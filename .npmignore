@@ -1,0 +1,17 @@
+src/
+tests/
+docs/
+pages/
+.github/
+.eslintcache
+*.md
+!README.md
+Dockerfile
+entrypoint.sh
+start.bat
+opencode.json
+tsconfig.json
+tsdown.config.ts
+eslint.config.js
+CLAUDE.md
+AGENTS.md

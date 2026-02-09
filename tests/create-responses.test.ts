@@ -1,0 +1,147 @@
+import { test, expect, mock } from "bun:test"
+
+import type { ResponsesPayload } from "../src/services/copilot/create-responses"
+
+import { state } from "../src/lib/state"
+import { createResponses } from "../src/services/copilot/create-responses"
+
+// Mock state
+state.copilotToken = "test-token"
+state.vsCodeVersion = "1.0.0"
+state.accountType = "individual"
+
+// Helper to mock fetch
+const fetchMock = mock(
+  (_url: string, opts: { headers: Record<string, string>; body?: string }) => {
+    return {
+      ok: true,
+      json: () => ({
+        id: "resp_123",
+        object: "response",
+        status: "completed",
+        output: [],
+      }),
+      headers: opts.headers,
+      body: opts.body,
+    }
+  },
+)
+// @ts-expect-error - Mock fetch doesn't implement all fetch properties
+;(globalThis as unknown as { fetch: typeof fetch }).fetch = fetchMock
+
+test("sends POST to /responses endpoint", async () => {
+  const payload: ResponsesPayload = {
+    model: "gpt5.2-codex",
+    input: "Hello",
+  }
+  await createResponses(payload)
+  expect(fetchMock).toHaveBeenCalled()
+  const url = fetchMock.mock.calls[0][0]
+  expect(url).toBe("https://api.githubcopilot.com/responses")
+})
+
+test("sets X-Initiator to user when input is a string", async () => {
+  const payload: ResponsesPayload = {
+    model: "gpt5.2-codex",
+    input: "Hello",
+  }
+  await createResponses(payload)
+  const headers = (
+    fetchMock.mock.calls[1][1] as { headers: Record<string, string> }
+  ).headers
+  expect(headers["X-Initiator"]).toBe("user")
+})
+
+test("sets X-Initiator to agent when input has assistant messages", async () => {
+  const payload: ResponsesPayload = {
+    model: "gpt5.2-codex",
+    input: [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: [{ type: "output_text", text: "hello" }] },
+    ],
+  }
+  await createResponses(payload)
+  const headers = (
+    fetchMock.mock.calls[2][1] as { headers: Record<string, string> }
+  ).headers
+  expect(headers["X-Initiator"]).toBe("agent")
+})
+
+test("sets X-Initiator to agent when input has function_call_output", async () => {
+  const payload: ResponsesPayload = {
+    model: "gpt5.2-codex",
+    input: [
+      { role: "user", content: "hi" },
+      { type: "function_call_output", call_id: "call_123", output: "result" },
+    ],
+  }
+  await createResponses(payload)
+  const headers = (
+    fetchMock.mock.calls[3][1] as { headers: Record<string, string> }
+  ).headers
+  expect(headers["X-Initiator"]).toBe("agent")
+})
+
+test("sets X-Initiator to user when input has only user messages", async () => {
+  const payload: ResponsesPayload = {
+    model: "gpt5.2-codex",
+    input: [
+      { role: "user", content: "hi" },
+      { role: "user", content: "hello again" },
+    ],
+  }
+  await createResponses(payload)
+  const headers = (
+    fetchMock.mock.calls[4][1] as { headers: Record<string, string> }
+  ).headers
+  expect(headers["X-Initiator"]).toBe("user")
+})
+
+test("strips unsupported tool types like web_search from payload", async () => {
+  const payload: ResponsesPayload = {
+    model: "gpt5.2-codex",
+    input: "Hello",
+    tools: [
+      { type: "web_search" },
+      {
+        type: "function",
+        name: "get_weather",
+        parameters: { type: "object" },
+      },
+    ],
+  }
+  await createResponses(payload)
+  const lastCall = fetchMock.mock.calls.at(-1)
+  const body = JSON.parse(
+    (lastCall?.[1] as unknown as { body: string }).body,
+  ) as { tools?: Array<{ type: string; name?: string }> }
+  expect(body.tools).toHaveLength(1)
+  expect(body.tools?.[0].type).toBe("function")
+  expect(body.tools?.[0].name).toBe("get_weather")
+})
+
+test("removes tools field entirely when all tools are unsupported", async () => {
+  const payload: ResponsesPayload = {
+    model: "gpt5.2-codex",
+    input: "Hello",
+    tools: [{ type: "web_search" }, { type: "code_interpreter" }],
+  }
+  await createResponses(payload)
+  const lastCall2 = fetchMock.mock.calls.at(-1)
+  const body = JSON.parse(
+    (lastCall2?.[1] as unknown as { body: string }).body,
+  ) as { tools?: Array<{ type: string }> }
+  expect(body.tools).toBeUndefined()
+})
+
+test("returns parsed JSON for non-streaming response", async () => {
+  const payload: ResponsesPayload = {
+    model: "gpt5.2-codex",
+    input: "Hello",
+    stream: false,
+  }
+  const response = await createResponses(payload)
+  expect(response).toHaveProperty("id", "resp_123")
+  expect(response).toHaveProperty("object", "response")
+  expect(response).toHaveProperty("status", "completed")
+})
