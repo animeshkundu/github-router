@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>github-router — Use Copilot with Claude Code, Codex, and more</title>
+  <meta name="description" content="A reverse proxy that exposes GitHub Copilot as OpenAI and Anthropic compatible API endpoints." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔀</text></svg>" />
+  <meta property="og:title" content="github-router" />
+  <meta property="og:description" content="Use GitHub Copilot with Claude Code, Codex CLI, and any OpenAI/Anthropic-compatible tool." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://animeshkundu.github.io/github-router/" />
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="github-router" />
+  <meta name="twitter:description" content="GitHub Copilot as OpenAI & Anthropic API" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css" />
+  <style>
+    :root {
+      --bg: #0a0a0b;
+      --bg2: #111113;
+      --bg3: #1a1a1e;
+      --border: #27272a;
+      --text: #fafafa;
+      --text2: #a1a1aa;
+      --accent: #3b82f6;
+      --accent-hover: #60a5fa;
+      --green: #22c55e;
+      --font: 'Inter', system-ui, -apple-system, sans-serif;
+      --mono: 'JetBrains Mono', 'Fira Code', monospace;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html { background: var(--bg); color: var(--text); font-family: var(--font); scroll-behavior: smooth; }
+    body { min-height: 100vh; }
+
+    .container { max-width: 1080px; margin: 0 auto; padding: 0 2rem; }
+
+    /* Nav */
+    nav { border-bottom: 1px solid var(--border); padding: 1rem 0; }
+    nav .container { display: flex; align-items: center; justify-content: space-between; }
+    nav .brand { font-weight: 700; font-size: 1.1rem; color: var(--text); text-decoration: none; }
+    nav .links { display: flex; gap: 1.5rem; list-style: none; }
+    nav .links a { color: var(--text2); text-decoration: none; font-size: 0.9rem; transition: color 0.2s; }
+    nav .links a:hover { color: var(--text); }
+
+    /* Hero */
+    .hero { padding: 6rem 0 4rem; text-align: center; }
+    .hero h1 { font-size: clamp(2.2rem, 5vw, 3.2rem); font-weight: 900; letter-spacing: -0.03em; line-height: 1.15; margin-bottom: 1.25rem; }
+    .hero h1 span { color: var(--accent); }
+    .hero .lead { font-size: 1.15rem; color: var(--text2); max-width: 580px; margin: 0 auto 2.5rem; line-height: 1.6; }
+
+    .install-cmd { display: inline-flex; align-items: center; gap: 0.75rem; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 0.8rem 1.25rem; font-family: var(--mono); font-size: 0.95rem; cursor: pointer; transition: border-color 0.2s; }
+    .install-cmd:hover { border-color: var(--accent); }
+    .install-cmd .prompt { color: var(--text2); user-select: none; }
+    .install-cmd .cmd { color: var(--green); }
+    .install-cmd .copy-hint { color: var(--text2); font-size: 0.75rem; opacity: 0; transition: opacity 0.2s; }
+    .install-cmd:hover .copy-hint { opacity: 1; }
+
+    /* Sections */
+    section { padding: 4rem 0; }
+    section h2 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem; letter-spacing: -0.02em; }
+    section .subtitle { color: var(--text2); margin-bottom: 2rem; }
+
+    /* Tool sections */
+    .tool-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.5rem; margin-top: 2rem; }
+    .tool-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 1.75rem; transition: border-color 0.2s, transform 0.2s; }
+    .tool-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+    .tool-card h3 { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.5rem; }
+    .tool-card p { color: var(--text2); font-size: 0.9rem; line-height: 1.5; margin-bottom: 1rem; }
+
+    /* Code */
+    pre { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; overflow-x: auto; font-family: var(--mono); font-size: 0.85rem; line-height: 1.65; position: relative; margin: 1rem 0; }
+    pre code { background: none !important; padding: 0 !important; font-size: inherit; }
+    code { font-family: var(--mono); background: var(--bg3); padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+    .copy-btn { position: absolute; top: 0.5rem; right: 0.5rem; background: var(--bg); border: 1px solid var(--border); color: var(--text2); padding: 4px 10px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; opacity: 0; transition: opacity 0.2s; font-family: var(--font); }
+    pre:hover .copy-btn { opacity: 1; }
+    .copy-btn:hover { color: var(--text); border-color: var(--text2); }
+
+    /* Config block */
+    .config-block { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 1.75rem; margin: 1.5rem 0; }
+    .config-block h3 { font-size: 1rem; font-weight: 600; margin-bottom: 0.25rem; }
+    .config-block .path { color: var(--text2); font-size: 0.85rem; font-family: var(--mono); margin-bottom: 1rem; }
+    .config-block pre { margin: 0; border: none; background: var(--bg); }
+
+    /* API table */
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; margin: 1rem 0; }
+    th { text-align: left; padding: 0.75rem 1rem; border-bottom: 2px solid var(--border); font-weight: 600; color: var(--text2); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    td { padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); }
+    td code { font-size: 0.85rem; }
+    tr:hover td { background: var(--bg2); }
+
+    /* Divider */
+    hr { border: none; border-top: 1px solid var(--border); margin: 0; }
+
+    /* Footer */
+    footer { border-top: 1px solid var(--border); padding: 2.5rem 0; text-align: center; color: var(--text2); font-size: 0.85rem; }
+    footer a { color: var(--text2); text-decoration: none; transition: color 0.2s; }
+    footer a:hover { color: var(--text); }
+
+    /* Responsive */
+    @media (max-width: 640px) {
+      .tool-grid { grid-template-columns: 1fr; }
+      nav .links { gap: 1rem; }
+      .hero { padding: 4rem 0 2rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <nav>
+    <div class="container">
+      <a href="#" class="brand">github-router</a>
+      <ul class="links">
+        <li><a href="#tools">Setup</a></li>
+        <li><a href="#api">API</a></li>
+        <li><a href="#docker">Docker</a></li>
+        <li><a href="dashboard.html">Dashboard</a></li>
+        <li><a href="https://github.com/animeshkundu/github-router">GitHub</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <main>
+
+    <div class="hero container">
+      <h1>GitHub Copilot API,<br><span>anywhere OpenAI goes</span></h1>
+      <p class="lead">A reverse proxy that makes your Copilot subscription work with Claude Code, Codex CLI, and any OpenAI or Anthropic-compatible tool. One command.</p>
+      <div class="install-cmd" onclick="navigator.clipboard.writeText('npx github-router@latest start');this.querySelector('.copy-hint').textContent='copied!'">
+        <span class="prompt">$</span>
+        <span class="cmd">npx github-router@latest start</span>
+        <span class="copy-hint">click to copy</span>
+      </div>
+    </div>
+
+    <hr />
+
+    <section id="tools" class="container">
+      <h2>Pick your tool</h2>
+      <p class="subtitle">Authenticate once, then connect your favorite AI coding tool.</p>
+
+      <div class="tool-grid">
+        <div class="tool-card">
+          <h3>Claude Code</h3>
+          <p>Interactive setup copies a launch command to your clipboard:</p>
+          <pre><code class="language-bash">npx github-router@latest start --claude-code</code></pre>
+          <p>Or drop this in <code>.claude/settings.json</code>:</p>
+        </div>
+
+        <div class="tool-card">
+          <h3>Codex CLI</h3>
+          <p>One flag or two env vars:</p>
+          <pre><code class="language-bash">npx github-router@latest start --codex</code></pre>
+          <pre><code class="language-bash">export OPENAI_BASE_URL=http://localhost:8787/v1
+export OPENAI_API_KEY=dummy
+codex -m gpt5.2-codex</code></pre>
+        </div>
+
+        <div class="tool-card">
+          <h3>Any OpenAI Client</h3>
+          <p>Point any tool at <code>localhost:8787/v1</code>:</p>
+          <pre><code class="language-bash">curl http://localhost:8787/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4.1","messages":[{"role":"user","content":"Hello"}]}'</code></pre>
+        </div>
+      </div>
+
+      <div class="config-block">
+        <h3>Claude Code settings.json</h3>
+        <p class="path">.claude/settings.json</p>
+        <pre><code class="language-json">{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:8787",
+    "ANTHROPIC_AUTH_TOKEN": "dummy",
+    "ANTHROPIC_MODEL": "gpt-4.1",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-4.1",
+    "ANTHROPIC_SMALL_FAST_MODEL": "gpt-4.1-mini",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-4.1-mini",
+    "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  },
+  "permissions": { "deny": ["WebSearch"] }
+}</code></pre>
+      </div>
+    </section>
+
+    <hr />
+
+    <section id="api" class="container">
+      <h2>API Endpoints</h2>
+      <p class="subtitle">OpenAI and Anthropic formats, streamed or buffered. All endpoints available with and without <code>/v1</code> prefix.</p>
+
+      <table>
+        <thead><tr><th>Endpoint</th><th>Method</th><th>Format</th></tr></thead>
+        <tbody>
+          <tr><td><code>/v1/chat/completions</code></td><td>POST</td><td>OpenAI Chat Completions</td></tr>
+          <tr><td><code>/v1/responses</code></td><td>POST</td><td>OpenAI Responses (Codex models)</td></tr>
+          <tr><td><code>/v1/messages</code></td><td>POST</td><td>Anthropic Messages</td></tr>
+          <tr><td><code>/v1/models</code></td><td>GET</td><td>OpenAI model list</td></tr>
+          <tr><td><code>/v1/embeddings</code></td><td>POST</td><td>OpenAI embeddings</td></tr>
+          <tr><td><code>/v1/search</code></td><td>POST</td><td>Web search</td></tr>
+          <tr><td><code>/usage</code></td><td>GET</td><td>Copilot usage &amp; quotas</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <hr />
+
+    <section id="docker" class="container">
+      <h2>Docker</h2>
+      <pre><code class="language-bash">docker build -t github-router .
+docker run -p 8787:8787 -e GH_TOKEN=your_token github-router</code></pre>
+
+      <details style="margin-top:1rem">
+        <summary style="cursor:pointer;color:var(--text2);font-size:0.9rem">Docker Compose</summary>
+        <pre><code class="language-yaml">services:
+  github-router:
+    build: .
+    ports: ["8787:8787"]
+    environment: [GH_TOKEN=your_token]
+    restart: unless-stopped</code></pre>
+      </details>
+    </section>
+
+    <hr />
+
+    <section id="cli" class="container">
+      <h2>CLI</h2>
+      <pre><code class="language-plaintext">github-router start [flags]    Start the proxy
+github-router auth              Authenticate with GitHub (one-time)
+github-router check-usage       Show Copilot usage/quotas
+github-router debug             Print diagnostic info</code></pre>
+
+      <table style="margin-top:1.5rem">
+        <thead><tr><th>Flag</th><th>Description</th><th>Default</th></tr></thead>
+        <tbody>
+          <tr><td><code>-p, --port</code></td><td>Port</td><td>8787</td></tr>
+          <tr><td><code>-v, --verbose</code></td><td>Debug logging</td><td>false</td></tr>
+          <tr><td><code>-a, --account-type</code></td><td>individual / business / enterprise</td><td>individual</td></tr>
+          <tr><td><code>-r, --rate-limit</code></td><td>Min seconds between requests</td><td>&mdash;</td></tr>
+          <tr><td><code>-w, --wait</code></td><td>Queue on rate limit instead of 429</td><td>false</td></tr>
+          <tr><td><code>-g, --github-token</code></td><td>Pass token directly</td><td>&mdash;</td></tr>
+          <tr><td><code>-c, --claude-code</code></td><td>Generate Claude Code launch cmd</td><td>false</td></tr>
+          <tr><td><code>--codex</code></td><td>Generate Codex CLI launch cmd</td><td>false</td></tr>
+          <tr><td><code>--manual</code></td><td>Approve each request</td><td>false</td></tr>
+          <tr><td><code>--proxy-env</code></td><td>Use HTTP_PROXY env vars</td><td>false</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>github-router &nbsp;&middot;&nbsp; <a href="https://github.com/animeshkundu/github-router">Source</a> &nbsp;&middot;&nbsp; <a href="https://www.npmjs.com/package/github-router">npm</a> &nbsp;&middot;&nbsp; <a href="dashboard.html">Dashboard</a> &nbsp;&middot;&nbsp; MIT License</p>
+    </div>
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/yaml.min.js"></script>
+  <script>
+    hljs.highlightAll();
+    document.querySelectorAll('pre').forEach(pre => {
+      const btn = document.createElement('button');
+      btn.className = 'copy-btn';
+      btn.textContent = 'Copy';
+      btn.onclick = () => {
+        navigator.clipboard.writeText(pre.querySelector('code').textContent);
+        btn.textContent = 'Copied!';
+        setTimeout(() => btn.textContent = 'Copy', 1500);
+      };
+      pre.appendChild(btn);
+    });
+  </script>
+</body>
+</html>
