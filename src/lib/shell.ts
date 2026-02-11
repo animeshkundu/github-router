@@ -8,11 +8,17 @@ function getShell(): ShellName {
   const { platform, ppid, env } = process
 
   if (platform === "win32") {
+    if (env.POWERSHELL_DISTRIBUTION_CHANNEL) {
+      return "powershell"
+    }
     try {
       const command = `wmic process get ParentProcessId,Name | findstr "${ppid}"`
       const parentProcess = execSync(command, { stdio: "pipe" }).toString()
 
-      if (parentProcess.toLowerCase().includes("powershell.exe")) {
+      if (
+        parentProcess.toLowerCase().includes("powershell.exe")
+        || parentProcess.toLowerCase().includes("pwsh.exe")
+      ) {
         return "powershell"
       }
     } catch {
@@ -30,6 +36,14 @@ function getShell(): ShellName {
 
     return "sh"
   }
+}
+
+function quotePosixValue(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`
+}
+
+function quotePowerShellValue(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
 }
 
 /**
@@ -53,26 +67,26 @@ export function generateEnvScript(
   switch (shell) {
     case "powershell": {
       commandBlock = filteredEnvVars
-        .map(([key, value]) => `$env:${key} = ${value}`)
+        .map(([key, value]) => `$env:${key} = ${quotePowerShellValue(value)}`)
         .join("; ")
       break
     }
     case "cmd": {
       commandBlock = filteredEnvVars
-        .map(([key, value]) => `set ${key}=${value}`)
+        .map(([key, value]) => `set "${key}=${value}"`)
         .join(" & ")
       break
     }
     case "fish": {
       commandBlock = filteredEnvVars
-        .map(([key, value]) => `set -gx ${key} ${value}`)
+        .map(([key, value]) => `set -gx ${key} ${quotePosixValue(value)}`)
         .join("; ")
       break
     }
     default: {
       // bash, zsh, sh
       const assignments = filteredEnvVars
-        .map(([key, value]) => `${key}=${value}`)
+        .map(([key, value]) => `${key}=${quotePosixValue(value)}`)
         .join(" ")
       commandBlock = filteredEnvVars.length > 0 ? `export ${assignments}` : ""
       break
@@ -80,7 +94,8 @@ export function generateEnvScript(
   }
 
   if (commandBlock && commandToRun) {
-    const separator = shell === "cmd" ? " & " : " && "
+    const separator =
+      shell === "cmd" ? " & " : shell === "powershell" ? "; " : " && "
     return `${commandBlock}${separator}${commandToRun}`
   }
 

@@ -122,6 +122,21 @@ export function translateChunkToAnthropicEvents(
           },
         })
         state.contentBlockOpen = true
+
+        const pendingArgs = state.pendingToolCallArgs[toolCall.index]
+        if (pendingArgs?.length) {
+          for (const pending of pendingArgs) {
+            events.push({
+              type: "content_block_delta",
+              index: anthropicBlockIndex,
+              delta: {
+                type: "input_json_delta",
+                partial_json: pending,
+              },
+            })
+          }
+          delete state.pendingToolCallArgs[toolCall.index]
+        }
       }
 
       if (toolCall.function?.arguments) {
@@ -137,6 +152,10 @@ export function translateChunkToAnthropicEvents(
               partial_json: toolCall.function.arguments,
             },
           })
+        } else {
+          const pendingArgs = state.pendingToolCallArgs[toolCall.index] ?? []
+          pendingArgs.push(toolCall.function.arguments)
+          state.pendingToolCallArgs[toolCall.index] = pendingArgs
         }
       }
     }

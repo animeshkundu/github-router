@@ -2,6 +2,7 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
+import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
 
@@ -24,10 +25,10 @@ export async function handleCountTokens(c: Context) {
     )
 
     if (!selectedModel) {
-      consola.warn("Model not found, returning default token count")
-      return c.json({
-        input_tokens: 1,
-      })
+      throw new HTTPError(
+        "Model not found",
+        Response.json({ message: "Model not found" }, { status: 404 }),
+      )
     }
 
     const tokenCount = await getTokenCount(openAIPayload, selectedModel)
@@ -63,8 +64,6 @@ export async function handleCountTokens(c: Context) {
     })
   } catch (error) {
     consola.error("Error counting tokens:", error)
-    return c.json({
-      input_tokens: 1,
-    })
+    throw error
   }
 }

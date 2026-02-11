@@ -39,8 +39,7 @@ export async function checkRateLimit(state: State) {
     `Rate limit reached. Waiting ${waitTimeSeconds} seconds before proceeding...`,
   )
   await sleep(waitTimeMs)
-   
-  state.lastRequestTimestamp = now
+  state.lastRequestTimestamp = Date.now()
   consola.info("Rate limit wait completed, proceeding with request")
   return
 }

@@ -12,6 +12,7 @@ import { generateEnvScript } from "./lib/shell"
 import { state } from "./lib/state"
 import { setupCopilotToken, setupGitHubToken } from "./lib/token"
 import { cacheModels, cacheVSCodeVersion } from "./lib/utils"
+import type { Model } from "./services/copilot/get-models"
 import { server } from "./server"
 
 interface RunServerOptions {
@@ -28,14 +29,38 @@ interface RunServerOptions {
   proxyEnv: boolean
 }
 
+const allowedAccountTypes = new Set(["individual", "business", "enterprise"])
+
+function filterModelsByEndpoint(
+  models: Array<Model>,
+  endpoint: string,
+): Array<Model> {
+  const filtered = models.filter((model) => {
+    const endpoints = model.supported_endpoints
+    // Some deployments omit supported_endpoints; keep those models visible.
+    if (!endpoints || endpoints.length === 0) return true
+    return endpoints.some((entry) => {
+      const normalized = entry.replace(/^\/?v1\//, "").replace(/^\//, "")
+      return normalized === endpoint
+    })
+  })
+
+  return filtered.length > 0 ? filtered : models
+}
+
 async function generateClaudeCodeCommand(serverUrl: string) {
   invariant(state.models, "Models should be loaded by now")
+
+  const supportedModels = filterModelsByEndpoint(
+    state.models.data,
+    "chat/completions",
+  )
 
   const selectedModel = await consola.prompt(
     "Select a model to use with Claude Code",
     {
       type: "select",
-      options: state.models.data.map((model) => model.id),
+      options: supportedModels.map((model) => model.id),
     },
   )
 
@@ -43,13 +68,14 @@ async function generateClaudeCodeCommand(serverUrl: string) {
     "Select a small model to use with Claude Code",
     {
       type: "select",
-      options: state.models.data.map((model) => model.id),
+      options: supportedModels.map((model) => model.id),
     },
   )
 
   const command = generateEnvScript(
     {
       ANTHROPIC_BASE_URL: serverUrl,
+      ANTHROPIC_API_KEY: "dummy",
       ANTHROPIC_AUTH_TOKEN: "dummy",
       ANTHROPIC_MODEL: selectedModel,
       ANTHROPIC_DEFAULT_SONNET_MODEL: selectedModel,
@@ -75,7 +101,12 @@ async function generateClaudeCodeCommand(serverUrl: string) {
 async function generateCodexCommand(serverUrl: string) {
   invariant(state.models, "Models should be loaded by now")
 
-  const defaultCodexModel = state.models.data.find(
+  const supportedModels = filterModelsByEndpoint(
+    state.models.data,
+    "responses",
+  )
+
+  const defaultCodexModel = supportedModels.find(
     (model) => model.id === "gpt5.2-codex",
   )
 
@@ -84,15 +115,16 @@ async function generateCodexCommand(serverUrl: string) {
       defaultCodexModel.id
     : await consola.prompt("Select a model to use with Codex CLI", {
         type: "select",
-        options: state.models.data.map((model) => model.id),
+        options: supportedModels.map((model) => model.id),
       })
 
+  const quotedModel = JSON.stringify(selectedModel)
   const command = generateEnvScript(
     {
       OPENAI_BASE_URL: `${serverUrl}/v1`,
       OPENAI_API_KEY: "dummy",
     },
-    `codex -m ${selectedModel}`,
+    `codex -m ${quotedModel}`,
   )
 
   try {
@@ -152,6 +184,7 @@ export async function runServer(options: RunServerOptions): Promise<void> {
 
   serve({
     fetch: server.fetch as ServerHandler,
+    hostname: "127.0.0.1",
     port: options.port,
   })
 }
@@ -229,18 +262,41 @@ export const start = defineCommand({
   },
   run({ args }) {
     const rateLimitRaw = args["rate-limit"]
-    const rateLimit =
-       
-      rateLimitRaw === undefined ? undefined : Number.parseInt(rateLimitRaw, 10)
+    let rateLimit: number | undefined
+    if (rateLimitRaw !== undefined) {
+      rateLimit = Number.parseInt(rateLimitRaw, 10)
+      if (Number.isNaN(rateLimit) || rateLimit <= 0) {
+        throw new Error("Invalid rate limit. Must be a positive integer.")
+      }
+    }
+
+    const port = Number.parseInt(args.port, 10)
+    if (Number.isNaN(port) || port <= 0 || port > 65535) {
+      throw new Error("Invalid port. Must be between 1 and 65535.")
+    }
+
+    const accountType = args["account-type"]
+    if (!allowedAccountTypes.has(accountType)) {
+      throw new Error(
+        "Invalid account type. Must be individual, business, or enterprise.",
+      )
+    }
+
+    const rateLimitWait = args.wait && rateLimit !== undefined
+    if (args.wait && rateLimit === undefined) {
+      consola.warn("Rate limit wait ignored because no rate limit was set.")
+    }
+
+    const githubToken = args["github-token"] ?? process.env.GH_TOKEN
 
     return runServer({
-      port: Number.parseInt(args.port, 10),
+      port,
       verbose: args.verbose,
-      accountType: args["account-type"],
+      accountType,
       manual: args.manual,
       rateLimit,
-      rateLimitWait: args.wait,
-      githubToken: args["github-token"],
+      rateLimitWait,
+      githubToken,
       claudeCode: args["claude-code"],
       codex: args.codex,
       showToken: args["show-token"],

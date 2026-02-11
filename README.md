@@ -44,6 +44,7 @@ Create `.claude/settings.json` in your project:
 {
   "env": {
     "ANTHROPIC_BASE_URL": "http://localhost:8787",
+    "ANTHROPIC_API_KEY": "dummy",
     "ANTHROPIC_AUTH_TOKEN": "dummy",
     "ANTHROPIC_MODEL": "gpt-4.1",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-4.1",
@@ -103,7 +104,8 @@ curl http://localhost:8787/v1/chat/completions \
 | `/v1/search` | POST | Web search |
 | `/usage` | GET | Copilot usage & quotas |
 
-All endpoints also available without the `/v1` prefix.
+OpenAI-compatible endpoints are also available without the `/v1` prefix (for example, `/chat/completions`).
+Anthropic endpoints are only available under `/v1/messages`.
 
 <details>
 <summary>Model / endpoint compatibility</summary>

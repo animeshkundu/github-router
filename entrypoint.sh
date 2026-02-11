@@ -5,6 +5,5 @@ if [ "$1" = "--auth" ]; then
   exec bun run dist/main.js auth
 else
   # Default command
-  exec bun run dist/main.js start -g "$GH_TOKEN" "$@"
+  exec bun run dist/main.js start "$@"
 fi
-

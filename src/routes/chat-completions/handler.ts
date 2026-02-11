@@ -20,7 +20,12 @@ export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
 
   let payload = await c.req.json<ChatCompletionsPayload>()
-  consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
+  const debugEnabled = consola.level >= 4
+  if (debugEnabled) {
+    consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
+  }
+
+  if (state.manualApprove) await awaitApproval()
 
   await injectWebSearchIfNeeded(payload)
 
@@ -41,27 +46,31 @@ export async function handleCompletion(c: Context) {
     consola.warn("Failed to calculate token count:", error)
   }
 
-  if (state.manualApprove) await awaitApproval()
-
   if (isNullish(payload.max_tokens)) {
     payload = {
       ...payload,
       max_tokens: selectedModel?.capabilities.limits.max_output_tokens,
     }
-    consola.debug("Set max_tokens to:", JSON.stringify(payload.max_tokens))
+    if (debugEnabled) {
+      consola.debug("Set max_tokens to:", JSON.stringify(payload.max_tokens))
+    }
   }
 
   const response = await createChatCompletions(payload)
 
   if (isNonStreaming(response)) {
-    consola.debug("Non-streaming response:", JSON.stringify(response))
+    if (debugEnabled) {
+      consola.debug("Non-streaming response:", JSON.stringify(response))
+    }
     return c.json(response)
   }
 
   consola.debug("Streaming response")
   return streamSSE(c, async (stream) => {
     for await (const chunk of response) {
-      consola.debug("Streaming chunk:", JSON.stringify(chunk))
+      if (debugEnabled) {
+        consola.debug("Streaming chunk:", JSON.stringify(chunk))
+      }
       await stream.writeSSE(chunk as SSEMessage)
     }
   })
@@ -83,41 +92,40 @@ async function injectWebSearchIfNeeded(
 
   // Skip search on follow-up messages (tool call results)
   const hasToolResult = payload.messages.some((msg) => msg.role === "tool")
-  if (hasToolResult) return
+  const query = hasToolResult ? undefined : extractUserQuery(payload.messages)
 
-  const query = extractUserQuery(payload.messages)
-  if (!query) return
+  if (query) {
+    try {
+      const results = await searchWeb(query)
+      const searchContext = [
+        "[Web Search Results]",
+        results.content,
+        "",
+        results.references.map((r) => `- [${r.title}](${r.url})`).join("\n"),
+        "[End Web Search Results]",
+      ].join("\n")
 
-  try {
-    const results = await searchWeb(query)
-    const searchContext = [
-      "[Web Search Results]",
-      results.content,
-      "",
-      results.references.map((r) => `- [${r.title}](${r.url})`).join("\n"),
-      "[End Web Search Results]",
-    ].join("\n")
-
-    // Prepend to existing system message or inject a new one
-    const systemMsg = payload.messages.find((msg) => msg.role === "system")
-    if (systemMsg) {
-      const existingContent =
-        typeof systemMsg.content === "string" ? systemMsg.content
-        : Array.isArray(systemMsg.content) ?
-          systemMsg.content
-            .filter((p) => p.type === "text")
-            .map((p) => ("text" in p ? p.text : ""))
-            .join("\n")
-        : ""
-      systemMsg.content = `${searchContext}\n\n${existingContent}`
-    } else {
-      payload.messages.unshift({
-        role: "system",
-        content: searchContext,
-      })
+      // Prepend to existing system message or inject a new one
+      const systemMsg = payload.messages.find((msg) => msg.role === "system")
+      if (systemMsg) {
+        const existingContent =
+          typeof systemMsg.content === "string" ? systemMsg.content
+          : Array.isArray(systemMsg.content) ?
+            systemMsg.content
+              .filter((p) => p.type === "text")
+              .map((p) => ("text" in p ? p.text : ""))
+              .join("\n")
+          : ""
+        systemMsg.content = `${searchContext}\n\n${existingContent}`
+      } else {
+        payload.messages.unshift({
+          role: "system",
+          content: searchContext,
+        })
+      }
+    } catch (error) {
+      consola.warn("Web search failed, continuing without results:", error)
     }
-  } catch (error) {
-    consola.warn("Web search failed, continuing without results:", error)
   }
 
   // Remove web_search from tools before forwarding
@@ -130,6 +138,22 @@ async function injectWebSearchIfNeeded(
   ) as typeof payload.tools
   if (payload.tools?.length === 0) {
     payload.tools = undefined
+  }
+  if (!payload.tools) {
+    payload.tool_choice = undefined
+  } else if (
+    payload.tool_choice
+    && typeof payload.tool_choice === "object"
+    && "type" in payload.tool_choice
+    && payload.tool_choice.type === "function"
+  ) {
+    const toolChoiceName = payload.tool_choice.function?.name
+    if (
+      toolChoiceName
+      && !payload.tools.some((tool) => tool.function.name === toolChoiceName)
+    ) {
+      payload.tool_choice = undefined
+    }
   }
 }
 

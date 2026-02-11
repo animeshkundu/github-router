@@ -27,32 +27,41 @@ export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
 
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
-  consola.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
-
-  await injectWebSearchIfNeeded(anthropicPayload)
-
-  const openAIPayload = translateToOpenAI(anthropicPayload)
-  consola.debug(
-    "Translated OpenAI request payload:",
-    JSON.stringify(openAIPayload),
-  )
+  const debugEnabled = consola.level >= 4
+  if (debugEnabled) {
+    consola.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
+  }
 
   if (state.manualApprove) {
     await awaitApproval()
   }
 
+  await injectWebSearchIfNeeded(anthropicPayload)
+
+  const openAIPayload = translateToOpenAI(anthropicPayload)
+  if (debugEnabled) {
+    consola.debug(
+      "Translated OpenAI request payload:",
+      JSON.stringify(openAIPayload),
+    )
+  }
+
   const response = await createChatCompletions(openAIPayload)
 
   if (isNonStreaming(response)) {
-    consola.debug(
-      "Non-streaming response from Copilot:",
-      JSON.stringify(response).slice(-400),
-    )
+    if (debugEnabled) {
+      consola.debug(
+        "Non-streaming response from Copilot:",
+        JSON.stringify(response).slice(-400),
+      )
+    }
     const anthropicResponse = translateToAnthropic(response)
-    consola.debug(
-      "Translated Anthropic response:",
-      JSON.stringify(anthropicResponse),
-    )
+    if (debugEnabled) {
+      consola.debug(
+        "Translated Anthropic response:",
+        JSON.stringify(anthropicResponse),
+      )
+    }
     return c.json(anthropicResponse)
   }
 
@@ -63,10 +72,13 @@ export async function handleCompletion(c: Context) {
       contentBlockIndex: 0,
       contentBlockOpen: false,
       toolCalls: {},
+      pendingToolCallArgs: {},
     }
 
     for await (const rawEvent of response) {
-      consola.debug("Copilot raw stream event:", JSON.stringify(rawEvent))
+      if (debugEnabled) {
+        consola.debug("Copilot raw stream event:", JSON.stringify(rawEvent))
+      }
       if (rawEvent.data === "[DONE]") {
         break
       }
@@ -79,7 +91,9 @@ export async function handleCompletion(c: Context) {
       const events = translateChunkToAnthropicEvents(chunk, streamState)
 
       for (const event of events) {
-        consola.debug("Translated Anthropic event:", JSON.stringify(event))
+        if (debugEnabled) {
+          consola.debug("Translated Anthropic event:", JSON.stringify(event))
+        }
         await stream.writeSSE({
           event: event.type,
           data: JSON.stringify(event),
@@ -141,6 +155,14 @@ async function injectWebSearchIfNeeded(
   payload.tools = payload.tools?.filter((t) => t.name !== "web_search")
   if (payload.tools?.length === 0) {
     payload.tools = undefined
+  }
+  if (!payload.tools) {
+    payload.tool_choice = undefined
+  } else if (
+    payload.tool_choice?.name
+    && !payload.tools.some((tool) => tool.name === payload.tool_choice?.name)
+  ) {
+    payload.tool_choice = undefined
   }
 }
 

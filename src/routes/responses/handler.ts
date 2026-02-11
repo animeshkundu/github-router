@@ -19,10 +19,13 @@ export async function handleResponses(c: Context) {
   await checkRateLimit(state)
 
   const payload = await c.req.json<ResponsesPayload>()
-  consola.debug(
-    "Responses request payload:",
-    JSON.stringify(payload).slice(-400),
-  )
+  const debugEnabled = consola.level >= 4
+  if (debugEnabled) {
+    consola.debug(
+      "Responses request payload:",
+      JSON.stringify(payload).slice(-400),
+    )
+  }
 
   const selectedModel = state.models?.data.find(
     (model) => model.id === payload.model,
@@ -37,23 +40,29 @@ export async function handleResponses(c: Context) {
   if (isNullish(payload.max_output_tokens)) {
     payload.max_output_tokens =
       selectedModel?.capabilities.limits.max_output_tokens
-    consola.debug(
-      "Set max_output_tokens to:",
-      JSON.stringify(payload.max_output_tokens),
-    )
+    if (debugEnabled) {
+      consola.debug(
+        "Set max_output_tokens to:",
+        JSON.stringify(payload.max_output_tokens),
+      )
+    }
   }
 
   const response = await createResponses(payload)
 
   if (isNonStreaming(response)) {
-    consola.debug("Non-streaming response:", JSON.stringify(response))
+    if (debugEnabled) {
+      consola.debug("Non-streaming response:", JSON.stringify(response))
+    }
     return c.json(response)
   }
 
   consola.debug("Streaming response")
   return streamSSE(c, async (stream) => {
     for await (const chunk of response) {
-      consola.debug("Streaming chunk:", JSON.stringify(chunk))
+      if (debugEnabled) {
+        consola.debug("Streaming chunk:", JSON.stringify(chunk))
+      }
 
       if (chunk.data === "[DONE]") {
         break

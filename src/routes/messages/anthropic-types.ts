@@ -203,4 +203,7 @@ export interface AnthropicStreamState {
       anthropicBlockIndex: number
     }
   }
+  pendingToolCallArgs: {
+    [openAIToolIndex: number]: Array<string>
+  }
 }

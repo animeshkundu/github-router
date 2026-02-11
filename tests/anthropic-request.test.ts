@@ -197,6 +197,62 @@ describe("Anthropic to OpenAI translation logic", () => {
     expect(assistantMessage?.tool_calls).toHaveLength(1)
     expect(assistantMessage?.tool_calls?.[0].function.name).toBe("get_weather")
   })
+
+  test("should default missing tool input to empty arguments", () => {
+    const anthropicPayload = {
+      model: "claude-3-5-sonnet-20241022",
+      messages: [
+        { role: "user", content: "What's the weather?" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "call_456",
+              name: "get_weather",
+              input: undefined,
+            },
+          ],
+        },
+      ],
+      max_tokens: 100,
+    } as unknown as AnthropicMessagesPayload
+
+    const openAIPayload = translateToOpenAI(anthropicPayload)
+    const assistantMessage = openAIPayload.messages.find(
+      (m) => m.role === "assistant",
+    )
+    expect(assistantMessage?.tool_calls?.[0].function.arguments).toBe("{}")
+  })
+
+  test("should skip tool_use blocks missing required identifiers", () => {
+    const anthropicPayload = {
+      model: "claude-3-5-sonnet-20241022",
+      messages: [
+        { role: "user", content: "What's the weather?" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "",
+              name: "",
+              input: { location: "NYC" },
+            },
+            { type: "text", text: "Working on it." },
+          ],
+        },
+      ],
+      max_tokens: 100,
+    } as unknown as AnthropicMessagesPayload
+
+    const openAIPayload = translateToOpenAI(anthropicPayload)
+    const assistantMessage = openAIPayload.messages.find(
+      (m) => m.role === "assistant",
+    )
+    expect(assistantMessage?.tool_calls).toBeUndefined()
+    expect(assistantMessage?.content).toContain("Working on it.")
+  })
 })
 
 describe("OpenAI Chat Completion v1 Request Payload Validation with Zod", () => {

@@ -138,6 +138,9 @@ function handleAssistantMessage(
   const toolUseBlocks = message.content.filter(
     (block): block is AnthropicToolUseBlock => block.type === "tool_use",
   )
+  const validToolUseBlocks = toolUseBlocks.filter(
+    (block) => Boolean(block.id) && Boolean(block.name),
+  )
 
   const textBlocks = message.content.filter(
     (block): block is AnthropicTextBlock => block.type === "text",
@@ -153,19 +156,21 @@ function handleAssistantMessage(
     ...thinkingBlocks.map((b) => b.thinking),
   ].join("\n\n")
 
-  return toolUseBlocks.length > 0 ?
+  const toolCalls: Array<ToolCall> = validToolUseBlocks.map((toolUse) => ({
+    id: toolUse.id,
+    type: "function",
+    function: {
+      name: toolUse.name,
+      arguments: serializeToolInput(toolUse.input),
+    },
+  }))
+
+  return toolCalls.length > 0 ?
       [
         {
           role: "assistant",
           content: allTextContent || null,
-          tool_calls: toolUseBlocks.map((toolUse) => ({
-            id: toolUse.id,
-            type: "function",
-            function: {
-              name: toolUse.name,
-              arguments: JSON.stringify(toolUse.input),
-            },
-          })),
+          tool_calls: toolCalls,
         },
       ]
     : [
@@ -226,6 +231,17 @@ function mapContent(
     }
   }
   return contentParts
+}
+
+function serializeToolInput(input: unknown): string {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return "{}"
+  }
+  try {
+    return JSON.stringify(input)
+  } catch {
+    return "{}"
+  }
 }
 
 function translateAnthropicToolsToOpenAI(
@@ -352,6 +368,44 @@ function getAnthropicToolUseBlocks(
     type: "tool_use",
     id: toolCall.id,
     name: toolCall.function.name,
-    input: JSON.parse(toolCall.function.arguments) as Record<string, unknown>,
+    input: parseToolArguments(toolCall.function.arguments),
   }))
+}
+
+function parseToolArguments(
+  argumentsJson: string,
+): Record<string, unknown> {
+  if (!argumentsJson) {
+    return {}
+  }
+  try {
+    return JSON.parse(argumentsJson) as Record<string, unknown>
+  } catch {
+    const sanitized = argumentsJson.replace(/\\(?!["\\/bfnrtu])/g, "\\\\")
+    try {
+      const parsed = JSON.parse(sanitized) as Record<string, unknown>
+      if (containsControlCharacters(parsed)) {
+        const fallback = argumentsJson.replace(/\\/g, "\\\\")
+        return JSON.parse(fallback) as Record<string, unknown>
+      }
+      return parsed
+    } catch {
+      return {}
+    }
+  }
+}
+
+function containsControlCharacters(value: unknown): boolean {
+  if (typeof value === "string") {
+    return /[\t\b\f]/.test(value)
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) => containsControlCharacters(entry))
+  }
+  if (value && typeof value === "object") {
+    return Object.values(value).some((entry) =>
+      containsControlCharacters(entry),
+    )
+  }
+  return false
 }

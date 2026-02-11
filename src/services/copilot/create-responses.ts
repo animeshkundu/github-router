@@ -57,7 +57,12 @@ function detectAgentCall(input: ResponsesPayload["input"]): boolean {
 
   return input.some((item) => {
     if ("role" in item && item.role === "assistant") return true
-    if ("type" in item && item.type === "function_call_output") return true
+    if (
+      "type" in item
+      && (item.type === "function_call" || item.type === "function_call_output")
+    ) {
+      return true
+    }
     return false
   })
 }
@@ -73,10 +78,44 @@ function filterUnsupportedTools(payload: ResponsesPayload): ResponsesPayload {
     return isSupported
   })
 
+  let toolChoice = payload.tool_choice
+  if (supported.length === 0) {
+    toolChoice = undefined
+  } else if (
+    toolChoice
+    && typeof toolChoice === "object"
+  ) {
+    const supportedNames = new Set(
+      supported.map((tool) => tool.name).filter(Boolean),
+    )
+    const toolChoiceName = getToolChoiceName(toolChoice)
+    if (toolChoiceName && !supportedNames.has(toolChoiceName)) {
+      toolChoice = undefined
+    }
+  }
+
   return {
     ...payload,
     tools: supported.length > 0 ? supported : undefined,
+    tool_choice: toolChoice,
   }
+}
+
+function getToolChoiceName(
+  toolChoice: NonNullable<ResponsesPayload["tool_choice"]>,
+): string | undefined {
+  if (typeof toolChoice !== "object") return undefined
+  if (
+    "function" in toolChoice
+    && toolChoice.function
+    && typeof toolChoice.function === "object"
+  ) {
+    return (toolChoice.function as { name?: string }).name
+  }
+  if ("name" in toolChoice) {
+    return toolChoice.name
+  }
+  return undefined
 }
 
 // Types
@@ -105,7 +144,9 @@ export interface ResponsesPayload {
   input: string | Array<ResponsesInputItem>
   instructions?: string
   tools?: Array<ResponsesTool>
-  tool_choice?: string | { type: string; name?: string }
+  tool_choice?:
+    | string
+    | { type: string; name?: string; function?: { name?: string } }
   max_output_tokens?: number
   temperature?: number
   top_p?: number
