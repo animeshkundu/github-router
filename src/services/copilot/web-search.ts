@@ -100,7 +100,7 @@ export async function searchWeb(query: string): Promise<WebSearchResult> {
   const response = await sendThreadMessage(threadId, query)
 
   const references: Array<{ title: string; url: string }> = []
-  for (const ref of response.message.references) {
+  for (const ref of response.message.references ?? []) {
     if (ref.results) {
       for (const result of ref.results) {
         if (result.url && result.reference_type !== "bing_search") {

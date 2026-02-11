@@ -28,6 +28,8 @@ interface RunServerOptions {
   proxyEnv: boolean
 }
 
+const allowedAccountTypes = new Set(["individual", "business", "enterprise"])
+
 async function generateClaudeCodeCommand(serverUrl: string) {
   invariant(state.models, "Models should be loaded by now")
 
@@ -152,6 +154,7 @@ export async function runServer(options: RunServerOptions): Promise<void> {
 
   serve({
     fetch: server.fetch as ServerHandler,
+    hostname: "127.0.0.1",
     port: options.port,
   })
 }
@@ -230,17 +233,41 @@ export const start = defineCommand({
   run({ args }) {
     const rateLimitRaw = args["rate-limit"]
     const rateLimit =
-       
       rateLimitRaw === undefined ? undefined : Number.parseInt(rateLimitRaw, 10)
+    if (
+      rateLimitRaw !== undefined &&
+      (Number.isNaN(rateLimit) || rateLimit <= 0)
+    ) {
+      throw new Error("Invalid rate limit. Must be a positive integer.")
+    }
+
+    const port = Number.parseInt(args.port, 10)
+    if (Number.isNaN(port) || port <= 0 || port > 65535) {
+      throw new Error("Invalid port. Must be between 1 and 65535.")
+    }
+
+    const accountType = args["account-type"]
+    if (!allowedAccountTypes.has(accountType)) {
+      throw new Error(
+        "Invalid account type. Must be individual, business, or enterprise.",
+      )
+    }
+
+    const rateLimitWait = args.wait && rateLimit !== undefined
+    if (args.wait && rateLimit === undefined) {
+      consola.warn("Rate limit wait ignored because no rate limit was set.")
+    }
+
+    const githubToken = args["github-token"] ?? process.env.GH_TOKEN
 
     return runServer({
-      port: Number.parseInt(args.port, 10),
+      port,
       verbose: args.verbose,
-      accountType: args["account-type"],
+      accountType,
       manual: args.manual,
       rateLimit,
-      rateLimitWait: args.wait,
-      githubToken: args["github-token"],
+      rateLimitWait,
+      githubToken,
       claudeCode: args["claude-code"],
       codex: args.codex,
       showToken: args["show-token"],
