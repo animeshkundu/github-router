@@ -12,6 +12,7 @@ import { generateEnvScript } from "./lib/shell"
 import { state } from "./lib/state"
 import { setupCopilotToken, setupGitHubToken } from "./lib/token"
 import { cacheModels, cacheVSCodeVersion } from "./lib/utils"
+import type { Model } from "./services/copilot/get-models"
 import { server } from "./server"
 
 interface RunServerOptions {
@@ -30,14 +31,36 @@ interface RunServerOptions {
 
 const allowedAccountTypes = new Set(["individual", "business", "enterprise"])
 
+function filterModelsByEndpoint(
+  models: Array<Model>,
+  endpoint: string,
+): Array<Model> {
+  const filtered = models.filter((model) => {
+    const endpoints = model.supported_endpoints
+    // Some deployments omit supported_endpoints; keep those models visible.
+    if (!endpoints || endpoints.length === 0) return true
+    return endpoints.some((entry) => {
+      const normalized = entry.replace(/^\/?v1\//, "").replace(/^\//, "")
+      return normalized === endpoint
+    })
+  })
+
+  return filtered.length > 0 ? filtered : models
+}
+
 async function generateClaudeCodeCommand(serverUrl: string) {
   invariant(state.models, "Models should be loaded by now")
+
+  const supportedModels = filterModelsByEndpoint(
+    state.models.data,
+    "chat/completions",
+  )
 
   const selectedModel = await consola.prompt(
     "Select a model to use with Claude Code",
     {
       type: "select",
-      options: state.models.data.map((model) => model.id),
+      options: supportedModels.map((model) => model.id),
     },
   )
 
@@ -45,13 +68,14 @@ async function generateClaudeCodeCommand(serverUrl: string) {
     "Select a small model to use with Claude Code",
     {
       type: "select",
-      options: state.models.data.map((model) => model.id),
+      options: supportedModels.map((model) => model.id),
     },
   )
 
   const command = generateEnvScript(
     {
       ANTHROPIC_BASE_URL: serverUrl,
+      ANTHROPIC_API_KEY: "dummy",
       ANTHROPIC_AUTH_TOKEN: "dummy",
       ANTHROPIC_MODEL: selectedModel,
       ANTHROPIC_DEFAULT_SONNET_MODEL: selectedModel,
@@ -77,7 +101,12 @@ async function generateClaudeCodeCommand(serverUrl: string) {
 async function generateCodexCommand(serverUrl: string) {
   invariant(state.models, "Models should be loaded by now")
 
-  const defaultCodexModel = state.models.data.find(
+  const supportedModels = filterModelsByEndpoint(
+    state.models.data,
+    "responses",
+  )
+
+  const defaultCodexModel = supportedModels.find(
     (model) => model.id === "gpt5.2-codex",
   )
 
@@ -86,7 +115,7 @@ async function generateCodexCommand(serverUrl: string) {
       defaultCodexModel.id
     : await consola.prompt("Select a model to use with Codex CLI", {
         type: "select",
-        options: state.models.data.map((model) => model.id),
+        options: supportedModels.map((model) => model.id),
       })
 
   const command = generateEnvScript(

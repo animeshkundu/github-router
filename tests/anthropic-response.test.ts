@@ -160,6 +160,51 @@ describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
     }
   })
 
+  test("should handle tool calls with empty arguments", () => {
+    const openAIResponse: ChatCompletionResponse = {
+      id: "chatcmpl-457",
+      object: "chat.completion",
+      created: 1677652288,
+      model: "gpt-4o-2024-05-13",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_empty",
+                type: "function",
+                function: {
+                  name: "get_current_weather",
+                  arguments: "",
+                },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+          logprobs: null,
+        },
+      ],
+      usage: {
+        prompt_tokens: 30,
+        completion_tokens: 20,
+        total_tokens: 50,
+      },
+    }
+
+    const anthropicResponse = translateToAnthropic(openAIResponse)
+
+    expect(isValidAnthropicResponse(anthropicResponse)).toBe(true)
+    expect(anthropicResponse.content[0].type).toBe("tool_use")
+    if (anthropicResponse.content[0].type === "tool_use") {
+      expect(anthropicResponse.content[0].input).toEqual({})
+    } else {
+      throw new Error("Expected tool_use block")
+    }
+  })
+
   test("should translate a response stopped due to length", () => {
     const openAIResponse: ChatCompletionResponse = {
       id: "chatcmpl-789",

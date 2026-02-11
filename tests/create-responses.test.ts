@@ -82,6 +82,26 @@ test("sets X-Initiator to agent when input has function_call_output", async () =
   expect(headers["X-Initiator"]).toBe("agent")
 })
 
+test("sets X-Initiator to agent when input has function_call", async () => {
+  const payload: ResponsesPayload = {
+    model: "gpt5.2-codex",
+    input: [
+      { role: "user", content: "hi" },
+      {
+        type: "function_call",
+        call_id: "call_456",
+        name: "get_weather",
+        arguments: '{"location":"NYC"}',
+      },
+    ],
+  }
+  await createResponses(payload)
+  const headers = (
+    fetchMock.mock.calls[4][1] as { headers: Record<string, string> }
+  ).headers
+  expect(headers["X-Initiator"]).toBe("agent")
+})
+
 test("sets X-Initiator to user when input has only user messages", async () => {
   const payload: ResponsesPayload = {
     model: "gpt5.2-codex",
@@ -92,7 +112,7 @@ test("sets X-Initiator to user when input has only user messages", async () => {
   }
   await createResponses(payload)
   const headers = (
-    fetchMock.mock.calls[4][1] as { headers: Record<string, string> }
+    fetchMock.mock.calls[5][1] as { headers: Record<string, string> }
   ).headers
   expect(headers["X-Initiator"]).toBe("user")
 })
@@ -109,15 +129,17 @@ test("strips unsupported tool types like web_search from payload", async () => {
         parameters: { type: "object" },
       },
     ],
+    tool_choice: { type: "tool", name: "web_search" },
   }
   await createResponses(payload)
   const lastCall = fetchMock.mock.calls.at(-1)
   const body = JSON.parse(
     (lastCall?.[1] as unknown as { body: string }).body,
-  ) as { tools?: Array<{ type: string; name?: string }> }
+  ) as { tools?: Array<{ type: string; name?: string }>; tool_choice?: unknown }
   expect(body.tools).toHaveLength(1)
   expect(body.tools?.[0].type).toBe("function")
   expect(body.tools?.[0].name).toBe("get_weather")
+  expect(body.tool_choice).toBeUndefined()
 })
 
 test("removes tools field entirely when all tools are unsupported", async () => {
@@ -125,13 +147,15 @@ test("removes tools field entirely when all tools are unsupported", async () => 
     model: "gpt5.2-codex",
     input: "Hello",
     tools: [{ type: "web_search" }, { type: "code_interpreter" }],
+    tool_choice: { type: "tool", name: "web_search" },
   }
   await createResponses(payload)
   const lastCall2 = fetchMock.mock.calls.at(-1)
   const body = JSON.parse(
     (lastCall2?.[1] as unknown as { body: string }).body,
-  ) as { tools?: Array<{ type: string }> }
+  ) as { tools?: Array<{ type: string }>; tool_choice?: unknown }
   expect(body.tools).toBeUndefined()
+  expect(body.tool_choice).toBeUndefined()
 })
 
 test("returns parsed JSON for non-streaming response", async () => {

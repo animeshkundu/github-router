@@ -57,7 +57,12 @@ function detectAgentCall(input: ResponsesPayload["input"]): boolean {
 
   return input.some((item) => {
     if ("role" in item && item.role === "assistant") return true
-    if ("type" in item && item.type === "function_call_output") return true
+    if (
+      "type" in item
+      && (item.type === "function_call" || item.type === "function_call_output")
+    ) {
+      return true
+    }
     return false
   })
 }
@@ -73,9 +78,27 @@ function filterUnsupportedTools(payload: ResponsesPayload): ResponsesPayload {
     return isSupported
   })
 
+  let toolChoice = payload.tool_choice
+  if (supported.length === 0) {
+    toolChoice = undefined
+  } else if (
+    toolChoice
+    && typeof toolChoice === "object"
+    && "name" in toolChoice
+    && toolChoice.name
+  ) {
+    const supportedNames = new Set(
+      supported.map((tool) => tool.name).filter(Boolean),
+    )
+    if (!supportedNames.has(toolChoice.name)) {
+      toolChoice = undefined
+    }
+  }
+
   return {
     ...payload,
     tools: supported.length > 0 ? supported : undefined,
+    tool_choice: toolChoice,
   }
 }
 
