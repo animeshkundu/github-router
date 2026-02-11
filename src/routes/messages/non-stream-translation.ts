@@ -381,7 +381,7 @@ function parseToolArguments(
   try {
     return JSON.parse(argumentsJson) as Record<string, unknown>
   } catch {
-    const sanitized = argumentsJson.replace(/\\(?!["\\/bfnrtu])/g, "\\\\")
+    const sanitized = argumentsJson.replace(/\\/g, "\\\\")
     try {
       return JSON.parse(sanitized) as Record<string, unknown>
     } catch {
