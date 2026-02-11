@@ -45,7 +45,6 @@ test("searchWeb rejects when copilot token missing", async () => {
 })
 
 test("searchWeb filters out bing_search references", async () => {
-  const originalFetch = globalThis.fetch
   const localFetch = mock((url: string) => {
     if (url.endsWith("/github/chat/threads")) {
       return {
@@ -77,6 +76,4 @@ test("searchWeb filters out bing_search references", async () => {
   expect(result.references).toEqual([
     { title: "Docs", url: "https://example.com" },
   ])
-
-  globalThis.fetch = originalFetch
 })

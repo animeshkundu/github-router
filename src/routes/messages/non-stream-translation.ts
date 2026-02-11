@@ -381,11 +381,31 @@ function parseToolArguments(
   try {
     return JSON.parse(argumentsJson) as Record<string, unknown>
   } catch {
-    const sanitized = argumentsJson.replace(/\\/g, "\\\\")
+    const sanitized = argumentsJson.replace(/\\(?!["\\/bfnrtu])/g, "\\\\")
     try {
-      return JSON.parse(sanitized) as Record<string, unknown>
+      const parsed = JSON.parse(sanitized) as Record<string, unknown>
+      if (containsControlCharacters(parsed)) {
+        const fallback = argumentsJson.replace(/\\/g, "\\\\")
+        return JSON.parse(fallback) as Record<string, unknown>
+      }
+      return parsed
     } catch {
       return {}
     }
   }
+}
+
+function containsControlCharacters(value: unknown): boolean {
+  if (typeof value === "string") {
+    return /[\t\b\f]/.test(value)
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) => containsControlCharacters(entry))
+  }
+  if (value && typeof value === "object") {
+    return Object.values(value).some((entry) =>
+      containsControlCharacters(entry),
+    )
+  }
+  return false
 }

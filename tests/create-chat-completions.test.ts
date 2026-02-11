@@ -68,7 +68,6 @@ test("sets X-Initiator to user if only user present", async () => {
 })
 
 test("throws HTTPError when Copilot responds with error", async () => {
-  const originalFetch = globalThis.fetch
   const errorFetch = mock(() => new Response("fail", { status: 500 }))
   // @ts-expect-error - override fetch for this test
   globalThis.fetch = errorFetch
@@ -78,12 +77,9 @@ test("throws HTTPError when Copilot responds with error", async () => {
     model: "gpt-test",
   }
   await expect(createChatCompletions(payload)).rejects.toBeInstanceOf(HTTPError)
-
-  globalThis.fetch = originalFetch
 })
 
 test("returns stream events when stream is enabled", async () => {
-  const originalFetch = globalThis.fetch
   const streamFetch = mock(
     () =>
       new Response(
@@ -109,6 +105,4 @@ test("returns stream events when stream is enabled", async () => {
     chunks.push(JSON.parse(event.data))
   }
   expect(chunks[0]?.id).toBe("chunk_1")
-
-  globalThis.fetch = originalFetch
 })

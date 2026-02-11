@@ -196,7 +196,6 @@ test("returns parsed JSON for non-streaming response", async () => {
 })
 
 test("throws HTTPError when response is not ok", async () => {
-  const originalFetch = globalThis.fetch
   const errorFetch = mock(() => new Response("fail", { status: 500 }))
   // @ts-expect-error - override fetch for this test
   globalThis.fetch = errorFetch
@@ -204,12 +203,9 @@ test("throws HTTPError when response is not ok", async () => {
   await expect(
     createResponses({ model: "gpt5.2-codex", input: "Hello" }),
   ).rejects.toBeInstanceOf(HTTPError)
-
-  globalThis.fetch = originalFetch
 })
 
 test("returns stream events when stream is enabled", async () => {
-  const originalFetch = globalThis.fetch
   const streamFetch = mock(
     () =>
       new Response('data: {"id":"resp_chunk"}\n\n', {
@@ -229,6 +225,4 @@ test("returns stream events when stream is enabled", async () => {
     events.push(event)
   }
   expect(events[0]?.data).toContain("resp_chunk")
-
-  globalThis.fetch = originalFetch
 })

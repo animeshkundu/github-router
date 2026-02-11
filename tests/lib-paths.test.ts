@@ -1,8 +1,11 @@
 import { test, expect, mock } from "bun:test"
 import fs from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
 
-const tempDir = await fs.mkdtemp("/tmp/github-router-paths-")
+const tempDir = await fs.mkdtemp(
+  path.join(os.tmpdir(), "github-router-paths-"),
+)
 
 mock.module("node:os", () => ({
   default: {
