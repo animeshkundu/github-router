@@ -20,7 +20,10 @@ export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
 
   let payload = await c.req.json<ChatCompletionsPayload>()
-  consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
+  const debugEnabled = consola.level >= 4
+  if (debugEnabled) {
+    consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
+  }
 
   await injectWebSearchIfNeeded(payload)
 
@@ -48,20 +51,26 @@ export async function handleCompletion(c: Context) {
       ...payload,
       max_tokens: selectedModel?.capabilities.limits.max_output_tokens,
     }
-    consola.debug("Set max_tokens to:", JSON.stringify(payload.max_tokens))
+    if (debugEnabled) {
+      consola.debug("Set max_tokens to:", JSON.stringify(payload.max_tokens))
+    }
   }
 
   const response = await createChatCompletions(payload)
 
   if (isNonStreaming(response)) {
-    consola.debug("Non-streaming response:", JSON.stringify(response))
+    if (debugEnabled) {
+      consola.debug("Non-streaming response:", JSON.stringify(response))
+    }
     return c.json(response)
   }
 
   consola.debug("Streaming response")
   return streamSSE(c, async (stream) => {
     for await (const chunk of response) {
-      consola.debug("Streaming chunk:", JSON.stringify(chunk))
+      if (debugEnabled) {
+        consola.debug("Streaming chunk:", JSON.stringify(chunk))
+      }
       await stream.writeSSE(chunk as SSEMessage)
     }
   })

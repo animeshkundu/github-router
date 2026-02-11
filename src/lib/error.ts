@@ -21,13 +21,14 @@ export async function forwardError(c: Context, error: unknown) {
     try {
       errorJson = JSON.parse(errorText)
     } catch {
-      errorJson = errorText
+      errorJson = undefined
     }
-    consola.error("HTTP error:", errorJson)
+    const message = resolveErrorMessage(errorJson, errorText)
+    consola.error("HTTP error:", errorJson ?? errorText)
     return c.json(
       {
         error: {
-          message: errorText,
+          message,
           type: "error",
         },
       },
@@ -38,10 +39,25 @@ export async function forwardError(c: Context, error: unknown) {
   return c.json(
     {
       error: {
-        message: (error as Error).message,
+        message: error instanceof Error ? error.message : String(error),
         type: "error",
       },
     },
     500,
   )
+}
+
+// Extracts error message from { message } or { error: { message } } payloads.
+function resolveErrorMessage(errorJson: unknown, fallback: string): string {
+  if (typeof errorJson !== "object" || errorJson === null) return fallback
+
+  const errorRecord = errorJson as Record<string, unknown>
+  if (errorRecord.message !== undefined) return String(errorRecord.message)
+
+  if (typeof errorRecord.error === "object" && errorRecord.error !== null) {
+    const nestedRecord = errorRecord.error as Record<string, unknown>
+    if (nestedRecord.message !== undefined) return String(nestedRecord.message)
+  }
+
+  return fallback
 }
