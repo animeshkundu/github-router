@@ -144,13 +144,14 @@ async function injectWebSearchIfNeeded(
   } else if (
     payload.tool_choice
     && typeof payload.tool_choice === "object"
-    && "function" in payload.tool_choice
-    && payload.tool_choice.function?.name
+    && "type" in payload.tool_choice
+    && payload.tool_choice.type === "function"
   ) {
-    const hasTool = payload.tools.some(
-      (tool) => tool.function.name === payload.tool_choice.function.name,
-    )
-    if (!hasTool) {
+    const toolChoiceName = payload.tool_choice.function?.name
+    if (
+      toolChoiceName
+      && !payload.tools.some((tool) => tool.function.name === toolChoiceName)
+    ) {
       payload.tool_choice = undefined
     }
   }

@@ -158,6 +158,22 @@ test("removes tools field entirely when all tools are unsupported", async () => 
   expect(body.tool_choice).toBeUndefined()
 })
 
+test("clears function tool_choice when tool is stripped", async () => {
+  const payload: ResponsesPayload = {
+    model: "gpt5.2-codex",
+    input: "Hello",
+    tools: [{ type: "web_search" }],
+    tool_choice: { type: "function", function: { name: "web_search" } },
+  }
+  await createResponses(payload)
+  const lastCall = fetchMock.mock.calls.at(-1)
+  const body = JSON.parse(
+    (lastCall?.[1] as unknown as { body: string }).body,
+  ) as { tools?: Array<{ type: string }>; tool_choice?: unknown }
+  expect(body.tools).toBeUndefined()
+  expect(body.tool_choice).toBeUndefined()
+})
+
 test("returns parsed JSON for non-streaming response", async () => {
   const payload: ResponsesPayload = {
     model: "gpt5.2-codex",

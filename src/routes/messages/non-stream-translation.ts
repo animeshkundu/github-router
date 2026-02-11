@@ -156,7 +156,7 @@ function handleAssistantMessage(
     ...thinkingBlocks.map((b) => b.thinking),
   ].join("\n\n")
 
-  const toolCalls = validToolUseBlocks.map((toolUse) => ({
+  const toolCalls: Array<ToolCall> = validToolUseBlocks.map((toolUse) => ({
     id: toolUse.id,
     type: "function",
     function: {
@@ -381,6 +381,11 @@ function parseToolArguments(
   try {
     return JSON.parse(argumentsJson) as Record<string, unknown>
   } catch {
-    return {}
+    const sanitized = argumentsJson.replace(/\\(?!["\\/bfnrtu])/g, "\\\\")
+    try {
+      return JSON.parse(sanitized) as Record<string, unknown>
+    } catch {
+      return {}
+    }
   }
 }

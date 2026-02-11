@@ -6,7 +6,10 @@ import type {
   ChatCompletionResponse,
 } from "~/services/copilot/create-chat-completions"
 
-import { type AnthropicStreamState } from "~/routes/messages/anthropic-types"
+import {
+  type AnthropicContentBlockDeltaEvent,
+  type AnthropicStreamState,
+} from "~/routes/messages/anthropic-types"
 import { translateToAnthropic } from "~/routes/messages/non-stream-translation"
 import { translateChunkToAnthropicEvents } from "~/routes/messages/stream-translation"
 
@@ -160,6 +163,52 @@ describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
     }
   })
 
+  test("should sanitize invalid backslashes in tool call arguments", () => {
+    const openAIResponse: ChatCompletionResponse = {
+      id: "chatcmpl-458",
+      object: "chat.completion",
+      created: 1677652288,
+      model: "gpt-4o-2024-05-13",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_path",
+                type: "function",
+                function: {
+                  name: "open_file",
+                  arguments: String.raw`{"path":"C:\Temp\file.txt"}`,
+                },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+          logprobs: null,
+        },
+      ],
+      usage: {
+        prompt_tokens: 30,
+        completion_tokens: 20,
+        total_tokens: 50,
+      },
+    }
+
+    const anthropicResponse = translateToAnthropic(openAIResponse)
+
+    expect(anthropicResponse.content[0].type).toBe("tool_use")
+    if (anthropicResponse.content[0].type === "tool_use") {
+      expect(anthropicResponse.content[0].input).toEqual({
+        path: "C:\\Temp\\file.txt",
+      })
+    } else {
+      throw new Error("Expected tool_use block")
+    }
+  })
+
   test("should handle tool calls with empty arguments", () => {
     const openAIResponse: ChatCompletionResponse = {
       id: "chatcmpl-457",
@@ -297,6 +346,7 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
       contentBlockIndex: 0,
       contentBlockOpen: false,
       toolCalls: {},
+      pendingToolCallArgs: {},
     }
     const translatedStream = openAIStream.flatMap((chunk) =>
       translateChunkToAnthropicEvents(chunk, streamState),
@@ -397,6 +447,7 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
       contentBlockIndex: 0,
       contentBlockOpen: false,
       toolCalls: {},
+      pendingToolCallArgs: {},
     }
     const translatedStream = openAIStream.flatMap((chunk) =>
       translateChunkToAnthropicEvents(chunk, streamState),
@@ -406,5 +457,83 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
     for (const event of translatedStream) {
       expect(isValidAnthropicStreamEvent(event)).toBe(true)
     }
+  })
+
+  test("buffers tool call arguments before id and name arrive", () => {
+    const openAIStream: Array<ChatCompletionChunk> = [
+      {
+        id: "cmpl-3",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "gpt-4o-2024-05-13",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [{ index: 0, function: { arguments: '{"loc' } }],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+      {
+        id: "cmpl-3",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "gpt-4o-2024-05-13",
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "call_early",
+                  type: "function",
+                  function: { name: "get_weather", arguments: 'ation": "Oslo"}' },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      },
+      {
+        id: "cmpl-3",
+        object: "chat.completion.chunk",
+        created: 1677652288,
+        model: "gpt-4o-2024-05-13",
+        choices: [
+          { index: 0, delta: {}, finish_reason: "tool_calls", logprobs: null },
+        ],
+      },
+    ]
+
+    const streamState: AnthropicStreamState = {
+      messageStartSent: false,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      toolCalls: {},
+      pendingToolCallArgs: {},
+    }
+    const translatedStream = openAIStream.flatMap((chunk) =>
+      translateChunkToAnthropicEvents(chunk, streamState),
+    )
+
+    const argumentEvents = translatedStream.filter(
+      (
+        event,
+      ): event is AnthropicContentBlockDeltaEvent & {
+        delta: { type: "input_json_delta"; partial_json: string }
+      } =>
+        event.type === "content_block_delta"
+        && event.delta.type === "input_json_delta",
+    )
+    expect(argumentEvents.map((event) => event.delta.partial_json)).toEqual([
+      '{"loc',
+      'ation": "Oslo"}',
+    ])
   })
 })

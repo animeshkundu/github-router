@@ -84,13 +84,12 @@ function filterUnsupportedTools(payload: ResponsesPayload): ResponsesPayload {
   } else if (
     toolChoice
     && typeof toolChoice === "object"
-    && "name" in toolChoice
-    && toolChoice.name
   ) {
     const supportedNames = new Set(
       supported.map((tool) => tool.name).filter(Boolean),
     )
-    if (!supportedNames.has(toolChoice.name)) {
+    const toolChoiceName = getToolChoiceName(toolChoice)
+    if (toolChoiceName && !supportedNames.has(toolChoiceName)) {
       toolChoice = undefined
     }
   }
@@ -100,6 +99,23 @@ function filterUnsupportedTools(payload: ResponsesPayload): ResponsesPayload {
     tools: supported.length > 0 ? supported : undefined,
     tool_choice: toolChoice,
   }
+}
+
+function getToolChoiceName(
+  toolChoice: NonNullable<ResponsesPayload["tool_choice"]>,
+): string | undefined {
+  if (typeof toolChoice !== "object") return undefined
+  if (
+    "function" in toolChoice
+    && toolChoice.function
+    && typeof toolChoice.function === "object"
+  ) {
+    return (toolChoice.function as { name?: string }).name
+  }
+  if ("name" in toolChoice) {
+    return toolChoice.name
+  }
+  return undefined
 }
 
 // Types
@@ -128,7 +144,9 @@ export interface ResponsesPayload {
   input: string | Array<ResponsesInputItem>
   instructions?: string
   tools?: Array<ResponsesTool>
-  tool_choice?: string | { type: string; name?: string }
+  tool_choice?:
+    | string
+    | { type: string; name?: string; function?: { name?: string } }
   max_output_tokens?: number
   temperature?: number
   top_p?: number

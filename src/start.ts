@@ -118,12 +118,13 @@ async function generateCodexCommand(serverUrl: string) {
         options: supportedModels.map((model) => model.id),
       })
 
+  const quotedModel = JSON.stringify(selectedModel)
   const command = generateEnvScript(
     {
       OPENAI_BASE_URL: `${serverUrl}/v1`,
       OPENAI_API_KEY: "dummy",
     },
-    `codex -m ${selectedModel}`,
+    `codex -m ${quotedModel}`,
   )
 
   try {
@@ -261,13 +262,12 @@ export const start = defineCommand({
   },
   run({ args }) {
     const rateLimitRaw = args["rate-limit"]
-    const rateLimit =
-      rateLimitRaw === undefined ? undefined : Number.parseInt(rateLimitRaw, 10)
-    if (
-      rateLimitRaw !== undefined &&
-      (Number.isNaN(rateLimit) || rateLimit <= 0)
-    ) {
-      throw new Error("Invalid rate limit. Must be a positive integer.")
+    let rateLimit: number | undefined
+    if (rateLimitRaw !== undefined) {
+      rateLimit = Number.parseInt(rateLimitRaw, 10)
+      if (Number.isNaN(rateLimit) || rateLimit <= 0) {
+        throw new Error("Invalid rate limit. Must be a positive integer.")
+      }
     }
 
     const port = Number.parseInt(args.port, 10)

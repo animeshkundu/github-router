@@ -32,6 +32,10 @@ export async function handleCompletion(c: Context) {
     consola.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
   }
 
+  if (state.manualApprove) {
+    await awaitApproval()
+  }
+
   await injectWebSearchIfNeeded(anthropicPayload)
 
   const openAIPayload = translateToOpenAI(anthropicPayload)
@@ -40,10 +44,6 @@ export async function handleCompletion(c: Context) {
       "Translated OpenAI request payload:",
       JSON.stringify(openAIPayload),
     )
-  }
-
-  if (state.manualApprove) {
-    await awaitApproval()
   }
 
   const response = await createChatCompletions(openAIPayload)
@@ -72,6 +72,7 @@ export async function handleCompletion(c: Context) {
       contentBlockIndex: 0,
       contentBlockOpen: false,
       toolCalls: {},
+      pendingToolCallArgs: {},
     }
 
     for await (const rawEvent of response) {
@@ -154,6 +155,14 @@ async function injectWebSearchIfNeeded(
   payload.tools = payload.tools?.filter((t) => t.name !== "web_search")
   if (payload.tools?.length === 0) {
     payload.tools = undefined
+  }
+  if (!payload.tools) {
+    payload.tool_choice = undefined
+  } else if (
+    payload.tool_choice?.name
+    && !payload.tools.some((tool) => tool.name === payload.tool_choice?.name)
+  ) {
+    payload.tool_choice = undefined
   }
 }
 
