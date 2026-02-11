@@ -25,6 +25,8 @@ export async function handleCompletion(c: Context) {
     consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
   }
 
+  if (state.manualApprove) await awaitApproval()
+
   await injectWebSearchIfNeeded(payload)
 
   // Find the selected model
@@ -43,8 +45,6 @@ export async function handleCompletion(c: Context) {
   } catch (error) {
     consola.warn("Failed to calculate token count:", error)
   }
-
-  if (state.manualApprove) await awaitApproval()
 
   if (isNullish(payload.max_tokens)) {
     payload = {
@@ -92,41 +92,40 @@ async function injectWebSearchIfNeeded(
 
   // Skip search on follow-up messages (tool call results)
   const hasToolResult = payload.messages.some((msg) => msg.role === "tool")
-  if (hasToolResult) return
+  const query = hasToolResult ? undefined : extractUserQuery(payload.messages)
 
-  const query = extractUserQuery(payload.messages)
-  if (!query) return
+  if (query) {
+    try {
+      const results = await searchWeb(query)
+      const searchContext = [
+        "[Web Search Results]",
+        results.content,
+        "",
+        results.references.map((r) => `- [${r.title}](${r.url})`).join("\n"),
+        "[End Web Search Results]",
+      ].join("\n")
 
-  try {
-    const results = await searchWeb(query)
-    const searchContext = [
-      "[Web Search Results]",
-      results.content,
-      "",
-      results.references.map((r) => `- [${r.title}](${r.url})`).join("\n"),
-      "[End Web Search Results]",
-    ].join("\n")
-
-    // Prepend to existing system message or inject a new one
-    const systemMsg = payload.messages.find((msg) => msg.role === "system")
-    if (systemMsg) {
-      const existingContent =
-        typeof systemMsg.content === "string" ? systemMsg.content
-        : Array.isArray(systemMsg.content) ?
-          systemMsg.content
-            .filter((p) => p.type === "text")
-            .map((p) => ("text" in p ? p.text : ""))
-            .join("\n")
-        : ""
-      systemMsg.content = `${searchContext}\n\n${existingContent}`
-    } else {
-      payload.messages.unshift({
-        role: "system",
-        content: searchContext,
-      })
+      // Prepend to existing system message or inject a new one
+      const systemMsg = payload.messages.find((msg) => msg.role === "system")
+      if (systemMsg) {
+        const existingContent =
+          typeof systemMsg.content === "string" ? systemMsg.content
+          : Array.isArray(systemMsg.content) ?
+            systemMsg.content
+              .filter((p) => p.type === "text")
+              .map((p) => ("text" in p ? p.text : ""))
+              .join("\n")
+          : ""
+        systemMsg.content = `${searchContext}\n\n${existingContent}`
+      } else {
+        payload.messages.unshift({
+          role: "system",
+          content: searchContext,
+        })
+      }
+    } catch (error) {
+      consola.warn("Web search failed, continuing without results:", error)
     }
-  } catch (error) {
-    consola.warn("Web search failed, continuing without results:", error)
   }
 
   // Remove web_search from tools before forwarding
@@ -139,6 +138,21 @@ async function injectWebSearchIfNeeded(
   ) as typeof payload.tools
   if (payload.tools?.length === 0) {
     payload.tools = undefined
+  }
+  if (!payload.tools) {
+    payload.tool_choice = undefined
+  } else if (
+    payload.tool_choice
+    && typeof payload.tool_choice === "object"
+    && "function" in payload.tool_choice
+    && payload.tool_choice.function?.name
+  ) {
+    const hasTool = payload.tools.some(
+      (tool) => tool.function.name === payload.tool_choice.function.name,
+    )
+    if (!hasTool) {
+      payload.tool_choice = undefined
+    }
   }
 }
 
