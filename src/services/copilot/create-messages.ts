@@ -23,7 +23,7 @@ import { state } from "~/lib/state"
  * without requiring the header.
  *
  * extraHeaders allows callers to forward client-supplied beta headers
- * (anthropic-beta, capi-beta-1) so Copilot enables extended features.
+ * (anthropic-beta) so Copilot enables extended features.
  */
 function buildHeaders(
   extraHeaders?: Record<string, string>,

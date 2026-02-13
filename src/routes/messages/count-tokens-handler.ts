@@ -71,8 +71,6 @@ export async function handleCountTokens(c: Context) {
     const filtered = filterBetaHeader(anthropicBeta)
     if (filtered) extraHeaders["anthropic-beta"] = filtered
   }
-  const capiBeta = c.req.header("capi-beta-1")
-  if (capiBeta) extraHeaders["capi-beta-1"] = capiBeta
 
   const response = await countTokens(finalBody, extraHeaders)
   const body = await response.json()

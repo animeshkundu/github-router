@@ -22,6 +22,7 @@ const ALLOWED_BETA_PREFIXES = [
   "interleaved-thinking-",
   "context-management-",
   "advanced-tool-use-",
+  "token-counting-",
 ]
 
 /**

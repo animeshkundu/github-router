@@ -7,7 +7,7 @@ export const standardHeaders = () => ({
   accept: "application/json",
 })
 
-const COPILOT_VERSION = "0.26.7"
+const COPILOT_VERSION = "0.38.2026021302"
 const EDITOR_PLUGIN_VERSION = `copilot-chat/${COPILOT_VERSION}`
 const USER_AGENT = `GitHubCopilotChat/${COPILOT_VERSION}`
 
@@ -34,6 +34,8 @@ export const copilotHeaders = (
     "x-github-api-version": API_VERSION,
     "x-request-id": randomUUID(),
     "x-vscode-user-agent-library-version": "electron-fetch",
+    "VScode-SessionId": state.sessionId,
+    "VScode-MachineId": state.machineId,
   }
 
   if (vision) headers["copilot-vision-request"] = "true"

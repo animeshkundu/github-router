@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto"
+
 import type { ModelsResponse } from "~/services/copilot/get-models"
 
 export interface State {
@@ -15,6 +17,10 @@ export interface State {
   // Rate limiting configuration
   rateLimitSeconds?: number
   lastRequestTimestamp?: number
+
+  // Persistent session identifiers to match VS Code fingerprint
+  sessionId: string
+  machineId: string
 }
 
 export const state: State = {
@@ -22,4 +28,6 @@ export const state: State = {
   manualApprove: false,
   rateLimitWait: false,
   showToken: false,
+  sessionId: randomUUID(),
+  machineId: randomUUID(),
 }

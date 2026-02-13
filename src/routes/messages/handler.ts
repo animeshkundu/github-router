@@ -28,8 +28,6 @@ function extractBetaHeaders(c: Context): Record<string, string> {
     const filtered = filterBetaHeader(anthropicBeta)
     if (filtered) headers["anthropic-beta"] = filtered
   }
-  const capiBeta = c.req.header("capi-beta-1")
-  if (capiBeta) headers["capi-beta-1"] = capiBeta
   return headers
 }
 
