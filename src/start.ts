@@ -61,31 +61,61 @@ function filterModelsByEndpoint(
 async function generateClaudeCodeCommand(serverUrl: string) {
   invariant(state.models, "Models should be loaded by now")
 
-  const supportedModels = filterModelsByEndpoint(
-    state.models.data,
-    "v1/messages",
+  const claudeModels = state.models.data.filter((model) =>
+    model.id.toLowerCase().startsWith("claude"),
   )
 
-  const selectedModel = await consola.prompt(
-    "Select a model to use with Claude Code",
-    {
-      type: "select",
-      options: supportedModels.map((model) => model.id),
-    },
-  )
+  if (claudeModels.length === 0) {
+    consola.error("No Claude models available from Copilot API")
+    return
+  }
 
-  const selectedSmallModel = await consola.prompt(
-    "Select a small model to use with Claude Code",
-    {
-      type: "select",
-      options: supportedModels.map((model) => model.id),
-    },
-  )
+  // Pick the best main model: prefer opus, then sonnet, then first available
+  const mainModel =
+    claudeModels.find((m) => m.id.includes("opus")) ??
+    claudeModels.find((m) => m.id.includes("sonnet")) ??
+    claudeModels[0]
+
+  // Pick the best small model: prefer haiku, then sonnet, then first available
+  const smallModel =
+    claudeModels.find((m) => m.id.includes("haiku")) ??
+    claudeModels.find((m) => m.id.includes("sonnet")) ??
+    claudeModels[0]
+
+  // Only prompt if there are multiple options and the user might want to override
+  let selectedModel = mainModel.id
+  let selectedSmallModel = smallModel.id
+
+  if (claudeModels.length > 1) {
+    consola.info(
+      `Using ${mainModel.id} as main model and ${smallModel.id} as small model`,
+    )
+    const override = await consola.prompt("Override model selection?", {
+      type: "confirm",
+      initial: false,
+    })
+
+    if (override) {
+      selectedModel = await consola.prompt(
+        "Select a main model for Claude Code",
+        {
+          type: "select",
+          options: claudeModels.map((model) => model.id),
+        },
+      )
+      selectedSmallModel = await consola.prompt(
+        "Select a small/fast model for Claude Code",
+        {
+          type: "select",
+          options: claudeModels.map((model) => model.id),
+        },
+      )
+    }
+  }
 
   const command = generateEnvScript(
     {
       ANTHROPIC_BASE_URL: serverUrl,
-      ANTHROPIC_API_KEY: "dummy",
       ANTHROPIC_AUTH_TOKEN: "dummy",
       ANTHROPIC_MODEL: selectedModel,
       ANTHROPIC_DEFAULT_SONNET_MODEL: selectedModel,
@@ -94,7 +124,7 @@ async function generateClaudeCodeCommand(serverUrl: string) {
       DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     },
-    "claude",
+    "claude --dangerously-skip-permissions",
   )
 
   printAndCopyCommand(command, "Claude Code")

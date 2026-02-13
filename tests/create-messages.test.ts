@@ -37,7 +37,7 @@ describe("createMessages", () => {
     globalThis.fetch = fetchMock
 
     await createMessages('{"model":"claude-sonnet-4.5","max_tokens":100,"messages":[]}')
-    expect(capturedUrl).toBe("https://api.githubcopilot.com/v1/messages")
+    expect(capturedUrl).toBe("https://api.githubcopilot.com/v1/messages?beta=true")
   })
 
   test("uses enterprise URL when account type is enterprise", async () => {
@@ -51,7 +51,7 @@ describe("createMessages", () => {
     globalThis.fetch = fetchMock
 
     await createMessages('{"model":"claude-sonnet-4.5","max_tokens":100,"messages":[]}')
-    expect(capturedUrl).toBe("https://api.enterprise.githubcopilot.com/v1/messages")
+    expect(capturedUrl).toBe("https://api.enterprise.githubcopilot.com/v1/messages?beta=true")
     state.accountType = "individual"
   })
 
@@ -174,6 +174,42 @@ describe("createMessages", () => {
     await createMessages('{}')
     expect(requestIds[0]).not.toBe(requestIds[1])
   })
+
+  test("forwards extra headers when provided", async () => {
+    let capturedHeaders: Record<string, string> = {}
+    const fetchMock = mock((_url: string, opts: { headers: Record<string, string> }) => {
+      capturedHeaders = opts.headers
+      return new Response(JSON.stringify({ type: "message", id: "msg", role: "assistant", model: "m", content: [], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } }))
+    })
+    // @ts-expect-error - override fetch
+    globalThis.fetch = fetchMock
+
+    await createMessages('{}', {
+      "anthropic-beta": "interleaved-thinking-2025-05-14,context-management-2025-06-27",
+      "capi-beta-1": "true",
+    })
+
+    expect(capturedHeaders["anthropic-beta"]).toBe("interleaved-thinking-2025-05-14,context-management-2025-06-27")
+    expect(capturedHeaders["capi-beta-1"]).toBe("true")
+    // Base headers should still be present
+    expect(capturedHeaders["X-Initiator"]).toBe("agent")
+    expect(capturedHeaders["anthropic-version"]).toBe("2023-06-01")
+  })
+
+  test("does not include extra headers when not provided", async () => {
+    let capturedHeaders: Record<string, string> = {}
+    const fetchMock = mock((_url: string, opts: { headers: Record<string, string> }) => {
+      capturedHeaders = opts.headers
+      return new Response(JSON.stringify({ type: "message", id: "msg", role: "assistant", model: "m", content: [], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } }))
+    })
+    // @ts-expect-error - override fetch
+    globalThis.fetch = fetchMock
+
+    await createMessages('{}')
+
+    expect(capturedHeaders["anthropic-beta"]).toBeUndefined()
+    expect(capturedHeaders["capi-beta-1"]).toBeUndefined()
+  })
 })
 
 describe("countTokens", () => {
@@ -187,7 +223,7 @@ describe("countTokens", () => {
     globalThis.fetch = fetchMock
 
     await countTokens('{"model":"claude-sonnet-4.5","messages":[]}')
-    expect(capturedUrl).toBe("https://api.githubcopilot.com/v1/messages/count_tokens")
+    expect(capturedUrl).toBe("https://api.githubcopilot.com/v1/messages/count_tokens?beta=true")
   })
 
   test("sends same VS Code-compatible headers as createMessages", async () => {
