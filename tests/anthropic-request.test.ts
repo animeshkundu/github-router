@@ -509,3 +509,48 @@ describe("Model name normalization (normalizeCopilotModelName)", () => {
     expect(normalizeCopilotModelName("gpt-4o")).toBe("gpt-4o")
   })
 })
+
+// Tests covering every model name that Claude Code's /model menu sends
+describe("Claude Code /model menu integration", () => {
+  test("Default (Sonnet 4.5): claude-sonnet-4-5-20250929 → claude-sonnet-4.5", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-sonnet-4-5-20250929")).toBe("claude-sonnet-4.5")
+    clearMockModels()
+  })
+
+  test("Opus: claude-opus-4-6 → claude-opus-4.6", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-opus-4-6")).toBe("claude-opus-4.6")
+    clearMockModels()
+  })
+
+  test("Opus (1M context): claude-opus-4-6-1m → claude-opus-4.6-1m", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-opus-4-6-1m")).toBe("claude-opus-4.6-1m")
+    clearMockModels()
+  })
+
+  test("Sonnet (1M context): claude-sonnet-4-5-1m → claude-sonnet-4.5", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-sonnet-4-5-1m")).toBe("claude-sonnet-4.5")
+    clearMockModels()
+  })
+
+  test("Haiku: claude-haiku-4-5-20251001 → claude-haiku-4.5", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-haiku-4-5-20251001")).toBe("claude-haiku-4.5")
+    clearMockModels()
+  })
+
+  test("Sub-agent Opus 4.5: claude-opus-4-5 → claude-opus-4.5", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-opus-4-5")).toBe("claude-opus-4.5")
+    clearMockModels()
+  })
+
+  test("Sub-agent Opus 4.5 dated: claude-opus-4-5-20250918 → claude-opus-4.5", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-opus-4-5-20250918")).toBe("claude-opus-4.5")
+    clearMockModels()
+  })
+})
