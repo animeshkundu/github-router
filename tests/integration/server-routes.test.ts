@@ -204,7 +204,7 @@ test("messages passthrough forwards body to copilot /v1/messages", async () => {
   let lastUrl: string | undefined
 
   const fetchMock = mock((url: string, opts?: { body?: string }) => {
-    if (url.endsWith("/v1/messages")) {
+    if (url.includes("/v1/messages")) {
       lastUrl = url
       lastBody = opts?.body
       return new Response(
@@ -256,7 +256,7 @@ test("messages stream passthrough pipes SSE events directly", async () => {
   ].join("")
 
   const fetchMock = mock((url: string) => {
-    if (url.endsWith("/v1/messages")) {
+    if (url.includes("/v1/messages")) {
       return new Response(ssePayload, {
         headers: { "content-type": "text/event-stream" },
       })
@@ -287,7 +287,7 @@ test("count_tokens passthrough forwards to copilot and returns result", async ()
   resetState()
 
   const fetchMock = mock((url: string) => {
-    if (url.endsWith("/v1/messages/count_tokens")) {
+    if (url.includes("/v1/messages/count_tokens")) {
       return new Response(JSON.stringify({ input_tokens: 42 }))
     }
     throw new Error(`Unexpected URL ${url}`)
@@ -313,7 +313,7 @@ test("count_tokens forwards upstream errors", async () => {
   resetState()
 
   const fetchMock = mock((url: string) => {
-    if (url.endsWith("/v1/messages/count_tokens")) {
+    if (url.includes("/v1/messages/count_tokens")) {
       return new Response(
         JSON.stringify({
           type: "error",
@@ -480,7 +480,7 @@ test("messages passthrough forwards upstream error status and body", async () =>
   resetState()
 
   const fetchMock = mock((url: string) => {
-    if (url.endsWith("/v1/messages")) {
+    if (url.includes("/v1/messages")) {
       return new Response(
         JSON.stringify({
           type: "error",
