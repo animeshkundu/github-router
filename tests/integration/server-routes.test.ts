@@ -198,25 +198,26 @@ test("responses stream skips DONE chunks", async () => {
   expect(body).not.toContain("[DONE]")
 })
 
-test("messages translates anthropic payload and strips tool choice", async () => {
+test("messages passthrough forwards body to copilot /v1/messages", async () => {
   resetState()
-  let lastChatBody: string | undefined
+  let lastBody: string | undefined
+  let lastUrl: string | undefined
 
   const fetchMock = mock((url: string, opts?: { body?: string }) => {
-    if (url.endsWith("/github/chat/threads")) {
-      return new Response(JSON.stringify({ thread_id: "thread-3" }))
-    }
-    if (url.includes("/github/chat/threads/") && url.endsWith("/messages")) {
+    if (url.endsWith("/v1/messages")) {
+      lastUrl = url
+      lastBody = opts?.body
       return new Response(
         JSON.stringify({
-          message: { content: "search result", references: [] },
+          id: "msg_123",
+          type: "message",
+          role: "assistant",
+          model: "gpt-4",
+          content: [{ type: "text", text: "hello" }],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 5, output_tokens: 3 },
         }),
-      )
-    }
-    if (url.endsWith("/chat/completions")) {
-      lastChatBody = opts?.body
-      return new Response(
-        JSON.stringify({ id: "chat", object: "chat.completion", choices: [] }),
       )
     }
     throw new Error(`Unexpected URL ${url}`)
@@ -224,39 +225,41 @@ test("messages translates anthropic payload and strips tool choice", async () =>
   // @ts-expect-error - override fetch for this test
   globalThis.fetch = fetchMock
 
+  const requestBody = JSON.stringify({
+    model: "gpt-4",
+    max_tokens: 10,
+    messages: [{ role: "user", content: "hello" }],
+  })
+
   const response = await server.request("/v1/messages", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: "gpt-4",
-      max_tokens: 10,
-      messages: [{ role: "user", content: "hello" }],
-      tools: [{ name: "web_search", input_schema: { type: "object" } }],
-      tool_choice: { type: "tool", name: "web_search" },
-    }),
+    body: requestBody,
   })
 
   expect(response.status).toBe(200)
-  const forwarded = JSON.parse(lastChatBody ?? "{}") as {
-    tool_choice?: unknown
-    messages: Array<{ role: string; content: string }>
-  }
-  expect(forwarded.tool_choice).toBeUndefined()
-  expect(forwarded.messages[0]?.content).toContain("[Web Search Results]")
+  expect(lastUrl).toContain("/v1/messages")
+  // Body is forwarded as-is
+  expect(lastBody).toBe(requestBody)
+  const json = (await response.json()) as { type: string; id: string }
+  expect(json.type).toBe("message")
+  expect(json.id).toBe("msg_123")
 })
 
-test("messages stream returns anthropic SSE events", async () => {
+test("messages stream passthrough pipes SSE events directly", async () => {
   resetState()
+  const ssePayload = [
+    'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"gpt-4","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":0}}}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  ].join("")
+
   const fetchMock = mock((url: string) => {
-    if (url.endsWith("/chat/completions")) {
-      return new Response(
-        [
-          'data: {"id":"cmpl","model":"gpt-4","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null,"logprobs":null}]}\n\n',
-          'data: {"id":"cmpl","model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop","logprobs":null}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\n',
-          "data: [DONE]\n\n",
-        ].join(""),
-        { headers: { "content-type": "text/event-stream" } },
-      )
+    if (url.endsWith("/v1/messages")) {
+      return new Response(ssePayload, {
+        headers: { "content-type": "text/event-stream" },
+      })
     }
     throw new Error(`Unexpected URL ${url}`)
   })
@@ -274,26 +277,57 @@ test("messages stream returns anthropic SSE events", async () => {
     }),
   })
   const body = await response.text()
+  // SSE events are forwarded as-is from upstream
   expect(body).toContain("message_start")
+  expect(body).toContain("content_block_delta")
+  expect(body).toContain("message_stop")
 })
 
-test("count_tokens returns token counts and handles missing model", async () => {
+test("count_tokens passthrough forwards to copilot and returns result", async () => {
   resetState()
-  let response = await server.request("/v1/messages/count_tokens", {
+
+  const fetchMock = mock((url: string) => {
+    if (url.endsWith("/v1/messages/count_tokens")) {
+      return new Response(JSON.stringify({ input_tokens: 42 }))
+    }
+    throw new Error(`Unexpected URL ${url}`)
+  })
+  // @ts-expect-error - override fetch for this test
+  globalThis.fetch = fetchMock
+
+  const response = await server.request("/v1/messages/count_tokens", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: "gpt-4",
+      model: "claude-sonnet-4.5",
       max_tokens: 10,
       messages: [{ role: "user", content: "hello" }],
     }),
   })
   expect(response.status).toBe(200)
   const json = (await response.json()) as { input_tokens: number }
-  expect(typeof json.input_tokens).toBe("number")
+  expect(json.input_tokens).toBe(42)
+})
 
-  state.models = { object: "list", data: [] }
-  response = await server.request("/v1/messages/count_tokens", {
+test("count_tokens forwards upstream errors", async () => {
+  resetState()
+
+  const fetchMock = mock((url: string) => {
+    if (url.endsWith("/v1/messages/count_tokens")) {
+      return new Response(
+        JSON.stringify({
+          type: "error",
+          error: { type: "not_found_error", message: "model not found" },
+        }),
+        { status: 404 },
+      )
+    }
+    throw new Error(`Unexpected URL ${url}`)
+  })
+  // @ts-expect-error - override fetch for this test
+  globalThis.fetch = fetchMock
+
+  const response = await server.request("/v1/messages/count_tokens", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -303,63 +337,6 @@ test("count_tokens returns token counts and handles missing model", async () => 
     }),
   })
   expect(response.status).toBe(404)
-})
-
-test("count_tokens applies tool adjustments for claude and grok", async () => {
-  resetState()
-  state.models = {
-    object: "list",
-    data: [
-      { ...baseModel, id: "claude-3" },
-      { ...baseModel, id: "grok-1" },
-    ],
-  }
-
-  const regularResponse = await server.request("/v1/messages/count_tokens", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "anthropic-beta": "claude-code-2024-02-01",
-    },
-    body: JSON.stringify({
-      model: "claude-3",
-      max_tokens: 10,
-      tools: [{ name: "tool", input_schema: { type: "object" } }],
-      messages: [{ role: "user", content: "hello" }],
-    }),
-  })
-  const regularJson = (await regularResponse.json()) as {
-    input_tokens: number
-  }
-
-  const mcpResponse = await server.request("/v1/messages/count_tokens", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "anthropic-beta": "claude-code-2024-02-01",
-    },
-    body: JSON.stringify({
-      model: "claude-3",
-      max_tokens: 10,
-      tools: [{ name: "mcp__tool", input_schema: { type: "object" } }],
-      messages: [{ role: "user", content: "hello" }],
-    }),
-  })
-  const mcpJson = (await mcpResponse.json()) as { input_tokens: number }
-  expect(mcpJson.input_tokens).toBeLessThan(regularJson.input_tokens)
-
-  const grokResponse = await server.request("/v1/messages/count_tokens", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: "grok-1",
-      max_tokens: 10,
-      tools: [{ name: "tool", input_schema: { type: "object" } }],
-      messages: [{ role: "user", content: "hello" }],
-    }),
-  })
-  const grokJson = (await grokResponse.json()) as { input_tokens: number }
-  expect(typeof grokJson.input_tokens).toBe("number")
 })
 
 test("routes for models, search, embeddings, usage, and token", async () => {
@@ -499,7 +476,40 @@ test("token endpoint rejects when disabled", async () => {
   expect(response.status).toBe(403)
 })
 
-test("chat and responses routes forward handler errors", async () => {
+test("messages passthrough forwards upstream error status and body", async () => {
+  resetState()
+
+  const fetchMock = mock((url: string) => {
+    if (url.endsWith("/v1/messages")) {
+      return new Response(
+        JSON.stringify({
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message: "model not supported",
+          },
+        }),
+        { status: 400 },
+      )
+    }
+    throw new Error(`Unexpected URL ${url}`)
+  })
+  // @ts-expect-error - override fetch for this test
+  globalThis.fetch = fetchMock
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "invalid",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+  expect(response.status).toBe(400)
+})
+
+test("all routes forward errors when copilot token is missing", async () => {
   resetState()
   state.copilotToken = undefined
 
@@ -512,6 +522,31 @@ test("chat and responses routes forward handler errors", async () => {
     }),
   })
   expect(chatResponse.status).toBe(500)
+
+  const messagesResponse = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4.5",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+  expect(messagesResponse.status).toBe(500)
+
+  const countTokensResponse = await server.request(
+    "/v1/messages/count_tokens",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4.5",
+        max_tokens: 10,
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    },
+  )
+  expect(countTokensResponse.status).toBe(500)
 
   const responsesResponse = await server.request("/v1/responses", {
     method: "POST",

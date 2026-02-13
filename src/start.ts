@@ -53,7 +53,7 @@ async function generateClaudeCodeCommand(serverUrl: string) {
 
   const supportedModels = filterModelsByEndpoint(
     state.models.data,
-    "chat/completions",
+    "v1/messages",
   )
 
   const selectedModel = await consola.prompt(
