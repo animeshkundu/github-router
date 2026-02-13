@@ -35,8 +35,26 @@ export const createChatCompletions = async (
   })
 
   if (!response.ok) {
-    consola.error("Failed to create chat completions", response)
-    throw new HTTPError("Failed to create chat completions", response)
+    let errorBody = ""
+    try {
+      errorBody = await response.text()
+    } catch {
+      errorBody = "(could not read error body)"
+    }
+    const claudeModels = state.models?.data
+      .filter((m) => m.id.startsWith("claude"))
+      .map((m) => m.id)
+      .join(", ") ?? "(models not loaded)"
+    consola.error(
+      `Copilot rejected model "${payload.model}": ${response.status} ${errorBody} (available Claude models: ${claudeModels})`,
+    )
+    // Re-create the response so downstream error handlers can still read the body
+    const reconstructed = new Response(errorBody, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    })
+    throw new HTTPError("Failed to create chat completions", reconstructed)
   }
 
   if (payload.stream) {

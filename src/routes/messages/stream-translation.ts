@@ -20,6 +20,7 @@ function isToolBlockOpen(state: AnthropicStreamState): boolean {
 export function translateChunkToAnthropicEvents(
   chunk: ChatCompletionChunk,
   state: AnthropicStreamState,
+  originalModel: string,
 ): Array<AnthropicStreamEventData> {
   const events: Array<AnthropicStreamEventData> = []
 
@@ -38,7 +39,7 @@ export function translateChunkToAnthropicEvents(
         type: "message",
         role: "assistant",
         content: [],
-        model: chunk.model,
+        model: originalModel,
         stop_reason: null,
         stop_sequence: null,
         usage: {

@@ -27,6 +27,7 @@ export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
 
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
+  const originalModel = anthropicPayload.model
   const debugEnabled = consola.level >= 4
   if (debugEnabled) {
     consola.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
@@ -55,7 +56,7 @@ export async function handleCompletion(c: Context) {
         JSON.stringify(response).slice(-400),
       )
     }
-    const anthropicResponse = translateToAnthropic(response)
+    const anthropicResponse = translateToAnthropic(response, originalModel)
     if (debugEnabled) {
       consola.debug(
         "Translated Anthropic response:",
@@ -88,7 +89,7 @@ export async function handleCompletion(c: Context) {
       }
 
       const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
-      const events = translateChunkToAnthropicEvents(chunk, streamState)
+      const events = translateChunkToAnthropicEvents(chunk, streamState, originalModel)
 
       for (const event of events) {
         if (debugEnabled) {

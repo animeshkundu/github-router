@@ -2,6 +2,8 @@ import { describe, test, expect } from "bun:test"
 import { z } from "zod"
 
 import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
+import { normalizeCopilotModelName } from "~/routes/messages/utils"
+import { state } from "~/lib/state"
 
 import { translateToOpenAI } from "../src/routes/messages/non-stream-translation"
 
@@ -365,5 +367,145 @@ describe("OpenAI Chat Completion v1 Request Payload Validation with Zod", () => 
     expect(isValidChatCompletionRequest(undefined)).toBe(false)
     expect(isValidChatCompletionRequest("a string")).toBe(false)
     expect(isValidChatCompletionRequest(123)).toBe(false)
+  })
+})
+
+// Mock Copilot model list matching the real server response
+const mockCopilotModels = [
+  "claude-opus-4.6-1m",
+  "claude-opus-4.6-fast",
+  "claude-opus-4.6",
+  "claude-sonnet-4",
+  "claude-sonnet-4.5",
+  "claude-opus-4.5",
+  "claude-opus-41",
+  "claude-haiku-4.5",
+  "gpt-4o",
+  "gpt-4o-mini",
+  "gpt5.2-codex",
+]
+
+function setupMockModels() {
+  state.models = {
+    object: "list",
+    data: mockCopilotModels.map((id) => ({
+      id,
+      name: id,
+      object: "model",
+      version: "1.0",
+      vendor: "test",
+      preview: false,
+      model_picker_enabled: true,
+      capabilities: {
+        family: "test",
+        limits: {},
+        object: "model_capabilities",
+        supports: {},
+        tokenizer: "test",
+        type: "chat",
+      },
+    })),
+  }
+}
+
+function clearMockModels() {
+  state.models = undefined
+}
+
+describe("Model name normalization (normalizeCopilotModelName)", () => {
+  test("exact match: claude-opus-4.6-1m passes through unchanged", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-opus-4.6-1m")).toBe("claude-opus-4.6-1m")
+    clearMockModels()
+  })
+
+  test("exact match: claude-haiku-4.5 passes through unchanged", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-haiku-4.5")).toBe("claude-haiku-4.5")
+    clearMockModels()
+  })
+
+  test("exact match: claude-opus-4.6 passes through unchanged", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-opus-4.6")).toBe("claude-opus-4.6")
+    clearMockModels()
+  })
+
+  test("dash→dot conversion: claude-opus-4-6 → claude-opus-4.6", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-opus-4-6")).toBe("claude-opus-4.6")
+    clearMockModels()
+  })
+
+  test("dash→dot conversion: claude-haiku-4-5 → claude-haiku-4.5", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-haiku-4-5")).toBe("claude-haiku-4.5")
+    clearMockModels()
+  })
+
+  test("dash→dot conversion: claude-sonnet-4-5 → claude-sonnet-4.5", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-sonnet-4-5")).toBe("claude-sonnet-4.5")
+    clearMockModels()
+  })
+
+  test("date suffix stripping: claude-sonnet-4-20250514 → claude-sonnet-4", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-sonnet-4-20250514")).toBe("claude-sonnet-4")
+    clearMockModels()
+  })
+
+  test("dash→dot + date: claude-sonnet-4-5-20250929 → claude-sonnet-4.5", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-sonnet-4-5-20250929")).toBe("claude-sonnet-4.5")
+    clearMockModels()
+  })
+
+  test("variant suffix stripping: claude-opus-4.6-fast is exact match", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-opus-4.6-fast")).toBe("claude-opus-4.6-fast")
+    clearMockModels()
+  })
+
+  test("prefix match fallback for unrecognized suffixes", () => {
+    setupMockModels()
+    // claude-opus-4.6-unknown should prefix-match claude-opus-4.6-fast or claude-opus-4.6-1m (longest prefix)
+    const result = normalizeCopilotModelName("claude-opus-4.6-unknown")
+    expect(mockCopilotModels).toContain(result)
+    clearMockModels()
+  })
+
+  test("non-Claude passthrough: gpt-4o passes through unchanged", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("gpt-4o")).toBe("gpt-4o")
+    clearMockModels()
+  })
+
+  test("non-Claude passthrough: gpt5.2-codex passes through unchanged", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("gpt5.2-codex")).toBe("gpt5.2-codex")
+    clearMockModels()
+  })
+
+  test("non-Claude unknown model passes through unchanged", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("llama-3-70b")).toBe("llama-3-70b")
+    clearMockModels()
+  })
+
+  test("unknown Claude model falls back to claude-opus-4.6", () => {
+    setupMockModels()
+    expect(normalizeCopilotModelName("claude-unknown-99")).toBe("claude-opus-4.6")
+    clearMockModels()
+  })
+
+  test("no models loaded: Claude model falls back to claude-opus-4.6", () => {
+    clearMockModels()
+    expect(normalizeCopilotModelName("claude-opus-4-6")).toBe("claude-opus-4.6")
+  })
+
+  test("no models loaded: non-Claude model passes through", () => {
+    clearMockModels()
+    expect(normalizeCopilotModelName("gpt-4o")).toBe("gpt-4o")
   })
 })
