@@ -6,9 +6,8 @@ pages/
 .eslintcache
 *.md
 !README.md
+docker/
 Dockerfile
-entrypoint.sh
-start.bat
 opencode.json
 tsconfig.json
 tsdown.config.ts
