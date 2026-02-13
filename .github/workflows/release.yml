@@ -24,7 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # PAT required to push version bump past branch protection.
+          # Falls back to GITHUB_TOKEN (publish still works; push will be skipped).
+          token: ${{ secrets.PAT || secrets.GITHUB_TOKEN }}
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -59,6 +61,7 @@ jobs:
 
       - name: Push version bump
         if: steps.version.outputs.bumped == 'true'
+        continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
