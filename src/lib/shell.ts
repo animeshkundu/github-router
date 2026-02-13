@@ -1,41 +1,46 @@
-import { execSync } from "node:child_process"
 import process from "node:process"
 
 type ShellName = "bash" | "zsh" | "fish" | "powershell" | "cmd" | "sh"
 type EnvVars = Record<string, string | undefined>
 
 function getShell(): ShellName {
-  const { platform, ppid, env } = process
+  const { platform, env } = process
 
   if (platform === "win32") {
-    if (env.POWERSHELL_DISTRIBUTION_CHANNEL) {
-      return "powershell"
+    // Git Bash / MSYS2 / Cygwin set SHELL even on Windows
+    if (env.SHELL) {
+      if (env.SHELL.endsWith("zsh")) return "zsh"
+      if (env.SHELL.endsWith("fish")) return "fish"
+      if (env.SHELL.endsWith("bash")) return "bash"
+      return "sh"
     }
-    try {
-      const command = `wmic process get ParentProcessId,Name | findstr "${ppid}"`
-      const parentProcess = execSync(command, { stdio: "pipe" }).toString()
 
+    // Windows PowerShell 5.x sets this
+    if (env.POWERSHELL_DISTRIBUTION_CHANNEL) return "powershell"
+
+    // PowerShell (both 5.x and 7+/pwsh) adds user-scoped module paths
+    // at runtime. The system-level PSModulePath in CMD lacks these paths.
+    if (env.PSModulePath) {
+      const lower = env.PSModulePath.toLowerCase()
       if (
-        parentProcess.toLowerCase().includes("powershell.exe")
-        || parentProcess.toLowerCase().includes("pwsh.exe")
+        lower.includes("documents\\powershell")
+        || lower.includes("documents\\windowspowershell")
       ) {
         return "powershell"
       }
-    } catch {
-      return "cmd"
     }
 
     return "cmd"
-  } else {
-    const shellPath = env.SHELL
-    if (shellPath) {
-      if (shellPath.endsWith("zsh")) return "zsh"
-      if (shellPath.endsWith("fish")) return "fish"
-      if (shellPath.endsWith("bash")) return "bash"
-    }
-
-    return "sh"
   }
+
+  const shellPath = env.SHELL
+  if (shellPath) {
+    if (shellPath.endsWith("zsh")) return "zsh"
+    if (shellPath.endsWith("fish")) return "fish"
+    if (shellPath.endsWith("bash")) return "bash"
+  }
+
+  return "sh"
 }
 
 function quotePosixValue(value: string): string {
