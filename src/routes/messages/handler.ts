@@ -4,8 +4,9 @@ import consola from "consola"
 
 import { awaitApproval } from "~/lib/approval"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
-import { filterBetaHeader } from "~/lib/utils"
+import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import { createMessages } from "~/services/copilot/create-messages"
 import { searchWeb } from "~/services/copilot/web-search"
 
@@ -169,6 +170,7 @@ async function processWebSearch(rawBody: string): Promise<string> {
 }
 
 export async function handleCompletion(c: Context) {
+  const startTime = Date.now()
   await checkRateLimit(state)
 
   const rawBody = await c.req.text()
@@ -185,12 +187,34 @@ export async function handleCompletion(c: Context) {
   const betaHeaders = extractBetaHeaders(c)
   const finalBody = await processWebSearch(rawBody)
 
-  const response = await createMessages(finalBody, betaHeaders)
+  // Resolve model name (e.g. opus → opus-1m variant)
+  const { body: resolvedBody, originalModel, resolvedModel } = resolveModelInBody(finalBody)
+
+  // Look up model metadata for context window info
+  const selectedModel = state.models?.data.find(
+    (m) => m.id === (resolvedModel ?? originalModel),
+  )
+
+  const response = await createMessages(resolvedBody, betaHeaders)
 
   const contentType = response.headers.get("content-type") ?? ""
+  const isStreaming = contentType.includes("text/event-stream")
 
   // Streaming: pipe the upstream SSE response body directly
-  if (contentType.includes("text/event-stream")) {
+  if (isStreaming) {
+    logRequest(
+      {
+        method: "POST",
+        path: c.req.path,
+        model: originalModel,
+        resolvedModel,
+        status: response.status,
+        streaming: true,
+      },
+      selectedModel,
+      startTime,
+    )
+
     if (debugEnabled) {
       consola.debug("Streaming response from Copilot /v1/messages")
     }
@@ -204,8 +228,23 @@ export async function handleCompletion(c: Context) {
     })
   }
 
-  // Non-streaming: forward JSON response
-  const responseBody = await response.json()
+  // Non-streaming: extract usage from response body
+  const responseBody = (await response.json()) as AnyRecord
+
+  logRequest(
+    {
+      method: "POST",
+      path: c.req.path,
+      model: originalModel,
+      resolvedModel,
+      inputTokens: responseBody.usage?.input_tokens,
+      outputTokens: responseBody.usage?.output_tokens,
+      status: response.status,
+    },
+    selectedModel,
+    startTime,
+  )
+
   if (debugEnabled) {
     consola.debug(
       "Non-streaming response from Copilot /v1/messages:",
@@ -213,4 +252,36 @@ export async function handleCompletion(c: Context) {
     )
   }
   return c.json(responseBody, response.status as 200)
+}
+
+/**
+ * Parse the JSON body, resolve the model name, and re-serialize.
+ * Returns the body string plus the original and resolved model names.
+ */
+function resolveModelInBody(rawBody: string): {
+  body: string
+  originalModel?: string
+  resolvedModel?: string
+} {
+  let parsed: AnyRecord
+  try {
+    parsed = JSON.parse(rawBody)
+  } catch {
+    return { body: rawBody }
+  }
+
+  const originalModel =
+    typeof parsed.model === "string" ? parsed.model : undefined
+  if (!originalModel) return { body: rawBody, originalModel }
+
+  const resolved = resolveModel(originalModel)
+  if (resolved === originalModel)
+    return { body: rawBody, originalModel, resolvedModel: originalModel }
+
+  parsed.model = resolved
+  return {
+    body: JSON.stringify(parsed),
+    originalModel,
+    resolvedModel: resolved,
+  }
 }

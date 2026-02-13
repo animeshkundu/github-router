@@ -42,6 +42,26 @@ export function filterBetaHeader(value: string): string | undefined {
   return filtered || undefined
 }
 
+/**
+ * Resolve a model name to the best available variant in the Copilot model list.
+ * Prefers the 1M context variant for opus models.
+ */
+export function resolveModel(modelId: string): string {
+  const models = state.models?.data
+  if (!models) return modelId
+
+  // Exact match — no remapping needed
+  if (models.some((m) => m.id === modelId)) return modelId
+
+  // For opus models, prefer the 1m variant
+  if (modelId.toLowerCase().includes("opus")) {
+    const oneM = models.find((m) => m.id.includes("opus") && m.id.endsWith("-1m"))
+    if (oneM) return oneM.id
+  }
+
+  return modelId
+}
+
 export async function cacheModels(): Promise<void> {
   const models = await getModels()
   state.models = models

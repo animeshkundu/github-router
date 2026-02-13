@@ -236,7 +236,7 @@ export const start = defineCommand({
     "account-type": {
       alias: "a",
       type: "string",
-      default: "individual",
+      default: "enterprise",
       description: "Account type to use (individual, business, enterprise)",
     },
     manual: {

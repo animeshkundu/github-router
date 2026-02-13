@@ -5,8 +5,9 @@ import { streamSSE } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
-import { isNullish } from "~/lib/utils"
+import { isNullish, resolveModel } from "~/lib/utils"
 import {
   createResponses,
   type ResponsesApiResponse,
@@ -16,6 +17,7 @@ import {
 import { searchWeb } from "~/services/copilot/web-search"
 
 export async function handleResponses(c: Context) {
+  const startTime = Date.now()
   await checkRateLimit(state)
 
   const payload = await c.req.json<ResponsesPayload>()
@@ -27,11 +29,16 @@ export async function handleResponses(c: Context) {
     )
   }
 
+  // Resolve model name (e.g. opus → opus-1m variant)
+  const originalModel = payload.model
+  const resolvedModel = resolveModel(payload.model)
+  if (resolvedModel !== payload.model) {
+    payload.model = resolvedModel
+  }
+
   const selectedModel = state.models?.data.find(
     (model) => model.id === payload.model,
   )
-
-  consola.info("Token counting not yet supported for /responses endpoint")
 
   if (state.manualApprove) await awaitApproval()
 
@@ -49,15 +56,28 @@ export async function handleResponses(c: Context) {
   }
 
   const response = await createResponses(payload)
+  const isStreaming = !isNonStreaming(response)
 
-  if (isNonStreaming(response)) {
+  logRequest(
+    {
+      method: "POST",
+      path: c.req.path,
+      model: originalModel,
+      resolvedModel,
+      status: 200,
+      streaming: isStreaming,
+    },
+    selectedModel,
+    startTime,
+  )
+
+  if (!isStreaming) {
     if (debugEnabled) {
       consola.debug("Non-streaming response:", JSON.stringify(response))
     }
     return c.json(response)
   }
 
-  consola.debug("Streaming response")
   return streamSSE(c, async (stream) => {
     for await (const chunk of response) {
       if (debugEnabled) {

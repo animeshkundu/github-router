@@ -25,7 +25,6 @@ export const createChatCompletions = async (
   // Build headers and add X-Initiator
   const headers: Record<string, string> = {
     ...copilotHeaders(state, enableVision),
-    "Openai-Organization": "github-copilot",
     "X-Initiator": isAgentCall ? "agent" : "user",
   }
 

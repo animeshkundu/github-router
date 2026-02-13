@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { randomBytes, randomUUID } from "node:crypto"
 
 import type { ModelsResponse } from "~/services/copilot/get-models"
 
@@ -7,6 +7,7 @@ export interface State {
   copilotToken?: string
 
   accountType: string
+  copilotApiUrl?: string
   models?: ModelsResponse
   vsCodeVersion?: string
 
@@ -24,10 +25,10 @@ export interface State {
 }
 
 export const state: State = {
-  accountType: "individual",
+  accountType: "enterprise",
   manualApprove: false,
   rateLimitWait: false,
   showToken: false,
   sessionId: randomUUID(),
-  machineId: randomUUID(),
+  machineId: randomBytes(32).toString("hex"),
 }

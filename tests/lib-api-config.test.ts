@@ -17,13 +17,16 @@ const baseState: State = {
   machineId: "test-machine-id",
 }
 
-test("copilotBaseUrl uses individual and enterprise formats", () => {
+test("copilotBaseUrl uses copilotApiUrl from token response when set", () => {
   expect(copilotBaseUrl({ ...baseState, accountType: "individual" })).toBe(
     "https://api.githubcopilot.com",
   )
-  expect(copilotBaseUrl({ ...baseState, accountType: "enterprise" })).toBe(
-    "https://api.enterprise.githubcopilot.com",
-  )
+  expect(
+    copilotBaseUrl({
+      ...baseState,
+      copilotApiUrl: "https://api.enterprise.githubcopilot.com",
+    }),
+  ).toBe("https://api.enterprise.githubcopilot.com")
 })
 
 test("copilotHeaders include auth and vision flag", () => {
