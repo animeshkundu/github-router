@@ -91,10 +91,11 @@ async function generateClaudeCodeCommand(serverUrl: string) {
     clipboard.writeSync(command)
     consola.success("Copied Claude Code command to clipboard!")
   } catch {
-    consola.warn("Failed to copy to clipboard.")
+    consola.warn(
+      "Failed to copy to clipboard. Here is the Claude Code command:",
+    )
+    consola.log(command)
   }
-
-  consola.log(command)
 }
 
 async function generateCodexCommand(serverUrl: string) {
@@ -130,10 +131,9 @@ async function generateCodexCommand(serverUrl: string) {
     clipboard.writeSync(command)
     consola.success("Copied Codex CLI command to clipboard!")
   } catch {
-    consola.warn("Failed to copy to clipboard.")
+    consola.warn("Failed to copy to clipboard. Here is the Codex CLI command:")
+    consola.log(command)
   }
-
-  consola.log(command)
 }
 
 export async function runServer(options: RunServerOptions): Promise<void> {
