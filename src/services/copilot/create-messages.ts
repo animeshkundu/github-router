@@ -21,13 +21,19 @@ import { state } from "~/lib/state"
  * We intentionally omit copilot-vision-request — VS Code only sends it when
  * images are present, and the native /v1/messages endpoint handles vision
  * without requiring the header.
+ *
+ * extraHeaders allows callers to forward client-supplied beta headers
+ * (anthropic-beta, capi-beta-1) so Copilot enables extended features.
  */
-function buildHeaders(): Record<string, string> {
+function buildHeaders(
+  extraHeaders?: Record<string, string>,
+): Record<string, string> {
   return {
     ...copilotHeaders(state),
     "X-Initiator": "agent",
     "anthropic-version": "2023-06-01",
     "X-Interaction-Id": randomUUID(),
+    ...extraHeaders,
   }
 }
 
@@ -37,11 +43,12 @@ function buildHeaders(): Record<string, string> {
  */
 export async function createMessages(
   body: string,
+  extraHeaders?: Record<string, string>,
 ): Promise<Response> {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
-  const headers = buildHeaders()
-  const url = `${copilotBaseUrl(state)}/v1/messages`
+  const headers = buildHeaders(extraHeaders)
+  const url = `${copilotBaseUrl(state)}/v1/messages?beta=true`
   consola.debug(`Forwarding to ${url}`)
 
   const response = await fetch(url, {
@@ -77,11 +84,12 @@ export async function createMessages(
  */
 export async function countTokens(
   body: string,
+  extraHeaders?: Record<string, string>,
 ): Promise<Response> {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
-  const headers = buildHeaders()
-  const url = `${copilotBaseUrl(state)}/v1/messages/count_tokens`
+  const headers = buildHeaders(extraHeaders)
+  const url = `${copilotBaseUrl(state)}/v1/messages/count_tokens?beta=true`
   consola.debug(`Forwarding to ${url}`)
 
   const response = await fetch(url, {
