@@ -41,16 +41,16 @@ jobs:
         run: |
           PKG_NAME=$(jq -r .name package.json)
           PKG_VERSION=$(jq -r .version package.json)
-          if npm view "${PKG_NAME}@${PKG_VERSION}" version 2>/dev/null; then
+          BUMPED=false
+          while npm view "${PKG_NAME}@${PKG_VERSION}" version 2>/dev/null; do
             echo "Version ${PKG_VERSION} already published, bumping patch..."
             npm version patch --no-git-tag-version
-            NEW_VERSION=$(jq -r .version package.json)
-            echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
-            echo "bumped=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${PKG_VERSION}" >> "$GITHUB_OUTPUT"
-            echo "bumped=false" >> "$GITHUB_OUTPUT"
-          fi
+            PKG_VERSION=$(jq -r .version package.json)
+            BUMPED=true
+          done
+          echo "version=${PKG_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "bumped=${BUMPED}" >> "$GITHUB_OUTPUT"
+          echo "Publishing version ${PKG_VERSION}"
 
       - name: Publish to npm
         run: npm publish --access public
