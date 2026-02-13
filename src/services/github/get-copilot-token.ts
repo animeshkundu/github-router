@@ -12,12 +12,25 @@ export const getCopilotToken = async () => {
 
   if (!response.ok) throw new HTTPError("Failed to get Copilot token", response)
 
-  return (await response.json()) as GetCopilotTokenResponse
+  const data = (await response.json()) as GetCopilotTokenResponse
+
+  // Use the API base URL from the token response if available,
+  // matching how VS Code determines the CAPI endpoint dynamically.
+  if (data.endpoints?.api) {
+    state.copilotApiUrl = data.endpoints.api
+  }
+
+  return data
 }
 
-// Trimmed for the sake of simplicity
 interface GetCopilotTokenResponse {
   expires_at: number
   refresh_in: number
   token: string
+  endpoints?: {
+    api?: string
+    proxy?: string
+    telemetry?: string
+    "origin-tracker"?: string
+  }
 }

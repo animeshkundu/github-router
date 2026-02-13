@@ -11,12 +11,10 @@ const COPILOT_VERSION = "0.38.2026021302"
 const EDITOR_PLUGIN_VERSION = `copilot-chat/${COPILOT_VERSION}`
 const USER_AGENT = `GitHubCopilotChat/${COPILOT_VERSION}`
 
-const API_VERSION = "2025-05-01"
+const API_VERSION = "2025-10-01"
 
 export const copilotBaseUrl = (state: State) =>
-  state.accountType === "individual" ?
-    "https://api.githubcopilot.com"
-  : `https://api.${state.accountType}.githubcopilot.com`
+  state.copilotApiUrl ?? "https://api.githubcopilot.com"
 export const copilotHeaders = (
   state: State,
   vision: boolean = false,

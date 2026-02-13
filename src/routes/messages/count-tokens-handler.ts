@@ -1,8 +1,8 @@
 import type { Context } from "hono"
 
-import consola from "consola"
-
-import { filterBetaHeader } from "~/lib/utils"
+import { logRequest } from "~/lib/request-log"
+import { filterBetaHeader, resolveModel } from "~/lib/utils"
+import { state } from "~/lib/state"
 import { countTokens } from "~/services/copilot/create-messages"
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -62,8 +62,10 @@ function stripWebSearchFromBody(rawBody: string): string {
  * native /v1/messages/count_tokens endpoint.
  */
 export async function handleCountTokens(c: Context) {
+  const startTime = Date.now()
   const rawBody = await c.req.text()
-  const finalBody = stripWebSearchFromBody(rawBody)
+  const strippedBody = stripWebSearchFromBody(rawBody)
+  const { body: finalBody, originalModel, resolvedModel } = resolveModelInBody(strippedBody)
 
   const extraHeaders: Record<string, string> = {}
   const anthropicBeta = c.req.header("anthropic-beta")
@@ -73,9 +75,54 @@ export async function handleCountTokens(c: Context) {
   }
 
   const response = await countTokens(finalBody, extraHeaders)
-  const body = await response.json()
+  const responseBody = (await response.json()) as { input_tokens?: number }
 
-  consola.info("Token count:", JSON.stringify(body))
+  const modelId = resolvedModel ?? originalModel
+  const selectedModel = state.models?.data.find((m) => m.id === modelId)
 
-  return c.json(body)
+  logRequest(
+    {
+      method: "POST",
+      path: c.req.path,
+      model: originalModel,
+      resolvedModel,
+      inputTokens: responseBody.input_tokens,
+      status: response.status,
+    },
+    selectedModel,
+    startTime,
+  )
+
+  return c.json(responseBody)
+}
+
+/**
+ * Parse the JSON body, resolve the model name, and re-serialize.
+ */
+function resolveModelInBody(rawBody: string): {
+  body: string
+  originalModel?: string
+  resolvedModel?: string
+} {
+  let parsed: AnyRecord
+  try {
+    parsed = JSON.parse(rawBody)
+  } catch {
+    return { body: rawBody }
+  }
+
+  const originalModel =
+    typeof parsed.model === "string" ? parsed.model : undefined
+  if (!originalModel) return { body: rawBody, originalModel }
+
+  const resolved = resolveModel(originalModel)
+  if (resolved === originalModel)
+    return { body: rawBody, originalModel, resolvedModel: originalModel }
+
+  parsed.model = resolved
+  return {
+    body: JSON.stringify(parsed),
+    originalModel,
+    resolvedModel: resolved,
+  }
 }

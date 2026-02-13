@@ -30,6 +30,7 @@ function buildHeaders(
 ): Record<string, string> {
   return {
     ...copilotHeaders(state),
+    accept: "application/json",
     "X-Initiator": "agent",
     "anthropic-version": "2023-06-01",
     "X-Interaction-Id": randomUUID(),

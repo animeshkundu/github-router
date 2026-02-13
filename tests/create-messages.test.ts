@@ -40,8 +40,8 @@ describe("createMessages", () => {
     expect(capturedUrl).toBe("https://api.githubcopilot.com/v1/messages?beta=true")
   })
 
-  test("uses enterprise URL when account type is enterprise", async () => {
-    state.accountType = "enterprise"
+  test("uses copilotApiUrl from token response when set", async () => {
+    state.copilotApiUrl = "https://api.enterprise.githubcopilot.com"
     let capturedUrl = ""
     const fetchMock = mock((url: string) => {
       capturedUrl = url
@@ -52,7 +52,7 @@ describe("createMessages", () => {
 
     await createMessages('{"model":"claude-sonnet-4.5","max_tokens":100,"messages":[]}')
     expect(capturedUrl).toBe("https://api.enterprise.githubcopilot.com/v1/messages?beta=true")
-    state.accountType = "individual"
+    state.copilotApiUrl = undefined
   })
 
   test("sends correct VS Code-compatible headers", async () => {
@@ -75,7 +75,7 @@ describe("createMessages", () => {
     expect(capturedHeaders["user-agent"]).toMatch(/^GitHubCopilotChat\//)
     expect(capturedHeaders["openai-intent"]).toBe("conversation-panel")
     expect(capturedHeaders["x-interaction-type"]).toBe("conversation-panel")
-    expect(capturedHeaders["x-github-api-version"]).toBe("2025-05-01")
+    expect(capturedHeaders["x-github-api-version"]).toBe("2025-10-01")
     expect(capturedHeaders["x-request-id"]).toBeDefined()
     expect(capturedHeaders["x-vscode-user-agent-library-version"]).toBe("electron-fetch")
 
@@ -240,7 +240,7 @@ describe("countTokens", () => {
     expect(capturedHeaders.Authorization).toBe("Bearer test-token")
     expect(capturedHeaders["X-Initiator"]).toBe("agent")
     expect(capturedHeaders["anthropic-version"]).toBe("2023-06-01")
-    expect(capturedHeaders["x-github-api-version"]).toBe("2025-05-01")
+    expect(capturedHeaders["x-github-api-version"]).toBe("2025-10-01")
   })
 
   test("forwards body as-is", async () => {

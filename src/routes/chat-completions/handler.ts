@@ -5,9 +5,10 @@ import { streamSSE, type SSEMessage } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
-import { isNullish } from "~/lib/utils"
+import { isNullish, resolveModel } from "~/lib/utils"
 import {
   createChatCompletions,
   type ChatCompletionResponse,
@@ -17,6 +18,7 @@ import {
 import { searchWeb } from "~/services/copilot/web-search"
 
 export async function handleCompletion(c: Context) {
+  const startTime = Date.now()
   await checkRateLimit(state)
 
   let payload = await c.req.json<ChatCompletionsPayload>()
@@ -29,21 +31,27 @@ export async function handleCompletion(c: Context) {
 
   await injectWebSearchIfNeeded(payload)
 
+  // Resolve model name (e.g. opus → opus-1m variant)
+  const originalModel = payload.model
+  const resolvedModel = resolveModel(payload.model)
+  if (resolvedModel !== payload.model) {
+    payload.model = resolvedModel
+  }
+
   // Find the selected model
   const selectedModel = state.models?.data.find(
     (model) => model.id === payload.model,
   )
 
-  // Calculate and display token count
+  // Calculate token count
+  let inputTokens: number | undefined
   try {
     if (selectedModel) {
       const tokenCount = await getTokenCount(payload, selectedModel)
-      consola.info("Current token count:", tokenCount)
-    } else {
-      consola.warn("No model selected, skipping token count calculation")
+      inputTokens = tokenCount.input
     }
-  } catch (error) {
-    consola.warn("Failed to calculate token count:", error)
+  } catch {
+    // Token counting is best-effort
   }
 
   if (isNullish(payload.max_tokens)) {
@@ -57,15 +65,35 @@ export async function handleCompletion(c: Context) {
   }
 
   const response = await createChatCompletions(payload)
+  const isStreaming = !isNonStreaming(response)
 
-  if (isNonStreaming(response)) {
+  // Extract output tokens from non-streaming response (no extra call)
+  const outputTokens = !isStreaming
+    ? (response as ChatCompletionResponse).usage?.completion_tokens
+    : undefined
+
+  logRequest(
+    {
+      method: "POST",
+      path: c.req.path,
+      model: originalModel,
+      resolvedModel,
+      inputTokens,
+      outputTokens,
+      status: 200,
+      streaming: isStreaming,
+    },
+    selectedModel,
+    startTime,
+  )
+
+  if (!isStreaming) {
     if (debugEnabled) {
       consola.debug("Non-streaming response:", JSON.stringify(response))
     }
     return c.json(response)
   }
 
-  consola.debug("Streaming response")
   return streamSSE(c, async (stream) => {
     for await (const chunk of response) {
       if (debugEnabled) {
