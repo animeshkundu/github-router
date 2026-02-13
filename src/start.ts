@@ -31,6 +31,16 @@ interface RunServerOptions {
 
 const allowedAccountTypes = new Set(["individual", "business", "enterprise"])
 
+function printAndCopyCommand(command: string, label: string): void {
+  consola.box(`${label}\n\n${command}`)
+  try {
+    clipboard.writeSync(command)
+    consola.success(`Copied ${label} command to clipboard!`)
+  } catch {
+    consola.warn("Failed to copy to clipboard. Copy the command above manually.")
+  }
+}
+
 function filterModelsByEndpoint(
   models: Array<Model>,
   endpoint: string,
@@ -87,15 +97,7 @@ async function generateClaudeCodeCommand(serverUrl: string) {
     "claude",
   )
 
-  try {
-    clipboard.writeSync(command)
-    consola.success("Copied Claude Code command to clipboard!")
-  } catch {
-    consola.warn(
-      "Failed to copy to clipboard. Here is the Claude Code command:",
-    )
-    consola.log(command)
-  }
+  printAndCopyCommand(command, "Claude Code")
 }
 
 async function generateCodexCommand(serverUrl: string) {
@@ -127,13 +129,7 @@ async function generateCodexCommand(serverUrl: string) {
     `codex -m ${quotedModel}`,
   )
 
-  try {
-    clipboard.writeSync(command)
-    consola.success("Copied Codex CLI command to clipboard!")
-  } catch {
-    consola.warn("Failed to copy to clipboard. Here is the Codex CLI command:")
-    consola.log(command)
-  }
+  printAndCopyCommand(command, "Codex CLI")
 }
 
 export async function runServer(options: RunServerOptions): Promise<void> {
