@@ -13,6 +13,8 @@ const baseState: State = {
   manualApprove: false,
   rateLimitWait: false,
   showToken: false,
+  sessionId: "test-session-id",
+  machineId: "test-machine-id",
 }
 
 test("copilotBaseUrl uses individual and enterprise formats", () => {

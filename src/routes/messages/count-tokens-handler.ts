@@ -2,6 +2,7 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
+import { filterBetaHeader } from "~/lib/utils"
 import { countTokens } from "~/services/copilot/create-messages"
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -66,9 +67,10 @@ export async function handleCountTokens(c: Context) {
 
   const extraHeaders: Record<string, string> = {}
   const anthropicBeta = c.req.header("anthropic-beta")
-  if (anthropicBeta) extraHeaders["anthropic-beta"] = anthropicBeta
-  const capiBeta = c.req.header("capi-beta-1")
-  if (capiBeta) extraHeaders["capi-beta-1"] = capiBeta
+  if (anthropicBeta) {
+    const filtered = filterBetaHeader(anthropicBeta)
+    if (filtered) extraHeaders["anthropic-beta"] = filtered
+  }
 
   const response = await countTokens(finalBody, extraHeaders)
   const body = await response.json()
