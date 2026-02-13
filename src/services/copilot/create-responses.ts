@@ -5,7 +5,10 @@ import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
 
-export const createResponses = async (payload: ResponsesPayload) => {
+export const createResponses = async (
+  payload: ResponsesPayload,
+  modelHeaders?: Record<string, string>,
+) => {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
   const enableVision = detectVision(payload.input)
@@ -14,6 +17,7 @@ export const createResponses = async (payload: ResponsesPayload) => {
 
   const headers: Record<string, string> = {
     ...copilotHeaders(state, enableVision),
+    ...modelHeaders,
     "X-Initiator": isAgentCall ? "agent" : "user",
   }
 

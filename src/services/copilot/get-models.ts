@@ -49,6 +49,7 @@ export interface Model {
   vendor: string
   version: string
   supported_endpoints?: Array<string>
+  requestHeaders?: Record<string, string>
   policy?: {
     state: string
     terms: string

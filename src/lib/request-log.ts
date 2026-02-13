@@ -11,6 +11,7 @@ export interface RequestLogInfo {
   outputTokens?: number
   status?: number
   streaming?: boolean
+  errorBody?: string
 }
 
 /**
@@ -90,5 +91,32 @@ export function logRequest(
     elapsed >= 1000 ? `${(elapsed / 1000).toFixed(1)}s` : `${elapsed}ms`
   parts.push(info.streaming ? `${duration} stream` : duration)
 
-  consola.info(parts.join("  "))
+  const line = parts.join("  ")
+
+  if (detectCapabilityMismatch(info, model)) {
+    consola.error(`[MISMATCH] ${line}`)
+  } else {
+    consola.info(line)
+  }
+}
+
+/**
+ * Detect when the API rejects a request for token/context reasons
+ * that contradict what the /models endpoint reported.
+ */
+function detectCapabilityMismatch(
+  info: RequestLogInfo,
+  model: Model | undefined,
+): boolean {
+  if (!info.errorBody || !model) return false
+  if (!info.status || info.status < 400) return false
+
+  const err = info.errorBody.toLowerCase()
+  return (
+    err.includes("token") ||
+    err.includes("context") ||
+    err.includes("too long") ||
+    err.includes("max_tokens") ||
+    err.includes("prompt is too long")
+  )
 }

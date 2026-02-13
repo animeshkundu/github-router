@@ -31,6 +31,8 @@ function buildHeaders(
   return {
     ...copilotHeaders(state),
     accept: "application/json",
+    "openai-intent": "conversation-agent",
+    "x-interaction-type": "conversation-agent",
     "X-Initiator": "agent",
     "anthropic-version": "2023-06-01",
     "X-Interaction-Id": randomUUID(),

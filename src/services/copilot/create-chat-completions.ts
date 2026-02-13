@@ -7,6 +7,7 @@ import { state } from "~/lib/state"
 
 export const createChatCompletions = async (
   payload: ChatCompletionsPayload,
+  modelHeaders?: Record<string, string>,
 ) => {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
@@ -25,7 +26,7 @@ export const createChatCompletions = async (
   // Build headers and add X-Initiator
   const headers: Record<string, string> = {
     ...copilotHeaders(state, enableVision),
-    "Openai-Organization": "github-copilot",
+    ...modelHeaders,
     "X-Initiator": isAgentCall ? "agent" : "user",
   }
 
