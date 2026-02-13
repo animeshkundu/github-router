@@ -476,7 +476,40 @@ test("token endpoint rejects when disabled", async () => {
   expect(response.status).toBe(403)
 })
 
-test("chat and responses routes forward handler errors", async () => {
+test("messages passthrough forwards upstream error status and body", async () => {
+  resetState()
+
+  const fetchMock = mock((url: string) => {
+    if (url.endsWith("/v1/messages")) {
+      return new Response(
+        JSON.stringify({
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message: "model not supported",
+          },
+        }),
+        { status: 400 },
+      )
+    }
+    throw new Error(`Unexpected URL ${url}`)
+  })
+  // @ts-expect-error - override fetch for this test
+  globalThis.fetch = fetchMock
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "invalid",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+  expect(response.status).toBe(400)
+})
+
+test("all routes forward errors when copilot token is missing", async () => {
   resetState()
   state.copilotToken = undefined
 
@@ -489,6 +522,31 @@ test("chat and responses routes forward handler errors", async () => {
     }),
   })
   expect(chatResponse.status).toBe(500)
+
+  const messagesResponse = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4.5",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+  expect(messagesResponse.status).toBe(500)
+
+  const countTokensResponse = await server.request(
+    "/v1/messages/count_tokens",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4.5",
+        max_tokens: 10,
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    },
+  )
+  expect(countTokensResponse.status).toBe(500)
 
   const responsesResponse = await server.request("/v1/responses", {
     method: "POST",
