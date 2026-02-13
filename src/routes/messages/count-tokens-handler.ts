@@ -2,69 +2,18 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
-import { HTTPError } from "~/lib/error"
-import { state } from "~/lib/state"
-import { getTokenCount } from "~/lib/tokenizer"
-
-import { type AnthropicMessagesPayload } from "./anthropic-types"
-import { translateToOpenAI } from "./non-stream-translation"
-import { normalizeCopilotModelName } from "./utils"
+import { countTokens } from "~/services/copilot/create-messages"
 
 /**
- * Handles token counting for Anthropic messages
+ * Passthrough handler for Anthropic token counting.
+ * Forwards the request directly to Copilot's native /v1/messages/count_tokens endpoint.
  */
 export async function handleCountTokens(c: Context) {
-  try {
-    const anthropicBeta = c.req.header("anthropic-beta")
+  const rawBody = await c.req.text()
+  const response = await countTokens(rawBody)
+  const body = await response.json()
 
-    const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
+  consola.info("Token count:", JSON.stringify(body))
 
-    const openAIPayload = translateToOpenAI(anthropicPayload)
-
-    const selectedModel = state.models?.data.find(
-      (model) => model.id === normalizeCopilotModelName(anthropicPayload.model),
-    )
-
-    if (!selectedModel) {
-      throw new HTTPError(
-        "Model not found",
-        Response.json({ message: "Model not found" }, { status: 404 }),
-      )
-    }
-
-    const tokenCount = await getTokenCount(openAIPayload, selectedModel)
-
-    if (anthropicPayload.tools && anthropicPayload.tools.length > 0) {
-      let mcpToolExist = false
-      if (anthropicBeta?.startsWith("claude-code")) {
-        mcpToolExist = anthropicPayload.tools.some((tool) =>
-          tool.name.startsWith("mcp__"),
-        )
-      }
-      if (!mcpToolExist) {
-        if (anthropicPayload.model.startsWith("claude")) {
-          // https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/overview#pricing
-          tokenCount.input = tokenCount.input + 346
-        } else if (anthropicPayload.model.startsWith("grok")) {
-          tokenCount.input = tokenCount.input + 480
-        }
-      }
-    }
-
-    let finalTokenCount = tokenCount.input + tokenCount.output
-    if (anthropicPayload.model.startsWith("claude")) {
-      finalTokenCount = Math.round(finalTokenCount * 1.15)
-    } else if (anthropicPayload.model.startsWith("grok")) {
-      finalTokenCount = Math.round(finalTokenCount * 1.03)
-    }
-
-    consola.info("Token count:", finalTokenCount)
-
-    return c.json({
-      input_tokens: finalTokenCount,
-    })
-  } catch (error) {
-    consola.error("Error counting tokens:", error)
-    throw error
-  }
+  return c.json(body)
 }
