@@ -95,7 +95,7 @@ describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
       },
     }
 
-    const anthropicResponse = translateToAnthropic(openAIResponse)
+    const anthropicResponse = translateToAnthropic(openAIResponse, "gpt-4o-2024-05-13")
 
     expect(isValidAnthropicResponse(anthropicResponse)).toBe(true)
 
@@ -146,7 +146,7 @@ describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
       },
     }
 
-    const anthropicResponse = translateToAnthropic(openAIResponse)
+    const anthropicResponse = translateToAnthropic(openAIResponse, "gpt-4o-2024-05-13")
 
     expect(isValidAnthropicResponse(anthropicResponse)).toBe(true)
 
@@ -197,7 +197,7 @@ describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
       },
     }
 
-    const anthropicResponse = translateToAnthropic(openAIResponse)
+    const anthropicResponse = translateToAnthropic(openAIResponse, "gpt-4o-2024-05-13")
 
     expect(anthropicResponse.content[0].type).toBe("tool_use")
     if (anthropicResponse.content[0].type === "tool_use") {
@@ -243,7 +243,7 @@ describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
       },
     }
 
-    const anthropicResponse = translateToAnthropic(openAIResponse)
+    const anthropicResponse = translateToAnthropic(openAIResponse, "gpt-4o-2024-05-13")
 
     expect(isValidAnthropicResponse(anthropicResponse)).toBe(true)
     expect(anthropicResponse.content[0].type).toBe("tool_use")
@@ -278,7 +278,7 @@ describe("OpenAI to Anthropic Non-Streaming Response Translation", () => {
       },
     }
 
-    const anthropicResponse = translateToAnthropic(openAIResponse)
+    const anthropicResponse = translateToAnthropic(openAIResponse, "gpt-4o-2024-05-13")
 
     expect(isValidAnthropicResponse(anthropicResponse)).toBe(true)
     expect(anthropicResponse.stop_reason).toBe("max_tokens")
@@ -349,7 +349,7 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
       pendingToolCallArgs: {},
     }
     const translatedStream = openAIStream.flatMap((chunk) =>
-      translateChunkToAnthropicEvents(chunk, streamState),
+      translateChunkToAnthropicEvents(chunk, streamState, "gpt-4o-2024-05-13"),
     )
 
     for (const event of translatedStream) {
@@ -450,7 +450,7 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
       pendingToolCallArgs: {},
     }
     const translatedStream = openAIStream.flatMap((chunk) =>
-      translateChunkToAnthropicEvents(chunk, streamState),
+      translateChunkToAnthropicEvents(chunk, streamState, "gpt-4o-2024-05-13"),
     )
 
     // These tests will fail until the stub is implemented
@@ -519,7 +519,7 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
       pendingToolCallArgs: {},
     }
     const translatedStream = openAIStream.flatMap((chunk) =>
-      translateChunkToAnthropicEvents(chunk, streamState),
+      translateChunkToAnthropicEvents(chunk, streamState, "gpt-4o-2024-05-13"),
     )
 
     const argumentEvents = translatedStream.filter(
@@ -535,5 +535,157 @@ describe("OpenAI to Anthropic Streaming Response Translation", () => {
       '{"loc',
       'ation": "Oslo"}',
     ])
+  })
+})
+
+describe("Response model name preservation", () => {
+  test("non-streaming: response model matches originalModel, not Copilot display name", () => {
+    const openAIResponse: ChatCompletionResponse = {
+      id: "chatcmpl-model-test",
+      object: "chat.completion",
+      created: 1677652288,
+      model: "Claude Haiku 4.5", // Copilot may return display name
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "Hello!",
+          },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+      usage: {
+        prompt_tokens: 5,
+        completion_tokens: 3,
+        total_tokens: 8,
+      },
+    }
+
+    // Pass the original client model name
+    const anthropicResponse = translateToAnthropic(openAIResponse, "claude-haiku-4.5")
+
+    expect(isValidAnthropicResponse(anthropicResponse)).toBe(true)
+    // Must return the client-sent model ID, NOT Copilot's display name
+    expect(anthropicResponse.model).toBe("claude-haiku-4.5")
+  })
+
+  test("non-streaming: response model preserves claude-opus-4.6-1m", () => {
+    const openAIResponse: ChatCompletionResponse = {
+      id: "chatcmpl-model-opus",
+      object: "chat.completion",
+      created: 1677652288,
+      model: "Claude Opus 4.6", // Copilot display name
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "Hello!",
+          },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+      usage: {
+        prompt_tokens: 5,
+        completion_tokens: 3,
+        total_tokens: 8,
+      },
+    }
+
+    const anthropicResponse = translateToAnthropic(openAIResponse, "claude-opus-4.6-1m")
+
+    expect(isValidAnthropicResponse(anthropicResponse)).toBe(true)
+    expect(anthropicResponse.model).toBe("claude-opus-4.6-1m")
+  })
+
+  test("streaming: message_start model matches originalModel", () => {
+    const firstChunk: ChatCompletionChunk = {
+      id: "cmpl-model-stream",
+      object: "chat.completion.chunk",
+      created: 1677652288,
+      model: "Claude Opus 4.6", // Copilot display name
+      choices: [
+        {
+          index: 0,
+          delta: { role: "assistant" },
+          finish_reason: null,
+          logprobs: null,
+        },
+      ],
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 0,
+        total_tokens: 10,
+        prompt_tokens_details: {
+          cached_tokens: 0,
+        },
+        completion_tokens_details: {
+          accepted_prediction_tokens: 0,
+          rejected_prediction_tokens: 0,
+        },
+      },
+    }
+
+    const streamState: AnthropicStreamState = {
+      messageStartSent: false,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      toolCalls: {},
+      pendingToolCallArgs: {},
+    }
+
+    const events = translateChunkToAnthropicEvents(
+      firstChunk,
+      streamState,
+      "claude-opus-4.6-1m",
+    )
+
+    const messageStartEvent = events.find((e) => e.type === "message_start")
+    expect(messageStartEvent).toBeDefined()
+    // The model in message_start must match what the client sent
+    if (messageStartEvent?.type === "message_start") {
+      expect(messageStartEvent.message.model).toBe("claude-opus-4.6-1m")
+    }
+  })
+
+  test("streaming: message_start model preserves dash-notation input", () => {
+    const firstChunk: ChatCompletionChunk = {
+      id: "cmpl-model-dash",
+      object: "chat.completion.chunk",
+      created: 1677652288,
+      model: "Claude Opus 4.6",
+      choices: [
+        {
+          index: 0,
+          delta: { role: "assistant" },
+          finish_reason: null,
+          logprobs: null,
+        },
+      ],
+    }
+
+    const streamState: AnthropicStreamState = {
+      messageStartSent: false,
+      contentBlockIndex: 0,
+      contentBlockOpen: false,
+      toolCalls: {},
+      pendingToolCallArgs: {},
+    }
+
+    // Client sent dash notation — the response should echo exactly what they sent
+    const events = translateChunkToAnthropicEvents(
+      firstChunk,
+      streamState,
+      "claude-opus-4-6",
+    )
+
+    const messageStartEvent = events.find((e) => e.type === "message_start")
+    expect(messageStartEvent).toBeDefined()
+    if (messageStartEvent?.type === "message_start") {
+      expect(messageStartEvent.message.model).toBe("claude-opus-4-6")
+    }
   })
 })
