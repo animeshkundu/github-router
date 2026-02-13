@@ -5,6 +5,7 @@ import consola from "consola"
 import { awaitApproval } from "~/lib/approval"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
+import { filterBetaHeader } from "~/lib/utils"
 import { createMessages } from "~/services/copilot/create-messages"
 import { searchWeb } from "~/services/copilot/web-search"
 
@@ -23,7 +24,10 @@ const isWebSearchTool = (tool: AnyRecord): boolean =>
 function extractBetaHeaders(c: Context): Record<string, string> {
   const headers: Record<string, string> = {}
   const anthropicBeta = c.req.header("anthropic-beta")
-  if (anthropicBeta) headers["anthropic-beta"] = anthropicBeta
+  if (anthropicBeta) {
+    const filtered = filterBetaHeader(anthropicBeta)
+    if (filtered) headers["anthropic-beta"] = filtered
+  }
   const capiBeta = c.req.header("capi-beta-1")
   if (capiBeta) headers["capi-beta-1"] = capiBeta
   return headers
