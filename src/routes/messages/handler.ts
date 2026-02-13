@@ -3,6 +3,7 @@ import type { Context } from "hono"
 import consola from "consola"
 
 import { awaitApproval } from "~/lib/approval"
+import { HTTPError } from "~/lib/error"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
@@ -195,7 +196,33 @@ export async function handleCompletion(c: Context) {
     (m) => m.id === (resolvedModel ?? originalModel),
   )
 
-  const response = await createMessages(resolvedBody, betaHeaders)
+  // Apply default anthropic-beta for Claude models when client sends none
+  const effectiveBetas = applyDefaultBetas(betaHeaders, resolvedModel ?? originalModel)
+
+  let response: Response
+  try {
+    response = await createMessages(resolvedBody, {
+      ...selectedModel?.requestHeaders,
+      ...effectiveBetas,
+    })
+  } catch (error) {
+    if (error instanceof HTTPError) {
+      const errorBody = await error.response.clone().text().catch(() => "")
+      logRequest(
+        {
+          method: "POST",
+          path: c.req.path,
+          model: originalModel,
+          resolvedModel,
+          status: error.response.status,
+          errorBody,
+        },
+        selectedModel,
+        startTime,
+      )
+    }
+    throw error
+  }
 
   const contentType = response.headers.get("content-type") ?? ""
   const isStreaming = contentType.includes("text/event-stream")
@@ -283,5 +310,26 @@ function resolveModelInBody(rawBody: string): {
     body: JSON.stringify(parsed),
     originalModel,
     resolvedModel: resolved,
+  }
+}
+
+/**
+ * Apply default anthropic-beta values for Claude models when the client
+ * (e.g. curl) sends no beta headers. Claude CLI sends its own betas,
+ * so this only fires as a safety net for bare clients.
+ */
+function applyDefaultBetas(
+  betaHeaders: Record<string, string>,
+  modelId?: string,
+): Record<string, string> {
+  if (betaHeaders["anthropic-beta"]) return betaHeaders
+  if (!modelId || !modelId.startsWith("claude-")) return betaHeaders
+
+  return {
+    ...betaHeaders,
+    "anthropic-beta": [
+      "interleaved-thinking-2025-05-14",
+      "token-counting-2024-11-01",
+    ].join(","),
   }
 }

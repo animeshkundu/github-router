@@ -4,6 +4,7 @@ import consola from "consola"
 import { streamSSE, type SSEMessage } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
+import { HTTPError } from "~/lib/error"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
@@ -64,7 +65,27 @@ export async function handleCompletion(c: Context) {
     }
   }
 
-  const response = await createChatCompletions(payload)
+  const response = await createChatCompletions(payload, selectedModel?.requestHeaders).catch(
+    (error: unknown) => {
+      if (error instanceof HTTPError) {
+        error.response.clone().text().then((errorBody) => {
+          logRequest(
+            {
+              method: "POST",
+              path: c.req.path,
+              model: originalModel,
+              resolvedModel,
+              status: error.response.status,
+              errorBody,
+            },
+            selectedModel,
+            startTime,
+          )
+        }).catch(() => {})
+      }
+      throw error
+    },
+  )
   const isStreaming = !isNonStreaming(response)
 
   // Extract output tokens from non-streaming response (no extra call)

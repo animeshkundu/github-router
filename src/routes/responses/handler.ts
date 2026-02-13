@@ -4,6 +4,7 @@ import consola from "consola"
 import { streamSSE } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
+import { HTTPError } from "~/lib/error"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
@@ -55,7 +56,27 @@ export async function handleResponses(c: Context) {
     }
   }
 
-  const response = await createResponses(payload)
+  const response = await createResponses(payload, selectedModel?.requestHeaders).catch(
+    (error: unknown) => {
+      if (error instanceof HTTPError) {
+        error.response.clone().text().then((errorBody) => {
+          logRequest(
+            {
+              method: "POST",
+              path: c.req.path,
+              model: originalModel,
+              resolvedModel,
+              status: error.response.status,
+              errorBody,
+            },
+            selectedModel,
+            startTime,
+          )
+        }).catch(() => {})
+      }
+      throw error
+    },
+  )
   const isStreaming = !isNonStreaming(response)
 
   logRequest(

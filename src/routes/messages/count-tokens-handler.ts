@@ -74,11 +74,14 @@ export async function handleCountTokens(c: Context) {
     if (filtered) extraHeaders["anthropic-beta"] = filtered
   }
 
-  const response = await countTokens(finalBody, extraHeaders)
-  const responseBody = (await response.json()) as { input_tokens?: number }
-
   const modelId = resolvedModel ?? originalModel
   const selectedModel = state.models?.data.find((m) => m.id === modelId)
+
+  const response = await countTokens(finalBody, {
+    ...selectedModel?.requestHeaders,
+    ...extraHeaders,
+  })
+  const responseBody = (await response.json()) as { input_tokens?: number }
 
   logRequest(
     {
