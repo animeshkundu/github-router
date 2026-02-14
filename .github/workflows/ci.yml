@@ -76,29 +76,33 @@ jobs:
         run: node dist/main.js --help
 
       - name: Verify no unguarded Bun references
-        run: node -e "
-          const fs = require('fs');
-          const lines = fs.readFileSync('dist/main.js', 'utf8').split('\n');
-          const issues = [];
-          for (let i = 0; i < lines.length; i++) {
-            if (/Bun\./.test(lines[i]) && !/typeof Bun/.test(lines[i])) {
-              const ctx = lines.slice(Math.max(0, i-3), i+1).join('\n');
-              if (!/typeof Bun/.test(ctx)) issues.push({ line: i+1, text: lines[i].trim() });
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("fs");
+            const lines = fs.readFileSync("dist/main.js", "utf8").split("\n");
+            const issues = [];
+            for (let i = 0; i < lines.length; i++) {
+              if (/Bun\./.test(lines[i]) && !/typeof Bun/.test(lines[i])) {
+                const ctx = lines.slice(Math.max(0, i-3), i+1).join("\n");
+                if (!/typeof Bun/.test(ctx)) issues.push({ line: i+1, text: lines[i].trim() });
+              }
             }
-          }
-          if (issues.length) { console.error('Unguarded Bun refs:', issues); process.exit(1); }
-          console.log('OK: all Bun references guarded');
-          "
+            if (issues.length) { console.error("Unguarded Bun refs:", issues); process.exit(1); }
+            console.log("OK: all Bun references guarded");
+          '
 
       - name: E2E smoke test on Node.js
-        run: node -e "
-          const { spawn } = require('child_process');
-          const http = require('http');
-          const server = spawn('node', ['dist/main.js', 'start', '-p', '19876', '--cc'], { stdio: 'inherit' });
-          const check = () => http.get('http://127.0.0.1:19876/models', r => {
-            if (r.statusCode === 200) { console.log('OK: server responds'); server.kill(); process.exit(0); }
-            else setTimeout(check, 500);
-          }).on('error', () => setTimeout(check, 500));
-          setTimeout(check, 2000);
-          setTimeout(() => { console.error('FAIL: timeout'); server.kill(); process.exit(1); }, 30000);
-          "
+        shell: bash
+        run: |
+          node -e '
+            const { spawn } = require("child_process");
+            const http = require("http");
+            const server = spawn("node", ["dist/main.js", "start", "-p", "19876", "--cc"], { stdio: "inherit" });
+            const check = () => http.get("http://127.0.0.1:19876/models", r => {
+              if (r.statusCode === 200) { console.log("OK: server responds"); server.kill(); process.exit(0); }
+              else setTimeout(check, 500);
+            }).on("error", () => setTimeout(check, 500));
+            setTimeout(check, 2000);
+            setTimeout(() => { console.error("FAIL: timeout"); server.kill(); process.exit(1); }, 30000);
+          '
