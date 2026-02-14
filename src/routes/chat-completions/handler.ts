@@ -66,22 +66,21 @@ export async function handleCompletion(c: Context) {
   }
 
   const response = await createChatCompletions(payload, selectedModel?.requestHeaders).catch(
-    (error: unknown) => {
+    async (error: unknown) => {
       if (error instanceof HTTPError) {
-        error.response.clone().text().then((errorBody) => {
-          logRequest(
-            {
-              method: "POST",
-              path: c.req.path,
-              model: originalModel,
-              resolvedModel,
-              status: error.response.status,
-              errorBody,
-            },
-            selectedModel,
-            startTime,
-          )
-        }).catch(() => {})
+        const errorBody = await error.response.clone().text().catch(() => "")
+        logRequest(
+          {
+            method: "POST",
+            path: c.req.path,
+            model: originalModel,
+            resolvedModel,
+            status: error.response.status,
+            errorBody,
+          },
+          selectedModel,
+          startTime,
+        )
       }
       throw error
     },
