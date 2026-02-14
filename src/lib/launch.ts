@@ -4,6 +4,8 @@ import consola from "consola"
 
 import type { Server } from "srvx"
 
+import { DEFAULT_CODEX_MODEL } from "./port"
+
 export interface LaunchTarget {
   kind: "claude-code" | "codex"
   envVars: Record<string, string>
@@ -18,7 +20,7 @@ export function buildLaunchCommand(target: LaunchTarget): {
   const cmd: string[] =
     target.kind === "claude-code"
       ? ["claude", "--dangerously-skip-permissions", ...target.extraArgs]
-      : ["codex", "-m", target.model ?? "gpt5.3-codex", ...target.extraArgs]
+      : ["codex", "-m", target.model ?? DEFAULT_CODEX_MODEL, ...target.extraArgs]
 
   return {
     cmd,
@@ -56,6 +58,7 @@ export function launchChild(target: LaunchTarget, server: Server): void {
   }
 
   let cleaned = false
+  let exiting = false
   async function cleanup(): Promise<void> {
     if (cleaned) return
     cleaned = true
@@ -75,14 +78,20 @@ export function launchChild(target: LaunchTarget, server: Server): void {
     clearTimeout(timeout)
   }
 
+  function exit(code: number): void {
+    if (exiting) return
+    exiting = true
+    process.exit(code)
+  }
+
   const onSignal = () => {
-    cleanup().then(() => process.exit(130))
+    cleanup().then(() => exit(130)).catch(() => exit(1))
   }
   process.on("SIGINT", onSignal)
   process.on("SIGTERM", onSignal)
 
   child.exited.then(async (exitCode) => {
     await cleanup()
-    process.exit(exitCode ?? 0)
-  })
+    exit(exitCode ?? 0)
+  }).catch(() => exit(1))
 }

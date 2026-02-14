@@ -5,7 +5,7 @@ import clipboard from "clipboardy"
 import consola from "consola"
 
 import { generateEnvScript } from "./lib/shell"
-import { DEFAULT_PORT } from "./lib/port"
+import { DEFAULT_CODEX_MODEL, DEFAULT_PORT } from "./lib/port"
 import {
   getClaudeCodeEnvVars,
   getCodexEnvVars,
@@ -31,7 +31,7 @@ function generateClaudeCodeCommand(serverUrl: string, model?: string) {
 }
 
 function generateCodexCommand(serverUrl: string, model?: string) {
-  const codexModel = model ?? "gpt5.3-codex"
+  const codexModel = model ?? DEFAULT_CODEX_MODEL
   const envVars = getCodexEnvVars(serverUrl)
   const command = generateEnvScript(envVars, `codex -m ${codexModel}`)
   printAndCopyCommand(command, "Codex CLI")

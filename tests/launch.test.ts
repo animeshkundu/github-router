@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import { buildLaunchCommand, type LaunchTarget } from "../src/lib/launch"
+import { DEFAULT_CODEX_MODEL } from "../src/lib/port"
 
 describe("buildLaunchCommand", () => {
   describe("claude-code", () => {
@@ -76,7 +77,7 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual(["codex", "-m", "gpt5.3-codex"])
+      expect(result.cmd).toEqual(["codex", "-m", DEFAULT_CODEX_MODEL])
       expect(result.env.OPENAI_BASE_URL).toBe("http://localhost:12345/v1")
       expect(result.env.OPENAI_API_KEY).toBe("dummy")
     })
@@ -109,7 +110,7 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual(["codex", "-m", "gpt5.3-codex", "--full-auto"])
+      expect(result.cmd).toEqual(["codex", "-m", DEFAULT_CODEX_MODEL, "--full-auto"])
     })
   })
 })

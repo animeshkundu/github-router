@@ -14,6 +14,11 @@ process.on("unhandledRejection", (error) => {
   consola.error("Unhandled rejection:", error)
 })
 
+process.on("uncaughtException", (error) => {
+  consola.error("Uncaught exception:", error)
+  process.exit(1)
+})
+
 const main = defineCommand({
   meta: {
     name: "github-router",

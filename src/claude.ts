@@ -32,16 +32,24 @@ export const claude = defineCommand({
 
     const parsed = parseSharedArgs(args as unknown as Record<string, unknown>)
 
-    const { server, serverUrl } = await setupAndServe({
-      ...parsed,
-      port: parsed.port, // undefined = random port
-      silent: true,
-    })
+    let server: Awaited<ReturnType<typeof setupAndServe>>["server"]
+    let serverUrl: string
+    try {
+      const result = await setupAndServe({
+        ...parsed,
+        port: parsed.port, // undefined = random port
+        silent: true,
+      })
+      server = result.server
+      serverUrl = result.serverUrl
+      await server.ready()
+    } catch (error) {
+      consola.error("Failed to start server:", error instanceof Error ? error.message : error)
+      process.exit(1)
+    }
 
     consola.success(`Server ready on ${serverUrl}, launching Claude Code...`)
-    consola.level = 1 // errors only — prevent TUI corruption
-
-    await server.ready()
+    consola.level = 1 // errors and warnings only — prevent TUI corruption
 
     const envVars = getClaudeCodeEnvVars(serverUrl, args.model)
     const extraArgs = ((args as unknown as Record<string, unknown>)._ as string[]) ?? []

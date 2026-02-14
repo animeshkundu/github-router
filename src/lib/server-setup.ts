@@ -69,7 +69,7 @@ export async function setupAndServe(
     silent: options.silent,
   }
 
-  let srvxServer: ReturnType<typeof serve>
+  let srvxServer: ReturnType<typeof serve> | undefined
 
   if (options.port !== undefined) {
     // Explicit port — no retry
@@ -87,13 +87,15 @@ export async function setupAndServe(
         const isAddrInUse =
           error instanceof Error
           && (error.message.includes("EADDRINUSE")
-            || error.message.includes("address already in use"))
+            || error.message.includes("address already in use")
+            || ("code" in error
+              && (error as NodeJS.ErrnoException).code === "EADDRINUSE"))
         if (!isAddrInUse) throw error
         consola.debug(`Port ${candidatePort} in use, trying another...`)
       }
     }
 
-    if (!srvxServer!) {
+    if (srvxServer === undefined) {
       throw new Error(
         `Failed to find an available port after ${MAX_PORT_RETRIES} attempts. `
         + `Specify a port with --port or free some ports. Last error: ${lastError}`,
@@ -102,7 +104,10 @@ export async function setupAndServe(
   }
 
   // Read actual port from the server URL
-  const url = srvxServer.url ?? `http://127.0.0.1:${options.port}`
+  const url = srvxServer.url
+  if (!url) {
+    throw new Error("Server started but URL is not available")
+  }
   const serverUrl = url.replace(/\/$/, "")
 
   return { server: srvxServer, serverUrl }
