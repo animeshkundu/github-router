@@ -27,7 +27,6 @@ modelRoutes.get("/", async (c) => {
       version: model.version,
       model_picker_enabled: model.model_picker_enabled,
       policy: model.policy,
-      requestHeaders: model.requestHeaders,
     }))
 
     return c.json({

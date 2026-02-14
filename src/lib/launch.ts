@@ -56,7 +56,6 @@ export function launchChild(target: LaunchTarget, server: Server): void {
     child = spawn(cmd[0], cmd.slice(1), {
       env,
       stdio: "inherit",
-      shell: process.platform === "win32",
     })
   } catch (error) {
     consola.error(

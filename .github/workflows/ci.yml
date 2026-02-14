@@ -39,7 +39,13 @@ jobs:
       - name: Test (isolated - mock.module process isolation)
         shell: bash
         run: |
-          for f in tests/isolated/*.test.ts; do
+          shopt -s nullglob
+          files=(tests/isolated/*.test.ts)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "ERROR: No isolated test files found"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
             echo "--- Running $f ---"
             bun test "$f" --timeout 15000
           done

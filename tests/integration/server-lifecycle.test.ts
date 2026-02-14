@@ -170,6 +170,7 @@ describe("route integration via app.request()", () => {
     expect(json.id).toBe("chat-1")
     expect(json.object).toBe("chat.completion")
     expect(json.choices).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalled()
   })
 
   test("POST /v1/chat/completions streaming returns SSE", async () => {
@@ -198,6 +199,7 @@ describe("route integration via app.request()", () => {
 
     const body = await response.text()
     expect(body).toContain("data:")
+    expect(fetchMock).toHaveBeenCalled()
   })
 
   test("POST /v1/messages returns Anthropic-format response", async () => {
@@ -236,6 +238,7 @@ describe("route integration via app.request()", () => {
     const json = (await response.json()) as { type: string; id: string }
     expect(json.type).toBe("message")
     expect(json.id).toBe("msg_test")
+    expect(fetchMock).toHaveBeenCalled()
   })
 
   test("POST /v1/messages streaming returns SSE events", async () => {
@@ -271,6 +274,7 @@ describe("route integration via app.request()", () => {
     const body = await response.text()
     expect(body).toContain("message_start")
     expect(body).toContain("message_stop")
+    expect(fetchMock).toHaveBeenCalled()
   })
 
   test("POST /v1/responses passthrough returns response shape", async () => {
@@ -313,6 +317,7 @@ describe("route integration via app.request()", () => {
     }
     expect(json.id).toBe("resp_test")
     expect(json.object).toBe("response")
+    expect(fetchMock).toHaveBeenCalled()
   })
 
   test("POST /v1/embeddings passthrough returns embedding shape", async () => {
@@ -350,5 +355,6 @@ describe("route integration via app.request()", () => {
     expect(json.object).toBe("list")
     expect(json.data).toHaveLength(1)
     expect(json.data[0]!.embedding).toEqual([0.1, 0.2])
+    expect(fetchMock).toHaveBeenCalled()
   })
 })

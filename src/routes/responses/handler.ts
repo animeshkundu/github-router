@@ -185,11 +185,14 @@ function extractUserQuery(
 }
 
 export async function handleResponsesCompact(c: Context) {
+  const startTime = Date.now()
+  await checkRateLimit(state)
+
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
-  const body = await c.req.text()
+  if (state.manualApprove) await awaitApproval()
 
-  consola.info("POST /responses/compact")
+  const body = await c.req.text()
 
   const response = await fetch(
     `${copilotBaseUrl(state)}/responses/compact`,
@@ -201,8 +204,19 @@ export async function handleResponsesCompact(c: Context) {
   )
 
   if (!response.ok) {
+    logRequest(
+      { method: "POST", path: c.req.path, status: response.status },
+      undefined,
+      startTime,
+    )
     throw new HTTPError("Copilot responses/compact request failed", response)
   }
+
+  logRequest(
+    { method: "POST", path: c.req.path, status: 200 },
+    undefined,
+    startTime,
+  )
 
   return c.json(await response.json())
 }

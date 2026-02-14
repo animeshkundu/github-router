@@ -156,7 +156,7 @@ describe("launchChild", () => {
     expect(options.env.ANTHROPIC_AUTH_TOKEN).toBe("dummy")
   })
 
-  test("uses shell: false on non-Windows platform", () => {
+  test("does not use shell mode", () => {
     execFileSyncMock.mockReturnValue(Buffer.from("/usr/bin/claude"))
     const fakeChild = createFakeChild()
     spawnMock.mockReturnValue(fakeChild)
@@ -165,7 +165,7 @@ describe("launchChild", () => {
     launchChild(defaultTarget, server as unknown as Server)
 
     const [, , options] = spawnMock.mock.calls[0]
-    expect(options.shell).toBe(false)
+    expect(options.shell).toBeFalsy()
   })
 
   test("registers SIGINT and SIGTERM handlers", () => {
