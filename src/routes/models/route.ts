@@ -16,11 +16,18 @@ modelRoutes.get("/", async (c) => {
     const models = state.models?.data.map((model) => ({
       id: model.id,
       object: "model",
-      type: "model",
-      created: 0, // No date available from source
-      created_at: new Date(0).toISOString(), // No date available from source
+      type: model.capabilities?.type ?? "model",
+      created: 0,
+      created_at: new Date(0).toISOString(),
       owned_by: model.vendor,
       display_name: model.name,
+      capabilities: model.capabilities,
+      supported_endpoints: model.supported_endpoints,
+      preview: model.preview,
+      version: model.version,
+      model_picker_enabled: model.model_picker_enabled,
+      policy: model.policy,
+      requestHeaders: model.requestHeaders,
     }))
 
     return c.json({
