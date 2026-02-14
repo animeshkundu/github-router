@@ -1,3 +1,4 @@
+import { execFileSync, spawn, type ChildProcess } from "node:child_process"
 import process from "node:process"
 
 import consola from "consola"
@@ -5,6 +6,17 @@ import consola from "consola"
 import type { Server } from "srvx"
 
 import { DEFAULT_CODEX_MODEL } from "./port"
+
+function commandExists(name: string): boolean {
+  try {
+    execFileSync(process.platform === "win32" ? "where.exe" : "which", [name], {
+      stdio: "ignore",
+    })
+    return true
+  } catch {
+    return false
+  }
+}
 
 export interface LaunchTarget {
   kind: "claude-code" | "codex"
@@ -32,21 +44,19 @@ export function launchChild(target: LaunchTarget, server: Server): void {
   const { cmd, env } = buildLaunchCommand(target)
 
   const executable = cmd[0]
-  if (!Bun.which(executable)) {
+  if (!commandExists(executable)) {
     consola.error(
       `"${executable}" not found on PATH. Install it first, then try again.`,
     )
     process.exit(1)
   }
 
-  let child: ReturnType<typeof Bun.spawn>
+  let child: ChildProcess
   try {
-    child = Bun.spawn({
-      cmd,
+    child = spawn(cmd[0], cmd.slice(1), {
       env,
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
+      stdio: "inherit",
+      shell: process.platform === "win32",
     })
   } catch (error) {
     consola.error(
@@ -90,8 +100,8 @@ export function launchChild(target: LaunchTarget, server: Server): void {
   process.on("SIGINT", onSignal)
   process.on("SIGTERM", onSignal)
 
-  child.exited.then(async (exitCode) => {
-    await cleanup()
-    exit(exitCode ?? 0)
-  }).catch(() => exit(1))
+  child.on("exit", (exitCode) => {
+    cleanup().then(() => exit(exitCode ?? 0)).catch(() => exit(1))
+  })
+  child.on("error", () => exit(1))
 }
