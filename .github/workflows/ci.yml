@@ -92,20 +92,50 @@ jobs:
             console.log("OK: all Bun references guarded");
           '
 
-      - name: E2E smoke test on Node.js
-        if: env.GH_TOKEN != ''
+      - name: E2E smoke test on Node.js (with mock API)
         shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           node -e '
-            const { spawn } = require("child_process");
             const http = require("http");
-            const server = spawn("node", ["dist/main.js", "start", "-p", "19876", "--cc"], { stdio: "inherit" });
-            const check = () => http.get("http://127.0.0.1:19876/models", r => {
-              if (r.statusCode === 200) { console.log("OK: server responds"); server.kill(); process.exit(0); }
-              else setTimeout(check, 500);
-            }).on("error", () => setTimeout(check, 500));
-            setTimeout(check, 2000);
-            setTimeout(() => { console.error("FAIL: timeout"); server.kill(); process.exit(1); }, 30000);
+            const { spawn } = require("child_process");
+
+            // 1. Start mock GitHub/Copilot API server
+            const mockApi = http.createServer((req, res) => {
+              res.setHeader("content-type", "application/json");
+              if (req.url.includes("/copilot_internal/v2/token")) {
+                res.end(JSON.stringify({ token: "mock-token", refresh_in: 99999, endpoints: { api: "http://127.0.0.1:19877" } }));
+              } else if (req.url.includes("/user")) {
+                res.end(JSON.stringify({ login: "ci-test" }));
+              } else if (req.url.includes("/models")) {
+                res.end(JSON.stringify({ data: [{ id: "gpt-4", capabilities: { family: "gpt-4", limits: {}, object: "model_capabilities", supports: {}, tokenizer: "o200k_base", type: "chat" }, model_picker_enabled: true, name: "GPT-4", object: "model", preview: false, vendor: "OpenAI", version: "gpt-4" }] }));
+              } else {
+                res.end(JSON.stringify({ id: "test", object: "chat.completion", choices: [{ message: { content: "hello" } }] }));
+              }
+            });
+            mockApi.listen(19877, "127.0.0.1", () => {
+              console.log("Mock API on :19877");
+
+              // 2. Start github-router pointing at mock
+              const router = spawn("node", ["dist/main.js", "start", "-p", "19876"], {
+                stdio: "inherit",
+                env: { ...process.env, GITHUB_API_URL: "http://127.0.0.1:19877", COPILOT_API_URL: "http://127.0.0.1:19877", GH_TOKEN: "mock-github-token" }
+              });
+
+              // 3. Poll until router responds
+              const check = () => http.get("http://127.0.0.1:19876/models", r => {
+                let body = "";
+                r.on("data", c => body += c);
+                r.on("end", () => {
+                  if (r.statusCode === 200 && body.includes("gpt-4")) {
+                    console.log("OK: router responds with models from mock API");
+                    router.kill(); mockApi.close(); process.exit(0);
+                  } else {
+                    console.log("Status:", r.statusCode, "Body:", body.slice(0, 200));
+                    setTimeout(check, 500);
+                  }
+                });
+              }).on("error", () => setTimeout(check, 500));
+              setTimeout(check, 3000);
+              setTimeout(() => { console.error("FAIL: timeout"); router.kill(); mockApi.close(); process.exit(1); }, 30000);
+            });
           '
