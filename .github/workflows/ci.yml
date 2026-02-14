@@ -7,7 +7,11 @@ on:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -19,13 +23,76 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Lint
+        if: matrix.os == 'ubuntu-latest'
         run: bun run lint:all
 
       - name: Type check
+        if: matrix.os == 'ubuntu-latest'
         run: bun run typecheck
-
-      - name: Test
-        run: bun test
 
       - name: Build
         run: bun run build
+
+      - name: Test
+        run: bun test tests/ --timeout 15000
+
+      - name: Test (isolated - mock.module process isolation)
+        shell: bash
+        run: |
+          for f in tests/isolated/*.test.ts; do
+            echo "--- Running $f ---"
+            bun test "$f" --timeout 15000
+          done
+
+  node-compat:
+    needs: ci
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.19"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install and build
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Verify CLI help on Node.js
+        run: node dist/main.js --help
+
+      - name: Verify no unguarded Bun references
+        run: node -e "
+          const fs = require('fs');
+          const lines = fs.readFileSync('dist/main.js', 'utf8').split('\n');
+          const issues = [];
+          for (let i = 0; i < lines.length; i++) {
+            if (/Bun\./.test(lines[i]) && !/typeof Bun/.test(lines[i])) {
+              const ctx = lines.slice(Math.max(0, i-3), i+1).join('\n');
+              if (!/typeof Bun/.test(ctx)) issues.push({ line: i+1, text: lines[i].trim() });
+            }
+          }
+          if (issues.length) { console.error('Unguarded Bun refs:', issues); process.exit(1); }
+          console.log('OK: all Bun references guarded');
+          "
+
+      - name: E2E smoke test on Node.js
+        run: node -e "
+          const { spawn } = require('child_process');
+          const http = require('http');
+          const server = spawn('node', ['dist/main.js', 'start', '-p', '19876', '--cc'], { stdio: 'inherit' });
+          const check = () => http.get('http://127.0.0.1:19876/models', r => {
+            if (r.statusCode === 200) { console.log('OK: server responds'); server.kill(); process.exit(0); }
+            else setTimeout(check, 500);
+          }).on('error', () => setTimeout(check, 500));
+          setTimeout(check, 2000);
+          setTimeout(() => { console.error('FAIL: timeout'); server.kill(); process.exit(1); }, 30000);
+          "
