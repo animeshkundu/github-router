@@ -93,7 +93,10 @@ jobs:
           '
 
       - name: E2E smoke test on Node.js
+        if: env.GH_TOKEN != ''
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           node -e '
             const { spawn } = require("child_process");
