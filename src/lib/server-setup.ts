@@ -103,7 +103,8 @@ export async function setupAndServe(
     }
   }
 
-  // Read actual port from the server URL
+  // Wait for the server to be listening before reading the URL
+  await srvxServer.ready()
   const url = srvxServer.url
   if (!url) {
     throw new Error("Server started but URL is not available")

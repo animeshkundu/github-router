@@ -43,7 +43,6 @@ export const codex = defineCommand({
       })
       server = result.server
       serverUrl = result.serverUrl
-      await server.ready()
     } catch (error) {
       consola.error("Failed to start server:", error instanceof Error ? error.message : error)
       process.exit(1)
