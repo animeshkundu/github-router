@@ -46,6 +46,10 @@ export async function setupAndServe(
   state.rateLimitWait = options.rateLimitWait
   state.showToken = options.showToken
 
+  if (process.env.COPILOT_API_URL) {
+    state.copilotApiUrl = process.env.COPILOT_API_URL
+  }
+
   await ensurePaths()
   await cacheVSCodeVersion()
 

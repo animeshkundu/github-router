@@ -41,7 +41,8 @@ export const copilotHeaders = (
   return headers
 }
 
-export const GITHUB_API_BASE_URL = "https://api.github.com"
+export const GITHUB_API_BASE_URL =
+  process.env.GITHUB_API_URL ?? "https://api.github.com"
 export const githubHeaders = (state: State) => ({
   ...standardHeaders(),
   authorization: `token ${state.githubToken}`,

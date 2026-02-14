@@ -3,6 +3,7 @@ import type { Context } from "hono"
 import consola from "consola"
 import { streamSSE } from "hono/streaming"
 
+import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
 import { awaitApproval } from "~/lib/approval"
 import { HTTPError } from "~/lib/error"
 import { checkRateLimit } from "~/lib/rate-limit"
@@ -181,4 +182,41 @@ function extractUserQuery(
     }
   }
   return undefined
+}
+
+export async function handleResponsesCompact(c: Context) {
+  const startTime = Date.now()
+  await checkRateLimit(state)
+
+  if (!state.copilotToken) throw new Error("Copilot token not found")
+
+  if (state.manualApprove) await awaitApproval()
+
+  const body = await c.req.text()
+
+  const response = await fetch(
+    `${copilotBaseUrl(state)}/responses/compact`,
+    {
+      method: "POST",
+      headers: copilotHeaders(state),
+      body,
+    },
+  )
+
+  if (!response.ok) {
+    logRequest(
+      { method: "POST", path: c.req.path, status: response.status },
+      undefined,
+      startTime,
+    )
+    throw new HTTPError("Copilot responses/compact request failed", response)
+  }
+
+  logRequest(
+    { method: "POST", path: c.req.path, status: 200 },
+    undefined,
+    startTime,
+  )
+
+  return c.json(await response.json())
 }

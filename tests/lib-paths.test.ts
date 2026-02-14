@@ -19,6 +19,9 @@ test("ensurePaths creates token file with permissions", async () => {
   await ensurePaths()
   const tokenStats = await fs.stat(PATHS.GITHUB_TOKEN_PATH)
   expect(tokenStats.isFile()).toBe(true)
-  expect(tokenStats.mode & 0o777).toBe(0o600)
+  // Windows doesn't enforce Unix permission bits; only check on Unix
+  if (process.platform !== "win32") {
+    expect(tokenStats.mode & 0o777).toBe(0o600)
+  }
   expect(PATHS.APP_DIR).toBe(path.join(tempDir, ".local", "share", "github-router"))
 })

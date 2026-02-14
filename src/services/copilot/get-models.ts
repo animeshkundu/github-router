@@ -22,12 +22,24 @@ interface ModelLimits {
   max_output_tokens?: number
   max_prompt_tokens?: number
   max_inputs?: number
+  max_non_streaming_output_tokens?: number
+  vision?: {
+    max_prompt_image_size?: number
+    max_prompt_images?: number
+    supported_media_types?: string[]
+  }
 }
 
 interface ModelSupports {
   tool_calls?: boolean
   parallel_tool_calls?: boolean
   dimensions?: boolean
+  streaming?: boolean
+  vision?: boolean
+  structured_outputs?: boolean
+  adaptive_thinking?: boolean
+  max_thinking_budget?: number
+  min_thinking_budget?: number
 }
 
 interface ModelCapabilities {
@@ -54,4 +66,13 @@ export interface Model {
     state: string
     terms: string
   }
+  billing?: {
+    is_premium: boolean
+    multiplier: number
+    restricted_to?: string[]
+  }
+  is_chat_default?: boolean
+  is_chat_fallback?: boolean
+  model_picker_category?: string
+  info_messages?: Array<{ code: string; message: string }>
 }
