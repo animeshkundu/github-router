@@ -10,56 +10,52 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
 
     <script src="https://unpkg.com/lucide-react@0.378.0/dist/umd/lucide.min.js"></script>
 
     <style>
-      /* Gruvbox-themed color palette */
       :root {
-        /* Main Color Palette */
-        --color-red: #cc241d;
-        --color-green: #98971a;
-        --color-yellow: #d79921;
-        --color-blue: #458588;
-        --color-purple: #b16286;
-        --color-aqua: #689d6a;
-        --color-orange: #d65d0e;
-        --color-gray: #a89984;
+        --color-red: #f43f5e;
+        --color-green: #22c55e;
+        --color-yellow: #f59e0b;
+        --color-blue: #0ea5e9;
+        --color-purple: #6366f1;
+        --color-aqua: #06b6d4;
+        --color-orange: #fb923c;
+        --color-gray: #94a3b8;
 
-        /* Accent/Lighter/Darker Shades of Main Colors */
-        --color-red-accent: #fb4934;
-        --color-green-accent: #b8bb26;
-        --color-yellow-accent: #fabd2f;
-        --color-blue-accent: #83a598;
-        --color-purple-accent: #d3869b;
-        --color-aqua-accent: #8ec07c;
-        --color-orange-accent: #fe8019;
-        --color-gray-accent: #928374;
+        --color-red-accent: #fecdd3;
+        --color-green-accent: #bbf7d0;
+        --color-yellow-accent: #fde68a;
+        --color-blue-accent: #bae6fd;
+        --color-purple-accent: #c7d2fe;
+        --color-aqua-accent: #a5f3fc;
+        --color-orange-accent: #fed7aa;
+        --color-gray-accent: #cbd5e1;
 
-        /* Background Colors */
-        --color-bg-darkest: #1d2021; /* bg0_h */
-        --color-bg: #282828; /* bg and bg0 */
-        --color-bg-light-1: #3c3836; /* bg1 */
-        --color-bg-light-2: #504945; /* bg2 */
-        --color-bg-light-3: #665c54; /* bg3 */
-        --color-bg-light-4: #7c6f64; /* bg4 */
-        --color-bg-soft: #32302f; /* bg0_s */
+        --color-bg-darkest: #04070f;
+        --color-bg: #0b1324;
+        --color-bg-light-1: #0f1b30;
+        --color-bg-light-2: #15233c;
+        --color-bg-light-3: #1d2f4f;
+        --color-bg-light-4: #253a61;
+        --color-bg-soft: #0d182d;
 
-        /* Foreground Colors */
-        --color-fg-darker: #a89984; /* fg4 - duplicate of gray */
-        --color-fg-dark: #bdae93; /* fg3 */
-        --color-fg-medium: #d5c4a1; /* fg2 */
-        --color-fg-light: #ebdbb2; /* fg and fg1 */
-        --color-fg-lightest: #fbf1c7; /* fg0 */
+        --color-fg-darker: #7f8ba6;
+        --color-fg-dark: #9aa6c0;
+        --color-fg-medium: #d5deed;
+        --color-fg-light: #e6edf7;
+        --color-fg-lightest: #f7fbff;
       }
 
-      /* Custom styles using the new palette */
       body {
-        font-family: "Inter", sans-serif;
-        background-color: var(--color-bg-darkest);
+        font-family: "Space Grotesk", "DM Sans", sans-serif;
+        background: radial-gradient(circle at 20% 20%, rgba(14, 165, 233, 0.12), transparent 32%),
+          radial-gradient(circle at 80% 0%, rgba(245, 158, 11, 0.14), transparent 26%),
+          var(--color-bg-darkest);
         color: var(--color-fg-light);
       }
 
@@ -96,17 +92,26 @@
     </style>
   </head>
   <body class="antialiased">
-    <nav class="px-4 py-2 flex items-center gap-4 text-sm" style="background-color: var(--color-bg); border-bottom: 1px solid var(--color-bg-light-2);">
-      <a href="index.html" class="transition-colors" style="color: var(--color-fg-dark);" onmouseover="this.style.color='var(--color-fg-lightest)'" onmouseout="this.style.color='var(--color-fg-dark)'">Docs</a>
-      <span style="color: var(--color-fg-lightest); font-weight: 600;">Dashboard</span>
-      <a href="https://github.com/animeshkundu/github-router" target="_blank" rel="noopener noreferrer" class="ml-auto transition-colors" style="color: var(--color-fg-dark);" onmouseover="this.style.color='var(--color-fg-lightest)'" onmouseout="this.style.color='var(--color-fg-dark)'">GitHub</a>
+    <nav class="sticky top-0 z-20 px-4 py-3 backdrop-blur" style="background: rgba(4, 7, 15, 0.8); border-bottom: 1px solid var(--color-bg-light-3);">
+      <div class="max-w-7xl mx-auto flex items-center gap-4 text-sm">
+        <a href="index.html" class="flex items-center gap-2 no-underline">
+          <span class="h-9 w-9 rounded-xl flex items-center justify-center font-semibold text-sm shadow-lg" style="background: linear-gradient(135deg, rgba(14,165,233,0.55), rgba(245,158,11,0.5)); color: var(--color-bg-darkest);">GR</span>
+          <span style="color: var(--color-fg-lightest); font-weight: 700;">github-router</span>
+        </a>
+        <div class="flex items-center gap-3 ml-auto">
+          <a href="index.html" class="transition-colors" style="color: var(--color-fg-dark);" onmouseover="this.style.color='var(--color-fg-lightest)'" onmouseout="this.style.color='var(--color-fg-dark)'">Docs</a>
+          <span class="px-3 py-1 rounded-full text-xs font-semibold" style="background-color: rgba(14,165,233,0.12); color: var(--color-blue); border: 1px solid rgba(14,165,233,0.25);">Usage dashboard</span>
+          <a href="https://github.com/animeshkundu/github-router" target="_blank" rel="noopener noreferrer" class="transition-colors" style="color: var(--color-fg-dark);" onmouseover="this.style.color='var(--color-fg-lightest)'" onmouseout="this.style.color='var(--color-fg-dark)'">GitHub</a>
+        </div>
+      </div>
     </nav>
     <div id="app" class="min-h-screen p-4 sm:p-6">
       <div class="max-w-7xl mx-auto">
         <!-- Header Section -->
-        <header class="mb-6">
+        <header class="mb-6 p-4 border rounded-xl shadow-lg" style="background-color: var(--color-bg-soft); border-color: var(--color-bg-light-2);">
+          <div class="inline-flex items-center gap-2 px-3 py-1 text-xs font-semibold rounded-full" style="background-color: rgba(14,165,233,0.12); color: var(--color-blue); border: 1px solid rgba(14,165,233,0.28);">Live Copilot quotas</div>
           <h1
-            class="text-2xl font-bold flex items-center gap-2"
+            class="text-2xl font-bold flex items-center gap-2 mt-2"
             style="color: var(--color-fg-lightest)"
           >
             <svg
@@ -130,14 +135,14 @@
             </svg>
             <span>github-router Usage Dashboard</span>
           </h1>
-          <p class="mt-1 text-sm" style="color: var(--color-gray)">
-            Should be the same as the one in VSCode
+          <p class="mt-2 text-sm leading-relaxed" style="color: var(--color-gray)">
+            Mirror the Copilot limits VS Code shows, inspect raw responses, and sanity check Anthropic/OpenAI parity in one place.
           </p>
         </header>
 
         <!-- Form Section -->
         <div
-          class="mb-6 p-4 border"
+          class="mb-6 p-4 sm:p-5 border rounded-xl shadow-lg"
           style="
             background-color: var(--color-bg-soft);
             border-color: var(--color-bg-light-2);
