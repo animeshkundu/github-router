@@ -66,12 +66,16 @@ test("sleep resolves after timeout", async () => {
 // --- normalizeModelId ---
 
 describe("normalizeModelId", () => {
-  test("lowercases", () => {
+  test("lowercases and inserts dash at letter-digit boundary", () => {
     expect(normalizeModelId("GPT-5.3-Codex")).toBe("gpt-5-3-codex")
   })
 
   test("replaces dots with dashes", () => {
     expect(normalizeModelId("gpt-5.3-codex")).toBe("gpt-5-3-codex")
+  })
+
+  test("inserts dash at letter-digit boundary", () => {
+    expect(normalizeModelId("gpt5.3-codex")).toBe("gpt-5-3-codex")
   })
 
   test("collapses repeated dashes", () => {

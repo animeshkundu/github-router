@@ -44,10 +44,15 @@ export function filterBetaHeader(value: string): string | undefined {
 
 /**
  * Normalize a model ID for fuzzy comparison: lowercase, replace dots with
- * dashes, and collapse repeated dashes. E.g. "gpt5.3-codex" → "gpt5-3-codex".
+ * dashes, insert dash at letter→digit boundaries, and collapse repeated
+ * dashes. E.g. "gpt5.3-codex" → "gpt-5-3-codex", "GPT-5.3-Codex" → "gpt-5-3-codex".
  */
 export function normalizeModelId(id: string): string {
-  return id.toLowerCase().replace(/\./g, "-").replace(/-{2,}/g, "-")
+  return id
+    .toLowerCase()
+    .replace(/\./g, "-")
+    .replace(/([a-z])(\d)/g, "$1-$2")
+    .replace(/-{2,}/g, "-")
 }
 
 /**
