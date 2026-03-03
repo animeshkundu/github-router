@@ -301,6 +301,28 @@ describe("E2E: /v1/messages", () => {
     expect(forwarded.model).toBe("claude-opus-4.6-1m")
   })
 
+  test("resolves claude-opus-4-6 (Claude Code format) to opus-1m, not opus 200K", async () => {
+    setupState()
+    const url = await startServer()
+
+    const upstream = mockUpstream(() => new Response(anthropicResponse))
+
+    // Claude Code sends "claude-opus-4-6" (dashes, no dots).
+    // Must resolve to 1m variant (1M context), NOT claude-opus-4.6 (200K).
+    await realFetch(`${url}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: "claude-opus-4-6",
+        max_tokens: 10,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+
+    const forwarded = JSON.parse(upstream.capturedBody() ?? "{}") as { model: string }
+    expect(forwarded.model).toBe("claude-opus-4.6-1m")
+  })
+
   test("applies default beta headers for Claude models when client sends none", async () => {
     setupState()
     const url = await startServer()

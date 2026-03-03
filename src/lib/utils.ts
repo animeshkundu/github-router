@@ -61,8 +61,8 @@ export function normalizeModelId(id: string): string {
  * Resolution cascade:
  * 1. Exact match
  * 2. Case-insensitive match
- * 3. Normalized match (dots→dashes, collapsed)
- * 4. Family preference (opus→1m, codex→highest version)
+ * 3. Family preference (opus→1m, codex→highest version)
+ * 4. Normalized match (dots→dashes, letter-digit boundaries)
  * 5. Return as-is with a warning
  */
 export function resolveModel(modelId: string): string {
@@ -77,14 +77,8 @@ export function resolveModel(modelId: string): string {
   const ciMatch = models.find((m) => m.id.toLowerCase() === lower)
   if (ciMatch) return ciMatch.id
 
-  // 3. Normalized match (dots → dashes, e.g. "gpt5.3-codex" → "gpt-5.3-codex")
-  const normalized = normalizeModelId(modelId)
-  const normMatch = models.find(
-    (m) => normalizeModelId(m.id) === normalized,
-  )
-  if (normMatch) return normMatch.id
-
-  // 4. Family preference
+  // 3. Family preference — before normalization so product aliases
+  //    (opus→1m, codex→latest) take priority over fuzzy matches
   if (lower.includes("opus")) {
     const oneM = models.find(
       (m) => m.id.includes("opus") && m.id.endsWith("-1m"),
@@ -97,11 +91,17 @@ export function resolveModel(modelId: string): string {
       (m) => m.id.includes("codex") && !m.id.includes("mini"),
     )
     if (codexModels.length > 0) {
-      // Sort by version descending (e.g. gpt-5.3-codex > gpt-5.2-codex)
       codexModels.sort((a, b) => b.id.localeCompare(a.id))
       return codexModels[0].id
     }
   }
+
+  // 4. Normalized match (dots → dashes, letter-digit boundaries)
+  const normalized = normalizeModelId(modelId)
+  const normMatch = models.find(
+    (m) => normalizeModelId(m.id) === normalized,
+  )
+  if (normMatch) return normMatch.id
 
   // 5. No match — warn and return as-is
   consola.warn(
