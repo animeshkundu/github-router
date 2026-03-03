@@ -63,7 +63,7 @@ export async function setupAndServe(
   await setupCopilotToken()
   await cacheModels()
 
-  consola.info(
+  consola.debug(
     `Available models: \n${state.models?.data.map((model) => `- ${model.id}`).join("\n")}`,
   )
 

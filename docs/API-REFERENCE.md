@@ -16,7 +16,7 @@ Passthrough to Copilot's `/responses`. OpenAI Responses API format used by Codex
 **Request**:
 ```json
 {
-  "model": "gpt5.2-codex",
+  "model": "gpt-5.2-codex",
   "input": "string or array of input items",
   "instructions": "optional system prompt",
   "tools": [{"type": "function", "name": "...", "parameters": {...}}],
@@ -45,7 +45,7 @@ Passthrough to Copilot's `/responses`. OpenAI Responses API format used by Codex
 - `response.function_call_arguments.delta` -function call argument chunk
 - `response.completed` -final complete response
 
-**Models**: gpt5.2-codex, gpt-5.1-codex-mini, gpt-5, gpt-4.1, etc.
+**Models**: gpt-5.3-codex, gpt-5.2-codex, gpt-5.1-codex-mini, gpt-5.1-codex-max, gpt-4.1, etc.
 
 ### GET `/v1/models` (also `/models`)
 Returns list of available Copilot models in OpenAI format.
@@ -55,14 +55,16 @@ Passthrough to Copilot's embeddings endpoint.
 
 ---
 
-## Anthropic-Compatible Endpoints (Translation)
+## Anthropic-Compatible Endpoints (Passthrough)
 
 ### POST `/v1/messages`
-Translates Anthropic Messages API format to OpenAI Chat Completions, calls Copilot, translates response back.
+Passthrough to Copilot's native `/v1/messages?beta=true` endpoint.
 
 **Request**: Anthropic Messages payload (`model`, `messages`, `max_tokens`, `system`, `tools`, etc.)
 **Response**: Anthropic Messages response (streaming or non-streaming)
 **Streaming**: Anthropic SSE events (`message_start`, `content_block_delta`, `message_stop`, etc.)
+**Models**: claude-opus-4.6-1m, claude-opus-4.6, claude-sonnet-4.6, claude-sonnet-4, etc.
+**Model resolution**: `opus` → `claude-opus-4.6-1m`, `claude-opus-4-6` → `claude-opus-4.6-1m`
 
 ### POST `/v1/messages/count_tokens`
 Estimates token count for an Anthropic-format payload.

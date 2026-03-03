@@ -32,7 +32,7 @@ export function buildLaunchCommand(target: LaunchTarget): {
   const cmd: string[] =
     target.kind === "claude-code"
       ? ["claude", "--dangerously-skip-permissions", ...target.extraArgs]
-      : ["codex", "-m", target.model ?? DEFAULT_CODEX_MODEL, ...target.extraArgs]
+      : ["codex", "--full-auto", "-m", target.model ?? DEFAULT_CODEX_MODEL, ...target.extraArgs]
 
   return {
     cmd,
@@ -53,10 +53,22 @@ export function launchChild(target: LaunchTarget, server: Server): void {
 
   let child: ChildProcess
   try {
-    child = spawn(cmd[0], cmd.slice(1), {
-      env,
-      stdio: "inherit",
-    })
+    if (process.platform === "win32") {
+      // On Windows, npm-installed binaries are .cmd scripts that need
+      // shell execution. Use the full command as a single string to
+      // avoid DEP0190 deprecation warning about shell + args.
+      const quoted = cmd.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ")
+      child = spawn(quoted, [], {
+        env,
+        stdio: "inherit",
+        shell: true,
+      })
+    } else {
+      child = spawn(cmd[0], cmd.slice(1), {
+        env,
+        stdio: "inherit",
+      })
+    }
   } catch (error) {
     consola.error(
       `Failed to launch ${executable}:`,

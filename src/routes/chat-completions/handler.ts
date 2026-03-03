@@ -5,6 +5,7 @@ import { streamSSE, type SSEMessage } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
 import { HTTPError } from "~/lib/error"
+import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
@@ -44,6 +45,8 @@ export async function handleCompletion(c: Context) {
     (model) => model.id === payload.model,
   )
 
+  logEndpointMismatch(payload.model, "/chat/completions")
+
   // Calculate token count
   let inputTokens: number | undefined
   try {
@@ -58,7 +61,7 @@ export async function handleCompletion(c: Context) {
   if (isNullish(payload.max_tokens)) {
     payload = {
       ...payload,
-      max_tokens: selectedModel?.capabilities.limits.max_output_tokens,
+      max_tokens: selectedModel?.capabilities?.limits?.max_output_tokens,
     }
     if (debugEnabled) {
       consola.debug("Set max_tokens to:", JSON.stringify(payload.max_tokens))

@@ -74,7 +74,7 @@ Or set the env vars yourself:
 ```sh
 export OPENAI_BASE_URL="http://localhost:8787/v1"
 export OPENAI_API_KEY="dummy"
-codex -m gpt5.2-codex
+codex --full-auto -m gpt-5.3-codex
 ```
 
 ---
@@ -110,12 +110,12 @@ Anthropic endpoints are only available under `/v1/messages`.
 <details>
 <summary>Model / endpoint compatibility</summary>
 
-| Model | /chat/completions | /responses |
-|---|---|---|
-| gpt-4.1, gpt-4o | Yes | Yes |
-| gpt5.2-codex, gpt-5.1-codex-mini | No | Yes |
-| claude-sonnet-4, claude-opus-4 | Yes (via /messages) | No |
-| o3, o4-mini | Yes | Yes |
+| Model | /chat/completions | /responses | /v1/messages |
+|---|---|---|---|
+| gpt-4.1, gpt-4o | Yes | Yes | No |
+| gpt-5.3-codex, gpt-5.2-codex | No | Yes | No |
+| claude-opus-4.6, claude-sonnet-4.6 | Yes | No | Yes |
+| o3, o4-mini | Yes | Yes | No |
 
 </details>
 
