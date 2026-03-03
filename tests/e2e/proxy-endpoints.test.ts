@@ -439,3 +439,57 @@ describe("E2E: model resolution edge cases", () => {
     expect(forwarded.model).toBe("gpt-5.3-codex")
   })
 })
+
+describe("E2E: endpoint-model mismatch", () => {
+  test("codex model on /v1/messages forwards but upstream rejects", async () => {
+    setupState()
+    const url = await startServer()
+
+    const upstream = mockUpstream(() =>
+      new Response(
+        JSON.stringify({
+          type: "error",
+          error: { type: "invalid_request_error", message: "model not supported" },
+        }),
+        { status: 400 },
+      ),
+    )
+
+    const res = await realFetch(`${url}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: "gpt-5.3-codex",
+        max_tokens: 10,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+
+    expect(res.status).toBe(400)
+    const body = JSON.parse(upstream.capturedBody() ?? "{}") as { model: string }
+    expect(body.model).toBe("gpt-5.3-codex")
+  })
+
+  test("claude model on /v1/responses forwards but upstream rejects", async () => {
+    setupState()
+    const url = await startServer()
+
+    mockUpstream(() =>
+      new Response(
+        JSON.stringify({
+          type: "error",
+          error: { type: "invalid_request_error", message: "model not supported" },
+        }),
+        { status: 400 },
+      ),
+    )
+
+    const res = await realFetch(`${url}/v1/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-opus-4.6", input: "hi", stream: false }),
+    })
+
+    expect(res.status).toBe(400)
+  })
+})

@@ -124,6 +124,22 @@ describe("resolveModel", () => {
     expect(resolveModel("opus")).toBe("claude-opus-4.6-1m")
   })
 
+  test("claude-opus-4-6 resolves to 1m, not 200K variant (regression)", () => {
+    // Claude Code sends "claude-opus-4-6" (dashes, no dots).
+    // Family preference (opus→1m) must run before normalization,
+    // otherwise it matches claude-opus-4.6 (200K) via normalization.
+    expect(resolveModel("claude-opus-4-6")).toBe("claude-opus-4.6-1m")
+  })
+
+  test("claude-opus-4.6 exact match stays at 200K, does not redirect to 1m", () => {
+    // When user explicitly requests the 200K variant, respect it.
+    expect(resolveModel("claude-opus-4.6")).toBe("claude-opus-4.6")
+  })
+
+  test("claude-opus-4.6-1m exact match stays as-is", () => {
+    expect(resolveModel("claude-opus-4.6-1m")).toBe("claude-opus-4.6-1m")
+  })
+
   test("codex family preference resolves to highest version", () => {
     expect(resolveModel("codex")).toBe("gpt-5.3-codex")
   })
