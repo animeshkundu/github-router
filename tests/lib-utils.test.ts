@@ -1,6 +1,7 @@
 import { test, expect, mock, afterEach, describe, beforeEach } from "bun:test"
 
 import { state } from "../src/lib/state"
+import { DEFAULT_CODEX_MODEL } from "../src/lib/port"
 import {
   cacheModels,
   cacheVSCodeVersion,
@@ -15,6 +16,11 @@ const originalFetch = globalThis.fetch
 
 afterEach(() => {
   globalThis.fetch = originalFetch
+})
+
+test("DEFAULT_CODEX_MODEL matches Copilot API format", () => {
+  // Must match both Copilot's model ID and Codex CLI's bundled catalog entry
+  expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.3-codex")
 })
 
 test("isNullish handles null and undefined", () => {

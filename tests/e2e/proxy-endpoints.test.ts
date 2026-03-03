@@ -400,6 +400,45 @@ describe("E2E: /v1/chat/completions", () => {
     const forwarded = JSON.parse(upstream.capturedBody() ?? "{}") as { max_tokens?: number }
     expect(forwarded.max_tokens).toBe(32768)
   })
+
+  test("does not crash when model has no capabilities", async () => {
+    // Simulate a model with no capabilities data (as seen in some Copilot responses)
+    const modelWithoutCaps = {
+      id: "bare-model",
+      model_picker_enabled: true,
+      name: "Bare Model",
+      object: "model",
+      preview: false,
+      vendor: "test",
+      version: "1",
+    }
+    // @ts-expect-error - intentionally omitting capabilities
+    setupState([...allModels, modelWithoutCaps])
+    const url = await startServer()
+
+    const upstream = mockUpstream(() =>
+      new Response(JSON.stringify({
+        id: "chatcmpl-123",
+        object: "chat.completion",
+        choices: [{ message: { role: "assistant", content: "hi" }, index: 0, finish_reason: "stop" }],
+        usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+      })),
+    )
+
+    const res = await realFetch(`${url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "bare-model",
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+
+    // Should not crash — capabilities?.limits?.max_output_tokens is undefined
+    expect(res.status).toBe(200)
+    const forwarded = JSON.parse(upstream.capturedBody() ?? "{}") as { max_tokens?: number }
+    expect(forwarded.max_tokens).toBeUndefined()
+  })
 })
 
 describe("E2E: model resolution edge cases", () => {
