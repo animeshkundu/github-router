@@ -121,7 +121,7 @@ test("chat completions stream returns SSE output", async () => {
   expect(body).toContain("data:")
 })
 
-test("responses injects web search and default max_output_tokens", async () => {
+test("responses injects web search and strips tools", async () => {
   resetState()
   let lastBody: string | undefined
 
@@ -167,7 +167,8 @@ test("responses injects web search and default max_output_tokens", async () => {
   }
   expect(forwarded.tools).toBeUndefined()
   expect(forwarded.tool_choice).toBeUndefined()
-  expect(forwarded.max_output_tokens).toBe(256)
+  // max_output_tokens is no longer injected — Codex CLI relies on server defaults
+  expect(forwarded.max_output_tokens).toBeUndefined()
   expect(forwarded.instructions).toContain("[Web Search Results]")
 })
 
