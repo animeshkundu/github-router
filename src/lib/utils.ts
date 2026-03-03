@@ -43,23 +43,98 @@ export function filterBetaHeader(value: string): string | undefined {
 }
 
 /**
+ * Normalize a model ID for fuzzy comparison: lowercase, replace dots with
+ * dashes, and collapse repeated dashes. E.g. "gpt5.3-codex" → "gpt5-3-codex".
+ */
+export function normalizeModelId(id: string): string {
+  return id.toLowerCase().replace(/\./g, "-").replace(/-{2,}/g, "-")
+}
+
+/**
  * Resolve a model name to the best available variant in the Copilot model list.
- * Prefers the 1M context variant for opus models.
+ *
+ * Resolution cascade:
+ * 1. Exact match
+ * 2. Case-insensitive match
+ * 3. Normalized match (dots→dashes, collapsed)
+ * 4. Family preference (opus→1m, codex→highest version)
+ * 5. Return as-is with a warning
  */
 export function resolveModel(modelId: string): string {
   const models = state.models?.data
   if (!models) return modelId
 
-  // Exact match — no remapping needed
+  // 1. Exact match
   if (models.some((m) => m.id === modelId)) return modelId
 
-  // For opus models, prefer the 1m variant
-  if (modelId.toLowerCase().includes("opus")) {
-    const oneM = models.find((m) => m.id.includes("opus") && m.id.endsWith("-1m"))
+  // 2. Case-insensitive match
+  const lower = modelId.toLowerCase()
+  const ciMatch = models.find((m) => m.id.toLowerCase() === lower)
+  if (ciMatch) return ciMatch.id
+
+  // 3. Normalized match (dots → dashes, e.g. "gpt5.3-codex" → "gpt-5.3-codex")
+  const normalized = normalizeModelId(modelId)
+  const normMatch = models.find(
+    (m) => normalizeModelId(m.id) === normalized,
+  )
+  if (normMatch) return normMatch.id
+
+  // 4. Family preference
+  if (lower.includes("opus")) {
+    const oneM = models.find(
+      (m) => m.id.includes("opus") && m.id.endsWith("-1m"),
+    )
     if (oneM) return oneM.id
   }
 
+  if (lower.includes("codex")) {
+    const codexModels = models.filter(
+      (m) => m.id.includes("codex") && !m.id.includes("mini"),
+    )
+    if (codexModels.length > 0) {
+      // Sort by version descending (e.g. gpt-5.3-codex > gpt-5.2-codex)
+      codexModels.sort((a, b) => b.id.localeCompare(a.id))
+      return codexModels[0].id
+    }
+  }
+
+  // 5. No match — warn and return as-is
+  consola.warn(
+    `Model "${modelId}" not found in Copilot model list. Available: ${models.map((m) => m.id).join(", ")}`,
+  )
   return modelId
+}
+
+/**
+ * Resolve a codex model ID, falling back to the best available codex model.
+ * Used by the codex subcommand for model selection.
+ */
+export function resolveCodexModel(modelId: string): string {
+  const resolved = resolveModel(modelId)
+  const models = state.models?.data
+  if (!models) return resolved
+
+  // Check if the resolved model exists in the model list
+  if (models.some((m) => m.id === resolved)) return resolved
+
+  // Fall back to the best available codex model
+  const codexModels = models.filter((m) => {
+    const endpoints = m.supported_endpoints ?? []
+    return (
+      m.id.includes("codex")
+      && !m.id.includes("mini")
+      && (endpoints.length === 0 || endpoints.includes("/responses"))
+    )
+  })
+
+  if (codexModels.length > 0) {
+    codexModels.sort((a, b) => b.id.localeCompare(a.id))
+    const best = codexModels[0].id
+    consola.warn(`Model "${modelId}" not available, using "${best}" instead`)
+    return best
+  }
+
+  return resolved
 }
 
 export async function cacheModels(): Promise<void> {

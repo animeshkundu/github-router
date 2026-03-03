@@ -34,7 +34,7 @@ function formatTokenInfo(
   if (inputTokens === undefined) return undefined
 
   const parts: Array<string> = []
-  const maxPrompt = model?.capabilities.limits.max_prompt_tokens
+  const maxPrompt = model?.capabilities?.limits?.max_prompt_tokens
 
   if (maxPrompt) {
     const pct = ((inputTokens / maxPrompt) * 100).toFixed(1)

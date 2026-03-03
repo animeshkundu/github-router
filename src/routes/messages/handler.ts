@@ -4,6 +4,7 @@ import consola from "consola"
 
 import { awaitApproval } from "~/lib/approval"
 import { HTTPError } from "~/lib/error"
+import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
@@ -192,9 +193,12 @@ export async function handleCompletion(c: Context) {
   const { body: resolvedBody, originalModel, resolvedModel } = resolveModelInBody(finalBody)
 
   // Look up model metadata for context window info
+  const modelId = resolvedModel ?? originalModel
   const selectedModel = state.models?.data.find(
-    (m) => m.id === (resolvedModel ?? originalModel),
+    (m) => m.id === modelId,
   )
+
+  if (modelId) logEndpointMismatch(modelId, "/v1/messages")
 
   // Apply default anthropic-beta for Claude models when client sends none
   const effectiveBetas = applyDefaultBetas(betaHeaders, resolvedModel ?? originalModel)

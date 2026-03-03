@@ -61,7 +61,7 @@ mock.module("~/lib/server-setup", () => ({
 }))
 
 mock.module("~/lib/port", () => ({
-  DEFAULT_CODEX_MODEL: "gpt5.3-codex",
+  DEFAULT_CODEX_MODEL: "gpt-5.3-codex",
 }))
 
 mock.module("consola", () => ({
@@ -166,7 +166,7 @@ describe("codex command", () => {
 
     const [, args] = spawnMock.mock.calls[0]
     expect(args).toContain("-m")
-    expect(args).toContain("gpt5.3-codex")
+    expect(args).toContain("gpt-5.3-codex")
   })
 
   test("model override applied", async () => {

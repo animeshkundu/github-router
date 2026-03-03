@@ -6,10 +6,11 @@ import { streamSSE } from "hono/streaming"
 import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
 import { awaitApproval } from "~/lib/approval"
 import { HTTPError } from "~/lib/error"
+import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
-import { isNullish, resolveModel } from "~/lib/utils"
+import { resolveModel } from "~/lib/utils"
 import {
   createResponses,
   type ResponsesApiResponse,
@@ -42,20 +43,11 @@ export async function handleResponses(c: Context) {
     (model) => model.id === payload.model,
   )
 
+  logEndpointMismatch(payload.model, "/responses")
+
   if (state.manualApprove) await awaitApproval()
 
   await injectWebSearchIfNeeded(payload)
-
-  if (isNullish(payload.max_output_tokens)) {
-    payload.max_output_tokens =
-      selectedModel?.capabilities.limits.max_output_tokens
-    if (debugEnabled) {
-      consola.debug(
-        "Set max_output_tokens to:",
-        JSON.stringify(payload.max_output_tokens),
-      )
-    }
-  }
 
   const response = await createResponses(payload, selectedModel?.requestHeaders).catch(
     async (error: unknown) => {

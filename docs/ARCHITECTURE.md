@@ -18,12 +18,10 @@ Hono Web Server (src/server.ts)
   ▼
 Route Handler (src/routes/<endpoint>/handler.ts)
   │
-  ├─ PASSTHROUGH routes: forward directly to Copilot
-  │   ├─ /v1/chat/completions → Copilot /chat/completions
-  │   └─ /v1/responses → Copilot /responses
-  │
-  └─ TRANSLATION routes: convert format, then call Copilot
-      └─ /v1/messages (Anthropic) → translate → Copilot /chat/completions → translate back
+  └─ PASSTHROUGH routes: forward directly to Copilot
+      ├─ /v1/chat/completions → Copilot /chat/completions
+      ├─ /v1/responses        → Copilot /responses
+      └─ /v1/messages         → Copilot /v1/messages?beta=true
   │
   ▼
 GitHub Copilot API (api.githubcopilot.com)
@@ -35,6 +33,8 @@ GitHub Copilot API (api.githubcopilot.com)
 src/
 ├── main.ts              # CLI entry point (citty subcommand router)
 ├── start.ts             # "start" subcommand: server init + CLI flags
+├── codex.ts             # "codex" subcommand: proxy + launch Codex CLI
+├── claude.ts            # "claude" subcommand: proxy + launch Claude Code
 ├── auth.ts              # "auth" subcommand: GitHub device flow
 ├── check-usage.ts       # "check-usage" subcommand
 ├── debug.ts             # "debug" subcommand
@@ -49,14 +49,10 @@ src/
 │   │   ├── route.ts       # POST /
 │   │   └── handler.ts     # Rate limit → createResponses() → response
 │   │
-│   ├── messages/          # TRANSLATION: Anthropic Messages API
+│   ├── messages/          # PASSTHROUGH: Anthropic Messages API
 │   │   ├── route.ts       # POST /, POST /count_tokens
-│   │   ├── handler.ts     # Rate limit → translate → createChatCompletions() → translate back
-│   │   ├── anthropic-types.ts        # Anthropic API type definitions
-│   │   ├── non-stream-translation.ts # Anthropic ↔ OpenAI format conversion
-│   │   ├── stream-translation.ts     # Streaming chunk conversion
-│   │   ├── count-tokens-handler.ts   # Token counting endpoint
-│   │   └── utils.ts                  # Stop reason mapping
+│   │   ├── handler.ts     # Rate limit → resolveModel → createMessages() → response
+│   │   └── count-tokens-handler.ts   # Token counting endpoint
 │   │
 │   ├── models/            # GET /models (list available Copilot models)
 │   ├── embeddings/        # POST /embeddings (passthrough)
@@ -67,8 +63,10 @@ src/
 │   ├── copilot/
 │   │   ├── create-chat-completions.ts  # POST to Copilot /chat/completions
 │   │   ├── create-responses.ts         # POST to Copilot /responses
+│   │   ├── create-messages.ts          # POST to Copilot /v1/messages?beta=true
 │   │   ├── create-embeddings.ts        # POST to Copilot /embeddings
-│   │   └── get-models.ts              # GET Copilot /models
+│   │   ├── get-models.ts              # GET Copilot /models
+│   │   └── web-search.ts             # Copilot web search integration
 │   ├── github/                         # GitHub OAuth + token management
 │   └── get-vscode-version.ts          # Fetches latest VSCode version
 │
@@ -83,31 +81,90 @@ src/
     ├── proxy.ts           # HTTP proxy support
     ├── shell.ts           # Cross-platform env var script generation
     ├── paths.ts           # File system paths for token storage
-    └── utils.ts           # sleep(), isNullish(), cacheModels(), cacheVSCodeVersion()
+    ├── port.ts            # Default port, random port generation, default codex model
+    ├── launch.ts          # Child process spawning for codex/claude subcommands
+    ├── model-validation.ts  # Endpoint support checks, mismatch logging
+    ├── server-setup.ts    # Shared server bootstrap (setupAndServe, env var builders)
+    ├── request-log.ts     # Structured request logging
+    └── utils.ts           # resolveModel(), filterBetaHeader(), normalizeModelId(),
+                           # resolveCodexModel(), sleep(), cacheModels(), cacheVSCodeVersion()
 ```
 
-## Two Patterns: Passthrough vs Translation
+## Passthrough Architecture
 
-### Passthrough (chat-completions, responses, embeddings)
+All three main API routes are now passthrough: they forward the request body directly to the corresponding Copilot endpoint and return the response as-is.
+
+### Passthrough routes (chat-completions, responses, messages, embeddings)
 When Copilot natively supports the API format, we just proxy the request through.
 Files: `service.ts` + `handler.ts` + `route.ts` (3 files)
 
-### Translation (messages/Anthropic)
-When Copilot doesn't support the format, we translate to/from Chat Completions.
-Files: `types.ts` + `non-stream-translation.ts` + `stream-translation.ts` + `handler.ts` + `route.ts` (5 files)
+The messages route previously used a translation layer (Anthropic format to/from Chat Completions format) with dedicated `anthropic-types.ts`, `non-stream-translation.ts`, and `stream-translation.ts` files. This was removed when Copilot added native `/v1/messages` support, making the translation unnecessary.
 
 ## Model Endpoint Routing
 
 Not all models support all endpoints:
 
-| Model Family | `/chat/completions` | `/responses` |
-|---|---|---|
-| gpt-4.1, gpt-4o | YES | YES |
-| gpt5.2-codex, gpt-5.1-codex-mini | NO | YES |
-| claude-sonnet-4, claude-opus-4 | YES (via /messages translation) | NO |
-| o3, o4-mini | YES | YES |
+| Model Family | `/chat/completions` | `/responses` | `/v1/messages` |
+|---|---|---|---|
+| gpt-4.1, gpt-4o | YES | YES | No |
+| gpt-5-codex variants | NO | YES (ONLY) | No |
+| claude-sonnet-4, claude-opus-4 | YES | NO | YES |
+| o3, o4-mini | YES | YES | No |
 
 Models report `supported_endpoints` in their metadata from the `/models` endpoint.
+
+## Model Resolution
+
+When a client requests a model by name, the proxy resolves it against the cached Copilot model list using a five-step cascade:
+
+1. **Exact match** -- model ID matches a known model verbatim
+2. **Case-insensitive match** -- e.g. `Claude-Sonnet-4` resolves to `claude-sonnet-4`
+3. **Normalized match** -- dots replaced with dashes, repeated dashes collapsed (e.g. `gpt5.3-codex` matches `gpt-5.3-codex`)
+4. **Family preference** -- shorthand names resolve to preferred variants:
+   - `opus` resolves to the `-1m` context variant (e.g. `claude-opus-4-1m`)
+   - `codex` resolves to the highest-versioned non-mini codex model
+5. **Passthrough with warning** -- if no match is found, the original model ID is forwarded as-is and a warning is logged
+
+The `resolveCodexModel()` variant extends this for the codex subcommand: if the resolved model still does not exist in the model list, it falls back to the best available codex model that supports `/responses`.
+
+Resolution is implemented in `src/lib/utils.ts` and invoked by both the subcommand startup logic and the messages route handler.
+
+## Subcommand Lifecycle
+
+The `codex` and `claude` subcommands start the proxy server and launch their respective CLI tools as child processes, wired to use the proxy.
+
+### Startup sequence
+
+Both subcommands follow the same pattern (implemented via `setupAndServe` in `src/lib/server-setup.ts`):
+
+1. **setupAndServe** -- parse CLI flags, initialize proxy/auth/tokens, start Hono server on a random port
+2. **cacheModels** -- fetch and cache the Copilot model list (called within `setupAndServe`)
+3. **Validate model** -- resolve the requested model against the cached list, warn if not found
+4. **Launch child process** -- spawn the CLI tool via `launchChild` (`src/lib/launch.ts`), which handles signal forwarding and server cleanup on exit
+
+### Environment variables
+
+Each subcommand sets environment variables so the child process uses the proxy:
+
+**codex** (`src/codex.ts`):
+- `OPENAI_BASE_URL` = `<serverUrl>/v1`
+- `OPENAI_API_KEY` = `dummy`
+- Codex CLI uses the `/v1/responses` endpoint
+
+**claude** (`src/claude.ts`):
+- `ANTHROPIC_BASE_URL` = `<serverUrl>`
+- `ANTHROPIC_AUTH_TOKEN` = `dummy`
+- `ANTHROPIC_MODEL` = resolved model (when `-m` is specified)
+- `DISABLE_NON_ESSENTIAL_MODEL_CALLS` = `1`
+- `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` = `1`
+- Claude Code uses the `/v1/messages` endpoint
+
+### Endpoint usage
+
+| Subcommand | Primary endpoint | Default model |
+|---|---|---|
+| `codex` | `/v1/responses` | `gpt-5.3-codex` |
+| `claude` | `/v1/messages` | (Claude Code's own default) |
 
 ## Authentication Flow
 
@@ -137,9 +194,8 @@ Singleton object tracking:
 
 ## Streaming
 
-Both passthrough and translation routes support SSE streaming:
+Both passthrough routes support SSE streaming:
 - **Passthrough**: SSE events from Copilot forwarded directly to client
-- **Translation**: Chat Completions chunks → translated to Anthropic SSE events
 
 The `fetch-event-stream` library handles parsing incoming SSE from Copilot.
 Hono's `streamSSE()` helper handles writing outgoing SSE to the client.

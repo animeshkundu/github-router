@@ -40,7 +40,7 @@ afterEach(() => {
 
 test("sends POST to /responses endpoint", async () => {
   const payload: ResponsesPayload = {
-    model: "gpt5.2-codex",
+    model: "gpt-5.2-codex",
     input: "Hello",
   }
   await createResponses(payload)
@@ -51,7 +51,7 @@ test("sends POST to /responses endpoint", async () => {
 
 test("sets X-Initiator to user when input is a string", async () => {
   const payload: ResponsesPayload = {
-    model: "gpt5.2-codex",
+    model: "gpt-5.2-codex",
     input: "Hello",
   }
   await createResponses(payload)
@@ -63,7 +63,7 @@ test("sets X-Initiator to user when input is a string", async () => {
 
 test("sets X-Initiator to agent when input has assistant messages", async () => {
   const payload: ResponsesPayload = {
-    model: "gpt5.2-codex",
+    model: "gpt-5.2-codex",
     input: [
       { role: "user", content: "hi" },
       { role: "assistant", content: [{ type: "output_text", text: "hello" }] },
@@ -78,7 +78,7 @@ test("sets X-Initiator to agent when input has assistant messages", async () => 
 
 test("sets X-Initiator to agent when input has function_call_output", async () => {
   const payload: ResponsesPayload = {
-    model: "gpt5.2-codex",
+    model: "gpt-5.2-codex",
     input: [
       { role: "user", content: "hi" },
       { type: "function_call_output", call_id: "call_123", output: "result" },
@@ -93,7 +93,7 @@ test("sets X-Initiator to agent when input has function_call_output", async () =
 
 test("sets X-Initiator to agent when input has function_call", async () => {
   const payload: ResponsesPayload = {
-    model: "gpt5.2-codex",
+    model: "gpt-5.2-codex",
     input: [
       { role: "user", content: "hi" },
       {
@@ -113,7 +113,7 @@ test("sets X-Initiator to agent when input has function_call", async () => {
 
 test("sets X-Initiator to user when input has only user messages", async () => {
   const payload: ResponsesPayload = {
-    model: "gpt5.2-codex",
+    model: "gpt-5.2-codex",
     input: [
       { role: "user", content: "hi" },
       { role: "user", content: "hello again" },
@@ -128,7 +128,7 @@ test("sets X-Initiator to user when input has only user messages", async () => {
 
 test("strips unsupported tool types like web_search from payload", async () => {
   const payload: ResponsesPayload = {
-    model: "gpt5.2-codex",
+    model: "gpt-5.2-codex",
     input: "Hello",
     tools: [
       { type: "web_search" },
@@ -153,7 +153,7 @@ test("strips unsupported tool types like web_search from payload", async () => {
 
 test("removes tools field entirely when all tools are unsupported", async () => {
   const payload: ResponsesPayload = {
-    model: "gpt5.2-codex",
+    model: "gpt-5.2-codex",
     input: "Hello",
     tools: [{ type: "web_search" }, { type: "code_interpreter" }],
     tool_choice: { type: "tool", name: "web_search" },
@@ -169,7 +169,7 @@ test("removes tools field entirely when all tools are unsupported", async () => 
 
 test("clears function tool_choice when tool is stripped", async () => {
   const payload: ResponsesPayload = {
-    model: "gpt5.2-codex",
+    model: "gpt-5.2-codex",
     input: "Hello",
     tools: [{ type: "web_search" }],
     tool_choice: { type: "function", function: { name: "web_search" } },
@@ -185,7 +185,7 @@ test("clears function tool_choice when tool is stripped", async () => {
 
 test("returns parsed JSON for non-streaming response", async () => {
   const payload: ResponsesPayload = {
-    model: "gpt5.2-codex",
+    model: "gpt-5.2-codex",
     input: "Hello",
     stream: false,
   }
@@ -201,7 +201,7 @@ test("throws HTTPError when response is not ok", async () => {
   globalThis.fetch = errorFetch
 
   await expect(
-    createResponses({ model: "gpt5.2-codex", input: "Hello" }),
+    createResponses({ model: "gpt-5.2-codex", input: "Hello" }),
   ).rejects.toBeInstanceOf(HTTPError)
 })
 
@@ -216,7 +216,7 @@ test("returns stream events when stream is enabled", async () => {
   globalThis.fetch = streamFetch
 
   const stream = (await createResponses({
-    model: "gpt5.2-codex",
+    model: "gpt-5.2-codex",
     input: "Hello",
     stream: true,
   })) as AsyncIterable<{ data: string }>

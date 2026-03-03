@@ -1,5 +1,5 @@
 export const DEFAULT_PORT = 8787
-export const DEFAULT_CODEX_MODEL = "gpt5.3-codex"
+export const DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
 
 const PORT_RANGE_MIN = 11000
 const PORT_RANGE_MAX = 65535
