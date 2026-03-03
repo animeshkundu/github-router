@@ -32,7 +32,7 @@ export function buildLaunchCommand(target: LaunchTarget): {
   const cmd: string[] =
     target.kind === "claude-code"
       ? ["claude", "--dangerously-skip-permissions", ...target.extraArgs]
-      : ["codex", "-m", target.model ?? DEFAULT_CODEX_MODEL, ...target.extraArgs]
+      : ["codex", "--full-auto", "-m", target.model ?? DEFAULT_CODEX_MODEL, ...target.extraArgs]
 
   return {
     cmd,

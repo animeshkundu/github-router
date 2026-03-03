@@ -77,7 +77,7 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual(["codex", "-m", DEFAULT_CODEX_MODEL])
+      expect(result.cmd).toEqual(["codex", "--full-auto", "-m", DEFAULT_CODEX_MODEL])
       expect(result.env.OPENAI_BASE_URL).toBe("http://localhost:12345/v1")
       expect(result.env.OPENAI_API_KEY).toBe("dummy")
     })
@@ -95,7 +95,7 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual(["codex", "-m", "gpt-4o"])
+      expect(result.cmd).toEqual(["codex", "--full-auto", "-m", "gpt-4o"])
     })
 
     test("appends extra args after base command", () => {
@@ -110,7 +110,7 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual(["codex", "-m", DEFAULT_CODEX_MODEL, "--full-auto"])
+      expect(result.cmd).toEqual(["codex", "--full-auto", "-m", DEFAULT_CODEX_MODEL, "--full-auto"])
     })
   })
 })
