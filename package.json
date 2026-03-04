@@ -16,7 +16,7 @@
   "homepage": "https://github.com/animeshkundu/github-router",
   "bugs": "https://github.com/animeshkundu/github-router/issues",
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "registry": "https://registry.npmjs.org"
   },
   "repository": {
     "type": "git",

@@ -67,7 +67,7 @@ export const claude = defineCommand({
     }
 
     consola.success(`Server ready on ${serverUrl}, launching Claude Code...`)
-    consola.level = 1 // errors and warnings only — prevent TUI corruption
+    consola.level = -Infinity // silent — prevent TUI corruption
 
     const envVars = getClaudeCodeEnvVars(serverUrl, resolvedModel ?? args.model)
     const extraArgs = ((args as unknown as Record<string, unknown>)._ as string[]) ?? []

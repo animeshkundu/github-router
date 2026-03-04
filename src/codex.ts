@@ -70,7 +70,7 @@ export const codex = defineCommand({
     }
 
     consola.success(`Server ready on ${serverUrl}, launching Codex CLI (${codexModel})...`)
-    consola.level = 1 // errors and warnings only — prevent TUI corruption
+    consola.level = -Infinity // silent — prevent TUI corruption
 
     const envVars = getCodexEnvVars(serverUrl)
     const extraArgs = ((args as unknown as Record<string, unknown>)._ as string[]) ?? []
