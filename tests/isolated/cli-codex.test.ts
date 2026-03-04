@@ -34,6 +34,7 @@ mock.module("node:process", () => ({
     exit: exitMock,
     on: processOnMock,
     stdout: { get isTTY() { return isTTY } },
+    stderr: { write: mock() },
   },
 }))
 
@@ -72,6 +73,8 @@ mock.module("consola", () => ({
     debug: mock(),
     success: mock(),
     level: 1,
+    options: { reporters: [], throttle: 1000 },
+    setReporters: mock(),
   },
 }))
 
