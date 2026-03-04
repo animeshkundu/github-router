@@ -3,6 +3,7 @@ import process from "node:process"
 import { defineCommand } from "citty"
 import consola from "consola"
 
+import { enableFileLogging } from "./lib/file-log-reporter"
 import { launchChild } from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
 import {
@@ -50,7 +51,9 @@ export const claude = defineCommand({
       process.exit(1)
     }
 
-    // Validate model if overridden
+    enableFileLogging() // redirect errors/warnings to file; suppress terminal output
+
+    // Validate model if overridden (warnings go to log file, not terminal)
     let resolvedModel: string | undefined
     if (args.model) {
       resolvedModel = resolveModel(args.model)
@@ -66,8 +69,8 @@ export const claude = defineCommand({
       }
     }
 
-    consola.success(`Server ready on ${serverUrl}, launching Claude Code...`)
-    consola.level = -Infinity // silent — prevent TUI corruption
+    // Print to stderr directly — consola's terminal reporter is already gone
+    process.stderr.write(`Server ready on ${serverUrl}, launching Claude Code...\n`)
 
     const envVars = getClaudeCodeEnvVars(serverUrl, resolvedModel ?? args.model)
     const extraArgs = ((args as unknown as Record<string, unknown>)._ as string[]) ?? []

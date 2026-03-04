@@ -69,6 +69,8 @@ mock.module("consola", () => ({
     error: mock(() => {}),
     debug: mock(() => {}),
     level: 0,
+    options: { reporters: [], throttle: 1000 },
+    setReporters: mock(),
   },
 }))
 

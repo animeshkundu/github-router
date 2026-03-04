@@ -3,6 +3,7 @@ import process from "node:process"
 import { defineCommand } from "citty"
 import consola from "consola"
 
+import { enableFileLogging } from "./lib/file-log-reporter"
 import { launchChild } from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
 import { DEFAULT_CODEX_MODEL } from "./lib/port"
@@ -52,6 +53,11 @@ export const codex = defineCommand({
     }
 
     const requestedModel = args.model ?? DEFAULT_CODEX_MODEL
+
+    // Resolve model before printing success message (so we show the actual model)
+    // but enable file logging first so resolution warnings go to file, not terminal
+    enableFileLogging()
+
     const codexModel = resolveCodexModel(requestedModel)
     if (codexModel !== requestedModel) {
       consola.info(`Model "${requestedModel}" resolved to "${codexModel}"`)
@@ -69,8 +75,8 @@ export const codex = defineCommand({
       if (ctx) consola.info(`Model context window: ${ctx.toLocaleString()} tokens`)
     }
 
-    consola.success(`Server ready on ${serverUrl}, launching Codex CLI (${codexModel})...`)
-    consola.level = -Infinity // silent — prevent TUI corruption
+    // Print to stderr directly — consola's terminal reporter is already gone
+    process.stderr.write(`Server ready on ${serverUrl}, launching Codex CLI (${codexModel})...\n`)
 
     const envVars = getCodexEnvVars(serverUrl)
     const extraArgs = ((args as unknown as Record<string, unknown>)._ as string[]) ?? []

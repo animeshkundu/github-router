@@ -45,9 +45,9 @@ export function launchChild(target: LaunchTarget, server: Server): void {
 
   const executable = cmd[0]
   if (!commandExists(executable)) {
-    consola.error(
-      `"${executable}" not found on PATH. Install it first, then try again.`,
-    )
+    const msg = `"${executable}" not found on PATH. Install it first, then try again.`
+    consola.error(msg)
+    process.stderr.write(msg + "\n")
     process.exit(1)
   }
 
@@ -70,10 +70,9 @@ export function launchChild(target: LaunchTarget, server: Server): void {
       })
     }
   } catch (error) {
-    consola.error(
-      `Failed to launch ${executable}:`,
-      error instanceof Error ? error.message : String(error),
-    )
+    const msg = `Failed to launch ${executable}: ${error instanceof Error ? error.message : String(error)}`
+    consola.error(msg)
+    process.stderr.write(msg + "\n")
     server.close(true).catch(() => {})
     process.exit(1)
   }
