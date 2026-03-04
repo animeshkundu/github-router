@@ -1,4 +1,5 @@
 import fs from "node:fs"
+import { Writable } from "node:stream"
 
 import consola from "consola"
 import type { ConsolaOptions, ConsolaReporter, LogObject } from "consola"
@@ -105,13 +106,22 @@ export class FileLogReporter implements ConsolaReporter {
   }
 }
 
+const nullStream = new Writable({ write(_chunk, _encoding, cb) { cb() } })
+
 /**
  * Switch consola to file-only mode for TUI sessions.
  * Removes the terminal reporter and installs a file reporter that
  * persists errors and warnings to disk with dedup and credential scrubbing.
+ *
+ * Also sinks consola's stdout/stderr streams as belt-and-suspenders:
+ * even if a terminal reporter is re-added, it cannot write to the terminal.
+ * Crash handlers that call process.stderr.write() directly are unaffected.
+ * FileLogReporter uses fs.writeSync() directly and is also unaffected.
  */
 export function enableFileLogging(): void {
   const reporter = new FileLogReporter(PATHS.ERROR_LOG_PATH)
   consola.options.throttle = 0 // disable built-in dedup
   consola.setReporters([reporter])
+  consola.options.stdout = nullStream as unknown as typeof process.stdout
+  consola.options.stderr = nullStream as unknown as typeof process.stderr
 }

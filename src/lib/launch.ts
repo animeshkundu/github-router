@@ -110,8 +110,12 @@ export function launchChild(target: LaunchTarget, server: Server): void {
   process.on("SIGINT", onSignal)
   process.on("SIGTERM", onSignal)
 
-  child.on("exit", (exitCode) => {
-    cleanup().then(() => exit(exitCode ?? 0)).catch(() => exit(1))
+  child.on("exit", (exitCode, signal) => {
+    // When killed by a signal, exitCode is null — derive from signal number
+    const code = exitCode ?? (signal ? 128 : 1)
+    cleanup().then(() => exit(code)).catch(() => exit(1))
   })
-  child.on("error", () => exit(1))
+  child.on("error", () => {
+    cleanup().then(() => exit(1)).catch(() => exit(1))
+  })
 }

@@ -201,7 +201,7 @@ describe("launchChild", () => {
     expect(exitMock).toHaveBeenCalledWith(42)
   })
 
-  test("on child exit event with null code: defaults to exit(0)", async () => {
+  test("on child exit event with null code: defaults to exit(1)", async () => {
     execFileSyncMock.mockReturnValue(Buffer.from("/usr/bin/claude"))
     const fakeChild = createFakeChild()
     spawnMock.mockReturnValue(fakeChild)
@@ -212,10 +212,10 @@ describe("launchChild", () => {
     fakeChild.emit("exit", null)
     await new Promise((r) => setTimeout(r, 50))
 
-    expect(exitMock).toHaveBeenCalledWith(0)
+    expect(exitMock).toHaveBeenCalledWith(1)
   })
 
-  test("on child error event: calls process.exit(1)", () => {
+  test("on child error event: runs cleanup then calls process.exit(1)", async () => {
     execFileSyncMock.mockReturnValue(Buffer.from("/usr/bin/claude"))
     const fakeChild = createFakeChild()
     spawnMock.mockReturnValue(fakeChild)
@@ -228,7 +228,9 @@ describe("launchChild", () => {
     } catch {
       // ExitError expected
     }
+    await new Promise((r) => setTimeout(r, 50))
 
+    expect(server.close).toHaveBeenCalledWith(true)
     expect(exitMock).toHaveBeenCalledWith(1)
   })
 

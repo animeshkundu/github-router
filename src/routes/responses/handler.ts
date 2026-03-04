@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import type { Context } from "hono"
 
 import consola from "consola"
@@ -176,6 +177,28 @@ function extractUserQuery(
   return undefined
 }
 
+/**
+ * Compaction prompt used when GitHub Copilot API does not support
+ * /responses/compact natively. Matches the prompt Codex CLI uses for
+ * local (non-OpenAI) compaction.
+ */
+const COMPACTION_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+
+Include:
+- Current progress and key decisions made
+- Important context, constraints, or user preferences
+- What remains to be done (clear next steps)
+- Any critical data, examples, or references needed to continue
+
+Be concise, structured, and focused on helping the next LLM seamlessly continue the work.`
+
+interface CompactRequestPayload {
+  model: string
+  input: Array<Record<string, unknown>>
+  instructions?: string
+  [key: string]: unknown
+}
+
 export async function handleResponsesCompact(c: Context) {
   const startTime = Date.now()
   await checkRateLimit(state)
@@ -184,24 +207,82 @@ export async function handleResponsesCompact(c: Context) {
 
   if (state.manualApprove) await awaitApproval()
 
-  const body = await c.req.text()
+  const body = await c.req.json<CompactRequestPayload>()
 
+  // Try Copilot's native compact endpoint first (future-proofs for when they add support)
   const response = await fetch(
     `${copilotBaseUrl(state)}/responses/compact`,
     {
       method: "POST",
       headers: copilotHeaders(state),
-      body,
+      body: JSON.stringify(body),
     },
   )
 
-  if (!response.ok) {
+  if (response.ok) {
     logRequest(
-      { method: "POST", path: c.req.path, status: response.status },
+      { method: "POST", path: c.req.path, status: 200 },
       undefined,
       startTime,
     )
-    throw new HTTPError("Copilot responses/compact request failed", response)
+    return c.json(await response.json())
+  }
+
+  // Copilot doesn't support /responses/compact — perform synthetic compaction
+  // by sending a regular /responses call with a summarization prompt
+  if (response.status === 404) {
+    consola.debug("Copilot API does not support /responses/compact, using synthetic compaction")
+    return await syntheticCompact(c, body, startTime)
+  }
+
+  // Other errors: throw as before
+  logRequest(
+    { method: "POST", path: c.req.path, status: response.status },
+    undefined,
+    startTime,
+  )
+  throw new HTTPError("Copilot responses/compact request failed", response)
+}
+
+/**
+ * Synthetic compaction: sends the conversation history to Copilot's
+ * regular /responses endpoint with a compaction prompt appended,
+ * then returns the model's summary in the compact response format.
+ */
+async function syntheticCompact(
+  c: Context,
+  body: CompactRequestPayload,
+  startTime: number,
+) {
+  const input = Array.isArray(body.input) ? [...body.input] : []
+
+  // Append compaction prompt as the last user message
+  input.push({
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: COMPACTION_PROMPT }],
+  })
+
+  const payload: ResponsesPayload = {
+    model: body.model,
+    input: input as Array<ResponsesInputItem>,
+    instructions: body.instructions,
+    stream: false,
+    store: false,
+  }
+
+  let result: ResponsesApiResponse
+  try {
+    result = (await createResponses(payload)) as ResponsesApiResponse
+  } catch (error) {
+    if (error instanceof HTTPError) {
+      logRequest(
+        { method: "POST", path: c.req.path, status: error.response.status },
+        undefined,
+        startTime,
+      )
+    }
+    throw error
   }
 
   logRequest(
@@ -210,5 +291,11 @@ export async function handleResponsesCompact(c: Context) {
     startTime,
   )
 
-  return c.json(await response.json())
+  return c.json({
+    id: `resp_compact_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+    object: "response.compaction",
+    created_at: Math.floor(Date.now() / 1000),
+    output: result.output,
+    usage: result.usage ?? { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+  })
 }
