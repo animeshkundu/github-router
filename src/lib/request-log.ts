@@ -1,5 +1,7 @@
 import consola from "consola"
 
+import { logMismatchToFile } from "./error-log"
+
 import type { Model } from "~/services/copilot/get-models"
 
 export interface RequestLogInfo {
@@ -95,6 +97,11 @@ export function logRequest(
 
   if (detectCapabilityMismatch(info, model)) {
     consola.error(`[MISMATCH] ${line}`)
+    logMismatchToFile(
+      info.resolvedModel ?? info.model ?? "unknown",
+      info.path,
+      model?.supported_endpoints ?? [],
+    )
   } else {
     consola.info(line)
   }

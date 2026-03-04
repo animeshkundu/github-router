@@ -4,6 +4,7 @@ import { defineCommand } from "citty"
 import consola from "consola"
 
 import { launchChild } from "./lib/launch"
+import { enableFileOnlyLogging } from "./lib/error-log"
 import { listModelsForEndpoint } from "./lib/model-validation"
 import {
   getClaudeCodeEnvVars,
@@ -67,7 +68,7 @@ export const claude = defineCommand({
     }
 
     consola.success(`Server ready on ${serverUrl}, launching Claude Code...`)
-    consola.level = 1 // errors and warnings only — prevent TUI corruption
+    enableFileOnlyLogging(consola) // redirect errors to file, silence console for TUI
 
     const envVars = getClaudeCodeEnvVars(serverUrl, resolvedModel ?? args.model)
     const extraArgs = ((args as unknown as Record<string, unknown>)._ as string[]) ?? []

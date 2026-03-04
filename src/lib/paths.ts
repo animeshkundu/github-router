@@ -5,10 +5,12 @@ import path from "node:path"
 const APP_DIR = path.join(os.homedir(), ".local", "share", "github-router")
 
 const GITHUB_TOKEN_PATH = path.join(APP_DIR, "github_token")
+const ERROR_LOG_PATH = path.join(APP_DIR, "github-router-errors.log")
 
 export const PATHS = {
   APP_DIR,
   GITHUB_TOKEN_PATH,
+  ERROR_LOG_PATH,
 }
 
 export async function ensurePaths(): Promise<void> {

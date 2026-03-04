@@ -1,5 +1,6 @@
 import consola from "consola"
 
+import { logMismatchToFile } from "./error-log"
 import { state } from "./state"
 
 type Endpoint = "/chat/completions" | "/responses" | "/v1/messages"
@@ -52,6 +53,7 @@ export function logEndpointMismatch(
     `Model "${modelId}" does not support ${path}. `
     + `Supported endpoints: ${supported.join(", ")}`,
   )
+  logMismatchToFile(modelId, path, supported)
   return true
 }
 

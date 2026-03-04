@@ -4,6 +4,7 @@ import { defineCommand } from "citty"
 import consola from "consola"
 
 import { launchChild } from "./lib/launch"
+import { enableFileOnlyLogging } from "./lib/error-log"
 import { listModelsForEndpoint } from "./lib/model-validation"
 import { DEFAULT_CODEX_MODEL } from "./lib/port"
 import {
@@ -70,7 +71,7 @@ export const codex = defineCommand({
     }
 
     consola.success(`Server ready on ${serverUrl}, launching Codex CLI (${codexModel})...`)
-    consola.level = 1 // errors and warnings only — prevent TUI corruption
+    enableFileOnlyLogging(consola) // redirect errors to file, silence console for TUI
 
     const envVars = getCodexEnvVars(serverUrl)
     const extraArgs = ((args as unknown as Record<string, unknown>)._ as string[]) ?? []

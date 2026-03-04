@@ -5,6 +5,7 @@ import clipboard from "clipboardy"
 import consola from "consola"
 
 import { generateEnvScript } from "./lib/shell"
+import { enableFileLogging } from "./lib/error-log"
 import { DEFAULT_CODEX_MODEL, DEFAULT_PORT } from "./lib/port"
 import {
   getClaudeCodeEnvVars,
@@ -70,6 +71,8 @@ export const start = defineCommand({
       port: parsed.port ?? DEFAULT_PORT,
       silent: false,
     })
+
+    enableFileLogging(consola)
 
     if (args.cc) generateClaudeCodeCommand(serverUrl, args.model)
     if (args.cx) generateCodexCommand(serverUrl, args.model)
