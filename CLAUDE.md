@@ -13,6 +13,26 @@ bun test             # Run all tests
 bun run start        # Production server (port 8787)
 ```
 
+## Publishing
+
+The canonical npm package is the **unscoped** `github-router` (NOT `@animeshkundu/github-router`).
+Users install via `npm install -g github-router`. The scoped name in package.json is for
+GitHub Packages compatibility only.
+
+```bash
+# Set your npmjs.org publish token (never commit this)
+export NPM_TOKEN=npm_...
+
+# Publish with auto-bumped patch version
+./publish/release.sh
+
+# Or specify a version explicitly
+./publish/release.sh 0.4.0
+```
+
+The release script builds, tests, temporarily rewrites package.json to the unscoped name,
+publishes, and restores. See `publish/release.sh` for details.
+
 ## Architecture
 
 - **Stack**: TypeScript / Bun / Hono / SSE streaming

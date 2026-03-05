@@ -38,7 +38,7 @@
     "lint:all": "eslint --cache .",
     "prepack": "bun run build",
     "prepare": "(simple-git-hooks || true)",
-    "release": "bun publish --access public",
+    "release": "./publish/release.sh",
     "start": "NODE_ENV=production bun run ./src/main.ts",
     "test": "bun test",
     "typecheck": "tsc"
