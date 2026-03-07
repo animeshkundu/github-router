@@ -87,11 +87,18 @@ export function resolveModel(modelId: string): string {
   }
 
   if (lower.includes("codex")) {
-    const codexModels = models.filter(
-      (m) => m.id.includes("codex") && !m.id.includes("mini"),
-    )
+    const codexModels = models.filter((m) => {
+      const endpoints = m.supported_endpoints ?? []
+      return (
+        (m.id.includes("codex") || m.id.startsWith("gpt-5"))
+        && !m.id.includes("mini")
+        && (endpoints.length === 0 || endpoints.includes("/responses"))
+      )
+    })
     if (codexModels.length > 0) {
-      codexModels.sort((a, b) => b.id.localeCompare(a.id))
+      codexModels.sort((a, b) =>
+        b.id.localeCompare(a.id, undefined, { numeric: true }),
+      )
       return codexModels[0].id
     }
   }
@@ -122,18 +129,20 @@ export function resolveCodexModel(modelId: string): string {
   // Check if the resolved model exists in the model list
   if (models.some((m) => m.id === resolved)) return resolved
 
-  // Fall back to the best available codex model
+  // Fall back to the best available codex/gpt-5 model supporting /responses
   const codexModels = models.filter((m) => {
     const endpoints = m.supported_endpoints ?? []
     return (
-      m.id.includes("codex")
+      (m.id.includes("codex") || m.id.startsWith("gpt-5"))
       && !m.id.includes("mini")
       && (endpoints.length === 0 || endpoints.includes("/responses"))
     )
   })
 
   if (codexModels.length > 0) {
-    codexModels.sort((a, b) => b.id.localeCompare(a.id))
+    codexModels.sort((a, b) =>
+      b.id.localeCompare(a.id, undefined, { numeric: true }),
+    )
     const best = codexModels[0].id
     consola.warn(`Model "${modelId}" not available, using "${best}" instead`)
     return best
