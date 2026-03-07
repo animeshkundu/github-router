@@ -19,8 +19,7 @@ afterEach(() => {
 })
 
 test("DEFAULT_CODEX_MODEL matches Copilot API format", () => {
-  // Must match both Copilot's model ID and Codex CLI's bundled catalog entry
-  expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.3-codex")
+  expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.4")
 })
 
 test("isNullish handles null and undefined", () => {
@@ -96,8 +95,12 @@ describe("normalizeModelId", () => {
 // --- resolveModel ---
 
 const fakeModels = [
+  { id: "gpt-5.4", supported_endpoints: ["/responses"] },
   { id: "gpt-5.3-codex", supported_endpoints: ["/responses"] },
   { id: "gpt-5.2-codex", supported_endpoints: ["/responses"] },
+  { id: "gpt-5.2", supported_endpoints: ["/chat/completions", "/responses"] },
+  { id: "gpt-5.1", supported_endpoints: ["/chat/completions", "/responses"] },
+  { id: "gpt-5-mini", supported_endpoints: ["/chat/completions", "/responses"] },
   { id: "claude-opus-4.6-1m", supported_endpoints: ["/v1/messages", "/chat/completions"] },
   { id: "claude-opus-4.6", supported_endpoints: ["/v1/messages", "/chat/completions"] },
   { id: "claude-sonnet-4.6", supported_endpoints: ["/v1/messages", "/chat/completions"] },
@@ -123,7 +126,9 @@ describe("resolveModel", () => {
   })
 
   test("normalized match (dots → dashes)", () => {
-    expect(resolveModel("gpt5.3-codex")).toBe("gpt-5.3-codex")
+    // "gpt5.3-codex" contains "codex", so family preference runs first
+    // and picks the highest gpt-5* model with /responses support
+    expect(resolveModel("gpt5.3-codex")).toBe("gpt-5.4")
   })
 
   test("opus family preference resolves to 1m variant", () => {
@@ -146,13 +151,13 @@ describe("resolveModel", () => {
     expect(resolveModel("claude-opus-4.6-1m")).toBe("claude-opus-4.6-1m")
   })
 
-  test("codex family preference resolves to highest version", () => {
-    expect(resolveModel("codex")).toBe("gpt-5.3-codex")
+  test("codex family preference resolves to highest gpt-5 version with /responses", () => {
+    expect(resolveModel("codex")).toBe("gpt-5.4")
   })
 
   test("returns input when no models cached", () => {
     state.models = undefined
-    expect(resolveModel("gpt-5.3-codex")).toBe("gpt-5.3-codex")
+    expect(resolveModel("gpt-5.4")).toBe("gpt-5.4")
   })
 
   test("returns input when no match found", () => {
@@ -173,20 +178,21 @@ describe("resolveCodexModel", () => {
   })
 
   test("resolves exact model", () => {
-    expect(resolveCodexModel("gpt-5.3-codex")).toBe("gpt-5.3-codex")
+    expect(resolveCodexModel("gpt-5.4")).toBe("gpt-5.4")
   })
 
-  test("resolves normalized model", () => {
-    expect(resolveCodexModel("gpt5.3-codex")).toBe("gpt-5.3-codex")
+  test("resolves normalized model containing codex to best gpt-5", () => {
+    // "gpt5.3-codex" contains "codex" → family preference picks gpt-5.4
+    expect(resolveCodexModel("gpt5.3-codex")).toBe("gpt-5.4")
   })
 
-  test("falls back to best codex model when not found", () => {
+  test("falls back to best gpt-5 model when not found", () => {
     const result = resolveCodexModel("nonexistent-codex")
-    expect(result).toBe("gpt-5.3-codex")
+    expect(result).toBe("gpt-5.4")
   })
 
   test("returns input when no models cached", () => {
     state.models = undefined
-    expect(resolveCodexModel("gpt-5.3-codex")).toBe("gpt-5.3-codex")
+    expect(resolveCodexModel("gpt-5.4")).toBe("gpt-5.4")
   })
 })

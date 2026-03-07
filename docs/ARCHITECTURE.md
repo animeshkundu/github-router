@@ -107,7 +107,7 @@ Not all models support all endpoints:
 | Model Family | `/chat/completions` | `/responses` | `/v1/messages` |
 |---|---|---|---|
 | gpt-4.1, gpt-4o | YES | YES | No |
-| gpt-5-codex variants | NO | YES (ONLY) | No |
+| gpt-5-codex variants, gpt-5.4 | NO | YES (ONLY) | No |
 | claude-sonnet-4, claude-opus-4 | YES | NO | YES |
 | o3, o4-mini | YES | YES | No |
 
@@ -122,7 +122,7 @@ When a client requests a model by name, the proxy resolves it against the cached
 3. **Normalized match** -- dots replaced with dashes, repeated dashes collapsed (e.g. `gpt5.3-codex` matches `gpt-5.3-codex`)
 4. **Family preference** -- shorthand names resolve to preferred variants:
    - `opus` resolves to the `-1m` context variant (e.g. `claude-opus-4-1m`)
-   - `codex` resolves to the highest-versioned non-mini codex model
+   - `codex` resolves to the highest-versioned gpt-5 model supporting `/responses`
 5. **Passthrough with warning** -- if no match is found, the original model ID is forwarded as-is and a warning is logged
 
 The `resolveCodexModel()` variant extends this for the codex subcommand: if the resolved model still does not exist in the model list, it falls back to the best available codex model that supports `/responses`.
@@ -163,7 +163,7 @@ Each subcommand sets environment variables so the child process uses the proxy:
 
 | Subcommand | Primary endpoint | Default model |
 |---|---|---|
-| `codex` | `/v1/responses` | `gpt-5.3-codex` |
+| `codex` | `/v1/responses` | `gpt-5.4` |
 | `claude` | `/v1/messages` | (Claude Code's own default) |
 
 ## Authentication Flow

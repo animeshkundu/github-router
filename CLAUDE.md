@@ -60,7 +60,7 @@ src/lib/               # Shared utilities (state, config, rate-limit, etc.)
 
 ### Model → endpoint mapping
 
-- gpt-5-codex models ONLY work via `/responses` (NOT `/chat/completions`)
+- gpt-5-codex models and gpt-5.4 ONLY work via `/responses` (NOT `/chat/completions`)
 - Models report `supported_endpoints` in their metadata
 
 ## Testing
