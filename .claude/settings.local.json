@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s http://localhost:9999/v1/models)",
+      "Bash(curl -s http://localhost:9999/models)",
+      "Bash(curl -s -X POST http://localhost:9999/v1/messages -H \"Content-Type: application/json\" -H \"x-api-key: dummy\" -H \"anthropic-version: 2023-06-01\" -d \"{\"\"model\"\":\"\"claude-opus-4.6-1m\"\",\"\"max_tokens\"\":50,\"\"messages\"\":[{\"\"role\"\":\"\"user\"\",\"\"content\"\":\"\"say hello in 3 words\"\"}]}\")",
+      "Bash(curl -s -X POST http://localhost:9999/v1/messages -H \"Content-Type: application/json\" -H \"x-api-key: dummy\" -H \"anthropic-version: 2023-06-01\" -d \"{\"\"model\"\":\"\"claude-haiku-4.5\"\",\"\"max_tokens\"\":50,\"\"messages\"\":[{\"\"role\"\":\"\"user\"\",\"\"content\"\":\"\"say hello in 3 words\"\"}]}\")",
+      "Bash(curl -s -X POST http://localhost:9999/v1/messages -H \"Content-Type: application/json\" -H \"x-api-key: dummy\" -H \"anthropic-version: 2023-06-01\" -d \"{\"\"model\"\":\"\"claude-opus-4.6-1m\"\",\"\"max_tokens\"\":50,\"\"stream\"\":true,\"\"messages\"\":[{\"\"role\"\":\"\"user\"\",\"\"content\"\":\"\"say hello in 3 words\"\"}]}\")",
+      "Bash(curl -s -X POST http://localhost:9999/v1/messages/count_tokens -H \"Content-Type: application/json\" -H \"x-api-key: dummy\" -d \"{\"\"model\"\":\"\"claude-opus-4.6-1m\"\",\"\"max_tokens\"\":50,\"\"messages\"\":[{\"\"role\"\":\"\"user\"\",\"\"content\"\":\"\"hello\"\"}]}\")",
+      "Bash(curl -s -X POST http://localhost:9999/v1/messages -H \"Content-Type: application/json\" -H \"x-api-key: dummy\" -H \"anthropic-version: 2023-06-01\" -d \"{\"\"model\"\":\"\"claude-haiku-4.5\"\",\"\"max_tokens\"\":50,\"\"stream\"\":true,\"\"messages\"\":[{\"\"role\"\":\"\"user\"\",\"\"content\"\":\"\"say hello\"\"}]}\")",
+      "Bash(curl -s -X POST http://localhost:9999/v1/messages/count_tokens -H \"Content-Type: application/json\" -H \"x-api-key: dummy\" -d \"{\"\"model\"\":\"\"claude-haiku-4.5\"\",\"\"max_tokens\"\":50,\"\"messages\"\":[{\"\"role\"\":\"\"user\"\",\"\"content\"\":\"\"hello\"\"}]}\")",
+      "Bash(cmd /c \"set ANTHROPIC_BASE_URL=http://localhost:9999 & set ANTHROPIC_AUTH_TOKEN=dummy & set ANTHROPIC_API_KEY=dummy & set ANTHROPIC_MODEL=claude-opus-4.6-1m & set ANTHROPIC_DEFAULT_SONNET_MODEL=claude-opus-4.6-1m & set ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4.5 & set ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4.5 & set DISABLE_NON_ESSENTIAL_MODEL_CALLS=1 & set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 & claude -p \"\"say hello world\"\" --output-format text --verbose 2>&1\")",
+      "Bash(set \"ANTHROPIC_BASE_URL=http://localhost:9999\")",
+      "Bash(set \"ANTHROPIC_AUTH_TOKEN=dummy\")",
+      "Bash(set \"ANTHROPIC_API_KEY=dummy\")",
+      "Bash(set \"ANTHROPIC_MODEL=claude-opus-4.6-1m\")",
+      "Bash(set \"ANTHROPIC_DEFAULT_SONNET_MODEL=claude-opus-4.6-1m\")",
+      "Bash(set \"ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4.5\")",
+      "Bash(set \"ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4.5\")",
+      "Bash(set \"DISABLE_NON_ESSENTIAL_MODEL_CALLS=1\")",
+      "Bash(set \"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1\")",
+      "Bash(claude -p \"say hello world\" --output-format text --verbose)",
+      "Bash(set \"CLAUDECODE=\")",
+      "Bash(cmd /c \"set CLAUDECODE= & set ANTHROPIC_BASE_URL=http://localhost:9999 & set ANTHROPIC_AUTH_TOKEN=dummy & set ANTHROPIC_API_KEY=dummy & set ANTHROPIC_MODEL=claude-opus-4.6-1m & set ANTHROPIC_DEFAULT_SONNET_MODEL=claude-opus-4.6-1m & set ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4.5 & set ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4.5 & set DISABLE_NON_ESSENTIAL_MODEL_CALLS=1 & set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 & claude -p \"\"say hello world\"\" --output-format text --verbose\")",
+      "Bash(CLAUDECODE=\"\" ANTHROPIC_BASE_URL=\"http://localhost:9999\" ANTHROPIC_AUTH_TOKEN=\"dummy\" ANTHROPIC_API_KEY=\"dummy\" ANTHROPIC_MODEL=\"claude-opus-4.6-1m\" ANTHROPIC_DEFAULT_SONNET_MODEL=\"claude-opus-4.6-1m\" ANTHROPIC_SMALL_FAST_MODEL=\"claude-haiku-4.5\" ANTHROPIC_DEFAULT_HAIKU_MODEL=\"claude-haiku-4.5\" DISABLE_NON_ESSENTIAL_MODEL_CALLS=\"1\" CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=\"1\" claude -p \"say hello world\" --output-format text --verbose)",
+      "Bash(CLAUDECODE=\"\" ANTHROPIC_BASE_URL=\"http://localhost:9999\" ANTHROPIC_AUTH_TOKEN=\"dummy\" ANTHROPIC_API_KEY=\"dummy\" ANTHROPIC_MODEL=\"claude-opus-4.6-1m\" ANTHROPIC_DEFAULT_SONNET_MODEL=\"claude-opus-4.6-1m\" ANTHROPIC_SMALL_FAST_MODEL=\"claude-haiku-4.5\" ANTHROPIC_DEFAULT_HAIKU_MODEL=\"claude-haiku-4.5\" DISABLE_NON_ESSENTIAL_MODEL_CALLS=\"1\" CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=\"1\" claude -p \"list the files in the current directory\" --output-format text --verbose)",
+      "Bash(CLAUDECODE=\"\" ANTHROPIC_BASE_URL=\"http://localhost:9999\" ANTHROPIC_AUTH_TOKEN=\"dummy\" ANTHROPIC_API_KEY=\"dummy\" ANTHROPIC_MODEL=\"claude-opus-4.6-1m\" ANTHROPIC_DEFAULT_SONNET_MODEL=\"claude-opus-4.6-1m\" ANTHROPIC_SMALL_FAST_MODEL=\"claude-haiku-4.5\" ANTHROPIC_DEFAULT_HAIKU_MODEL=\"claude-haiku-4.5\" DISABLE_NON_ESSENTIAL_MODEL_CALLS=\"1\" CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=\"1\" claude -p \"read the file src/routes/messages/utils.ts and tell me what it does\" --output-format text --verbose)",
+      "Bash(bun run typecheck)"
+    ]
+  }
+}
