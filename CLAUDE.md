@@ -19,15 +19,16 @@ The canonical npm package is the **unscoped** `github-router` (NOT `@animeshkund
 Users install via `npm install -g github-router`. The scoped name in package.json is for
 GitHub Packages compatibility only.
 
+**CI publishing** (preferred): Every push to `master` triggers the Release workflow
+(`.github/workflows/release.yml`), which auto-bumps the version, publishes to npmjs.org
+via OIDC trusted publishing (no token needed), creates a GitHub release, and builds Docker
+images. Uses Node 24 (npm 11.11.0) for OIDC support.
+
+**Manual publishing** (fallback):
 ```bash
-# Set your npmjs.org publish token (never commit this)
 export NPM_TOKEN=npm_...
-
-# Publish with auto-bumped patch version
-./publish/release.sh
-
-# Or specify a version explicitly
-./publish/release.sh 0.4.0
+./publish/release.sh          # auto-bump patch
+./publish/release.sh 0.4.0    # explicit version
 ```
 
 The release script builds, tests, temporarily rewrites package.json to the unscoped name,

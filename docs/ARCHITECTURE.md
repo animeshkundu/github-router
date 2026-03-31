@@ -68,7 +68,8 @@ src/
 │   │   ├── get-models.ts              # GET Copilot /models
 │   │   └── web-search.ts             # Copilot web search integration
 │   ├── github/                         # GitHub OAuth + token management
-│   └── get-vscode-version.ts          # Fetches latest VSCode version
+│   ├── get-copilot-version.ts          # Fetches latest Copilot Chat version (marketplace API)
+│   └── get-vscode-version.ts           # Fetches latest VSCode version (AUR)
 │
 └── lib/                 # Shared utilities
     ├── state.ts           # Global singleton state
@@ -189,7 +190,8 @@ Singleton object tracking:
 - `githubToken` / `copilotToken` — authentication credentials
 - `accountType` — "individual" | "business" | "enterprise" (affects API base URL)
 - `models` — cached model list from Copilot API
-- `vsCodeVersion` — dynamically fetched, used in request headers
+- `vsCodeVersion` — dynamically fetched from AUR at startup, used in `editor-version` header
+- `copilotVersion` — dynamically fetched from VS Code marketplace at startup, used in `editor-plugin-version` and `user-agent` headers
 - `extendedBetas` — when true, forward extended beta prefixes for Claude CLI compatibility (default: false, VS Code stealth mode)
 - `manualApprove` / `rateLimitSeconds` / `rateLimitWait` / `showToken` — CLI flag state
 
@@ -234,9 +236,20 @@ When Copilot returns an error already in Anthropic format, it is forwarded as-is
 
 ## VS Code Fingerprint
 
-The proxy mimics VS Code Copilot Chat extension headers to match expected API client identity. Key values in `src/lib/api-config.ts`:
-- `COPILOT_VERSION`: Extension version (currently `0.43.2026033101`)
-- `API_VERSION`: GitHub API version (`2025-10-01`)
+The proxy mimics VS Code Copilot Chat extension headers to match expected API client identity.
+
+**Dynamic version fetching** (`src/services/get-copilot-version.ts`):
+- Copilot Chat extension version is fetched from the VS Code marketplace API at startup
+- VS Code editor version is fetched from AUR PKGBUILD at startup (`src/services/get-vscode-version.ts`)
+- Both use 5-second timeouts with hardcoded fallbacks on failure
+- Versions are cached in `state.copilotVersion` and `state.vsCodeVersion`
+
+**Header construction** (`src/lib/api-config.ts`):
+- `editor-plugin-version`: `copilot-chat/<copilotVersion>` (dynamic)
+- `user-agent`: `GitHubCopilotChat/<copilotVersion>` (dynamic)
+- `editor-version`: `vscode/<vsCodeVersion>` (dynamic)
+- `x-github-api-version`: `2025-10-01` (static)
+- `anthropic-version`: `2023-06-01` (static, matches both VS Code and Claude CLI)
 - `anthropic-version`: `2023-06-01` (matches both VS Code and Claude CLI)
 
 For `/v1/messages`, the proxy uses `openai-intent: messages-proxy` and suppresses `copilot-integration-id`, matching VS Code extension v0.43 behavior.
