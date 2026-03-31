@@ -38,13 +38,18 @@ jobs:
       - name: Build
         run: bun run build
 
+      - name: Configure npm auth
+        run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Bump version if already published
         id: version
         run: |
-          PKG_NAME=$(jq -r .name package.json)
+          UNSCOPED_NAME="github-router"
           PKG_VERSION=$(jq -r .version package.json)
           BUMPED=false
-          while npm view "${PKG_NAME}@${PKG_VERSION}" version 2>/dev/null; do
+          while npm view "${UNSCOPED_NAME}@${PKG_VERSION}" version 2>/dev/null; do
             echo "Version ${PKG_VERSION} already published, bumping patch..."
             npm version patch --no-git-tag-version
             PKG_VERSION=$(jq -r .version package.json)
@@ -55,9 +60,18 @@ jobs:
           echo "Publishing version ${PKG_VERSION}"
 
       - name: Publish to npm
-        run: npm publish --access public
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # Rewrite to unscoped name for publish (canonical npm package is "github-router")
+          cp package.json package.json.bak
+          node -e "
+            const pkg = JSON.parse(require('fs').readFileSync('package.json', 'utf8'));
+            pkg.name = 'github-router';
+            delete pkg.publishConfig;
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          npm publish --access public
+          # Restore scoped name (keep bumped version for the version-bump commit)
+          mv package.json.bak package.json
 
       - name: Push version bump
         if: steps.version.outputs.bumped == 'true'
