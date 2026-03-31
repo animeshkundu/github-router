@@ -58,6 +58,7 @@ mock.module("~/lib/server-setup", () => ({
     "github-token": { alias: "g", type: "string" as const },
     "show-token": { type: "boolean" as const, default: false },
     "proxy-env": { type: "boolean" as const, default: false },
+    "extended-betas": { type: "boolean" as const, default: false },
   },
 }))
 
@@ -80,6 +81,7 @@ mock.module("consola", () => ({
 
 // --- Import module under test AFTER mocks ---
 const { codex } = await import("../../src/codex")
+import { state } from "../../src/lib/state"
 
 type CommandRunFn = (ctx: { args: Record<string, unknown> }) => Promise<void>
 
@@ -102,6 +104,8 @@ beforeEach(() => {
   })
   processOnMock.mockReset()
   isTTY = true
+  // Reset shared state to prevent leakage from other test files
+  state.models = undefined
 
   setupAndServeMock.mockReset()
   setupAndServeMock.mockResolvedValue({
@@ -119,6 +123,7 @@ beforeEach(() => {
     githubToken: undefined,
     showToken: false,
     proxyEnv: false,
+    extendedBetas: false,
   })
   getCodexEnvVarsMock.mockReset()
   getCodexEnvVarsMock.mockImplementation((serverUrl: string) => ({

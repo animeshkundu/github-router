@@ -58,6 +58,7 @@ mock.module("~/lib/server-setup", () => ({
     "github-token": { alias: "g", type: "string" as const },
     "show-token": { type: "boolean" as const, default: false },
     "proxy-env": { type: "boolean" as const, default: false },
+    "extended-betas": { type: "boolean" as const, default: false },
   },
 }))
 
@@ -115,6 +116,7 @@ beforeEach(() => {
     githubToken: undefined,
     showToken: false,
     proxyEnv: false,
+    extendedBetas: false,
   })
   getClaudeCodeEnvVarsMock.mockReset()
   getClaudeCodeEnvVarsMock.mockImplementation(

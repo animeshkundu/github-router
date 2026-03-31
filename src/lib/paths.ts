@@ -2,15 +2,20 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
-const APP_DIR = path.join(os.homedir(), ".local", "share", "github-router")
-
-const GITHUB_TOKEN_PATH = path.join(APP_DIR, "github_token")
-const ERROR_LOG_PATH = path.join(APP_DIR, "error.log")
+function appDir(): string {
+  return path.join(os.homedir(), ".local", "share", "github-router")
+}
 
 export const PATHS = {
-  APP_DIR,
-  GITHUB_TOKEN_PATH,
-  ERROR_LOG_PATH,
+  get APP_DIR() {
+    return appDir()
+  },
+  get GITHUB_TOKEN_PATH() {
+    return path.join(appDir(), "github_token")
+  },
+  get ERROR_LOG_PATH() {
+    return path.join(appDir(), "error.log")
+  },
 }
 
 export async function ensurePaths(): Promise<void> {
