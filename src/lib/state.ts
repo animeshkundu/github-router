@@ -10,6 +10,7 @@ export interface State {
   copilotApiUrl?: string
   models?: ModelsResponse
   vsCodeVersion?: string
+  copilotVersion?: string
 
   manualApprove: boolean
   rateLimitWait: boolean

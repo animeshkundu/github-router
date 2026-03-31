@@ -1,6 +1,7 @@
 import consola from "consola"
 
 import { getModels } from "~/services/copilot/get-models"
+import { getCopilotChatVersion } from "~/services/get-copilot-version"
 import { getVSCodeVersion } from "~/services/get-vscode-version"
 
 import { state } from "./state"
@@ -182,4 +183,11 @@ export const cacheVSCodeVersion = async () => {
   state.vsCodeVersion = response
 
   consola.info(`Using VSCode version: ${response}`)
+}
+
+export const cacheCopilotVersion = async () => {
+  const version = await getCopilotChatVersion()
+  state.copilotVersion = version
+
+  consola.info(`Using Copilot Chat version: ${version}`)
 }

@@ -127,8 +127,7 @@ function resolveModelInBody(rawBody: string): {
   }
 
   const needsSanitize = rawBody.includes('"scope"')
-  if (needsSanitize) {
-    sanitizeCacheControl(parsed)
+  if (needsSanitize && sanitizeCacheControl(parsed)) {
     modified = true
   }
 
@@ -142,13 +141,15 @@ function resolveModelInBody(rawBody: string): {
   }
 }
 
-function sanitizeCacheControl(body: AnyRecord): void {
+function sanitizeCacheControl(body: AnyRecord): boolean {
+  let stripped = false
   function stripScope(block: AnyRecord): void {
     if (block.cache_control?.scope !== undefined) {
       delete block.cache_control.scope
       if (Object.keys(block.cache_control).length === 0) {
         delete block.cache_control
       }
+      stripped = true
     }
   }
 
@@ -172,4 +173,6 @@ function sanitizeCacheControl(body: AnyRecord): void {
   if (Array.isArray(body.tools)) {
     for (const tool of body.tools) stripScope(tool)
   }
+
+  return stripped
 }

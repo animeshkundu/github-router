@@ -6,7 +6,7 @@ import { generateRandomPort } from "./port"
 import { initProxyFromEnv } from "./proxy"
 import { state } from "./state"
 import { setupCopilotToken, setupGitHubToken } from "./token"
-import { cacheModels, cacheVSCodeVersion } from "./utils"
+import { cacheModels, cacheCopilotVersion, cacheVSCodeVersion } from "./utils"
 import { server as app } from "../server"
 
 const MAX_PORT_RETRIES = 10
@@ -54,6 +54,7 @@ export async function setupAndServe(
 
   await ensurePaths()
   await cacheVSCodeVersion()
+  await cacheCopilotVersion()
 
   if (options.githubToken) {
     state.githubToken = options.githubToken

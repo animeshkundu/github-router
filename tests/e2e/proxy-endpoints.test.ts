@@ -374,6 +374,64 @@ describe("E2E: /v1/messages", () => {
     expect(beta).not.toContain("claude-code")
     expect(beta).not.toContain("output-128k")
   })
+
+  test("strips cache_control.scope from system blocks before forwarding", async () => {
+    setupState()
+    const url = await startServer()
+
+    const upstream = mockUpstream(() => new Response(anthropicResponse))
+
+    await realFetch(`${url}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-opus-4.6-1m",
+        max_tokens: 10,
+        system: [
+          { type: "text", text: "You are helpful." },
+          {
+            type: "text",
+            text: "Main prompt.",
+            cache_control: { type: "ephemeral", scope: "global" },
+          },
+        ],
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+
+    const forwarded = JSON.parse(upstream.capturedBody() ?? "{}") as Record<string, unknown>
+    const system = forwarded.system as Array<Record<string, unknown>>
+    // scope should be stripped, type preserved
+    expect(system[1].cache_control).toEqual({ type: "ephemeral" })
+  })
+
+  test("does not re-serialize body when scope appears only in message text", async () => {
+    setupState()
+    const url = await startServer()
+
+    const upstream = mockUpstream(() => new Response(anthropicResponse))
+
+    const body = JSON.stringify({
+      model: "claude-opus-4.6-1m",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "Explain the scope of this project" }],
+    })
+
+    await realFetch(`${url}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+      },
+      body,
+    })
+
+    // Body should be forwarded as-is (no re-serialization)
+    expect(upstream.capturedBody()).toBe(body)
+  })
 })
 
 describe("E2E: /v1/chat/completions", () => {
