@@ -45,9 +45,20 @@ publishes, and restores. See `publish/release.sh` for details.
    - `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`
    - Service: `src/services/copilot/create-*.ts` → handler → route
 
-2. **Translation**: Convert format, call Copilot, convert back:
-   - `/v1/messages` (Anthropic) → translate to Chat Completions → call Copilot → translate response back
-   - Extra files: `anthropic-types.ts`, `non-stream-translation.ts`, `stream-translation.ts`
+2. **Passthrough with sanitization**: Forward to Copilot, stripping unsupported fields:
+   - `/v1/messages` (Anthropic) → strip `cache_control.scope`, filter beta headers → Copilot `/v1/messages?beta=true`
+   - `/v1/messages/count_tokens` → same sanitization → Copilot `/v1/messages/count_tokens?beta=true`
+
+### Beta header filtering
+
+Two modes controlled by `--extended-betas` flag:
+- **Default (VS Code stealth)**: Only forward 3 beta prefixes the VS Code extension sends (`interleaved-thinking-`, `context-management-`, `advanced-tool-use-`). Traffic is indistinguishable from VS Code.
+- **Extended (`--extended-betas`)**: Forward 20 beta prefixes for Claude CLI compatibility. Required when using `github-router claude --extended-betas`.
+
+### Error format
+
+Errors use Anthropic SDK format: `{type:"error",error:{type:"<category>",message:"..."}}`.
+Upstream Anthropic-format errors from Copilot are forwarded as-is.
 
 ### Key directories
 

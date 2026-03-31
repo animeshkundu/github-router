@@ -66,6 +66,10 @@ Passthrough to Copilot's native `/v1/messages?beta=true` endpoint.
 **Models**: claude-opus-4.6-1m, claude-opus-4.6, claude-sonnet-4.6, claude-sonnet-4, etc.
 **Model resolution**: `opus` → `claude-opus-4.6-1m`, `claude-opus-4-6` → `claude-opus-4.6-1m`
 
+**Body sanitization**: `cache_control.scope` fields are stripped before forwarding (Copilot does not support the `prompt-caching-scope` beta). This enables Claude CLI 2.1.88+ compatibility.
+
+**Beta header filtering**: The `anthropic-beta` header is filtered to a whitelist before forwarding. Default mode forwards only VS Code extension betas. Use `--extended-betas` to forward all Claude CLI betas.
+
 ### POST `/v1/messages/count_tokens`
 Estimates token count for an Anthropic-format payload.
 
@@ -105,7 +109,26 @@ Returns Copilot usage and quota information.
 Returns the current Copilot token (useful for debugging).
 
 ### GET `/`
-Health check. Returns `"Server running"`.
+Health check. Returns `"Server running"`. Also responds to `HEAD /` (used by Claude CLI as pre-flight health check).
+
+---
+
+## Error Format
+
+All error responses use the Anthropic SDK format:
+```json
+{
+  "type": "error",
+  "error": {
+    "type": "invalid_request_error",
+    "message": "Human-readable error description"
+  }
+}
+```
+
+Error types by HTTP status: `400` → `invalid_request_error`, `401` → `authentication_error`, `403` → `permission_error`, `404` → `not_found_error`, `429` → `rate_limit_error`, `529` → `overloaded_error`, other → `api_error`.
+
+Unknown endpoints return a 404 in this format.
 
 ---
 
@@ -118,3 +141,10 @@ All requests to Copilot include:
 - `user-agent: GitHubCopilotChat/<version>`
 - `X-Initiator: user|agent` (based on message content)
 - `copilot-vision-request: true` (when images detected in input)
+
+For `/v1/messages` specifically:
+- `openai-intent: messages-proxy` (matches VS Code extension v0.43)
+- `copilot-integration-id` is suppressed (extension v0.43 behavior)
+- `anthropic-version: 2023-06-01`
+- `anthropic-beta: <filtered list>` (only whitelisted prefixes forwarded)
+- `x-request-id` from Copilot response is forwarded to the client

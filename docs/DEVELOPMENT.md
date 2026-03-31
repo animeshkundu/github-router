@@ -46,6 +46,7 @@ bun run dev -- start [flags]
 --codex          Generate Codex CLI launch command
 --show-token     Display tokens in logs
 --proxy-env      Use HTTP_PROXY/HTTPS_PROXY env vars
+--extended-betas Forward extended beta headers for Claude CLI compatibility
 ```
 
 ## Project Conventions
@@ -65,7 +66,9 @@ import { createChatCompletions } from "~/services/copilot/create-chat-completion
 ### Error Handling
 - Use `HTTPError` for API errors (preserves status code from upstream)
 - Wrap route handlers in `forwardError()` to properly forward errors to clients
-- Never swallow errors silently -log with `consola.error()`
+- Error format follows Anthropic SDK convention: `{type:"error",error:{type:"<category>",message:"..."}}`
+- Upstream Anthropic-format errors from Copilot are forwarded as-is (not re-wrapped)
+- Never swallow errors silently — log with `consola.error()`
 
 ### Logging
 Use `consola` for all logging:
