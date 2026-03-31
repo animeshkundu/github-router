@@ -75,8 +75,6 @@ jobs:
           npm publish --access public --provenance
           # Restore scoped name (keep bumped version for the version-bump commit)
           mv package.json.bak package.json
-        env:
-          NODE_AUTH_TOKEN: ""  # OIDC trusted publishing — no token needed
 
       - name: Push version bump
         if: steps.version.outputs.bumped == 'true'
