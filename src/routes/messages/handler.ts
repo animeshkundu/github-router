@@ -249,13 +249,19 @@ export async function handleCompletion(c: Context) {
     if (debugEnabled) {
       consola.debug("Streaming response from Copilot /v1/messages")
     }
+    const streamHeaders: Record<string, string> = {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    }
+    const requestId = response.headers.get("x-request-id")
+    if (requestId) streamHeaders["x-request-id"] = requestId
+    const reqId = response.headers.get("request-id")
+    if (reqId) streamHeaders["request-id"] = reqId
+
     return new Response(response.body, {
       status: response.status,
-      headers: {
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache",
-        connection: "keep-alive",
-      },
+      headers: streamHeaders,
     })
   }
 
@@ -282,12 +288,19 @@ export async function handleCompletion(c: Context) {
       JSON.stringify(responseBody).slice(0, 2000),
     )
   }
+  const xRequestId = response.headers.get("x-request-id")
+  if (xRequestId) c.header("x-request-id", xRequestId)
+  const requestIdHeader = response.headers.get("request-id")
+  if (requestIdHeader) c.header("request-id", requestIdHeader)
   return c.json(responseBody, response.status as 200)
 }
 
 /**
- * Parse the JSON body, resolve the model name, and re-serialize.
- * Returns the body string plus the original and resolved model names.
+ * Parse the JSON body, resolve the model name, sanitize cache_control
+ * fields, and re-serialize. Returns the body string plus the original
+ * and resolved model names.
+ *
+ * Re-serialization is skipped when no modifications are needed.
  */
 function resolveModelInBody(rawBody: string): {
   body: string
@@ -303,17 +316,70 @@ function resolveModelInBody(rawBody: string): {
 
   const originalModel =
     typeof parsed.model === "string" ? parsed.model : undefined
-  if (!originalModel) return { body: rawBody, originalModel }
 
-  const resolved = resolveModel(originalModel)
-  if (resolved === originalModel)
-    return { body: rawBody, originalModel, resolvedModel: originalModel }
+  let modified = false
+  if (originalModel) {
+    const resolved = resolveModel(originalModel)
+    if (resolved !== originalModel) {
+      parsed.model = resolved
+      modified = true
+    }
+  }
 
-  parsed.model = resolved
+  // Strip cache_control.scope — fast path skips when "scope" absent
+  const needsSanitize = rawBody.includes('"scope"')
+  if (needsSanitize) {
+    sanitizeCacheControl(parsed)
+    modified = true
+  }
+
+  const resolvedModel =
+    typeof parsed.model === "string" ? parsed.model : originalModel
+
   return {
-    body: JSON.stringify(parsed),
+    body: modified ? JSON.stringify(parsed) : rawBody,
     originalModel,
-    resolvedModel: resolved,
+    resolvedModel,
+  }
+}
+
+/**
+ * Strip the `scope` field from all `cache_control` objects in the body.
+ * Claude CLI 2.1.88+ sends {"type":"ephemeral","scope":"global"} which
+ * Copilot rejects. Mutates the parsed object in place.
+ *
+ * Covers: system blocks, message content blocks (including nested
+ * tool_result content), and tool definitions.
+ */
+function sanitizeCacheControl(body: AnyRecord): void {
+  function stripScope(block: AnyRecord): void {
+    if (block.cache_control?.scope !== undefined) {
+      delete block.cache_control.scope
+      if (Object.keys(block.cache_control).length === 0) {
+        delete block.cache_control
+      }
+    }
+  }
+
+  if (Array.isArray(body.system)) {
+    for (const block of body.system) stripScope(block)
+  }
+
+  if (Array.isArray(body.messages)) {
+    for (const msg of body.messages) {
+      if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          stripScope(block)
+          if (Array.isArray(block.content)) {
+            for (const nested of block.content) stripScope(nested)
+          }
+        }
+      }
+    }
+  }
+
+  if (Array.isArray(body.tools)) {
+    for (const tool of body.tools) stripScope(tool)
   }
 }
 
@@ -333,7 +399,7 @@ function applyDefaultBetas(
     ...betaHeaders,
     "anthropic-beta": [
       "interleaved-thinking-2025-05-14",
-      "token-counting-2024-11-01",
+      "context-management-2025-06-27",
     ].join(","),
   }
 }

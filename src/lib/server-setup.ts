@@ -21,6 +21,7 @@ export interface ServerSetupOptions {
   githubToken?: string
   showToken: boolean
   proxyEnv: boolean
+  extendedBetas: boolean
   silent: boolean
 }
 
@@ -45,6 +46,7 @@ export async function setupAndServe(
   state.rateLimitSeconds = options.rateLimit
   state.rateLimitWait = options.rateLimitWait
   state.showToken = options.showToken
+  state.extendedBetas = options.extendedBetas
 
   if (process.env.COPILOT_API_URL) {
     state.copilotApiUrl = process.env.COPILOT_API_URL
@@ -170,6 +172,12 @@ export const sharedServerArgs = {
     default: false,
     description: "Initialize proxy from environment variables",
   },
+  "extended-betas": {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Forward extended beta headers for Claude CLI compatibility (default: VS Code-only)",
+  },
 } as const
 
 const allowedAccountTypes = new Set(["individual", "business", "enterprise"])
@@ -185,6 +193,7 @@ export function parseSharedArgs(args: Record<string, unknown>): {
   githubToken?: string
   showToken: boolean
   proxyEnv: boolean
+  extendedBetas: boolean
 } {
   const portRaw = args.port as string | undefined
   let port: number | undefined
@@ -229,6 +238,7 @@ export function parseSharedArgs(args: Record<string, unknown>): {
     githubToken,
     showToken: args["show-token"] as boolean,
     proxyEnv: args["proxy-env"] as boolean,
+    extendedBetas: args["extended-betas"] as boolean,
   }
 }
 

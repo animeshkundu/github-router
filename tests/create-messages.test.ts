@@ -69,11 +69,11 @@ describe("createMessages", () => {
     // Copilot auth and identification headers
     expect(capturedHeaders.Authorization).toBe("Bearer test-token")
     expect(capturedHeaders["content-type"]).toBe("application/json")
-    expect(capturedHeaders["copilot-integration-id"]).toBe("vscode-chat")
+    expect(capturedHeaders["copilot-integration-id"]).toBeUndefined()
     expect(capturedHeaders["editor-version"]).toBe("vscode/1.0.0")
     expect(capturedHeaders["editor-plugin-version"]).toMatch(/^copilot-chat\//)
     expect(capturedHeaders["user-agent"]).toMatch(/^GitHubCopilotChat\//)
-    expect(capturedHeaders["openai-intent"]).toBe("conversation-agent")
+    expect(capturedHeaders["openai-intent"]).toBe("messages-proxy")
     expect(capturedHeaders["x-interaction-type"]).toBe("conversation-agent")
     expect(capturedHeaders["x-github-api-version"]).toBe("2025-10-01")
     expect(capturedHeaders["x-request-id"]).toBeDefined()
