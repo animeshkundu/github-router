@@ -186,11 +186,12 @@ Each subcommand sets environment variables so the child process uses the proxy:
 ## Global State (`src/lib/state.ts`)
 
 Singleton object tracking:
-- `githubToken` / `copilotToken` -authentication credentials
-- `accountType` -"individual" | "business" | "enterprise" (affects API base URL)
-- `models` -cached model list from Copilot API
-- `vsCodeVersion` -dynamically fetched, used in request headers
-- `manualApprove` / `rateLimitSeconds` / `rateLimitWait` / `showToken` -CLI flag state
+- `githubToken` / `copilotToken` — authentication credentials
+- `accountType` — "individual" | "business" | "enterprise" (affects API base URL)
+- `models` — cached model list from Copilot API
+- `vsCodeVersion` — dynamically fetched, used in request headers
+- `extendedBetas` — when true, forward extended beta prefixes for Claude CLI compatibility (default: false, VS Code stealth mode)
+- `manualApprove` / `rateLimitSeconds` / `rateLimitWait` / `showToken` — CLI flag state
 
 ## Streaming
 
@@ -199,3 +200,43 @@ Both passthrough routes support SSE streaming:
 
 The `fetch-event-stream` library handles parsing incoming SSE from Copilot.
 Hono's `streamSSE()` helper handles writing outgoing SSE to the client.
+
+## Beta Header Filtering (`src/lib/utils.ts`)
+
+The proxy filters the `anthropic-beta` header to control which beta features are forwarded to Copilot. Two whitelists are available, selected by the `--extended-betas` CLI flag:
+
+**Default (VS Code stealth)**: Only 3 prefixes matching what VS Code Copilot Chat v0.43 sends:
+- `interleaved-thinking-`, `context-management-`, `advanced-tool-use-`
+
+**Extended (`--extended-betas`)**: 20 prefixes including all betas Claude CLI sends:
+- Adds `claude-code-`, `context-1m-`, `effort-`, `prompt-caching-`, `computer-use-`, `pdfs-`, `max-tokens-`, `token-counting-`, `compact-`, `structured-outputs-`, `fast-mode-`, `skills-`, `mcp-client-`, `mcp-servers-`, `files-api-`, `redact-thinking-`, `web-search-`
+
+Notably absent from both lists: `output-128k-` (Copilot returns 400).
+
+## Request Body Sanitization
+
+The `/v1/messages` and `/v1/messages/count_tokens` handlers sanitize the request body before forwarding:
+
+1. **Model resolution**: Client model names resolved to Copilot model IDs (e.g., `claude-opus-4-6` → `claude-opus-4.6-1m`)
+2. **cache_control.scope stripping**: Claude CLI 2.1.88+ sends `cache_control: {"type":"ephemeral","scope":"global"}` which Copilot rejects. The `scope` field is stripped from all `cache_control` objects in system blocks, message content blocks (including nested tool_result content), and tool definitions. Empty `cache_control` objects are removed entirely.
+3. **Web search tool handling**: `web_search` tools are intercepted, search is performed via Copilot's Chat Threads API, results are injected into the system prompt, and the tool is stripped from the request.
+
+Fast path: sanitization is skipped when `"scope"` does not appear in the raw body string. Model resolution and sanitization share a single JSON parse/serialize pass.
+
+## Error Format
+
+All errors returned by the proxy use the Anthropic SDK format:
+```json
+{"type": "error", "error": {"type": "invalid_request_error", "message": "..."}}
+```
+
+When Copilot returns an error already in Anthropic format, it is forwarded as-is. Other errors (gateway errors, proxy-internal errors) are wrapped in this format with appropriate `error.type` based on HTTP status (400 → `invalid_request_error`, 401 → `authentication_error`, 429 → `rate_limit_error`, etc.).
+
+## VS Code Fingerprint
+
+The proxy mimics VS Code Copilot Chat extension headers to match expected API client identity. Key values in `src/lib/api-config.ts`:
+- `COPILOT_VERSION`: Extension version (currently `0.43.2026033101`)
+- `API_VERSION`: GitHub API version (`2025-10-01`)
+- `anthropic-version`: `2023-06-01` (matches both VS Code and Claude CLI)
+
+For `/v1/messages`, the proxy uses `openai-intent: messages-proxy` and suppresses `copilot-integration-id`, matching VS Code extension v0.43 behavior.

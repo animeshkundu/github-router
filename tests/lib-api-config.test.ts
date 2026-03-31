@@ -13,6 +13,7 @@ const baseState: State = {
   manualApprove: false,
   rateLimitWait: false,
   showToken: false,
+  extendedBetas: false,
   sessionId: "test-session-id",
   machineId: "test-machine-id",
 }

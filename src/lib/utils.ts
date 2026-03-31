@@ -14,29 +14,59 @@ export const isNullish = (value: unknown): value is null | undefined =>
   value === null || value === undefined
 
 /**
- * Beta values that VS Code Copilot Chat actually sends to the Copilot API.
- * Only these are forwarded; everything else (e.g. context-1m-*) is stripped
- * so our requests match what VS Code produces.
+ * Beta prefixes VS Code Copilot Chat v0.43 actually sends.
+ * Default mode — makes proxy traffic indistinguishable from VS Code.
  */
-const ALLOWED_BETA_PREFIXES = [
+const VSCODE_BETA_PREFIXES = [
   "interleaved-thinking-",
   "context-management-",
   "advanced-tool-use-",
-  "token-counting-",
 ]
 
 /**
- * Filter an `anthropic-beta` header value, keeping only beta flags that
- * VS Code Copilot is known to send. Returns the filtered comma-separated
- * string, or undefined if nothing remains.
+ * Extended beta prefixes for Claude CLI compatibility.
+ * Enabled via --extended-betas flag. Includes all betas confirmed
+ * to work with the Copilot API.
+ *
+ * Notably absent: output-128k- (Copilot returns 400).
+ */
+const EXTENDED_BETA_PREFIXES = [
+  ...VSCODE_BETA_PREFIXES,
+  "claude-code-",
+  "context-1m-",
+  "effort-",
+  "prompt-caching-",
+  "computer-use-",
+  "pdfs-",
+  "max-tokens-",
+  "token-counting-",
+  "compact-",
+  "structured-outputs-",
+  "fast-mode-",
+  "skills-",
+  "mcp-client-",
+  "mcp-servers-",
+  "files-api-",
+  "redact-thinking-",
+  "web-search-",
+]
+
+/**
+ * Filter an `anthropic-beta` header value, keeping only beta flags
+ * in the active whitelist. Uses extended prefixes when --extended-betas
+ * is enabled, VS Code-only prefixes otherwise.
+ * Returns the filtered comma-separated string, or undefined if nothing remains.
  */
 export function filterBetaHeader(value: string): string | undefined {
+  const prefixes = state.extendedBetas
+    ? EXTENDED_BETA_PREFIXES
+    : VSCODE_BETA_PREFIXES
   const filtered = value
     .split(",")
     .map((v) => v.trim())
     .filter(
       (v) =>
-        v && ALLOWED_BETA_PREFIXES.some((prefix) => v.startsWith(prefix)),
+        v && prefixes.some((prefix) => v.startsWith(prefix)),
     )
     .join(",")
   return filtered || undefined

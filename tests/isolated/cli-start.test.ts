@@ -12,6 +12,7 @@ const parseSharedArgsMock = mock((_args: Record<string, unknown>) => ({
   githubToken: undefined,
   showToken: false,
   proxyEnv: false,
+  extendedBetas: false,
 }))
 const getClaudeCodeEnvVarsMock = mock(
   (serverUrl: string, model?: string) => {
@@ -49,6 +50,7 @@ mock.module("~/lib/server-setup", () => ({
     "github-token": { alias: "g", type: "string" as const },
     "show-token": { type: "boolean" as const, default: false },
     "proxy-env": { type: "boolean" as const, default: false },
+    "extended-betas": { type: "boolean" as const, default: false },
   },
 }))
 
@@ -109,6 +111,7 @@ beforeEach(() => {
     githubToken: undefined,
     showToken: false,
     proxyEnv: false,
+    extendedBetas: false,
   })
   getClaudeCodeEnvVarsMock.mockReset()
   getClaudeCodeEnvVarsMock.mockImplementation(

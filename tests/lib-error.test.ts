@@ -18,7 +18,8 @@ test("forwardError uses top-level message from HTTPError JSON payload", async ()
   const response = await app.request("/")
   expect(response.status).toBe(400)
   await expect(response.json()).resolves.toEqual({
-    error: { message: "Top-level error", type: "error" },
+    type: "error",
+    error: { type: "invalid_request_error", message: "Top-level error" },
   })
 })
 
@@ -37,7 +38,8 @@ test("forwardError falls back to nested error message", async () => {
   const response = await app.request("/")
   expect(response.status).toBe(422)
   await expect(response.json()).resolves.toEqual({
-    error: { message: "Nested error", type: "error" },
+    type: "error",
+    error: { type: "api_error", message: "Nested error" },
   })
 })
 
@@ -53,7 +55,8 @@ test("forwardError keeps raw text for HTTPError without JSON", async () => {
   const response = await app.request("/")
   expect(response.status).toBe(409)
   await expect(response.json()).resolves.toEqual({
-    error: { message: "plain error", type: "error" },
+    type: "error",
+    error: { type: "api_error", message: "plain error" },
   })
 })
 
@@ -64,6 +67,28 @@ test("forwardError returns 500 for non-HTTP errors", async () => {
   const response = await app.request("/")
   expect(response.status).toBe(500)
   await expect(response.json()).resolves.toEqual({
-    error: { message: "boom", type: "error" },
+    type: "error",
+    error: { type: "api_error", message: "boom" },
   })
+})
+
+test("forwardError passes through Anthropic-format error from upstream", async () => {
+  const app = new Hono()
+  const upstreamError = {
+    type: "error",
+    error: { type: "invalid_request_error", message: "scope is not allowed" },
+  }
+  app.get("/", (c) =>
+    forwardError(
+      c,
+      new HTTPError(
+        "Failed",
+        Response.json(upstreamError, { status: 400 }),
+      ),
+    ),
+  )
+
+  const response = await app.request("/")
+  expect(response.status).toBe(400)
+  await expect(response.json()).resolves.toEqual(upstreamError)
 })

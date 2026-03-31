@@ -100,7 +100,7 @@ export async function handleCountTokens(c: Context) {
 }
 
 /**
- * Parse the JSON body, resolve the model name, and re-serialize.
+ * Parse the JSON body, resolve the model name, sanitize cache_control, and re-serialize.
  */
 function resolveModelInBody(rawBody: string): {
   body: string
@@ -116,16 +116,60 @@ function resolveModelInBody(rawBody: string): {
 
   const originalModel =
     typeof parsed.model === "string" ? parsed.model : undefined
-  if (!originalModel) return { body: rawBody, originalModel }
 
-  const resolved = resolveModel(originalModel)
-  if (resolved === originalModel)
-    return { body: rawBody, originalModel, resolvedModel: originalModel }
+  let modified = false
+  if (originalModel) {
+    const resolved = resolveModel(originalModel)
+    if (resolved !== originalModel) {
+      parsed.model = resolved
+      modified = true
+    }
+  }
 
-  parsed.model = resolved
+  const needsSanitize = rawBody.includes('"scope"')
+  if (needsSanitize) {
+    sanitizeCacheControl(parsed)
+    modified = true
+  }
+
+  const resolvedModel =
+    typeof parsed.model === "string" ? parsed.model : originalModel
+
   return {
-    body: JSON.stringify(parsed),
+    body: modified ? JSON.stringify(parsed) : rawBody,
     originalModel,
-    resolvedModel: resolved,
+    resolvedModel,
+  }
+}
+
+function sanitizeCacheControl(body: AnyRecord): void {
+  function stripScope(block: AnyRecord): void {
+    if (block.cache_control?.scope !== undefined) {
+      delete block.cache_control.scope
+      if (Object.keys(block.cache_control).length === 0) {
+        delete block.cache_control
+      }
+    }
+  }
+
+  if (Array.isArray(body.system)) {
+    for (const block of body.system) stripScope(block)
+  }
+
+  if (Array.isArray(body.messages)) {
+    for (const msg of body.messages) {
+      if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          stripScope(block)
+          if (Array.isArray(block.content)) {
+            for (const nested of block.content) stripScope(nested)
+          }
+        }
+      }
+    }
+  }
+
+  if (Array.isArray(body.tools)) {
+    for (const tool of body.tools) stripScope(tool)
   }
 }

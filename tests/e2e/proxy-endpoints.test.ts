@@ -342,10 +342,10 @@ describe("E2E: /v1/messages", () => {
     const headers = upstream.capturedHeaders()
     expect(headers).toBeDefined()
     expect(headers!["anthropic-beta"]).toContain("interleaved-thinking")
-    expect(headers!["anthropic-beta"]).toContain("token-counting")
+    expect(headers!["anthropic-beta"]).toContain("context-management")
   })
 
-  test("filters client beta headers to allowed prefixes only", async () => {
+  test("filters client beta headers to VS Code whitelist by default", async () => {
     setupState()
     const url = await startServer()
 
@@ -356,7 +356,7 @@ describe("E2E: /v1/messages", () => {
       headers: {
         "content-type": "application/json",
         "anthropic-version": "2023-06-01",
-        "anthropic-beta": "interleaved-thinking-2025-05-14,context-1m-2025-04-14,token-counting-2024-11-01",
+        "anthropic-beta": "interleaved-thinking-2025-05-14,context-1m-2025-04-14,claude-code-20250219,output-128k-2025-02-19",
       },
       body: JSON.stringify({
         model: "claude-opus-4.6-1m",
@@ -369,8 +369,10 @@ describe("E2E: /v1/messages", () => {
     expect(headers).toBeDefined()
     const beta = headers!["anthropic-beta"]
     expect(beta).toContain("interleaved-thinking-2025-05-14")
-    expect(beta).toContain("token-counting-2024-11-01")
+    // Default mode: VS Code whitelist only — non-VS-Code betas stripped
     expect(beta).not.toContain("context-1m")
+    expect(beta).not.toContain("claude-code")
+    expect(beta).not.toContain("output-128k")
   })
 })
 

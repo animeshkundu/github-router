@@ -16,6 +16,9 @@ server.use(cors())
 
 server.get("/", (c) => c.text("Server running"))
 
+// Claude CLI sends HEAD / as health check before each request
+server.on("HEAD", ["/"], (c) => c.body(null, 200))
+
 server.route("/chat/completions", completionRoutes)
 server.route("/responses", responsesRoutes)
 server.route("/models", modelRoutes)
@@ -33,3 +36,17 @@ server.route("/v1/search", searchRoutes)
 
 // Anthropic compatible endpoints
 server.route("/v1/messages", messageRoutes)
+
+// Return Anthropic-format JSON for unknown endpoints
+server.notFound((c) =>
+  c.json(
+    {
+      type: "error",
+      error: {
+        type: "not_found_error",
+        message: `${c.req.method} ${c.req.path} not found`,
+      },
+    },
+    404,
+  ),
+)

@@ -28,16 +28,19 @@ import { state } from "~/lib/state"
 function buildHeaders(
   extraHeaders?: Record<string, string>,
 ): Record<string, string> {
-  return {
+  const headers: Record<string, string> = {
     ...copilotHeaders(state),
     accept: "application/json",
-    "openai-intent": "conversation-agent",
+    "openai-intent": "messages-proxy",
     "x-interaction-type": "conversation-agent",
     "X-Initiator": "agent",
     "anthropic-version": "2023-06-01",
     "X-Interaction-Id": randomUUID(),
     ...extraHeaders,
   }
+  // VS Code extension v0.43+ suppresses this for /v1/messages
+  delete headers["copilot-integration-id"]
+  return headers
 }
 
 /**

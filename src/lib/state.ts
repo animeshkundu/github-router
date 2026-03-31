@@ -14,6 +14,7 @@ export interface State {
   manualApprove: boolean
   rateLimitWait: boolean
   showToken: boolean
+  extendedBetas: boolean
 
   // Rate limiting configuration
   rateLimitSeconds?: number
@@ -29,6 +30,7 @@ export const state: State = {
   manualApprove: false,
   rateLimitWait: false,
   showToken: false,
+  extendedBetas: false,
   sessionId: randomUUID(),
   machineId: randomBytes(32).toString("hex"),
 }
