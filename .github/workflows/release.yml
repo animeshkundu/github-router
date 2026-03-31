@@ -19,6 +19,9 @@ jobs:
   publish-npm:
     needs: ci
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -32,16 +35,16 @@ jobs:
         with:
           bun-version: "1.2.19"
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
       - name: Build
         run: bun run build
-
-      - name: Configure npm auth
-        run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Bump version if already published
         id: version
@@ -69,9 +72,11 @@ jobs:
             delete pkg.publishConfig;
             require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
-          npm publish --access public
+          npm publish --access public --provenance
           # Restore scoped name (keep bumped version for the version-bump commit)
           mv package.json.bak package.json
+        env:
+          NODE_AUTH_TOKEN: ""  # OIDC trusted publishing — no token needed
 
       - name: Push version bump
         if: steps.version.outputs.bumped == 'true'
