@@ -16,7 +16,7 @@ Passthrough to Copilot's `/responses`. OpenAI Responses API format used by Codex
 **Request**:
 ```json
 {
-  "model": "gpt-5.2-codex",
+  "model": "gpt-5.4",
   "input": "string or array of input items",
   "instructions": "optional system prompt",
   "tools": [{"type": "function", "name": "...", "parameters": {...}}],
@@ -45,7 +45,7 @@ Passthrough to Copilot's `/responses`. OpenAI Responses API format used by Codex
 - `response.function_call_arguments.delta` -function call argument chunk
 - `response.completed` -final complete response
 
-**Models**: gpt-5.3-codex, gpt-5.2-codex, gpt-5.1-codex-mini, gpt-5.1-codex-max, gpt-4.1, etc.
+**Models**: gpt-5.4, gpt-5.3-codex, gpt-5.2-codex, gpt-5.1-codex-mini, gpt-5.1-codex-max, gpt-4.1, etc.
 
 ### GET `/v1/models` (also `/models`)
 Returns list of available Copilot models in OpenAI format.

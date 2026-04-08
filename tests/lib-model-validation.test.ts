@@ -8,6 +8,7 @@ import {
 import { state } from "../src/lib/state"
 
 const fakeModels = [
+  { id: "gpt-5.4", supported_endpoints: ["/responses"] },
   { id: "gpt-5.3-codex", supported_endpoints: ["/responses"] },
   { id: "gpt-5.2-codex", supported_endpoints: ["/responses"] },
   { id: "claude-opus-4.6-1m", supported_endpoints: ["/v1/messages", "/chat/completions"] },
@@ -87,6 +88,7 @@ describe("listModelsForEndpoint", () => {
 
   test("lists models for /responses", () => {
     const models = listModelsForEndpoint("/responses")
+    expect(models).toContain("gpt-5.4")
     expect(models).toContain("gpt-5.3-codex")
     expect(models).toContain("gpt-5.2-codex")
     expect(models).toContain("gpt-4.1")

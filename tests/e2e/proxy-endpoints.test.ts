@@ -16,6 +16,29 @@ import type { Model, ModelsResponse } from "../../src/services/copilot/get-model
 
 // --- Test model fixtures ---
 
+const gpt54: Model = {
+  id: "gpt-5.4",
+  model_picker_enabled: true,
+  name: "GPT-5.4",
+  object: "model",
+  preview: false,
+  vendor: "OpenAI",
+  version: "gpt-5.4",
+  capabilities: {
+    family: "gpt-5.4",
+    limits: {
+      max_context_window_tokens: 400000,
+      max_output_tokens: 128000,
+      max_prompt_tokens: 272000,
+    },
+    object: "model_capabilities",
+    supports: { streaming: true, tool_calls: true, parallel_tool_calls: true },
+    tokenizer: "o200k_base",
+    type: "chat",
+  },
+  supported_endpoints: ["/responses"],
+}
+
 const codexModel: Model = {
   id: "gpt-5.3-codex",
   model_picker_enabled: true,
@@ -119,7 +142,7 @@ const gpt41: Model = {
   supported_endpoints: ["/chat/completions", "/responses"],
 }
 
-const allModels: Model[] = [codexModel, codexOldModel, claudeOpus1m, claudeOpus, gpt41]
+const allModels: Model[] = [gpt54, codexModel, codexOldModel, claudeOpus1m, claudeOpus, gpt41]
 
 // --- Helpers ---
 
@@ -250,7 +273,7 @@ describe("E2E: /v1/responses", () => {
     expect(forwarded.max_output_tokens).toBeUndefined()
   })
 
-  test("normalizes old format gpt5.3-codex to gpt-5.3-codex", async () => {
+  test("normalizes old format gpt5.3-codex via codex family preference", async () => {
     setupState()
     const url = await startServer()
 
@@ -266,7 +289,8 @@ describe("E2E: /v1/responses", () => {
 
     expect(res.status).toBe(200)
     const forwarded = JSON.parse(upstream.capturedBody() ?? "{}") as { model: string }
-    expect(forwarded.model).toBe("gpt-5.3-codex")
+    // "gpt5.3-codex" contains "codex" → family preference picks best gpt-5* model
+    expect(forwarded.model).toBe("gpt-5.4")
   })
 })
 
@@ -520,7 +544,7 @@ describe("E2E: model resolution edge cases", () => {
     expect(forwarded.model).toBe("gpt-5.3-codex")
   })
 
-  test("codex family keyword resolves to highest version", async () => {
+  test("codex family keyword resolves to highest gpt-5 version", async () => {
     setupState()
     const url = await startServer()
 
@@ -535,7 +559,7 @@ describe("E2E: model resolution edge cases", () => {
     })
 
     const forwarded = JSON.parse(upstream.capturedBody() ?? "{}") as { model: string }
-    expect(forwarded.model).toBe("gpt-5.3-codex")
+    expect(forwarded.model).toBe("gpt-5.4")
   })
 })
 
