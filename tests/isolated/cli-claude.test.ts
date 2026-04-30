@@ -141,6 +141,14 @@ beforeEach(() => {
 })
 
 describe("claude command", () => {
+  test("teammate mode arg defaults to auto", () => {
+    const commandArgs = (claude as unknown as {
+      args: Record<string, { default?: unknown }>
+    }).args
+
+    expect(commandArgs["teammate-mode"].default).toBe("auto")
+  })
+
   test("TTY check: non-interactive terminal exits with code 1", async () => {
     isTTY = false
     const run = getRunFn()

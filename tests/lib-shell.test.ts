@@ -228,4 +228,10 @@ describe("script generation", () => {
     const result = generateEnvScript({ SKIP: undefined }, "cmd")
     expect(result).toBe("unset SKIP && cmd")
   })
+
+  test("invalid env var names rejected", () => {
+    expect(() => generateEnvScript({ "BAD;KEY": "value" }, "cmd")).toThrow(
+      "Invalid environment variable name: BAD;KEY",
+    )
+  })
 })

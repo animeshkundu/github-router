@@ -3,6 +3,15 @@ import process from "node:process"
 type ShellName = "bash" | "zsh" | "fish" | "powershell" | "cmd" | "sh"
 type EnvVars = Record<string, string | undefined>
 
+const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+function assertSafeEnvKey(key: string): string {
+  if (!ENV_KEY_PATTERN.test(key)) {
+    throw new Error(`Invalid environment variable name: ${key}`)
+  }
+  return key
+}
+
 function getShell(): ShellName {
   const { platform, env } = process
 
@@ -63,10 +72,13 @@ export function generateEnvScript(
   commandToRun: string = "",
 ): string {
   const shell = getShell()
-  const filteredEnvVars = Object.entries(envVars).filter(
+  const entries = Object.entries(envVars).map(
+    ([key, value]) => [assertSafeEnvKey(key), value] as const,
+  )
+  const filteredEnvVars = entries.filter(
     ([, value]) => value !== undefined,
   ) as Array<[string, string]>
-  const unsetEnvKeys = Object.entries(envVars)
+  const unsetEnvKeys = entries
     .filter(([, value]) => value === undefined)
     .map(([key]) => key)
 
