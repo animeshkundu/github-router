@@ -5,6 +5,7 @@ import consola from "consola"
 
 import { enableFileLogging } from "./lib/file-log-reporter"
 import {
+  CLAUDE_TEAMMATE_MODES,
   DEFAULT_CLAUDE_TEAMMATE_MODE,
   launchChild,
   type ClaudeTeammateMode,
@@ -104,5 +105,5 @@ export const claude = defineCommand({
 })
 
 function isClaudeTeammateMode(value: string): value is ClaudeTeammateMode {
-  return value === "auto" || value === "in-process" || value === "tmux"
+  return CLAUDE_TEAMMATE_MODES.includes(value as ClaudeTeammateMode)
 }

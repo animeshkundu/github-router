@@ -26,10 +26,13 @@ export interface LaunchTarget {
   teammateMode?: ClaudeTeammateMode
 }
 
-export type ClaudeTeammateMode = "auto" | "in-process" | "tmux"
+export const CLAUDE_TEAMMATE_MODES = ["auto", "in-process", "tmux"] as const
+
+export type ClaudeTeammateMode = (typeof CLAUDE_TEAMMATE_MODES)[number]
 
 export const DEFAULT_CLAUDE_TEAMMATE_MODE: ClaudeTeammateMode = "auto"
 
+/** Merge child env vars, deleting keys explicitly set to undefined for auth isolation. */
 function buildChildEnv(
   envVars: Record<string, string | undefined>,
 ): Record<string, string | undefined> {
