@@ -20,9 +20,25 @@ function commandExists(name: string): boolean {
 
 export interface LaunchTarget {
   kind: "claude-code" | "codex"
-  envVars: Record<string, string>
+  envVars: Record<string, string | undefined>
   extraArgs: string[]
   model?: string
+  teammateMode?: ClaudeTeammateMode
+}
+
+export type ClaudeTeammateMode = "auto" | "in-process" | "tmux"
+
+export const DEFAULT_CLAUDE_TEAMMATE_MODE: ClaudeTeammateMode = "auto"
+
+function buildChildEnv(
+  envVars: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = { ...process.env }
+  for (const [key, value] of Object.entries(envVars)) {
+    if (value === undefined) delete env[key]
+    else env[key] = value
+  }
+  return env
 }
 
 export function buildLaunchCommand(target: LaunchTarget): {
@@ -31,12 +47,18 @@ export function buildLaunchCommand(target: LaunchTarget): {
 } {
   const cmd: string[] =
     target.kind === "claude-code"
-      ? ["claude", "--dangerously-skip-permissions", ...target.extraArgs]
+      ? [
+          "claude",
+          "--dangerously-skip-permissions",
+          "--teammate-mode",
+          target.teammateMode ?? DEFAULT_CLAUDE_TEAMMATE_MODE,
+          ...target.extraArgs,
+        ]
       : ["codex", "--full-auto", "-m", target.model ?? DEFAULT_CODEX_MODEL, ...target.extraArgs]
 
   return {
     cmd,
-    env: { ...process.env, ...target.envVars },
+    env: buildChildEnv(target.envVars),
   }
 }
 

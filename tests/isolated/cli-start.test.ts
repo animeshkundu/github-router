@@ -16,11 +16,13 @@ const parseSharedArgsMock = mock((_args: Record<string, unknown>) => ({
 }))
 const getClaudeCodeEnvVarsMock = mock(
   (serverUrl: string, model?: string) => {
-    const vars: Record<string, string> = {
+    const vars: Record<string, string | undefined> = {
       ANTHROPIC_BASE_URL: serverUrl,
+      ANTHROPIC_API_KEY: undefined,
       ANTHROPIC_AUTH_TOKEN: "dummy",
       DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
     }
     if (model) vars.ANTHROPIC_MODEL = model
     return vars
@@ -116,11 +118,13 @@ beforeEach(() => {
   getClaudeCodeEnvVarsMock.mockReset()
   getClaudeCodeEnvVarsMock.mockImplementation(
     (serverUrl: string, model?: string) => {
-      const vars: Record<string, string> = {
+      const vars: Record<string, string | undefined> = {
         ANTHROPIC_BASE_URL: serverUrl,
+        ANTHROPIC_API_KEY: undefined,
         ANTHROPIC_AUTH_TOKEN: "dummy",
         DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
       }
       if (model) vars.ANTHROPIC_MODEL = model
       return vars
@@ -168,6 +172,9 @@ describe("cli-start", () => {
     expect(consolaBoxMock.mock.calls.length).toBeGreaterThanOrEqual(2)
     const boxCall = (consolaBoxMock.mock.calls as unknown[][])[0][0] as string
     expect(boxCall).toContain("Claude Code")
+    expect(boxCall).toContain("--teammate-mode auto")
+    expect(boxCall).toContain("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1")
+    expect(boxCall).not.toContain("ANTHROPIC_API_KEY=")
   })
 
   test("--cx flag generates Codex CLI command", async () => {

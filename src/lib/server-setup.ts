@@ -247,12 +247,14 @@ export function parseSharedArgs(args: Record<string, unknown>): {
 export function getClaudeCodeEnvVars(
   serverUrl: string,
   model?: string,
-): Record<string, string> {
-  const vars: Record<string, string> = {
+): Record<string, string | undefined> {
+  const vars: Record<string, string | undefined> = {
     ANTHROPIC_BASE_URL: serverUrl,
+    ANTHROPIC_API_KEY: undefined,
     ANTHROPIC_AUTH_TOKEN: "dummy",
     DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
   }
   if (model) vars.ANTHROPIC_MODEL = model
   return vars

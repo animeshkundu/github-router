@@ -212,13 +212,20 @@ describe("script generation", () => {
     expect(result).toBe("export FOO='1' BAR='2' BAZ='3' && cmd")
   })
 
-  test("undefined values filtered out", () => {
+  test("undefined values unset", () => {
     if (isWindows) setEnv({ SHELL: "/bin/bash", POWERSHELL_DISTRIBUTION_CHANNEL: undefined, PSModulePath: undefined })
     else setEnv({ SHELL: "/bin/bash" })
     const result = generateEnvScript(
       { FOO: "1", SKIP: undefined, BAR: "2" },
       "cmd",
     )
-    expect(result).toBe("export FOO='1' BAR='2' && cmd")
+    expect(result).toBe("unset SKIP && export FOO='1' BAR='2' && cmd")
+  })
+
+  test("undefined values unset without assignments", () => {
+    if (isWindows) setEnv({ SHELL: "/bin/bash", POWERSHELL_DISTRIBUTION_CHANNEL: undefined, PSModulePath: undefined })
+    else setEnv({ SHELL: "/bin/bash" })
+    const result = generateEnvScript({ SKIP: undefined }, "cmd")
+    expect(result).toBe("unset SKIP && cmd")
   })
 })

@@ -66,34 +66,47 @@ export function generateEnvScript(
   const filteredEnvVars = Object.entries(envVars).filter(
     ([, value]) => value !== undefined,
   ) as Array<[string, string]>
+  const unsetEnvKeys = Object.entries(envVars)
+    .filter(([, value]) => value === undefined)
+    .map(([key]) => key)
 
   let commandBlock: string
 
   switch (shell) {
     case "powershell": {
-      commandBlock = filteredEnvVars
+      const unsetBlock = unsetEnvKeys
+        .map((key) => `Remove-Item Env:${key} -ErrorAction SilentlyContinue`)
+        .join("; ")
+      const setBlock = filteredEnvVars
         .map(([key, value]) => `$env:${key} = ${quotePowerShellValue(value)}`)
         .join("; ")
+      commandBlock = [unsetBlock, setBlock].filter(Boolean).join("; ")
       break
     }
     case "cmd": {
-      commandBlock = filteredEnvVars
+      const unsetBlock = unsetEnvKeys.map((key) => `set "${key}="`).join(" & ")
+      const setBlock = filteredEnvVars
         .map(([key, value]) => `set "${key}=${value}"`)
         .join(" & ")
+      commandBlock = [unsetBlock, setBlock].filter(Boolean).join(" & ")
       break
     }
     case "fish": {
-      commandBlock = filteredEnvVars
+      const unsetBlock = unsetEnvKeys.map((key) => `set -e ${key}`).join("; ")
+      const setBlock = filteredEnvVars
         .map(([key, value]) => `set -gx ${key} ${quotePosixValue(value)}`)
         .join("; ")
+      commandBlock = [unsetBlock, setBlock].filter(Boolean).join("; ")
       break
     }
     default: {
       // bash, zsh, sh
+      const unsetBlock = unsetEnvKeys.length > 0 ? `unset ${unsetEnvKeys.join(" ")}` : ""
       const assignments = filteredEnvVars
         .map(([key, value]) => `${key}=${quotePosixValue(value)}`)
         .join(" ")
-      commandBlock = filteredEnvVars.length > 0 ? `export ${assignments}` : ""
+      const setBlock = filteredEnvVars.length > 0 ? `export ${assignments}` : ""
+      commandBlock = [unsetBlock, setBlock].filter(Boolean).join(" && ")
       break
     }
   }

@@ -153,7 +153,11 @@ describe("launchChild", () => {
     expect(spawnMock).toHaveBeenCalledTimes(1)
     const [cmd, args, options] = spawnMock.mock.calls[0]
     expect(cmd).toBe("claude")
-    expect(args).toEqual(["--dangerously-skip-permissions"])
+    expect(args).toEqual([
+      "--dangerously-skip-permissions",
+      "--teammate-mode",
+      "auto",
+    ])
     expect(options.stdio).toBe("inherit")
     expect(options.env.ANTHROPIC_BASE_URL).toBe("http://localhost:12345")
     expect(options.env.ANTHROPIC_AUTH_TOKEN).toBe("dummy")

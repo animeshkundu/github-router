@@ -4,7 +4,11 @@ import { defineCommand } from "citty"
 import consola from "consola"
 
 import { enableFileLogging } from "./lib/file-log-reporter"
-import { launchChild } from "./lib/launch"
+import {
+  DEFAULT_CLAUDE_TEAMMATE_MODE,
+  launchChild,
+  type ClaudeTeammateMode,
+} from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
 import {
   getClaudeCodeEnvVars,
@@ -27,6 +31,11 @@ export const claude = defineCommand({
       type: "string",
       description: "Override the default model for Claude Code",
     },
+    "teammate-mode": {
+      type: "string",
+      default: DEFAULT_CLAUDE_TEAMMATE_MODE,
+      description: "Set Claude Code teammate mode (auto, in-process, tmux)",
+    },
   },
   async run({ args }) {
     if (!process.stdout.isTTY) {
@@ -35,6 +44,12 @@ export const claude = defineCommand({
     }
 
     const parsed = parseSharedArgs(args as unknown as Record<string, unknown>)
+    const teammateMode =
+      (args["teammate-mode"] as string | undefined) ?? DEFAULT_CLAUDE_TEAMMATE_MODE
+    if (!isClaudeTeammateMode(teammateMode)) {
+      consola.error("Invalid teammate mode. Must be auto, in-process, or tmux.")
+      process.exit(1)
+    }
 
     let server: Awaited<ReturnType<typeof setupAndServe>>["server"]
     let serverUrl: string
@@ -76,8 +91,18 @@ export const claude = defineCommand({
     const extraArgs = ((args as unknown as Record<string, unknown>)._ as string[]) ?? []
 
     launchChild(
-      { kind: "claude-code", envVars, extraArgs, model: resolvedModel ?? args.model },
+      {
+        kind: "claude-code",
+        envVars,
+        extraArgs,
+        model: resolvedModel ?? args.model,
+        teammateMode,
+      },
       server,
     )
   },
 })
+
+function isClaudeTeammateMode(value: string): value is ClaudeTeammateMode {
+  return value === "auto" || value === "in-process" || value === "tmux"
+}

@@ -121,11 +121,13 @@ beforeEach(() => {
   getClaudeCodeEnvVarsMock.mockReset()
   getClaudeCodeEnvVarsMock.mockImplementation(
     (serverUrl: string, model?: string) => {
-      const vars: Record<string, string> = {
+      const vars: Record<string, string | undefined> = {
         ANTHROPIC_BASE_URL: serverUrl,
+        ANTHROPIC_API_KEY: undefined,
         ANTHROPIC_AUTH_TOKEN: "dummy",
         DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
       }
       if (model) vars.ANTHROPIC_MODEL = model
       return vars
@@ -175,7 +177,7 @@ describe("claude command", () => {
     expect(cmd).toBe("claude")
   })
 
-  test("env vars include ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, DISABLE_ keys", async () => {
+  test("env vars include Claude Code proxy defaults", async () => {
     const run = getRunFn()
 
     await run({ args: {} })
@@ -186,9 +188,41 @@ describe("claude command", () => {
     )
     const [, , options] = spawnMock.mock.calls[0]
     expect(options.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:12345")
+    expect(options.env.ANTHROPIC_API_KEY).toBeUndefined()
     expect(options.env.ANTHROPIC_AUTH_TOKEN).toBe("dummy")
     expect(options.env.DISABLE_NON_ESSENTIAL_MODEL_CALLS).toBe("1")
     expect(options.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1")
+    expect(options.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS).toBe("1")
+  })
+
+  test("default teammate mode is auto", async () => {
+    const run = getRunFn()
+
+    await run({ args: {} })
+
+    const [, args] = spawnMock.mock.calls[0]
+    expect(args).toContain("--teammate-mode")
+    expect(args).toContain("auto")
+  })
+
+  test("teammate mode override is passed through", async () => {
+    const run = getRunFn()
+
+    await run({ args: { "teammate-mode": "in-process" } })
+
+    const [, args] = spawnMock.mock.calls[0]
+    expect(args).toContain("--teammate-mode")
+    expect(args).toContain("in-process")
+  })
+
+  test("invalid teammate mode exits with code 1", async () => {
+    const run = getRunFn()
+
+    await expect(
+      run({ args: { "teammate-mode": "bogus" } }),
+    ).rejects.toThrow(ExitError)
+    expect(exitMock).toHaveBeenCalledWith(1)
+    expect(setupAndServeMock).not.toHaveBeenCalled()
   })
 
   test("model override sets ANTHROPIC_MODEL", async () => {

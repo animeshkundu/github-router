@@ -4,6 +4,7 @@ import { defineCommand } from "citty"
 import clipboard from "clipboardy"
 import consola from "consola"
 
+import { DEFAULT_CLAUDE_TEAMMATE_MODE } from "./lib/launch"
 import { generateEnvScript } from "./lib/shell"
 import { DEFAULT_CODEX_MODEL, DEFAULT_PORT } from "./lib/port"
 import {
@@ -26,7 +27,10 @@ function printAndCopyCommand(command: string, label: string): void {
 
 function generateClaudeCodeCommand(serverUrl: string, model?: string) {
   const envVars = getClaudeCodeEnvVars(serverUrl, model)
-  const command = generateEnvScript(envVars, "claude --dangerously-skip-permissions")
+  const command = generateEnvScript(
+    envVars,
+    `claude --dangerously-skip-permissions --teammate-mode ${DEFAULT_CLAUDE_TEAMMATE_MODE}`,
+  )
   printAndCopyCommand(command, "Claude Code")
 }
 

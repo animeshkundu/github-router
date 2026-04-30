@@ -79,13 +79,15 @@ describe("parseSharedArgs", () => {
 })
 
 describe("getClaudeCodeEnvVars", () => {
-  test("returns ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, DISABLE_* keys", () => {
+  test("returns Claude Code proxy env vars with agent teams enabled", () => {
     const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
     expect(vars).toEqual({
       ANTHROPIC_BASE_URL: "http://127.0.0.1:8787",
+      ANTHROPIC_API_KEY: undefined,
       ANTHROPIC_AUTH_TOKEN: "dummy",
       DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
     })
   })
 
