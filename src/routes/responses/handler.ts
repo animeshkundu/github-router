@@ -134,24 +134,48 @@ async function injectWebSearchIfNeeded(
   }
 
   const query = extractUserQuery(payload.input)
-  if (!query) return
+  if (query) {
+    try {
+      const results = await searchWeb(query)
+      const searchContext = [
+        "[Web Search Results]",
+        results.content,
+        "",
+        results.references.map((r) => `- [${r.title}](${r.url})`).join("\n"),
+        "[End Web Search Results]",
+      ].join("\n")
 
-  try {
-    const results = await searchWeb(query)
-    const searchContext = [
-      "[Web Search Results]",
-      results.content,
-      "",
-      results.references.map((r) => `- [${r.title}](${r.url})`).join("\n"),
-      "[End Web Search Results]",
-    ].join("\n")
+      payload.instructions =
+        payload.instructions ?
+          `${searchContext}\n\n${payload.instructions}`
+        : searchContext
+    } catch (error) {
+      consola.warn("Web search failed, continuing without results:", error)
+    }
+  }
 
-    payload.instructions =
-      payload.instructions ?
-        `${searchContext}\n\n${payload.instructions}`
-      : searchContext
-  } catch (error) {
-    consola.warn("Web search failed, continuing without results:", error)
+  // Strip the legacy `web_search` tool — the router fulfilled it locally via
+  // /github/chat/threads, and Copilot's /responses rejects this exact type
+  // (Copilot supports `web_search_preview` / `web_search_preview_2025_03_11`,
+  // not bare `web_search`). Other tool types pass through unchanged.
+  payload.tools = payload.tools?.filter((t) => t.type !== "web_search")
+  if (payload.tools && payload.tools.length === 0) {
+    payload.tools = undefined
+  }
+  if (!payload.tools) {
+    payload.tool_choice = undefined
+  } else if (
+    payload.tool_choice
+    && typeof payload.tool_choice === "object"
+  ) {
+    const choice = payload.tool_choice as {
+      name?: string
+      function?: { name?: string }
+    }
+    const choiceName = choice.function?.name ?? choice.name
+    if (choiceName === "web_search") {
+      payload.tool_choice = undefined
+    }
   }
 }
 

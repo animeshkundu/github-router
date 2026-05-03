@@ -69,7 +69,9 @@ describe("createMessages", () => {
     // Copilot auth and identification headers
     expect(capturedHeaders.Authorization).toBe("Bearer test-token")
     expect(capturedHeaders["content-type"]).toBe("application/json")
-    expect(capturedHeaders["copilot-integration-id"]).toBeUndefined()
+    // copilot-integration-id is now forwarded — Copilot accepts it on /v1/messages
+    // (verified live; previously this was deleted, but pre-2026 rejection no longer applies).
+    expect(capturedHeaders["copilot-integration-id"]).toBe("vscode-chat")
     expect(capturedHeaders["editor-version"]).toBe("vscode/1.0.0")
     expect(capturedHeaders["editor-plugin-version"]).toMatch(/^copilot-chat\//)
     expect(capturedHeaders["user-agent"]).toMatch(/^GitHubCopilotChat\//)

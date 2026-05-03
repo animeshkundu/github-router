@@ -1,10 +1,11 @@
 import { test, expect, mock, afterEach, describe, beforeEach } from "bun:test"
 
 import { state } from "../src/lib/state"
-import { DEFAULT_CODEX_MODEL } from "../src/lib/port"
+import { DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL } from "../src/lib/port"
 import {
   cacheModels,
   cacheVSCodeVersion,
+  filterBetaHeader,
   isNullish,
   normalizeModelId,
   resolveCodexModel,
@@ -20,7 +21,11 @@ afterEach(() => {
 
 test("DEFAULT_CODEX_MODEL matches Copilot API format", () => {
   // Must match both Copilot's model ID and Codex CLI's bundled catalog entry
-  expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.3-codex")
+  expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.5")
+})
+
+test("DEFAULT_CLAUDE_MODEL matches Copilot API format", () => {
+  expect(DEFAULT_CLAUDE_MODEL).toBe("claude-opus-4.7")
 })
 
 test("isNullish handles null and undefined", () => {
@@ -96,8 +101,11 @@ describe("normalizeModelId", () => {
 // --- resolveModel ---
 
 const fakeModels = [
+  { id: "gpt-5.5", supported_endpoints: ["/responses"] },
   { id: "gpt-5.3-codex", supported_endpoints: ["/responses"] },
   { id: "gpt-5.2-codex", supported_endpoints: ["/responses"] },
+  { id: "claude-opus-4.7-1m-internal", supported_endpoints: ["/v1/messages", "/chat/completions"] },
+  { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages", "/chat/completions"] },
   { id: "claude-opus-4.6-1m", supported_endpoints: ["/v1/messages", "/chat/completions"] },
   { id: "claude-opus-4.6", supported_endpoints: ["/v1/messages", "/chat/completions"] },
   { id: "claude-sonnet-4.6", supported_endpoints: ["/v1/messages", "/chat/completions"] },
@@ -126,28 +134,44 @@ describe("resolveModel", () => {
     expect(resolveModel("gpt5.3-codex")).toBe("gpt-5.3-codex")
   })
 
-  test("opus family preference resolves to 1m variant", () => {
-    expect(resolveModel("opus")).toBe("claude-opus-4.6-1m")
+  test("opus family preference resolves to 1m variant (no version → first match)", () => {
+    // Bare "opus" has no major.minor; falls back to first 1M variant in list order.
+    expect(resolveModel("opus")).toBe("claude-opus-4.7-1m-internal")
   })
 
-  test("claude-opus-4-6 resolves to 1m, not 200K variant (regression)", () => {
-    // Claude Code sends "claude-opus-4-6" (dashes, no dots).
-    // Family preference (opus→1m) must run before normalization,
-    // otherwise it matches claude-opus-4.6 (200K) via normalization.
+  test("claude-opus-4.7 exact match stays at 200K (does not auto-upgrade)", () => {
+    // Exact match wins over 1M upgrade. The implicit default upgrade to the
+    // 1M variant is the claude subcommand's responsibility, not the resolver's
+    // — explicit ids are respected. Verified empirically against Copilot.
+    expect(resolveModel("claude-opus-4.7")).toBe("claude-opus-4.7")
+  })
+
+  test("claude-opus-4-7 (dashed) resolves to 4.7-1m-internal via family preference", () => {
+    // Claude Code sends "claude-opus-4-7" (dashes, no dots) — no exact match,
+    // so family preference picks the 1M variant whose major.minor matches
+    // (regression: the old endsWith("-1m") missed claude-opus-4.7-1m-internal,
+    // and the version-preference guard prevents downgrading to 4.6-1m).
+    expect(resolveModel("claude-opus-4-7")).toBe("claude-opus-4.7-1m-internal")
+  })
+
+  test("claude-opus-4-6 (dashed) resolves to 4.6-1m, not the older default", () => {
+    // The version-preference logic must pick 4.6-1m, not silently upgrade
+    // to claude-opus-4.7-1m-internal just because it comes first in the list.
     expect(resolveModel("claude-opus-4-6")).toBe("claude-opus-4.6-1m")
-  })
-
-  test("claude-opus-4.6 exact match stays at 200K, does not redirect to 1m", () => {
-    // When user explicitly requests the 200K variant, respect it.
-    expect(resolveModel("claude-opus-4.6")).toBe("claude-opus-4.6")
   })
 
   test("claude-opus-4.6-1m exact match stays as-is", () => {
     expect(resolveModel("claude-opus-4.6-1m")).toBe("claude-opus-4.6-1m")
   })
 
-  test("codex family preference resolves to highest version", () => {
+  test("codex family preference resolves to highest codex-suffix version", () => {
     expect(resolveModel("codex")).toBe("gpt-5.3-codex")
+  })
+
+  test("gpt-5.5 exact match returns as-is (no codex fallback)", () => {
+    // gpt-5.5 is the new codex-class model but lacks the -codex suffix.
+    // It must hit step 1 exact match, not fall through to codex fallback.
+    expect(resolveModel("gpt-5.5")).toBe("gpt-5.5")
   })
 
   test("returns input when no models cached", () => {
@@ -161,6 +185,63 @@ describe("resolveModel", () => {
 })
 
 // --- resolveCodexModel ---
+
+// --- filterBetaHeader: regression guards for Copilot's denylist ---
+
+describe("filterBetaHeader", () => {
+  const originalExtended = state.extendedBetas
+
+  afterEach(() => {
+    state.extendedBetas = originalExtended
+  })
+
+  test("default mode keeps the 3 VS Code-stealth prefixes", () => {
+    state.extendedBetas = false
+    const input = [
+      "interleaved-thinking-2025-05-14",
+      "context-management-2025-06-27",
+      "advanced-tool-use-2025-11-20",
+    ].join(",")
+    expect(filterBetaHeader(input)).toBe(input)
+  })
+
+  test("default mode strips Claude CLI extended betas", () => {
+    state.extendedBetas = false
+    expect(filterBetaHeader("prompt-caching-2024-07-31")).toBeUndefined()
+    expect(filterBetaHeader("claude-code-2025-04-29")).toBeUndefined()
+  })
+
+  test("extended mode strips context-1m-* (Copilot 400s — verified live)", () => {
+    state.extendedBetas = true
+    // Empty header drop → undefined; mixed header drops only the rejected one
+    expect(filterBetaHeader("context-1m-2025-08-07")).toBeUndefined()
+    expect(
+      filterBetaHeader("prompt-caching-2024-07-31,context-1m-2025-08-07"),
+    ).toBe("prompt-caching-2024-07-31")
+  })
+
+  test("extended mode strips skills-* (Copilot 400s — verified live)", () => {
+    state.extendedBetas = true
+    expect(filterBetaHeader("skills-2025-10-02")).toBeUndefined()
+  })
+
+  test("extended mode strips files-api-* (Copilot 400s — verified live)", () => {
+    state.extendedBetas = true
+    expect(filterBetaHeader("files-api-2025-04-14")).toBeUndefined()
+  })
+
+  test("extended mode keeps confirmed-working betas", () => {
+    state.extendedBetas = true
+    const input = [
+      "claude-code-2025-04-29",
+      "prompt-caching-2024-07-31",
+      "computer-use-2024-10-22",
+      "mcp-client-2025-04-04",
+      "web-search-2025-03-05",
+    ].join(",")
+    expect(filterBetaHeader(input)).toBe(input)
+  })
+})
 
 describe("resolveCodexModel", () => {
   beforeEach(() => {
@@ -180,9 +261,25 @@ describe("resolveCodexModel", () => {
     expect(resolveCodexModel("gpt5.3-codex")).toBe("gpt-5.3-codex")
   })
 
-  test("falls back to best codex model when not found", () => {
+  test("falls back to best codex-class model when not found (prefers -codex suffix)", () => {
     const result = resolveCodexModel("nonexistent-codex")
     expect(result).toBe("gpt-5.3-codex")
+  })
+
+  test("falls back to gpt-5.5 when no -codex suffix models in cache", () => {
+    // Simulate a future Copilot catalog where the -codex line was retired.
+    // resolveCodexModel must still pick the highest non-mini /responses model.
+    state.models = {
+      data: [
+        { id: "gpt-5.5", supported_endpoints: ["/responses"] },
+        { id: "gpt-5.4", supported_endpoints: ["/responses", "/chat/completions"] },
+        { id: "gpt-5-mini", supported_endpoints: ["/responses"] },
+        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    const result = resolveCodexModel("nonexistent-future-codex")
+    expect(result).toBe("gpt-5.5")
   })
 
   test("returns input when no models cached", () => {

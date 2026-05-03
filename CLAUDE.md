@@ -54,7 +54,17 @@ publishes, and restores. See `publish/release.sh` for details.
 
 Two modes controlled by `--extended-betas` flag:
 - **Default (VS Code stealth)**: Only forward 3 beta prefixes the VS Code extension sends (`interleaved-thinking-`, `context-management-`, `advanced-tool-use-`). Traffic is indistinguishable from VS Code.
-- **Extended (`--extended-betas`)**: Forward 20 beta prefixes for Claude CLI compatibility. Required when using `github-router claude --extended-betas`.
+- **Extended (`--extended-betas`)**: Forward 14 additional beta prefixes for Claude CLI compatibility. Required when using `github-router claude --extended-betas`.
+
+The router strips `context-1m-`, `skills-`, `files-api-`, and `code-execution-` from every outgoing `anthropic-beta` value — Copilot returns 400 ("unsupported beta header") on each. 1M context for Opus 4.7 is unlocked by selecting the `claude-opus-4.7-1m-internal` model id (enterprise tier only), not via a beta header.
+
+### Default models
+
+The `claude` and `codex` subcommands default to the latest Copilot-supported models when no `--model` is given:
+- `claude` → `claude-opus-4.7` (resolver upgrades to `claude-opus-4.7-1m-internal` when present, which requires enterprise tier)
+- `codex` → `gpt-5.5` (Copilot's GPT-5.5 dropped the `-codex` suffix; the `/responses` endpoint is the discriminator)
+
+Override with `-m`/`--model`. Constants live in `src/lib/port.ts`.
 
 ### Error format
 

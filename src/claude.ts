@@ -6,6 +6,7 @@ import consola from "consola"
 import { enableFileLogging } from "./lib/file-log-reporter"
 import { launchChild } from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
+import { DEFAULT_CLAUDE_MODEL } from "./lib/port"
 import {
   getClaudeCodeEnvVars,
   parseSharedArgs,
@@ -53,30 +54,44 @@ export const claude = defineCommand({
 
     enableFileLogging() // redirect errors/warnings to file; suppress terminal output
 
-    // Validate model if overridden (warnings go to log file, not terminal)
-    let resolvedModel: string | undefined
-    if (args.model) {
-      resolvedModel = resolveModel(args.model)
-      if (resolvedModel !== args.model) {
-        consola.info(`Model "${args.model}" resolved to "${resolvedModel}"`)
-      }
-      const modelEntry = state.models?.data.find((m) => m.id === resolvedModel)
-      if (!modelEntry) {
-        const available = listModelsForEndpoint("/v1/messages")
-        consola.warn(
-          `Model "${resolvedModel}" not found. Available claude models: ${available.join(", ")}`,
-        )
-      }
+    // Resolve and validate model (warnings go to log file, not terminal).
+    // When --model is not supplied, fall back to DEFAULT_CLAUDE_MODEL so
+    // Claude Code defaults to the latest Opus available on Copilot.
+    const usingDefault = !args.model
+    const requestedModel = args.model ?? DEFAULT_CLAUDE_MODEL
+    let resolvedModel = resolveModel(requestedModel)
+
+    // For the implicit default only, upgrade to a same-family 1M variant
+    // when one is available (e.g. claude-opus-4.7 → claude-opus-4.7-1m-internal
+    // for enterprise tokens). Explicit --model is respected as-is so users
+    // can pin to the 200K variant by typing it literally.
+    if (usingDefault && state.models) {
+      const oneM = state.models.data.find(
+        (m) =>
+          m.id.startsWith(`${resolvedModel}-`) && /-1m(?:$|-)/.test(m.id),
+      )
+      if (oneM) resolvedModel = oneM.id
+    }
+
+    if (resolvedModel !== requestedModel) {
+      consola.info(`Model "${requestedModel}" resolved to "${resolvedModel}"`)
+    }
+    const modelEntry = state.models?.data.find((m) => m.id === resolvedModel)
+    if (!modelEntry) {
+      const available = listModelsForEndpoint("/v1/messages")
+      consola.warn(
+        `Model "${resolvedModel}" not found. Available claude models: ${available.join(", ")}`,
+      )
     }
 
     // Print to stderr directly — consola's terminal reporter is already gone
-    process.stderr.write(`Server ready on ${serverUrl}, launching Claude Code...\n`)
+    process.stderr.write(`Server ready on ${serverUrl}, launching Claude Code (${resolvedModel})...\n`)
 
-    const envVars = getClaudeCodeEnvVars(serverUrl, resolvedModel ?? args.model)
+    const envVars = getClaudeCodeEnvVars(serverUrl, resolvedModel)
     const extraArgs = ((args as unknown as Record<string, unknown>)._ as string[]) ?? []
 
     launchChild(
-      { kind: "claude-code", envVars, extraArgs, model: resolvedModel ?? args.model },
+      { kind: "claude-code", envVars, extraArgs, model: resolvedModel },
       server,
     )
   },

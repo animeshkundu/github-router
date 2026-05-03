@@ -62,6 +62,14 @@ mock.module("~/lib/server-setup", () => ({
   },
 }))
 
+mock.module("~/lib/port", () => ({
+  DEFAULT_CLAUDE_MODEL: "claude-opus-4.7",
+  // launch.ts imports DEFAULT_CODEX_MODEL transitively via claude.ts → launchChild;
+  // re-export it so the module mock doesn't break sibling imports.
+  DEFAULT_CODEX_MODEL: "gpt-5.5",
+  DEFAULT_PORT: 8787,
+}))
+
 mock.module("consola", () => ({
   default: {
     error: mock(),
@@ -77,6 +85,7 @@ mock.module("consola", () => ({
 
 // --- Import module under test AFTER mocks ---
 const { claude } = await import("../../src/claude")
+const { state } = await import("../../src/lib/state")
 
 type CommandRunFn = (ctx: { args: Record<string, unknown> }) => Promise<void>
 
@@ -180,9 +189,11 @@ describe("claude command", () => {
 
     await run({ args: {} })
 
+    // No --model → claude.ts falls back to DEFAULT_CLAUDE_MODEL ("claude-opus-4.7")
+    // and passes it through to Claude Code via ANTHROPIC_MODEL.
     expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
       "http://127.0.0.1:12345",
-      undefined,
+      "claude-opus-4.7",
     )
     const [, , options] = spawnMock.mock.calls[0]
     expect(options.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:12345")
@@ -202,6 +213,50 @@ describe("claude command", () => {
     )
     const [, , options] = spawnMock.mock.calls[0]
     expect(options.env.ANTHROPIC_MODEL).toBe("claude-sonnet-4-20250514")
+  })
+
+  test("default upgrades to 1M variant when both 200K and 1M are in cache", async () => {
+    // Critical for the user's goal: enterprise users should get 1M context
+    // for advisor / agent-team forks without typing the long internal id.
+    state.models = {
+      data: [
+        { id: "claude-opus-4.7" },
+        { id: "claude-opus-4.7-1m-internal" },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    try {
+      const run = getRunFn()
+      await run({ args: {} })
+      expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:12345",
+        "claude-opus-4.7-1m-internal",
+      )
+    } finally {
+      state.models = undefined
+    }
+  })
+
+  test("explicit --model is respected even when 1M variant available", async () => {
+    // Discriminator: only the implicit DEFAULT path upgrades to 1M.
+    // If the user explicitly types claude-opus-4.7, they get exactly 4.7.
+    state.models = {
+      data: [
+        { id: "claude-opus-4.7" },
+        { id: "claude-opus-4.7-1m-internal" },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    try {
+      const run = getRunFn()
+      await run({ args: { model: "claude-opus-4.7" } })
+      expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:12345",
+        "claude-opus-4.7",
+      )
+    } finally {
+      state.models = undefined
+    }
   })
 
   test("extra positional args passed through", async () => {

@@ -29,12 +29,14 @@ const VSCODE_BETA_PREFIXES = [
  * Enabled via --extended-betas flag. Includes all betas confirmed
  * to work with the Copilot API.
  *
- * Notably absent: output-128k- (Copilot returns 400).
+ * Notably absent (Copilot 400s on these — verified live):
+ *   context-1m-, skills-, files-api-, code-execution-, output-128k-.
+ * 1M context is unlocked by selecting `claude-opus-4.7-1m-internal`
+ * as the model id, not via a beta header.
  */
 const EXTENDED_BETA_PREFIXES = [
   ...VSCODE_BETA_PREFIXES,
   "claude-code-",
-  "context-1m-",
   "effort-",
   "prompt-caching-",
   "computer-use-",
@@ -44,10 +46,8 @@ const EXTENDED_BETA_PREFIXES = [
   "compact-",
   "structured-outputs-",
   "fast-mode-",
-  "skills-",
   "mcp-client-",
   "mcp-servers-",
-  "files-api-",
   "redact-thinking-",
   "web-search-",
 ]
@@ -111,9 +111,22 @@ export function resolveModel(modelId: string): string {
   // 3. Family preference — before normalization so product aliases
   //    (opus→1m, codex→latest) take priority over fuzzy matches
   if (lower.includes("opus")) {
-    const oneM = models.find(
-      (m) => m.id.includes("opus") && m.id.endsWith("-1m"),
+    // Match ...-1m or ...-1m-<anything> (e.g. claude-opus-4.7-1m-internal).
+    // Prefer the 1M variant whose major.minor matches the requested version,
+    // otherwise find() would silently downgrade claude-opus-4.7 to a
+    // claude-opus-4.6-1m if the latter happens to come first in the list.
+    // Accept both dotted ("opus-4.7") and dashed ("opus-4-7") inputs —
+    // Claude Code historically sends the dashed form.
+    const oneMs = models.filter(
+      (m) => m.id.includes("opus") && /-1m(?:$|-)/.test(m.id),
     )
+    const versionMatch = lower.match(/opus-(\d+)[.-](\d+)/)
+    const requestedVersion =
+      versionMatch ? `${versionMatch[1]}.${versionMatch[2]}` : undefined
+    const preferred = requestedVersion
+      ? oneMs.find((m) => m.id.includes(`opus-${requestedVersion}-`))
+      : undefined
+    const oneM = preferred ?? oneMs[0]
     if (oneM) return oneM.id
   }
 
@@ -153,19 +166,24 @@ export function resolveCodexModel(modelId: string): string {
   // Check if the resolved model exists in the model list
   if (models.some((m) => m.id === resolved)) return resolved
 
-  // Fall back to the best available codex model
-  const codexModels = models.filter((m) => {
+  // Fall back to the best available codex-class model. The /responses
+  // endpoint is the discriminator — gpt-5.5 dropped the -codex suffix but
+  // still routes through /responses. Prefer explicit -codex ids when both
+  // exist, otherwise pick the highest version-like id.
+  const candidates = models.filter((m) => {
     const endpoints = m.supported_endpoints ?? []
-    return (
-      m.id.includes("codex")
-      && !m.id.includes("mini")
-      && (endpoints.length === 0 || endpoints.includes("/responses"))
-    )
+    if (m.id.includes("mini") || m.id.includes("nano")) return false
+    return endpoints.length === 0 || endpoints.includes("/responses")
   })
 
-  if (codexModels.length > 0) {
-    codexModels.sort((a, b) => b.id.localeCompare(a.id))
-    const best = codexModels[0].id
+  if (candidates.length > 0) {
+    candidates.sort((a, b) => {
+      const aCodex = a.id.includes("codex") ? 1 : 0
+      const bCodex = b.id.includes("codex") ? 1 : 0
+      if (aCodex !== bCodex) return bCodex - aCodex
+      return b.id.localeCompare(a.id)
+    })
+    const best = candidates[0].id
     consola.warn(`Model "${modelId}" not available, using "${best}" instead`)
     return best
   }

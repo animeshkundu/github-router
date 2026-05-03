@@ -21,12 +21,10 @@ export const createResponses = async (
     "X-Initiator": isAgentCall ? "agent" : "user",
   }
 
-  const filteredPayload = filterUnsupportedTools(payload)
-
   const response = await fetch(`${copilotBaseUrl(state)}/responses`, {
     method: "POST",
     headers,
-    body: JSON.stringify(filteredPayload),
+    body: JSON.stringify(payload),
   })
 
   if (!response.ok) {
@@ -69,57 +67,6 @@ function detectAgentCall(input: ResponsesPayload["input"]): boolean {
     }
     return false
   })
-}
-
-function filterUnsupportedTools(payload: ResponsesPayload): ResponsesPayload {
-  if (!payload.tools || !Array.isArray(payload.tools)) return payload
-
-  const supported = payload.tools.filter((tool) => {
-    const isSupported = tool.type === "function"
-    if (!isSupported) {
-      consola.debug(`Stripping unsupported tool type: ${tool.type}`)
-    }
-    return isSupported
-  })
-
-  let toolChoice = payload.tool_choice
-  if (supported.length === 0) {
-    toolChoice = undefined
-  } else if (
-    toolChoice
-    && typeof toolChoice === "object"
-  ) {
-    const supportedNames = new Set(
-      supported.map((tool) => tool.name).filter(Boolean),
-    )
-    const toolChoiceName = getToolChoiceName(toolChoice)
-    if (toolChoiceName && !supportedNames.has(toolChoiceName)) {
-      toolChoice = undefined
-    }
-  }
-
-  return {
-    ...payload,
-    tools: supported.length > 0 ? supported : undefined,
-    tool_choice: toolChoice,
-  }
-}
-
-function getToolChoiceName(
-  toolChoice: NonNullable<ResponsesPayload["tool_choice"]>,
-): string | undefined {
-  if (typeof toolChoice !== "object") return undefined
-  if (
-    "function" in toolChoice
-    && toolChoice.function
-    && typeof toolChoice.function === "object"
-  ) {
-    return (toolChoice.function as { name?: string }).name
-  }
-  if ("name" in toolChoice) {
-    return toolChoice.name
-  }
-  return undefined
 }
 
 // Types
