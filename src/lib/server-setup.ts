@@ -1,3 +1,6 @@
+import os from "node:os"
+import path from "node:path"
+
 import consola from "consola"
 import { serve, type ServerHandler } from "srvx"
 
@@ -248,22 +251,38 @@ export function parseSharedArgs(args: Record<string, unknown>): {
  *
  * The parent env is sanitized of every key in `STRIPPED_PARENT_ENV_KEYS`
  * (see `src/lib/launch.ts`) BEFORE these overrides are merged in, so we
- * only need to provide the positive values. We deliberately do NOT set
- * `ANTHROPIC_API_KEY` — Claude Code 2.1.126 prints an "Auth conflict"
- * warning whenever both `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY`
- * are present (even with dummy values). Stripping API_KEY at the parent
- * level is sufficient to prevent shell-exported real keys from leaking
- * via `x-api-key`.
+ * only need to provide the positive values.
  *
  * Auth precedence in Claude Code (https://code.claude.com/docs/en/iam):
  *   1. Cloud provider (CLAUDE_CODE_USE_BEDROCK / VERTEX / FOUNDRY) — stripped at parent.
  *   2. ANTHROPIC_AUTH_TOKEN — set here to "dummy"; wins over #4–#6.
- *   3. ANTHROPIC_API_KEY — stripped at parent, intentionally NOT re-set.
+ *   3. ANTHROPIC_API_KEY — stripped at parent, intentionally NOT re-set
+ *      (Claude Code emits an Auth conflict warning when both AUTH_TOKEN
+ *      and API_KEY are present, even with dummy values).
  *   4. apiKeyHelper in settings.json — beaten by #2.
  *   5. CLAUDE_CODE_OAUTH_TOKEN — stripped at parent.
- *   6. Subscription OAuth (Keychain / ~/.claude/.credentials.json) — beaten by #2
- *      via env-var precedence; we leave the credential file in place so
- *      `claude /logout` still works outside the proxy.
+ *   6. Subscription OAuth (Keychain / ~/.claude/.credentials.json) —
+ *      INVISIBLE to the spawned child via the CLAUDE_CONFIG_DIR trick
+ *      below. The credential file is left in place so `claude /logout`
+ *      still works outside the proxy.
+ *
+ * `CLAUDE_CONFIG_DIR` activates Claude Code's per-config-dir keychain
+ * isolation. Per binary-grep of Claude Code 2.1.126's `iN()` function:
+ *
+ *   function iN(H = "") {
+ *     let _ = B6(),  // resolved config-dir path
+ *         K = !process.env.CLAUDE_CONFIG_DIR ? "" : `-${sha256(_).slice(0, 8)}`;
+ *     return `Claude Code${OAUTH_FILE_SUFFIX}${H}${K}`
+ *   }
+ *
+ * The conditional is on PRESENCE, not value. When CLAUDE_CONFIG_DIR is
+ * unset (the user's normal `claude` usage), the keychain service name is
+ * "Claude Code" and their `/login` credential is found there. When set
+ * (the proxy session), the service name becomes "Claude Code-<hash>" —
+ * the user's credential is invisible, `iCH()` returns null, and all
+ * three auth-conflict warnings fire `false`. The path resolves to the
+ * default config-dir, so settings.json/skills/MCP/plugins/hooks/CLAUDE.md
+ * still load from `~/.claude` as normal.
  */
 export function getClaudeCodeEnvVars(
   serverUrl: string,
@@ -274,6 +293,13 @@ export function getClaudeCodeEnvVars(
     ANTHROPIC_BASE_URL: serverUrl,
     // Authoritative dummy bearer; sent as `Authorization: Bearer dummy`.
     ANTHROPIC_AUTH_TOKEN: "dummy",
+    // Activate per-config-dir keychain isolation — silences the
+    // "/login managed key" auth-conflict warning without requiring
+    // `claude /logout`. Pointing at the default $HOME/.claude is
+    // intentional: it preserves all user customization (settings.json,
+    // skills, MCP, hooks, CLAUDE.md, custom agents) while making the
+    // keychain probe miss the user's actual credential entry.
+    CLAUDE_CONFIG_DIR: path.join(os.homedir(), ".claude"),
     // Suppress non-essential telemetry/model calls.
     DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",

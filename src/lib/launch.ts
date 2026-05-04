@@ -35,6 +35,11 @@ const STRIPPED_PARENT_ENV_KEYS = [
   "CLAUDE_CODE_USE_BEDROCK",
   "CLAUDE_CODE_USE_VERTEX",
   "CLAUDE_CODE_USE_FOUNDRY",
+  // Defense-in-depth: prevent a parent-set CLAUDE_CONFIG_DIR (e.g. an
+  // alternate test profile) from silently leaking into the proxy session.
+  // The proxy sets its own value to activate per-config-dir keychain
+  // isolation (see `getClaudeCodeEnvVars` doc comment).
+  "CLAUDE_CONFIG_DIR",
   // Codex CLI auth surface
   "OPENAI_API_KEY",
   "OPENAI_BASE_URL",

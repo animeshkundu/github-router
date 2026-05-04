@@ -1,3 +1,6 @@
+import os from "node:os"
+import path from "node:path"
+
 import { test, expect, describe } from "bun:test"
 
 import {
@@ -85,6 +88,18 @@ describe("getClaudeCodeEnvVars", () => {
     expect(vars.ANTHROPIC_AUTH_TOKEN).toBe("dummy")
     expect(vars.DISABLE_NON_ESSENTIAL_MODEL_CALLS).toBe("1")
     expect(vars.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1")
+  })
+
+  test("sets CLAUDE_CONFIG_DIR to the default path to activate keychain isolation", () => {
+    // Per binary-grep of Claude Code 2.1.126 iN(): when CLAUDE_CONFIG_DIR
+    // is set (to ANYTHING — even its default), the keychain service-name
+    // gets a sha256-hash suffix. The user's existing /login credential
+    // is stored under the no-suffix service "Claude Code", so the proxy's
+    // hashed lookup misses → iCH() returns null → all three auth-conflict
+    // warnings silenced. Pointing at the default path preserves all
+    // user customization (settings.json, skills, MCP, etc.).
+    const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+    expect(vars.CLAUDE_CONFIG_DIR).toBe(path.join(os.homedir(), ".claude"))
   })
 
   test("does NOT set ANTHROPIC_API_KEY (regression — Claude Code emits an Auth conflict warning when both AUTH_TOKEN and API_KEY are present, even with dummy values)", () => {
