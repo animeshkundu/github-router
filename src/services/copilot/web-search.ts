@@ -2,7 +2,7 @@ import consola from "consola"
 import { events } from "fetch-event-stream"
 import { z } from "zod"
 
-import { copilotBaseUrl } from "~/lib/api-config"
+import { copilotBaseUrl, copilotVersion } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
 import { sleep } from "~/lib/utils"
@@ -66,6 +66,10 @@ function mcpHeaders(sid?: string): Record<string, string> {
       "GitHub token missing — re-run auth flow. Web search uses the GitHub PAT (not the Copilot token); the on-disk token at ~/.local/share/github-router/github_token must be present.",
     )
   }
+  // Match the GitHubCopilotChat/<version> User-Agent the rest of the
+  // router sends (see api-config.ts:32). Sending "github-router/<version>"
+  // breaks the VS-Code-stealth posture and broadcasts our identity to the
+  // MCP server.
   const headers: Record<string, string> = {
     Authorization: `Bearer ${state.githubToken}`,
     "content-type": "application/json",
@@ -73,7 +77,7 @@ function mcpHeaders(sid?: string): Record<string, string> {
     "X-MCP-Host": "copilot-cli",
     "X-MCP-Toolsets": "web_search",
     "Mcp-Protocol-Version": "2025-06-18",
-    "user-agent": `github-router/${state.copilotVersion ?? "0.3.10"}`,
+    "user-agent": `GitHubCopilotChat/${copilotVersion(state)}`,
   }
   if (sid) headers["Mcp-Session-Id"] = sid
   return headers
@@ -113,9 +117,11 @@ export async function searchWeb(query: string): Promise<WebSearchResult> {
       params: {
         protocolVersion: "2024-11-05",
         capabilities: {},
+        // Identify as the Copilot Chat extension, mirroring the User-Agent
+        // and editor-plugin-version we send on every other request.
         clientInfo: {
-          name: "github-router",
-          version: state.copilotVersion ?? "0.3.10",
+          name: "GitHubCopilotChat",
+          version: copilotVersion(state),
         },
       },
     })
@@ -204,12 +210,24 @@ export async function searchWeb(query: string): Promise<WebSearchResult> {
         callRes,
       )
     }
-    const inner = InnerSchema.parse(innerRaw)
+    // safeParse: a raw ZodError thrown here would bypass forwardError's
+    // HTTPError check and surface as a generic 500 instead of an Anthropic
+    // shape error. Wrap explicitly.
+    const innerParsed = InnerSchema.safeParse(innerRaw)
+    if (!innerParsed.success) {
+      throw new HTTPError(
+        `MCP web_search: inner content shape changed (${innerParsed.error.issues
+          .map((i) => `${i.path.join(".")}: ${i.message}`)
+          .join("; ")})`,
+        callRes,
+      )
+    }
+    const inner = innerParsed.data
 
     const references: Array<{ title: string; url: string }> = []
     for (const ann of inner.text.annotations ?? []) {
       const cite = ann.url_citation
-      if (cite && !cite.url.includes("bing.com/search")) {
+      if (cite && !cite.url.toLowerCase().includes("bing.com/search")) {
         references.push({ title: cite.title, url: cite.url })
       }
     }
@@ -218,13 +236,20 @@ export async function searchWeb(query: string): Promise<WebSearchResult> {
     return { content: inner.text.value, references }
   } finally {
     if (sid) {
-      // Best-effort session teardown — never throw.
-      void fetch(`${copilotBaseUrl(state)}/mcp`, {
-        method: "DELETE",
-        headers: mcpHeaders(sid),
-      }).catch(() => {
-        // ignore
-      })
+      // Best-effort session teardown — never throw. Wrap header construction
+      // in try{} too: if state.githubToken cleared between init and finally,
+      // mcpHeaders(sid) throws synchronously BEFORE fetch is called and
+      // .catch() never attaches, which would mask the original error.
+      try {
+        void fetch(`${copilotBaseUrl(state)}/mcp`, {
+          method: "DELETE",
+          headers: mcpHeaders(sid),
+        }).catch(() => {
+          // ignore
+        })
+      } catch {
+        // mcpHeaders threw (token cleared); skip teardown
+      }
     }
   }
 }

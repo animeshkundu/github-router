@@ -9,7 +9,7 @@ export const standardHeaders = () => ({
 
 const DEFAULT_COPILOT_VERSION = "0.43.2026033101"
 
-function copilotVersion(state: State): string {
+export function copilotVersion(state: State): string {
   return state.copilotVersion ?? DEFAULT_COPILOT_VERSION
 }
 

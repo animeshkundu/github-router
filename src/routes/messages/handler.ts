@@ -358,14 +358,14 @@ function resolveModelInBody(rawBody: string): {
   }
 }
 
-const EFFORT_ORDER = ["low", "medium", "high", "xhigh"] as const
+export const EFFORT_ORDER = ["low", "medium", "high", "xhigh"] as const
 
 /**
  * Bucket a thinking budget into a Copilot reasoning-effort string.
  * `<2000`→low, `<8000`→medium, `<24000`→high, else→xhigh.
  * Defaults missing/non-numeric budgets to 8000 ("high").
  */
-function bucketEffort(budget: unknown): (typeof EFFORT_ORDER)[number] {
+export function bucketEffort(budget: unknown): (typeof EFFORT_ORDER)[number] {
   const n =
     typeof budget === "number" && Number.isFinite(budget) ? budget : 8000
   if (n < 2000) return "low"
@@ -382,7 +382,7 @@ function bucketEffort(budget: unknown): (typeof EFFORT_ORDER)[number] {
  * given distance is always the lower-tier value, regardless of input
  * order in `supported`.
  */
-function clampEffort(
+export function clampEffort(
   bucketed: (typeof EFFORT_ORDER)[number],
   supported: Array<string>,
 ): string {

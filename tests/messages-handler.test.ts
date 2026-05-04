@@ -1,6 +1,7 @@
 import { describe, test, expect, mock, afterEach, beforeEach } from "bun:test"
 
 import { state } from "../src/lib/state"
+import { bucketEffort, clampEffort } from "../src/routes/messages/handler"
 import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
@@ -243,5 +244,80 @@ describe("thinking-mode translation on /v1/messages", () => {
     }
     expect(forwarded.thinking).toEqual({ type: "adaptive" })
     expect(forwarded.output_config?.effort).toBe("high")
+  })
+})
+
+// Direct unit tests for bucketEffort/clampEffort — boundary cases are
+// off-by-one bug magnets and the integration tests above only cover the
+// happy paths. Keep these cheap and exhaustive.
+
+describe("bucketEffort", () => {
+  test("budget 0 → low", () => {
+    expect(bucketEffort(0)).toBe("low")
+  })
+  test("budget 1999 → low (just below 2000 boundary)", () => {
+    expect(bucketEffort(1999)).toBe("low")
+  })
+  test("budget 2000 → medium (boundary — half-open [2k, 8k))", () => {
+    expect(bucketEffort(2000)).toBe("medium")
+  })
+  test("budget 7999 → medium (just below 8000 boundary)", () => {
+    expect(bucketEffort(7999)).toBe("medium")
+  })
+  test("budget 8000 → high (boundary)", () => {
+    expect(bucketEffort(8000)).toBe("high")
+  })
+  test("budget 23999 → high (just below 24000 boundary)", () => {
+    expect(bucketEffort(23999)).toBe("high")
+  })
+  test("budget 24000 → xhigh (boundary)", () => {
+    expect(bucketEffort(24000)).toBe("xhigh")
+  })
+  test("budget 100000 → xhigh", () => {
+    expect(bucketEffort(100_000)).toBe("xhigh")
+  })
+  test("undefined budget → high (default 8000)", () => {
+    expect(bucketEffort(undefined)).toBe("high")
+  })
+  test("non-numeric budget (string) → high (default 8000)", () => {
+    expect(bucketEffort("4000")).toBe("high")
+  })
+  test("NaN → high (default 8000)", () => {
+    expect(bucketEffort(NaN)).toBe("high")
+  })
+  test("Infinity → high (default 8000, Number.isFinite false)", () => {
+    expect(bucketEffort(Infinity)).toBe("high")
+  })
+  test("negative budget → low (n < 2000 is true for any negative)", () => {
+    expect(bucketEffort(-1)).toBe("low")
+  })
+})
+
+describe("clampEffort", () => {
+  test("returns the bucketed value when supported", () => {
+    expect(clampEffort("medium", ["low", "medium", "high"])).toBe("medium")
+  })
+  test("clamps xhigh to medium when only medium is supported", () => {
+    expect(clampEffort("xhigh", ["medium"])).toBe("medium")
+  })
+  test("clamps high to medium when only low/medium are supported", () => {
+    // distance: low=2, medium=1 → medium wins (closer)
+    expect(clampEffort("high", ["low", "medium"])).toBe("medium")
+  })
+  test("equidistant tie picks the lower-tier value (low over high)", () => {
+    // bucketed=medium, supported=[low,high]; both at distance 1
+    // EFFORT_ORDER iterates low→xhigh, strict `<` keeps the first
+    expect(clampEffort("medium", ["low", "high"])).toBe("low")
+  })
+  test("respects supported-array order independence (low/high vs high/low)", () => {
+    // Same input, swapped supported order — must still pick low (canonical
+    // EFFORT_ORDER iteration, not input array order).
+    expect(clampEffort("medium", ["high", "low"])).toBe("low")
+  })
+  test("falls back to bucketed when supported is empty", () => {
+    expect(clampEffort("medium", [])).toBe("medium")
+  })
+  test("xhigh with only low supported clamps to low", () => {
+    expect(clampEffort("xhigh", ["low"])).toBe("low")
   })
 })
