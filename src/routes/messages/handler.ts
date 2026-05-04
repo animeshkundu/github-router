@@ -10,6 +10,7 @@ import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import { createMessages } from "~/services/copilot/create-messages"
+import type { Model } from "~/services/copilot/get-models"
 import { searchWeb } from "~/services/copilot/web-search"
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -189,15 +190,16 @@ export async function handleCompletion(c: Context) {
   const betaHeaders = extractBetaHeaders(c)
   const finalBody = await processWebSearch(rawBody)
 
-  // Resolve model name (e.g. opus → opus-1m variant)
-  const { body: resolvedBody, originalModel, resolvedModel } = resolveModelInBody(finalBody)
+  // Resolve model name (e.g. opus → opus-1m variant) and translate
+  // thinking-mode shape for adaptive-thinking models.
+  const {
+    body: resolvedBody,
+    originalModel,
+    resolvedModel,
+    selectedModel,
+  } = resolveModelInBody(finalBody)
 
-  // Look up model metadata for context window info
   const modelId = resolvedModel ?? originalModel
-  const selectedModel = state.models?.data.find(
-    (m) => m.id === modelId,
-  )
-
   if (modelId) logEndpointMismatch(modelId, "/v1/messages")
 
   // Apply default anthropic-beta for Claude models when client sends none
@@ -297,8 +299,9 @@ export async function handleCompletion(c: Context) {
 
 /**
  * Parse the JSON body, resolve the model name, sanitize cache_control
- * fields, and re-serialize. Returns the body string plus the original
- * and resolved model names.
+ * fields, translate thinking-mode shape for adaptive-thinking models,
+ * and re-serialize. Returns the body string, original/resolved model
+ * names, and the matching model metadata (if any).
  *
  * Re-serialization is skipped when no modifications are needed.
  */
@@ -306,6 +309,7 @@ function resolveModelInBody(rawBody: string): {
   body: string
   originalModel?: string
   resolvedModel?: string
+  selectedModel?: Model
 } {
   let parsed: AnyRecord
   try {
@@ -326,20 +330,115 @@ function resolveModelInBody(rawBody: string): {
     }
   }
 
+  const resolvedModel =
+    typeof parsed.model === "string" ? parsed.model : originalModel
+
+  const selectedModel = resolvedModel
+    ? state.models?.data.find((m) => m.id === resolvedModel)
+    : undefined
+
+  // Translate thinking-mode shape for adaptive-thinking models — Copilot
+  // wants {type:"adaptive"} + output_config.effort, not Anthropic's
+  // {type:"enabled", budget_tokens}.
+  if (translateThinking(parsed, selectedModel)) {
+    modified = true
+  }
+
   // Strip cache_control.scope — fast path skips when "scope" absent
   const needsSanitize = rawBody.includes('"scope"')
   if (needsSanitize && sanitizeCacheControl(parsed)) {
     modified = true
   }
 
-  const resolvedModel =
-    typeof parsed.model === "string" ? parsed.model : originalModel
-
   return {
     body: modified ? JSON.stringify(parsed) : rawBody,
     originalModel,
     resolvedModel,
+    selectedModel,
   }
+}
+
+const EFFORT_ORDER = ["low", "medium", "high", "xhigh"] as const
+
+/**
+ * Bucket a thinking budget into a Copilot reasoning-effort string.
+ * `<2000`→low, `<8000`→medium, `<24000`→high, else→xhigh.
+ * Defaults missing/non-numeric budgets to 8000 ("high").
+ */
+function bucketEffort(budget: unknown): (typeof EFFORT_ORDER)[number] {
+  const n =
+    typeof budget === "number" && Number.isFinite(budget) ? budget : 8000
+  if (n < 2000) return "low"
+  if (n < 8000) return "medium"
+  if (n < 24000) return "high"
+  return "xhigh"
+}
+
+/**
+ * Clamp a bucketed effort to the closest value in `supported`. Ties
+ * resolve to the lower-tier option (per EFFORT_ORDER).
+ *
+ * Iterates EFFORT_ORDER (canonical low→xhigh) so the first match on a
+ * given distance is always the lower-tier value, regardless of input
+ * order in `supported`.
+ */
+function clampEffort(
+  bucketed: (typeof EFFORT_ORDER)[number],
+  supported: Array<string>,
+): string {
+  if (supported.includes(bucketed)) return bucketed
+  const targetIdx = EFFORT_ORDER.indexOf(bucketed)
+  let best: (typeof EFFORT_ORDER)[number] | undefined
+  let bestDist = Infinity
+  for (let i = 0; i < EFFORT_ORDER.length; i++) {
+    const value = EFFORT_ORDER[i]
+    if (!supported.includes(value)) continue
+    const dist = Math.abs(i - targetIdx)
+    // strict `<` keeps the first (lower-tier) on ties
+    if (dist < bestDist) {
+      bestDist = dist
+      best = value
+    }
+  }
+  return best ?? bucketed
+}
+
+/**
+ * Translate Anthropic-shape `thinking:{type:"enabled", budget_tokens}` to
+ * Copilot-shape `thinking:{type:"adaptive"}` + `output_config.effort`
+ * when the resolved model declares `adaptive_thinking: true`.
+ *
+ * Returns true if the body was modified. No-op when the model doesn't
+ * support adaptive thinking, when thinking is missing/disabled/already
+ * adaptive, or when `body` isn't a plain object. Client-supplied
+ * `output_config.effort` always wins over the bucketed value.
+ */
+function translateThinking(body: AnyRecord, model?: Model): boolean {
+  if (!model?.capabilities?.supports?.adaptive_thinking) return false
+  const thinking = body.thinking
+  if (!thinking || typeof thinking !== "object") return false
+  if (thinking.type !== "enabled") return false
+
+  const bucketed = bucketEffort(thinking.budget_tokens)
+  const supported = model.capabilities.supports.reasoning_effort
+  const effort =
+    Array.isArray(supported) && supported.length > 0
+      ? clampEffort(bucketed, supported)
+      : bucketed
+
+  body.thinking = { type: "adaptive" }
+
+  const existing =
+    body.output_config && typeof body.output_config === "object"
+      ? (body.output_config as AnyRecord)
+      : {}
+  body.output_config = {
+    ...existing,
+    // client-supplied effort wins
+    effort: existing.effort ?? effort,
+  }
+
+  return true
 }
 
 /**

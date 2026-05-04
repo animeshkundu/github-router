@@ -37,6 +37,10 @@ server.route("/v1/search", searchRoutes)
 // Anthropic compatible endpoints
 server.route("/v1/messages", messageRoutes)
 
+// Stub out Claude Code SDK telemetry so it doesn't 404-spam logs.
+// Copilot doesn't expose this endpoint; clients fire it best-effort.
+server.post("/api/event_logging/batch", (c) => c.body(null, 200))
+
 // Return Anthropic-format JSON for unknown endpoints
 server.notFound((c) =>
   c.json(

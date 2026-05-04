@@ -477,6 +477,26 @@ test("token endpoint rejects when disabled", async () => {
   expect(response.status).toBe(403)
 })
 
+test("telemetry stub returns 200 for malformed body without calling fetch", async () => {
+  resetState()
+  let fetchCalled = false
+  const fetchMock = mock(() => {
+    fetchCalled = true
+    throw new Error("fetch must not be called for telemetry stub")
+  })
+  // @ts-expect-error - override fetch for this test
+  globalThis.fetch = fetchMock
+
+  const response = await server.request("/api/event_logging/batch", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{not valid json",
+  })
+
+  expect(response.status).toBe(200)
+  expect(fetchCalled).toBe(false)
+})
+
 test("messages passthrough forwards upstream error status and body", async () => {
   resetState()
 

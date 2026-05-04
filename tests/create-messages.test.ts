@@ -77,7 +77,7 @@ describe("createMessages", () => {
     expect(capturedHeaders["user-agent"]).toMatch(/^GitHubCopilotChat\//)
     expect(capturedHeaders["openai-intent"]).toBe("messages-proxy")
     expect(capturedHeaders["x-interaction-type"]).toBe("conversation-agent")
-    expect(capturedHeaders["x-github-api-version"]).toBe("2025-10-01")
+    expect(capturedHeaders["x-github-api-version"]).toBe("2026-01-09")
     expect(capturedHeaders["x-request-id"]).toBeDefined()
     expect(capturedHeaders["x-vscode-user-agent-library-version"]).toBe("electron-fetch")
 
@@ -242,7 +242,7 @@ describe("countTokens", () => {
     expect(capturedHeaders.Authorization).toBe("Bearer test-token")
     expect(capturedHeaders["X-Initiator"]).toBe("agent")
     expect(capturedHeaders["anthropic-version"]).toBe("2023-06-01")
-    expect(capturedHeaders["x-github-api-version"]).toBe("2025-10-01")
+    expect(capturedHeaders["x-github-api-version"]).toBe("2026-01-09")
   })
 
   test("forwards body as-is", async () => {
