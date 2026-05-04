@@ -1,7 +1,7 @@
 import consola from "consola"
 import { serve, type ServerHandler } from "srvx"
 
-import { ensurePaths } from "./paths"
+import { PATHS, ensurePaths } from "./paths"
 import { generateRandomPort } from "./port"
 import { initProxyFromEnv } from "./proxy"
 import { state } from "./state"
@@ -243,14 +243,48 @@ export function parseSharedArgs(args: Record<string, unknown>): {
   }
 }
 
-/** Build environment variables for Claude Code. */
+/**
+ * Build environment variables for Claude Code.
+ *
+ * Defends against every non-proxy auth path Claude Code might otherwise
+ * pick up (verified live against claude 2.1.126 — see `getClaudeCodeEnvVars`
+ * tests). Auth precedence in Claude Code is documented at
+ * https://code.claude.com/docs/en/iam:
+ *
+ *   1. Cloud provider (CLAUDE_CODE_USE_BEDROCK / VERTEX / FOUNDRY) — wins
+ *      over ANTHROPIC_BASE_URL, so we explicitly clear inherited truthy
+ *      values with empty strings.
+ *   2. ANTHROPIC_AUTH_TOKEN — sent as `Authorization: Bearer …`.
+ *   3. ANTHROPIC_API_KEY — sent as `x-api-key: …`. Claude Code sends BOTH
+ *      headers when both env vars are set, so we shadow the user's
+ *      possibly-real shell-exported key with a dummy too.
+ *   4. apiKeyHelper in settings.json — overridden by env vars (#2/#3).
+ *   5. CLAUDE_CODE_OAUTH_TOKEN — long-lived OAuth; cleared explicitly.
+ *   6. Subscription OAuth (Keychain / ~/.claude/.credentials.json) — beaten
+ *      by env-var precedence above.
+ */
 export function getClaudeCodeEnvVars(
   serverUrl: string,
   model?: string,
 ): Record<string, string> {
   const vars: Record<string, string> = {
+    // Route to the proxy
     ANTHROPIC_BASE_URL: serverUrl,
+    // Authoritative dummy creds — both required because Claude Code sends
+    // both headers when both vars are set; without ANTHROPIC_API_KEY="dummy"
+    // a real shell-exported key would leak to the proxy via x-api-key.
     ANTHROPIC_AUTH_TOKEN: "dummy",
+    ANTHROPIC_API_KEY: "dummy",
+    // Disable cloud-provider routing in case the user has these set
+    // (empty string is falsy in Claude Code's truthy check).
+    CLAUDE_CODE_USE_BEDROCK: "",
+    CLAUDE_CODE_USE_VERTEX: "",
+    CLAUDE_CODE_USE_FOUNDRY: "",
+    // Disable any inherited long-lived OAuth token.
+    CLAUDE_CODE_OAUTH_TOKEN: "",
+    // Drop user-injected custom headers that could carry auth.
+    ANTHROPIC_CUSTOM_HEADERS: "",
+    // Suppress non-essential telemetry/model calls.
     DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
   }
@@ -258,10 +292,19 @@ export function getClaudeCodeEnvVars(
   return vars
 }
 
-/** Build environment variables for Codex CLI. */
+/**
+ * Build environment variables for Codex CLI.
+ *
+ * Codex caches a ChatGPT subscription login under `$CODEX_HOME` (defaults
+ * `~/.codex`); per openai/codex#2733 the cached login can override
+ * `OPENAI_API_KEY`. Pointing `CODEX_HOME` at an isolated directory makes
+ * the proxy's dummy key authoritative.
+ */
 export function getCodexEnvVars(serverUrl: string): Record<string, string> {
   return {
     OPENAI_BASE_URL: `${serverUrl}/v1`,
     OPENAI_API_KEY: "dummy",
+    // Isolated CODEX_HOME — masks any cached ChatGPT login (openai/codex#2733).
+    CODEX_HOME: PATHS.CODEX_HOME,
   }
 }

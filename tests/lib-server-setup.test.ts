@@ -79,14 +79,35 @@ describe("parseSharedArgs", () => {
 })
 
 describe("getClaudeCodeEnvVars", () => {
-  test("returns ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, DISABLE_* keys", () => {
+  test("returns proxy URL plus auth-bypass shims", () => {
     const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
-    expect(vars).toEqual({
-      ANTHROPIC_BASE_URL: "http://127.0.0.1:8787",
-      ANTHROPIC_AUTH_TOKEN: "dummy",
-      DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-    })
+    expect(vars.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:8787")
+    expect(vars.ANTHROPIC_AUTH_TOKEN).toBe("dummy")
+    expect(vars.ANTHROPIC_API_KEY).toBe("dummy")
+    expect(vars.DISABLE_NON_ESSENTIAL_MODEL_CALLS).toBe("1")
+    expect(vars.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1")
+  })
+
+  test("clears every non-proxy auth path Claude Code might inherit", () => {
+    // Auth precedence per https://code.claude.com/docs/en/iam:
+    // (1) cloud provider, (2) ANTHROPIC_AUTH_TOKEN, (3) ANTHROPIC_API_KEY,
+    // (4) apiKeyHelper, (5) CLAUDE_CODE_OAUTH_TOKEN, (6) subscription OAuth.
+    // We override (1)/(2)/(3)/(5) and beat (4)/(6) by env-var precedence.
+    const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+    expect(vars.CLAUDE_CODE_USE_BEDROCK).toBe("")
+    expect(vars.CLAUDE_CODE_USE_VERTEX).toBe("")
+    expect(vars.CLAUDE_CODE_USE_FOUNDRY).toBe("")
+    expect(vars.CLAUDE_CODE_OAUTH_TOKEN).toBe("")
+    expect(vars.ANTHROPIC_CUSTOM_HEADERS).toBe("")
+  })
+
+  test("ANTHROPIC_API_KEY is set to dummy (regression — without this, an inherited real key leaks via x-api-key)", () => {
+    // Verified live: Claude Code 2.1.126 sends BOTH `Authorization: Bearer
+    // <ANTHROPIC_AUTH_TOKEN>` AND `x-api-key: <ANTHROPIC_API_KEY>` when both
+    // env vars are set. If we don't shadow ANTHROPIC_API_KEY, a real key
+    // exported in the user's shell flows through the proxy.
+    const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+    expect(vars.ANTHROPIC_API_KEY).toBe("dummy")
   })
 
   test("includes ANTHROPIC_MODEL when model provided", () => {
@@ -109,5 +130,18 @@ describe("getCodexEnvVars", () => {
   test("returns OPENAI_API_KEY as 'dummy'", () => {
     const vars = getCodexEnvVars("http://127.0.0.1:8787")
     expect(vars.OPENAI_API_KEY).toBe("dummy")
+  })
+
+  test("isolates CODEX_HOME to mask cached ChatGPT login (openai/codex#2733)", () => {
+    // Codex caches a ChatGPT subscription login in $CODEX_HOME/auth.json
+    // which can override OPENAI_API_KEY per the upstream bug. Pointing at
+    // an isolated dir under our app data makes the proxy's dummy key
+    // authoritative.
+    const vars = getCodexEnvVars("http://127.0.0.1:8787")
+    expect(vars.CODEX_HOME).toBeDefined()
+    expect(vars.CODEX_HOME).not.toBe("")
+    // Path lives under the github-router app dir, not the user's ~/.codex.
+    expect(vars.CODEX_HOME).toContain("github-router")
+    expect(vars.CODEX_HOME).not.toBe(`${process.env.HOME}/.codex`)
   })
 })

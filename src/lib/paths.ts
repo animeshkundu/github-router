@@ -16,10 +16,19 @@ export const PATHS = {
   get ERROR_LOG_PATH() {
     return path.join(appDir(), "error.log")
   },
+  /**
+   * Isolated CODEX_HOME for the spawned Codex CLI. Masks any cached
+   * ChatGPT subscription login (openai/codex#2733 — cached login can
+   * override OPENAI_API_KEY) so the proxy's dummy key is authoritative.
+   */
+  get CODEX_HOME() {
+    return path.join(appDir(), "codex-isolated")
+  },
 }
 
 export async function ensurePaths(): Promise<void> {
   await fs.mkdir(PATHS.APP_DIR, { recursive: true })
+  await fs.mkdir(PATHS.CODEX_HOME, { recursive: true })
   await ensureFile(PATHS.GITHUB_TOKEN_PATH)
 }
 
