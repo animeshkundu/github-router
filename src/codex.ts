@@ -6,7 +6,10 @@ import consola from "consola"
 import { enableFileLogging } from "./lib/file-log-reporter"
 import { launchChild } from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
-import { DEFAULT_CODEX_MODEL } from "./lib/port"
+import {
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_MODEL_FALLBACKS,
+} from "./lib/port"
 import {
   getCodexEnvVars,
   parseSharedArgs,
@@ -52,15 +55,37 @@ export const codex = defineCommand({
       process.exit(1)
     }
 
+    const usingDefault = !args.model
     const requestedModel = args.model ?? DEFAULT_CODEX_MODEL
 
     // Resolve model before printing success message (so we show the actual model)
     // but enable file logging first so resolution warnings go to file, not terminal
     enableFileLogging()
 
-    const codexModel = resolveCodexModel(requestedModel)
+    let codexModel = resolveCodexModel(requestedModel)
     if (codexModel !== requestedModel) {
       consola.info(`Model "${requestedModel}" resolved to "${codexModel}"`)
+    }
+
+    // For the implicit-default path only, walk DEFAULT_CODEX_MODEL_FALLBACKS
+    // when the default isn't in the resolved Copilot model list. Layered on
+    // top of resolveCodexModel's "best /responses model" fallback — that
+    // remains the final safety net when every named fallback misses.
+    if (usingDefault && state.models) {
+      const inCache = (id: string) =>
+        state.models?.data.some((m) => m.id === id) ?? false
+      if (!inCache(codexModel)) {
+        for (const fallback of DEFAULT_CODEX_MODEL_FALLBACKS) {
+          const resolved = resolveCodexModel(fallback)
+          if (inCache(resolved)) {
+            consola.info(
+              `Default model "${codexModel}" not in your Copilot model list; falling back to "${resolved}".`,
+            )
+            codexModel = resolved
+            break
+          }
+        }
+      }
     }
 
     // Validate model exists in Copilot model list

@@ -1,7 +1,12 @@
 import { test, expect, mock, afterEach, describe, beforeEach } from "bun:test"
 
 import { state } from "../src/lib/state"
-import { DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL } from "../src/lib/port"
+import {
+  DEFAULT_CLAUDE_MODEL,
+  DEFAULT_CLAUDE_MODEL_FALLBACKS,
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_MODEL_FALLBACKS,
+} from "../src/lib/port"
 import {
   cacheModels,
   cacheVSCodeVersion,
@@ -24,8 +29,27 @@ test("DEFAULT_CODEX_MODEL matches Copilot API format", () => {
   expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.5")
 })
 
-test("DEFAULT_CLAUDE_MODEL matches Copilot API format", () => {
-  expect(DEFAULT_CLAUDE_MODEL).toBe("claude-opus-4.7")
+test("DEFAULT_CLAUDE_MODEL is the 1M-context variant", () => {
+  // The launcher walks DEFAULT_CLAUDE_MODEL_FALLBACKS when this id isn't in
+  // the user's Copilot model list (e.g. non-enterprise tokens).
+  expect(DEFAULT_CLAUDE_MODEL).toBe("claude-opus-4.7-1m-internal")
+})
+
+test("DEFAULT_CLAUDE_MODEL_FALLBACKS lists 200K + older variants in order", () => {
+  // Ordering matters — the launcher uses the first match.
+  expect(Array.from(DEFAULT_CLAUDE_MODEL_FALLBACKS)).toEqual([
+    "claude-opus-4.7",
+    "claude-opus-4.6-1m",
+    "claude-opus-4.6",
+  ])
+})
+
+test("DEFAULT_CODEX_MODEL_FALLBACKS lists older /responses models in order", () => {
+  expect(Array.from(DEFAULT_CODEX_MODEL_FALLBACKS)).toEqual([
+    "gpt-5.4",
+    "gpt-5.3-codex",
+    "gpt-5.2-codex",
+  ])
 })
 
 test("isNullish handles null and undefined", () => {

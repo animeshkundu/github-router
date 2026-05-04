@@ -63,10 +63,16 @@ mock.module("~/lib/server-setup", () => ({
 }))
 
 mock.module("~/lib/port", () => ({
-  DEFAULT_CLAUDE_MODEL: "claude-opus-4.7",
+  DEFAULT_CLAUDE_MODEL: "claude-opus-4.7-1m-internal",
+  DEFAULT_CLAUDE_MODEL_FALLBACKS: [
+    "claude-opus-4.7",
+    "claude-opus-4.6-1m",
+    "claude-opus-4.6",
+  ],
   // launch.ts imports DEFAULT_CODEX_MODEL transitively via claude.ts → launchChild;
   // re-export it so the module mock doesn't break sibling imports.
   DEFAULT_CODEX_MODEL: "gpt-5.5",
+  DEFAULT_CODEX_MODEL_FALLBACKS: ["gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex"],
   DEFAULT_PORT: 8787,
 }))
 
@@ -189,11 +195,12 @@ describe("claude command", () => {
 
     await run({ args: {} })
 
-    // No --model → claude.ts falls back to DEFAULT_CLAUDE_MODEL ("claude-opus-4.7")
-    // and passes it through to Claude Code via ANTHROPIC_MODEL.
+    // No --model and no model cache → claude.ts uses DEFAULT_CLAUDE_MODEL
+    // ("claude-opus-4.7-1m-internal"); fallback chain only fires when the
+    // cache is populated AND the default is missing.
     expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
       "http://127.0.0.1:12345",
-      "claude-opus-4.7",
+      "claude-opus-4.7-1m-internal",
     )
     const [, , options] = spawnMock.mock.calls[0]
     expect(options.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:12345")
@@ -215,9 +222,9 @@ describe("claude command", () => {
     expect(options.env.ANTHROPIC_MODEL).toBe("claude-sonnet-4-20250514")
   })
 
-  test("default upgrades to 1M variant when both 200K and 1M are in cache", async () => {
-    // Critical for the user's goal: enterprise users should get 1M context
-    // for advisor / agent-team forks without typing the long internal id.
+  test("default 1M variant in cache → used as-is (no fallback)", async () => {
+    // Enterprise tier: 1M-internal is entitled. claude.ts must NOT fire the
+    // fallback chain — the default is already in the cache.
     state.models = {
       data: [
         { id: "claude-opus-4.7" },
@@ -237,8 +244,53 @@ describe("claude command", () => {
     }
   })
 
-  test("explicit --model is respected even when 1M variant available", async () => {
-    // Discriminator: only the implicit DEFAULT path upgrades to 1M.
+  test("default 1M missing but 4.7 present → falls back to claude-opus-4.7", async () => {
+    // Pro+/Business/Max tier: claude-opus-4.7-1m-internal is gated, but the
+    // 200K variant is available. The fallback chain should pick it up
+    // gracefully without requiring --model.
+    state.models = {
+      data: [
+        { id: "claude-opus-4.7" },
+        { id: "claude-opus-4.6" },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    try {
+      const run = getRunFn()
+      await run({ args: {} })
+      expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:12345",
+        "claude-opus-4.7",
+      )
+    } finally {
+      state.models = undefined
+    }
+  })
+
+  test("default and all fallbacks missing → keeps literal default (warning logged)", async () => {
+    // Degenerate case: cache has nothing in the opus family. Don't crash;
+    // pass the literal default through and let validation surface the warning.
+    state.models = {
+      data: [
+        { id: "gpt-5.5" },
+        { id: "claude-sonnet-4.6" },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    try {
+      const run = getRunFn()
+      await run({ args: {} })
+      expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:12345",
+        "claude-opus-4.7-1m-internal",
+      )
+    } finally {
+      state.models = undefined
+    }
+  })
+
+  test("explicit --model is respected even when default 1M is in cache", async () => {
+    // Discriminator: only the implicit DEFAULT path uses the fallback chain.
     // If the user explicitly types claude-opus-4.7, they get exactly 4.7.
     state.models = {
       data: [

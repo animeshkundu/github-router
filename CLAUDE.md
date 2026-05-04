@@ -61,10 +61,11 @@ The router strips `context-1m-`, `skills-`, `files-api-`, and `code-execution-` 
 ### Default models
 
 The `claude` and `codex` subcommands default to the latest Copilot-supported models when no `--model` is given:
-- `claude` → `claude-opus-4.7` (resolver upgrades to `claude-opus-4.7-1m-internal` when present, which requires enterprise tier)
-- `codex` → `gpt-5.5` (Copilot's GPT-5.5 dropped the `-codex` suffix; the `/responses` endpoint is the discriminator)
 
-Override with `-m`/`--model`. Constants live in `src/lib/port.ts`.
+- `claude` → `claude-opus-4.7-1m-internal` (1M context, enterprise-only — `billing.restricted_to: ["enterprise"]`). When the default isn't in the user's resolved Copilot model list (Pro+/Business/Max accounts), the launcher walks `DEFAULT_CLAUDE_MODEL_FALLBACKS` in order: `claude-opus-4.7` (200K) → `claude-opus-4.6-1m` → `claude-opus-4.6`.
+- `codex` → `gpt-5.5` (dropped the `-codex` suffix; `/responses` is the discriminator). Falls back via `DEFAULT_CODEX_MODEL_FALLBACKS`: `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex`. `resolveCodexModel`'s "best available `/responses` model" provides a final safety net beyond the named chain.
+
+Fallback chains only fire on the implicit-default path — explicit `-m`/`--model` is always respected as-is. Constants live in `src/lib/port.ts`.
 
 ### Spawned-CLI auth isolation
 

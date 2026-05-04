@@ -6,7 +6,10 @@ import consola from "consola"
 import { enableFileLogging } from "./lib/file-log-reporter"
 import { launchChild } from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
-import { DEFAULT_CLAUDE_MODEL } from "./lib/port"
+import {
+  DEFAULT_CLAUDE_MODEL,
+  DEFAULT_CLAUDE_MODEL_FALLBACKS,
+} from "./lib/port"
 import {
   getClaudeCodeEnvVars,
   parseSharedArgs,
@@ -55,22 +58,30 @@ export const claude = defineCommand({
     enableFileLogging() // redirect errors/warnings to file; suppress terminal output
 
     // Resolve and validate model (warnings go to log file, not terminal).
-    // When --model is not supplied, fall back to DEFAULT_CLAUDE_MODEL so
-    // Claude Code defaults to the latest Opus available on Copilot.
+    // When --model is not supplied, fall back to DEFAULT_CLAUDE_MODEL.
+    // For the implicit-default path only, walk DEFAULT_CLAUDE_MODEL_FALLBACKS
+    // when the default isn't in the resolved Copilot model list — e.g. on
+    // non-enterprise tokens where claude-opus-4.7-1m-internal is gated.
+    // Explicit --model is respected as-is.
     const usingDefault = !args.model
     const requestedModel = args.model ?? DEFAULT_CLAUDE_MODEL
     let resolvedModel = resolveModel(requestedModel)
 
-    // For the implicit default only, upgrade to a same-family 1M variant
-    // when one is available (e.g. claude-opus-4.7 → claude-opus-4.7-1m-internal
-    // for enterprise tokens). Explicit --model is respected as-is so users
-    // can pin to the 200K variant by typing it literally.
     if (usingDefault && state.models) {
-      const oneM = state.models.data.find(
-        (m) =>
-          m.id.startsWith(`${resolvedModel}-`) && /-1m(?:$|-)/.test(m.id),
-      )
-      if (oneM) resolvedModel = oneM.id
+      const inCache = (id: string) =>
+        state.models?.data.some((m) => m.id === id) ?? false
+      if (!inCache(resolvedModel)) {
+        for (const fallback of DEFAULT_CLAUDE_MODEL_FALLBACKS) {
+          const fallbackResolved = resolveModel(fallback)
+          if (inCache(fallbackResolved)) {
+            consola.info(
+              `Default model "${resolvedModel}" not in your Copilot model list; falling back to "${fallbackResolved}".`,
+            )
+            resolvedModel = fallbackResolved
+            break
+          }
+        }
+      }
     }
 
     if (resolvedModel !== requestedModel) {
