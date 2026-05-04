@@ -16,7 +16,7 @@ Passthrough to Copilot's `/responses`. OpenAI Responses API format used by Codex
 **Request**:
 ```json
 {
-  "model": "gpt-5.2-codex",
+  "model": "gpt-5.5",
   "input": "string or array of input items",
   "instructions": "optional system prompt",
   "tools": [{"type": "function", "name": "...", "parameters": {...}}],
@@ -45,7 +45,7 @@ Passthrough to Copilot's `/responses`. OpenAI Responses API format used by Codex
 - `response.function_call_arguments.delta` -function call argument chunk
 - `response.completed` -final complete response
 
-**Models**: gpt-5.3-codex, gpt-5.2-codex, gpt-5.1-codex-mini, gpt-5.1-codex-max, gpt-4.1, etc.
+**Models**: gpt-5.5, gpt-5.4, gpt-5.3-codex, gpt-5.2-codex, gpt-4.1, etc. The `codex` subcommand defaults to `gpt-5.5` (with fallback chain — see `src/lib/port.ts`).
 
 ### GET `/v1/models` (also `/models`)
 Returns list of available Copilot models in OpenAI format.
@@ -63,8 +63,8 @@ Passthrough to Copilot's native `/v1/messages?beta=true` endpoint.
 **Request**: Anthropic Messages payload (`model`, `messages`, `max_tokens`, `system`, `tools`, etc.)
 **Response**: Anthropic Messages response (streaming or non-streaming)
 **Streaming**: Anthropic SSE events (`message_start`, `content_block_delta`, `message_stop`, etc.)
-**Models**: claude-opus-4.6-1m, claude-opus-4.6, claude-sonnet-4.6, claude-sonnet-4, etc.
-**Model resolution**: `opus` → `claude-opus-4.6-1m`, `claude-opus-4-6` → `claude-opus-4.6-1m`
+**Models**: claude-opus-4.7-1m-internal (enterprise-only), claude-opus-4.7, claude-opus-4.6-1m, claude-opus-4.6, claude-sonnet-4.6, etc. The `claude` subcommand sets `ANTHROPIC_MODEL=claude-opus-4-7` (Anthropic-published dashed slug — for Claude Code `/model` UI compatibility); the proxy translates that to the right Copilot slug on every request.
+**Model resolution**: accepts both Anthropic dashed slugs and Copilot dotted slugs. `claude-opus-4-7` → `claude-opus-4.7-1m-internal` on enterprise (family preference + version match) or `claude-opus-4.7` on non-enterprise (step-4 normalized match). `claude-opus-4.7-1m-internal` is accepted directly (step-1 exact). `opus` → highest available `-1m` variant.
 
 **Body sanitization**: `cache_control.scope` fields are stripped before forwarding (Copilot does not support the `prompt-caching-scope` beta). This enables Claude CLI 2.1.88+ compatibility.
 

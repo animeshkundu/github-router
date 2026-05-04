@@ -28,7 +28,21 @@ The server runs at `http://localhost:8787`. Now pick your tool below.
 
 ## Use with Claude Code
 
-**Option A: Interactive (recommended)**
+**Option A: One-shot subcommand (recommended)**
+
+```sh
+npx github-router@latest claude
+```
+
+Boots the proxy on a random port and spawns Claude Code wired to it. Sets `ANTHROPIC_MODEL=claude-opus-4-7` (Anthropic's dashed slug — Claude Code's `/model` UI displays this as menu entry "Opus 4.7 (1M context)"). The proxy translates to Copilot's `claude-opus-4.7-1m-internal` on enterprise tokens or `claude-opus-4.7` on Pro+/Business/Max at request time. Major.minor fallback chain: `claude-opus-4-6` → `claude-opus-4-5`. Override with `-m`:
+
+```sh
+npx github-router@latest claude -m claude-opus-4-7
+```
+
+The launcher sanitizes parent-env auth keys and sets `CLAUDE_CONFIG_DIR=$HOME/.claude` so the spawned `claude` ignores any persisted Console OAuth credential without requiring `claude /logout`. Settings, MCP servers, hooks, and CLAUDE.md auto-discovery still load from `~/.claude` as normal.
+
+**Option B: Interactive launch-command generator**
 
 ```sh
 npx github-router@latest start --claude-code
@@ -36,7 +50,7 @@ npx github-router@latest start --claude-code
 
 Select your models, a launch command gets copied to your clipboard. Paste it in a new terminal.
 
-**Option B: Copy-paste config**
+**Option C: Copy-paste config**
 
 Create `.claude/settings.json` in your project:
 
@@ -65,16 +79,26 @@ Then run `claude` as normal.
 
 ## Use with Codex CLI
 
+The fastest path is the `codex` subcommand — it boots the proxy on a random port and spawns Codex CLI wired to it:
+
 ```sh
-npx github-router@latest start --codex
+npx github-router@latest codex
 ```
 
-Or set the env vars yourself:
+Defaults to `gpt-5.5`; falls back to `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex` if your Copilot tier doesn't expose 5.5 yet. Override with `-m`:
 
 ```sh
+npx github-router@latest codex -m gpt-5.3-codex
+```
+
+Or run the proxy and Codex CLI separately:
+
+```sh
+npx github-router@latest start --codex   # interactive launch-command generator
+# — or set env vars yourself —
 export OPENAI_BASE_URL="http://localhost:8787/v1"
 export OPENAI_API_KEY="dummy"
-codex --full-auto -m gpt-5.3-codex
+codex --full-auto -m gpt-5.5
 ```
 
 ---
@@ -113,8 +137,10 @@ Anthropic endpoints are only available under `/v1/messages`.
 | Model | /chat/completions | /responses | /v1/messages |
 |---|---|---|---|
 | gpt-4.1, gpt-4o | Yes | Yes | No |
+| gpt-5.5, gpt-5.4 | No | Yes | No |
 | gpt-5.3-codex, gpt-5.2-codex | No | Yes | No |
-| claude-opus-4.6, claude-sonnet-4.6 | Yes | No | Yes |
+| claude-opus-4.7-1m-internal (enterprise), claude-opus-4.7 | Yes | No | Yes |
+| claude-opus-4.6-1m, claude-opus-4.6, claude-sonnet-4.6 | Yes | No | Yes |
 | o3, o4-mini | Yes | Yes | No |
 
 </details>
@@ -169,10 +195,19 @@ docker run -p 8787:8787 -v $(pwd)/github-router-data:/root/.local/share/github-r
 
 ```
 github-router start [options]    Start the proxy server
+github-router claude [options]   Start proxy + spawn Claude Code wired to it
+github-router codex [options]    Start proxy + spawn Codex CLI wired to it
 github-router auth               Authenticate with GitHub
 github-router check-usage        Show Copilot usage/quotas
 github-router debug              Print diagnostic info
 ```
+
+The `claude` and `codex` subcommands accept all the shared flags below plus `-m`/`--model` to override the default model. Default models live in `src/lib/port.ts`:
+
+- `claude` → `claude-opus-4-7` (Anthropic dashed slug for UI compatibility; the proxy translates to Copilot's `claude-opus-4.7-1m-internal` on enterprise or `claude-opus-4.7` elsewhere). Major.minor fallback chain: `claude-opus-4-6` → `claude-opus-4-5`.
+- `codex` → `gpt-5.5` → `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex`
+
+Fallback chains fire only on the implicit-default path; explicit `-m`/`--model` is always respected as-is.
 
 | Flag | Description | Default |
 |---|---|---|

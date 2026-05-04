@@ -1,0 +1,323 @@
+import { describe, test, expect, mock, afterEach, beforeEach } from "bun:test"
+
+import { state } from "../src/lib/state"
+import { bucketEffort, clampEffort } from "../src/routes/messages/handler"
+import { server } from "../src/server"
+
+const originalFetch = globalThis.fetch
+let savedModels: typeof state.models
+
+function makeModel(overrides: {
+  id?: string
+  adaptive_thinking?: boolean
+  reasoning_effort?: Array<string>
+}) {
+  return {
+    id: overrides.id ?? "claude-opus-4.7",
+    name: "Claude Opus 4.7",
+    object: "model",
+    preview: false,
+    vendor: "anthropic",
+    version: "1",
+    model_picker_enabled: true,
+    capabilities: {
+      family: "claude",
+      limits: { max_output_tokens: 8192 },
+      object: "model",
+      supports: {
+        ...(overrides.adaptive_thinking !== undefined && {
+          adaptive_thinking: overrides.adaptive_thinking,
+        }),
+        ...(overrides.reasoning_effort && {
+          reasoning_effort: overrides.reasoning_effort,
+        }),
+      },
+      tokenizer: "claude",
+      type: "chat",
+    },
+  }
+}
+
+function emptyMessageResponse() {
+  return new Response(
+    JSON.stringify({
+      id: "msg_test",
+      type: "message",
+      role: "assistant",
+      model: "claude-opus-4.7",
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 5, output_tokens: 3 },
+    }),
+  )
+}
+
+beforeEach(() => {
+  savedModels = state.models
+  state.copilotToken = "test-token"
+  state.vsCodeVersion = "1.0.0"
+  state.accountType = "individual"
+  state.manualApprove = false
+  state.rateLimitSeconds = undefined
+  state.rateLimitWait = false
+})
+
+afterEach(() => {
+  globalThis.fetch = originalFetch
+  state.models = savedModels
+})
+
+describe("thinking-mode translation on /v1/messages", () => {
+  test("translates enabled+budget 5000 to adaptive+effort 'medium'", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        makeModel({
+          id: "claude-opus-4.7",
+          adaptive_thinking: true,
+          reasoning_effort: ["low", "medium", "high", "xhigh"],
+        }),
+      ],
+    }
+
+    let capturedBody: string | undefined
+    const fetchMock = mock((url: string, opts?: { body?: string }) => {
+      if (url.includes("/v1/messages")) {
+        capturedBody = opts?.body
+        return emptyMessageResponse()
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    })
+    // @ts-expect-error - override fetch for this test
+    globalThis.fetch = fetchMock
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        thinking: { type: "enabled", budget_tokens: 5000 },
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+    expect(response.status).toBe(200)
+
+    const forwarded = JSON.parse(capturedBody ?? "{}") as {
+      thinking?: { type?: string; budget_tokens?: number }
+      output_config?: { effort?: string }
+    }
+    expect(forwarded.thinking).toEqual({ type: "adaptive" })
+    expect(forwarded.output_config?.effort).toBe("medium")
+  })
+
+  test("clamps to supported reasoning_effort when bucketed not in list", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        makeModel({
+          id: "claude-opus-4.7",
+          adaptive_thinking: true,
+          reasoning_effort: ["medium"],
+        }),
+      ],
+    }
+
+    let capturedBody: string | undefined
+    const fetchMock = mock((url: string, opts?: { body?: string }) => {
+      if (url.includes("/v1/messages")) {
+        capturedBody = opts?.body
+        return emptyMessageResponse()
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    })
+    // @ts-expect-error - override fetch for this test
+    globalThis.fetch = fetchMock
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        // budget 30000 → bucketed "xhigh" → clamps to "medium"
+        thinking: { type: "enabled", budget_tokens: 30000 },
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+    expect(response.status).toBe(200)
+
+    const forwarded = JSON.parse(capturedBody ?? "{}") as {
+      thinking?: { type?: string }
+      output_config?: { effort?: string }
+    }
+    expect(forwarded.thinking).toEqual({ type: "adaptive" })
+    expect(forwarded.output_config?.effort).toBe("medium")
+  })
+
+  test("leaves thinking unchanged when model lacks adaptive_thinking", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        makeModel({
+          id: "claude-opus-4.7",
+          // adaptive_thinking absent
+        }),
+      ],
+    }
+
+    let capturedBody: string | undefined
+    const fetchMock = mock((url: string, opts?: { body?: string }) => {
+      if (url.includes("/v1/messages")) {
+        capturedBody = opts?.body
+        return emptyMessageResponse()
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    })
+    // @ts-expect-error - override fetch for this test
+    globalThis.fetch = fetchMock
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        thinking: { type: "enabled", budget_tokens: 5000 },
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+    expect(response.status).toBe(200)
+
+    const forwarded = JSON.parse(capturedBody ?? "{}") as {
+      thinking?: { type?: string; budget_tokens?: number }
+      output_config?: unknown
+    }
+    expect(forwarded.thinking).toEqual({
+      type: "enabled",
+      budget_tokens: 5000,
+    })
+    expect(forwarded.output_config).toBeUndefined()
+  })
+
+  test("preserves client-supplied output_config.effort", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        makeModel({
+          id: "claude-opus-4.7",
+          adaptive_thinking: true,
+          reasoning_effort: ["low", "medium", "high", "xhigh"],
+        }),
+      ],
+    }
+
+    let capturedBody: string | undefined
+    const fetchMock = mock((url: string, opts?: { body?: string }) => {
+      if (url.includes("/v1/messages")) {
+        capturedBody = opts?.body
+        return emptyMessageResponse()
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    })
+    // @ts-expect-error - override fetch for this test
+    globalThis.fetch = fetchMock
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        // budget 5000 buckets to "medium", but client says "high" — client wins
+        thinking: { type: "enabled", budget_tokens: 5000 },
+        output_config: { effort: "high" },
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+    expect(response.status).toBe(200)
+
+    const forwarded = JSON.parse(capturedBody ?? "{}") as {
+      thinking?: { type?: string }
+      output_config?: { effort?: string }
+    }
+    expect(forwarded.thinking).toEqual({ type: "adaptive" })
+    expect(forwarded.output_config?.effort).toBe("high")
+  })
+})
+
+// Direct unit tests for bucketEffort/clampEffort — boundary cases are
+// off-by-one bug magnets and the integration tests above only cover the
+// happy paths. Keep these cheap and exhaustive.
+
+describe("bucketEffort", () => {
+  test("budget 0 → low", () => {
+    expect(bucketEffort(0)).toBe("low")
+  })
+  test("budget 1999 → low (just below 2000 boundary)", () => {
+    expect(bucketEffort(1999)).toBe("low")
+  })
+  test("budget 2000 → medium (boundary — half-open [2k, 8k))", () => {
+    expect(bucketEffort(2000)).toBe("medium")
+  })
+  test("budget 7999 → medium (just below 8000 boundary)", () => {
+    expect(bucketEffort(7999)).toBe("medium")
+  })
+  test("budget 8000 → high (boundary)", () => {
+    expect(bucketEffort(8000)).toBe("high")
+  })
+  test("budget 23999 → high (just below 24000 boundary)", () => {
+    expect(bucketEffort(23999)).toBe("high")
+  })
+  test("budget 24000 → xhigh (boundary)", () => {
+    expect(bucketEffort(24000)).toBe("xhigh")
+  })
+  test("budget 100000 → xhigh", () => {
+    expect(bucketEffort(100_000)).toBe("xhigh")
+  })
+  test("undefined budget → high (default 8000)", () => {
+    expect(bucketEffort(undefined)).toBe("high")
+  })
+  test("non-numeric budget (string) → high (default 8000)", () => {
+    expect(bucketEffort("4000")).toBe("high")
+  })
+  test("NaN → high (default 8000)", () => {
+    expect(bucketEffort(NaN)).toBe("high")
+  })
+  test("Infinity → high (default 8000, Number.isFinite false)", () => {
+    expect(bucketEffort(Infinity)).toBe("high")
+  })
+  test("negative budget → low (n < 2000 is true for any negative)", () => {
+    expect(bucketEffort(-1)).toBe("low")
+  })
+})
+
+describe("clampEffort", () => {
+  test("returns the bucketed value when supported", () => {
+    expect(clampEffort("medium", ["low", "medium", "high"])).toBe("medium")
+  })
+  test("clamps xhigh to medium when only medium is supported", () => {
+    expect(clampEffort("xhigh", ["medium"])).toBe("medium")
+  })
+  test("clamps high to medium when only low/medium are supported", () => {
+    // distance: low=2, medium=1 → medium wins (closer)
+    expect(clampEffort("high", ["low", "medium"])).toBe("medium")
+  })
+  test("equidistant tie picks the lower-tier value (low over high)", () => {
+    // bucketed=medium, supported=[low,high]; both at distance 1
+    // EFFORT_ORDER iterates low→xhigh, strict `<` keeps the first
+    expect(clampEffort("medium", ["low", "high"])).toBe("low")
+  })
+  test("respects supported-array order independence (low/high vs high/low)", () => {
+    // Same input, swapped supported order — must still pick low (canonical
+    // EFFORT_ORDER iteration, not input array order).
+    expect(clampEffort("medium", ["high", "low"])).toBe("low")
+  })
+  test("falls back to bucketed when supported is empty", () => {
+    expect(clampEffort("medium", [])).toBe("medium")
+  })
+  test("xhigh with only low supported clamps to low", () => {
+    expect(clampEffort("xhigh", ["low"])).toBe("low")
+  })
+})

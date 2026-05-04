@@ -13,21 +13,22 @@ modelRoutes.get("/", async (c) => {
       await cacheModels()
     }
 
-    const models = state.models?.data.map((model) => ({
-      id: model.id,
-      object: "model",
-      type: model.capabilities?.type ?? "model",
-      created: 0,
-      created_at: new Date(0).toISOString(),
-      owned_by: model.vendor,
-      display_name: model.name,
-      capabilities: model.capabilities,
-      supported_endpoints: model.supported_endpoints,
-      preview: model.preview,
-      version: model.version,
-      model_picker_enabled: model.model_picker_enabled,
-      policy: model.policy,
-    }))
+    const models = state.models?.data.map((model) => {
+      // Pass through every upstream field (billing, is_chat_default,
+      // info_messages, model_picker_category, etc.) and overlay the
+      // OpenAI-compat aliases. requestHeaders is router-internal — drop it.
+      const { requestHeaders, ...rest } = model
+      void requestHeaders
+      return {
+        ...rest,
+        object: "model",
+        type: model.capabilities?.type ?? "model",
+        created: 0,
+        created_at: new Date(0).toISOString(),
+        owned_by: model.vendor,
+        display_name: model.name,
+      }
+    })
 
     return c.json({
       object: "list",

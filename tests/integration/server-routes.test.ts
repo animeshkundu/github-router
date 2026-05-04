@@ -39,20 +39,64 @@ function resetState() {
   state.models = { object: "list", data: [baseModel] }
 }
 
+/**
+ * Mock a single MCP request (initialize / notifications/initialized / tools/call /
+ * DELETE teardown) given the request opts. `content` is the search text the
+ * tools/call leg returns inside `inner.text.value`.
+ */
+function mcpResponse(
+  opts: { body?: string; method?: string } | undefined,
+  content: string,
+): Response {
+  if ((opts?.method ?? "GET") === "DELETE") {
+    return new Response(null, { status: 204 })
+  }
+  let parsed: { method?: string; id?: number } = {}
+  if (opts?.body) {
+    try {
+      parsed = JSON.parse(opts.body) as { method?: string; id?: number }
+    } catch {
+      // ignore
+    }
+  }
+  if (parsed.method === "initialize") {
+    return new Response(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { protocolVersion: "2024-11-05", capabilities: {} },
+      }),
+      { status: 200, headers: { "mcp-session-id": "sid-test" } },
+    )
+  }
+  if (parsed.method === "notifications/initialized") {
+    return new Response(null, { status: 202 })
+  }
+  if (parsed.method === "tools/call") {
+    const inner = JSON.stringify({
+      type: "output_text",
+      text: { value: content, annotations: [] },
+    })
+    const sse = `event: message\ndata: ${JSON.stringify({
+      jsonrpc: "2.0",
+      id: parsed.id,
+      result: { content: [{ type: "text", text: inner }] },
+    })}\n\n`
+    return new Response(sse, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    })
+  }
+  return new Response("unexpected MCP request", { status: 500 })
+}
+
 test("chat completions injects web search context and strips tools", async () => {
   resetState()
   let lastChatBody: string | undefined
 
-  const fetchMock = mock((url: string, opts?: { body?: string }) => {
-    if (url.endsWith("/github/chat/threads")) {
-      return new Response(JSON.stringify({ thread_id: "thread-1" }))
-    }
-    if (url.includes("/github/chat/threads/") && url.endsWith("/messages")) {
-      return new Response(
-        JSON.stringify({
-          message: { content: "search result", references: [] },
-        }),
-      )
+  const fetchMock = mock(async (url: string, opts?: { body?: string; method?: string }) => {
+    if (url.endsWith("/mcp")) {
+      return mcpResponse(opts, "search result")
     }
     if (url.endsWith("/chat/completions")) {
       lastChatBody = opts?.body
@@ -125,16 +169,9 @@ test("responses injects web search and strips tools", async () => {
   resetState()
   let lastBody: string | undefined
 
-  const fetchMock = mock((url: string, opts?: { body?: string }) => {
-    if (url.endsWith("/github/chat/threads")) {
-      return new Response(JSON.stringify({ thread_id: "thread-2" }))
-    }
-    if (url.includes("/github/chat/threads/") && url.endsWith("/messages")) {
-      return new Response(
-        JSON.stringify({
-          message: { content: "search result", references: [] },
-        }),
-      )
+  const fetchMock = mock(async (url: string, opts?: { body?: string; method?: string }) => {
+    if (url.endsWith("/mcp")) {
+      return mcpResponse(opts, "search result")
     }
     if (url.endsWith("/responses")) {
       lastBody = opts?.body
@@ -345,7 +382,7 @@ test("routes for models, search, embeddings, usage, and token", async () => {
   state.showToken = true
   state.copilotToken = "copilot"
 
-  const fetchMock = mock((url: string) => {
+  const fetchMock = mock(async (url: string, opts?: { body?: string; method?: string }) => {
     if (url.endsWith("/embeddings")) {
       return new Response(
         JSON.stringify({
@@ -403,13 +440,8 @@ test("routes for models, search, embeddings, usage, and token", async () => {
         }),
       )
     }
-    if (url.endsWith("/github/chat/threads")) {
-      return new Response(JSON.stringify({ thread_id: "thread-4" }))
-    }
-    if (url.includes("/github/chat/threads/") && url.endsWith("/messages")) {
-      return new Response(
-        JSON.stringify({ message: { content: "search", references: [] } }),
-      )
+    if (url.endsWith("/mcp")) {
+      return mcpResponse(opts, "search")
     }
     throw new Error(`Unexpected URL ${url}`)
   })
@@ -475,6 +507,26 @@ test("token endpoint rejects when disabled", async () => {
   state.showToken = false
   const response = await server.request("/token")
   expect(response.status).toBe(403)
+})
+
+test("telemetry stub returns 200 for malformed body without calling fetch", async () => {
+  resetState()
+  let fetchCalled = false
+  const fetchMock = mock(() => {
+    fetchCalled = true
+    throw new Error("fetch must not be called for telemetry stub")
+  })
+  // @ts-expect-error - override fetch for this test
+  globalThis.fetch = fetchMock
+
+  const response = await server.request("/api/event_logging/batch", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{not valid json",
+  })
+
+  expect(response.status).toBe(200)
+  expect(fetchCalled).toBe(false)
 })
 
 test("messages passthrough forwards upstream error status and body", async () => {

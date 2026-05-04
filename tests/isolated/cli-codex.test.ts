@@ -63,7 +63,8 @@ mock.module("~/lib/server-setup", () => ({
 }))
 
 mock.module("~/lib/port", () => ({
-  DEFAULT_CODEX_MODEL: "gpt-5.3-codex",
+  DEFAULT_CODEX_MODEL: "gpt-5.5",
+  DEFAULT_CODEX_MODEL_FALLBACKS: ["gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex"],
 }))
 
 mock.module("consola", () => ({
@@ -174,7 +175,51 @@ describe("codex command", () => {
 
     const [, args] = spawnMock.mock.calls[0]
     expect(args).toContain("-m")
-    expect(args).toContain("gpt-5.3-codex")
+    expect(args).toContain("gpt-5.5")
+  })
+
+  test("falls back gracefully when gpt-5.5 missing — picks best /responses model in cache", async () => {
+    // Pre-rollout tier where gpt-5.5 hasn't appeared yet. resolveCodexModel's
+    // "best /responses model" safety net catches this even before the named
+    // fallback chain runs. With both 5.4 and 5.3-codex present, the -codex
+    // suffix is preferred by resolveCodexModel — we still get a working model
+    // without --model.
+    state.models = {
+      data: [
+        { id: "gpt-5.4", supported_endpoints: ["/responses"] },
+        { id: "gpt-5.3-codex", supported_endpoints: ["/responses"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    try {
+      const run = getRunFn()
+      await run({ args: {} })
+      const [, args] = spawnMock.mock.calls[0]
+      expect(args).toContain("-m")
+      expect(args).toContain("gpt-5.3-codex")
+    } finally {
+      state.models = undefined
+    }
+  })
+
+  test("named fallback chain picks gpt-5.4 when only it is in cache", async () => {
+    // resolveCodexModel returns "gpt-5.4" (only candidate); the named
+    // fallback chain confirms it's in cache and uses it directly.
+    state.models = {
+      data: [
+        { id: "gpt-5.4", supported_endpoints: ["/responses"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    try {
+      const run = getRunFn()
+      await run({ args: {} })
+      const [, args] = spawnMock.mock.calls[0]
+      expect(args).toContain("-m")
+      expect(args).toContain("gpt-5.4")
+    } finally {
+      state.models = undefined
+    }
   })
 
   test("model override applied", async () => {

@@ -54,7 +54,49 @@ publishes, and restores. See `publish/release.sh` for details.
 
 Two modes controlled by `--extended-betas` flag:
 - **Default (VS Code stealth)**: Only forward 3 beta prefixes the VS Code extension sends (`interleaved-thinking-`, `context-management-`, `advanced-tool-use-`). Traffic is indistinguishable from VS Code.
-- **Extended (`--extended-betas`)**: Forward 20 beta prefixes for Claude CLI compatibility. Required when using `github-router claude --extended-betas`.
+- **Extended (`--extended-betas`)**: Forward 14 additional beta prefixes for Claude CLI compatibility. Required when using `github-router claude --extended-betas`.
+
+The router strips `context-1m-`, `skills-`, `files-api-`, and `code-execution-` from every outgoing `anthropic-beta` value — Copilot returns 400 ("unsupported beta header") on each. 1M context for Opus 4.7 is unlocked by selecting the `claude-opus-4.7-1m-internal` model id (enterprise tier only), not via a beta header.
+
+### Default models
+
+The `claude` and `codex` subcommands default to the latest Copilot-supported models when no `--model` is given:
+
+- `claude` → `ANTHROPIC_MODEL=claude-opus-4-7` (Anthropic-published dashed slug). The proxy's `resolveModel` (`src/lib/utils.ts`) translates this to Copilot's `claude-opus-4.7-1m-internal` on enterprise tokens or `claude-opus-4.7` on Pro+/Business/Max at request time, so the actual upstream call routes correctly. The `DEFAULT_CLAUDE_MODEL_FALLBACKS` chain (`claude-opus-4-6` → `claude-opus-4-5`) covers major.minor regressions only — the 1M↔200K downgrade is handled inside the resolver.
+
+  Why the Anthropic slug instead of the Copilot slug: Claude Code 2.1.126's `/model` UI is backed by a hardcoded registry of Anthropic-published slugs. Setting `ANTHROPIC_MODEL=claude-opus-4.7-1m-internal` (Copilot's slug, with dots and `-internal` suffix) doesn't match any registry entry, so the menu falls back to "Opus 4" with a "Newer version available" hint instead of selecting "Opus 4.7 (1M context)". The Anthropic dashed slug fixes the UI without sacrificing routing — round-trip covered by `tests/lib-utils.test.ts:154`.
+
+  Users can pass `--model claude-opus-4.7-1m-internal` (Copilot slug) for explicit pinning, but Claude Code's UI won't recognize it and will display "Opus 4" instead of "Opus 4.7 (1M context)". Use the Anthropic slug for correct UI labels.
+
+- `codex` → `gpt-5.5` (dropped the `-codex` suffix; `/responses` is the discriminator). Falls back via `DEFAULT_CODEX_MODEL_FALLBACKS`: `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex`. `resolveCodexModel`'s "best available `/responses` model" provides a final safety net beyond the named chain. Codex CLI's bundled catalog uses Copilot-style slugs directly, so no Anthropic-slug translation is needed.
+
+Fallback chains only fire on the implicit-default path — explicit `-m`/`--model` is always respected as-is. Constants live in `src/lib/port.ts`.
+
+### Spawned-CLI auth isolation
+
+When `github-router claude` (or `codex`) launches its child CLI, the parent `process.env` is sanitized of every auth-related key listed in `STRIPPED_PARENT_ENV_KEYS` (`src/lib/launch.ts`) BEFORE the proxy's overrides are merged in. Stripped keys: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_MODEL`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CONFIG_DIR`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME`.
+
+This serves two purposes: (1) prevents shell-exported real credentials from leaking through the proxy (e.g. an `ANTHROPIC_API_KEY` in the user's shell would otherwise flow through as `x-api-key`), and (2) avoids Claude Code's `Auth conflict` warnings that fire whenever both `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` are present (regardless of value — even dummy values trip the check). Because of the strip, `getClaudeCodeEnvVars` only needs to set the positive overrides; it deliberately does NOT set `ANTHROPIC_API_KEY`.
+
+To silence the third auth-conflict warning (the "/login managed key" detection from a persisted `claude /login`), `getClaudeCodeEnvVars` also sets `CLAUDE_CONFIG_DIR=$HOME/.claude`. This activates Claude Code's per-config-dir keychain isolation: the spawned child queries Keychain service `Claude Code-<sha256-hash>` instead of the user's actual `Claude Code` entry (no suffix). The probe misses → the credential is invisible to the proxy session → all three auth-conflict warnings silenced. The path resolves to the default config-dir, so `settings.json`/skills/MCP/plugins/hooks/CLAUDE.md/custom agents all still load from `~/.claude` as normal — **zero feature loss**.
+
+The persisted Console OAuth credential is **never modified** — it stays exactly where the user's `claude /login` placed it (Keychain or `~/.claude/.credentials.json`), fully accessible to `claude` invoked outside the proxy. No `claude /logout` is required.
+
+### Thinking-mode translation
+
+Copilot rejects Anthropic's `thinking:{type:"enabled", budget_tokens:N}` shape on adaptive-thinking models with HTTP 400. The router translates to Copilot's `thinking:{type:"adaptive"}` + `output_config:{effort}` automatically when the resolved model declares `adaptive_thinking: true`. Bucket: `<2k → low`, `<8k → medium`, `<24k → high`, else `xhigh`. Clamps to `model.capabilities.supports.reasoning_effort` allowlist when present (lower-tier preference for ties). Client-supplied `output_config.effort` always wins. No-op when the model lacks `adaptive_thinking` (passthrough). Implemented in `src/routes/messages/handler.ts` (`translateThinking`).
+
+### Web search
+
+The `/search` route fulfils web-search tool calls via Copilot's MCP (Model Context Protocol) endpoint at `${copilotBaseUrl}/mcp`, the same path Copilot CLI uses for its `web_search` tool. **Auth is the GitHub PAT directly** (`state.githubToken`), not the Copilot-exchanged token — `/mcp` validates a Copilot seat against the OAuth token rather than the short-lived CAPI bearer.
+
+Wire flow (in `src/services/copilot/web-search.ts`): `initialize` → capture `Mcp-Session-Id` → `notifications/initialized` → `tools/call` `{name:"web_search", arguments:{query}}` over SSE-framed JSON-RPC. The required `X-MCP-Toolsets: web_search` header is what makes the tool appear in `tools/list`; without it the default toolset omits `web_search`. Best-effort `DELETE /mcp` teardown closes the session.
+
+This path is **model-agnostic** — the proxy fulfils the search out-of-band before forwarding the assistant's `tool_use` to the model. Works regardless of whether the user's enterprise has the `github_chat` policy enabled (the legacy `/github/chat/threads` wrapper required it; that entitlement silently flipped from Enabled-default to Disabled-default per the [Nov 4 2025 changelog](https://github.blog/changelog/2025-11-04-github-copilot-policy-update-for-unconfigured-policies/)).
+
+For OpenAI-shaped clients on GPT-5.x clients can also use `tools:[{type:"web_search_preview"}]` on `/v1/responses` directly — Copilot fulfils that natively without going through the proxy's MCP path. For Anthropic-shape `web_search_*` tools on `/v1/messages`, Copilot returns 400 "use of the web search tool is not supported"; the proxy strips them via the existing `injectWebSearchIfNeeded` path and substitutes MCP-fetched search context in the system prompt.
+
+PAT-bearing requests are sent only to hosts in `COPILOT_HOST_ALLOWLIST` (`src/services/github/get-copilot-token.ts`) — `endpoints.api` from the token-exchange response is rejected if it points elsewhere, so a tampered response can't exfiltrate the PAT.
 
 ### Error format
 

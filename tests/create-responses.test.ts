@@ -126,61 +126,54 @@ test("sets X-Initiator to user when input has only user messages", async () => {
   expect(headers["X-Initiator"]).toBe("user")
 })
 
-test("strips unsupported tool types like web_search from payload", async () => {
+test("forwards all tool types unchanged (apply_patch, custom, shell, tool_search, mcp)", async () => {
+  // Copilot's /responses now schema-supports 14 tool types; per-model
+  // support varies. The router lets Copilot return its own per-model 400
+  // rather than pre-filtering. See plan §4.
   const payload: ResponsesPayload = {
-    model: "gpt-5.2-codex",
+    model: "gpt-5.5",
     input: "Hello",
     tools: [
-      { type: "web_search" },
-      {
-        type: "function",
-        name: "get_weather",
-        parameters: { type: "object" },
-      },
+      { type: "function", name: "get_weather", parameters: { type: "object" } },
+      { type: "apply_patch" },
+      { type: "custom", name: "x", format: { type: "text" } },
+      { type: "shell" },
+      { type: "tool_search" },
+      { type: "mcp" },
+      { type: "web_search_preview" },
     ],
-    tool_choice: { type: "tool", name: "web_search" },
+    tool_choice: { type: "tool", name: "apply_patch" },
   }
   await createResponses(payload)
   const lastCall = fetchMock.mock.calls.at(-1)
   const body = JSON.parse(
     (lastCall?.[1] as unknown as { body: string }).body,
   ) as { tools?: Array<{ type: string; name?: string }>; tool_choice?: unknown }
-  expect(body.tools).toHaveLength(1)
-  expect(body.tools?.[0].type).toBe("function")
-  expect(body.tools?.[0].name).toBe("get_weather")
-  expect(body.tool_choice).toBeUndefined()
+  expect(body.tools).toHaveLength(7)
+  expect(body.tools?.map((t) => t.type)).toEqual([
+    "function",
+    "apply_patch",
+    "custom",
+    "shell",
+    "tool_search",
+    "mcp",
+    "web_search_preview",
+  ])
+  expect(body.tool_choice).toEqual({ type: "tool", name: "apply_patch" })
 })
 
-test("removes tools field entirely when all tools are unsupported", async () => {
+test("forwards single non-function tool (regression for old strip behavior)", async () => {
   const payload: ResponsesPayload = {
-    model: "gpt-5.2-codex",
+    model: "gpt-5.5",
     input: "Hello",
-    tools: [{ type: "web_search" }, { type: "code_interpreter" }],
-    tool_choice: { type: "tool", name: "web_search" },
-  }
-  await createResponses(payload)
-  const lastCall2 = fetchMock.mock.calls.at(-1)
-  const body = JSON.parse(
-    (lastCall2?.[1] as unknown as { body: string }).body,
-  ) as { tools?: Array<{ type: string }>; tool_choice?: unknown }
-  expect(body.tools).toBeUndefined()
-  expect(body.tool_choice).toBeUndefined()
-})
-
-test("clears function tool_choice when tool is stripped", async () => {
-  const payload: ResponsesPayload = {
-    model: "gpt-5.2-codex",
-    input: "Hello",
-    tools: [{ type: "web_search" }],
-    tool_choice: { type: "function", function: { name: "web_search" } },
+    tools: [{ type: "apply_patch" }],
   }
   await createResponses(payload)
   const lastCall = fetchMock.mock.calls.at(-1)
   const body = JSON.parse(
     (lastCall?.[1] as unknown as { body: string }).body,
-  ) as { tools?: Array<{ type: string }>; tool_choice?: unknown }
-  expect(body.tools).toBeUndefined()
-  expect(body.tool_choice).toBeUndefined()
+  ) as { tools?: Array<{ type: string }> }
+  expect(body.tools).toEqual([{ type: "apply_patch" }])
 })
 
 test("returns parsed JSON for non-streaming response", async () => {
