@@ -66,6 +66,14 @@ The `claude` and `codex` subcommands default to the latest Copilot-supported mod
 
 Override with `-m`/`--model`. Constants live in `src/lib/port.ts`.
 
+### Spawned-CLI auth isolation
+
+When `github-router claude` (or `codex`) launches its child CLI, the parent `process.env` is sanitized of every auth-related key listed in `STRIPPED_PARENT_ENV_KEYS` (`src/lib/launch.ts`) BEFORE the proxy's overrides are merged in. Stripped keys: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_MODEL`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME`.
+
+This serves two purposes: (1) prevents shell-exported real credentials from leaking through the proxy (e.g. an `ANTHROPIC_API_KEY` in the user's shell would otherwise flow through as `x-api-key`), and (2) avoids Claude Code's `Auth conflict` warnings that fire whenever both `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` are present (regardless of value — even dummy values trip the check). Because of the strip, `getClaudeCodeEnvVars` only needs to set the positive overrides (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN: "dummy"`, `DISABLE_*`, optional `ANTHROPIC_MODEL`); it deliberately does NOT set `ANTHROPIC_API_KEY`.
+
+The persisted Console OAuth (Keychain or `~/.claude/.credentials.json`) is left in place so `claude /logout` still works outside the proxy. The `ANTHROPIC_AUTH_TOKEN` env var beats the persisted credential per Claude Code's auth precedence (https://code.claude.com/docs/en/iam).
+
 ### Thinking-mode translation
 
 Copilot rejects Anthropic's `thinking:{type:"enabled", budget_tokens:N}` shape on adaptive-thinking models with HTTP 400. The router translates to Copilot's `thinking:{type:"adaptive"}` + `output_config:{effort}` automatically when the resolved model declares `adaptive_thinking: true`. Bucket: `<2k → low`, `<8k → medium`, `<24k → high`, else `xhigh`. Clamps to `model.capabilities.supports.reasoning_effort` allowlist when present (lower-tier preference for ties). Client-supplied `output_config.effort` always wins. No-op when the model lacks `adaptive_thinking` (passthrough). Implemented in `src/routes/messages/handler.ts` (`translateThinking`).

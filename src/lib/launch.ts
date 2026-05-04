@@ -7,6 +7,56 @@ import type { Server } from "srvx"
 
 import { DEFAULT_CODEX_MODEL } from "./port"
 
+/**
+ * Auth-related env keys we strip from the parent before spawning the
+ * child CLI. The proxy provides its own values for everything we care
+ * about (ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, OPENAI_BASE_URL,
+ * OPENAI_API_KEY, CODEX_HOME, ANTHROPIC_MODEL); for the rest, we want
+ * the child to behave as if the user had no parent-env auth at all.
+ *
+ * Why strip rather than override-with-empty-string:
+ *   - Claude Code emits "Auth conflict" warnings whenever both
+ *     ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are present (regardless
+ *     of value, even when both are "dummy"). Stripping API_KEY entirely
+ *     suppresses the warning AND prevents an inherited real shell key
+ *     from leaking via x-api-key.
+ *   - Cloud-provider toggles (CLAUDE_CODE_USE_*) and OAUTH_TOKEN, etc.
+ *     are simpler dropped than overridden — a missing env var is
+ *     unambiguously falsy/absent in every code path that reads it.
+ */
+const STRIPPED_PARENT_ENV_KEYS = [
+  // Claude Code auth surface
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_CUSTOM_HEADERS",
+  "ANTHROPIC_MODEL",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+  // Codex CLI auth surface
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "CODEX_HOME",
+] as const
+
+/**
+ * Strip auth-related keys from a parent-process env object. The result
+ * is suitable to spread into a spawned child's env BEFORE the proxy's
+ * explicit overrides, so the proxy is the only source of truth for
+ * auth — and stale shell exports can't leak through.
+ */
+export function sanitizeParentEnv(
+  parent: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const sanitized: NodeJS.ProcessEnv = { ...parent }
+  for (const key of STRIPPED_PARENT_ENV_KEYS) {
+    delete sanitized[key]
+  }
+  return sanitized
+}
+
 function commandExists(name: string): boolean {
   try {
     execFileSync(process.platform === "win32" ? "where.exe" : "which", [name], {
@@ -36,7 +86,7 @@ export function buildLaunchCommand(target: LaunchTarget): {
 
   return {
     cmd,
-    env: { ...process.env, ...target.envVars },
+    env: { ...sanitizeParentEnv(process.env), ...target.envVars },
   }
 }
 

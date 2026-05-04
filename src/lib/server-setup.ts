@@ -246,22 +246,24 @@ export function parseSharedArgs(args: Record<string, unknown>): {
 /**
  * Build environment variables for Claude Code.
  *
- * Defends against every non-proxy auth path Claude Code might otherwise
- * pick up (verified live against claude 2.1.126 — see `getClaudeCodeEnvVars`
- * tests). Auth precedence in Claude Code is documented at
- * https://code.claude.com/docs/en/iam:
+ * The parent env is sanitized of every key in `STRIPPED_PARENT_ENV_KEYS`
+ * (see `src/lib/launch.ts`) BEFORE these overrides are merged in, so we
+ * only need to provide the positive values. We deliberately do NOT set
+ * `ANTHROPIC_API_KEY` — Claude Code 2.1.126 prints an "Auth conflict"
+ * warning whenever both `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY`
+ * are present (even with dummy values). Stripping API_KEY at the parent
+ * level is sufficient to prevent shell-exported real keys from leaking
+ * via `x-api-key`.
  *
- *   1. Cloud provider (CLAUDE_CODE_USE_BEDROCK / VERTEX / FOUNDRY) — wins
- *      over ANTHROPIC_BASE_URL, so we explicitly clear inherited truthy
- *      values with empty strings.
- *   2. ANTHROPIC_AUTH_TOKEN — sent as `Authorization: Bearer …`.
- *   3. ANTHROPIC_API_KEY — sent as `x-api-key: …`. Claude Code sends BOTH
- *      headers when both env vars are set, so we shadow the user's
- *      possibly-real shell-exported key with a dummy too.
- *   4. apiKeyHelper in settings.json — overridden by env vars (#2/#3).
- *   5. CLAUDE_CODE_OAUTH_TOKEN — long-lived OAuth; cleared explicitly.
- *   6. Subscription OAuth (Keychain / ~/.claude/.credentials.json) — beaten
- *      by env-var precedence above.
+ * Auth precedence in Claude Code (https://code.claude.com/docs/en/iam):
+ *   1. Cloud provider (CLAUDE_CODE_USE_BEDROCK / VERTEX / FOUNDRY) — stripped at parent.
+ *   2. ANTHROPIC_AUTH_TOKEN — set here to "dummy"; wins over #4–#6.
+ *   3. ANTHROPIC_API_KEY — stripped at parent, intentionally NOT re-set.
+ *   4. apiKeyHelper in settings.json — beaten by #2.
+ *   5. CLAUDE_CODE_OAUTH_TOKEN — stripped at parent.
+ *   6. Subscription OAuth (Keychain / ~/.claude/.credentials.json) — beaten by #2
+ *      via env-var precedence; we leave the credential file in place so
+ *      `claude /logout` still works outside the proxy.
  */
 export function getClaudeCodeEnvVars(
   serverUrl: string,
@@ -270,20 +272,8 @@ export function getClaudeCodeEnvVars(
   const vars: Record<string, string> = {
     // Route to the proxy
     ANTHROPIC_BASE_URL: serverUrl,
-    // Authoritative dummy creds — both required because Claude Code sends
-    // both headers when both vars are set; without ANTHROPIC_API_KEY="dummy"
-    // a real shell-exported key would leak to the proxy via x-api-key.
+    // Authoritative dummy bearer; sent as `Authorization: Bearer dummy`.
     ANTHROPIC_AUTH_TOKEN: "dummy",
-    ANTHROPIC_API_KEY: "dummy",
-    // Disable cloud-provider routing in case the user has these set
-    // (empty string is falsy in Claude Code's truthy check).
-    CLAUDE_CODE_USE_BEDROCK: "",
-    CLAUDE_CODE_USE_VERTEX: "",
-    CLAUDE_CODE_USE_FOUNDRY: "",
-    // Disable any inherited long-lived OAuth token.
-    CLAUDE_CODE_OAUTH_TOKEN: "",
-    // Drop user-injected custom headers that could carry auth.
-    ANTHROPIC_CUSTOM_HEADERS: "",
     // Suppress non-essential telemetry/model calls.
     DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
@@ -295,10 +285,14 @@ export function getClaudeCodeEnvVars(
 /**
  * Build environment variables for Codex CLI.
  *
- * Codex caches a ChatGPT subscription login under `$CODEX_HOME` (defaults
- * `~/.codex`); per openai/codex#2733 the cached login can override
- * `OPENAI_API_KEY`. Pointing `CODEX_HOME` at an isolated directory makes
- * the proxy's dummy key authoritative.
+ * Like `getClaudeCodeEnvVars`, the parent env is sanitized of
+ * `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `CODEX_HOME` (see
+ * `STRIPPED_PARENT_ENV_KEYS` in `src/lib/launch.ts`) before these
+ * overrides are merged, so a stale shell `OPENAI_API_KEY` can't leak
+ * through. Codex caches a ChatGPT subscription login under
+ * `$CODEX_HOME/auth.json` which can override `OPENAI_API_KEY` per
+ * openai/codex#2733; pointing `CODEX_HOME` at an isolated directory
+ * masks any cached login.
  */
 export function getCodexEnvVars(serverUrl: string): Record<string, string> {
   return {

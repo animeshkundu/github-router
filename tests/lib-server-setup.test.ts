@@ -79,35 +79,39 @@ describe("parseSharedArgs", () => {
 })
 
 describe("getClaudeCodeEnvVars", () => {
-  test("returns proxy URL plus auth-bypass shims", () => {
+  test("returns minimal proxy override set", () => {
     const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
     expect(vars.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:8787")
     expect(vars.ANTHROPIC_AUTH_TOKEN).toBe("dummy")
-    expect(vars.ANTHROPIC_API_KEY).toBe("dummy")
     expect(vars.DISABLE_NON_ESSENTIAL_MODEL_CALLS).toBe("1")
     expect(vars.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1")
   })
 
-  test("clears every non-proxy auth path Claude Code might inherit", () => {
-    // Auth precedence per https://code.claude.com/docs/en/iam:
-    // (1) cloud provider, (2) ANTHROPIC_AUTH_TOKEN, (3) ANTHROPIC_API_KEY,
-    // (4) apiKeyHelper, (5) CLAUDE_CODE_OAUTH_TOKEN, (6) subscription OAuth.
-    // We override (1)/(2)/(3)/(5) and beat (4)/(6) by env-var precedence.
+  test("does NOT set ANTHROPIC_API_KEY (regression — Claude Code emits an Auth conflict warning when both AUTH_TOKEN and API_KEY are present, even with dummy values)", () => {
+    // Verified live: claude 2.1.126 prints
+    //   ⚠ Auth conflict: Both a token (ANTHROPIC_AUTH_TOKEN) and an API
+    //     key (ANTHROPIC_API_KEY) are set. This may lead to unexpected
+    //     behavior.
+    // whenever both env vars exist. Stripping API_KEY from the parent env
+    // (in launch.ts sanitizeParentEnv) AND not re-adding it here keeps
+    // the warning silent. Inherited shell-exported real keys can't leak
+    // because they're stripped at the parent level.
     const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
-    expect(vars.CLAUDE_CODE_USE_BEDROCK).toBe("")
-    expect(vars.CLAUDE_CODE_USE_VERTEX).toBe("")
-    expect(vars.CLAUDE_CODE_USE_FOUNDRY).toBe("")
-    expect(vars.CLAUDE_CODE_OAUTH_TOKEN).toBe("")
-    expect(vars.ANTHROPIC_CUSTOM_HEADERS).toBe("")
+    expect(vars).not.toHaveProperty("ANTHROPIC_API_KEY")
   })
 
-  test("ANTHROPIC_API_KEY is set to dummy (regression — without this, an inherited real key leaks via x-api-key)", () => {
-    // Verified live: Claude Code 2.1.126 sends BOTH `Authorization: Bearer
-    // <ANTHROPIC_AUTH_TOKEN>` AND `x-api-key: <ANTHROPIC_API_KEY>` when both
-    // env vars are set. If we don't shadow ANTHROPIC_API_KEY, a real key
-    // exported in the user's shell flows through the proxy.
+  test("does NOT set the empty-string clears (handled by parent-env sanitization)", () => {
+    // CLAUDE_CODE_USE_*, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_CUSTOM_HEADERS
+    // are stripped from process.env in launch.ts before the spread, so we
+    // don't need to set them to "" here. Setting them to "" would also be
+    // wrong — see the API_KEY case above; some Claude Code versions check
+    // presence not value.
     const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
-    expect(vars.ANTHROPIC_API_KEY).toBe("dummy")
+    expect(vars).not.toHaveProperty("CLAUDE_CODE_USE_BEDROCK")
+    expect(vars).not.toHaveProperty("CLAUDE_CODE_USE_VERTEX")
+    expect(vars).not.toHaveProperty("CLAUDE_CODE_USE_FOUNDRY")
+    expect(vars).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN")
+    expect(vars).not.toHaveProperty("ANTHROPIC_CUSTOM_HEADERS")
   })
 
   test("includes ANTHROPIC_MODEL when model provided", () => {
