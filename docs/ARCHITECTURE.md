@@ -82,7 +82,7 @@ src/
     ├── proxy.ts           # HTTP proxy support
     ├── shell.ts           # Cross-platform env var script generation
     ├── paths.ts           # File system paths for token storage
-    ├── port.ts            # Default port, random port generation, default codex model
+    ├── port.ts            # Default port, random port generation, default claude/codex models + fallback chains
     ├── launch.ts          # Child process spawning for codex/claude subcommands
     ├── model-validation.ts  # Endpoint support checks, mismatch logging
     ├── server-setup.ts    # Shared server bootstrap (setupAndServe, env var builders)
@@ -122,11 +122,13 @@ When a client requests a model by name, the proxy resolves it against the cached
 2. **Case-insensitive match** -- e.g. `Claude-Sonnet-4` resolves to `claude-sonnet-4`
 3. **Normalized match** -- dots replaced with dashes, repeated dashes collapsed (e.g. `gpt5.3-codex` matches `gpt-5.3-codex`)
 4. **Family preference** -- shorthand names resolve to preferred variants:
-   - `opus` resolves to the `-1m` context variant (e.g. `claude-opus-4-1m`)
+   - `opus` resolves to the latest `-1m` context variant (e.g. `claude-opus-4.7-1m-internal`); the resolver picks the 1M variant whose major.minor matches the request rather than the first `-1m` it finds
    - `codex` resolves to the highest-versioned non-mini codex model
 5. **Passthrough with warning** -- if no match is found, the original model ID is forwarded as-is and a warning is logged
 
-The `resolveCodexModel()` variant extends this for the codex subcommand: if the resolved model still does not exist in the model list, it falls back to the best available codex model that supports `/responses`.
+The `resolveCodexModel()` variant extends this for the codex subcommand: if the resolved model still does not exist in the model list, it falls back to the best available `/responses`-compatible model (preferring `-codex` suffix when present, otherwise the highest version-like ID such as `gpt-5.5`).
+
+**Subcommand-level fallback chains** (`src/lib/port.ts`, `DEFAULT_CLAUDE_MODEL_FALLBACKS` and `DEFAULT_CODEX_MODEL_FALLBACKS`) layer on top of `resolveModel`/`resolveCodexModel` for the implicit-default path only. When the `claude` or `codex` subcommand is invoked without `-m`/`--model` and the default model isn't present in the resolved Copilot model list (e.g. non-enterprise tokens lack `claude-opus-4.7-1m-internal`), the launcher walks the fallback list in order and uses the first available entry. Explicit `--model` is always respected as-is.
 
 Resolution is implemented in `src/lib/utils.ts` and invoked by both the subcommand startup logic and the messages route handler.
 
@@ -155,17 +157,19 @@ Each subcommand sets environment variables so the child process uses the proxy:
 **claude** (`src/claude.ts`):
 - `ANTHROPIC_BASE_URL` = `<serverUrl>`
 - `ANTHROPIC_AUTH_TOKEN` = `dummy`
-- `ANTHROPIC_MODEL` = resolved model (when `-m` is specified)
+- `ANTHROPIC_MODEL` = resolved model (always set — defaults to `claude-opus-4.7-1m-internal` or first available fallback)
+- `CLAUDE_CONFIG_DIR` = `$HOME/.claude` (activates per-config-dir keychain isolation; see CLAUDE.md "Spawned-CLI auth isolation")
 - `DISABLE_NON_ESSENTIAL_MODEL_CALLS` = `1`
 - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` = `1`
 - Claude Code uses the `/v1/messages` endpoint
+- The parent process env is sanitized of every key in `STRIPPED_PARENT_ENV_KEYS` (`src/lib/launch.ts`) before these overrides are merged, so shell-exported real credentials don't leak through
 
 ### Endpoint usage
 
-| Subcommand | Primary endpoint | Default model |
-|---|---|---|
-| `codex` | `/v1/responses` | `gpt-5.3-codex` |
-| `claude` | `/v1/messages` | (Claude Code's own default) |
+| Subcommand | Primary endpoint | Default model | Fallback chain |
+|---|---|---|---|
+| `codex` | `/v1/responses` | `gpt-5.5` | `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex` |
+| `claude` | `/v1/messages` | `claude-opus-4.7-1m-internal` (enterprise) | `claude-opus-4.7` → `claude-opus-4.6-1m` → `claude-opus-4.6` |
 
 ## Authentication Flow
 
