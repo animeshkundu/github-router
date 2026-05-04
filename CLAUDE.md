@@ -66,6 +66,18 @@ The `claude` and `codex` subcommands default to the latest Copilot-supported mod
 
 Override with `-m`/`--model`. Constants live in `src/lib/port.ts`.
 
+### Thinking-mode translation
+
+Copilot rejects Anthropic's `thinking:{type:"enabled", budget_tokens:N}` shape on adaptive-thinking models with HTTP 400. The router translates to Copilot's `thinking:{type:"adaptive"}` + `output_config:{effort}` automatically when the resolved model declares `adaptive_thinking: true`. Bucket: `<2k → low`, `<8k → medium`, `<24k → high`, else `xhigh`. Clamps to `model.capabilities.supports.reasoning_effort` allowlist when present (lower-tier preference for ties). Client-supplied `output_config.effort` always wins. No-op when the model lacks `adaptive_thinking` (passthrough). Implemented in `src/routes/messages/handler.ts` (`translateThinking`).
+
+### Web search
+
+The legacy `/search` route wraps Copilot's `/github/chat/threads` endpoint and depends on the **`github_chat` token entitlement** — gated by the enterprise admin policy "Copilot in GitHub.com" being Enabled. Per the [Nov 4 2025 GitHub changelog](https://github.blog/changelog/2025-11-04-github-copilot-policy-update-for-unconfigured-policies/), Unconfigured policies silently flipped from Enabled-default to Disabled-default — so accounts that "used to work" may now see 401/403. When the entitlement is missing, the indirect `web_search` tool path on `/v1/responses` and `/v1/chat/completions` silently degrades (no search context, but the main request still succeeds via the existing try/catch around `searchWeb`).
+
+For OpenAI-shaped clients on GPT-5.x today: `tools:[{type:"web_search_preview"}]` on `/v1/responses` works natively (the tool-type filter was removed in commit 4c62926). For Anthropic-shape `web_search_*` tools on `/v1/messages`, Copilot returns 400 "use of the web search tool is not supported" — these are not currently translatable.
+
+A migration to MCP (`/mcp` with `X-MCP-Toolsets: web_search` and the GitHub PAT bearer) — model-agnostic, regardless of `github_chat` — is tracked in `followups-mcp-web-search.md`. Verified working live during the bundle's investigation.
+
 ### Error format
 
 Errors use Anthropic SDK format: `{type:"error",error:{type:"<category>",message:"..."}}`.
