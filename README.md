@@ -34,10 +34,10 @@ The server runs at `http://localhost:8787`. Now pick your tool below.
 npx github-router@latest claude
 ```
 
-Boots the proxy on a random port and spawns Claude Code wired to it. Defaults to `claude-opus-4.7-1m-internal` (1M context, enterprise tier); on Pro+/Business/Max tokens where the 1M variant isn't entitled, it falls back to `claude-opus-4.7` → `claude-opus-4.6-1m` → `claude-opus-4.6`. Override with `-m`:
+Boots the proxy on a random port and spawns Claude Code wired to it. Sets `ANTHROPIC_MODEL=claude-opus-4-7` (Anthropic's dashed slug — Claude Code's `/model` UI displays this as menu entry "Opus 4.7 (1M context)"). The proxy translates to Copilot's `claude-opus-4.7-1m-internal` on enterprise tokens or `claude-opus-4.7` on Pro+/Business/Max at request time. Major.minor fallback chain: `claude-opus-4-6` → `claude-opus-4-5`. Override with `-m`:
 
 ```sh
-npx github-router@latest claude -m claude-opus-4.7
+npx github-router@latest claude -m claude-opus-4-7
 ```
 
 The launcher sanitizes parent-env auth keys and sets `CLAUDE_CONFIG_DIR=$HOME/.claude` so the spawned `claude` ignores any persisted Console OAuth credential without requiring `claude /logout`. Settings, MCP servers, hooks, and CLAUDE.md auto-discovery still load from `~/.claude` as normal.
@@ -204,7 +204,7 @@ github-router debug              Print diagnostic info
 
 The `claude` and `codex` subcommands accept all the shared flags below plus `-m`/`--model` to override the default model. Default models live in `src/lib/port.ts`:
 
-- `claude` → `claude-opus-4.7-1m-internal` (enterprise) → `claude-opus-4.7` → `claude-opus-4.6-1m` → `claude-opus-4.6`
+- `claude` → `claude-opus-4-7` (Anthropic dashed slug for UI compatibility; the proxy translates to Copilot's `claude-opus-4.7-1m-internal` on enterprise or `claude-opus-4.7` elsewhere). Major.minor fallback chain: `claude-opus-4-6` → `claude-opus-4-5`.
 - `codex` → `gpt-5.5` → `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex`
 
 Fallback chains fire only on the implicit-default path; explicit `-m`/`--model` is always respected as-is.

@@ -128,7 +128,9 @@ When a client requests a model by name, the proxy resolves it against the cached
 
 The `resolveCodexModel()` variant extends this for the codex subcommand: if the resolved model still does not exist in the model list, it falls back to the best available `/responses`-compatible model (preferring `-codex` suffix when present, otherwise the highest version-like ID such as `gpt-5.5`).
 
-**Subcommand-level fallback chains** (`src/lib/port.ts`, `DEFAULT_CLAUDE_MODEL_FALLBACKS` and `DEFAULT_CODEX_MODEL_FALLBACKS`) layer on top of `resolveModel`/`resolveCodexModel` for the implicit-default path only. When the `claude` or `codex` subcommand is invoked without `-m`/`--model` and the default model isn't present in the resolved Copilot model list (e.g. non-enterprise tokens lack `claude-opus-4.7-1m-internal`), the launcher walks the fallback list in order and uses the first available entry. Explicit `--model` is always respected as-is.
+**Subcommand-level fallback chains** (`src/lib/port.ts`, `DEFAULT_CLAUDE_MODEL_FALLBACKS` and `DEFAULT_CODEX_MODEL_FALLBACKS`) layer on top of `resolveModel`/`resolveCodexModel` for the implicit-default path only. When the `claude` or `codex` subcommand is invoked without `-m`/`--model` and the default model isn't present in the resolved Copilot model list, the launcher walks the fallback list in order and uses the first entry whose resolver-translated slug is in the cache. Explicit `--model` is always respected as-is.
+
+Note that the `claude` chain uses **Anthropic-published dashed slugs** (`claude-opus-4-7`, not `claude-opus-4.7-1m-internal`) — `ANTHROPIC_MODEL` must hold a slug that Claude Code's `/model` UI registry recognizes, so the menu highlights the right entry. The proxy's resolver handles the dashed-Anthropic → dotted-Copilot translation on every `/v1/messages` request via the body rewrite at `src/routes/messages/handler.ts:326`. The `codex` chain uses Copilot slugs directly because Codex CLI's bundled catalog uses Copilot-style IDs.
 
 Resolution is implemented in `src/lib/utils.ts` and invoked by both the subcommand startup logic and the messages route handler.
 
@@ -157,19 +159,19 @@ Each subcommand sets environment variables so the child process uses the proxy:
 **claude** (`src/claude.ts`):
 - `ANTHROPIC_BASE_URL` = `<serverUrl>`
 - `ANTHROPIC_AUTH_TOKEN` = `dummy`
-- `ANTHROPIC_MODEL` = resolved model (always set — defaults to `claude-opus-4.7-1m-internal` or first available fallback)
+- `ANTHROPIC_MODEL` = Anthropic-published dashed slug (defaults to `claude-opus-4-7` or first available fallback). NOT the Copilot-internal slug — see "Subcommand-level fallback chains" in §"Model Resolution" for why
 - `CLAUDE_CONFIG_DIR` = `$HOME/.claude` (activates per-config-dir keychain isolation; see CLAUDE.md "Spawned-CLI auth isolation")
 - `DISABLE_NON_ESSENTIAL_MODEL_CALLS` = `1`
 - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` = `1`
-- Claude Code uses the `/v1/messages` endpoint
+- Claude Code uses the `/v1/messages` endpoint; the body-rewrite at `src/routes/messages/handler.ts:326` runs every incoming `model` field through `resolveModel` so the Anthropic→Copilot translation is automatic
 - The parent process env is sanitized of every key in `STRIPPED_PARENT_ENV_KEYS` (`src/lib/launch.ts`) before these overrides are merged, so shell-exported real credentials don't leak through
 
 ### Endpoint usage
 
-| Subcommand | Primary endpoint | Default model | Fallback chain |
+| Subcommand | Primary endpoint | Default model (env-var slug) | Fallback chain |
 |---|---|---|---|
 | `codex` | `/v1/responses` | `gpt-5.5` | `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex` |
-| `claude` | `/v1/messages` | `claude-opus-4.7-1m-internal` (enterprise) | `claude-opus-4.7` → `claude-opus-4.6-1m` → `claude-opus-4.6` |
+| `claude` | `/v1/messages` | `claude-opus-4-7` (Anthropic dashed slug; resolver maps to Copilot's `-1m-internal` on enterprise or `claude-opus-4.7` on Pro+) | `claude-opus-4-6` → `claude-opus-4-5` |
 
 ## Authentication Flow
 

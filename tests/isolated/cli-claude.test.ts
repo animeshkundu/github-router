@@ -63,12 +63,11 @@ mock.module("~/lib/server-setup", () => ({
 }))
 
 mock.module("~/lib/port", () => ({
-  DEFAULT_CLAUDE_MODEL: "claude-opus-4.7-1m-internal",
-  DEFAULT_CLAUDE_MODEL_FALLBACKS: [
-    "claude-opus-4.7",
-    "claude-opus-4.6-1m",
-    "claude-opus-4.6",
-  ],
+  // Anthropic-published dashed slug (per plan §14) — Claude Code's `/model`
+  // UI registry expects this, and the proxy's resolver translates back to
+  // Copilot's `claude-opus-4.7-1m-internal` at request time.
+  DEFAULT_CLAUDE_MODEL: "claude-opus-4-7",
+  DEFAULT_CLAUDE_MODEL_FALLBACKS: ["claude-opus-4-6", "claude-opus-4-5"],
   // launch.ts imports DEFAULT_CODEX_MODEL transitively via claude.ts → launchChild;
   // re-export it so the module mock doesn't break sibling imports.
   DEFAULT_CODEX_MODEL: "gpt-5.5",
@@ -196,11 +195,11 @@ describe("claude command", () => {
     await run({ args: {} })
 
     // No --model and no model cache → claude.ts uses DEFAULT_CLAUDE_MODEL
-    // ("claude-opus-4.7-1m-internal"); fallback chain only fires when the
-    // cache is populated AND the default is missing.
+    // ("claude-opus-4-7"); resolver is a no-op without a cache, so the
+    // Anthropic slug flows through unchanged.
     expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
       "http://127.0.0.1:12345",
-      "claude-opus-4.7-1m-internal",
+      "claude-opus-4-7",
     )
     const [, , options] = spawnMock.mock.calls[0]
     expect(options.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:12345")
@@ -222,9 +221,12 @@ describe("claude command", () => {
     expect(options.env.ANTHROPIC_MODEL).toBe("claude-sonnet-4-20250514")
   })
 
-  test("default 1M variant in cache → used as-is (no fallback)", async () => {
-    // Enterprise tier: 1M-internal is entitled. claude.ts must NOT fire the
-    // fallback chain — the default is already in the cache.
+  test("default works on enterprise (resolver maps Anthropic slug → 1M Copilot slug)", async () => {
+    // ANTHROPIC_MODEL must be the Anthropic slug (claude-opus-4-7) so
+    // Claude Code's `/model` UI matches menu entry 3 "Opus 4.7 (1M context)".
+    // The proxy's resolveModel translates to Copilot's
+    // claude-opus-4.7-1m-internal at request time — invisible to the user.
+    // Cache populated with 1M variant → inCache check passes, no fallback.
     state.models = {
       data: [
         { id: "claude-opus-4.7" },
@@ -237,17 +239,20 @@ describe("claude command", () => {
       await run({ args: {} })
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
-        "claude-opus-4.7-1m-internal",
+        "claude-opus-4-7",
       )
     } finally {
       state.models = undefined
     }
   })
 
-  test("default 1M missing but 4.7 present → falls back to claude-opus-4.7", async () => {
-    // Pro+/Business/Max tier: claude-opus-4.7-1m-internal is gated, but the
-    // 200K variant is available. The fallback chain should pick it up
-    // gracefully without requiring --model.
+  test("default works on non-enterprise (resolver downgrades 1M→200K transparently)", async () => {
+    // Pro+/Business/Max: only the 200K variant is available. Resolver's
+    // family-preference branch finds no -1m, falls through to step 4
+    // (normalized match), which translates claude-opus-4-7 → claude-opus-4.7.
+    // Since claude-opus-4.7 IS in cache, inCache returns true and the
+    // fallback chain does NOT fire — ANTHROPIC_MODEL remains the Anthropic
+    // slug for UI compatibility.
     state.models = {
       data: [
         { id: "claude-opus-4.7" },
@@ -260,7 +265,30 @@ describe("claude command", () => {
       await run({ args: {} })
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
-        "claude-opus-4.7",
+        "claude-opus-4-7",
+      )
+    } finally {
+      state.models = undefined
+    }
+  })
+
+  test("opus 4.7 absent → fallback chain picks claude-opus-4-6 (load-bearing test)", async () => {
+    // Discriminator for the fallback chain firing. Cache has 4.6 but no 4.7
+    // of any kind. claude-opus-4-7 doesn't resolve to anything in cache;
+    // walking the chain, claude-opus-4-6 resolves to claude-opus-4.6 (step 4
+    // normalized match), which IS in cache → fallback fires.
+    state.models = {
+      data: [
+        { id: "claude-opus-4.6" },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    try {
+      const run = getRunFn()
+      await run({ args: {} })
+      expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:12345",
+        "claude-opus-4-6",
       )
     } finally {
       state.models = undefined
@@ -268,8 +296,11 @@ describe("claude command", () => {
   })
 
   test("default and all fallbacks missing → keeps literal default (warning logged)", async () => {
-    // Degenerate case: cache has nothing in the opus family. Don't crash;
-    // pass the literal default through and let validation surface the warning.
+    // Degenerate case: no Opus models at all. Don't crash; pass the literal
+    // Anthropic default through. The /v1/messages route's resolveModelInBody
+    // would then return the input unchanged (step 5 with warning) and
+    // Copilot would 400 — that's fine, it's a misconfigured environment
+    // and the warning surfaces it.
     state.models = {
       data: [
         { id: "gpt-5.5" },
@@ -282,7 +313,7 @@ describe("claude command", () => {
       await run({ args: {} })
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
-        "claude-opus-4.7-1m-internal",
+        "claude-opus-4-7",
       )
     } finally {
       state.models = undefined

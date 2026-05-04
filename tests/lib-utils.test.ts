@@ -29,18 +29,21 @@ test("DEFAULT_CODEX_MODEL matches Copilot API format", () => {
   expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.5")
 })
 
-test("DEFAULT_CLAUDE_MODEL is the 1M-context variant", () => {
-  // The launcher walks DEFAULT_CLAUDE_MODEL_FALLBACKS when this id isn't in
-  // the user's Copilot model list (e.g. non-enterprise tokens).
-  expect(DEFAULT_CLAUDE_MODEL).toBe("claude-opus-4.7-1m-internal")
+test("DEFAULT_CLAUDE_MODEL is the Anthropic-published dashed slug", () => {
+  // Anthropic slug is what Claude Code's `/model` UI registry expects.
+  // The proxy's `resolveModel` translates this to Copilot's
+  // `claude-opus-4.7-1m-internal` (enterprise) or `claude-opus-4.7`
+  // (Pro+/Business/Max) at request time.
+  expect(DEFAULT_CLAUDE_MODEL).toBe("claude-opus-4-7")
 })
 
-test("DEFAULT_CLAUDE_MODEL_FALLBACKS lists 200K + older variants in order", () => {
+test("DEFAULT_CLAUDE_MODEL_FALLBACKS lists older Opus versions (Anthropic slugs)", () => {
   // Ordering matters — the launcher uses the first match.
+  // 1M↔200K downgrade is handled inside the resolver, so we don't need
+  // separate `-1m` entries here — only major.minor regressions.
   expect(Array.from(DEFAULT_CLAUDE_MODEL_FALLBACKS)).toEqual([
-    "claude-opus-4.7",
-    "claude-opus-4.6-1m",
-    "claude-opus-4.6",
+    "claude-opus-4-6",
+    "claude-opus-4-5",
   ])
 })
 
@@ -176,6 +179,23 @@ describe("resolveModel", () => {
     // (regression: the old endsWith("-1m") missed claude-opus-4.7-1m-internal,
     // and the version-preference guard prevents downgrading to 4.6-1m).
     expect(resolveModel("claude-opus-4-7")).toBe("claude-opus-4.7-1m-internal")
+  })
+
+  test("claude-opus-4-7 (dashed) downgrades to plain claude-opus-4.7 when 1M variant absent", () => {
+    // Non-enterprise tier: only the 200K variant is in the cache. The
+    // family-preference branch finds zero -1m variants, falls through to
+    // step 4 (normalized match), which translates dashed → dotted.
+    // Without this graceful downgrade, ANTHROPIC_MODEL=claude-opus-4-7
+    // (the new default per plan §14) would 400 against Copilot for
+    // Pro+/Business/Max tokens.
+    state.models = {
+      data: [
+        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.6", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(resolveModel("claude-opus-4-7")).toBe("claude-opus-4.7")
   })
 
   test("claude-opus-4-6 (dashed) resolves to 4.6-1m, not the older default", () => {
