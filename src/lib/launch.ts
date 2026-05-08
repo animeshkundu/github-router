@@ -78,6 +78,48 @@ export interface LaunchTarget {
   envVars: Record<string, string>
   extraArgs: string[]
   model?: string
+  /**
+   * Proxy URL the spawned child should target. Required for Codex 0.129+
+   * which stopped honoring OPENAI_BASE_URL and now needs an explicit
+   * `-c model_providers.<name>.base_url=...` argument. Set by the codex
+   * subcommand from the same `serverUrl` it computed for env vars.
+   */
+  serverUrl?: string
+}
+
+/**
+ * Codex 0.129.0 broke two things the launcher had been relying on:
+ *   (1) `--full-auto` was removed in favor of `--sandbox` + `--ask-for-approval`;
+ *       passing it now exits the child immediately with
+ *       `error: unexpected argument '--full-auto' found`.
+ *   (2) `OPENAI_BASE_URL` is silently ignored — Codex hardcodes
+ *       `https://api.openai.com/v1/responses` and 401s out without an
+ *       explicit `-c model_providers.<name>.base_url` override.
+ *
+ * `buildCodexCmd` builds the launch argv that works on Codex 0.129+ while
+ * still being compatible with older versions that accept the same flags.
+ */
+function buildCodexCmd(target: LaunchTarget): string[] {
+  const cmd: string[] = ["codex"]
+  if (target.serverUrl) {
+    // Define an inline provider that points at our proxy and use it.
+    cmd.push(
+      "-c",
+      `model_providers.github_router={name="github-router",base_url="${target.serverUrl}/v1",wire_api="responses",env_key="OPENAI_API_KEY"}`,
+      "-c",
+      "model_provider=github_router",
+    )
+  }
+  cmd.push(
+    "--sandbox",
+    "workspace-write",
+    "--ask-for-approval",
+    "on-request",
+    "-m",
+    target.model ?? DEFAULT_CODEX_MODEL,
+    ...target.extraArgs,
+  )
+  return cmd
 }
 
 export function buildLaunchCommand(target: LaunchTarget): {
@@ -87,7 +129,7 @@ export function buildLaunchCommand(target: LaunchTarget): {
   const cmd: string[] =
     target.kind === "claude-code"
       ? ["claude", "--dangerously-skip-permissions", ...target.extraArgs]
-      : ["codex", "--full-auto", "-m", target.model ?? DEFAULT_CODEX_MODEL, ...target.extraArgs]
+      : buildCodexCmd(target)
 
   return {
     cmd,
