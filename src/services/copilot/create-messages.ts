@@ -4,6 +4,7 @@ import consola from "consola"
 
 import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
+import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
 
 /**
@@ -58,6 +59,7 @@ export async function createMessages(
     method: "POST",
     headers,
     body,
+    signal: AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS),
   })
 
   if (!response.ok) {
@@ -99,6 +101,7 @@ export async function countTokens(
     method: "POST",
     headers,
     body,
+    signal: AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS),
   })
 
   if (!response.ok) {

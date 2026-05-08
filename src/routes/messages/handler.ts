@@ -3,11 +3,13 @@ import type { Context } from "hono"
 import consola from "consola"
 
 import { awaitApproval } from "~/lib/approval"
+import { parseJsonOrDiagnose } from "~/lib/diagnose-response"
 import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
+import { peekAndRelay } from "~/lib/stream-relay"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import { createMessages } from "~/services/copilot/create-messages"
 import type { Model } from "~/services/copilot/get-models"
@@ -233,6 +235,12 @@ export async function handleCompletion(c: Context) {
   const contentType = response.headers.get("content-type") ?? ""
   const isStreaming = contentType.includes("text/event-stream")
 
+  if (debugEnabled) {
+    consola.debug(
+      `Upstream /v1/messages: status=${response.status} content-type="${contentType}" isStreaming=${isStreaming}`,
+    )
+  }
+
   // Streaming: pipe the upstream SSE response body directly
   if (isStreaming) {
     logRequest(
@@ -261,14 +269,22 @@ export async function handleCompletion(c: Context) {
     const reqId = response.headers.get("request-id")
     if (reqId) streamHeaders["request-id"] = reqId
 
-    return new Response(response.body, {
-      status: response.status,
-      headers: streamHeaders,
-    })
+    return new Response(
+      response.body
+        ? await peekAndRelay(response.body, c.req.path)
+        : null,
+      {
+        status: response.status,
+        headers: streamHeaders,
+      },
+    )
   }
 
   // Non-streaming: extract usage from response body
-  const responseBody = (await response.json()) as AnyRecord
+  const responseBody = await parseJsonOrDiagnose<AnyRecord>(
+    response,
+    c.req.path,
+  )
 
   logRequest(
     {

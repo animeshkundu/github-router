@@ -47,3 +47,30 @@ export function generateRandomPort(): number {
     + PORT_RANGE_MIN
   )
 }
+
+function envInt(key: string, fallback: number): number {
+  const raw = process.env[key]
+  if (!raw) return fallback
+  const parsed = parseInt(raw, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+// Total fetch-phase timeout (until Response object resolves) for upstream
+// streaming endpoints. Generous default; override via env when needed.
+export const UPSTREAM_FETCH_TIMEOUT_MS = envInt(
+  "UPSTREAM_FETCH_TIMEOUT_MS",
+  600_000,
+)
+
+// Inactivity bound on body reads — if no chunk arrives within this window,
+// abort the stream and emit a structured error event. 75s sits comfortably
+// above Copilot's ~60s idle cut so the proxy reaps stalled connections
+// before the upstream RST hits us as an unhandled rejection.
+export const UPSTREAM_INACTIVITY_TIMEOUT_MS = envInt(
+  "UPSTREAM_INACTIVITY_TIMEOUT_MS",
+  75_000,
+)
+
+// TODO: extend timeout coverage to non-streaming paths (web-search MCP in
+// src/services/copilot/web-search.ts, embeddings, models) when those
+// endpoints become hot or start hanging in practice.

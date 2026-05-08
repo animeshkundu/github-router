@@ -611,3 +611,104 @@ test("all routes forward errors when copilot token is missing", async () => {
   })
   expect(responsesResponse.status).toBe(500)
 })
+
+test("messages stream pre-byte upstream error returns clean JSON via forwardError", async () => {
+  resetState()
+
+  // Upstream returns 200 SSE Content-Type but the body errors on the very
+  // first read — the production failure mode where undici's TLSSocket close
+  // fires before any chunk arrives.
+  const erroringBody = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.error(new TypeError("terminated"))
+    },
+  })
+  const fetchMock = mock((url: string) => {
+    if (url.includes("/v1/messages")) {
+      return new Response(erroringBody, {
+        headers: { "content-type": "text/event-stream" },
+      })
+    }
+    throw new Error(`Unexpected URL ${url}`)
+  })
+  // @ts-expect-error - override fetch for this test
+  globalThis.fetch = fetchMock
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-4",
+      max_tokens: 10,
+      stream: true,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+
+  // Status is the error status (not 200) because peekAndRelay threw before
+  // the success Response was constructed; the route's try/catch routed
+  // through forwardError which produced a JSON envelope.
+  expect(response.status).toBe(500)
+  const json = (await response.json()) as {
+    type: string
+    error: { type: string; message: string }
+  }
+  expect(json.type).toBe("error")
+  expect(json.error.type).toBe("api_error")
+  expect(json.error.message).toContain("terminated")
+})
+
+test("messages stream mid-stream upstream error appends event:error to wire bytes", async () => {
+  resetState()
+
+  // Upstream yields two valid SSE events then errors. Wrapper must emit
+  // both events plus a final `event: error` SSE frame.
+  const ENC = new TextEncoder()
+  const partialBody = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      controller.enqueue(
+        ENC.encode(
+          'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"gpt-4","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":0}}}\n\n',
+        ),
+      )
+      controller.enqueue(
+        ENC.encode(
+          'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n',
+        ),
+      )
+      // Now error mid-stream
+      await new Promise((r) => setTimeout(r, 5))
+      controller.error(new TypeError("terminated"))
+    },
+  })
+  const fetchMock = mock((url: string) => {
+    if (url.includes("/v1/messages")) {
+      return new Response(partialBody, {
+        headers: { "content-type": "text/event-stream" },
+      })
+    }
+    throw new Error(`Unexpected URL ${url}`)
+  })
+  // @ts-expect-error - override fetch for this test
+  globalThis.fetch = fetchMock
+
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-4",
+      max_tokens: 10,
+      stream: true,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  })
+  expect(response.status).toBe(200)
+  // Body must be consumed via .text() to drive the wrapper's pull() loop
+  // — otherwise pull is never invoked and the test passes vacuously.
+  const body = await response.text()
+  expect(body).toContain("event: message_start")
+  expect(body).toContain("event: content_block_delta")
+  expect(body).toContain("event: error")
+  expect(body).toContain('"type":"api_error"')
+  expect(body).toContain("terminated")
+})

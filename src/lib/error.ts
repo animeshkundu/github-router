@@ -13,7 +13,7 @@ export class HTTPError extends Error {
 }
 
 export async function forwardError(c: Context, error: unknown) {
-  consola.error("Error occurred:", error)
+  consola.error(`Error occurred at ${c.req.path}:`, error)
 
   if (error instanceof HTTPError) {
     const errorText = await error.response.text().catch(() => "")
