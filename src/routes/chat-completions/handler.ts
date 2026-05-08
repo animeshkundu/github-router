@@ -215,6 +215,7 @@ export async function handleCompletion(c: Context) {
       headers: {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
+        "transfer-encoding": "chunked",
         connection: "keep-alive",
       },
     },

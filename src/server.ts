@@ -1,6 +1,8 @@
 import { Hono } from "hono"
 import { cors } from "hono/cors"
 
+import packageJson from "../package.json" with { type: "json" }
+
 import { completionRoutes } from "./routes/chat-completions/route"
 import { embeddingRoutes } from "./routes/embeddings/route"
 import { messageRoutes } from "./routes/messages/route"
@@ -15,6 +17,17 @@ export const server = new Hono()
 server.use(cors())
 
 server.get("/", (c) => c.text("Server running"))
+
+// Build identity. Operators can `curl http://localhost:<port>/version` to
+// confirm which build is serving requests — useful when upgrading via
+// `npx github-router@latest` and verifying the new code actually loaded.
+server.get("/version", (c) =>
+  c.json({
+    name: packageJson.name,
+    version: packageJson.version,
+    gitSha: process.env.GITHUB_SHA ?? "unknown",
+  }),
+)
 
 // Claude CLI sends HEAD / as health check before each request
 server.on("HEAD", ["/"], (c) => c.body(null, 200))

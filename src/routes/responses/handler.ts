@@ -206,6 +206,7 @@ export async function handleResponses(c: Context) {
       headers: {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
+        "transfer-encoding": "chunked",
         connection: "keep-alive",
       },
     },

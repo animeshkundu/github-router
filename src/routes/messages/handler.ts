@@ -9,7 +9,7 @@ import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
-import { peekAndRelay } from "~/lib/stream-relay"
+import { relayAnthropicStream } from "~/lib/stream-relay"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import { createMessages } from "~/services/copilot/create-messages"
 import type { Model } from "~/services/copilot/get-models"
@@ -262,6 +262,7 @@ export async function handleCompletion(c: Context) {
     const streamHeaders: Record<string, string> = {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
+      "transfer-encoding": "chunked",
       connection: "keep-alive",
     }
     const requestId = response.headers.get("x-request-id")
@@ -271,7 +272,7 @@ export async function handleCompletion(c: Context) {
 
     return new Response(
       response.body
-        ? await peekAndRelay(response.body, c.req.path)
+        ? relayAnthropicStream(response.body, { routePath: c.req.path })
         : null,
       {
         status: response.status,

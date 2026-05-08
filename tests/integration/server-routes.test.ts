@@ -612,12 +612,19 @@ test("all routes forward errors when copilot token is missing", async () => {
   expect(responsesResponse.status).toBe(500)
 })
 
-test("messages stream pre-byte upstream error returns clean JSON via forwardError", async () => {
+test("messages stream pre-byte upstream error emits event:error on a 200 stream", async () => {
   resetState()
 
   // Upstream returns 200 SSE Content-Type but the body errors on the very
   // first read — the production failure mode where undici's TLSSocket close
   // fires before any chunk arrives.
+  //
+  // After dropping peekAndRelay (followup PR), pre-byte errors stay on the
+  // 200 streaming path: the wrapper emits `event: error` and immediately
+  // closes the stream. Anthropic SDKs that special-case `event: error`
+  // surface our message; SDKs that don't fall back to socket-close handling
+  // because the close immediately follows. Either path produces a clean
+  // user-visible error — never a hang.
   const erroringBody = new ReadableStream<Uint8Array>({
     start(controller) {
       controller.error(new TypeError("terminated"))
@@ -645,17 +652,13 @@ test("messages stream pre-byte upstream error returns clean JSON via forwardErro
     }),
   })
 
-  // Status is the error status (not 200) because peekAndRelay threw before
-  // the success Response was constructed; the route's try/catch routed
-  // through forwardError which produced a JSON envelope.
-  expect(response.status).toBe(500)
-  const json = (await response.json()) as {
-    type: string
-    error: { type: string; message: string }
-  }
-  expect(json.type).toBe("error")
-  expect(json.error.type).toBe("api_error")
-  expect(json.error.message).toContain("terminated")
+  expect(response.status).toBe(200)
+  // MUST consume the body via .text() to drive the wrapper's pull() loop —
+  // otherwise pull is never invoked and we'd assert on an empty body.
+  const body = await response.text()
+  expect(body).toContain("event: error")
+  expect(body).toContain('"type":"api_error"')
+  expect(body).toContain("terminated")
 })
 
 test("messages stream mid-stream upstream error appends event:error to wire bytes", async () => {

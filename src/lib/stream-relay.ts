@@ -33,32 +33,24 @@ interface RelayOptions {
  *   - Upstream inactivity (no chunk for `inactivityTimeoutMs`) is treated as a
  *     soft failure that emits an error event rather than hanging forever.
  *
- * The caller MUST have already peeked the first chunk from the upstream
- * (see `peekAndRelay`) so that pre-byte failures can be surfaced as a clean
- * JSON 502 via `forwardError` instead of being squeezed into an SSE event
- * prefix that violates Anthropic's stream state machine.
- *
- * Pass the already-acquired `reader` (not the upstream `Response.body`) so
- * this helper doesn't try to re-acquire a lock the caller already holds.
+ * Pre-byte upstream errors (failure on the very first read) are handled by
+ * the same code path: an `event: error` SSE event is emitted on a 200
+ * response, then the connection is closed. Even if the consumer's SDK
+ * silently swallows `event: error`, the immediate close triggers the
+ * client's socket-disconnect handler — the user always sees an error
+ * string, never a hang.
  */
 export function relayAnthropicStream(
-  reader: ByteReader,
-  firstChunk: Uint8Array,
+  body: ReadableStream<Uint8Array>,
   opts: RelayOptions,
 ): ReadableStream<Uint8Array> {
   const inactivityMs = opts.inactivityTimeoutMs ?? UPSTREAM_INACTIVITY_TIMEOUT_MS
+  const reader = body.getReader() as unknown as ByteReader
   let bytesRelayed = 0
-  let firstChunkSent = false
   let upstreamFinished = false
 
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
-      if (!firstChunkSent) {
-        firstChunkSent = true
-        bytesRelayed += firstChunk.byteLength
-        controller.enqueue(firstChunk)
-        return
-      }
       if (upstreamFinished) {
         controller.close()
         return
@@ -106,45 +98,6 @@ export function relayAnthropicStream(
   })
 }
 
-/**
- * Peek the first chunk of an upstream SSE response, then return a wrapped
- * ReadableStream that re-prepends that chunk and continues with the regular
- * relay. If the very first read fails, the error propagates — callers must
- * catch and route through `forwardError`, which converts the failure into a
- * proper JSON error response (status not yet committed). This is what
- * replaces the unsafe synthetic-`message_start` prefix approach.
- */
-export async function peekAndRelay(
-  body: ReadableStream<Uint8Array>,
-  routePath: string,
-  inactivityTimeoutMs?: number,
-): Promise<ReadableStream<Uint8Array>> {
-  const reader = body.getReader() as unknown as ByteReader
-  let firstChunk: Uint8Array
-  try {
-    const result = await readWithInactivityTimeout(
-      reader,
-      inactivityTimeoutMs ?? UPSTREAM_INACTIVITY_TIMEOUT_MS,
-    )
-    if (result.done || !result.value) {
-      reader.releaseLock()
-      throw new Error(`Upstream returned an empty SSE stream at ${routePath}`)
-    }
-    firstChunk = result.value
-  } catch (error) {
-    try {
-      reader.releaseLock()
-    } catch {
-      // already released
-    }
-    throw error
-  }
-  return relayAnthropicStream(reader, firstChunk, {
-    routePath,
-    inactivityTimeoutMs,
-  })
-}
-
 async function readWithInactivityTimeout(
   reader: ByteReader,
   timeoutMs: number,
@@ -159,6 +112,12 @@ async function readWithInactivityTimeout(
       )
     }, timeoutMs)
   })
+  // Attach a noop catcher so that, when reader.read() wins the race and
+  // the timer happens to fire on the same tick anyway, the rejection is
+  // already handled. Without this, Node 24's default
+  // --unhandled-rejections=throw terminates the process under sustained
+  // load (every chunk creates a fresh setTimeout/timeoutPromise pair).
+  timeoutPromise.catch(() => {})
   try {
     return await Promise.race([reader.read(), timeoutPromise])
   } finally {
@@ -204,8 +163,13 @@ export function buildOpenAIErrorEvent(
 }
 
 function classifyStreamError(errName: string): string {
-  if (errName === "AbortError") return "request_canceled"
-  if (errName === "InactivityTimeout") return "request_canceled"
+  // Use only documented Anthropic error types
+  // (https://platform.claude.com/docs/en/api/errors). `timeout_error` is
+  // the documented type for client-side / inactivity aborts; it survives
+  // the SDK's discriminated-union parsing without falling into a default
+  // branch that some consumers don't handle.
+  if (errName === "AbortError") return "timeout_error"
+  if (errName === "InactivityTimeout") return "timeout_error"
   return "api_error"
 }
 

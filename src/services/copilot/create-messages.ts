@@ -55,12 +55,11 @@ export async function createMessages(
   const url = `${copilotBaseUrl(state)}/v1/messages?beta=true`
   consola.debug(`Forwarding to ${url}`)
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers,
-    body,
-    signal: AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS),
-  })
+  const fetchInit: RequestInit = { method: "POST", headers, body }
+  if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
+    fetchInit.signal = AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS)
+  }
+  const response = await fetch(url, fetchInit)
 
   if (!response.ok) {
     let errorBody = ""
@@ -97,12 +96,11 @@ export async function countTokens(
   const url = `${copilotBaseUrl(state)}/v1/messages/count_tokens?beta=true`
   consola.debug(`Forwarding to ${url}`)
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers,
-    body,
-    signal: AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS),
-  })
+  const fetchInit: RequestInit = { method: "POST", headers, body }
+  if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
+    fetchInit.signal = AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS)
+  }
+  const response = await fetch(url, fetchInit)
 
   if (!response.ok) {
     let errorBody = ""

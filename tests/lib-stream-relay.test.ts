@@ -5,7 +5,6 @@ import {
   buildAnthropicErrorEvent,
   buildOpenAIErrorEvent,
   logStreamError,
-  peekAndRelay,
   relayAnthropicStream,
 } from "../src/lib/stream-relay"
 
@@ -78,14 +77,14 @@ function makeUpstream(
   })
 }
 
-describe("peekAndRelay + relayAnthropicStream — happy path", () => {
+describe("relayAnthropicStream — happy path", () => {
   test("clean upstream pipes through unchanged and does not log", async () => {
     const upstream = makeUpstream([
       { bytes: ENCODER.encode("event: message_start\ndata: {}\n\n") },
       { bytes: ENCODER.encode("event: message_stop\ndata: {}\n\n") },
     ])
 
-    const wrapped = await peekAndRelay(upstream, "/v1/messages")
+    const wrapped = relayAnthropicStream(upstream, { routePath: "/v1/messages" })
     const out = await collect(wrapped)
 
     expect(out).toBe(
@@ -95,33 +94,27 @@ describe("peekAndRelay + relayAnthropicStream — happy path", () => {
   })
 })
 
-describe("peekAndRelay — pre-byte error path", () => {
-  test("upstream errors on first read → peekAndRelay rejects (handler will route via forwardError)", async () => {
-    const upstream = makeUpstream([
-      { error: Object.assign(new TypeError("terminated"), {}) },
-    ])
+describe("relayAnthropicStream — pre-byte error path", () => {
+  test("upstream errors on first read → emits event:error and closes (no JSON-fallback path needed)", async () => {
+    const upstream = makeUpstream([{ error: new TypeError("terminated") }])
 
-    let thrown: unknown
-    try {
-      await peekAndRelay(upstream, "/v1/messages")
-    } catch (err) {
-      thrown = err
-    }
-    expect(thrown).toBeInstanceOf(TypeError)
-    expect((thrown as Error).message).toBe("terminated")
+    const wrapped = relayAnthropicStream(upstream, { routePath: "/v1/messages" })
+    const out = await collect(wrapped)
+
+    expect(out).toContain("event: error")
+    expect(out).toContain("terminated")
+    expect(out).toContain('"type":"api_error"')
+    expect(captured.error.length).toBe(1)
+    expect(String(captured.error[0]?.[0] ?? "")).toContain("bytes=0")
   })
 
-  test("upstream returns done immediately → peekAndRelay throws empty-stream error", async () => {
+  test("upstream returns done immediately → emits empty stream cleanly (no error)", async () => {
     const upstream = makeUpstream([{ done: true }])
+    const wrapped = relayAnthropicStream(upstream, { routePath: "/v1/messages" })
+    const out = await collect(wrapped)
 
-    let thrown: unknown
-    try {
-      await peekAndRelay(upstream, "/v1/messages")
-    } catch (err) {
-      thrown = err
-    }
-    expect((thrown as Error).message).toContain("empty SSE stream")
-    expect((thrown as Error).message).toContain("/v1/messages")
+    expect(out).toBe("")
+    expect(captured.error.length).toBe(0)
   })
 })
 
@@ -131,7 +124,7 @@ describe("relayAnthropicStream — mid-stream error path", () => {
       { bytes: ENCODER.encode("event: a\ndata: 1\n\n") },
       { error: new TypeError("terminated") },
     ])
-    const wrapped = await peekAndRelay(upstream, "/v1/messages")
+    const wrapped = relayAnthropicStream(upstream, { routePath: "/v1/messages" })
     const out = await collect(wrapped)
 
     expect(out).toContain("event: a")
@@ -148,23 +141,57 @@ describe("relayAnthropicStream — mid-stream error path", () => {
 })
 
 describe("relayAnthropicStream — inactivity timeout", () => {
-  test("upstream stalls past inactivityTimeoutMs → emits InactivityTimeout error event", async () => {
-    // First chunk is sent immediately (peeked). Second never arrives.
+  test("upstream stalls past inactivityTimeoutMs → emits InactivityTimeout error event with timeout_error type", async () => {
     const upstream = makeUpstream([
       { bytes: ENCODER.encode("event: msg\ndata: 1\n\n") },
-      // No more chunks; pull() awaits forever
       { delayMs: 5000 },
     ])
-    const wrapped = await peekAndRelay(upstream, "/v1/messages", 100)
+    const wrapped = relayAnthropicStream(upstream, {
+      routePath: "/v1/messages",
+      inactivityTimeoutMs: 100,
+    })
     const out = await collect(wrapped)
 
     expect(out).toContain("event: msg")
     expect(out).toContain("event: error")
     expect(out).toContain("upstream_inactive")
-    expect(out).toContain('"type":"request_canceled"')
+    expect(out).toContain('"type":"timeout_error"')
     expect(captured.error.length).toBe(1)
     const log = String(captured.error[0]?.[0] ?? "")
     expect(log).toContain("errType=InactivityTimeout")
+  })
+})
+
+describe("relayAnthropicStream — unhandled-rejection sentinel (Node 24 crash regression)", () => {
+  test("100 high-pressure timeout iterations produce zero unhandled rejections", async () => {
+    const unhandled: Array<unknown> = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    process.on("unhandledRejection", onUnhandled)
+
+    try {
+      // Each iteration: upstream yields one chunk fast, then never yields
+      // again. With inactivityTimeoutMs=10, the timer fires; with the chunk
+      // arriving quickly, there's a tight race between reader.read() and
+      // setTimeout. Without `timeoutPromise.catch(() => {})`, this leaks
+      // unhandled rejections under Node 24's default --unhandled-rejections=throw.
+      for (let i = 0; i < 100; i++) {
+        const upstream = makeUpstream([
+          { bytes: ENCODER.encode(`event: ${i}\ndata: ${i}\n\n`) },
+          { delayMs: 1000 },
+        ])
+        const wrapped = relayAnthropicStream(upstream, {
+          routePath: "/v1/messages",
+          inactivityTimeoutMs: 10,
+        })
+        await collect(wrapped)
+      }
+
+      // Drain microtasks so any pending unhandled rejections fire.
+      await new Promise((r) => setTimeout(r, 50))
+      expect(unhandled.length).toBe(0)
+    } finally {
+      process.off("unhandledRejection", onUnhandled)
+    }
   })
 })
 
@@ -182,7 +209,7 @@ describe("relayAnthropicStream — concurrent cancel", () => {
       },
     })
 
-    const wrapped = await peekAndRelay(upstream, "/v1/messages")
+    const wrapped = relayAnthropicStream(upstream, { routePath: "/v1/messages" })
     const reader = wrapped.getReader()
     const first = await reader.read()
     expect(DECODER.decode(first.value)).toContain("event: a")
@@ -193,16 +220,13 @@ describe("relayAnthropicStream — concurrent cancel", () => {
 
 describe("relayAnthropicStream — backpressure (pull-based)", () => {
   test("slow consumer keeps upstream read invocations bounded", async () => {
-    // Construct an upstream of 50 quick chunks. Consumer reads with a 10ms
-    // delay between reads. After consuming N chunks, we expect upstream pulls
-    // to be ≤ N + 2 (one for peek, possibly one buffered ahead).
     const counters = { reads: 0 }
     const chunks: Array<FakeChunkSpec> = []
     for (let i = 0; i < 50; i++) {
       chunks.push({ bytes: ENCODER.encode(`event: ${i}\ndata: ${i}\n\n`) })
     }
     const upstream = makeUpstream(chunks, counters)
-    const wrapped = await peekAndRelay(upstream, "/v1/messages")
+    const wrapped = relayAnthropicStream(upstream, { routePath: "/v1/messages" })
     const reader = wrapped.getReader()
 
     let consumed = 0
@@ -214,8 +238,6 @@ describe("relayAnthropicStream — backpressure (pull-based)", () => {
     }
     await reader.cancel()
 
-    // Upstream should NOT have been fully drained eagerly. With highWaterMark=1,
-    // pull is called once at startup and once per consumer demand.
     expect(counters.reads).toBeLessThan(15)
   })
 })
@@ -235,12 +257,19 @@ describe("buildAnthropicErrorEvent", () => {
     expect(parsed.error.message).toContain("terminated")
   })
 
-  test("classifies AbortError and InactivityTimeout as request_canceled", () => {
+  test("classifies AbortError and InactivityTimeout as documented timeout_error", () => {
     for (const errName of ["AbortError", "InactivityTimeout"]) {
       const event = buildAnthropicErrorEvent(errName, "x")
       const dataLine = event.split("\n")[1]?.replace("data: ", "") ?? ""
       const parsed = JSON.parse(dataLine) as { error: { type: string } }
-      expect(parsed.error.type).toBe("request_canceled")
+      expect(parsed.error.type).toBe("timeout_error")
+    }
+  })
+
+  test("never emits the non-canonical request_canceled type", () => {
+    for (const name of ["AbortError", "InactivityTimeout", "TypeError", "Error"]) {
+      const event = buildAnthropicErrorEvent(name, "x")
+      expect(event).not.toContain("request_canceled")
     }
   })
 })
@@ -272,22 +301,5 @@ describe("logStreamError", () => {
     const log = String(captured.error[0]?.[0] ?? "")
     expect(log).toContain("/v1/chat/completions")
     expect(log).toContain("errType=TypeError")
-  })
-})
-
-describe("relayAnthropicStream — direct invocation (low-level)", () => {
-  test("preserves the firstChunk argument as the first emitted bytes", async () => {
-    const upstream = makeUpstream([
-      { bytes: ENCODER.encode("second\n") },
-      { done: true },
-    ])
-    const reader = upstream.getReader()
-    const wrapped = relayAnthropicStream(
-      reader as unknown as Parameters<typeof relayAnthropicStream>[0],
-      ENCODER.encode("first\n"),
-      { routePath: "/v1/messages", inactivityTimeoutMs: 1000 },
-    )
-    const out = await collect(wrapped)
-    expect(out).toBe("first\nsecond\n")
   })
 })

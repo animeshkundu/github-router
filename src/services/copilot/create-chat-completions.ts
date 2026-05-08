@@ -31,12 +31,18 @@ export const createChatCompletions = async (
     "X-Initiator": isAgentCall ? "agent" : "user",
   }
 
-  const response = await fetch(`${copilotBaseUrl(state)}/chat/completions`, {
+  const fetchInit: RequestInit = {
     method: "POST",
     headers,
     body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS),
-  })
+  }
+  if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
+    fetchInit.signal = AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS)
+  }
+  const response = await fetch(
+    `${copilotBaseUrl(state)}/chat/completions`,
+    fetchInit,
+  )
 
   if (!response.ok) {
     let errorBody = ""

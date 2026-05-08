@@ -34,6 +34,47 @@ export NPM_TOKEN=npm_...
 The release script builds, tests, temporarily rewrites package.json to the unscoped name,
 publishes, and restores. See `publish/release.sh` for details.
 
+## Upgrading a running proxy
+
+A running proxy (`npx github-router@latest claude` from earlier) is **pinned to its
+installed version** and will NOT auto-update when a new release is published. To pick up
+a new release:
+
+```bash
+# 1. Confirm the new version is live on npm
+npm view github-router version
+
+# 2. Identify the running proxy(ies). Each `claude` session spawns one.
+ps aux | grep -E 'github-router|bun.*dist/main' | grep -v grep
+
+# 3. WAIT for any in-flight Claude Code request to settle, then kill the
+#    proxy. Killing mid-stream loses the current request only — the Claude
+#    Code session itself reconnects on the next prompt, but the in-flight
+#    response is lost.
+kill <PID>
+
+# 4. Force re-fetch (npm 11 prefers-online by default; this is belt-and-suspenders
+#    for stale npx caches):
+rm -rf ~/.npm/_npx/*github-router*
+
+# 5. Restart
+npx github-router@latest claude
+
+# 6. Verify the new build is serving by hitting the /version endpoint with
+#    the proxy's actual port (visible in `ps` output as `--port` or implied
+#    from the random port the proxy chose):
+curl http://localhost:<PORT>/version
+# → {"name":"github-router","version":"0.3.X","gitSha":"..."}
+```
+
+Tunable env vars (set before launching `claude`):
+
+- `UPSTREAM_FETCH_TIMEOUT_MS` — overall fetch-phase timeout in ms. Default `0` = no
+  timeout. Set a positive integer if you need a hard ceiling on Copilot fetches.
+- `UPSTREAM_INACTIVITY_TIMEOUT_MS` — body-phase inactivity timeout in ms. Default `75000`
+  (75s — sits above Copilot's ~60s idle cut). Lower this only if you want the proxy to
+  reap stalled connections more aggressively.
+
 ## Architecture
 
 - **Stack**: TypeScript / Bun / Hono / SSE streaming

@@ -56,10 +56,15 @@ function envInt(key: string, fallback: number): number {
 }
 
 // Total fetch-phase timeout (until Response object resolves) for upstream
-// streaming endpoints. Generous default; override via env when needed.
+// streaming endpoints. Default 0 = no fetch-phase timeout — body-phase
+// failures are covered by UPSTREAM_INACTIVITY_TIMEOUT_MS below, and a
+// fetch-lifecycle timeout would silently truncate legitimate long
+// completions (e.g. xhigh-thinking responses that legitimately stream
+// for 30+ minutes). Set the env var to a positive integer if you need
+// a hard cap.
 export const UPSTREAM_FETCH_TIMEOUT_MS = envInt(
   "UPSTREAM_FETCH_TIMEOUT_MS",
-  600_000,
+  0,
 )
 
 // Inactivity bound on body reads — if no chunk arrives within this window,
