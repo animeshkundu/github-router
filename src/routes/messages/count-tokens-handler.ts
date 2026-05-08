@@ -4,6 +4,7 @@ import { logRequest } from "~/lib/request-log"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import { state } from "~/lib/state"
 import { countTokens } from "~/services/copilot/create-messages"
+import { parseJsonOrDiagnose } from "~/lib/diagnose-response"
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyRecord = Record<string, any>
@@ -81,7 +82,10 @@ export async function handleCountTokens(c: Context) {
     ...selectedModel?.requestHeaders,
     ...extraHeaders,
   })
-  const responseBody = (await response.json()) as { input_tokens?: number }
+  const responseBody = await parseJsonOrDiagnose<{ input_tokens?: number }>(
+    response,
+    c.req.path,
+  )
 
   logRequest(
     {
