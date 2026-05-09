@@ -25,6 +25,31 @@ interface RelayOptions {
 }
 
 /**
+ * Detect the family of "controller has already closed" errors that Bun and
+ * the WHATWG streams runtime throw when an enqueue/close call races with
+ * the consumer cancelling its read. These are NOT upstream failures — they
+ * mean the client has finished reading (or disconnected) and we should
+ * exit pull() quietly without trying to write more bytes or log noise.
+ *
+ * Bun's wording: `TypeError: Invalid state: Controller is already closed`.
+ * Other runtimes use `TypeError: The stream is closing` or
+ * `TypeError: This ReadableStream is closed` or include "errored" / "cancelled".
+ */
+export function isControllerClosedError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const msg = error.message.toLowerCase()
+  return (
+    msg.includes("controller is already closed")
+    || msg.includes("controller is already errored")
+    || msg.includes("readablestream is closed")
+    || msg.includes("readablestream is already closed")
+    || msg.includes("stream is closing")
+    || msg.includes("stream is already closed")
+    || msg.includes("stream is closed")
+  )
+}
+
+/**
  * Wrap an upstream SSE byte stream so that:
  *   - Backpressure is respected (pull-based; only reads when downstream demands).
  *   - Mid-stream errors (undici "terminated", AbortError, network resets) are
@@ -32,6 +57,10 @@ interface RelayOptions {
  *     Anthropic-shape `event: error` SSE event before the downstream is closed.
  *   - Upstream inactivity (no chunk for `inactivityTimeoutMs`) is treated as a
  *     soft failure that emits an error event rather than hanging forever.
+ *   - Consumer cancellation (client disconnects mid-read or finishes early)
+ *     is recognized and handled silently — NOT logged as an upstream error,
+ *     NOT followed by a futile event:error write that can corrupt the
+ *     terminal bytes the client has already buffered.
  *
  * Pre-byte upstream errors (failure on the very first read) are handled by
  * the same code path: an `event: error` SSE event is emitted on a 200
@@ -48,27 +77,63 @@ export function relayAnthropicStream(
   const reader = body.getReader() as unknown as ByteReader
   let bytesRelayed = 0
   let upstreamFinished = false
+  let consumerCancelled = false
+
+  const safeClose = (controller: ReadableStreamDefaultController<Uint8Array>) => {
+    try {
+      controller.close()
+    } catch {
+      // already closed / errored — fine
+    }
+  }
 
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
-      if (upstreamFinished) {
-        controller.close()
+      if (consumerCancelled || upstreamFinished) {
+        safeClose(controller)
         return
       }
 
       try {
         const result = await readWithInactivityTimeout(reader, inactivityMs)
+        if (consumerCancelled) {
+          // Consumer cancelled while we were awaiting upstream — drop the
+          // value (if any) and exit silently. The cancel() callback has
+          // already propagated cancellation upstream.
+          safeClose(controller)
+          return
+        }
         if (result.done) {
           upstreamFinished = true
-          controller.close()
+          safeClose(controller)
           return
         }
         if (result.value) {
           bytesRelayed += result.value.byteLength
-          controller.enqueue(result.value)
+          try {
+            controller.enqueue(result.value)
+          } catch (enqueueError) {
+            if (isControllerClosedError(enqueueError)) {
+              // Consumer raced ahead of us: it closed the stream between
+              // our last await and this enqueue. Treat as a normal end of
+              // stream — upstream chunks past this point are dropped, but
+              // that's expected behavior on consumer cancel.
+              consumerCancelled = true
+              return
+            }
+            throw enqueueError
+          }
         }
       } catch (error) {
         upstreamFinished = true
+        if (isControllerClosedError(error) || consumerCancelled) {
+          // Not an upstream error — the consumer has closed the stream.
+          // Don't log noise, don't try to enqueue an error event (that
+          // would also throw and may corrupt the terminal bytes). Make
+          // sure the downstream is closed so the consumer's read settles.
+          safeClose(controller)
+          return
+        }
         const errName = error instanceof Error ? error.name : "Error"
         const errMessage = error instanceof Error ? error.message : String(error)
         consola.error(
@@ -77,19 +142,19 @@ export function relayAnthropicStream(
         const event = buildAnthropicErrorEvent(errName, errMessage)
         try {
           controller.enqueue(ENCODER.encode(event))
-        } catch {
-          consola.warn(
-            `Could not deliver error event to consumer at ${opts.routePath}: already cancelled`,
-          )
+        } catch (enqueueError) {
+          if (!isControllerClosedError(enqueueError)) {
+            consola.warn(
+              `Could not deliver error event to consumer at ${opts.routePath}: ${enqueueError instanceof Error ? enqueueError.message : String(enqueueError)}`,
+            )
+          }
+          // Consumer-closed: silent
         }
-        try {
-          controller.close()
-        } catch {
-          // already closed
-        }
+        safeClose(controller)
       }
     },
     cancel(reason) {
+      consumerCancelled = true
       upstreamFinished = true
       reader.cancel(reason).catch(() => {
         // upstream may already be closed

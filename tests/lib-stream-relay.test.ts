@@ -4,6 +4,7 @@ import consola from "consola"
 import {
   buildAnthropicErrorEvent,
   buildOpenAIErrorEvent,
+  isControllerClosedError,
   logStreamError,
   relayAnthropicStream,
 } from "../src/lib/stream-relay"
@@ -301,5 +302,104 @@ describe("logStreamError", () => {
     const log = String(captured.error[0]?.[0] ?? "")
     expect(log).toContain("/v1/chat/completions")
     expect(log).toContain("errType=TypeError")
+  })
+})
+
+describe("isControllerClosedError", () => {
+  test("recognizes Bun's 'Controller is already closed' message", () => {
+    expect(
+      isControllerClosedError(
+        new TypeError("Invalid state: Controller is already closed"),
+      ),
+    ).toBe(true)
+  })
+
+  test("recognizes other 'closed/closing/errored' WHATWG variants", () => {
+    for (const msg of [
+      "The stream is closing",
+      "ReadableStream is closed",
+      "Cannot enqueue: ReadableStream is already closed",
+      "Controller is already errored",
+      "stream is closed",
+    ]) {
+      expect(isControllerClosedError(new TypeError(msg))).toBe(true)
+    }
+  })
+
+  test("does NOT match unrelated errors", () => {
+    for (const e of [
+      new TypeError("terminated"),
+      new Error("upstream_inactive"),
+      Object.assign(new Error("aborted"), { name: "AbortError" }),
+      new Error("fetch failed"),
+      "string error",
+      undefined,
+      null,
+    ]) {
+      expect(isControllerClosedError(e as unknown)).toBe(false)
+    }
+  })
+})
+
+describe("relayAnthropicStream — consumer-cancel race (the live regression)", () => {
+  test("consumer cancels mid-stream → no spurious error log when next pull would have raced", async () => {
+    // Production scenario: pull() has read a chunk and is about to enqueue;
+    // meanwhile the consumer cancelled. Before the fix the catch path
+    // logged "Upstream stream interrupted" and tried to enqueue an error
+    // event (which also threw and may have corrupted terminal wire bytes,
+    // surfacing as "JSON Parse error: Expected ':' before value" in
+    // Claude Code). After the fix: detected as consumer-cancel, silent.
+    let upstreamCancelCalled = false
+    const upstream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(ENCODER.encode("event: a\ndata: 1\n\n"))
+      },
+      cancel() {
+        upstreamCancelCalled = true
+      },
+    })
+
+    const wrapped = relayAnthropicStream(upstream, { routePath: "/v1/messages" })
+    const reader = wrapped.getReader()
+    const first = await reader.read()
+    expect(DECODER.decode(first.value)).toContain("event: a")
+
+    // Cancel — this sets consumerCancelled=true and propagates to upstream.
+    await reader.cancel("test-cancel")
+    expect(upstreamCancelCalled).toBe(true)
+
+    // Critical: no error log, no warn — consumer cancel is normal.
+    expect(captured.error.length).toBe(0)
+    expect(captured.warn.length).toBe(0)
+  })
+
+  test("upstream errors with controller-closed-family message → silent recovery (no event:error spam)", async () => {
+    // Pathological upstream: yields one chunk on first pull, then throws
+    // a controller-closed-family error on the second pull. Wrapper must
+    // recognize the family and bail without logging or emitting event:error
+    // (which would itself fail and possibly corrupt the wire).
+    let firstPull = true
+    const upstream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (firstPull) {
+          firstPull = false
+          controller.enqueue(ENCODER.encode("event: a\ndata: 1\n\n"))
+          return
+        }
+        controller.error(
+          new TypeError("Invalid state: Controller is already closed"),
+        )
+      },
+    })
+
+    const wrapped = relayAnthropicStream(upstream, { routePath: "/v1/messages" })
+    const out = await collect(wrapped)
+
+    expect(out).toContain("event: a")
+    // No event:error appended — wrapper recognized the controller-closed
+    // family and bailed silently.
+    expect(out).not.toContain("event: error")
+    expect(captured.error.length).toBe(0)
+    expect(captured.warn.length).toBe(0)
   })
 })

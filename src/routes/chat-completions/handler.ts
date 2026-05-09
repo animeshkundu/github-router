@@ -8,7 +8,7 @@ import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
-import { buildOpenAIErrorEvent, logStreamError } from "~/lib/stream-relay"
+import { buildOpenAIErrorEvent, isControllerClosedError, logStreamError } from "~/lib/stream-relay"
 import { getTokenCount } from "~/lib/tokenizer"
 import { isNullish, resolveModel } from "~/lib/utils"
 import {
@@ -154,54 +154,80 @@ export async function handleCompletion(c: Context) {
     ? undefined
     : firstResult.value
   let upstreamFinished = firstResult.done
+  let consumerCancelled = false
+
+  const safeClose = (controller: ReadableStreamDefaultController<Uint8Array>) => {
+    try {
+      controller.close()
+    } catch {
+      // already closed / errored
+    }
+  }
+  const safeEnqueue = (
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    bytes: Uint8Array,
+  ): boolean => {
+    try {
+      controller.enqueue(bytes)
+      return true
+    } catch (e) {
+      if (isControllerClosedError(e)) {
+        consumerCancelled = true
+        return false
+      }
+      throw e
+    }
+  }
 
   return new Response(
     new ReadableStream<Uint8Array>({
       async pull(controller) {
+        if (consumerCancelled || upstreamFinished) {
+          safeClose(controller)
+          return
+        }
         if (pendingFirstChunk !== undefined) {
           const chunk = pendingFirstChunk
           pendingFirstChunk = undefined
           if (debugEnabled) {
             consola.debug("Streaming chunk:", JSON.stringify(chunk))
           }
-          controller.enqueue(ENCODER.encode(formatSSE(chunk)))
-          return
-        }
-        if (upstreamFinished) {
-          controller.close()
+          safeEnqueue(controller, ENCODER.encode(formatSSE(chunk)))
           return
         }
         try {
           const result = await iterator.next()
+          if (consumerCancelled) {
+            safeClose(controller)
+            return
+          }
           if (result.done) {
             upstreamFinished = true
-            controller.close()
+            safeClose(controller)
             return
           }
           if (debugEnabled) {
             consola.debug("Streaming chunk:", JSON.stringify(result.value))
           }
-          controller.enqueue(ENCODER.encode(formatSSE(result.value)))
+          safeEnqueue(controller, ENCODER.encode(formatSSE(result.value)))
         } catch (error) {
           upstreamFinished = true
+          if (isControllerClosedError(error) || consumerCancelled) {
+            // Consumer-cancelled mid-pull, not an upstream failure.
+            // Close so the consumer's read settles cleanly.
+            safeClose(controller)
+            return
+          }
           const { errName, errMessage } = logStreamError(c.req.path, error)
-          try {
-            controller.enqueue(
-              ENCODER.encode(buildOpenAIErrorEvent(errName, errMessage)),
-            )
-          } catch {
-            consola.warn(
-              `Could not deliver error event to consumer at ${c.req.path}: already cancelled`,
-            )
-          }
-          try {
-            controller.close()
-          } catch {
-            // already closed
-          }
+          safeEnqueue(
+            controller,
+            ENCODER.encode(buildOpenAIErrorEvent(errName, errMessage)),
+          )
+          safeClose(controller)
         }
       },
       cancel() {
+        consumerCancelled = true
         upstreamFinished = true
         if (typeof iterator.return === "function") {
           iterator.return().catch(() => {
