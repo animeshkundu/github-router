@@ -5,6 +5,7 @@ import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
 import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
+import { tryRefreshAndRetry } from "~/lib/token"
 
 export const createChatCompletions = async (
   payload: ChatCompletionsPayload,
@@ -24,25 +25,25 @@ export const createChatCompletions = async (
     ["assistant", "tool"].includes(msg.role),
   )
 
-  // Build headers and add X-Initiator
-  const headers: Record<string, string> = {
-    ...copilotHeaders(state, enableVision),
-    ...modelHeaders,
-    "X-Initiator": isAgentCall ? "agent" : "user",
+  const url = `${copilotBaseUrl(state)}/chat/completions`
+  const doFetch = (): Promise<Response> => {
+    // Re-build headers per attempt so a 401-retry picks up the refreshed token.
+    const headers: Record<string, string> = {
+      ...copilotHeaders(state, enableVision),
+      ...modelHeaders,
+      "X-Initiator": isAgentCall ? "agent" : "user",
+    }
+    const fetchInit: RequestInit = {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    }
+    if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
+      fetchInit.signal = AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS)
+    }
+    return fetch(url, fetchInit)
   }
-
-  const fetchInit: RequestInit = {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  }
-  if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
-    fetchInit.signal = AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS)
-  }
-  const response = await fetch(
-    `${copilotBaseUrl(state)}/chat/completions`,
-    fetchInit,
-  )
+  const response = await tryRefreshAndRetry(doFetch, "/chat/completions")
 
   if (!response.ok) {
     let errorBody = ""

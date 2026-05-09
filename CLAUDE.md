@@ -2,6 +2,13 @@
 
 A reverse proxy that exposes GitHub Copilot as OpenAI and Anthropic compatible API endpoints.
 
+## Review checklist (read before submitting / approving any PR)
+
+- **Stream lifecycle**: every `controller.enqueue` / `controller.close` / `reader.read` call site must have a regression test that intentionally races consumer cancel against the call. Cooperative-mock tests are insufficient — they cannot reproduce the microsecond window where Bun's HTTP layer closes the controller while a `pull()` is mid-`await`. See `tests/integration/chaos.test.ts` for the test pattern.
+- **The smoking gun**: a new `Could not deliver error event` warn-log is a bug, not a routine warning. Open an issue and treat as a regression.
+- **Author responsibility**: PR descriptions must list the failure modes the author considered and tested, not just the happy path. Reviewers can only check what they're asked about — narrow prompts produce narrow reviews. The class of bug we missed in the manual `ReadableStream({pull})` rollout was an enqueue-after-cancel race that the catch block was clearly intended to handle, but no test ever reproduced it. The catch-handler's existence is not a substitute for an actual race-triggering test.
+- **Spec ≠ runtime**: WHATWG/Anthropic spec compliance is necessary but not sufficient. Verify what Bun (and Node undici when relevant) actually throw at runtime. Don't reason "the spec says close is idempotent" — verify "Bun throws `TypeError: Invalid state: Controller is already closed` if you enqueue after close."
+
 ## Commands
 
 ```bash

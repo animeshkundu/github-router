@@ -104,6 +104,15 @@ export function relayAnthropicStream(
           return
         }
         if (result.done) {
+          // Zero-byte close is rare and usually indicates upstream
+          // misbehavior (200 + SSE headers + immediate FIN). Surface it
+          // in the error log so the operator can correlate; the consumer
+          // sees a clean empty stream.
+          if (bytesRelayed === 0) {
+            consola.warn(
+              `Upstream returned empty SSE stream at ${opts.routePath}`,
+            )
+          }
           upstreamFinished = true
           safeClose(controller)
           return

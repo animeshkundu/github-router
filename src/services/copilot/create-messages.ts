@@ -6,6 +6,7 @@ import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
 import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
+import { tryRefreshAndRetry } from "~/lib/token"
 
 /**
  * Build headers that match what VS Code Copilot Chat sends to the Copilot API.
@@ -51,15 +52,19 @@ export async function createMessages(
 ): Promise<Response> {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
-  const headers = buildHeaders(extraHeaders)
   const url = `${copilotBaseUrl(state)}/v1/messages?beta=true`
   consola.debug(`Forwarding to ${url}`)
 
-  const fetchInit: RequestInit = { method: "POST", headers, body }
-  if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
-    fetchInit.signal = AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS)
+  // Re-build headers per attempt so a 401-retry picks up the refreshed token.
+  const doFetch = (): Promise<Response> => {
+    const headers = buildHeaders(extraHeaders)
+    const fetchInit: RequestInit = { method: "POST", headers, body }
+    if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
+      fetchInit.signal = AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS)
+    }
+    return fetch(url, fetchInit)
   }
-  const response = await fetch(url, fetchInit)
+  const response = await tryRefreshAndRetry(doFetch, "/v1/messages")
 
   if (!response.ok) {
     let errorBody = ""
@@ -92,15 +97,21 @@ export async function countTokens(
 ): Promise<Response> {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
-  const headers = buildHeaders(extraHeaders)
   const url = `${copilotBaseUrl(state)}/v1/messages/count_tokens?beta=true`
   consola.debug(`Forwarding to ${url}`)
 
-  const fetchInit: RequestInit = { method: "POST", headers, body }
-  if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
-    fetchInit.signal = AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS)
+  const doFetch = (): Promise<Response> => {
+    const headers = buildHeaders(extraHeaders)
+    const fetchInit: RequestInit = { method: "POST", headers, body }
+    if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
+      fetchInit.signal = AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS)
+    }
+    return fetch(url, fetchInit)
   }
-  const response = await fetch(url, fetchInit)
+  const response = await tryRefreshAndRetry(
+    doFetch,
+    "/v1/messages/count_tokens",
+  )
 
   if (!response.ok) {
     let errorBody = ""

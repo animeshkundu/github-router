@@ -233,7 +233,26 @@ export async function handleCompletion(c: Context) {
   }
 
   const contentType = response.headers.get("content-type") ?? ""
-  const isStreaming = contentType.includes("text/event-stream")
+  // Trust the upstream content-type when it's explicit. Two anomalies need
+  // a fallback: (a) header missing entirely, (b) header is
+  // `application/octet-stream` (some proxies normalize SSE this way). In
+  // those cases, treat as streaming if the client asked for it via the
+  // Accept header — Anthropic SDKs send `Accept: text/event-stream` for
+  // streaming requests. We do NOT fall back when content-type is
+  // explicitly `application/json` — that's almost always an upstream
+  // error response that should be parsed via parseJsonOrDiagnose.
+  const clientAcceptsSSE = (c.req.header("accept") ?? "").includes(
+    "text/event-stream",
+  )
+  let isStreaming = contentType.includes("text/event-stream")
+  if (!isStreaming && clientAcceptsSSE) {
+    if (contentType === "" || contentType === "application/octet-stream") {
+      consola.warn(
+        `Upstream /v1/messages returned status=${response.status} content-type=${JSON.stringify(contentType)} but client requested streaming; treating response body as SSE`,
+      )
+      isStreaming = true
+    }
+  }
 
   if (debugEnabled) {
     consola.debug(

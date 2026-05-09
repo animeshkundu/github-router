@@ -5,6 +5,7 @@ import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
 import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
+import { tryRefreshAndRetry } from "~/lib/token"
 
 export const createResponses = async (
   payload: ResponsesPayload,
@@ -16,24 +17,24 @@ export const createResponses = async (
 
   const isAgentCall = detectAgentCall(payload.input)
 
-  const headers: Record<string, string> = {
-    ...copilotHeaders(state, enableVision),
-    ...modelHeaders,
-    "X-Initiator": isAgentCall ? "agent" : "user",
+  const url = `${copilotBaseUrl(state)}/responses`
+  const doFetch = (): Promise<Response> => {
+    const headers: Record<string, string> = {
+      ...copilotHeaders(state, enableVision),
+      ...modelHeaders,
+      "X-Initiator": isAgentCall ? "agent" : "user",
+    }
+    const fetchInit: RequestInit = {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    }
+    if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
+      fetchInit.signal = AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS)
+    }
+    return fetch(url, fetchInit)
   }
-
-  const fetchInit: RequestInit = {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  }
-  if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
-    fetchInit.signal = AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS)
-  }
-  const response = await fetch(
-    `${copilotBaseUrl(state)}/responses`,
-    fetchInit,
-  )
+  const response = await tryRefreshAndRetry(doFetch, "/responses")
 
   if (!response.ok) {
     consola.error("Failed to create responses", response)

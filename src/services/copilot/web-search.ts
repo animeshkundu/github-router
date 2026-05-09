@@ -51,17 +51,29 @@ const InnerSchema = z.object({
 const MAX_SEARCHES_PER_SECOND = 3
 let searchTimestamps: Array<number> = []
 
+// Single-flight chain serializes throttle checks. Without this, two
+// concurrent searches can both read the timestamp array, both filter,
+// both skip the await, and both push — doubling the QPS the throttle
+// is supposed to enforce.
+let throttleChain: Promise<void> = Promise.resolve()
+
 async function throttleSearch(): Promise<void> {
-  const now = Date.now()
-  searchTimestamps = searchTimestamps.filter((t) => now - t < 1000)
-  if (searchTimestamps.length >= MAX_SEARCHES_PER_SECOND) {
-    const waitMs = 1000 - (now - searchTimestamps[0])
-    if (waitMs > 0) {
-      consola.debug(`Web search rate limited, waiting ${waitMs}ms`)
-      await sleep(waitMs)
+  const myTurn = throttleChain.then(async () => {
+    const now = Date.now()
+    searchTimestamps = searchTimestamps.filter((t) => now - t < 1000)
+    if (searchTimestamps.length >= MAX_SEARCHES_PER_SECOND) {
+      const waitMs = 1000 - (now - searchTimestamps[0])
+      if (waitMs > 0) {
+        consola.debug(`Web search rate limited, waiting ${waitMs}ms`)
+        await sleep(waitMs)
+      }
     }
-  }
-  searchTimestamps.push(Date.now())
+    searchTimestamps.push(Date.now())
+  })
+  throttleChain = myTurn.catch(() => {
+    // errors don't break the chain — next caller starts fresh
+  })
+  return myTurn
 }
 
 function mcpHeaders(sid?: string): Record<string, string> {
