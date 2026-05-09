@@ -31,6 +31,9 @@ const RpcSchema = z.object({
 const InnerSchema = z.object({
   text: z.object({
     value: z.string(),
+    // Upstream sometimes returns `null` instead of an absent field for the
+    // no-results case. `.nullable().optional()` accepts undefined, null,
+    // and a real array; readers must `?? []` before iterating.
     annotations: z
       .array(
         z.object({
@@ -39,9 +42,10 @@ const InnerSchema = z.object({
             .optional(),
         }),
       )
+      .nullable()
       .optional(),
   }),
-  bing_searches: z.array(z.unknown()).optional(),
+  bing_searches: z.array(z.unknown()).nullable().optional(),
 })
 
 const MAX_SEARCHES_PER_SECOND = 3
