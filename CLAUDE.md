@@ -79,9 +79,12 @@ Tunable env vars (set before launching `claude`):
 
 - `UPSTREAM_FETCH_TIMEOUT_MS` — overall fetch-phase timeout in ms. Default `0` = no
   timeout. Set a positive integer if you need a hard ceiling on Copilot fetches.
-- `UPSTREAM_INACTIVITY_TIMEOUT_MS` — body-phase inactivity timeout in ms. Default `75000`
-  (75s — sits above Copilot's ~60s idle cut). Lower this only if you want the proxy to
-  reap stalled connections more aggressively.
+- `UPSTREAM_INACTIVITY_TIMEOUT_MS` — body-phase inactivity timeout in ms. Default `300000`
+  (5 min — sits well above Copilot's ~60s idle cut and accommodates reasoning models'
+  long thinking-pauses between token bursts; the previous 75s default aborted live
+  `/v1/messages` requests at bytes=134k–163k mid-stream when gpt-5.5/opus-4.7-xhigh
+  went quiet to think). Lower this only if you specifically want to reap stalled
+  connections faster than 5 minutes.
 
 ## Architecture
 

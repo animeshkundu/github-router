@@ -68,12 +68,19 @@ export const UPSTREAM_FETCH_TIMEOUT_MS = envInt(
 )
 
 // Inactivity bound on body reads — if no chunk arrives within this window,
-// abort the stream and emit a structured error event. 75s sits comfortably
-// above Copilot's ~60s idle cut so the proxy reaps stalled connections
-// before the upstream RST hits us as an unhandled rejection.
+// abort the stream and emit a structured error event. 300s (5 min) sits
+// well above Copilot's ~60s idle cut so the proxy still reaps stalled
+// connections before the upstream RST hits us as an unhandled rejection,
+// but does NOT prematurely abort reasoning-capable models (gpt-5.5,
+// gpt-5.3-codex, gemini-3.1-pro-preview, claude-opus-4.7-xhigh) which
+// routinely produce >75s silences between visible token bursts while
+// thinking. The earlier 75s default produced live aborts at /v1/messages
+// with bytes=134k–163k already streamed — proof the upstream was healthy
+// and just thinking. Lower this only if you specifically want to reap
+// stalled connections faster than 5 minutes.
 export const UPSTREAM_INACTIVITY_TIMEOUT_MS = envInt(
   "UPSTREAM_INACTIVITY_TIMEOUT_MS",
-  75_000,
+  300_000,
 )
 
 // TODO: extend timeout coverage to non-streaming paths (web-search MCP in
