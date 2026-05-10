@@ -10,6 +10,7 @@ import { tryRefreshAndRetry } from "~/lib/token"
 export const createChatCompletions = async (
   payload: ChatCompletionsPayload,
   modelHeaders?: Record<string, string>,
+  callerSignal?: AbortSignal,
 ) => {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
@@ -38,9 +39,13 @@ export const createChatCompletions = async (
       headers,
       body: JSON.stringify(payload),
     }
+    const signals: Array<AbortSignal> = []
     if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
-      fetchInit.signal = AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS)
+      signals.push(AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS))
     }
+    if (callerSignal) signals.push(callerSignal)
+    if (signals.length === 1) fetchInit.signal = signals[0]
+    else if (signals.length > 1) fetchInit.signal = AbortSignal.any(signals)
     return fetch(url, fetchInit)
   }
   const response = await tryRefreshAndRetry(doFetch, "/chat/completions")

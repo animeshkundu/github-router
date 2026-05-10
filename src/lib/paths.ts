@@ -2,6 +2,8 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
+import consola from "consola"
+
 function appDir(): string {
   return path.join(os.homedir(), ".local", "share", "github-router")
 }
@@ -24,12 +26,29 @@ export const PATHS = {
   get CODEX_HOME() {
     return path.join(appDir(), "codex-isolated")
   },
+  /**
+   * Runtime tempfiles for the per-launch peer-MCP wiring (the
+   * `--mcp-config` JSON and `--agents` JSON written before spawning
+   * Claude Code). Mode 0o700 to match the security review's mandate;
+   * cleaned on shutdown via the per-launch `cleanup()`, plus a
+   * boot-time sweep of stale files (dead PIDs, >24h old).
+   */
+  get CLAUDE_RUNTIME_DIR() {
+    return path.join(appDir(), "runtime")
+  },
 }
 
 export async function ensurePaths(): Promise<void> {
   await fs.mkdir(PATHS.APP_DIR, { recursive: true })
   await fs.mkdir(PATHS.CODEX_HOME, { recursive: true })
+  await fs.mkdir(PATHS.CLAUDE_RUNTIME_DIR, { recursive: true })
+  // mkdir({recursive: true}) does NOT chmod an existing directory, so
+  // explicitly tighten in case the dir was created by an older version.
+  await chmodIfPossible(PATHS.CLAUDE_RUNTIME_DIR, 0o700)
   await ensureFile(PATHS.GITHUB_TOKEN_PATH)
+  await sweepStaleRuntimeFiles().catch((err) => {
+    consola.debug("Runtime sweep skipped:", err)
+  })
 }
 
 async function ensureFile(filePath: string): Promise<void> {
@@ -38,5 +57,103 @@ async function ensureFile(filePath: string): Promise<void> {
   } catch {
     await fs.writeFile(filePath, "")
     await fs.chmod(filePath, 0o600)
+  }
+}
+
+async function chmodIfPossible(target: string, mode: number): Promise<void> {
+  if (process.platform === "win32") return // Windows chmod is no-op-ish
+  try {
+    await fs.chmod(target, mode)
+  } catch (err) {
+    consola.debug(`chmod ${target} ${mode.toString(8)} failed:`, err)
+  }
+}
+
+/**
+ * Write a runtime tempfile securely.
+ *
+ *   - Mode `0o600` so other local users (multi-tenant boxes, shared
+ *     dev containers) can't read the per-launch nonce or runtime URL.
+ *   - `flag: "wx"` (O_CREAT | O_EXCL | O_WRONLY) refuses to overwrite
+ *     an existing path. POSIX open(2) with O_EXCL also rejects
+ *     pre-placed symlinks, killing the symlink-clobber attack vector.
+ *   - The caller's responsibility to pick a path NOT yet in use.
+ *     We intentionally do NOT pre-unlink: an `lstat` + `unlink` +
+ *     `open(O_EXCL)` sequence still has a TOCTOU window where an
+ *     attacker can drop a symlink between unlink and open. Letting
+ *     `wx` fail is the safer behavior — surfaces the conflict
+ *     instead of silently following.
+ */
+export async function writeRuntimeFileSecure(
+  filePath: string,
+  content: string,
+): Promise<void> {
+  await fs.writeFile(filePath, content, { mode: 0o600, flag: "wx" })
+}
+
+/**
+ * Sweep stale runtime tempfiles. Removes:
+ *   1. Files whose embedded PID is no longer a live process. A proxy
+ *      crash (`kill -9`, OS reboot) leaves orphans that would
+ *      otherwise accumulate forever — and worse, a stale config
+ *      pointing at a now-recycled port could route MCP traffic to
+ *      whatever process bound that port next.
+ *   2. Files older than 24h regardless of PID, defense-in-depth
+ *      against PID wraparound.
+ *
+ * Naming convention: `peer-mcp-<pid>.json` and `peer-agents-<pid>.json`.
+ * Files not matching either pattern are left alone — this directory
+ * is shared with future runtime artifacts.
+ */
+export async function sweepStaleRuntimeFiles(): Promise<void> {
+  const dir = PATHS.CLAUDE_RUNTIME_DIR
+  let entries: Array<string>
+  try {
+    entries = await fs.readdir(dir)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return
+    throw err
+  }
+  const now = Date.now()
+  const STALE_MS = 24 * 60 * 60 * 1000
+
+  for (const name of entries) {
+    const match = /^peer-(?:mcp|agents)-(\d+)\.json$/.exec(name)
+    if (!match) continue
+    const pid = Number.parseInt(match[1], 10)
+    const filePath = path.join(dir, name)
+
+    let shouldDelete = false
+    if (!isPidAlive(pid)) {
+      shouldDelete = true
+    } else {
+      try {
+        const stat = await fs.stat(filePath)
+        if (now - stat.mtimeMs > STALE_MS) shouldDelete = true
+      } catch {
+        // stat failed — assume gone, skip
+      }
+    }
+
+    if (shouldDelete) {
+      await fs.unlink(filePath).catch(() => {
+        // already gone or unreadable, fine
+      })
+    }
+  }
+}
+
+function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    // signal 0 = check existence without delivering a signal. EPERM
+    // means the process exists but we can't signal it (which is still
+    // "alive" for our purposes); ESRCH means it's gone.
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === "EPERM") return true
+    return false
   }
 }

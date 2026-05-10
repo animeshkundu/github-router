@@ -88,6 +88,28 @@ mock.module("consola", () => ({
   },
 }))
 
+// MCP wiring mocks — keep tests hermetic. Real fs operations (and the
+// real per-launch nonce generation) are exercised in
+// tests/codex-mcp-config.test.ts; here we just verify that claude.ts
+// invokes the wiring with the expected args and threads the resulting
+// flags into spawnMock.
+const writePeerMcpRuntimeFilesMock = mock()
+const resolveCodexCliBackendMock = mock()
+const getCodexVersionMock = mock()
+
+mock.module("~/lib/codex-mcp-config", () => ({
+  writePeerMcpRuntimeFiles: writePeerMcpRuntimeFilesMock,
+  resolveCodexCliBackend: resolveCodexCliBackendMock,
+}))
+
+// launch.ts also exports buildLaunchCommand etc. — re-export the real
+// ones, but stub getCodexVersion so we don't shell out to `codex --version`.
+const realLaunch = await import("../../src/lib/launch")
+mock.module("~/lib/launch", () => ({
+  ...realLaunch,
+  getCodexVersion: getCodexVersionMock,
+}))
+
 // --- Import module under test AFTER mocks ---
 const { claude } = await import("../../src/claude")
 const { state } = await import("../../src/lib/state")
@@ -150,6 +172,24 @@ beforeEach(() => {
   execFileSyncMock.mockReturnValue(Buffer.from("/usr/bin/claude"))
   spawnMock.mockReset()
   spawnMock.mockReturnValue(createFakeChild())
+
+  // MCP wiring: default-on. Most tests exercise the default path
+  // (codex-cli absent) where we get HTTP backend + 2-3 personas.
+  writePeerMcpRuntimeFilesMock.mockReset()
+  writePeerMcpRuntimeFilesMock.mockResolvedValue({
+    mcpConfigPath: "/tmp/peer-mcp-test.json",
+    agentsPath: "/tmp/peer-agents-test.json",
+    nonce: "test-nonce",
+    personas: [
+      { agentName: "codex-critic" },
+      { agentName: "codex-reviewer" },
+    ],
+    cleanup: async () => {},
+  })
+  resolveCodexCliBackendMock.mockReset()
+  resolveCodexCliBackendMock.mockReturnValue("http")
+  getCodexVersionMock.mockReset()
+  getCodexVersionMock.mockReturnValue({ ok: false })
 })
 
 describe("claude command", () => {
@@ -358,5 +398,115 @@ describe("claude command", () => {
 
     await expect(run({ args: {} })).rejects.toThrow(ExitError)
     expect(exitMock).toHaveBeenCalledWith(1)
+  })
+
+  describe("codex-mcp wiring", () => {
+    test("default → writes runtime files, appends --mcp-config + --agents to spawn", async () => {
+      const run = getRunFn()
+      await run({ args: {} })
+
+      expect(writePeerMcpRuntimeFilesMock).toHaveBeenCalledTimes(1)
+      const [serverUrl, opts] = writePeerMcpRuntimeFilesMock.mock.calls[0]
+      expect(serverUrl).toBe("http://127.0.0.1:12345")
+      expect(opts.codexCli).toBe(false)
+
+      const [, args] = spawnMock.mock.calls[0]
+      expect(args).toContain("--mcp-config")
+      expect(args).toContain("/tmp/peer-mcp-test.json")
+      expect(args).toContain("--agents")
+      expect(args).toContain("/tmp/peer-agents-test.json")
+      expect(args).not.toContain("--strict-mcp-config")
+    })
+
+    test("--no-codex-mcp → no MCP wiring, no extra spawn args", async () => {
+      const run = getRunFn()
+      await run({ args: { "codex-mcp": false } })
+
+      expect(writePeerMcpRuntimeFilesMock).not.toHaveBeenCalled()
+      const [, args] = spawnMock.mock.calls[0]
+      expect(args).not.toContain("--mcp-config")
+      expect(args).not.toContain("--agents")
+    })
+
+    test("--codex-cli requested + codex absent → falls back to http backend", async () => {
+      resolveCodexCliBackendMock.mockReturnValue("http")
+      const run = getRunFn()
+      await run({ args: { "codex-cli": true } })
+
+      // resolveCodexCliBackend is consulted with requested=true and codex info
+      expect(resolveCodexCliBackendMock).toHaveBeenCalledTimes(1)
+      const resolveArgs = resolveCodexCliBackendMock.mock.calls[0][0]
+      expect(resolveArgs.requested).toBe(true)
+      expect(resolveArgs.codexInfo).toEqual({ ok: false })
+
+      // Resulting backend was http, so writePeerMcpRuntimeFiles got codexCli: false
+      const writeArgs = writePeerMcpRuntimeFilesMock.mock.calls[0][1]
+      expect(writeArgs.codexCli).toBe(false)
+    })
+
+    test("--codex-cli with codex 0.129+ → cli backend selected", async () => {
+      getCodexVersionMock.mockReturnValue({ ok: true, version: "0.129.0" })
+      resolveCodexCliBackendMock.mockReturnValue("cli")
+      const run = getRunFn()
+      await run({ args: { "codex-cli": true } })
+
+      const writeArgs = writePeerMcpRuntimeFilesMock.mock.calls[0][1]
+      expect(writeArgs.codexCli).toBe(true)
+    })
+
+    test("--codex-mcp-only → adds --strict-mcp-config to spawn args", async () => {
+      const run = getRunFn()
+      await run({ args: { "codex-mcp-only": true } })
+
+      const [, args] = spawnMock.mock.calls[0]
+      expect(args).toContain("--strict-mcp-config")
+    })
+
+    test("writePeerMcpRuntimeFiles failure does not block claude launch", async () => {
+      writePeerMcpRuntimeFilesMock.mockRejectedValue(new Error("disk full"))
+      const run = getRunFn()
+      await run({ args: {} })
+
+      // Spawn still happened (claude launches without MCP wiring)
+      expect(spawnMock).toHaveBeenCalledTimes(1)
+      const [, args] = spawnMock.mock.calls[0]
+      expect(args).not.toContain("--mcp-config")
+    })
+
+    test("gemini availability is probed against state.models catalog", async () => {
+      state.models = {
+        data: [
+          { id: "gemini-3.1-pro-preview" },
+          { id: "claude-opus-4.7" },
+        ] as unknown as NonNullable<typeof state.models>["data"],
+        object: "list",
+      }
+      try {
+        const run = getRunFn()
+        await run({ args: {} })
+        const writeArgs = writePeerMcpRuntimeFilesMock.mock.calls[0][1]
+        expect(writeArgs.geminiAvailable).toBe(true)
+      } finally {
+        state.models = undefined
+      }
+    })
+
+    test("gemini absent from catalog → geminiAvailable=false", async () => {
+      state.models = {
+        data: [
+          { id: "gpt-5.5" },
+          { id: "claude-opus-4.7" },
+        ] as unknown as NonNullable<typeof state.models>["data"],
+        object: "list",
+      }
+      try {
+        const run = getRunFn()
+        await run({ args: {} })
+        const writeArgs = writePeerMcpRuntimeFilesMock.mock.calls[0][1]
+        expect(writeArgs.geminiAvailable).toBe(false)
+      } finally {
+        state.models = undefined
+      }
+    })
   })
 })

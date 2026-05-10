@@ -73,6 +73,50 @@ function commandExists(name: string): boolean {
   }
 }
 
+/**
+ * Provider-config flags (`-c model_providers.github_router=...`) that
+ * point Codex at our proxy. Extracted from `buildCodexCmd` so the new
+ * `codex mcp-server` MCP-config builder can reuse the exact same
+ * provider definition — drift between the two paths would silently
+ * break the MCP wiring.
+ */
+export function buildCodexProviderConfigFlags(serverUrl: string): Array<string> {
+  return [
+    "-c",
+    `model_providers.github_router={name="github-router",base_url="${serverUrl}/v1",wire_api="responses",env_key="OPENAI_API_KEY"}`,
+    "-c",
+    "model_provider=github_router",
+  ]
+}
+
+/**
+ * Inspect the installed `codex` binary. Used by the codex-MCP wiring
+ * in `claude.ts` to gate `--codex-cli`. Codex 0.129.0 introduced the
+ * `mcp-server` subcommand; older versions don't expose it, so we
+ * downgrade to the HTTP backend with a warning.
+ */
+export function getCodexVersion(): { ok: boolean; version?: string } {
+  if (!commandExists("codex")) return { ok: false }
+  let raw: string
+  try {
+    raw = execFileSync("codex", ["--version"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim()
+  } catch {
+    return { ok: false }
+  }
+  // Output examples: "codex-cli 0.129.0", "codex 0.130.1-dev"
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(raw)
+  if (!m) return { ok: false, version: raw }
+  const major = Number.parseInt(m[1], 10)
+  const minor = Number.parseInt(m[2], 10)
+  const version = `${m[1]}.${m[2]}.${m[3]}`
+  // mcp-server requires codex >= 0.129.0
+  const ok = major > 0 || (major === 0 && minor >= 129)
+  return { ok, version }
+}
+
 export interface LaunchTarget {
   kind: "claude-code" | "codex"
   envVars: Record<string, string>
@@ -102,13 +146,7 @@ export interface LaunchTarget {
 function buildCodexCmd(target: LaunchTarget): string[] {
   const cmd: string[] = ["codex"]
   if (target.serverUrl) {
-    // Define an inline provider that points at our proxy and use it.
-    cmd.push(
-      "-c",
-      `model_providers.github_router={name="github-router",base_url="${target.serverUrl}/v1",wire_api="responses",env_key="OPENAI_API_KEY"}`,
-      "-c",
-      "model_provider=github_router",
-    )
+    cmd.push(...buildCodexProviderConfigFlags(target.serverUrl))
   }
   cmd.push(
     "--sandbox",
@@ -137,7 +175,11 @@ export function buildLaunchCommand(target: LaunchTarget): {
   }
 }
 
-export function launchChild(target: LaunchTarget, server: Server): void {
+export function launchChild(
+  target: LaunchTarget,
+  server: Server,
+  options: { onShutdown?: () => Promise<void> | void } = {},
+): void {
   const { cmd, env } = buildLaunchCommand(target)
 
   const executable = cmd[0]
@@ -171,6 +213,9 @@ export function launchChild(target: LaunchTarget, server: Server): void {
     consola.error(msg)
     process.stderr.write(msg + "\n")
     server.close(true).catch(() => {})
+    if (options.onShutdown) {
+      void Promise.resolve(options.onShutdown()).catch(() => {})
+    }
     process.exit(1)
   }
 
@@ -191,6 +236,13 @@ export function launchChild(target: LaunchTarget, server: Server): void {
       await server.close(true)
     } catch {
       // Server already closed
+    }
+    if (options.onShutdown) {
+      try {
+        await options.onShutdown()
+      } catch {
+        // Best-effort cleanup; shutdown must not be blocked by it.
+      }
     }
     clearTimeout(timeout)
   }

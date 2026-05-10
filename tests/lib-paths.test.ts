@@ -13,7 +13,8 @@ mock.module("node:os", () => ({
   },
 }))
 
-const { ensurePaths, PATHS } = await import("../src/lib/paths")
+const { ensurePaths, PATHS, sweepStaleRuntimeFiles, writeRuntimeFileSecure } =
+  await import("../src/lib/paths")
 
 test("ensurePaths creates token file with permissions", async () => {
   await ensurePaths()
@@ -24,4 +25,102 @@ test("ensurePaths creates token file with permissions", async () => {
     expect(tokenStats.mode & 0o777).toBe(0o600)
   }
   expect(PATHS.APP_DIR).toBe(path.join(tempDir, ".local", "share", "github-router"))
+})
+
+test("ensurePaths creates CLAUDE_RUNTIME_DIR with mode 0o700", async () => {
+  await ensurePaths()
+  const dirStats = await fs.stat(PATHS.CLAUDE_RUNTIME_DIR)
+  expect(dirStats.isDirectory()).toBe(true)
+  if (process.platform !== "win32") {
+    expect(dirStats.mode & 0o777).toBe(0o700)
+  }
+  expect(PATHS.CLAUDE_RUNTIME_DIR).toBe(
+    path.join(tempDir, ".local", "share", "github-router", "runtime"),
+  )
+})
+
+test("writeRuntimeFileSecure writes 0o600 with O_EXCL semantics", async () => {
+  await ensurePaths()
+  const target = path.join(PATHS.CLAUDE_RUNTIME_DIR, `excl-${Date.now()}.json`)
+  await writeRuntimeFileSecure(target, '{"hello":"world"}')
+
+  const stat = await fs.stat(target)
+  expect(stat.isFile()).toBe(true)
+  if (process.platform !== "win32") {
+    expect(stat.mode & 0o777).toBe(0o600)
+  }
+  const body = await fs.readFile(target, "utf8")
+  expect(body).toBe('{"hello":"world"}')
+
+  // Second write to same path must fail (O_EXCL).
+  await expect(writeRuntimeFileSecure(target, "x")).rejects.toThrow()
+
+  await fs.unlink(target)
+})
+
+test("writeRuntimeFileSecure refuses to follow a pre-placed symlink", async () => {
+  if (process.platform === "win32") return // symlinks need admin on Windows
+
+  await ensurePaths()
+  const symlinkPath = path.join(
+    PATHS.CLAUDE_RUNTIME_DIR,
+    `symlink-${Date.now()}.json`,
+  )
+  const decoyPath = path.join(tempDir, `decoy-${Date.now()}.json`)
+  await fs.writeFile(decoyPath, "decoy")
+  await fs.symlink(decoyPath, symlinkPath)
+
+  // O_EXCL rejects existing files INCLUDING symlinks (regardless of
+  // target). The decoy file must remain untouched.
+  await expect(writeRuntimeFileSecure(symlinkPath, "attacker")).rejects.toThrow()
+  const decoyAfter = await fs.readFile(decoyPath, "utf8")
+  expect(decoyAfter).toBe("decoy")
+
+  await fs.unlink(symlinkPath)
+  await fs.unlink(decoyPath)
+})
+
+test("sweepStaleRuntimeFiles removes dead-PID files but keeps live-PID files", async () => {
+  await ensurePaths()
+  const dir = PATHS.CLAUDE_RUNTIME_DIR
+
+  // Live: this process's PID
+  const livePath = path.join(dir, `peer-mcp-${process.pid}.json`)
+  await fs.writeFile(livePath, "{}", { mode: 0o600 })
+
+  // Dead: a PID that almost certainly doesn't exist (max signed int -1)
+  const deadPid = 2_147_483_646
+  const deadPath = path.join(dir, `peer-mcp-${deadPid}.json`)
+  await fs.writeFile(deadPath, "{}", { mode: 0o600 })
+
+  // Unrelated file — should not be touched even though the dir matches.
+  const unrelatedPath = path.join(dir, "not-a-peer-config.txt")
+  await fs.writeFile(unrelatedPath, "leave me alone", { mode: 0o600 })
+
+  await sweepStaleRuntimeFiles()
+
+  await expect(fs.stat(livePath)).resolves.toBeDefined()
+  await expect(fs.stat(deadPath)).rejects.toThrow()
+  await expect(fs.stat(unrelatedPath)).resolves.toBeDefined()
+
+  await fs.unlink(livePath)
+  await fs.unlink(unrelatedPath)
+})
+
+test("sweepStaleRuntimeFiles also removes peer-agents-* dead-PID files", async () => {
+  await ensurePaths()
+  const dir = PATHS.CLAUDE_RUNTIME_DIR
+
+  const deadPid = 2_147_483_645
+  const deadAgentsPath = path.join(dir, `peer-agents-${deadPid}.json`)
+  await fs.writeFile(deadAgentsPath, "{}", { mode: 0o600 })
+
+  await sweepStaleRuntimeFiles()
+  await expect(fs.stat(deadAgentsPath)).rejects.toThrow()
+})
+
+test("sweepStaleRuntimeFiles tolerates missing dir without throwing", async () => {
+  // Drop the dir, then call sweep — should be a no-op.
+  await fs.rm(PATHS.CLAUDE_RUNTIME_DIR, { recursive: true, force: true })
+  await expect(sweepStaleRuntimeFiles()).resolves.toBeUndefined()
 })

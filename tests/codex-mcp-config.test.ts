@@ -1,0 +1,300 @@
+import { describe, expect, test } from "bun:test"
+import { randomBytes } from "node:crypto"
+import fs from "node:fs/promises"
+import path from "node:path"
+
+import {
+  buildPeerAgentDefinitions,
+  buildPeerMcpConfig,
+  resolveCodexCliBackend,
+  writePeerMcpRuntimeFiles,
+} from "../src/lib/codex-mcp-config"
+
+const NONCE = "0".repeat(64)
+const URL = "http://127.0.0.1:18787"
+
+// Use a fixed `/tmp` prefix instead of `os.tmpdir()` — `tests/lib-paths.test.ts`
+// uses `mock.module("node:os", ...)` to stub homedir(), which globally
+// replaces the os module and removes tmpdir(). Avoid that landmine.
+const TEST_TMP_ROOT = process.env.TMPDIR?.replace(/\/$/, "") ?? "/tmp"
+
+async function makeTempDir(prefix: string): Promise<string> {
+  const suffix = randomBytes(8).toString("hex")
+  const dir = path.join(TEST_TMP_ROOT, `github-router-${prefix}-${suffix}`)
+  await fs.mkdir(dir, { recursive: true })
+  return dir
+}
+
+async function withTempRuntimeDir<T>(
+  fn: (runtimeDir: string, codexHome: string) => Promise<T>,
+): Promise<T> {
+  const runtimeDir = await makeTempDir("mcp-cfg")
+  await fs.chmod(runtimeDir, 0o700)
+  const codexHome = await makeTempDir("codex-home")
+  try {
+    return await fn(runtimeDir, codexHome)
+  } finally {
+    await fs.rm(runtimeDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(codexHome, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+describe("buildPeerMcpConfig", () => {
+  test("HTTP backend (codexCli=false) registers only gh-router-peers", () => {
+    const cfg = buildPeerMcpConfig(URL, {
+      codexCli: false,
+      geminiAvailable: true,
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    expect(Object.keys(cfg.mcpServers)).toEqual(["gh-router-peers"])
+    const entry = cfg.mcpServers["gh-router-peers"] as {
+      type: "http"
+      url: string
+      headers: Record<string, string>
+    }
+    expect(entry.type).toBe("http")
+    expect(entry.url).toBe(`${URL}/mcp`)
+    expect(entry.headers.Authorization).toBe(`Bearer ${NONCE}`)
+  })
+
+  test("CLI backend adds codex-cli stdio entry with provider flags + env", () => {
+    const cfg = buildPeerMcpConfig(URL, {
+      codexCli: true,
+      geminiAvailable: true,
+      nonce: NONCE,
+      codexHome: "/tmp/codex-isolated",
+    })
+    expect(Object.keys(cfg.mcpServers).sort()).toEqual([
+      "codex-cli",
+      "gh-router-peers",
+    ])
+    const cli = cfg.mcpServers["codex-cli"] as {
+      command: string
+      args: Array<string>
+      env: Record<string, string>
+    }
+    expect(cli.command).toBe("codex")
+    expect(cli.args[0]).toBe("mcp-server")
+    // Provider config flags follow.
+    expect(cli.args).toContain("-c")
+    expect(cli.args).toContain("model_provider=github_router")
+    const providerCfg = cli.args.find((a) =>
+      a.startsWith("model_providers.github_router="),
+    )
+    expect(providerCfg).toContain(`base_url="${URL}/v1"`)
+    expect(providerCfg).toContain('wire_api="responses"')
+
+    expect(cli.env).toEqual({
+      OPENAI_BASE_URL: `${URL}/v1`,
+      OPENAI_API_KEY: "dummy",
+      CODEX_HOME: "/tmp/codex-isolated",
+    })
+  })
+})
+
+describe("buildPeerAgentDefinitions", () => {
+  test("HTTP backend with gemini = 3 agents (critic, gemini-critic, reviewer)", () => {
+    const agents = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: true,
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    expect(Object.keys(agents).sort()).toEqual([
+      "codex-critic",
+      "codex-reviewer",
+      "gemini-critic",
+    ])
+    // Each prompt routes to the HTTP MCP server name.
+    for (const name of Object.keys(agents)) {
+      expect(agents[name]!.prompt).toContain("mcp__gh-router-peers__")
+      expect(agents[name]!.description.length).toBeGreaterThan(0)
+    }
+  })
+
+  test("HTTP backend without gemini drops gemini-critic = 2 agents", () => {
+    const agents = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: false,
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    expect(Object.keys(agents).sort()).toEqual([
+      "codex-critic",
+      "codex-reviewer",
+    ])
+    expect(agents["gemini-critic"]).toBeUndefined()
+  })
+
+  test("CLI backend with gemini = 4 agents (+ implementer)", () => {
+    const agents = buildPeerAgentDefinitions({
+      codexCli: true,
+      geminiAvailable: true,
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    expect(Object.keys(agents).sort()).toEqual([
+      "codex-critic",
+      "codex-implementer",
+      "codex-reviewer",
+      "gemini-critic",
+    ])
+    // codex-* personas point at the stdio server; gemini-critic stays HTTP.
+    expect(agents["codex-critic"]!.prompt).toContain("mcp__codex-cli__codex")
+    expect(agents["gemini-critic"]!.prompt).toContain(
+      "mcp__gh-router-peers__gemini_critic",
+    )
+    expect(agents["codex-implementer"]!.prompt).toContain('"workspace-write"')
+  })
+})
+
+describe("resolveCodexCliBackend", () => {
+  test("not requested → http", () => {
+    expect(
+      resolveCodexCliBackend({ requested: false, codexInfo: null }),
+    ).toBe("http")
+  })
+
+  test("requested but codex missing → http (with warning)", () => {
+    expect(
+      resolveCodexCliBackend({ requested: true, codexInfo: { ok: false } }),
+    ).toBe("http")
+  })
+
+  test("requested with codex 0.129+ → cli", () => {
+    expect(
+      resolveCodexCliBackend({
+        requested: true,
+        codexInfo: { ok: true, version: "0.129.0" },
+      }),
+    ).toBe("cli")
+  })
+
+  test("requested with codex 0.128.x → http (downgraded)", () => {
+    expect(
+      resolveCodexCliBackend({
+        requested: true,
+        codexInfo: { ok: false, version: "0.128.5" },
+      }),
+    ).toBe("http")
+  })
+})
+
+describe("writePeerMcpRuntimeFiles", () => {
+  test("writes mcp-config + agents tempfiles with mode 0o600 and PID-suffixed names", async () => {
+    await withTempRuntimeDir(async (runtimeDir, codexHome) => {
+      const runtime = await writePeerMcpRuntimeFiles(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        runtimeDir,
+        codexHome,
+      })
+
+      expect(runtime.mcpConfigPath).toBe(
+        path.join(runtimeDir, `peer-mcp-${process.pid}.json`),
+      )
+      expect(runtime.agentsPath).toBe(
+        path.join(runtimeDir, `peer-agents-${process.pid}.json`),
+      )
+
+      // Files exist + permissions
+      const mcpStat = await fs.stat(runtime.mcpConfigPath)
+      const agentsStat = await fs.stat(runtime.agentsPath)
+      if (process.platform !== "win32") {
+        expect(mcpStat.mode & 0o777).toBe(0o600)
+        expect(agentsStat.mode & 0o777).toBe(0o600)
+      }
+
+      // Nonce is 32-byte hex (64 chars) and embedded as Bearer header
+      expect(runtime.nonce).toMatch(/^[0-9a-f]{64}$/)
+      const cfg = JSON.parse(
+        await fs.readFile(runtime.mcpConfigPath, "utf8"),
+      ) as {
+        mcpServers: { "gh-router-peers": { headers: { Authorization: string } } }
+      }
+      expect(cfg.mcpServers["gh-router-peers"].headers.Authorization).toBe(
+        `Bearer ${runtime.nonce}`,
+      )
+
+      // Cleanup unlinks both
+      await runtime.cleanup()
+      await expect(fs.stat(runtime.mcpConfigPath)).rejects.toThrow()
+      await expect(fs.stat(runtime.agentsPath)).rejects.toThrow()
+    })
+  })
+
+  test("two consecutive invocations produce distinct nonces", async () => {
+    await withTempRuntimeDir(async (runtimeDir, codexHome) => {
+      const a = await writePeerMcpRuntimeFiles(URL, {
+        codexCli: false,
+        geminiAvailable: false,
+        runtimeDir,
+        codexHome,
+      })
+      // Cleanup so the second write doesn't trip O_EXCL via same-PID name
+      await a.cleanup()
+      const b = await writePeerMcpRuntimeFiles(URL, {
+        codexCli: false,
+        geminiAvailable: false,
+        runtimeDir,
+        codexHome,
+      })
+      await b.cleanup()
+      expect(a.nonce).not.toBe(b.nonce)
+    })
+  })
+
+  test("re-runs in the same PID overwrite cleanly (pre-existing files don't break)", async () => {
+    await withTempRuntimeDir(async (runtimeDir, codexHome) => {
+      const a = await writePeerMcpRuntimeFiles(URL, {
+        codexCli: false,
+        geminiAvailable: false,
+        runtimeDir,
+        codexHome,
+      })
+      // Don't cleanup. Second call must succeed despite same-PID names existing.
+      const b = await writePeerMcpRuntimeFiles(URL, {
+        codexCli: false,
+        geminiAvailable: false,
+        runtimeDir,
+        codexHome,
+      })
+      expect(a.mcpConfigPath).toBe(b.mcpConfigPath)
+      expect(b.nonce).not.toBe(a.nonce)
+      await b.cleanup()
+    })
+  })
+
+  test("personas list reflects mode (codexCli adds implementer)", async () => {
+    await withTempRuntimeDir(async (runtimeDir, codexHome) => {
+      const httpMode = await writePeerMcpRuntimeFiles(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        runtimeDir,
+        codexHome,
+      })
+      const cliMode = await writePeerMcpRuntimeFiles(URL, {
+        codexCli: true,
+        geminiAvailable: true,
+        runtimeDir,
+        codexHome,
+      })
+      const httpNames = httpMode.personas.map((p) => p.agentName).sort()
+      const cliNames = cliMode.personas.map((p) => p.agentName).sort()
+      expect(httpNames).toEqual([
+        "codex-critic",
+        "codex-reviewer",
+        "gemini-critic",
+      ])
+      expect(cliNames).toEqual([
+        "codex-critic",
+        "codex-implementer",
+        "codex-reviewer",
+        "gemini-critic",
+      ])
+      await httpMode.cleanup()
+      await cliMode.cleanup()
+    })
+  })
+})
