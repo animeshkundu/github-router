@@ -24,12 +24,38 @@ const MCP_PROTOCOL_VERSION = "2025-06-18"
 const SERVER_NAME = "github-router-peers"
 const SERVER_VERSION = "1"
 
-/** Bounded concurrency. Reviewers flagged Opus's natural pattern with three
- *  critics is parallel invocation — without a cap that's 3× upstream Copilot
- *  QPS per delegation. Cap at 2 in-flight tools/call across the whole proxy
- *  and surface overflow as `isError: "queue full"` instead of silent
- *  serialization. */
-const MAX_INFLIGHT_TOOLS_CALL = 2
+/**
+ * Reasoning effort levels accepted by Copilot's /v1/responses (gpt-5.x) and
+ * /v1/chat/completions endpoints. Per the proxy's existing thinking-mode
+ * translator (CLAUDE.md "Thinking-mode translation"), Copilot's adaptive-
+ * thinking path uses these same buckets:
+ *   <2k tokens → low, <8k → medium, <24k → high, else → xhigh.
+ *
+ * Default `high` for peer reviews — adversarial-by-design but still cost-
+ * conscious. Callers can pass `xhigh` explicitly for deep dives, or `medium`
+ * for quick sanity checks.
+ */
+const EFFORT_LEVELS = ["low", "medium", "high", "xhigh"] as const
+type Effort = (typeof EFFORT_LEVELS)[number]
+const DEFAULT_EFFORT: Effort = "high"
+
+function isEffort(v: unknown): v is Effort {
+  return typeof v === "string" && (EFFORT_LEVELS as ReadonlyArray<string>).includes(v)
+}
+
+/** Bounded concurrency. Originally capped at 2 (commit 4317a25) as a defensive
+ *  pre-launch guess against Opus's natural pattern of fanning out to all three
+ *  critics at once. Raised to 8 (Phase 2D of the peer-MCP plan) so the
+ *  decomposition pattern Phase 2B teaches Opus — "split a >20 KB artifact
+ *  into 2-4 batches and call in parallel" — can actually run in parallel
+ *  without the (3+)th call returning isError "queue full". The persona
+ *  handlers (`callPersona`) hold no shared mutable state — there's no race
+ *  the cap is hiding; the upstream Copilot's own rate-limit (surfaced as a
+ *  per-call 429 → tool isError) is the real backpressure mechanism. 8 covers
+ *  a 7-fork wave with one slot of headroom and is still a hard upper bound
+ *  against runaway clients. See docs/research/peer-mcp-investigation.md
+ *  § "Concurrency cap investigation" for the full justification.  */
+const MAX_INFLIGHT_TOOLS_CALL = 8
 let inFlightToolsCall = 0
 
 interface JsonRpcRequest {
@@ -145,6 +171,16 @@ function toolEntries(): Array<ToolEntry> {
           description:
             "Optional additional context (extra file content, prior decisions). Concatenated to the brief before sending.",
         },
+        effort: {
+          type: "string",
+          enum: [...EFFORT_LEVELS],
+          description:
+            `Reasoning depth (low | medium | high | xhigh). Default "${DEFAULT_EFFORT}". `
+            + "Use 'xhigh' for explicit deep dives where you want maximum reasoning. "
+            + "Use 'medium' for quick sanity checks. "
+            + "Note: for non-OpenAI models routed via /v1/chat/completions (gemini-3.x), "
+            + "the upstream may silently ignore this knob.",
+        },
       },
     },
   }))
@@ -200,6 +236,7 @@ async function callPersona(
   persona: PersonaSpec,
   prompt: string,
   context: string | undefined,
+  effort: Effort,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
   // Resolve the model id against the live catalog so a slug rename
   // (e.g., gemini-3.1-pro-preview → gemini-3.1-pro at GA) auto-resolves
@@ -228,6 +265,10 @@ async function callPersona(
         },
       ],
       stream: false,
+      // Reasoning effort — gpt-5.x adaptive-thinking reads this field
+      // directly. Copilot's translator buckets to its own internal
+      // levels (CLAUDE.md "Thinking-mode translation").
+      reasoning: { effort },
     }
     const response = (await createResponses(
       payload,
@@ -247,6 +288,11 @@ async function callPersona(
       { role: "user", content: userText },
     ],
     stream: false,
+    // Forwarded as-is. Per gemini_critic's review (see
+    // docs/research/peer-mcp-investigation.md): Copilot's gemini route
+    // may silently ignore this knob or 400 if it strict-validates the
+    // schema; the latter surfaces through the existing tool-error path.
+    reasoning_effort: effort,
   }
   const response = (await createChatCompletions(
     payload,
@@ -291,6 +337,19 @@ async function handleToolsCall(
   const args = (params.arguments ?? {}) as Record<string, unknown>
   const prompt = typeof args.prompt === "string" ? args.prompt : ""
   const context = typeof args.context === "string" ? args.context : undefined
+  // Validate effort against the EFFORT_LEVELS allowlist; reject unknown
+  // values cleanly rather than forwarding garbage to the upstream payload.
+  let effort: Effort = DEFAULT_EFFORT
+  if (args.effort !== undefined) {
+    if (!isEffort(args.effort)) {
+      return rpcError(
+        body.id,
+        RPC_INVALID_PARAMS,
+        `tools/call: arguments.effort must be one of ${EFFORT_LEVELS.join("|")}; got ${JSON.stringify(args.effort)}`,
+      )
+    }
+    effort = args.effort
+  }
 
   if (!name) {
     return rpcError(body.id, RPC_INVALID_PARAMS, "tools/call missing name")
@@ -328,7 +387,7 @@ async function handleToolsCall(
   inFlightToolsCall++
   const startedAt = Date.now()
   try {
-    const result = await callPersona(persona, prompt, context)
+    const result = await callPersona(persona, prompt, context, effort)
     logTelemetry({
       name: persona.agentName,
       model: persona.model,

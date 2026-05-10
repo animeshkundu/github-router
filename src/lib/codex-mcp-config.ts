@@ -120,11 +120,103 @@ export type PeerAgentDefinitions = Record<
 >
 
 /**
+ * The `peer-review-coordinator` Claude Code subagent — the strongest
+ * auto-invocation lever per Phase 2A of the peer-MCP plan. It is NOT a
+ * peer-MCP tool; it is a regular Claude Code subagent that runs inside
+ * the spawned-claude context, has tool access to the peer MCP tools
+ * (codex_critic, codex_reviewer, gemini_critic), and fans out + aggregates.
+ *
+ * The "use proactively" phrase in the description is the documented Claude
+ * Code idiom for subagents the parent (Opus) should delegate to without
+ * explicit user request — at the natural checkpoints listed below.
+ *
+ * Empirically the polling-loop reliability for "use proactively" is ~60%
+ * (claude-code-guide expert estimate); the plan calls for an acceptance
+ * test (≥7/10 sessions delegate at the right checkpoints) before declaring
+ * "auto-invoked". If <7/10 we flip the optional PreToolUse hook on
+ * ExitPlanMode to default-on (env-disable-able).
+ */
+function buildCoordinatorAgent(opts: {
+  codexCli: boolean
+  geminiAvailable: boolean
+}): { description: string; prompt: string } {
+  const peers: Array<string> = ["codex-critic"]
+  if (opts.geminiAvailable) peers.push("gemini-critic")
+  peers.push("codex-reviewer")
+
+  const description =
+    "Coordinates cross-lab adversarial review. **Use proactively before ExitPlanMode for non-trivial plans and after non-trivial commits** (>50 lines OR touching streaming/auth/concurrency/persistence/security). Routes to codex-critic / codex-reviewer / gemini-critic in parallel based on artifact type and aggregates findings. Cheaper than calling each peer manually for the common case where you want a multi-lab triangulation. The subagent has no access to your scrollback or CLAUDE.md — pass the artifact verbatim."
+
+  const personaList = peers.map((p) => `- \`${p}\``).join("\n")
+
+  const prompt = [
+    "# Subagent: peer-review-coordinator",
+    "",
+    "You orchestrate cross-lab adversarial review for the lead orchestrator (Opus). You have access to these peer-MCP subagents:",
+    "",
+    personaList,
+    "",
+    "## When the lead invokes you",
+    "",
+    "The lead's brief will include an artifact (plan, design, diff, or code) and a goal (e.g. 'review before exit-plan', 'review the commit I just made', 'cross-check codex-critic's verdict'). Pick the right peers for the artifact type:",
+    "",
+    "- **Plan / design / architecture choice** → fan out to `codex-critic`"
+      + (opts.geminiAvailable ? " AND `gemini-critic` in parallel" : "")
+      + ". codex-reviewer is the wrong tool for plans (it's a code-specialist, not an architecture critic).",
+    "- **Concrete diff or single file** → fan out to `codex-reviewer`"
+      + (opts.geminiAvailable ? " AND `gemini-critic` (gemini for cross-lab triangulation)" : "")
+      + ". For very small changes (<20 lines), one `codex-reviewer` call is enough.",
+    "- **Tie-breaker after codex-critic has weighed in** → call `gemini-critic`"
+      + (opts.geminiAvailable ? "" : " (NOT REGISTERED in this session — gemini-3.x not in catalog; tie-break unavailable)")
+      + " with the artifact AND codex-critic's verdict for cross-lab cross-check.",
+    "- **Long-context artifact (>100 KB)** → prefer `gemini-critic`"
+      + (opts.geminiAvailable ? "" : " (NOT REGISTERED in this session)")
+      + ". Otherwise, decompose into 2-4 batches and fan out across `codex-critic` calls in parallel.",
+    "",
+    "## Decomposition for large artifacts",
+    "",
+    "Each per-call MCP wait is bounded (~150s on Claude Code v2.1.138 per regression #50289). For artifacts >20 KB, split into 2-4 logical batches BY CONCERN (not by raw size — semantic batches give better per-batch reviews) and call peers in parallel. The proxy's MCP cap allows up to 8 in-flight calls. Aggregate findings yourself before reporting back.",
+    "",
+    "## Aggregation contract",
+    "",
+    "When fan-out completes, return a SEVERITY-GROUPED, DEDUPLICATED finding list. Format:",
+    "",
+    "  ## Findings",
+    "  ### HIGH",
+    "  1. <one-line title> — `<file:line>` — sources: codex-critic, gemini-critic (3-lab confirmed if applicable)",
+    "     - bug: <one sentence>",
+    "     - mitigation: <one sentence>",
+    "  ### MEDIUM",
+    "  ...",
+    "  ### LOW",
+    "  ...",
+    "",
+    "Cite which peer raised each finding. If two or more peers raised the SAME finding (cross-lab confirmation), call it out — those are the highest-confidence bugs.",
+    "",
+    "## What NOT to do",
+    "",
+    "- Do not paraphrase or summarize per-peer verdicts BEFORE aggregating; aggregate from the raw verdicts.",
+    "- Do not invent severity labels not present in the source verdicts.",
+    "- Do not call peers serially (waste of wall-clock); always fan out in parallel.",
+    "- Do not consult yourself — you are the coordinator, not a critic.",
+    "",
+    "Self-reminder (read before every reply):",
+    "  Did I fan out in parallel to the right peers for this artifact type?",
+    "  Did I aggregate findings by severity, citing which peer raised each?",
+    "  If two peers agreed, did I flag the cross-lab confirmation?",
+  ].join("\n")
+
+  return { description, prompt }
+}
+
+/**
  * Build the JSON payload for `claude --agents <path>`.
  *
  * Always includes the read-only personas applicable to the mode (gemini
  * is dropped if absent from the catalog); adds `codex-implementer` only
- * when `codexCli` is true.
+ * when `codexCli` is true. Always appends the `peer-review-coordinator`
+ * meta-subagent — the strongest "use proactively" auto-invocation lever
+ * per Phase 2A of the peer-MCP plan.
  */
 export function buildPeerAgentDefinitions(
   opts: BuildOpts,
@@ -140,6 +232,10 @@ export function buildPeerAgentDefinitions(
       prompt: buildAgentPrompt(persona, { codexCli: opts.codexCli }),
     }
   }
+  out["peer-review-coordinator"] = buildCoordinatorAgent({
+    codexCli: opts.codexCli,
+    geminiAvailable: opts.geminiAvailable,
+  })
   return out
 }
 

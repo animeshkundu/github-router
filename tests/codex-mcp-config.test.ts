@@ -94,7 +94,7 @@ describe("buildPeerMcpConfig", () => {
 })
 
 describe("buildPeerAgentDefinitions", () => {
-  test("HTTP backend with gemini = 3 agents (critic, gemini-critic, reviewer)", () => {
+  test("HTTP backend with gemini = 3 personas + peer-review-coordinator (4 agents total)", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: false,
       geminiAvailable: true,
@@ -105,15 +105,20 @@ describe("buildPeerAgentDefinitions", () => {
       "codex-critic",
       "codex-reviewer",
       "gemini-critic",
+      "peer-review-coordinator",
     ])
-    // Each prompt routes to the HTTP MCP server name.
-    for (const name of Object.keys(agents)) {
+    // Each persona prompt routes to the HTTP MCP server name; the
+    // coordinator prompt does NOT route to mcp tools directly (it
+    // delegates to the persona subagents instead).
+    for (const name of ["codex-critic", "codex-reviewer", "gemini-critic"]) {
       expect(agents[name]!.prompt).toContain("mcp__gh-router-peers__")
       expect(agents[name]!.description.length).toBeGreaterThan(0)
     }
+    expect(agents["peer-review-coordinator"]!.description).toContain("Use proactively")
+    expect(agents["peer-review-coordinator"]!.prompt).toContain("codex-critic")
   })
 
-  test("HTTP backend without gemini drops gemini-critic = 2 agents", () => {
+  test("HTTP backend without gemini drops gemini-critic but keeps coordinator", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: false,
       geminiAvailable: false,
@@ -123,11 +128,14 @@ describe("buildPeerAgentDefinitions", () => {
     expect(Object.keys(agents).sort()).toEqual([
       "codex-critic",
       "codex-reviewer",
+      "peer-review-coordinator",
     ])
     expect(agents["gemini-critic"]).toBeUndefined()
+    // Coordinator prompt should NOT reference gemini-critic when not registered.
+    expect(agents["peer-review-coordinator"]!.prompt).toContain("NOT REGISTERED")
   })
 
-  test("CLI backend with gemini = 4 agents (+ implementer)", () => {
+  test("CLI backend with gemini = 4 personas + coordinator (5 agents total)", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: true,
       geminiAvailable: true,
@@ -139,6 +147,7 @@ describe("buildPeerAgentDefinitions", () => {
       "codex-implementer",
       "codex-reviewer",
       "gemini-critic",
+      "peer-review-coordinator",
     ])
     // codex-* personas point at the stdio server; gemini-critic stays HTTP.
     expect(agents["codex-critic"]!.prompt).toContain("mcp__codex-cli__codex")

@@ -155,7 +155,10 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.5",
     endpoint: "/v1/responses",
     description:
-      "Adversarial second opinion on plans, designs, code, or systems-engineering tradeoffs. Backed by gpt-5.5 (OpenAI) — different model, different training data, different blind spots than Opus. Uses a calibrated 1–5 grading rubric and is allowed to reply 'no material objection' on solid artifacts. Prefer this for plans/designs under ~50k tokens of context. Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. The subagent has no access to your scrollback or CLAUDE.md.",
+      "Adversarial second opinion on plans, designs, code, or systems-engineering tradeoffs. Backed by gpt-5.5 (OpenAI) — different model, different training data, different blind spots than Opus. Uses a calibrated 1–5 grading rubric and is allowed to reply 'no material objection' on solid artifacts."
+      + " **CALL BEFORE: ExitPlanMode for any plan involving >2 files or new architecture; finalizing a major design choice; TeamCreate when the team's task is non-trivial.** **CALL AFTER: any commit touching concurrency, security, or streaming code paths.**"
+      + " If the artifact is large (>20 KB), prefer to break it into 2-4 focused batches and call this tool once per batch IN PARALLEL — each call must complete under the Claude Code MCP per-tool-call ceiling (~150s on v2.1.138 per regression #50289), so monolithic large-artifact calls will time out client-side. Aggregate findings yourself."
+      + " Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. Optionally pass `effort: 'xhigh'` for explicit deep dives or `effort: 'medium'` for quick sanity checks (default 'high'). The subagent has no access to your scrollback or CLAUDE.md.",
     baseInstructions: CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -167,7 +170,10 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gemini-3.1-pro-preview",
     endpoint: "/v1/chat/completions",
     description:
-      "Adversarial second opinion from a different lab. Backed by gemini-3.1-pro-preview (Google) — different training data and RLHF priors than Opus AND codex-critic, the strongest blind-spot-buster when the lead wants triangulation across three labs. Use for long-context artifacts (>50k tokens), math/proof-shaped reasoning, or as a tie-breaker after codex-critic has weighed in. Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. The subagent has no access to your scrollback or CLAUDE.md.",
+      "Adversarial second opinion from a different lab. Backed by gemini-3.1-pro-preview (Google) — different training data and RLHF priors than Opus AND codex-critic, the strongest blind-spot-buster when the lead wants triangulation across three labs. Use for long-context artifacts (>50k tokens), math/proof-shaped reasoning, or as a tie-breaker after codex-critic has weighed in."
+      + " **CALL BEFORE: ExitPlanMode for plans where Opus + codex-critic agree (use as triangulation); finalizing irreversible architectural choices.** **CALL AFTER: commits where you want a third-lab cross-check.**"
+      + " If the artifact is large (>100 KB), prefer to break into batches and call in parallel — gemini handles long context well but each per-call MCP wait is still bounded (~150s on v2.1.138)."
+      + " Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. The `effort` parameter is forwarded but may be silently ignored by Copilot's gemini route — gemini-3.x reasoning is largely auto-applied. The subagent has no access to your scrollback or CLAUDE.md.",
     baseInstructions: GEMINI_CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -179,7 +185,10 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.3-codex",
     endpoint: "/v1/responses",
     description:
-      "Line-level code review of a specific diff or file. Backed by gpt-5.3-codex (OpenAI) — the code-specialist sibling of gpt-5.5, trained heavily on code-review datasets so it catches different bugs than Opus. Prefer over codex-critic when the artifact is a concrete diff or single file (codex-critic is for plans/designs). Always pass: (a) the diff or file verbatim, (b) the change's intent, (c) test status. The subagent has no access to your scrollback or CLAUDE.md.",
+      "Line-level code review of a specific diff or file. Backed by gpt-5.3-codex (OpenAI) — the code-specialist sibling of gpt-5.5, trained heavily on code-review datasets so it catches different bugs than Opus. Prefer over codex-critic when the artifact is a concrete diff or single file (codex-critic is for plans/designs)."
+      + " **CALL AFTER: any non-trivial commit (>50 lines OR touching critical paths: streaming, auth, concurrency, persistence, security).** **CALL BEFORE: opening a PR or pushing changes a peer would review.**"
+      + " For diffs >20 KB, split by file-group and call once per group in parallel — each per-call wait is bounded (~150s on v2.1.138)."
+      + " Always pass: (a) the diff or file verbatim, (b) the change's intent, (c) test status. Optionally pass `effort: 'xhigh'` when reviewing security-critical code, `effort: 'medium'` for routine reviews (default 'high'). The subagent has no access to your scrollback or CLAUDE.md.",
     baseInstructions: REVIEWER_BASE,
     agentPrompt: "",
     writeCapable: false,

@@ -326,11 +326,15 @@ describe("/mcp tools/call routing", () => {
       instructions: string
       input: Array<{ role: string; content: Array<{ type: string; text: string }> }>
       stream?: boolean
+      reasoning?: { effort?: string }
     }
     expect(upstream.model).toBe("gpt-5.5")
     expect(upstream.instructions).toContain("codex-critic")
     expect(upstream.instructions).toContain("1–5") // grading rubric
     expect(upstream.stream).toBe(false)
+    // Default effort is "high" (Phase 2C — lower than xhigh per cost
+    // tradeoff, raisable per call via the effort argument).
+    expect(upstream.reasoning?.effort).toBe("high")
     const userText = upstream.input[0].content[0].text
     expect(userText).toContain("Review this trivial design.")
     expect(userText).toContain("ctx-123")
@@ -341,6 +345,38 @@ describe("/mcp tools/call routing", () => {
     }
     expect(result.isError).toBeUndefined()
     expect(result.content[0].text).toBe("no material objection")
+  })
+
+  test("explicit effort:xhigh argument reaches the upstream payload", async () => {
+    // Phase 2C effort plumbing — caller can override the default.
+    const captured = mockResponsesUpstream("ok")
+    await rpc({
+      jsonrpc: "2.0",
+      id: 109,
+      method: "tools/call",
+      params: {
+        name: "codex_critic",
+        arguments: { prompt: "deep dive", effort: "xhigh" },
+      },
+    })
+    const upstream = captured.lastBody as { reasoning?: { effort?: string } }
+    expect(upstream.reasoning?.effort).toBe("xhigh")
+  })
+
+  test("invalid effort value is rejected with -32602 (not silently forwarded)", async () => {
+    mockResponsesUpstream("ok")
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 110,
+      method: "tools/call",
+      params: {
+        name: "codex_critic",
+        arguments: { prompt: "x", effort: "extreme" },
+      },
+    })
+    const err = json.error as { code: number; message: string }
+    expect(err.code).toBe(-32602)
+    expect(err.message).toMatch(/effort/)
   })
 
   test("codex_reviewer call hits /responses with model=gpt-5.3-codex", async () => {
@@ -430,8 +466,13 @@ describe("/mcp tools/call routing", () => {
 })
 
 describe("/mcp concurrency cap", () => {
-  test("3rd in-flight tools/call returns queue-full isError", async () => {
-    // Mock a slow upstream so calls overlap.
+  test("9th in-flight tools/call returns queue-full isError (cap = 8)", async () => {
+    // Phase 2D of the peer-MCP plan raised MAX_INFLIGHT_TOOLS_CALL from 2
+    // to 8 so the decomposition pattern (Track 2B) — "split a >20 KB
+    // artifact into 2-4 batches and call in parallel" — can actually run
+    // in parallel without the (3+)th call returning isError "queue full".
+    // The cap at 8 covers a 7-fork wave with one slot of headroom and is
+    // still a hard upper bound against runaway clients.
     let resolveSlow: ((res: Response) => void) | null = null
     const slow = new Promise<Response>((r) => {
       resolveSlow = r
@@ -446,19 +487,22 @@ describe("/mcp concurrency cap", () => {
         params: { name: "codex_critic", arguments: { prompt: "x" } },
       })
 
-    const a = fire()
-    const b = fire()
-    // Brief tick so the two calls increment the in-flight counter.
+    // Fire 8 calls — all should occupy in-flight slots.
+    const inflight = [
+      fire(), fire(), fire(), fire(),
+      fire(), fire(), fire(), fire(),
+    ]
+    // Brief tick so the calls increment the in-flight counter.
     await new Promise((r) => setTimeout(r, 10))
-    expect(__getInFlightForTests()).toBe(2)
+    expect(__getInFlightForTests()).toBe(8)
 
-    // Third call should immediately return queue-full.
-    const c = await fire()
-    const result = c.json.result as { isError: boolean; content: Array<{ text: string }> }
+    // Ninth call should immediately return queue-full.
+    const ninth = await fire()
+    const result = ninth.json.result as { isError: boolean; content: Array<{ text: string }> }
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toMatch(/queue full/i)
 
-    // Now release the slow upstream so the in-flight pair resolves.
+    // Now release the slow upstream so the in-flight 8 resolve.
     resolveSlow!(
       new Response(
         JSON.stringify({
@@ -476,7 +520,7 @@ describe("/mcp concurrency cap", () => {
         { status: 200, headers: { "content-type": "application/json" } },
       ),
     )
-    await Promise.all([a, b])
+    await Promise.all(inflight)
     expect(__getInFlightForTests()).toBe(0)
   })
 })

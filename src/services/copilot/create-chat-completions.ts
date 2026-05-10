@@ -182,6 +182,13 @@ export interface ChatCompletionsPayload {
     | { type: "function"; function: { name: string } }
     | null
   user?: string | null
+  /**
+   * OpenAI-compatible reasoning effort knob. Copilot accepts low/medium/high/xhigh
+   * for OpenAI-routed models; for non-OpenAI models (e.g. gemini-3.x routed via
+   * /v1/chat/completions) the upstream may silently ignore this or 400 — the proxy
+   * forwards it as-is and surfaces any 400 through the existing tool-error path.
+   */
+  reasoning_effort?: string | null
 }
 
 export interface Tool {
