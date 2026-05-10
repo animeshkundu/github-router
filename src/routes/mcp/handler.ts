@@ -200,7 +200,6 @@ async function callPersona(
   persona: PersonaSpec,
   prompt: string,
   context: string | undefined,
-  signal: AbortSignal,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
   // Resolve the model id against the live catalog so a slug rename
   // (e.g., gemini-3.1-pro-preview → gemini-3.1-pro at GA) auto-resolves
@@ -208,6 +207,16 @@ async function callPersona(
   const resolvedModel = resolveModel(persona.model)
   const userText = buildUserText(prompt, context)
 
+  // NOTE on consumer-cancel signal: we deliberately do NOT pass
+  // c.req.raw.signal into the upstream fetch. Bun/srvx aborts the
+  // request signal as soon as the request body is fully consumed
+  // (after `await c.req.json()`), which would make every persona call
+  // fail immediately with "This operation was aborted". The existing
+  // /v1/responses handler also doesn't propagate consumer signal —
+  // it relies on the manual ReadableStream.cancel() callback for
+  // streaming, which v1 tools/call doesn't use. If we add streaming
+  // tools/call results in the future, revisit with a Bun-aware
+  // approach (see CLAUDE.md "Spec ≠ runtime").
   if (persona.endpoint === "/v1/responses") {
     const payload: ResponsesPayload = {
       model: resolvedModel,
@@ -222,8 +231,6 @@ async function callPersona(
     }
     const response = (await createResponses(
       payload,
-      undefined,
-      signal,
     )) as ResponsesApiResponse
     const text = extractResponsesText(response)
     if (!text) {
@@ -243,8 +250,6 @@ async function callPersona(
   }
   const response = (await createChatCompletions(
     payload,
-    undefined,
-    signal,
   )) as ChatCompletionResponse
   const text = extractChatCompletionText(response)
   if (!text) {
@@ -280,7 +285,6 @@ function logTelemetry(t: PersonaTelemetry): void {
 
 async function handleToolsCall(
   body: JsonRpcRequest,
-  signal: AbortSignal,
 ): Promise<object> {
   const params = body.params ?? {}
   const name = typeof params.name === "string" ? params.name : ""
@@ -324,7 +328,7 @@ async function handleToolsCall(
   inFlightToolsCall++
   const startedAt = Date.now()
   try {
-    const result = await callPersona(persona, prompt, context, signal)
+    const result = await callPersona(persona, prompt, context)
     logTelemetry({
       name: persona.agentName,
       model: persona.model,
@@ -360,7 +364,7 @@ async function handleToolsCall(
 }
 
 async function handleRpc(
-  c: Context,
+  _c: Context,
   body: JsonRpcRequest,
 ): Promise<{ status: number; body: object | null }> {
   if (body.jsonrpc !== "2.0" || typeof body.method !== "string") {
@@ -395,7 +399,7 @@ async function handleRpc(
     case "tools/call":
       return {
         status: 200,
-        body: await handleToolsCall(body, c.req.raw.signal),
+        body: await handleToolsCall(body),
       }
 
     case "ping":
