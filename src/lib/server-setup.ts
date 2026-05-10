@@ -300,6 +300,22 @@ export function getClaudeCodeEnvVars(
     // skills, MCP, hooks, CLAUDE.md, custom agents) while making the
     // keychain probe miss the user's actual credential entry.
     CLAUDE_CONFIG_DIR: path.join(os.homedir(), ".claude"),
+    // Extend Claude Code's MCP per-tool-call wait window from the
+    // hardcoded SDK default (~60s post-2.1.113 regression #50289) to
+    // 10 minutes. The peer-MCP review tools (codex_critic, codex_reviewer,
+    // gemini_critic) front gpt-5.5 / gpt-5.3-codex / gemini-3.1-pro at
+    // high reasoning effort — adversarial reviews of large diffs can
+    // legitimately reason for several minutes between visible token
+    // bursts. Without this, every long peer-review call client-cancels
+    // before the upstream model produces its first token.
+    //
+    // The MCP_TIMEOUT symbol is in the v2.1.138 binary's env-var
+    // allowlist; whether it actually reaches the HTTP per-tool-call
+    // wait (vs. just server-startup) is empirical — see plan Phase 1.
+    // Setting it costs nothing if the regression is fixed in a future
+    // version (the bundled MCP SDK respects per-server `timeout` and
+    // ignores the env override).
+    MCP_TIMEOUT: "600000",
     // Suppress non-essential telemetry/model calls.
     DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",

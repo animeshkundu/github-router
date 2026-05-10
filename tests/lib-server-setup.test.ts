@@ -90,6 +90,21 @@ describe("getClaudeCodeEnvVars", () => {
     expect(vars.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1")
   })
 
+  test("sets MCP_TIMEOUT=600000 to extend HTTP MCP per-tool-call wait beyond the v2.1.113+ regression", () => {
+    // Regression context: GitHub issue
+    // https://github.com/anthropics/claude-code/issues/50289 — open,
+    // labeled `bug, regression, has repro`. The .mcp.json per-server
+    // `timeout` field is silently dropped for HTTP transport since
+    // Claude Code 2.1.113. The MCP_TIMEOUT env var symbol is in the
+    // v2.1.138 binary's env-var allowlist; the empirical question is
+    // whether it actually extends the per-tool-call HTTP wait (vs.
+    // just server-startup). This test asserts we set it; whether it
+    // works at runtime is what Phase 1 of the peer-MCP plan tests.
+    // See docs/peer-mcp-design.md and docs/research/peer-mcp-investigation.md.
+    const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+    expect(vars.MCP_TIMEOUT).toBe("600000")
+  })
+
   test("sets CLAUDE_CONFIG_DIR to the default path to activate keychain isolation", () => {
     // Per binary-grep of Claude Code 2.1.126 iN(): when CLAUDE_CONFIG_DIR
     // is set (to ANYTHING — even its default), the keychain service-name
