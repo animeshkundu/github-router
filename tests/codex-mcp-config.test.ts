@@ -182,7 +182,7 @@ describe("resolveCodexCliBackend", () => {
 })
 
 describe("writePeerMcpRuntimeFiles", () => {
-  test("writes mcp-config + agents tempfiles with mode 0o600 and PID-suffixed names", async () => {
+  test("writes mcp-config + agents tempfiles with mode 0o600 and PID+random-suffix names", async () => {
     await withTempRuntimeDir(async (runtimeDir, codexHome) => {
       const runtime = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
@@ -191,12 +191,20 @@ describe("writePeerMcpRuntimeFiles", () => {
         codexHome,
       })
 
-      expect(runtime.mcpConfigPath).toBe(
-        path.join(runtimeDir, `peer-mcp-${process.pid}.json`),
+      // Filenames are PID-prefixed (so the boot sweep can identify them)
+      // and random-suffixed (so concurrent in-process calls can't collide).
+      expect(runtime.mcpConfigPath).toMatch(
+        new RegExp(
+          `peer-mcp-${process.pid}-[0-9a-f]{8}\\.json$`,
+        ),
       )
-      expect(runtime.agentsPath).toBe(
-        path.join(runtimeDir, `peer-agents-${process.pid}.json`),
+      expect(runtime.agentsPath).toMatch(
+        new RegExp(
+          `peer-agents-${process.pid}-[0-9a-f]{8}\\.json$`,
+        ),
       )
+      expect(path.dirname(runtime.mcpConfigPath)).toBe(runtimeDir)
+      expect(path.dirname(runtime.agentsPath)).toBe(runtimeDir)
 
       // Files exist + permissions
       const mcpStat = await fs.stat(runtime.mcpConfigPath)
@@ -232,7 +240,8 @@ describe("writePeerMcpRuntimeFiles", () => {
         runtimeDir,
         codexHome,
       })
-      // Cleanup so the second write doesn't trip O_EXCL via same-PID name
+      // Cleanup not strictly required now (random suffix prevents collision)
+      // but kept to exercise the cleanup path.
       await a.cleanup()
       const b = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
@@ -245,7 +254,7 @@ describe("writePeerMcpRuntimeFiles", () => {
     })
   })
 
-  test("re-runs in the same PID overwrite cleanly (pre-existing files don't break)", async () => {
+  test("re-runs in the same PID produce DIFFERENT files (random-suffix collision avoidance)", async () => {
     await withTempRuntimeDir(async (runtimeDir, codexHome) => {
       const a = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
@@ -253,15 +262,21 @@ describe("writePeerMcpRuntimeFiles", () => {
         runtimeDir,
         codexHome,
       })
-      // Don't cleanup. Second call must succeed despite same-PID names existing.
+      // Don't cleanup. Second call must NOT collide with first call's
+      // files — random-suffix guarantees uniqueness within a process.
       const b = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
         geminiAvailable: false,
         runtimeDir,
         codexHome,
       })
-      expect(a.mcpConfigPath).toBe(b.mcpConfigPath)
+      expect(a.mcpConfigPath).not.toBe(b.mcpConfigPath)
+      expect(a.agentsPath).not.toBe(b.agentsPath)
       expect(b.nonce).not.toBe(a.nonce)
+      // Both sets of files exist and are independently cleanupable.
+      await fs.access(a.mcpConfigPath)
+      await fs.access(b.mcpConfigPath)
+      await a.cleanup()
       await b.cleanup()
     })
   })

@@ -1,3 +1,5 @@
+import consola from "consola"
+
 export const DEFAULT_PORT = 8787
 
 /**
@@ -51,7 +53,17 @@ export function generateRandomPort(): number {
 function envInt(key: string, fallback: number): number {
   const raw = process.env[key]
   if (!raw) return fallback
-  const parsed = parseInt(raw, 10)
+  // Strict integer format only: parseInt is too permissive — it would
+  // silently turn `"5e3"` into 5, `"300_000"` into 300, `"60000ms"` into
+  // 60000. For timeout knobs we'd rather fall back than silently
+  // misconfigure (e.g. set a 5-min inactivity timer to 5 ms).
+  if (!/^[0-9]+$/.test(raw.trim())) {
+    consola.warn(
+      `${key}=${JSON.stringify(raw)} is not a non-negative integer; using fallback ${fallback}`,
+    )
+    return fallback
+  }
+  const parsed = Number.parseInt(raw, 10)
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
 }
 

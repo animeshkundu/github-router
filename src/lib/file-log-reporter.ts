@@ -96,12 +96,24 @@ export class FileLogReporter implements ConsolaReporter {
     // call stack as a write (e.g., a consola.error fired from an error
     // handler triggered by another log). Now we just write and trust the
     // synchronicity.
+    //
+    // The fd is closed in `finally` so an ENOSPC/EIO from writeSync does
+    // not leak the fd. Repeated logging failures otherwise escalate into
+    // EMFILE and bring down the whole process's ability to open files.
+    let fd: number | undefined
     try {
-      const fd = fs.openSync(this.filePath, "a", 0o600)
+      fd = fs.openSync(this.filePath, "a", 0o600)
       fs.writeSync(fd, line)
-      fs.closeSync(fd)
     } catch {
       // Silently discard — cannot log a logging failure
+    } finally {
+      if (fd !== undefined) {
+        try {
+          fs.closeSync(fd)
+        } catch {
+          // already closed / unwritable — nothing to do
+        }
+      }
     }
   }
 }

@@ -135,11 +135,21 @@ export function relayAnthropicStream(
         }
       } catch (error) {
         upstreamFinished = true
-        if (isControllerClosedError(error) || consumerCancelled) {
-          // Not an upstream error — the consumer has closed the stream.
-          // Don't log noise, don't try to enqueue an error event (that
-          // would also throw and may corrupt the terminal bytes). Make
-          // sure the downstream is closed so the consumer's read settles.
+        if (consumerCancelled) {
+          // Consumer cancelled mid-stream — the cancel() callback already
+          // ran (or our inner enqueue-catch flipped the flag). Close the
+          // downstream so the consumer's read settles, and release the
+          // upstream reader if not already done.
+          //
+          // We deliberately do NOT call isControllerClosedError(error) on
+          // upstream/reader failures here — that helper matches substrings
+          // like "stream is closed" which can legitimately appear in real
+          // undici upstream errors (e.g., body stream closed by the
+          // server), and treating them as consumer-cancel would silently
+          // suppress an `event: error` frame the consumer needs.
+          reader.cancel(error).catch(() => {
+            // upstream may already be closed
+          })
           safeClose(controller)
           return
         }
@@ -159,6 +169,13 @@ export function relayAnthropicStream(
           }
           // Consumer-closed: silent
         }
+        // Release the upstream socket. We've decided this stream is over —
+        // the consumer's `cancel()` callback will NOT fire because we're
+        // closing from our side, so without this the upstream fetch body
+        // and TCP connection stay alive until the upstream times out.
+        reader.cancel(error).catch(() => {
+          // upstream may already be closed
+        })
         safeClose(controller)
       }
     },

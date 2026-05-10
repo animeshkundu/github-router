@@ -163,6 +163,13 @@ export async function handleCompletion(c: Context) {
       // already closed / errored
     }
   }
+  const releaseUpstream = (reason?: unknown) => {
+    if (typeof iterator.return === "function") {
+      iterator.return(reason).catch(() => {
+        // upstream may already be closed
+      })
+    }
+  }
   const safeEnqueue = (
     controller: ReadableStreamDefaultController<Uint8Array>,
     bytes: Uint8Array,
@@ -173,6 +180,11 @@ export async function handleCompletion(c: Context) {
     } catch (e) {
       if (isControllerClosedError(e)) {
         consumerCancelled = true
+        // The downstream cancel() callback may not fire if the controller
+        // was closed by Bun's HTTP layer rather than an explicit consumer
+        // .cancel() — release the upstream iterator here so the upstream
+        // socket does not leak.
+        releaseUpstream(e)
         return false
       }
       throw e
@@ -206,15 +218,29 @@ export async function handleCompletion(c: Context) {
             safeClose(controller)
             return
           }
+          // Defensive: an upstream iterator that yields `{done:false, value:undefined}`
+          // would crash formatSSE() below. Skip silently and pull again on
+          // the next consumer demand. Real upstream iterators never emit
+          // this shape, but a misbehaving / proxied iterator might.
+          if (result.value === undefined || result.value === null) return
           if (debugEnabled) {
             consola.debug("Streaming chunk:", JSON.stringify(result.value))
           }
           safeEnqueue(controller, ENCODER.encode(formatSSE(result.value)))
         } catch (error) {
           upstreamFinished = true
-          if (isControllerClosedError(error) || consumerCancelled) {
-            // Consumer-cancelled mid-pull, not an upstream failure.
-            // Close so the consumer's read settles cleanly.
+          if (consumerCancelled) {
+            // Consumer-cancelled mid-pull, not an upstream failure. Close
+            // so the consumer's read settles cleanly. Also release the
+            // upstream iterator — the cancel() callback may not have
+            // fired if the controller was closed by Bun's HTTP layer.
+            //
+            // We deliberately do NOT call isControllerClosedError(error)
+            // on iterator-side errors here — the helper matches substrings
+            // like "stream is closed" which can appear in real upstream
+            // errors, and treating them as consumer-cancel would silently
+            // suppress the OpenAI-shape error frame the consumer needs.
+            releaseUpstream(error)
             safeClose(controller)
             return
           }
@@ -223,17 +249,17 @@ export async function handleCompletion(c: Context) {
             controller,
             ENCODER.encode(buildOpenAIErrorEvent(errName, errMessage)),
           )
+          // We've decided this stream is done — release the upstream
+          // iterator since the cancel() callback won't fire on a
+          // server-initiated close.
+          releaseUpstream(error)
           safeClose(controller)
         }
       },
       cancel() {
         consumerCancelled = true
         upstreamFinished = true
-        if (typeof iterator.return === "function") {
-          iterator.return().catch(() => {
-            // upstream may already be closed
-          })
-        }
+        releaseUpstream()
       },
     }),
     {

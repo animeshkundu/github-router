@@ -92,18 +92,24 @@ export async function writeRuntimeFileSecure(
 }
 
 /**
- * Sweep stale runtime tempfiles. Removes:
- *   1. Files whose embedded PID is no longer a live process. A proxy
- *      crash (`kill -9`, OS reboot) leaves orphans that would
- *      otherwise accumulate forever — and worse, a stale config
- *      pointing at a now-recycled port could route MCP traffic to
- *      whatever process bound that port next.
- *   2. Files older than 24h regardless of PID, defense-in-depth
- *      against PID wraparound.
+ * Sweep stale runtime tempfiles. Removes files whose embedded PID is no
+ * longer a live process. A proxy crash (`kill -9`, OS reboot) leaves
+ * orphans that would otherwise accumulate forever — and worse, a stale
+ * config pointing at a now-recycled port could route MCP traffic to
+ * whatever process bound that port next.
  *
  * Naming convention: `peer-mcp-<pid>.json` and `peer-agents-<pid>.json`.
  * Files not matching either pattern are left alone — this directory
  * is shared with future runtime artifacts.
+ *
+ * We deliberately do NOT age-prune files whose PID is alive. A
+ * legitimately long-running proxy can have a tempfile older than any
+ * arbitrary threshold; deleting it out from under the live process
+ * breaks the spawned Claude Code child's MCP/agent wiring with no clean
+ * recovery. PID-wraparound risk is mitigated by (a) PID reuse on Linux
+ * being slow under typical loads, and (b) the file is only consulted by
+ * github-router itself — an unrelated process that inherits the PID
+ * never reads it.
  */
 export async function sweepStaleRuntimeFiles(): Promise<void> {
   const dir = PATHS.CLAUDE_RUNTIME_DIR
@@ -114,32 +120,20 @@ export async function sweepStaleRuntimeFiles(): Promise<void> {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return
     throw err
   }
-  const now = Date.now()
-  const STALE_MS = 24 * 60 * 60 * 1000
 
   for (const name of entries) {
-    const match = /^peer-(?:mcp|agents)-(\d+)\.json$/.exec(name)
+    // Match both legacy `peer-mcp-<pid>.json` and current
+    // `peer-mcp-<pid>-<rand>.json` filenames so we can clean up either.
+    const match = /^peer-(?:mcp|agents)-(\d+)(?:-[0-9a-f]+)?\.json$/.exec(name)
     if (!match) continue
     const pid = Number.parseInt(match[1], 10)
     const filePath = path.join(dir, name)
 
-    let shouldDelete = false
-    if (!isPidAlive(pid)) {
-      shouldDelete = true
-    } else {
-      try {
-        const stat = await fs.stat(filePath)
-        if (now - stat.mtimeMs > STALE_MS) shouldDelete = true
-      } catch {
-        // stat failed — assume gone, skip
-      }
-    }
+    if (isPidAlive(pid)) continue
 
-    if (shouldDelete) {
-      await fs.unlink(filePath).catch(() => {
-        // already gone or unreadable, fine
-      })
-    }
+    await fs.unlink(filePath).catch(() => {
+      // already gone or unreadable, fine
+    })
   }
 }
 

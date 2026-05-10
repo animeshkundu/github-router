@@ -21,7 +21,15 @@ let rateLimitChain: Promise<void> = Promise.resolve()
 export async function checkRateLimit(state: State) {
   if (state.rateLimitSeconds === undefined) return
 
-  const myTurn = rateLimitChain.then(() => doCheck(state))
+  // Ticket carried by `myTurn` so a queue-timeout can flag it as cancelled
+  // before doCheck() ever gets to sleep or write to state.lastRequestTimestamp.
+  // Without this, a request that already returned 429 to the caller would
+  // STILL run later inside the chain — sleep, then bump the shared timestamp
+  // — penalising subsequent legitimate requests for a request that was
+  // never actually serviced.
+  const ticket = { aborted: false }
+
+  const myTurn = rateLimitChain.then(() => doCheck(state, ticket))
   rateLimitChain = myTurn.catch(() => {
     // Errors don't break the chain — the next caller starts fresh.
   })
@@ -29,6 +37,7 @@ export async function checkRateLimit(state: State) {
   return Promise.race([
     myTurn,
     sleep(RATE_LIMIT_QUEUE_TIMEOUT_MS).then(() => {
+      ticket.aborted = true
       throw new HTTPError(
         "Rate limit queue wait exceeded",
         Response.json(
@@ -46,8 +55,12 @@ export async function checkRateLimit(state: State) {
   ])
 }
 
-async function doCheck(state: State): Promise<void> {
+async function doCheck(
+  state: State,
+  ticket: { aborted: boolean },
+): Promise<void> {
   if (state.rateLimitSeconds === undefined) return
+  if (ticket.aborted) return
 
   const now = Date.now()
 
@@ -80,6 +93,10 @@ async function doCheck(state: State): Promise<void> {
     `Rate limit reached. Waiting ${waitTimeSeconds} seconds before proceeding...`,
   )
   await sleep(waitTimeMs)
+  // Re-check after the sleep — if the caller queue-timed-out while we were
+  // sleeping, do NOT bump the shared timestamp (that would penalise the next
+  // legitimate request for one that was already 429'd).
+  if (ticket.aborted) return
   state.lastRequestTimestamp = Date.now()
   consola.info("Rate limit wait completed, proceeding with request")
 }

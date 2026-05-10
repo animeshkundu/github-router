@@ -124,3 +124,44 @@ test("sweepStaleRuntimeFiles tolerates missing dir without throwing", async () =
   await fs.rm(PATHS.CLAUDE_RUNTIME_DIR, { recursive: true, force: true })
   await expect(sweepStaleRuntimeFiles()).resolves.toBeUndefined()
 })
+
+test("sweepStaleRuntimeFiles does NOT delete a live-PID file even if it is older than 24h", async () => {
+  // Regression for codex_reviewer batch7 finding: the previous sweep
+  // age-pruned files older than 24h regardless of liveness, which would
+  // delete a long-running proxy's active tempfiles out from under it.
+  // Now: only dead-PID files are removed; age is irrelevant for live PIDs.
+  await ensurePaths()
+  const dir = PATHS.CLAUDE_RUNTIME_DIR
+
+  const livePath = path.join(dir, `peer-mcp-${process.pid}-deadbeef.json`)
+  await fs.writeFile(livePath, "{}", { mode: 0o600 })
+
+  // Backdate to 7 days ago — well past any 24h "stale" threshold.
+  const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000
+  await fs.utimes(livePath, sevenDaysAgo / 1000, sevenDaysAgo / 1000)
+
+  await sweepStaleRuntimeFiles()
+
+  await expect(fs.stat(livePath)).resolves.toBeDefined()
+  await fs.unlink(livePath)
+})
+
+test("sweepStaleRuntimeFiles handles both legacy peer-mcp-<pid>.json and new peer-mcp-<pid>-<rand>.json", async () => {
+  // Regression: filenames now carry a random suffix to avoid in-process
+  // collisions. The sweep regex must match BOTH the legacy and current
+  // shapes so we can clean up after either.
+  await ensurePaths()
+  const dir = PATHS.CLAUDE_RUNTIME_DIR
+
+  const deadPidA = 2_147_483_644
+  const deadPidB = 2_147_483_643
+  const legacyDead = path.join(dir, `peer-mcp-${deadPidA}.json`)
+  const suffixedDead = path.join(dir, `peer-agents-${deadPidB}-cafef00d.json`)
+  await fs.writeFile(legacyDead, "{}", { mode: 0o600 })
+  await fs.writeFile(suffixedDead, "{}", { mode: 0o600 })
+
+  await sweepStaleRuntimeFiles()
+
+  await expect(fs.stat(legacyDead)).rejects.toThrow()
+  await expect(fs.stat(suffixedDead)).rejects.toThrow()
+})

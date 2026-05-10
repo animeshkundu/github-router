@@ -367,15 +367,38 @@ async function handleRpc(
   _c: Context,
   body: JsonRpcRequest,
 ): Promise<{ status: number; body: object | null }> {
+  // Reject non-object envelopes (null, arrays, primitives) BEFORE we
+  // dereference body.jsonrpc / body.method — without this guard a `null`
+  // body throws TypeError on the property access, falls into the outer
+  // catch in handleMcpPost, and returns RPC_INTERNAL_ERROR (-32603) when
+  // the JSON-RPC spec wants RPC_INVALID_REQUEST (-32600) for shape errors.
+  if (
+    body === null
+    || typeof body !== "object"
+    || Array.isArray(body)
+  ) {
+    return {
+      status: 200,
+      body: rpcError(null, RPC_INVALID_REQUEST, "jsonrpc 2.0 envelope required"),
+    }
+  }
   if (body.jsonrpc !== "2.0" || typeof body.method !== "string") {
     return {
       status: 200,
-      body: rpcError(body.id, RPC_INVALID_REQUEST, "jsonrpc 2.0 envelope required"),
+      body: rpcError(body.id ?? null, RPC_INVALID_REQUEST, "jsonrpc 2.0 envelope required"),
     }
   }
 
+  // Per JSON-RPC 2.0: requests without an `id` field are notifications
+  // and MUST NOT receive a response body. The runtime must treat them
+  // as fire-and-forget. We dispatch the method (so e.g. notifications/
+  // initialized still gets observed), then return 202 + empty body
+  // regardless of what the dispatched method returned.
+  const isNotification = body.id === undefined
+
   switch (body.method) {
     case "initialize":
+      if (isNotification) return { status: 202, body: null }
       return {
         status: 200,
         body: rpcResult(body.id, {
@@ -391,22 +414,26 @@ async function handleRpc(
       return { status: 202, body: null }
 
     case "tools/list":
+      if (isNotification) return { status: 202, body: null }
       return {
         status: 200,
         body: rpcResult(body.id, { tools: toolEntries() }),
       }
 
     case "tools/call":
+      if (isNotification) return { status: 202, body: null }
       return {
         status: 200,
         body: await handleToolsCall(body),
       }
 
     case "ping":
+      if (isNotification) return { status: 202, body: null }
       // MCP heartbeat — return empty result.
       return { status: 200, body: rpcResult(body.id, {}) }
 
     default:
+      if (isNotification) return { status: 202, body: null }
       return {
         status: 200,
         body: rpcError(
@@ -444,9 +471,15 @@ export async function handleMcpPost(c: Context): Promise<Response> {
     return c.json(respBody, status as 200)
   } catch (err) {
     consola.error("/mcp handler error:", err)
+    // Be defensive about `body.id` — body could be null or a non-object
+    // primitive that slipped past the JSON parse (rare but possible).
+    const echoId =
+      typeof body === "object" && body !== null && !Array.isArray(body)
+        ? (body as JsonRpcRequest).id ?? null
+        : null
     return c.json(
       rpcError(
-        body.id,
+        echoId,
         RPC_INTERNAL_ERROR,
         err instanceof Error ? err.message : String(err),
       ),

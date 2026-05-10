@@ -195,6 +195,59 @@ describe("/mcp protocol methods", () => {
     expect(err.code).toBe(-32600)
   })
 
+  test("null JSON body → invalid-request (-32600), NOT internal-error (-32603)", async () => {
+    // Regression for codex_reviewer batch 6 finding #1: previously a
+    // `null` body threw on `body.jsonrpc` access, fell into the outer
+    // catch in handleMcpPost, and surfaced as -32603 internal-error
+    // when the JSON-RPC spec wants -32600 invalid-request for shape
+    // errors. Now the handler shape-guards before dereferencing.
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+        },
+        body: "null",
+      }),
+    )
+    expect(res.status).toBe(200)
+    const json = await res.json() as { error?: { code: number } }
+    expect(json.error?.code).toBe(-32600)
+  })
+
+  test("array JSON body → invalid-request (-32600), not a crash", async () => {
+    // Same shape-guard applies to arrays.
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+        },
+        body: "[1,2,3]",
+      }),
+    )
+    expect(res.status).toBe(200)
+    const json = await res.json() as { error?: { code: number } }
+    expect(json.error?.code).toBe(-32600)
+  })
+
+  test("notification (id missing) for tools/list → 202 with empty body, no JSON-RPC response", async () => {
+    // Regression for codex_reviewer batch 6 finding #2: per JSON-RPC 2.0,
+    // requests without an `id` are notifications and MUST NOT receive a
+    // response body. Previously the handler returned the regular result
+    // body anyway (forcing `id ?? null`), which breaks strict clients.
+    const res = await mcpRoutes.request(
+      buildReq({ jsonrpc: "2.0", method: "tools/list" }),
+    )
+    expect(res.status).toBe(202)
+    const text = await res.text()
+    expect(text).toBe("")
+  })
+
   test("DELETE /mcp returns 200 ack regardless of body", async () => {
     const res = await mcpRoutes.request(
       new Request(`http://${PROXY_HOST}/`, {

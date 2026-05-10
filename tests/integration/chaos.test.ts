@@ -183,13 +183,19 @@ test(
           messages: [{ role: "user", content: "say hi" }],
         })
 
-        // For the client-abort behavior (and a quarter of the others),
-        // schedule an abort at a random millisecond after the request
-        // starts. This is the path that produced the original
-        // controller-already-closed race.
+        // Two abort flavours, both intentionally racy in different ways:
+        //   - timer-based: schedules abort at a random ms after request
+        //     start. Tests the "abort fires before any byte arrived" path.
+        //   - milestone-based: reads the first downstream chunk, THEN aborts.
+        //     Deterministically lands the abort INSIDE the pull()-mid-await
+        //     window, which is the race that produced the original
+        //     controller-already-closed bug. The timer-only approach can
+        //     fire too early under load and miss this window entirely.
         const shouldAbort =
           behavior === "happy_then_client_abort" || i % 4 === 0
-        if (shouldAbort) {
+        const useMilestoneAbort = shouldAbort && i % 2 === 0
+        const useTimerAbort = shouldAbort && !useMilestoneAbort
+        if (useTimerAbort) {
           setTimeout(() => ac.abort(), Math.floor(Math.random() * 8) + 2)
         }
 
@@ -200,12 +206,35 @@ test(
             body: reqBody,
             signal: ac.signal,
           })
-          // Drain the body so the wrapper's pull() runs.
-          const body = await res.text().catch(() => "")
+          let bodyLen = 0
+          if (useMilestoneAbort && res.body) {
+            // Read first chunk to confirm the wrapper's pull() has started,
+            // then abort. This deterministically lands the abort in the
+            // pull()-mid-await window — the race CLAUDE.md flags as the
+            // class of bug the chaos test is supposed to catch.
+            const reader = res.body.getReader()
+            try {
+              const first = await reader.read()
+              if (first.value) bodyLen += first.value.byteLength
+              ac.abort()
+              while (true) {
+                const r = await reader.read()
+                if (r.done) break
+                if (r.value) bodyLen += r.value.byteLength
+              }
+            } catch {
+              // Abort propagates as a read error — that's the path under test.
+            }
+          } else {
+            // Drain the body so the wrapper's pull() runs to completion (or
+            // aborts via the timer-scheduled abort).
+            const body = await res.text().catch(() => "")
+            bodyLen = body.length
+          }
           results.push({
             behavior,
             status: res.status,
-            bodyLen: body.length,
+            bodyLen,
           })
         } catch (e) {
           results.push({
@@ -239,15 +268,37 @@ test(
       ).length
       expect(couldNotDeliverCount).toBe(0)
 
-      // Every response is either a clean status (200/4xx/5xx) or an
-      // AbortError — no hangs (the test has implicit timeout protection
-      // from bun:test, but we also assert results all settled).
+      // Consumer-cancel paths must NOT produce "Upstream stream interrupted"
+      // log lines — those are reserved for genuine upstream failures
+      // (midstream_error, upstream_rst). Bound conservatively: at most one
+      // line per real-upstream-failure iteration.
+      const realFailureBehaviors = new Set<ChaosBehavior>([
+        "midstream_error",
+        "upstream_rst",
+      ])
+      const realFailureIterations = behaviors.filter((b) =>
+        realFailureBehaviors.has(b),
+      ).length * Math.ceil(ITERATIONS / behaviors.length)
+      const upstreamInterruptedCount = (
+        newLines.match(/Upstream stream interrupted/g) ?? []
+      ).length
+      expect(upstreamInterruptedCount).toBeLessThanOrEqual(
+        realFailureIterations,
+      )
+
+      // Allowlist for client-error patterns. Anything else means the abort
+      // path produced an unexpected runtime error class — the assertion
+      // catches regressions that the previous `typeof e === "string"` check
+      // would have silently accepted.
+      const ALLOWED_ERROR_PATTERN =
+        /AbortError|abort|fetch failed|terminated|operation was aborted/i
+      // Every response is either a clean status (200/4xx/5xx) or a
+      // recognized client-side error — no hangs (the test has implicit
+      // timeout protection from bun:test, but we also assert results all
+      // settled).
       for (const r of results) {
         if (r.error) {
-          // AbortError is the expected error for client-aborted requests.
-          // "fetch failed" / undici equivalents are also acceptable for
-          // mid-stream-killed connections.
-          expect(typeof r.error).toBe("string")
+          expect(r.error).toMatch(ALLOWED_ERROR_PATTERN)
         } else {
           expect(r.status).toBeGreaterThanOrEqual(200)
           expect(r.status).toBeLessThan(600)

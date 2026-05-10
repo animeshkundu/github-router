@@ -35,38 +35,56 @@ export const setupCopilotToken = async () => {
 // + a 401-retry path) share one in-flight refresh promise so we never
 // overlap network calls or race writes to state.copilotToken.
 let inflightRefresh: Promise<void> | undefined
-let lastRefreshAttemptAt = 0
-const REFRESH_STORM_WINDOW_MS = 30_000
+// Cooldowns are keyed off the OUTCOME of the last refresh, not the attempt:
+//   - lastRefreshSuccess: throttles 401-retries when the token is fresh
+//     (don't pointlessly re-fetch a token we just got).
+//   - lastRefreshFailure: shorter backoff so a transient upstream blip
+//     doesn't suppress legitimate refresh attempts for a full 30s, but
+//     still prevents a thundering-herd refresh-storm against an upstream
+//     that's persistently failing.
+let lastRefreshSuccess = 0
+let lastRefreshFailure = 0
+const REFRESH_SUCCESS_COOLDOWN_MS = 30_000
+const REFRESH_FAILURE_COOLDOWN_MS = 5_000
 
 export async function refreshCopilotToken(
   reason: "interval" | "401-retry",
 ): Promise<void> {
   if (inflightRefresh) return inflightRefresh
-  // Refresh-storm protection: if we attempted a refresh within the
-  // window, decline new attempts. Interval refreshes always proceed
+  // Refresh-storm protection: if a recent refresh already completed,
+  // decline new 401-retry attempts. Interval refreshes always proceed
   // (they're spaced by `refresh_in - 60s` which is well outside the
-  // window); 401-retry attempts respect the window.
-  if (
-    reason === "401-retry"
-    && Date.now() - lastRefreshAttemptAt < REFRESH_STORM_WINDOW_MS
-  ) {
-    consola.debug(
-      `refreshCopilotToken(${reason}) skipped: prior refresh within ${REFRESH_STORM_WINDOW_MS}ms`,
-    )
-    return
+  // window). 401-retry attempts respect both cooldowns:
+  //   - skip if a refresh succeeded within the last 30s (token is fresh)
+  //   - skip if a refresh failed within the last 5s (back off briefly)
+  if (reason === "401-retry") {
+    const now = Date.now()
+    if (now - lastRefreshSuccess < REFRESH_SUCCESS_COOLDOWN_MS) {
+      consola.debug(
+        `refreshCopilotToken(${reason}) skipped: prior success within ${REFRESH_SUCCESS_COOLDOWN_MS}ms`,
+      )
+      return
+    }
+    if (now - lastRefreshFailure < REFRESH_FAILURE_COOLDOWN_MS) {
+      consola.debug(
+        `refreshCopilotToken(${reason}) skipped: prior failure within ${REFRESH_FAILURE_COOLDOWN_MS}ms`,
+      )
+      return
+    }
   }
-  lastRefreshAttemptAt = Date.now()
 
   inflightRefresh = (async () => {
     consola.debug(`Refreshing Copilot token (reason=${reason})`)
     try {
       const { token } = await getCopilotToken()
       state.copilotToken = token
+      lastRefreshSuccess = Date.now()
       consola.debug("Copilot token refreshed")
       if (state.showToken) {
         consola.info("Refreshed Copilot token:", token)
       }
     } catch (error) {
+      lastRefreshFailure = Date.now()
       consola.error(
         `Failed to refresh Copilot token (reason=${reason}):`,
         error,

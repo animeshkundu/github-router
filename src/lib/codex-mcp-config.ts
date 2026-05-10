@@ -167,10 +167,12 @@ interface WriteOpts {
  * tempfiles under `CLAUDE_RUNTIME_DIR` with mode 0o600 and `O_EXCL`,
  * and return a `cleanup()` to unlink them on shutdown.
  *
- * Filenames are `peer-mcp-<pid>.json` and `peer-agents-<pid>.json`
- * — PID-suffixed so the boot-time sweep (`sweepStaleRuntimeFiles` in
- * paths.ts) can drop orphans from crashed prior sessions without
- * disturbing live ones.
+ * Filenames are `peer-mcp-<pid>-<rand>.json` and `peer-agents-<pid>-<rand>.json`.
+ * The PID prefix is what the boot-time sweep (`sweepStaleRuntimeFiles` in
+ * paths.ts) keys off to drop orphans from crashed prior sessions; the
+ * random suffix prevents two concurrent calls within the same process
+ * from clobbering each other's files (e.g., a proxy that internally
+ * relaunches its spawned child without restarting itself).
  */
 export async function writePeerMcpRuntimeFiles(
   serverUrl: string,
@@ -186,8 +188,11 @@ export async function writePeerMcpRuntimeFiles(
   if (process.platform !== "win32") {
     await fs.chmod(runtimeDir, 0o700).catch(() => {})
   }
-  const mcpConfigPath = path.join(runtimeDir, `peer-mcp-${process.pid}.json`)
-  const agentsPath = path.join(runtimeDir, `peer-agents-${process.pid}.json`)
+  // 4-byte random suffix gives 2^32 distinct names per PID — collision-free
+  // for any realistic count of in-process re-invocations.
+  const fileSuffix = `${process.pid}-${randomBytes(4).toString("hex")}`
+  const mcpConfigPath = path.join(runtimeDir, `peer-mcp-${fileSuffix}.json`)
+  const agentsPath = path.join(runtimeDir, `peer-agents-${fileSuffix}.json`)
 
   const mcpConfig = buildPeerMcpConfig(serverUrl, {
     codexCli: opts.codexCli,
