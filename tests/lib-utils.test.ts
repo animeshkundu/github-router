@@ -1,4 +1,5 @@
 import { test, expect, mock, afterEach, describe, beforeEach } from "bun:test"
+import consola from "consola"
 
 import { state } from "../src/lib/state"
 import {
@@ -225,6 +226,148 @@ describe("resolveModel", () => {
 
   test("returns input when no match found", () => {
     expect(resolveModel("nonexistent-model")).toBe("nonexistent-model")
+  })
+
+  // --- Step 5: Anthropic dated-slug retry (claude-code-guide-driven Haiku/Sonnet path) ---
+
+  test("haiku dated slug resolves to floating tag (claude-haiku-4-5-20251001 → claude-haiku-4.5)", () => {
+    // Reproduces the bug: Claude Code's small-model background path requested
+    // claude-haiku-4-5-20251001 every session and Copilot's catalog only has
+    // claude-haiku-4.5. Without Step 5 the request fell through to a warn +
+    // upstream rejection, breaking subagent dispatch.
+    state.models = {
+      data: [
+        ...fakeModels,
+        { id: "claude-haiku-4.5", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(resolveModel("claude-haiku-4-5-20251001")).toBe("claude-haiku-4.5")
+  })
+
+  test("sonnet 4.6 dated slug resolves to floating tag", () => {
+    // Sonnet 4.6 hits the same path as Haiku — Anthropic's published slug
+    // carries -YYYYMMDD, Copilot's catalog uses claude-sonnet-4.6.
+    expect(resolveModel("claude-sonnet-4-6-20260101")).toBe("claude-sonnet-4.6")
+  })
+
+  test("sonnet 4.5 dated slug (claude-sonnet-4-5-20250929) resolves to claude-sonnet-4.5", () => {
+    // Live coverage: as of today's Copilot /models catalog, both
+    // claude-sonnet-4.5 and claude-sonnet-4.6 are present, so requests
+    // pinned to the older 4.5 snapshot must still resolve correctly.
+    state.models = {
+      data: [
+        ...fakeModels,
+        { id: "claude-sonnet-4.5", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(resolveModel("claude-sonnet-4-5-20250929")).toBe("claude-sonnet-4.5")
+  })
+
+  test("legacy Anthropic convention (claude-3-5-sonnet-20241022) resolves to claude-3-5-sonnet", () => {
+    // Locks in coverage of the older Anthropic shape (no major.minor with dot).
+    state.models = {
+      data: [
+        ...fakeModels,
+        { id: "claude-3-5-sonnet", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(resolveModel("claude-3-5-sonnet-20241022")).toBe("claude-3-5-sonnet")
+  })
+
+  test("opus dated slug composes with family preference (claude-opus-4-7-20260101 → 1m-internal)", () => {
+    // Step 5 strips the date, retried Step 3 picks the 1M variant. Proves the
+    // retry composes correctly with existing family-preference logic.
+    expect(resolveModel("claude-opus-4-7-20260101")).toBe(
+      "claude-opus-4.7-1m-internal",
+    )
+  })
+
+  test("family guard: non-claude 8-digit suffix is NOT stripped (codex-critic must-fix)", () => {
+    // If OpenAI (or any other provider) ever ships a slug like
+    // gpt-future-20260101 (Anthropic-style concatenated date), the regex must
+    // NOT silently strip it. Choosing a slug without "opus"/"codex" so it
+    // skips Step 3 family preference and reaches Step 5 — which must refuse
+    // to strip because the input doesn't start with "claude-".
+    expect(resolveModel("gpt-future-20260101")).toBe("gpt-future-20260101")
+  })
+
+  test("explicit version pinning wins over date-strip retry (gemini-critic must-fix)", () => {
+    // If Copilot ever publishes a dated catalog entry alongside the floating
+    // tag (precedent: gpt-4o-2024-11-20 ↔ gpt-4o), Step 1 exact match must
+    // win — the retry only fires when the standard cascade misses entirely.
+    state.models = {
+      data: [
+        { id: "claude-haiku-4.5", supported_endpoints: ["/v1/messages"] },
+        {
+          id: "claude-haiku-4.5-20251001",
+          supported_endpoints: ["/v1/messages"],
+        },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    // Note: dotted catalog id with the date suffix appended. Step 1 finds
+    // the exact catalog entry; Step 5 never runs.
+    expect(resolveModel("claude-haiku-4.5-20251001")).toBe(
+      "claude-haiku-4.5-20251001",
+    )
+  })
+})
+
+// --- resolveModel: consola breadcrumb assertions for Step 5 dated-slug retry ---
+
+describe("resolveModel — Step 5 dated-slug retry log breadcrumbs", () => {
+  let originalInfo: typeof consola.info
+  let originalWarn: typeof consola.warn
+  let infoCalls: Array<Array<unknown>>
+  let warnCalls: Array<Array<unknown>>
+
+  beforeEach(() => {
+    originalInfo = consola.info
+    originalWarn = consola.warn
+    infoCalls = []
+    warnCalls = []
+    consola.info = mock((...args: Array<unknown>) => {
+      infoCalls.push(args)
+    }) as unknown as typeof consola.info
+    consola.warn = mock((...args: Array<unknown>) => {
+      warnCalls.push(args)
+    }) as unknown as typeof consola.warn
+
+    state.models = {
+      data: [
+        { id: "claude-haiku-4.5", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+  })
+
+  afterEach(() => {
+    consola.info = originalInfo
+    consola.warn = originalWarn
+    state.models = undefined
+  })
+
+  test("dated-slug success path emits one info breadcrumb and zero warns", () => {
+    const result = resolveModel("claude-haiku-4-5-20251001")
+    expect(result).toBe("claude-haiku-4.5")
+    expect(infoCalls).toHaveLength(1)
+    const [msg] = infoCalls[0] as [string]
+    expect(msg).toContain("claude-haiku-4-5-20251001")
+    expect(msg).toContain("claude-haiku-4.5")
+    expect(msg).toContain("stripped -YYYYMMDD")
+    // The fix's whole point: no "not found" warning on the success path.
+    expect(warnCalls).toHaveLength(0)
+  })
+
+  test("haiku resolution does NOT trigger the legacy not-found warning", () => {
+    resolveModel("claude-haiku-4-5-20251001")
+    const warnTexts = warnCalls.map((c) => String(c[0] ?? ""))
+    expect(
+      warnTexts.some((t) => t.includes("not found in Copilot model list")),
+    ).toBe(false)
   })
 })
 
