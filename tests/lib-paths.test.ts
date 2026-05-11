@@ -13,7 +13,7 @@ mock.module("node:os", () => ({
   },
 }))
 
-const { ensurePaths, PATHS, sweepStaleRuntimeFiles, writeRuntimeFileSecure } =
+const { ensurePaths, PATHS, sweepStaleRuntimeFiles, sweepStalePeerAgentMdFiles, writeRuntimeFileSecure } =
   await import("../src/lib/paths")
 
 test("ensurePaths creates token file with permissions", async () => {
@@ -164,4 +164,45 @@ test("sweepStaleRuntimeFiles handles both legacy peer-mcp-<pid>.json and new pee
 
   await expect(fs.stat(legacyDead)).rejects.toThrow()
   await expect(fs.stat(suffixedDead)).rejects.toThrow()
+})
+
+test("sweepStalePeerAgentMdFiles deletes dead-PID peer-*.md but keeps live-PID and unrelated user files", async () => {
+  // Phase 2.5: per-launch .md subagent files written to ~/.claude/agents/
+  // need a corresponding sweep for orphans from crashed prior proxies.
+  // The sweep MUST NOT touch the user's own .md files (they don't match
+  // the `peer-<numeric-pid>-` prefix).
+  const agentsDir = path.join(tempDir, ".claude", "agents")
+  await fs.mkdir(agentsDir, { recursive: true })
+
+  const livePath = path.join(agentsDir, `peer-${process.pid}-abcd1234-codex-critic.md`)
+  const deadPid = 2_147_483_642
+  const deadPath = path.join(agentsDir, `peer-${deadPid}-deadbeef-codex-critic.md`)
+  // User's own subagent — completely unrelated naming, must NOT be touched.
+  const userOwn = path.join(agentsDir, "my-personal-helper.md")
+  // Edge case: user's file that *starts* with "peer" but isn't ours
+  // (e.g., the user named their own subagent "peer-reviewer"). MUST NOT
+  // be touched because the digit-PID segment isn't there.
+  const userPeerLike = path.join(agentsDir, "peer-reviewer.md")
+
+  await fs.writeFile(livePath, "---\nname: codex-critic\n---\n", { mode: 0o600 })
+  await fs.writeFile(deadPath, "---\nname: codex-critic\n---\n", { mode: 0o600 })
+  await fs.writeFile(userOwn, "---\nname: my-personal-helper\n---\n", { mode: 0o600 })
+  await fs.writeFile(userPeerLike, "---\nname: peer-reviewer\n---\n", { mode: 0o600 })
+
+  await sweepStalePeerAgentMdFiles()
+
+  await expect(fs.stat(livePath)).resolves.toBeDefined()
+  await expect(fs.stat(deadPath)).rejects.toThrow()
+  await expect(fs.stat(userOwn)).resolves.toBeDefined()
+  await expect(fs.stat(userPeerLike)).resolves.toBeDefined()
+
+  // Cleanup
+  await fs.unlink(livePath)
+  await fs.unlink(userOwn)
+  await fs.unlink(userPeerLike)
+})
+
+test("sweepStalePeerAgentMdFiles tolerates missing ~/.claude/agents dir", async () => {
+  await fs.rm(path.join(tempDir, ".claude", "agents"), { recursive: true, force: true })
+  await expect(sweepStalePeerAgentMdFiles()).resolves.toBeUndefined()
 })

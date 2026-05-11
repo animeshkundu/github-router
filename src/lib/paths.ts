@@ -49,6 +49,13 @@ export async function ensurePaths(): Promise<void> {
   await sweepStaleRuntimeFiles().catch((err) => {
     consola.debug("Runtime sweep skipped:", err)
   })
+  // Phase 2.5: also sweep stale peer-* subagent .md files from
+  // ~/.claude/agents/ (orphans from prior proxy crashes). The user's
+  // own .md files are NOT touched — the regex requires our `peer-`
+  // prefix.
+  await sweepStalePeerAgentMdFiles().catch((err) => {
+    consola.debug("Peer-agent .md sweep skipped:", err)
+  })
 }
 
 async function ensureFile(filePath: string): Promise<void> {
@@ -149,5 +156,40 @@ function isPidAlive(pid: number): boolean {
     const code = (err as NodeJS.ErrnoException).code
     if (code === "EPERM") return true
     return false
+  }
+}
+
+/**
+ * Sweep stale peer-* subagent .md files from `~/.claude/agents/`. Phase
+ * 2.5 writes one .md per peer agent into the canonical agents directory
+ * so they appear in Claude Code's Task `subagent_type` enum. Files are
+ * named `peer-<pid>-<rand>-<agentName>.md` so this sweep can drop
+ * orphans from crashed prior proxy sessions without touching the user's
+ * own .md files (which won't match the `peer-<numeric-pid>-` prefix).
+ *
+ * Same liveness rule as `sweepStaleRuntimeFiles`: only delete when the
+ * file's embedded PID is no longer alive. Live PIDs keep their files —
+ * a long-running proxy doesn't lose its agent registrations.
+ */
+export async function sweepStalePeerAgentMdFiles(): Promise<void> {
+  const dir = path.join(os.homedir(), ".claude", "agents")
+  let entries: Array<string>
+  try {
+    entries = await fs.readdir(dir)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return
+    throw err
+  }
+  for (const name of entries) {
+    // Match both legacy `peer-<pid>-<name>.md` (if any predate the random
+    // suffix) and current `peer-<pid>-<rand>-<name>.md`. The trailing
+    // `.+` keeps the match permissive on agentName since it's user-chosen.
+    const match = /^peer-(\d+)(?:-[0-9a-f]+)?-.+\.md$/.exec(name)
+    if (!match) continue
+    const pid = Number.parseInt(match[1], 10)
+    if (isPidAlive(pid)) continue
+    await fs.unlink(path.join(dir, name)).catch(() => {
+      // already gone or unreadable, fine
+    })
   }
 }

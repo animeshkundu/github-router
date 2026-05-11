@@ -179,6 +179,11 @@ beforeEach(() => {
   writePeerMcpRuntimeFilesMock.mockResolvedValue({
     mcpConfigPath: "/tmp/peer-mcp-test.json",
     agentsPath: "/tmp/peer-agents-test.json",
+    agentMdPaths: [
+      "/tmp/.claude/agents/peer-1-deadbeef-codex-critic.md",
+      "/tmp/.claude/agents/peer-1-deadbeef-codex-reviewer.md",
+      "/tmp/.claude/agents/peer-1-deadbeef-peer-review-coordinator.md",
+    ],
     nonce: "test-nonce",
     personas: [
       { agentName: "codex-critic" },
@@ -401,7 +406,7 @@ describe("claude command", () => {
   })
 
   describe("codex-mcp wiring", () => {
-    test("default → writes runtime files, appends --mcp-config + --agents to spawn", async () => {
+    test("default → writes runtime files, appends --mcp-config to spawn (no --agents — Phase 2.5 uses ~/.claude/agents/*.md instead)", async () => {
       const run = getRunFn()
       await run({ args: {} })
 
@@ -413,8 +418,11 @@ describe("claude command", () => {
       const [, args] = spawnMock.mock.calls[0]
       expect(args).toContain("--mcp-config")
       expect(args).toContain("/tmp/peer-mcp-test.json")
-      expect(args).toContain("--agents")
-      expect(args).toContain("/tmp/peer-agents-test.json")
+      // Phase 2.5: --agents JSON path is intentionally NOT passed.
+      // Subagents are registered via .md files in ~/.claude/agents/
+      // because Claude Code v2.1.138's Task subagent_type enum reads
+      // from there, not from the --agents JSON path.
+      expect(args).not.toContain("--agents")
       expect(args).not.toContain("--strict-mcp-config")
     })
 

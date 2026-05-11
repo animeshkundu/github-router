@@ -145,11 +145,17 @@ export const claude = defineCommand({
     //      and the `--codex-cli` stdio backend (requires codex 0.129+,
     //      adds the implementer persona).
     //   2. Probe the live Copilot catalog for gemini-3.1-pro-preview.
-    //   3. Generate a per-launch nonce, write the MCP config + agents
-    //      tempfiles under PATHS.CLAUDE_RUNTIME_DIR with mode 0o600.
-    //   4. Inject `--mcp-config <path>` and `--agents <path>` into the
-    //      spawned Claude Code's argv. Add `--strict-mcp-config` if the
-    //      user explicitly opts out of their existing MCP servers.
+    //   3. Generate a per-launch nonce, write the MCP config tempfile
+    //      under PATHS.CLAUDE_RUNTIME_DIR with mode 0o600, AND write
+    //      one .md subagent file per peer agent into ~/.claude/agents/
+    //      (Phase 2.5 — `--agents` JSON does NOT populate Claude Code's
+    //      Task subagent_type enum on v2.1.138; .md files in the canonical
+    //      agents dir do).
+    //   4. Inject `--mcp-config <path>` into the spawned Claude Code's
+    //      argv. Add `--strict-mcp-config` if the user explicitly opts
+    //      out of their existing MCP servers. The `--agents` JSON path
+    //      is intentionally NOT passed: the .md registration in the
+    //      canonical agents dir is the authoritative surface.
     //   5. Plumb `cleanup()` into launchChild's onShutdown so tempfiles
     //      are unlinked on signal exit.
     let onShutdown: (() => Promise<void>) | undefined
@@ -178,14 +184,14 @@ export const claude = defineCommand({
         onShutdown = runtime.cleanup
 
         extraArgs.push("--mcp-config", runtime.mcpConfigPath)
-        extraArgs.push("--agents", runtime.agentsPath)
         if ((args as Record<string, unknown>)["codex-mcp-only"] === true) {
           extraArgs.push("--strict-mcp-config")
         }
 
         const personaNames = runtime.personas.map((p) => p.agentName).join(", ")
         process.stderr.write(
-          `Peer MCP wired (backend=${backend}, personas=[${personaNames}]).\n`,
+          `Peer MCP wired (backend=${backend}, personas=[${personaNames}], `
+            + `subagent .md files=${runtime.agentMdPaths.length}).\n`,
         )
       } catch (err) {
         consola.warn(

@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
 
 import consola from "consola"
@@ -242,6 +243,13 @@ export function buildPeerAgentDefinitions(
 export interface PeerMcpRuntimeFiles {
   mcpConfigPath: string
   agentsPath: string
+  /** .md subagent files written into ~/.claude/agents/ (Phase 2.5). The
+   *  `--agents` JSON path is silently ignored by Claude Code v2.1.138's
+   *  Task `subagent_type` enum (the JSON's subagents are only reachable
+   *  via natural-language delegation). The .md files in the canonical
+   *  agents directory ARE picked up by the enum, making the
+   *  peer-review-coordinator + persona subagents directly invokable. */
+  agentMdPaths: Array<string>
   nonce: string
   personas: Array<PersonaSpec>
   cleanup: () => Promise<void>
@@ -256,6 +264,89 @@ interface WriteOpts {
   runtimeDir?: string
   /** Override for tests. Defaults to a fresh 32-byte hex nonce. */
   nonce?: string
+  /** Override for tests. Defaults to ~/.claude/agents (where Claude Code
+   *  reads subagent .md files at session start). */
+  agentsDir?: string
+}
+
+/**
+ * Default location Claude Code reads subagent .md files from at session
+ * startup. Files placed here populate the Task `subagent_type` enum.
+ *
+ * We pin to the user's `~/.claude/agents/` because `getClaudeCodeEnvVars`
+ * sets `CLAUDE_CONFIG_DIR=$HOME/.claude` (the Spawned-CLI auth isolation
+ * trick) — the spawned child reads from this exact path.
+ */
+function defaultAgentsDir(): string {
+  return path.join(os.homedir(), ".claude", "agents")
+}
+
+/**
+ * YAML frontmatter string-escape — sufficient for our use case where
+ * descriptions can contain colons, quotes, and newlines. Wraps the
+ * value in double-quotes and escapes backslashes + double-quotes.
+ * Newlines are encoded as the YAML escape sequence `\n`.
+ *
+ * NOT a general-purpose YAML serializer; we control the inputs.
+ */
+function escapeYamlString(s: string): string {
+  return (
+    `"${s.replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\n/g, "\\n")}"`
+  )
+}
+
+/** Build a single subagent .md file body (frontmatter + system prompt). */
+function buildAgentMd(spec: { name: string; description: string; prompt: string }): string {
+  return [
+    "---",
+    `name: ${spec.name}`,
+    `description: ${escapeYamlString(spec.description)}`,
+    "---",
+    "",
+    spec.prompt,
+    "",
+  ].join("\n")
+}
+
+/**
+ * Write per-launch subagent .md files into the user's `~/.claude/agents/`
+ * directory so they appear in Claude Code's Task `subagent_type` enum
+ * (which `--agents` JSON files do NOT, per claude-code-guide expert).
+ *
+ * Filenames follow `peer-<pid>-<rand>-<agentName>.md` so the boot-time
+ * sweep (`sweepStalePeerAgentMdFiles` in paths.ts) can drop orphans
+ * from crashed prior proxy sessions without touching the user's other
+ * `.claude/agents/` files. The `name:` field in the frontmatter is the
+ * canonical agent identifier — matching across files would cause Claude
+ * Code to (un)deterministically pick one, so concurrent proxies running
+ * the same agents need different filenames but resolve to the same
+ * agent name (intended — they're the same subagent, just registered
+ * twice).
+ *
+ * Returns the file paths plus a cleanup() that unlinks them.
+ */
+export async function writePeerAgentMdFiles(
+  agents: Record<string, { description: string; prompt: string }>,
+  opts: { agentsDir?: string; fileSuffix: string },
+): Promise<{ paths: Array<string>; cleanup: () => Promise<void> }> {
+  const dir = opts.agentsDir ?? defaultAgentsDir()
+  await fs.mkdir(dir, { recursive: true })
+  const paths: Array<string> = []
+  for (const [name, def] of Object.entries(agents)) {
+    const filePath = path.join(dir, `peer-${opts.fileSuffix}-${name}.md`)
+    // Same idempotency pattern as the JSON tempfiles: unlink first so
+    // O_EXCL succeeds even if a same-suffix file somehow survived.
+    await fs.unlink(filePath).catch(() => {})
+    await writeRuntimeFileSecure(
+      filePath,
+      buildAgentMd({ name, description: def.description, prompt: def.prompt }),
+    )
+    paths.push(filePath)
+  }
+  const cleanup = async (): Promise<void> => {
+    await Promise.allSettled(paths.map((p) => fs.unlink(p)))
+  }
+  return { paths, cleanup }
 }
 
 /**
@@ -314,6 +405,17 @@ export async function writePeerMcpRuntimeFiles(
   await writeRuntimeFileSecure(mcpConfigPath, JSON.stringify(mcpConfig, null, 2))
   await writeRuntimeFileSecure(agentsPath, JSON.stringify(agents, null, 2))
 
+  // Phase 2.5: also write the same agents as .md files into
+  // ~/.claude/agents/ — this is the registry Claude Code's Task
+  // `subagent_type` enum reads from at session start. The `--agents`
+  // JSON path above is kept for inspection / future-proofing but the
+  // .md files are what makes the subagents actually invokable from
+  // Opus's tool surface.
+  const mdResult = await writePeerAgentMdFiles(agents, {
+    agentsDir: opts.agentsDir,
+    fileSuffix,
+  })
+
   const personas = personasFor({
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
@@ -323,8 +425,16 @@ export async function writePeerMcpRuntimeFiles(
     await Promise.allSettled([
       fs.unlink(mcpConfigPath),
       fs.unlink(agentsPath),
+      mdResult.cleanup(),
     ])
   }
 
-  return { mcpConfigPath, agentsPath, nonce, personas, cleanup }
+  return {
+    mcpConfigPath,
+    agentsPath,
+    agentMdPaths: mdResult.paths,
+    nonce,
+    personas,
+    cleanup,
+  }
 }

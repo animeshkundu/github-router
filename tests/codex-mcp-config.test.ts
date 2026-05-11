@@ -26,16 +26,21 @@ async function makeTempDir(prefix: string): Promise<string> {
 }
 
 async function withTempRuntimeDir<T>(
-  fn: (runtimeDir: string, codexHome: string) => Promise<T>,
+  fn: (runtimeDir: string, codexHome: string, agentsDir: string) => Promise<T>,
 ): Promise<T> {
   const runtimeDir = await makeTempDir("mcp-cfg")
   await fs.chmod(runtimeDir, 0o700)
   const codexHome = await makeTempDir("codex-home")
+  // Phase 2.5: writePeerMcpRuntimeFiles also writes .md files into an
+  // agents dir (default ~/.claude/agents). Tests MUST pass an explicit
+  // tempdir so they don't pollute the user's real agents directory.
+  const agentsDir = await makeTempDir("agents")
   try {
-    return await fn(runtimeDir, codexHome)
+    return await fn(runtimeDir, codexHome, agentsDir)
   } finally {
     await fs.rm(runtimeDir, { recursive: true, force: true }).catch(() => {})
     await fs.rm(codexHome, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(agentsDir, { recursive: true, force: true }).catch(() => {})
   }
 }
 
@@ -191,13 +196,14 @@ describe("resolveCodexCliBackend", () => {
 })
 
 describe("writePeerMcpRuntimeFiles", () => {
-  test("writes mcp-config + agents tempfiles with mode 0o600 and PID+random-suffix names", async () => {
-    await withTempRuntimeDir(async (runtimeDir, codexHome) => {
+  test("writes mcp-config + agents tempfiles with mode 0o600 and PID+random-suffix names + .md subagent files", async () => {
+    await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
       const runtime = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
         geminiAvailable: true,
         runtimeDir,
         codexHome,
+        agentsDir,
       })
 
       // Filenames are PID-prefixed (so the boot sweep can identify them)
@@ -214,6 +220,29 @@ describe("writePeerMcpRuntimeFiles", () => {
       )
       expect(path.dirname(runtime.mcpConfigPath)).toBe(runtimeDir)
       expect(path.dirname(runtime.agentsPath)).toBe(runtimeDir)
+
+      // Phase 2.5: .md subagent files written into agentsDir, one per
+      // registered agent (3 personas + peer-review-coordinator = 4).
+      expect(runtime.agentMdPaths.length).toBe(4)
+      for (const p of runtime.agentMdPaths) {
+        expect(path.dirname(p)).toBe(agentsDir)
+        expect(p).toMatch(
+          new RegExp(`peer-${process.pid}-[0-9a-f]{8}-[a-z-]+\\.md$`),
+        )
+        const stat = await fs.stat(p)
+        if (process.platform !== "win32") {
+          expect(stat.mode & 0o777).toBe(0o600)
+        }
+      }
+
+      // The coordinator .md must contain the "Use proactively" trigger
+      // and the canonical agent name in frontmatter.
+      const coordPath = runtime.agentMdPaths.find((p) =>
+        p.endsWith("peer-review-coordinator.md"),
+      )!
+      const coordBody = await fs.readFile(coordPath, "utf8")
+      expect(coordBody).toMatch(/^---\nname: peer-review-coordinator\n/)
+      expect(coordBody).toContain("Use proactively")
 
       // Files exist + permissions
       const mcpStat = await fs.stat(runtime.mcpConfigPath)
@@ -234,20 +263,24 @@ describe("writePeerMcpRuntimeFiles", () => {
         `Bearer ${runtime.nonce}`,
       )
 
-      // Cleanup unlinks both
+      // Cleanup unlinks both JSON tempfiles AND all .md files
       await runtime.cleanup()
       await expect(fs.stat(runtime.mcpConfigPath)).rejects.toThrow()
       await expect(fs.stat(runtime.agentsPath)).rejects.toThrow()
+      for (const p of runtime.agentMdPaths) {
+        await expect(fs.stat(p)).rejects.toThrow()
+      }
     })
   })
 
   test("two consecutive invocations produce distinct nonces", async () => {
-    await withTempRuntimeDir(async (runtimeDir, codexHome) => {
+    await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
       const a = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
         geminiAvailable: false,
         runtimeDir,
         codexHome,
+        agentsDir,
       })
       // Cleanup not strictly required now (random suffix prevents collision)
       // but kept to exercise the cleanup path.
@@ -257,6 +290,7 @@ describe("writePeerMcpRuntimeFiles", () => {
         geminiAvailable: false,
         runtimeDir,
         codexHome,
+        agentsDir,
       })
       await b.cleanup()
       expect(a.nonce).not.toBe(b.nonce)
@@ -264,12 +298,13 @@ describe("writePeerMcpRuntimeFiles", () => {
   })
 
   test("re-runs in the same PID produce DIFFERENT files (random-suffix collision avoidance)", async () => {
-    await withTempRuntimeDir(async (runtimeDir, codexHome) => {
+    await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
       const a = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
         geminiAvailable: false,
         runtimeDir,
         codexHome,
+        agentsDir,
       })
       // Don't cleanup. Second call must NOT collide with first call's
       // files — random-suffix guarantees uniqueness within a process.
@@ -278,10 +313,13 @@ describe("writePeerMcpRuntimeFiles", () => {
         geminiAvailable: false,
         runtimeDir,
         codexHome,
+        agentsDir,
       })
       expect(a.mcpConfigPath).not.toBe(b.mcpConfigPath)
       expect(a.agentsPath).not.toBe(b.agentsPath)
       expect(b.nonce).not.toBe(a.nonce)
+      // .md paths also distinct
+      expect(a.agentMdPaths).not.toEqual(b.agentMdPaths)
       // Both sets of files exist and are independently cleanupable.
       await fs.access(a.mcpConfigPath)
       await fs.access(b.mcpConfigPath)
@@ -291,18 +329,20 @@ describe("writePeerMcpRuntimeFiles", () => {
   })
 
   test("personas list reflects mode (codexCli adds implementer)", async () => {
-    await withTempRuntimeDir(async (runtimeDir, codexHome) => {
+    await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
       const httpMode = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
         geminiAvailable: true,
         runtimeDir,
         codexHome,
+        agentsDir,
       })
       const cliMode = await writePeerMcpRuntimeFiles(URL, {
         codexCli: true,
         geminiAvailable: true,
         runtimeDir,
         codexHome,
+        agentsDir,
       })
       const httpNames = httpMode.personas.map((p) => p.agentName).sort()
       const cliNames = cliMode.personas.map((p) => p.agentName).sort()
