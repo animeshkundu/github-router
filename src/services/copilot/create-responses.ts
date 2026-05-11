@@ -3,11 +3,14 @@ import { events } from "fetch-event-stream"
 
 import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
+import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
+import { tryRefreshAndRetry } from "~/lib/token"
 
 export const createResponses = async (
   payload: ResponsesPayload,
   modelHeaders?: Record<string, string>,
+  callerSignal?: AbortSignal,
 ) => {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
@@ -15,17 +18,28 @@ export const createResponses = async (
 
   const isAgentCall = detectAgentCall(payload.input)
 
-  const headers: Record<string, string> = {
-    ...copilotHeaders(state, enableVision),
-    ...modelHeaders,
-    "X-Initiator": isAgentCall ? "agent" : "user",
+  const url = `${copilotBaseUrl(state)}/responses`
+  const doFetch = (): Promise<Response> => {
+    const headers: Record<string, string> = {
+      ...copilotHeaders(state, enableVision),
+      ...modelHeaders,
+      "X-Initiator": isAgentCall ? "agent" : "user",
+    }
+    const fetchInit: RequestInit = {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    }
+    const signals: Array<AbortSignal> = []
+    if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
+      signals.push(AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS))
+    }
+    if (callerSignal) signals.push(callerSignal)
+    if (signals.length === 1) fetchInit.signal = signals[0]
+    else if (signals.length > 1) fetchInit.signal = AbortSignal.any(signals)
+    return fetch(url, fetchInit)
   }
-
-  const response = await fetch(`${copilotBaseUrl(state)}/responses`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  })
+  const response = await tryRefreshAndRetry(doFetch, "/responses")
 
   if (!response.ok) {
     consola.error("Failed to create responses", response)

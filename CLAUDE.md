@@ -2,6 +2,19 @@
 
 A reverse proxy that exposes GitHub Copilot as OpenAI and Anthropic compatible API endpoints.
 
+## Design docs
+
+- [`docs/peer-mcp-design.md`](docs/peer-mcp-design.md) — current architecture and phased migration plan for the peer-model MCP integration (codex_critic gpt-5.5, codex_reviewer gpt-5.3-codex, gemini_critic gemini-3.1-pro). Read this before changing anything in `src/routes/mcp/`, `src/lib/peer-mcp-personas.ts`, or `src/lib/codex-mcp-config.ts`.
+- [`docs/research/peer-mcp-investigation.md`](docs/research/peer-mcp-investigation.md) — multi-stage adversarial-review log behind the design: GitHub-issue refs (#50289 etc.), peer-critic verdicts at each iteration, the 7-batch sweep that proved decomposition works, and the concurrency-cap investigation. Read this when you want to know *why* a particular Phase ordering or specific value (cap=8, retention=30min, partial-buffer cap=1MB) was chosen.
+
+## Review checklist (read before submitting / approving any PR)
+
+- **Stream lifecycle**: every `controller.enqueue` / `controller.close` / `reader.read` call site must have a regression test that intentionally races consumer cancel against the call. Cooperative-mock tests are insufficient — they cannot reproduce the microsecond window where Bun's HTTP layer closes the controller while a `pull()` is mid-`await`. See `tests/integration/chaos.test.ts` for the test pattern.
+- **The smoking gun**: a new `Could not deliver error event` warn-log is a bug, not a routine warning. Open an issue and treat as a regression.
+- **Author responsibility**: PR descriptions must list the failure modes the author considered and tested, not just the happy path. Reviewers can only check what they're asked about — narrow prompts produce narrow reviews. The class of bug we missed in the manual `ReadableStream({pull})` rollout was an enqueue-after-cancel race that the catch block was clearly intended to handle, but no test ever reproduced it. The catch-handler's existence is not a substitute for an actual race-triggering test.
+- **Spec ≠ runtime**: WHATWG/Anthropic spec compliance is necessary but not sufficient. Verify what Bun (and Node undici when relevant) actually throw at runtime. Don't reason "the spec says close is idempotent" — verify "Bun throws `TypeError: Invalid state: Controller is already closed` if you enqueue after close."
+- **Bun request-signal quirk**: `c.req.raw.signal` from a Bun/srvx HTTP handler is aborted as soon as the request body is fully consumed (i.e., right after `await c.req.json()`), even when the consumer is still happily reading the response. Do NOT propagate it into upstream `fetch()` calls — every such call would fail immediately with "This operation was aborted." `/v1/responses` and `/mcp` both intentionally drop it; tear-down on consumer cancel is handled at the `ReadableStream.cancel()` callback for streaming responses, and is a no-op for non-streaming responses (the upstream call completes regardless). If a future change truly needs to propagate consumer cancel, verify with a real Bun.serve listener — unit tests with `app.request(new Request(...))` do not reproduce the quirk.
+
 ## Commands
 
 ```bash
@@ -33,6 +46,50 @@ export NPM_TOKEN=npm_...
 
 The release script builds, tests, temporarily rewrites package.json to the unscoped name,
 publishes, and restores. See `publish/release.sh` for details.
+
+## Upgrading a running proxy
+
+A running proxy (`npx github-router@latest claude` from earlier) is **pinned to its
+installed version** and will NOT auto-update when a new release is published. To pick up
+a new release:
+
+```bash
+# 1. Confirm the new version is live on npm
+npm view github-router version
+
+# 2. Identify the running proxy(ies). Each `claude` session spawns one.
+ps aux | grep -E 'github-router|bun.*dist/main' | grep -v grep
+
+# 3. WAIT for any in-flight Claude Code request to settle, then kill the
+#    proxy. Killing mid-stream loses the current request only — the Claude
+#    Code session itself reconnects on the next prompt, but the in-flight
+#    response is lost.
+kill <PID>
+
+# 4. Force re-fetch (npm 11 prefers-online by default; this is belt-and-suspenders
+#    for stale npx caches):
+rm -rf ~/.npm/_npx/*github-router*
+
+# 5. Restart
+npx github-router@latest claude
+
+# 6. Verify the new build is serving by hitting the /version endpoint with
+#    the proxy's actual port (visible in `ps` output as `--port` or implied
+#    from the random port the proxy chose):
+curl http://localhost:<PORT>/version
+# → {"name":"github-router","version":"0.3.X","gitSha":"..."}
+```
+
+Tunable env vars (set before launching `claude`):
+
+- `UPSTREAM_FETCH_TIMEOUT_MS` — overall fetch-phase timeout in ms. Default `0` = no
+  timeout. Set a positive integer if you need a hard ceiling on Copilot fetches.
+- `UPSTREAM_INACTIVITY_TIMEOUT_MS` — body-phase inactivity timeout in ms. Default `300000`
+  (5 min — sits well above Copilot's ~60s idle cut and accommodates reasoning models'
+  long thinking-pauses between token bursts; the previous 75s default aborted live
+  `/v1/messages` requests at bytes=134k–163k mid-stream when gpt-5.5/opus-4.7-xhigh
+  went quiet to think). Lower this only if you specifically want to reap stalled
+  connections faster than 5 minutes.
 
 ## Architecture
 
@@ -71,6 +128,20 @@ The `claude` and `codex` subcommands default to the latest Copilot-supported mod
 - `codex` → `gpt-5.5` (dropped the `-codex` suffix; `/responses` is the discriminator). Falls back via `DEFAULT_CODEX_MODEL_FALLBACKS`: `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex`. `resolveCodexModel`'s "best available `/responses` model" provides a final safety net beyond the named chain. Codex CLI's bundled catalog uses Copilot-style slugs directly, so no Anthropic-slug translation is needed.
 
 Fallback chains only fire on the implicit-default path — explicit `-m`/`--model` is always respected as-is. Constants live in `src/lib/port.ts`.
+
+### Peer-model MCP integration (auto-invocation, effort, decomposition)
+
+The `claude` subcommand auto-injects three peer-model review tools as Claude Code subagents (`codex-critic` gpt-5.5, `codex-reviewer` gpt-5.3-codex, `gemini-critic` gemini-3.1-pro-preview) plus a `peer-review-coordinator` meta-subagent that fans out to them in parallel. Full architecture in [`docs/peer-mcp-design.md`](docs/peer-mcp-design.md); rationale + multi-stage adversarial review log in [`docs/research/peer-mcp-investigation.md`](docs/research/peer-mcp-investigation.md).
+
+**Auto-invocation triggers** (Phase 2A): each persona's MCP-tool description includes prescriptive **CALL BEFORE / CALL AFTER** wording so Opus naturally delegates at the right checkpoints (before `ExitPlanMode` for non-trivial plans, after commits touching concurrency/security/streaming, before `TeamCreate` for non-trivial team tasks). The `peer-review-coordinator` subagent's description uses the documented Claude Code "use proactively" idiom — Opus delegates to it without an explicit user request at the matching checkpoints. Empirical reliability is ~60% per claude-code-guide (the plan calls for an acceptance test ≥7/10; if <7/10 we flip an opt-in `PreToolUse(ExitPlanMode)` hook to default-on, env-disable-able via `GH_ROUTER_AUTO_PEER_REVIEW=0`).
+
+**Phase 2.5 — agent registration surface** (critical for Track 2A actually working): Claude Code v2.1.138's `--agents <json>` flag does NOT populate the Task `subagent_type` enum (per claude-code-guide expert verification — confirmed by the documented separation in code.claude.com/docs/en/cli-reference.md). Subagents passed via `--agents` are only reachable via natural-language delegation; explicit `Task(subagent_type=...)` calls fail with "Agent type 'X' not found". The fix is to write per-launch markdown subagent files into `~/.claude/agents/peer-<pid>-<rand>-<name>.md` — that's the canonical surface Claude Code reads at session start. The spawned `claude` is no longer launched with `--agents`; the `.md` files are. A boot-time sweep (`sweepStalePeerAgentMdFiles` in `src/lib/paths.ts`) drops stale files matching `peer-<deadpid>-*-*.md` from `~/.claude/agents/`; the regex's required digit-PID prefix protects user-authored files (e.g. `peer-reviewer.md` is preserved because there's no PID segment).
+
+**Decomposition guidance** (Phase 2B): each persona description tells Opus "if the artifact is large (>20 KB), split into 2-4 focused batches and call in parallel" — necessary because Claude Code v2.1.113+ regression [#50289](https://github.com/anthropics/claude-code/issues/50289) caps HTTP MCP per-tool-call wait at ~60s SDK default / ~150s observed on v2.1.138 regardless of `.mcp.json` `timeout` field. The 7-batch sweep documented in `docs/research/peer-mcp-investigation.md` proved decomposition completes every per-batch call in <3 min.
+
+**Reasoning effort** (Phase 2C): each persona MCP tool accepts an `effort?: "low"|"medium"|"high"|"xhigh"` argument, default **`high`** (cost-conscious; raise to `xhigh` for explicit deep dives, drop to `medium` for quick sanity checks). For `/v1/responses` personas (codex-critic, codex-reviewer) the effort is set as `payload.reasoning.effort`. For `/v1/chat/completions` (gemini-critic) it's set as `payload.reasoning_effort` and may be silently ignored by Copilot's gemini route — gemini-3.x reasoning is largely auto-applied. Invalid effort values are rejected with JSON-RPC `-32602`.
+
+**Concurrency cap** (Phase 2D): `MAX_INFLIGHT_TOOLS_CALL = 8` in `src/routes/mcp/handler.ts` (raised from the original defensive 2). 9th in-flight `tools/call` returns clean isError `"queue full"`. Cap exists to bound runaway clients; persona handlers are stateless. Decomposition fan-out of 4-7 parallel batches now fits comfortably under the cap.
 
 ### Spawned-CLI auth isolation
 

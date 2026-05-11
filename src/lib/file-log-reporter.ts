@@ -72,7 +72,6 @@ function rotateIfNeeded(filePath: string): void {
 export class FileLogReporter implements ConsolaReporter {
   private readonly filePath: string
   private readonly seen = new Set<string>()
-  private writing = false
 
   constructor(filePath: string) {
     this.filePath = filePath
@@ -81,7 +80,6 @@ export class FileLogReporter implements ConsolaReporter {
 
   log(logObj: LogObject, _ctx: { options: ConsolaOptions }): void {
     if (!ALLOWED_TYPES.has(logObj.type)) return
-    if (this.writing) return // re-entrancy guard
 
     const key = makeDedupeKey(logObj)
     if (this.seen.has(key)) return
@@ -91,17 +89,31 @@ export class FileLogReporter implements ConsolaReporter {
 
     const line = formatLogLine(logObj)
 
-    this.writing = true
+    // fs.openSync/writeSync/closeSync are synchronous and atomic from the
+    // perspective of the JS event loop — no other log() call can interleave
+    // between them. The previous re-entrancy guard (`if (this.writing)
+    // return`) silently dropped log lines that arrived during the same
+    // call stack as a write (e.g., a consola.error fired from an error
+    // handler triggered by another log). Now we just write and trust the
+    // synchronicity.
+    //
+    // The fd is closed in `finally` so an ENOSPC/EIO from writeSync does
+    // not leak the fd. Repeated logging failures otherwise escalate into
+    // EMFILE and bring down the whole process's ability to open files.
+    let fd: number | undefined
     try {
-      // Always open with explicit mode to ensure 0o600 even if file was
-      // deleted between writes and appendFileSync would recreate it as 0o644
-      const fd = fs.openSync(this.filePath, "a", 0o600)
+      fd = fs.openSync(this.filePath, "a", 0o600)
       fs.writeSync(fd, line)
-      fs.closeSync(fd)
     } catch {
       // Silently discard — cannot log a logging failure
     } finally {
-      this.writing = false
+      if (fd !== undefined) {
+        try {
+          fs.closeSync(fd)
+        } catch {
+          // already closed / unwritable — nothing to do
+        }
+      }
     }
   }
 }

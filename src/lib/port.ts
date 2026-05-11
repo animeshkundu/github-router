@@ -1,3 +1,5 @@
+import consola from "consola"
+
 export const DEFAULT_PORT = 8787
 
 /**
@@ -47,3 +49,52 @@ export function generateRandomPort(): number {
     + PORT_RANGE_MIN
   )
 }
+
+function envInt(key: string, fallback: number): number {
+  const raw = process.env[key]
+  if (!raw) return fallback
+  // Strict integer format only: parseInt is too permissive — it would
+  // silently turn `"5e3"` into 5, `"300_000"` into 300, `"60000ms"` into
+  // 60000. For timeout knobs we'd rather fall back than silently
+  // misconfigure (e.g. set a 5-min inactivity timer to 5 ms).
+  if (!/^[0-9]+$/.test(raw.trim())) {
+    consola.warn(
+      `${key}=${JSON.stringify(raw)} is not a non-negative integer; using fallback ${fallback}`,
+    )
+    return fallback
+  }
+  const parsed = Number.parseInt(raw, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+// Total fetch-phase timeout (until Response object resolves) for upstream
+// streaming endpoints. Default 0 = no fetch-phase timeout — body-phase
+// failures are covered by UPSTREAM_INACTIVITY_TIMEOUT_MS below, and a
+// fetch-lifecycle timeout would silently truncate legitimate long
+// completions (e.g. xhigh-thinking responses that legitimately stream
+// for 30+ minutes). Set the env var to a positive integer if you need
+// a hard cap.
+export const UPSTREAM_FETCH_TIMEOUT_MS = envInt(
+  "UPSTREAM_FETCH_TIMEOUT_MS",
+  0,
+)
+
+// Inactivity bound on body reads — if no chunk arrives within this window,
+// abort the stream and emit a structured error event. 300s (5 min) sits
+// well above Copilot's ~60s idle cut so the proxy still reaps stalled
+// connections before the upstream RST hits us as an unhandled rejection,
+// but does NOT prematurely abort reasoning-capable models (gpt-5.5,
+// gpt-5.3-codex, gemini-3.1-pro-preview, claude-opus-4.7-xhigh) which
+// routinely produce >75s silences between visible token bursts while
+// thinking. The earlier 75s default produced live aborts at /v1/messages
+// with bytes=134k–163k already streamed — proof the upstream was healthy
+// and just thinking. Lower this only if you specifically want to reap
+// stalled connections faster than 5 minutes.
+export const UPSTREAM_INACTIVITY_TIMEOUT_MS = envInt(
+  "UPSTREAM_INACTIVITY_TIMEOUT_MS",
+  300_000,
+)
+
+// TODO: extend timeout coverage to non-streaming paths (web-search MCP in
+// src/services/copilot/web-search.ts, embeddings, models) when those
+// endpoints become hot or start hanging in practice.

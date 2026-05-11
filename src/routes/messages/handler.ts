@@ -3,11 +3,13 @@ import type { Context } from "hono"
 import consola from "consola"
 
 import { awaitApproval } from "~/lib/approval"
+import { parseJsonOrDiagnose } from "~/lib/diagnose-response"
 import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
+import { relayAnthropicStream } from "~/lib/stream-relay"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import { createMessages } from "~/services/copilot/create-messages"
 import type { Model } from "~/services/copilot/get-models"
@@ -231,7 +233,32 @@ export async function handleCompletion(c: Context) {
   }
 
   const contentType = response.headers.get("content-type") ?? ""
-  const isStreaming = contentType.includes("text/event-stream")
+  // Trust the upstream content-type when it's explicit. Two anomalies need
+  // a fallback: (a) header missing entirely, (b) header is
+  // `application/octet-stream` (some proxies normalize SSE this way). In
+  // those cases, treat as streaming if the client asked for it via the
+  // Accept header — Anthropic SDKs send `Accept: text/event-stream` for
+  // streaming requests. We do NOT fall back when content-type is
+  // explicitly `application/json` — that's almost always an upstream
+  // error response that should be parsed via parseJsonOrDiagnose.
+  const clientAcceptsSSE = (c.req.header("accept") ?? "").includes(
+    "text/event-stream",
+  )
+  let isStreaming = contentType.includes("text/event-stream")
+  if (!isStreaming && clientAcceptsSSE) {
+    if (contentType === "" || contentType === "application/octet-stream") {
+      consola.warn(
+        `Upstream /v1/messages returned status=${response.status} content-type=${JSON.stringify(contentType)} but client requested streaming; treating response body as SSE`,
+      )
+      isStreaming = true
+    }
+  }
+
+  if (debugEnabled) {
+    consola.debug(
+      `Upstream /v1/messages: status=${response.status} content-type="${contentType}" isStreaming=${isStreaming}`,
+    )
+  }
 
   // Streaming: pipe the upstream SSE response body directly
   if (isStreaming) {
@@ -254,6 +281,7 @@ export async function handleCompletion(c: Context) {
     const streamHeaders: Record<string, string> = {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
+      "transfer-encoding": "chunked",
       connection: "keep-alive",
     }
     const requestId = response.headers.get("x-request-id")
@@ -261,14 +289,22 @@ export async function handleCompletion(c: Context) {
     const reqId = response.headers.get("request-id")
     if (reqId) streamHeaders["request-id"] = reqId
 
-    return new Response(response.body, {
-      status: response.status,
-      headers: streamHeaders,
-    })
+    return new Response(
+      response.body
+        ? relayAnthropicStream(response.body, { routePath: c.req.path })
+        : null,
+      {
+        status: response.status,
+        headers: streamHeaders,
+      },
+    )
   }
 
   // Non-streaming: extract usage from response body
-  const responseBody = (await response.json()) as AnyRecord
+  const responseBody = await parseJsonOrDiagnose<AnyRecord>(
+    response,
+    c.req.path,
+  )
 
   logRequest(
     {

@@ -69,7 +69,7 @@ describe("buildLaunchCommand", () => {
   })
 
   describe("codex", () => {
-    test("returns correct command with default model", () => {
+    test("returns correct command with default model (no serverUrl = no provider config)", () => {
       const target: LaunchTarget = {
         kind: "codex",
         envVars: {
@@ -81,7 +81,15 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual(["codex", "--full-auto", "-m", DEFAULT_CODEX_MODEL])
+      expect(result.cmd).toEqual([
+        "codex",
+        "--sandbox",
+        "workspace-write",
+        "--ask-for-approval",
+        "on-request",
+        "-m",
+        DEFAULT_CODEX_MODEL,
+      ])
       expect(result.env.OPENAI_BASE_URL).toBe("http://localhost:12345/v1")
       expect(result.env.OPENAI_API_KEY).toBe("dummy")
     })
@@ -99,7 +107,15 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual(["codex", "--full-auto", "-m", "gpt-4o"])
+      expect(result.cmd).toEqual([
+        "codex",
+        "--sandbox",
+        "workspace-write",
+        "--ask-for-approval",
+        "on-request",
+        "-m",
+        "gpt-4o",
+      ])
     })
 
     test("appends extra args after base command", () => {
@@ -109,12 +125,48 @@ describe("buildLaunchCommand", () => {
           OPENAI_BASE_URL: "http://localhost:12345/v1",
           OPENAI_API_KEY: "dummy",
         },
-        extraArgs: ["--full-auto"],
+        extraArgs: ["--debug"],
       }
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual(["codex", "--full-auto", "-m", DEFAULT_CODEX_MODEL, "--full-auto"])
+      expect(result.cmd).toEqual([
+        "codex",
+        "--sandbox",
+        "workspace-write",
+        "--ask-for-approval",
+        "on-request",
+        "-m",
+        DEFAULT_CODEX_MODEL,
+        "--debug",
+      ])
+    })
+
+    test("injects -c model_provider override when serverUrl is provided (Codex 0.129+ ignores OPENAI_BASE_URL)", () => {
+      const target: LaunchTarget = {
+        kind: "codex",
+        envVars: { OPENAI_API_KEY: "dummy" },
+        extraArgs: [],
+        serverUrl: "http://127.0.0.1:18787",
+      }
+
+      const result = buildLaunchCommand(target)
+
+      expect(result.cmd[0]).toBe("codex")
+      // The provider config must come BEFORE the sandbox/model args so
+      // Codex parses it as a root flag and the spawned model_provider
+      // points at our proxy.
+      expect(result.cmd).toContain("-c")
+      const providerCfgIdx = result.cmd.findIndex((s) =>
+        s.startsWith("model_providers.github_router="),
+      )
+      expect(providerCfgIdx).toBeGreaterThan(0)
+      expect(result.cmd[providerCfgIdx]).toContain(
+        'base_url="http://127.0.0.1:18787/v1"',
+      )
+      expect(result.cmd[providerCfgIdx]).toContain('wire_api="responses"')
+      const useProviderIdx = result.cmd.indexOf("model_provider=github_router")
+      expect(useProviderIdx).toBeGreaterThan(providerCfgIdx)
     })
   })
 

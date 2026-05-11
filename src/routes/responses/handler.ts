@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto"
 import type { Context } from "hono"
 
 import consola from "consola"
-import { streamSSE } from "hono/streaming"
 
 import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
 import { awaitApproval } from "~/lib/approval"
@@ -11,6 +10,7 @@ import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
+import { buildOpenAIErrorEvent, isControllerClosedError, logStreamError } from "~/lib/stream-relay"
 import { resolveModel } from "~/lib/utils"
 import {
   createResponses,
@@ -19,6 +19,26 @@ import {
   type ResponsesPayload,
 } from "~/services/copilot/create-responses"
 import { searchWeb } from "~/services/copilot/web-search"
+
+interface UpstreamSSEEvent {
+  event?: string
+  data?: string
+  id?: string | number
+}
+
+const ENCODER = new TextEncoder()
+
+function formatSSE(chunk: UpstreamSSEEvent): string {
+  const parts: Array<string> = []
+  if (chunk.event) parts.push(`event: ${chunk.event}`)
+  if (chunk.data !== undefined) {
+    for (const line of String(chunk.data).split(/\r\n|\r|\n/)) {
+      parts.push(`data: ${line}`)
+    }
+  }
+  if (chunk.id !== undefined) parts.push(`id: ${String(chunk.id)}`)
+  return parts.join("\n") + "\n\n"
+}
 
 export async function handleResponses(c: Context) {
   const startTime = Date.now()
@@ -92,27 +112,163 @@ export async function handleResponses(c: Context) {
     return c.json(response)
   }
 
-  return streamSSE(c, async (stream) => {
-    for await (const chunk of response) {
-      if (debugEnabled) {
-        consola.debug("Streaming chunk:", JSON.stringify(chunk))
-      }
+  // Streaming: peek the first SSE event so pre-byte upstream errors surface
+  // through the route's try/catch → forwardError as a clean JSON response,
+  // and only mid-stream errors hit the manual ReadableStream's pull-error path.
+  // The /responses iterator emits a final `[DONE]` sentinel which we drop.
+  const iterator = (response as AsyncIterableIterator<UpstreamSSEEvent>)[
+    Symbol.asyncIterator
+  ]()
 
-      if (chunk.data === "[DONE]") {
-        break
-      }
+  // Skip leading empty / [DONE] sentinels until we get a real event.
+  let firstChunk: UpstreamSSEEvent | undefined
+  let upstreamFinished = false
+  while (true) {
+    const r = await iterator.next()
+    if (r.done) {
+      upstreamFinished = true
+      break
+    }
+    // Defensive guard against an iterator that yields {done:false, value:undefined}
+    // before we dereference r.value.data below.
+    if (r.value === undefined || r.value === null) continue
+    if (r.value.data === "[DONE]") {
+      upstreamFinished = true
+      break
+    }
+    if (!r.value.data) continue
+    firstChunk = r.value
+    break
+  }
+  if (firstChunk === undefined) {
+    consola.warn(
+      `Upstream /responses returned no payload events at ${c.req.path}`,
+    )
+  }
 
-      if (!chunk.data) {
-        continue
-      }
+  let pendingFirstChunk: UpstreamSSEEvent | undefined = firstChunk
+  let consumerCancelled = false
 
-      await stream.writeSSE({
-        data: chunk.data,
-        event: chunk.event,
-        id: chunk.id?.toString(),
+  const safeClose = (controller: ReadableStreamDefaultController<Uint8Array>) => {
+    try {
+      controller.close()
+    } catch {
+      // already closed / errored
+    }
+  }
+  const releaseUpstream = (reason?: unknown) => {
+    if (typeof iterator.return === "function") {
+      iterator.return(reason).catch(() => {
+        // upstream may already be closed
       })
     }
-  })
+  }
+  const safeEnqueue = (
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    bytes: Uint8Array,
+  ): boolean => {
+    try {
+      controller.enqueue(bytes)
+      return true
+    } catch (e) {
+      if (isControllerClosedError(e)) {
+        consumerCancelled = true
+        // The downstream cancel() callback may not fire if the controller
+        // was closed by Bun's HTTP layer rather than an explicit consumer
+        // .cancel() — release the upstream iterator here so the upstream
+        // socket does not leak.
+        releaseUpstream(e)
+        return false
+      }
+      throw e
+    }
+  }
+
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (consumerCancelled || upstreamFinished) {
+          safeClose(controller)
+          return
+        }
+        if (pendingFirstChunk !== undefined) {
+          const chunk = pendingFirstChunk
+          pendingFirstChunk = undefined
+          if (debugEnabled) {
+            consola.debug("Streaming chunk:", JSON.stringify(chunk))
+          }
+          safeEnqueue(controller, ENCODER.encode(formatSSE(chunk)))
+          return
+        }
+        try {
+          const result = await iterator.next()
+          if (consumerCancelled) {
+            safeClose(controller)
+            return
+          }
+          if (result.done) {
+            upstreamFinished = true
+            safeClose(controller)
+            return
+          }
+          // Defensive: an upstream iterator that yields `{done:false, value:undefined}`
+          // would crash on `result.value.data` below. Skip silently and
+          // pull again on the next consumer demand. Real upstream iterators
+          // never emit this shape, but a misbehaving / proxied iterator might.
+          if (result.value === undefined || result.value === null) return
+          if (result.value.data === "[DONE]") {
+            upstreamFinished = true
+            safeClose(controller)
+            return
+          }
+          if (!result.value.data) return
+          if (debugEnabled) {
+            consola.debug("Streaming chunk:", JSON.stringify(result.value))
+          }
+          safeEnqueue(controller, ENCODER.encode(formatSSE(result.value)))
+        } catch (error) {
+          upstreamFinished = true
+          if (consumerCancelled) {
+            // Consumer-cancelled mid-pull. Release the upstream iterator
+            // — the cancel() callback may not have fired if the controller
+            // was closed by Bun's HTTP layer.
+            //
+            // We deliberately do NOT call isControllerClosedError(error)
+            // on iterator-side errors here — the helper matches substrings
+            // like "stream is closed" which can appear in real upstream
+            // errors, and treating them as consumer-cancel would silently
+            // suppress the OpenAI-shape error frame the consumer needs.
+            releaseUpstream(error)
+            safeClose(controller)
+            return
+          }
+          const { errName, errMessage } = logStreamError(c.req.path, error)
+          safeEnqueue(
+            controller,
+            ENCODER.encode(buildOpenAIErrorEvent(errName, errMessage)),
+          )
+          // Server-initiated close — release the upstream iterator since
+          // our cancel() callback won't fire.
+          releaseUpstream(error)
+          safeClose(controller)
+        }
+      },
+      cancel() {
+        consumerCancelled = true
+        upstreamFinished = true
+        releaseUpstream()
+      },
+    }),
+    {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        "transfer-encoding": "chunked",
+        connection: "keep-alive",
+      },
+    },
+  )
 }
 
 const isNonStreaming = (

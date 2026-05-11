@@ -414,3 +414,31 @@ test("searchWeb matches by id even with non-matching events earlier in stream", 
     { title: "Doc", url: "https://example.com/doc" },
   ])
 })
+
+test("searchWeb accepts null for annotations and bing_searches (no-results case)", async () => {
+  // Upstream MCP started returning `null` instead of omitting these fields
+  // when there are no results. The Zod schema must accept null/undefined/array
+  // — otherwise the proxy spams the warn log on every empty-result query.
+  const inner = {
+    type: "output_text",
+    text: { value: "no relevant info found", annotations: null },
+    bing_searches: null,
+  }
+  const { fn } = makeMcpMock({
+    callEvents: (callId) => [
+      {
+        jsonrpc: "2.0",
+        id: callId,
+        result: {
+          content: [{ type: "text", text: JSON.stringify(inner) }],
+        },
+      },
+    ],
+  })
+  // @ts-expect-error - mock fetch
+  globalThis.fetch = fn
+
+  const result = await searchWeb("query")
+  expect(result.content).toBe("no relevant info found")
+  expect(result.references).toEqual([])
+})

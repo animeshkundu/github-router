@@ -3,11 +3,14 @@ import { events } from "fetch-event-stream"
 
 import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
+import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
+import { tryRefreshAndRetry } from "~/lib/token"
 
 export const createChatCompletions = async (
   payload: ChatCompletionsPayload,
   modelHeaders?: Record<string, string>,
+  callerSignal?: AbortSignal,
 ) => {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
@@ -23,18 +26,29 @@ export const createChatCompletions = async (
     ["assistant", "tool"].includes(msg.role),
   )
 
-  // Build headers and add X-Initiator
-  const headers: Record<string, string> = {
-    ...copilotHeaders(state, enableVision),
-    ...modelHeaders,
-    "X-Initiator": isAgentCall ? "agent" : "user",
+  const url = `${copilotBaseUrl(state)}/chat/completions`
+  const doFetch = (): Promise<Response> => {
+    // Re-build headers per attempt so a 401-retry picks up the refreshed token.
+    const headers: Record<string, string> = {
+      ...copilotHeaders(state, enableVision),
+      ...modelHeaders,
+      "X-Initiator": isAgentCall ? "agent" : "user",
+    }
+    const fetchInit: RequestInit = {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    }
+    const signals: Array<AbortSignal> = []
+    if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
+      signals.push(AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS))
+    }
+    if (callerSignal) signals.push(callerSignal)
+    if (signals.length === 1) fetchInit.signal = signals[0]
+    else if (signals.length > 1) fetchInit.signal = AbortSignal.any(signals)
+    return fetch(url, fetchInit)
   }
-
-  const response = await fetch(`${copilotBaseUrl(state)}/chat/completions`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  })
+  const response = await tryRefreshAndRetry(doFetch, "/chat/completions")
 
   if (!response.ok) {
     let errorBody = ""
@@ -168,6 +182,13 @@ export interface ChatCompletionsPayload {
     | { type: "function"; function: { name: string } }
     | null
   user?: string | null
+  /**
+   * OpenAI-compatible reasoning effort knob. Copilot accepts low/medium/high/xhigh
+   * for OpenAI-routed models; for non-OpenAI models (e.g. gemini-3.x routed via
+   * /v1/chat/completions) the upstream may silently ignore this or 400 — the proxy
+   * forwards it as-is and surfaces any 400 through the existing tool-error path.
+   */
+  reasoning_effort?: string | null
 }
 
 export interface Tool {

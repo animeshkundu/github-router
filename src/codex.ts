@@ -107,7 +107,13 @@ export const codex = defineCommand({
     const extraArgs = ((args as unknown as Record<string, unknown>)._ as string[]) ?? []
 
     launchChild(
-      { kind: "codex", envVars, extraArgs, model: codexModel },
+      {
+        kind: "codex",
+        envVars,
+        extraArgs,
+        model: codexModel,
+        serverUrl,
+      },
       server,
     )
   },

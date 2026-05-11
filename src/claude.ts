@@ -3,8 +3,12 @@ import process from "node:process"
 import { defineCommand } from "citty"
 import consola from "consola"
 
+import {
+  resolveCodexCliBackend,
+  writePeerMcpRuntimeFiles,
+} from "./lib/codex-mcp-config"
 import { enableFileLogging } from "./lib/file-log-reporter"
-import { launchChild } from "./lib/launch"
+import { getCodexVersion, launchChild } from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
 import {
   DEFAULT_CLAUDE_MODEL,
@@ -30,6 +34,24 @@ export const claude = defineCommand({
       alias: "m",
       type: "string",
       description: "Override the default model for Claude Code",
+    },
+    "codex-mcp": {
+      type: "boolean" as const,
+      default: true,
+      description:
+        "Wire peer-model MCP personas (codex-critic, codex-reviewer, gemini-critic) into the spawned Claude Code session",
+    },
+    "codex-cli": {
+      type: "boolean" as const,
+      default: false,
+      description:
+        "Add a `codex mcp-server` stdio backend so codex-implementer can mutate files. Requires codex CLI 0.129+; gracefully falls back to HTTP-only if absent.",
+    },
+    "codex-mcp-only": {
+      type: "boolean" as const,
+      default: false,
+      description:
+        "Pass --strict-mcp-config to claude code so only github-router's MCP servers are loaded (hides user's existing MCP servers)",
     },
   },
   async run({ args }) {
@@ -118,9 +140,72 @@ export const claude = defineCommand({
     const envVars = getClaudeCodeEnvVars(serverUrl, chosenSlug)
     const extraArgs = ((args as unknown as Record<string, unknown>)._ as string[]) ?? []
 
+    // Peer-MCP wiring. Default-on. When enabled:
+    //   1. Decide between HTTP backend (always works, read-only personas)
+    //      and the `--codex-cli` stdio backend (requires codex 0.129+,
+    //      adds the implementer persona).
+    //   2. Probe the live Copilot catalog for gemini-3.1-pro-preview.
+    //   3. Generate a per-launch nonce, write the MCP config tempfile
+    //      under PATHS.CLAUDE_RUNTIME_DIR with mode 0o600, AND write
+    //      one .md subagent file per peer agent into ~/.claude/agents/
+    //      (Phase 2.5 — `--agents` JSON does NOT populate Claude Code's
+    //      Task subagent_type enum on v2.1.138; .md files in the canonical
+    //      agents dir do).
+    //   4. Inject `--mcp-config <path>` into the spawned Claude Code's
+    //      argv. Add `--strict-mcp-config` if the user explicitly opts
+    //      out of their existing MCP servers. The `--agents` JSON path
+    //      is intentionally NOT passed: the .md registration in the
+    //      canonical agents dir is the authoritative surface.
+    //   5. Plumb `cleanup()` into launchChild's onShutdown so tempfiles
+    //      are unlinked on signal exit.
+    let onShutdown: (() => Promise<void>) | undefined
+    const codexMcpEnabled = (args as Record<string, unknown>)["codex-mcp"] !== false
+    if (codexMcpEnabled) {
+      try {
+        const requestedCli =
+          ((args as Record<string, unknown>)["codex-cli"] as boolean | undefined) ?? false
+        const backend = resolveCodexCliBackend({
+          requested: requestedCli,
+          codexInfo: requestedCli ? getCodexVersion() : null,
+        })
+        const geminiAvailable =
+          state.models?.data.some((m) => /^gemini-3\..*pro/i.test(m.id)) ?? false
+        if (!geminiAvailable) {
+          consola.info(
+            "gemini-3.1-pro-preview not found in your Copilot model catalog; gemini-critic persona will not be registered.",
+          )
+        }
+
+        const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
+          codexCli: backend === "cli",
+          geminiAvailable,
+        })
+        state.peerMcpNonce = runtime.nonce
+        onShutdown = runtime.cleanup
+
+        extraArgs.push("--mcp-config", runtime.mcpConfigPath)
+        if ((args as Record<string, unknown>)["codex-mcp-only"] === true) {
+          extraArgs.push("--strict-mcp-config")
+        }
+
+        const personaNames = runtime.personas.map((p) => p.agentName).join(", ")
+        process.stderr.write(
+          `Peer MCP wired (backend=${backend}, personas=[${personaNames}], `
+            + `subagent .md files=${runtime.agentMdPaths.length}).\n`,
+        )
+      } catch (err) {
+        consola.warn(
+          `Peer MCP wiring failed (claude will launch without it): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
+    }
+
     launchChild(
       { kind: "claude-code", envVars, extraArgs, model: chosenSlug },
       server,
+      { onShutdown },
     )
   },
 })

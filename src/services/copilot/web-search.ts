@@ -31,6 +31,9 @@ const RpcSchema = z.object({
 const InnerSchema = z.object({
   text: z.object({
     value: z.string(),
+    // Upstream sometimes returns `null` instead of an absent field for the
+    // no-results case. `.nullable().optional()` accepts undefined, null,
+    // and a real array; readers must `?? []` before iterating.
     annotations: z
       .array(
         z.object({
@@ -39,25 +42,38 @@ const InnerSchema = z.object({
             .optional(),
         }),
       )
+      .nullable()
       .optional(),
   }),
-  bing_searches: z.array(z.unknown()).optional(),
+  bing_searches: z.array(z.unknown()).nullable().optional(),
 })
 
 const MAX_SEARCHES_PER_SECOND = 3
 let searchTimestamps: Array<number> = []
 
+// Single-flight chain serializes throttle checks. Without this, two
+// concurrent searches can both read the timestamp array, both filter,
+// both skip the await, and both push — doubling the QPS the throttle
+// is supposed to enforce.
+let throttleChain: Promise<void> = Promise.resolve()
+
 async function throttleSearch(): Promise<void> {
-  const now = Date.now()
-  searchTimestamps = searchTimestamps.filter((t) => now - t < 1000)
-  if (searchTimestamps.length >= MAX_SEARCHES_PER_SECOND) {
-    const waitMs = 1000 - (now - searchTimestamps[0])
-    if (waitMs > 0) {
-      consola.debug(`Web search rate limited, waiting ${waitMs}ms`)
-      await sleep(waitMs)
+  const myTurn = throttleChain.then(async () => {
+    const now = Date.now()
+    searchTimestamps = searchTimestamps.filter((t) => now - t < 1000)
+    if (searchTimestamps.length >= MAX_SEARCHES_PER_SECOND) {
+      const waitMs = 1000 - (now - searchTimestamps[0])
+      if (waitMs > 0) {
+        consola.debug(`Web search rate limited, waiting ${waitMs}ms`)
+        await sleep(waitMs)
+      }
     }
-  }
-  searchTimestamps.push(Date.now())
+    searchTimestamps.push(Date.now())
+  })
+  throttleChain = myTurn.catch(() => {
+    // errors don't break the chain — next caller starts fresh
+  })
+  return myTurn
 }
 
 function mcpHeaders(sid?: string): Record<string, string> {
