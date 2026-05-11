@@ -94,7 +94,11 @@ export function normalizeModelId(id: string): string {
  * 2. Case-insensitive match
  * 3. Family preference (opus→1m, codex→highest version)
  * 4. Normalized match (dots→dashes, letter-digit boundaries)
- * 5. Return as-is with a warning
+ * 5. Anthropic dated-slug retry: if the input matches `claude-...-YYYYMMDD`,
+ *    strip the date and re-run the cascade once. Family-guarded so non-claude
+ *    8-digit suffixes can't be mis-stripped; runs after Steps 1-4 so explicit
+ *    version pinning (a dated catalog id matched at Step 1) always wins.
+ * 6. Return as-is with a warning
  */
 export function resolveModel(modelId: string): string {
   const models = state.models?.data
@@ -147,7 +151,30 @@ export function resolveModel(modelId: string): string {
   )
   if (normMatch) return normMatch.id
 
-  // 5. No match — warn and return as-is
+  // 5. Anthropic dated-slug retry. Claude Code's /model UI ships Anthropic's
+  //    published slugs (e.g. "claude-haiku-4-5-20251001") that carry a
+  //    -YYYYMMDD suffix Copilot's catalog doesn't use. Strip the date and
+  //    re-run the cascade once so the request maps to the floating tag
+  //    (claude-haiku-4.5). Family-guarded to `claude-` so a hypothetical
+  //    "gpt-...-20260101" can't be silently stripped. Bounded recursion:
+  //    the stripped id no longer matches the regex, so the retry's own
+  //    Step 5 is a no-op.
+  const dateStripped = modelId.replace(/^(claude-[\w.-]+)-20\d{6}$/i, "$1")
+  if (dateStripped !== modelId) {
+    const retried = resolveModel(dateStripped)
+    // resolveModel returns the input unchanged on miss; treat unchanged-and-
+    // not-in-catalog as miss to avoid logging a misleading "resolved" hop.
+    const retryHit =
+      retried !== dateStripped || models.some((m) => m.id === dateStripped)
+    if (retryHit) {
+      consola.info(
+        `Resolved Anthropic dated slug "${modelId}" → "${retried}" (stripped -YYYYMMDD; pass an explicit catalog id to pin a snapshot)`,
+      )
+      return retried
+    }
+  }
+
+  // 6. No match — warn and return as-is
   consola.warn(
     `Model "${modelId}" not found in Copilot model list. Available: ${models.map((m) => m.id).join(", ")}`,
   )
