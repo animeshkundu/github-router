@@ -169,8 +169,15 @@ test("sweepStaleRuntimeFiles handles both legacy peer-mcp-<pid>.json and new pee
 test("sweepStalePeerAgentMdFiles deletes dead-PID peer-*.md but keeps live-PID and unrelated user files", async () => {
   // Phase 2.5: per-launch .md subagent files written to ~/.claude/agents/
   // need a corresponding sweep for orphans from crashed prior proxies.
-  // The sweep MUST NOT touch the user's own .md files (they don't match
-  // the `peer-<numeric-pid>-` prefix).
+  // The sweep MUST NOT touch the user's own .md files.
+  //
+  // Phase 2.6 (codex-critic + gemini-critic 2-lab finding): the original
+  // permissive regex (`^peer-(\d+)(?:-[0-9a-f]+)?-.+\.md$`) would have
+  // matched user files like `peer-12345-meeting-notes.md` and silently
+  // unlinked them. The tightened regex requires BOTH the 8-hex-char
+  // random suffix AND an exact persona-name suffix. This test exercises
+  // BOTH the easy cases AND the user-file-with-PID-shape case the prior
+  // version would have silently broken.
   const agentsDir = path.join(tempDir, ".claude", "agents")
   await fs.mkdir(agentsDir, { recursive: true })
 
@@ -179,15 +186,23 @@ test("sweepStalePeerAgentMdFiles deletes dead-PID peer-*.md but keeps live-PID a
   const deadPath = path.join(agentsDir, `peer-${deadPid}-deadbeef-codex-critic.md`)
   // User's own subagent — completely unrelated naming, must NOT be touched.
   const userOwn = path.join(agentsDir, "my-personal-helper.md")
-  // Edge case: user's file that *starts* with "peer" but isn't ours
-  // (e.g., the user named their own subagent "peer-reviewer"). MUST NOT
-  // be touched because the digit-PID segment isn't there.
+  // User's file that *starts* with "peer" but isn't ours.
   const userPeerLike = path.join(agentsDir, "peer-reviewer.md")
+  // CRITICAL: user file with PID-shape prefix that the OLD regex matched
+  // and the NEW regex must reject (no 8-hex-char segment, no allowlisted
+  // persona suffix). Picking deadPid explicitly so isPidAlive=false —
+  // any false-positive match would unlink it.
+  const userPidLike = path.join(agentsDir, `peer-${deadPid}-meeting-notes.md`)
+  // Even nastier: user file matching the PID-and-hex shape but a
+  // non-persona suffix. Must still be rejected by the persona allowlist.
+  const userPidHexLike = path.join(agentsDir, `peer-${deadPid}-deadbeef-meeting.md`)
 
   await fs.writeFile(livePath, "---\nname: codex-critic\n---\n", { mode: 0o600 })
   await fs.writeFile(deadPath, "---\nname: codex-critic\n---\n", { mode: 0o600 })
   await fs.writeFile(userOwn, "---\nname: my-personal-helper\n---\n", { mode: 0o600 })
   await fs.writeFile(userPeerLike, "---\nname: peer-reviewer\n---\n", { mode: 0o600 })
+  await fs.writeFile(userPidLike, "---\nname: meeting-notes\n---\n", { mode: 0o600 })
+  await fs.writeFile(userPidHexLike, "---\nname: meeting\n---\n", { mode: 0o600 })
 
   await sweepStalePeerAgentMdFiles()
 
@@ -195,11 +210,17 @@ test("sweepStalePeerAgentMdFiles deletes dead-PID peer-*.md but keeps live-PID a
   await expect(fs.stat(deadPath)).rejects.toThrow()
   await expect(fs.stat(userOwn)).resolves.toBeDefined()
   await expect(fs.stat(userPeerLike)).resolves.toBeDefined()
+  // The two PID-shape user files MUST survive the sweep — the prior
+  // version's permissive regex would have silently deleted them.
+  await expect(fs.stat(userPidLike)).resolves.toBeDefined()
+  await expect(fs.stat(userPidHexLike)).resolves.toBeDefined()
 
   // Cleanup
   await fs.unlink(livePath)
   await fs.unlink(userOwn)
   await fs.unlink(userPeerLike)
+  await fs.unlink(userPidLike)
+  await fs.unlink(userPidHexLike)
 })
 
 test("sweepStalePeerAgentMdFiles tolerates missing ~/.claude/agents dir", async () => {

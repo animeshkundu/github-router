@@ -283,17 +283,47 @@ function defaultAgentsDir(): string {
 
 /**
  * YAML frontmatter string-escape — sufficient for our use case where
- * descriptions can contain colons, quotes, and newlines. Wraps the
- * value in double-quotes and escapes backslashes + double-quotes.
- * Newlines are encoded as the YAML escape sequence `\n`.
+ * descriptions can contain colons, quotes, newlines. Wraps the value
+ * in double-quotes and escapes:
+ *   - `\` and `"` (canonical YAML)
+ *   - `\n`, `\r`, `\t` (whitespace controls — `\r` matters on Windows-edited
+ *     literals; strict YAML 1.2 parsers reject raw `\r` in double-quoted
+ *     scalars)
+ *   - other C0 control chars (\x00-\x08, \x0B, \x0C, \x0E-\x1F) and
+ *     DEL (\x7F) — encoded as `\xNN` so the YAML stays valid even if
+ *     a future description sources data from an external file
  *
  * NOT a general-purpose YAML serializer; we control the inputs.
  */
 function escapeYamlString(s: string): string {
   return (
-    `"${s.replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\n/g, "\\n")}"`
+    `"${
+      s
+        .replace(/\\/g, "\\\\")
+        .replace(/"/g, "\\\"")
+        .replace(/\n/g, "\\n")
+        .replace(/\r/g, "\\r")
+        .replace(/\t/g, "\\t")
+        // The point of this regex IS to match control characters so we
+        // can replace them with safe `\xNN` escapes — the lint rule's
+        // concern (accidental control-char in regex) doesn't apply here.
+        // eslint-disable-next-line no-control-regex
+        .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, (c) =>
+          `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`,
+        )
+    }"`
   )
 }
+
+/**
+ * Strict allowlist for subagent names — controls both the YAML
+ * frontmatter `name:` field AND the filename suffix. Defense-in-depth:
+ * even if a future contributor wires in a dynamic agent name from
+ * outside, the validator at the top of `writePeerAgentMdFiles` rejects
+ * anything that wouldn't be a safe bare YAML scalar AND a safe path
+ * component.
+ */
+const VALID_AGENT_NAME = /^[a-z][a-z0-9-]*$/
 
 /** Build a single subagent .md file body (frontmatter + system prompt). */
 function buildAgentMd(spec: { name: string; description: string; prompt: string }): string {
@@ -329,19 +359,43 @@ export async function writePeerAgentMdFiles(
   agents: Record<string, { description: string; prompt: string }>,
   opts: { agentsDir?: string; fileSuffix: string },
 ): Promise<{ paths: Array<string>; cleanup: () => Promise<void> }> {
+  // Validate every agent name BEFORE touching the filesystem. Defense-
+  // in-depth against a future contributor wiring in a dynamic name from
+  // outside (--agent flag, MCP tool registration, etc.). Names appear
+  // in BOTH the filename (path-traversal vector if unvalidated) and the
+  // YAML frontmatter `name:` field (parser-confusion if it contains
+  // YAML indicator chars). The strict regex matches only safe lowercase
+  // identifiers — every current persona/coordinator name passes.
+  for (const name of Object.keys(agents)) {
+    if (!VALID_AGENT_NAME.test(name)) {
+      throw new Error(
+        `writePeerAgentMdFiles: invalid agent name ${JSON.stringify(name)} — `
+          + `must match ${VALID_AGENT_NAME.source}`,
+      )
+    }
+  }
   const dir = opts.agentsDir ?? defaultAgentsDir()
   await fs.mkdir(dir, { recursive: true })
   const paths: Array<string> = []
-  for (const [name, def] of Object.entries(agents)) {
-    const filePath = path.join(dir, `peer-${opts.fileSuffix}-${name}.md`)
-    // Same idempotency pattern as the JSON tempfiles: unlink first so
-    // O_EXCL succeeds even if a same-suffix file somehow survived.
-    await fs.unlink(filePath).catch(() => {})
-    await writeRuntimeFileSecure(
-      filePath,
-      buildAgentMd({ name, description: def.description, prompt: def.prompt }),
-    )
-    paths.push(filePath)
+  try {
+    for (const [name, def] of Object.entries(agents)) {
+      const filePath = path.join(dir, `peer-${opts.fileSuffix}-${name}.md`)
+      // Same idempotency pattern as the JSON tempfiles: unlink first so
+      // O_EXCL succeeds even if a same-suffix file somehow survived.
+      await fs.unlink(filePath).catch(() => {})
+      await writeRuntimeFileSecure(
+        filePath,
+        buildAgentMd({ name, description: def.description, prompt: def.prompt }),
+      )
+      paths.push(filePath)
+    }
+  } catch (err) {
+    // Partial-failure cleanup: if iteration N fails (disk full, EPERM,
+    // EEXIST race), the N-1 successfully-written files would otherwise
+    // be orphans the caller has no handle to. Unlink the partials before
+    // re-throwing so the boot sweep doesn't have to deal with them.
+    await Promise.allSettled(paths.map((p) => fs.unlink(p)))
+    throw err
   }
   const cleanup = async (): Promise<void> => {
     await Promise.allSettled(paths.map((p) => fs.unlink(p)))

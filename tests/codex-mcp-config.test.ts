@@ -328,6 +328,139 @@ describe("writePeerMcpRuntimeFiles", () => {
     })
   })
 
+  test("invalid agent name (Phase 2.6 path-traversal/YAML defense) → throws + cleans up partials", async () => {
+    // Defense against a future contributor wiring in a dynamic agent name
+    // from outside (--agent flag, MCP tool registration, etc.). The
+    // VALID_AGENT_NAME regex is the load-bearing protection; this test
+    // pins the contract.
+    await withTempRuntimeDir(async (_runtimeDir, _codexHome, agentsDir) => {
+      const { writePeerAgentMdFiles } = await import(
+        "../src/lib/codex-mcp-config"
+      )
+      // First valid agent succeeds and writes; second has an invalid
+      // name (contains "/" — would be a path-traversal vector). The
+      // function must throw AND clean up the first file (no orphans).
+      const ok = path.join(
+        agentsDir,
+        `peer-${process.pid}-cafef00d-codex-critic.md`,
+      )
+      await expect(
+        writePeerAgentMdFiles(
+          {
+            "codex-critic": { description: "ok", prompt: "ok" },
+            "../../etc/passwd": { description: "bad", prompt: "bad" },
+          },
+          { agentsDir, fileSuffix: `${process.pid}-cafef00d` },
+        ),
+      ).rejects.toThrow(/invalid agent name/)
+      // Validator runs BEFORE any file is written — orphan check is
+      // moot for the all-invalid case, but the test ensures we don't
+      // even start writing when validation fails.
+      await expect(fs.stat(ok)).rejects.toThrow()
+    })
+  })
+
+  test("YAML escape extends to CR, tab, control chars (Phase 2.6)", async () => {
+    // Strict YAML 1.2 parsers reject raw \r in double-quoted scalars;
+    // most parsers tolerate it but we shouldn't depend on tolerance.
+    // Same for \t and other C0 controls.
+    const { writePeerAgentMdFiles } = await import(
+      "../src/lib/codex-mcp-config"
+    )
+    await withTempRuntimeDir(async (_runtimeDir, _codexHome, agentsDir) => {
+      const result = await writePeerAgentMdFiles(
+        {
+          "codex-critic": {
+            // intentionally pathological — CR, tab, BEL, DEL all in description
+            description: "line1\rline2\twith\x07bell\x7Fand\x00null",
+            prompt: "system prompt",
+          },
+        },
+        { agentsDir, fileSuffix: `${process.pid}-deadbeef` },
+      )
+      const body = await fs.readFile(result.paths[0]!, "utf8")
+      expect(body).toContain("\\r")
+      expect(body).toContain("\\t")
+      expect(body).toContain("\\x07")
+      expect(body).toContain("\\x7f")
+      expect(body).toContain("\\x00")
+      // Raw CR/tab/control chars MUST NOT appear inside the
+      // double-quoted YAML scalar.
+      const frontmatter = body.split("---")[1] ?? ""
+      expect(frontmatter).not.toMatch(
+        // The regex deliberately matches the control-char range we just
+        // proved is escaped above; no-control-regex doesn't apply here.
+        // eslint-disable-next-line no-control-regex
+        /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/,
+      )
+      // Real CR/tab in body lines OUTSIDE frontmatter are fine — the
+      // body is not YAML, just markdown.
+      await result.cleanup()
+    })
+  })
+
+  test("concurrent proxy launches: A's cleanup() does NOT touch B's .md files", async () => {
+    // Critical isolation invariant raised by user + cross-lab review:
+    // when two `github-router claude` processes run simultaneously,
+    // closing/cleaning up proxy A MUST NOT delete proxy B's .md files.
+    //
+    // Mechanism: each call to writePeerAgentMdFiles closes over a local
+    // `paths` array containing only THAT launch's files; cleanup() does
+    // `fs.unlink(p)` for each path in its own closure, never iterates
+    // the directory. So A's cleanup is physically incapable of touching
+    // B's files. This test pins that contract.
+    const { writePeerAgentMdFiles } = await import(
+      "../src/lib/codex-mcp-config"
+    )
+    await withTempRuntimeDir(async (_runtimeDir, _codexHome, agentsDir) => {
+      // Two distinct fileSuffix values simulate two concurrent proxies
+      // (different PIDs and/or different random suffixes — same agents
+      // dir, same agent NAMES, but different filenames).
+      const a = await writePeerAgentMdFiles(
+        {
+          "codex-critic": { description: "A's persona", prompt: "A's prompt" },
+          "peer-review-coordinator": {
+            description: "A's coordinator",
+            prompt: "A's prompt",
+          },
+        },
+        { agentsDir, fileSuffix: `${process.pid}-aaaa1111` },
+      )
+      const b = await writePeerAgentMdFiles(
+        {
+          "codex-critic": { description: "B's persona", prompt: "B's prompt" },
+          "peer-review-coordinator": {
+            description: "B's coordinator",
+            prompt: "B's prompt",
+          },
+        },
+        { agentsDir, fileSuffix: `${process.pid}-bbbb2222` },
+      )
+      // Sanity: both sides wrote their own files.
+      expect(a.paths.length).toBe(2)
+      expect(b.paths.length).toBe(2)
+      for (const p of [...a.paths, ...b.paths]) {
+        await fs.access(p)
+      }
+      expect(new Set([...a.paths, ...b.paths]).size).toBe(4) // all distinct
+
+      // Close proxy A. Verify A's files gone, B's files survive.
+      await a.cleanup()
+      for (const p of a.paths) {
+        await expect(fs.stat(p)).rejects.toThrow()
+      }
+      for (const p of b.paths) {
+        await expect(fs.stat(p)).resolves.toBeDefined()
+      }
+
+      // Close proxy B. Verify clean exit.
+      await b.cleanup()
+      for (const p of b.paths) {
+        await expect(fs.stat(p)).rejects.toThrow()
+      }
+    })
+  })
+
   test("personas list reflects mode (codexCli adds implementer)", async () => {
     await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
       const httpMode = await writePeerMcpRuntimeFiles(URL, {

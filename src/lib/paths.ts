@@ -165,11 +165,20 @@ function isPidAlive(pid: number): boolean {
  * so they appear in Claude Code's Task `subagent_type` enum. Files are
  * named `peer-<pid>-<rand>-<agentName>.md` so this sweep can drop
  * orphans from crashed prior proxy sessions without touching the user's
- * own .md files (which won't match the `peer-<numeric-pid>-` prefix).
+ * own .md files.
  *
  * Same liveness rule as `sweepStaleRuntimeFiles`: only delete when the
  * file's embedded PID is no longer alive. Live PIDs keep their files —
  * a long-running proxy doesn't lose its agent registrations.
+ *
+ * Regex tightening (Phase 2.6, codex-critic + gemini-critic 2-lab finding):
+ * the original sweep regex `^peer-(\d+)(?:-[0-9a-f]+)?-.+\.md$` was too
+ * permissive — a user-authored `peer-12345-meeting-notes.md` matches
+ * (`12345` = "PID", `-meeting-notes` = trailing `.+`) and would be
+ * silently unlinked when 12345 happens to be a dead PID (overwhelmingly
+ * likely). Tightened to require BOTH the 8-hex-char random suffix AND
+ * an exact-match persona name suffix, eliminating the risk for any
+ * realistic user filename.
  */
 export async function sweepStalePeerAgentMdFiles(): Promise<void> {
   const dir = path.join(os.homedir(), ".claude", "agents")
@@ -181,10 +190,7 @@ export async function sweepStalePeerAgentMdFiles(): Promise<void> {
     throw err
   }
   for (const name of entries) {
-    // Match both legacy `peer-<pid>-<name>.md` (if any predate the random
-    // suffix) and current `peer-<pid>-<rand>-<name>.md`. The trailing
-    // `.+` keeps the match permissive on agentName since it's user-chosen.
-    const match = /^peer-(\d+)(?:-[0-9a-f]+)?-.+\.md$/.exec(name)
+    const match = PEER_AGENT_MD_FILENAME.exec(name)
     if (!match) continue
     const pid = Number.parseInt(match[1], 10)
     if (isPidAlive(pid)) continue
@@ -193,3 +199,14 @@ export async function sweepStalePeerAgentMdFiles(): Promise<void> {
     })
   }
 }
+
+/**
+ * Strict regex matching only files this proxy writes:
+ *   peer-<pid>-<8 hex>-<exact persona/coordinator name>.md
+ * The persona-name allowlist is the load-bearing protection against
+ * deleting user files. Update this list whenever a new persona is added
+ * to `PERSONAS_READ` / `PERSONAS_WRITE` in `peer-mcp-personas.ts` or a
+ * new coordinator-style agent is added in `codex-mcp-config.ts`.
+ */
+const PEER_AGENT_MD_FILENAME =
+  /^peer-(\d+)-[0-9a-f]{8}-(?:codex-critic|codex-reviewer|gemini-critic|codex-implementer|peer-review-coordinator)\.md$/
