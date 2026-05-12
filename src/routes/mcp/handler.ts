@@ -58,6 +58,24 @@ function isEffort(v: unknown): v is Effort {
 const MAX_INFLIGHT_TOOLS_CALL = 8
 let inFlightToolsCall = 0
 
+/**
+ * Per-request AbortController registry for `notifications/cancelled`
+ * (Phase D P1.5). When a client times out a tools/call before the
+ * upstream Copilot fetch completes, the JSON-RPC notification:
+ *   { jsonrpc:"2.0", method:"notifications/cancelled",
+ *     params:{ requestId: "<id>", reason?: "..." } }
+ * arrives. Without handling, the upstream fetch keeps running until
+ * natural completion, leaking the inFlightToolsCall slot for tens of
+ * minutes. Tracking the AbortController lets us abort the fetch and
+ * free the slot immediately.
+ *
+ * Important: per CLAUDE.md "Bun request-signal quirk", we use OUR own
+ * AbortController (NOT c.req.raw.signal which fires after request body
+ * is consumed). The signal is threaded into createResponses /
+ * createChatCompletions's `callerSignal` parameter.
+ */
+const inflightAborts = new Map<string | number, AbortController>()
+
 interface JsonRpcRequest {
   jsonrpc: "2.0"
   id?: number | string | null
@@ -237,6 +255,7 @@ async function callPersona(
   prompt: string,
   context: string | undefined,
   effort: Effort,
+  signal?: AbortSignal,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
   // Resolve the model id against the live catalog so a slug rename
   // (e.g., gemini-3.1-pro-preview → gemini-3.1-pro at GA) auto-resolves
@@ -248,12 +267,11 @@ async function callPersona(
   // c.req.raw.signal into the upstream fetch. Bun/srvx aborts the
   // request signal as soon as the request body is fully consumed
   // (after `await c.req.json()`), which would make every persona call
-  // fail immediately with "This operation was aborted". The existing
-  // /v1/responses handler also doesn't propagate consumer signal —
-  // it relies on the manual ReadableStream.cancel() callback for
-  // streaming, which v1 tools/call doesn't use. If we add streaming
-  // tools/call results in the future, revisit with a Bun-aware
-  // approach (see CLAUDE.md "Spec ≠ runtime").
+  // fail immediately with "This operation was aborted". Instead, the
+  // caller (handleToolsCall) creates its own AbortController and
+  // threads it through `signal`. This is the controller registered in
+  // `inflightAborts` and aborted by `notifications/cancelled` (Phase D
+  // P1.5). See CLAUDE.md "Bun request-signal quirk" for full context.
   if (persona.endpoint === "/v1/responses") {
     const payload: ResponsesPayload = {
       model: resolvedModel,
@@ -272,6 +290,8 @@ async function callPersona(
     }
     const response = (await createResponses(
       payload,
+      undefined,
+      signal,
     )) as ResponsesApiResponse
     const text = extractResponsesText(response)
     if (!text) {
@@ -296,6 +316,8 @@ async function callPersona(
   }
   const response = (await createChatCompletions(
     payload,
+    undefined,
+    signal,
   )) as ChatCompletionResponse
   const text = extractChatCompletionText(response)
   if (!text) {
@@ -386,8 +408,25 @@ async function handleToolsCall(
 
   inFlightToolsCall++
   const startedAt = Date.now()
+  // Phase D P1.5: register an AbortController so notifications/cancelled
+  // can free the slot. Use the JSON-RPC request id as the key — clients
+  // emit `params.requestId` matching it. If the client doesn't supply
+  // an id (notification request), skip registration; nothing to cancel.
+  const abortKey =
+    body.id !== undefined && body.id !== null ? body.id : undefined
+  let aborter: AbortController | undefined
+  if (abortKey !== undefined) {
+    aborter = new AbortController()
+    inflightAborts.set(abortKey, aborter)
+  }
   try {
-    const result = await callPersona(persona, prompt, context, effort)
+    const result = await callPersona(
+      persona,
+      prompt,
+      context,
+      effort,
+      aborter?.signal,
+    )
     logTelemetry({
       name: persona.agentName,
       model: persona.model,
@@ -407,7 +446,11 @@ async function handleToolsCall(
     // Tool error vs JSON-RPC error: per MCP spec, runtime errors that
     // correspond to "the tool ran but failed" should surface as
     // result.isError=true (not as JSON-RPC errors). Catalog/auth/etc.
-    // 404s from the upstream all go here.
+    // 404s from the upstream all go here. Aborts (from
+    // notifications/cancelled) also land here as `AbortError`; treat
+    // identically — the cancel notification is fire-and-forget, but
+    // the original tools/call still gets a response so the client
+    // doesn't hang waiting for it.
     return rpcResult(body.id, {
       content: [
         {
@@ -419,7 +462,40 @@ async function handleToolsCall(
     })
   } finally {
     inFlightToolsCall--
+    if (abortKey !== undefined) {
+      inflightAborts.delete(abortKey)
+    }
   }
+}
+
+/**
+ * Handle `notifications/cancelled` per JSON-RPC 2.0 + MCP spec.
+ * params.requestId is the id of an in-flight tools/call to abort.
+ * Notifications return no body (handled by isNotification path in
+ * handleRpc); this side-effect frees the in-flight slot.
+ */
+function handleCancelledNotification(body: JsonRpcRequest): void {
+  const params = body.params ?? {}
+  const requestId = (params as { requestId?: unknown }).requestId
+  if (
+    requestId === undefined
+    || (typeof requestId !== "string" && typeof requestId !== "number")
+  ) {
+    consola.debug(
+      `[mcp] notifications/cancelled missing or invalid requestId: ${JSON.stringify(requestId)}`,
+    )
+    return
+  }
+  const aborter = inflightAborts.get(requestId)
+  if (!aborter) {
+    // Already completed or never registered. No-op — common race when
+    // cancel races with completion.
+    return
+  }
+  aborter.abort(new Error("client requested cancellation"))
+  // The finally block in handleToolsCall removes the entry on
+  // completion; we don't delete here to avoid a TOCTOU race where the
+  // upstream fetch is mid-completion when cancel arrives.
 }
 
 async function handleRpc(
@@ -462,7 +538,18 @@ async function handleRpc(
         status: 200,
         body: rpcResult(body.id, {
           protocolVersion: MCP_PROTOCOL_VERSION,
-          capabilities: { tools: { listChanged: false } },
+          // Capabilities advertised must match what we actually serve
+          // (codex-critic Phase D requirement: "empty lists are not
+          // sufficient unless the whole MCP handshake is coherent").
+          // We expose tools (the personas), and stub resources/prompts
+          // as empty lists so well-behaved clients don't error on
+          // probing them. {} for resources/prompts means "supported
+          // but no list-changed notifications, no subscribe semantics".
+          capabilities: {
+            tools: { listChanged: false },
+            resources: {},
+            prompts: {},
+          },
           serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
         }),
       }
@@ -485,6 +572,71 @@ async function handleRpc(
         status: 200,
         body: await handleToolsCall(body),
       }
+
+    // --- Phase D: MCP method stubs with full handshake coherence ---
+    // (codex-critic: "if advertising resources:{}, also handle
+    // resources/templates/list with {resourceTemplates: []}")
+
+    case "resources/list":
+      if (isNotification) return { status: 202, body: null }
+      return {
+        status: 200,
+        body: rpcResult(body.id, { resources: [] }),
+      }
+
+    case "resources/templates/list":
+      if (isNotification) return { status: 202, body: null }
+      return {
+        status: 200,
+        body: rpcResult(body.id, { resourceTemplates: [] }),
+      }
+
+    case "resources/read": {
+      if (isNotification) return { status: 202, body: null }
+      // Parametric — empty list isn't appropriate. Return proper
+      // JSON-RPC -32602 invalid params per codex-critic Phase D.
+      const uri = (body.params as { uri?: unknown } | undefined)?.uri
+      return {
+        status: 200,
+        body: rpcError(
+          body.id,
+          RPC_INVALID_PARAMS,
+          `resources/read: resource URI not found: ${
+            typeof uri === "string" ? uri : "(missing/invalid uri)"
+          }`,
+        ),
+      }
+    }
+
+    case "prompts/list":
+      if (isNotification) return { status: 202, body: null }
+      return {
+        status: 200,
+        body: rpcResult(body.id, { prompts: [] }),
+      }
+
+    case "prompts/get": {
+      if (isNotification) return { status: 202, body: null }
+      const name = (body.params as { name?: unknown } | undefined)?.name
+      return {
+        status: 200,
+        body: rpcError(
+          body.id,
+          RPC_INVALID_PARAMS,
+          `prompts/get: prompt name not found: ${
+            typeof name === "string" ? name : "(missing/invalid name)"
+          }`,
+        ),
+      }
+    }
+
+    // --- Phase D P1.5: cancellation handling ---
+    case "notifications/cancelled":
+      // Side-effect only (abort the in-flight call). MUST NOT return
+      // a body per JSON-RPC 2.0 notifications. Returns 202 like other
+      // notifications.
+      handleCancelledNotification(body)
+      return { status: 202, body: null }
 
     case "ping":
       if (isNotification) return { status: 202, body: null }

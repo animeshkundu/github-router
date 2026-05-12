@@ -316,11 +316,64 @@ export function getClaudeCodeEnvVars(
     // version (the bundled MCP SDK respects per-server `timeout` and
     // ignores the env override).
     MCP_TIMEOUT: "600000",
-    // Suppress non-essential telemetry/model calls.
+    // Suppress non-essential telemetry/model calls. The first two are
+    // Anthropic's own knobs (per cc-backup managedEnv.ts); the third
+    // (`DISABLE_TELEMETRY`) suppresses Datadog/Statsig/etc. external
+    // analytics that would otherwise run regardless of the proxy. None of
+    // these calls reach the proxy (they hit external hosts), but they
+    // consume user resources and may leak metadata. Setting all three
+    // turns the spawned child into a quiet local-only session.
     DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    DISABLE_TELEMETRY: "1",
   }
   if (model) vars.ANTHROPIC_MODEL = model
+
+  // Auto-enable Anthropic's experimental "leverage" features for proxied
+  // claude sessions. Symmetric with the leverage-policy default
+  // (extended-betas ON for `claude` subcommand): users running
+  // `github-router claude` opted in for the Claude Code feature surface,
+  // and these experimental gates default off for non-Anthropic users
+  // (gated by GrowthBook flags that don't fire outside Anthropic).
+  //
+  // Presence-based guard: if the parent env has set ANY value for these
+  // keys (including "0", "false", "no", "off", or any unrecognized
+  // value), preserve the user's intent — only inject "1" when the key
+  // is unset. The parent env survives `buildLaunchCommand`'s sanitize
+  // step because none of these keys are in `STRIPPED_PARENT_ENV_KEYS`,
+  // so an unset proxy var means the parent's value (if any) wins
+  // naturally.
+  //
+  // ADVISOR has a documented `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` hard
+  // opt-out that wins via JI()'s ordering (DISABLE checked before
+  // ENABLE). FORK_SUBAGENT and AGENT_TEAMS rely on Anthropic's SH()
+  // falsy semantics for opt-out ("0"/"false"/"no"/"off"/empty all opt
+  // out — preserved by the presence guard). FINE_GRAINED_TOOL_STREAMING
+  // is explicitly recommended by Anthropic's docs at
+  // code.claude.com/docs/en/env-vars: "Set to `1` to force on when
+  // routing through a proxy via ANTHROPIC_BASE_URL". TASKS only
+  // manifests in `claude -p` headless mode.
+  //
+  // GATEWAY_MODEL_DISCOVERY is intentionally NOT enabled here — Claude
+  // Code's hardcoded slug registry maps slugs to capabilities, not just
+  // labels; Copilot's slugs (claude-opus-4.6-1m) don't match
+  // Anthropic's registry (claude-opus-4-6), so dynamic discovery would
+  // silently degrade advanced tool use. Enable it intentionally only
+  // after building a slug-translation shim in /v1/models. See
+  // CLAUDE.md "Experimental Claude Code features auto-enabled".
+  const experimentalEnables: ReadonlyArray<string> = [
+    "CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL",
+    "CLAUDE_CODE_FORK_SUBAGENT",
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+    "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING",
+    "CLAUDE_CODE_ENABLE_TASKS",
+  ]
+  for (const key of experimentalEnables) {
+    if (process.env[key] === undefined) {
+      vars[key] = "1"
+    }
+  }
+
   return vars
 }
 

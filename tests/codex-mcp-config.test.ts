@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
+import { parse as parseYaml } from "yaml"
+import { z } from "zod"
 
 import {
   buildPeerAgentDefinitions,
@@ -492,6 +494,207 @@ describe("writePeerMcpRuntimeFiles", () => {
       ])
       await httpMode.cleanup()
       await cliMode.cleanup()
+    })
+  })
+})
+
+// --- Phase C P0.3: Zod-validation against cc-backup loadAgentsDir.ts schema ---
+
+/**
+ * Mirror of cc-backup/src/tools/AgentTool/loadAgentsDir.ts's MINIMUM
+ * frontmatter requirements for `parseAgentFromMarkdown` (the function
+ * Claude Code calls when scanning ~/.claude/agents/*.md at session start).
+ *
+ * Required fields (returns null + logs error if missing):
+ *   - `name` (non-empty string) — line 547-549 of loadAgentsDir.ts
+ *   - `description` (non-empty string) — line 552-558
+ *
+ * Optional fields are silently defaulted or warn-and-default. The cc-
+ * backup schema is NOT .strict() — unknown frontmatter keys are ignored.
+ * This test validates the router's emission against the REQUIRED set so
+ * we don't regress into a "subagent silently fails to load" state.
+ *
+ * The body (post-frontmatter content) becomes `systemPrompt` after
+ * trimming. Must be non-empty for the agent to function — line 712
+ * `const systemPrompt = content.trim()`.
+ */
+const ClaudeCodeAgentMdFrontmatterSchema = z.object({
+  name: z.string().min(1, "name field is required and must be non-empty"),
+  description: z
+    .string()
+    .min(1, "description field is required and must be non-empty"),
+  // Optional fields — schema documents them so we don't accidentally
+  // emit a typo'd key (e.g. `permission_mode` instead of `permissionMode`).
+  // cc-backup parser ignores unknown keys (not .strict()) so unknown keys
+  // wouldn't break loading, but typos are still a maintenance hazard.
+  model: z.string().optional(),
+  effort: z.union([z.string(), z.number()]).optional(),
+  permissionMode: z.string().optional(),
+  tools: z.array(z.string()).optional(),
+  disallowedTools: z.array(z.string()).optional(),
+  skills: z.array(z.string()).optional(),
+  mcpServers: z.array(z.unknown()).optional(),
+  hooks: z.unknown().optional(),
+  maxTurns: z.number().int().positive().optional(),
+  initialPrompt: z.string().optional(),
+  memory: z.enum(["user", "project", "local"]).optional(),
+  background: z.boolean().optional(),
+  isolation: z.enum(["worktree", "remote"]).optional(),
+  color: z.string().optional(),
+})
+
+/**
+ * Parse a router-emitted .md file: split frontmatter from body, parse
+ * frontmatter as YAML, return both. Mirrors what cc-backup's
+ * loadMarkdownFilesForSubdir does (it uses gray-matter under the hood
+ * but the format is the standard YAML-frontmatter convention).
+ */
+function parseAgentMd(body: string): {
+  frontmatter: unknown
+  content: string
+} {
+  // Format: "---\n<yaml>\n---\n<body>"
+  const match = body.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/)
+  if (!match) {
+    throw new Error("Body does not have valid YAML frontmatter delimiters")
+  }
+  const yamlSrc = match[1] ?? ""
+  const content = match[2] ?? ""
+  const frontmatter = parseYaml(yamlSrc) as unknown
+  return { frontmatter, content }
+}
+
+describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", () => {
+  test("every emitted agent file passes cc-backup's required-field validation", async () => {
+    await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
+      const runtime = await writePeerMcpRuntimeFiles(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        runtimeDir,
+        codexHome,
+        agentsDir,
+      })
+      try {
+        // Each emitted .md file must:
+        //   1. Have a parseable YAML frontmatter delimited by ---/---
+        //   2. Pass the cc-backup schema (name + description required,
+        //      optional fields use the documented enums)
+        //   3. Have a non-empty body (becomes systemPrompt)
+        for (const filePath of runtime.agentMdPaths) {
+          const body = await fs.readFile(filePath, "utf8")
+          const { frontmatter, content } = parseAgentMd(body)
+
+          const result = ClaudeCodeAgentMdFrontmatterSchema.safeParse(
+            frontmatter,
+          )
+          if (!result.success) {
+            throw new Error(
+              `Agent .md file ${path.basename(filePath)} fails cc-backup schema:\n`
+                + JSON.stringify(result.error.format(), null, 2),
+            )
+          }
+          expect(content.trim().length).toBeGreaterThan(0)
+        }
+      } finally {
+        await runtime.cleanup()
+      }
+    })
+  })
+
+  test("frontmatter `name` matches the canonical agent name in the filename suffix", async () => {
+    // Defense-in-depth: cc-backup uses frontmatter `name` as the agent
+    // identifier (the filename is incidental — only matters for our boot
+    // sweep). If the two ever drift, Claude Code would route to a name
+    // the user can't predict from the file. Lock them in step.
+    await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
+      const runtime = await writePeerMcpRuntimeFiles(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        runtimeDir,
+        codexHome,
+        agentsDir,
+      })
+      try {
+        for (const filePath of runtime.agentMdPaths) {
+          const body = await fs.readFile(filePath, "utf8")
+          const { frontmatter } = parseAgentMd(body)
+          const fm = frontmatter as { name: string }
+
+          // Filename pattern: peer-<pid>-<rand>-<agentName>.md
+          // Extract agentName: everything between last <hex>- and .md
+          const filename = path.basename(filePath, ".md")
+          const segments = filename.split("-")
+          // peer-<pid>-<8hex>-<name parts joined by ->
+          const agentNameFromFile = segments.slice(3).join("-")
+
+          expect(fm.name).toBe(agentNameFromFile)
+        }
+      } finally {
+        await runtime.cleanup()
+      }
+    })
+  })
+
+  test("emitted .md files include the canonical persona names (peer-review-coordinator + each enabled persona)", async () => {
+    // The .md set must include peer-review-coordinator (always) plus one
+    // file per active persona. Locks in the contract that the .md
+    // emission set tracks the active personas list — drift here means
+    // a persona is registered in MCP but not delegable as a subagent
+    // (or vice versa).
+    await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
+      const runtime = await writePeerMcpRuntimeFiles(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        runtimeDir,
+        codexHome,
+        agentsDir,
+      })
+      try {
+        const names = new Set<string>()
+        for (const filePath of runtime.agentMdPaths) {
+          const body = await fs.readFile(filePath, "utf8")
+          const { frontmatter } = parseAgentMd(body)
+          names.add((frontmatter as { name: string }).name)
+        }
+        // Expected when geminiAvailable=true:
+        expect(names.has("peer-review-coordinator")).toBe(true)
+        expect(names.has("codex-critic")).toBe(true)
+        expect(names.has("codex-reviewer")).toBe(true)
+        expect(names.has("gemini-critic")).toBe(true)
+      } finally {
+        await runtime.cleanup()
+      }
+    })
+  })
+
+  test("frontmatter description is non-empty (cc-backup logs warning + returns null if empty)", async () => {
+    // Per cc-backup loadAgentsDir.ts:552-558 — empty description means
+    // the parser returns null (agent silently doesn't load). The min(1)
+    // assertion in our Zod schema covers this; this test makes the
+    // requirement explicit so future code changes that empty out a
+    // description will trip the check.
+    await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
+      const runtime = await writePeerMcpRuntimeFiles(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        runtimeDir,
+        codexHome,
+        agentsDir,
+      })
+      try {
+        for (const filePath of runtime.agentMdPaths) {
+          const body = await fs.readFile(filePath, "utf8")
+          const { frontmatter } = parseAgentMd(body)
+          const fm = frontmatter as { description: string }
+          expect(fm.description.length).toBeGreaterThan(0)
+          // Sanity: description should be substantive (real persona
+          // descriptions are several sentences). Catch a bug where a
+          // refactor accidentally truncates to a placeholder.
+          expect(fm.description.length).toBeGreaterThan(20)
+        }
+      } finally {
+        await runtime.cleanup()
+      }
     })
   })
 })

@@ -258,6 +258,110 @@ describe("/mcp protocol methods", () => {
     )
     expect(res.status).toBe(200)
   })
+
+  // --- Phase D P1.1: MCP method stubs with full handshake coherence ---
+
+  test("initialize advertises tools+resources+prompts capabilities (codex-critic Phase D requirement)", async () => {
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 100,
+      method: "initialize",
+    })
+    const result = json.result as {
+      capabilities: {
+        tools?: { listChanged?: boolean }
+        resources?: Record<string, unknown>
+        prompts?: Record<string, unknown>
+      }
+    }
+    // Must advertise resources/prompts to legitimize the empty-list
+    // stubs we ship below; otherwise codex-critic warned a strict
+    // client would error on probing them.
+    expect(result.capabilities.tools).toBeDefined()
+    expect(result.capabilities.resources).toBeDefined()
+    expect(result.capabilities.prompts).toBeDefined()
+  })
+
+  test("resources/list returns empty list (stub for forward-compat with Phase 3 async-MCP)", async () => {
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 101,
+      method: "resources/list",
+    })
+    expect(status).toBe(200)
+    expect((json.result as { resources: Array<unknown> }).resources).toEqual([])
+  })
+
+  test("resources/templates/list returns empty list (codex-critic: 'if advertising resources:{}, also handle templates')", async () => {
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 102,
+      method: "resources/templates/list",
+    })
+    expect(status).toBe(200)
+    expect(
+      (json.result as { resourceTemplates: Array<unknown> }).resourceTemplates,
+    ).toEqual([])
+  })
+
+  test("resources/read returns -32602 invalid params (parametric — empty list inappropriate)", async () => {
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 103,
+      method: "resources/read",
+      params: { uri: "review://job-fake-uuid" },
+    })
+    expect(status).toBe(200)
+    const err = (json as { error?: { code: number; message: string } }).error
+    expect(err?.code).toBe(-32602)
+    expect(err?.message).toContain("review://job-fake-uuid")
+  })
+
+  test("resources/read with no uri returns -32602 with diagnostic message", async () => {
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 104,
+      method: "resources/read",
+    })
+    const err = (json as { error?: { code: number; message: string } }).error
+    expect(err?.code).toBe(-32602)
+    expect(err?.message).toContain("missing/invalid uri")
+  })
+
+  test("prompts/list returns empty list", async () => {
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 105,
+      method: "prompts/list",
+    })
+    expect(status).toBe(200)
+    expect((json.result as { prompts: Array<unknown> }).prompts).toEqual([])
+  })
+
+  test("prompts/get returns -32602 invalid params (parametric)", async () => {
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 106,
+      method: "prompts/get",
+      params: { name: "nonexistent-prompt" },
+    })
+    expect(status).toBe(200)
+    const err = (json as { error?: { code: number; message: string } }).error
+    expect(err?.code).toBe(-32602)
+    expect(err?.message).toContain("nonexistent-prompt")
+  })
+
+  test("notifications/claude/channel accepted silently (no response body)", async () => {
+    const res = await mcpRoutes.request(
+      buildReq({
+        jsonrpc: "2.0",
+        method: "notifications/claude/channel",
+        params: { channel: "permission" },
+      }),
+    )
+    // Notifications return 202 with empty body per JSON-RPC 2.0
+    expect(res.status).toBe(202)
+  })
 })
 
 describe("/mcp tools/call routing", () => {
@@ -522,5 +626,90 @@ describe("/mcp concurrency cap", () => {
     )
     await Promise.all(inflight)
     expect(__getInFlightForTests()).toBe(0)
+  })
+
+  // --- Phase D P1.5: notifications/cancelled handling ---
+
+  test("notifications/cancelled aborts in-flight tools/call and frees the slot", async () => {
+    // Mock fetch that respects AbortSignal — exactly what real fetch does.
+    // The promise pends forever unless the signal aborts (then rejects).
+    let abortHandler: (() => void) | null = null
+    const slow = (init?: { signal?: AbortSignal }) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal
+        if (!signal) {
+          // No signal provided — pend forever (test will time out).
+          return
+        }
+        if (signal.aborted) {
+          reject(new DOMException("aborted", "AbortError"))
+          return
+        }
+        abortHandler = () => {
+          reject(new DOMException("aborted", "AbortError"))
+        }
+        signal.addEventListener("abort", abortHandler, { once: true })
+      })
+    globalThis.fetch = mock((_url: unknown, init?: { signal?: AbortSignal }) =>
+      slow(init),
+    ) as unknown as typeof globalThis.fetch
+
+    // Fire one tools/call with a known id we can target with cancel.
+    const REQUEST_ID = 9999
+    const callPromise = rpc({
+      jsonrpc: "2.0",
+      id: REQUEST_ID,
+      method: "tools/call",
+      params: { name: "codex_critic", arguments: { prompt: "x" } },
+    })
+
+    // Brief tick so the call increments in-flight + registers AbortController.
+    await new Promise((r) => setTimeout(r, 10))
+    expect(__getInFlightForTests()).toBe(1)
+
+    // Send the cancel notification.
+    const cancelRes = await mcpRoutes.request(
+      buildReq({
+        jsonrpc: "2.0",
+        method: "notifications/cancelled",
+        params: { requestId: REQUEST_ID, reason: "test cancel" },
+      }),
+    )
+    expect(cancelRes.status).toBe(202)
+
+    // The original tools/call must complete with isError (caught by the
+    // try/catch in handleToolsCall and reported as tool-error). Slot freed.
+    const { json } = await callPromise
+    const result = json.result as {
+      isError: boolean
+      content: Array<{ text: string }>
+    }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toMatch(/aborted|abort|cancellation/i)
+    expect(__getInFlightForTests()).toBe(0)
+  })
+
+  test("notifications/cancelled with unknown requestId is no-op (no error)", async () => {
+    // No in-flight calls — the cancel must not throw or error.
+    const res = await mcpRoutes.request(
+      buildReq({
+        jsonrpc: "2.0",
+        method: "notifications/cancelled",
+        params: { requestId: 12345, reason: "race after completion" },
+      }),
+    )
+    expect(res.status).toBe(202)
+    expect(__getInFlightForTests()).toBe(0)
+  })
+
+  test("notifications/cancelled with missing requestId is no-op", async () => {
+    const res = await mcpRoutes.request(
+      buildReq({
+        jsonrpc: "2.0",
+        method: "notifications/cancelled",
+        params: {},
+      }),
+    )
+    expect(res.status).toBe(202)
   })
 })

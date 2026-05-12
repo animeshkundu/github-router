@@ -42,7 +42,21 @@ export const createResponses = async (
   const response = await tryRefreshAndRetry(doFetch, "/responses")
 
   if (!response.ok) {
-    consola.error("Failed to create responses", response)
+    // Read the body BEFORE throwing so the actual upstream error is
+    // visible in the proxy log. Without this we'd interpolate
+    // `[object Response]` and have no idea what Copilot rejected.
+    // Clone first because `response.text()` consumes the body and the
+    // HTTPError handler in callers may want to read it again.
+    let bodyText: string
+    try {
+      bodyText = await response.clone().text()
+    } catch {
+      bodyText = "(failed to read body)"
+    }
+    consola.error(
+      `Failed to create responses: HTTP ${response.status} ${response.statusText} `
+        + `from ${url} — body: ${bodyText.slice(0, 2000)}`,
+    )
     throw new HTTPError("Failed to create responses", response)
   }
 

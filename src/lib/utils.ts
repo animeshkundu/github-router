@@ -30,9 +30,22 @@ const VSCODE_BETA_PREFIXES = [
  * to work with the Copilot API.
  *
  * Notably absent (Copilot 400s on these — verified live):
- *   context-1m-, skills-, files-api-, code-execution-, output-128k-.
+ *   context-1m-, skills-, files-api-, code-execution-, output-128k-,
+ *   advisor-tool- (see EXPLICITLY_STRIPPED_BETA_PREFIXES below).
  * 1M context is unlocked by selecting `claude-opus-4.7-1m-internal`
  * as the model id, not via a beta header.
+ *
+ * Empirical verification (2026-05-11 against api.enterprise.githubcopilot.com):
+ *   task-budgets-2026-03-13          → 200 ACCEPTED (cost-ceiling leverage)
+ *   token-efficient-tools-2026-03-28 → 200 ACCEPTED (per-tool token saving)
+ *   summarize-connector-text-2026-03-13 → 200 (Anthropic-internal feature flag,
+ *     won't fire for non-ant users; allowlisted defensively for ant edge case)
+ *   afk-mode-2026-01-31              → 200 (Anthropic-internal feature flag)
+ *   cli-internal-2026-02-09          → 200 (USER_TYPE=ant only)
+ *   oauth-2025-04-20                 → 200 (Files-API path; Files-API itself
+ *     is not supportable via Copilot, but the header alone is harmless)
+ *   prompt-caching-scope-2026-01-05  → 200 even with body cache_control.scope
+ *     stripped (already covered by `prompt-caching-` prefix above)
  */
 const EXTENDED_BETA_PREFIXES = [
   ...VSCODE_BETA_PREFIXES,
@@ -50,13 +63,42 @@ const EXTENDED_BETA_PREFIXES = [
   "mcp-servers-",
   "redact-thinking-",
   "web-search-",
+  // Empirically accepted by Copilot, sent by Claude Code v2.1.138+
+  "task-budgets-",
+  "token-efficient-tools-",
+  // Anthropic-internal feature flags (won't reach proxy from non-ant users
+  // due to Bun build-time dead-code elimination, but allowlisted so the rare
+  // ant-user / managed-deployment case flows cleanly).
+  "summarize-connector-text-",
+  "afk-mode-",
+  "cli-internal-",
+  "oauth-",
 ]
 
 /**
+ * Beta prefixes the proxy explicitly STRIPS even from the extended
+ * allowlist (and even if a future leverage mode broadens the allowlist
+ * further). Defensive layer: today's allowlist-only filter would already
+ * drop these because they're not in any allowlist, but keeping an
+ * explicit deny-list catches future changes that broaden allow rules
+ * (e.g. a hypothetical pattern-based mode that lets `claude-*` through).
+ *
+ * Empirical (2026-05-11): Copilot returns HTTP 400
+ *   `unsupported beta header(s): advisor-tool-2026-03-01`
+ * on every request that includes `advisor-tool-`. Stripping it is the
+ * difference between a working request (no ADVISOR semantics) and a
+ * fully-failed request. Document upstream limitation in CLAUDE.md.
+ */
+const EXPLICITLY_STRIPPED_BETA_PREFIXES = [
+  "advisor-tool-",
+] as const
+
+/**
  * Filter an `anthropic-beta` header value, keeping only beta flags
- * in the active whitelist. Uses extended prefixes when --extended-betas
- * is enabled, VS Code-only prefixes otherwise.
- * Returns the filtered comma-separated string, or undefined if nothing remains.
+ * in the active whitelist AND not in the explicit-strip list.
+ * Uses extended prefixes when --extended-betas is enabled, VS Code-only
+ * prefixes otherwise. Returns the filtered comma-separated string,
+ * or undefined if nothing remains.
  */
 export function filterBetaHeader(value: string): string | undefined {
   const prefixes = state.extendedBetas
@@ -67,7 +109,9 @@ export function filterBetaHeader(value: string): string | undefined {
     .map((v) => v.trim())
     .filter(
       (v) =>
-        v && prefixes.some((prefix) => v.startsWith(prefix)),
+        v
+        && prefixes.some((prefix) => v.startsWith(prefix))
+        && !EXPLICITLY_STRIPPED_BETA_PREFIXES.some((p) => v.startsWith(p)),
     )
     .join(",")
   return filtered || undefined
@@ -174,7 +218,48 @@ export function resolveModel(modelId: string): string {
     }
   }
 
-  // 6. No match — warn and return as-is
+  // 6. Legacy family fallback. Claude Code's settings.json may pin slugs
+  //    whose Copilot equivalent does not exist (e.g. claude-3-7-sonnet-20250219
+  //    or claude-sonnet-4-0 — neither is in Copilot's enterprise catalog as
+  //    of 2026-05-11; a request for either returns HTTP 400 "model not
+  //    supported"). Step 5's dated-retry strips the date but the resulting
+  //    "claude-3-7-sonnet" still has no Copilot equivalent. Rather than
+  //    dead-end the request, fall back to the highest available family
+  //    member (sonnet → highest sonnet, haiku → highest haiku). Surfaces
+  //    via consola.info so the user sees the substitution. Opus is already
+  //    handled by the family preference in Step 3.
+  //
+  //    Guards (codex-reviewer findings):
+  //      (a) Family fires only for `claude-` prefixed inputs — protects
+  //          against custom-sonnet-future or any non-Anthropic provider
+  //          coincidentally containing "sonnet"/"haiku" in its slug.
+  //      (b) Family token must be word-bounded (`-sonnet-` / `-sonnet$`)
+  //          so a hypothetical claude-supersonnet-* doesn't match.
+  //      (c) Sort uses numeric collation (`{numeric: true}`) so a future
+  //          claude-sonnet-4.10 sorts higher than claude-sonnet-4.6
+  //          (lexicographic alone would invert).
+  if (lower.startsWith("claude-")) {
+    const matchSonnet = /(?:^|-)sonnet(?:-|$)/.test(lower)
+    const matchHaiku = /(?:^|-)haiku(?:-|$)/.test(lower)
+    if (matchSonnet || matchHaiku) {
+      const family = matchSonnet ? "sonnet" : "haiku"
+      const familyMembers = models.filter((m) =>
+        new RegExp(`(?:^|-)${family}(?:-|$|\\.)`).test(m.id),
+      )
+      if (familyMembers.length > 0) {
+        familyMembers.sort((a, b) =>
+          b.id.localeCompare(a.id, undefined, { numeric: true }),
+        )
+        const best = familyMembers[0].id
+        consola.info(
+          `Model "${modelId}" not in Copilot catalog; falling back to highest available "${best}" (legacy ${family} slug). Pin a current catalog id to silence.`,
+        )
+        return best
+      }
+    }
+  }
+
+  // 7. No match — warn and return as-is
   consola.warn(
     `Model "${modelId}" not found in Copilot model list. Available: ${models.map((m) => m.id).join(", ")}`,
   )

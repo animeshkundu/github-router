@@ -7,10 +7,16 @@ const tempDir = await fs.mkdtemp(
   path.join(os.tmpdir(), "github-router-paths-"),
 )
 
+// Preserve every real `os` export and only override `homedir`. Bun's
+// mock.module is global for the rest of the test run — a stripped-down
+// mock here would shadow os.tmpdir(), os.platform(), etc. for any
+// later test file that imports node:os (e.g. claude-version-check.test
+// .ts:11 calls os.tmpdir() at module-load time and would crash with
+// "os.tmpdir is not a function" if run after this file).
 mock.module("node:os", () => ({
-  default: {
-    homedir: () => tempDir,
-  },
+  default: { ...os, homedir: () => tempDir },
+  ...os,
+  homedir: () => tempDir,
 }))
 
 const { ensurePaths, PATHS, sweepStaleRuntimeFiles, sweepStalePeerAgentMdFiles, writeRuntimeFileSecure } =

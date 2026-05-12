@@ -63,6 +63,33 @@ server.route("/mcp", mcpRoutes)
 // Copilot doesn't expose this endpoint; clients fire it best-effort.
 server.post("/api/event_logging/batch", (c) => c.body(null, 200))
 
+// Phase E P1.4: explicit Files-API not-supported route. Claude Code's
+// BriefTool upload + utils/teleport/gitBundle paths hit
+// GET /v1/files/{id}/content (download), GET /v1/files (list),
+// POST /v1/files (upload). Copilot has no equivalent storage backend
+// (verified via cc-backup src/services/api/filesApi.ts). Without this
+// explicit route, requests fall to the default 404 with a generic
+// "not found" message — fine but unhelpful.
+//
+// Why surface explicitly: the user gets a clear signal "this feature
+// isn't supported here" instead of inferring it from a generic 404.
+// Fail-loud-with-explanation aligns with cc-backup mentality #10
+// (errors are logged not swallowed; surface the limitation).
+server.all("/v1/files/*", (c) =>
+  c.json(
+    {
+      type: "error",
+      error: {
+        type: "not_found_error",
+        message:
+          "Files API is not supported by github-router (Copilot has no equivalent storage backend). "
+          + "Use the Anthropic API directly for file uploads/downloads.",
+      },
+    },
+    404,
+  ),
+)
+
 // Return Anthropic-format JSON for unknown endpoints
 server.notFound((c) =>
   c.json(

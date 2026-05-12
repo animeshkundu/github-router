@@ -14,10 +14,12 @@ class ExitError extends Error {
 // node:process, and consola to avoid cross-file pollution.
 
 const execFileSyncMock = mock()
+const execFileMock = mock()
 const spawnMock = mock()
 
 mock.module("node:child_process", () => ({
   execFileSync: execFileSyncMock,
+  execFile: execFileMock,
   spawn: spawnMock,
 }))
 

@@ -40,6 +40,32 @@ const STRIPPED_PARENT_ENV_KEYS = [
   // The proxy sets its own value to activate per-config-dir keychain
   // isolation (see `getClaudeCodeEnvVars` doc comment).
   "CLAUDE_CONFIG_DIR",
+  // Claude Code Bridge / IDE remote-session surface. Any of these set in
+  // the parent shell would activate Claude Code's remote-session code path
+  // — which makes many additional API calls (POST /v1/code/sessions,
+  // POST /v1/environments/bridge, etc.) that this proxy does not implement
+  // (Copilot has no equivalent). Stripping forces the spawned child to
+  // run as a local-only session, which is what the proxy supports.
+  // (Verified surface in cc-backup src/bridge/*, src/utils/managedEnv.ts;
+  // empirical check 2026-05-11.)
+  "CLAUDE_BRIDGE_OAUTH_TOKEN",
+  "CLAUDE_BRIDGE_BASE_URL",
+  "CLAUDE_BRIDGE_SESSION_INGRESS_URL",
+  "SESSION_INGRESS_URL",
+  "CLAUDE_CODE_REMOTE",
+  "CLAUDE_CODE_CONTAINER_ID",
+  "CLAUDE_CODE_REMOTE_SESSION_ID",
+  "CLAUDE_CODE_SESSION_ID",
+  // CLAUDE_CODE_ADDITIONAL_PROTECTION makes Claude Code emit
+  // `x-anthropic-additional-protection: true` on every /v1/messages request.
+  // Copilot ignores it today (verified 2026-05-11) but the header is pure
+  // wire-fingerprint noise that breaks the VS Code stealth posture.
+  "CLAUDE_CODE_ADDITIONAL_PROTECTION",
+  // NOT stripped: ANTHROPIC_SMALL_FAST_MODEL. Users with custom Copilot
+  // mappings legitimately rely on this to route the haiku-tier "small fast"
+  // model. Stripping would be an unforced error (gemini-critic finding) —
+  // we trust resolveModel's dated-slug-retry / family-fallback to translate
+  // unrecognized values, and surface unsupported-model failures via consola.
   // Codex CLI auth surface
   "OPENAI_API_KEY",
   "OPENAI_BASE_URL",

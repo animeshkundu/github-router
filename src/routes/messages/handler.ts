@@ -8,9 +8,15 @@ import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
+import { sanitizeAnthropicBody } from "~/lib/sanitize-anthropic-body"
 import { state } from "~/lib/state"
 import { relayAnthropicStream } from "~/lib/stream-relay"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
+import {
+  buildAdvisorStream,
+  injectAdvisorTool,
+  isAdvisorRequested,
+} from "~/services/advisor/advisor"
 import { createMessages } from "~/services/copilot/create-messages"
 import type { Model } from "~/services/copilot/get-models"
 import { searchWeb } from "~/services/copilot/web-search"
@@ -190,7 +196,72 @@ export async function handleCompletion(c: Context) {
   }
 
   const betaHeaders = extractBetaHeaders(c)
-  const finalBody = await processWebSearch(rawBody)
+
+  // Phase I: detect ADVISOR request BEFORE filterBetaHeader strips
+  // the advisor-tool- prefix from the outgoing header. We need the raw
+  // incoming header to know whether the user asked for ADVISOR.
+  const incomingBeta = c.req.header("anthropic-beta")
+  const advisorEnabled = isAdvisorRequested(incomingBeta)
+
+  let finalBody = await processWebSearch(rawBody)
+  // Inbound advisor-history sanitization: rewrite malformed
+  // server_tool_use ids in Claude Code's replayed conversation history
+  // (left over from before the round-5 fix or any non-spec-compliant
+  // source). Without this, Copilot 400s on
+  //   `messages.N.content.M.server_tool_use.id: String should match
+  //    pattern '^srvtoolu_[a-zA-Z0-9_]+$'`
+  // when the conversation grows long enough to echo a malformed block.
+  // Scoped narrowly to advisor pairs to avoid the ID round-trip trap
+  // (see src/lib/sanitize-anthropic-body.ts header comment).
+  finalBody = sanitizeAnthropicBody(finalBody)
+  if (advisorEnabled) {
+    // Inject __anthropic_advisor tool definition (with cc-backup's
+    // ADVISOR_TOOL_INSTRUCTIONS as description) so the model knows
+    // when to call it. Tool name uses double-underscore prefix to
+    // avoid collision with any user MCP server's `advisor`.
+    finalBody = injectAdvisorTool(finalBody)
+    consola.info(
+      "ADVISOR enabled for this request — injecting __anthropic_advisor tool; will translate tool_use → server_tool_use{advisor} on the SSE stream",
+    )
+  }
+
+  // Phase G fail-fast (deferred translate path per codex-critic): if the
+  // request includes inline `mcp_servers`, refuse with a clear Anthropic-
+  // format error before forwarding. The original plan was to translate
+  // (instantiate MCP clients server-side and inline tools) but the design
+  // has structural holes — continuation after pool TTL isn't implementable
+  // from the request alone, and streaming correctness during the multi-turn
+  // tool loop is fragile. Local stdio MCP (~/.claude/mcp.json) covers the
+  // common Claude usage; remote-managed MCP is the rare path. Fail-fast
+  // with a clear pointer is the better Pareto choice (codex-critic 2/2/3
+  // verdict on the translate-path design).
+  if (finalBody.includes('"mcp_servers"')) {
+    try {
+      const probe = JSON.parse(finalBody) as AnyRecord
+      if (Array.isArray(probe.mcp_servers) && probe.mcp_servers.length > 0) {
+        return c.json(
+          {
+            type: "error",
+            error: {
+              type: "invalid_request_error",
+              message:
+                "Inline `mcp_servers` body field is not supported by github-router "
+                + "(Copilot returns 400 'Extra inputs are not permitted'; the proxy "
+                + "would need a multi-turn tool-loop translation that has unresolved "
+                + "design holes — see Phase G in the plan). Configure your remote MCP "
+                + "servers as local stdio entries in `~/.claude/mcp.json` instead — "
+                + "Claude Code will spawn them locally and the proxy passes their "
+                + "tool calls through transparently. (https://docs.claude.com/en/docs/claude-code/mcp)",
+            },
+          },
+          400,
+        )
+      }
+    } catch {
+      // Body wasn't valid JSON — fall through, downstream handlers will
+      // surface the parse error in their own way.
+    }
+  }
 
   // Resolve model name (e.g. opus → opus-1m variant) and translate
   // thinking-mode shape for adaptive-thinking models.
@@ -260,7 +331,8 @@ export async function handleCompletion(c: Context) {
     )
   }
 
-  // Streaming: pipe the upstream SSE response body directly
+  // Streaming: pipe the upstream SSE response body directly (or wrap
+  // with the ADVISOR translate-loop if advisor was requested).
   if (isStreaming) {
     logRequest(
       {
@@ -288,6 +360,45 @@ export async function handleCompletion(c: Context) {
     if (requestId) streamHeaders["x-request-id"] = requestId
     const reqId = response.headers.get("request-id")
     if (reqId) streamHeaders["request-id"] = reqId
+
+    // Phase I: branch into the advisor translate-loop if the user
+    // requested ADVISOR. The loop intercepts tool_use{__anthropic_advisor}
+    // blocks, translates to server_tool_use{advisor}, runs the advisor
+    // model server-side, emits advisor_tool_result, and continues the
+    // Copilot conversation on the SAME SSE connection (no intermediate
+    // message_stop). See src/services/advisor/advisor.ts for the design
+    // (gemini-critic streaming-during-loop pattern).
+    if (advisorEnabled && response.body) {
+      // Parse the resolved body once to extract the conversation +
+      // base body for continuation calls. The translate-loop needs
+      // these to extend the conversation across advisor turns.
+      let parsedBase: AnyRecord = {}
+      try {
+        parsedBase = JSON.parse(resolvedBody) as AnyRecord
+      } catch {
+        // Should not happen since resolveModelInBody just re-serialized
+        // it. Fallback: pass empty conversation; translate-loop will
+        // skip advisor calls if it can't construct continuations.
+      }
+      const initialConversation = Array.isArray(parsedBase.messages)
+        ? (parsedBase.messages as Array<AnyRecord>)
+        : []
+      return new Response(
+        buildAdvisorStream({
+          firstResponse: response,
+          initialConversation,
+          baseBody: parsedBase,
+          requestHeaders: {
+            ...selectedModel?.requestHeaders,
+            ...effectiveBetas,
+          },
+        }),
+        {
+          status: response.status,
+          headers: streamHeaders,
+        },
+      )
+    }
 
     return new Response(
       response.body
@@ -383,6 +494,26 @@ function resolveModelInBody(rawBody: string): {
   // Strip cache_control.scope — fast path skips when "scope" absent
   const needsSanitize = rawBody.includes('"scope"')
   if (needsSanitize && sanitizeCacheControl(parsed)) {
+    modified = true
+  }
+
+  // Strip Anthropic-only top-level body fields Copilot 400s on. Empirical
+  // verification (2026-05-11 against api.enterprise.githubcopilot.com):
+  //   - `budget: {total_tokens}` (Task Budgets) → 400 "budget: Extra inputs not permitted"
+  //   - `output_config: {schema}` (Structured Outputs) → 400 "output_config.schema: Extra..."
+  //   - `betas: [...]` (top-level array, distinct from anthropic-beta header) → 400 "betas: Extra..."
+  // Fast-path skip when none of the field names appear in the raw body.
+  // NOT stripped:
+  //   - `mcp_servers` — Phase G builds the translate path; silent strip
+  //     here would cause LLM to hallucinate tools (gemini-critic finding).
+  //   - `metadata: {user_id}` — Copilot 200s, ignores harmlessly. Strip
+  //     would be cosmetic (codex-critic: "preserve unknown fields unless
+  //     documented reason"); ~0.1ms re-serialize cost per request adds up.
+  const needsAnthropicOnlyStrip =
+    rawBody.includes('"budget"')
+    || rawBody.includes('"output_config"')
+    || rawBody.includes('"betas"')
+  if (needsAnthropicOnlyStrip && stripAnthropicOnlyFields(parsed)) {
     modified = true
   }
 
@@ -539,5 +670,140 @@ function applyDefaultBetas(
       "interleaved-thinking-2025-05-14",
       "context-management-2025-06-27",
     ].join(","),
+  }
+}
+
+/**
+ * Strip top-level body fields that Anthropic's Messages API accepts but
+ * Copilot rejects with HTTP 400 "Extra inputs are not permitted". Mutates
+ * `body` in place; returns true if anything was stripped.
+ *
+ * Empirical verification (2026-05-11):
+ *   POST /v1/messages?beta=true { ..., budget: {total_tokens: 10000} } → 400
+ *   POST /v1/messages?beta=true { ..., output_config: {schema: {...}} }  → 400
+ *   POST /v1/messages?beta=true { ..., betas: ["..."] }                  → 400
+ *
+ * Each strip emits a one-line consola.warn so users running with these
+ * features (e.g. `claude --max-budget-usd`, `--json-schema`) understand
+ * the request succeeds with the *body field* dropped — semantics may
+ * differ from upstream Anthropic. The corresponding `anthropic-beta`
+ * header is preserved (Phase A allowlist) so the *intent* still flows
+ * to Copilot, even if the per-request enforcement field is gone.
+ *
+ * NOT stripped here:
+ *   - `mcp_servers` (Phase G translate path — silent strip causes LLM
+ *     to hallucinate tools per gemini-critic finding)
+ *   - `metadata` (Copilot 200s, ignores harmlessly)
+ */
+function stripAnthropicOnlyFields(body: AnyRecord): boolean {
+  let stripped = false
+  if (body.budget !== undefined) {
+    consola.warn(
+      "Stripping body-level `budget` field (Copilot 400s; the `task-budgets-` beta header is preserved but cost ceiling is not enforced server-side)",
+    )
+    delete body.budget
+    stripped = true
+  }
+  if (body.output_config !== undefined) {
+    // output_config has multiple known shapes:
+    //   - `{schema:{...}}` (Structured Outputs full form) — Copilot 400s
+    //   - `{type:"json_object"}` (Structured Outputs short form, used
+    //     by Claude Code's hook evaluator + the Anthropic SDK's
+    //     structured-output API) — Copilot 400s with the same
+    //     `output_config: Extra inputs are not permitted` message,
+    //     just at the top-level field rather than the nested .schema.
+    //   - `{effort:"high"}` (proxy-set during adaptive-thinking
+    //     translation) — Copilot 200s, required by translateThinking.
+    //
+    // Strategy: strip every Structured-Outputs field (`schema`,
+    // `type`, `response_format`, anything else we don't recognize as
+    // proxy-internal). Keep `effort` if present. If the object ends
+    // up empty, drop the whole field.
+    //
+    // **Schema preservation via prompt injection**: stripping
+    // `output_config.schema` removes server-side enforcement, which
+    // makes the model's output non-deterministic. Claude Code's
+    // hook evaluator then fails with "JSON validation failed" because
+    // it tries to `JSON.parse(response)` and gets natural-language
+    // text. To preserve the structured-output INTENT through Copilot,
+    // append a system-prompt instruction telling the model to produce
+    // JSON conforming to the schema. This isn't as strong as
+    // server-side enforcement (the model may occasionally deviate),
+    // but it's much better than no constraint at all.
+    if (body.output_config && typeof body.output_config === "object") {
+      const oc = body.output_config as AnyRecord
+      const PROXY_OWNED_FIELDS = new Set(["effort"])
+      // Capture the schema BEFORE stripping so we can inject it.
+      const schema = oc.schema
+      const ocType = oc.type
+      let strippedAny = false
+      for (const key of Object.keys(oc)) {
+        if (!PROXY_OWNED_FIELDS.has(key)) {
+          delete oc[key]
+          strippedAny = true
+        }
+      }
+      if (strippedAny) {
+        consola.warn(
+          "Stripping client-set `output_config` Structured-Outputs fields"
+          + " (Copilot 400s on `output_config.*` other than `effort`;"
+          + " injecting schema as system-prompt instruction so the"
+          + " model still produces JSON conforming to the structured-"
+          + "outputs schema, since server-side enforcement is gone)",
+        )
+        if (Object.keys(oc).length === 0) {
+          delete body.output_config
+        }
+        if (schema !== undefined || ocType === "json_object") {
+          appendStructuredOutputInstruction(body, schema, ocType)
+        }
+        stripped = true
+      }
+    }
+  }
+  if (Array.isArray(body.betas)) {
+    consola.warn(
+      "Stripping body-level `betas` array (Copilot 400s; the betas are conveyed via the `anthropic-beta` header instead)",
+    )
+    delete body.betas
+    stripped = true
+  }
+  return stripped
+}
+
+/**
+ * Append a system-prompt instruction telling the model to produce JSON
+ * conforming to a Structured Outputs schema. Used after the proxy
+ * strips `output_config` to preserve the schema enforcement intent
+ * via prompt engineering instead of server-side validation.
+ *
+ * Mutates `body.system` in place. Handles both string and array shapes
+ * (Anthropic spec allows either).
+ */
+function appendStructuredOutputInstruction(
+  body: AnyRecord,
+  schema: unknown,
+  ocType: unknown,
+): void {
+  let instruction =
+    "\n\nIMPORTANT: Your response MUST be a single valid JSON object."
+    + " Do not wrap it in markdown code fences. Do not include any text"
+    + " before or after the JSON object."
+  if (schema !== undefined) {
+    instruction +=
+      ` The JSON object MUST conform to this JSON Schema:\n${JSON.stringify(schema)}`
+  } else if (typeof ocType === "string") {
+    instruction +=
+      ` Output type requested: ${ocType}.`
+  }
+  if (typeof body.system === "string") {
+    body.system = body.system + instruction
+  } else if (Array.isArray(body.system)) {
+    body.system = [
+      ...body.system,
+      { type: "text", text: instruction.trimStart() },
+    ]
+  } else {
+    body.system = instruction.trimStart()
   }
 }
