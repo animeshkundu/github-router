@@ -155,6 +155,61 @@ describe("getClaudeCodeEnvVars", () => {
   })
 })
 
+const EXPERIMENTAL_ENABLES = [
+  "CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL",
+  "CLAUDE_CODE_FORK_SUBAGENT",
+  "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+  "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING",
+  "CLAUDE_CODE_ENABLE_TASKS",
+]
+
+describe("experimental feature auto-enable", () => {
+  test.each(EXPERIMENTAL_ENABLES)(
+    "%s defaults to '1' when parent env is unset (auto-enable Anthropic experimental feature)",
+    (key) => {
+      const prior = process.env[key]
+      delete process.env[key]
+      try {
+        const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+        expect(vars[key]).toBe("1")
+      } finally {
+        if (prior === undefined) delete process.env[key]
+        else process.env[key] = prior
+      }
+    },
+  )
+
+  test.each(EXPERIMENTAL_ENABLES)(
+    "%s does NOT override a parent-set '0' (literal opt-out honored by presence-based guard)",
+    (key) => {
+      const prior = process.env[key]
+      process.env[key] = "0"
+      try {
+        const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+        expect(vars[key]).toBeUndefined()
+      } finally {
+        if (prior === undefined) delete process.env[key]
+        else process.env[key] = prior
+      }
+    },
+  )
+
+  test.each(EXPERIMENTAL_ENABLES)(
+    "%s does NOT override a parent-set 'false' (Anthropic SH() falsy semantics — value preserved by presence-based guard)",
+    (key) => {
+      const prior = process.env[key]
+      process.env[key] = "false"
+      try {
+        const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+        expect(vars[key]).toBeUndefined()
+      } finally {
+        if (prior === undefined) delete process.env[key]
+        else process.env[key] = prior
+      }
+    },
+  )
+})
+
 describe("getCodexEnvVars", () => {
   test("returns OPENAI_BASE_URL with /v1 suffix", () => {
     const vars = getCodexEnvVars("http://127.0.0.1:8787")
