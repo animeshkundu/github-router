@@ -109,11 +109,36 @@ Tunable env vars (set before launching `claude`):
 
 ### Beta header filtering
 
-Two modes controlled by `--extended-betas` flag:
-- **Default (VS Code stealth)**: Only forward 3 beta prefixes the VS Code extension sends (`interleaved-thinking-`, `context-management-`, `advanced-tool-use-`). Traffic is indistinguishable from VS Code.
-- **Extended (`--extended-betas`)**: Forward 14 additional beta prefixes for Claude CLI compatibility. Required when using `github-router claude --extended-betas`.
+The `--extended-betas` shared flag controls VS Code stealth vs Claude CLI leverage. The **`claude` subcommand defaults to leverage mode** (extended-betas ON; see "Stealth vs leverage policy" below) — opt back into stealth via `claude --stealth`. The `start` and `codex` subcommands default to stealth.
 
-The router strips `context-1m-`, `skills-`, `files-api-`, and `code-execution-` from every outgoing `anthropic-beta` value — Copilot returns 400 ("unsupported beta header") on each. 1M context for Opus 4.7 is unlocked by selecting the `claude-opus-4.7-1m-internal` model id (enterprise tier only), not via a beta header.
+- **Default for `start`/`codex` (VS Code stealth)**: Only forward 3 beta prefixes the VS Code extension sends (`interleaved-thinking-`, `context-management-`, `advanced-tool-use-`). Wire fingerprint matches VS Code Copilot Chat.
+- **Extended/leverage (`--extended-betas`, default for `claude`)**: Forward 20 beta prefixes covering the full Claude CLI feature surface (`claude-code-`, `effort-`, `prompt-caching-`, `computer-use-`, `pdfs-`, `max-tokens-`, `token-counting-`, `compact-`, `structured-outputs-`, `fast-mode-`, `mcp-client-`, `mcp-servers-`, `redact-thinking-`, `web-search-`, `task-budgets-`, `token-efficient-tools-`, plus 4 Anthropic-internal flags). Empirically validated against `api.enterprise.githubcopilot.com` 2026-05-11 — every prefix returns 200 from Copilot.
+
+The router strips `context-1m-`, `skills-`, `files-api-`, `code-execution-`, `output-128k-`, and **`advisor-tool-`** from every outgoing `anthropic-beta` value — Copilot returns 400 ("unsupported beta header") on each. The strip list lives in `EXPLICITLY_STRIPPED_BETA_PREFIXES` (`src/lib/utils.ts`) — defensive deny-list that catches even future allowlist broadenings. 1M context for Opus 4.7 is unlocked by selecting the `claude-opus-4.7-1m-internal` model id (enterprise tier only), not via a beta header.
+
+The router also strips body-level `budget`, `output_config.schema`, and `betas` array from `/v1/messages` and `/v1/messages/count_tokens` (Phase B; Copilot 400s on each — verified live). The corresponding `anthropic-beta` headers (`task-budgets-`, `structured-outputs-`) are preserved so the *intent* still flows; only the per-request enforcement field is dropped.
+
+### Stealth vs leverage policy
+
+`github-router claude` defaults to **leverage** (extended-betas ON, all stripped/preserved fields per the "Beta header filtering" section). Rationale: the spawned Claude Code already identifies itself via UA, editor-version, and Claude-specific request headers — partial stealth doesn't meaningfully reduce the wire-fingerprint diff, and stealth's cost is losing the features the user explicitly chose to install Claude Code for (cost-budget enforcement, prompt caching, MCP, structured outputs, etc.).
+
+Opt-out: `claude --stealth` reverts to the 3-prefix VS Code-only filter for users who specifically prioritize wire similarity over feature surface.
+
+The `start` and `codex` subcommands continue to default to VS Code stealth — they're for raw API users / Codex users who don't need the Claude CLI feature set.
+
+### Unsupported features (Copilot can't serve)
+
+Some Anthropic API surfaces have no Copilot equivalent. The proxy returns explicit Anthropic-format errors so users see the limitation surfaced clearly:
+
+- **Files API** (`/v1/files/*`): Copilot has no equivalent storage backend (verified via `cc-backup/src/services/api/filesApi.ts`). The proxy returns 404 with a descriptive error pointing users at the real Anthropic API for file uploads/downloads.
+- **ADVISOR** (`advisor-tool-2026-03-01`): Copilot returns 400 "unsupported beta header" on this prefix. The proxy strips the header so the request still succeeds (without ADVISOR semantics). Phase I plan: implement proxy-side ADVISOR translation that intercepts `tool_use{name:"__anthropic_advisor"}` blocks and routes them to a configurable advisor model (default cross-lab via gpt-5.5 or gemini-3.1-pro for true "second set of eyes" semantic). Until Phase I ships, ADVISOR-using sessions degrade to no-ADVISOR cleanly.
+- **`mcp_servers` body field** (inline remote-managed MCP): Copilot 400s on this field. Phase G plan: implement proxy-side translate-path that materializes the declared servers' tools server-side and routes resulting tool_uses back. Until Phase G ships, requests with inline `mcp_servers` get HTTP 400 from Copilot (forwarded as-is) — fail-fast is preferred over silent strip (which would cause LLM to hallucinate tool calls for tools that don't exist; gemini-critic finding).
+- **Bridge / CCR (Remote Sessions)**: requires `CLAUDE_CODE_REMOTE`/`CLAUDE_BRIDGE_*` env vars. Stripped from the spawned-child env (`STRIPPED_PARENT_ENV_KEYS`) so the remote-session code path never activates. Local sessions only.
+- **Files API OAuth, account/settings, team-memory sync, user-settings sync, etc.**: gated by `DISABLE_NON_ESSENTIAL_MODEL_CALLS=1` + `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` + `DISABLE_TELEMETRY=1` (all set by `getClaudeCodeEnvVars`). Suppressed at the source.
+
+### `apiKeyHelper` and external credential scripts
+
+Claude Code's settings.json supports `apiKeyHelper`, `awsCredentialExport`, `awsAuthRefresh`, `gcpAuthRefresh` — external scripts that mint credentials. The proxy overrides `ANTHROPIC_AUTH_TOKEN=dummy` and `ANTHROPIC_BASE_URL=<proxy>` regardless. If a user's `apiKeyHelper` mints an `x-api-key` header, that header is sent alongside our `Authorization: Bearer dummy` — Copilot ignores `x-api-key`, so requests still work. The "Auth conflict" warning Claude Code emits when both credential paths are present may resurface; the `CLAUDE_CONFIG_DIR=$HOME/.claude` keychain isolation already covers the common case (persisted `claude /login`). External-script credentials are out of the proxy's scope.
 
 ### Default models
 

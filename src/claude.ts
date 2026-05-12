@@ -53,6 +53,12 @@ export const claude = defineCommand({
       description:
         "Pass --strict-mcp-config to claude code so only github-router's MCP servers are loaded (hides user's existing MCP servers)",
     },
+    stealth: {
+      type: "boolean" as const,
+      default: false,
+      description:
+        "Opt back into VS Code-only beta header filtering. Loses leverage features (task budgets, token-efficient tools, prompt caching, etc.) but minimizes the wire-fingerprint difference from VS Code Copilot Chat. By default the `claude` subcommand enables extended/leverage betas because the spawned Claude Code already identifies itself via UA and other headers — partial stealth doesn't buy much.",
+    },
   },
   async run({ args }) {
     if (!process.stdout.isTTY) {
@@ -61,6 +67,34 @@ export const claude = defineCommand({
     }
 
     const parsed = parseSharedArgs(args as unknown as Record<string, unknown>)
+
+    // Phase E P2.2: stealth-vs-leverage policy.
+    // The `claude` subcommand defaults to LEVERAGE mode (extended-betas
+    // ON) because the spawned Claude Code already identifies itself via
+    // UA / editor-version / x-app headers — partial stealth doesn't
+    // meaningfully reduce the wire fingerprint, and the cost of stealth
+    // is losing features the user explicitly chose to install Claude
+    // Code for (--max-budget-usd, token-efficient tools, prompt caching,
+    // structured outputs, MCP, etc.).
+    //
+    // The `--stealth` flag opts back into the VS Code-only filter for
+    // users who specifically want minimal wire diff over leverage.
+    // The shared `--extended-betas` flag still works (treated as alias).
+    //
+    // Note: `advisor-tool-` is stripped in BOTH modes regardless of this
+    // setting (Phase A: Copilot 400s on it). ADVISOR will be served via
+    // Phase I's proxy-side translate path independently.
+    if (args.stealth) {
+      // Stealth wins if explicitly requested.
+      parsed.extendedBetas = false
+      consola.info(
+        "Stealth mode: VS Code-only beta filtering. Leverage features disabled.",
+      )
+    } else if (!args["extended-betas"]) {
+      // No explicit --extended-betas AND no --stealth → default ON.
+      parsed.extendedBetas = true
+    }
+    // If user passed --extended-betas explicitly, parsed already reflects it.
 
     let server: Awaited<ReturnType<typeof setupAndServe>>["server"]
     let serverUrl: string
