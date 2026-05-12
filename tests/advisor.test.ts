@@ -7,9 +7,11 @@ import {
   ADVISOR_DEFAULT_EFFORT,
   ADVISOR_DEFAULT_MODEL,
   ADVISOR_INTERNAL_TOOL_NAME,
+  ADVISOR_MAX_CONVERSATION_CHARS,
   ADVISOR_TOOL_INSTRUCTIONS,
   injectAdvisorTool,
   isAdvisorRequested,
+  renderConversationAsText,
   toClientServerToolUseId,
 } from "../src/services/advisor/advisor"
 
@@ -698,3 +700,134 @@ describe("toClientServerToolUseId charset hardening (round-5 codex critic)", () 
     }
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────
+// renderConversationAsText front-truncation (Phase L)
+// Long Claude Code sessions render to >272K tokens (gpt-5.5's prompt
+// cap on /v1/responses). Without truncation the advisor fails with
+// `model_max_prompt_tokens_exceeded` and falls back silently. The
+// front-truncation drops oldest turns first because the advisor's
+// value is on the current state, not the original prompt.
+// ─────────────────────────────────────────────────────────────────────
+
+describe("renderConversationAsText (Phase L truncation)", () => {
+  test("default char budget matches gpt-5.5 prompt cap with headroom", () => {
+    // 720K chars at ~3 chars/token ≈ 240K tokens, leaving ~32K
+    // headroom under gpt-5.5's 272K limit. If this constant changes,
+    // re-derive the headroom and update the inline doc comment.
+    expect(ADVISOR_MAX_CONVERSATION_CHARS).toBe(720_000)
+  })
+
+  test("short conversation passes through unchanged (no truncation marker)", () => {
+    const conversation = [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi there" },
+    ]
+    const out = renderConversationAsText(conversation)
+    expect(out).not.toContain("[TRUNCATED")
+    expect(out).toContain("### Turn 1 — user")
+    expect(out).toContain("hello")
+    expect(out).toContain("### Turn 2 — assistant")
+    expect(out).toContain("hi there")
+  })
+
+  test("front-truncates oldest turns when budget exceeded; keeps tail", () => {
+    // Each turn is ~1100 chars; with a 5000-char budget we should keep
+    // the latest ~4 turns and drop the rest.
+    const filler = "x".repeat(1000)
+    const conversation = Array.from({ length: 20 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `turn ${i + 1} ${filler}`,
+    }))
+    const out = renderConversationAsText(conversation, 5000)
+    expect(out.startsWith("[TRUNCATED:")).toBe(true)
+    expect(out).toContain("earlier turn(s) omitted")
+    // The latest turn must be present; older turns must be dropped.
+    expect(out).toContain("### Turn 20 — assistant")
+    expect(out).toContain("turn 20")
+    expect(out).not.toContain("### Turn 1 — user")
+    expect(out).not.toContain("turn 1 ")
+    // Total length stays at or under budget (modulo the truncation
+    // notice itself, which is tiny).
+    expect(out.length).toBeLessThanOrEqual(5500)
+  })
+
+  test("preserves most-recent turn even when it alone exceeds budget (tail-truncate)", () => {
+    const huge = "y".repeat(10000)
+    const conversation = [
+      { role: "user", content: "early turn" },
+      { role: "assistant", content: huge },
+    ]
+    const out = renderConversationAsText(conversation, 2000)
+    // Must announce a hard truncation and only show the tail of turn 2.
+    expect(out).toContain("[TRUNCATED:")
+    expect(out).toContain("turn 2")
+    expect(out).toContain("yyyy") // the tail of the huge string
+    expect(out.length).toBeLessThanOrEqual(2000)
+    expect(out).not.toContain("early turn")
+  })
+
+  test("truncation notice reports correct counts", () => {
+    const filler = "z".repeat(500)
+    const conversation = Array.from({ length: 10 }, (_, i) => ({
+      role: "user",
+      content: `t${i + 1} ${filler}`,
+    }))
+    // Each turn ≈ 580 chars. Budget 1500 keeps the latest ~2 turns,
+    // drops 8 earlier ones.
+    const out = renderConversationAsText(conversation, 1500)
+    const match = /\[TRUNCATED: (\d+) earlier turn\(s\) omitted .* (\d+) most-recent turn\(s\) shown/.exec(out)
+    expect(match).not.toBeNull()
+    const dropped = Number(match![1])
+    const kept = Number(match![2])
+    expect(dropped + kept).toBe(10)
+    expect(kept).toBeGreaterThan(0)
+    expect(dropped).toBeGreaterThan(0)
+  })
+
+  test("empty conversation returns empty string with no notice", () => {
+    expect(renderConversationAsText([])).toBe("")
+  })
+
+  test("custom budget parameter overrides default", () => {
+    const conversation = Array.from({ length: 5 }, (_, i) => ({
+      role: "user",
+      content: `turn ${i + 1} ${"a".repeat(2000)}`,
+    }))
+    // With a tiny budget, only the latest turn (or part of it) survives.
+    const tight = renderConversationAsText(conversation, 3000)
+    expect(tight).toContain("[TRUNCATED:")
+    // With a generous budget, everything fits.
+    const generous = renderConversationAsText(conversation, 100_000)
+    expect(generous).not.toContain("[TRUNCATED:")
+    expect(generous).toContain("### Turn 1 — user")
+    expect(generous).toContain("### Turn 5 — user")
+  })
+
+  test("tool_use and tool_result blocks counted in budget; truncated together", () => {
+    const conversation = Array.from({ length: 30 }, (_, i) => ({
+      role: i % 2 === 0 ? "assistant" : "user",
+      content: [
+        {
+          type: i % 2 === 0 ? "tool_use" : "tool_result",
+          ...(i % 2 === 0
+            ? {
+                id: `toolu_${i}`,
+                name: "Read",
+                input: { file_path: `/some/path/${i}` },
+              }
+            : {
+                tool_use_id: `toolu_${i - 1}`,
+                content: "x".repeat(800),
+              }),
+        },
+      ],
+    }))
+    const out = renderConversationAsText(conversation, 3000)
+    expect(out).toContain("[TRUNCATED:")
+    // The latest few turns must include their tool_use / tool_result
+    // serialization (i.e. the renderer didn't strip them when truncating).
+    expect(out).toMatch(/tool_(use|result)/)
+  })
+})
+

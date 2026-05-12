@@ -178,6 +178,16 @@ export function injectAdvisorTool(rawBody: string): string {
   return JSON.stringify(parsed)
 }
 
+/** Character budget for rendered conversation text passed to the
+ *  advisor model. gpt-5.5 (default advisor) caps prompt input at
+ *  272,000 tokens. At a conservative ~3 chars/token (mixed prose +
+ *  code + JSON), 720,000 chars renders to ≈240,000 tokens, leaving
+ *  ~32,000 tokens of headroom for the system prompt and per-turn
+ *  framing overhead. Without this cap, long Claude Code sessions
+ *  produce 400 `model_max_prompt_tokens_exceeded` from /v1/responses
+ *  and the advisor falls back silently. */
+export const ADVISOR_MAX_CONVERSATION_CHARS = 720_000
+
 /**
  * Render an Anthropic-shape conversation (messages array with
  * role/content blocks) as a single human-readable text blob. Used
@@ -185,37 +195,85 @@ export function injectAdvisorTool(rawBody: string): string {
  * doesn't have a 1:1 mapping for Anthropic's tool_use/tool_result
  * blocks; serializing to text preserves the semantics — the advisor
  * just needs to READ the conversation, not produce more of it).
+ *
+ * Front-truncates oldest turns when the rendered output would exceed
+ * `maxChars`. The advisor cares more about current state (latest
+ * tool calls, errors, in-flight task) than the original prompt —
+ * mirrors Claude Code's own context-truncation strategy. When any
+ * turns are dropped, prepends a `[TRUNCATED: N earlier turn(s)
+ * omitted ...]` notice so the advisor knows the transcript is
+ * partial and can flag if it needs the missing context.
  */
-function renderConversationAsText(conversation: Array<AnyRecord>): string {
-  const lines: Array<string> = []
+export function renderConversationAsText(
+  conversation: Array<AnyRecord>,
+  maxChars: number = ADVISOR_MAX_CONVERSATION_CHARS,
+): string {
+  const turnBlocks: Array<string> = []
   for (let i = 0; i < conversation.length; i++) {
     const msg = conversation[i]
     const role = (msg.role as string) ?? "unknown"
-    lines.push(`### Turn ${i + 1} — ${role}`)
+    const block: Array<string> = [`### Turn ${i + 1} — ${role}`]
     const content = msg.content
     if (typeof content === "string") {
-      lines.push(content)
+      block.push(content)
     } else if (Array.isArray(content)) {
-      for (const block of content) {
-        if (typeof block !== "object" || block === null) continue
-        const b = block as AnyRecord
+      for (const part of content) {
+        if (typeof part !== "object" || part === null) continue
+        const b = part as AnyRecord
         if (b.type === "text" && typeof b.text === "string") {
-          lines.push(b.text)
+          block.push(b.text)
         } else if (b.type === "tool_use") {
-          lines.push(
+          block.push(
             `[tool_use ${b.name ?? "?"}(${b.id ?? "?"}): ${JSON.stringify(b.input ?? {})}]`,
           )
         } else if (b.type === "tool_result") {
-          const c = typeof b.content === "string" ? b.content : JSON.stringify(b.content)
-          lines.push(`[tool_result ${b.tool_use_id ?? "?"}]:\n${c}`)
+          const c =
+            typeof b.content === "string" ? b.content : JSON.stringify(b.content)
+          block.push(`[tool_result ${b.tool_use_id ?? "?"}]:\n${c}`)
         } else {
-          lines.push(`[${b.type}: ${JSON.stringify(b).slice(0, 500)}]`)
+          block.push(`[${b.type}: ${JSON.stringify(b).slice(0, 500)}]`)
         }
       }
     }
-    lines.push("")
+    block.push("")
+    turnBlocks.push(block.join("\n"))
   }
-  return lines.join("\n")
+
+  // Walk from the latest turn backward, accumulating until the next
+  // turn would push us over budget. The "+1" accounts for the join
+  // separator between turn blocks.
+  let totalChars = 0
+  let firstKeptIdx = turnBlocks.length
+  for (let i = turnBlocks.length - 1; i >= 0; i--) {
+    const len = turnBlocks[i].length + 1
+    if (totalChars + len > maxChars) break
+    totalChars += len
+    firstKeptIdx = i
+  }
+
+  // Edge case: even the latest turn alone exceeds the budget. Hard-
+  // truncate its tail to fit (advisor still gets the most-recent
+  // context, just not all of it). 200-char reserve for the notice.
+  if (firstKeptIdx === turnBlocks.length && turnBlocks.length > 0) {
+    const last = turnBlocks[turnBlocks.length - 1]
+    const reserve = 200
+    const tail = last.slice(-(maxChars - reserve))
+    return (
+      `[TRUNCATED: conversation too long for advisor model context; `
+      + `only the tail of the latest (turn ${turnBlocks.length}) is shown]\n\n`
+      + tail
+    )
+  }
+
+  const kept = turnBlocks.slice(firstKeptIdx)
+  if (firstKeptIdx > 0) {
+    kept.unshift(
+      `[TRUNCATED: ${firstKeptIdx} earlier turn(s) omitted to fit advisor `
+        + `model context budget; ${turnBlocks.length - firstKeptIdx} most-recent `
+        + `turn(s) shown below]\n`,
+    )
+  }
+  return kept.join("\n")
 }
 
 /**
