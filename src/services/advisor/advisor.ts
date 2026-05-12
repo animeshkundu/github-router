@@ -46,6 +46,11 @@ import { events } from "fetch-event-stream"
 import { isControllerClosedError } from "~/lib/stream-relay"
 import { resolveModel } from "~/lib/utils"
 import { createMessages } from "~/services/copilot/create-messages"
+import {
+  createResponses,
+  type ResponsesApiResponse,
+  type ResponsesPayload,
+} from "~/services/copilot/create-responses"
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyRecord = Record<string, any>
@@ -66,12 +71,17 @@ export const ADVISOR_CLIENT_TOOL_NAME = "advisor"
  *  times per session per cc-backup ADVISOR_TOOL_INSTRUCTIONS. */
 export const ADVISOR_MAX_TURNS = 16
 
-/** Default advisor model. Per gemini-critic: hardcode to a
- *  cross-lab model so the user gets a true "second set of eyes"
- *  instead of the main model reviewing itself. gpt-5.5 is the
- *  cross-lab equivalent of codex-critic; users can configure via
- *  `--advisor-model` (TODO: wire flag). */
+/** Default advisor model + reasoning effort. Per gemini-critic + user
+ *  direction: hardcode to a cross-lab model (gpt-5.5 — Copilot's
+ *  /responses-only flagship) at xhigh effort. The cross-lab choice
+ *  gives a true "second set of eyes" instead of the main model
+ *  reviewing itself; xhigh effort buys the deep-dive reasoning that
+ *  matches Anthropic's own ADVISOR (which uses a stronger reviewer
+ *  model — Opus 4.6/Sonnet 4.6 typically). */
 export const ADVISOR_DEFAULT_MODEL = "gpt-5.5"
+export const ADVISOR_DEFAULT_EFFORT = "xhigh"
+
+type Effort = "low" | "medium" | "high" | "xhigh"
 
 /** ADVISOR_TOOL_INSTRUCTIONS verbatim from cc-backup
  *  src/utils/advisor.ts — describes when the model should invoke
@@ -144,47 +154,152 @@ export function injectAdvisorTool(rawBody: string): string {
 }
 
 /**
+ * Render an Anthropic-shape conversation (messages array with
+ * role/content blocks) as a single human-readable text blob. Used
+ * as the input to the advisor model (gpt-5.5 via /v1/responses
+ * doesn't have a 1:1 mapping for Anthropic's tool_use/tool_result
+ * blocks; serializing to text preserves the semantics — the advisor
+ * just needs to READ the conversation, not produce more of it).
+ */
+function renderConversationAsText(conversation: Array<AnyRecord>): string {
+  const lines: Array<string> = []
+  for (let i = 0; i < conversation.length; i++) {
+    const msg = conversation[i]
+    const role = (msg.role as string) ?? "unknown"
+    lines.push(`### Turn ${i + 1} — ${role}`)
+    const content = msg.content
+    if (typeof content === "string") {
+      lines.push(content)
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (typeof block !== "object" || block === null) continue
+        const b = block as AnyRecord
+        if (b.type === "text" && typeof b.text === "string") {
+          lines.push(b.text)
+        } else if (b.type === "tool_use") {
+          lines.push(
+            `[tool_use ${b.name ?? "?"}(${b.id ?? "?"}): ${JSON.stringify(b.input ?? {})}]`,
+          )
+        } else if (b.type === "tool_result") {
+          const c = typeof b.content === "string" ? b.content : JSON.stringify(b.content)
+          lines.push(`[tool_result ${b.tool_use_id ?? "?"}]:\n${c}`)
+        } else {
+          lines.push(`[${b.type}: ${JSON.stringify(b).slice(0, 500)}]`)
+        }
+      }
+    }
+    lines.push("")
+  }
+  return lines.join("\n")
+}
+
+/**
  * Run the advisor model with the full conversation context. Returns
- * the advisor's text response. Uses createMessages directly so we get
- * Copilot's full feature surface (caching, etc.).
+ * the advisor's text response.
  *
- * The advisor model is called as a NON-streaming /v1/messages with a
- * system prompt instructing it to act as an expert reviewer. We pass
- * the user's full conversation as the messages array.
+ * Routes by model family:
+ *   - gpt-5.x / codex / o-series (have `/responses` in supported_endpoints):
+ *     use createResponses with `reasoning.effort` set. This is the
+ *     default path — gpt-5.5 at xhigh effort.
+ *   - claude-* (no `/responses`): fall back to createMessages.
+ *
+ * The conversation is serialized to text via renderConversationAsText
+ * so the advisor model (which may not natively understand Anthropic's
+ * tool_use/tool_result block shapes) sees a flat readable transcript.
+ * This loses some structural fidelity but matches the spirit of
+ * Anthropic's own ADVISOR ("see the whole task + every tool call +
+ * every result").
  */
 async function runAdvisor(
   conversation: Array<AnyRecord>,
   advisorModel: string,
+  advisorEffort: Effort,
 ): Promise<string> {
   const advisorSystem =
     "You are an expert advisor reviewing an in-progress Claude Code session. "
-    + "The user/assistant conversation below is the work-in-progress. "
-    + "Read carefully and provide concrete, actionable advice on the next step "
-    + "or course-correction. Be specific — cite the parts of the conversation "
-    + "you're responding to. If the assistant is on the right track, say so "
-    + "explicitly. If they're stuck or off-track, name the specific assumption "
-    + "or step to revisit. Aim for 2-5 paragraphs of substantive guidance."
+    + "The transcript below is the work-in-progress (turns numbered, with "
+    + "tool calls and results inlined). Read carefully and provide concrete, "
+    + "actionable advice on the next step or course-correction. Be specific — "
+    + "cite the parts of the transcript you're responding to. If the assistant "
+    + "is on the right track, say so explicitly. If they're stuck or off-track, "
+    + "name the specific assumption or step to revisit. Aim for 2-5 paragraphs "
+    + "of substantive guidance."
 
-  // Build a non-streaming request body. The conversation is forwarded
-  // as the messages array; system is the advisor instruction.
+  const conversationText = renderConversationAsText(conversation)
+  const resolvedAdvisorModel = resolveModel(advisorModel)
+
+  // Route by model family. gpt-5.x / o-series / codex go through
+  // /v1/responses with reasoning.effort. claude-* stays on /v1/messages.
+  // Quick heuristic: if the model id starts with "gpt-" or contains
+  // "codex" or starts with "o", use /responses. Otherwise /v1/messages.
+  // (Could be tightened with a state.models lookup, but the fast-path
+  // text match is correct for every model in Copilot's catalog today.)
+  const useResponses = /^(gpt-|o\d|.*codex)/i.test(resolvedAdvisorModel)
+
+  if (useResponses) {
+    const payload: ResponsesPayload = {
+      model: resolvedAdvisorModel,
+      instructions: advisorSystem,
+      input: [
+        {
+          role: "user",
+          content: [{ type: "input_text", text: conversationText }],
+        },
+      ],
+      stream: false,
+      // gpt-5.x reads reasoning.effort directly. xhigh is the deepest
+      // reasoning bucket — appropriate for adversarial review since the
+      // advisor adds most of its value on the FIRST call (per cc-backup
+      // ADVISOR_TOOL_INSTRUCTIONS line 31), so don't be cheap.
+      reasoning: { effort: advisorEffort },
+    }
+    const response = (await createResponses(payload)) as ResponsesApiResponse
+    const out: Array<string> = []
+    for (const item of response.output) {
+      if (typeof item !== "object" || item === null) continue
+      const obj = item as Record<string, unknown>
+      if (obj.type !== "message" || obj.role !== "assistant") continue
+      const content = obj.content
+      if (!Array.isArray(content)) continue
+      for (const part of content) {
+        if (typeof part !== "object" || part === null) continue
+        const p = part as Record<string, unknown>
+        if (
+          (p.type === "output_text" || p.type === "text")
+          && typeof p.text === "string"
+        ) {
+          out.push(p.text)
+        }
+      }
+    }
+    const text = out.join("")
+    if (!text) {
+      throw new Error(
+        `Advisor model ${resolvedAdvisorModel} returned empty assistant output`,
+      )
+    }
+    return text
+  }
+
+  // claude-* fallback: /v1/messages with the conversation as a single
+  // user message. Effort doesn't apply (Anthropic uses thinking mode
+  // separately).
   const advisorBody = JSON.stringify({
-    model: resolveModel(advisorModel),
+    model: resolvedAdvisorModel,
     max_tokens: 4096,
     system: advisorSystem,
-    messages: conversation,
+    messages: [{ role: "user", content: conversationText }],
     stream: false,
   })
-
   const response = await createMessages(advisorBody, {})
   const json = (await response.json()) as AnyRecord
-  // Anthropic message response shape: {content: [{type: "text", text: ...}], ...}
   const blocks = Array.isArray(json.content) ? json.content : []
   const text = blocks
     .filter((b: AnyRecord) => b.type === "text" && typeof b.text === "string")
     .map((b: AnyRecord) => b.text as string)
     .join("\n\n")
   if (!text) {
-    throw new Error("Advisor model returned empty response")
+    throw new Error(`Advisor model ${resolvedAdvisorModel} returned empty response`)
   }
   return text
 }
@@ -238,8 +353,10 @@ export function buildAdvisorStream(opts: {
   baseBody: AnyRecord
   requestHeaders: Record<string, string>
   advisorModel?: string
+  advisorEffort?: Effort
 }): ReadableStream<Uint8Array> {
   const advisorModel = opts.advisorModel ?? ADVISOR_DEFAULT_MODEL
+  const advisorEffort = opts.advisorEffort ?? ADVISOR_DEFAULT_EFFORT
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -466,7 +583,7 @@ export function buildAdvisorStream(opts: {
 
           let advisorText: string
           try {
-            advisorText = await runAdvisor(conversation, advisorModel)
+            advisorText = await runAdvisor(conversation, advisorModel, advisorEffort)
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err)
             consola.warn(`Advisor model call failed: ${msg}`)

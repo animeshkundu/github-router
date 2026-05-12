@@ -4,6 +4,8 @@ import { state } from "../src/lib/state"
 import { server } from "../src/server"
 import {
   ADVISOR_CLIENT_TOOL_NAME,
+  ADVISOR_DEFAULT_EFFORT,
+  ADVISOR_DEFAULT_MODEL,
   ADVISOR_INTERNAL_TOOL_NAME,
   ADVISOR_TOOL_INSTRUCTIONS,
   injectAdvisorTool,
@@ -73,6 +75,15 @@ afterEach(() => {
   state.models = savedModels
   state.extendedBetas = savedExtendedBetas
   delete process.env.CLAUDE_CODE_DISABLE_ADVISOR_TOOL
+})
+
+describe("ADVISOR defaults (Phase I)", () => {
+  test("default model is gpt-5.5 (cross-lab)", () => {
+    expect(ADVISOR_DEFAULT_MODEL).toBe("gpt-5.5")
+  })
+  test("default effort is xhigh (deepest reasoning bucket)", () => {
+    expect(ADVISOR_DEFAULT_EFFORT).toBe("xhigh")
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────
@@ -295,45 +306,52 @@ describe("ADVISOR streaming integration (Phase I)", () => {
   })
 
   test("when model calls __anthropic_advisor: translates to server_tool_use{advisor}, runs advisor, emits advisor_tool_result, continues", async () => {
-    // First Copilot call: returns text + tool_use{__anthropic_advisor}.
-    // Second Copilot call (continuation after advisor): returns more text + message_stop.
-    // Third call (advisor model itself): returns advisor's reviewer response.
-    let copilotCallCount = 0
-    let advisorCallCount = 0
+    // First Copilot call (/v1/messages stream): returns text + tool_use{__anthropic_advisor}.
+    // Second Copilot call (continuation, /v1/messages stream): returns more text + message_stop.
+    // Advisor call (gpt-5.5 via /responses, non-stream): returns advisor's text.
+    let copilotMessagesCallCount = 0
+    let advisorResponsesCallCount = 0
     const fetchMock = mock((url: string, init?: { body?: string }) => {
-      if (url.includes("/v1/messages")) {
+      // ADVISOR call: gpt-5.5 → /responses with reasoning.effort=xhigh
+      if (url.includes("/responses")) {
         const parsedBody = JSON.parse((init?.body ?? "{}") as string) as {
           model?: string
+          reasoning?: { effort?: string }
           stream?: boolean
         }
-        // Advisor model call: model=gpt-5.5, stream:false. Returns
-        // a normal /v1/messages JSON response.
-        if (parsedBody.model === "gpt-5.5" && parsedBody.stream === false) {
-          advisorCallCount++
-          return new Response(
-            JSON.stringify({
-              id: "advisor_resp",
-              type: "message",
-              role: "assistant",
-              model: "gpt-5.5",
-              content: [
-                {
-                  type: "text",
-                  text: "Advisor says: you're on track. Proceed.",
-                },
-              ],
-              stop_reason: "end_turn",
-              stop_sequence: null,
-              usage: { input_tokens: 50, output_tokens: 10 },
-            }),
-            { status: 200, headers: { "content-type": "application/json" } },
-          )
-        }
+        // Verify the advisor call uses gpt-5.5 + xhigh + non-streaming
+        expect(parsedBody.model).toBe("gpt-5.5")
+        expect(parsedBody.reasoning?.effort).toBe("xhigh")
+        expect(parsedBody.stream).toBe(false)
+        advisorResponsesCallCount++
+        return new Response(
+          JSON.stringify({
+            id: "advisor_resp",
+            object: "response",
+            status: "completed",
+            output: [
+              {
+                type: "message",
+                role: "assistant",
+                content: [
+                  {
+                    type: "output_text",
+                    text: "Advisor says: you're on track. Proceed.",
+                  },
+                ],
+              },
+            ],
+            usage: { input_tokens: 50, output_tokens: 10 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
 
+      if (url.includes("/v1/messages")) {
         // Copilot main-loop call: streaming. First call returns the
         // advisor tool_use; second (continuation) returns final text.
-        copilotCallCount++
-        if (copilotCallCount === 1) {
+        copilotMessagesCallCount++
+        if (copilotMessagesCallCount === 1) {
           return new Response(
             buildSseStream([
               { event: "message_start", data: { type: "message_start", message: { id: "m1" } } },
@@ -403,10 +421,10 @@ describe("ADVISOR streaming integration (Phase I)", () => {
     const messageStopEventCount = (text.match(/^event: message_stop$/gm) ?? []).length
     expect(messageStopEventCount).toBe(1)
 
-    // Verify the advisor model was called once
-    expect(advisorCallCount).toBe(1)
-    // Verify Copilot was called twice (main + continuation)
-    expect(copilotCallCount).toBe(2)
+    // Verify the advisor model was called once via /responses with xhigh
+    expect(advisorResponsesCallCount).toBe(1)
+    // Verify Copilot was called twice via /v1/messages (main + continuation)
+    expect(copilotMessagesCallCount).toBe(2)
   })
 
   test("CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 disables advisor — request flows as normal passthrough", async () => {
