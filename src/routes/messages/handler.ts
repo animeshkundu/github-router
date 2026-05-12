@@ -11,6 +11,11 @@ import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
 import { relayAnthropicStream } from "~/lib/stream-relay"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
+import {
+  buildAdvisorStream,
+  injectAdvisorTool,
+  isAdvisorRequested,
+} from "~/services/advisor/advisor"
 import { createMessages } from "~/services/copilot/create-messages"
 import type { Model } from "~/services/copilot/get-models"
 import { searchWeb } from "~/services/copilot/web-search"
@@ -190,7 +195,24 @@ export async function handleCompletion(c: Context) {
   }
 
   const betaHeaders = extractBetaHeaders(c)
-  const finalBody = await processWebSearch(rawBody)
+
+  // Phase I: detect ADVISOR request BEFORE filterBetaHeader strips
+  // the advisor-tool- prefix from the outgoing header. We need the raw
+  // incoming header to know whether the user asked for ADVISOR.
+  const incomingBeta = c.req.header("anthropic-beta")
+  const advisorEnabled = isAdvisorRequested(incomingBeta)
+
+  let finalBody = await processWebSearch(rawBody)
+  if (advisorEnabled) {
+    // Inject __anthropic_advisor tool definition (with cc-backup's
+    // ADVISOR_TOOL_INSTRUCTIONS as description) so the model knows
+    // when to call it. Tool name uses double-underscore prefix to
+    // avoid collision with any user MCP server's `advisor`.
+    finalBody = injectAdvisorTool(finalBody)
+    consola.info(
+      "ADVISOR enabled for this request — injecting __anthropic_advisor tool; will translate tool_use → server_tool_use{advisor} on the SSE stream",
+    )
+  }
 
   // Phase G fail-fast (deferred translate path per codex-critic): if the
   // request includes inline `mcp_servers`, refuse with a clear Anthropic-
@@ -298,7 +320,8 @@ export async function handleCompletion(c: Context) {
     )
   }
 
-  // Streaming: pipe the upstream SSE response body directly
+  // Streaming: pipe the upstream SSE response body directly (or wrap
+  // with the ADVISOR translate-loop if advisor was requested).
   if (isStreaming) {
     logRequest(
       {
@@ -326,6 +349,45 @@ export async function handleCompletion(c: Context) {
     if (requestId) streamHeaders["x-request-id"] = requestId
     const reqId = response.headers.get("request-id")
     if (reqId) streamHeaders["request-id"] = reqId
+
+    // Phase I: branch into the advisor translate-loop if the user
+    // requested ADVISOR. The loop intercepts tool_use{__anthropic_advisor}
+    // blocks, translates to server_tool_use{advisor}, runs the advisor
+    // model server-side, emits advisor_tool_result, and continues the
+    // Copilot conversation on the SAME SSE connection (no intermediate
+    // message_stop). See src/services/advisor/advisor.ts for the design
+    // (gemini-critic streaming-during-loop pattern).
+    if (advisorEnabled && response.body) {
+      // Parse the resolved body once to extract the conversation +
+      // base body for continuation calls. The translate-loop needs
+      // these to extend the conversation across advisor turns.
+      let parsedBase: AnyRecord = {}
+      try {
+        parsedBase = JSON.parse(resolvedBody) as AnyRecord
+      } catch {
+        // Should not happen since resolveModelInBody just re-serialized
+        // it. Fallback: pass empty conversation; translate-loop will
+        // skip advisor calls if it can't construct continuations.
+      }
+      const initialConversation = Array.isArray(parsedBase.messages)
+        ? (parsedBase.messages as Array<AnyRecord>)
+        : []
+      return new Response(
+        buildAdvisorStream({
+          firstResponse: response,
+          initialConversation,
+          baseBody: parsedBase,
+          requestHeaders: {
+            ...selectedModel?.requestHeaders,
+            ...effectiveBetas,
+          },
+        }),
+        {
+          status: response.status,
+          headers: streamHeaders,
+        },
+      )
+    }
 
     return new Response(
       response.body
