@@ -68,6 +68,32 @@ export async function handleCountTokens(c: Context) {
   const startTime = Date.now()
   const rawBody = await c.req.text()
   const strippedBody = stripWebSearchFromBody(rawBody)
+
+  // Phase G fail-fast: same rationale as handler.ts. count_tokens uses
+  // the same Copilot schema validator, so mcp_servers in the body
+  // produces the same 400 — surface clearly here too.
+  if (strippedBody.includes('"mcp_servers"')) {
+    try {
+      const probe = JSON.parse(strippedBody) as AnyRecord
+      if (Array.isArray(probe.mcp_servers) && probe.mcp_servers.length > 0) {
+        return c.json(
+          {
+            type: "error",
+            error: {
+              type: "invalid_request_error",
+              message:
+                "Inline `mcp_servers` body field is not supported by github-router. "
+                + "Configure remote MCP servers as local stdio entries in `~/.claude/mcp.json` instead.",
+            },
+          },
+          400,
+        )
+      }
+    } catch {
+      // Not valid JSON — fall through to downstream parse-error path.
+    }
+  }
+
   const { body: finalBody, originalModel, resolvedModel } = resolveModelInBody(strippedBody)
 
   const extraHeaders: Record<string, string> = {}

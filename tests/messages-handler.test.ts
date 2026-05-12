@@ -487,12 +487,18 @@ describe("Anthropic-only body field stripping (Phase B P0.2)", () => {
     expect(forwarded.metadata).toEqual({ user_id: "test-user-123" })
   })
 
-  test("does NOT strip `mcp_servers` (Phase G translate path — silent strip would cause LLM to hallucinate tools)", async () => {
-    // Phase A intentionally does not touch mcp_servers — Phase G builds
-    // the proxy-side translate path that materializes those servers'
-    // tools server-side. Until then, the field flows through and Copilot
-    // 400s the request — which is the correct fail-fast behavior per
-    // gemini-critic ("silent strip causes LLM to hallucinate tools").
+  test("REJECTS `mcp_servers` with fail-fast 400 (Phase G — translate path deferred per codex-critic)", async () => {
+    // Phase G design (proxy-side translate via inline-MCP client pool +
+    // multi-turn tool loop) was deferred because codex-critic surfaced
+    // structural design holes:
+    //   - continuation-after-pool-TTL not implementable from request alone
+    //   - streaming buffer-and-resume creates incoherent SSE if any
+    //     assistant deltas already forwarded before tool_use detection
+    //   - tool-name namespace (server:tool) regex unverified against
+    //     Copilot
+    // Better Pareto: fail-fast 400 with helpful error pointing user at
+    // local stdio MCP via ~/.claude/mcp.json (which works without this
+    // code).
     const captured: { body?: string } = {}
     setupModelAndFetch(captured)
 
@@ -508,13 +514,42 @@ describe("Anthropic-only body field stripping (Phase B P0.2)", () => {
         ],
       }),
     })
-    expect(response.status).toBe(200)
-
-    const forwarded = JSON.parse(captured.body ?? "{}") as {
-      mcp_servers?: Array<unknown>
+    expect(response.status).toBe(400)
+    const body = (await response.json()) as {
+      type: string
+      error: { type: string; message: string }
     }
-    // Untouched — Phase G will eventually add translate-path here
-    expect(forwarded.mcp_servers).toHaveLength(1)
+    expect(body.type).toBe("error")
+    expect(body.error.type).toBe("invalid_request_error")
+    expect(body.error.message).toContain("mcp_servers")
+    expect(body.error.message).toContain("~/.claude/mcp.json")
+    // Most importantly: NEVER forwarded to Copilot
+    expect(captured.body).toBeUndefined()
+  })
+
+  test("ACCEPTS empty mcp_servers array (no fail-fast — only non-empty triggers reject)", async () => {
+    // Edge case: client sends mcp_servers:[] explicitly. Treat as no-op
+    // (no inline servers to translate) — forward as-is. Copilot will
+    // 400 because the field is "Extra inputs not permitted" regardless,
+    // but our fail-fast condition is specifically "non-empty array" to
+    // avoid false-positives.
+    const captured: { body?: string } = {}
+    setupModelAndFetch(captured)
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+        mcp_servers: [],
+      }),
+    })
+    // Empty array passes our fail-fast and reaches the upstream mock,
+    // which we made 200 in setupModelAndFetch.
+    expect(response.status).toBe(200)
+    expect(captured.body).toBeDefined()
   })
 
   test("strips multiple Copilot-incompatible fields in one request (composes with cache_control + thinking translation)", async () => {

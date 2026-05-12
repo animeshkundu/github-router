@@ -67,7 +67,7 @@
     "budget": "400 'budget: Extra inputs are not permitted' — STRIPPED by router (Phase B)",
     "output_config.schema": "400 'output_config.schema: Extra inputs are not permitted' — STRIPPED (preserves output_config.effort sibling)",
     "betas": "400 'betas: Extra inputs are not permitted' — STRIPPED (anthropic-beta header conveys the same info)",
-    "mcp_servers": "400 'mcp_servers: Extra inputs are not permitted' — NOT stripped (Phase G translate-path planned; silent strip would cause LLM to hallucinate tools)",
+    "mcp_servers": "400 'mcp_servers: Extra inputs are not permitted' from Copilot — proxy now FAIL-FAST 400s with helpful Anthropic-format error pointing user at ~/.claude/mcp.json (Phase G translate-path DEFERRED per codex-critic: structural design holes around continuation-after-pool-TTL and streaming-correctness)",
     "metadata": "200 ACCEPTED (Copilot ignores harmlessly) — PRESERVED (codex-critic guidance)",
     "top_k": "200 ACCEPTED (sanity control)",
     "cache_control.scope": "400 'Extra inputs not permitted' — STRIPPED (pre-existing)"

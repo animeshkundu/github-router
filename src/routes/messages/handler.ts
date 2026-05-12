@@ -192,6 +192,44 @@ export async function handleCompletion(c: Context) {
   const betaHeaders = extractBetaHeaders(c)
   const finalBody = await processWebSearch(rawBody)
 
+  // Phase G fail-fast (deferred translate path per codex-critic): if the
+  // request includes inline `mcp_servers`, refuse with a clear Anthropic-
+  // format error before forwarding. The original plan was to translate
+  // (instantiate MCP clients server-side and inline tools) but the design
+  // has structural holes — continuation after pool TTL isn't implementable
+  // from the request alone, and streaming correctness during the multi-turn
+  // tool loop is fragile. Local stdio MCP (~/.claude/mcp.json) covers the
+  // common Claude usage; remote-managed MCP is the rare path. Fail-fast
+  // with a clear pointer is the better Pareto choice (codex-critic 2/2/3
+  // verdict on the translate-path design).
+  if (finalBody.includes('"mcp_servers"')) {
+    try {
+      const probe = JSON.parse(finalBody) as AnyRecord
+      if (Array.isArray(probe.mcp_servers) && probe.mcp_servers.length > 0) {
+        return c.json(
+          {
+            type: "error",
+            error: {
+              type: "invalid_request_error",
+              message:
+                "Inline `mcp_servers` body field is not supported by github-router "
+                + "(Copilot returns 400 'Extra inputs are not permitted'; the proxy "
+                + "would need a multi-turn tool-loop translation that has unresolved "
+                + "design holes — see Phase G in the plan). Configure your remote MCP "
+                + "servers as local stdio entries in `~/.claude/mcp.json` instead — "
+                + "Claude Code will spawn them locally and the proxy passes their "
+                + "tool calls through transparently. (https://docs.claude.com/en/docs/claude-code/mcp)",
+            },
+          },
+          400,
+        )
+      }
+    } catch {
+      // Body wasn't valid JSON — fall through, downstream handlers will
+      // surface the parse error in their own way.
+    }
+  }
+
   // Resolve model name (e.g. opus → opus-1m variant) and translate
   // thinking-mode shape for adaptive-thinking models.
   const {

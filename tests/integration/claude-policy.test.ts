@@ -272,19 +272,32 @@ describe("contract: body-field strip policy on /v1/messages", () => {
     expect(fwd.metadata).toEqual({ user_id: "test-user" })
   })
 
-  test("PRESERVES `mcp_servers` (Phase G boundary — silent strip would hallucinate tools)", async () => {
+  test("REJECTS `mcp_servers` (Phase G fail-fast — translate path deferred per codex-critic)", async () => {
     const captured = captureUpstream()
-    await server.request("/v1/messages", {
+    const response = await server.request("/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: claudeBody({
         mcp_servers: [{ type: "url", url: "https://example.com/mcp", name: "x" }],
       }),
     })
-    const fwd = captured.body() as { mcp_servers?: Array<unknown> }
-    // Until Phase G translates, mcp_servers flows through (and Copilot
-    // 400s the request). Fail-fast > silent strip per gemini-critic.
-    expect(fwd.mcp_servers).toHaveLength(1)
+    // Phase G now fail-fast 400s instead of pass-through. The original
+    // peer-review-driven policy was "preserve and let Copilot 400" but
+    // codex-critic's design review DEFERRED the translate path due to
+    // structural design holes (continuation-after-TTL not implementable;
+    // streaming correctness fragile). Fail-fast with helpful error
+    // pointing at ~/.claude/mcp.json is the better Pareto.
+    expect(response.status).toBe(400)
+    const body = (await response.json()) as {
+      type: string
+      error: { type: string; message: string }
+    }
+    expect(body.type).toBe("error")
+    expect(body.error.message).toContain("mcp_servers")
+    expect(body.error.message).toContain("~/.claude/mcp.json")
+    // Never forwarded to Copilot. captured.body() returns {} when the
+    // mock fetch was never called (the helper falls back to JSON.parse("{}")).
+    expect(captured.body()).toEqual({})
   })
 
   test("PRESERVES arbitrary tool definitions (TeamCreate / GOAL / etc. flow through)", async () => {
