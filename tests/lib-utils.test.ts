@@ -428,6 +428,179 @@ describe("filterBetaHeader", () => {
     ].join(",")
     expect(filterBetaHeader(input)).toBe(input)
   })
+
+  // --- Phase A: empirically verified new prefixes (2026-05-11 against Copilot enterprise) ---
+
+  test("extended mode keeps task-budgets-* (Copilot 200 — verified)", () => {
+    state.extendedBetas = true
+    expect(filterBetaHeader("task-budgets-2026-03-13")).toBe(
+      "task-budgets-2026-03-13",
+    )
+  })
+
+  test("extended mode keeps token-efficient-tools-* (Copilot 200 — verified)", () => {
+    state.extendedBetas = true
+    expect(filterBetaHeader("token-efficient-tools-2026-03-28")).toBe(
+      "token-efficient-tools-2026-03-28",
+    )
+  })
+
+  test("extended mode keeps Anthropic-internal betas (won't fire for non-ant users but allowlisted defensively)", () => {
+    state.extendedBetas = true
+    const input = [
+      "summarize-connector-text-2026-03-13",
+      "afk-mode-2026-01-31",
+      "cli-internal-2026-02-09",
+      "oauth-2025-04-20",
+    ].join(",")
+    expect(filterBetaHeader(input)).toBe(input)
+  })
+
+  test("extended mode strips advisor-tool-* (Copilot 400 'unsupported beta header' — verified live)", () => {
+    state.extendedBetas = true
+    // Empirical 2026-05-11: Copilot returns
+    //   `unsupported beta header(s): advisor-tool-2026-03-01`
+    // on every request that includes this prefix. The proxy must strip
+    // even when extended-betas is on. ADVISOR is not implementable via
+    // Copilot upstream — see Phase I (proxy-side ADVISOR translation)
+    // and CLAUDE.md for the planned alternative.
+    expect(filterBetaHeader("advisor-tool-2026-03-01")).toBeUndefined()
+  })
+
+  test("extended mode strips advisor-tool-* even when bundled with other valid betas", () => {
+    state.extendedBetas = true
+    // The strip must be surgical — keep the working sibling, drop the
+    // poison pill, so the request still benefits from the rest of the
+    // beta set instead of failing wholesale.
+    expect(
+      filterBetaHeader(
+        "task-budgets-2026-03-13,advisor-tool-2026-03-01,token-efficient-tools-2026-03-28",
+      ),
+    ).toBe("task-budgets-2026-03-13,token-efficient-tools-2026-03-28")
+  })
+
+  test("default (vscode-stealth) mode also strips advisor-tool-* (defense-in-depth)", () => {
+    state.extendedBetas = false
+    expect(filterBetaHeader("advisor-tool-2026-03-01")).toBeUndefined()
+  })
+})
+
+// --- Phase A P0.4: legacy Sonnet/Haiku family fallback ---
+
+describe("resolveModel — Step 6 legacy family fallback (Phase A P0.4)", () => {
+  let originalInfo: typeof consola.info
+  let infoCalls: Array<Array<unknown>>
+
+  beforeEach(() => {
+    originalInfo = consola.info
+    infoCalls = []
+    consola.info = mock((...args: Array<unknown>) => {
+      infoCalls.push(args)
+    }) as unknown as typeof consola.info
+
+    // Simulate Copilot's catalog as of 2026-05-11: only sonnet 4.5 and 4.6,
+    // no Sonnet < 4.5; only haiku 4.5, no Haiku < 4.5.
+    state.models = {
+      data: [
+        { id: "claude-sonnet-4.5", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-sonnet-4.6", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-haiku-4.5", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+  })
+
+  afterEach(() => {
+    consola.info = originalInfo
+    state.models = undefined
+  })
+
+  test("legacy Sonnet 3.7 dated slug falls back to highest sonnet (claude-3-7-sonnet-20250219 → claude-sonnet-4.6)", () => {
+    // Empirical 2026-05-11: requesting claude-3-7-sonnet-20250219 against
+    // Copilot returns HTTP 400 "The requested model is not supported."
+    // Without this fallback, every Claude Code session pinning legacy
+    // Sonnet in settings.json fails wholesale.
+    //
+    // The cascade interaction: Step 5 (dated-slug retry) strips the date
+    // and re-runs resolveModel, which lands on Step 6 (legacy fallback).
+    // BOTH log breadcrumbs fire — Step 6's "legacy sonnet" inside the
+    // retry, then Step 5's "stripped -YYYYMMDD" on the way out. We assert
+    // the legacy-fallback breadcrumb appears SOMEWHERE so users know a
+    // legacy substitution happened (the dated-slug log alone could be
+    // misleading — it sounds like a same-family version match).
+    const result = resolveModel("claude-3-7-sonnet-20250219")
+    expect(result).toBe("claude-sonnet-4.6")
+    const allMessages = infoCalls.map((c) => String(c[0] ?? "")).join(" | ")
+    expect(allMessages).toContain("legacy sonnet")
+    expect(allMessages).toContain("claude-sonnet-4.6")
+  })
+
+  test("legacy Sonnet 4.0 falls back to highest sonnet (claude-sonnet-4-0 → claude-sonnet-4.6)", () => {
+    // Same empirical failure as the 3.7 case — Copilot 400s on sonnet-4-0.
+    const result = resolveModel("claude-sonnet-4-0")
+    expect(result).toBe("claude-sonnet-4.6")
+  })
+
+  test("legacy Haiku 3.5 falls back to highest haiku when not handled by step 5", () => {
+    // The dated-slug retry alone strips the date and tries the cascade
+    // again; if that still misses, family fallback must catch it.
+    // (Empirical: Copilot accepts claude-3-5-haiku-20241022 natively, but
+    // we should still translate it to a Copilot-known slug for consistency
+    // and clearer logs.)
+    const result = resolveModel("claude-3-5-haiku-future-slug")
+    expect(result).toBe("claude-haiku-4.5")
+  })
+
+  test("legacy fallback does NOT fire when exact catalog match exists", () => {
+    // Step 1 wins — fallback is the LAST resort before warn.
+    expect(resolveModel("claude-sonnet-4.5")).toBe("claude-sonnet-4.5")
+    expect(resolveModel("claude-sonnet-4.6")).toBe("claude-sonnet-4.6")
+    // No info-log breadcrumb on exact match.
+    expect(infoCalls).toHaveLength(0)
+  })
+
+  test("legacy fallback does NOT fire for non-claude families (codex-reviewer must-fix)", () => {
+    // Per the claude- prefix guard added after codex-reviewer feedback:
+    // a non-Claude provider coincidentally using "sonnet" in its slug
+    // (custom-sonnet-future, gpt-future-sonnet, etc.) must NOT silently
+    // remap to a Claude model. The fallback only fires for claude-*
+    // inputs.
+    const result = resolveModel("custom-sonnet-future")
+    expect(result).toBe("custom-sonnet-future") // unchanged — falls through to Step 7 warn
+  })
+
+  test("legacy fallback does NOT fire for word-internal family substring (claude-supersonnet would not match)", () => {
+    // Word-bounded family regex `(?:^|-)sonnet(?:-|$)` protects against
+    // a future hypothetical model whose name happens to embed "sonnet"
+    // mid-word.
+    const result = resolveModel("claude-supersonnetx-future")
+    expect(result).toBe("claude-supersonnetx-future") // no match, returns as-is + warn
+  })
+
+  test("legacy fallback uses numeric-aware sort (claude-sonnet-4.10 > claude-sonnet-4.6)", () => {
+    // Lexicographic compare alone misorders two-digit minors. Numeric
+    // collation picks the actual highest version. Today the catalog has
+    // only single-digit minors so this is forward-compat insurance —
+    // simulate a hypothetical future catalog.
+    state.models = {
+      data: [
+        { id: "claude-sonnet-4.6", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-sonnet-4.10", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    const result = resolveModel("claude-sonnet-3-7")
+    expect(result).toBe("claude-sonnet-4.10")
+  })
+
+  test("legacy fallback emits info breadcrumb (visible substitution)", () => {
+    resolveModel("claude-sonnet-4-0")
+    expect(infoCalls.length).toBeGreaterThanOrEqual(1)
+    const allMessages = infoCalls.map((c) => String(c[0] ?? "")).join(" | ")
+    expect(allMessages).toContain("not in Copilot catalog")
+    expect(allMessages).toContain("Pin a current catalog id")
+  })
 })
 
 describe("resolveCodexModel", () => {

@@ -316,9 +316,16 @@ export function getClaudeCodeEnvVars(
     // version (the bundled MCP SDK respects per-server `timeout` and
     // ignores the env override).
     MCP_TIMEOUT: "600000",
-    // Suppress non-essential telemetry/model calls.
+    // Suppress non-essential telemetry/model calls. The first two are
+    // Anthropic's own knobs (per cc-backup managedEnv.ts); the third
+    // (`DISABLE_TELEMETRY`) suppresses Datadog/Statsig/etc. external
+    // analytics that would otherwise run regardless of the proxy. None of
+    // these calls reach the proxy (they hit external hosts), but they
+    // consume user resources and may leak metadata. Setting all three
+    // turns the spawned child into a quiet local-only session.
     DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    DISABLE_TELEMETRY: "1",
   }
   if (model) vars.ANTHROPIC_MODEL = model
   return vars

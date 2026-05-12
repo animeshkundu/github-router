@@ -285,5 +285,54 @@ describe("buildLaunchCommand", () => {
       const { env: codexEnv } = buildLaunchCommand(codexTarget)
       expect(codexEnv.OPENAI_BASE_URL).toBe("http://127.0.0.1:8787/v1")
     })
+
+    // --- Phase A P1.3: bridge / remote-session env strips ---
+
+    test("bridge / remote-session env keys are stripped (Claude Code Bridge)", () => {
+      // If any of these is set in the parent shell, the spawned Claude Code
+      // would activate remote-session mode and start hitting endpoints
+      // (POST /v1/code/sessions, POST /v1/environments/bridge, etc.) the
+      // proxy does not implement (Copilot has no equivalent). Source:
+      // cc-backup/src/bridge/* + WorkSecret schema in src/bridge/types.ts.
+      const fixture: NodeJS.ProcessEnv = {
+        CLAUDE_BRIDGE_OAUTH_TOKEN: "bridge-oauth-leaked",
+        CLAUDE_BRIDGE_BASE_URL: "https://bridge.example.com",
+        CLAUDE_BRIDGE_SESSION_INGRESS_URL: "https://ingress.example.com",
+        SESSION_INGRESS_URL: "https://alt-ingress.example.com",
+        CLAUDE_CODE_REMOTE: "1",
+        CLAUDE_CODE_CONTAINER_ID: "container-abc",
+        CLAUDE_CODE_REMOTE_SESSION_ID: "remote-session-xyz",
+        CLAUDE_CODE_SESSION_ID: "session-resume-123",
+        CLAUDE_CODE_ADDITIONAL_PROTECTION: "true",
+        // Unrelated — must be preserved
+        PATH: "/usr/bin:/bin",
+      }
+      const sanitized = sanitizeParentEnv(fixture)
+
+      expect(sanitized).not.toHaveProperty("CLAUDE_BRIDGE_OAUTH_TOKEN")
+      expect(sanitized).not.toHaveProperty("CLAUDE_BRIDGE_BASE_URL")
+      expect(sanitized).not.toHaveProperty("CLAUDE_BRIDGE_SESSION_INGRESS_URL")
+      expect(sanitized).not.toHaveProperty("SESSION_INGRESS_URL")
+      expect(sanitized).not.toHaveProperty("CLAUDE_CODE_REMOTE")
+      expect(sanitized).not.toHaveProperty("CLAUDE_CODE_CONTAINER_ID")
+      expect(sanitized).not.toHaveProperty("CLAUDE_CODE_REMOTE_SESSION_ID")
+      expect(sanitized).not.toHaveProperty("CLAUDE_CODE_SESSION_ID")
+      expect(sanitized).not.toHaveProperty("CLAUDE_CODE_ADDITIONAL_PROTECTION")
+      expect(sanitized.PATH).toBe("/usr/bin:/bin")
+    })
+
+    test("ANTHROPIC_SMALL_FAST_MODEL is intentionally NOT stripped (gemini-critic finding)", () => {
+      // Users with custom Copilot mappings legitimately rely on this env
+      // var to route the haiku-tier "small fast" model. Stripping would
+      // be an unforced error — we trust resolveModel's family-fallback
+      // (Phase A P0.4) to translate unknown haiku slugs.
+      const fixture: NodeJS.ProcessEnv = {
+        ANTHROPIC_SMALL_FAST_MODEL: "claude-haiku-4-5-20251001",
+      }
+      const sanitized = sanitizeParentEnv(fixture)
+      expect(sanitized.ANTHROPIC_SMALL_FAST_MODEL).toBe(
+        "claude-haiku-4-5-20251001",
+      )
+    })
   })
 })
