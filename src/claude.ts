@@ -4,6 +4,10 @@ import { defineCommand } from "citty"
 import consola from "consola"
 
 import {
+  autoUpdateClaude,
+  checkClaudeVersion,
+} from "./lib/claude-version-check"
+import {
   resolveCodexCliBackend,
   writePeerMcpRuntimeFiles,
 } from "./lib/codex-mcp-config"
@@ -59,6 +63,18 @@ export const claude = defineCommand({
       description:
         "Opt back into VS Code-only beta header filtering. Loses leverage features (task budgets, token-efficient tools, prompt caching, etc.) but minimizes the wire-fingerprint difference from VS Code Copilot Chat. By default the `claude` subcommand enables extended/leverage betas because the spawned Claude Code already identifies itself via UA and other headers — partial stealth doesn't buy much.",
     },
+    "auto-update": {
+      type: "boolean" as const,
+      default: true,
+      description:
+        "Check for and install latest Claude Code on launch (throttled to once per hour via ~/.local/share/github-router/last-update-check). Set to false (--no-auto-update) to keep the current installed version. Falls back gracefully if npm/network unavailable.",
+    },
+    "update-check": {
+      type: "boolean" as const,
+      default: true,
+      description:
+        "Check the npm registry for a newer Claude Code version on launch and warn if stale (non-blocking ~500ms cost). Set to false (--no-update-check) to skip the check entirely (useful for offline/CI). Independent from --auto-update: --no-update-check implies no auto-install (nothing to install since we never check).",
+    },
   },
   async run({ args }) {
     if (!process.stdout.isTTY) {
@@ -95,6 +111,56 @@ export const claude = defineCommand({
       parsed.extendedBetas = true
     }
     // If user passed --extended-betas explicitly, parsed already reflects it.
+
+    // Phase H P2: Claude Code version check + opt-in auto-update.
+    // Default: check + auto-install if newer version available
+    // (throttled to once per hour). The user explicitly chose to install
+    // a Claude Code wrapper — they want the latest features and bug
+    // fixes. Opt-out via --no-auto-update (check only, warn) or
+    // --no-update-check (silence entirely). Best-effort: skips silently
+    // if npm is offline or claude is not on PATH. The check happens
+    // BEFORE setupAndServe so a stale version doesn't get spawned.
+    if (args["update-check"] !== false) {
+      try {
+        const versionCheck = await checkClaudeVersion({
+          noCheck: false,
+        })
+        if (versionCheck.skipped && versionCheck.skipReason === "no-claude") {
+          // Claude isn't on PATH — let launchChild surface the more
+          // contextual "claude not found" error in the spawn step.
+          consola.debug(
+            "claude --version probe failed; skipping auto-update.",
+          )
+        } else if (versionCheck.skipped && versionCheck.skipReason === "no-npm") {
+          // npm view failed — likely offline. Don't block launch.
+          consola.debug(
+            "npm view @anthropic-ai/claude-code failed; skipping auto-update check (likely offline).",
+          )
+        } else if (
+          versionCheck.needsUpdate
+          && versionCheck.installedVersion
+          && versionCheck.latestVersion
+        ) {
+          if (args["auto-update"] !== false) {
+            try {
+              await autoUpdateClaude(versionCheck.latestVersion)
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err)
+              consola.warn(
+                `Auto-update of Claude Code from ${versionCheck.installedVersion} to ${versionCheck.latestVersion} failed (${msg}); continuing with installed version. Run \`npm install -g @anthropic-ai/claude-code@latest\` manually to retry.`,
+              )
+            }
+          } else {
+            consola.warn(
+              `Claude Code v${versionCheck.installedVersion} is installed; v${versionCheck.latestVersion} is available. Run with --auto-update (the default) to install on launch, or \`npm install -g @anthropic-ai/claude-code@latest\` manually.`,
+            )
+          }
+        }
+      } catch (err) {
+        // Whole version-check should never block launch.
+        consola.debug("Claude version check failed:", err)
+      }
+    }
 
     let server: Awaited<ReturnType<typeof setupAndServe>>["server"]
     let serverUrl: string
