@@ -34,7 +34,7 @@ jobs:
         run: bun run build
 
       - name: Test
-        run: bun test tests/ --timeout 15000
+        run: bun test tests/ --timeout 15000 --path-ignore-patterns 'tests/isolated/**'
 
       - name: Test (isolated - mock.module process isolation)
         shell: bash
