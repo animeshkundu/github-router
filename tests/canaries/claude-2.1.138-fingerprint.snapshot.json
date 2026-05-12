@@ -1,0 +1,107 @@
+{
+  "_comment": "DRIFT CANARY (Phase F P2.4) — informational snapshot of empirical Copilot+Claude-Code wire shape as of 2026-05-11. NOT a regression gate. Future contributors: when this diff updates (Claude Code adds a beta, Copilot accepts/rejects something new), update this snapshot manually after verifying the policy contract test still passes. The contract test in tests/integration/claude-policy.test.ts is the regression gate — this canary just makes the wire-shape diff visible during code review.",
+  "captured_on": "2026-05-11",
+  "captured_against": {
+    "endpoint": "https://api.enterprise.githubcopilot.com/v1/messages?beta=true",
+    "account_type": "enterprise",
+    "common_request_headers": {
+      "anthropic-version": "2023-06-01",
+      "editor-version": "vscode/1.95.0",
+      "editor-plugin-version": "copilot-chat/0.21.0",
+      "user-agent": "GitHubCopilotChat/0.21.0",
+      "openai-intent": "messages-proxy",
+      "x-github-api-version": "2025-10-01",
+      "content-type": "application/json"
+    },
+    "request_body": {
+      "model": "claude-haiku-4-5",
+      "max_tokens": 1,
+      "messages": [{ "role": "user", "content": "hi" }]
+    }
+  },
+  "claude_model_catalog": [
+    "claude-haiku-4.5",
+    "claude-opus-4.5",
+    "claude-opus-4.6",
+    "claude-opus-4.6-1m",
+    "claude-opus-4.7",
+    "claude-opus-4.7-1m-internal",
+    "claude-opus-4.7-high",
+    "claude-opus-4.7-xhigh",
+    "claude-sonnet-4.5",
+    "claude-sonnet-4.6"
+  ],
+  "anthropic_beta_responses": {
+    "interleaved-thinking-2025-05-14": "200 ACCEPTED (router default + extended)",
+    "context-management-2025-06-27": "200 ACCEPTED (router default + extended)",
+    "advanced-tool-use-2025-11-20": "200 ACCEPTED (router default + extended)",
+    "claude-code-20250219": "200 ACCEPTED (router extended)",
+    "effort-2025-11-24": "200 ACCEPTED (router extended)",
+    "prompt-caching-2024-07-31": "200 ACCEPTED (router extended)",
+    "prompt-caching-scope-2026-01-05": "200 ACCEPTED — header alone OK even with body cache_control.scope stripped",
+    "computer-use-2024-10-22": "200 ACCEPTED (router extended)",
+    "pdfs-2024-09-25": "200 ACCEPTED (router extended)",
+    "max-tokens-2024-08-08": "200 ACCEPTED (router extended)",
+    "token-counting-2024-11-01": "200 ACCEPTED (router extended)",
+    "compact-2025-04-08": "200 ACCEPTED (router extended)",
+    "structured-outputs-2025-12-15": "200 ACCEPTED (header allowed; body output_config.schema stripped)",
+    "fast-mode-2026-02-01": "200 ACCEPTED (router extended)",
+    "mcp-client-2025-04-04": "200 ACCEPTED (router extended)",
+    "mcp-servers-2025-04-04": "200 ACCEPTED (router extended)",
+    "redact-thinking-2026-02-12": "200 ACCEPTED (router extended)",
+    "web-search-2025-03-05": "200 ACCEPTED (router extended; tool-use intercepted via /search MCP)",
+    "task-budgets-2026-03-13": "200 ACCEPTED (router extended; body budget stripped)",
+    "token-efficient-tools-2026-03-28": "200 ACCEPTED (router extended)",
+    "summarize-connector-text-2026-03-13": "200 ACCEPTED (router extended; Anthropic-internal flag, won't fire for non-ant users)",
+    "afk-mode-2026-01-31": "200 ACCEPTED (router extended; Anthropic-internal flag)",
+    "cli-internal-2026-02-09": "200 ACCEPTED (router extended; USER_TYPE=ant only)",
+    "oauth-2025-04-20": "200 ACCEPTED (router extended; Files-API path; Files-API itself 404'd)",
+    "advisor-tool-2026-03-01": "400 'unsupported beta header(s): advisor-tool-2026-03-01' — STRIPPED by router (Phase A EXPLICITLY_STRIPPED_BETA_PREFIXES). Phase I plan: implement proxy-side ADVISOR translate.",
+    "context-1m-2025-08-07": "400 'unsupported beta header' — NOT in router allowlist (1M context unlocked via model slug claude-opus-4.7-1m-internal)",
+    "skills-2025-10-02": "400 'unsupported beta header' — NOT in router allowlist",
+    "files-api-2025-04-14": "400 'unsupported beta header' — NOT in router allowlist (also: Files API endpoint itself returns 404)",
+    "code-execution-2025-05-22": "400 'unsupported beta header' — NOT in router allowlist",
+    "output-128k-2025-02-19": "400 'unsupported beta header' — NOT in router allowlist"
+  },
+  "body_field_responses": {
+    "budget": "400 'budget: Extra inputs are not permitted' — STRIPPED by router (Phase B)",
+    "output_config.schema": "400 'output_config.schema: Extra inputs are not permitted' — STRIPPED (preserves output_config.effort sibling)",
+    "betas": "400 'betas: Extra inputs are not permitted' — STRIPPED (anthropic-beta header conveys the same info)",
+    "mcp_servers": "400 'mcp_servers: Extra inputs are not permitted' — NOT stripped (Phase G translate-path planned; silent strip would cause LLM to hallucinate tools)",
+    "metadata": "200 ACCEPTED (Copilot ignores harmlessly) — PRESERVED (codex-critic guidance)",
+    "top_k": "200 ACCEPTED (sanity control)",
+    "cache_control.scope": "400 'Extra inputs not permitted' — STRIPPED (pre-existing)"
+  },
+  "claude_code_only_request_headers": {
+    "_comment": "All 7 returned 200 individually + combined. Copilot ignores them. The router currently does NOT explicitly forward arbitrary headers to Copilot — only specific ones it adds (Authorization, anthropic-beta, anthropic-version, openai-intent, copilot-* identity, etc.). So these are 'cosmetic hygiene' candidates only; demoted from P0.3 to P2.1.",
+    "x-app: cli": "200 IGNORED",
+    "X-Claude-Code-Session-Id": "200 IGNORED",
+    "x-claude-remote-container-id": "200 IGNORED",
+    "x-claude-remote-session-id": "200 IGNORED",
+    "x-client-app": "200 IGNORED",
+    "x-anthropic-additional-protection": "200 IGNORED (env-stripped via CLAUDE_CODE_ADDITIONAL_PROTECTION; if it leaks through, Copilot still 200s)",
+    "x-client-request-id": "200 IGNORED"
+  },
+  "model_resolution": {
+    "_comment": "Behavior of resolveModel cascade against the catalog above.",
+    "claude-opus-4-7 (Anthropic dashed)": "→ claude-opus-4.7-1m-internal (family preference picks 1M variant matching version)",
+    "claude-opus-4.7 (Copilot exact)": "→ claude-opus-4.7 (Step 1 exact match; no auto-upgrade)",
+    "claude-opus-4-7-20260101 (dated)": "→ claude-opus-4.7-1m-internal (Step 5 dated-retry → Step 3 family pref)",
+    "claude-haiku-4-5-20251001 (dated, Phase A pre-existing)": "→ claude-haiku-4.5 (Step 5 dated-retry → Step 4 normalized)",
+    "claude-3-7-sonnet-20250219 (legacy Sonnet 3.7)": "→ claude-sonnet-4.6 (Phase A P0.4 Step 6 legacy fallback). Was: Copilot 400 'model not supported'.",
+    "claude-sonnet-4-0 (legacy Sonnet 4.0)": "→ claude-sonnet-4.6 (Phase A P0.4 Step 6 legacy fallback). Was: Copilot 400.",
+    "claude-3-5-haiku-20241022 (legacy Haiku 3.5)": "Native Copilot acceptance — request reaches Copilot as-is and Bedrock-aliases to claude-haiku-4-5-20251001",
+    "nonexistent-model": "→ nonexistent-model (Step 7 warn + return as-is)"
+  },
+  "leverage_features_status": {
+    "task_budgets": "ENABLED via header (Phase A allowlist); body field stripped (Phase B). Header-only conveyance; cost ceiling NOT enforced server-side. Estimated user impact: 100% of --max-budget-usd users now get the request to succeed (was 100% failure).",
+    "token_efficient_tools": "ENABLED via header. Estimated cost saving: ~5-15% on tool-heavy sessions per Anthropic's own ~14% reduction figure.",
+    "structured_outputs": "PARTIAL — header allowlisted, body schema stripped. Schema enforcement happens client-side in Claude Code; without server-side enforcement, JSON validation may fail more often. User-visible: same 'invalid JSON' errors users would see on real Anthropic when schema doesn't match — but no automatic retry.",
+    "advisor": "DISABLED — Copilot 400s on the beta header. Stripped server-side. Phase I plan: implement proxy-side ADVISOR translate (intercept tool_use{name:'__anthropic_advisor'}, route to configurable advisor model — default cross-lab via gpt-5.5 or gemini-3.1-pro for true 'second set of eyes').",
+    "agent_team": "ENABLED — TeamCreate/TeamDelete tool definitions and tool_use/tool_result blocks pass through unmodified (verified by Phase F policy test). The peer-review-coordinator subagent is auto-injected on every team via existing peer-MCP plumbing.",
+    "goals": "ENABLED — Goal tracking is purely client-side (Stop-hook driven in Claude Code). The proxy doesn't intercept hooks.",
+    "files_api": "DISABLED — Copilot has no equivalent storage backend. /v1/files/* returns explicit 404 with 'use Anthropic API directly' message (Phase E P1.4).",
+    "bridge_remote_sessions": "DISABLED — CLAUDE_BRIDGE_*, CLAUDE_CODE_REMOTE, etc. stripped from spawned-child env (Phase A P1.3) so the remote-session code path never activates.",
+    "telemetry": "DISABLED — DISABLE_TELEMETRY=1 + DISABLE_NON_ESSENTIAL_MODEL_CALLS=1 + CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 set by getClaudeCodeEnvVars (Phase A P1.2)."
+  }
+}
