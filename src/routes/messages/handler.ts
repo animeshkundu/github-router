@@ -386,6 +386,26 @@ function resolveModelInBody(rawBody: string): {
     modified = true
   }
 
+  // Strip Anthropic-only top-level body fields Copilot 400s on. Empirical
+  // verification (2026-05-11 against api.enterprise.githubcopilot.com):
+  //   - `budget: {total_tokens}` (Task Budgets) → 400 "budget: Extra inputs not permitted"
+  //   - `output_config: {schema}` (Structured Outputs) → 400 "output_config.schema: Extra..."
+  //   - `betas: [...]` (top-level array, distinct from anthropic-beta header) → 400 "betas: Extra..."
+  // Fast-path skip when none of the field names appear in the raw body.
+  // NOT stripped:
+  //   - `mcp_servers` — Phase G builds the translate path; silent strip
+  //     here would cause LLM to hallucinate tools (gemini-critic finding).
+  //   - `metadata: {user_id}` — Copilot 200s, ignores harmlessly. Strip
+  //     would be cosmetic (codex-critic: "preserve unknown fields unless
+  //     documented reason"); ~0.1ms re-serialize cost per request adds up.
+  const needsAnthropicOnlyStrip =
+    rawBody.includes('"budget"')
+    || rawBody.includes('"output_config"')
+    || rawBody.includes('"betas"')
+  if (needsAnthropicOnlyStrip && stripAnthropicOnlyFields(parsed)) {
+    modified = true
+  }
+
   return {
     body: modified ? JSON.stringify(parsed) : rawBody,
     originalModel,
@@ -540,4 +560,64 @@ function applyDefaultBetas(
       "context-management-2025-06-27",
     ].join(","),
   }
+}
+
+/**
+ * Strip top-level body fields that Anthropic's Messages API accepts but
+ * Copilot rejects with HTTP 400 "Extra inputs are not permitted". Mutates
+ * `body` in place; returns true if anything was stripped.
+ *
+ * Empirical verification (2026-05-11):
+ *   POST /v1/messages?beta=true { ..., budget: {total_tokens: 10000} } → 400
+ *   POST /v1/messages?beta=true { ..., output_config: {schema: {...}} }  → 400
+ *   POST /v1/messages?beta=true { ..., betas: ["..."] }                  → 400
+ *
+ * Each strip emits a one-line consola.warn so users running with these
+ * features (e.g. `claude --max-budget-usd`, `--json-schema`) understand
+ * the request succeeds with the *body field* dropped — semantics may
+ * differ from upstream Anthropic. The corresponding `anthropic-beta`
+ * header is preserved (Phase A allowlist) so the *intent* still flows
+ * to Copilot, even if the per-request enforcement field is gone.
+ *
+ * NOT stripped here:
+ *   - `mcp_servers` (Phase G translate path — silent strip causes LLM
+ *     to hallucinate tools per gemini-critic finding)
+ *   - `metadata` (Copilot 200s, ignores harmlessly)
+ */
+function stripAnthropicOnlyFields(body: AnyRecord): boolean {
+  let stripped = false
+  if (body.budget !== undefined) {
+    consola.warn(
+      "Stripping body-level `budget` field (Copilot 400s; the `task-budgets-` beta header is preserved but cost ceiling is not enforced server-side)",
+    )
+    delete body.budget
+    stripped = true
+  }
+  if (body.output_config !== undefined) {
+    // output_config has two known shapes: {schema:{...}} for Structured
+    // Outputs (Copilot 400s) and {effort:"high"} for our adaptive-thinking
+    // translation (Copilot 200s — required by translateThinking). Strip
+    // ONLY when `schema` is present. The {effort} shape stays.
+    if (body.output_config && typeof body.output_config === "object"
+        && (body.output_config as AnyRecord).schema !== undefined) {
+      consola.warn(
+        "Stripping body-level `output_config.schema` field (Copilot 400s on Structured Outputs body shape; `structured-outputs-` beta header is preserved)",
+      )
+      delete (body.output_config as AnyRecord).schema
+      // If output_config is now empty, drop the whole field; otherwise
+      // preserve siblings (e.g. effort).
+      if (Object.keys(body.output_config as AnyRecord).length === 0) {
+        delete body.output_config
+      }
+      stripped = true
+    }
+  }
+  if (Array.isArray(body.betas)) {
+    consola.warn(
+      "Stripping body-level `betas` array (Copilot 400s; the betas are conveyed via the `anthropic-beta` header instead)",
+    )
+    delete body.betas
+    stripped = true
+  }
+  return stripped
 }

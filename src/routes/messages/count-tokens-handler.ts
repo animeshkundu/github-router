@@ -1,5 +1,7 @@
 import type { Context } from "hono"
 
+import consola from "consola"
+
 import { logRequest } from "~/lib/request-log"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import { state } from "~/lib/state"
@@ -135,6 +137,18 @@ function resolveModelInBody(rawBody: string): {
     modified = true
   }
 
+  // Strip Anthropic-only body fields Copilot 400s on. See
+  // `stripAnthropicOnlyFields` in handler.ts for full rationale + empirical
+  // evidence (2026-05-11 verification). count_tokens uses the same Copilot
+  // schema validator as /v1/messages so the same fields are rejected.
+  const needsAnthropicOnlyStrip =
+    rawBody.includes('"budget"')
+    || rawBody.includes('"output_config"')
+    || rawBody.includes('"betas"')
+  if (needsAnthropicOnlyStrip && stripAnthropicOnlyFields(parsed)) {
+    modified = true
+  }
+
   const resolvedModel =
     typeof parsed.model === "string" ? parsed.model : originalModel
 
@@ -178,5 +192,44 @@ function sanitizeCacheControl(body: AnyRecord): boolean {
     for (const tool of body.tools) stripScope(tool)
   }
 
+  return stripped
+}
+
+/**
+ * Strip top-level body fields Copilot 400s on (budget, output_config.schema,
+ * betas). Duplicated structurally from handler.ts because count_tokens uses
+ * its own JSON-pass; the bodies are independent. Behavior must stay in lock-
+ * step with handler.ts's stripAnthropicOnlyFields — covered by integration
+ * tests (Phase F P2.4).
+ */
+function stripAnthropicOnlyFields(body: AnyRecord): boolean {
+  let stripped = false
+  if (body.budget !== undefined) {
+    consola.warn(
+      "[count_tokens] Stripping body-level `budget` field (Copilot 400s)",
+    )
+    delete body.budget
+    stripped = true
+  }
+  if (body.output_config !== undefined) {
+    if (body.output_config && typeof body.output_config === "object"
+        && (body.output_config as AnyRecord).schema !== undefined) {
+      consola.warn(
+        "[count_tokens] Stripping body-level `output_config.schema` field (Copilot 400s on Structured Outputs)",
+      )
+      delete (body.output_config as AnyRecord).schema
+      if (Object.keys(body.output_config as AnyRecord).length === 0) {
+        delete body.output_config
+      }
+      stripped = true
+    }
+  }
+  if (Array.isArray(body.betas)) {
+    consola.warn(
+      "[count_tokens] Stripping body-level `betas` array (Copilot 400s; conveyed via header)",
+    )
+    delete body.betas
+    stripped = true
+  }
   return stripped
 }
