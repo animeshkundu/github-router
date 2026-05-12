@@ -126,6 +126,19 @@ export function isAdvisorRequested(rawBetaHeader: string | undefined): boolean {
  * array. Returns a new body string. Idempotent — if the tool is already
  * present (e.g. the user's MCP shadowed it) we leave the existing one
  * alone and return the body unchanged.
+ *
+ * Also strips any tool entry with `type: "advisor_*"` (Anthropic API's
+ * native server-side advisor tool — `advisor_20260301` and future
+ * variants). When `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1` is
+ * set, Claude Code injects its own advisor tool with this type into
+ * `tools[]`. Copilot 400s on the unknown tool type ("Input tag
+ * 'advisor_20260301' found using 'type' does not match any of the
+ * expected tags"), so the proxy must strip it before forwarding while
+ * still injecting our custom `__anthropic_advisor` tool that the model
+ * can invoke. The proxy's intercept on the response stream then
+ * translates the model's `tool_use{__anthropic_advisor}` to the
+ * client-shape `server_tool_use{name:"advisor"}` + `advisor_tool_result`
+ * blocks the client expects.
  */
 export function injectAdvisorTool(rawBody: string): string {
   let parsed: AnyRecord
@@ -134,22 +147,34 @@ export function injectAdvisorTool(rawBody: string): string {
   } catch {
     return rawBody
   }
-  const tools = Array.isArray(parsed.tools) ? parsed.tools : []
-  if (tools.some((t: AnyRecord) => t?.name === ADVISOR_INTERNAL_TOOL_NAME)) {
-    return rawBody // already injected
+  const rawTools = Array.isArray(parsed.tools) ? parsed.tools : []
+  // Strip Anthropic-native advisor typed tools (Copilot 400s on these).
+  const tools = rawTools.filter((t: AnyRecord) => {
+    if (typeof t !== "object" || t === null) return true
+    const type = (t as AnyRecord).type
+    return typeof type !== "string" || !type.startsWith("advisor_")
+  })
+  const stripped = tools.length !== rawTools.length
+  const alreadyInjected = tools.some(
+    (t: AnyRecord) => t?.name === ADVISOR_INTERNAL_TOOL_NAME,
+  )
+  if (alreadyInjected && !stripped) {
+    return rawBody // no-op: already injected and nothing to strip
   }
-  parsed.tools = [
-    ...tools,
-    {
-      name: ADVISOR_INTERNAL_TOOL_NAME,
-      description: ADVISOR_TOOL_INSTRUCTIONS,
-      input_schema: {
-        type: "object",
-        properties: {},
-        required: [],
-      },
-    },
-  ]
+  parsed.tools = alreadyInjected
+    ? tools
+    : [
+        ...tools,
+        {
+          name: ADVISOR_INTERNAL_TOOL_NAME,
+          description: ADVISOR_TOOL_INSTRUCTIONS,
+          input_schema: {
+            type: "object",
+            properties: {},
+            required: [],
+          },
+        },
+      ]
   return JSON.stringify(parsed)
 }
 
@@ -307,19 +332,83 @@ async function runAdvisor(
 interface ToolUseTracker {
   /** Block index from the SSE stream */
   index: number
-  /** tool_use_id assigned by the upstream model */
+  /** tool_use_id assigned by the upstream model — used in the
+   *  conversation-replay path sent back to Copilot in next turns of
+   *  the in-loop advisor flow (must match Anthropic `^toolu_*$`). */
   id: string
+  /** Client-facing server_tool_use id derived from `id` — used in
+   *  the translated server_tool_use + advisor_tool_result blocks
+   *  emitted on the SSE stream to the client. Anthropic spec
+   *  requires this to match `^srvtoolu_[a-zA-Z0-9_]+$` (parallel to
+   *  `toolu_*` for client-fulfilled tools). Mismatched format causes
+   *  Copilot to 400 the conversation history when Claude Code
+   *  replays it later — the failure is delayed because the original
+   *  request succeeds; the broken block only hits a validator on a
+   *  much-later turn that includes it in the message history. */
+  clientId: string
   /** Accumulated input_json_delta text (advisor takes no input but
    *  we accumulate defensively) */
   inputJson: string
 }
 
-interface AssistantBlock {
-  type: string
-  text?: string
-  id?: string
-  name?: string
-  input?: AnyRecord
+/**
+ * Derive a spec-compliant `srvtoolu_*` id for a client-facing
+ * `server_tool_use` (and matching `advisor_tool_result.tool_use_id`)
+ * from the upstream model's `toolu_*` id.
+ *
+ * Anthropic spec: `^srvtoolu_[a-zA-Z0-9_]+$`. If the upstream id
+ * suffix contains chars outside that charset (e.g., a hyphenated id
+ * from a non-Anthropic provider, or a corrupt id), fall back to a
+ * synthesized stable id keyed by the SSE block index. Defensive
+ * against edge cases that would otherwise emit a malformed block —
+ * spec violation in either direction is a 400.
+ */
+export function toClientServerToolUseId(
+  id: string,
+  fallbackIndex: number,
+): string {
+  const suffix = id.startsWith("toolu_") ? id.slice("toolu_".length) : id
+  if (/^[a-zA-Z0-9_]+$/.test(suffix)) return `srvtoolu_${suffix}`
+  return `srvtoolu_advisor_${fallbackIndex}`
+}
+
+/**
+ * A captured assistant content block from the upstream Copilot stream,
+ * suitable for replay back to Copilot in the advisor loop's
+ * continuation turn. Holds the raw `content_block` object verbatim so
+ * future block types we don't recognize today (thinking, redacted_
+ * thinking, image, document, citations, etc.) flow through correctly.
+ *
+ * Mutated in place during streaming: text_delta appends to .block.text,
+ * thinking_delta to .block.thinking, signature_delta to .block.signature,
+ * input_json_delta accumulates into partialJson and is parsed into
+ * .block.input at content_block_stop (Anthropic spec requires
+ * tool_use.input to be a parsed object on replay, not a raw JSON string).
+ *
+ * Special case: when the upstream block is `tool_use{__anthropic_advisor}`,
+ * the proxy SYNTHESIZES a different block for client output
+ * (`server_tool_use{name:"advisor"}` with the `srvtoolu_*` clientId)
+ * AND tracks the original `toolu_*` id in `advisorReplay` so the
+ * Copilot-replay continuation request uses the original.
+ */
+interface CapturedBlock {
+  /** The full `content_block` object from the upstream
+   *  content_block_start event (or, for advisor blocks, an internal
+   *  representation we'll synthesize on emit). */
+  block: AnyRecord
+  /** Raw partial_json buffer for tool_use blocks. JSON.parse'd into
+   *  `block.input` at content_block_stop. */
+  partialJson: string
+  /** Set if this block was the advisor invocation. The
+   *  Copilot-replay path must emit a `tool_use{__anthropic_advisor}`
+   *  with the original `toolu_*` id, NOT the client-facing
+   *  `srvtoolu_*` id; the input is the parsed advisor input (defaults
+   *  to {} if no input_json_delta arrived — codex round-7: don't bake
+   *  "advisor takes no input" as a load-bearing invariant). */
+  advisorReplay?: { id: string }
+  /** Set during content_block_stop if this block should be dropped
+   *  from the replay (e.g., empty text block). */
+  dropFromReplay?: boolean
 }
 
 /**
@@ -384,14 +473,14 @@ export function buildAdvisorStream(opts: {
       async function processOneTurn(
         response: Response,
       ): Promise<{
-        assistantBlocks: Array<AssistantBlock>
+        capturedBlocks: Array<CapturedBlock>
         advisorToolUse: ToolUseTracker | null
       }> {
-        const assistantBlocks: Array<AssistantBlock> = []
+        const capturedBlocks: Array<CapturedBlock> = []
         let advisorToolUse: ToolUseTracker | null = null
         // Track which upstream block index corresponds to which entry
-        // in assistantBlocks (so deltas know which to update).
-        const indexToBlock = new Map<number, AssistantBlock>()
+        // in capturedBlocks (so deltas know which to update).
+        const indexToBlock = new Map<number, CapturedBlock>()
 
         for await (const ev of events(response)) {
           if (!ev.event || !ev.data) continue
@@ -401,14 +490,14 @@ export function buildAdvisorStream(opts: {
           } catch {
             // Non-JSON data — forward as-is (defensive).
             const ok = safeEnqueue(ENCODER.encode(`event: ${ev.event}\ndata: ${ev.data}\n\n`))
-            if (!ok) return { assistantBlocks, advisorToolUse }
+            if (!ok) return { capturedBlocks, advisorToolUse }
             continue
           }
 
           switch (ev.event) {
             case "message_start": {
               if (!messageStartForwarded) {
-                if (!safeEnqueueEvent(ev.event, payload)) return { assistantBlocks, advisorToolUse }
+                if (!safeEnqueueEvent(ev.event, payload)) return { capturedBlocks, advisorToolUse }
                 messageStartForwarded = true
               }
               // Suppress duplicate message_start on continuation turns —
@@ -430,9 +519,14 @@ export function buildAdvisorStream(opts: {
                   && block.name === ADVISOR_INTERNAL_TOOL_NAME
                 ) {
                   // Translate to server_tool_use{advisor}
+                  const id =
+                    typeof block.id === "string"
+                      ? block.id
+                      : `toolu_advisor_${myIndex}`
                   advisorToolUse = {
                     index: myIndex,
-                    id: typeof block.id === "string" ? block.id : `advisor_${myIndex}`,
+                    id,
+                    clientId: toClientServerToolUseId(id, myIndex),
                     inputJson: "",
                   }
                   const translated = {
@@ -440,35 +534,47 @@ export function buildAdvisorStream(opts: {
                     index: myIndex,
                     content_block: {
                       type: "server_tool_use",
-                      id: advisorToolUse.id,
+                      id: advisorToolUse.clientId,
                       name: ADVISOR_CLIENT_TOOL_NAME,
                       input: {},
                     },
                   }
-                  if (!safeEnqueueEvent(ev.event, translated)) return { assistantBlocks, advisorToolUse }
-                  // Track for later — we need this in the conversation
-                  // for the next-turn Copilot call, but we use the
-                  // INTERNAL name (Copilot doesn't know server_tool_use).
-                  const ab: AssistantBlock = {
-                    type: "tool_use",
-                    id: advisorToolUse.id,
-                    name: ADVISOR_INTERNAL_TOOL_NAME,
-                    input: {},
+                  if (!safeEnqueueEvent(ev.event, translated)) return { capturedBlocks, advisorToolUse }
+                  // Track for later — the Copilot-replay continuation
+                  // turn needs to round-trip with the INTERNAL name +
+                  // ORIGINAL toolu_* id (Copilot doesn't know
+                  // server_tool_use). The advisor branch reuses the
+                  // standard captured-block pipeline (deltas accumulate,
+                  // input parses) so that future versions of advisor
+                  // that take params would Just Work — we synthesize
+                  // the actual replay shape in the content mapping.
+                  const captured: CapturedBlock = {
+                    block: {
+                      type: "tool_use",
+                      id,
+                      name: ADVISOR_INTERNAL_TOOL_NAME,
+                      input: {},
+                    },
+                    partialJson: "",
+                    advisorReplay: { id },
                   }
-                  assistantBlocks.push(ab)
-                  indexToBlock.set(upstreamIndex, ab)
+                  capturedBlocks.push(captured)
+                  indexToBlock.set(upstreamIndex, captured)
                 } else {
                   // Forward as-is, with re-indexed.
                   const reindexed = { ...payload, index: myIndex }
-                  if (!safeEnqueueEvent(ev.event, reindexed)) return { assistantBlocks, advisorToolUse }
-                  const ab: AssistantBlock = {
-                    type: typeof block.type === "string" ? block.type : "unknown",
-                    id: typeof block.id === "string" ? block.id : undefined,
-                    name: typeof block.name === "string" ? block.name : undefined,
-                    text: typeof block.text === "string" ? block.text : undefined,
+                  if (!safeEnqueueEvent(ev.event, reindexed)) return { capturedBlocks, advisorToolUse }
+                  // Store the raw content_block verbatim — preserves
+                  // every field upstream sent (including ones the proxy
+                  // doesn't know about: thinking, signature, image src,
+                  // document data, citations, etc.). Mutated in place
+                  // by deltas; emitted verbatim on replay.
+                  const captured: CapturedBlock = {
+                    block: { ...block },
+                    partialJson: "",
                   }
-                  assistantBlocks.push(ab)
-                  indexToBlock.set(upstreamIndex, ab)
+                  capturedBlocks.push(captured)
+                  indexToBlock.set(upstreamIndex, captured)
                 }
               }
               continue
@@ -478,54 +584,130 @@ export function buildAdvisorStream(opts: {
               const upstreamIndex = (payload as AnyRecord).index as number | undefined
               const delta = (payload as AnyRecord).delta as AnyRecord | undefined
               if (upstreamIndex !== undefined) {
-                const ab =
+                const captured =
                   upstreamIndex !== undefined ? indexToBlock.get(upstreamIndex) : undefined
                 // Re-index for the outgoing event
                 const reindexed = {
                   ...payload,
-                  index: ab
-                    ? assistantBlocks.indexOf(ab) >= 0
+                  index: captured
+                    ? capturedBlocks.indexOf(captured) >= 0
                       ? // Find the synthetic index by matching back.
-                        nextSyntheticIndex - assistantBlocks.length + assistantBlocks.indexOf(ab)
+                        nextSyntheticIndex - capturedBlocks.length + capturedBlocks.indexOf(captured)
                       : upstreamIndex
                     : upstreamIndex,
                 }
-                if (!safeEnqueueEvent(ev.event, reindexed)) return { assistantBlocks, advisorToolUse }
-                // Accumulate text/input for re-call
-                if (ab && delta) {
+                if (!safeEnqueueEvent(ev.event, reindexed)) return { capturedBlocks, advisorToolUse }
+                // Accumulate every delta type into the right field on
+                // captured.block. The block is mutated in place; on
+                // replay it's emitted verbatim, so every field upstream
+                // sent (text, thinking, signature, citations, image
+                // src, document data, etc.) flows back correctly.
+                if (captured && delta) {
                   if (delta.type === "text_delta" && typeof delta.text === "string") {
-                    ab.text = (ab.text ?? "") + delta.text
+                    captured.block.text =
+                      ((captured.block.text as string | undefined) ?? "") + delta.text
+                  } else if (
+                    delta.type === "thinking_delta"
+                    && typeof delta.thinking === "string"
+                  ) {
+                    // Anthropic spec: thinking blocks must carry their
+                    // text on replay. signature_delta carries the
+                    // cryptographic signature separately.
+                    captured.block.thinking =
+                      ((captured.block.thinking as string | undefined) ?? "") + delta.thinking
+                  } else if (
+                    delta.type === "signature_delta"
+                    && typeof delta.signature === "string"
+                  ) {
+                    // Concatenate verbatim — Anthropic verifies
+                    // signatures cryptographically; mutating bytes
+                    // (e.g., normalization, base64 decode/re-encode)
+                    // would break verification. Pure string append.
+                    captured.block.signature =
+                      ((captured.block.signature as string | undefined) ?? "") + delta.signature
                   } else if (
                     delta.type === "input_json_delta"
                     && typeof delta.partial_json === "string"
                   ) {
-                    if (!ab.input) ab.input = {} as AnyRecord
-                    // We'll just track raw partial_json into ab.input as
-                    // a hidden field; for advisor (no input) this is moot.
+                    captured.partialJson += delta.partial_json
+                  } else if (
+                    delta.type === "citations_delta"
+                    && delta.citation
+                  ) {
+                    // Append citations array. Future-proof for the
+                    // citations Anthropic feature without us needing
+                    // to know its shape.
+                    if (!Array.isArray(captured.block.citations)) {
+                      captured.block.citations = [] as Array<unknown>
+                    }
+                    ;(captured.block.citations as Array<unknown>).push(delta.citation)
                   }
+                  // Other delta types: leave block as-is. The
+                  // content_block_start payload is preserved verbatim,
+                  // so any future delta type that the proxy hasn't
+                  // explicitly accumulated still has the original
+                  // start-state to fall back to.
                 }
               } else {
-                if (!safeEnqueueEvent(ev.event, payload)) return { assistantBlocks, advisorToolUse }
+                if (!safeEnqueueEvent(ev.event, payload)) return { capturedBlocks, advisorToolUse }
               }
               continue
             }
 
             case "content_block_stop": {
               const upstreamIndex = (payload as AnyRecord).index as number | undefined
-              const ab = upstreamIndex !== undefined ? indexToBlock.get(upstreamIndex) : undefined
+              const captured = upstreamIndex !== undefined ? indexToBlock.get(upstreamIndex) : undefined
               const reindexed = {
                 ...payload,
-                index: ab
-                  ? nextSyntheticIndex - assistantBlocks.length + assistantBlocks.indexOf(ab)
+                index: captured
+                  ? nextSyntheticIndex - capturedBlocks.length + capturedBlocks.indexOf(captured)
                   : (upstreamIndex ?? 0),
               }
-              if (!safeEnqueueEvent(ev.event, reindexed)) return { assistantBlocks, advisorToolUse }
+              if (!safeEnqueueEvent(ev.event, reindexed)) return { capturedBlocks, advisorToolUse }
+
+              // Finalize block state for replay:
+              if (captured) {
+                // (a) For tool_use blocks, parse the accumulated raw
+                //     partial_json into the block's `input` field.
+                //     Anthropic spec requires `tool_use.input` to be a
+                //     parsed JSON object on replay, not a string.
+                //     Warn-log on parse failure rather than silent
+                //     fallback so corruption surfaces in production
+                //     stderr (codex round-7).
+                if (
+                  captured.block.type === "tool_use"
+                  && captured.partialJson.length > 0
+                ) {
+                  try {
+                    captured.block.input = JSON.parse(captured.partialJson)
+                  } catch (err) {
+                    consola.warn(
+                      `advisor: malformed input_json_delta for tool_use `
+                        + `id=${(captured.block.id as string | undefined) ?? "?"} `
+                        + `name=${(captured.block.name as string | undefined) ?? "?"} `
+                        + `partialJson.length=${captured.partialJson.length} `
+                        + `parseError=${err instanceof Error ? err.message : String(err)}`,
+                    )
+                    captured.block.input = {}
+                  }
+                }
+                // (b) Drop empty text blocks from replay — empty
+                //     {type:"text", text:""} is at best meaningless and
+                //     at worst spec-invalid (codex round-7).
+                if (
+                  captured.block.type === "text"
+                  && (typeof captured.block.text !== "string"
+                    || (captured.block.text as string).length === 0)
+                ) {
+                  captured.dropFromReplay = true
+                }
+              }
               continue
             }
 
             case "message_delta": {
               // Forward as-is (usage updates etc.)
-              if (!safeEnqueueEvent(ev.event, payload)) return { assistantBlocks, advisorToolUse }
+              if (!safeEnqueueEvent(ev.event, payload)) return { capturedBlocks, advisorToolUse }
               continue
             }
 
@@ -535,26 +717,26 @@ export function buildAdvisorStream(opts: {
               // ends the entire outgoing assistant turn. Only emit it
               // when the advisor loop is fully done.
               if (advisorToolUse) {
-                return { assistantBlocks, advisorToolUse }
+                return { capturedBlocks, advisorToolUse }
               }
-              if (!safeEnqueueEvent(ev.event, payload)) return { assistantBlocks, advisorToolUse }
-              return { assistantBlocks, advisorToolUse }
+              if (!safeEnqueueEvent(ev.event, payload)) return { capturedBlocks, advisorToolUse }
+              return { capturedBlocks, advisorToolUse }
             }
 
             default: {
               // Unknown event — forward as-is.
-              if (!safeEnqueueEvent(ev.event, payload)) return { assistantBlocks, advisorToolUse }
+              if (!safeEnqueueEvent(ev.event, payload)) return { capturedBlocks, advisorToolUse }
             }
           }
         }
-        return { assistantBlocks, advisorToolUse }
+        return { capturedBlocks, advisorToolUse }
       }
 
       try {
         let response: Response = opts.firstResponse
 
         for (turnsRun = 0; turnsRun < ADVISOR_MAX_TURNS; turnsRun++) {
-          const { assistantBlocks, advisorToolUse } = await processOneTurn(response)
+          const { capturedBlocks, advisorToolUse } = await processOneTurn(response)
 
           if (!advisorToolUse) {
             // No advisor call this turn — message_stop was already
@@ -564,20 +746,36 @@ export function buildAdvisorStream(opts: {
 
           // Advisor was called this turn. Run advisor model with the
           // full conversation extended by the assistant turn.
+          //
+          // Replay strategy: emit captured.block VERBATIM for every
+          // captured block (preserves thinking, signature, redacted_
+          // thinking, image, document, citations, anything Anthropic
+          // adds tomorrow). Special-case ONLY the advisor block, which
+          // needs the INTERNAL `__anthropic_advisor` name + ORIGINAL
+          // `toolu_*` id (Copilot doesn't know server_tool_use).
           const assistantTurn = {
             role: "assistant",
-            content: assistantBlocks.map((b) => {
-              if (b.type === "text") return { type: "text", text: b.text ?? "" }
-              if (b.type === "tool_use") {
-                return {
-                  type: "tool_use",
-                  id: b.id,
-                  name: b.name,
-                  input: b.input ?? {},
+            content: capturedBlocks
+              .filter((c) => !c.dropFromReplay)
+              .map((c) => {
+                if (c.advisorReplay) {
+                  // Use the parsed input if any input_json_delta
+                  // arrived; otherwise default to {}. Don't bake
+                  // "advisor takes no input" as a load-bearing
+                  // invariant (codex round-7).
+                  const input =
+                    typeof c.block.input === "object" && c.block.input !== null
+                      ? (c.block.input as AnyRecord)
+                      : {}
+                  return {
+                    type: "tool_use",
+                    id: c.advisorReplay.id, // toolu_*, NOT srvtoolu_*
+                    name: ADVISOR_INTERNAL_TOOL_NAME,
+                    input,
+                  }
                 }
-              }
-              return { type: b.type }
-            }),
+                return c.block // verbatim — the bug fix
+              }),
           }
           conversation.push(assistantTurn)
 
@@ -589,18 +787,22 @@ export function buildAdvisorStream(opts: {
             consola.warn(`Advisor model call failed: ${msg}`)
             advisorText =
               `[Advisor unavailable: ${msg}. Continuing without external review — `
-              + `proceed with caution and consider self-checking against your "
-              + "primary-source evidence.]`
+              + `proceed with caution and consider self-checking against your `
+              + `primary-source evidence.]`
           }
 
           // Synthesize advisor_tool_result block to client.
+          // tool_use_id MUST be the client-facing srvtoolu_* id so it
+          // pairs with the server_tool_use block emitted earlier; the
+          // internal toolu_* id is only used in the Copilot-replay
+          // path below.
           const resultIndex = nextSyntheticIndex++
           const startOk = safeEnqueueEvent("content_block_start", {
             type: "content_block_start",
             index: resultIndex,
             content_block: {
               type: "advisor_tool_result",
-              tool_use_id: advisorToolUse.id,
+              tool_use_id: advisorToolUse.clientId,
               content: { type: "advisor_result", text: advisorText },
             },
           })

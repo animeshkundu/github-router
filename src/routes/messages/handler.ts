@@ -8,6 +8,7 @@ import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
+import { sanitizeAnthropicBody } from "~/lib/sanitize-anthropic-body"
 import { state } from "~/lib/state"
 import { relayAnthropicStream } from "~/lib/stream-relay"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
@@ -203,6 +204,16 @@ export async function handleCompletion(c: Context) {
   const advisorEnabled = isAdvisorRequested(incomingBeta)
 
   let finalBody = await processWebSearch(rawBody)
+  // Inbound advisor-history sanitization: rewrite malformed
+  // server_tool_use ids in Claude Code's replayed conversation history
+  // (left over from before the round-5 fix or any non-spec-compliant
+  // source). Without this, Copilot 400s on
+  //   `messages.N.content.M.server_tool_use.id: String should match
+  //    pattern '^srvtoolu_[a-zA-Z0-9_]+$'`
+  // when the conversation grows long enough to echo a malformed block.
+  // Scoped narrowly to advisor pairs to avoid the ID round-trip trap
+  // (see src/lib/sanitize-anthropic-body.ts header comment).
+  finalBody = sanitizeAnthropicBody(finalBody)
   if (advisorEnabled) {
     // Inject __anthropic_advisor tool definition (with cc-backup's
     // ADVISOR_TOOL_INSTRUCTIONS as description) so the model knows
@@ -694,22 +705,60 @@ function stripAnthropicOnlyFields(body: AnyRecord): boolean {
     stripped = true
   }
   if (body.output_config !== undefined) {
-    // output_config has two known shapes: {schema:{...}} for Structured
-    // Outputs (Copilot 400s) and {effort:"high"} for our adaptive-thinking
-    // translation (Copilot 200s — required by translateThinking). Strip
-    // ONLY when `schema` is present. The {effort} shape stays.
-    if (body.output_config && typeof body.output_config === "object"
-        && (body.output_config as AnyRecord).schema !== undefined) {
-      consola.warn(
-        "Stripping body-level `output_config.schema` field (Copilot 400s on Structured Outputs body shape; `structured-outputs-` beta header is preserved)",
-      )
-      delete (body.output_config as AnyRecord).schema
-      // If output_config is now empty, drop the whole field; otherwise
-      // preserve siblings (e.g. effort).
-      if (Object.keys(body.output_config as AnyRecord).length === 0) {
-        delete body.output_config
+    // output_config has multiple known shapes:
+    //   - `{schema:{...}}` (Structured Outputs full form) — Copilot 400s
+    //   - `{type:"json_object"}` (Structured Outputs short form, used
+    //     by Claude Code's hook evaluator + the Anthropic SDK's
+    //     structured-output API) — Copilot 400s with the same
+    //     `output_config: Extra inputs are not permitted` message,
+    //     just at the top-level field rather than the nested .schema.
+    //   - `{effort:"high"}` (proxy-set during adaptive-thinking
+    //     translation) — Copilot 200s, required by translateThinking.
+    //
+    // Strategy: strip every Structured-Outputs field (`schema`,
+    // `type`, `response_format`, anything else we don't recognize as
+    // proxy-internal). Keep `effort` if present. If the object ends
+    // up empty, drop the whole field.
+    //
+    // **Schema preservation via prompt injection**: stripping
+    // `output_config.schema` removes server-side enforcement, which
+    // makes the model's output non-deterministic. Claude Code's
+    // hook evaluator then fails with "JSON validation failed" because
+    // it tries to `JSON.parse(response)` and gets natural-language
+    // text. To preserve the structured-output INTENT through Copilot,
+    // append a system-prompt instruction telling the model to produce
+    // JSON conforming to the schema. This isn't as strong as
+    // server-side enforcement (the model may occasionally deviate),
+    // but it's much better than no constraint at all.
+    if (body.output_config && typeof body.output_config === "object") {
+      const oc = body.output_config as AnyRecord
+      const PROXY_OWNED_FIELDS = new Set(["effort"])
+      // Capture the schema BEFORE stripping so we can inject it.
+      const schema = oc.schema
+      const ocType = oc.type
+      let strippedAny = false
+      for (const key of Object.keys(oc)) {
+        if (!PROXY_OWNED_FIELDS.has(key)) {
+          delete oc[key]
+          strippedAny = true
+        }
       }
-      stripped = true
+      if (strippedAny) {
+        consola.warn(
+          "Stripping client-set `output_config` Structured-Outputs fields"
+          + " (Copilot 400s on `output_config.*` other than `effort`;"
+          + " injecting schema as system-prompt instruction so the"
+          + " model still produces JSON conforming to the structured-"
+          + "outputs schema, since server-side enforcement is gone)",
+        )
+        if (Object.keys(oc).length === 0) {
+          delete body.output_config
+        }
+        if (schema !== undefined || ocType === "json_object") {
+          appendStructuredOutputInstruction(body, schema, ocType)
+        }
+        stripped = true
+      }
     }
   }
   if (Array.isArray(body.betas)) {
@@ -720,4 +769,41 @@ function stripAnthropicOnlyFields(body: AnyRecord): boolean {
     stripped = true
   }
   return stripped
+}
+
+/**
+ * Append a system-prompt instruction telling the model to produce JSON
+ * conforming to a Structured Outputs schema. Used after the proxy
+ * strips `output_config` to preserve the schema enforcement intent
+ * via prompt engineering instead of server-side validation.
+ *
+ * Mutates `body.system` in place. Handles both string and array shapes
+ * (Anthropic spec allows either).
+ */
+function appendStructuredOutputInstruction(
+  body: AnyRecord,
+  schema: unknown,
+  ocType: unknown,
+): void {
+  let instruction =
+    "\n\nIMPORTANT: Your response MUST be a single valid JSON object."
+    + " Do not wrap it in markdown code fences. Do not include any text"
+    + " before or after the JSON object."
+  if (schema !== undefined) {
+    instruction +=
+      ` The JSON object MUST conform to this JSON Schema:\n${JSON.stringify(schema)}`
+  } else if (typeof ocType === "string") {
+    instruction +=
+      ` Output type requested: ${ocType}.`
+  }
+  if (typeof body.system === "string") {
+    body.system = body.system + instruction
+  } else if (Array.isArray(body.system)) {
+    body.system = [
+      ...body.system,
+      { type: "text", text: instruction.trimStart() },
+    ]
+  } else {
+    body.system = instruction.trimStart()
+  }
 }

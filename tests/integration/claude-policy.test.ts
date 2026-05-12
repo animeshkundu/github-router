@@ -250,6 +250,145 @@ describe("contract: body-field strip policy on /v1/messages", () => {
     expect(fwd.output_config).toBeUndefined()
   })
 
+  test("strips top-level `output_config: {type:'json_object'}` (Structured Outputs short form — Copilot 400s on `output_config: Extra inputs are not permitted`)", async () => {
+    // Regression for the Stop hook / SDK structured-output path bug:
+    // Claude Code's hook evaluator and the Anthropic SDK's
+    // structured-output API send the short form
+    // `output_config: {type: "json_object"}` without `.schema`. The
+    // previous strip logic only triggered when `.schema` was present
+    // and left this shape untouched, causing Copilot to 400.
+    const captured = captureUpstream()
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: claudeBody({ output_config: { type: "json_object" } }),
+    })
+    const fwd = captured.body() as { output_config?: unknown }
+    expect(fwd.output_config).toBeUndefined()
+  })
+
+  test("preserves `output_config: {effort}` (set by translateThinking for adaptive-thinking models — must not be stripped)", async () => {
+    // Defense-in-depth: prove the strip logic doesn't accidentally
+    // remove the proxy's own adaptive-thinking translation output.
+    // `effort` is in the PROXY_OWNED_FIELDS allowlist; everything
+    // else gets stripped. (translateThinking would set this on
+    // adaptive-thinking models; here we send it directly to test
+    // the allowlist behavior in isolation.)
+    const captured = captureUpstream()
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: claudeBody({ output_config: { effort: "high" } }),
+    })
+    const fwd = captured.body() as {
+      output_config?: { effort?: string }
+    }
+    expect(fwd.output_config?.effort).toBe("high")
+  })
+
+  test("strips Structured-Outputs siblings of `effort` (mixed shape: keeps effort, drops type/schema)", async () => {
+    // If a client sends a hybrid `output_config: {effort, type,
+    // schema}` (unusual but spec-allowed), the strip preserves
+    // `effort` and removes the rest.
+    const captured = captureUpstream()
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: claudeBody({
+        output_config: {
+          effort: "medium",
+          type: "json_object",
+          schema: { type: "object" },
+        },
+      }),
+    })
+    const fwd = captured.body() as {
+      output_config?: { effort?: string; type?: string; schema?: unknown }
+    }
+    expect(fwd.output_config?.effort).toBe("medium")
+    expect(fwd.output_config?.type).toBeUndefined()
+    expect(fwd.output_config?.schema).toBeUndefined()
+  })
+
+  test("appends Structured Outputs schema as system-prompt instruction when stripping `output_config.schema` (preserves the structured-output INTENT — Stop hook regression)", async () => {
+    // Without this, Claude Code's hook evaluator fails with
+    // `JSON validation failed` because the model produces
+    // natural-language text after the proxy strips output_config.
+    // The proxy injects the schema into the system prompt as a
+    // natural-language instruction so the model still produces
+    // conforming JSON (best-effort, no server-side enforcement).
+    const captured = captureUpstream()
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: claudeBody({
+        system: "You are a helpful assistant.",
+        output_config: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: {
+              ok: { type: "boolean" },
+              reason: { type: "string" },
+            },
+            required: ["ok", "reason"],
+          },
+        },
+      }),
+    })
+    const fwd = captured.body() as {
+      system?: string | Array<{ type: string; text: string }>
+      output_config?: unknown
+    }
+    expect(fwd.output_config).toBeUndefined()
+    expect(typeof fwd.system).toBe("string")
+    expect(fwd.system as string).toContain("You are a helpful assistant.")
+    expect(fwd.system as string).toContain("MUST be a single valid JSON object")
+    expect(fwd.system as string).toContain('"ok"')
+    expect(fwd.system as string).toContain('"reason"')
+  })
+
+  test("appends short-form output_config: {type:'json_object'} as system-prompt instruction (no schema)", async () => {
+    const captured = captureUpstream()
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: claudeBody({
+        output_config: { type: "json_object" },
+      }),
+    })
+    const fwd = captured.body() as {
+      system?: string | Array<{ type: string; text: string }>
+      output_config?: unknown
+    }
+    expect(fwd.output_config).toBeUndefined()
+    // Body had no system; the instruction is added as the new system value.
+    expect(typeof fwd.system).toBe("string")
+    expect(fwd.system as string).toContain("MUST be a single valid JSON object")
+    expect(fwd.system as string).toContain("Output type requested: json_object")
+  })
+
+  test("preserves array-shape `system` when appending schema instruction", async () => {
+    const captured = captureUpstream()
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: claudeBody({
+        system: [{ type: "text", text: "You are a careful assistant." }],
+        output_config: {
+          schema: { type: "object", properties: { x: { type: "number" } } },
+        },
+      }),
+    })
+    const fwd = captured.body() as {
+      system?: Array<{ type: string; text: string }>
+    }
+    expect(Array.isArray(fwd.system)).toBe(true)
+    expect(fwd.system!.length).toBe(2)
+    expect(fwd.system![0]!.text).toBe("You are a careful assistant.")
+    expect(fwd.system![1]!.text).toContain("MUST be a single valid JSON object")
+  })
+
   test("strips top-level `betas` array (distinct from anthropic-beta header)", async () => {
     const captured = captureUpstream()
     await server.request("/v1/messages", {

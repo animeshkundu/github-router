@@ -3,6 +3,7 @@ import type { Context } from "hono"
 import consola from "consola"
 
 import { logRequest } from "~/lib/request-log"
+import { sanitizeAnthropicBody } from "~/lib/sanitize-anthropic-body"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import { state } from "~/lib/state"
 import { countTokens } from "~/services/copilot/create-messages"
@@ -67,7 +68,12 @@ function stripWebSearchFromBody(rawBody: string): string {
 export async function handleCountTokens(c: Context) {
   const startTime = Date.now()
   const rawBody = await c.req.text()
-  const strippedBody = stripWebSearchFromBody(rawBody)
+  // Inbound advisor-history sanitization (mirrors handler.ts) — count
+  // tokens uses the same Copilot validator, so a malformed
+  // server_tool_use block in the conversation history would 400 here
+  // too. Scoped narrowly to advisor pairs.
+  const sanitizedBody = sanitizeAnthropicBody(rawBody)
+  const strippedBody = stripWebSearchFromBody(sanitizedBody)
 
   // Phase G fail-fast: same rationale as handler.ts. count_tokens uses
   // the same Copilot schema validator, so mcp_servers in the body
@@ -238,16 +244,25 @@ function stripAnthropicOnlyFields(body: AnyRecord): boolean {
     stripped = true
   }
   if (body.output_config !== undefined) {
-    if (body.output_config && typeof body.output_config === "object"
-        && (body.output_config as AnyRecord).schema !== undefined) {
-      consola.warn(
-        "[count_tokens] Stripping body-level `output_config.schema` field (Copilot 400s on Structured Outputs)",
-      )
-      delete (body.output_config as AnyRecord).schema
-      if (Object.keys(body.output_config as AnyRecord).length === 0) {
-        delete body.output_config
+    if (body.output_config && typeof body.output_config === "object") {
+      const oc = body.output_config as AnyRecord
+      const PROXY_OWNED_FIELDS = new Set(["effort"])
+      let strippedAny = false
+      for (const key of Object.keys(oc)) {
+        if (!PROXY_OWNED_FIELDS.has(key)) {
+          delete oc[key]
+          strippedAny = true
+        }
       }
-      stripped = true
+      if (strippedAny) {
+        consola.warn(
+          "[count_tokens] Stripping client-set `output_config` Structured-Outputs fields (Copilot 400s on `output_config.*` other than `effort`)",
+        )
+        if (Object.keys(oc).length === 0) {
+          delete body.output_config
+        }
+        stripped = true
+      }
     }
   }
   if (Array.isArray(body.betas)) {

@@ -10,6 +10,7 @@ import {
   ADVISOR_TOOL_INSTRUCTIONS,
   injectAdvisorTool,
   isAdvisorRequested,
+  toClientServerToolUseId,
 } from "../src/services/advisor/advisor"
 
 const originalFetch = globalThis.fetch
@@ -172,6 +173,79 @@ describe("injectAdvisorTool (Phase I)", () => {
     expect(injectAdvisorTool(body)).toBe(body)
   })
 
+  test("strips Anthropic-native advisor typed tool (advisor_20260301) — Copilot 400s on the unknown tool type", () => {
+    // When CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL=1 (auto-set
+    // by the proxy), Claude Code adds its own advisor tool to tools[]
+    // with `type: "advisor_20260301"`. Copilot doesn't recognize the
+    // type and 400s with "Input tag 'advisor_20260301' found using
+    // 'type' does not match any of the expected tags". The proxy must
+    // strip it BEFORE forwarding while still injecting our own
+    // __anthropic_advisor custom tool that the model can invoke.
+    const body = JSON.stringify({
+      model: "claude-opus-4.7",
+      messages: [],
+      tools: [
+        { name: "Read", input_schema: { type: "object" } },
+        { type: "advisor_20260301" },
+        { name: "Write", input_schema: { type: "object" } },
+      ],
+    })
+    const out = injectAdvisorTool(body)
+    const parsed = JSON.parse(out) as { tools: Array<Record<string, unknown>> }
+    // Anthropic-typed advisor tool stripped.
+    expect(
+      parsed.tools.some(
+        (t) => typeof t.type === "string" && t.type.startsWith("advisor_"),
+      ),
+    ).toBe(false)
+    // Other tools preserved.
+    expect(parsed.tools.some((t) => t.name === "Read")).toBe(true)
+    expect(parsed.tools.some((t) => t.name === "Write")).toBe(true)
+    // Our custom __anthropic_advisor tool added.
+    expect(parsed.tools.some((t) => t.name === ADVISOR_INTERNAL_TOOL_NAME)).toBe(
+      true,
+    )
+  })
+
+  test("strips advisor typed tool even when __anthropic_advisor is already present (no double-inject + still strip)", () => {
+    const body = JSON.stringify({
+      model: "claude-opus-4.7",
+      messages: [],
+      tools: [
+        { type: "advisor_20260301" },
+        {
+          name: ADVISOR_INTERNAL_TOOL_NAME,
+          description: "existing",
+          input_schema: { type: "object" },
+        },
+      ],
+    })
+    const out = injectAdvisorTool(body)
+    const parsed = JSON.parse(out) as { tools: Array<Record<string, unknown>> }
+    expect(parsed.tools.length).toBe(1)
+    expect(parsed.tools[0].name).toBe(ADVISOR_INTERNAL_TOOL_NAME)
+  })
+
+  test("does not strip future advisor type variants beyond advisor_ prefix unless they also start with advisor_", () => {
+    // Defensive: only strip tools whose `type` literally starts with
+    // "advisor_". A tool named "advisor" or with a different type
+    // string should pass through.
+    const body = JSON.stringify({
+      model: "claude-opus-4.7",
+      messages: [],
+      tools: [
+        { name: "advisor", input_schema: { type: "object" } }, // custom tool named advisor — keep
+        { type: "custom" }, // generic custom tool — keep
+        { type: "advisor_20270101" }, // future variant — strip
+      ],
+    })
+    const out = injectAdvisorTool(body)
+    const parsed = JSON.parse(out) as { tools: Array<Record<string, unknown>> }
+    expect(parsed.tools.some((t) => t.name === "advisor")).toBe(true)
+    expect(parsed.tools.some((t) => t.type === "custom")).toBe(true)
+    expect(parsed.tools.some((t) => t.type === "advisor_20270101")).toBe(false)
+  })
+
   test("input_schema requires no parameters (advisor takes the conversation context implicitly)", () => {
     const body = JSON.stringify({ model: "claude-opus-4.7", messages: [] })
     const out = injectAdvisorTool(body)
@@ -311,6 +385,7 @@ describe("ADVISOR streaming integration (Phase I)", () => {
     // Advisor call (gpt-5.5 via /responses, non-stream): returns advisor's text.
     let copilotMessagesCallCount = 0
     let advisorResponsesCallCount = 0
+    let continuationRequestBody: string | undefined
     const fetchMock = mock((url: string, init?: { body?: string }) => {
       // ADVISOR call: gpt-5.5 → /responses with reasoning.effort=xhigh
       if (url.includes("/responses")) {
@@ -355,17 +430,34 @@ describe("ADVISOR streaming integration (Phase I)", () => {
           return new Response(
             buildSseStream([
               { event: "message_start", data: { type: "message_start", message: { id: "m1" } } },
-              { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } },
-              { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Let me consult." } } },
+              // Thinking block — must be preserved with .thinking text
+              // and .signature (Anthropic spec) when replayed to
+              // Copilot in the continuation turn.
+              { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } } },
+              { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "I should ask the advisor." } } },
+              { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "abcdef" } } },
+              { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "0123456789" } } },
               { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
-              { event: "content_block_start", data: { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tu_advisor_1", name: ADVISOR_INTERNAL_TOOL_NAME, input: {} } } },
+              { event: "content_block_start", data: { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } } },
+              { event: "content_block_delta", data: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "Let me consult." } } },
               { event: "content_block_stop", data: { type: "content_block_stop", index: 1 } },
+              // Non-advisor tool_use with non-empty input streamed via
+              // input_json_delta — must be parsed into an OBJECT (not
+              // string) on Copilot replay (gemini round-6 fix).
+              { event: "content_block_start", data: { type: "content_block_start", index: 2, content_block: { type: "tool_use", id: "toolu_read_1", name: "Read", input: {} } } },
+              { event: "content_block_delta", data: { type: "content_block_delta", index: 2, delta: { type: "input_json_delta", partial_json: "{\"file_p" } } },
+              { event: "content_block_delta", data: { type: "content_block_delta", index: 2, delta: { type: "input_json_delta", partial_json: "ath\":\"/tmp/x" } } },
+              { event: "content_block_delta", data: { type: "content_block_delta", index: 2, delta: { type: "input_json_delta", partial_json: ".txt\"}" } } },
+              { event: "content_block_stop", data: { type: "content_block_stop", index: 2 } },
+              { event: "content_block_start", data: { type: "content_block_start", index: 3, content_block: { type: "tool_use", id: "toolu_advisor_1", name: ADVISOR_INTERNAL_TOOL_NAME, input: {} } } },
+              { event: "content_block_stop", data: { type: "content_block_stop", index: 3 } },
               { event: "message_stop", data: { type: "message_stop" } },
             ]),
             { status: 200, headers: { "content-type": "text/event-stream" } },
           )
         }
-        // Continuation after advisor result.
+        // Continuation after advisor result. Capture body for assertions.
+        continuationRequestBody = init?.body ?? ""
         return new Response(
           buildSseStream([
             { event: "message_start", data: { type: "message_start", message: { id: "m2" } } },
@@ -425,6 +517,82 @@ describe("ADVISOR streaming integration (Phase I)", () => {
     expect(advisorResponsesCallCount).toBe(1)
     // Verify Copilot was called twice via /v1/messages (main + continuation)
     expect(copilotMessagesCallCount).toBe(2)
+
+    // ── round-5 codex/gemini bug fix: id format spec compliance ──
+    // server_tool_use.id (client-facing) must be `srvtoolu_*` per
+    // Anthropic spec. The original model id was `toolu_advisor_1`, so
+    // the derived client id is `srvtoolu_advisor_1`.
+    const serverToolUseMatches = text.match(
+      /"type":"server_tool_use","id":"([^"]+)"/g,
+    )
+    expect(serverToolUseMatches).not.toBeNull()
+    expect(serverToolUseMatches!.length).toBeGreaterThan(0)
+    for (const m of serverToolUseMatches!) {
+      const id = m.match(/"id":"([^"]+)"/)![1]!
+      expect(id).toMatch(/^srvtoolu_[a-zA-Z0-9_]+$/)
+      expect(id).toBe("srvtoolu_advisor_1")
+    }
+
+    // advisor_tool_result.tool_use_id (client-facing) must pair with
+    // the server_tool_use.id and match the same spec.
+    const advisorResultMatches = text.match(
+      /"type":"advisor_tool_result","tool_use_id":"([^"]+)"/g,
+    )
+    expect(advisorResultMatches).not.toBeNull()
+    expect(advisorResultMatches!.length).toBeGreaterThan(0)
+    for (const m of advisorResultMatches!) {
+      const id = m.match(/"tool_use_id":"([^"]+)"/)![1]!
+      expect(id).toMatch(/^srvtoolu_[a-zA-Z0-9_]+$/)
+      expect(id).toBe("srvtoolu_advisor_1") // pairs with server_tool_use
+    }
+
+    // Copilot replay (the continuation request body) must use the
+    // ORIGINAL `toolu_*` id, NOT the client-facing `srvtoolu_*`.
+    // Copilot's spec validator expects `^toolu_*$` for tool_use ids
+    // and the matching `tool_result.tool_use_id` reference.
+    expect(continuationRequestBody).toBeDefined()
+    expect(continuationRequestBody!).toContain('"id":"toolu_advisor_1"')
+    expect(continuationRequestBody!).toContain(
+      '"tool_use_id":"toolu_advisor_1"',
+    )
+    // Belt-and-suspenders: continuation body must NOT leak the client-
+    // facing srvtoolu_ id into the Copilot replay.
+    expect(continuationRequestBody!).not.toContain("srvtoolu_")
+
+    // ── round-7 holistic fix: thinking-block + tool_use input replay ──
+    // The mocked first turn included a `thinking` block streamed via
+    // thinking_delta + signature_delta events. The continuation
+    // request body MUST include the thinking block with both .thinking
+    // text and .signature preserved verbatim, or Copilot 400s with
+    // `messages.N.content.M.thinking.thinking: Field required`.
+    const continuationParsed = JSON.parse(continuationRequestBody!) as {
+      messages: Array<{ role: string; content: Array<Record<string, unknown>> }>
+    }
+    // Find the assistant message (the one we constructed from the
+    // upstream stream).
+    const assistantMsg = continuationParsed.messages.find(
+      (m) => m.role === "assistant",
+    )
+    expect(assistantMsg).toBeDefined()
+    const thinkingBlock = assistantMsg!.content.find(
+      (b) => b.type === "thinking",
+    )
+    expect(thinkingBlock).toBeDefined()
+    expect(thinkingBlock!.thinking).toBe("I should ask the advisor.")
+    // signature_delta arrived in two chunks; verbatim concat per
+    // Anthropic spec (cryptographic verification).
+    expect(thinkingBlock!.signature).toBe("abcdef0123456789")
+
+    // Non-advisor `tool_use` block must have its `input` field as a
+    // PARSED OBJECT (not the raw `partial_json` string accumulator).
+    // gemini round-6 finding.
+    const readToolUseBlock = assistantMsg!.content.find(
+      (b) => b.type === "tool_use" && b.name === "Read",
+    )
+    expect(readToolUseBlock).toBeDefined()
+    expect(typeof readToolUseBlock!.input).toBe("object")
+    expect(readToolUseBlock!.input).toEqual({ file_path: "/tmp/x.txt" })
+    expect(readToolUseBlock!.id).toBe("toolu_read_1")
   })
 
   test("CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 disables advisor — request flows as normal passthrough", async () => {
@@ -473,5 +641,60 @@ describe("ADVISOR streaming integration (Phase I)", () => {
     expect(response.status).toBe(200)
     // Tool was NOT injected (advisor disabled).
     expect(injectedTool).toBe(false)
+  })
+})
+
+describe("toClientServerToolUseId charset hardening (round-5 codex critic)", () => {
+  test("normal toolu_ id → srvtoolu_ id with prefix swap", () => {
+    expect(toClientServerToolUseId("toolu_abc123XYZ", 0)).toBe(
+      "srvtoolu_abc123XYZ",
+    )
+  })
+
+  test("synthesized toolu_advisor_N fallback id → srvtoolu_advisor_N", () => {
+    expect(toClientServerToolUseId("toolu_advisor_5", 5)).toBe(
+      "srvtoolu_advisor_5",
+    )
+  })
+
+  test("non-toolu_ prefix with valid charset → srvtoolu_ + raw suffix", () => {
+    // e.g., a future provider's id that doesn't start with toolu_ but
+    // is otherwise spec-compliant; pass through with srvtoolu_ prefix.
+    expect(toClientServerToolUseId("call_oai_xyz", 9)).toBe(
+      "srvtoolu_call_oai_xyz",
+    )
+  })
+
+  test("malformed id with hyphens → synthesized fallback (defensive)", () => {
+    // Hyphens are NOT in the spec charset [a-zA-Z0-9_]. Without the
+    // fallback, srvtoolu_abc-123 would be a malformed block and 400.
+    expect(toClientServerToolUseId("toolu_abc-123", 7)).toBe(
+      "srvtoolu_advisor_7",
+    )
+  })
+
+  test("non-ascii id → synthesized fallback", () => {
+    expect(toClientServerToolUseId("toolu_abcé", 11)).toBe(
+      "srvtoolu_advisor_11",
+    )
+  })
+
+  test("empty suffix after toolu_ stripping → fallback (regex requires at least one char)", () => {
+    expect(toClientServerToolUseId("toolu_", 13)).toBe("srvtoolu_advisor_13")
+  })
+
+  test("output always matches Anthropic spec /^srvtoolu_[a-zA-Z0-9_]+$/", () => {
+    const inputs = [
+      "toolu_normal_id_42",
+      "toolu_with-hyphen",
+      "call_oai_chunk",
+      "toolu_",
+      "weird id with spaces",
+      "",
+    ]
+    for (let i = 0; i < inputs.length; i++) {
+      const out = toClientServerToolUseId(inputs[i]!, i)
+      expect(out).toMatch(/^srvtoolu_[a-zA-Z0-9_]+$/)
+    }
   })
 })
