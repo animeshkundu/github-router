@@ -32,6 +32,13 @@ const STRIPPED_PARENT_ENV_KEYS = [
   "ANTHROPIC_CUSTOM_HEADERS",
   "ANTHROPIC_MODEL",
   "CLAUDE_CODE_OAUTH_TOKEN",
+  // Per binary-grep of v2.1.140 (function QuH): Claude Code recognizes
+  // CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR as an alternate auth source
+  // (loads OAuth from an open file descriptor). Stripping this prevents
+  // a user-exported FD reference from leaking into the proxy session
+  // and creating a third auth source alongside the synthetic
+  // .credentials.json (potential auth-conflict warning).
+  "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
   "CLAUDE_CODE_USE_BEDROCK",
   "CLAUDE_CODE_USE_VERTEX",
   "CLAUDE_CODE_USE_FOUNDRY",

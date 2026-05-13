@@ -1,6 +1,3 @@
-import os from "node:os"
-import path from "node:path"
-
 import consola from "consola"
 import { serve, type ServerHandler } from "srvx"
 
@@ -253,36 +250,38 @@ export function parseSharedArgs(args: Record<string, unknown>): {
  * (see `src/lib/launch.ts`) BEFORE these overrides are merged in, so we
  * only need to provide the positive values.
  *
- * Auth precedence in Claude Code (https://code.claude.com/docs/en/iam):
+ * Auth precedence in Claude Code (https://code.claude.com/docs/en/iam),
+ * after the github-router substrate fix:
  *   1. Cloud provider (CLAUDE_CODE_USE_BEDROCK / VERTEX / FOUNDRY) — stripped at parent.
- *   2. ANTHROPIC_AUTH_TOKEN — set here to "dummy"; wins over #4–#6.
- *   3. ANTHROPIC_API_KEY — stripped at parent, intentionally NOT re-set
- *      (Claude Code emits an Auth conflict warning when both AUTH_TOKEN
- *      and API_KEY are present, even with dummy values).
- *   4. apiKeyHelper in settings.json — beaten by #2.
+ *   2. ANTHROPIC_AUTH_TOKEN — NOT set by the proxy. Stripped at parent
+ *      (no env-source auth in the spawned child at all).
+ *   3. ANTHROPIC_API_KEY — stripped at parent.
+ *   4. apiKeyHelper in settings.json — copied into our config dir as
+ *      part of the mirror; if the user defined one, it still fires
+ *      and may mint an `x-api-key` header. Copilot ignores `x-api-key`,
+ *      so behavior is unchanged from before this fix.
  *   5. CLAUDE_CODE_OAUTH_TOKEN — stripped at parent.
- *   6. Subscription OAuth (Keychain / ~/.claude/.credentials.json) —
- *      INVISIBLE to the spawned child via the CLAUDE_CONFIG_DIR trick
- *      below. The credential file is left in place so `claude /logout`
- *      still works outside the proxy.
+ *   6. Subscription OAuth (Keychain / `<CLAUDE_CONFIG_DIR>/.credentials.json`)
+ *      — the credentials file is OURS (synthetic blob, written by
+ *      `ensureClaudeConfigMirror`). Claude Code reads accessToken from
+ *      it and sends as `Authorization: Bearer <accessToken>`. The
+ *      teammate-spawn allowlist propagates `CLAUDE_CONFIG_DIR` to
+ *      children, so spawned teammates find the same synthetic credential
+ *      and authenticate (the bug this whole fix addresses).
  *
  * `CLAUDE_CONFIG_DIR` activates Claude Code's per-config-dir keychain
- * isolation. Per binary-grep of Claude Code 2.1.126's `iN()` function:
+ * isolation (per binary-grep of v2.1.126's `iN()` function: when set,
+ * the keychain service name becomes `Claude Code-<sha256(path)[0..8]>`,
+ * missing the user's real `Claude Code` entry). Pointing it at our
+ * snapshot-copied `PATHS.CLAUDE_CONFIG_DIR` preserves user customization
+ * (mirrored settings.json, skills, MCP, hooks, CLAUDE.md, custom
+ * agents) while giving teammates a credential they can find on disk.
  *
- *   function iN(H = "") {
- *     let _ = B6(),  // resolved config-dir path
- *         K = !process.env.CLAUDE_CONFIG_DIR ? "" : `-${sha256(_).slice(0, 8)}`;
- *     return `Claude Code${OAUTH_FILE_SUFFIX}${H}${K}`
- *   }
- *
- * The conditional is on PRESENCE, not value. When CLAUDE_CONFIG_DIR is
- * unset (the user's normal `claude` usage), the keychain service name is
- * "Claude Code" and their `/login` credential is found there. When set
- * (the proxy session), the service name becomes "Claude Code-<hash>" —
- * the user's credential is invisible, `iCH()` returns null, and all
- * three auth-conflict warnings fire `false`. The path resolves to the
- * default config-dir, so settings.json/skills/MCP/plugins/hooks/CLAUDE.md
- * still load from `~/.claude` as normal.
+ * No-401 invariant: Claude Code's reactive refresh path (`SZ1` →
+ * `D3(0,true,...)`) fires on any 401 from upstream. The synthetic
+ * refreshToken would fail any real refresh attempt, so the proxy
+ * MUST NOT return 401 on the Anthropic-shape boundary even when
+ * upstream Copilot returns 401. See `src/routes/messages/handler.ts`.
  */
 export function getClaudeCodeEnvVars(
   serverUrl: string,
@@ -291,15 +290,11 @@ export function getClaudeCodeEnvVars(
   const vars: Record<string, string> = {
     // Route to the proxy
     ANTHROPIC_BASE_URL: serverUrl,
-    // Authoritative dummy bearer; sent as `Authorization: Bearer dummy`.
-    ANTHROPIC_AUTH_TOKEN: "dummy",
-    // Activate per-config-dir keychain isolation — silences the
-    // "/login managed key" auth-conflict warning without requiring
-    // `claude /logout`. Pointing at the default $HOME/.claude is
-    // intentional: it preserves all user customization (settings.json,
-    // skills, MCP, hooks, CLAUDE.md, custom agents) while making the
-    // keychain probe miss the user's actual credential entry.
-    CLAUDE_CONFIG_DIR: path.join(os.homedir(), ".claude"),
+    // CLAUDE_CONFIG_DIR points at the router-owned snapshot mirror;
+    // the synthetic .credentials.json inside it provides the OAuth
+    // accessToken that Claude Code sends as Bearer. See
+    // `ensureClaudeConfigMirror` in `src/lib/paths.ts`.
+    CLAUDE_CONFIG_DIR: PATHS.CLAUDE_CONFIG_DIR,
     // Extend Claude Code's MCP per-tool-call wait window from the
     // hardcoded SDK default (~60s post-2.1.113 regression #50289) to
     // 10 minutes. The peer-MCP review tools (codex_critic, codex_reviewer,
@@ -328,6 +323,19 @@ export function getClaudeCodeEnvVars(
     DISABLE_TELEMETRY: "1",
   }
   if (model) vars.ANTHROPIC_MODEL = model
+
+  // Default the small/fast tier model (used by Claude Code for status
+  // text, auto-compact summaries, session titles, background ops) to
+  // claude-haiku-4-5. Anthropic-published dashed slug; the proxy's
+  // resolveModel translates to Copilot's dotted slug at request time.
+  // Presence-based guard preserves any user-set value, including the
+  // dated slug variant or a different family (gemini, gpt) for users
+  // who have custom Copilot mappings — symmetric with the
+  // ANTHROPIC_SMALL_FAST_MODEL pass-through documented in launch.ts's
+  // STRIPPED_PARENT_ENV_KEYS comment.
+  if (process.env.ANTHROPIC_SMALL_FAST_MODEL === undefined) {
+    vars.ANTHROPIC_SMALL_FAST_MODEL = "claude-haiku-4-5"
+  }
 
   // Auto-enable Anthropic's experimental "leverage" features for proxied
   // claude sessions. Symmetric with the leverage-policy default

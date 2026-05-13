@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
-import os from "node:os"
 import path from "node:path"
 
 import consola from "consola"
@@ -273,12 +272,16 @@ interface WriteOpts {
  * Default location Claude Code reads subagent .md files from at session
  * startup. Files placed here populate the Task `subagent_type` enum.
  *
- * We pin to the user's `~/.claude/agents/` because `getClaudeCodeEnvVars`
- * sets `CLAUDE_CONFIG_DIR=$HOME/.claude` (the Spawned-CLI auth isolation
- * trick) — the spawned child reads from this exact path.
+ * We point at the router-owned `PATHS.CLAUDE_CONFIG_DIR/agents/` because
+ * `getClaudeCodeEnvVars` sets `CLAUDE_CONFIG_DIR=PATHS.CLAUDE_CONFIG_DIR`
+ * (the snapshot-mirror substrate fix that gives spawned teammates an
+ * authenticatable on-disk credential). The user's own custom-agent .md
+ * files were copied into this same dir by `ensureClaudeConfigMirror`,
+ * so writing peer-* files here doesn't conflict — and the boot-time
+ * sweep is scoped to peer-* names only via the persona-name allowlist.
  */
 function defaultAgentsDir(): string {
-  return path.join(os.homedir(), ".claude", "agents")
+  return path.join(PATHS.CLAUDE_CONFIG_DIR, "agents")
 }
 
 /**
