@@ -14,6 +14,7 @@ import {
 import { enableFileLogging } from "./lib/file-log-reporter"
 import { getCodexVersion, launchChild } from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
+import { ensureClaudeConfigMirror } from "./lib/paths"
 import {
   DEFAULT_CLAUDE_MODEL,
   DEFAULT_CLAUDE_MODEL_FALLBACKS,
@@ -174,6 +175,29 @@ export const claude = defineCommand({
       serverUrl = result.serverUrl
     } catch (error) {
       consola.error("Failed to start server:", error instanceof Error ? error.message : error)
+      process.exit(1)
+    }
+
+    // Provision the router-owned CLAUDE_CONFIG_DIR with our synthetic
+    // .credentials.json + a snapshot copy of the user's ~/.claude/.
+    // The spawned Claude Code (and any teammates it spawns via the
+    // agent-teams primitive) reads this dir instead of ~/.claude/,
+    // finds our synthetic credential, and authenticates — closing the
+    // teammate-spawn allowlist gap that drops ANTHROPIC_AUTH_TOKEN.
+    // See ensureClaudeConfigMirror in src/lib/paths.ts.
+    //
+    // Run BEFORE enableFileLogging so a fatal credentials-write failure
+    // surfaces on the user's terminal (we only throw on the credentials
+    // write — copy failures of individual user files are debug-logged
+    // and skipped).
+    try {
+      await ensureClaudeConfigMirror()
+    } catch (err) {
+      consola.error(
+        `Failed to provision CLAUDE_CONFIG_DIR mirror: ${
+          err instanceof Error ? err.message : String(err)
+        }. Spawned Claude Code would not be able to authenticate.`,
+      )
       process.exit(1)
     }
 

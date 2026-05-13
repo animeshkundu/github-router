@@ -45,10 +45,24 @@ export async function forwardError(c: Context, error: unknown) {
       )
     }
 
-    // Forward upstream Anthropic-format errors as-is
+    // Remap upstream 401 to 503 — maintain the no-401 invariant on the
+    // Anthropic-shape boundary. Claude Code's reactive refresh path
+    // (function `SZ1` → `D3(0,true,...)` in v2.1.140 binary) fires on
+    // any 401 from upstream and attempts to refresh the OAuth token.
+    // Spawned-via-proxy sessions use a synthetic credential
+    // (`ensureClaudeConfigMirror`'s SYNTHETIC_CREDENTIAL); refreshing
+    // it would fail and degrade the session. Mapping 401 → 503 lets
+    // the upstream message still reach the user while side-stepping
+    // the refresh path. 503 maps to Anthropic's "overloaded_error"
+    // type — semantically reasonable for "proxy got an upstream
+    // failure, retry later".
+    const responseStatus =
+      error.response.status === 401 ? 503 : error.response.status
+
+    // Forward upstream Anthropic-format errors as-is (with remapped status)
     if (isAnthropicError(errorJson)) {
       consola.error("HTTP error:", errorJson)
-      return c.json(errorJson, error.response.status as ContentfulStatusCode)
+      return c.json(errorJson, responseStatus as ContentfulStatusCode)
     }
 
     const message = resolveErrorMessage(errorJson, errorText)
@@ -57,11 +71,11 @@ export async function forwardError(c: Context, error: unknown) {
       {
         type: "error",
         error: {
-          type: resolveErrorType(error.response.status),
+          type: resolveErrorType(responseStatus),
           message,
         },
       },
-      error.response.status as ContentfulStatusCode,
+      responseStatus as ContentfulStatusCode,
     )
   }
 
@@ -144,6 +158,12 @@ export function isContextOverflow(
 
 /**
  * Map HTTP status to Anthropic error type.
+ *
+ * Note: a 401 from upstream is remapped to 503 in `forwardError` BEFORE
+ * this function is called (no-401 invariant — see comment there). The
+ * 401 → "authentication_error" mapping below is preserved for
+ * defensive coverage in case any code path calls `resolveErrorType`
+ * directly with an unsanitized status.
  */
 function resolveErrorType(status: number): string {
   if (status === 400) return "invalid_request_error"
@@ -151,6 +171,7 @@ function resolveErrorType(status: number): string {
   if (status === 403) return "permission_error"
   if (status === 404) return "not_found_error"
   if (status === 429) return "rate_limit_error"
+  if (status === 503) return "overloaded_error"
   if (status === 529) return "overloaded_error"
   return "api_error"
 }

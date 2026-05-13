@@ -571,16 +571,27 @@ describe("contract: spawned-Claude env defaults", () => {
     expect(env.MCP_TIMEOUT).toBe("600000")
   })
 
-  test("sets CLAUDE_CONFIG_DIR to $HOME/.claude (per-config-dir keychain isolation)", () => {
+  test("sets CLAUDE_CONFIG_DIR to the router-owned snapshot mirror (per-config-dir keychain isolation, plus auth-substrate for spawned teammates)", () => {
     const env = getClaudeCodeEnvVars("http://127.0.0.1:8787")
     expect(env.CLAUDE_CONFIG_DIR).toBeDefined()
-    expect(env.CLAUDE_CONFIG_DIR).toContain(".claude")
+    // Post-fix: points at PATHS.CLAUDE_CONFIG_DIR (router-owned snapshot
+    // mirror under ~/.local/share/github-router/claude-config/), not
+    // ~/.claude. The mirror's .credentials.json provides synthetic OAuth
+    // for spawned teammates that drop ANTHROPIC_AUTH_TOKEN from their
+    // env (Claude Code v2.1.140 teammate-spawn allowlist gap).
+    expect(env.CLAUDE_CONFIG_DIR).toContain("github-router")
+    expect(env.CLAUDE_CONFIG_DIR).toContain("claude-config")
   })
 
-  test("sets ANTHROPIC_BASE_URL to proxy URL and ANTHROPIC_AUTH_TOKEN=dummy", () => {
+  test("sets ANTHROPIC_BASE_URL to proxy URL; does NOT set ANTHROPIC_AUTH_TOKEN (auth flows from synthetic .credentials.json in CLAUDE_CONFIG_DIR mirror)", () => {
     const env = getClaudeCodeEnvVars("http://127.0.0.1:18787")
     expect(env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:18787")
-    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("dummy")
+    // Post-fix: ANTHROPIC_AUTH_TOKEN no longer set. The synthetic
+    // claudeAiOauth.accessToken from <CLAUDE_CONFIG_DIR>/.credentials.json
+    // is sent as Bearer instead. Dropping the env-source eliminates the
+    // env-vs-file auth-conflict warning and is a no-op for spawned
+    // teammates (they would have dropped it anyway via the allowlist).
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
     // Crucially does NOT set ANTHROPIC_API_KEY (would trigger Auth conflict)
     expect(env.ANTHROPIC_API_KEY).toBeUndefined()
   })

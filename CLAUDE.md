@@ -136,7 +136,7 @@ The injection uses a **presence-based guard** in `getClaudeCodeEnvVars` (`src/li
 |---|---|
 | `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL` | gpt-5.5/xhigh advisor tool (Phase I server-side wiring; see ADVISOR bullet above) |
 | `CLAUDE_CODE_FORK_SUBAGENT` | Forked subagents inherit the full conversation context (vs starting fresh). Headless mode (`claude --print`) silently no-ops the fork (`Z8()` precondition in the binary) |
-| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `TeamCreate` + inter-teammate `SendMessage` primitives |
+| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `TeamCreate` + inter-teammate `SendMessage` primitives. **Requires the CLAUDE_CONFIG_DIR snapshot mirror** — see "Spawned-CLI auth isolation" below. The teammate-spawn allowlist drops `ANTHROPIC_AUTH_TOKEN`, so spawned teammates can only authenticate by reading a credential from disk in a CONFIG_DIR they inherit. |
 | `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING` | Tool inputs stream as the model generates them. Anthropic explicitly recommends this for proxy users at [code.claude.com/docs/en/env-vars](https://code.claude.com/docs/en/env-vars): "Set to `1` to force on when routing through a proxy via `ANTHROPIC_BASE_URL`" |
 | `CLAUDE_CODE_ENABLE_TASKS` | Task tracking in `claude -p` headless mode (already on in interactive) |
 
@@ -158,7 +158,7 @@ Some Anthropic API surfaces have no Copilot equivalent. The proxy returns explic
 
 ### `apiKeyHelper` and external credential scripts
 
-Claude Code's settings.json supports `apiKeyHelper`, `awsCredentialExport`, `awsAuthRefresh`, `gcpAuthRefresh` — external scripts that mint credentials. The proxy overrides `ANTHROPIC_AUTH_TOKEN=dummy` and `ANTHROPIC_BASE_URL=<proxy>` regardless. If a user's `apiKeyHelper` mints an `x-api-key` header, that header is sent alongside our `Authorization: Bearer dummy` — Copilot ignores `x-api-key`, so requests still work. The "Auth conflict" warning Claude Code emits when both credential paths are present may resurface; the `CLAUDE_CONFIG_DIR=$HOME/.claude` keychain isolation already covers the common case (persisted `claude /login`). External-script credentials are out of the proxy's scope.
+Claude Code's settings.json supports `apiKeyHelper`, `awsCredentialExport`, `awsAuthRefresh`, `gcpAuthRefresh` — external scripts that mint credentials. The user's `settings.json` is mirror-copied into our `CLAUDE_CONFIG_DIR` at startup (see "Spawned-CLI auth isolation" below), so any helper they defined still fires inside the proxy session. The proxy supplies auth via the synthetic `claudeAiOauth` blob in `<CLAUDE_CONFIG_DIR>/.credentials.json` (Bearer header sourced from its `accessToken`); if a user's `apiKeyHelper` mints an additional `x-api-key` header, that header is sent alongside our Bearer — Copilot ignores `x-api-key`, so requests still work. The legacy "Auth conflict" warning is silenced because the spawned child has only one env-source-of-auth (none — we removed `ANTHROPIC_AUTH_TOKEN=dummy`) and the keychain probe misses by hashed service name. External-script credentials beyond apiKeyHelper are out of the proxy's scope.
 
 ### Default models
 
@@ -171,6 +171,8 @@ The `claude` and `codex` subcommands default to the latest Copilot-supported mod
   Users can pass `--model claude-opus-4.7-1m-internal` (Copilot slug) for explicit pinning, but Claude Code's UI won't recognize it and will display "Opus 4" instead of "Opus 4.7 (1M context)". Use the Anthropic slug for correct UI labels.
 
 - `codex` → `gpt-5.5` (dropped the `-codex` suffix; `/responses` is the discriminator). Falls back via `DEFAULT_CODEX_MODEL_FALLBACKS`: `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex`. `resolveCodexModel`'s "best available `/responses` model" provides a final safety net beyond the named chain. Codex CLI's bundled catalog uses Copilot-style slugs directly, so no Anthropic-slug translation is needed.
+
+`getClaudeCodeEnvVars` also defaults `ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5` (Anthropic-published dashed slug; Claude Code uses this tier for status text, auto-compact summaries, session titles, and other background ops). Presence-based guard preserves any user-set value — symmetric with `STRIPPED_PARENT_ENV_KEYS`'s intentional pass-through of `ANTHROPIC_SMALL_FAST_MODEL` for users with custom Copilot mappings.
 
 Fallback chains only fire on the implicit-default path — explicit `-m`/`--model` is always respected as-is. Constants live in `src/lib/port.ts`.
 
@@ -190,13 +192,29 @@ The `claude` subcommand auto-injects three peer-model review tools as Claude Cod
 
 ### Spawned-CLI auth isolation
 
-When `github-router claude` (or `codex`) launches its child CLI, the parent `process.env` is sanitized of every auth-related key listed in `STRIPPED_PARENT_ENV_KEYS` (`src/lib/launch.ts`) BEFORE the proxy's overrides are merged in. Stripped keys: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_MODEL`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CONFIG_DIR`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME`.
+When `github-router claude` (or `codex`) launches its child CLI, the parent `process.env` is sanitized of every auth-related key listed in `STRIPPED_PARENT_ENV_KEYS` (`src/lib/launch.ts`) BEFORE the proxy's overrides are merged in. Stripped keys: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_MODEL`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CONFIG_DIR`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME`.
 
-This serves two purposes: (1) prevents shell-exported real credentials from leaking through the proxy (e.g. an `ANTHROPIC_API_KEY` in the user's shell would otherwise flow through as `x-api-key`), and (2) avoids Claude Code's `Auth conflict` warnings that fire whenever both `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` are present (regardless of value — even dummy values trip the check). Because of the strip, `getClaudeCodeEnvVars` only needs to set the positive overrides; it deliberately does NOT set `ANTHROPIC_API_KEY`.
+This serves two purposes: (1) prevents shell-exported real credentials from leaking through the proxy, and (2) avoids Claude Code's `Auth conflict` warnings that fire whenever multiple auth sources are present (regardless of value — even dummy values trip the check).
 
-To silence the third auth-conflict warning (the "/login managed key" detection from a persisted `claude /login`), `getClaudeCodeEnvVars` also sets `CLAUDE_CONFIG_DIR=$HOME/.claude`. This activates Claude Code's per-config-dir keychain isolation: the spawned child queries Keychain service `Claude Code-<sha256-hash>` instead of the user's actual `Claude Code` entry (no suffix). The probe misses → the credential is invisible to the proxy session → all three auth-conflict warnings silenced. The path resolves to the default config-dir, so `settings.json`/skills/MCP/plugins/hooks/CLAUDE.md/custom agents all still load from `~/.claude` as normal — **zero feature loss**.
+#### CLAUDE_CONFIG_DIR snapshot mirror — gives spawned teammates a credential they can find on disk
 
-The persisted Console OAuth credential is **never modified** — it stays exactly where the user's `claude /login` placed it (Keychain or `~/.claude/.credentials.json`), fully accessible to `claude` invoked outside the proxy. No `claude /logout` is required.
+`getClaudeCodeEnvVars` sets `CLAUDE_CONFIG_DIR=PATHS.CLAUDE_CONFIG_DIR` (a router-owned dir at `~/.local/share/github-router/claude-config/`). At the start of every `github-router claude` session, `ensureClaudeConfigMirror` (`src/lib/paths.ts`):
+
+1. **Snapshot-copies** `~/.claude/` into the router-owned dir (real files, not symlinks — symlinks don't isolate writes), excluding `.credentials.json`, `statsig/`, `projects/`, `transcripts/`, `logs/`, `cache/`, `todos/`, `shell_snapshots/`, and lock files. Mtime-based skip means re-syncs only re-copy when source is newer. Idempotent and concurrent-safe.
+2. **Writes a synthetic `claudeAiOauth` credential** (schema verbatim from v2.1.140 binary function `guH`): `accessToken`, `refreshToken` (synthetic strings), `expiresAt: 4070908800000` (2099-01-01 ms — sidesteps Claude Code's proactive refresh path `nH8`/`R8H`), `scopes: ["user:inference", "user:profile"]` (passes `tB()` so `Hq()` is true → full feature surface), `subscriptionType: "max"` (highest client-side gating; pure label, no server validation). Atomic temp+rename write so Claude Code's `EZ1()` mtime watcher never sees a partial write.
+3. **Re-creates `agents/`** as a real subdirectory so the proxy's per-launch `peer-<pid>-<rand>-<name>.md` files (written by `writePeerAgentMdFiles` in `src/lib/codex-mcp-config.ts`) coexist with the user's mirrored custom-agent files. The `sweepStalePeerAgentMdFiles` function targets this same dir, scoped to peer-* names by the persona allowlist regex.
+
+**Why this fixes agent teams**: Claude Code v2.1.140's teammate-spawn code rebuilds the child process env from a fixed allowlist (visible in the spawned tmux pane's command line: `CLAUDECODE`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `DISABLE_TELEMETRY`) — and **drops `ANTHROPIC_AUTH_TOKEN`**. Pre-fix the proxy set `ANTHROPIC_AUTH_TOKEN=dummy`; teammates dropped it and landed at "Not logged in · Run /login", silently consuming mailbox messages without producing turns. Post-fix the proxy sets nothing on the env; auth flows from the synthetic creds file in `CLAUDE_CONFIG_DIR/.credentials.json`. `CLAUDE_CONFIG_DIR` IS in the teammate-spawn allowlist, so teammates inherit the path, find the credential, and authenticate.
+
+**Keychain isolation still active**: per binary-grep of v2.1.126's `iN()`, when `CLAUDE_CONFIG_DIR` is set the keychain service name becomes `Claude Code-<sha256(path)[0..8]>` instead of `Claude Code` (no suffix). The user's persisted `claude /login` credential is stored under the no-suffix name and is invisible to the proxy session — even if their normal `claude` would find it. The mirror dir's hash misses, file fallback hits our synthetic blob.
+
+**No-401 invariant**: Claude Code's reactive refresh path (`SZ1` → `D3(0,true,...)` in v2.1.140) fires on any 401 from upstream and tries to refresh the OAuth token. Refreshing the synthetic token would fail and degrade the session. `forwardError` in `src/lib/error.ts` remaps upstream 401 → 503 (Anthropic `overloaded_error` type) to maintain the invariant on the Anthropic-shape boundary, regardless of whether the upstream Copilot returned 401 with a plain or Anthropic-shaped body.
+
+**Trade-offs**:
+- **Stale snapshot**: if the user updates `~/.claude/settings.json` (or any other mirrored file) via plain `claude` while a github-router session is running, the proxy session won't pick up the change until next restart. Mtime-based re-sync at startup handles between-session updates.
+- **Session-time writes are isolated**: when Claude Code writes during a proxied session (e.g., `/agents` creates a new agent, `/config` edits settings), those writes land in our mirror dir, NOT the user's real `~/.claude/`. They aren't visible to a plain `claude` invocation outside the proxy.
+
+The persisted Console OAuth credential at `~/.claude/.credentials.json` is **never modified** — it stays exactly where the user's `claude /login` placed it, fully accessible to `claude` invoked outside the proxy. No `claude /logout` is required.
 
 ### Thinking-mode translation
 

@@ -1,8 +1,6 @@
-import os from "node:os"
-import path from "node:path"
-
 import { test, expect, describe } from "bun:test"
 
+import { PATHS } from "../src/lib/paths"
 import {
   parseSharedArgs,
   getClaudeCodeEnvVars,
@@ -85,9 +83,24 @@ describe("getClaudeCodeEnvVars", () => {
   test("returns minimal proxy override set", () => {
     const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
     expect(vars.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:8787")
-    expect(vars.ANTHROPIC_AUTH_TOKEN).toBe("dummy")
     expect(vars.DISABLE_NON_ESSENTIAL_MODEL_CALLS).toBe("1")
     expect(vars.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1")
+  })
+
+  test("does NOT set ANTHROPIC_AUTH_TOKEN — auth flows from synthetic .credentials.json in CLAUDE_CONFIG_DIR mirror", () => {
+    // Pre-fix: the proxy set ANTHROPIC_AUTH_TOKEN="dummy" so Claude
+    // Code's pre-flight had an auth source. Spawned teammates dropped
+    // this env var (Claude Code v2.1.140's teammate-spawn allowlist),
+    // landing them at "Not logged in · Run /login".
+    //
+    // Post-fix: `ensureClaudeConfigMirror` writes a synthetic
+    // claudeAiOauth credential to PATHS.CLAUDE_CONFIG_DIR/.credentials.json.
+    // CLAUDE_CONFIG_DIR IS in the teammate-spawn allowlist, so teammates
+    // inherit the path, find the credential file, and authenticate.
+    // No env-source auth is needed — and dropping it silences the
+    // file-managed-key vs env auth-conflict warning.
+    const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+    expect(vars).not.toHaveProperty("ANTHROPIC_AUTH_TOKEN")
   })
 
   test("sets MCP_TIMEOUT=600000 to extend HTTP MCP per-tool-call wait beyond the v2.1.113+ regression", () => {
@@ -105,16 +118,24 @@ describe("getClaudeCodeEnvVars", () => {
     expect(vars.MCP_TIMEOUT).toBe("600000")
   })
 
-  test("sets CLAUDE_CONFIG_DIR to the default path to activate keychain isolation", () => {
+  test("sets CLAUDE_CONFIG_DIR to the router-owned snapshot mirror (not ~/.claude)", () => {
     // Per binary-grep of Claude Code 2.1.126 iN(): when CLAUDE_CONFIG_DIR
     // is set (to ANYTHING — even its default), the keychain service-name
-    // gets a sha256-hash suffix. The user's existing /login credential
-    // is stored under the no-suffix service "Claude Code", so the proxy's
-    // hashed lookup misses → iCH() returns null → all three auth-conflict
-    // warnings silenced. Pointing at the default path preserves all
-    // user customization (settings.json, skills, MCP, etc.).
+    // gets a sha256-hash suffix. The user's existing /login credential is
+    // stored under the no-suffix service "Claude Code", so the proxy's
+    // hashed lookup misses → iCH() returns null.
+    //
+    // The PATH we point at is now PATHS.CLAUDE_CONFIG_DIR (router-owned
+    // snapshot mirror in ~/.local/share/github-router/claude-config/),
+    // NOT ~/.claude. ensureClaudeConfigMirror snapshot-copies the user's
+    // ~/.claude into this path (excluding .credentials.json + volatile
+    // state) and writes our synthetic claudeAiOauth credential. Spawned
+    // teammates inherit CLAUDE_CONFIG_DIR via Claude Code's allowlist
+    // and authenticate against the synthetic credential.
     const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
-    expect(vars.CLAUDE_CONFIG_DIR).toBe(path.join(os.homedir(), ".claude"))
+    expect(vars.CLAUDE_CONFIG_DIR).toBe(PATHS.CLAUDE_CONFIG_DIR)
+    expect(vars.CLAUDE_CONFIG_DIR).toContain("github-router")
+    expect(vars.CLAUDE_CONFIG_DIR).toContain("claude-config")
   })
 
   test("does NOT set ANTHROPIC_API_KEY (regression — Claude Code emits an Auth conflict warning when both AUTH_TOKEN and API_KEY are present, even with dummy values)", () => {
@@ -128,6 +149,34 @@ describe("getClaudeCodeEnvVars", () => {
     // because they're stripped at the parent level.
     const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
     expect(vars).not.toHaveProperty("ANTHROPIC_API_KEY")
+  })
+
+  test("defaults ANTHROPIC_SMALL_FAST_MODEL to claude-haiku-4-5 with presence-based guard", () => {
+    const prior = process.env.ANTHROPIC_SMALL_FAST_MODEL
+    delete process.env.ANTHROPIC_SMALL_FAST_MODEL
+    try {
+      const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBe("claude-haiku-4-5")
+    } finally {
+      if (prior === undefined) delete process.env.ANTHROPIC_SMALL_FAST_MODEL
+      else process.env.ANTHROPIC_SMALL_FAST_MODEL = prior
+    }
+  })
+
+  test("does NOT override a parent-set ANTHROPIC_SMALL_FAST_MODEL (presence guard preserves user's custom Copilot mapping)", () => {
+    // Symmetric with launch.ts's STRIPPED_PARENT_ENV_KEYS comment that
+    // intentionally does NOT strip ANTHROPIC_SMALL_FAST_MODEL — users
+    // with custom Copilot mappings legitimately set this to a non-haiku
+    // value (gemini-2.0-flash, gpt-5.5-mini, etc.).
+    const prior = process.env.ANTHROPIC_SMALL_FAST_MODEL
+    process.env.ANTHROPIC_SMALL_FAST_MODEL = "gemini-2.0-flash"
+    try {
+      const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      expect(vars).not.toHaveProperty("ANTHROPIC_SMALL_FAST_MODEL")
+    } finally {
+      if (prior === undefined) delete process.env.ANTHROPIC_SMALL_FAST_MODEL
+      else process.env.ANTHROPIC_SMALL_FAST_MODEL = prior
+    }
   })
 
   test("does NOT set the empty-string clears (handled by parent-env sanitization)", () => {

@@ -195,3 +195,74 @@ test("forwardError remaps 413 with non-JSON body using sensible message", async 
   expect(json.error.message).toContain("prompt is too long")
   expect(json.error.message).toContain("Request Entity Too Large")
 })
+
+// ============================================================
+// no-401 invariant — Claude Code's reactive refresh path (function
+// `SZ1` in v2.1.140 binary) fires on any 401 from upstream and
+// attempts to refresh the OAuth token. Spawned-via-proxy sessions
+// use a synthetic credential (ensureClaudeConfigMirror's
+// SYNTHETIC_CREDENTIAL); refreshing it would fail and degrade the
+// session. forwardError remaps upstream 401 → 503 to maintain the
+// invariant on the Anthropic-shape boundary.
+// ============================================================
+
+test("forwardError remaps upstream 401 to 503 (no-401 invariant)", async () => {
+  const app = new Hono()
+  app.get("/", (c) =>
+    forwardError(
+      c,
+      new HTTPError(
+        "Failed",
+        Response.json({ message: "Bearer rejected by Copilot" }, { status: 401 }),
+      ),
+    ),
+  )
+
+  const response = await app.request("/")
+  // CRITICAL: status MUST NOT be 401 (would trigger Claude Code's
+  // reactive refresh of our synthetic OAuth token, which would fail
+  // and degrade the session).
+  expect(response.status).toBe(503)
+  await expect(response.json()).resolves.toEqual({
+    type: "error",
+    error: { type: "overloaded_error", message: "Bearer rejected by Copilot" },
+  })
+})
+
+test("forwardError remaps upstream 401 with Anthropic-format body to 503 (still no-401 even when forwarding upstream shape)", async () => {
+  // Even when upstream returns a properly Anthropic-shaped error JSON,
+  // we must still map status 401 → 503 to prevent the refresh path.
+  // The body is forwarded as-is (preserving the original error type),
+  // but the HTTP status changes.
+  const app = new Hono()
+  const upstreamBody = {
+    type: "error",
+    error: { type: "authentication_error", message: "invalid x-api-key" },
+  }
+  app.get("/", (c) =>
+    forwardError(
+      c,
+      new HTTPError("Failed", Response.json(upstreamBody, { status: 401 })),
+    ),
+  )
+
+  const response = await app.request("/")
+  expect(response.status).toBe(503)
+  // Body still forwarded unchanged (just status remapped)
+  await expect(response.json()).resolves.toEqual(upstreamBody)
+})
+
+test("forwardError preserves non-401 statuses (only 401 is remapped)", async () => {
+  // Sanity: the remap is targeted, not a blanket rewrite.
+  for (const status of [400, 403, 404, 429, 500, 502, 504]) {
+    const app = new Hono()
+    app.get("/", (c) =>
+      forwardError(
+        c,
+        new HTTPError("Failed", Response.json({ message: "x" }, { status })),
+      ),
+    )
+    const response = await app.request("/")
+    expect(response.status).toBe(status)
+  }
+})
