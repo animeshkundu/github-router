@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -75,45 +76,101 @@ export async function ensurePaths(): Promise<void> {
 }
 
 /**
- * Top-level entries in the user's `~/.claude/` we deliberately do NOT
- * mirror into the router-owned config dir.
+ * Per-entry mirror policy. Every top-level entry under `~/.claude/` falls
+ * into exactly one bucket; unlisted names default to `MIRRORED` so a future
+ * Claude-Code-side addition flows through as a snapshot copy rather than
+ * being silently lost.
  *
- *   - `.credentials.json` — replaced by our synthetic OAuth blob.
- *   - `.credentials.json.lock`, `.oauth_refresh.lock` — refresh-loop
- *     locks; would couple proxy sessions with the user's real `claude`
- *     sessions.
- *   - `statsig/` — feature-flag cache, write-heavy.
- *   - `projects/`, `transcripts/`, `logs/`, `cache/`, `todos/`,
- *     `shell_snapshots/` — per-session state. Sharing these between
- *     proxy sessions and the user's plain `claude` sessions causes
- *     cross-talk (e.g. one session sees another's session history).
- *   - `agents/` — handled specially: we re-create it as an empty real
- *     dir and copy the user's custom-agent .md files into it, so the
- *     proxy's own `peer-<pid>-...md` files (written at runtime) live
- *     in the same dir without colliding with the user's real agents
- *     during cleanup.
+ * Three policies:
  *
- * Excludes match by exact top-level basename. Sub-paths within
- * non-excluded dirs are mirrored recursively.
+ *   - `ISOLATED` — not present in the mirror at all. The proxy owns its
+ *     own copy (synthetic `.credentials.json`, the `.github-router-managed`
+ *     marker) or the entry has no place in a proxy session
+ *     (`.credentials.json.lock`, `.oauth_refresh.lock` couple refresh loops
+ *     across sessions; `statsig/` is write-heavy and would constantly
+ *     re-copy; `cache/` and `logs/` are ephemeral; `paste-cache/` holds
+ *     sensitive clipboard extracts and shouldn't leak across sessions —
+ *     gemini-critic finding).
+ *
+ *   - `SHARED` — symlink `<mirror>/<X>` → `~/.claude/<X>` so writes made
+ *     during the proxy session land in the user's real `~/.claude/` and
+ *     chat history is visible in both proxy and plain-`claude` sessions.
+ *     **Directories only.** Never use this for individual files: Claude
+ *     Code's atomic-write pattern (`fs.writeFile(temp); fs.rename(temp,
+ *     target)`) does NOT follow symlinks — a `rename` over the symlink
+ *     replaces it with a regular file, silently severing the connection
+ *     to `~/.claude/<X>`. Gemini-critic finding from the 3-lab review.
+ *
+ *   - `MIRRORED` (default) — snapshot-copy with mtime skip. Use for static
+ *     or settings-shaped state where proxy-session writes should NOT flow
+ *     back to `~/.claude/` (e.g. `settings.json`, `.claude.json`,
+ *     `teams/`, `session-env/`) and for `agents/` — the proxy itself
+ *     writes per-launch `peer-<pid>-*.md` files into the mirror's `agents/`
+ *     and `sweepStalePeerAgentMdFiles` deletes them; a symlink would route
+ *     those writes/deletes into the user's real `~/.claude/agents/` and
+ *     destroy the user's own subagent files. **Hard regression test**:
+ *     `policyFor("agents") === "MIRRORED"` is asserted in
+ *     `tests/lib-paths.test.ts` to prevent accidental reclassification.
+ *
+ * Sub-paths within MIRRORED dirs cascade recursively (existing behavior).
  */
-const EXCLUDED_MIRROR_TOPLEVEL = new Set([
-  ".credentials.json",
-  ".credentials.json.lock",
-  ".oauth_refresh.lock",
+type MirrorPolicy = "ISOLATED" | "SHARED" | "MIRRORED"
+
+const CLAUDE_HOME_POLICY: ReadonlyMap<string, MirrorPolicy> = new Map<
+  string,
+  MirrorPolicy
+>([
+  // ISOLATED
+  [".credentials.json", "ISOLATED"],
+  [".credentials.json.lock", "ISOLATED"],
+  [".oauth_refresh.lock", "ISOLATED"],
   // Defense-in-depth: don't let a user-side file/symlink with the same
   // name as our marker collide with what we write. The marker write
   // logic also lstat-checks before writing (refuses if a non-regular
   // file exists at the path), but excluding it here removes the
   // attack vector entirely.
-  ".github-router-managed",
-  "statsig",
-  "projects",
-  "transcripts",
-  "logs",
-  "cache",
-  "todos",
-  "shell_snapshots",
+  [".github-router-managed", "ISOLATED"],
+  ["statsig", "ISOLATED"],
+  ["cache", "ISOLATED"],
+  ["logs", "ISOLATED"],
+  ["paste-cache", "ISOLATED"],
+  // SHARED — directories only (see policy doc above)
+  ["projects", "SHARED"],
+  ["sessions", "SHARED"],
+  ["tasks", "SHARED"],
+  ["todos", "SHARED"],
+  ["transcripts", "SHARED"],
+  ["shell-snapshots", "SHARED"],
+  // The underscored variant is the historical exclude-list name; some
+  // Claude Code versions may still use it. Classify SHARED so either
+  // spelling resolves correctly.
+  ["shell_snapshots", "SHARED"],
+  ["plans", "SHARED"],
+  ["file-history", "SHARED"],
+  ["backups", "SHARED"],
 ])
+
+function policyFor(name: string): MirrorPolicy {
+  return CLAUDE_HOME_POLICY.get(name) ?? "MIRRORED"
+}
+
+/**
+ * Test-only export: lets the test suite assert hard regression guards
+ * such as `policyFor("agents") === "MIRRORED"` (preventing accidental
+ * reclassification that would let `sweepStalePeerAgentMdFiles` delete
+ * files in the user's real `~/.claude/agents/`).
+ */
+export const __testing = { policyFor }
+
+/**
+ * Names with `SHARED` policy, materialized once for iteration in
+ * `ensureClaudeConfigMirror`'s post-copy phase.
+ */
+const SHARED_TOPLEVEL_NAMES: ReadonlyArray<string> = Array.from(
+  CLAUDE_HOME_POLICY.entries(),
+)
+  .filter(([, kind]) => kind === "SHARED")
+  .map(([name]) => name)
 
 /**
  * Marker file written into the router-owned CLAUDE_CONFIG_DIR so users
@@ -162,20 +219,29 @@ const SYNTHETIC_CREDENTIAL = {
 /**
  * Snapshot-copy the user's `~/.claude/` into the router-owned
  * CLAUDE_CONFIG_DIR (real files, not symlinks — symlinks don't isolate
- * writes), excluding volatile state per `EXCLUDED_MIRROR_TOPLEVEL`.
- * Then write the synthetic `.credentials.json` so spawned Claude Code
- * (and teammates that inherit `CLAUDE_CONFIG_DIR`) authenticate.
+ * writes), classifying each top-level entry per `CLAUDE_HOME_POLICY`:
+ * ISOLATED entries are skipped, MIRRORED entries are copied, and
+ * SHARED entries become directory symlinks back to `~/.claude/<X>` so
+ * chat history (in `projects/<cwd-hash>/<session-uuid>.jsonl`) and
+ * other durable user state flow between proxy and plain-`claude`
+ * sessions. Then writes the synthetic `.credentials.json` so spawned
+ * Claude Code (and teammates that inherit `CLAUDE_CONFIG_DIR`)
+ * authenticate.
  *
  * Idempotent: only re-copies files whose source `mtime` is newer than
- * target. Concurrent-safe: `mkdir({recursive:true})` is idempotent;
- * symlink/copy operations tolerate `EEXIST`; credentials write uses
- * temp-file + atomic rename so Claude Code's `EZ1()` mtime watcher
- * never sees a partial write.
+ * target; SHARED-symlink creation no-ops when the symlink already
+ * points at the right target. Concurrent-safe: `mkdir({recursive:true})`
+ * is idempotent; symlinks are created via atomic temp+rename so two
+ * parallel github-router-claude startups can't race to EEXIST; the
+ * credentials write uses temp-file + atomic rename so Claude Code's
+ * `EZ1()` mtime watcher never sees a partial write.
  *
  * Walks with `lstat` (does NOT follow symlinks during traversal — a
  * symlink-into-`/` would otherwise let the walk escape). Symlink leaves
- * in the source tree are recreated as symlinks in the mirror (target
- * preserved verbatim, not dereferenced).
+ * in the source tree are skipped during the MIRRORED copy walk (per the
+ * symlink-confused-deputy security finding); SHARED symlinks are
+ * created on the mirror side only, pointing at predetermined targets
+ * inside the user's real `~/.claude/`.
  *
  * Caller is expected to invoke this after `ensurePaths()` and before
  * spawning Claude Code (`launchChild`). The mirror must exist before
@@ -193,7 +259,9 @@ export async function ensureClaudeConfigMirror(opts: {
   await fs.mkdir(targetDir, { recursive: true, mode: 0o700 })
   await chmodIfPossible(targetDir, 0o700)
 
-  // 2. Snapshot-copy from ~/.claude if it exists
+  // 2. Snapshot-copy from ~/.claude if it exists. Only MIRRORED entries
+  //    flow through this walk; ISOLATED and SHARED entries are filtered
+  //    in `mirrorDirRecursive` and handled separately.
   let sourceExists = false
   try {
     const sourceStat = await fs.stat(sourceDir)
@@ -209,9 +277,24 @@ export async function ensureClaudeConfigMirror(opts: {
 
   // 3. Always ensure agents/ exists (even if user has none) so the
   //    peer-agent .md emission has a place to write. Empty dir is fine.
+  //    agents/ is MIRRORED, not SHARED — the proxy writes per-launch
+  //    `peer-<pid>-*.md` files here and `sweepStalePeerAgentMdFiles`
+  //    deletes them; routing those operations into the user's real
+  //    `~/.claude/agents/` would destroy their custom subagent files.
   await fs.mkdir(path.join(targetDir, "agents"), { recursive: true })
 
-  // 4. Write synthetic .credentials.json (only if content differs)
+  // 4. Create symlinks for SHARED entries so chat history (and other
+  //    durable user state) is visible in both proxy and plain-`claude`.
+  for (const name of SHARED_TOPLEVEL_NAMES) {
+    await ensureSharedSymlink(name, sourceDir, targetDir).catch((err) => {
+      consola.debug(
+        `ensureClaudeConfigMirror: SHARED symlink for ${name} skipped:`,
+        err,
+      )
+    })
+  }
+
+  // 5. Write synthetic .credentials.json (only if content differs)
   const credentialsPath = path.join(targetDir, ".credentials.json")
   const desiredJson = JSON.stringify(SYNTHETIC_CREDENTIAL, null, 2)
   let needsWrite = true
@@ -247,7 +330,7 @@ export async function ensureClaudeConfigMirror(opts: {
   }
   await chmodIfPossible(credentialsPath, 0o600)
 
-  // 5. Write/refresh marker file. Use lstat (not access) to detect
+  // 6. Write/refresh marker file. Use lstat (not access) to detect
   //    symlinks at the marker path — a previously-mirrored or
   //    user-placed symlink could otherwise let our `fs.writeFile`
   //    follow through to an arbitrary target. With the symlink-skip
@@ -289,9 +372,13 @@ export async function ensureClaudeConfigMirror(opts: {
 /**
  * Recursive snapshot-copy helper for `ensureClaudeConfigMirror`. Walks
  * `sourceDir/relPath` and mirrors each entry into `targetDir/relPath`.
- * - Top-level `EXCLUDED_MIRROR_TOPLEVEL` basenames are skipped entirely.
- * - Symlinks are recreated as symlinks (not dereferenced) so the walk
- *   never follows out of `sourceDir`.
+ * - Top-level entries are dispatched on `policyFor(name)`:
+ *     - `ISOLATED` → skipped entirely (no presence in mirror).
+ *     - `SHARED`   → skipped from the copy walk; handled by
+ *                    `ensureSharedSymlink` in the post-copy phase.
+ *     - `MIRRORED` → copied as today.
+ * - Symlinks are skipped (not recreated) so the walk never follows out
+ *   of `sourceDir` and we don't reintroduce a confused-deputy vector.
  * - Files copy only if source mtime > target mtime (idempotent).
  */
 async function mirrorDirRecursive(
@@ -309,8 +396,12 @@ async function mirrorDirRecursive(
     return
   }
   for (const name of entries) {
-    // Top-level exclusion only — sub-paths within included dirs always mirror.
-    if (relPath === "" && EXCLUDED_MIRROR_TOPLEVEL.has(name)) continue
+    // Policy dispatch at top-level only. Sub-paths within MIRRORED
+    // dirs always cascade as MIRRORED.
+    if (relPath === "") {
+      const policy = policyFor(name)
+      if (policy === "ISOLATED" || policy === "SHARED") continue
+    }
     const childRel = relPath === "" ? name : path.join(relPath, name)
     const childSource = path.join(sourceDir, childRel)
     const childTarget = path.join(targetDir, childRel)
@@ -366,6 +457,125 @@ async function mirrorDirRecursive(
       continue
     }
     // Skip other inode types (sockets, devices, fifos) silently.
+  }
+}
+
+/**
+ * Create or refresh a directory symlink `<mirrorDir>/<name>` →
+ * `<sourceDir>/<name>` (i.e. `~/.local/share/github-router/claude-config/<X>`
+ * → `~/.claude/<X>`). Idempotent and concurrent-safe.
+ *
+ * Behavior depending on what's already at `<mirrorDir>/<name>`:
+ *   - Symlink with the correct target → no-op.
+ *   - Symlink with the wrong target → replace atomically.
+ *   - Regular file or directory (legacy mirror leftover from before
+ *     this policy existed) → loud-warn and skip. Auto-deleting would
+ *     destroy proxy-session writes from the prior version. The user
+ *     is told the exact path and remediation.
+ *   - ENOENT → create symlink atomically.
+ *
+ * Atomic-creation: symlinks are first written at a unique side-path
+ * (`<mirrorDir>/<name>.tmp.<pid>.<8 hex>`) and then `fs.rename()`d into
+ * place. POSIX `rename` is atomic and replaces an existing symlink in
+ * a single step, so two concurrent `github-router claude` startups can't
+ * race to `EEXIST` — the loser's rename just overwrites the winner's
+ * symlink with an identical one. Gemini-critic 3-lab-review finding.
+ *
+ * Pre-creates `~/.claude/<name>/` as a real directory if missing so
+ * Claude Code's writes through the symlink don't fail with ENOENT.
+ */
+async function ensureSharedSymlink(
+  name: string,
+  sourceDir: string,
+  mirrorDir: string,
+): Promise<void> {
+  const sourcePath = path.join(sourceDir, name)
+  const mirrorPath = path.join(mirrorDir, name)
+
+  // 1. Ensure the source directory exists. Without this, Claude Code's
+  //    writes through the symlink (e.g. `projects/<hash>/foo.jsonl`)
+  //    fail with ENOENT on the parent dir.
+  try {
+    await fs.mkdir(sourcePath, { recursive: true })
+  } catch (err) {
+    // If the path exists as something other than a dir (file, symlink),
+    // skip with a debug log — the user has a non-standard setup and we
+    // shouldn't clobber.
+    consola.debug(
+      `ensureSharedSymlink(${name}): cannot mkdir source ${sourcePath}:`,
+      err,
+    )
+    return
+  }
+
+  // 2. Inspect the mirror-side slot.
+  let existing: Awaited<ReturnType<typeof fs.lstat>> | null = null
+  try {
+    existing = await fs.lstat(mirrorPath)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      consola.debug(
+        `ensureSharedSymlink(${name}): cannot lstat ${mirrorPath}:`,
+        err,
+      )
+      return
+    }
+  }
+
+  if (existing?.isSymbolicLink()) {
+    // Compare normalized target. `readlink` returns the value verbatim
+    // (which we wrote as the absolute `sourcePath` originally), so a
+    // strict-equal check is sufficient — no `realpath` needed.
+    let currentTarget: string | null = null
+    try {
+      currentTarget = await fs.readlink(mirrorPath)
+    } catch (err) {
+      consola.debug(
+        `ensureSharedSymlink(${name}): cannot readlink ${mirrorPath}:`,
+        err,
+      )
+    }
+    if (currentTarget === sourcePath) return
+    // Wrong target — fall through to the atomic-rename replace path.
+  } else if (existing) {
+    // Real file or directory occupies the slot. This is the upgrade
+    // case from a prior github-router version that mirrored these
+    // entries as snapshot copies. We refuse to clobber: those copies
+    // may hold proxy-session writes the user hasn't surfaced yet.
+    consola.warn(
+      `ensureClaudeConfigMirror: ${mirrorPath} is a real ${
+        existing.isDirectory() ? "directory" : "file"
+      } from an older github-router version; refusing to clobber. ` +
+        `If you want chat-history continuity for "${name}", move its ` +
+        `contents into ${sourcePath}/ (or delete ${mirrorPath} if empty); ` +
+        `the mirror will create a symlink on next launch.`,
+    )
+    return
+  }
+
+  // 3. Atomic-rename creation: symlink to a unique temp path, then
+  //    rename over the slot. `fs.rename` replaces existing symlinks
+  //    atomically on POSIX and is safe against concurrent racers.
+  const tempPath = `${mirrorPath}.tmp.${process.pid}.${randomBytes(4).toString("hex")}`
+  try {
+    await fs.symlink(sourcePath, tempPath)
+  } catch (err) {
+    // Extremely unlikely (the temp path is per-pid + 8-hex random) but
+    // log and bail rather than throw — the proxy can still start.
+    consola.debug(
+      `ensureSharedSymlink(${name}): symlink ${tempPath} failed:`,
+      err,
+    )
+    return
+  }
+  try {
+    await fs.rename(tempPath, mirrorPath)
+  } catch (err) {
+    consola.debug(
+      `ensureSharedSymlink(${name}): rename ${tempPath} → ${mirrorPath} failed:`,
+      err,
+    )
+    await fs.unlink(tempPath).catch(() => {})
   }
 }
 

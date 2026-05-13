@@ -19,7 +19,7 @@ mock.module("node:os", () => ({
   homedir: () => tempDir,
 }))
 
-const { ensurePaths, PATHS, sweepStaleRuntimeFiles, sweepStalePeerAgentMdFiles, writeRuntimeFileSecure, ensureClaudeConfigMirror } =
+const { ensurePaths, PATHS, sweepStaleRuntimeFiles, sweepStalePeerAgentMdFiles, writeRuntimeFileSecure, ensureClaudeConfigMirror, __testing } =
   await import("../src/lib/paths")
 
 test("ensurePaths creates token file with permissions", async () => {
@@ -327,46 +327,64 @@ test("ensureClaudeConfigMirror copies user's ~/.claude entries (snapshot, not sy
   expect(settings).toBe('{"theme":"dark"}')
 })
 
-test("ensureClaudeConfigMirror excludes .credentials.json, statsig/, projects/, transcripts/, logs/, cache/, todos/, shell_snapshots/, lock files", async () => {
+test("ensureClaudeConfigMirror: ISOLATED entries absent, SHARED entries become symlinks to ~/.claude/<name>", async () => {
   const claudeHome = path.join(tempDir, ".claude")
   await fs.rm(claudeHome, { recursive: true, force: true })
   await fs.mkdir(claudeHome, { recursive: true })
 
-  // Excluded entries — must NOT appear in mirror
+  // ISOLATED — must NOT appear in mirror
   await fs.writeFile(path.join(claudeHome, ".credentials.json"), '{"real":"creds"}')
   await fs.writeFile(path.join(claudeHome, ".credentials.json.lock"), "lock")
   await fs.writeFile(path.join(claudeHome, ".oauth_refresh.lock"), "lock")
   await fs.mkdir(path.join(claudeHome, "statsig"), { recursive: true })
   await fs.writeFile(path.join(claudeHome, "statsig", "cache.json"), "cache")
+  await fs.mkdir(path.join(claudeHome, "logs"), { recursive: true })
+  await fs.mkdir(path.join(claudeHome, "cache"), { recursive: true })
+  await fs.mkdir(path.join(claudeHome, "paste-cache"), { recursive: true })
+  await fs.writeFile(path.join(claudeHome, "paste-cache", "clip.txt"), "secret")
+
+  // SHARED — must become symlinks back to ~/.claude/<name>
   await fs.mkdir(path.join(claudeHome, "projects"), { recursive: true })
   await fs.writeFile(path.join(claudeHome, "projects", "session.jsonl"), "session")
   await fs.mkdir(path.join(claudeHome, "transcripts"), { recursive: true })
-  await fs.mkdir(path.join(claudeHome, "logs"), { recursive: true })
-  await fs.mkdir(path.join(claudeHome, "cache"), { recursive: true })
   await fs.mkdir(path.join(claudeHome, "todos"), { recursive: true })
   await fs.mkdir(path.join(claudeHome, "shell_snapshots"), { recursive: true })
-  // Included for control
+
+  // MIRRORED control — present in mirror, real file
   await fs.writeFile(path.join(claudeHome, "settings.json"), "{}")
 
   await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
   await ensureClaudeConfigMirror()
 
-  // Excluded entries must NOT exist in mirror
-  for (const excluded of [
+  // ISOLATED entries must NOT exist in mirror
+  for (const isolated of [
     ".credentials.json.lock",
     ".oauth_refresh.lock",
     "statsig",
-    "projects",
-    "transcripts",
     "logs",
     "cache",
-    "todos",
-    "shell_snapshots",
+    "paste-cache",
   ]) {
     await expect(
-      fs.stat(path.join(PATHS.CLAUDE_CONFIG_DIR, excluded)),
+      fs.stat(path.join(PATHS.CLAUDE_CONFIG_DIR, isolated)),
     ).rejects.toThrow()
   }
+
+  // SHARED entries exist as symlinks pointing at ~/.claude/<name>
+  for (const shared of ["projects", "transcripts", "todos", "shell_snapshots"]) {
+    const linkPath = path.join(PATHS.CLAUDE_CONFIG_DIR, shared)
+    const lst = await fs.lstat(linkPath)
+    expect(lst.isSymbolicLink()).toBe(true)
+    const target = await fs.readlink(linkPath)
+    expect(target).toBe(path.join(claudeHome, shared))
+  }
+  // And reading through the symlink returns the source's content
+  const sessionViaMirror = await fs.readFile(
+    path.join(PATHS.CLAUDE_CONFIG_DIR, "projects", "session.jsonl"),
+    "utf8",
+  )
+  expect(sessionViaMirror).toBe("session")
+
   // .credentials.json IS present in mirror, but with our synthetic content
   // (not the user's "real":"creds" body). This is the load-bearing
   // isolation: the user's credential is never visible to the proxy session.
@@ -376,10 +394,13 @@ test("ensureClaudeConfigMirror excludes .credentials.json, statsig/, projects/, 
   )
   expect(creds).not.toContain("real")
   expect(creds).toContain("claudeAiOauth")
-  // Control: included entry is present
-  await expect(
-    fs.stat(path.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")),
-  ).resolves.toBeDefined()
+
+  // MIRRORED control: included entry is present as a real file (not a symlink)
+  const settingsStat = await fs.lstat(
+    path.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json"),
+  )
+  expect(settingsStat.isFile()).toBe(true)
+  expect(settingsStat.isSymbolicLink()).toBe(false)
 })
 
 test("ensureClaudeConfigMirror is idempotent — re-running does not change credential mtime", async () => {
@@ -445,7 +466,7 @@ test("ensureClaudeConfigMirror SKIPS symlinks in source (gemini-critic security 
 test("ensureClaudeConfigMirror marker-write refuses to clobber an existing symlink at .github-router-managed (defense-in-depth)", async () => {
   if (process.platform === "win32") return // symlinks need admin
 
-  // .github-router-managed is in EXCLUDED_MIRROR_TOPLEVEL so a user-side
+  // .github-router-managed is ISOLATED in CLAUDE_HOME_POLICY so a user-side
   // symlink at ~/.claude/.github-router-managed wouldn't be mirrored.
   // But this test exercises the defense-in-depth: if a symlink somehow
   // ends up at <mirror>/.github-router-managed (e.g. placed manually by
@@ -467,4 +488,148 @@ test("ensureClaudeConfigMirror marker-write refuses to clobber an existing symli
   // Sensitive file content unchanged (symlink not followed)
   const after = await fs.readFile(sensitive, "utf8")
   expect(after).toBe("DO-NOT-OVERWRITE")
+})
+
+// ============================================================
+// SHARED-symlink phase (3-lab review: chat-history continuity)
+// ============================================================
+
+test("ensureClaudeConfigMirror auto-creates ~/.claude/<X> when missing (so symlink target resolves)", async () => {
+  if (process.platform === "win32") return // symlinks need admin
+
+  // Start with NO ~/.claude at all
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+
+  await ensureClaudeConfigMirror()
+
+  // The SHARED source dir was auto-created so the symlink isn't dangling
+  const sourceProjects = await fs.stat(path.join(claudeHome, "projects"))
+  expect(sourceProjects.isDirectory()).toBe(true)
+
+  // And the mirror entry is a symlink resolving to it
+  const mirrorProjects = path.join(PATHS.CLAUDE_CONFIG_DIR, "projects")
+  const lst = await fs.lstat(mirrorProjects)
+  expect(lst.isSymbolicLink()).toBe(true)
+  const target = await fs.readlink(mirrorProjects)
+  expect(target).toBe(path.join(claudeHome, "projects"))
+})
+
+test("ensureClaudeConfigMirror re-points a SHARED symlink whose target is wrong", async () => {
+  if (process.platform === "win32") return
+
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await fs.mkdir(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, mode: 0o700 })
+
+  // Pre-place a symlink pointing somewhere else
+  const wrongTarget = path.join(tempDir, "decoy-projects")
+  await fs.mkdir(wrongTarget, { recursive: true })
+  await fs.symlink(
+    wrongTarget,
+    path.join(PATHS.CLAUDE_CONFIG_DIR, "projects"),
+  )
+
+  await ensureClaudeConfigMirror()
+
+  const after = await fs.readlink(
+    path.join(PATHS.CLAUDE_CONFIG_DIR, "projects"),
+  )
+  expect(after).toBe(path.join(claudeHome, "projects"))
+})
+
+test("ensureClaudeConfigMirror refuses to clobber a real dir at a SHARED slot (migration safety)", async () => {
+  if (process.platform === "win32") return
+
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await fs.mkdir(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, mode: 0o700 })
+
+  // Simulate a stale mirror from a prior github-router version: a real
+  // dir at <mirror>/projects containing data. Auto-deleting would lose
+  // that data — the migration story is warn-and-skip.
+  const stalePath = path.join(PATHS.CLAUDE_CONFIG_DIR, "projects")
+  await fs.mkdir(stalePath, { recursive: true })
+  await fs.writeFile(
+    path.join(stalePath, "old-session.jsonl"),
+    "old-proxy-session-data",
+  )
+
+  await ensureClaudeConfigMirror()
+
+  // Real dir + content must survive untouched
+  const lst = await fs.lstat(stalePath)
+  expect(lst.isDirectory()).toBe(true)
+  expect(lst.isSymbolicLink()).toBe(false)
+  const survived = await fs.readFile(
+    path.join(stalePath, "old-session.jsonl"),
+    "utf8",
+  )
+  expect(survived).toBe("old-proxy-session-data")
+})
+
+test("ensureClaudeConfigMirror SHARED-symlink idempotent: re-running does not change ctime", async () => {
+  if (process.platform === "win32") return
+
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+
+  await ensureClaudeConfigMirror()
+  const linkPath = path.join(PATHS.CLAUDE_CONFIG_DIR, "projects")
+  const before = await fs.lstat(linkPath)
+
+  await new Promise((r) => setTimeout(r, 20))
+  await ensureClaudeConfigMirror()
+
+  const after = await fs.lstat(linkPath)
+  // ctime tracks symlink replacement (rename). If the no-op branch is
+  // working, ctime is unchanged across invocations.
+  expect(after.ctimeMs).toBe(before.ctimeMs)
+})
+
+test("policyFor regression guard: agents/ MUST stay MIRRORED (sweep deletes inside it)", () => {
+  // sweepStalePeerAgentMdFiles unlinks `peer-<pid>-*.md` files inside
+  // <mirror>/agents/. If `agents/` were ever reclassified to SHARED,
+  // that sweep would delete files in the user's REAL ~/.claude/agents/
+  // including any custom subagent files. Hard-pin to MIRRORED.
+  expect(__testing.policyFor("agents")).toBe("MIRRORED")
+
+  // Companion guards for the other isolation-critical names.
+  expect(__testing.policyFor(".credentials.json")).toBe("ISOLATED")
+  expect(__testing.policyFor("statsig")).toBe("ISOLATED")
+  expect(__testing.policyFor("paste-cache")).toBe("ISOLATED")
+  // Unknown name defaults to MIRRORED (safe — flows through as snapshot)
+  expect(__testing.policyFor("some-future-claude-dir")).toBe("MIRRORED")
+  // Files NEVER go in SHARED (Node's fs.rename severs file symlinks
+  // silently — gemini-critic finding). Spot-check the two known file
+  // names that were considered for SHARED and rejected.
+  expect(__testing.policyFor("history.jsonl")).toBe("MIRRORED")
+  expect(__testing.policyFor(".claude.json")).toBe("MIRRORED")
+})
+
+test("ensureClaudeConfigMirror SHARED-symlink concurrent: parallel calls don't EEXIST", async () => {
+  if (process.platform === "win32") return
+
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+
+  // Two parallel invocations — atomic rename means the loser silently
+  // overwrites the winner's symlink with an identical one.
+  await expect(
+    Promise.all([ensureClaudeConfigMirror(), ensureClaudeConfigMirror()]),
+  ).resolves.toBeDefined()
+
+  // Final state: symlink resolves correctly
+  const link = await fs.readlink(
+    path.join(PATHS.CLAUDE_CONFIG_DIR, "projects"),
+  )
+  expect(link).toBe(path.join(claudeHome, "projects"))
 })
