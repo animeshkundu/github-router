@@ -541,7 +541,30 @@ test("ensureClaudeConfigMirror re-points a SHARED symlink whose target is wrong"
   expect(after).toBe(path.join(claudeHome, "projects"))
 })
 
-test("ensureClaudeConfigMirror refuses to clobber a real dir at a SHARED slot (migration safety)", async () => {
+test("ensureClaudeConfigMirror auto-rmdirs an EMPTY real dir at a SHARED slot, then symlinks (smooth migration path)", async () => {
+  if (process.platform === "win32") return
+
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await fs.mkdir(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, mode: 0o700 })
+
+  // Empty real dir from a prior github-router snapshot. Safe to reap
+  // since it holds no proxy-session writes.
+  const stalePath = path.join(PATHS.CLAUDE_CONFIG_DIR, "projects")
+  await fs.mkdir(stalePath, { recursive: true })
+
+  await ensureClaudeConfigMirror()
+
+  // Real dir was rmdir'd and replaced with a symlink to the source dir
+  const lst = await fs.lstat(stalePath)
+  expect(lst.isSymbolicLink()).toBe(true)
+  const target = await fs.readlink(stalePath)
+  expect(target).toBe(path.join(claudeHome, "projects"))
+})
+
+test("ensureClaudeConfigMirror refuses to clobber a NON-EMPTY real dir at a SHARED slot (migration safety)", async () => {
   if (process.platform === "win32") return
 
   const claudeHome = path.join(tempDir, ".claude")
@@ -552,7 +575,7 @@ test("ensureClaudeConfigMirror refuses to clobber a real dir at a SHARED slot (m
 
   // Simulate a stale mirror from a prior github-router version: a real
   // dir at <mirror>/projects containing data. Auto-deleting would lose
-  // that data — the migration story is warn-and-skip.
+  // that data — the migration story is warn-and-skip for non-empty dirs.
   const stalePath = path.join(PATHS.CLAUDE_CONFIG_DIR, "projects")
   await fs.mkdir(stalePath, { recursive: true })
   await fs.writeFile(
@@ -571,6 +594,30 @@ test("ensureClaudeConfigMirror refuses to clobber a real dir at a SHARED slot (m
     "utf8",
   )
   expect(survived).toBe("old-proxy-session-data")
+})
+
+test("ensureClaudeConfigMirror refuses to clobber a regular FILE at a SHARED slot", async () => {
+  if (process.platform === "win32") return
+
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await fs.mkdir(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, mode: 0o700 })
+
+  // Defense-in-depth: if a regular file somehow occupies a SHARED slot
+  // (shouldn't happen in practice — only dirs are SHARED — but the path
+  // exists in code), warn and skip rather than auto-clobber.
+  const filePath = path.join(PATHS.CLAUDE_CONFIG_DIR, "projects")
+  await fs.writeFile(filePath, "user-placed-content")
+
+  await ensureClaudeConfigMirror()
+
+  const lst = await fs.lstat(filePath)
+  expect(lst.isFile()).toBe(true)
+  expect(lst.isSymbolicLink()).toBe(false)
+  const survived = await fs.readFile(filePath, "utf8")
+  expect(survived).toBe("user-placed-content")
 })
 
 test("ensureClaudeConfigMirror SHARED-symlink idempotent: re-running does not change ctime", async () => {

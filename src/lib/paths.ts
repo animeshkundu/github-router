@@ -468,10 +468,14 @@ async function mirrorDirRecursive(
  * Behavior depending on what's already at `<mirrorDir>/<name>`:
  *   - Symlink with the correct target → no-op.
  *   - Symlink with the wrong target → replace atomically.
- *   - Regular file or directory (legacy mirror leftover from before
- *     this policy existed) → loud-warn and skip. Auto-deleting would
- *     destroy proxy-session writes from the prior version. The user
- *     is told the exact path and remediation.
+ *   - Empty real directory (legacy mirror leftover with no proxy-session
+ *     writes accumulated yet) → `rmdir` and replace with the symlink.
+ *     Safe by definition: `fs.rmdir` only succeeds on empty dirs (POSIX),
+ *     so there is nothing to lose. Smooths the upgrade path for users
+ *     whose legacy mirror dirs were never written to.
+ *   - Non-empty real directory or regular file → loud-warn and skip.
+ *     Auto-deleting would destroy proxy-session writes from the prior
+ *     version. The user is told the exact path and remediation.
  *   - ENOENT → create symlink atomically.
  *
  * Atomic-creation: symlinks are first written at a unique side-path
@@ -537,18 +541,32 @@ async function ensureSharedSymlink(
     }
     if (currentTarget === sourcePath) return
     // Wrong target — fall through to the atomic-rename replace path.
+  } else if (existing?.isDirectory()) {
+    // Legacy real directory at the slot. Try `fs.rmdir` — on POSIX it
+    // succeeds ONLY if the directory is empty, so there's nothing to
+    // lose. If it's non-empty (ENOTEMPTY) or any other failure occurs,
+    // fall back to the warn-and-skip path so we never auto-clobber
+    // user data.
+    try {
+      await fs.rmdir(mirrorPath)
+      // Empty dir reaped — fall through to the atomic-rename create path.
+    } catch (err) {
+      consola.warn(
+        `ensureClaudeConfigMirror: ${mirrorPath} is a non-empty real directory ` +
+          `from an older github-router version; refusing to clobber. ` +
+          `If you want chat-history continuity for "${name}", move its ` +
+          `contents into ${sourcePath}/ then delete ${mirrorPath}; the ` +
+          `mirror will create a symlink on next launch. ` +
+          `(rmdir error: ${(err as NodeJS.ErrnoException).code ?? "unknown"})`,
+      )
+      return
+    }
   } else if (existing) {
-    // Real file or directory occupies the slot. This is the upgrade
-    // case from a prior github-router version that mirrored these
-    // entries as snapshot copies. We refuse to clobber: those copies
-    // may hold proxy-session writes the user hasn't surfaced yet.
+    // Regular file (or special inode like a socket) — never auto-clobber.
     consola.warn(
-      `ensureClaudeConfigMirror: ${mirrorPath} is a real ${
-        existing.isDirectory() ? "directory" : "file"
-      } from an older github-router version; refusing to clobber. ` +
-        `If you want chat-history continuity for "${name}", move its ` +
-        `contents into ${sourcePath}/ (or delete ${mirrorPath} if empty); ` +
-        `the mirror will create a symlink on next launch.`,
+      `ensureClaudeConfigMirror: ${mirrorPath} is a regular file at a ` +
+        `SHARED symlink slot; refusing to clobber. Inspect and remove ` +
+        `manually if safe; the mirror will create a symlink on next launch.`,
     )
     return
   }
