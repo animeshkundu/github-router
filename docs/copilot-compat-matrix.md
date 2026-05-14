@@ -127,6 +127,22 @@ The probe currently exercises `/v1/messages`. TODO:
 - `/v1/responses` — gpt-5.x / o-series models
 - `/v1/embeddings` — passthrough
 
+## Peer-MCP personas
+
+The proxy's `/mcp` endpoint exposes four read-only adversarial-review personas (`codex_critic`, `codex_reviewer`, `gemini_critic`, `opus_critic`) plus an optional write-capable `codex_implementer` (only when `--codex-cli`). See [`docs/peer-mcp-design.md`](peer-mcp-design.md) for the full architecture.
+
+Each persona declares an `allowedEfforts` allowlist that the `/mcp` `tools/call` handler enforces (Phase A1 of `cap-codex-effort-add-opus-critic`). Calls passing an effort outside the allowlist are rejected at the JSON-RPC layer with `-32602 RPC_INVALID_PARAMS` BEFORE any Copilot fetch, so a banned tier never burns an in-flight slot or hits the ~60s MCP per-tool-call ceiling. The allowlists are derived empirically from latency probes (see CLAUDE.md "Peer-model MCP integration" for the full table).
+
+| Probe id | Persona | What's verified | End-to-end status | Source | Last verified |
+|---|---|---|---|---|---|
+| `opus_critic_low` | `opus_critic` | `/v1/messages` accepts `thinking.budget_tokens=1024 + max_tokens=2524` (the body shape the handler builds for `effort:"low"`) | ✅ 200 | anthropic-docs | 2026-05-14 |
+| `opus_critic_medium` | `opus_critic` | `/v1/messages` accepts `thinking.budget_tokens=3000 + max_tokens=4500` (the body shape the handler builds for `effort:"medium"`) | ✅ 200 | anthropic-docs | 2026-05-14 |
+| `opus_critic_high_rejected` | `opus_critic` | `peer-mcp-personas.ts` source: `opus-critic.allowedEfforts` excludes `"high"`. Static-check probe (parses TS source) — the live MCP boundary requires the per-launch nonce, which is harder to obtain from a probe script than to read the source-of-truth declaration. | ✅ excluded | proxy-internal | 2026-05-14 |
+| `codex_critic_xhigh_rejected` | `codex_critic` | `peer-mcp-personas.ts` source: `codex-critic.allowedEfforts` excludes `"xhigh"`. Static-check probe (same rationale as above). Empirical: gpt-5.5 at xhigh is 56s on a 600-byte prompt — busts the 60s ceiling on real reviews. | ✅ excluded | proxy-internal | 2026-05-14 |
+| `codex_reviewer_xhigh_rejected` | `codex_reviewer` | `peer-mcp-personas.ts` source: `codex-reviewer.allowedEfforts` excludes `"xhigh"`. Static-check probe. Empirical: gpt-5.3-codex is faster than gpt-5.5 but xhigh still pushes the ceiling on real diffs. | ✅ excluded | proxy-internal | 2026-05-14 |
+
+Static-check probes anchor the script to `PROJECT_ROOT` (computed from `BASH_SOURCE`) so they work regardless of CWD; the persona-block parser is a bounded `awk` window from the matched `agentName:` line and depends on the current TS source style (double-quoted string entries inside an array literal). If the persona spec ever switches to dynamic construction or single quotes, these probes will fail loudly — the failure mode is acceptable because the static check IS the source of truth the handler enforces, so any change to the spec needs the probe updated in lock-step.
+
 ## Adding a new probe
 
 1. Pick an `id` (snake_case, descriptive — e.g. `tooltype_computer_20250124` or `cache_control_scope_stripped`).

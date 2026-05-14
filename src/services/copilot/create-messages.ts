@@ -45,10 +45,17 @@ function buildHeaders(
 /**
  * Forward an Anthropic Messages API request to Copilot's native /v1/messages endpoint.
  * Returns the raw Response so callers can handle streaming vs non-streaming.
+ *
+ * `callerSignal` (optional) is composed with the standard
+ * UPSTREAM_FETCH_TIMEOUT_MS via AbortSignal.any so callers (e.g. the
+ * peer-MCP `opus-critic` persona) can cancel the upstream call when
+ * Claude Code's MCP per-tool-call ceiling fires. Mirrors the pattern
+ * in createResponses / createChatCompletions.
  */
 export async function createMessages(
   body: string,
   extraHeaders?: Record<string, string>,
+  callerSignal?: AbortSignal,
 ): Promise<Response> {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
@@ -59,9 +66,13 @@ export async function createMessages(
   const doFetch = (): Promise<Response> => {
     const headers = buildHeaders(extraHeaders)
     const fetchInit: RequestInit = { method: "POST", headers, body }
+    const signals: Array<AbortSignal> = []
     if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
-      fetchInit.signal = AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS)
+      signals.push(AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS))
     }
+    if (callerSignal) signals.push(callerSignal)
+    if (signals.length === 1) fetchInit.signal = signals[0]
+    else if (signals.length > 1) fetchInit.signal = AbortSignal.any(signals)
     return fetch(url, fetchInit)
   }
   const response = await tryRefreshAndRetry(doFetch, "/v1/messages")
@@ -90,10 +101,14 @@ export async function createMessages(
 /**
  * Forward an Anthropic count_tokens request to Copilot's native endpoint.
  * Returns the raw Response.
+ *
+ * `callerSignal` is composed with UPSTREAM_FETCH_TIMEOUT_MS — same pattern
+ * as createMessages.
  */
 export async function countTokens(
   body: string,
   extraHeaders?: Record<string, string>,
+  callerSignal?: AbortSignal,
 ): Promise<Response> {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
@@ -103,9 +118,13 @@ export async function countTokens(
   const doFetch = (): Promise<Response> => {
     const headers = buildHeaders(extraHeaders)
     const fetchInit: RequestInit = { method: "POST", headers, body }
+    const signals: Array<AbortSignal> = []
     if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
-      fetchInit.signal = AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS)
+      signals.push(AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS))
     }
+    if (callerSignal) signals.push(callerSignal)
+    if (signals.length === 1) fetchInit.signal = signals[0]
+    else if (signals.length > 1) fetchInit.signal = AbortSignal.any(signals)
     return fetch(url, fetchInit)
   }
   const response = await tryRefreshAndRetry(

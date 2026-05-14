@@ -8,12 +8,16 @@ import { resolveModel } from "~/lib/utils"
 import {
   PERSONAS_READ,
   type PersonaSpec,
+  EFFORT_LEVELS,
+  type Effort,
+  isEffort,
 } from "~/lib/peer-mcp-personas"
 import {
   createChatCompletions,
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
+import { createMessages } from "~/services/copilot/create-messages"
 import {
   createResponses,
   type ResponsesApiResponse,
@@ -24,24 +28,10 @@ const MCP_PROTOCOL_VERSION = "2025-06-18"
 const SERVER_NAME = "github-router-peers"
 const SERVER_VERSION = "1"
 
-/**
- * Reasoning effort levels accepted by Copilot's /v1/responses (gpt-5.x) and
- * /v1/chat/completions endpoints. Per the proxy's existing thinking-mode
- * translator (CLAUDE.md "Thinking-mode translation"), Copilot's adaptive-
- * thinking path uses these same buckets:
- *   <2k tokens → low, <8k → medium, <24k → high, else → xhigh.
- *
- * Default `high` for peer reviews — adversarial-by-design but still cost-
- * conscious. Callers can pass `xhigh` explicitly for deep dives, or `medium`
- * for quick sanity checks.
- */
-const EFFORT_LEVELS = ["low", "medium", "high", "xhigh"] as const
-type Effort = (typeof EFFORT_LEVELS)[number]
-const DEFAULT_EFFORT: Effort = "high"
-
-function isEffort(v: unknown): v is Effort {
-  return typeof v === "string" && (EFFORT_LEVELS as ReadonlyArray<string>).includes(v)
-}
+// Effort levels (EFFORT_LEVELS, Effort, isEffort) are imported from
+// peer-mcp-personas.ts so PersonaSpec.allowedEfforts can reference the
+// same type without a circular import. Per-persona defaultEffort is on
+// the PersonaSpec; there is no module-level default here anymore.
 
 /** Bounded concurrency. Originally capped at 2 (commit 4317a25) as a defensive
  *  pre-launch guess against Opus's natural pattern of fanning out to all three
@@ -168,7 +158,11 @@ function geminiAvailable(): boolean {
 }
 
 function activePersonas(): Array<PersonaSpec> {
-  return PERSONAS_READ.filter((p) => !p.requiresHttp || geminiAvailable())
+  // Drop personas whose model family is missing from Copilot's live
+  // catalog (currently only gemini-critic, gated by `requiresGeminiCatalog`).
+  // Distinct from `requiresHttp` (codex-cli stdio routing constraint) —
+  // see PersonaSpec field doc in peer-mcp-personas.ts.
+  return PERSONAS_READ.filter((p) => !p.requiresGeminiCatalog || geminiAvailable())
 }
 
 function toolEntries(): Array<ToolEntry> {
@@ -191,13 +185,17 @@ function toolEntries(): Array<ToolEntry> {
         },
         effort: {
           type: "string",
-          enum: [...EFFORT_LEVELS],
+          // Per-persona allowedEfforts: schema only advertises tiers the
+          // persona accepts. Empirical data (2026-05-14) drove which tiers
+          // each persona exposes — see EFFORT_LEVELS doc in
+          // src/lib/peer-mcp-personas.ts.
+          enum: [...p.allowedEfforts],
           description:
-            `Reasoning depth (low | medium | high | xhigh). Default "${DEFAULT_EFFORT}". `
-            + "Use 'xhigh' for explicit deep dives where you want maximum reasoning. "
-            + "Use 'medium' for quick sanity checks. "
-            + "Note: for non-OpenAI models routed via /v1/chat/completions (gemini-3.x), "
-            + "the upstream may silently ignore this knob.",
+            `Reasoning depth (${p.allowedEfforts.join(" | ")}). Default "${p.defaultEffort}". `
+            + "Higher tiers cost more wall-clock; lower tiers are quicker sanity checks. "
+            + (p.endpoint === "/v1/chat/completions"
+              ? "Note: for gemini routed via /v1/chat/completions, the upstream may silently ignore this knob."
+              : ""),
         },
       },
     },
@@ -238,6 +236,33 @@ function extractChatCompletionText(response: ChatCompletionResponse): string {
   return typeof c === "string" ? c : ""
 }
 
+/**
+ * Extract assistant text from an Anthropic /v1/messages response.
+ * Mirrors `extractResponsesText` for the OpenAI /v1/responses shape.
+ *
+ * The Anthropic Messages API response has shape `{content: [{type, ...}, ...]}`.
+ * Text blocks have `type: "text"` and `text: string`. Thinking blocks have
+ * `type: "thinking"` (and live in the same array; we ignore them — they're
+ * the model's reasoning trace, not the final answer for the lead).
+ */
+interface MessagesApiContentBlock {
+  type: string
+  text?: string
+}
+interface MessagesApiResponse {
+  content?: ReadonlyArray<MessagesApiContentBlock>
+}
+
+function extractMessagesText(response: MessagesApiResponse): string {
+  const out: Array<string> = []
+  for (const block of response.content ?? []) {
+    if (block.type === "text" && typeof block.text === "string") {
+      out.push(block.text)
+    }
+  }
+  return out.join("")
+}
+
 interface ToolErrorContent {
   content: Array<{ type: "text"; text: string }>
   isError: true
@@ -248,6 +273,51 @@ function toolError(message: string): ToolErrorContent {
     content: [{ type: "text", text: message }],
     isError: true,
   }
+}
+
+/**
+ * Empirical pre-flight cap to convert "would-bust-the-60s-MCP-ceiling"
+ * calls into fast actionable errors instead of slot-leaking timeouts.
+ *
+ * Probed live against Copilot 2026-05-14:
+ *   gpt-5.5 high on a ~600B prompt = 23.8s → ~76s on 8KB (rough linear)
+ *   gpt-5.3-codex high on ~600B = 16.0s → ~64s on 12KB
+ *   claude-opus-4-7 medium (thinking=3000) on a trivial prompt = 22.5s
+ *     but model self-paces budget → ~50s+ on a real ~6KB review
+ *
+ * Returns `{tooLong: true, capBytes}` when the (persona, effort, briefBytes)
+ * tuple is empirically predicted to bust the 60s ceiling. Caller must
+ * reject pre-flight before burning an inFlight slot. Thresholds are
+ * deliberately conservative — better to surface as a fast error and let
+ * the caller decompose than to silently time out.
+ *
+ * gemini_critic has no cap (long-context model + Copilot may auto-pace).
+ */
+const PRE_FLIGHT_CAPS: ReadonlyArray<{
+  toolName: string
+  effort: Effort
+  maxBriefBytes: number
+}> = [
+  { toolName: "codex_critic", effort: "high", maxBriefBytes: 8 * 1024 },
+  { toolName: "codex_reviewer", effort: "high", maxBriefBytes: 12 * 1024 },
+  { toolName: "opus_critic", effort: "medium", maxBriefBytes: 6 * 1024 },
+]
+
+function predictedTooLong(
+  persona: PersonaSpec,
+  effort: Effort,
+  briefBytes: number,
+): { tooLong: true; capBytes: number } | { tooLong: false } {
+  for (const cap of PRE_FLIGHT_CAPS) {
+    if (
+      cap.toolName === persona.toolNameHttp
+      && cap.effort === effort
+      && briefBytes > cap.maxBriefBytes
+    ) {
+      return { tooLong: true, capBytes: cap.maxBriefBytes }
+    }
+  }
+  return { tooLong: false }
 }
 
 async function callPersona(
@@ -262,6 +332,10 @@ async function callPersona(
   // through the existing fuzzy matcher rather than 404'ing.
   const resolvedModel = resolveModel(persona.model)
   const userText = buildUserText(prompt, context)
+
+  // NOTE: predictedTooLong pre-flight cap fires in handleToolsCall
+  // BEFORE inFlightToolsCall++ — see the architectural invariant
+  // documented in CLAUDE.md. Don't duplicate it here.
 
   // NOTE on consumer-cancel signal: we deliberately do NOT pass
   // c.req.raw.signal into the upstream fetch. Bun/srvx aborts the
@@ -294,6 +368,33 @@ async function callPersona(
       signal,
     )) as ResponsesApiResponse
     const text = extractResponsesText(response)
+    if (!text) {
+      return toolError(`persona ${persona.agentName}: empty assistant output`)
+    }
+    return { content: [{ type: "text", text }] }
+  }
+
+  if (persona.endpoint === "/v1/messages") {
+    // claude-opus-4-7 path (Phase B). The persona-level allowedEfforts
+    // gate (Phase A1) already rejected high/xhigh; this branch only
+    // sees low or medium. Conservative thinking-budget bucketing to fit
+    // within the 60s MCP ceiling at realistic claude-opus-4-7 reasoning
+    // rates (~80-150 tps): low → 1024 tokens (~13s thinking); medium →
+    // 3000 tokens (~38s thinking). Anthropic spec REQUIRES
+    // max_tokens >= budget_tokens AND recommends extra room for the
+    // actual response — set max_tokens = budget + 1500.
+    const budgetTokens = effort === "low" ? 1024 : 3000
+    const maxTokens = budgetTokens + 1500
+    const body = JSON.stringify({
+      model: resolvedModel,
+      max_tokens: maxTokens,
+      system: persona.baseInstructions,
+      thinking: { type: "enabled", budget_tokens: budgetTokens },
+      messages: [{ role: "user", content: userText }],
+    })
+    const response = await createMessages(body, undefined, signal)
+    const json = (await response.json()) as MessagesApiResponse
+    const text = extractMessagesText(json)
     if (!text) {
       return toolError(`persona ${persona.agentName}: empty assistant output`)
     }
@@ -359,19 +460,18 @@ async function handleToolsCall(
   const args = (params.arguments ?? {}) as Record<string, unknown>
   const prompt = typeof args.prompt === "string" ? args.prompt : ""
   const context = typeof args.context === "string" ? args.context : undefined
-  // Validate effort against the EFFORT_LEVELS allowlist; reject unknown
-  // values cleanly rather than forwarding garbage to the upstream payload.
-  let effort: Effort = DEFAULT_EFFORT
-  if (args.effort !== undefined) {
-    if (!isEffort(args.effort)) {
-      return rpcError(
-        body.id,
-        RPC_INVALID_PARAMS,
-        `tools/call: arguments.effort must be one of ${EFFORT_LEVELS.join("|")}; got ${JSON.stringify(args.effort)}`,
-      )
-    }
-    effort = args.effort
+  // Validate effort shape against the global EFFORT_LEVELS allowlist
+  // (rejects garbage like `effort: "extreme"`); the per-persona
+  // allowedEfforts gate runs AFTER persona lookup below (rejects
+  // valid-but-not-allowed-here tiers like `xhigh` on codex_critic).
+  if (args.effort !== undefined && !isEffort(args.effort)) {
+    return rpcError(
+      body.id,
+      RPC_INVALID_PARAMS,
+      `tools/call: arguments.effort must be one of ${EFFORT_LEVELS.join("|")}; got ${JSON.stringify(args.effort)}`,
+    )
   }
+  const requestedEffort = args.effort as Effort | undefined
 
   if (!name) {
     return rpcError(body.id, RPC_INVALID_PARAMS, "tools/call missing name")
@@ -390,6 +490,53 @@ async function handleToolsCall(
       RPC_INVALID_PARAMS,
       `tools/call: arguments.prompt is required`,
     )
+  }
+
+  // Per-persona effort gate. Empirical data (probed live 2026-05-14)
+  // showed that gpt-5.5 at `xhigh` on a tiny prompt takes 56s — right
+  // at the 60s MCP per-tool-call ceiling and guaranteed to bust it on
+  // real review prompts. claude-opus-4-7 at `high`+ thinking budgets
+  // also can't fit in 60s. Each persona declares which tiers it
+  // accepts; rejected tiers return RPC_INVALID_PARAMS so the caller
+  // can re-call at a permitted tier instead of waiting for a timeout.
+  if (
+    requestedEffort !== undefined
+    && !persona.allowedEfforts.includes(requestedEffort)
+  ) {
+    return rpcError(
+      body.id,
+      RPC_INVALID_PARAMS,
+      `tools/call: persona "${persona.toolNameHttp}" does not accept effort="${requestedEffort}". `
+        + `Allowed: ${persona.allowedEfforts.join("|")}. `
+        + `(Higher tiers were removed because they don't fit in Claude Code's ~60s MCP per-tool-call ceiling on this model.)`,
+    )
+  }
+  const effort: Effort = requestedEffort ?? persona.defaultEffort
+
+  // Pre-flight latency cap (Phase A2). Fires BEFORE inFlightToolsCall++
+  // so a rejected pre-flight is free of concurrency-slot cost (the
+  // documented invariant in CLAUDE.md "Peer-model MCP integration").
+  // Convert would-be-timeouts into fast actionable errors before we
+  // burn an inFlight slot or start a multi-tens-of-seconds upstream call.
+  const userText = buildUserText(prompt, context)
+  const briefBytes = Buffer.byteLength(userText, "utf8")
+  const cap = predictedTooLong(persona, effort, briefBytes)
+  if (cap.tooLong) {
+    const briefKb = (briefBytes / 1024).toFixed(1)
+    const capKb = (cap.capBytes / 1024).toFixed(0)
+    return rpcResult(body.id, {
+      content: [
+        {
+          type: "text",
+          text:
+            `${persona.toolNameHttp} at effort='${effort}' on a ${briefKb}KB brief is likely to exceed the ~60s MCP per-tool-call ceiling `
+              + `(empirical cap for this persona+effort: ${capKb}KB). `
+              + `Either drop to a lower effort tier, or split the brief into 2-4 parallel sub-calls per the decomposition guidance in the tool description. `
+              + `(See docs/copilot-compat-matrix.md for the empirical latency curves driving this cap.)`,
+        },
+      ],
+      isError: true,
+    })
   }
 
   if (inFlightToolsCall >= MAX_INFLIGHT_TOOLS_CALL) {

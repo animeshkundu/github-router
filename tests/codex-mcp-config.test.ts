@@ -101,7 +101,7 @@ describe("buildPeerMcpConfig", () => {
 })
 
 describe("buildPeerAgentDefinitions", () => {
-  test("HTTP backend with gemini = 3 personas + peer-review-coordinator (4 agents total)", () => {
+  test("HTTP backend with gemini = 4 personas + peer-review-coordinator (5 agents total)", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: false,
       geminiAvailable: true,
@@ -112,17 +112,19 @@ describe("buildPeerAgentDefinitions", () => {
       "codex-critic",
       "codex-reviewer",
       "gemini-critic",
+      "opus-critic",
       "peer-review-coordinator",
     ])
     // Each persona prompt routes to the HTTP MCP server name; the
     // coordinator prompt does NOT route to mcp tools directly (it
     // delegates to the persona subagents instead).
-    for (const name of ["codex-critic", "codex-reviewer", "gemini-critic"]) {
+    for (const name of ["codex-critic", "codex-reviewer", "gemini-critic", "opus-critic"]) {
       expect(agents[name]!.prompt).toContain("mcp__gh-router-peers__")
       expect(agents[name]!.description.length).toBeGreaterThan(0)
     }
     expect(agents["peer-review-coordinator"]!.description).toContain("Use proactively")
     expect(agents["peer-review-coordinator"]!.prompt).toContain("codex-critic")
+    expect(agents["peer-review-coordinator"]!.prompt).toContain("opus-critic")
   })
 
   test("HTTP backend without gemini drops gemini-critic but keeps coordinator", () => {
@@ -135,14 +137,19 @@ describe("buildPeerAgentDefinitions", () => {
     expect(Object.keys(agents).sort()).toEqual([
       "codex-critic",
       "codex-reviewer",
+      "opus-critic",
       "peer-review-coordinator",
     ])
     expect(agents["gemini-critic"]).toBeUndefined()
     // Coordinator prompt should NOT reference gemini-critic when not registered.
     expect(agents["peer-review-coordinator"]!.prompt).toContain("NOT REGISTERED")
+    // opus-critic is always registered (Anthropic models always present),
+    // so the coordinator's routing-rules block must mention it regardless
+    // of whether gemini is available.
+    expect(agents["peer-review-coordinator"]!.prompt).toContain("opus-critic")
   })
 
-  test("CLI backend with gemini = 4 personas + coordinator (5 agents total)", () => {
+  test("CLI backend with gemini = 5 personas + coordinator (6 agents total)", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: true,
       geminiAvailable: true,
@@ -154,6 +161,7 @@ describe("buildPeerAgentDefinitions", () => {
       "codex-implementer",
       "codex-reviewer",
       "gemini-critic",
+      "opus-critic",
       "peer-review-coordinator",
     ])
     // codex-* personas point at the stdio server; gemini-critic stays HTTP.
@@ -162,6 +170,15 @@ describe("buildPeerAgentDefinitions", () => {
       "mcp__gh-router-peers__gemini_critic",
     )
     expect(agents["codex-implementer"]!.prompt).toContain('"workspace-write"')
+    // opus-critic.requiresHttp = true (codex-cli stdio bridge can't run
+    // claude-opus-4-7 — gpt-5/codex models only). Even in CLI mode, opus
+    // routes via HTTP. Verify the prompt routes to the HTTP backend tool
+    // and does NOT mention codex-cli for this persona.
+    expect(agents["opus-critic"]).toBeDefined()
+    expect(agents["opus-critic"]!.prompt).toContain(
+      "mcp__gh-router-peers__opus_critic",
+    )
+    expect(agents["opus-critic"]!.prompt).not.toContain("mcp__codex-cli__codex")
   })
 })
 
@@ -224,8 +241,8 @@ describe("writePeerMcpRuntimeFiles", () => {
       expect(path.dirname(runtime.agentsPath)).toBe(runtimeDir)
 
       // Phase 2.5: .md subagent files written into agentsDir, one per
-      // registered agent (3 personas + peer-review-coordinator = 4).
-      expect(runtime.agentMdPaths.length).toBe(4)
+      // registered agent (4 personas + peer-review-coordinator = 5).
+      expect(runtime.agentMdPaths.length).toBe(5)
       for (const p of runtime.agentMdPaths) {
         expect(path.dirname(p)).toBe(agentsDir)
         expect(p).toMatch(
@@ -485,12 +502,14 @@ describe("writePeerMcpRuntimeFiles", () => {
         "codex-critic",
         "codex-reviewer",
         "gemini-critic",
+        "opus-critic",
       ])
       expect(cliNames).toEqual([
         "codex-critic",
         "codex-implementer",
         "codex-reviewer",
         "gemini-critic",
+        "opus-critic",
       ])
       await httpMode.cleanup()
       await cliMode.cleanup()
@@ -661,6 +680,7 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
         expect(names.has("codex-critic")).toBe(true)
         expect(names.has("codex-reviewer")).toBe(true)
         expect(names.has("gemini-critic")).toBe(true)
+        expect(names.has("opus-critic")).toBe(true)
       } finally {
         await runtime.cleanup()
       }

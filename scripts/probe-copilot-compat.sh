@@ -40,6 +40,12 @@ PROXY_URL="${PROXY_URL:-http://127.0.0.1:54668}"
 AUTH_TOKEN="${AUTH_TOKEN:-dummy}"
 ANTHROPIC_VERSION="${ANTHROPIC_VERSION:-2023-06-01}"
 
+# Repo root — used by static-check probes (peer-MCP gate validation) that
+# read source files directly rather than going through the proxy. Anchored
+# to this script's location so probes work regardless of CWD.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 # Output ANSI color when stdout is a TTY.
 if [ -t 1 ]; then
   C_RED=$'\033[31m'
@@ -91,6 +97,27 @@ declare -a PROBE_REGISTRY=(
 
   # ===== Streaming =====
   "stream_with_tools|claude-emits|Streaming response with tools (no FGTS) returns 200 with valid SSE event sequence"
+
+  # ===== Peer-MCP personas (Phase B6 of cap-codex-effort-add-opus-critic) =====
+  # Two probe shapes:
+  #   - opus_critic_low / opus_critic_medium are END-TO-END LIVE PROBES against the
+  #     proxy's /v1/messages endpoint, using the same Anthropic-shape thinking block
+  #     that the /mcp /v1/messages branch builds for the opus-critic persona. They
+  #     verify Copilot still 200s on those budget_tokens/max_tokens combos.
+  #   - opus_critic_high_rejected / codex_critic_xhigh_rejected /
+  #     codex_reviewer_xhigh_rejected are STATIC-CHECK PROBES that read
+  #     src/lib/peer-mcp-personas.ts directly and assert the per-persona
+  #     allowedEfforts gate (Phase A1 of the same plan) excludes the
+  #     ceiling-busting tier. The static check is the single source of truth
+  #     the handler then enforces at the /mcp boundary; running the live MCP
+  #     call would require fishing the per-launch nonce out of
+  #     ~/.local/share/github-router/.../peer-mcp-<pid>-<rand>.json — much
+  #     more brittle than parsing one TS source line.
+  "opus_critic_low|anthropic-docs|opus_critic at effort=low equivalent (thinking.budget=1024, max_tokens=2524) returns 200 from /v1/messages"
+  "opus_critic_medium|anthropic-docs|opus_critic at effort=medium equivalent (thinking.budget=3000, max_tokens=4500) returns 200 from /v1/messages"
+  "opus_critic_high_rejected|proxy-internal|peer-mcp-personas.ts: opus-critic.allowedEfforts excludes 'high' (Phase A1 gate) — static check"
+  "codex_critic_xhigh_rejected|proxy-internal|peer-mcp-personas.ts: codex-critic.allowedEfforts excludes 'xhigh' (Phase A1 gate) — static check"
+  "codex_reviewer_xhigh_rejected|proxy-internal|peer-mcp-personas.ts: codex-reviewer.allowedEfforts excludes 'xhigh' (Phase A1 gate) — static check"
 )
 
 # ===========================================================================
@@ -319,6 +346,111 @@ probe_stream_with_tools() {
   assert_status 200 \
     && assert_body_contains "event: message_start" \
     && assert_body_contains "event: content_block_start"
+}
+
+# ===========================================================================
+# Peer-MCP persona probes (Phase B6)
+# ===========================================================================
+
+# Helper: extract a persona's allowedEfforts line from peer-mcp-personas.ts.
+# Args:
+#   $1 = persona agentName (e.g. "opus-critic")
+# Stdout: the matching `allowedEfforts: [...]` line, or empty on miss.
+extract_persona_allowed_efforts() {
+  local persona_name="$1"
+  local file="${PROJECT_ROOT}/src/lib/peer-mcp-personas.ts"
+  if [ ! -f "$file" ]; then
+    echo ""
+    return
+  fi
+  # awk: from the agentName line, scan up to 30 lines forward for the
+  # allowedEfforts line. Bounded window keeps the match local to the
+  # persona's own block (each persona block is < 20 lines in practice).
+  awk -v target="agentName: \"${persona_name}\"" '
+    $0 ~ target { found=NR }
+    found && NR > found && NR <= found + 30 && /allowedEfforts:/ { print; exit }
+  ' "$file"
+}
+
+# Helper: assert a static-check result with a clear failure message.
+# Args:
+#   $1 = persona agentName
+#   $2 = forbidden tier (e.g. '"high"' or '"xhigh"')
+#   $3 = brief reason (shown in failure output)
+assert_persona_excludes_tier() {
+  local persona="$1" forbidden="$2" reason="$3"
+  local line
+  line="$(extract_persona_allowed_efforts "$persona")"
+  if [ -z "$line" ]; then
+    echo "  ${C_RED}FAIL${C_RESET}: persona '${persona}' allowedEfforts not found in src/lib/peer-mcp-personas.ts"
+    return 1
+  fi
+  # Match the forbidden tier as a quoted JSON-like array entry. The
+  # surrounding quotes ensure '"high"' does NOT match the substring of
+  # '"xhigh"' (and vice versa).
+  if echo "$line" | grep -q -- "${forbidden}"; then
+    echo "  ${C_RED}FAIL${C_RESET}: persona '${persona}' allowedEfforts unexpectedly includes ${forbidden} (${reason})"
+    echo "  ${C_DIM}line: ${line}${C_RESET}"
+    return 1
+  fi
+  return 0
+}
+
+probe_opus_critic_low() {
+  # End-to-end live probe. Mirrors the Anthropic body shape that the
+  # /mcp /v1/messages branch builds for opus_critic at effort=low:
+  # budget_tokens=1024 → max_tokens=budget+1500=2524.
+  do_request POST /v1/messages '{
+    "model": "claude-opus-4-7",
+    "max_tokens": 2524,
+    "system": "You are opus-critic.",
+    "thinking": {"type": "enabled", "budget_tokens": 1024},
+    "messages": [{"role": "user", "content": "Reply with the literal string \"no material objection\" if you have none."}]
+  }'
+  assert_status 200
+}
+
+probe_opus_critic_medium() {
+  # End-to-end live probe. effort=medium → budget_tokens=3000,
+  # max_tokens=4500. Same shape as opus_critic_low.
+  do_request POST /v1/messages '{
+    "model": "claude-opus-4-7",
+    "max_tokens": 4500,
+    "system": "You are opus-critic.",
+    "thinking": {"type": "enabled", "budget_tokens": 3000},
+    "messages": [{"role": "user", "content": "Reply with the literal string \"no material objection\" if you have none."}]
+  }'
+  assert_status 200
+}
+
+probe_opus_critic_high_rejected() {
+  # Static check: the opus-critic persona spec MUST exclude "high" from
+  # allowedEfforts so the /mcp handler's Phase A1 gate (handler.ts) returns
+  # RPC_INVALID_PARAMS rather than letting the call hit the 60s MCP ceiling
+  # on a thinking-budget that exceeds it. We validate the SOURCE OF TRUTH
+  # (peer-mcp-personas.ts) rather than the live MCP boundary because the
+  # live path requires the per-launch nonce — see the registry comment.
+  assert_persona_excludes_tier \
+    "opus-critic" '"high"' \
+    "high+ thinking budgets bust the 60s MCP per-tool-call ceiling on claude-opus-4-7"
+}
+
+probe_codex_critic_xhigh_rejected() {
+  # Static check: codex-critic (gpt-5.5) must reject xhigh. Empirical:
+  # 56s baseline on a tiny prompt at xhigh, busts the 60s ceiling on
+  # any real-sized review brief.
+  assert_persona_excludes_tier \
+    "codex-critic" '"xhigh"' \
+    "gpt-5.5 at xhigh is 56s on a tiny prompt; busts the 60s MCP ceiling"
+}
+
+probe_codex_reviewer_xhigh_rejected() {
+  # Static check: codex-reviewer (gpt-5.3-codex) must reject xhigh.
+  # Sibling model is faster but xhigh still pushes the ceiling on realistic
+  # diffs.
+  assert_persona_excludes_tier \
+    "codex-reviewer" '"xhigh"' \
+    "gpt-5.3-codex at xhigh still pushes the 60s MCP ceiling on real diffs"
 }
 
 # ===========================================================================

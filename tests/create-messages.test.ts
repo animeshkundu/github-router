@@ -212,6 +212,62 @@ describe("createMessages", () => {
     expect(capturedHeaders["anthropic-beta"]).toBeUndefined()
     expect(capturedHeaders["capi-beta-1"]).toBeUndefined()
   })
+
+  test("aborts the upstream fetch when the caller signal aborts", async () => {
+    // Mirrors the cancellation pattern in create-responses.ts /
+    // create-chat-completions.ts: a caller (e.g. the peer-MCP opus-critic
+    // persona) passes an AbortSignal that's wired to Claude Code's
+    // ~60s MCP per-tool-call ceiling. When the ceiling fires, the
+    // upstream fetch must reject — composed via AbortSignal.any so the
+    // existing UPSTREAM_FETCH_TIMEOUT_MS is preserved.
+    let capturedSignal: AbortSignal | undefined
+    const fetchMock = mock((_url: string, opts: { signal?: AbortSignal }) => {
+      capturedSignal = opts.signal
+      return new Promise<Response>((_resolve, reject) => {
+        opts.signal?.addEventListener("abort", () => {
+          reject(new DOMException("aborted", "AbortError"))
+        })
+      })
+    })
+    // @ts-expect-error - override fetch
+    globalThis.fetch = fetchMock
+
+    const controller = new AbortController()
+    const promise = createMessages('{}', undefined, controller.signal)
+    // Abort after the fetch is in flight.
+    queueMicrotask(() => controller.abort())
+
+    let caught: unknown
+    try {
+      await promise
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeDefined()
+    expect((caught as Error).name).toBe("AbortError")
+    expect(capturedSignal).toBeDefined()
+    expect(capturedSignal?.aborted).toBe(true)
+  })
+
+  test("forwards the caller signal alongside the timeout signal", async () => {
+    // When both UPSTREAM_FETCH_TIMEOUT_MS and a caller signal are present
+    // we must compose with AbortSignal.any. The default
+    // UPSTREAM_FETCH_TIMEOUT_MS is 0 (no timeout) per src/lib/port.ts,
+    // so the only signal in play here is the caller's — assert it lands
+    // on opts.signal regardless.
+    let capturedSignal: AbortSignal | undefined
+    const fetchMock = mock((_url: string, opts: { signal?: AbortSignal }) => {
+      capturedSignal = opts.signal
+      return new Response(JSON.stringify({ type: "message", id: "msg", role: "assistant", model: "m", content: [], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } }))
+    })
+    // @ts-expect-error - override fetch
+    globalThis.fetch = fetchMock
+
+    const controller = new AbortController()
+    await createMessages('{}', undefined, controller.signal)
+    expect(capturedSignal).toBeDefined()
+    expect(capturedSignal?.aborted).toBe(false)
+  })
 })
 
 describe("countTokens", () => {
@@ -276,5 +332,30 @@ describe("countTokens", () => {
       expect(error).toBeInstanceOf(HTTPError)
       expect((error as HTTPError).response.status).toBe(400)
     }
+  })
+
+  test("aborts the upstream fetch when the caller signal aborts", async () => {
+    const fetchMock = mock((_url: string, opts: { signal?: AbortSignal }) => {
+      return new Promise<Response>((_resolve, reject) => {
+        opts.signal?.addEventListener("abort", () => {
+          reject(new DOMException("aborted", "AbortError"))
+        })
+      })
+    })
+    // @ts-expect-error - override fetch
+    globalThis.fetch = fetchMock
+
+    const controller = new AbortController()
+    const promise = countTokens('{}', undefined, controller.signal)
+    queueMicrotask(() => controller.abort())
+
+    let caught: unknown
+    try {
+      await promise
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeDefined()
+    expect((caught as Error).name).toBe("AbortError")
   })
 })

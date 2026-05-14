@@ -140,12 +140,18 @@ function buildCoordinatorAgent(opts: {
   codexCli: boolean
   geminiAvailable: boolean
 }): { description: string; prompt: string } {
-  const peers: Array<string> = ["codex-critic"]
+  // opus-critic is always registered (Anthropic models are always present
+  // in the Copilot catalog), so no `geminiAvailable`-style guard is
+  // required. Order: codex-critic first (cross-lab depth), opus-critic
+  // second (cheapest same-lab sanity check), gemini-critic third
+  // (third-lab triangulation, only when registered), codex-reviewer
+  // last (code-specialist, narrower scope).
+  const peers: Array<string> = ["codex-critic", "opus-critic"]
   if (opts.geminiAvailable) peers.push("gemini-critic")
   peers.push("codex-reviewer")
 
   const description =
-    "Coordinates cross-lab adversarial review. **Use proactively before ExitPlanMode for non-trivial plans and after non-trivial commits** (>50 lines OR touching streaming/auth/concurrency/persistence/security). Routes to codex-critic / codex-reviewer / gemini-critic in parallel based on artifact type and aggregates findings. Cheaper than calling each peer manually for the common case where you want a multi-lab triangulation. The subagent has no access to your scrollback or CLAUDE.md — pass the artifact verbatim."
+    "Coordinates cross-lab adversarial review. **Use proactively before ExitPlanMode for non-trivial plans and after non-trivial commits** (>50 lines OR touching streaming/auth/concurrency/persistence/security). Routes to codex-critic / opus-critic / codex-reviewer / gemini-critic in parallel based on artifact type and aggregates findings. Cheaper than calling each peer manually for the common case where you want a multi-lab triangulation. The subagent has no access to your scrollback or CLAUDE.md — pass the artifact verbatim."
 
   const personaList = peers.map((p) => `- \`${p}\``).join("\n")
 
@@ -172,10 +178,11 @@ function buildCoordinatorAgent(opts: {
     "- **Long-context artifact (>100 KB)** → prefer `gemini-critic`"
       + (opts.geminiAvailable ? "" : " (NOT REGISTERED in this session)")
       + ". Otherwise, decompose into 2-4 batches and fan out across `codex-critic` calls in parallel.",
+    "- **Fast same-lab sanity check on a moderate artifact (<5 KB)** → prefer `opus-critic` (cheapest, ~22s, only `effort: low|medium` supported). Same lab as the lead — limited blind-spot diversification, but a useful gut-check before committing to a controversial decision. For cross-lab diversification or deep dives on larger artifacts, use codex/gemini at higher effort with decomposition for >5KB.",
     "",
     "## Decomposition for large artifacts",
     "",
-    "Each per-call MCP wait is bounded (~150s on Claude Code v2.1.138 per regression #50289). For artifacts >20 KB, split into 2-4 logical batches BY CONCERN (not by raw size — semantic batches give better per-batch reviews) and call peers in parallel. The proxy's MCP cap allows up to 8 in-flight calls. Aggregate findings yourself before reporting back.",
+    "Each per-call MCP wait is bounded (~60s SDK default on Claude Code v2.1.113+ per regressions #50289 / #52137 — empirically reproduced 2026-05-14). The proxy enforces per-persona effort allowlists AND a pre-flight `predictedTooLong` cap (codex_critic@high >8 KB, codex_reviewer@high >12 KB, opus_critic@medium >6 KB) to surface would-be-timeouts as fast actionable errors. For artifacts that exceed the cap, split into 2-4 logical batches BY CONCERN (not by raw size — semantic batches give better per-batch reviews) and call peers in parallel. The proxy's MCP cap allows up to 8 in-flight calls. Aggregate findings yourself before reporting back.",
     "",
     "## Aggregation contract",
     "",

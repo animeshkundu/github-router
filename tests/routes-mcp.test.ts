@@ -140,7 +140,7 @@ describe("/mcp protocol methods", () => {
     expect(res.status).toBe(202)
   })
 
-  test("tools/list returns 3 tools when gemini is in catalog", async () => {
+  test("tools/list returns 4 tools when gemini is in catalog", async () => {
     const { status, json } = await rpc({
       jsonrpc: "2.0",
       id: 2,
@@ -154,6 +154,7 @@ describe("/mcp protocol methods", () => {
       "codex_critic",
       "codex_reviewer",
       "gemini_critic",
+      "opus_critic",
     ])
     for (const t of result.tools) {
       expect(t.description.length).toBeGreaterThan(20)
@@ -175,6 +176,7 @@ describe("/mcp protocol methods", () => {
     expect(result.tools.map((t) => t.name).sort()).toEqual([
       "codex_critic",
       "codex_reviewer",
+      "opus_critic",
     ])
   })
 
@@ -413,6 +415,27 @@ describe("/mcp tools/call routing", () => {
     return captured
   }
 
+  /** Mock /v1/messages upstream (used by opus_critic via createMessages). */
+  function mockMessagesUpstream(text: string, captured: { lastBody?: unknown; called?: boolean } = {}) {
+    globalThis.fetch = mock(async (_url, init) => {
+      captured.called = true
+      captured.lastBody = JSON.parse((init as RequestInit).body as string)
+      const responseBody = {
+        id: "msg_test",
+        type: "message",
+        role: "assistant",
+        model: "claude-opus-4-7",
+        content: [{ type: "text", text }],
+        stop_reason: "end_turn",
+      }
+      return new Response(JSON.stringify(responseBody), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }) as unknown as typeof globalThis.fetch
+    return captured
+  }
+
   test("codex_critic call hits /responses with model=gpt-5.5 and persona instructions", async () => {
     const captured = mockResponsesUpstream("no material objection")
     const { status, json } = await rpc({
@@ -451,20 +474,63 @@ describe("/mcp tools/call routing", () => {
     expect(result.content[0].text).toBe("no material objection")
   })
 
-  test("explicit effort:xhigh argument reaches the upstream payload", async () => {
+  test("explicit effort:xhigh on gemini_critic reaches the upstream payload", async () => {
     // Phase 2C effort plumbing — caller can override the default.
-    const captured = mockResponsesUpstream("ok")
+    // Switched from codex_critic to gemini_critic because the per-persona
+    // allowedEfforts gate (added in the codex-effort-cap-and-opus-critic
+    // change) removed xhigh from codex_critic's allowed set — gpt-5.5 at
+    // xhigh routinely busts the 60s MCP ceiling. gemini_critic still
+    // allows xhigh (Copilot may silently ignore the knob, but the proxy
+    // forwards it for honest schema fidelity).
+    const captured = mockChatCompletionsUpstream("ok")
     await rpc({
       jsonrpc: "2.0",
       id: 109,
       method: "tools/call",
       params: {
-        name: "codex_critic",
+        name: "gemini_critic",
         arguments: { prompt: "deep dive", effort: "xhigh" },
       },
     })
-    const upstream = captured.lastBody as { reasoning?: { effort?: string } }
-    expect(upstream.reasoning?.effort).toBe("xhigh")
+    const upstream = captured.lastBody as { reasoning_effort?: string }
+    expect(upstream.reasoning_effort).toBe("xhigh")
+  })
+
+  test("codex_critic rejects effort:xhigh with -32602 (per-persona allowedEfforts gate)", async () => {
+    // gpt-5.5 at xhigh on a tiny prompt = 56s wall (probed 2026-05-14),
+    // right at the 60s MCP ceiling. Gate rejects upfront so the caller
+    // can re-call at a permitted tier instead of hitting a silent timeout.
+    mockResponsesUpstream("ok")
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 200,
+      method: "tools/call",
+      params: {
+        name: "codex_critic",
+        arguments: { prompt: "x", effort: "xhigh" },
+      },
+    })
+    const err = json.error as { code: number; message: string }
+    expect(err.code).toBe(-32602)
+    expect(err.message).toContain("xhigh")
+    expect(err.message).toContain("Allowed: low|medium|high")
+  })
+
+  test("opus_critic rejects effort:high with -32602 (thinking-budget math)", async () => {
+    mockResponsesUpstream("ok")  // wrong endpoint but no upstream call should be made
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 201,
+      method: "tools/call",
+      params: {
+        name: "opus_critic",
+        arguments: { prompt: "x", effort: "high" },
+      },
+    })
+    const err = json.error as { code: number; message: string }
+    expect(err.code).toBe(-32602)
+    expect(err.message).toContain("high")
+    expect(err.message).toContain("Allowed: low|medium")
   })
 
   test("invalid effort value is rejected with -32602 (not silently forwarded)", async () => {
@@ -481,6 +547,89 @@ describe("/mcp tools/call routing", () => {
     const err = json.error as { code: number; message: string }
     expect(err.code).toBe(-32602)
     expect(err.message).toMatch(/effort/)
+  })
+
+  test("predictedTooLong rejects pre-flight with isError; no upstream call made", async () => {
+    // Architectural invariant: the cap MUST fire before inFlightToolsCall++
+    // and BEFORE any upstream fetch. Spec for Phase A2 (CLAUDE.md
+    // documents this contract: "rejected pre-flight is free of
+    // concurrency-slot cost").
+    const captured = mockResponsesUpstream("should-never-reach-this", { lastBody: undefined })
+    // codex_critic@high cap = 8 KB. Build a 9 KB prompt to trip it.
+    const oversize = "x".repeat(9 * 1024)
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 300,
+      method: "tools/call",
+      params: {
+        name: "codex_critic",
+        arguments: { prompt: oversize, effort: "high" },
+      },
+    })
+    expect(status).toBe(200)
+    const result = json.result as {
+      content: Array<{ type: string; text: string }>
+      isError?: boolean
+    }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain("60s MCP")
+    expect(result.content[0].text).toContain("8KB")
+    expect(result.content[0].text).toMatch(/9\.\d+KB/)
+    // No upstream call was made — captured.lastBody is still undefined.
+    expect(captured.lastBody).toBeUndefined()
+  })
+
+  test("opus_critic at effort:'low' routes to /v1/messages with thinking.budget_tokens=1024", async () => {
+    const captured = mockMessagesUpstream("no material objection")
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 301,
+      method: "tools/call",
+      params: {
+        name: "opus_critic",
+        arguments: { prompt: "review this", effort: "low" },
+      },
+    })
+    expect(status).toBe(200)
+    const result = json.result as {
+      content: Array<{ type: string; text: string }>
+      isError?: boolean
+    }
+    expect(result.isError).toBeUndefined()
+    expect(result.content[0].text).toBe("no material objection")
+    // Verify the upstream payload's bucketing: low → 1024 budget, max=1024+1500=2524
+    const upstream = captured.lastBody as {
+      model?: string
+      max_tokens?: number
+      thinking?: { type?: string; budget_tokens?: number }
+      messages?: Array<{ role?: string; content?: string }>
+      system?: string
+    }
+    expect(upstream.thinking?.type).toBe("enabled")
+    expect(upstream.thinking?.budget_tokens).toBe(1024)
+    expect(upstream.max_tokens).toBe(2524)
+    expect(upstream.messages?.[0]?.role).toBe("user")
+    expect(upstream.messages?.[0]?.content).toBe("review this")
+    expect(upstream.system).toContain("opus-critic")
+  })
+
+  test("opus_critic at effort:'medium' (default) routes to /v1/messages with thinking.budget_tokens=3000", async () => {
+    const captured = mockMessagesUpstream("no material objection")
+    await rpc({
+      jsonrpc: "2.0",
+      id: 302,
+      method: "tools/call",
+      params: {
+        name: "opus_critic",
+        arguments: { prompt: "review" },  // omit effort → persona.defaultEffort = "medium"
+      },
+    })
+    const upstream = captured.lastBody as {
+      max_tokens?: number
+      thinking?: { budget_tokens?: number }
+    }
+    expect(upstream.thinking?.budget_tokens).toBe(3000)
+    expect(upstream.max_tokens).toBe(4500)  // budget + 1500
   })
 
   test("codex_reviewer call hits /responses with model=gpt-5.3-codex", async () => {
