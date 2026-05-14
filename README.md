@@ -79,19 +79,19 @@ Then run `claude` as normal.
 
 `github-router claude` auto-wires four peer-model adversarial reviewers plus a coordinator into the spawned Claude Code session. No setup, no prior MCP config, no `.claude/agents/` files needed — they appear as Task `subagent_type` options the session can delegate to. Opt out with `--no-codex-mcp`.
 
-Each persona is exposed both as a Claude Code subagent (callable via the `Task` tool) AND as an MCP tool at `mcp__gh-router-peers__<name>`. Personas are stateless: each invocation runs a fresh request against its model with a baked persona prompt — they have no access to your scrollback or `CLAUDE.md`, so the lead must paste the artifact into the brief.
+Each persona is exposed both as a Claude Code subagent (callable via the `Task` tool) AND as an MCP tool at `mcp__gh-router-peers__<name>`. Personas are stateless: each invocation runs a fresh request against its model with a baked persona prompt — they have no access to your scrollback or project memory, so the lead must paste the artifact into the brief.
 
 | Subagent | Model | Endpoint | Effort tiers (default) |
 |---|---|---|---|
 | `codex-critic` | gpt-5.5 | `/v1/responses` | low \| medium \| high \| xhigh (high) |
 | `codex-reviewer` | gpt-5.3-codex | `/v1/responses` | low \| medium \| high \| xhigh (high) |
-| `opus-critic` | claude-opus-4-7 | `/v1/messages` | low \| medium \| high \| xhigh (high) |
+| `opus-critic` | claude-opus-4-7 | `/v1/messages` | low \| medium \| high \| xhigh (medium) |
 | `gemini-critic` | gemini-3.1-pro-preview | `/v1/chat/completions` | low \| medium \| high \| xhigh (high) |
 | `peer-review-coordinator` | (meta) | — | — |
 
 `peer-review-coordinator` is a subagent (not an MCP tool) that fans out to the right combination of the four critics in parallel based on artifact type — plan, diff, single file, or long-context — and aggregates findings.
 
-**Effort tiers** are exposed via the MCP tool's `effort` argument; subagents pass it through. All four tiers are accepted on every persona. `xhigh` routinely runs 60–90s; the proxy automatically picks sync vs async dispatch based on predicted latency, so calls past the standard ~60s MCP per-tool-call ceiling complete transparently with no user setup.
+**Effort tiers** are exposed via the MCP tool's `effort` argument; subagents pass it through. All four tiers are accepted on every persona. `xhigh` routinely runs 60–90s; the proxy responds to `tools/call` requests with SSE-streamed responses (per MCP 2025-06-18 Streamable HTTP transport spec) so the connection stays open past the standard ~60s MCP per-tool-call ceiling and long calls complete transparently with no user setup.
 
 `gemini-critic` only registers when `gemini-3.1-pro-preview` is present in your Copilot model catalog. If absent, the persona is silently dropped from both the MCP `tools/list` and the subagent set, and `peer-review-coordinator` skips it in routing decisions.
 
