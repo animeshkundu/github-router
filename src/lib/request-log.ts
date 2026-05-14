@@ -120,3 +120,68 @@ function detectCapabilityMismatch(
     err.includes("prompt is too long")
   )
 }
+
+/**
+ * Opt-in instrumentation for the discovery loop (Phase 0.5 of the
+ * long-horizon plan). When `GH_ROUTER_LOG_FIELDS=1` is set in the
+ * environment, emits a single structured `[fields]` log line per request
+ * recording the top-level body keys, per-tool field keys, and
+ * anthropic-beta header values seen.
+ *
+ * Default-off (zero overhead). The companion
+ * `scripts/discover-new-fields.sh` greps these lines, aggregates unique
+ * field names per request shape, and diffs against the known-fields
+ * list in `docs/copilot-compat-matrix.md` — surfacing anything new
+ * that should get a probe row added.
+ *
+ * Format (single line, deterministic-ish key order):
+ *   [fields] path=<P> body_keys=<csv> tool_field_keys=<csv> beta_values=<csv>
+ *
+ * Where:
+ *   - `body_keys` is the alphabetical union of top-level keys in the
+ *     request body
+ *   - `tool_field_keys` is the alphabetical union of all keys appearing
+ *     across every entry of `body.tools[]` (or empty)
+ *   - `beta_values` is the comma-split anthropic-beta header value as
+ *     received (NOT filtered) — captures what the client sends, not
+ *     what we forward
+ */
+export function logRequestFields(opts: {
+  path: string
+  body: unknown
+  betaHeader?: string
+}): void {
+  if (process.env.GH_ROUTER_LOG_FIELDS !== "1") return
+  const bodyKeys = collectTopLevelKeys(opts.body)
+  const toolFieldKeys = collectToolFieldKeys(opts.body)
+  const betaValues = (opts.betaHeader ?? "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean)
+  consola.info(
+    `[fields] path=${opts.path}`
+    + ` body_keys=${bodyKeys.join(",")}`
+    + ` tool_field_keys=${toolFieldKeys.join(",")}`
+    + ` beta_values=${betaValues.join(",")}`,
+  )
+}
+
+function collectTopLevelKeys(body: unknown): Array<string> {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return []
+  return Object.keys(body as Record<string, unknown>).sort()
+}
+
+function collectToolFieldKeys(body: unknown): Array<string> {
+  if (!body || typeof body !== "object") return []
+  const tools = (body as Record<string, unknown>).tools
+  if (!Array.isArray(tools)) return []
+  const seen = new Set<string>()
+  for (const tool of tools) {
+    if (tool && typeof tool === "object" && !Array.isArray(tool)) {
+      for (const k of Object.keys(tool as Record<string, unknown>)) {
+        seen.add(k)
+      }
+    }
+  }
+  return [...seen].sort()
+}

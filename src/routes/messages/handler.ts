@@ -7,7 +7,7 @@ import { parseJsonOrDiagnose } from "~/lib/diagnose-response"
 import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
-import { logRequest } from "~/lib/request-log"
+import { logRequest, logRequestFields } from "~/lib/request-log"
 import { sanitizeAnthropicBody } from "~/lib/sanitize-anthropic-body"
 import { state } from "~/lib/state"
 import { relayAnthropicStream } from "~/lib/stream-relay"
@@ -189,6 +189,23 @@ export async function handleCompletion(c: Context) {
   const debugEnabled = consola.level >= 4
   if (debugEnabled) {
     consola.debug("Anthropic request body:", rawBody.slice(0, 2000))
+  }
+
+  // Opt-in field-key discovery (Phase 0.5 of the long-horizon plan).
+  // No-op unless GH_ROUTER_LOG_FIELDS=1 is set. Feeds
+  // scripts/discover-new-fields.sh.
+  if (process.env.GH_ROUTER_LOG_FIELDS === "1") {
+    let parsedForLog: unknown = undefined
+    try {
+      parsedForLog = JSON.parse(rawBody) as unknown
+    } catch {
+      // Body parse failures are surfaced downstream; don't double-warn here.
+    }
+    logRequestFields({
+      path: c.req.path,
+      body: parsedForLog,
+      betaHeader: c.req.header("anthropic-beta"),
+    })
   }
 
   if (state.manualApprove) {
@@ -498,10 +515,20 @@ function resolveModelInBody(rawBody: string): {
   }
 
   // Strip Anthropic-only top-level body fields Copilot 400s on. Empirical
-  // verification (2026-05-11 against api.enterprise.githubcopilot.com):
+  // verification (2026-05-11 / 2026-05-13 against api.enterprise.githubcopilot.com):
   //   - `budget: {total_tokens}` (Task Budgets) → 400 "budget: Extra inputs not permitted"
   //   - `output_config: {schema}` (Structured Outputs) → 400 "output_config.schema: Extra..."
   //   - `betas: [...]` (top-level array, distinct from anthropic-beta header) → 400 "betas: Extra..."
+  //   - `tools[i].eager_input_streaming` (Fine-Grained Tool Streaming) → 400
+  //     "tools.0.custom.eager_input_streaming: Extra inputs are not permitted"
+  //     (the `.custom.` infix is Copilot's error-format; the actual emit
+  //     location from Claude Code is the top of each tool object per
+  //     https://platform.claude.com/docs/en/agents-and-tools/tool-use/fine-grained-tool-streaming).
+  //     Stripping disables only the streaming-chunk-size optimization;
+  //     correctness is unaffected — `input_json_delta` events still flow,
+  //     just with `partial_json:""` instead of populated chunks.
+  //     Probes: `eager_input_streaming_strips` / `eager_input_streaming_passthrough`
+  //     in scripts/probe-copilot-compat.sh.
   // Fast-path skip when none of the field names appear in the raw body.
   // NOT stripped:
   //   - `mcp_servers` — Phase G builds the translate path; silent strip
@@ -513,6 +540,7 @@ function resolveModelInBody(rawBody: string): {
     rawBody.includes('"budget"')
     || rawBody.includes('"output_config"')
     || rawBody.includes('"betas"')
+    || rawBody.includes('"eager_input_streaming"')
   if (needsAnthropicOnlyStrip && stripAnthropicOnlyFields(parsed)) {
     modified = true
   }
@@ -767,6 +795,30 @@ function stripAnthropicOnlyFields(body: AnyRecord): boolean {
     )
     delete body.betas
     stripped = true
+  }
+  // Per-tool field strip: `eager_input_streaming` (Fine-Grained Tool Streaming).
+  // Auto-enabled by getClaudeCodeEnvVars setting CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1
+  // (see src/lib/server-setup.ts), which causes the Claude Code SDK to emit
+  // `eager_input_streaming: true` on each custom tool definition. Copilot rejects.
+  // JSON-AST traversal — never regex on the raw body (gemini-critic: would
+  // corrupt prompt text containing the same string).
+  if (Array.isArray(body.tools)) {
+    let warnedFGTS = false
+    for (const tool of body.tools) {
+      if (typeof tool === "object" && tool !== null) {
+        const t = tool as AnyRecord
+        if (t.eager_input_streaming !== undefined) {
+          delete t.eager_input_streaming
+          stripped = true
+          if (!warnedFGTS) {
+            consola.warn(
+              "Stripping per-tool `eager_input_streaming` field (Copilot 400s on `tools.*.custom.eager_input_streaming`; FGTS chunk-size optimization disabled, but streaming correctness is unaffected — `input_json_delta` events still flow normally)",
+            )
+            warnedFGTS = true
+          }
+        }
+      }
+    }
   }
   return stripped
 }
