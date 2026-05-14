@@ -29,18 +29,15 @@
  *   <2k tokens → low, <8k → medium, <24k → high, else → xhigh.
  *
  * Per-persona `allowedEfforts` and `defaultEffort` constrain which subset
- * each persona exposes — enforced in handler.ts:handleToolsCall. Empirical
- * data (probed live 2026-05-14) drove the current allowlists:
+ * each persona exposes — enforced in handler.ts:handleToolsCall.
  *
- *   - codex_critic  (gpt-5.5, /v1/responses): xhigh removed — 56s baseline
- *     on a tiny prompt, busts the 60s MCP per-call ceiling on real reviews.
- *   - codex_reviewer (gpt-5.3-codex, /v1/responses): xhigh removed — same
- *     reasoning, sibling model is faster but xhigh still pushes the ceiling.
- *   - gemini_critic (gemini-3.1-pro-preview, /v1/chat/completions): all
- *     four — long-context model + Copilot may silently ignore the knob anyway.
- *   - opus_critic (claude-opus-4-7, /v1/messages): only low/medium — the
- *     thinking-budget math at high (~6k tokens × ~80 tps = ~75s) busts the
- *     ceiling on adversarial reviews where the model uses budget.
+ * **xhigh on long-running personas works via SSE-streamed /mcp responses**
+ * (handler.ts:handleToolsCallSSE). Claude Code's MCP HTTP client honors
+ * `text/event-stream` responses without applying the ~60s per-tool-call
+ * timer that previously broke xhigh on gpt-5.5 (~56s wall) and
+ * claude-opus-4-7 (high+ thinking budgets). All four personas now expose
+ * all four effort tiers with `high` default; SSE handles the long tail
+ * transparently to the user.
  */
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh"] as const
 export type Effort = (typeof EFFORT_LEVELS)[number]
@@ -214,13 +211,13 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     description:
       "Adversarial second opinion on plans, designs, code, or systems-engineering tradeoffs. Backed by gpt-5.5 (OpenAI) — different model, different training data, different blind spots than Opus. Uses a calibrated 1–5 grading rubric and is allowed to reply 'no material objection' on solid artifacts."
       + " **CALL BEFORE: ExitPlanMode for any plan involving >2 files or new architecture; finalizing a major design choice; TeamCreate when the team's task is non-trivial.** **CALL AFTER: any commit touching concurrency, security, or streaming code paths.**"
-      + " If the artifact is large (>8 KB), prefer to break it into 2-4 focused batches and call this tool once per batch IN PARALLEL — each call must complete under Claude Code's ~60s MCP per-tool-call ceiling, so monolithic large-artifact calls will time out client-side. Aggregate findings yourself."
-      + " Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. **Effort tiers**: `low | medium | high` (default `high`). `xhigh` is NOT supported on this persona — empirical data (2026-05-14) shows xhigh routinely takes 56s+ on a tiny prompt and busts the 60s MCP ceiling on real reviews. For deeper reasoning, decompose into parallel sub-calls instead. The subagent has no access to your scrollback or project memory.",
+      + " For very large artifacts (>50 KB), prefer to break it into 2-4 focused batches and call this tool once per batch IN PARALLEL — semantic batches give better per-batch reviews and exercise the proxy's 8-in-flight cap. Aggregate findings yourself."
+      + " Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. **Effort tiers**: `low | medium | high | xhigh` (default `high`). All four tiers are supported — long-running calls (xhigh on substantial briefs can take 60-150s) stream back via SSE under the hood; the user does not need to do anything. The subagent has no access to your scrollback or project memory.",
     baseInstructions: CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
     requiresHttp: false,
-    allowedEfforts: ["low", "medium", "high"] as const,
+    allowedEfforts: ["low", "medium", "high", "xhigh"] as const,
     defaultEffort: "high",
   },
   {
@@ -231,7 +228,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     description:
       "Adversarial second opinion from a different lab. Backed by gemini-3.1-pro-preview (Google) — different training data and RLHF priors than Opus AND codex-critic, the strongest blind-spot-buster when the lead wants triangulation across three labs. Use for long-context artifacts (>50k tokens), math/proof-shaped reasoning, or as a tie-breaker after codex-critic has weighed in."
       + " **CALL BEFORE: ExitPlanMode for plans where Opus + codex-critic agree (use as triangulation); finalizing irreversible architectural choices.** **CALL AFTER: commits where you want a third-lab cross-check.**"
-      + " If the artifact is large (>100 KB), prefer to break into batches and call in parallel — gemini handles long context well but each per-call MCP wait is still bounded (~60s on v2.1.138)."
+      + " For very large artifacts (>200 KB), prefer to break into batches and call in parallel — gemini handles long context well; long-running calls stream back via SSE under the hood."
       + " Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. **Effort tiers**: `low | medium | high | xhigh` (default `high`). The `effort` parameter is forwarded but may be silently ignored by Copilot's gemini route — gemini-3.x reasoning is largely auto-applied. The subagent has no access to your scrollback or project memory.",
     baseInstructions: GEMINI_CRITIC_BASE,
     agentPrompt: "",
@@ -249,13 +246,13 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     description:
       "Line-level code review of a specific diff or file. Backed by gpt-5.3-codex (OpenAI) — the code-specialist sibling of gpt-5.5, trained heavily on code-review datasets so it catches different bugs than Opus. Prefer over codex-critic when the artifact is a concrete diff or single file (codex-critic is for plans/designs)."
       + " **CALL AFTER: any non-trivial commit (>50 lines OR touching critical paths: streaming, auth, concurrency, persistence, security).** **CALL BEFORE: opening a PR or pushing changes a peer would review.**"
-      + " For diffs >12 KB, split by file-group and call once per group in parallel — each per-call wait is bounded (~60s on v2.1.138)."
-      + " Always pass: (a) the diff or file verbatim, (b) the change's intent, (c) test status. **Effort tiers**: `low | medium | high` (default `high`). `xhigh` is NOT supported on this persona — same 60s MCP ceiling reasoning as codex-critic; for deeper reasoning, decompose into parallel sub-calls. The subagent has no access to your scrollback or project memory.",
+      + " For very large diffs (>50 KB), split by file-group and call once per group in parallel — long-running calls stream back via SSE under the hood; the user does not need to do anything."
+      + " Always pass: (a) the diff or file verbatim, (b) the change's intent, (c) test status. **Effort tiers**: `low | medium | high | xhigh` (default `high`). All four tiers are supported. The subagent has no access to your scrollback or project memory.",
     baseInstructions: REVIEWER_BASE,
     agentPrompt: "",
     writeCapable: false,
     requiresHttp: false,
-    allowedEfforts: ["low", "medium", "high"] as const,
+    allowedEfforts: ["low", "medium", "high", "xhigh"] as const,
     defaultEffort: "high",
   },
   {
@@ -266,8 +263,8 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     description:
       "Adversarial second opinion from a fresh-context Opus 4.7 — same model AND same lab as the lead orchestrator. Useful when you suspect cognitive momentum is wrong (sunk cost on a plan, motivated reasoning toward a particular fix), or as a cheap+fast sanity check before committing to a controversial decision."
       + " **LIMITED blind-spot diversification compared to codex-critic / gemini-critic (same training, same lab) — use as inexpensive sanity check, NOT as a substitute for cross-lab triangulation.**"
-      + " **CALL WHEN**: the artifact fits comfortably in one shot (<5 KB) and you want a quick same-lab gut-check; a fresh perspective on a decision you've been iterating on. **Hard cap: briefs above 6 KB at `effort:'medium'` are pre-flight rejected** — decompose into smaller sub-calls or pick a smaller artifact. **DO NOT call as the primary triangulation peer** — use codex-critic + gemini-critic for that."
-      + " **Effort tiers**: `low | medium` (default `medium`). `high` and `xhigh` are NOT supported on this persona — the thinking budget required for those tiers cannot complete within Claude Code's ~60s MCP per-tool-call ceiling on claude-opus-4-7 (empirical: ~80-150 tps × ~6k+ token budget = 60s+). For deep dives, use codex-critic at `effort:'high'` (with brief <8KB) or gemini-critic. The subagent has no access to your scrollback or project memory.",
+      + " **CALL WHEN**: you want a fresh-context same-lab gut-check; a fresh perspective on a decision you've been iterating on. **DO NOT call as the primary triangulation peer** — use codex-critic + gemini-critic for that."
+      + " **Effort tiers**: `low | medium | high | xhigh` (default `medium`). All four tiers are supported — higher tiers use larger thinking budgets (xhigh can take 60-120s) and stream back via SSE under the hood; the user does not need to do anything. The subagent has no access to your scrollback or project memory.",
     baseInstructions: OPUS_CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -277,7 +274,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     // claude-opus-4-7 is always in Copilot's catalog for our supported
     // tiers; we don't need a catalog probe to register the persona).
     requiresHttp: true,
-    allowedEfforts: ["low", "medium"] as const,
+    allowedEfforts: ["low", "medium", "high", "xhigh"] as const,
     defaultEffort: "medium",
   },
 ])
@@ -294,11 +291,8 @@ export const PERSONAS_WRITE: ReadonlyArray<PersonaSpec> = Object.freeze([
     agentPrompt: "",
     writeCapable: true,
     requiresHttp: false,
-    // codex-implementer is the same model as codex-reviewer (gpt-5.3-codex)
-    // — applying the same allowedEfforts subset for consistency. xhigh is
-    // out for the same 60s-ceiling reasoning. Implementation tasks rarely
-    // benefit from "deepest possible reasoning" anyway.
-    allowedEfforts: ["low", "medium", "high"] as const,
+    // All four tiers supported — long calls stream via SSE.
+    allowedEfforts: ["low", "medium", "high", "xhigh"] as const,
     defaultEffort: "high",
   },
 ])

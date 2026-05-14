@@ -80,18 +80,29 @@ describe("PERSONAS_READ", () => {
     }
   })
 
-  test("codex-critic and codex-reviewer reject xhigh (60s ceiling)", () => {
-    const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
-    expect(byName["codex-critic"]?.allowedEfforts).not.toContain("xhigh")
-    expect(byName["codex-reviewer"]?.allowedEfforts).not.toContain("xhigh")
+  test("all personas now expose all four effort tiers (SSE handles long calls)", () => {
+    // SSE-streamed /mcp responses (handler.ts:handleToolsCallSSE) bypass
+    // Claude Code's ~60s tools/call ceiling, so the previous xhigh
+    // constraints on codex-critic / codex-reviewer / opus-critic are
+    // lifted. All read personas + the codex-implementer now allow the
+    // full effort range; long calls stream back transparently.
+    const allFour = ["low", "medium", "high", "xhigh"] as const
+    for (const p of PERSONAS_READ) {
+      expect(p.allowedEfforts).toEqual(allFour)
+    }
   })
 
-  test("opus-critic only allows low/medium (thinking-budget math)", () => {
+  test("opus-critic defaults to medium effort (cheap-and-fast same-lab gut check)", () => {
     const opus = PERSONAS_READ.find((p) => p.agentName === "opus-critic")
-    expect(opus?.allowedEfforts).toEqual(["low", "medium"])
     expect(opus?.defaultEffort).toBe("medium")
   })
 
+  test("codex-critic / codex-reviewer / gemini-critic default to high effort", () => {
+    const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
+    expect(byName["codex-critic"]?.defaultEffort).toBe("high")
+    expect(byName["codex-reviewer"]?.defaultEffort).toBe("high")
+    expect(byName["gemini-critic"]?.defaultEffort).toBe("high")
+  })
   test("gemini-critic still accepts all four effort tiers", () => {
     const gem = PERSONAS_READ.find((p) => p.agentName === "gemini-critic")
     expect(gem?.allowedEfforts).toEqual(["low", "medium", "high", "xhigh"])

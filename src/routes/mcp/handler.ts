@@ -293,32 +293,47 @@ function toolError(message: string): ToolErrorContent {
  *
  * gemini_critic has no cap (long-context model + Copilot may auto-pace).
  */
-const PRE_FLIGHT_CAPS: ReadonlyArray<{
-  toolName: string
-  effort: Effort
-  maxBriefBytes: number
-}> = [
-  { toolName: "codex_critic", effort: "high", maxBriefBytes: 8 * 1024 },
-  { toolName: "codex_reviewer", effort: "high", maxBriefBytes: 12 * 1024 },
-  { toolName: "opus_critic", effort: "medium", maxBriefBytes: 6 * 1024 },
-]
-
-function predictedTooLong(
-  persona: PersonaSpec,
-  effort: Effort,
-  briefBytes: number,
-): { tooLong: true; capBytes: number } | { tooLong: false } {
-  for (const cap of PRE_FLIGHT_CAPS) {
-    if (
-      cap.toolName === persona.toolNameHttp
-      && cap.effort === effort
-      && briefBytes > cap.maxBriefBytes
-    ) {
-      return { tooLong: true, capBytes: cap.maxBriefBytes }
-    }
-  }
-  return { tooLong: false }
-}
+/**
+ * Pre-flight latency cap was added to convert would-be-timeouts into fast
+ * actionable errors when Claude Code's MCP HTTP client capped tools/call
+ * waits at ~60s for JSON responses (regressions #50289 / #52137). With
+ * SSE-streamed responses (handler.ts:handleToolsCallSSE) Claude Code
+ * keeps the connection open past that ceiling and waits for the streamed
+ * result, so long-running calls now succeed transparently.
+ *
+ * The cap is therefore disabled by default. The MAX_INFLIGHT_TOOLS_CALL
+ * concurrency limit (8) remains as the runaway-client guard. We keep the
+ * predictedTooLong helper + the constants table around (commented out)
+ * so a future regression in the SSE path or a non-SSE-capable client
+ * can re-enable the gate quickly without re-deriving the empirical
+ * thresholds.
+ */
+// const PRE_FLIGHT_CAPS: ReadonlyArray<{
+//   toolName: string
+//   effort: Effort
+//   maxBriefBytes: number
+// }> = [
+//   { toolName: "codex_critic", effort: "high", maxBriefBytes: 8 * 1024 },
+//   { toolName: "codex_reviewer", effort: "high", maxBriefBytes: 12 * 1024 },
+//   { toolName: "opus_critic", effort: "medium", maxBriefBytes: 6 * 1024 },
+// ]
+//
+// function predictedTooLong(
+//   persona: PersonaSpec,
+//   effort: Effort,
+//   briefBytes: number,
+// ): { tooLong: true; capBytes: number } | { tooLong: false } {
+//   for (const cap of PRE_FLIGHT_CAPS) {
+//     if (
+//       cap.toolName === persona.toolNameHttp
+//       && cap.effort === effort
+//       && briefBytes > cap.maxBriefBytes
+//     ) {
+//       return { tooLong: true, capBytes: cap.maxBriefBytes }
+//     }
+//   }
+//   return { tooLong: false }
+// }
 
 async function callPersona(
   persona: PersonaSpec,
@@ -375,16 +390,20 @@ async function callPersona(
   }
 
   if (persona.endpoint === "/v1/messages") {
-    // claude-opus-4-7 path (Phase B). The persona-level allowedEfforts
-    // gate (Phase A1) already rejected high/xhigh; this branch only
-    // sees low or medium. Conservative thinking-budget bucketing to fit
-    // within the 60s MCP ceiling at realistic claude-opus-4-7 reasoning
-    // rates (~80-150 tps): low → 1024 tokens (~13s thinking); medium →
-    // 3000 tokens (~38s thinking). Anthropic spec REQUIRES
-    // max_tokens >= budget_tokens AND recommends extra room for the
-    // actual response — set max_tokens = budget + 1500.
-    const budgetTokens = effort === "low" ? 1024 : 3000
-    const maxTokens = budgetTokens + 1500
+    // claude-opus-4-7 path. All four effort tiers are now supported —
+    // SSE-streamed /mcp responses (handler.ts:handleToolsCallSSE) bypass
+    // Claude Code's ~60s tools/call ceiling, so larger thinking budgets
+    // that previously busted the ceiling now work transparently. Buckets
+    // mirror the inverse of bucketEffort in src/routes/messages/handler.ts:
+    //   low → 1024, medium → 3000, high → 8000, xhigh → 16000.
+    // Anthropic spec REQUIRES max_tokens >= budget_tokens AND recommends
+    // extra room for the actual response — max_tokens = budget + 2048.
+    const budgetTokens =
+      effort === "low" ? 1024
+      : effort === "medium" ? 3000
+      : effort === "high" ? 8000
+      : 16000  // xhigh
+    const maxTokens = budgetTokens + 2048
     const body = JSON.stringify({
       model: resolvedModel,
       max_tokens: maxTokens,
@@ -492,13 +511,10 @@ async function handleToolsCall(
     )
   }
 
-  // Per-persona effort gate. Empirical data (probed live 2026-05-14)
-  // showed that gpt-5.5 at `xhigh` on a tiny prompt takes 56s — right
-  // at the 60s MCP per-tool-call ceiling and guaranteed to bust it on
-  // real review prompts. claude-opus-4-7 at `high`+ thinking budgets
-  // also can't fit in 60s. Each persona declares which tiers it
-  // accepts; rejected tiers return RPC_INVALID_PARAMS so the caller
-  // can re-call at a permitted tier instead of waiting for a timeout.
+  // Per-persona effort gate. All four personas now allow all four
+  // effort tiers (low|medium|high|xhigh). The gate remains in place so
+  // a future persona that needs to constrain its tiers can do so
+  // declaratively via PersonaSpec.allowedEfforts.
   if (
     requestedEffort !== undefined
     && !persona.allowedEfforts.includes(requestedEffort)
@@ -507,36 +523,16 @@ async function handleToolsCall(
       body.id,
       RPC_INVALID_PARAMS,
       `tools/call: persona "${persona.toolNameHttp}" does not accept effort="${requestedEffort}". `
-        + `Allowed: ${persona.allowedEfforts.join("|")}. `
-        + `(Higher tiers were removed because they don't fit in Claude Code's ~60s MCP per-tool-call ceiling on this model.)`,
+        + `Allowed: ${persona.allowedEfforts.join("|")}.`,
     )
   }
   const effort: Effort = requestedEffort ?? persona.defaultEffort
 
-  // Pre-flight latency cap (Phase A2). Fires BEFORE inFlightToolsCall++
-  // so a rejected pre-flight is free of concurrency-slot cost (the
-  // documented invariant in CLAUDE.md "Peer-model MCP integration").
-  // Convert would-be-timeouts into fast actionable errors before we
-  // burn an inFlight slot or start a multi-tens-of-seconds upstream call.
-  const userText = buildUserText(prompt, context)
-  const briefBytes = Buffer.byteLength(userText, "utf8")
-  const cap = predictedTooLong(persona, effort, briefBytes)
-  if (cap.tooLong) {
-    const briefKb = (briefBytes / 1024).toFixed(1)
-    const capKb = (cap.capBytes / 1024).toFixed(0)
-    return rpcResult(body.id, {
-      content: [
-        {
-          type: "text",
-          text:
-            `${persona.toolNameHttp} at effort='${effort}' on a ${briefKb}KB brief is likely to exceed the ~60s MCP per-tool-call ceiling `
-              + `(empirical cap for this persona+effort: ${capKb}KB). `
-              + `Either drop to a lower effort tier, or split the brief into 2-4 parallel sub-calls per the decomposition guidance in the tool description.`,
-        },
-      ],
-      isError: true,
-    })
-  }
+  // predictedTooLong pre-flight cap is disabled — SSE-streamed responses
+  // (handler.ts:handleToolsCallSSE) bypass Claude Code's ~60s tools/call
+  // ceiling, so size-based pre-flight rejection is no longer needed. The
+  // helper + thresholds remain commented above for fast revival if the
+  // SSE path regresses or a non-SSE-capable client appears.
 
   if (inFlightToolsCall >= MAX_INFLIGHT_TOOLS_CALL) {
     // Documented per-call cap. NOT silent serialization — surface the
@@ -822,6 +818,27 @@ export async function handleMcpPost(c: Context): Promise<Response> {
     )
   }
 
+  // SSE-streamed response branch for `tools/call` when the client
+  // advertises text/event-stream Accept (Claude Code's MCP HTTP client
+  // does, per MCP 2025-06-18 Streamable HTTP transport spec). Streamed
+  // responses bypass the per-tool-call wait timer that ~60s-caps JSON
+  // responses on Claude Code v2.1.113+ (regressions #50289 / #52137,
+  // documented in docs/research/peer-mcp-investigation.md). Heartbeat
+  // `notifications/progress` events keep the connection alive while
+  // the upstream Copilot call is in flight; the final tools/call
+  // response is delivered as the closing `message` event. Non-tools/call
+  // RPC methods (initialize, tools/list, etc.) stay on the JSON path —
+  // they're synchronous and don't benefit from streaming.
+  if (
+    typeof body === "object"
+    && body !== null
+    && !Array.isArray(body)
+    && body.method === "tools/call"
+    && acceptsEventStream(c.req.header("accept"))
+  ) {
+    return handleToolsCallSSE(body)
+  }
+
   try {
     const { status, body: respBody } = await handleRpc(c, body)
     if (respBody === null) return c.body(null, status as 202)
@@ -843,6 +860,156 @@ export async function handleMcpPost(c: Context): Promise<Response> {
       200,
     )
   }
+}
+
+/**
+ * Accept-header parsing for MCP Streamable HTTP. Per MCP 2025-06-18
+ * spec, clients send `Accept: application/json, text/event-stream` to
+ * indicate they can consume either response shape. Server picks; for
+ * tools/call we pick SSE because Claude Code's per-tool-call timer
+ * (~60s on v2.1.113+) does not fire on streamed responses.
+ *
+ * Lenient parse: split on commas, strip params (q-values, charset),
+ * trim, lowercase, look for the SSE token. Returns false on undefined
+ * / empty / strict-JSON-only Accept.
+ */
+function acceptsEventStream(accept: string | undefined): boolean {
+  if (!accept) return false
+  const tokens = accept
+    .toLowerCase()
+    .split(",")
+    .map((t) => t.split(";")[0].trim())
+  return tokens.includes("text/event-stream")
+}
+
+/**
+ * SSE-streamed response for a single tools/call. Delegates the actual
+ * upstream call to `handleToolsCall` (so the per-persona effort gate,
+ * predictedTooLong cap, AbortController registration, telemetry, and
+ * inFlight slot accounting all run identically); wraps the awaited
+ * result in an SSE envelope with periodic heartbeats while the upstream
+ * fetch is in flight.
+ *
+ * SSE event format (per MCP Streamable HTTP):
+ *   event: message
+ *   data: <json-rpc-2.0 message>\n\n
+ *
+ * - Heartbeats are JSON-RPC `notifications/progress` notifications with
+ *   the request id as `progressToken` (per MCP progress-notification spec).
+ * - The final message is the JSON-RPC response envelope returned by
+ *   handleToolsCall — same structure as the JSON-path response.
+ * - On consumer cancel (ReadableStream.cancel), the heartbeat interval
+ *   is cleared and the inFlight slot's AbortController is signalled
+ *   (handleToolsCall observes the abort and returns an error envelope
+ *   that we drop unwritten — controller is already closed).
+ *
+ * Per CLAUDE.md "Stream lifecycle" / "The smoking gun" rules: every
+ * controller.enqueue/close is wrapped in a try/catch that swallows the
+ * "Invalid state: Controller is already closed" race without warning.
+ */
+const SSE_HEARTBEAT_INTERVAL_MS = 5000
+
+async function handleToolsCallSSE(body: JsonRpcRequest): Promise<Response> {
+  const encoder = new TextEncoder()
+  // Kick off the actual tool call as a Promise. handleToolsCall handles
+  // all gates, slot accounting, abort registration, telemetry — we just
+  // wrap its eventual result in an SSE envelope.
+  const callPromise = handleToolsCall(body)
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      let closed = false
+      const safeEnqueue = (chunk: Uint8Array): void => {
+        if (closed) return
+        try {
+          controller.enqueue(chunk)
+        } catch (err) {
+          // Controller already closed by consumer cancel or earlier
+          // close — common race between heartbeat tick and stream
+          // teardown. Per CLAUDE.md "smoking gun" rule, do NOT log
+          // this as a warning; it's expected.
+          consola.debug("/mcp SSE enqueue after close (expected race):", err)
+          closed = true
+        }
+      }
+      const safeClose = (): void => {
+        if (closed) return
+        closed = true
+        try {
+          controller.close()
+        } catch (err) {
+          consola.debug("/mcp SSE close after close:", err)
+        }
+      }
+      const sseFrame = (rpcMessage: object): Uint8Array =>
+        encoder.encode(`event: message\ndata: ${JSON.stringify(rpcMessage)}\n\n`)
+      const heartbeatFrame = (): Uint8Array =>
+        sseFrame({
+          jsonrpc: "2.0",
+          method: "notifications/progress",
+          params: {
+            progressToken: body.id ?? null,
+            progress: 0,
+            message: "in flight",
+          },
+        })
+
+      // Initial heartbeat (proves the stream is open) + recurring
+      // heartbeats every SSE_HEARTBEAT_INTERVAL_MS until the call
+      // resolves.
+      safeEnqueue(heartbeatFrame())
+      const heartbeatHandle = setInterval(
+        () => safeEnqueue(heartbeatFrame()),
+        SSE_HEARTBEAT_INTERVAL_MS,
+      )
+
+      try {
+        const result = await callPromise
+        safeEnqueue(sseFrame(result))
+      } catch (err) {
+        consola.error("/mcp SSE upstream error:", err)
+        safeEnqueue(
+          sseFrame(
+            rpcError(
+              body.id ?? null,
+              RPC_INTERNAL_ERROR,
+              err instanceof Error ? err.message : String(err),
+            ),
+          ),
+        )
+      } finally {
+        clearInterval(heartbeatHandle)
+        safeClose()
+      }
+    },
+    cancel() {
+      // Consumer disconnected. handleToolsCall's AbortController is
+      // keyed by body.id and already registered in inflightAborts;
+      // signal it so the upstream Copilot fetch tears down and the
+      // inFlight slot is freed promptly. No need to clear heartbeats
+      // here — the start() function's finally-block does that when
+      // callPromise resolves (or rejects with the abort).
+      const abortKey =
+        body.id !== undefined && body.id !== null ? body.id : undefined
+      if (abortKey !== undefined) {
+        const aborter = inflightAborts.get(abortKey)
+        if (aborter) aborter.abort(new Error("client disconnected SSE stream"))
+      }
+    },
+  })
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      // MCP Streamable HTTP transport identifier so middleboxes (and
+      // future Claude Code versions that key off this) handle the
+      // response correctly.
+      "X-Accel-Buffering": "no",
+    },
+  })
 }
 
 export function handleMcpDelete(c: Context): Response {

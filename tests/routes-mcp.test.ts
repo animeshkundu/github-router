@@ -496,41 +496,49 @@ describe("/mcp tools/call routing", () => {
     expect(upstream.reasoning_effort).toBe("xhigh")
   })
 
-  test("codex_critic rejects effort:xhigh with -32602 (per-persona allowedEfforts gate)", async () => {
-    // gpt-5.5 at xhigh on a tiny prompt = 56s wall (probed 2026-05-14),
-    // right at the 60s MCP ceiling. Gate rejects upfront so the caller
-    // can re-call at a permitted tier instead of hitting a silent timeout.
-    mockResponsesUpstream("ok")
-    const { json } = await rpc({
+  test("codex_critic accepts effort:xhigh (SSE-streamed responses bypass the 60s ceiling)", async () => {
+    // Previously codex-critic@xhigh was rejected because gpt-5.5 at xhigh on
+    // a tiny prompt = 56s wall (probed 2026-05-14), right at Claude Code's
+    // 60s tools/call ceiling. With SSE-streamed /mcp responses
+    // (handler.ts:handleToolsCallSSE), the connection stays open past the
+    // ceiling and long calls succeed transparently — so the gate is lifted.
+    const captured = mockResponsesUpstream("ok")
+    await rpc({
       jsonrpc: "2.0",
       id: 200,
       method: "tools/call",
       params: {
         name: "codex_critic",
-        arguments: { prompt: "x", effort: "xhigh" },
+        arguments: { prompt: "deep dive", effort: "xhigh" },
       },
     })
-    const err = json.error as { code: number; message: string }
-    expect(err.code).toBe(-32602)
-    expect(err.message).toContain("xhigh")
-    expect(err.message).toContain("Allowed: low|medium|high")
+    const upstream = captured.lastBody as { reasoning?: { effort?: string } }
+    expect(upstream.reasoning?.effort).toBe("xhigh")
   })
 
-  test("opus_critic rejects effort:high with -32602 (thinking-budget math)", async () => {
-    mockResponsesUpstream("ok")  // wrong endpoint but no upstream call should be made
-    const { json } = await rpc({
+  test("opus_critic accepts effort:high (SSE-streamed responses bypass the 60s ceiling)", async () => {
+    // Previously opus-critic was capped at low|medium because the thinking-
+    // budget math (~80-150 tps × 6k+ tokens) busts the 60s ceiling. With
+    // SSE-streamed responses, the long path works transparently.
+    const captured = mockMessagesUpstream("ok")
+    await rpc({
       jsonrpc: "2.0",
       id: 201,
       method: "tools/call",
       params: {
         name: "opus_critic",
-        arguments: { prompt: "x", effort: "high" },
+        arguments: { prompt: "review", effort: "high" },
       },
     })
-    const err = json.error as { code: number; message: string }
-    expect(err.code).toBe(-32602)
-    expect(err.message).toContain("high")
-    expect(err.message).toContain("Allowed: low|medium")
+    expect(captured.called).toBe(true)
+    // For opus@high, budget bucketing extrapolates linearly above medium=3000:
+    // high=6000 (default), max_tokens=budget+1500=7500.
+    const upstream = captured.lastBody as {
+      max_tokens?: number
+      thinking?: { budget_tokens?: number }
+    }
+    expect(upstream.thinking?.budget_tokens).toBeGreaterThanOrEqual(3000)
+    expect(upstream.max_tokens).toBeGreaterThanOrEqual((upstream.thinking?.budget_tokens ?? 0))
   })
 
   test("invalid effort value is rejected with -32602 (not silently forwarded)", async () => {
@@ -549,13 +557,13 @@ describe("/mcp tools/call routing", () => {
     expect(err.message).toMatch(/effort/)
   })
 
-  test("predictedTooLong rejects pre-flight with isError; no upstream call made", async () => {
-    // Architectural invariant: the cap MUST fire before inFlightToolsCall++
-    // and BEFORE any upstream fetch. Spec for Phase A2 (CLAUDE.md
-    // documents this contract: "rejected pre-flight is free of
-    // concurrency-slot cost").
-    const captured = mockResponsesUpstream("should-never-reach-this", { lastBody: undefined })
-    // codex_critic@high cap = 8 KB. Build a 9 KB prompt to trip it.
+  test("large brief at effort:'high' is no longer pre-flight rejected (SSE handles long calls)", async () => {
+    // Previously a 9KB brief on codex_critic@high was rejected by the
+    // predictedTooLong cap (8KB threshold) to avoid timing out under the
+    // 60s tools/call ceiling. With SSE-streamed responses the call now
+    // succeeds — verify the upstream fetch is invoked instead of
+    // pre-flight rejected.
+    const captured = mockResponsesUpstream("ok")
     const oversize = "x".repeat(9 * 1024)
     const { status, json } = await rpc({
       jsonrpc: "2.0",
@@ -571,12 +579,9 @@ describe("/mcp tools/call routing", () => {
       content: Array<{ type: string; text: string }>
       isError?: boolean
     }
-    expect(result.isError).toBe(true)
-    expect(result.content[0].text).toContain("60s MCP")
-    expect(result.content[0].text).toContain("8KB")
-    expect(result.content[0].text).toMatch(/9\.\d+KB/)
-    // No upstream call was made — captured.lastBody is still undefined.
-    expect(captured.lastBody).toBeUndefined()
+    expect(result.isError).toBeUndefined()
+    // Upstream WAS called — captured.lastBody is set.
+    expect(captured.lastBody).toBeDefined()
   })
 
   test("opus_critic at effort:'low' routes to /v1/messages with thinking.budget_tokens=1024", async () => {
@@ -597,7 +602,7 @@ describe("/mcp tools/call routing", () => {
     }
     expect(result.isError).toBeUndefined()
     expect(result.content[0].text).toBe("no material objection")
-    // Verify the upstream payload's bucketing: low → 1024 budget, max=1024+1500=2524
+    // Verify upstream bucketing: low → 1024 budget, max=1024+2048=3072
     const upstream = captured.lastBody as {
       model?: string
       max_tokens?: number
@@ -607,7 +612,7 @@ describe("/mcp tools/call routing", () => {
     }
     expect(upstream.thinking?.type).toBe("enabled")
     expect(upstream.thinking?.budget_tokens).toBe(1024)
-    expect(upstream.max_tokens).toBe(2524)
+    expect(upstream.max_tokens).toBe(3072)
     expect(upstream.messages?.[0]?.role).toBe("user")
     expect(upstream.messages?.[0]?.content).toBe("review this")
     expect(upstream.system).toContain("opus-critic")
@@ -629,7 +634,26 @@ describe("/mcp tools/call routing", () => {
       thinking?: { budget_tokens?: number }
     }
     expect(upstream.thinking?.budget_tokens).toBe(3000)
-    expect(upstream.max_tokens).toBe(4500)  // budget + 1500
+    expect(upstream.max_tokens).toBe(5048)  // 3000 + 2048
+  })
+
+  test("opus_critic at effort:'xhigh' routes to /v1/messages with thinking.budget_tokens=16000", async () => {
+    const captured = mockMessagesUpstream("verdict")
+    await rpc({
+      jsonrpc: "2.0",
+      id: 303,
+      method: "tools/call",
+      params: {
+        name: "opus_critic",
+        arguments: { prompt: "deep dive", effort: "xhigh" },
+      },
+    })
+    const upstream = captured.lastBody as {
+      max_tokens?: number
+      thinking?: { budget_tokens?: number }
+    }
+    expect(upstream.thinking?.budget_tokens).toBe(16000)
+    expect(upstream.max_tokens).toBe(18048)  // 16000 + 2048
   })
 
   test("codex_reviewer call hits /responses with model=gpt-5.3-codex", async () => {
