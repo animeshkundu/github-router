@@ -75,6 +75,28 @@ Create `.claude/settings.json` in your project:
 
 Then run `claude` as normal.
 
+### Peer-MCP review subagents
+
+`github-router claude` auto-wires four peer-model adversarial reviewers plus a coordinator into the spawned Claude Code session. No setup, no prior MCP config, no `.claude/agents/` files needed — they appear as Task `subagent_type` options the session can delegate to. Opt out with `--no-codex-mcp`.
+
+Each persona is exposed both as a Claude Code subagent (callable via the `Task` tool) AND as an MCP tool at `mcp__gh-router-peers__<name>`. Personas are stateless: each invocation runs a fresh request against its model with a baked persona prompt — they have no access to your scrollback or `CLAUDE.md`, so the lead must paste the artifact into the brief.
+
+| Subagent | Model | Endpoint | Effort tiers (default) |
+|---|---|---|---|
+| `codex-critic` | gpt-5.5 | `/v1/responses` | low \| medium \| high \| xhigh (high) |
+| `codex-reviewer` | gpt-5.3-codex | `/v1/responses` | low \| medium \| high \| xhigh (high) |
+| `opus-critic` | claude-opus-4-7 | `/v1/messages` | low \| medium \| high \| xhigh (high) |
+| `gemini-critic` | gemini-3.1-pro-preview | `/v1/chat/completions` | low \| medium \| high \| xhigh (high) |
+| `peer-review-coordinator` | (meta) | — | — |
+
+`peer-review-coordinator` is a subagent (not an MCP tool) that fans out to the right combination of the four critics in parallel based on artifact type — plan, diff, single file, or long-context — and aggregates findings.
+
+**Effort tiers** are exposed via the MCP tool's `effort` argument; subagents pass it through. All four tiers are accepted on every persona. `xhigh` routinely runs 60–90s; the proxy automatically picks sync vs async dispatch based on predicted latency, so calls past the standard ~60s MCP per-tool-call ceiling complete transparently with no user setup.
+
+`gemini-critic` only registers when `gemini-3.1-pro-preview` is present in your Copilot model catalog. If absent, the persona is silently dropped from both the MCP `tools/list` and the subagent set, and `peer-review-coordinator` skips it in routing decisions.
+
+For codex-side write capability (a `codex-implementer` persona that can mutate files via Codex's tool-use sandbox), pass `--codex-cli`. Requires `codex` CLI 0.129+ on `PATH`; falls back to HTTP-only with a warning if codex is missing or older. Pass `--codex-mcp-only` to also pass `--strict-mcp-config` to Claude Code so only the proxy's MCP servers are loaded (hides any MCP servers in your existing `~/.claude/mcp.json`).
+
 ---
 
 ## Use with Codex CLI
@@ -222,6 +244,18 @@ Fallback chains fire only on the implicit-default path; explicit `-m`/`--model` 
 | `--codex` | Generate Codex CLI launch command | false |
 | `--show-token` | Print tokens to console | false |
 | `--proxy-env` | Use HTTP_PROXY/HTTPS_PROXY env vars | false |
+
+Additional flags accepted only by the `claude` subcommand:
+
+| Flag | Description | Default |
+|---|---|---|
+| `--model, -m` | Override the default Claude model | claude-opus-4-7 |
+| `--codex-mcp` / `--no-codex-mcp` | Wire peer-MCP review subagents (codex-critic / opus-critic / gemini-critic / codex-reviewer / peer-review-coordinator) into the spawned session | true |
+| `--codex-cli` | Add a `codex mcp-server` stdio backend so `codex-implementer` can mutate files. Requires codex CLI 0.129+; falls back to HTTP-only if absent | false |
+| `--codex-mcp-only` | Pass `--strict-mcp-config` to Claude Code so only the proxy's MCP servers load (hides any user MCP servers in `~/.claude/mcp.json`) | false |
+| `--stealth` | Opt back into VS Code-only beta-header filtering. Loses leverage features (task budgets, token-efficient tools, prompt caching, etc.) but minimizes the wire-fingerprint diff from VS Code Copilot Chat | false |
+| `--auto-update` / `--no-auto-update` | Check for and install latest Claude Code on launch (throttled to once per hour). Falls back gracefully if npm/network unavailable | true |
+| `--update-check` / `--no-update-check` | Check the npm registry for a newer Claude Code version on launch and warn if stale (~500ms cost). `--no-update-check` implies no auto-install | true |
 
 ---
 

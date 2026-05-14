@@ -118,7 +118,7 @@ Self-reminder (read before every reply):
 
 const COLD_START_CONTRACT = `
 Cold-start contract for the lead orchestrator (Opus):
-  When delegating to me, paste a self-contained brief. I have no access to your scrollback, CLAUDE.md, or the project tree. Always include:
+  When delegating to me, paste a self-contained brief. I have no access to your scrollback, project memory, or the project tree. Always include:
     (a) the artifact under review verbatim (code/diff/plan text),
     (b) the constraints or "done" criteria,
     (c) any prior decisions I should not relitigate.
@@ -215,7 +215,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
       "Adversarial second opinion on plans, designs, code, or systems-engineering tradeoffs. Backed by gpt-5.5 (OpenAI) — different model, different training data, different blind spots than Opus. Uses a calibrated 1–5 grading rubric and is allowed to reply 'no material objection' on solid artifacts."
       + " **CALL BEFORE: ExitPlanMode for any plan involving >2 files or new architecture; finalizing a major design choice; TeamCreate when the team's task is non-trivial.** **CALL AFTER: any commit touching concurrency, security, or streaming code paths.**"
       + " If the artifact is large (>8 KB), prefer to break it into 2-4 focused batches and call this tool once per batch IN PARALLEL — each call must complete under Claude Code's ~60s MCP per-tool-call ceiling, so monolithic large-artifact calls will time out client-side. Aggregate findings yourself."
-      + " Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. **Effort tiers**: `low | medium | high` (default `high`). `xhigh` is NOT supported on this persona — empirical data (2026-05-14) shows xhigh routinely takes 56s+ on a tiny prompt and busts the 60s MCP ceiling on real reviews. For deeper reasoning, decompose into parallel sub-calls instead. The subagent has no access to your scrollback or CLAUDE.md.",
+      + " Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. **Effort tiers**: `low | medium | high` (default `high`). `xhigh` is NOT supported on this persona — empirical data (2026-05-14) shows xhigh routinely takes 56s+ on a tiny prompt and busts the 60s MCP ceiling on real reviews. For deeper reasoning, decompose into parallel sub-calls instead. The subagent has no access to your scrollback or project memory.",
     baseInstructions: CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -232,7 +232,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
       "Adversarial second opinion from a different lab. Backed by gemini-3.1-pro-preview (Google) — different training data and RLHF priors than Opus AND codex-critic, the strongest blind-spot-buster when the lead wants triangulation across three labs. Use for long-context artifacts (>50k tokens), math/proof-shaped reasoning, or as a tie-breaker after codex-critic has weighed in."
       + " **CALL BEFORE: ExitPlanMode for plans where Opus + codex-critic agree (use as triangulation); finalizing irreversible architectural choices.** **CALL AFTER: commits where you want a third-lab cross-check.**"
       + " If the artifact is large (>100 KB), prefer to break into batches and call in parallel — gemini handles long context well but each per-call MCP wait is still bounded (~60s on v2.1.138)."
-      + " Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. **Effort tiers**: `low | medium | high | xhigh` (default `high`). The `effort` parameter is forwarded but may be silently ignored by Copilot's gemini route — gemini-3.x reasoning is largely auto-applied. The subagent has no access to your scrollback or CLAUDE.md.",
+      + " Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. **Effort tiers**: `low | medium | high | xhigh` (default `high`). The `effort` parameter is forwarded but may be silently ignored by Copilot's gemini route — gemini-3.x reasoning is largely auto-applied. The subagent has no access to your scrollback or project memory.",
     baseInstructions: GEMINI_CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -250,7 +250,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
       "Line-level code review of a specific diff or file. Backed by gpt-5.3-codex (OpenAI) — the code-specialist sibling of gpt-5.5, trained heavily on code-review datasets so it catches different bugs than Opus. Prefer over codex-critic when the artifact is a concrete diff or single file (codex-critic is for plans/designs)."
       + " **CALL AFTER: any non-trivial commit (>50 lines OR touching critical paths: streaming, auth, concurrency, persistence, security).** **CALL BEFORE: opening a PR or pushing changes a peer would review.**"
       + " For diffs >12 KB, split by file-group and call once per group in parallel — each per-call wait is bounded (~60s on v2.1.138)."
-      + " Always pass: (a) the diff or file verbatim, (b) the change's intent, (c) test status. **Effort tiers**: `low | medium | high` (default `high`). `xhigh` is NOT supported on this persona — same 60s MCP ceiling reasoning as codex-critic; for deeper reasoning, decompose into parallel sub-calls. The subagent has no access to your scrollback or CLAUDE.md.",
+      + " Always pass: (a) the diff or file verbatim, (b) the change's intent, (c) test status. **Effort tiers**: `low | medium | high` (default `high`). `xhigh` is NOT supported on this persona — same 60s MCP ceiling reasoning as codex-critic; for deeper reasoning, decompose into parallel sub-calls. The subagent has no access to your scrollback or project memory.",
     baseInstructions: REVIEWER_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -267,7 +267,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
       "Adversarial second opinion from a fresh-context Opus 4.7 — same model AND same lab as the lead orchestrator. Useful when you suspect cognitive momentum is wrong (sunk cost on a plan, motivated reasoning toward a particular fix), or as a cheap+fast sanity check before committing to a controversial decision."
       + " **LIMITED blind-spot diversification compared to codex-critic / gemini-critic (same training, same lab) — use as inexpensive sanity check, NOT as a substitute for cross-lab triangulation.**"
       + " **CALL WHEN**: the artifact fits comfortably in one shot (<5 KB) and you want a quick same-lab gut-check; a fresh perspective on a decision you've been iterating on. **Hard cap: briefs above 6 KB at `effort:'medium'` are pre-flight rejected** — decompose into smaller sub-calls or pick a smaller artifact. **DO NOT call as the primary triangulation peer** — use codex-critic + gemini-critic for that."
-      + " **Effort tiers**: `low | medium` (default `medium`). `high` and `xhigh` are NOT supported on this persona — the thinking budget required for those tiers cannot complete within Claude Code's ~60s MCP per-tool-call ceiling on claude-opus-4-7 (empirical: ~80-150 tps × ~6k+ token budget = 60s+). For deep dives, use codex-critic at `effort:'high'` (with brief <8KB) or gemini-critic. The subagent has no access to your scrollback or CLAUDE.md.",
+      + " **Effort tiers**: `low | medium` (default `medium`). `high` and `xhigh` are NOT supported on this persona — the thinking budget required for those tiers cannot complete within Claude Code's ~60s MCP per-tool-call ceiling on claude-opus-4-7 (empirical: ~80-150 tps × ~6k+ token budget = 60s+). For deep dives, use codex-critic at `effort:'high'` (with brief <8KB) or gemini-critic. The subagent has no access to your scrollback or project memory.",
     baseInstructions: OPUS_CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -289,7 +289,7 @@ export const PERSONAS_WRITE: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.3-codex",
     endpoint: "/v1/responses",
     description:
-      "Targeted implementation of a self-contained coding task — actual file edits via Codex's tool-use sandbox. Backed by gpt-5.3-codex with workspace-write access (only registered when --codex-cli is set). Use only when the task has a clear spec and acceptance criteria; for tasks needing iterative tool-use across many files, prefer a Claude teammate (Agent Team). Always pass: (a) the spec, (b) the files in scope, (c) the acceptance criteria. The subagent has no access to your scrollback or CLAUDE.md.",
+      "Targeted implementation of a self-contained coding task — actual file edits via Codex's tool-use sandbox. Backed by gpt-5.3-codex with workspace-write access (only registered when --codex-cli is set). Use only when the task has a clear spec and acceptance criteria; for tasks needing iterative tool-use across many files, prefer a Claude teammate (Agent Team). Always pass: (a) the spec, (b) the files in scope, (c) the acceptance criteria. The subagent has no access to your scrollback or project memory.",
     baseInstructions: IMPLEMENTER_BASE,
     agentPrompt: "",
     writeCapable: true,

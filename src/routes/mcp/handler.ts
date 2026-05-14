@@ -531,8 +531,7 @@ async function handleToolsCall(
           text:
             `${persona.toolNameHttp} at effort='${effort}' on a ${briefKb}KB brief is likely to exceed the ~60s MCP per-tool-call ceiling `
               + `(empirical cap for this persona+effort: ${capKb}KB). `
-              + `Either drop to a lower effort tier, or split the brief into 2-4 parallel sub-calls per the decomposition guidance in the tool description. `
-              + `(See docs/copilot-compat-matrix.md for the empirical latency curves driving this cap.)`,
+              + `Either drop to a lower effort tier, or split the brief into 2-4 parallel sub-calls per the decomposition guidance in the tool description.`,
         },
       ],
       isError: true,
