@@ -656,6 +656,91 @@ describe("/mcp tools/call routing", () => {
     expect(upstream.max_tokens).toBe(18048)  // 16000 + 2048
   })
 
+  test("tools/call with Accept: text/event-stream returns SSE-streamed response with heartbeat + final result", async () => {
+    // Empirical wire-shape test for handleToolsCallSSE — validates the
+    // structural fix that lets xhigh work on every persona by bypassing
+    // Claude Code's ~60s tools/call ceiling. Per MCP 2025-06-18
+    // Streamable HTTP spec, when the client sends Accept: text/event-stream
+    // the server can respond with Content-Type: text/event-stream and
+    // emit JSON-RPC messages as SSE events.
+    mockResponsesUpstream("verdict")
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+          // Claude Code's MCP HTTP client sends both per spec.
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1000,
+          method: "tools/call",
+          params: { name: "codex_critic", arguments: { prompt: "x", effort: "xhigh" } },
+        }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toBe("text/event-stream")
+    expect(res.headers.get("cache-control")).toContain("no-cache")
+    const body = await res.text()
+    // At least one heartbeat (initial event before the upstream call resolves).
+    expect(body).toContain("event: message")
+    expect(body).toContain('"method":"notifications/progress"')
+    expect(body).toContain('"progressToken":1000')
+    // Final tools/call result envelope is the closing message event.
+    expect(body).toContain('"id":1000')
+    expect(body).toContain('"result"')
+    expect(body).toContain("verdict")
+  })
+
+  test("tools/call with Accept: application/json (no SSE) keeps the JSON path unchanged", async () => {
+    mockResponsesUpstream("ok")
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+          accept: "application/json",  // ← NO event-stream
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1001,
+          method: "tools/call",
+          params: { name: "codex_critic", arguments: { prompt: "x", effort: "high" } },
+        }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toContain("application/json")
+    const json = await res.json() as { result?: unknown; id?: number }
+    expect(json.id).toBe(1001)
+    expect(json.result).toBeDefined()
+  })
+
+  test("non-tools/call requests stay on JSON path even with Accept: text/event-stream", async () => {
+    // initialize / tools/list / etc. don't benefit from streaming; the
+    // SSE branch is gated on method === "tools/call" specifically.
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1002, method: "tools/list" }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toContain("application/json")
+  })
+
   test("codex_reviewer call hits /responses with model=gpt-5.3-codex", async () => {
     const captured = mockResponsesUpstream("Clean review — no findings.")
     await rpc({
