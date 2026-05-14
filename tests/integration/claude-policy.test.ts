@@ -566,9 +566,10 @@ describe("contract: spawned-Claude env defaults", () => {
     expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1")
   })
 
-  test("sets MCP_TIMEOUT to 600000ms (10 min — belt-and-suspenders for #50289)", () => {
+  test("sets MCP_TIMEOUT and MCP_TOOL_TIMEOUT to 600000ms (10 min — MCP_TOOL_TIMEOUT is the load-bearing per-tool-call lever on v2.1.141)", () => {
     const env = getClaudeCodeEnvVars("http://127.0.0.1:8787")
     expect(env.MCP_TIMEOUT).toBe("600000")
+    expect(env.MCP_TOOL_TIMEOUT).toBe("600000")
   })
 
   test("sets CLAUDE_CONFIG_DIR to the router-owned snapshot mirror (per-config-dir keychain isolation, plus auth-substrate for spawned teammates)", () => {

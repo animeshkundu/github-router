@@ -103,19 +103,31 @@ describe("getClaudeCodeEnvVars", () => {
     expect(vars).not.toHaveProperty("ANTHROPIC_AUTH_TOKEN")
   })
 
-  test("sets MCP_TIMEOUT=600000 to extend HTTP MCP per-tool-call wait beyond the v2.1.113+ regression", () => {
-    // Regression context: GitHub issue
-    // https://github.com/anthropics/claude-code/issues/50289 — open,
-    // labeled `bug, regression, has repro`. The .mcp.json per-server
-    // `timeout` field is silently dropped for HTTP transport since
-    // Claude Code 2.1.113. The MCP_TIMEOUT env var symbol is in the
-    // v2.1.138 binary's env-var allowlist; the empirical question is
-    // whether it actually extends the per-tool-call HTTP wait (vs.
-    // just server-startup). This test asserts we set it; whether it
-    // works at runtime is what Phase 1 of the peer-MCP plan tests.
-    // See docs/peer-mcp-design.md and docs/research/peer-mcp-investigation.md.
+  test("sets MCP_TIMEOUT=600000 (legacy belt-and-suspenders) and MCP_TOOL_TIMEOUT=600000 (the load-bearing per-tool-call timeout on v2.1.141)", () => {
+    // Two distinct env vars at play (per binary inspection of v2.1.141
+    // `y13()`, 2026-05-14):
+    //
+    //   - MCP_TIMEOUT — historical/general MCP timeout, may apply to
+    //     server-startup or initial-handshake but NOT confirmed to reach
+    //     the per-tool-call HTTP wait on v2.1.138-141 (regressions
+    //     #50289 / #52137 documented this as silently-ignored on the
+    //     per-call path). Kept as belt-and-suspenders.
+    //
+    //   - MCP_TOOL_TIMEOUT — load-bearing on v2.1.141: `y13()` reads
+    //     `parseInt(process.env.MCP_TOOL_TIMEOUT)` for the per-tool-call
+    //     timeout passed to `client.callTool({...}, schema, {timeout:W})`.
+    //     Default `1e8` ms (~27.7 hours) when the env is unset. Setting
+    //     a finite-but-large value (10 min) surfaces regressions where
+    //     the SDK silently caps lower AND prevents long-tail runaway
+    //     calls from holding resources indefinitely.
+    //
+    // SDK detail: the `resetTimeoutOnProgress` opt-in in MCP SDK v1.29.0
+    // is required for SSE notifications/progress to reset the per-call
+    // timer. Claude Code v2.1.141 does NOT pass it, so SSE heartbeats
+    // alone don't help — MCP_TOOL_TIMEOUT is the actual lever.
     const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
     expect(vars.MCP_TIMEOUT).toBe("600000")
+    expect(vars.MCP_TOOL_TIMEOUT).toBe("600000")
   })
 
   test("sets CLAUDE_CONFIG_DIR to the router-owned snapshot mirror (not ~/.claude)", () => {
