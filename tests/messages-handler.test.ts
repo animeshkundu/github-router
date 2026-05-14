@@ -464,6 +464,127 @@ describe("Anthropic-only body field stripping (Phase B P0.2)", () => {
     expect(forwarded.betas).toBeUndefined()
   })
 
+  test("strips per-tool `eager_input_streaming` field (Copilot 400 'tools.0.custom.eager_input_streaming' — verified live 2026-05-13; FGTS auto-enabled by getClaudeCodeEnvVars)", async () => {
+    const captured: { body?: string } = {}
+    setupModelAndFetch(captured)
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+        tools: [
+          {
+            name: "echo_test",
+            description: "Test tool",
+            input_schema: {
+              type: "object",
+              properties: { x: { type: "string" } },
+            },
+            eager_input_streaming: true,
+          },
+        ],
+      }),
+    })
+    expect(response.status).toBe(200)
+
+    const forwarded = JSON.parse(captured.body ?? "{}") as {
+      tools?: Array<{
+        name?: string
+        description?: string
+        input_schema?: unknown
+        eager_input_streaming?: unknown
+        cache_control?: unknown
+      }>
+    }
+    // Field stripped
+    expect(forwarded.tools?.[0]?.eager_input_streaming).toBeUndefined()
+    // Other tool fields preserved (regression guard against over-eager strip)
+    expect(forwarded.tools?.[0]?.name).toBe("echo_test")
+    expect(forwarded.tools?.[0]?.description).toBe("Test tool")
+    expect(forwarded.tools?.[0]?.input_schema).toEqual({
+      type: "object",
+      properties: { x: { type: "string" } },
+    })
+  })
+
+  test("strips `eager_input_streaming` from each tool independently (multi-tool, mixed presence)", async () => {
+    const captured: { body?: string } = {}
+    setupModelAndFetch(captured)
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+        tools: [
+          {
+            name: "tool_a",
+            description: "A",
+            input_schema: { type: "object" },
+            eager_input_streaming: true,
+          },
+          {
+            name: "tool_b",
+            description: "B",
+            input_schema: { type: "object" },
+          },
+          {
+            name: "tool_c",
+            description: "C",
+            input_schema: { type: "object" },
+            eager_input_streaming: false,
+          },
+        ],
+      }),
+    })
+    expect(response.status).toBe(200)
+
+    const forwarded = JSON.parse(captured.body ?? "{}") as {
+      tools?: Array<{ name?: string; eager_input_streaming?: unknown }>
+    }
+    // All three tools have the field stripped (true OR false — both rejected by Copilot)
+    expect(forwarded.tools?.[0]?.eager_input_streaming).toBeUndefined()
+    expect(forwarded.tools?.[1]?.eager_input_streaming).toBeUndefined()
+    expect(forwarded.tools?.[2]?.eager_input_streaming).toBeUndefined()
+    // Names preserved (no tool dropped)
+    expect(forwarded.tools?.map((t) => t.name)).toEqual(["tool_a", "tool_b", "tool_c"])
+  })
+
+  test("does NOT touch tools[] when no `eager_input_streaming` present (no-op preservation)", async () => {
+    const captured: { body?: string } = {}
+    setupModelAndFetch(captured)
+
+    const toolsBlock = [
+      {
+        name: "echo_test",
+        description: "Test tool",
+        input_schema: { type: "object" },
+      },
+    ]
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+        tools: toolsBlock,
+      }),
+    })
+    expect(response.status).toBe(200)
+
+    const forwarded = JSON.parse(captured.body ?? "{}") as {
+      tools?: typeof toolsBlock
+    }
+    expect(forwarded.tools).toEqual(toolsBlock)
+  })
+
   test("does NOT strip `metadata` (Copilot 200s, ignores harmlessly — codex-critic 'preserve unknown unless documented' guidance)", async () => {
     const captured: { body?: string } = {}
     setupModelAndFetch(captured)

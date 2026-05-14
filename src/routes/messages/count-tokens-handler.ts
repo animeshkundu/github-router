@@ -171,12 +171,13 @@ function resolveModelInBody(rawBody: string): {
 
   // Strip Anthropic-only body fields Copilot 400s on. See
   // `stripAnthropicOnlyFields` in handler.ts for full rationale + empirical
-  // evidence (2026-05-11 verification). count_tokens uses the same Copilot
-  // schema validator as /v1/messages so the same fields are rejected.
+  // evidence (2026-05-11 / 2026-05-13 verification). count_tokens uses the same
+  // Copilot schema validator as /v1/messages so the same fields are rejected.
   const needsAnthropicOnlyStrip =
     rawBody.includes('"budget"')
     || rawBody.includes('"output_config"')
     || rawBody.includes('"betas"')
+    || rawBody.includes('"eager_input_streaming"')
   if (needsAnthropicOnlyStrip && stripAnthropicOnlyFields(parsed)) {
     modified = true
   }
@@ -271,6 +272,25 @@ function stripAnthropicOnlyFields(body: AnyRecord): boolean {
     )
     delete body.betas
     stripped = true
+  }
+  // Per-tool field strip: `eager_input_streaming` (FGTS). Mirrors handler.ts.
+  if (Array.isArray(body.tools)) {
+    let warnedFGTS = false
+    for (const tool of body.tools) {
+      if (typeof tool === "object" && tool !== null) {
+        const t = tool as AnyRecord
+        if (t.eager_input_streaming !== undefined) {
+          delete t.eager_input_streaming
+          stripped = true
+          if (!warnedFGTS) {
+            consola.warn(
+              "[count_tokens] Stripping per-tool `eager_input_streaming` (Copilot 400s on `tools.*.custom.eager_input_streaming`)",
+            )
+            warnedFGTS = true
+          }
+        }
+      }
+    }
   }
   return stripped
 }
