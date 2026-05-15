@@ -33,7 +33,7 @@ Canonical Copilot tool-type allowlist (verbatim from a 400 in probe `tooltype_co
 | `bash_20250124` | ✅ 200 | copilot-allowlist | `tooltype_bash_20250124` | Current bash version |
 | `tool_search_tool_bm25` | ✅ 200 | copilot-allowlist | (TODO) | In Copilot allowlist — add probe |
 | `tool_search_tool_regex` | ✅ 200 | copilot-allowlist | (TODO) | In Copilot allowlist — add probe |
-| `web_search_20250305` | ⚠️ 200 (inconclusive) | anthropic-docs | `tooltype_web_search_20250305` | Body validator accepts; model never invoked the tool in the test prompt — needs a stronger probe to confirm functional acceptance |
+| `web_search_20250305` | ⚠️ 200 (inconclusive) | anthropic-docs | `tooltype_web_search_20250305` | Body validator accepts; model never invoked the tool in the test prompt — needs a stronger probe to confirm functional acceptance. See `web_search_anthropic_tool_messages` row below for the resolved end-to-end behavior with a real trigger query. |
 | `bash_20241022` | ❌ 400 | copilot-allowlist | `tooltype_bash_20241022_legacy` | Legacy version rejected |
 | `code_execution_20250825` | ❌ 400 | copilot-allowlist | `tooltype_code_execution_20250825` | Not in Copilot allowlist |
 | `computer_20250124` | (untested) | anthropic-docs | (TODO) | Add probe — Anthropic ships this typed tool; status unknown |
@@ -119,7 +119,43 @@ The proxy filters via `filterBetaHeader` in `src/lib/utils.ts`. Two lists:
 | `gpt-5.3-codex` | (untested via this matrix) | codex-emits | (TODO) | `/v1/responses` |
 | `gemini-3.1-pro-preview` | (untested via this matrix) | exploratory | (TODO) | `/v1/chat/completions` |
 
-## Endpoints covered
+## Web search — cross-endpoint native exposure (Task #2 empirical map)
+
+Resolution of the long-standing `tooltype_web_search_20250305` "inconclusive" row, plus full coverage of how Copilot exposes web_search natively across all three Anthropic-shape entry points and what the proxy does on top.
+
+| Endpoint | Tool shape sent | Direct upstream Copilot | End-to-end through proxy | Probe id |
+|---|---|---|---|---|
+| `/v1/messages` | `tools[].type=web_search_20250305` (Anthropic native) | ❌ 400 `unsupported_value: "The use of the web search tool is not supported."` | ✅ 200 (proxy intercepts in `processWebSearch`, fulfils via Copilot `/mcp` server-side, strips tool, injects results in `system`) | `web_search_anthropic_tool_messages` |
+| `/v1/responses` | `tools[].type=web_search_preview` (OpenAI Responses native) | ✅ 200 — model invokes natively; output stream contains `web_search_call` block (action.queries[]) followed by `message` | ✅ 200 (proxy passes through; no MCP hop) | `web_search_responses_preview` |
+| `/v1/responses` | `tools[].type=web_search_preview_2025_03_11` (versioned variant) | ✅ 200 — model invokes natively (same shape as bare preview) | (untested via proxy — covered by upstream confirmation) | (TODO) |
+| `/v1/responses` | `tools[].type=web_search` (bare/legacy) | ✅ 200 — body validator accepts AND model invokes natively (proven with real query). Comment in `src/routes/responses/handler.ts:314-316` saying Copilot rejects this is now stale. | ✅ 200 — but proxy strips the `web_search` tool and substitutes MCP results in `instructions` instead, so the model never gets the chance to invoke natively | (no probe — proxy strips so untestable end-to-end without bypass) |
+| `/v1/chat/completions` | `tools[].type=web_search` | ❌ 400 `invalid_request_body: "Invalid 'tools[0].function.name': empty string."` (validator only accepts strict OpenAI function tools) | ✅ 200 (proxy intercepts in `injectWebSearchIfNeeded`, fulfils via MCP, strips tool, prepends results to `system` message) | `web_search_chat_completions` |
+| `/v1/chat/completions` | `tools[].type=web_search_preview` | ❌ 400 (same shape error) | ✅ 200 (same proxy strip+substitute path as above) | (TODO — same code path as above) |
+| `/v1/chat/completions` | top-level `web_search_options: {}` (gpt-4o-search-preview style) | ✅ 200 (validator accepts) — but vanilla `gpt-4o` has no native search wiring; model returns "I cannot provide real-time data, knowledge ends Oct 2023". Field is silently ignored. | (proxy passthrough — no `web_search_options` strip) | (TODO) |
+
+**Conclusion**: Copilot's only native web_search exposure is on `/v1/responses` for GPT-5.x via `web_search_preview` (and accidentally `web_search`, which the proxy strips). All other entry points require the proxy's MCP-fulfilment fallback.
+
+**Native /mcp web_search tool** (used by the proxy under the hood — auth is the GitHub PAT, not the Copilot-exchanged token):
+- Endpoint: `POST https://api.enterprise.githubcopilot.com/mcp`
+- Wire: `initialize` → `notifications/initialized` → `tools/call`
+- Required header: `X-MCP-Toolsets: web_search` (without it, `tools/list` returns the default toolset which omits web_search)
+- Tool input schema (verbatim from `tools/list` 2026-05-14):
+  ```json
+  {"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}
+  ```
+- Response shape (stable across 3 distinct queries, 2026-05-14):
+  ```json
+  {
+    "type": "...",
+    "text": {"value": "<markdown body with citation refs>", "annotations": [...]},
+    "annotations": [...],            // duplicate of text.annotations at top level
+    "bing_searches": [{"text": "...", "url": "..."}]
+  }
+  ```
+  Each `annotations[i]`: `{end_index, start_index, text, url_citation: {title, url}}`.
+- The proxy's Zod schema (`src/services/copilot/web-search.ts:InnerSchema`) reads only `text.value` and `text.annotations[i].url_citation` — extra top-level `type`, top-level `annotations`, and the `bing_searches[i]` inner shape are silently stripped/ignored. **No drift observed since the May 8 fix** (when the inner shape changed and the schema was relaxed to make `annotations` `.nullable().optional()`).
+
+
 
 The probe currently exercises `/v1/messages`. TODO:
 - `/v1/messages/count_tokens` — same Copilot validator, same strip logic in `count-tokens-handler.ts`. Add probes mirroring the body-field strips above.

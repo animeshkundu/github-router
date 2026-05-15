@@ -310,10 +310,17 @@ async function injectWebSearchIfNeeded(
     }
   }
 
-  // Strip the legacy `web_search` tool — the router fulfilled it locally via
-  // /github/chat/threads, and Copilot's /responses rejects this exact type
-  // (Copilot supports `web_search_preview` / `web_search_preview_2025_03_11`,
-  // not bare `web_search`). Other tool types pass through unchanged.
+  // Strip the legacy `web_search` tool — defensive. Copilot's /responses
+  // empirically accepts bare `web_search` on gpt-5.x today (2026-05-15
+  // probe `web_search_responses_preview`: model invokes it natively, output
+  // contains a `web_search_call` block), and also accepts the explicit
+  // `web_search_preview` / `web_search_preview_2025_03_11` shapes. We strip
+  // here as belt-and-suspenders against version drift across Copilot tiers
+  // — the proxy's MCP fallback (`injectWebSearchIfNeeded`) substitutes a
+  // pre-fetched result so the user-facing path always works regardless of
+  // upstream support. Lift this strip if/when we trust bare `web_search`
+  // across all served gpt-5.x variants. Other tool types pass through
+  // unchanged.
   payload.tools = payload.tools?.filter((t) => t.type !== "web_search")
   if (payload.tools && payload.tools.length === 0) {
     payload.tools = undefined

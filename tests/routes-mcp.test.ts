@@ -140,7 +140,7 @@ describe("/mcp protocol methods", () => {
     expect(res.status).toBe(202)
   })
 
-  test("tools/list returns 4 tools when gemini is in catalog", async () => {
+  test("tools/list returns 4 personas + web_search when gemini is in catalog", async () => {
     const { status, json } = await rpc({
       jsonrpc: "2.0",
       id: 2,
@@ -155,6 +155,7 @@ describe("/mcp protocol methods", () => {
       "codex_reviewer",
       "gemini_critic",
       "opus_critic",
+      "web_search",
     ])
     for (const t of result.tools) {
       expect(t.description.length).toBeGreaterThan(20)
@@ -162,7 +163,7 @@ describe("/mcp protocol methods", () => {
     }
   })
 
-  test("tools/list omits gemini_critic when no gemini-3.x-pro in catalog", async () => {
+  test("tools/list omits gemini_critic when no gemini-3.x-pro in catalog (web_search still present)", async () => {
     state.models = {
       object: "list",
       data: baseModels.data.filter((m) => !m.id.startsWith("gemini")),
@@ -177,7 +178,29 @@ describe("/mcp protocol methods", () => {
       "codex_critic",
       "codex_reviewer",
       "opus_critic",
+      "web_search",
     ])
+  })
+
+  test("tools/list web_search entry has {query} input schema (no prompt/effort)", async () => {
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    })
+    const result = json.result as {
+      tools: Array<{ name: string; inputSchema: Record<string, unknown> }>
+    }
+    const entry = result.tools.find((t) => t.name === "web_search")
+    expect(entry).toBeDefined()
+    const schema = entry!.inputSchema as {
+      type: string
+      required: Array<string>
+      properties: Record<string, unknown>
+    }
+    expect(schema.type).toBe("object")
+    expect(schema.required).toEqual(["query"])
+    expect(Object.keys(schema.properties)).toEqual(["query"])
   })
 
   test("unknown method → JSON-RPC method-not-found", async () => {
@@ -1059,5 +1082,350 @@ describe("/mcp concurrency cap", () => {
       }),
     )
     expect(res.status).toBe(202)
+  })
+})
+
+describe("/mcp web_search tool", () => {
+  /**
+   * Mock the upstream Copilot /mcp endpoint that searchWeb hits.
+   *
+   * searchWeb's flow: initialize → notifications/initialized → tools/call
+   * (SSE stream) → DELETE. We mock all four shapes by inspecting the
+   * request body's JSON-RPC method field.
+   */
+  function mockUpstreamMcp(opts: {
+    /** SSE inner-text JSON payload for tools/call success. */
+    inner?: {
+      text: { value: string; annotations?: Array<{ url_citation?: { title: string; url: string } }> | null }
+      bing_searches?: Array<unknown> | null
+    }
+    /** Override tools/call HTTP status (200 = success path). */
+    callStatus?: number
+    /** Force the upstream tools/call to throw a generic error. */
+    forceCallError?: boolean
+  } = {}) {
+    const captured: { tcCalled?: boolean; lastQuery?: string } = {}
+    globalThis.fetch = mock(async (_url: unknown, init?: { method?: string; body?: string }) => {
+      const method = init?.method ?? "GET"
+      if (method === "DELETE") {
+        return new Response(null, { status: 204 })
+      }
+      let body: { method?: string; id?: number; params?: { arguments?: { query?: string } } } = {}
+      try {
+        body = JSON.parse(init?.body ?? "{}") as typeof body
+      } catch {
+        // ignore
+      }
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { protocolVersion: "2024-11-05", capabilities: {} },
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+              "mcp-session-id": "test-sid",
+            },
+          },
+        )
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 202 })
+      }
+      if (body.method === "tools/call") {
+        captured.tcCalled = true
+        captured.lastQuery = body.params?.arguments?.query
+        if (opts.forceCallError) {
+          return new Response("upstream sick", { status: 502 })
+        }
+        const inner = opts.inner ?? {
+          text: {
+            value: "Default search content.",
+            annotations: [
+              {
+                url_citation: { title: "Source One", url: "https://example.com/1" },
+              },
+            ],
+          },
+        }
+        const sseBody =
+          `event: message\ndata: ${JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: {
+              content: [{ type: "text", text: JSON.stringify(inner) }],
+            },
+          })}\n\n`
+        return new Response(sseBody, {
+          status: opts.callStatus ?? 200,
+          headers: { "content-type": "text/event-stream" },
+        })
+      }
+      return new Response("unexpected", { status: 500 })
+    }) as unknown as typeof globalThis.fetch
+    return captured
+  }
+
+  test("web_search call returns formatted content + ## References section", async () => {
+    const captured = mockUpstreamMcp({
+      inner: {
+        text: {
+          value: "Hono latest is 4.12.15.",
+          annotations: [
+            {
+              url_citation: {
+                title: "hono - npm",
+                url: "https://www.npmjs.com/package/hono",
+              },
+            },
+            {
+              url_citation: {
+                title: "Hono docs",
+                url: "https://hono.dev",
+              },
+            },
+          ],
+        },
+      },
+    })
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 600,
+      method: "tools/call",
+      params: { name: "web_search", arguments: { query: "Hono latest version" } },
+    })
+    expect(status).toBe(200)
+    expect(captured.tcCalled).toBe(true)
+    expect(captured.lastQuery).toBe("Hono latest version")
+    const result = json.result as {
+      content: Array<{ type: string; text: string }>
+      isError?: boolean
+    }
+    expect(result.isError).toBeUndefined()
+    expect(result.content[0].type).toBe("text")
+    expect(result.content[0].text).toContain("Hono latest is 4.12.15.")
+    expect(result.content[0].text).toContain("## References")
+    expect(result.content[0].text).toContain("- [hono - npm](https://www.npmjs.com/package/hono)")
+    expect(result.content[0].text).toContain("- [Hono docs](https://hono.dev)")
+  })
+
+  test("web_search omits ## References section when there are no references", async () => {
+    mockUpstreamMcp({
+      inner: {
+        text: {
+          value: "Some content with no citations.",
+          annotations: null,
+        },
+      },
+    })
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 601,
+      method: "tools/call",
+      params: { name: "web_search", arguments: { query: "obscure niche query" } },
+    })
+    const result = json.result as {
+      content: Array<{ type: string; text: string }>
+      isError?: boolean
+    }
+    expect(result.isError).toBeUndefined()
+    expect(result.content[0].text).toBe("Some content with no citations.")
+    expect(result.content[0].text).not.toContain("## References")
+  })
+
+  test("web_search filters bing.com/search citations from the references list", async () => {
+    // Behavior comes from searchWeb itself, but assert it surfaces through
+    // the MCP tool — bing redirect URLs should not appear in the formatted
+    // output we hand to the lead.
+    mockUpstreamMcp({
+      inner: {
+        text: {
+          value: "Result.",
+          annotations: [
+            {
+              url_citation: {
+                title: "Real source",
+                url: "https://real.example.com/page",
+              },
+            },
+            {
+              url_citation: {
+                title: "Bing redirect",
+                url: "https://www.bing.com/search?q=foo",
+              },
+            },
+          ],
+        },
+      },
+    })
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 602,
+      method: "tools/call",
+      params: { name: "web_search", arguments: { query: "x" } },
+    })
+    const result = json.result as { content: Array<{ text: string }> }
+    expect(result.content[0].text).toContain("Real source")
+    expect(result.content[0].text).not.toContain("bing.com/search")
+  })
+
+  test("web_search with missing query returns isError tool envelope (not -32602 RPC error)", async () => {
+    // Per the architect's spec, arg validation lives inside the tool's
+    // handler closure (not pre-validated at the RPC layer). Result:
+    // missing/invalid args surface as a tool-error envelope, not a
+    // JSON-RPC -32602 — the call still "succeeds" at the protocol layer.
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 603,
+      method: "tools/call",
+      params: { name: "web_search", arguments: {} },
+    })
+    expect(status).toBe(200)
+    const result = json.result as {
+      content: Array<{ text: string }>
+      isError?: boolean
+    }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toMatch(/query is required/i)
+  })
+
+  test("web_search with non-string query returns isError tool envelope", async () => {
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 604,
+      method: "tools/call",
+      params: { name: "web_search", arguments: { query: 42 } },
+    })
+    const result = json.result as {
+      content: Array<{ text: string }>
+      isError?: boolean
+    }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toMatch(/query is required/i)
+  })
+
+  test("web_search upstream failure surfaces as tool isError with `web_search failed:` prefix", async () => {
+    mockUpstreamMcp({ forceCallError: true })
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 605,
+      method: "tools/call",
+      params: { name: "web_search", arguments: { query: "x" } },
+    })
+    expect(status).toBe(200)
+    const result = json.result as {
+      content: Array<{ text: string }>
+      isError?: boolean
+    }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toMatch(/^web_search failed:/i)
+  })
+
+  test("web_search counts against MAX_INFLIGHT_TOOLS_CALL=8 (slot accounting symmetric with personas)", async () => {
+    // Hold the upstream tools/call open with a never-resolving promise so
+    // the slot stays incremented; verify __getInFlightForTests bumps to 1
+    // mid-call. (Architect's spec point 5: keeps accounting symmetric.)
+    let resolveSlow: ((res: Response) => void) | null = null
+    const slow = new Promise<Response>((r) => {
+      resolveSlow = r
+    })
+    globalThis.fetch = mock(async (_url: unknown, init?: { method?: string; body?: string }) => {
+      const method = init?.method ?? "GET"
+      if (method === "DELETE") return new Response(null, { status: 204 })
+      let body: { method?: string; id?: number } = {}
+      try {
+        body = JSON.parse(init?.body ?? "{}") as typeof body
+      } catch {
+        // ignore
+      }
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { protocolVersion: "2024-11-05", capabilities: {} },
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+              "mcp-session-id": "test-sid",
+            },
+          },
+        )
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 202 })
+      }
+      if (body.method === "tools/call") {
+        return slow  // hangs — slot stays acquired
+      }
+      return new Response("unexpected", { status: 500 })
+    }) as unknown as typeof globalThis.fetch
+
+    const callPromise = rpc({
+      jsonrpc: "2.0",
+      id: 606,
+      method: "tools/call",
+      params: { name: "web_search", arguments: { query: "hold" } },
+    })
+    // Brief tick so the call increments the in-flight counter.
+    await new Promise((r) => setTimeout(r, 10))
+    expect(__getInFlightForTests()).toBe(1)
+
+    // Release the upstream so the call resolves and the slot is freed.
+    const innerOk = {
+      text: { value: "released", annotations: [] },
+    }
+    resolveSlow!(
+      new Response(
+        `event: message\ndata: ${JSON.stringify({
+          jsonrpc: "2.0",
+          id: 606,
+          result: { content: [{ type: "text", text: JSON.stringify(innerOk) }] },
+        })}\n\n`,
+        {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        },
+      ),
+    )
+    await callPromise
+    expect(__getInFlightForTests()).toBe(0)
+  })
+
+  test("web_search call hits the JSON path even with a multi-KB query (predictedTooLong cap is persona-only)", async () => {
+    // The predictedTooLong cap exists for thinking-budget-bearing peer
+    // calls (codex_critic@high>8KB, etc.). Non-persona tools have no
+    // such cost surface — verify a 9 KB query goes through to the
+    // upstream rather than being pre-flight rejected.
+    const captured = mockUpstreamMcp({
+      inner: { text: { value: "ok", annotations: null } },
+    })
+    const oversize = "x".repeat(9 * 1024)
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+          accept: "application/json",  // JSON path — would trigger cap on personas
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 607,
+          method: "tools/call",
+          params: { name: "web_search", arguments: { query: oversize } },
+        }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    const json = await res.json() as { result?: { isError?: boolean; content: Array<{ text: string }> } }
+    expect(json.result?.isError).toBeUndefined()
+    expect(captured.tcCalled).toBe(true)
   })
 })

@@ -91,6 +91,25 @@ declare -a PROBE_REGISTRY=(
   "tooltype_code_execution_20250825|copilot-allowlist|code_execution_20250825 returns 400 (not in Copilot allowlist)"
   "tooltype_web_search_20250305|anthropic-docs|web_search_20250305 returns 200 in body validator (model invocation inconclusive)"
 
+  # ===== Web search across endpoints (Task #2 — empirical native exposure map) =====
+  # End-to-end through proxy: the Anthropic-shape web_search tool is rejected by
+  # Copilot's upstream /v1/messages with 400 'use of the web search tool is not
+  # supported'. The proxy intercepts in handler.ts (processWebSearch), runs the
+  # MCP path server-side (web-search.ts), and substitutes results into the system
+  # prompt before forwarding the (web_search-stripped) body. End-user sees 200.
+  "web_search_anthropic_tool_messages|anthropic-docs|tools[].type=web_search_20250305 on /v1/messages: end-to-end 200 (proxy fulfils via MCP and strips before forwarding); upstream Copilot 400s on raw"
+  # Native: Copilot's /v1/responses fulfils web_search_preview natively for
+  # GPT-5.x — no proxy intervention needed; output stream contains a
+  # web_search_call block followed by the model's final message.
+  "web_search_responses_preview|copilot-allowlist|tools[].type=web_search_preview on /v1/responses (gpt-5.5): 200; model invokes (output[].type=web_search_call present)"
+  # Negative-upstream / positive-proxy: Copilot's /chat/completions has no
+  # native hosted web_search. Direct upstream returns 400 with
+  # 'tools[0].function.name' empty-string error. The proxy intercepts via
+  # injectWebSearchIfNeeded (chat-completions/handler.ts), fulfils via MCP
+  # server-side, and strips the web_search tool before forwarding — so the
+  # end-user sees 200. Same pattern as web_search_anthropic_tool_messages.
+  "web_search_chat_completions|exploratory|tools[].type=web_search on /chat/completions (gpt-4.1): end-to-end 200 (proxy fulfils via MCP and strips before forwarding); upstream Copilot 400s on raw shape (only OpenAI function tools accepted there)"
+
   # ===== Context management =====
   "compact_20260112|anthropic-docs|context_management.edits[].type=compact_20260112 with anthropic-beta:compact-2026-01-12 returns 200"
   "clear_tool_uses_20250919|anthropic-docs|context_management.edits[].type=clear_tool_uses_20250919 returns 200"
@@ -312,6 +331,54 @@ probe_tooltype_web_search_20250305() {
     "max_tokens": 50,
     "tools": [{"type":"web_search_20250305","name":"web_search"}],
     "messages": [{"role":"user","content":"hi"}]
+  }'
+  assert_status 200
+}
+
+# End-to-end via proxy: Anthropic-shape web_search tool on /v1/messages.
+# Asserts the user-facing 200 the proxy delivers (it intercepts in
+# processWebSearch, fulfils via Copilot's /mcp web_search server-side, and
+# strips the tool before forwarding the body to upstream Copilot — which
+# would 400 'use of the web search tool is not supported' without the strip).
+# A real-world trigger query ('current price of bitcoin') is used so the proxy
+# actually exercises the MCP fulfilment path.
+probe_web_search_anthropic_tool_messages() {
+  do_request POST /v1/messages '{
+    "model": "claude-opus-4-7",
+    "max_tokens": 256,
+    "tools": [{"type":"web_search_20250305","name":"web_search"}],
+    "messages": [{"role":"user","content":"What is the current price of Bitcoin?"}]
+  }'
+  assert_status 200
+}
+
+# Native Copilot path: /v1/responses fulfils web_search_preview natively for
+# GPT-5.x. Output stream contains a web_search_call block (action.queries[])
+# followed by the model's message. No proxy intervention needed.
+probe_web_search_responses_preview() {
+  do_request POST /v1/responses '{
+    "model": "gpt-5.5",
+    "input": "What is the current price of Bitcoin?",
+    "tools": [{"type":"web_search_preview"}],
+    "max_output_tokens": 256
+  }'
+  assert_status 200 \
+    && assert_body_contains "web_search_call"
+}
+
+# End-to-end via proxy: OpenAI-shape web_search tool on /chat/completions.
+# Asserts the 200 the proxy delivers. The proxy's injectWebSearchIfNeeded
+# (chat-completions/handler.ts) intercepts {type:"web_search"} OR
+# function-shaped tools named "web_search", fulfils via Copilot's /mcp
+# server-side, and strips before forwarding to upstream — which would 400
+# with 'tools[0].function.name' empty-string error on the raw shape.
+# Uses gpt-4.1 (chat/completions-capable). gpt-5.5 is /responses-only.
+probe_web_search_chat_completions() {
+  do_request POST /v1/chat/completions '{
+    "model": "gpt-4.1",
+    "messages": [{"role":"user","content":"What is the current price of Bitcoin?"}],
+    "tools": [{"type":"web_search"}],
+    "max_tokens": 256
   }'
   assert_status 200
 }

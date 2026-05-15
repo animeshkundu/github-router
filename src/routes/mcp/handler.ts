@@ -11,6 +11,8 @@ import {
   EFFORT_LEVELS,
   type Effort,
   isEffort,
+  NON_PERSONA_MCP_TOOLS,
+  type NonPersonaMcpTool,
 } from "~/lib/peer-mcp-personas"
 import {
   createChatCompletions,
@@ -166,7 +168,7 @@ function activePersonas(): Array<PersonaSpec> {
 }
 
 function toolEntries(): Array<ToolEntry> {
-  return activePersonas().map((p) => ({
+  const personaEntries: Array<ToolEntry> = activePersonas().map((p) => ({
     name: p.toolNameHttp,
     description: p.description,
     inputSchema: {
@@ -200,6 +202,18 @@ function toolEntries(): Array<ToolEntry> {
       },
     },
   }))
+  // Append non-persona utility tools (currently just `web_search`). They
+  // share the same `tools/list` surface but have their own input schemas
+  // (no prompt/context/effort) and skip the per-persona validation gates
+  // in handleToolsCall.
+  const nonPersonaEntries: Array<ToolEntry> = NON_PERSONA_MCP_TOOLS.map(
+    (t) => ({
+      name: t.toolNameHttp,
+      description: t.description,
+      inputSchema: t.inputSchema,
+    }),
+  )
+  return [...personaEntries, ...nonPersonaEntries]
 }
 
 function buildUserText(prompt: string, context?: string): string {
@@ -531,56 +545,77 @@ async function handleToolsCall(
   const params = body.params ?? {}
   const name = typeof params.name === "string" ? params.name : ""
   const args = (params.arguments ?? {}) as Record<string, unknown>
-  const prompt = typeof args.prompt === "string" ? args.prompt : ""
-  const context = typeof args.context === "string" ? args.context : undefined
-  // Validate effort shape against the global EFFORT_LEVELS allowlist
-  // (rejects garbage like `effort: "extreme"`); the per-persona
-  // allowedEfforts gate runs AFTER persona lookup below (rejects
-  // valid-but-not-allowed-here tiers like `xhigh` on codex_critic).
-  if (args.effort !== undefined && !isEffort(args.effort)) {
-    return rpcError(
-      body.id,
-      RPC_INVALID_PARAMS,
-      `tools/call: arguments.effort must be one of ${EFFORT_LEVELS.join("|")}; got ${JSON.stringify(args.effort)}`,
-    )
-  }
-  const requestedEffort = args.effort as Effort | undefined
 
   if (!name) {
     return rpcError(body.id, RPC_INVALID_PARAMS, "tools/call missing name")
   }
+
+  // Routing: try personas first; fall through to non-persona utility
+  // tools (currently just `web_search`). The two registries share the
+  // tools/list surface but have different validation gates — personas
+  // get the prompt+effort+predictedTooLong gauntlet; non-persona tools
+  // do their own arg validation inside the handler closure.
   const persona = activePersonas().find((p) => p.toolNameHttp === name)
-  if (!persona) {
+  const nonPersonaTool: NonPersonaMcpTool | undefined = persona
+    ? undefined
+    : NON_PERSONA_MCP_TOOLS.find((t) => t.toolNameHttp === name)
+
+  if (!persona && !nonPersonaTool) {
     return rpcError(
       body.id,
       RPC_METHOD_NOT_FOUND,
       `tools/call: unknown tool "${name}"`,
     )
   }
-  if (!prompt) {
-    return rpcError(
-      body.id,
-      RPC_INVALID_PARAMS,
-      `tools/call: arguments.prompt is required`,
-    )
-  }
 
-  // Per-persona effort gate. All four personas now allow all four
-  // effort tiers (low|medium|high|xhigh). The gate remains in place so
-  // a future persona that needs to constrain its tiers can do so
-  // declaratively via PersonaSpec.allowedEfforts.
-  if (
-    requestedEffort !== undefined
-    && !persona.allowedEfforts.includes(requestedEffort)
-  ) {
-    return rpcError(
-      body.id,
-      RPC_INVALID_PARAMS,
-      `tools/call: persona "${persona.toolNameHttp}" does not accept effort="${requestedEffort}". `
-        + `Allowed: ${persona.allowedEfforts.join("|")}.`,
-    )
+  // Persona-only validation: prompt required, effort schema-checked
+  // against EFFORT_LEVELS and gated by per-persona allowedEfforts. None
+  // of this applies to non-persona tools (no prompt, no effort).
+  let personaPrompt: string | undefined
+  let personaContext: string | undefined
+  let personaEffort: Effort | undefined
+  if (persona) {
+    // Validate effort shape against the global EFFORT_LEVELS allowlist
+    // (rejects garbage like `effort: "extreme"`); the per-persona
+    // allowedEfforts gate runs AFTER persona lookup below (rejects
+    // valid-but-not-allowed-here tiers like `xhigh` on codex_critic).
+    if (args.effort !== undefined && !isEffort(args.effort)) {
+      return rpcError(
+        body.id,
+        RPC_INVALID_PARAMS,
+        `tools/call: arguments.effort must be one of ${EFFORT_LEVELS.join("|")}; got ${JSON.stringify(args.effort)}`,
+      )
+    }
+    const requestedEffort = args.effort as Effort | undefined
+
+    const prompt = typeof args.prompt === "string" ? args.prompt : ""
+    if (!prompt) {
+      return rpcError(
+        body.id,
+        RPC_INVALID_PARAMS,
+        `tools/call: arguments.prompt is required`,
+      )
+    }
+    personaPrompt = prompt
+    personaContext = typeof args.context === "string" ? args.context : undefined
+
+    // Per-persona effort gate. All four personas now allow all four
+    // effort tiers (low|medium|high|xhigh). The gate remains in place so
+    // a future persona that needs to constrain its tiers can do so
+    // declaratively via PersonaSpec.allowedEfforts.
+    if (
+      requestedEffort !== undefined
+      && !persona.allowedEfforts.includes(requestedEffort)
+    ) {
+      return rpcError(
+        body.id,
+        RPC_INVALID_PARAMS,
+        `tools/call: persona "${persona.toolNameHttp}" does not accept effort="${requestedEffort}". `
+          + `Allowed: ${persona.allowedEfforts.join("|")}.`,
+      )
+    }
+    personaEffort = requestedEffort ?? persona.defaultEffort
   }
-  const effort: Effort = requestedEffort ?? persona.defaultEffort
 
   // predictedTooLong pre-flight cap is enforced upstream of this
   // function — see `jsonPathPreflightCap` invoked by handleMcpPost
@@ -589,7 +624,10 @@ async function handleToolsCall(
   // documented in CLAUDE.md). The cap is JSON-PATH ONLY: SSE-streamed
   // responses (handleToolsCallSSE) bypass Claude Code's ~60s
   // tools/call ceiling via heartbeats and therefore don't need the
-  // size-based gate.
+  // size-based gate. Non-persona tools have no thinking budget and so
+  // the predictedTooLong cap doesn't apply to them either (the
+  // jsonPathPreflightCap returns undefined when persona lookup misses,
+  // which naturally exempts non-persona tools).
 
   if (inFlightToolsCall >= MAX_INFLIGHT_TOOLS_CALL) {
     // Documented per-call cap. NOT silent serialization — surface the
@@ -618,17 +656,24 @@ async function handleToolsCall(
     aborter = new AbortController()
     inflightAborts.set(abortKey, aborter)
   }
+  // Telemetry shape differs per branch — personas have a model id;
+  // non-persona tools don't dispatch to a peer LLM, so log the tool
+  // name as the "model" slot for grep'ability.
+  const telemetryName = persona ? persona.agentName : nonPersonaTool!.toolNameHttp
+  const telemetryModel = persona ? persona.model : "(non-persona)"
   try {
-    const result = await callPersona(
-      persona,
-      prompt,
-      context,
-      effort,
-      aborter?.signal,
-    )
+    const result = persona
+      ? await callPersona(
+          persona,
+          personaPrompt!,
+          personaContext,
+          personaEffort!,
+          aborter?.signal,
+        )
+      : await nonPersonaTool!.handler(args, aborter?.signal)
     logTelemetry({
-      name: persona.agentName,
-      model: persona.model,
+      name: telemetryName,
+      model: telemetryModel,
       durationMs: Date.now() - startedAt,
       result: result.isError ? "isError" : "ok",
     })
@@ -636,8 +681,8 @@ async function handleToolsCall(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     logTelemetry({
-      name: persona.agentName,
-      model: persona.model,
+      name: telemetryName,
+      model: telemetryModel,
       durationMs: Date.now() - startedAt,
       result: "exception",
       errorMessage: message,
@@ -654,7 +699,9 @@ async function handleToolsCall(
       content: [
         {
           type: "text",
-          text: `persona ${persona.agentName} failed: ${message}`,
+          text: persona
+            ? `persona ${persona.agentName} failed: ${message}`
+            : `tool ${nonPersonaTool!.toolNameHttp} failed: ${message}`,
         },
       ],
       isError: true,

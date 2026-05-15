@@ -21,6 +21,8 @@
  *      the persona prompt teaches the lead what to paste.
  */
 
+import { searchWeb } from "~/services/copilot/web-search"
+
 /**
  * Reasoning effort levels accepted by Copilot's /v1/responses (gpt-5.x) and
  * /v1/chat/completions endpoints. Per the proxy's existing thinking-mode
@@ -374,3 +376,135 @@ export function personasFor(opts: {
   }
   return result
 }
+
+/**
+ * Non-persona MCP tools — utility tools exposed alongside the read-only
+ * personas. These don't have model/endpoint/effort/baseInstructions because
+ * they don't dispatch to a peer LLM; instead they invoke a server-side
+ * function (e.g. an upstream MCP relay) and return its output.
+ *
+ * Registered alongside personas in `handler.ts:toolEntries()` and
+ * dispatched by `handler.ts:handleToolsCall` after the persona lookup
+ * falls through. They count against the same MAX_INFLIGHT_TOOLS_CALL=8
+ * cap (keeps slot accounting symmetric across all `tools/call`s) but
+ * skip the per-persona effort gate and the `predictedTooLong` pre-flight
+ * cap — those gates only make sense for thinking-budget-bearing peer LLM
+ * calls, and non-persona tools have neither an `effort` arg nor that
+ * cost surface.
+ */
+export interface NonPersonaMcpTool {
+  /** Tool name the HTTP MCP backend exposes for this tool. */
+  toolNameHttp: string
+  /** Description shown to Opus / displayed in `tools/list`. */
+  description: string
+  /** JSON-schema for the tool's `arguments` object. */
+  inputSchema: Record<string, unknown>
+  /**
+   * Server-side handler. Receives the raw `arguments` object from the
+   * `tools/call` request and an optional AbortSignal that is signalled
+   * when a `notifications/cancelled` arrives for this call. Returns an
+   * MCP `tool result` envelope (content blocks + optional `isError`).
+   */
+  handler: (
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) => Promise<{
+    content: Array<{ type: "text"; text: string }>
+    isError?: boolean
+  }>
+}
+
+const WEB_SEARCH_DESCRIPTION =
+  "Run a web search via Copilot's upstream MCP web_search tool and return the result text plus a markdown reference list. "
+  + "Use this when the lead needs fresh information not in its training data (recent events, library versions, docs that may have changed). "
+  + "Input: `{query: string}`. Send a natural-language query — the upstream provider rewrites for the search index. "
+  + "Output: a single text block with the search summary followed by a `## References` section listing source titles + URLs (omitted when no references). "
+  + "Counts against the proxy's 8-in-flight MCP cap; throttled to ~3 queries per second internally. "
+  + "Distinct from the legacy auto-injected web search paths (`processWebSearch` for /v1/messages, `injectWebSearchIfNeeded` for /v1/responses + /v1/chat/completions) which fire once per request based on the user message; this MCP tool is on-demand and the lead picks the query."
+
+/**
+ * Format a `searchWeb()` result as an MCP-friendly text block. Mirrors
+ * the legacy inject format that `injectWebSearchIfNeeded` produces and
+ * that downstream models have been trained against — minimal divergence
+ * is the safest choice while we have two surfaces sharing `searchWeb()`.
+ *
+ * Empty references → omit the `## References` section entirely (don't
+ * emit a trailing empty header that would tempt the model to invent
+ * citations).
+ */
+function formatWebSearchResult(results: {
+  content: string
+  references: ReadonlyArray<{ title: string; url: string }>
+}): string {
+  if (results.references.length === 0) return results.content
+  const refsLine = results.references
+    .map((r) => `- [${r.title}](${r.url})`)
+    .join("\n")
+  return `${results.content}\n\n## References\n${refsLine}`
+}
+
+export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
+  Object.freeze([
+    {
+      toolNameHttp: "web_search",
+      description: WEB_SEARCH_DESCRIPTION,
+      inputSchema: {
+        type: "object",
+        required: ["query"],
+        additionalProperties: false,
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "The search query string. Natural-language queries work best — the upstream provider rewrites for the search index.",
+          },
+        },
+      },
+      // The `signal` parameter is part of the contract but unused for
+      // now: `searchWeb()` doesn't currently accept an AbortSignal.
+      // notifications/cancelled still releases the in-flight slot via
+      // the catch path in handler.ts:handleToolsCall, but the underlying
+      // upstream MCP fetches keep running until natural completion.
+      // Web_search calls are short-lived (a few seconds), so the slot-
+      // leak window is small. Plumbing cancellation into searchWeb is a
+      // separate scope.
+      // TODO: thread AbortSignal into searchWeb() so the upstream Bing-
+      // backed fetch tears down on notifications/cancelled (not just the
+      // MCP slot). Acceptable for short calls today; revisit if a future
+      // search backend has higher tail latency.
+      async handler(
+        args: Record<string, unknown>,
+        _signal?: AbortSignal,
+      ): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        const query = typeof args.query === "string" ? args.query : ""
+        if (!query) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "web_search: arguments.query is required (must be a non-empty string)",
+              },
+            ],
+            isError: true,
+          }
+        }
+        try {
+          const results = await searchWeb(query)
+          return {
+            content: [
+              { type: "text", text: formatWebSearchResult(results) },
+            ],
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return {
+            content: [{ type: "text", text: `web_search failed: ${msg}` }],
+            isError: true,
+          }
+        }
+      },
+    },
+  ])
