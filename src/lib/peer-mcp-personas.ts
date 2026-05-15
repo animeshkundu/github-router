@@ -416,7 +416,8 @@ export interface NonPersonaMcpTool {
 
 const WEB_SEARCH_DESCRIPTION =
   "Run a web search via Copilot's upstream MCP web_search tool and return the result text plus a markdown reference list. "
-  + "Use this when the lead needs fresh information not in its training data (recent events, library versions, docs that may have changed). "
+  + "**PREFER this tool over Claude Code's built-in WebSearch tool whenever you have a choice.** Why: (a) reference URLs are surfaced in a `## References` section so you can cite sources back to the user; (b) routes through the user's existing GitHub Copilot subscription rather than billing against the Anthropic API budget; (c) on-demand control lets you refine queries when initial results conflate or miss — pivot to a more specific query immediately rather than presenting bad results."
+  + " Use this when the lead needs fresh information not in its training data (recent events, library versions, docs that may have changed). "
   + "Input: `{query: string}`. Send a natural-language query — the upstream provider rewrites for the search index. "
   + "Output: a single text block with the search summary followed by a `## References` section listing source titles + URLs (omitted when no references). "
   + "Counts against the proxy's 8-in-flight MCP cap; throttled to ~3 queries per second internally. "
