@@ -40,6 +40,12 @@ PROXY_URL="${PROXY_URL:-http://127.0.0.1:54668}"
 AUTH_TOKEN="${AUTH_TOKEN:-dummy}"
 ANTHROPIC_VERSION="${ANTHROPIC_VERSION:-2023-06-01}"
 
+# Repo root — used by static-check probes (peer-MCP gate validation) that
+# read source files directly rather than going through the proxy. Anchored
+# to this script's location so probes work regardless of CWD.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 # Output ANSI color when stdout is a TTY.
 if [ -t 1 ]; then
   C_RED=$'\033[31m'
@@ -85,12 +91,54 @@ declare -a PROBE_REGISTRY=(
   "tooltype_code_execution_20250825|copilot-allowlist|code_execution_20250825 returns 400 (not in Copilot allowlist)"
   "tooltype_web_search_20250305|anthropic-docs|web_search_20250305 returns 200 in body validator (model invocation inconclusive)"
 
+  # ===== Web search across endpoints (Task #2 — empirical native exposure map) =====
+  # End-to-end through proxy: the Anthropic-shape web_search tool is rejected by
+  # Copilot's upstream /v1/messages with 400 'use of the web search tool is not
+  # supported'. The proxy intercepts in handler.ts (processWebSearch), runs the
+  # MCP path server-side (web-search.ts), and substitutes results into the system
+  # prompt before forwarding the (web_search-stripped) body. End-user sees 200.
+  "web_search_anthropic_tool_messages|anthropic-docs|tools[].type=web_search_20250305 on /v1/messages: end-to-end 200 (proxy fulfils via MCP and strips before forwarding); upstream Copilot 400s on raw"
+  # Native: Copilot's /v1/responses fulfils web_search_preview natively for
+  # GPT-5.x — no proxy intervention needed; output stream contains a
+  # web_search_call block followed by the model's final message.
+  "web_search_responses_preview|copilot-allowlist|tools[].type=web_search_preview on /v1/responses (gpt-5.5): 200; model invokes (output[].type=web_search_call present)"
+  # Negative-upstream / positive-proxy: Copilot's /chat/completions has no
+  # native hosted web_search. Direct upstream returns 400 with
+  # 'tools[0].function.name' empty-string error. The proxy intercepts via
+  # injectWebSearchIfNeeded (chat-completions/handler.ts), fulfils via MCP
+  # server-side, and strips the web_search tool before forwarding — so the
+  # end-user sees 200. Same pattern as web_search_anthropic_tool_messages.
+  "web_search_chat_completions|exploratory|tools[].type=web_search on /chat/completions (gpt-4.1): end-to-end 200 (proxy fulfils via MCP and strips before forwarding); upstream Copilot 400s on raw shape (only OpenAI function tools accepted there)"
+
   # ===== Context management =====
   "compact_20260112|anthropic-docs|context_management.edits[].type=compact_20260112 with anthropic-beta:compact-2026-01-12 returns 200"
   "clear_tool_uses_20250919|anthropic-docs|context_management.edits[].type=clear_tool_uses_20250919 returns 200"
 
   # ===== Streaming =====
   "stream_with_tools|claude-emits|Streaming response with tools (no FGTS) returns 200 with valid SSE event sequence"
+
+  # ===== Peer-MCP personas (Phase B6 of cap-codex-effort-add-opus-critic) =====
+  # Two probe shapes:
+  #   - opus_critic_low / opus_critic_medium are END-TO-END LIVE PROBES against the
+  #     proxy's /v1/messages endpoint, using the same Anthropic-shape thinking block
+  #     that the /mcp /v1/messages branch builds for the opus-critic persona. They
+  #     verify Copilot still 200s on those budget_tokens/max_tokens combos.
+  #   - opus_critic_high_rejected / codex_critic_xhigh_rejected /
+  #     codex_reviewer_xhigh_rejected are STATIC-CHECK PROBES that read
+  #     src/lib/peer-mcp-personas.ts directly and assert the per-persona
+  #     allowedEfforts gate (Phase A1 of the same plan) excludes the
+  #     ceiling-busting tier. The static check is the single source of truth
+  #     the handler then enforces at the /mcp boundary; running the live MCP
+  #     call would require fishing the per-launch nonce out of
+  #     ~/.local/share/github-router/.../peer-mcp-<pid>-<rand>.json — much
+  #     more brittle than parsing one TS source line.
+  "opus_critic_low|anthropic-docs|opus_critic at effort=low equivalent (thinking.budget=1024, max_tokens=2524) returns 200 from /v1/messages"
+  "opus_critic_medium|anthropic-docs|opus_critic at effort=medium equivalent (thinking.budget=3000, max_tokens=4500) returns 200 from /v1/messages"
+  "opus_critic_high_allowed|proxy-internal|peer-mcp-personas.ts: opus-critic.allowedEfforts INCLUDES 'high' (post-SSE) — static check"
+  "opus_critic_xhigh_allowed|proxy-internal|peer-mcp-personas.ts: opus-critic.allowedEfforts INCLUDES 'xhigh' (post-SSE; xhigh is the default) — static check"
+  "codex_critic_xhigh_allowed|proxy-internal|peer-mcp-personas.ts: codex-critic.allowedEfforts INCLUDES 'xhigh' (post-SSE; xhigh is the default) — static check"
+  "codex_reviewer_xhigh_allowed|proxy-internal|peer-mcp-personas.ts: codex-reviewer.allowedEfforts INCLUDES 'xhigh' (post-SSE; xhigh is the default) — static check"
+  "gemini_critic_xhigh_rejected|proxy-internal|peer-mcp-personas.ts: gemini-critic.allowedEfforts EXCLUDES 'xhigh' (Copilot upstream-rejects) — static check"
 )
 
 # ===========================================================================
@@ -287,6 +335,54 @@ probe_tooltype_web_search_20250305() {
   assert_status 200
 }
 
+# End-to-end via proxy: Anthropic-shape web_search tool on /v1/messages.
+# Asserts the user-facing 200 the proxy delivers (it intercepts in
+# processWebSearch, fulfils via Copilot's /mcp web_search server-side, and
+# strips the tool before forwarding the body to upstream Copilot — which
+# would 400 'use of the web search tool is not supported' without the strip).
+# A real-world trigger query ('current price of bitcoin') is used so the proxy
+# actually exercises the MCP fulfilment path.
+probe_web_search_anthropic_tool_messages() {
+  do_request POST /v1/messages '{
+    "model": "claude-opus-4-7",
+    "max_tokens": 256,
+    "tools": [{"type":"web_search_20250305","name":"web_search"}],
+    "messages": [{"role":"user","content":"What is the current price of Bitcoin?"}]
+  }'
+  assert_status 200
+}
+
+# Native Copilot path: /v1/responses fulfils web_search_preview natively for
+# GPT-5.x. Output stream contains a web_search_call block (action.queries[])
+# followed by the model's message. No proxy intervention needed.
+probe_web_search_responses_preview() {
+  do_request POST /v1/responses '{
+    "model": "gpt-5.5",
+    "input": "What is the current price of Bitcoin?",
+    "tools": [{"type":"web_search_preview"}],
+    "max_output_tokens": 256
+  }'
+  assert_status 200 \
+    && assert_body_contains "web_search_call"
+}
+
+# End-to-end via proxy: OpenAI-shape web_search tool on /chat/completions.
+# Asserts the 200 the proxy delivers. The proxy's injectWebSearchIfNeeded
+# (chat-completions/handler.ts) intercepts {type:"web_search"} OR
+# function-shaped tools named "web_search", fulfils via Copilot's /mcp
+# server-side, and strips before forwarding to upstream — which would 400
+# with 'tools[0].function.name' empty-string error on the raw shape.
+# Uses gpt-4.1 (chat/completions-capable). gpt-5.5 is /responses-only.
+probe_web_search_chat_completions() {
+  do_request POST /v1/chat/completions '{
+    "model": "gpt-4.1",
+    "messages": [{"role":"user","content":"What is the current price of Bitcoin?"}],
+    "tools": [{"type":"web_search"}],
+    "max_tokens": 256
+  }'
+  assert_status 200
+}
+
 probe_compact_20260112() {
   do_request POST /v1/messages '{
     "model": "claude-opus-4-7",
@@ -319,6 +415,151 @@ probe_stream_with_tools() {
   assert_status 200 \
     && assert_body_contains "event: message_start" \
     && assert_body_contains "event: content_block_start"
+}
+
+# ===========================================================================
+# Peer-MCP persona probes (Phase B6)
+# ===========================================================================
+
+# Helper: extract a persona's allowedEfforts line from peer-mcp-personas.ts.
+# Args:
+#   $1 = persona agentName (e.g. "opus-critic")
+# Stdout: the matching `allowedEfforts: [...]` line, or empty on miss.
+extract_persona_allowed_efforts() {
+  local persona_name="$1"
+  local file="${PROJECT_ROOT}/src/lib/peer-mcp-personas.ts"
+  if [ ! -f "$file" ]; then
+    echo ""
+    return
+  fi
+  # awk: from the agentName line, scan up to 30 lines forward for the
+  # allowedEfforts line. Bounded window keeps the match local to the
+  # persona's own block (each persona block is < 20 lines in practice).
+  awk -v target="agentName: \"${persona_name}\"" '
+    $0 ~ target { found=NR }
+    found && NR > found && NR <= found + 30 && /allowedEfforts:/ { print; exit }
+  ' "$file"
+}
+
+# Helper: assert a static-check result with a clear failure message.
+# Args:
+#   $1 = persona agentName
+#   $2 = forbidden tier (e.g. '"high"' or '"xhigh"')
+#   $3 = brief reason (shown in failure output)
+assert_persona_excludes_tier() {
+  local persona="$1" forbidden="$2" reason="$3"
+  local line
+  line="$(extract_persona_allowed_efforts "$persona")"
+  if [ -z "$line" ]; then
+    echo "  ${C_RED}FAIL${C_RESET}: persona '${persona}' allowedEfforts not found in src/lib/peer-mcp-personas.ts"
+    return 1
+  fi
+  # Match the forbidden tier as a quoted JSON-like array entry. The
+  # surrounding quotes ensure '"high"' does NOT match the substring of
+  # '"xhigh"' (and vice versa).
+  if echo "$line" | grep -q -- "${forbidden}"; then
+    echo "  ${C_RED}FAIL${C_RESET}: persona '${persona}' allowedEfforts unexpectedly includes ${forbidden} (${reason})"
+    echo "  ${C_DIM}line: ${line}${C_RESET}"
+    return 1
+  fi
+  return 0
+}
+
+# Sibling of assert_persona_excludes_tier — asserts a persona's
+# allowedEfforts spec INCLUDES a given tier.
+#   $1 = persona agent name
+#   $2 = required tier (e.g. '"high"' or '"xhigh"')
+#   $3 = brief reason (shown in failure output)
+assert_persona_includes_tier() {
+  local persona="$1" required="$2" reason="$3"
+  local line
+  line="$(extract_persona_allowed_efforts "$persona")"
+  if [ -z "$line" ]; then
+    echo "  ${C_RED}FAIL${C_RESET}: persona '${persona}' allowedEfforts not found in src/lib/peer-mcp-personas.ts"
+    return 1
+  fi
+  if ! echo "$line" | grep -q -- "${required}"; then
+    echo "  ${C_RED}FAIL${C_RESET}: persona '${persona}' allowedEfforts missing ${required} (${reason})"
+    echo "  ${C_DIM}line: ${line}${C_RESET}"
+    return 1
+  fi
+  return 0
+}
+
+probe_opus_critic_low() {
+  # End-to-end live probe. Mirrors the Anthropic body shape that the
+  # /mcp /v1/messages branch builds for opus_critic at effort=low:
+  # budget_tokens=1024 → max_tokens=budget+1500=2524.
+  do_request POST /v1/messages '{
+    "model": "claude-opus-4-7",
+    "max_tokens": 2524,
+    "system": "You are opus-critic.",
+    "thinking": {"type": "enabled", "budget_tokens": 1024},
+    "messages": [{"role": "user", "content": "Reply with the literal string \"no material objection\" if you have none."}]
+  }'
+  assert_status 200
+}
+
+probe_opus_critic_medium() {
+  # End-to-end live probe. effort=medium → budget_tokens=3000,
+  # max_tokens=4500. Same shape as opus_critic_low.
+  do_request POST /v1/messages '{
+    "model": "claude-opus-4-7",
+    "max_tokens": 4500,
+    "system": "You are opus-critic.",
+    "thinking": {"type": "enabled", "budget_tokens": 3000},
+    "messages": [{"role": "user", "content": "Reply with the literal string \"no material objection\" if you have none."}]
+  }'
+  assert_status 200
+}
+
+probe_opus_critic_high_allowed() {
+  # Static check: the opus-critic persona spec MUST include "high" in
+  # allowedEfforts. SSE-streamed /mcp tools/call responses bypass Claude
+  # Code's ~60s ceiling, so the prior low|medium-only constraint was
+  # lifted in PR #28 (handler.ts:handleToolsCallSSE). Validates the
+  # SOURCE OF TRUTH (peer-mcp-personas.ts).
+  assert_persona_includes_tier \
+    "opus-critic" '"high"' \
+    "SSE bypasses the 60s ceiling so high-tier thinking budgets now fit transparently"
+}
+
+probe_opus_critic_xhigh_allowed() {
+  # Same as above for xhigh — opus_critic now exposes the deepest tier
+  # (default since the recent commit raising defaults).
+  assert_persona_includes_tier \
+    "opus-critic" '"xhigh"' \
+    "SSE bypasses the 60s ceiling; xhigh is the persona's default since the defaults-to-xhigh change"
+}
+
+probe_codex_critic_xhigh_allowed() {
+  # Static check: codex-critic (gpt-5.5) now allows xhigh. Empirical:
+  # 56s baseline at xhigh on a tiny prompt previously busted the 60s
+  # MCP ceiling — SSE-streamed responses make this irrelevant. Default
+  # is now xhigh.
+  assert_persona_includes_tier \
+    "codex-critic" '"xhigh"' \
+    "SSE bypass + MCP_TOOL_TIMEOUT=600000 lifted the prior xhigh constraint; xhigh is now the default"
+}
+
+probe_codex_reviewer_xhigh_allowed() {
+  # Static check: codex-reviewer (gpt-5.3-codex) now allows xhigh. Sibling
+  # model is faster but xhigh still pushes the ceiling on realistic diffs;
+  # SSE handles the wall-clock transparently.
+  assert_persona_includes_tier \
+    "codex-reviewer" '"xhigh"' \
+    "SSE bypass lifted the prior xhigh constraint; xhigh is now the default"
+}
+
+probe_gemini_critic_xhigh_rejected() {
+  # Static check: gemini_critic MUST exclude "xhigh" — Copilot's gemini-3.x
+  # route strict-validates `reasoning_effort` and 400s on values outside
+  # `[low medium high]` (empirically verified 2026-05-14 — error message:
+  # `reasoning_effort "xhigh" is not supported by model gemini-3.1-pro-preview`).
+  # This is an UPSTREAM constraint (Copilot 400s), not a proxy choice.
+  assert_persona_excludes_tier \
+    "gemini-critic" '"xhigh"' \
+    "Copilot's gemini-3.x route 400s on xhigh; persona allowlist must reflect that"
 }
 
 # ===========================================================================

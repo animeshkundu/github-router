@@ -295,22 +295,35 @@ export function getClaudeCodeEnvVars(
     // accessToken that Claude Code sends as Bearer. See
     // `ensureClaudeConfigMirror` in `src/lib/paths.ts`.
     CLAUDE_CONFIG_DIR: PATHS.CLAUDE_CONFIG_DIR,
-    // Extend Claude Code's MCP per-tool-call wait window from the
-    // hardcoded SDK default (~60s post-2.1.113 regression #50289) to
-    // 10 minutes. The peer-MCP review tools (codex_critic, codex_reviewer,
-    // gemini_critic) front gpt-5.5 / gpt-5.3-codex / gemini-3.1-pro at
-    // high reasoning effort — adversarial reviews of large diffs can
-    // legitimately reason for several minutes between visible token
-    // bursts. Without this, every long peer-review call client-cancels
-    // before the upstream model produces its first token.
+    // Extend Claude Code's MCP per-tool-call wait window. Two distinct
+    // env vars are at play (per binary inspection of v2.1.141 by the
+    // peer-MCP team's empirical SDK test, 2026-05-14):
     //
-    // The MCP_TIMEOUT symbol is in the v2.1.138 binary's env-var
-    // allowlist; whether it actually reaches the HTTP per-tool-call
-    // wait (vs. just server-startup) is empirical — see plan Phase 1.
-    // Setting it costs nothing if the regression is fixed in a future
-    // version (the bundled MCP SDK respects per-server `timeout` and
-    // ignores the env override).
+    //   - MCP_TIMEOUT — historical/general MCP timeout, may apply to
+    //     server-startup or initial-handshake but NOT confirmed to reach
+    //     the per-tool-call HTTP wait on v2.1.138-141 (regressions
+    //     #50289 / #52137 documented this as silently-ignored on the
+    //     per-call path). Kept as belt-and-suspenders.
+    //
+    //   - MCP_TOOL_TIMEOUT — the load-bearing one. v2.1.141's `y13()`
+    //     reads `parseInt(process.env.MCP_TOOL_TIMEOUT)` for the per-
+    //     tool-call timeout passed to MCP SDK's `.callTool({...},
+    //     schema, {timeout: W})`. Default `1e8` ms (~27.7 hours) when
+    //     the env is unset. Setting it to a finite-but-large value
+    //     (10 min) is safer than relying on the implicit 27.7-hour
+    //     default — surfaces regressions where the SDK silently caps
+    //     at 60s, AND prevents long-tail runaway calls from holding
+    //     resources indefinitely.
+    //
+    // Without the SDK's `resetTimeoutOnProgress` opt-in (which Claude
+    // Code does not pass), SSE notifications/progress events DO NOT
+    // reset the per-call timer — they only fire UI callbacks. So
+    // MCP_TOOL_TIMEOUT is the actual lever for long-running peer-MCP
+    // calls, not the SSE response transport. SSE remains valuable as
+    // the canonical Streamable HTTP shape and for progress UI, but the
+    // ceiling-busting work is done by these env vars.
     MCP_TIMEOUT: "600000",
+    MCP_TOOL_TIMEOUT: "600000",
     // Suppress non-essential telemetry/model calls. The first two are
     // Anthropic's own knobs (per cc-backup managedEnv.ts); the third
     // (`DISABLE_TELEMETRY`) suppresses Datadog/Statsig/etc. external

@@ -8,10 +8,15 @@ import {
 } from "../src/lib/peer-mcp-personas"
 
 describe("PERSONAS_READ", () => {
-  test("exposes exactly three load-bearing read personas", () => {
-    expect(PERSONAS_READ).toHaveLength(3)
+  test("exposes the four load-bearing read personas", () => {
+    expect(PERSONAS_READ).toHaveLength(4)
     const names = PERSONAS_READ.map((p) => p.agentName)
-    expect(names).toEqual(["codex-critic", "gemini-critic", "codex-reviewer"])
+    expect(names).toEqual([
+      "codex-critic",
+      "gemini-critic",
+      "codex-reviewer",
+      "opus-critic",
+    ])
   })
 
   test("each persona has the correct model + endpoint binding", () => {
@@ -28,6 +33,14 @@ describe("PERSONAS_READ", () => {
     expect(byName["codex-reviewer"]?.model).toBe("gpt-5.3-codex")
     expect(byName["codex-reviewer"]?.endpoint).toBe("/v1/responses")
     expect(byName["codex-reviewer"]?.requiresHttp).toBe(false)
+
+    expect(byName["opus-critic"]?.model).toBe("claude-opus-4-7")
+    expect(byName["opus-critic"]?.endpoint).toBe("/v1/messages")
+    // opus-critic must route via HTTP (codex-cli stdio bridge can't run
+    // claude-opus-4-7 — it speaks gpt-5/codex only)
+    expect(byName["opus-critic"]?.requiresHttp).toBe(true)
+    expect(byName["opus-critic"]?.requiresGeminiCatalog).toBeUndefined()
+    expect(byName["opus-critic"]?.writeCapable).toBe(false)
   })
 
   test("HTTP tool names are snake_case (matches MCP convention)", () => {
@@ -44,11 +57,66 @@ describe("PERSONAS_READ", () => {
     expect(critic?.baseInstructions).toContain("Self-reminder")
   })
 
-  test("descriptions teach the lead what to pass (cold-start contract)", () => {
+  test("descriptions surface load-bearing routing signal (model identity)", () => {
+    const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
+    expect(byName["codex-critic"]?.description).toContain("gpt-5.5")
+    expect(byName["gemini-critic"]?.description).toContain("gemini-3.1-pro")
+    expect(byName["codex-reviewer"]?.description).toContain("gpt-5.3-codex")
+    expect(byName["opus-critic"]?.description).toContain("Opus 4.7")
     for (const p of PERSONAS_READ) {
-      expect(p.description).toContain("Always pass")
-      expect(p.description).toContain("scrollback")
+      // codex-reviewer is intentionally framed as a code-specialist /
+      // "magnifying glass", not an adversarial critic — its baseInstructions
+      // even redirect architecture briefs away. Skip the adversarial check
+      // for that persona; all other read personas are critics by design.
+      if (p.agentName !== "codex-reviewer") {
+        expect(p.description.toLowerCase()).toContain("adversarial")
+      }
+      // Cold-start contract: peers have no scrollback, so the lead must
+      // pass the artifact verbatim. Cross-lab smoke-test feedback (codex +
+      // opus independently flagged this regression after the trim landed).
+      expect(p.description.toLowerCase()).toContain("verbatim")
+      expect(p.description.length).toBeLessThan(200)
     }
+  })
+
+  test("each persona declares allowedEfforts and a defaultEffort within it", () => {
+    for (const p of PERSONAS_READ) {
+      expect(p.allowedEfforts.length).toBeGreaterThan(0)
+      expect(p.allowedEfforts).toContain(p.defaultEffort)
+    }
+  })
+
+  test("codex-critic / codex-reviewer / opus-critic accept all four effort tiers (SSE handles long calls)", () => {
+    // SSE-streamed /mcp responses (handler.ts:handleToolsCallSSE) bypass
+    // Claude Code's ~60s tools/call ceiling, so the previous xhigh
+    // constraints on these three are lifted. gemini-critic is the
+    // exception — see the next test.
+    const allFour = ["low", "medium", "high", "xhigh"] as const
+    const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
+    expect(byName["codex-critic"]?.allowedEfforts).toEqual(allFour)
+    expect(byName["codex-reviewer"]?.allowedEfforts).toEqual(allFour)
+    expect(byName["opus-critic"]?.allowedEfforts).toEqual(allFour)
+  })
+
+  test("codex-critic / codex-reviewer / opus-critic default to xhigh (deepest reasoning, SSE handles wall-clock)", () => {
+    const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
+    expect(byName["codex-critic"]?.defaultEffort).toBe("xhigh")
+    expect(byName["codex-reviewer"]?.defaultEffort).toBe("xhigh")
+    expect(byName["opus-critic"]?.defaultEffort).toBe("xhigh")
+  })
+
+  test("gemini-critic defaults to high (Copilot's gemini route 400s on xhigh — see allowedEfforts test below)", () => {
+    const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
+    expect(byName["gemini-critic"]?.defaultEffort).toBe("high")
+  })
+
+  test("gemini-critic accepts only low/medium/high (Copilot's gemini route 400s on xhigh)", () => {
+    // Copilot rejects xhigh on gemini-3.x with HTTP 400:
+    // "reasoning_effort 'xhigh' is not supported by model
+    // gemini-3.1-pro-preview; supported values: [low medium high]"
+    // — empirically verified 2026-05-14.
+    const gem = PERSONAS_READ.find((p) => p.agentName === "gemini-critic")
+    expect(gem?.allowedEfforts).toEqual(["low", "medium", "high"])
   })
 })
 
@@ -67,15 +135,22 @@ describe("PERSONAS_WRITE", () => {
     const impl = PERSONAS_WRITE[0]
     expect(impl.baseInstructions).toContain("session terminates abnormally")
   })
+
+  test("description carries the cold-start verbatim contract", () => {
+    for (const p of PERSONAS_WRITE) {
+      expect(p.description.toLowerCase()).toContain("verbatim")
+    }
+  })
 })
 
 describe("personasFor", () => {
-  test("HTTP backend (codexCli=false) with gemini available returns 3 read personas", () => {
+  test("HTTP backend (codexCli=false) with gemini available returns 4 read personas", () => {
     const list = personasFor({ codexCli: false, geminiAvailable: true })
     expect(list.map((p) => p.agentName)).toEqual([
       "codex-critic",
       "gemini-critic",
       "codex-reviewer",
+      "opus-critic",
     ])
   })
 
@@ -84,24 +159,27 @@ describe("personasFor", () => {
     expect(list.map((p) => p.agentName)).toEqual([
       "codex-critic",
       "codex-reviewer",
+      "opus-critic",
     ])
   })
 
-  test("CLI backend with gemini adds codex-implementer for 4 personas", () => {
+  test("CLI backend with gemini adds codex-implementer for 5 personas", () => {
     const list = personasFor({ codexCli: true, geminiAvailable: true })
     expect(list.map((p) => p.agentName)).toEqual([
       "codex-critic",
       "gemini-critic",
       "codex-reviewer",
+      "opus-critic",
       "codex-implementer",
     ])
   })
 
-  test("CLI backend without gemini = 3 personas (codex-critic, codex-reviewer, codex-implementer)", () => {
+  test("CLI backend without gemini = 4 personas (codex-critic, codex-reviewer, opus-critic, codex-implementer)", () => {
     const list = personasFor({ codexCli: true, geminiAvailable: false })
     expect(list.map((p) => p.agentName)).toEqual([
       "codex-critic",
       "codex-reviewer",
+      "opus-critic",
       "codex-implementer",
     ])
   })

@@ -262,13 +262,10 @@ export async function handleCompletion(c: Context) {
             error: {
               type: "invalid_request_error",
               message:
-                "Inline `mcp_servers` body field is not supported by github-router "
-                + "(Copilot returns 400 'Extra inputs are not permitted'; the proxy "
-                + "would need a multi-turn tool-loop translation that has unresolved "
-                + "design holes — see Phase G in the plan). Configure your remote MCP "
-                + "servers as local stdio entries in `~/.claude/mcp.json` instead — "
-                + "Claude Code will spawn them locally and the proxy passes their "
-                + "tool calls through transparently. (https://docs.claude.com/en/docs/claude-code/mcp)",
+                "Inline `mcp_servers` body field is not supported by github-router. "
+                + "Configure remote MCP servers as local stdio entries in `~/.claude/mcp.json` instead — "
+                + "Claude Code will spawn them locally and the proxy passes their tool calls through transparently. "
+                + "(https://docs.claude.com/en/docs/claude-code/mcp)",
             },
           },
           400,

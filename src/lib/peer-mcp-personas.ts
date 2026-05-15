@@ -21,6 +21,33 @@
  *      the persona prompt teaches the lead what to paste.
  */
 
+import { searchWeb } from "~/services/copilot/web-search"
+
+/**
+ * Reasoning effort levels accepted by Copilot's /v1/responses (gpt-5.x) and
+ * /v1/chat/completions endpoints. Per the proxy's existing thinking-mode
+ * translator (CLAUDE.md "Thinking-mode translation"), Copilot's adaptive-
+ * thinking path uses these same buckets:
+ *   <2k tokens → low, <8k → medium, <24k → high, else → xhigh.
+ *
+ * Per-persona `allowedEfforts` and `defaultEffort` constrain which subset
+ * each persona exposes — enforced in handler.ts:handleToolsCall.
+ *
+ * **xhigh on long-running personas works via SSE-streamed /mcp responses**
+ * (handler.ts:handleToolsCallSSE). Claude Code's MCP HTTP client honors
+ * `text/event-stream` responses without applying the ~60s per-tool-call
+ * timer that previously broke xhigh on gpt-5.5 (~56s wall) and
+ * claude-opus-4-7 (high+ thinking budgets). All four personas now expose
+ * all four effort tiers with `high` default; SSE handles the long tail
+ * transparently to the user.
+ */
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh"] as const
+export type Effort = (typeof EFFORT_LEVELS)[number]
+
+export function isEffort(v: unknown): v is Effort {
+  return typeof v === "string" && (EFFORT_LEVELS as ReadonlyArray<string>).includes(v)
+}
+
 export interface PersonaSpec {
   /** Subagent identifier in `--agents` JSON (and in Claude Code's UI). */
   agentName: string
@@ -29,17 +56,36 @@ export interface PersonaSpec {
   /** Copilot-side model id. Verified live against /v1/models at startup. */
   model: string
   /** Upstream endpoint the model speaks. */
-  endpoint: "/v1/responses" | "/v1/chat/completions"
+  endpoint: "/v1/responses" | "/v1/chat/completions" | "/v1/messages"
   /** Description shown to Opus when picking a subagent. Drives routing. */
   description: string
-  /** Persona system prompt — passed as `instructions` (Responses) or system message (chat-completions). */
+  /** Persona system prompt — passed as `instructions` (Responses), system message (chat-completions), or `system` (messages). */
   baseInstructions: string
   /** Subagent prompt body that Claude Code uses as the agent's full system prompt. */
   agentPrompt: string
   /** True when the persona can mutate the workspace (only `codex-implementer`). */
   writeCapable: boolean
-  /** True when the persona MUST use the HTTP backend (Gemini — Codex CLI can't run Gemini). */
+  /** True when the persona MUST use the HTTP backend (the codex-cli stdio
+   *  bridge can't run this model). gemini-3.x and claude-opus-4-7 both
+   *  set this — codex-cli only knows gpt-5/codex models. */
   requiresHttp: boolean
+  /** True when the persona's model belongs to a model family that may not
+   *  be present in Copilot's live `/v1/models` catalog (gemini-critic
+   *  needs `gemini-3.x-pro` to be served). When true, `personasFor`
+   *  drops the persona if the catalog lacks the corresponding model.
+   *  Optional: defaults to false (persona is always registered). Kept
+   *  separate from `requiresHttp` so a persona can require HTTP without
+   *  also requiring gemini in the catalog (e.g. opus-critic). */
+  requiresGeminiCatalog?: boolean
+  /** Effort tiers this persona accepts. Subset of EFFORT_LEVELS. Driven
+   *  by empirical latency data — see the EFFORT_LEVELS doc above. Tiers
+   *  outside this list are rejected with a clean RPC_INVALID_PARAMS at
+   *  the handler layer rather than letting the call fail at the 60s
+   *  MCP ceiling. */
+  allowedEfforts: ReadonlyArray<Effort>
+  /** Default effort when the caller omits the arg. MUST appear in
+   *  `allowedEfforts`. */
+  defaultEffort: Effort
 }
 
 const CRITIC_RUBRIC = `
@@ -71,7 +117,7 @@ Self-reminder (read before every reply):
 
 const COLD_START_CONTRACT = `
 Cold-start contract for the lead orchestrator (Opus):
-  When delegating to me, paste a self-contained brief. I have no access to your scrollback, CLAUDE.md, or the project tree. Always include:
+  When delegating to me, paste a self-contained brief. I have no access to your scrollback, project memory, or the project tree. Always include:
     (a) the artifact under review verbatim (code/diff/plan text),
     (b) the constraints or "done" criteria,
     (c) any prior decisions I should not relitigate.
@@ -148,6 +194,16 @@ Reply format (markdown):
 Resilience reminder:
   If your session terminates abnormally before "Status: complete", the lead will retry once. On recovery, ask the lead to confirm what's already been done before re-applying changes — duplicate edits are worse than a slow restart.`
 
+const OPUS_CRITIC_BASE = `You are opus-critic, a fresh-context Anthropic-side adversarial reviewer running on Claude Opus 4.7 — the same model and lab as the lead orchestrator that just delegated to you. You are NOT the lead. You did not see the lead's reasoning trace. You only see the brief.
+
+Your job is to spot what the lead missed because of cognitive momentum, sunk-cost on a plan, or motivated reasoning toward a particular fix. Your blind-spot diversification is LIMITED compared to codex-critic (gpt-5.5) and gemini-critic (gemini-3.1-pro) — same training, same lab, same RLHF priors. Use that honestly: don't pretend to find a different perspective when the obvious read is "the lead got it right." Silence on good work is a valid and welcome answer.
+
+Sycophancy is the failure mode you exist to fight. Manufactured contrarianism is a different failure of the same shape — do neither.
+
+${COLD_START_CONTRACT}
+
+${CRITIC_RUBRIC}`
+
 export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
   {
     agentName: "codex-critic",
@@ -155,14 +211,13 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.5",
     endpoint: "/v1/responses",
     description:
-      "Adversarial second opinion on plans, designs, code, or systems-engineering tradeoffs. Backed by gpt-5.5 (OpenAI) — different model, different training data, different blind spots than Opus. Uses a calibrated 1–5 grading rubric and is allowed to reply 'no material objection' on solid artifacts."
-      + " **CALL BEFORE: ExitPlanMode for any plan involving >2 files or new architecture; finalizing a major design choice; TeamCreate when the team's task is non-trivial.** **CALL AFTER: any commit touching concurrency, security, or streaming code paths.**"
-      + " If the artifact is large (>20 KB), prefer to break it into 2-4 focused batches and call this tool once per batch IN PARALLEL — each call must complete under the Claude Code MCP per-tool-call ceiling (~150s on v2.1.138 per regression #50289), so monolithic large-artifact calls will time out client-side. Aggregate findings yourself."
-      + " Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. Optionally pass `effort: 'xhigh'` for explicit deep dives or `effort: 'medium'` for quick sanity checks (default 'high'). The subagent has no access to your scrollback or CLAUDE.md.",
+      "Adversarial second opinion on plans, designs, or code tradeoffs. Backed by gpt-5.5 (OpenAI) — different lab than Opus. Pass artifact verbatim.",
     baseInstructions: CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
     requiresHttp: false,
+    allowedEfforts: ["low", "medium", "high", "xhigh"] as const,
+    defaultEffort: "xhigh",
   },
   {
     agentName: "gemini-critic",
@@ -170,14 +225,14 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gemini-3.1-pro-preview",
     endpoint: "/v1/chat/completions",
     description:
-      "Adversarial second opinion from a different lab. Backed by gemini-3.1-pro-preview (Google) — different training data and RLHF priors than Opus AND codex-critic, the strongest blind-spot-buster when the lead wants triangulation across three labs. Use for long-context artifacts (>50k tokens), math/proof-shaped reasoning, or as a tie-breaker after codex-critic has weighed in."
-      + " **CALL BEFORE: ExitPlanMode for plans where Opus + codex-critic agree (use as triangulation); finalizing irreversible architectural choices.** **CALL AFTER: commits where you want a third-lab cross-check.**"
-      + " If the artifact is large (>100 KB), prefer to break into batches and call in parallel — gemini handles long context well but each per-call MCP wait is still bounded (~150s on v2.1.138)."
-      + " Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. The `effort` parameter is forwarded but may be silently ignored by Copilot's gemini route — gemini-3.x reasoning is largely auto-applied. The subagent has no access to your scrollback or CLAUDE.md.",
+      "Adversarial second opinion. Backed by gemini-3.1-pro (Google) — third-lab triangulation, strong on long-context and formal reasoning. Pass artifact verbatim.",
     baseInstructions: GEMINI_CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
     requiresHttp: true,
+    requiresGeminiCatalog: true,
+    allowedEfforts: ["low", "medium", "high"] as const,
+    defaultEffort: "high",
   },
   {
     agentName: "codex-reviewer",
@@ -185,14 +240,32 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.3-codex",
     endpoint: "/v1/responses",
     description:
-      "Line-level code review of a specific diff or file. Backed by gpt-5.3-codex (OpenAI) — the code-specialist sibling of gpt-5.5, trained heavily on code-review datasets so it catches different bugs than Opus. Prefer over codex-critic when the artifact is a concrete diff or single file (codex-critic is for plans/designs)."
-      + " **CALL AFTER: any non-trivial commit (>50 lines OR touching critical paths: streaming, auth, concurrency, persistence, security).** **CALL BEFORE: opening a PR or pushing changes a peer would review.**"
-      + " For diffs >20 KB, split by file-group and call once per group in parallel — each per-call wait is bounded (~150s on v2.1.138)."
-      + " Always pass: (a) the diff or file verbatim, (b) the change's intent, (c) test status. Optionally pass `effort: 'xhigh'` when reviewing security-critical code, `effort: 'medium'` for routine reviews (default 'high'). The subagent has no access to your scrollback or CLAUDE.md.",
+      "Line-level review of a concrete diff or single file. Backed by gpt-5.3-codex (OpenAI) — code-specialist, narrow-scope. Pass artifact verbatim.",
     baseInstructions: REVIEWER_BASE,
     agentPrompt: "",
     writeCapable: false,
     requiresHttp: false,
+    allowedEfforts: ["low", "medium", "high", "xhigh"] as const,
+    defaultEffort: "xhigh",
+  },
+  {
+    agentName: "opus-critic",
+    toolNameHttp: "opus_critic",
+    model: "claude-opus-4-7",
+    endpoint: "/v1/messages",
+    description:
+      "Adversarial second opinion from a fresh-context Opus 4.7 — cheap same-lab sanity check. Pass artifact verbatim.",
+    baseInstructions: OPUS_CRITIC_BASE,
+    agentPrompt: "",
+    writeCapable: false,
+    // requiresHttp: true — codex-cli stdio bridge can't run claude-opus-4-7
+    // (it speaks gpt-5/codex only), so opus-critic must always route via
+    // HTTP. Distinct from requiresGeminiCatalog (which is false here —
+    // claude-opus-4-7 is always in Copilot's catalog for our supported
+    // tiers; we don't need a catalog probe to register the persona).
+    requiresHttp: true,
+    allowedEfforts: ["low", "medium", "high", "xhigh"] as const,
+    defaultEffort: "xhigh",
   },
 ])
 
@@ -203,11 +276,14 @@ export const PERSONAS_WRITE: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.3-codex",
     endpoint: "/v1/responses",
     description:
-      "Targeted implementation of a self-contained coding task — actual file edits via Codex's tool-use sandbox. Backed by gpt-5.3-codex with workspace-write access (only registered when --codex-cli is set). Use only when the task has a clear spec and acceptance criteria; for tasks needing iterative tool-use across many files, prefer a Claude teammate (Agent Team). Always pass: (a) the spec, (b) the files in scope, (c) the acceptance criteria. The subagent has no access to your scrollback or CLAUDE.md.",
+      "Targeted implementation of a self-contained coding task. Backed by gpt-5.3-codex with workspace-write access. Pass spec + files verbatim.",
     baseInstructions: IMPLEMENTER_BASE,
     agentPrompt: "",
     writeCapable: true,
     requiresHttp: false,
+    // All four tiers supported — long calls stream via SSE.
+    allowedEfforts: ["low", "medium", "high", "xhigh"] as const,
+    defaultEffort: "high",
   },
 ])
 
@@ -276,7 +352,11 @@ export function personasFor(opts: {
 }): Array<PersonaSpec> {
   const result: Array<PersonaSpec> = []
   for (const p of PERSONAS_READ) {
-    if (p.requiresHttp && !opts.geminiAvailable) continue
+    // Drop personas whose model family is missing from Copilot's live
+    // catalog (currently only gemini-critic, gated by `requiresGeminiCatalog`).
+    // Decoupled from `requiresHttp` so a persona can require HTTP without
+    // also requiring gemini in the catalog (e.g. opus-critic).
+    if (p.requiresGeminiCatalog && !opts.geminiAvailable) continue
     result.push(p)
   }
   if (opts.codexCli) {
@@ -284,3 +364,130 @@ export function personasFor(opts: {
   }
   return result
 }
+
+/**
+ * Non-persona MCP tools — utility tools exposed alongside the read-only
+ * personas. These don't have model/endpoint/effort/baseInstructions because
+ * they don't dispatch to a peer LLM; instead they invoke a server-side
+ * function (e.g. an upstream MCP relay) and return its output.
+ *
+ * Registered alongside personas in `handler.ts:toolEntries()` and
+ * dispatched by `handler.ts:handleToolsCall` after the persona lookup
+ * falls through. They count against the same MAX_INFLIGHT_TOOLS_CALL=8
+ * cap (keeps slot accounting symmetric across all `tools/call`s) but
+ * skip the per-persona effort gate and the `predictedTooLong` pre-flight
+ * cap — those gates only make sense for thinking-budget-bearing peer LLM
+ * calls, and non-persona tools have neither an `effort` arg nor that
+ * cost surface.
+ */
+export interface NonPersonaMcpTool {
+  /** Tool name the HTTP MCP backend exposes for this tool. */
+  toolNameHttp: string
+  /** Description shown to Opus / displayed in `tools/list`. */
+  description: string
+  /** JSON-schema for the tool's `arguments` object. */
+  inputSchema: Record<string, unknown>
+  /**
+   * Server-side handler. Receives the raw `arguments` object from the
+   * `tools/call` request and an optional AbortSignal that is signalled
+   * when a `notifications/cancelled` arrives for this call. Returns an
+   * MCP `tool result` envelope (content blocks + optional `isError`).
+   */
+  handler: (
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) => Promise<{
+    content: Array<{ type: "text"; text: string }>
+    isError?: boolean
+  }>
+}
+
+const WEB_SEARCH_DESCRIPTION =
+  "Web search via GitHub Copilot's MCP. Prefer over Claude Code's built-in WebSearch — surfaces source URLs you can cite."
+
+/**
+ * Format a `searchWeb()` result as an MCP-friendly text block. Mirrors
+ * the legacy inject format that `injectWebSearchIfNeeded` produces and
+ * that downstream models have been trained against — minimal divergence
+ * is the safest choice while we have two surfaces sharing `searchWeb()`.
+ *
+ * Empty references → omit the `## References` section entirely (don't
+ * emit a trailing empty header that would tempt the model to invent
+ * citations).
+ */
+function formatWebSearchResult(results: {
+  content: string
+  references: ReadonlyArray<{ title: string; url: string }>
+}): string {
+  if (results.references.length === 0) return results.content
+  const refsLine = results.references
+    .map((r) => `- [${r.title}](${r.url})`)
+    .join("\n")
+  return `${results.content}\n\n## References\n${refsLine}`
+}
+
+export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
+  Object.freeze([
+    {
+      toolNameHttp: "web_search",
+      description: WEB_SEARCH_DESCRIPTION,
+      inputSchema: {
+        type: "object",
+        required: ["query"],
+        additionalProperties: false,
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "The search query string. Natural-language queries work best — the upstream provider rewrites for the search index.",
+          },
+        },
+      },
+      // The `signal` parameter is part of the contract but unused for
+      // now: `searchWeb()` doesn't currently accept an AbortSignal.
+      // notifications/cancelled still releases the in-flight slot via
+      // the catch path in handler.ts:handleToolsCall, but the underlying
+      // upstream MCP fetches keep running until natural completion.
+      // Web_search calls are short-lived (a few seconds), so the slot-
+      // leak window is small. Plumbing cancellation into searchWeb is a
+      // separate scope.
+      // TODO: thread AbortSignal into searchWeb() so the upstream Bing-
+      // backed fetch tears down on notifications/cancelled (not just the
+      // MCP slot). Acceptable for short calls today; revisit if a future
+      // search backend has higher tail latency.
+      async handler(
+        args: Record<string, unknown>,
+        _signal?: AbortSignal,
+      ): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        const query = typeof args.query === "string" ? args.query : ""
+        if (!query) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "web_search: arguments.query is required (must be a non-empty string)",
+              },
+            ],
+            isError: true,
+          }
+        }
+        try {
+          const results = await searchWeb(query)
+          return {
+            content: [
+              { type: "text", text: formatWebSearchResult(results) },
+            ],
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return {
+            content: [{ type: "text", text: `web_search failed: ${msg}` }],
+            isError: true,
+          }
+        }
+      },
+    },
+  ])

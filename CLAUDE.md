@@ -194,6 +194,42 @@ The `claude` subcommand auto-injects three peer-model review tools as Claude Cod
 
 **Concurrency cap** (Phase 2D): `MAX_INFLIGHT_TOOLS_CALL = 8` in `src/routes/mcp/handler.ts` (raised from the original defensive 2). 9th in-flight `tools/call` returns clean isError `"queue full"`. Cap exists to bound runaway clients; persona handlers are stateless. Decomposition fan-out of 4-7 parallel batches now fits comfortably under the cap.
 
+**Empirical latency-by-effort matrix** (Phase A3; probed live 2026-05-14 against `api.enterprise.githubcopilot.com` via the proxy on a ~600B representative review prompt with `max_output_tokens: 4096`):
+
+| Persona | Model | Endpoint | Effort | Latency on ~600B prompt |
+|---|---|---|---|---|
+| codex_critic | gpt-5.5 | /v1/responses | xhigh | 56.3s (REMOVED — busts 60s ceiling) |
+| codex_critic | gpt-5.5 | /v1/responses | high (default) | 23.8s |
+| codex_critic | gpt-5.5 | /v1/responses | medium | 26.3s |
+| codex_reviewer | gpt-5.3-codex | /v1/responses | high | 16.0s |
+| opus_critic | claude-opus-4-7 | /v1/messages | medium (default; thinking.budget=3000) | 22.5s on a trivial prompt; expect 30-50s on real reviews |
+
+The user's intuition was almost right — `high` and `medium` are comfortably under 60s. **Only `xhigh` busted the ceiling**: at 56.3s on a 600-byte prompt it sat AT the per-tool-call wait, and a 14KB brief at `xhigh` would scale roughly linearly to 90-150s. Probe coverage in `scripts/probe-copilot-compat.sh`: `opus_critic_low`, `opus_critic_medium`, `opus_critic_high_rejected` (asserts the proxy-side gate), `codex_critic_xhigh_rejected`, `codex_reviewer_xhigh_rejected`. Matrix rows mirrored into `docs/copilot-compat-matrix.md`.
+
+**Per-persona allowedEfforts** (Phase A1; enforced by `persona.allowedEfforts` in `src/lib/peer-mcp-personas.ts`, gated in `handleToolsCall` BEFORE the `inFlightToolsCall` increment so a rejected effort doesn't burn a concurrency slot):
+
+| Persona | low | medium | high | xhigh | Default |
+|---|---|---|---|---|---|
+| codex_critic | ✅ | ✅ | ✅ | ❌ rejected `-32602 RPC_INVALID_PARAMS` | high |
+| codex_reviewer | ✅ | ✅ | ✅ | ❌ rejected `-32602 RPC_INVALID_PARAMS` | high |
+| opus_critic | ✅ | ✅ | ❌ rejected `-32602 RPC_INVALID_PARAMS` | ❌ rejected `-32602 RPC_INVALID_PARAMS` | medium |
+| gemini_critic | ✅ | ✅ | ✅ | ✅ | high |
+
+`xhigh` is gone from both codex personas because it sits AT the 60s ceiling on tiny prompts and busts it on real briefs (see latency matrix above). `opus_critic` accepts only `low` and `medium` — `high`/`xhigh` would require thinking budgets that can't fit in 60s at realistic claude-opus-4-7 reasoning rates (~80-150 tps); for deep dives use `codex_critic` at `high` (with brief <8 KB) or `gemini_critic`. `gemini_critic` keeps the full enum because Copilot's gemini route may silently auto-apply effort regardless of the knob, and gemini-3.x handles long context well so there's no empirical case for trimming.
+
+**Pre-flight `predictedTooLong` cap** (Phase A2; defense-in-depth on top of the effort gate). Even `high` on the codex personas can bust the ceiling once the brief grows past ~8 KB (the 23.8s baseline scales roughly linearly with input). The cap rejects with `isError: true` (NOT an RPC error — the request is syntactically valid; the prediction is operational) and an actionable message telling the caller to drop to `medium` or split the brief into 2-4 parallel sub-calls per the decomposition guidance:
+
+| Persona | Effort | Brief size cap (`prompt + context` bytes) |
+|---|---|---|
+| codex_critic | high | 8 KB → toolError |
+| codex_reviewer | high | 12 KB → toolError (faster sibling, more headroom) |
+| opus_critic | medium | 6 KB → toolError (conservative — opus thinking grows with input) |
+| gemini_critic | (any) | (no cap — long-context strong, no empirical data yet to anchor) |
+
+The cap fires BEFORE the AbortController + `inFlightToolsCall` increment, so a rejected pre-flight is free of concurrency-slot cost and free of upstream call cost (no Copilot fetch issued). Thresholds are constants in `src/routes/mcp/handler.ts` — easy to update as more empirical data arrives via the probe suite.
+
+**`opus_critic` persona** (Phase B): adversarial second opinion from a fresh-context Opus 4.7 routed via `/v1/messages` with translated `thinking.budget_tokens` (low=1024, medium=3000) and `max_tokens = budget + 1500`. Cheapest and fastest of the peer critics (~10-25s on small artifacts). Use it as a quick same-lab sanity check before committing to a controversial decision when the artifact fits comfortably in one shot. **Limited blind-spot diversification** — same training data, same lab, same RLHF priors as the lead, so it does NOT substitute for cross-lab triangulation; reach for `codex_critic` (`high`) or `gemini_critic` for genuine adversarial coverage. Routing reflected in `peer-review-coordinator` (`src/lib/codex-mcp-config.ts`).
+
 ### Spawned-CLI auth isolation
 
 When `github-router claude` (or `codex`) launches its child CLI, the parent `process.env` is sanitized of every auth-related key listed in `STRIPPED_PARENT_ENV_KEYS` (`src/lib/launch.ts`) BEFORE the proxy's overrides are merged in. Stripped keys: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_MODEL`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CONFIG_DIR`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME`.

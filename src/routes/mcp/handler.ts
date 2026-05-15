@@ -8,12 +8,18 @@ import { resolveModel } from "~/lib/utils"
 import {
   PERSONAS_READ,
   type PersonaSpec,
+  EFFORT_LEVELS,
+  type Effort,
+  isEffort,
+  NON_PERSONA_MCP_TOOLS,
+  type NonPersonaMcpTool,
 } from "~/lib/peer-mcp-personas"
 import {
   createChatCompletions,
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
+import { createMessages } from "~/services/copilot/create-messages"
 import {
   createResponses,
   type ResponsesApiResponse,
@@ -24,24 +30,10 @@ const MCP_PROTOCOL_VERSION = "2025-06-18"
 const SERVER_NAME = "github-router-peers"
 const SERVER_VERSION = "1"
 
-/**
- * Reasoning effort levels accepted by Copilot's /v1/responses (gpt-5.x) and
- * /v1/chat/completions endpoints. Per the proxy's existing thinking-mode
- * translator (CLAUDE.md "Thinking-mode translation"), Copilot's adaptive-
- * thinking path uses these same buckets:
- *   <2k tokens → low, <8k → medium, <24k → high, else → xhigh.
- *
- * Default `high` for peer reviews — adversarial-by-design but still cost-
- * conscious. Callers can pass `xhigh` explicitly for deep dives, or `medium`
- * for quick sanity checks.
- */
-const EFFORT_LEVELS = ["low", "medium", "high", "xhigh"] as const
-type Effort = (typeof EFFORT_LEVELS)[number]
-const DEFAULT_EFFORT: Effort = "high"
-
-function isEffort(v: unknown): v is Effort {
-  return typeof v === "string" && (EFFORT_LEVELS as ReadonlyArray<string>).includes(v)
-}
+// Effort levels (EFFORT_LEVELS, Effort, isEffort) are imported from
+// peer-mcp-personas.ts so PersonaSpec.allowedEfforts can reference the
+// same type without a circular import. Per-persona defaultEffort is on
+// the PersonaSpec; there is no module-level default here anymore.
 
 /** Bounded concurrency. Originally capped at 2 (commit 4317a25) as a defensive
  *  pre-launch guess against Opus's natural pattern of fanning out to all three
@@ -168,11 +160,15 @@ function geminiAvailable(): boolean {
 }
 
 function activePersonas(): Array<PersonaSpec> {
-  return PERSONAS_READ.filter((p) => !p.requiresHttp || geminiAvailable())
+  // Drop personas whose model family is missing from Copilot's live
+  // catalog (currently only gemini-critic, gated by `requiresGeminiCatalog`).
+  // Distinct from `requiresHttp` (codex-cli stdio routing constraint) —
+  // see PersonaSpec field doc in peer-mcp-personas.ts.
+  return PERSONAS_READ.filter((p) => !p.requiresGeminiCatalog || geminiAvailable())
 }
 
 function toolEntries(): Array<ToolEntry> {
-  return activePersonas().map((p) => ({
+  const personaEntries: Array<ToolEntry> = activePersonas().map((p) => ({
     name: p.toolNameHttp,
     description: p.description,
     inputSchema: {
@@ -191,17 +187,33 @@ function toolEntries(): Array<ToolEntry> {
         },
         effort: {
           type: "string",
-          enum: [...EFFORT_LEVELS],
+          // Per-persona allowedEfforts: schema only advertises tiers the
+          // persona accepts. Empirical data (2026-05-14) drove which tiers
+          // each persona exposes — see EFFORT_LEVELS doc in
+          // src/lib/peer-mcp-personas.ts.
+          enum: [...p.allowedEfforts],
           description:
-            `Reasoning depth (low | medium | high | xhigh). Default "${DEFAULT_EFFORT}". `
-            + "Use 'xhigh' for explicit deep dives where you want maximum reasoning. "
-            + "Use 'medium' for quick sanity checks. "
-            + "Note: for non-OpenAI models routed via /v1/chat/completions (gemini-3.x), "
-            + "the upstream may silently ignore this knob.",
+            `Reasoning depth (${p.allowedEfforts.join(" | ")}). Default "${p.defaultEffort}". `
+            + "Higher tiers cost more wall-clock; lower tiers are quicker sanity checks. "
+            + (p.endpoint === "/v1/chat/completions"
+              ? "Note: for gemini routed via /v1/chat/completions, the upstream may silently ignore this knob."
+              : ""),
         },
       },
     },
   }))
+  // Append non-persona utility tools (currently just `web_search`). They
+  // share the same `tools/list` surface but have their own input schemas
+  // (no prompt/context/effort) and skip the per-persona validation gates
+  // in handleToolsCall.
+  const nonPersonaEntries: Array<ToolEntry> = NON_PERSONA_MCP_TOOLS.map(
+    (t) => ({
+      name: t.toolNameHttp,
+      description: t.description,
+      inputSchema: t.inputSchema,
+    }),
+  )
+  return [...personaEntries, ...nonPersonaEntries]
 }
 
 function buildUserText(prompt: string, context?: string): string {
@@ -238,6 +250,33 @@ function extractChatCompletionText(response: ChatCompletionResponse): string {
   return typeof c === "string" ? c : ""
 }
 
+/**
+ * Extract assistant text from an Anthropic /v1/messages response.
+ * Mirrors `extractResponsesText` for the OpenAI /v1/responses shape.
+ *
+ * The Anthropic Messages API response has shape `{content: [{type, ...}, ...]}`.
+ * Text blocks have `type: "text"` and `text: string`. Thinking blocks have
+ * `type: "thinking"` (and live in the same array; we ignore them — they're
+ * the model's reasoning trace, not the final answer for the lead).
+ */
+interface MessagesApiContentBlock {
+  type: string
+  text?: string
+}
+interface MessagesApiResponse {
+  content?: ReadonlyArray<MessagesApiContentBlock>
+}
+
+function extractMessagesText(response: MessagesApiResponse): string {
+  const out: Array<string> = []
+  for (const block of response.content ?? []) {
+    if (block.type === "text" && typeof block.text === "string") {
+      out.push(block.text)
+    }
+  }
+  return out.join("")
+}
+
 interface ToolErrorContent {
   content: Array<{ type: "text"; text: string }>
   isError: true
@@ -248,6 +287,115 @@ function toolError(message: string): ToolErrorContent {
     content: [{ type: "text", text: message }],
     isError: true,
   }
+}
+
+/**
+ * Empirical pre-flight cap to convert "would-bust-the-60s-MCP-ceiling"
+ * calls into fast actionable errors instead of slot-leaking timeouts.
+ *
+ * Probed live against Copilot 2026-05-14:
+ *   gpt-5.5 high on a ~600B prompt = 23.8s → ~76s on 8KB (rough linear)
+ *   gpt-5.3-codex high on ~600B = 16.0s → ~64s on 12KB
+ *   claude-opus-4-7 medium (thinking=3000) on a trivial prompt = 22.5s
+ *     but model self-paces budget → ~50s+ on a real ~6KB review
+ *
+ * Returns `{tooLong: true, capBytes}` when the (persona, effort, briefBytes)
+ * tuple is empirically predicted to bust the 60s ceiling.
+ *
+ * SCOPE: the cap is JSON-PATH ONLY. Callers (handleMcpPost) MUST gate
+ * the call site by `!acceptsEventStream(...)`. The SSE path
+ * (handleToolsCallSSE) keeps the connection open past the 60s ceiling
+ * via heartbeats — size-based pre-flight rejection there would just
+ * lock SSE clients out of their primary advantage. JSON-path clients
+ * (raw curl with `Accept: application/json`, older MCP clients without
+ * SSE awareness) DO still hit the underlying tools/call timer, so the
+ * cap is the only way to surface a fast actionable error there
+ * instead of a slot-leaking timeout.
+ *
+ * INVARIANT: pre-flight MUST fire BEFORE inFlightToolsCall++ — the
+ * slot must not be acquired for a rejected pre-flight. handleMcpPost
+ * runs the check before delegating to handleRpc → handleToolsCall (the
+ * function that increments the counter). Documented in CLAUDE.md.
+ *
+ * gemini_critic has no cap (long-context model + Copilot may auto-pace).
+ */
+const PRE_FLIGHT_CAPS: ReadonlyArray<{
+  toolName: string
+  effort: Effort
+  maxBriefBytes: number
+}> = [
+  { toolName: "codex_critic", effort: "high", maxBriefBytes: 8 * 1024 },
+  { toolName: "codex_reviewer", effort: "high", maxBriefBytes: 12 * 1024 },
+  { toolName: "opus_critic", effort: "medium", maxBriefBytes: 6 * 1024 },
+]
+
+function predictedTooLong(
+  persona: PersonaSpec,
+  effort: Effort,
+  briefBytes: number,
+): { tooLong: true; capBytes: number } | { tooLong: false } {
+  for (const cap of PRE_FLIGHT_CAPS) {
+    if (
+      cap.toolName === persona.toolNameHttp
+      && cap.effort === effort
+      && briefBytes > cap.maxBriefBytes
+    ) {
+      return { tooLong: true, capBytes: cap.maxBriefBytes }
+    }
+  }
+  return { tooLong: false }
+}
+
+/**
+ * JSON-path pre-flight predictedTooLong gate. Returns a JSON-RPC result
+ * body wrapping a tool-error envelope when the call would bust the 60s
+ * tools/call ceiling on the JSON path; returns undefined when the call
+ * should proceed normally.
+ *
+ * Skips the check (returns undefined) for any shape problem so
+ * handleRpc can return the canonical JSON-RPC error code instead:
+ *   - notification (no id) → handleRpc returns 202 + empty body
+ *   - missing/unknown name  → handleRpc returns -32601
+ *   - missing prompt        → handleRpc returns -32602
+ *   - invalid effort string → handleRpc returns -32602
+ *   - effort not in persona.allowedEfforts → handleRpc returns -32602
+ */
+function jsonPathPreflightCap(body: JsonRpcRequest):
+  | { jsonrpc: "2.0"; id: JsonRpcRequest["id"] | null; result: ToolErrorContent }
+  | undefined {
+  if (body.id === undefined) return undefined
+  const params = (body.params ?? {}) as Record<string, unknown>
+  const name = typeof params.name === "string" ? params.name : ""
+  const args = (params.arguments ?? {}) as Record<string, unknown>
+  const prompt = typeof args.prompt === "string" ? args.prompt : ""
+  const context = typeof args.context === "string" ? args.context : undefined
+  const rawEffort = args.effort
+  if (!name || !prompt) return undefined
+  const persona = activePersonas().find((p) => p.toolNameHttp === name)
+  if (!persona) return undefined
+  if (rawEffort !== undefined && !isEffort(rawEffort)) return undefined
+  const effortMaybe = rawEffort as Effort | undefined
+  if (
+    effortMaybe !== undefined
+    && !persona.allowedEfforts.includes(effortMaybe)
+  ) {
+    return undefined
+  }
+  const effort: Effort = effortMaybe ?? persona.defaultEffort
+  const briefBytes = Buffer.byteLength(buildUserText(prompt, context), "utf8")
+  const verdict = predictedTooLong(persona, effort, briefBytes)
+  if (!verdict.tooLong) return undefined
+  return rpcResult(
+    body.id,
+    toolError(
+      `pre-flight rejected: ${persona.toolNameHttp} at effort=${effort} on a `
+        + `${briefBytes}-byte brief is empirically predicted to exceed the JSON `
+        + `tools/call timeout (cap=${verdict.capBytes} bytes for this tier). `
+        + `Either drop to a lower effort tier, split the brief into 2-4 `
+        + `parallel sub-calls per the decomposition guidance, or send `
+        + `Accept: text/event-stream to use the SSE path which bypasses this cap.`,
+    ),
+  )
 }
 
 async function callPersona(
@@ -262,6 +410,11 @@ async function callPersona(
   // through the existing fuzzy matcher rather than 404'ing.
   const resolvedModel = resolveModel(persona.model)
   const userText = buildUserText(prompt, context)
+
+  // NOTE: predictedTooLong pre-flight cap fires in handleMcpPost
+  // BEFORE handleRpc → handleToolsCall → inFlightToolsCall++ — see
+  // the architectural invariant documented in CLAUDE.md. JSON-path
+  // only; SSE callers bypass it. Don't duplicate it here.
 
   // NOTE on consumer-cancel signal: we deliberately do NOT pass
   // c.req.raw.signal into the upstream fetch. Bun/srvx aborts the
@@ -294,6 +447,41 @@ async function callPersona(
       signal,
     )) as ResponsesApiResponse
     const text = extractResponsesText(response)
+    if (!text) {
+      return toolError(`persona ${persona.agentName}: empty assistant output`)
+    }
+    return { content: [{ type: "text", text }] }
+  }
+
+  if (persona.endpoint === "/v1/messages") {
+    // claude-opus-4-7 path. Copilot's adaptive-thinking models reject
+    // Anthropic's standard `thinking: {type:"enabled", budget_tokens:N}`
+    // shape with HTTP 400: "thinking.type.enabled is not supported for
+    // this model. Use thinking.type.adaptive and output_config.effort".
+    // Build the Copilot-shape directly. Empirical: confirmed 2026-05-14
+    // via curl test against the proxy after build, opus_critic@xhigh
+    // returned the expected 400 with that exact wording.
+    //
+    // max_tokens budget: choose a generous ceiling per effort tier so
+    // the model has room for substantive reasoning + response without
+    // truncation. Numbers chosen empirically:
+    //   low → 4096, medium → 8192, high → 16384, xhigh → 32768.
+    const maxTokens =
+      effort === "low" ? 4096
+      : effort === "medium" ? 8192
+      : effort === "high" ? 16384
+      : 32768  // xhigh
+    const body = JSON.stringify({
+      model: resolvedModel,
+      max_tokens: maxTokens,
+      system: persona.baseInstructions,
+      thinking: { type: "adaptive" },
+      output_config: { effort },
+      messages: [{ role: "user", content: userText }],
+    })
+    const response = await createMessages(body, undefined, signal)
+    const json = (await response.json()) as MessagesApiResponse
+    const text = extractMessagesText(json)
     if (!text) {
       return toolError(`persona ${persona.agentName}: empty assistant output`)
     }
@@ -357,40 +545,89 @@ async function handleToolsCall(
   const params = body.params ?? {}
   const name = typeof params.name === "string" ? params.name : ""
   const args = (params.arguments ?? {}) as Record<string, unknown>
-  const prompt = typeof args.prompt === "string" ? args.prompt : ""
-  const context = typeof args.context === "string" ? args.context : undefined
-  // Validate effort against the EFFORT_LEVELS allowlist; reject unknown
-  // values cleanly rather than forwarding garbage to the upstream payload.
-  let effort: Effort = DEFAULT_EFFORT
-  if (args.effort !== undefined) {
-    if (!isEffort(args.effort)) {
-      return rpcError(
-        body.id,
-        RPC_INVALID_PARAMS,
-        `tools/call: arguments.effort must be one of ${EFFORT_LEVELS.join("|")}; got ${JSON.stringify(args.effort)}`,
-      )
-    }
-    effort = args.effort
-  }
 
   if (!name) {
     return rpcError(body.id, RPC_INVALID_PARAMS, "tools/call missing name")
   }
+
+  // Routing: try personas first; fall through to non-persona utility
+  // tools (currently just `web_search`). The two registries share the
+  // tools/list surface but have different validation gates — personas
+  // get the prompt+effort+predictedTooLong gauntlet; non-persona tools
+  // do their own arg validation inside the handler closure.
   const persona = activePersonas().find((p) => p.toolNameHttp === name)
-  if (!persona) {
+  const nonPersonaTool: NonPersonaMcpTool | undefined = persona
+    ? undefined
+    : NON_PERSONA_MCP_TOOLS.find((t) => t.toolNameHttp === name)
+
+  if (!persona && !nonPersonaTool) {
     return rpcError(
       body.id,
       RPC_METHOD_NOT_FOUND,
       `tools/call: unknown tool "${name}"`,
     )
   }
-  if (!prompt) {
-    return rpcError(
-      body.id,
-      RPC_INVALID_PARAMS,
-      `tools/call: arguments.prompt is required`,
-    )
+
+  // Persona-only validation: prompt required, effort schema-checked
+  // against EFFORT_LEVELS and gated by per-persona allowedEfforts. None
+  // of this applies to non-persona tools (no prompt, no effort).
+  let personaPrompt: string | undefined
+  let personaContext: string | undefined
+  let personaEffort: Effort | undefined
+  if (persona) {
+    // Validate effort shape against the global EFFORT_LEVELS allowlist
+    // (rejects garbage like `effort: "extreme"`); the per-persona
+    // allowedEfforts gate runs AFTER persona lookup below (rejects
+    // valid-but-not-allowed-here tiers like `xhigh` on codex_critic).
+    if (args.effort !== undefined && !isEffort(args.effort)) {
+      return rpcError(
+        body.id,
+        RPC_INVALID_PARAMS,
+        `tools/call: arguments.effort must be one of ${EFFORT_LEVELS.join("|")}; got ${JSON.stringify(args.effort)}`,
+      )
+    }
+    const requestedEffort = args.effort as Effort | undefined
+
+    const prompt = typeof args.prompt === "string" ? args.prompt : ""
+    if (!prompt) {
+      return rpcError(
+        body.id,
+        RPC_INVALID_PARAMS,
+        `tools/call: arguments.prompt is required`,
+      )
+    }
+    personaPrompt = prompt
+    personaContext = typeof args.context === "string" ? args.context : undefined
+
+    // Per-persona effort gate. All four personas now allow all four
+    // effort tiers (low|medium|high|xhigh). The gate remains in place so
+    // a future persona that needs to constrain its tiers can do so
+    // declaratively via PersonaSpec.allowedEfforts.
+    if (
+      requestedEffort !== undefined
+      && !persona.allowedEfforts.includes(requestedEffort)
+    ) {
+      return rpcError(
+        body.id,
+        RPC_INVALID_PARAMS,
+        `tools/call: persona "${persona.toolNameHttp}" does not accept effort="${requestedEffort}". `
+          + `Allowed: ${persona.allowedEfforts.join("|")}.`,
+      )
+    }
+    personaEffort = requestedEffort ?? persona.defaultEffort
   }
+
+  // predictedTooLong pre-flight cap is enforced upstream of this
+  // function — see `jsonPathPreflightCap` invoked by handleMcpPost
+  // BEFORE handleRpc/handleToolsCall, so the slot increment below is
+  // never reached for a rejected pre-flight (architectural invariant
+  // documented in CLAUDE.md). The cap is JSON-PATH ONLY: SSE-streamed
+  // responses (handleToolsCallSSE) bypass Claude Code's ~60s
+  // tools/call ceiling via heartbeats and therefore don't need the
+  // size-based gate. Non-persona tools have no thinking budget and so
+  // the predictedTooLong cap doesn't apply to them either (the
+  // jsonPathPreflightCap returns undefined when persona lookup misses,
+  // which naturally exempts non-persona tools).
 
   if (inFlightToolsCall >= MAX_INFLIGHT_TOOLS_CALL) {
     // Documented per-call cap. NOT silent serialization — surface the
@@ -419,17 +656,24 @@ async function handleToolsCall(
     aborter = new AbortController()
     inflightAborts.set(abortKey, aborter)
   }
+  // Telemetry shape differs per branch — personas have a model id;
+  // non-persona tools don't dispatch to a peer LLM, so log the tool
+  // name as the "model" slot for grep'ability.
+  const telemetryName = persona ? persona.agentName : nonPersonaTool!.toolNameHttp
+  const telemetryModel = persona ? persona.model : "(non-persona)"
   try {
-    const result = await callPersona(
-      persona,
-      prompt,
-      context,
-      effort,
-      aborter?.signal,
-    )
+    const result = persona
+      ? await callPersona(
+          persona,
+          personaPrompt!,
+          personaContext,
+          personaEffort!,
+          aborter?.signal,
+        )
+      : await nonPersonaTool!.handler(args, aborter?.signal)
     logTelemetry({
-      name: persona.agentName,
-      model: persona.model,
+      name: telemetryName,
+      model: telemetryModel,
       durationMs: Date.now() - startedAt,
       result: result.isError ? "isError" : "ok",
     })
@@ -437,8 +681,8 @@ async function handleToolsCall(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     logTelemetry({
-      name: persona.agentName,
-      model: persona.model,
+      name: telemetryName,
+      model: telemetryModel,
       durationMs: Date.now() - startedAt,
       result: "exception",
       errorMessage: message,
@@ -455,7 +699,9 @@ async function handleToolsCall(
       content: [
         {
           type: "text",
-          text: `persona ${persona.agentName} failed: ${message}`,
+          text: persona
+            ? `persona ${persona.agentName} failed: ${message}`
+            : `tool ${nonPersonaTool!.toolNameHttp} failed: ${message}`,
         },
       ],
       isError: true,
@@ -676,6 +922,48 @@ export async function handleMcpPost(c: Context): Promise<Response> {
     )
   }
 
+  // SSE-streamed response branch for `tools/call` when the client
+  // advertises text/event-stream Accept (Claude Code's MCP HTTP client
+  // does, per MCP 2025-06-18 Streamable HTTP transport spec). Streamed
+  // responses bypass the per-tool-call wait timer that ~60s-caps JSON
+  // responses on Claude Code v2.1.113+ (regressions #50289 / #52137,
+  // documented in docs/research/peer-mcp-investigation.md). Heartbeat
+  // `notifications/progress` events keep the connection alive while
+  // the upstream Copilot call is in flight; the final tools/call
+  // response is delivered as the closing `message` event. Non-tools/call
+  // RPC methods (initialize, tools/list, etc.) stay on the JSON path —
+  // they're synchronous and don't benefit from streaming.
+  if (
+    typeof body === "object"
+    && body !== null
+    && !Array.isArray(body)
+    && body.method === "tools/call"
+    && acceptsEventStream(c.req.header("accept"))
+  ) {
+    return handleToolsCallSSE(body)
+  }
+
+  // JSON-path pre-flight predictedTooLong cap. SSE clients (above)
+  // bypass Claude Code's ~60s tools/call ceiling via heartbeats, but
+  // JSON-path clients (raw curl with `Accept: application/json`,
+  // older MCP clients without SSE awareness) still hit the underlying
+  // timer. Reject here as a fast actionable error instead of letting
+  // the request burn an inFlight slot for ~60s before the client
+  // times out — invariant: the cap MUST fire BEFORE handleToolsCall
+  // so inFlightToolsCall++ is never reached for a rejected pre-flight
+  // (CLAUDE.md). `jsonPathPreflightCap` returns undefined for any
+  // shape problem (missing prompt, unknown name, invalid effort) so
+  // handleRpc returns the canonical -32601/-32602 error code.
+  if (
+    typeof body === "object"
+    && body !== null
+    && !Array.isArray(body)
+    && body.method === "tools/call"
+  ) {
+    const preflight = jsonPathPreflightCap(body)
+    if (preflight) return c.json(preflight, 200)
+  }
+
   try {
     const { status, body: respBody } = await handleRpc(c, body)
     if (respBody === null) return c.body(null, status as 202)
@@ -697,6 +985,156 @@ export async function handleMcpPost(c: Context): Promise<Response> {
       200,
     )
   }
+}
+
+/**
+ * Accept-header parsing for MCP Streamable HTTP. Per MCP 2025-06-18
+ * spec, clients send `Accept: application/json, text/event-stream` to
+ * indicate they can consume either response shape. Server picks; for
+ * tools/call we pick SSE because Claude Code's per-tool-call timer
+ * (~60s on v2.1.113+) does not fire on streamed responses.
+ *
+ * Lenient parse: split on commas, strip params (q-values, charset),
+ * trim, lowercase, look for the SSE token. Returns false on undefined
+ * / empty / strict-JSON-only Accept.
+ */
+function acceptsEventStream(accept: string | undefined): boolean {
+  if (!accept) return false
+  const tokens = accept
+    .toLowerCase()
+    .split(",")
+    .map((t) => t.split(";")[0].trim())
+  return tokens.includes("text/event-stream")
+}
+
+/**
+ * SSE-streamed response for a single tools/call. Delegates the actual
+ * upstream call to `handleToolsCall` (so the per-persona effort gate,
+ * predictedTooLong cap, AbortController registration, telemetry, and
+ * inFlight slot accounting all run identically); wraps the awaited
+ * result in an SSE envelope with periodic heartbeats while the upstream
+ * fetch is in flight.
+ *
+ * SSE event format (per MCP Streamable HTTP):
+ *   event: message
+ *   data: <json-rpc-2.0 message>\n\n
+ *
+ * - Heartbeats are JSON-RPC `notifications/progress` notifications with
+ *   the request id as `progressToken` (per MCP progress-notification spec).
+ * - The final message is the JSON-RPC response envelope returned by
+ *   handleToolsCall — same structure as the JSON-path response.
+ * - On consumer cancel (ReadableStream.cancel), the heartbeat interval
+ *   is cleared and the inFlight slot's AbortController is signalled
+ *   (handleToolsCall observes the abort and returns an error envelope
+ *   that we drop unwritten — controller is already closed).
+ *
+ * Per CLAUDE.md "Stream lifecycle" / "The smoking gun" rules: every
+ * controller.enqueue/close is wrapped in a try/catch that swallows the
+ * "Invalid state: Controller is already closed" race without warning.
+ */
+const SSE_HEARTBEAT_INTERVAL_MS = 5000
+
+async function handleToolsCallSSE(body: JsonRpcRequest): Promise<Response> {
+  const encoder = new TextEncoder()
+  // Kick off the actual tool call as a Promise. handleToolsCall handles
+  // all gates, slot accounting, abort registration, telemetry — we just
+  // wrap its eventual result in an SSE envelope.
+  const callPromise = handleToolsCall(body)
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      let closed = false
+      const safeEnqueue = (chunk: Uint8Array): void => {
+        if (closed) return
+        try {
+          controller.enqueue(chunk)
+        } catch (err) {
+          // Controller already closed by consumer cancel or earlier
+          // close — common race between heartbeat tick and stream
+          // teardown. Per CLAUDE.md "smoking gun" rule, do NOT log
+          // this as a warning; it's expected.
+          consola.debug("/mcp SSE enqueue after close (expected race):", err)
+          closed = true
+        }
+      }
+      const safeClose = (): void => {
+        if (closed) return
+        closed = true
+        try {
+          controller.close()
+        } catch (err) {
+          consola.debug("/mcp SSE close after close:", err)
+        }
+      }
+      const sseFrame = (rpcMessage: object): Uint8Array =>
+        encoder.encode(`event: message\ndata: ${JSON.stringify(rpcMessage)}\n\n`)
+      const heartbeatFrame = (): Uint8Array =>
+        sseFrame({
+          jsonrpc: "2.0",
+          method: "notifications/progress",
+          params: {
+            progressToken: body.id ?? null,
+            progress: 0,
+            message: "in flight",
+          },
+        })
+
+      // Initial heartbeat (proves the stream is open) + recurring
+      // heartbeats every SSE_HEARTBEAT_INTERVAL_MS until the call
+      // resolves.
+      safeEnqueue(heartbeatFrame())
+      const heartbeatHandle = setInterval(
+        () => safeEnqueue(heartbeatFrame()),
+        SSE_HEARTBEAT_INTERVAL_MS,
+      )
+
+      try {
+        const result = await callPromise
+        safeEnqueue(sseFrame(result))
+      } catch (err) {
+        consola.error("/mcp SSE upstream error:", err)
+        safeEnqueue(
+          sseFrame(
+            rpcError(
+              body.id ?? null,
+              RPC_INTERNAL_ERROR,
+              err instanceof Error ? err.message : String(err),
+            ),
+          ),
+        )
+      } finally {
+        clearInterval(heartbeatHandle)
+        safeClose()
+      }
+    },
+    cancel() {
+      // Consumer disconnected. handleToolsCall's AbortController is
+      // keyed by body.id and already registered in inflightAborts;
+      // signal it so the upstream Copilot fetch tears down and the
+      // inFlight slot is freed promptly. No need to clear heartbeats
+      // here — the start() function's finally-block does that when
+      // callPromise resolves (or rejects with the abort).
+      const abortKey =
+        body.id !== undefined && body.id !== null ? body.id : undefined
+      if (abortKey !== undefined) {
+        const aborter = inflightAborts.get(abortKey)
+        if (aborter) aborter.abort(new Error("client disconnected SSE stream"))
+      }
+    },
+  })
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      // MCP Streamable HTTP transport identifier so middleboxes (and
+      // future Claude Code versions that key off this) handle the
+      // response correctly.
+      "X-Accel-Buffering": "no",
+    },
+  })
 }
 
 export function handleMcpDelete(c: Context): Response {

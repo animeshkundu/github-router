@@ -33,7 +33,7 @@ Canonical Copilot tool-type allowlist (verbatim from a 400 in probe `tooltype_co
 | `bash_20250124` | ✅ 200 | copilot-allowlist | `tooltype_bash_20250124` | Current bash version |
 | `tool_search_tool_bm25` | ✅ 200 | copilot-allowlist | (TODO) | In Copilot allowlist — add probe |
 | `tool_search_tool_regex` | ✅ 200 | copilot-allowlist | (TODO) | In Copilot allowlist — add probe |
-| `web_search_20250305` | ⚠️ 200 (inconclusive) | anthropic-docs | `tooltype_web_search_20250305` | Body validator accepts; model never invoked the tool in the test prompt — needs a stronger probe to confirm functional acceptance |
+| `web_search_20250305` | ⚠️ 200 (inconclusive) | anthropic-docs | `tooltype_web_search_20250305` | Body validator accepts; model never invoked the tool in the test prompt — needs a stronger probe to confirm functional acceptance. See `web_search_anthropic_tool_messages` row below for the resolved end-to-end behavior with a real trigger query. |
 | `bash_20241022` | ❌ 400 | copilot-allowlist | `tooltype_bash_20241022_legacy` | Legacy version rejected |
 | `code_execution_20250825` | ❌ 400 | copilot-allowlist | `tooltype_code_execution_20250825` | Not in Copilot allowlist |
 | `computer_20250124` | (untested) | anthropic-docs | (TODO) | Add probe — Anthropic ships this typed tool; status unknown |
@@ -119,13 +119,67 @@ The proxy filters via `filterBetaHeader` in `src/lib/utils.ts`. Two lists:
 | `gpt-5.3-codex` | (untested via this matrix) | codex-emits | (TODO) | `/v1/responses` |
 | `gemini-3.1-pro-preview` | (untested via this matrix) | exploratory | (TODO) | `/v1/chat/completions` |
 
-## Endpoints covered
+## Web search — cross-endpoint native exposure (Task #2 empirical map)
+
+Resolution of the long-standing `tooltype_web_search_20250305` "inconclusive" row, plus full coverage of how Copilot exposes web_search natively across all three Anthropic-shape entry points and what the proxy does on top.
+
+| Endpoint | Tool shape sent | Direct upstream Copilot | End-to-end through proxy | Probe id |
+|---|---|---|---|---|
+| `/v1/messages` | `tools[].type=web_search_20250305` (Anthropic native) | ❌ 400 `unsupported_value: "The use of the web search tool is not supported."` | ✅ 200 (proxy intercepts in `processWebSearch`, fulfils via Copilot `/mcp` server-side, strips tool, injects results in `system`) | `web_search_anthropic_tool_messages` |
+| `/v1/responses` | `tools[].type=web_search_preview` (OpenAI Responses native) | ✅ 200 — model invokes natively; output stream contains `web_search_call` block (action.queries[]) followed by `message` | ✅ 200 (proxy passes through; no MCP hop) | `web_search_responses_preview` |
+| `/v1/responses` | `tools[].type=web_search_preview_2025_03_11` (versioned variant) | ✅ 200 — model invokes natively (same shape as bare preview) | (untested via proxy — covered by upstream confirmation) | (TODO) |
+| `/v1/responses` | `tools[].type=web_search` (bare/legacy) | ✅ 200 — body validator accepts AND model invokes natively (proven with real query). Comment in `src/routes/responses/handler.ts:314-316` saying Copilot rejects this is now stale. | ✅ 200 — but proxy strips the `web_search` tool and substitutes MCP results in `instructions` instead, so the model never gets the chance to invoke natively | (no probe — proxy strips so untestable end-to-end without bypass) |
+| `/v1/chat/completions` | `tools[].type=web_search` | ❌ 400 `invalid_request_body: "Invalid 'tools[0].function.name': empty string."` (validator only accepts strict OpenAI function tools) | ✅ 200 (proxy intercepts in `injectWebSearchIfNeeded`, fulfils via MCP, strips tool, prepends results to `system` message) | `web_search_chat_completions` |
+| `/v1/chat/completions` | `tools[].type=web_search_preview` | ❌ 400 (same shape error) | ✅ 200 (same proxy strip+substitute path as above) | (TODO — same code path as above) |
+| `/v1/chat/completions` | top-level `web_search_options: {}` (gpt-4o-search-preview style) | ✅ 200 (validator accepts) — but vanilla `gpt-4o` has no native search wiring; model returns "I cannot provide real-time data, knowledge ends Oct 2023". Field is silently ignored. | (proxy passthrough — no `web_search_options` strip) | (TODO) |
+
+**Conclusion**: Copilot's only native web_search exposure is on `/v1/responses` for GPT-5.x via `web_search_preview` (and accidentally `web_search`, which the proxy strips). All other entry points require the proxy's MCP-fulfilment fallback.
+
+**Native /mcp web_search tool** (used by the proxy under the hood — auth is the GitHub PAT, not the Copilot-exchanged token):
+- Endpoint: `POST https://api.enterprise.githubcopilot.com/mcp`
+- Wire: `initialize` → `notifications/initialized` → `tools/call`
+- Required header: `X-MCP-Toolsets: web_search` (without it, `tools/list` returns the default toolset which omits web_search)
+- Tool input schema (verbatim from `tools/list` 2026-05-14):
+  ```json
+  {"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}
+  ```
+- Response shape (stable across 3 distinct queries, 2026-05-14):
+  ```json
+  {
+    "type": "...",
+    "text": {"value": "<markdown body with citation refs>", "annotations": [...]},
+    "annotations": [...],            // duplicate of text.annotations at top level
+    "bing_searches": [{"text": "...", "url": "..."}]
+  }
+  ```
+  Each `annotations[i]`: `{end_index, start_index, text, url_citation: {title, url}}`.
+- The proxy's Zod schema (`src/services/copilot/web-search.ts:InnerSchema`) reads only `text.value` and `text.annotations[i].url_citation` — extra top-level `type`, top-level `annotations`, and the `bing_searches[i]` inner shape are silently stripped/ignored. **No drift observed since the May 8 fix** (when the inner shape changed and the schema was relaxed to make `annotations` `.nullable().optional()`).
+
+
 
 The probe currently exercises `/v1/messages`. TODO:
 - `/v1/messages/count_tokens` — same Copilot validator, same strip logic in `count-tokens-handler.ts`. Add probes mirroring the body-field strips above.
 - `/v1/chat/completions` — Codex/raw-OpenAI clients
 - `/v1/responses` — gpt-5.x / o-series models
 - `/v1/embeddings` — passthrough
+
+## Peer-MCP personas
+
+The proxy's `/mcp` endpoint exposes four read-only adversarial-review personas (`codex_critic`, `codex_reviewer`, `gemini_critic`, `opus_critic`) plus an optional write-capable `codex_implementer` (only when `--codex-cli`). See [`docs/peer-mcp-design.md`](peer-mcp-design.md) for the full architecture.
+
+Each persona declares an `allowedEfforts` allowlist that the `/mcp` `tools/call` handler enforces (Phase A1 of `cap-codex-effort-add-opus-critic`). Calls passing an effort outside the allowlist are rejected at the JSON-RPC layer with `-32602 RPC_INVALID_PARAMS` BEFORE any Copilot fetch, so a banned tier never burns an in-flight slot or hits the ~60s MCP per-tool-call ceiling. The allowlists are derived empirically from latency probes (see CLAUDE.md "Peer-model MCP integration" for the full table).
+
+| Probe id | Persona | What's verified | End-to-end status | Source | Last verified |
+|---|---|---|---|---|---|
+| `opus_critic_low` | `opus_critic` | `/v1/messages` accepts `thinking.budget_tokens=1024 + max_tokens=2524` (the body shape the handler builds for `effort:"low"`) | ✅ 200 | anthropic-docs | 2026-05-14 |
+| `opus_critic_medium` | `opus_critic` | `/v1/messages` accepts `thinking.budget_tokens=3000 + max_tokens=4500` (the body shape the handler builds for `effort:"medium"`) | ✅ 200 | anthropic-docs | 2026-05-14 |
+| `opus_critic_high_allowed` | `opus_critic` | `peer-mcp-personas.ts` source: `opus-critic.allowedEfforts` INCLUDES `"high"`. Static-check probe — SSE-streamed /mcp responses (PR #28 commit 48f08be) bypass Claude Code's ~60s tools/call ceiling so the prior low/medium-only constraint was lifted. | ✅ included | proxy-internal | 2026-05-15 |
+| `opus_critic_xhigh_allowed` | `opus_critic` | `peer-mcp-personas.ts` source: `opus-critic.allowedEfforts` INCLUDES `"xhigh"`. xhigh is now the persona's defaultEffort (commit 7734356) — SSE handles the wall-clock transparently. | ✅ included | proxy-internal | 2026-05-15 |
+| `codex_critic_xhigh_allowed` | `codex_critic` | `peer-mcp-personas.ts` source: `codex-critic.allowedEfforts` INCLUDES `"xhigh"`. Empirical: gpt-5.5 at xhigh on a 600-byte prompt = 56s; SSE bypass + MCP_TOOL_TIMEOUT=600000 (commit 3a2c311) lifted the prior constraint. xhigh is now the default. | ✅ included | proxy-internal | 2026-05-15 |
+| `codex_reviewer_xhigh_allowed` | `codex_reviewer` | `peer-mcp-personas.ts` source: `codex-reviewer.allowedEfforts` INCLUDES `"xhigh"`. Sibling model (gpt-5.3-codex) is faster than gpt-5.5; SSE handles long calls transparently. xhigh is now the default. | ✅ included | proxy-internal | 2026-05-15 |
+| `gemini_critic_xhigh_rejected` | `gemini_critic` | `peer-mcp-personas.ts` source: `gemini-critic.allowedEfforts` EXCLUDES `"xhigh"`. **UPSTREAM constraint** (not a proxy choice): Copilot's gemini-3.x route strict-validates `reasoning_effort` and 400s on values outside `[low medium high]`. Empirically verified 2026-05-14 (error: `reasoning_effort "xhigh" is not supported by model gemini-3.1-pro-preview`). | ✅ excluded | proxy-internal | 2026-05-15 |
+
+Static-check probes anchor the script to `PROJECT_ROOT` (computed from `BASH_SOURCE`) so they work regardless of CWD; the persona-block parser is a bounded `awk` window from the matched `agentName:` line and depends on the current TS source style (double-quoted string entries inside an array literal). If the persona spec ever switches to dynamic construction or single quotes, these probes will fail loudly — the failure mode is acceptable because the static check IS the source of truth the handler enforces, so any change to the spec needs the probe updated in lock-step.
 
 ## Adding a new probe
 

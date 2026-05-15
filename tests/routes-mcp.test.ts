@@ -140,7 +140,7 @@ describe("/mcp protocol methods", () => {
     expect(res.status).toBe(202)
   })
 
-  test("tools/list returns 3 tools when gemini is in catalog", async () => {
+  test("tools/list returns 4 personas + web_search when gemini is in catalog", async () => {
     const { status, json } = await rpc({
       jsonrpc: "2.0",
       id: 2,
@@ -154,6 +154,8 @@ describe("/mcp protocol methods", () => {
       "codex_critic",
       "codex_reviewer",
       "gemini_critic",
+      "opus_critic",
+      "web_search",
     ])
     for (const t of result.tools) {
       expect(t.description.length).toBeGreaterThan(20)
@@ -161,7 +163,7 @@ describe("/mcp protocol methods", () => {
     }
   })
 
-  test("tools/list omits gemini_critic when no gemini-3.x-pro in catalog", async () => {
+  test("tools/list omits gemini_critic when no gemini-3.x-pro in catalog (web_search still present)", async () => {
     state.models = {
       object: "list",
       data: baseModels.data.filter((m) => !m.id.startsWith("gemini")),
@@ -175,7 +177,30 @@ describe("/mcp protocol methods", () => {
     expect(result.tools.map((t) => t.name).sort()).toEqual([
       "codex_critic",
       "codex_reviewer",
+      "opus_critic",
+      "web_search",
     ])
+  })
+
+  test("tools/list web_search entry has {query} input schema (no prompt/effort)", async () => {
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    })
+    const result = json.result as {
+      tools: Array<{ name: string; inputSchema: Record<string, unknown> }>
+    }
+    const entry = result.tools.find((t) => t.name === "web_search")
+    expect(entry).toBeDefined()
+    const schema = entry!.inputSchema as {
+      type: string
+      required: Array<string>
+      properties: Record<string, unknown>
+    }
+    expect(schema.type).toBe("object")
+    expect(schema.required).toEqual(["query"])
+    expect(Object.keys(schema.properties)).toEqual(["query"])
   })
 
   test("unknown method → JSON-RPC method-not-found", async () => {
@@ -413,6 +438,27 @@ describe("/mcp tools/call routing", () => {
     return captured
   }
 
+  /** Mock /v1/messages upstream (used by opus_critic via createMessages). */
+  function mockMessagesUpstream(text: string, captured: { lastBody?: unknown; called?: boolean } = {}) {
+    globalThis.fetch = mock(async (_url, init) => {
+      captured.called = true
+      captured.lastBody = JSON.parse((init as RequestInit).body as string)
+      const responseBody = {
+        id: "msg_test",
+        type: "message",
+        role: "assistant",
+        model: "claude-opus-4-7",
+        content: [{ type: "text", text }],
+        stop_reason: "end_turn",
+      }
+      return new Response(JSON.stringify(responseBody), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }) as unknown as typeof globalThis.fetch
+    return captured
+  }
+
   test("codex_critic call hits /responses with model=gpt-5.5 and persona instructions", async () => {
     const captured = mockResponsesUpstream("no material objection")
     const { status, json } = await rpc({
@@ -436,9 +482,11 @@ describe("/mcp tools/call routing", () => {
     expect(upstream.instructions).toContain("codex-critic")
     expect(upstream.instructions).toContain("1–5") // grading rubric
     expect(upstream.stream).toBe(false)
-    // Default effort is "high" (Phase 2C — lower than xhigh per cost
-    // tradeoff, raisable per call via the effort argument).
-    expect(upstream.reasoning?.effort).toBe("high")
+    // Default effort is "xhigh" (raised from "high" — SSE-streamed
+    // responses bypass the 60s tools/call ceiling, so the deepest
+    // reasoning bucket is the right default. Lower per call via the
+    // effort argument when wall-clock matters more than depth.)
+    expect(upstream.reasoning?.effort).toBe("xhigh")
     const userText = upstream.input[0].content[0].text
     expect(userText).toContain("Review this trivial design.")
     expect(userText).toContain("ctx-123")
@@ -451,8 +499,11 @@ describe("/mcp tools/call routing", () => {
     expect(result.content[0].text).toBe("no material objection")
   })
 
-  test("explicit effort:xhigh argument reaches the upstream payload", async () => {
-    // Phase 2C effort plumbing — caller can override the default.
+  test("explicit effort:xhigh on codex_critic reaches the upstream payload", async () => {
+    // Now that gemini_critic dropped xhigh too (Copilot's gemini route
+    // 400s on xhigh per the per-persona gate), use codex_critic for the
+    // "xhigh reaches upstream" assertion. SSE-streamed /mcp responses
+    // bypass the 60s ceiling so codex@xhigh works transparently.
     const captured = mockResponsesUpstream("ok")
     await rpc({
       jsonrpc: "2.0",
@@ -465,6 +516,55 @@ describe("/mcp tools/call routing", () => {
     })
     const upstream = captured.lastBody as { reasoning?: { effort?: string } }
     expect(upstream.reasoning?.effort).toBe("xhigh")
+  })
+
+  test("codex_critic accepts effort:xhigh (SSE-streamed responses bypass the 60s ceiling)", async () => {
+    // Previously codex-critic@xhigh was rejected because gpt-5.5 at xhigh on
+    // a tiny prompt = 56s wall (probed 2026-05-14), right at Claude Code's
+    // 60s tools/call ceiling. With SSE-streamed /mcp responses
+    // (handler.ts:handleToolsCallSSE), the connection stays open past the
+    // ceiling and long calls succeed transparently — so the gate is lifted.
+    const captured = mockResponsesUpstream("ok")
+    await rpc({
+      jsonrpc: "2.0",
+      id: 200,
+      method: "tools/call",
+      params: {
+        name: "codex_critic",
+        arguments: { prompt: "deep dive", effort: "xhigh" },
+      },
+    })
+    const upstream = captured.lastBody as { reasoning?: { effort?: string } }
+    expect(upstream.reasoning?.effort).toBe("xhigh")
+  })
+
+  test("opus_critic accepts effort:high (SSE-streamed responses bypass the 60s ceiling)", async () => {
+    // Previously opus-critic was capped at low|medium because the thinking-
+    // budget math (~80-150 tps × 6k+ tokens) busts the 60s ceiling. With
+    // SSE-streamed responses, the long path works transparently.
+    const captured = mockMessagesUpstream("ok")
+    await rpc({
+      jsonrpc: "2.0",
+      id: 201,
+      method: "tools/call",
+      params: {
+        name: "opus_critic",
+        arguments: { prompt: "review", effort: "high" },
+      },
+    })
+    expect(captured.called).toBe(true)
+    // Verify the Copilot-shape adaptive-thinking payload (NOT the
+    // Anthropic-spec thinking.type=enabled shape — Copilot 400s on that
+    // for opus). Empirically observed 2026-05-14.
+    const upstream = captured.lastBody as {
+      max_tokens?: number
+      thinking?: { type?: string; budget_tokens?: unknown }
+      output_config?: { effort?: string }
+    }
+    expect(upstream.thinking?.type).toBe("adaptive")
+    expect(upstream.thinking?.budget_tokens).toBeUndefined()
+    expect(upstream.output_config?.effort).toBe("high")
+    expect(upstream.max_tokens).toBe(16384)  // high tier ceiling
   })
 
   test("invalid effort value is rejected with -32602 (not silently forwarded)", async () => {
@@ -481,6 +581,277 @@ describe("/mcp tools/call routing", () => {
     const err = json.error as { code: number; message: string }
     expect(err.code).toBe(-32602)
     expect(err.message).toMatch(/effort/)
+  })
+
+  test("gemini_critic rejects effort:'xhigh' with -32602 (Copilot's gemini route only allows low|medium|high)", async () => {
+    // Per-persona allowedEfforts gate. Empirically: Copilot returns 400
+    // "reasoning_effort 'xhigh' is not supported by model
+    // gemini-3.1-pro-preview; supported values: [low medium high]"
+    // (verified 2026-05-14). The persona's allowedEfforts dropped xhigh
+    // to surface this as a clean RPC_INVALID_PARAMS pre-flight rejection
+    // rather than a silent upstream 400.
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 111,
+      method: "tools/call",
+      params: {
+        name: "gemini_critic",
+        arguments: { prompt: "x", effort: "xhigh" },
+      },
+    })
+    const err = json.error as { code: number; message: string }
+    expect(err.code).toBe(-32602)
+    expect(err.message).toContain("xhigh")
+    expect(err.message).toContain("Allowed: low|medium|high")
+  })
+
+  test("SSE-path tools/call with Accept: text/event-stream is NOT subject to predictedTooLong cap", async () => {
+    // Companion to the JSON-path test below. The SSE path keeps the
+    // connection open past Claude Code's ~60s tools/call ceiling via
+    // heartbeats, so size-based pre-flight rejection there would just
+    // lock SSE clients out of higher-effort calls on bigger briefs.
+    // Verify the upstream fetch IS invoked (cap not applied) when the
+    // client sends `Accept: text/event-stream`.
+    const captured = mockResponsesUpstream("ok")
+    const oversize = "x".repeat(9 * 1024)
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 300,
+          method: "tools/call",
+          params: {
+            name: "codex_critic",
+            arguments: { prompt: oversize, effort: "high" },
+          },
+        }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toBe("text/event-stream")
+    // Drain the stream so the upstream fetch resolves before assertions.
+    const body = await res.text()
+    expect(body).toContain('"id":300')
+    // Upstream WAS called — captured.lastBody is set (cap not applied).
+    expect(captured.lastBody).toBeDefined()
+  })
+
+  test("JSON-path tools/call with Accept: application/json hits predictedTooLong cap on 9KB brief at codex_critic@high", async () => {
+    // SSE-streamed responses bypass Claude Code's ~60s tools/call
+    // ceiling via heartbeats, but JSON-path clients (raw curl with
+    // `Accept: application/json`, older MCP clients without SSE
+    // awareness) still hit the underlying timer. The predictedTooLong
+    // cap fires in handleMcpPost BEFORE inFlightToolsCall++ to surface
+    // the failure as a clean fast-fail (isError envelope) instead of
+    // a slot-leaking timeout — and to point the caller at SSE / a
+    // lower effort tier / decomposition as remediations.
+    const captured = mockResponsesUpstream("should not be called")
+    const oversize = "x".repeat(9 * 1024)
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+          accept: "application/json", // NO text/event-stream
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 311,
+          method: "tools/call",
+          params: {
+            name: "codex_critic",
+            arguments: { prompt: oversize, effort: "high" },
+          },
+        }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toContain("application/json")
+    const json = (await res.json()) as {
+      id?: number
+      result?: { content: Array<{ text: string }>; isError?: boolean }
+    }
+    expect(json.id).toBe(311)
+    expect(json.result?.isError).toBe(true)
+    expect(json.result?.content[0].text).toMatch(/pre-flight rejected/i)
+    expect(json.result?.content[0].text).toContain("codex_critic")
+    expect(json.result?.content[0].text).toContain("text/event-stream")
+    // Upstream NOT called — pre-flight rejected before fetch.
+    expect(captured.lastBody).toBeUndefined()
+    // Slot not acquired — invariant from CLAUDE.md.
+    expect(__getInFlightForTests()).toBe(0)
+  })
+
+  test("opus_critic at effort:'low' routes to /v1/messages with adaptive thinking + effort:low", async () => {
+    const captured = mockMessagesUpstream("no material objection")
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 301,
+      method: "tools/call",
+      params: {
+        name: "opus_critic",
+        arguments: { prompt: "review this", effort: "low" },
+      },
+    })
+    expect(status).toBe(200)
+    const result = json.result as {
+      content: Array<{ type: string; text: string }>
+      isError?: boolean
+    }
+    expect(result.isError).toBeUndefined()
+    expect(result.content[0].text).toBe("no material objection")
+    // Verify Copilot-shape adaptive payload (NOT thinking.type=enabled).
+    const upstream = captured.lastBody as {
+      model?: string
+      max_tokens?: number
+      thinking?: { type?: string; budget_tokens?: unknown }
+      output_config?: { effort?: string }
+      messages?: Array<{ role?: string; content?: string }>
+      system?: string
+    }
+    expect(upstream.thinking?.type).toBe("adaptive")
+    expect(upstream.thinking?.budget_tokens).toBeUndefined()
+    expect(upstream.output_config?.effort).toBe("low")
+    expect(upstream.max_tokens).toBe(4096)
+    expect(upstream.messages?.[0]?.role).toBe("user")
+    expect(upstream.messages?.[0]?.content).toBe("review this")
+    expect(upstream.system).toContain("opus-critic")
+  })
+
+  test("opus_critic with no explicit effort uses persona.defaultEffort=xhigh", async () => {
+    const captured = mockMessagesUpstream("no material objection")
+    await rpc({
+      jsonrpc: "2.0",
+      id: 302,
+      method: "tools/call",
+      params: {
+        name: "opus_critic",
+        arguments: { prompt: "review" },  // omit effort → persona.defaultEffort = "xhigh"
+      },
+    })
+    const upstream = captured.lastBody as {
+      max_tokens?: number
+      thinking?: { type?: string }
+      output_config?: { effort?: string }
+    }
+    expect(upstream.thinking?.type).toBe("adaptive")
+    expect(upstream.output_config?.effort).toBe("xhigh")
+    expect(upstream.max_tokens).toBe(32768)
+  })
+
+  test("opus_critic at effort:'xhigh' routes with output_config.effort=xhigh", async () => {
+    const captured = mockMessagesUpstream("verdict")
+    await rpc({
+      jsonrpc: "2.0",
+      id: 303,
+      method: "tools/call",
+      params: {
+        name: "opus_critic",
+        arguments: { prompt: "deep dive", effort: "xhigh" },
+      },
+    })
+    const upstream = captured.lastBody as {
+      max_tokens?: number
+      thinking?: { type?: string }
+      output_config?: { effort?: string }
+    }
+    expect(upstream.thinking?.type).toBe("adaptive")
+    expect(upstream.output_config?.effort).toBe("xhigh")
+    expect(upstream.max_tokens).toBe(32768)
+  })
+
+  test("tools/call with Accept: text/event-stream returns SSE-streamed response with heartbeat + final result", async () => {
+    // Empirical wire-shape test for handleToolsCallSSE — validates the
+    // structural fix that lets xhigh work on every persona by bypassing
+    // Claude Code's ~60s tools/call ceiling. Per MCP 2025-06-18
+    // Streamable HTTP spec, when the client sends Accept: text/event-stream
+    // the server can respond with Content-Type: text/event-stream and
+    // emit JSON-RPC messages as SSE events.
+    mockResponsesUpstream("verdict")
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+          // Claude Code's MCP HTTP client sends both per spec.
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1000,
+          method: "tools/call",
+          params: { name: "codex_critic", arguments: { prompt: "x", effort: "xhigh" } },
+        }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toBe("text/event-stream")
+    expect(res.headers.get("cache-control")).toContain("no-cache")
+    const body = await res.text()
+    // At least one heartbeat (initial event before the upstream call resolves).
+    expect(body).toContain("event: message")
+    expect(body).toContain('"method":"notifications/progress"')
+    expect(body).toContain('"progressToken":1000')
+    // Final tools/call result envelope is the closing message event.
+    expect(body).toContain('"id":1000')
+    expect(body).toContain('"result"')
+    expect(body).toContain("verdict")
+  })
+
+  test("tools/call with Accept: application/json (no SSE) keeps the JSON path unchanged", async () => {
+    mockResponsesUpstream("ok")
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+          accept: "application/json",  // ← NO event-stream
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1001,
+          method: "tools/call",
+          params: { name: "codex_critic", arguments: { prompt: "x", effort: "high" } },
+        }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toContain("application/json")
+    const json = await res.json() as { result?: unknown; id?: number }
+    expect(json.id).toBe(1001)
+    expect(json.result).toBeDefined()
+  })
+
+  test("non-tools/call requests stay on JSON path even with Accept: text/event-stream", async () => {
+    // initialize / tools/list / etc. don't benefit from streaming; the
+    // SSE branch is gated on method === "tools/call" specifically.
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1002, method: "tools/list" }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toContain("application/json")
   })
 
   test("codex_reviewer call hits /responses with model=gpt-5.3-codex", async () => {
@@ -711,5 +1082,350 @@ describe("/mcp concurrency cap", () => {
       }),
     )
     expect(res.status).toBe(202)
+  })
+})
+
+describe("/mcp web_search tool", () => {
+  /**
+   * Mock the upstream Copilot /mcp endpoint that searchWeb hits.
+   *
+   * searchWeb's flow: initialize → notifications/initialized → tools/call
+   * (SSE stream) → DELETE. We mock all four shapes by inspecting the
+   * request body's JSON-RPC method field.
+   */
+  function mockUpstreamMcp(opts: {
+    /** SSE inner-text JSON payload for tools/call success. */
+    inner?: {
+      text: { value: string; annotations?: Array<{ url_citation?: { title: string; url: string } }> | null }
+      bing_searches?: Array<unknown> | null
+    }
+    /** Override tools/call HTTP status (200 = success path). */
+    callStatus?: number
+    /** Force the upstream tools/call to throw a generic error. */
+    forceCallError?: boolean
+  } = {}) {
+    const captured: { tcCalled?: boolean; lastQuery?: string } = {}
+    globalThis.fetch = mock(async (_url: unknown, init?: { method?: string; body?: string }) => {
+      const method = init?.method ?? "GET"
+      if (method === "DELETE") {
+        return new Response(null, { status: 204 })
+      }
+      let body: { method?: string; id?: number; params?: { arguments?: { query?: string } } } = {}
+      try {
+        body = JSON.parse(init?.body ?? "{}") as typeof body
+      } catch {
+        // ignore
+      }
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { protocolVersion: "2024-11-05", capabilities: {} },
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+              "mcp-session-id": "test-sid",
+            },
+          },
+        )
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 202 })
+      }
+      if (body.method === "tools/call") {
+        captured.tcCalled = true
+        captured.lastQuery = body.params?.arguments?.query
+        if (opts.forceCallError) {
+          return new Response("upstream sick", { status: 502 })
+        }
+        const inner = opts.inner ?? {
+          text: {
+            value: "Default search content.",
+            annotations: [
+              {
+                url_citation: { title: "Source One", url: "https://example.com/1" },
+              },
+            ],
+          },
+        }
+        const sseBody =
+          `event: message\ndata: ${JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: {
+              content: [{ type: "text", text: JSON.stringify(inner) }],
+            },
+          })}\n\n`
+        return new Response(sseBody, {
+          status: opts.callStatus ?? 200,
+          headers: { "content-type": "text/event-stream" },
+        })
+      }
+      return new Response("unexpected", { status: 500 })
+    }) as unknown as typeof globalThis.fetch
+    return captured
+  }
+
+  test("web_search call returns formatted content + ## References section", async () => {
+    const captured = mockUpstreamMcp({
+      inner: {
+        text: {
+          value: "Hono latest is 4.12.15.",
+          annotations: [
+            {
+              url_citation: {
+                title: "hono - npm",
+                url: "https://www.npmjs.com/package/hono",
+              },
+            },
+            {
+              url_citation: {
+                title: "Hono docs",
+                url: "https://hono.dev",
+              },
+            },
+          ],
+        },
+      },
+    })
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 600,
+      method: "tools/call",
+      params: { name: "web_search", arguments: { query: "Hono latest version" } },
+    })
+    expect(status).toBe(200)
+    expect(captured.tcCalled).toBe(true)
+    expect(captured.lastQuery).toBe("Hono latest version")
+    const result = json.result as {
+      content: Array<{ type: string; text: string }>
+      isError?: boolean
+    }
+    expect(result.isError).toBeUndefined()
+    expect(result.content[0].type).toBe("text")
+    expect(result.content[0].text).toContain("Hono latest is 4.12.15.")
+    expect(result.content[0].text).toContain("## References")
+    expect(result.content[0].text).toContain("- [hono - npm](https://www.npmjs.com/package/hono)")
+    expect(result.content[0].text).toContain("- [Hono docs](https://hono.dev)")
+  })
+
+  test("web_search omits ## References section when there are no references", async () => {
+    mockUpstreamMcp({
+      inner: {
+        text: {
+          value: "Some content with no citations.",
+          annotations: null,
+        },
+      },
+    })
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 601,
+      method: "tools/call",
+      params: { name: "web_search", arguments: { query: "obscure niche query" } },
+    })
+    const result = json.result as {
+      content: Array<{ type: string; text: string }>
+      isError?: boolean
+    }
+    expect(result.isError).toBeUndefined()
+    expect(result.content[0].text).toBe("Some content with no citations.")
+    expect(result.content[0].text).not.toContain("## References")
+  })
+
+  test("web_search filters bing.com/search citations from the references list", async () => {
+    // Behavior comes from searchWeb itself, but assert it surfaces through
+    // the MCP tool — bing redirect URLs should not appear in the formatted
+    // output we hand to the lead.
+    mockUpstreamMcp({
+      inner: {
+        text: {
+          value: "Result.",
+          annotations: [
+            {
+              url_citation: {
+                title: "Real source",
+                url: "https://real.example.com/page",
+              },
+            },
+            {
+              url_citation: {
+                title: "Bing redirect",
+                url: "https://www.bing.com/search?q=foo",
+              },
+            },
+          ],
+        },
+      },
+    })
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 602,
+      method: "tools/call",
+      params: { name: "web_search", arguments: { query: "x" } },
+    })
+    const result = json.result as { content: Array<{ text: string }> }
+    expect(result.content[0].text).toContain("Real source")
+    expect(result.content[0].text).not.toContain("bing.com/search")
+  })
+
+  test("web_search with missing query returns isError tool envelope (not -32602 RPC error)", async () => {
+    // Per the architect's spec, arg validation lives inside the tool's
+    // handler closure (not pre-validated at the RPC layer). Result:
+    // missing/invalid args surface as a tool-error envelope, not a
+    // JSON-RPC -32602 — the call still "succeeds" at the protocol layer.
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 603,
+      method: "tools/call",
+      params: { name: "web_search", arguments: {} },
+    })
+    expect(status).toBe(200)
+    const result = json.result as {
+      content: Array<{ text: string }>
+      isError?: boolean
+    }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toMatch(/query is required/i)
+  })
+
+  test("web_search with non-string query returns isError tool envelope", async () => {
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 604,
+      method: "tools/call",
+      params: { name: "web_search", arguments: { query: 42 } },
+    })
+    const result = json.result as {
+      content: Array<{ text: string }>
+      isError?: boolean
+    }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toMatch(/query is required/i)
+  })
+
+  test("web_search upstream failure surfaces as tool isError with `web_search failed:` prefix", async () => {
+    mockUpstreamMcp({ forceCallError: true })
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 605,
+      method: "tools/call",
+      params: { name: "web_search", arguments: { query: "x" } },
+    })
+    expect(status).toBe(200)
+    const result = json.result as {
+      content: Array<{ text: string }>
+      isError?: boolean
+    }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toMatch(/^web_search failed:/i)
+  })
+
+  test("web_search counts against MAX_INFLIGHT_TOOLS_CALL=8 (slot accounting symmetric with personas)", async () => {
+    // Hold the upstream tools/call open with a never-resolving promise so
+    // the slot stays incremented; verify __getInFlightForTests bumps to 1
+    // mid-call. (Architect's spec point 5: keeps accounting symmetric.)
+    let resolveSlow: ((res: Response) => void) | null = null
+    const slow = new Promise<Response>((r) => {
+      resolveSlow = r
+    })
+    globalThis.fetch = mock(async (_url: unknown, init?: { method?: string; body?: string }) => {
+      const method = init?.method ?? "GET"
+      if (method === "DELETE") return new Response(null, { status: 204 })
+      let body: { method?: string; id?: number } = {}
+      try {
+        body = JSON.parse(init?.body ?? "{}") as typeof body
+      } catch {
+        // ignore
+      }
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { protocolVersion: "2024-11-05", capabilities: {} },
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+              "mcp-session-id": "test-sid",
+            },
+          },
+        )
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 202 })
+      }
+      if (body.method === "tools/call") {
+        return slow  // hangs — slot stays acquired
+      }
+      return new Response("unexpected", { status: 500 })
+    }) as unknown as typeof globalThis.fetch
+
+    const callPromise = rpc({
+      jsonrpc: "2.0",
+      id: 606,
+      method: "tools/call",
+      params: { name: "web_search", arguments: { query: "hold" } },
+    })
+    // Brief tick so the call increments the in-flight counter.
+    await new Promise((r) => setTimeout(r, 10))
+    expect(__getInFlightForTests()).toBe(1)
+
+    // Release the upstream so the call resolves and the slot is freed.
+    const innerOk = {
+      text: { value: "released", annotations: [] },
+    }
+    resolveSlow!(
+      new Response(
+        `event: message\ndata: ${JSON.stringify({
+          jsonrpc: "2.0",
+          id: 606,
+          result: { content: [{ type: "text", text: JSON.stringify(innerOk) }] },
+        })}\n\n`,
+        {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        },
+      ),
+    )
+    await callPromise
+    expect(__getInFlightForTests()).toBe(0)
+  })
+
+  test("web_search call hits the JSON path even with a multi-KB query (predictedTooLong cap is persona-only)", async () => {
+    // The predictedTooLong cap exists for thinking-budget-bearing peer
+    // calls (codex_critic@high>8KB, etc.). Non-persona tools have no
+    // such cost surface — verify a 9 KB query goes through to the
+    // upstream rather than being pre-flight rejected.
+    const captured = mockUpstreamMcp({
+      inner: { text: { value: "ok", annotations: null } },
+    })
+    const oversize = "x".repeat(9 * 1024)
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+          accept: "application/json",  // JSON path — would trigger cap on personas
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 607,
+          method: "tools/call",
+          params: { name: "web_search", arguments: { query: oversize } },
+        }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    const json = await res.json() as { result?: { isError?: boolean; content: Array<{ text: string }> } }
+    expect(json.result?.isError).toBeUndefined()
+    expect(captured.tcCalled).toBe(true)
   })
 })
