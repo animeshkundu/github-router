@@ -652,6 +652,14 @@ test("policyFor regression guard: agents/ MUST stay MIRRORED (sweep deletes insi
   expect(__testing.policyFor(".credentials.json")).toBe("ISOLATED")
   expect(__testing.policyFor("statsig")).toBe("ISOLATED")
   expect(__testing.policyFor("paste-cache")).toBe("ISOLATED")
+  // Background-session supervisor state (Claude Code v2.1.139+) — must
+  // stay ISOLATED so a real-user `claude --bg` session never surfaces
+  // in a proxy session under the synthetic credential. Crossing the
+  // credential domain would route follow-up calls to dispatched bg
+  // jobs through the proxy bearer.
+  expect(__testing.policyFor("jobs")).toBe("ISOLATED")
+  expect(__testing.policyFor("daemon")).toBe("ISOLATED")
+  expect(__testing.policyFor("daemon.log")).toBe("ISOLATED")
   // Unknown name defaults to MIRRORED (safe — flows through as snapshot)
   expect(__testing.policyFor("some-future-claude-dir")).toBe("MIRRORED")
   // Files NEVER go in SHARED (Node's fs.rename severs file symlinks

@@ -134,6 +134,9 @@ const CLAUDE_HOME_POLICY: ReadonlyMap<string, MirrorPolicy> = new Map<
   ["cache", "ISOLATED"],
   ["logs", "ISOLATED"],
   ["paste-cache", "ISOLATED"],
+  ["jobs", "ISOLATED"],
+  ["daemon", "ISOLATED"],
+  ["daemon.log", "ISOLATED"],
   // SHARED — directories only (see policy doc above)
   ["projects", "SHARED"],
   ["sessions", "SHARED"],
