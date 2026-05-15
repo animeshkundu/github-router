@@ -127,3 +127,56 @@ Build the async pattern peers and researchers converged on, with the bug fixes b
 ## Decision Log Pointer
 
 The full multi-stage adversarial review process — including the 4-perspective team consultation that reshaped this plan three times (plugin/Bash → async-MCP → phased) — is documented in [research/peer-mcp-investigation.md](research/peer-mcp-investigation.md) for future contributors who want the rationale behind each Phase ordering decision.
+
+## Deployed state (auto-invocation, effort, decomposition)
+
+This section documents what is actually shipped in the proxy today — the runtime
+behavior `github-router claude` exposes — as distinct from the phased plan above.
+
+The `claude` subcommand auto-injects three peer-model review tools as Claude Code subagents (`codex-critic` gpt-5.5, `codex-reviewer` gpt-5.3-codex, `gemini-critic` gemini-3.1-pro-preview) plus a `peer-review-coordinator` meta-subagent that fans out to them in parallel.
+
+**Auto-invocation triggers** (Phase 2A): each persona's MCP-tool description includes prescriptive **CALL BEFORE / CALL AFTER** wording so Opus naturally delegates at the right checkpoints (before `ExitPlanMode` for non-trivial plans, after commits touching concurrency/security/streaming, before `TeamCreate` for non-trivial team tasks). The `peer-review-coordinator` subagent's description uses the documented Claude Code "use proactively" idiom — Opus delegates to it without an explicit user request at the matching checkpoints. Empirical reliability is ~60% per claude-code-guide (the plan calls for an acceptance test ≥7/10; if <7/10 we flip an opt-in `PreToolUse(ExitPlanMode)` hook to default-on, env-disable-able via `GH_ROUTER_AUTO_PEER_REVIEW=0`).
+
+**Phase 2.5 — agent registration surface** (critical for Track 2A actually working): Claude Code v2.1.138's `--agents <json>` flag does NOT populate the Task `subagent_type` enum (per claude-code-guide expert verification — confirmed by the documented separation in code.claude.com/docs/en/cli-reference.md). Subagents passed via `--agents` are only reachable via natural-language delegation; explicit `Task(subagent_type=...)` calls fail with "Agent type 'X' not found". The fix is to write per-launch markdown subagent files into `~/.claude/agents/peer-<pid>-<rand>-<name>.md` — that's the canonical surface Claude Code reads at session start. The spawned `claude` is no longer launched with `--agents`; the `.md` files are. A boot-time sweep (`sweepStalePeerAgentMdFiles` in `src/lib/paths.ts`) drops stale files matching `peer-<deadpid>-*-*.md` from `~/.claude/agents/`; **the regex's required digit-PID prefix protects user-authored files (e.g. `peer-reviewer.md` is preserved because there's no PID segment) — do NOT relax it without auditing every file under `~/.claude/agents/`**.
+
+**Decomposition guidance** (Phase 2B): each persona description tells Opus "if the artifact is large (>20 KB), split into 2-4 focused batches and call in parallel" — necessary because Claude Code v2.1.113+ regression [#50289](https://github.com/anthropics/claude-code/issues/50289) caps HTTP MCP per-tool-call wait at the bundled MCP-SDK default (~30 s in `cc-backup/src/services/mcp/client.ts:457`; field reports of "5 min" / "60 s" elsewhere are a different SDK constant or older binary). The `MCP_TIMEOUT=600000` env var injected by `getClaudeCodeEnvVars` is "belt-and-suspenders" — it works on versions where the regression is fixed and is silently ignored on regressed versions. **Decomposition is the load-bearing fix; the env injection is harmless insurance.** The 7-batch sweep documented in [research/peer-mcp-investigation.md](research/peer-mcp-investigation.md) proved decomposition completes every per-batch call in <3 min.
+
+**Reasoning effort** (Phase 2C): each persona MCP tool accepts an `effort?: "low"|"medium"|"high"|"xhigh"` argument, default **`high`** (cost-conscious; raise to `xhigh` for explicit deep dives, drop to `medium` for quick sanity checks). For `/v1/responses` personas (codex-critic, codex-reviewer) the effort is set as `payload.reasoning.effort`. For `/v1/chat/completions` (gemini-critic) it's set as `payload.reasoning_effort` and may be silently ignored by Copilot's gemini route — gemini-3.x reasoning is largely auto-applied. Invalid effort values are rejected with JSON-RPC `-32602`.
+
+**Concurrency cap** (Phase 2D): `MAX_INFLIGHT_TOOLS_CALL = 8` in `src/routes/mcp/handler.ts` (raised from the original defensive 2). 9th in-flight `tools/call` returns clean isError `"queue full"`. Cap exists to bound runaway clients; persona handlers are stateless. Decomposition fan-out of 4-7 parallel batches now fits comfortably under the cap.
+
+**Empirical latency-by-effort matrix** (Phase A3; probed live 2026-05-14 against `api.enterprise.githubcopilot.com` via the proxy on a ~600B representative review prompt with `max_output_tokens: 4096`):
+
+| Persona | Model | Endpoint | Effort | Latency on ~600B prompt |
+|---|---|---|---|---|
+| codex_critic | gpt-5.5 | /v1/responses | xhigh (default) | 56.3s — fits inside SSE-streamed `/mcp` (no MCP per-tool-call timeout) |
+| codex_critic | gpt-5.5 | /v1/responses | high | 23.8s |
+| codex_critic | gpt-5.5 | /v1/responses | medium | 26.3s |
+| codex_reviewer | gpt-5.3-codex | /v1/responses | high | 16.0s |
+| opus_critic | claude-opus-4-7 | /v1/messages | xhigh (default; thinking.budget=24000) | 30-90s on real reviews — fits inside SSE-streamed `/mcp` |
+
+`xhigh` is the default on codex_critic, codex_reviewer, and opus_critic because commit `d3491d6` shipped SSE-streamed `/mcp` responses (`handler.ts:handleToolsCallSSE`). Claude Code's MCP HTTP client honors `text/event-stream` and does NOT apply the ~60s per-tool-call timer to streamed responses, so the previous `xhigh` 60s-ceiling concern no longer applies on long-running personas. Probe coverage in `scripts/probe-copilot-compat.sh`: `opus_critic_low`, `opus_critic_medium`, `opus_critic_high_allowed`, `opus_critic_xhigh_allowed`, `codex_critic_xhigh_allowed`, `codex_reviewer_xhigh_allowed`, `gemini_critic_xhigh_rejected`. Matrix rows mirrored into [`copilot-compat-matrix.md`](copilot-compat-matrix.md).
+
+**Per-persona allowedEfforts** (Phase A1; enforced by `persona.allowedEfforts` in `src/lib/peer-mcp-personas.ts`, gated in `handleToolsCall` BEFORE the `inFlightToolsCall` increment so a rejected effort doesn't burn a concurrency slot):
+
+| Persona | low | medium | high | xhigh | Default |
+|---|---|---|---|---|---|
+| codex_critic | ✅ | ✅ | ✅ | ✅ (SSE-streamed) | xhigh |
+| codex_reviewer | ✅ | ✅ | ✅ | ✅ (SSE-streamed) | xhigh |
+| opus_critic | ✅ | ✅ | ✅ | ✅ (SSE-streamed) | xhigh |
+| gemini_critic | ✅ | ✅ | ✅ | ❌ rejected `-32602 RPC_INVALID_PARAMS` | high |
+
+`xhigh` is allowed on the three long-running personas because SSE-streamed `/mcp` keeps the wall time off the MCP per-tool-call clock. `gemini_critic` is the exception: Copilot's gemini route returned 400 (`reasoning_effort "xhigh" is not supported by model gemini-3.1-pro-preview; supported values: [low medium high]`), so the gate rejects xhigh upstream of any Copilot call. The empirical 400 is captured in the proxy log for posterity.
+
+**Pre-flight `predictedTooLong` cap** (Phase A2; defense-in-depth on top of the effort gate). Even `high` on the codex personas can bust the ceiling once the brief grows past ~8 KB (the 23.8s baseline scales roughly linearly with input). The cap rejects with `isError: true` (NOT an RPC error — the request is syntactically valid; the prediction is operational) and an actionable message telling the caller to drop to `medium` or split the brief into 2-4 parallel sub-calls per the decomposition guidance:
+
+| Persona | Effort | Brief size cap (`prompt + context` bytes) |
+|---|---|---|
+| codex_critic | high | 8 KB → toolError |
+| codex_reviewer | high | 12 KB → toolError (faster sibling, more headroom) |
+| opus_critic | medium | 6 KB → toolError (conservative — opus thinking grows with input) |
+| gemini_critic | (any) | (no cap — long-context strong, no empirical data yet to anchor) |
+
+**The cap fires BEFORE the AbortController + `inFlightToolsCall` increment**, so a rejected pre-flight is free of concurrency-slot cost and free of upstream call cost (no Copilot fetch issued). Don't reorder this — moving the cap after the increment leaks concurrency slots on every rejected pre-flight. Thresholds are constants in `src/routes/mcp/handler.ts` — easy to update as more empirical data arrives via the probe suite.
+
+**`opus_critic` persona** (Phase B): adversarial second opinion from a fresh-context Opus 4.7 routed via `/v1/messages` with translated `thinking.budget_tokens` (low=1024, medium=3000) and `max_tokens = budget + 1500`. Cheapest and fastest of the peer critics (~10-25s on small artifacts). Use it as a quick same-lab sanity check before committing to a controversial decision when the artifact fits comfortably in one shot. **Limited blind-spot diversification** — same training data, same lab, same RLHF priors as the lead, so it does NOT substitute for cross-lab triangulation; reach for `codex_critic` (`high`) or `gemini_critic` for genuine adversarial coverage. Routing reflected in `peer-review-coordinator` (`src/lib/codex-mcp-config.ts`).

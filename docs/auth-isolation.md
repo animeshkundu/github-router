@@ -1,0 +1,49 @@
+# Spawned-CLI auth isolation & CLAUDE_CONFIG_DIR mirror
+
+How `github-router claude` (and `codex`) sanitizes the parent env, mirrors `~/.claude/`
+into a router-owned config dir, and writes a synthetic OAuth credential so spawned
+teammates can authenticate without leaking real credentials. See [`../CLAUDE.md`](../CLAUDE.md)
+for project overview.
+
+## `apiKeyHelper` and external credential scripts
+
+Claude Code's settings.json supports `apiKeyHelper`, `awsCredentialExport`, `awsAuthRefresh`, `gcpAuthRefresh` — external scripts that mint credentials. The user's `settings.json` is mirror-copied into our `CLAUDE_CONFIG_DIR` at startup (see "CLAUDE_CONFIG_DIR snapshot mirror" below), so any helper they defined still fires inside the proxy session. The proxy supplies auth via the synthetic `claudeAiOauth` blob in `<CLAUDE_CONFIG_DIR>/.credentials.json` (Bearer header sourced from its `accessToken`); if a user's `apiKeyHelper` mints an additional `x-api-key` header, that header is sent alongside our Bearer — Copilot ignores `x-api-key`, so requests still work. The legacy "Auth conflict" warning is silenced because the spawned child has only one env-source-of-auth (none — we removed `ANTHROPIC_AUTH_TOKEN=dummy`) and the keychain probe misses by hashed service name. External-script credentials beyond apiKeyHelper are out of the proxy's scope.
+
+## Parent-env sanitization
+
+When `github-router claude` (or `codex`) launches its child CLI, the parent `process.env` is sanitized of every auth-related key listed in `STRIPPED_PARENT_ENV_KEYS` (`src/lib/launch.ts`) BEFORE the proxy's overrides are merged in. Stripped keys: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_MODEL`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CONFIG_DIR`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME`.
+
+This serves two purposes: (1) prevents shell-exported real credentials from leaking through the proxy, and (2) avoids Claude Code's `Auth conflict` warnings that fire whenever multiple auth sources are present (regardless of value — even dummy values trip the check).
+
+> **Do NOT re-introduce `ANTHROPIC_AUTH_TOKEN=<anything>` to the spawned-child env.**
+> Historical agent-teams silent-mailbox bug: Claude Code's teammate-spawn code drops
+> `ANTHROPIC_AUTH_TOKEN` from its allowlist, so teammates that inherit a token landed
+> at "Not logged in · Run /login" while still consuming mailbox messages without
+> producing turns. The synthetic-credential approach below is what fixes it.
+
+## CLAUDE_CONFIG_DIR snapshot mirror — gives spawned teammates a credential they can find on disk
+
+`getClaudeCodeEnvVars` sets `CLAUDE_CONFIG_DIR=PATHS.CLAUDE_CONFIG_DIR` (a router-owned dir at `~/.local/share/github-router/claude-config/`). At the start of every `github-router claude` session, `ensureClaudeConfigMirror` (`src/lib/paths.ts`) classifies each top-level entry under `~/.claude/` per `CLAUDE_HOME_POLICY` (three buckets) and acts accordingly:
+
+1. **ISOLATED** (skipped from the mirror entirely): `.credentials.json` (we write a synthetic one), `.credentials.json.lock`, `.oauth_refresh.lock`, `.github-router-managed`, `statsig/` (write-heavy contention), `cache/`, `logs/`, `paste-cache/` (sensitive clipboard data). Lock files would otherwise couple refresh loops across proxy/plain-`claude` sessions.
+2. **SHARED** (directory symlink `<mirror>/X → ~/.claude/X`, created via atomic temp+rename so two concurrent proxy startups can't race to EEXIST): `projects/`, `sessions/`, `tasks/`, `todos/`, `transcripts/`, `shell-snapshots/`, `shell_snapshots/`, `plans/`, `file-history/`, `backups/`. This is the load-bearing fix for chat-history continuity — Claude Code's per-session JSONL files in `projects/<cwd-hash>/<session-uuid>.jsonl` now flow between proxy and plain-`claude` sessions, and a proxy session shows up in plain `claude`'s `/resume` list. **Directories only.** Never symlink individual files: Node's `fs.rename()` does NOT follow symlinks, so Claude Code's atomic-write pattern (`writeFile(temp); rename(temp, target)`) would silently sever a file symlink — gemini-critic finding in the 3-lab review.
+3. **MIRRORED** (snapshot copy with mtime skip — current behavior): everything else, including `settings.json`, `agents/`, `plugins/`, `policy-limits.json`, `downloads/`, `telemetry/`, `.last-cleanup`, `.claude.json`, `history.jsonl`, `teams/`, `session-env/`. The default for any unlisted name is MIRRORED so a future Claude-Code-side addition flows through as a snapshot copy rather than being silently lost. `agents/` MUST stay MIRRORED — the proxy itself writes per-launch `peer-<pid>-<rand>-<name>.md` files into it and `sweepStalePeerAgentMdFiles` deletes them; a symlink would route those writes/deletes into the user's real `~/.claude/agents/` and destroy their custom subagent files. A `policyFor("agents") === "MIRRORED"` regression test in `tests/lib-paths.test.ts` hard-pins this.
+
+Then `ensureClaudeConfigMirror`:
+
+4. **Writes a synthetic `claudeAiOauth` credential** (schema verbatim from v2.1.140 binary function `guH`): `accessToken`, `refreshToken` (synthetic strings), `expiresAt: 4070908800000` (2099-01-01 ms — sidesteps Claude Code's proactive refresh path `nH8`/`R8H`), `scopes: ["user:inference", "user:profile"]` (passes `tB()` so `Hq()` is true → full feature surface), `subscriptionType: "max"` (highest client-side gating; pure label, no server validation). Atomic temp+rename write so Claude Code's `EZ1()` mtime watcher never sees a partial write.
+
+**Why this fixes agent teams**: Claude Code v2.1.140's teammate-spawn code rebuilds the child process env from a fixed allowlist (visible in the spawned tmux pane's command line: `CLAUDECODE`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `DISABLE_TELEMETRY`) — and **drops `ANTHROPIC_AUTH_TOKEN`**. Pre-fix the proxy set `ANTHROPIC_AUTH_TOKEN=dummy`; teammates dropped it and landed at "Not logged in · Run /login", silently consuming mailbox messages without producing turns. Post-fix the proxy sets nothing on the env; auth flows from the synthetic creds file in `CLAUDE_CONFIG_DIR/.credentials.json`. `CLAUDE_CONFIG_DIR` IS in the teammate-spawn allowlist, so teammates inherit the path, find the credential, and authenticate.
+
+**Keychain isolation still active**: per binary-grep of v2.1.126's `iN()`, when `CLAUDE_CONFIG_DIR` is set the keychain service name becomes `Claude Code-<sha256(path)[0..8]>` instead of `Claude Code` (no suffix). The user's persisted `claude /login` credential is stored under the no-suffix name and is invisible to the proxy session — even if their normal `claude` would find it. The mirror dir's hash misses, file fallback hits our synthetic blob.
+
+**No-401 invariant**: Claude Code's reactive refresh path (`SZ1` → `D3(0,true,...)` in v2.1.140) fires on any 401 from upstream and tries to refresh the OAuth token. Refreshing the synthetic token would fail and degrade the session. `forwardError` in `src/lib/error.ts` remaps upstream 401 → 503 (Anthropic `overloaded_error` type) to maintain the invariant on the Anthropic-shape boundary, regardless of whether the upstream Copilot returned 401 with a plain or Anthropic-shaped body.
+
+## Trade-offs
+
+- **Stale snapshot for MIRRORED entries**: if the user updates `~/.claude/settings.json` (or any other MIRRORED file: `.claude.json`, `history.jsonl`, `teams/`, `session-env/`, `agents/`, `plugins/`, etc.) via plain `claude` while a github-router session is running, the proxy session won't pick up the change until next restart. Mtime-based re-sync at startup handles between-session updates.
+- **Proxy-session writes to MIRRORED entries don't flow back**: when Claude Code writes during a proxied session to a MIRRORED file (e.g., `/config` edits `settings.json`, the session updates `history.jsonl`), those writes land in the mirror dir, NOT the user's real `~/.claude/`. Deliberate: `.claude.json`, `history.jsonl`, `teams/`, `session-env/` are classified MIRRORED on purpose. `history.jsonl` and `.claude.json` *cannot* be SHARED — symlinks on files are severed by atomic-rename (see Approach above). `teams/` and `session-env/` are conservatively MIRRORED until their contents are empirically verified to be safe to share across credential domains.
+- **SHARED entries DO flow both ways**: chat-history dirs (`projects/`, `sessions/`, `tasks/`, `todos/`, `plans/`, `file-history/`, `transcripts/`, `shell-snapshots/`, `backups/`) are symlinks, so proxy-session writes land in the user's real `~/.claude/` and a proxy session's `.jsonl` appears in plain `claude`'s `/resume` list. Concurrent `github-router claude` + plain `claude` sessions in the same project are safe — different session UUIDs mean different files, no lock contention.
+- **Migration from older github-router**: a user upgrading from a version that mirrored `projects/`, `sessions/`, etc. as snapshot copies will have real (stale) dirs at those mirror slots. `ensureSharedSymlink` refuses to clobber them; instead it logs a warn naming the exact path and instructing the user to move contents into `~/.claude/<name>/` (or delete `<mirror>/<name>/` if empty). After the user follows the warn once, subsequent runs find the symlink already in place and no-op. No auto-deletion of user data.
+
+The persisted Console OAuth credential at `~/.claude/.credentials.json` is **never modified** — it stays exactly where the user's `claude /login` placed it, fully accessible to `claude` invoked outside the proxy. No `claude /logout` is required.
