@@ -71,6 +71,10 @@ describe("PERSONAS_READ", () => {
       if (p.agentName !== "codex-reviewer") {
         expect(p.description.toLowerCase()).toContain("adversarial")
       }
+      // Cold-start contract: peers have no scrollback, so the lead must
+      // pass the artifact verbatim. Cross-lab smoke-test feedback (codex +
+      // opus independently flagged this regression after the trim landed).
+      expect(p.description.toLowerCase()).toContain("verbatim")
       expect(p.description.length).toBeLessThan(200)
     }
   })

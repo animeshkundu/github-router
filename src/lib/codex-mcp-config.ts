@@ -151,7 +151,7 @@ function buildCoordinatorAgent(opts: {
   peers.push("codex-reviewer")
 
   const description =
-    "Coordinates cross-lab adversarial review across codex-critic, opus-critic, gemini-critic, codex-reviewer. Use proactively before non-trivial plans and after non-trivial commits."
+    "Coordinates cross-lab adversarial review across codex-critic, opus-critic, gemini-critic, codex-reviewer. Use proactively before non-trivial plans and after non-trivial commits. Always pass artifacts verbatim — peers are fresh-context."
 
   const personaList = peers.map((p) => `- \`${p}\``).join("\n")
 
