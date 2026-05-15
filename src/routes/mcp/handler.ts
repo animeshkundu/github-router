@@ -286,54 +286,103 @@ function toolError(message: string): ToolErrorContent {
  *     but model self-paces budget → ~50s+ on a real ~6KB review
  *
  * Returns `{tooLong: true, capBytes}` when the (persona, effort, briefBytes)
- * tuple is empirically predicted to bust the 60s ceiling. Caller must
- * reject pre-flight before burning an inFlight slot. Thresholds are
- * deliberately conservative — better to surface as a fast error and let
- * the caller decompose than to silently time out.
+ * tuple is empirically predicted to bust the 60s ceiling.
+ *
+ * SCOPE: the cap is JSON-PATH ONLY. Callers (handleMcpPost) MUST gate
+ * the call site by `!acceptsEventStream(...)`. The SSE path
+ * (handleToolsCallSSE) keeps the connection open past the 60s ceiling
+ * via heartbeats — size-based pre-flight rejection there would just
+ * lock SSE clients out of their primary advantage. JSON-path clients
+ * (raw curl with `Accept: application/json`, older MCP clients without
+ * SSE awareness) DO still hit the underlying tools/call timer, so the
+ * cap is the only way to surface a fast actionable error there
+ * instead of a slot-leaking timeout.
+ *
+ * INVARIANT: pre-flight MUST fire BEFORE inFlightToolsCall++ — the
+ * slot must not be acquired for a rejected pre-flight. handleMcpPost
+ * runs the check before delegating to handleRpc → handleToolsCall (the
+ * function that increments the counter). Documented in CLAUDE.md.
  *
  * gemini_critic has no cap (long-context model + Copilot may auto-pace).
  */
+const PRE_FLIGHT_CAPS: ReadonlyArray<{
+  toolName: string
+  effort: Effort
+  maxBriefBytes: number
+}> = [
+  { toolName: "codex_critic", effort: "high", maxBriefBytes: 8 * 1024 },
+  { toolName: "codex_reviewer", effort: "high", maxBriefBytes: 12 * 1024 },
+  { toolName: "opus_critic", effort: "medium", maxBriefBytes: 6 * 1024 },
+]
+
+function predictedTooLong(
+  persona: PersonaSpec,
+  effort: Effort,
+  briefBytes: number,
+): { tooLong: true; capBytes: number } | { tooLong: false } {
+  for (const cap of PRE_FLIGHT_CAPS) {
+    if (
+      cap.toolName === persona.toolNameHttp
+      && cap.effort === effort
+      && briefBytes > cap.maxBriefBytes
+    ) {
+      return { tooLong: true, capBytes: cap.maxBriefBytes }
+    }
+  }
+  return { tooLong: false }
+}
+
 /**
- * Pre-flight latency cap was added to convert would-be-timeouts into fast
- * actionable errors when Claude Code's MCP HTTP client capped tools/call
- * waits at ~60s for JSON responses (regressions #50289 / #52137). With
- * SSE-streamed responses (handler.ts:handleToolsCallSSE) Claude Code
- * keeps the connection open past that ceiling and waits for the streamed
- * result, so long-running calls now succeed transparently.
+ * JSON-path pre-flight predictedTooLong gate. Returns a JSON-RPC result
+ * body wrapping a tool-error envelope when the call would bust the 60s
+ * tools/call ceiling on the JSON path; returns undefined when the call
+ * should proceed normally.
  *
- * The cap is therefore disabled by default. The MAX_INFLIGHT_TOOLS_CALL
- * concurrency limit (8) remains as the runaway-client guard. We keep the
- * predictedTooLong helper + the constants table around (commented out)
- * so a future regression in the SSE path or a non-SSE-capable client
- * can re-enable the gate quickly without re-deriving the empirical
- * thresholds.
+ * Skips the check (returns undefined) for any shape problem so
+ * handleRpc can return the canonical JSON-RPC error code instead:
+ *   - notification (no id) → handleRpc returns 202 + empty body
+ *   - missing/unknown name  → handleRpc returns -32601
+ *   - missing prompt        → handleRpc returns -32602
+ *   - invalid effort string → handleRpc returns -32602
+ *   - effort not in persona.allowedEfforts → handleRpc returns -32602
  */
-// const PRE_FLIGHT_CAPS: ReadonlyArray<{
-//   toolName: string
-//   effort: Effort
-//   maxBriefBytes: number
-// }> = [
-//   { toolName: "codex_critic", effort: "high", maxBriefBytes: 8 * 1024 },
-//   { toolName: "codex_reviewer", effort: "high", maxBriefBytes: 12 * 1024 },
-//   { toolName: "opus_critic", effort: "medium", maxBriefBytes: 6 * 1024 },
-// ]
-//
-// function predictedTooLong(
-//   persona: PersonaSpec,
-//   effort: Effort,
-//   briefBytes: number,
-// ): { tooLong: true; capBytes: number } | { tooLong: false } {
-//   for (const cap of PRE_FLIGHT_CAPS) {
-//     if (
-//       cap.toolName === persona.toolNameHttp
-//       && cap.effort === effort
-//       && briefBytes > cap.maxBriefBytes
-//     ) {
-//       return { tooLong: true, capBytes: cap.maxBriefBytes }
-//     }
-//   }
-//   return { tooLong: false }
-// }
+function jsonPathPreflightCap(body: JsonRpcRequest):
+  | { jsonrpc: "2.0"; id: JsonRpcRequest["id"] | null; result: ToolErrorContent }
+  | undefined {
+  if (body.id === undefined) return undefined
+  const params = (body.params ?? {}) as Record<string, unknown>
+  const name = typeof params.name === "string" ? params.name : ""
+  const args = (params.arguments ?? {}) as Record<string, unknown>
+  const prompt = typeof args.prompt === "string" ? args.prompt : ""
+  const context = typeof args.context === "string" ? args.context : undefined
+  const rawEffort = args.effort
+  if (!name || !prompt) return undefined
+  const persona = activePersonas().find((p) => p.toolNameHttp === name)
+  if (!persona) return undefined
+  if (rawEffort !== undefined && !isEffort(rawEffort)) return undefined
+  const effortMaybe = rawEffort as Effort | undefined
+  if (
+    effortMaybe !== undefined
+    && !persona.allowedEfforts.includes(effortMaybe)
+  ) {
+    return undefined
+  }
+  const effort: Effort = effortMaybe ?? persona.defaultEffort
+  const briefBytes = Buffer.byteLength(buildUserText(prompt, context), "utf8")
+  const verdict = predictedTooLong(persona, effort, briefBytes)
+  if (!verdict.tooLong) return undefined
+  return rpcResult(
+    body.id,
+    toolError(
+      `pre-flight rejected: ${persona.toolNameHttp} at effort=${effort} on a `
+        + `${briefBytes}-byte brief is empirically predicted to exceed the JSON `
+        + `tools/call timeout (cap=${verdict.capBytes} bytes for this tier). `
+        + `Either drop to a lower effort tier, split the brief into 2-4 `
+        + `parallel sub-calls per the decomposition guidance, or send `
+        + `Accept: text/event-stream to use the SSE path which bypasses this cap.`,
+    ),
+  )
+}
 
 async function callPersona(
   persona: PersonaSpec,
@@ -348,9 +397,10 @@ async function callPersona(
   const resolvedModel = resolveModel(persona.model)
   const userText = buildUserText(prompt, context)
 
-  // NOTE: predictedTooLong pre-flight cap fires in handleToolsCall
-  // BEFORE inFlightToolsCall++ — see the architectural invariant
-  // documented in CLAUDE.md. Don't duplicate it here.
+  // NOTE: predictedTooLong pre-flight cap fires in handleMcpPost
+  // BEFORE handleRpc → handleToolsCall → inFlightToolsCall++ — see
+  // the architectural invariant documented in CLAUDE.md. JSON-path
+  // only; SSE callers bypass it. Don't duplicate it here.
 
   // NOTE on consumer-cancel signal: we deliberately do NOT pass
   // c.req.raw.signal into the upstream fetch. Bun/srvx aborts the
@@ -532,11 +582,14 @@ async function handleToolsCall(
   }
   const effort: Effort = requestedEffort ?? persona.defaultEffort
 
-  // predictedTooLong pre-flight cap is disabled — SSE-streamed responses
-  // (handler.ts:handleToolsCallSSE) bypass Claude Code's ~60s tools/call
-  // ceiling, so size-based pre-flight rejection is no longer needed. The
-  // helper + thresholds remain commented above for fast revival if the
-  // SSE path regresses or a non-SSE-capable client appears.
+  // predictedTooLong pre-flight cap is enforced upstream of this
+  // function — see `jsonPathPreflightCap` invoked by handleMcpPost
+  // BEFORE handleRpc/handleToolsCall, so the slot increment below is
+  // never reached for a rejected pre-flight (architectural invariant
+  // documented in CLAUDE.md). The cap is JSON-PATH ONLY: SSE-streamed
+  // responses (handleToolsCallSSE) bypass Claude Code's ~60s
+  // tools/call ceiling via heartbeats and therefore don't need the
+  // size-based gate.
 
   if (inFlightToolsCall >= MAX_INFLIGHT_TOOLS_CALL) {
     // Documented per-call cap. NOT silent serialization — surface the
@@ -841,6 +894,27 @@ export async function handleMcpPost(c: Context): Promise<Response> {
     && acceptsEventStream(c.req.header("accept"))
   ) {
     return handleToolsCallSSE(body)
+  }
+
+  // JSON-path pre-flight predictedTooLong cap. SSE clients (above)
+  // bypass Claude Code's ~60s tools/call ceiling via heartbeats, but
+  // JSON-path clients (raw curl with `Accept: application/json`,
+  // older MCP clients without SSE awareness) still hit the underlying
+  // timer. Reject here as a fast actionable error instead of letting
+  // the request burn an inFlight slot for ~60s before the client
+  // times out — invariant: the cap MUST fire BEFORE handleToolsCall
+  // so inFlightToolsCall++ is never reached for a rejected pre-flight
+  // (CLAUDE.md). `jsonPathPreflightCap` returns undefined for any
+  // shape problem (missing prompt, unknown name, invalid effort) so
+  // handleRpc returns the canonical -32601/-32602 error code.
+  if (
+    typeof body === "object"
+    && body !== null
+    && !Array.isArray(body)
+    && body.method === "tools/call"
+  ) {
+    const preflight = jsonPathPreflightCap(body)
+    if (preflight) return c.json(preflight, 200)
   }
 
   try {

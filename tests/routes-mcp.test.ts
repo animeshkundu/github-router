@@ -580,31 +580,90 @@ describe("/mcp tools/call routing", () => {
     expect(err.message).toContain("Allowed: low|medium|high")
   })
 
-  test("large brief at effort:'high' is no longer pre-flight rejected (SSE handles long calls)", async () => {
-    // Previously a 9KB brief on codex_critic@high was rejected by the
-    // predictedTooLong cap (8KB threshold) to avoid timing out under the
-    // 60s tools/call ceiling. With SSE-streamed responses the call now
-    // succeeds — verify the upstream fetch is invoked instead of
-    // pre-flight rejected.
+  test("SSE-path tools/call with Accept: text/event-stream is NOT subject to predictedTooLong cap", async () => {
+    // Companion to the JSON-path test below. The SSE path keeps the
+    // connection open past Claude Code's ~60s tools/call ceiling via
+    // heartbeats, so size-based pre-flight rejection there would just
+    // lock SSE clients out of higher-effort calls on bigger briefs.
+    // Verify the upstream fetch IS invoked (cap not applied) when the
+    // client sends `Accept: text/event-stream`.
     const captured = mockResponsesUpstream("ok")
     const oversize = "x".repeat(9 * 1024)
-    const { status, json } = await rpc({
-      jsonrpc: "2.0",
-      id: 300,
-      method: "tools/call",
-      params: {
-        name: "codex_critic",
-        arguments: { prompt: oversize, effort: "high" },
-      },
-    })
-    expect(status).toBe(200)
-    const result = json.result as {
-      content: Array<{ type: string; text: string }>
-      isError?: boolean
-    }
-    expect(result.isError).toBeUndefined()
-    // Upstream WAS called — captured.lastBody is set.
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 300,
+          method: "tools/call",
+          params: {
+            name: "codex_critic",
+            arguments: { prompt: oversize, effort: "high" },
+          },
+        }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toBe("text/event-stream")
+    // Drain the stream so the upstream fetch resolves before assertions.
+    const body = await res.text()
+    expect(body).toContain('"id":300')
+    // Upstream WAS called — captured.lastBody is set (cap not applied).
     expect(captured.lastBody).toBeDefined()
+  })
+
+  test("JSON-path tools/call with Accept: application/json hits predictedTooLong cap on 9KB brief at codex_critic@high", async () => {
+    // SSE-streamed responses bypass Claude Code's ~60s tools/call
+    // ceiling via heartbeats, but JSON-path clients (raw curl with
+    // `Accept: application/json`, older MCP clients without SSE
+    // awareness) still hit the underlying timer. The predictedTooLong
+    // cap fires in handleMcpPost BEFORE inFlightToolsCall++ to surface
+    // the failure as a clean fast-fail (isError envelope) instead of
+    // a slot-leaking timeout — and to point the caller at SSE / a
+    // lower effort tier / decomposition as remediations.
+    const captured = mockResponsesUpstream("should not be called")
+    const oversize = "x".repeat(9 * 1024)
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+          accept: "application/json", // NO text/event-stream
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 311,
+          method: "tools/call",
+          params: {
+            name: "codex_critic",
+            arguments: { prompt: oversize, effort: "high" },
+          },
+        }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toContain("application/json")
+    const json = (await res.json()) as {
+      id?: number
+      result?: { content: Array<{ text: string }>; isError?: boolean }
+    }
+    expect(json.id).toBe(311)
+    expect(json.result?.isError).toBe(true)
+    expect(json.result?.content[0].text).toMatch(/pre-flight rejected/i)
+    expect(json.result?.content[0].text).toContain("codex_critic")
+    expect(json.result?.content[0].text).toContain("text/event-stream")
+    // Upstream NOT called — pre-flight rejected before fetch.
+    expect(captured.lastBody).toBeUndefined()
+    // Slot not acquired — invariant from CLAUDE.md.
+    expect(__getInFlightForTests()).toBe(0)
   })
 
   test("opus_critic at effort:'low' routes to /v1/messages with adaptive thinking + effort:low", async () => {
