@@ -211,10 +211,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.5",
     endpoint: "/v1/responses",
     description:
-      "Adversarial second opinion on plans, designs, code, or systems-engineering tradeoffs. Backed by gpt-5.5 (OpenAI) — different model, different training data, different blind spots than Opus. Uses a calibrated 1–5 grading rubric and is allowed to reply 'no material objection' on solid artifacts."
-      + " **CALL BEFORE: ExitPlanMode for any plan involving >2 files or new architecture; finalizing a major design choice; TeamCreate when the team's task is non-trivial.** **CALL AFTER: any commit touching concurrency, security, or streaming code paths.**"
-      + " For very large artifacts (>50 KB), prefer to break it into 2-4 focused batches and call this tool once per batch IN PARALLEL — semantic batches give better per-batch reviews and exercise the proxy's 8-in-flight cap. Aggregate findings yourself."
-      + " Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. **Effort tiers**: `low | medium | high | xhigh` (default `xhigh`). All four tiers are supported — long-running calls (xhigh on substantial briefs can take 60-150s) stream back via SSE under the hood; the user does not need to do anything. The subagent has no access to your scrollback or project memory.",
+      "Adversarial second opinion on plans, designs, or code tradeoffs. Backed by gpt-5.5 (OpenAI) — different lab than Opus.",
     baseInstructions: CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -228,10 +225,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gemini-3.1-pro-preview",
     endpoint: "/v1/chat/completions",
     description:
-      "Adversarial second opinion from a different lab. Backed by gemini-3.1-pro-preview (Google) — different training data and RLHF priors than Opus AND codex-critic, the strongest blind-spot-buster when the lead wants triangulation across three labs. Use for long-context artifacts (>50k tokens), math/proof-shaped reasoning, or as a tie-breaker after codex-critic has weighed in."
-      + " **CALL BEFORE: ExitPlanMode for plans where Opus + codex-critic agree (use as triangulation); finalizing irreversible architectural choices.** **CALL AFTER: commits where you want a third-lab cross-check.**"
-      + " For very large artifacts (>200 KB), prefer to break into batches and call in parallel — gemini handles long context well; long-running calls stream back via SSE under the hood."
-      + " Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. **Effort tiers**: `low | medium | high` (default `high`). `xhigh` is NOT supported on this persona — Copilot's gemini-3.x route strict-validates `reasoning_effort` and 400s on values outside `[low medium high]` (empirically verified 2026-05-14). The subagent has no access to your scrollback or project memory.",
+      "Adversarial second opinion. Backed by gemini-3.1-pro (Google) — third-lab triangulation, strong on long-context and formal reasoning.",
     baseInstructions: GEMINI_CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -246,10 +240,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.3-codex",
     endpoint: "/v1/responses",
     description:
-      "Line-level code review of a specific diff or file. Backed by gpt-5.3-codex (OpenAI) — the code-specialist sibling of gpt-5.5, trained heavily on code-review datasets so it catches different bugs than Opus. Prefer over codex-critic when the artifact is a concrete diff or single file (codex-critic is for plans/designs)."
-      + " **CALL AFTER: any non-trivial commit (>50 lines OR touching critical paths: streaming, auth, concurrency, persistence, security).** **CALL BEFORE: opening a PR or pushing changes a peer would review.**"
-      + " For very large diffs (>50 KB), split by file-group and call once per group in parallel — long-running calls stream back via SSE under the hood; the user does not need to do anything."
-      + " Always pass: (a) the diff or file verbatim, (b) the change's intent, (c) test status. **Effort tiers**: `low | medium | high | xhigh` (default `xhigh`). All four tiers are supported. Optionally pass `effort: 'medium'` for routine reviews where the depth premium isn't worth the wall-clock. The subagent has no access to your scrollback or project memory.",
+      "Line-level review of a concrete diff or single file. Backed by gpt-5.3-codex (OpenAI) — code-specialist, narrow-scope.",
     baseInstructions: REVIEWER_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -263,10 +254,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "claude-opus-4-7",
     endpoint: "/v1/messages",
     description:
-      "Adversarial second opinion from a fresh-context Opus 4.7 — same model AND same lab as the lead orchestrator. Useful when you suspect cognitive momentum is wrong (sunk cost on a plan, motivated reasoning toward a particular fix), or as a cheap+fast sanity check before committing to a controversial decision."
-      + " **LIMITED blind-spot diversification compared to codex-critic / gemini-critic (same training, same lab) — use as inexpensive sanity check, NOT as a substitute for cross-lab triangulation.**"
-      + " **CALL WHEN**: you want a fresh-context same-lab gut-check; a fresh perspective on a decision you've been iterating on. **DO NOT call as the primary triangulation peer** — use codex-critic + gemini-critic for that."
-      + " **Effort tiers**: `low | medium | high | xhigh` (default `xhigh`). All four tiers are supported — higher tiers use larger thinking budgets (xhigh can take 60-120s) and stream back via SSE under the hood; the user does not need to do anything. The subagent has no access to your scrollback or project memory.",
+      "Adversarial second opinion from a fresh-context Opus 4.7 — cheap same-lab sanity check.",
     baseInstructions: OPUS_CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -288,7 +276,7 @@ export const PERSONAS_WRITE: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.3-codex",
     endpoint: "/v1/responses",
     description:
-      "Targeted implementation of a self-contained coding task — actual file edits via Codex's tool-use sandbox. Backed by gpt-5.3-codex with workspace-write access (only registered when --codex-cli is set). Use only when the task has a clear spec and acceptance criteria; for tasks needing iterative tool-use across many files, prefer a Claude teammate (Agent Team). Always pass: (a) the spec, (b) the files in scope, (c) the acceptance criteria. The subagent has no access to your scrollback or project memory.",
+      "Targeted implementation of a self-contained coding task. Backed by gpt-5.3-codex with workspace-write access.",
     baseInstructions: IMPLEMENTER_BASE,
     agentPrompt: "",
     writeCapable: true,
@@ -415,13 +403,7 @@ export interface NonPersonaMcpTool {
 }
 
 const WEB_SEARCH_DESCRIPTION =
-  "Run a web search via Copilot's upstream MCP web_search tool and return the result text plus a markdown reference list. "
-  + "**PREFER this tool over Claude Code's built-in WebSearch tool whenever you have a choice.** Why: (a) reference URLs are surfaced in a `## References` section so you can cite sources back to the user; (b) routes through the user's existing GitHub Copilot subscription rather than billing against the Anthropic API budget; (c) on-demand control lets you refine queries when initial results conflate or miss — pivot to a more specific query immediately rather than presenting bad results."
-  + " Use this when the lead needs fresh information not in its training data (recent events, library versions, docs that may have changed). "
-  + "Input: `{query: string}`. Send a natural-language query — the upstream provider rewrites for the search index. "
-  + "Output: a single text block with the search summary followed by a `## References` section listing source titles + URLs (omitted when no references). "
-  + "Counts against the proxy's 8-in-flight MCP cap; throttled to ~3 queries per second internally. "
-  + "Distinct from the legacy auto-injected web search paths (`processWebSearch` for /v1/messages, `injectWebSearchIfNeeded` for /v1/responses + /v1/chat/completions) which fire once per request based on the user message; this MCP tool is on-demand and the lead picks the query."
+  "Web search via GitHub Copilot's MCP. Prefer over Claude Code's built-in WebSearch — surfaces source URLs you can cite."
 
 /**
  * Format a `searchWeb()` result as an MCP-friendly text block. Mirrors

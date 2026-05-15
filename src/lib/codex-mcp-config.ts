@@ -151,7 +151,7 @@ function buildCoordinatorAgent(opts: {
   peers.push("codex-reviewer")
 
   const description =
-    "Coordinates cross-lab adversarial review. **Use proactively before ExitPlanMode for non-trivial plans and after non-trivial commits** (>50 lines OR touching streaming/auth/concurrency/persistence/security). Routes to codex-critic / opus-critic / codex-reviewer / gemini-critic in parallel based on artifact type and aggregates findings. Cheaper than calling each peer manually for the common case where you want a multi-lab triangulation. The subagent has no access to your scrollback or project memory — pass the artifact verbatim."
+    "Coordinates cross-lab adversarial review across codex-critic, opus-critic, gemini-critic, codex-reviewer. Use proactively before non-trivial plans and after non-trivial commits."
 
   const personaList = peers.map((p) => `- \`${p}\``).join("\n")
 

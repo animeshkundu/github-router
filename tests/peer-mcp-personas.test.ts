@@ -57,19 +57,21 @@ describe("PERSONAS_READ", () => {
     expect(critic?.baseInstructions).toContain("Self-reminder")
   })
 
-  test("descriptions teach the lead what to pass (cold-start contract)", () => {
-    // codex-critic, gemini-critic, codex-reviewer use the "Always pass"
-    // language explicitly; opus-critic uses "fits comfortably in one shot"
-    // framing for its same-lab gut-check use case (the cold-start
-    // contract is delivered via baseInstructions instead). Both forms
-    // surface the "no scrollback access" warning.
+  test("descriptions surface load-bearing routing signal (model identity)", () => {
+    const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
+    expect(byName["codex-critic"]?.description).toContain("gpt-5.5")
+    expect(byName["gemini-critic"]?.description).toContain("gemini-3.1-pro")
+    expect(byName["codex-reviewer"]?.description).toContain("gpt-5.3-codex")
+    expect(byName["opus-critic"]?.description).toContain("Opus 4.7")
     for (const p of PERSONAS_READ) {
-      expect(p.description.toLowerCase()).toContain("scrollback")
-    }
-    for (const p of PERSONAS_READ) {
-      if (p.agentName !== "opus-critic") {
-        expect(p.description).toContain("Always pass")
+      // codex-reviewer is intentionally framed as a code-specialist /
+      // "magnifying glass", not an adversarial critic — its baseInstructions
+      // even redirect architecture briefs away. Skip the adversarial check
+      // for that persona; all other read personas are critics by design.
+      if (p.agentName !== "codex-reviewer") {
+        expect(p.description.toLowerCase()).toContain("adversarial")
       }
+      expect(p.description.length).toBeLessThan(200)
     }
   })
 
