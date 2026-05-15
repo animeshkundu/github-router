@@ -229,13 +229,13 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
       "Adversarial second opinion from a different lab. Backed by gemini-3.1-pro-preview (Google) — different training data and RLHF priors than Opus AND codex-critic, the strongest blind-spot-buster when the lead wants triangulation across three labs. Use for long-context artifacts (>50k tokens), math/proof-shaped reasoning, or as a tie-breaker after codex-critic has weighed in."
       + " **CALL BEFORE: ExitPlanMode for plans where Opus + codex-critic agree (use as triangulation); finalizing irreversible architectural choices.** **CALL AFTER: commits where you want a third-lab cross-check.**"
       + " For very large artifacts (>200 KB), prefer to break into batches and call in parallel — gemini handles long context well; long-running calls stream back via SSE under the hood."
-      + " Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. **Effort tiers**: `low | medium | high | xhigh` (default `high`). The `effort` parameter is forwarded but may be silently ignored by Copilot's gemini route — gemini-3.x reasoning is largely auto-applied. The subagent has no access to your scrollback or project memory.",
+      + " Always pass: (a) the artifact verbatim, (b) the constraints/'done' criteria, (c) any prior decisions. **Effort tiers**: `low | medium | high` (default `high`). `xhigh` is NOT supported on this persona — Copilot's gemini-3.x route strict-validates `reasoning_effort` and 400s on values outside `[low medium high]` (empirically verified 2026-05-14). The subagent has no access to your scrollback or project memory.",
     baseInstructions: GEMINI_CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
     requiresHttp: true,
     requiresGeminiCatalog: true,
-    allowedEfforts: ["low", "medium", "high", "xhigh"] as const,
+    allowedEfforts: ["low", "medium", "high"] as const,
     defaultEffort: "high",
   },
   {

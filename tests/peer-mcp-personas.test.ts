@@ -80,16 +80,16 @@ describe("PERSONAS_READ", () => {
     }
   })
 
-  test("all personas now expose all four effort tiers (SSE handles long calls)", () => {
+  test("codex-critic / codex-reviewer / opus-critic accept all four effort tiers (SSE handles long calls)", () => {
     // SSE-streamed /mcp responses (handler.ts:handleToolsCallSSE) bypass
     // Claude Code's ~60s tools/call ceiling, so the previous xhigh
-    // constraints on codex-critic / codex-reviewer / opus-critic are
-    // lifted. All read personas + the codex-implementer now allow the
-    // full effort range; long calls stream back transparently.
+    // constraints on these three are lifted. gemini-critic is the
+    // exception — see the next test.
     const allFour = ["low", "medium", "high", "xhigh"] as const
-    for (const p of PERSONAS_READ) {
-      expect(p.allowedEfforts).toEqual(allFour)
-    }
+    const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
+    expect(byName["codex-critic"]?.allowedEfforts).toEqual(allFour)
+    expect(byName["codex-reviewer"]?.allowedEfforts).toEqual(allFour)
+    expect(byName["opus-critic"]?.allowedEfforts).toEqual(allFour)
   })
 
   test("opus-critic defaults to medium effort (cheap-and-fast same-lab gut check)", () => {
@@ -103,9 +103,14 @@ describe("PERSONAS_READ", () => {
     expect(byName["codex-reviewer"]?.defaultEffort).toBe("high")
     expect(byName["gemini-critic"]?.defaultEffort).toBe("high")
   })
-  test("gemini-critic still accepts all four effort tiers", () => {
+
+  test("gemini-critic accepts only low/medium/high (Copilot's gemini route 400s on xhigh)", () => {
+    // Copilot rejects xhigh on gemini-3.x with HTTP 400:
+    // "reasoning_effort 'xhigh' is not supported by model
+    // gemini-3.1-pro-preview; supported values: [low medium high]"
+    // — empirically verified 2026-05-14.
     const gem = PERSONAS_READ.find((p) => p.agentName === "gemini-critic")
-    expect(gem?.allowedEfforts).toEqual(["low", "medium", "high", "xhigh"])
+    expect(gem?.allowedEfforts).toEqual(["low", "medium", "high"])
   })
 })
 

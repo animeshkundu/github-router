@@ -390,25 +390,29 @@ async function callPersona(
   }
 
   if (persona.endpoint === "/v1/messages") {
-    // claude-opus-4-7 path. All four effort tiers are now supported —
-    // SSE-streamed /mcp responses (handler.ts:handleToolsCallSSE) bypass
-    // Claude Code's ~60s tools/call ceiling, so larger thinking budgets
-    // that previously busted the ceiling now work transparently. Buckets
-    // mirror the inverse of bucketEffort in src/routes/messages/handler.ts:
-    //   low → 1024, medium → 3000, high → 8000, xhigh → 16000.
-    // Anthropic spec REQUIRES max_tokens >= budget_tokens AND recommends
-    // extra room for the actual response — max_tokens = budget + 2048.
-    const budgetTokens =
-      effort === "low" ? 1024
-      : effort === "medium" ? 3000
-      : effort === "high" ? 8000
-      : 16000  // xhigh
-    const maxTokens = budgetTokens + 2048
+    // claude-opus-4-7 path. Copilot's adaptive-thinking models reject
+    // Anthropic's standard `thinking: {type:"enabled", budget_tokens:N}`
+    // shape with HTTP 400: "thinking.type.enabled is not supported for
+    // this model. Use thinking.type.adaptive and output_config.effort".
+    // Build the Copilot-shape directly. Empirical: confirmed 2026-05-14
+    // via curl test against the proxy after build, opus_critic@xhigh
+    // returned the expected 400 with that exact wording.
+    //
+    // max_tokens budget: choose a generous ceiling per effort tier so
+    // the model has room for substantive reasoning + response without
+    // truncation. Numbers chosen empirically:
+    //   low → 4096, medium → 8192, high → 16384, xhigh → 32768.
+    const maxTokens =
+      effort === "low" ? 4096
+      : effort === "medium" ? 8192
+      : effort === "high" ? 16384
+      : 32768  // xhigh
     const body = JSON.stringify({
       model: resolvedModel,
       max_tokens: maxTokens,
       system: persona.baseInstructions,
-      thinking: { type: "enabled", budget_tokens: budgetTokens },
+      thinking: { type: "adaptive" },
+      output_config: { effort },
       messages: [{ role: "user", content: userText }],
     })
     const response = await createMessages(body, undefined, signal)

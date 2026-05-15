@@ -474,26 +474,23 @@ describe("/mcp tools/call routing", () => {
     expect(result.content[0].text).toBe("no material objection")
   })
 
-  test("explicit effort:xhigh on gemini_critic reaches the upstream payload", async () => {
-    // Phase 2C effort plumbing — caller can override the default.
-    // Switched from codex_critic to gemini_critic because the per-persona
-    // allowedEfforts gate (added in the codex-effort-cap-and-opus-critic
-    // change) removed xhigh from codex_critic's allowed set — gpt-5.5 at
-    // xhigh routinely busts the 60s MCP ceiling. gemini_critic still
-    // allows xhigh (Copilot may silently ignore the knob, but the proxy
-    // forwards it for honest schema fidelity).
-    const captured = mockChatCompletionsUpstream("ok")
+  test("explicit effort:xhigh on codex_critic reaches the upstream payload", async () => {
+    // Now that gemini_critic dropped xhigh too (Copilot's gemini route
+    // 400s on xhigh per the per-persona gate), use codex_critic for the
+    // "xhigh reaches upstream" assertion. SSE-streamed /mcp responses
+    // bypass the 60s ceiling so codex@xhigh works transparently.
+    const captured = mockResponsesUpstream("ok")
     await rpc({
       jsonrpc: "2.0",
       id: 109,
       method: "tools/call",
       params: {
-        name: "gemini_critic",
+        name: "codex_critic",
         arguments: { prompt: "deep dive", effort: "xhigh" },
       },
     })
-    const upstream = captured.lastBody as { reasoning_effort?: string }
-    expect(upstream.reasoning_effort).toBe("xhigh")
+    const upstream = captured.lastBody as { reasoning?: { effort?: string } }
+    expect(upstream.reasoning?.effort).toBe("xhigh")
   })
 
   test("codex_critic accepts effort:xhigh (SSE-streamed responses bypass the 60s ceiling)", async () => {
@@ -531,14 +528,18 @@ describe("/mcp tools/call routing", () => {
       },
     })
     expect(captured.called).toBe(true)
-    // For opus@high, budget bucketing extrapolates linearly above medium=3000:
-    // high=6000 (default), max_tokens=budget+1500=7500.
+    // Verify the Copilot-shape adaptive-thinking payload (NOT the
+    // Anthropic-spec thinking.type=enabled shape — Copilot 400s on that
+    // for opus). Empirically observed 2026-05-14.
     const upstream = captured.lastBody as {
       max_tokens?: number
-      thinking?: { budget_tokens?: number }
+      thinking?: { type?: string; budget_tokens?: unknown }
+      output_config?: { effort?: string }
     }
-    expect(upstream.thinking?.budget_tokens).toBeGreaterThanOrEqual(3000)
-    expect(upstream.max_tokens).toBeGreaterThanOrEqual((upstream.thinking?.budget_tokens ?? 0))
+    expect(upstream.thinking?.type).toBe("adaptive")
+    expect(upstream.thinking?.budget_tokens).toBeUndefined()
+    expect(upstream.output_config?.effort).toBe("high")
+    expect(upstream.max_tokens).toBe(16384)  // high tier ceiling
   })
 
   test("invalid effort value is rejected with -32602 (not silently forwarded)", async () => {
@@ -555,6 +556,28 @@ describe("/mcp tools/call routing", () => {
     const err = json.error as { code: number; message: string }
     expect(err.code).toBe(-32602)
     expect(err.message).toMatch(/effort/)
+  })
+
+  test("gemini_critic rejects effort:'xhigh' with -32602 (Copilot's gemini route only allows low|medium|high)", async () => {
+    // Per-persona allowedEfforts gate. Empirically: Copilot returns 400
+    // "reasoning_effort 'xhigh' is not supported by model
+    // gemini-3.1-pro-preview; supported values: [low medium high]"
+    // (verified 2026-05-14). The persona's allowedEfforts dropped xhigh
+    // to surface this as a clean RPC_INVALID_PARAMS pre-flight rejection
+    // rather than a silent upstream 400.
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 111,
+      method: "tools/call",
+      params: {
+        name: "gemini_critic",
+        arguments: { prompt: "x", effort: "xhigh" },
+      },
+    })
+    const err = json.error as { code: number; message: string }
+    expect(err.code).toBe(-32602)
+    expect(err.message).toContain("xhigh")
+    expect(err.message).toContain("Allowed: low|medium|high")
   })
 
   test("large brief at effort:'high' is no longer pre-flight rejected (SSE handles long calls)", async () => {
@@ -584,7 +607,7 @@ describe("/mcp tools/call routing", () => {
     expect(captured.lastBody).toBeDefined()
   })
 
-  test("opus_critic at effort:'low' routes to /v1/messages with thinking.budget_tokens=1024", async () => {
+  test("opus_critic at effort:'low' routes to /v1/messages with adaptive thinking + effort:low", async () => {
     const captured = mockMessagesUpstream("no material objection")
     const { status, json } = await rpc({
       jsonrpc: "2.0",
@@ -602,23 +625,25 @@ describe("/mcp tools/call routing", () => {
     }
     expect(result.isError).toBeUndefined()
     expect(result.content[0].text).toBe("no material objection")
-    // Verify upstream bucketing: low → 1024 budget, max=1024+2048=3072
+    // Verify Copilot-shape adaptive payload (NOT thinking.type=enabled).
     const upstream = captured.lastBody as {
       model?: string
       max_tokens?: number
-      thinking?: { type?: string; budget_tokens?: number }
+      thinking?: { type?: string; budget_tokens?: unknown }
+      output_config?: { effort?: string }
       messages?: Array<{ role?: string; content?: string }>
       system?: string
     }
-    expect(upstream.thinking?.type).toBe("enabled")
-    expect(upstream.thinking?.budget_tokens).toBe(1024)
-    expect(upstream.max_tokens).toBe(3072)
+    expect(upstream.thinking?.type).toBe("adaptive")
+    expect(upstream.thinking?.budget_tokens).toBeUndefined()
+    expect(upstream.output_config?.effort).toBe("low")
+    expect(upstream.max_tokens).toBe(4096)
     expect(upstream.messages?.[0]?.role).toBe("user")
     expect(upstream.messages?.[0]?.content).toBe("review this")
     expect(upstream.system).toContain("opus-critic")
   })
 
-  test("opus_critic at effort:'medium' (default) routes to /v1/messages with thinking.budget_tokens=3000", async () => {
+  test("opus_critic at effort:'medium' (default) routes with output_config.effort=medium", async () => {
     const captured = mockMessagesUpstream("no material objection")
     await rpc({
       jsonrpc: "2.0",
@@ -631,13 +656,15 @@ describe("/mcp tools/call routing", () => {
     })
     const upstream = captured.lastBody as {
       max_tokens?: number
-      thinking?: { budget_tokens?: number }
+      thinking?: { type?: string }
+      output_config?: { effort?: string }
     }
-    expect(upstream.thinking?.budget_tokens).toBe(3000)
-    expect(upstream.max_tokens).toBe(5048)  // 3000 + 2048
+    expect(upstream.thinking?.type).toBe("adaptive")
+    expect(upstream.output_config?.effort).toBe("medium")
+    expect(upstream.max_tokens).toBe(8192)
   })
 
-  test("opus_critic at effort:'xhigh' routes to /v1/messages with thinking.budget_tokens=16000", async () => {
+  test("opus_critic at effort:'xhigh' routes with output_config.effort=xhigh", async () => {
     const captured = mockMessagesUpstream("verdict")
     await rpc({
       jsonrpc: "2.0",
@@ -650,10 +677,12 @@ describe("/mcp tools/call routing", () => {
     })
     const upstream = captured.lastBody as {
       max_tokens?: number
-      thinking?: { budget_tokens?: number }
+      thinking?: { type?: string }
+      output_config?: { effort?: string }
     }
-    expect(upstream.thinking?.budget_tokens).toBe(16000)
-    expect(upstream.max_tokens).toBe(18048)  // 16000 + 2048
+    expect(upstream.thinking?.type).toBe("adaptive")
+    expect(upstream.output_config?.effort).toBe("xhigh")
+    expect(upstream.max_tokens).toBe(32768)
   })
 
   test("tools/call with Accept: text/event-stream returns SSE-streamed response with heartbeat + final result", async () => {

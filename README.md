@@ -86,7 +86,7 @@ Each persona is exposed both as a Claude Code subagent (callable via the `Task` 
 | `codex-critic` | gpt-5.5 | `/v1/responses` | low \| medium \| high \| xhigh (high) |
 | `codex-reviewer` | gpt-5.3-codex | `/v1/responses` | low \| medium \| high \| xhigh (high) |
 | `opus-critic` | claude-opus-4-7 | `/v1/messages` | low \| medium \| high \| xhigh (medium) |
-| `gemini-critic` | gemini-3.1-pro-preview | `/v1/chat/completions` | low \| medium \| high \| xhigh (high) |
+| `gemini-critic` | gemini-3.1-pro-preview | `/v1/chat/completions` | low \| medium \| high (high) |
 | `peer-review-coordinator` | (meta) | — | — |
 
 `peer-review-coordinator` is a subagent (not an MCP tool) that fans out to the right combination of the four critics in parallel based on artifact type — plan, diff, single file, or long-context — and aggregates findings.
