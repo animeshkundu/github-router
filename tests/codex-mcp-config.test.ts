@@ -123,6 +123,13 @@ describe("buildPeerAgentDefinitions", () => {
       expect(agents[name]!.description.length).toBeGreaterThan(0)
     }
     expect(agents["peer-review-coordinator"]!.description).toContain("Use proactively")
+    // Cold-start contract: the coordinator's load-bearing sentence
+    // ("peers are fresh-context") is the ONLY place that explains *why*
+    // artifacts must be passed verbatim. Per-persona descriptions only
+    // carry the bare imperative; this is where the reasoning lives.
+    // Cross-lab smoke-test feedback flagged this assertion as missing.
+    expect(agents["peer-review-coordinator"]!.description).toContain("verbatim")
+    expect(agents["peer-review-coordinator"]!.description).toContain("fresh-context")
     expect(agents["peer-review-coordinator"]!.prompt).toContain("codex-critic")
     expect(agents["peer-review-coordinator"]!.prompt).toContain("opus-critic")
   })

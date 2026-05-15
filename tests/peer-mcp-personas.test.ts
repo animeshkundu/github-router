@@ -135,6 +135,12 @@ describe("PERSONAS_WRITE", () => {
     const impl = PERSONAS_WRITE[0]
     expect(impl.baseInstructions).toContain("session terminates abnormally")
   })
+
+  test("description carries the cold-start verbatim contract", () => {
+    for (const p of PERSONAS_WRITE) {
+      expect(p.description.toLowerCase()).toContain("verbatim")
+    }
+  })
 })
 
 describe("personasFor", () => {
