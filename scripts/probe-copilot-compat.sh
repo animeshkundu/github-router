@@ -115,9 +115,11 @@ declare -a PROBE_REGISTRY=(
   #     more brittle than parsing one TS source line.
   "opus_critic_low|anthropic-docs|opus_critic at effort=low equivalent (thinking.budget=1024, max_tokens=2524) returns 200 from /v1/messages"
   "opus_critic_medium|anthropic-docs|opus_critic at effort=medium equivalent (thinking.budget=3000, max_tokens=4500) returns 200 from /v1/messages"
-  "opus_critic_high_rejected|proxy-internal|peer-mcp-personas.ts: opus-critic.allowedEfforts excludes 'high' (Phase A1 gate) — static check"
-  "codex_critic_xhigh_rejected|proxy-internal|peer-mcp-personas.ts: codex-critic.allowedEfforts excludes 'xhigh' (Phase A1 gate) — static check"
-  "codex_reviewer_xhigh_rejected|proxy-internal|peer-mcp-personas.ts: codex-reviewer.allowedEfforts excludes 'xhigh' (Phase A1 gate) — static check"
+  "opus_critic_high_allowed|proxy-internal|peer-mcp-personas.ts: opus-critic.allowedEfforts INCLUDES 'high' (post-SSE) — static check"
+  "opus_critic_xhigh_allowed|proxy-internal|peer-mcp-personas.ts: opus-critic.allowedEfforts INCLUDES 'xhigh' (post-SSE; xhigh is the default) — static check"
+  "codex_critic_xhigh_allowed|proxy-internal|peer-mcp-personas.ts: codex-critic.allowedEfforts INCLUDES 'xhigh' (post-SSE; xhigh is the default) — static check"
+  "codex_reviewer_xhigh_allowed|proxy-internal|peer-mcp-personas.ts: codex-reviewer.allowedEfforts INCLUDES 'xhigh' (post-SSE; xhigh is the default) — static check"
+  "gemini_critic_xhigh_rejected|proxy-internal|peer-mcp-personas.ts: gemini-critic.allowedEfforts EXCLUDES 'xhigh' (Copilot upstream-rejects) — static check"
 )
 
 # ===========================================================================
@@ -396,6 +398,27 @@ assert_persona_excludes_tier() {
   return 0
 }
 
+# Sibling of assert_persona_excludes_tier — asserts a persona's
+# allowedEfforts spec INCLUDES a given tier.
+#   $1 = persona agent name
+#   $2 = required tier (e.g. '"high"' or '"xhigh"')
+#   $3 = brief reason (shown in failure output)
+assert_persona_includes_tier() {
+  local persona="$1" required="$2" reason="$3"
+  local line
+  line="$(extract_persona_allowed_efforts "$persona")"
+  if [ -z "$line" ]; then
+    echo "  ${C_RED}FAIL${C_RESET}: persona '${persona}' allowedEfforts not found in src/lib/peer-mcp-personas.ts"
+    return 1
+  fi
+  if ! echo "$line" | grep -q -- "${required}"; then
+    echo "  ${C_RED}FAIL${C_RESET}: persona '${persona}' allowedEfforts missing ${required} (${reason})"
+    echo "  ${C_DIM}line: ${line}${C_RESET}"
+    return 1
+  fi
+  return 0
+}
+
 probe_opus_critic_low() {
   # End-to-end live probe. Mirrors the Anthropic body shape that the
   # /mcp /v1/messages branch builds for opus_critic at effort=low:
@@ -423,34 +446,53 @@ probe_opus_critic_medium() {
   assert_status 200
 }
 
-probe_opus_critic_high_rejected() {
-  # Static check: the opus-critic persona spec MUST exclude "high" from
-  # allowedEfforts so the /mcp handler's Phase A1 gate (handler.ts) returns
-  # RPC_INVALID_PARAMS rather than letting the call hit the 60s MCP ceiling
-  # on a thinking-budget that exceeds it. We validate the SOURCE OF TRUTH
-  # (peer-mcp-personas.ts) rather than the live MCP boundary because the
-  # live path requires the per-launch nonce — see the registry comment.
-  assert_persona_excludes_tier \
+probe_opus_critic_high_allowed() {
+  # Static check: the opus-critic persona spec MUST include "high" in
+  # allowedEfforts. SSE-streamed /mcp tools/call responses bypass Claude
+  # Code's ~60s ceiling, so the prior low|medium-only constraint was
+  # lifted in PR #28 (handler.ts:handleToolsCallSSE). Validates the
+  # SOURCE OF TRUTH (peer-mcp-personas.ts).
+  assert_persona_includes_tier \
     "opus-critic" '"high"' \
-    "high+ thinking budgets bust the 60s MCP per-tool-call ceiling on claude-opus-4-7"
+    "SSE bypasses the 60s ceiling so high-tier thinking budgets now fit transparently"
 }
 
-probe_codex_critic_xhigh_rejected() {
-  # Static check: codex-critic (gpt-5.5) must reject xhigh. Empirical:
-  # 56s baseline on a tiny prompt at xhigh, busts the 60s ceiling on
-  # any real-sized review brief.
-  assert_persona_excludes_tier \
+probe_opus_critic_xhigh_allowed() {
+  # Same as above for xhigh — opus_critic now exposes the deepest tier
+  # (default since the recent commit raising defaults).
+  assert_persona_includes_tier \
+    "opus-critic" '"xhigh"' \
+    "SSE bypasses the 60s ceiling; xhigh is the persona's default since the defaults-to-xhigh change"
+}
+
+probe_codex_critic_xhigh_allowed() {
+  # Static check: codex-critic (gpt-5.5) now allows xhigh. Empirical:
+  # 56s baseline at xhigh on a tiny prompt previously busted the 60s
+  # MCP ceiling — SSE-streamed responses make this irrelevant. Default
+  # is now xhigh.
+  assert_persona_includes_tier \
     "codex-critic" '"xhigh"' \
-    "gpt-5.5 at xhigh is 56s on a tiny prompt; busts the 60s MCP ceiling"
+    "SSE bypass + MCP_TOOL_TIMEOUT=600000 lifted the prior xhigh constraint; xhigh is now the default"
 }
 
-probe_codex_reviewer_xhigh_rejected() {
-  # Static check: codex-reviewer (gpt-5.3-codex) must reject xhigh.
-  # Sibling model is faster but xhigh still pushes the ceiling on realistic
-  # diffs.
-  assert_persona_excludes_tier \
+probe_codex_reviewer_xhigh_allowed() {
+  # Static check: codex-reviewer (gpt-5.3-codex) now allows xhigh. Sibling
+  # model is faster but xhigh still pushes the ceiling on realistic diffs;
+  # SSE handles the wall-clock transparently.
+  assert_persona_includes_tier \
     "codex-reviewer" '"xhigh"' \
-    "gpt-5.3-codex at xhigh still pushes the 60s MCP ceiling on real diffs"
+    "SSE bypass lifted the prior xhigh constraint; xhigh is now the default"
+}
+
+probe_gemini_critic_xhigh_rejected() {
+  # Static check: gemini_critic MUST exclude "xhigh" — Copilot's gemini-3.x
+  # route strict-validates `reasoning_effort` and 400s on values outside
+  # `[low medium high]` (empirically verified 2026-05-14 — error message:
+  # `reasoning_effort "xhigh" is not supported by model gemini-3.1-pro-preview`).
+  # This is an UPSTREAM constraint (Copilot 400s), not a proxy choice.
+  assert_persona_excludes_tier \
+    "gemini-critic" '"xhigh"' \
+    "Copilot's gemini-3.x route 400s on xhigh; persona allowlist must reflect that"
 }
 
 # ===========================================================================
