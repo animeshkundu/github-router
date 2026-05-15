@@ -92,15 +92,15 @@ describe("PERSONAS_READ", () => {
     expect(byName["opus-critic"]?.allowedEfforts).toEqual(allFour)
   })
 
-  test("opus-critic defaults to medium effort (cheap-and-fast same-lab gut check)", () => {
-    const opus = PERSONAS_READ.find((p) => p.agentName === "opus-critic")
-    expect(opus?.defaultEffort).toBe("medium")
+  test("codex-critic / codex-reviewer / opus-critic default to xhigh (deepest reasoning, SSE handles wall-clock)", () => {
+    const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
+    expect(byName["codex-critic"]?.defaultEffort).toBe("xhigh")
+    expect(byName["codex-reviewer"]?.defaultEffort).toBe("xhigh")
+    expect(byName["opus-critic"]?.defaultEffort).toBe("xhigh")
   })
 
-  test("codex-critic / codex-reviewer / gemini-critic default to high effort", () => {
+  test("gemini-critic defaults to high (Copilot's gemini route 400s on xhigh — see allowedEfforts test below)", () => {
     const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
-    expect(byName["codex-critic"]?.defaultEffort).toBe("high")
-    expect(byName["codex-reviewer"]?.defaultEffort).toBe("high")
     expect(byName["gemini-critic"]?.defaultEffort).toBe("high")
   })
 

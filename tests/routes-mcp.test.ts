@@ -459,9 +459,11 @@ describe("/mcp tools/call routing", () => {
     expect(upstream.instructions).toContain("codex-critic")
     expect(upstream.instructions).toContain("1–5") // grading rubric
     expect(upstream.stream).toBe(false)
-    // Default effort is "high" (Phase 2C — lower than xhigh per cost
-    // tradeoff, raisable per call via the effort argument).
-    expect(upstream.reasoning?.effort).toBe("high")
+    // Default effort is "xhigh" (raised from "high" — SSE-streamed
+    // responses bypass the 60s tools/call ceiling, so the deepest
+    // reasoning bucket is the right default. Lower per call via the
+    // effort argument when wall-clock matters more than depth.)
+    expect(upstream.reasoning?.effort).toBe("xhigh")
     const userText = upstream.input[0].content[0].text
     expect(userText).toContain("Review this trivial design.")
     expect(userText).toContain("ctx-123")
@@ -702,7 +704,7 @@ describe("/mcp tools/call routing", () => {
     expect(upstream.system).toContain("opus-critic")
   })
 
-  test("opus_critic at effort:'medium' (default) routes with output_config.effort=medium", async () => {
+  test("opus_critic with no explicit effort uses persona.defaultEffort=xhigh", async () => {
     const captured = mockMessagesUpstream("no material objection")
     await rpc({
       jsonrpc: "2.0",
@@ -710,7 +712,7 @@ describe("/mcp tools/call routing", () => {
       method: "tools/call",
       params: {
         name: "opus_critic",
-        arguments: { prompt: "review" },  // omit effort → persona.defaultEffort = "medium"
+        arguments: { prompt: "review" },  // omit effort → persona.defaultEffort = "xhigh"
       },
     })
     const upstream = captured.lastBody as {
@@ -719,8 +721,8 @@ describe("/mcp tools/call routing", () => {
       output_config?: { effort?: string }
     }
     expect(upstream.thinking?.type).toBe("adaptive")
-    expect(upstream.output_config?.effort).toBe("medium")
-    expect(upstream.max_tokens).toBe(8192)
+    expect(upstream.output_config?.effort).toBe("xhigh")
+    expect(upstream.max_tokens).toBe(32768)
   })
 
   test("opus_critic at effort:'xhigh' routes with output_config.effort=xhigh", async () => {

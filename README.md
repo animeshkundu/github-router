@@ -83,9 +83,9 @@ Each persona is exposed both as a Claude Code subagent (callable via the `Task` 
 
 | Subagent | Model | Endpoint | Effort tiers (default) |
 |---|---|---|---|
-| `codex-critic` | gpt-5.5 | `/v1/responses` | low \| medium \| high \| xhigh (high) |
-| `codex-reviewer` | gpt-5.3-codex | `/v1/responses` | low \| medium \| high \| xhigh (high) |
-| `opus-critic` | claude-opus-4-7 | `/v1/messages` | low \| medium \| high \| xhigh (medium) |
+| `codex-critic` | gpt-5.5 | `/v1/responses` | low \| medium \| high \| xhigh (xhigh) |
+| `codex-reviewer` | gpt-5.3-codex | `/v1/responses` | low \| medium \| high \| xhigh (xhigh) |
+| `opus-critic` | claude-opus-4-7 | `/v1/messages` | low \| medium \| high \| xhigh (xhigh) |
 | `gemini-critic` | gemini-3.1-pro-preview | `/v1/chat/completions` | low \| medium \| high (high) |
 | `peer-review-coordinator` | (meta) | — | — |
 
