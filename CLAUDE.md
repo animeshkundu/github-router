@@ -198,24 +198,24 @@ The `claude` subcommand auto-injects three peer-model review tools as Claude Cod
 
 | Persona | Model | Endpoint | Effort | Latency on ~600B prompt |
 |---|---|---|---|---|
-| codex_critic | gpt-5.5 | /v1/responses | xhigh | 56.3s (REMOVED — busts 60s ceiling) |
-| codex_critic | gpt-5.5 | /v1/responses | high (default) | 23.8s |
+| codex_critic | gpt-5.5 | /v1/responses | xhigh (default) | 56.3s — fits inside SSE-streamed `/mcp` (no MCP per-tool-call timeout) |
+| codex_critic | gpt-5.5 | /v1/responses | high | 23.8s |
 | codex_critic | gpt-5.5 | /v1/responses | medium | 26.3s |
 | codex_reviewer | gpt-5.3-codex | /v1/responses | high | 16.0s |
-| opus_critic | claude-opus-4-7 | /v1/messages | medium (default; thinking.budget=3000) | 22.5s on a trivial prompt; expect 30-50s on real reviews |
+| opus_critic | claude-opus-4-7 | /v1/messages | xhigh (default; thinking.budget=24000) | 30-90s on real reviews — fits inside SSE-streamed `/mcp` |
 
-The user's intuition was almost right — `high` and `medium` are comfortably under 60s. **Only `xhigh` busted the ceiling**: at 56.3s on a 600-byte prompt it sat AT the per-tool-call wait, and a 14KB brief at `xhigh` would scale roughly linearly to 90-150s. Probe coverage in `scripts/probe-copilot-compat.sh`: `opus_critic_low`, `opus_critic_medium`, `opus_critic_high_rejected` (asserts the proxy-side gate), `codex_critic_xhigh_rejected`, `codex_reviewer_xhigh_rejected`. Matrix rows mirrored into `docs/copilot-compat-matrix.md`.
+`xhigh` is the default on codex_critic, codex_reviewer, and opus_critic because commit `d3491d6` shipped SSE-streamed `/mcp` responses (`handler.ts:handleToolsCallSSE`). Claude Code's MCP HTTP client honors `text/event-stream` and does NOT apply the ~60s per-tool-call timer to streamed responses, so the previous `xhigh` 60s-ceiling concern no longer applies on long-running personas. Probe coverage in `scripts/probe-copilot-compat.sh`: `opus_critic_low`, `opus_critic_medium`, `opus_critic_high_allowed`, `opus_critic_xhigh_allowed`, `codex_critic_xhigh_allowed`, `codex_reviewer_xhigh_allowed`, `gemini_critic_xhigh_rejected`. Matrix rows mirrored into `docs/copilot-compat-matrix.md`.
 
 **Per-persona allowedEfforts** (Phase A1; enforced by `persona.allowedEfforts` in `src/lib/peer-mcp-personas.ts`, gated in `handleToolsCall` BEFORE the `inFlightToolsCall` increment so a rejected effort doesn't burn a concurrency slot):
 
 | Persona | low | medium | high | xhigh | Default |
 |---|---|---|---|---|---|
-| codex_critic | ✅ | ✅ | ✅ | ❌ rejected `-32602 RPC_INVALID_PARAMS` | high |
-| codex_reviewer | ✅ | ✅ | ✅ | ❌ rejected `-32602 RPC_INVALID_PARAMS` | high |
-| opus_critic | ✅ | ✅ | ❌ rejected `-32602 RPC_INVALID_PARAMS` | ❌ rejected `-32602 RPC_INVALID_PARAMS` | medium |
-| gemini_critic | ✅ | ✅ | ✅ | ✅ | high |
+| codex_critic | ✅ | ✅ | ✅ | ✅ (SSE-streamed) | xhigh |
+| codex_reviewer | ✅ | ✅ | ✅ | ✅ (SSE-streamed) | xhigh |
+| opus_critic | ✅ | ✅ | ✅ | ✅ (SSE-streamed) | xhigh |
+| gemini_critic | ✅ | ✅ | ✅ | ❌ rejected `-32602 RPC_INVALID_PARAMS` | high |
 
-`xhigh` is gone from both codex personas because it sits AT the 60s ceiling on tiny prompts and busts it on real briefs (see latency matrix above). `opus_critic` accepts only `low` and `medium` — `high`/`xhigh` would require thinking budgets that can't fit in 60s at realistic claude-opus-4-7 reasoning rates (~80-150 tps); for deep dives use `codex_critic` at `high` (with brief <8 KB) or `gemini_critic`. `gemini_critic` keeps the full enum because Copilot's gemini route may silently auto-apply effort regardless of the knob, and gemini-3.x handles long context well so there's no empirical case for trimming.
+`xhigh` is allowed on the three long-running personas because SSE-streamed `/mcp` keeps the wall time off the MCP per-tool-call clock. `gemini_critic` is the exception: Copilot's gemini route returned 400 (`reasoning_effort "xhigh" is not supported by model gemini-3.1-pro-preview; supported values: [low medium high]`), so the gate rejects xhigh upstream of any Copilot call. The empirical 400 is captured in the proxy log for posterity.
 
 **Pre-flight `predictedTooLong` cap** (Phase A2; defense-in-depth on top of the effort gate). Even `high` on the codex personas can bust the ceiling once the brief grows past ~8 KB (the 23.8s baseline scales roughly linearly with input). The cap rejects with `isError: true` (NOT an RPC error — the request is syntactically valid; the prediction is operational) and an actionable message telling the caller to drop to `medium` or split the brief into 2-4 parallel sub-calls per the decomposition guidance:
 
