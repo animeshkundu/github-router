@@ -2,6 +2,10 @@
 
 A reverse proxy that exposes GitHub Copilot as OpenAI and Anthropic compatible API endpoints.
 
+## Primary deployment target
+
+The primary deployment target for this project is **Windows 11**. macOS and Linux are supported and tested, but Windows is the canonical user environment — every PR must pass the `windows-latest` CI job before merge. A Windows CI failure is treated as a merge blocker, not as flake. If Windows behavior diverges from POSIX, the Windows path is the authoritative one to fix; do not POSIX-skip a Windows failure to land a change.
+
 ## Design docs
 
 - [`docs/peer-mcp-design.md`](docs/peer-mcp-design.md) — current architecture and phased migration plan for the peer-model MCP integration (codex_critic gpt-5.5, codex_reviewer gpt-5.3-codex, gemini_critic gemini-3.1-pro), plus the deployed-state section covering auto-invocation triggers, allowedEfforts, the latency-by-effort matrix, and the predictedTooLong cap. Read this before changing anything in `src/routes/mcp/`, `src/lib/peer-mcp-personas.ts`, or `src/lib/codex-mcp-config.ts`.
@@ -23,6 +27,8 @@ A reverse proxy that exposes GitHub Copilot as OpenAI and Anthropic compatible A
 - **Bun request-signal quirk**: `c.req.raw.signal` from a Bun/srvx HTTP handler is aborted as soon as the request body is fully consumed (i.e., right after `await c.req.json()`), even when the consumer is still happily reading the response. Do NOT propagate it into upstream `fetch()` calls — every such call would fail immediately with "This operation was aborted." `/v1/responses` and `/mcp` both intentionally drop it; tear-down on consumer cancel is handled at the `ReadableStream.cancel()` callback for streaming responses, and is a no-op for non-streaming responses (the upstream call completes regardless). If a future change truly needs to propagate consumer cancel, verify with a real Bun.serve listener — unit tests with `app.request(new Request(...))` do not reproduce the quirk.
 - **Compatibility probe rule**: every field, header, body shape, or tool type that any client (Claude Code, Codex, raw API users) emits MUST have a probe row in `scripts/probe-copilot-compat.sh` AND a row in `docs/copilot-compat-matrix.md` — with an explicit accept-or-reject expectation. Discovery sources: real traffic (`bun run discover:fields` after launching with `GH_ROUTER_LOG_FIELDS=1`), code changes that emit new shapes, exploratory probing. The probe set grows monotonically; removing a row requires written justification in the matrix doc. Run `bun run probe:copilot` (strict mode) before merging changes that touch request shaping. Symmetric: both `❌ 400` and `✅ 200` rows are asserted, so drift in either direction surfaces immediately rather than after users hit it.
 - **Strip-rule probe rule**: adding (or removing) a strip rule in `stripAnthropicOnlyFields` / `sanitizeCacheControl` / equivalent requires (a) an end-to-end probe in `scripts/probe-copilot-compat.sh` asserting the user-facing behavior the strip enables (typically a `200` where without the strip Copilot would 400), AND (b) a row in `docs/copilot-compat-matrix.md` documenting the upstream truth. The probe id should be referenced in the strip's code comment so a future contributor following a breadcrumb lands on the empirical evidence.
+- **Windows-first CI**: `windows-latest` CI must be green before merge. Any test that skips on `process.platform === "win32"` requires an explicit written justification (e.g., the symlink-confused-deputy probe at `tests/lib-paths.test.ts:67` is justified because file-typed symlinks legitimately require admin/Developer Mode). Adding new `win32 return` guards to existing tests is a regression of CI coverage on the primary deployment target.
+- **Zero-tolerance for flaky / failing CI**: every PR must have a fully green CI run across the entire matrix before merge — no exceptions, no "rerun until green," no "the failing test is unrelated to my change." Flakes and pre-existing failures are merge blockers for whoever is next to land a PR, regardless of who introduced them. If you encounter a flaky test, root-cause it and either fix the underlying race / resource leak / timing bug, OR delete the test with a written justification in the PR description (suppressing via `.skip` or retry-loops is not acceptable — those convert visible bugs into invisible ones). The cost of pausing to fix a flake is bounded; the cost of a green-rate that creeps below 100% compounds into "CI doesn't mean anything" and bugs ship.
 
 ## Commands
 
@@ -70,6 +76,8 @@ Files API (`/v1/files/*`) → 404; ADVISOR (`advisor-tool-2026-03-01`) → Phase
 ### `apiKeyHelper` and external credential scripts
 
 The user's `settings.json` is mirror-copied into `CLAUDE_CONFIG_DIR` at startup so any `apiKeyHelper` / `awsCredentialExport` / `awsAuthRefresh` / `gcpAuthRefresh` defined there still fires inside the proxy session. The proxy supplies auth via the synthetic `claudeAiOauth` blob in `<CLAUDE_CONFIG_DIR>/.credentials.json`; if a user's helper mints an additional `x-api-key` header it's sent alongside our Bearer (Copilot ignores `x-api-key`). See [`docs/auth-isolation.md`](docs/auth-isolation.md).
+
+**MCPs**: user-scope and local-scope MCPs are stored in `~/.claude.json`, which is MIRRORED (snapshot-copied at proxy startup). To register MCPs that persist across `github-router claude` launches, add them via plain `claude mcp add` (or edit `~/.claude.json` directly) *outside* a proxy session — the next launch's snapshot will pick them up. MCPs added inside a proxy session are session-scoped and lost when that session ends; this is by design (the mirror is one-way snapshot, not write-back, to keep the proxy's session state isolated from the user's real config).
 
 ### Default models
 

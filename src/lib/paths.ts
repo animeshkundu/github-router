@@ -163,7 +163,7 @@ function policyFor(name: string): MirrorPolicy {
  * reclassification that would let `sweepStalePeerAgentMdFiles` delete
  * files in the user's real `~/.claude/agents/`).
  */
-export const __testing = { policyFor }
+export const __testing = { policyFor, ensureSharedSymlink }
 
 /**
  * Names with `SHARED` policy, materialized once for iteration in
@@ -505,10 +505,17 @@ async function ensureSharedSymlink(
   try {
     await fs.mkdir(sourcePath, { recursive: true })
   } catch (err) {
-    // If the path exists as something other than a dir (file, symlink),
-    // skip with a debug log — the user has a non-standard setup and we
-    // shouldn't clobber.
-    consola.debug(
+    // Escalated from debug → warn per the CLAUDE.md "smoking gun"
+    // rule (consistent with the symlink and rename catches below):
+    // if the source dir cannot be created (e.g. a stray regular file
+    // sitting at `~/.claude/projects`, perms blocking mkdir on a
+    // corp-managed Windows box, OneDrive cloud-only reparse point),
+    // ensureSharedSymlink returns without creating a junction. The
+    // spawned Claude Code child then writes to the REAL `~/.claude`
+    // while the proxy reads from the mirror — exactly the split-brain
+    // pattern this whole function exists to prevent. Silent debug-log
+    // hid this from us once already; warn so the user sees the cause.
+    consola.warn(
       `ensureSharedSymlink(${name}): cannot mkdir source ${sourcePath}:`,
       err,
     )
@@ -521,7 +528,16 @@ async function ensureSharedSymlink(
     existing = await fs.lstat(mirrorPath)
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      consola.debug(
+      // Escalated from debug → warn per the CLAUDE.md "smoking gun"
+      // rule (consistent with the other fs catches in this function):
+      // ENOENT is the only expected-and-benign failure mode here
+      // (slot doesn't exist yet — falls through to create). Any other
+      // lstat failure (EACCES, ELOOP, EIO from a sketchy reparse
+      // point) means we bail without creating the junction, which
+      // silently leaves the proxy and child diverged. A visible warn
+      // surfaces the root cause instead of a mysteriously missing
+      // junction.
+      consola.warn(
         `ensureSharedSymlink(${name}): cannot lstat ${mirrorPath}:`,
         err,
       )
@@ -530,20 +546,46 @@ async function ensureSharedSymlink(
   }
 
   if (existing?.isSymbolicLink()) {
-    // Compare normalized target. `readlink` returns the value verbatim
-    // (which we wrote as the absolute `sourcePath` originally), so a
-    // strict-equal check is sufficient — no `realpath` needed.
-    let currentTarget: string | null = null
-    try {
-      currentTarget = await fs.readlink(mirrorPath)
-    } catch (err) {
-      consola.debug(
-        `ensureSharedSymlink(${name}): cannot readlink ${mirrorPath}:`,
-        err,
+    // Resolve both sides to their canonical absolute paths and compare.
+    // We use `fs.realpath` rather than the raw `fs.readlink()` output
+    // because Windows junctions resolve via readlink to `\\?\`-prefixed
+    // device-namespace paths (e.g. `\\?\C:\Users\foo\.claude\projects`)
+    // while we wrote the plain absolute `sourcePath` (e.g.
+    // `C:\Users\foo\.claude\projects`) with `fs.symlink`. A literal
+    // `===` on the raw readlink output never matched on Windows, so
+    // the fast path silently failed and every startup tore down +
+    // recreated all 9 SHARED junctions — masked locally because NTFS
+    // File System Tunneling forges the creation timestamp for a name
+    // deleted and recreated within 15 s (the per-startup churn was
+    // real, the ctime-stable assertion was a false negative). The
+    // realpath comparison canonicalizes both forms to the same string
+    // on POSIX and Windows alike, and as a bonus handles drive-letter
+    // casing / trailing-slash differences too. The extra two syscalls
+    // per slot are negligible at proxy startup (runs once per launch).
+    //
+    // CRITICAL: sourceReal and currentReal are NOT treated symmetrically.
+    // If `sourceReal` is null (we just mkdir'd it above, but realpath
+    // failed — OneDrive cloud-only reparse point, EACCES on parent,
+    // EXDEV mount oddity), we WARN AND RETURN rather than fall through.
+    // Falling through would do unlink+symlink+rename with the same
+    // failing realpath next launch — silent every-startup churn, the
+    // exact bug class round-3 G2 fixed in a different code path.
+    // `currentReal === null` is benign (broken/wrong slot — replace).
+    const sourceReal = await fs.realpath(sourcePath).catch(() => null)
+    if (sourceReal === null) {
+      consola.warn(
+        `ensureSharedSymlink(${name}): cannot resolve source ${sourcePath} ` +
+          `— skipping junction creation to avoid silent every-startup churn. ` +
+          `Inspect the source dir's permissions / OneDrive sync state and re-launch.`,
       )
+      return
     }
-    if (currentTarget === sourcePath) return
-    // Wrong target — fall through to the atomic-rename replace path.
+    const currentReal = await fs.realpath(mirrorPath).catch(() => null)
+    if (currentReal !== null && currentReal === sourceReal) {
+      return
+    }
+    // Wrong target (or unresolvable mirror) — fall through to the
+    // atomic-rename replace path.
   } else if (existing?.isDirectory()) {
     // Legacy real directory at the slot. Try `fs.rmdir` — on POSIX it
     // succeeds ONLY if the directory is empty, so there's nothing to
@@ -559,7 +601,7 @@ async function ensureSharedSymlink(
           `from an older github-router version; refusing to clobber. ` +
           `If you want chat-history continuity for "${name}", move its ` +
           `contents into ${sourcePath}/ then delete ${mirrorPath}; the ` +
-          `mirror will create a symlink on next launch. ` +
+          `mirror will create a symlink (junction on Windows) on next launch. ` +
           `(rmdir error: ${(err as NodeJS.ErrnoException).code ?? "unknown"})`,
       )
       return
@@ -577,22 +619,50 @@ async function ensureSharedSymlink(
   // 3. Atomic-rename creation: symlink to a unique temp path, then
   //    rename over the slot. `fs.rename` replaces existing symlinks
   //    atomically on POSIX and is safe against concurrent racers.
+  //    On Windows, MoveFileEx with MOVEFILE_REPLACE_EXISTING does NOT
+  //    replace an existing directory or junction destination
+  //    (npm/cli#9021), so when the slot already holds a wrong-target
+  //    junction we must explicitly unlink it first. The sub-millisecond
+  //    window of no-link is acceptable: ensureClaudeConfigMirror is
+  //    idempotent under concurrency and only runs at proxy startup,
+  //    before any spawned Claude Code child has been launched.
   const tempPath = `${mirrorPath}.tmp.${process.pid}.${randomBytes(4).toString("hex")}`
   try {
-    await fs.symlink(sourcePath, tempPath)
+    await fs.symlink(
+      sourcePath,
+      tempPath,
+      process.platform === "win32" ? "junction" : "dir",
+    )
   } catch (err) {
-    // Extremely unlikely (the temp path is per-pid + 8-hex random) but
-    // log and bail rather than throw — the proxy can still start.
-    consola.debug(
+    // Escalated from debug → warn per the CLAUDE.md "smoking gun" rule:
+    // the rule applies to ALL fs catches in this function, not just the
+    // rename one. The temp path is per-pid + 8-hex random so EEXIST is
+    // essentially impossible — any failure here (EPERM on Windows
+    // without DevMode, EXDEV cross-volume, ENOSPC, …) is a real
+    // operational problem the user needs to see.
+    consola.warn(
       `ensureSharedSymlink(${name}): symlink ${tempPath} failed:`,
       err,
     )
     return
   }
+  if (process.platform === "win32" && existing?.isSymbolicLink()) {
+    // Windows-only: clear the wrong-target junction so the rename
+    // below can land. Best-effort — if a concurrent racer already
+    // unlinked it, the rename succeeds as a CREATE; if a concurrent
+    // racer already replaced it with a fresh junction, the rename
+    // hits the catch below and we surface a warn.
+    await fs.unlink(mirrorPath).catch(() => {})
+  }
   try {
     await fs.rename(tempPath, mirrorPath)
   } catch (err) {
-    consola.debug(
+    // Escalated from debug → warn per the CLAUDE.md "smoking gun"
+    // rule (consistent with the fs.symlink catch above): a silent
+    // debug log here previously hid the Windows rename-replace bug
+    // (junction-over-junction MoveFileEx EPERM). Post-fix, rename
+    // failures should be rare and visible.
+    consola.warn(
       `ensureSharedSymlink(${name}): rename ${tempPath} → ${mirrorPath} failed:`,
       err,
     )
