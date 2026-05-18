@@ -754,6 +754,100 @@ test("ensureClaudeConfigMirror SHARED-symlink concurrent: parallel calls don't E
     "utf8",
   )
   expect(readback).toBe(sentinelBody)
+
+  // G6: no `.tmp.<pid>.<hex>` leftovers from the racing rename. The
+  // catch-and-cleanup branch must reap its own temp; if a regression
+  // skips the cleanup we'd see litter accumulating in the mirror dir
+  // across every concurrent invocation.
+  const mirrorEntries = await fs.readdir(PATHS.CLAUDE_CONFIG_DIR)
+  const tempLitter = mirrorEntries.filter((name) => name.includes(".tmp."))
+  expect(tempLitter).toEqual([])
+
+  // G6: every SHARED entry — not just the spot-checked `projects` —
+  // resolves to its source dir behaviorally. Earlier the loop only
+  // verified `projects`; if a regression broke one of the others
+  // (e.g. trailing-slash drift in the sourcePath construction for a
+  // specific name) the spot-check would have missed it.
+  for (const sharedName of [
+    "projects",
+    "transcripts",
+    "todos",
+    "shell-snapshots",
+    "sessions",
+    "tasks",
+    "plans",
+    "file-history",
+    "backups",
+  ]) {
+    const slot = path.join(PATHS.CLAUDE_CONFIG_DIR, sharedName)
+    const source = path.join(claudeHome, sharedName)
+    const perEntrySentinel = `sentinel-${randomBytes(8).toString("hex")}.txt`
+    const perEntryBody = `roundtrip-${sharedName}-${Date.now()}`
+    await fs.writeFile(path.join(slot, perEntrySentinel), perEntryBody)
+    const back = await fs.readFile(
+      path.join(source, perEntrySentinel),
+      "utf8",
+    )
+    expect(back).toBe(perEntryBody)
+  }
+})
+
+test("ensureClaudeConfigMirror SHARED-symlink concurrent wrong-target replace: parallel re-points converge correctly (G6)", async () => {
+  // Pre-place a wrong-target junction at the slot, then run N=4
+  // parallel `ensureClaudeConfigMirror` calls. On Windows this
+  // exercises the unlink-then-rename branch under contention — every
+  // call's lstat sees a symlink, every call enters the replace path.
+  // The end-state contract: the slot resolves to the correct source,
+  // the decoy is untouched, no temp files are left behind.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await fs.mkdir(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, mode: 0o700 })
+
+  const slotPath = path.join(PATHS.CLAUDE_CONFIG_DIR, "projects")
+  const sourcePath = path.join(claudeHome, "projects")
+  const decoyTarget = path.join(
+    tempDir,
+    `decoy-concurrent-${randomBytes(4).toString("hex")}`,
+  )
+  await fs.mkdir(decoyTarget, { recursive: true })
+  await fs.symlink(
+    decoyTarget,
+    slotPath,
+    process.platform === "win32" ? "junction" : "dir",
+  )
+
+  // N=4 parallel ensures, all of which see the wrong-target slot.
+  await expect(
+    Promise.all([
+      ensureClaudeConfigMirror(),
+      ensureClaudeConfigMirror(),
+      ensureClaudeConfigMirror(),
+      ensureClaudeConfigMirror(),
+    ]),
+  ).resolves.toBeDefined()
+
+  // 1. Slot now resolves to the correct source via sentinel round-trip.
+  const sentinelName = `sentinel-${randomBytes(8).toString("hex")}.txt`
+  const sentinelBody = `repoint-parallel-${Date.now()}`
+  await fs.writeFile(path.join(slotPath, sentinelName), sentinelBody)
+  const back = await fs.readFile(
+    path.join(sourcePath, sentinelName),
+    "utf8",
+  )
+  expect(back).toBe(sentinelBody)
+
+  // 2. Decoy untouched — the sentinel must NOT have landed there
+  // (proves all 4 calls re-pointed correctly, not just the first).
+  await expect(
+    fs.stat(path.join(decoyTarget, sentinelName)),
+  ).rejects.toThrow()
+
+  // 3. No temp-file litter from the concurrent rename catches.
+  const mirrorEntries = await fs.readdir(PATHS.CLAUDE_CONFIG_DIR)
+  const tempLitter = mirrorEntries.filter((name) => name.includes(".tmp."))
+  expect(tempLitter).toEqual([])
 })
 
 // ============================================================
