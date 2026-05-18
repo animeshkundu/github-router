@@ -24,6 +24,42 @@ mock.module("node:os", () => ({
 const { ensurePaths, PATHS, sweepStaleRuntimeFiles, sweepStalePeerAgentMdFiles, writeRuntimeFileSecure, ensureClaudeConfigMirror, __testing } =
   await import("../src/lib/paths")
 
+// Round-4 #4: verify that monkey-patching `fs.<name>` / `consola.<name>`
+// is actually intercepted by the library-side imports of those
+// modules. Both the library and these tests use `import X from "..."`
+// (default-import form) — so the load-bearing invariant is that
+// `(await import(...)).default` is the SAME object we monkey-patched.
+// We assert that explicitly. ESM/CJS interop in Bun gives every
+// default-import consumer the same singleton object, but a future
+// loader change could silently break that and our spy-based tests
+// would then pass vacuously (no spy invocations recorded ⇒
+// "spy NOT called for X" trivially true). This sanity check fails
+// loud before we draw any inference from `spy.mock.calls`.
+//
+// Note: we check `mod.default[prop]`, not `mod[prop]`. The
+// re-import's named-export binding (`mod.realpath`) is a separate
+// reference from the default object and is NOT what the library
+// sees through its default import — so checking the named binding
+// would be the wrong test.
+async function expectFsSpyInstalled(
+  prop: string,
+  spy: unknown,
+): Promise<void> {
+  const fsModule = await import("node:fs/promises")
+  expect(
+    (fsModule.default as unknown as Record<string, unknown>)[prop],
+  ).toBe(spy)
+}
+async function expectConsolaSpyInstalled(
+  prop: string,
+  spy: unknown,
+): Promise<void> {
+  const consolaModule = await import("consola")
+  expect(
+    (consolaModule.default as unknown as Record<string, unknown>)[prop],
+  ).toBe(spy)
+}
+
 test("ensurePaths creates token file with permissions", async () => {
   await ensurePaths()
   const tokenStats = await fs.stat(PATHS.GITHUB_TOKEN_PATH)
@@ -916,6 +952,15 @@ test("ensureClaudeConfigMirror fast-path: re-running does NOT churn SHARED junct
   ;(fs as unknown as { rename: typeof fs.rename }).rename = renameSpy
   ;(fs as unknown as { unlink: typeof fs.unlink }).unlink = unlinkSpy
   try {
+    // Round-4 #4 sanity: prove the monkey-patch is visible to the
+    // library-side `import fs from "node:fs/promises"`. Without
+    // this guard, a silent intercept failure would make the
+    // "zero SHARED-slot calls" assertion trivially true and we'd
+    // ship a Windows churn regression undetected.
+    await expectFsSpyInstalled("symlink", symlinkSpy)
+    await expectFsSpyInstalled("rename", renameSpy)
+    await expectFsSpyInstalled("unlink", unlinkSpy)
+
     // Steady-state re-invocation. Expectation: no SHARED slot is
     // touched by any of the three mutation syscalls.
     await ensureClaudeConfigMirror()
@@ -976,6 +1021,11 @@ test("ensureSharedSymlink: rename failure surfaces a consola.warn and cleans up 
   ;(fs as unknown as { unlink: unknown }).unlink = unlinkSpy
   ;(consola as unknown as { warn: unknown }).warn = warnSpy
   try {
+    // Round-4 #4 sanity: intercept is live on both modules.
+    await expectFsSpyInstalled("rename", renameSpy)
+    await expectFsSpyInstalled("unlink", unlinkSpy)
+    await expectConsolaSpyInstalled("warn", warnSpy)
+
     await __testing.ensureSharedSymlink("projects", claudeHome, mirrorDir)
 
     // Warn fired with a message identifying the failing call.
@@ -1033,6 +1083,10 @@ test("ensureSharedSymlink: symlink failure surfaces a consola.warn (G1 regressio
     ;(fs as unknown as { symlink: unknown }).symlink = symlinkSpy
     ;(consola as unknown as { warn: unknown }).warn = warnSpy
     try {
+      // Round-4 #4 sanity: intercept is live on both modules.
+      await expectFsSpyInstalled("symlink", symlinkSpy)
+      await expectConsolaSpyInstalled("warn", warnSpy)
+
       await __testing.ensureSharedSymlink("projects", claudeHome, mirrorDir)
       const warnedAboutSymlink = warnSpy.mock.calls.some((call) => {
         const msg = call[0]
@@ -1111,6 +1165,10 @@ test("ensureSharedSymlink: Windows unlink-before-rename call ordering (G3 mechan
   ;(fs as unknown as { unlink: unknown }).unlink = unlinkSpy
   ;(fs as unknown as { rename: unknown }).rename = renameSpy
   try {
+    // Round-4 #4 sanity: intercept is live on fs/promises.
+    await expectFsSpyInstalled("unlink", unlinkSpy)
+    await expectFsSpyInstalled("rename", renameSpy)
+
     await __testing.ensureSharedSymlink("projects", claudeHome, mirrorDir)
 
     const unlinkIdx = events.findIndex(
@@ -1185,6 +1243,9 @@ test("ensureSharedSymlink: Windows rename observes an EMPTY slot (G3 effect)", a
   })
   ;(fs as unknown as { rename: unknown }).rename = renameSpy
   try {
+    // Round-4 #4 sanity: intercept is live on fs/promises.
+    await expectFsSpyInstalled("rename", renameSpy)
+
     await __testing.ensureSharedSymlink("projects", claudeHome, mirrorDir)
     // At the moment of rename, the wrong-target junction must already
     // be unlinked (slot missing → rename is a CREATE rather than a
@@ -1237,6 +1298,9 @@ test("ensureSharedSymlink: mkdir(source) failure surfaces a consola.warn (Round-
   const warnSpy = mock(originalWarn.bind(consola))
   ;(consola as unknown as { warn: unknown }).warn = warnSpy
   try {
+    // Round-4 #4 sanity: intercept is live on consola.
+    await expectConsolaSpyInstalled("warn", warnSpy)
+
     await __testing.ensureSharedSymlink("projects", claudeHome, mirrorDir)
     const warnedAboutMkdir = warnSpy.mock.calls.some((call) => {
       const msg = call[0]
@@ -1296,6 +1360,11 @@ test("ensureSharedSymlink: lstat(mirror) non-ENOENT failure surfaces a consola.w
   ;(fs as unknown as { symlink: unknown }).symlink = symlinkSpy
   ;(consola as unknown as { warn: unknown }).warn = warnSpy
   try {
+    // Round-4 #4 sanity: intercept is live on both modules.
+    await expectFsSpyInstalled("lstat", lstatSpy)
+    await expectFsSpyInstalled("symlink", symlinkSpy)
+    await expectConsolaSpyInstalled("warn", warnSpy)
+
     await __testing.ensureSharedSymlink("projects", claudeHome, mirrorDir)
     const warnedAboutLstat = warnSpy.mock.calls.some((call) => {
       const msg = call[0]
@@ -1384,6 +1453,13 @@ test("ensureSharedSymlink: realpath(sourcePath) failure surfaces a consola.warn 
   ;(fs as unknown as { unlink: unknown }).unlink = unlinkSpy
   ;(consola as unknown as { warn: unknown }).warn = warnSpy
   try {
+    // Round-4 #4 sanity: intercept is live on both modules.
+    await expectFsSpyInstalled("realpath", realpathSpy)
+    await expectFsSpyInstalled("symlink", symlinkSpy)
+    await expectFsSpyInstalled("rename", renameSpy)
+    await expectFsSpyInstalled("unlink", unlinkSpy)
+    await expectConsolaSpyInstalled("warn", warnSpy)
+
     await __testing.ensureSharedSymlink("projects", claudeHome, mirrorDir)
 
     // 1. A warn was surfaced about the unresolvable source.
