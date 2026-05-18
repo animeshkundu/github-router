@@ -1,4 +1,5 @@
 import { test, expect, mock } from "bun:test"
+import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -65,7 +66,13 @@ test("writeRuntimeFileSecure writes 0o600 with O_EXCL semantics", async () => {
 })
 
 test("writeRuntimeFileSecure refuses to follow a pre-placed symlink", async () => {
-  if (process.platform === "win32") return // symlinks need admin on Windows
+  // Skipped on Windows: the test setup deliberately creates a FILE-typed
+  // symlink (`fs.symlink(decoyPath, symlinkPath)` where decoy is a file),
+  // which on Windows requires admin or Developer Mode. The Windows symlink
+  // fix in src/lib/paths.ts uses `'junction'` for directory targets only;
+  // file-typed symlinks remain admin-gated by the OS and are unrelated to
+  // the SHARED-mirror fix.
+  if (process.platform === "win32") return
 
   await ensurePaths()
   const symlinkPath = path.join(
@@ -370,15 +377,25 @@ test("ensureClaudeConfigMirror: ISOLATED entries absent, SHARED entries become s
     ).rejects.toThrow()
   }
 
-  // SHARED entries exist as symlinks pointing at ~/.claude/<name>
+  // SHARED entries resolve to the source directory. We additionally
+  // assert `isSymbolicLink()` + exact `readlink()` ONLY on POSIX —
+  // Windows uses junctions (lstat reports them as directories, and
+  // readlink may return `\\?\` device-namespace prefixed paths).
   for (const shared of ["projects", "transcripts", "todos", "shell_snapshots"]) {
     const linkPath = path.join(PATHS.CLAUDE_CONFIG_DIR, shared)
-    const lst = await fs.lstat(linkPath)
-    expect(lst.isSymbolicLink()).toBe(true)
-    const target = await fs.readlink(linkPath)
-    expect(target).toBe(path.join(claudeHome, shared))
+    // Cross-platform: stat resolves through the link to the source dir.
+    const resolved = await fs.stat(linkPath)
+    expect(resolved.isDirectory()).toBe(true)
+    if (process.platform !== "win32") {
+      const lst = await fs.lstat(linkPath)
+      expect(lst.isSymbolicLink()).toBe(true)
+      const target = await fs.readlink(linkPath)
+      expect(target).toBe(path.join(claudeHome, shared))
+    }
   }
-  // And reading through the symlink returns the source's content
+  // And reading through the link returns the source's content
+  // (behavioral round-trip — works on POSIX symlinks and Windows
+  // junctions identically).
   const sessionViaMirror = await fs.readFile(
     path.join(PATHS.CLAUDE_CONFIG_DIR, "projects", "session.jsonl"),
     "utf8",
@@ -495,8 +512,6 @@ test("ensureClaudeConfigMirror marker-write refuses to clobber an existing symli
 // ============================================================
 
 test("ensureClaudeConfigMirror auto-creates ~/.claude/<X> when missing (so symlink target resolves)", async () => {
-  if (process.platform === "win32") return // symlinks need admin
-
   // Start with NO ~/.claude at all
   const claudeHome = path.join(tempDir, ".claude")
   await fs.rm(claudeHome, { recursive: true, force: true })
@@ -504,46 +519,71 @@ test("ensureClaudeConfigMirror auto-creates ~/.claude/<X> when missing (so symli
 
   await ensureClaudeConfigMirror()
 
-  // The SHARED source dir was auto-created so the symlink isn't dangling
+  // The SHARED source dir was auto-created so the link isn't dangling
   const sourceProjects = await fs.stat(path.join(claudeHome, "projects"))
   expect(sourceProjects.isDirectory()).toBe(true)
 
-  // And the mirror entry is a symlink resolving to it
+  // And the mirror entry resolves to it. We don't assert
+  // `isSymbolicLink()` / exact `readlink()` here because Windows uses
+  // junctions (lstat reports junctions as directories, and readlink may
+  // return `\\?\`-prefixed device-namespace paths). Behavioral round-trip
+  // proves the link works regardless of the underlying mechanism.
   const mirrorProjects = path.join(PATHS.CLAUDE_CONFIG_DIR, "projects")
-  const lst = await fs.lstat(mirrorProjects)
-  expect(lst.isSymbolicLink()).toBe(true)
-  const target = await fs.readlink(mirrorProjects)
-  expect(target).toBe(path.join(claudeHome, "projects"))
+  const mirrorStat = await fs.stat(mirrorProjects)
+  expect(mirrorStat.isDirectory()).toBe(true)
+
+  const sentinelName = `sentinel-${randomBytes(8).toString("hex")}.txt`
+  const sentinelBody = `roundtrip-${Date.now()}`
+  await fs.writeFile(path.join(mirrorProjects, sentinelName), sentinelBody)
+  const readback = await fs.readFile(
+    path.join(claudeHome, "projects", sentinelName),
+    "utf8",
+  )
+  expect(readback).toBe(sentinelBody)
 })
 
 test("ensureClaudeConfigMirror re-points a SHARED symlink whose target is wrong", async () => {
-  if (process.platform === "win32") return
-
   const claudeHome = path.join(tempDir, ".claude")
   await fs.rm(claudeHome, { recursive: true, force: true })
   await fs.mkdir(claudeHome, { recursive: true })
   await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
   await fs.mkdir(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, mode: 0o700 })
 
-  // Pre-place a symlink pointing somewhere else
+  // Pre-place a directory link pointing somewhere else. Use `'junction'`
+  // on Windows (no admin needed); `'dir'` on POSIX.
   const wrongTarget = path.join(tempDir, "decoy-projects")
   await fs.mkdir(wrongTarget, { recursive: true })
+  await fs.writeFile(path.join(wrongTarget, "decoy.txt"), "decoy-content")
   await fs.symlink(
     wrongTarget,
     path.join(PATHS.CLAUDE_CONFIG_DIR, "projects"),
+    process.platform === "win32" ? "junction" : "dir",
   )
 
   await ensureClaudeConfigMirror()
 
-  const after = await fs.readlink(
-    path.join(PATHS.CLAUDE_CONFIG_DIR, "projects"),
+  // After: writing a sentinel through the mirror lands in the correct
+  // source dir (not the decoy). We don't compare `readlink()` strings
+  // because Windows junctions may return `\\?\`-prefixed device paths.
+  const sentinelName = `sentinel-${randomBytes(8).toString("hex")}.txt`
+  const sentinelBody = `repoint-${Date.now()}`
+  await fs.writeFile(
+    path.join(PATHS.CLAUDE_CONFIG_DIR, "projects", sentinelName),
+    sentinelBody,
   )
-  expect(after).toBe(path.join(claudeHome, "projects"))
+  const readback = await fs.readFile(
+    path.join(claudeHome, "projects", sentinelName),
+    "utf8",
+  )
+  expect(readback).toBe(sentinelBody)
+  // The decoy must NOT have received the sentinel (proves the link was
+  // re-pointed away from it).
+  await expect(
+    fs.stat(path.join(wrongTarget, sentinelName)),
+  ).rejects.toThrow()
 })
 
 test("ensureClaudeConfigMirror auto-rmdirs an EMPTY real dir at a SHARED slot, then symlinks (smooth migration path)", async () => {
-  if (process.platform === "win32") return
-
   const claudeHome = path.join(tempDir, ".claude")
   await fs.rm(claudeHome, { recursive: true, force: true })
   await fs.mkdir(claudeHome, { recursive: true })
@@ -552,21 +592,30 @@ test("ensureClaudeConfigMirror auto-rmdirs an EMPTY real dir at a SHARED slot, t
 
   // Empty real dir from a prior github-router snapshot. Safe to reap
   // since it holds no proxy-session writes.
-  const stalePath = path.join(PATHS.CLAUDE_CONFIG_DIR, "projects")
-  await fs.mkdir(stalePath, { recursive: true })
+  const slotPath = path.join(PATHS.CLAUDE_CONFIG_DIR, "projects")
+  await fs.mkdir(slotPath, { recursive: true })
 
   await ensureClaudeConfigMirror()
 
-  // Real dir was rmdir'd and replaced with a symlink to the source dir
-  const lst = await fs.lstat(stalePath)
-  expect(lst.isSymbolicLink()).toBe(true)
-  const target = await fs.readlink(stalePath)
-  expect(target).toBe(path.join(claudeHome, "projects"))
+  // Real dir was rmdir'd and replaced with a directory link to the
+  // source dir. Behavioral check: stat resolves through, and a sentinel
+  // written through the slot appears in the source dir. We don't assert
+  // `isSymbolicLink()` because Windows junctions are reported by `lstat`
+  // as directories, not symlinks.
+  const slotStat = await fs.stat(slotPath)
+  expect(slotStat.isDirectory()).toBe(true)
+
+  const sentinelName = `sentinel-${randomBytes(8).toString("hex")}.txt`
+  const sentinelBody = `empty-rmdir-${Date.now()}`
+  await fs.writeFile(path.join(slotPath, sentinelName), sentinelBody)
+  const readback = await fs.readFile(
+    path.join(claudeHome, "projects", sentinelName),
+    "utf8",
+  )
+  expect(readback).toBe(sentinelBody)
 })
 
 test("ensureClaudeConfigMirror refuses to clobber a NON-EMPTY real dir at a SHARED slot (migration safety)", async () => {
-  if (process.platform === "win32") return
-
   const claudeHome = path.join(tempDir, ".claude")
   await fs.rm(claudeHome, { recursive: true, force: true })
   await fs.mkdir(claudeHome, { recursive: true })
@@ -585,10 +634,18 @@ test("ensureClaudeConfigMirror refuses to clobber a NON-EMPTY real dir at a SHAR
 
   await ensureClaudeConfigMirror()
 
-  // Real dir + content must survive untouched
+  // Real dir + content must survive untouched. Content preservation is
+  // the load-bearing cross-platform check (a successful clobber would
+  // either replace the dir with a link to an empty source dir, or empty
+  // out the slot). On POSIX we additionally assert "still NOT a
+  // symbolic link" since a clobber would create one; on Windows
+  // junctions are reported by `lstat` as directories, so that specific
+  // check is meaningless and skipped.
   const lst = await fs.lstat(stalePath)
   expect(lst.isDirectory()).toBe(true)
-  expect(lst.isSymbolicLink()).toBe(false)
+  if (process.platform !== "win32") {
+    expect(lst.isSymbolicLink()).toBe(false)
+  }
   const survived = await fs.readFile(
     path.join(stalePath, "old-session.jsonl"),
     "utf8",
@@ -597,8 +654,6 @@ test("ensureClaudeConfigMirror refuses to clobber a NON-EMPTY real dir at a SHAR
 })
 
 test("ensureClaudeConfigMirror refuses to clobber a regular FILE at a SHARED slot", async () => {
-  if (process.platform === "win32") return
-
   const claudeHome = path.join(tempDir, ".claude")
   await fs.rm(claudeHome, { recursive: true, force: true })
   await fs.mkdir(claudeHome, { recursive: true })
@@ -615,14 +670,18 @@ test("ensureClaudeConfigMirror refuses to clobber a regular FILE at a SHARED slo
 
   const lst = await fs.lstat(filePath)
   expect(lst.isFile()).toBe(true)
-  expect(lst.isSymbolicLink()).toBe(false)
+  // The "not a symbolic link" assertion is only meaningful on POSIX —
+  // on Windows a successful clobber would create a junction (which
+  // `lstat` reports as a directory, never a symlink), so the assertion
+  // would always pass vacuously and provides no signal.
+  if (process.platform !== "win32") {
+    expect(lst.isSymbolicLink()).toBe(false)
+  }
   const survived = await fs.readFile(filePath, "utf8")
   expect(survived).toBe("user-placed-content")
 })
 
 test("ensureClaudeConfigMirror SHARED-symlink idempotent: re-running does not change ctime", async () => {
-  if (process.platform === "win32") return
-
   const claudeHome = path.join(tempDir, ".claude")
   await fs.rm(claudeHome, { recursive: true, force: true })
   await fs.mkdir(claudeHome, { recursive: true })
@@ -630,14 +689,16 @@ test("ensureClaudeConfigMirror SHARED-symlink idempotent: re-running does not ch
 
   await ensureClaudeConfigMirror()
   const linkPath = path.join(PATHS.CLAUDE_CONFIG_DIR, "projects")
+  // `lstat` returns the link's own metadata on POSIX symlinks AND on
+  // Windows junctions (both expose ctime tracking the slot's creation
+  // / replacement). If the no-op branch fires, no rename happens and
+  // ctime is unchanged across invocations.
   const before = await fs.lstat(linkPath)
 
   await new Promise((r) => setTimeout(r, 20))
   await ensureClaudeConfigMirror()
 
   const after = await fs.lstat(linkPath)
-  // ctime tracks symlink replacement (rename). If the no-op branch is
-  // working, ctime is unchanged across invocations.
   expect(after.ctimeMs).toBe(before.ctimeMs)
 })
 
@@ -670,21 +731,26 @@ test("policyFor regression guard: agents/ MUST stay MIRRORED (sweep deletes insi
 })
 
 test("ensureClaudeConfigMirror SHARED-symlink concurrent: parallel calls don't EEXIST", async () => {
-  if (process.platform === "win32") return
-
   const claudeHome = path.join(tempDir, ".claude")
   await fs.rm(claudeHome, { recursive: true, force: true })
   await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
 
   // Two parallel invocations — atomic rename means the loser silently
-  // overwrites the winner's symlink with an identical one.
+  // overwrites the winner's link with an identical one.
   await expect(
     Promise.all([ensureClaudeConfigMirror(), ensureClaudeConfigMirror()]),
   ).resolves.toBeDefined()
 
-  // Final state: symlink resolves correctly
-  const link = await fs.readlink(
-    path.join(PATHS.CLAUDE_CONFIG_DIR, "projects"),
+  // Final state: the link resolves to the source dir. Behavioral
+  // round-trip rather than `readlink()` comparison so Windows junctions
+  // (which may return `\\?\`-prefixed device paths) are accepted.
+  const mirrorProjects = path.join(PATHS.CLAUDE_CONFIG_DIR, "projects")
+  const sentinelName = `sentinel-${randomBytes(8).toString("hex")}.txt`
+  const sentinelBody = `concurrent-${Date.now()}`
+  await fs.writeFile(path.join(mirrorProjects, sentinelName), sentinelBody)
+  const readback = await fs.readFile(
+    path.join(claudeHome, "projects", sentinelName),
+    "utf8",
   )
-  expect(link).toBe(path.join(claudeHome, "projects"))
+  expect(readback).toBe(sentinelBody)
 })
