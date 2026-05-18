@@ -559,7 +559,7 @@ async function ensureSharedSymlink(
           `from an older github-router version; refusing to clobber. ` +
           `If you want chat-history continuity for "${name}", move its ` +
           `contents into ${sourcePath}/ then delete ${mirrorPath}; the ` +
-          `mirror will create a symlink on next launch. ` +
+          `mirror will create a symlink (junction on Windows) on next launch. ` +
           `(rmdir error: ${(err as NodeJS.ErrnoException).code ?? "unknown"})`,
       )
       return
@@ -579,7 +579,11 @@ async function ensureSharedSymlink(
   //    atomically on POSIX and is safe against concurrent racers.
   const tempPath = `${mirrorPath}.tmp.${process.pid}.${randomBytes(4).toString("hex")}`
   try {
-    await fs.symlink(sourcePath, tempPath)
+    await fs.symlink(
+      sourcePath,
+      tempPath,
+      process.platform === "win32" ? "junction" : "dir",
+    )
   } catch (err) {
     // Extremely unlikely (the temp path is per-pid + 8-hex random) but
     // log and bail rather than throw — the proxy can still start.
