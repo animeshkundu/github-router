@@ -1,4 +1,5 @@
 import { test, expect, mock } from "bun:test"
+import consola from "consola"
 import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 import os from "node:os"
@@ -843,5 +844,259 @@ test("ensureClaudeConfigMirror fast-path: re-running does NOT churn SHARED junct
       originalSymlink
     ;(fs as unknown as { rename: typeof fs.rename }).rename = originalRename
     ;(fs as unknown as { unlink: typeof fs.unlink }).unlink = originalUnlink
+  }
+})
+
+// ============================================================
+// Round-3 G1 / G5: smoking-gun warn coverage for fs catches
+// ============================================================
+//
+// Both `fs.symlink` and `fs.rename` failure paths in ensureSharedSymlink
+// now warn (formerly debug). These tests pin both to consola.warn
+// so a future contributor doesn't silently downgrade them again
+// (which is exactly what hid the round-1 EPERM and round-2
+// rename-replace bugs through entire releases).
+
+test("ensureSharedSymlink: rename failure surfaces a consola.warn and cleans up temp (G5)", async () => {
+  // Fresh state — we want the rename branch to actually run.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  const mirrorDir = path.join(
+    tempDir,
+    `mirror-rename-warn-${randomBytes(4).toString("hex")}`,
+  )
+  await fs.mkdir(mirrorDir, { recursive: true })
+
+  const originalRename = fs.rename
+  const originalUnlink = fs.unlink
+  const originalWarn = consola.warn
+  const renameSpy = mock(async () => {
+    const err = new Error("simulated rename failure") as NodeJS.ErrnoException
+    err.code = "EPERM"
+    throw err
+  })
+  const unlinkSpy = mock(originalUnlink.bind(fs))
+  const warnSpy = mock(originalWarn.bind(consola))
+  ;(fs as unknown as { rename: unknown }).rename = renameSpy
+  ;(fs as unknown as { unlink: unknown }).unlink = unlinkSpy
+  ;(consola as unknown as { warn: unknown }).warn = warnSpy
+  try {
+    await __testing.ensureSharedSymlink("projects", claudeHome, mirrorDir)
+
+    // Warn fired with a message identifying the failing call.
+    const warnedAboutRename = warnSpy.mock.calls.some((call) => {
+      const msg = call[0]
+      return (
+        typeof msg === "string" &&
+        msg.includes("rename") &&
+        msg.includes("failed")
+      )
+    })
+    expect(warnedAboutRename).toBe(true)
+
+    // Temp was unlinked so we don't leave `<mirror>/projects.tmp.<pid>.<hex>`
+    // litter behind. The exact temp path is randomised, so we match by
+    // the `<slot>.tmp.` prefix.
+    const slotPath = path.join(mirrorDir, "projects")
+    const unlinkedTemp = unlinkSpy.mock.calls.some((call) => {
+      const arg = call[0]
+      return typeof arg === "string" && arg.startsWith(`${slotPath}.tmp.`)
+    })
+    expect(unlinkedTemp).toBe(true)
+  } finally {
+    ;(fs as unknown as { rename: typeof fs.rename }).rename = originalRename
+    ;(fs as unknown as { unlink: typeof fs.unlink }).unlink = originalUnlink
+    ;(consola as unknown as { warn: typeof consola.warn }).warn = originalWarn
+  }
+})
+
+test("ensureSharedSymlink: symlink failure surfaces a consola.warn (G1 regression)", async () => {
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  const mirrorDir = path.join(
+    tempDir,
+    `mirror-symlink-warn-${randomBytes(4).toString("hex")}`,
+  )
+  await fs.mkdir(mirrorDir, { recursive: true })
+
+  const originalSymlink = fs.symlink
+  const originalWarn = consola.warn
+
+  // Case 1: EPERM (the original round-1 failure mode — pre-fix
+  // Windows users hit this every launch and the silent debug log
+  // hid it).
+  for (const code of ["EPERM", "EXDEV"] as const) {
+    const symlinkSpy = mock(async () => {
+      const err = new Error(
+        `simulated symlink failure (${code})`,
+      ) as NodeJS.ErrnoException
+      err.code = code
+      throw err
+    })
+    const warnSpy = mock(originalWarn.bind(consola))
+    ;(fs as unknown as { symlink: unknown }).symlink = symlinkSpy
+    ;(consola as unknown as { warn: unknown }).warn = warnSpy
+    try {
+      await __testing.ensureSharedSymlink("projects", claudeHome, mirrorDir)
+      const warnedAboutSymlink = warnSpy.mock.calls.some((call) => {
+        const msg = call[0]
+        return (
+          typeof msg === "string" &&
+          msg.includes("symlink") &&
+          msg.includes("failed")
+        )
+      })
+      expect(warnedAboutSymlink).toBe(true)
+    } finally {
+      ;(fs as unknown as { symlink: typeof fs.symlink }).symlink =
+        originalSymlink
+      ;(consola as unknown as { warn: typeof consola.warn }).warn =
+        originalWarn
+    }
+  }
+})
+
+// ============================================================
+// Round-3 G3: spy test for unlink-before-rename ordering on Windows
+// ============================================================
+//
+// The round-2 fix added a Windows-only `fs.unlink(mirrorPath)` before
+// `fs.rename(tempPath, mirrorPath)` because MoveFileEx can't replace
+// a directory/junction destination. This test asserts the MECHANISM
+// (call order), not just the outcome (sentinel round-trip works).
+// Skipped on POSIX because there the ordering doesn't matter —
+// `fs.rename` atomically replaces symlinks without a prior unlink.
+
+test("ensureSharedSymlink: Windows unlink-before-rename call ordering (G3 mechanism)", async () => {
+  // Only meaningful on Windows; the unlink branch is platform-gated.
+  if (process.platform !== "win32") return
+
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  const mirrorDir = path.join(
+    tempDir,
+    `mirror-order-${randomBytes(4).toString("hex")}`,
+  )
+  await fs.mkdir(mirrorDir, { recursive: true })
+
+  // Pre-place a wrong-target junction at the slot. Use the
+  // cross-platform `junction` type so this works on Windows.
+  const slotPath = path.join(mirrorDir, "projects")
+  const decoyTarget = path.join(
+    tempDir,
+    `decoy-${randomBytes(4).toString("hex")}`,
+  )
+  await fs.mkdir(decoyTarget, { recursive: true })
+  await fs.symlink(decoyTarget, slotPath, "junction")
+
+  // Shared event log so we can compare call order across spies.
+  const events: Array<{ name: "unlink" | "rename"; arg0: string }> = []
+  const originalUnlink = fs.unlink
+  const originalRename = fs.rename
+  const unlinkSpy = mock(async (...args: unknown[]) => {
+    if (typeof args[0] === "string") {
+      events.push({ name: "unlink", arg0: args[0] })
+    }
+    return (originalUnlink as (...a: unknown[]) => Promise<void>).apply(
+      fs,
+      args,
+    )
+  })
+  const renameSpy = mock(async (...args: unknown[]) => {
+    if (typeof args[1] === "string") {
+      events.push({ name: "rename", arg0: args[1] })
+    }
+    return (originalRename as (...a: unknown[]) => Promise<void>).apply(
+      fs,
+      args,
+    )
+  })
+  ;(fs as unknown as { unlink: unknown }).unlink = unlinkSpy
+  ;(fs as unknown as { rename: unknown }).rename = renameSpy
+  try {
+    await __testing.ensureSharedSymlink("projects", claudeHome, mirrorDir)
+
+    const unlinkIdx = events.findIndex(
+      (e) => e.name === "unlink" && e.arg0 === slotPath,
+    )
+    const renameIdx = events.findIndex(
+      (e) => e.name === "rename" && e.arg0 === slotPath,
+    )
+    expect(unlinkIdx).toBeGreaterThanOrEqual(0)
+    expect(renameIdx).toBeGreaterThanOrEqual(0)
+    // The contract: unlink the wrong-target junction BEFORE renaming
+    // the new temp into the slot. If a future refactor reverses these
+    // (or drops the unlink), MoveFileEx fails silently and the slot
+    // continues to point at the decoy.
+    expect(unlinkIdx).toBeLessThan(renameIdx)
+  } finally {
+    ;(fs as unknown as { unlink: typeof fs.unlink }).unlink = originalUnlink
+    ;(fs as unknown as { rename: typeof fs.rename }).rename = originalRename
+  }
+})
+
+test("ensureSharedSymlink: Windows rename observes an EMPTY slot (G3 effect)", async () => {
+  // Companion to the ordering test above: asserts the unlink actually
+  // cleared the slot, observed at the moment fs.rename is invoked.
+  // If the unlink were somehow skipped or no-op'd, the slot would
+  // still hold the wrong-target junction when rename runs and we'd
+  // observe `isSymbolicLink() === true`.
+  if (process.platform !== "win32") return
+
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  const mirrorDir = path.join(
+    tempDir,
+    `mirror-empty-at-rename-${randomBytes(4).toString("hex")}`,
+  )
+  await fs.mkdir(mirrorDir, { recursive: true })
+
+  const slotPath = path.join(mirrorDir, "projects")
+  const decoyTarget = path.join(
+    tempDir,
+    `decoy-${randomBytes(4).toString("hex")}`,
+  )
+  await fs.mkdir(decoyTarget, { recursive: true })
+  await fs.symlink(decoyTarget, slotPath, "junction")
+
+  // Capture the lstat result at the exact moment rename is invoked on
+  // the slot. lstat is NOT monkey-patched so it reflects real fs state.
+  // Wrapped in an object so TS doesn't narrow the closure-mutated
+  // value to its initial `null`.
+  const observed: { state: "missing" | "symlink" | "other" | null } = {
+    state: null,
+  }
+  const originalRename = fs.rename
+  const renameSpy = mock(async (...args: unknown[]) => {
+    if (args[1] === slotPath) {
+      try {
+        const stat = await fs.lstat(slotPath)
+        observed.state = stat.isSymbolicLink() ? "symlink" : "other"
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+          observed.state = "missing"
+        } else {
+          throw err
+        }
+      }
+    }
+    return (originalRename as (...a: unknown[]) => Promise<void>).apply(
+      fs,
+      args,
+    )
+  })
+  ;(fs as unknown as { rename: unknown }).rename = renameSpy
+  try {
+    await __testing.ensureSharedSymlink("projects", claudeHome, mirrorDir)
+    // At the moment of rename, the wrong-target junction must already
+    // be unlinked (slot missing → rename is a CREATE rather than a
+    // doomed REPLACE).
+    expect(observed.state).toBe("missing")
+  } finally {
+    ;(fs as unknown as { rename: typeof fs.rename }).rename = originalRename
   }
 })

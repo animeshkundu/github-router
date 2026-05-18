@@ -163,7 +163,7 @@ function policyFor(name: string): MirrorPolicy {
  * reclassification that would let `sweepStalePeerAgentMdFiles` delete
  * files in the user's real `~/.claude/agents/`).
  */
-export const __testing = { policyFor }
+export const __testing = { policyFor, ensureSharedSymlink }
 
 /**
  * Names with `SHARED` policy, materialized once for iteration in
@@ -605,9 +605,13 @@ async function ensureSharedSymlink(
       process.platform === "win32" ? "junction" : "dir",
     )
   } catch (err) {
-    // Extremely unlikely (the temp path is per-pid + 8-hex random) but
-    // log and bail rather than throw — the proxy can still start.
-    consola.debug(
+    // Escalated from debug → warn per the CLAUDE.md "smoking gun" rule:
+    // the rule applies to ALL fs catches in this function, not just the
+    // rename one. The temp path is per-pid + 8-hex random so EEXIST is
+    // essentially impossible — any failure here (EPERM on Windows
+    // without DevMode, EXDEV cross-volume, ENOSPC, …) is a real
+    // operational problem the user needs to see.
+    consola.warn(
       `ensureSharedSymlink(${name}): symlink ${tempPath} failed:`,
       err,
     )
@@ -625,9 +629,10 @@ async function ensureSharedSymlink(
     await fs.rename(tempPath, mirrorPath)
   } catch (err) {
     // Escalated from debug → warn per the CLAUDE.md "smoking gun"
-    // rule: a silent debug log here previously hid the Windows
-    // rename-replace bug (junction-over-junction MoveFileEx EPERM).
-    // Post-fix, rename failures should be rare and visible.
+    // rule (consistent with the fs.symlink catch above): a silent
+    // debug log here previously hid the Windows rename-replace bug
+    // (junction-over-junction MoveFileEx EPERM). Post-fix, rename
+    // failures should be rare and visible.
     consola.warn(
       `ensureSharedSymlink(${name}): rename ${tempPath} → ${mirrorPath} failed:`,
       err,
