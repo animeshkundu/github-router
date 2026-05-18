@@ -505,10 +505,17 @@ async function ensureSharedSymlink(
   try {
     await fs.mkdir(sourcePath, { recursive: true })
   } catch (err) {
-    // If the path exists as something other than a dir (file, symlink),
-    // skip with a debug log — the user has a non-standard setup and we
-    // shouldn't clobber.
-    consola.debug(
+    // Escalated from debug → warn per the CLAUDE.md "smoking gun"
+    // rule (consistent with the symlink and rename catches below):
+    // if the source dir cannot be created (e.g. a stray regular file
+    // sitting at `~/.claude/projects`, perms blocking mkdir on a
+    // corp-managed Windows box, OneDrive cloud-only reparse point),
+    // ensureSharedSymlink returns without creating a junction. The
+    // spawned Claude Code child then writes to the REAL `~/.claude`
+    // while the proxy reads from the mirror — exactly the split-brain
+    // pattern this whole function exists to prevent. Silent debug-log
+    // hid this from us once already; warn so the user sees the cause.
+    consola.warn(
       `ensureSharedSymlink(${name}): cannot mkdir source ${sourcePath}:`,
       err,
     )
@@ -521,7 +528,16 @@ async function ensureSharedSymlink(
     existing = await fs.lstat(mirrorPath)
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      consola.debug(
+      // Escalated from debug → warn per the CLAUDE.md "smoking gun"
+      // rule (consistent with the other fs catches in this function):
+      // ENOENT is the only expected-and-benign failure mode here
+      // (slot doesn't exist yet — falls through to create). Any other
+      // lstat failure (EACCES, ELOOP, EIO from a sketchy reparse
+      // point) means we bail without creating the junction, which
+      // silently leaves the proxy and child diverged. A visible warn
+      // surfaces the root cause instead of a mysteriously missing
+      // junction.
+      consola.warn(
         `ensureSharedSymlink(${name}): cannot lstat ${mirrorPath}:`,
         err,
       )
@@ -546,16 +562,29 @@ async function ensureSharedSymlink(
     // on POSIX and Windows alike, and as a bonus handles drive-letter
     // casing / trailing-slash differences too. The extra two syscalls
     // per slot are negligible at proxy startup (runs once per launch).
-    const currentReal = await fs.realpath(mirrorPath).catch(() => null)
+    //
+    // CRITICAL: sourceReal and currentReal are NOT treated symmetrically.
+    // If `sourceReal` is null (we just mkdir'd it above, but realpath
+    // failed — OneDrive cloud-only reparse point, EACCES on parent,
+    // EXDEV mount oddity), we WARN AND RETURN rather than fall through.
+    // Falling through would do unlink+symlink+rename with the same
+    // failing realpath next launch — silent every-startup churn, the
+    // exact bug class round-3 G2 fixed in a different code path.
+    // `currentReal === null` is benign (broken/wrong slot — replace).
     const sourceReal = await fs.realpath(sourcePath).catch(() => null)
-    if (
-      currentReal !== null &&
-      sourceReal !== null &&
-      currentReal === sourceReal
-    ) {
+    if (sourceReal === null) {
+      consola.warn(
+        `ensureSharedSymlink(${name}): cannot resolve source ${sourcePath} ` +
+          `— skipping junction creation to avoid silent every-startup churn. ` +
+          `Inspect the source dir's permissions / OneDrive sync state and re-launch.`,
+      )
       return
     }
-    // Wrong target (or unresolvable) — fall through to the
+    const currentReal = await fs.realpath(mirrorPath).catch(() => null)
+    if (currentReal !== null && currentReal === sourceReal) {
+      return
+    }
+    // Wrong target (or unresolvable mirror) — fall through to the
     // atomic-rename replace path.
   } else if (existing?.isDirectory()) {
     // Legacy real directory at the slot. Try `fs.rmdir` — on POSIX it

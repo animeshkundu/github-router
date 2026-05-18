@@ -1194,3 +1194,239 @@ test("ensureSharedSymlink: Windows rename observes an EMPTY slot (G3 effect)", a
     ;(fs as unknown as { rename: typeof fs.rename }).rename = originalRename
   }
 })
+
+// ============================================================
+// Round-4 G1/G2/G7 regression: smoking-gun rule for the remaining
+// fs catches (mkdir source, lstat mirror, realpath sourcePath).
+// ============================================================
+//
+// Three-lab adversarial review flagged that round-3 only escalated
+// the symlink/rename catches; the mkdir-source, lstat-mirror, and
+// realpath-source-failure paths were still silent. Each is a
+// different incarnation of the same smoking-gun pattern, exposed
+// by different production conditions (OneDrive cloud-only
+// reparse points, corp-managed Windows perm policies, stray files
+// at SHARED slot paths from prior versions, EXDEV from cross-volume
+// junctions). The fix is uniform: warn rather than debug; the test
+// for each pins the catch with a consola.warn spy so a future
+// contributor can't silently re-introduce the debug-log shape.
+
+test("ensureSharedSymlink: mkdir(source) failure surfaces a consola.warn (Round-4 #2)", async () => {
+  // Pre-place a REGULAR FILE at `<claudeHome>/projects`. mkdir
+  // (recursive: true) on a path occupied by a file fails with
+  // ENOTDIR / EEXIST and we must surface that loudly — otherwise
+  // the child writes through to ~/.claude (which lacks the dir we
+  // failed to create) while the proxy quietly skips.
+  const claudeHome = path.join(
+    tempDir,
+    `.claude-mkdir-fail-${randomBytes(4).toString("hex")}`,
+  )
+  await fs.mkdir(claudeHome, { recursive: true })
+  // Plant the obstructing file at the SHARED slot name.
+  await fs.writeFile(
+    path.join(claudeHome, "projects"),
+    "stray-file-shouldnt-be-here",
+  )
+  const mirrorDir = path.join(
+    tempDir,
+    `mirror-mkdir-fail-${randomBytes(4).toString("hex")}`,
+  )
+  await fs.mkdir(mirrorDir, { recursive: true })
+
+  const originalWarn = consola.warn
+  const warnSpy = mock(originalWarn.bind(consola))
+  ;(consola as unknown as { warn: unknown }).warn = warnSpy
+  try {
+    await __testing.ensureSharedSymlink("projects", claudeHome, mirrorDir)
+    const warnedAboutMkdir = warnSpy.mock.calls.some((call) => {
+      const msg = call[0]
+      return (
+        typeof msg === "string" &&
+        msg.includes("cannot mkdir source") &&
+        msg.includes("projects")
+      )
+    })
+    expect(warnedAboutMkdir).toBe(true)
+    // And the mirror slot was NOT touched (no junction half-created).
+    await expect(
+      fs.lstat(path.join(mirrorDir, "projects")),
+    ).rejects.toThrow()
+  } finally {
+    ;(consola as unknown as { warn: typeof consola.warn }).warn = originalWarn
+  }
+})
+
+test("ensureSharedSymlink: lstat(mirror) non-ENOENT failure surfaces a consola.warn (Round-4 #7)", async () => {
+  // Mock fs.lstat to throw a non-ENOENT error (e.g. EACCES on a corp
+  // box that locks down %APPDATA%, ELOOP on a sketchy reparse-point).
+  // Pre-fix this was debug-logged and the function returned silently
+  // — no junction created, child diverges from proxy state.
+  const claudeHome = path.join(
+    tempDir,
+    `.claude-lstat-fail-${randomBytes(4).toString("hex")}`,
+  )
+  await fs.mkdir(claudeHome, { recursive: true })
+  const mirrorDir = path.join(
+    tempDir,
+    `mirror-lstat-fail-${randomBytes(4).toString("hex")}`,
+  )
+  await fs.mkdir(mirrorDir, { recursive: true })
+  const slotPath = path.join(mirrorDir, "projects")
+
+  const originalLstat = fs.lstat
+  const originalSymlink = fs.symlink
+  const originalWarn = consola.warn
+  const lstatSpy = mock(async (...args: unknown[]) => {
+    // Only intercept the specific path we're targeting; let everything
+    // else through to the real lstat so unrelated bookkeeping doesn't
+    // explode.
+    if (args[0] === slotPath) {
+      const err = new Error("simulated EACCES") as NodeJS.ErrnoException
+      err.code = "EACCES"
+      throw err
+    }
+    return (originalLstat as (...a: unknown[]) => Promise<unknown>).apply(
+      fs,
+      args,
+    )
+  })
+  const symlinkSpy = mock(originalSymlink.bind(fs))
+  const warnSpy = mock(originalWarn.bind(consola))
+  ;(fs as unknown as { lstat: unknown }).lstat = lstatSpy
+  ;(fs as unknown as { symlink: unknown }).symlink = symlinkSpy
+  ;(consola as unknown as { warn: unknown }).warn = warnSpy
+  try {
+    await __testing.ensureSharedSymlink("projects", claudeHome, mirrorDir)
+    const warnedAboutLstat = warnSpy.mock.calls.some((call) => {
+      const msg = call[0]
+      return (
+        typeof msg === "string" &&
+        msg.includes("cannot lstat") &&
+        msg.includes("projects")
+      )
+    })
+    expect(warnedAboutLstat).toBe(true)
+    // And no junction was created (we returned before the symlink call).
+    const symlinkAtSlot = symlinkSpy.mock.calls.some((call) => {
+      return (
+        Array.isArray(call) &&
+        call.length >= 2 &&
+        typeof call[1] === "string" &&
+        call[1].startsWith(slotPath)
+      )
+    })
+    expect(symlinkAtSlot).toBe(false)
+  } finally {
+    ;(fs as unknown as { lstat: typeof fs.lstat }).lstat = originalLstat
+    ;(fs as unknown as { symlink: typeof fs.symlink }).symlink =
+      originalSymlink
+    ;(consola as unknown as { warn: typeof consola.warn }).warn = originalWarn
+  }
+})
+
+test("ensureSharedSymlink: realpath(sourcePath) failure surfaces a consola.warn and SKIPS junction creation (Round-4 #1)", async () => {
+  // The G2 realpath comparison treats sourceReal and currentReal
+  // ASYMMETRICALLY: sourceReal === null means we bail (warn+return)
+  // rather than fall through to symlink+rename. Falling through with
+  // a failing realpath would re-fire the same realpath next launch
+  // — silent every-startup churn, the exact bug class round-3 G2
+  // fixed in a different code path. This test pins that behavior.
+  //
+  // Production trigger: OneDrive / Dropbox cloud-only reparse point
+  // at ~/.claude/projects (common on corp Win11 boxes), or EACCES on
+  // a parent dir, or EXDEV on a cross-volume mount.
+  const claudeHome = path.join(
+    tempDir,
+    `.claude-realpath-fail-${randomBytes(4).toString("hex")}`,
+  )
+  await fs.mkdir(path.join(claudeHome, "projects"), { recursive: true })
+  const mirrorDir = path.join(
+    tempDir,
+    `mirror-realpath-fail-${randomBytes(4).toString("hex")}`,
+  )
+  await fs.mkdir(mirrorDir, { recursive: true })
+  const sourcePath = path.join(claudeHome, "projects")
+  const slotPath = path.join(mirrorDir, "projects")
+  // Pre-place a valid junction at the slot so lstat sees a symbolic
+  // link and we enter the realpath-comparison branch (rather than
+  // the empty-slot create path which doesn't realpath the source).
+  await fs.symlink(
+    sourcePath,
+    slotPath,
+    process.platform === "win32" ? "junction" : "dir",
+  )
+
+  const originalRealpath = fs.realpath
+  const originalSymlink = fs.symlink
+  const originalRename = fs.rename
+  const originalUnlink = fs.unlink
+  const originalWarn = consola.warn
+  const realpathSpy = mock(async (...args: unknown[]) => {
+    if (args[0] === sourcePath) {
+      const err = new Error(
+        "simulated OneDrive cloud-only reparse failure",
+      ) as NodeJS.ErrnoException
+      err.code = "EIO"
+      throw err
+    }
+    return (originalRealpath as (...a: unknown[]) => Promise<string>).apply(
+      fs,
+      args,
+    )
+  })
+  const symlinkSpy = mock(originalSymlink.bind(fs))
+  const renameSpy = mock(originalRename.bind(fs))
+  const unlinkSpy = mock(originalUnlink.bind(fs))
+  const warnSpy = mock(originalWarn.bind(consola))
+  ;(fs as unknown as { realpath: unknown }).realpath = realpathSpy
+  ;(fs as unknown as { symlink: unknown }).symlink = symlinkSpy
+  ;(fs as unknown as { rename: unknown }).rename = renameSpy
+  ;(fs as unknown as { unlink: unknown }).unlink = unlinkSpy
+  ;(consola as unknown as { warn: unknown }).warn = warnSpy
+  try {
+    await __testing.ensureSharedSymlink("projects", claudeHome, mirrorDir)
+
+    // 1. A warn was surfaced about the unresolvable source.
+    const warnedAboutSource = warnSpy.mock.calls.some((call) => {
+      const msg = call[0]
+      return (
+        typeof msg === "string" &&
+        msg.includes("cannot resolve source") &&
+        msg.includes("projects") &&
+        msg.includes("churn")
+      )
+    })
+    expect(warnedAboutSource).toBe(true)
+
+    // 2. The replace path was NOT entered (no symlink, no rename, no
+    //    unlink of the slot). This is the load-bearing assertion:
+    //    falling through would silently churn the junction every
+    //    startup, masked by NTFS tunneling.
+    const replacedSlot = symlinkSpy.mock.calls.some((call) => {
+      return (
+        Array.isArray(call) &&
+        call.length >= 2 &&
+        typeof call[1] === "string" &&
+        call[1].startsWith(`${slotPath}.tmp.`)
+      )
+    })
+    expect(replacedSlot).toBe(false)
+    expect(renameSpy.mock.calls.length).toBe(0)
+    const unlinkedSlot = unlinkSpy.mock.calls.some((call) => {
+      return (
+        Array.isArray(call) &&
+        typeof call[0] === "string" &&
+        call[0] === slotPath
+      )
+    })
+    expect(unlinkedSlot).toBe(false)
+  } finally {
+    ;(fs as unknown as { realpath: typeof fs.realpath }).realpath =
+      originalRealpath
+    ;(fs as unknown as { symlink: typeof fs.symlink }).symlink =
+      originalSymlink
+    ;(fs as unknown as { rename: typeof fs.rename }).rename = originalRename
+    ;(fs as unknown as { unlink: typeof fs.unlink }).unlink = originalUnlink
+    ;(consola as unknown as { warn: typeof consola.warn }).warn = originalWarn
+  }
+})
