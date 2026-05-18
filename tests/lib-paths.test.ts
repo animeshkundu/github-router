@@ -754,3 +754,94 @@ test("ensureClaudeConfigMirror SHARED-symlink concurrent: parallel calls don't E
   )
   expect(readback).toBe(sentinelBody)
 })
+
+// ============================================================
+// Round-3 G2: diagnostic test for the SHARED-symlink fast path
+// ============================================================
+//
+// Adversarial-review finding (3 critics, 3 different labs): the fast
+// path at `ensureSharedSymlink` did `currentTarget === sourcePath` on
+// the raw `readlink()` output. On Windows, junctions resolve via
+// readlink to `\\?\`-prefixed device-namespace paths (e.g.
+// `\\?\C:\Users\foo\.claude\projects` vs the plain `C:\Users\foo\
+// .claude\projects` we wrote with `fs.symlink`). The literal `===`
+// always returned false → fast path never fired → every startup did
+// unlink + rename per SHARED entry (×9). Test #7 (`idempotent ...
+// does not change ctime`) passed anyway because NTFS File System
+// Tunneling forges the creation timestamp for a name deleted and
+// recreated within 15 s — the dir WAS being torn down/rebuilt, the
+// ctime was just being faked by the OS.
+//
+// This diagnostic test is a MECHANISM test, not an outcome test:
+// it spies on fs.symlink/fs.rename/fs.unlink and asserts ZERO
+// SHARED-slot calls on a steady-state re-invocation. On POSIX this
+// passes pre-fix (readlink returns the verbatim value we wrote);
+// on Windows it FAILS pre-fix and passes post-fix (realpath
+// canonicalizes both sides to the same form).
+test("ensureClaudeConfigMirror fast-path: re-running does NOT churn SHARED junctions (no fs.symlink/rename/unlink for shared slots)", async () => {
+  // Fresh state so the first call does the create.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+
+  // Warm up: establishes the SHARED links in steady state.
+  await ensureClaudeConfigMirror()
+
+  // Snapshot of which paths count as SHARED slots for our spy filter.
+  // Anything that targets one of these (or a `<slot>.tmp.<pid>.<hex>`
+  // variant) is a SHARED-slot mutation we want to count.
+  const sharedSlots = [
+    "projects",
+    "transcripts",
+    "todos",
+    "shell_snapshots",
+    "shell-snapshots",
+    "sessions",
+    "tasks",
+    "plans",
+    "file-history",
+    "backups",
+  ].map((n) => path.join(PATHS.CLAUDE_CONFIG_DIR, n))
+  const touchesShared = (arg: unknown): boolean =>
+    typeof arg === "string" &&
+    sharedSlots.some(
+      (slot) => arg === slot || arg.startsWith(`${slot}.tmp.`),
+    )
+
+  // Spy by monkey-patching the imported fs object. `import fs from
+  // "node:fs/promises"` is a singleton namespace; mutating its
+  // properties is visible inside `src/lib/paths.ts` too.
+  const originalSymlink = fs.symlink
+  const originalRename = fs.rename
+  const originalUnlink = fs.unlink
+  const symlinkSpy = mock(originalSymlink.bind(fs))
+  const renameSpy = mock(originalRename.bind(fs))
+  const unlinkSpy = mock(originalUnlink.bind(fs))
+  ;(fs as unknown as { symlink: typeof fs.symlink }).symlink = symlinkSpy
+  ;(fs as unknown as { rename: typeof fs.rename }).rename = renameSpy
+  ;(fs as unknown as { unlink: typeof fs.unlink }).unlink = unlinkSpy
+  try {
+    // Steady-state re-invocation. Expectation: no SHARED slot is
+    // touched by any of the three mutation syscalls.
+    await ensureClaudeConfigMirror()
+
+    const sharedSymlinkCalls = symlinkSpy.mock.calls.filter((call) =>
+      (call as unknown[]).some(touchesShared),
+    )
+    const sharedRenameCalls = renameSpy.mock.calls.filter((call) =>
+      (call as unknown[]).some(touchesShared),
+    )
+    const sharedUnlinkCalls = unlinkSpy.mock.calls.filter((call) =>
+      (call as unknown[]).some(touchesShared),
+    )
+
+    expect(sharedSymlinkCalls).toEqual([])
+    expect(sharedRenameCalls).toEqual([])
+    expect(sharedUnlinkCalls).toEqual([])
+  } finally {
+    ;(fs as unknown as { symlink: typeof fs.symlink }).symlink =
+      originalSymlink
+    ;(fs as unknown as { rename: typeof fs.rename }).rename = originalRename
+    ;(fs as unknown as { unlink: typeof fs.unlink }).unlink = originalUnlink
+  }
+})

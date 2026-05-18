@@ -530,20 +530,33 @@ async function ensureSharedSymlink(
   }
 
   if (existing?.isSymbolicLink()) {
-    // Compare normalized target. `readlink` returns the value verbatim
-    // (which we wrote as the absolute `sourcePath` originally), so a
-    // strict-equal check is sufficient — no `realpath` needed.
-    let currentTarget: string | null = null
-    try {
-      currentTarget = await fs.readlink(mirrorPath)
-    } catch (err) {
-      consola.debug(
-        `ensureSharedSymlink(${name}): cannot readlink ${mirrorPath}:`,
-        err,
-      )
+    // Resolve both sides to their canonical absolute paths and compare.
+    // We use `fs.realpath` rather than the raw `fs.readlink()` output
+    // because Windows junctions resolve via readlink to `\\?\`-prefixed
+    // device-namespace paths (e.g. `\\?\C:\Users\foo\.claude\projects`)
+    // while we wrote the plain absolute `sourcePath` (e.g.
+    // `C:\Users\foo\.claude\projects`) with `fs.symlink`. A literal
+    // `===` on the raw readlink output never matched on Windows, so
+    // the fast path silently failed and every startup tore down +
+    // recreated all 9 SHARED junctions — masked locally because NTFS
+    // File System Tunneling forges the creation timestamp for a name
+    // deleted and recreated within 15 s (the per-startup churn was
+    // real, the ctime-stable assertion was a false negative). The
+    // realpath comparison canonicalizes both forms to the same string
+    // on POSIX and Windows alike, and as a bonus handles drive-letter
+    // casing / trailing-slash differences too. The extra two syscalls
+    // per slot are negligible at proxy startup (runs once per launch).
+    const currentReal = await fs.realpath(mirrorPath).catch(() => null)
+    const sourceReal = await fs.realpath(sourcePath).catch(() => null)
+    if (
+      currentReal !== null &&
+      sourceReal !== null &&
+      currentReal === sourceReal
+    ) {
+      return
     }
-    if (currentTarget === sourcePath) return
-    // Wrong target — fall through to the atomic-rename replace path.
+    // Wrong target (or unresolvable) — fall through to the
+    // atomic-rename replace path.
   } else if (existing?.isDirectory()) {
     // Legacy real directory at the slot. Try `fs.rmdir` — on POSIX it
     // succeeds ONLY if the directory is empty, so there's nothing to
