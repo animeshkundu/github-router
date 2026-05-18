@@ -577,6 +577,13 @@ async function ensureSharedSymlink(
   // 3. Atomic-rename creation: symlink to a unique temp path, then
   //    rename over the slot. `fs.rename` replaces existing symlinks
   //    atomically on POSIX and is safe against concurrent racers.
+  //    On Windows, MoveFileEx with MOVEFILE_REPLACE_EXISTING does NOT
+  //    replace an existing directory or junction destination
+  //    (npm/cli#9021), so when the slot already holds a wrong-target
+  //    junction we must explicitly unlink it first. The sub-millisecond
+  //    window of no-link is acceptable: ensureClaudeConfigMirror is
+  //    idempotent under concurrency and only runs at proxy startup,
+  //    before any spawned Claude Code child has been launched.
   const tempPath = `${mirrorPath}.tmp.${process.pid}.${randomBytes(4).toString("hex")}`
   try {
     await fs.symlink(
@@ -593,10 +600,22 @@ async function ensureSharedSymlink(
     )
     return
   }
+  if (process.platform === "win32" && existing?.isSymbolicLink()) {
+    // Windows-only: clear the wrong-target junction so the rename
+    // below can land. Best-effort — if a concurrent racer already
+    // unlinked it, the rename succeeds as a CREATE; if a concurrent
+    // racer already replaced it with a fresh junction, the rename
+    // hits the catch below and we surface a warn.
+    await fs.unlink(mirrorPath).catch(() => {})
+  }
   try {
     await fs.rename(tempPath, mirrorPath)
   } catch (err) {
-    consola.debug(
+    // Escalated from debug → warn per the CLAUDE.md "smoking gun"
+    // rule: a silent debug log here previously hid the Windows
+    // rename-replace bug (junction-over-junction MoveFileEx EPERM).
+    // Post-fix, rename failures should be rare and visible.
+    consola.warn(
       `ensureSharedSymlink(${name}): rename ${tempPath} → ${mirrorPath} failed:`,
       err,
     )
