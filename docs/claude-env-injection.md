@@ -20,6 +20,10 @@ The injection uses a **presence-based guard** in `getClaudeCodeEnvVars` (`src/li
 
 **Opt out per-feature** by setting the env to `0` / `false` / `no` / `off` / empty string in your shell — the presence-based guard preserves any value you set. ADVISOR has a documented hard opt-out (`CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`) that wins via `JI()` ordering.
 
+## Adjacent proxy-side opt-out: `GH_ROUTER_PEER_AWARENESS`
+
+Independent of the Claude Code feature gates above, the proxy appends a short (~100-token) `--append-system-prompt` snippet introducing Claude to the peer-review MCP tools, the `peer-review-coordinator` fan-out subagent, and Claude Code's built-in `advisor` tool. Non-prescriptive — the prescriptive auto-invocation triggers live in each MCP tool's own `description` (see [`peer-mcp-design.md`](peer-mcp-design.md) Phase 2A). Default-on; opt out per-launch with `GH_ROUTER_PEER_AWARENESS=0` (also accepts `false` / `off` / `no` / empty string, case-insensitive — same surface as the CLAUDE_CODE_* opt-outs). Built by `buildPeerAwarenessSnippet` in `src/lib/peer-mcp-personas.ts`; size-pinned by tests in `tests/peer-mcp-personas.test.ts` to stay under 700 bytes minimal / 900 bytes maximal so it doesn't bloat the system prompt.
+
 **Race-surface coverage**: enabling FORK_SUBAGENT and FINE_GRAINED_TOOL_STREAMING by default amplifies the SSE frame distribution through `relayAnthropicStream`. Per the Review checklist in `CLAUDE.md`, `tests/integration/fork-fgts-cancel.test.ts` exercises consumer cancels against fragmented `input_json_delta` streams to assert no smoking-gun warns surface.
 
 ## Not auto-enabled (deferred)

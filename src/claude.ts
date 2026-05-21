@@ -8,13 +8,15 @@ import {
   checkClaudeVersion,
 } from "./lib/claude-version-check"
 import {
+  injectPeerMcpIntoMirror,
   resolveCodexCliBackend,
   writePeerMcpRuntimeFiles,
 } from "./lib/codex-mcp-config"
 import { enableFileLogging } from "./lib/file-log-reporter"
 import { getCodexVersion, launchChild } from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
-import { ensureClaudeConfigMirror } from "./lib/paths"
+import { ensureClaudeConfigMirror, removeOwnClaudeConfigMirror } from "./lib/paths"
+import { buildPeerAwarenessSnippet } from "./lib/peer-mcp-personas"
 import {
   DEFAULT_CLAUDE_MODEL,
   DEFAULT_CLAUDE_MODEL_FALLBACKS,
@@ -282,7 +284,17 @@ export const claude = defineCommand({
     //      canonical agents dir is the authoritative surface.
     //   5. Plumb `cleanup()` into launchChild's onShutdown so tempfiles
     //      are unlinked on signal exit.
-    let onShutdown: (() => Promise<void>) | undefined
+    //
+    // The per-launch CLAUDE_CONFIG_DIR mirror is ALWAYS cleaned up on
+    // shutdown (regardless of codex-mcp), since `ensureClaudeConfigMirror`
+    // above always provisioned it. We chain the peer-MCP cleanup
+    // (if any) ahead of the mirror removal so files inside the mirror
+    // get unlinked first via known paths; the recursive `fs.rm` is
+    // belt-and-braces for everything else.
+    const baseShutdown = async (): Promise<void> => {
+      await removeOwnClaudeConfigMirror()
+    }
+    let onShutdown: () => Promise<void> = baseShutdown
     const codexMcpEnabled = (args as Record<string, unknown>)["codex-mcp"] !== false
     if (codexMcpEnabled) {
       try {
@@ -305,18 +317,92 @@ export const claude = defineCommand({
           geminiAvailable,
         })
         state.peerMcpNonce = runtime.nonce
-        onShutdown = runtime.cleanup
+        onShutdown = async (): Promise<void> => {
+          await runtime.cleanup()
+          await baseShutdown()
+        }
 
-        extraArgs.push("--mcp-config", runtime.mcpConfigPath)
-        if ((args as Record<string, unknown>)["codex-mcp-only"] === true) {
-          extraArgs.push("--strict-mcp-config")
+        // Subagent MCP visibility: inject `gh-router-peers` (and the
+        // `codex-cli` stdio entry when enabled) into the mirrored
+        // `<CLAUDE_CONFIG_DIR>/.claude.json` so subagents — Agent-tool
+        // subagents, forks, agent-teams subprocesses — discover the peer
+        // MCP from persistent (user-scope) config rather than the parent's
+        // ephemeral --mcp-config CLI flag. Same nonce as runtime files
+        // (the proxy validates Authorization against the launch nonce
+        // regardless of which channel the request came through).
+        //
+        // On collision with a user-side entry of the same name, this
+        // returns ok:false; we then keep --mcp-config as the fallback so
+        // at least the parent session retains the peer tools (subagents
+        // remain blind in that case, by design — explicit branch, not
+        // silent precedence).
+        const injected = await injectPeerMcpIntoMirror(serverUrl, {
+          codexCli: backend === "cli",
+          geminiAvailable,
+          nonce: runtime.nonce,
+        })
+
+        // Channel selection: prefer the mirror (subagent-visible) when
+        // injection succeeded. Only fall back to --mcp-config when
+        // injection refused due to a user-side collision. Pushing BOTH
+        // would register the same server name twice (mirror + CLI flag),
+        // which is ambiguous across Claude Code versions.
+        if (!injected.ok) {
+          extraArgs.push("--mcp-config", runtime.mcpConfigPath)
+          if ((args as Record<string, unknown>)["codex-mcp-only"] === true) {
+            extraArgs.push("--strict-mcp-config")
+          }
+        } else if ((args as Record<string, unknown>)["codex-mcp-only"] === true) {
+          // User asked for strict-MCP-only but the mirror inject path
+          // can't enforce that (other user-scope MCPs already in the
+          // mirror's snapshot are visible). Warn so the flag's mismatch
+          // with the new behavior is obvious.
+          consola.warn(
+            "--codex-mcp-only has no effect when peer MCP is wired via the "
+              + "mirrored .claude.json (the user's existing user-scope MCPs in "
+              + "the snapshot are still visible). Pass --no-codex-mcp to skip "
+              + "peer-MCP wiring entirely.",
+          )
         }
 
         const personaNames = runtime.personas.map((p) => p.agentName).join(", ")
+        const subagentVisibility = injected.ok
+          ? `subagent-visible (mirrored mcpServers: [${injected.serversAdded.join(", ")}])`
+          : `subagent-INVISIBLE (collision on user-side mcpServers: [${injected.conflictingServers.join(", ")}]; parent-only via --mcp-config)`
         process.stderr.write(
           `Peer MCP wired (backend=${backend}, personas=[${personaNames}], `
-            + `subagent .md files=${runtime.agentMdPaths.length}).\n`,
+            + `subagent .md files=${runtime.agentMdPaths.length}, ${subagentVisibility}).\n`,
         )
+
+        // Awareness snippet: append a short, non-prescriptive system-prompt
+        // section telling Claude *what* peer-review tools exist and *when*
+        // they tend to be useful — Claude decides *whether* to call them.
+        // The auto-invocation triggers live in each MCP tool's own
+        // `description` (the prescriptive layer); this snippet is the
+        // awareness layer. Opt out with `GH_ROUTER_PEER_AWARENESS` set to
+        // 0, false, no, off, or empty string (case-insensitive, trimmed)
+        // — same surface as the CLAUDE_CODE_* opt-outs documented in
+        // docs/claude-env-injection.md.
+        const peerAwarenessOptOut = (
+          process.env.GH_ROUTER_PEER_AWARENESS ?? "1"
+        )
+          .trim()
+          .toLowerCase()
+        const peerAwarenessDisabled =
+          peerAwarenessOptOut === ""
+          || peerAwarenessOptOut === "0"
+          || peerAwarenessOptOut === "false"
+          || peerAwarenessOptOut === "off"
+          || peerAwarenessOptOut === "no"
+        if (!peerAwarenessDisabled) {
+          extraArgs.push(
+            "--append-system-prompt",
+            buildPeerAwarenessSnippet({
+              codexCli: backend === "cli",
+              geminiAvailable,
+            }),
+          )
+        }
       } catch (err) {
         consola.warn(
           `Peer MCP wiring failed (claude will launch without it): ${
