@@ -413,6 +413,172 @@ export async function writePeerAgentMdFiles(
   return { paths, cleanup }
 }
 
+export type InjectPeerMcpResult =
+  | { ok: true; serversAdded: ReadonlyArray<string> }
+  | {
+      ok: false
+      reason: "user-has-conflicting-entry"
+      conflictingServers: ReadonlyArray<string>
+    }
+
+interface InjectOpts {
+  codexCli: boolean
+  geminiAvailable: boolean
+  /** Per-launch nonce — must match what writePeerMcpRuntimeFiles wrote
+   *  so the proxy's /mcp Authorization check passes. */
+  nonce: string
+  /** Override for tests. Defaults to PATHS.CODEX_HOME. */
+  codexHome?: string
+  /** Override for tests. Defaults to PATHS.CLAUDE_CONFIG_DIR (per-launch). */
+  claudeConfigDir?: string
+}
+
+/**
+ * Mutate the mirrored `<CLAUDE_CONFIG_DIR>/.claude.json` to add the
+ * `gh-router-peers` entry (and `codex-cli` when enabled) under
+ * `mcpServers`. This is the load-bearing fix for subagent MCP visibility.
+ *
+ * Subagents — Agent-tool subagents, forks, and agent-teams subprocesses
+ * — discover MCP servers from persistent scopes (`.claude.json` and
+ * project-scope `.mcp.json`), NOT from the parent's `--mcp-config` CLI
+ * flag. Writing into the per-launch mirror's `.claude.json` makes the
+ * MCP entry visible to subagents transparently: they inherit
+ * `CLAUDE_CONFIG_DIR` from the parent's env, so they read the same
+ * config file we just mutated.
+ *
+ * Safety:
+ *   - Refuses to overwrite a same-named user-side entry (the snapshot
+ *     copied their `.claude.json` first, so an existing entry would
+ *     belong to the user). Returns `{ ok: false }` so the caller can
+ *     fall back to leaving `--mcp-config` in place for the parent.
+ *   - Preserves all other top-level fields and other `mcpServers`
+ *     entries.
+ *   - Atomic write: temp-file with `wx` (`O_CREAT | O_EXCL`) followed by
+ *     `rename`, mirroring the synthetic-credentials write pattern in
+ *     `ensureClaudeConfigMirror`. Mode 0o600. The per-launch
+ *     `CLAUDE_CONFIG_DIR` means there are no cross-launch racers.
+ */
+export async function injectPeerMcpIntoMirror(
+  serverUrl: string,
+  opts: InjectOpts,
+): Promise<InjectPeerMcpResult> {
+  const dir = opts.claudeConfigDir ?? PATHS.CLAUDE_CONFIG_DIR
+  const target = path.join(dir, ".claude.json")
+
+  // 1. Read existing snapshot (or {} if missing / malformed). We do NOT
+  //    fail loudly on parse error — start fresh and let the proxy
+  //    session run. Logging the warn surfaces the underlying corruption
+  //    for the user to investigate.
+  let existing: Record<string, unknown> = {}
+  try {
+    const raw = await fs.readFile(target, "utf8")
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        existing = parsed as Record<string, unknown>
+      } else {
+        consola.warn(
+          `injectPeerMcpIntoMirror: ${target} parsed to non-object `
+            + `(typeof=${typeof parsed}); discarding contents and starting fresh.`,
+        )
+      }
+    } catch (err) {
+      consola.warn(
+        `injectPeerMcpIntoMirror: cannot parse ${target} as JSON; `
+          + `starting fresh (existing contents will be overwritten):`,
+        err,
+      )
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      consola.debug(
+        `injectPeerMcpIntoMirror: cannot read ${target}:`,
+        err,
+      )
+    }
+    // Either ENOENT (first-ever launch, no user .claude.json) or some
+    // other read error. Either way, start fresh.
+  }
+
+  // 2. Normalize `mcpServers` to an object (clobber if user had it set
+  //    to a non-object value — that's already broken; our overwrite
+  //    won't make it worse and the warn flags it).
+  let mcpServers: Record<string, unknown>
+  const rawServers = existing.mcpServers
+  if (
+    rawServers !== undefined
+    && rawServers !== null
+    && typeof rawServers === "object"
+    && !Array.isArray(rawServers)
+  ) {
+    mcpServers = rawServers as Record<string, unknown>
+  } else {
+    if (rawServers !== undefined && rawServers !== null) {
+      consola.warn(
+        `injectPeerMcpIntoMirror: mcpServers field in ${target} is not an `
+          + `object (typeof=${typeof rawServers}); replacing with our entry.`,
+      )
+    }
+    mcpServers = {}
+  }
+
+  // 3. Build our desired entries from the SAME builder used for
+  //    --mcp-config so the two channels never drift.
+  const peerConfig = buildPeerMcpConfig(serverUrl, {
+    codexCli: opts.codexCli,
+    geminiAvailable: opts.geminiAvailable,
+    nonce: opts.nonce,
+    codexHome: opts.codexHome ?? PATHS.CODEX_HOME,
+  })
+
+  // 4. Refuse to overwrite any same-named user-side entry. This is the
+  //    explicit-branch / "no silent precedence" requirement from the
+  //    plan — log a warning, return ok:false, and let the caller fall
+  //    back to --mcp-config (parent-session-only).
+  const conflicts: Array<string> = []
+  for (const name of Object.keys(peerConfig.mcpServers)) {
+    if (mcpServers[name] !== undefined) conflicts.push(name)
+  }
+  if (conflicts.length > 0) {
+    consola.warn(
+      `injectPeerMcpIntoMirror: your ~/.claude/.claude.json already has `
+        + `mcpServers entries named [${conflicts.join(", ")}]; refusing to `
+        + `overwrite. Subagents will not see the peer-MCP tools — only the `
+        + `parent session via --mcp-config fallback. To resolve, rename the `
+        + `user-side server(s) (e.g. via \`claude mcp remove\`) and relaunch.`,
+    )
+    return {
+      ok: false,
+      reason: "user-has-conflicting-entry",
+      conflictingServers: conflicts,
+    }
+  }
+
+  // 5. Merge our entries; preserve everything else.
+  for (const [name, entry] of Object.entries(peerConfig.mcpServers)) {
+    mcpServers[name] = entry
+  }
+  existing.mcpServers = mcpServers
+
+  // 6. Atomic temp+rename. Same pattern as the synthetic .credentials.json
+  //    write in ensureClaudeConfigMirror. Per-launch dir means there are
+  //    no cross-launch racers; EEXIST on the tempfile is essentially
+  //    impossible (per-pid + 8-hex random). Mode 0o600 to match the
+  //    upstream Claude Code file perms.
+  const desiredJson = JSON.stringify(existing, null, 2) + "\n"
+  await fs.mkdir(dir, { recursive: true })
+  const tempPath = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
+  try {
+    await fs.writeFile(tempPath, desiredJson, { mode: 0o600, flag: "wx" })
+    await fs.rename(tempPath, target)
+  } catch (err) {
+    await fs.unlink(tempPath).catch(() => {})
+    throw err
+  }
+
+  return { ok: true, serversAdded: Object.keys(peerConfig.mcpServers) }
+}
+
 /**
  * Generate a per-launch nonce, write the MCP config + agents JSON
  * tempfiles under `CLAUDE_RUNTIME_DIR` with mode 0o600 and `O_EXCL`,

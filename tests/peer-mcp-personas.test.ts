@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import {
   buildAgentPrompt,
+  buildPeerAwarenessSnippet,
   PERSONAS_READ,
   PERSONAS_WRITE,
   personasFor,
@@ -240,5 +241,126 @@ describe("prompt-cache stability", () => {
     const aCli = buildAgentPrompt(persona, { codexCli: true })
     const bCli = buildAgentPrompt(persona, { codexCli: true })
     expect(aCli).toBe(bCli)
+  })
+})
+
+describe("buildPeerAwarenessSnippet", () => {
+  test("always advertises the three always-on critic tools, coordinator, and namespace prefix", () => {
+    const snippet = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: false,
+    })
+    // Trimmed snippet: per-tool descriptions are in MCP tool listings;
+    // here we just list the tool short-names + the `gh-router-peers`
+    // namespace prefix so Claude knows where to look.
+    expect(snippet).toContain("mcp__gh-router-peers__")
+    expect(snippet).toContain("codex_critic")
+    expect(snippet).toContain("codex_reviewer")
+    expect(snippet).toContain("opus_critic")
+    expect(snippet).toContain("peer-review-coordinator")
+    expect(snippet).toContain("## Peer review and advisor")
+  })
+
+  test("snippet stays under 100 tokens (~700 bytes) in the minimal case", () => {
+    // Bloat budget per the design decision: the snippet is default-on,
+    // so it must stay small. ~100 tokens ≈ ~400 bytes for English; we
+    // leave headroom up to 700 bytes. If this fails, the snippet has
+    // grown beyond its design budget — trim it back rather than relax
+    // the threshold.
+    const minimal = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: false,
+    })
+    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(700)
+  })
+
+  test("snippet stays under 150 tokens (~900 bytes) in the maximal case", () => {
+    const full = buildPeerAwarenessSnippet({
+      codexCli: true,
+      geminiAvailable: true,
+    })
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(900)
+  })
+
+  test("mentions Claude Code's advisor built-in tool", () => {
+    // The user's original ask was that Claude know about *both* the peers
+    // AND the advisor. The proxy auto-enables the advisor experimental
+    // flag (CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL); the awareness
+    // snippet surfaces it alongside the peer critics so Claude reaches
+    // for either at its own discretion.
+    const snippet = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: false,
+    })
+    expect(snippet).toContain("`advisor`")
+  })
+
+  test("omits gemini_critic when gemini is not in the catalog", () => {
+    const snippet = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: false,
+    })
+    expect(snippet).not.toContain("gemini_critic")
+    expect(snippet).not.toContain("gemini-3.1-pro")
+  })
+
+  test("includes gemini_critic when gemini is in the catalog", () => {
+    const snippet = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: true,
+    })
+    expect(snippet).toContain("gemini_critic")
+    expect(snippet).toContain("gemini-3.1-pro")
+  })
+
+  test("includes codex-cli stdio bridge mention only when codexCli=true", () => {
+    const without = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: true,
+    })
+    expect(without).not.toContain("mcp__codex-cli__codex")
+
+    const withCli = buildPeerAwarenessSnippet({
+      codexCli: true,
+      geminiAvailable: true,
+    })
+    expect(withCli).toContain("mcp__codex-cli__codex")
+  })
+
+  test("snippet is non-prescriptive (doesn't dictate when to call)", () => {
+    const snippet = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: true,
+    })
+    // Awareness layer must not force a workflow — the auto-invocation
+    // triggers (CALL BEFORE / CALL AFTER) live in each MCP tool's own
+    // `description` instead. Pin "at your discretion" as the no-mandate
+    // phrasing.
+    expect(snippet).toContain("at your discretion")
+  })
+
+  test("snippet is deterministic for the same inputs", () => {
+    const a = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: true,
+    })
+    const b = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: true,
+    })
+    expect(a).toBe(b)
+  })
+
+  test("mentions subagent inheritance (the load-bearing UX claim)", () => {
+    const snippet = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: true,
+    })
+    // The whole holistic-fix premise is that subagents inherit these
+    // tools via the mirrored .claude.json. Make that visible in the
+    // awareness snippet so Claude knows it can fan out without losing
+    // the peer tools downstream.
+    expect(snippet).toMatch(/subagents/i)
+    expect(snippet).toMatch(/inherit/i)
   })
 })

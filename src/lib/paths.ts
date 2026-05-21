@@ -48,10 +48,44 @@ export const PATHS = {
    * synthetic credential and authenticate instead of falling into the
    * "Not logged in · Run /login" gate that would otherwise leave
    * them mute. See `ensureClaudeConfigMirror` below.
+   *
+   * Per-launch dir: `<appDir>/claude-config/<pid>-<8 hex>`. Two
+   * concurrent `github-router claude` launches each get their own
+   * isolated mirror, so per-launch state (synthetic credential,
+   * snapshot copy of `~/.claude/`, future per-launch `.claude.json`
+   * mutation with the peer-MCP entry) cannot cross-talk. The
+   * per-launch suffix is cached on first access (see
+   * `claudeConfigDirSuffix()`) so all callers within a single proxy
+   * lifetime see the same value. Boot-time `sweepStaleClaudeConfigMirrors`
+   * reaps mirrors from crashed prior PIDs.
    */
   get CLAUDE_CONFIG_DIR() {
-    return path.join(appDir(), "claude-config")
+    return path.join(appDir(), "claude-config", claudeConfigDirSuffix())
   },
+}
+
+/**
+ * Per-launch suffix for `PATHS.CLAUDE_CONFIG_DIR`. Lazily generated on
+ * first access and cached for the lifetime of the process so every
+ * caller (env-var injection in `getClaudeCodeEnvVars`,
+ * `ensureClaudeConfigMirror` provisioning, peer-agent `.md` writes
+ * under `<dir>/agents/`, the shutdown cleanup) resolves the same path.
+ *
+ * Shape: `<pid>-<8 hex>`. The PID prefix is what
+ * `sweepStaleClaudeConfigMirrors` keys off to drop orphans from
+ * crashed prior sessions; the 8-hex random suffix prevents collision
+ * if a future caller (tests, internal relaunch) ever clears the cache
+ * within a single PID lifetime.
+ *
+ * NOT exported — every consumer should go through `PATHS.CLAUDE_CONFIG_DIR`
+ * so the homedir-mock pattern used in the test suite keeps working.
+ */
+let _claudeConfigDirSuffix: string | undefined
+function claudeConfigDirSuffix(): string {
+  if (_claudeConfigDirSuffix === undefined) {
+    _claudeConfigDirSuffix = `${process.pid}-${randomBytes(4).toString("hex")}`
+  }
+  return _claudeConfigDirSuffix
 }
 
 export async function ensurePaths(): Promise<void> {
@@ -65,11 +99,18 @@ export async function ensurePaths(): Promise<void> {
   await sweepStaleRuntimeFiles().catch((err) => {
     consola.debug("Runtime sweep skipped:", err)
   })
-  // Phase 2.5: also sweep stale peer-* subagent .md files from the
-  // router-owned CLAUDE_CONFIG_DIR/agents/ (orphans from prior proxy
-  // crashes). The user's own .md files are never in this dir — only
-  // peer-* files we wrote — so the sweep is conservative by location
-  // alone, in addition to the regex's persona-name allowlist.
+  // Sweep stale per-launch CLAUDE_CONFIG_DIR mirrors left behind by
+  // crashed prior proxy sessions BEFORE peer-agent .md sweep, since
+  // the .md sweep is scoped to THIS launch's mirror and the per-launch
+  // dir sweep is the parent cleanup for the same orphan class.
+  await sweepStaleClaudeConfigMirrors().catch((err) => {
+    consola.debug("Per-launch claude-config sweep skipped:", err)
+  })
+  // Phase 2.5: also sweep stale peer-* subagent .md files from this
+  // launch's CLAUDE_CONFIG_DIR/agents/ (defense-in-depth — should be
+  // a no-op since the per-launch dir didn't exist before this PID
+  // started; keeps the safety net in case a future change ever shares
+  // an agents/ dir across launches).
   await sweepStalePeerAgentMdFiles().catch((err) => {
     consola.debug("Peer-agent .md sweep skipped:", err)
   })
@@ -825,3 +866,78 @@ export async function sweepStalePeerAgentMdFiles(): Promise<void> {
  */
 const PEER_AGENT_MD_FILENAME =
   /^peer-(\d+)-[0-9a-f]{8}-(?:codex-critic|codex-reviewer|gemini-critic|codex-implementer|peer-review-coordinator)\.md$/
+
+/**
+ * Strict regex matching only per-launch claude-config mirror dirs this
+ * proxy creates: `<pid>-<8 hex>`. Anchored to the entire entry name so
+ * user-authored siblings under `<appDir>/claude-config/` (if any) are
+ * untouchable. The PID prefix is what `sweepStaleClaudeConfigMirrors`
+ * keys off; the 8-hex random suffix matches `randomBytes(4)` exactly
+ * (no `?` — files created by a different shape are not ours).
+ */
+const CLAUDE_CONFIG_MIRROR_DIR = /^(\d+)-[0-9a-f]{8}$/
+
+/**
+ * Sweep stale per-launch CLAUDE_CONFIG_DIR mirrors left behind by
+ * crashed prior proxy sessions. Symmetric to `sweepStalePeerAgentMdFiles`
+ * — same liveness rule (only delete when the embedded PID is dead),
+ * same strict regex (the dir-name allowlist is the load-bearing
+ * protection against deleting user-authored siblings).
+ *
+ * Scans `<appDir>/claude-config/` (the parent of the per-launch dirs).
+ * Each entry whose name matches `<pid>-<8 hex>` AND whose PID is no
+ * longer alive is removed recursively. `fs.rm({recursive: true})`
+ * walks the tree calling `unlink` on symlinks/junctions rather than
+ * following them, so the SHARED junctions back to `~/.claude/<X>`
+ * are removed without touching their targets.
+ *
+ * Tolerates missing parent dir (first-ever launch, or user wiped it).
+ */
+export async function sweepStaleClaudeConfigMirrors(): Promise<void> {
+  const parent = path.join(appDir(), "claude-config")
+  let entries: Array<string>
+  try {
+    entries = await fs.readdir(parent)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return
+    throw err
+  }
+  for (const name of entries) {
+    const match = CLAUDE_CONFIG_MIRROR_DIR.exec(name)
+    if (!match) continue
+    const pid = Number.parseInt(match[1], 10)
+    if (isPidAlive(pid)) continue
+    await fs
+      .rm(path.join(parent, name), { recursive: true, force: true })
+      .catch((err) => {
+        // Best-effort: stale-dir cleanup must never block startup.
+        // Common failure modes (worth surviving silently): an EBUSY/EPERM
+        // on Windows if a leftover handle is still open, or a stray
+        // root-owned file inside the dir from a previous run with
+        // different permissions.
+        consola.debug(
+          `sweepStaleClaudeConfigMirrors: cannot rm ${name}:`,
+          err,
+        )
+      })
+  }
+}
+
+/**
+ * Remove THIS launch's per-launch CLAUDE_CONFIG_DIR on shutdown.
+ * Best-effort: a failure here must not block process exit (the caller
+ * wraps this in a `.catch`-equivalent via `launchChild`'s onShutdown
+ * try/catch). Symmetric to `writePeerMcpRuntimeFiles`'s `cleanup()`:
+ * we own this dir for the lifetime of the proxy, so removing it on
+ * normal shutdown is correct; the boot-time sweep handles the
+ * abnormal-exit case.
+ *
+ * `fs.rm({recursive: true})` removes SHARED junctions via unlink
+ * (does NOT follow them into the user's real `~/.claude/<X>`).
+ */
+export async function removeOwnClaudeConfigMirror(): Promise<void> {
+  const dir = PATHS.CLAUDE_CONFIG_DIR
+  await fs.rm(dir, { recursive: true, force: true }).catch((err) => {
+    consola.debug(`removeOwnClaudeConfigMirror: rm ${dir} skipped:`, err)
+  })
+}

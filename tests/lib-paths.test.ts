@@ -21,7 +21,7 @@ mock.module("node:os", () => ({
   homedir: () => tempDir,
 }))
 
-const { ensurePaths, PATHS, sweepStaleRuntimeFiles, sweepStalePeerAgentMdFiles, writeRuntimeFileSecure, ensureClaudeConfigMirror, __testing } =
+const { ensurePaths, PATHS, sweepStaleRuntimeFiles, sweepStalePeerAgentMdFiles, sweepStaleClaudeConfigMirrors, removeOwnClaudeConfigMirror, writeRuntimeFileSecure, ensureClaudeConfigMirror, __testing } =
   await import("../src/lib/paths")
 
 // Round-4 #4: verify that monkey-patching `fs.<name>` / `consola.<name>`
@@ -278,6 +278,118 @@ test("sweepStalePeerAgentMdFiles deletes dead-PID peer-*.md but keeps live-PID a
 test("sweepStalePeerAgentMdFiles tolerates missing CLAUDE_CONFIG_DIR/agents dir", async () => {
   await fs.rm(path.join(PATHS.CLAUDE_CONFIG_DIR, "agents"), { recursive: true, force: true })
   await expect(sweepStalePeerAgentMdFiles()).resolves.toBeUndefined()
+})
+
+// ============================================================
+// Per-launch CLAUDE_CONFIG_DIR tests (Part 1: holistic subagent MCP
+// inheritance — see plans/in-this-code-base-cryptic-dove.md)
+// ============================================================
+
+test("PATHS.CLAUDE_CONFIG_DIR ends with <pid>-<8 hex> and is stable across calls within the process", () => {
+  const first = PATHS.CLAUDE_CONFIG_DIR
+  // Shape check — leaf is the per-launch suffix, parent is "claude-config"
+  const leaf = path.basename(first)
+  const parent = path.basename(path.dirname(first))
+  expect(parent).toBe("claude-config")
+  expect(leaf).toMatch(new RegExp(`^${process.pid}-[0-9a-f]{8}$`))
+  // Stability — every access returns the same value
+  const second = PATHS.CLAUDE_CONFIG_DIR
+  const third = PATHS.CLAUDE_CONFIG_DIR
+  expect(second).toBe(first)
+  expect(third).toBe(first)
+})
+
+test("sweepStaleClaudeConfigMirrors deletes dead-PID dirs but keeps live-PID dirs and unrelated siblings", async () => {
+  await ensurePaths()
+  const parent = path.join(PATHS.APP_DIR, "claude-config")
+  await fs.mkdir(parent, { recursive: true })
+
+  // Live: this process's PID (matches the strict <pid>-<8 hex> shape)
+  const livePath = path.join(parent, `${process.pid}-cafef00d`)
+  await fs.mkdir(livePath, { recursive: true })
+  await fs.writeFile(path.join(livePath, "sentinel"), "live")
+
+  // Dead: a PID that almost certainly doesn't exist
+  const deadPid = 2_147_483_641
+  const deadPath = path.join(parent, `${deadPid}-deadbeef`)
+  await fs.mkdir(deadPath, { recursive: true })
+  await fs.writeFile(path.join(deadPath, "sentinel"), "dead")
+
+  // Unrelated user-authored sibling — must NOT be touched. Picks names
+  // that DON'T match the <pid>-<8 hex> shape (no underscore-vs-dash
+  // wiggle: the regex requires lowercase 8-char hex, anchored).
+  const userOwn = path.join(parent, "my-backup-dir")
+  await fs.mkdir(userOwn, { recursive: true })
+  await fs.writeFile(path.join(userOwn, "user-file"), "leave-me")
+  // Even nastier: a sibling that's <digits>-<not-quite-8-hex>, which
+  // the regex must reject (wrong suffix length).
+  const userPidShape = path.join(parent, `${deadPid}-deadbef`)
+  await fs.mkdir(userPidShape, { recursive: true })
+  await fs.writeFile(path.join(userPidShape, "user-file"), "leave-me-too")
+  // And a sibling with the right hex length but non-hex chars.
+  const userBadHex = path.join(parent, `${deadPid}-zzzzzzzz`)
+  await fs.mkdir(userBadHex, { recursive: true })
+  await fs.writeFile(path.join(userBadHex, "user-file"), "leave-me-three")
+
+  await sweepStaleClaudeConfigMirrors()
+
+  await expect(fs.stat(livePath)).resolves.toBeDefined()
+  await expect(fs.stat(deadPath)).rejects.toThrow()
+  await expect(fs.stat(userOwn)).resolves.toBeDefined()
+  await expect(fs.stat(userPidShape)).resolves.toBeDefined()
+  await expect(fs.stat(userBadHex)).resolves.toBeDefined()
+
+  // Cleanup
+  await fs.rm(livePath, { recursive: true, force: true })
+  await fs.rm(userOwn, { recursive: true, force: true })
+  await fs.rm(userPidShape, { recursive: true, force: true })
+  await fs.rm(userBadHex, { recursive: true, force: true })
+})
+
+test("sweepStaleClaudeConfigMirrors tolerates missing parent dir", async () => {
+  // No claude-config/ at all (e.g. first-ever launch, or user wiped).
+  // Sweep must no-op rather than throw.
+  await fs.rm(path.join(PATHS.APP_DIR, "claude-config"), { recursive: true, force: true })
+  await expect(sweepStaleClaudeConfigMirrors()).resolves.toBeUndefined()
+})
+
+test("removeOwnClaudeConfigMirror deletes this launch's mirror dir and does NOT follow SHARED junctions", async () => {
+  // Establish a mirror with a SHARED junction inside it.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await ensureClaudeConfigMirror()
+
+  // Plant a sentinel in the SHARED source so we can prove removal of
+  // the mirror dir does not destroy it.
+  const sentinelName = `sentinel-${randomBytes(8).toString("hex")}.txt`
+  const sentinelBody = `survives-removal-${Date.now()}`
+  await fs.writeFile(
+    path.join(claudeHome, "projects", sentinelName),
+    sentinelBody,
+  )
+
+  // Sanity: mirror dir exists, SHARED slot is reachable via mirror.
+  await expect(fs.stat(PATHS.CLAUDE_CONFIG_DIR)).resolves.toBeDefined()
+  await expect(
+    fs.stat(path.join(PATHS.CLAUDE_CONFIG_DIR, "projects", sentinelName)),
+  ).resolves.toBeDefined()
+
+  await removeOwnClaudeConfigMirror()
+
+  // Mirror dir gone.
+  await expect(fs.stat(PATHS.CLAUDE_CONFIG_DIR)).rejects.toThrow()
+  // SHARED source dir + sentinel content untouched (fs.rm did NOT
+  // follow the junction into ~/.claude/projects/).
+  const survived = await fs.readFile(
+    path.join(claudeHome, "projects", sentinelName),
+    "utf8",
+  )
+  expect(survived).toBe(sentinelBody)
+
+  // Re-provision the mirror for downstream tests that expect it to exist.
+  await ensureClaudeConfigMirror()
 })
 
 // ============================================================

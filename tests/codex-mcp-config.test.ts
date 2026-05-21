@@ -8,6 +8,7 @@ import { z } from "zod"
 import {
   buildPeerAgentDefinitions,
   buildPeerMcpConfig,
+  injectPeerMcpIntoMirror,
   resolveCodexCliBackend,
   writePeerMcpRuntimeFiles,
 } from "../src/lib/codex-mcp-config"
@@ -694,6 +695,45 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
     })
   })
 
+  test("frontmatter MUST NOT include a `tools:` field (subagent inherits parent's full toolset incl. MCPs)", async () => {
+    // Load-bearing pin for the holistic subagent MCP/tool-inheritance
+    // fix (plans/in-this-code-base-cryptic-dove.md, Part 3). Claude Code
+    // subagent semantics: omitting `tools:` from the frontmatter inherits
+    // the parent's full toolset — built-ins AND every MCP tool the parent
+    // can see. Adding a `tools:` allowlist *restricts* the subagent to
+    // exactly that list, EXCLUDING user-scope MCPs and built-ins not
+    // listed. Adding the field (even with a "comprehensive-looking" list)
+    // would silently regress the "all abilities" goal — every user-side
+    // MCP would vanish from subagents the moment we forgot to enumerate it.
+    //
+    // If a future contributor genuinely needs to restrict subagent tools,
+    // do so on a per-persona basis at the Claude-Code config layer, NOT
+    // by adding `tools:` to the proxy-emitted frontmatter.
+    await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
+      const runtime = await writePeerMcpRuntimeFiles(URL, {
+        codexCli: true,
+        geminiAvailable: true,
+        runtimeDir,
+        codexHome,
+        agentsDir,
+      })
+      try {
+        for (const filePath of runtime.agentMdPaths) {
+          const body = await fs.readFile(filePath, "utf8")
+          const { frontmatter } = parseAgentMd(body)
+          const fm = frontmatter as Record<string, unknown>
+          expect(fm.tools).toBeUndefined()
+          // Defense-in-depth at the raw-bytes layer too (in case a future
+          // change emits `tools:` outside the parsed YAML somehow):
+          const fmText = body.split("---")[1] ?? ""
+          expect(fmText).not.toMatch(/^tools\s*:/m)
+        }
+      } finally {
+        await runtime.cleanup()
+      }
+    })
+  })
+
   test("frontmatter description is non-empty (cc-backup logs warning + returns null if empty)", async () => {
     // Per cc-backup loadAgentsDir.ts:552-558 — empty description means
     // the parser returns null (agent silently doesn't load). The min(1)
@@ -723,5 +763,283 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
         await runtime.cleanup()
       }
     })
+  })
+})
+
+describe("injectPeerMcpIntoMirror", () => {
+  async function withMirrorDir<T>(
+    fn: (dir: string) => Promise<T>,
+  ): Promise<T> {
+    const dir = await makeTempDir("mirror")
+    try {
+      return await fn(dir)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+
+  test("creates .claude.json with our entry when the file does not yet exist", async () => {
+    await withMirrorDir(async (dir) => {
+      const result = await injectPeerMcpIntoMirror(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        claudeConfigDir: dir,
+      })
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      expect(result.serversAdded).toEqual(["gh-router-peers"])
+
+      const target = path.join(dir, ".claude.json")
+      const stat = await fs.stat(target)
+      if (process.platform !== "win32") {
+        expect(stat.mode & 0o777).toBe(0o600)
+      }
+      const parsed = JSON.parse(await fs.readFile(target, "utf8")) as {
+        mcpServers: Record<string, { headers: { Authorization: string } }>
+      }
+      expect(Object.keys(parsed.mcpServers)).toEqual(["gh-router-peers"])
+      expect(parsed.mcpServers["gh-router-peers"]!.headers.Authorization).toBe(
+        `Bearer ${NONCE}`,
+      )
+    })
+  })
+
+  test("preserves user's existing top-level fields AND other mcpServers entries", async () => {
+    await withMirrorDir(async (dir) => {
+      // Plant a realistic snapshot-shaped .claude.json
+      const seed = {
+        numStartups: 42,
+        userID: "abc123",
+        projects: { foo: { lastSeen: 999 } },
+        mcpServers: {
+          "user-redis": {
+            type: "http",
+            url: "http://localhost:6379/mcp",
+            headers: {},
+          },
+        },
+      }
+      const target = path.join(dir, ".claude.json")
+      await fs.writeFile(target, JSON.stringify(seed, null, 2), {
+        mode: 0o600,
+      })
+
+      const result = await injectPeerMcpIntoMirror(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        claudeConfigDir: dir,
+      })
+      expect(result.ok).toBe(true)
+
+      const after = JSON.parse(await fs.readFile(target, "utf8")) as {
+        numStartups: number
+        userID: string
+        projects: { foo: { lastSeen: number } }
+        mcpServers: Record<string, unknown>
+      }
+      // Top-level user fields preserved untouched
+      expect(after.numStartups).toBe(42)
+      expect(after.userID).toBe("abc123")
+      expect(after.projects.foo.lastSeen).toBe(999)
+      // User's mcpServers entry preserved untouched
+      expect(after.mcpServers["user-redis"]).toBeDefined()
+      // Our entry added alongside
+      expect(after.mcpServers["gh-router-peers"]).toBeDefined()
+      // Exact key set: user-redis + gh-router-peers (no codex-cli, codexCli=false)
+      expect(Object.keys(after.mcpServers).sort()).toEqual([
+        "gh-router-peers",
+        "user-redis",
+      ])
+    })
+  })
+
+  test("codexCli=true also injects the codex-cli stdio entry", async () => {
+    await withMirrorDir(async (dir) => {
+      const result = await injectPeerMcpIntoMirror(URL, {
+        codexCli: true,
+        geminiAvailable: true,
+        nonce: NONCE,
+        codexHome: "/tmp/codex-isolated",
+        claudeConfigDir: dir,
+      })
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      expect([...result.serversAdded].sort()).toEqual([
+        "codex-cli",
+        "gh-router-peers",
+      ])
+
+      const parsed = JSON.parse(
+        await fs.readFile(path.join(dir, ".claude.json"), "utf8"),
+      ) as { mcpServers: Record<string, { command?: string }> }
+      expect(parsed.mcpServers["codex-cli"]?.command).toBe("codex")
+      expect(parsed.mcpServers["gh-router-peers"]).toBeDefined()
+    })
+  })
+
+  test("refuses to overwrite a user-side gh-router-peers entry (collision branch)", async () => {
+    await withMirrorDir(async (dir) => {
+      const userEntry = {
+        type: "http",
+        url: "https://evil.example.com/mcp",
+        headers: { "X-Custom": "user-controlled" },
+      }
+      const seed = {
+        numStartups: 7,
+        mcpServers: { "gh-router-peers": userEntry, "another-server": {} },
+      }
+      const target = path.join(dir, ".claude.json")
+      await fs.writeFile(target, JSON.stringify(seed, null, 2), {
+        mode: 0o600,
+      })
+      const beforeBody = await fs.readFile(target, "utf8")
+
+      const result = await injectPeerMcpIntoMirror(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        claudeConfigDir: dir,
+      })
+      expect(result.ok).toBe(false)
+      if (result.ok) return
+      expect(result.reason).toBe("user-has-conflicting-entry")
+      expect(result.conflictingServers).toEqual(["gh-router-peers"])
+
+      // File MUST be unchanged byte-for-byte — we refused, no clobber.
+      const afterBody = await fs.readFile(target, "utf8")
+      expect(afterBody).toBe(beforeBody)
+    })
+  })
+
+  test("collision detection also fires for a user-side codex-cli when codexCli=true", async () => {
+    await withMirrorDir(async (dir) => {
+      const seed = {
+        mcpServers: {
+          "codex-cli": { command: "user-codex", args: [], env: {} },
+        },
+      }
+      const target = path.join(dir, ".claude.json")
+      await fs.writeFile(target, JSON.stringify(seed, null, 2), { mode: 0o600 })
+      const beforeBody = await fs.readFile(target, "utf8")
+
+      const result = await injectPeerMcpIntoMirror(URL, {
+        codexCli: true,
+        geminiAvailable: true,
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        claudeConfigDir: dir,
+      })
+      expect(result.ok).toBe(false)
+      if (result.ok) return
+      expect(result.conflictingServers).toContain("codex-cli")
+
+      const afterBody = await fs.readFile(target, "utf8")
+      expect(afterBody).toBe(beforeBody)
+    })
+  })
+
+  test("malformed JSON in existing .claude.json → starts fresh (warn + overwrite)", async () => {
+    await withMirrorDir(async (dir) => {
+      const target = path.join(dir, ".claude.json")
+      await fs.writeFile(target, "{ not valid json", { mode: 0o600 })
+
+      const result = await injectPeerMcpIntoMirror(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        claudeConfigDir: dir,
+      })
+      expect(result.ok).toBe(true)
+
+      const parsed = JSON.parse(await fs.readFile(target, "utf8")) as {
+        mcpServers: Record<string, unknown>
+      }
+      expect(parsed.mcpServers["gh-router-peers"]).toBeDefined()
+    })
+  })
+
+  test("idempotent re-run on the SAME mirror does NOT spuriously collide (gh-router-peers we wrote ourselves)", async () => {
+    // Edge case: if a future caller invokes injectPeerMcpIntoMirror twice
+    // in the same proxy lifetime (e.g. internal relaunch), the second
+    // call would see OUR previously-written gh-router-peers and refuse.
+    // Document this as the current behavior — the collision branch is
+    // intentionally conservative ("any same-named entry → refuse") and
+    // we don't try to fingerprint "did we write this?". The fix if this
+    // ever bites is to delete the entry before re-injecting; for now
+    // assert the current behavior so any future refactor is explicit
+    // about the trade-off.
+    await withMirrorDir(async (dir) => {
+      const first = await injectPeerMcpIntoMirror(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        claudeConfigDir: dir,
+      })
+      expect(first.ok).toBe(true)
+
+      const second = await injectPeerMcpIntoMirror(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        claudeConfigDir: dir,
+      })
+      expect(second.ok).toBe(false)
+      if (second.ok) return
+      expect(second.conflictingServers).toEqual(["gh-router-peers"])
+    })
+  })
+
+  test("mcpServers field set to a non-object value gets replaced (warn + clobber)", async () => {
+    await withMirrorDir(async (dir) => {
+      const seed = { numStartups: 1, mcpServers: "this is wrong" }
+      const target = path.join(dir, ".claude.json")
+      await fs.writeFile(target, JSON.stringify(seed), { mode: 0o600 })
+
+      const result = await injectPeerMcpIntoMirror(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        claudeConfigDir: dir,
+      })
+      expect(result.ok).toBe(true)
+
+      const parsed = JSON.parse(await fs.readFile(target, "utf8")) as {
+        numStartups: number
+        mcpServers: Record<string, unknown>
+      }
+      expect(parsed.numStartups).toBe(1) // other fields preserved
+      expect(parsed.mcpServers["gh-router-peers"]).toBeDefined()
+    })
+  })
+
+  test("creates the parent dir if it does not exist (lazy mkdir)", async () => {
+    // The per-launch CLAUDE_CONFIG_DIR is normally created by
+    // ensureClaudeConfigMirror BEFORE injectPeerMcpIntoMirror runs.
+    // But if a future caller flips that order, we should not ENOENT-fail.
+    const parent = await makeTempDir("mirror-parent")
+    const dir = path.join(parent, "nonexistent-subdir")
+    try {
+      const result = await injectPeerMcpIntoMirror(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        claudeConfigDir: dir,
+      })
+      expect(result.ok).toBe(true)
+      const stat = await fs.stat(path.join(dir, ".claude.json"))
+      expect(stat.isFile()).toBe(true)
+    } finally {
+      await fs.rm(parent, { recursive: true, force: true }).catch(() => {})
+    }
   })
 })

@@ -345,6 +345,57 @@ export function buildAgentPrompt(
   ].join("\n")
 }
 
+/**
+ * Build the awareness snippet appended to the spawned `claude` session's
+ * system prompt via `--append-system-prompt`. Non-prescriptive — Claude
+ * sees that the peer tools and advisor exist; *when* to invoke is left
+ * to Claude's judgment.
+ *
+ * Trimmed to <100 tokens by design. The per-tool descriptions are
+ * already in Claude's context as MCP tool descriptions (loaded from
+ * `tools/list`); the snippet's net-new value is:
+ *   - the `advisor` mention (built-in, not MCP-discoverable),
+ *   - the `peer-review-coordinator` fan-out hint,
+ *   - the "subagents you spawn inherit these" claim (the load-bearing
+ *     UX payoff of the holistic subagent-MCP-inheritance fix).
+ *
+ * Surface contract (regression-pinned in tests/peer-mcp-personas.test.ts):
+ *   - Always lists codex_critic, codex_reviewer, opus_critic, advisor,
+ *     peer-review-coordinator, and the subagent-inheritance fact.
+ *   - Conditionally lists gemini_critic only when `geminiAvailable`.
+ *   - Mentions `codex-cli` stdio bridge only when `codexCli`.
+ *
+ * The snippet is the awareness layer; the auto-invocation triggers
+ * (CALL BEFORE / CALL AFTER) remain in each MCP tool's own `description`.
+ * The two layers are intentionally complementary — keep the snippet
+ * terse and never re-encode the prescriptive triggers here.
+ */
+export function buildPeerAwarenessSnippet(opts: {
+  codexCli: boolean
+  geminiAvailable: boolean
+}): string {
+  const criticList: Array<string> = [
+    "`codex_critic` (gpt-5.5)",
+    "`codex_reviewer` (gpt-5.3-codex)",
+  ]
+  if (opts.geminiAvailable) {
+    criticList.push("`gemini_critic` (gemini-3.1-pro)")
+  }
+  criticList.push("`opus_critic` (Opus 4.7)")
+
+  const codexCliClause = opts.codexCli
+    ? " The `mcp__codex-cli__codex` stdio bridge dispatches to `codex-implementer` for end-to-end coding tasks."
+    : ""
+
+  return [
+    "## Peer review and advisor",
+    "",
+    `Cross-lab peer critics under \`mcp__gh-router-peers__*\` — ${criticList.join(
+      ", ",
+    )} — plus the \`peer-review-coordinator\` fan-out subagent, and Claude Code's built-in \`advisor\` tool, are available at your discretion for second opinions and adversarial review. Subagents you spawn inherit them.${codexCliClause}`,
+  ].join("\n")
+}
+
 /** Convenience: every persona that should be registered for the given mode. */
 export function personasFor(opts: {
   codexCli: boolean

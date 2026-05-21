@@ -28,11 +28,14 @@ const exitMock = mock((code: number) => {
 })
 const processOnMock = mock()
 let isTTY = true
+// Mutable env that the mocked `process` exposes. Tests can write to this
+// to drive env-conditional code paths (e.g. GH_ROUTER_PEER_AWARENESS opt-out).
+const mockProcessEnv: Record<string, string | undefined> = {}
 
 mock.module("node:process", () => ({
   default: {
     platform: "linux",
-    env: {},
+    env: mockProcessEnv,
     exit: exitMock,
     on: processOnMock,
     stdout: { get isTTY() { return isTTY } },
@@ -97,11 +100,13 @@ mock.module("consola", () => ({
 // flags into spawnMock.
 const writePeerMcpRuntimeFilesMock = mock()
 const resolveCodexCliBackendMock = mock()
+const injectPeerMcpIntoMirrorMock = mock()
 const getCodexVersionMock = mock()
 
 mock.module("~/lib/codex-mcp-config", () => ({
   writePeerMcpRuntimeFiles: writePeerMcpRuntimeFilesMock,
   resolveCodexCliBackend: resolveCodexCliBackendMock,
+  injectPeerMcpIntoMirror: injectPeerMcpIntoMirrorMock,
 }))
 
 // launch.ts also exports buildLaunchCommand etc. — re-export the real
@@ -195,6 +200,11 @@ beforeEach(() => {
   })
   resolveCodexCliBackendMock.mockReset()
   resolveCodexCliBackendMock.mockReturnValue("http")
+  injectPeerMcpIntoMirrorMock.mockReset()
+  injectPeerMcpIntoMirrorMock.mockResolvedValue({
+    ok: true,
+    serversAdded: ["gh-router-peers"],
+  })
   getCodexVersionMock.mockReset()
   getCodexVersionMock.mockReturnValue({ ok: false })
 })
@@ -408,7 +418,7 @@ describe("claude command", () => {
   })
 
   describe("codex-mcp wiring", () => {
-    test("default → writes runtime files, appends --mcp-config to spawn (no --agents — Phase 2.5 uses ~/.claude/agents/*.md instead)", async () => {
+    test("default (mirror inject succeeds) → writes runtime files + inject into mirror; --mcp-config NOT pushed", async () => {
       const run = getRunFn()
       await run({ args: {} })
 
@@ -417,22 +427,46 @@ describe("claude command", () => {
       expect(serverUrl).toBe("http://127.0.0.1:12345")
       expect(opts.codexCli).toBe(false)
 
+      // injectPeerMcpIntoMirror is called with the same nonce as runtime files
+      // so the proxy validates Authorization regardless of which channel the
+      // request came through.
+      expect(injectPeerMcpIntoMirrorMock).toHaveBeenCalledTimes(1)
+      const [injectUrl, injectOpts] = injectPeerMcpIntoMirrorMock.mock.calls[0]
+      expect(injectUrl).toBe("http://127.0.0.1:12345")
+      expect(injectOpts.codexCli).toBe(false)
+      expect(injectOpts.nonce).toBe("test-nonce")
+
       const [, args] = spawnMock.mock.calls[0]
-      expect(args).toContain("--mcp-config")
-      expect(args).toContain("/tmp/peer-mcp-test.json")
-      // Phase 2.5: --agents JSON path is intentionally NOT passed.
-      // Subagents are registered via .md files in ~/.claude/agents/
-      // because Claude Code v2.1.138's Task subagent_type enum reads
-      // from there, not from the --agents JSON path.
+      // Mirror inject succeeded → MCP is discovered from
+      // <CLAUDE_CONFIG_DIR>/.claude.json (subagent-visible), so --mcp-config
+      // is NOT pushed. Pushing both channels would register the same server
+      // name twice (ambiguous across Claude Code versions).
+      expect(args).not.toContain("--mcp-config")
       expect(args).not.toContain("--agents")
       expect(args).not.toContain("--strict-mcp-config")
     })
 
-    test("--no-codex-mcp → no MCP wiring, no extra spawn args", async () => {
+    test("collision (mirror inject refuses) → --mcp-config IS pushed as fallback for parent-only visibility", async () => {
+      injectPeerMcpIntoMirrorMock.mockResolvedValue({
+        ok: false,
+        conflictingServers: ["gh-router-peers"],
+      })
+      const run = getRunFn()
+      await run({ args: {} })
+
+      const [, args] = spawnMock.mock.calls[0]
+      // Collision branch keeps the parent session functional even though
+      // subagents won't see the peer tools.
+      expect(args).toContain("--mcp-config")
+      expect(args).toContain("/tmp/peer-mcp-test.json")
+    })
+
+    test("--no-codex-mcp → no MCP wiring, no mirror inject, no extra spawn args", async () => {
       const run = getRunFn()
       await run({ args: { "codex-mcp": false } })
 
       expect(writePeerMcpRuntimeFilesMock).not.toHaveBeenCalled()
+      expect(injectPeerMcpIntoMirrorMock).not.toHaveBeenCalled()
       const [, args] = spawnMock.mock.calls[0]
       expect(args).not.toContain("--mcp-config")
       expect(args).not.toContain("--agents")
@@ -462,13 +496,34 @@ describe("claude command", () => {
 
       const writeArgs = writePeerMcpRuntimeFilesMock.mock.calls[0][1]
       expect(writeArgs.codexCli).toBe(true)
+      // Mirror inject also gets codexCli=true so the codex-cli stdio entry
+      // lands in the mirrored mcpServers map alongside gh-router-peers.
+      const injectArgs = injectPeerMcpIntoMirrorMock.mock.calls[0][1]
+      expect(injectArgs.codexCli).toBe(true)
     })
 
-    test("--codex-mcp-only → adds --strict-mcp-config to spawn args", async () => {
+    test("--codex-mcp-only with mirror-inject success → no --strict-mcp-config, warns about ineffective flag", async () => {
       const run = getRunFn()
       await run({ args: { "codex-mcp-only": true } })
 
       const [, args] = spawnMock.mock.calls[0]
+      // Mirror channel can't enforce strict-MCP-only (user's snapshot
+      // MCPs are visible) — flag is downgraded to a warning, no
+      // --strict-mcp-config push.
+      expect(args).not.toContain("--strict-mcp-config")
+      expect(args).not.toContain("--mcp-config")
+    })
+
+    test("--codex-mcp-only with collision fallback → --strict-mcp-config IS pushed alongside --mcp-config", async () => {
+      injectPeerMcpIntoMirrorMock.mockResolvedValue({
+        ok: false,
+        conflictingServers: ["gh-router-peers"],
+      })
+      const run = getRunFn()
+      await run({ args: { "codex-mcp-only": true } })
+
+      const [, args] = spawnMock.mock.calls[0]
+      expect(args).toContain("--mcp-config")
       expect(args).toContain("--strict-mcp-config")
     })
 
@@ -481,6 +536,55 @@ describe("claude command", () => {
       expect(spawnMock).toHaveBeenCalledTimes(1)
       const [, args] = spawnMock.mock.calls[0]
       expect(args).not.toContain("--mcp-config")
+      // Mirror inject was never attempted because runtime files failed first.
+      expect(injectPeerMcpIntoMirrorMock).not.toHaveBeenCalled()
+    })
+
+    test("injectPeerMcpIntoMirror failure does not block claude launch", async () => {
+      injectPeerMcpIntoMirrorMock.mockRejectedValue(new Error("permission denied"))
+      const run = getRunFn()
+      await run({ args: {} })
+
+      // Whole codex-mcp block is wrapped in try/catch → spawn still happens.
+      expect(spawnMock).toHaveBeenCalledTimes(1)
+      const [, args] = spawnMock.mock.calls[0]
+      expect(args).not.toContain("--mcp-config")
+    })
+
+    test("GH_ROUTER_PEER_AWARENESS unset → --append-system-prompt is pushed by default", async () => {
+      delete mockProcessEnv.GH_ROUTER_PEER_AWARENESS
+      const run = getRunFn()
+      await run({ args: {} })
+
+      const [, args] = spawnMock.mock.calls[0]
+      const idx = args.indexOf("--append-system-prompt")
+      expect(idx).toBeGreaterThanOrEqual(0)
+      const snippet = args[idx + 1] as string
+      expect(snippet).toContain("Peer review and advisor")
+    })
+
+    test("GH_ROUTER_PEER_AWARENESS=0 → --append-system-prompt NOT pushed", async () => {
+      mockProcessEnv.GH_ROUTER_PEER_AWARENESS = "0"
+      try {
+        const run = getRunFn()
+        await run({ args: {} })
+        const [, args] = spawnMock.mock.calls[0]
+        expect(args).not.toContain("--append-system-prompt")
+      } finally {
+        delete mockProcessEnv.GH_ROUTER_PEER_AWARENESS
+      }
+    })
+
+    test("GH_ROUTER_PEER_AWARENESS=FALSE (uppercase) → --append-system-prompt NOT pushed", async () => {
+      mockProcessEnv.GH_ROUTER_PEER_AWARENESS = "FALSE"
+      try {
+        const run = getRunFn()
+        await run({ args: {} })
+        const [, args] = spawnMock.mock.calls[0]
+        expect(args).not.toContain("--append-system-prompt")
+      } finally {
+        delete mockProcessEnv.GH_ROUTER_PEER_AWARENESS
+      }
     })
 
     test("gemini availability is probed against state.models catalog", async () => {
