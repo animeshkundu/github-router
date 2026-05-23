@@ -18,8 +18,8 @@ import { listModelsForEndpoint } from "./lib/model-validation"
 import { ensureClaudeConfigMirror, removeOwnClaudeConfigMirror } from "./lib/paths"
 import { buildPeerAwarenessSnippet } from "./lib/peer-mcp-personas"
 import {
-  DEFAULT_CLAUDE_MODEL,
   DEFAULT_CLAUDE_MODEL_FALLBACKS,
+  pickClaudeDefault,
 } from "./lib/port"
 import {
   getClaudeCodeEnvVars,
@@ -222,7 +222,7 @@ export const claude = defineCommand({
     // (which Claude Code's UI won't recognize, but power users may want
     // for explicit pinning).
     const usingDefault = !args.model
-    const requestedSlug = args.model ?? DEFAULT_CLAUDE_MODEL
+    const requestedSlug = args.model ?? pickClaudeDefault()
     let chosenSlug = requestedSlug
     let resolvedSlug = resolveModel(chosenSlug)
 

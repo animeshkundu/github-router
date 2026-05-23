@@ -1,5 +1,7 @@
 import consola from "consola"
 
+import { state } from "./state"
+
 export const DEFAULT_PORT = 8787
 
 /**
@@ -25,6 +27,49 @@ export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
   "claude-opus-4-6",
   "claude-opus-4-5",
 ] as const
+
+/**
+ * Cap-aware default picker for `ANTHROPIC_MODEL` on the implicit-default
+ * path. Returns `claude-opus-4-7[1m]` when the live Copilot catalog
+ * contains a `*-opus-4.7-1m*` variant (enterprise tier), else
+ * `DEFAULT_CLAUDE_MODEL` (the bare slug).
+ *
+ * The `[1m]` literal-bracket suffix is Claude Code's local 1M-context
+ * unlock — cc-backup `src/utils/context.ts:35-40` matches `/\[1m\]/i`
+ * to flip the context window from 200K to 1M, which drives compaction
+ * triggers, the status-line context %, and token budgets. Without the
+ * bracket Claude Code accounts against 200K regardless of how the
+ * proxy routes the underlying request.
+ *
+ * Cap-awareness matters because on non-enterprise Copilot tiers there
+ * is no `-1m` opus backend; sending `[1m]` there would either 400 at
+ * Copilot or (with `resolveModel`'s graceful-degrade) silently
+ * downgrade upstream while Claude Code still over-accounts context.
+ * This helper detects the catalog state at launch and only opts in
+ * when the backend can actually serve 1M.
+ *
+ * Sonnet/Haiku families are intentionally NOT given `[1m]` defaults
+ * because Copilot has no `-1m` backend for them (and Anthropic-side
+ * `modelSupports1M` doesn't list haiku at all). See
+ * `src/lib/server-setup.ts:getClaudeCodeEnvVars` for the
+ * `ANTHROPIC_DEFAULT_{SONNET,HAIKU,OPUS}_MODEL` tier defaults.
+ *
+ * Must be called AFTER `cacheModels()` has populated `state.models`.
+ * Returns the bare slug if the catalog isn't populated (resolveModel
+ * can't tell the difference between "no catalog yet" and "no 1M
+ * variant" — defaulting safe-side preserves the pre-change behavior).
+ */
+export function pickClaudeDefault(): string {
+  const has1mOpus47 =
+    state.models?.data.some((m) => /opus-4[.-]7-1m(?:$|-)/i.test(m.id)) ?? false
+  if (has1mOpus47) {
+    consola.info(
+      `Catalog contains opus-4.7-1m variant; defaulting ANTHROPIC_MODEL to "${DEFAULT_CLAUDE_MODEL}[1m]" so Claude Code accounts for 1M context locally. Set CLAUDE_CODE_DISABLE_1M_CONTEXT=1 to opt out (HIPAA), or pass --model ${DEFAULT_CLAUDE_MODEL} to pin 200K.`,
+    )
+    return `${DEFAULT_CLAUDE_MODEL}[1m]`
+  }
+  return DEFAULT_CLAUDE_MODEL
+}
 
 /**
  * Default model for `github-router codex`. `gpt-5.5` is the new flagship

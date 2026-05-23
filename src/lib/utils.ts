@@ -134,6 +134,9 @@ export function normalizeModelId(id: string): string {
  * Resolve a model name to the best available variant in the Copilot model list.
  *
  * Resolution cascade:
+ * 0. `[1m]` literal-bracket suffix: strip, delegate, warn if downgraded.
+ *    Bracketed slug must never reach Copilot (400s on it). See cc-backup
+ *    `src/utils/context.ts:35-40` for Claude Code's 1M unlock mechanism.
  * 1. Exact match
  * 2. Case-insensitive match
  * 3. Family preference (opus→1m, codex→highest version)
@@ -147,6 +150,38 @@ export function normalizeModelId(id: string): string {
 export function resolveModel(modelId: string): string {
   const models = state.models?.data
   if (!models) return modelId
+
+  // [1m] literal-bracket suffix: Claude Code's request for 1M context
+  // accounting. cc-backup `src/utils/context.ts:35-40` has1mContext
+  // matches `/\[1m\]/i`; getContextWindowForModel returns 1_000_000
+  // when true. parseUserSpecifiedModel (model.ts:445-506) reattaches
+  // the bracket after alias resolution, so Claude Code SENDS the
+  // bracketed slug verbatim on the wire (`model: "claude-opus-4-7[1m]"`).
+  // Copilot doesn't recognize the bracket → 400.
+  //
+  // Strip for the catalog lookup and delegate. If the stripped
+  // resolution lands on a `-1m` variant (enterprise opus path via
+  // family preference), perfect — the upstream call routes to the 1M
+  // backend and Claude Code's local accounting was right. Otherwise
+  // (non-enterprise for opus, or any [1m] on sonnet/haiku where
+  // Copilot has no -1m backend), warn and return the 200K resolution
+  // so the request still succeeds — at the cost of Claude Code
+  // over-accounting context against the proxy (it will compact early
+  // because it thinks the window is 1M).
+  //
+  // Bounded recursion: the stripped form no longer matches the regex,
+  // so the inner resolveModel call cannot re-enter this branch.
+  const oneMMatch = modelId.match(/^(.*)\[1m\]$/i)
+  if (oneMMatch) {
+    const stripped = oneMMatch[1]
+    const resolved = resolveModel(stripped)
+    if (!/-1m(?:$|-)/.test(resolved)) {
+      consola.warn(
+        `Model "${modelId}" requested 1M context but no -1m backend is in Copilot's catalog for this tier/family; downgrading upstream to "${resolved}" (200K). Claude Code's local context accounting will still assume 1M — expect premature auto-compact. Drop the [1m] suffix (or unset CLAUDE_CODE_DISABLE_1M_CONTEXT if you set it) to silence.`,
+      )
+    }
+    return resolved
+  }
 
   // 1. Exact match
   if (models.some((m) => m.id === modelId)) return modelId
