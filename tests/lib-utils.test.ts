@@ -7,6 +7,7 @@ import {
   DEFAULT_CLAUDE_MODEL_FALLBACKS,
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_MODEL_FALLBACKS,
+  pickClaudeDefault,
 } from "../src/lib/port"
 import {
   cacheModels,
@@ -313,6 +314,77 @@ describe("resolveModel", () => {
     expect(resolveModel("claude-haiku-4.5-20251001")).toBe(
       "claude-haiku-4.5-20251001",
     )
+  })
+
+  // --- Step 0: [1m] literal-bracket suffix (Claude Code's 1M unlock) ---
+
+  test("[1m] suffix on opus-4-7 routes to the 1M backend when present (enterprise tier)", () => {
+    // cc-backup src/utils/context.ts:35-40: has1mContext matches /\[1m\]/i;
+    // Claude Code's parseUserSpecifiedModel (model.ts:445-506) reattaches
+    // the bracket after alias resolution, so the wire form is literally
+    // "claude-opus-4-7[1m]". The proxy MUST strip the bracket before
+    // touching Copilot (which 400s on the bracket) and prefer a -1m
+    // variant if the catalog has one.
+    expect(resolveModel("claude-opus-4-7[1m]")).toBe(
+      "claude-opus-4.7-1m-internal",
+    )
+  })
+
+  test("[1m] suffix preserves case-insensitively (matches /\\[1m\\]/i)", () => {
+    // cc-backup uses the /i flag — Claude Code may send [1M] in some
+    // edge case. Strip regardless.
+    expect(resolveModel("claude-opus-4-7[1M]")).toBe(
+      "claude-opus-4.7-1m-internal",
+    )
+  })
+
+  test("[1m] suffix on opus-4-7 downgrades to 200K when no -1m backend in catalog (non-enterprise)", () => {
+    // Pro+/Business/Max tier: only the 200K variant is present. The
+    // bracket-strip delegates to the inner cascade, which finds
+    // claude-opus-4.7 via normalized match. The proxy must NOT forward
+    // the bracketed slug to Copilot — it would 400.
+    state.models = {
+      data: [
+        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.6", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(resolveModel("claude-opus-4-7[1m]")).toBe("claude-opus-4.7")
+  })
+
+  test("[1m] suffix on a family with no 1M backend (sonnet) downgrades silently to the 200K variant", () => {
+    // Copilot's catalog has no sonnet-1m at any tier. A user (or future
+    // misconfiguration) sending claude-sonnet-4-6[1m] must still produce
+    // a valid Copilot request — just one where Claude Code's local
+    // accounting is wrong.
+    expect(resolveModel("claude-sonnet-4-6[1m]")).toBe("claude-sonnet-4.6")
+  })
+
+  test("[1m] suffix never appears in the resolved output (bracket stripped before return)", () => {
+    // Defense-in-depth: regardless of which inner branch resolves the
+    // stripped form, the literal "[1m]" must NEVER appear in the result.
+    // If it did, the request would be forwarded verbatim to Copilot
+    // and 400 with an unrecognized model id.
+    const inputs = [
+      "claude-opus-4-7[1m]",
+      "claude-opus-4-7[1M]",
+      "claude-sonnet-4-6[1m]",
+      "claude-haiku-4-5[1m]",
+    ]
+    for (const input of inputs) {
+      expect(resolveModel(input)).not.toContain("[1m]")
+      expect(resolveModel(input)).not.toContain("[1M]")
+    }
+  })
+
+  test("[1m] bracket-strip recursion is bounded (the stripped form cannot re-enter the bracket branch)", () => {
+    // Sanity: a doubly-bracketed input shouldn't infinite-loop. The outer
+    // strip removes one [1m]; the inner call sees "...[1m]" again,
+    // strips once more; the third level has no bracket and falls into
+    // the normal cascade. This is "fine" behavior — pathological inputs
+    // resolve in a finite number of recursions.
+    expect(() => resolveModel("claude-opus-4-7[1m][1m]")).not.toThrow()
   })
 })
 
@@ -645,5 +717,77 @@ describe("resolveCodexModel", () => {
   test("returns input when no models cached", () => {
     state.models = undefined
     expect(resolveCodexModel("gpt-5.3-codex")).toBe("gpt-5.3-codex")
+  })
+})
+
+// --- pickClaudeDefault: cap-aware ANTHROPIC_MODEL default ---
+
+describe("pickClaudeDefault", () => {
+  afterEach(() => {
+    state.models = undefined
+  })
+
+  test("returns claude-opus-4-7[1m] when catalog has opus-4.7-1m-internal (enterprise tier)", () => {
+    state.models = {
+      data: [
+        {
+          id: "claude-opus-4.7-1m-internal",
+          supported_endpoints: ["/v1/messages"],
+        },
+        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(pickClaudeDefault()).toBe("claude-opus-4-7[1m]")
+  })
+
+  test("returns claude-opus-4-7[1m] when catalog has opus-4-7-1m (dashed variant)", () => {
+    // Forward-compat: if Copilot ever switches to dashed slugs for the 1M
+    // variant, the detector must still fire (regex covers both /opus-4[.-]7-1m/).
+    state.models = {
+      data: [
+        { id: "claude-opus-4-7-1m", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(pickClaudeDefault()).toBe("claude-opus-4-7[1m]")
+  })
+
+  test("returns bare claude-opus-4-7 when no 1M variant in catalog (non-enterprise tier)", () => {
+    // Pro+/Business/Max tier: only the 200K variant is present. Without
+    // cap-awareness, ANTHROPIC_MODEL=claude-opus-4-7[1m] would force Claude
+    // Code to over-account context while the proxy silently downgrades.
+    state.models = {
+      data: [
+        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.6", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(pickClaudeDefault()).toBe(DEFAULT_CLAUDE_MODEL)
+    expect(pickClaudeDefault()).not.toContain("[1m]")
+  })
+
+  test("returns bare claude-opus-4-7 when state.models is unset (pre-cacheModels safety)", () => {
+    // If somehow pickClaudeDefault gets called before cacheModels populates
+    // state.models, default safe-side to the bare slug. Preserves the
+    // pre-change behavior exactly.
+    state.models = undefined
+    expect(pickClaudeDefault()).toBe(DEFAULT_CLAUDE_MODEL)
+  })
+
+  test("does NOT false-positive on opus-4.6-1m (version-anchored to 4.7)", () => {
+    // The 1M detector matches /opus-4[.-]7-1m/, not generic /opus-.*-1m/.
+    // A future Copilot tier that has only the OLDER 4.6-1m must not flip
+    // the default — the default model is 4.7, and 4.7-1m specifically must
+    // be present to opt in.
+    state.models = {
+      data: [
+        { id: "claude-opus-4.6-1m", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(pickClaudeDefault()).toBe(DEFAULT_CLAUDE_MODEL)
   })
 })

@@ -350,6 +350,34 @@ export function getClaudeCodeEnvVars(
     vars.ANTHROPIC_SMALL_FAST_MODEL = "claude-haiku-4-5"
   }
 
+  // Tier-default knobs read by Claude Code's /model picker (cc-backup
+  // src/utils/model/modelOptions.ts:78,109,167) when the user invokes
+  // the picker to switch model. Without these, the picker shows
+  // Anthropic's catalog-baseline entries (which may be stale relative
+  // to what Copilot has). Setting them seeds the three tier rows with
+  // ids the proxy's resolveModel knows how to route.
+  //
+  // Why NO [1m] suffix on Sonnet/Haiku: Copilot has no -1m backend for
+  // either family (only opus-4.7-1m-internal exists in the catalog as
+  // of 2026-05-22; Anthropic-side modelSupports1M in cc-backup
+  // context.ts:43-49 only lists sonnet-4* and opus-4-6 — haiku has no
+  // 1M variant on either side). The [1m] decoration for the *active*
+  // default lives on ANTHROPIC_MODEL itself (see pickClaudeDefault in
+  // src/claude.ts) and is cap-aware against the live catalog.
+  //
+  // Presence-based guard symmetric with the SMALL_FAST_MODEL guard
+  // above — preserves any value (including 0/false/off/unrecognized)
+  // the user has explicitly set.
+  if (process.env.ANTHROPIC_DEFAULT_SONNET_MODEL === undefined) {
+    vars.ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-4-6"
+  }
+  if (process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL === undefined) {
+    vars.ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-haiku-4-5"
+  }
+  if (process.env.ANTHROPIC_DEFAULT_OPUS_MODEL === undefined) {
+    vars.ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-7"
+  }
+
   // Auto-enable Anthropic's experimental "leverage" features for proxied
   // claude sessions. Symmetric with the leverage-policy default
   // (extended-betas ON for `claude` subcommand): users running

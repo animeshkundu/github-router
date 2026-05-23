@@ -67,12 +67,22 @@ mock.module("~/lib/server-setup", () => ({
   },
 }))
 
+// Closure-captured impl for the pickClaudeDefault mock. Tests rebind this
+// in beforeEach (and per-test) to drive the cap-aware default behavior
+// without needing to load the real state module from the mock factory
+// (Bun deadlocks if a mock.module factory dynamically resolves another
+// module via require / import at factory-eval time).
+let pickClaudeDefaultImpl: () => string = () => "claude-opus-4-7"
+
 mock.module("~/lib/port", () => ({
   // Anthropic-published dashed slug (per plan §14) — Claude Code's `/model`
   // UI registry expects this, and the proxy's resolver translates back to
   // Copilot's `claude-opus-4.7-1m-internal` at request time.
   DEFAULT_CLAUDE_MODEL: "claude-opus-4-7",
   DEFAULT_CLAUDE_MODEL_FALLBACKS: ["claude-opus-4-6", "claude-opus-4-5"],
+  // Delegates to the closure-captured impl so tests can swap behavior
+  // per-case (cap-aware-default tests set this to return "...[1m]").
+  pickClaudeDefault: () => pickClaudeDefaultImpl(),
   // launch.ts imports DEFAULT_CODEX_MODEL transitively via claude.ts → launchChild;
   // re-export it so the module mock doesn't break sibling imports.
   DEFAULT_CODEX_MODEL: "gpt-5.5",
@@ -207,6 +217,10 @@ beforeEach(() => {
   })
   getCodexVersionMock.mockReset()
   getCodexVersionMock.mockReturnValue({ ok: false })
+
+  // Default pickClaudeDefault to the bare slug; tests that exercise the
+  // 1M-detection path rebind this to return "claude-opus-4-7[1m]".
+  pickClaudeDefaultImpl = () => "claude-opus-4-7"
 })
 
 describe("claude command", () => {
@@ -278,12 +292,22 @@ describe("claude command", () => {
     expect(options.env.ANTHROPIC_MODEL).toBe("claude-sonnet-4-20250514")
   })
 
-  test("default works on enterprise (resolver maps Anthropic slug → 1M Copilot slug)", async () => {
-    // ANTHROPIC_MODEL must be the Anthropic slug (claude-opus-4-7) so
-    // Claude Code's `/model` UI matches menu entry 3 "Opus 4.7 (1M context)".
-    // The proxy's resolveModel translates to Copilot's
-    // claude-opus-4.7-1m-internal at request time — invisible to the user.
-    // Cache populated with 1M variant → inCache check passes, no fallback.
+  test("default works on enterprise (cap-aware default adds [1m] suffix so Claude Code accounts for 1M context locally)", async () => {
+    // Enterprise tier: catalog contains opus-4.7-1m-internal. pickClaudeDefault
+    // (src/lib/port.ts) detects the 1M backend and returns the bracketed
+    // slug "claude-opus-4-7[1m]". Claude Code's has1mContext (cc-backup
+    // context.ts:35-40) matches /\[1m\]/i and flips its context window to
+    // 1_000_000 — driving compaction triggers and the status-line context
+    // %. The proxy's resolveModel strips the bracket before talking to
+    // Copilot (which would 400 on it), so the upstream call still routes
+    // to claude-opus-4.7-1m-internal.
+    //
+    // Here we simulate the enterprise outcome by overriding the mocked
+    // pickClaudeDefault to return the bracketed slug (the catalog-detection
+    // logic itself is covered by tests/lib-utils.test.ts). state.models is
+    // still set so the fallback-chain probe (inCache) finds the resolved
+    // -1m slug and doesn't trigger a fallback.
+    pickClaudeDefaultImpl = () => "claude-opus-4-7[1m]"
     state.models = {
       data: [
         { id: "claude-opus-4.7" },
@@ -296,20 +320,18 @@ describe("claude command", () => {
       await run({ args: {} })
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
-        "claude-opus-4-7",
+        "claude-opus-4-7[1m]",
       )
     } finally {
       state.models = undefined
     }
   })
 
-  test("default works on non-enterprise (resolver downgrades 1M→200K transparently)", async () => {
-    // Pro+/Business/Max: only the 200K variant is available. Resolver's
-    // family-preference branch finds no -1m, falls through to step 4
-    // (normalized match), which translates claude-opus-4-7 → claude-opus-4.7.
-    // Since claude-opus-4.7 IS in cache, inCache returns true and the
-    // fallback chain does NOT fire — ANTHROPIC_MODEL remains the Anthropic
-    // slug for UI compatibility.
+  test("default works on non-enterprise (no 1M variant in catalog → bare slug, 200K accounting)", async () => {
+    // Pro+/Business/Max: only the 200K variant is available. pickClaudeDefault
+    // returns the bare DEFAULT_CLAUDE_MODEL (no [1m] suffix), so Claude Code's
+    // local context accounting matches the upstream behavior. The fallback
+    // chain doesn't fire because claude-opus-4.7 IS in cache.
     state.models = {
       data: [
         { id: "claude-opus-4.7" },

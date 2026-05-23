@@ -191,6 +191,95 @@ describe("getClaudeCodeEnvVars", () => {
     }
   })
 
+  test("defaults ANTHROPIC_DEFAULT_SONNET_MODEL to claude-sonnet-4-6 (NO [1m] — Copilot has no sonnet-1m backend)", () => {
+    // Sonnet 4.6 has no -1m variant in Copilot's catalog as of 2026-05-22,
+    // and Anthropic-side modelSupports1M (cc-backup context.ts:43-49) does
+    // list sonnet-4*, but the Copilot proxy can't route there. A bracketed
+    // default would either 400 upstream or silently over-account context
+    // locally. Bare slug — explicit, safe.
+    const prior = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+    delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+    try {
+      const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("claude-sonnet-4-6")
+      expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL).not.toContain("[1m]")
+    } finally {
+      if (prior === undefined) delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+      else process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = prior
+    }
+  })
+
+  test("does NOT override a parent-set ANTHROPIC_DEFAULT_SONNET_MODEL", () => {
+    const prior = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+    process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = "gemini-3.1-pro-preview"
+    try {
+      const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      expect(vars).not.toHaveProperty("ANTHROPIC_DEFAULT_SONNET_MODEL")
+    } finally {
+      if (prior === undefined) delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+      else process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = prior
+    }
+  })
+
+  test("defaults ANTHROPIC_DEFAULT_HAIKU_MODEL to claude-haiku-4-5 (NO [1m] — Haiku has no 1M variant on either side)", () => {
+    // Anthropic-side modelSupports1M (cc-backup context.ts:43-49) does NOT
+    // list any haiku at all. There is no 1M haiku in existence; bracketing
+    // would be nonsense.
+    const prior = process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
+    delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
+    try {
+      const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("claude-haiku-4-5")
+      expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).not.toContain("[1m]")
+    } finally {
+      if (prior === undefined) delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
+      else process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = prior
+    }
+  })
+
+  test("does NOT override a parent-set ANTHROPIC_DEFAULT_HAIKU_MODEL", () => {
+    const prior = process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
+    process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = "gpt-5.5-mini"
+    try {
+      const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      expect(vars).not.toHaveProperty("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+    } finally {
+      if (prior === undefined) delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
+      else process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = prior
+    }
+  })
+
+  test("defaults ANTHROPIC_DEFAULT_OPUS_MODEL to bare claude-opus-4-7 (NO [1m] — the active default's [1m] decoration lives on ANTHROPIC_MODEL via pickClaudeDefault, which is cap-aware)", () => {
+    // The picker-row tier default is the bare slug; the *active* default
+    // (ANTHROPIC_MODEL) is cap-aware (pickClaudeDefault adds [1m] only
+    // when the catalog actually has the 1M backend). Keeping the picker
+    // row bare lets the user manually flip to 1M via /model selection
+    // (Claude Code's picker shows "opus[1m]" as a separate entry — see
+    // cc-backup aliases.ts MODEL_ALIASES).
+    const prior = process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
+    delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
+    try {
+      const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-4-7")
+      expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).not.toContain("[1m]")
+    } finally {
+      if (prior === undefined) delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
+      else process.env.ANTHROPIC_DEFAULT_OPUS_MODEL = prior
+    }
+  })
+
+  test("does NOT override a parent-set ANTHROPIC_DEFAULT_OPUS_MODEL", () => {
+    const prior = process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
+    process.env.ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-5"
+    try {
+      const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      expect(vars).not.toHaveProperty("ANTHROPIC_DEFAULT_OPUS_MODEL")
+    } finally {
+      if (prior === undefined) delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
+      else process.env.ANTHROPIC_DEFAULT_OPUS_MODEL = prior
+    }
+  })
+
   test("does NOT set the empty-string clears (handled by parent-env sanitization)", () => {
     // CLAUDE_CODE_USE_*, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_CUSTOM_HEADERS
     // are stripped from process.env in launch.ts before the spread, so we
