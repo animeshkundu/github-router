@@ -554,12 +554,15 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         "ripgrep with BM25F ranking (Robertson, Zaragoza, Taylor 2004) " +
         "over four code-aware fields: matched line, surrounding context, " +
         "file path tokens, symbol-definition heuristic. Prefer this over " +
-        "Bash+grep when you want ranked discovery: pass the workspace " +
-        "path explicitly. `workspace` MUST be under one of the proxy's " +
-        "allow-set roots (proxy launch cwd, GH_ROUTER_CODE_SEARCH_ROOTS " +
-        "JSON env, or any directory containing a .gh-router-searchable " +
-        "marker file). Secret-shape files (.env, .pem, id_rsa, etc.) are " +
-        "always excluded.",
+        "Grep/Bash+grep for ranked discovery queries (\"where is X defined\", " +
+        "\"which files reference Y\", \"find code that does Z\") — BM25F " +
+        "surfaces the few right answers instead of every match. Use Grep " +
+        "for exact-pattern enumeration when you need every hit unranked, " +
+        "and Glob for file-name patterns (no content match). `workspace` " +
+        "MUST be under one of the proxy's allow-set roots (proxy launch " +
+        "cwd, GH_ROUTER_CODE_SEARCH_ROOTS JSON env, or any directory " +
+        "containing a .gh-router-searchable marker file). Secret-shape " +
+        "files (.env, .pem, id_rsa, etc.) are always excluded.",
       inputSchema: {
         type: "object",
         required: ["query", "workspace"],
