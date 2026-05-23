@@ -217,17 +217,18 @@ Tokenizer: rule-based identifier splitter per Vasilescu, Ray, Mockus, *How to Sp
 
 After BM25F sort, truncate at the first hit below `0.5 × top_score` (Burges 2010 LTR convention). When the top score is 0 (no field had a query-token match), all hits are returned in tie-break order — signals "no ranking signal." `pruned_below_shoulder` reports the count omitted.
 
-### Workspace trust model
+### Workspace model
 
-Default-deny. A `workspace` argument is accepted iff its canonicalized path lies within one of:
+`workspace` is any absolute path the proxy process can `stat` and is a directory. The proxy runs as the user; reads are bounded by the user's own filesystem permissions, same as Claude Code's built-in Read / Bash / Edit tools. There is no allow-set, no marker-file walk, no secret-shape file denylist.
 
-1. The proxy's `process.cwd()` at startup (canonicalized once at module init in `src/lib/state.ts`).
-2. Any root in `GH_ROUTER_CODE_SEARCH_ROOTS` (JSON array of absolute paths). JSON-array form avoids the Windows-vs-POSIX `path.delimiter` ambiguity.
-3. Any directory containing a `.gh-router-searchable` marker file (self-documenting opt-in walked from the candidate up to filesystem root).
+This was reconsidered after the initial design (which had a default-deny allow-set + a hardcoded secret-shape denylist for `*.env`, `*.pem`, `id_rsa*`, etc.). The earlier framing treated `code_search` as a potential "model-callable file-exfil oracle." That framing assumes a privilege gap between the proxy and the model — but there isn't one. The same model that can call `code_search` can also issue `Bash cat ~/.ssh/id_rsa` or `Read /etc/passwd`. Gating only `code_search` was inconsistency, not defense. The simpler holistic answer: reach the same paths Claude Code already reaches, no special-cased boundary.
 
-Comparison uses `path.relative(root, candidate)` semantics with case-folding on win32/darwin (case-preserving-but-insensitive filesystems) to block the prefix-sibling bypass (`C:\Users\Foo2` does NOT pass as a child of `C:\Users\Foo`). Rejected requests respond with a clear error that does NOT echo the rejected path (same info-leak avoidance pattern as `COPILOT_HOST_ALLOWLIST`).
+Validation kept:
 
-Hardcoded secret-shape **denylist** is applied as `-g '!PATTERN'` ripgrep flags AFTER any user `file_glob`, so it cannot be bypassed: `*.env`, `*.env.*`, `*.pem`, `*.p12`, `*.pfx`, `*id_rsa*`, `*id_ed25519*`, `credentials*`, `*.kdbx`, `*.keystore`, `*.gpg`, `.aws/**`, `.ssh/**`, `.docker/config.json`, `*.kube/config*`. `--no-ignore` / `--unrestricted` are NOT exposed via the tool API.
+- `workspace` must be an absolute path (relative paths are an integration-error footgun).
+- `realpathSync` canonicalization (resolves symlinks; output paths are reported relative to this canonical root).
+- Must exist AND be a directory (a file path or a missing path errors out cleanly).
+- Errors do NOT echo the rejected path (output of `code_search` flows upstream to model providers; consistent with `COPILOT_HOST_ALLOWLIST`'s no-echo pattern).
 
 ### Hardened spawn (CVE-class fixes from peer review)
 
@@ -257,6 +258,6 @@ Per-call breadcrumb logged via consola at info level (not sent off-host):
 
 Raw `query` and absolute workspace paths are NOT logged unless `GH_ROUTER_DEBUG_CODE_SEARCH=1` is set — query strings can leak intent and codebase shape.
 
-### Upstream-snippet security framing
+### Upstream-snippet awareness
 
-Snippets are sent upstream as tool-use-result content to the model. Treat the workspace trust model as "what am I comfortable pasting into a chat with Anthropic/OpenAI/Gemini" — secret-shape denylist + path allow-set are the safeguards, but do NOT point at a workspace containing untrusted secrets.
+Snippets are sent upstream as tool-use-result content to the model. The proxy doesn't filter what gets returned — that's the same channel as `Read`'s tool result. If you wouldn't paste a directory's contents into a chat with the model provider, don't search it; the workspace surface here is no different from any other read tool.

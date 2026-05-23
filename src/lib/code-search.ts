@@ -12,10 +12,13 @@
  *
  * Load-bearing design decisions worth knowing before editing:
  *
- *   - Workspace trust is default-deny (allow-set: startup cwd +
- *     GH_ROUTER_CODE_SEARCH_ROOTS JSON + .gh-router-searchable
- *     marker files). Home-dir-wide trust was rejected as a
- *     model-callable file-exfil oracle (codex-critic + opus-critic).
+ *   - Workspace is any absolute path that exists and is a directory.
+ *     The proxy runs as the user; code_search reads what the proxy
+ *     process can read, the same way Claude Code's built-in Read /
+ *     Bash tools do. The earlier allow-set + secret-shape denylist
+ *     was dropped: the threat model is symmetric (the model already
+ *     has Bash and Read), so an extra gate on this one tool was just
+ *     inconsistency, not defense.
  *
  *   - rg is spawned with `cwd: canonicalWorkspace` and target `.`,
  *     NEVER with the user-supplied path string as an argv positional.
@@ -49,8 +52,6 @@ import { createInterface } from "node:readline"
 import * as path from "node:path"
 
 import consola from "consola"
-
-import { state } from "./state"
 
 // ============================================================
 // Constants
@@ -104,30 +105,6 @@ const DEFAULT_CONTEXT_LINES = 2
 const MAX_SNIPPET_BYTES = 2048
 const MAX_STDOUT_BYTES = 10 * 1024 * 1024
 const WALL_TIME_MS = 30_000
-
-/**
- * Hardcoded secret-shape denylist. Applied as `-g '!PATTERN'` AFTER
- * any user-supplied file_glob, so users cannot override these.
- * Protects against checked-in secret-shaped files leaking into
- * search snippets that then flow upstream to third-party providers.
- */
-const SECRET_DENYLIST: ReadonlyArray<string> = Object.freeze([
-  "*.env",
-  "*.env.*",
-  "*.pem",
-  "*.p12",
-  "*.pfx",
-  "*id_rsa*",
-  "*id_ed25519*",
-  "credentials*",
-  "*.kdbx",
-  "*.keystore",
-  "*.gpg",
-  ".aws/**",
-  ".ssh/**",
-  ".docker/config.json",
-  "*.kube/config*",
-])
 
 /**
  * Definition-shape heuristic for `symbol_context` field. Match this
@@ -315,84 +292,31 @@ function validateInputs(input: CodeSearchInput): string | null {
 // Workspace validation
 // ============================================================
 
-/**
- * Walk up from `start` looking for a `.gh-router-searchable` marker
- * file. Returns the canonicalized root that contains the marker, or
- * undefined if none is found before the filesystem root.
- *
- * The marker file is the self-documenting opt-in mechanism for
- * tools that don't control proxy startup (so they can't set the
- * env-var allow-set themselves). User-controlled, easy to audit.
- */
-function findMarkerRoot(start: string): string | undefined {
-  let cur = start
-  // Bound the walk so a degenerate path doesn't loop forever.
-  for (let i = 0; i < 256; i++) {
-    const marker = path.join(cur, ".gh-router-searchable")
-    try {
-      if (statSync(marker).isFile()) {
-        return realpathSync(cur)
-      }
-    } catch {
-      // marker absent or path component unreachable — continue up
-    }
-    const parent = path.dirname(cur)
-    if (parent === cur) return undefined // hit filesystem root
-    cur = parent
-  }
-  return undefined
-}
-
-/**
- * Case-fold safe descendant check. Returns true iff `candidate` is
- * `root` or a descendant of `root`. On case-preserving-but-
- * insensitive filesystems (win32, darwin), the comparison is case-
- * folded so `C:\Users\Foo2` does NOT pass as a child of
- * `C:\Users\Foo` (the prefix-sibling bypass from MEDIUM-8).
- */
-function isWithinRoot(candidate: string, root: string): boolean {
-  const rel = path.relative(root, candidate)
-  if (path.isAbsolute(rel)) return false
-  // Same-case OK on Linux; on win32/darwin, also reject if `rel`
-  // crosses up via "..". path.relative producing a leading ".."
-  // means candidate isn't under root.
-  if (rel.startsWith("..")) return false
-
-  // path.relative does case-sensitive comparison on all platforms.
-  // On case-insensitive filesystems we need to ALSO verify the
-  // case-folded version, to catch e.g. C:\users\foo treated as
-  // C:\Users\Foo:
-  if (process.platform === "win32" || process.platform === "darwin") {
-    const candFolded = candidate.toLowerCase()
-    const rootFolded = root.toLowerCase()
-    if (
-      candFolded !== rootFolded &&
-      !candFolded.startsWith(rootFolded + path.sep) &&
-      // Also handle the case where rootFolded already ends with sep
-      !candFolded.startsWith(rootFolded)
-    ) {
-      return false
-    }
-    // Prefix-sibling check: if rootFolded doesn't end with sep,
-    // candidate must equal it OR have sep at exactly len(rootFolded).
-    if (
-      candFolded !== rootFolded &&
-      !rootFolded.endsWith(path.sep) &&
-      candFolded.length > rootFolded.length &&
-      candFolded[rootFolded.length] !== path.sep
-    ) {
-      return false
-    }
-  }
-  return true
-}
-
 interface ValidationResult {
   ok: boolean
   canonical?: string
   error?: string
 }
 
+/**
+ * Validate a `workspace` arg. The proxy runs as the user; any path
+ * the proxy process can `stat` is a legal workspace — mirrors what
+ * Claude Code's Read / Bash tools could already reach. Earlier the
+ * validator enforced an allow-set + secret-shape file denylist; the
+ * holistic threat model showed those were inconsistent guardrails
+ * (the model already has filesystem access via its other tools), so
+ * they're dropped.
+ *
+ * Still enforced:
+ *   - Absolute path (relative paths are an integration-error footgun).
+ *   - realpath canonicalization (resolves symlinks; output paths are
+ *     reported relative to this).
+ *   - Path must exist AND be a directory.
+ *
+ * Errors do NOT echo the rejected path (output of code_search flows
+ * upstream to the model provider; consistent with the
+ * COPILOT_HOST_ALLOWLIST pattern in `src/lib/utils.ts`).
+ */
 export function validateWorkspace(workspace: string): ValidationResult {
   if (!path.isAbsolute(workspace)) {
     return { ok: false, error: "workspace must be an absolute path" }
@@ -402,22 +326,18 @@ export function validateWorkspace(workspace: string): ValidationResult {
   try {
     canonical = realpathSync(workspace)
   } catch {
-    // We deliberately don't echo the path — info-leak avoidance.
     return { ok: false, error: "workspace path is not accessible" }
   }
 
-  // Allow-set: startup roots + dynamic marker-file root.
-  const startupRoots = state.codeSearchRoots
-  for (const root of startupRoots) {
-    if (isWithinRoot(canonical, root)) {
-      return { ok: true, canonical }
+  try {
+    if (!statSync(canonical).isDirectory()) {
+      return { ok: false, error: "workspace must be a directory" }
     }
+  } catch {
+    return { ok: false, error: "workspace path is not accessible" }
   }
-  const markerRoot = findMarkerRoot(canonical)
-  if (markerRoot && isWithinRoot(canonical, markerRoot)) {
-    return { ok: true, canonical }
-  }
-  return { ok: false, error: "workspace not in allow-set" }
+
+  return { ok: true, canonical }
 }
 
 // ============================================================
@@ -524,13 +444,8 @@ function buildRgArgs(input: {
     args.push("-F")
   }
 
-  // User-supplied glob FIRST, then denylist. ripgrep applies all
-  // -g flags; the deny entries come last so they're always honored.
   if (input.fileGlob && input.fileGlob !== "**/*") {
     args.push("-g", input.fileGlob)
-  }
-  for (const pat of SECRET_DENYLIST) {
-    args.push("-g", `!${pat}`)
   }
 
   // CVE fix HIGH-2: positional separator. Without `--`, a query
