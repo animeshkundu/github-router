@@ -16,6 +16,7 @@ const baseState: State = {
   extendedBetas: false,
   sessionId: "test-session-id",
   machineId: "test-machine-id",
+  codeSearchRoots: [],
 }
 
 test("copilotBaseUrl uses copilotApiUrl from token response when set", () => {

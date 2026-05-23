@@ -97,6 +97,14 @@ Each persona is exposed both as a Claude Code subagent (callable via the `Task` 
 
 For codex-side write capability (a `codex-implementer` persona that can mutate files via Codex's tool-use sandbox), pass `--codex-cli`. Requires `codex` CLI 0.129+ on `PATH`; falls back to HTTP-only with a warning if codex is missing or older. Pass `--codex-mcp-only` to also pass `--strict-mcp-config` to Claude Code so only the proxy's MCP servers are loaded (hides any MCP servers in your existing `~/.claude/mcp.json`).
 
+### Code search (`mcp__gh-router-peers__code_search`)
+
+Alongside the peer reviewers, the same MCP surface exposes a `code_search` tool — fast structured code search over the workspace, ranked by **BM25F** (Robertson, Zaragoza, Taylor 2004) over four code-aware fields: matched line, surrounding context, file path tokens, and a symbol-definition heuristic. Defaults to a "ranked" mode with shoulder pruning so models get the few right answers, not a flood of substring matches. `literal` and `regex` modes are also available for exact searches.
+
+Workspace trust is **default-deny**. Allowed roots are the union of: the proxy's startup `cwd`, paths in the `GH_ROUTER_CODE_SEARCH_ROOTS` env var (JSON array of absolute paths), and any directory containing a `.gh-router-searchable` marker file. Secret-shape files (`.env`, `.pem`, `id_rsa`, `credentials*`, `.aws/**`, `.ssh/**`, etc.) are always excluded — `file_glob` cannot bypass them. Paths in results are returned relative to the workspace, never absolute.
+
+Ripgrep is provided via the `@vscode/ripgrep` npm dependency (per-platform binary via `optionalDependencies` — no postinstall script needed). The proxy prefers system `rg` on `PATH` when available and falls back to the bundled binary otherwise. To opt into raw query/path logging for debugging, set `GH_ROUTER_DEBUG_CODE_SEARCH=1` — by default the proxy logs only counts and timings.
+
 ---
 
 ## Use with Codex CLI

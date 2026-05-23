@@ -21,6 +21,7 @@
  *      the persona prompt teaches the lead what to paste.
  */
 
+import { searchCode } from "./code-search"
 import { searchWeb } from "~/services/copilot/web-search"
 
 /**
@@ -536,6 +537,113 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           const msg = err instanceof Error ? err.message : String(err)
           return {
             content: [{ type: "text", text: `web_search failed: ${msg}` }],
+            isError: true,
+          }
+        }
+      },
+    },
+    {
+      // code_search — proxy-side MCP tool exposing ripgrep + BM25F
+      // ranking to all clients (Claude Code, codex, gemini callers).
+      // Plan: ~/.local/share/.../plans/what-are-the-following-wild-tarjan.md
+      // Implementation: src/lib/code-search.ts (load-bearing notes there).
+      toolNameHttp: "code_search",
+      description:
+        "Fast structured code search over an allowed workspace root. " +
+        "Returns ranked, deduplicated hits with snippets. Backed by " +
+        "ripgrep with BM25F ranking (Robertson, Zaragoza, Taylor 2004) " +
+        "over four code-aware fields: matched line, surrounding context, " +
+        "file path tokens, symbol-definition heuristic. Prefer this over " +
+        "Bash+grep when you want ranked discovery: pass the workspace " +
+        "path explicitly. `workspace` MUST be under one of the proxy's " +
+        "allow-set roots (proxy launch cwd, GH_ROUTER_CODE_SEARCH_ROOTS " +
+        "JSON env, or any directory containing a .gh-router-searchable " +
+        "marker file). Secret-shape files (.env, .pem, id_rsa, etc.) are " +
+        "always excluded.",
+      inputSchema: {
+        type: "object",
+        required: ["query", "workspace"],
+        additionalProperties: false,
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "Search text. In 'ranked' (default) and 'literal' modes, " +
+              "interpreted as a literal string. In 'regex' mode, " +
+              "interpreted as a PCRE2 regex.",
+          },
+          workspace: {
+            type: "string",
+            description:
+              "Absolute path to the project root to search. Must be in " +
+              "the proxy's allow-set (see tool description).",
+          },
+          mode: {
+            type: "string",
+            enum: ["ranked", "literal", "regex"],
+            description:
+              "Ranking mode. 'ranked' (default): BM25F over matched-line, " +
+              "symbol-context, file-path, and surrounding-context fields; " +
+              "results ordered by score with shoulder pruning (drops " +
+              "results below 50% of the top score). 'literal': fixed-" +
+              "string search, ripgrep document order. 'regex': PCRE2 " +
+              "search, ripgrep document order.",
+          },
+          file_glob: {
+            type: "string",
+            description:
+              "Optional ripgrep glob filter (e.g. 'src/**/*.ts'). " +
+              "Secret-shape denylist is applied AFTER and cannot be " +
+              "overridden.",
+          },
+          limit: {
+            type: "number",
+            description: "Max hits to return (default 20, max 100).",
+          },
+          context_lines: {
+            type: "number",
+            description:
+              "Lines of context before AND after each match (default 2, " +
+              "max 10). Used both for snippet rendering and as the " +
+              "'context' field in BM25F scoring.",
+          },
+        },
+      },
+      async handler(
+        args: Record<string, unknown>,
+        signal?: AbortSignal,
+      ): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        try {
+          const result = await searchCode(
+            {
+              query: typeof args.query === "string" ? args.query : "",
+              workspace:
+                typeof args.workspace === "string" ? args.workspace : "",
+              mode:
+                args.mode === "literal" || args.mode === "regex" ||
+                args.mode === "ranked"
+                  ? args.mode
+                  : undefined,
+              file_glob:
+                typeof args.file_glob === "string" ? args.file_glob : undefined,
+              limit: typeof args.limit === "number" ? args.limit : undefined,
+              context_lines:
+                typeof args.context_lines === "number"
+                  ? args.context_lines
+                  : undefined,
+            },
+            signal,
+          )
+          return {
+            content: [{ type: "text", text: JSON.stringify(result) }],
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return {
+            content: [{ type: "text", text: `code_search failed: ${msg}` }],
             isError: true,
           }
         }

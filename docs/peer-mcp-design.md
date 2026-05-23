@@ -182,3 +182,81 @@ The `claude` subcommand auto-injects three peer-model review tools as Claude Cod
 **The cap fires BEFORE the AbortController + `inFlightToolsCall` increment**, so a rejected pre-flight is free of concurrency-slot cost and free of upstream call cost (no Copilot fetch issued). Don't reorder this — moving the cap after the increment leaks concurrency slots on every rejected pre-flight. Thresholds are constants in `src/routes/mcp/handler.ts` — easy to update as more empirical data arrives via the probe suite.
 
 **`opus_critic` persona** (Phase B): adversarial second opinion from a fresh-context Opus 4.7 routed via `/v1/messages` with translated `thinking.budget_tokens` (low=1024, medium=3000) and `max_tokens = budget + 1500`. Cheapest and fastest of the peer critics (~10-25s on small artifacts). Use it as a quick same-lab sanity check before committing to a controversial decision when the artifact fits comfortably in one shot. **Limited blind-spot diversification** — same training data, same lab, same RLHF priors as the lead, so it does NOT substitute for cross-lab triangulation; reach for `codex_critic` (`high`) or `gemini_critic` for genuine adversarial coverage. Routing reflected in `peer-review-coordinator` (`src/lib/codex-mcp-config.ts`).
+
+## Code search (`code_search`)
+
+Non-persona MCP tool exposed alongside `web_search` under `NON_PERSONA_MCP_TOOLS` (`src/lib/peer-mcp-personas.ts`). All clients (Claude Code, codex, gemini callers) see it via the same `/mcp` surface. Implementation: `src/lib/code-search.ts`.
+
+### Ranking algorithm
+
+**BM25F** (Robertson, Zaragoza, Taylor; *Simple BM25 Extension to Multiple Weighted Fields*; CIKM 2004). Multi-field extension of Okapi BM25 (Robertson & Zaragoza 2009 monograph, *Foundations and Trends in IR* 3(4):333-389). Lucene/Elasticsearch use BM25/BM25F as their default scorer; CodeSearchNet (Husain et al 2019, arxiv/1909.09436) uses BM25 as its classical IR baseline; Sourcegraph Zoekt's "weighted scoring signals (symbol match, file path, syntactic context, ...)" is BM25F-shaped multi-field scoring over a code-specific field set.
+
+Formula (canonical CIKM 2004), applied at file granularity over the ripgrep hit set:
+
+```
+BM25F(q, f) = Σ_t  IDF(t) · w_t,f / (w_t,f + k1)
+w_t,f       = Σ_field  b_field · tf_t,field,f /
+              ((1 − l_field) + l_field · (len_field,f / avglen_field))
+IDF(t)      = log( (M − df(t) + 0.5) / (df(t) + 0.5) )
+```
+
+Lucene defaults: `k1 = 1.2`. Per-call corpus statistics (M = number of files in the hit set, df, avglen) computed once per query — no persistent index needed; sub-second for hit sets ≤ a few hundred files.
+
+### Fields
+
+| Field | Source | `b_f` | `l_f` |
+|---|---|---|---|
+| `match_line` | The line ripgrep matched | 3.0 | 0.0 |
+| `symbol_context` | Matched line if it's a definition-shape (`function`, `class`, `const X =`, etc.); empty otherwise | 2.5 | 0.0 |
+| `file_path` | Path tokens (basename + dirs, space-joined) | 2.0 | 0.0 |
+| `context` | Lines before+after the match (configurable `context_lines`) | 1.0 | 0.75 |
+
+Tokenizer: rule-based identifier splitter per Vasilescu, Ray, Mockus, *How to Split Identifiers?* (ESEC/FSE 2021). Case-boundary splits with acronym-run lookahead (`HTTPSConnection` → `[https, connection]`), digit-boundary attaches trailing digits to letters (`parseV2Handler` → `[parse, v2, handler]`), lowercase, drop length-1 tokens.
+
+### Shoulder pruning
+
+After BM25F sort, truncate at the first hit below `0.5 × top_score` (Burges 2010 LTR convention). When the top score is 0 (no field had a query-token match), all hits are returned in tie-break order — signals "no ranking signal." `pruned_below_shoulder` reports the count omitted.
+
+### Workspace trust model
+
+Default-deny. A `workspace` argument is accepted iff its canonicalized path lies within one of:
+
+1. The proxy's `process.cwd()` at startup (canonicalized once at module init in `src/lib/state.ts`).
+2. Any root in `GH_ROUTER_CODE_SEARCH_ROOTS` (JSON array of absolute paths). JSON-array form avoids the Windows-vs-POSIX `path.delimiter` ambiguity.
+3. Any directory containing a `.gh-router-searchable` marker file (self-documenting opt-in walked from the candidate up to filesystem root).
+
+Comparison uses `path.relative(root, candidate)` semantics with case-folding on win32/darwin (case-preserving-but-insensitive filesystems) to block the prefix-sibling bypass (`C:\Users\Foo2` does NOT pass as a child of `C:\Users\Foo`). Rejected requests respond with a clear error that does NOT echo the rejected path (same info-leak avoidance pattern as `COPILOT_HOST_ALLOWLIST`).
+
+Hardcoded secret-shape **denylist** is applied as `-g '!PATTERN'` ripgrep flags AFTER any user `file_glob`, so it cannot be bypassed: `*.env`, `*.env.*`, `*.pem`, `*.p12`, `*.pfx`, `*id_rsa*`, `*id_ed25519*`, `credentials*`, `*.kdbx`, `*.keystore`, `*.gpg`, `.aws/**`, `.ssh/**`, `.docker/config.json`, `*.kube/config*`. `--no-ignore` / `--unrestricted` are NOT exposed via the tool API.
+
+### Hardened spawn (CVE-class fixes from peer review)
+
+- **Argv injection** (`--`): ripgrep is invoked as `rg <flags> -- <query> .` — the positional separator prevents a query starting with `-` (e.g. `--no-ignore`) from being parsed as a flag.
+- **TOCTOU**: rg spawns with `cwd: canonicalWorkspace, shell: false` and target `.` — the user-supplied workspace string is NEVER passed as an argv positional. The kernel-level cwd handle pins the directory at spawn time, closing most of the validate→spawn race window. Residual same-user races (an attacker who controls the same user account and can swap the directory between validation and spawn) are explicitly out of scope.
+- **Cancel-race partial JSON**: on `signal.aborted`, the JSON parser short-circuits before reading further lines — a half-flushed truncated chunk never reaches `JSON.parse`. Three-lab confirmed fix.
+- **Windows process-tree**: on `process.platform === "win32"`, abort uses `taskkill /T /F /PID <pid>` because `child.kill()` does NOT reliably terminate descendants on Windows.
+- **Global limit**: `--max-count` is per-file in ripgrep. We enforce `limit` globally in the TS reader; relying on rg's flag would let a 500-file monorepo return 10,000 hits with `limit=20`.
+
+### Ripgrep bundling
+
+Tri-tier resolution (mirrors cc-backup `src/utils/ripgrep.ts:31-65`):
+
+1. **System** — if PATH has `rg`, spawn as the literal command name `"rg"` (NOT the absolute path from `which`/`where` — using just the name leverages Windows' NoDefaultCurrentDirectoryInExePath to prevent PATH-hijacking via `./rg.exe` in the proxy's cwd).
+2. **Bundled** — `@vscode/ripgrep@1.18.0+` which ships per-platform binaries via `optionalDependencies` (no postinstall script needed; the right binary lands at `node_modules/@vscode/ripgrep-{platform}-{arch}/bin/rg{.exe}`).
+3. **Error** — clean MCP `isError: true` response only if BOTH fail.
+
+`package.json` keeps `"trustedDependencies": ["@vscode/ripgrep"]` as forward-compatibility for older `@vscode/ripgrep` versions that used postinstall scripts (Bun does NOT run postinstall by default).
+
+### Observability
+
+Per-call breadcrumb logged via consola at info level (not sent off-host):
+
+```
+[code_search] mode=ranked results=14 truncated=false scanned_files=412 elapsed_ms=34 abort=false rg=system
+```
+
+Raw `query` and absolute workspace paths are NOT logged unless `GH_ROUTER_DEBUG_CODE_SEARCH=1` is set — query strings can leak intent and codebase shape.
+
+### Upstream-snippet security framing
+
+Snippets are sent upstream as tool-use-result content to the model. Treat the workspace trust model as "what am I comfortable pasting into a chat with Anthropic/OpenAI/Gemini" — secret-shape denylist + path allow-set are the safeguards, but do NOT point at a workspace containing untrusted secrets.
