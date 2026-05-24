@@ -99,7 +99,6 @@ const SHOULDER_THRESHOLD = 0.5
 
 const MAX_QUERY_LEN = 1024
 const MAX_GLOB_LEN = 512
-const MAX_LIMIT = 100
 const DEFAULT_LIMIT = 20
 const MAX_CONTEXT_LINES = 10
 const DEFAULT_CONTEXT_LINES = 2
@@ -1669,7 +1668,7 @@ export async function searchCode(
 
   const mode = rawInput.mode ?? "ranked"
   const structuralMode = rawInput.structural ?? "full"
-  const limit = Math.min(rawInput.limit ?? DEFAULT_LIMIT, MAX_LIMIT)
+  const limit = rawInput.limit ?? DEFAULT_LIMIT
   const contextLines = Math.min(
     rawInput.context_lines ?? DEFAULT_CONTEXT_LINES,
     MAX_CONTEXT_LINES,
@@ -1730,17 +1729,40 @@ export async function searchCode(
     throw new Error(`failed to spawn ripgrep: ${(err as Error).message}`)
   }
 
-  // Drain stderr to a bounded buffer so it doesn't fill the pipe.
+  // Capture stderr as text (bounded to 64KB — rg errors are short,
+  // but the existing 1MB byte cap stays as a runaway-input guard).
+  // We surface stderr on exit code 2 so model gets actionable errors
+  // (e.g. regex compile failures) rather than empty results.
+  const STDERR_TEXT_CAP = 64 * 1024
   let stderrBytes = 0
+  let stderrText = ""
   if (child.stderr) {
-    child.stderr.on("data", (chunk: Buffer) => {
+    child.stderr.setEncoding("utf8")
+    child.stderr.on("data", (chunk: string) => {
       stderrBytes += chunk.length
+      if (stderrText.length < STDERR_TEXT_CAP) {
+        stderrText = (stderrText + chunk).slice(0, STDERR_TEXT_CAP)
+      }
       if (stderrBytes > 1024 * 1024) {
         // 1MB stderr is excessive — kill.
         ac.abort("stderr_cap")
       }
     })
   }
+
+  // Track rg's exit code so we can distinguish "no matches" (code 1)
+  // from a real error (code 2: bad regex, IO failure after our
+  // workspace validation, etc.) Per `man rg`:
+  //   0 = matches found
+  //   1 = no matches (not an error)
+  //   2 = error (regex, IO, ...)
+  let exitCode: number | null = null
+  const exitPromise = new Promise<void>((resolve) => {
+    child.on("close", (code) => {
+      exitCode = code
+      resolve()
+    })
+  })
 
   try {
     parseResult = await parseRgJsonStream(child, {
@@ -1758,6 +1780,35 @@ export async function searchCode(
   if (ac.signal.aborted && parseResult.hits.length === 0) {
     const reason = String(ac.signal.reason ?? "aborted")
     throw new Error(`code_search aborted (${reason})`)
+  }
+
+  // Surface rg errors (regex compile failures, etc.) to the caller.
+  // Exit code 2 means "rg encountered an error" — typically a malformed
+  // regex in mode="regex". Without this, an invalid regex returns
+  // empty results with no indication of why; the model can't tell
+  // "no matches" from "your pattern is broken." We re-check
+  // !signal.aborted so timeout/cap-driven aborts (which also produce
+  // non-zero exit) keep their existing error path above.
+  //
+  // Await rg's full exit before reading exitCode — the parseRgJsonStream
+  // for-await terminates on stdout EOF, which may slightly precede the
+  // child's 'close' event in Node's event-loop ordering.
+  if (!ac.signal.aborted) {
+    await exitPromise
+  }
+  if (
+    exitCode !== null &&
+    exitCode !== 0 &&
+    exitCode !== 1 &&
+    !ac.signal.aborted &&
+    parseResult.hits.length === 0
+  ) {
+    const trimmed = stderrText.trim()
+    const detail =
+      trimmed.length > 0
+        ? trimmed.replace(/^rg:\s*/i, "").slice(0, 600)
+        : `ripgrep exited with code ${exitCode}`
+    throw new Error(`code_search: ${detail}`)
   }
 
   // Apply ranking.

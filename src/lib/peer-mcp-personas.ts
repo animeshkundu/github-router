@@ -393,7 +393,7 @@ export function buildPeerAwarenessSnippet(opts: {
     "",
     `Cross-lab peer critics under \`mcp__gh-router-peers__*\` — ${criticList.join(
       ", ",
-    )} — plus the \`peer-review-coordinator\` fan-out subagent, and Claude Code's built-in \`advisor\` tool, are available at your discretion for second opinions and adversarial review. Subagents you spawn inherit them.${codexCliClause}`,
+    )} — plus the \`peer-review-coordinator\` fan-out subagent, and Claude Code's built-in \`advisor\` tool, are available at your discretion for second opinions and adversarial review. Subagents you spawn inherit them.${codexCliClause} Also \`mcp__gh-router-peers__code_search\` for accurate ranked code discovery (BM25F + tree-sitter) — prefer it over \`Grep\` when finding definitions or call sites.`,
   ].join("\n")
 }
 
@@ -608,7 +608,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           },
           limit: {
             type: "number",
-            description: "Max hits to return (default 20, max 100).",
+            description: "Max hits to return (default 20).",
           },
           structural: {
             type: "string",
@@ -658,7 +658,6 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           const minimal: {
             results: Array<{ file: string; line: number; snippet: string }>
             truncated: boolean
-            pruned_below_shoulder?: number
             ranking_fallback?: string
           } = {
             results: result.results.map((hit) => ({
@@ -667,9 +666,6 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               snippet: hit.snippet,
             })),
             truncated: result.truncated,
-          }
-          if (typeof result.pruned_below_shoulder === "number") {
-            minimal.pruned_below_shoulder = result.pruned_below_shoulder
           }
           if (typeof result.structuralFallback === "string") {
             minimal.ranking_fallback = result.structuralFallback

@@ -215,7 +215,7 @@ Tokenizer: rule-based identifier splitter per Vasilescu, Ray, Mockus, *How to Sp
 
 ### Shoulder pruning
 
-After BM25F sort, truncate at the first hit below `0.5 × top_score` (Burges 2010 LTR convention). When the top score is 0 (no field had a query-token match), all hits are returned in tie-break order — signals "no ranking signal." `pruned_below_shoulder` reports the count omitted.
+After BM25F sort, truncate at the first hit below `0.5 × top_score` (Burges 2010 LTR convention). When the top score is 0 (no field had a query-token match), all hits are returned in tie-break order. The pruning is an internal optimization that surfaces the few viable answers; the count of omitted results is intentionally NOT exposed to the model (the model can re-issue in `literal` mode if it needs the full unranked set, and a numeric pruning count is diagnostic-only — see the minimality principle below).
 
 ### Workspace model
 
@@ -292,7 +292,7 @@ Every field in an MCP tool's **input** and **output** schema must be one of:
 
   (a) **Required to call the tool correctly** (e.g. `query`, `workspace` on `code_search` — the tool cannot do its job without them).
   (b) **Tunable by the model in a way that improves outcomes** (e.g. `mode`, `structural`, `limit` — the model can reasonably decide "I need every hit, switch to literal" or "this is a large repo, drop to topN").
-  (c) **Directly actionable feedback that helps the model self-correct on the next call** (e.g. `truncated: true` tells the model "raise `limit` or narrow the query"; `pruned_below_shoulder: 7` tells it "the long tail was cut, your top results are probably what you want"; `ranking_fallback: "structural budget exceeded after 23/50 hits; retry with structural: \"topN\""` tells it exactly what to do differently).
+  (c) **Directly actionable feedback that helps the model self-correct on the next call** (e.g. `truncated: true` tells the model "raise `limit` or narrow the query"; `ranking_fallback: "structural budget exceeded after 23/50 hits; retry with structural: \"topN\""` tells it exactly what to do differently; a ripgrep regex-compile error surfaced as `isError: true` content tells it "your pattern is malformed").
 
 If a proposed field fails all three tests, **cut it**. The model's context is finite and precious; echoing the model's own inputs back, exposing internal diagnostics for human eyeballs, and surfacing failures the model has no lever to fix all cost tokens for negative value. Negative value because every additional token in the tool response (i) reduces the budget left for the model's actual reasoning, and (ii) introduces noise the model has to filter through before reaching the actionable bits.
 
@@ -313,7 +313,7 @@ The internal `CodeSearchResponse` type in `src/lib/code-search.ts` is rich on pu
 | `scanned_files: 412` | **cut** | Telemetry — belongs in the proxy log, not in the model's context. |
 | `elapsed_ms: 34` | **cut** | Same — telemetry. |
 | `truncated: true` | **kept** | Actionable: model can raise `limit` or narrow `query`. |
-| `pruned_below_shoulder: 7` | **kept** | Actionable: model knows the long tail was cut and the top results are confidently the right ones. |
+| `pruned_below_shoulder: 7` | **cut** | Initially kept on the theory that "the long tail was cut" helps the model. In practice the field is diagnostic — the model can't reasonably act on a numeric pruning count, and `0` on the success path violates the "absent iff non-actionable" principle. Pruning still happens internally; the count just doesn't surface. |
 | `ranking_fallback: "structural budget exceeded..."` | **kept** (when present) | The textbook good field. Present **iff** actionable; absent (not `null`, not `""`) on the happy path so the model spends zero tokens noticing nothing went wrong. |
 | Per-hit `file`, `line`, `snippet` | **kept** | The actual payload. The model uses `file` and `line` to navigate, `snippet` to decide if the hit is relevant. |
 

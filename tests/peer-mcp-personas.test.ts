@@ -295,6 +295,21 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(snippet).toContain("`advisor`")
   })
 
+  test("mentions code_search with an accuracy framing + nudge", () => {
+    // code_search is a useful default for "find me code that does X"
+    // discovery; without a hint in the awareness snippet Claude reaches
+    // for Grep more often than ideal. The nudge stays at-discretion
+    // (not "always use this") while leaving a clear preference signal.
+    const snippet = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: false,
+    })
+    expect(snippet).toContain("code_search")
+    expect(snippet.toLowerCase()).toContain("accurate")
+    // The nudge: name Grep as the tool being displaced for ranked discovery.
+    expect(snippet).toContain("Grep")
+  })
+
   test("omits gemini_critic when gemini is not in the catalog", () => {
     const snippet = buildPeerAwarenessSnippet({
       codexCli: false,

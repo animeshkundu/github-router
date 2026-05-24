@@ -306,6 +306,43 @@ describe("searchCode integration", () => {
     expect(r.truncated).toBe(true)
   })
 
+  test("invalid regex in mode='regex' surfaces ripgrep's error to the caller", async () => {
+    // Without exit-code surfacing this would silently return [] and
+    // the model couldn't distinguish "your regex is broken" from
+    // "no matches." The error message should include ripgrep's own
+    // diagnostic (e.g. "regex parse error" / "unclosed character class").
+    await expect(
+      searchCode({
+        query: "[unterminated",
+        workspace: fx.root,
+        mode: "regex",
+        limit: 5,
+      }),
+    ).rejects.toThrow(/regex parse error|unclosed/)
+  })
+
+  test("caller-supplied limit > 100 is respected (no internal clamp)", async () => {
+    // Build a fixture with 150 hits in one file so the model can
+    // verify limit=120 returns 120 results (the old MAX_LIMIT=100
+    // would have silently clipped to 100).
+    const wideFx = makeFixture((root) => {
+      const lines = Array.from({ length: 150 }, (_, i) => `// HIT_LINE_${i}`)
+      writeFileSync(path.join(root, "wide.ts"), lines.join("\n") + "\n")
+    })
+    try {
+      const r = await searchCode({
+        query: "HIT_LINE_",
+        workspace: wideFx.root,
+        mode: "literal",
+        limit: 120,
+      })
+      expect(r.results.length).toBe(120)
+      expect(r.truncated).toBe(true)
+    } finally {
+      wideFx.cleanup()
+    }
+  })
+
   test("query with null byte is rejected", async () => {
     await expect(
       searchCode({ query: "\0", workspace: fx.root }),
@@ -712,7 +749,6 @@ describe("MCP handler trims the response per the minimality principle", () => {
     const allowedTopKeys = new Set([
       "results",
       "truncated",
-      "pruned_below_shoulder",
       "ranking_fallback",
     ])
     for (const k of Object.keys(body)) {
@@ -722,6 +758,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
     // No internals leaked:
     expect(body).not.toHaveProperty("scanned_files")
     expect(body).not.toHaveProperty("elapsed_ms")
+    expect(body).not.toHaveProperty("pruned_below_shoulder")
     expect(body).not.toHaveProperty("ranking")
     expect(body).not.toHaveProperty("structuralFallback")
 
