@@ -80,7 +80,7 @@ import type {
   ToolCall,
 } from "@earendil-works/pi-ai"
 
-import { Budget } from "./budget"
+import { Budget, WorkerAbort } from "./budget"
 import {
   WorktreeRegistry,
   getInstanceUuid,
@@ -379,6 +379,7 @@ export async function runWorkerAgent(
     // ToolCall)[]` — see `extractAssistantText` above for why we don't
     // just `.toString()`.
     let finalText = ""
+    let lastStopReason: string | null = null
     const unsubscribe = agent.subscribe((event) => {
       if (event.type !== "message_end") return
       const msg = event.message
@@ -387,6 +388,8 @@ export async function runWorkerAgent(
       const content = (msg as AssistantMessage).content
       if (!Array.isArray(content)) return
       finalText = extractAssistantText(content)
+      const sr = (msg as { stopReason?: unknown }).stopReason
+      if (typeof sr === "string") lastStopReason = sr
     })
 
     // Step 10: wall-clock timer. `Budget.checkBeforeCall` already
@@ -438,17 +441,45 @@ export async function runWorkerAgent(
       }
 
       const text = diff ? `${finalText}\n\n${diff}` : finalText
+      // Never return empty text — the harness has no signal to act on.
+      // Distinguish (a) Pi exited silently after tool work from (b) a
+      // legitimate no-op so the caller can decide to retry/rephrase.
+      if (!text.trim()) {
+        return {
+          text:
+            `[worker exited with no output `
+            + `(stopReason=${lastStopReason ?? "unknown"}, `
+            + `turns=${budget.turns}, elapsed=${budget.elapsedMs}ms)]`,
+          isError: true,
+        }
+      }
       return { text }
     } catch (err) {
       // Step 13b: error-path cleanup. Mirror the success path so the
-      // worktree can't strand on a Pi-throws-mid-loop path.
+      // worktree can't strand on a Pi-throws-mid-loop path. For
+      // `WorkerAbort` (budget cap hit), capture the diff before tearing
+      // the worktree down — the partial work Pi did is still useful for
+      // the caller to inspect.
+      let diff = ""
+      if (err instanceof WorkerAbort) {
+        try {
+          diff = await ws.finalize()
+        } catch {
+          /* ignore — best-effort, halt message stands alone */
+        }
+      }
       try {
         await ws.remove()
       } catch {
         /* same as above */
       }
+      const haltOrErr = err instanceof Error ? err.message : String(err)
+      const parts: Array<string> = []
+      if (finalText) parts.push(finalText)
+      if (diff) parts.push(diff)
+      parts.push(haltOrErr)
       return {
-        text: err instanceof Error ? err.message : String(err),
+        text: parts.join("\n\n"),
         isError: true,
       }
     } finally {

@@ -400,7 +400,7 @@ export function buildPeerAwarenessSnippet(opts: {
     "",
     `Cross-lab peer critics under \`mcp__gh-router-peers__*\` — ${criticList.join(
       ", ",
-    )} — plus the \`peer-review-coordinator\` fan-out subagent, and Claude Code's built-in \`advisor\` tool, are available at your discretion for second opinions and adversarial review. Subagents you spawn inherit them.${codexCliClause} Also \`mcp__gh-router-peers__code_search\` for accurate ranked code discovery (BM25F + tree-sitter) — prefer it over \`Grep\` when finding definitions or call sites.`,
+    )} — plus the \`peer-review-coordinator\` fan-out subagent, and Claude Code's built-in \`advisor\` tool, are available at your discretion for second opinions and adversarial review. Subagents you spawn inherit them.${codexCliClause} Also \`mcp__gh-router-peers__code_search\` for accurate ranked code discovery (BM25F + tree-sitter) — prefer it over \`Grep\` when finding definitions or call sites. \`worker_explore\` / \`worker_implement\` delegate bounded work to a Gemini worker — offload to save your context.`,
   ].join("\n")
 }
 
@@ -772,10 +772,14 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       toolNameHttp: "worker_explore",
       capability: "worker",
       description:
-        "Read-only investigation by an autonomous worker (Gemini via "
-        + "Pi). Tools: read, glob, grep, code_search, web_search, "
-        + "fetch_url, peer_review, advisor. The worker decides when "
-        + "it's done and what to surface.",
+        "Read-only investigation by an autonomous worker (Gemini via Pi). "
+        + "Tools: read, glob, grep, code_search, web_search, fetch_url, "
+        + "peer_review, advisor. Use it to offload bounded research "
+        + "(\"find files matching X then summarize\", \"how does library "
+        + "Y handle Z\", \"survey this codebase for usages of deprecated "
+        + "API\") that would otherwise eat your context window. The "
+        + "worker plans its own tool calls and returns a single text "
+        + "answer.",
       inputSchema: {
         type: "object",
         required: ["prompt"],
@@ -820,14 +824,13 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       toolNameHttp: "worker_implement",
       capability: "worker",
       description:
-        "Delegates a scoped coding task to an autonomous worker "
-        + "(Gemini via Pi). Modifies files in your workspace and can "
-        + "run shell commands. With `worktree: false` (default) edits "
-        + "in place — concurrent worker_implement calls and Claude's "
-        + "own edits to the same files will race. With `worktree: "
-        + "true` runs in an isolated git worktree and returns the "
-        + "diff for review. The worker decides when it's done and "
-        + "what to surface.",
+        "Delegates a scoped coding task to an autonomous worker (Gemini "
+        + "via Pi). Modifies files in your workspace and can run shell "
+        + "commands. With `worktree: false` (default) edits in place — "
+        + "concurrent worker_implement calls and Claude's own edits to "
+        + "the same files will race. With `worktree: true` runs in an "
+        + "isolated git worktree and returns the diff for review. "
+        + "HARD ERROR if true and the workspace is not a git repository.",
       inputSchema: {
         type: "object",
         required: ["prompt"],
