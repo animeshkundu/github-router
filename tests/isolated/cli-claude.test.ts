@@ -88,6 +88,13 @@ mock.module("~/lib/port", () => ({
   DEFAULT_CODEX_MODEL: "gpt-5.5",
   DEFAULT_CODEX_MODEL_FALLBACKS: ["gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex"],
   DEFAULT_PORT: 8787,
+  // The worker-agent surface (registered via peer-mcp-personas → tools.ts →
+  // create-responses.ts) statically imports these from ~/lib/port. The
+  // mock has to re-export them or any test that loads the worker static
+  // graph fails at import time with `Export named 'UPSTREAM_FETCH_TIMEOUT_MS'
+  // not found in module`. Values are the real defaults (per src/lib/port.ts).
+  UPSTREAM_FETCH_TIMEOUT_MS: 0,
+  UPSTREAM_INACTIVITY_TIMEOUT_MS: 300_000,
 }))
 
 mock.module("consola", () => ({

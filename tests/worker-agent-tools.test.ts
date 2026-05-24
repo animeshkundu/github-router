@@ -58,7 +58,7 @@ const IS_WINDOWS = process.platform === "win32"
 function freshWorkspace(): { dir: string; cleanup: () => void } {
   // realpath up-front to keep our `confineToWorkspace` checks honest
   // on macOS /private/var symlinks.
-  const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "wa-tools-")))
+  const dir = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "wa-tools-")))
   return {
     dir,
     cleanup: () => {
@@ -714,7 +714,7 @@ describe("web_search", () => {
     process.env.GH_ROUTER_WORKER_DISABLE_NETWORK = "1"
     const tools = buildWorkerTools({
       mode: "explore",
-      workspace: realpathSync(os.tmpdir()),
+      workspace: realpathSync.native(os.tmpdir()),
     })
     const tool = tools.find((t) => t.name === "web_search")!
     await expect(
@@ -1236,7 +1236,7 @@ describe("buildWorkerTools", () => {
   test("explore mode returns 8 read-only tools", () => {
     const tools = buildWorkerTools({
       mode: "explore",
-      workspace: realpathSync(os.tmpdir()),
+      workspace: realpathSync.native(os.tmpdir()),
     })
     expect(tools.length).toBe(8)
     const names = tools.map((t) => t.name).sort()
@@ -1257,7 +1257,7 @@ describe("buildWorkerTools", () => {
   test("implement mode returns 11 tools (explore + edit/write/bash)", () => {
     const tools = buildWorkerTools({
       mode: "implement",
-      workspace: realpathSync(os.tmpdir()),
+      workspace: realpathSync.native(os.tmpdir()),
     })
     expect(tools.length).toBe(11)
     const names = tools.map((t) => t.name)
@@ -1269,7 +1269,7 @@ describe("buildWorkerTools", () => {
   test("each tool has the required Pi AgentTool shape", () => {
     const tools = buildWorkerTools({
       mode: "implement",
-      workspace: realpathSync(os.tmpdir()),
+      workspace: realpathSync.native(os.tmpdir()),
     })
     for (const t of tools) {
       expect(typeof t.name).toBe("string")
@@ -1281,8 +1281,8 @@ describe("buildWorkerTools", () => {
   })
 
   test("workspace is captured by closure (per-call independence)", () => {
-    const w1 = realpathSync(mkdtempSync(path.join(os.tmpdir(), "w1-")))
-    const w2 = realpathSync(mkdtempSync(path.join(os.tmpdir(), "w2-")))
+    const w1 = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "w1-")))
+    const w2 = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "w2-")))
     try {
       const t1 = buildWorkerTools({ mode: "explore", workspace: w1 })
       const t2 = buildWorkerTools({ mode: "explore", workspace: w2 })

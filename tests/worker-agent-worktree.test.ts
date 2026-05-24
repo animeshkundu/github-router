@@ -71,7 +71,7 @@ function git(cwd: string, args: Array<string>): string {
 
 function makeRepo(setup: (root: string) => void): RepoFixture {
   // realpathSync because macOS mkdtempSync returns a symlinked path.
-  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "wa-wt-")))
+  const root = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "wa-wt-")))
   git(root, ["init", "-q", "-b", "main"])
   setup(root)
   // Initial commit so HEAD exists.
@@ -301,7 +301,7 @@ describe("createWorktree remove() idempotent", () => {
 
 describe("createWorktree no-git hard error", () => {
   test("throws when workspace is not a git repository", async () => {
-    const dir = realpathSync(
+    const dir = realpathSync.native(
       mkdtempSync(path.join(os.tmpdir(), "wa-wt-no-git-")),
     )
     const { registry, instanceUuid } = makeRegistry()

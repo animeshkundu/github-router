@@ -82,7 +82,7 @@ function git(cwd: string, args: Array<string>): string {
 function makeRepo(): { root: string; cleanup: () => void } {
   // realpathSync to neutralize macOS tmpdir symlinks — git resolves
   // symlinks internally and the sweep compares against real paths.
-  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "wa-bs-repo-")))
+  const root = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "wa-bs-repo-")))
   git(root, ["init", "-q", "-b", "main"])
   writeFileSync(path.join(root, "README.md"), "hello\n")
   git(root, ["add", "-A"])

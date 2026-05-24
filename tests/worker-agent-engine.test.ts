@@ -306,7 +306,7 @@ describe("runWorkerAgent early-exit branches", () => {
 
   test("implement + worktree on a non-git workspace returns a hard error", async () => {
     const before = __getInFlightForTests()
-    const dir = realpathSync(
+    const dir = realpathSync.native(
       mkdtempSync(path.join(os.tmpdir(), "wa-engine-no-git-")),
     )
     try {
@@ -338,7 +338,7 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
       () => sseFinalText("explore-mode-reply"),
     ) as unknown as typeof fetch
 
-    const dir = realpathSync(
+    const dir = realpathSync.native(
       mkdtempSync(path.join(os.tmpdir(), "wa-engine-explore-")),
     )
     try {
@@ -366,7 +366,7 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
     // Build a real git repo so createWorktree succeeds, then stage an
     // untracked file inside the worktree by hooking into the Pi loop's
     // fetch and seeding the new file BEFORE the agent prompts.
-    const repo = realpathSync(
+    const repo = realpathSync.native(
       mkdtempSync(path.join(os.tmpdir(), "wa-engine-impl-")),
     )
     try {
@@ -428,7 +428,7 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
       })
     }) as unknown as typeof fetch
 
-    const dir = realpathSync(
+    const dir = realpathSync.native(
       mkdtempSync(path.join(os.tmpdir(), "wa-engine-abort-")),
     )
     try {

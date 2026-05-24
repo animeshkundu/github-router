@@ -394,14 +394,28 @@ probe_web_search_chat_completions() {
 }
 
 probe_compact_20260112() {
+  # `compact_20260112` is gated upstream by the `anthropic-beta:
+  # compact-2026-01-12` header. The probe sends the header, but the
+  # default `bun run start` proxy runs in **stealth** mode (only 3
+  # VSCode beta prefixes forwarded; `compact-*` is stripped) — so by
+  # the time the request reaches Copilot the beta is gone and the
+  # upstream allowlist falls back to `{clear_thinking_20251015,
+  # clear_tool_uses_20250919}`, rejecting `compact_20260112` with 400.
+  #
+  # Asserting 400 captures the stealth-default user-facing reality.
+  # The leverage-mode (extended-betas, `github-router claude`'s
+  # default) path that DOES return 200 is intentionally not asserted
+  # here — that'd need a separate proxy launch flag. See
+  # docs/copilot-compat-matrix.md "Anthropic-beta header prefixes" +
+  # the `compact-` row for the leverage-mode expectation.
   do_request POST /v1/messages '{
     "model": "claude-opus-4-7",
     "max_tokens": 50,
     "context_management": {"edits": [{"type":"compact_20260112"}]},
     "messages": [{"role":"user","content":"hi"}]
   }' "anthropic-beta: compact-2026-01-12"
-  assert_status 200 \
-    && assert_body_contains "applied_edits"
+  assert_status 400 \
+    && assert_body_contains "compact_20260112"
 }
 
 probe_clear_tool_uses_20250919() {

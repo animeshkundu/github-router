@@ -65,7 +65,7 @@ describe("paths.confineToWorkspace", () => {
   beforeAll(() => {
     // realpath the tmpdir up-front so the trailing-separator check
     // doesn't trip on macOS's /private/var → /var symlink.
-    workspace = realpathSync(
+    workspace = realpathSync.native(
       mkdtempSync(path.join(os.tmpdir(), "worker-paths-")),
     )
     // Create a sibling dir to test the trailing-separator-aware
@@ -110,7 +110,7 @@ describe("paths.confineToWorkspace", () => {
     // Simulate the failure mode by constructing a synthetic workspace
     // and a sibling that starts with the same prefix but is a
     // distinct directory.
-    const workTmp = realpathSync(
+    const workTmp = realpathSync.native(
       mkdtempSync(path.join(os.tmpdir(), "work-")),
     )
     const siblingName = path.basename(workTmp) + "2"
