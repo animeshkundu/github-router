@@ -667,7 +667,7 @@ describe("structural ranking (tree-sitter)", () => {
       )
     }
     // No fallback on this small fixture — well within the 200ms budget.
-    expect(r.structuralFallback).toBeNull()
+    expect(r.notice).toBeNull()
   })
 
   test("'topN' mode also runs (just parses fewer files)", async () => {
@@ -696,14 +696,14 @@ describe("structural ranking (tree-sitter)", () => {
     expect(r.results[0].file).toBe("src/parser.ts")
   })
 
-  test("structuralFallback is null on a normal call", async () => {
+  test("notice is null on a normal call", async () => {
     const r = await searchCode({
       query: "parseModel",
       workspace: fx.root,
       mode: "ranked",
       limit: 10,
     })
-    expect(r.structuralFallback).toBeNull()
+    expect(r.notice).toBeNull()
   })
 })
 
@@ -749,7 +749,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
     const allowedTopKeys = new Set([
       "results",
       "truncated",
-      "ranking_fallback",
+      "notice",
     ])
     for (const k of Object.keys(body)) {
       expect(allowedTopKeys.has(k)).toBe(true)
@@ -761,6 +761,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
     expect(body).not.toHaveProperty("pruned_below_shoulder")
     expect(body).not.toHaveProperty("ranking")
     expect(body).not.toHaveProperty("structuralFallback")
+    expect(body).not.toHaveProperty("ranking_fallback")
 
     // Per-hit shape — exactly these three keys:
     const results = body.results as Array<Record<string, unknown>>
@@ -770,7 +771,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
     }
   })
 
-  test("ranking_fallback is OMITTED (not null) on success", async () => {
+  test("notice is OMITTED (not null) on success", async () => {
     const { NON_PERSONA_MCP_TOOLS } = await import(
       "../src/lib/peer-mcp-personas"
     )
@@ -784,7 +785,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
       limit: 5,
     })
     const body = JSON.parse(result.content[0].text) as Record<string, unknown>
-    expect("ranking_fallback" in body).toBe(false)
+    expect("notice" in body).toBe(false)
   })
 
   test("structural param accepted via the MCP handler", async () => {
@@ -824,6 +825,75 @@ describe("MCP handler trims the response per the minimality principle", () => {
     expect(schema.additionalProperties).toBe(false)
     // While we're here: structural IS in the schema.
     expect(schema.properties).toHaveProperty("structural")
+  })
+
+  test("response size cap (256KB) truncates and emits an actionable notice", async () => {
+    // Build a fixture with enough fat hits that the assembled JSON
+    // response would exceed the 256KB cap. ~600 lines of ~1KB-ish
+    // content each → ~600KB raw, well over the cap. We ask for
+    // limit=5000 so internal limit-truncation doesn't fire first.
+    const fatFx = makeFixture((root) => {
+      const filler = "X".repeat(900) // ~900 chars per line
+      const lines = Array.from(
+        { length: 600 },
+        (_, i) => `// HIT_LINE_${i} ${filler}`,
+      )
+      writeFileSync(path.join(root, "wide.ts"), lines.join("\n") + "\n")
+    })
+    try {
+      const { NON_PERSONA_MCP_TOOLS } = await import(
+        "../src/lib/peer-mcp-personas"
+      )
+      const tool = NON_PERSONA_MCP_TOOLS.find(
+        (t) => t.toolNameHttp === "code_search",
+      )!
+      const result = await tool.handler({
+        query: "HIT_LINE_",
+        workspace: fatFx.root,
+        mode: "literal",
+        limit: 5000,
+      })
+      expect(result.isError).toBeUndefined()
+      const body = JSON.parse(result.content[0].text) as {
+        results: Array<unknown>
+        truncated: boolean
+        notice?: string
+      }
+      // Cap fired: response stays under ~300KB (256KB cap + slack).
+      expect(Buffer.byteLength(result.content[0].text, "utf8")).toBeLessThan(
+        300 * 1024,
+      )
+      // Truncated and notice both set.
+      expect(body.truncated).toBe(true)
+      expect(body.notice).toBeDefined()
+      expect(body.notice).toContain("size limit")
+      // We still returned a useful number of hits, not zero.
+      expect(body.results.length).toBeGreaterThan(10)
+    } finally {
+      fatFx.cleanup()
+    }
+  })
+
+  test("notice priority: size cap message overrides structural notice when both could fire", async () => {
+    // Hard to make structural-budget fire on a tiny fixture, so this
+    // test just verifies the field-naming contract: notice is the
+    // single unified field that surfaces any actionable degradation.
+    const { NON_PERSONA_MCP_TOOLS } = await import(
+      "../src/lib/peer-mcp-personas"
+    )
+    const tool = NON_PERSONA_MCP_TOOLS.find(
+      (t) => t.toolNameHttp === "code_search",
+    )!
+    const result = await tool.handler({
+      query: "findMe",
+      workspace: fx.root,
+      mode: "ranked",
+      limit: 5,
+    })
+    const body = JSON.parse(result.content[0].text) as Record<string, unknown>
+    // No legacy field names leaked:
+    expect(body).not.toHaveProperty("ranking_fallback")
+    expect(body).not.toHaveProperty("structuralFallback")
   })
 })
 

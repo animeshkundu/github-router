@@ -163,8 +163,8 @@ export interface CodeSearchInput {
    * definition signal. `"topN"` parses only the top 10 — same signal,
    * tighter latency on large repos. Default `"full"`. The pass is
    * wrapped in a 200ms wall-clock budget; on overrun, remaining hits
-   * fall back to the regex symbol heuristic and `structuralFallback`
-   * is populated with a human-readable explanation.
+   * fall back to the regex symbol heuristic and `notice` is populated
+   * with a human-readable explanation.
    */
   structural?: "full" | "topN"
 }
@@ -190,14 +190,22 @@ export interface CodeSearchResponse {
     k1?: number
   }
   /**
-   * `null` when the structural pass completed within budget (or was
-   * not run — e.g., non-ranked modes, no hits). A string when the
-   * 200ms wall-clock fired, telling the model how to retry. The MCP
-   * handler maps this to the `ranking_fallback` response field
-   * (omitted entirely when `null`) — only-when-actionable surface
-   * per the docs/peer-mcp-design.md minimality principle.
+   * Single actionable degradation notice for the model. `null` on the
+   * happy path. A string when something the model can correct fired:
+   *   - structural-budget exhaustion ("retry with structural: \"topN\"
+   *     or narrow query")
+   *   - response-size cap ("response size limit reached at N hits;
+   *     lower limit or narrow your query")
+   * Size-cap takes priority over structural-budget when both fire,
+   * because size-cap means the model is missing results; structural-
+   * budget just means the ranking was less precise but the result set
+   * is complete.
+   *
+   * The MCP handler maps this to the `notice` response field (omitted
+   * entirely when `null`) — only-when-actionable surface per the
+   * docs/peer-mcp-design.md minimality principle.
    */
-  structuralFallback: string | null
+  notice: string | null
 }
 
 /**
@@ -1195,7 +1203,8 @@ interface StructuralPassResult {
   confirmedHitIndexes: Set<number>
   /** null = success (entire top-N parsed within budget). String =
    *  budget exceeded mid-pass, with explanation suitable for surfacing
-   *  to the model as `ranking_fallback`. */
+   *  to the model as the `notice` field (overridden by size-cap notice
+   *  at the handler boundary when both fire). */
   fallback: string | null
 }
 
@@ -1814,7 +1823,7 @@ export async function searchCode(
   // Apply ranking.
   let kept: Array<ScoredHit>
   let prunedBelowShoulder: number | undefined
-  let structuralFallback: string | null = null
+  let notice: string | null = null
   if (mode === "ranked") {
     const queryTokens = tokenize(rawInput.query)
     // Pass 1: regex-only BM25F. Cheap and gives us a reliable
@@ -1842,7 +1851,7 @@ export async function searchCode(
       budgetMs: STRUCTURAL_BUDGET_MS,
       signal: ac.signal,
     })
-    structuralFallback = structural.fallback
+    notice = structural.fallback
 
     // Pass 2: re-score with AST confirmation. Corpus stats are
     // re-computed against the structurally-enriched symbol_context
@@ -1906,7 +1915,7 @@ export async function searchCode(
       `results=${results.length} truncated=${parseResult.truncated} ` +
       `scanned_files=${parseResult.scannedFiles} elapsed_ms=${elapsed_ms} ` +
       `abort=${parseResult.cancelled} rg=${rgResolution.source} ` +
-      `structuralFallback=${structuralFallback ? "yes" : "no"}` +
+      `notice=${notice ? "yes" : "no"}` +
       (debugLog ? ` query="${rawInput.query}" workspace="${ws.canonical}"` : ""),
   )
 
@@ -1924,7 +1933,7 @@ export async function searchCode(
             k1: BM25F_K1,
           }
         : { algorithm: "ripgrep_document_order" },
-    structuralFallback,
+    notice,
   }
 }
 

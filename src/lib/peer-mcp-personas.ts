@@ -619,8 +619,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               "best signal, fine for typical repos. 'topN' restricts to " +
               "the top 10 for tighter latency on very large workspaces. " +
               "Both modes share a 200ms wall-clock budget; on budget " +
-              "exhaustion the response includes `ranking_fallback` and " +
-              "remaining hits fall back to the regex symbol heuristic.",
+              "exhaustion the response includes `notice` and remaining " +
+              "hits fall back to the regex symbol heuristic.",
           },
         },
       },
@@ -655,20 +655,59 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           // Minimal-surface response shape. See the SCHEMA + RESPONSE
           // MINIMALITY comment above for why these fields and only
           // these fields are forwarded to the model.
-          const minimal: {
-            results: Array<{ file: string; line: number; snippet: string }>
-            truncated: boolean
-            ranking_fallback?: string
-          } = {
-            results: result.results.map((hit) => ({
+          //
+          // Response-size cap (256KB): MCP clients can't ingest
+          // multi-megabyte tool results in one shot, so a runaway
+          // `limit: 1000000` against a hit-heavy repo would produce
+          // a blob the model can't actually use. We accumulate hits
+          // up to a hard byte budget and surface `notice` when the
+          // cap fires so the model knows to narrow its query or
+          // lower `limit`. Always returns at least one hit when
+          // there are any hits to return (per-hit oversize is
+          // bounded separately by `max_snippet_bytes`).
+          const SIZE_CAP_BYTES = 256 * 1024
+          const trimmedHits: Array<{
+            file: string
+            line: number
+            snippet: string
+          }> = []
+          let totalBytes = 0
+          let sizeCapped = false
+          for (const hit of result.results) {
+            const next = {
               file: hit.file,
               line: hit.line,
               snippet: hit.snippet,
-            })),
-            truncated: result.truncated,
+            }
+            const nextBytes = Buffer.byteLength(JSON.stringify(next), "utf8")
+            if (trimmedHits.length > 0 && totalBytes + nextBytes > SIZE_CAP_BYTES) {
+              sizeCapped = true
+              break
+            }
+            trimmedHits.push(next)
+            totalBytes += nextBytes
           }
-          if (typeof result.structuralFallback === "string") {
-            minimal.ranking_fallback = result.structuralFallback
+
+          const minimal: {
+            results: Array<{ file: string; line: number; snippet: string }>
+            truncated: boolean
+            notice?: string
+          } = {
+            results: trimmedHits,
+            truncated: result.truncated || sizeCapped,
+          }
+          // Notice priority: size-cap > structural-budget. Size-cap
+          // means the model is missing results entirely and should
+          // narrow; structural-budget just means the ranking was
+          // less precise but the result set is complete. The size-
+          // cap message is the more urgent action.
+          if (sizeCapped) {
+            minimal.notice =
+              `response size limit reached at ${trimmedHits.length} hits ` +
+              `(~${Math.round(totalBytes / 1024)}KB); narrow your query ` +
+              `or lower 'limit' to get all relevant matches`
+          } else if (typeof result.notice === "string") {
+            minimal.notice = result.notice
           }
           return {
             content: [{ type: "text", text: JSON.stringify(minimal) }],

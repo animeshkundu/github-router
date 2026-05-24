@@ -275,7 +275,7 @@ The depth of the structural pass is controlled by the `structural` input:
 | `full` (default) | 50 | Typical repos; best signal under the budget |
 | `topN`           | 10 | Very large monorepos where latency matters more than tail-end ranking quality |
 
-A hard **200ms wall-clock budget** wraps the structural pass. If the budget exceeds before all top-N files are parsed, parsing stops, remaining hits fall back to the regex `symbol_context`, and the response surfaces a `ranking_fallback: string` field telling the model what happened and how to react (e.g. retry with `structural: "topN"` or narrow the query). On the success path the field is omitted entirely — this is a "present iff actionable" field, not a "0 / null when fine" field.
+A hard **200ms wall-clock budget** wraps the structural pass. If the budget exceeds before all top-N files are parsed, parsing stops, remaining hits fall back to the regex `symbol_context`, and the response surfaces a `notice: string` field telling the model what happened and how to react (e.g. retry with `structural: "topN"` or narrow the query). The same `notice` field also surfaces when a **256KB response-size cap** truncates the result set — in that case the message tells the model to narrow its query or lower `limit`. Size-cap takes priority over structural-budget when both fire because size-cap means the model is missing results entirely. On the success path the field is omitted entirely — this is a "present iff actionable" field, not a "0 / null when fine" field.
 
 Per-file results are cached by `(realpath, mtime)` so a repeated search over the same hit set doesn't re-parse files that already returned no structural signal.
 
@@ -292,7 +292,7 @@ Every field in an MCP tool's **input** and **output** schema must be one of:
 
   (a) **Required to call the tool correctly** (e.g. `query`, `workspace` on `code_search` — the tool cannot do its job without them).
   (b) **Tunable by the model in a way that improves outcomes** (e.g. `mode`, `structural`, `limit` — the model can reasonably decide "I need every hit, switch to literal" or "this is a large repo, drop to topN").
-  (c) **Directly actionable feedback that helps the model self-correct on the next call** (e.g. `truncated: true` tells the model "raise `limit` or narrow the query"; `ranking_fallback: "structural budget exceeded after 23/50 hits; retry with structural: \"topN\""` tells it exactly what to do differently; a ripgrep regex-compile error surfaced as `isError: true` content tells it "your pattern is malformed").
+  (c) **Directly actionable feedback that helps the model self-correct on the next call** (e.g. `truncated: true` tells the model "raise `limit` or narrow the query"; `notice: "structural budget exceeded after 23/50 hits; retry with structural: \"topN\""` or `notice: "response size limit reached at 420 hits (~256KB); narrow your query or lower 'limit'"` tells it exactly what to do differently; a ripgrep regex-compile error surfaced as `isError: true` content tells it "your pattern is malformed").
 
 If a proposed field fails all three tests, **cut it**. The model's context is finite and precious; echoing the model's own inputs back, exposing internal diagnostics for human eyeballs, and surfacing failures the model has no lever to fix all cost tokens for negative value. Negative value because every additional token in the tool response (i) reduces the budget left for the model's actual reasoning, and (ii) introduces noise the model has to filter through before reaching the actionable bits.
 
@@ -314,7 +314,7 @@ The internal `CodeSearchResponse` type in `src/lib/code-search.ts` is rich on pu
 | `elapsed_ms: 34` | **cut** | Same — telemetry. |
 | `truncated: true` | **kept** | Actionable: model can raise `limit` or narrow `query`. |
 | `pruned_below_shoulder: 7` | **cut** | Initially kept on the theory that "the long tail was cut" helps the model. In practice the field is diagnostic — the model can't reasonably act on a numeric pruning count, and `0` on the success path violates the "absent iff non-actionable" principle. Pruning still happens internally; the count just doesn't surface. |
-| `ranking_fallback: "structural budget exceeded..."` | **kept** (when present) | The textbook good field. Present **iff** actionable; absent (not `null`, not `""`) on the happy path so the model spends zero tokens noticing nothing went wrong. |
+| `notice: "structural budget exceeded..."` or `notice: "response size limit reached..."` | **kept** (when present) | The textbook good field. Present **iff** actionable; absent (not `null`, not `""`) on the happy path so the model spends zero tokens noticing nothing went wrong. Two failure modes share one field because both are actionable strings the model just reads — splitting them into separate fields would mean more schema for no leverage. |
 | Per-hit `file`, `line`, `snippet` | **kept** | The actual payload. The model uses `file` and `line` to navigate, `snippet` to decide if the hit is relevant. |
 
 ### Adding a new MCP tool
