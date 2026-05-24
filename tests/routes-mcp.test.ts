@@ -140,7 +140,7 @@ describe("/mcp protocol methods", () => {
     expect(res.status).toBe(202)
   })
 
-  test("tools/list returns 4 personas + web_search when gemini is in catalog", async () => {
+  test("tools/list returns 4 personas + web_search + code_search when gemini is in catalog", async () => {
     const { status, json } = await rpc({
       jsonrpc: "2.0",
       id: 2,
@@ -151,6 +151,7 @@ describe("/mcp protocol methods", () => {
       tools: Array<{ name: string; description: string; inputSchema: unknown }>
     }
     expect(result.tools.map((t) => t.name).sort()).toEqual([
+      "code_search",
       "codex_critic",
       "codex_reviewer",
       "gemini_critic",
@@ -163,7 +164,7 @@ describe("/mcp protocol methods", () => {
     }
   })
 
-  test("tools/list omits gemini_critic when no gemini-3.x-pro in catalog (web_search still present)", async () => {
+  test("tools/list omits gemini_critic when no gemini-3.x-pro in catalog (web_search + code_search still present)", async () => {
     state.models = {
       object: "list",
       data: baseModels.data.filter((m) => !m.id.startsWith("gemini")),
@@ -175,6 +176,7 @@ describe("/mcp protocol methods", () => {
     })
     const result = json.result as { tools: Array<{ name: string }> }
     expect(result.tools.map((t) => t.name).sort()).toEqual([
+      "code_search",
       "codex_critic",
       "codex_reviewer",
       "opus_critic",

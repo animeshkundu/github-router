@@ -48,10 +48,14 @@
   "simple-git-hooks": {
     "pre-commit": "bunx lint-staged"
   },
+  "trustedDependencies": [
+    "@vscode/ripgrep"
+  ],
   "lint-staged": {
     "*": "bun run lint --fix"
   },
   "dependencies": {
+    "@vscode/ripgrep": "^1.15.13",
     "citty": "^0.1.6",
     "clipboardy": "^5.0.0",
     "consola": "^3.4.2",
@@ -60,7 +64,9 @@
     "hono": "^4.9.9",
     "proxy-from-env": "^1.1.0",
     "srvx": "^0.8.9",
+    "tree-sitter-wasms": "^0.1.13",
     "undici": "^7.16.0",
+    "web-tree-sitter": "0.22.6",
     "zod": "^4.1.11"
   },
   "devDependencies": {

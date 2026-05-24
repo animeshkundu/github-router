@@ -182,3 +182,141 @@ The `claude` subcommand auto-injects three peer-model review tools as Claude Cod
 **The cap fires BEFORE the AbortController + `inFlightToolsCall` increment**, so a rejected pre-flight is free of concurrency-slot cost and free of upstream call cost (no Copilot fetch issued). Don't reorder this — moving the cap after the increment leaks concurrency slots on every rejected pre-flight. Thresholds are constants in `src/routes/mcp/handler.ts` — easy to update as more empirical data arrives via the probe suite.
 
 **`opus_critic` persona** (Phase B): adversarial second opinion from a fresh-context Opus 4.7 routed via `/v1/messages` with translated `thinking.budget_tokens` (low=1024, medium=3000) and `max_tokens = budget + 1500`. Cheapest and fastest of the peer critics (~10-25s on small artifacts). Use it as a quick same-lab sanity check before committing to a controversial decision when the artifact fits comfortably in one shot. **Limited blind-spot diversification** — same training data, same lab, same RLHF priors as the lead, so it does NOT substitute for cross-lab triangulation; reach for `codex_critic` (`high`) or `gemini_critic` for genuine adversarial coverage. Routing reflected in `peer-review-coordinator` (`src/lib/codex-mcp-config.ts`).
+
+## Code search (`code_search`)
+
+Non-persona MCP tool exposed alongside `web_search` under `NON_PERSONA_MCP_TOOLS` (`src/lib/peer-mcp-personas.ts`). All clients (Claude Code, codex, gemini callers) see it via the same `/mcp` surface. Implementation: `src/lib/code-search.ts`.
+
+### Ranking algorithm
+
+**BM25F** (Robertson, Zaragoza, Taylor; *Simple BM25 Extension to Multiple Weighted Fields*; CIKM 2004). Multi-field extension of Okapi BM25 (Robertson & Zaragoza 2009 monograph, *Foundations and Trends in IR* 3(4):333-389). Lucene/Elasticsearch use BM25/BM25F as their default scorer; CodeSearchNet (Husain et al 2019, arxiv/1909.09436) uses BM25 as its classical IR baseline; Sourcegraph Zoekt's "weighted scoring signals (symbol match, file path, syntactic context, ...)" is BM25F-shaped multi-field scoring over a code-specific field set.
+
+Formula (canonical CIKM 2004), applied at file granularity over the ripgrep hit set:
+
+```
+BM25F(q, f) = Σ_t  IDF(t) · w_t,f / (w_t,f + k1)
+w_t,f       = Σ_field  b_field · tf_t,field,f /
+              ((1 − l_field) + l_field · (len_field,f / avglen_field))
+IDF(t)      = log( (M − df(t) + 0.5) / (df(t) + 0.5) )
+```
+
+Lucene defaults: `k1 = 1.2`. Per-call corpus statistics (M = number of files in the hit set, df, avglen) computed once per query — no persistent index needed; sub-second for hit sets ≤ a few hundred files.
+
+### Fields
+
+| Field | Source | `b_f` | `l_f` |
+|---|---|---|---|
+| `match_line` | The line ripgrep matched | 3.0 | 0.0 |
+| `symbol_context` | Matched line if it's a definition-shape (`function`, `class`, `const X =`, etc.); empty otherwise | 2.5 | 0.0 |
+| `file_path` | Path tokens (basename + dirs, space-joined) | 2.0 | 0.0 |
+| `context` | Lines before+after the match (configurable `context_lines`) | 1.0 | 0.75 |
+
+Tokenizer: rule-based identifier splitter per Vasilescu, Ray, Mockus, *How to Split Identifiers?* (ESEC/FSE 2021). Case-boundary splits with acronym-run lookahead (`HTTPSConnection` → `[https, connection]`), digit-boundary attaches trailing digits to letters (`parseV2Handler` → `[parse, v2, handler]`), lowercase, drop length-1 tokens.
+
+### Shoulder pruning
+
+After BM25F sort, truncate at the first hit below `0.5 × top_score` (Burges 2010 LTR convention). When the top score is 0 (no field had a query-token match), all hits are returned in tie-break order. The pruning is an internal optimization that surfaces the few viable answers; the count of omitted results is intentionally NOT exposed to the model (the model can re-issue in `literal` mode if it needs the full unranked set, and a numeric pruning count is diagnostic-only — see the minimality principle below).
+
+### Workspace model
+
+`workspace` is any absolute path the proxy process can `stat` and is a directory. The proxy runs as the user; reads are bounded by the user's own filesystem permissions, same as Claude Code's built-in Read / Bash / Edit tools. There is no allow-set, no marker-file walk, no secret-shape file denylist.
+
+This was reconsidered after the initial design (which had a default-deny allow-set + a hardcoded secret-shape denylist for `*.env`, `*.pem`, `id_rsa*`, etc.). The earlier framing treated `code_search` as a potential "model-callable file-exfil oracle." That framing assumes a privilege gap between the proxy and the model — but there isn't one. The same model that can call `code_search` can also issue `Bash cat ~/.ssh/id_rsa` or `Read /etc/passwd`. Gating only `code_search` was inconsistency, not defense. The simpler holistic answer: reach the same paths Claude Code already reaches, no special-cased boundary.
+
+Validation kept:
+
+- `workspace` must be an absolute path (relative paths are an integration-error footgun).
+- `realpathSync` canonicalization (resolves symlinks; output paths are reported relative to this canonical root).
+- Must exist AND be a directory (a file path or a missing path errors out cleanly).
+- Errors do NOT echo the rejected path (output of `code_search` flows upstream to model providers; consistent with `COPILOT_HOST_ALLOWLIST`'s no-echo pattern).
+
+### Hardened spawn (CVE-class fixes from peer review)
+
+- **Argv injection** (`--`): ripgrep is invoked as `rg <flags> -- <query> .` — the positional separator prevents a query starting with `-` (e.g. `--no-ignore`) from being parsed as a flag.
+- **TOCTOU**: rg spawns with `cwd: canonicalWorkspace, shell: false` and target `.` — the user-supplied workspace string is NEVER passed as an argv positional. The kernel-level cwd handle pins the directory at spawn time, closing most of the validate→spawn race window. Residual same-user races (an attacker who controls the same user account and can swap the directory between validation and spawn) are explicitly out of scope.
+- **Cancel-race partial JSON**: on `signal.aborted`, the JSON parser short-circuits before reading further lines — a half-flushed truncated chunk never reaches `JSON.parse`. Three-lab confirmed fix.
+- **Windows process-tree**: on `process.platform === "win32"`, abort uses `taskkill /T /F /PID <pid>` because `child.kill()` does NOT reliably terminate descendants on Windows.
+- **Global limit**: `--max-count` is per-file in ripgrep. We enforce `limit` globally in the TS reader; relying on rg's flag would let a 500-file monorepo return 10,000 hits with `limit=20`.
+
+### Ripgrep bundling
+
+Tri-tier resolution (mirrors cc-backup `src/utils/ripgrep.ts:31-65`):
+
+1. **System** — if PATH has `rg`, spawn as the literal command name `"rg"` (NOT the absolute path from `which`/`where` — using just the name leverages Windows' NoDefaultCurrentDirectoryInExePath to prevent PATH-hijacking via `./rg.exe` in the proxy's cwd).
+2. **Bundled** — `@vscode/ripgrep@1.18.0+` which ships per-platform binaries via `optionalDependencies` (no postinstall script needed; the right binary lands at `node_modules/@vscode/ripgrep-{platform}-{arch}/bin/rg{.exe}`).
+3. **Error** — clean MCP `isError: true` response only if BOTH fail.
+
+`package.json` keeps `"trustedDependencies": ["@vscode/ripgrep"]` as forward-compatibility for older `@vscode/ripgrep` versions that used postinstall scripts (Bun does NOT run postinstall by default).
+
+### Observability
+
+Per-call breadcrumb logged via consola at info level (not sent off-host):
+
+```
+[code_search] mode=ranked results=14 truncated=false scanned_files=412 elapsed_ms=34 abort=false rg=system
+```
+
+Raw `query` and absolute workspace paths are NOT logged unless `GH_ROUTER_DEBUG_CODE_SEARCH=1` is set — query strings can leak intent and codebase shape.
+
+### Upstream-snippet awareness
+
+Snippets are sent upstream as tool-use-result content to the model. The proxy doesn't filter what gets returned — that's the same channel as `Read`'s tool result. If you wouldn't paste a directory's contents into a chat with the model provider, don't search it; the workspace surface here is no different from any other read tool.
+
+### Structural-aware ranking
+
+The default `ranked` mode does not stop at BM25F over text features. After scoring, the top-N hits are re-examined with tree-sitter so the `symbol_context` field can be lifted from a regex heuristic to a true AST signal — when the matched line is an identifier-definition node (function/class/method/interface/type/struct/trait/impl/enum/etc.) and the matched identifier sits at the node's "name" position, the field tokens are populated with that identifier and the hit's score rises accordingly. When the AST doesn't confirm a definition, the prior regex heuristic remains in place; this is purely a strict upgrade, never a downgrade.
+
+Tree-sitter grammars (TypeScript, JavaScript, Python, Go, Rust, Java, C, C++) are pre-loaded at module init so the first ranked query of a session doesn't pay a cold-start cost. Files with extensions outside the covered set degrade silently to regex-only `symbol_context` for that one file (logged via consola, no user-facing notice).
+
+The depth of the structural pass is controlled by the `structural` input:
+
+| `structural` | Top-N parsed | When to pick |
+|---|---|---|
+| `full` (default) | 50 | Typical repos; best signal under the budget |
+| `topN`           | 10 | Very large monorepos where latency matters more than tail-end ranking quality |
+
+A hard **200ms wall-clock budget** wraps the structural pass. If the budget exceeds before all top-N files are parsed, parsing stops, remaining hits fall back to the regex `symbol_context`, and the response surfaces a `notice: string` field telling the model what happened and how to react (e.g. retry with `structural: "topN"` or narrow the query). The same `notice` field also surfaces when a **256KB response-size cap** truncates the result set — in that case the message tells the model to narrow its query or lower `limit`. Size-cap takes priority over structural-budget when both fire because size-cap means the model is missing results entirely. On the success path the field is omitted entirely — this is a "present iff actionable" field, not a "0 / null when fine" field.
+
+Per-file results are cached by `(realpath, mtime)` so a repeated search over the same hit set doesn't re-parse files that already returned no structural signal.
+
+### Cross-skeleton query expansion
+
+Single-identifier queries in `ranked` and `literal` mode are auto-expanded across naming conventions before being handed to ripgrep: `getUserName` → `(getUserName|get_user_name|get-user-name|GetUserName|GET_USER_NAME)`. This fixes the live correctness bug where `rg getUserName` did not surface `get_user_name`. Expansion is skipped when:
+
+- `mode === "regex"` — the user is being explicit about regex semantics; we do not silently rewrite.
+- The query contains whitespace, dots, parens, or any other character that defeats skeleton-form derivation — falls through to current literal behavior.
+
+## Design principle: ruthlessly minimal MCP tool surface
+
+Every field in an MCP tool's **input** and **output** schema must be one of:
+
+  (a) **Required to call the tool correctly** (e.g. `query`, `workspace` on `code_search` — the tool cannot do its job without them).
+  (b) **Tunable by the model in a way that improves outcomes** (e.g. `mode`, `structural`, `limit` — the model can reasonably decide "I need every hit, switch to literal" or "this is a large repo, drop to topN").
+  (c) **Directly actionable feedback that helps the model self-correct on the next call** (e.g. `truncated: true` tells the model "raise `limit` or narrow the query"; `notice: "structural budget exceeded after 23/50 hits; retry with structural: \"topN\""` or `notice: "response size limit reached at 420 hits (~256KB); narrow your query or lower 'limit'"` tells it exactly what to do differently; a ripgrep regex-compile error surfaced as `isError: true` content tells it "your pattern is malformed").
+
+If a proposed field fails all three tests, **cut it**. The model's context is finite and precious; echoing the model's own inputs back, exposing internal diagnostics for human eyeballs, and surfacing failures the model has no lever to fix all cost tokens for negative value. Negative value because every additional token in the tool response (i) reduces the budget left for the model's actual reasoning, and (ii) introduces noise the model has to filter through before reaching the actionable bits.
+
+This rule applies to **all** MCP tools registered under `NON_PERSONA_MCP_TOOLS` (`code_search`, `web_search`, anything added later) and to the peer-critic persona tools (`codex_critic`, `codex_reviewer`, `opus_critic`, `gemini_critic`).
+
+### Worked example: `code_search`
+
+The internal `CodeSearchResponse` type in `src/lib/code-search.ts` is rich on purpose — internal callers (tests, future in-process consumers) benefit from BM25F scores, per-field contributions, scanning stats, etc. The MCP handler in `src/lib/peer-mcp-personas.ts` trims aggressively before stringifying to `content[0].text`. The cuts, with the test each field failed:
+
+| Field | Verdict | Why it failed |
+|---|---|---|
+| `ranking.algorithm: "BM25F"` | **cut** | The model cannot pick a ranking algorithm. Naming the algorithm is decorative. |
+| `ranking.citation: "Robertson, Zaragoza, Taylor 2004"` | **cut** | Purely cosmetic — provenance for human readers. |
+| `ranking.k1: 1.2` | **cut** | Internal tuning constant; not a knob the model is allowed to touch. |
+| Per-hit `score: 0.7423` | **cut** | The model already sees ordering. Naming the score doesn't add a lever. |
+| Per-hit `field_contributions: {match_line: 0.4, ...}` | **cut** | Diagnostic for ranker debugging. The model can't say "boost `match_line`." |
+| Per-hit `match_byte_range: [12, 24]` | **cut** | Useful for highlighting in a UI; the model already has `snippet` for content and `line` for navigation. |
+| `scanned_files: 412` | **cut** | Telemetry — belongs in the proxy log, not in the model's context. |
+| `elapsed_ms: 34` | **cut** | Same — telemetry. |
+| `truncated: true` | **kept** | Actionable: model can raise `limit` or narrow `query`. |
+| `pruned_below_shoulder: 7` | **cut** | Initially kept on the theory that "the long tail was cut" helps the model. In practice the field is diagnostic — the model can't reasonably act on a numeric pruning count, and `0` on the success path violates the "absent iff non-actionable" principle. Pruning still happens internally; the count just doesn't surface. |
+| `notice: "structural budget exceeded..."` or `notice: "response size limit reached..."` | **kept** (when present) | The textbook good field. Present **iff** actionable; absent (not `null`, not `""`) on the happy path so the model spends zero tokens noticing nothing went wrong. Two failure modes share one field because both are actionable strings the model just reads — splitting them into separate fields would mean more schema for no leverage. |
+| Per-hit `file`, `line`, `snippet` | **kept** | The actual payload. The model uses `file` and `line` to navigate, `snippet` to decide if the hit is relevant. |
+
+### Adding a new MCP tool
+
+For each proposed input or output field, answer in one sentence: **"What would the model do with this?"** If the answer is "nothing" or "look at it for context but not act on it," cut it. Default to absent — adding back later is cheap; pulling out a field clients have already learned to expect is breaking.

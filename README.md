@@ -97,6 +97,14 @@ Each persona is exposed both as a Claude Code subagent (callable via the `Task` 
 
 For codex-side write capability (a `codex-implementer` persona that can mutate files via Codex's tool-use sandbox), pass `--codex-cli`. Requires `codex` CLI 0.129+ on `PATH`; falls back to HTTP-only with a warning if codex is missing or older. Pass `--codex-mcp-only` to also pass `--strict-mcp-config` to Claude Code so only the proxy's MCP servers are loaded (hides any MCP servers in your existing `~/.claude/mcp.json`).
 
+### Code search (`mcp__gh-router-peers__code_search`)
+
+Alongside the peer reviewers, the same MCP surface exposes a `code_search` tool — fast structured code search over the workspace, ranked by **BM25F** (Robertson, Zaragoza, Taylor 2004) over four code-aware fields: matched line, surrounding context, file path tokens, and a symbol-definition heuristic. On top of that, the top hits get a tree-sitter pass that promotes true identifier-definition sites over incidental string matches; depth is controlled by the optional `structural` argument (`"full"` parses the top 50 hits, `"topN"` parses the top 10 for tighter latency on big repos). A single `notice` field surfaces in the response on the rare occasions an actionable degradation fires — the structural pass overran its 200ms wall-clock budget, or the response hit the 256KB size cap and was truncated; the message text tells the model what to retry. Defaults to a "ranked" mode with shoulder pruning so models get the few right answers, not a flood of substring matches. `literal` and `regex` modes are also available for exact searches; single-identifier queries in `ranked`/`literal` mode auto-expand across camelCase / snake_case / kebab-case skeletons so `getUserName` also matches `get_user_name`.
+
+`workspace` is any absolute path the proxy process can read — typically the project root or a sub-tree you're working in. The model picks it. There's no allow-set or secret-shape file denylist: the threat model is symmetric since Claude Code already has Read / Bash / Edit tools that reach the same paths, so gating one tool would have been inconsistency rather than defense. Paths in results are returned relative to the workspace, never absolute.
+
+Ripgrep is provided via the `@vscode/ripgrep` npm dependency (per-platform binary via `optionalDependencies` — no postinstall script needed). The proxy prefers system `rg` on `PATH` when available and falls back to the bundled binary otherwise. To opt into raw query/path logging for debugging, set `GH_ROUTER_DEBUG_CODE_SEARCH=1` — by default the proxy logs only counts and timings.
+
 ---
 
 ## Use with Codex CLI

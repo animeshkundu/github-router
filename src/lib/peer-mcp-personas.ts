@@ -21,6 +21,7 @@
  *      the persona prompt teaches the lead what to paste.
  */
 
+import { searchCode } from "./code-search"
 import { searchWeb } from "~/services/copilot/web-search"
 
 /**
@@ -392,7 +393,7 @@ export function buildPeerAwarenessSnippet(opts: {
     "",
     `Cross-lab peer critics under \`mcp__gh-router-peers__*\` — ${criticList.join(
       ", ",
-    )} — plus the \`peer-review-coordinator\` fan-out subagent, and Claude Code's built-in \`advisor\` tool, are available at your discretion for second opinions and adversarial review. Subagents you spawn inherit them.${codexCliClause}`,
+    )} — plus the \`peer-review-coordinator\` fan-out subagent, and Claude Code's built-in \`advisor\` tool, are available at your discretion for second opinions and adversarial review. Subagents you spawn inherit them.${codexCliClause} Also \`mcp__gh-router-peers__code_search\` for accurate ranked code discovery (BM25F + tree-sitter) — prefer it over \`Grep\` when finding definitions or call sites.`,
   ].join("\n")
 }
 
@@ -536,6 +537,185 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           const msg = err instanceof Error ? err.message : String(err)
           return {
             content: [{ type: "text", text: `web_search failed: ${msg}` }],
+            isError: true,
+          }
+        }
+      },
+    },
+    {
+      // code_search — proxy-side MCP tool exposing ripgrep + BM25F +
+      // tree-sitter structural-aware ranking to all clients (Claude
+      // Code, codex, gemini callers). Implementation: src/lib/code-search.ts.
+      //
+      // SCHEMA + RESPONSE MINIMALITY: this entry is the canonical
+      // worked example for the "ruthlessly minimal MCP tool surface"
+      // principle (docs/peer-mcp-design.md). The handler below trims
+      // the rich internal `CodeSearchResponse` to {file, line, snippet}
+      // per hit and a tiny top-level envelope. Internal diagnostics
+      // (scores, field_contributions, scanned_files, elapsed_ms, the
+      // ranking metadata block) are intentionally NOT forwarded — the
+      // model cannot act on them, so they would only burn its context.
+      // Do NOT re-export them without re-reading the principle section.
+      toolNameHttp: "code_search",
+      description:
+        "Fast structured code search over a local workspace. Returns " +
+        "ranked, deduplicated hits with snippets. Ranks with BM25F " +
+        "across matched-line / file-path / surrounding-context / " +
+        "symbol-context fields, then refines `symbol-context` with " +
+        "tree-sitter AST analysis on the top hits so identifier " +
+        "definitions outrank incidental string matches. Prefer this " +
+        "over Grep/Bash+grep for ranked discovery (\"where is X " +
+        "defined\", \"which files reference Y\", \"find code that does " +
+        "Z\") — ranked mode surfaces the few right answers instead of " +
+        "every match. Use Grep for exact-pattern enumeration when you " +
+        "need every hit unranked, and Glob for file-name patterns (no " +
+        "content match). `workspace` is any absolute path the proxy " +
+        "process can read — typically the project root or a sub-tree " +
+        "you're working in.",
+      inputSchema: {
+        type: "object",
+        required: ["query", "workspace"],
+        additionalProperties: false,
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "Search text. In 'ranked' (default) and 'literal' modes, " +
+              "interpreted as a literal string. In 'regex' mode, " +
+              "interpreted as a PCRE2 regex. In 'ranked' and 'literal' " +
+              "modes, single-identifier queries are auto-expanded across " +
+              "camelCase / snake_case / kebab-case / SCREAMING_SNAKE " +
+              "skeletons so `getUserName` also matches `get_user_name`.",
+          },
+          workspace: {
+            type: "string",
+            description:
+              "Absolute path to the project root (or sub-tree) to search.",
+          },
+          mode: {
+            type: "string",
+            enum: ["ranked", "literal", "regex"],
+            description:
+              "Ranking mode. 'ranked' (default): BM25F + tree-sitter " +
+              "structural boost; results ordered by score with shoulder " +
+              "pruning (drops results below 50% of the top score). " +
+              "'literal': fixed-string search, ripgrep document order. " +
+              "'regex': PCRE2 search, ripgrep document order.",
+          },
+          file_glob: {
+            type: "string",
+            description: "Optional ripgrep glob filter (e.g. 'src/**/*.ts').",
+          },
+          limit: {
+            type: "number",
+            description: "Max hits to return (default 20).",
+          },
+          structural: {
+            type: "string",
+            enum: ["full", "topN"],
+            description:
+              "Structural-ranking depth (ranked mode only). 'full' " +
+              "(default) runs tree-sitter on the top 50 BM25F hits — " +
+              "best signal, fine for typical repos. 'topN' restricts to " +
+              "the top 10 for tighter latency on very large workspaces. " +
+              "Both modes share a 200ms wall-clock budget; on budget " +
+              "exhaustion the response includes `notice` and remaining " +
+              "hits fall back to the regex symbol heuristic.",
+          },
+        },
+      },
+      async handler(
+        args: Record<string, unknown>,
+        signal?: AbortSignal,
+      ): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        try {
+          const result = await searchCode(
+            {
+              query: typeof args.query === "string" ? args.query : "",
+              workspace:
+                typeof args.workspace === "string" ? args.workspace : "",
+              mode:
+                args.mode === "literal" || args.mode === "regex" ||
+                args.mode === "ranked"
+                  ? args.mode
+                  : undefined,
+              file_glob:
+                typeof args.file_glob === "string" ? args.file_glob : undefined,
+              limit: typeof args.limit === "number" ? args.limit : undefined,
+              structural:
+                args.structural === "full" || args.structural === "topN"
+                  ? args.structural
+                  : undefined,
+            },
+            signal,
+          )
+          // Minimal-surface response shape. See the SCHEMA + RESPONSE
+          // MINIMALITY comment above for why these fields and only
+          // these fields are forwarded to the model.
+          //
+          // Response-size cap (256KB): MCP clients can't ingest
+          // multi-megabyte tool results in one shot, so a runaway
+          // `limit: 1000000` against a hit-heavy repo would produce
+          // a blob the model can't actually use. We accumulate hits
+          // up to a hard byte budget and surface `notice` when the
+          // cap fires so the model knows to narrow its query or
+          // lower `limit`. Always returns at least one hit when
+          // there are any hits to return (per-hit oversize is
+          // bounded separately by `max_snippet_bytes`).
+          const SIZE_CAP_BYTES = 256 * 1024
+          const trimmedHits: Array<{
+            file: string
+            line: number
+            snippet: string
+          }> = []
+          let totalBytes = 0
+          let sizeCapped = false
+          for (const hit of result.results) {
+            const next = {
+              file: hit.file,
+              line: hit.line,
+              snippet: hit.snippet,
+            }
+            const nextBytes = Buffer.byteLength(JSON.stringify(next), "utf8")
+            if (trimmedHits.length > 0 && totalBytes + nextBytes > SIZE_CAP_BYTES) {
+              sizeCapped = true
+              break
+            }
+            trimmedHits.push(next)
+            totalBytes += nextBytes
+          }
+
+          const minimal: {
+            results: Array<{ file: string; line: number; snippet: string }>
+            truncated: boolean
+            notice?: string
+          } = {
+            results: trimmedHits,
+            truncated: result.truncated || sizeCapped,
+          }
+          // Notice priority: size-cap > structural-budget. Size-cap
+          // means the model is missing results entirely and should
+          // narrow; structural-budget just means the ranking was
+          // less precise but the result set is complete. The size-
+          // cap message is the more urgent action.
+          if (sizeCapped) {
+            minimal.notice =
+              `response size limit reached at ${trimmedHits.length} hits ` +
+              `(~${Math.round(totalBytes / 1024)}KB); narrow your query ` +
+              `or lower 'limit' to get all relevant matches`
+          } else if (typeof result.notice === "string") {
+            minimal.notice = result.notice
+          }
+          return {
+            content: [{ type: "text", text: JSON.stringify(minimal) }],
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return {
+            content: [{ type: "text", text: `code_search failed: ${msg}` }],
             isError: true,
           }
         }
