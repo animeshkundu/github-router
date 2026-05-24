@@ -359,13 +359,16 @@ export function buildAgentPrompt(
  * sees that the peer tools and advisor exist; *when* to invoke is left
  * to Claude's judgment.
  *
- * Trimmed to <100 tokens by design. The per-tool descriptions are
+ * Trimmed to ~150 tokens by design. The per-tool descriptions are
  * already in Claude's context as MCP tool descriptions (loaded from
  * `tools/list`); the snippet's net-new value is:
  *   - the `advisor` mention (built-in, not MCP-discoverable),
  *   - the `peer-review-coordinator` fan-out hint,
  *   - the "subagents you spawn inherit these" claim (the load-bearing
- *     UX payoff of the holistic subagent-MCP-inheritance fix).
+ *     UX payoff of the holistic subagent-MCP-inheritance fix),
+ *   - the worker-tools "offload to save your context" framing (the
+ *     per-tool MCP descriptions cover capabilities; the snippet adds
+ *     the strategic when-to-use signal).
  *
  * Surface contract (regression-pinned in tests/peer-mcp-personas.test.ts):
  *   - Always lists codex_critic, codex_reviewer, opus_critic, advisor,
@@ -400,7 +403,7 @@ export function buildPeerAwarenessSnippet(opts: {
     "",
     `Cross-lab peer critics under \`mcp__gh-router-peers__*\` — ${criticList.join(
       ", ",
-    )} — plus the \`peer-review-coordinator\` fan-out subagent, and Claude Code's built-in \`advisor\` tool, are available at your discretion for second opinions and adversarial review. Subagents you spawn inherit them.${codexCliClause} Also \`mcp__gh-router-peers__code_search\` for accurate ranked code discovery (BM25F + tree-sitter) — prefer it over \`Grep\` when finding definitions or call sites. \`worker_explore\` / \`worker_implement\` delegate bounded work to a Gemini worker — offload to save your context.`,
+    )} — plus the \`peer-review-coordinator\` fan-out subagent, and Claude Code's built-in \`advisor\` tool, are available at your discretion for second opinions and adversarial review. Subagents you spawn inherit them.${codexCliClause} Also \`mcp__gh-router-peers__code_search\` for accurate ranked code discovery (BM25F + tree-sitter) — prefer it over \`Grep\` when finding definitions or call sites. \`worker_explore\` / \`worker_implement\` delegate bounded research or scoped coding tasks (file ops, edits, bash, web fetch) to an autonomous Gemini worker — offload work that would consume your context. Use \`worktree: true\` on \`worker_implement\` for isolated runs that return a diff for review.`,
   ].join("\n")
 }
 
