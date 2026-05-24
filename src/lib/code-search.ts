@@ -47,11 +47,12 @@
  */
 
 import { spawn, execFile, execFileSync, type ChildProcess } from "node:child_process"
-import { existsSync, realpathSync, statSync } from "node:fs"
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { createInterface } from "node:readline"
 import * as path from "node:path"
 
 import consola from "consola"
+import Parser from "web-tree-sitter"
 
 // ============================================================
 // Constants
@@ -107,10 +108,41 @@ const MAX_STDOUT_BYTES = 10 * 1024 * 1024
 const WALL_TIME_MS = 30_000
 
 /**
+ * Structural-pass settings. The wall-clock budget is checked between
+ * files (NOT mid-parse — tree-sitter doesn't surface a usable cancel
+ * hook in the web-tree-sitter binding we're on), so a single
+ * pathological file can overrun by one file's parse-time. In practice
+ * a single source file parses in well under 50ms; 200ms gives us
+ * comfortable headroom for ~5-10 files even on cold cache.
+ */
+const STRUCTURAL_BUDGET_MS = 200
+const STRUCTURAL_TOPN_FULL = 50
+const STRUCTURAL_TOPN_FAST = 10
+
+/**
+ * Cap the per-file size we'll parse. 1MB of source covers all
+ * reasonable hand-written files; bigger files are almost always
+ * generated code or vendored bundles whose AST signal is worthless
+ * for ranking real definitions.
+ */
+const STRUCTURAL_MAX_FILE_BYTES = 1024 * 1024
+
+/**
+ * LRU bound on the parsed-tree cache. Each Tree pins ~roughly the
+ * size of its source plus tree-sitter's internal node arena. 64 is
+ * comfortably under typical Node heap budgets; trees are eagerly
+ * `.delete()`-ed on eviction.
+ */
+const STRUCTURAL_CACHE_MAX = 64
+
+/**
  * Definition-shape heuristic for `symbol_context` field. Match this
  * against the matched line (after leading whitespace strip) to
- * detect "the match is on a definition." Cheaper than tree-sitter,
- * good enough for MVP.
+ * detect "the match is on a definition." This is the regex fallback
+ * we use when (a) tree-sitter can't reach the file (unsupported
+ * language, grammar load failure, parse error), (b) the file isn't
+ * in the structural pass's top-N slice, or (c) the structural budget
+ * fired.
  */
 const SYMBOL_REGEX =
   /^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:public\s+|private\s+|protected\s+|static\s+|abstract\s+|readonly\s+)*(?:function|class|interface|type|enum|def|fn|trait|impl|module|namespace|const|let|var)\s+[A-Za-z_$]/
@@ -126,6 +158,16 @@ export interface CodeSearchInput {
   file_glob?: string
   limit?: number
   context_lines?: number
+  /**
+   * Depth of the tree-sitter structural-ranking pass. `"full"` parses
+   * the top 50 BM25F hits and re-scores them with AST-confirmed
+   * definition signal. `"topN"` parses only the top 10 — same signal,
+   * tighter latency on large repos. Default `"full"`. The pass is
+   * wrapped in a 200ms wall-clock budget; on overrun, remaining hits
+   * fall back to the regex symbol heuristic and `structuralFallback`
+   * is populated with a human-readable explanation.
+   */
+  structural?: "full" | "topN"
 }
 
 export interface CodeSearchHit {
@@ -148,6 +190,15 @@ export interface CodeSearchResponse {
     citation?: string
     k1?: number
   }
+  /**
+   * `null` when the structural pass completed within budget (or was
+   * not run — e.g., non-ranked modes, no hits). A string when the
+   * 200ms wall-clock fired, telling the model how to retry. The MCP
+   * handler maps this to the `ranking_fallback` response field
+   * (omitted entirely when `null`) — only-when-actionable surface
+   * per the docs/peer-mcp-design.md minimality principle.
+   */
+  structuralFallback: string | null
 }
 
 /**
@@ -419,14 +470,106 @@ function killChild(child: ChildProcess): void {
 }
 
 // ============================================================
-// Ripgrep invocation
+// Identifier skeleton-form query expansion
 // ============================================================
+
+/**
+ * Single-identifier query matcher. We only expand queries that look
+ * like a single identifier — any whitespace, regex metacharacters, or
+ * structural punctuation defeats the expansion and we fall through to
+ * the original rg behavior. ASCII-only on purpose (matches the
+ * tokenizer's scope; Unicode identifiers are MVP-out).
+ */
+const SINGLE_IDENTIFIER_REGEX = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/
+
+/**
+ * Split an identifier into its constituent word-pieces, recognizing
+ *
+ *   - snake_case   (split on `_`)
+ *   - kebab-case   (split on `-`)
+ *   - camelCase    (split on lowercase→uppercase boundaries)
+ *   - PascalCase   (each capitalized run is a piece)
+ *   - acronym runs (HTTPSConnection → [HTTPS, Connection])
+ *   - trailing digits attached to letters (parseV2 → [parse, V2])
+ *
+ * Pieces are returned in source-order, with the original case
+ * preserved per piece — re-skeletons compose by re-casing each piece.
+ */
+function splitIdentifierPieces(identifier: string): Array<string> {
+  const pieces: Array<string> = []
+  for (const chunk of identifier.split(/[-_]/)) {
+    if (!chunk) continue
+    // Acronym-aware case-boundary split. Same regex as the BM25F
+    // tokenizer, minus the lowercasing — we want original-case
+    // pieces so we can re-cast them per skeleton.
+    const matches = chunk.match(
+      /[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+[0-9]*|[A-Z]+[0-9]*|[0-9]+/g,
+    )
+    if (matches) pieces.push(...matches)
+  }
+  return pieces
+}
+
+/**
+ * Produce skeleton variants for an identifier query. Returns `null`
+ * when the query is not a single identifier or has only one piece
+ * (no skeleton structure to vary across) — caller falls through to
+ * the literal-search path.
+ *
+ * The variant set covers the five conventions any real codebase
+ * mixes:
+ *
+ *   getUserName       (lowerCamelCase)
+ *   GetUserName       (UpperCamelCase / PascalCase)
+ *   get_user_name     (snake_case)
+ *   get-user-name     (kebab-case)
+ *   GET_USER_NAME     (UPPER_SNAKE_CASE)
+ *
+ * The set is deduplicated so identifiers that collapse skeletons
+ * (e.g., single-word queries) don't bloat the regex pointlessly.
+ */
+function expandIdentifierVariants(query: string): Array<string> | null {
+  if (!SINGLE_IDENTIFIER_REGEX.test(query)) return null
+  const pieces = splitIdentifierPieces(query)
+  if (pieces.length < 2) return null
+  const lower = pieces.map((p) => p.toLowerCase())
+  const upper = pieces.map((p) => p.toUpperCase())
+  const cap = lower.map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+  const variants = new Set<string>()
+  variants.add(query)
+  variants.add(lower[0] + cap.slice(1).join("")) // camelCase
+  variants.add(cap.join("")) // PascalCase
+  variants.add(lower.join("_")) // snake_case
+  variants.add(lower.join("-")) // kebab-case
+  variants.add(upper.join("_")) // UPPER_SNAKE_CASE
+  return Array.from(variants)
+}
+
+/**
+ * Build the rg regex pattern for a set of skeleton variants. The
+ * variants are already plain identifiers (no regex metacharacters),
+ * so simple alternation suffices. Word boundaries are intentionally
+ * NOT applied — the user's mental model for "search for getUserName"
+ * is substring-anywhere, which is also what `-F getUserName` did.
+ */
+function buildExpansionPattern(variants: ReadonlyArray<string>): string {
+  return "(?:" + variants.join("|") + ")"
+}
 
 function buildRgArgs(input: {
   mode: "ranked" | "literal" | "regex"
   fileGlob?: string
   contextLines: number
   query: string
+  /**
+   * When set, the caller has expanded the original query into a
+   * regex alternation across skeleton-form variants. We override
+   * `-F` (literal) regardless of the user's chosen mode and pass
+   * the alternation as a ripgrep regex pattern. The original-mode
+   * literal semantics are preserved because the variants are plain
+   * identifiers (no regex metacharacters).
+   */
+  expansionPattern?: string
 }): Array<string> {
   const args: Array<string> = ["--json", "--no-follow"]
 
@@ -440,7 +583,13 @@ function buildRgArgs(input: {
   // exact-string semantics for the user's query; BM25F handles
   // tokenized matching at scoring time, not at rg time). Regex
   // mode uses ripgrep's default (PCRE2-via-builtin).
-  if (input.mode === "literal" || input.mode === "ranked") {
+  //
+  // EXCEPTION: when the caller passed `expansionPattern`, we drop
+  // `-F` and feed the alternation as a regex. Skeleton expansion is
+  // mutually exclusive with literal-mode semantics — but the
+  // variants are still plain identifiers, so it remains
+  // identifier-substring matching (the user's intent).
+  if (!input.expansionPattern && (input.mode === "literal" || input.mode === "ranked")) {
     args.push("-F")
   }
 
@@ -451,7 +600,7 @@ function buildRgArgs(input: {
   // CVE fix HIGH-2: positional separator. Without `--`, a query
   // starting with `-` (e.g. `--no-ignore`) would be parsed as a
   // ripgrep flag.
-  args.push("--", input.query, ".")
+  args.push("--", input.expansionPattern ?? input.query, ".")
 
   return args
 }
@@ -634,8 +783,598 @@ function stripTrailingNewline(s: string): string {
 }
 
 // ============================================================
-// BM25F scoring
+// Tree-sitter structural ranking
 // ============================================================
+
+/**
+ * Extension → grammar key. Grammars not in this map skip structural
+ * parsing (the hit falls back to the regex SYMBOL_REGEX heuristic for
+ * `symbol_context`). Keep this list aligned with `GRAMMAR_FILES`
+ * below — adding a language requires both an extension mapping and a
+ * `.wasm` to load.
+ */
+const EXTENSION_TO_LANG: Readonly<Record<string, string>> = {
+  ".ts": "typescript",
+  ".tsx": "tsx",
+  ".js": "javascript",
+  ".mjs": "javascript",
+  ".cjs": "javascript",
+  ".jsx": "javascript",
+  ".py": "python",
+  ".go": "go",
+  ".rs": "rust",
+  ".java": "java",
+  ".c": "c",
+  ".h": "c",
+  ".cpp": "cpp",
+  ".cc": "cpp",
+  ".cxx": "cpp",
+  ".hpp": "cpp",
+  ".hxx": "cpp",
+}
+
+/**
+ * Grammar key → wasm filename under `node_modules/tree-sitter-wasms/out/`.
+ * Resolved at runtime from `node_modules`; the file paths are stable
+ * because `tree-sitter-wasms` ships prebuilt binaries (no per-install
+ * codegen).
+ */
+const GRAMMAR_FILES: Readonly<Record<string, string>> = {
+  typescript: "tree-sitter-typescript.wasm",
+  tsx: "tree-sitter-tsx.wasm",
+  javascript: "tree-sitter-javascript.wasm",
+  python: "tree-sitter-python.wasm",
+  go: "tree-sitter-go.wasm",
+  rust: "tree-sitter-rust.wasm",
+  java: "tree-sitter-java.wasm",
+  c: "tree-sitter-c.wasm",
+  cpp: "tree-sitter-cpp.wasm",
+}
+
+/**
+ * Per-language definition-shape node types. When a matched identifier
+ * sits inside one of these nodes AND is at the node's "name" position,
+ * we have AST-confirmed evidence the line is an identifier-definition
+ * site. The brief's enumeration plus a handful of language-idiomatic
+ * extras (e.g., `lexical_declaration` for TS/JS top-level `const`s,
+ * `mod_item` for Rust modules).
+ *
+ * The set lookup is per-language so a node type that means
+ * "definition" in one language but "reference" in another won't
+ * cross-pollute.
+ */
+const DEFINITION_NODE_TYPES: Readonly<Record<string, ReadonlySet<string>>> = {
+  typescript: new Set([
+    "function_declaration",
+    "function_signature",
+    "function_expression",
+    "method_definition",
+    "method_signature",
+    "class_declaration",
+    "interface_declaration",
+    "type_alias_declaration",
+    "enum_declaration",
+    "variable_declarator",
+    "generator_function_declaration",
+    "abstract_method_signature",
+    "public_field_definition",
+    "property_signature",
+  ]),
+  tsx: new Set([
+    "function_declaration",
+    "function_signature",
+    "function_expression",
+    "method_definition",
+    "method_signature",
+    "class_declaration",
+    "interface_declaration",
+    "type_alias_declaration",
+    "enum_declaration",
+    "variable_declarator",
+    "generator_function_declaration",
+    "abstract_method_signature",
+    "public_field_definition",
+    "property_signature",
+  ]),
+  javascript: new Set([
+    "function_declaration",
+    "function_expression",
+    "method_definition",
+    "class_declaration",
+    "variable_declarator",
+    "generator_function_declaration",
+  ]),
+  python: new Set([
+    "function_definition",
+    "class_definition",
+    "decorated_definition",
+  ]),
+  go: new Set([
+    "function_declaration",
+    "method_declaration",
+    "type_spec",
+    "type_alias",
+    "const_spec",
+    "var_spec",
+  ]),
+  rust: new Set([
+    "function_item",
+    "impl_item",
+    "trait_item",
+    "struct_item",
+    "enum_item",
+    "mod_item",
+    "type_item",
+    "const_item",
+    "static_item",
+    "macro_definition",
+  ]),
+  java: new Set([
+    "class_declaration",
+    "interface_declaration",
+    "method_declaration",
+    "constructor_declaration",
+    "enum_declaration",
+    "field_declaration",
+    "annotation_type_declaration",
+  ]),
+  c: new Set([
+    "function_definition",
+    "declaration",
+    "struct_specifier",
+    "enum_specifier",
+    "union_specifier",
+    "type_definition",
+  ]),
+  cpp: new Set([
+    "function_definition",
+    "declaration",
+    "struct_specifier",
+    "class_specifier",
+    "enum_specifier",
+    "union_specifier",
+    "type_definition",
+    "namespace_definition",
+    "template_declaration",
+  ]),
+}
+
+/**
+ * Node types that the AST exposes as "this token is an identifier".
+ * The match-position lookup uses these to filter out parent-node hits
+ * before checking the definition-site predicate.
+ */
+const IDENTIFIER_NODE_TYPES = new Set([
+  "identifier",
+  "type_identifier",
+  "field_identifier",
+  "property_identifier",
+  "shorthand_property_identifier_pattern",
+  "shorthand_property_identifier",
+  "scoped_identifier",
+  "name",
+])
+
+interface GrammarBundle {
+  /** Lazy promise of the language registry. Awaited per-call so the
+   *  init cost overlaps with any other module-load work. */
+  ready: Promise<Map<string, Parser.Language>>
+}
+
+let _grammarBundle: GrammarBundle | undefined
+
+/**
+ * Resolve the `tree-sitter-wasms/out/` directory at the package root.
+ * `require.resolve` is used through a try/catch — the bundled-only
+ * fallback runs in environments where node_modules has been pruned to
+ * just runtime deps.
+ */
+function resolveGrammarRoot(): string | null {
+  try {
+    const pkgPath = require.resolve("tree-sitter-wasms/package.json")
+    return path.join(path.dirname(pkgPath), "out")
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Pre-load all grammars at module-init time so the first search
+ * doesn't pay a ~500ms cold-start cost. The Promise is captured at
+ * import time and awaited per-call; per-grammar failures are caught
+ * individually so one broken grammar can't take the whole tool down.
+ */
+function getGrammarBundle(): GrammarBundle {
+  if (_grammarBundle) return _grammarBundle
+  const ready = (async (): Promise<Map<string, Parser.Language>> => {
+    const out = new Map<string, Parser.Language>()
+    try {
+      await Parser.init()
+    } catch (err) {
+      consola.warn(
+        `[code_search] tree-sitter Parser.init failed; structural ranking disabled: ${(err as Error).message}`,
+      )
+      return out
+    }
+    const root = resolveGrammarRoot()
+    if (!root) {
+      consola.warn(
+        "[code_search] tree-sitter-wasms package not resolvable; structural ranking disabled",
+      )
+      return out
+    }
+    for (const [key, filename] of Object.entries(GRAMMAR_FILES)) {
+      const wasmPath = path.join(root, filename)
+      try {
+        const lang = await Parser.Language.load(wasmPath)
+        out.set(key, lang)
+      } catch (err) {
+        consola.warn(
+          `[code_search] failed to load tree-sitter grammar '${key}' from ${filename}: ${(err as Error).message}`,
+        )
+      }
+    }
+    return out
+  })()
+  _grammarBundle = { ready }
+  return _grammarBundle
+}
+
+// Kick off grammar pre-load at module import time. The brief calls
+// this out explicitly: amortize the WASM init cost across module load
+// rather than the first search call.
+void getGrammarBundle().ready.catch(() => {
+  /* errors already logged per-grammar */
+})
+
+function getLanguageKeyForPath(filePath: string): string | null {
+  const ext = path.extname(filePath).toLowerCase()
+  return EXTENSION_TO_LANG[ext] ?? null
+}
+
+/**
+ * Tree cache. Keyed by canonical file path with mtime gate — on
+ * mtime change the cache entry is invalidated (and the old Tree's
+ * native memory is freed via `.delete()`). LRU eviction at
+ * STRUCTURAL_CACHE_MAX entries; null trees indicate prior failure
+ * and short-circuit re-parsing for the same mtime.
+ */
+interface CachedTree {
+  mtimeMs: number
+  /** null = tried, parse failed (or unsupported language). */
+  tree: Parser.Tree | null
+  /** Source bytes — we need them at structural-walk time to compute
+   *  byte offsets from line numbers. Kept alongside the tree so the
+   *  next call on the same (file, mtime) doesn't re-read. */
+  source: string | null
+}
+
+const _treeCache = new Map<string, CachedTree>()
+
+function cacheGet(absPath: string, mtimeMs: number): CachedTree | undefined {
+  const cur = _treeCache.get(absPath)
+  if (!cur) return undefined
+  if (cur.mtimeMs !== mtimeMs) {
+    // File changed since cache entry — discard.
+    if (cur.tree) {
+      try {
+        cur.tree.delete()
+      } catch {
+        // Tree already collected
+      }
+    }
+    _treeCache.delete(absPath)
+    return undefined
+  }
+  // Touch for LRU ordering.
+  _treeCache.delete(absPath)
+  _treeCache.set(absPath, cur)
+  return cur
+}
+
+function cachePut(absPath: string, entry: CachedTree): void {
+  // Evict oldest if at cap. Map iteration order is insertion order
+  // (and we re-insert on access in cacheGet), so the first key is
+  // the oldest.
+  while (_treeCache.size >= STRUCTURAL_CACHE_MAX) {
+    const firstKey = _treeCache.keys().next().value
+    if (firstKey === undefined) break
+    const evicted = _treeCache.get(firstKey)
+    if (evicted?.tree) {
+      try {
+        evicted.tree.delete()
+      } catch {
+        // Best effort
+      }
+    }
+    _treeCache.delete(firstKey)
+  }
+  _treeCache.set(absPath, entry)
+}
+
+/**
+ * Compute the absolute byte offset where line `lineNumber1` starts
+ * in `source`. Lines are counted by LF; CRLF files have the same
+ * line starts as LF files (the \r is part of the previous line's
+ * content, not the line break). `lineNumber1` is 1-indexed to match
+ * ripgrep's output. Returns -1 if the line is past EOF.
+ */
+function lineStartByte(source: string, lineNumber1: number): number {
+  if (lineNumber1 <= 1) return 0
+  let line = 1
+  for (let i = 0; i < source.length; i++) {
+    if (source.charCodeAt(i) === 0x0a /* \n */) {
+      line += 1
+      if (line === lineNumber1) return i + 1
+    }
+  }
+  return -1
+}
+
+/**
+ * Walk up from a matched identifier node looking for the closest
+ * definition-shape ancestor (per the language's allowed types). When
+ * we find one, verify the matched identifier is at the definition's
+ * "name" slot — NOT inside a parameter type, a body, or a parent's
+ * signature. Returns true iff this is a real definition site for
+ * the identifier the rg submatch landed on.
+ *
+ * The walk has a small depth bound (6) — definition names sit very
+ * close to their definition node in every supported grammar; deeper
+ * walks risk false positives (e.g., matching `name` inside the body
+ * of an enclosing function and concluding "yes, definition").
+ */
+function isDefiningSite(
+  matchedNode: Parser.SyntaxNode,
+  langKey: string,
+): boolean {
+  const defTypes = DEFINITION_NODE_TYPES[langKey]
+  if (!defTypes) return false
+  let cur: Parser.SyntaxNode | null = matchedNode.parent
+  let depth = 0
+  while (cur && depth < 6) {
+    if (defTypes.has(cur.type)) {
+      // Try the language's standard "name" field first. Almost all
+      // grammars expose this for class/method/function/variable
+      // declarations.
+      const nameField = cur.childForFieldName("name")
+      if (nameField && containsByteRange(nameField, matchedNode)) {
+        return true
+      }
+      // C / C++ function_definition: name lives inside the
+      // `declarator` field, possibly nested through pointer or
+      // reference declarators. Same trick works for Java
+      // field_declaration's `declarator` field.
+      const declarator = cur.childForFieldName("declarator")
+      if (declarator && containsByteRange(declarator, matchedNode)) {
+        // The matched identifier is somewhere in the declarator
+        // subtree. Confirm it's the first identifier-leaf — that
+        // disambiguates `int foo(int bar)`'s `foo` (definition) from
+        // its `bar` (parameter, also inside declarator).
+        const first = firstIdentifierLeaf(declarator)
+        if (first && first.startIndex === matchedNode.startIndex) {
+          return true
+        }
+      }
+      // Rust `impl_item` and Go `type_spec`: the identifier is in
+      // the `type` field rather than `name`.
+      const typeField = cur.childForFieldName("type")
+      if (typeField && containsByteRange(typeField, matchedNode)) {
+        const first = firstIdentifierLeaf(typeField)
+        if (first && first.startIndex === matchedNode.startIndex) {
+          return true
+        }
+      }
+    }
+    cur = cur.parent
+    depth += 1
+  }
+  return false
+}
+
+function containsByteRange(
+  outer: Parser.SyntaxNode,
+  inner: Parser.SyntaxNode,
+): boolean {
+  return outer.startIndex <= inner.startIndex && outer.endIndex >= inner.endIndex
+}
+
+function firstIdentifierLeaf(
+  node: Parser.SyntaxNode,
+): Parser.SyntaxNode | null {
+  if (IDENTIFIER_NODE_TYPES.has(node.type)) return node
+  for (const child of node.namedChildren) {
+    const r = firstIdentifierLeaf(child)
+    if (r) return r
+  }
+  return null
+}
+
+interface StructuralPassResult {
+  /** Indexes (into the input hits array) where AST confirmed the
+   *  matched identifier is at a definition site. */
+  confirmedHitIndexes: Set<number>
+  /** null = success (entire top-N parsed within budget). String =
+   *  budget exceeded mid-pass, with explanation suitable for surfacing
+   *  to the model as `ranking_fallback`. */
+  fallback: string | null
+}
+
+/**
+ * Run the structural-confirmation pass over the top-N already-ranked
+ * BM25F hits. Wall-clock-bounded — checked between files, not mid-
+ * parse (web-tree-sitter@0.22 doesn't expose a usable cancel hook).
+ *
+ * Per-file failure modes (file too big, language unsupported, parse
+ * error, I/O error) are silent: the file's hits keep the regex
+ * `symbol_context` heuristic. Only the wall-clock budget fires the
+ * user-visible `fallback` message.
+ */
+async function runStructuralPass(opts: {
+  hitsRanked: Array<{ hit: RawHit; index: number }>
+  workspaceRoot: string
+  topN: number
+  budgetMs: number
+  signal: AbortSignal
+}): Promise<StructuralPassResult> {
+  const result: StructuralPassResult = {
+    confirmedHitIndexes: new Set(),
+    fallback: null,
+  }
+  if (opts.hitsRanked.length === 0) return result
+
+  if (opts.signal.aborted) return result
+
+  const grammars = await getGrammarBundle().ready
+  if (grammars.size === 0) {
+    // No grammars loaded — log already done in getGrammarBundle.
+    // Don't surface as user-facing fallback; this is a setup-side
+    // failure, not a per-search budget overrun.
+    return result
+  }
+
+  // Group hits by file so we parse each file once across all its
+  // hits within the top-N slice.
+  const cap = Math.min(opts.hitsRanked.length, opts.topN)
+  const byFile = new Map<string, Array<{ hit: RawHit; index: number }>>()
+  for (let i = 0; i < cap; i++) {
+    const entry = opts.hitsRanked[i]
+    const list = byFile.get(entry.hit.file) ?? []
+    list.push(entry)
+    byFile.set(entry.hit.file, list)
+  }
+
+  const t0 = Date.now()
+  let filesParsed = 0
+  let parsersUsed = new Map<string, Parser>()
+
+  try {
+    for (const [relFile, entries] of byFile) {
+      if (opts.signal.aborted) break
+      const elapsed = Date.now() - t0
+      if (elapsed >= opts.budgetMs) {
+        result.fallback =
+          `structural budget exceeded after parsing ${filesParsed}/${cap} hits; ` +
+          `retry with structural: "topN" or narrow your query`
+        break
+      }
+
+      const langKey = getLanguageKeyForPath(relFile)
+      if (!langKey) continue // unsupported extension — silent skip
+      const lang = grammars.get(langKey)
+      if (!lang) continue // grammar failed to load — silent skip
+
+      const absPath = path.join(opts.workspaceRoot, relFile)
+      let mtimeMs: number
+      let size: number
+      try {
+        const st = statSync(absPath)
+        mtimeMs = st.mtimeMs
+        size = st.size
+      } catch (err) {
+        consola.debug(
+          `[code_search] structural skip ${relFile} (stat failed: ${(err as Error).message})`,
+        )
+        continue
+      }
+      if (size > STRUCTURAL_MAX_FILE_BYTES) {
+        consola.debug(
+          `[code_search] structural skip ${relFile} (${size} bytes > cap)`,
+        )
+        continue
+      }
+
+      let cached = cacheGet(absPath, mtimeMs)
+      if (!cached) {
+        let source: string
+        try {
+          source = readFileSync(absPath, "utf8")
+        } catch (err) {
+          consola.debug(
+            `[code_search] structural skip ${relFile} (read failed: ${(err as Error).message})`,
+          )
+          cachePut(absPath, { mtimeMs, tree: null, source: null })
+          continue
+        }
+        let parser = parsersUsed.get(langKey)
+        if (!parser) {
+          parser = new Parser()
+          parser.setLanguage(lang)
+          parsersUsed.set(langKey, parser)
+        }
+        let tree: Parser.Tree | null = null
+        try {
+          tree = parser.parse(source)
+        } catch (err) {
+          consola.debug(
+            `[code_search] tree-sitter parse failed for ${relFile}: ${(err as Error).message}`,
+          )
+        }
+        cached = { mtimeMs, tree, source: tree ? source : null }
+        cachePut(absPath, cached)
+        filesParsed += 1
+      }
+
+      if (!cached.tree || !cached.source) continue
+
+      // Walk every hit's matched identifier in this file.
+      for (const entry of entries) {
+        const lineStart = lineStartByte(cached.source, entry.hit.line)
+        if (lineStart < 0) continue
+        const matchByteStart = lineStart + entry.hit.match_start
+        const matchByteEnd = lineStart + entry.hit.match_end
+        let node: Parser.SyntaxNode | null
+        try {
+          node = cached.tree.rootNode.descendantForIndex(
+            matchByteStart,
+            matchByteEnd,
+          )
+        } catch {
+          node = null
+        }
+        if (!node) continue
+        // Climb to the nearest identifier-typed node, since
+        // descendantForIndex may land on a parent for off-by-one
+        // byte ranges in CRLF files.
+        if (!IDENTIFIER_NODE_TYPES.has(node.type)) {
+          let cur: Parser.SyntaxNode | null = node
+          let depth = 0
+          while (cur && !IDENTIFIER_NODE_TYPES.has(cur.type) && depth < 3) {
+            // Try descending to an identifier leaf at the match
+            // start before climbing — handles the case where the
+            // grammar wraps the identifier in e.g. shorthand_*
+            // patterns.
+            const leaf = firstIdentifierLeaf(cur)
+            if (leaf && leaf.startIndex === matchByteStart) {
+              cur = leaf
+              break
+            }
+            cur = cur.parent
+            depth += 1
+          }
+          node = cur
+        }
+        if (!node || !IDENTIFIER_NODE_TYPES.has(node.type)) continue
+        if (isDefiningSite(node, langKey)) {
+          result.confirmedHitIndexes.add(entry.index)
+        }
+      }
+    }
+  } finally {
+    // Tree-sitter Parser instances are reusable and we don't hold
+    // them across calls; freeing keeps native memory clean.
+    for (const parser of parsersUsed.values()) {
+      try {
+        parser.delete()
+      } catch {
+        // Best effort
+      }
+    }
+    parsersUsed = new Map()
+  }
+
+  return result
+}
 
 interface FieldTexts {
   match_line: string
@@ -644,18 +1383,33 @@ interface FieldTexts {
   symbol_context: string
 }
 
-function extractFields(hit: RawHit): FieldTexts {
+function extractFields(hit: RawHit, astConfirmed: boolean): FieldTexts {
   const ctx = [...hit.context_before, ...hit.context_after].join("\n")
-  const isSymbol = SYMBOL_REGEX.test(hit.matched_line.trimStart())
+  let symbolContext: string
+  if (astConfirmed) {
+    // Tree-sitter confirmed: this is a real identifier-definition
+    // site. Populate `symbol_context` with the matched identifier
+    // text so the BM25F field-weight (2.5x) fires for this hit even
+    // when the regex heuristic would have left the field empty —
+    // the live correctness fix described in the brief.
+    const ident = hit.matched_line.slice(hit.match_start, hit.match_end)
+    // Guard: rg submatch offsets can be empty / out-of-range for
+    // multiline matches — fall back to the matched line so we still
+    // get a non-empty field.
+    symbolContext = ident.length > 0 ? ident : hit.matched_line
+  } else if (SYMBOL_REGEX.test(hit.matched_line.trimStart())) {
+    // Regex heuristic remains in place for hits the AST hasn't
+    // confirmed (top-N spillover, unsupported language, parse
+    // error, budget overrun). Same field shape as v1.
+    symbolContext = hit.matched_line
+  } else {
+    symbolContext = ""
+  }
   return {
     match_line: hit.matched_line,
     context: ctx,
     file_path: hit.file.replace(/[/\\]/g, " "),
-    // symbol_context is binary: either the matched line is a
-    // definition, or it isn't. If yes, the matched line itself
-    // populates the field (so query tokens score there too); if
-    // no, the field is empty (TF=0 for all tokens).
-    symbol_context: isSymbol ? hit.matched_line : "",
+    symbol_context: symbolContext,
   }
 }
 
@@ -685,6 +1439,15 @@ interface ScoredHit {
 function bm25fScore(
   hits: ReadonlyArray<RawHit>,
   queryTokens: ReadonlyArray<string>,
+  /**
+   * Indexes (into `hits`) for which tree-sitter has confirmed the
+   * matched identifier sits at a real definition site. Drives the
+   * `extractFields` symbol_context override. Pass `undefined` (or an
+   * empty Set) to score with the regex heuristic only — matches the
+   * v1 behavior, used as the first pass before structural ranking
+   * runs.
+   */
+  astConfirmedHits?: ReadonlySet<number>,
 ): Array<ScoredHit> {
   if (hits.length === 0 || queryTokens.length === 0) {
     return hits.map((h) => ({
@@ -703,8 +1466,10 @@ function bm25fScore(
   // the same path across multiple hits in one file).
   const fileTokenCache = new Map<string, FieldTexts>()
   const perHitTokens: Array<Record<keyof FieldTexts, Array<string>>> = []
-  for (const hit of hits) {
-    const fields = extractFields(hit)
+  for (let i = 0; i < hits.length; i++) {
+    const hit = hits[i]
+    const confirmed = astConfirmedHits?.has(i) ?? false
+    const fields = extractFields(hit, confirmed)
     fileTokenCache.set(hit.file, fields)
     perHitTokens.push({
       match_line: tokenize(fields.match_line),
@@ -903,11 +1668,24 @@ export async function searchCode(
   }
 
   const mode = rawInput.mode ?? "ranked"
+  const structuralMode = rawInput.structural ?? "full"
   const limit = Math.min(rawInput.limit ?? DEFAULT_LIMIT, MAX_LIMIT)
   const contextLines = Math.min(
     rawInput.context_lines ?? DEFAULT_CONTEXT_LINES,
     MAX_CONTEXT_LINES,
   )
+
+  // Identifier skeleton-form expansion. When the user's query is a
+  // single identifier in any of the five canonical conventions, we
+  // expand to all of them and feed rg a regex alternation. This is
+  // the live-correctness fix for "rg getUserName" not finding
+  // get_user_name. Regex mode is excluded — the user is explicit
+  // about regex semantics there.
+  const expansion =
+    mode === "regex" ? null : expandIdentifierVariants(rawInput.query)
+  const expansionPattern = expansion
+    ? buildExpansionPattern(expansion)
+    : undefined
 
   // Local AbortController combines: external signal, wall-time, and
   // any internal short-circuits (stdout cap, global limit). Single
@@ -936,6 +1714,7 @@ export async function searchCode(
     fileGlob: rawInput.file_glob,
     contextLines,
     query: rawInput.query,
+    expansionPattern,
   })
 
   let child: ChildProcess
@@ -984,10 +1763,45 @@ export async function searchCode(
   // Apply ranking.
   let kept: Array<ScoredHit>
   let prunedBelowShoulder: number | undefined
+  let structuralFallback: string | null = null
   if (mode === "ranked") {
     const queryTokens = tokenize(rawInput.query)
-    const scored = bm25fScore(parseResult.hits, queryTokens)
-    const pruned = shoulderPrune(scored)
+    // Pass 1: regex-only BM25F. Cheap and gives us a reliable
+    // ordering to pick the top-N for structural confirmation.
+    const pass1 = bm25fScore(parseResult.hits, queryTokens)
+    pass1.sort((a, b) => b.score - a.score)
+    const topN =
+      structuralMode === "topN" ? STRUCTURAL_TOPN_FAST : STRUCTURAL_TOPN_FULL
+    // Build (hit, original-index) entries for the top-N. The index
+    // is into `parseResult.hits` so the AST-confirmed set lines up
+    // with the pass-2 scoring loop.
+    const indexByHit = new Map<RawHit, number>()
+    for (let i = 0; i < parseResult.hits.length; i++) {
+      indexByHit.set(parseResult.hits[i], i)
+    }
+    const hitsRanked = pass1
+      .slice(0, Math.min(topN, pass1.length))
+      .map((sh) => ({ hit: sh.hit, index: indexByHit.get(sh.hit) ?? -1 }))
+      .filter((e) => e.index >= 0)
+
+    const structural = await runStructuralPass({
+      hitsRanked,
+      workspaceRoot: ws.canonical,
+      topN,
+      budgetMs: STRUCTURAL_BUDGET_MS,
+      signal: ac.signal,
+    })
+    structuralFallback = structural.fallback
+
+    // Pass 2: re-score with AST confirmation. Corpus stats are
+    // re-computed against the structurally-enriched symbol_context
+    // fields so token IDFs reflect the new field contents.
+    const pass2 = bm25fScore(
+      parseResult.hits,
+      queryTokens,
+      structural.confirmedHitIndexes,
+    )
+    const pruned = shoulderPrune(pass2)
     kept = pruned.kept.slice(0, limit)
     prunedBelowShoulder = pruned.prunedBelowShoulder
   } else {
@@ -1033,9 +1847,12 @@ export async function searchCode(
   // absolute paths unless explicitly enabled.
   const debugLog = process.env.GH_ROUTER_DEBUG_CODE_SEARCH === "1"
   consola.info(
-    `[code_search] mode=${mode} results=${results.length} truncated=${parseResult.truncated} ` +
+    `[code_search] mode=${mode} structural=${structuralMode} ` +
+      `expansion=${expansion ? expansion.length : 0} ` +
+      `results=${results.length} truncated=${parseResult.truncated} ` +
       `scanned_files=${parseResult.scannedFiles} elapsed_ms=${elapsed_ms} ` +
-      `abort=${parseResult.cancelled} rg=${rgResolution.source}` +
+      `abort=${parseResult.cancelled} rg=${rgResolution.source} ` +
+      `structuralFallback=${structuralFallback ? "yes" : "no"}` +
       (debugLog ? ` query="${rawInput.query}" workspace="${ws.canonical}"` : ""),
   )
 
@@ -1053,6 +1870,7 @@ export async function searchCode(
             k1: BM25F_K1,
           }
         : { algorithm: "ripgrep_document_order" },
+    structuralFallback,
   }
 }
 

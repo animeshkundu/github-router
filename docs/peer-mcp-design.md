@@ -261,3 +261,62 @@ Raw `query` and absolute workspace paths are NOT logged unless `GH_ROUTER_DEBUG_
 ### Upstream-snippet awareness
 
 Snippets are sent upstream as tool-use-result content to the model. The proxy doesn't filter what gets returned — that's the same channel as `Read`'s tool result. If you wouldn't paste a directory's contents into a chat with the model provider, don't search it; the workspace surface here is no different from any other read tool.
+
+### Structural-aware ranking
+
+The default `ranked` mode does not stop at BM25F over text features. After scoring, the top-N hits are re-examined with tree-sitter so the `symbol_context` field can be lifted from a regex heuristic to a true AST signal — when the matched line is an identifier-definition node (function/class/method/interface/type/struct/trait/impl/enum/etc.) and the matched identifier sits at the node's "name" position, the field tokens are populated with that identifier and the hit's score rises accordingly. When the AST doesn't confirm a definition, the prior regex heuristic remains in place; this is purely a strict upgrade, never a downgrade.
+
+Tree-sitter grammars (TypeScript, JavaScript, Python, Go, Rust, Java, C, C++) are pre-loaded at module init so the first ranked query of a session doesn't pay a cold-start cost. Files with extensions outside the covered set degrade silently to regex-only `symbol_context` for that one file (logged via consola, no user-facing notice).
+
+The depth of the structural pass is controlled by the `structural` input:
+
+| `structural` | Top-N parsed | When to pick |
+|---|---|---|
+| `full` (default) | 50 | Typical repos; best signal under the budget |
+| `topN`           | 10 | Very large monorepos where latency matters more than tail-end ranking quality |
+
+A hard **200ms wall-clock budget** wraps the structural pass. If the budget exceeds before all top-N files are parsed, parsing stops, remaining hits fall back to the regex `symbol_context`, and the response surfaces a `ranking_fallback: string` field telling the model what happened and how to react (e.g. retry with `structural: "topN"` or narrow the query). On the success path the field is omitted entirely — this is a "present iff actionable" field, not a "0 / null when fine" field.
+
+Per-file results are cached by `(realpath, mtime)` so a repeated search over the same hit set doesn't re-parse files that already returned no structural signal.
+
+### Cross-skeleton query expansion
+
+Single-identifier queries in `ranked` and `literal` mode are auto-expanded across naming conventions before being handed to ripgrep: `getUserName` → `(getUserName|get_user_name|get-user-name|GetUserName|GET_USER_NAME)`. This fixes the live correctness bug where `rg getUserName` did not surface `get_user_name`. Expansion is skipped when:
+
+- `mode === "regex"` — the user is being explicit about regex semantics; we do not silently rewrite.
+- The query contains whitespace, dots, parens, or any other character that defeats skeleton-form derivation — falls through to current literal behavior.
+
+## Design principle: ruthlessly minimal MCP tool surface
+
+Every field in an MCP tool's **input** and **output** schema must be one of:
+
+  (a) **Required to call the tool correctly** (e.g. `query`, `workspace` on `code_search` — the tool cannot do its job without them).
+  (b) **Tunable by the model in a way that improves outcomes** (e.g. `mode`, `structural`, `limit` — the model can reasonably decide "I need every hit, switch to literal" or "this is a large repo, drop to topN").
+  (c) **Directly actionable feedback that helps the model self-correct on the next call** (e.g. `truncated: true` tells the model "raise `limit` or narrow the query"; `pruned_below_shoulder: 7` tells it "the long tail was cut, your top results are probably what you want"; `ranking_fallback: "structural budget exceeded after 23/50 hits; retry with structural: \"topN\""` tells it exactly what to do differently).
+
+If a proposed field fails all three tests, **cut it**. The model's context is finite and precious; echoing the model's own inputs back, exposing internal diagnostics for human eyeballs, and surfacing failures the model has no lever to fix all cost tokens for negative value. Negative value because every additional token in the tool response (i) reduces the budget left for the model's actual reasoning, and (ii) introduces noise the model has to filter through before reaching the actionable bits.
+
+This rule applies to **all** MCP tools registered under `NON_PERSONA_MCP_TOOLS` (`code_search`, `web_search`, anything added later) and to the peer-critic persona tools (`codex_critic`, `codex_reviewer`, `opus_critic`, `gemini_critic`).
+
+### Worked example: `code_search`
+
+The internal `CodeSearchResponse` type in `src/lib/code-search.ts` is rich on purpose — internal callers (tests, future in-process consumers) benefit from BM25F scores, per-field contributions, scanning stats, etc. The MCP handler in `src/lib/peer-mcp-personas.ts` trims aggressively before stringifying to `content[0].text`. The cuts, with the test each field failed:
+
+| Field | Verdict | Why it failed |
+|---|---|---|
+| `ranking.algorithm: "BM25F"` | **cut** | The model cannot pick a ranking algorithm. Naming the algorithm is decorative. |
+| `ranking.citation: "Robertson, Zaragoza, Taylor 2004"` | **cut** | Purely cosmetic — provenance for human readers. |
+| `ranking.k1: 1.2` | **cut** | Internal tuning constant; not a knob the model is allowed to touch. |
+| Per-hit `score: 0.7423` | **cut** | The model already sees ordering. Naming the score doesn't add a lever. |
+| Per-hit `field_contributions: {match_line: 0.4, ...}` | **cut** | Diagnostic for ranker debugging. The model can't say "boost `match_line`." |
+| Per-hit `match_byte_range: [12, 24]` | **cut** | Useful for highlighting in a UI; the model already has `snippet` for content and `line` for navigation. |
+| `scanned_files: 412` | **cut** | Telemetry — belongs in the proxy log, not in the model's context. |
+| `elapsed_ms: 34` | **cut** | Same — telemetry. |
+| `truncated: true` | **kept** | Actionable: model can raise `limit` or narrow `query`. |
+| `pruned_below_shoulder: 7` | **kept** | Actionable: model knows the long tail was cut and the top results are confidently the right ones. |
+| `ranking_fallback: "structural budget exceeded..."` | **kept** (when present) | The textbook good field. Present **iff** actionable; absent (not `null`, not `""`) on the happy path so the model spends zero tokens noticing nothing went wrong. |
+| Per-hit `file`, `line`, `snippet` | **kept** | The actual payload. The model uses `file` and `line` to navigate, `snippet` to decide if the hit is relevant. |
+
+### Adding a new MCP tool
+
+For each proposed input or output field, answer in one sentence: **"What would the model do with this?"** If the answer is "nothing" or "look at it for context but not act on it," cut it. Default to absent — adding back later is cheap; pulling out a field clients have already learned to expect is breaking.

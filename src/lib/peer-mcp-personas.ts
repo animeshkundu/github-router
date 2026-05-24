@@ -543,26 +543,35 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       },
     },
     {
-      // code_search — proxy-side MCP tool exposing ripgrep + BM25F
-      // ranking to all clients (Claude Code, codex, gemini callers).
-      // Plan: ~/.local/share/.../plans/what-are-the-following-wild-tarjan.md
-      // Implementation: src/lib/code-search.ts (load-bearing notes there).
+      // code_search — proxy-side MCP tool exposing ripgrep + BM25F +
+      // tree-sitter structural-aware ranking to all clients (Claude
+      // Code, codex, gemini callers). Implementation: src/lib/code-search.ts.
+      //
+      // SCHEMA + RESPONSE MINIMALITY: this entry is the canonical
+      // worked example for the "ruthlessly minimal MCP tool surface"
+      // principle (docs/peer-mcp-design.md). The handler below trims
+      // the rich internal `CodeSearchResponse` to {file, line, snippet}
+      // per hit and a tiny top-level envelope. Internal diagnostics
+      // (scores, field_contributions, scanned_files, elapsed_ms, the
+      // ranking metadata block) are intentionally NOT forwarded — the
+      // model cannot act on them, so they would only burn its context.
+      // Do NOT re-export them without re-reading the principle section.
       toolNameHttp: "code_search",
       description:
         "Fast structured code search over a local workspace. Returns " +
-        "ranked, deduplicated hits with snippets. Backed by ripgrep " +
-        "with BM25F ranking (Robertson, Zaragoza, Taylor 2004) over " +
-        "four code-aware fields: matched line, surrounding context, " +
-        "file path tokens, symbol-definition heuristic. Prefer this " +
+        "ranked, deduplicated hits with snippets. Ranks with BM25F " +
+        "across matched-line / file-path / surrounding-context / " +
+        "symbol-context fields, then refines `symbol-context` with " +
+        "tree-sitter AST analysis on the top hits so identifier " +
+        "definitions outrank incidental string matches. Prefer this " +
         "over Grep/Bash+grep for ranked discovery (\"where is X " +
         "defined\", \"which files reference Y\", \"find code that does " +
-        "Z\") — BM25F surfaces the few right answers instead of every " +
-        "match. Use Grep for exact-pattern enumeration when you need " +
-        "every hit unranked, and Glob for file-name patterns (no " +
+        "Z\") — ranked mode surfaces the few right answers instead of " +
+        "every match. Use Grep for exact-pattern enumeration when you " +
+        "need every hit unranked, and Glob for file-name patterns (no " +
         "content match). `workspace` is any absolute path the proxy " +
         "process can read — typically the project root or a sub-tree " +
-        "you're working in. The model picks it; the proxy doesn't " +
-        "second-guess.",
+        "you're working in.",
       inputSchema: {
         type: "object",
         required: ["query", "workspace"],
@@ -573,42 +582,45 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             description:
               "Search text. In 'ranked' (default) and 'literal' modes, " +
               "interpreted as a literal string. In 'regex' mode, " +
-              "interpreted as a PCRE2 regex.",
+              "interpreted as a PCRE2 regex. In 'ranked' and 'literal' " +
+              "modes, single-identifier queries are auto-expanded across " +
+              "camelCase / snake_case / kebab-case / SCREAMING_SNAKE " +
+              "skeletons so `getUserName` also matches `get_user_name`.",
           },
           workspace: {
             type: "string",
             description:
-              "Absolute path to the project root to search. Must be in " +
-              "the proxy's allow-set (see tool description).",
+              "Absolute path to the project root (or sub-tree) to search.",
           },
           mode: {
             type: "string",
             enum: ["ranked", "literal", "regex"],
             description:
-              "Ranking mode. 'ranked' (default): BM25F over matched-line, " +
-              "symbol-context, file-path, and surrounding-context fields; " +
-              "results ordered by score with shoulder pruning (drops " +
-              "results below 50% of the top score). 'literal': fixed-" +
-              "string search, ripgrep document order. 'regex': PCRE2 " +
-              "search, ripgrep document order.",
+              "Ranking mode. 'ranked' (default): BM25F + tree-sitter " +
+              "structural boost; results ordered by score with shoulder " +
+              "pruning (drops results below 50% of the top score). " +
+              "'literal': fixed-string search, ripgrep document order. " +
+              "'regex': PCRE2 search, ripgrep document order.",
           },
           file_glob: {
             type: "string",
-            description:
-              "Optional ripgrep glob filter (e.g. 'src/**/*.ts'). " +
-              "Secret-shape denylist is applied AFTER and cannot be " +
-              "overridden.",
+            description: "Optional ripgrep glob filter (e.g. 'src/**/*.ts').",
           },
           limit: {
             type: "number",
             description: "Max hits to return (default 20, max 100).",
           },
-          context_lines: {
-            type: "number",
+          structural: {
+            type: "string",
+            enum: ["full", "topN"],
             description:
-              "Lines of context before AND after each match (default 2, " +
-              "max 10). Used both for snippet rendering and as the " +
-              "'context' field in BM25F scoring.",
+              "Structural-ranking depth (ranked mode only). 'full' " +
+              "(default) runs tree-sitter on the top 50 BM25F hits — " +
+              "best signal, fine for typical repos. 'topN' restricts to " +
+              "the top 10 for tighter latency on very large workspaces. " +
+              "Both modes share a 200ms wall-clock budget; on budget " +
+              "exhaustion the response includes `ranking_fallback` and " +
+              "remaining hits fall back to the regex symbol heuristic.",
           },
         },
       },
@@ -633,15 +645,37 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               file_glob:
                 typeof args.file_glob === "string" ? args.file_glob : undefined,
               limit: typeof args.limit === "number" ? args.limit : undefined,
-              context_lines:
-                typeof args.context_lines === "number"
-                  ? args.context_lines
+              structural:
+                args.structural === "full" || args.structural === "topN"
+                  ? args.structural
                   : undefined,
             },
             signal,
           )
+          // Minimal-surface response shape. See the SCHEMA + RESPONSE
+          // MINIMALITY comment above for why these fields and only
+          // these fields are forwarded to the model.
+          const minimal: {
+            results: Array<{ file: string; line: number; snippet: string }>
+            truncated: boolean
+            pruned_below_shoulder?: number
+            ranking_fallback?: string
+          } = {
+            results: result.results.map((hit) => ({
+              file: hit.file,
+              line: hit.line,
+              snippet: hit.snippet,
+            })),
+            truncated: result.truncated,
+          }
+          if (typeof result.pruned_below_shoulder === "number") {
+            minimal.pruned_below_shoulder = result.pruned_below_shoulder
+          }
+          if (typeof result.structuralFallback === "string") {
+            minimal.ranking_fallback = result.structuralFallback
+          }
           return {
-            content: [{ type: "text", text: JSON.stringify(result) }],
+            content: [{ type: "text", text: JSON.stringify(minimal) }],
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)

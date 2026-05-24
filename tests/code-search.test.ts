@@ -476,6 +476,321 @@ describe("BM25F ranking", () => {
 })
 
 // ============================================================
+// Cross-skeleton query expansion (the live audit-confirmed bug)
+// ============================================================
+
+describe("query expansion (cross-skeleton)", () => {
+  let fx: Fixture
+
+  beforeAll(() => {
+    fx = makeFixture((root) => {
+      // Four files with the SAME identifier expressed in different
+      // skeletons. Pre-expansion, searching for any one form returned
+      // only its own file. After expansion, all four come back.
+      writeFileSync(
+        path.join(root, "camel.ts"),
+        "function getUserName() { return 'x' }\n",
+      )
+      writeFileSync(
+        path.join(root, "snake.py"),
+        "def get_user_name(): return 'x'\n",
+      )
+      writeFileSync(
+        path.join(root, "pascal.ts"),
+        "class GetUserName {}\n",
+      )
+      writeFileSync(
+        path.join(root, "screaming.py"),
+        "GET_USER_NAME = 'x'\n",
+      )
+    })
+  })
+
+  afterAll(() => {
+    fx.cleanup()
+  })
+
+  test("ranked mode finds all four skeleton variants from a camelCase query", async () => {
+    const r = await searchCode({
+      query: "getUserName",
+      workspace: fx.root,
+      mode: "ranked",
+      limit: 10,
+    })
+    const files = r.results.map((h) => h.file).sort()
+    expect(files).toEqual(["camel.ts", "pascal.ts", "screaming.py", "snake.py"])
+  })
+
+  test("literal mode also expands", async () => {
+    const r = await searchCode({
+      query: "get_user_name",
+      workspace: fx.root,
+      mode: "literal",
+      limit: 10,
+    })
+    const files = r.results.map((h) => h.file).sort()
+    expect(files).toContain("camel.ts")
+    expect(files).toContain("snake.py")
+  })
+
+  test("regex mode does NOT expand (user is explicit about regex semantics)", async () => {
+    const r = await searchCode({
+      query: "getUserName",
+      workspace: fx.root,
+      mode: "regex",
+      limit: 10,
+    })
+    // Regex mode searches the literal string only.
+    const files = r.results.map((h) => h.file).sort()
+    expect(files).toEqual(["camel.ts"])
+  })
+
+  test("multi-token / non-identifier query falls through to literal search", async () => {
+    // Query with spaces (or other identifier-breaking characters)
+    // is not a single identifier — expansion is skipped.
+    const r = await searchCode({
+      query: "function getUserName",
+      workspace: fx.root,
+      mode: "literal",
+      limit: 10,
+    })
+    expect(r.results.length).toBe(1)
+    expect(r.results[0].file).toBe("camel.ts")
+  })
+})
+
+// ============================================================
+// Structural ranking (tree-sitter)
+// ============================================================
+
+describe("structural ranking (tree-sitter)", () => {
+  let fx: Fixture
+
+  beforeAll(() => {
+    fx = makeFixture((root) => {
+      mkdirSync(path.join(root, "src"))
+      mkdirSync(path.join(root, "tests"))
+
+      // The definition site (function declaration).
+      writeFileSync(
+        path.join(root, "src", "parser.ts"),
+        [
+          "export function parseModel(input: string): string {",
+          "  return input.trim()",
+          "}",
+        ].join("\n"),
+      )
+      // Multiple call sites in different files.
+      writeFileSync(
+        path.join(root, "src", "consumer_a.ts"),
+        [
+          "import { parseModel } from './parser'",
+          "export function a(x: string) {",
+          "  return parseModel(x)",
+          "}",
+        ].join("\n"),
+      )
+      writeFileSync(
+        path.join(root, "src", "consumer_b.ts"),
+        [
+          "import { parseModel } from './parser'",
+          "export function b(x: string) {",
+          "  return parseModel(x).toUpperCase()",
+          "}",
+        ].join("\n"),
+      )
+    })
+  })
+
+  afterAll(() => {
+    fx.cleanup()
+  })
+
+  test("'full' mode ranks the AST-confirmed definition site above call sites", async () => {
+    const r = await searchCode({
+      query: "parseModel",
+      workspace: fx.root,
+      mode: "ranked",
+      structural: "full",
+      limit: 10,
+    })
+    expect(r.results.length).toBeGreaterThan(0)
+    // The definition should rank first.
+    expect(r.results[0].file).toBe("src/parser.ts")
+    // The definition's symbol_context contribution should be strictly
+    // greater than zero (AST boost fired) AND strictly greater than
+    // any call-site hit's symbol_context (which is the actual signal
+    // that ranks definitions above call sites).
+    const top = r.results[0]
+    expect(top.field_contributions!.symbol_context).toBeGreaterThan(0)
+    const callSites = r.results.filter((h) => h.file !== "src/parser.ts")
+    for (const call of callSites) {
+      expect(top.field_contributions!.symbol_context).toBeGreaterThan(
+        call.field_contributions!.symbol_context,
+      )
+    }
+    // No fallback on this small fixture — well within the 200ms budget.
+    expect(r.structuralFallback).toBeNull()
+  })
+
+  test("'topN' mode also runs (just parses fewer files)", async () => {
+    const r = await searchCode({
+      query: "parseModel",
+      workspace: fx.root,
+      mode: "ranked",
+      structural: "topN",
+      limit: 10,
+    })
+    // Same fixture is small enough that 'topN' (10 files) and 'full'
+    // (50 files) both parse everything; the contract is just that
+    // 'topN' is a legal value and returns sensibly ranked results.
+    expect(r.results.length).toBeGreaterThan(0)
+    expect(r.results[0].file).toBe("src/parser.ts")
+  })
+
+  test("default structural is 'full' (omitted param accepted)", async () => {
+    const r = await searchCode({
+      query: "parseModel",
+      workspace: fx.root,
+      mode: "ranked",
+      limit: 10,
+    })
+    // Without specifying structural, the AST boost still fires.
+    expect(r.results[0].file).toBe("src/parser.ts")
+  })
+
+  test("structuralFallback is null on a normal call", async () => {
+    const r = await searchCode({
+      query: "parseModel",
+      workspace: fx.root,
+      mode: "ranked",
+      limit: 10,
+    })
+    expect(r.structuralFallback).toBeNull()
+  })
+})
+
+// ============================================================
+// MCP handler boundary — minimal response shape
+// ============================================================
+
+describe("MCP handler trims the response per the minimality principle", () => {
+  let fx: Fixture
+
+  beforeAll(() => {
+    fx = makeFixture((root) => {
+      writeFileSync(
+        path.join(root, "a.ts"),
+        "function findMe() { return 1 }\n",
+      )
+    })
+  })
+
+  afterAll(() => {
+    fx.cleanup()
+  })
+
+  test("response contains only file/line/snippet per hit; no score/field_contributions/match_byte_range", async () => {
+    // Drive the handler the way the MCP client does — call the
+    // registered tool's handler directly and parse its content.
+    const { NON_PERSONA_MCP_TOOLS } = await import(
+      "../src/lib/peer-mcp-personas"
+    )
+    const tool = NON_PERSONA_MCP_TOOLS.find(
+      (t) => t.toolNameHttp === "code_search",
+    )!
+    const result = await tool.handler({
+      query: "findMe",
+      workspace: fx.root,
+      mode: "literal",
+      limit: 5,
+    })
+    expect(result.isError).toBeUndefined()
+    const body = JSON.parse(result.content[0].text) as Record<string, unknown>
+
+    // Top-level shape — only these keys allowed:
+    const allowedTopKeys = new Set([
+      "results",
+      "truncated",
+      "pruned_below_shoulder",
+      "ranking_fallback",
+    ])
+    for (const k of Object.keys(body)) {
+      expect(allowedTopKeys.has(k)).toBe(true)
+    }
+
+    // No internals leaked:
+    expect(body).not.toHaveProperty("scanned_files")
+    expect(body).not.toHaveProperty("elapsed_ms")
+    expect(body).not.toHaveProperty("ranking")
+    expect(body).not.toHaveProperty("structuralFallback")
+
+    // Per-hit shape — exactly these three keys:
+    const results = body.results as Array<Record<string, unknown>>
+    expect(results.length).toBeGreaterThan(0)
+    for (const hit of results) {
+      expect(Object.keys(hit).sort()).toEqual(["file", "line", "snippet"])
+    }
+  })
+
+  test("ranking_fallback is OMITTED (not null) on success", async () => {
+    const { NON_PERSONA_MCP_TOOLS } = await import(
+      "../src/lib/peer-mcp-personas"
+    )
+    const tool = NON_PERSONA_MCP_TOOLS.find(
+      (t) => t.toolNameHttp === "code_search",
+    )!
+    const result = await tool.handler({
+      query: "findMe",
+      workspace: fx.root,
+      mode: "literal",
+      limit: 5,
+    })
+    const body = JSON.parse(result.content[0].text) as Record<string, unknown>
+    expect("ranking_fallback" in body).toBe(false)
+  })
+
+  test("structural param accepted via the MCP handler", async () => {
+    const { NON_PERSONA_MCP_TOOLS } = await import(
+      "../src/lib/peer-mcp-personas"
+    )
+    const tool = NON_PERSONA_MCP_TOOLS.find(
+      (t) => t.toolNameHttp === "code_search",
+    )!
+    for (const structural of ["full", "topN"]) {
+      const result = await tool.handler({
+        query: "findMe",
+        workspace: fx.root,
+        mode: "ranked",
+        structural,
+        limit: 5,
+      })
+      expect(result.isError).toBeUndefined()
+      const body = JSON.parse(result.content[0].text) as Record<string, unknown>
+      expect((body.results as Array<unknown>).length).toBeGreaterThan(0)
+    }
+  })
+
+  test("context_lines param is no longer accepted in the schema", async () => {
+    const { NON_PERSONA_MCP_TOOLS } = await import(
+      "../src/lib/peer-mcp-personas"
+    )
+    const tool = NON_PERSONA_MCP_TOOLS.find(
+      (t) => t.toolNameHttp === "code_search",
+    )!
+    const schema = tool.inputSchema as {
+      properties: Record<string, unknown>
+      additionalProperties: boolean
+    }
+    expect(schema.properties).not.toHaveProperty("context_lines")
+    // And additionalProperties is still false (no escape hatch).
+    expect(schema.additionalProperties).toBe(false)
+    // While we're here: structural IS in the schema.
+    expect(schema.properties).toHaveProperty("structural")
+  })
+})
+
+// ============================================================
 // Symlink escape behavior
 // ============================================================
 
