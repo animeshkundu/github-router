@@ -580,10 +580,12 @@ interface PersonaTelemetry {
 }
 
 function logTelemetry(t: PersonaTelemetry): void {
-  // Single-line stderr log so users can grep across sessions to see
-  // which personas earn their keep. Honors the minimalist reviewer's
-  // "earn your keep" critique — personas with near-zero use after
-  // ~2 weeks are removal candidates.
+  // Opt-in via GH_ROUTER_LOG_PEER_MCP=1 (mirrors GH_ROUTER_LOG_FIELDS).
+  // Default off: the proxy shares a TTY with the Claude TUI under
+  // `github-router claude`, and an unconditional stderr write per tool
+  // call shows up as ambient noise. Maintainer "earn their keep"
+  // analysis still works — flip the flag when you want it.
+  if (process.env.GH_ROUTER_LOG_PEER_MCP !== "1") return
   const parts = [
     `[peer-mcp]`,
     `name=${t.name}`,

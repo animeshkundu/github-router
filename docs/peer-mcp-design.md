@@ -183,6 +183,8 @@ The `claude` subcommand auto-injects three peer-model review tools as Claude Cod
 
 **`opus_critic` persona** (Phase B): adversarial second opinion from a fresh-context Opus 4.7 routed via `/v1/messages` with translated `thinking.budget_tokens` (low=1024, medium=3000) and `max_tokens = budget + 1500`. Cheapest and fastest of the peer critics (~10-25s on small artifacts). Use it as a quick same-lab sanity check before committing to a controversial decision when the artifact fits comfortably in one shot. **Limited blind-spot diversification** — same training data, same lab, same RLHF priors as the lead, so it does NOT substitute for cross-lab triangulation; reach for `codex_critic` (`high`) or `gemini_critic` for genuine adversarial coverage. Routing reflected in `peer-review-coordinator` (`src/lib/codex-mcp-config.ts`).
 
+**Per-call telemetry log** (`logTelemetry` in `src/routes/mcp/handler.ts`): opt-in via `GH_ROUTER_LOG_PEER_MCP=1` (mirrors the strict `=== "1"` pattern of `GH_ROUTER_LOG_FIELDS`). When enabled, every `tools/call` writes one line directly to stderr — `[peer-mcp] name=<persona> model=<id> duration_ms=<n> result=<ok|isError|exception>` — so a maintainer can grep across sessions to see which personas earn their keep. Default off because the proxy shares a TTY with the Claude TUI under `github-router claude`, and an unconditional stderr write per call shows up as ambient UI noise.
+
 ## Code search (`code_search`)
 
 Non-persona MCP tool exposed alongside `web_search` under `NON_PERSONA_MCP_TOOLS` (`src/lib/peer-mcp-personas.ts`). All clients (Claude Code, codex, gemini callers) see it via the same `/mcp` surface. Implementation: `src/lib/code-search.ts`.
