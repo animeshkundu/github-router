@@ -73,6 +73,12 @@ function makeRepo(setup: (root: string) => void): RepoFixture {
   // realpathSync because macOS mkdtempSync returns a symlinked path.
   const root = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "wa-wt-")))
   git(root, ["init", "-q", "-b", "main"])
+  // Disable autocrlf so Windows runners don't transparently convert
+  // \n → \r\n on checkout (breaks byte-exact toBe comparisons in
+  // the diff/replay tests). The default global config on
+  // windows-latest sets core.autocrlf=true.
+  git(root, ["config", "core.autocrlf", "false"])
+  git(root, ["config", "core.eol", "lf"])
   setup(root)
   // Initial commit so HEAD exists.
   git(root, ["add", "-A"])

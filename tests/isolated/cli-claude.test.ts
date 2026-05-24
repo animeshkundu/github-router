@@ -16,11 +16,18 @@ class ExitError extends Error {
 const execFileSyncMock = mock()
 const execFileMock = mock()
 const spawnMock = mock()
+const spawnSyncMock = mock()
 
 mock.module("node:child_process", () => ({
   execFileSync: execFileSyncMock,
   execFile: execFileMock,
   spawn: spawnMock,
+  // worker-agent/bash.ts and lifecycle.ts use spawnSync (Windows
+  // taskkill, exit-handler sweep that can't await async). Without
+  // this, the static import graph pulled in by peer-mcp-personas →
+  // worker-agent fails at load with `Export named 'spawnSync' not
+  // found in module 'node:child_process'`.
+  spawnSync: spawnSyncMock,
 }))
 
 const exitMock = mock((code: number) => {

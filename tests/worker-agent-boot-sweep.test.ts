@@ -84,6 +84,11 @@ function makeRepo(): { root: string; cleanup: () => void } {
   // symlinks internally and the sweep compares against real paths.
   const root = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "wa-bs-repo-")))
   git(root, ["init", "-q", "-b", "main"])
+  // Match the worker-agent-worktree test's git config for the same
+  // autocrlf reason — windows-latest's global config turns LF into
+  // CRLF on checkout otherwise.
+  git(root, ["config", "core.autocrlf", "false"])
+  git(root, ["config", "core.eol", "lf"])
   writeFileSync(path.join(root, "README.md"), "hello\n")
   git(root, ["add", "-A"])
   git(root, ["commit", "-q", "-m", "initial"])
@@ -102,13 +107,26 @@ function makeRepo(): { root: string; cleanup: () => void } {
 function listGitWorktreePaths(repoRoot: string): Array<string> {
   // `git worktree list --porcelain` emits one `worktree <path>` line
   // per registered worktree (incl. the main one). We only need paths
-  // to assert presence/absence of specific worktrees.
+  // to assert presence/absence of specific worktrees. Git on Windows
+  // emits forward-slashes; the test's `path.join(...)` produces
+  // backslashes. Normalize both sides to forward-slashes so the
+  // `toContain`/`not.toContain` comparisons work cross-platform.
   const out = git(repoRoot, ["worktree", "list", "--porcelain"])
   const paths: Array<string> = []
   for (const line of out.split(/\r?\n/)) {
-    if (line.startsWith("worktree ")) paths.push(line.slice("worktree ".length))
+    if (line.startsWith("worktree ")) {
+      paths.push(line.slice("worktree ".length).replace(/\\/g, "/"))
+    }
   }
   return paths
+}
+
+/** Cross-platform path-equality helper: git always returns forward-slashes,
+ *  Node's `path.join` produces platform-native separators. Use this to
+ *  build the expected value for `toContain` checks against
+ *  `listGitWorktreePaths`. */
+function normalizePathForGit(p: string): string {
+  return p.replace(/\\/g, "/")
 }
 
 function branchExists(repoRoot: string, branch: string): boolean {
@@ -170,9 +188,12 @@ describe("sweepStaleWorktreesAtBoot — E2E with real git worktrees", () => {
         git(repo.root, ["worktree", "add", "-b", liveBranch, liveDir, "HEAD"])
 
         // Pre-conditions: both registered with git, both branches present.
+        // `listGitWorktreePaths` normalizes to forward-slashes (git's native
+        // format); use `normalizePathForGit` on the expected values so the
+        // assertions work on Windows too.
         const before = listGitWorktreePaths(repo.root)
-        expect(before).toContain(staleDir)
-        expect(before).toContain(liveDir)
+        expect(before).toContain(normalizePathForGit(staleDir))
+        expect(before).toContain(normalizePathForGit(liveDir))
         expect(branchExists(repo.root, staleBranch)).toBe(true)
         expect(branchExists(repo.root, liveBranch)).toBe(true)
 
@@ -186,12 +207,12 @@ describe("sweepStaleWorktreesAtBoot — E2E with real git worktrees", () => {
         expect(await dirExists(staleDir)).toBe(false)
         expect(branchExists(repo.root, staleBranch)).toBe(false)
         const after = listGitWorktreePaths(repo.root)
-        expect(after).not.toContain(staleDir)
+        expect(after).not.toContain(normalizePathForGit(staleDir))
 
         // LIVE: still on disk, still in git, branch still present.
         expect(await dirExists(liveDir)).toBe(true)
         expect(branchExists(repo.root, liveBranch)).toBe(true)
-        expect(after).toContain(liveDir)
+        expect(after).toContain(normalizePathForGit(liveDir))
 
         // Tidy up the live worktree before rmSync runs over the repo
         // root in cleanup — leaves git's metadata in a consistent
@@ -281,7 +302,7 @@ describe("sweepStaleWorktreesAtBoot — E2E with real git worktrees", () => {
         expect(await dirExists(bogusDir)).toBe(false)
         expect(await dirExists(realDir)).toBe(false)
         expect(branchExists(repo.root, realBranch)).toBe(false)
-        expect(listGitWorktreePaths(repo.root)).not.toContain(realDir)
+        expect(listGitWorktreePaths(repo.root)).not.toContain(normalizePathForGit(realDir))
       } finally {
         repo.cleanup()
       }
