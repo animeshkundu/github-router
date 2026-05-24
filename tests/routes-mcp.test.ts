@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 import { mcpRoutes } from "../src/routes/mcp/route"
 import {
@@ -7,6 +10,11 @@ import {
 } from "../src/routes/mcp/handler"
 import { state } from "../src/lib/state"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
+import {
+  __resetForTests as __resetWorkerSlotsForTests,
+  acquireWorkerSlot,
+  MAX_INFLIGHT_WORKER_CALLS,
+} from "../src/lib/worker-agent/semaphore"
 
 const PROXY_PORT = 18787
 const PROXY_HOST = `127.0.0.1:${PROXY_PORT}`
@@ -49,6 +57,7 @@ const originalFetch = globalThis.fetch
 
 beforeEach(() => {
   __resetInFlightForTests()
+  __resetWorkerSlotsForTests()
   state.peerMcpNonce = NONCE
   state.copilotToken = "test-copilot-token"
   state.githubToken = "test-gh-token"
@@ -1429,5 +1438,387 @@ describe("/mcp web_search tool", () => {
     const json = await res.json() as { result?: { isError?: boolean; content: Array<{ text: string }> } }
     expect(json.result?.isError).toBeUndefined()
     expect(captured.tcCalled).toBe(true)
+  })
+})
+
+// =============================================================================
+// /mcp worker_* tools — registration + thin-closure routing
+// =============================================================================
+// The gate has two arms (both must hold for the tools to appear in tools/list
+// AND for tools/call to dispatch):
+//   1. state.models?.data contains `gemini-3.5-flash` with
+//      capabilities.supports.tool_calls === true
+//   2. process.env.GH_ROUTER_DISABLE_WORKER_TOOLS !== "1"
+// The tests below exercise each arm independently plus the full mocked-call
+// happy path, the engine's pre-fetch failure modes (semaphore overflow,
+// unknown model, worktree-without-git), and the silent thinking clamp.
+
+/**
+ * Build a synthetic model entry that DOES advertise tool_calls (the worker
+ * gate requires this) and an explicit reasoning_effort allowlist.
+ *
+ * `fakeModel` defaults to `supports: {}` (no tool_calls) so it cannot be
+ * used as-is for the worker gate. We deep-clone-ish via spread + override.
+ */
+const fakeWorkerModel = (
+  id: string,
+  opts: {
+    tool_calls?: boolean
+    reasoning_effort?: ReadonlyArray<string>
+  } = {},
+) => {
+  const base = fakeModel(id, ["/v1/chat/completions"])
+  return {
+    ...base,
+    capabilities: {
+      ...base.capabilities,
+      supports: {
+        ...(opts.tool_calls === false ? {} : { tool_calls: true }),
+        ...(opts.reasoning_effort
+          ? { reasoning_effort: [...opts.reasoning_effort] }
+          : {}),
+      },
+    },
+  }
+}
+
+/**
+ * Drop a single SSE chunk that finishes immediately. The worker streams
+ * `text_start`/`text_delta`/`text_end` events from the delta content and
+ * an assistant `message_end` from `finish_reason: "stop"` — the runWorkerAgent
+ * `agent.waitForIdle()` then resolves with `finalText` set to the delta text.
+ */
+function workerSseResponse(
+  text: string,
+  opts: { capturePayload?: (p: Record<string, unknown>) => void } = {},
+): typeof globalThis.fetch {
+  const chunks = [
+    {
+      choices: [
+        {
+          index: 0,
+          delta: { content: text },
+          finish_reason: null,
+        },
+      ],
+    },
+    {
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    },
+  ]
+  const body =
+    chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n"
+
+  return mock(async (_url: unknown, init?: { body?: string }) => {
+    if (opts.capturePayload && init?.body) {
+      try {
+        opts.capturePayload(JSON.parse(init.body) as Record<string, unknown>)
+      } catch {
+        // ignore
+      }
+    }
+    return new Response(body, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    })
+  }) as unknown as typeof globalThis.fetch
+}
+
+describe("/mcp worker_* tools — registration + gating", () => {
+  test("tools/list includes worker_explore + worker_implement when gemini-3.5-flash is present with tool_calls", async () => {
+    state.models = {
+      object: "list",
+      data: [...baseModels.data, fakeWorkerModel("gemini-3.5-flash")],
+    }
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 700,
+      method: "tools/list",
+    })
+    expect(status).toBe(200)
+    const result = json.result as { tools: Array<{ name: string }> }
+    const names = result.tools.map((t) => t.name)
+    expect(names).toContain("worker_explore")
+    expect(names).toContain("worker_implement")
+  })
+
+  test("tools/list omits both worker tools when GH_ROUTER_DISABLE_WORKER_TOOLS=1 (even if model is present)", async () => {
+    const prev = process.env.GH_ROUTER_DISABLE_WORKER_TOOLS
+    process.env.GH_ROUTER_DISABLE_WORKER_TOOLS = "1"
+    try {
+      state.models = {
+        object: "list",
+        data: [...baseModels.data, fakeWorkerModel("gemini-3.5-flash")],
+      }
+      const { json } = await rpc({
+        jsonrpc: "2.0",
+        id: 701,
+        method: "tools/list",
+      })
+      const names = (json.result as { tools: Array<{ name: string }> }).tools.map(
+        (t) => t.name,
+      )
+      expect(names).not.toContain("worker_explore")
+      expect(names).not.toContain("worker_implement")
+    } finally {
+      if (prev === undefined) delete process.env.GH_ROUTER_DISABLE_WORKER_TOOLS
+      else process.env.GH_ROUTER_DISABLE_WORKER_TOOLS = prev
+    }
+  })
+
+  test("tools/list omits both worker tools when gemini-3.5-flash is absent from catalog", async () => {
+    // baseModels already has NO gemini-3.5-flash — just confirm.
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 702,
+      method: "tools/list",
+    })
+    const names = (json.result as { tools: Array<{ name: string }> }).tools.map(
+      (t) => t.name,
+    )
+    expect(names).not.toContain("worker_explore")
+    expect(names).not.toContain("worker_implement")
+  })
+
+  test("tools/list omits both when gemini-3.5-flash is present WITHOUT tool_calls support", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        ...baseModels.data,
+        fakeWorkerModel("gemini-3.5-flash", { tool_calls: false }),
+      ],
+    }
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 703,
+      method: "tools/list",
+    })
+    const names = (json.result as { tools: Array<{ name: string }> }).tools.map(
+      (t) => t.name,
+    )
+    expect(names).not.toContain("worker_explore")
+    expect(names).not.toContain("worker_implement")
+  })
+
+  test("defense-in-depth: tools/call for worker_explore returns method-not-found when gate fails (even if client bypasses tools/list)", async () => {
+    // No gemini-3.5-flash in catalog → gate fails. A naive client could
+    // skip tools/list and hard-code the name; the call-time gate must
+    // reject identically to an unknown tool (-32601), keeping the gated
+    // surface functionally invisible.
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 704,
+      method: "tools/call",
+      params: { name: "worker_explore", arguments: { prompt: "hi" } },
+    })
+    expect(status).toBe(200)
+    const err = (json as { error?: { code: number; message: string } }).error
+    expect(err?.code).toBe(-32601)
+    expect(err?.message).toMatch(/unknown tool/i)
+  })
+})
+
+describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
+  beforeEach(() => {
+    state.models = {
+      object: "list",
+      data: [
+        ...baseModels.data,
+        fakeWorkerModel("gemini-3.5-flash", {
+          reasoning_effort: ["low", "medium", "high"],
+        }),
+      ],
+    }
+  })
+
+  test("worker_explore happy path returns assistant text in result.content[0].text", async () => {
+    globalThis.fetch = workerSseResponse("explore-result-text")
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 710,
+      method: "tools/call",
+      params: {
+        name: "worker_explore",
+        arguments: { prompt: "what does foo do?" },
+      },
+    })
+    expect(status).toBe(200)
+    const result = json.result as {
+      isError?: boolean
+      content: Array<{ type: string; text: string }>
+    }
+    expect(result.isError).toBeFalsy()
+    expect(result.content[0].text).toBe("explore-result-text")
+  })
+
+  test("worker_implement (worktree:false, default) returns assistant text — in-place edit path", async () => {
+    globalThis.fetch = workerSseResponse("implement-direct-result")
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 711,
+      method: "tools/call",
+      params: {
+        name: "worker_implement",
+        arguments: { prompt: "add a comment to README" },
+      },
+    })
+    const result = json.result as {
+      isError?: boolean
+      content: Array<{ text: string }>
+    }
+    expect(result.isError).toBeFalsy()
+    expect(result.content[0].text).toContain("implement-direct-result")
+  })
+
+  test("worker_implement (worktree:true) succeeds inside the github-router repo (which IS a git repo)", async () => {
+    // process.cwd() during tests is the github-router repo root — a real
+    // git repo, so createWorktree should succeed and emit assistant text.
+    // This validates the implement-worktree happy path round-trip.
+    globalThis.fetch = workerSseResponse("implement-worktree-result")
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 712,
+      method: "tools/call",
+      params: {
+        name: "worker_implement",
+        arguments: {
+          prompt: "fix the typo",
+          worktree: true,
+        },
+      },
+    })
+    const result = json.result as {
+      isError?: boolean
+      content: Array<{ text: string }>
+    }
+    expect(result.isError).toBeFalsy()
+    expect(result.content[0].text).toContain("implement-worktree-result")
+  })
+
+  test("9th concurrent worker call returns isError with 'Worker queue full' text (semaphore cap = 8)", async () => {
+    // Fill the worker semaphore directly, leaving zero slots. The next
+    // tools/call MUST return the engine's fast-fail envelope BEFORE
+    // attempting fetch — so no fetch mock is needed.
+    const releases: Array<() => void> = []
+    for (let i = 0; i < MAX_INFLIGHT_WORKER_CALLS; i += 1) {
+      const r = await acquireWorkerSlot()
+      if (!r) throw new Error("test setup: semaphore filled too early")
+      releases.push(r)
+    }
+    try {
+      const { json } = await rpc({
+        jsonrpc: "2.0",
+        id: 713,
+        method: "tools/call",
+        params: {
+          name: "worker_explore",
+          arguments: { prompt: "anything" },
+        },
+      })
+      const result = json.result as {
+        isError: boolean
+        content: Array<{ text: string }>
+      }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toMatch(/worker queue full/i)
+    } finally {
+      for (const release of releases) release()
+    }
+  })
+
+  test("model:'nonexistent' returns isError listing the catalog's tool_call-capable model ids", async () => {
+    // No fetch mock needed: resolveModelAndThinking fails BEFORE fetch.
+    // The error message must enumerate the catalog candidates so the
+    // caller can correct without guessing — gemini-3.5-flash is the
+    // only tool_call-capable model in the test catalog, so it should
+    // be the only one listed.
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 714,
+      method: "tools/call",
+      params: {
+        name: "worker_explore",
+        arguments: { prompt: "anything", model: "nonexistent" },
+      },
+    })
+    const result = json.result as {
+      isError: boolean
+      content: Array<{ text: string }>
+    }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain("Unknown model: nonexistent")
+    expect(result.content[0].text).toContain("gemini-3.5-flash")
+  })
+
+  test("thinking:'xhigh' against gemini-3.5-flash (max 'high') silently clamps to 'high' — no clamp notice in response text", async () => {
+    let captured: Record<string, unknown> | undefined
+    globalThis.fetch = workerSseResponse("silent-thinking-result", {
+      capturePayload: (p) => {
+        captured = p
+      },
+    })
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 715,
+      method: "tools/call",
+      params: {
+        name: "worker_explore",
+        arguments: { prompt: "hi", thinking: "xhigh" },
+      },
+    })
+    const result = json.result as {
+      isError?: boolean
+      content: Array<{ text: string }>
+    }
+    expect(result.isError).toBeFalsy()
+    // Response text MUST be exactly the assistant text — no clamp notice
+    // injected by the engine (the plan calls this out explicitly).
+    expect(result.content[0].text).toBe("silent-thinking-result")
+    expect(result.content[0].text).not.toMatch(/clamp|notice/i)
+    // The outbound payload's `reasoning_effort` field MUST be the
+    // clamped value ("high" — the highest allowed for this model),
+    // NOT the raw "xhigh" the caller asked for. We inspect the field
+    // directly rather than substring-scanning the full payload (the
+    // peer_review/advisor tool schemas legitimately mention "xhigh"
+    // as an enum value, which would create a false positive).
+    expect((captured as { reasoning_effort?: string }).reasoning_effort).toBe(
+      "high",
+    )
+  })
+
+  test("worker_implement worktree:true in a non-git cwd returns isError (hard fail, no silent fallback)", async () => {
+    // Move cwd into a fresh non-git temp dir. The engine's Step-4
+    // worktree provisioning calls `git rev-parse` and throws on
+    // non-zero exit; runWorkerAgent surfaces the throw as the isError
+    // envelope. No fetch mock — failure is pre-fetch.
+    const originalCwd = process.cwd()
+    const dir = mkdtempSync(join(tmpdir(), "gh-router-worker-noregister-"))
+    try {
+      process.chdir(dir)
+      const { json } = await rpc({
+        jsonrpc: "2.0",
+        id: 716,
+        method: "tools/call",
+        params: {
+          name: "worker_implement",
+          arguments: { prompt: "make a change", worktree: true },
+        },
+      })
+      const result = json.result as {
+        isError: boolean
+        content: Array<{ text: string }>
+      }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toMatch(
+        /not a (git )?repository|git unavailable/i,
+      )
+    } finally {
+      process.chdir(originalCwd)
+      try {
+        rmSync(dir, { recursive: true, force: true })
+      } catch {
+        // best effort
+      }
+    }
   })
 })

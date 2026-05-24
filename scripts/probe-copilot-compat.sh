@@ -139,6 +139,16 @@ declare -a PROBE_REGISTRY=(
   "codex_critic_xhigh_allowed|proxy-internal|peer-mcp-personas.ts: codex-critic.allowedEfforts INCLUDES 'xhigh' (post-SSE; xhigh is the default) — static check"
   "codex_reviewer_xhigh_allowed|proxy-internal|peer-mcp-personas.ts: codex-reviewer.allowedEfforts INCLUDES 'xhigh' (post-SSE; xhigh is the default) — static check"
   "gemini_critic_xhigh_rejected|proxy-internal|peer-mcp-personas.ts: gemini-critic.allowedEfforts EXCLUDES 'xhigh' (Copilot upstream-rejects) — static check"
+
+  # ===== Worker tools (load-bearing model+shape contract) =====
+  # The worker_explore / worker_implement MCP tools default to gemini-3.5-flash
+  # on /v1/chat/completions with stream:true + tools[] + reasoning_effort:"high".
+  # If Copilot ever tightens the validator (rejects the field combination, or
+  # drops reasoning_effort on this model), the worker tools degrade silently —
+  # the dual gate's first arm catches catalog miss / tool_calls=false, but only
+  # this probe catches the case where the model IS present and tool-capable but
+  # the body shape is rejected. See docs/peer-mcp-design.md "Worker tools".
+  "worker_gemini_tools_reasoning|exploratory|gemini-3.5-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'high' (load-bearing contract for worker_explore/worker_implement MCP tools)"
 )
 
 # ===========================================================================
@@ -560,6 +570,35 @@ probe_gemini_critic_xhigh_rejected() {
   assert_persona_excludes_tier \
     "gemini-critic" '"xhigh"' \
     "Copilot's gemini-3.x route 400s on xhigh; persona allowlist must reflect that"
+}
+
+# ===========================================================================
+# Worker-tools probes
+# ===========================================================================
+
+# End-to-end live probe: assert Copilot's /v1/chat/completions accepts the
+# exact body shape the worker-agent stream-fn emits — gemini-3.5-flash with
+# a tools[] array + reasoning_effort:"high". This is the load-bearing
+# contract for the worker_explore / worker_implement MCP tools (see
+# docs/peer-mcp-design.md "Worker tools" and docs/pi-vendor-sync.md).
+#
+# Failure mode this catches: Copilot tightens the gemini-3.5-flash validator
+# in a way that the dual gate cannot detect. The dual gate's catalog arm
+# only checks "model present + tool_calls advertised"; it does NOT exercise
+# the actual request shape. If the validator starts rejecting the
+# combination (or drops reasoning_effort on this model), the gate would
+# leave the tools advertised but every call would 400 — this probe surfaces
+# that regression upstream.
+probe_worker_gemini_tools_reasoning() {
+  do_request POST /v1/chat/completions '{
+    "model": "gemini-3.5-flash",
+    "messages": [{"role":"user","content":"reply with the literal string ok"}],
+    "tools": [{"type":"function","function":{"name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}}],
+    "tool_choice": "auto",
+    "reasoning_effort": "high",
+    "max_tokens": 50
+  }'
+  assert_status 200
 }
 
 # ===========================================================================
