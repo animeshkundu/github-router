@@ -58,7 +58,7 @@ Canonical Copilot tool-type allowlist (verbatim from a 400 in probe `tooltype_co
 | `thinking: {type:"adaptive"}` | ✅ 200 | claude-emits | (TODO) | Native Copilot shape |
 | `metadata: {user_id}` | ✅ 200 (passthrough) | claude-emits | (TODO) | Copilot 200s and ignores; not stripped per "preserve unknown fields unless documented" |
 | `mcp_servers: []` (empty array) | ✅ 200 (proxy passthrough; Copilot may 400, but harmless) | exploratory | (TODO) | Edge case |
-| `context_management.edits[].type=compact_20260112` | ✅ 200 | anthropic-docs | `compact_20260112` | Server-side compaction; `applied_edits:[]` returned. Need >50k input tokens to actually trigger — probe just confirms acceptance, not actual compaction firing |
+| `context_management.edits[].type=compact_20260112` | ❌ 400 in stealth, ✅ 200 with leverage betas | anthropic-docs | `compact_20260112` | Requires `anthropic-beta: compact-2026-01-12` forwarded to upstream. Stealth-default `bun run start` strips the beta → Copilot's allowlist drops to `{clear_thinking_20251015, clear_tool_uses_20250919}` and the body field 400s. `github-router claude` (extended-betas) forwards the beta and gets 200 + `applied_edits:[]`. Probe asserts the stealth-mode 400; leverage-mode acceptance is implicit via the `compact-` beta-prefix row. Strip-rule follow-up tracked in a separate PR. |
 | `context_management.edits[].type=clear_tool_uses_20250919` | ✅ 200 | anthropic-docs | `clear_tool_uses_20250919` | Context editing; clears old tool results |
 | `budget: {total_tokens}` | ✅ 200 (proxy strips) | claude-emits | (TODO) | Copilot 400s; proxy strips body field; `task-budgets-` beta header preserved |
 | `output_config: {schema}` (Structured Outputs full) | ✅ 200 (proxy strips schema, injects as system prompt) | claude-emits | (TODO) | Copilot 400s on `.schema`; proxy strips and injects schema-conforming instruction |
@@ -118,6 +118,7 @@ The proxy filters via `filterBetaHeader` in `src/lib/utils.ts`. Two lists:
 | `gpt-5.5` | (untested via this matrix — covered by codex-critic peer-MCP) | codex-emits | (TODO) | `/v1/responses` |
 | `gpt-5.3-codex` | (untested via this matrix) | codex-emits | (TODO) | `/v1/responses` |
 | `gemini-3.1-pro-preview` | (untested via this matrix) | exploratory | (TODO) | `/v1/chat/completions` |
+| `gemini-3.5-flash` | ✅ 200 (`/v1/chat/completions` accepts `tools[]` + `reasoning_effort:"high"`) | exploratory | `worker_gemini_tools_reasoning` | Default model for `worker_explore` / `worker_implement` MCP tools. Probe is load-bearing for the worker-tools dual gate (catalog arm verifies presence + `tool_calls`; this probe verifies the actual request shape Copilot's validator accepts). See [`docs/peer-mcp-design.md`](peer-mcp-design.md) "Worker tools" and [`docs/pi-vendor-sync.md`](pi-vendor-sync.md). |
 
 ## Web search — cross-endpoint native exposure (Task #2 empirical map)
 

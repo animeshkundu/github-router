@@ -62,11 +62,15 @@
     "fetch-event-stream": "^0.1.5",
     "gpt-tokenizer": "^3.0.1",
     "hono": "^4.9.9",
+    "ignore": "7.0.5",
+    "partial-json": "0.1.7",
     "proxy-from-env": "^1.1.0",
     "srvx": "^0.8.9",
     "tree-sitter-wasms": "^0.1.13",
+    "typebox": "1.1.38",
     "undici": "^7.16.0",
     "web-tree-sitter": "0.22.6",
+    "yaml": "2.9.0",
     "zod": "^4.1.11"
   },
   "devDependencies": {

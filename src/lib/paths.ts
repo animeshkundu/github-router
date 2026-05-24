@@ -114,6 +114,18 @@ export async function ensurePaths(): Promise<void> {
   await sweepStalePeerAgentMdFiles().catch((err) => {
     consola.debug("Peer-agent .md sweep skipped:", err)
   })
+  // Worker-agent boot-time PID+instance safety net. Walks the
+  // worker-repos.json ledger and removes any worktree dir whose
+  // <pid> is dead OR whose <instance> UUID doesn't match this proxy.
+  // Catches SIGKILL/OOM/host-crash escapees from prior sessions.
+  // Lazy-imported so the worker-agent module doesn't get loaded by
+  // every consumer of `paths.ts`.
+  await (async () => {
+    const mod = await import("./worker-agent/lifecycle")
+    await mod.sweepStaleWorktreesAtBoot()
+  })().catch((err) => {
+    consola.debug("Worker worktree boot sweep skipped:", err)
+  })
 }
 
 /**

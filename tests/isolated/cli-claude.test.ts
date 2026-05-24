@@ -16,11 +16,18 @@ class ExitError extends Error {
 const execFileSyncMock = mock()
 const execFileMock = mock()
 const spawnMock = mock()
+const spawnSyncMock = mock()
 
 mock.module("node:child_process", () => ({
   execFileSync: execFileSyncMock,
   execFile: execFileMock,
   spawn: spawnMock,
+  // worker-agent/bash.ts and lifecycle.ts use spawnSync (Windows
+  // taskkill, exit-handler sweep that can't await async). Without
+  // this, the static import graph pulled in by peer-mcp-personas →
+  // worker-agent fails at load with `Export named 'spawnSync' not
+  // found in module 'node:child_process'`.
+  spawnSync: spawnSyncMock,
 }))
 
 const exitMock = mock((code: number) => {
@@ -88,6 +95,13 @@ mock.module("~/lib/port", () => ({
   DEFAULT_CODEX_MODEL: "gpt-5.5",
   DEFAULT_CODEX_MODEL_FALLBACKS: ["gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex"],
   DEFAULT_PORT: 8787,
+  // The worker-agent surface (registered via peer-mcp-personas → tools.ts →
+  // create-responses.ts) statically imports these from ~/lib/port. The
+  // mock has to re-export them or any test that loads the worker static
+  // graph fails at import time with `Export named 'UPSTREAM_FETCH_TIMEOUT_MS'
+  // not found in module`. Values are the real defaults (per src/lib/port.ts).
+  UPSTREAM_FETCH_TIMEOUT_MS: 0,
+  UPSTREAM_INACTIVITY_TIMEOUT_MS: 300_000,
 }))
 
 mock.module("consola", () => ({

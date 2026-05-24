@@ -22,6 +22,13 @@
  */
 
 import { searchCode } from "./code-search"
+// Static import is safe: the previous module-init cycle (peer-mcp-personas
+// → worker-agent/index → engine → tools → peer-mcp-personas) was caused
+// by a top-level `assertCriticsMatchPersonas()` call in tools.ts that
+// read `PERSONAS_READ` mid-init. That runtime check has been moved into
+// a test (`tests/peer-mcp-persona-drift.test.ts`), so the cycle no
+// longer closes and a normal static import works.
+import { runWorkerAgent, type WorkerThinkingLevel } from "~/lib/worker-agent"
 import { searchWeb } from "~/services/copilot/web-search"
 
 /**
@@ -352,13 +359,16 @@ export function buildAgentPrompt(
  * sees that the peer tools and advisor exist; *when* to invoke is left
  * to Claude's judgment.
  *
- * Trimmed to <100 tokens by design. The per-tool descriptions are
+ * Trimmed to ~150 tokens by design. The per-tool descriptions are
  * already in Claude's context as MCP tool descriptions (loaded from
  * `tools/list`); the snippet's net-new value is:
  *   - the `advisor` mention (built-in, not MCP-discoverable),
  *   - the `peer-review-coordinator` fan-out hint,
  *   - the "subagents you spawn inherit these" claim (the load-bearing
- *     UX payoff of the holistic subagent-MCP-inheritance fix).
+ *     UX payoff of the holistic subagent-MCP-inheritance fix),
+ *   - the worker-tools "offload to save your context" framing (the
+ *     per-tool MCP descriptions cover capabilities; the snippet adds
+ *     the strategic when-to-use signal).
  *
  * Surface contract (regression-pinned in tests/peer-mcp-personas.test.ts):
  *   - Always lists codex_critic, codex_reviewer, opus_critic, advisor,
@@ -393,7 +403,7 @@ export function buildPeerAwarenessSnippet(opts: {
     "",
     `Cross-lab peer critics under \`mcp__gh-router-peers__*\` — ${criticList.join(
       ", ",
-    )} — plus the \`peer-review-coordinator\` fan-out subagent, and Claude Code's built-in \`advisor\` tool, are available at your discretion for second opinions and adversarial review. Subagents you spawn inherit them.${codexCliClause} Also \`mcp__gh-router-peers__code_search\` for accurate ranked code discovery (BM25F + tree-sitter) — prefer it over \`Grep\` when finding definitions or call sites.`,
+    )} — plus the \`peer-review-coordinator\` fan-out subagent, and Claude Code's built-in \`advisor\` tool, are available at your discretion for second opinions and adversarial review. Subagents you spawn inherit them.${codexCliClause} Also \`mcp__gh-router-peers__code_search\` for accurate ranked code discovery (BM25F + tree-sitter) — prefer it over \`Grep\` when finding definitions or call sites. \`worker_explore\` / \`worker_implement\` delegate bounded research or scoped coding tasks (file ops, edits, bash, web fetch) to an autonomous Gemini worker — offload work that would consume your context. Use \`worktree: true\` on \`worker_implement\` for isolated runs that return a diff for review.`,
   ].join("\n")
 }
 
@@ -439,6 +449,19 @@ export interface NonPersonaMcpTool {
   description: string
   /** JSON-schema for the tool's `arguments` object. */
   inputSchema: Record<string, unknown>
+  /**
+   * Optional capability tag the handler uses to drop the tool from
+   * `tools/list` and `tools/call` when the runtime gate is off. Today
+   * only `"worker"` is defined — the worker tools require Copilot's
+   * `gemini-3.5-flash` to be in the live catalog with `tool_calls`
+   * support AND the `GH_ROUTER_DISABLE_WORKER_TOOLS=1` opt-out to be
+   * unset (see `workerToolsEnabled()` in `routes/mcp/handler.ts`).
+   *
+   * Absent on `web_search` / `code_search` — those are always available
+   * once the proxy is in claude mode (loopback + nonce already gate
+   * `/mcp` itself).
+   */
+  capability?: "worker"
   /**
    * Server-side handler. Receives the raw `arguments` object from the
    * `tools/call` request and an optional AbortSignal that is signalled
@@ -721,4 +744,253 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         }
       },
     },
+    // worker_explore / worker_implement — autonomous worker tools backed
+    // by the Pi agent loop (`src/lib/worker-agent/engine.ts`), routed
+    // through Copilot's `gemini-3.5-flash` by default.
+    //
+    // GATING (`capability: "worker"`): the MCP handler drops both entries
+    // from `tools/list` and `tools/call` when `workerToolsEnabled()` is
+    // false. The gate fires when (a) `gemini-3.5-flash` is missing from
+    // the live Copilot catalog (or present but lacks `tool_calls`
+    // support), OR (b) the operator opted out via
+    // `GH_ROUTER_DISABLE_WORKER_TOOLS=1`. Defense-in-depth: the gate is
+    // checked at BOTH list-time and call-time so a client that hard-
+    // codes the tool name can't bypass the list-side filter.
+    //
+    // SCHEMA SHAPE: `prompt` is required; `model` / `thinking` are
+    // optional fine-tunes the worker engine validates against the live
+    // catalog (unknown model → isError envelope with the candidate
+    // list; unsupported thinking-tier → silent clamp to the model's
+    // max). `worker_implement` adds `worktree: boolean` to opt the
+    // worker into an isolated git worktree when atomic isolation
+    // matters more than in-place speed.
+    //
+    // HANDLER: thin closure over `runWorkerAgent` — every safety check
+    // (semaphore, model resolution, workspace canonicalization,
+    // worktree provisioning, budget, audit log, cleanup) lives inside
+    // the engine. The MCP layer only translates the JSON-RPC arguments
+    // into a typed `WorkerAgentOpts` and forwards the resulting
+    // `{text, isError?}` envelope verbatim.
+    {
+      toolNameHttp: "worker_explore",
+      capability: "worker",
+      description:
+        "Read-only investigation by an autonomous worker (Gemini via Pi). "
+        + "Tools: read, glob, grep, code_search, web_search, fetch_url, "
+        + "peer_review, advisor. Use it to offload bounded research "
+        + "(\"find files matching X then summarize\", \"how does library "
+        + "Y handle Z\", \"survey this codebase for usages of deprecated "
+        + "API\") that would otherwise eat your context window. The "
+        + "worker plans its own tool calls and returns a single text "
+        + "answer.",
+      inputSchema: {
+        type: "object",
+        required: ["prompt"],
+        additionalProperties: false,
+        properties: {
+          prompt: {
+            type: "string",
+            description:
+              "The investigation brief — what to find, read, or "
+              + "explain. The worker plans its own tool calls and "
+              + "returns a single text answer.",
+          },
+          model: {
+            type: "string",
+            description:
+              "Optional Copilot catalog model id (defaults to "
+              + "gemini-3.5-flash). Must advertise tool_calls "
+              + "support; the engine emits an isError envelope listing "
+              + "the eligible catalog models on mismatch.",
+          },
+          thinking: {
+            type: "string",
+            enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
+            description:
+              "Optional reasoning depth (default high). Silently "
+              + "clamped to the model's allowed range; \"off\" drops "
+              + "the parameter entirely.",
+          },
+        },
+      },
+      async handler(
+        args: Record<string, unknown>,
+        signal?: AbortSignal,
+      ): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        return runWorkerToolCall({ mode: "explore", args, signal })
+      },
+    },
+    {
+      toolNameHttp: "worker_implement",
+      capability: "worker",
+      description:
+        "Delegates a scoped coding task to an autonomous worker (Gemini "
+        + "via Pi). Modifies files in your workspace and can run shell "
+        + "commands. With `worktree: false` (default) edits in place — "
+        + "concurrent worker_implement calls and Claude's own edits to "
+        + "the same files will race. With `worktree: true` runs in an "
+        + "isolated git worktree and returns the diff for review. "
+        + "HARD ERROR if true and the workspace is not a git repository.",
+      inputSchema: {
+        type: "object",
+        required: ["prompt"],
+        additionalProperties: false,
+        properties: {
+          prompt: {
+            type: "string",
+            description:
+              "The coding task — what to change, build, or fix. The "
+              + "worker plans its own edit/write/bash sequence.",
+          },
+          worktree: {
+            type: "boolean",
+            description:
+              "When true, run inside a fresh git worktree and return "
+              + "Pi's final text followed by the unified diff (so the "
+              + "lead can review before merging). When false/omitted, "
+              + "edits the workspace in place — concurrent worker "
+              + "calls and Claude's own edits will race. HARD ERROR "
+              + "if true and the workspace is not a git repository.",
+          },
+          model: {
+            type: "string",
+            description:
+              "Optional Copilot catalog model id (defaults to "
+              + "gemini-3.5-flash). Must advertise tool_calls "
+              + "support; the engine emits an isError envelope listing "
+              + "the eligible catalog models on mismatch.",
+          },
+          thinking: {
+            type: "string",
+            enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
+            description:
+              "Optional reasoning depth (default high). Silently "
+              + "clamped to the model's allowed range; \"off\" drops "
+              + "the parameter entirely.",
+          },
+        },
+      },
+      async handler(
+        args: Record<string, unknown>,
+        signal?: AbortSignal,
+      ): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        return runWorkerToolCall({ mode: "implement", args, signal })
+      },
+    },
   ])
+
+/**
+ * Shared closure body for the two worker MCP tools. Validates the
+ * minimal arg shape (prompt required + optional knobs typed), then
+ * forwards to `runWorkerAgent` with `workspace = process.cwd()`. The
+ * engine performs every deeper validation (model existence, thinking
+ * clamp, worktree provisioning, semaphore acquisition) and never
+ * throws — its `{text, isError?}` envelope is forwarded verbatim into
+ * the MCP `tool result` shape.
+ *
+ * Arg-validation policy mirrors `web_search`'s pattern: shape errors
+ * surface as `isError: true` tool-result envelopes (NOT JSON-RPC -32602
+ * errors). The MCP `tools/list` JSON schema already documents the
+ * required/optional fields; this runtime check is defense against a
+ * client that ignores the schema.
+ */
+async function runWorkerToolCall(call: {
+  mode: "explore" | "implement"
+  args: Record<string, unknown>
+  signal?: AbortSignal
+}): Promise<{
+  content: Array<{ type: "text"; text: string }>
+  isError?: boolean
+}> {
+  const { mode, args, signal } = call
+  const prompt = typeof args.prompt === "string" ? args.prompt : ""
+  if (!prompt) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: `worker_${mode}: arguments.prompt is required (must be a non-empty string)`,
+        },
+      ],
+      isError: true,
+    }
+  }
+
+  // Optional knobs. Reject obviously-wrong types here so the engine
+  // doesn't have to defend against `model: 42` etc. Schema validation
+  // at the MCP client side should catch most of this; we still want
+  // a clean error path when a client bypasses the schema.
+  const model = args.model === undefined ? undefined : typeof args.model === "string" ? args.model : null
+  if (model === null) {
+    return {
+      content: [
+        { type: "text", text: `worker_${mode}: arguments.model must be a string when provided` },
+      ],
+      isError: true,
+    }
+  }
+  const thinkingRaw = args.thinking
+  const ALLOWED_THINKING: ReadonlyArray<WorkerThinkingLevel> = [
+    "off",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+  ]
+  let thinking: WorkerThinkingLevel | undefined
+  if (thinkingRaw !== undefined) {
+    if (
+      typeof thinkingRaw !== "string"
+      || !(ALLOWED_THINKING as ReadonlyArray<string>).includes(thinkingRaw)
+    ) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `worker_${mode}: arguments.thinking must be one of ${ALLOWED_THINKING.join("|")}`,
+          },
+        ],
+        isError: true,
+      }
+    }
+    thinking = thinkingRaw as WorkerThinkingLevel
+  }
+
+  let worktree: boolean | undefined
+  if (mode === "implement" && args.worktree !== undefined) {
+    if (typeof args.worktree !== "boolean") {
+      return {
+        content: [
+          { type: "text", text: `worker_implement: arguments.worktree must be a boolean when provided` },
+        ],
+        isError: true,
+      }
+    }
+    worktree = args.worktree
+  }
+
+  // `runWorkerAgent` is now statically imported at the top of this
+  // file — the cycle that previously forced a dynamic import has
+  // been broken by moving `assertCriticsMatchPersonas` out of
+  // tools.ts module init into a dedicated test.
+  const result = await runWorkerAgent({
+    mode,
+    prompt,
+    workspace: process.cwd(),
+    model,
+    thinking,
+    worktree,
+    signal,
+  })
+  return {
+    content: [{ type: "text", text: result.text }],
+    isError: result.isError,
+  }
+}

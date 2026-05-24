@@ -6,6 +6,7 @@ import consola from "consola"
 import type { Server } from "srvx"
 
 import { DEFAULT_CODEX_MODEL } from "./port"
+import { sweepRegistry } from "./worker-agent/lifecycle"
 
 /**
  * Auth-related env keys we strip from the parent before spawning the
@@ -293,6 +294,17 @@ export function launchChild(
   process.on("SIGTERM", onSignal)
 
   child.on("exit", (exitCode, signal) => {
+    // When the spawned CLI exits we may be holding worker-agent
+    // worktrees that the proxy will never get a chance to clean up
+    // through the per-call finally (the proxy itself is about to
+    // shut down). Drain them synchronously here — same sweep the
+    // SIGINT/SIGTERM handlers use. No-op if no worker tools were
+    // ever invoked (registry is null).
+    try {
+      sweepRegistry()
+    } catch {
+      // best-effort; don't let cleanup failures override the exit code
+    }
     // When killed by a signal, exitCode is null — derive from signal number
     const code = exitCode ?? (signal ? 128 : 1)
     cleanup().then(() => exit(code)).catch(() => exit(1))

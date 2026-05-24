@@ -25,6 +25,13 @@ import {
   type ResponsesApiResponse,
   type ResponsesPayload,
 } from "~/services/copilot/create-responses"
+import { DEFAULT_MODEL as WORKER_DEFAULT_MODEL } from "~/lib/worker-agent"
+import {
+  MAX_INFLIGHT_TOOLS_CALL,
+  acquireInFlightSlot,
+  currentInFlight,
+  __resetInFlightForTests as __resetInFlightSharedForTests,
+} from "~/lib/mcp-inflight"
 
 const MCP_PROTOCOL_VERSION = "2025-06-18"
 const SERVER_NAME = "github-router-peers"
@@ -46,9 +53,12 @@ const SERVER_VERSION = "1"
  *  per-call 429 → tool isError) is the real backpressure mechanism. 8 covers
  *  a 7-fork wave with one slot of headroom and is still a hard upper bound
  *  against runaway clients. See docs/research/peer-mcp-investigation.md
- *  § "Concurrency cap investigation" for the full justification.  */
-const MAX_INFLIGHT_TOOLS_CALL = 8
-let inFlightToolsCall = 0
+ *  § "Concurrency cap investigation" for the full justification.
+ *
+ *  The counter itself lives in `src/lib/mcp-inflight.ts` so the
+ *  worker-agent's nested `peer_review` / `advisor` tools share the
+ *  same budget — otherwise a worker could fan out unboundedly to
+ *  peers without showing up in the MCP-side cap. */
 
 /**
  * Per-request AbortController registry for `notifications/cancelled`
@@ -159,6 +169,40 @@ function geminiAvailable(): boolean {
   return models.some((m) => /^gemini-3\..*pro/i.test(m.id))
 }
 
+/**
+ * Gate for the worker tools (`worker_explore`, `worker_implement`).
+ *
+ * Returns true iff BOTH:
+ *   1. Copilot's live catalog (`state.models?.data`) contains the
+ *      worker's default model (`gemini-3.5-flash`) AND that entry
+ *      advertises `capabilities.supports.tool_calls === true`. The
+ *      worker loop is function-calling; a model that can't emit
+ *      tool_calls is unusable, so dormant-register (omit from
+ *      `tools/list`) keeps the surface honest.
+ *   2. The operator hasn't set `GH_ROUTER_DISABLE_WORKER_TOOLS=1`
+ *      (opt-out — workers ship enabled by default per plan).
+ *
+ * Callers that pass `model: <non-default>` bypass this list-time
+ * gate but still hit the per-call `resolveModelAndThinking`
+ * validation in the engine, which surfaces a clean `isError`
+ * envelope with the catalog's eligible model ids on mismatch.
+ *
+ * `WORKER_DEFAULT_MODEL` is imported (aliased from `DEFAULT_MODEL`)
+ * from `src/lib/worker-agent` so the engine owns the single source
+ * of truth. Previously this was a parallel `const` here; the parallel
+ * declaration was demoted to an alias-import after codex review HIGH
+ * caught the drift risk (the gate would silently disagree with the
+ * engine if the default ever changed in one place but not the other).
+ */
+function workerToolsEnabled(): boolean {
+  if (process.env.GH_ROUTER_DISABLE_WORKER_TOOLS === "1") return false
+  const models = state.models?.data
+  if (!models) return false
+  const found = models.find((m) => m.id === WORKER_DEFAULT_MODEL)
+  if (!found) return false
+  return found.capabilities?.supports?.tool_calls === true
+}
+
 function activePersonas(): Array<PersonaSpec> {
   // Drop personas whose model family is missing from Copilot's live
   // catalog (currently only gemini-critic, gated by `requiresGeminiCatalog`).
@@ -202,11 +246,16 @@ function toolEntries(): Array<ToolEntry> {
       },
     },
   }))
-  // Append non-persona utility tools (currently just `web_search`). They
-  // share the same `tools/list` surface but have their own input schemas
-  // (no prompt/context/effort) and skip the per-persona validation gates
-  // in handleToolsCall.
-  const nonPersonaEntries: Array<ToolEntry> = NON_PERSONA_MCP_TOOLS.map(
+  // Append non-persona utility tools (`web_search`, `code_search`, and
+  // — when the runtime gate passes — `worker_explore`/`worker_implement`).
+  // They share the same `tools/list` surface but have their own input
+  // schemas (no prompt/context/effort) and skip the per-persona
+  // validation gates in handleToolsCall. Per-tool `capability` tag
+  // drives the runtime gate (today only `"worker"` is defined; see
+  // `workerToolsEnabled()`).
+  const nonPersonaEntries: Array<ToolEntry> = NON_PERSONA_MCP_TOOLS.filter(
+    (t) => t.capability !== "worker" || workerToolsEnabled(),
+  ).map(
     (t) => ({
       name: t.toolNameHttp,
       description: t.description,
@@ -221,7 +270,11 @@ function buildUserText(prompt: string, context?: string): string {
   return `${prompt}\n\n---\n\nAdditional context:\n${context}`
 }
 
-function extractResponsesText(response: ResponsesApiResponse): string {
+// Exported so `src/lib/worker-agent/tools.ts` (worker `advisor` tool)
+// can extract assistant text from a /responses payload without
+// re-implementing the walk. Single source of truth — keep behavior
+// changes here, not in a sibling copy.
+export function extractResponsesText(response: ResponsesApiResponse): string {
   const out: Array<string> = []
   for (const item of response.output) {
     if (typeof item !== "object" || item === null) continue
@@ -398,7 +451,11 @@ function jsonPathPreflightCap(body: JsonRpcRequest):
   )
 }
 
-async function callPersona(
+// Exported so `src/lib/worker-agent/tools.ts` (worker `peer_review` tool)
+// can reuse the same persona dispatch — single source of truth for the
+// per-endpoint Copilot request shape (Responses vs Messages vs
+// chat-completions). Behavior unchanged; widening visibility only.
+export async function callPersona(
   persona: PersonaSpec,
   prompt: string,
   context: string | undefined,
@@ -568,6 +625,24 @@ async function handleToolsCall(
     )
   }
 
+  // Defense-in-depth: even if a client hard-codes a tool name to bypass
+  // the `tools/list` filter, the call-time gate runs the SAME
+  // `workerToolsEnabled()` check and rejects with -32601 (same code as
+  // an unknown tool — the gated tool is functionally invisible). This
+  // mirrors the list-time filter in `toolEntries()` exactly so the
+  // two surfaces stay symmetric.
+  if (
+    nonPersonaTool
+    && nonPersonaTool.capability === "worker"
+    && !workerToolsEnabled()
+  ) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+
   // Persona-only validation: prompt required, effort schema-checked
   // against EFFORT_LEVELS and gated by per-persona allowedEfforts. None
   // of this applies to non-persona tools (no prompt, no effort).
@@ -629,9 +704,12 @@ async function handleToolsCall(
   // jsonPathPreflightCap returns undefined when persona lookup misses,
   // which naturally exempts non-persona tools).
 
-  if (inFlightToolsCall >= MAX_INFLIGHT_TOOLS_CALL) {
-    // Documented per-call cap. NOT silent serialization — surface the
-    // backpressure so Opus knows to retry shortly.
+  // Documented per-call cap. NOT silent serialization — surface the
+  // backpressure so Opus knows to retry shortly. The slot is held in
+  // the shared mcp-inflight counter so worker-side nested peer/advisor
+  // calls compete for the same 8-wide budget.
+  const release = acquireInFlightSlot()
+  if (!release) {
     return rpcResult(body.id, {
       content: [
         {
@@ -642,8 +720,6 @@ async function handleToolsCall(
       isError: true,
     })
   }
-
-  inFlightToolsCall++
   const startedAt = Date.now()
   // Phase D P1.5: register an AbortController so notifications/cancelled
   // can free the slot. Use the JSON-RPC request id as the key — clients
@@ -707,7 +783,7 @@ async function handleToolsCall(
       isError: true,
     })
   } finally {
-    inFlightToolsCall--
+    release()
     if (abortKey !== undefined) {
       inflightAborts.delete(abortKey)
     }
@@ -1154,10 +1230,10 @@ export function handleMcpDelete(c: Context): Response {
 
 /** Test helper: reset in-flight counter between tests. */
 export function __resetInFlightForTests(): void {
-  inFlightToolsCall = 0
+  __resetInFlightSharedForTests()
 }
 
 /** Test helper: peek the in-flight counter. */
 export function __getInFlightForTests(): number {
-  return inFlightToolsCall
+  return currentInFlight()
 }

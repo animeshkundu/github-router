@@ -320,3 +320,76 @@ The internal `CodeSearchResponse` type in `src/lib/code-search.ts` is rich on pu
 ### Adding a new MCP tool
 
 For each proposed input or output field, answer in one sentence: **"What would the model do with this?"** If the answer is "nothing" or "look at it for context but not act on it," cut it. Default to absent — adding back later is cheap; pulling out a field clients have already learned to expect is breaking.
+
+## Worker tools (`worker_explore`, `worker_implement`)
+
+Two non-persona MCP tools — `mcp__gh-router-peers__worker_explore` and `mcp__gh-router-peers__worker_implement` — delegate scoped work to an **autonomous worker subagent** backed by the **Pi agent runtime** (vendored at `src/vendor/pi/`) and routed through Copilot's `gemini-3.5-flash` by default. The worker plans its own tool calls, decides when it's done, and returns a single text answer (plus a unified diff when `worktree: true`). Implementation: `src/lib/worker-agent/engine.ts` (`runWorkerAgent`) and `src/lib/worker-agent/tools.ts` (the 11 worker-side `AgentTool` definitions).
+
+### Tool surface
+
+| Tool | Mode | Tools the worker can call | Worktree opt-in | Description |
+| --- | --- | --- | --- | --- |
+| `worker_explore` | read-only | `read`, `glob`, `grep`, `code_search`, `web_search`, `fetch_url`, `peer_review`, `advisor` (8) | n/a | Read-only investigation — the worker plans its own searches/reads and returns a single text answer. |
+| `worker_implement` | read+write | explore tools + `edit`, `write`, `bash` (11) | `worktree: boolean` (default `false`) | Scoped coding task; modifies files in your workspace. With `worktree: true` runs in a fresh git worktree and returns Pi's text followed by the unified diff. With `worktree: false` edits in place — concurrent calls race. |
+
+Both tools accept optional `model` (any Copilot catalog model with `tool_calls` support; default `gemini-3.5-flash`) and `thinking` (one of `off`/`minimal`/`low`/`medium`/`high`/`xhigh`, default `high`, silently clamped to the model's allowed range).
+
+### Dual gate (catalog + opt-out)
+
+`workerToolsEnabled()` in `src/routes/mcp/handler.ts` drops both worker tools from `tools/list` AND `tools/call` when EITHER:
+
+1. The operator set `GH_ROUTER_DISABLE_WORKER_TOOLS=1`, OR
+2. `gemini-3.5-flash` is missing from the live Copilot catalog, OR present but lacks `tool_calls` support.
+
+This is defense-in-depth — a client that hard-codes the tool name still fails at call-time rather than seeing a useless dormant registration. The default model lives at `src/lib/worker-agent/engine.ts:DEFAULT_MODEL` and is re-imported by the handler (`import { DEFAULT_MODEL as WORKER_DEFAULT_MODEL } from "~/lib/worker-agent"`) so there is no parallel constant to drift.
+
+### Budget caps (turns / wallclock / tool-bytes — NOT tokens or cost)
+
+Every worker run gets a `Budget` (`src/lib/worker-agent/budget.ts`) wired through Pi's `beforeToolCall` (cap check, blocks the call with a clear reason) and `prepareNextTurn` (turn counter) hooks. Three caps, all env-overridable:
+
+| Cap | Default | Env override | Where it fires |
+| --- | --- | --- | --- |
+| Max turns | 500 | `GH_ROUTER_WORKER_MAX_TURNS` | `beforeToolCall` → `block: true, reason: "[halted: turns]"` |
+| Max wall-clock | 30 minutes | `GH_ROUTER_WORKER_MAX_WALLCLOCK_MS` | `beforeToolCall` + a `setTimeout(agent.abort)` belt-and-suspenders that tears down mid-bash |
+| Max cumulative tool-output bytes | 16 MiB | `GH_ROUTER_WORKER_MAX_TOOL_BYTES` | `afterToolCall` records, `beforeToolCall` blocks |
+| Advisor transcript chars | 720 000 | `GH_ROUTER_WORKER_ADVISOR_MAX_CHARS` | `advisor` tool truncation (matches `ADVISOR_MAX_CONVERSATION_CHARS` in `src/services/advisor/advisor.ts`) |
+
+**No token/cost accounting.** Counting tokens would require duplicating Anthropic/Copilot's tokenizer choices per model; the caps above are model-agnostic proxies that hit the same SRE concern (runaway loops, runaway resource use) without that complexity.
+
+### File-size caps (read/write/ripgrep stdout)
+
+All three are 10 MiB, matching `MAX_STDOUT_BYTES` in `src/lib/code-search.ts:106` so worker file IO and the `code_search` MCP tool share the same upstream-output bound. Worker `read` rejects files >10 MiB with a clean throw; `write` and `edit` reject results >10 MiB; `bash`'s ripgrep wrapper kills the child on >10 MiB stdout and resolves with truncated text + a flag. These are constants in `src/lib/worker-agent/tools.ts` (`READ_MAX_BYTES`, `WRITE_MAX_BYTES`, `RG_STDOUT_CAP`).
+
+### Worktree mode (per-call auto-clean + crash-safe sweep)
+
+With `worker_implement` + `worktree: true`, the engine provisions a fresh git worktree under `<repo>/.git/worktrees/worker-<pid>-<uuid>-<rand>` on a new branch, runs the worker isolated, captures `git diff HEAD` after `git add -N .` (so untracked files appear), and removes the worktree in the per-call `finally`. Three layers of safety net against orphans:
+
+1. **Per-call `finally`** — happy path, fires on success AND mid-loop throws.
+2. **Session-end signal sweep** — `registerExitHandlers` in `src/lib/worker-agent/lifecycle.ts` installs SIGINT/SIGTERM/exit handlers that walk the per-process registry and `git worktree remove --force` everything. SIGINT/SIGTERM handlers re-raise (`process.kill(pid, sig)` after removing themselves) so the conventional `128 + signum` exit code is preserved.
+3. **Boot-time sweep** — every proxy launch reads `.claude/worker-repos.json` (the per-proxy ledger of repos this proxy has ever touched), walks `git worktree list` for each, and removes entries whose name matches `worker-<PID>-...` AND whose PID is no longer alive AND whose instance UUID doesn't match this proxy's. The digit-PID prefix + UUID match is critical — a regex relaxation would risk deleting user-authored worktrees with similar names. Quota: 20 entries per repo; oldest LRU evicted.
+
+### MCP in-flight cap participation
+
+The worker's `peer_review` and `advisor` tools (which dispatch to peer-model personas / the advisor responses endpoint from inside the worker's Pi loop) acquire the **same** `MAX_INFLIGHT_TOOLS_CALL = 8` slot as MCP-boundary persona calls. Implementation: `src/lib/mcp-inflight.ts` exports `acquireInFlightSlot()`; both `src/routes/mcp/handler.ts` (for `tools/call` dispatch) and `src/lib/worker-agent/tools.ts` (for nested peer/advisor) acquire from it. Without this shared counter, a single worker could fan out unboundedly to peers and starve the operator's own MCP traffic; with it, nested calls return a clean `Peer MCP queue full` tool error and the worker model can back off.
+
+### Bash hardening
+
+Worker `bash` runs through `src/lib/worker-agent/bash.ts` with:
+
+- **Strict env allowlist** (NOT denylist) — only `PATH`, `HOME`/`USERPROFILE`, locale (`LANG`/`LC_ALL`/`TZ`), temp dirs (`TMPDIR`/`TEMP`/`TMP`), and Windows essentials (`SystemRoot`, `ComSpec`, `PATHEXT`, `USERNAME`, `APPDATA`, `LOCALAPPDATA`, `windir`, `SystemDrive`, `ProgramFiles`, `ProgramFiles(x86)`, `ProgramData`) survive. **All `GH_ROUTER_*`, `GITHUB_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `COPILOT_TOKEN`** are dropped. Adding a key requires it to be (a) genuinely required for typical shell invocations AND (b) unable to carry the user's credentials.
+- **POSIX `bash -c`** (not `-lc`) — skips `.profile`/`.bashrc` so the operator's shell aliases can't redefine `rm`, `git`, etc. under the worker's feet.
+- **Windows `taskkill /T /F`** for descendant teardown; POSIX uses negative-PID process group kill. 2-second SIGTERM→SIGKILL grace on POSIX.
+- **Per-stream 1 MiB output cap** + per-call configurable timeout.
+- **Opt-in network deny** via `GH_ROUTER_WORKER_DISABLE_NETWORK=1` — a caller-side regex on the raw `cmd` string rejects obvious egress commands (`curl`, `wget`, `nc`, `npm install`, etc.) BEFORE `spawn`.
+
+### Path-containment denylist (read/glob/grep/code_search)
+
+The worker's read-only file tools refuse paths matching `.env*`, `*.pem`, `id_rsa*`, `id_ed25519*`, anything under `.git/` (interior, not the worktree root), `.ssh/`, `.gnupg/`, `.npmrc`, `.netrc`. The intent is "don't make it trivial for a confused worker to exfiltrate the operator's secrets via tool-result text"; the threat model is honest about not being defense against a determined caller (the same operator could run `worker_implement` with `bash` and `cat` the file directly).
+
+### Vendored Pi runtime
+
+The Pi agent runtime (`@earendil-works/pi-agent-core` + a minimal `pi-ai` slice) is **vendored** at `src/vendor/pi/` rather than depended on via `package.json`. The vendor sync protocol — how to refresh the snapshot, what to keep in sync, and what to deliberately diverge on — is documented in [`pi-vendor-sync.md`](pi-vendor-sync.md). MIT attribution is preserved verbatim in `src/vendor/pi/LICENSE` and via comment headers on every vendored file.
+
+### Compatibility probe (`gemini-3.5-flash` accepts `tools` + `reasoning_effort`)
+
+The probe set asserts that Copilot's `/v1/chat/completions` accepts a `tools` array plus `reasoning_effort: "high"` on `gemini-3.5-flash`. Without this contract holding, both worker tools degrade to dormant (the dual gate fires on the catalog check). Probe id `worker_gemini_tools_reasoning` in `scripts/probe-copilot-compat.sh`; matrix row in `docs/copilot-compat-matrix.md`.
