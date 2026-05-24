@@ -1816,11 +1816,14 @@ export async function searchCode(
   // Render output hits. rg paths are already relative to cwd
   // (we spawned with target ".") so no extra resolution needed.
   // Strip the leading "./" or ".\" that rg prepends when target=".".
+  // Then normalize separators to "/" so output is platform-agnostic
+  // (Windows rg returns "src\foo.ts"; models and tests expect "/").
   const results: Array<CodeSearchHit> = kept.map((sh) => {
     let file = sh.hit.file
     if (file.startsWith("./") || file.startsWith(".\\")) {
       file = file.slice(2)
     }
+    file = file.replace(/\\/g, "/")
     const baseHit: CodeSearchHit = {
       file,
       line: sh.hit.line,
