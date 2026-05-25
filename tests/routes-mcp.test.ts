@@ -149,7 +149,7 @@ describe("/mcp protocol methods", () => {
     expect(res.status).toBe(202)
   })
 
-  test("tools/list returns 4 personas + web_search + code_search when gemini is in catalog", async () => {
+  test("tools/list returns 4 personas + web_search + code_search + stand_in when all required models are in catalog", async () => {
     const { status, json } = await rpc({
       jsonrpc: "2.0",
       id: 2,
@@ -165,6 +165,7 @@ describe("/mcp protocol methods", () => {
       "codex_reviewer",
       "gemini_critic",
       "opus_critic",
+      "stand_in",
       "web_search",
     ])
     for (const t of result.tools) {
@@ -173,7 +174,7 @@ describe("/mcp protocol methods", () => {
     }
   })
 
-  test("tools/list omits gemini_critic when no gemini-3.x-pro in catalog (web_search + code_search still present)", async () => {
+  test("tools/list omits gemini_critic AND stand_in when no gemini-3.x-pro in catalog (web_search + code_search still present)", async () => {
     state.models = {
       object: "list",
       data: baseModels.data.filter((m) => !m.id.startsWith("gemini")),
@@ -948,6 +949,232 @@ describe("/mcp tools/call routing", () => {
     const result = json.result as { content: Array<{ text: string }>; isError: boolean }
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain("codex-critic")
+  })
+})
+
+describe("/mcp stand_in tool", () => {
+  // ──────────────────────────────────────────────────────────────────
+  // Helper: mock all three peer upstreams in one fetch shim. Routes by
+  // URL to the appropriate response shape (Responses / Messages / Chat
+  // Completions). Each model is given a queue of pre-canned vote JSON
+  // strings; nth call consumes nth entry.
+  // ──────────────────────────────────────────────────────────────────
+  function mockThreePeers(queues: {
+    "gpt-5.5": Array<string>
+    "claude-opus-4-7": Array<string>
+    "gemini-3.1-pro-preview": Array<string>
+  }) {
+    const consumed = { "gpt-5.5": 0, "claude-opus-4-7": 0, "gemini-3.1-pro-preview": 0 }
+    globalThis.fetch = mock(async (url) => {
+      const u = typeof url === "string" ? url : (url as URL).toString()
+      let text: string
+      if (u.includes("/responses")) {
+        text = queues["gpt-5.5"][consumed["gpt-5.5"]++]
+        return new Response(JSON.stringify({
+          id: "resp_test",
+          object: "response",
+          status: "completed",
+          output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text }] }],
+        }), { status: 200, headers: { "content-type": "application/json" } })
+      }
+      if (u.includes("/v1/messages")) {
+        text = queues["claude-opus-4-7"][consumed["claude-opus-4-7"]++]
+        return new Response(JSON.stringify({
+          id: "msg_test", type: "message", role: "assistant", model: "claude-opus-4-7",
+          content: [{ type: "text", text }], stop_reason: "end_turn",
+        }), { status: 200, headers: { "content-type": "application/json" } })
+      }
+      // chat completions (gemini)
+      text = queues["gemini-3.1-pro-preview"][consumed["gemini-3.1-pro-preview"]++]
+      return new Response(JSON.stringify({
+        id: "chatcmpl_test", object: "chat.completion", created: 0,
+        model: "gemini-3.1-pro-preview",
+        choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop", logprobs: null }],
+      }), { status: 200, headers: { "content-type": "application/json" } })
+    }) as unknown as typeof globalThis.fetch
+    return { consumed }
+  }
+
+  const VOTE_A_HIGH = JSON.stringify({ choice: "A", confidence: 0.9, reasoning: "A wins on tree-shaking" })
+  const TINY_INPUT = {
+    decision: "Which date library?",
+    options: [
+      { id: "A", summary: "date-fns" },
+      { id: "B", summary: "luxon" },
+    ],
+  }
+
+  test("tools/call stand_in dispatches to all three peers and returns a consensus envelope", async () => {
+    mockThreePeers({
+      "gpt-5.5":                [VOTE_A_HIGH],
+      "claude-opus-4-7":        [VOTE_A_HIGH],
+      "gemini-3.1-pro-preview": [VOTE_A_HIGH],
+    })
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 4001,
+      method: "tools/call",
+      params: { name: "stand_in", arguments: TINY_INPUT },
+    })
+    expect(status).toBe(200)
+    const result = json.result as { content: Array<{ text: string }>; isError?: boolean }
+    expect(result.isError).toBeUndefined()
+    // The handler JSON-stringifies the StandInResult into a single text
+    // block — re-parse it and assert verdict shape.
+    const parsed = JSON.parse(result.content[0].text) as {
+      verdict: string; recommendation: string | null; confidence: number
+    }
+    expect(parsed.verdict).toBe("consensus")
+    expect(parsed.recommendation).toBe("A")
+  })
+
+  test("tools/call stand_in releases its in-flight slot after completion (slot count returns to 0)", async () => {
+    mockThreePeers({
+      "gpt-5.5":                [VOTE_A_HIGH],
+      "claude-opus-4-7":        [VOTE_A_HIGH],
+      "gemini-3.1-pro-preview": [VOTE_A_HIGH],
+    })
+    expect(__getInFlightForTests()).toBe(0)
+    await rpc({
+      jsonrpc: "2.0",
+      id: 4002,
+      method: "tools/call",
+      params: { name: "stand_in", arguments: TINY_INPUT },
+    })
+    // Slot count returns to 0 after the call (cleanup invariant).
+    expect(__getInFlightForTests()).toBe(0)
+  })
+
+  test("stand_in holds exactly ONE in-flight slot despite making 3 internal upstream calls", async () => {
+    // Suspend the gemini upstream until we've peeked the in-flight
+    // counter. The other two mocks resolve immediately, but the
+    // stand_in orchestrator awaits the parallel Promise.all of all
+    // three — so the slot stays acquired until gemini's promise settles.
+    let releaseGemini!: () => void
+    const geminiPending = new Promise<void>((resolve) => { releaseGemini = resolve })
+
+    globalThis.fetch = mock(async (url) => {
+      const u = typeof url === "string" ? url : (url as URL).toString()
+      if (u.includes("/responses")) {
+        return new Response(JSON.stringify({
+          id: "r", object: "response", status: "completed",
+          output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: VOTE_A_HIGH }] }],
+        }), { status: 200, headers: { "content-type": "application/json" } })
+      }
+      if (u.includes("/v1/messages")) {
+        return new Response(JSON.stringify({
+          id: "m", type: "message", role: "assistant", model: "claude-opus-4-7",
+          content: [{ type: "text", text: VOTE_A_HIGH }], stop_reason: "end_turn",
+        }), { status: 200, headers: { "content-type": "application/json" } })
+      }
+      await geminiPending
+      return new Response(JSON.stringify({
+        id: "c", object: "chat.completion", created: 0, model: "gemini-3.1-pro-preview",
+        choices: [{ index: 0, message: { role: "assistant", content: VOTE_A_HIGH }, finish_reason: "stop", logprobs: null }],
+      }), { status: 200, headers: { "content-type": "application/json" } })
+    }) as unknown as typeof globalThis.fetch
+
+    const callPromise = rpc({
+      jsonrpc: "2.0",
+      id: 4003,
+      method: "tools/call",
+      params: { name: "stand_in", arguments: TINY_INPUT },
+    })
+
+    // Give the event loop a few turns to start the upstream calls and
+    // acquire the slot. With 3 parallel internal calls, this would be 3
+    // slots if dispatchModelCall re-acquired — but it does NOT (per the
+    // CLAUDE.md invariant): only the MCP boundary acquires a slot.
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    expect(__getInFlightForTests()).toBe(1)
+
+    releaseGemini()
+    await callPromise
+    expect(__getInFlightForTests()).toBe(0)
+  })
+
+  test("JSON-path tools/call with oversized stand_in input hits predictedTooLong cap (slot NOT acquired)", async () => {
+    // Same pattern as the codex_critic predictedTooLong test above. The
+    // cap fires in handleMcpPost BEFORE handleToolsCall, so no upstream
+    // fetch and no slot acquisition. The error message must point the
+    // caller at the SSE bypass.
+    const sentinel = mock(async () => {
+      throw new Error("upstream MUST NOT be called when pre-flight rejects")
+    })
+    globalThis.fetch = sentinel as unknown as typeof globalThis.fetch
+
+    const oversizedContext = "x".repeat(7 * 1024)
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+          accept: "application/json", // NO text/event-stream
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 4004,
+          method: "tools/call",
+          params: {
+            name: "stand_in",
+            arguments: { ...TINY_INPUT, context: oversizedContext },
+          },
+        }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as {
+      id?: number
+      result?: { content: Array<{ text: string }>; isError?: boolean }
+    }
+    expect(json.id).toBe(4004)
+    expect(json.result?.isError).toBe(true)
+    expect(json.result?.content[0].text).toMatch(/pre-flight rejected/i)
+    expect(json.result?.content[0].text).toContain("stand_in")
+    expect(json.result?.content[0].text).toContain("text/event-stream")
+    expect(sentinel).not.toHaveBeenCalled()
+    expect(__getInFlightForTests()).toBe(0)
+  })
+
+  test("tools/call stand_in returns isError on shape failure (missing options)", async () => {
+    const sentinel = mock(async () => {
+      throw new Error("upstream MUST NOT be called when arg validation rejects")
+    })
+    globalThis.fetch = sentinel as unknown as typeof globalThis.fetch
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 4005,
+      method: "tools/call",
+      params: { name: "stand_in", arguments: { decision: "pick one" } },
+    })
+    expect(status).toBe(200)
+    const result = json.result as { content: Array<{ text: string }>; isError?: boolean }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain("options")
+    expect(sentinel).not.toHaveBeenCalled()
+  })
+
+  test("tools/list omits stand_in when gpt-5.5 is missing from catalog (other personas + tools still present)", async () => {
+    state.models = {
+      object: "list",
+      data: baseModels.data.filter((m) => m.id !== "gpt-5.5"),
+    }
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 4006,
+      method: "tools/list",
+    })
+    const result = json.result as { tools: Array<{ name: string }> }
+    const names = result.tools.map((t) => t.name)
+    expect(names).not.toContain("stand_in")
+    // codex_critic remains (it uses gpt-5.5 too, but its gating is at
+    // request time via resolveModel; the registration gate is only on
+    // requiresGeminiCatalog). Verify by presence:
+    expect(names).toContain("codex_critic")
+    expect(names).toContain("opus_critic")
+    expect(names).toContain("web_search")
   })
 })
 

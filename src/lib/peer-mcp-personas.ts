@@ -30,6 +30,7 @@ import { searchCode } from "./code-search"
 // longer closes and a normal static import works.
 import { runWorkerAgent, type WorkerThinkingLevel } from "~/lib/worker-agent"
 import { searchWeb } from "~/services/copilot/web-search"
+import { runStandIn, type StandInInput } from "~/lib/stand-in"
 
 /**
  * Reasoning effort levels accepted by Copilot's /v1/responses (gpt-5.x) and
@@ -451,17 +452,21 @@ export interface NonPersonaMcpTool {
   inputSchema: Record<string, unknown>
   /**
    * Optional capability tag the handler uses to drop the tool from
-   * `tools/list` and `tools/call` when the runtime gate is off. Today
-   * only `"worker"` is defined — the worker tools require Copilot's
-   * `gemini-3.5-flash` to be in the live catalog with `tool_calls`
-   * support AND the `GH_ROUTER_DISABLE_WORKER_TOOLS=1` opt-out to be
-   * unset (see `workerToolsEnabled()` in `routes/mcp/handler.ts`).
+   * `tools/list` and `tools/call` when the runtime gate is off.
+   *
+   * - `"worker"` (worker_explore / worker_implement) requires Copilot's
+   *   `gemini-3.5-flash` to be in the live catalog with `tool_calls`
+   *   support AND `GH_ROUTER_DISABLE_WORKER_TOOLS=1` to be unset
+   *   (see `workerToolsEnabled()` in `routes/mcp/handler.ts`).
+   * - `"stand_in"` requires all three of `gpt-5.5`, `claude-opus-4-7`,
+   *   and a `gemini-3.X.*pro` model to be in the live catalog (see
+   *   `standInToolEnabled()` in `routes/mcp/handler.ts`).
    *
    * Absent on `web_search` / `code_search` — those are always available
    * once the proxy is in claude mode (loopback + nonce already gate
    * `/mcp` itself).
    */
-  capability?: "worker"
+  capability?: "worker" | "stand_in"
   /**
    * Server-side handler. Receives the raw `arguments` object from the
    * `tools/call` request and an optional AbortSignal that is signalled
@@ -883,6 +888,104 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         return runWorkerToolCall({ mode: "implement", args, signal })
       },
     },
+    {
+      // stand_in — three-lab away-mode advisor. Polls gpt-5.5 xhigh +
+      // claude-opus-4-7 xhigh + gemini-3.1-pro-preview high in two
+      // structured voting rounds (blind R1 → informed R2) and returns
+      // a ranked-choice verdict. Implementation: src/lib/stand-in.ts.
+      //
+      // GATING (`capability: "stand_in"`): the MCP handler drops the
+      // entry from `tools/list` and `tools/call` when any of the three
+      // required models is missing from Copilot's live catalog. See
+      // `standInToolEnabled()` in `routes/mcp/handler.ts`.
+      //
+      // SCOPE BOUND: the tool is an ADVISOR, not a decider. Recommends,
+      // never executes. Dangerous actions (push, delete, drop, deploy)
+      // remain gated by the user-confirmation discipline in CLAUDE.md
+      // "Executing actions with care" — three-lab consensus does NOT
+      // unlock them. Verdict semantics in stand-in.ts.
+      //
+      // DESCRIPTION TUNING: deliberately narrow auto-invocation
+      // wording. The tool is for decision tiebreak when the user is
+      // away; routine code review remains `peer-review-coordinator`'s
+      // job, and single-model second opinions remain `codex_critic` /
+      // `gemini_critic` / `opus_critic`. Don't relax the "Do NOT use
+      // for" clauses without checking the auto-routing impact.
+      toolNameHttp: "stand_in",
+      capability: "stand_in",
+      description:
+        "**Away-mode decision tiebreak.** Three-lab advisor "
+        + "(gpt-5.5 xhigh, opus-4.7 xhigh, gemini-3.1-pro high) for "
+        + "**when the user is unavailable and you are stuck between two "
+        + "or more concrete options**. Polls all three across two "
+        + "structured rounds (blind vote → informed re-vote with peer "
+        + "reasoning visible) and returns a ranked-choice verdict. Use "
+        + "when: you would otherwise halt and wait for the user. Do "
+        + "NOT use for: code review (use `peer-review-coordinator`), "
+        + "open-ended exploration, single-model second opinions (use "
+        + "`codex_critic` / `gemini_critic` / `opus_critic` directly), "
+        + "or as a substitute for user confirmation on irreversible "
+        + "actions (push, delete, drop, deploy — those still require "
+        + "the user even with three-lab consensus).",
+      inputSchema: {
+        type: "object",
+        required: ["decision", "options"],
+        additionalProperties: false,
+        properties: {
+          decision: {
+            type: "string",
+            description:
+              "One-sentence framing of the choice the user would otherwise make. "
+              + "Be specific about what's being decided, not why.",
+          },
+          options: {
+            type: "array",
+            minItems: 2,
+            maxItems: 6,
+            description:
+              "2-6 concrete options for the panel to vote on. Caller-provided — "
+              + "do NOT ask the panel to generate options. The verdict cites "
+              + "the chosen option by `id`.",
+            items: {
+              type: "object",
+              required: ["id", "summary"],
+              additionalProperties: false,
+              properties: {
+                id: {
+                  type: "string",
+                  description:
+                    "Short stable identifier the verdict refers to (e.g., \"A\", \"lib-x\").",
+                },
+                summary: {
+                  type: "string",
+                  description: "One-line description of the option.",
+                },
+                detail: {
+                  type: "string",
+                  description:
+                    "Optional longer context for the option (constraints, trade-offs).",
+                },
+              },
+            },
+          },
+          context: {
+            type: "string",
+            description:
+              "Task / code background that informs the decision. Keep tight — "
+              + "the input is capped at ~6KB total across decision + options + context.",
+          },
+        },
+      },
+      async handler(
+        args: Record<string, unknown>,
+        signal?: AbortSignal,
+      ): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        return runStandInToolCall(args, signal)
+      },
+    },
   ])
 
 /**
@@ -992,5 +1095,124 @@ async function runWorkerToolCall(call: {
   return {
     content: [{ type: "text", text: result.text }],
     isError: result.isError,
+  }
+}
+
+/**
+ * Shared closure body for the `stand_in` MCP tool. Validates the input
+ * shape ({decision, options, context}) then calls `runStandIn`. The
+ * orchestrator never throws — failure modes (upstream errors, parse
+ * failures, abstains) all surface inside the structured `StandInResult`
+ * envelope, which we JSON-stringify into the single MCP text block.
+ *
+ * Arg-validation policy mirrors `runWorkerToolCall` and `web_search`:
+ * shape errors surface as `isError: true` tool-result envelopes (NOT
+ * JSON-RPC -32602). The `tools/list` JSON schema documents required
+ * fields; this runtime check is defense against a schema-ignoring
+ * client.
+ *
+ * `isError` is FALSE for the no_consensus / need_more_info verdicts —
+ * those are valid protocol outcomes the caller acts on, not errors.
+ * `isError` is TRUE only for input-shape failures (bad arg types,
+ * missing required fields).
+ */
+async function runStandInToolCall(
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<{
+  content: Array<{ type: "text"; text: string }>
+  isError?: boolean
+}> {
+  const decision = typeof args.decision === "string" ? args.decision : ""
+  if (!decision) {
+    return {
+      content: [
+        { type: "text", text: "stand_in: arguments.decision is required (non-empty string)" },
+      ],
+      isError: true,
+    }
+  }
+
+  const optionsRaw = args.options
+  if (!Array.isArray(optionsRaw)) {
+    return {
+      content: [
+        { type: "text", text: "stand_in: arguments.options must be an array (2-6 entries)" },
+      ],
+      isError: true,
+    }
+  }
+  if (optionsRaw.length < 2 || optionsRaw.length > 6) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: `stand_in: arguments.options must contain 2-6 entries; got ${optionsRaw.length}`,
+        },
+      ],
+      isError: true,
+    }
+  }
+  const options: Array<{ id: string; summary: string; detail?: string }> = []
+  const seenIds = new Set<string>()
+  for (let i = 0; i < optionsRaw.length; i++) {
+    const entry = optionsRaw[i]
+    if (typeof entry !== "object" || entry === null) {
+      return {
+        content: [
+          { type: "text", text: `stand_in: arguments.options[${i}] must be an object` },
+        ],
+        isError: true,
+      }
+    }
+    const e = entry as Record<string, unknown>
+    const id = typeof e.id === "string" ? e.id : ""
+    const summary = typeof e.summary === "string" ? e.summary : ""
+    if (!id) {
+      return {
+        content: [
+          { type: "text", text: `stand_in: arguments.options[${i}].id is required (non-empty string)` },
+        ],
+        isError: true,
+      }
+    }
+    if (!summary) {
+      return {
+        content: [
+          { type: "text", text: `stand_in: arguments.options[${i}].summary is required (non-empty string)` },
+        ],
+        isError: true,
+      }
+    }
+    if (seenIds.has(id)) {
+      return {
+        content: [
+          { type: "text", text: `stand_in: arguments.options[${i}].id="${id}" is duplicated; ids must be unique` },
+        ],
+        isError: true,
+      }
+    }
+    seenIds.add(id)
+    const detail = typeof e.detail === "string" && e.detail.length > 0 ? e.detail : undefined
+    options.push({ id, summary, detail })
+  }
+
+  const context =
+    args.context === undefined ? undefined
+    : typeof args.context === "string" ? args.context
+    : null
+  if (context === null) {
+    return {
+      content: [
+        { type: "text", text: "stand_in: arguments.context must be a string when provided" },
+      ],
+      isError: true,
+    }
+  }
+
+  const input: StandInInput = { decision, options, context }
+  const result = await runStandIn(input, signal)
+  return {
+    content: [{ type: "text", text: JSON.stringify(result) }],
   }
 }
