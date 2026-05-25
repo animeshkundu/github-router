@@ -170,6 +170,38 @@ function geminiAvailable(): boolean {
 }
 
 /**
+ * Gate for the `stand_in` tool.
+ *
+ * Returns true iff Copilot's live catalog (`state.models?.data`) contains
+ * ALL THREE peer models the consensus protocol needs:
+ *   - `gpt-5.5`             (codex_critic's model)
+ *   - `claude-opus-4-7`     (opus_critic's model)
+ *   - any `gemini-3.X.*pro` (gemini_critic's model family — matches the
+ *     same regex `geminiAvailable()` uses, so the gate stays in sync if
+ *     the GA slug renames `gemini-3.1-pro-preview` → `gemini-3.1-pro`)
+ *
+ * If any one is missing, `stand_in` is dropped from `tools/list` AND
+ * fails `tools/call` with -32601 (mirroring the `worker` capability's
+ * defense-in-depth pattern — the gated tool is functionally invisible).
+ *
+ * Tier-mismatch on `claude-opus-4-7`: the proxy's `resolveModel` will
+ * fuzzy-match `claude-opus-4-7` to `claude-opus-4.7` (Copilot's dotted
+ * slug). For the catalog probe we use the Anthropic-published dashed
+ * slug too — `state.models?.data` mirrors Copilot's catalog where these
+ * land under the dotted slug, so we match by Copilot's actual id shape.
+ */
+function standInToolEnabled(): boolean {
+  const models = state.models?.data
+  if (!models) return false
+  const hasGpt55 = models.some((m) => m.id === "gpt-5.5")
+  const hasOpus = models.some(
+    (m) => m.id === "claude-opus-4-7" || m.id === "claude-opus-4.7",
+  )
+  const hasGeminiPro = models.some((m) => /^gemini-3\..*pro/i.test(m.id))
+  return hasGpt55 && hasOpus && hasGeminiPro
+}
+
+/**
  * Gate for the worker tools (`worker_explore`, `worker_implement`).
  *
  * Returns true iff BOTH:
@@ -247,14 +279,18 @@ function toolEntries(): Array<ToolEntry> {
     },
   }))
   // Append non-persona utility tools (`web_search`, `code_search`, and
-  // — when the runtime gate passes — `worker_explore`/`worker_implement`).
-  // They share the same `tools/list` surface but have their own input
-  // schemas (no prompt/context/effort) and skip the per-persona
-  // validation gates in handleToolsCall. Per-tool `capability` tag
-  // drives the runtime gate (today only `"worker"` is defined; see
-  // `workerToolsEnabled()`).
+  // — when the runtime gate passes — `worker_explore`/`worker_implement`,
+  // `stand_in`). They share the same `tools/list` surface but have
+  // their own input schemas (no prompt/context/effort) and skip the
+  // per-persona validation gates in handleToolsCall. Per-tool
+  // `capability` tag drives the runtime gate (see `workerToolsEnabled()`
+  // and `standInToolEnabled()`).
   const nonPersonaEntries: Array<ToolEntry> = NON_PERSONA_MCP_TOOLS.filter(
-    (t) => t.capability !== "worker" || workerToolsEnabled(),
+    (t) => {
+      if (t.capability === "worker") return workerToolsEnabled()
+      if (t.capability === "stand_in") return standInToolEnabled()
+      return true
+    },
   ).map(
     (t) => ({
       name: t.toolNameHttp,
@@ -420,10 +456,51 @@ function jsonPathPreflightCap(body: JsonRpcRequest):
   const params = (body.params ?? {}) as Record<string, unknown>
   const name = typeof params.name === "string" ? params.name : ""
   const args = (params.arguments ?? {}) as Record<string, unknown>
+  if (!name) return undefined
+
+  // stand_in: non-persona tool with a different input shape
+  // ({decision, options, context}) and a single fixed-per-model effort
+  // tier (xhigh/xhigh/high), so the existing persona-keyed
+  // `predictedTooLong` cap table doesn't apply. Run a dedicated check.
+  //
+  // The cap exists because stand_in fundamentally cannot fit in the
+  // JSON-path 60s tools/call ceiling on any non-trivial input: two
+  // sequential voting rounds × ~60-90s per round across three frontier
+  // models = 2-3 minutes typical wall-clock. The size threshold (~6KB)
+  // is conservative — bursting it means the JSON-path caller will
+  // definitely time out, so we surface the actionable "use SSE" error
+  // up front instead of leaking an inFlight slot for the duration.
+  if (name === "stand_in") {
+    const decision = typeof args.decision === "string" ? args.decision : ""
+    const optionsRaw = Array.isArray(args.options) ? args.options : []
+    const standInContext = typeof args.context === "string" ? args.context : ""
+    if (!decision || optionsRaw.length === 0) return undefined // shape error → -32602 path
+    const briefBytes = Buffer.byteLength(
+      decision + JSON.stringify(optionsRaw) + standInContext,
+      "utf8",
+    )
+    const STAND_IN_CAP_BYTES = 6 * 1024
+    if (briefBytes > STAND_IN_CAP_BYTES) {
+      return rpcResult(
+        body.id,
+        toolError(
+          `pre-flight rejected: stand_in on a ${briefBytes}-byte input is `
+            + `predicted to exceed the JSON tools/call timeout (cap=${STAND_IN_CAP_BYTES} bytes). `
+            + `stand_in runs two sequential voting rounds across three frontier `
+            + `models — wall-clock is typically 2-3 minutes regardless of input `
+            + `size. Send Accept: text/event-stream to use the SSE path which `
+            + `bypasses this cap, or trim the decision/options/context.`,
+        ),
+      )
+    }
+    return undefined
+  }
+
+  // Persona path (existing logic).
   const prompt = typeof args.prompt === "string" ? args.prompt : ""
   const context = typeof args.context === "string" ? args.context : undefined
   const rawEffort = args.effort
-  if (!name || !prompt) return undefined
+  if (!prompt) return undefined
   const persona = activePersonas().find((p) => p.toolNameHttp === name)
   if (!persona) return undefined
   if (rawEffort !== undefined && !isEffort(rawEffort)) return undefined
@@ -451,66 +528,67 @@ function jsonPathPreflightCap(body: JsonRpcRequest):
   )
 }
 
-// Exported so `src/lib/worker-agent/tools.ts` (worker `peer_review` tool)
-// can reuse the same persona dispatch — single source of truth for the
-// per-endpoint Copilot request shape (Responses vs Messages vs
-// chat-completions). Behavior unchanged; widening visibility only.
-export async function callPersona(
-  persona: PersonaSpec,
-  prompt: string,
-  context: string | undefined,
-  effort: Effort,
-  signal?: AbortSignal,
-): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+/**
+ * Per-endpoint wire dispatch for a single peer-model call. Returns the
+ * assistant's raw text (possibly empty — caller decides what "empty"
+ * means in their context). Upstream errors (network, 4xx, 5xx) propagate
+ * as exceptions via `await`.
+ *
+ * Extracted from `callPersona()` so non-persona callers — specifically
+ * the `stand_in` orchestrator in `src/lib/stand-in.ts` — can reuse the
+ * same per-endpoint request shaping without re-implementing it. The
+ * stand_in tool needs to drive its own per-round system prompts across
+ * three concrete models (gpt-5.5, claude-opus-4-7, gemini-3.1-pro-preview),
+ * each on a different endpoint; doing that with a `PersonaSpec` would
+ * require either inventing throwaway personas per round or duplicating
+ * the dispatch switch.
+ *
+ * NOTE on consumer-cancel signal: we deliberately do NOT pass
+ * c.req.raw.signal into the upstream fetch. Bun/srvx aborts the
+ * request signal as soon as the request body is fully consumed
+ * (after `await c.req.json()`), which would make every call fail
+ * immediately with "This operation was aborted". The caller creates
+ * its own AbortController and threads it through `signal`. See CLAUDE.md
+ * "Bun request-signal quirk" for full context.
+ */
+export async function dispatchModelCall(args: {
+  model: string
+  endpoint: PersonaSpec["endpoint"]
+  instructions: string
+  userText: string
+  effort: Effort
+  signal?: AbortSignal
+}): Promise<string> {
   // Resolve the model id against the live catalog so a slug rename
   // (e.g., gemini-3.1-pro-preview → gemini-3.1-pro at GA) auto-resolves
   // through the existing fuzzy matcher rather than 404'ing.
-  const resolvedModel = resolveModel(persona.model)
-  const userText = buildUserText(prompt, context)
+  const resolvedModel = resolveModel(args.model)
 
-  // NOTE: predictedTooLong pre-flight cap fires in handleMcpPost
-  // BEFORE handleRpc → handleToolsCall → inFlightToolsCall++ — see
-  // the architectural invariant documented in CLAUDE.md. JSON-path
-  // only; SSE callers bypass it. Don't duplicate it here.
-
-  // NOTE on consumer-cancel signal: we deliberately do NOT pass
-  // c.req.raw.signal into the upstream fetch. Bun/srvx aborts the
-  // request signal as soon as the request body is fully consumed
-  // (after `await c.req.json()`), which would make every persona call
-  // fail immediately with "This operation was aborted". Instead, the
-  // caller (handleToolsCall) creates its own AbortController and
-  // threads it through `signal`. This is the controller registered in
-  // `inflightAborts` and aborted by `notifications/cancelled` (Phase D
-  // P1.5). See CLAUDE.md "Bun request-signal quirk" for full context.
-  if (persona.endpoint === "/v1/responses") {
+  if (args.endpoint === "/v1/responses") {
     const payload: ResponsesPayload = {
       model: resolvedModel,
-      instructions: persona.baseInstructions,
+      instructions: args.instructions,
       input: [
         {
           role: "user",
-          content: [{ type: "input_text", text: userText }],
+          content: [{ type: "input_text", text: args.userText }],
         },
       ],
       stream: false,
       // Reasoning effort — gpt-5.x adaptive-thinking reads this field
       // directly. Copilot's translator buckets to its own internal
       // levels (CLAUDE.md "Thinking-mode translation").
-      reasoning: { effort },
+      reasoning: { effort: args.effort },
     }
     const response = (await createResponses(
       payload,
       undefined,
-      signal,
+      args.signal,
     )) as ResponsesApiResponse
-    const text = extractResponsesText(response)
-    if (!text) {
-      return toolError(`persona ${persona.agentName}: empty assistant output`)
-    }
-    return { content: [{ type: "text", text }] }
+    return extractResponsesText(response)
   }
 
-  if (persona.endpoint === "/v1/messages") {
+  if (args.endpoint === "/v1/messages") {
     // claude-opus-4-7 path. Copilot's adaptive-thinking models reject
     // Anthropic's standard `thinking: {type:"enabled", budget_tokens:N}`
     // shape with HTTP 400: "thinking.type.enabled is not supported for
@@ -524,47 +602,72 @@ export async function callPersona(
     // truncation. Numbers chosen empirically:
     //   low → 4096, medium → 8192, high → 16384, xhigh → 32768.
     const maxTokens =
-      effort === "low" ? 4096
-      : effort === "medium" ? 8192
-      : effort === "high" ? 16384
+      args.effort === "low" ? 4096
+      : args.effort === "medium" ? 8192
+      : args.effort === "high" ? 16384
       : 32768  // xhigh
     const body = JSON.stringify({
       model: resolvedModel,
       max_tokens: maxTokens,
-      system: persona.baseInstructions,
+      system: args.instructions,
       thinking: { type: "adaptive" },
-      output_config: { effort },
-      messages: [{ role: "user", content: userText }],
+      output_config: { effort: args.effort },
+      messages: [{ role: "user", content: args.userText }],
     })
-    const response = await createMessages(body, undefined, signal)
+    const response = await createMessages(body, undefined, args.signal)
     const json = (await response.json()) as MessagesApiResponse
-    const text = extractMessagesText(json)
-    if (!text) {
-      return toolError(`persona ${persona.agentName}: empty assistant output`)
-    }
-    return { content: [{ type: "text", text }] }
+    return extractMessagesText(json)
   }
 
   // /v1/chat/completions (Gemini)
   const payload: ChatCompletionsPayload = {
     model: resolvedModel,
     messages: [
-      { role: "system", content: persona.baseInstructions },
-      { role: "user", content: userText },
+      { role: "system", content: args.instructions },
+      { role: "user", content: args.userText },
     ],
     stream: false,
     // Forwarded as-is. Per gemini_critic's review (see
     // docs/research/peer-mcp-investigation.md): Copilot's gemini route
     // may silently ignore this knob or 400 if it strict-validates the
     // schema; the latter surfaces through the existing tool-error path.
-    reasoning_effort: effort,
+    reasoning_effort: args.effort,
   }
   const response = (await createChatCompletions(
     payload,
     undefined,
-    signal,
+    args.signal,
   )) as ChatCompletionResponse
-  const text = extractChatCompletionText(response)
+  return extractChatCompletionText(response)
+}
+
+// Exported so `src/lib/worker-agent/tools.ts` (worker `peer_review` tool)
+// can reuse the same persona dispatch — single source of truth for the
+// per-endpoint Copilot request shape (Responses vs Messages vs
+// chat-completions). Thin wrapper around `dispatchModelCall` that adds
+// persona-specific framing: the user-text concat (prompt + context) and
+// the canonical `persona <agentName>: empty assistant output` error
+// message that the existing persona test suites assert against.
+export async function callPersona(
+  persona: PersonaSpec,
+  prompt: string,
+  context: string | undefined,
+  effort: Effort,
+  signal?: AbortSignal,
+): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+  // NOTE: predictedTooLong pre-flight cap fires in handleMcpPost
+  // BEFORE handleRpc → handleToolsCall → inFlightToolsCall++ — see
+  // the architectural invariant documented in CLAUDE.md. JSON-path
+  // only; SSE callers bypass it. Don't duplicate it here.
+  const userText = buildUserText(prompt, context)
+  const text = await dispatchModelCall({
+    model: persona.model,
+    endpoint: persona.endpoint,
+    instructions: persona.baseInstructions,
+    userText,
+    effort,
+    signal,
+  })
   if (!text) {
     return toolError(`persona ${persona.agentName}: empty assistant output`)
   }
@@ -629,14 +732,25 @@ async function handleToolsCall(
 
   // Defense-in-depth: even if a client hard-codes a tool name to bypass
   // the `tools/list` filter, the call-time gate runs the SAME
-  // `workerToolsEnabled()` check and rejects with -32601 (same code as
-  // an unknown tool — the gated tool is functionally invisible). This
-  // mirrors the list-time filter in `toolEntries()` exactly so the
-  // two surfaces stay symmetric.
+  // `workerToolsEnabled()` / `standInToolEnabled()` check and rejects
+  // with -32601 (same code as an unknown tool — the gated tool is
+  // functionally invisible). This mirrors the list-time filter in
+  // `toolEntries()` exactly so the two surfaces stay symmetric.
   if (
     nonPersonaTool
     && nonPersonaTool.capability === "worker"
     && !workerToolsEnabled()
+  ) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+  if (
+    nonPersonaTool
+    && nonPersonaTool.capability === "stand_in"
+    && !standInToolEnabled()
   ) {
     return rpcError(
       body.id,

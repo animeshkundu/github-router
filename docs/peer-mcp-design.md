@@ -395,3 +395,78 @@ The Pi agent runtime (`@earendil-works/pi-agent-core` + a minimal `pi-ai` slice)
 ### Compatibility probe (`gemini-3.5-flash` accepts `tools` + `reasoning_effort`)
 
 The probe set asserts that Copilot's `/v1/chat/completions` accepts a `tools` array plus `reasoning_effort: "high"` on `gemini-3.5-flash`. Without this contract holding, both worker tools degrade to dormant (the dual gate fires on the catalog check). Probe id `worker_gemini_tools_reasoning` in `scripts/probe-copilot-compat.sh`; matrix row in `docs/copilot-compat-matrix.md`.
+
+## `stand_in` tool (away-mode advisor)
+
+`stand_in` is a server-side, code-driven consensus advisor for **decision tiebreak when the user is unavailable**. Polls all three frontier peers — gpt-5.5 xhigh (OpenAI), claude-opus-4-7 xhigh (Anthropic), gemini-3.1-pro-preview high (Google) — across two structured voting rounds and returns a ranked-choice verdict with per-model reasoning. Implementation lives at `src/lib/stand-in.ts`; the MCP tool entry and gate are in `src/lib/peer-mcp-personas.ts` / `src/routes/mcp/handler.ts` (`standInToolEnabled`).
+
+### Scope: advisor, not decider
+
+The tool *recommends*; the main agent still decides and executes. Dangerous actions (push, delete, drop, deploy) remain gated by the user-confirmation discipline in CLAUDE.md "Executing actions with care" — three-lab consensus does NOT unlock them. This is a deliberate scope choice: it captures the velocity win for judgment-stuck decisions while keeping the blast radius small.
+
+### Protocol: blind R1 → informed R2 → abstain
+
+Three reasons this specific shape is load-bearing:
+
+1. **Blind round 1** — each model gets the decision + options + context with no peer input. Frontier models capitulate to each other under deliberation (sycophancy); the blind round is the anti-anchor mechanism.
+2. **Informed round 2** — each model sees the other two models' R1 votes and reasoning, then votes again. They may keep or change their R1 vote. The system prompt explicitly forbids changing-just-to-agree.
+3. **Abstain on disagreement** — if R2 doesn't produce a 2/3-or-better majority, the verdict is `no_consensus` and the main agent must defer to the user. The tool refuses to manufacture false agreement.
+
+R1 short-circuits to `consensus` if all three models pick the same non-null option AND mean confidence ≥ 0.8. Otherwise R2 runs.
+
+### Verdicts
+
+| Verdict           | Meaning                                                  | `recommendation` | Main agent action               |
+| ----------------- | -------------------------------------------------------- | ---------------- | ------------------------------- |
+| `consensus`       | 3/3 same option                                          | option.id        | Proceed with the recommendation |
+| `majority`        | 2/3 same option (dissenter reasoning in `notes`)         | option.id        | Proceed, surface the dissent    |
+| `no_consensus`    | 1/1/1 split, or insufficient successful votes            | `null`           | Defer to the user               |
+| `need_more_info`  | All 3 R1 votes flagged a specific missing-context gap    | `null`           | Gather context, call again      |
+
+`isError` stays `false` for all four verdicts — `no_consensus` and `need_more_info` are valid protocol outcomes, not errors. `isError: true` is reserved for input-shape failures (bad arg types, missing required fields).
+
+### Why code-driven, not model-driven
+
+A small-model orchestrator (haiku / gemini-flash deciding when to escalate, when to call consensus, when to abstain) was considered and rejected. The abstain invariant and the blind-round anti-sycophancy property must hold **deterministically**, not "if the orchestrator model honors them." A model orchestrator is itself a model with RLHF priors and its own sycophancy pressure — it would be tempted to declare partial agreement to be helpful, or skip the abstain, or run extra rounds chasing convergence. For a tool that speaks for the user when they're absent, determinism and auditability are first-order requirements. The orchestrator is ~250 lines of TypeScript; that's the right complexity for a state machine.
+
+### Input / output surface (ruthlessly minimal)
+
+**Input** (`{decision, options[], context?}`):
+- `decision: string` — one-sentence framing of the choice.
+- `options: Array<{id, summary, detail?}>` — 2-6 concrete options; caller-provided (NOT model-generated). The verdict cites the chosen option by `id`.
+- `context?: string` — task/code background.
+
+**Output** (JSON-stringified into a single MCP text block):
+```typescript
+{
+  verdict: "consensus" | "majority" | "no_consensus" | "need_more_info",
+  recommendation: string | null,
+  confidence: number,
+  votes: Record<ModelKey, { round1: Vote | VoteFailure, round2: Vote | VoteFailure | null }>,
+  notes?: string
+}
+```
+
+Every field is either (a) required for the caller to act, (b) directly actionable (per-model vote reasoning = "here's why, here's what to look for next"), or (c) the load-bearing verdict signal. No echoed inputs, no diagnostic-only fields, no per-vote latency, no token counts. Per-model effort is **fixed** (not caller-tunable) — exposing knobs would invite callers to cheap out and muddy the consensus signal.
+
+### Distinction from sibling tools
+
+- vs `peer-review-coordinator` — coordinator is parallel **fan-out + aggregation** for code review (each peer reviews independently, coordinator deduplicates findings). `stand_in` is structured **voting with deliberation** for picking between concrete options. Don't conflate.
+- vs `advisor` — advisor is "review my approach before I commit" (single model, auto-receives conversation, free-form review). `stand_in` is "tiebreak between options" (three models, structured caller input, ranked verdict).
+- vs `codex_critic` / `gemini_critic` / `opus_critic` directly — those are single-model second opinions on artifacts. `stand_in` is the multi-model voting protocol layered on top of them.
+
+The auto-invocation description on the `stand_in` tool entry is deliberately narrow ("when the user is unavailable and you are stuck between two or more concrete options"). Routine review, open-ended exploration, single-model second opinions, and irreversible-action confirmation all explicitly route elsewhere — don't relax the "Do NOT use for" clauses without checking the auto-routing impact.
+
+### Catalog gating (`capability: "stand_in"`)
+
+The MCP handler drops `stand_in` from `tools/list` AND fails-fast on `tools/call` with -32601 when any of the three required models is missing from Copilot's live catalog (`standInToolEnabled` in `src/routes/mcp/handler.ts`). The check matches `claude-opus-4-7` OR its dotted-slug variant `claude-opus-4.7` to stay symmetric with `resolveModel`'s fuzzy match. The gemini check shares the same regex as `geminiAvailable()` so a GA slug rename (`gemini-3.1-pro-preview` → `gemini-3.1-pro`) auto-resolves through both gates.
+
+### Slot accounting & pre-flight cap
+
+- **One slot per `stand_in` invocation**, NOT one per internal model call. The MCP boundary in `handleToolsCall` acquires the slot; `dispatchModelCall` (the shared per-endpoint wire helper extracted from `callPersona`) does NOT re-acquire. A single `stand_in` call making 6 internal upstream fetches (3 models × 2 rounds) consumes exactly 1 slot from the cap=8 budget. Regression test: `tests/routes-mcp.test.ts` "stand_in holds exactly ONE in-flight slot…".
+- **`predictedTooLong` cap = 6KB** on `decision + options + context` byte-size, JSON-path only. Fires BEFORE `acquireInFlightSlot` per the load-bearing invariant. Rationale: `stand_in` runs two sequential rounds across three frontier models, typical wall-clock 2-3 minutes; on the JSON path this always busts the 60s tools/call ceiling on non-trivial inputs. The cap surfaces "use SSE" as a fast actionable error instead of leaking a slot for the duration.
+
+### Future: idle-trigger auto-invocation (out of scope for this PR)
+
+A planned Phase B would add a Claude Code `Stop` / `UserPromptSubmit` hook layer that auto-invokes `stand_in` when the assistant has called `AskUserQuestion` and the user hasn't replied within ~3 minutes (configurable via `GH_ROUTER_STAND_IN_IDLE_MS`). The watcher would inject the consensus verdict via `claude --resume <sessionId> --print "[stand-in:<verdict>] ..."` on the `consensus` / `majority` paths and stay silent (preserving the abstain → wait-for-user invariant) on `no_consensus` / `need_more_info`. Default would be opt-out (on by default, disable with `GH_ROUTER_STAND_IN_AUTO=0`). Deferred until the model-invoked path proves consensus quality is good enough to merit the hook complexity (cross-platform detached-spawn, `claude --resume` injection validation, race-on-cancellation safety).
+
