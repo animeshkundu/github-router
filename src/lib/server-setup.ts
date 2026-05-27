@@ -22,6 +22,7 @@ export interface ServerSetupOptions {
   showToken: boolean
   proxyEnv: boolean
   extendedBetas: boolean
+  browseEnabled: boolean
   silent: boolean
 }
 
@@ -47,6 +48,12 @@ export async function setupAndServe(
   state.rateLimitWait = options.rateLimitWait
   state.showToken = options.showToken
   state.extendedBetas = options.extendedBetas
+  // --browse + GH_ROUTER_ENABLE_BROWSE=1 are equivalent; either enables
+  // the browser-control MCP tools. The env-var path is the convenience
+  // for users who don't want to retype the flag every session, mirroring
+  // the GH_ROUTER_DISABLE_WORKER_TOOLS / GH_ROUTER_LOG_PEER_MCP convention.
+  state.browseEnabled =
+    options.browseEnabled || process.env.GH_ROUTER_ENABLE_BROWSE === "1"
 
   if (process.env.COPILOT_API_URL) {
     state.copilotApiUrl = process.env.COPILOT_API_URL
@@ -179,6 +186,12 @@ export const sharedServerArgs = {
     description:
       "Forward extended beta headers for Claude CLI compatibility (default: VS Code-only)",
   },
+  browse: {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Enable the browser-control MCP tools (browser_open_tab, browser_screenshot, browser_click, etc.) on /mcp. Requires Chrome or Edge installed; the bundled extension must be loaded on first tool call (the proxy returns install_required with Web Store URLs + a Load Unpacked fallback path). Off by default; can also be enabled with GH_ROUTER_ENABLE_BROWSE=1.",
+  },
 } as const
 
 const allowedAccountTypes = new Set(["individual", "business", "enterprise"])
@@ -195,6 +208,7 @@ export function parseSharedArgs(args: Record<string, unknown>): {
   showToken: boolean
   proxyEnv: boolean
   extendedBetas: boolean
+  browseEnabled: boolean
 } {
   const portRaw = args.port as string | undefined
   let port: number | undefined
@@ -240,6 +254,7 @@ export function parseSharedArgs(args: Record<string, unknown>): {
     showToken: args["show-token"] as boolean,
     proxyEnv: args["proxy-env"] as boolean,
     extendedBetas: args["extended-betas"] as boolean,
+    browseEnabled: args.browse as boolean,
   }
 }
 

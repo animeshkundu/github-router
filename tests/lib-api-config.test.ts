@@ -14,6 +14,7 @@ const baseState: State = {
   rateLimitWait: false,
   showToken: false,
   extendedBetas: false,
+  browseEnabled: false,
   sessionId: "test-session-id",
   machineId: "test-machine-id",
 }

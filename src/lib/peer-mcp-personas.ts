@@ -28,6 +28,7 @@ import { searchCode } from "./code-search"
 // read `PERSONAS_READ` mid-init. That runtime check has been moved into
 // a test (`tests/peer-mcp-persona-drift.test.ts`), so the cycle no
 // longer closes and a normal static import works.
+import { BROWSER_TOOLS } from "~/lib/browser-mcp"
 import { runWorkerAgent, type WorkerThinkingLevel } from "~/lib/worker-agent"
 import { searchWeb } from "~/services/copilot/web-search"
 import { runStandIn, type StandInInput } from "~/lib/stand-in"
@@ -461,12 +462,17 @@ export interface NonPersonaMcpTool {
    * - `"stand_in"` requires all three of `gpt-5.5`, `claude-opus-4-7`,
    *   and a `gemini-3.X.*pro` model to be in the live catalog (see
    *   `standInToolEnabled()` in `routes/mcp/handler.ts`).
+   * - `"browser"` (browser_open_tab, browser_screenshot, browser_click,
+   *   …) requires `state.browseEnabled` (set by `--browse` or
+   *   `GH_ROUTER_ENABLE_BROWSE=1`) AND at least one Chromium-family
+   *   browser detected on disk (see `browserToolsEnabled()` in
+   *   `routes/mcp/handler.ts`).
    *
    * Absent on `web_search` / `code_search` — those are always available
    * once the proxy is in claude mode (loopback + nonce already gate
    * `/mcp` itself).
    */
-  capability?: "worker" | "stand_in"
+  capability?: "worker" | "stand_in" | "browser"
   /**
    * Server-side handler. Receives the raw `arguments` object from the
    * `tools/call` request and an optional AbortSignal that is signalled
@@ -986,6 +992,13 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         return runStandInToolCall(args, signal)
       },
     },
+    // Browser-control tools (`browser_*`). Defined in a sibling module so
+    // the dispatch implementation can grow without bloating this file.
+    // Each entry carries `capability: "browser"` so `browserToolsEnabled()`
+    // in `src/routes/mcp/handler.ts` drops them at both list-time and
+    // call-time when the operator hasn't opted in via `--browse` or
+    // `GH_ROUTER_ENABLE_BROWSE=1`.
+    ...BROWSER_TOOLS,
   ])
 
 /**
