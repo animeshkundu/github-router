@@ -346,25 +346,29 @@ async function toolKeyboard(args) {
   // chrome.debugger.Input.dispatchKeyEvent is the only way to simulate
   // real keystrokes that browser shortcuts (Ctrl+L, etc) actually
   // observe. KeyboardEvent dispatched from JS doesn't trigger them.
-  await chrome.debugger.attach({ tabId }, "1.3")
-  try {
-    const winVK = key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0
-    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
-      type: "keyDown",
-      modifiers: bits,
-      key,
-      text: key.length === 1 ? key : undefined,
-      windowsVirtualKeyCode: winVK,
-    })
-    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
-      type: "keyUp",
-      modifiers: bits,
-      key,
-      windowsVirtualKeyCode: winVK,
-    })
-  } finally {
-    try { await chrome.debugger.detach({ tabId }) } catch { /* may already be detached */ }
-  }
+  //
+  // We attach via the shared attachDebuggerOnce helper (and do NOT
+  // detach in finally). Detaching here would also tear down the
+  // console / network buffers from browser_console_logs and
+  // browser_network_log, since those rely on the SAME debugger
+  // attachment. The attach stays for the tab's lifetime — chrome's
+  // "is being controlled" banner is the visible cost, accepted in
+  // exchange for cross-tool composability.
+  await attachDebuggerOnce(tabId)
+  const winVK = key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0
+  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+    type: "keyDown",
+    modifiers: bits,
+    key,
+    text: key.length === 1 ? key : undefined,
+    windowsVirtualKeyCode: winVK,
+  })
+  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+    type: "keyUp",
+    modifiers: bits,
+    key,
+    windowsVirtualKeyCode: winVK,
+  })
   return { ok: true }
 }
 
@@ -422,23 +426,23 @@ async function toolEvalJs(args) {
   // chrome.debugger.Runtime.evaluate is equivalent to typing in the
   // DevTools console — runs in the page's main world, supports arbitrary
   // expression strings (MV3 CSP blocks eval/Function in the SW context).
-  await chrome.debugger.attach({ tabId }, "1.3")
-  try {
-    const r = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
-      expression,
-      returnByValue: true,
-      awaitPromise: true,
-      timeout: timeoutMs,
-      userGesture: true,
-    })
-    if (r.exceptionDetails) {
-      return { error: r.exceptionDetails.text || r.exceptionDetails.exception?.description || "Runtime exception" }
-    }
-    // Strip {type, value} wrapper from returnByValue → just the value.
-    return { result: r.result?.value }
-  } finally {
-    try { await chrome.debugger.detach({ tabId }) } catch { /* may already be detached */ }
+  //
+  // Shares the per-tab debugger attach with browser_console_logs and
+  // browser_network_log — we attach but DO NOT detach in finally, because
+  // detaching would clear those tools' lazy-attached event buffers.
+  await attachDebuggerOnce(tabId)
+  const r = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+    expression,
+    returnByValue: true,
+    awaitPromise: true,
+    timeout: timeoutMs,
+    userGesture: true,
+  })
+  if (r.exceptionDetails) {
+    return { error: r.exceptionDetails.text || r.exceptionDetails.exception?.description || "Runtime exception" }
   }
+  // Strip {type, value} wrapper from returnByValue → just the value.
+  return { result: r.result?.value }
 }
 
 async function toolDownload(args) {
