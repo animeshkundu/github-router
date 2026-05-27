@@ -152,13 +152,32 @@ function packageRoot(): string {
 }
 
 /**
- * Absolute path to the extension's source directory. Extension is
- * plain JS / JSON (no build pipeline) so `src/browser-ext/` is the
- * canonical location whether installed via npm or running from a
- * checkout.
+ * Absolute path to the extension's source directory. Layouts:
+ *
+ *   - Installed via npm: `<package>/dist/browser-ext/` (the published
+ *     tarball ships only `dist/`, see package.json "files"). The build
+ *     step copies `src/browser-ext/` → `dist/browser-ext/` so the
+ *     unpacked extension is available to users.
+ *   - Running from this repo: dist/browser-ext/ if it exists (after
+ *     `bun run build`), else src/browser-ext/ for fresh-clone-pre-build.
+ *
+ * Override with `GH_ROUTER_BROWSER_EXT_DIR=<abs path>` for development
+ * (lets you point at a working copy of the extension you're editing
+ * without rebuilding between iterations).
  */
 export function extensionDir(): string {
-  return path.join(packageRoot(), "src", "browser-ext")
+  const override = process.env.GH_ROUTER_BROWSER_EXT_DIR
+  if (override && override.length > 0) return override
+  const root = packageRoot()
+  const distExt = path.join(root, "dist", "browser-ext")
+  try {
+    if (readFileSync(path.join(distExt, "manifest.json")).length > 0) {
+      return distExt
+    }
+  } catch {
+    // dist/browser-ext not built yet — fall back to src/.
+  }
+  return path.join(root, "src", "browser-ext")
 }
 
 /** Absolute path to the bundled bridge entrypoint. */
