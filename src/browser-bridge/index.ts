@@ -32,7 +32,7 @@
 import { randomBytes, randomUUID } from "node:crypto"
 import { appendFileSync, mkdirSync, writeFileSync, chmodSync } from "node:fs"
 import { createServer } from "node:http"
-import { homedir, platform, tmpdir } from "node:os"
+import { platform, tmpdir } from "node:os"
 import path from "node:path"
 import process from "node:process"
 
@@ -42,6 +42,11 @@ import type { Socket } from "node:net"
 // clear error if ws is missing rather than a cryptic ESM resolution
 // failure deep in some dependency tree.
 import { WebSocketServer, type WebSocket } from "ws"
+
+// Path resolution lives in a tiny sibling module so the bridge and the
+// install-check resolve `bridge.json` identically — see the comment in
+// `bridge-paths.ts` for the historical win32-divergence bug.
+import { discoveryPath } from "../lib/browser-mcp/bridge-paths"
 
 // Early-boot trace: write a line to a debug log whenever the bridge
 // process starts. Native-messaging hosts run under the browser so we
@@ -78,21 +83,6 @@ interface BridgeDiscoveryFile {
   port: number
   token: string
   startedAt: number
-}
-
-function appDir(): string {
-  // Mirrors PATHS.APP_DIR in src/lib/paths.ts but resolved directly so
-  // the bridge has no dependency on the proxy's TS source tree.
-  if (platform() === "win32") {
-    const local = process.env.LOCALAPPDATA
-    if (local) return path.join(local, "github-router")
-    return path.join(homedir(), "AppData", "Local", "github-router")
-  }
-  return path.join(homedir(), ".local", "share", "github-router")
-}
-
-function discoveryPath(): string {
-  return path.join(appDir(), "browser-mcp", "bridge.json")
 }
 
 function writeDiscoveryFile(payload: BridgeDiscoveryFile): void {
