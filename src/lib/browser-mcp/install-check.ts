@@ -22,12 +22,11 @@
 import { readFileSync } from "node:fs"
 import path from "node:path"
 
-import { PATHS } from "~/lib/paths"
-
 import {
   detectSupportedBrowsers,
   type SupportedBrowser,
 } from "./browser-detect"
+import { discoveryPath } from "./bridge-paths"
 import {
   bridgeBundlePath,
   computeExtensionIdFromKey,
@@ -66,10 +65,6 @@ export interface BridgeReady {
   port: number
   token: string
   pid: number
-}
-
-function discoveryPath(): string {
-  return path.join(PATHS.APP_DIR, "browser-mcp", "bridge.json")
 }
 
 export function readBridgeDiscovery(): BridgeDiscovery | undefined {
