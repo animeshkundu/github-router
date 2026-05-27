@@ -121,6 +121,22 @@ The NMH installer writes manifests to every plausible per-product directory so t
 
 Registry writes on Windows go through `reg.exe add ... /f` (no PowerShell, no admin — HKCU only). File modes on POSIX are 0o644 for the manifest and 0o755 for the launcher shim; Windows ignores the POSIX mode arg.
 
+### Where the extension files come from
+
+The extension is plain JSON + JS (no bundler needed), but it has to land under `dist/` so the npm tarball's `"files": ["dist"]` allowlist actually ships it. The `build` script does `tsdown && bun scripts/copy-browser-ext.ts`, so a published package looks like:
+
+```
+node_modules/@animeshkundu/github-router/
+├── dist/
+│   ├── main.js                       (the proxy)
+│   ├── browser-bridge/index.js       (the native-messaging host, bundled with ws)
+│   └── browser-ext/                  (Load Unpacked target)
+│       ├── manifest.json
+│       └── background.js
+```
+
+`extensionDir()` in [`src/lib/browser-mcp/native-host-installer.ts`](../src/lib/browser-mcp/native-host-installer.ts) prefers `dist/browser-ext/` (production), falls back to `src/browser-ext/` if dist hasn't been built (fresh clone), and can be overridden with `GH_ROUTER_BROWSER_EXT_DIR=<abs path>` for rapid extension iteration without rebuilding between edits.
+
 ### Stable extension ID
 
 The extension's `manifest.json` carries a fixed RSA-2048 `key` field. Chrome and Edge derive the extension ID deterministically from this key (sha256 of the DER bytes, first 16 bytes mapped via the hex-value-to-[a-p] alphabet), so the ID is identical whether the user installs via the Chrome Web Store or via Developer Mode "Load unpacked". The same ID lands in the NMH manifest's `allowed_origins` so the extension's native-messaging connection works in both modes.
