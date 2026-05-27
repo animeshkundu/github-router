@@ -31,7 +31,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsdown",
+    "build": "tsdown && bun scripts/copy-browser-ext.ts",
     "dev": "bun run --watch ./src/main.ts",
     "discover:fields": "bash scripts/discover-new-fields.sh",
     "knip": "knip-bun",
