@@ -25,6 +25,7 @@ import {
   type ResponsesApiResponse,
   type ResponsesPayload,
 } from "~/services/copilot/create-responses"
+import { hasSupportedBrowserInstalled } from "~/lib/browser-mcp/browser-detect"
 import { DEFAULT_MODEL as WORKER_DEFAULT_MODEL } from "~/lib/worker-agent"
 import {
   MAX_INFLIGHT_TOOLS_CALL,
@@ -235,6 +236,40 @@ function workerToolsEnabled(): boolean {
   return found.capabilities?.supports?.tool_calls === true
 }
 
+/**
+ * Gate for the browser-control MCP tools (`browser_*`).
+ *
+ * Returns true iff BOTH:
+ *   1. The operator opted in via `--browse` (which sets
+ *      `state.browseEnabled`) OR the equivalent env var
+ *      `GH_ROUTER_ENABLE_BROWSE=1`. Default OFF — browser-control is
+ *      side-effectful (mutates the user's browser session, downloads
+ *      files, can navigate to phishing URLs the model was prompted with),
+ *      so dormant-register is the safe default.
+ *   2. At least one supported Chromium-family browser (Chrome or Edge)
+ *      is detected on disk by `hasSupportedBrowserInstalled()`. No
+ *      browser → nothing for the bridge to attach to → tools stay
+ *      invisible rather than fail at call time. Detection is cached for
+ *      the proxy lifetime; a fresh install requires a restart.
+ *
+ * Mirrors the defense-in-depth pattern of `workerToolsEnabled()` /
+ * `standInToolEnabled()`: this same function gates BOTH the
+ * `tools/list` filter in `toolEntries()` AND the call-time rejection in
+ * `handleToolsCall` (returning -32601 for hard-coded tool-name
+ * bypasses), so the two surfaces stay symmetric.
+ *
+ * The env-var check reads `process.env` directly instead of relying
+ * solely on `state.browseEnabled` so a non-`setupAndServe` startup path
+ * (tests, embedded use) can still flip the gate via env. The CLI flag
+ * path is the canonical one for end users.
+ */
+function browserToolsEnabled(): boolean {
+  const optedIn =
+    state.browseEnabled || process.env.GH_ROUTER_ENABLE_BROWSE === "1"
+  if (!optedIn) return false
+  return hasSupportedBrowserInstalled()
+}
+
 function activePersonas(): Array<PersonaSpec> {
   // Drop personas whose model family is missing from Copilot's live
   // catalog (currently only gemini-critic, gated by `requiresGeminiCatalog`).
@@ -289,6 +324,7 @@ function toolEntries(): Array<ToolEntry> {
     (t) => {
       if (t.capability === "worker") return workerToolsEnabled()
       if (t.capability === "stand_in") return standInToolEnabled()
+      if (t.capability === "browser") return browserToolsEnabled()
       return true
     },
   ).map(
@@ -751,6 +787,17 @@ async function handleToolsCall(
     nonPersonaTool
     && nonPersonaTool.capability === "stand_in"
     && !standInToolEnabled()
+  ) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+  if (
+    nonPersonaTool
+    && nonPersonaTool.capability === "browser"
+    && !browserToolsEnabled()
   ) {
     return rpcError(
       body.id,

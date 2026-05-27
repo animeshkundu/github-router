@@ -10,6 +10,35 @@ export default tseslint.config(
     ignores: ["dist/", "node_modules/", "src/vendor/"],
   },
   {
+    // MV3 service worker (plain JS, browser globals + chrome.* APIs).
+    // Lives outside the main typescript build; needs its own globals
+    // declaration so eslint's no-undef rule passes.
+    files: ["src/browser-ext/**/*.js"],
+    languageOptions: {
+      globals: {
+        chrome: "readonly",
+        console: "readonly",
+        document: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
+        setInterval: "readonly",
+        clearInterval: "readonly",
+        globalThis: "readonly",
+        // Page-context globals: these appear inside the `func` arg of
+        // chrome.scripting.executeScript blocks which run in the
+        // injected page, not the SW. Listed as readonly so the SW's
+        // own no-undef check doesn't flag them.
+        window: "readonly",
+        HTMLInputElement: "readonly",
+        HTMLTextAreaElement: "readonly",
+        MouseEvent: "readonly",
+        InputEvent: "readonly",
+        KeyboardEvent: "readonly",
+        Event: "readonly",
+      },
+    },
+  },
+  {
     rules: {
       "@typescript-eslint/no-unused-vars": [
         "error",

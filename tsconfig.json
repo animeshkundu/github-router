@@ -26,5 +26,9 @@
       "@earendil-works/pi-ai": ["./src/vendor/pi/ai/index.ts"],
       "@earendil-works/pi-ai/*": ["./src/vendor/pi/ai/*"]
     }
-  }
+  },
+  "exclude": [
+    "src/browser-ext/**",
+    "src/browser-bridge/**"
+  ]
 }
