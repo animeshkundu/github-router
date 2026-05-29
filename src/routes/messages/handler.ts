@@ -406,12 +406,22 @@ export async function handleCompletion(c: Context) {
   // Apply default anthropic-beta for Claude models when client sends none
   const effectiveBetas = applyDefaultBetas(betaHeaders, resolvedModel ?? originalModel)
 
+  // When ADVISOR is enabled, create a shared AbortController BEFORE the
+  // initial createMessages call so consumer-cancel propagates to the
+  // initial response body (not just continuation/runAdvisor calls). Pre-
+  // fix the initial createMessages had no callerSignal, so the response
+  // body survived cancellation for up to UPSTREAM_FETCH_TIMEOUT_MS (5 min),
+  // burning tokens and holding a socket.
+  // NOTE: do NOT use c.req.raw.signal here — Bun aborts it after request-
+  // body consumption (see CLAUDE.md "Bun request-signal quirk").
+  const advisorAborter = advisorEnabled ? new AbortController() : undefined
+
   let response: Response
   try {
     response = await createMessages(resolvedBody, {
       ...selectedModel?.requestHeaders,
       ...effectiveBetas,
-    })
+    }, advisorAborter?.signal)
   } catch (error) {
     if (error instanceof HTTPError) {
       const errorBody = await error.response.clone().text().catch(() => "")
@@ -520,6 +530,7 @@ export async function handleCompletion(c: Context) {
             ...selectedModel?.requestHeaders,
             ...effectiveBetas,
           },
+          externalAborter: advisorAborter,
         }),
         {
           status: response.status,

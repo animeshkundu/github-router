@@ -505,20 +505,18 @@ export function buildAdvisorStream(opts: {
   requestHeaders: Record<string, string>
   advisorModel?: string
   advisorEffort?: Effort
+  externalAborter?: AbortController
 }): ReadableStream<Uint8Array> {
   const advisorModel = opts.advisorModel ?? ADVISOR_DEFAULT_MODEL
   const advisorEffort = opts.advisorEffort ?? ADVISOR_DEFAULT_EFFORT
 
-  // Internal AbortController for consumer-disconnect cancellation.
-  // Threads into runAdvisor() (which forwards to createResponses /
-  // createMessages via their `callerSignal` arg) AND the continuation
-  // createMessages() call. Without this, a consumer cancel mid-stream
-  // left the outer turn loop running — the `for await (const ev of
-  // events(response))` inside `processOneTurn` would early-return on
-  // safeEnqueue failure, but only AFTER the advisor + continuation
-  // upstream calls had already burned tokens and held sockets open.
-  // Up to ~16 leaked upstream calls per cancelled request.
-  const aborter = new AbortController()
+  // Use the caller-supplied AbortController when provided, otherwise
+  // create a local one. When the handler creates a shared controller
+  // that also governs the initial createMessages response, consumer-
+  // cancel propagates to BOTH the initial response body AND the
+  // continuation/runAdvisor calls — fixing the leak where the initial
+  // fetch survived cancellation for up to UPSTREAM_FETCH_TIMEOUT_MS.
+  const aborter = opts.externalAborter ?? new AbortController()
   // Hoist `conversation` so cancel() can clear the reference and let
   // the accumulated tool_result text get GC'd promptly (a long
   // advisor loop accumulates hundreds of KB of upstream content).
