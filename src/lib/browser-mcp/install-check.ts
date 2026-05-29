@@ -166,8 +166,32 @@ function buildInstallRequired(
  * model. Side effect: when reason is `extension_not_loaded`, attempts
  * to install the NMH manifest for every detected browser so that the
  * extension can connect immediately on load.
+ *
+ * Single-flight: concurrent calls share one in-flight Promise so that
+ * `installNativeHostForAll` (which writes files and spawns reg.exe on
+ * Windows) is called exactly once per check cycle, regardless of how
+ * many browser_* tool calls arrive concurrently.
  */
+
+// In-flight single-flight promise shared across concurrent callers.
+let _inFlightReady: Promise<BridgeReady | InstallRequiredPayload> | undefined
+
 export async function ensureBridgeReady(): Promise<
+  BridgeReady | InstallRequiredPayload
+> {
+  if (_inFlightReady) return _inFlightReady
+  _inFlightReady = _ensureBridgeReadyImpl().finally(() => {
+    _inFlightReady = undefined
+  })
+  return _inFlightReady
+}
+
+/** @internal — exported only for tests. Resets single-flight state between test cases. */
+export function __resetEnsureBridgeReadyForTests(): void {
+  _inFlightReady = undefined
+}
+
+async function _ensureBridgeReadyImpl(): Promise<
   BridgeReady | InstallRequiredPayload
 > {
   const browsers = detectSupportedBrowsers()
