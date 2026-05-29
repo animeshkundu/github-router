@@ -40,7 +40,8 @@ export const claude = defineCommand({
     model: {
       alias: "m",
       type: "string",
-      description: "Override the default model for Claude Code",
+      description:
+        "Override the default model for Claude Code. Accepts a full slug (e.g. claude-opus-4-7) or an Opus family shorthand (e.g. 4.7, 4.8, 4.6) which expands to the best variant for that family — adding the [1m] suffix when a 1M-context backend is in the catalog.",
     },
     "codex-mcp": {
       type: "boolean" as const,
@@ -221,8 +222,18 @@ export const claude = defineCommand({
     // Explicit `--model` is respected as-is — including Copilot slugs
     // (which Claude Code's UI won't recognize, but power users may want
     // for explicit pinning).
+    // `-m 4.7` / `-m 4.8` shorthand: treat a bare "N.M" value as an
+    // Opus-family preference and let pickClaudeDefault pick the best
+    // variant for that family (adding [1m] when an opus-N.M-1m backend
+    // exists in the catalog). Full slugs and any non-matching string
+    // continue to pass through unchanged. `usingDefault` stays false
+    // for shorthand so the DEFAULT_CLAUDE_MODEL_FALLBACKS walk doesn't
+    // override an explicit family request with the next-older Opus.
     const usingDefault = !args.model
-    const requestedSlug = args.model ?? pickClaudeDefault()
+    const opusFamilyShorthand = args.model?.match(/^(\d+\.\d+)$/)?.[1]
+    const requestedSlug = opusFamilyShorthand
+      ? pickClaudeDefault(opusFamilyShorthand)
+      : (args.model ?? pickClaudeDefault())
     let chosenSlug = requestedSlug
     let resolvedSlug = resolveModel(chosenSlug)
 

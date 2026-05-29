@@ -78,8 +78,11 @@ mock.module("~/lib/server-setup", () => ({
 // in beforeEach (and per-test) to drive the cap-aware default behavior
 // without needing to load the real state module from the mock factory
 // (Bun deadlocks if a mock.module factory dynamically resolves another
-// module via require / import at factory-eval time).
-let pickClaudeDefaultImpl: () => string = () => "claude-opus-4-7"
+// module via require / import at factory-eval time). The optional
+// `family` arg mirrors the real `pickClaudeDefault(opusFamily?)` so
+// the `-m 4.7` / `-m 4.8` shorthand path is exercisable.
+let pickClaudeDefaultImpl: (family?: string) => string = () => "claude-opus-4-7"
+let pickClaudeDefaultCalls: Array<string | undefined> = []
 
 mock.module("~/lib/port", () => ({
   // Anthropic-published dashed slug (per plan §14) — Claude Code's `/model`
@@ -89,7 +92,12 @@ mock.module("~/lib/port", () => ({
   DEFAULT_CLAUDE_MODEL_FALLBACKS: ["claude-opus-4-6", "claude-opus-4-5"],
   // Delegates to the closure-captured impl so tests can swap behavior
   // per-case (cap-aware-default tests set this to return "...[1m]").
-  pickClaudeDefault: () => pickClaudeDefaultImpl(),
+  // Records every call's `family` arg so shorthand-routing tests can
+  // assert the right value was forwarded from `-m 4.X` to the picker.
+  pickClaudeDefault: (family?: string) => {
+    pickClaudeDefaultCalls.push(family)
+    return pickClaudeDefaultImpl(family)
+  },
   // launch.ts imports DEFAULT_CODEX_MODEL transitively via claude.ts → launchChild;
   // re-export it so the module mock doesn't break sibling imports.
   DEFAULT_CODEX_MODEL: "gpt-5.5",
@@ -233,8 +241,10 @@ beforeEach(() => {
   getCodexVersionMock.mockReturnValue({ ok: false })
 
   // Default pickClaudeDefault to the bare slug; tests that exercise the
-  // 1M-detection path rebind this to return "claude-opus-4-7[1m]".
+  // 1M-detection path rebind this to return "claude-opus-4-7[1m]". Reset
+  // the call recorder so per-test assertions see a clean slate.
   pickClaudeDefaultImpl = () => "claude-opus-4-7"
+  pickClaudeDefaultCalls = []
 })
 
 describe("claude command", () => {
@@ -433,6 +443,121 @@ describe("claude command", () => {
     } finally {
       state.models = undefined
     }
+  })
+
+  // --- Opus family shorthand: `-m 4.7` / `-m 4.8` / `-m 4.6` ---
+
+  test("--model 4.7 shorthand routes through pickClaudeDefault(\"4.7\")", async () => {
+    // The shorthand pattern /^\d+\.\d+$/ on args.model expands via
+    // pickClaudeDefault(family). On enterprise (1M present), the picker
+    // returns the bracketed slug; the env var carries the bracket so
+    // Claude Code unlocks 1M-context local accounting.
+    pickClaudeDefaultImpl = (family?: string) =>
+      family === "4.7" ? "claude-opus-4-7[1m]" : "claude-opus-4-7"
+    state.models = {
+      data: [
+        { id: "claude-opus-4.7" },
+        { id: "claude-opus-4.7-1m-internal" },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    try {
+      const run = getRunFn()
+      await run({ args: { model: "4.7" } })
+      expect(pickClaudeDefaultCalls).toContain("4.7")
+      expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:12345",
+        "claude-opus-4-7[1m]",
+      )
+    } finally {
+      state.models = undefined
+    }
+  })
+
+  test("--model 4.8 shorthand routes through pickClaudeDefault(\"4.8\") and returns bare slug (no 1M variant)", async () => {
+    // Mirrors the live Copilot catalog as of 2026-05-29: `claude-opus-4.8`
+    // exists without a 1M sibling, so the picker returns the bare slug.
+    pickClaudeDefaultImpl = (family?: string) =>
+      family === "4.8" ? "claude-opus-4-8" : "claude-opus-4-7"
+    state.models = {
+      data: [
+        { id: "claude-opus-4.8" },
+        { id: "claude-opus-4.7-1m-internal" },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    try {
+      const run = getRunFn()
+      await run({ args: { model: "4.8" } })
+      expect(pickClaudeDefaultCalls).toContain("4.8")
+      expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:12345",
+        "claude-opus-4-8",
+      )
+      const [, , options] = spawnMock.mock.calls[0]
+      expect(options.env.ANTHROPIC_MODEL).toBe("claude-opus-4-8")
+    } finally {
+      state.models = undefined
+    }
+  })
+
+  test("--model 4.6 shorthand routes through pickClaudeDefault(\"4.6\")", async () => {
+    pickClaudeDefaultImpl = (family?: string) =>
+      family === "4.6" ? "claude-opus-4-6[1m]" : "claude-opus-4-7"
+    state.models = {
+      data: [
+        { id: "claude-opus-4.6-1m" },
+        { id: "claude-opus-4.6" },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    try {
+      const run = getRunFn()
+      await run({ args: { model: "4.6" } })
+      expect(pickClaudeDefaultCalls).toContain("4.6")
+      expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:12345",
+        "claude-opus-4-6[1m]",
+      )
+    } finally {
+      state.models = undefined
+    }
+  })
+
+  test("--model with a full slug is NOT treated as shorthand (passthrough preserved)", async () => {
+    // Regression guard: full slugs like `claude-opus-4-7-something` must
+    // continue to flow straight through to resolveModel without touching
+    // pickClaudeDefault — that's the existing "power-user pinning" path.
+    state.models = {
+      data: [
+        { id: "claude-opus-4.7-1m-internal" },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    try {
+      const run = getRunFn()
+      await run({ args: { model: "claude-opus-4.7-1m-internal" } })
+      expect(pickClaudeDefaultCalls).toEqual([])
+      expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:12345",
+        "claude-opus-4.7-1m-internal",
+      )
+    } finally {
+      state.models = undefined
+    }
+  })
+
+  test("--model garbage (non-numeric) is NOT treated as shorthand", async () => {
+    // The regex only matches `\d+\.\d+`; any other string flows through
+    // unchanged so e.g. typoed slugs surface the existing model-not-found
+    // warning rather than silently triggering a family lookup.
+    const run = getRunFn()
+    await run({ args: { model: "garbage-slug" } })
+    expect(pickClaudeDefaultCalls).toEqual([])
+    expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:12345",
+      "garbage-slug",
+    )
   })
 
   test("extra positional args passed through", async () => {

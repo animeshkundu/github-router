@@ -790,4 +790,104 @@ describe("pickClaudeDefault", () => {
     }
     expect(pickClaudeDefault()).toBe(DEFAULT_CLAUDE_MODEL)
   })
+
+  // --- Opus family shorthand (`-m 4.7` / `-m 4.6` / `-m 4.8`) ---
+
+  test("pickClaudeDefault(\"4.7\") returns claude-opus-4-7[1m] when 1M variant present", () => {
+    // Explicit family request is equivalent to the no-arg default for the 4.7 case.
+    state.models = {
+      data: [
+        { id: "claude-opus-4.7-1m-internal", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(pickClaudeDefault("4.7")).toBe("claude-opus-4-7[1m]")
+  })
+
+  test("pickClaudeDefault(\"4.6\") returns claude-opus-4-6[1m] when opus-4.6-1m present", () => {
+    state.models = {
+      data: [
+        { id: "claude-opus-4.6-1m", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.6", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(pickClaudeDefault("4.6")).toBe("claude-opus-4-6[1m]")
+  })
+
+  test("pickClaudeDefault(\"4.8\") returns bare claude-opus-4-8 (no 1M variant in catalog)", () => {
+    // Reflects the actual live catalog state as of 2026-05-29: Copilot ships
+    // `claude-opus-4.8` without `-high`, `-xhigh`, or `-1m` sibling slugs.
+    state.models = {
+      data: [
+        { id: "claude-opus-4.8", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.7-1m-internal", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(pickClaudeDefault("4.8")).toBe("claude-opus-4-8")
+    expect(pickClaudeDefault("4.8")).not.toContain("[1m]")
+  })
+
+  test("pickClaudeDefault(\"4.7\") returns bare claude-opus-4-7 when only 200K variant present", () => {
+    state.models = {
+      data: [
+        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(pickClaudeDefault("4.7")).toBe("claude-opus-4-7")
+  })
+
+  test("pickClaudeDefault accepts dashed family form (\"4-8\") as a convenience", () => {
+    state.models = {
+      data: [
+        { id: "claude-opus-4.8", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(pickClaudeDefault("4-8")).toBe("claude-opus-4-8")
+  })
+
+  test("pickClaudeDefault warns when requested family is completely absent from catalog", () => {
+    state.models = {
+      data: [
+        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    const warnSpy = mock((..._args: unknown[]) => {})
+    const original = consola.warn
+    consola.warn = warnSpy as unknown as typeof consola.warn
+    try {
+      // 9.9 doesn't exist anywhere — should warn but still return the bare slug
+      // so resolveModel's downstream "model not found" path can take over.
+      const result = pickClaudeDefault("9.9")
+      expect(result).toBe("claude-opus-9-9")
+      expect(warnSpy).toHaveBeenCalled()
+      const firstCall = warnSpy.mock.calls[0] ?? []
+      const warnArg = String((firstCall as unknown[])[0] ?? "")
+      expect(warnArg).toContain("9.9")
+    } finally {
+      consola.warn = original
+    }
+  })
+
+  test("pickClaudeDefault does NOT warn for missing family when state.models is unset (pre-cache safety)", () => {
+    // Before cacheModels populates the catalog, we can't tell "absent" from
+    // "not loaded yet". Stay silent to avoid noisy launch logs.
+    state.models = undefined
+    const warnSpy = mock((..._args: unknown[]) => {})
+    const original = consola.warn
+    consola.warn = warnSpy as unknown as typeof consola.warn
+    try {
+      expect(pickClaudeDefault("4.8")).toBe("claude-opus-4-8")
+      expect(warnSpy).not.toHaveBeenCalled()
+    } finally {
+      consola.warn = original
+    }
+  })
 })
