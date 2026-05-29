@@ -30,9 +30,12 @@ export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
 
 /**
  * Cap-aware default picker for `ANTHROPIC_MODEL` on the implicit-default
- * path. Returns `claude-opus-4-7[1m]` when the live Copilot catalog
- * contains a `*-opus-4.7-1m*` variant (enterprise tier), else
- * `DEFAULT_CLAUDE_MODEL` (the bare slug).
+ * path. Returns `claude-opus-${family}[1m]` when the live Copilot catalog
+ * contains an `opus-${family}-1m*` variant (enterprise tier), else the
+ * bare `claude-opus-${family}` slug. `family` defaults to `"4.7"` so the
+ * no-arg call preserves the original behavior; explicit values like
+ * `"4.6"` or `"4.8"` are used to honor the `github-router claude
+ * -m <version>` family shorthand.
  *
  * The `[1m]` literal-bracket suffix is Claude Code's local 1M-context
  * unlock — cc-backup `src/utils/context.ts:35-40` matches `/\[1m\]/i`
@@ -59,16 +62,45 @@ export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
  * can't tell the difference between "no catalog yet" and "no 1M
  * variant" — defaulting safe-side preserves the pre-change behavior).
  */
-export function pickClaudeDefault(): string {
-  const has1mOpus47 =
-    state.models?.data.some((m) => /opus-4[.-]7-1m(?:$|-)/i.test(m.id)) ?? false
-  if (has1mOpus47) {
-    consola.info(
-      `Catalog contains opus-4.7-1m variant; defaulting ANTHROPIC_MODEL to "${DEFAULT_CLAUDE_MODEL}[1m]" so Claude Code accounts for 1M context locally. Set CLAUDE_CODE_DISABLE_1M_CONTEXT=1 to opt out (HIPAA), or pass --model ${DEFAULT_CLAUDE_MODEL} to pin 200K.`,
+const DEFAULT_OPUS_FAMILY = "4.7"
+
+export function pickClaudeDefault(opusFamily: string = DEFAULT_OPUS_FAMILY): string {
+  // Canonicalize the family to dotted form so both "4.7" and "4-7" work
+  // as input, then derive the dashed Anthropic slug and a regex that
+  // tolerates either separator in catalog ids (Copilot uses dotted,
+  // some test fixtures use dashed).
+  const dotted = opusFamily.replace(/-/g, ".")
+  const dashed = dotted.replace(/\./g, "-")
+  const bareSlug = `claude-opus-${dashed}`
+  const versionPattern = dotted.replace(/\./g, "[.-]")
+  const oneMRegex = new RegExp(`opus-${versionPattern}-1m(?:$|-)`, "i")
+  const familyRegex = new RegExp(`opus-${versionPattern}(?:$|[-.])`, "i")
+
+  const models = state.models?.data ?? []
+  const has1m = models.some((m) => oneMRegex.test(m.id))
+
+  // Warn when the user explicitly requested a family that's completely
+  // absent from the catalog — `resolveModel`'s downstream cache-walk
+  // will surface the "model not found" error, but a heads-up at this
+  // layer makes it obvious why a typo'd `-m 4.0` falls through.
+  if (
+    opusFamily !== DEFAULT_OPUS_FAMILY
+    && state.models
+    && models.length > 0
+    && !models.some((m) => familyRegex.test(m.id))
+  ) {
+    consola.warn(
+      `Requested Opus family "${dotted}" not found in Copilot catalog; using "${bareSlug}" anyway (resolveModel may not find a backend for it).`,
     )
-    return `${DEFAULT_CLAUDE_MODEL}[1m]`
   }
-  return DEFAULT_CLAUDE_MODEL
+
+  if (has1m) {
+    consola.info(
+      `Catalog contains opus-${dotted}-1m variant; defaulting ANTHROPIC_MODEL to "${bareSlug}[1m]" so Claude Code accounts for 1M context locally. Set CLAUDE_CODE_DISABLE_1M_CONTEXT=1 to opt out (HIPAA), or pass --model ${bareSlug} to pin 200K.`,
+    )
+    return `${bareSlug}[1m]`
+  }
+  return bareSlug
 }
 
 /**
