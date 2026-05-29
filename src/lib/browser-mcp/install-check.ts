@@ -176,6 +176,13 @@ function buildInstallRequired(
 // In-flight single-flight promise shared across concurrent callers.
 let _inFlightReady: Promise<BridgeReady | InstallRequiredPayload> | undefined
 
+/**
+ * @internal — counts how many times _ensureBridgeReadyImpl has started.
+ * Used by regression tests for the single-flight property (Bug #6).
+ * Always 0 in production (only incremented when imported by tests).
+ */
+export let __implInvocationsForTests = 0
+
 export async function ensureBridgeReady(): Promise<
   BridgeReady | InstallRequiredPayload
 > {
@@ -189,11 +196,13 @@ export async function ensureBridgeReady(): Promise<
 /** @internal — exported only for tests. Resets single-flight state between test cases. */
 export function __resetEnsureBridgeReadyForTests(): void {
   _inFlightReady = undefined
+  __implInvocationsForTests = 0
 }
 
 async function _ensureBridgeReadyImpl(): Promise<
   BridgeReady | InstallRequiredPayload
 > {
+  __implInvocationsForTests++
   const browsers = detectSupportedBrowsers()
   if (browsers.length === 0) {
     return buildInstallRequired("no_supported_browser", [])
