@@ -72,6 +72,12 @@ function rotateIfNeeded(filePath: string): void {
 export class FileLogReporter implements ConsolaReporter {
   private readonly filePath: string
   private readonly seen = new Set<string>()
+  // Approximate bytes written since the last rotation check. We use a
+  // conservative trigger threshold (half the max) so a burst of large
+  // lines between checks never grows the file by more than ~2x the cap.
+  // The stat inside rotateIfNeeded confirms the real size before rotating.
+  private bytesSinceCheck = 0
+  private static readonly ROTATE_CHECK_BYTES = MAX_LOG_BYTES / 2
 
   constructor(filePath: string) {
     this.filePath = filePath
@@ -88,6 +94,24 @@ export class FileLogReporter implements ConsolaReporter {
     this.seen.add(key)
 
     const line = formatLogLine(logObj)
+
+    // Periodic rotation check: after every ROTATE_CHECK_BYTES written since
+    // the last check, call rotateIfNeeded to enforce the MAX_LOG_BYTES ceiling
+    // from inside the hot path. The stat inside rotateIfNeeded only runs when
+    // the threshold is exceeded, so this adds at most one stat per 512 KB of
+    // output — acceptable for a warn/error-only log path.
+    //
+    // Concurrency: log() is synchronous (openSync/writeSync/closeSync hold
+    // the event loop for each line), so two calls can't interleave. The
+    // bytesSinceCheck counter is therefore safe without a mutex. If
+    // rotateIfNeeded's rename races a concurrent fs.openSync("a") in a
+    // subsequent call (e.g., on Windows where renameSync is not atomic with
+    // open), the open still succeeds and the new line goes to the right file.
+    this.bytesSinceCheck += line.length
+    if (this.bytesSinceCheck >= FileLogReporter.ROTATE_CHECK_BYTES) {
+      rotateIfNeeded(this.filePath)
+      this.bytesSinceCheck = 0
+    }
 
     // fs.openSync/writeSync/closeSync are synchronous and atomic from the
     // perspective of the JS event loop — no other log() call can interleave
