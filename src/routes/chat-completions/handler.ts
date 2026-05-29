@@ -7,8 +7,9 @@ import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
+import { UPSTREAM_INACTIVITY_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
-import { buildOpenAIErrorEvent, isControllerClosedError, logStreamError } from "~/lib/stream-relay"
+import { buildOpenAIErrorEvent, isControllerClosedError, logStreamError, readIteratorWithTimeout } from "~/lib/stream-relay"
 import { getTokenCount } from "~/lib/tokenizer"
 import { isNullish, resolveModel } from "~/lib/utils"
 import {
@@ -143,7 +144,7 @@ export async function handleCompletion(c: Context) {
   const iterator = (response as AsyncIterableIterator<UpstreamSSEEvent>)[
     Symbol.asyncIterator
   ]()
-  const firstResult = await iterator.next()
+  const firstResult = await readIteratorWithTimeout(iterator, UPSTREAM_INACTIVITY_TIMEOUT_MS)
   if (firstResult.done) {
     consola.warn(
       `Upstream /chat/completions returned an empty stream at ${c.req.path}`,
@@ -208,7 +209,7 @@ export async function handleCompletion(c: Context) {
           return
         }
         try {
-          const result = await iterator.next()
+          const result = await readIteratorWithTimeout(iterator, UPSTREAM_INACTIVITY_TIMEOUT_MS)
           if (consumerCancelled) {
             safeClose(controller)
             return

@@ -113,10 +113,15 @@ async function bridgeCall(
       headers: { authorization: `Bearer ${endpoint.token}` },
     })
     let settled = false
+    // Must be `let` (not `const`): declared before finish() which reads
+    // it via clearTimeout, but assigned by setTimeout below. Using
+    // `const` caused the original TDZ crash when signal.aborted was
+    // already true at call time (Bug D1).
+    let timer: ReturnType<typeof setTimeout> | undefined = undefined
     const finish = (fn: () => void) => {
       if (settled) return
       settled = true
-      clearTimeout(timer)
+      if (timer !== undefined) clearTimeout(timer)
       if (signal) signal.removeEventListener("abort", onAbort)
       try {
         ws.close()
@@ -133,7 +138,7 @@ async function bridgeCall(
       }
       signal.addEventListener("abort", onAbort, { once: true })
     }
-    const timer = setTimeout(
+    timer = setTimeout(
       () => finish(() => reject(new Error(`timeout after ${timeoutMs}ms`))),
       timeoutMs,
     )

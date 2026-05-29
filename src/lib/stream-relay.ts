@@ -217,6 +217,44 @@ async function readWithInactivityTimeout(
 }
 
 /**
+ * Race an `AsyncIterableIterator.next()` call against an inactivity timeout.
+ *
+ * Follows the same pattern as `readWithInactivityTimeout` (including the
+ * noop catcher to avoid Node 24 unhandled-rejection crashes) but works
+ * with typed iterators that yield parsed objects rather than raw bytes.
+ *
+ * On timeout, throws an `InactivityTimeout` error (same classification as
+ * the byte-reader variant — surfaced to the consumer as `timeout_error` via
+ * `buildOpenAIErrorEvent`).
+ *
+ * @param iterator - An AsyncIterableIterator whose `.next()` we want to race.
+ * @param timeoutMs - Milliseconds before the timeout fires.
+ */
+export async function readIteratorWithTimeout<T>(
+  iterator: AsyncIterableIterator<T>,
+  timeoutMs: number,
+): Promise<IteratorResult<T>> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      reject(
+        Object.assign(new Error("upstream_inactive"), {
+          name: "InactivityTimeout",
+        }),
+      )
+    }, timeoutMs)
+  })
+  // Same noop-catcher pattern: prevents unhandled-rejection crashes when the
+  // iterator wins the race on the same tick the timer fires.
+  timeoutPromise.catch(() => {})
+  try {
+    return await Promise.race([iterator.next(), timeoutPromise])
+  } finally {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle)
+  }
+}
+
+/**
  * Build the SSE wire bytes for an Anthropic-format streaming error event.
  * Per Anthropic streaming spec, errors are sent as:
  *   event: error

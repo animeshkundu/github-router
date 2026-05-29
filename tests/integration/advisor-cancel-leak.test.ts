@@ -34,6 +34,7 @@ import {
   afterAll,
   afterEach,
   beforeAll,
+  describe,
   expect,
   mock,
   test,
@@ -408,3 +409,147 @@ test(
   },
   15_000,
 )
+
+describe("Bug D2 — initial createMessages response not cancellable", () => {
+  test(
+    "consumer cancel aborts the initial upstream fetch signal within 500ms",
+    async () => {
+      // Track the AbortSignal passed to the FIRST /v1/messages upstream call.
+      // Pre-fix: createMessages is called with no callerSignal, so the only
+      // signal is the 5-minute UPSTREAM_FETCH_TIMEOUT_MS timeout — consumer
+      // cancel does NOT propagate. Post-fix: the handler passes the shared
+      // advisorAborter.signal, so cancel() → aborter.abort() → initial
+      // fetch signal fires.
+      let initialFetchSignal: AbortSignal | undefined
+      let initialFetchSignalAbortedAt: number | undefined
+
+      globalThis.fetch = mock((url: string | URL, init?: RequestInit) => {
+        const u = typeof url === "string" ? url : url.toString()
+        if (u.startsWith(baseUrl)) {
+          return realFetch(url, init)
+        }
+
+        if (u.includes("/v1/messages") || u.includes("/messages")) {
+          if (!initialFetchSignal) {
+            // First call — capture the signal and return a slow SSE stream
+            // that delays 5s before emitting any events. This simulates an
+            // upstream that's "thinking" (quiet body after headers).
+            initialFetchSignal = init?.signal ?? undefined
+            if (initialFetchSignal) {
+              initialFetchSignal.addEventListener("abort", () => {
+                if (!initialFetchSignalAbortedAt) {
+                  initialFetchSignalAbortedAt = Date.now()
+                }
+              })
+            }
+            const encoder = new TextEncoder()
+            let emitted = false
+            const stream = new ReadableStream<Uint8Array>({
+              async pull(controller) {
+                if (emitted) {
+                  // Hold the stream open indefinitely — the cancel should
+                  // terminate us before we emit anything else.
+                  await new Promise((r) => setTimeout(r, 5000))
+                  try { controller.close() } catch { /* */ }
+                  return
+                }
+                // Wait 5s before emitting the first event (simulates thinking).
+                await new Promise((r) => setTimeout(r, 5000))
+                emitted = true
+                try {
+                  controller.enqueue(
+                    encoder.encode(
+                      `event: message_start\ndata: ${JSON.stringify({
+                        type: "message_start",
+                        message: {
+                          id: "m_slow",
+                          type: "message",
+                          role: "assistant",
+                          model: "claude-opus-4-7",
+                          content: [],
+                          stop_reason: null,
+                          stop_sequence: null,
+                          usage: { input_tokens: 1, output_tokens: 0 },
+                        },
+                      })}\n\n`,
+                    ),
+                  )
+                } catch { /* enqueue after close */ }
+              },
+            })
+            return Promise.resolve(
+              new Response(stream, {
+                status: 200,
+                headers: { "content-type": "text/event-stream" },
+              }),
+            )
+          }
+          // Should not reach a second call — the cancel should prevent
+          // the advisor loop from making continuation calls.
+          return new Response("unexpected", { status: 500 })
+        }
+
+        if (u.includes("/responses")) {
+          // Advisor call — should not be reached in this test because
+          // the initial response never emits an advisor tool_use block.
+          return new Response("unexpected advisor", { status: 500 })
+        }
+        return new Response("?", { status: 500 })
+      }) as unknown as typeof globalThis.fetch
+
+      // Fire the advisor-enabled request.
+      const ac = new AbortController()
+      const res = await fetch(`${baseUrl}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          "anthropic-beta": "advisor-tool-2026-03-01",
+        },
+        body: JSON.stringify({
+          model: "claude-opus-4-7",
+          max_tokens: 100,
+          messages: [{ role: "user", content: "slow initial test" }],
+          stream: true,
+        }),
+        signal: ac.signal,
+      })
+      expect(res.status).toBe(200)
+
+      // Start reading the body — it should be quiet (the upstream SSE
+      // stream is waiting 5s before emitting).
+      const reader = res.body!.getReader()
+      const readPromise = reader.read().catch(() => ({ done: true, value: undefined }))
+
+      // Wait 100ms, then cancel the consumer.
+      await new Promise((r) => setTimeout(r, 100))
+      const cancelTime = Date.now()
+      ac.abort()
+      await readPromise
+      try {
+        while (true) {
+          const r = await reader.read()
+          if (r.done) break
+        }
+      } catch {
+        // expected after abort
+      }
+
+      // Give the abort propagation up to 500ms to reach the initial signal.
+      const deadline = Date.now() + 500
+      while (!initialFetchSignalAbortedAt && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10))
+      }
+
+      // CRITICAL assertion: the initial fetch signal was aborted.
+      // Pre-fix: initialFetchSignal has no callerSignal from the handler,
+      // so it only carries the 5-min timeout — cancel never reaches it.
+      // Post-fix: the shared advisorAborter.signal propagates cancel.
+      expect(initialFetchSignal).toBeDefined()
+      expect(initialFetchSignalAbortedAt).toBeDefined()
+      // The abort should have arrived within 500ms of the cancel time.
+      expect(initialFetchSignalAbortedAt! - cancelTime).toBeLessThan(500)
+    },
+    15_000,
+  )
+})

@@ -222,3 +222,64 @@ test("returns error when synthetic /responses call fails", async () => {
   const body = (await response.json()) as AnyRecord
   expect(body.error).toBeDefined()
 })
+
+// Regression test for Bug E2: unconsumed response body on 404 fallback.
+// The 404 response body must be cancelled before syntheticCompact() is called
+// so the upstream TCP connection is released promptly.
+test("cancels the 404 response body before falling back to synthetic compaction", async () => {
+  resetState()
+
+  let compactBodyCancelled = false
+
+  const fetchMock = mock((url: string, _opts?: { body?: string }) => {
+    if (typeof url === "string" && url.endsWith("/responses/compact")) {
+      // Return a 404 with a custom ReadableStream whose cancel() callback
+      // records whether the handler consumed/cancelled the body.
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("404 page not found"))
+          controller.close()
+        },
+        cancel() {
+          compactBodyCancelled = true
+        },
+      })
+      return new Response(stream, { status: 404 })
+    }
+    if (typeof url === "string" && url.endsWith("/responses")) {
+      // Successful synthetic /responses reply
+      return new Response(
+        JSON.stringify({
+          id: "resp_synth",
+          object: "response",
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Summary." }],
+            },
+          ],
+          usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+        }),
+      )
+    }
+    throw new Error(`Unexpected URL: ${url}`)
+  })
+  // @ts-expect-error - override fetch for this test
+  globalThis.fetch = fetchMock
+
+  const response = await server.request("/v1/responses/compact", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(compactRequestBody),
+  })
+
+  expect(response.status).toBe(200)
+  const body = (await response.json()) as AnyRecord
+  expect(body.object).toBe("response.compaction")
+
+  // Critical assertion: the 404 body must have been cancelled so the
+  // upstream TCP connection is returned to the pool promptly.
+  expect(compactBodyCancelled).toBe(true)
+})

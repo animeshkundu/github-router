@@ -11,21 +11,29 @@ state.copilotToken = "test-token"
 state.vsCodeVersion = "1.0.0"
 state.accountType = "individual"
 
-// Helper to mock fetch
 const originalFetch = globalThis.fetch
+
+const DEFAULT_RESPONSE_BODY = JSON.stringify({
+  id: "resp_123",
+  object: "response",
+  status: "completed",
+  output: [],
+})
+
+// Returns a real Response so readResponseBodyCapped can call response.headers.get()
+// and response.body.getReader(). The previous plain-object mock broke after we
+// introduced the response-cap utility which requires a proper Response interface.
+// Request-header inspection still works: tests read fetchMock.mock.calls[N][1].headers
+// which are the RequestInit.headers passed TO the upstream (unchanged).
 const fetchMock = mock(
-  (_url: string, opts: { headers: Record<string, string>; body?: string }) => {
-    return {
-      ok: true,
-      json: () => ({
-        id: "resp_123",
-        object: "response",
-        status: "completed",
-        output: [],
-      }),
-      headers: opts.headers,
-      body: opts.body,
-    }
+  (_url: string, _opts: { headers: Record<string, string>; body?: string }) => {
+    return new Response(DEFAULT_RESPONSE_BODY, {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "content-length": String(DEFAULT_RESPONSE_BODY.length),
+      },
+    })
   },
 )
 
