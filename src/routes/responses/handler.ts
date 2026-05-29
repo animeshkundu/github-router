@@ -10,8 +10,9 @@ import { logEndpointMismatch } from "~/lib/model-validation"
 import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
+import { UPSTREAM_INACTIVITY_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
-import { buildOpenAIErrorEvent, isControllerClosedError, logStreamError } from "~/lib/stream-relay"
+import { buildOpenAIErrorEvent, isControllerClosedError, logStreamError, readIteratorWithTimeout } from "~/lib/stream-relay"
 import { tryRefreshAndRetry } from "~/lib/token"
 import { resolveModel } from "~/lib/utils"
 import {
@@ -126,7 +127,7 @@ export async function handleResponses(c: Context) {
   let firstChunk: UpstreamSSEEvent | undefined
   let upstreamFinished = false
   while (true) {
-    const r = await iterator.next()
+    const r = await readIteratorWithTimeout(iterator, UPSTREAM_INACTIVITY_TIMEOUT_MS)
     if (r.done) {
       upstreamFinished = true
       break
@@ -203,7 +204,7 @@ export async function handleResponses(c: Context) {
           return
         }
         try {
-          const result = await iterator.next()
+          const result = await readIteratorWithTimeout(iterator, UPSTREAM_INACTIVITY_TIMEOUT_MS)
           if (consumerCancelled) {
             safeClose(controller)
             return
