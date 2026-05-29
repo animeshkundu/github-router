@@ -168,6 +168,25 @@ export function sweepRegistry(): void {
 }
 
 /**
+ * Windows ConPTY / node-pty signal behavior:
+ *
+ * When a ConPTY host (VS Code terminal, Windows Terminal, node-pty) closes
+ * the pseudo-console, the ConPTY layer sends CTRL_CLOSE_EVENT to the
+ * process group. Node.js translates this into SIGINT (NOT SIGTERM). The
+ * process has a ~5-second window before forced termination.
+ *
+ * Implication: the SIGTERM handler below may NEVER fire in node-pty
+ * environments. This is by design — the three-layer cleanup architecture
+ * ensures coverage:
+ *   1. Per-call cleanup (engine.ts finally block) — happy path
+ *   2. SIGINT handler (this file) — ConPTY close, Ctrl+C
+ *   3. `exit` handler (this file) — unconditional, fires on any exit
+ *   4. Boot-time PID+instance sweep (sweepStaleWorktreesAtBoot) — crash recovery
+ *
+ * Layers 1+2+3 cover ConPTY; layer 4 covers SIGKILL/OOM/container restart.
+ */
+
+/**
  * Wire up SIGINT/SIGTERM/exit handlers that walk the registry and
  * remove every entry. Idempotent: subsequent calls swap the registry
  * pointer but do NOT register additional process listeners (otherwise

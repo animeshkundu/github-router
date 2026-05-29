@@ -1,0 +1,5 @@
+# Enforce LF line endings across all platforms. Windows CI (the primary
+# deployment target) sets core.autocrlf=true by default; without this
+# file, cloned .sh scripts and test fixtures may pick up CRLF that
+# breaks bash execution and causes test assertions to include \r.
+* text=auto eol=lf
