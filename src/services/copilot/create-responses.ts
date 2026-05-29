@@ -4,6 +4,7 @@ import { events } from "fetch-event-stream"
 import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
 import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
+import { MAX_RESPONSE_BODY_BYTES, readResponseBodyCapped } from "~/lib/response-cap"
 import { state } from "~/lib/state"
 import { tryRefreshAndRetry } from "~/lib/token"
 
@@ -64,7 +65,21 @@ export const createResponses = async (
     return events(response)
   }
 
-  return (await response.json()) as ResponsesApiResponse
+  const cappedResult = await readResponseBodyCapped<ResponsesApiResponse>(
+    response,
+    "/v1/responses",
+    MAX_RESPONSE_BODY_BYTES,
+  )
+  if (!cappedResult.ok) {
+    throw new HTTPError(
+      "Upstream /v1/responses response exceeded 10 MiB size cap",
+      new Response(JSON.stringify(cappedResult.errorResponse), {
+        status: cappedResult.status,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+  }
+  return cappedResult.value
 }
 
 function detectVision(input: ResponsesPayload["input"]): boolean {

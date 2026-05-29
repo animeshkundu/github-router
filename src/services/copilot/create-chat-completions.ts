@@ -4,6 +4,7 @@ import { events } from "fetch-event-stream"
 import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
 import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
+import { MAX_RESPONSE_BODY_BYTES, readResponseBodyCapped } from "~/lib/response-cap"
 import { state } from "~/lib/state"
 import { tryRefreshAndRetry } from "~/lib/token"
 
@@ -77,7 +78,21 @@ export const createChatCompletions = async (
     return events(response)
   }
 
-  return (await response.json()) as ChatCompletionResponse
+  const cappedResult = await readResponseBodyCapped<ChatCompletionResponse>(
+    response,
+    "/v1/chat/completions",
+    MAX_RESPONSE_BODY_BYTES,
+  )
+  if (!cappedResult.ok) {
+    throw new HTTPError(
+      "Upstream /v1/chat/completions response exceeded 10 MiB size cap",
+      new Response(JSON.stringify(cappedResult.errorResponse), {
+        status: cappedResult.status,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+  }
+  return cappedResult.value
 }
 
 // Streaming types
