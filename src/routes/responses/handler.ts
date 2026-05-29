@@ -7,10 +7,12 @@ import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
 import { awaitApproval } from "~/lib/approval"
 import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
+import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
 import { state } from "~/lib/state"
 import { buildOpenAIErrorEvent, isControllerClosedError, logStreamError } from "~/lib/stream-relay"
+import { tryRefreshAndRetry } from "~/lib/token"
 import { resolveModel } from "~/lib/utils"
 import {
   createResponses,
@@ -397,14 +399,14 @@ export async function handleResponsesCompact(c: Context) {
   const body = await c.req.json<CompactRequestPayload>()
 
   // Try Copilot's native compact endpoint first (future-proofs for when they add support)
-  const response = await fetch(
-    `${copilotBaseUrl(state)}/responses/compact`,
-    {
-      method: "POST",
-      headers: copilotHeaders(state),
-      body: JSON.stringify(body),
-    },
-  )
+  const compactUrl = `${copilotBaseUrl(state)}/responses/compact`
+  const doFetch = (): Promise<Response> => fetch(compactUrl, {
+    method: "POST",
+    headers: copilotHeaders(state),
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS || 300_000),
+  })
+  const response = await tryRefreshAndRetry(doFetch, "/responses/compact")
 
   if (response.ok) {
     logRequest(
@@ -419,6 +421,8 @@ export async function handleResponsesCompact(c: Context) {
   // by sending a regular /responses call with a summarization prompt
   if (response.status === 404) {
     consola.debug("Copilot API does not support /responses/compact, using synthetic compaction")
+    // Consume the 404 response body to release the upstream TCP connection.
+    await response.body?.cancel().catch(() => {})
     return await syntheticCompact(c, body, startTime)
   }
 
