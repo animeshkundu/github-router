@@ -11,13 +11,13 @@
  *   - POSIX process-group kill: grandchildren spawned by `bash -c
  *     "sleep & wait"` are reaped (verified via `pgrep`)
  *
- * Windows: tests that exercise POSIX-only details (process groups,
- * /bin/bash) are guarded by `process.platform === "win32"` skip.
- * Justification: these tests verify POSIX kernel facilities that have
- * no Windows equivalent (the Windows side is exercised by the
- * `taskkill` cleanup path which is platform-agnostic at the JS
- * surface — adding a Windows-specific assertion would be a redundant
- * duplicate of what `bash.ts` already does).
+ * Platform coverage: POSIX tests (`bash -c`) and Windows tests
+ * (`cmd.exe /d /s /c`) each have dedicated describe blocks. POSIX-
+ * only details (process groups, /bin/bash) are guarded by
+ * `if (IS_WINDOWS) return`; Windows-only tests (cmd.exe exit codes,
+ * taskkill tree-kill, env allowlist via `%VAR%` syntax) are guarded
+ * by `if (!IS_WINDOWS) return`. Both code paths are load-bearing —
+ * see CLAUDE.md "Windows-first CI" for the primary-target policy.
  *
  * Plan: `plans/we-have-added-a-dreamy-tide.md` ("Bash hardening").
  */
@@ -290,7 +290,6 @@ describe("runBash stdin", () => {
 
 describe("runBash disableNetwork param", () => {
   test("accepts the flag but does NOT enforce it (caller's job)", async () => {
-    if (IS_WINDOWS) return
     const { dir, cleanup } = freshWorkspace()
     try {
       // The flag is accepted for symmetry; we explicitly do NOT
@@ -305,6 +304,209 @@ describe("runBash disableNetwork param", () => {
       })
       expect(result.exitCode).toBe(0)
       expect(result.stdout.trim()).toBe("would-be-net")
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Windows cmd.exe code-path coverage
+// ---------------------------------------------------------------------------
+// The POSIX tests above use `bash -c` and POSIX utilities (sleep, yes,
+// pgrep). The tests below verify the `cmd.exe /d /s /c` code path that
+// runBash takes on Windows. Each test is the cmd.exe equivalent of a
+// POSIX test above; both paths are load-bearing per CLAUDE.md
+// "Windows-first CI".
+// ---------------------------------------------------------------------------
+
+describe("runBash (Windows cmd.exe)", () => {
+  test("preserves non-zero exit code via exit /b", async () => {
+    if (!IS_WINDOWS) return
+    const { dir, cleanup } = freshWorkspace()
+    try {
+      const result = await runBash("exit /b 42", {
+        cwd: dir,
+        timeoutMs: 10_000,
+        signal: new AbortController().signal,
+        disableNetwork: false,
+      })
+      expect(result.exitCode).toBe(42)
+      expect(result.timedOut).toBe(false)
+      expect(result.killed).toBe(false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("timeout fires and reports timedOut: true", async () => {
+    if (!IS_WINDOWS) return
+    const { dir, cleanup } = freshWorkspace()
+    try {
+      const start = Date.now()
+      // `ping -n 6 127.0.0.1` blocks for ~5 seconds on Windows.
+      const result = await runBash("ping -n 6 127.0.0.1 >NUL", {
+        cwd: dir,
+        timeoutMs: 100,
+        signal: new AbortController().signal,
+        disableNetwork: false,
+      })
+      const elapsed = Date.now() - start
+      expect(result.timedOut).toBe(true)
+      // taskkill /T /F should terminate promptly.
+      expect(elapsed).toBeLessThan(5000)
+      expect(result.exitCode).not.toBe(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("truncates stdout at 1 MiB and appends marker", async () => {
+    if (!IS_WINDOWS) return
+    const { dir, cleanup } = freshWorkspace()
+    try {
+      // Produce ~2 MiB of output via a cmd.exe for-loop. Each
+      // iteration prints a 99-char line + \r\n = 101 bytes;
+      // 20500 iterations ≈ 2.07 MB, well over the 1 MiB cap.
+      const result = await runBash(
+        "for /L %i in (1,1,20500) do @echo " +
+          "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy" +
+          "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+        {
+          cwd: dir,
+          timeoutMs: 60_000,
+          signal: new AbortController().signal,
+          disableNetwork: false,
+        },
+      )
+      expect(result.stdout).toContain("[bash: stdout truncated at 1MB]")
+      // Captured body should not exceed 1 MiB + marker bytes by much.
+      expect(result.stdout.length).toBeLessThan(1024 * 1024 + 256)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("abort signal kills the child and reports killed: true", async () => {
+    if (!IS_WINDOWS) return
+    const { dir, cleanup } = freshWorkspace()
+    const controller = new AbortController()
+    try {
+      const start = Date.now()
+      // `ping -n 31` blocks for ~30 seconds.
+      const pending = runBash("ping -n 31 127.0.0.1 >NUL", {
+        cwd: dir,
+        timeoutMs: 60_000,
+        signal: controller.signal,
+        disableNetwork: false,
+      })
+      // Give spawn a moment to actually start.
+      setTimeout(() => controller.abort(), 50)
+      const result = await pending
+      const elapsed = Date.now() - start
+      expect(result.killed).toBe(true)
+      // taskkill /T /F should terminate the tree promptly.
+      expect(elapsed).toBeLessThan(5000)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("does NOT leak secret-like parent env vars to cmd.exe", async () => {
+    if (!IS_WINDOWS) return
+    const { dir, cleanup } = freshWorkspace()
+    const SECRET = "super-secret-token-DO-NOT-LEAK"
+    const previous = process.env.GITHUB_TOKEN
+    process.env.GITHUB_TOKEN = SECRET
+    try {
+      // cmd.exe: `if defined VAR (echo LEAK) else (echo EMPTY)`
+      const result = await runBash(
+        'if defined GITHUB_TOKEN (echo LEAK:%GITHUB_TOKEN%) else (echo EMPTY)',
+        {
+          cwd: dir,
+          timeoutMs: 10_000,
+          signal: new AbortController().signal,
+          disableNetwork: false,
+        },
+      )
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout.trim()).toBe("EMPTY")
+      // Defense-in-depth: ensure the literal secret never appears.
+      expect(result.stdout).not.toContain(SECRET)
+      expect(result.stderr).not.toContain(SECRET)
+    } finally {
+      if (previous === undefined) delete process.env.GITHUB_TOKEN
+      else process.env.GITHUB_TOKEN = previous
+      cleanup()
+    }
+  })
+
+  test("preserves PATH so common executables resolve", async () => {
+    if (!IS_WINDOWS) return
+    const { dir, cleanup } = freshWorkspace()
+    try {
+      const result = await runBash(
+        "where git >NUL 2>&1 && echo OK || echo MISSING",
+        {
+          cwd: dir,
+          timeoutMs: 10_000,
+          signal: new AbortController().signal,
+          disableNetwork: false,
+        },
+      )
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout.trim()).toBe("OK")
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("taskkill /T /F terminates child tree on abort", async () => {
+    if (!IS_WINDOWS) return
+    const { dir, cleanup } = freshWorkspace()
+    const controller = new AbortController()
+    try {
+      const start = Date.now()
+      // Long-running ping spawns a child process tree.
+      const pending = runBash("ping -n 9999 127.0.0.1 >NUL", {
+        cwd: dir,
+        timeoutMs: 60_000,
+        signal: controller.signal,
+        disableNetwork: false,
+      })
+      // Give the child time to start, then abort.
+      setTimeout(() => controller.abort(), 200)
+      const result = await pending
+      const elapsed = Date.now() - start
+      expect(result.killed).toBe(true)
+      // The whole thing must wrap up well within 5 seconds —
+      // if taskkill /T /F didn't work, ping would hang for ~9999s.
+      expect(elapsed).toBeLessThan(5000)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("stdin is ignored (findstr exits on empty stdin)", async () => {
+    if (!IS_WINDOWS) return
+    const { dir, cleanup } = freshWorkspace()
+    try {
+      // `findstr "."` reads stdin; with stdin: 'ignore' it sees EOF
+      // immediately and exits with code 1 (no match on empty input).
+      const start = Date.now()
+      const result = await runBash('findstr "."', {
+        cwd: dir,
+        timeoutMs: 5_000,
+        signal: new AbortController().signal,
+        disableNetwork: false,
+      })
+      const elapsed = Date.now() - start
+      // findstr exit 1 = no match (expected with empty stdin).
+      expect(result.exitCode).toBe(1)
+      expect(result.stdout).toBe("")
+      // Must not hang waiting for input — should complete in well
+      // under 3 seconds.
+      expect(elapsed).toBeLessThan(3000)
     } finally {
       cleanup()
     }

@@ -55,6 +55,7 @@
 import {
   type ChildProcess,
   spawn,
+  spawnSync,
 } from "node:child_process"
 import {
   closeSync,
@@ -255,6 +256,33 @@ function resolvePathOrThrow(
  *   with the truncated text + a flag. The caller appends the
  *   truncation marker to the formatted output.
  */
+/**
+ * Platform-aware kill for child processes. On Windows `child.kill()`
+ * does NOT reliably terminate descendant processes — we use
+ * `taskkill /T /F /PID` instead (same pattern as `bash.ts:killProcessTree`
+ * and `code-search.ts:killChild`). EBUSY is swallowed because taskkill
+ * occasionally races with the child's own teardown.
+ */
+function killChildTree(child: ChildProcess): void {
+  if (!child.pid || child.killed) return
+  if (process.platform === "win32") {
+    try {
+      spawnSync("taskkill", ["/T", "/F", "/PID", String(child.pid)], {
+        stdio: "ignore",
+        windowsHide: true,
+      })
+    } catch {
+      /* EBUSY race or already gone */
+    }
+    return
+  }
+  try {
+    child.kill("SIGTERM")
+  } catch {
+    /* already gone */
+  }
+}
+
 async function runRipgrep(
   args: Array<string>,
   cwd: string,
@@ -291,11 +319,7 @@ async function runRipgrep(
 
     const onAbort = (): void => {
       if (child.pid && !child.killed) {
-        try {
-          child.kill("SIGTERM")
-        } catch {
-          /* already gone */
-        }
+        killChildTree(child)
       }
     }
     if (signal.aborted) {
@@ -314,11 +338,7 @@ async function runRipgrep(
       if (chunk.length > room) {
         truncated = true
         if (child.pid && !child.killed) {
-          try {
-            child.kill("SIGTERM")
-          } catch {
-            /* fine */
-          }
+          killChildTree(child)
         }
       }
     })

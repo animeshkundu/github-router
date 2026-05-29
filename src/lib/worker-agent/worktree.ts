@@ -415,7 +415,7 @@ export async function createWorktree(
     // Heuristic count: each non-trailing-summary line of `diff --stat`
     // describes one file. The trailing line is "N files changed, …";
     // we just count lines and let the reader sanity-check.
-    const lineCount = stat.split("\n").filter((l) => l.length > 0).length
+    const lineCount = stat.split(/\r?\n/).filter((l) => l.length > 0).length
     const fileEstimate = Math.max(0, lineCount - 1)
     return `[diff truncated at 256KB; ${fileEstimate} files changed]\n${stat}`
   }

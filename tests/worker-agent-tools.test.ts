@@ -539,13 +539,12 @@ describe("bash tool surface", () => {
   })
 
   test("non-zero exit returns as content, not error", async () => {
-    if (IS_WINDOWS) return
     const { dir, cleanup } = freshWorkspace()
     try {
       const tool = __testExports.bashTool(dir)
       const r = await tool.execute(
         "c1",
-        { cmd: "exit 7" },
+        { cmd: IS_WINDOWS ? "exit /b 7" : "exit 7" },
         new AbortController().signal,
       )
       expect((r.content[0] as { text: string }).text).toContain("exit=7")
@@ -555,7 +554,6 @@ describe("bash tool surface", () => {
   })
 
   test("network-disabled gate blocks curl when env set", async () => {
-    if (IS_WINDOWS) return
     process.env.GH_ROUTER_WORKER_DISABLE_NETWORK = "1"
     const { dir, cleanup } = freshWorkspace()
     try {
@@ -573,7 +571,6 @@ describe("bash tool surface", () => {
   })
 
   test("network-disabled does NOT block a plain echo", async () => {
-    if (IS_WINDOWS) return
     process.env.GH_ROUTER_WORKER_DISABLE_NETWORK = "1"
     const { dir, cleanup } = freshWorkspace()
     try {
@@ -590,7 +587,6 @@ describe("bash tool surface", () => {
   })
 
   test("network-disabled matches wget / ssh too", async () => {
-    if (IS_WINDOWS) return
     process.env.GH_ROUTER_WORKER_DISABLE_NETWORK = "1"
     const { dir, cleanup } = freshWorkspace()
     try {
