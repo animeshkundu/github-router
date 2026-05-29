@@ -227,4 +227,32 @@ describe("FileLogReporter", () => {
     // Last element after split on trailing \n is empty string
     expect(lines[lines.length - 1]).toBe("")
   })
+
+  // Regression test for Bug #5: rotation must fire from log(), not only from
+  // the constructor. A long-running daemon that writes many unique error lines
+  // after startup should never grow the log file without bound.
+  //
+  // Strategy: start with an empty file (so construction does NOT rotate),
+  // then write enough unique lines to exceed the 1 MiB cap 3x over.
+  // After all writes, the active log file must be smaller than 1 MiB.
+  //
+  // The unfixed code fails this assertion because rotateIfNeeded() is only
+  // called in the constructor, so the append-only hot path grows the file
+  // without any ceiling check.
+  test("rotation fires from log() after the file grows past 1MB during a long-lived daemon run", () => {
+    // Start with an empty file — construction does NOT rotate.
+    fs.writeFileSync(logFile, "")
+    const reporter = new FileLogReporter(logFile)
+
+    // Each line is ~120 bytes; 1 MiB / 120 ≈ 8738 lines per MB.
+    // Write 3 * 9000 = 27 000 unique error lines so we exceed 1 MiB three times.
+    // Lines must be unique to defeat the dedup set; include the loop index.
+    const TARGET_LINES = 27_000
+    for (let i = 0; i < TARGET_LINES; i++) {
+      reporter.log(makeLogObj("error", `daemon-error-unique-${i}-${"x".repeat(60)}`), dummyCtx)
+    }
+
+    const sizeAfter = fs.statSync(logFile).size
+    expect(sizeAfter).toBeLessThan(1024 * 1024)
+  })
 })

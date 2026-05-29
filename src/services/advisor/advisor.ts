@@ -297,7 +297,11 @@ async function runAdvisor(
   conversation: Array<AnyRecord>,
   advisorModel: string,
   advisorEffort: Effort,
+  signal?: AbortSignal,
 ): Promise<string> {
+  if (signal?.aborted) {
+    throw new Error("advisor call aborted before dispatch")
+  }
   const advisorSystem =
     "You are an expert advisor reviewing an in-progress Claude Code session. "
     + "The transcript below is the work-in-progress (turns numbered, with "
@@ -336,7 +340,7 @@ async function runAdvisor(
       // ADVISOR_TOOL_INSTRUCTIONS line 31), so don't be cheap.
       reasoning: { effort: advisorEffort },
     }
-    const response = (await createResponses(payload)) as ResponsesApiResponse
+    const response = (await createResponses(payload, undefined, signal)) as ResponsesApiResponse
     const out: Array<string> = []
     for (const item of response.output) {
       if (typeof item !== "object" || item === null) continue
@@ -374,7 +378,7 @@ async function runAdvisor(
     messages: [{ role: "user", content: conversationText }],
     stream: false,
   })
-  const response = await createMessages(advisorBody, {})
+  const response = await createMessages(advisorBody, {}, signal)
   const json = (await response.json()) as AnyRecord
   const blocks = Array.isArray(json.content) ? json.content : []
   const text = blocks
@@ -505,9 +509,23 @@ export function buildAdvisorStream(opts: {
   const advisorModel = opts.advisorModel ?? ADVISOR_DEFAULT_MODEL
   const advisorEffort = opts.advisorEffort ?? ADVISOR_DEFAULT_EFFORT
 
+  // Internal AbortController for consumer-disconnect cancellation.
+  // Threads into runAdvisor() (which forwards to createResponses /
+  // createMessages via their `callerSignal` arg) AND the continuation
+  // createMessages() call. Without this, a consumer cancel mid-stream
+  // left the outer turn loop running — the `for await (const ev of
+  // events(response))` inside `processOneTurn` would early-return on
+  // safeEnqueue failure, but only AFTER the advisor + continuation
+  // upstream calls had already burned tokens and held sockets open.
+  // Up to ~16 leaked upstream calls per cancelled request.
+  const aborter = new AbortController()
+  // Hoist `conversation` so cancel() can clear the reference and let
+  // the accumulated tool_result text get GC'd promptly (a long
+  // advisor loop accumulates hundreds of KB of upstream content).
+  let conversation: Array<AnyRecord> | null = [...opts.initialConversation]
+
   return new ReadableStream<Uint8Array>({
     async start(controller) {
-      const conversation = [...opts.initialConversation]
       let messageStartForwarded = false
       let nextSyntheticIndex = 0
       let turnsRun = 0
@@ -517,7 +535,17 @@ export function buildAdvisorStream(opts: {
           controller.enqueue(bytes)
           return true
         } catch (err) {
-          if (isControllerClosedError(err)) return false
+          if (isControllerClosedError(err)) {
+            // Consumer is gone — also signal the upstream abort so the
+            // outer loop and any in-flight createMessages/runAdvisor
+            // tear down on the next signal check (or sooner, via the
+            // fetch's AbortSignal). Safe to call repeatedly — abort()
+            // is idempotent.
+            if (!aborter.signal.aborted) {
+              aborter.abort(new Error("advisor stream consumer disconnected"))
+            }
+            return false
+          }
           throw err
         }
       }
@@ -794,6 +822,13 @@ export function buildAdvisorStream(opts: {
         let response: Response = opts.firstResponse
 
         for (turnsRun = 0; turnsRun < ADVISOR_MAX_TURNS; turnsRun++) {
+          // Top-of-loop abort check — bail before processing the next
+          // turn if the consumer has disconnected. Without this, the
+          // outer for-loop kept iterating after a mid-stream cancel,
+          // burning advisor + continuation calls into a dead stream.
+          if (aborter.signal.aborted) return
+          if (conversation === null) return
+
           const { capturedBlocks, advisorToolUse } = await processOneTurn(response)
 
           if (!advisorToolUse) {
@@ -801,6 +836,13 @@ export function buildAdvisorStream(opts: {
             // forwarded. We're done.
             return
           }
+
+          // Immediate post-turn abort check — `processOneTurn` returns
+          // early on `safeEnqueue` failure (which now also aborts the
+          // controller). Don't dispatch runAdvisor + continuation if
+          // the consumer is already gone.
+          if (aborter.signal.aborted) return
+          if (conversation === null) return
 
           // Advisor was called this turn. Run advisor model with the
           // full conversation extended by the assistant turn.
@@ -839,8 +881,18 @@ export function buildAdvisorStream(opts: {
 
           let advisorText: string
           try {
-            advisorText = await runAdvisor(conversation, advisorModel, advisorEffort)
+            advisorText = await runAdvisor(
+              conversation,
+              advisorModel,
+              advisorEffort,
+              aborter.signal,
+            )
           } catch (err) {
+            // If the failure was the consumer-cancel abort, bail
+            // silently — there's nothing left to deliver. Otherwise
+            // synthesize an inline notice so the model can degrade
+            // gracefully (same path as before).
+            if (aborter.signal.aborted) return
             const msg = err instanceof Error ? err.message : String(err)
             consola.warn(`Advisor model call failed: ${msg}`)
             advisorText =
@@ -854,6 +906,8 @@ export function buildAdvisorStream(opts: {
           // pairs with the server_tool_use block emitted earlier; the
           // internal toolu_* id is only used in the Copilot-replay
           // path below.
+          if (aborter.signal.aborted) return
+          if (conversation === null) return
           const resultIndex = nextSyntheticIndex++
           const startOk = safeEnqueueEvent("content_block_start", {
             type: "content_block_start",
@@ -889,16 +943,22 @@ export function buildAdvisorStream(opts: {
           // post-advisor. Reuse baseBody fields (max_tokens, system,
           // tools, etc.) but with the extended conversation and
           // stream:true.
+          if (aborter.signal.aborted) return
           const continuationBody = JSON.stringify({
             ...opts.baseBody,
             messages: conversation,
             stream: true,
           })
-          response = await createMessages(continuationBody, opts.requestHeaders)
+          response = await createMessages(
+            continuationBody,
+            opts.requestHeaders,
+            aborter.signal,
+          )
         }
 
         // Loop exhausted. Synthesize final message_stop + an error text
         // block so the client doesn't hang.
+        if (aborter.signal.aborted) return
         const finalIndex = nextSyntheticIndex++
         safeEnqueueEvent("content_block_start", {
           type: "content_block_start",
@@ -919,6 +979,10 @@ export function buildAdvisorStream(opts: {
         })
         safeEnqueueEvent("message_stop", { type: "message_stop" })
       } catch (err) {
+        // Suppress advisor-stream error path on consumer cancel —
+        // emitting `event: error` would log a misleading "advisor loop
+        // failed" line; the consumer is already gone.
+        if (aborter.signal.aborted) return
         const msg = err instanceof Error ? err.message : String(err)
         consola.error(`Advisor stream error: ${msg}`)
         safeEnqueueEvent("error", {
@@ -926,12 +990,34 @@ export function buildAdvisorStream(opts: {
           error: { type: "api_error", message: `advisor loop failed: ${msg}` },
         })
       } finally {
+        // Truncate the conversation reference so the accumulated
+        // tool_result text gets GC'd promptly (long advisor loops
+        // accumulate hundreds of KB).
+        conversation = null
         try {
           controller.close()
         } catch {
           // already closed
         }
       }
+    },
+    cancel(reason) {
+      // Consumer disconnected. Abort the upstream advisor /
+      // continuation fetches so the sockets tear down immediately,
+      // and clear the conversation reference for GC. The outer turn
+      // loop observes `aborter.signal.aborted` at the top of every
+      // iteration AND after each await point, so it exits at the
+      // next checkpoint without dispatching another upstream call.
+      if (!aborter.signal.aborted) {
+        aborter.abort(
+          new Error(
+            `advisor stream cancelled: ${
+              reason instanceof Error ? reason.message : String(reason ?? "no reason")
+            }`,
+          ),
+        )
+      }
+      conversation = null
     },
   })
 }

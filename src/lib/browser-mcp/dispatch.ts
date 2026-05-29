@@ -138,6 +138,20 @@ async function bridgeCall(
       timeoutMs,
     )
     ws.on("open", () => {
+      // Guard: timeout or abort may have fired between the TCP connect
+      // completing and the "open" event arriving on the event loop.
+      // Without this check, send() would execute the tool in the
+      // browser even though the caller has already rejected the promise
+      // — a "ghost execution" for side-effectful tools (click, fill,
+      // navigate, download).
+      if (settled) {
+        try {
+          ws.close()
+        } catch {
+          // ignore
+        }
+        return
+      }
       ws.send(JSON.stringify({ id, tool, args }))
     })
     ws.on("message", (raw) => {

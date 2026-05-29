@@ -529,21 +529,17 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           },
         },
       },
-      // The `signal` parameter is part of the contract but unused for
-      // now: `searchWeb()` doesn't currently accept an AbortSignal.
-      // notifications/cancelled still releases the in-flight slot via
-      // the catch path in handler.ts:handleToolsCall, but the underlying
-      // upstream MCP fetches keep running until natural completion.
-      // Web_search calls are short-lived (a few seconds), so the slot-
-      // leak window is small. Plumbing cancellation into searchWeb is a
-      // separate scope.
-      // TODO: thread AbortSignal into searchWeb() so the upstream Bing-
-      // backed fetch tears down on notifications/cancelled (not just the
-      // MCP slot). Acceptable for short calls today; revisit if a future
-      // search backend has higher tail latency.
+      // searchWeb() now accepts an AbortSignal — wired through so an
+      // SSE consumer disconnect or notifications/cancelled aborts the
+      // upstream MCP fetches (initialize / notifications/initialized /
+      // tools/call SSE iterator) and the upstream sockets tear down
+      // immediately. Without this, the upstream Bing-backed call kept
+      // running until natural completion, leaking the inflight slot
+      // for the full UPSTREAM_FETCH_TIMEOUT_MS window (~5 min) — eight
+      // consumer disconnects in 5 minutes fully stalled /mcp.
       async handler(
         args: Record<string, unknown>,
-        _signal?: AbortSignal,
+        signal?: AbortSignal,
       ): Promise<{
         content: Array<{ type: "text"; text: string }>
         isError?: boolean
@@ -561,7 +557,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           }
         }
         try {
-          const results = await searchWeb(query)
+          const results = await searchWeb(query, signal)
           return {
             content: [
               { type: "text", text: formatWebSearchResult(results) },
