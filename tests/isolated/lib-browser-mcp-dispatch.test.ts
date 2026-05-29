@@ -209,3 +209,48 @@ describe("Bug #3 — bridgeCall ghost execution after timeout", () => {
     expect(ws!.closeCalls).toBeGreaterThan(0)
   })
 })
+
+describe("Bug D1 — bridgeCall TDZ crash on pre-aborted signal", () => {
+  test("pre-aborted signal cleanly rejects with 'aborted' and closes the WS", async () => {
+    // Import AFTER mocks are registered so it picks up the mocked ws module.
+    const { dispatchBrowserTool } = await import(
+      "../../src/lib/browser-mcp/dispatch"
+    )
+
+    // Reset the single-flight state so this test gets a fresh ensureBridgeReady call.
+    const { __resetEnsureBridgeReadyForTests } = await import(
+      "../../src/lib/browser-mcp/install-check"
+    )
+    __resetEnsureBridgeReadyForTests()
+
+    // Create a signal that is already aborted BEFORE calling dispatchBrowserTool.
+    // Pre-fix: finish() is called synchronously from onAbort() which tries
+    // clearTimeout(timer), but `timer` is a const declared later — TDZ crash
+    // (ReferenceError: Cannot access 'timer' before initialization).
+    // The WS opened at line 112 is never closed.
+    const ac = new AbortController()
+    ac.abort()
+
+    const result = await dispatchBrowserTool(
+      "browser_click",
+      { ref: "el-2" },
+      ac.signal,
+      { timeoutMs: 5000 },
+    )
+
+    // Post-fix: the promise cleanly rejects via the dispatchBrowserTool
+    // catch path and returns an isError envelope with "aborted".
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toMatch(/aborted/i)
+
+    // The WS should have been closed by finish() (no leak).
+    // Wait a tick for the WS constructor to have fired.
+    await new Promise((r) => setTimeout(r, 10))
+    const ws = fakeWsRef.current
+    if (ws) {
+      expect(ws.closeCalls).toBeGreaterThan(0)
+    }
+    // If ws is undefined, the pre-aborted path short-circuited before
+    // opening the WS — also correct (no WS leak).
+  })
+})
