@@ -48,6 +48,11 @@ import { WebSocketServer, type WebSocket } from "ws"
 // `bridge-paths.ts` for the historical win32-divergence bug.
 import { discoveryPath } from "../lib/browser-mcp/bridge-paths"
 
+// Pending-entry management: tracks in-flight requests from the WS client
+// to the browser extension, with per-entry TTL timers so entries are
+// cleaned up even when the extension hangs (MV3 SW dormancy, tab crash).
+import { pendingAdd, pendingDropClient, pendingResolve } from "./pending"
+
 // Early-boot trace: write a line to a debug log whenever the bridge
 // process starts. Native-messaging hosts run under the browser so we
 // can't see their stdout/stderr by default; this trace file is the
@@ -65,6 +70,12 @@ try {
 
 const HEARTBEAT_MS = 5000
 const HEARTBEAT_MISS_LIMIT = 3
+// Per-entry TTL for pending requests. Mirrors the dispatcher-side maxMs for
+// the longest tool (browser_download: 300 000 ms). Entries not resolved
+// within this window — because the extension hung or a tab crashed — are
+// forcibly resolved with a structured timeout error so the dispatcher and
+// the pending Map don't leak for the lifetime of a long proxy session.
+const PENDING_TTL_MS = 300_000
 
 type BridgeRequest = {
   id: string
@@ -213,12 +224,7 @@ httpServer.on("upgrade", (req, socket: Socket, head) => {
   })
 })
 
-// Pending requests routed from a WS client through the browser. Keyed
-// by request id; the response from the browser fires the resolver.
-const pending = new Map<
-  string,
-  { resolve: (msg: BridgeResponse) => void; client: WebSocket }
->()
+// Pending requests are now managed by pending.ts (with per-entry TTL timers).
 
 function handleWsConnection(ws: WebSocket): void {
   let alive = true
@@ -260,19 +266,19 @@ function handleWsConnection(ws: WebSocket): void {
       return
     }
     if (typeof msg.id !== "string" || typeof msg.tool !== "string") return
-    pending.set(msg.id, {
-      resolve: (resp) => ws.send(JSON.stringify(resp)),
-      client: ws,
-    })
+    pendingAdd(
+      msg.id,
+      ws,
+      PENDING_TTL_MS,
+      (resp) => ws.send(JSON.stringify(resp)),
+    )
     sendToBrowser(msg)
   })
   ws.on("close", () => {
     clearInterval(heartbeat)
     // Drop any pending requests bound to this client so we don't leak
     // memory if the dispatcher disconnects mid-flight.
-    for (const [id, p] of pending) {
-      if (p.client === ws) pending.delete(id)
-    }
+    pendingDropClient(ws)
   })
 }
 
@@ -288,10 +294,7 @@ fromBrowserListeners.push((msg) => {
   lastBrowserContactMs = Date.now()
   const r = msg as BridgeResponse
   if (typeof r.id !== "string") return
-  const p = pending.get(r.id)
-  if (!p) return
-  pending.delete(r.id)
-  p.resolve(r)
+  pendingResolve(r.id, r)
 })
 
 // ---------------------------------------------------------------------
