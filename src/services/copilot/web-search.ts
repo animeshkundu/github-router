@@ -103,44 +103,60 @@ async function postMcp(
   body: unknown,
   sid?: string,
   retry = true,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const url = `${copilotBaseUrl(state)}/mcp`
   const res = await fetch(url, {
     method: "POST",
     headers: mcpHeaders(sid),
     body: JSON.stringify(body),
+    signal,
   })
   if (!res.ok && retry && res.status >= 500) {
     await sleep(500)
-    return postMcp(body, sid, false)
+    return postMcp(body, sid, false, signal)
   }
   return res
 }
 
-export async function searchWeb(query: string): Promise<WebSearchResult> {
+export async function searchWeb(
+  query: string,
+  signal?: AbortSignal,
+): Promise<WebSearchResult> {
   await throttleSearch()
   consola.info(`Web search (MCP): "${query.slice(0, 80)}"`)
+  // Reject early on a pre-aborted signal — callers that wired in their
+  // own AbortController (e.g. /mcp handler.ts:handleToolsCall) may have
+  // already cancelled before throttleSearch resolved.
+  if (signal?.aborted) {
+    throw new Error("web search aborted before dispatch")
+  }
 
   const callId = Math.floor(Math.random() * 1_000_000_000)
   let sid: string | undefined
 
   try {
     // 1. initialize
-    const initRes = await postMcp({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: "2024-11-05",
-        capabilities: {},
-        // Identify as the Copilot Chat extension, mirroring the User-Agent
-        // and editor-plugin-version we send on every other request.
-        clientInfo: {
-          name: "GitHubCopilotChat",
-          version: copilotVersion(state),
+    const initRes = await postMcp(
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          // Identify as the Copilot Chat extension, mirroring the User-Agent
+          // and editor-plugin-version we send on every other request.
+          clientInfo: {
+            name: "GitHubCopilotChat",
+            version: copilotVersion(state),
+          },
         },
       },
-    })
+      undefined,
+      true,
+      signal,
+    )
     if (!initRes.ok) {
       consola.error("MCP initialize failed", initRes.status)
       throw new HTTPError("MCP initialize failed", initRes)
@@ -157,6 +173,8 @@ export async function searchWeb(query: string): Promise<WebSearchResult> {
     const notifRes = await postMcp(
       { jsonrpc: "2.0", method: "notifications/initialized" },
       sid,
+      true,
+      signal,
     )
     if (!notifRes.ok && notifRes.status !== 202) {
       consola.error("MCP notifications/initialized failed", notifRes.status)
@@ -175,6 +193,8 @@ export async function searchWeb(query: string): Promise<WebSearchResult> {
         },
       },
       sid,
+      true,
+      signal,
     )
     if (!callRes.ok) {
       consola.error("MCP tools/call failed", callRes.status)
@@ -183,6 +203,14 @@ export async function searchWeb(query: string): Promise<WebSearchResult> {
 
     let rpc: z.infer<typeof RpcSchema> | undefined
     for await (const ev of events(callRes)) {
+      // Bail mid-stream if the caller signalled abort. The fetch's
+      // AbortSignal also tears down the underlying socket, but the
+      // for-await iterator can still buffer a chunk or two before the
+      // abort propagates — check explicitly so we don't decode bytes
+      // we don't care about.
+      if (signal?.aborted) {
+        throw new Error("web search aborted during SSE stream")
+      }
       if (!ev.data) continue
       let parsedJson: unknown
       try {
@@ -256,6 +284,9 @@ export async function searchWeb(query: string): Promise<WebSearchResult> {
       // in try{} too: if state.githubToken cleared between init and finally,
       // mcpHeaders(sid) throws synchronously BEFORE fetch is called and
       // .catch() never attaches, which would mask the original error.
+      // Teardown intentionally does NOT propagate the caller's
+      // AbortSignal — the original request may have been cancelled, but
+      // we still want to release the upstream session if at all possible.
       try {
         void fetch(`${copilotBaseUrl(state)}/mcp`, {
           method: "DELETE",

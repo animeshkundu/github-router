@@ -62,22 +62,64 @@ const SERVER_VERSION = "1"
  *  peers without showing up in the MCP-side cap. */
 
 /**
- * Per-request AbortController registry for `notifications/cancelled`
- * (Phase D P1.5). When a client times out a tools/call before the
- * upstream Copilot fetch completes, the JSON-RPC notification:
- *   { jsonrpc:"2.0", method:"notifications/cancelled",
- *     params:{ requestId: "<id>", reason?: "..." } }
- * arrives. Without handling, the upstream fetch keeps running until
- * natural completion, leaking the inFlightToolsCall slot for tens of
- * minutes. Tracking the AbortController lets us abort the fetch and
- * free the slot immediately.
+ * Per-request cancellation registry for in-flight `tools/call`s. Used
+ * by both `notifications/cancelled` (Phase D P1.5) AND the SSE
+ * `ReadableStream.cancel()` callback (consumer disconnect) to tear
+ * down the upstream Copilot fetch promptly and free the in-flight
+ * slot — otherwise an SSE-path cancel leaks the slot until the
+ * upstream call hits `UPSTREAM_FETCH_TIMEOUT_MS` (~5 min). Eight
+ * consumer disconnects in 5 minutes fully stalls `/mcp` `tools/call`
+ * for everyone since the shared cap is 8.
  *
- * Important: per CLAUDE.md "Bun request-signal quirk", we use OUR own
+ * Each entry carries (a) the AbortController whose signal threads
+ * into createResponses / createChatCompletions / createMessages /
+ * searchWeb via their `callerSignal` parameter, AND (b) a `release`
+ * callback that frees the slot synchronously. Both are invoked by
+ * `cancelInflight()`, which is called from BOTH cancel paths and is
+ * idempotent — `acquireInFlightSlot()`'s release fn is itself
+ * idempotent, and the entry is deleted on first cancel so a racing
+ * cancel-after-natural-completion is a no-op lookup.
+ *
+ * The `finally` block in `handleToolsCall` only deletes the entry
+ * when it still owns the same object (identity check via
+ * `inflightAborts.get(key) === entry`) — protects against a stale
+ * finally racing with a cancel that already cleaned up and a new
+ * tools/call having registered a fresh entry under the same id.
+ *
+ * Per CLAUDE.md "Bun request-signal quirk", we use OUR own
  * AbortController (NOT c.req.raw.signal which fires after request body
- * is consumed). The signal is threaded into createResponses /
- * createChatCompletions's `callerSignal` parameter.
+ * is consumed).
  */
-const inflightAborts = new Map<string | number, AbortController>()
+interface InflightEntry {
+  aborter: AbortController
+  release: () => void
+}
+const inflightAborts = new Map<string | number, InflightEntry>()
+
+/**
+ * Idempotent teardown for an in-flight tools/call. Aborts the upstream
+ * fetch, frees the concurrency slot, and removes the registry entry.
+ * Safe to call from both `notifications/cancelled` and the SSE
+ * `ReadableStream.cancel()` callback, in either order, and any number
+ * of times — the second call is a no-op.
+ */
+function cancelInflight(key: string | number, reason: string): void {
+  const entry = inflightAborts.get(key)
+  if (!entry) return
+  // Delete before aborting so a re-entrant call from the abort handler
+  // (or a racing cancel notification) can't double-process.
+  inflightAborts.delete(key)
+  try {
+    entry.aborter.abort(new Error(reason))
+  } catch {
+    // ignore — abort never throws in practice, but be defensive.
+  }
+  try {
+    entry.release()
+  } catch {
+    // release is idempotent; defensive catch.
+  }
+}
 
 interface JsonRpcRequest {
   jsonrpc: "2.0"
@@ -885,15 +927,31 @@ async function handleToolsCall(
   }
   const startedAt = Date.now()
   // Phase D P1.5: register an AbortController so notifications/cancelled
-  // can free the slot. Use the JSON-RPC request id as the key — clients
-  // emit `params.requestId` matching it. If the client doesn't supply
-  // an id (notification request), skip registration; nothing to cancel.
+  // (or an SSE consumer disconnect) can free the slot. Use the JSON-RPC
+  // request id as the key — clients emit `params.requestId` matching it.
+  // If the client doesn't supply an id (notification request), skip
+  // registration; nothing to cancel.
+  //
+  // Slot ownership: the InflightEntry holds BOTH the AbortController AND
+  // a closure-captured `release` callback. `cancelInflight()` (called
+  // from `notifications/cancelled` and from `handleToolsCallSSE.cancel()`)
+  // invokes BOTH: aborting the upstream fetch tears down the socket,
+  // and synchronously releasing the slot frees the cap=8 budget without
+  // waiting for the upstream call's promise to settle.
+  //
+  // The `finally` block at the bottom of this function only deletes the
+  // map entry when it still owns the same object (identity check). This
+  // protects against a stale finally racing with a cancel that already
+  // cleaned up — and (rare) a brand new tools/call having registered a
+  // fresh entry under the same id in between.
   const abortKey =
     body.id !== undefined && body.id !== null ? body.id : undefined
   let aborter: AbortController | undefined
+  let inflightEntry: InflightEntry | undefined
   if (abortKey !== undefined) {
     aborter = new AbortController()
-    inflightAborts.set(abortKey, aborter)
+    inflightEntry = { aborter, release }
+    inflightAborts.set(abortKey, inflightEntry)
   }
   // Telemetry shape differs per branch — personas have a model id;
   // non-persona tools don't dispatch to a peer LLM, so log the tool
@@ -947,8 +1005,12 @@ async function handleToolsCall(
     })
   } finally {
     release()
-    if (abortKey !== undefined) {
-      inflightAborts.delete(abortKey)
+    if (abortKey !== undefined && inflightEntry !== undefined) {
+      // Identity-check: only delete if the registered entry is still
+      // ours. A racing cancel may have already replaced/cleaned it.
+      if (inflightAborts.get(abortKey) === inflightEntry) {
+        inflightAborts.delete(abortKey)
+      }
     }
   }
 }
@@ -971,16 +1033,10 @@ function handleCancelledNotification(body: JsonRpcRequest): void {
     )
     return
   }
-  const aborter = inflightAborts.get(requestId)
-  if (!aborter) {
-    // Already completed or never registered. No-op — common race when
-    // cancel races with completion.
-    return
-  }
-  aborter.abort(new Error("client requested cancellation"))
-  // The finally block in handleToolsCall removes the entry on
-  // completion; we don't delete here to avoid a TOCTOU race where the
-  // upstream fetch is mid-completion when cancel arrives.
+  // cancelInflight is idempotent and handles the missing-entry case
+  // (already-completed or never-registered). It aborts the upstream
+  // fetch via the AbortController AND synchronously frees the slot.
+  cancelInflight(requestId, "client requested cancellation")
 }
 
 async function handleRpc(
@@ -1279,6 +1335,12 @@ async function handleToolsCallSSE(body: JsonRpcRequest): Promise<Response> {
   // all gates, slot accounting, abort registration, telemetry — we just
   // wrap its eventual result in an SSE envelope.
   const callPromise = handleToolsCall(body)
+  // Heartbeat interval is hoisted out of `start()` so `cancel()` can
+  // clear it synchronously on consumer disconnect — otherwise a 5-second
+  // tick fires into a closed controller after every cancel, and the
+  // interval continues until `callPromise` settles (potentially minutes
+  // later) instead of stopping immediately.
+  let heartbeatHandle: ReturnType<typeof setInterval> | undefined
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -1320,9 +1382,10 @@ async function handleToolsCallSSE(body: JsonRpcRequest): Promise<Response> {
 
       // Initial heartbeat (proves the stream is open) + recurring
       // heartbeats every SSE_HEARTBEAT_INTERVAL_MS until the call
-      // resolves.
+      // resolves. Cleared in BOTH the `finally` below (natural
+      // completion) AND the `cancel()` callback (consumer disconnect).
       safeEnqueue(heartbeatFrame())
-      const heartbeatHandle = setInterval(
+      heartbeatHandle = setInterval(
         () => safeEnqueue(heartbeatFrame()),
         SSE_HEARTBEAT_INTERVAL_MS,
       )
@@ -1342,22 +1405,33 @@ async function handleToolsCallSSE(body: JsonRpcRequest): Promise<Response> {
           ),
         )
       } finally {
-        clearInterval(heartbeatHandle)
+        if (heartbeatHandle !== undefined) {
+          clearInterval(heartbeatHandle)
+          heartbeatHandle = undefined
+        }
         safeClose()
       }
     },
     cancel() {
-      // Consumer disconnected. handleToolsCall's AbortController is
-      // keyed by body.id and already registered in inflightAborts;
-      // signal it so the upstream Copilot fetch tears down and the
-      // inFlight slot is freed promptly. No need to clear heartbeats
-      // here — the start() function's finally-block does that when
-      // callPromise resolves (or rejects with the abort).
+      // Consumer disconnected. Three things must happen synchronously:
+      //   1. Stop the heartbeat — otherwise the 5s interval keeps
+      //      firing into a closed controller (and stays alive in the
+      //      Node/Bun event loop) until callPromise settles.
+      //   2. Abort the upstream Copilot fetch so the socket tears
+      //      down and any thread-blocked persona handler unwinds.
+      //   3. Free the in-flight slot synchronously (don't wait for
+      //      handleToolsCall's `finally` to run — the upstream fetch
+      //      may take minutes to abort, and the slot blocks other
+      //      tools/call callers in the meantime).
+      // `cancelInflight` does (2) + (3) atomically and is idempotent.
+      if (heartbeatHandle !== undefined) {
+        clearInterval(heartbeatHandle)
+        heartbeatHandle = undefined
+      }
       const abortKey =
         body.id !== undefined && body.id !== null ? body.id : undefined
       if (abortKey !== undefined) {
-        const aborter = inflightAborts.get(abortKey)
-        if (aborter) aborter.abort(new Error("client disconnected SSE stream"))
+        cancelInflight(abortKey, "client disconnected SSE stream")
       }
     },
   })
