@@ -76,7 +76,11 @@ describe("PERSONAS_READ", () => {
       // pass the artifact verbatim. Cross-lab smoke-test feedback (codex +
       // opus independently flagged this regression after the trim landed).
       expect(p.description.toLowerCase()).toContain("verbatim")
-      expect(p.description.length).toBeLessThan(200)
+      // Per Anthropic's tool-use guidance: descriptions should be 3-4+
+      // sentences for complex tools, explaining scope, when-to-use, and
+      // when-not-to-use. Cap at 400 chars to prevent bloat while allowing
+      // the routing signal Opus 4.8 needs to pick the right tool.
+      expect(p.description.length).toBeLessThan(400)
     }
   })
 
@@ -250,9 +254,6 @@ describe("buildPeerAwarenessSnippet", () => {
       codexCli: false,
       geminiAvailable: false,
     })
-    // Trimmed snippet: per-tool descriptions are in MCP tool listings;
-    // here we just list the tool short-names + the `gh-router-peers`
-    // namespace prefix so Claude knows where to look.
     expect(snippet).toContain("mcp__gh-router-peers__")
     expect(snippet).toContain("codex_critic")
     expect(snippet).toContain("codex_reviewer")
@@ -261,23 +262,23 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(snippet).toContain("## Peer review and advisor")
   })
 
-  test("snippet stays under ~250 tokens (~1500 bytes) in the minimal case", () => {
-    // The snippet includes a structured decision tree that routes Claude
-    // to the right tool per task shape. Worth the extra tokens vs the old
-    // single-paragraph format — decision quality improves measurably.
+  test("snippet stays under ~200 tokens (~1200 bytes) in the minimal case", () => {
+    // Descriptive prose, not a decision tree — per Anthropic's guidance
+    // for Opus 4.8, tool descriptions carry the routing signal; the
+    // awareness snippet should stay concise and non-prescriptive.
     const minimal = buildPeerAwarenessSnippet({
       codexCli: false,
       geminiAvailable: false,
     })
-    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(1500)
+    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(1200)
   })
 
-  test("snippet stays under ~300 tokens (~1800 bytes) in the maximal case", () => {
+  test("snippet stays under ~250 tokens (~1500 bytes) in the maximal case", () => {
     const full = buildPeerAwarenessSnippet({
       codexCli: true,
       geminiAvailable: true,
     })
-    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(1800)
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(1500)
   })
 
   test("mentions Claude Code's advisor built-in tool", () => {
@@ -295,37 +296,18 @@ describe("buildPeerAwarenessSnippet", () => {
     })
     expect(snippet).toContain("code_search")
     expect(snippet.toLowerCase()).toContain("accurate")
-    // The nudge: name Grep as the tool being displaced for ranked discovery.
     expect(snippet).toContain("Grep")
-    // Parallel usage hint — the key behavioral change we want.
+    // Parallel usage hint — describes the capability, doesn't force it.
     expect(snippet.toLowerCase()).toContain("parallel")
   })
 
-  test("mentions web_search for docs and upstream lookups", () => {
+  test("mentions web_search and stand_in", () => {
     const snippet = buildPeerAwarenessSnippet({
       codexCli: false,
       geminiAvailable: false,
     })
     expect(snippet).toContain("web_search")
-  })
-
-  test("mentions stand_in for away-mode decision tiebreak", () => {
-    const snippet = buildPeerAwarenessSnippet({
-      codexCli: false,
-      geminiAvailable: false,
-    })
     expect(snippet).toContain("stand_in")
-  })
-
-  test("includes task-shape routing for critics", () => {
-    const snippet = buildPeerAwarenessSnippet({
-      codexCli: false,
-      geminiAvailable: false,
-    })
-    // The decision tree routes by task shape — verify key routing signals
-    expect(snippet).toContain("Plan / design")
-    expect(snippet).toContain("Concrete diff")
-    expect(snippet).toContain("Quick sanity check")
   })
 
   test("omits gemini_critic when gemini is not in the catalog", () => {
@@ -360,15 +342,19 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(withCli).toContain("mcp__codex-cli__codex")
   })
 
-  test("snippet routes at user discretion (doesn't force a workflow)", () => {
+  test("snippet is non-prescriptive (describes, doesn't dictate)", () => {
     const snippet = buildPeerAwarenessSnippet({
       codexCli: false,
       geminiAvailable: true,
     })
-    // The routing layer suggests tools per task shape but leaves the
-    // final call to Claude — pin "at your discretion" as the no-mandate
-    // phrasing.
+    // Per Anthropic's Opus 4.8 guidance: tool descriptions carry the
+    // routing signal; the awareness snippet should describe capabilities
+    // and let the model decide. Pin "at your discretion" as the
+    // non-prescriptive phrasing.
     expect(snippet).toContain("at your discretion")
+    // Must NOT contain prescriptive arrows or forced routing.
+    expect(snippet).not.toContain("→")
+    expect(snippet).not.toContain("Pick by task shape")
   })
 
   test("snippet is deterministic for the same inputs", () => {

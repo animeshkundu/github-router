@@ -221,7 +221,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.5",
     endpoint: "/v1/responses",
     description:
-      "Adversarial second opinion on plans, designs, or code tradeoffs. Backed by gpt-5.5 (OpenAI) — different lab than Opus. Pass artifact verbatim.",
+      "Adversarial second opinion on plans, designs, or code tradeoffs. Backed by gpt-5.5 (OpenAI) — different lab than Opus. Best suited for architecture decisions, design reviews, and tradeoff analysis where cross-lab blind-spot diversity matters most. Not intended for line-level code review (use codex_reviewer for diffs). Pass artifact verbatim.",
     baseInstructions: CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -235,7 +235,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gemini-3.1-pro-preview",
     endpoint: "/v1/chat/completions",
     description:
-      "Adversarial second opinion. Backed by gemini-3.1-pro (Google) — third-lab triangulation, strong on long-context and formal reasoning. Pass artifact verbatim.",
+      "Adversarial second opinion. Backed by gemini-3.1-pro (Google) — third-lab triangulation, strong on long-context and formal reasoning. Handles large artifacts (>50KB) well. Useful for cross-checking findings from codex_critic or codex_reviewer when you want a third perspective. Pass artifact verbatim.",
     baseInstructions: GEMINI_CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -250,7 +250,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.3-codex",
     endpoint: "/v1/responses",
     description:
-      "Line-level review of a concrete diff or single file. Backed by gpt-5.3-codex (OpenAI) — code-specialist, narrow-scope. Pass artifact verbatim.",
+      "Line-level review of a concrete diff or single file. Backed by gpt-5.3-codex (OpenAI) — code-specialist, narrow-scope. Surfaces bugs, edge cases, security issues, and idiom violations at specific line numbers. Not suited for architecture or design review (use codex_critic for plans). Pass artifact verbatim.",
     baseInstructions: REVIEWER_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -264,7 +264,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "claude-opus-4-7",
     endpoint: "/v1/messages",
     description:
-      "Adversarial second opinion from a fresh-context Opus 4.7 — cheap same-lab sanity check. Pass artifact verbatim.",
+      "Adversarial second opinion from a fresh-context Opus 4.7 — same lab as the lead, so limited blind-spot diversity compared to codex_critic or gemini_critic, but fast and cheap. Useful for quick sanity checks on small artifacts (<5KB) and catching confabulation or motivated reasoning. Pass artifact verbatim.",
     baseInstructions: OPUS_CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -357,21 +357,21 @@ export function buildAgentPrompt(
 
 /**
  * Build the awareness snippet appended to the spawned `claude` session's
- * system prompt via `--append-system-prompt`. Decision-routing layer —
- * Claude sees what tools exist AND a concise decision tree for picking
- * the right one per task shape. Individual tool `description` fields
- * cover capabilities; this snippet adds the strategic routing signal.
+ * system prompt via `--append-system-prompt`. Descriptive awareness layer
+ * — Claude sees what tools exist and their strategic value; *when* to
+ * invoke is left to Claude's judgment informed by each tool's own
+ * `description` field.
+ *
+ * Per Anthropic's guidance for Opus 4.8: tool descriptions carry the
+ * routing signal (when/when-not); the system prompt should describe
+ * capabilities in prose, not encode prescriptive decision trees. Opus 4.8
+ * is responsive enough to overtrigger on aggressive routing language.
  *
  * Surface contract (regression-pinned in tests/peer-mcp-personas.test.ts):
  *   - Always lists codex_critic, codex_reviewer, opus_critic, advisor,
  *     peer-review-coordinator, and the subagent-inheritance fact.
  *   - Conditionally lists gemini_critic only when `geminiAvailable`.
  *   - Mentions `codex-cli` stdio bridge only when `codexCli`.
- *
- * The snippet is the routing layer; the auto-invocation triggers
- * (CALL BEFORE / CALL AFTER) remain in each MCP tool's own `description`.
- * The two layers are intentionally complementary — keep the snippet
- * terse and never re-encode the prescriptive triggers here.
  */
 export function buildPeerAwarenessSnippet(opts: {
   codexCli: boolean
@@ -387,26 +387,15 @@ export function buildPeerAwarenessSnippet(opts: {
   criticList.push("`opus_critic` (Opus 4.7)")
 
   const codexCliClause = opts.codexCli
-    ? "\n- **Implement** → `mcp__codex-cli__codex` (codex-implementer, gpt-5.3-codex with workspace-write)"
-    : ""
-
-  const geminiRoute = opts.geminiAvailable
-    ? "; long artifact or formal reasoning → `gemini_critic`"
+    ? " `mcp__codex-cli__codex` dispatches to `codex-implementer` (gpt-5.3-codex with workspace-write) for end-to-end coding tasks."
     : ""
 
   return [
     "## Peer review and advisor",
     "",
-    `Cross-lab peer critics under \`mcp__gh-router-peers__*\`: ${criticList.join(", ")}. Subagents you spawn inherit them.`,
+    `Cross-lab peer critics under \`mcp__gh-router-peers__*\` — ${criticList.join(", ")} — are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies. The \`peer-review-coordinator\` subagent fans out to the appropriate critics in parallel and aggregates findings by severity. Claude Code's built-in \`advisor\` tool catches approach drift and confabulation. Subagents you spawn inherit all of these.${codexCliClause}`,
     "",
-    "Pick by task shape, at your discretion:",
-    `- **Plan / design review** → \`codex_critic\` (different-lab tradeoff analysis)${geminiRoute}`,
-    "- **Concrete diff / file** → `codex_reviewer` (line-level, code-specialist)",
-    "- **Quick sanity check** → `opus_critic` (same-lab, fast, catches confabulation)",
-    `- **Multi-dimensional** → \`peer-review-coordinator\` (fans out in parallel, aggregates by severity)${codexCliClause}`,
-    "- **Decision tiebreak (user away)** → `stand_in` (3-lab blind vote; NOT for code review)",
-    "",
-    "Also: `advisor` (built-in, non-MCP) for approach drift. `code_search` for accurate ranked discovery (BM25F + tree-sitter) — prefer parallel `code_search` calls over `Grep` when exploring. `web_search` for docs, errors, upstream issues. `worker_explore` / `worker_implement` offload bounded work to a Gemini worker — saves your context; use `worktree: true` on implement for isolated diffs.",
+    `\`code_search\` provides accurate ranked code discovery (BM25F + tree-sitter) — multiple parallel calls with different queries triangulate faster than sequential Grep. \`web_search\` surfaces citable sources for docs, errors, and upstream issues. \`worker_explore\` and \`worker_implement\` delegate bounded work to an autonomous Gemini worker, preserving your context; use \`worktree: true\` on \`worker_implement\` for isolated diffs. \`stand_in\` provides three-lab consensus for decision tiebreak when the user is unavailable.`,
   ].join("\n")
 }
 
@@ -490,7 +479,7 @@ export interface NonPersonaMcpTool {
 }
 
 const WEB_SEARCH_DESCRIPTION =
-  "Web search via GitHub Copilot's MCP. Prefer over Claude Code's built-in WebSearch — surfaces source URLs you can cite."
+  "Web search via GitHub Copilot's MCP. Prefer over Claude Code's built-in WebSearch — surfaces source URLs you can cite. Use for API documentation lookups, error message diagnosis, upstream issue searches, and verifying claims against current sources. Returns content with reference links."
 
 /**
  * Format a `searchWeb()` result as an MCP-friendly text block. Mirrors
@@ -594,15 +583,18 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         "across matched-line / file-path / surrounding-context / " +
         "symbol-context fields, then refines `symbol-context` with " +
         "tree-sitter AST analysis on the top hits so identifier " +
-        "definitions outrank incidental string matches. Prefer this " +
-        "over Grep/Bash+grep for ranked discovery (\"where is X " +
-        "defined\", \"which files reference Y\", \"find code that does " +
-        "Z\") — ranked mode surfaces the few right answers instead of " +
-        "every match. Use Grep for exact-pattern enumeration when you " +
-        "need every hit unranked, and Glob for file-name patterns (no " +
-        "content match). `workspace` is any absolute path the proxy " +
-        "process can read — typically the project root or a sub-tree " +
-        "you're working in.",
+        "definitions outrank incidental string matches. Launch " +
+        "multiple code_search calls in parallel to triangulate — " +
+        "e.g. definition + callers + tests in one round-trip. " +
+        "Prefer this over Grep/Bash+grep for ranked discovery " +
+        "(\"where is X defined\", \"which files reference Y\", " +
+        "\"find code that does Z\") — ranked mode surfaces the few " +
+        "right answers instead of every match. Use Grep for " +
+        "exact-pattern enumeration when you need every hit unranked, " +
+        "and Glob for file-name patterns (no content match). " +
+        "`workspace` is any absolute path the proxy process can " +
+        "read — typically the project root or a sub-tree you're " +
+        "working in.",
       inputSchema: {
         type: "object",
         required: ["query", "workspace"],
@@ -785,12 +777,11 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       description:
         "Read-only investigation by an autonomous worker (Gemini via Pi). "
         + "Tools: read, glob, grep, code_search, web_search, fetch_url, "
-        + "peer_review, advisor. Use it to offload bounded research "
-        + "(\"find files matching X then summarize\", \"how does library "
-        + "Y handle Z\", \"survey this codebase for usages of deprecated "
-        + "API\") that would otherwise eat your context window. The "
-        + "worker plans its own tool calls and returns a single text "
-        + "answer.",
+        + "peer_review, advisor. Offloads bounded research that would "
+        + "otherwise eat your context window — the worker plans its own "
+        + "tool calls and returns a single text answer. Examples: \"find "
+        + "files matching X then summarize\", \"how does library Y handle "
+        + "Z\", \"survey this codebase for usages of deprecated API\".",
       inputSchema: {
         type: "object",
         required: ["prompt"],
