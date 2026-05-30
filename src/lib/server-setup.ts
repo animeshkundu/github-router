@@ -393,6 +393,23 @@ export function getClaudeCodeEnvVars(
     vars.ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-7"
   }
 
+  // Plan-mode (v2) Phase-2 "Plan" agent parallelism. Claude Code's
+  // getPlanModeV2AgentCount() (verified verbatim in the claude v2.1.158
+  // binary, minified fn `bGK`) gates this on subscription tier:
+  //   env override CLAUDE_CODE_PLAN_V2_AGENT_COUNT (1..10) wins, else
+  //   max+rateLimitTier=default_claude_max_20x -> 3, enterprise/team -> 3,
+  //   else 1.
+  // Our synthetic credential is subscriptionType:"max" with
+  // rateLimitTier:"default_claude_max_20x", so the natural tier path now
+  // yields 3 — but we pin it higher here. The env override is the clean,
+  // tier-independent lever (wins unconditionally, range 1..10), so the
+  // count holds even if the credential tier ever changes. Presence-guarded,
+  // symmetric with the tier-default guards above: any user-set value
+  // (incl. "0"/unset intent) wins; we only inject the default when unset.
+  if (process.env.CLAUDE_CODE_PLAN_V2_AGENT_COUNT === undefined) {
+    vars.CLAUDE_CODE_PLAN_V2_AGENT_COUNT = "7"
+  }
+
   // Auto-enable Anthropic's experimental "leverage" features for proxied
   // claude sessions. Symmetric with the leverage-policy default
   // (extended-betas ON for `claude` subcommand): users running

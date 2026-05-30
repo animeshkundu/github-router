@@ -259,6 +259,16 @@ const MANAGED_MARKER_FILENAME = ".github-router-managed"
  *     (`e7()` / `Zc_()` / `CZ1()`); no server validation since
  *     `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` suppresses
  *     subscription-validation calls. Picks the most-permissive gating.
+ *   - `rateLimitTier` — `"default_claude_max_20x"`. Paired with
+ *     `subscriptionType:"max"` this is the real Max-20x tier, so the
+ *     credential is internally consistent (vs the prior odd `max`+`null`).
+ *     Verified live (claude v2.1.158) call-sites are cosmetic billing /
+ *     upsell-suppression UI plus the `getPlanModeV2AgentCount` (`bGK`)
+ *     `max && 20x → 3` branch — which `CLAUDE_CODE_PLAN_V2_AGENT_COUNT`
+ *     (set to 7 in server-setup) already overrides, so this is
+ *     belt-and-suspenders for the natural code path. No client-side quota
+ *     enforcement keys off the tier (rate-limit UI reads server
+ *     `x-ratelimit-*` headers; the proxy holds the no-429 invariant).
  */
 const SYNTHETIC_CREDENTIAL = {
   claudeAiOauth: {
@@ -267,7 +277,7 @@ const SYNTHETIC_CREDENTIAL = {
     expiresAt: 4_070_908_800_000,
     scopes: ["user:inference", "user:profile"],
     subscriptionType: "max",
-    rateLimitTier: null,
+    rateLimitTier: "default_claude_max_20x",
     clientId: "github-router",
   },
 } as const

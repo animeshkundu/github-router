@@ -439,6 +439,11 @@ test("ensureClaudeConfigMirror writes synthetic credential matching the document
   expect(Array.isArray(parsed.claudeAiOauth.scopes)).toBe(true)
   expect(parsed.claudeAiOauth.scopes.length).toBeGreaterThan(0)
   expect(parsed.claudeAiOauth.subscriptionType).toBe("max")
+  // rateLimitTier paired with subscriptionType:"max" is the real Max-20x
+  // tier (internally consistent vs the prior `max`+`null`); makes the
+  // natural getPlanModeV2AgentCount path also yield 3 (CLAUDE_CODE_PLAN_V2_
+  // AGENT_COUNT=7 in server-setup overrides this regardless).
+  expect(parsed.claudeAiOauth.rateLimitTier).toBe("default_claude_max_20x")
   // expiresAt must be far-future (post-2050) to sidestep proactive
   // refresh — Claude Code's `R8H()` returns false for unexpired tokens.
   expect(parsed.claudeAiOauth.expiresAt).toBeGreaterThan(

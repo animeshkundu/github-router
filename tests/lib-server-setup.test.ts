@@ -191,6 +191,38 @@ describe("getClaudeCodeEnvVars", () => {
     }
   })
 
+  test("defaults CLAUDE_CODE_PLAN_V2_AGENT_COUNT to 7 with presence-based guard", () => {
+    // Claude Code's getPlanModeV2AgentCount() (v2.1.158 binary, minified
+    // fn `bGK`) reads CLAUDE_CODE_PLAN_V2_AGENT_COUNT first and, when set
+    // to an int in 1..10, returns it unconditionally — ahead of the
+    // subscription-tier branch. The synthetic credential's
+    // max+default_claude_max_20x tier would yield 3 on the natural path;
+    // this env override pins it to 7 regardless of tier.
+    const prior = process.env.CLAUDE_CODE_PLAN_V2_AGENT_COUNT
+    delete process.env.CLAUDE_CODE_PLAN_V2_AGENT_COUNT
+    try {
+      const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      expect(vars.CLAUDE_CODE_PLAN_V2_AGENT_COUNT).toBe("7")
+    } finally {
+      if (prior === undefined)
+        delete process.env.CLAUDE_CODE_PLAN_V2_AGENT_COUNT
+      else process.env.CLAUDE_CODE_PLAN_V2_AGENT_COUNT = prior
+    }
+  })
+
+  test("does NOT override a parent-set CLAUDE_CODE_PLAN_V2_AGENT_COUNT (presence guard preserves user's chosen count)", () => {
+    const prior = process.env.CLAUDE_CODE_PLAN_V2_AGENT_COUNT
+    process.env.CLAUDE_CODE_PLAN_V2_AGENT_COUNT = "3"
+    try {
+      const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      expect(vars).not.toHaveProperty("CLAUDE_CODE_PLAN_V2_AGENT_COUNT")
+    } finally {
+      if (prior === undefined)
+        delete process.env.CLAUDE_CODE_PLAN_V2_AGENT_COUNT
+      else process.env.CLAUDE_CODE_PLAN_V2_AGENT_COUNT = prior
+    }
+  })
+
   test("defaults ANTHROPIC_DEFAULT_SONNET_MODEL to claude-sonnet-4-6 (NO [1m] — Copilot has no sonnet-1m backend)", () => {
     // Sonnet 4.6 has no -1m variant in Copilot's catalog as of 2026-05-22,
     // and Anthropic-side modelSupports1M (cc-backup context.ts:43-49) does
