@@ -578,7 +578,7 @@ function buildRgArgs(input: {
    */
   expansionPattern?: string
 }): Array<string> {
-  const args: Array<string> = ["--json", "--no-follow"]
+  const args: Array<string> = ["--json", "--no-binary", "--no-follow"]
 
   // -C N means N lines BEFORE and N AFTER. We always want context
   // for snippet rendering AND for the BM25F context field.
@@ -685,6 +685,7 @@ async function parseRgJsonStream(
     return { hits, scannedFiles: 0, truncated: false, cancelled: false, stdoutBytes: 0 }
   }
 
+  child.stdout.setEncoding("utf8") // match stderr treatment at line 1749
   const rl = createInterface({ input: child.stdout, crlfDelay: Infinity })
 
   // Wire abort: on signal, immediately tear down the reader and
@@ -706,11 +707,16 @@ async function parseRgJsonStream(
         killChild(child)
         break
       }
-      if (rawLine.length === 0) continue
+      // Defense-in-depth: strip NUL bytes that survive despite --no-binary
+      // (e.g. if rg's binary detection is fooled by a file with NUL only
+      // beyond the 8KB detection window). Resource accounting above uses
+      // rawLine.length (honest); parsing below uses the sanitized line.
+      const line = rawLine.includes("\0") ? rawLine.replace(/\0/g, "") : rawLine
+      if (line.length === 0) continue
 
       let evt: RgEvent
       try {
-        evt = JSON.parse(rawLine) as RgEvent
+        evt = JSON.parse(line) as RgEvent
       } catch {
         // Skip malformed lines rather than failing the whole call.
         // A truncated chunk at process death would also land here;

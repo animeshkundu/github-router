@@ -76,7 +76,11 @@ describe("PERSONAS_READ", () => {
       // pass the artifact verbatim. Cross-lab smoke-test feedback (codex +
       // opus independently flagged this regression after the trim landed).
       expect(p.description.toLowerCase()).toContain("verbatim")
-      expect(p.description.length).toBeLessThan(200)
+      // Per Anthropic's tool-use guidance: descriptions should be 3-4+
+      // sentences for complex tools, explaining scope, when-to-use, and
+      // when-not-to-use. Cap at 400 chars to prevent bloat while allowing
+      // the routing signal Opus 4.8 needs to pick the right tool.
+      expect(p.description.length).toBeLessThan(400)
     }
   })
 
@@ -250,9 +254,6 @@ describe("buildPeerAwarenessSnippet", () => {
       codexCli: false,
       geminiAvailable: false,
     })
-    // Trimmed snippet: per-tool descriptions are in MCP tool listings;
-    // here we just list the tool short-names + the `gh-router-peers`
-    // namespace prefix so Claude knows where to look.
     expect(snippet).toContain("mcp__gh-router-peers__")
     expect(snippet).toContain("codex_critic")
     expect(snippet).toContain("codex_reviewer")
@@ -261,33 +262,26 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(snippet).toContain("## Peer review and advisor")
   })
 
-  test("snippet stays under ~150 tokens (~1000 bytes) in the minimal case", () => {
-    // Bloat budget per the design decision: the snippet is default-on,
-    // so it must stay small. ~100 tokens ≈ ~400 bytes for English; we
-    // leave headroom up to 1000 bytes to accommodate the worker-tools
-    // clause. If this fails, the snippet has grown beyond its design
-    // budget — trim it back rather than relax the threshold.
+  test("snippet stays under ~200 tokens (~1200 bytes) in the minimal case", () => {
+    // Descriptive prose, not a decision tree — per Anthropic's guidance
+    // for Opus 4.8, tool descriptions carry the routing signal; the
+    // awareness snippet should stay concise and non-prescriptive.
     const minimal = buildPeerAwarenessSnippet({
       codexCli: false,
       geminiAvailable: false,
     })
-    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(1000)
+    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(1200)
   })
 
-  test("snippet stays under ~180 tokens (~1200 bytes) in the maximal case", () => {
+  test("snippet stays under ~250 tokens (~1500 bytes) in the maximal case", () => {
     const full = buildPeerAwarenessSnippet({
       codexCli: true,
       geminiAvailable: true,
     })
-    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(1200)
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(1500)
   })
 
   test("mentions Claude Code's advisor built-in tool", () => {
-    // The user's original ask was that Claude know about *both* the peers
-    // AND the advisor. The proxy auto-enables the advisor experimental
-    // flag (CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL); the awareness
-    // snippet surfaces it alongside the peer critics so Claude reaches
-    // for either at its own discretion.
     const snippet = buildPeerAwarenessSnippet({
       codexCli: false,
       geminiAvailable: false,
@@ -295,19 +289,25 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(snippet).toContain("`advisor`")
   })
 
-  test("mentions code_search with an accuracy framing + nudge", () => {
-    // code_search is a useful default for "find me code that does X"
-    // discovery; without a hint in the awareness snippet Claude reaches
-    // for Grep more often than ideal. The nudge stays at-discretion
-    // (not "always use this") while leaving a clear preference signal.
+  test("mentions code_search with an accuracy framing + parallel nudge", () => {
     const snippet = buildPeerAwarenessSnippet({
       codexCli: false,
       geminiAvailable: false,
     })
     expect(snippet).toContain("code_search")
     expect(snippet.toLowerCase()).toContain("accurate")
-    // The nudge: name Grep as the tool being displaced for ranked discovery.
     expect(snippet).toContain("Grep")
+    // Parallel usage hint — describes the capability, doesn't force it.
+    expect(snippet.toLowerCase()).toContain("parallel")
+  })
+
+  test("mentions web_search and stand_in", () => {
+    const snippet = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: false,
+    })
+    expect(snippet).toContain("web_search")
+    expect(snippet).toContain("stand_in")
   })
 
   test("omits gemini_critic when gemini is not in the catalog", () => {
@@ -342,16 +342,19 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(withCli).toContain("mcp__codex-cli__codex")
   })
 
-  test("snippet is non-prescriptive (doesn't dictate when to call)", () => {
+  test("snippet is non-prescriptive (describes, doesn't dictate)", () => {
     const snippet = buildPeerAwarenessSnippet({
       codexCli: false,
       geminiAvailable: true,
     })
-    // Awareness layer must not force a workflow — the auto-invocation
-    // triggers (CALL BEFORE / CALL AFTER) live in each MCP tool's own
-    // `description` instead. Pin "at your discretion" as the no-mandate
-    // phrasing.
+    // Per Anthropic's Opus 4.8 guidance: tool descriptions carry the
+    // routing signal; the awareness snippet should describe capabilities
+    // and let the model decide. Pin "at your discretion" as the
+    // non-prescriptive phrasing.
     expect(snippet).toContain("at your discretion")
+    // Must NOT contain prescriptive arrows or forced routing.
+    expect(snippet).not.toContain("→")
+    expect(snippet).not.toContain("Pick by task shape")
   })
 
   test("snippet is deterministic for the same inputs", () => {
@@ -371,10 +374,6 @@ describe("buildPeerAwarenessSnippet", () => {
       codexCli: false,
       geminiAvailable: true,
     })
-    // The whole holistic-fix premise is that subagents inherit these
-    // tools via the mirrored .claude.json. Make that visible in the
-    // awareness snippet so Claude knows it can fan out without losing
-    // the peer tools downstream.
     expect(snippet).toMatch(/subagents/i)
     expect(snippet).toMatch(/inherit/i)
   })

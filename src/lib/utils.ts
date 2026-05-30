@@ -209,7 +209,12 @@ export function resolveModel(modelId: string): string {
     const preferred = requestedVersion
       ? oneMs.find((m) => m.id.includes(`opus-${requestedVersion}-`))
       : undefined
-    const oneM = preferred ?? oneMs[0]
+    // When a specific version was requested (e.g. "claude-opus-4-8") but
+    // no matching 1M variant exists in the catalog, do NOT fall back to a
+    // different version's 1M variant — that silently downgrades (e.g.
+    // 4.8 → 4.6-1m). Instead, fall through to step 4 (normalization)
+    // which will resolve the bare dotted entry (claude-opus-4.8).
+    const oneM = preferred ?? (requestedVersion ? undefined : oneMs[0])
     if (oneM) return oneM.id
   }
 

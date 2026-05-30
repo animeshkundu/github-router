@@ -932,3 +932,62 @@ describe("symlink behavior", () => {
     }
   })
 })
+
+// ============================================================
+// Binary file handling (NUL-byte defense)
+// ============================================================
+
+describe("binary file handling (NUL-byte defense)", () => {
+  let fx: Fixture
+
+  beforeAll(() => {
+    fx = makeFixture((root) => {
+      mkdirSync(path.join(root, "src"))
+
+      // Normal source file — should be found
+      writeFileSync(
+        path.join(root, "src", "clean.ts"),
+        "export const binaryTestMarker = 42\n",
+      )
+
+      // Binary file — contains the same query but with NUL bytes.
+      // Use Buffer.from to construct the payload (cross-platform).
+      const binaryContent = Buffer.from(
+        "binaryTestMarker\0\0\0 some binary junk\0\n",
+      )
+      writeFileSync(path.join(root, "src", "data.bin"), binaryContent)
+    })
+  })
+
+  afterAll(() => {
+    fx.cleanup()
+  })
+
+  test("results include source file and skip binary file", async () => {
+    const r = await searchCode({
+      query: "binaryTestMarker",
+      workspace: fx.root,
+      mode: "literal",
+      limit: 10,
+    })
+    // Must find the clean source file
+    expect(r.results.length).toBeGreaterThan(0)
+    expect(r.results.some((h) => h.file.includes("clean.ts"))).toBe(true)
+    // Must NOT include the binary file
+    expect(r.results.some((h) => h.file.includes("data.bin"))).toBe(false)
+  })
+
+  test("no NUL bytes leak into ranked response", async () => {
+    const r = await searchCode({
+      query: "binaryTestMarker",
+      workspace: fx.root,
+      mode: "ranked",
+      limit: 10,
+    })
+    // Serialize entire result and check for NUL
+    const serialized = JSON.stringify(r)
+    expect(serialized).not.toContain("\0")
+    // Should still find the clean file
+    expect(r.results.some((h) => h.file.includes("clean.ts"))).toBe(true)
+  })
+})

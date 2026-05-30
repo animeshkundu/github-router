@@ -142,10 +142,10 @@ function buildCoordinatorAgent(opts: {
 }): { description: string; prompt: string } {
   // opus-critic is always registered (Anthropic models are always present
   // in the Copilot catalog), so no `geminiAvailable`-style guard is
-  // required. Order: codex-critic first (cross-lab depth), opus-critic
-  // second (cheapest same-lab sanity check), gemini-critic third
-  // (third-lab triangulation, only when registered), codex-reviewer
-  // last (code-specialist, narrower scope).
+  // required. Order: codex-critic first (strongest reasoning, cross-lab),
+  // opus-critic second (largest context window — 1M when available),
+  // gemini-critic third (third-lab triangulation, formal reasoning, only
+  // when registered), codex-reviewer last (code-specialist, line-level).
   const peers: Array<string> = ["codex-critic", "opus-critic"]
   if (opts.geminiAvailable) peers.push("gemini-critic")
   peers.push("codex-reviewer")
@@ -166,23 +166,24 @@ function buildCoordinatorAgent(opts: {
     "",
     "The lead's brief will include an artifact (plan, design, diff, or code) and a goal (e.g. 'review before exit-plan', 'review the commit I just made', 'cross-check codex-critic's verdict'). Pick the right peers for the artifact type:",
     "",
-    "- **Plan / design / architecture choice** → fan out to `codex-critic`"
-      + (opts.geminiAvailable ? " AND `gemini-critic` in parallel" : "")
+    "- **Plan / design / architecture choice** → fan out to `codex-critic` (gpt-5.5, strongest reasoning, cross-lab)"
+      + (opts.geminiAvailable ? " AND `gemini-critic` (third-lab triangulation, strong on formal reasoning) in parallel" : "")
       + ". codex-reviewer is the wrong tool for plans (it's a code-specialist, not an architecture critic).",
-    "- **Concrete diff or single file** → fan out to `codex-reviewer`"
-      + (opts.geminiAvailable ? " AND `gemini-critic` (gemini for cross-lab triangulation)" : "")
+    "- **Concrete diff or single file** → fan out to `codex-reviewer` (gpt-5.3-codex, line-level code specialist, fastest at ~16s)"
+      + (opts.geminiAvailable ? " AND `gemini-critic` for cross-lab triangulation" : "")
       + ". For very small changes (<20 lines), one `codex-reviewer` call is enough.",
+    "- **Large artifact (>50 KB)** → prefer `opus-critic` (Opus 4.7, up to 1M context — the largest window in the lineup, no decomposition needed for most artifacts). For cross-lab diversity on large artifacts, pair with `codex-critic` and decompose the artifact into 2-4 semantic batches for codex.",
+    "- **Formal reasoning, proofs, or invariants** → prefer `gemini-critic`"
+      + (opts.geminiAvailable ? " (gemini-3.1-pro, strong on math and formally-stated properties)" : " (NOT REGISTERED in this session — gemini-3.x not in catalog)")
+      + ".",
     "- **Tie-breaker after codex-critic has weighed in** → call `gemini-critic`"
-      + (opts.geminiAvailable ? "" : " (NOT REGISTERED in this session — gemini-3.x not in catalog; tie-break unavailable)")
-      + " with the artifact AND codex-critic's verdict for cross-lab cross-check.",
-    "- **Long-context artifact (>100 KB)** → prefer `gemini-critic`"
       + (opts.geminiAvailable ? "" : " (NOT REGISTERED in this session)")
-      + ". Otherwise, decompose into 2-4 batches and fan out across `codex-critic` calls in parallel.",
-    "- **Fast same-lab sanity check on a moderate artifact (<5 KB)** → prefer `opus-critic` (cheapest, ~22s, only `effort: low|medium` supported). Same lab as the lead — limited blind-spot diversification, but a useful gut-check before committing to a controversial decision. For cross-lab diversification or deep dives on larger artifacts, use codex/gemini at higher effort with decomposition for >5KB.",
+      + " or `opus-critic` with the artifact AND codex-critic's verdict for cross-check.",
+    "- **Fast sanity check** → `opus-critic` (~22s, same lab as lead but fresh context — catches confabulation and motivated reasoning).",
     "",
     "## Decomposition for large artifacts",
     "",
-    "Each per-call MCP wait is bounded (~60s SDK default on Claude Code v2.1.113+ per regressions #50289 / #52137 — empirically reproduced 2026-05-14). The proxy enforces per-persona effort allowlists AND a pre-flight `predictedTooLong` cap (codex_critic@high >8 KB, codex_reviewer@high >12 KB, opus_critic@medium >6 KB) to surface would-be-timeouts as fast actionable errors. For artifacts that exceed the cap, split into 2-4 logical batches BY CONCERN (not by raw size — semantic batches give better per-batch reviews) and call peers in parallel. The proxy's MCP cap allows up to 8 in-flight calls. Aggregate findings yourself before reporting back.",
+    "Each per-call MCP wait is bounded (~60s SDK default on Claude Code v2.1.113+ per regressions #50289 / #52137 — empirically reproduced 2026-05-14). The proxy enforces per-persona effort allowlists AND a pre-flight `predictedTooLong` cap (codex_critic@high >8 KB, codex_reviewer@high >12 KB, opus_critic@medium >6 KB) to surface would-be-timeouts as fast actionable errors. For artifacts that exceed the cap but fit within opus-critic's context window (up to 1M tokens when available), route the full artifact to opus-critic. Otherwise, split into 2-4 logical batches BY CONCERN (not by raw size — semantic batches give better per-batch reviews) and call peers in parallel. The proxy's MCP cap allows up to 8 in-flight calls. Aggregate findings yourself before reporting back.",
     "",
     "## Aggregation contract",
     "",
