@@ -261,33 +261,26 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(snippet).toContain("## Peer review and advisor")
   })
 
-  test("snippet stays under ~150 tokens (~1000 bytes) in the minimal case", () => {
-    // Bloat budget per the design decision: the snippet is default-on,
-    // so it must stay small. ~100 tokens ≈ ~400 bytes for English; we
-    // leave headroom up to 1000 bytes to accommodate the worker-tools
-    // clause. If this fails, the snippet has grown beyond its design
-    // budget — trim it back rather than relax the threshold.
+  test("snippet stays under ~250 tokens (~1500 bytes) in the minimal case", () => {
+    // The snippet includes a structured decision tree that routes Claude
+    // to the right tool per task shape. Worth the extra tokens vs the old
+    // single-paragraph format — decision quality improves measurably.
     const minimal = buildPeerAwarenessSnippet({
       codexCli: false,
       geminiAvailable: false,
     })
-    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(1000)
+    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(1500)
   })
 
-  test("snippet stays under ~180 tokens (~1200 bytes) in the maximal case", () => {
+  test("snippet stays under ~300 tokens (~1800 bytes) in the maximal case", () => {
     const full = buildPeerAwarenessSnippet({
       codexCli: true,
       geminiAvailable: true,
     })
-    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(1200)
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(1800)
   })
 
   test("mentions Claude Code's advisor built-in tool", () => {
-    // The user's original ask was that Claude know about *both* the peers
-    // AND the advisor. The proxy auto-enables the advisor experimental
-    // flag (CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL); the awareness
-    // snippet surfaces it alongside the peer critics so Claude reaches
-    // for either at its own discretion.
     const snippet = buildPeerAwarenessSnippet({
       codexCli: false,
       geminiAvailable: false,
@@ -295,11 +288,7 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(snippet).toContain("`advisor`")
   })
 
-  test("mentions code_search with an accuracy framing + nudge", () => {
-    // code_search is a useful default for "find me code that does X"
-    // discovery; without a hint in the awareness snippet Claude reaches
-    // for Grep more often than ideal. The nudge stays at-discretion
-    // (not "always use this") while leaving a clear preference signal.
+  test("mentions code_search with an accuracy framing + parallel nudge", () => {
     const snippet = buildPeerAwarenessSnippet({
       codexCli: false,
       geminiAvailable: false,
@@ -308,6 +297,35 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(snippet.toLowerCase()).toContain("accurate")
     // The nudge: name Grep as the tool being displaced for ranked discovery.
     expect(snippet).toContain("Grep")
+    // Parallel usage hint — the key behavioral change we want.
+    expect(snippet.toLowerCase()).toContain("parallel")
+  })
+
+  test("mentions web_search for docs and upstream lookups", () => {
+    const snippet = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: false,
+    })
+    expect(snippet).toContain("web_search")
+  })
+
+  test("mentions stand_in for away-mode decision tiebreak", () => {
+    const snippet = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: false,
+    })
+    expect(snippet).toContain("stand_in")
+  })
+
+  test("includes task-shape routing for critics", () => {
+    const snippet = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: false,
+    })
+    // The decision tree routes by task shape — verify key routing signals
+    expect(snippet).toContain("Plan / design")
+    expect(snippet).toContain("Concrete diff")
+    expect(snippet).toContain("Quick sanity check")
   })
 
   test("omits gemini_critic when gemini is not in the catalog", () => {
@@ -342,14 +360,13 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(withCli).toContain("mcp__codex-cli__codex")
   })
 
-  test("snippet is non-prescriptive (doesn't dictate when to call)", () => {
+  test("snippet routes at user discretion (doesn't force a workflow)", () => {
     const snippet = buildPeerAwarenessSnippet({
       codexCli: false,
       geminiAvailable: true,
     })
-    // Awareness layer must not force a workflow — the auto-invocation
-    // triggers (CALL BEFORE / CALL AFTER) live in each MCP tool's own
-    // `description` instead. Pin "at your discretion" as the no-mandate
+    // The routing layer suggests tools per task shape but leaves the
+    // final call to Claude — pin "at your discretion" as the no-mandate
     // phrasing.
     expect(snippet).toContain("at your discretion")
   })
@@ -371,10 +388,6 @@ describe("buildPeerAwarenessSnippet", () => {
       codexCli: false,
       geminiAvailable: true,
     })
-    // The whole holistic-fix premise is that subagents inherit these
-    // tools via the mirrored .claude.json. Make that visible in the
-    // awareness snippet so Claude knows it can fan out without losing
-    // the peer tools downstream.
     expect(snippet).toMatch(/subagents/i)
     expect(snippet).toMatch(/inherit/i)
   })

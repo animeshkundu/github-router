@@ -357,20 +357,10 @@ export function buildAgentPrompt(
 
 /**
  * Build the awareness snippet appended to the spawned `claude` session's
- * system prompt via `--append-system-prompt`. Non-prescriptive — Claude
- * sees that the peer tools and advisor exist; *when* to invoke is left
- * to Claude's judgment.
- *
- * Trimmed to ~150 tokens by design. The per-tool descriptions are
- * already in Claude's context as MCP tool descriptions (loaded from
- * `tools/list`); the snippet's net-new value is:
- *   - the `advisor` mention (built-in, not MCP-discoverable),
- *   - the `peer-review-coordinator` fan-out hint,
- *   - the "subagents you spawn inherit these" claim (the load-bearing
- *     UX payoff of the holistic subagent-MCP-inheritance fix),
- *   - the worker-tools "offload to save your context" framing (the
- *     per-tool MCP descriptions cover capabilities; the snippet adds
- *     the strategic when-to-use signal).
+ * system prompt via `--append-system-prompt`. Decision-routing layer —
+ * Claude sees what tools exist AND a concise decision tree for picking
+ * the right one per task shape. Individual tool `description` fields
+ * cover capabilities; this snippet adds the strategic routing signal.
  *
  * Surface contract (regression-pinned in tests/peer-mcp-personas.test.ts):
  *   - Always lists codex_critic, codex_reviewer, opus_critic, advisor,
@@ -378,7 +368,7 @@ export function buildAgentPrompt(
  *   - Conditionally lists gemini_critic only when `geminiAvailable`.
  *   - Mentions `codex-cli` stdio bridge only when `codexCli`.
  *
- * The snippet is the awareness layer; the auto-invocation triggers
+ * The snippet is the routing layer; the auto-invocation triggers
  * (CALL BEFORE / CALL AFTER) remain in each MCP tool's own `description`.
  * The two layers are intentionally complementary — keep the snippet
  * terse and never re-encode the prescriptive triggers here.
@@ -397,15 +387,26 @@ export function buildPeerAwarenessSnippet(opts: {
   criticList.push("`opus_critic` (Opus 4.7)")
 
   const codexCliClause = opts.codexCli
-    ? " The `mcp__codex-cli__codex` stdio bridge dispatches to `codex-implementer` for end-to-end coding tasks."
+    ? "\n- **Implement** → `mcp__codex-cli__codex` (codex-implementer, gpt-5.3-codex with workspace-write)"
+    : ""
+
+  const geminiRoute = opts.geminiAvailable
+    ? "; long artifact or formal reasoning → `gemini_critic`"
     : ""
 
   return [
     "## Peer review and advisor",
     "",
-    `Cross-lab peer critics under \`mcp__gh-router-peers__*\` — ${criticList.join(
-      ", ",
-    )} — plus the \`peer-review-coordinator\` fan-out subagent, and Claude Code's built-in \`advisor\` tool, are available at your discretion for second opinions and adversarial review. Subagents you spawn inherit them.${codexCliClause} Also \`mcp__gh-router-peers__code_search\` for accurate ranked code discovery (BM25F + tree-sitter) — prefer it over \`Grep\` when finding definitions or call sites. \`worker_explore\` / \`worker_implement\` delegate bounded research or scoped coding tasks (file ops, edits, bash, web fetch) to an autonomous Gemini worker — offload work that would consume your context. Use \`worktree: true\` on \`worker_implement\` for isolated runs that return a diff for review.`,
+    `Cross-lab peer critics under \`mcp__gh-router-peers__*\`: ${criticList.join(", ")}. Subagents you spawn inherit them.`,
+    "",
+    "Pick by task shape, at your discretion:",
+    `- **Plan / design review** → \`codex_critic\` (different-lab tradeoff analysis)${geminiRoute}`,
+    "- **Concrete diff / file** → `codex_reviewer` (line-level, code-specialist)",
+    "- **Quick sanity check** → `opus_critic` (same-lab, fast, catches confabulation)",
+    `- **Multi-dimensional** → \`peer-review-coordinator\` (fans out in parallel, aggregates by severity)${codexCliClause}`,
+    "- **Decision tiebreak (user away)** → `stand_in` (3-lab blind vote; NOT for code review)",
+    "",
+    "Also: `advisor` (built-in, non-MCP) for approach drift. `code_search` for accurate ranked discovery (BM25F + tree-sitter) — prefer parallel `code_search` calls over `Grep` when exploring. `web_search` for docs, errors, upstream issues. `worker_explore` / `worker_implement` offload bounded work to a Gemini worker — saves your context; use `worktree: true` on implement for isolated diffs.",
   ].join("\n")
 }
 
