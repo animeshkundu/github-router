@@ -210,6 +210,38 @@ describe("resolveModel", () => {
     expect(resolveModel("claude-opus-4.6-1m")).toBe("claude-opus-4.6-1m")
   })
 
+  test("claude-opus-4-8 (dashed) resolves to bare claude-opus-4.8, not a wrong-version 1M variant", () => {
+    // Copilot ships claude-opus-4.8 without a -1m sibling. The resolver
+    // must NOT fall back to claude-opus-4.7-1m-internal or claude-opus-4.6-1m.
+    state.models = {
+      data: [
+        { id: "claude-opus-4.8", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.7-1m-internal", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.6-1m", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.6", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(resolveModel("claude-opus-4-8")).toBe("claude-opus-4.8")
+  })
+
+  test("claude-opus-4-7 still resolves to 1m-internal when 4.8 is in catalog (regression guard)", () => {
+    // Ensure the fix doesn't break the 4.7 path where a matching 1M
+    // variant DOES exist.
+    state.models = {
+      data: [
+        { id: "claude-opus-4.8", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.7-1m-internal", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.6-1m", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.6", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(resolveModel("claude-opus-4-7")).toBe("claude-opus-4.7-1m-internal")
+  })
+
   test("codex family preference resolves to highest codex-suffix version", () => {
     expect(resolveModel("codex")).toBe("gpt-5.3-codex")
   })
