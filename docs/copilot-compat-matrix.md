@@ -36,6 +36,8 @@ Canonical Copilot tool-type allowlist (verbatim from a 400 in probe `tooltype_co
 | `web_search_20250305` | ⚠️ 200 (inconclusive) | anthropic-docs | `tooltype_web_search_20250305` | Body validator accepts; model never invoked the tool in the test prompt — needs a stronger probe to confirm functional acceptance. See `web_search_anthropic_tool_messages` row below for the resolved end-to-end behavior with a real trigger query. |
 | `bash_20241022` | ❌ 400 | copilot-allowlist | `tooltype_bash_20241022_legacy` | Legacy version rejected |
 | `code_execution_20250825` | ❌ 400 | copilot-allowlist | `tooltype_code_execution_20250825` | Not in Copilot allowlist |
+| `web_fetch_20250910` / `web_fetch_20260209` (hosted) | ❌ 400 (proxy fail-fast) | anthropic-docs | `tooltype_web_fetch_hosted_rejected` | Anthropic hosted web_fetch (beta `web-fetch-2025-09-10` / GA 2026-02-17). Copilot has no backend, and the fetch URL is model-chosen mid-generation so it can't be pre-fulfilled like `web_search`. Proxy rejects with a clear 400 (matched on the `web_fetch_\d{8}` type slug) rather than silently strip — see `docs/unsupported-features.md`. |
+| custom tool named `web_fetch` (`type:custom`) | ✅ 200 | exploratory | `tooltype_web_fetch_custom_name_allowed` | Regression guard: the hosted-web_fetch gate matches the `type` slug only, never the tool NAME, so a client-side custom tool that shares the name still passes (Copilot accepts `custom`). |
 | `computer_20250124` | (untested) | anthropic-docs | (TODO) | Add probe — Anthropic ships this typed tool; status unknown |
 
 ## Per-tool fields (`tools[i].<field>`)

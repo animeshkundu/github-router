@@ -102,6 +102,8 @@ declare -a PROBE_REGISTRY=(
   "tooltype_bash_20241022_legacy|copilot-allowlist|bash_20241022 (legacy version) returns 400"
   "tooltype_code_execution_20250825|copilot-allowlist|code_execution_20250825 returns 400 (not in Copilot allowlist)"
   "tooltype_web_search_20250305|anthropic-docs|web_search_20250305 returns 200 in body validator (model invocation inconclusive)"
+  "tooltype_web_fetch_hosted_rejected|anthropic-docs|hosted web_fetch_20260209 returns 400 (proxy fail-fast: no Copilot backend, URL is model-chosen mid-generation so cannot be pre-fulfilled)"
+  "tooltype_web_fetch_custom_name_allowed|exploratory|custom tool merely NAMED web_fetch (type:custom) returns 200 — detection matches the hosted type slug, not the name (regression guard against over-matching)"
 
   # ===== Web search across endpoints (Task #2 — empirical native exposure map) =====
   # End-to-end through proxy: the Anthropic-shape web_search tool is rejected by
@@ -376,6 +378,31 @@ probe_tooltype_web_search_20250305() {
     "model": "claude-opus-4-7",
     "max_tokens": 50,
     "tools": [{"type":"web_search_20250305","name":"web_search"}],
+    "messages": [{"role":"user","content":"hi"}]
+  }'
+  assert_status 200
+}
+
+probe_tooltype_web_fetch_hosted_rejected() {
+  # Proxy fail-fast 400 (generated proxy-side, independent of Copilot). The
+  # hosted web_fetch tool is matched on its `type` slug.
+  do_request POST /v1/messages '{
+    "model": "claude-opus-4-7",
+    "max_tokens": 50,
+    "tools": [{"type":"web_fetch_20260209"}],
+    "messages": [{"role":"user","content":"fetch https://example.com"}]
+  }'
+  assert_status 400
+}
+
+probe_tooltype_web_fetch_custom_name_allowed() {
+  # Regression guard: a CLIENT-SIDE custom tool that merely shares the name
+  # "web_fetch" (type:custom) must NOT be caught by the hosted-tool gate —
+  # Copilot's allowlist accepts `custom`, so the end user sees 200.
+  do_request POST /v1/messages '{
+    "model": "claude-opus-4-7",
+    "max_tokens": 50,
+    "tools": [{"type":"custom","name":"web_fetch","input_schema":{"type":"object"}}],
     "messages": [{"role":"user","content":"hi"}]
   }'
   assert_status 200

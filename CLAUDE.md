@@ -76,7 +76,7 @@ See [`docs/publishing.md`](docs/publishing.md) for npm/Docker release flow, the 
 
 ### Unsupported features (Copilot can't serve)
 
-Files API (`/v1/files/*`) → 404; ADVISOR (`advisor-tool-2026-03-01`) → Phase I server-side wiring (proxy injects `__anthropic_advisor`, dispatches to gpt-5.5 xhigh, streams `advisor_tool_result` back); `mcp_servers` non-empty → fail-fast 400; Bridge / CCR remote-session env stripped from spawned-child env. Full surface + opt-out paths in [`docs/unsupported-features.md`](docs/unsupported-features.md).
+Files API (`/v1/files/*`) → 404; ADVISOR (`advisor-tool-2026-03-01`) → Phase I server-side wiring (proxy injects `__anthropic_advisor`, dispatches to gpt-5.5 xhigh, streams `advisor_tool_result` back); `mcp_servers` non-empty → fail-fast 400; hosted `web_fetch` tool (`web_fetch_<date>` type slug) → fail-fast 400 on `/v1/messages` + `/v1/chat/completions` (no Copilot backend; model-chosen URL can't be pre-fulfilled; matched on type slug not name so custom tools named `web_fetch` pass); Bridge / CCR remote-session env stripped from spawned-child env. Full surface + opt-out paths in [`docs/unsupported-features.md`](docs/unsupported-features.md).
 
 ### `apiKeyHelper` and external credential scripts
 

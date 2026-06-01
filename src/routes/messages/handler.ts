@@ -28,6 +28,14 @@ const isWebSearchTool = (tool: AnyRecord): boolean =>
   (typeof tool.type === "string" && tool.type.startsWith("web_search")) ||
   tool.name === "web_search"
 
+// Anthropic hosted `web_fetch` tool (beta web-fetch-2025-09-10 / GA 2026-02-17;
+// type slugs web_fetch_20250910, web_fetch_20260209). Matched ONLY on the
+// hosted-tool `type` slug — NEVER on tool name — because a client-side custom
+// tool that merely shares the name (`{type:"custom", name:"web_fetch"}`) is a
+// legitimate request Copilot's allowlist accepts and must not be rejected.
+const isHostedWebFetchTool = (tool: AnyRecord): boolean =>
+  typeof tool?.type === "string" && /^web_fetch_\d{8}$/.test(tool.type)
+
 /**
  * Extract whitelisted beta headers from the incoming request to forward
  * to the Copilot API. VS Code sends these to enable extended features
@@ -219,6 +227,39 @@ export async function handleCompletion(c: Context) {
   // incoming header to know whether the user asked for ADVISOR.
   const incomingBeta = c.req.header("anthropic-beta")
   const advisorEnabled = isAdvisorRequested(incomingBeta)
+
+  // Fail-fast on the Anthropic hosted `web_fetch` tool (mirrors the
+  // mcp_servers deferral). web_fetch's URL is chosen by the model
+  // mid-generation (server_tool_use{web_fetch}), so unlike web_search there is
+  // nothing to pre-fulfill at request time, and Copilot's tool-type allowlist
+  // has no web_fetch backend. Silently stripping it would make the model
+  // hallucinate it has the tool (the mcp_servers / gemini-critic lesson).
+  // Reject BEFORE processWebSearch so a request carrying BOTH web_search and
+  // web_fetch does not perform a side-effecting MCP search before failing.
+  if (rawBody.includes("web_fetch")) {
+    try {
+      const probe = JSON.parse(rawBody) as AnyRecord
+      if (Array.isArray(probe.tools) && probe.tools.some(isHostedWebFetchTool)) {
+        return c.json(
+          {
+            type: "error",
+            error: {
+              type: "invalid_request_error",
+              message:
+                "Anthropic's hosted `web_fetch` tool is not supported by github-router. "
+                + "Copilot has no web_fetch backend, and the fetch URL is chosen by the model "
+                + "mid-generation so it cannot be pre-fulfilled the way `web_search` is. "
+                + "Remove the `web_fetch_*` tool; `web_search` is supported.",
+            },
+          },
+          400,
+        )
+      }
+    } catch {
+      // Body wasn't valid JSON — fall through; downstream handlers surface
+      // the parse error in their own way.
+    }
+  }
 
   let finalBody = await processWebSearch(rawBody)
   // Inbound advisor-history sanitization: rewrite malformed
