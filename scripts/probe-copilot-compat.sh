@@ -83,6 +83,17 @@ declare -a PROBE_REGISTRY=(
   "eager_input_streaming_stripped|claude-emits|tools[i].eager_input_streaming sent through proxy returns 200 (proxy strips before forwarding; Copilot would 400 on the raw field)"
   "eager_input_streaming_with_type_custom_stripped|claude-emits|Same field with explicit type:custom returns 200 (same strip path)"
 
+  # ===== fast-mode `speed` body-field strip =====
+  # The `fast-mode-2026-02-01` beta HEADER is forwarded (extended/leverage mode),
+  # but the top-level `speed:"fast"` BODY field is unknown to Copilot's validator.
+  # The proxy strips the body field before forwarding so the request 200s; Copilot
+  # would 400 ("Extra inputs are not permitted") on the raw top-level field.
+  # count-tokens needs its own probe — the harness runs end-to-end through the
+  # proxy only, and a /v1/messages probe cannot honestly cover the separate
+  # count-tokens code path.
+  "speed_fast_stripped|claude-emits|top-level speed:\"fast\" (with fast-mode beta header) sent through proxy returns 200 (proxy strips body field before forwarding; Copilot would 400 on the raw top-level field)"
+  "speed_fast_count_tokens_stripped|claude-emits|top-level speed:\"fast\" on /v1/messages/count_tokens returns 200 (proxy strips before forwarding; Copilot would 400 on the raw field)"
+
   # ===== Native Anthropic tool types =====
   "tooltype_memory_20250818|anthropic-docs|memory_20250818 returns 200; model emits tool_use{name:memory, command:view}"
   "tooltype_text_editor_20250728|anthropic-docs|text_editor_20250728 returns 200"
@@ -280,6 +291,21 @@ probe_eager_input_streaming_with_type_custom_stripped() {
     "tools": [{"type":"custom","name":"echo","description":"t","input_schema":{"type":"object"},"eager_input_streaming":true}],
     "messages": [{"role":"user","content":"hi"}]
   }'
+  assert_status 200
+}
+
+probe_speed_fast_stripped() {
+  # Send the REAL fast-mode shape: the `fast-mode-2026-02-01` beta header is
+  # forwarded (extended/leverage mode) while the top-level `speed:"fast"` body
+  # field is stripped by the proxy before forwarding. End-user sees 200; Copilot
+  # would 400 on the raw top-level field.
+  do_request POST /v1/messages '{"model":"claude-haiku-4-5","max_tokens":50,"speed":"fast","messages":[{"role":"user","content":"hi"}]}' "anthropic-beta: fast-mode-2026-02-01"
+  assert_status 200
+}
+
+probe_speed_fast_count_tokens_stripped() {
+  # Same strip exercised through the independent count_tokens code path.
+  do_request POST /v1/messages/count_tokens '{"model":"claude-haiku-4-5","speed":"fast","messages":[{"role":"user","content":"hi"}]}' "anthropic-beta: fast-mode-2026-02-01"
   assert_status 200
 }
 

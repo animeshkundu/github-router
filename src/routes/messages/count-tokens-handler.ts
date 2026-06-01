@@ -178,6 +178,7 @@ function resolveModelInBody(rawBody: string): {
     || rawBody.includes('"output_config"')
     || rawBody.includes('"betas"')
     || rawBody.includes('"eager_input_streaming"')
+    || rawBody.includes('"speed"')
   if (needsAnthropicOnlyStrip && stripAnthropicOnlyFields(parsed)) {
     modified = true
   }
@@ -230,10 +231,11 @@ function sanitizeCacheControl(body: AnyRecord): boolean {
 
 /**
  * Strip top-level body fields Copilot 400s on (budget, output_config.schema,
- * betas). Duplicated structurally from handler.ts because count_tokens uses
- * its own JSON-pass; the bodies are independent. Behavior must stay in lock-
- * step with handler.ts's stripAnthropicOnlyFields — covered by integration
- * tests (Phase F P2.4).
+ * betas, speed). Duplicated structurally from handler.ts because count_tokens
+ * uses its own JSON-pass; the bodies are independent. Behavior must stay in
+ * lock-step with handler.ts's stripAnthropicOnlyFields — covered by integration
+ * tests (Phase F P2.4). The `speed` strip is verified end-to-end by the
+ * `speed_fast_count_tokens_stripped` probe in scripts/probe-copilot-compat.sh.
  */
 function stripAnthropicOnlyFields(body: AnyRecord): boolean {
   let stripped = false
@@ -242,6 +244,13 @@ function stripAnthropicOnlyFields(body: AnyRecord): boolean {
       "[count_tokens] Stripping body-level `budget` field (Copilot 400s)",
     )
     delete body.budget
+    stripped = true
+  }
+  if (body.speed !== undefined) {
+    consola.warn(
+      "[count_tokens] Stripping body-level `speed` field (Copilot 400s; the `fast-mode-` beta header is preserved but the latency hint is not enforced upstream)",
+    )
+    delete body.speed
     stripped = true
   }
   if (body.output_config !== undefined) {

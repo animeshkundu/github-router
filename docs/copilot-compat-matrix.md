@@ -65,6 +65,7 @@ Canonical Copilot tool-type allowlist (verbatim from a 400 in probe `tooltype_co
 | `output_config: {type: "json_object"}` (short form) | ✅ 200 (proxy strips, injects) | claude-emits | (TODO) | Same strip path as `.schema` |
 | `output_config: {effort}` | ✅ 200 (preserved) | proxy-internal | (TODO) | Proxy-set during `translateThinking`; required for adaptive-thinking models |
 | `betas: ["..."]` (top-level array) | ✅ 200 (proxy strips) | claude-emits | (TODO) | Distinct from `anthropic-beta` header; Copilot 400s on body field; proxy strips, header preserves |
+| `speed: "fast"` (fast-mode body field) | ✅ 200 (proxy strips; latency hint NOT enforced upstream) | claude-emits | `speed_fast_stripped` / `speed_fast_count_tokens_stripped` | Copilot 400s on the raw top-level field ("Extra inputs are not permitted"); proxy strips the body field before forwarding. The `fast-mode-2026-02-01` beta header is preserved (extended/leverage mode) so intent flows, but Copilot has no fast-mode backend — the latency hint is dropped, NOT honored. |
 | `mcp_servers: [{...}]` (non-empty) | ❌ 400 (proxy fail-fast) | claude-emits | (TODO) | Phase G translate path was deferred; proxy fail-fasts with helpful error pointing at `~/.claude/mcp.json` |
 | `stream: true` | ✅ 200 (SSE) | claude-emits | `stream_with_tools` | Streaming response with valid SSE event sequence |
 

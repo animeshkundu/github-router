@@ -558,6 +558,7 @@ function resolveModelInBody(rawBody: string): {
     || rawBody.includes('"output_config"')
     || rawBody.includes('"betas"')
     || rawBody.includes('"eager_input_streaming"')
+    || rawBody.includes('"speed"')
   if (needsAnthropicOnlyStrip && stripAnthropicOnlyFields(parsed)) {
     modified = true
   }
@@ -727,6 +728,11 @@ function applyDefaultBetas(
  *   POST /v1/messages?beta=true { ..., budget: {total_tokens: 10000} } → 400
  *   POST /v1/messages?beta=true { ..., output_config: {schema: {...}} }  → 400
  *   POST /v1/messages?beta=true { ..., betas: ["..."] }                  → 400
+ *   POST /v1/messages?beta=true { ..., speed: "fast" }                   → 400
+ *     (probe id `speed_fast_stripped`). The body-field strip never touches
+ *     the `fast-mode-2026-02-01` beta header (which forwards in extended/
+ *     leverage mode), but Copilot has no fast-mode backend so the latency
+ *     hint is dropped, NOT honored.
  *
  * Each strip emits a one-line consola.warn so users running with these
  * features (e.g. `claude --max-budget-usd`, `--json-schema`) understand
@@ -739,6 +745,13 @@ function applyDefaultBetas(
  *   - `mcp_servers` (Phase G translate path — silent strip causes LLM
  *     to hallucinate tools per gemini-critic finding)
  *   - `metadata` (Copilot 200s, ignores harmlessly)
+ *
+ * Known limitation (shared by all raw-substring triggers above): the
+ * fast-path `needsAnthropicOnlyStrip` gate matches on the literal
+ * substring `"speed"` (etc.) in the raw body, so a JSON-escaped top-level
+ * key would parse to `speed` but miss the trigger. Real Claude Code /
+ * Anthropic-SDK clients emit unescaped keys; rewriting the trigger is out
+ * of scope (would perturb the 4 incumbent strips).
  */
 function stripAnthropicOnlyFields(body: AnyRecord): boolean {
   let stripped = false
@@ -747,6 +760,13 @@ function stripAnthropicOnlyFields(body: AnyRecord): boolean {
       "Stripping body-level `budget` field (Copilot 400s; the `task-budgets-` beta header is preserved but cost ceiling is not enforced server-side)",
     )
     delete body.budget
+    stripped = true
+  }
+  if (body.speed !== undefined) {
+    consola.warn(
+      "Stripping body-level `speed` field (Copilot 400s; the `fast-mode-` beta header is preserved but the fast-mode latency hint is not enforced upstream)",
+    )
+    delete body.speed
     stripped = true
   }
   if (body.output_config !== undefined) {
