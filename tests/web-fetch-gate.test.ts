@@ -119,6 +119,20 @@ test("/v1/messages rejects a mixed web_search+web_fetch request BEFORE running a
   expect(calls.length).toBe(0)
 })
 
+test("/v1/messages rejects hosted web_fetch even when the type slug is JSON-unicode-escaped (no raw-substring bypass)", async () => {
+  const { calls } = mockUpstream()
+  // Raw body where the slug is escaped (`web_fetch…`) — a naive
+  // rawBody.includes("web_fetch") pre-gate would miss this; the parse-based
+  // gate must still catch it.
+  const res = await server.request("/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: '{"model":"claude-haiku-4-5","max_tokens":50,"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"web\\u005ffetch_20260209"}]}',
+  })
+  expect(res.status).toBe(400)
+  expect(calls.length).toBe(0)
+})
+
 // ── /v1/chat/completions ──────────────────────────────────────────────
 
 test("/v1/chat/completions rejects hosted web_fetch (type slug) with 400", async () => {

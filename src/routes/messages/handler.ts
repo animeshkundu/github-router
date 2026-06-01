@@ -236,29 +236,29 @@ export async function handleCompletion(c: Context) {
   // hallucinate it has the tool (the mcp_servers / gemini-critic lesson).
   // Reject BEFORE processWebSearch so a request carrying BOTH web_search and
   // web_fetch does not perform a side-effecting MCP search before failing.
-  if (rawBody.includes("web_fetch")) {
-    try {
-      const probe = JSON.parse(rawBody) as AnyRecord
-      if (Array.isArray(probe.tools) && probe.tools.some(isHostedWebFetchTool)) {
-        return c.json(
-          {
-            type: "error",
-            error: {
-              type: "invalid_request_error",
-              message:
-                "Anthropic's hosted `web_fetch` tool is not supported by github-router. "
-                + "Copilot has no web_fetch backend, and the fetch URL is chosen by the model "
-                + "mid-generation so it cannot be pre-fulfilled the way `web_search` is. "
-                + "Remove the `web_fetch_*` tool; `web_search` is supported.",
-            },
+  // Parse the body directly (rather than a raw-substring pre-gate) so a
+  // JSON-escaped `type` slug (e.g. "web_fetch_…") cannot bypass the reject.
+  try {
+    const probe = JSON.parse(rawBody) as AnyRecord
+    if (Array.isArray(probe.tools) && probe.tools.some(isHostedWebFetchTool)) {
+      return c.json(
+        {
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message:
+              "Anthropic's hosted `web_fetch` tool is not supported by github-router. "
+              + "Copilot has no web_fetch backend, and the fetch URL is chosen by the model "
+              + "mid-generation so it cannot be pre-fulfilled the way `web_search` is. "
+              + "Remove the `web_fetch_*` tool; `web_search` is supported.",
           },
-          400,
-        )
-      }
-    } catch {
-      // Body wasn't valid JSON — fall through; downstream handlers surface
-      // the parse error in their own way.
+        },
+        400,
+      )
     }
+  } catch {
+    // Body wasn't valid JSON — fall through; downstream handlers surface
+    // the parse error in their own way.
   }
 
   let finalBody = await processWebSearch(rawBody)
