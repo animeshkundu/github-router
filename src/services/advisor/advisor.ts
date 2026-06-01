@@ -43,7 +43,9 @@
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
+import { state } from "~/lib/state"
 import { isControllerClosedError } from "~/lib/stream-relay"
+import { getTokenizerFromModel, loadEncoder } from "~/lib/tokenizer"
 import { resolveModel } from "~/lib/utils"
 import { createMessages } from "~/services/copilot/create-messages"
 import {
@@ -178,15 +180,49 @@ export function injectAdvisorTool(rawBody: string): string {
   return JSON.stringify(parsed)
 }
 
-/** Character budget for rendered conversation text passed to the
- *  advisor model. gpt-5.5 (default advisor) caps prompt input at
- *  272,000 tokens. At a conservative ~3 chars/token (mixed prose +
- *  code + JSON), 720,000 chars renders to ≈240,000 tokens, leaving
- *  ~32,000 tokens of headroom for the system prompt and per-turn
- *  framing overhead. Without this cap, long Claude Code sessions
- *  produce 400 `model_max_prompt_tokens_exceeded` from /v1/responses
- *  and the advisor falls back silently. */
+/** Fallback CHARACTER budget for `renderConversationAsText` when called
+ *  without a token `measure` (unit-agnostic default = char length). Also
+ *  the conservative no-catalog floor: 720,000 chars ≈ 240,000 tokens at
+ *  ~3 chars/token, which fits even the smaller `/responses` models. The
+ *  live path measures EXACT o200k tokens (see `runAdvisor`) and budgets
+ *  against the model's real `max_prompt_tokens`, so this constant is only
+ *  a safety net, never the normal path. */
 export const ADVISOR_MAX_CONVERSATION_CHARS = 720_000
+
+/** Token budget used when the advisor model's `max_prompt_tokens` can't
+ *  be resolved from the live catalog. ≈ the 720K-char fallback in tokens. */
+export const ADVISOR_FALLBACK_MAX_TOKENS = 240_000
+
+/** Tokens reserved below the model's `max_prompt_tokens` for the advisor
+ *  system prompt + per-call framing + any encode/wire discrepancy between
+ *  our o200k count and Copilot's full-payload count. The transcript token
+ *  budget is `max_prompt_tokens - reserve`. Generous on purpose: a 400
+ *  `model_max_prompt_tokens_exceeded` degrades to a silent advisor
+ *  fallback, and the marginal window we give up is irrelevant next to
+ *  gpt-5.5's 922K. */
+const ADVISOR_PROMPT_TOKEN_RESERVE = 8_000
+
+/**
+ * Derive the TOKEN budget for the rendered transcript from the advisor
+ * model's live `max_prompt_tokens` (cached in `state.models` by
+ * `cacheModels()` at startup). Self-correcting: tracks the model's real
+ * window instead of a hardcoded guess, and honors a SMALLER window if a
+ * caller overrides `advisorModel` to a tighter model. Falls back to
+ * `ADVISOR_FALLBACK_MAX_TOKENS` when the catalog or field is missing.
+ */
+export function resolveAdvisorMaxTokens(advisorModel: string): number {
+  const id = resolveModel(advisorModel)
+  const maxPromptTokens = state.models?.data?.find((m) => m.id === id)
+    ?.capabilities?.limits?.max_prompt_tokens
+  if (
+    typeof maxPromptTokens !== "number"
+    || !Number.isFinite(maxPromptTokens)
+    || maxPromptTokens <= 0
+  ) {
+    return ADVISOR_FALLBACK_MAX_TOKENS
+  }
+  return Math.max(1, maxPromptTokens - ADVISOR_PROMPT_TOKEN_RESERVE)
+}
 
 /**
  * Render an Anthropic-shape conversation (messages array with
@@ -197,16 +233,23 @@ export const ADVISOR_MAX_CONVERSATION_CHARS = 720_000
  * just needs to READ the conversation, not produce more of it).
  *
  * Front-truncates oldest turns when the rendered output would exceed
- * `maxChars`. The advisor cares more about current state (latest
+ * `maxUnits`. The advisor cares more about current state (latest
  * tool calls, errors, in-flight task) than the original prompt —
  * mirrors Claude Code's own context-truncation strategy. When any
  * turns are dropped, prepends a `[TRUNCATED: N earlier turn(s)
  * omitted ...]` notice so the advisor knows the transcript is
  * partial and can flag if it needs the missing context.
+ *
+ * Unit-agnostic via the injected `measure` function: production passes
+ * an EXACT o200k token counter and a token budget (so truncation tracks
+ * the model's real `max_prompt_tokens`); the default `measure` is char
+ * length, so callers/tests that pass a plain numeric budget get the
+ * historical character-budget behavior.
  */
 export function renderConversationAsText(
   conversation: Array<AnyRecord>,
-  maxChars: number = ADVISOR_MAX_CONVERSATION_CHARS,
+  maxUnits: number = ADVISOR_MAX_CONVERSATION_CHARS,
+  measure: (s: string) => number = (s) => s.length,
 ): string {
   const turnBlocks: Array<string> = []
   for (let i = 0; i < conversation.length; i++) {
@@ -240,29 +283,27 @@ export function renderConversationAsText(
   }
 
   // Walk from the latest turn backward, accumulating until the next
-  // turn would push us over budget. The "+1" accounts for the join
-  // separator between turn blocks.
-  let totalChars = 0
+  // turn would push us over budget. Measured in whatever unit `measure`
+  // reports (tokens in prod, chars by default).
+  let totalUnits = 0
   let firstKeptIdx = turnBlocks.length
   for (let i = turnBlocks.length - 1; i >= 0; i--) {
-    const len = turnBlocks[i].length + 1
-    if (totalChars + len > maxChars) break
-    totalChars += len
+    const len = measure(turnBlocks[i]) + 1
+    if (totalUnits + len > maxUnits) break
+    totalUnits += len
     firstKeptIdx = i
   }
 
   // Edge case: even the latest turn alone exceeds the budget. Hard-
   // truncate its tail to fit (advisor still gets the most-recent
-  // context, just not all of it). 200-char reserve for the notice.
+  // context, just not all of it).
   if (firstKeptIdx === turnBlocks.length && turnBlocks.length > 0) {
     const last = turnBlocks[turnBlocks.length - 1]
-    const reserve = 200
-    const tail = last.slice(-(maxChars - reserve))
-    return (
+    const notice =
       `[TRUNCATED: conversation too long for advisor model context; `
       + `only the tail of the latest (turn ${turnBlocks.length}) is shown]\n\n`
-      + tail
-    )
+    const budgetForTail = Math.max(0, maxUnits - measure(notice))
+    return notice + truncateTailToUnits(last, budgetForTail, measure)
   }
 
   const kept = turnBlocks.slice(firstKeptIdx)
@@ -274,6 +315,32 @@ export function renderConversationAsText(
     )
   }
   return kept.join("\n")
+}
+
+/**
+ * Return the longest suffix of `text` whose `measure(...)` is ≤ `maxUnits`.
+ * Binary search on the cut point — unit-agnostic (works for the token
+ * `measure` in prod and the char-length default), and exact rather than
+ * a chars-per-token estimate. `measure` is called O(log n) times.
+ */
+function truncateTailToUnits(
+  text: string,
+  maxUnits: number,
+  measure: (s: string) => number,
+): string {
+  if (maxUnits <= 0) return ""
+  if (measure(text) <= maxUnits) return text
+  let lo = 0
+  let hi = text.length
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi + 1) / 2) // candidate tail length
+    if (measure(text.slice(text.length - mid)) <= maxUnits) {
+      lo = mid
+    } else {
+      hi = mid - 1
+    }
+  }
+  return text.slice(text.length - lo)
 }
 
 /**
@@ -312,8 +379,39 @@ async function runAdvisor(
     + "name the specific assumption or step to revisit. Aim for 2-5 paragraphs "
     + "of substantive guidance."
 
-  const conversationText = renderConversationAsText(conversation)
   const resolvedAdvisorModel = resolveModel(advisorModel)
+
+  // Budget the rendered transcript against the advisor model's REAL
+  // prompt-token window using its exact o200k tokenizer (every advisor-
+  // eligible Copilot model declares o200k_base), not a chars/token
+  // approximation. Front-truncation in renderConversationAsText then
+  // drops oldest turns until the EXACT token count fits. If the tokenizer
+  // can't be loaded, degrade to the char-length budget rather than fail
+  // the whole advisor turn.
+  let measure: (s: string) => number
+  let maxUnits: number
+  try {
+    const modelEntry = state.models?.data?.find(
+      (m) => m.id === resolvedAdvisorModel,
+    )
+    const encoder = await loadEncoder(
+      modelEntry ? getTokenizerFromModel(modelEntry) : "o200k_base",
+    )
+    measure = (s) => encoder.encode(s).length
+    maxUnits = resolveAdvisorMaxTokens(advisorModel)
+  } catch (err) {
+    consola.debug(
+      "advisor: tokenizer load failed; using char-length budget:",
+      err,
+    )
+    measure = (s) => s.length
+    maxUnits = ADVISOR_MAX_CONVERSATION_CHARS
+  }
+  const conversationText = renderConversationAsText(
+    conversation,
+    maxUnits,
+    measure,
+  )
 
   // Route by model family. gpt-5.x / o-series / codex go through
   // /v1/responses with reasoning.effort. claude-* stays on /v1/messages.

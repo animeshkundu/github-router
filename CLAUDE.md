@@ -6,6 +6,8 @@ A reverse proxy that exposes GitHub Copilot as OpenAI and Anthropic compatible A
 
 The primary deployment target for this project is **Windows 11**. macOS and Linux are supported and tested, but Windows is the canonical user environment — every PR must pass the `windows-latest` CI job before merge. A Windows CI failure is treated as a merge blocker, not as flake. If Windows behavior diverges from POSIX, the Windows path is the authoritative one to fix; do not POSIX-skip a Windows failure to land a change.
 
+The canonical end-user setup is **Windows 11 + Claude Code (the CLI client) + a GitHub Copilot _Enterprise_ license**. The enterprise license is load-bearing for feature decisions: it unlocks catalog models gated `restricted_to: ["enterprise"]` — notably the 1M-context Opus (`claude-opus-4.7-1m-internal`, ≈936K-token prompt window) used by `opus_critic` and the `[1m]` Opus default. When choosing models or windows, assume the enterprise catalog is present (prefer the 1M variants), but always gate on the live catalog with a non-enterprise fallback so the proxy still works on lesser tiers.
+
 ## Design docs
 
 - [`docs/peer-mcp-design.md`](docs/peer-mcp-design.md) — current architecture and phased migration plan for the peer-model MCP integration (codex_critic gpt-5.5, codex_reviewer gpt-5.3-codex, gemini_critic gemini-3.1-pro), plus the deployed-state section covering auto-invocation triggers, allowedEfforts, the latency-by-effort matrix, and the predictedTooLong cap. Read this before changing anything in `src/routes/mcp/`, `src/lib/peer-mcp-personas.ts`, or `src/lib/codex-mcp-config.ts`.

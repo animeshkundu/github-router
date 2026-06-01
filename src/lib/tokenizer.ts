@@ -19,7 +19,7 @@ const ENCODING_MAP = {
 type SupportedEncoding = keyof typeof ENCODING_MAP
 
 // Define encoder interface
-interface Encoder {
+export interface Encoder {
   encode: (text: string) => Array<number>
 }
 
@@ -144,6 +144,33 @@ const getEncodeChatFunction = async (encoding: string): Promise<Encoder> => {
  */
 export const getTokenizerFromModel = (model: Model): string => {
   return model.capabilities?.tokenizer || "o200k_base"
+}
+
+/**
+ * Load (and cache) the encoder for an encoding name. Unknown encodings
+ * fall back to o200k_base. Exposed so prompt-window budgeting code can
+ * count raw-text tokens without going through the chat-payload path.
+ */
+export const loadEncoder = async (
+  encoding: string = "o200k_base",
+): Promise<Encoder> => getEncodeChatFunction(encoding)
+
+/**
+ * Exact token count of a raw text string under the given encoding
+ * (default o200k_base — the tokenizer every adaptive Copilot model in
+ * our lineup declares via `capabilities.tokenizer`). This is the real
+ * BPE count, NOT a chars-per-token or word-count approximation, so it
+ * matches the limit Copilot enforces (`max_prompt_tokens`) to the
+ * token. Used by advisor transcript budgeting and the peer-MCP
+ * prompt-window guard.
+ */
+export const getTextTokenCount = async (
+  text: string,
+  encoding: string = "o200k_base",
+): Promise<number> => {
+  if (!text) return 0
+  const encoder = await getEncodeChatFunction(encoding)
+  return encoder.encode(text).length
 }
 
 /**

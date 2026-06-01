@@ -6,12 +6,14 @@ import {
   ADVISOR_CLIENT_TOOL_NAME,
   ADVISOR_DEFAULT_EFFORT,
   ADVISOR_DEFAULT_MODEL,
+  ADVISOR_FALLBACK_MAX_TOKENS,
   ADVISOR_INTERNAL_TOOL_NAME,
   ADVISOR_MAX_CONVERSATION_CHARS,
   ADVISOR_TOOL_INSTRUCTIONS,
   injectAdvisorTool,
   isAdvisorRequested,
   renderConversationAsText,
+  resolveAdvisorMaxTokens,
   toClientServerToolUseId,
 } from "../src/services/advisor/advisor"
 
@@ -703,19 +705,94 @@ describe("toClientServerToolUseId charset hardening (round-5 codex critic)", () 
 
 // ─────────────────────────────────────────────────────────────────────
 // renderConversationAsText front-truncation (Phase L)
-// Long Claude Code sessions render to >272K tokens (gpt-5.5's prompt
-// cap on /v1/responses). Without truncation the advisor fails with
+// Long Claude Code sessions render past the advisor model's prompt cap
+// (gpt-5.5's is 922K tokens on /v1/responses — empirically enforced to
+// the token). Without truncation the advisor fails with
 // `model_max_prompt_tokens_exceeded` and falls back silently. The
 // front-truncation drops oldest turns first because the advisor's
-// value is on the current state, not the original prompt.
+// value is on the current state, not the original prompt. The token
+// budget is derived from the live catalog via resolveAdvisorMaxTokens;
+// ADVISOR_FALLBACK_MAX_TOKENS / ADVISOR_MAX_CONVERSATION_CHARS are the
+// no-catalog fallbacks.
 // ─────────────────────────────────────────────────────────────────────
 
 describe("renderConversationAsText (Phase L truncation)", () => {
-  test("default char budget matches gpt-5.5 prompt cap with headroom", () => {
-    // 720K chars at ~3 chars/token ≈ 240K tokens, leaving ~32K
-    // headroom under gpt-5.5's 272K limit. If this constant changes,
-    // re-derive the headroom and update the inline doc comment.
+  test("fallback char budget is the safe no-catalog floor", () => {
+    // 720K chars at ~3 chars/token ≈ 240K tokens — fits even the
+    // smaller /responses models (gpt-5.3-codex caps at 272K prompt
+    // tokens). Used only when state.models can't resolve the limit.
     expect(ADVISOR_MAX_CONVERSATION_CHARS).toBe(720_000)
+  })
+
+  test("derives token budget from the live catalog max_prompt_tokens", () => {
+    // gpt-5.5's real cap is 922K prompt tokens; minus the 8K reserve =
+    // 914,000 tokens of transcript budget.
+    state.models = {
+      object: "list",
+      data: [
+        {
+          id: "gpt-5.5",
+          name: "gpt-5.5",
+          object: "model",
+          preview: false,
+          vendor: "openai",
+          version: "1",
+          model_picker_enabled: true,
+          capabilities: {
+            family: "gpt-5",
+            limits: { max_prompt_tokens: 922_000, max_output_tokens: 128_000 },
+            object: "model",
+            supports: {},
+            tokenizer: "o200k",
+            type: "chat",
+          },
+        },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+    }
+    expect(resolveAdvisorMaxTokens("gpt-5.5")).toBe(914_000)
+    // Far larger than the old hardcoded ~240K-token (720K-char) fallback.
+    expect(resolveAdvisorMaxTokens("gpt-5.5")).toBeGreaterThan(
+      ADVISOR_FALLBACK_MAX_TOKENS,
+    )
+  })
+
+  test("honors a SMALLER window when the model has a tighter cap", () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          id: "tiny-model",
+          name: "tiny-model",
+          object: "model",
+          preview: false,
+          vendor: "x",
+          version: "1",
+          model_picker_enabled: true,
+          capabilities: {
+            family: "x",
+            limits: { max_prompt_tokens: 100_000 },
+            object: "model",
+            supports: {},
+            tokenizer: "o200k",
+            type: "chat",
+          },
+        },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+    }
+    // 100000 - 8000 reserve = 92000 — smaller than the fallback, and we
+    // must respect it rather than floor at the fallback.
+    expect(resolveAdvisorMaxTokens("tiny-model")).toBe(92_000)
+  })
+
+  test("falls back to the token constant when the model/field is missing", () => {
+    state.models = {
+      object: "list",
+      data: [] as unknown as NonNullable<typeof state.models>["data"],
+    }
+    expect(resolveAdvisorMaxTokens("gpt-5.5")).toBe(ADVISOR_FALLBACK_MAX_TOKENS)
+    // Also when state.models is entirely unset.
+    state.models = undefined
+    expect(resolveAdvisorMaxTokens("gpt-5.5")).toBe(ADVISOR_FALLBACK_MAX_TOKENS)
   })
 
   test("short conversation passes through unchanged (no truncation marker)", () => {
@@ -828,6 +905,40 @@ describe("renderConversationAsText (Phase L truncation)", () => {
     // The latest few turns must include their tool_use / tool_result
     // serialization (i.e. the renderer didn't strip them when truncating).
     expect(out).toMatch(/tool_(use|result)/)
+  })
+
+  test("with the real o200k measure, output fits the EXACT token budget", async () => {
+    const { loadEncoder } = await import("../src/lib/tokenizer")
+    const encoder = await loadEncoder("o200k_base")
+    const measure = (s: string) => encoder.encode(s).length
+    // 40 turns of dense-ish content; budget well below the full size.
+    const conversation = Array.from({ length: 40 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `Turn ${i} ${"lorem ipsum dolor sit amet ".repeat(50)}`,
+    }))
+    const MAX_TOKENS = 1200
+    const out = renderConversationAsText(conversation, MAX_TOKENS, measure)
+    // Hard invariant: the rendered transcript NEVER exceeds the token
+    // budget — this is what keeps us clear of model_max_prompt_tokens_exceeded.
+    expect(measure(out)).toBeLessThanOrEqual(MAX_TOKENS)
+    expect(out).toContain("[TRUNCATED:")
+    // And it kept the freshest turns (front-truncation).
+    expect(out).toContain("Turn 39")
+    expect(out).not.toContain("Turn 0 ")
+  })
+
+  test("real o200k measure: single over-budget turn tail-truncated within budget", async () => {
+    const { loadEncoder } = await import("../src/lib/tokenizer")
+    const encoder = await loadEncoder("o200k_base")
+    const measure = (s: string) => encoder.encode(s).length
+    const conversation = [
+      { role: "user", content: "early small turn" },
+      { role: "assistant", content: `BIG ${"alpha beta gamma ".repeat(2000)}` },
+    ]
+    const MAX_TOKENS = 500
+    const out = renderConversationAsText(conversation, MAX_TOKENS, measure)
+    expect(measure(out)).toBeLessThanOrEqual(MAX_TOKENS)
+    expect(out).toContain("only the tail of the latest")
   })
 })
 

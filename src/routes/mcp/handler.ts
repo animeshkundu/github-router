@@ -4,6 +4,7 @@ import consola from "consola"
 import type { Context } from "hono"
 
 import { state } from "~/lib/state"
+import { getTextTokenCount, getTokenizerFromModel } from "~/lib/tokenizer"
 import { resolveModel } from "~/lib/utils"
 import {
   PERSONAS_READ,
@@ -312,12 +313,38 @@ function browserToolsEnabled(): boolean {
   return hasSupportedBrowserInstalled()
 }
 
+/**
+ * The 1M-context Opus variant (`claude-opus-4.7-1m-internal`,
+ * `max_prompt_tokens` 936K), gated `restricted_to: ["enterprise"]`.
+ * opus_critic prefers it so it can take large artifacts in one shot
+ * (the whole point of pairing it with gpt-5.5 as the big-window peers);
+ * falls back to the 200K `claude-opus-4-7` when the catalog (non-
+ * enterprise) doesn't carry a 1M opus slug.
+ */
+const OPUS_1M_RE = /opus-4\.7.*1m/i
+function resolveOpusCriticModel(): string {
+  const oneM = state.models?.data?.find((m) => OPUS_1M_RE.test(m.id))
+  return oneM ? oneM.id : "claude-opus-4-7"
+}
+
 function activePersonas(): Array<PersonaSpec> {
   // Drop personas whose model family is missing from Copilot's live
   // catalog (currently only gemini-critic, gated by `requiresGeminiCatalog`).
   // Distinct from `requiresHttp` (codex-cli stdio routing constraint) —
   // see PersonaSpec field doc in peer-mcp-personas.ts.
-  return PERSONAS_READ.filter((p) => !p.requiresGeminiCatalog || geminiAvailable())
+  //
+  // opus_critic's model is resolved at call time: the 1M variant when the
+  // (enterprise) catalog carries it, else the 200K fallback. Resolving here
+  // — rather than baking a static slug into PERSONAS_READ — means the
+  // downstream dispatch, telemetry, and the prompt-window guard all see the
+  // SAME effective model with no extra threading.
+  return PERSONAS_READ.filter(
+    (p) => !p.requiresGeminiCatalog || geminiAvailable(),
+  ).map((p) =>
+    p.toolNameHttp === "opus_critic"
+      ? { ...p, model: resolveOpusCriticModel() }
+      : p,
+  )
 }
 
 function toolEntries(): Array<ToolEntry> {
@@ -511,6 +538,83 @@ function predictedTooLong(
     }
   }
   return { tooLong: false }
+}
+
+/**
+ * Tokens reserved below a peer model's `max_prompt_tokens` for the
+ * per-call message framing (role wrappers, output_config, etc.) and any
+ * discrepancy between our o200k count and Copilot's full-payload count.
+ */
+const PEER_PROMPT_TOKEN_RESERVE = 2_000
+
+/**
+ * Prompt-window guard. Unlike `predictedTooLong` (a JSON-path *timeout*
+ * predictor in bytes), this guards the *context window*: it counts the
+ * EXACT o200k tokens of the text actually sent to the peer (system
+ * instructions + prompt + context) and compares against the persona
+ * model's live `max_prompt_tokens`. Applies on BOTH the SSE and JSON
+ * paths (called from `handleToolsCall`, before slot acquisition) because
+ * an over-window brief 400s `model_max_prompt_tokens_exceeded` upstream
+ * regardless of transport — and on SSE there is no other size bound.
+ *
+ * Returns an actionable message when over budget (reject, don't
+ * truncate — silently dropping lines from a review artifact is worse
+ * than a clear error), or undefined when it fits or the limit is unknown.
+ */
+async function predictedWindowOverflow(
+  persona: PersonaSpec,
+  prompt: string,
+  context: string | undefined,
+): Promise<string | undefined> {
+  const id = resolveModel(persona.model)
+  const entry = state.models?.data?.find((m) => m.id === id)
+  if (!entry) return undefined // model not in catalog — let upstream decide
+  const maxPromptTokens = entry.capabilities?.limits?.max_prompt_tokens
+  if (
+    typeof maxPromptTokens !== "number"
+    || !Number.isFinite(maxPromptTokens)
+    || maxPromptTokens <= 0
+  ) {
+    return undefined // unknown window — let the upstream call decide
+  }
+  const budget = maxPromptTokens - PEER_PROMPT_TOKEN_RESERVE
+  const inputText = `${persona.baseInstructions}\n${buildUserText(prompt, context)}`
+  // Cheap lower-bound fast-path: o200k_base is a byte-level BPE, so the
+  // token count is ALWAYS ≤ the UTF-8 byte length (merges only reduce
+  // count). When the bytes alone fit the budget, the call definitely
+  // fits — skip the (relatively) expensive exact tokenization. This
+  // bounds tokenization work to briefs large enough in bytes to plausibly
+  // overflow, so a burst of normal-sized calls never pays for it.
+  if (Buffer.byteLength(inputText, "utf8") <= budget) return undefined
+  let tokens: number
+  try {
+    const encoding = getTokenizerFromModel(entry)
+    tokens = await getTextTokenCount(inputText, encoding)
+  } catch (err) {
+    // Tokenizer load/encode failure is non-fatal: the upstream call still
+    // enforces the real limit. Fail OPEN (let it through) rather than
+    // turning an optimization into a hard error.
+    consola.debug("[mcp] window-guard tokenization failed; allowing call:", err)
+    return undefined
+  }
+  if (tokens <= budget) return undefined
+  const opusHint = OPUS_1M_RE.test(id)
+    ? ""
+    : " / `opus_critic` (Opus-4.7 1M ≈ 936K tokens, when the enterprise catalog carries it)"
+  // Report against `budget` (window minus the framing reserve), not the
+  // raw window, so the message can't read paradoxically (e.g. "127900
+  // exceeds 128000") when tokens land in the reserve band. Peer calls
+  // carry no tool schemas or message history — just system=baseInstructions
+  // + a single user message — so the ${PEER_PROMPT_TOKEN_RESERVE}-token
+  // reserve is a generous cover for the JSON wire framing.
+  return (
+    `pre-flight rejected: this ${persona.toolNameHttp} brief is ≈${tokens} tokens, over the `
+    + `${budget}-token budget for ${persona.model} (its ${maxPromptTokens}-token prompt window `
+    + `minus a ${PEER_PROMPT_TOKEN_RESERVE}-token framing reserve). Do NOT summarize or truncate `
+    + `the artifact to fit. Route the full artifact to a larger-window peer — `
+    + `\`codex_critic\` (gpt-5.5 ≈ 922K tokens)${opusHint} — or split it into focused `
+    + `sub-calls BY CONCERN and call them in parallel, then aggregate.`
+  )
 }
 
 /**
@@ -895,6 +999,22 @@ async function handleToolsCall(
       )
     }
     personaEffort = requestedEffort ?? persona.defaultEffort
+  }
+
+  // Prompt-window guard (BOTH paths). predictedTooLong below is JSON-path
+  // only; this token-exact window check runs here, before slot acquisition,
+  // so an over-window brief fails fast with an actionable "route to a
+  // larger-window peer or decompose" message instead of leaking the upstream
+  // 400 (or, on SSE where there's no size bound at all, burning a slot for a
+  // doomed call). MUST stay before acquireInFlightSlot per the load-bearing
+  // invariant (a reject after acquisition leaks a concurrency slot).
+  if (persona && personaPrompt !== undefined) {
+    const overflow = await predictedWindowOverflow(
+      persona,
+      personaPrompt,
+      personaContext,
+    )
+    if (overflow) return rpcResult(body.id, toolError(overflow))
   }
 
   // predictedTooLong pre-flight cap is enforced upstream of this
@@ -1305,10 +1425,13 @@ function acceptsEventStream(accept: string | undefined): boolean {
 /**
  * SSE-streamed response for a single tools/call. Delegates the actual
  * upstream call to `handleToolsCall` (so the per-persona effort gate,
- * predictedTooLong cap, AbortController registration, telemetry, and
- * inFlight slot accounting all run identically); wraps the awaited
- * result in an SSE envelope with periodic heartbeats while the upstream
- * fetch is in flight.
+ * the token-exact prompt-window guard, AbortController registration,
+ * telemetry, and inFlight slot accounting all run identically); wraps
+ * the awaited result in an SSE envelope with periodic heartbeats while
+ * the upstream fetch is in flight. NOTE: the JSON-path `predictedTooLong`
+ * byte cap is NOT applied here — it lives in `jsonPathPreflightCap`
+ * (JSON path only); SSE bypasses it intentionally because heartbeats
+ * keep the call alive past the ~60s tools/call ceiling it guards.
  *
  * SSE event format (per MCP Streamable HTTP):
  *   event: message
