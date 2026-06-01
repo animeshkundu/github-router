@@ -633,6 +633,30 @@ describe("Anthropic-only body field stripping (Phase B P0.2)", () => {
     expect(forwarded.max_tokens).toBe(100)
   })
 
+  test("strips top-level `diagnostics` field (cache-diagnosis-2026-04-07; Copilot 400 on unknown top-level field — probe `cache_diagnostics_stripped`)", async () => {
+    const captured: { body?: string } = {}
+    setupModelAndFetch(captured)
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+        diagnostics: { previous_message_id: "msg_abc123" },
+      }),
+    })
+    expect(response.status).toBe(200)
+
+    const forwarded = JSON.parse(captured.body ?? "{}") as {
+      diagnostics?: unknown
+      max_tokens?: number
+    }
+    expect(forwarded.diagnostics).toBeUndefined()
+    expect(forwarded.max_tokens).toBe(100)
+  })
+
   test("strips body `speed` while still forwarding the `fast-mode-2026-02-01` beta header (intent flows; latency hint dropped)", async () => {
     state.models = { object: "list", data: [makeBareClaudeModel()] }
     // Leverage/extended-betas mode is what `github-router claude` runs; only

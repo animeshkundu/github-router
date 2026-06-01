@@ -94,6 +94,7 @@ declare -a PROBE_REGISTRY=(
   "speed_fast_stripped|claude-emits|top-level speed:\"fast\" (with fast-mode beta header) sent through proxy returns 200 (proxy strips body field before forwarding; Copilot would 400 on the raw top-level field)"
   "speed_fast_count_tokens_stripped|claude-emits|top-level speed:\"fast\" on /v1/messages/count_tokens returns 200 (proxy strips before forwarding; Copilot would 400 on the raw field)"
   "output_config_format_ga_stripped|anthropic-docs|output_config:{format:{type,schema}} (Structured Outputs GA 2026-02-17 nested shape) returns 200 (proxy strips output_config.format + injects schema as system instruction; Copilot would 400 on output_config.* other than effort)"
+  "cache_diagnostics_stripped|anthropic-docs|top-level diagnostics:{previous_message_id} (cache-diagnosis-2026-04-07) returns 200 (proxy strips the unknown top-level field; Copilot would 400 and has no cache-diagnostics backend)"
 
   # ===== Native Anthropic tool types =====
   "tooltype_memory_20250818|anthropic-docs|memory_20250818 returns 200; model emits tool_use{name:memory, command:view}"
@@ -318,6 +319,15 @@ probe_output_config_format_ga_stripped() {
   # everything but effort) and injects the schema as a system-prompt
   # instruction so the structured-output intent survives. End-user sees 200.
   do_request POST /v1/messages '{"model":"claude-haiku-4-5","max_tokens":50,"output_config":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}}},"messages":[{"role":"user","content":"hi"}]}'
+  assert_status 200
+}
+
+probe_cache_diagnostics_stripped() {
+  # cache-diagnosis-2026-04-07 adds a top-level `diagnostics` request field
+  # (and a `cache-diagnosis-` beta header). Copilot 400s on the unknown
+  # top-level field and has no cache-diagnostics backend, so the proxy strips
+  # the body field (the beta header is dropped by the allowlist). End-user 200.
+  do_request POST /v1/messages '{"model":"claude-haiku-4-5","max_tokens":50,"diagnostics":{"previous_message_id":"msg_abc123"},"messages":[{"role":"user","content":"hi"}]}' "anthropic-beta: cache-diagnosis-2026-04-07"
   assert_status 200
 }
 

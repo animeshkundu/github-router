@@ -600,6 +600,7 @@ function resolveModelInBody(rawBody: string): {
     || rawBody.includes('"betas"')
     || rawBody.includes('"eager_input_streaming"')
     || rawBody.includes('"speed"')
+    || rawBody.includes('"diagnostics"')
   if (needsAnthropicOnlyStrip && stripAnthropicOnlyFields(parsed)) {
     modified = true
   }
@@ -808,6 +809,13 @@ function stripAnthropicOnlyFields(body: AnyRecord): boolean {
       "Stripping body-level `speed` field (Copilot 400s; the `fast-mode-` beta header is preserved but the fast-mode latency hint is not enforced upstream)",
     )
     delete body.speed
+    stripped = true
+  }
+  if (body.diagnostics !== undefined) {
+    consola.warn(
+      "Stripping body-level `diagnostics` field (cache-diagnosis-2026-04-07; Copilot 400s on the unknown top-level field, and has no cache-diagnostics backend so the request still succeeds without it)",
+    )
+    delete body.diagnostics
     stripped = true
   }
   if (body.output_config !== undefined) {
