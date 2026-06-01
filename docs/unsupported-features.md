@@ -16,4 +16,6 @@ See [`../CLAUDE.md`](../CLAUDE.md) for project overview.
 
 - **Bridge / CCR (Remote Sessions)**: requires `CLAUDE_CODE_REMOTE`/`CLAUDE_BRIDGE_*` env vars. Stripped from the spawned-child env (`STRIPPED_PARENT_ENV_KEYS`) so the remote-session code path never activates. Local sessions only.
 
+- **Fast-mode inference tier** (`fast-mode-2026-02-01`, the Opus 4.8 "fast mode" 2×-price/2.5×-speed tier): the proxy forwards the `fast-mode-` beta header in leverage mode and strips the top-level `speed: "fast"` body hint (see [`docs/beta-headers.md`](docs/beta-headers.md)), but Copilot has no fast-mode backend — the *tier itself* (the billing/latency semantic) is an Anthropic-infrastructure feature with no Copilot equivalent, so requests succeed at normal speed/price. Nothing more is implementable proxy-side. `CLAUDE_CODE_OPUS_4_6_FAST_MODE_OVERRIDE` is a **client-side** Claude Code env var that only changes which Opus slug Claude Code emits; the proxy does NOT read it (and should not start) — `resolveModel` maps whatever slug arrives normally.
+
 - **Files API OAuth, account/settings, team-memory sync, user-settings sync, etc.**: gated by `DISABLE_NON_ESSENTIAL_MODEL_CALLS=1` + `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` + `DISABLE_TELEMETRY=1` (all set by `getClaudeCodeEnvVars`). Suppressed at the source.
