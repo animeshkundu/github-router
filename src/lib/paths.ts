@@ -760,6 +760,17 @@ async function injectSyntheticClaudeJsonFields(
   //    read-only attribute issues (FAT/exFAT volumes, corp-managed
   //    perms): `fs.rename` over a read-only file can fail with EPERM
   //    on Windows even though POSIX would silently succeed.
+  //
+  //    Concurrent-racer tolerance: when multiple `ensureClaudeConfigMirror()`
+  //    calls run in parallel (e.g., from tests, or a future caller),
+  //    Windows `fs.rename` can fail with EBUSY/EPERM/EACCES if
+  //    another racer has the destination open or mid-write. The
+  //    write content is fully deterministic (same SYNTHETIC fields,
+  //    same force-override merge of the same source-priority list),
+  //    so a successful rename by ANY racer produces the same bytes
+  //    we'd produce. On rename failure, verify the on-disk content
+  //    matches `desiredJson` — if so, accept silently (another
+  //    racer won the race; the file is correct).
   const tempPath = `${claudeJsonPath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
   try {
     await fs.writeFile(tempPath, desiredJson, { mode: 0o600, flag: "wx" })
@@ -769,6 +780,19 @@ async function injectSyntheticClaudeJsonFields(
     await fs.rename(tempPath, claudeJsonPath)
   } catch (err) {
     await fs.unlink(tempPath).catch(() => {})
+    try {
+      const observed = await fs.readFile(claudeJsonPath, "utf8")
+      if (observed === desiredJson) {
+        consola.debug(
+          `ensureClaudeConfigMirror: rename failed but mirror already holds expected content (concurrent racer won the race):`,
+          err,
+        )
+        await chmodIfPossible(claudeJsonPath, 0o600).catch(() => {})
+        return
+      }
+    } catch {
+      // Fall through to rethrow the original error.
+    }
     throw err
   }
   await chmodIfPossible(claudeJsonPath, 0o600).catch(() => {})

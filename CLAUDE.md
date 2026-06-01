@@ -46,6 +46,16 @@ bun test             # Run all tests
 bun run start        # Production server (port 8787)
 ```
 
+## Subcommands
+
+- `github-router start` — run the proxy on its own (port 8787). Use when bringing your own client.
+- `github-router claude [-m <model>]` — launch Claude Code with the proxy auto-configured (synthetic credentials, peer-MCP injected, onboarding-skip fields written into the per-launch mirror).
+- `github-router codex [...]` — launch Codex CLI against the proxy with `OPENAI_API_KEY` and `OPENAI_BASE_URL` pinned to the synthetic dummy and the proxy URL.
+- `github-router auth` — re-run the GitHub device-code login (writes the PAT to `~/.local/share/github-router/github_token`).
+- `github-router check-usage` — pretty-print Copilot quota / premium / chat / completions snapshots.
+- `github-router models [<pattern>] [--json]` — pretty-print the live Copilot model catalog with capabilities (family, tokenizer, context/output limits, supports flags, reasoning efforts, supported endpoints, billing/restrictions). With a positional `<pattern>` arg, fuzzy-substring-filters (case-insensitive) on id / name / vendor / family. `--json` emits the raw catalog. Fetches live each invocation; requires a valid Copilot token (auto-refreshed via `setupCopilotToken`).
+- `github-router debug [...]` — internal diagnostics; not for user-facing flows.
+
 ## Publishing & runtime ops
 
 See [`docs/publishing.md`](docs/publishing.md) for npm/Docker release flow, the upgrade procedure for a running proxy, and the `UPSTREAM_FETCH_TIMEOUT_MS` / `UPSTREAM_INACTIVITY_TIMEOUT_MS` tunables (default 5 min — do NOT lower without re-reading the 134-163k mid-stream abort history).
