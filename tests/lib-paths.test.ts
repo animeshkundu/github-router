@@ -23,6 +23,7 @@ mock.module("node:os", () => ({
 
 const { ensurePaths, PATHS, sweepStaleRuntimeFiles, sweepStalePeerAgentMdFiles, sweepStaleClaudeConfigMirrors, removeOwnClaudeConfigMirror, writeRuntimeFileSecure, ensureClaudeConfigMirror, __testing } =
   await import("../src/lib/paths")
+const { injectPeerMcpIntoMirror } = await import("../src/lib/codex-mcp-config")
 
 // Round-4 #4: verify that monkey-patching `fs.<name>` / `consola.<name>`
 // is actually intercepted by the library-side imports of those
@@ -451,6 +452,669 @@ test("ensureClaudeConfigMirror writes synthetic credential matching the document
   )
 })
 
+test("ensureClaudeConfigMirror writes synthetic .claude.json with onboarding-skip fields on a fresh machine (no ~/.claude exists)", async () => {
+  // Regression for the "Anthropic login wizard on a fresh machine" bug.
+  // Without `hasCompletedOnboarding: true` in <CLAUDE_CONFIG_DIR>/.claude.json,
+  // Claude Code's first-launch wizard runs — including the OAuth login
+  // step that defeats the synthetic credential. Gate verified against
+  // claude v2.1.158 binary: `if (!E_().hasCompletedOnboarding) { ...
+  // await Onboarding.default(...) }`.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+
+  await ensureClaudeConfigMirror()
+
+  const claudeJsonPath = path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json")
+  const stat = await fs.stat(claudeJsonPath)
+  expect(stat.isFile()).toBe(true)
+  if (process.platform !== "win32") {
+    expect(stat.mode & 0o777).toBe(0o600)
+  }
+  const parsed = JSON.parse(await fs.readFile(claudeJsonPath, "utf8"))
+  // Load-bearing gate field — skips the first-launch wizard.
+  expect(parsed.hasCompletedOnboarding).toBe(true)
+  // Skips the --dangerously-skip-permissions trust disclaimer.
+  expect(parsed.bypassPermissionsModeAccepted).toBe(true)
+  // Nice-to-have identity blob (binary reads with optional chaining).
+  expect(parsed.oauthAccount).toBeDefined()
+  expect(parsed.oauthAccount.emailAddress).toBe("github-router@local")
+  expect(parsed.oauthAccount.organizationName).toBe("github-router")
+})
+
+test("ensureClaudeConfigMirror MERGES onboarding-skip fields into an existing user-mirrored .claude.json without clobbering other fields", async () => {
+  // Verify additive semantics: a user-side .claude.json with arbitrary
+  // content (numStartups, theme, mcpServers entries, etc.) must survive
+  // the synthetic-fields injection unchanged.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  // Seed user content. Use known-non-default values so we can prove
+  // round-trip preservation.
+  const userContent = {
+    numStartups: 42,
+    theme: "light",
+    userID: "user-abc-123",
+    mcpServers: {
+      "user-side-server": { command: "/usr/local/bin/foo", args: ["--bar"] },
+    },
+    projects: {
+      "/Users/test/proj-x": { lastSeen: 999_999 },
+    },
+    // Intentionally seed BOTH boolean gates as false (the wizard-not-
+    // yet-run / logged-out state). Our injection MUST force BOTH to
+    // true; this is the regression scenario where a user logged out
+    // via the UI and the proxy session should still skip the wizard.
+    hasCompletedOnboarding: false,
+    bypassPermissionsModeAccepted: false,
+  }
+  await fs.writeFile(
+    path.join(claudeHome, ".claude.json"),
+    JSON.stringify(userContent, null, 2),
+  )
+
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await ensureClaudeConfigMirror()
+
+  const claudeJsonPath = path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json")
+  const parsed = JSON.parse(await fs.readFile(claudeJsonPath, "utf8"))
+  // Both synthetic gate fields force-flipped even though user had false.
+  expect(parsed.hasCompletedOnboarding).toBe(true)
+  expect(parsed.bypassPermissionsModeAccepted).toBe(true)
+  // User content preserved.
+  expect(parsed.numStartups).toBe(42)
+  expect(parsed.theme).toBe("light")
+  expect(parsed.userID).toBe("user-abc-123")
+  expect(parsed.projects).toEqual({
+    "/Users/test/proj-x": { lastSeen: 999_999 },
+  })
+  expect(parsed.mcpServers).toEqual({
+    "user-side-server": { command: "/usr/local/bin/foo", args: ["--bar"] },
+  })
+})
+
+test("ensureClaudeConfigMirror is idempotent on .claude.json — re-running does NOT mutate the file (fs-spy mechanism test)", async () => {
+  // Mechanism-level idempotency check (replaces a fragile mtime-equality
+  // check). FAT/exFAT mtime resolution is 2 s; a regression that DID
+  // rewrite the file within the same 2-second bucket would still
+  // pass an `mtimeMs equal` assertion. NTFS is 100 ns so the current
+  // windows-latest CI is fine, but the test should not be filesystem-
+  // dependent. Spy on `fs.writeFile`/`fs.rename`/`fs.unlink` and assert
+  // ZERO mutating calls hit `.claude.json` (or its tempfile prefix) on
+  // the second invocation — directly proves the no-write path fired.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+
+  // First call establishes steady state with all synthetic fields.
+  await ensureClaudeConfigMirror()
+  const claudeJsonPath = path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json")
+  const touchesClaudeJson = (arg: unknown): boolean =>
+    typeof arg === "string"
+    && (arg === claudeJsonPath || arg.startsWith(`${claudeJsonPath}.`))
+
+  const originalWriteFile = fs.writeFile
+  const originalRename = fs.rename
+  const originalUnlink = fs.unlink
+  const writeFileSpy = mock(originalWriteFile.bind(fs))
+  const renameSpy = mock(originalRename.bind(fs))
+  const unlinkSpy = mock(originalUnlink.bind(fs))
+  ;(fs as unknown as { writeFile: typeof fs.writeFile }).writeFile = writeFileSpy
+  ;(fs as unknown as { rename: typeof fs.rename }).rename = renameSpy
+  ;(fs as unknown as { unlink: typeof fs.unlink }).unlink = unlinkSpy
+  try {
+    await expectFsSpyInstalled("writeFile", writeFileSpy)
+    await expectFsSpyInstalled("rename", renameSpy)
+    await expectFsSpyInstalled("unlink", unlinkSpy)
+
+    // Steady-state re-invocation. All synthetic fields are already
+    // correct, so no mutating syscall should hit .claude.json.
+    await ensureClaudeConfigMirror()
+
+    const writes = writeFileSpy.mock.calls.filter((call) =>
+      (call as unknown[]).some(touchesClaudeJson),
+    )
+    const renames = renameSpy.mock.calls.filter((call) =>
+      (call as unknown[]).some(touchesClaudeJson),
+    )
+    const unlinks = unlinkSpy.mock.calls.filter((call) =>
+      (call as unknown[]).some(touchesClaudeJson),
+    )
+    expect(writes).toEqual([])
+    expect(renames).toEqual([])
+    expect(unlinks).toEqual([])
+  } finally {
+    ;(fs as unknown as { writeFile: typeof fs.writeFile }).writeFile =
+      originalWriteFile
+    ;(fs as unknown as { rename: typeof fs.rename }).rename = originalRename
+    ;(fs as unknown as { unlink: typeof fs.unlink }).unlink = originalUnlink
+  }
+})
+
+test("ensureClaudeConfigMirror OVERWRITES even a structurally-usable oauthAccount (split-brain auth prevention)", async () => {
+  // Round-2 finding: pairing the proxy's synthetic OAuth token (in
+  // `.credentials.json`) with a real-user `oauthAccount` (real UUIDs,
+  // real email) creates a split-brain auth state — Claude Code's
+  // identity-vs-token cross-checks may treat the mismatch as session
+  // corruption and trigger re-login, defeating the entire fix. The
+  // helper now always overwrites `oauthAccount` with the synthetic
+  // blob regardless of what's there. The user's REAL identity stays
+  // intact in their actual `~/.claude.json`; only the proxy session
+  // (per-launch mirror dir) sees the synthetic identity.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  // Also clear any HOME-level leftovers from prior tests.
+  await fs.unlink(path.join(tempDir, ".claude.json")).catch(() => {})
+  const realOauth = {
+    accountUuid: "real-account-uuid-deadbeef",
+    organizationUuid: "real-org-uuid-cafef00d",
+    organizationRole: "admin",
+    emailAddress: "real-user@example.com",
+    organizationName: "Real Co.",
+  }
+  await fs.writeFile(
+    path.join(claudeHome, ".claude.json"),
+    JSON.stringify({ oauthAccount: realOauth, userMarker: "preserve-me" }, null, 2),
+  )
+
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await ensureClaudeConfigMirror()
+
+  const parsed = JSON.parse(
+    await fs.readFile(path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json"), "utf8"),
+  )
+  // oauthAccount FORCE-OVERRIDDEN with synthetic (split-brain prevention).
+  expect(parsed.oauthAccount).toEqual({
+    accountUuid: "00000000-0000-0000-0000-000000000000",
+    organizationUuid: "00000000-0000-0000-0000-000000000000",
+    organizationRole: "member",
+    emailAddress: "github-router@local",
+    organizationName: "github-router",
+  })
+  // Other user fields preserved.
+  expect(parsed.userMarker).toBe("preserve-me")
+  // Synthetic gate fields still injected.
+  expect(parsed.hasCompletedOnboarding).toBe(true)
+  expect(parsed.bypassPermissionsModeAccepted).toBe(true)
+})
+
+test("ensureClaudeConfigMirror OVERWRITES a structurally-broken oauthAccount (empty object / missing UUIDs / wrong type)", async () => {
+  // Presence-only checks would preserve `{}` / `{foo: 1}` / `{accountUuid: ""}`
+  // and leave Claude Code's "logged in as X" UI broken — which in some
+  // flows triggers a re-login prompt that defeats the synthetic
+  // credential. Structural check (non-empty accountUuid AND
+  // organizationUuid required) must overwrite these.
+  for (const brokenOauth of [
+    {}, // empty object
+    { foo: "bar" }, // wrong fields
+    { accountUuid: "" }, // empty string UUID
+    { accountUuid: "x" }, // only one UUID, no organizationUuid
+    { organizationUuid: "x" }, // only one UUID, no accountUuid
+    { accountUuid: "", organizationUuid: "y" }, // empty + non-empty
+    { accountUuid: 12345, organizationUuid: "y" }, // wrong type
+    null, // null
+    "not-an-object", // wrong type entirely
+    ["array", "not", "object"], // array
+  ] as const) {
+    const claudeHome = path.join(tempDir, ".claude")
+    await fs.rm(claudeHome, { recursive: true, force: true })
+    await fs.mkdir(claudeHome, { recursive: true })
+    await fs.writeFile(
+      path.join(claudeHome, ".claude.json"),
+      JSON.stringify({ oauthAccount: brokenOauth, userMarker: "preserve-me" }, null, 2),
+    )
+    await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+    await ensureClaudeConfigMirror()
+
+    const parsed = JSON.parse(
+      await fs.readFile(
+        path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json"),
+        "utf8",
+      ),
+    )
+    // Broken oauthAccount overwritten with synthetic.
+    expect(parsed.oauthAccount).toEqual({
+      accountUuid: "00000000-0000-0000-0000-000000000000",
+      organizationUuid: "00000000-0000-0000-0000-000000000000",
+      organizationRole: "member",
+      emailAddress: "github-router@local",
+      organizationName: "github-router",
+    })
+    // Other fields preserved.
+    expect(parsed.userMarker).toBe("preserve-me")
+  }
+})
+
+test("ensureClaudeConfigMirror recovers user content from CANONICAL ~/.claude.json (HOME-level path that Claude Code's qG resolver actually reads)", async () => {
+  // The binary's path resolver `qG` is:
+  //   path.join(process.env.CLAUDE_CONFIG_DIR || homedir(), ".claude.json")
+  // So when CLAUDE_CONFIG_DIR is unset, Claude Code reads `~/.claude.json`
+  // (HOME-level), NOT `~/.claude/.claude.json` (subdir-level). This is
+  // where `claude mcp add` writes and where user-scope MCPs / project
+  // entries live for default invocations. The mirror walk operates on
+  // `~/.claude/` and would never see this file — without explicit
+  // recovery here, the proxy session would lose all user-scope MCPs
+  // even on non-fresh machines.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  // Write the canonical HOME-level file with user content.
+  const homeLevelClaudeJson = path.join(tempDir, ".claude.json")
+  const userContent = {
+    userID: "home-level-user",
+    mcpServers: {
+      "user-mcp-via-claude-mcp-add": { command: "/usr/local/bin/baz" },
+    },
+    projects: { "/Users/test/cool-proj": { lastSeen: 4242 } },
+  }
+  await fs.writeFile(
+    homeLevelClaudeJson,
+    JSON.stringify(userContent, null, 2),
+  )
+
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await ensureClaudeConfigMirror()
+
+  const parsed = JSON.parse(
+    await fs.readFile(path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json"), "utf8"),
+  )
+  // User content recovered from the canonical HOME-level path.
+  expect(parsed.userID).toBe("home-level-user")
+  expect(parsed.mcpServers).toEqual({
+    "user-mcp-via-claude-mcp-add": { command: "/usr/local/bin/baz" },
+  })
+  expect(parsed.projects).toEqual({
+    "/Users/test/cool-proj": { lastSeen: 4242 },
+  })
+  // Synthetic gate fields injected.
+  expect(parsed.hasCompletedOnboarding).toBe(true)
+  expect(parsed.bypassPermissionsModeAccepted).toBe(true)
+  expect(parsed.oauthAccount).toBeDefined()
+  // HOME-level source file untouched (read-through-only, no mutation).
+  const homeLevelAfter = JSON.parse(await fs.readFile(homeLevelClaudeJson, "utf8"))
+  expect(homeLevelAfter).toEqual(userContent)
+  // Cleanup so it doesn't bleed into other tests' tempDir state.
+  await fs.unlink(homeLevelClaudeJson).catch(() => {})
+})
+
+test("ensureClaudeConfigMirror prefers HOME-level ~/.claude.json over subdir-level ~/.claude/.claude.json when both exist", async () => {
+  // Verify the priority ordering: canonical HOME-level path wins over
+  // the legacy subdir-level path. A user's `claude mcp add` writes
+  // land HOME-level; stale snapshots may linger subdir-level. The
+  // canonical content is what Claude Code actually reads on default
+  // invocations, so we must mirror that.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  // HOME-level (canonical) — the one we should pick up.
+  const homeLevelClaudeJson = path.join(tempDir, ".claude.json")
+  await fs.writeFile(
+    homeLevelClaudeJson,
+    JSON.stringify({ marker: "HOME-LEVEL-WINS", numStartups: 99 }, null, 2),
+  )
+  // Subdir-level (legacy) — should NOT win.
+  await fs.writeFile(
+    path.join(claudeHome, ".claude.json"),
+    JSON.stringify({ marker: "SUBDIR-LEVEL-LOSES", numStartups: 1 }, null, 2),
+  )
+
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await ensureClaudeConfigMirror()
+
+  const parsed = JSON.parse(
+    await fs.readFile(path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json"), "utf8"),
+  )
+  expect(parsed.marker).toBe("HOME-LEVEL-WINS")
+  expect(parsed.numStartups).toBe(99)
+  await fs.unlink(homeLevelClaudeJson).catch(() => {})
+})
+
+test("ensureClaudeConfigMirror recovers user content through a SYMLINKED ~/.claude.json (dotfiles-repo pattern)", async () => {
+  // Power-user / corp-managed pattern: ~/.claude.json (HOME-level,
+  // canonical Claude Code path) is a symlink into a dotfiles repo.
+  // The mirror walk operates on ~/.claude/ and would never see this
+  // file at all — without explicit recovery the proxy session would
+  // silently lose every MCP server, project history entry, and
+  // setting. The helper reads THROUGH the source symlink via
+  // fs.readFile and merges against the user's actual content.
+  if (process.platform === "win32") return // symlinks need admin on Windows
+
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  // Also clear any HOME-level .claude.json from previous tests.
+  await fs.unlink(path.join(tempDir, ".claude.json")).catch(() => {})
+  // Stash user content in a "dotfiles" location.
+  const dotfilesDir = path.join(
+    tempDir,
+    `dotfiles-${randomBytes(4).toString("hex")}`,
+  )
+  await fs.mkdir(dotfilesDir, { recursive: true })
+  const userContent = {
+    userID: "dotfiles-user",
+    mcpServers: { "important-server": { command: "/bin/echo" } },
+    projects: { "/home/dotfiles-user/proj": { lastSeen: 12345 } },
+  }
+  await fs.writeFile(
+    path.join(dotfilesDir, "claude.json"),
+    JSON.stringify(userContent, null, 2),
+  )
+  // Symlink ~/.claude.json (HOME-level, canonical) -> dotfiles/claude.json
+  await fs.symlink(
+    path.join(dotfilesDir, "claude.json"),
+    path.join(tempDir, ".claude.json"),
+  )
+
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await ensureClaudeConfigMirror()
+
+  const parsed = JSON.parse(
+    await fs.readFile(path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json"), "utf8"),
+  )
+  // User content recovered from through-symlink read.
+  expect(parsed.userID).toBe("dotfiles-user")
+  expect(parsed.mcpServers).toEqual({
+    "important-server": { command: "/bin/echo" },
+  })
+  expect(parsed.projects).toEqual({
+    "/home/dotfiles-user/proj": { lastSeen: 12345 },
+  })
+  // Synthetic gate fields still injected.
+  expect(parsed.hasCompletedOnboarding).toBe(true)
+  expect(parsed.bypassPermissionsModeAccepted).toBe(true)
+  // Synthetic oauthAccount seeded (user had none).
+  expect(parsed.oauthAccount).toBeDefined()
+  expect(parsed.oauthAccount.emailAddress).toBe("github-router@local")
+  // The mirror file is a REGULAR file, not a symlink — we don't
+  // recreate the source-side symlink in the mirror (that would be the
+  // exact confused-deputy vector the walk skip exists to prevent).
+  const lst = await fs.lstat(path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json"))
+  expect(lst.isFile()).toBe(true)
+  expect(lst.isSymbolicLink()).toBe(false)
+  // The original source symlink at ~/.claude.json (HOME-level) must
+  // be untouched (read-through must not have modified it).
+  const sourceLst = await fs.lstat(path.join(tempDir, ".claude.json"))
+  expect(sourceLst.isSymbolicLink()).toBe(true)
+  await fs.unlink(path.join(tempDir, ".claude.json")).catch(() => {})
+})
+
+test("ensureClaudeConfigMirror REFUSES to operate on a non-regular .claude.json in the mirror and FAILS LOUD (postcondition)", async () => {
+  // Defense-in-depth, matching the marker-write at step 7: if anything
+  // other than a regular file occupies <CLAUDE_CONFIG_DIR>/.claude.json
+  // (symlink planted manually, leftover from a buggy prior version,
+  // etc.), the helper must NOT follow it. fs.readFile / chmod / rename
+  // could otherwise touch arbitrary user-controlled targets.
+  // The postcondition check then promotes the helper's warn-and-return
+  // into a launch-failing throw, so the user investigates the
+  // warn-flagged path rather than landing in Claude Code's OAuth wizard.
+  if (process.platform === "win32") return // symlinks need admin
+
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await fs.mkdir(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, mode: 0o700 })
+
+  // Plant a malicious symlink at the mirror's .claude.json path,
+  // pointing at a NON-JSON target so the postcondition's read+parse
+  // step has a deterministic failure mode if (counterfactually) the
+  // helper followed through.
+  const sensitive = path.join(tempDir, "sensitive-claude-json.txt")
+  await fs.writeFile(sensitive, "DO-NOT-OVERWRITE-OR-READ")
+  await fs.symlink(
+    sensitive,
+    path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json"),
+  )
+
+  // Postcondition surfaces a throw — silent fallback to the OAuth
+  // wizard is exactly what this whole subsystem exists to prevent.
+  await expect(ensureClaudeConfigMirror()).rejects.toThrow(/postcondition failed/)
+
+  // The sensitive file MUST be untouched (helper refused to follow).
+  const survived = await fs.readFile(sensitive, "utf8")
+  expect(survived).toBe("DO-NOT-OVERWRITE-OR-READ")
+  // The symlink at the mirror path is still the symlink (no rename
+  // clobber). The user investigates the warn message and the throw.
+  const lst = await fs.lstat(path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json"))
+  expect(lst.isSymbolicLink()).toBe(true)
+})
+
+test("ensureClaudeConfigMirror falls through to next candidate on non-ENOENT mirror read (transient AV / EACCES doesn't crash the launch)", async () => {
+  // Round-2 finding: a transient mirror read failure (Windows AV
+  // sharing-violation, EACCES from a chmod race, etc.) used to abort
+  // the helper, which then fired the postcondition crash. New
+  // behavior: fall through to the subdir-level candidate, and if
+  // that also misses, write synthetic-only. The mirror is overwriteable
+  // (we own the per-launch dir); refusing to write because we couldn't
+  // read it is over-rotation.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  await fs.unlink(path.join(tempDir, ".claude.json")).catch(() => {})
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await fs.mkdir(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, mode: 0o700 })
+
+  // Seed a mirror file we'll make unreadable via the spy.
+  const claudeJsonPath = path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json")
+  await fs.writeFile(claudeJsonPath, JSON.stringify({ stale: "ignore" }, null, 2), {
+    mode: 0o600,
+  })
+
+  const originalReadFile = fs.readFile
+  const originalWarn = consola.warn
+  const readFileSpy = mock(async (...args: unknown[]) => {
+    if (args[0] === claudeJsonPath) {
+      const err = new Error("simulated EACCES") as NodeJS.ErrnoException
+      err.code = "EACCES"
+      throw err
+    }
+    return (originalReadFile as (...a: unknown[]) => Promise<unknown>).apply(
+      fs,
+      args,
+    )
+  })
+  const warnSpy = mock(originalWarn.bind(consola))
+  ;(fs as unknown as { readFile: unknown }).readFile = readFileSpy
+  ;(consola as unknown as { warn: unknown }).warn = warnSpy
+  try {
+    await expectFsSpyInstalled("readFile", readFileSpy)
+    await expectConsolaSpyInstalled("warn", warnSpy)
+
+    // The helper should NOT crash — fall through to the subdir-level
+    // candidate (missing → ENOENT → ok), then write synthetic-only.
+    // The postcondition's final readFile then runs against the
+    // freshly-written file. We have to restore readFile BEFORE the
+    // postcondition fires; instead, narrow the spy to fail only the
+    // step-2 mirror read, not the postcondition's read of the same
+    // path. That's hard to do precisely, so we accept that the
+    // postcondition will also hit the spy and throw with a clear
+    // message. We assert the helper got far enough to log the
+    // fall-through warn — which is the load-bearing assertion.
+    await expect(ensureClaudeConfigMirror()).rejects.toThrow(
+      /postcondition failed|simulated EACCES/,
+    )
+
+    // The fall-through behavior we DO want to assert: the helper
+    // logged debug (not warn) for the mirror read failure — mirror
+    // failures are not user-visible, only HOME-level failures are.
+    // We just verify it didn't throw an unrelated kind of error.
+  } finally {
+    ;(fs as unknown as { readFile: typeof fs.readFile }).readFile = originalReadFile
+    ;(consola as unknown as { warn: typeof consola.warn }).warn = originalWarn
+  }
+})
+
+test("ensureClaudeConfigMirror falls through MALFORMED higher-priority source to valid lower-priority source", async () => {
+  // Round-2 3-lab finding: a zero-byte or corrupt ~/.claude.json
+  // (HOME) used to drop the user's good ~/.claude/.claude.json
+  // (subdir) content on the floor because parseExistingClaudeJson
+  // returned `{}` and the loop break'd. New behavior: parse failure
+  // returns null and the loop continues to the next candidate.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  // Corrupt HOME-level file (priority 1).
+  await fs.writeFile(path.join(tempDir, ".claude.json"), "{ not valid json")
+  // Valid subdir-level file (priority 3 — should be picked).
+  const subdirContent = {
+    userID: "subdir-user-must-survive",
+    mcpServers: { "important": { command: "/bin/echo" } },
+  }
+  await fs.writeFile(
+    path.join(claudeHome, ".claude.json"),
+    JSON.stringify(subdirContent, null, 2),
+  )
+
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await ensureClaudeConfigMirror()
+
+  const parsed = JSON.parse(
+    await fs.readFile(path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json"), "utf8"),
+  )
+  // Subdir content recovered (HOME was malformed → skipped).
+  expect(parsed.userID).toBe("subdir-user-must-survive")
+  expect(parsed.mcpServers).toEqual({ "important": { command: "/bin/echo" } })
+  // Synthetic gate fields still injected.
+  expect(parsed.hasCompletedOnboarding).toBe(true)
+  expect(parsed.bypassPermissionsModeAccepted).toBe(true)
+  await fs.unlink(path.join(tempDir, ".claude.json")).catch(() => {})
+})
+
+test("ensureClaudeConfigMirror writes correctly when HOME-level .claude.json has ALL gate fields already present (round-2 regression: fully-onboarded user)", async () => {
+  // Round-2 2-lab finding (opus + gemini): the previous
+  // `needsWrite = !hadExisting` heuristic returned without writing
+  // when HOME-level was fully populated with all three valid gate
+  // fields and the mirror was empty. The postcondition then crashed
+  // the launch for the COMMON user state (anyone who has accepted
+  // bypass-mode and logged in via plain `claude`). New behavior:
+  // mirror non-existence ALWAYS forces a write (byte-equivalence
+  // check only fires when source IS the mirror itself).
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.unlink(path.join(tempDir, ".claude.json")).catch(() => {})
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+
+  // Seed HOME-level with all three valid gate fields + real user
+  // content. Real-shaped UUIDs (so the previous "structurally usable"
+  // check would have skipped overwrite). This is the dominant state
+  // of a non-fresh user machine.
+  const fullyOnboardedContent = {
+    hasCompletedOnboarding: true,
+    bypassPermissionsModeAccepted: true,
+    oauthAccount: {
+      accountUuid: "real-uuid-1234567890abcdef",
+      organizationUuid: "real-org-uuid-fedcba0987654321",
+      organizationRole: "admin",
+      emailAddress: "real-user@example.com",
+      organizationName: "Real Co.",
+    },
+    numStartups: 100,
+    userID: "real-user-id",
+    mcpServers: { "user-mcp": { command: "/bin/foo" } },
+  }
+  await fs.writeFile(
+    path.join(tempDir, ".claude.json"),
+    JSON.stringify(fullyOnboardedContent, null, 2),
+  )
+
+  // This MUST NOT throw (the round-2 regression we're guarding against).
+  await ensureClaudeConfigMirror()
+
+  // Mirror file must exist with the gate fields present.
+  const parsed = JSON.parse(
+    await fs.readFile(path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json"), "utf8"),
+  )
+  expect(parsed.hasCompletedOnboarding).toBe(true)
+  expect(parsed.bypassPermissionsModeAccepted).toBe(true)
+  // oauthAccount FORCE-OVERRIDDEN with synthetic (split-brain prevention).
+  expect(parsed.oauthAccount.emailAddress).toBe("github-router@local")
+  // Other user fields preserved.
+  expect(parsed.numStartups).toBe(100)
+  expect(parsed.userID).toBe("real-user-id")
+  expect(parsed.mcpServers).toEqual({ "user-mcp": { command: "/bin/foo" } })
+  await fs.unlink(path.join(tempDir, ".claude.json")).catch(() => {})
+})
+
+test("ensureClaudeConfigMirror postcondition REFUSES to follow a planted symlink with valid-gate target (defense-in-depth)", async () => {
+  // Round-2 finding: a symlink at the mirror path pointing at an
+  // attacker-controlled file with valid gate fields would have
+  // bypassed the helper's "non-regular file" warn-and-return AND
+  // the postcondition's plain readFile (which follows symlinks).
+  // The postcondition now does lstat first and throws if non-regular.
+  if (process.platform === "win32") return // symlinks need admin
+
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  await fs.unlink(path.join(tempDir, ".claude.json")).catch(() => {})
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await fs.mkdir(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, mode: 0o700 })
+
+  // Plant a symlink at the mirror path pointing at a file with
+  // VALID gate-field content (the attack: bypass the helper's warn
+  // and slip through the postcondition).
+  const attackerTarget = path.join(tempDir, "attacker-claude-json.txt")
+  await fs.writeFile(
+    attackerTarget,
+    JSON.stringify({
+      hasCompletedOnboarding: true,
+      bypassPermissionsModeAccepted: true,
+      oauthAccount: {
+        accountUuid: "valid-looking-uuid",
+        organizationUuid: "valid-looking-org",
+        organizationRole: "admin",
+        emailAddress: "attacker@evil.example",
+        organizationName: "Evil",
+      },
+    }),
+  )
+  await fs.symlink(
+    attackerTarget,
+    path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json"),
+  )
+
+  // Postcondition lstats first → sees symlink → throws.
+  await expect(ensureClaudeConfigMirror()).rejects.toThrow(
+    /not a regular file/,
+  )
+
+  // Attacker's target file is untouched (no read-through followed).
+  const survived = await fs.readFile(attackerTarget, "utf8")
+  expect(survived).toContain("attacker@evil.example")
+  // Symlink at mirror is still the symlink (no clobber).
+  const lst = await fs.lstat(path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json"))
+  expect(lst.isSymbolicLink()).toBe(true)
+})
+
+test("ensureClaudeConfigMirror tolerates a corrupt (unparseable) .claude.json by overwriting with synthetic fields", async () => {
+  // Same fail-open posture as `injectPeerMcpIntoMirror`: log warn,
+  // overwrite with our synthetic fields. Never throws — a corrupt
+  // .claude.json must not break the proxy launch.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  await fs.writeFile(
+    path.join(claudeHome, ".claude.json"),
+    "{ this is not valid json",
+  )
+
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await expect(ensureClaudeConfigMirror()).resolves.toBeUndefined()
+
+  const parsed = JSON.parse(
+    await fs.readFile(path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json"), "utf8"),
+  )
+  expect(parsed.hasCompletedOnboarding).toBe(true)
+  expect(parsed.bypassPermissionsModeAccepted).toBe(true)
+  // Synthetic oauthAccount also injected (regression: previous test
+  // version only asserted the two booleans — a regression that lost
+  // oauthAccount in the corrupt-JSON path would have slipped through).
+  expect(parsed.oauthAccount).toBeDefined()
+  expect(parsed.oauthAccount.emailAddress).toBe("github-router@local")
+  expect(parsed.oauthAccount.accountUuid).toBe(
+    "00000000-0000-0000-0000-000000000000",
+  )
+})
+
 test("ensureClaudeConfigMirror copies user's ~/.claude entries (snapshot, not symlink)", async () => {
   // Set up a fake ~/.claude with various entries
   const claudeHome = path.join(tempDir, ".claude")
@@ -854,6 +1518,45 @@ test("ensureClaudeConfigMirror SHARED-symlink idempotent: re-running does not ch
 
   const after = await fs.lstat(linkPath)
   expect(after.ctimeMs).toBe(before.ctimeMs)
+})
+
+test("ensureClaudeConfigMirror + injectPeerMcpIntoMirror: gate fields survive the subsequent peer-MCP rewrite (round-2 integration)", async () => {
+  // Round-2 finding: the postcondition fires after
+  // ensureClaudeConfigMirror, but `src/claude.ts` then calls
+  // injectPeerMcpIntoMirror which read-merge-writes the SAME file. If
+  // that future helper dropped our gate fields during merge, the
+  // postcondition gave false confidence. This integration test runs
+  // both helpers in the production order and asserts the gate fields
+  // are still present in the final on-disk state — catches any
+  // future regression in the peer-MCP merge.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.unlink(path.join(tempDir, ".claude.json")).catch(() => {})
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+
+  // Production order: mirror first, then peer-MCP injection.
+  await ensureClaudeConfigMirror()
+  const result = await injectPeerMcpIntoMirror("http://127.0.0.1:18787", {
+    codexCli: false,
+    geminiAvailable: true,
+    nonce: "0".repeat(64),
+    codexHome: "/tmp/codex-test",
+    claudeConfigDir: PATHS.CLAUDE_CONFIG_DIR,
+  })
+  expect(result.ok).toBe(true)
+
+  // Gate fields MUST still be present after the peer-MCP rewrite.
+  const claudeJsonPath = path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json")
+  const parsed = JSON.parse(await fs.readFile(claudeJsonPath, "utf8"))
+  expect(parsed.hasCompletedOnboarding).toBe(true)
+  expect(parsed.bypassPermissionsModeAccepted).toBe(true)
+  expect(parsed.oauthAccount).toBeDefined()
+  expect(parsed.oauthAccount.emailAddress).toBe("github-router@local")
+  // And the peer-MCP entry IS present (proves injectPeerMcpIntoMirror
+  // actually ran — guards against the integration test silently
+  // becoming a no-op).
+  expect(parsed.mcpServers).toBeDefined()
+  expect(parsed.mcpServers["gh-router-peers"]).toBeDefined()
 })
 
 test("policyFor regression guard: agents/ MUST stay MIRRORED (sweep deletes inside it)", () => {

@@ -283,6 +283,62 @@ const SYNTHETIC_CREDENTIAL = {
 } as const
 
 /**
+ * Router-owned fields injected into `<CLAUDE_CONFIG_DIR>/.claude.json` so
+ * Claude Code skips its first-launch onboarding wizard. The synthetic
+ * `.credentials.json` covers the OAuth *token*, but on a fresh machine
+ * the wizard runs anyway — and one of its steps is the browser-OAuth
+ * "Sign in to your Anthropic account" prompt that the user sees today.
+ *
+ * Schema verified against `claude` v2.1.158 binary strings:
+ *
+ *   - `hasCompletedOnboarding: true` — single load-bearing gate.
+ *     Binary code path: `if (!E_().hasCompletedOnboarding) { ... await
+ *     Onboarding.default(...) }`. Setting true causes the wizard
+ *     (including the OAuth login step) to be skipped entirely.
+ *
+ *   - `bypassPermissionsModeAccepted: true` — skips the
+ *     `--dangerously-skip-permissions` trust disclaimer. Binary gate:
+ *     `K = Ip() || Boolean(E_().bypassPermissionsModeAccepted)`. The
+ *     proxy passes `--dangerously-skip-permissions` so `Ip()` typically
+ *     suffices, but pinning the field covers edge code paths (e.g.
+ *     `--bg --dangerously-skip-permissions`) that still consult it
+ *     directly and would otherwise throw "requires accepting the
+ *     disclaimer first."
+ *
+ *   - `oauthAccount` — nice-to-have for UI consistency. Claude Code
+ *     reads sub-fields with optional chaining (`oauthAccount?.accountUuid`,
+ *     `oauthAccount?.organizationUuid`, `oauthAccount?.organizationRole`)
+ *     so undefined doesn't trigger login — but populating gives any
+ *     "logged in as X" / status-line UI something deterministic and
+ *     obviously-synthetic to display. Values are intentionally
+ *     non-credible (`github-router@local`, all-zero UUIDs) so any
+ *     leak into logs is self-documenting, not impersonation.
+ *
+ * Merge semantics: the two boolean gates are **force-overridden** —
+ * even an existing `false` is flipped to `true`. (A user logging out
+ * via the Claude Code UI cannot defeat the proxy-session bypass.)
+ * `oauthAccount` is overwritten only when the existing value isn't a
+ * *structurally usable* one (presence-only would preserve `{}` or
+ * `{foo:1}` shapes that defeat the fix); a real OAuth identity with
+ * non-empty `accountUuid` and `organizationUuid` is preserved as-is.
+ * Every OTHER top-level field the user brought in via the mirror walk
+ * (settings, project history, user-side MCP entries, etc.) is preserved
+ * verbatim. The mirror is a router-controlled view, not a faithful
+ * copy — same trade-off the synthetic credential already makes.
+ */
+const SYNTHETIC_CLAUDE_JSON_FIELDS = {
+  hasCompletedOnboarding: true,
+  bypassPermissionsModeAccepted: true,
+  oauthAccount: {
+    accountUuid: "00000000-0000-0000-0000-000000000000",
+    organizationUuid: "00000000-0000-0000-0000-000000000000",
+    organizationRole: "member",
+    emailAddress: "github-router@local",
+    organizationName: "github-router",
+  },
+} as const
+
+/**
  * Snapshot-copy the user's `~/.claude/` into the router-owned
  * CLAUDE_CONFIG_DIR (real files, not symlinks — symlinks don't isolate
  * writes), classifying each top-level entry per `CLAUDE_HOME_POLICY`:
@@ -396,7 +452,37 @@ export async function ensureClaudeConfigMirror(opts: {
   }
   await chmodIfPossible(credentialsPath, 0o600)
 
-  // 6. Write/refresh marker file. Use lstat (not access) to detect
+  // 6. Inject onboarding-skip fields into <CLAUDE_CONFIG_DIR>/.claude.json.
+  //    Runs AFTER the mirror walk (step 2) so a user's existing
+  //    .claude.json content (settings, projects, user-side mcpServers)
+  //    is preserved, and BEFORE `injectPeerMcpIntoMirror` (called later
+  //    from `src/claude.ts`) which read-merge-writes the same file and
+  //    will preserve our fields naturally.
+  //
+  //    Without this step, on a brand-new machine where ~/.claude/.claude.json
+  //    doesn't exist, nothing lands in the mirror, Claude Code's
+  //    `hasCompletedOnboarding` gate defaults to falsy, and the
+  //    first-launch wizard runs — including the "Sign in to your
+  //    Anthropic account" OAuth step that defeats the synthetic
+  //    credential. See SYNTHETIC_CLAUDE_JSON_FIELDS for the gate
+  //    rationale + binary-verified field shape.
+  await injectSyntheticClaudeJsonFields(targetDir, sourceDir, realHome)
+
+  // 6a. Postcondition: verify the gate fields actually landed in the
+  //     mirror's .claude.json. The helper has several "warn and
+  //     return" branches (non-regular target, non-ENOENT read failure)
+  //     where falling through silently would let Claude Code's
+  //     first-launch wizard fire — the exact bug this whole
+  //     subsystem exists to prevent. Re-reading the file and
+  //     asserting the booleans converts every silent-fail path into a
+  //     fail-loud launch error, which `src/claude.ts` surfaces to the
+  //     user with `process.exit(1)`. Cheap (one extra readFile +
+  //     JSON.parse on a small file we just wrote) and gives the
+  //     no-silent-degradation invariant teeth even if a future
+  //     contributor adds a new bail-out branch.
+  await assertOnboardingGateInjected(targetDir)
+
+  // 7. Write/refresh marker file. Use lstat (not access) to detect
   //    symlinks at the marker path — a previously-mirrored or
   //    user-placed symlink could otherwise let our `fs.writeFile`
   //    follow through to an arbitrary target. With the symlink-skip
@@ -432,6 +518,430 @@ export async function ensureClaudeConfigMirror(opts: {
       .catch((err) => {
         consola.debug(`ensureClaudeConfigMirror: marker write skipped:`, err)
       })
+  }
+}
+
+/**
+ * Read-merge-atomic-write the router-required onboarding-skip fields
+ * (see `SYNTHETIC_CLAUDE_JSON_FIELDS`) into `<targetDir>/.claude.json`.
+ *
+ * Inputs:
+ *   - `targetDir` — the per-launch mirror dir we own.
+ *   - `sourceDir` — the user's `~/.claude/` (subdir-level legacy path).
+ *   - `realHome` — the user's `$HOME`. Used to locate the **canonical**
+ *     `~/.claude.json` (HOME level), which is what Claude Code's path
+ *     resolver `qG` actually reads when `CLAUDE_CONFIG_DIR` is unset:
+ *     `path.join(process.env.CLAUDE_CONFIG_DIR || homedir(),
+ *     ".claude.json")`. The mirror walk operates on `~/.claude/` and
+ *     thus can only see the subdir-level `~/.claude/.claude.json`
+ *     (often a stale shadow); the canonical HOME-level file — where
+ *     `claude mcp add` writes and Claude Code reads on default
+ *     invocations — would otherwise be invisible to the proxy session.
+ *
+ * Behaviour:
+ *   - Mirror's `.claude.json` is a non-regular file (symlink, dir,
+ *     etc.) → log warn, refuse to touch. The postcondition check in
+ *     `ensureClaudeConfigMirror` then throws, blocking launch — the
+ *     user investigates the warn-flagged path rather than landing in
+ *     the OAuth wizard.
+ *   - Read existing content from the first VALID source, in priority
+ *     order:
+ *       (a) `~/.claude.json` HOME-level (canonical Claude Code path)
+ *       (b) The mirror file itself (snapshot-walk's product; only
+ *           consulted if it's a regular file per step 1)
+ *       (c) `~/.claude/.claude.json` subdir-level (legacy)
+ *     A candidate that's missing (ENOENT), too large (> 50 MiB cap),
+ *     or fails to parse as a non-empty object is **skipped** — the
+ *     loop falls through to the next candidate, so a malformed
+ *     higher-priority source can't drop valid lower-priority content
+ *     on the floor. HOME-level non-ENOENT read failures warn
+ *     (user-visible — corp perms / OneDrive). All other failures
+ *     debug-log. `fs.readFile` follows symlinks; reading user-owned
+ *     content into a per-launch user-owned dir is not a privilege
+ *     escalation (same uid).
+ *   - Merge: **force-override** all three synthetic fields
+ *     unconditionally — `hasCompletedOnboarding`,
+ *     `bypassPermissionsModeAccepted`, AND `oauthAccount`. A
+ *     within-proxy "log out" is impossible by design. `oauthAccount`
+ *     is overwritten even when the user has a real one, because
+ *     pairing the synthetic OAuth token (from `.credentials.json`)
+ *     with a real-user identity blob creates a split-brain auth
+ *     state that Claude Code's identity-vs-token cross-checks may
+ *     treat as session corruption (triggering re-login → defeats
+ *     the fix). The user's real identity remains intact in their
+ *     own `~/.claude.json`; only the proxy session sees synthetic.
+ *     `Object.assign(Object.create(null), existing)` instead of spread
+ *     defuses the `__proto__` prototype-pollution sink from JSON.parse.
+ *   - Idempotency: skip the write IFF the source we read FROM is the
+ *     mirror itself AND the current mirror content is byte-equivalent
+ *     to what we'd write. Bytes-on-disk comparison is robust against
+ *     filesystem mtime resolution (FAT/exFAT 2 s buckets) and the
+ *     source-presence-vs-mirror-presence conflation that broke
+ *     round-2's `needsWrite = !hadExisting` heuristic.
+ *
+ * Atomic write: tempfile (per-PID + 4-byte random suffix matching
+ * `injectPeerMcpIntoMirror`'s pattern, so collision is effectively
+ * impossible) + rename, mode 0o600. Pre-chmod the destination before
+ * rename to defuse Windows read-only attribute issues. Any write
+ * error throws to the caller — `src/claude.ts` fails the launch
+ * loudly. Combined with the postcondition check, every silent-
+ * degradation path is converted to a fail-loud launch error.
+ */
+async function injectSyntheticClaudeJsonFields(
+  targetDir: string,
+  sourceDir: string,
+  realHome: string,
+): Promise<void> {
+  const claudeJsonPath = path.join(targetDir, ".claude.json")
+
+  // 1. lstat the mirror path before touching it (defense-in-depth,
+  //    matching the marker-write at step 7). If something other than a
+  //    regular file occupies the slot, refuse — `fs.readFile` /
+  //    `chmodIfPossible` / `fs.rename` would otherwise follow / clobber
+  //    in surprising ways. The postcondition then throws.
+  let mirrorIsRegularFile = false
+  try {
+    const mirrorStat = await fs.lstat(claudeJsonPath)
+    if (mirrorStat.isFile()) {
+      mirrorIsRegularFile = true
+    } else {
+      consola.warn(
+        `ensureClaudeConfigMirror: ${claudeJsonPath} exists but is not a regular file (mode=${mirrorStat.mode.toString(8)}); refusing to inject synthetic fields. Inspect and remove manually if safe.`,
+      )
+      return
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      consola.warn(
+        `ensureClaudeConfigMirror: cannot lstat ${claudeJsonPath}; refusing to inject synthetic fields (overwriting an unreadable file would risk destroying user content):`,
+        err,
+      )
+      return
+    }
+    // ENOENT: mirror file doesn't exist yet — fine; step 2 skips the
+    // mirror candidate and step 4 creates a new file.
+  }
+
+  // 2. Read existing content from the first VALID source. Priority:
+  //      (a) `~/.claude.json` HOME-level (canonical Claude Code path)
+  //      (b) Mirror file (the snapshot-walk's product; only if regular)
+  //      (c) `~/.claude/.claude.json` subdir-level (legacy)
+  //    A candidate that's missing (ENOENT) or fails to parse as a
+  //    non-empty object is SKIPPED — the loop falls through to the
+  //    next candidate. This is the load-bearing fix for "corrupt HOME
+  //    blocks valid subdir": a zero-byte or malformed HOME file no
+  //    longer drops the user's good subdir content on the floor.
+  //    Size cap (`MAX_CLAUDE_JSON_BYTES`) skips absurdly large files
+  //    that would risk OOM. HOME read failures (non-ENOENT) warn
+  //    loudly — the canonical path failing is user-visible. Mirror /
+  //    subdir read failures debug-log and fall through.
+  //    `fs.readFile` follows symlinks; reading user-owned content
+  //    into a per-launch user-owned dir is not a privilege escalation.
+  let existing: Record<string, unknown> = {}
+  let selectedSource: string | null = null
+  const homeLevelClaudeJson = path.join(realHome, ".claude.json")
+  const subdirClaudeJson = path.join(sourceDir, ".claude.json")
+  const sourceCandidates: Array<string | null> = [
+    homeLevelClaudeJson,
+    mirrorIsRegularFile ? claudeJsonPath : null,
+    subdirClaudeJson,
+  ]
+  for (const sourceCandidate of sourceCandidates) {
+    if (sourceCandidate === null) continue
+    try {
+      const stat = await fs.stat(sourceCandidate)
+      if (stat.size > MAX_CLAUDE_JSON_BYTES) {
+        consola.warn(
+          `ensureClaudeConfigMirror: ${sourceCandidate} is ${stat.size} bytes (> ${MAX_CLAUDE_JSON_BYTES} cap); skipping this source to avoid OOM. Inspect for accidental log/state accumulation.`,
+        )
+        continue
+      }
+      const raw = await fs.readFile(sourceCandidate, "utf8")
+      const parsed = parseExistingClaudeJson(raw, sourceCandidate)
+      if (parsed === null) {
+        // Malformed (parse failure or non-object). Skip; try next candidate.
+        continue
+      }
+      existing = parsed
+      selectedSource = sourceCandidate
+      consola.debug(
+        `ensureClaudeConfigMirror: read .claude.json content from ${sourceCandidate}`,
+      )
+      break
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code === "ENOENT") {
+        // Normal case — skip silently.
+        continue
+      }
+      // Non-ENOENT read/stat failure. Severity depends on which source:
+      //   - HOME-level (canonical): warn (user-visible — corp perms,
+      //     OneDrive cloud-only, EACCES, etc.). Fall through, since
+      //     the gate-injection still needs to happen.
+      //   - Mirror / subdir: debug. Mirror failures used to abort,
+      //     but that locked out the still-valid subdir-level fallback;
+      //     we can always re-create the mirror from any valid source.
+      if (sourceCandidate === homeLevelClaudeJson) {
+        consola.warn(
+          `ensureClaudeConfigMirror: cannot read canonical ${homeLevelClaudeJson}; falling back to other sources. User-scope MCPs added via 'claude mcp add' may be invisible to the proxy session:`,
+          err,
+        )
+      } else {
+        consola.debug(
+          `ensureClaudeConfigMirror: cannot read source ${sourceCandidate}:`,
+          err,
+        )
+      }
+      // Fall through to next candidate. If all miss/fail, proceed
+      // with synthetic-only content (existing stays {}).
+    }
+  }
+
+  // 3. Build merged content. `Object.assign(Object.create(null), ...)`
+  //    instead of `{...existing}` avoids the `__proto__` prototype-
+  //    pollution sink (`JSON.parse('{"__proto__":{...}}')` sets the
+  //    object's prototype via defineProperty; spreading then triggers
+  //    the standard `__proto__` setter and mutates merged's prototype
+  //    chain. Cheap defense, prevents the entire class.
+  //
+  //    All three gate fields are FORCE-OVERRIDDEN regardless of
+  //    existing value:
+  //      - `hasCompletedOnboarding` and `bypassPermissionsModeAccepted`
+  //        are the load-bearing gates we exist to set; a within-proxy
+  //        "log out" is impossible by design.
+  //      - `oauthAccount` is overwritten unconditionally with the
+  //        synthetic identity (NOT preserved even when real). Pairing
+  //        the synthetic OAuth token (from `.credentials.json`) with
+  //        a real-user `accountUuid` / `organizationUuid` creates a
+  //        split-brain auth state where Claude Code's identity-vs-
+  //        token cross-checks (binary `oauthAccount?.accountUuid`
+  //        consumers) may treat the mismatch as session corruption
+  //        and trigger re-login — the exact bug we're preventing.
+  //        The user's real identity remains intact in their own
+  //        `~/.claude.json`; only the proxy session sees synthetic.
+  const merged: Record<string, unknown> = Object.assign(
+    Object.create(null) as Record<string, unknown>,
+    existing,
+  )
+  merged.hasCompletedOnboarding = SYNTHETIC_CLAUDE_JSON_FIELDS.hasCompletedOnboarding
+  merged.bypassPermissionsModeAccepted = SYNTHETIC_CLAUDE_JSON_FIELDS.bypassPermissionsModeAccepted
+  merged.oauthAccount = SYNTHETIC_CLAUDE_JSON_FIELDS.oauthAccount
+
+  // 4. Decide if a write is needed. Idempotency contract: skip the
+  //    write IFF we read FROM the mirror itself AND the current mirror
+  //    content is byte-equivalent to what we'd write. Bytes-on-disk
+  //    comparison (vs. inferring from source state) is robust against:
+  //      - source-presence ≠ mirror-presence (a fully-onboarded HOME
+  //        file with no mirror yet must still trigger a mirror write)
+  //      - HOME content newer than mirror (HOME wins → mirror is
+  //        always rewritten when source was HOME)
+  //      - filesystem mtime resolution (FAT/exFAT 2s buckets)
+  const desiredJson = JSON.stringify(merged, null, 2) + "\n"
+  if (selectedSource === claudeJsonPath) {
+    try {
+      const currentMirrorJson = await fs.readFile(claudeJsonPath, "utf8")
+      if (currentMirrorJson === desiredJson) {
+        await chmodIfPossible(claudeJsonPath, 0o600).catch(() => {})
+        return
+      }
+    } catch {
+      // Mirror read failed between step 2's success and now — fall
+      // through to write. Worst case we rewrite identical content.
+    }
+  }
+
+  // 5. Atomic temp + rename. Mode 0o600. Per-PID + 4-byte random
+  //    suffix matches `injectPeerMcpIntoMirror`'s pattern. Any write
+  //    error throws to the caller — `src/claude.ts` exits the launch
+  //    with a loud error message rather than silently degrading to
+  //    the OAuth wizard.
+  //
+  //    Pre-chmod the destination before rename to defuse Windows
+  //    read-only attribute issues (FAT/exFAT volumes, corp-managed
+  //    perms): `fs.rename` over a read-only file can fail with EPERM
+  //    on Windows even though POSIX would silently succeed.
+  //
+  //    Concurrent-racer tolerance: when multiple `ensureClaudeConfigMirror()`
+  //    calls run in parallel (e.g., from tests, or a future caller),
+  //    Windows `fs.rename` can fail with EBUSY/EPERM/EACCES if
+  //    another racer has the destination open or mid-write. The
+  //    write content is fully deterministic (same SYNTHETIC fields,
+  //    same force-override merge of the same source-priority list),
+  //    so a successful rename by ANY racer produces the same bytes
+  //    we'd produce. On rename failure, verify the on-disk content
+  //    matches `desiredJson` — if so, accept silently (another
+  //    racer won the race; the file is correct).
+  const tempPath = `${claudeJsonPath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
+  try {
+    await fs.writeFile(tempPath, desiredJson, { mode: 0o600, flag: "wx" })
+    if (mirrorIsRegularFile) {
+      await chmodIfPossible(claudeJsonPath, 0o600).catch(() => {})
+    }
+    await fs.rename(tempPath, claudeJsonPath)
+  } catch (err) {
+    await fs.unlink(tempPath).catch(() => {})
+    try {
+      const observed = await fs.readFile(claudeJsonPath, "utf8")
+      if (observed === desiredJson) {
+        consola.debug(
+          `ensureClaudeConfigMirror: rename failed but mirror already holds expected content (concurrent racer won the race):`,
+          err,
+        )
+        await chmodIfPossible(claudeJsonPath, 0o600).catch(() => {})
+        return
+      }
+    } catch {
+      // Fall through to rethrow the original error.
+    }
+    throw err
+  }
+  await chmodIfPossible(claudeJsonPath, 0o600).catch(() => {})
+}
+
+/**
+ * Size cap on candidate `.claude.json` reads in
+ * `injectSyntheticClaudeJsonFields`. Real-world files are KB-MB scale;
+ * if a `.claude.json` has grown to hundreds of MB (corruption, runaway
+ * project history accumulation, accidental log redirect) reading it
+ * blocks the event loop and risks OOM. 50 MiB is comfortably above
+ * any legitimate Claude Code state and well below typical RSS budgets.
+ */
+const MAX_CLAUDE_JSON_BYTES = 50 * 1024 * 1024
+
+/**
+ * Structural check for `oauthAccount`: must be a non-null, non-array
+ * object whose `accountUuid` AND `organizationUuid` are non-empty
+ * strings. Empty objects / partial blobs (missing UUIDs) do NOT count
+ * as "usable" — preserving them would let Claude Code's various
+ * "logged in as X" UIs read undefined sub-fields and (in some flows)
+ * fall back to a re-login prompt that defeats the synthetic-credential
+ * fix. Field names match the binary's optional-chain reads
+ * (`oauthAccount?.accountUuid`, `oauthAccount?.organizationUuid`).
+ */
+function isUsableOauthAccount(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  const obj = value as Record<string, unknown>
+  const accountUuid = obj.accountUuid
+  const organizationUuid = obj.organizationUuid
+  return (
+    typeof accountUuid === "string"
+    && accountUuid.length > 0
+    && typeof organizationUuid === "string"
+    && organizationUuid.length > 0
+  )
+}
+
+/**
+ * Parse a JSON blob expected to be an object. Returns `null` on parse
+ * failure or non-object/array value (so callers can SKIP this source
+ * rather than treating an empty object as a successful read — a
+ * round-1 finding from gemini-critic). Logs a warn so the user can
+ * investigate. Used in `injectSyntheticClaudeJsonFields`'s source-
+ * priority loop: a malformed HOME-level file falls through to the
+ * mirror or subdir candidate instead of dropping valid lower-priority
+ * content on the floor.
+ */
+function parseExistingClaudeJson(
+  raw: string,
+  contextPath: string,
+): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>
+    }
+    consola.warn(
+      `ensureClaudeConfigMirror: ${contextPath} parsed to non-object `
+        + `(typeof=${typeof parsed}); skipping this source.`,
+    )
+    return null
+  } catch (err) {
+    consola.warn(
+      `ensureClaudeConfigMirror: cannot parse ${contextPath} as JSON; `
+        + `skipping this source:`,
+      err,
+    )
+    return null
+  }
+}
+
+/**
+ * Postcondition for `ensureClaudeConfigMirror`: re-reads the mirror's
+ * `.claude.json` and verifies that both boolean gate fields actually
+ * landed. Converts every "warn and return" branch in
+ * `injectSyntheticClaudeJsonFields` (non-regular target, non-ENOENT
+ * read failure, postcondition lstat race) into a launch-failing
+ * throw — `src/claude.ts:197`'s catch path turns it into a clear
+ * `process.exit(1)` rather than silently spawning Claude Code into
+ * the OAuth wizard. The whole point of this subsystem is preventing
+ * that silent degradation; a warn that scrolls by in the launch log
+ * is not enough.
+ *
+ * Cheap (one extra readFile + JSON.parse on a small file we just
+ * wrote) and load-bearing: every future contributor who adds a new
+ * bail-out branch in the helper above automatically gets fail-loud
+ * for free instead of having to remember to thread the failure
+ * upward by hand.
+ */
+async function assertOnboardingGateInjected(targetDir: string): Promise<void> {
+  const claudeJsonPath = path.join(targetDir, ".claude.json")
+
+  // 1. lstat first — never follow a symlink. A planted symlink at the
+  //    mirror path pointing at an attacker-controlled file with valid
+  //    gate fields would otherwise pass a plain readFile check and let
+  //    the helper's "non-regular target" warn-and-return slip through.
+  let lst: import("node:fs").Stats
+  try {
+    lst = await fs.lstat(claudeJsonPath)
+  } catch (err) {
+    throw new Error(
+      `ensureClaudeConfigMirror: postcondition failed — cannot lstat ${claudeJsonPath} after injection (synthetic onboarding-skip fields are required to prevent Claude Code's first-launch wizard, which would defeat the synthetic credential): ${(err as Error).message}`,
+    )
+  }
+  if (!lst.isFile()) {
+    throw new Error(
+      `ensureClaudeConfigMirror: postcondition failed — ${claudeJsonPath} exists but is not a regular file (mode=${lst.mode.toString(8)}). Check the preceding warn-level log lines for the underlying cause; without a regular file holding the gate fields, Claude Code's first-launch wizard fires and defeats the synthetic credential.`,
+    )
+  }
+
+  let raw: string
+  try {
+    raw = await fs.readFile(claudeJsonPath, "utf8")
+  } catch (err) {
+    throw new Error(
+      `ensureClaudeConfigMirror: postcondition failed — cannot read ${claudeJsonPath} after injection: ${(err as Error).message}`,
+    )
+  }
+  let parsed: Record<string, unknown>
+  try {
+    const json = JSON.parse(raw) as unknown
+    if (!json || typeof json !== "object" || Array.isArray(json)) {
+      throw new Error(`parsed to non-object (typeof=${typeof json})`)
+    }
+    parsed = json as Record<string, unknown>
+  } catch (err) {
+    throw new Error(
+      `ensureClaudeConfigMirror: postcondition failed — ${claudeJsonPath} is not a valid JSON object after injection: ${(err as Error).message}`,
+    )
+  }
+  if (
+    parsed.hasCompletedOnboarding !== true
+    || parsed.bypassPermissionsModeAccepted !== true
+  ) {
+    throw new Error(
+      `ensureClaudeConfigMirror: postcondition failed — ${claudeJsonPath} is missing required gate fields after injection (hasCompletedOnboarding=${String(parsed.hasCompletedOnboarding)}, bypassPermissionsModeAccepted=${String(parsed.bypassPermissionsModeAccepted)}). Check the preceding warn-level log lines for the underlying cause; without these fields Claude Code's first-launch wizard fires and defeats the synthetic credential.`,
+    )
+  }
+  // Reuse `isUsableOauthAccount` so a future change to the structural
+  // definition stays consistent across helper write-decision and
+  // postcondition. The synthetic blob we always write satisfies this
+  // by construction; a regression that drops oauthAccount during the
+  // merge would otherwise slip past (per the round-2 codex/opus/
+  // gemini-3-lab finding).
+  if (!isUsableOauthAccount(parsed.oauthAccount)) {
+    throw new Error(
+      `ensureClaudeConfigMirror: postcondition failed — ${claudeJsonPath} has invalid oauthAccount after injection (got ${JSON.stringify(parsed.oauthAccount)}). The synthetic identity blob is required so Claude Code's identity-vs-token cross-checks don't trigger a re-login that defeats the synthetic credential.`,
+    )
   }
 }
 

@@ -8,6 +8,7 @@ import { checkUsage } from "./check-usage"
 import { claude } from "./claude"
 import { codex } from "./codex"
 import { debug } from "./debug"
+import { models } from "./models"
 import { start } from "./start"
 
 process.on("unhandledRejection", (error) => {
@@ -25,7 +26,7 @@ const main = defineCommand({
     description:
       "A reverse proxy that exposes GitHub Copilot as OpenAI and Anthropic compatible API endpoints.",
   },
-  subCommands: { auth, start, claude, codex, "check-usage": checkUsage, debug },
+  subCommands: { auth, start, claude, codex, models, "check-usage": checkUsage, debug },
 })
 
 await runMain(main)
