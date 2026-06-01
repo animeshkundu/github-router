@@ -93,13 +93,17 @@ test("/v1/messages rejects hosted web_fetch (type slug) with 400", async () => {
   expect(calls.length).toBe(0)
 })
 
-test("/v1/messages allows a CUSTOM tool merely named web_fetch (type=custom) — must not over-match on name", async () => {
+test("/v1/messages does NOT reject a CUSTOM tool merely named web_fetch (type=custom) — proxy must not over-match on name (forwards it; Copilot separately denylists the name)", async () => {
   const { calls } = mockUpstream()
   const res = await server.request("/v1/messages", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: msg([{ type: "custom", name: "web_fetch", input_schema: { type: "object" } }]),
   })
+  // The proxy forwards it (no proxy-side 400); whether Copilot accepts it is a
+  // separate layer — live Copilot actually rejects the *name* web_fetch, see
+  // probe `tooltype_web_fetch_custom_name_copilot_rejects`. Here we assert only
+  // that the PROXY did not over-match and short-circuit.
   expect(res.status).toBe(200)
   expect(calls.some((u) => u.includes("messages"))).toBe(true)
 })

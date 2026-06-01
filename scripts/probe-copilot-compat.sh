@@ -104,7 +104,7 @@ declare -a PROBE_REGISTRY=(
   "tooltype_code_execution_20250825|copilot-allowlist|code_execution_20250825 returns 400 (not in Copilot allowlist)"
   "tooltype_web_search_20250305|anthropic-docs|web_search_20250305 returns 200 in body validator (model invocation inconclusive)"
   "tooltype_web_fetch_hosted_rejected|anthropic-docs|hosted web_fetch_20260209 returns 400 (proxy fail-fast: no Copilot backend, URL is model-chosen mid-generation so cannot be pre-fulfilled)"
-  "tooltype_web_fetch_custom_name_allowed|exploratory|custom tool merely NAMED web_fetch (type:custom) returns 200 — detection matches the hosted type slug, not the name (regression guard against over-matching)"
+  "tooltype_web_fetch_custom_name_copilot_rejects|exploratory|a custom tool merely NAMED web_fetch (type:custom) is forwarded UNCHANGED by the proxy (no over-match on name) and rejected by Copilot itself with 400 'rejected tool(s): web_fetch' — distinct from the proxy's hosted-web_fetch message, proving the proxy did not reject it"
 
   # ===== Web search across endpoints (Task #2 — empirical native exposure map) =====
   # End-to-end through proxy: the Anthropic-shape web_search tool is rejected by
@@ -405,17 +405,21 @@ probe_tooltype_web_fetch_hosted_rejected() {
   assert_status 400
 }
 
-probe_tooltype_web_fetch_custom_name_allowed() {
-  # Regression guard: a CLIENT-SIDE custom tool that merely shares the name
-  # "web_fetch" (type:custom) must NOT be caught by the hosted-tool gate —
-  # Copilot's allowlist accepts `custom`, so the end user sees 200.
+probe_tooltype_web_fetch_custom_name_copilot_rejects() {
+  # A CLIENT-SIDE custom tool that merely shares the name "web_fetch"
+  # (type:custom) must NOT be caught by the proxy's hosted-tool gate (which
+  # matches the `web_fetch_<date>` type slug, never the name). The proxy
+  # forwards it unchanged; Copilot then rejects it with its OWN message
+  # ("rejected tool(s): web_fetch") — distinct from the proxy's hosted-web_fetch
+  # error, proving the proxy did not over-match on the name.
   do_request POST /v1/messages '{
     "model": "claude-opus-4-7",
     "max_tokens": 50,
     "tools": [{"type":"custom","name":"web_fetch","input_schema":{"type":"object"}}],
     "messages": [{"role":"user","content":"hi"}]
   }'
-  assert_status 200
+  assert_status 400 \
+    && assert_body_contains "rejected tool(s)"
 }
 
 # End-to-end via proxy: Anthropic-shape web_search tool on /v1/messages.
