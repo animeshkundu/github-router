@@ -7,7 +7,7 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   prettier,
   {
-    ignores: ["dist/", "node_modules/", "src/vendor/"],
+    ignores: ["dist/", "node_modules/", "src/vendor/", ".claude/"],
   },
   {
     // MV3 service worker (plain JS, browser globals + chrome.* APIs).
