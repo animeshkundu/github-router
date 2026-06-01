@@ -221,7 +221,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.5",
     endpoint: "/v1/responses",
     description:
-      "Adversarial second opinion on plans, designs, or code tradeoffs. Backed by gpt-5.5 (OpenAI, 400K context) — strongest reasoning model in the critic lineup, different lab than Opus. Best for architecture decisions, design reviews, and tradeoff analysis where cross-lab diversity matters. Not for line-level code review (use codex_reviewer). Pass artifact verbatim.",
+      "Adversarial second opinion on plans, designs, or code tradeoffs. Backed by gpt-5.5 (OpenAI, ≈922K-token input window) — strongest reasoning model in the critic lineup, different lab than Opus. Best for architecture decisions, design reviews, and tradeoff analysis where cross-lab diversity matters. Not for line-level code review (use codex_reviewer). Pass artifact verbatim.",
     baseInstructions: CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -250,7 +250,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.3-codex",
     endpoint: "/v1/responses",
     description:
-      "Line-level review of a concrete diff or single file. Backed by gpt-5.3-codex (OpenAI, 400K context) — code-specialist, fastest critic (~16s). Surfaces bugs, edge cases, security issues, and idiom violations at specific line numbers. Not suited for architecture or design review (use codex_critic for plans). Pass artifact verbatim.",
+      "Line-level review of a concrete diff or single file. Backed by gpt-5.3-codex (OpenAI, ≈272K-token input window) — code-specialist, fastest critic (~16s). Surfaces bugs, edge cases, security issues, and idiom violations at specific line numbers. Not suited for architecture or design review (use codex_critic for plans). Pass artifact verbatim.",
     baseInstructions: REVIEWER_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -264,7 +264,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "claude-opus-4-7",
     endpoint: "/v1/messages",
     description:
-      "Adversarial second opinion from a fresh-context Opus 4.7 — same lab as the lead, limited blind-spot diversity vs cross-lab critics, but has the largest context window (up to 1M tokens on enterprise tiers). Handles large artifacts without decomposition. Fast (~22s), catches confabulation and motivated reasoning. Pass artifact verbatim.",
+      "Adversarial second opinion from a fresh-context Opus 4.7 — same lab as the lead, limited blind-spot diversity vs cross-lab critics. On enterprise catalogs that carry Opus-4.7-1M it runs with a ≈936K-token input window and handles large artifacts without decomposition; otherwise ≈168K. Fast (~22s), catches confabulation and motivated reasoning. Pass artifact verbatim.",
     baseInstructions: OPUS_CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,

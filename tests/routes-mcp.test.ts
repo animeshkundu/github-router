@@ -2049,3 +2049,164 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
     }
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────
+// Prompt-window guard + opus_critic 1M-variant selection
+// Window guard: reject (don't truncate) a brief that exceeds the persona
+// model's real max_prompt_tokens, counted with the exact o200k tokenizer.
+// opus_critic: prefer the enterprise 1M opus slug when the live catalog
+// carries it, else fall back to the 200K claude-opus-4-7.
+// ─────────────────────────────────────────────────────────────────────
+describe("/mcp peer prompt-window guard", () => {
+  function mockResponses(text: string, captured: { lastBody?: unknown; called?: boolean } = {}) {
+    globalThis.fetch = mock(async (_url, init) => {
+      captured.called = true
+      captured.lastBody = JSON.parse((init as RequestInit).body as string)
+      return new Response(
+        JSON.stringify({
+          id: "resp_test",
+          object: "response",
+          status: "completed",
+          output: [
+            { type: "message", role: "assistant", content: [{ type: "output_text", text }] },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )
+    }) as unknown as typeof globalThis.fetch
+    return captured
+  }
+
+  function modelWith(id: string, maxPromptTokens: number, endpoints: string[]) {
+    const m = fakeModel(id, endpoints)
+    m.capabilities.limits = {
+      max_context_window_tokens: maxPromptTokens + 50_000,
+      max_prompt_tokens: maxPromptTokens,
+    } as never
+    return m
+  }
+
+  test("rejects a brief that exceeds the persona model's prompt window (no upstream call)", async () => {
+    // gpt-5.5 with a deliberately tiny 200-token window; send a brief far
+    // larger so the exact o200k count busts it.
+    state.models = {
+      object: "list",
+      data: [modelWith("gpt-5.5", 200, ["/v1/responses"])],
+    }
+    const captured = mockResponses("should-not-be-called")
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 700,
+      method: "tools/call",
+      params: {
+        name: "codex_critic",
+        arguments: { prompt: "word ".repeat(2000) }, // ~2000 tokens >> 200
+      },
+    })
+    expect(status).toBe(200)
+    const result = json.result as { isError?: boolean; content: Array<{ text: string }> }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toMatch(/over the .*-token budget/i)
+    expect(result.content[0].text).toMatch(/larger-window peer|split it into/i)
+    // Guard fired BEFORE dispatch — upstream was never called.
+    expect(captured.called).toBeUndefined()
+  })
+
+  test("allows a brief that fits the window (reaches upstream)", async () => {
+    state.models = {
+      object: "list",
+      data: [modelWith("gpt-5.5", 900_000, ["/v1/responses"])],
+    }
+    const captured = mockResponses("ok")
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 701,
+      method: "tools/call",
+      params: { name: "codex_critic", arguments: { prompt: "small brief" } },
+    })
+    const result = json.result as { isError?: boolean; content: Array<{ text: string }> }
+    expect(result.isError).toBeUndefined()
+    expect(captured.called).toBe(true)
+  })
+
+  test("no max_prompt_tokens in catalog → guard is a no-op (call proceeds)", async () => {
+    // baseModels (from beforeEach) carry only max_context_window_tokens.
+    const captured = mockResponses("ok")
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 702,
+      method: "tools/call",
+      params: { name: "codex_critic", arguments: { prompt: "x".repeat(100000) } },
+    })
+    const result = json.result as { isError?: boolean }
+    expect(result.isError).toBeUndefined()
+    expect(captured.called).toBe(true)
+  })
+
+  test("opus_critic uses the 1M variant when the catalog carries it", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        modelWith("claude-opus-4.7", 168_000, ["/v1/messages"]),
+        modelWith("claude-opus-4.7-1m-internal", 936_000, ["/v1/messages"]),
+      ],
+    }
+    const captured: { lastBody?: unknown; called?: boolean } = {}
+    globalThis.fetch = mock(async (_url, init) => {
+      captured.called = true
+      captured.lastBody = JSON.parse((init as RequestInit).body as string)
+      return new Response(
+        JSON.stringify({
+          id: "msg_test",
+          type: "message",
+          role: "assistant",
+          model: "claude-opus-4.7-1m-internal",
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )
+    }) as unknown as typeof globalThis.fetch
+
+    await rpc({
+      jsonrpc: "2.0",
+      id: 703,
+      method: "tools/call",
+      params: { name: "opus_critic", arguments: { prompt: "review this" } },
+    })
+    expect((captured.lastBody as { model: string }).model).toBe(
+      "claude-opus-4.7-1m-internal",
+    )
+  })
+
+  test("opus_critic falls back to claude-opus-4.7 when no 1M variant present", async () => {
+    state.models = {
+      object: "list",
+      data: [modelWith("claude-opus-4.7", 168_000, ["/v1/messages"])],
+    }
+    const captured: { lastBody?: unknown } = {}
+    globalThis.fetch = mock(async (_url, init) => {
+      captured.lastBody = JSON.parse((init as RequestInit).body as string)
+      return new Response(
+        JSON.stringify({
+          id: "msg_test",
+          type: "message",
+          role: "assistant",
+          model: "claude-opus-4.7",
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )
+    }) as unknown as typeof globalThis.fetch
+
+    await rpc({
+      jsonrpc: "2.0",
+      id: 704,
+      method: "tools/call",
+      params: { name: "opus_critic", arguments: { prompt: "review this" } },
+    })
+    // resolveModel maps dashed claude-opus-4-7 → dotted claude-opus-4.7.
+    expect((captured.lastBody as { model: string }).model).toBe("claude-opus-4.7")
+  })
+})
