@@ -93,6 +93,7 @@ declare -a PROBE_REGISTRY=(
   # count-tokens code path.
   "speed_fast_stripped|claude-emits|top-level speed:\"fast\" (with fast-mode beta header) sent through proxy returns 200 (proxy strips body field before forwarding; Copilot would 400 on the raw top-level field)"
   "speed_fast_count_tokens_stripped|claude-emits|top-level speed:\"fast\" on /v1/messages/count_tokens returns 200 (proxy strips before forwarding; Copilot would 400 on the raw field)"
+  "output_config_format_ga_stripped|anthropic-docs|output_config:{format:{type,schema}} (Structured Outputs GA 2026-02-17 nested shape) returns 200 (proxy strips output_config.format + injects schema as system instruction; Copilot would 400 on output_config.* other than effort)"
 
   # ===== Native Anthropic tool types =====
   "tooltype_memory_20250818|anthropic-docs|memory_20250818 returns 200; model emits tool_use{name:memory, command:view}"
@@ -306,6 +307,15 @@ probe_speed_fast_stripped() {
 probe_speed_fast_count_tokens_stripped() {
   # Same strip exercised through the independent count_tokens code path.
   do_request POST /v1/messages/count_tokens '{"model":"claude-haiku-4-5","speed":"fast","messages":[{"role":"user","content":"hi"}]}' "anthropic-beta: fast-mode-2026-02-01"
+  assert_status 200
+}
+
+probe_output_config_format_ga_stripped() {
+  # Structured Outputs GA (2026-02-17) nests schema/type under
+  # output_config.format. The proxy strips output_config.* (Copilot 400s on
+  # everything but effort) and injects the schema as a system-prompt
+  # instruction so the structured-output intent survives. End-user sees 200.
+  do_request POST /v1/messages '{"model":"claude-haiku-4-5","max_tokens":50,"output_config":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}}},"messages":[{"role":"user","content":"hi"}]}'
   assert_status 200
 }
 

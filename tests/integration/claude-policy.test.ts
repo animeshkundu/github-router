@@ -368,6 +368,63 @@ describe("contract: body-field strip policy on /v1/messages", () => {
     expect(fwd.system as string).toContain("Output type requested: json_object")
   })
 
+  test("appends schema instruction for the GA nested shape `output_config: {format: {type, schema}}` (Structured Outputs GA 2026-02-17 — pre-GA flat .schema moved under .format)", async () => {
+    // GA renamed the flat `output_config.schema` / `.type` to nest them
+    // under `output_config.format`. The strip loop removes `format` either
+    // way, so without reading the nested location the schema intent would
+    // be lost silently (no prompt-injection compensation) and Claude Code's
+    // hook evaluator would fail on natural-language output.
+    const captured = captureUpstream()
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: claudeBody({
+        system: "You are a helpful assistant.",
+        output_config: {
+          format: {
+            type: "json_schema",
+            schema: {
+              type: "object",
+              properties: { ok: { type: "boolean" }, reason: { type: "string" } },
+              required: ["ok", "reason"],
+            },
+          },
+        },
+      }),
+    })
+    const fwd = captured.body() as {
+      system?: string | Array<{ type: string; text: string }>
+      output_config?: unknown
+    }
+    expect(fwd.output_config).toBeUndefined()
+    expect(typeof fwd.system).toBe("string")
+    expect(fwd.system as string).toContain("You are a helpful assistant.")
+    expect(fwd.system as string).toContain("MUST be a single valid JSON object")
+    expect(fwd.system as string).toContain('"ok"')
+    expect(fwd.system as string).toContain('"reason"')
+  })
+
+  test("flat `output_config.schema` takes precedence over nested `.format.schema` when both present (legacy back-compat)", async () => {
+    const captured = captureUpstream()
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: claudeBody({
+        output_config: {
+          schema: { type: "object", properties: { flatField: { type: "string" } } },
+          format: {
+            type: "json_schema",
+            schema: { type: "object", properties: { nestedField: { type: "string" } } },
+          },
+        },
+      }),
+    })
+    const fwd = captured.body() as { system?: string; output_config?: unknown }
+    expect(fwd.output_config).toBeUndefined()
+    expect(fwd.system as string).toContain('"flatField"')
+    expect(fwd.system as string).not.toContain('"nestedField"')
+  })
+
   test("preserves array-shape `system` when appending schema instruction", async () => {
     const captured = captureUpstream()
     await server.request("/v1/messages", {

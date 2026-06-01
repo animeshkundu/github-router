@@ -798,9 +798,18 @@ function stripAnthropicOnlyFields(body: AnyRecord): boolean {
     if (body.output_config && typeof body.output_config === "object") {
       const oc = body.output_config as AnyRecord
       const PROXY_OWNED_FIELDS = new Set(["effort"])
-      // Capture the schema BEFORE stripping so we can inject it.
-      const schema = oc.schema
-      const ocType = oc.type
+      // Capture the schema BEFORE stripping so we can inject it. Structured
+      // Outputs GA (2026-02-17) nested the schema/type under
+      // `output_config.format` (`{format:{type,schema}}`); pre-GA used the
+      // flat `output_config.schema` / `output_config.type`. Read both, with
+      // the flat (legacy) location taking precedence so existing callers are
+      // unaffected. The strip loop below removes `format` either way (it is
+      // not proxy-owned), so without this the GA shape would lose its schema
+      // intent silently and the prompt-injection compensation never fire.
+      const fmt =
+        oc.format && typeof oc.format === "object" ? (oc.format as AnyRecord) : undefined
+      const schema = oc.schema !== undefined ? oc.schema : fmt?.schema
+      const ocType = oc.type !== undefined ? oc.type : fmt?.type
       let strippedAny = false
       for (const key of Object.keys(oc)) {
         if (!PROXY_OWNED_FIELDS.has(key)) {
