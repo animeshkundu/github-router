@@ -281,6 +281,468 @@ describe("browser-mcp E2E (real Chromium + bridge + extension)", () => {
       expect(data.elapsedMs).toBeGreaterThanOrEqual(400)
     },
   )
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Humanlike-input v2: browser_mouse / browser_drag / browser_type /
+  // browser_locate plus browser_scroll(at-pointer) and browser_read_page
+  // viewport block.
+  // ─────────────────────────────────────────────────────────────────────
+
+  async function openHumanlikeFixture(): Promise<number> {
+    const opened = await ws!.call("browser_open_tab", {
+      url: `${fixtures!.base}/humanlike.html`,
+    })
+    if (!opened.ok) throw new Error(`open humanlike fixture: ${opened.error}`)
+    return (opened.data as { tabId: number }).tabId
+  }
+
+  test.skipIf(shouldSkip)(
+    "browser_read_page exposes viewport metadata (width / dpr / scroll)",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      const res = await ws!.call("browser_read_page", { tabId })
+      expect(res.ok).toBe(true)
+      const data = res.data as {
+        viewport: {
+          width: number; height: number; devicePixelRatio: number;
+          scrollX: number; scrollY: number;
+        }
+      }
+      expect(data.viewport).toBeDefined()
+      expect(typeof data.viewport.width).toBe("number")
+      expect(typeof data.viewport.height).toBe("number")
+      expect(typeof data.viewport.devicePixelRatio).toBe("number")
+      expect(data.viewport.devicePixelRatio).toBeGreaterThan(0)
+    },
+  )
+
+  test.skipIf(shouldSkip)(
+    "browser_locate returns bbox + viewport + topmostAtCenter (with overlay detection)",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      const direct = await ws!.call("browser_locate", { tabId, selector: "#click-btn" })
+      expect(direct.ok).toBe(true)
+      const d = direct.data as {
+        found: boolean; bbox: [number, number, number, number];
+        center: [number, number]; visible: boolean; inView: boolean;
+        topmostAtCenter: { isTarget: boolean };
+        viewport: { devicePixelRatio: number };
+      }
+      expect(d.found).toBe(true)
+      expect(d.visible).toBe(true)
+      expect(d.inView).toBe(true)
+      expect(d.bbox[2]).toBeGreaterThan(0)
+      expect(d.topmostAtCenter.isTarget).toBe(true)
+
+      // Overlay-occluded target: the cover absolutely-positioned div sits
+      // ON TOP of #overlay-target's center, so topmostAtCenter.isTarget
+      // should be false.
+      const occluded = await ws!.call("browser_locate", { tabId, selector: "#overlay-target" })
+      expect(occluded.ok).toBe(true)
+      const o = occluded.data as { topmostAtCenter: { isTarget: boolean; tag: string } }
+      expect(o.topmostAtCenter.isTarget).toBe(false)
+    },
+  )
+
+  test.skipIf(shouldSkip)(
+    "browser_mouse action=click via selector lands inside the bbox with isTrusted=true",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      // Reset recorder
+      await ws!.call("browser_eval_js", { tabId, expression: "window.__lastClick = null" })
+      const clicked = await ws!.call("browser_mouse", {
+        tabId,
+        action: "click",
+        selector: "#click-btn",
+      })
+      if (!clicked.ok) console.error("browser_mouse click error:", clicked.error)
+      expect(clicked.ok).toBe(true)
+      const ev = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "window.__lastClick",
+      })
+      expect(ev.ok).toBe(true)
+      const last = (ev.data as { result: { x: number; y: number; isTrusted: boolean; target: string } | null }).result
+      expect(last).not.toBeNull()
+      expect(last!.target).toBe("click-btn")
+      expect(last!.isTrusted).toBe(true)
+      expect(last!.x).toBeGreaterThan(0)
+      expect(last!.y).toBeGreaterThan(0)
+    },
+  )
+
+  test.skipIf(shouldSkip)(
+    "browser_mouse action=click is hit-test gated: target_obscured for overlay, force:true bypasses",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      await ws!.call("browser_eval_js", { tabId, expression: "window.__overlayClicked = false" })
+      const blocked = await ws!.call("browser_mouse", {
+        tabId,
+        action: "click",
+        selector: "#overlay-target",
+      })
+      // Pre-click hit-test must refuse because the cover is on top.
+      expect(blocked.ok).toBe(false)
+      expect(blocked.error).toMatch(/target_obscured/)
+      // force:true bypasses the hit-test. We still expect the underlying
+      // element's click handler to NOT fire (the cover intercepts), but
+      // the tool itself should succeed.
+      const forced = await ws!.call("browser_mouse", {
+        tabId,
+        action: "click",
+        selector: "#overlay-target",
+        force: true,
+      })
+      expect(forced.ok).toBe(true)
+    },
+  )
+
+  test.skipIf(shouldSkip)(
+    "browser_mouse action=move with steps>1 produces interpolated mousemove events",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      await ws!.call("browser_eval_js", { tabId, expression: "window.__mouseEvents = []" })
+      const moved = await ws!.call("browser_mouse", {
+        tabId,
+        action: "move",
+        x: 200,
+        y: 200,
+        steps: 20,
+        stepDelayMs: 2,
+      })
+      expect(moved.ok).toBe(true)
+      const ev = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "window.__mouseEvents.length",
+      })
+      expect(ev.ok).toBe(true)
+      const count = (ev.data as { result: number }).result
+      // We dispatched 20 mouseMoved events; the page should have seen them.
+      expect(count).toBeGreaterThanOrEqual(15)
+      // Check isTrusted on the events
+      const trustedEv = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "window.__mouseEvents.every(e => e.isTrusted)",
+      })
+      expect((trustedEv.data as { result: boolean }).result).toBe(true)
+    },
+  )
+
+  test.skipIf(shouldSkip)(
+    "browser_mouse action=move reveals a CSS :hover tooltip (proves real input pipeline)",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      await ws!.call("browser_mouse", {
+        tabId,
+        action: "move",
+        selector: "#hover-target",
+      })
+      // Wait a tick for the :hover style to apply
+      await ws!.call("browser_wait", {
+        tabId,
+        until: "networkIdle",
+        timeoutMs: 600,
+      })
+      const ev = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "getComputedStyle(document.getElementById('hover-tooltip')).display",
+      })
+      expect(ev.ok).toBe(true)
+      expect((ev.data as { result: string }).result).toBe("block")
+    },
+  )
+
+  test.skipIf(shouldSkip)(
+    "browser_mouse action=dblclick fires the dblclick event (two cycles, not one with clickCount:2)",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      await ws!.call("browser_eval_js", { tabId, expression: "window.__lastDblClick = null" })
+      const dbl = await ws!.call("browser_mouse", {
+        tabId,
+        action: "dblclick",
+        selector: "#click-btn",
+      })
+      expect(dbl.ok).toBe(true)
+      const ev = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "window.__lastDblClick && window.__lastDblClick.target",
+      })
+      expect((ev.data as { result: string | null }).result).toBe("click-btn")
+    },
+  )
+
+  test.skipIf(shouldSkip)(
+    "browser_drag mode=auto picks html5 for draggable=true and triggers drop with DataTransfer payload",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "window.__dropEvents = []; window.__html5DragStarted = false",
+      })
+      const dragged = await ws!.call("browser_drag", {
+        tabId,
+        fromSelector: "#drag-source-html5",
+        toSelector: "#drop-target-html5",
+        steps: 10,
+        stepDelayMs: 8,
+      }, 20_000)
+      if (!dragged.ok) console.error("browser_drag(html5) error:", dragged.error)
+      expect(dragged.ok).toBe(true)
+      expect((dragged.data as { mode_used: string }).mode_used).toBe("html5")
+      // Verify the drop landed with the right payload
+      const ev = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "window.__dropEvents",
+      })
+      const drops = (ev.data as { result: Array<{ kind: string; payload?: string }> }).result
+      expect(drops.length).toBeGreaterThanOrEqual(1)
+      expect(drops[0].kind).toBe("html5")
+      expect(drops[0].payload).toBe("DRAGGED_PAYLOAD")
+    },
+  )
+
+  test.skipIf(shouldSkip)(
+    "browser_drag mode=pointer holds button across moves and triggers pointer-event drop",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "window.__pointerDrag = { downAt: null, ups: 0, movesWithButton: 0, dropAt: null }; window.__dropEvents = []",
+      })
+      const dragged = await ws!.call("browser_drag", {
+        tabId,
+        fromSelector: "#drag-source-pointer",
+        toSelector: "#drop-target-pointer",
+        steps: 15,
+        stepDelayMs: 6,
+        mode: "pointer",
+      }, 15_000)
+      if (!dragged.ok) console.error("browser_drag(pointer) error:", dragged.error)
+      expect(dragged.ok).toBe(true)
+      expect((dragged.data as { mode_used: string }).mode_used).toBe("pointer")
+      // The fixture counts pointermove events that arrived with buttons:1
+      // (i.e. button held). The plan's Critical #5 — without buttons:1 the
+      // page would see buttons:0 and pointer-event drag handlers would
+      // abort. Assert we actually held the button across moves.
+      const movesEv = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "window.__pointerDrag.movesWithButton",
+      })
+      expect((movesEv.data as { result: number }).result).toBeGreaterThanOrEqual(10)
+      const dropEv = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "window.__pointerDrag.dropAt",
+      })
+      const drop = (dropEv.data as { result: { x: number; y: number } | null }).result
+      expect(drop).not.toBeNull()
+    },
+  )
+
+  test.skipIf(shouldSkip)(
+    "browser_type fires per-keystroke keydown events with isTrusted=true (no doubling)",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "window.__keyEvents = []; document.getElementById('text-input').value = ''; document.getElementById('text-input').focus()",
+      })
+      const typed = await ws!.call("browser_type", { tabId, text: "hello" })
+      if (!typed.ok) console.error("browser_type error:", typed.error)
+      expect(typed.ok).toBe(true)
+      expect((typed.data as { chars: number }).chars).toBe(5)
+      const keyEv = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "window.__keyEvents.length",
+      })
+      expect((keyEv.data as { result: number }).result).toBe(5)
+      const trustedEv = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "window.__keyEvents.every(e => e.isTrusted)",
+      })
+      expect((trustedEv.data as { result: boolean }).result).toBe(true)
+      const valEv = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "document.getElementById('text-input').value",
+      })
+      // The page should have received exactly "hello" — no doubled chars
+      // from a stray `char` event between keyDown/keyUp.
+      expect((valEv.data as { result: string }).result).toBe("hello")
+    },
+  )
+
+  test.skipIf(shouldSkip)(
+    "browser_type handles \\n as Enter (not a literal newline) and rejects other control chars",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "window.__keyEvents = []; document.getElementById('text-input').value = ''; document.getElementById('text-input').focus()",
+      })
+      const typed = await ws!.call("browser_type", { tabId, text: "hi\n" })
+      expect(typed.ok).toBe(true)
+      // Page should see one Enter key event
+      const enterEv = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "window.__keyEvents.find(e => e.key === 'Enter') ? true : false",
+      })
+      expect((enterEv.data as { result: boolean }).result).toBe(true)
+      // Value should be "hi" (Enter on a plain text input doesn't insert
+      // a newline character, it submits or is no-op)
+      const valEv = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "document.getElementById('text-input').value",
+      })
+      expect((valEv.data as { result: string }).result).toBe("hi")
+
+      // Now reject \x01
+      const bad = await ws!.call("browser_type", { tabId, text: "\x01" })
+      expect(bad.ok).toBe(false)
+      expect(bad.error).toMatch(/invalid_text/)
+    },
+  )
+
+  test.skipIf(shouldSkip)(
+    "browser_type iterates Unicode code points correctly (no surrogate corruption)",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "document.getElementById('text-input').value = ''; document.getElementById('text-input').focus()",
+      })
+      // "héllo" is 5 code points; the é (U+00E9) is BMP so no surrogate
+      // pair. Also test an emoji which IS a surrogate pair.
+      const typed = await ws!.call("browser_type", { tabId, text: "héllo" })
+      expect(typed.ok).toBe(true)
+      expect((typed.data as { chars: number }).chars).toBe(5)
+      const valEv = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "document.getElementById('text-input').value",
+      })
+      expect((valEv.data as { result: string }).result).toBe("héllo")
+    },
+  )
+
+  test.skipIf(shouldSkip)(
+    "browser_scroll target=at-pointer wheel-scrolls a sub-region without scrolling the window",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "document.getElementById('inner-scroller').scrollTop = 0; window.scrollTo(0, 0)",
+      })
+      const beforeOuter = await ws!.call("browser_eval_js", { tabId, expression: "window.scrollY" })
+      const wheeled = await ws!.call("browser_scroll", {
+        tabId,
+        target: "at-pointer",
+        selector: "#inner-scroller",
+        deltaY: 300,
+      })
+      if (!wheeled.ok) console.error("browser_scroll(at-pointer) error:", wheeled.error)
+      expect(wheeled.ok).toBe(true)
+      // Give the wheel event time to be processed by the page
+      await new Promise((r) => setTimeout(r, 200))
+      const innerTop = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "document.getElementById('inner-scroller').scrollTop",
+      })
+      expect((innerTop.data as { result: number }).result).toBeGreaterThan(0)
+      // Outer window must NOT have scrolled
+      const afterOuter = await ws!.call("browser_eval_js", { tabId, expression: "window.scrollY" })
+      expect((afterOuter.data as { result: number }).result).toBe(
+        (beforeOuter.data as { result: number }).result,
+      )
+    },
+  )
+
+  test.skipIf(shouldSkip)(
+    "browser_scroll(at-pointer) rejects deltaX=0 and deltaY=0",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      const bad = await ws!.call("browser_scroll", {
+        tabId,
+        target: "at-pointer",
+        selector: "#inner-scroller",
+        deltaY: 0,
+      })
+      expect(bad.ok).toBe(false)
+      expect(bad.error).toMatch(/non-zero/i)
+    },
+  )
+
+  test.skipIf(shouldSkip)(
+    "per-tab input mutex: two parallel browser_mouse calls on the same tab serialize cleanly",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      // Fire two slow moves in parallel. Neither should error; both
+      // should land. If the mutex were missing, CDP mouse state would
+      // race and we'd see one fail or interleaved coords.
+      const [a, b] = await Promise.all([
+        ws!.call("browser_mouse", {
+          tabId, action: "move", x: 100, y: 100, steps: 10, stepDelayMs: 10,
+        }),
+        ws!.call("browser_mouse", {
+          tabId, action: "move", x: 300, y: 300, steps: 10, stepDelayMs: 10,
+        }),
+      ])
+      expect(a.ok).toBe(true)
+      expect(b.ok).toBe(true)
+    },
+  )
+
+  // Regression tests for post-peer-review Critical / Important fixes.
+
+  test.skipIf(shouldSkip)(
+    "browser_mouse rejects conflicting target descriptors (ref + x,y both passed) — no silent precedence",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      const bad = await ws!.call("browser_mouse", {
+        tabId,
+        action: "click",
+        selector: "#click-btn",
+        x: 0,
+        y: 0,
+      })
+      expect(bad.ok).toBe(false)
+      expect(bad.error).toMatch(/exactly one of/i)
+    },
+  )
+
+  test.skipIf(shouldSkip)(
+    "browser_mouse rejects paired-coord violation (x without y)",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      const bad = await ws!.call("browser_mouse", {
+        tabId,
+        action: "click",
+        x: 100,
+      })
+      expect(bad.ok).toBe(false)
+      expect(bad.error).toMatch(/x and y must be provided together/i)
+    },
+  )
+
+  test.skipIf(shouldSkip)(
+    "browser_type normalizes CRLF to LF (does NOT reject \\r)",
+    async () => {
+      const tabId = await openHumanlikeFixture()
+      await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "window.__keyEvents = []; document.getElementById('text-input').value = ''; document.getElementById('text-input').focus()",
+      })
+      // \r\n must be accepted (post-fix) and dispatched as one Enter.
+      const typed = await ws!.call("browser_type", { tabId, text: "hi\r\n" })
+      expect(typed.ok).toBe(true)
+      // Should be 3 chars (h, i, Enter from the normalized \n) — NOT 4.
+      // The \r is consumed during normalization, not dispatched.
+      expect((typed.data as { chars: number }).chars).toBe(3)
+      // And the input.value is "hi" (Enter on a text input is no-op).
+      const valEv = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "document.getElementById('text-input').value",
+      })
+      expect((valEv.data as { result: string }).result).toBe("hi")
+    },
+  )
 })
 
 // When skipping, surface the reason so CI logs are self-documenting.

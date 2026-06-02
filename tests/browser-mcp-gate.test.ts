@@ -187,4 +187,37 @@ describe("browser-mcp capability gate (--browse)", () => {
     expect(payload.manual_steps.load_unpacked_dir).toMatch(/browser-ext/)
     expect(payload.manual_steps.expected_extension_id).toMatch(/^[a-p]{32}$/)
   })
+
+  test("tools/list includes the humanlike-input v2 tools (mouse / drag / type / locate) when gate is on", async () => {
+    if (!hasSupportedBrowserInstalled()) return
+    state.browseEnabled = true
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "tools/list",
+    })
+    const names = (json.result as { tools: Array<{ name: string }> }).tools.map(
+      (t) => t.name,
+    )
+    for (const name of ["browser_mouse", "browser_drag", "browser_type", "browser_locate"]) {
+      expect(names).toContain(name)
+    }
+  })
+
+  test("defense-in-depth: tools/call browser_mouse / browser_drag / browser_type / browser_locate return -32601 when gate is off", async () => {
+    // Symmetric with browser_open_tab — a naive client hard-coding any
+    // of these new names must hit the same method-not-found path.
+    for (const name of ["browser_mouse", "browser_drag", "browser_type", "browser_locate"]) {
+      const { status, json } = await rpc({
+        jsonrpc: "2.0",
+        id: 7,
+        method: "tools/call",
+        params: { name, arguments: { tabId: 1 } },
+      })
+      expect(status).toBe(200)
+      const err = (json as { error?: { code: number; message: string } }).error
+      expect(err?.code).toBe(-32601)
+      expect(err?.message).toMatch(/unknown tool/i)
+    }
+  })
 })

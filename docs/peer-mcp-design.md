@@ -340,6 +340,8 @@ Two non-persona MCP tools — `mcp__gh-router-peers__worker_explore` and `mcp__g
 
 Both tools accept optional `model` (any Copilot catalog model with `tool_calls` support; default `gemini-3.5-flash`) and `thinking` (one of `off`/`minimal`/`low`/`medium`/`high`/`xhigh`, default `high`, silently clamped to the model's allowed range).
 
+Both also accept an optional `workspace` (absolute path) — the working directory the worker operates in. **Default is the proxy's launch cwd** (the directory `github-router start` / `github-router claude` was invoked from); the model can override when the parent agent has multiple workspaces open and needs the worker pointed at a specific one. The override is absolute-only — relative paths are rejected at the MCP boundary with an actionable error so a typo doesn't silently resolve against `process.cwd()` and land somewhere surprising. For `worker_implement` with `worktree: true`, the workspace must be inside a git repository (the engine's existing `createWorktree` hard-errors otherwise). Threat model matches `code_search`: the proxy already runs as the user; no allowlist (the same operator could `Read` / `Bash` the same paths through Claude Code directly). See `runWorkerToolCall` in `src/lib/peer-mcp-personas.ts` for the validation.
+
 ### Dual gate (catalog + opt-out)
 
 `workerToolsEnabled()` in `src/routes/mcp/handler.ts` drops both worker tools from `tools/list` AND `tools/call` when EITHER:

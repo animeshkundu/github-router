@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>browser-mcp humanlike-input fixture</title>
+    <style>
+      body { margin: 0; padding: 16px; font-family: sans-serif; }
+      .row { margin: 12px 0; }
+      #hover-target {
+        display: inline-block;
+        padding: 16px 24px;
+        background: #eef;
+        border: 1px solid #99c;
+        position: relative;
+      }
+      #hover-tooltip {
+        display: none;
+        position: absolute;
+        top: 100%;
+        left: 0;
+        background: #ffe;
+        border: 1px solid #cc9;
+        padding: 6px 10px;
+      }
+      #hover-target:hover #hover-tooltip { display: block; }
+      #overlay-target {
+        position: relative;
+        display: inline-block;
+        padding: 16px 24px;
+        background: #efe;
+        border: 1px solid #9c9;
+      }
+      #overlay-wrap {
+        position: relative;
+        display: inline-block;
+      }
+      #overlay-cover {
+        position: absolute;
+        inset: 0;
+        background: rgba(255, 0, 0, 0.5);
+        z-index: 10;
+      }
+      .drag-area {
+        display: flex;
+        gap: 20px;
+        margin: 20px 0;
+      }
+      .drag-source, .drop-target {
+        width: 120px;
+        height: 80px;
+        border: 2px dashed #888;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .drag-source { background: #fef; }
+      .drop-target { background: #fff; }
+      #inner-scroller {
+        width: 300px;
+        height: 200px;
+        overflow: auto;
+        border: 1px solid #888;
+      }
+      #inner-content { height: 2000px; padding: 8px; }
+    </style>
+  </head>
+  <body>
+    <h1>HUMANLIKE_MARKER</h1>
+
+    <div class="row">
+      <button id="click-btn" data-testid="click-btn">Click me</button>
+      <input id="text-input" placeholder="type into me" />
+    </div>
+
+    <div class="row">
+      <span id="hover-target" data-testid="hover-target">
+        Hover me
+        <span id="hover-tooltip" data-testid="hover-tooltip">REVEAL_ON_HOVER</span>
+      </span>
+    </div>
+
+    <div class="row">
+      <span id="overlay-wrap">
+        <span id="overlay-target" data-testid="overlay-target">Behind overlay</span>
+        <span id="overlay-cover" data-testid="overlay-cover"></span>
+      </span>
+    </div>
+
+    <div class="drag-area">
+      <div class="drag-source" id="drag-source-html5" draggable="true" data-testid="drag-source-html5">
+        HTML5 drag
+      </div>
+      <div class="drop-target" id="drop-target-html5" data-testid="drop-target-html5">
+        Drop here
+      </div>
+    </div>
+
+    <div class="drag-area">
+      <div class="drag-source" id="drag-source-pointer" data-testid="drag-source-pointer">
+        Pointer drag
+      </div>
+      <div class="drop-target" id="drop-target-pointer" data-testid="drop-target-pointer">
+        Drop here
+      </div>
+    </div>
+
+    <div class="row">
+      <div id="inner-scroller" data-testid="inner-scroller">
+        <div id="inner-content">
+          Long content<br />Long content<br />Long content<br />Long content<br />
+          Long content<br />Long content<br />Long content<br />Long content<br />
+          Long content<br />Long content<br />Long content<br />Long content<br />
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // Mouse-event recorder for the click / move / coord tests.
+      window.__mouseEvents = []
+      window.__keyEvents = []
+      window.__dropEvents = []
+      window.__pointerDrag = { downAt: null, ups: 0, movesWithButton: 0, dropAt: null }
+
+      document.addEventListener("mousemove", (e) => {
+        window.__mouseEvents.push({ x: e.clientX, y: e.clientY, isTrusted: e.isTrusted })
+      })
+
+      const clickBtn = document.getElementById("click-btn")
+      clickBtn.addEventListener("click", (e) => {
+        window.__lastClick = { x: e.clientX, y: e.clientY, isTrusted: e.isTrusted, target: "click-btn" }
+      })
+      clickBtn.addEventListener("dblclick", () => {
+        window.__lastDblClick = { target: "click-btn" }
+      })
+
+      const overlay = document.getElementById("overlay-target")
+      overlay.addEventListener("click", () => {
+        window.__overlayClicked = true
+      })
+
+      // HTML5 drag-and-drop wiring
+      const html5Source = document.getElementById("drag-source-html5")
+      const html5Drop = document.getElementById("drop-target-html5")
+      html5Source.addEventListener("dragstart", (e) => {
+        e.dataTransfer.setData("text/plain", "DRAGGED_PAYLOAD")
+        window.__html5DragStarted = true
+      })
+      html5Drop.addEventListener("dragenter", (e) => { e.preventDefault() })
+      html5Drop.addEventListener("dragover", (e) => { e.preventDefault() })
+      html5Drop.addEventListener("drop", (e) => {
+        e.preventDefault()
+        const payload = e.dataTransfer.getData("text/plain")
+        window.__dropEvents.push({ kind: "html5", payload })
+        html5Drop.textContent = "DROPPED:" + payload
+      })
+
+      // Pointer-event drag wiring (mimics react-dnd / Sortable.js: tracks
+      // buttons:1 across pointermove between mousedown and mouseup).
+      const ptrSource = document.getElementById("drag-source-pointer")
+      const ptrDrop = document.getElementById("drop-target-pointer")
+      ptrSource.addEventListener("mousedown", (e) => {
+        window.__pointerDrag.downAt = { x: e.clientX, y: e.clientY }
+      })
+      document.addEventListener("mousemove", (e) => {
+        if (window.__pointerDrag.downAt && e.buttons === 1) {
+          window.__pointerDrag.movesWithButton++
+        }
+      })
+      document.addEventListener("mouseup", (e) => {
+        if (window.__pointerDrag.downAt) {
+          window.__pointerDrag.ups++
+          // Was the cursor over the drop target at release?
+          const rect = ptrDrop.getBoundingClientRect()
+          const overTarget = e.clientX >= rect.left && e.clientX <= rect.right
+            && e.clientY >= rect.top && e.clientY <= rect.bottom
+          if (overTarget) {
+            window.__pointerDrag.dropAt = { x: e.clientX, y: e.clientY }
+            window.__dropEvents.push({ kind: "pointer" })
+            ptrDrop.textContent = "DROPPED:pointer"
+          }
+          window.__pointerDrag.downAt = null
+        }
+      })
+
+      // Text input key recorder
+      const input = document.getElementById("text-input")
+      input.addEventListener("keydown", (e) => {
+        window.__keyEvents.push({ key: e.key, code: e.code, isTrusted: e.isTrusted })
+      })
+      input.focus()
+    </script>
+  </body>
+</html>

@@ -24,6 +24,9 @@ export default tseslint.config(
         setInterval: "readonly",
         clearInterval: "readonly",
         globalThis: "readonly",
+        // SW-context global: navigator.locks serialises debugger-attach
+        // attempts after MV3 SW respawn.
+        navigator: "readonly",
         // Page-context globals: these appear inside the `func` arg of
         // chrome.scripting.executeScript blocks which run in the
         // injected page, not the SW. Listed as readonly so the SW's
@@ -35,6 +38,8 @@ export default tseslint.config(
         InputEvent: "readonly",
         KeyboardEvent: "readonly",
         Event: "readonly",
+        getComputedStyle: "readonly",
+        CSS: "readonly",
       },
     },
   },

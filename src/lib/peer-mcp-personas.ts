@@ -21,6 +21,8 @@
  *      the persona prompt teaches the lead what to paste.
  */
 
+import path from "node:path"
+
 import { searchCode } from "./code-search"
 // Static import is safe: the previous module-init cycle (peer-mcp-personas
 // → worker-agent/index → engine → tools → peer-mcp-personas) was caused
@@ -810,6 +812,16 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               + "clamped to the model's allowed range; \"off\" drops "
               + "the parameter entirely.",
           },
+          workspace: {
+            type: "string",
+            description:
+              "Optional absolute path to the workspace the worker "
+              + "operates in. Defaults to the proxy's launch cwd. "
+              + "Use this when the parent agent has multiple "
+              + "workspaces open and the worker must operate in a "
+              + "specific one. Must be absolute (relative paths "
+              + "rejected).",
+          },
         },
       },
       async handler(
@@ -869,6 +881,17 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               "Optional reasoning depth (default high). Silently "
               + "clamped to the model's allowed range; \"off\" drops "
               + "the parameter entirely.",
+          },
+          workspace: {
+            type: "string",
+            description:
+              "Optional absolute path to the workspace the worker "
+              + "operates in. Defaults to the proxy's launch cwd. "
+              + "Use this when the parent agent has multiple "
+              + "workspaces open and the worker must operate in a "
+              + "specific one. Must be absolute (relative paths "
+              + "rejected). For worktree:true, must be inside a "
+              + "git repo.",
           },
         },
       },
@@ -992,11 +1015,13 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
 /**
  * Shared closure body for the two worker MCP tools. Validates the
  * minimal arg shape (prompt required + optional knobs typed), then
- * forwards to `runWorkerAgent` with `workspace = process.cwd()`. The
- * engine performs every deeper validation (model existence, thinking
- * clamp, worktree provisioning, semaphore acquisition) and never
- * throws — its `{text, isError?}` envelope is forwarded verbatim into
- * the MCP `tool result` shape.
+ * forwards to `runWorkerAgent`. `workspace` defaults to the proxy's
+ * launch cwd; callers can override via the optional `workspace` arg
+ * (absolute paths only — enforced here). The engine performs every
+ * deeper validation (model existence, thinking clamp, worktree
+ * provisioning, semaphore acquisition, workspace realpath +
+ * accessibility) and never throws — its `{text, isError?}` envelope
+ * is forwarded verbatim into the MCP `tool result` shape.
  *
  * Arg-validation policy mirrors `web_search`'s pattern: shape errors
  * surface as `isError: true` tool-result envelopes (NOT JSON-RPC -32602
@@ -1080,6 +1105,33 @@ async function runWorkerToolCall(call: {
     worktree = args.worktree
   }
 
+  // Optional workspace override. Default is the proxy's launch cwd;
+  // the model can override when the parent agent has multiple
+  // workspaces open and the worker must operate in a specific one
+  // (matches code_search's threat model — no allowlist; proxy already
+  // runs as the user). Absolute-only at the boundary so a relative
+  // path doesn't silently resolve against process.cwd().
+  let workspace = process.cwd()
+  if (args.workspace !== undefined) {
+    if (typeof args.workspace !== "string" || args.workspace.length === 0) {
+      return {
+        content: [
+          { type: "text", text: `worker_${mode}: arguments.workspace must be a non-empty string when provided` },
+        ],
+        isError: true,
+      }
+    }
+    if (!path.isAbsolute(args.workspace)) {
+      return {
+        content: [
+          { type: "text", text: `worker_${mode}: arguments.workspace must be an absolute path (got "${args.workspace}")` },
+        ],
+        isError: true,
+      }
+    }
+    workspace = args.workspace
+  }
+
   // `runWorkerAgent` is now statically imported at the top of this
   // file — the cycle that previously forced a dynamic import has
   // been broken by moving `assertCriticsMatchPersonas` out of
@@ -1087,7 +1139,7 @@ async function runWorkerToolCall(call: {
   const result = await runWorkerAgent({
     mode,
     prompt,
-    workspace: process.cwd(),
+    workspace,
     model,
     thinking,
     worktree,
