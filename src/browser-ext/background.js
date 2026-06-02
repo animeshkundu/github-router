@@ -152,6 +152,14 @@ async function toolScreenshot(args) {
       await sleep(150)
     }
   }
+  // Both this API and CDP Page.captureScreenshot require the browser
+  // to have a real OS-level rendering surface. On Chrome-for-Testing
+  // launched in plain headed mode without --headless=new, no such
+  // surface exists and either path hangs indefinitely — the Playwright
+  // E2E harness passes --headless=new in its args list for exactly this
+  // reason. Real Chrome with a visible window has a surface and works
+  // fine. If you're driving Chrome-for-Testing programmatically and
+  // need screenshots, launch with `--headless=new`.
   const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format })
   // dataUrl: "data:image/png;base64,...."
   const m = /^data:([^;]+);base64,(.*)$/.exec(dataUrl)
@@ -448,16 +456,77 @@ function clampNum(v, min, max) {
 // This mutex is per-tab, layered on top.
 const tabInputLockTails = new Map() // tabId → Promise (tail of the lock chain)
 
-async function withTabInputLock(tabId, fn) {
+// Wall-clock cap on how long ONE input call may hold its tab's mutex,
+// passed per-call (each tool sizes its own cap). Acts as a deadlock
+// release valve when an in-extension hang outlives the dispatcher's
+// WS-side timeout — without this cap the lock would stay held forever
+// (CDP commands don't abort when the dispatcher's WS disconnects).
+//
+// On wedge: we force-detach `chrome.debugger` for the tab AND bump the
+// tab's input generation. The detach makes all in-flight `sendCommand`
+// promises in the wedged fn() reject with "Debugger is not attached"
+// — without this, the wedged fn could keep dispatching stale CDP
+// events (e.g. a leftover `mouseReleased`) after the next caller has
+// already taken the lock and started a fresh drag, corrupting it.
+// `attachedTabs` is cleared so the next caller's `attachDebuggerOnce`
+// re-attaches cleanly. Cost: per-tab `consoleBuffers` /
+// `networkBuffers` are dropped (their backing CDP domain is no longer
+// enabled); the next `browser_console_logs` / `browser_network_log`
+// call re-`Runtime.enable` / `Network.enable` and starts capturing
+// fresh. A loud console.warn surfaces the wedge to forensic readers.
+//
+// Default cap = 60s — comfortably covers mouse/drag/scroll/keyboard
+// dispatcher maxMs (30s/30s/15s/10s) plus CDP overhead. `browser_type`
+// passes a larger explicit cap to accommodate its legitimately-slow
+// per-keystroke max (210s + grace).
+const DEFAULT_TAB_INPUT_LOCK_HOLD_CAP_MS = 60_000
+const TYPE_TAB_INPUT_LOCK_HOLD_CAP_MS = 240_000
+
+const tabInputGenerations = new Map() // tabId → number, bumped each acquire + on wedge
+
+async function withTabInputLock(tabId, fn, holdCapMs = DEFAULT_TAB_INPUT_LOCK_HOLD_CAP_MS) {
   const previousTail = tabInputLockTails.get(tabId) || Promise.resolve()
   let release
   const myTurn = new Promise((r) => { release = r })
   const newTail = previousTail.then(() => myTurn)
   tabInputLockTails.set(tabId, newTail)
   await previousTail
+  let timer
+  let wedged = false
   try {
-    return await fn()
+    return await Promise.race([
+      fn(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          wedged = true
+          reject(new Error(
+            `input_lock_wedged: held > ${holdCapMs}ms on tabId=${tabId}; force-detached debugger to abort the stuck CDP call.`,
+          ))
+        }, holdCapMs)
+      }),
+    ])
   } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    if (wedged) {
+      console.warn(`[browser-bridge] tab ${tabId} input lock wedged past ${holdCapMs}ms — force-detaching debugger`)
+      // Force-detach so the wedged fn's pending sendCommand promises
+      // reject and any further CDP calls it queues fail too. Without
+      // this, stale events from the wedged call can interleave with
+      // the next caller and corrupt drags / mouse state.
+      try {
+        await chrome.debugger.detach({ tabId })
+      } catch {
+        // already detached / tab gone — fine
+      }
+      attachedTabs.delete(tabId)
+      // Buffers need re-enabling next time their domains attach.
+      consoleBuffers.delete(tabId)
+      networkBuffers.delete(tabId)
+      // Bump the generation so any wedged fn() that checks before
+      // its next CDP send (future tools may opt in) sees the stale
+      // marker and bails out early.
+      tabInputGenerations.set(tabId, (tabInputGenerations.get(tabId) || 0) + 1)
+    }
     release()
     // GC the Map entry only if no later caller chained on top of us.
     // If they did, the tail has been replaced; leave it alone.
@@ -870,8 +939,23 @@ async function toolType(args) {
         key = "Backspace"; codeStr = "Backspace"; vkc = 8; sendText = undefined
       } else {
         key = ch
+        // Punctuation table fills in real Windows-VK values for the
+        // characters whose naive `charCodeAt` would collide with
+        // unrelated VK codes (e.g. '.' = 46 = VK_DELETE). Letters and
+        // digits use their natural charCode (VK_A..VK_Z / VK_0..VK_9
+        // happen to match). Everything else: 0, and CDP infers event
+        // semantics from `key` + `text`. Without this, sites that
+        // fall back to `event.keyCode` for hotkey handling would see
+        // 0 for typed punctuation; with it they get the canonical VK.
+        const punctVk = PUNCT_TO_VK[ch]
+        if (/^[a-zA-Z0-9]$/.test(ch)) {
+          vkc = ch.toUpperCase().charCodeAt(0)
+        } else if (punctVk !== undefined) {
+          vkc = punctVk
+        } else {
+          vkc = 0
+        }
         codeStr = deriveKeyCode(ch)
-        vkc = ch.length === 1 ? ch.toUpperCase().charCodeAt(0) : 0
         sendText = ch
       }
       // Correct CDP recipe: keyDown WITH text fires keydown + keypress +
@@ -897,19 +981,64 @@ async function toolType(args) {
       if (delayMs > 0) await sleep(delayMs)
     }
     return { ok: true, chars: count }
-  })
+  }, TYPE_TAB_INPUT_LOCK_HOLD_CAP_MS)
 }
 
+// Windows VK codes for the printable punctuation that browser_type
+// needs to send. Letters and digits aren't here — their natural
+// charCode happens to match VK_A..VK_Z / VK_0..VK_9 and the typing
+// loop derives those inline. This table covers the unshifted AND
+// shift-modified character on each US-layout punctuation key; both
+// map to the same physical-key VK (the shift state is implied by the
+// `text` field, and we don't dispatch a separate shift keydown).
+//
+// Source: Windows VK reference (learn.microsoft.com/...windows-keyboard-codes)
+// — VK_OEM_* are the layout-specific punctuation codes (US-QWERTY here).
+const PUNCT_TO_VK = Object.freeze({
+  // Shift+number row
+  "!": 49, "@": 50, "#": 51, "$": 52, "%": 53,
+  "^": 54, "&": 55, "*": 56, "(": 57, ")": 48,
+  // VK_OEM_1 .. VK_OEM_7 + space
+  ";": 186, ":": 186,
+  "=": 187, "+": 187,
+  ",": 188, "<": 188,
+  "-": 189, "_": 189,
+  ".": 190, ">": 190,
+  "/": 191, "?": 191,
+  "`": 192, "~": 192,
+  "[": 219, "{": 219,
+  "\\": 220, "|": 220,
+  "]": 221, "}": 221,
+  "'": 222, '"': 222,
+  " ": 32, // VK_SPACE
+})
+
 function deriveKeyCode(ch) {
-  // Best-effort code field. Sufficient for sites that check event.code
-  // for ASCII printable chars. Non-ASCII falls back to empty string.
+  // Best-effort code field. Covers ASCII printable chars including
+  // shift-modified punctuation (! → Digit1, @ → Digit2, < → Comma,
+  // etc) so `event.code` reports the PHYSICAL key the char lives on
+  // — sites that check `event.code === "Digit1"` for layout-aware
+  // shortcuts work the same whether the user typed `1` or `!`.
+  // Non-ASCII falls back to empty string.
   if (/^[a-zA-Z]$/.test(ch)) return "Key" + ch.toUpperCase()
   if (/^[0-9]$/.test(ch)) return "Digit" + ch
   if (ch === " ") return "Space"
   const map = {
-    "-": "Minus", "=": "Equal", "[": "BracketLeft", "]": "BracketRight",
-    "\\": "Backslash", ";": "Semicolon", "'": "Quote", ",": "Comma",
-    ".": "Period", "/": "Slash", "`": "Backquote",
+    // Number-row shift partners
+    "!": "Digit1", "@": "Digit2", "#": "Digit3", "$": "Digit4", "%": "Digit5",
+    "^": "Digit6", "&": "Digit7", "*": "Digit8", "(": "Digit9", ")": "Digit0",
+    // OEM keys (US-QWERTY)
+    "-": "Minus", "_": "Minus",
+    "=": "Equal", "+": "Equal",
+    "[": "BracketLeft", "{": "BracketLeft",
+    "]": "BracketRight", "}": "BracketRight",
+    "\\": "Backslash", "|": "Backslash",
+    ";": "Semicolon", ":": "Semicolon",
+    "'": "Quote", '"': "Quote",
+    ",": "Comma", "<": "Comma",
+    ".": "Period", ">": "Period",
+    "/": "Slash", "?": "Slash",
+    "`": "Backquote", "~": "Backquote",
   }
   return map[ch] || ""
 }

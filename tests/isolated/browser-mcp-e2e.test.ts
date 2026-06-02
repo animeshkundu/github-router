@@ -623,6 +623,35 @@ describe("browser-mcp E2E (real Chromium + bridge + extension)", () => {
   )
 
   test.skipIf(shouldSkip)(
+    "browser_type preserves punctuation — '.', ':', '-', ',', '@', '/', etc must NOT be dropped",
+    async () => {
+      // Regression for the bug surfaced during real-Chrome smoke test on
+      // DuckDuckGo: typing 'site:github.com' yielded 'site:githubcom' because
+      // '.'.charCodeAt(0) === 46 === VK_DELETE on Windows. The keyDown with
+      // windowsVirtualKeyCode=46 was interpreted as a delete-key press and
+      // Chromium suppressed the '.' text insertion. Same hazard for every
+      // printable non-letter/digit char whose charCode collides with a VK
+      // code. Fix: only derive vkc for /[a-zA-Z0-9]/, else 0 (let CDP infer).
+      const tabId = await openHumanlikeFixture()
+      await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "document.getElementById('text-input').value = ''; document.getElementById('text-input').focus()",
+      })
+      // Realistic punctuation soup: a URL with all the trip-wire chars.
+      const text = "user-name@host.example.com:8080/path?q=a&b=c"
+      const typed = await ws!.call("browser_type", { tabId, text })
+      expect(typed.ok).toBe(true)
+      expect((typed.data as { chars: number }).chars).toBe(text.length)
+      const valEv = await ws!.call("browser_eval_js", {
+        tabId,
+        expression: "document.getElementById('text-input').value",
+      })
+      // Exact match — no silently-dropped chars.
+      expect((valEv.data as { result: string }).result).toBe(text)
+    },
+  )
+
+  test.skipIf(shouldSkip)(
     "browser_scroll target=at-pointer wheel-scrolls a sub-region without scrolling the window",
     async () => {
       const tabId = await openHumanlikeFixture()
