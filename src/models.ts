@@ -144,25 +144,27 @@ function formatModel(model: Model): Array<string> {
 
   const limits = model.capabilities.limits
   const limitParts: Array<string> = []
-  if (limits.max_context_window_tokens) {
-    limitParts.push(`ctx ${formatTokens(limits.max_context_window_tokens)}`)
-  } else if (limits.max_prompt_tokens) {
-    limitParts.push(`prompt ${formatTokens(limits.max_prompt_tokens)}`)
-  }
-  if (limits.max_output_tokens) {
-    limitParts.push(`out ${formatTokens(limits.max_output_tokens)}`)
-  }
-  if (
-    limits.max_non_streaming_output_tokens
-    && limits.max_non_streaming_output_tokens !== limits.max_output_tokens
-  ) {
-    limitParts.push(
-      `out-non-stream ${formatTokens(limits.max_non_streaming_output_tokens)}`,
-    )
-  }
-  if (limits.max_inputs) limitParts.push(`inputs ${limits.max_inputs}`)
-  if (limits.vision?.max_prompt_images) {
-    limitParts.push(`images ${limits.vision.max_prompt_images}`)
+  if (limits) {
+    if (limits.max_context_window_tokens) {
+      limitParts.push(`ctx ${formatTokens(limits.max_context_window_tokens)}`)
+    } else if (limits.max_prompt_tokens) {
+      limitParts.push(`prompt ${formatTokens(limits.max_prompt_tokens)}`)
+    }
+    if (limits.max_output_tokens) {
+      limitParts.push(`out ${formatTokens(limits.max_output_tokens)}`)
+    }
+    if (
+      limits.max_non_streaming_output_tokens
+      && limits.max_non_streaming_output_tokens !== limits.max_output_tokens
+    ) {
+      limitParts.push(
+        `out-non-stream ${formatTokens(limits.max_non_streaming_output_tokens)}`,
+      )
+    }
+    if (limits.max_inputs) limitParts.push(`inputs ${limits.max_inputs}`)
+    if (limits.vision?.max_prompt_images) {
+      limitParts.push(`images ${limits.vision.max_prompt_images}`)
+    }
   }
   if (limitParts.length > 0) {
     lines.push(`      limits: ${limitParts.join("  ·  ")}`)
@@ -170,23 +172,25 @@ function formatModel(model: Model): Array<string> {
 
   const supports = model.capabilities.supports
   const supportFlags: Array<string> = []
-  if (supports.tool_calls) supportFlags.push("tools")
-  if (supports.parallel_tool_calls) supportFlags.push("parallel-tools")
-  if (supports.streaming) supportFlags.push("streaming")
-  if (supports.vision) supportFlags.push("vision")
-  if (supports.structured_outputs) supportFlags.push("structured-outputs")
-  if (supports.dimensions) supportFlags.push("dimensions")
-  if (supports.adaptive_thinking) {
-    const min = supports.min_thinking_budget
-    const max = supports.max_thinking_budget
-    const range
-      = min !== undefined && max !== undefined
-        ? `(${formatTokens(min)}-${formatTokens(max)})`
-        : ""
-    supportFlags.push(`adaptive-thinking${range}`)
-  }
-  if (supports.reasoning_effort && supports.reasoning_effort.length > 0) {
-    supportFlags.push(`reasoning:${supports.reasoning_effort.join("/")}`)
+  if (supports) {
+    if (supports.tool_calls) supportFlags.push("tools")
+    if (supports.parallel_tool_calls) supportFlags.push("parallel-tools")
+    if (supports.streaming) supportFlags.push("streaming")
+    if (supports.vision) supportFlags.push("vision")
+    if (supports.structured_outputs) supportFlags.push("structured-outputs")
+    if (supports.dimensions) supportFlags.push("dimensions")
+    if (supports.adaptive_thinking) {
+      const min = supports.min_thinking_budget
+      const max = supports.max_thinking_budget
+      const range
+        = min !== undefined && max !== undefined
+          ? `(${formatTokens(min)}-${formatTokens(max)})`
+          : ""
+      supportFlags.push(`adaptive-thinking${range}`)
+    }
+    if (supports.reasoning_effort && supports.reasoning_effort.length > 0) {
+      supportFlags.push(`reasoning:${supports.reasoning_effort.join("/")}`)
+    }
   }
   if (supportFlags.length > 0) {
     lines.push(`      supports: ${supportFlags.join(", ")}`)

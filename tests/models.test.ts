@@ -180,6 +180,29 @@ test("formatModel handles minimal models without limits/supports/billing", () =>
   expect(out).not.toContain("billing:")
 })
 
+test("formatModel handles models whose capabilities omit limits/supports entirely", () => {
+  // Copilot's live catalog returns at least one model (e.g. embeddings) whose
+  // capabilities.limits is undefined; reproduces the npx 0.3.43 crash:
+  // "Cannot read properties of undefined (reading 'max_context_window_tokens')".
+  const m = makeModel({
+    id: "text-embedding-3-small",
+    vendor: "OpenAI",
+    capabilities: {
+      family: "text-embedding-3-small",
+      type: "embeddings",
+      object: "model_capabilities",
+      tokenizer: "cl100k_base",
+    },
+  })
+  expect(() => formatModel(m)).not.toThrow()
+  const out = formatModel(m).join("\n")
+  expect(out).toContain("text-embedding-3-small")
+  expect(out).toContain("family: text-embedding-3-small")
+  expect(out).toContain("type: embeddings")
+  expect(out).not.toContain("limits:")
+  expect(out).not.toContain("supports:")
+})
+
 test("formatModel surfaces model_picker_category and chat-default flags", () => {
   const m = makeModel({
     id: "default-chat",
