@@ -15,7 +15,7 @@ import type { NonPersonaMcpTool } from "~/lib/peer-mcp-personas"
  * call-time when the operator hasn't opted in via `--browse` or
  * `GH_ROUTER_ENABLE_BROWSE=1`.
  *
- * v1 surface: 15 tools (Phases 3 + 4a + 4b).
+ * v1 surface: 19 tools (Phases 3 + 4a + 4b + humanlike input v2).
  */
 export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
   {
@@ -130,7 +130,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
   {
     toolNameHttp: "browser_read_page",
     description:
-      "Extract rendered page text plus the list of interactive elements (refs, roles, names, bounding boxes). Element refs returned here are intended as the input to a follow-up browser_click / browser_fill / browser_scroll — preferred over CSS selectors because refs are stable across dynamic class names. Text is capped at 256 KiB.",
+      "Extract rendered page text plus interactive elements (refs, roles, names, bounding boxes) plus viewport metadata. Each element entry carries bbox: [x, y, w, h] in CSS viewport pixels — the same coordinate space used by browser_mouse / browser_drag / browser_scroll(at-pointer). Element refs returned here are intended as the primary input to follow-up tool calls — preferred over CSS selectors because refs are stable across dynamic class names. The viewport block {width, height, devicePixelRatio, scrollX, scrollY} lets you map a CSS-px bbox to a device-px pixel in browser_screenshot (device_px = css_px * devicePixelRatio). Text is capped at 256 KiB; elements at the first 200 interactive nodes.",
     inputSchema: {
       type: "object",
       required: ["tabId"],
@@ -200,7 +200,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
   {
     toolNameHttp: "browser_scroll",
     description:
-      "Scroll a tab to the top, to the bottom, by a pixel amount, or to a specific element by ref.",
+      "Scroll a tab. Five modes: top / bottom of the page, by an absolute pixel delta, to a specific element (by ref), or wheel-scroll a sub-region at a pointer location ('at-pointer' — the path that works for chat windows / infinite-scroll lists / modal bodies that don't respond to window.scrollTo because they have their own scroll container).",
     inputSchema: {
       type: "object",
       required: ["tabId", "target"],
@@ -209,7 +209,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         tabId: { type: "number" },
         target: {
           type: "string",
-          enum: ["top", "bottom", "pixels", "element"],
+          enum: ["top", "bottom", "pixels", "element", "at-pointer"],
           description: "Scroll target type.",
         },
         pixels: {
@@ -218,7 +218,31 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
         ref: {
           type: "string",
-          description: "Element ref when target=element. Scrolls so the element is centered in the viewport.",
+          description: "Element ref. For target=element, scrolls so the element is centered. For target=at-pointer, resolves to the bbox center as the wheel position.",
+        },
+        selector: {
+          type: "string",
+          description: "CSS selector. For target=at-pointer, fallback when no ref. Resolves to bbox center.",
+        },
+        x: {
+          type: "number",
+          description: "Pointer x (CSS viewport px) for target=at-pointer. Pair with y. Exactly one of (ref, selector, or x+y) is required for at-pointer.",
+        },
+        y: {
+          type: "number",
+          description: "Pointer y (CSS viewport px) for target=at-pointer. Pair with x.",
+        },
+        deltaX: {
+          type: "number",
+          description: "Wheel delta x (CSS px) for target=at-pointer. Default 0. Clamped to |10000|.",
+        },
+        deltaY: {
+          type: "number",
+          description: "Wheel delta y (CSS px) for target=at-pointer. Positive scrolls down. Default 0. Clamped to |10000|. At least one of deltaX/deltaY must be non-zero.",
+        },
+        force: {
+          type: "boolean",
+          description: "Skip the pre-wheel elementFromPoint hit-test for target=at-pointer. Default false. Set true when an overlay covers the target but forwards wheel events.",
         },
       },
     },
@@ -365,6 +389,158 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
     capability: "browser",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_network_log", args, signal)
+    },
+  },
+  {
+    toolNameHttp: "browser_mouse",
+    description:
+      "Move / click / hover / press / release the mouse via real CDP input events (Input.dispatchMouseEvent). Use this when you need behavior that synthetic .click() can't trigger: hover-to-reveal menus, canvas / map / image-map clicks, sites that check event.isTrusted, or precise coordinate targeting. Target with ref (from browser_read_page), CSS selector, or (x, y) in CSS viewport pixels — exactly one. action='move' is the hover (single mouseMoved fires :hover and pointerover reliably). action='dblclick' sends two press/release cycles with incrementing clickCount (a real double-click, not one cycle with clickCount=2). By default the target is hit-tested with elementFromPoint and the call fails with `target_obscured` if the topmost element isn't the target or a descendant — pass force:true to bypass when you know an overlay forwards events.",
+    inputSchema: {
+      type: "object",
+      required: ["tabId", "action"],
+      additionalProperties: false,
+      properties: {
+        tabId: { type: "number" },
+        action: {
+          type: "string",
+          enum: ["move", "click", "dblclick", "down", "up"],
+          description: "What to do. move=position cursor (hover). click=press+release. dblclick=two press+release with clickCount 1 then 2. down=press only. up=release only.",
+        },
+        ref: {
+          type: "string",
+          description: "Element ref from browser_read_page (preferred). Resolves to bbox center. Exactly one of ref / selector / (x+y) required.",
+        },
+        selector: {
+          type: "string",
+          description: "CSS selector (fallback). Resolves to bbox center.",
+        },
+        x: {
+          type: "number",
+          description: "Target x in CSS viewport pixels. Pair with y. Use when working from a screenshot or eval_js output.",
+        },
+        y: {
+          type: "number",
+          description: "Target y in CSS viewport pixels. Pair with x.",
+        },
+        button: {
+          type: "string",
+          enum: ["left", "right", "middle"],
+          description: "Mouse button for click / dblclick / down / up. Default 'left'. Ignored for action=move.",
+        },
+        steps: {
+          type: "number",
+          description: "Humanlike trajectory. >1 interpolates the cursor approach over N mouseMoved events. Default 1 (teleport). Clamped to [1, 100].",
+        },
+        stepDelayMs: {
+          type: "number",
+          description: "Pause between interpolated mouseMoved events when steps > 1. Default 8. Clamped to [0, 50].",
+        },
+        force: {
+          type: "boolean",
+          description: "Skip the pre-click elementFromPoint hit-test (ref/selector mode only). Default false.",
+        },
+      },
+    },
+    capability: "browser",
+    async handler(args: Record<string, unknown>, signal?: AbortSignal) {
+      return dispatchBrowserTool("browser_mouse", args, signal)
+    },
+  },
+  {
+    toolNameHttp: "browser_drag",
+    description:
+      "Drag from a source to a destination. Auto-detects whether to use HTML5 native DnD (for elements with draggable='true', via CDP Input.setInterceptDrags + Input.dispatchDragEvent — the only path that triggers Chromium's native dragstart pipeline) or pointer-based DnD (for react-dnd / Sortable.js / mouse-event-based drag handlers — via CDP mouse events with buttons:1 held throughout). Each of from/to can be a ref (preferred), a CSS selector, or x+y coordinates. Returns { ok: true, mode_used: 'pointer'|'html5' } so you can verify which path ran.",
+    inputSchema: {
+      type: "object",
+      required: ["tabId"],
+      additionalProperties: false,
+      properties: {
+        tabId: { type: "number" },
+        fromRef: { type: "string", description: "Source ref from browser_read_page (preferred)." },
+        fromSelector: { type: "string", description: "Source CSS selector (fallback)." },
+        fromX: { type: "number", description: "Source x in CSS viewport pixels. Pair with fromY." },
+        fromY: { type: "number", description: "Source y in CSS viewport pixels. Pair with fromX." },
+        toRef: { type: "string", description: "Destination ref from browser_read_page (preferred)." },
+        toSelector: { type: "string", description: "Destination CSS selector (fallback)." },
+        toX: { type: "number", description: "Destination x in CSS viewport pixels. Pair with toY." },
+        toY: { type: "number", description: "Destination y in CSS viewport pixels. Pair with toX." },
+        button: {
+          type: "string",
+          enum: ["left", "middle"],
+          description: "Mouse button held during drag. Default 'left'.",
+        },
+        steps: {
+          type: "number",
+          description: "Intermediate mouseMoved events from→to with the button held. Drag-detect libraries need a trajectory to fire. Default 15. Clamped to [1, 100].",
+        },
+        stepDelayMs: {
+          type: "number",
+          description: "Pause between intermediate moves. Default 12. Clamped to [0, 50].",
+        },
+        mode: {
+          type: "string",
+          enum: ["auto", "pointer", "html5"],
+          description: "Drag mode. 'auto' (default) picks html5 if the source has draggable='true', else pointer. Override only when auto detection misses.",
+        },
+        force: {
+          type: "boolean",
+          description: "Skip the pre-press elementFromPoint hit-test on the source. Default false.",
+        },
+      },
+    },
+    capability: "browser",
+    async handler(args: Record<string, unknown>, signal?: AbortSignal) {
+      return dispatchBrowserTool("browser_drag", args, signal)
+    },
+  },
+  {
+    toolNameHttp: "browser_type",
+    description:
+      "Type a string into the currently-focused element per-keystroke via CDP Input.dispatchKeyEvent. Each character fires keydown + keypress + input — this is the tool for keystroke-driven autocomplete, chips, search-as-you-type, and any site whose handlers listen on keydown rather than just reading element.value. For plain form-value entry use browser_fill (faster, sets value directly). For chord shortcuts (Control+L, etc) use browser_keyboard. Special characters in text: \\n→Enter, \\t→Tab, \\b→Backspace (dispatched as the named key, not as a literal control char). Other control chars (< 0x20) are rejected with an actionable error. Uppercase letters come from the natural code point — event.shiftKey is false but the typed value is correct.",
+    inputSchema: {
+      type: "object",
+      required: ["tabId", "text"],
+      additionalProperties: false,
+      properties: {
+        tabId: { type: "number" },
+        text: {
+          type: "string",
+          description: "The text to type. Max 4096 chars. Iterates as Unicode code points (surrogate pairs handled correctly).",
+        },
+        delayMs: {
+          type: "number",
+          description: "Pause between characters. Default 0. Clamped to [0, 50]. Set > 0 when typing into search-as-you-type inputs that debounce.",
+        },
+      },
+    },
+    capability: "browser",
+    async handler(args: Record<string, unknown>, signal?: AbortSignal) {
+      return dispatchBrowserTool("browser_type", args, signal)
+    },
+  },
+  {
+    toolNameHttp: "browser_locate",
+    description:
+      "Resolve a single ref or selector to bounding box + hit-test metadata, without a full browser_read_page snapshot. Cheap — one in-page script call. Returns bbox (CSS viewport px), center, inView (bbox intersects viewport), visible (display/visibility/opacity > 0 and bbox > 0), computed pointer-events, viewport metadata, and topmostAtCenter (is the element at the bbox center actually this target, or is it occluded by an overlay?). Use this before browser_mouse / browser_drag to detect overlay-occluded targets, or to check whether something scrolled out of view.",
+    inputSchema: {
+      type: "object",
+      required: ["tabId"],
+      additionalProperties: false,
+      properties: {
+        tabId: { type: "number" },
+        ref: {
+          type: "string",
+          description: "Element ref from browser_read_page (preferred). Exactly one of ref / selector required.",
+        },
+        selector: {
+          type: "string",
+          description: "CSS selector (fallback).",
+        },
+      },
+    },
+    capability: "browser",
+    async handler(args: Record<string, unknown>, signal?: AbortSignal) {
+      return dispatchBrowserTool("browser_locate", args, signal)
     },
   },
 ])

@@ -44,6 +44,10 @@ type ToolName =
   | "browser_download"
   | "browser_console_logs"
   | "browser_network_log"
+  | "browser_mouse"
+  | "browser_drag"
+  | "browser_type"
+  | "browser_locate"
 
 interface PerToolTimeout {
   defaultMs: number
@@ -59,13 +63,21 @@ const PER_TOOL_TIMEOUTS: Record<ToolName, PerToolTimeout> = {
   browser_read_page: { defaultMs: 10_000, maxMs: 30_000 },
   browser_click: { defaultMs: 10_000, maxMs: 30_000 },
   browser_fill: { defaultMs: 10_000, maxMs: 30_000 },
-  browser_scroll: { defaultMs: 5_000, maxMs: 10_000 },
+  browser_scroll: { defaultMs: 5_000, maxMs: 15_000 },
   browser_keyboard: { defaultMs: 5_000, maxMs: 10_000 },
   browser_wait: { defaultMs: 10_000, maxMs: 60_000 },
   browser_eval_js: { defaultMs: 5_000, maxMs: 30_000 },
   browser_download: { defaultMs: 60_000, maxMs: 300_000 },
   browser_console_logs: { defaultMs: 5_000, maxMs: 10_000 },
   browser_network_log: { defaultMs: 5_000, maxMs: 10_000 },
+  // mouse/drag worst case: 100 steps * 50ms stepDelayMs + CDP overhead + hit-test ~= 6s.
+  // Cap at 30s to leave room for slow extension SW wake-up after dormancy.
+  browser_mouse: { defaultMs: 10_000, maxMs: 30_000 },
+  browser_drag: { defaultMs: 15_000, maxMs: 30_000 },
+  // type worst case: 4096 chars * 50ms delayMs ~= 205s. Cap default at the
+  // typical-case ~50 chars limit; max accommodates the schema-allowed worst case.
+  browser_type: { defaultMs: 15_000, maxMs: 210_000 },
+  browser_locate: { defaultMs: 5_000, maxMs: 10_000 },
 }
 
 function pickTimeout(tool: string): PerToolTimeout {

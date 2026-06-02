@@ -1922,6 +1922,76 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
     expect(result.content[0].text).toContain("implement-worktree-result")
   })
 
+  test("worker_explore accepts an explicit absolute workspace override", async () => {
+    // The model can override the default (process.cwd()) when the parent
+    // agent operates against multiple workspaces. We use the github-router
+    // repo root (resolved from import.meta.url) as a known-absolute path.
+    globalThis.fetch = workerSseResponse("explore-with-workspace-override")
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 720,
+      method: "tools/call",
+      params: {
+        name: "worker_explore",
+        arguments: {
+          prompt: "investigate something",
+          workspace: process.cwd(),
+        },
+      },
+    })
+    expect(status).toBe(200)
+    const result = json.result as {
+      isError?: boolean
+      content: Array<{ text: string }>
+    }
+    expect(result.isError).toBeFalsy()
+    expect(result.content[0].text).toBe("explore-with-workspace-override")
+  })
+
+  test("worker_explore rejects a relative workspace path with isError + actionable message", async () => {
+    // No fetch mock: validation fails BEFORE the engine starts.
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 721,
+      method: "tools/call",
+      params: {
+        name: "worker_explore",
+        arguments: {
+          prompt: "anything",
+          workspace: "./relative/path",
+        },
+      },
+    })
+    expect(status).toBe(200)
+    const result = json.result as {
+      isError: boolean
+      content: Array<{ text: string }>
+    }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toMatch(/absolute path/i)
+  })
+
+  test("worker_implement rejects a non-string workspace value with isError", async () => {
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 722,
+      method: "tools/call",
+      params: {
+        name: "worker_implement",
+        arguments: {
+          prompt: "do a thing",
+          workspace: 42,
+        },
+      },
+    })
+    const result = json.result as {
+      isError: boolean
+      content: Array<{ text: string }>
+    }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toMatch(/non-empty string/i)
+  })
+
   test("9th concurrent worker call returns isError with 'Worker queue full' text (semaphore cap = 8)", async () => {
     // Fill the worker semaphore directly, leaving zero slots. The next
     // tools/call MUST return the engine's fast-fail envelope BEFORE
