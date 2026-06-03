@@ -256,6 +256,7 @@ describe("buildPeerAwarenessSnippet", () => {
     geminiAvailable: false,
     workerToolsAvailable: false,
     standInAvailable: false,
+    browseAvailable: false,
   } as const
   // Maximal: all capabilities on — produces the largest snippet.
   const MAXIMAL = {
@@ -263,6 +264,7 @@ describe("buildPeerAwarenessSnippet", () => {
     geminiAvailable: true,
     workerToolsAvailable: true,
     standInAvailable: true,
+    browseAvailable: true,
   } as const
 
   test("always advertises the three always-on critic tools, coordinator, and namespace prefix", () => {
@@ -348,6 +350,26 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(on).toContain("worker_implement")
     expect(on).toContain("Workers themselves")
     expect(on).toContain("worktree: true")
+  })
+
+  test("conditionally mentions browser_* when browseAvailable is on", () => {
+    const off = buildPeerAwarenessSnippet({
+      ...MINIMAL,
+      browseAvailable: false,
+    })
+    expect(off).not.toContain("browser_act")
+    expect(off).not.toContain("browser_find")
+    expect(off).not.toContain("browser_extract")
+    expect(off).not.toContain("browser_*")
+
+    const on = buildPeerAwarenessSnippet({
+      ...MINIMAL,
+      browseAvailable: true,
+    })
+    expect(on).toContain("browser_act")
+    expect(on).toContain("browser_find")
+    expect(on).toContain("browser_extract")
+    expect(on).toContain("mcp__gh-router-peers__browser_")
   })
 
   test("omits gemini_critic when gemini is not in the catalog", () => {

@@ -402,6 +402,7 @@ export function buildPeerAwarenessSnippet(opts: {
   geminiAvailable: boolean
   workerToolsAvailable: boolean
   standInAvailable: boolean
+  browseAvailable: boolean
 }): string {
   const criticList: Array<string> = [
     "`codex_critic` (gpt-5.5)",
@@ -436,6 +437,11 @@ export function buildPeerAwarenessSnippet(opts: {
   if (opts.standInAvailable) {
     para2Parts.push(
       "`stand_in` provides three-lab consensus for decision tiebreak when the user is unavailable.",
+    )
+  }
+  if (opts.browseAvailable) {
+    para2Parts.push(
+      "`browser_*` tools (under `mcp__gh-router-peers__browser_*`) drive a real Chrome / Edge browser via a local extension; prefer the L2 compound tools `browser_act(intent | ref, value?)` / `browser_find(intent)` / `browser_extract(schema, instruction)` over the L0/L1 primitives.",
     )
   }
 
