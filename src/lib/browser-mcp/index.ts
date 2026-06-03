@@ -8,6 +8,7 @@ import {
   pickMatchingElements,
   type PageSnapshot,
 } from "./compressor"
+import { decompose } from "./decompose"
 import { observePage } from "./observe"
 
 import type { NonPersonaMcpTool } from "~/lib/peer-mcp-personas"
@@ -624,51 +625,54 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         const actionIn = typeof args.action === "string" ? args.action : "click"
         return dispatchActionByRef(tabId, refIn, actionIn, value, signal)
       }
-      // INTENT mode.
-      const snapshot = await fetchSnapshot(tabId, signal)
-      const picked = await pickElement(snapshot, intent!, signal, value)
-      if (!picked.ref || picked.confidence < 0.5) {
-        // No text-based match. Try visual fallback if a canvas / svg is in view.
-        const surfaces = snapshot.visualSurfaces
-        if (surfaces && surfaces.length > 0) {
-          const shotEnv = await dispatchBrowserTool("browser_screenshot", { tabId, format: "png" }, signal)
-          if (shotEnv.isError) {
-            return toolEnvelope({ ok: false, error: "no text match; screenshot for visual fallback failed", picked }, true)
-          }
-          const shotText = shotEnv.content?.[0]?.text
-          let shot: { contentType?: string; dataBase64?: string } = {}
-          try {
-            shot = shotText ? (JSON.parse(shotText) as typeof shot) : {}
-          } catch {
-            return toolEnvelope({ ok: false, error: "no text match; screenshot envelope unparseable" }, true)
-          }
-          if (!shot.contentType || !shot.dataBase64) {
-            return toolEnvelope({ ok: false, error: "no text match; screenshot envelope missing fields" }, true)
-          }
-          const visual = await pickElementVisual(shot.dataBase64, shot.contentType, intent!, surfaces, signal)
-          if (visual.confidence < 0.5) {
-            return toolEnvelope({ ok: false, error: "no element matched intent (text + visual)", picked, visual }, true)
-          }
-          // Coord click via browser_mouse.
-          const clickEnv = await dispatchBrowserTool(
-            "browser_mouse",
-            { tabId, action: "click", x: visual.x, y: visual.y, force: true },
-            signal,
-          )
-          if (clickEnv.isError) return clickEnv
-          return toolEnvelope({
-            ok: true,
-            action_taken: "click_visual",
-            x: visual.x,
-            y: visual.y,
-            confidence: visual.confidence,
-            reason: visual.reason,
-          })
-        }
-        return toolEnvelope({ ok: false, error: "no element matched intent", picked }, true)
+      // INTENT mode: decompose into atomic steps (login pattern,
+      // search-and-click pattern, conjunctions, or single-step
+      // fallback). Run each step through the matcher cascade
+      // sequentially; on the FIRST failure of a multi-step compound,
+      // surface the failed step's reason. (TODO: Phase 3c will
+      // escalate the whole compound to a fast-model planner once on
+      // failure rather than aborting at the first step.)
+      const decomposed = decompose(intent!, value)
+      if (decomposed.steps.length === 1) {
+        // Single step: behaves exactly like pre-decompose browser_act.
+        return runAtomicIntentStep(tabId, decomposed.steps[0].intent, decomposed.steps[0].value, signal)
       }
-      // Text-based match found. Dispatch.
-      return dispatchActionByRef(tabId, picked.ref, picked.action, picked.value ?? value, signal)
+      // Multi-step compound: dispatch each step sequentially. Refresh
+      // the snapshot between steps because each mutating action
+      // invalidates the cache (Phase 1b hook). Aggregate into one
+      // {ok, summary} envelope; lead model gets ONE response, not
+      // one per step.
+      const summaries: string[] = []
+      let navigated = false
+      for (let i = 0; i < decomposed.steps.length; i++) {
+        const step = decomposed.steps[i]
+        const env = await runAtomicIntentStep(tabId, step.intent, step.value, signal)
+        const stepText = env.content?.[0]?.text
+        let stepResult: Record<string, unknown> = {}
+        if (typeof stepText === "string") {
+          try { stepResult = JSON.parse(stepText) as Record<string, unknown> } catch { /* keep empty */ }
+        }
+        if (env.isError || stepResult.ok === false) {
+          return toolEnvelope({
+            ok: false,
+            summary: `compound step ${i + 1}/${decomposed.steps.length} failed: ${String(stepResult.error ?? "unknown")}`,
+            template: decomposed.template,
+            steps_completed: i,
+            failed_step: step.intent,
+          }, true)
+        }
+        if (typeof stepResult.action_taken === "string") {
+          summaries.push(`${stepResult.action_taken} (${step.intent})`)
+        }
+        if (stepResult.navigated === true) navigated = true
+      }
+      return toolEnvelope({
+        ok: true,
+        summary: decomposed.successSummary ?? summaries.join(" → "),
+        template: decomposed.template,
+        steps_completed: decomposed.steps.length,
+        navigated,
+      })
     },
   },
   {
@@ -748,6 +752,67 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
 // ---------------------------------------------------------------------
 // Compound-tool helpers
 // ---------------------------------------------------------------------
+
+/**
+ * Run a single atomic intent step: fetch snapshot, run matcher
+ * cascade (via pickElement), visual fallback on no-match, dispatch
+ * the resolved action. Returns the standard MCP envelope.
+ *
+ * Pulled out of `browser_act`'s handler so the compound-intent loop
+ * (decompose path) can call it per-step without duplicating the
+ * snapshot + visual-fallback logic.
+ */
+async function runAtomicIntentStep(
+  tabId: number,
+  intent: string,
+  value: string | undefined,
+  signal?: AbortSignal,
+): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+  const snapshot = await fetchSnapshot(tabId, signal)
+  const picked = await pickElement(snapshot, intent, signal, value)
+  if (!picked.ref || picked.confidence < 0.5) {
+    // No text-based match. Try visual fallback if a canvas / svg is in view.
+    const surfaces = snapshot.visualSurfaces
+    if (surfaces && surfaces.length > 0) {
+      const shotEnv = await dispatchBrowserTool("browser_screenshot", { tabId, format: "png" }, signal)
+      if (shotEnv.isError) {
+        return toolEnvelope({ ok: false, error: "no text match; screenshot for visual fallback failed", picked }, true)
+      }
+      const shotText = shotEnv.content?.[0]?.text
+      let shot: { contentType?: string; dataBase64?: string } = {}
+      try {
+        shot = shotText ? (JSON.parse(shotText) as typeof shot) : {}
+      } catch {
+        return toolEnvelope({ ok: false, error: "no text match; screenshot envelope unparseable" }, true)
+      }
+      if (!shot.contentType || !shot.dataBase64) {
+        return toolEnvelope({ ok: false, error: "no text match; screenshot envelope missing fields" }, true)
+      }
+      const visual = await pickElementVisual(shot.dataBase64, shot.contentType, intent, surfaces, signal)
+      if (visual.confidence < 0.5) {
+        return toolEnvelope({ ok: false, error: "no element matched intent (text + visual)", picked, visual }, true)
+      }
+      // Coord click via browser_mouse.
+      const clickEnv = await dispatchBrowserTool(
+        "browser_mouse",
+        { tabId, action: "click", x: visual.x, y: visual.y, force: true },
+        signal,
+      )
+      if (clickEnv.isError) return clickEnv
+      return toolEnvelope({
+        ok: true,
+        action_taken: "click_visual",
+        x: visual.x,
+        y: visual.y,
+        confidence: visual.confidence,
+        reason: visual.reason,
+      })
+    }
+    return toolEnvelope({ ok: false, error: "no element matched intent", picked }, true)
+  }
+  // Text-based match found. Dispatch.
+  return dispatchActionByRef(tabId, picked.ref, picked.action, picked.value ?? value, signal)
+}
 
 /**
  * Dispatch an action against a known ref via the appropriate primitive.
