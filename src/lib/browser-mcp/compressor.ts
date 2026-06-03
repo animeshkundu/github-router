@@ -364,36 +364,25 @@ export async function pickMatchingElements(
   return out
 }
 
-const EXTRACT_SYSTEM = `You extract structured data from a browser page snapshot into a JSON object matching the provided schema.
+const EXTRACT_SYSTEM = `You extract structured data from a browser page snapshot into a JSON object matching the result schema you've been given.
 
 Use the snapshot's text + element list as your source. Be faithful to what's visible; do not invent values.
 
-Call the extract_result tool with your answer in the result field.`
-
-const EXTRACT_TOOL = {
-  name: "extract_result",
-  description: "Report the extracted object.",
-  parameters: {
-    type: "object",
-    required: ["result"],
-    additionalProperties: false,
-    properties: {
-      // The schema is per-call, but we can't easily inject it into a
-      // function-schema's nested properties here without leaking
-      // caller-controlled schema into our request payload (which
-      // some upstreams reject as invalid). Accept any-shaped object;
-      // the caller's downstream validation is the source of truth.
-      result: { type: "object", additionalProperties: true },
-    },
-  },
-}
+Call the extract_result tool with your answer in the result field. The result field's schema is the caller's exact requested shape — fill it completely. If a field cannot be determined from the snapshot, omit it (when optional) or use a sensible empty value (when required).`
 
 /**
- * Structured extraction. The schema is passed inside the user message
- * as instruction to the model; the returned object is whatever the
- * model put in the `result` field. Caller is responsible for
- * validating against the schema if they need stricter guarantees than
- * the backend provides.
+ * Structured extraction. The caller's JSON schema is injected directly
+ * into the extract_result tool's `result` parameter so the model's
+ * tool-call mechanism enforces shape — the model can't satisfy the
+ * call without producing data of the requested shape. This is the
+ * holistic fix for the earlier "extract returns {}" behavior caused
+ * by an any-shape `result` field with no shape constraint.
+ *
+ * Failure mode: if the caller passes a malformed JSON Schema, the
+ * upstream (Copilot → Gemini / GPT / Claude) returns a 400 which
+ * propagates as an HTTPError via createChatCompletions. That's the
+ * right surface for the caller to discover and correct their schema;
+ * silently falling back to an any-shape result would mask the bug.
  */
 export async function extractStructured(
   snapshot: PageSnapshot,
@@ -403,13 +392,27 @@ export async function extractStructured(
 ): Promise<unknown> {
   const userPayload = JSON.stringify({
     instruction,
-    schema,
     snapshot: {
       text: snapshot.text,
       elements: snapshot.elements,
     },
   })
-  const raw = await callCompressor(EXTRACT_SYSTEM, userPayload, EXTRACT_TOOL, signal)
+  const extractTool = {
+    name: "extract_result",
+    description: "Report the extracted object. The result field's schema is the caller's requested shape; fill it completely.",
+    parameters: {
+      type: "object",
+      required: ["result"],
+      additionalProperties: false,
+      properties: {
+        // Inject the caller's schema verbatim. Trust the upstream to
+        // validate it; let any 4xx propagate so a bad schema surfaces
+        // as a clear error instead of an empty result.
+        result: (schema as Record<string, unknown>) ?? { type: "object" },
+      },
+    },
+  }
+  const raw = await callCompressor(EXTRACT_SYSTEM, userPayload, extractTool, signal)
   if (raw && typeof raw === "object" && "result" in (raw as Record<string, unknown>)) {
     return (raw as { result: unknown }).result
   }
