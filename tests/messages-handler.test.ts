@@ -1,7 +1,7 @@
 import { describe, test, expect, mock, afterEach, beforeEach } from "bun:test"
 
 import { state } from "../src/lib/state"
-import { bucketEffort, clampEffort } from "../src/routes/messages/handler"
+import { bucketEffort, clampEffort, clampOutputConfigEffortInPlace } from "../src/routes/messages/handler"
 import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
@@ -319,6 +319,91 @@ describe("clampEffort", () => {
   })
   test("xhigh with only low supported clamps to low", () => {
     expect(clampEffort("xhigh", ["low"])).toBe("low")
+  })
+})
+
+describe("clampOutputConfigEffortInPlace", () => {
+  function modelWithEfforts(efforts: Array<string> | undefined) {
+    return {
+      id: "test-model",
+      capabilities: {
+        supports: efforts === undefined ? {} : { reasoning_effort: efforts },
+      },
+    } as unknown as Parameters<typeof clampOutputConfigEffortInPlace>[1]
+  }
+
+  test("clamps xhigh to medium for opus-4.8-shaped allowlist (the bug-trigger case)", () => {
+    const body: Record<string, unknown> = {
+      output_config: { effort: "xhigh" },
+    }
+    const mutated = clampOutputConfigEffortInPlace(body, modelWithEfforts(["medium"]))
+    expect(mutated).toBe(true)
+    expect((body.output_config as { effort: string }).effort).toBe("medium")
+  })
+
+  test("no-op when current effort is already in the allowlist", () => {
+    const body: Record<string, unknown> = {
+      output_config: { effort: "medium" },
+    }
+    const mutated = clampOutputConfigEffortInPlace(body, modelWithEfforts(["low", "medium", "high"]))
+    expect(mutated).toBe(false)
+    expect((body.output_config as { effort: string }).effort).toBe("medium")
+  })
+
+  test("no-op when model has no reasoning_effort allowlist (treat as 'any accepted')", () => {
+    const body: Record<string, unknown> = {
+      output_config: { effort: "xhigh" },
+    }
+    const mutated = clampOutputConfigEffortInPlace(body, modelWithEfforts(undefined))
+    expect(mutated).toBe(false)
+    expect((body.output_config as { effort: string }).effort).toBe("xhigh")
+  })
+
+  test("no-op when output_config is absent", () => {
+    const body: Record<string, unknown> = {}
+    const mutated = clampOutputConfigEffortInPlace(body, modelWithEfforts(["medium"]))
+    expect(mutated).toBe(false)
+    expect(body.output_config).toBeUndefined()
+  })
+
+  test("no-op when output_config.effort is absent", () => {
+    const body: Record<string, unknown> = { output_config: { schema: {} } }
+    const mutated = clampOutputConfigEffortInPlace(body, modelWithEfforts(["medium"]))
+    expect(mutated).toBe(false)
+  })
+
+  test("no-op when output_config.effort is non-string (defensive)", () => {
+    const body: Record<string, unknown> = { output_config: { effort: 123 } }
+    const mutated = clampOutputConfigEffortInPlace(body, modelWithEfforts(["medium"]))
+    expect(mutated).toBe(false)
+  })
+
+  test("no-op when model is undefined", () => {
+    const body: Record<string, unknown> = {
+      output_config: { effort: "xhigh" },
+    }
+    const mutated = clampOutputConfigEffortInPlace(body, undefined)
+    expect(mutated).toBe(false)
+    expect((body.output_config as { effort: string }).effort).toBe("xhigh")
+  })
+
+  test("unknown effort string is bucketed as xhigh then clamped DOWN to highest supported", () => {
+    // Defensive: an unrecognized effort (e.g. "ultra") should clamp
+    // down, not up, so we never escalate above what the model allows.
+    const body: Record<string, unknown> = {
+      output_config: { effort: "ultra" },
+    }
+    const mutated = clampOutputConfigEffortInPlace(body, modelWithEfforts(["low", "medium"]))
+    expect(mutated).toBe(true)
+    expect((body.output_config as { effort: string }).effort).toBe("medium")
+  })
+
+  test("preserves other output_config fields when clamping effort", () => {
+    const body: Record<string, unknown> = {
+      output_config: { effort: "xhigh", schema: { type: "object" } },
+    }
+    clampOutputConfigEffortInPlace(body, modelWithEfforts(["medium"]))
+    expect(body.output_config).toEqual({ effort: "medium", schema: { type: "object" } })
   })
 })
 

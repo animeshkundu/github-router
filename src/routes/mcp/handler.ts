@@ -27,7 +27,10 @@ import {
   type ResponsesPayload,
 } from "~/services/copilot/create-responses"
 import { hasSupportedBrowserInstalled } from "~/lib/browser-mcp/browser-detect"
-import { DEFAULT_MODEL as WORKER_DEFAULT_MODEL } from "~/lib/worker-agent"
+import {
+  standInToolEnabled,
+  workerToolsEnabled,
+} from "~/lib/mcp-capabilities"
 import {
   MAX_INFLIGHT_TOOLS_CALL,
   acquireInFlightSlot,
@@ -213,71 +216,11 @@ function geminiAvailable(): boolean {
   return models.some((m) => /^gemini-3\..*pro/i.test(m.id))
 }
 
-/**
- * Gate for the `stand_in` tool.
- *
- * Returns true iff Copilot's live catalog (`state.models?.data`) contains
- * ALL THREE peer models the consensus protocol needs:
- *   - `gpt-5.5`             (codex_critic's model)
- *   - `claude-opus-4-7`     (opus_critic's model)
- *   - any `gemini-3.X.*pro` (gemini_critic's model family — matches the
- *     same regex `geminiAvailable()` uses, so the gate stays in sync if
- *     the GA slug renames `gemini-3.1-pro-preview` → `gemini-3.1-pro`)
- *
- * If any one is missing, `stand_in` is dropped from `tools/list` AND
- * fails `tools/call` with -32601 (mirroring the `worker` capability's
- * defense-in-depth pattern — the gated tool is functionally invisible).
- *
- * Tier-mismatch on `claude-opus-4-7`: the proxy's `resolveModel` will
- * fuzzy-match `claude-opus-4-7` to `claude-opus-4.7` (Copilot's dotted
- * slug). For the catalog probe we use the Anthropic-published dashed
- * slug too — `state.models?.data` mirrors Copilot's catalog where these
- * land under the dotted slug, so we match by Copilot's actual id shape.
- */
-function standInToolEnabled(): boolean {
-  const models = state.models?.data
-  if (!models) return false
-  const hasGpt55 = models.some((m) => m.id === "gpt-5.5")
-  const hasOpus = models.some(
-    (m) => m.id === "claude-opus-4-7" || m.id === "claude-opus-4.7",
-  )
-  const hasGeminiPro = models.some((m) => /^gemini-3\..*pro/i.test(m.id))
-  return hasGpt55 && hasOpus && hasGeminiPro
-}
-
-/**
- * Gate for the worker tools (`worker_explore`, `worker_implement`).
- *
- * Returns true iff BOTH:
- *   1. Copilot's live catalog (`state.models?.data`) contains the
- *      worker's default model (`gemini-3.5-flash`) AND that entry
- *      advertises `capabilities.supports.tool_calls === true`. The
- *      worker loop is function-calling; a model that can't emit
- *      tool_calls is unusable, so dormant-register (omit from
- *      `tools/list`) keeps the surface honest.
- *   2. The operator hasn't set `GH_ROUTER_DISABLE_WORKER_TOOLS=1`
- *      (opt-out — workers ship enabled by default per plan).
- *
- * Callers that pass `model: <non-default>` bypass this list-time
- * gate but still hit the per-call `resolveModelAndThinking`
- * validation in the engine, which surfaces a clean `isError`
- * envelope with the catalog's eligible model ids on mismatch.
- *
- * `WORKER_DEFAULT_MODEL` is imported (aliased from `DEFAULT_MODEL`)
- * from `src/lib/worker-agent` so the engine owns the single source
- * of truth. Previously this was a parallel `const` here; the parallel
- * declaration was demoted to an alias-import after codex review HIGH
- * caught the drift risk (the gate would silently disagree with the
- * engine if the default ever changed in one place but not the other).
- */
-function workerToolsEnabled(): boolean {
-  if (process.env.GH_ROUTER_DISABLE_WORKER_TOOLS === "1") return false
-  const models = state.models?.data
-  if (!models) return false
-  const found = models.find((m) => m.id === WORKER_DEFAULT_MODEL)
-  if (!found) return false
-  return found.capabilities?.supports?.tool_calls === true
-}
+// `standInToolEnabled` and `workerToolsEnabled` were extracted to
+// `src/lib/mcp-capabilities.ts` so CLI startup (`src/claude.ts`) can
+// import the same predicates without dragging Hono route-handler
+// transitive deps. They're re-imported at the top of this file and
+// used unchanged in the gate code below.
 
 /**
  * Gate for the browser-control MCP tools (`browser_*`).

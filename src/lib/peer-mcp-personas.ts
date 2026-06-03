@@ -359,25 +359,49 @@ export function buildAgentPrompt(
 
 /**
  * Build the awareness snippet appended to the spawned `claude` session's
- * system prompt via `--append-system-prompt`. Descriptive awareness layer
- * — Claude sees what tools exist and their strategic value; *when* to
- * invoke is left to Claude's judgment informed by each tool's own
+ * system prompt via `--append-system-prompt` AND to the mirrored
+ * `<CLAUDE_CONFIG_DIR>/CLAUDE.md` (the latter reaches Agent-tool subagents
+ * and agent-teams teammates that inherit CLAUDE_CONFIG_DIR but not
+ * --append-system-prompt). Pure capability description — Claude reads
+ * what tools exist and their factual properties; *when* to invoke each
+ * is left to Claude's judgment informed by each tool's own
  * `description` field.
  *
  * Per Anthropic's guidance for Opus 4.8: tool descriptions carry the
- * routing signal (when/when-not); the system prompt should describe
- * capabilities in prose, not encode prescriptive decision trees. Opus 4.8
- * is responsive enough to overtrigger on aggressive routing language.
+ * routing signal (when/when-not); the awareness snippet should describe
+ * capabilities in factual present tense and let the model decide.
+ *
+ * Framing constraint (enforced by negative pins in
+ * tests/peer-mcp-personas.test.ts): no imperatives ("Lead with X",
+ * "Brief them to Y"), no hedges ("you might want to consider"), no
+ * anchors disguised as description ("cheapest first move", "saves them
+ * the discovery step", "waste wall-clock"). Pure capability inventory.
  *
  * Surface contract (regression-pinned in tests/peer-mcp-personas.test.ts):
  *   - Always lists codex_critic, codex_reviewer, opus_critic, advisor,
- *     peer-review-coordinator, and the subagent-inheritance fact.
+ *     peer-review-coordinator, and the subagent-inheritance fact (the
+ *     load-bearing UX claim: spawned subagents inherit the peer-MCP
+ *     toolset via the mirrored `.claude.json`).
  *   - Conditionally lists gemini_critic only when `geminiAvailable`.
+ *   - Conditionally lists worker_explore / worker_implement /
+ *     "Workers themselves have code_search" only when
+ *     `workerToolsAvailable` (mirrors `workerToolsEnabled()` in
+ *     src/routes/mcp/handler.ts so the snippet never names a tool gated
+ *     out of the live catalog).
+ *   - Conditionally lists stand_in only when `standInAvailable`
+ *     (mirrors `standInToolEnabled()`).
  *   - Mentions `codex-cli` stdio bridge only when `codexCli`.
+ *   - Does NOT re-document Claude Code's built-in delegation semantics
+ *     (Agent-tool recursion, agent-teams coordination) — Claude
+ *     already knows those. The snippet only states proxy-specific
+ *     capabilities and the inheritance fact that makes them reachable
+ *     by descendants.
  */
 export function buildPeerAwarenessSnippet(opts: {
   codexCli: boolean
   geminiAvailable: boolean
+  workerToolsAvailable: boolean
+  standInAvailable: boolean
 }): string {
   const criticList: Array<string> = [
     "`codex_critic` (gpt-5.5)",
@@ -392,12 +416,35 @@ export function buildPeerAwarenessSnippet(opts: {
     ? " `mcp__codex-cli__codex` dispatches to `codex-implementer` (gpt-5.3-codex with workspace-write) for end-to-end coding tasks."
     : ""
 
+  // Paragraph 2 — capability inventory. Sentences are joined with a
+  // single space; conditional sentences (worker_*, stand_in) only
+  // appear when their gate is on, so the snippet never names a tool
+  // missing from the live tools/list.
+  const para2Parts: Array<string> = [
+    "`code_search` returns ranked code-discovery hits (BM25F + tree-sitter ranking, no additional model call). Multiple independent queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, `.csv`, `.env*`, config-only wiring), `grep`/`glob` still apply.",
+  ]
+  if (opts.workerToolsAvailable) {
+    para2Parts.push(
+      "`worker_explore` runs a Gemini-backed read-only worker that returns a summary, using its own context rather than yours; concurrent launches share the `MAX_INFLIGHT_TOOLS_CALL=8` cap with operator traffic.",
+      "`worker_implement` is the same worker with edit/write/bash; `worktree: true` runs it in an isolated git worktree and returns the diff.",
+      "Workers themselves have `code_search` in their toolset.",
+    )
+  }
+  para2Parts.push(
+    "`web_search` surfaces citable sources for docs, errors, and upstream issues.",
+  )
+  if (opts.standInAvailable) {
+    para2Parts.push(
+      "`stand_in` provides three-lab consensus for decision tiebreak when the user is unavailable.",
+    )
+  }
+
   return [
     "## Peer review and advisor",
     "",
-    `Cross-lab peer critics under \`mcp__gh-router-peers__*\` — ${criticList.join(", ")} — are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies. The \`peer-review-coordinator\` subagent fans out to the appropriate critics in parallel and aggregates findings by severity. Claude Code's built-in \`advisor\` tool catches approach drift and confabulation. Subagents you spawn inherit all of these.${codexCliClause}`,
+    `Cross-lab peer critics under \`mcp__gh-router-peers__*\` (${criticList.join(", ")}) are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies. The \`peer-review-coordinator\` subagent fans out to the appropriate critics in parallel and aggregates findings by severity. Claude Code's built-in \`advisor\` tool catches approach drift and confabulation. Subagents you spawn inherit all of these.${codexCliClause}`,
     "",
-    `\`code_search\` provides accurate ranked code discovery (BM25F + tree-sitter) — multiple parallel calls with different queries triangulate faster than sequential Grep. \`web_search\` surfaces citable sources for docs, errors, and upstream issues. \`worker_explore\` and \`worker_implement\` delegate bounded work to an autonomous Gemini worker, preserving your context; use \`worktree: true\` on \`worker_implement\` for isolated diffs. \`stand_in\` provides three-lab consensus for decision tiebreak when the user is unavailable.`,
+    para2Parts.join(" "),
   ].join("\n")
 }
 
@@ -777,13 +824,18 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       toolNameHttp: "worker_explore",
       capability: "worker",
       description:
-        "Read-only investigation by an autonomous worker (Gemini via Pi). "
-        + "Tools: read, glob, grep, code_search, web_search, fetch_url, "
-        + "peer_review, advisor. Offloads bounded research that would "
-        + "otherwise eat your context window — the worker plans its own "
-        + "tool calls and returns a single text answer. Examples: \"find "
-        + "files matching X then summarize\", \"how does library Y handle "
-        + "Z\", \"survey this codebase for usages of deprecated API\".",
+        "Read-only investigation by an autonomous worker (Pi runtime; "
+        + "default model `gemini-3.5-flash`, override via the `model` "
+        + "arg with any Copilot-catalog model that advertises "
+        + "`tool_calls`). Tools: read, glob, grep, code_search, "
+        + "web_search, fetch_url. The worker's system prompt sandboxes "
+        + "it and gives one-line descriptions of each tool, so brief "
+        + "it on the investigation, not on tool semantics. Offloads "
+        + "bounded research that would otherwise eat your context "
+        + "window — the worker plans its own tool calls and returns a "
+        + "single text answer. Examples: \"find files matching X then "
+        + "summarize\", \"how does library Y handle Z\", \"survey this "
+        + "codebase for usages of deprecated API\".",
       inputSchema: {
         type: "object",
         required: ["prompt"],
@@ -838,13 +890,19 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       toolNameHttp: "worker_implement",
       capability: "worker",
       description:
-        "Delegates a scoped coding task to an autonomous worker (Gemini "
-        + "via Pi). Modifies files in your workspace and can run shell "
-        + "commands. With `worktree: false` (default) edits in place — "
-        + "concurrent worker_implement calls and Claude's own edits to "
-        + "the same files will race. With `worktree: true` runs in an "
-        + "isolated git worktree and returns the diff for review. "
-        + "HARD ERROR if true and the workspace is not a git repository.",
+        "Delegates a scoped coding task to an autonomous worker (Pi "
+        + "runtime; default model `gemini-3.5-flash`, override via the "
+        + "`model` arg with any Copilot-catalog model that advertises "
+        + "`tool_calls`). Tools: the worker_explore read-only set plus "
+        + "edit, write, bash, and codex_review (code review by "
+        + "codex-reviewer / gpt-5.3-codex). The worker's system prompt "
+        + "sandboxes it and gives one-line descriptions of each tool, "
+        + "so brief it on the task, not on tool semantics. With "
+        + "`worktree: false` (default) edits in place — concurrent "
+        + "worker_implement calls and Claude's own edits to the same "
+        + "files will race. With `worktree: true` runs in an isolated "
+        + "git worktree and returns the diff for review. HARD ERROR if "
+        + "true and the workspace is not a git repository.",
       inputSchema: {
         type: "object",
         required: ["prompt"],

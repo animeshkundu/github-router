@@ -1229,37 +1229,45 @@ describe("renderPiMessagesAsText", () => {
 // ============================================================
 
 describe("buildWorkerTools", () => {
-  test("explore mode returns 8 read-only tools", () => {
+  test("explore mode returns 6 read-only tools (peer_review/advisor dropped from worker surface)", () => {
     const tools = buildWorkerTools({
       mode: "explore",
       workspace: realpathSync.native(os.tmpdir()),
     })
-    expect(tools.length).toBe(8)
+    expect(tools.length).toBe(6)
     const names = tools.map((t) => t.name).sort()
     expect(names).toEqual(
       [
-        "advisor",
         "code_search",
         "fetch_url",
         "glob",
         "grep",
-        "peer_review",
         "read",
         "web_search",
       ].sort(),
     )
+    // peer_review and advisor are intentionally NOT in the worker
+    // surface (per user directive). They remain implemented as helper
+    // factories for legacy callers, but buildWorkerTools no longer
+    // wires them.
+    expect(names).not.toContain("peer_review")
+    expect(names).not.toContain("advisor")
   })
 
-  test("implement mode returns 11 tools (explore + edit/write/bash)", () => {
+  test("implement mode returns 10 tools (explore + edit/write/bash + codex_review)", () => {
     const tools = buildWorkerTools({
       mode: "implement",
       workspace: realpathSync.native(os.tmpdir()),
     })
-    expect(tools.length).toBe(11)
+    expect(tools.length).toBe(10)
     const names = tools.map((t) => t.name)
-    for (const w of ["edit", "write", "bash"]) {
+    for (const w of ["edit", "write", "bash", "codex_review"]) {
       expect(names).toContain(w)
     }
+    // Same narrowing: no peer_review, no advisor — only the
+    // codex-reviewer-locked codex_review is exposed for code review.
+    expect(names).not.toContain("peer_review")
+    expect(names).not.toContain("advisor")
   })
 
   test("each tool has the required Pi AgentTool shape", () => {

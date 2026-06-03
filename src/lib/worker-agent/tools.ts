@@ -166,21 +166,6 @@ export interface BuildWorkerToolsOpts {
    * `paths.ts`'s docstring).
    */
   workspace: string
-  /**
-   * Live getter for the Pi `Agent.state.messages` transcript. The
-   * `advisor` tool prepends a rendered transcript to the advisor's
-   * user prompt so the reviewer has situational context (without
-   * this, advisor sees only the bare `concern` string and gives
-   * generic advice). Engine wires this as `() => agent.state.messages`
-   * — getter, not snapshot, so the tool sees the freshest transcript
-   * at call time rather than at construction time.
-   *
-   * Optional: when omitted, advisor falls back to "no transcript
-   * available" — useful for tests and for callers who explicitly want
-   * the unsituated path (e.g. the explore-mode toolset wired without
-   * a state binding).
-   */
-  getMessages?: () => ReadonlyArray<AgentMessage>
 }
 
 /**
@@ -1070,6 +1055,105 @@ function lookupPersona(critic: string): PersonaSpec {
   return persona
 }
 
+/**
+ * Narrow code-review tool for the implement-mode worker. Locks the
+ * critic to `codex-reviewer` (gpt-5.3-codex — the code-specialist
+ * critic) so the worker has exactly one escalation path for code
+ * review without exposing the broader peer-critic surface or the
+ * advisor. Matches the user directive that worker_implement should
+ * have access to a single code-review tool, not the full peer set.
+ *
+ * Implementation is intentionally a thin wrapper over the same
+ * dispatch path as `peerReviewTool` — sharing `lookupPersona`,
+ * `acquireInFlightSlot`, and `callPersona` keeps the slot accounting,
+ * effort clamping, and isError-promotion semantics identical.
+ */
+const CODEX_REVIEW_PARAMS = Type.Object({
+  prompt: Type.String({
+    description:
+      "The code-review brief — diff or single file under review plus "
+      + "constraints. Pasted verbatim into codex-reviewer's user message.",
+  }),
+  context: Type.Optional(
+    Type.String({
+      description: "Optional extra context concatenated to the brief.",
+    }),
+  ),
+  effort: Type.Optional(PEER_EFFORT_UNION),
+})
+
+function codexReviewTool(): AgentTool<typeof CODEX_REVIEW_PARAMS> {
+  return {
+    name: "codex_review",
+    label: "Codex code review",
+    description:
+      "Code review by `codex-reviewer` (gpt-5.3-codex, code-specialist "
+      + "critic). Returns line-level findings on a diff or single file. "
+      + "Use to overcome blind spots on a coding change before committing.",
+    parameters: CODEX_REVIEW_PARAMS,
+    async execute(
+      _toolCallId,
+      params,
+      signal,
+    ): Promise<AgentToolResult<Record<string, never>>> {
+      if (networkDisabled()) {
+        throw new Error("rejected: network disabled")
+      }
+      const persona = lookupPersona("codex-reviewer")
+      const requested = params.effort
+      const effort =
+        requested && persona.allowedEfforts.includes(requested)
+          ? requested
+          : persona.defaultEffort
+      // Slot accounting: `worker_implement` already holds 1 slot from
+      // the MCP boundary; this nested `codex_review` call needs a
+      // 2nd slot from the same shared `MAX_INFLIGHT_TOOLS_CALL=8`
+      // counter. Under modest concurrency (≥8 simultaneous
+      // worker_implement runs) every slot is held by a parent, and
+      // every nested codex_review attempt starves indefinitely
+      // because the parent can't release until the nested call
+      // returns. Throwing here would abort the worker's task entirely
+      // — bad UX, since the worker's job is to land code, not to be
+      // a critic.
+      //
+      // Soft-fail-and-continue: if the cap is saturated, return a
+      // structured tool result naming the saturation and suggesting
+      // the worker proceed without review. Pi's tool-call loop feeds
+      // this back to the model, which can decide to ship and ask the
+      // lead to review the diff manually. This is the same trade-off
+      // peer_review made historically when designed for main-agent
+      // call sites, but escalated to the worker context where the
+      // alternative (throwing) is more disruptive.
+      const release = acquireInFlightSlot()
+      if (!release) {
+        return textResult(
+          `codex_review skipped: MCP in-flight cap (${MAX_INFLIGHT_TOOLS_CALL}) saturated. ` +
+          `Proceed with the coding task and either retry codex_review later or ` +
+          `ask the lead to review the diff out-of-band.`,
+        )
+      }
+      try {
+        const result = await callPersona(
+          persona,
+          params.prompt,
+          params.context,
+          effort,
+          signal,
+        )
+        if (result.isError) {
+          const msg =
+            result.content[0]?.text ?? `codex_review failed`
+          throw new Error(msg)
+        }
+        const text = result.content.map((c) => c.text).join("")
+        return textResult(text)
+      } finally {
+        release()
+      }
+    },
+  }
+}
+
 function geminiInCatalog(): boolean {
   const models = state.models?.data
   if (!models) return false
@@ -1283,7 +1367,7 @@ function advisorTool(
 export function buildWorkerTools(
   opts: BuildWorkerToolsOpts,
 ): Array<AgentTool<TSchema, Record<string, never>>> {
-  const { mode, workspace, getMessages } = opts
+  const { mode, workspace } = opts
   const explore: Array<AgentTool<TSchema, Record<string, never>>> = [
     readTool(workspace),
     globTool(workspace),
@@ -1291,8 +1375,6 @@ export function buildWorkerTools(
     codeSearchTool(workspace),
     webSearchTool(),
     fetchUrlTool(),
-    peerReviewTool(),
-    advisorTool(getMessages),
   ]
   if (mode === "explore") return explore
   return [
@@ -1300,6 +1382,7 @@ export function buildWorkerTools(
     editTool(workspace),
     writeTool(workspace),
     bashTool(workspace),
+    codexReviewTool(),
   ]
 }
 

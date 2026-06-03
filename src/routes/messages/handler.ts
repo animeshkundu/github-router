@@ -525,6 +525,17 @@ function resolveModelInBody(rawBody: string): {
     modified = true
   }
 
+  // Unconditionally clamp output_config.effort to the model's
+  // reasoning_effort allowlist. Runs even when translateThinking did
+  // not fire — catches requests that arrive ALREADY in Copilot shape
+  // (e.g. Claude Code agent-teams teammates that send xhigh to opus-4.8,
+  // which Copilot rejects with "output_config.effort 'xhigh' is not
+  // supported by model claude-opus-4.8; supported values: [medium]").
+  // Policy: the proxy does not forward a value upstream rejects.
+  if (clampOutputConfigEffortInPlace(parsed, selectedModel)) {
+    modified = true
+  }
+
   // Strip cache_control.scope — fast path skips when "scope" absent
   const needsSanitize = rawBody.includes('"scope"')
   if (needsSanitize && sanitizeCacheControl(parsed)) {
@@ -613,6 +624,62 @@ export function clampEffort(
     }
   }
   return best ?? bucketed
+}
+
+/**
+ * Clamp `body.output_config.effort` to the model's
+ * `capabilities.supports.reasoning_effort` allowlist. Mutates `body`
+ * in place. Returns true iff a clamp was applied.
+ *
+ * Sibling to `translateThinking`'s internal clamp — that one only fires
+ * when the request arrives in the Anthropic `thinking:{type:"enabled"}`
+ * shape (which the translator converts into `output_config.effort`).
+ * Requests that arrive ALREADY in Copilot shape (`output_config.effort`
+ * set by the client) would otherwise pass through unclamped and 400 at
+ * upstream — the failure mode is exactly the one Claude Code agent-teams
+ * teammates hit on opus-4.8 with `xhigh` effort (Copilot rejects with
+ * "output_config.effort 'xhigh' is not supported by model
+ * claude-opus-4.8; supported values: [medium]").
+ *
+ * Generic policy: the proxy does not forward a value upstream rejects.
+ * If the model declares a `reasoning_effort` allowlist and the
+ * client-supplied `output_config.effort` is not in it, clamp via
+ * `clampEffort` (using `EFFORT_ORDER` bucketing). Unknown effort
+ * values fall through to `clampEffort`'s "no closer tier" branch
+ * (returns the original); the model would then 400 at upstream, which
+ * is the right behaviour for genuinely invalid input.
+ *
+ * No-ops when:
+ *   - The model has no `reasoning_effort` allowlist (some models
+ *     accept arbitrary efforts; treat absent allowlist as "any
+ *     accepted")
+ *   - `body.output_config` is missing or not a plain object
+ *   - `body.output_config.effort` is missing or not a string
+ *   - The current effort is already in the allowlist (no-op clamp)
+ */
+export function clampOutputConfigEffortInPlace(
+  body: AnyRecord,
+  model?: Model,
+): boolean {
+  if (!model?.capabilities?.supports?.reasoning_effort) return false
+  const supported = model.capabilities.supports.reasoning_effort
+  if (!Array.isArray(supported) || supported.length === 0) return false
+  if (!body.output_config || typeof body.output_config !== "object") return false
+  const oc = body.output_config as AnyRecord
+  const current = oc.effort
+  if (typeof current !== "string") return false
+  if (supported.includes(current)) return false
+  // Pass the current effort through `clampEffort` if it is a known
+  // EFFORT_ORDER bucket; otherwise fall back to picking the nearest
+  // supported tier by treating unknown values as `xhigh` (so we always
+  // clamp DOWN to the highest supported, never up).
+  const bucketed = (EFFORT_ORDER as ReadonlyArray<string>).includes(current)
+    ? (current as (typeof EFFORT_ORDER)[number])
+    : "xhigh"
+  const clamped = clampEffort(bucketed, supported)
+  if (clamped === current) return false
+  oc.effort = clamped
+  return true
 }
 
 /**
