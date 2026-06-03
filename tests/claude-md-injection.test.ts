@@ -20,6 +20,7 @@ mock.module("node:os", () => ({
 const { PATHS, isUnderClaudeConfigMirror } = await import("../src/lib/paths")
 const {
   appendPeerAwarenessToMirroredClaudeMd,
+  prependStyleDirectiveToMirroredClaudeMd,
   findMarkerBlocks,
   __testExports,
 } = await import("../src/lib/claude-md-injection")
@@ -27,6 +28,9 @@ const {
 const {
   MARKER_OPEN,
   MARKER_CLOSE,
+  STYLE_MARKER_OPEN,
+  STYLE_MARKER_CLOSE,
+  STYLE_DIRECTIVE,
   MAX_CLAUDE_MD_BYTES,
   ERROR_CODE,
   detectLineEnding,
@@ -542,6 +546,106 @@ test("detectLineEnding edge cases", () => {
   // Mixed — majority wins.
   expect(detectLineEnding("a\r\nb\r\nc\n")).toBe("\r\n")
   expect(detectLineEnding("a\nb\nc\r\n")).toBe("\n")
+})
+
+// ============================================================
+// prependStyleDirectiveToMirroredClaudeMd
+// ============================================================
+
+test("style directive content is self-compliant — no em dashes, no Claude/AI/Anthropic attribution", () => {
+  // The directive tells future writing to avoid em dashes and
+  // attribution. Pin that the directive itself follows its own rules.
+  expect(STYLE_DIRECTIVE).not.toContain("—") // em dash
+  // U+2013 en dash also not used (the rule says "no em dashes" but
+  // en dashes carry similar AI-output baggage; allow if absent here).
+  expect(STYLE_DIRECTIVE.toLowerCase()).toContain("avoid em dashes")
+  expect(STYLE_DIRECTIVE.toLowerCase()).toContain("claude")
+  expect(STYLE_DIRECTIVE.toLowerCase()).toContain("anthropic")
+})
+
+test("style directive is prepended at the TOP of CLAUDE.md with user content preserved below", async () => {
+  await freshMirrorDir()
+  const userContent = "# Title\n\nReal content.\n"
+  await fs.writeFile(TARGET, userContent, "utf8")
+
+  await prependStyleDirectiveToMirroredClaudeMd()
+
+  const result = await fs.readFile(TARGET, "utf8")
+  // Style block sits at the very top.
+  expect(result.startsWith(STYLE_MARKER_OPEN)).toBe(true)
+  // Directive body is between the markers.
+  expect(result).toContain(STYLE_DIRECTIVE)
+  // Close marker comes BEFORE the user content.
+  const closeIdx = result.indexOf(STYLE_MARKER_CLOSE)
+  const userIdx = result.indexOf("# Title")
+  expect(closeIdx).toBeLessThan(userIdx)
+  // User content preserved.
+  expect(result).toContain("# Title")
+  expect(result).toContain("Real content.")
+})
+
+test("style directive prepend is idempotent across re-launches", async () => {
+  await freshMirrorDir()
+  const userContent = "# Title\n\nReal content.\n"
+  await fs.writeFile(TARGET, userContent, "utf8")
+
+  for (let i = 0; i < 4; i++) {
+    await prependStyleDirectiveToMirroredClaudeMd()
+  }
+
+  const result = await fs.readFile(TARGET, "utf8")
+  const opens = (result.match(new RegExp(escapeRe(STYLE_MARKER_OPEN), "g")) ?? []).length
+  const closes = (result.match(new RegExp(escapeRe(STYLE_MARKER_CLOSE), "g")) ?? []).length
+  expect(opens).toBe(1)
+  expect(closes).toBe(1)
+})
+
+test("style block at top and peer-awareness block at bottom coexist independently", async () => {
+  await freshMirrorDir()
+  const userContent = "# Title\n\nReal content.\n"
+  await fs.writeFile(TARGET, userContent, "utf8")
+
+  await prependStyleDirectiveToMirroredClaudeMd()
+  await appendPeerAwarenessToMirroredClaudeMd(SNIPPET)
+
+  const result = await fs.readFile(TARGET, "utf8")
+  // Both blocks present, each exactly once.
+  expect((result.match(new RegExp(escapeRe(STYLE_MARKER_OPEN), "g")) ?? []).length).toBe(1)
+  expect((result.match(new RegExp(escapeRe(STYLE_MARKER_CLOSE), "g")) ?? []).length).toBe(1)
+  expect((result.match(new RegExp(escapeRe(MARKER_OPEN), "g")) ?? []).length).toBe(1)
+  expect((result.match(new RegExp(escapeRe(MARKER_CLOSE), "g")) ?? []).length).toBe(1)
+  // Order: style at top, user in middle, peer at bottom.
+  const styleCloseIdx = result.indexOf(STYLE_MARKER_CLOSE)
+  const userIdx = result.indexOf("# Title")
+  const peerOpenIdx = result.indexOf(MARKER_OPEN)
+  expect(styleCloseIdx).toBeLessThan(userIdx)
+  expect(userIdx).toBeLessThan(peerOpenIdx)
+})
+
+test("re-running both helpers across launches stays idempotent (no block accumulation)", async () => {
+  await freshMirrorDir()
+  const userContent = "# Title\n\nReal content.\n"
+  await fs.writeFile(TARGET, userContent, "utf8")
+
+  for (let i = 0; i < 3; i++) {
+    await prependStyleDirectiveToMirroredClaudeMd()
+    await appendPeerAwarenessToMirroredClaudeMd(SNIPPET)
+  }
+
+  const result = await fs.readFile(TARGET, "utf8")
+  expect((result.match(new RegExp(escapeRe(STYLE_MARKER_OPEN), "g")) ?? []).length).toBe(1)
+  expect((result.match(new RegExp(escapeRe(MARKER_OPEN), "g")) ?? []).length).toBe(1)
+  // User content still preserved exactly once.
+  expect((result.match(/# Title/g) ?? []).length).toBe(1)
+  expect((result.match(/Real content\./g) ?? []).length).toBe(1)
+})
+
+test("style directive accepts a custom override (forward-compat for env-driven config)", async () => {
+  await freshMirrorDir()
+  await prependStyleDirectiveToMirroredClaudeMd("Custom style note.")
+  const result = await fs.readFile(TARGET, "utf8")
+  expect(result).toContain("Custom style note.")
+  expect(result).not.toContain(STYLE_DIRECTIVE)
 })
 
 function escapeRe(s: string): string {

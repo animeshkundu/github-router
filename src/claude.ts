@@ -17,7 +17,7 @@ import { getCodexVersion, launchChild } from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
 import { ensureClaudeConfigMirror, removeOwnClaudeConfigMirror } from "./lib/paths"
 import { buildPeerAwarenessSnippet } from "./lib/peer-mcp-personas"
-import { appendPeerAwarenessToMirroredClaudeMd } from "./lib/claude-md-injection"
+import { appendPeerAwarenessToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import {
   DEFAULT_CLAUDE_MODEL_FALLBACKS,
   pickClaudeDefault,
@@ -432,6 +432,21 @@ export const claude = defineCommand({
         } catch (err) {
           consola.warn(
             `Peer-awareness CLAUDE.md append failed (main agent still covered via --append-system-prompt): ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          )
+        }
+        // Style directive: prepend a short writing/communication style
+        // directive at the TOP of the mirrored CLAUDE.md so every
+        // spawned agent reads it first. Independent marker fence from
+        // the peer-awareness block, so the two coexist (style at top,
+        // user content in the middle, peer-awareness at the bottom).
+        // Best-effort like the append above.
+        try {
+          await prependStyleDirectiveToMirroredClaudeMd()
+        } catch (err) {
+          consola.warn(
+            `Style-directive CLAUDE.md prepend failed: ${
               err instanceof Error ? err.message : String(err)
             }`,
           )

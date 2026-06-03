@@ -134,7 +134,6 @@ const writePeerMcpRuntimeFilesMock = mock()
 const resolveCodexCliBackendMock = mock()
 const injectPeerMcpIntoMirrorMock = mock()
 const getCodexVersionMock = mock()
-const appendPeerAwarenessToMirroredClaudeMdMock = mock()
 
 mock.module("~/lib/codex-mcp-config", () => ({
   writePeerMcpRuntimeFiles: writePeerMcpRuntimeFilesMock,
@@ -142,13 +141,17 @@ mock.module("~/lib/codex-mcp-config", () => ({
   injectPeerMcpIntoMirror: injectPeerMcpIntoMirrorMock,
 }))
 
-// The CLAUDE.md append is the new descendant-reach surface; mock it
-// here so the cli-claude test focuses on call/no-call assertions and
-// the real filesystem write logic is exercised by
+// The CLAUDE.md append + prepend helpers are the new descendant-reach
+// surface; mock both here so the cli-claude test focuses on call/no-call
+// assertions and the real filesystem write logic is exercised by
 // tests/claude-md-injection.test.ts in isolation.
+const appendPeerAwarenessToMirroredClaudeMdMock = mock()
+const prependStyleDirectiveToMirroredClaudeMdMock = mock()
 mock.module("~/lib/claude-md-injection", () => ({
   appendPeerAwarenessToMirroredClaudeMd:
     appendPeerAwarenessToMirroredClaudeMdMock,
+  prependStyleDirectiveToMirroredClaudeMd:
+    prependStyleDirectiveToMirroredClaudeMdMock,
 }))
 
 // launch.ts also exports buildLaunchCommand etc. — re-export the real
@@ -249,6 +252,8 @@ beforeEach(() => {
   })
   appendPeerAwarenessToMirroredClaudeMdMock.mockReset()
   appendPeerAwarenessToMirroredClaudeMdMock.mockResolvedValue(undefined)
+  prependStyleDirectiveToMirroredClaudeMdMock.mockReset()
+  prependStyleDirectiveToMirroredClaudeMdMock.mockResolvedValue(undefined)
   getCodexVersionMock.mockReset()
   getCodexVersionMock.mockReturnValue({ ok: false })
 
@@ -724,7 +729,7 @@ describe("claude command", () => {
       expect(args).not.toContain("--mcp-config")
     })
 
-    test("default env → --append-system-prompt is pushed AND appendPeerAwarenessToMirroredClaudeMd is invoked", async () => {
+    test("default env → --append-system-prompt is pushed AND both CLAUDE.md helpers are invoked", async () => {
       delete mockProcessEnv.GH_ROUTER_PEER_AWARENESS
       const run = getRunFn()
       await run({ args: {} })
@@ -735,12 +740,14 @@ describe("claude command", () => {
       const snippet = args[idx + 1] as string
       expect(snippet).toContain("Peer review and advisor")
 
-      // The new sibling surface: descendant-reach via mirrored
-      // CLAUDE.md is invoked exactly once with the same snippet.
+      // The peer-MCP awareness append at the bottom of CLAUDE.md.
       expect(appendPeerAwarenessToMirroredClaudeMdMock).toHaveBeenCalledTimes(1)
       const [appendedSnippet] = appendPeerAwarenessToMirroredClaudeMdMock
         .mock.calls[0]
       expect(appendedSnippet).toBe(snippet)
+
+      // The style-directive prepend at the top of CLAUDE.md.
+      expect(prependStyleDirectiveToMirroredClaudeMdMock).toHaveBeenCalledTimes(1)
     })
 
     test("--append-system-prompt is pushed exactly once (no accidental double-injection)", async () => {

@@ -7,20 +7,43 @@ import consola from "consola"
 import { isUnderClaudeConfigMirror, PATHS } from "./paths"
 
 /**
- * Marker fence around the peer-MCP awareness block in the mirrored
- * `<CLAUDE_CONFIG_DIR>/CLAUDE.md`. The literal text is intentionally
- * specific enough that a content collision with user prose is
- * implausible. Used by `findMarkerBlocks` to locate prior injections
- * for idempotent re-write across launches.
+ * Marker fences for each injection block. The literal text of each
+ * fence is intentionally specific enough that a content collision with
+ * user prose is implausible. Each block's parser only matches its own
+ * marker pair, so blocks operate independently.
  *
- * Writer-side guard: `appendPeerAwarenessToMirroredClaudeMd` refuses
- * to write a snippet that itself contains either marker literal — that
- * would create ambiguous state on the next launch (the inner literal
- * would parse as a new open or close marker).
+ * Writer-side guard: the injector refuses to write a snippet that
+ * itself contains its own marker literals (that would create
+ * ambiguous state on the next launch where the inner literal would
+ * parse as a new open or close marker).
  */
-const MARKER_OPEN =
+const PEER_MARKER_OPEN =
   "<!-- gh-router peer-mcp awareness — auto-injected, regenerated per launch -->"
-const MARKER_CLOSE = "<!-- /gh-router peer-mcp awareness -->"
+const PEER_MARKER_CLOSE = "<!-- /gh-router peer-mcp awareness -->"
+
+const STYLE_MARKER_OPEN =
+  "<!-- gh-router style directive — auto-injected, regenerated per launch -->"
+const STYLE_MARKER_CLOSE = "<!-- /gh-router style directive -->"
+
+// Back-compat aliases used by existing tests. The peer block's
+// markers remain the "default" pair surfaced through __testExports.
+const MARKER_OPEN = PEER_MARKER_OPEN
+const MARKER_CLOSE = PEER_MARKER_CLOSE
+
+/**
+ * Writing / communication style directive injected at the TOP of the
+ * mirrored CLAUDE.md so every spawned agent (main, Agent-tool subagent,
+ * agent-teams teammate) reads it before the user's own CLAUDE.md body.
+ *
+ * Self-referentially compliant: the directive itself uses no em
+ * dashes and does not mention any Claude / Anthropic attribution.
+ */
+const STYLE_DIRECTIVE =
+  "Write concisely without losing detail. "
+  + "Use a natural human voice. "
+  + "Avoid em dashes. "
+  + "Do not attribute work to Claude, AI, LLM, or Anthropic anywhere "
+  + "(commits, PRs, issues, code, comments, docs)."
 
 /**
  * Skip the helper if the user's `~/.claude/CLAUDE.md` (or, equivalently,
@@ -56,18 +79,23 @@ interface MarkerBlock {
 }
 
 /**
- * Find every well-formed marker block in `lines`. A well-formed block
- * is an exact `MARKER_OPEN` line followed somewhere later (any number
- * of intervening lines) by an exact `MARKER_CLOSE` line, with no
- * intervening `MARKER_OPEN`. Multiple stale blocks all surface here so
- * the caller can remove all of them.
+ * Find every well-formed marker block matching the given `markerOpen`
+ * + `markerClose` pair. A well-formed block is an exact `markerOpen`
+ * line followed somewhere later (any number of intervening lines) by
+ * an exact `markerClose` line, with no intervening `markerOpen`.
+ * Multiple stale blocks all surface here so the caller can remove
+ * all of them.
  *
  * Malformed state (open without close, or close without open) is
  * reported separately via the second return value so the caller can
  * `warn` and leave user prose untouched. We never try to "fix"
  * malformed marker state — that risks corrupting user content.
  */
-export function findMarkerBlocks(lines: ReadonlyArray<string>): {
+export function findMarkerBlocks(
+  lines: ReadonlyArray<string>,
+  markerOpen: string = PEER_MARKER_OPEN,
+  markerClose: string = PEER_MARKER_CLOSE,
+): {
   blocks: Array<MarkerBlock>
   malformed: boolean
 } {
@@ -76,13 +104,13 @@ export function findMarkerBlocks(lines: ReadonlyArray<string>): {
   let malformed = false
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
-    if (line === MARKER_OPEN) {
+    if (line === markerOpen) {
       if (pendingOpen !== null) {
         // Two opens with no close between them — malformed.
         malformed = true
       }
       pendingOpen = i
-    } else if (line === MARKER_CLOSE) {
+    } else if (line === markerClose) {
       if (pendingOpen === null) {
         // Close with no preceding open — malformed.
         malformed = true
@@ -164,15 +192,12 @@ function joinLines(lines: ReadonlyArray<string>, eol: "\r\n" | "\n"): string {
  *     attacker) targeted — the boundary's whole point is to never
  *     mutate real `~/.claude/`, so accepting any symlinked root
  *     undermines it.
- *   - If `realpath` fails on the mirror root, refuse. The mirror dir
- *     is provisioned by `ensureClaudeConfigMirror` before this helper
- *     runs (documented ordering invariant); a `realpath` failure here
- *     signals an unexpected state.
- *   - If `realpath` fails on the target's parent (e.g. first-time
- *     creation), fall back to the lexical check we already passed at
- *     entry — the target's parent IS the mirror root for the
- *     `CLAUDE.md`-creation case, and the mirror-root realpath above
- *     has already confirmed the root.
+ *   - If `realpath` fails on the mirror root OR the target parent,
+ *     refuse. The mirror dir is provisioned by `ensureClaudeConfigMirror`
+ *     before this helper runs (documented ordering invariant); a
+ *     `realpath` failure here signals an unexpected state, and after
+ *     the root check has already succeeded a missing parent means the
+ *     root vanished between checks (TOCTOU race).
  */
 async function isUnderClaudeConfigMirrorRealpath(
   target: string,
@@ -306,7 +331,7 @@ async function renameWithRetry(
   // user's real CLAUDE.md.
   await fs.unlink(tempPath).catch(() => {})
   consola.warn(
-    `${ERROR_CODE}: rename failed for ${target} after ${RENAME_RETRY_DELAYS_MS.length + 1} attempts (no copyFile fallback — would risk symlink/hardlink escape; descendant-reach via CLAUDE.md disabled this launch; main agent still has --append-system-prompt). rename err: ${
+    `${ERROR_CODE}: rename failed for ${target} after ${RENAME_RETRY_DELAYS_MS.length + 1} attempts (no copyFile fallback to avoid symlink/hardlink escape; descendant-reach via CLAUDE.md disabled this launch; main agent still has --append-system-prompt). rename err: ${
       lastErr instanceof Error ? lastErr.message : String(lastErr)
     }`,
   )
@@ -314,38 +339,25 @@ async function renameWithRetry(
 }
 
 /**
- * Append the peer-MCP awareness `snippet` to the mirrored
- * `<CLAUDE_CONFIG_DIR>/CLAUDE.md`. Idempotent across launches: prior
- * well-formed marker blocks are removed before appending a fresh one
- * at the bottom. The original user content is preserved byte-for-byte
- * at the top (modulo line-ending normalization to the file's detected
- * style; leading UTF-8 BOM is stripped from the parse path).
- *
- * Failures `warn` and return — this surface is the descendant-reach
- * enhancement; the main agent still gets the awareness via
- * `--append-system-prompt`. A throw here would block the launch for
- * an enhancement-only failure. Every warn message starts with
- * `CLAUDE_MD_WRITE` so users can grep launcher output.
- *
- * Hard invariants:
- *   1. Mirror-only: refuse to write outside the per-launch mirror dir,
- *      with symlink/junction-resolving check via `fs.realpath` (not
- *      just lexical `path.resolve`).
- *   2. Symlink refusal: if the target itself is a symlink, do not
- *      follow.
- *   3. Size guard: skip if the would-be post-write content exceeds
- *      1 MiB — measured AFTER strip + append so a near-cap fixture
- *      with a stale block does not get permanently stranded.
- *   4. CRLF preservation: write back in the file's detected style.
- *   5. Malformed marker: leave user prose untouched + `warn`.
- *   6. Atomic write: temp + rename, with verify-on-fail / copyFile
- *      fallback for Windows transient EBUSY/EPERM.
- *   7. Writer-side guard: refuse to write a snippet that contains
- *      either marker literal — would create ambiguous state.
+ * Generic marker-block injection into the mirrored CLAUDE.md.
+ * Parameterized on the marker pair (so independent blocks coexist
+ * without colliding) and position (`"top"` = prepend, `"bottom"` =
+ * append). Encapsulates all the safety invariants; the two exported
+ * helpers (`appendPeerAwarenessToMirroredClaudeMd` and
+ * `prependStyleDirectiveToMirroredClaudeMd`) are thin wrappers.
  */
-export async function appendPeerAwarenessToMirroredClaudeMd(
-  snippet: string,
-): Promise<void> {
+interface InjectMarkerBlockOpts {
+  snippet: string
+  markerOpen: string
+  markerClose: string
+  position: "top" | "bottom"
+  /** Logged in debug messages so the two callers are distinguishable. */
+  label: string
+}
+
+async function injectMarkerBlock(opts: InjectMarkerBlockOpts): Promise<void> {
+  const { snippet, markerOpen, markerClose, position, label } = opts
+
   // Invariant 7: writer-side guard. Refuse to inject a snippet that
   // contains either marker literal — otherwise the next launch's
   // parser would see the inner literal as a new open/close and
@@ -353,9 +365,9 @@ export async function appendPeerAwarenessToMirroredClaudeMd(
   // malformed-marker path indefinitely. The snippet body should
   // never legitimately contain these strings; failing fast here
   // catches a builder bug at the source.
-  if (snippet.includes(MARKER_OPEN) || snippet.includes(MARKER_CLOSE)) {
+  if (snippet.includes(markerOpen) || snippet.includes(markerClose)) {
     consola.warn(
-      `${ERROR_CODE}: refusing to inject snippet that contains marker literal; this would corrupt idempotency on the next launch`,
+      `${ERROR_CODE}: refusing to inject ${label} snippet that contains marker literal; this would corrupt idempotency on the next launch`,
     )
     return
   }
@@ -365,7 +377,7 @@ export async function appendPeerAwarenessToMirroredClaudeMd(
   // Invariant 1: mirror-only safety guard (symlink-resolving).
   if (!(await isUnderClaudeConfigMirrorRealpath(target))) {
     consola.warn(
-      `${ERROR_CODE}: refusing to write outside resolved mirror dir (target=${target}, mirror=${PATHS.CLAUDE_CONFIG_DIR})`,
+      `${ERROR_CODE}: refusing to write outside resolved mirror dir (target=${target}, mirror=${PATHS.CLAUDE_CONFIG_DIR}) [${label}]`,
     )
     return
   }
@@ -378,7 +390,7 @@ export async function appendPeerAwarenessToMirroredClaudeMd(
     const linkStat = await fs.lstat(target)
     if (linkStat.isSymbolicLink()) {
       consola.warn(
-        `${ERROR_CODE}: refusing to write through symlinked CLAUDE.md (target=${target})`,
+        `${ERROR_CODE}: refusing to write through symlinked CLAUDE.md (target=${target}) [${label}]`,
       )
       return
     }
@@ -386,7 +398,7 @@ export async function appendPeerAwarenessToMirroredClaudeMd(
       // Directory or other non-regular entry sitting where CLAUDE.md
       // should be. Refuse rather than try to fix.
       consola.warn(
-        `${ERROR_CODE}: refusing to write non-regular target (target=${target}, mode=${linkStat.mode.toString(8)})`,
+        `${ERROR_CODE}: refusing to write non-regular target (target=${target}, mode=${linkStat.mode.toString(8)}) [${label}]`,
       )
       return
     }
@@ -398,13 +410,13 @@ export async function appendPeerAwarenessToMirroredClaudeMd(
     // fs.writeFile, even with the symlink-refusal above.
     if (linkStat.size > MAX_CLAUDE_MD_BYTES) {
       consola.warn(
-        `${ERROR_CODE}: skipping oversized CLAUDE.md (${linkStat.size} bytes > ${MAX_CLAUDE_MD_BYTES}); descendant-reach disabled this launch`,
+        `${ERROR_CODE}: skipping oversized CLAUDE.md (${linkStat.size} bytes > ${MAX_CLAUDE_MD_BYTES}) [${label}]; descendant-reach disabled this launch`,
       )
       return
     }
     if (linkStat.nlink > 1) {
       consola.warn(
-        `${ERROR_CODE}: refusing to write to hardlinked CLAUDE.md (nlink=${linkStat.nlink}); would mutate shared inode`,
+        `${ERROR_CODE}: refusing to write to hardlinked CLAUDE.md (nlink=${linkStat.nlink}) [${label}]; would mutate shared inode`,
       )
       return
     }
@@ -422,7 +434,7 @@ export async function appendPeerAwarenessToMirroredClaudeMd(
       targetExists = false
     } else {
       consola.warn(
-        `${ERROR_CODE}: failed to stat/read target (${target}): ${
+        `${ERROR_CODE}: failed to stat/read target (${target}) [${label}]: ${
           err instanceof Error ? err.message : String(err)
         }`,
       )
@@ -432,23 +444,27 @@ export async function appendPeerAwarenessToMirroredClaudeMd(
 
   // Invariant 4: detect line-ending style from the existing content
   // AND remember whether the file had a UTF-8 BOM so we can preserve
-  // it (peer-review codex-critic I5 — UTF-8-with-BOM is common on
-  // Windows, dropping it silently rewrites the file).
+  // it (peer-review codex-critic I5).
   const hadBom = existingContent.charCodeAt(0) === 0xfeff
   const normalizedContent = stripLeadingBom(existingContent)
   const eol = detectLineEnding(normalizedContent)
 
-  // Strip prior well-formed marker blocks (invariant 5: malformed
-  // state is warn-and-leave; we do not edit through user prose).
+  // Strip prior well-formed marker blocks of THIS pair only
+  // (invariant 5: malformed state is warn-and-leave; we do not edit
+  // through user prose). Other marker pairs in the file are untouched
+  // so the peer-awareness block and the style block coexist without
+  // interfering.
   const lines = splitLines(normalizedContent)
-  const { blocks, malformed } = findMarkerBlocks(lines)
+  const { blocks, malformed } = findMarkerBlocks(lines, markerOpen, markerClose)
   if (malformed) {
     consola.warn(
-      `${ERROR_CODE}: malformed marker state in ${target} (open without close or vice versa); leaving file untouched`,
+      `${ERROR_CODE}: malformed marker state in ${target} (open without close or vice versa) [${label}]; leaving file untouched`,
     )
     return
   }
   // Remove blocks in reverse order so earlier indices stay valid.
+  // Also drop blank-line separators that were inserted around the
+  // block on prior writes (loop until non-blank to handle accumulation).
   const cleanedLines = [...lines]
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i]
@@ -456,57 +472,75 @@ export async function appendPeerAwarenessToMirroredClaudeMd(
       block.openLineIndex,
       block.closeLineIndex - block.openLineIndex + 1,
     )
-    // Drop trailing blank lines that were inserted as the block's
-    // leading separator on previous writes (suggestion #13: loop
-    // until non-blank, not exactly one — prevents accumulation if a
-    // hand-edit ever introduced multiple blanks).
-    while (
-      block.openLineIndex - 1 >= 0
-      && cleanedLines[block.openLineIndex - 1] === ""
-      && cleanedLines.slice(0, block.openLineIndex - 1).some((l) => l !== "")
-    ) {
-      cleanedLines.splice(block.openLineIndex - 1, 1)
+    if (position === "bottom") {
+      // Drop trailing blank lines BEFORE the (removed) block.
+      while (
+        block.openLineIndex - 1 >= 0
+        && cleanedLines[block.openLineIndex - 1] === ""
+        && cleanedLines.slice(0, block.openLineIndex - 1).some((l) => l !== "")
+      ) {
+        cleanedLines.splice(block.openLineIndex - 1, 1)
+      }
+    } else {
+      // position === "top": drop leading blank lines AFTER the
+      // (removed) block — they were the separator we inserted last
+      // time between our prepended block and user content.
+      while (
+        block.openLineIndex < cleanedLines.length
+        && cleanedLines[block.openLineIndex] === ""
+        && cleanedLines.slice(block.openLineIndex + 1).some((l) => l !== "")
+      ) {
+        cleanedLines.splice(block.openLineIndex, 1)
+      }
     }
   }
 
-  // Trim trailing blank lines from cleaned content so the marker
-  // block sits at the bottom with exactly one blank-line separator
-  // between user content and our block (matches the file layout
-  // invariant: `<original>\n\n<marker-block>`).
-  while (cleanedLines.length > 0
-    && cleanedLines[cleanedLines.length - 1] === "") {
-    cleanedLines.pop()
+  // Trim trailing blank lines so the bottom-append block sits with
+  // exactly one separator; for top-prepend, trim leading blanks
+  // analogously.
+  if (position === "bottom") {
+    while (
+      cleanedLines.length > 0
+      && cleanedLines[cleanedLines.length - 1] === ""
+    ) {
+      cleanedLines.pop()
+    }
+  } else {
+    while (cleanedLines.length > 0 && cleanedLines[0] === "") {
+      cleanedLines.shift()
+    }
   }
 
-  // Build the final content. If user content is non-empty, separate
-  // with a blank line. End with a trailing newline so editors / git
-  // don't flag "no newline at end of file". Restore the leading UTF-8
-  // BOM if the original had one (preserves Windows-authored files).
+  // Build the final content. Position determines whether our block
+  // sits at the top or bottom, with exactly one blank-line separator
+  // between user content and our block.
   const snippetLines = snippet.split("\n").map((l) =>
     l.endsWith("\r") ? l.slice(0, -1) : l,
   )
-  const markerBlockLines = [MARKER_OPEN, ...snippetLines, MARKER_CLOSE]
-  const finalLines: Array<string> =
-    cleanedLines.length === 0
-      ? [...markerBlockLines, ""]
-      : [...cleanedLines, "", ...markerBlockLines, ""]
+  const markerBlockLines = [markerOpen, ...snippetLines, markerClose]
+  let finalLines: Array<string>
+  if (cleanedLines.length === 0) {
+    finalLines = [...markerBlockLines, ""]
+  } else if (position === "bottom") {
+    finalLines = [...cleanedLines, "", ...markerBlockLines, ""]
+  } else {
+    finalLines = [...markerBlockLines, "", ...cleanedLines, ""]
+  }
   const bodyContent = joinLines(finalLines, eol)
   const finalContent = hadBom ? "﻿" + bodyContent : bodyContent
 
   // Invariant 3: size guard, measured on the post-build content so a
   // user fixture sitting just below the cap with a stale block can
-  // still be cleaned up — prevents the I6 "permanent stale-snippet
-  // lockout" where the raw-size check fires before the strip and the
-  // mirror is never re-rewritten.
+  // still be cleaned up (peer-review I6).
   if (Buffer.byteLength(finalContent, "utf8") > MAX_CLAUDE_MD_BYTES) {
     consola.warn(
-      `${ERROR_CODE}: post-build content exceeds ${MAX_CLAUDE_MD_BYTES} bytes; skipping update (descendant-reach disabled this launch)`,
+      `${ERROR_CODE}: post-build content exceeds ${MAX_CLAUDE_MD_BYTES} bytes [${label}]; skipping update (descendant-reach disabled this launch)`,
     )
     return
   }
 
   // Invariant 6: atomic temp + rename, with bounded retry + verify-
-  // on-fail / copyFile fallback for Windows transient EBUSY/EPERM.
+  // on-fail. No copyFile fallback (would defeat symlink boundary).
   const tempPath = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
   try {
     await fs.writeFile(tempPath, finalContent, {
@@ -516,7 +550,7 @@ export async function appendPeerAwarenessToMirroredClaudeMd(
   } catch (err) {
     await fs.unlink(tempPath).catch(() => {})
     consola.warn(
-      `${ERROR_CODE}: temp-file write failed for ${tempPath}: ${
+      `${ERROR_CODE}: temp-file write failed for ${tempPath} [${label}]: ${
         err instanceof Error ? err.message : String(err)
       }`,
     )
@@ -528,8 +562,54 @@ export async function appendPeerAwarenessToMirroredClaudeMd(
   consola.debug(
     `${ERROR_CODE}: ${
       targetExists ? "updated" : "created"
-    } ${target} (${finalContent.length} bytes, eol=${eol === "\r\n" ? "CRLF" : "LF"})`,
+    } ${target} [${label}] (${finalContent.length} bytes, eol=${eol === "\r\n" ? "CRLF" : "LF"})`,
   )
+}
+
+/**
+ * Append the peer-MCP awareness `snippet` to the mirrored
+ * `<CLAUDE_CONFIG_DIR>/CLAUDE.md`. Idempotent across launches: prior
+ * well-formed peer-marker blocks are removed before appending a fresh
+ * one at the bottom. The original user content is preserved
+ * byte-for-byte at the top (modulo line-ending normalization to the
+ * file's detected style; leading UTF-8 BOM is preserved).
+ *
+ * Failures `warn` and return — this surface is the descendant-reach
+ * enhancement; the main agent still gets the awareness via
+ * `--append-system-prompt`. Every warn message starts with
+ * `CLAUDE_MD_WRITE` so users can grep launcher output.
+ */
+export async function appendPeerAwarenessToMirroredClaudeMd(
+  snippet: string,
+): Promise<void> {
+  await injectMarkerBlock({
+    snippet,
+    markerOpen: PEER_MARKER_OPEN,
+    markerClose: PEER_MARKER_CLOSE,
+    position: "bottom",
+    label: "peer-mcp-awareness",
+  })
+}
+
+/**
+ * Prepend a writing / communication style directive to the TOP of the
+ * mirrored `<CLAUDE_CONFIG_DIR>/CLAUDE.md` so every spawned agent
+ * reads it first. The directive itself is hard-coded to
+ * `STYLE_DIRECTIVE` above; the parameter exists for tests / future
+ * configurability. Idempotent across launches via the
+ * style-marker fence (separate from the peer-awareness fence, so the
+ * two blocks coexist without colliding).
+ */
+export async function prependStyleDirectiveToMirroredClaudeMd(
+  directive: string = STYLE_DIRECTIVE,
+): Promise<void> {
+  await injectMarkerBlock({
+    snippet: directive,
+    markerOpen: STYLE_MARKER_OPEN,
+    markerClose: STYLE_MARKER_CLOSE,
+    position: "top",
+    label: "style-directive",
+  })
 }
 
 /**
@@ -540,6 +620,11 @@ export async function appendPeerAwarenessToMirroredClaudeMd(
 export const __testExports = {
   MARKER_OPEN,
   MARKER_CLOSE,
+  PEER_MARKER_OPEN,
+  PEER_MARKER_CLOSE,
+  STYLE_MARKER_OPEN,
+  STYLE_MARKER_CLOSE,
+  STYLE_DIRECTIVE,
   MAX_CLAUDE_MD_BYTES,
   ERROR_CODE,
   RENAME_RETRY_DELAYS_MS,
