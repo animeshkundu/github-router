@@ -130,13 +130,18 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
   {
     toolNameHttp: "browser_read_page",
     description:
-      "Extract rendered page text plus interactive elements (refs, roles, names, bounding boxes) plus viewport metadata. Each element entry carries bbox: [x, y, w, h] in CSS viewport pixels — the same coordinate space used by browser_mouse / browser_drag / browser_scroll(at-pointer). Element refs returned here are intended as the primary input to follow-up tool calls — preferred over CSS selectors because refs are stable across dynamic class names. The viewport block {width, height, devicePixelRatio, scrollX, scrollY} lets you map a CSS-px bbox to a device-px pixel in browser_screenshot (device_px = css_px * devicePixelRatio). Text is capped at 256 KiB; elements at the first 200 interactive nodes.",
+      "Compressed page snapshot for the model: visible text, interactive elements with stable refs, viewport metadata, and (when present) `visualSurfaces` listing canvas / svg regions that need vision. Each element entry carries `bbox: [x, y, w, h]` in CSS viewport pixels (same coord space as browser_mouse / drag / scroll-at-pointer). Refs (e.g. `e42`) are stable for the lifetime of one read_page snapshot and are the preferred input to follow-up actions over brittle CSS selectors. The `viewport` block (`width`, `height`, `devicePixelRatio`, `scrollX`, `scrollY`) lets you map CSS-px bbox to device-px pixels for browser_screenshot. Mode controls what ships back: `summary` (default, ~5-15 KB) returns only viewport-visible elements/text and drops nameless non-interactive nodes; `full` returns up to 200 elements + 256 KiB of innerText (the legacy behavior — use only when you need off-screen content unscrolled). PREFER browser_act / browser_find for intent-driven interaction; read_page is the lower-level snapshot when you need to enumerate.",
     inputSchema: {
       type: "object",
       required: ["tabId"],
       additionalProperties: false,
       properties: {
         tabId: { type: "number", description: "Tab id from browser_list_tabs / browser_open_tab." },
+        mode: {
+          type: "string",
+          enum: ["summary", "full"],
+          description: "Snapshot scope. Default 'summary' returns viewport-visible elements + text capped at 20 KiB. 'full' returns up to 200 interactive elements page-wide + 256 KiB of innerText.",
+        },
       },
     },
     capability: "browser",

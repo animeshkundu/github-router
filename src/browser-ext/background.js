@@ -184,40 +184,83 @@ async function toolScreenshot(args) {
 async function toolReadPage(args) {
   const tabId = typeof args.tabId === "number" ? args.tabId : undefined
   if (!tabId) throw new Error("browser_read_page: tabId is required")
+  const mode = args.mode === "full" ? "full" : "summary"
   const [result] = await chrome.scripting.executeScript({
     target: { tabId },
-    func: () => {
-      // Element refs: every interactive element gets an id we return to
-      // the caller; subsequent click/fill calls reference these refs
-      // instead of brittle CSS selectors. Refs are stable for the
-      // lifetime of a single read_page snapshot.
-      const interactive = "a, button, input, select, textarea, [role='button'], [role='link'], [role='checkbox']"
-      const els = Array.from(document.querySelectorAll(interactive))
-      const elements = els.slice(0, 200).map((el, i) => {
-        const ref = `e${i + 1}`
-        el.setAttribute("data-gh-router-ref", ref)
-        const rect = el.getBoundingClientRect()
-        return {
-          ref,
-          role: el.getAttribute("role") || el.tagName.toLowerCase(),
-          name:
-            (el.getAttribute("aria-label") ||
-              el.textContent ||
-              el.getAttribute("value") ||
-              el.getAttribute("placeholder") ||
-              "")
-              .trim()
-              .slice(0, 200),
-          bbox: [Math.round(rect.x), Math.round(rect.y), Math.round(rect.width), Math.round(rect.height)],
+    func: (mode) => {
+      // Stable ref attribution: every interactive element gets a
+      // data-gh-router-ref attribute the model uses for subsequent
+      // ref-based actions. Stable for the lifetime of one read_page.
+      //
+      // Traversal: descend into open shadow roots so web-component-heavy
+      // UIs (e.g. modern React apps with shadow encapsulation) surface
+      // their interactive elements. Cross-origin iframes are not reached
+      // from in-page script — that needs CDP and is documented as a
+      // future enhancement.
+      const INTERACTIVE_ROLES = new Set([
+        "button",
+        "link",
+        "textbox",
+        "combobox",
+        "checkbox",
+        "radio",
+        "switch",
+        "tab",
+        "menuitem",
+        "option",
+        "slider",
+        "searchbox",
+        "spinbutton",
+        "treeitem",
+      ])
+      const INTERACTIVE_TAGS = new Set([
+        "a",
+        "button",
+        "input",
+        "select",
+        "textarea",
+      ])
+      function isInteractive(el) {
+        const role = el.getAttribute("role")
+        if (role && INTERACTIVE_ROLES.has(role)) return true
+        if (INTERACTIVE_TAGS.has(el.tagName.toLowerCase())) return true
+        if (el.hasAttribute("contenteditable") && el.getAttribute("contenteditable") !== "false") return true
+        const ti = el.getAttribute("tabindex")
+        if (ti !== null && Number.parseInt(ti, 10) >= 0) return true
+        return false
+      }
+      function nameOf(el) {
+        const labelledBy = el.getAttribute("aria-labelledby")
+        if (labelledBy) {
+          const labelEl = document.getElementById(labelledBy)
+          if (labelEl) return (labelEl.textContent || "").trim().slice(0, 200)
         }
-      })
-      // Page text: innerText is roughly what a user reads. Cap at
-      // 256 KiB to keep the response tractable.
-      const MAX = 256 * 1024
-      let text = document.body ? document.body.innerText : ""
-      if (text.length > MAX) text = text.slice(0, MAX)
-      // Viewport metadata so the model can correlate CSS-px bbox to
-      // device-px pixels in browser_screenshot (device_px = css_px * dpr).
+        return (
+          el.getAttribute("aria-label")
+          || el.getAttribute("title")
+          || (el.textContent || "")
+          || el.getAttribute("value")
+          || el.getAttribute("placeholder")
+          || el.getAttribute("alt")
+          || ""
+        ).trim().slice(0, 200)
+      }
+      function walkDeep(root, sink) {
+        // Walk every element under root, descending into open shadow
+        // roots. Closed shadow roots are intentionally opaque per the
+        // web spec; nothing we can do.
+        // NodeFilter.SHOW_ELEMENT === 1.
+        const walker = root.createTreeWalker
+          ? root.createTreeWalker(root, 1)
+          : document.createTreeWalker(root, 1)
+        let n
+        while ((n = walker.nextNode())) {
+          sink.push(n)
+          if (n.shadowRoot && n.shadowRoot.mode === "open") {
+            walkDeep(n.shadowRoot, sink)
+          }
+        }
+      }
       const viewport = {
         width: window.innerWidth,
         height: window.innerHeight,
@@ -225,8 +268,121 @@ async function toolReadPage(args) {
         scrollX: window.scrollX,
         scrollY: window.scrollY,
       }
-      return { text, elements, viewport }
+      function inViewport(rect) {
+        return (
+          rect.bottom > 0
+          && rect.right > 0
+          && rect.top < viewport.height
+          && rect.left < viewport.width
+          && rect.width > 0
+          && rect.height > 0
+        )
+      }
+      const allElements = []
+      walkDeep(document, allElements)
+      const interactive = allElements.filter(isInteractive)
+      // Summary mode: viewport-visible only; drop nameless non-tag
+      // elements (a div with role="button" but no aria-label is noise).
+      // Full mode: keep everything, model asked for it.
+      const ELEMENT_CAP = 200
+      const elements = []
+      let refCounter = 0
+      for (const el of interactive) {
+        if (elements.length >= ELEMENT_CAP) break
+        const rect = el.getBoundingClientRect()
+        if (mode === "summary" && !inViewport(rect)) continue
+        const name = nameOf(el)
+        const tag = el.tagName.toLowerCase()
+        if (mode === "summary" && !name && !INTERACTIVE_TAGS.has(tag)) continue
+        refCounter++
+        const ref = `e${refCounter}`
+        el.setAttribute("data-gh-router-ref", ref)
+        const entry = {
+          ref,
+          role: el.getAttribute("role") || tag,
+          bbox: [
+            Math.round(rect.x),
+            Math.round(rect.y),
+            Math.round(rect.width),
+            Math.round(rect.height),
+          ],
+        }
+        if (name) entry.name = name
+        elements.push(entry)
+      }
+      // Text extraction.
+      // summary: walk text nodes whose parent is in the viewport; cap
+      // at 20 KB. The model sees what a user could read without
+      // scrolling. Off-screen content remains reachable via mode:"full".
+      // full: 256 KiB innerText cap (legacy behavior).
+      let text = ""
+      if (mode === "full") {
+        const MAX_FULL = 256 * 1024
+        text = document.body ? document.body.innerText : ""
+        if (text.length > MAX_FULL) text = text.slice(0, MAX_FULL)
+      } else {
+        const TEXT_CAP = 20 * 1024
+        const parts = []
+        let total = 0
+        const root = document.body || document.documentElement
+        if (root) {
+          const tw = document.createTreeWalker(root, 4) // NodeFilter.SHOW_TEXT === 4
+          let n
+          while ((n = tw.nextNode())) {
+            const parent = n.parentElement
+            if (!parent) continue
+            // Skip script/style content.
+            const ptag = parent.tagName ? parent.tagName.toLowerCase() : ""
+            if (ptag === "script" || ptag === "style" || ptag === "noscript") continue
+            const pr = parent.getBoundingClientRect()
+            if (!inViewport(pr)) continue
+            const t = (n.textContent || "").replace(/\s+/g, " ").trim()
+            if (!t) continue
+            if (total + t.length + 1 > TEXT_CAP) {
+              parts.push(t.slice(0, Math.max(0, TEXT_CAP - total)))
+              break
+            }
+            parts.push(t)
+            total += t.length + 1
+          }
+        }
+        text = parts.join("\n")
+      }
+      // visualSurfaces: canvas + svg of non-trivial size in the
+      // viewport. Signals "this region needs vision" to the lead model
+      // so it knows to call browser_screenshot / let browser_act
+      // auto-escalate when the text-based pickElement misses.
+      const visualSurfaces = []
+      const VS_MIN = 100
+      const canvasNodes = allElements.filter((el) => {
+        const t = el.tagName && el.tagName.toLowerCase()
+        return t === "canvas" || t === "svg"
+      })
+      for (const el of canvasNodes) {
+        const rect = el.getBoundingClientRect()
+        if (rect.width < VS_MIN || rect.height < VS_MIN) continue
+        if (!inViewport(rect)) continue
+        let ref = el.getAttribute("data-gh-router-ref")
+        if (!ref) {
+          ref = `v${visualSurfaces.length + 1}`
+          el.setAttribute("data-gh-router-ref", ref)
+        }
+        visualSurfaces.push({
+          ref,
+          kind: el.tagName.toLowerCase(),
+          bbox: [
+            Math.round(rect.x),
+            Math.round(rect.y),
+            Math.round(rect.width),
+            Math.round(rect.height),
+          ],
+        })
+      }
+      const out = { mode, text, elements, viewport }
+      if (visualSurfaces.length > 0) out.visualSurfaces = visualSurfaces
+      return out
     },
+    args: [mode],
   })
   if (!result || typeof result.result !== "object") {
     throw new Error("browser_read_page: scripting.executeScript returned nothing")
