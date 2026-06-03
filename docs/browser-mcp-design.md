@@ -249,6 +249,41 @@ bun run build                         # bundles the bridge
 GH_ROUTER_RUN_BROWSER_E2E=1 bun test tests/isolated/browser-mcp-e2e.test.ts --timeout 90000
 ```
 
+## L2 compound tools — intent-driven browsing with inner-LLM compressor
+
+The primitive `browser_*` tools (mouse, drag, type, keyboard, scroll, eval_js, screenshot, download, navigate, wait, list/open/close_tab) let a model drive the browser at the level a Playwright script would. The L2 compound tools sit on top and let the model think in intent rather than refs / coordinates / selectors:
+
+- **`browser_act(tabId, intent | ref, value?)`** — preferred for any click / fill / type / scroll-to action.
+  - **INTENT mode** (`intent` supplied): inner compressor (Gemini Flash class) reads the snapshot, picks an element + action, dispatches. **Auto-escalates to visual fallback** when no text-based match found AND the snapshot reported `visualSurfaces` in the viewport — takes a screenshot, hands it + intent + surface bboxes to a multimodal model, gets back `{x, y}` CSS-pixel coords, dispatches `browser_mouse` click. This is the dual-engine pattern: a11y-tree for ~90% of the work, vision strictly for canvas / WebGL / D3 blackholes.
+  - **REF mode** (`ref` supplied, optional `action` / `value`): direct dispatch, zero compressor latency. The fold-in path for the now-removed `browser_click` and `browser_fill`. Model with a stable ref from a prior `browser_find` pays nothing extra.
+- **`browser_find(tabId, intent)`** — natural-language intent, returns up to 5 ranked matches with refs + bbox + reason. Cheaper than `browser_read_page` when you know what you're looking for.
+- **`browser_extract(tabId, schema, instruction)`** — structured extraction from the current snapshot into a typed object matching the schema.
+
+The compressor backend is picked at startup from the live Copilot catalog by walking a static fallback chain: `gemini-3.5-flash` → `gpt-5.4-mini` → `claude-haiku-4-5`. First entry present AND advertising `tool_calls` support wins. The picked id is logged. When NONE of the three is in the catalog, the compound tools are dropped from `tools/list` AND fail `tools/call` with -32601 (gate at `browserCompoundToolsEnabled()` in `src/lib/mcp-capabilities.ts`, mirroring the existing `workerToolsEnabled` / `standInToolEnabled` pattern). The L1 primitives are unaffected — `browser_act` ref-mode keeps working without the compressor.
+
+Compressor calls take a slot from the shared `MAX_INFLIGHT_TOOLS_CALL = 8` budget so a wedged compressor can't starve operator traffic.
+
+## L0 / L1 cull
+
+The original 19-tool surface had several primitives whose duties the L2 tools subsume cleanly. The removed tools' EXTENSION-side handlers stay live so the compound tools can internally dispatch them, but the MCP surface no longer exposes:
+
+- `browser_click`, `browser_fill` → folded into `browser_act` (REF mode dispatches directly; INTENT mode goes through the compressor).
+- `browser_locate` → subsumed by `browser_find` (returns bbox + visibility for matches).
+- `browser_console_logs`, `browser_network_log` → merged into `browser_diagnostics(kind, level?, regex?, limit?)`. One MCP tool, filtered response, lower context cost than the prior 1000-entry raw dumps.
+
+Net MCP surface: **18 tools** (down from 19) with the L2 layer absorbing most of the actual model traffic. Real win is in response-shape compression + intent-driven flow rather than raw tool count.
+
+## Compressed page snapshot — `browser_read_page` modes
+
+`browser_read_page` accepts a `mode` parameter:
+
+- **`summary`** (default): viewport-visible interactive elements only; viewport-visible text capped at 20 KiB; drops nameless non-tag elements (a `div role="button"` with no aria-label is noise); `visualSurfaces` field listing canvas / svg of non-trivial size for the dual-engine. ~5–15 KB typical response.
+- **`full`**: up to 200 interactive elements page-wide + 256 KiB of innerText (legacy behavior, for the rare case the model wants off-screen content unscrolled).
+
+Refs (`e1`, `e2`, …) persist across snapshots: the extension reuses any element's existing `data-gh-router-ref` and only mints new ids for elements it hasn't seen. Model can do `read_page → act(ref) → read_page` and the ref-to-element binding stays valid. Full diff-envelope responses (only what changed since a baseline snapshot id) are documented as a future enhancement on top of this primitive.
+
+The in-page traversal descends into open Shadow DOM roots so web-component-heavy UIs (modern React apps with shadow encapsulation) surface their interactive elements. Cross-origin iframes still aren't reached from in-page script — that needs full CDP `Accessibility.getFullAXTree` with frame stitching, documented as a future enhancement.
+
 ## Known gotchas (the ones that bit me building this)
 
 1. **`computeExtensionIdFromKey` is not "char + 49"**. The Chrome algorithm maps the hex VALUE (0..15) to a letter (a..p), not the hex character code. The off-by-one bug silently produced a 23-char ID that didn't match Chrome's runtime ID, which caused `connectNative` to fail with "Specified native messaging host not found".

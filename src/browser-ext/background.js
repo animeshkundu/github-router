@@ -281,12 +281,29 @@ async function toolReadPage(args) {
       const allElements = []
       walkDeep(document, allElements)
       const interactive = allElements.filter(isInteractive)
+      // Stable refs across snapshots: if an element already carries a
+      // data-gh-router-ref from a prior snapshot, keep it. New elements
+      // get the next unused counter. Result: ref `e42` refers to the
+      // SAME element across reads, so model can do `read_page → click(ref)
+      // → read_page` and the ref-to-element binding stays valid.
+      const usedRefs = new Set()
+      for (const el of interactive) {
+        const existing = el.getAttribute("data-gh-router-ref")
+        if (existing && /^e\d+$/.test(existing)) usedRefs.add(existing)
+      }
+      let nextRef = 1
+      function nextFreshRef() {
+        while (usedRefs.has(`e${nextRef}`)) nextRef++
+        const r = `e${nextRef}`
+        usedRefs.add(r)
+        nextRef++
+        return r
+      }
       // Summary mode: viewport-visible only; drop nameless non-tag
       // elements (a div with role="button" but no aria-label is noise).
       // Full mode: keep everything, model asked for it.
       const ELEMENT_CAP = 200
       const elements = []
-      let refCounter = 0
       for (const el of interactive) {
         if (elements.length >= ELEMENT_CAP) break
         const rect = el.getBoundingClientRect()
@@ -294,9 +311,11 @@ async function toolReadPage(args) {
         const name = nameOf(el)
         const tag = el.tagName.toLowerCase()
         if (mode === "summary" && !name && !INTERACTIVE_TAGS.has(tag)) continue
-        refCounter++
-        const ref = `e${refCounter}`
-        el.setAttribute("data-gh-router-ref", ref)
+        let ref = el.getAttribute("data-gh-router-ref")
+        if (!ref || !/^e\d+$/.test(ref)) {
+          ref = nextFreshRef()
+          el.setAttribute("data-gh-router-ref", ref)
+        }
         const entry = {
           ref,
           role: el.getAttribute("role") || tag,

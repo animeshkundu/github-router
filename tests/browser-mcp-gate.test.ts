@@ -188,7 +188,7 @@ describe("browser-mcp capability gate (--browse)", () => {
     expect(payload.manual_steps.expected_extension_id).toMatch(/^[a-p]{32}$/)
   })
 
-  test("tools/list includes the humanlike-input v2 tools (mouse / drag / type / locate) when gate is on", async () => {
+  test("tools/list includes the humanlike-input v2 tools (mouse / drag / type) when gate is on", async () => {
     if (!hasSupportedBrowserInstalled()) return
     state.browseEnabled = true
     const { json } = await rpc({
@@ -199,15 +199,16 @@ describe("browser-mcp capability gate (--browse)", () => {
     const names = (json.result as { tools: Array<{ name: string }> }).tools.map(
       (t) => t.name,
     )
-    for (const name of ["browser_mouse", "browser_drag", "browser_type", "browser_locate"]) {
+    for (const name of ["browser_mouse", "browser_drag", "browser_type"]) {
       expect(names).toContain(name)
     }
   })
 
-  test("defense-in-depth: tools/call browser_mouse / browser_drag / browser_type / browser_locate return -32601 when gate is off", async () => {
+  test("defense-in-depth: tools/call browser_mouse / browser_drag / browser_type return -32601 when gate is off", async () => {
     // Symmetric with browser_open_tab — a naive client hard-coding any
-    // of these new names must hit the same method-not-found path.
-    for (const name of ["browser_mouse", "browser_drag", "browser_type", "browser_locate"]) {
+    // of these names must hit the same method-not-found path. `browser_locate`
+    // was removed as part of the L2 cull (browser_find returns bbox).
+    for (const name of ["browser_mouse", "browser_drag", "browser_type"]) {
       const { status, json } = await rpc({
         jsonrpc: "2.0",
         id: 7,
@@ -219,5 +220,34 @@ describe("browser-mcp capability gate (--browse)", () => {
       expect(err?.code).toBe(-32601)
       expect(err?.message).toMatch(/unknown tool/i)
     }
+  })
+
+  test("L2 cull removes browser_click / browser_fill / browser_locate / browser_console_logs / browser_network_log from MCP surface", async () => {
+    if (!hasSupportedBrowserInstalled()) return
+    state.browseEnabled = true
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 8,
+      method: "tools/list",
+    })
+    const names = (json.result as { tools: Array<{ name: string }> }).tools.map(
+      (t) => t.name,
+    )
+    for (const removed of [
+      "browser_click",
+      "browser_fill",
+      "browser_locate",
+      "browser_console_logs",
+      "browser_network_log",
+    ]) {
+      expect(names).not.toContain(removed)
+    }
+    // browser_diagnostics replaces console_logs + network_log; browser_act
+    // (ref mode) replaces click + fill; browser_find returns bbox in lieu
+    // of locate. These four are the additive L2 surface.
+    expect(names).toContain("browser_diagnostics")
+    // browser_find / browser_act / browser_extract are capability-gated on
+    // the compressor backend being present in the catalog; only assert
+    // they show up when the gate fires.
   })
 })
