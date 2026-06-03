@@ -501,17 +501,21 @@ export interface NonPersonaMcpTool {
    * - `"stand_in"` requires all three of `gpt-5.5`, `claude-opus-4-7`,
    *   and a `gemini-3.X.*pro` model to be in the live catalog (see
    *   `standInToolEnabled()` in `routes/mcp/handler.ts`).
-   * - `"browser"` (browser_open_tab, browser_screenshot, browser_click,
+   * - `"browser"` (browser_open_tab, browser_screenshot, browser_mouse,
    *   …) requires `state.browseEnabled` (set by `--browse` or
    *   `GH_ROUTER_ENABLE_BROWSE=1`) AND at least one Chromium-family
    *   browser detected on disk (see `browserToolsEnabled()` in
    *   `routes/mcp/handler.ts`).
+   * - `"browser_compound"` (browser_find / browser_act / browser_extract)
+   *   requires `browserToolsEnabled()` AND a compressor backend in the
+   *   live catalog (see `browserCompoundToolsEnabled()` in
+   *   `lib/mcp-capabilities.ts`).
    *
    * Absent on `web_search` / `code_search` — those are always available
    * once the proxy is in claude mode (loopback + nonce already gate
    * `/mcp` itself).
    */
-  capability?: "worker" | "stand_in" | "browser"
+  capability?: "worker" | "stand_in" | "browser" | "browser_compound"
   /**
    * Server-side handler. Receives the raw `arguments` object from the
    * `tools/call` request and an optional AbortSignal that is signalled

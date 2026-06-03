@@ -28,6 +28,7 @@ import {
 } from "~/services/copilot/create-responses"
 import { hasSupportedBrowserInstalled } from "~/lib/browser-mcp/browser-detect"
 import {
+  browserCompoundToolsEnabled,
   standInToolEnabled,
   workerToolsEnabled,
 } from "~/lib/mcp-capabilities"
@@ -337,6 +338,7 @@ function toolEntries(): Array<ToolEntry> {
       if (t.capability === "worker") return workerToolsEnabled()
       if (t.capability === "stand_in") return standInToolEnabled()
       if (t.capability === "browser") return browserToolsEnabled()
+      if (t.capability === "browser_compound") return browserCompoundToolsEnabled()
       return true
     },
   ).map(

@@ -14,6 +14,7 @@
  * a tool the live catalog doesn't expose).
  */
 
+import { compressorAvailable } from "./browser-mcp/compressor"
 import { state } from "./state"
 import { DEFAULT_MODEL as WORKER_DEFAULT_MODEL } from "./worker-agent"
 
@@ -78,4 +79,25 @@ export function workerToolsEnabled(): boolean {
   const found = models.find((m) => m.id === WORKER_DEFAULT_MODEL)
   if (!found) return false
   return found.capabilities?.supports?.tool_calls === true
+}
+
+/**
+ * Gate for the compound L2 browser tools (`browser_find`, `browser_act`
+ * in intent mode, `browser_extract`).
+ *
+ * Returns true iff `compressorAvailable()` — i.e. at least one model in
+ * the compressor fallback chain (`gemini-3.5-flash` → `gpt-5.4-mini` →
+ * `claude-haiku-4-5`) is present in the live catalog with `tool_calls`
+ * support. When none are reachable the compound tools are dropped from
+ * `tools/list` AND fail `tools/call` with -32601.
+ *
+ * Note: this gate does NOT additionally re-check the `browser` opt-in.
+ * The `handler.ts` filter chain runs `browser` and `browser_compound`
+ * via separate `capability` tags; the compound tools' entries also
+ * apply at the route level via the existing `--browse` enablement
+ * because they live under the browser MCP surface that the route
+ * only mounts when `state.browseEnabled`.
+ */
+export function browserCompoundToolsEnabled(): boolean {
+  return compressorAvailable()
 }
