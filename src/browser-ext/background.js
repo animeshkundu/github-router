@@ -21,14 +21,28 @@
 const NATIVE_HOST_NAME = "com.githubrouter.browser"
 
 // ---------------------------------------------------------------------
-// Navigation policy — list of URL patterns blocked from open / navigate.
-// Mirrored in src/lib/browser-mcp/policy.ts (defense in depth).
+// Navigation policy — URL patterns this extension blocks at
+// webNavigation.onBeforeNavigate. This list is INTENTIONALLY NARROWER
+// than the bridge-side regex in src/lib/browser-mcp/policy.ts: the
+// bridge regex only fires for tool-initiated nav (browser_open_tab /
+// browser_navigate) so it can safely block `extensions` without
+// affecting the human user, while THIS regex fires for user-typed URL
+// bar nav too and must preserve human access to chrome://extensions /
+// edge://extensions (needed to reload this extension after package
+// updates).
 // ---------------------------------------------------------------------
 
+// `extensions` is intentionally omitted from the extension-side regex —
+// chrome.webNavigation.onBeforeNavigate fires for ALL top-level
+// navigations including the user typing in the URL bar, so including it
+// here would lock the user out of managing the very extension that
+// loads this code (and prevent the reload arrow that auto-update falls
+// back to). Bridge-side policy.ts keeps `extensions` in its regex,
+// which is sufficient because the bridge regex only gates tool-
+// initiated nav (browser_open_tab / browser_navigate).
 const BLOCKED_URL_RE =
-  /^(chrome|edge|brave|opera|vivaldi):\/\/(settings|preferences|extensions|policy|management|password|flags|flag-descriptions)/i
-const BLOCKED_VIEW_SOURCE_RE =
-  /^view-source:(chrome|edge):\/\/(settings|extensions)/i
+  /^(chrome|edge|brave|opera|vivaldi):\/\/(settings|preferences|policy|management|password|flags|flag-descriptions)/i
+const BLOCKED_VIEW_SOURCE_RE = /^view-source:(chrome|edge):\/\/settings/i
 
 function isBlockedUrl(url) {
   if (typeof url !== "string") return false
@@ -170,40 +184,83 @@ async function toolScreenshot(args) {
 async function toolReadPage(args) {
   const tabId = typeof args.tabId === "number" ? args.tabId : undefined
   if (!tabId) throw new Error("browser_read_page: tabId is required")
+  const mode = args.mode === "full" ? "full" : "summary"
   const [result] = await chrome.scripting.executeScript({
     target: { tabId },
-    func: () => {
-      // Element refs: every interactive element gets an id we return to
-      // the caller; subsequent click/fill calls reference these refs
-      // instead of brittle CSS selectors. Refs are stable for the
-      // lifetime of a single read_page snapshot.
-      const interactive = "a, button, input, select, textarea, [role='button'], [role='link'], [role='checkbox']"
-      const els = Array.from(document.querySelectorAll(interactive))
-      const elements = els.slice(0, 200).map((el, i) => {
-        const ref = `e${i + 1}`
-        el.setAttribute("data-gh-router-ref", ref)
-        const rect = el.getBoundingClientRect()
-        return {
-          ref,
-          role: el.getAttribute("role") || el.tagName.toLowerCase(),
-          name:
-            (el.getAttribute("aria-label") ||
-              el.textContent ||
-              el.getAttribute("value") ||
-              el.getAttribute("placeholder") ||
-              "")
-              .trim()
-              .slice(0, 200),
-          bbox: [Math.round(rect.x), Math.round(rect.y), Math.round(rect.width), Math.round(rect.height)],
+    func: (mode) => {
+      // Stable ref attribution: every interactive element gets a
+      // data-gh-router-ref attribute the model uses for subsequent
+      // ref-based actions. Stable for the lifetime of one read_page.
+      //
+      // Traversal: descend into open shadow roots so web-component-heavy
+      // UIs (e.g. modern React apps with shadow encapsulation) surface
+      // their interactive elements. Cross-origin iframes are not reached
+      // from in-page script — that needs CDP and is documented as a
+      // future enhancement.
+      const INTERACTIVE_ROLES = new Set([
+        "button",
+        "link",
+        "textbox",
+        "combobox",
+        "checkbox",
+        "radio",
+        "switch",
+        "tab",
+        "menuitem",
+        "option",
+        "slider",
+        "searchbox",
+        "spinbutton",
+        "treeitem",
+      ])
+      const INTERACTIVE_TAGS = new Set([
+        "a",
+        "button",
+        "input",
+        "select",
+        "textarea",
+      ])
+      function isInteractive(el) {
+        const role = el.getAttribute("role")
+        if (role && INTERACTIVE_ROLES.has(role)) return true
+        if (INTERACTIVE_TAGS.has(el.tagName.toLowerCase())) return true
+        if (el.hasAttribute("contenteditable") && el.getAttribute("contenteditable") !== "false") return true
+        const ti = el.getAttribute("tabindex")
+        if (ti !== null && Number.parseInt(ti, 10) >= 0) return true
+        return false
+      }
+      function nameOf(el) {
+        const labelledBy = el.getAttribute("aria-labelledby")
+        if (labelledBy) {
+          const labelEl = document.getElementById(labelledBy)
+          if (labelEl) return (labelEl.textContent || "").trim().slice(0, 200)
         }
-      })
-      // Page text: innerText is roughly what a user reads. Cap at
-      // 256 KiB to keep the response tractable.
-      const MAX = 256 * 1024
-      let text = document.body ? document.body.innerText : ""
-      if (text.length > MAX) text = text.slice(0, MAX)
-      // Viewport metadata so the model can correlate CSS-px bbox to
-      // device-px pixels in browser_screenshot (device_px = css_px * dpr).
+        return (
+          el.getAttribute("aria-label")
+          || el.getAttribute("title")
+          || (el.textContent || "")
+          || el.getAttribute("value")
+          || el.getAttribute("placeholder")
+          || el.getAttribute("alt")
+          || ""
+        ).trim().slice(0, 200)
+      }
+      function walkDeep(root, sink) {
+        // Walk every element under root, descending into open shadow
+        // roots. Closed shadow roots are intentionally opaque per the
+        // web spec; nothing we can do.
+        // NodeFilter.SHOW_ELEMENT === 1.
+        const walker = root.createTreeWalker
+          ? root.createTreeWalker(root, 1)
+          : document.createTreeWalker(root, 1)
+        let n
+        while ((n = walker.nextNode())) {
+          sink.push(n)
+          if (n.shadowRoot && n.shadowRoot.mode === "open") {
+            walkDeep(n.shadowRoot, sink)
+          }
+        }
+      }
       const viewport = {
         width: window.innerWidth,
         height: window.innerHeight,
@@ -211,8 +268,140 @@ async function toolReadPage(args) {
         scrollX: window.scrollX,
         scrollY: window.scrollY,
       }
-      return { text, elements, viewport }
+      function inViewport(rect) {
+        return (
+          rect.bottom > 0
+          && rect.right > 0
+          && rect.top < viewport.height
+          && rect.left < viewport.width
+          && rect.width > 0
+          && rect.height > 0
+        )
+      }
+      const allElements = []
+      walkDeep(document, allElements)
+      const interactive = allElements.filter(isInteractive)
+      // Stable refs across snapshots: if an element already carries a
+      // data-gh-router-ref from a prior snapshot, keep it. New elements
+      // get the next unused counter. Result: ref `e42` refers to the
+      // SAME element across reads, so model can do `read_page → click(ref)
+      // → read_page` and the ref-to-element binding stays valid.
+      const usedRefs = new Set()
+      for (const el of interactive) {
+        const existing = el.getAttribute("data-gh-router-ref")
+        if (existing && /^e\d+$/.test(existing)) usedRefs.add(existing)
+      }
+      let nextRef = 1
+      function nextFreshRef() {
+        while (usedRefs.has(`e${nextRef}`)) nextRef++
+        const r = `e${nextRef}`
+        usedRefs.add(r)
+        nextRef++
+        return r
+      }
+      // Summary mode: viewport-visible only; drop nameless non-tag
+      // elements (a div with role="button" but no aria-label is noise).
+      // Full mode: keep everything, model asked for it.
+      const ELEMENT_CAP = 200
+      const elements = []
+      for (const el of interactive) {
+        if (elements.length >= ELEMENT_CAP) break
+        const rect = el.getBoundingClientRect()
+        if (mode === "summary" && !inViewport(rect)) continue
+        const name = nameOf(el)
+        const tag = el.tagName.toLowerCase()
+        if (mode === "summary" && !name && !INTERACTIVE_TAGS.has(tag)) continue
+        let ref = el.getAttribute("data-gh-router-ref")
+        if (!ref || !/^e\d+$/.test(ref)) {
+          ref = nextFreshRef()
+          el.setAttribute("data-gh-router-ref", ref)
+        }
+        const entry = {
+          ref,
+          role: el.getAttribute("role") || tag,
+          bbox: [
+            Math.round(rect.x),
+            Math.round(rect.y),
+            Math.round(rect.width),
+            Math.round(rect.height),
+          ],
+        }
+        if (name) entry.name = name
+        elements.push(entry)
+      }
+      // Text extraction.
+      // summary: walk text nodes whose parent is in the viewport; cap
+      // at 20 KB. The model sees what a user could read without
+      // scrolling. Off-screen content remains reachable via mode:"full".
+      // full: 256 KiB innerText cap (legacy behavior).
+      let text = ""
+      if (mode === "full") {
+        const MAX_FULL = 256 * 1024
+        text = document.body ? document.body.innerText : ""
+        if (text.length > MAX_FULL) text = text.slice(0, MAX_FULL)
+      } else {
+        const TEXT_CAP = 20 * 1024
+        const parts = []
+        let total = 0
+        const root = document.body || document.documentElement
+        if (root) {
+          const tw = document.createTreeWalker(root, 4) // NodeFilter.SHOW_TEXT === 4
+          let n
+          while ((n = tw.nextNode())) {
+            const parent = n.parentElement
+            if (!parent) continue
+            // Skip script/style content.
+            const ptag = parent.tagName ? parent.tagName.toLowerCase() : ""
+            if (ptag === "script" || ptag === "style" || ptag === "noscript") continue
+            const pr = parent.getBoundingClientRect()
+            if (!inViewport(pr)) continue
+            const t = (n.textContent || "").replace(/\s+/g, " ").trim()
+            if (!t) continue
+            if (total + t.length + 1 > TEXT_CAP) {
+              parts.push(t.slice(0, Math.max(0, TEXT_CAP - total)))
+              break
+            }
+            parts.push(t)
+            total += t.length + 1
+          }
+        }
+        text = parts.join("\n")
+      }
+      // visualSurfaces: canvas + svg of non-trivial size in the
+      // viewport. Signals "this region needs vision" to the lead model
+      // so it knows to call browser_screenshot / let browser_act
+      // auto-escalate when the text-based pickElement misses.
+      const visualSurfaces = []
+      const VS_MIN = 100
+      const canvasNodes = allElements.filter((el) => {
+        const t = el.tagName && el.tagName.toLowerCase()
+        return t === "canvas" || t === "svg"
+      })
+      for (const el of canvasNodes) {
+        const rect = el.getBoundingClientRect()
+        if (rect.width < VS_MIN || rect.height < VS_MIN) continue
+        if (!inViewport(rect)) continue
+        let ref = el.getAttribute("data-gh-router-ref")
+        if (!ref) {
+          ref = `v${visualSurfaces.length + 1}`
+          el.setAttribute("data-gh-router-ref", ref)
+        }
+        visualSurfaces.push({
+          ref,
+          kind: el.tagName.toLowerCase(),
+          bbox: [
+            Math.round(rect.x),
+            Math.round(rect.y),
+            Math.round(rect.width),
+            Math.round(rect.height),
+          ],
+        })
+      }
+      const out = { mode, text, elements, viewport }
+      if (visualSurfaces.length > 0) out.visualSurfaces = visualSurfaces
+      return out
     },
+    args: [mode],
   })
   if (!result || typeof result.result !== "object") {
     throw new Error("browser_read_page: scripting.executeScript returned nothing")
@@ -232,36 +421,93 @@ async function toolClick(args) {
   const clickCount = typeof args.clickCount === "number" ? args.clickCount : 1
   if (!tabId) throw new Error("browser_click: tabId is required")
   if (!ref && !selector) throw new Error("browser_click: ref or selector is required")
-  const before = await chrome.tabs.get(tabId)
-  const urlBefore = before.url
-  const [result] = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (ref, selector, button, clickCount) => {
-      const sel = ref ? `[data-gh-router-ref="${ref}"]` : selector
-      const el = document.querySelector(sel)
-      if (!el) return { ok: false, error: `element not found: ${sel}` }
-      // Use native .click() for left-button (handles default action,
-      // form submission, etc); MouseEvent for right-click context menus.
-      if (button === "right") {
-        for (let i = 0; i < clickCount; i++) {
-          el.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }))
+  // Subscribe to nav events BEFORE dispatching the click so a fast
+  // click → nav transition can't race past us. Cleanup runs in
+  // finally so an executeScript throw doesn't leak listeners.
+  const navState = watchTabNavigation(tabId)
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (ref, selector, button, clickCount) => {
+        const sel = ref ? `[data-gh-router-ref="${ref}"]` : selector
+        const el = document.querySelector(sel)
+        if (!el) return { ok: false, error: `element not found: ${sel}` }
+        // Use native .click() for left-button (handles default action,
+        // form submission, etc); MouseEvent for right-click context menus.
+        if (button === "right") {
+          for (let i = 0; i < clickCount; i++) {
+            el.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }))
+          }
+        } else {
+          for (let i = 0; i < clickCount; i++) el.click()
         }
-      } else {
-        for (let i = 0; i < clickCount; i++) el.click()
-      }
-      return { ok: true }
-    },
-    args: [ref, selector, button, clickCount],
-  })
-  if (!result || !result.result || !result.result.ok) {
-    throw new Error(`browser_click: ${result?.result?.error ?? "execution failed"}`)
+        return { ok: true }
+      },
+      args: [ref, selector, button, clickCount],
+    })
+    if (!result || !result.result || !result.result.ok) {
+      throw new Error(`browser_click: ${result?.result?.error ?? "execution failed"}`)
+    }
+    // Accurate navigated detection via webNavigation events (replaces the
+    // old 300ms URL-poll which missed slow nav and reported navigated:false
+    // for clicks that DID navigate but took longer to commit). Wait up to
+    // ~150ms for onBeforeNavigate to fire; if it does, then wait up to
+    // ~5s for onCommitted to land. If onBeforeNavigate never fires, no
+    // navigation was triggered — return immediately, no wasted latency.
+    const navigated = await navState.promise
+    return { ok: true, navigated }
+  } finally {
+    navState.cleanup()
   }
-  // Brief settle window so clicks that trigger navigation surface in
-  // the response. 300ms is enough to catch immediate-redirect clicks
-  // without significantly slowing the tool's tail latency.
-  await sleep(300)
-  const after = await chrome.tabs.get(tabId)
-  return { ok: true, navigated: after.url !== urlBefore }
+}
+
+/**
+ * Pre-subscribe to chrome.webNavigation events for an upcoming click
+ * on a tab. Returns a {promise, cleanup} pair. The caller fires the
+ * click AFTER calling this so the listener can never miss the
+ * onBeforeNavigate that the click triggers.
+ *
+ * Promise resolves to:
+ *   - true when onCommitted fires for tabId+frameId 0 within ~5s of
+ *     an onBeforeNavigate also firing on that tab/frame, OR
+ *   - false when onBeforeNavigate doesn't fire within ~150ms post-call
+ *     (= no nav triggered by the click).
+ *
+ * cleanup() removes both listeners — caller MUST invoke from a finally
+ * block to avoid leaking event subscriptions on errors.
+ */
+function watchTabNavigation(tabId) {
+  const NO_NAV_MS = 150
+  const COMMIT_MS = 5000
+  let onBefore
+  let onCommitted
+  let resolved = false
+  let noNavTimer
+  let commitTimer
+  const cleanup = () => {
+    try { if (onBefore) chrome.webNavigation.onBeforeNavigate.removeListener(onBefore) } catch { /* ignore */ }
+    try { if (onCommitted) chrome.webNavigation.onCommitted.removeListener(onCommitted) } catch { /* ignore */ }
+    if (noNavTimer) clearTimeout(noNavTimer)
+    if (commitTimer) clearTimeout(commitTimer)
+  }
+  const promise = new Promise((resolve) => {
+    const settle = (v) => { if (!resolved) { resolved = true; resolve(v) } }
+    onCommitted = (details) => {
+      if (details.tabId === tabId && details.frameId === 0) settle(true)
+    }
+    onBefore = (details) => {
+      if (details.tabId !== tabId || details.frameId !== 0) return
+      // Nav started; switch from "did we get a nav at all" to "wait
+      // for commit". If commit doesn't land in COMMIT_MS, assume the
+      // nav stuck or was cancelled and report true (a nav DID start).
+      if (noNavTimer) { clearTimeout(noNavTimer); noNavTimer = undefined }
+      commitTimer = setTimeout(() => settle(true), COMMIT_MS)
+    }
+    chrome.webNavigation.onBeforeNavigate.addListener(onBefore)
+    chrome.webNavigation.onCommitted.addListener(onCommitted)
+    noNavTimer = setTimeout(() => settle(false), NO_NAV_MS)
+  })
+  return { promise, cleanup }
 }
 
 async function toolFill(args) {
@@ -1438,11 +1684,39 @@ function connectBridge() {
     nativePort = undefined
   })
   nativePort = port
+  // Hello frame — lets the bridge associate this connection with a
+  // version. Pre-flight on the proxy side compares this against the
+  // version stamped into dist/browser-ext/manifest.json at build, and
+  // triggers an auto-reload (via __reload__ control frame) when the
+  // package has been updated but the loaded extension is stale.
+  try {
+    port.postMessage({
+      type: "__hello__",
+      version: chrome.runtime.getManifest().version,
+    })
+  } catch (err) {
+    console.warn("[browser-bridge] hello frame failed:", err)
+  }
   return port
 }
 
 async function handleBridgeRequest(req, port) {
-  if (!req || typeof req.id !== "string" || typeof req.tool !== "string") return
+  if (!req) return
+  // Control frames — not regular tool dispatches. The bridge sends
+  // these out-of-band; the {id, tool, args} shape doesn't apply.
+  if (req.type === "__reload__") {
+    // chrome.runtime.reload terminates this service worker and starts
+    // a fresh one that re-reads on-disk files. Used by the proxy's
+    // pre-flight when the loaded extension version doesn't match the
+    // version stamped into dist/browser-ext/manifest.json.
+    try {
+      chrome.runtime.reload()
+    } catch (err) {
+      console.warn("[browser-bridge] reload failed:", err)
+    }
+    return
+  }
+  if (typeof req.id !== "string" || typeof req.tool !== "string") return
   const handler = TOOL_HANDLERS[req.tool]
   if (!handler) {
     port.postMessage({ id: req.id, ok: false, error: `unknown tool: ${req.tool}`, code: "unknown_tool" })
@@ -1483,17 +1757,17 @@ chrome.tabs.onUpdated.addListener(() => {
   try { connectBridge() } catch (err) { console.warn("[browser-bridge] onUpdated connect failed:", err) }
 })
 
-// Defense in depth — webNavigation listener catches in-page-initiated
-// navigations (JS-driven redirects, meta-refresh, anchor clicks the
-// model didn't go through browser_navigate for). Tool-initiated paths
-// already pre-check via isBlockedUrl() / the bridge-layer policy.ts,
-// so this is the safety net for navigations the bridge can't see.
-//
-// On match: cancel the navigation by routing the tab back to
-// about:blank, AND log a console.error so browser_console_logs can
-// surface "the model tried to navigate to a blocked URL" on the next
-// drain. The cancel happens via chrome.tabs.update — there's no
-// onBeforeNavigate "cancel" API in MV3.
+// webNavigation.onBeforeNavigate fires for ALL top-level navigations
+// — user-typed URL bar entries AND in-page-initiated nav (JS redirect,
+// meta-refresh, anchor clicks). It does NOT expose transitionType, so
+// we can't cheaply distinguish initiator at this stage. Consequence:
+// every URL in BLOCKED_URL_RE is unreachable when this extension is
+// enabled, including for the human user. `extensions` is deliberately
+// excluded from BLOCKED_URL_RE to preserve user access to the page
+// they need to manage this extension; bridge-side policy.ts still
+// rejects tool-initiated nav there. On match: route the tab back to
+// about:blank (no onBeforeNavigate cancel API in MV3) and log a
+// console.error so browser_console_logs can surface it on next drain.
 chrome.webNavigation.onBeforeNavigate.addListener((details) => {
   if (details.frameId !== 0) return  // only top-level frame
   if (isBlockedUrl(details.url)) {

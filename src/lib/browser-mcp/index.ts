@@ -1,6 +1,49 @@
 import { dispatchBrowserTool } from "./dispatch"
+import {
+  ResultShapeError,
+  SchemaValidationError,
+  extractStructured,
+  pickElement,
+  pickElementVisual,
+  pickMatchingElements,
+  type PageSnapshot,
+} from "./compressor"
 
 import type { NonPersonaMcpTool } from "~/lib/peer-mcp-personas"
+
+/**
+ * Helper for compound tools (`browser_find` / `browser_act` /
+ * `browser_extract`): fetch the page snapshot via the existing
+ * primitive dispatcher and unwrap the JSON text envelope. Compound
+ * tools all start from a snapshot, so a single helper keeps the
+ * unwrap logic in one place.
+ */
+async function fetchSnapshot(
+  tabId: number,
+  signal?: AbortSignal,
+): Promise<PageSnapshot> {
+  const env = await dispatchBrowserTool(
+    "browser_read_page",
+    { tabId, mode: "summary" },
+    signal,
+  )
+  if (env.isError) {
+    throw new Error("browser_read_page returned an error envelope; bridge / extension not ready")
+  }
+  const text = env.content?.[0]?.text
+  if (typeof text !== "string") {
+    throw new Error("browser_read_page returned no text content")
+  }
+  return JSON.parse(text) as PageSnapshot
+}
+
+function toolEnvelope(
+  data: unknown,
+  isError?: boolean,
+): { content: Array<{ type: "text"; text: string }>; isError?: boolean } {
+  const text = typeof data === "string" ? data : JSON.stringify(data, null, 2)
+  return isError ? { content: [{ type: "text", text }], isError: true } : { content: [{ type: "text", text }] }
+}
 
 /**
  * Browser-control MCP tools (`browser_*`). All entries route through
@@ -130,71 +173,23 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
   {
     toolNameHttp: "browser_read_page",
     description:
-      "Extract rendered page text plus interactive elements (refs, roles, names, bounding boxes) plus viewport metadata. Each element entry carries bbox: [x, y, w, h] in CSS viewport pixels — the same coordinate space used by browser_mouse / browser_drag / browser_scroll(at-pointer). Element refs returned here are intended as the primary input to follow-up tool calls — preferred over CSS selectors because refs are stable across dynamic class names. The viewport block {width, height, devicePixelRatio, scrollX, scrollY} lets you map a CSS-px bbox to a device-px pixel in browser_screenshot (device_px = css_px * devicePixelRatio). Text is capped at 256 KiB; elements at the first 200 interactive nodes.",
+      "Compressed page snapshot for the model: visible text, interactive elements with stable refs, viewport metadata, and (when present) `visualSurfaces` listing canvas / svg regions that need vision. Each element entry carries `bbox: [x, y, w, h]` in CSS viewport pixels (same coord space as browser_mouse / drag / scroll-at-pointer). Refs (e.g. `e42`) are stable for the lifetime of one read_page snapshot and are the preferred input to follow-up actions over brittle CSS selectors. The `viewport` block (`width`, `height`, `devicePixelRatio`, `scrollX`, `scrollY`) lets you map CSS-px bbox to device-px pixels for browser_screenshot. Mode controls what ships back: `summary` (default, ~5-15 KB) returns only viewport-visible elements/text and drops nameless non-interactive nodes; `full` returns up to 200 elements + 256 KiB of innerText (the legacy behavior — use only when you need off-screen content unscrolled). PREFER browser_act / browser_find for intent-driven interaction; read_page is the lower-level snapshot when you need to enumerate.",
     inputSchema: {
       type: "object",
       required: ["tabId"],
       additionalProperties: false,
       properties: {
         tabId: { type: "number", description: "Tab id from browser_list_tabs / browser_open_tab." },
+        mode: {
+          type: "string",
+          enum: ["summary", "full"],
+          description: "Snapshot scope. Default 'summary' returns viewport-visible elements + text capped at 20 KiB. 'full' returns up to 200 interactive elements page-wide + 256 KiB of innerText.",
+        },
       },
     },
     capability: "browser",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_read_page", args, signal)
-    },
-  },
-  {
-    toolNameHttp: "browser_click",
-    description:
-      "Click an element by ref (from a prior browser_read_page) or CSS selector. Returns {ok, navigated} where navigated=true if the URL changed within ~300ms of the click.",
-    inputSchema: {
-      type: "object",
-      required: ["tabId"],
-      additionalProperties: false,
-      properties: {
-        tabId: { type: "number" },
-        ref: { type: "string", description: "Element ref from browser_read_page (preferred)." },
-        selector: { type: "string", description: "CSS selector (fallback when no ref)." },
-        button: { type: "string", enum: ["left", "right"], description: "Mouse button. Default 'left'." },
-        clickCount: { type: "number", description: "Number of times to click. Default 1." },
-      },
-    },
-    capability: "browser",
-    async handler(args: Record<string, unknown>, signal?: AbortSignal) {
-      return dispatchBrowserTool("browser_click", args, signal)
-    },
-  },
-  {
-    toolNameHttp: "browser_fill",
-    description:
-      "Type into an input / textarea, select from a dropdown, or toggle a checkbox / radio. Dispatches native input and change events so React-style controlled inputs see the value.",
-    inputSchema: {
-      type: "object",
-      required: ["tabId", "value"],
-      additionalProperties: false,
-      properties: {
-        tabId: { type: "number" },
-        ref: { type: "string", description: "Element ref from browser_read_page (preferred)." },
-        selector: { type: "string", description: "CSS selector (fallback when no ref)." },
-        value: {
-          description:
-            "The value to set. String for inputs / textareas / select option value. Boolean for checkbox / radio. Max 1 MB.",
-        },
-        clearFirst: {
-          type: "boolean",
-          description: "Clear the input before typing (default true). No effect on select / checkbox.",
-        },
-        pressEnter: {
-          type: "boolean",
-          description:
-            "After typing, dispatch Enter keydown / keyup and call form.requestSubmit if available. Default false.",
-        },
-      },
-    },
-    capability: "browser",
-    async handler(args: Record<string, unknown>, signal?: AbortSignal) {
-      return dispatchBrowserTool("browser_fill", args, signal)
     },
   },
   {
@@ -353,45 +348,6 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
     },
   },
   {
-    toolNameHttp: "browser_console_logs",
-    description:
-      "Drain console messages a tab has emitted since the last call. The first call for a tab attaches chrome.debugger and starts capturing, so very-early-load messages from before the first call are missed; subsequent calls return everything since the previous drain. Buffer is capped at 1000 entries per tab.",
-    inputSchema: {
-      type: "object",
-      required: ["tabId"],
-      additionalProperties: false,
-      properties: {
-        tabId: { type: "number" },
-        level: {
-          type: "string",
-          enum: ["log", "info", "warn", "error", "debug", "all"],
-          description: "Filter by console level. Default 'all'.",
-        },
-      },
-    },
-    capability: "browser",
-    async handler(args: Record<string, unknown>, signal?: AbortSignal) {
-      return dispatchBrowserTool("browser_console_logs", args, signal)
-    },
-  },
-  {
-    toolNameHttp: "browser_network_log",
-    description:
-      "Drain network responses a tab has received since the last call. Same lazy-attach + cap-1000 behavior as browser_console_logs. Returns request URL, method, status, mime type, and timestamp per entry.",
-    inputSchema: {
-      type: "object",
-      required: ["tabId"],
-      additionalProperties: false,
-      properties: {
-        tabId: { type: "number" },
-      },
-    },
-    capability: "browser",
-    async handler(args: Record<string, unknown>, signal?: AbortSignal) {
-      return dispatchBrowserTool("browser_network_log", args, signal)
-    },
-  },
-  {
     toolNameHttp: "browser_mouse",
     description:
       "Move / click / hover / press / release the mouse via real CDP input events (Input.dispatchMouseEvent). Use this when you need behavior that synthetic .click() can't trigger: hover-to-reveal menus, canvas / map / image-map clicks, sites that check event.isTrusted, or precise coordinate targeting. Target with ref (from browser_read_page), CSS selector, or (x, y) in CSS viewport pixels — exactly one. action='move' is the hover (single mouseMoved fires :hover and pointerover reliably). action='dblclick' sends two press/release cycles with incrementing clickCount (a real double-click, not one cycle with clickCount=2). By default the target is hit-tested with elementFromPoint and the call fails with `target_obscured` if the topmost element isn't the target or a descendant — pass force:true to bypass when you know an overlay forwards events.",
@@ -519,28 +475,297 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
     },
   },
   {
-    toolNameHttp: "browser_locate",
+    toolNameHttp: "browser_diagnostics",
     description:
-      "Resolve a single ref or selector to bounding box + hit-test metadata, without a full browser_read_page snapshot. Cheap — one in-page script call. Returns bbox (CSS viewport px), center, inView (bbox intersects viewport), visible (display/visibility/opacity > 0 and bbox > 0), computed pointer-events, viewport metadata, and topmostAtCenter (is the element at the bbox center actually this target, or is it occluded by an overlay?). Use this before browser_mouse / browser_drag to detect overlay-occluded targets, or to check whether something scrolled out of view.",
+      "Drain console messages or network responses for a tab, with filtering. Replaces the prior browser_console_logs / browser_network_log primitives. `kind` selects the stream; remaining params filter the result before it ships to the model so the response carries only what the caller asked for instead of a raw 1000-entry array dump. Lazy-attach behavior: first call for a tab attaches chrome.debugger; very-early-load events from before the first call are missed.",
+    inputSchema: {
+      type: "object",
+      required: ["tabId", "kind"],
+      additionalProperties: false,
+      properties: {
+        tabId: { type: "number" },
+        kind: {
+          type: "string",
+          enum: ["console", "network"],
+          description: "Which stream to drain.",
+        },
+        level: {
+          type: "string",
+          enum: ["log", "info", "warn", "error", "debug", "all"],
+          description: "Console only. Default 'all'. Ignored when kind=network.",
+        },
+        regex: {
+          type: "string",
+          description: "Optional JS-regex string. Console: matches the message body. Network: matches the request URL.",
+        },
+        limit: {
+          type: "number",
+          description: "Max entries to return after filtering. Default 100. Hard cap 1000.",
+        },
+      },
+    },
+    capability: "browser",
+    async handler(args: Record<string, unknown>, signal?: AbortSignal) {
+      const kind = args.kind === "network" ? "network" : "console"
+      const tool = kind === "network" ? "browser_network_log" : "browser_console_logs"
+      const tabId = typeof args.tabId === "number" ? args.tabId : undefined
+      const level = typeof args.level === "string" ? args.level : "all"
+      const regexStr = typeof args.regex === "string" ? args.regex : undefined
+      const limit = typeof args.limit === "number" ? Math.min(1000, Math.max(1, args.limit)) : 100
+      const env = await dispatchBrowserTool(tool, { tabId, level }, signal)
+      if (env.isError) return env
+      const text = env.content?.[0]?.text
+      if (typeof text !== "string") return env
+      let entries: Array<Record<string, unknown>>
+      try {
+        const parsed = JSON.parse(text) as unknown
+        const arr = Array.isArray(parsed)
+          ? parsed
+          : Array.isArray((parsed as { entries?: unknown })?.entries)
+            ? ((parsed as { entries: Array<unknown> }).entries)
+            : []
+        entries = arr.filter((e): e is Record<string, unknown> => typeof e === "object" && e !== null)
+      } catch {
+        return env
+      }
+      let filtered = entries
+      if (regexStr) {
+        try {
+          const re = new RegExp(regexStr)
+          const field = kind === "network" ? "url" : "text"
+          filtered = filtered.filter((e) => {
+            const v = e[field]
+            return typeof v === "string" && re.test(v)
+          })
+        } catch {
+          return toolEnvelope({ error: `invalid regex: ${regexStr}` }, true)
+        }
+      }
+      const out = filtered.slice(0, limit)
+      return toolEnvelope({ kind, total: entries.length, returned: out.length, entries: out })
+    },
+  },
+  {
+    toolNameHttp: "browser_find",
+    description:
+      "Find up to 5 elements matching a natural-language intent ('the search box at the top', 'the Submit button at the bottom of the login form'). Returns ranked candidates with stable refs the model can pass to browser_act (ref mode) or browser_mouse. Cheaper than browser_read_page when you know what you're looking for — the inner compressor (Gemini Flash class) filters the snapshot for you instead of sending the full element list to the lead model.",
+    inputSchema: {
+      type: "object",
+      required: ["tabId", "intent"],
+      additionalProperties: false,
+      properties: {
+        tabId: { type: "number" },
+        intent: {
+          type: "string",
+          description: "Natural-language description of what to find.",
+        },
+      },
+    },
+    capability: "browser_compound",
+    async handler(args: Record<string, unknown>, signal?: AbortSignal) {
+      const tabId = typeof args.tabId === "number" ? args.tabId : undefined
+      const intent = typeof args.intent === "string" ? args.intent : ""
+      if (!tabId) return toolEnvelope({ error: "tabId required" }, true)
+      if (!intent) return toolEnvelope({ error: "intent required" }, true)
+      const snapshot = await fetchSnapshot(tabId, signal)
+      const matches = await pickMatchingElements(snapshot, intent, signal)
+      const indexed = new Map(snapshot.elements.map((e) => [e.ref, e]))
+      const expanded = matches.map((m) => {
+        const el = indexed.get(m.ref)
+        return el
+          ? { ref: m.ref, role: el.role, name: el.name, bbox: el.bbox, reason: m.reason }
+          : { ref: m.ref, reason: m.reason }
+      })
+      return toolEnvelope({ matches: expanded })
+    },
+  },
+  {
+    toolNameHttp: "browser_act",
+    description:
+      "Preferred for any click / fill / type / scroll-to action against a tab. Two modes: (1) INTENT mode — pass `intent` as natural language ('click the submit button'); the inner compressor (Gemini Flash class) maps it to an element + action. Auto-escalates to visual fallback (screenshot + multimodal model + pixel-coord click) when the intent points into a canvas / svg region the a11y tree can't see. (2) REF mode — pass `ref` (from a prior browser_find or browser_read_page) and optionally `value`; dispatches directly with zero compressor latency. This is the fold-in path for the now-removed browser_click and browser_fill. Returns {ok, action_taken, target_ref, navigated}.",
     inputSchema: {
       type: "object",
       required: ["tabId"],
       additionalProperties: false,
       properties: {
         tabId: { type: "number" },
+        intent: {
+          type: "string",
+          description: "Natural-language description of the action. Triggers INTENT mode. Mutually exclusive with `ref`.",
+        },
         ref: {
           type: "string",
-          description: "Element ref from browser_read_page (preferred). Exactly one of ref / selector required.",
+          description: "Element ref from browser_find / browser_read_page. Triggers REF mode (no compressor round-trip).",
         },
-        selector: {
+        action: {
           type: "string",
-          description: "CSS selector (fallback).",
+          enum: ["click", "fill", "type", "select", "scroll_into_view"],
+          description: "REF mode only. Defaults to 'click'. In INTENT mode, the compressor picks the action.",
+        },
+        value: {
+          type: "string",
+          description: "For fill / type / select: the string value to set. In INTENT mode the compressor uses this when an action requires a value.",
         },
       },
     },
     capability: "browser",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
-      return dispatchBrowserTool("browser_locate", args, signal)
+      const tabId = typeof args.tabId === "number" ? args.tabId : undefined
+      if (!tabId) return toolEnvelope({ error: "tabId required" }, true)
+      const refIn = typeof args.ref === "string" ? args.ref : undefined
+      const intent = typeof args.intent === "string" ? args.intent : undefined
+      const value = typeof args.value === "string" ? args.value : undefined
+      if (!refIn && !intent) {
+        return toolEnvelope({ error: "either `ref` (REF mode) or `intent` (INTENT mode) is required" }, true)
+      }
+      // REF mode: direct dispatch, zero compressor round-trip.
+      if (refIn) {
+        const actionIn = typeof args.action === "string" ? args.action : "click"
+        return dispatchActionByRef(tabId, refIn, actionIn, value, signal)
+      }
+      // INTENT mode.
+      const snapshot = await fetchSnapshot(tabId, signal)
+      const picked = await pickElement(snapshot, intent!, signal, value)
+      if (!picked.ref || picked.confidence < 0.5) {
+        // No text-based match. Try visual fallback if a canvas / svg is in view.
+        const surfaces = snapshot.visualSurfaces
+        if (surfaces && surfaces.length > 0) {
+          const shotEnv = await dispatchBrowserTool("browser_screenshot", { tabId, format: "png" }, signal)
+          if (shotEnv.isError) {
+            return toolEnvelope({ ok: false, error: "no text match; screenshot for visual fallback failed", picked }, true)
+          }
+          const shotText = shotEnv.content?.[0]?.text
+          let shot: { contentType?: string; dataBase64?: string } = {}
+          try {
+            shot = shotText ? (JSON.parse(shotText) as typeof shot) : {}
+          } catch {
+            return toolEnvelope({ ok: false, error: "no text match; screenshot envelope unparseable" }, true)
+          }
+          if (!shot.contentType || !shot.dataBase64) {
+            return toolEnvelope({ ok: false, error: "no text match; screenshot envelope missing fields" }, true)
+          }
+          const visual = await pickElementVisual(shot.dataBase64, shot.contentType, intent!, surfaces, signal)
+          if (visual.confidence < 0.5) {
+            return toolEnvelope({ ok: false, error: "no element matched intent (text + visual)", picked, visual }, true)
+          }
+          // Coord click via browser_mouse.
+          const clickEnv = await dispatchBrowserTool(
+            "browser_mouse",
+            { tabId, action: "click", x: visual.x, y: visual.y, force: true },
+            signal,
+          )
+          if (clickEnv.isError) return clickEnv
+          return toolEnvelope({
+            ok: true,
+            action_taken: "click_visual",
+            x: visual.x,
+            y: visual.y,
+            confidence: visual.confidence,
+            reason: visual.reason,
+          })
+        }
+        return toolEnvelope({ ok: false, error: "no element matched intent", picked }, true)
+      }
+      // Text-based match found. Dispatch.
+      return dispatchActionByRef(tabId, picked.ref, picked.action, picked.value ?? value, signal)
+    },
+  },
+  {
+    toolNameHttp: "browser_extract",
+    description:
+      "Structured extraction from the current page into a JSON object matching the provided schema. The inner compressor reads the page snapshot (text + elements) and synthesizes the typed object. Use this instead of browser_read_page + lead-model parsing when you know the shape you want (e.g. a list of {title, author, url} rows from a PR list).",
+    inputSchema: {
+      type: "object",
+      required: ["tabId", "schema", "instruction"],
+      additionalProperties: false,
+      properties: {
+        tabId: { type: "number" },
+        schema: {
+          description: "JSON schema (or schema-shaped descriptor) for the desired output shape.",
+        },
+        instruction: {
+          type: "string",
+          description: "What to extract, in plain language ('the visible PR list').",
+        },
+      },
+    },
+    capability: "browser_compound",
+    async handler(args: Record<string, unknown>, signal?: AbortSignal) {
+      const tabId = typeof args.tabId === "number" ? args.tabId : undefined
+      const instruction = typeof args.instruction === "string" ? args.instruction : ""
+      const schema = args.schema
+      if (!tabId) return toolEnvelope({ error: "tabId required" }, true)
+      if (!instruction) return toolEnvelope({ error: "instruction required" }, true)
+      if (!schema) return toolEnvelope({ error: "schema required" }, true)
+      const snapshot = await fetchSnapshot(tabId, signal)
+      try {
+        const extracted = await extractStructured(snapshot, schema, instruction, signal)
+        return toolEnvelope(extracted)
+      } catch (err) {
+        // Surface compressor validation errors as clean isError envelopes
+        // instead of leaking through as raw exceptions. Caller sees the
+        // exact reason (bad schema vs wrong-shape result) and can fix
+        // the call.
+        if (err instanceof SchemaValidationError) {
+          return toolEnvelope({ error: `invalid schema: ${err.message}` }, true)
+        }
+        if (err instanceof ResultShapeError) {
+          return toolEnvelope({ error: `extraction produced wrong shape: ${err.message}` }, true)
+        }
+        throw err
+      }
     },
   },
 ])
+
+// ---------------------------------------------------------------------
+// Compound-tool helpers
+// ---------------------------------------------------------------------
+
+/**
+ * Dispatch an action against a known ref via the appropriate primitive.
+ * Shared between REF mode and INTENT-mode-text-match in `browser_act`.
+ * Returns an MCP envelope (text content + optional isError).
+ */
+async function dispatchActionByRef(
+  tabId: number,
+  ref: string,
+  action: string,
+  value: string | undefined,
+  signal?: AbortSignal,
+): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+  let env: { content?: Array<{ type: "text"; text: string }>; isError?: boolean }
+  switch (action) {
+    case "click":
+      env = await dispatchBrowserTool("browser_click", { tabId, ref }, signal)
+      break
+    case "fill":
+      env = await dispatchBrowserTool("browser_fill", { tabId, ref, value }, signal)
+      break
+    case "type":
+      // browser_type targets the focused element; click ref first to focus.
+      await dispatchBrowserTool("browser_click", { tabId, ref }, signal)
+      env = await dispatchBrowserTool("browser_type", { tabId, text: value ?? "" }, signal)
+      break
+    case "select":
+      env = await dispatchBrowserTool("browser_fill", { tabId, ref, value }, signal)
+      break
+    case "scroll_into_view":
+      env = await dispatchBrowserTool("browser_scroll", { tabId, target: "element", ref }, signal)
+      break
+    default:
+      return toolEnvelope({ ok: false, error: `unknown action: ${action}` }, true)
+  }
+  if (env.isError) return env as { content: Array<{ type: "text"; text: string }>; isError: true }
+  const innerText = env.content?.[0]?.text
+  let parsed: Record<string, unknown> = {}
+  if (typeof innerText === "string") {
+    try { parsed = JSON.parse(innerText) as Record<string, unknown> } catch { /* keep empty */ }
+  }
+  return toolEnvelope({
+    ok: true,
+    action_taken: action,
+    target_ref: ref,
+    navigated: typeof parsed.navigated === "boolean" ? parsed.navigated : undefined,
+  })
+}

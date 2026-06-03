@@ -1,16 +1,21 @@
-// policy.ts — bridge-layer URL block (defense in depth).
+// policy.ts — bridge-layer URL block for tool-initiated nav.
 //
-// The extension's webNavigation.onBeforeNavigate listener is the
-// authoritative block: it catches both tool-initiated navigations and
-// in-page-initiated ones (JS redirect, meta-refresh). The bridge layer
-// adds a second, server-side check on tool arguments BEFORE the call
-// forwards to the extension, so an extension regression that silently
-// re-enables a dangerous URL still fails closed.
+// This regex is INTENTIONALLY WIDER than the extension-side regex in
+// src/browser-ext/background.js. The bridge-side check only fires for
+// browser_open_tab / browser_navigate tool calls (see
+// preflightUrlPolicy below), so it can safely include `extensions`
+// without locking the human user out of their own admin page. The
+// extension-side check fires for ALL top-level navigations including
+// user-typed URL bar entries (webNavigation.onBeforeNavigate doesn't
+// distinguish initiator), so it must exclude `extensions` to preserve
+// human access.
 //
-// Mirror this regex in src/browser-ext/background.js' isBlockedUrl to
-// keep the two layers in sync. The bridge-side regex is the source of
-// truth for tests; the extension regex is a duplicate-on-purpose so
-// the SW doesn't need a network round-trip to know the policy.
+// Net result:
+//   - model tool-navigates to chrome://extensions → blocked here
+//   - user types chrome://extensions in URL bar → allowed
+//   - in-page JS does window.location = "chrome://extensions" →
+//     allowed (we accept this narrow surface to keep the extension
+//     listener simple; opening the page grants no privilege)
 
 const BLOCKED_URL_RE =
   /^(chrome|edge|brave|opera|vivaldi):\/\/(settings|preferences|extensions|policy|management|password|flags|flag-descriptions)/i

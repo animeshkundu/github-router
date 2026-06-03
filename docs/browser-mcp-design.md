@@ -140,6 +140,7 @@ Every browser tool runs a pre-flight `ensureBridgeReady()` (in [`src/lib/browser
 3. Auto-install the NMH manifest for every detected browser (file write on POSIX, registry write + JSON file on Windows). This is cheap and idempotent.
 4. Read the bridge's discovery file at `<APP_DIR>/browser-mcp/bridge.json` and probe its `/health` endpoint with the file's bearer token. Returns `install_required {reason: "bridge_not_running"}` if the file's absent or the probe fails.
 5. Check `health.extension_connected`. Returns `install_required {reason: "extension_not_loaded"}` if no extension is currently attached.
+6. Compare `health.extension_loaded_version` (reported by the extension on connect — see "Auto-update flow" below) against the version stamped into `dist/browser-ext/manifest.json` at build. On mismatch, POST `/reload` to the bridge (which forwards a `__reload__` control frame to the extension; the extension calls `chrome.runtime.reload()`). Poll the discovery file + `/health` for up to 3 s waiting for the new bridge process to spawn and the new extension to report the expected version. On success, continue with the new port/token/pid. On failure (Chrome refused to silently reload — typically because the new manifest declared new permissions), return `install_required {reason: "extension_outdated"}` with the loaded/expected pair in `version_mismatch` so the model can surface both numbers.
 
 The structured `install_required` response is returned as a JSON text block with `isError: true` so the model treats it as actionable failure (not a normal success). The payload includes a `load_unpacked_dir` path pointing at the bundled extension under `src/browser-ext/` so the model or user can complete the install by enabling Developer Mode in chrome://extensions and clicking "Load unpacked".
 
@@ -181,6 +182,17 @@ node_modules/@animeshkundu/github-router/
 The extension's `manifest.json` carries a fixed RSA-2048 `key` field. Chrome and Edge derive the extension ID deterministically from this key (sha256 of the DER bytes, first 16 bytes mapped via the hex-value-to-[a-p] alphabet), so the ID is identical whether the user installs via the Chrome Web Store or via Developer Mode "Load unpacked". The same ID lands in the NMH manifest's `allowed_origins` so the extension's native-messaging connection works in both modes.
 
 `computeExtensionIdFromKey()` in [`src/lib/browser-mcp/native-host-installer.ts`](../src/lib/browser-mcp/native-host-installer.ts) implements the derivation.
+
+### Auto-update flow
+
+The unpacked extension does not auto-update via Chrome Web Store (it's never published there). The package itself ships fresh `dist/browser-ext/` files on every `bun run build`, but the loaded extension in Chrome / Edge keeps running whatever code was on disk when the user last loaded it. To close the gap without forcing the user to remember to click reload on every package upgrade, the bridge ↔ extension protocol carries two control frames that drive a transparent auto-reload:
+
+- **`__hello__` frame** (extension → bridge, sent immediately on `connectNative`): `{type: "__hello__", version: chrome.runtime.getManifest().version}`. The bridge stores this in a module-level `extensionLoadedVersion` and exposes it via `/health`. Older bridge versions that don't recognize the frame just ignore it (it doesn't match the `{id, ok, data}` response shape they expect from a tool reply).
+- **`__reload__` frame** (bridge → extension, triggered by `POST /reload` on the bridge's HTTP endpoint): `{type: "__reload__"}`. The extension's handler calls `chrome.runtime.reload()`, which terminates the current SW. Chrome / Edge then re-read the extension files from disk and start a fresh SW — picking up whatever `dist/browser-ext/background.js` looks like NOW. The fresh SW connects to a new bridge process (Chrome spawns one per `connectNative`) which writes a new `bridge.json` discovery file; pre-flight re-reads the discovery file each poll cycle to follow the bridge restart.
+
+The version stamped into `dist/browser-ext/manifest.json` is read from `package.json` by [`scripts/copy-browser-ext.ts`](../scripts/copy-browser-ext.ts) during build — `src/browser-ext/manifest.json` carries the sentinel `0.0.0` so source-checkout loads (via `GH_ROUTER_BROWSER_EXT_DIR` pointing at `src/browser-ext/`) are visually distinguishable from a real release. Pre-flight skips the mismatch check entirely when either side reports `0.0.0` so dev-iteration loops don't trigger reloads.
+
+**Cases auto-reload cannot fix.** Chrome / Edge refuse to silently reload an unpacked extension and instead disable it when the new manifest declares new `permissions` or `host_permissions`, when the `key` field changes (different extension ID → effectively a new install), or for some manifest schema changes. In those cases, pre-flight's poll times out, the loaded version stays stale, and the fallback `install_required {reason: "extension_outdated"}` response tells the user to manually re-enable + reload via `chrome://extensions` / `edge://extensions`. The `attemptedReloads` set (keyed by `${extensionId}::${expectedVersion}`) prevents a reload loop — at most one `__reload__` per `(id, expectedVersion)` pair per proxy process.
 
 ## Bridge runtime
 
@@ -237,6 +249,41 @@ bun run build                         # bundles the bridge
 GH_ROUTER_RUN_BROWSER_E2E=1 bun test tests/isolated/browser-mcp-e2e.test.ts --timeout 90000
 ```
 
+## L2 compound tools — intent-driven browsing with inner-LLM compressor
+
+The primitive `browser_*` tools (mouse, drag, type, keyboard, scroll, eval_js, screenshot, download, navigate, wait, list/open/close_tab) let a model drive the browser at the level a Playwright script would. The L2 compound tools sit on top and let the model think in intent rather than refs / coordinates / selectors:
+
+- **`browser_act(tabId, intent | ref, value?)`** — preferred for any click / fill / type / scroll-to action.
+  - **INTENT mode** (`intent` supplied): inner compressor (Gemini Flash class) reads the snapshot, picks an element + action, dispatches. **Auto-escalates to visual fallback** when no text-based match found AND the snapshot reported `visualSurfaces` in the viewport — takes a screenshot, hands it + intent + surface bboxes to a multimodal model, gets back `{x, y}` CSS-pixel coords, dispatches `browser_mouse` click. This is the dual-engine pattern: a11y-tree for ~90% of the work, vision strictly for canvas / WebGL / D3 blackholes.
+  - **REF mode** (`ref` supplied, optional `action` / `value`): direct dispatch, zero compressor latency. The fold-in path for the now-removed `browser_click` and `browser_fill`. Model with a stable ref from a prior `browser_find` pays nothing extra.
+- **`browser_find(tabId, intent)`** — natural-language intent, returns up to 5 ranked matches with refs + bbox + reason. Cheaper than `browser_read_page` when you know what you're looking for.
+- **`browser_extract(tabId, schema, instruction)`** — structured extraction from the current snapshot into a typed object matching the schema.
+
+The compressor backend is picked at startup from the live Copilot catalog by walking a static fallback chain: `gemini-3.5-flash` → `gpt-5.4-mini` → `claude-haiku-4-5`. First entry present AND advertising `tool_calls` support wins. The picked id is logged. When NONE of the three is in the catalog, the compound tools are dropped from `tools/list` AND fail `tools/call` with -32601 (gate at `browserCompoundToolsEnabled()` in `src/lib/mcp-capabilities.ts`, mirroring the existing `workerToolsEnabled` / `standInToolEnabled` pattern). The L1 primitives are unaffected — `browser_act` ref-mode keeps working without the compressor.
+
+Compressor calls take a slot from the shared `MAX_INFLIGHT_TOOLS_CALL = 8` budget so a wedged compressor can't starve operator traffic.
+
+## L0 / L1 cull
+
+The original 19-tool surface had several primitives whose duties the L2 tools subsume cleanly. The removed tools' EXTENSION-side handlers stay live so the compound tools can internally dispatch them, but the MCP surface no longer exposes:
+
+- `browser_click`, `browser_fill` → folded into `browser_act` (REF mode dispatches directly; INTENT mode goes through the compressor).
+- `browser_locate` → subsumed by `browser_find` (returns bbox + visibility for matches).
+- `browser_console_logs`, `browser_network_log` → merged into `browser_diagnostics(kind, level?, regex?, limit?)`. One MCP tool, filtered response, lower context cost than the prior 1000-entry raw dumps.
+
+Net MCP surface: **18 tools** (down from 19) with the L2 layer absorbing most of the actual model traffic. Real win is in response-shape compression + intent-driven flow rather than raw tool count.
+
+## Compressed page snapshot — `browser_read_page` modes
+
+`browser_read_page` accepts a `mode` parameter:
+
+- **`summary`** (default): viewport-visible interactive elements only; viewport-visible text capped at 20 KiB; drops nameless non-tag elements (a `div role="button"` with no aria-label is noise); `visualSurfaces` field listing canvas / svg of non-trivial size for the dual-engine. ~5–15 KB typical response.
+- **`full`**: up to 200 interactive elements page-wide + 256 KiB of innerText (legacy behavior, for the rare case the model wants off-screen content unscrolled).
+
+Refs (`e1`, `e2`, …) persist across snapshots: the extension reuses any element's existing `data-gh-router-ref` and only mints new ids for elements it hasn't seen. Model can do `read_page → act(ref) → read_page` and the ref-to-element binding stays valid. Full diff-envelope responses (only what changed since a baseline snapshot id) are documented as a future enhancement on top of this primitive.
+
+The in-page traversal descends into open Shadow DOM roots so web-component-heavy UIs (modern React apps with shadow encapsulation) surface their interactive elements. Cross-origin iframes still aren't reached from in-page script — that needs full CDP `Accessibility.getFullAXTree` with frame stitching, documented as a future enhancement.
+
 ## Known gotchas (the ones that bit me building this)
 
 1. **`computeExtensionIdFromKey` is not "char + 49"**. The Chrome algorithm maps the hex VALUE (0..15) to a letter (a..p), not the hex character code. The off-by-one bug silently produced a 23-char ID that didn't match Chrome's runtime ID, which caused `connectNative` to fail with "Specified native messaging host not found".
@@ -249,7 +296,7 @@ GH_ROUTER_RUN_BROWSER_E2E=1 bun test tests/isolated/browser-mcp-e2e.test.ts --ti
 
 5. **`chrome.scripting.executeScript` args must be JSON-serializable**. `undefined` throws "Value is unserializable". Coerce optional args to `null` before passing them to the func.
 
-6. **`webNavigation.onBeforeNavigate` doesn't have a cancel API in MV3**. The "block" is implemented as "let the navigation start, then immediately update the tab to about:blank". This is a slightly racy fallback for in-page-initiated navs; the bridge-layer policy check is the precise enforcement for tool-initiated nav.
+6. **`webNavigation.onBeforeNavigate` fires for ALL top-level navigations, not just in-page-initiated ones.** Chrome's API does not surface `transitionType` until `onCommitted`, so the listener cannot cheaply distinguish "user typed in the URL bar" from "page JS redirected here." Early versions of the extension blocked `chrome://extensions` and `edge://extensions` in this listener — which locked the user out of the very page they needed to reload the extension after package updates (and is the catch-22 the auto-update flow exists to short-circuit). The fix is asymmetric: bridge-side `policy.ts` keeps `extensions` in its blocklist (it only runs for tool calls — `browser_open_tab`, `browser_navigate` — so blocking it there does not affect user-initiated nav), while the extension-side regex deliberately omits `extensions` (and `view-source:extensions`) to preserve human access. Other blocked URLs (settings / flags / password / preferences / policy / management) stay blocked in both layers. The "block" itself is still implemented as "let the navigation start, then immediately update the tab to about:blank" — `onBeforeNavigate` has no cancel API in MV3.
 
 7. **`browser_screenshot` requires a real OS rendering surface**. Both `chrome.tabs.captureVisibleTab` and CDP `Page.captureScreenshot` read from the compositor's surface. Chrome-for-Testing launched in plain headed mode without `--headless=new` does NOT have a surface and either call hangs indefinitely (no error, no timeout — just blocks). Real Chrome with a visible window has a surface and works fine. The Playwright E2E harness passes `--headless=new` precisely for this reason. If you're driving Chrome-for-Testing programmatically and need screenshots, add `--headless=new` to its argv.
 

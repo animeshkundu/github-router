@@ -28,6 +28,7 @@ import {
 } from "~/services/copilot/create-responses"
 import { hasSupportedBrowserInstalled } from "~/lib/browser-mcp/browser-detect"
 import {
+  browserCompoundToolsEnabled,
   standInToolEnabled,
   workerToolsEnabled,
 } from "~/lib/mcp-capabilities"
@@ -337,6 +338,10 @@ function toolEntries(): Array<ToolEntry> {
       if (t.capability === "worker") return workerToolsEnabled()
       if (t.capability === "stand_in") return standInToolEnabled()
       if (t.capability === "browser") return browserToolsEnabled()
+      // Compound tools require BOTH the browser surface opt-in AND a
+      // compressor backend in the catalog. Without browseEnabled the
+      // compound tools must be invisible alongside the L0/L1 primitives.
+      if (t.capability === "browser_compound") return browserToolsEnabled() && browserCompoundToolsEnabled()
       return true
     },
   ).map(
@@ -887,6 +892,17 @@ async function handleToolsCall(
     nonPersonaTool
     && nonPersonaTool.capability === "browser"
     && !browserToolsEnabled()
+  ) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+  if (
+    nonPersonaTool
+    && nonPersonaTool.capability === "browser_compound"
+    && !(browserToolsEnabled() && browserCompoundToolsEnabled())
   ) {
     return rpcError(
       body.id,

@@ -184,6 +184,7 @@ function sendToBrowser(msg: unknown): void {
 // ---------------------------------------------------------------------
 
 const token = randomBytes(32).toString("hex")
+let extensionLoadedVersion: string | undefined
 const httpServer = createServer((req, res) => {
   // Tiny health endpoint so the dispatcher can probe without opening a
   // WS. Bearer-token auth applies here too — leaking "yes the bridge
@@ -202,8 +203,33 @@ const httpServer = createServer((req, res) => {
         ok: true,
         pid: process.pid,
         extension_connected: extensionConnected(),
+        extension_loaded_version: extensionLoadedVersion,
       }),
     )
+    return
+  }
+  if (req.url === "/reload" && req.method === "POST") {
+    // Triggers chrome.runtime.reload() in the extension via a control
+    // frame. Pre-flight uses this when the loaded extension version is
+    // stale relative to the version stamped into
+    // dist/browser-ext/manifest.json. After the extension reloads, a
+    // fresh extension SW connects via NMH and Chrome spawns a NEW
+    // bridge process; pre-flight then re-reads the discovery file to
+    // probe the new bridge.
+    try {
+      sendToBrowser({ type: "__reload__" })
+      res.setHeader("content-type", "application/json")
+      res.end(JSON.stringify({ ok: true }))
+    } catch (err) {
+      res.statusCode = 500
+      res.setHeader("content-type", "application/json")
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      )
+    }
     return
   }
   res.statusCode = 404
@@ -292,6 +318,20 @@ function extensionConnected(): boolean {
 
 fromBrowserListeners.push((msg) => {
   lastBrowserContactMs = Date.now()
+  // Hello frame from the extension carries chrome.runtime.getManifest()
+  // .version. Pre-flight on the dispatcher side compares this against
+  // the version stamped into dist/browser-ext/manifest.json at build
+  // time to detect when a loaded extension is stale (package was
+  // updated after Chrome loaded the extension).
+  if (
+    msg
+    && typeof msg === "object"
+    && (msg as { type?: unknown }).type === "__hello__"
+    && typeof (msg as { version?: unknown }).version === "string"
+  ) {
+    extensionLoadedVersion = (msg as { version: string }).version
+    return
+  }
   const r = msg as BridgeResponse
   if (typeof r.id !== "string") return
   pendingResolve(r.id, r)
