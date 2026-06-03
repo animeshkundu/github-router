@@ -176,32 +176,18 @@ function stripCodeFence(text: string): string {
 // Public helpers
 // ---------------------------------------------------------------------
 
-export interface SnapshotElement {
-  ref: string
-  role: string
-  name?: string
-  bbox: [number, number, number, number]
-}
-
-export interface VisualSurface {
-  ref: string
-  kind: "canvas" | "svg"
-  bbox: [number, number, number, number]
-}
-
-export interface PageSnapshot {
-  mode?: "summary" | "full"
-  text: string
-  elements: ReadonlyArray<SnapshotElement>
-  viewport: {
-    width: number
-    height: number
-    devicePixelRatio: number
-    scrollX: number
-    scrollY: number
-  }
-  visualSurfaces?: ReadonlyArray<VisualSurface>
-}
+// Snapshot shape lives in `./snapshot-types` so the deterministic
+// matcher cascade (Phase 2) can import it without pulling the inner-
+// LLM module in too. Re-exported here for callers that already import
+// from compressor (PR #55 surface) — moving the import path one file
+// over would churn every existing consumer for zero behavior change.
+export type {
+  PageSnapshot,
+  SnapshotElement,
+  SnapshotTruncation,
+  VisualSurface,
+} from "./snapshot-types"
+import type { PageSnapshot, VisualSurface } from "./snapshot-types"
 
 export interface PickedAction {
   ref: string
