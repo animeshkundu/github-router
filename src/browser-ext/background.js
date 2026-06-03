@@ -20,6 +20,14 @@
 
 const NATIVE_HOST_NAME = "com.githubrouter.browser"
 
+// Snapshot cache + invalidation lives in a sibling module so the
+// matcher-cascade work in Phase 2 can consume it without dragging in
+// the entire 1700-line background.js dispatcher.
+import {
+  captureSnapshot,
+  invalidateSnapshot,
+} from "./snapshot.js"
+
 // ---------------------------------------------------------------------
 // Navigation policy — URL patterns this extension blocks at
 // webNavigation.onBeforeNavigate. This list is INTENTIONALLY NARROWER
@@ -185,6 +193,25 @@ async function toolReadPage(args) {
   const tabId = typeof args.tabId === "number" ? args.tabId : undefined
   if (!tabId) throw new Error("browser_read_page: tabId is required")
   const mode = args.mode === "full" ? "full" : "summary"
+  const refresh = args.refresh === true
+  // Cache wrapper. captureSnapshot reads through the per-tab cache when
+  // refresh=false. Mode is part of the cache key because summary +
+  // full produce different element sets — caching one and returning
+  // it for the other would be a correctness bug.
+  return captureSnapshot(tabId, { mode, refresh }, extractSnapshotLegacy)
+}
+
+/**
+ * Legacy `document.querySelectorAll`-based extractor. Stays as the
+ * default extractor until Phase 1b-CDP lands; will become the fallback
+ * path when CDP attach fails (enterprise policy, DevTools open on the
+ * tab, etc.). The implementation runs in the page world via
+ * chrome.scripting.executeScript and returns a PageSnapshot-shaped
+ * object that snapshot.captureSnapshot caches and returns to the
+ * caller.
+ */
+async function extractSnapshotLegacy(tabId, opts) {
+  const mode = opts?.mode === "full" ? "full" : "summary"
   const [result] = await chrome.scripting.executeScript({
     target: { tabId },
     func: (mode) => {
@@ -397,7 +424,14 @@ async function toolReadPage(args) {
           ],
         })
       }
-      const out = { mode, text, elements, viewport }
+      const out = {
+        mode,
+        url: window.location.href,
+        title: document.title,
+        text,
+        elements,
+        viewport,
+      }
       if (visualSurfaces.length > 0) out.visualSurfaces = visualSurfaces
       return out
     },
@@ -1569,6 +1603,11 @@ chrome.debugger.onDetach.addListener((source) => {
     consoleBuffers.delete(source.tabId)
     networkBuffers.delete(source.tabId)
     tabInputLockTails.delete(source.tabId)
+    // Snapshot cache: CDP-written refs survive a detach (they're DOM
+    // attributes, not CDP state), but bbox/AXNode IDs become unreliable
+    // because re-attach needs a fresh DOM.enable handshake. Safer to
+    // invalidate and re-capture on next read.
+    invalidateSnapshot(source.tabId, "debugger-detach")
   }
 })
 
@@ -1583,6 +1622,21 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   consoleBuffers.delete(tabId)
   networkBuffers.delete(tabId)
   tabInputLockTails.delete(tabId)
+  invalidateSnapshot(tabId, "tab-closed")
+})
+
+// Snapshot cache invalidation on top-frame navigation. The legacy ref
+// scheme (data-gh-router-ref DOM attribute) does NOT survive a fresh
+// document load, so a stale snapshot would return refs that resolve
+// to nothing. Invalidate so the next read captures the new document.
+// We intentionally do NOT invalidate on child-frame navigations — a
+// click inside an iframe shouldn't bust the whole-tab snapshot. Phase
+// 1b-CDP will revisit this when cross-origin iframe ref attribution
+// changes the trade-off.
+chrome.webNavigation.onCommitted.addListener((details) => {
+  if (details.frameId === 0 && typeof details.tabId === "number") {
+    invalidateSnapshot(details.tabId, "navigation")
+  }
 })
 
 async function toolConsoleLogs(args) {
@@ -1725,10 +1779,42 @@ async function handleBridgeRequest(req, port) {
   try {
     const data = await handler(req.args || {})
     port.postMessage({ id: req.id, ok: true, data })
+    // Snapshot cache invalidation for mutating actions. The matcher
+    // cascade (Phase 2) dispatches against cached snapshots; a
+    // successful click / fill / type / etc. likely changed the page,
+    // so the cached element list is stale. Invalidate by tabId from
+    // the request args; tools that don't carry a tabId (open_tab on
+    // create-path, list_tabs) are not page-mutating per-tab so they
+    // skip this.
+    if (MUTATES_PAGE.has(req.tool)) {
+      const tabId = typeof req.args?.tabId === "number" ? req.args.tabId : undefined
+      if (typeof tabId === "number") {
+        invalidateSnapshot(tabId, `mutation:${req.tool}`)
+      }
+    }
   } catch (err) {
     port.postMessage({ id: req.id, ok: false, error: err && err.message ? err.message : String(err) })
   }
 }
+
+// Tools whose successful execution likely mutates the page's DOM,
+// triggering snapshot-cache invalidation for the tabId in args. Kept
+// as a Set rather than per-tool flags so adding a new mutating tool
+// is one line. Conservative: tools listed here MAY not mutate (e.g.
+// click on a disabled button is a no-op); the cost of a spurious
+// invalidate is one extra capture on next read, vs the cost of a
+// stale snapshot which is silent dispatch against a vanished ref.
+const MUTATES_PAGE = new Set([
+  "browser_click",
+  "browser_fill",
+  "browser_type",
+  "browser_keyboard",
+  "browser_scroll",
+  "browser_mouse",
+  "browser_drag",
+  "browser_navigate",
+  "browser_eval_js",
+])
 
 chrome.runtime.onInstalled.addListener(() => {
   try { connectBridge() } catch (err) { console.warn("[browser-bridge] onInstalled connect failed:", err) }
