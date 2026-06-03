@@ -1,5 +1,7 @@
 import { dispatchBrowserTool } from "./dispatch"
 import {
+  ResultShapeError,
+  SchemaValidationError,
   extractStructured,
   pickElement,
   pickElementVisual,
@@ -623,7 +625,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
       }
       // INTENT mode.
       const snapshot = await fetchSnapshot(tabId, signal)
-      const picked = await pickElement(snapshot, intent!, signal)
+      const picked = await pickElement(snapshot, intent!, signal, value)
       if (!picked.ref || picked.confidence < 0.5) {
         // No text-based match. Try visual fallback if a canvas / svg is in view.
         const surfaces = snapshot.visualSurfaces
@@ -696,8 +698,22 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
       if (!instruction) return toolEnvelope({ error: "instruction required" }, true)
       if (!schema) return toolEnvelope({ error: "schema required" }, true)
       const snapshot = await fetchSnapshot(tabId, signal)
-      const extracted = await extractStructured(snapshot, schema, instruction, signal)
-      return toolEnvelope(extracted)
+      try {
+        const extracted = await extractStructured(snapshot, schema, instruction, signal)
+        return toolEnvelope(extracted)
+      } catch (err) {
+        // Surface compressor validation errors as clean isError envelopes
+        // instead of leaking through as raw exceptions. Caller sees the
+        // exact reason (bad schema vs wrong-shape result) and can fix
+        // the call.
+        if (err instanceof SchemaValidationError) {
+          return toolEnvelope({ error: `invalid schema: ${err.message}` }, true)
+        }
+        if (err instanceof ResultShapeError) {
+          return toolEnvelope({ error: `extraction produced wrong shape: ${err.message}` }, true)
+        }
+        throw err
+      }
     },
   },
 ])

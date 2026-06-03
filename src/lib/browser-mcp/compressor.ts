@@ -210,90 +210,69 @@ export interface PickedAction {
   confidence: number
 }
 
-const PICK_ELEMENT_SYSTEM = `You map a natural-language intent to ONE element from a browser page snapshot.
-
-Snapshot elements look like: {ref: "e42", role: "button", name: "Sign in", bbox: [x,y,w,h]}.
-
-Call the pick_element tool with your answer.
-
-Pick action by intent + element role:
-- click for buttons, links, checkboxes, radios, switches
-- fill for inputs / textareas when intent supplies a string value
-- type for per-keystroke autocomplete inputs
-- select for combobox / select
-- scroll_into_view when the model wants to bring something on-screen
-
-If no element matches with confidence ≥ 0.5, call with ref="" and confidence=0.`
-
-const PICK_ELEMENT_TOOL = {
-  name: "pick_element",
-  description: "Report which element the intent points at.",
-  parameters: {
-    type: "object",
-    required: ["ref", "action", "confidence"],
-    additionalProperties: false,
-    properties: {
-      ref: { type: "string", description: "Element ref (e.g. 'e42') or empty if no match." },
-      action: {
-        type: "string",
-        enum: ["click", "fill", "type", "select", "scroll_into_view"],
-      },
-      value: { type: "string", description: "Required for fill / type / select actions; the value to set." },
-      confidence: { type: "number", description: "0 to 1." },
-    },
-  },
-}
-
 /**
  * Pick a single element matching the natural-language intent. Used by
- * `browser_act` in intent mode. Returns a struct describing which ref
- * to act on, which action verb (`click` / `fill` / `type` / etc.), and
- * the compressor's confidence. When no element matches confidently the
- * returned `ref` is empty — caller should escalate to visual fallback
- * (when `visualSurfaces` is present) or surface the miss to the lead
- * model.
+ * `browser_act` in intent mode. Internally delegates the matching step
+ * to `pickMatchingElements` (the same picker `browser_find` uses) so
+ * `find` and `act` can't disagree on the same intent, then infers the
+ * action verb deterministically from the picked element's role and
+ * whether the intent supplied a value. Single source of truth for
+ * element matching.
+ *
+ * Returns ref="" + confidence=0 when no element matches — caller
+ * should escalate to visual fallback (when `visualSurfaces` is
+ * present) or surface the miss to the lead model.
  */
 export async function pickElement(
   snapshot: PageSnapshot,
   intent: string,
   signal?: AbortSignal,
+  value?: string,
 ): Promise<PickedAction> {
-  // Trim snapshot elements to bare essentials before sending to the
-  // backend. The bbox in the on-the-wire snapshot is for the lead
-  // model's geometry; the compressor only needs ref/role/name.
-  const trimmed = snapshot.elements.map((e) => ({
-    ref: e.ref,
-    role: e.role,
-    name: e.name,
-  }))
-  const userPayload = JSON.stringify({
-    intent,
-    elements: trimmed,
-    has_visual_surfaces: Boolean(snapshot.visualSurfaces && snapshot.visualSurfaces.length > 0),
-  })
-  const raw = await callCompressor(PICK_ELEMENT_SYSTEM, userPayload, PICK_ELEMENT_TOOL, signal)
-  return normalizePickedAction(raw)
-}
-
-function normalizePickedAction(raw: unknown): PickedAction {
-  if (!raw || typeof raw !== "object") {
+  const matches = await pickMatchingElements(snapshot, intent, signal)
+  if (matches.length === 0) {
     return { ref: "", action: "click", confidence: 0 }
   }
-  const obj = raw as Record<string, unknown>
-  const ref = typeof obj.ref === "string" ? obj.ref : ""
-  const actionStr = typeof obj.action === "string" ? obj.action : "click"
-  const validActions = ["click", "fill", "type", "select", "scroll_into_view"] as const
-  const action = (validActions as ReadonlyArray<string>).includes(actionStr)
-    ? (actionStr as PickedAction["action"])
-    : "click"
-  const value = typeof obj.value === "string" ? obj.value : undefined
-  const confidence
-    = typeof obj.confidence === "number"
-      ? Math.max(0, Math.min(1, obj.confidence))
-      : 0
-  return value === undefined
-    ? { ref, action, confidence }
-    : { ref, action, value, confidence }
+  const top = matches[0]
+  const el = snapshot.elements.find((e) => e.ref === top.ref)
+  if (!el) {
+    return { ref: "", action: "click", confidence: 0 }
+  }
+  const action = inferAction(el.role, intent, value)
+  const out: PickedAction = { ref: top.ref, action, confidence: 0.8 }
+  if (value !== undefined && (action === "fill" || action === "type" || action === "select")) {
+    out.value = value
+  }
+  return out
+}
+
+/**
+ * Deterministic action picker. Given an element role + the intent text
+ * + an optional value, decide which primitive action to dispatch.
+ * Pulled out of the compressor's responsibility so the compressor only
+ * has to match elements (one prompt, one schema), and action selection
+ * is a few small rules a future contributor can read at a glance.
+ */
+function inferAction(
+  role: string,
+  intent: string,
+  value: string | undefined,
+): PickedAction["action"] {
+  const intentLower = intent.toLowerCase()
+  const r = role.toLowerCase()
+  if (/\bscroll\b/.test(intentLower) || /scroll[ -]?into[ -]?view/.test(intentLower)) {
+    return "scroll_into_view"
+  }
+  if (r === "select" || r === "combobox") return "select"
+  if (r === "textarea" || r === "input" || r === "textbox" || r === "searchbox" || r === "spinbutton") {
+    // Per-keystroke 'type' only when the intent explicitly says so OR
+    // there's no value provided (typing into a focused field for
+    // search-as-you-type). Otherwise 'fill' is the default — faster
+    // and works for React-controlled inputs.
+    if (/\btype\b/.test(intentLower) && value !== undefined) return "type"
+    return "fill"
+  }
+  return "click"
 }
 
 const FIND_ELEMENTS_SYSTEM = `You match a natural-language intent to elements from a browser page snapshot.
@@ -371,25 +350,79 @@ Use the snapshot's text + element list as your source. Be faithful to what's vis
 Call the extract_result tool with your answer in the result field. The result field's schema is the caller's exact requested shape — fill it completely. If a field cannot be determined from the snapshot, omit it (when optional) or use a sensible empty value (when required).`
 
 /**
+ * Lightweight sanity check on a caller-supplied JSON Schema: the
+ * schema must be a non-null object AND declare at least one of a
+ * recognized `type` value, `properties`, `items`, `$ref`, or a
+ * compound combinator (`oneOf` / `anyOf` / `allOf`). This catches the
+ * two failure modes the prior smoke test surfaced — empty `{}` and
+ * structurally-malformed schemas like `{type: "nonsense"}` — both of
+ * which the permissive upstream silently accepts and the model then
+ * fills with a useless primitive.
+ *
+ * Returns an error message string when the schema fails the check,
+ * or undefined when the schema looks plausible.
+ */
+function validateExtractSchema(schema: unknown): string | undefined {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return "schema must be a non-null JSON object"
+  }
+  const obj = schema as Record<string, unknown>
+  const validTypes = new Set(["object", "array", "string", "number", "integer", "boolean", "null"])
+  const hasValidType = typeof obj.type === "string" && validTypes.has(obj.type)
+  const hasShape
+    = "properties" in obj
+      || "items" in obj
+      || "$ref" in obj
+      || "oneOf" in obj
+      || "anyOf" in obj
+      || "allOf" in obj
+  if (!hasValidType && !hasShape) {
+    return `schema must declare a recognized type (one of ${Array.from(validTypes).join(", ")}) OR have properties / items / $ref / oneOf / anyOf / allOf`
+  }
+  if ("type" in obj && !hasValidType) {
+    return `schema 'type' field must be one of: ${Array.from(validTypes).join(", ")}`
+  }
+  return undefined
+}
+
+/**
  * Structured extraction. The caller's JSON schema is injected directly
  * into the extract_result tool's `result` parameter so the model's
  * tool-call mechanism enforces shape — the model can't satisfy the
- * call without producing data of the requested shape. This is the
- * holistic fix for the earlier "extract returns {}" behavior caused
- * by an any-shape `result` field with no shape constraint.
+ * call without producing data of the requested shape.
  *
- * Failure mode: if the caller passes a malformed JSON Schema, the
- * upstream (Copilot → Gemini / GPT / Claude) returns a 400 which
- * propagates as an HTTPError via createChatCompletions. That's the
- * right surface for the caller to discover and correct their schema;
- * silently falling back to an any-shape result would mask the bug.
+ * Schema is pre-validated by `validateExtractSchema` — bad schemas
+ * fail loud with a clear `SchemaValidationError` instead of slipping
+ * through to the upstream (which is permissive enough to accept
+ * garbage and let the model return a useless primitive).
+ *
+ * Post-validation: if the model's `result` ended up as a primitive
+ * (string / number / boolean) when the schema declared object / array,
+ * surface the shape mismatch — the model returned the wrong type and
+ * the caller should know rather than receive a confusing value.
  */
+export class SchemaValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "SchemaValidationError"
+  }
+}
+
+export class ResultShapeError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "ResultShapeError"
+  }
+}
+
 export async function extractStructured(
   snapshot: PageSnapshot,
   schema: unknown,
   instruction: string,
   signal?: AbortSignal,
 ): Promise<unknown> {
+  const schemaError = validateExtractSchema(schema)
+  if (schemaError) throw new SchemaValidationError(schemaError)
   const userPayload = JSON.stringify({
     instruction,
     snapshot: {
@@ -405,18 +438,32 @@ export async function extractStructured(
       required: ["result"],
       additionalProperties: false,
       properties: {
-        // Inject the caller's schema verbatim. Trust the upstream to
-        // validate it; let any 4xx propagate so a bad schema surfaces
-        // as a clear error instead of an empty result.
-        result: (schema as Record<string, unknown>) ?? { type: "object" },
+        result: schema as Record<string, unknown>,
       },
     },
   }
   const raw = await callCompressor(EXTRACT_SYSTEM, userPayload, extractTool, signal)
-  if (raw && typeof raw === "object" && "result" in (raw as Record<string, unknown>)) {
-    return (raw as { result: unknown }).result
+  const unwrapped
+    = raw && typeof raw === "object" && "result" in (raw as Record<string, unknown>)
+      ? (raw as { result: unknown }).result
+      : raw
+  // Post-validate: declared type vs returned type. The pre-check guarantees
+  // schema has a recognized type or a shape combinator at this point.
+  const declaredType
+    = (schema as { type?: unknown }).type as string | undefined
+  if (declaredType === "object" && (typeof unwrapped !== "object" || unwrapped === null || Array.isArray(unwrapped))) {
+    throw new ResultShapeError(`schema declared type "object" but model returned ${describeType(unwrapped)}`)
   }
-  return raw
+  if (declaredType === "array" && !Array.isArray(unwrapped)) {
+    throw new ResultShapeError(`schema declared type "array" but model returned ${describeType(unwrapped)}`)
+  }
+  return unwrapped
+}
+
+function describeType(v: unknown): string {
+  if (v === null) return "null"
+  if (Array.isArray(v)) return "array"
+  return typeof v
 }
 
 const PICK_VISUAL_SYSTEM = `You're given a browser screenshot, a natural-language intent, and a list of canvas / svg regions in CSS-pixel coordinates.
