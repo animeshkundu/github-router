@@ -26,7 +26,60 @@ import {
   ensureBridgeReady,
   installRequiredToolResult,
 } from "./install-check"
+import { interActionDelay } from "./humanlike"
 import { preflightUrlPolicy } from "./policy"
+import { state } from "~/lib/state"
+
+/**
+ * Tools whose dispatch counts as a mutating user action for pacing
+ * purposes. Read-only tools (list_tabs, screenshot, read_page,
+ * diagnostics, navigate-without-form-submit) skip the inter-action
+ * delay because they don't look like a human clicking around.
+ */
+const PACED_TOOLS = new Set([
+  "browser_click",
+  "browser_fill",
+  "browser_type",
+  "browser_keyboard",
+  "browser_scroll",
+  "browser_mouse",
+  "browser_drag",
+])
+
+let lastDispatchAt = 0
+
+async function maybeInjectHumanlikeDelay(
+  tool: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (state.humanlikeForce !== "on") return
+  if (!PACED_TOOLS.has(tool)) return
+  const target = interActionDelay()
+  const sinceLast = Date.now() - lastDispatchAt
+  const wait = Math.max(0, target - sinceLast)
+  if (wait > 0) {
+    await sleepAbortable(wait, signal)
+  }
+  lastDispatchAt = Date.now()
+}
+
+function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("aborted"))
+      return
+    }
+    const timer = setTimeout(() => {
+      if (signal) signal.removeEventListener("abort", onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(new Error("aborted"))
+    }
+    if (signal) signal.addEventListener("abort", onAbort, { once: true })
+  })
+}
 
 type ToolName =
   | "browser_list_tabs"
@@ -229,6 +282,13 @@ export async function dispatchBrowserTool(
   if (ready.install_required) {
     return installRequiredToolResult(ready)
   }
+  // Humanlike pacing: when state.humanlikeForce === "on" (--humanlike
+  // flag or GH_ROUTER_HUMANLIKE=1) AND this tool is a mutating action
+  // (click / fill / type / keyboard / scroll / mouse / drag), inject
+  // a Beta-distributed inter-action delay before the dispatch. Phase
+  // 4-future will gate this on bot-challenge detection per tabId
+  // (state.humanlikeForce === "auto" path); for now it's force-on.
+  await maybeInjectHumanlikeDelay(tool, signal)
   const { defaultMs, maxMs } = pickTimeout(tool)
   const callerTimeout =
     typeof opts.timeoutMs === "number" && opts.timeoutMs > 0
