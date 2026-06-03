@@ -8,6 +8,7 @@ import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import { state } from "~/lib/state"
 import { countTokens } from "~/services/copilot/create-messages"
 import { parseJsonOrDiagnose } from "~/lib/diagnose-response"
+import { clampOutputConfigEffortInPlace } from "./handler"
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyRecord = Record<string, any>
@@ -184,6 +185,19 @@ function resolveModelInBody(rawBody: string): {
 
   const resolvedModel =
     typeof parsed.model === "string" ? parsed.model : originalModel
+
+  // Unconditionally clamp output_config.effort to the resolved
+  // model's reasoning_effort allowlist. Mirrors the same step in
+  // /v1/messages handler so count_tokens never forwards a value
+  // upstream rejects. Selected model is looked up off state.models
+  // so the clamp uses the live catalog (matches handler.ts's lookup
+  // pattern).
+  const selectedModel = resolvedModel
+    ? state.models?.data.find((m) => m.id === resolvedModel)
+    : undefined
+  if (selectedModel && clampOutputConfigEffortInPlace(parsed, selectedModel)) {
+    modified = true
+  }
 
   return {
     body: modified ? JSON.stringify(parsed) : rawBody,
