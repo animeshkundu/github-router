@@ -28,6 +28,16 @@ export interface State {
    */
   browseEnabled: boolean
 
+  /**
+   * When true, --power-browse was passed (or GH_ROUTER_ENABLE_POWER_BROWSE=1
+   * is set). Exposes the FULL browser MCP surface (~18 tools) on /mcp,
+   * including the L0/L1 primitives that hand DOM details (refs,
+   * bboxes, role/name dumps) to the lead model. Default --browse mode
+   * exposes only the 6 lead-model tools (act, observe, extract,
+   * navigate, screenshot, open_tab). Always implies browseEnabled.
+   */
+  powerBrowseEnabled: boolean
+
   // Rate limiting configuration
   rateLimitSeconds?: number
   lastRequestTimestamp?: number
@@ -55,6 +65,7 @@ export const state: State = {
   showToken: false,
   extendedBetas: false,
   browseEnabled: false,
+  powerBrowseEnabled: false,
   sessionId: randomUUID(),
   machineId: randomBytes(32).toString("hex"),
 }

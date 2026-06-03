@@ -160,6 +160,26 @@ async function callCompressor(
 }
 
 /**
+ * Public re-export of `callCompressor` for sibling modules that need
+ * the same forced-tool-calling pipeline (slot acquisition, fallback-
+ * chain backend, code-fence stripping). Currently used by `observe.ts`
+ * to drive the natural-language describer through the same backend
+ * the matcher cascade escalates to.
+ *
+ * Kept as a thin wrapper rather than re-exporting `callCompressor`
+ * directly so the underlying function can change signature without
+ * breaking the public surface.
+ */
+export async function callCompressorPublic(
+  systemPrompt: string,
+  userMessage: ChatCompletionsPayload["messages"][number]["content"],
+  tool: { name: string, description: string, parameters: Record<string, unknown> },
+  signal?: AbortSignal,
+): Promise<unknown> {
+  return callCompressor(systemPrompt, userMessage, tool, signal)
+}
+
+/**
  * Strip a single leading / trailing ``` (or ```json) code fence from a
  * model's free-form text reply so JSON.parse works. Idempotent on
  * fence-free input. Defensive against the failure mode caught in PR #55

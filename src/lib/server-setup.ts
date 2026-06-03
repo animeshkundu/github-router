@@ -23,6 +23,7 @@ export interface ServerSetupOptions {
   proxyEnv: boolean
   extendedBetas: boolean
   browseEnabled: boolean
+  powerBrowseEnabled: boolean
   silent: boolean
 }
 
@@ -54,6 +55,14 @@ export async function setupAndServe(
   // the GH_ROUTER_DISABLE_WORKER_TOOLS / GH_ROUTER_LOG_PEER_MCP convention.
   state.browseEnabled =
     options.browseEnabled || process.env.GH_ROUTER_ENABLE_BROWSE === "1"
+  // --power-browse implies --browse: power mode exposes the FULL
+  // browser tool surface (read_page, mouse, drag, scroll, keyboard,
+  // type, eval_js, diagnostics, find, locate) on top of the lead
+  // surface. There is no "power without basic" state, so enabling
+  // power forces basic on too.
+  state.powerBrowseEnabled =
+    options.powerBrowseEnabled || process.env.GH_ROUTER_ENABLE_POWER_BROWSE === "1"
+  if (state.powerBrowseEnabled) state.browseEnabled = true
 
   if (process.env.COPILOT_API_URL) {
     state.copilotApiUrl = process.env.COPILOT_API_URL
@@ -192,6 +201,12 @@ export const sharedServerArgs = {
     description:
       "Enable the browser-control MCP tools (browser_open_tab, browser_screenshot, browser_click, etc.) on /mcp. Requires Chrome or Edge installed; the bundled extension must be loaded on first tool call (the proxy returns install_required with Web Store URLs + a Load Unpacked fallback path). Off by default; can also be enabled with GH_ROUTER_ENABLE_BROWSE=1.",
   },
+  "power-browse": {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Expose the full ~18-tool browser MCP surface (raw read_page, mouse / drag / scroll / keyboard / type primitives, eval_js, diagnostics, find, locate). Default --browse exposes only the 6 lead-model tools (act, observe, extract, navigate, screenshot, open_tab) that hide DOM details behind intent. Implies --browse. Off by default; can also be enabled with GH_ROUTER_ENABLE_POWER_BROWSE=1.",
+  },
 } as const
 
 const allowedAccountTypes = new Set(["individual", "business", "enterprise"])
@@ -209,6 +224,7 @@ export function parseSharedArgs(args: Record<string, unknown>): {
   proxyEnv: boolean
   extendedBetas: boolean
   browseEnabled: boolean
+  powerBrowseEnabled: boolean
 } {
   const portRaw = args.port as string | undefined
   let port: number | undefined
@@ -255,6 +271,7 @@ export function parseSharedArgs(args: Record<string, unknown>): {
     proxyEnv: args["proxy-env"] as boolean,
     extendedBetas: args["extended-betas"] as boolean,
     browseEnabled: args.browse as boolean,
+    powerBrowseEnabled: args["power-browse"] as boolean,
   }
 }
 

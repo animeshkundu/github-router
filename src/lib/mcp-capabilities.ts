@@ -101,3 +101,25 @@ export function workerToolsEnabled(): boolean {
 export function browserCompoundToolsEnabled(): boolean {
   return compressorAvailable()
 }
+
+/**
+ * Gate for the L0/L1 power browser tools (`browser_read_page`,
+ * `browser_mouse`, `browser_drag`, `browser_type`, `browser_keyboard`,
+ * `browser_scroll`, `browser_eval_js`, `browser_diagnostics`,
+ * `browser_find`, `browser_close_tab`, `browser_list_tabs`,
+ * `browser_wait`, `browser_download`).
+ *
+ * Returns true iff `state.powerBrowseEnabled` (set by `--power-browse`
+ * or `GH_ROUTER_ENABLE_POWER_BROWSE=1`). When off, the default
+ * `--browse` surface exposes only the 6 lead-model tools (`act`,
+ * `observe`, `extract`, `navigate`, `screenshot`, `open_tab`) that
+ * hide DOM details behind intent. Power mode adds the raw primitives
+ * for users who want direct coord/keystroke control.
+ *
+ * `handler.ts` filter chain ANDs this with `browserToolsEnabled()`
+ * (defense-in-depth — power without basic is meaningless and the
+ * setup path already forces basic on when power is on).
+ */
+export function browserPowerToolsEnabled(): boolean {
+  return state.powerBrowseEnabled === true
+}

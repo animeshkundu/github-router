@@ -8,6 +8,7 @@ import {
   pickMatchingElements,
   type PageSnapshot,
 } from "./compressor"
+import { observePage } from "./observe"
 
 import type { NonPersonaMcpTool } from "~/lib/peer-mcp-personas"
 
@@ -70,7 +71,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
       additionalProperties: false,
       properties: {},
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_list_tabs", args, signal)
     },
@@ -116,7 +117,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_close_tab", args, signal)
     },
@@ -187,7 +188,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_read_page", args, signal)
     },
@@ -241,7 +242,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_scroll", args, signal)
     },
@@ -262,7 +263,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_keyboard", args, signal)
     },
@@ -290,7 +291,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_wait", args, signal)
     },
@@ -315,7 +316,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_eval_js", args, signal)
     },
@@ -342,7 +343,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_download", args, signal)
     },
@@ -397,7 +398,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_mouse", args, signal)
     },
@@ -444,7 +445,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_drag", args, signal)
     },
@@ -469,7 +470,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_type", args, signal)
     },
@@ -504,7 +505,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       const kind = args.kind === "network" ? "network" : "console"
       const tool = kind === "network" ? "browser_network_log" : "browser_console_logs"
@@ -561,7 +562,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser_compound",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       const tabId = typeof args.tabId === "number" ? args.tabId : undefined
       const intent = typeof args.intent === "string" ? args.intent : ""
@@ -668,6 +669,32 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
       }
       // Text-based match found. Dispatch.
       return dispatchActionByRef(tabId, picked.ref, picked.action, picked.value ?? value, signal)
+    },
+  },
+  {
+    toolNameHttp: "browser_observe",
+    description:
+      "Get a natural-language description of the current page's user-actionable state — what forms, buttons, links, and content sections are visible — in 2-4 sentences. Optional `intent` focuses the description on a region ('describe the login form', 'what's in the comments section'). Use this BEFORE browser_act when you don't know what's on the page, or AFTER navigation to confirm the page loaded. Cheaper than screenshots when text is enough. Does not include canvas/SVG content — those surface as a `hasVisualSurfaces` flag; switch to browser_screenshot for visuals.",
+    inputSchema: {
+      type: "object",
+      required: ["tabId"],
+      additionalProperties: false,
+      properties: {
+        tabId: { type: "number" },
+        intent: {
+          type: "string",
+          description: "Optional natural-language focus ('describe the form', 'what's in the sidebar').",
+        },
+      },
+    },
+    capability: "browser_compound",
+    async handler(args: Record<string, unknown>, signal?: AbortSignal) {
+      const tabId = typeof args.tabId === "number" ? args.tabId : undefined
+      const intent = typeof args.intent === "string" ? args.intent : undefined
+      if (!tabId) return toolEnvelope({ error: "tabId required" }, true)
+      const snapshot = await fetchSnapshot(tabId, signal)
+      const result = await observePage(snapshot, intent, signal)
+      return toolEnvelope(result)
     },
   },
   {
