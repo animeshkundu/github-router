@@ -442,7 +442,7 @@ export function buildPeerAwarenessSnippet(opts: {
   return [
     "## Peer review and advisor",
     "",
-    `Cross-lab peer critics under \`mcp__gh-router-peers__*\` — ${criticList.join(", ")} — are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies. The \`peer-review-coordinator\` subagent fans out to the appropriate critics in parallel and aggregates findings by severity. Claude Code's built-in \`advisor\` tool catches approach drift and confabulation. Subagents you spawn inherit all of these.${codexCliClause}`,
+    `Cross-lab peer critics under \`mcp__gh-router-peers__*\` (${criticList.join(", ")}) are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies. The \`peer-review-coordinator\` subagent fans out to the appropriate critics in parallel and aggregates findings by severity. Claude Code's built-in \`advisor\` tool catches approach drift and confabulation. Subagents you spawn inherit all of these.${codexCliClause}`,
     "",
     para2Parts.join(" "),
   ].join("\n")

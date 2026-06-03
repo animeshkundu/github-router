@@ -411,6 +411,11 @@ describe("buildPeerAwarenessSnippet", () => {
     // out of scope for the "Peer review and advisor" fence). Negative-
     // pin against accidental re-introduction.
     expect(snippet).not.toContain("Workflow")
+    // No em dashes — the style directive prepended to CLAUDE.md says
+    // "Avoid em dashes", and the peer-awareness snippet must not
+    // contradict its sibling injection. Pin against accidental
+    // reintroduction (the old paragraph 1 used `— ... —` parentheticals).
+    expect(snippet).not.toContain("—")
   })
 
   test("snippet is deterministic for the same inputs", () => {
