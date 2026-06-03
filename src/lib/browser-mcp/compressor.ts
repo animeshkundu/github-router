@@ -86,16 +86,21 @@ export function compressorAvailable(): boolean {
 }
 
 /**
- * One round-trip to the picked backend. Wraps slot acquisition,
- * payload assembly, and JSON-only result parsing. Throws on:
- * - no backend in catalog (caller should pre-check via the gate),
- * - slot saturation (returns null via slot — surfaces a clear retry signal),
- * - upstream rejection (surfaces the HTTPError from createChatCompletions),
- * - unparseable JSON in the reply.
+ * One round-trip to the picked backend. Wraps slot acquisition, payload
+ * assembly, and JSON parsing. Forces structured output via tool-calling:
+ * each caller supplies a tool schema and we set `tool_choice` so the
+ * model has to emit a tool call whose `arguments` field is a
+ * shape-validated JSON string. This eliminates a whole class of bug
+ * where models wrap their JSON in markdown code fences despite
+ * `response_format: { type: "json_object" }`. As a belt-and-suspenders
+ * fallback for backends that ignore `tool_choice`, we ALSO accept
+ * free-form `message.content` and strip a leading / trailing ```` ``` ````
+ * code fence before parsing.
  */
 async function callCompressor(
   systemPrompt: string,
   userMessage: ChatCompletionsPayload["messages"][number]["content"],
+  tool: { name: string; description: string; parameters: Record<string, unknown> },
   signal?: AbortSignal,
 ): Promise<unknown> {
   const model = pickBackendFromCatalog()
@@ -116,17 +121,55 @@ async function callCompressor(
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage },
       ],
-      response_format: { type: "json_object" },
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+          },
+        },
+      ],
+      tool_choice: { type: "function", function: { name: tool.name } },
     } as ChatCompletionsPayload
     const resp = (await createChatCompletions(payload, undefined, signal)) as ChatCompletionResponse
-    const text = resp.choices?.[0]?.message?.content
-    if (typeof text !== "string" || text.length === 0) {
-      throw new Error("browser-mcp compressor: empty response from backend")
+    const choice = resp.choices?.[0]
+    const msg = choice?.message as
+      | {
+          content?: string | null
+          tool_calls?: Array<{ function?: { arguments?: string } }>
+        }
+      | undefined
+    const toolArgs = msg?.tool_calls?.[0]?.function?.arguments
+    if (typeof toolArgs === "string" && toolArgs.length > 0) {
+      return JSON.parse(toolArgs)
     }
-    return JSON.parse(text)
+    // Fallback path: model ignored tool_choice and returned content
+    // directly. Strip any markdown code fence wrapper before parsing.
+    const text = typeof msg?.content === "string" ? msg.content : ""
+    if (text.length === 0) {
+      throw new Error("browser-mcp compressor: empty response from backend (no tool_calls and no content)")
+    }
+    return JSON.parse(stripCodeFence(text))
   } finally {
     release()
   }
+}
+
+/**
+ * Strip a single leading / trailing ``` (or ```json) code fence from a
+ * model's free-form text reply so JSON.parse works. Idempotent on
+ * fence-free input. Defensive against the failure mode caught in PR #55
+ * smoke-test: some models wrap JSON output in ```json ... ``` even
+ * with response_format: { type: "json_object" } set.
+ */
+function stripCodeFence(text: string): string {
+  const t = text.trim()
+  // ```json\n...\n``` or ```\n...\n```
+  const fenced = /^```(?:json)?\s*\n?([\s\S]*?)\n?```$/.exec(t)
+  if (fenced) return fenced[1].trim()
+  return t
 }
 
 // ---------------------------------------------------------------------
@@ -171,7 +214,7 @@ const PICK_ELEMENT_SYSTEM = `You map a natural-language intent to ONE element fr
 
 Snapshot elements look like: {ref: "e42", role: "button", name: "Sign in", bbox: [x,y,w,h]}.
 
-Return JSON: {ref: string, action: "click"|"fill"|"type"|"select"|"scroll_into_view", value?: string, confidence: number from 0 to 1}.
+Call the pick_element tool with your answer.
 
 Pick action by intent + element role:
 - click for buttons, links, checkboxes, radios, switches
@@ -180,9 +223,26 @@ Pick action by intent + element role:
 - select for combobox / select
 - scroll_into_view when the model wants to bring something on-screen
 
-If no element matches with confidence ≥ 0.5, return {ref: "", action: "click", confidence: 0}.
+If no element matches with confidence ≥ 0.5, call with ref="" and confidence=0.`
 
-Respond with ONLY the JSON object, no prose.`
+const PICK_ELEMENT_TOOL = {
+  name: "pick_element",
+  description: "Report which element the intent points at.",
+  parameters: {
+    type: "object",
+    required: ["ref", "action", "confidence"],
+    additionalProperties: false,
+    properties: {
+      ref: { type: "string", description: "Element ref (e.g. 'e42') or empty if no match." },
+      action: {
+        type: "string",
+        enum: ["click", "fill", "type", "select", "scroll_into_view"],
+      },
+      value: { type: "string", description: "Required for fill / type / select actions; the value to set." },
+      confidence: { type: "number", description: "0 to 1." },
+    },
+  },
+}
 
 /**
  * Pick a single element matching the natural-language intent. Used by
@@ -211,7 +271,7 @@ export async function pickElement(
     elements: trimmed,
     has_visual_surfaces: Boolean(snapshot.visualSurfaces && snapshot.visualSurfaces.length > 0),
   })
-  const raw = await callCompressor(PICK_ELEMENT_SYSTEM, userPayload, signal)
+  const raw = await callCompressor(PICK_ELEMENT_SYSTEM, userPayload, PICK_ELEMENT_TOOL, signal)
   return normalizePickedAction(raw)
 }
 
@@ -240,9 +300,32 @@ const FIND_ELEMENTS_SYSTEM = `You match a natural-language intent to elements fr
 
 Snapshot elements look like: {ref: "e42", role: "button", name: "Sign in"}.
 
-Return JSON: {matches: [{ref: string, reason: string}], up to 5 best matches ordered by relevance}.
+Call the find_elements tool with up to 5 best matches ordered by relevance.`
 
-Respond with ONLY the JSON object, no prose.`
+const FIND_ELEMENTS_TOOL = {
+  name: "find_elements",
+  description: "Report ranked element matches for the intent.",
+  parameters: {
+    type: "object",
+    required: ["matches"],
+    additionalProperties: false,
+    properties: {
+      matches: {
+        type: "array",
+        maxItems: 5,
+        items: {
+          type: "object",
+          required: ["ref", "reason"],
+          additionalProperties: false,
+          properties: {
+            ref: { type: "string" },
+            reason: { type: "string" },
+          },
+        },
+      },
+    },
+  },
+}
 
 export interface FindMatch {
   ref: string
@@ -265,7 +348,7 @@ export async function pickMatchingElements(
     name: e.name,
   }))
   const userPayload = JSON.stringify({ intent, elements: trimmed })
-  const raw = await callCompressor(FIND_ELEMENTS_SYSTEM, userPayload, signal)
+  const raw = await callCompressor(FIND_ELEMENTS_SYSTEM, userPayload, FIND_ELEMENTS_TOOL, signal)
   if (!raw || typeof raw !== "object") return []
   const matches = (raw as { matches?: unknown }).matches
   if (!Array.isArray(matches)) return []
@@ -285,13 +368,32 @@ const EXTRACT_SYSTEM = `You extract structured data from a browser page snapshot
 
 Use the snapshot's text + element list as your source. Be faithful to what's visible; do not invent values.
 
-Return JSON matching the schema exactly. Respond with ONLY the JSON object, no prose.`
+Call the extract_result tool with your answer in the result field.`
+
+const EXTRACT_TOOL = {
+  name: "extract_result",
+  description: "Report the extracted object.",
+  parameters: {
+    type: "object",
+    required: ["result"],
+    additionalProperties: false,
+    properties: {
+      // The schema is per-call, but we can't easily inject it into a
+      // function-schema's nested properties here without leaking
+      // caller-controlled schema into our request payload (which
+      // some upstreams reject as invalid). Accept any-shaped object;
+      // the caller's downstream validation is the source of truth.
+      result: { type: "object", additionalProperties: true },
+    },
+  },
+}
 
 /**
- * Structured extraction. The schema is passed verbatim to the
- * backend (JSON schema string); the returned object is the parsed
- * JSON. Caller is responsible for validating against the schema if
- * they need stricter guarantees than the backend provides.
+ * Structured extraction. The schema is passed inside the user message
+ * as instruction to the model; the returned object is whatever the
+ * model put in the `result` field. Caller is responsible for
+ * validating against the schema if they need stricter guarantees than
+ * the backend provides.
  */
 export async function extractStructured(
   snapshot: PageSnapshot,
@@ -307,18 +409,34 @@ export async function extractStructured(
       elements: snapshot.elements,
     },
   })
-  return callCompressor(EXTRACT_SYSTEM, userPayload, signal)
+  const raw = await callCompressor(EXTRACT_SYSTEM, userPayload, EXTRACT_TOOL, signal)
+  if (raw && typeof raw === "object" && "result" in (raw as Record<string, unknown>)) {
+    return (raw as { result: unknown }).result
+  }
+  return raw
 }
 
 const PICK_VISUAL_SYSTEM = `You're given a browser screenshot, a natural-language intent, and a list of canvas / svg regions in CSS-pixel coordinates.
 
 Find the pixel coordinates in the screenshot where the intent points. Coordinates are CSS pixels (origin top-left of viewport).
 
-Return JSON: {x: number, y: number, confidence: number from 0 to 1, reason: string}.
+Call the pick_visual tool with the coordinates. If no clear target is visible, call with x=0, y=0, confidence=0.`
 
-If no clear target is visible, return {x: 0, y: 0, confidence: 0, reason: "..."}.
-
-Respond with ONLY the JSON object, no prose.`
+const PICK_VISUAL_TOOL = {
+  name: "pick_visual",
+  description: "Report the pixel coordinates the intent points at.",
+  parameters: {
+    type: "object",
+    required: ["x", "y", "confidence", "reason"],
+    additionalProperties: false,
+    properties: {
+      x: { type: "number" },
+      y: { type: "number" },
+      confidence: { type: "number" },
+      reason: { type: "string" },
+    },
+  },
+}
 
 export interface PickedVisual {
   x: number
@@ -352,7 +470,7 @@ export async function pickElementVisual(
       image_url: { url: `data:${contentType};base64,${screenshotB64}` },
     },
   ]
-  const raw = await callCompressor(PICK_VISUAL_SYSTEM, userPayload, signal)
+  const raw = await callCompressor(PICK_VISUAL_SYSTEM, userPayload, PICK_VISUAL_TOOL, signal)
   if (!raw || typeof raw !== "object") {
     return { x: 0, y: 0, confidence: 0, reason: "empty backend response" }
   }

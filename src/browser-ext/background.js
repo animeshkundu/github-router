@@ -421,36 +421,93 @@ async function toolClick(args) {
   const clickCount = typeof args.clickCount === "number" ? args.clickCount : 1
   if (!tabId) throw new Error("browser_click: tabId is required")
   if (!ref && !selector) throw new Error("browser_click: ref or selector is required")
-  const before = await chrome.tabs.get(tabId)
-  const urlBefore = before.url
-  const [result] = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: (ref, selector, button, clickCount) => {
-      const sel = ref ? `[data-gh-router-ref="${ref}"]` : selector
-      const el = document.querySelector(sel)
-      if (!el) return { ok: false, error: `element not found: ${sel}` }
-      // Use native .click() for left-button (handles default action,
-      // form submission, etc); MouseEvent for right-click context menus.
-      if (button === "right") {
-        for (let i = 0; i < clickCount; i++) {
-          el.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }))
+  // Subscribe to nav events BEFORE dispatching the click so a fast
+  // click → nav transition can't race past us. Cleanup runs in
+  // finally so an executeScript throw doesn't leak listeners.
+  const navState = watchTabNavigation(tabId)
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (ref, selector, button, clickCount) => {
+        const sel = ref ? `[data-gh-router-ref="${ref}"]` : selector
+        const el = document.querySelector(sel)
+        if (!el) return { ok: false, error: `element not found: ${sel}` }
+        // Use native .click() for left-button (handles default action,
+        // form submission, etc); MouseEvent for right-click context menus.
+        if (button === "right") {
+          for (let i = 0; i < clickCount; i++) {
+            el.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }))
+          }
+        } else {
+          for (let i = 0; i < clickCount; i++) el.click()
         }
-      } else {
-        for (let i = 0; i < clickCount; i++) el.click()
-      }
-      return { ok: true }
-    },
-    args: [ref, selector, button, clickCount],
-  })
-  if (!result || !result.result || !result.result.ok) {
-    throw new Error(`browser_click: ${result?.result?.error ?? "execution failed"}`)
+        return { ok: true }
+      },
+      args: [ref, selector, button, clickCount],
+    })
+    if (!result || !result.result || !result.result.ok) {
+      throw new Error(`browser_click: ${result?.result?.error ?? "execution failed"}`)
+    }
+    // Accurate navigated detection via webNavigation events (replaces the
+    // old 300ms URL-poll which missed slow nav and reported navigated:false
+    // for clicks that DID navigate but took longer to commit). Wait up to
+    // ~150ms for onBeforeNavigate to fire; if it does, then wait up to
+    // ~5s for onCommitted to land. If onBeforeNavigate never fires, no
+    // navigation was triggered — return immediately, no wasted latency.
+    const navigated = await navState.promise
+    return { ok: true, navigated }
+  } finally {
+    navState.cleanup()
   }
-  // Brief settle window so clicks that trigger navigation surface in
-  // the response. 300ms is enough to catch immediate-redirect clicks
-  // without significantly slowing the tool's tail latency.
-  await sleep(300)
-  const after = await chrome.tabs.get(tabId)
-  return { ok: true, navigated: after.url !== urlBefore }
+}
+
+/**
+ * Pre-subscribe to chrome.webNavigation events for an upcoming click
+ * on a tab. Returns a {promise, cleanup} pair. The caller fires the
+ * click AFTER calling this so the listener can never miss the
+ * onBeforeNavigate that the click triggers.
+ *
+ * Promise resolves to:
+ *   - true when onCommitted fires for tabId+frameId 0 within ~5s of
+ *     an onBeforeNavigate also firing on that tab/frame, OR
+ *   - false when onBeforeNavigate doesn't fire within ~150ms post-call
+ *     (= no nav triggered by the click).
+ *
+ * cleanup() removes both listeners — caller MUST invoke from a finally
+ * block to avoid leaking event subscriptions on errors.
+ */
+function watchTabNavigation(tabId) {
+  const NO_NAV_MS = 150
+  const COMMIT_MS = 5000
+  let onBefore
+  let onCommitted
+  let resolved = false
+  let noNavTimer
+  let commitTimer
+  const cleanup = () => {
+    try { if (onBefore) chrome.webNavigation.onBeforeNavigate.removeListener(onBefore) } catch { /* ignore */ }
+    try { if (onCommitted) chrome.webNavigation.onCommitted.removeListener(onCommitted) } catch { /* ignore */ }
+    if (noNavTimer) clearTimeout(noNavTimer)
+    if (commitTimer) clearTimeout(commitTimer)
+  }
+  const promise = new Promise((resolve) => {
+    const settle = (v) => { if (!resolved) { resolved = true; resolve(v) } }
+    onCommitted = (details) => {
+      if (details.tabId === tabId && details.frameId === 0) settle(true)
+    }
+    onBefore = (details) => {
+      if (details.tabId !== tabId || details.frameId !== 0) return
+      // Nav started; switch from "did we get a nav at all" to "wait
+      // for commit". If commit doesn't land in COMMIT_MS, assume the
+      // nav stuck or was cancelled and report true (a nav DID start).
+      if (noNavTimer) { clearTimeout(noNavTimer); noNavTimer = undefined }
+      commitTimer = setTimeout(() => settle(true), COMMIT_MS)
+    }
+    chrome.webNavigation.onBeforeNavigate.addListener(onBefore)
+    chrome.webNavigation.onCommitted.addListener(onCommitted)
+    noNavTimer = setTimeout(() => settle(false), NO_NAV_MS)
+  })
+  return { promise, cleanup }
 }
 
 async function toolFill(args) {
