@@ -17,10 +17,15 @@ import { getCodexVersion, launchChild } from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
 import { ensureClaudeConfigMirror, removeOwnClaudeConfigMirror } from "./lib/paths"
 import { buildPeerAwarenessSnippet } from "./lib/peer-mcp-personas"
+import { appendPeerAwarenessToMirroredClaudeMd } from "./lib/claude-md-injection"
 import {
   DEFAULT_CLAUDE_MODEL_FALLBACKS,
   pickClaudeDefault,
 } from "./lib/port"
+import {
+  standInToolEnabled,
+  workerToolsEnabled,
+} from "./lib/mcp-capabilities"
 import {
   getClaudeCodeEnvVars,
   parseSharedArgs,
@@ -385,33 +390,50 @@ export const claude = defineCommand({
             + `subagent .md files=${runtime.agentMdPaths.length}, ${subagentVisibility}).\n`,
         )
 
-        // Awareness snippet: append a short, non-prescriptive system-prompt
-        // section telling Claude *what* peer-review tools exist and *when*
-        // they tend to be useful — Claude decides *whether* to call them.
-        // The auto-invocation triggers live in each MCP tool's own
-        // `description` (the prescriptive layer); this snippet is the
-        // awareness layer. Opt out with `GH_ROUTER_PEER_AWARENESS` set to
-        // 0, false, no, off, or empty string (case-insensitive, trimmed)
-        // — same surface as the CLAUDE_CODE_* opt-outs documented in
-        // docs/claude-env-injection.md.
-        const peerAwarenessOptOut = (
-          process.env.GH_ROUTER_PEER_AWARENESS ?? "1"
-        )
-          .trim()
-          .toLowerCase()
-        const peerAwarenessDisabled =
-          peerAwarenessOptOut === ""
-          || peerAwarenessOptOut === "0"
-          || peerAwarenessOptOut === "false"
-          || peerAwarenessOptOut === "off"
-          || peerAwarenessOptOut === "no"
-        if (!peerAwarenessDisabled) {
-          extraArgs.push(
-            "--append-system-prompt",
-            buildPeerAwarenessSnippet({
-              codexCli: backend === "cli",
-              geminiAvailable,
-            }),
+        // Awareness snippet: append a short, descriptive system-prompt
+        // section telling Claude *what* peer-review tools exist — Claude
+        // decides *whether* to call them based on each tool's own
+        // `description` (the routing layer). This is the awareness layer.
+        //
+        // Delivery is dual-surface, both unconditional:
+        //   1. --append-system-prompt — system-turn position, strongest
+        //      attention weight; reaches the main agent only.
+        //   2. <CLAUDE_CONFIG_DIR>/CLAUDE.md (appended) — user-turn
+        //      <claudeMd> wrapper; reaches Agent-tool subagents and
+        //      agent-teams teammates that inherit CLAUDE_CONFIG_DIR but
+        //      not --append-system-prompt.
+        //
+        // Capability gates: worker_* and stand_in mentions are gated on
+        // the same predicates the /mcp tools/list uses (workerToolsEnabled
+        // / standInToolEnabled), so the snippet never names a tool that
+        // is missing from the live catalog.
+        //
+        // Previously gated by GH_ROUTER_PEER_AWARENESS (default-on).
+        // The flag was dropped (per plan: it served no purpose now that
+        // the snippet is default-on across both surfaces). Existing
+        // `GH_ROUTER_PEER_AWARENESS=0` shell exports are silent no-ops.
+        const peerSnippet = buildPeerAwarenessSnippet({
+          codexCli: backend === "cli",
+          geminiAvailable,
+          workerToolsAvailable: workerToolsEnabled(),
+          standInAvailable: standInToolEnabled(),
+        })
+        extraArgs.push("--append-system-prompt", peerSnippet)
+        // Ordering invariant: this MUST run AFTER ensureClaudeConfigMirror()
+        // has resolved (above in this same handler), so the snapshot of
+        // the user's ~/.claude/CLAUDE.md is already in place before we
+        // append our marker block. The helper's own mirror-only safety
+        // guard rejects writes outside CLAUDE_CONFIG_DIR as defence in
+        // depth. Failures warn-and-continue — the main agent already has
+        // the awareness via --append-system-prompt, so this surface is
+        // descendant-reach enhancement, not a launch-blocker.
+        try {
+          await appendPeerAwarenessToMirroredClaudeMd(peerSnippet)
+        } catch (err) {
+          consola.warn(
+            `Peer-awareness CLAUDE.md append failed (main agent still covered via --append-system-prompt): ${
+              err instanceof Error ? err.message : String(err)
+            }`,
           )
         }
       } catch (err) {

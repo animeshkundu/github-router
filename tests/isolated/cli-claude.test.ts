@@ -134,11 +134,21 @@ const writePeerMcpRuntimeFilesMock = mock()
 const resolveCodexCliBackendMock = mock()
 const injectPeerMcpIntoMirrorMock = mock()
 const getCodexVersionMock = mock()
+const appendPeerAwarenessToMirroredClaudeMdMock = mock()
 
 mock.module("~/lib/codex-mcp-config", () => ({
   writePeerMcpRuntimeFiles: writePeerMcpRuntimeFilesMock,
   resolveCodexCliBackend: resolveCodexCliBackendMock,
   injectPeerMcpIntoMirror: injectPeerMcpIntoMirrorMock,
+}))
+
+// The CLAUDE.md append is the new descendant-reach surface; mock it
+// here so the cli-claude test focuses on call/no-call assertions and
+// the real filesystem write logic is exercised by
+// tests/claude-md-injection.test.ts in isolation.
+mock.module("~/lib/claude-md-injection", () => ({
+  appendPeerAwarenessToMirroredClaudeMd:
+    appendPeerAwarenessToMirroredClaudeMdMock,
 }))
 
 // launch.ts also exports buildLaunchCommand etc. — re-export the real
@@ -237,6 +247,8 @@ beforeEach(() => {
     ok: true,
     serversAdded: ["gh-router-peers"],
   })
+  appendPeerAwarenessToMirroredClaudeMdMock.mockReset()
+  appendPeerAwarenessToMirroredClaudeMdMock.mockResolvedValue(undefined)
   getCodexVersionMock.mockReset()
   getCodexVersionMock.mockReturnValue({ ok: false })
 
@@ -712,7 +724,7 @@ describe("claude command", () => {
       expect(args).not.toContain("--mcp-config")
     })
 
-    test("GH_ROUTER_PEER_AWARENESS unset → --append-system-prompt is pushed by default", async () => {
+    test("default env → --append-system-prompt is pushed AND appendPeerAwarenessToMirroredClaudeMd is invoked", async () => {
       delete mockProcessEnv.GH_ROUTER_PEER_AWARENESS
       const run = getRunFn()
       await run({ args: {} })
@@ -722,30 +734,93 @@ describe("claude command", () => {
       expect(idx).toBeGreaterThanOrEqual(0)
       const snippet = args[idx + 1] as string
       expect(snippet).toContain("Peer review and advisor")
+
+      // The new sibling surface: descendant-reach via mirrored
+      // CLAUDE.md is invoked exactly once with the same snippet.
+      expect(appendPeerAwarenessToMirroredClaudeMdMock).toHaveBeenCalledTimes(1)
+      const [appendedSnippet] = appendPeerAwarenessToMirroredClaudeMdMock
+        .mock.calls[0]
+      expect(appendedSnippet).toBe(snippet)
     })
 
-    test("GH_ROUTER_PEER_AWARENESS=0 → --append-system-prompt NOT pushed", async () => {
+    test("--append-system-prompt is pushed exactly once (no accidental double-injection)", async () => {
+      delete mockProcessEnv.GH_ROUTER_PEER_AWARENESS
+      const run = getRunFn()
+      await run({ args: {} })
+
+      const [, args] = spawnMock.mock.calls[0]
+      const occurrences = (args as Array<string>).filter(
+        (a) => a === "--append-system-prompt",
+      ).length
+      expect(occurrences).toBe(1)
+    })
+
+    test("GH_ROUTER_PEER_AWARENESS=0 is a no-op (flag was dropped) — --append-system-prompt still pushed", async () => {
+      // Per peer-review #8 and the plan: the GH_ROUTER_PEER_AWARENESS
+      // flag was removed; the snippet is now default-on across both
+      // surfaces. Existing shell exports become silent no-ops. This
+      // test guards against accidental re-introduction of the gate.
       mockProcessEnv.GH_ROUTER_PEER_AWARENESS = "0"
       try {
         const run = getRunFn()
         await run({ args: {} })
         const [, args] = spawnMock.mock.calls[0]
-        expect(args).not.toContain("--append-system-prompt")
+        expect(args).toContain("--append-system-prompt")
+        expect(
+          appendPeerAwarenessToMirroredClaudeMdMock,
+        ).toHaveBeenCalledTimes(1)
       } finally {
         delete mockProcessEnv.GH_ROUTER_PEER_AWARENESS
       }
     })
 
-    test("GH_ROUTER_PEER_AWARENESS=FALSE (uppercase) → --append-system-prompt NOT pushed", async () => {
+    test("GH_ROUTER_PEER_AWARENESS='' (empty string) is also a no-op", async () => {
+      // Edge case per peer-review S5 — empty-string opt-out parsing
+      // was a common bug surface in the old flag. Verify the
+      // post-deletion behaviour is uniform across falsy values.
+      mockProcessEnv.GH_ROUTER_PEER_AWARENESS = ""
+      try {
+        const run = getRunFn()
+        await run({ args: {} })
+        const [, args] = spawnMock.mock.calls[0]
+        expect(args).toContain("--append-system-prompt")
+        expect(
+          appendPeerAwarenessToMirroredClaudeMdMock,
+        ).toHaveBeenCalledTimes(1)
+      } finally {
+        delete mockProcessEnv.GH_ROUTER_PEER_AWARENESS
+      }
+    })
+
+    test("GH_ROUTER_PEER_AWARENESS=FALSE is also a no-op", async () => {
       mockProcessEnv.GH_ROUTER_PEER_AWARENESS = "FALSE"
       try {
         const run = getRunFn()
         await run({ args: {} })
         const [, args] = spawnMock.mock.calls[0]
-        expect(args).not.toContain("--append-system-prompt")
+        expect(args).toContain("--append-system-prompt")
+        expect(
+          appendPeerAwarenessToMirroredClaudeMdMock,
+        ).toHaveBeenCalledTimes(1)
       } finally {
         delete mockProcessEnv.GH_ROUTER_PEER_AWARENESS
       }
+    })
+
+    test("CLAUDE.md append failure does not block claude launch (warn-and-continue)", async () => {
+      // Descendant-reach is enhancement, not a launch-blocker. The
+      // main agent still has --append-system-prompt, so a CLAUDE.md
+      // write failure should not surface as an error to the user.
+      appendPeerAwarenessToMirroredClaudeMdMock.mockRejectedValue(
+        new Error("disk full"),
+      )
+      const run = getRunFn()
+      await run({ args: {} })
+
+      expect(spawnMock).toHaveBeenCalledTimes(1)
+      const [, args] = spawnMock.mock.calls[0]
+      // --append-system-prompt was still pushed for the main agent.
+      expect(args).toContain("--append-system-prompt")
     })
 
     test("gemini availability is probed against state.models catalog", async () => {

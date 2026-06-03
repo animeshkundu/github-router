@@ -280,22 +280,15 @@ export async function runWorkerAgent(
     // a code change.
     const budget = new Budget()
 
-    // Step 6: tools. `getMessages` is wired with a forward-referenced
-    // closure that resolves to `agent.state.messages` at call time —
-    // the advisor tool consumes the LIVE transcript so its review has
-    // the freshest context, not a snapshot from construction time.
-    //
-    // We use a single-field object as the forward-reference holder
-    // rather than a bare `let`. `let agent: Agent | undefined` would
-    // trip ESLint's `prefer-const` (it sees one assignment and doesn't
-    // model the closure dependency); a ref holder is the conventional
-    // workaround and reads truthfully: the agent is mutable from the
-    // closure's perspective.
-    const agentRef: { current?: Agent } = {}
+    // Step 6: tools. The `advisor` tool (which consumed the live
+    // Pi transcript via a `getMessages` getter) was removed from the
+    // worker surface — workers now have a narrower toolset (read/glob/
+    // grep/code_search/web_search/fetch_url; implement adds edit/write/
+    // bash/codex_review). No remaining tool needs the transcript, so
+    // `getMessages` is no longer threaded through.
     const tools = buildWorkerTools({
       mode: opts.mode,
       workspace: ws.dir,
-      getMessages: () => agentRef.current?.state.messages ?? [],
     })
 
     // Step 7: Agent. `streamFn` is the routing override (per Pi docs

@@ -88,6 +88,27 @@ function claudeConfigDirSuffix(): string {
   return _claudeConfigDirSuffix
 }
 
+/**
+ * Predicate: is `target` inside the current launch's `CLAUDE_CONFIG_DIR`?
+ *
+ * Used as a defence-in-depth safety guard by helpers that mutate files
+ * under the mirror dir (e.g. `appendPeerAwarenessToMirroredClaudeMd`).
+ * If `PATHS.CLAUDE_CONFIG_DIR` has somehow been pointed at the user's
+ * real `~/.claude/` (configuration drift, future code regression), the
+ * helper refuses to write — the proxy should never mutate user files.
+ *
+ * Pure-prefix `startsWith` is unsafe (`/a/foo` matches `/a/foobar`), so
+ * this requires either equality or `<root><sep>...` strictly.
+ * Synchronous because we don't need real-path resolution; symlink
+ * refusal lives at the consuming helper.
+ */
+export function isUnderClaudeConfigMirror(target: string): boolean {
+  const resolvedRoot = path.resolve(PATHS.CLAUDE_CONFIG_DIR)
+  const resolvedTarget = path.resolve(target)
+  if (resolvedTarget === resolvedRoot) return true
+  return resolvedTarget.startsWith(resolvedRoot + path.sep)
+}
+
 export async function ensurePaths(): Promise<void> {
   await fs.mkdir(PATHS.APP_DIR, { recursive: true })
   await fs.mkdir(PATHS.CODEX_HOME, { recursive: true })

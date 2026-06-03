@@ -247,20 +247,27 @@ describe("systemPromptFor", () => {
     expect(p).not.toContain("edit/write/bash")
   })
 
-  test("implement prompt mentions edit/write/bash", () => {
+  test("implement prompt mentions edit/write/bash and codex_review", () => {
     const p = systemPromptFor("implement")
     expect(p).toContain(
       "You are operating inside a sandboxed coding worker.",
     )
-    expect(p).toContain("edit/write/bash")
+    expect(p).toContain("`edit`")
+    expect(p).toContain("`write`")
+    expect(p).toContain("`bash`")
+    expect(p).toContain("`codex_review`")
   })
 
   test("prompts are short — no prescriptive task advice", () => {
-    // Soft sanity: keep the prompt under 800 chars. The plan calls
-    // out that the prompt is security-boundary ONLY; if someone
-    // tacks on a giant style guide they'll trip this.
-    expect(systemPromptFor("explore").length).toBeLessThan(800)
-    expect(systemPromptFor("implement").length).toBeLessThan(800)
+    // Soft sanity: keep the prompt under 2000 chars. The plan calls
+    // out that the prompt is security-boundary + brief capability
+    // inventory ONLY; if someone tacks on a giant style guide they'll
+    // trip this. Cap raised from the original 800 to accommodate the
+    // per-tool bullets added per the Section 3 + user directive (Pi
+    // needs short descriptions; Gemini has no built-in knowledge of
+    // the proxy-specific tools).
+    expect(systemPromptFor("explore").length).toBeLessThan(2000)
+    expect(systemPromptFor("implement").length).toBeLessThan(2000)
   })
 })
 
