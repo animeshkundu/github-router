@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "github-router browser bridge",
   "short_name": "gh-router-browser",
-  "version": "0.0.1",
+  "version": "0.0.0",
   "description": "Bridge between Claude (via github-router /mcp) and the browser. Implements tab control, navigation, clicks, form fill, downloads, screenshots, devtools eval. Blocks navigation to chrome://settings.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqJElxuBlonBS3TVW9FJN0mGTtShB3L1hoaYf6k39SOr1ogGYmF90EjRxy1i21k9wQQjPf26bcBu/9X67KrQjQV0uB38CaNukgiSeoLjfptN811u+PJHx6BP+jx3Qa6/3VenNPxHC8WEU0GXql8QSjIHEyCwKb6fMASXOK94JyB5Ywov2x8mt/+9ncqBBBMVzf6r5Sagy4PL1XnryLsuADD/vOEkPet8wXgH/Oj7v5tTsQQZ7U1JT51PoDs2BFnXc5v3TkVgZwd32k3ONh+nkDw1Hof+4zwUGOyJE6eMrlYzRlKM4Qxdf9JpavQvqfieAbTRWcyKeclnHeoIfE7cDBQIDAQAB",
   "background": {

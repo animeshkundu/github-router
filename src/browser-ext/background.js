@@ -21,14 +21,28 @@
 const NATIVE_HOST_NAME = "com.githubrouter.browser"
 
 // ---------------------------------------------------------------------
-// Navigation policy — list of URL patterns blocked from open / navigate.
-// Mirrored in src/lib/browser-mcp/policy.ts (defense in depth).
+// Navigation policy — URL patterns this extension blocks at
+// webNavigation.onBeforeNavigate. This list is INTENTIONALLY NARROWER
+// than the bridge-side regex in src/lib/browser-mcp/policy.ts: the
+// bridge regex only fires for tool-initiated nav (browser_open_tab /
+// browser_navigate) so it can safely block `extensions` without
+// affecting the human user, while THIS regex fires for user-typed URL
+// bar nav too and must preserve human access to chrome://extensions /
+// edge://extensions (needed to reload this extension after package
+// updates).
 // ---------------------------------------------------------------------
 
+// `extensions` is intentionally omitted from the extension-side regex —
+// chrome.webNavigation.onBeforeNavigate fires for ALL top-level
+// navigations including the user typing in the URL bar, so including it
+// here would lock the user out of managing the very extension that
+// loads this code (and prevent the reload arrow that auto-update falls
+// back to). Bridge-side policy.ts keeps `extensions` in its regex,
+// which is sufficient because the bridge regex only gates tool-
+// initiated nav (browser_open_tab / browser_navigate).
 const BLOCKED_URL_RE =
-  /^(chrome|edge|brave|opera|vivaldi):\/\/(settings|preferences|extensions|policy|management|password|flags|flag-descriptions)/i
-const BLOCKED_VIEW_SOURCE_RE =
-  /^view-source:(chrome|edge):\/\/(settings|extensions)/i
+  /^(chrome|edge|brave|opera|vivaldi):\/\/(settings|preferences|policy|management|password|flags|flag-descriptions)/i
+const BLOCKED_VIEW_SOURCE_RE = /^view-source:(chrome|edge):\/\/settings/i
 
 function isBlockedUrl(url) {
   if (typeof url !== "string") return false
@@ -1438,11 +1452,39 @@ function connectBridge() {
     nativePort = undefined
   })
   nativePort = port
+  // Hello frame — lets the bridge associate this connection with a
+  // version. Pre-flight on the proxy side compares this against the
+  // version stamped into dist/browser-ext/manifest.json at build, and
+  // triggers an auto-reload (via __reload__ control frame) when the
+  // package has been updated but the loaded extension is stale.
+  try {
+    port.postMessage({
+      type: "__hello__",
+      version: chrome.runtime.getManifest().version,
+    })
+  } catch (err) {
+    console.warn("[browser-bridge] hello frame failed:", err)
+  }
   return port
 }
 
 async function handleBridgeRequest(req, port) {
-  if (!req || typeof req.id !== "string" || typeof req.tool !== "string") return
+  if (!req) return
+  // Control frames — not regular tool dispatches. The bridge sends
+  // these out-of-band; the {id, tool, args} shape doesn't apply.
+  if (req.type === "__reload__") {
+    // chrome.runtime.reload terminates this service worker and starts
+    // a fresh one that re-reads on-disk files. Used by the proxy's
+    // pre-flight when the loaded extension version doesn't match the
+    // version stamped into dist/browser-ext/manifest.json.
+    try {
+      chrome.runtime.reload()
+    } catch (err) {
+      console.warn("[browser-bridge] reload failed:", err)
+    }
+    return
+  }
+  if (typeof req.id !== "string" || typeof req.tool !== "string") return
   const handler = TOOL_HANDLERS[req.tool]
   if (!handler) {
     port.postMessage({ id: req.id, ok: false, error: `unknown tool: ${req.tool}`, code: "unknown_tool" })
@@ -1483,17 +1525,17 @@ chrome.tabs.onUpdated.addListener(() => {
   try { connectBridge() } catch (err) { console.warn("[browser-bridge] onUpdated connect failed:", err) }
 })
 
-// Defense in depth — webNavigation listener catches in-page-initiated
-// navigations (JS-driven redirects, meta-refresh, anchor clicks the
-// model didn't go through browser_navigate for). Tool-initiated paths
-// already pre-check via isBlockedUrl() / the bridge-layer policy.ts,
-// so this is the safety net for navigations the bridge can't see.
-//
-// On match: cancel the navigation by routing the tab back to
-// about:blank, AND log a console.error so browser_console_logs can
-// surface "the model tried to navigate to a blocked URL" on the next
-// drain. The cancel happens via chrome.tabs.update — there's no
-// onBeforeNavigate "cancel" API in MV3.
+// webNavigation.onBeforeNavigate fires for ALL top-level navigations
+// — user-typed URL bar entries AND in-page-initiated nav (JS redirect,
+// meta-refresh, anchor clicks). It does NOT expose transitionType, so
+// we can't cheaply distinguish initiator at this stage. Consequence:
+// every URL in BLOCKED_URL_RE is unreachable when this extension is
+// enabled, including for the human user. `extensions` is deliberately
+// excluded from BLOCKED_URL_RE to preserve user access to the page
+// they need to manage this extension; bridge-side policy.ts still
+// rejects tool-initiated nav there. On match: route the tab back to
+// about:blank (no onBeforeNavigate cancel API in MV3) and log a
+// console.error so browser_console_logs can surface it on next drain.
 chrome.webNavigation.onBeforeNavigate.addListener((details) => {
   if (details.frameId !== 0) return  // only top-level frame
   if (isBlockedUrl(details.url)) {
