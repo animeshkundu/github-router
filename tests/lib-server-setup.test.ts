@@ -163,12 +163,12 @@ describe("getClaudeCodeEnvVars", () => {
     expect(vars).not.toHaveProperty("ANTHROPIC_API_KEY")
   })
 
-  test("defaults ANTHROPIC_SMALL_FAST_MODEL to claude-haiku-4-5 with presence-based guard", () => {
+  test("defaults ANTHROPIC_SMALL_FAST_MODEL to claude-sonnet-4-6 with presence-based guard", () => {
     const prior = process.env.ANTHROPIC_SMALL_FAST_MODEL
     delete process.env.ANTHROPIC_SMALL_FAST_MODEL
     try {
       const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
-      expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBe("claude-haiku-4-5")
+      expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBe("claude-sonnet-4-6")
     } finally {
       if (prior === undefined) delete process.env.ANTHROPIC_SMALL_FAST_MODEL
       else process.env.ANTHROPIC_SMALL_FAST_MODEL = prior
@@ -178,8 +178,9 @@ describe("getClaudeCodeEnvVars", () => {
   test("does NOT override a parent-set ANTHROPIC_SMALL_FAST_MODEL (presence guard preserves user's custom Copilot mapping)", () => {
     // Symmetric with launch.ts's STRIPPED_PARENT_ENV_KEYS comment that
     // intentionally does NOT strip ANTHROPIC_SMALL_FAST_MODEL — users
-    // with custom Copilot mappings legitimately set this to a non-haiku
-    // value (gemini-2.0-flash, gpt-5.5-mini, etc.).
+    // with custom Copilot mappings legitimately set this to a value
+    // other than our claude-sonnet-4-6 default (gemini-2.0-flash,
+    // gpt-5.5-mini, etc.).
     const prior = process.env.ANTHROPIC_SMALL_FAST_MODEL
     process.env.ANTHROPIC_SMALL_FAST_MODEL = "gemini-2.0-flash"
     try {
@@ -281,18 +282,19 @@ describe("getClaudeCodeEnvVars", () => {
     }
   })
 
-  test("defaults ANTHROPIC_DEFAULT_OPUS_MODEL to bare claude-opus-4-7 (NO [1m] — the active default's [1m] decoration lives on ANTHROPIC_MODEL via pickClaudeDefault, which is cap-aware)", () => {
+  test("defaults ANTHROPIC_DEFAULT_OPUS_MODEL to bare claude-opus-4-8 (NO [1m] — the active default's [1m] decoration lives on ANTHROPIC_MODEL via pickClaudeDefault, which is cap-aware)", () => {
     // The picker-row tier default is the bare slug; the *active* default
     // (ANTHROPIC_MODEL) is cap-aware (pickClaudeDefault adds [1m] only
-    // when the catalog actually has the 1M backend). Keeping the picker
-    // row bare lets the user manually flip to 1M via /model selection
-    // (Claude Code's picker shows "opus[1m]" as a separate entry — see
-    // cc-backup aliases.ts MODEL_ALIASES).
+    // when the catalog actually signals 1M capability — either via a
+    // sibling -1m slug or via base-slug max_context_window_tokens).
+    // Keeping the picker row bare lets the user manually flip to 1M via
+    // /model selection (Claude Code's picker shows "opus[1m]" as a
+    // separate entry — see cc-backup aliases.ts MODEL_ALIASES).
     const prior = process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
     delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
     try {
       const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
-      expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-4-7")
+      expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-4-8")
       expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).not.toContain("[1m]")
     } finally {
       if (prior === undefined) delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL

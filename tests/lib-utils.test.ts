@@ -34,9 +34,9 @@ test("DEFAULT_CODEX_MODEL matches Copilot API format", () => {
 test("DEFAULT_CLAUDE_MODEL is the Anthropic-published dashed slug", () => {
   // Anthropic slug is what Claude Code's `/model` UI registry expects.
   // The proxy's `resolveModel` translates this to Copilot's
-  // `claude-opus-4.7-1m-internal` (enterprise) or `claude-opus-4.7`
-  // (Pro+/Business/Max) at request time.
-  expect(DEFAULT_CLAUDE_MODEL).toBe("claude-opus-4-7")
+  // `claude-opus-4.8` at request time (no -1m sibling on 4.8; the single
+  // base slug already advertises 1M context).
+  expect(DEFAULT_CLAUDE_MODEL).toBe("claude-opus-4-8")
 })
 
 test("DEFAULT_CLAUDE_MODEL_FALLBACKS lists older Opus versions (Anthropic slugs)", () => {
@@ -44,6 +44,7 @@ test("DEFAULT_CLAUDE_MODEL_FALLBACKS lists older Opus versions (Anthropic slugs)
   // 1M↔200K downgrade is handled inside the resolver, so we don't need
   // separate `-1m` entries here — only major.minor regressions.
   expect(Array.from(DEFAULT_CLAUDE_MODEL_FALLBACKS)).toEqual([
+    "claude-opus-4-7",
     "claude-opus-4-6",
     "claude-opus-4-5",
   ])
@@ -759,39 +760,51 @@ describe("pickClaudeDefault", () => {
     state.models = undefined
   })
 
-  test("returns claude-opus-4-7[1m] when catalog has opus-4.7-1m-internal (enterprise tier)", () => {
+  test("returns claude-opus-4-8[1m] when catalog base slug has max_context_window_tokens >= 1M (no sibling -1m needed)", () => {
+    // Reflects the live catalog as of 2026-06-04: claude-opus-4.8 ships
+    // as a single base slug whose capabilities.limits already advertises
+    // max_context_window_tokens: 1_000_000. There is NO sibling -1m
+    // entry. The dual-signal detector must flip [1m] on via the
+    // base-slug capability signal.
     state.models = {
       data: [
         {
-          id: "claude-opus-4.7-1m-internal",
+          id: "claude-opus-4.8",
           supported_endpoints: ["/v1/messages"],
+          capabilities: { limits: { max_context_window_tokens: 1_000_000 } },
         },
-        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
       ] as unknown as NonNullable<typeof state.models>["data"],
       object: "list",
     }
-    expect(pickClaudeDefault()).toBe("claude-opus-4-7[1m]")
+    expect(pickClaudeDefault()).toBe("claude-opus-4-8[1m]")
   })
 
-  test("returns claude-opus-4-7[1m] when catalog has opus-4-7-1m (dashed variant)", () => {
-    // Forward-compat: if Copilot ever switches to dashed slugs for the 1M
-    // variant, the detector must still fire (regex covers both /opus-4[.-]7-1m/).
+  test("returns claude-opus-4-8[1m] when catalog has hypothetical opus-4.8-1m sibling slug too", () => {
+    // Forward-compat: if Copilot ever ships a separate -1m sibling for 4.8,
+    // the sibling-slug signal still fires (regex match is independent of
+    // the base-slug capability check).
     state.models = {
       data: [
-        { id: "claude-opus-4-7-1m", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.8-1m", supported_endpoints: ["/v1/messages"] },
+        { id: "claude-opus-4.8", supported_endpoints: ["/v1/messages"] },
       ] as unknown as NonNullable<typeof state.models>["data"],
       object: "list",
     }
-    expect(pickClaudeDefault()).toBe("claude-opus-4-7[1m]")
+    expect(pickClaudeDefault()).toBe("claude-opus-4-8[1m]")
   })
 
-  test("returns bare claude-opus-4-7 when no 1M variant in catalog (non-enterprise tier)", () => {
-    // Pro+/Business/Max tier: only the 200K variant is present. Without
-    // cap-awareness, ANTHROPIC_MODEL=claude-opus-4-7[1m] would force Claude
-    // Code to over-account context while the proxy silently downgrades.
+  test("returns bare claude-opus-4-8 when no 1M signal fires (base slug 200K, no sibling)", () => {
+    // Pro-tier scenario: only the 200K variant is present and the base
+    // slug's max_context_window_tokens isn't 1M. Without cap-awareness,
+    // ANTHROPIC_MODEL=claude-opus-4-8[1m] would force Claude Code to
+    // over-account context while the proxy silently downgrades.
     state.models = {
       data: [
-        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+        {
+          id: "claude-opus-4.8",
+          supported_endpoints: ["/v1/messages"],
+          capabilities: { limits: { max_context_window_tokens: 200_000 } },
+        },
         { id: "claude-opus-4.6", supported_endpoints: ["/v1/messages"] },
       ] as unknown as NonNullable<typeof state.models>["data"],
       object: "list",
@@ -800,33 +813,40 @@ describe("pickClaudeDefault", () => {
     expect(pickClaudeDefault()).not.toContain("[1m]")
   })
 
-  test("returns bare claude-opus-4-7 when state.models is unset (pre-cacheModels safety)", () => {
+  test("returns bare claude-opus-4-8 when state.models is unset (pre-cacheModels safety)", () => {
     // If somehow pickClaudeDefault gets called before cacheModels populates
-    // state.models, default safe-side to the bare slug. Preserves the
-    // pre-change behavior exactly.
+    // state.models, default safe-side to the bare slug.
     state.models = undefined
     expect(pickClaudeDefault()).toBe(DEFAULT_CLAUDE_MODEL)
   })
 
-  test("does NOT false-positive on opus-4.6-1m (version-anchored to 4.7)", () => {
-    // The 1M detector matches /opus-4[.-]7-1m/, not generic /opus-.*-1m/.
-    // A future Copilot tier that has only the OLDER 4.6-1m must not flip
-    // the default — the default model is 4.7, and 4.7-1m specifically must
-    // be present to opt in.
+  test("does NOT false-positive on opus-4.7-1m-internal (version-anchored to 4.8)", () => {
+    // The 1M detector for the default family matches /opus-4[.-]8-1m/
+    // OR the 4.8 base slug's max_context_window_tokens. A 4.7 1M sibling
+    // (stand_in's pinned row) must NOT flip the 4.8 default's [1m]
+    // decoration, and the 4.8 base slug with no 1M signal must stay bare.
     state.models = {
       data: [
-        { id: "claude-opus-4.6-1m", supported_endpoints: ["/v1/messages"] },
-        { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+        {
+          id: "claude-opus-4.7-1m-internal",
+          supported_endpoints: ["/v1/messages"],
+        },
+        {
+          id: "claude-opus-4.8",
+          supported_endpoints: ["/v1/messages"],
+          capabilities: { limits: { max_context_window_tokens: 200_000 } },
+        },
       ] as unknown as NonNullable<typeof state.models>["data"],
       object: "list",
     }
     expect(pickClaudeDefault()).toBe(DEFAULT_CLAUDE_MODEL)
+    expect(pickClaudeDefault()).not.toContain("[1m]")
   })
 
   // --- Opus family shorthand (`-m 4.7` / `-m 4.6` / `-m 4.8`) ---
 
   test("pickClaudeDefault(\"4.7\") returns claude-opus-4-7[1m] when 1M variant present", () => {
-    // Explicit family request is equivalent to the no-arg default for the 4.7 case.
+    // Explicit family request still uses the sibling-slug signal.
     state.models = {
       data: [
         { id: "claude-opus-4.7-1m-internal", supported_endpoints: ["/v1/messages"] },
@@ -849,14 +869,34 @@ describe("pickClaudeDefault", () => {
     expect(pickClaudeDefault("4.6")).toBe("claude-opus-4-6[1m]")
   })
 
-  test("pickClaudeDefault(\"4.8\") returns bare claude-opus-4-8 (no 1M variant in catalog)", () => {
-    // Reflects the actual live catalog state as of 2026-05-29: Copilot ships
-    // `claude-opus-4.8` without `-high`, `-xhigh`, or `-1m` sibling slugs.
+  test("pickClaudeDefault(\"4.8\") returns claude-opus-4-8[1m] via base-slug capability signal", () => {
+    // The explicit-family path uses the same dual-signal detector.
     state.models = {
       data: [
-        { id: "claude-opus-4.8", supported_endpoints: ["/v1/messages"] },
+        {
+          id: "claude-opus-4.8",
+          supported_endpoints: ["/v1/messages"],
+          capabilities: { limits: { max_context_window_tokens: 1_000_000 } },
+        },
         { id: "claude-opus-4.7-1m-internal", supported_endpoints: ["/v1/messages"] },
         { id: "claude-opus-4.7", supported_endpoints: ["/v1/messages"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(pickClaudeDefault("4.8")).toBe("claude-opus-4-8[1m]")
+  })
+
+  test("pickClaudeDefault(\"4.8\") returns bare claude-opus-4-8 when no 1M signal fires", () => {
+    // Bare-slug branch: if a future Copilot tier ever ships claude-opus-4.8
+    // as 200K-only (no -1m sibling and base-slug capability also 200K),
+    // we must stay on the bare slug.
+    state.models = {
+      data: [
+        {
+          id: "claude-opus-4.8",
+          supported_endpoints: ["/v1/messages"],
+          capabilities: { limits: { max_context_window_tokens: 200_000 } },
+        },
       ] as unknown as NonNullable<typeof state.models>["data"],
       object: "list",
     }
@@ -874,14 +914,46 @@ describe("pickClaudeDefault", () => {
     expect(pickClaudeDefault("4.7")).toBe("claude-opus-4-7")
   })
 
-  test("pickClaudeDefault accepts dashed family form (\"4-8\") as a convenience", () => {
+  test("base-slug 1M detection is NOT order-dependent when dotted + dashed aliases coexist", () => {
+    // Defensive: if the catalog ever lists both `claude-opus-4.8` (200K)
+    // and `claude-opus-4-8` (1M-capable) — or vice versa — the picker
+    // must consider ALL base-slug matches, not just the first. The
+    // .reduce(max(...)) form makes the result deterministic regardless
+    // of catalog ordering. Today Copilot only ships dotted slugs, but
+    // defending here keeps the detector robust against future drift.
     state.models = {
       data: [
-        { id: "claude-opus-4.8", supported_endpoints: ["/v1/messages"] },
+        // dotted alias first, advertised as 200K
+        {
+          id: "claude-opus-4.8",
+          supported_endpoints: ["/v1/messages"],
+          capabilities: { limits: { max_context_window_tokens: 200_000 } },
+        },
+        // dashed alias second, advertised as 1M — would have been missed
+        // by find()-then-check; reduce(max()) sees both.
+        {
+          id: "claude-opus-4-8",
+          supported_endpoints: ["/v1/messages"],
+          capabilities: { limits: { max_context_window_tokens: 1_000_000 } },
+        },
       ] as unknown as NonNullable<typeof state.models>["data"],
       object: "list",
     }
-    expect(pickClaudeDefault("4-8")).toBe("claude-opus-4-8")
+    expect(pickClaudeDefault("4.8")).toBe("claude-opus-4-8[1m]")
+  })
+
+  test("pickClaudeDefault accepts dashed family form (\"4-8\") as a convenience", () => {
+    state.models = {
+      data: [
+        {
+          id: "claude-opus-4.8",
+          supported_endpoints: ["/v1/messages"],
+          capabilities: { limits: { max_context_window_tokens: 1_000_000 } },
+        },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(pickClaudeDefault("4-8")).toBe("claude-opus-4-8[1m]")
   })
 
   test("pickClaudeDefault warns when requested family is completely absent from catalog", () => {

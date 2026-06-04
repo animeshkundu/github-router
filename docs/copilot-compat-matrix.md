@@ -102,7 +102,7 @@ The proxy filters via `filterBetaHeader` in `src/lib/utils.ts`. Two lists:
 | `oauth-` | ✅ 200 | claude-emits | (TODO) | Files-API path header |
 | `memory-2025-08-18` | ✅ 200 | anthropic-docs | `tooltype_memory_20250818` | Required for `memory_20250818` tool; verified live |
 | `advisor-tool-` | ❌ 400 (proxy strips) | claude-emits | (TODO) | Copilot 400s `unsupported beta header(s): advisor-tool-2026-03-01`; proxy strips header AND injects synthetic advisor flow server-side per `src/services/advisor/advisor.ts` |
-| `context-1m-` | ❌ 400 (not in allowlist) | anthropic-docs | (TODO) | 1M context unlocked via model id `claude-opus-4.7-1m-internal`, not header |
+| `context-1m-` | ❌ 400 (not in allowlist) | anthropic-docs | (TODO) | 1M context unlocked via 1M-capable model ids (`claude-opus-4.8`, `claude-opus-4.7-1m-internal`, `claude-opus-4.6-1m`), not header |
 | `skills-` | ❌ 400 (not in allowlist) | anthropic-docs | (TODO) | Anthropic Skills API not supported by Copilot |
 | `files-api-` | ❌ 400 (not in allowlist) | anthropic-docs | (TODO) | Files API not supported by Copilot — see CLAUDE.md "Unsupported features" |
 | `code-execution-` | ❌ 400 (not in allowlist) | anthropic-docs | (TODO) | Matches `code_execution_20250825` tool rejection |
@@ -112,9 +112,10 @@ The proxy filters via `filterBetaHeader` in `src/lib/utils.ts`. Two lists:
 
 | Model id | End-to-end status | Source | Probe id | Notes |
 |---|---|---|---|---|
+| `claude-opus-4-8` (Anthropic dashed slug, default) | ✅ 200 (proxy resolves) | claude-emits | (used by every claude probe) | Translates to `claude-opus-4.8` (single base slug already advertises 1M context) |
 | `claude-opus-4-7` (Anthropic dashed slug) | ✅ 200 (proxy resolves) | claude-emits | (used by every claude probe) | Translates to `claude-opus-4.7-1m-internal` (enterprise) or `claude-opus-4.7` (Pro+) |
-| `claude-haiku-4-5` | ✅ 200 (proxy resolves) | claude-emits | (used by baseline probes) | Default `ANTHROPIC_SMALL_FAST_MODEL` |
-| `claude-sonnet-4-6` | (untested) | anthropic-docs | (TODO) | Add probe |
+| `claude-haiku-4-5` | ✅ 200 (proxy resolves) | claude-emits | (used by baseline probes) | `ANTHROPIC_DEFAULT_HAIKU_MODEL` (/model picker Haiku tier) + request-shape probe carrier |
+| `claude-sonnet-4-6` | ✅ 200 (proxy resolves) | claude-emits | smallfast_sonnet_baseline | Default `ANTHROPIC_SMALL_FAST_MODEL` (emitted every session for background ops) + `ANTHROPIC_DEFAULT_SONNET_MODEL` picker tier |
 | `gpt-5.5` | (untested via this matrix — covered by codex-critic peer-MCP) | codex-emits | (TODO) | `/v1/responses` |
 | `gpt-5.3-codex` | (untested via this matrix) | codex-emits | (TODO) | `/v1/responses` |
 | `gemini-3.1-pro-preview` | (untested via this matrix) | exploratory | (TODO) | `/v1/chat/completions` |

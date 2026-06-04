@@ -48,10 +48,11 @@ import { runStandIn, type StandInInput } from "~/lib/stand-in"
  * **xhigh on long-running personas works via SSE-streamed /mcp responses**
  * (handler.ts:handleToolsCallSSE). Claude Code's MCP HTTP client honors
  * `text/event-stream` responses without applying the ~60s per-tool-call
- * timer that previously broke xhigh on gpt-5.5 (~56s wall) and
- * claude-opus-4-7 (high+ thinking budgets). All four personas now expose
- * all four effort tiers with `high` default; SSE handles the long tail
- * transparently to the user.
+ * timer that previously broke xhigh on gpt-5.5 (~56s wall) and on
+ * Anthropic Opus families (high+ thinking budgets). opus-critic itself
+ * now runs on claude-opus-4-6 which doesn't advertise xhigh, so the
+ * SSE long-tail concern there is moot; the SSE machinery still applies
+ * to the other personas that do expose xhigh.
  */
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh"] as const
 export type Effort = (typeof EFFORT_LEVELS)[number]
@@ -78,7 +79,7 @@ export interface PersonaSpec {
   /** True when the persona can mutate the workspace (only `codex-implementer`). */
   writeCapable: boolean
   /** True when the persona MUST use the HTTP backend (the codex-cli stdio
-   *  bridge can't run this model). gemini-3.x and claude-opus-4-7 both
+   *  bridge can't run this model). gemini-3.x and claude-opus-4-6 both
    *  set this — codex-cli only knows gpt-5/codex models. */
   requiresHttp: boolean
   /** True when the persona's model belongs to a model family that may not
@@ -263,21 +264,25 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
   {
     agentName: "opus-critic",
     toolNameHttp: "opus_critic",
-    model: "claude-opus-4-7",
+    model: "claude-opus-4-6",
     endpoint: "/v1/messages",
     description:
-      "Adversarial second opinion from a fresh-context Opus 4.7 — same lab as the lead, limited blind-spot diversity vs cross-lab critics. On enterprise catalogs that carry Opus-4.7-1M it runs with a ≈936K-token input window and handles large artifacts without decomposition; otherwise ≈168K. Fast (~22s), catches confabulation and motivated reasoning. Pass artifact verbatim.",
+      "Adversarial second opinion from a fresh-context Opus 4.6 — same lab as the lead, limited blind-spot diversity vs cross-lab critics. On enterprise catalogs that carry Opus-4.6-1M it runs with a ≈936K-token input window; otherwise ≈168K. Pinned one minor behind the default Opus so the panel spans more of the version curve. Catches confabulation. Pass artifact verbatim.",
     baseInstructions: OPUS_CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
-    // requiresHttp: true — codex-cli stdio bridge can't run claude-opus-4-7
+    // requiresHttp: true — codex-cli stdio bridge can't run claude-opus-4-6
     // (it speaks gpt-5/codex only), so opus-critic must always route via
     // HTTP. Distinct from requiresGeminiCatalog (which is false here —
-    // claude-opus-4-7 is always in Copilot's catalog for our supported
+    // claude-opus-4-6 is always in Copilot's catalog for our supported
     // tiers; we don't need a catalog probe to register the persona).
     requiresHttp: true,
-    allowedEfforts: ["low", "medium", "high", "xhigh"] as const,
-    defaultEffort: "xhigh",
+    // claude-opus-4.6 / claude-opus-4.6-1m only advertise reasoning_effort
+    // ["low", "medium", "high", "max"] — no xhigh. We omit xhigh from the
+    // allowlist so a caller-supplied "xhigh" rejects with a clean
+    // RPC_INVALID_PARAMS instead of bouncing off Copilot at request time.
+    allowedEfforts: ["low", "medium", "high"] as const,
+    defaultEffort: "high",
   },
 ])
 

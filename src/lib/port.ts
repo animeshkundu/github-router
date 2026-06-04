@@ -6,24 +6,23 @@ export const DEFAULT_PORT = 8787
 
 /**
  * Default model for `github-router claude`. The Anthropic-published dashed
- * slug (`claude-opus-4-7`) — NOT the Copilot-internal slug
- * (`claude-opus-4.7-1m-internal`) — because Claude Code 2.1.126's `/model`
- * UI is backed by a hardcoded registry of Anthropic slugs, and an
- * unrecognized slug causes the menu to highlight "Opus 4" with a
- * "Newer version available" hint instead of "Opus 4.7 (1M context)".
+ * slug (`claude-opus-4-8`) — NOT the Copilot-internal slug — because
+ * Claude Code's `/model` UI is backed by a hardcoded registry of Anthropic
+ * slugs, and an unrecognized slug causes the menu to highlight "Opus 4"
+ * with a "Newer version available" hint instead of selecting the newest
+ * Opus entry.
  *
  * The proxy's `resolveModel` (`src/lib/utils.ts`) translates this to
- * Copilot's `claude-opus-4.7-1m-internal` (enterprise) or
- * `claude-opus-4.7` (Pro+/Business/Max) at request time via the
- * family-preference + version-match branch — round-trip covered by
- * `tests/lib-utils.test.ts:154`.
+ * Copilot's `claude-opus-4.8` at request time via the family-preference
+ * + version-match branch.
  *
  * `DEFAULT_CLAUDE_MODEL_FALLBACKS` covers major.minor regressions only;
  * 1M↔200K downgrade is handled inside the resolver, so we don't need
  * separate `-1m` entries here.
  */
-export const DEFAULT_CLAUDE_MODEL = "claude-opus-4-7"
+export const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
 export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
+  "claude-opus-4-7",
   "claude-opus-4-6",
   "claude-opus-4-5",
 ] as const
@@ -31,11 +30,26 @@ export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
 /**
  * Cap-aware default picker for `ANTHROPIC_MODEL` on the implicit-default
  * path. Returns `claude-opus-${family}[1m]` when the live Copilot catalog
- * contains an `opus-${family}-1m*` variant (enterprise tier), else the
- * bare `claude-opus-${family}` slug. `family` defaults to `"4.7"` so the
- * no-arg call preserves the original behavior; explicit values like
- * `"4.6"` or `"4.8"` are used to honor the `github-router claude
- * -m <version>` family shorthand.
+ * shows the family is 1M-capable, else the bare `claude-opus-${family}`
+ * slug. `family` defaults to `"4.8"` so the no-arg call selects the
+ * current default; explicit values like `"4.7"` or `"4.6"` are used to
+ * honor the `github-router claude -m <version>` family shorthand.
+ *
+ * **Dual-signal 1M detection**. The Opus families have evolved different
+ * shapes in Copilot's catalog over time:
+ *   1. **Sibling-slug signal** — `opus-${family}-1m` (or `opus-${family}-1m-internal`)
+ *      exists as a separate catalog entry distinct from the base slug.
+ *      This is how 4.6 and 4.7 ship (`claude-opus-4.6-1m`,
+ *      `claude-opus-4.7-1m-internal`). Matched by the version-anchored
+ *      regex below.
+ *   2. **Base-slug capability signal** — the catalog entry whose id IS
+ *      the base `opus-${family}` slug advertises
+ *      `capabilities.limits.max_context_window_tokens >= 1_000_000`. This
+ *      is how 4.8 ships — there is no `-1m` sibling; the single
+ *      `claude-opus-4.8` id is the 1M variant.
+ * Either signal flips on the `[1m]` decoration. Both signals together
+ * also flip it on (no double-counting). The breadcrumb log names which
+ * signal fired so users can spot catalog shape changes.
  *
  * The `[1m]` literal-bracket suffix is Claude Code's local 1M-context
  * unlock — cc-backup `src/utils/context.ts:35-40` matches `/\[1m\]/i`
@@ -45,14 +59,14 @@ export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
  * proxy routes the underlying request.
  *
  * Cap-awareness matters because on non-enterprise Copilot tiers there
- * is no `-1m` opus backend; sending `[1m]` there would either 400 at
+ * is no 1M opus backend; sending `[1m]` there would either 400 at
  * Copilot or (with `resolveModel`'s graceful-degrade) silently
  * downgrade upstream while Claude Code still over-accounts context.
  * This helper detects the catalog state at launch and only opts in
  * when the backend can actually serve 1M.
  *
  * Sonnet/Haiku families are intentionally NOT given `[1m]` defaults
- * because Copilot has no `-1m` backend for them (and Anthropic-side
+ * because Copilot has no 1M backend for them (and Anthropic-side
  * `modelSupports1M` doesn't list haiku at all). See
  * `src/lib/server-setup.ts:getClaudeCodeEnvVars` for the
  * `ANTHROPIC_DEFAULT_{SONNET,HAIKU,OPUS}_MODEL` tier defaults.
@@ -62,10 +76,12 @@ export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
  * can't tell the difference between "no catalog yet" and "no 1M
  * variant" — defaulting safe-side preserves the pre-change behavior).
  */
-const DEFAULT_OPUS_FAMILY = "4.7"
+const DEFAULT_OPUS_FAMILY = "4.8"
+
+const ONE_M_TOKENS = 1_000_000
 
 export function pickClaudeDefault(opusFamily: string = DEFAULT_OPUS_FAMILY): string {
-  // Canonicalize the family to dotted form so both "4.7" and "4-7" work
+  // Canonicalize the family to dotted form so both "4.8" and "4-8" work
   // as input, then derive the dashed Anthropic slug and a regex that
   // tolerates either separator in catalog ids (Copilot uses dotted,
   // some test fixtures use dashed).
@@ -74,10 +90,25 @@ export function pickClaudeDefault(opusFamily: string = DEFAULT_OPUS_FAMILY): str
   const bareSlug = `claude-opus-${dashed}`
   const versionPattern = dotted.replace(/\./g, "[.-]")
   const oneMRegex = new RegExp(`opus-${versionPattern}-1m(?:$|-)`, "i")
+  const baseSlugRegex = new RegExp(`^claude-opus-${versionPattern}$`, "i")
   const familyRegex = new RegExp(`opus-${versionPattern}(?:$|[-.])`, "i")
 
   const models = state.models?.data ?? []
-  const has1m = models.some((m) => oneMRegex.test(m.id))
+  const siblingOneM = models.some((m) => oneMRegex.test(m.id))
+  // Scan ALL entries whose id matches the base slug (dotted or dashed form)
+  // and take the max of their advertised context windows. Using find()
+  // would be order-dependent if both dotted and dashed aliases ever coexist
+  // — the live Copilot catalog only ships dotted today, but defending here
+  // keeps the detector robust against future catalog shape drift.
+  const baseSlugMaxContext = models.reduce(
+    (max, m) =>
+      baseSlugRegex.test(m.id)
+        ? Math.max(max, m.capabilities?.limits?.max_context_window_tokens ?? 0)
+        : max,
+    0,
+  )
+  const baseSlugOneM = baseSlugMaxContext >= ONE_M_TOKENS
+  const has1m = siblingOneM || baseSlugOneM
 
   // Warn when the user explicitly requested a family that's completely
   // absent from the catalog — `resolveModel`'s downstream cache-walk
@@ -95,8 +126,20 @@ export function pickClaudeDefault(opusFamily: string = DEFAULT_OPUS_FAMILY): str
   }
 
   if (has1m) {
+    const signal = siblingOneM
+      ? baseSlugOneM
+        ? "sibling-slug + base-slug 1M capability"
+        : `sibling slug opus-${dotted}-1m`
+      : `base slug ${bareSlug} (max_context_window_tokens=${baseSlugMaxContext})`
+    // Only mention --model pin-to-200K when a real 200K variant exists in
+    // the catalog (i.e., a sibling -1m slug means the bare slug is 200K).
+    // For 4.8-shaped families (single slug already 1M, no sibling), the
+    // bare slug is the 1M backend — there is no 200K alternative to pin.
+    const pinHint = siblingOneM
+      ? ` Pass --model ${bareSlug} to pin 200K.`
+      : ` (No separate 200K variant of ${dotted} exists in the catalog — the bare slug IS the 1M backend.)`
     consola.info(
-      `Catalog contains opus-${dotted}-1m variant; defaulting ANTHROPIC_MODEL to "${bareSlug}[1m]" so Claude Code accounts for 1M context locally. Set CLAUDE_CODE_DISABLE_1M_CONTEXT=1 to opt out (HIPAA), or pass --model ${bareSlug} to pin 200K.`,
+      `Catalog signals opus-${dotted} is 1M-capable (${signal}); defaulting ANTHROPIC_MODEL to "${bareSlug}[1m]" so Claude Code accounts for 1M context locally. Set CLAUDE_CODE_DISABLE_1M_CONTEXT=1 to opt out (HIPAA).${pinHint}`,
     )
     return `${bareSlug}[1m]`
   }

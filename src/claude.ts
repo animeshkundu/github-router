@@ -213,7 +213,7 @@ export const claude = defineCommand({
 
     // Two slugs flow through this code:
     //   * `chosenSlug` — the value we set for `ANTHROPIC_MODEL`. Must be an
-    //     Anthropic-published slug (e.g. `claude-opus-4-7`) so Claude Code's
+    //     Anthropic-published slug (e.g. `claude-opus-4-8`) so Claude Code's
     //     hardcoded `/model` registry matches it and the UI shows the right
     //     menu entry. The proxy's resolver translates this back to a Copilot
     //     slug at request time, so the actual upstream call still works.

@@ -117,6 +117,13 @@ declare -a PROBE_REGISTRY=(
   # ===== Streaming =====
   "stream_with_tools|claude-emits|Streaming response with tools (no FGTS) returns 200 with valid SSE event sequence"
 
+  # ===== Default tier models (emitted by every claude session) =====
+  # claude-sonnet-4-6 is the ANTHROPIC_SMALL_FAST_MODEL default
+  # (getClaudeCodeEnvVars in src/lib/server-setup.ts) — Claude Code emits
+  # it for status text, auto-compact summaries, session titles, and other
+  # background ops on every session, so it must resolve+200 end-to-end.
+  "smallfast_sonnet_baseline|claude-emits|claude-sonnet-4-6 (ANTHROPIC_SMALL_FAST_MODEL default) resolves and returns 200 from /v1/messages"
+
   # ===== Peer-MCP personas (Phase B6 of cap-codex-effort-add-opus-critic) =====
   # Two probe shapes:
   #   - opus_critic_low / opus_critic_medium are END-TO-END LIVE PROBES against the
@@ -132,10 +139,10 @@ declare -a PROBE_REGISTRY=(
   #     call would require fishing the per-launch nonce out of
   #     ~/.local/share/github-router/.../peer-mcp-<pid>-<rand>.json — much
   #     more brittle than parsing one TS source line.
-  "opus_critic_low|anthropic-docs|opus_critic at effort=low equivalent (thinking.budget=1024, max_tokens=2524) returns 200 from /v1/messages"
-  "opus_critic_medium|anthropic-docs|opus_critic at effort=medium equivalent (thinking.budget=3000, max_tokens=4500) returns 200 from /v1/messages"
-  "opus_critic_high_allowed|proxy-internal|peer-mcp-personas.ts: opus-critic.allowedEfforts INCLUDES 'high' (post-SSE) — static check"
-  "opus_critic_xhigh_allowed|proxy-internal|peer-mcp-personas.ts: opus-critic.allowedEfforts INCLUDES 'xhigh' (post-SSE; xhigh is the default) — static check"
+  "opus_critic_low|anthropic-docs|opus_critic at effort=low equivalent (claude-opus-4-6, thinking.budget=1024, max_tokens=2524) returns 200 from /v1/messages"
+  "opus_critic_medium|anthropic-docs|opus_critic at effort=medium equivalent (claude-opus-4-6, thinking.budget=3000, max_tokens=4500) returns 200 from /v1/messages"
+  "opus_critic_high_allowed|proxy-internal|peer-mcp-personas.ts: opus-critic.allowedEfforts INCLUDES 'high' (default+deepest tier on claude-opus-4-6) — static check"
+  "opus_critic_xhigh_rejected|proxy-internal|peer-mcp-personas.ts: opus-critic.allowedEfforts EXCLUDES 'xhigh' (claude-opus-4-6 doesn't advertise xhigh) — static check"
   "codex_critic_xhigh_allowed|proxy-internal|peer-mcp-personas.ts: codex-critic.allowedEfforts INCLUDES 'xhigh' (post-SSE; xhigh is the default) — static check"
   "codex_reviewer_xhigh_allowed|proxy-internal|peer-mcp-personas.ts: codex-reviewer.allowedEfforts INCLUDES 'xhigh' (post-SSE; xhigh is the default) — static check"
   "gemini_critic_xhigh_rejected|proxy-internal|peer-mcp-personas.ts: gemini-critic.allowedEfforts EXCLUDES 'xhigh' (Copilot upstream-rejects) — static check"
@@ -513,9 +520,10 @@ assert_persona_includes_tier() {
 probe_opus_critic_low() {
   # End-to-end live probe. Mirrors the Anthropic body shape that the
   # /mcp /v1/messages branch builds for opus_critic at effort=low:
-  # budget_tokens=1024 → max_tokens=budget+1500=2524.
+  # budget_tokens=1024 → max_tokens=budget+1500=2524. opus_critic now
+  # runs on claude-opus-4-6 (resolves to claude-opus-4.6-1m when present).
   do_request POST /v1/messages '{
-    "model": "claude-opus-4-7",
+    "model": "claude-opus-4-6",
     "max_tokens": 2524,
     "system": "You are opus-critic.",
     "thinking": {"type": "enabled", "budget_tokens": 1024},
@@ -526,9 +534,9 @@ probe_opus_critic_low() {
 
 probe_opus_critic_medium() {
   # End-to-end live probe. effort=medium → budget_tokens=3000,
-  # max_tokens=4500. Same shape as opus_critic_low.
+  # max_tokens=4500. Same shape as opus_critic_low (claude-opus-4-6).
   do_request POST /v1/messages '{
-    "model": "claude-opus-4-7",
+    "model": "claude-opus-4-6",
     "max_tokens": 4500,
     "system": "You are opus-critic.",
     "thinking": {"type": "enabled", "budget_tokens": 3000},
@@ -541,19 +549,25 @@ probe_opus_critic_high_allowed() {
   # Static check: the opus-critic persona spec MUST include "high" in
   # allowedEfforts. SSE-streamed /mcp tools/call responses bypass Claude
   # Code's ~60s ceiling, so the prior low|medium-only constraint was
-  # lifted in PR #28 (handler.ts:handleToolsCallSSE). Validates the
-  # SOURCE OF TRUTH (peer-mcp-personas.ts).
+  # lifted in PR #28 (handler.ts:handleToolsCallSSE). "high" is now the
+  # persona's DEFAULT effort (claude-opus-4-6 doesn't advertise xhigh, so
+  # high is the deepest tier it offers). Validates the SOURCE OF TRUTH
+  # (peer-mcp-personas.ts).
   assert_persona_includes_tier \
     "opus-critic" '"high"' \
-    "SSE bypasses the 60s ceiling so high-tier thinking budgets now fit transparently"
+    "high is opus-critic's default+deepest tier on claude-opus-4-6 (no xhigh advertised)"
 }
 
-probe_opus_critic_xhigh_allowed() {
-  # Same as above for xhigh — opus_critic now exposes the deepest tier
-  # (default since the recent commit raising defaults).
-  assert_persona_includes_tier \
+probe_opus_critic_xhigh_rejected() {
+  # Static check: opus-critic moved to claude-opus-4-6, whose catalog entry
+  # advertises reasoning_effort ["low","medium","high","max"] — NO xhigh.
+  # The persona spec MUST exclude "xhigh" from allowedEfforts so a
+  # caller-supplied xhigh rejects with -32602 at the /mcp boundary rather
+  # than bouncing off Copilot at request time. Validates the SOURCE OF
+  # TRUTH (peer-mcp-personas.ts). Mirrors gemini_critic_xhigh_rejected.
+  assert_persona_excludes_tier \
     "opus-critic" '"xhigh"' \
-    "SSE bypasses the 60s ceiling; xhigh is the persona's default since the defaults-to-xhigh change"
+    "claude-opus-4-6 does not advertise xhigh; the persona must not offer it"
 }
 
 probe_codex_critic_xhigh_allowed() {
@@ -584,6 +598,19 @@ probe_gemini_critic_xhigh_rejected() {
   assert_persona_excludes_tier \
     "gemini-critic" '"xhigh"' \
     "Copilot's gemini-3.x route 400s on xhigh; persona allowlist must reflect that"
+}
+
+probe_smallfast_sonnet_baseline() {
+  # End-to-end live probe. claude-sonnet-4-6 is the ANTHROPIC_SMALL_FAST_MODEL
+  # default injected by getClaudeCodeEnvVars — emitted on every claude
+  # session for background ops. resolveModel maps it to Copilot's
+  # claude-sonnet-4.6; Copilot must 200.
+  do_request POST /v1/messages '{
+    "model": "claude-sonnet-4-6",
+    "max_tokens": 16,
+    "messages": [{"role": "user", "content": "Reply with the single word: ok"}]
+  }'
+  assert_status 200
 }
 
 # ===========================================================================

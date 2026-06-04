@@ -122,7 +122,7 @@ When a client requests a model by name, the proxy resolves it against the cached
 2. **Case-insensitive match** -- e.g. `Claude-Sonnet-4` resolves to `claude-sonnet-4`
 3. **Normalized match** -- dots replaced with dashes, repeated dashes collapsed (e.g. `gpt5.3-codex` matches `gpt-5.3-codex`)
 4. **Family preference** -- shorthand names resolve to preferred variants:
-   - `opus` resolves to the latest `-1m` context variant (e.g. `claude-opus-4.7-1m-internal`); the resolver picks the 1M variant whose major.minor matches the request rather than the first `-1m` it finds
+   - `opus` resolves to the highest-version Opus available, preferring 1M-capable backends (e.g. `claude-opus-4.8` whose base slug already advertises 1M context; or `claude-opus-4.7-1m-internal` / `claude-opus-4.6-1m` where the `-1m` sibling carries the bigger window). The resolver picks the 1M variant whose major.minor matches the request rather than the first 1M backend it finds.
    - `codex` resolves to the highest-versioned non-mini codex model
 5. **Passthrough with warning** -- if no match is found, the original model ID is forwarded as-is and a warning is logged
 
@@ -130,7 +130,7 @@ The `resolveCodexModel()` variant extends this for the codex subcommand: if the 
 
 **Subcommand-level fallback chains** (`src/lib/port.ts`, `DEFAULT_CLAUDE_MODEL_FALLBACKS` and `DEFAULT_CODEX_MODEL_FALLBACKS`) layer on top of `resolveModel`/`resolveCodexModel` for the implicit-default path only. When the `claude` or `codex` subcommand is invoked without `-m`/`--model` and the default model isn't present in the resolved Copilot model list, the launcher walks the fallback list in order and uses the first entry whose resolver-translated slug is in the cache. Explicit `--model` is always respected as-is.
 
-Note that the `claude` chain uses **Anthropic-published dashed slugs** (`claude-opus-4-7`, not `claude-opus-4.7-1m-internal`) — `ANTHROPIC_MODEL` must hold a slug that Claude Code's `/model` UI registry recognizes, so the menu highlights the right entry. The proxy's resolver handles the dashed-Anthropic → dotted-Copilot translation on every `/v1/messages` request via the body rewrite at `src/routes/messages/handler.ts:326`. The `codex` chain uses Copilot slugs directly because Codex CLI's bundled catalog uses Copilot-style IDs.
+Note that the `claude` chain uses **Anthropic-published dashed slugs** (`claude-opus-4-8`, not `claude-opus-4.8`) — `ANTHROPIC_MODEL` must hold a slug that Claude Code's `/model` UI registry recognizes, so the menu highlights the right entry. The proxy's resolver handles the dashed-Anthropic → dotted-Copilot translation on every `/v1/messages` request via the body rewrite at `src/routes/messages/handler.ts:326`. The `codex` chain uses Copilot slugs directly because Codex CLI's bundled catalog uses Copilot-style IDs.
 
 Resolution is implemented in `src/lib/utils.ts` and invoked by both the subcommand startup logic and the messages route handler.
 
@@ -159,7 +159,7 @@ Each subcommand sets environment variables so the child process uses the proxy:
 **claude** (`src/claude.ts`):
 - `ANTHROPIC_BASE_URL` = `<serverUrl>`
 - `ANTHROPIC_AUTH_TOKEN` = `dummy`
-- `ANTHROPIC_MODEL` = Anthropic-published dashed slug (defaults to `claude-opus-4-7` or first available fallback). NOT the Copilot-internal slug — see "Subcommand-level fallback chains" in §"Model Resolution" for why
+- `ANTHROPIC_MODEL` = Anthropic-published dashed slug (defaults to `claude-opus-4-8` or first available fallback). NOT the Copilot-internal slug — see "Subcommand-level fallback chains" in §"Model Resolution" for why
 - `CLAUDE_CONFIG_DIR` = `$HOME/.claude` (activates per-config-dir keychain isolation; see CLAUDE.md "Spawned-CLI auth isolation")
 - `DISABLE_NON_ESSENTIAL_MODEL_CALLS` = `1`
 - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` = `1`
@@ -171,7 +171,7 @@ Each subcommand sets environment variables so the child process uses the proxy:
 | Subcommand | Primary endpoint | Default model (env-var slug) | Fallback chain |
 |---|---|---|---|
 | `codex` | `/v1/responses` | `gpt-5.5` | `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex` |
-| `claude` | `/v1/messages` | `claude-opus-4-7` (Anthropic dashed slug; resolver maps to Copilot's `-1m-internal` on enterprise or `claude-opus-4.7` on Pro+) | `claude-opus-4-6` → `claude-opus-4-5` |
+| `claude` | `/v1/messages` | `claude-opus-4-8` (Anthropic dashed slug; resolver maps to Copilot's `claude-opus-4.8` — the single base slug already advertises 1M context) | `claude-opus-4-7` → `claude-opus-4-6` → `claude-opus-4-5` |
 
 ## Authentication Flow
 

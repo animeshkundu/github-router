@@ -87,6 +87,8 @@
     "claude-opus-4-7 (Anthropic dashed)": "→ claude-opus-4.7-1m-internal (family preference picks 1M variant matching version)",
     "claude-opus-4.7 (Copilot exact)": "→ claude-opus-4.7 (Step 1 exact match; no auto-upgrade)",
     "claude-opus-4-7-20260101 (dated)": "→ claude-opus-4.7-1m-internal (Step 5 dated-retry → Step 3 family pref)",
+    "claude-opus-4-8 (Anthropic dashed; default)": "→ claude-opus-4.8 (no -1m sibling exists for 4.8; base slug already advertises max_context_window_tokens=1M)",
+    "claude-opus-4-6 (Anthropic dashed; opus_critic)": "→ claude-opus-4.6-1m (family preference picks 1M variant matching version)",
     "claude-haiku-4-5-20251001 (dated, Phase A pre-existing)": "→ claude-haiku-4.5 (Step 5 dated-retry → Step 4 normalized)",
     "claude-3-7-sonnet-20250219 (legacy Sonnet 3.7)": "→ claude-sonnet-4.6 (Phase A P0.4 Step 6 legacy fallback). Was: Copilot 400 'model not supported'.",
     "claude-sonnet-4-0 (legacy Sonnet 4.0)": "→ claude-sonnet-4.6 (Phase A P0.4 Step 6 legacy fallback). Was: Copilot 400.",

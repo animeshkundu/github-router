@@ -259,17 +259,21 @@ function browserToolsEnabled(): boolean {
 }
 
 /**
- * The 1M-context Opus variant (`claude-opus-4.7-1m-internal`,
- * `max_prompt_tokens` 936K), gated `restricted_to: ["enterprise"]`.
- * opus_critic prefers it so it can take large artifacts in one shot
+ * The 1M-context Opus 4.6 variant (`claude-opus-4.6-1m`, `max_prompt_tokens`
+ * 936K). opus_critic prefers it so it can take large artifacts in one shot
  * (the whole point of pairing it with gpt-5.5 as the big-window peers);
- * falls back to the 200K `claude-opus-4-7` when the catalog (non-
- * enterprise) doesn't carry a 1M opus slug.
+ * falls back to the 200K `claude-opus-4-6` when the catalog doesn't carry
+ * a 1M 4.6 slug. The regex is version-anchored to 4.6 AND requires a
+ * `-1m` suffix boundary (not a permissive `.*1m`), so it does NOT
+ * false-positive on `claude-opus-4.7-1m-internal` (stand_in's pinned
+ * 4.7 row), `claude-opus-4.6-1max` (hypothetical), or `claude-opus-4.8`
+ * (1M-without-sibling). Tolerates dotted (`opus-4.6-1m`) and dashed
+ * (`opus-4-6-1m`) catalog separators.
  */
-const OPUS_1M_RE = /opus-4\.7.*1m/i
+const OPUS_1M_RE = /opus-4[.-]6-1m(?:$|-)/i
 function resolveOpusCriticModel(): string {
   const oneM = state.models?.data?.find((m) => OPUS_1M_RE.test(m.id))
-  return oneM ? oneM.id : "claude-opus-4-7"
+  return oneM ? oneM.id : "claude-opus-4-6"
 }
 
 function activePersonas(): Array<PersonaSpec> {
@@ -445,6 +449,8 @@ function toolError(message: string): ToolErrorContent {
  *   gpt-5.3-codex high on ~600B = 16.0s → ~64s on 12KB
  *   claude-opus-4-7 medium (thinking=3000) on a trivial prompt = 22.5s
  *     but model self-paces budget → ~50s+ on a real ~6KB review
+ *     (still applicable to stand_in's 4.7 row; opus_critic now runs on
+ *     4.6 with similar empirical shape)
  *
  * Returns `{tooLong: true, capBytes}` when the (persona, effort, briefBytes)
  * tuple is empirically predicted to bust the 60s ceiling.
@@ -724,7 +730,8 @@ export async function dispatchModelCall(args: {
   }
 
   if (args.endpoint === "/v1/messages") {
-    // claude-opus-4-7 path. Copilot's adaptive-thinking models reject
+    // claude-opus-4-* path (4.6 for opus_critic, 4.7 for stand_in,
+    // 4.8 for ad-hoc). Copilot's adaptive-thinking models reject
     // Anthropic's standard `thinking: {type:"enabled", budget_tokens:N}`
     // shape with HTTP 400: "thinking.type.enabled is not supported for
     // this model. Use thinking.type.adaptive and output_config.effort".

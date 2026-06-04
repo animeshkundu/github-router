@@ -389,15 +389,22 @@ export function getClaudeCodeEnvVars(
 
   // Default the small/fast tier model (used by Claude Code for status
   // text, auto-compact summaries, session titles, background ops) to
-  // claude-haiku-4-5. Anthropic-published dashed slug; the proxy's
+  // claude-sonnet-4-6. Anthropic-published dashed slug; the proxy's
   // resolveModel translates to Copilot's dotted slug at request time.
+  // We deliberately pass Sonnet rather than Haiku here: on the canonical
+  // Copilot-Enterprise deployment the quality lift on background ops
+  // (compaction summaries, session titles) is worth more than Haiku's
+  // marginal latency/cost edge, and Copilot bills per-request by
+  // multiplier rather than per-token. The /model picker's Haiku tier row
+  // (ANTHROPIC_DEFAULT_HAIKU_MODEL below) stays claude-haiku-4-5 so users
+  // who explicitly want the cheap tier still get it.
   // Presence-based guard preserves any user-set value, including the
   // dated slug variant or a different family (gemini, gpt) for users
   // who have custom Copilot mappings — symmetric with the
   // ANTHROPIC_SMALL_FAST_MODEL pass-through documented in launch.ts's
   // STRIPPED_PARENT_ENV_KEYS comment.
   if (process.env.ANTHROPIC_SMALL_FAST_MODEL === undefined) {
-    vars.ANTHROPIC_SMALL_FAST_MODEL = "claude-haiku-4-5"
+    vars.ANTHROPIC_SMALL_FAST_MODEL = "claude-sonnet-4-6"
   }
 
   // Tier-default knobs read by Claude Code's /model picker (cc-backup
@@ -407,13 +414,17 @@ export function getClaudeCodeEnvVars(
   // to what Copilot has). Setting them seeds the three tier rows with
   // ids the proxy's resolveModel knows how to route.
   //
-  // Why NO [1m] suffix on Sonnet/Haiku: Copilot has no -1m backend for
-  // either family (only opus-4.7-1m-internal exists in the catalog as
-  // of 2026-05-22; Anthropic-side modelSupports1M in cc-backup
+  // Why NO [1m] suffix on Sonnet/Haiku: Copilot has no 1M backend for
+  // either family. Per the live catalog as of 2026-06-04: opus-4.6-1m
+  // (sibling-slug 1M), opus-4.7-1m-internal (sibling-slug 1M, enterprise),
+  // and opus-4.8 (base slug already 1M, no sibling) all exist; sonnet
+  // and haiku stay 200K. Anthropic-side modelSupports1M in cc-backup
   // context.ts:43-49 only lists sonnet-4* and opus-4-6 — haiku has no
-  // 1M variant on either side). The [1m] decoration for the *active*
+  // 1M variant on either side. The [1m] decoration for the *active*
   // default lives on ANTHROPIC_MODEL itself (see pickClaudeDefault in
-  // src/claude.ts) and is cap-aware against the live catalog.
+  // src/lib/port.ts) and is cap-aware against the live catalog via the
+  // dual-signal detector (sibling-slug regex OR base-slug
+  // max_context_window_tokens).
   //
   // Presence-based guard symmetric with the SMALL_FAST_MODEL guard
   // above — preserves any value (including 0/false/off/unrecognized)
@@ -425,7 +436,7 @@ export function getClaudeCodeEnvVars(
     vars.ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-haiku-4-5"
   }
   if (process.env.ANTHROPIC_DEFAULT_OPUS_MODEL === undefined) {
-    vars.ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-7"
+    vars.ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-8"
   }
 
   // Plan-mode (v2) Phase-2 "Plan" agent parallelism. Claude Code's
