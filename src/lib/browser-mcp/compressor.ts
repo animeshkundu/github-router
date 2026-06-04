@@ -25,6 +25,8 @@
 
 import consola from "consola"
 
+import { deterministicResolve } from "./matcher"
+import { parseIntent } from "./parse-intent"
 import { acquireInFlightSlot } from "~/lib/mcp-inflight"
 import { state } from "~/lib/state"
 import {
@@ -158,6 +160,27 @@ async function callCompressor(
 }
 
 /**
+ * Public re-export of `callCompressor` for sibling modules that need
+ * the same forced-tool-calling pipeline (slot acquisition, fallback-
+ * chain backend, code-fence stripping). Used by `observe.ts` to drive
+ * the natural-language describer through the same backend the matcher
+ * cascade escalates to, and by `decompose-planner.ts` for the
+ * fast-model compound-step replanner.
+ *
+ * Kept as a thin wrapper rather than re-exporting `callCompressor`
+ * directly so the underlying function can change signature without
+ * breaking the public surface.
+ */
+export async function callCompressorPublic(
+  systemPrompt: string,
+  userMessage: ChatCompletionsPayload["messages"][number]["content"],
+  tool: { name: string, description: string, parameters: Record<string, unknown> },
+  signal?: AbortSignal,
+): Promise<unknown> {
+  return callCompressor(systemPrompt, userMessage, tool, signal)
+}
+
+/**
  * Strip a single leading / trailing ``` (or ```json) code fence from a
  * model's free-form text reply so JSON.parse works. Idempotent on
  * fence-free input. Defensive against the failure mode caught in PR #55
@@ -176,32 +199,18 @@ function stripCodeFence(text: string): string {
 // Public helpers
 // ---------------------------------------------------------------------
 
-export interface SnapshotElement {
-  ref: string
-  role: string
-  name?: string
-  bbox: [number, number, number, number]
-}
-
-export interface VisualSurface {
-  ref: string
-  kind: "canvas" | "svg"
-  bbox: [number, number, number, number]
-}
-
-export interface PageSnapshot {
-  mode?: "summary" | "full"
-  text: string
-  elements: ReadonlyArray<SnapshotElement>
-  viewport: {
-    width: number
-    height: number
-    devicePixelRatio: number
-    scrollX: number
-    scrollY: number
-  }
-  visualSurfaces?: ReadonlyArray<VisualSurface>
-}
+// Snapshot shape lives in `./snapshot-types` so the deterministic
+// matcher cascade (Phase 2) can import it without pulling the inner-
+// LLM module in too. Re-exported here for callers that already import
+// from compressor (PR #55 surface) — moving the import path one file
+// over would churn every existing consumer for zero behavior change.
+export type {
+  PageSnapshot,
+  SnapshotElement,
+  SnapshotTruncation,
+  VisualSurface,
+} from "./snapshot-types"
+import type { PageSnapshot, VisualSurface } from "./snapshot-types"
 
 export interface PickedAction {
   ref: string
@@ -219,6 +228,16 @@ export interface PickedAction {
  * whether the intent supplied a value. Single source of truth for
  * element matching.
  *
+ * Phase 2 short-circuits the common case through the deterministic
+ * matcher cascade in `./matcher.ts` — pure-sync, no LLM round-trip,
+ * <5ms on a 200-element snapshot. Only when the cascade returns
+ * `source: "escalate"` (0 candidates or >1 ambiguous candidates) do
+ * we fall through to the existing fast-model `pickMatchingElements`
+ * path. When we DO escalate, we pass the cascade's pre-filtered
+ * top-K shortlist along so the fast model sees ~8 candidates instead
+ * of the full 200-element snapshot — 3-5× token-cost reduction even
+ * on misses.
+ *
  * Returns ref="" + confidence=0 when no element matches — caller
  * should escalate to visual fallback (when `visualSurfaces` is
  * present) or surface the miss to the lead model.
@@ -229,7 +248,22 @@ export async function pickElement(
   signal?: AbortSignal,
   value?: string,
 ): Promise<PickedAction> {
-  const matches = await pickMatchingElements(snapshot, intent, signal)
+  // Phase 2: try the deterministic cascade first.
+  const parsed = parseIntent(intent)
+  const det = deterministicResolve(snapshot, parsed, value)
+  if (det.source !== "escalate" && det.ref !== "") {
+    const out: PickedAction = {
+      ref: det.ref,
+      action: det.action,
+      confidence: det.confidence,
+    }
+    if (det.value !== undefined) out.value = det.value
+    return out
+  }
+  // Escalation: fast-model fallback. Pass the cascade's shortlist as
+  // a hint so the model has 8 candidates to choose from instead of
+  // the full snapshot.
+  const matches = await pickMatchingElements(snapshot, intent, signal, det.candidates)
   if (matches.length === 0) {
     return { ref: "", action: "click", confidence: 0 }
   }
@@ -315,13 +349,44 @@ export interface FindMatch {
  * Return up to 5 candidate matches for an intent. Used by
  * `browser_find` — the lead model gets a small ranked list rather than
  * a full element dump. Empty array when nothing matches.
+ *
+ * Phase 2 short-circuits via the deterministic matcher cascade when
+ * possible. When the cascade finds a single confident match, we
+ * synthesize a one-item `FindMatch[]` and skip the fast-model
+ * round-trip. When the cascade's `candidates` shortlist is passed in
+ * by `pickElement` (escalation path), we trim the snapshot to just
+ * those refs before sending to the fast model — keeps tokens down on
+ * misses too.
  */
 export async function pickMatchingElements(
   snapshot: PageSnapshot,
   intent: string,
   signal?: AbortSignal,
+  shortlist?: ReadonlyArray<{ ref: string }>,
 ): Promise<ReadonlyArray<FindMatch>> {
-  const trimmed = snapshot.elements.map((e) => ({
+  // Phase 2 short-circuit: when no shortlist was passed (we're called
+  // directly from browser_find, not as an escalation from pickElement),
+  // try the deterministic cascade first.
+  if (!shortlist) {
+    const parsed = parseIntent(intent)
+    const det = deterministicResolve(snapshot, parsed)
+    if (det.source !== "escalate" && det.ref !== "") {
+      const el = snapshot.elements.find((e) => e.ref === det.ref)
+      if (el) {
+        return [{ ref: det.ref, reason: `deterministic ${det.source}: ${det.reason}` }]
+      }
+    }
+    // Else: fall through to fast-model with the cascade's shortlist
+    // if it produced one, else the full element list.
+    shortlist = det.candidates
+  }
+  const refSet = shortlist && shortlist.length > 0
+    ? new Set(shortlist.map((s) => s.ref))
+    : undefined
+  const trimmedSource = refSet
+    ? snapshot.elements.filter((e) => refSet.has(e.ref))
+    : snapshot.elements
+  const trimmed = trimmedSource.map((e) => ({
     ref: e.ref,
     role: e.role,
     name: e.name,

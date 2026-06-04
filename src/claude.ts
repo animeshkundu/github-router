@@ -418,6 +418,7 @@ export const claude = defineCommand({
           workerToolsAvailable: workerToolsEnabled(),
           standInAvailable: standInToolEnabled(),
           browseAvailable: state.browseEnabled,
+          powerBrowseAvailable: state.powerBrowseEnabled,
         })
         extraArgs.push("--append-system-prompt", peerSnippet)
         // Ordering invariant: this MUST run AFTER ensureClaudeConfigMirror()

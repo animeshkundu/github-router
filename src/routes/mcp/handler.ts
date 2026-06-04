@@ -29,6 +29,7 @@ import {
 import { hasSupportedBrowserInstalled } from "~/lib/browser-mcp/browser-detect"
 import {
   browserCompoundToolsEnabled,
+  browserPowerToolsEnabled,
   standInToolEnabled,
   workerToolsEnabled,
 } from "~/lib/mcp-capabilities"
@@ -342,6 +343,10 @@ function toolEntries(): Array<ToolEntry> {
       // compressor backend in the catalog. Without browseEnabled the
       // compound tools must be invisible alongside the L0/L1 primitives.
       if (t.capability === "browser_compound") return browserToolsEnabled() && browserCompoundToolsEnabled()
+      // Power tools require BOTH the browser surface opt-in AND the
+      // --power-browse flag. Default --browse mode hides them so the
+      // lead model sees only the 6 intent-driven tools.
+      if (t.capability === "browser_power") return browserToolsEnabled() && browserPowerToolsEnabled()
       return true
     },
   ).map(
@@ -903,6 +908,17 @@ async function handleToolsCall(
     nonPersonaTool
     && nonPersonaTool.capability === "browser_compound"
     && !(browserToolsEnabled() && browserCompoundToolsEnabled())
+  ) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+  if (
+    nonPersonaTool
+    && nonPersonaTool.capability === "browser_power"
+    && !(browserToolsEnabled() && browserPowerToolsEnabled())
   ) {
     return rpcError(
       body.id,

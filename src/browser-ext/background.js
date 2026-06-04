@@ -20,6 +20,15 @@
 
 const NATIVE_HOST_NAME = "com.githubrouter.browser"
 
+// Snapshot cache + invalidation lives in a sibling module so the
+// matcher-cascade work in Phase 2 can consume it without dragging in
+// the entire 1700-line background.js dispatcher.
+import {
+  captureSnapshot,
+  invalidateSnapshot,
+} from "./snapshot.js"
+import { extractSnapshotCDP } from "./snapshot-cdp.js"
+
 // ---------------------------------------------------------------------
 // Navigation policy — URL patterns this extension blocks at
 // webNavigation.onBeforeNavigate. This list is INTENTIONALLY NARROWER
@@ -185,6 +194,40 @@ async function toolReadPage(args) {
   const tabId = typeof args.tabId === "number" ? args.tabId : undefined
   if (!tabId) throw new Error("browser_read_page: tabId is required")
   const mode = args.mode === "full" ? "full" : "summary"
+  const refresh = args.refresh === true
+  // Phase 1c-CDP: try the CDP `Accessibility.getFullAXTree`-based
+  // extractor first. Better cross-origin iframe coverage, real
+  // platform-computed accessible names, AX-tree-flagged hidden /
+  // disabled state. Falls back to the legacy DOM walker when CDP
+  // attach fails (enterprise DeveloperToolsAvailability=2, DevTools
+  // already open on the tab, sandbox restriction). The fallback path
+  // produces a strict-subset shape so consumers don't have to branch.
+  const extractor = async (tId, ext) => {
+    try {
+      return await extractSnapshotCDP(tId, ext, {
+        attachDebugger: attachDebuggerOnce,
+        sendCommand: (id, method, params) => chrome.debugger.sendCommand({ tabId: id }, method, params),
+      })
+    } catch (err) {
+      const msg = err && err.message ? err.message : String(err)
+      console.warn(`[browser-mcp/snapshot] CDP extractor failed, falling back to legacy: ${msg}`)
+      return await extractSnapshotLegacy(tId, ext)
+    }
+  }
+  return captureSnapshot(tabId, { mode, refresh }, extractor)
+}
+
+/**
+ * Legacy `document.querySelectorAll`-based extractor. Stays as the
+ * default extractor until Phase 1b-CDP lands; will become the fallback
+ * path when CDP attach fails (enterprise policy, DevTools open on the
+ * tab, etc.). The implementation runs in the page world via
+ * chrome.scripting.executeScript and returns a PageSnapshot-shaped
+ * object that snapshot.captureSnapshot caches and returns to the
+ * caller.
+ */
+async function extractSnapshotLegacy(tabId, opts) {
+  const mode = opts?.mode === "full" ? "full" : "summary"
   const [result] = await chrome.scripting.executeScript({
     target: { tabId },
     func: (mode) => {
@@ -303,6 +346,97 @@ async function toolReadPage(args) {
       // elements (a div with role="button" but no aria-label is noise).
       // Full mode: keep everything, model asked for it.
       const ELEMENT_CAP = 200
+      const LANDMARK_ROLES = new Set([
+        "dialog", "alertdialog", "region", "navigation", "main",
+        "form", "search", "complementary", "banner", "contentinfo",
+      ])
+      const LANDMARK_TAGS = new Set([
+        "dialog", "form", "nav", "main", "header", "footer", "aside", "section",
+      ])
+      // Pre-mint refs for landmark ancestors so child elements can
+      // cite parent refs without a second walk.
+      function landmarkRefsFor(el) {
+        const refs = []
+        let cur = el.parentElement
+        let depth = 0
+        while (cur && depth < 12 && refs.length < 4) {
+          const role = cur.getAttribute && cur.getAttribute("role")
+          const ctag = cur.tagName && cur.tagName.toLowerCase()
+          const isLandmark = (role && LANDMARK_ROLES.has(role)) || LANDMARK_TAGS.has(ctag)
+          if (isLandmark) {
+            let r = cur.getAttribute("data-gh-router-ref")
+            if (!r || !/^e\d+$/.test(r)) {
+              r = nextFreshRef()
+              cur.setAttribute("data-gh-router-ref", r)
+            }
+            refs.push(r)
+          }
+          cur = cur.parentElement
+          depth++
+        }
+        return refs
+      }
+      function stateFlagsFor(el, tag) {
+        const flags = {}
+        // disabled: prefer the property (more reliable than the attr
+        // for inputs / buttons; aria-disabled covers role=button divs).
+        if (el.disabled === true || el.getAttribute("aria-disabled") === "true") flags.disabled = true
+        if (el.checked === true) flags.checked = true
+        else if (el.indeterminate === true) flags.checked = "mixed"
+        else if (el.getAttribute("aria-checked") === "true") flags.checked = true
+        else if (el.getAttribute("aria-checked") === "mixed") flags.checked = "mixed"
+        const aria = (name) => el.getAttribute(name)
+        if (aria("aria-expanded") === "true") flags.expanded = true
+        else if (aria("aria-expanded") === "false") flags.expanded = false
+        if (el.selected === true || aria("aria-selected") === "true") flags.selected = true
+        if (aria("aria-pressed") === "true") flags.pressed = true
+        else if (aria("aria-pressed") === "false") flags.pressed = false
+        if (el.required === true || aria("aria-required") === "true") flags.required = true
+        if (el.readOnly === true || aria("aria-readonly") === "true") flags.readonly = true
+        if (aria("aria-invalid") === "true") flags.invalid = true
+        if (document.activeElement === el) flags.focused = true
+        // hidden: aria-hidden takes precedence; offsetParent === null
+        // covers display:none parents (NOT a reliable visibility check
+        // for fixed-position elements but a reasonable cheap signal).
+        if (aria("aria-hidden") === "true") flags.hidden = true
+        else if (tag !== "body" && el.offsetParent === null && getComputedStyle(el).position !== "fixed") {
+          flags.hidden = true
+        }
+        return flags
+      }
+      function inputExtrasFor(el, tag) {
+        const out = {}
+        if (tag === "input" || tag === "textarea" || tag === "select") {
+          const t = (el.type || "").toLowerCase()
+          if (t) out.inputType = t
+        }
+        const ph = el.placeholder || el.getAttribute("placeholder")
+        if (ph) out.placeholder = String(ph).slice(0, 200)
+        const ac = el.getAttribute("autocomplete")
+        if (ac) out.autocomplete = ac
+        // For inputs / textareas / select, value is the current user
+        // input. Bounded so a huge textarea doesn't bloat the snapshot.
+        if (typeof el.value === "string" && el.value.length > 0) {
+          out.value = el.value.slice(0, 200)
+        }
+        return out
+      }
+      function attrExtrasFor(el) {
+        // Surface raw attrs the matcher's L5 testid layer + L7 semantic
+        // heuristic want to see. Limited to a handful — we don't want
+        // to dump every attribute on every element.
+        const out = {}
+        const id = el.id
+        if (id) out.id = id
+        const testid = el.getAttribute("data-testid") || el.getAttribute("data-test-id")
+          || el.getAttribute("data-test") || el.getAttribute("data-qa")
+        if (testid) out.testid = testid
+        const nameAttr = el.getAttribute("name")
+        if (nameAttr) out.name_attr = nameAttr
+        const aria = el.getAttribute("aria-label")
+        if (aria) out.aria_label = aria
+        return out
+      }
       const elements = []
       for (const el of interactive) {
         if (elements.length >= ELEMENT_CAP) break
@@ -319,6 +453,7 @@ async function toolReadPage(args) {
         const entry = {
           ref,
           role: el.getAttribute("role") || tag,
+          tag,
           bbox: [
             Math.round(rect.x),
             Math.round(rect.y),
@@ -327,6 +462,25 @@ async function toolReadPage(args) {
           ],
         }
         if (name) entry.name = name
+        // Inline state flags onto the entry. Each is omitted when
+        // false / default per the snapshot-types contract.
+        const flags = stateFlagsFor(el, tag)
+        for (const k of Object.keys(flags)) entry[k] = flags[k]
+        // Input-shaped extras (placeholder / inputType / value /
+        // autocomplete) — only present for input-shaped elements.
+        const inExtras = inputExtrasFor(el, tag)
+        if (inExtras.inputType) entry.inputType = inExtras.inputType
+        if (inExtras.placeholder) entry.placeholder = inExtras.placeholder
+        if (inExtras.autocomplete) entry.autocomplete = inExtras.autocomplete
+        if (inExtras.value) entry.value = inExtras.value
+        // Raw attribute extras for L5 testid + L7 semantic layers.
+        // Stored on a single `attrs` object to keep the top-level
+        // shape stable.
+        const attrExtras = attrExtrasFor(el)
+        if (Object.keys(attrExtras).length > 0) entry.attrs = attrExtras
+        // Landmark ancestry — up to 4 deep, dialog / form / nav / etc.
+        const landmarks = landmarkRefsFor(el)
+        if (landmarks.length > 0) entry.landmarks = landmarks
         elements.push(entry)
       }
       // Text extraction.
@@ -397,7 +551,14 @@ async function toolReadPage(args) {
           ],
         })
       }
-      const out = { mode, text, elements, viewport }
+      const out = {
+        mode,
+        url: window.location.href,
+        title: document.title,
+        text,
+        elements,
+        viewport,
+      }
       if (visualSurfaces.length > 0) out.visualSurfaces = visualSurfaces
       return out
     },
@@ -1535,8 +1696,28 @@ async function attachDebuggerOnce(tabId, opts) {
       networkBuffers.set(tabId, [])
       await chrome.debugger.sendCommand({ tabId }, "Network.enable")
     }
+    // CDP a11y-tree extraction needs DOM + Page + Accessibility
+    // domains enabled. We track them in a single Set so a second
+    // captureSnapshot call on the same tab is a no-op.
+    if (opts?.accessibility && !axDomainsEnabledTabs.has(tabId)) {
+      axDomainsEnabledTabs.add(tabId)
+      try {
+        await chrome.debugger.sendCommand({ tabId }, "DOM.enable")
+        await chrome.debugger.sendCommand({ tabId }, "Page.enable")
+        await chrome.debugger.sendCommand({ tabId }, "Accessibility.enable")
+      } catch (err) {
+        // Roll back the tracking flag so the next call retries.
+        axDomainsEnabledTabs.delete(tabId)
+        throw err
+      }
+    }
   })
 }
+
+// Track which tabs have the CDP a11y domains enabled (DOM + Page +
+// Accessibility). Cleared on debugger.onDetach / tabs.onRemoved
+// alongside the other per-tab state.
+const axDomainsEnabledTabs = new Set()
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const tabId = source.tabId
@@ -1569,6 +1750,12 @@ chrome.debugger.onDetach.addListener((source) => {
     consoleBuffers.delete(source.tabId)
     networkBuffers.delete(source.tabId)
     tabInputLockTails.delete(source.tabId)
+    axDomainsEnabledTabs.delete(source.tabId)
+    // Snapshot cache: CDP-written refs survive a detach (they're DOM
+    // attributes, not CDP state), but bbox/AXNode IDs become unreliable
+    // because re-attach needs a fresh DOM.enable handshake. Safer to
+    // invalidate and re-capture on next read.
+    invalidateSnapshot(source.tabId, "debugger-detach")
   }
 })
 
@@ -1583,6 +1770,22 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   consoleBuffers.delete(tabId)
   networkBuffers.delete(tabId)
   tabInputLockTails.delete(tabId)
+  axDomainsEnabledTabs.delete(tabId)
+  invalidateSnapshot(tabId, "tab-closed")
+})
+
+// Snapshot cache invalidation on top-frame navigation. The legacy ref
+// scheme (data-gh-router-ref DOM attribute) does NOT survive a fresh
+// document load, so a stale snapshot would return refs that resolve
+// to nothing. Invalidate so the next read captures the new document.
+// We intentionally do NOT invalidate on child-frame navigations — a
+// click inside an iframe shouldn't bust the whole-tab snapshot. Phase
+// 1b-CDP will revisit this when cross-origin iframe ref attribution
+// changes the trade-off.
+chrome.webNavigation.onCommitted.addListener((details) => {
+  if (details.frameId === 0 && typeof details.tabId === "number") {
+    invalidateSnapshot(details.tabId, "navigation")
+  }
 })
 
 async function toolConsoleLogs(args) {
@@ -1607,6 +1810,128 @@ async function toolNetworkLog(args) {
   networkBuffers.set(tabId, [])
   return { entries: drained }
 }
+
+// ---------------------------------------------------------------------
+// Bot-challenge detection (Phase 4 auto-detect)
+// ---------------------------------------------------------------------
+// Listens to chrome.webRequest.onHeadersReceived for response-header
+// fingerprints of major bot-protection vendors. On match: post a
+// `__botDetected__` control frame to the bridge. The bridge tracks
+// which tabs are flagged and the proxy dispatcher consults that state
+// via /health to inject humanlike pacing for paced tabs.
+//
+// Signature confidence tiers:
+//   HIGH (per-vendor, single-hit enables): cf-ray + 403/503, x-dd-b,
+//     x-px-block, x-px-uuid, x-incapsula header on 403.
+//   MEDIUM (cookie / generic — deferred to v2): _abck=*~-1~ cookie,
+//     burst of 403/429 across 5 s window.
+//
+// False-positive guard: only fires when we actually own the
+// connection to the bridge (`nativePort` set). No phantom signals
+// during SW startup before the port opens.
+
+const BOT_DETECTION_VENDORS = {
+  cloudflare: (resp) => {
+    if (resp.statusCode !== 403 && resp.statusCode !== 503) return null
+    const cfRay = headerValue(resp.responseHeaders, "cf-ray")
+    return cfRay ? { signal: "cf-ray + " + resp.statusCode, evidence: cfRay.slice(0, 60) } : null
+  },
+  datadome: (resp) => {
+    const dd = headerValue(resp.responseHeaders, "x-dd-b")
+    return dd === "1" ? { signal: "x-dd-b=1", evidence: "" } : null
+  },
+  perimeterx: (resp) => {
+    if (headerValue(resp.responseHeaders, "x-px-block") === "1") {
+      return { signal: "x-px-block=1", evidence: "" }
+    }
+    const pxUuid = headerValue(resp.responseHeaders, "x-px-uuid")
+    if (pxUuid && (resp.statusCode === 403 || resp.statusCode === 429)) {
+      return { signal: "x-px-uuid + " + resp.statusCode, evidence: pxUuid.slice(0, 36) }
+    }
+    return null
+  },
+  imperva: (resp) => {
+    if (resp.statusCode !== 403) return null
+    const iinfo = headerValue(resp.responseHeaders, "x-iinfo")
+    return iinfo ? { signal: "x-iinfo + 403", evidence: iinfo.slice(0, 40) } : null
+  },
+}
+
+function headerValue(headers, name) {
+  if (!Array.isArray(headers)) return undefined
+  const lower = name.toLowerCase()
+  for (const h of headers) {
+    if (h.name && h.name.toLowerCase() === lower) return h.value
+  }
+  return undefined
+}
+
+// Per-tab deduplication: a single vendor's signature firing repeatedly
+// on a tab should emit ONE control frame, not one per response. Bridge
+// already de-dupes by tabId on its side; we de-dupe here too to keep
+// the wire quiet.
+const detectedVendorsByTab = new Map() // tabId -> Set<vendor>
+
+function emitBotDetected(tabId, vendor, signal, evidence) {
+  if (typeof tabId !== "number" || tabId < 0) return
+  if (!nativePort) return
+  let seen = detectedVendorsByTab.get(tabId)
+  if (!seen) {
+    seen = new Set()
+    detectedVendorsByTab.set(tabId, seen)
+  }
+  if (seen.has(vendor)) return
+  seen.add(vendor)
+  try {
+    nativePort.postMessage({
+      type: "__botDetected__",
+      tabId,
+      vendor,
+      signal,
+      evidence,
+      ts: Date.now(),
+    })
+  } catch (err) {
+    console.warn("[browser-bridge/bot-detect] post failed:", err)
+  }
+}
+
+// MAIN frame only — sub-resource 403s on tracking pixels are common
+// noise. Vendor blocks always land on the main document request.
+try {
+  chrome.webRequest.onHeadersReceived.addListener(
+    (details) => {
+      try {
+        for (const [vendor, probe] of Object.entries(BOT_DETECTION_VENDORS)) {
+          const hit = probe(details)
+          if (hit) {
+            emitBotDetected(details.tabId, vendor, hit.signal, hit.evidence)
+            break
+          }
+        }
+      } catch (err) {
+        console.warn("[browser-bridge/bot-detect] probe crashed:", err)
+      }
+    },
+    { urls: ["<all_urls>"], types: ["main_frame"] },
+    ["responseHeaders"],
+  )
+} catch (err) {
+  // webRequest permission may not be granted on some enterprise
+  // policies; auto-detect just no-ops in that case.
+  console.warn("[browser-bridge/bot-detect] webRequest listener registration failed:", err)
+}
+
+// Cleanup: clear vendor dedup state on navigation + tab close so a
+// new document gets a fresh detection window.
+chrome.webNavigation.onCommitted.addListener((details) => {
+  if (details.frameId === 0 && typeof details.tabId === "number") {
+    detectedVendorsByTab.delete(details.tabId)
+  }
+})
+chrome.tabs.onRemoved.addListener((tabId) => {
+  detectedVendorsByTab.delete(tabId)
+})
 
 const TOOL_HANDLERS = {
   __ping__: () => ({
@@ -1725,10 +2050,42 @@ async function handleBridgeRequest(req, port) {
   try {
     const data = await handler(req.args || {})
     port.postMessage({ id: req.id, ok: true, data })
+    // Snapshot cache invalidation for mutating actions. The matcher
+    // cascade (Phase 2) dispatches against cached snapshots; a
+    // successful click / fill / type / etc. likely changed the page,
+    // so the cached element list is stale. Invalidate by tabId from
+    // the request args; tools that don't carry a tabId (open_tab on
+    // create-path, list_tabs) are not page-mutating per-tab so they
+    // skip this.
+    if (MUTATES_PAGE.has(req.tool)) {
+      const tabId = typeof req.args?.tabId === "number" ? req.args.tabId : undefined
+      if (typeof tabId === "number") {
+        invalidateSnapshot(tabId, `mutation:${req.tool}`)
+      }
+    }
   } catch (err) {
     port.postMessage({ id: req.id, ok: false, error: err && err.message ? err.message : String(err) })
   }
 }
+
+// Tools whose successful execution likely mutates the page's DOM,
+// triggering snapshot-cache invalidation for the tabId in args. Kept
+// as a Set rather than per-tool flags so adding a new mutating tool
+// is one line. Conservative: tools listed here MAY not mutate (e.g.
+// click on a disabled button is a no-op); the cost of a spurious
+// invalidate is one extra capture on next read, vs the cost of a
+// stale snapshot which is silent dispatch against a vanished ref.
+const MUTATES_PAGE = new Set([
+  "browser_click",
+  "browser_fill",
+  "browser_type",
+  "browser_keyboard",
+  "browser_scroll",
+  "browser_mouse",
+  "browser_drag",
+  "browser_navigate",
+  "browser_eval_js",
+])
 
 chrome.runtime.onInstalled.addListener(() => {
   try { connectBridge() } catch (err) { console.warn("[browser-bridge] onInstalled connect failed:", err) }

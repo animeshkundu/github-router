@@ -26,7 +26,106 @@ import {
   ensureBridgeReady,
   installRequiredToolResult,
 } from "./install-check"
+import { interActionDelay } from "./humanlike"
 import { preflightUrlPolicy } from "./policy"
+import { state } from "~/lib/state"
+
+/**
+ * Tools whose dispatch counts as a mutating user action for pacing
+ * purposes. Read-only tools (list_tabs, screenshot, read_page,
+ * diagnostics, navigate-without-form-submit) skip the inter-action
+ * delay because they don't look like a human clicking around.
+ */
+const PACED_TOOLS = new Set([
+  "browser_click",
+  "browser_fill",
+  "browser_type",
+  "browser_keyboard",
+  "browser_scroll",
+  "browser_mouse",
+  "browser_drag",
+])
+
+let lastDispatchAt = 0
+// Cached snapshot of bridge-reported humanlike-tab state. Probed at
+// most once per HUMANLIKE_PROBE_INTERVAL_MS so we don't spam /health
+// on every tool dispatch.
+let humanlikeAutoCache: { fetchedAt: number, tabs: Set<number> } = {
+  fetchedAt: 0,
+  tabs: new Set(),
+}
+const HUMANLIKE_PROBE_INTERVAL_MS = 5_000
+
+async function isHumanlikeAutoOn(
+  tabId: number | undefined,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (state.humanlikeForce === "off") return false
+  if (typeof tabId !== "number") return false
+  const now = Date.now()
+  if (now - humanlikeAutoCache.fetchedAt > HUMANLIKE_PROBE_INTERVAL_MS) {
+    try {
+      const ready = await ensureBridgeReady()
+      if (ready.install_required) return false
+      const res = await fetch(`http://127.0.0.1:${ready.port}/health`, {
+        headers: { authorization: `Bearer ${ready.token}` },
+        signal,
+      })
+      if (res.ok) {
+        const body = await res.json() as { humanlike_tabs?: Array<{ tabId: number }> }
+        const tabs = new Set<number>()
+        for (const t of body.humanlike_tabs ?? []) {
+          if (typeof t.tabId === "number") tabs.add(t.tabId)
+        }
+        humanlikeAutoCache = { fetchedAt: now, tabs }
+      }
+    } catch {
+      // /health unreachable — keep stale cache, fail-closed-to-fast
+      // (no pacing). Better to be fast on transient errors than
+      // permanently slow on a flaky network.
+    }
+  }
+  return humanlikeAutoCache.tabs.has(tabId)
+}
+
+async function maybeInjectHumanlikeDelay(
+  tool: string,
+  signal?: AbortSignal,
+  tabId?: number,
+): Promise<void> {
+  if (!PACED_TOOLS.has(tool)) return
+  // Force-on > auto-detected per-tab > off.
+  let on = state.humanlikeForce === "on"
+  if (!on && state.humanlikeForce === "auto") {
+    on = await isHumanlikeAutoOn(tabId, signal)
+  }
+  if (!on) return
+  const target = interActionDelay()
+  const sinceLast = Date.now() - lastDispatchAt
+  const wait = Math.max(0, target - sinceLast)
+  if (wait > 0) {
+    await sleepAbortable(wait, signal)
+  }
+  lastDispatchAt = Date.now()
+}
+
+function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("aborted"))
+      return
+    }
+    const timer = setTimeout(() => {
+      if (signal) signal.removeEventListener("abort", onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(new Error("aborted"))
+    }
+    if (signal) signal.addEventListener("abort", onAbort, { once: true })
+  })
+}
 
 type ToolName =
   | "browser_list_tabs"
@@ -229,6 +328,17 @@ export async function dispatchBrowserTool(
   if (ready.install_required) {
     return installRequiredToolResult(ready)
   }
+  // Humanlike pacing: when state.humanlikeForce === "on" (--humanlike
+  // flag or GH_ROUTER_HUMANLIKE=1) AND this tool is a mutating action
+  // (click / fill / type / keyboard / scroll / mouse / drag), inject
+  // a Beta-distributed inter-action delay before the dispatch. When
+  // state.humanlikeForce === "auto" (default), consult the bridge
+  // /health endpoint for tabs flagged by extension-side bot-challenge
+  // detection (Cloudflare / Datadome / PerimeterX / Imperva headers)
+  // and inject the same delay only for those tabs. Cached probe is
+  // throttled to one /health call per 5 s.
+  const tabIdArg = typeof args.tabId === "number" ? args.tabId : undefined
+  await maybeInjectHumanlikeDelay(tool, signal, tabIdArg)
   const { defaultMs, maxMs } = pickTimeout(tool)
   const callerTimeout =
     typeof opts.timeoutMs === "number" && opts.timeoutMs > 0

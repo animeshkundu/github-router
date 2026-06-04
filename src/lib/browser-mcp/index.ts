@@ -8,6 +8,9 @@ import {
   pickMatchingElements,
   type PageSnapshot,
 } from "./compressor"
+import { decompose } from "./decompose"
+import { observePage } from "./observe"
+import { planCompoundReplan } from "./planner"
 
 import type { NonPersonaMcpTool } from "~/lib/peer-mcp-personas"
 
@@ -70,7 +73,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
       additionalProperties: false,
       properties: {},
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_list_tabs", args, signal)
     },
@@ -116,7 +119,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_close_tab", args, signal)
     },
@@ -187,7 +190,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_read_page", args, signal)
     },
@@ -241,7 +244,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_scroll", args, signal)
     },
@@ -262,7 +265,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_keyboard", args, signal)
     },
@@ -290,7 +293,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_wait", args, signal)
     },
@@ -315,7 +318,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_eval_js", args, signal)
     },
@@ -342,7 +345,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_download", args, signal)
     },
@@ -397,7 +400,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_mouse", args, signal)
     },
@@ -444,7 +447,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_drag", args, signal)
     },
@@ -469,7 +472,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       return dispatchBrowserTool("browser_type", args, signal)
     },
@@ -504,7 +507,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       const kind = args.kind === "network" ? "network" : "console"
       const tool = kind === "network" ? "browser_network_log" : "browser_console_logs"
@@ -561,7 +564,7 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         },
       },
     },
-    capability: "browser_compound",
+    capability: "browser_power",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       const tabId = typeof args.tabId === "number" ? args.tabId : undefined
       const intent = typeof args.intent === "string" ? args.intent : ""
@@ -623,51 +626,150 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
         const actionIn = typeof args.action === "string" ? args.action : "click"
         return dispatchActionByRef(tabId, refIn, actionIn, value, signal)
       }
-      // INTENT mode.
-      const snapshot = await fetchSnapshot(tabId, signal)
-      const picked = await pickElement(snapshot, intent!, signal, value)
-      if (!picked.ref || picked.confidence < 0.5) {
-        // No text-based match. Try visual fallback if a canvas / svg is in view.
-        const surfaces = snapshot.visualSurfaces
-        if (surfaces && surfaces.length > 0) {
-          const shotEnv = await dispatchBrowserTool("browser_screenshot", { tabId, format: "png" }, signal)
-          if (shotEnv.isError) {
-            return toolEnvelope({ ok: false, error: "no text match; screenshot for visual fallback failed", picked }, true)
-          }
-          const shotText = shotEnv.content?.[0]?.text
-          let shot: { contentType?: string; dataBase64?: string } = {}
-          try {
-            shot = shotText ? (JSON.parse(shotText) as typeof shot) : {}
-          } catch {
-            return toolEnvelope({ ok: false, error: "no text match; screenshot envelope unparseable" }, true)
-          }
-          if (!shot.contentType || !shot.dataBase64) {
-            return toolEnvelope({ ok: false, error: "no text match; screenshot envelope missing fields" }, true)
-          }
-          const visual = await pickElementVisual(shot.dataBase64, shot.contentType, intent!, surfaces, signal)
-          if (visual.confidence < 0.5) {
-            return toolEnvelope({ ok: false, error: "no element matched intent (text + visual)", picked, visual }, true)
-          }
-          // Coord click via browser_mouse.
-          const clickEnv = await dispatchBrowserTool(
-            "browser_mouse",
-            { tabId, action: "click", x: visual.x, y: visual.y, force: true },
-            signal,
-          )
-          if (clickEnv.isError) return clickEnv
-          return toolEnvelope({
-            ok: true,
-            action_taken: "click_visual",
-            x: visual.x,
-            y: visual.y,
-            confidence: visual.confidence,
-            reason: visual.reason,
-          })
-        }
-        return toolEnvelope({ ok: false, error: "no element matched intent", picked }, true)
+      // INTENT mode: decompose into atomic steps (login pattern,
+      // search-and-click pattern, conjunctions, or single-step
+      // fallback). Run each step through the matcher cascade
+      // sequentially; on the FIRST failure of a multi-step compound,
+      // surface the failed step's reason. (TODO: Phase 3c will
+      // escalate the whole compound to a fast-model planner once on
+      // failure rather than aborting at the first step.)
+      const decomposed = decompose(intent!, value)
+      if (decomposed.steps.length === 1) {
+        // Single step: behaves exactly like pre-decompose browser_act.
+        return runAtomicIntentStep(tabId, decomposed.steps[0].intent, decomposed.steps[0].value, signal)
       }
-      // Text-based match found. Dispatch.
-      return dispatchActionByRef(tabId, picked.ref, picked.action, picked.value ?? value, signal)
+      // Multi-step compound: dispatch each step sequentially. Refresh
+      // the snapshot between steps because each mutating action
+      // invalidates the cache (Phase 1b hook). Aggregate into one
+      // {ok, summary} envelope; lead model gets ONE response, not
+      // one per step. On failure of any step in a multi-step
+      // compound, escalate the WHOLE compound to the fast-model
+      // replanner ONCE (Phase 3c) — bounds worst-case cost to one
+      // fast-model call regardless of step count or compound depth.
+      const summaries: string[] = []
+      let navigated = false
+      const completedSteps: typeof decomposed.steps = []
+      for (let i = 0; i < decomposed.steps.length; i++) {
+        const step = decomposed.steps[i]
+        const env = await runAtomicIntentStep(tabId, step.intent, step.value, signal)
+        const stepText = env.content?.[0]?.text
+        let stepResult: Record<string, unknown> = {}
+        if (typeof stepText === "string") {
+          try { stepResult = JSON.parse(stepText) as Record<string, unknown> } catch { /* keep empty */ }
+        }
+        if (env.isError || stepResult.ok === false) {
+          // Phase 3c: planner replan. Fetch a fresh snapshot of the
+          // page state at the failure point, ask the fast model to
+          // produce a revised step list, dispatch each replanned
+          // step through the cascade. Strict cost cap: ONE planner
+          // call per compound, no recursion (the replanned-step
+          // failure path surfaces a clean error to the lead model).
+          try {
+            const failureReason = String(stepResult.error ?? "unknown")
+            const freshSnapshot = await fetchSnapshot(tabId, signal)
+            const replan = await planCompoundReplan({
+              originalIntent: intent!,
+              originalValue: value,
+              completedSteps,
+              failedStep: step,
+              failureReason,
+              snapshot: freshSnapshot,
+            }, signal)
+            if (replan.steps.length === 0) {
+              return toolEnvelope({
+                ok: false,
+                summary: `compound step ${i + 1}/${decomposed.steps.length} failed and planner declined: ${replan.reasoning || failureReason}`,
+                template: decomposed.template,
+                steps_completed: i,
+                failed_step: step.intent,
+                planner_reasoning: replan.reasoning,
+              }, true)
+            }
+            // Dispatch each replanned step. NO recursive replan on
+            // failure here — the lead model gets a clean error if
+            // the replan also fails.
+            const replanSummaries: string[] = []
+            for (let j = 0; j < replan.steps.length; j++) {
+              const rstep = replan.steps[j]
+              const renv = await runAtomicIntentStep(tabId, rstep.intent, rstep.value, signal)
+              const rtext = renv.content?.[0]?.text
+              let rresult: Record<string, unknown> = {}
+              if (typeof rtext === "string") {
+                try { rresult = JSON.parse(rtext) as Record<string, unknown> } catch { /* keep empty */ }
+              }
+              if (renv.isError || rresult.ok === false) {
+                return toolEnvelope({
+                  ok: false,
+                  summary: `compound failed at original step ${i + 1}, planner replan also failed at step ${j + 1}/${replan.steps.length}: ${String(rresult.error ?? "unknown")}`,
+                  template: decomposed.template,
+                  steps_completed: i,
+                  failed_step: rstep.intent,
+                  planner_reasoning: replan.reasoning,
+                }, true)
+              }
+              if (typeof rresult.action_taken === "string") {
+                replanSummaries.push(`${rresult.action_taken} (${rstep.intent})`)
+              }
+              if (rresult.navigated === true) navigated = true
+            }
+            return toolEnvelope({
+              ok: true,
+              summary: `compound recovered via planner (${replan.reasoning}): ${replanSummaries.join(" → ")}`,
+              template: decomposed.template,
+              steps_completed: i + replan.steps.length,
+              navigated,
+              planner_used: true,
+              planner_reasoning: replan.reasoning,
+            })
+          } catch (replanErr) {
+            return toolEnvelope({
+              ok: false,
+              summary: `compound step ${i + 1}/${decomposed.steps.length} failed; planner errored: ${replanErr instanceof Error ? replanErr.message : String(replanErr)}`,
+              template: decomposed.template,
+              steps_completed: i,
+              failed_step: step.intent,
+            }, true)
+          }
+        }
+        if (typeof stepResult.action_taken === "string") {
+          summaries.push(`${stepResult.action_taken} (${step.intent})`)
+        }
+        if (stepResult.navigated === true) navigated = true
+        completedSteps.push(step)
+      }
+      return toolEnvelope({
+        ok: true,
+        summary: decomposed.successSummary ?? summaries.join(" → "),
+        template: decomposed.template,
+        steps_completed: decomposed.steps.length,
+        navigated,
+      })
+    },
+  },
+  {
+    toolNameHttp: "browser_observe",
+    description:
+      "Get a natural-language description of the current page's user-actionable state — what forms, buttons, links, and content sections are visible — in 2-4 sentences. Optional `intent` focuses the description on a region ('describe the login form', 'what's in the comments section'). Use this BEFORE browser_act when you don't know what's on the page, or AFTER navigation to confirm the page loaded. Cheaper than screenshots when text is enough. Does not include canvas/SVG content — those surface as a `hasVisualSurfaces` flag; switch to browser_screenshot for visuals.",
+    inputSchema: {
+      type: "object",
+      required: ["tabId"],
+      additionalProperties: false,
+      properties: {
+        tabId: { type: "number" },
+        intent: {
+          type: "string",
+          description: "Optional natural-language focus ('describe the form', 'what's in the sidebar').",
+        },
+      },
+    },
+    capability: "browser_compound",
+    async handler(args: Record<string, unknown>, signal?: AbortSignal) {
+      const tabId = typeof args.tabId === "number" ? args.tabId : undefined
+      const intent = typeof args.intent === "string" ? args.intent : undefined
+      if (!tabId) return toolEnvelope({ error: "tabId required" }, true)
+      const snapshot = await fetchSnapshot(tabId, signal)
+      const result = await observePage(snapshot, intent, signal)
+      return toolEnvelope(result)
     },
   },
   {
@@ -721,6 +823,67 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
 // ---------------------------------------------------------------------
 // Compound-tool helpers
 // ---------------------------------------------------------------------
+
+/**
+ * Run a single atomic intent step: fetch snapshot, run matcher
+ * cascade (via pickElement), visual fallback on no-match, dispatch
+ * the resolved action. Returns the standard MCP envelope.
+ *
+ * Pulled out of `browser_act`'s handler so the compound-intent loop
+ * (decompose path) can call it per-step without duplicating the
+ * snapshot + visual-fallback logic.
+ */
+async function runAtomicIntentStep(
+  tabId: number,
+  intent: string,
+  value: string | undefined,
+  signal?: AbortSignal,
+): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+  const snapshot = await fetchSnapshot(tabId, signal)
+  const picked = await pickElement(snapshot, intent, signal, value)
+  if (!picked.ref || picked.confidence < 0.5) {
+    // No text-based match. Try visual fallback if a canvas / svg is in view.
+    const surfaces = snapshot.visualSurfaces
+    if (surfaces && surfaces.length > 0) {
+      const shotEnv = await dispatchBrowserTool("browser_screenshot", { tabId, format: "png" }, signal)
+      if (shotEnv.isError) {
+        return toolEnvelope({ ok: false, error: "no text match; screenshot for visual fallback failed", picked }, true)
+      }
+      const shotText = shotEnv.content?.[0]?.text
+      let shot: { contentType?: string; dataBase64?: string } = {}
+      try {
+        shot = shotText ? (JSON.parse(shotText) as typeof shot) : {}
+      } catch {
+        return toolEnvelope({ ok: false, error: "no text match; screenshot envelope unparseable" }, true)
+      }
+      if (!shot.contentType || !shot.dataBase64) {
+        return toolEnvelope({ ok: false, error: "no text match; screenshot envelope missing fields" }, true)
+      }
+      const visual = await pickElementVisual(shot.dataBase64, shot.contentType, intent, surfaces, signal)
+      if (visual.confidence < 0.5) {
+        return toolEnvelope({ ok: false, error: "no element matched intent (text + visual)", picked, visual }, true)
+      }
+      // Coord click via browser_mouse.
+      const clickEnv = await dispatchBrowserTool(
+        "browser_mouse",
+        { tabId, action: "click", x: visual.x, y: visual.y, force: true },
+        signal,
+      )
+      if (clickEnv.isError) return clickEnv
+      return toolEnvelope({
+        ok: true,
+        action_taken: "click_visual",
+        x: visual.x,
+        y: visual.y,
+        confidence: visual.confidence,
+        reason: visual.reason,
+      })
+    }
+    return toolEnvelope({ ok: false, error: "no element matched intent", picked }, true)
+  }
+  // Text-based match found. Dispatch.
+  return dispatchActionByRef(tabId, picked.ref, picked.action, picked.value ?? value, signal)
+}
 
 /**
  * Dispatch an action against a known ref via the appropriate primitive.

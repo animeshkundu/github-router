@@ -41,6 +41,7 @@ const baseModels: ModelsResponse = {
 }
 
 let savedBrowseEnabled: boolean
+let savedPowerBrowseEnabled: boolean
 let savedEnvBrowseFlag: string | undefined
 let savedEnvDisableWorker: string | undefined
 
@@ -65,6 +66,7 @@ beforeEach(() => {
   __resetInFlightForTests()
   _resetSupportedBrowserCache()
   savedBrowseEnabled = state.browseEnabled
+  savedPowerBrowseEnabled = state.powerBrowseEnabled
   savedEnvBrowseFlag = process.env.GH_ROUTER_ENABLE_BROWSE
   savedEnvDisableWorker = process.env.GH_ROUTER_DISABLE_WORKER_TOOLS
   // Pin worker tools OFF so tools/list output is deterministic across
@@ -77,6 +79,7 @@ beforeEach(() => {
   state.githubToken = "test-gh-token"
   state.accountType = "individual"
   state.browseEnabled = false
+  state.powerBrowseEnabled = false
   state.models = baseModels
 })
 
@@ -84,6 +87,7 @@ afterEach(() => {
   state.peerMcpNonce = undefined
   state.models = undefined
   state.browseEnabled = savedBrowseEnabled
+  state.powerBrowseEnabled = savedPowerBrowseEnabled
   if (savedEnvBrowseFlag === undefined) delete process.env.GH_ROUTER_ENABLE_BROWSE
   else process.env.GH_ROUTER_ENABLE_BROWSE = savedEnvBrowseFlag
   if (savedEnvDisableWorker === undefined) delete process.env.GH_ROUTER_DISABLE_WORKER_TOOLS
@@ -188,9 +192,10 @@ describe("browser-mcp capability gate (--browse)", () => {
     expect(payload.manual_steps.expected_extension_id).toMatch(/^[a-p]{32}$/)
   })
 
-  test("tools/list includes the humanlike-input v2 tools (mouse / drag / type) when gate is on", async () => {
+  test("tools/list includes the humanlike-input v2 tools (mouse / drag / type) under --power-browse", async () => {
     if (!hasSupportedBrowserInstalled()) return
     state.browseEnabled = true
+    state.powerBrowseEnabled = true
     const { json } = await rpc({
       jsonrpc: "2.0",
       id: 6,
@@ -204,10 +209,38 @@ describe("browser-mcp capability gate (--browse)", () => {
     }
   })
 
-  test("defense-in-depth: tools/call browser_mouse / browser_drag / browser_type return -32601 when gate is off", async () => {
+  test("power-tier tools (mouse / drag / type / diagnostics) are HIDDEN under default --browse", async () => {
+    if (!hasSupportedBrowserInstalled()) return
+    state.browseEnabled = true
+    state.powerBrowseEnabled = false
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 11,
+      method: "tools/list",
+    })
+    const names = (json.result as { tools: Array<{ name: string }> }).tools.map(
+      (t) => t.name,
+    )
+    for (const name of [
+      "browser_mouse",
+      "browser_drag",
+      "browser_type",
+      "browser_diagnostics",
+      "browser_read_page",
+      "browser_keyboard",
+      "browser_scroll",
+      "browser_eval_js",
+    ]) {
+      expect(names).not.toContain(name)
+    }
+  })
+
+  test("defense-in-depth: tools/call browser_mouse / browser_drag / browser_type return -32601 when --power-browse is off", async () => {
     // Symmetric with browser_open_tab — a naive client hard-coding any
     // of these names must hit the same method-not-found path. `browser_locate`
     // was removed as part of the L2 cull (browser_find returns bbox).
+    state.browseEnabled = true
+    state.powerBrowseEnabled = false
     for (const name of ["browser_mouse", "browser_drag", "browser_type"]) {
       const { status, json } = await rpc({
         jsonrpc: "2.0",
@@ -222,9 +255,10 @@ describe("browser-mcp capability gate (--browse)", () => {
     }
   })
 
-  test("L2 cull removes browser_click / browser_fill / browser_locate / browser_console_logs / browser_network_log from MCP surface", async () => {
+  test("L2 cull removes browser_click / browser_fill / browser_locate / browser_console_logs / browser_network_log from MCP surface (even with --power-browse)", async () => {
     if (!hasSupportedBrowserInstalled()) return
     state.browseEnabled = true
+    state.powerBrowseEnabled = true
     const { json } = await rpc({
       jsonrpc: "2.0",
       id: 8,
@@ -244,10 +278,50 @@ describe("browser-mcp capability gate (--browse)", () => {
     }
     // browser_diagnostics replaces console_logs + network_log; browser_act
     // (ref mode) replaces click + fill; browser_find returns bbox in lieu
-    // of locate. These four are the additive L2 surface.
+    // of locate. These four are the additive L2 surface — diagnostics is
+    // gated under --power-browse now.
     expect(names).toContain("browser_diagnostics")
-    // browser_find / browser_act / browser_extract are capability-gated on
-    // the compressor backend being present in the catalog; only assert
-    // they show up when the gate fires.
+  })
+
+  test("default --browse exposes the 6-tool lead surface only (act, observe, extract, navigate, screenshot, open_tab)", async () => {
+    if (!hasSupportedBrowserInstalled()) return
+    state.browseEnabled = true
+    state.powerBrowseEnabled = false
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 12,
+      method: "tools/list",
+    })
+    const names = (json.result as { tools: Array<{ name: string }> }).tools
+      .map((t) => t.name)
+      .filter((n) => n.startsWith("browser_"))
+    // open_tab / navigate / screenshot / act are always present under
+    // --browse (capability "browser"). observe / extract require the
+    // compressor backend (capability "browser_compound") — on this
+    // CI box gemini-3.5-flash IS in the catalog so they show. The
+    // assertion is on the FULL lead surface; if the compressor isn't
+    // present, the test is meaningless and skipped.
+    expect(names).toContain("browser_open_tab")
+    expect(names).toContain("browser_navigate")
+    expect(names).toContain("browser_screenshot")
+    expect(names).toContain("browser_act")
+    // Power-tier tools must NOT appear.
+    for (const power of [
+      "browser_mouse",
+      "browser_drag",
+      "browser_type",
+      "browser_keyboard",
+      "browser_scroll",
+      "browser_eval_js",
+      "browser_read_page",
+      "browser_diagnostics",
+      "browser_find",
+      "browser_download",
+      "browser_wait",
+      "browser_list_tabs",
+      "browser_close_tab",
+    ]) {
+      expect(names).not.toContain(power)
+    }
   })
 })

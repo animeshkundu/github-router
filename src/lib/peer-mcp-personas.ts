@@ -403,6 +403,7 @@ export function buildPeerAwarenessSnippet(opts: {
   workerToolsAvailable: boolean
   standInAvailable: boolean
   browseAvailable: boolean
+  powerBrowseAvailable?: boolean
 }): string {
   const criticList: Array<string> = [
     "`codex_critic` (gpt-5.5)",
@@ -440,8 +441,11 @@ export function buildPeerAwarenessSnippet(opts: {
     )
   }
   if (opts.browseAvailable) {
+    const powerNote = opts.powerBrowseAvailable
+      ? " Power mode is on: the L0/L1 primitives (`browser_mouse`, `browser_drag`, `browser_type`, `browser_keyboard`, `browser_scroll`, `browser_eval_js`, `browser_read_page`, `browser_diagnostics`, `browser_find`) are also available for direct DOM / coordinate control."
+      : ""
     para2Parts.push(
-      "`browser_*` tools (under `mcp__gh-router-peers__browser_*`) drive a real Chrome / Edge browser via a local extension; prefer the L2 compound tools `browser_act(intent | ref, value?)` / `browser_find(intent)` / `browser_extract(schema, instruction)` over the L0/L1 primitives.",
+      `\`browser_*\` tools (under \`mcp__gh-router-peers__browser_*\`) drive a real Chrome / Edge browser via a local extension. Lead surface: \`browser_act(intent, value?)\` for any click / fill / type / scroll-to (an inner fast model resolves intent), \`browser_observe(intent?)\` for a 2-4 sentence natural-language page description, \`browser_extract(schema, instruction)\` for typed extraction, \`browser_navigate\` / \`browser_open_tab\` / \`browser_screenshot\` for state and visuals. The lead model never sees raw DOM: refs, bboxes, and role/name dumps stay internal.${powerNote}`,
     )
   }
 
@@ -516,12 +520,18 @@ export interface NonPersonaMcpTool {
    *   requires `browserToolsEnabled()` AND a compressor backend in the
    *   live catalog (see `browserCompoundToolsEnabled()` in
    *   `lib/mcp-capabilities.ts`).
+   * - `"browser_power"` (browser_read_page / mouse / drag / type / keyboard /
+   *   scroll / eval_js / diagnostics / find / locate / close_tab /
+   *   list_tabs / wait / download) requires `browserToolsEnabled()` AND
+   *   `state.powerBrowseEnabled` (set by `--power-browse` or
+   *   `GH_ROUTER_ENABLE_POWER_BROWSE=1`). Default `--browse` exposes
+   *   only the 6 lead-model tools; power mode adds the raw primitives.
    *
    * Absent on `web_search` / `code_search` — those are always available
    * once the proxy is in claude mode (loopback + nonce already gate
    * `/mcp` itself).
    */
-  capability?: "worker" | "stand_in" | "browser" | "browser_compound"
+  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power"
   /**
    * Server-side handler. Receives the raw `arguments` object from the
    * `tools/call` request and an optional AbortSignal that is signalled

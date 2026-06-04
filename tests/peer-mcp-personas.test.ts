@@ -358,7 +358,7 @@ describe("buildPeerAwarenessSnippet", () => {
       browseAvailable: false,
     })
     expect(off).not.toContain("browser_act")
-    expect(off).not.toContain("browser_find")
+    expect(off).not.toContain("browser_observe")
     expect(off).not.toContain("browser_extract")
     expect(off).not.toContain("browser_*")
 
@@ -366,10 +366,39 @@ describe("buildPeerAwarenessSnippet", () => {
       ...MINIMAL,
       browseAvailable: true,
     })
+    // Default --browse surface: 6 lead tools. The Phase 3 retag moved
+    // browser_find to power; the snippet describes the lead surface
+    // (act / observe / extract / navigate / open_tab / screenshot) and
+    // does NOT mention power-tier tools like find.
     expect(on).toContain("browser_act")
-    expect(on).toContain("browser_find")
+    expect(on).toContain("browser_observe")
     expect(on).toContain("browser_extract")
     expect(on).toContain("mcp__gh-router-peers__browser_")
+    // Power tools NOT mentioned in default --browse mode.
+    expect(on).not.toContain("browser_find")
+    expect(on).not.toContain("browser_mouse")
+    expect(on).not.toContain("browser_eval_js")
+  })
+
+  test("mentions power tools when powerBrowseAvailable is on", () => {
+    const off = buildPeerAwarenessSnippet({
+      ...MINIMAL,
+      browseAvailable: true,
+      powerBrowseAvailable: false,
+    })
+    expect(off).not.toContain("Power mode")
+    expect(off).not.toContain("browser_mouse")
+    expect(off).not.toContain("browser_eval_js")
+
+    const on = buildPeerAwarenessSnippet({
+      ...MINIMAL,
+      browseAvailable: true,
+      powerBrowseAvailable: true,
+    })
+    expect(on).toContain("Power mode")
+    expect(on).toContain("browser_mouse")
+    expect(on).toContain("browser_eval_js")
+    expect(on).toContain("browser_find")
   })
 
   test("omits gemini_critic when gemini is not in the catalog", () => {

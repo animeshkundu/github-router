@@ -304,6 +304,78 @@ The in-page traversal descends into open Shadow DOM roots so web-component-heavy
 
 9. **Per-tab input mutex needs a wall-clock release cap**. `withTabInputLock(tabId, fn)` is a Promise-tail-chain mutex. If `fn()` hangs longer than the dispatcher's per-tool WS-side timeout, the dispatcher returns failure to the caller BUT the in-extension fn() keeps awaiting the CDP response. The lock is never released and every subsequent input call on that tabId hangs forever (CDP commands don't abort when the originating WS disconnects). Mitigation: `Promise.race(fn(), timeoutAfter(240_000))` inside the lock — if held > 240s, force-release the queue and emit a console.warn. The wedged CDP call's response is discarded when it eventually arrives.
 
+## Deterministic-first architecture (Phases 1-4)
+
+The post-PR-55 surface routed every intent through a fast model (Gemini Flash class) that picked an element. The deterministic-first refactor inverts this: a typed matcher cascade handles ~60-85% of intents with zero model round-trip, fast model becomes the fallback for genuinely ambiguous cases, and the lead model stops seeing DOM entirely.
+
+### Snapshot cache (`src/browser-ext/snapshot.js`)
+
+Per-tab module-level cache wrapping `toolReadPage`. Invalidation is action-driven, not time-driven:
+
+- `chrome.webNavigation.onCommitted` (top frame) — new document, refs gone, snapshot wholly stale.
+- `chrome.tabs.onRemoved` — cleanup.
+- `chrome.debugger.onDetach` — refs survive but bbox / AXNode IDs need a fresh handshake.
+- Mutating-action success — `handleBridgeRequest` checks a `MUTATES_PAGE` Set (click / fill / type / keyboard / scroll / mouse / drag / navigate / eval_js) and invalidates by tabId from args.
+
+Today the cache wraps the legacy `document.querySelectorAll` extractor. Phase 1b-CDP (future) will swap the extractor for `chrome.debugger.attach + Accessibility.getFullAXTree` to add cross-origin iframe coverage and the rich state fields the matcher cascade can use.
+
+### Matcher cascade (`src/lib/browser-mcp/matcher.ts`)
+
+Pure-sync 8-layer cascade tried in order. Each layer is a predicate over the snapshot returning candidates with a confidence score; the cascade short-circuits on the first layer with an unambiguous winner.
+
+| Layer | Score | Predicate |
+|---|---|---|
+| L0 | 1.00 | Role + exact accessible name (Playwright `getByRole({name, exact})`) |
+| L1 | 0.95 | Form input by label association |
+| L2 | 0.85/0.75 | Placeholder exact / contains |
+| L3 | 0.70 | Accessible-name fuzzy whole-word substring |
+| L4 | 0.65 | Visible text / value content match |
+| L5 | 0.90 | data-testid / id / name token match (lights up post-Phase 1b-CDP) |
+| L6 | 0.80 | Spatial ordinal (`the third card`) |
+| L7 | 0.55 | Heuristic semantic (`email field`, `password`, `submit`) |
+
+Disambiguation tie-breakers: hidden / tiny-bbox / disabled drop, viewport-proximity weight, role-specificity weight for click verbs. Multi-candidate within 0.15 of each other → ESCALATE to fast model. False positives are worse than escalation per the user constraint "no failure ballooning."
+
+Escalation hands the cascade's pre-filtered top-K (≤8) shortlist to the fast model instead of the full snapshot, saving 3-5× tokens on the fallback path.
+
+`compressor.ts` integration: `pickElement` and `pickMatchingElements` try the cascade first; on `source === "escalate"` they fall through to the existing fast-model `pickMatchingElements` with the shortlist as a hint.
+
+### Three-tier capability gate
+
+Browser MCP tools carry one of three `capability` tags:
+
+| Tag | Visible when | Tools |
+|---|---|---|
+| `browser` | `--browse` opt-in | open_tab, navigate, screenshot, act |
+| `browser_compound` | `--browse` AND compressor backend in catalog | observe (NEW), extract |
+| `browser_power` | `--browse` AND `--power-browse` flag | list_tabs, close_tab, read_page, scroll, keyboard, wait, eval_js, download, mouse, drag, type, diagnostics, find |
+
+Lead-model-facing surface (default `--browse`): 6 tools (act, observe, extract, navigate, screenshot, open_tab). The L0/L1 primitives that would hand DOM details to the lead model live behind `--power-browse` (or `GH_ROUTER_ENABLE_POWER_BROWSE=1`).
+
+Gate predicates: `browserToolsEnabled()` / `browserCompoundToolsEnabled()` / `browserPowerToolsEnabled()` in `src/lib/mcp-capabilities.ts`. Filter chain at `src/routes/mcp/handler.ts:336` mirrors the call-time dispatch at line 880+ so the surface stays symmetric.
+
+### `browser_observe` (`src/lib/browser-mcp/observe.ts`)
+
+Natural-language page describer for the lead model. Trims the snapshot to text + element role/name list, passes to the fast model with a "describe this page in 2-4 sentences" prompt, returns `{description, hasVisualSurfaces, url, title}` with NO refs / bboxes / role / name dumps. Lead-model orientation tool used BEFORE `browser_act` when the model doesn't know what's on the page.
+
+### Compound intent decomposition (`src/lib/browser-mcp/decompose.ts`)
+
+Regex grammar splits a single compound intent into ordered atomic steps:
+- **Login**: `log in [to X] with USER / PASS` → fill user, fill password, click Sign in
+- **Search-and-click**: `search [for] X and click [the] first result` → fill search, submit, click first
+- **Conjunctions**: split on ` and then `, ` then `, ` ; `, ` , and `
+- **Fallback**: single-step free-form intent (same as today's behavior)
+
+`browser_act` dispatches each atomic step through the matcher cascade sequentially. Lead model gets ONE `{ok, summary}` envelope, not one per step. On step failure, returns a "compound step N/M failed" summary.
+
+### Adaptive humanlike pacing (`src/lib/browser-mcp/humanlike.ts`)
+
+Pure-math pacing engine. Inter-action delays via Beta(2, 5) shape (mode near min, long tail) in [800, 4600] ms. Per-keystroke delays uniform [50, 200] ms with word-end Gaussian pauses and rare long pauses. Bezier mouse trajectories with perpendicular midpoint offset, overshoot-and-correct end control point, sigmoid easing, per-step jitter clipped to ±5 px. Scroll chunking in 60-320 px slices with 40-120 ms inter-chunk pauses.
+
+`--humanlike` CLI flag (or `GH_ROUTER_HUMANLIKE=1`) force-enables for all dispatches. `GH_ROUTER_BROWSER_NO_HUMANLIKE=1` hard-disables (wins for test reproducibility). Default mode is `auto` — pacing only engages when bot-challenge detection fires (extension-side signature listeners + per-tab sticky state, deferred to a follow-up).
+
+Today the dispatcher injects inter-action delays only for mutating tools (click / fill / type / keyboard / scroll / mouse / drag). Read-only tools (list_tabs, screenshot, read_page, diagnostics, navigate) skip pacing because they don't look like a human clicking around.
+
 ## See also
 
 - [`peer-mcp-design.md`](peer-mcp-design.md) — the broader MCP design philosophy this builds on (the ruthlessly-minimal tool surface rule, the inflight slot model, the dormant-register pattern).
