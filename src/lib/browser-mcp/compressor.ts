@@ -162,9 +162,10 @@ async function callCompressor(
 /**
  * Public re-export of `callCompressor` for sibling modules that need
  * the same forced-tool-calling pipeline (slot acquisition, fallback-
- * chain backend, code-fence stripping). Currently used by `observe.ts`
- * to drive the natural-language describer through the same backend
- * the matcher cascade escalates to.
+ * chain backend, code-fence stripping). Used by `observe.ts` to drive
+ * the natural-language describer through the same backend the matcher
+ * cascade escalates to, and by `decompose-planner.ts` for the
+ * fast-model compound-step replanner.
  *
  * Kept as a thin wrapper rather than re-exporting `callCompressor`
  * directly so the underlying function can change signature without
