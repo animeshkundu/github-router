@@ -2286,6 +2286,82 @@ describe("/mcp peer prompt-window guard", () => {
     expect((captured.lastBody as { model: string }).model).toBe("claude-opus-4.6")
   })
 
+  test("opus_critic regex matches dashed form opus-4-6-1m (forward-compat for catalog slug-shape changes)", async () => {
+    // Forward-compat: if Copilot ever ships the 1M sibling as dashed
+    // (`claude-opus-4-6-1m` instead of `claude-opus-4.6-1m`), the regex's
+    // `[.-]` character class must still match. Without dashed tolerance,
+    // opus_critic would silently downgrade to the 200K fallback.
+    state.models = {
+      object: "list",
+      data: [
+        modelWith("claude-opus-4.6", 168_000, ["/v1/messages"]),
+        modelWith("claude-opus-4-6-1m", 936_000, ["/v1/messages"]),
+      ],
+    }
+    const captured: { lastBody?: unknown } = {}
+    globalThis.fetch = mock(async (_url, init) => {
+      captured.lastBody = JSON.parse((init as RequestInit).body as string)
+      return new Response(
+        JSON.stringify({
+          id: "msg_test",
+          type: "message",
+          role: "assistant",
+          model: "claude-opus-4-6-1m",
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )
+    }) as unknown as typeof globalThis.fetch
+
+    await rpc({
+      jsonrpc: "2.0",
+      id: 706,
+      method: "tools/call",
+      params: { name: "opus_critic", arguments: { prompt: "review this" } },
+    })
+    expect((captured.lastBody as { model: string }).model).toBe("claude-opus-4-6-1m")
+  })
+
+  test("opus_critic regex does NOT false-positive on hypothetical opus-4.6-1max (suffix-boundary)", async () => {
+    // Regression guard for an earlier permissive `/opus-4\.6.*1m/i` form
+    // that would match `opus-4.6-1max` or `opus-4.6-foo-1m-bar`. The
+    // tightened `/opus-4[.-]6-1m(?:$|-)/i` requires `-1m` followed by
+    // either end-of-string or `-`, so unrelated `1m`-substrings can't
+    // hijack the picker.
+    state.models = {
+      object: "list",
+      data: [
+        modelWith("claude-opus-4.6", 168_000, ["/v1/messages"]),
+        // hypothetical garbage slug — must NOT match
+        modelWith("claude-opus-4.6-1max", 1_000_000, ["/v1/messages"]),
+      ],
+    }
+    const captured: { lastBody?: unknown } = {}
+    globalThis.fetch = mock(async (_url, init) => {
+      captured.lastBody = JSON.parse((init as RequestInit).body as string)
+      return new Response(
+        JSON.stringify({
+          id: "msg_test",
+          type: "message",
+          role: "assistant",
+          model: "claude-opus-4.6",
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )
+    }) as unknown as typeof globalThis.fetch
+
+    await rpc({
+      jsonrpc: "2.0",
+      id: 707,
+      method: "tools/call",
+      params: { name: "opus_critic", arguments: { prompt: "review this" } },
+    })
+    expect((captured.lastBody as { model: string }).model).toBe("claude-opus-4.6")
+  })
+
   test("opus_critic falls back to claude-opus-4.6 when no 1M variant present", async () => {
     state.models = {
       object: "list",

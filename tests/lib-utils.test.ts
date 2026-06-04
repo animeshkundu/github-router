@@ -914,6 +914,34 @@ describe("pickClaudeDefault", () => {
     expect(pickClaudeDefault("4.7")).toBe("claude-opus-4-7")
   })
 
+  test("base-slug 1M detection is NOT order-dependent when dotted + dashed aliases coexist", () => {
+    // Defensive: if the catalog ever lists both `claude-opus-4.8` (200K)
+    // and `claude-opus-4-8` (1M-capable) — or vice versa — the picker
+    // must consider ALL base-slug matches, not just the first. The
+    // .reduce(max(...)) form makes the result deterministic regardless
+    // of catalog ordering. Today Copilot only ships dotted slugs, but
+    // defending here keeps the detector robust against future drift.
+    state.models = {
+      data: [
+        // dotted alias first, advertised as 200K
+        {
+          id: "claude-opus-4.8",
+          supported_endpoints: ["/v1/messages"],
+          capabilities: { limits: { max_context_window_tokens: 200_000 } },
+        },
+        // dashed alias second, advertised as 1M — would have been missed
+        // by find()-then-check; reduce(max()) sees both.
+        {
+          id: "claude-opus-4-8",
+          supported_endpoints: ["/v1/messages"],
+          capabilities: { limits: { max_context_window_tokens: 1_000_000 } },
+        },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    expect(pickClaudeDefault("4.8")).toBe("claude-opus-4-8[1m]")
+  })
+
   test("pickClaudeDefault accepts dashed family form (\"4-8\") as a convenience", () => {
     state.models = {
       data: [

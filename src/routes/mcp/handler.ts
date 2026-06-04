@@ -263,11 +263,14 @@ function browserToolsEnabled(): boolean {
  * 936K). opus_critic prefers it so it can take large artifacts in one shot
  * (the whole point of pairing it with gpt-5.5 as the big-window peers);
  * falls back to the 200K `claude-opus-4-6` when the catalog doesn't carry
- * a 1M 4.6 slug. The regex is version-anchored to 4.6 so it does NOT
+ * a 1M 4.6 slug. The regex is version-anchored to 4.6 AND requires a
+ * `-1m` suffix boundary (not a permissive `.*1m`), so it does NOT
  * false-positive on `claude-opus-4.7-1m-internal` (stand_in's pinned
- * 4.7 row) or any future opus-4.8-style 1M-without-sibling variant.
+ * 4.7 row), `claude-opus-4.6-1max` (hypothetical), or `claude-opus-4.8`
+ * (1M-without-sibling). Tolerates dotted (`opus-4.6-1m`) and dashed
+ * (`opus-4-6-1m`) catalog separators.
  */
-const OPUS_1M_RE = /opus-4\.6.*1m/i
+const OPUS_1M_RE = /opus-4[.-]6-1m(?:$|-)/i
 function resolveOpusCriticModel(): string {
   const oneM = state.models?.data?.find((m) => OPUS_1M_RE.test(m.id))
   return oneM ? oneM.id : "claude-opus-4-6"

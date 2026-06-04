@@ -95,10 +95,19 @@ export function pickClaudeDefault(opusFamily: string = DEFAULT_OPUS_FAMILY): str
 
   const models = state.models?.data ?? []
   const siblingOneM = models.some((m) => oneMRegex.test(m.id))
-  const baseSlugEntry = models.find((m) => baseSlugRegex.test(m.id))
-  const baseSlugOneM =
-    (baseSlugEntry?.capabilities?.limits?.max_context_window_tokens ?? 0)
-    >= ONE_M_TOKENS
+  // Scan ALL entries whose id matches the base slug (dotted or dashed form)
+  // and take the max of their advertised context windows. Using find()
+  // would be order-dependent if both dotted and dashed aliases ever coexist
+  // — the live Copilot catalog only ships dotted today, but defending here
+  // keeps the detector robust against future catalog shape drift.
+  const baseSlugMaxContext = models.reduce(
+    (max, m) =>
+      baseSlugRegex.test(m.id)
+        ? Math.max(max, m.capabilities?.limits?.max_context_window_tokens ?? 0)
+        : max,
+    0,
+  )
+  const baseSlugOneM = baseSlugMaxContext >= ONE_M_TOKENS
   const has1m = siblingOneM || baseSlugOneM
 
   // Warn when the user explicitly requested a family that's completely
@@ -121,9 +130,16 @@ export function pickClaudeDefault(opusFamily: string = DEFAULT_OPUS_FAMILY): str
       ? baseSlugOneM
         ? "sibling-slug + base-slug 1M capability"
         : `sibling slug opus-${dotted}-1m`
-      : `base slug ${bareSlug} (max_context_window_tokens=${baseSlugEntry?.capabilities?.limits?.max_context_window_tokens})`
+      : `base slug ${bareSlug} (max_context_window_tokens=${baseSlugMaxContext})`
+    // Only mention --model pin-to-200K when a real 200K variant exists in
+    // the catalog (i.e., a sibling -1m slug means the bare slug is 200K).
+    // For 4.8-shaped families (single slug already 1M, no sibling), the
+    // bare slug is the 1M backend — there is no 200K alternative to pin.
+    const pinHint = siblingOneM
+      ? ` Pass --model ${bareSlug} to pin 200K.`
+      : ` (No separate 200K variant of ${dotted} exists in the catalog — the bare slug IS the 1M backend.)`
     consola.info(
-      `Catalog signals opus-${dotted} is 1M-capable (${signal}); defaulting ANTHROPIC_MODEL to "${bareSlug}[1m]" so Claude Code accounts for 1M context locally. Set CLAUDE_CODE_DISABLE_1M_CONTEXT=1 to opt out (HIPAA), or pass --model ${bareSlug} to pin 200K.`,
+      `Catalog signals opus-${dotted} is 1M-capable (${signal}); defaulting ANTHROPIC_MODEL to "${bareSlug}[1m]" so Claude Code accounts for 1M context locally. Set CLAUDE_CODE_DISABLE_1M_CONTEXT=1 to opt out (HIPAA).${pinHint}`,
     )
     return `${bareSlug}[1m]`
   }
