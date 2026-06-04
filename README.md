@@ -34,10 +34,10 @@ The server runs at `http://localhost:8787`. Now pick your tool below.
 npx github-router@latest claude
 ```
 
-Boots the proxy on a random port and spawns Claude Code wired to it. Sets `ANTHROPIC_MODEL=claude-opus-4-7` (Anthropic's dashed slug — Claude Code's `/model` UI displays this as menu entry "Opus 4.7 (1M context)"). The proxy translates to Copilot's `claude-opus-4.7-1m-internal` on enterprise tokens or `claude-opus-4.7` on Pro+/Business/Max at request time. Major.minor fallback chain: `claude-opus-4-6` → `claude-opus-4-5`. Override with `-m`:
+Boots the proxy on a random port and spawns Claude Code wired to it. Sets `ANTHROPIC_MODEL=claude-opus-4-8` (Anthropic's dashed slug — Claude Code's `/model` UI displays this as menu entry "Opus 4.8 (1M context)"). The proxy translates to Copilot's `claude-opus-4.8` at request time (single base slug; the catalog entry's `max_context_window_tokens` already advertises 1M context — no `-1m` sibling needed for 4.8). Major.minor fallback chain: `claude-opus-4-7` → `claude-opus-4-6` → `claude-opus-4-5`. Override with `-m`:
 
 ```sh
-npx github-router@latest claude -m claude-opus-4-7
+npx github-router@latest claude -m claude-opus-4-8
 ```
 
 The launcher sanitizes parent-env auth keys and sets `CLAUDE_CONFIG_DIR=$HOME/.claude` so the spawned `claude` ignores any persisted Console OAuth credential without requiring `claude /logout`. Settings, MCP servers, hooks, and CLAUDE.md auto-discovery still load from `~/.claude` as normal.
@@ -85,7 +85,7 @@ Each persona is exposed both as a Claude Code subagent (callable via the `Task` 
 |---|---|---|---|
 | `codex-critic` | gpt-5.5 | `/v1/responses` | low \| medium \| high \| xhigh (xhigh) |
 | `codex-reviewer` | gpt-5.3-codex | `/v1/responses` | low \| medium \| high \| xhigh (xhigh) |
-| `opus-critic` | claude-opus-4-7 | `/v1/messages` | low \| medium \| high \| xhigh (xhigh) |
+| `opus-critic` | claude-opus-4-6 | `/v1/messages` | low \| medium \| high (high) |
 | `gemini-critic` | gemini-3.1-pro-preview | `/v1/chat/completions` | low \| medium \| high (high) |
 | `peer-review-coordinator` | (meta) | — | — |
 
@@ -169,6 +169,7 @@ Anthropic endpoints are only available under `/v1/messages`.
 | gpt-4.1, gpt-4o | Yes | Yes | No |
 | gpt-5.5, gpt-5.4 | No | Yes | No |
 | gpt-5.3-codex, gpt-5.2-codex | No | Yes | No |
+| claude-opus-4.8 (1M context as the single base slug) | Yes | No | Yes |
 | claude-opus-4.7-1m-internal (enterprise), claude-opus-4.7 | Yes | No | Yes |
 | claude-opus-4.6-1m, claude-opus-4.6, claude-sonnet-4.6 | Yes | No | Yes |
 | o3, o4-mini | Yes | Yes | No |
@@ -234,7 +235,7 @@ github-router debug              Print diagnostic info
 
 The `claude` and `codex` subcommands accept all the shared flags below plus `-m`/`--model` to override the default model. Default models live in `src/lib/port.ts`:
 
-- `claude` → `claude-opus-4-7` (Anthropic dashed slug for UI compatibility; the proxy translates to Copilot's `claude-opus-4.7-1m-internal` on enterprise or `claude-opus-4.7` elsewhere). Major.minor fallback chain: `claude-opus-4-6` → `claude-opus-4-5`.
+- `claude` → `claude-opus-4-8` (Anthropic dashed slug for UI compatibility; the proxy translates to Copilot's `claude-opus-4.8` — the single base slug already advertises 1M context via `max_context_window_tokens`, so no `-1m` sibling exists). Major.minor fallback chain: `claude-opus-4-7` → `claude-opus-4-6` → `claude-opus-4-5`.
 - `codex` → `gpt-5.5` → `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex`
 
 Fallback chains fire only on the implicit-default path; explicit `-m`/`--model` is always respected as-is.
@@ -257,7 +258,7 @@ Additional flags accepted only by the `claude` subcommand:
 
 | Flag | Description | Default |
 |---|---|---|
-| `--model, -m` | Override the default Claude model | claude-opus-4-7 |
+| `--model, -m` | Override the default Claude model | claude-opus-4-8 |
 | `--codex-mcp` / `--no-codex-mcp` | Wire peer-MCP review subagents (codex-critic / opus-critic / gemini-critic / codex-reviewer / peer-review-coordinator) into the spawned session | true |
 | `--codex-cli` | Add a `codex mcp-server` stdio backend so `codex-implementer` can mutate files. Requires codex CLI 0.129+; falls back to HTTP-only if absent | false |
 | `--codex-mcp-only` | Pass `--strict-mcp-config` to Claude Code so only the proxy's MCP servers load (hides any user MCP servers in `~/.claude/mcp.json`) | false |

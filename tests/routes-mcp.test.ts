@@ -459,7 +459,7 @@ describe("/mcp tools/call routing", () => {
         id: "msg_test",
         type: "message",
         role: "assistant",
-        model: "claude-opus-4-7",
+        model: "claude-opus-4-6",
         content: [{ type: "text", text }],
         stop_reason: "end_turn",
       }
@@ -739,7 +739,7 @@ describe("/mcp tools/call routing", () => {
     expect(upstream.system).toContain("opus-critic")
   })
 
-  test("opus_critic with no explicit effort uses persona.defaultEffort=xhigh", async () => {
+  test("opus_critic with no explicit effort uses persona.defaultEffort=high", async () => {
     const captured = mockMessagesUpstream("no material objection")
     await rpc({
       jsonrpc: "2.0",
@@ -747,7 +747,7 @@ describe("/mcp tools/call routing", () => {
       method: "tools/call",
       params: {
         name: "opus_critic",
-        arguments: { prompt: "review" },  // omit effort → persona.defaultEffort = "xhigh"
+        arguments: { prompt: "review" },  // omit effort → persona.defaultEffort = "high"
       },
     })
     const upstream = captured.lastBody as {
@@ -756,13 +756,17 @@ describe("/mcp tools/call routing", () => {
       output_config?: { effort?: string }
     }
     expect(upstream.thinking?.type).toBe("adaptive")
-    expect(upstream.output_config?.effort).toBe("xhigh")
-    expect(upstream.max_tokens).toBe(32768)
+    expect(upstream.output_config?.effort).toBe("high")
+    expect(upstream.max_tokens).toBe(16384)
   })
 
-  test("opus_critic at effort:'xhigh' routes with output_config.effort=xhigh", async () => {
-    const captured = mockMessagesUpstream("verdict")
-    await rpc({
+  test("opus_critic rejects effort:'xhigh' (4.6 model doesn't advertise xhigh)", async () => {
+    // opus_critic now runs on claude-opus-4-6 whose catalog entry only
+    // advertises reasoning_effort ["low","medium","high","max"]. xhigh
+    // is omitted from the persona's allowedEfforts so a caller-supplied
+    // xhigh rejects with -32602 at the handler layer rather than bouncing
+    // off Copilot at request time.
+    const { status, json } = await rpc({
       jsonrpc: "2.0",
       id: 303,
       method: "tools/call",
@@ -771,14 +775,9 @@ describe("/mcp tools/call routing", () => {
         arguments: { prompt: "deep dive", effort: "xhigh" },
       },
     })
-    const upstream = captured.lastBody as {
-      max_tokens?: number
-      thinking?: { type?: string }
-      output_config?: { effort?: string }
-    }
-    expect(upstream.thinking?.type).toBe("adaptive")
-    expect(upstream.output_config?.effort).toBe("xhigh")
-    expect(upstream.max_tokens).toBe(32768)
+    expect(status).toBe(200)
+    const error = json.error as { code?: number; message?: string }
+    expect(error?.code).toBe(-32602)
   })
 
   test("tools/call with Accept: text/event-stream returns SSE-streamed response with heartbeat + final result", async () => {
@@ -2124,8 +2123,8 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
 // Prompt-window guard + opus_critic 1M-variant selection
 // Window guard: reject (don't truncate) a brief that exceeds the persona
 // model's real max_prompt_tokens, counted with the exact o200k tokenizer.
-// opus_critic: prefer the enterprise 1M opus slug when the live catalog
-// carries it, else fall back to the 200K claude-opus-4-7.
+// opus_critic: prefer the 1M opus-4.6 slug when the live catalog carries
+// it, else fall back to the 200K claude-opus-4-6.
 // ─────────────────────────────────────────────────────────────────────
 describe("/mcp peer prompt-window guard", () => {
   function mockResponses(text: string, captured: { lastBody?: unknown; called?: boolean } = {}) {
@@ -2213,12 +2212,12 @@ describe("/mcp peer prompt-window guard", () => {
     expect(captured.called).toBe(true)
   })
 
-  test("opus_critic uses the 1M variant when the catalog carries it", async () => {
+  test("opus_critic uses the 4.6-1m variant when the catalog carries it", async () => {
     state.models = {
       object: "list",
       data: [
-        modelWith("claude-opus-4.7", 168_000, ["/v1/messages"]),
-        modelWith("claude-opus-4.7-1m-internal", 936_000, ["/v1/messages"]),
+        modelWith("claude-opus-4.6", 168_000, ["/v1/messages"]),
+        modelWith("claude-opus-4.6-1m", 936_000, ["/v1/messages"]),
       ],
     }
     const captured: { lastBody?: unknown; called?: boolean } = {}
@@ -2230,7 +2229,7 @@ describe("/mcp peer prompt-window guard", () => {
           id: "msg_test",
           type: "message",
           role: "assistant",
-          model: "claude-opus-4.7-1m-internal",
+          model: "claude-opus-4.6-1m",
           content: [{ type: "text", text: "ok" }],
           stop_reason: "end_turn",
         }),
@@ -2245,14 +2244,21 @@ describe("/mcp peer prompt-window guard", () => {
       params: { name: "opus_critic", arguments: { prompt: "review this" } },
     })
     expect((captured.lastBody as { model: string }).model).toBe(
-      "claude-opus-4.7-1m-internal",
+      "claude-opus-4.6-1m",
     )
   })
 
-  test("opus_critic falls back to claude-opus-4.7 when no 1M variant present", async () => {
+  test("opus_critic regex does NOT false-positive on 4.7-1m or 4.8 (version-anchored to 4.6)", async () => {
+    // Regression guard: a catalog that has 4.7-1m-internal (stand_in's
+    // pinned row) and 4.8 (the spawned-Claude-Code default) but NO
+    // 4.6-1m sibling must fall back to the bare claude-opus-4-6.
     state.models = {
       object: "list",
-      data: [modelWith("claude-opus-4.7", 168_000, ["/v1/messages"])],
+      data: [
+        modelWith("claude-opus-4.6", 168_000, ["/v1/messages"]),
+        modelWith("claude-opus-4.7-1m-internal", 936_000, ["/v1/messages"]),
+        modelWith("claude-opus-4.8", 1_000_000, ["/v1/messages"]),
+      ],
     }
     const captured: { lastBody?: unknown } = {}
     globalThis.fetch = mock(async (_url, init) => {
@@ -2262,7 +2268,38 @@ describe("/mcp peer prompt-window guard", () => {
           id: "msg_test",
           type: "message",
           role: "assistant",
-          model: "claude-opus-4.7",
+          model: "claude-opus-4.6",
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )
+    }) as unknown as typeof globalThis.fetch
+
+    await rpc({
+      jsonrpc: "2.0",
+      id: 705,
+      method: "tools/call",
+      params: { name: "opus_critic", arguments: { prompt: "review this" } },
+    })
+    // resolveModel maps dashed claude-opus-4-6 → dotted claude-opus-4.6.
+    expect((captured.lastBody as { model: string }).model).toBe("claude-opus-4.6")
+  })
+
+  test("opus_critic falls back to claude-opus-4.6 when no 1M variant present", async () => {
+    state.models = {
+      object: "list",
+      data: [modelWith("claude-opus-4.6", 168_000, ["/v1/messages"])],
+    }
+    const captured: { lastBody?: unknown } = {}
+    globalThis.fetch = mock(async (_url, init) => {
+      captured.lastBody = JSON.parse((init as RequestInit).body as string)
+      return new Response(
+        JSON.stringify({
+          id: "msg_test",
+          type: "message",
+          role: "assistant",
+          model: "claude-opus-4.6",
           content: [{ type: "text", text: "ok" }],
           stop_reason: "end_turn",
         }),
@@ -2276,7 +2313,7 @@ describe("/mcp peer prompt-window guard", () => {
       method: "tools/call",
       params: { name: "opus_critic", arguments: { prompt: "review this" } },
     })
-    // resolveModel maps dashed claude-opus-4-7 → dotted claude-opus-4.7.
-    expect((captured.lastBody as { model: string }).model).toBe("claude-opus-4.7")
+    // resolveModel maps dashed claude-opus-4-6 → dotted claude-opus-4.6.
+    expect((captured.lastBody as { model: string }).model).toBe("claude-opus-4.6")
   })
 })

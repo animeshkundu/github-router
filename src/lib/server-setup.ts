@@ -407,13 +407,17 @@ export function getClaudeCodeEnvVars(
   // to what Copilot has). Setting them seeds the three tier rows with
   // ids the proxy's resolveModel knows how to route.
   //
-  // Why NO [1m] suffix on Sonnet/Haiku: Copilot has no -1m backend for
-  // either family (only opus-4.7-1m-internal exists in the catalog as
-  // of 2026-05-22; Anthropic-side modelSupports1M in cc-backup
+  // Why NO [1m] suffix on Sonnet/Haiku: Copilot has no 1M backend for
+  // either family. Per the live catalog as of 2026-06-04: opus-4.6-1m
+  // (sibling-slug 1M), opus-4.7-1m-internal (sibling-slug 1M, enterprise),
+  // and opus-4.8 (base slug already 1M, no sibling) all exist; sonnet
+  // and haiku stay 200K. Anthropic-side modelSupports1M in cc-backup
   // context.ts:43-49 only lists sonnet-4* and opus-4-6 — haiku has no
-  // 1M variant on either side). The [1m] decoration for the *active*
+  // 1M variant on either side. The [1m] decoration for the *active*
   // default lives on ANTHROPIC_MODEL itself (see pickClaudeDefault in
-  // src/claude.ts) and is cap-aware against the live catalog.
+  // src/lib/port.ts) and is cap-aware against the live catalog via the
+  // dual-signal detector (sibling-slug regex OR base-slug
+  // max_context_window_tokens).
   //
   // Presence-based guard symmetric with the SMALL_FAST_MODEL guard
   // above — preserves any value (including 0/false/off/unrecognized)
@@ -425,7 +429,7 @@ export function getClaudeCodeEnvVars(
     vars.ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-haiku-4-5"
   }
   if (process.env.ANTHROPIC_DEFAULT_OPUS_MODEL === undefined) {
-    vars.ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-7"
+    vars.ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-8"
   }
 
   // Plan-mode (v2) Phase-2 "Plan" agent parallelism. Claude Code's

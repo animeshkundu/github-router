@@ -179,7 +179,7 @@ describe("buildPeerAgentDefinitions", () => {
     )
     expect(agents["codex-implementer"]!.prompt).toContain('"workspace-write"')
     // opus-critic.requiresHttp = true (codex-cli stdio bridge can't run
-    // claude-opus-4-7 — gpt-5/codex models only). Even in CLI mode, opus
+    // claude-opus-4-6 — gpt-5/codex models only). Even in CLI mode, opus
     // routes via HTTP. Verify the prompt routes to the HTTP backend tool
     // and does NOT mention codex-cli for this persona.
     expect(agents["opus-critic"]).toBeDefined()
