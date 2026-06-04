@@ -163,12 +163,12 @@ describe("getClaudeCodeEnvVars", () => {
     expect(vars).not.toHaveProperty("ANTHROPIC_API_KEY")
   })
 
-  test("defaults ANTHROPIC_SMALL_FAST_MODEL to claude-haiku-4-5 with presence-based guard", () => {
+  test("defaults ANTHROPIC_SMALL_FAST_MODEL to claude-sonnet-4-6 with presence-based guard", () => {
     const prior = process.env.ANTHROPIC_SMALL_FAST_MODEL
     delete process.env.ANTHROPIC_SMALL_FAST_MODEL
     try {
       const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
-      expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBe("claude-haiku-4-5")
+      expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBe("claude-sonnet-4-6")
     } finally {
       if (prior === undefined) delete process.env.ANTHROPIC_SMALL_FAST_MODEL
       else process.env.ANTHROPIC_SMALL_FAST_MODEL = prior
@@ -178,8 +178,9 @@ describe("getClaudeCodeEnvVars", () => {
   test("does NOT override a parent-set ANTHROPIC_SMALL_FAST_MODEL (presence guard preserves user's custom Copilot mapping)", () => {
     // Symmetric with launch.ts's STRIPPED_PARENT_ENV_KEYS comment that
     // intentionally does NOT strip ANTHROPIC_SMALL_FAST_MODEL — users
-    // with custom Copilot mappings legitimately set this to a non-haiku
-    // value (gemini-2.0-flash, gpt-5.5-mini, etc.).
+    // with custom Copilot mappings legitimately set this to a value
+    // other than our claude-sonnet-4-6 default (gemini-2.0-flash,
+    // gpt-5.5-mini, etc.).
     const prior = process.env.ANTHROPIC_SMALL_FAST_MODEL
     process.env.ANTHROPIC_SMALL_FAST_MODEL = "gemini-2.0-flash"
     try {

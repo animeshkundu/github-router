@@ -389,15 +389,22 @@ export function getClaudeCodeEnvVars(
 
   // Default the small/fast tier model (used by Claude Code for status
   // text, auto-compact summaries, session titles, background ops) to
-  // claude-haiku-4-5. Anthropic-published dashed slug; the proxy's
+  // claude-sonnet-4-6. Anthropic-published dashed slug; the proxy's
   // resolveModel translates to Copilot's dotted slug at request time.
+  // We deliberately pass Sonnet rather than Haiku here: on the canonical
+  // Copilot-Enterprise deployment the quality lift on background ops
+  // (compaction summaries, session titles) is worth more than Haiku's
+  // marginal latency/cost edge, and Copilot bills per-request by
+  // multiplier rather than per-token. The /model picker's Haiku tier row
+  // (ANTHROPIC_DEFAULT_HAIKU_MODEL below) stays claude-haiku-4-5 so users
+  // who explicitly want the cheap tier still get it.
   // Presence-based guard preserves any user-set value, including the
   // dated slug variant or a different family (gemini, gpt) for users
   // who have custom Copilot mappings — symmetric with the
   // ANTHROPIC_SMALL_FAST_MODEL pass-through documented in launch.ts's
   // STRIPPED_PARENT_ENV_KEYS comment.
   if (process.env.ANTHROPIC_SMALL_FAST_MODEL === undefined) {
-    vars.ANTHROPIC_SMALL_FAST_MODEL = "claude-haiku-4-5"
+    vars.ANTHROPIC_SMALL_FAST_MODEL = "claude-sonnet-4-6"
   }
 
   // Tier-default knobs read by Claude Code's /model picker (cc-backup
