@@ -1773,6 +1773,128 @@ async function toolNetworkLog(args) {
   return { entries: drained }
 }
 
+// ---------------------------------------------------------------------
+// Bot-challenge detection (Phase 4 auto-detect)
+// ---------------------------------------------------------------------
+// Listens to chrome.webRequest.onHeadersReceived for response-header
+// fingerprints of major bot-protection vendors. On match: post a
+// `__botDetected__` control frame to the bridge. The bridge tracks
+// which tabs are flagged and the proxy dispatcher consults that state
+// via /health to inject humanlike pacing for paced tabs.
+//
+// Signature confidence tiers:
+//   HIGH (per-vendor, single-hit enables): cf-ray + 403/503, x-dd-b,
+//     x-px-block, x-px-uuid, x-incapsula header on 403.
+//   MEDIUM (cookie / generic — deferred to v2): _abck=*~-1~ cookie,
+//     burst of 403/429 across 5 s window.
+//
+// False-positive guard: only fires when we actually own the
+// connection to the bridge (`nativePort` set). No phantom signals
+// during SW startup before the port opens.
+
+const BOT_DETECTION_VENDORS = {
+  cloudflare: (resp) => {
+    if (resp.statusCode !== 403 && resp.statusCode !== 503) return null
+    const cfRay = headerValue(resp.responseHeaders, "cf-ray")
+    return cfRay ? { signal: "cf-ray + " + resp.statusCode, evidence: cfRay.slice(0, 60) } : null
+  },
+  datadome: (resp) => {
+    const dd = headerValue(resp.responseHeaders, "x-dd-b")
+    return dd === "1" ? { signal: "x-dd-b=1", evidence: "" } : null
+  },
+  perimeterx: (resp) => {
+    if (headerValue(resp.responseHeaders, "x-px-block") === "1") {
+      return { signal: "x-px-block=1", evidence: "" }
+    }
+    const pxUuid = headerValue(resp.responseHeaders, "x-px-uuid")
+    if (pxUuid && (resp.statusCode === 403 || resp.statusCode === 429)) {
+      return { signal: "x-px-uuid + " + resp.statusCode, evidence: pxUuid.slice(0, 36) }
+    }
+    return null
+  },
+  imperva: (resp) => {
+    if (resp.statusCode !== 403) return null
+    const iinfo = headerValue(resp.responseHeaders, "x-iinfo")
+    return iinfo ? { signal: "x-iinfo + 403", evidence: iinfo.slice(0, 40) } : null
+  },
+}
+
+function headerValue(headers, name) {
+  if (!Array.isArray(headers)) return undefined
+  const lower = name.toLowerCase()
+  for (const h of headers) {
+    if (h.name && h.name.toLowerCase() === lower) return h.value
+  }
+  return undefined
+}
+
+// Per-tab deduplication: a single vendor's signature firing repeatedly
+// on a tab should emit ONE control frame, not one per response. Bridge
+// already de-dupes by tabId on its side; we de-dupe here too to keep
+// the wire quiet.
+const detectedVendorsByTab = new Map() // tabId -> Set<vendor>
+
+function emitBotDetected(tabId, vendor, signal, evidence) {
+  if (typeof tabId !== "number" || tabId < 0) return
+  if (!nativePort) return
+  let seen = detectedVendorsByTab.get(tabId)
+  if (!seen) {
+    seen = new Set()
+    detectedVendorsByTab.set(tabId, seen)
+  }
+  if (seen.has(vendor)) return
+  seen.add(vendor)
+  try {
+    nativePort.postMessage({
+      type: "__botDetected__",
+      tabId,
+      vendor,
+      signal,
+      evidence,
+      ts: Date.now(),
+    })
+  } catch (err) {
+    console.warn("[browser-bridge/bot-detect] post failed:", err)
+  }
+}
+
+// MAIN frame only — sub-resource 403s on tracking pixels are common
+// noise. Vendor blocks always land on the main document request.
+try {
+  chrome.webRequest.onHeadersReceived.addListener(
+    (details) => {
+      try {
+        for (const [vendor, probe] of Object.entries(BOT_DETECTION_VENDORS)) {
+          const hit = probe(details)
+          if (hit) {
+            emitBotDetected(details.tabId, vendor, hit.signal, hit.evidence)
+            break
+          }
+        }
+      } catch (err) {
+        console.warn("[browser-bridge/bot-detect] probe crashed:", err)
+      }
+    },
+    { urls: ["<all_urls>"], types: ["main_frame"] },
+    ["responseHeaders"],
+  )
+} catch (err) {
+  // webRequest permission may not be granted on some enterprise
+  // policies; auto-detect just no-ops in that case.
+  console.warn("[browser-bridge/bot-detect] webRequest listener registration failed:", err)
+}
+
+// Cleanup: clear vendor dedup state on navigation + tab close so a
+// new document gets a fresh detection window.
+chrome.webNavigation.onCommitted.addListener((details) => {
+  if (details.frameId === 0 && typeof details.tabId === "number") {
+    detectedVendorsByTab.delete(details.tabId)
+  }
+})
+chrome.tabs.onRemoved.addListener((tabId) => {
+  detectedVendorsByTab.delete(tabId)
+})
+
 const TOOL_HANDLERS = {
   __ping__: () => ({
     pong: true,

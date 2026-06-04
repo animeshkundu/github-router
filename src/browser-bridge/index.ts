@@ -204,6 +204,9 @@ const httpServer = createServer((req, res) => {
         pid: process.pid,
         extension_connected: extensionConnected(),
         extension_loaded_version: extensionLoadedVersion,
+        humanlike_tabs: Array.from(humanlikeTabs.entries()).map(
+          ([tabId, v]) => ({ tabId, vendor: v.vendor, signal: v.signal, since: v.since }),
+        ),
       }),
     )
     return
@@ -332,10 +335,33 @@ fromBrowserListeners.push((msg) => {
     extensionLoadedVersion = (msg as { version: string }).version
     return
   }
+  // Bot-challenge detection frame (Phase 4 auto-detect). The extension
+  // posts this on Cloudflare / Datadome / PerimeterX / Imperva
+  // response-header signatures. We track flagged tabs and surface
+  // them via /health for the proxy dispatcher to consult.
+  if (
+    msg
+    && typeof msg === "object"
+    && (msg as { type?: unknown }).type === "__botDetected__"
+    && typeof (msg as { tabId?: unknown }).tabId === "number"
+  ) {
+    const m = msg as { tabId: number, vendor?: string, signal?: string }
+    humanlikeTabs.set(m.tabId, {
+      vendor: typeof m.vendor === "string" ? m.vendor : "unknown",
+      signal: typeof m.signal === "string" ? m.signal : "",
+      since: Date.now(),
+    })
+    return
+  }
   const r = msg as BridgeResponse
   if (typeof r.id !== "string") return
   pendingResolve(r.id, r)
 })
+
+// Sticky-per-tab humanlike state. Cleared on tab close (the extension
+// could emit a __tabClosed__ frame for this; v1 just lets stale
+// entries linger — they're harmless without an actual paced dispatch).
+const humanlikeTabs = new Map<number, { vendor: string, signal: string, since: number }>()
 
 // ---------------------------------------------------------------------
 // Boot

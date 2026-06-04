@@ -47,13 +47,59 @@ const PACED_TOOLS = new Set([
 ])
 
 let lastDispatchAt = 0
+// Cached snapshot of bridge-reported humanlike-tab state. Probed at
+// most once per HUMANLIKE_PROBE_INTERVAL_MS so we don't spam /health
+// on every tool dispatch.
+let humanlikeAutoCache: { fetchedAt: number, tabs: Set<number> } = {
+  fetchedAt: 0,
+  tabs: new Set(),
+}
+const HUMANLIKE_PROBE_INTERVAL_MS = 5_000
+
+async function isHumanlikeAutoOn(
+  tabId: number | undefined,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (state.humanlikeForce === "off") return false
+  if (typeof tabId !== "number") return false
+  const now = Date.now()
+  if (now - humanlikeAutoCache.fetchedAt > HUMANLIKE_PROBE_INTERVAL_MS) {
+    try {
+      const ready = await ensureBridgeReady()
+      if (ready.install_required) return false
+      const res = await fetch(`http://127.0.0.1:${ready.port}/health`, {
+        headers: { authorization: `Bearer ${ready.token}` },
+        signal,
+      })
+      if (res.ok) {
+        const body = await res.json() as { humanlike_tabs?: Array<{ tabId: number }> }
+        const tabs = new Set<number>()
+        for (const t of body.humanlike_tabs ?? []) {
+          if (typeof t.tabId === "number") tabs.add(t.tabId)
+        }
+        humanlikeAutoCache = { fetchedAt: now, tabs }
+      }
+    } catch {
+      // /health unreachable — keep stale cache, fail-closed-to-fast
+      // (no pacing). Better to be fast on transient errors than
+      // permanently slow on a flaky network.
+    }
+  }
+  return humanlikeAutoCache.tabs.has(tabId)
+}
 
 async function maybeInjectHumanlikeDelay(
   tool: string,
   signal?: AbortSignal,
+  tabId?: number,
 ): Promise<void> {
-  if (state.humanlikeForce !== "on") return
   if (!PACED_TOOLS.has(tool)) return
+  // Force-on > auto-detected per-tab > off.
+  let on = state.humanlikeForce === "on"
+  if (!on && state.humanlikeForce === "auto") {
+    on = await isHumanlikeAutoOn(tabId, signal)
+  }
+  if (!on) return
   const target = interActionDelay()
   const sinceLast = Date.now() - lastDispatchAt
   const wait = Math.max(0, target - sinceLast)
@@ -285,10 +331,14 @@ export async function dispatchBrowserTool(
   // Humanlike pacing: when state.humanlikeForce === "on" (--humanlike
   // flag or GH_ROUTER_HUMANLIKE=1) AND this tool is a mutating action
   // (click / fill / type / keyboard / scroll / mouse / drag), inject
-  // a Beta-distributed inter-action delay before the dispatch. Phase
-  // 4-future will gate this on bot-challenge detection per tabId
-  // (state.humanlikeForce === "auto" path); for now it's force-on.
-  await maybeInjectHumanlikeDelay(tool, signal)
+  // a Beta-distributed inter-action delay before the dispatch. When
+  // state.humanlikeForce === "auto" (default), consult the bridge
+  // /health endpoint for tabs flagged by extension-side bot-challenge
+  // detection (Cloudflare / Datadome / PerimeterX / Imperva headers)
+  // and inject the same delay only for those tabs. Cached probe is
+  // throttled to one /health call per 5 s.
+  const tabIdArg = typeof args.tabId === "number" ? args.tabId : undefined
+  await maybeInjectHumanlikeDelay(tool, signal, tabIdArg)
   const { defaultMs, maxMs } = pickTimeout(tool)
   const callerTimeout =
     typeof opts.timeoutMs === "number" && opts.timeoutMs > 0
