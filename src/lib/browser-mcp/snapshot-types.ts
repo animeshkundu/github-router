@@ -101,6 +101,23 @@ export interface SnapshotElement {
    * the matcher disambiguate "Submit in the form labeled X" vs
    * "Submit in the form labeled Y" without re-walking the tree. */
   landmarks?: ReadonlyArray<string>
+
+  /** Raw attribute extras that the matcher cascade's L5 testid +
+   * aria-label layer + L7 semantic-id heuristic consume. Limited
+   * to the handful that signal author intent (not a full attribute
+   * dump). Omitted when none of the listed attrs are present.
+   *
+   * - `testid`: data-testid / data-test-id / data-test / data-qa
+   * - `id`: HTML id attribute
+   * - `name_attr`: HTML name attribute (form fields)
+   * - `aria_label`: aria-label string when set
+   */
+  attrs?: {
+    testid?: string
+    id?: string
+    name_attr?: string
+    aria_label?: string
+  }
 }
 
 /**

@@ -376,22 +376,48 @@ const L4: Layer = {
   },
 }
 
-// L5: data-testid / id / name token match (when intent looks like a
-// token: single short kebab/snake/camel identifier).
+// L5: data-testid / id / name / aria-label token match (when intent
+// looks like a token: single short kebab/snake/camel identifier).
+// Enriched-extractor surfaces `attrs.testid` / `attrs.id` /
+// `attrs.name_attr` / `attrs.aria_label`; testids and ids are the
+// engineering-grade selectors test authors maintain explicitly, so
+// when intent matches one we're nearly certain it's the right
+// element (score 0.90).
 const L5: Layer = {
   name: "L5",
   floor: 0.85,
-  run: (_snapshot, parsed) => {
+  run: (snapshot, parsed) => {
     const target = parsed.normTarget
     if (!target) return []
     if (!/^[a-z][a-z0-9_-]{2,}$/i.test(target)) return []
-    // The PR #55 snapshot shape doesn't surface raw id/testid/name —
-    // that lives in Phase 1b-CDP. For now, the only signal is the
-    // ref itself (which is data-gh-router-ref, not user-set). Layer
-    // is a no-op against legacy snapshots; lights up automatically
-    // once snapshot.elements gains attrs.
-    return []
+    const norm = target.toLowerCase().replace(/[-_]/g, "")
+    const out: Candidate[] = []
+    for (const el of snapshot.elements) {
+      const attrs = (el as { attrs?: Record<string, string> }).attrs
+      if (!attrs) continue
+      // testid: highest signal — explicitly maintained by test authors.
+      if (attrs.testid && stripSep(attrs.testid).toLowerCase() === norm) {
+        out.push({ el, score: 0.90, layer: "L5", reason: `L5 testid="${attrs.testid}"` })
+        continue
+      }
+      if (attrs.id && stripSep(attrs.id).toLowerCase() === norm) {
+        out.push({ el, score: 0.88, layer: "L5", reason: `L5 id="${attrs.id}"` })
+        continue
+      }
+      if (attrs.name_attr && stripSep(attrs.name_attr).toLowerCase() === norm) {
+        out.push({ el, score: 0.86, layer: "L5", reason: `L5 name="${attrs.name_attr}"` })
+        continue
+      }
+      if (attrs.aria_label && stripSep(attrs.aria_label).toLowerCase() === norm) {
+        out.push({ el, score: 0.86, layer: "L5", reason: `L5 aria-label="${attrs.aria_label}"` })
+      }
+    }
+    return out
   },
+}
+
+function stripSep(s: string): string {
+  return s.replace(/[-_\s]/g, "")
 }
 
 // L6: spatial / ordinal ("the third card").

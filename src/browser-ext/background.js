@@ -330,6 +330,97 @@ async function extractSnapshotLegacy(tabId, opts) {
       // elements (a div with role="button" but no aria-label is noise).
       // Full mode: keep everything, model asked for it.
       const ELEMENT_CAP = 200
+      const LANDMARK_ROLES = new Set([
+        "dialog", "alertdialog", "region", "navigation", "main",
+        "form", "search", "complementary", "banner", "contentinfo",
+      ])
+      const LANDMARK_TAGS = new Set([
+        "dialog", "form", "nav", "main", "header", "footer", "aside", "section",
+      ])
+      // Pre-mint refs for landmark ancestors so child elements can
+      // cite parent refs without a second walk.
+      function landmarkRefsFor(el) {
+        const refs = []
+        let cur = el.parentElement
+        let depth = 0
+        while (cur && depth < 12 && refs.length < 4) {
+          const role = cur.getAttribute && cur.getAttribute("role")
+          const ctag = cur.tagName && cur.tagName.toLowerCase()
+          const isLandmark = (role && LANDMARK_ROLES.has(role)) || LANDMARK_TAGS.has(ctag)
+          if (isLandmark) {
+            let r = cur.getAttribute("data-gh-router-ref")
+            if (!r || !/^e\d+$/.test(r)) {
+              r = nextFreshRef()
+              cur.setAttribute("data-gh-router-ref", r)
+            }
+            refs.push(r)
+          }
+          cur = cur.parentElement
+          depth++
+        }
+        return refs
+      }
+      function stateFlagsFor(el, tag) {
+        const flags = {}
+        // disabled: prefer the property (more reliable than the attr
+        // for inputs / buttons; aria-disabled covers role=button divs).
+        if (el.disabled === true || el.getAttribute("aria-disabled") === "true") flags.disabled = true
+        if (el.checked === true) flags.checked = true
+        else if (el.indeterminate === true) flags.checked = "mixed"
+        else if (el.getAttribute("aria-checked") === "true") flags.checked = true
+        else if (el.getAttribute("aria-checked") === "mixed") flags.checked = "mixed"
+        const aria = (name) => el.getAttribute(name)
+        if (aria("aria-expanded") === "true") flags.expanded = true
+        else if (aria("aria-expanded") === "false") flags.expanded = false
+        if (el.selected === true || aria("aria-selected") === "true") flags.selected = true
+        if (aria("aria-pressed") === "true") flags.pressed = true
+        else if (aria("aria-pressed") === "false") flags.pressed = false
+        if (el.required === true || aria("aria-required") === "true") flags.required = true
+        if (el.readOnly === true || aria("aria-readonly") === "true") flags.readonly = true
+        if (aria("aria-invalid") === "true") flags.invalid = true
+        if (document.activeElement === el) flags.focused = true
+        // hidden: aria-hidden takes precedence; offsetParent === null
+        // covers display:none parents (NOT a reliable visibility check
+        // for fixed-position elements but a reasonable cheap signal).
+        if (aria("aria-hidden") === "true") flags.hidden = true
+        else if (tag !== "body" && el.offsetParent === null && getComputedStyle(el).position !== "fixed") {
+          flags.hidden = true
+        }
+        return flags
+      }
+      function inputExtrasFor(el, tag) {
+        const out = {}
+        if (tag === "input" || tag === "textarea" || tag === "select") {
+          const t = (el.type || "").toLowerCase()
+          if (t) out.inputType = t
+        }
+        const ph = el.placeholder || el.getAttribute("placeholder")
+        if (ph) out.placeholder = String(ph).slice(0, 200)
+        const ac = el.getAttribute("autocomplete")
+        if (ac) out.autocomplete = ac
+        // For inputs / textareas / select, value is the current user
+        // input. Bounded so a huge textarea doesn't bloat the snapshot.
+        if (typeof el.value === "string" && el.value.length > 0) {
+          out.value = el.value.slice(0, 200)
+        }
+        return out
+      }
+      function attrExtrasFor(el) {
+        // Surface raw attrs the matcher's L5 testid layer + L7 semantic
+        // heuristic want to see. Limited to a handful — we don't want
+        // to dump every attribute on every element.
+        const out = {}
+        const id = el.id
+        if (id) out.id = id
+        const testid = el.getAttribute("data-testid") || el.getAttribute("data-test-id")
+          || el.getAttribute("data-test") || el.getAttribute("data-qa")
+        if (testid) out.testid = testid
+        const nameAttr = el.getAttribute("name")
+        if (nameAttr) out.name_attr = nameAttr
+        const aria = el.getAttribute("aria-label")
+        if (aria) out.aria_label = aria
+        return out
+      }
       const elements = []
       for (const el of interactive) {
         if (elements.length >= ELEMENT_CAP) break
@@ -346,6 +437,7 @@ async function extractSnapshotLegacy(tabId, opts) {
         const entry = {
           ref,
           role: el.getAttribute("role") || tag,
+          tag,
           bbox: [
             Math.round(rect.x),
             Math.round(rect.y),
@@ -354,6 +446,25 @@ async function extractSnapshotLegacy(tabId, opts) {
           ],
         }
         if (name) entry.name = name
+        // Inline state flags onto the entry. Each is omitted when
+        // false / default per the snapshot-types contract.
+        const flags = stateFlagsFor(el, tag)
+        for (const k of Object.keys(flags)) entry[k] = flags[k]
+        // Input-shaped extras (placeholder / inputType / value /
+        // autocomplete) — only present for input-shaped elements.
+        const inExtras = inputExtrasFor(el, tag)
+        if (inExtras.inputType) entry.inputType = inExtras.inputType
+        if (inExtras.placeholder) entry.placeholder = inExtras.placeholder
+        if (inExtras.autocomplete) entry.autocomplete = inExtras.autocomplete
+        if (inExtras.value) entry.value = inExtras.value
+        // Raw attribute extras for L5 testid + L7 semantic layers.
+        // Stored on a single `attrs` object to keep the top-level
+        // shape stable.
+        const attrExtras = attrExtrasFor(el)
+        if (Object.keys(attrExtras).length > 0) entry.attrs = attrExtras
+        // Landmark ancestry — up to 4 deep, dialog / form / nav / etc.
+        const landmarks = landmarkRefsFor(el)
+        if (landmarks.length > 0) entry.landmarks = landmarks
         elements.push(entry)
       }
       // Text extraction.
