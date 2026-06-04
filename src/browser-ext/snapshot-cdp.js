@@ -71,6 +71,17 @@ export async function extractSnapshotCDP(tabId, opts, deps) {
   try {
     const tab = await chrome.tabs.get(tabId)
     const viewport = await captureViewport(tabId, sendCommand)
+    // DOM.getDocument must be called before DOM.pushNodesByBackendIdsToFrontend
+    // can resolve anything — DOM.enable alone does NOT materialize the
+    // protocol-side node tree, which is the gotcha that bit the first
+    // implementation (1597 AX nodes, 0 resolved). pierce:true crosses
+    // into shadow roots and iframe content documents in one round-trip.
+    try {
+      await sendCommand(tabId, "DOM.getDocument", { depth: -1, pierce: true })
+    } catch {
+      // Best-effort — getDocument can fail on detached / about:blank
+      // frames; pushNodes calls below will throw cleanly per-frame.
+    }
     const frameTree = await sendCommand(tabId, "Page.getFrameTree", {})
     const frames = flattenFrameTree(frameTree.frameTree)
     let truncatedElements = false
@@ -78,6 +89,7 @@ export async function extractSnapshotCDP(tabId, opts, deps) {
     const elements = []
     const refCounter = { next: 1 }
     const usedRefs = new Set()
+    const diag = { frames: frames.length, axNodes: 0, interesting: 0, resolved: 0, withRef: 0 }
     for (const frame of frames) {
       if (timedOut) break
       if (elements.length >= ELEMENT_CAP) {
@@ -96,6 +108,7 @@ export async function extractSnapshotCDP(tabId, opts, deps) {
           refCounter,
           usedRefs,
           sendCommand,
+          diag,
         })
         elements.push(...frameElements)
       } catch {
@@ -122,6 +135,7 @@ export async function extractSnapshotCDP(tabId, opts, deps) {
         elements: truncatedElements,
         text: truncatedText,
         framesSkipped,
+        diag,
       },
     }
     if (visualSurfaces.length > 0) out.visualSurfaces = visualSurfaces
@@ -173,12 +187,13 @@ async function captureViewport(tabId, sendCommand) {
 
 async function extractFrameElements({
   tabId, frame, parentFrameOffset, isTopFrame, mode, viewport,
-  remainingCap, refCounter, usedRefs, sendCommand,
+  remainingCap, refCounter, usedRefs, sendCommand, diag,
 }) {
   const cap = Math.min(PER_FRAME_CAP, remainingCap)
   const params = isTopFrame ? {} : { frameId: frame.frameId }
   const result = await sendCommand(tabId, "Accessibility.getFullAXTree", params)
   const nodes = Array.isArray(result.nodes) ? result.nodes : []
+  if (diag) diag.axNodes += nodes.length
   // Pre-pass: collect landmark nodes by AXNode id so leaf nodes can
   // attribute their ancestry without walking the whole tree.
   const landmarkByAxId = new Map()
@@ -216,6 +231,7 @@ async function extractFrameElements({
     if (typeof n.backendDOMNodeId !== "number") return false
     return true
   }).slice(0, cap)
+  if (diag) diag.interesting += interesting.length
   // Resolve backendDOMNodeIds to frontend nodeIds in one batch.
   const backendIds = interesting.map((n) => n.backendDOMNodeId)
   let nodeIds = []
@@ -225,6 +241,7 @@ async function extractFrameElements({
         backendNodeIds: backendIds,
       })
       nodeIds = Array.isArray(resolved.nodeIds) ? resolved.nodeIds : []
+      if (diag) diag.resolved += nodeIds.filter((n) => n).length
     } catch {
       // DOM.pushNodes can fail per-frame on cross-origin. Best-effort.
     }
@@ -333,6 +350,7 @@ async function extractFrameElements({
     const lm = landmarksOf(ax.nodeId)
     if (lm.length > 0) entry.landmarks = lm
     out.push(entry)
+    if (diag) diag.withRef++
   }
   return out
 }
