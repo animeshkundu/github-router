@@ -27,6 +27,7 @@ import {
   captureSnapshot,
   invalidateSnapshot,
 } from "./snapshot.js"
+import { extractSnapshotCDP } from "./snapshot-cdp.js"
 
 // ---------------------------------------------------------------------
 // Navigation policy — URL patterns this extension blocks at
@@ -194,11 +195,26 @@ async function toolReadPage(args) {
   if (!tabId) throw new Error("browser_read_page: tabId is required")
   const mode = args.mode === "full" ? "full" : "summary"
   const refresh = args.refresh === true
-  // Cache wrapper. captureSnapshot reads through the per-tab cache when
-  // refresh=false. Mode is part of the cache key because summary +
-  // full produce different element sets — caching one and returning
-  // it for the other would be a correctness bug.
-  return captureSnapshot(tabId, { mode, refresh }, extractSnapshotLegacy)
+  // Phase 1c-CDP: try the CDP `Accessibility.getFullAXTree`-based
+  // extractor first. Better cross-origin iframe coverage, real
+  // platform-computed accessible names, AX-tree-flagged hidden /
+  // disabled state. Falls back to the legacy DOM walker when CDP
+  // attach fails (enterprise DeveloperToolsAvailability=2, DevTools
+  // already open on the tab, sandbox restriction). The fallback path
+  // produces a strict-subset shape so consumers don't have to branch.
+  const extractor = async (tId, ext) => {
+    try {
+      return await extractSnapshotCDP(tId, ext, {
+        attachDebugger: attachDebuggerOnce,
+        sendCommand: (id, method, params) => chrome.debugger.sendCommand({ tabId: id }, method, params),
+      })
+    } catch (err) {
+      const msg = err && err.message ? err.message : String(err)
+      console.warn(`[browser-mcp/snapshot] CDP extractor failed, falling back to legacy: ${msg}`)
+      return await extractSnapshotLegacy(tId, ext)
+    }
+  }
+  return captureSnapshot(tabId, { mode, refresh }, extractor)
 }
 
 /**
@@ -1680,8 +1696,28 @@ async function attachDebuggerOnce(tabId, opts) {
       networkBuffers.set(tabId, [])
       await chrome.debugger.sendCommand({ tabId }, "Network.enable")
     }
+    // CDP a11y-tree extraction needs DOM + Page + Accessibility
+    // domains enabled. We track them in a single Set so a second
+    // captureSnapshot call on the same tab is a no-op.
+    if (opts?.accessibility && !axDomainsEnabledTabs.has(tabId)) {
+      axDomainsEnabledTabs.add(tabId)
+      try {
+        await chrome.debugger.sendCommand({ tabId }, "DOM.enable")
+        await chrome.debugger.sendCommand({ tabId }, "Page.enable")
+        await chrome.debugger.sendCommand({ tabId }, "Accessibility.enable")
+      } catch (err) {
+        // Roll back the tracking flag so the next call retries.
+        axDomainsEnabledTabs.delete(tabId)
+        throw err
+      }
+    }
   })
 }
+
+// Track which tabs have the CDP a11y domains enabled (DOM + Page +
+// Accessibility). Cleared on debugger.onDetach / tabs.onRemoved
+// alongside the other per-tab state.
+const axDomainsEnabledTabs = new Set()
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const tabId = source.tabId
@@ -1714,6 +1750,7 @@ chrome.debugger.onDetach.addListener((source) => {
     consoleBuffers.delete(source.tabId)
     networkBuffers.delete(source.tabId)
     tabInputLockTails.delete(source.tabId)
+    axDomainsEnabledTabs.delete(source.tabId)
     // Snapshot cache: CDP-written refs survive a detach (they're DOM
     // attributes, not CDP state), but bbox/AXNode IDs become unreliable
     // because re-attach needs a fresh DOM.enable handshake. Safer to
@@ -1733,6 +1770,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   consoleBuffers.delete(tabId)
   networkBuffers.delete(tabId)
   tabInputLockTails.delete(tabId)
+  axDomainsEnabledTabs.delete(tabId)
   invalidateSnapshot(tabId, "tab-closed")
 })
 
