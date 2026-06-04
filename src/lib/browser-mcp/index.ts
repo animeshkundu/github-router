@@ -10,6 +10,7 @@ import {
 } from "./compressor"
 import { decompose } from "./decompose"
 import { observePage } from "./observe"
+import { planCompoundReplan } from "./planner"
 
 import type { NonPersonaMcpTool } from "~/lib/peer-mcp-personas"
 
@@ -641,9 +642,13 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
       // the snapshot between steps because each mutating action
       // invalidates the cache (Phase 1b hook). Aggregate into one
       // {ok, summary} envelope; lead model gets ONE response, not
-      // one per step.
+      // one per step. On failure of any step in a multi-step
+      // compound, escalate the WHOLE compound to the fast-model
+      // replanner ONCE (Phase 3c) — bounds worst-case cost to one
+      // fast-model call regardless of step count or compound depth.
       const summaries: string[] = []
       let navigated = false
+      const completedSteps: typeof decomposed.steps = []
       for (let i = 0; i < decomposed.steps.length; i++) {
         const step = decomposed.steps[i]
         const env = await runAtomicIntentStep(tabId, step.intent, step.value, signal)
@@ -653,18 +658,84 @@ export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
           try { stepResult = JSON.parse(stepText) as Record<string, unknown> } catch { /* keep empty */ }
         }
         if (env.isError || stepResult.ok === false) {
-          return toolEnvelope({
-            ok: false,
-            summary: `compound step ${i + 1}/${decomposed.steps.length} failed: ${String(stepResult.error ?? "unknown")}`,
-            template: decomposed.template,
-            steps_completed: i,
-            failed_step: step.intent,
-          }, true)
+          // Phase 3c: planner replan. Fetch a fresh snapshot of the
+          // page state at the failure point, ask the fast model to
+          // produce a revised step list, dispatch each replanned
+          // step through the cascade. Strict cost cap: ONE planner
+          // call per compound, no recursion (the replanned-step
+          // failure path surfaces a clean error to the lead model).
+          try {
+            const failureReason = String(stepResult.error ?? "unknown")
+            const freshSnapshot = await fetchSnapshot(tabId, signal)
+            const replan = await planCompoundReplan({
+              originalIntent: intent!,
+              originalValue: value,
+              completedSteps,
+              failedStep: step,
+              failureReason,
+              snapshot: freshSnapshot,
+            }, signal)
+            if (replan.steps.length === 0) {
+              return toolEnvelope({
+                ok: false,
+                summary: `compound step ${i + 1}/${decomposed.steps.length} failed and planner declined: ${replan.reasoning || failureReason}`,
+                template: decomposed.template,
+                steps_completed: i,
+                failed_step: step.intent,
+                planner_reasoning: replan.reasoning,
+              }, true)
+            }
+            // Dispatch each replanned step. NO recursive replan on
+            // failure here — the lead model gets a clean error if
+            // the replan also fails.
+            const replanSummaries: string[] = []
+            for (let j = 0; j < replan.steps.length; j++) {
+              const rstep = replan.steps[j]
+              const renv = await runAtomicIntentStep(tabId, rstep.intent, rstep.value, signal)
+              const rtext = renv.content?.[0]?.text
+              let rresult: Record<string, unknown> = {}
+              if (typeof rtext === "string") {
+                try { rresult = JSON.parse(rtext) as Record<string, unknown> } catch { /* keep empty */ }
+              }
+              if (renv.isError || rresult.ok === false) {
+                return toolEnvelope({
+                  ok: false,
+                  summary: `compound failed at original step ${i + 1}, planner replan also failed at step ${j + 1}/${replan.steps.length}: ${String(rresult.error ?? "unknown")}`,
+                  template: decomposed.template,
+                  steps_completed: i,
+                  failed_step: rstep.intent,
+                  planner_reasoning: replan.reasoning,
+                }, true)
+              }
+              if (typeof rresult.action_taken === "string") {
+                replanSummaries.push(`${rresult.action_taken} (${rstep.intent})`)
+              }
+              if (rresult.navigated === true) navigated = true
+            }
+            return toolEnvelope({
+              ok: true,
+              summary: `compound recovered via planner (${replan.reasoning}): ${replanSummaries.join(" → ")}`,
+              template: decomposed.template,
+              steps_completed: i + replan.steps.length,
+              navigated,
+              planner_used: true,
+              planner_reasoning: replan.reasoning,
+            })
+          } catch (replanErr) {
+            return toolEnvelope({
+              ok: false,
+              summary: `compound step ${i + 1}/${decomposed.steps.length} failed; planner errored: ${replanErr instanceof Error ? replanErr.message : String(replanErr)}`,
+              template: decomposed.template,
+              steps_completed: i,
+              failed_step: step.intent,
+            }, true)
+          }
         }
         if (typeof stepResult.action_taken === "string") {
           summaries.push(`${stepResult.action_taken} (${step.intent})`)
         }
         if (stepResult.navigated === true) navigated = true
+        completedSteps.push(step)
       }
       return toolEnvelope({
         ok: true,
