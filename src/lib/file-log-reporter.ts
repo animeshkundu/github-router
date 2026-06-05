@@ -53,7 +53,13 @@ function makeDedupeKey(logObj: LogObject): string {
     : key
 }
 
-function rotateIfNeeded(filePath: string): void {
+/**
+ * Construction-time rotation: rename the log aside if it's already over the
+ * cap before we start appending. Runs with no descriptor held (the instance
+ * fd is opened lazily on the first `log()`), so a plain path stat + rename is
+ * correct here. The per-`log()` ceiling check lives in `rotateIfNeeded()`.
+ */
+function rotateAtStartup(filePath: string): void {
   let size: number
   try {
     size = fs.statSync(filePath).size
@@ -79,9 +85,79 @@ export class FileLogReporter implements ConsolaReporter {
   private bytesSinceCheck = 0
   private static readonly ROTATE_CHECK_BYTES = MAX_LOG_BYTES / 2
 
+  // Persistent append descriptor. Opened lazily on the first write and held
+  // open for the reporter's lifetime — a daemon writing thousands of warn /
+  // error lines must NOT pay an openSync + closeSync syscall pair per line
+  // (that was ~0.4 ms/line on Windows NTFS, i.e. seconds per MB). It is
+  // closed only across a rotation (so the rename can succeed — Windows
+  // refuses to rename a file with an open handle) and on an explicit
+  // close(); the next write reopens the fresh file.
+  private fd: number | undefined
+
   constructor(filePath: string) {
     this.filePath = filePath
-    rotateIfNeeded(filePath)
+    rotateAtStartup(filePath)
+  }
+
+  private ensureFd(): number | undefined {
+    if (this.fd !== undefined) return this.fd
+    try {
+      this.fd = fs.openSync(this.filePath, "a", 0o600)
+    } catch {
+      // Path unwritable (e.g. it's a directory, or perms) — stay closed and
+      // drop lines silently. Cannot log a logging failure.
+      this.fd = undefined
+    }
+    return this.fd
+  }
+
+  private closeFd(): void {
+    if (this.fd === undefined) return
+    try {
+      fs.closeSync(this.fd)
+    } catch {
+      // already closed / unwritable — nothing to do
+    }
+    this.fd = undefined
+  }
+
+  /**
+   * Enforce the MAX_LOG_BYTES ceiling. Sizes the LIVE file (fstat on the open
+   * fd when we hold one — no path race — else a path stat), and on overflow
+   * CLOSES the fd before renaming. Closing first is load-bearing on Windows
+   * (renaming a file with an open handle fails with EBUSY/EPERM) and correct
+   * on POSIX too (a held append-fd would otherwise keep writing into the
+   * renamed `.1` inode). The fd is left closed so the next write reopens the
+   * freshly-created file.
+   */
+  private rotateIfNeeded(): void {
+    let size: number
+    try {
+      size =
+        this.fd !== undefined
+          ? fs.fstatSync(this.fd).size
+          : fs.statSync(this.filePath).size
+    } catch {
+      return // file does not exist / fd invalid
+    }
+    if (size <= MAX_LOG_BYTES) return
+
+    this.closeFd()
+    try {
+      fs.renameSync(this.filePath, this.filePath + ".1")
+    } catch {
+      // best-effort: if rename fails, continue appending to the existing file
+    }
+  }
+
+  /**
+   * Close the held descriptor. Safe to call repeatedly and after a write
+   * failure. Optional for correctness (writeSync flushes immediately and the
+   * OS closes fds at process exit), but lets a long-lived host release the
+   * handle deterministically on shutdown.
+   */
+  close(): void {
+    this.closeFd()
   }
 
   log(logObj: LogObject, _ctx: { options: ConsolaOptions }): void {
@@ -96,48 +172,29 @@ export class FileLogReporter implements ConsolaReporter {
     const line = formatLogLine(logObj)
 
     // Periodic rotation check: after every ROTATE_CHECK_BYTES written since
-    // the last check, call rotateIfNeeded to enforce the MAX_LOG_BYTES ceiling
-    // from inside the hot path. The stat inside rotateIfNeeded only runs when
-    // the threshold is exceeded, so this adds at most one stat per 512 KB of
-    // output — acceptable for a warn/error-only log path.
+    // the last check, enforce the MAX_LOG_BYTES ceiling from inside the hot
+    // path. The fstat/stat only runs when the threshold is exceeded, so this
+    // adds at most one stat per 512 KB of output.
     //
-    // Concurrency: log() is synchronous (openSync/writeSync/closeSync hold
-    // the event loop for each line), so two calls can't interleave. The
-    // bytesSinceCheck counter is therefore safe without a mutex. If
-    // rotateIfNeeded's rename races a concurrent fs.openSync("a") in a
-    // subsequent call (e.g., on Windows where renameSync is not atomic with
-    // open), the open still succeeds and the new line goes to the right file.
+    // Concurrency: log() is synchronous (the writeSync below holds the event
+    // loop), so two calls can't interleave and the bytesSinceCheck counter is
+    // safe without a mutex.
     this.bytesSinceCheck += line.length
     if (this.bytesSinceCheck >= FileLogReporter.ROTATE_CHECK_BYTES) {
-      rotateIfNeeded(this.filePath)
+      this.rotateIfNeeded()
       this.bytesSinceCheck = 0
     }
 
-    // fs.openSync/writeSync/closeSync are synchronous and atomic from the
-    // perspective of the JS event loop — no other log() call can interleave
-    // between them. The previous re-entrancy guard (`if (this.writing)
-    // return`) silently dropped log lines that arrived during the same
-    // call stack as a write (e.g., a consola.error fired from an error
-    // handler triggered by another log). Now we just write and trust the
-    // synchronicity.
-    //
-    // The fd is closed in `finally` so an ENOSPC/EIO from writeSync does
-    // not leak the fd. Repeated logging failures otherwise escalate into
-    // EMFILE and bring down the whole process's ability to open files.
-    let fd: number | undefined
+    // Write through the persistent append fd (opened lazily / reopened after
+    // a rotation). On any write error, close + drop the fd so a transient
+    // failure (ENOSPC, the file removed out from under us) neither wedges
+    // logging permanently nor leaks the descriptor — the next call reopens.
+    const fd = this.ensureFd()
+    if (fd === undefined) return
     try {
-      fd = fs.openSync(this.filePath, "a", 0o600)
       fs.writeSync(fd, line)
     } catch {
-      // Silently discard — cannot log a logging failure
-    } finally {
-      if (fd !== undefined) {
-        try {
-          fs.closeSync(fd)
-        } catch {
-          // already closed / unwritable — nothing to do
-        }
-      }
+      this.closeFd()
     }
   }
 }
