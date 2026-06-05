@@ -46,6 +46,10 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import process from "node:process"
 
+import { PATHS } from "../paths"
+import { toolbeltEnabled } from "../toolbelt"
+import { toolbeltPathOverride } from "../toolbelt/path-inject"
+
 /**
  * Env keys preserved from the parent process. Add a new key only if
  * (a) it is genuinely required for typical shell invocations to work
@@ -142,6 +146,13 @@ function buildEnv(): NodeJS.ProcessEnv {
   for (const key of ENV_ALLOWLIST) {
     const v = process.env[key]
     if (v !== undefined) env[key] = v
+  }
+  // Prepend the toolbelt bin dir so the worker shell can call
+  // rg/fd/jq/sd/sg/yq too. Reuse the casing-safe helper; never mutate
+  // the global process.env (that would broaden shadowing to every
+  // router subprocess). Credential keys remain dropped by the allowlist.
+  if (toolbeltEnabled()) {
+    Object.assign(env, toolbeltPathOverride(env, PATHS.TOOLBELT_BIN_DIR))
   }
   return env
 }

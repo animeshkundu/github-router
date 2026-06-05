@@ -147,11 +147,14 @@ mock.module("~/lib/codex-mcp-config", () => ({
 // tests/claude-md-injection.test.ts in isolation.
 const appendPeerAwarenessToMirroredClaudeMdMock = mock()
 const prependStyleDirectiveToMirroredClaudeMdMock = mock()
+const appendToolbeltAwarenessToMirroredClaudeMdMock = mock()
 mock.module("~/lib/claude-md-injection", () => ({
   appendPeerAwarenessToMirroredClaudeMd:
     appendPeerAwarenessToMirroredClaudeMdMock,
   prependStyleDirectiveToMirroredClaudeMd:
     prependStyleDirectiveToMirroredClaudeMdMock,
+  appendToolbeltAwarenessToMirroredClaudeMd:
+    appendToolbeltAwarenessToMirroredClaudeMdMock,
 }))
 
 // launch.ts also exports buildLaunchCommand etc. — re-export the real
@@ -254,6 +257,8 @@ beforeEach(() => {
   appendPeerAwarenessToMirroredClaudeMdMock.mockResolvedValue(undefined)
   prependStyleDirectiveToMirroredClaudeMdMock.mockReset()
   prependStyleDirectiveToMirroredClaudeMdMock.mockResolvedValue(undefined)
+  appendToolbeltAwarenessToMirroredClaudeMdMock.mockReset()
+  appendToolbeltAwarenessToMirroredClaudeMdMock.mockResolvedValue(undefined)
   getCodexVersionMock.mockReset()
   getCodexVersionMock.mockReturnValue({ ok: false })
 

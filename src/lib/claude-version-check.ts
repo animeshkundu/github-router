@@ -1,16 +1,20 @@
-import { execFile, execFileSync } from "node:child_process"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { promisify } from "node:util"
 
 import consola from "consola"
 
-const execFileAsync = promisify(execFile)
+import {
+  resolveExecutable,
+  runCommandCapture,
+  runCommandVoid,
+} from "./exec"
+import { withInstallLock } from "./update-lock"
 
 const NPM_PACKAGE = "@anthropic-ai/claude-code"
 const THROTTLE_HOURS = 1
 const NPM_VIEW_TIMEOUT_MS = 5000
+const CLAUDE_VERSION_TIMEOUT_MS = 3000
 const NPM_INSTALL_TIMEOUT_MS = 120_000 // 2 min — npm install can be slow on cold caches
 
 interface VersionCheckCache {
@@ -82,16 +86,23 @@ function shouldCheckNow(cache: VersionCheckCache | null): boolean {
  * Read the installed `claude` version. Returns null if claude is not
  * on PATH or the version probe fails (e.g. older versions that don't
  * support `--version` cleanly).
+ *
+ * Windows-safe: `claude` is a `.cmd` shim that `execFile` cannot launch
+ * directly. We resolve it to an absolute path (excluding the cwd, so a
+ * planted `claude.cmd` in an untrusted repo can't run) and invoke it
+ * through the shared exec helper.
  */
-function getInstalledVersion(): string | null {
+async function getInstalledVersion(): Promise<string | null> {
+  const claudePath = resolveExecutable("claude")
+  if (!claudePath) return null
   try {
-    const out = execFileSync("claude", ["--version"], {
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 3000,
-      encoding: "utf8",
-    })
+    const { stdout, code } = await runCommandCapture(
+      [claudePath, "--version"],
+      { timeoutMs: CLAUDE_VERSION_TIMEOUT_MS },
+    )
+    if (code !== 0) return null
     // Output shape: "2.1.139 (Claude Code)\n"
-    const match = out.match(/^(\d+\.\d+\.\d+)/)
+    const match = stdout.match(/(\d+\.\d+\.\d+)/)
     return match ? match[1] : null
   } catch {
     return null
@@ -101,14 +112,19 @@ function getInstalledVersion(): string | null {
 /**
  * Fetch the latest version of @anthropic-ai/claude-code from the npm
  * registry. Returns null on network failure / npm unavailable.
+ *
+ * Windows-safe: `npm` is `npm.cmd`; resolved to an absolute path
+ * (excluding cwd) before invocation.
  */
 async function getLatestVersion(): Promise<string | null> {
+  const npmPath = resolveExecutable("npm")
+  if (!npmPath) return null
   try {
-    const { stdout } = await execFileAsync(
-      "npm",
-      ["view", NPM_PACKAGE, "version", "--silent"],
-      { timeout: NPM_VIEW_TIMEOUT_MS },
+    const { stdout, code } = await runCommandCapture(
+      [npmPath, "view", NPM_PACKAGE, "version", "--silent"],
+      { timeoutMs: NPM_VIEW_TIMEOUT_MS },
     )
+    if (code !== 0) return null
     const v = stdout.trim()
     return /^\d+\.\d+\.\d+/.test(v) ? v : null
   } catch {
@@ -122,7 +138,7 @@ async function getLatestVersion(): Promise<string | null> {
  * stable releases). Returns true if `latest` is strictly higher than
  * `installed`.
  */
-function isNewer(installed: string | null, latest: string | null): boolean {
+export function isNewer(installed: string | null, latest: string | null): boolean {
   if (!installed || !latest) return false
   const a = installed.split(".").map((n) => parseInt(n, 10))
   const b = latest.split(".").map((n) => parseInt(n, 10))
@@ -182,7 +198,7 @@ export async function checkClaudeVersion(opts: {
     }
   }
 
-  const installedVersion = getInstalledVersion()
+  const installedVersion = await getInstalledVersion()
   if (installedVersion === null) {
     return {
       installed: false,
@@ -224,23 +240,105 @@ export async function checkClaudeVersion(opts: {
 }
 
 /**
- * Run `npm install -g @anthropic-ai/claude-code@latest` synchronously.
- * Throws on failure — the caller decides whether to abort the launch
- * or continue with the older version.
+ * Heuristic: did `claude update` fail because the subcommand does not
+ * exist (a build predating `claude update`), as opposed to a transient
+ * update error? We only npm-fall-back on this specific signal — falling
+ * back on any failure would install a conflicting npm copy on
+ * native-installer machines.
+ *
+ * Matches the usage/Commander-style "unknown command" messages CLIs emit
+ * for an unrecognized subcommand. Deliberately narrow.
  */
-export async function autoUpdateClaude(latestVersion: string): Promise<void> {
-  consola.info(
-    `Updating ${NPM_PACKAGE} to ${latestVersion} (this may take ~30s)...`,
+export function looksLikeUnknownUpdateCommand(output: string): boolean {
+  return /unknown command|unknown subcommand|unrecognized (sub)?command|invalid command|command not found|is not a (known|valid) command/i.test(
+    output,
   )
-  try {
-    await execFileAsync(
-      "npm",
-      ["install", "-g", `${NPM_PACKAGE}@latest`, "--silent"],
-      { timeout: NPM_INSTALL_TIMEOUT_MS },
+}
+
+/**
+ * Update Claude Code to the latest version.
+ *
+ * Strategy (decided in the plan, corrected after a real-world false
+ * negative): run `claude update` directly — it respects the user's
+ * actual install method (native installer or npm), so it never creates a
+ * conflicting second install, and it is NOT blocked by the
+ * `DISABLE_AUTOUPDATER` the proxy sets in the *child* env (this runs from
+ * the proxy's own env, and `claude update` is a manual command
+ * unaffected by that flag).
+ *
+ * Only if `claude update` reports the subcommand is unknown (a build too
+ * old to have it) do we fall back to `npm install -g
+ * @anthropic-ai/claude-code@latest` with a VISIBLE warning. The earlier
+ * `claude --help` capability probe was removed: it timed out / mismatched
+ * on slow cold starts and wrongly forced the npm path every launch,
+ * creating dual npm-global + native installs.
+ *
+ * Serialized across concurrent proxies via an install lock. Throws on
+ * failure — the caller decides whether to warn and continue.
+ */
+export interface UpdateClaudeDeps {
+  resolveExecutable: typeof resolveExecutable
+  runCommandCapture: typeof runCommandCapture
+  runCommandVoid: typeof runCommandVoid
+  withInstallLock: typeof withInstallLock
+}
+
+export async function updateClaude(
+  latestVersion: string,
+  deps: Partial<UpdateClaudeDeps> = {},
+): Promise<void> {
+  const _resolve = deps.resolveExecutable ?? resolveExecutable
+  const _capture = deps.runCommandCapture ?? runCommandCapture
+  const _void = deps.runCommandVoid ?? runCommandVoid
+  const _lock = deps.withInstallLock ?? withInstallLock
+
+  const claudePath = _resolve("claude")
+  if (!claudePath) throw new Error("claude not found on PATH")
+
+  const ran = await _lock("claude-update.lock", async () => {
+    consola.info(`Updating Claude Code to ${latestVersion} via \`claude update\`...`)
+    // Capture (not inherit) so we can detect an unknown-command signal;
+    // echo the output afterward so the user still sees what happened.
+    const { code, stdout, stderr } = await _capture([claudePath, "update"], {
+      timeoutMs: NPM_INSTALL_TIMEOUT_MS,
+    })
+    const combined = `${stdout}${stderr}`
+    const trimmed = combined.trim()
+    if (trimmed) process.stdout.write(trimmed.endsWith("\n") ? trimmed : `${trimmed}\n`)
+
+    if (code === 0) {
+      consola.success(`Claude Code updated to ${latestVersion}`)
+      return
+    }
+
+    if (!looksLikeUnknownUpdateCommand(combined)) {
+      throw new Error(`\`claude update\` exited with code ${code}`)
+    }
+
+    // Fallback: npm. Only reachable on installs too old to have
+    // `claude update` at all.
+    const npmPath = _resolve("npm")
+    if (!npmPath) {
+      throw new Error(
+        "this Claude Code build predates `claude update` and npm is not on PATH; " +
+          `update manually: npm install -g ${NPM_PACKAGE}@latest`,
+      )
+    }
+    consola.warn(
+      "This Claude Code build predates `claude update`; falling back to " +
+        `\`npm install -g ${NPM_PACKAGE}@latest\`.`,
     )
+    const { code: npmCode, stderr: npmStderr } = await _void(
+      [npmPath, "install", "-g", `${NPM_PACKAGE}@latest`, "--silent"],
+      { timeoutMs: NPM_INSTALL_TIMEOUT_MS },
+    )
+    if (npmCode !== 0) {
+      throw new Error(`npm install failed: ${npmStderr.trim() || `exit ${npmCode}`}`)
+    }
     consola.success(`${NPM_PACKAGE} updated to ${latestVersion}`)
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    throw new Error(`npm install failed: ${msg}`)
+  })
+
+  if (!ran) {
+    consola.debug("Claude Code update already in progress in another process; skipping.")
   }
 }

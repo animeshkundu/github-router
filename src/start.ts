@@ -13,6 +13,7 @@ import {
   setupAndServe,
   sharedServerArgs,
 } from "./lib/server-setup"
+import { runSelfUpdate } from "./lib/self-update"
 
 function printAndCopyCommand(command: string, label: string): void {
   consola.box(`${label}\n\n${command}`)
@@ -70,6 +71,10 @@ export const start = defineCommand({
       port: parsed.port ?? DEFAULT_PORT,
       silent: false,
     })
+
+    // Best-effort self-update (detached, applies next launch). Runs
+    // after the server is listening so the bounded probe can't delay it.
+    void runSelfUpdate({ selfUpdate: args["self-update"] !== false })
 
     if (args.cc) generateClaudeCodeCommand(serverUrl, args.model)
     if (args.cx) generateCodexCommand(serverUrl, args.model)

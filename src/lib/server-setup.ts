@@ -6,6 +6,8 @@ import { generateRandomPort } from "./port"
 import { initProxyFromEnv } from "./proxy"
 import { state } from "./state"
 import { setupCopilotToken, setupGitHubToken } from "./token"
+import { toolbeltEnabled } from "./toolbelt"
+import { toolbeltPathOverride } from "./toolbelt/path-inject"
 import { cacheModels, cacheCopilotVersion, cacheVSCodeVersion } from "./utils"
 import { server as app } from "../server"
 
@@ -222,6 +224,12 @@ export const sharedServerArgs = {
     default: false,
     description:
       "Force humanlike pacing on ALL browser tool dispatches: Beta-distributed inter-action delays (800-4600 ms), Bezier mouse trajectories with overshoot-and-correct, per-keystroke jitter with word-end pauses, scroll chunking. Use for known anti-bot sites (Cloudflare, Datadome). Off by default (auto mode); GH_ROUTER_HUMANLIKE=1 is the env equivalent. GH_ROUTER_BROWSER_NO_HUMANLIKE=1 hard-disables (wins over --humanlike, for tests).",
+  },
+  "self-update": {
+    type: "boolean" as const,
+    default: true,
+    description:
+      "Update github-router itself to the latest npm version on launch (throttled once/hour). Best-effort and non-blocking: the proxy serves immediately and a detached updater applies the new version after this process exits (it takes effect on the NEXT launch; the running process keeps its current build). Disable with --no-self-update or GH_ROUTER_NO_SELF_UPDATE=1. Skipped silently if npm/network unavailable.",
   },
 } as const
 
@@ -501,6 +509,13 @@ export function getClaudeCodeEnvVars(
     }
   }
 
+  // Prepend the toolbelt bin dir to the spawned agent's PATH so it can
+  // call rg/fd/jq/sd/sg/yq directly. Uses the parent's existing PATH
+  // key casing to avoid creating a duplicate `Path`/`PATH` on Windows.
+  if (toolbeltEnabled()) {
+    Object.assign(vars, toolbeltPathOverride(process.env, PATHS.TOOLBELT_BIN_DIR))
+  }
+
   return vars
 }
 
@@ -517,10 +532,14 @@ export function getClaudeCodeEnvVars(
  * masks any cached login.
  */
 export function getCodexEnvVars(serverUrl: string): Record<string, string> {
-  return {
+  const vars: Record<string, string> = {
     OPENAI_BASE_URL: `${serverUrl}/v1`,
     OPENAI_API_KEY: "dummy",
     // Isolated CODEX_HOME — masks any cached ChatGPT login (openai/codex#2733).
     CODEX_HOME: PATHS.CODEX_HOME,
   }
+  if (toolbeltEnabled()) {
+    Object.assign(vars, toolbeltPathOverride(process.env, PATHS.TOOLBELT_BIN_DIR))
+  }
+  return vars
 }
