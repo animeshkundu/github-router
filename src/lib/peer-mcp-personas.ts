@@ -36,6 +36,60 @@ import { searchWeb } from "~/services/copilot/web-search"
 import { runStandIn, type StandInInput } from "~/lib/stand-in"
 
 /**
+ * MCP server groups. Each group is surfaced to Claude Code as its OWN MCP
+ * server — a distinct `mcpServers` entry pointing at a path-scoped
+ * `/mcp/<urlSuffix>` endpoint — so the server name signals the tool
+ * category to the model (`mcp__search__code`, `mcp__browser__navigate`)
+ * instead of burying everything under one opaque `gh-router-peers`.
+ *
+ *   - `peers`   — the adversarial critics (codex_critic, codex_reviewer,
+ *                 gemini_critic, opus_critic, + codex_implementer in cli mode)
+ *   - `search`  — `code` (ranked code search) + `web` (web search)
+ *   - `workers` — `explore` / `implement` (autonomous Pi-runtime workers)
+ *   - `browser` — the browser-control tools (only with `--browse`)
+ *   - `decide`  — `stand_in` (three-lab away-mode decision advisor)
+ */
+export type McpGroup = "peers" | "search" | "workers" | "browser" | "decide"
+/** Either a single group (scoped endpoint) or the full union (`/mcp`). */
+export type McpScope = McpGroup | "all"
+export const MCP_GROUPS: ReadonlyArray<McpGroup> = Object.freeze([
+  "peers",
+  "search",
+  "workers",
+  "browser",
+  "decide",
+])
+
+export interface McpGroupMeta {
+  /** Preferred (bare) config-entry key the proxy injects into `.claude.json`.
+   *  Resolved to the prefixed `gh-router-<group>` fallback on collision —
+   *  see `resolveGroupKeys` in codex-mcp-config.ts. */
+  preferredKey: string
+  /** Stable path segment for the scoped endpoint `/mcp/<urlSuffix>`. Always
+   *  the canonical group name regardless of the resolved config key (the URL
+   *  is what the proxy routes on; the config key is what Claude Code
+   *  namespaces tools by — the two are independent). */
+  urlSuffix: McpGroup
+  /** MCP `initialize` `serverInfo.name`. Keeps a `github-router-` provenance
+   *  breadcrumb in MCP logs even though the config key is bare (Claude Code
+   *  namespaces by the config KEY, not by `serverInfo.name`). */
+  serverInfoName: string
+}
+
+export const GROUP_META: Record<McpGroup, McpGroupMeta> = Object.freeze({
+  peers: { preferredKey: "peers", urlSuffix: "peers", serverInfoName: "github-router-peers" },
+  search: { preferredKey: "search", urlSuffix: "search", serverInfoName: "github-router-search" },
+  workers: { preferredKey: "workers", urlSuffix: "workers", serverInfoName: "github-router-workers" },
+  browser: { preferredKey: "browser", urlSuffix: "browser", serverInfoName: "github-router-browser" },
+  decide: { preferredKey: "decide", urlSuffix: "decide", serverInfoName: "github-router-decide" },
+})
+
+/** True iff `s` is a registered group name (route `:group` param validation). */
+export function isMcpGroup(s: unknown): s is McpGroup {
+  return typeof s === "string" && (MCP_GROUPS as ReadonlyArray<string>).includes(s)
+}
+
+/**
  * Reasoning effort levels accepted by Copilot's /v1/responses (gpt-5.x) and
  * /v1/chat/completions endpoints. Per the proxy's existing thinking-mode
  * translator (CLAUDE.md "Thinking-mode translation"), Copilot's adaptive-
@@ -311,8 +365,11 @@ export const PERSONAS_WRITE: ReadonlyArray<PersonaSpec> = Object.freeze([
  *
  * Two modes branch on `codexCli`:
  *   - HTTP backend: subagent calls the per-persona tool
- *     `mcp__gh-router-peers__<toolNameHttp>` with `{prompt, context}`;
- *     model + instructions are server-baked.
+ *     `mcp__<peersKey>__<toolNameHttp>` with `{prompt, context}`;
+ *     model + instructions are server-baked. `peersKey` is the resolved
+ *     config key for the `peers` server — normally the bare `peers`, or the
+ *     `gh-router-peers` fallback when the user already has a `peers` MCP
+ *     (so the routing string always points at OUR server, never the user's).
  *   - codex-cli backend: subagent calls the single
  *     `mcp__codex-cli__codex` tool with `{prompt, model: <persona.model>,
  *     base-instructions: <persona.baseInstructions>}`. Gemini stays on
@@ -320,12 +377,12 @@ export const PERSONAS_WRITE: ReadonlyArray<PersonaSpec> = Object.freeze([
  */
 export function buildAgentPrompt(
   persona: PersonaSpec,
-  opts: { codexCli: boolean },
+  opts: { codexCli: boolean; peersKey: string },
 ): string {
   const useStdio = opts.codexCli && !persona.requiresHttp
   const toolPath = useStdio
     ? "mcp__codex-cli__codex"
-    : `mcp__gh-router-peers__${persona.toolNameHttp}`
+    : `mcp__${opts.peersKey}__${persona.toolNameHttp}`
 
   const invocationBlock = useStdio
     ? [
@@ -409,7 +466,18 @@ export function buildPeerAwarenessSnippet(opts: {
   standInAvailable: boolean
   browseAvailable: boolean
   powerBrowseAvailable?: boolean
+  /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
+   *  collision). Missing key → use the preferred bare key. Keeps the
+   *  `mcp__<server>__<tool>` paths in this snippet pointing at OUR servers. */
+  groupKeys?: Partial<Record<McpGroup, string>>
 }): string {
+  const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
+  const peersKey = key("peers")
+  const searchKey = key("search")
+  const workersKey = key("workers")
+  const browserKey = key("browser")
+  const decideKey = key("decide")
+
   const criticList: Array<string> = [
     "`codex_critic` (gpt-5.5)",
     "`codex_reviewer` (gpt-5.3-codex)",
@@ -424,40 +492,40 @@ export function buildPeerAwarenessSnippet(opts: {
     : ""
 
   // Paragraph 2 — capability inventory. Sentences are joined with a
-  // single space; conditional sentences (worker_*, stand_in) only
+  // single space; conditional sentences (workers, stand_in) only
   // appear when their gate is on, so the snippet never names a tool
   // missing from the live tools/list.
   const para2Parts: Array<string> = [
-    "`code_search` returns ranked code-discovery hits (BM25F + tree-sitter ranking, no additional model call). Multiple independent queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, `.csv`, `.env*`, config-only wiring), `grep`/`glob` still apply.",
+    `\`mcp__${searchKey}__code\` returns ranked code-discovery hits (BM25F + tree-sitter ranking, no additional model call). Multiple independent queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, \`.csv\`, \`.env*\`, config-only wiring), \`grep\`/\`glob\` still apply.`,
   ]
   if (opts.workerToolsAvailable) {
     para2Parts.push(
-      "`worker_explore` runs a Gemini-backed read-only worker that returns a summary, using its own context rather than yours; concurrent launches share the `MAX_INFLIGHT_TOOLS_CALL=8` cap with operator traffic.",
-      "`worker_implement` is the same worker with edit/write/bash; `worktree: true` runs it in an isolated git worktree and returns the diff.",
+      `\`mcp__${workersKey}__explore\` runs a Gemini-backed read-only worker that returns a summary, using its own context rather than yours; concurrent launches share the \`MAX_INFLIGHT_TOOLS_CALL=8\` cap with operator traffic.`,
+      `\`mcp__${workersKey}__implement\` is the same worker with edit/write/bash; \`worktree: true\` runs it in an isolated git worktree and returns the diff.`,
       "Workers themselves have `code_search` in their toolset.",
     )
   }
   para2Parts.push(
-    "`web_search` surfaces citable sources for docs, errors, and upstream issues.",
+    `\`mcp__${searchKey}__web\` surfaces citable sources for docs, errors, and upstream issues.`,
   )
   if (opts.standInAvailable) {
     para2Parts.push(
-      "`stand_in` provides three-lab consensus for decision tiebreak when the user is unavailable.",
+      `\`mcp__${decideKey}__stand_in\` provides three-lab consensus for decision tiebreak when the user is unavailable.`,
     )
   }
   if (opts.browseAvailable) {
     const powerNote = opts.powerBrowseAvailable
-      ? " Power mode is on: the L0/L1 primitives (`browser_mouse`, `browser_drag`, `browser_type`, `browser_keyboard`, `browser_scroll`, `browser_eval_js`, `browser_read_page`, `browser_diagnostics`, `browser_find`) are also available for direct DOM / coordinate control."
+      ? ` Power mode is on: the L0/L1 primitives (\`mcp__${browserKey}__mouse\`, \`__drag\`, \`__type\`, \`__keyboard\`, \`__scroll\`, \`__eval_js\`, \`__read_page\`, \`__diagnostics\`, \`__find\`) are also available for direct DOM / coordinate control.`
       : ""
     para2Parts.push(
-      `\`browser_*\` tools (under \`mcp__gh-router-peers__browser_*\`) drive a real Chrome / Edge browser via a local extension. Lead surface: \`browser_act(intent, value?)\` for any click / fill / type / scroll-to (an inner fast model resolves intent), \`browser_observe(intent?)\` for a 2-4 sentence natural-language page description, \`browser_extract(schema, instruction)\` for typed extraction, \`browser_navigate\` / \`browser_open_tab\` / \`browser_screenshot\` for state and visuals. The lead model never sees raw DOM: refs, bboxes, and role/name dumps stay internal.${powerNote}`,
+      `\`mcp__${browserKey}__*\` tools drive a real Chrome / Edge browser via a local extension. Lead surface: \`__act(intent, value?)\` for any click / fill / type / scroll-to (an inner fast model resolves intent), \`__observe(intent?)\` for a 2-4 sentence natural-language page description, \`__extract(schema, instruction)\` for typed extraction, \`__navigate\` / \`__open_tab\` / \`__screenshot\` for state and visuals. The lead model never sees raw DOM: refs, bboxes, and role/name dumps stay internal.${powerNote}`,
     )
   }
 
   return [
     "## Peer review and advisor",
     "",
-    `Cross-lab peer critics under \`mcp__gh-router-peers__*\` (${criticList.join(", ")}) are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies. The \`peer-review-coordinator\` subagent fans out to the appropriate critics in parallel and aggregates findings by severity. Claude Code's built-in \`advisor\` tool catches approach drift and confabulation. Subagents you spawn inherit all of these.${codexCliClause}`,
+    `Cross-lab peer critics under \`mcp__${peersKey}__*\` (${criticList.join(", ")}) are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies. The \`peer-review-coordinator\` subagent fans out to the appropriate critics in parallel and aggregates findings by severity. Claude Code's built-in \`advisor\` tool catches approach drift and confabulation. Subagents you spawn inherit all of these.${codexCliClause}`,
     "",
     para2Parts.join(" "),
   ].join("\n")
@@ -501,6 +569,10 @@ export function personasFor(opts: {
 export interface NonPersonaMcpTool {
   /** Tool name the HTTP MCP backend exposes for this tool. */
   toolNameHttp: string
+  /** Which MCP server (scoped endpoint) this tool is surfaced under. Drives
+   *  the `tools/list` scope filter and the call-time scope reject in
+   *  handler.ts, and the per-group `mcpServers` entry in codex-mcp-config.ts. */
+  group: McpGroup
   /** Description shown to Opus / displayed in `tools/list`. */
   description: string
   /** JSON-schema for the tool's `arguments` object. */
@@ -579,7 +651,8 @@ function formatWebSearchResult(results: {
 export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
   Object.freeze([
     {
-      toolNameHttp: "web_search",
+      toolNameHttp: "web",
+      group: "search",
       description: WEB_SEARCH_DESCRIPTION,
       inputSchema: {
         type: "object",
@@ -650,7 +723,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       // ranking metadata block) are intentionally NOT forwarded — the
       // model cannot act on them, so they would only burn its context.
       // Do NOT re-export them without re-reading the principle section.
-      toolNameHttp: "code_search",
+      toolNameHttp: "code",
+      group: "search",
       description:
         "Fast structured code search over a local workspace. Returns " +
         "ranked, deduplicated hits with snippets. Ranks with BM25F " +
@@ -658,7 +732,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         "symbol-context fields, then refines `symbol-context` with " +
         "tree-sitter AST analysis on the top hits so identifier " +
         "definitions outrank incidental string matches. Launch " +
-        "multiple code_search calls in parallel to triangulate — " +
+        "multiple code searches in parallel to triangulate — " +
         "e.g. definition + callers + tests in one round-trip. " +
         "Prefer this over Grep/Bash+grep for ranked discovery " +
         "(\"where is X defined\", \"which files reference Y\", " +
@@ -846,7 +920,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     // into a typed `WorkerAgentOpts` and forwards the resulting
     // `{text, isError?}` envelope verbatim.
     {
-      toolNameHttp: "worker_explore",
+      toolNameHttp: "explore",
+      group: "workers",
       capability: "worker",
       description:
         "Read-only investigation by an autonomous worker (Pi runtime; "
@@ -912,7 +987,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       },
     },
     {
-      toolNameHttp: "worker_implement",
+      toolNameHttp: "implement",
+      group: "workers",
       capability: "worker",
       description:
         "Delegates a scoped coding task to an autonomous worker (Pi "
@@ -1012,6 +1088,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       // `gemini_critic` / `opus_critic`. Don't relax the "Do NOT use
       // for" clauses without checking the auto-routing impact.
       toolNameHttp: "stand_in",
+      group: "decide",
       capability: "stand_in",
       description:
         "**Away-mode decision tiebreak.** Three-lab advisor "
@@ -1086,14 +1163,61 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         return runStandInToolCall(args, signal)
       },
     },
-    // Browser-control tools (`browser_*`). Defined in a sibling module so
-    // the dispatch implementation can grow without bloating this file.
-    // Each entry carries `capability: "browser"` so `browserToolsEnabled()`
-    // in `src/routes/mcp/handler.ts` drops them at both list-time and
-    // call-time when the operator hasn't opted in via `--browse` or
-    // `GH_ROUTER_ENABLE_BROWSE=1`.
-    ...BROWSER_TOOLS,
+    // Browser-control tools. Defined in a sibling module so the dispatch
+    // implementation can grow without bloating this file.
+    //
+    // MCP-NAME vs WIRE-NAME DECOUPLING: the `browser-mcp/index.ts` entries
+    // name their tools `browser_*` AND each handler dispatches that same
+    // `browser_*` string to the extension over the native-messaging wire
+    // (the extension's `TOOL_HANDLERS[req.tool]` keys on it). Here we strip
+    // the `browser_` prefix from ONLY the MCP-facing `toolNameHttp` (so the
+    // model sees `mcp__browser__navigate`), while the handlers' hardcoded
+    // wire literals stay `browser_*` untouched. Net effect: the installed
+    // MV3 extension needs NO reload — exposed name ≠ wire name by design.
+    // Regression-pinned in tests (calling the bare MCP name dispatches the
+    // `browser_`-prefixed wire name). Each entry also carries
+    // `capability: "browser" | "browser_compound" | "browser_power"` for the
+    // existing gate chain in handler.ts.
+    ...BROWSER_TOOLS.map((t) => ({
+      ...t,
+      group: "browser" as const,
+      toolNameHttp: t.toolNameHttp.replace(/^browser_/, ""),
+    })),
   ])
+
+/**
+ * Startup invariant: every MCP tool name must be unique within its group
+ * AND across the unscoped `/mcp` union. `handleToolsCall` keys dispatch on
+ * the bare tool name, so a duplicate would silently shadow — this assertion
+ * fails loudly on future drift instead. Cheap; called once at server boot
+ * (and pinned by a test). Personas are definitionally the `peers` group.
+ */
+export function assertMcpToolSurfaceConsistent(): void {
+  const perGroup = new Map<McpGroup, Set<string>>()
+  const union = new Set<string>()
+  const add = (group: McpGroup, name: string): void => {
+    let g = perGroup.get(group)
+    if (!g) {
+      g = new Set()
+      perGroup.set(group, g)
+    }
+    if (g.has(name)) {
+      throw new Error(
+        `assertMcpToolSurfaceConsistent: tool "${name}" duplicated within group "${group}"`,
+      )
+    }
+    g.add(name)
+    if (union.has(name)) {
+      throw new Error(
+        `assertMcpToolSurfaceConsistent: tool "${name}" duplicated across the unscoped /mcp union `
+          + `— handleToolsCall keys on the bare name and cannot disambiguate`,
+      )
+    }
+    union.add(name)
+  }
+  for (const p of [...PERSONAS_READ, ...PERSONAS_WRITE]) add("peers", p.toolNameHttp)
+  for (const t of NON_PERSONA_MCP_TOOLS) add(t.group, t.toolNameHttp)
+}
 
 /**
  * Shared closure body for the two worker MCP tools. Validates the

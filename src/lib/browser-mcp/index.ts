@@ -61,9 +61,17 @@ function toolEnvelope(
  * call-time when the operator hasn't opted in via `--browse` or
  * `GH_ROUTER_ENABLE_BROWSE=1`.
  *
+ * NAMING: the `toolNameHttp` here is the WIRE name (`browser_*`) that each
+ * handler dispatches to the extension. `peer-mcp-personas.ts` strips the
+ * `browser_` prefix when spreading these into `NON_PERSONA_MCP_TOOLS` so
+ * the MCP-facing name is bare (`mcp__browser__navigate`) while the wire
+ * name stays `browser_navigate` — do NOT rename the literals below or the
+ * installed extension breaks. The `group` field is injected at that spread
+ * (hence `Omit<…, "group">` here).
+ *
  * v1 surface: 19 tools (Phases 3 + 4a + 4b + humanlike input v2).
  */
-export const BROWSER_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
+export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Object.freeze([
   {
     toolNameHttp: "browser_list_tabs",
     description:

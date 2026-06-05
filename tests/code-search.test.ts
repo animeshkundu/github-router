@@ -734,7 +734,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
       "../src/lib/peer-mcp-personas"
     )
     const tool = NON_PERSONA_MCP_TOOLS.find(
-      (t) => t.toolNameHttp === "code_search",
+      (t) => t.toolNameHttp === "code",
     )!
     const result = await tool.handler({
       query: "findMe",
@@ -776,7 +776,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
       "../src/lib/peer-mcp-personas"
     )
     const tool = NON_PERSONA_MCP_TOOLS.find(
-      (t) => t.toolNameHttp === "code_search",
+      (t) => t.toolNameHttp === "code",
     )!
     const result = await tool.handler({
       query: "findMe",
@@ -793,7 +793,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
       "../src/lib/peer-mcp-personas"
     )
     const tool = NON_PERSONA_MCP_TOOLS.find(
-      (t) => t.toolNameHttp === "code_search",
+      (t) => t.toolNameHttp === "code",
     )!
     for (const structural of ["full", "topN"]) {
       const result = await tool.handler({
@@ -814,7 +814,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
       "../src/lib/peer-mcp-personas"
     )
     const tool = NON_PERSONA_MCP_TOOLS.find(
-      (t) => t.toolNameHttp === "code_search",
+      (t) => t.toolNameHttp === "code",
     )!
     const schema = tool.inputSchema as {
       properties: Record<string, unknown>
@@ -845,7 +845,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
         "../src/lib/peer-mcp-personas"
       )
       const tool = NON_PERSONA_MCP_TOOLS.find(
-        (t) => t.toolNameHttp === "code_search",
+        (t) => t.toolNameHttp === "code",
       )!
       const result = await tool.handler({
         query: "HIT_LINE_",
@@ -882,7 +882,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
       "../src/lib/peer-mcp-personas"
     )
     const tool = NON_PERSONA_MCP_TOOLS.find(
-      (t) => t.toolNameHttp === "code_search",
+      (t) => t.toolNameHttp === "code",
     )!
     const result = await tool.handler({
       query: "findMe",

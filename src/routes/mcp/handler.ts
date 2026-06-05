@@ -14,6 +14,10 @@ import {
   isEffort,
   NON_PERSONA_MCP_TOOLS,
   type NonPersonaMcpTool,
+  GROUP_META,
+  isMcpGroup,
+  type McpGroup,
+  type McpScope,
 } from "~/lib/peer-mcp-personas"
 import {
   createChatCompletions,
@@ -26,10 +30,10 @@ import {
   type ResponsesApiResponse,
   type ResponsesPayload,
 } from "~/services/copilot/create-responses"
-import { hasSupportedBrowserInstalled } from "~/lib/browser-mcp/browser-detect"
 import {
   browserCompoundToolsEnabled,
   browserPowerToolsEnabled,
+  browserToolsEnabled,
   standInToolEnabled,
   workerToolsEnabled,
 } from "~/lib/mcp-capabilities"
@@ -43,6 +47,16 @@ import {
 const MCP_PROTOCOL_VERSION = "2025-06-18"
 const SERVER_NAME = "github-router-peers"
 const SERVER_VERSION = "1"
+
+/**
+ * MCP `initialize` `serverInfo.name` for a given scope. Scoped endpoints
+ * report their `github-router-<group>` provenance name; the unscoped union
+ * keeps the legacy `github-router-peers`. Cosmetic handshake metadata —
+ * Claude Code namespaces tools by the config-entry KEY, not this name.
+ */
+function serverInfoNameForScope(scope: McpScope): string {
+  return scope === "all" ? SERVER_NAME : GROUP_META[scope].serverInfoName
+}
 
 // Effort levels (EFFORT_LEVELS, Effort, isEffort) are imported from
 // peer-mcp-personas.ts so PersonaSpec.allowedEfforts can reference the
@@ -218,45 +232,13 @@ function geminiAvailable(): boolean {
   return models.some((m) => /^gemini-3\..*pro/i.test(m.id))
 }
 
-// `standInToolEnabled` and `workerToolsEnabled` were extracted to
-// `src/lib/mcp-capabilities.ts` so CLI startup (`src/claude.ts`) can
-// import the same predicates without dragging Hono route-handler
-// transitive deps. They're re-imported at the top of this file and
-// used unchanged in the gate code below.
-
-/**
- * Gate for the browser-control MCP tools (`browser_*`).
- *
- * Returns true iff BOTH:
- *   1. The operator opted in via `--browse` (which sets
- *      `state.browseEnabled`) OR the equivalent env var
- *      `GH_ROUTER_ENABLE_BROWSE=1`. Default OFF — browser-control is
- *      side-effectful (mutates the user's browser session, downloads
- *      files, can navigate to phishing URLs the model was prompted with),
- *      so dormant-register is the safe default.
- *   2. At least one supported Chromium-family browser (Chrome or Edge)
- *      is detected on disk by `hasSupportedBrowserInstalled()`. No
- *      browser → nothing for the bridge to attach to → tools stay
- *      invisible rather than fail at call time. Detection is cached for
- *      the proxy lifetime; a fresh install requires a restart.
- *
- * Mirrors the defense-in-depth pattern of `workerToolsEnabled()` /
- * `standInToolEnabled()`: this same function gates BOTH the
- * `tools/list` filter in `toolEntries()` AND the call-time rejection in
- * `handleToolsCall` (returning -32601 for hard-coded tool-name
- * bypasses), so the two surfaces stay symmetric.
- *
- * The env-var check reads `process.env` directly instead of relying
- * solely on `state.browseEnabled` so a non-`setupAndServe` startup path
- * (tests, embedded use) can still flip the gate via env. The CLI flag
- * path is the canonical one for end users.
- */
-function browserToolsEnabled(): boolean {
-  const optedIn =
-    state.browseEnabled || process.env.GH_ROUTER_ENABLE_BROWSE === "1"
-  if (!optedIn) return false
-  return hasSupportedBrowserInstalled()
-}
+// `standInToolEnabled`, `workerToolsEnabled`, and `browserToolsEnabled`
+// were extracted to `src/lib/mcp-capabilities.ts` so CLI startup
+// (`src/claude.ts`) can import the same predicates without dragging Hono
+// route-handler transitive deps. They're re-imported at the top of this
+// file and used unchanged in the gate code below — gating BOTH the
+// `tools/list` filter in `toolEntries()` AND the call-time rejection in
+// `handleToolsCall` (-32601 for hard-coded tool-name bypasses).
 
 /**
  * The 1M-context Opus 4.6 variant (`claude-opus-4.6-1m`, `max_prompt_tokens`
@@ -296,50 +278,56 @@ function activePersonas(): Array<PersonaSpec> {
   )
 }
 
-function toolEntries(): Array<ToolEntry> {
-  const personaEntries: Array<ToolEntry> = activePersonas().map((p) => ({
-    name: p.toolNameHttp,
-    description: p.description,
-    inputSchema: {
-      type: "object",
-      required: ["prompt"],
-      additionalProperties: false,
-      properties: {
-        prompt: {
-          type: "string",
-          description: "The lead's brief — the artifact under review plus constraints.",
-        },
-        context: {
-          type: "string",
-          description:
-            "Optional additional context (extra file content, prior decisions). Concatenated to the brief before sending.",
-        },
-        effort: {
-          type: "string",
-          // Per-persona allowedEfforts: schema only advertises tiers the
-          // persona accepts. Empirical data (2026-05-14) drove which tiers
-          // each persona exposes — see EFFORT_LEVELS doc in
-          // src/lib/peer-mcp-personas.ts.
-          enum: [...p.allowedEfforts],
-          description:
-            `Reasoning depth (${p.allowedEfforts.join(" | ")}). Default "${p.defaultEffort}". `
-            + "Higher tiers cost more wall-clock; lower tiers are quicker sanity checks. "
-            + (p.endpoint === "/v1/chat/completions"
-              ? "Note: for gemini routed via /v1/chat/completions, the upstream may silently ignore this knob."
-              : ""),
-        },
-      },
-    },
-  }))
-  // Append non-persona utility tools (`web_search`, `code_search`, and
-  // — when the runtime gate passes — `worker_explore`/`worker_implement`,
-  // `stand_in`). They share the same `tools/list` surface but have
-  // their own input schemas (no prompt/context/effort) and skip the
-  // per-persona validation gates in handleToolsCall. Per-tool
+function toolEntries(scope: McpScope): Array<ToolEntry> {
+  // Personas are definitionally the `peers` group; include them only on
+  // the `peers` scoped endpoint and the unscoped union.
+  const personaEntries: Array<ToolEntry> =
+    scope === "all" || scope === "peers"
+      ? activePersonas().map((p) => ({
+          name: p.toolNameHttp,
+          description: p.description,
+          inputSchema: {
+            type: "object",
+            required: ["prompt"],
+            additionalProperties: false,
+            properties: {
+              prompt: {
+                type: "string",
+                description: "The lead's brief — the artifact under review plus constraints.",
+              },
+              context: {
+                type: "string",
+                description:
+                  "Optional additional context (extra file content, prior decisions). Concatenated to the brief before sending.",
+              },
+              effort: {
+                type: "string",
+                // Per-persona allowedEfforts: schema only advertises tiers the
+                // persona accepts. Empirical data (2026-05-14) drove which tiers
+                // each persona exposes — see EFFORT_LEVELS doc in
+                // src/lib/peer-mcp-personas.ts.
+                enum: [...p.allowedEfforts],
+                description:
+                  `Reasoning depth (${p.allowedEfforts.join(" | ")}). Default "${p.defaultEffort}". `
+                  + "Higher tiers cost more wall-clock; lower tiers are quicker sanity checks. "
+                  + (p.endpoint === "/v1/chat/completions"
+                    ? "Note: for gemini routed via /v1/chat/completions, the upstream may silently ignore this knob."
+                    : ""),
+              },
+            },
+          },
+        }))
+      : []
+  // Append non-persona utility tools, filtered first by the requested
+  // scope (`t.group`) then by the per-tool capability gate. Per-tool
   // `capability` tag drives the runtime gate (see `workerToolsEnabled()`
-  // and `standInToolEnabled()`).
+  // / `standInToolEnabled()` / `browserToolsEnabled()`). They share the
+  // same `tools/list` surface but have their own input schemas (no
+  // prompt/context/effort) and skip the per-persona validation gates in
+  // handleToolsCall.
   const nonPersonaEntries: Array<ToolEntry> = NON_PERSONA_MCP_TOOLS.filter(
     (t) => {
+      if (scope !== "all" && t.group !== scope) return false
       if (t.capability === "worker") return workerToolsEnabled()
       if (t.capability === "stand_in") return standInToolEnabled()
       if (t.capability === "browser") return browserToolsEnabled()
@@ -590,7 +578,7 @@ async function predictedWindowOverflow(
  *   - invalid effort string → handleRpc returns -32602
  *   - effort not in persona.allowedEfforts → handleRpc returns -32602
  */
-function jsonPathPreflightCap(body: JsonRpcRequest):
+function jsonPathPreflightCap(body: JsonRpcRequest, scope: McpScope):
   | { jsonrpc: "2.0"; id: JsonRpcRequest["id"] | null; result: ToolErrorContent }
   | undefined {
   if (body.id === undefined) return undefined
@@ -612,6 +600,10 @@ function jsonPathPreflightCap(body: JsonRpcRequest):
   // definitely time out, so we surface the actionable "use SSE" error
   // up front instead of leaking an inFlight slot for the duration.
   if (name === "stand_in") {
+    // Out-of-scope JSON call (e.g. stand_in on /mcp/peers): let
+    // handleToolsCall return the -32601 scope reject instead of a
+    // misleading predictedTooLong message.
+    if (scope !== "all" && scope !== "decide") return undefined
     const decision = typeof args.decision === "string" ? args.decision : ""
     const optionsRaw = Array.isArray(args.options) ? args.options : []
     const standInContext = typeof args.context === "string" ? args.context : ""
@@ -644,6 +636,9 @@ function jsonPathPreflightCap(body: JsonRpcRequest):
   if (!prompt) return undefined
   const persona = activePersonas().find((p) => p.toolNameHttp === name)
   if (!persona) return undefined
+  // Personas are the `peers` group — skip the cap on any other scoped
+  // endpoint so handleToolsCall's scope reject (-32601) wins.
+  if (scope !== "all" && scope !== "peers") return undefined
   if (rawEffort !== undefined && !isEffort(rawEffort)) return undefined
   const effortMaybe = rawEffort as Effort | undefined
   if (
@@ -845,6 +840,7 @@ function logTelemetry(t: PersonaTelemetry): void {
 
 async function handleToolsCall(
   body: JsonRpcRequest,
+  scope: McpScope,
 ): Promise<object> {
   const params = body.params ?? {}
   const name = typeof params.name === "string" ? params.name : ""
@@ -865,6 +861,20 @@ async function handleToolsCall(
     : NON_PERSONA_MCP_TOOLS.find((t) => t.toolNameHttp === name)
 
   if (!persona && !nonPersonaTool) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+
+  // Scope reject: a tool may only be called via its own scoped endpoint
+  // (or the unscoped union). Personas are the `peers` group. Calling a
+  // tool on the wrong `/mcp/<group>` is indistinguishable from an unknown
+  // tool (-32601), mirroring the capability-gate rejection below. This
+  // runs BEFORE acquireInFlightSlot — no slot leak on reject.
+  const toolGroup: McpGroup = persona ? "peers" : nonPersonaTool!.group
+  if (scope !== "all" && toolGroup !== scope) {
     return rpcError(
       body.id,
       RPC_METHOD_NOT_FOUND,
@@ -1144,6 +1154,7 @@ function handleCancelledNotification(body: JsonRpcRequest): void {
 async function handleRpc(
   _c: Context,
   body: JsonRpcRequest,
+  scope: McpScope,
 ): Promise<{ status: number; body: object | null }> {
   // Reject non-object envelopes (null, arrays, primitives) BEFORE we
   // dereference body.jsonrpc / body.method — without this guard a `null`
@@ -1193,7 +1204,7 @@ async function handleRpc(
             resources: {},
             prompts: {},
           },
-          serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
+          serverInfo: { name: serverInfoNameForScope(scope), version: SERVER_VERSION },
         }),
       }
 
@@ -1206,14 +1217,14 @@ async function handleRpc(
       if (isNotification) return { status: 202, body: null }
       return {
         status: 200,
-        body: rpcResult(body.id, { tools: toolEntries() }),
+        body: rpcResult(body.id, { tools: toolEntries(scope) }),
       }
 
     case "tools/call":
       if (isNotification) return { status: 202, body: null }
       return {
         status: 200,
-        body: await handleToolsCall(body),
+        body: await handleToolsCall(body, scope),
       }
 
     // --- Phase D: MCP method stubs with full handshake coherence ---
@@ -1299,12 +1310,31 @@ async function handleRpc(
   }
 }
 
-export async function handleMcpPost(c: Context): Promise<Response> {
+export async function handleMcpPost(
+  c: Context,
+  scopeArg: string = "all",
+): Promise<Response> {
   const auth = checkAuth(c)
   if (!auth.ok) {
     return c.json(
       rpcError(null, RPC_INVALID_REQUEST, auth.reason),
       auth.status,
+    )
+  }
+
+  // Validate the path scope AFTER auth so an unauthenticated probe of
+  // `/mcp/<group>` cannot distinguish a valid group (auth failure) from an
+  // unknown one (404) — no pre-auth scope-enumeration oracle. "all" is the
+  // unscoped union endpoint.
+  let scope: McpScope
+  if (scopeArg === "all") {
+    scope = "all"
+  } else if (isMcpGroup(scopeArg)) {
+    scope = scopeArg
+  } else {
+    return c.json(
+      rpcError(null, RPC_METHOD_NOT_FOUND, `unknown MCP group "${scopeArg}"`),
+      404,
     )
   }
 
@@ -1337,7 +1367,7 @@ export async function handleMcpPost(c: Context): Promise<Response> {
     && body.method === "tools/call"
     && acceptsEventStream(c.req.header("accept"))
   ) {
-    return handleToolsCallSSE(body)
+    return handleToolsCallSSE(body, scope)
   }
 
   // JSON-path pre-flight predictedTooLong cap. SSE clients (above)
@@ -1357,12 +1387,12 @@ export async function handleMcpPost(c: Context): Promise<Response> {
     && !Array.isArray(body)
     && body.method === "tools/call"
   ) {
-    const preflight = jsonPathPreflightCap(body)
+    const preflight = jsonPathPreflightCap(body, scope)
     if (preflight) return c.json(preflight, 200)
   }
 
   try {
-    const { status, body: respBody } = await handleRpc(c, body)
+    const { status, body: respBody } = await handleRpc(c, body, scope)
     if (respBody === null) return c.body(null, status as 202)
     return c.json(respBody, status as 200)
   } catch (err) {
@@ -1434,12 +1464,12 @@ function acceptsEventStream(accept: string | undefined): boolean {
  */
 const SSE_HEARTBEAT_INTERVAL_MS = 5000
 
-async function handleToolsCallSSE(body: JsonRpcRequest): Promise<Response> {
+async function handleToolsCallSSE(body: JsonRpcRequest, scope: McpScope): Promise<Response> {
   const encoder = new TextEncoder()
   // Kick off the actual tool call as a Promise. handleToolsCall handles
   // all gates, slot accounting, abort registration, telemetry — we just
   // wrap its eventual result in an SSE envelope.
-  const callPromise = handleToolsCall(body)
+  const callPromise = handleToolsCall(body, scope)
   // Heartbeat interval is hoisted out of `start()` so `cancel()` can
   // clear it synchronously on consumer disconnect — otherwise a 5-second
   // tick fires into a closed controller after every cancel, and the

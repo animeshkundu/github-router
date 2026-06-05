@@ -133,12 +133,34 @@ mock.module("consola", () => ({
 const writePeerMcpRuntimeFilesMock = mock()
 const resolveCodexCliBackendMock = mock()
 const injectPeerMcpIntoMirrorMock = mock()
+const resolveGroupKeysFromMirrorMock = mock()
 const getCodexVersionMock = mock()
 
 mock.module("~/lib/codex-mcp-config", () => ({
   writePeerMcpRuntimeFiles: writePeerMcpRuntimeFilesMock,
   resolveCodexCliBackend: resolveCodexCliBackendMock,
   injectPeerMcpIntoMirror: injectPeerMcpIntoMirrorMock,
+  resolveGroupKeysFromMirror: resolveGroupKeysFromMirrorMock,
+}))
+
+// Capability-gate predicates. claude.ts imports these from
+// ~/lib/mcp-capabilities to decide which scoped MCP servers to register
+// (workers / decide / browser only when their catalog gate passes). Pin
+// them OFF by default so the enabled-group set is the deterministic
+// `["peers", "search"]` for every test that doesn't override; tests that
+// exercise a group's gate rebind the relevant mock per-case.
+const workerToolsEnabledMock = mock(() => false)
+const standInToolEnabledMock = mock(() => false)
+const browserToolsEnabledMock = mock(() => false)
+mock.module("~/lib/mcp-capabilities", () => ({
+  workerToolsEnabled: workerToolsEnabledMock,
+  standInToolEnabled: standInToolEnabledMock,
+  browserToolsEnabled: browserToolsEnabledMock,
+  // handler.ts (pulled in transitively via the static import graph)
+  // also imports these two; re-export stubs so the module mock doesn't
+  // break that import. claude.ts itself only uses the three above.
+  browserCompoundToolsEnabled: mock(() => false),
+  browserPowerToolsEnabled: mock(() => false),
 }))
 
 // The CLAUDE.md append + prepend helpers are the new descendant-reach
@@ -248,8 +270,20 @@ beforeEach(() => {
   injectPeerMcpIntoMirrorMock.mockReset()
   injectPeerMcpIntoMirrorMock.mockResolvedValue({
     ok: true,
-    serversAdded: ["gh-router-peers"],
+    serversAdded: ["peers", "search"],
   })
+  resolveGroupKeysFromMirrorMock.mockReset()
+  // Default: no user-side collision → bare keys for the always-on groups.
+  resolveGroupKeysFromMirrorMock.mockResolvedValue({
+    keys: { peers: "peers", search: "search" },
+    skipped: [],
+  })
+  workerToolsEnabledMock.mockReset()
+  workerToolsEnabledMock.mockReturnValue(false)
+  standInToolEnabledMock.mockReset()
+  standInToolEnabledMock.mockReturnValue(false)
+  browserToolsEnabledMock.mockReset()
+  browserToolsEnabledMock.mockReturnValue(false)
   appendPeerAwarenessToMirroredClaudeMdMock.mockReset()
   appendPeerAwarenessToMirroredClaudeMdMock.mockResolvedValue(undefined)
   prependStyleDirectiveToMirroredClaudeMdMock.mockReset()
@@ -605,10 +639,20 @@ describe("claude command", () => {
       const run = getRunFn()
       await run({ args: {} })
 
+      // The always-on groups (peers + search) are resolved against the
+      // mirror snapshot; workers/decide/browser stay off because their
+      // capability mocks return false by default.
+      expect(resolveGroupKeysFromMirrorMock).toHaveBeenCalledTimes(1)
+      const [enabledGroups] = resolveGroupKeysFromMirrorMock.mock.calls[0]
+      expect(enabledGroups).toEqual(["peers", "search"])
+
       expect(writePeerMcpRuntimeFilesMock).toHaveBeenCalledTimes(1)
       const [serverUrl, opts] = writePeerMcpRuntimeFilesMock.mock.calls[0]
       expect(serverUrl).toBe("http://127.0.0.1:12345")
       expect(opts.codexCli).toBe(false)
+      // Resolved group keys thread into the runtime-file builder so the
+      // --mcp-config payload points at OUR scoped endpoints.
+      expect(opts.groupKeys).toEqual({ peers: "peers", search: "search" })
 
       // injectPeerMcpIntoMirror is called with the same nonce as runtime files
       // so the proxy validates Authorization regardless of which channel the
@@ -618,6 +662,9 @@ describe("claude command", () => {
       expect(injectUrl).toBe("http://127.0.0.1:12345")
       expect(injectOpts.codexCli).toBe(false)
       expect(injectOpts.nonce).toBe("test-nonce")
+      // Same resolved group keys thread into the mirror inject so the two
+      // channels never drift.
+      expect(injectOpts.groupKeys).toEqual({ peers: "peers", search: "search" })
 
       const [, args] = spawnMock.mock.calls[0]
       // Mirror inject succeeded → MCP is discovered from
@@ -629,17 +676,58 @@ describe("claude command", () => {
       expect(args).not.toContain("--strict-mcp-config")
     })
 
-    test("collision (mirror inject refuses) → --mcp-config IS pushed as fallback for parent-only visibility", async () => {
+    test("user-side `peers` collision → our peers server registers as gh-router-peers (capability preserved, no drop)", async () => {
+      // The user already has a `peers` MCP. resolveGroupKeysFromMirror
+      // falls back to the prefixed `gh-router-peers` key for OUR peers
+      // server rather than dropping the capability. The bare `search`
+      // group is collision-free so it keeps the bare key. Mirror inject
+      // STILL succeeds (the resolved keys are collision-free by
+      // construction), so subagents stay visible and --mcp-config is NOT
+      // pushed.
+      resolveGroupKeysFromMirrorMock.mockResolvedValue({
+        keys: { peers: "gh-router-peers", search: "search" },
+        skipped: [],
+      })
+      injectPeerMcpIntoMirrorMock.mockResolvedValue({
+        ok: true,
+        serversAdded: ["gh-router-peers", "search"],
+      })
+      const run = getRunFn()
+      await run({ args: {} })
+
+      // The fallback key threads into BOTH wiring channels so every
+      // reference points at OUR server, never the user's same-named one.
+      const writeArgs = writePeerMcpRuntimeFilesMock.mock.calls[0][1]
+      expect(writeArgs.groupKeys).toEqual({
+        peers: "gh-router-peers",
+        search: "search",
+      })
+      const injectArgs = injectPeerMcpIntoMirrorMock.mock.calls[0][1]
+      expect(injectArgs.groupKeys).toEqual({
+        peers: "gh-router-peers",
+        search: "search",
+      })
+
+      const [, args] = spawnMock.mock.calls[0]
+      // Inject succeeded (collision-free resolved keys) → subagent-visible,
+      // so --mcp-config is NOT pushed.
+      expect(args).not.toContain("--mcp-config")
+    })
+
+    test("mirror inject race refusal → --mcp-config IS pushed as fallback for parent-only visibility", async () => {
+      // Distinct from the user-side-collision path above: here
+      // resolveGroupKeysFromMirror handed back collision-free keys, but a
+      // racing mirror mutation between resolution and write made the
+      // inject refuse (ok:false). The parent session stays functional via
+      // --mcp-config even though subagents won't see the peer tools.
       injectPeerMcpIntoMirrorMock.mockResolvedValue({
         ok: false,
-        conflictingServers: ["gh-router-peers"],
+        conflictingServers: ["peers"],
       })
       const run = getRunFn()
       await run({ args: {} })
 
       const [, args] = spawnMock.mock.calls[0]
-      // Collision branch keeps the parent session functional even though
-      // subagents won't see the peer tools.
       expect(args).toContain("--mcp-config")
       expect(args).toContain("/tmp/peer-mcp-test.json")
     })
@@ -680,7 +768,7 @@ describe("claude command", () => {
       const writeArgs = writePeerMcpRuntimeFilesMock.mock.calls[0][1]
       expect(writeArgs.codexCli).toBe(true)
       // Mirror inject also gets codexCli=true so the codex-cli stdio entry
-      // lands in the mirrored mcpServers map alongside gh-router-peers.
+      // lands in the mirrored mcpServers map alongside the scoped peers entry.
       const injectArgs = injectPeerMcpIntoMirrorMock.mock.calls[0][1]
       expect(injectArgs.codexCli).toBe(true)
     })
@@ -700,7 +788,7 @@ describe("claude command", () => {
     test("--codex-mcp-only with collision fallback → --strict-mcp-config IS pushed alongside --mcp-config", async () => {
       injectPeerMcpIntoMirrorMock.mockResolvedValue({
         ok: false,
-        conflictingServers: ["gh-router-peers"],
+        conflictingServers: ["peers"],
       })
       const run = getRunFn()
       await run({ args: { "codex-mcp-only": true } })

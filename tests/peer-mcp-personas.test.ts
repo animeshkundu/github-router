@@ -198,10 +198,10 @@ describe("personasFor", () => {
 })
 
 describe("buildAgentPrompt — HTTP mode", () => {
-  test("codex-critic prompt routes to mcp__gh-router-peers__codex_critic", () => {
+  test("codex-critic prompt routes to mcp__peers__codex_critic", () => {
     const persona = PERSONAS_READ.find((p) => p.agentName === "codex-critic")!
-    const prompt = buildAgentPrompt(persona, { codexCli: false })
-    expect(prompt).toContain("mcp__gh-router-peers__codex_critic")
+    const prompt = buildAgentPrompt(persona, { codexCli: false, peersKey: "peers" })
+    expect(prompt).toContain("mcp__peers__codex_critic")
     expect(prompt).not.toContain("mcp__codex-cli__codex")
     // Persona text is inlined.
     expect(prompt).toContain("adversarial reviewer")
@@ -211,8 +211,8 @@ describe("buildAgentPrompt — HTTP mode", () => {
 
   test("gemini-critic always routes to HTTP even with codex-cli mode", () => {
     const persona = PERSONAS_READ.find((p) => p.agentName === "gemini-critic")!
-    const cliPrompt = buildAgentPrompt(persona, { codexCli: true })
-    expect(cliPrompt).toContain("mcp__gh-router-peers__gemini_critic")
+    const cliPrompt = buildAgentPrompt(persona, { codexCli: true, peersKey: "peers" })
+    expect(cliPrompt).toContain("mcp__peers__gemini_critic")
     expect(cliPrompt).not.toContain("mcp__codex-cli__codex")
   })
 })
@@ -220,7 +220,7 @@ describe("buildAgentPrompt — HTTP mode", () => {
 describe("buildAgentPrompt — codex-cli mode", () => {
   test("codex-critic prompt routes to mcp__codex-cli__codex with model + base-instructions", () => {
     const persona = PERSONAS_READ.find((p) => p.agentName === "codex-critic")!
-    const prompt = buildAgentPrompt(persona, { codexCli: true })
+    const prompt = buildAgentPrompt(persona, { codexCli: true, peersKey: "peers" })
     expect(prompt).toContain("mcp__codex-cli__codex")
     expect(prompt).toContain('"gpt-5.5"')
     expect(prompt).toContain("base-instructions")
@@ -229,7 +229,7 @@ describe("buildAgentPrompt — codex-cli mode", () => {
 
   test("codex-implementer prompt routes to codex-cli with workspace-write sandbox", () => {
     const persona = PERSONAS_WRITE[0]
-    const prompt = buildAgentPrompt(persona, { codexCli: true })
+    const prompt = buildAgentPrompt(persona, { codexCli: true, peersKey: "peers" })
     expect(prompt).toContain("mcp__codex-cli__codex")
     expect(prompt).toContain('"gpt-5.3-codex"')
     expect(prompt).toContain('"workspace-write"')
@@ -245,12 +245,12 @@ describe("prompt-cache stability", () => {
 
   test("buildAgentPrompt output is deterministic for same inputs", () => {
     const persona = PERSONAS_READ[0]
-    const a = buildAgentPrompt(persona, { codexCli: false })
-    const b = buildAgentPrompt(persona, { codexCli: false })
+    const a = buildAgentPrompt(persona, { codexCli: false, peersKey: "peers" })
+    const b = buildAgentPrompt(persona, { codexCli: false, peersKey: "peers" })
     expect(a).toBe(b)
 
-    const aCli = buildAgentPrompt(persona, { codexCli: true })
-    const bCli = buildAgentPrompt(persona, { codexCli: true })
+    const aCli = buildAgentPrompt(persona, { codexCli: true, peersKey: "peers" })
+    const bCli = buildAgentPrompt(persona, { codexCli: true, peersKey: "peers" })
     expect(aCli).toBe(bCli)
   })
 })
@@ -276,7 +276,7 @@ describe("buildPeerAwarenessSnippet", () => {
 
   test("always advertises the three always-on critic tools, coordinator, and namespace prefix", () => {
     const snippet = buildPeerAwarenessSnippet(MINIMAL)
-    expect(snippet).toContain("mcp__gh-router-peers__")
+    expect(snippet).toContain("mcp__peers__")
     expect(snippet).toContain("codex_critic")
     expect(snippet).toContain("codex_reviewer")
     expect(snippet).toContain("opus_critic")
@@ -303,9 +303,11 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(snippet).toContain("`advisor`")
   })
 
-  test("describes code_search with the ranked/BM25F framing + parallel-in-one-turn affordance", () => {
+  test("describes the code search tool with the ranked/BM25F framing + parallel-in-one-turn affordance", () => {
     const snippet = buildPeerAwarenessSnippet(MINIMAL)
-    expect(snippet).toContain("code_search")
+    // The code search tool is now namespaced under the `search` server as
+    // `mcp__search__code` (renamed from the flat `code_search`).
+    expect(snippet).toContain("mcp__search__code")
     // Per peer-review I6, the previous "accurate" overclaim was
     // replaced with "ranked"; pin the new property word.
     expect(snippet.toLowerCase()).toContain("ranked")
@@ -327,64 +329,71 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(snippet).toContain("`glob`")
   })
 
-  test("mentions web_search (default-on) and stand_in (only when standInAvailable)", () => {
+  test("mentions the web search tool (default-on) and stand_in (only when standInAvailable)", () => {
     const minimal = buildPeerAwarenessSnippet(MINIMAL)
-    expect(minimal).toContain("web_search")
-    // stand_in is gated — must NOT appear in minimal.
+    // Web search is now namespaced under the `search` server as
+    // `mcp__search__web` (renamed from the flat `web_search`).
+    expect(minimal).toContain("mcp__search__web")
+    // stand_in is gated — its sentence must NOT appear in minimal.
     expect(minimal).not.toContain("stand_in")
 
     const withStandIn = buildPeerAwarenessSnippet({
       ...MINIMAL,
       standInAvailable: true,
     })
-    expect(withStandIn).toContain("stand_in")
+    // stand_in is now namespaced under the `decide` server.
+    expect(withStandIn).toContain("mcp__decide__stand_in")
   })
 
-  test("worker_explore / worker_implement mentions are gated on workerToolsAvailable", () => {
+  test("worker explore / implement mentions are gated on workerToolsAvailable", () => {
     const off = buildPeerAwarenessSnippet({
       ...MINIMAL,
       workerToolsAvailable: false,
     })
-    expect(off).not.toContain("worker_explore")
-    expect(off).not.toContain("worker_implement")
+    expect(off).not.toContain("mcp__workers__explore")
+    expect(off).not.toContain("mcp__workers__implement")
     expect(off).not.toContain("Workers themselves")
 
     const on = buildPeerAwarenessSnippet({
       ...MINIMAL,
       workerToolsAvailable: true,
     })
-    expect(on).toContain("worker_explore")
-    expect(on).toContain("worker_implement")
+    // Worker tools are now namespaced under the `workers` server as
+    // `mcp__workers__explore` / `mcp__workers__implement` (renamed from
+    // the flat `worker_explore` / `worker_implement`).
+    expect(on).toContain("mcp__workers__explore")
+    expect(on).toContain("mcp__workers__implement")
     expect(on).toContain("Workers themselves")
     expect(on).toContain("worktree: true")
   })
 
-  test("conditionally mentions browser_* when browseAvailable is on", () => {
+  test("conditionally mentions the browser tools when browseAvailable is on", () => {
     const off = buildPeerAwarenessSnippet({
       ...MINIMAL,
       browseAvailable: false,
     })
-    expect(off).not.toContain("browser_act")
-    expect(off).not.toContain("browser_observe")
-    expect(off).not.toContain("browser_extract")
-    expect(off).not.toContain("browser_*")
+    expect(off).not.toContain("__act")
+    expect(off).not.toContain("__observe")
+    expect(off).not.toContain("__extract")
+    expect(off).not.toContain("mcp__browser__")
 
     const on = buildPeerAwarenessSnippet({
       ...MINIMAL,
       browseAvailable: true,
     })
-    // Default --browse surface: 6 lead tools. The Phase 3 retag moved
-    // browser_find to power; the snippet describes the lead surface
-    // (act / observe / extract / navigate / open_tab / screenshot) and
-    // does NOT mention power-tier tools like find.
-    expect(on).toContain("browser_act")
-    expect(on).toContain("browser_observe")
-    expect(on).toContain("browser_extract")
-    expect(on).toContain("mcp__gh-router-peers__browser_")
+    // Browser tools are namespaced under the `browser` server; the lead
+    // surface is described via the bare action suffixes (act / observe /
+    // extract / navigate / open_tab / screenshot) under the
+    // `mcp__browser__*` prefix. Power-tier tools (mouse / eval_js / find)
+    // are NOT mentioned in default --browse mode.
+    expect(on).toContain("mcp__browser__*")
+    expect(on).toContain("__act")
+    expect(on).toContain("__observe")
+    expect(on).toContain("__extract")
     // Power tools NOT mentioned in default --browse mode.
-    expect(on).not.toContain("browser_find")
-    expect(on).not.toContain("browser_mouse")
-    expect(on).not.toContain("browser_eval_js")
+    expect(on).not.toContain("__find")
+    expect(on).not.toContain("__mouse")
+    expect(on).not.toContain("__eval_js")
   })
 
   test("mentions power tools when powerBrowseAvailable is on", () => {
@@ -394,8 +403,8 @@ describe("buildPeerAwarenessSnippet", () => {
       powerBrowseAvailable: false,
     })
     expect(off).not.toContain("Power mode")
-    expect(off).not.toContain("browser_mouse")
-    expect(off).not.toContain("browser_eval_js")
+    expect(off).not.toContain("__mouse")
+    expect(off).not.toContain("__eval_js")
 
     const on = buildPeerAwarenessSnippet({
       ...MINIMAL,
@@ -403,9 +412,9 @@ describe("buildPeerAwarenessSnippet", () => {
       powerBrowseAvailable: true,
     })
     expect(on).toContain("Power mode")
-    expect(on).toContain("browser_mouse")
-    expect(on).toContain("browser_eval_js")
-    expect(on).toContain("browser_find")
+    expect(on).toContain("mcp__browser__mouse")
+    expect(on).toContain("__eval_js")
+    expect(on).toContain("__find")
   })
 
   test("omits gemini_critic when gemini is not in the catalog", () => {

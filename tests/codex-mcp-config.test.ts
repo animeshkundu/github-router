@@ -10,8 +10,10 @@ import {
   buildPeerMcpConfig,
   injectPeerMcpIntoMirror,
   resolveCodexCliBackend,
+  resolveGroupKeysFromMirror,
   writePeerMcpRuntimeFiles,
 } from "../src/lib/codex-mcp-config"
+import { MCP_GROUPS } from "../src/lib/peer-mcp-personas"
 
 const NONCE = "0".repeat(64)
 const URL = "http://127.0.0.1:18787"
@@ -48,34 +50,66 @@ async function withTempRuntimeDir<T>(
 }
 
 describe("buildPeerMcpConfig", () => {
-  test("HTTP backend (codexCli=false) registers only gh-router-peers", () => {
+  test("HTTP backend emits one scoped http entry per group in groupKeys", () => {
     const cfg = buildPeerMcpConfig(URL, {
       codexCli: false,
       geminiAvailable: true,
+      groupKeys: { peers: "peers", search: "search", workers: "workers", decide: "decide" },
       nonce: NONCE,
       codexHome: "/tmp/codex",
     })
-    expect(Object.keys(cfg.mcpServers)).toEqual(["gh-router-peers"])
-    const entry = cfg.mcpServers["gh-router-peers"] as {
-      type: "http"
-      url: string
-      headers: Record<string, string>
+    // One mcpServers entry per group present in groupKeys, keyed by the
+    // resolved (here bare) key, each pointing at its scoped /mcp/<group>.
+    expect(Object.keys(cfg.mcpServers).sort()).toEqual([
+      "decide",
+      "peers",
+      "search",
+      "workers",
+    ])
+    for (const group of ["peers", "search", "workers", "decide"]) {
+      const entry = cfg.mcpServers[group] as {
+        type: "http"
+        url: string
+        headers: Record<string, string>
+      }
+      expect(entry.type).toBe("http")
+      expect(entry.url).toBe(`${URL}/mcp/${group}`)
+      expect(entry.headers.Authorization).toBe(`Bearer ${NONCE}`)
     }
-    expect(entry.type).toBe("http")
-    expect(entry.url).toBe(`${URL}/mcp`)
-    expect(entry.headers.Authorization).toBe(`Bearer ${NONCE}`)
+  })
+
+  test("collision fallback key still maps to the canonical scoped URL", () => {
+    // resolveGroupKeysFromMirror hands back a `gh-router-<group>` key when
+    // the bare key collided with a user entry. The url suffix is ALWAYS
+    // the canonical group name regardless of the resolved config key.
+    const cfg = buildPeerMcpConfig(URL, {
+      codexCli: false,
+      geminiAvailable: true,
+      groupKeys: { peers: "gh-router-peers", browser: "gh-router-browser" },
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    expect(Object.keys(cfg.mcpServers).sort()).toEqual([
+      "gh-router-browser",
+      "gh-router-peers",
+    ])
+    const peers = cfg.mcpServers["gh-router-peers"] as { url: string }
+    expect(peers.url).toBe(`${URL}/mcp/peers`)
+    const browser = cfg.mcpServers["gh-router-browser"] as { url: string }
+    expect(browser.url).toBe(`${URL}/mcp/browser`)
   })
 
   test("CLI backend adds codex-cli stdio entry with provider flags + env", () => {
     const cfg = buildPeerMcpConfig(URL, {
       codexCli: true,
       geminiAvailable: true,
+      groupKeys: { peers: "peers" },
       nonce: NONCE,
       codexHome: "/tmp/codex-isolated",
     })
     expect(Object.keys(cfg.mcpServers).sort()).toEqual([
       "codex-cli",
-      "gh-router-peers",
+      "peers",
     ])
     const cli = cfg.mcpServers["codex-cli"] as {
       command: string
@@ -106,6 +140,7 @@ describe("buildPeerAgentDefinitions", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: false,
       geminiAvailable: true,
+      groupKeys: { peers: "peers" },
       nonce: NONCE,
       codexHome: "/tmp/codex",
     })
@@ -120,7 +155,7 @@ describe("buildPeerAgentDefinitions", () => {
     // coordinator prompt does NOT route to mcp tools directly (it
     // delegates to the persona subagents instead).
     for (const name of ["codex-critic", "codex-reviewer", "gemini-critic", "opus-critic"]) {
-      expect(agents[name]!.prompt).toContain("mcp__gh-router-peers__")
+      expect(agents[name]!.prompt).toContain("mcp__peers__")
       expect(agents[name]!.description.length).toBeGreaterThan(0)
     }
     expect(agents["peer-review-coordinator"]!.description).toContain("Use proactively")
@@ -139,6 +174,7 @@ describe("buildPeerAgentDefinitions", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: false,
       geminiAvailable: false,
+      groupKeys: { peers: "peers" },
       nonce: NONCE,
       codexHome: "/tmp/codex",
     })
@@ -161,6 +197,7 @@ describe("buildPeerAgentDefinitions", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: true,
       geminiAvailable: true,
+      groupKeys: { peers: "peers" },
       nonce: NONCE,
       codexHome: "/tmp/codex",
     })
@@ -175,7 +212,7 @@ describe("buildPeerAgentDefinitions", () => {
     // codex-* personas point at the stdio server; gemini-critic stays HTTP.
     expect(agents["codex-critic"]!.prompt).toContain("mcp__codex-cli__codex")
     expect(agents["gemini-critic"]!.prompt).toContain(
-      "mcp__gh-router-peers__gemini_critic",
+      "mcp__peers__gemini_critic",
     )
     expect(agents["codex-implementer"]!.prompt).toContain('"workspace-write"')
     // opus-critic.requiresHttp = true (codex-cli stdio bridge can't run
@@ -184,9 +221,29 @@ describe("buildPeerAgentDefinitions", () => {
     // and does NOT mention codex-cli for this persona.
     expect(agents["opus-critic"]).toBeDefined()
     expect(agents["opus-critic"]!.prompt).toContain(
-      "mcp__gh-router-peers__opus_critic",
+      "mcp__peers__opus_critic",
     )
     expect(agents["opus-critic"]!.prompt).not.toContain("mcp__codex-cli__codex")
+  })
+
+  test("collision-fallback peers key threads into the persona routing string", () => {
+    // When the user already has a `peers` MCP, resolveGroupKeysFromMirror
+    // hands back `gh-router-peers` for the peers group. That resolved key
+    // MUST appear in the routing string so the subagent calls OUR server,
+    // not the user's.
+    const agents = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: true,
+      groupKeys: { peers: "gh-router-peers" },
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    expect(agents["codex-critic"]!.prompt).toContain(
+      "mcp__gh-router-peers__codex_critic",
+    )
+    expect(agents["opus-critic"]!.prompt).toContain(
+      "mcp__gh-router-peers__opus_critic",
+    )
   })
 })
 
@@ -228,6 +285,7 @@ describe("writePeerMcpRuntimeFiles", () => {
       const runtime = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
         geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search" },
         runtimeDir,
         codexHome,
         agentsDir,
@@ -284,9 +342,13 @@ describe("writePeerMcpRuntimeFiles", () => {
       const cfg = JSON.parse(
         await fs.readFile(runtime.mcpConfigPath, "utf8"),
       ) as {
-        mcpServers: { "gh-router-peers": { headers: { Authorization: string } } }
+        mcpServers: Record<string, { url: string; headers: { Authorization: string } }>
       }
-      expect(cfg.mcpServers["gh-router-peers"].headers.Authorization).toBe(
+      // One scoped entry per group we passed in groupKeys.
+      expect(Object.keys(cfg.mcpServers).sort()).toEqual(["peers", "search"])
+      expect(cfg.mcpServers["peers"]!.url).toBe(`${URL}/mcp/peers`)
+      expect(cfg.mcpServers["search"]!.url).toBe(`${URL}/mcp/search`)
+      expect(cfg.mcpServers["peers"]!.headers.Authorization).toBe(
         `Bearer ${runtime.nonce}`,
       )
 
@@ -305,6 +367,7 @@ describe("writePeerMcpRuntimeFiles", () => {
       const a = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
         geminiAvailable: false,
+        groupKeys: { peers: "peers" },
         runtimeDir,
         codexHome,
         agentsDir,
@@ -315,6 +378,7 @@ describe("writePeerMcpRuntimeFiles", () => {
       const b = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
         geminiAvailable: false,
+        groupKeys: { peers: "peers" },
         runtimeDir,
         codexHome,
         agentsDir,
@@ -329,6 +393,7 @@ describe("writePeerMcpRuntimeFiles", () => {
       const a = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
         geminiAvailable: false,
+        groupKeys: { peers: "peers" },
         runtimeDir,
         codexHome,
         agentsDir,
@@ -338,6 +403,7 @@ describe("writePeerMcpRuntimeFiles", () => {
       const b = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
         geminiAvailable: false,
+        groupKeys: { peers: "peers" },
         runtimeDir,
         codexHome,
         agentsDir,
@@ -493,6 +559,7 @@ describe("writePeerMcpRuntimeFiles", () => {
       const httpMode = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
         geminiAvailable: true,
+        groupKeys: { peers: "peers" },
         runtimeDir,
         codexHome,
         agentsDir,
@@ -500,6 +567,7 @@ describe("writePeerMcpRuntimeFiles", () => {
       const cliMode = await writePeerMcpRuntimeFiles(URL, {
         codexCli: true,
         geminiAvailable: true,
+        groupKeys: { peers: "peers" },
         runtimeDir,
         codexHome,
         agentsDir,
@@ -597,6 +665,7 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
       const runtime = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
         geminiAvailable: true,
+        groupKeys: { peers: "peers" },
         runtimeDir,
         codexHome,
         agentsDir,
@@ -637,6 +706,7 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
       const runtime = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
         geminiAvailable: true,
+        groupKeys: { peers: "peers" },
         runtimeDir,
         codexHome,
         agentsDir,
@@ -672,6 +742,7 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
       const runtime = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
         geminiAvailable: true,
+        groupKeys: { peers: "peers" },
         runtimeDir,
         codexHome,
         agentsDir,
@@ -713,6 +784,7 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
       const runtime = await writePeerMcpRuntimeFiles(URL, {
         codexCli: true,
         geminiAvailable: true,
+        groupKeys: { peers: "peers" },
         runtimeDir,
         codexHome,
         agentsDir,
@@ -744,6 +816,7 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
       const runtime = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
         geminiAvailable: true,
+        groupKeys: { peers: "peers" },
         runtimeDir,
         codexHome,
         agentsDir,
@@ -778,18 +851,19 @@ describe("injectPeerMcpIntoMirror", () => {
     }
   }
 
-  test("creates .claude.json with our entry when the file does not yet exist", async () => {
+  test("creates .claude.json with one entry per group when the file does not yet exist", async () => {
     await withMirrorDir(async (dir) => {
       const result = await injectPeerMcpIntoMirror(URL, {
         codexCli: false,
         geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search" },
         nonce: NONCE,
         codexHome: "/tmp/codex",
         claudeConfigDir: dir,
       })
       expect(result.ok).toBe(true)
       if (!result.ok) return
-      expect(result.serversAdded).toEqual(["gh-router-peers"])
+      expect([...result.serversAdded].sort()).toEqual(["peers", "search"])
 
       const target = path.join(dir, ".claude.json")
       const stat = await fs.stat(target)
@@ -799,8 +873,11 @@ describe("injectPeerMcpIntoMirror", () => {
       const parsed = JSON.parse(await fs.readFile(target, "utf8")) as {
         mcpServers: Record<string, { headers: { Authorization: string } }>
       }
-      expect(Object.keys(parsed.mcpServers)).toEqual(["gh-router-peers"])
-      expect(parsed.mcpServers["gh-router-peers"]!.headers.Authorization).toBe(
+      expect(Object.keys(parsed.mcpServers).sort()).toEqual(["peers", "search"])
+      expect(parsed.mcpServers["peers"]!.headers.Authorization).toBe(
+        `Bearer ${NONCE}`,
+      )
+      expect(parsed.mcpServers["search"]!.headers.Authorization).toBe(
         `Bearer ${NONCE}`,
       )
     })
@@ -829,6 +906,7 @@ describe("injectPeerMcpIntoMirror", () => {
       const result = await injectPeerMcpIntoMirror(URL, {
         codexCli: false,
         geminiAvailable: true,
+        groupKeys: { peers: "peers" },
         nonce: NONCE,
         codexHome: "/tmp/codex",
         claudeConfigDir: dir,
@@ -848,10 +926,10 @@ describe("injectPeerMcpIntoMirror", () => {
       // User's mcpServers entry preserved untouched
       expect(after.mcpServers["user-redis"]).toBeDefined()
       // Our entry added alongside
-      expect(after.mcpServers["gh-router-peers"]).toBeDefined()
-      // Exact key set: user-redis + gh-router-peers (no codex-cli, codexCli=false)
+      expect(after.mcpServers["peers"]).toBeDefined()
+      // Exact key set: user-redis + peers (no codex-cli, codexCli=false)
       expect(Object.keys(after.mcpServers).sort()).toEqual([
-        "gh-router-peers",
+        "peers",
         "user-redis",
       ])
     })
@@ -862,6 +940,7 @@ describe("injectPeerMcpIntoMirror", () => {
       const result = await injectPeerMcpIntoMirror(URL, {
         codexCli: true,
         geminiAvailable: true,
+        groupKeys: { peers: "peers" },
         nonce: NONCE,
         codexHome: "/tmp/codex-isolated",
         claudeConfigDir: dir,
@@ -870,18 +949,24 @@ describe("injectPeerMcpIntoMirror", () => {
       if (!result.ok) return
       expect([...result.serversAdded].sort()).toEqual([
         "codex-cli",
-        "gh-router-peers",
+        "peers",
       ])
 
       const parsed = JSON.parse(
         await fs.readFile(path.join(dir, ".claude.json"), "utf8"),
       ) as { mcpServers: Record<string, { command?: string }> }
       expect(parsed.mcpServers["codex-cli"]?.command).toBe("codex")
-      expect(parsed.mcpServers["gh-router-peers"]).toBeDefined()
+      expect(parsed.mcpServers["peers"]).toBeDefined()
     })
   })
 
-  test("refuses to overwrite a user-side gh-router-peers entry (collision branch)", async () => {
+  test("defensive: refuses to overwrite a user-side entry whose key matches a resolved groupKey", async () => {
+    // Keys handed to inject are pre-resolved collision-free by
+    // resolveGroupKeysFromMirror, so this branch should never fire in
+    // normal flow. But if a racing mutation of the mirror reintroduces a
+    // same-named entry between resolution and inject, the merge must
+    // refuse rather than clobber the user's server. Simulate that race by
+    // passing a resolved key (`peers`) that the mirror already holds.
     await withMirrorDir(async (dir) => {
       const userEntry = {
         type: "http",
@@ -890,7 +975,7 @@ describe("injectPeerMcpIntoMirror", () => {
       }
       const seed = {
         numStartups: 7,
-        mcpServers: { "gh-router-peers": userEntry, "another-server": {} },
+        mcpServers: { peers: userEntry, "another-server": {} },
       }
       const target = path.join(dir, ".claude.json")
       await fs.writeFile(target, JSON.stringify(seed, null, 2), {
@@ -901,6 +986,7 @@ describe("injectPeerMcpIntoMirror", () => {
       const result = await injectPeerMcpIntoMirror(URL, {
         codexCli: false,
         geminiAvailable: true,
+        groupKeys: { peers: "peers" },
         nonce: NONCE,
         codexHome: "/tmp/codex",
         claudeConfigDir: dir,
@@ -908,7 +994,7 @@ describe("injectPeerMcpIntoMirror", () => {
       expect(result.ok).toBe(false)
       if (result.ok) return
       expect(result.reason).toBe("user-has-conflicting-entry")
-      expect(result.conflictingServers).toEqual(["gh-router-peers"])
+      expect(result.conflictingServers).toEqual(["peers"])
 
       // File MUST be unchanged byte-for-byte — we refused, no clobber.
       const afterBody = await fs.readFile(target, "utf8")
@@ -930,6 +1016,7 @@ describe("injectPeerMcpIntoMirror", () => {
       const result = await injectPeerMcpIntoMirror(URL, {
         codexCli: true,
         geminiAvailable: true,
+        groupKeys: { peers: "peers" },
         nonce: NONCE,
         codexHome: "/tmp/codex",
         claudeConfigDir: dir,
@@ -951,6 +1038,7 @@ describe("injectPeerMcpIntoMirror", () => {
       const result = await injectPeerMcpIntoMirror(URL, {
         codexCli: false,
         geminiAvailable: true,
+        groupKeys: { peers: "peers" },
         nonce: NONCE,
         codexHome: "/tmp/codex",
         claudeConfigDir: dir,
@@ -960,24 +1048,29 @@ describe("injectPeerMcpIntoMirror", () => {
       const parsed = JSON.parse(await fs.readFile(target, "utf8")) as {
         mcpServers: Record<string, unknown>
       }
-      expect(parsed.mcpServers["gh-router-peers"]).toBeDefined()
+      expect(parsed.mcpServers["peers"]).toBeDefined()
     })
   })
 
-  test("idempotent re-run on the SAME mirror does NOT spuriously collide (gh-router-peers we wrote ourselves)", async () => {
+  test("idempotent re-run on the SAME mirror does NOT spuriously collide (peers we wrote ourselves)", async () => {
     // Edge case: if a future caller invokes injectPeerMcpIntoMirror twice
-    // in the same proxy lifetime (e.g. internal relaunch), the second
-    // call would see OUR previously-written gh-router-peers and refuse.
-    // Document this as the current behavior — the collision branch is
-    // intentionally conservative ("any same-named entry → refuse") and
-    // we don't try to fingerprint "did we write this?". The fix if this
-    // ever bites is to delete the entry before re-injecting; for now
-    // assert the current behavior so any future refactor is explicit
-    // about the trade-off.
+    // in the same proxy lifetime (e.g. internal relaunch) with the same
+    // pre-resolved keys, the second call would see OUR previously-written
+    // `peers` entry and refuse. Document this as the current behavior —
+    // the collision branch is intentionally conservative ("any same-named
+    // entry → refuse") and we don't try to fingerprint "did we write
+    // this?". The fix if this ever bites is to delete the entry before
+    // re-injecting; for now assert the current behavior so any future
+    // refactor is explicit about the trade-off. (In the real launch flow
+    // resolveGroupKeysFromMirror reads the mirror fresh each time, so a
+    // second resolution would fall back to `gh-router-peers` and avoid
+    // this — the collision only appears when the SAME pre-resolved key is
+    // reused without re-resolving.)
     await withMirrorDir(async (dir) => {
       const first = await injectPeerMcpIntoMirror(URL, {
         codexCli: false,
         geminiAvailable: true,
+        groupKeys: { peers: "peers" },
         nonce: NONCE,
         codexHome: "/tmp/codex",
         claudeConfigDir: dir,
@@ -987,13 +1080,14 @@ describe("injectPeerMcpIntoMirror", () => {
       const second = await injectPeerMcpIntoMirror(URL, {
         codexCli: false,
         geminiAvailable: true,
+        groupKeys: { peers: "peers" },
         nonce: NONCE,
         codexHome: "/tmp/codex",
         claudeConfigDir: dir,
       })
       expect(second.ok).toBe(false)
       if (second.ok) return
-      expect(second.conflictingServers).toEqual(["gh-router-peers"])
+      expect(second.conflictingServers).toEqual(["peers"])
     })
   })
 
@@ -1006,6 +1100,7 @@ describe("injectPeerMcpIntoMirror", () => {
       const result = await injectPeerMcpIntoMirror(URL, {
         codexCli: false,
         geminiAvailable: true,
+        groupKeys: { peers: "peers" },
         nonce: NONCE,
         codexHome: "/tmp/codex",
         claudeConfigDir: dir,
@@ -1017,7 +1112,7 @@ describe("injectPeerMcpIntoMirror", () => {
         mcpServers: Record<string, unknown>
       }
       expect(parsed.numStartups).toBe(1) // other fields preserved
-      expect(parsed.mcpServers["gh-router-peers"]).toBeDefined()
+      expect(parsed.mcpServers["peers"]).toBeDefined()
     })
   })
 
@@ -1031,6 +1126,7 @@ describe("injectPeerMcpIntoMirror", () => {
       const result = await injectPeerMcpIntoMirror(URL, {
         codexCli: false,
         geminiAvailable: true,
+        groupKeys: { peers: "peers" },
         nonce: NONCE,
         codexHome: "/tmp/codex",
         claudeConfigDir: dir,
@@ -1041,5 +1137,119 @@ describe("injectPeerMcpIntoMirror", () => {
     } finally {
       await fs.rm(parent, { recursive: true, force: true }).catch(() => {})
     }
+  })
+})
+
+describe("resolveGroupKeysFromMirror", () => {
+  async function withMirrorDir<T>(
+    fn: (dir: string) => Promise<T>,
+  ): Promise<T> {
+    const dir = await makeTempDir("resolve-mirror")
+    try {
+      return await fn(dir)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+
+  async function seedMirror(
+    dir: string,
+    mcpServers: Record<string, unknown>,
+  ): Promise<void> {
+    const target = path.join(dir, ".claude.json")
+    await fs.writeFile(target, JSON.stringify({ mcpServers }, null, 2), {
+      mode: 0o600,
+    })
+  }
+
+  test("empty / missing mirror → every enabled group gets its bare key", async () => {
+    await withMirrorDir(async (dir) => {
+      // No .claude.json planted — readMcpServersSnapshot treats this as {}.
+      const { keys, skipped } = await resolveGroupKeysFromMirror(
+        MCP_GROUPS,
+        dir,
+      )
+      expect(skipped).toEqual([])
+      expect(keys).toEqual({
+        peers: "peers",
+        search: "search",
+        workers: "workers",
+        browser: "browser",
+        decide: "decide",
+      })
+    })
+  })
+
+  test("a user-side bare `browser` entry → browser resolves to the gh-router-browser fallback", async () => {
+    await withMirrorDir(async (dir) => {
+      await seedMirror(dir, {
+        browser: { type: "http", url: "http://localhost:9/mcp", headers: {} },
+      })
+      const { keys, skipped } = await resolveGroupKeysFromMirror(
+        MCP_GROUPS,
+        dir,
+      )
+      expect(skipped).toEqual([])
+      // The collided group falls back to the prefixed key…
+      expect(keys.browser).toBe("gh-router-browser")
+      // …while every other group keeps its bare key.
+      expect(keys.peers).toBe("peers")
+      expect(keys.search).toBe("search")
+      expect(keys.workers).toBe("workers")
+      expect(keys.decide).toBe("decide")
+    })
+  })
+
+  test("both `search` AND `gh-router-search` taken → numbered fallback (never skip, never route at user's server)", async () => {
+    await withMirrorDir(async (dir) => {
+      await seedMirror(dir, {
+        search: { type: "http", url: "http://localhost:1/mcp", headers: {} },
+        "gh-router-search": {
+          type: "http",
+          url: "http://localhost:2/mcp",
+          headers: {},
+        },
+      })
+      const { keys, skipped } = await resolveGroupKeysFromMirror(
+        MCP_GROUPS,
+        dir,
+      )
+      // Never skip: search walks past the two taken names to a free,
+      // proxy-owned key. The capability stays available and the model is
+      // never routed at the user's `search` or `gh-router-search` servers.
+      expect(skipped).toEqual([])
+      expect(keys.search).toBe("gh-router-search-2")
+      // Other groups unaffected.
+      expect(keys.peers).toBe("peers")
+      expect(keys.browser).toBe("browser")
+    })
+  })
+
+  test("walks the numbered sequence until a free key is found", async () => {
+    await withMirrorDir(async (dir) => {
+      await seedMirror(dir, {
+        peers: { type: "http", url: "http://localhost:1/mcp", headers: {} },
+        "gh-router-peers": { type: "http", url: "http://localhost:2/mcp", headers: {} },
+        "gh-router-peers-2": { type: "http", url: "http://localhost:3/mcp", headers: {} },
+      })
+      const { keys } = await resolveGroupKeysFromMirror(["peers"], dir)
+      // peers is load-bearing — it ALWAYS gets a key we own, even past
+      // three user collisions.
+      expect(keys.peers).toBe("gh-router-peers-3")
+    })
+  })
+
+  test("only resolves the enabled groups it is asked about", async () => {
+    await withMirrorDir(async (dir) => {
+      const { keys, skipped } = await resolveGroupKeysFromMirror(
+        ["peers", "search"],
+        dir,
+      )
+      expect(skipped).toEqual([])
+      expect(Object.keys(keys).sort()).toEqual(["peers", "search"])
+      expect(keys.workers).toBeUndefined()
+      expect(keys.browser).toBeUndefined()
+      expect(keys.decide).toBeUndefined()
+    })
   })
 })

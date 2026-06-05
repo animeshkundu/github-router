@@ -4,15 +4,32 @@
 
 Expose three peer models — `gpt-5.5` (codex_critic), `gpt-5.3-codex` (codex_reviewer), `gemini-3.1-pro-preview` (gemini_critic) — as cross-lab adversarial reviewers inside Claude Code, used per their strengths to improve quality and reduce blindspots/hallucinations. Capability injection must be auto-injected on `github-router claude` startup with no per-session user action. Reasoning effort must be configurable via the MCP tool args, defaulting to `high` (with `xhigh` available for explicit deep dives).
 
-## Current Architecture (as of commit `d844623`)
+### Five-Server Split
 
-The proxy at `src/routes/mcp/` already exposes three peer-MCP tools at `/mcp` on a loopback port:
+As of the latest architectural change, the original single `gh-router-peers` MCP server was split into **five intent-named MCP servers** to prevent monolithic server congestion and enforce isolation. Each is a distinct `mcpServers` entry pointing at a path-scoped `/mcp/<group>` endpoint (instead of the single `/mcp` union path, which is kept as a fallback for BYO clients).
 
-- `mcp__gh-router-peers__codex_critic` (gpt-5.5) — adversarial design review
-- `mcp__gh-router-peers__codex_reviewer` (gpt-5.3-codex) — line-level code review
-- `mcp__gh-router-peers__gemini_critic` (gemini-3.1-pro-preview) — long-context cross-lab triangulation
+The five scoped servers and their public MCP surfaces are:
+- `peers`   → `/mcp/peers` (the critics: `codex_critic`, `codex_reviewer`, `gemini_critic`, `opus_critic` + `codex_implementer` in `--codex-cli` mode)
+- `search`  → `/mcp/search` (`code` [was `code_search`], `web` [was `web_search`])
+- `workers` → `/mcp/workers` (`explore` [was `worker_explore`], `implement` [was `worker_implement`])
+- `browser` → `/mcp/browser` (the browser tools with the `browser_` prefix dropped: `navigate`, `open_tab`, `read_page`, `act`, …; loaded only under `--browse`)
+- `decide`  → `/mcp/decide` (`stand_in` [unchanged name])
 
-Auto-injection: `github-router claude` registers `gh-router-peers` by **merging it into the per-launch mirrored `<CLAUDE_CONFIG_DIR>/.claude.json`'s `mcpServers` map** (`injectPeerMcpIntoMirror` in `src/lib/codex-mcp-config.ts`). This is the load-bearing fix for subagent MCP visibility — subagents (Agent-tool, forks, agent-teams subprocesses) discover MCP servers from `CLAUDE_CONFIG_DIR/.claude.json` user-scope, NOT from a parent-process-only CLI flag, so the mirror approach makes the peer tools visible to every spawned tier. The merge is non-destructive (the user's pre-existing user-scope MCPs are preserved). On collision with a user-side server of the same name, the inject is refused and the proxy falls back to ephemeral `--mcp-config` for the parent session only; subagents in that degraded mode do not see the peer tools (explicit branch — see the `subagent-INVISIBLE` startup banner). Subagent persona prompts are written to `<CLAUDE_CONFIG_DIR>/agents/peer-<pid>-<rand>-<name>.md` and pass an `--agents`-style discovery path; the frontmatter has **no `tools:` field** so the subagent inherits the parent's full toolset (built-ins + every MCP visible to the parent, incl. the peer tools just injected — pinned by a "frontmatter has no `tools:` field" regression test in `tests/codex-mcp-config.test.ts`). Per-launch mirror dir (`<pid>-<rand>` under `~/.local/share/github-router/claude-config/`) means two concurrent launches never race on the `.claude.json` write or share an MCP nonce; orphan dirs from SIGKILL'd proxies are reclaimed by a boot-time PID-alive sweep. Project-scope MCPs (`<workspace>/.mcp.json`) are untouched — the spawned `claude` inherits the parent's cwd via `launchChild`'s no-`cwd:` spawn, so Claude Code reads them directly from the workspace; the proxy never mirrors or sanitizes project-scope. Auth: per-launch random 32-byte nonce as Bearer token + Host header check (loopback only); the proxy validates against the launch nonce regardless of which channel — mirror or `--mcp-config` fallback — the request came through.
+Under this new topology, the lead model sees names prefixed as `mcp__<group>__<newname>`, e.g., `mcp__search__code`, `mcp__browser__navigate`, `mcp__peers__codex_critic`, `mcp__workers__explore`, `mcp__decide__stand_in`.
+
+Config keys are bare by default (`peers`, `search`, etc.). To prevent a user's own servers from silently hijacking or dropping ours, the proxy performs active collision checking: if a key collides with a user-side `mcpServers` entry, it falls back to `gh-router-<group>` (e.g., `gh-router-browser`). This resolved key is threaded into BOTH the `mcpServers` map entries AND the persona `.md` routing files. On repeated collision it walks the numbered sequence `gh-router-<group>-2`, `-3`, … to the first free name — it never skips and never reuses a user-owned key (`resolveGroupKeysFromMirror` in `src/lib/codex-mcp-config.ts`).
+
+---
+
+## Current Architecture
+
+The proxy at `src/routes/mcp/` exposes five scoped MCP servers on loopback ports:
+
+- `mcp__peers__codex_critic` (gpt-5.5) — adversarial design review
+- `mcp__peers__codex_reviewer` (gpt-5.3-codex) — line-level code review
+- `mcp__peers__gemini_critic` (gemini-3.1-pro-preview) — long-context cross-lab triangulation
+
+Auto-injection: `github-router claude` registers these servers by **merging them into the per-launch mirrored `<CLAUDE_CONFIG_DIR>/.claude.json`'s `mcpServers` map** (`injectPeerMcpIntoMirror` in `src/lib/codex-mcp-config.ts`). This is the load-bearing fix for subagent MCP visibility — subagents (Agent-tool, forks, agent-teams subprocesses) discover MCP servers from `CLAUDE_CONFIG_DIR/.claude.json` user-scope, NOT from a parent-process-only CLI flag, so the mirror approach makes the peer tools visible to every spawned tier. The merge is non-destructive (the user's pre-existing user-scope MCPs are preserved). On collision, we dynamically resolve the server keys using a fallback name (`gh-router-<group>`) as described above; subagents inherit the fallback keys identically. Subagent persona prompts are written to `<CLAUDE_CONFIG_DIR>/agents/peer-<pid>-<rand>-<name>.md` and pass an `--agents`-style discovery path; the frontmatter has **no `tools:` field** so the subagent inherits the parent's full toolset (built-ins + every MCP visible to the parent, incl. our injected tools). Per-launch mirror dir (`<pid>-<rand>` under `~/.local/share/github-router/claude-config/`) means two concurrent launches never race on the `.claude.json` write or share an MCP nonce; orphan dirs from SIGKILL'd proxies are reclaimed by a boot-time PID-alive sweep. Project-scope MCPs (`<workspace>/.mcp.json`) are untouched — the spawned `claude` inherits the parent's cwd via `launchChild`'s no-`cwd:` spawn, so Claude Code reads them directly from the workspace; the proxy never mirrors or sanitizes project-scope. Auth: per-launch random 32-byte nonce as Bearer token + Host header check (loopback only); the proxy validates against the launch nonce regardless of which channel — mirror or `--mcp-config` fallback — the request came through.
 
 Awareness layer: a short (~100-token) `--append-system-prompt` snippet (built by `buildPeerAwarenessSnippet` in `src/lib/peer-mcp-personas.ts`) tells Claude that the peer critics, the `peer-review-coordinator` fan-out subagent, and Claude Code's built-in `advisor` tool are available — non-prescriptive (the prescriptive auto-invocation triggers live in each MCP tool's own `description`). Default-on; opt out per-launch with `GH_ROUTER_PEER_AWARENESS=0` (also accepts `false` / `off` / `no` / empty string, case-insensitive).
 
@@ -151,11 +168,11 @@ The `claude` subcommand auto-injects three peer-model review tools as Claude Cod
 
 | Persona | Model | Endpoint | Effort | Latency on ~600B prompt |
 |---|---|---|---|---|
-| codex_critic | gpt-5.5 | /v1/responses | xhigh (default) | 56.3s — fits inside SSE-streamed `/mcp` (no MCP per-tool-call timeout) |
+| codex_critic | gpt-5.5 | /v1/responses | xhigh (default) | 56.3s — fits inside SSE-streamed `/mcp/peers` (no MCP per-tool-call timeout) |
 | codex_critic | gpt-5.5 | /v1/responses | high | 23.8s |
 | codex_critic | gpt-5.5 | /v1/responses | medium | 26.3s |
 | codex_reviewer | gpt-5.3-codex | /v1/responses | high | 16.0s |
-| opus_critic | claude-opus-4.6-1m (else claude-opus-4-6) | /v1/messages | high (default; xhigh not supported on 4.6) | 30-90s on real reviews — fits inside SSE-streamed `/mcp` |
+| opus_critic | claude-opus-4.6-1m (else claude-opus-4-6) | /v1/messages | high (default; xhigh not supported on 4.6) | 30-90s on real reviews — fits inside SSE-streamed `/mcp/peers` |
 
 **opus_critic model selection**: `activePersonas()` (`src/routes/mcp/handler.ts`) resolves opus_critic's model at call time — it prefers the 1M-context Opus 4.6 variant (`claude-opus-4.6-1m`, ≈936K-token prompt window) when the live catalog carries it (matched by `/opus-4\.6.*1m/i`), and falls back to the 200K `claude-opus-4-6` otherwise. opus_critic is pinned one minor behind the spawned-Claude-Code default (`claude-opus-4-8`) so the panel spans a wider slice of the Opus version curve — codex_critic (gpt-5.5, ≈922K) and opus_critic (4.6-1m, ≈936K) remain the two big-window peers that can take a large artifact whole. Note that 4.6 doesn't advertise `xhigh` in its `reasoning_effort` allowlist (only `low|medium|high|max`), so opus_critic's `defaultEffort` is `"high"` and `xhigh` is rejected at the handler with -32602.
 
@@ -170,7 +187,7 @@ The `claude` subcommand auto-injects three peer-model review tools as Claude Cod
 | opus_critic | ✅ | ✅ | ✅ | ✅ (SSE-streamed) | xhigh |
 | gemini_critic | ✅ | ✅ | ✅ | ❌ rejected `-32602 RPC_INVALID_PARAMS` | high |
 
-`xhigh` is allowed on the three long-running personas because SSE-streamed `/mcp` keeps the wall time off the MCP per-tool-call clock. `gemini_critic` is the exception: Copilot's gemini route returned 400 (`reasoning_effort "xhigh" is not supported by model gemini-3.1-pro-preview; supported values: [low medium high]`), so the gate rejects xhigh upstream of any Copilot call. The empirical 400 is captured in the proxy log for posterity.
+`xhigh` is allowed on the three long-running personas because SSE-streamed `/mcp/peers` keeps the wall time off the MCP per-tool-call clock. `gemini_critic` is the exception: Copilot's gemini route returned 400 (`reasoning_effort "xhigh" is not supported by model gemini-3.1-pro-preview; supported values: [low medium high]`), so the gate rejects xhigh upstream of any Copilot call. The empirical 400 is captured in the proxy log for posterity.
 
 **Pre-flight `predictedTooLong` cap** (Phase A2; defense-in-depth on top of the effort gate). Even `high` on the codex personas can bust the ceiling once the brief grows past ~8 KB (the 23.8s baseline scales roughly linearly with input). The cap rejects with `isError: true` (NOT an RPC error — the request is syntactically valid; the prediction is operational) and an actionable message telling the caller to drop to `medium` or split the brief into 2-4 parallel sub-calls per the decomposition guidance:
 
@@ -189,9 +206,9 @@ The `claude` subcommand auto-injects three peer-model review tools as Claude Cod
 
 **Per-call telemetry log** (`logTelemetry` in `src/routes/mcp/handler.ts`): opt-in via `GH_ROUTER_LOG_PEER_MCP=1` (mirrors the strict `=== "1"` pattern of `GH_ROUTER_LOG_FIELDS`). When enabled, every `tools/call` writes one line directly to stderr — `[peer-mcp] name=<persona> model=<id> duration_ms=<n> result=<ok|isError|exception>` — so a maintainer can grep across sessions to see which personas earn their keep. Default off because the proxy shares a TTY with the Claude TUI under `github-router claude`, and an unconditional stderr write per call shows up as ambient UI noise.
 
-## Code search (`code_search`)
+## Code search (`code`)
 
-Non-persona MCP tool exposed alongside `web_search` under `NON_PERSONA_MCP_TOOLS` (`src/lib/peer-mcp-personas.ts`). All clients (Claude Code, codex, gemini callers) see it via the same `/mcp` surface. Implementation: `src/lib/code-search.ts`.
+Non-persona MCP tool exposed alongside `web` under `NON_PERSONA_MCP_TOOLS` (`src/lib/peer-mcp-personas.ts`). All clients (Claude Code, codex, gemini callers) see it via the same `/mcp/search` scoped surface (or `/mcp` union). Implementation: `src/lib/code-search.ts`.
 
 ### Ranking algorithm
 
@@ -227,14 +244,14 @@ After BM25F sort, truncate at the first hit below `0.5 × top_score` (Burges 201
 
 `workspace` is any absolute path the proxy process can `stat` and is a directory. The proxy runs as the user; reads are bounded by the user's own filesystem permissions, same as Claude Code's built-in Read / Bash / Edit tools. There is no allow-set, no marker-file walk, no secret-shape file denylist.
 
-This was reconsidered after the initial design (which had a default-deny allow-set + a hardcoded secret-shape denylist for `*.env`, `*.pem`, `id_rsa*`, etc.). The earlier framing treated `code_search` as a potential "model-callable file-exfil oracle." That framing assumes a privilege gap between the proxy and the model — but there isn't one. The same model that can call `code_search` can also issue `Bash cat ~/.ssh/id_rsa` or `Read /etc/passwd`. Gating only `code_search` was inconsistency, not defense. The simpler holistic answer: reach the same paths Claude Code already reaches, no special-cased boundary.
+This was reconsidered after the initial design (which had a default-deny allow-set + a hardcoded secret-shape denylist for `*.env`, `*.pem`, `id_rsa*`, etc.). The earlier framing treated the tool as a potential "model-callable file-exfil oracle." That framing assumes a privilege gap between the proxy and the model — but there isn't one. The same model that can call the search tool can also issue `Bash cat ~/.ssh/id_rsa` or `Read /etc/passwd`. Gating only search was inconsistency, not defense. The simpler holistic answer: reach the same paths Claude Code already reaches, no special-cased boundary.
 
 Validation kept:
 
 - `workspace` must be an absolute path (relative paths are an integration-error footgun).
 - `realpathSync` canonicalization (resolves symlinks; output paths are reported relative to this canonical root).
 - Must exist AND be a directory (a file path or a missing path errors out cleanly).
-- Errors do NOT echo the rejected path (output of `code_search` flows upstream to model providers; consistent with `COPILOT_HOST_ALLOWLIST`'s no-echo pattern).
+- Errors do NOT echo the rejected path (output flows upstream to model providers; consistent with `COPILOT_HOST_ALLOWLIST`'s no-echo pattern).
 
 ### Hardened spawn (CVE-class fixes from peer review)
 
@@ -259,7 +276,7 @@ Tri-tier resolution (mirrors cc-backup `src/utils/ripgrep.ts:31-65`):
 Per-call breadcrumb logged via consola at info level (not sent off-host):
 
 ```
-[code_search] mode=ranked results=14 truncated=false scanned_files=412 elapsed_ms=34 abort=false rg=system
+[code] mode=ranked results=14 truncated=false scanned_files=412 elapsed_ms=34 abort=false rg=system
 ```
 
 Raw `query` and absolute workspace paths are NOT logged unless `GH_ROUTER_DEBUG_CODE_SEARCH=1` is set — query strings can leak intent and codebase shape.
@@ -296,15 +313,15 @@ Single-identifier queries in `ranked` and `literal` mode are auto-expanded acros
 
 Every field in an MCP tool's **input** and **output** schema must be one of:
 
-  (a) **Required to call the tool correctly** (e.g. `query`, `workspace` on `code_search` — the tool cannot do its job without them).
+  (a) **Required to call the tool correctly** (e.g. `query`, `workspace` on the search tool — the tool cannot do its job without them).
   (b) **Tunable by the model in a way that improves outcomes** (e.g. `mode`, `structural`, `limit` — the model can reasonably decide "I need every hit, switch to literal" or "this is a large repo, drop to topN").
   (c) **Directly actionable feedback that helps the model self-correct on the next call** (e.g. `truncated: true` tells the model "raise `limit` or narrow the query"; `notice: "structural budget exceeded after 23/50 hits; retry with structural: \"topN\""` or `notice: "response size limit reached at 420 hits (~256KB); narrow your query or lower 'limit'"` tells it exactly what to do differently; a ripgrep regex-compile error surfaced as `isError: true` content tells it "your pattern is malformed").
 
 If a proposed field fails all three tests, **cut it**. The model's context is finite and precious; echoing the model's own inputs back, exposing internal diagnostics for human eyeballs, and surfacing failures the model has no lever to fix all cost tokens for negative value. Negative value because every additional token in the tool response (i) reduces the budget left for the model's actual reasoning, and (ii) introduces noise the model has to filter through before reaching the actionable bits.
 
-This rule applies to **all** MCP tools registered under `NON_PERSONA_MCP_TOOLS` (`code_search`, `web_search`, anything added later) and to the peer-critic persona tools (`codex_critic`, `codex_reviewer`, `opus_critic`, `gemini_critic`).
+This rule applies to **all** MCP tools registered under `NON_PERSONA_MCP_TOOLS` (`code`, `web`, anything added later) and to the peer-critic persona tools (`codex_critic`, `codex_reviewer`, `opus_critic`, `gemini_critic`).
 
-### Worked example: `code_search`
+### Worked example: `code`
 
 The internal `CodeSearchResponse` type in `src/lib/code-search.ts` is rich on purpose — internal callers (tests, future in-process consumers) benefit from BM25F scores, per-field contributions, scanning stats, etc. The MCP handler in `src/lib/peer-mcp-personas.ts` trims aggressively before stringifying to `content[0].text`. The cuts, with the test each field failed:
 
@@ -327,20 +344,22 @@ The internal `CodeSearchResponse` type in `src/lib/code-search.ts` is rich on pu
 
 For each proposed input or output field, answer in one sentence: **"What would the model do with this?"** If the answer is "nothing" or "look at it for context but not act on it," cut it. Default to absent — adding back later is cheap; pulling out a field clients have already learned to expect is breaking.
 
-## Worker tools (`worker_explore`, `worker_implement`)
+## Worker tools (`explore`, `implement`)
 
-Two non-persona MCP tools — `mcp__gh-router-peers__worker_explore` and `mcp__gh-router-peers__worker_implement` — delegate scoped work to an **autonomous worker subagent** backed by the **Pi agent runtime** (vendored at `src/vendor/pi/`) and routed through Copilot's `gemini-3.5-flash` by default. The worker plans its own tool calls, decides when it's done, and returns a single text answer (plus a unified diff when `worktree: true`). Implementation: `src/lib/worker-agent/engine.ts` (`runWorkerAgent`) and `src/lib/worker-agent/tools.ts` (the 11 worker-side `AgentTool` definitions).
+Two non-persona MCP tools — `mcp__workers__explore` and `mcp__workers__implement` — delegate scoped work to an **autonomous worker subagent** backed by the **Pi agent runtime** (vendored at `src/vendor/pi/`) and routed through Copilot's `gemini-3.5-flash` by default. The worker plans its own tool calls, decides when it's done, and returns a single text answer (plus a unified diff when `worktree: true`). Implementation: `src/lib/worker-agent/engine.ts` (`runWorkerAgent`) and `src/lib/worker-agent/tools.ts` (the 11 worker-side `AgentTool` definitions).
+
+These tools are exposed under the `workers` MCP server at `/mcp/workers` (or the `/mcp` union path).
 
 ### Tool surface
 
 | Tool | Mode | Tools the worker can call | Worktree opt-in | Description |
 | --- | --- | --- | --- | --- |
-| `worker_explore` | read-only | `read`, `glob`, `grep`, `code_search`, `web_search`, `fetch_url`, `peer_review`, `advisor` (8) | n/a | Read-only investigation — the worker plans its own searches/reads and returns a single text answer. |
-| `worker_implement` | read+write | explore tools + `edit`, `write`, `bash` (11) | `worktree: boolean` (default `false`) | Scoped coding task; modifies files in your workspace. With `worktree: true` runs in a fresh git worktree and returns Pi's text followed by the unified diff. With `worktree: false` edits in place — concurrent calls race. |
+| `explore` | read-only | `read`, `glob`, `grep`, `code_search`, `web_search`, `fetch_url`, `peer_review`, `advisor` (8) | n/a | Read-only investigation — the worker plans its own searches/reads and returns a single text answer. |
+| `implement` | read+write | explore tools + `edit`, `write`, `bash` (11) | `worktree: boolean` (default `false`) | Scoped coding task; modifies files in your workspace. With `worktree: true` runs in a fresh git worktree and returns Pi's text followed by the unified diff. With `worktree: false` edits in place — concurrent calls race. |
 
 Both tools accept optional `model` (any Copilot catalog model with `tool_calls` support; default `gemini-3.5-flash`) and `thinking` (one of `off`/`minimal`/`low`/`medium`/`high`/`xhigh`, default `high`, silently clamped to the model's allowed range).
 
-Both also accept an optional `workspace` (absolute path) — the working directory the worker operates in. **Default is the proxy's launch cwd** (the directory `github-router start` / `github-router claude` was invoked from); the model can override when the parent agent has multiple workspaces open and needs the worker pointed at a specific one. The override is absolute-only — relative paths are rejected at the MCP boundary with an actionable error so a typo doesn't silently resolve against `process.cwd()` and land somewhere surprising. For `worker_implement` with `worktree: true`, the workspace must be inside a git repository (the engine's existing `createWorktree` hard-errors otherwise). Threat model matches `code_search`: the proxy already runs as the user; no allowlist (the same operator could `Read` / `Bash` the same paths through Claude Code directly). See `runWorkerToolCall` in `src/lib/peer-mcp-personas.ts` for the validation.
+Both also accept an optional `workspace` (absolute path) — the working directory the worker operates in. **Default is the proxy's launch cwd** (the directory `github-router start` / `github-router claude` was invoked from); the model can override when the parent agent has multiple workspaces open and needs the worker pointed at a specific one. The override is absolute-only — relative paths are rejected at the MCP boundary with an actionable error so a typo doesn't silently resolve against `process.cwd()` and land somewhere surprising. For `implement` with `worktree: true`, the workspace must be inside a git repository (the engine's existing `createWorktree` hard-errors otherwise). Threat model matches code search: the proxy already runs as the user; no allowlist (the same operator could `Read` / `Bash` the same paths through Claude Code directly). See `runWorkerToolCall` in `src/lib/peer-mcp-personas.ts` for the validation.
 
 ### Dual gate (catalog + opt-out)
 
@@ -370,7 +389,7 @@ All three are 10 MiB, matching `MAX_STDOUT_BYTES` in `src/lib/code-search.ts:106
 
 ### Worktree mode (per-call auto-clean + crash-safe sweep)
 
-With `worker_implement` + `worktree: true`, the engine provisions a fresh git worktree under `<repo>/.git/worktrees/worker-<pid>-<uuid>-<rand>` on a new branch, runs the worker isolated, captures `git diff HEAD` after `git add -N .` (so untracked files appear), and removes the worktree in the per-call `finally`. Three layers of safety net against orphans:
+With `implement` + `worktree: true`, the engine provisions a fresh git worktree under `<repo>/.git/worktrees/worker-<pid>-<uuid>-<rand>` on a new branch, runs the worker isolated, captures `git diff HEAD` after `git add -N .` (so untracked files appear), and removes the worktree in the per-call `finally`. Three layers of safety net against orphans:
 
 1. **Per-call `finally`** — happy path, fires on success AND mid-loop throws.
 2. **Session-end signal sweep** — `registerExitHandlers` in `src/lib/worker-agent/lifecycle.ts` installs SIGINT/SIGTERM/exit handlers that walk the per-process registry and `git worktree remove --force` everything. SIGINT/SIGTERM handlers re-raise (`process.kill(pid, sig)` after removing themselves) so the conventional `128 + signum` exit code is preserved.
@@ -392,7 +411,7 @@ Worker `bash` runs through `src/lib/worker-agent/bash.ts` with:
 
 ### Path-containment denylist (read/glob/grep/code_search)
 
-The worker's read-only file tools refuse paths matching `.env*`, `*.pem`, `id_rsa*`, `id_ed25519*`, anything under `.git/` (interior, not the worktree root), `.ssh/`, `.gnupg/`, `.npmrc`, `.netrc`. The intent is "don't make it trivial for a confused worker to exfiltrate the operator's secrets via tool-result text"; the threat model is honest about not being defense against a determined caller (the same operator could run `worker_implement` with `bash` and `cat` the file directly).
+The worker's read-only file tools refuse paths matching `.env*`, `*.pem`, `id_rsa*`, `id_ed25519*`, anything under `.git/` (interior, not the worktree root), `.ssh/`, `.gnupg/`, `.npmrc`, `.netrc`. The intent is "don't make it trivial for a confused worker to exfiltrate the operator's secrets via tool-result text"; the threat model is honest about not being defense against a determined caller (the same operator could run `implement` with `bash` and `cat` the file directly).
 
 ### Vendored Pi runtime
 

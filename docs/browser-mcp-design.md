@@ -1,6 +1,6 @@
 # Browser-control MCP (`--browse`)
 
-The `--browse` flag adds a `browser_*` tool suite to the github-router `/mcp` endpoint. When a model calls one of these tools, the proxy routes the request through a local bridge process to a Chrome / Edge extension running in the user's browser. The extension then drives Chrome's tab, scripting, debugger, and downloads APIs and returns the result back up the chain.
+The `--browse` flag adds a tool suite to the github-router `/mcp/browser` endpoint (or `/mcp` on the full union). When a model calls one of these tools, the proxy routes the request through a local bridge process to a Chrome / Edge extension running in the user's browser. The extension then drives Chrome's tab, scripting, debugger, and downloads APIs and returns the result back up the chain.
 
 Quick links: the entry point for changes is [`src/lib/browser-mcp/`](../src/lib/browser-mcp/). The extension lives in [`src/browser-ext/`](../src/browser-ext/) and the native-messaging host lives in [`src/browser-bridge/`](../src/browser-bridge/).
 
@@ -8,7 +8,7 @@ Quick links: the entry point for changes is [`src/lib/browser-mcp/`](../src/lib/
 
 ```
 +-------------------------+       JSON-RPC over HTTP/SSE        +----------------------------+
-|  Claude (or any MCP     | <---------------------------------> |  github-router /mcp        |
+|  Claude (or any MCP     | <---------------------------------> |  github-router /mcp/browser|
 |  client)                |   tools/list, tools/call            |  (handler.ts)              |
 +-------------------------+                                      +-------------+--------------+
                                                                                |
@@ -68,47 +68,53 @@ The browser tools default to OFF. They appear in `tools/list` and accept `tools/
 
 The gate lives at `src/routes/mcp/handler.ts:browserToolsEnabled` and fires symmetrically at both list-time and call-time, mirroring the pattern used by `workerToolsEnabled()` and `standInToolEnabled()` so a client that hardcodes a tool name still gets a -32601 method-not-found.
 
-## Tool surface (19 tools)
+## Tool surface (18 tools)
 
 Ruthlessly minimal per [`peer-mcp-design.md`](peer-mcp-design.md) "Design principle: ruthlessly minimal MCP tool surface" — every field is required to call the tool, model-tunable in a way that improves outcomes, or directly actionable feedback.
 
-| Tool | Purpose |
-| --- | --- |
-| `browser_list_tabs` | Enumerate open tabs across all windows. |
-| `browser_open_tab` | Open a new tab at a URL and wait for load. |
-| `browser_close_tab` | Close one or more tabs. |
-| `browser_navigate` | Goto / back / forward / reload an existing tab. |
-| `browser_read_page` | Extract rendered text, interactive-element refs + CSS-px bboxes, and viewport metadata `{width, height, devicePixelRatio, scrollX, scrollY}`. |
-| `browser_click` | Click an element by ref or selector (synthetic `.click()` — fast path); reports whether navigation followed. |
-| `browser_fill` | Type into input / textarea, select option, toggle checkbox / radio (native-setter — fast path). |
-| `browser_scroll` | Scroll to top / bottom / by pixels / to a referenced element / wheel at a pointer location (`at-pointer` mode for sub-region scroll). |
-| `browser_screenshot` | Capture a base64 PNG of the visible tab area. |
-| `browser_keyboard` | Send a chord (Control+L, etc) via CDP `Input.dispatchKeyEvent`. |
-| `browser_wait` | Wait for selector / URL regex match / network-idle heuristic. |
-| `browser_eval_js` | Evaluate a JS expression in the page's main world (CDP `Runtime.evaluate`). |
-| `browser_download` | Trigger a download by URL and wait for completion. |
-| `browser_console_logs` | Drain captured console messages since the last call. |
-| `browser_network_log` | Drain captured network responses since the last call. |
-| `browser_mouse` | Move / click / dblclick / down / up via real CDP `Input.dispatchMouseEvent`. Target via ref, selector, or (x, y). Hover-to-reveal menus, canvas clicks, trusted events. |
-| `browser_drag` | Drag from→to. Auto-detects HTML5 native DnD (`draggable="true"` → `Input.setInterceptDrags` + `Input.dispatchDragEvent`) vs pointer DnD (CDP mouse events with `buttons:1` held throughout — for react-dnd / Sortable.js). |
-| `browser_type` | Type a string per-keystroke via CDP `Input.dispatchKeyEvent` — fires keydown + keypress + input for search-as-you-type / autocomplete / chip inputs. |
-| `browser_locate` | Resolve a single ref or selector to bbox + center + hit-test metadata (`topmostAtCenter`, `pointerEvents`, `visible`, `inView`) without a full page snapshot. |
+**CRITICAL RENAME NOTE**: The `browser_` prefix has been dropped on the public-facing MCP tool schema to keep the surface elegant (e.g. `browser_navigate` became `navigate`, `browser_open_tab` became `open_tab`, etc.). 
 
-Element refs returned by `browser_read_page` are intended as the primary input to follow-up `browser_click` / `browser_fill` / `browser_scroll` / `browser_mouse` / `browser_drag` calls. Refs are more robust than CSS selectors against dynamic class names and the model can read them straight out of the page snapshot.
+**THIS IS MCP-FACING ONLY**: The rename is applied at the `NON_PERSONA_MCP_TOOLS` mapping in `peer-mcp-personas.ts` (`...BROWSER_TOOLS.map(t => ({...t, group:"browser", toolNameHttp: t.toolNameHttp.replace(/^browser_/,"")}))`). The wire `tool` string the MV3 extension dispatches on (`TOOL_HANDLERS[req.tool]`) **STAYS** `browser_*` (e.g., `browser_navigate`), and the handler closures in `src/lib/browser-mcp/index.ts` still call `dispatchBrowserTool("browser_navigate", …)`. This means installed extensions need **NO** reload, and `dispatch.ts` (timeouts, pacing, etc. keyed on wire names) is untouched.
+
+The model sees these tools with the `mcp__browser__` prefix (e.g. `mcp__browser__navigate`):
+
+| Tool (MCP name) | Wire name (internal only) | Purpose |
+| --- | --- | --- |
+| `list_tabs` | `browser_list_tabs` | Enumerate open tabs across all windows. |
+| `open_tab` | `browser_open_tab` | Open a new tab at a URL and wait for load. |
+| `close_tab` | `browser_close_tab` | Close one or more tabs. |
+| `navigate` | `browser_navigate` | Goto / back / forward / reload an existing tab. |
+| `read_page` | `browser_read_page` | Extract rendered text, interactive-element refs + CSS-px bboxes, and viewport metadata `{width, height, devicePixelRatio, scrollX, scrollY}`. |
+| `scroll` | `browser_scroll` | Scroll to top / bottom / by pixels / to a referenced element / wheel at a pointer location (`at-pointer` mode for sub-region scroll). |
+| `screenshot` | `browser_screenshot` | Capture a base64 PNG of the visible tab area. |
+| `keyboard` | `browser_keyboard` | Send a chord (Control+L, etc) via CDP `Input.dispatchKeyEvent`. |
+| `wait` | `browser_wait` | Wait for selector / URL regex match / network-idle heuristic. |
+| `eval_js` | `browser_eval_js` | Evaluate a JS expression in the page's main world (CDP `Runtime.evaluate`). |
+| `download` | `browser_download` | Trigger a download by URL and wait for completion. |
+| `mouse` | `browser_mouse` | Move / click / dblclick / down / up via real CDP `Input.dispatchMouseEvent`. Target via ref, selector, or (x, y). Hover-to-reveal menus, canvas clicks, trusted events. |
+| `drag` | `browser_drag` | Drag from→to. Auto-detects HTML5 native DnD (`draggable="true"` → `Input.setInterceptDrags` + `Input.dispatchDragEvent`) vs pointer DnD (CDP mouse events with `buttons:1` held throughout — for react-dnd / Sortable.js). |
+| `type` | `browser_type` | Type a string per-keystroke via CDP `Input.dispatchKeyEvent` — fires keydown + keypress + input for search-as-you-type / autocomplete / chip inputs. |
+| `act` | `browser_act` | Compound tool — Click, fill, type or scroll to an element with intent-driven or direct ref dispatch. |
+| `find` | `browser_find` | Compound tool — Resolve text/labels/placeholders into specific element refs and bboxes. |
+| `extract` | `browser_extract` | Compound tool — Extract structured data matching a schema. |
+| `observe` | `browser_observe` | Compound tool — Natural-language page describer for high-level orientation. |
+| `diagnostics` | `browser_diagnostics` | Combined diagnostics log (network/console). |
+
+Element refs returned by `read_page` are intended as the primary input to follow-up `act` / `scroll` / `mouse` / `drag` calls. Refs are more robust than CSS selectors against dynamic class names and the model can read them straight out of the page snapshot.
 
 ### Humanlike-input design notes (v2)
 
-The `browser_mouse` / `browser_drag` / `browser_type` / `browser_locate` set gives the model real input events the page can't distinguish from a human's, on top of the synthetic-event fast paths (`browser_click` / `browser_fill`). Choose by need: ref-and-go forms → fast path; hover menus / drag / canvas / sites that gate on `event.isTrusted` → CDP path.
+The `browser_mouse` / `browser_drag` / `browser_type` / `browser_locate` set gives the model real input events the page can't distinguish from a human's, on top of the synthetic-event fast paths. Choose by need: ref-and-go forms → fast path; hover menus / drag / canvas / sites that gate on `event.isTrusted` → CDP path.
 
 Several design constraints are load-bearing:
 
 1. **No cursor-position state.** Every action takes an explicit target (ref, selector, or coordinates). MV3 service-worker termination between LLM tool calls would silently wipe a per-tab `Map<tabId,{x,y}>` cache, leaving a `move` then `down` sequence in an undefined state. Explicit-target-every-call is the robust choice.
-2. **Hit-test by default.** When the target is a ref or selector, `browser_mouse` / `browser_drag` / `browser_scroll(at-pointer)` resolve to bbox center AND run `document.elementFromPoint(cx, cy)` in the same in-page script. If the topmost element isn't the target or a descendant, the call fails with `target_obscured: topmost is <tag#id>` so the model gets actionable feedback instead of clicking through an overlay. Pass `force: true` to bypass when an overlay intentionally forwards events.
-3. **Per-tab input mutex.** CDP mouse state is global per attachment; two parallel `browser_mouse` / `browser_drag` calls on the same tab would interleave and corrupt each other (one call's `mouseMoved` would land mid-drag of another). The global `MAX_INFLIGHT_TOOLS_CALL=8` cap doesn't help — it's process-wide, not per-tab. `withTabInputLock(tabId, fn)` serialises mouse / drag / type / keyboard / scroll(at-pointer) on the same tab.
+2. **Hit-test by default.** When the target is a ref or selector, `mouse` / `drag` / `scroll(at-pointer)` resolve to bbox center AND run `document.elementFromPoint(cx, cy)` in the same in-page script. If the topmost element isn't the target or a descendant, the call fails with `target_obscured: topmost is <tag#id>` so the model gets actionable feedback instead of clicking through an overlay. Pass `force: true` to bypass when an overlay intentionally forwards events.
+3. **Per-tab input mutex.** CDP mouse state is global per attachment; two parallel `mouse` / `drag` calls on the same tab would interleave and corrupt each other (one call's `mouseMoved` would land mid-drag of another). The global `MAX_INFLIGHT_TOOLS_CALL=8` cap doesn't help — it's process-wide, not per-tab. `withTabInputLock(tabId, fn)` serialises mouse / drag / type / keyboard / scroll(at-pointer) on the same tab.
 4. **Drag mode auto-detect.** Native HTML5 DnD (`draggable="true"` elements) CANNOT be triggered by raw CDP mouse events — Chromium's `dragstart` pipeline is gated behind OS-level drag detection. The `html5` path uses `Input.setInterceptDrags(true)` to capture the `DragData` payload from the `Input.dragIntercepted` event, then dispatches `dragEnter` / `dragOver` / `drop` to the destination. The `pointer` path holds the button (`buttons: buttonBits`) across all intermediate `mouseMoved` events so pointer-event drag handlers (react-dnd, Sortable.js) don't abort. `auto` picks based on the source's `el.draggable` attribute; result includes `mode_used` so the caller can verify which path ran.
-5. **`browser_type` typing recipe.** Each character is `keyDown{key, code, text, windowsVirtualKeyCode}` then `keyUp{key, code, windowsVirtualKeyCode}`. `keyDown` with `text` fires `keydown` + `keypress` + `input` together; we deliberately do NOT send a separate `char` event between them — that would double-fire `keypress` / `input` on most sites. Special chars: `\n` → Enter, `\t` → Tab, `\b` → Backspace (dispatched as the named key, no `text` field — else the page receives a literal control character). Other control chars (< 0x20) are rejected up front with an actionable error directing the model to `browser_keyboard`. Iteration is `for (const ch of text)` (Unicode code points), not `text.split("")` (which would split surrogate pairs).
+5. **`type` typing recipe.** Each character is `keyDown{key, code, text, windowsVirtualKeyCode}` then `keyUp{key, code, windowsVirtualKeyCode}`. `keyDown` with `text` fires `keydown` + `keypress` + `input` together; we deliberately do NOT send a separate `char` event between them — that would double-fire `keypress` / `input` on most sites. Special chars: `\n` → Enter, `\t` → Tab, `\b` → Backspace (dispatched as the named key, no `text` field — else the page receives a literal control character). Other control chars (< 0x20) are rejected up front with an actionable error directing the model to `keyboard`. Iteration is `for (const ch of text)` (Unicode code points), not `text.split("")` (which would split surrogate pairs).
 6. **`attachDebuggerOnce` hardening.** Wrapped in `navigator.locks.request("browser-mcp:debugger-attach:" + tabId, ...)` to serialise concurrent attach attempts after MV3 SW respawn (when the in-memory `attachedTabs` Set is wiped but Chrome may have kept the underlying CDP attachment alive). On `"Another debugger is already attached"`, the code catches and trusts the existing attachment.
-7. **`browser_read_page` viewport block.** Additive — existing consumers untouched. `{width, height, devicePixelRatio, scrollX, scrollY}` lets the model map a CSS-px `bbox` to a device-px pixel in `browser_screenshot` (`device_px = css_px * devicePixelRatio`).
+7. **`read_page` viewport block.** Additive — existing consumers untouched. `{width, height, devicePixelRatio, scrollX, scrollY}` lets the model map a CSS-px `bbox` to a device-px pixel in `screenshot` (`device_px = css_px * devicePixelRatio`).
 
 ### Numeric bounds (humanlike-input v2)
 
