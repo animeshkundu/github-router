@@ -16,7 +16,10 @@ import {
   setupAndServe,
   sharedServerArgs,
 } from "./lib/server-setup"
+import { runSelfUpdate } from "./lib/self-update"
 import { state } from "./lib/state"
+import { toolbeltEnabled } from "./lib/toolbelt"
+import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { resolveCodexModel } from "./lib/utils"
 
 export const codex = defineCommand({
@@ -53,6 +56,15 @@ export const codex = defineCommand({
     } catch (error) {
       consola.error("Failed to start server:", error instanceof Error ? error.message : error)
       process.exit(1)
+    }
+
+    // Best-effort self-update (detached, applies next launch).
+    void runSelfUpdate({ selfUpdate: args["self-update"] !== false })
+
+    // Materialize the LLM toolbelt in the background (PATH prepend is in
+    // getCodexEnvVars). Best-effort; never blocks launch.
+    if (toolbeltEnabled()) {
+      void provisionToolbelt().catch(() => {})
     }
 
     const usingDefault = !args.model

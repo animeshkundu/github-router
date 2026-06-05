@@ -4,9 +4,10 @@ import { defineCommand } from "citty"
 import consola from "consola"
 
 import {
-  autoUpdateClaude,
   checkClaudeVersion,
+  updateClaude,
 } from "./lib/claude-version-check"
+import { runSelfUpdate } from "./lib/self-update"
 import {
   injectPeerMcpIntoMirror,
   resolveCodexCliBackend,
@@ -17,7 +18,9 @@ import { getCodexVersion, launchChild } from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
 import { ensureClaudeConfigMirror, removeOwnClaudeConfigMirror } from "./lib/paths"
 import { buildPeerAwarenessSnippet } from "./lib/peer-mcp-personas"
-import { appendPeerAwarenessToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
+import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
+import { buildToolbeltAwareness, planExposedCommands, toolbeltEnabled } from "./lib/toolbelt"
+import { provisionToolbelt } from "./lib/toolbelt/provision"
 import {
   DEFAULT_CLAUDE_MODEL_FALLBACKS,
   pickClaudeDefault,
@@ -76,7 +79,7 @@ export const claude = defineCommand({
       type: "boolean" as const,
       default: true,
       description:
-        "Check for and install latest Claude Code on launch (throttled to once per hour via ~/.local/share/github-router/last-update-check). Set to false (--no-auto-update) to keep the current installed version. Falls back gracefully if npm/network unavailable.",
+        "Check for and install the latest Claude Code on launch via `claude update` (throttled to once per hour via ~/.local/share/github-router/last-update-check). `claude update` respects the real install method (native installer or npm), so it never creates a conflicting second install; builds too old to support it fall back to `npm install -g @anthropic-ai/claude-code@latest`. Set to false (--no-auto-update) to check and warn only. Falls back gracefully if claude/npm/network unavailable.",
     },
     "update-check": {
       type: "boolean" as const,
@@ -152,16 +155,16 @@ export const claude = defineCommand({
         ) {
           if (args["auto-update"] !== false) {
             try {
-              await autoUpdateClaude(versionCheck.latestVersion)
+              await updateClaude(versionCheck.latestVersion)
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err)
               consola.warn(
-                `Auto-update of Claude Code from ${versionCheck.installedVersion} to ${versionCheck.latestVersion} failed (${msg}); continuing with installed version. Run \`npm install -g @anthropic-ai/claude-code@latest\` manually to retry.`,
+                `Auto-update of Claude Code from ${versionCheck.installedVersion} to ${versionCheck.latestVersion} failed (${msg}); continuing with installed version. Run \`claude update\` (or \`npm install -g @anthropic-ai/claude-code@latest\`) manually to retry.`,
               )
             }
           } else {
             consola.warn(
-              `Claude Code v${versionCheck.installedVersion} is installed; v${versionCheck.latestVersion} is available. Run with --auto-update (the default) to install on launch, or \`npm install -g @anthropic-ai/claude-code@latest\` manually.`,
+              `Claude Code v${versionCheck.installedVersion} is installed; v${versionCheck.latestVersion} is available. Run with --auto-update (the default) to install on launch, or \`claude update\` manually.`,
             )
           }
         }
@@ -185,6 +188,11 @@ export const claude = defineCommand({
       consola.error("Failed to start server:", error instanceof Error ? error.message : error)
       process.exit(1)
     }
+
+    // Queue a best-effort self-update of github-router itself (detached,
+    // applies next launch). Fire-and-forget so the bounded npm probe
+    // never delays spawning Claude Code.
+    void runSelfUpdate({ selfUpdate: args["self-update"] !== false })
 
     // Provision the router-owned CLAUDE_CONFIG_DIR with our synthetic
     // .credentials.json + a snapshot copy of the user's ~/.claude/.
@@ -281,6 +289,31 @@ export const claude = defineCommand({
 
     const envVars = getClaudeCodeEnvVars(serverUrl, chosenSlug)
     const extraArgs = ((args as unknown as Record<string, unknown>)._ as string[]) ?? []
+
+    // LLM toolbelt: materialize curated CLI tools (rg/fd/jq/sd/sg/yq)
+    // into the router bin dir prepended to the agent's PATH (the prepend
+    // itself is done in getClaudeCodeEnvVars). Materialization runs in
+    // the BACKGROUND so it never delays launch; the awareness one-liner
+    // is computed synchronously from the gap-fill plan and appended to
+    // the mirrored CLAUDE.md so the main agent AND descendants learn
+    // which tools are on PATH. Best-effort.
+    if (toolbeltEnabled()) {
+      void provisionToolbelt().catch((err) =>
+        consola.debug("Toolbelt provisioning failed:", err),
+      )
+      const toolbeltLine = buildToolbeltAwareness(planExposedCommands())
+      if (toolbeltLine) {
+        try {
+          await appendToolbeltAwarenessToMirroredClaudeMd(toolbeltLine)
+        } catch (err) {
+          consola.warn(
+            `Toolbelt CLAUDE.md append failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          )
+        }
+      }
+    }
 
     // Peer-MCP wiring. Default-on. When enabled:
     //   1. Decide between HTTP backend (always works, read-only personas)

@@ -7,6 +7,19 @@ import {
 } from "../src/lib/launch"
 import { DEFAULT_CODEX_MODEL } from "../src/lib/port"
 
+// buildLaunchCommand now resolves the top-level CLI to an absolute path
+// (anti-shadow) when it is installed on the host, so cmd[0] may be e.g.
+// "C:\\...\\codex.CMD" instead of the bare name. Assert on the basename
+// so the tests are deterministic across machines.
+function baseCmd(cmd: string[]): string {
+  return (
+    cmd[0]
+      .replace(/\\/g, "/")
+      .split("/")
+      .pop() ?? cmd[0]
+  ).replace(/\.(cmd|exe)$/i, "")
+}
+
 describe("buildLaunchCommand", () => {
   describe("claude-code", () => {
     test("returns correct command and env vars", () => {
@@ -23,7 +36,8 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual(["claude", "--dangerously-skip-permissions"])
+      expect(baseCmd(result.cmd)).toBe("claude")
+      expect(result.cmd.slice(1)).toEqual(["--dangerously-skip-permissions"])
       expect(result.env.ANTHROPIC_BASE_URL).toBe("http://localhost:12345")
       expect(result.env.ANTHROPIC_AUTH_TOKEN).toBe("dummy")
       expect(result.env.DISABLE_NON_ESSENTIAL_MODEL_CALLS).toBe("1")
@@ -59,8 +73,8 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual([
-        "claude",
+      expect(baseCmd(result.cmd)).toBe("claude")
+      expect(result.cmd.slice(1)).toEqual([
         "--dangerously-skip-permissions",
         "--verbose",
         "--debug",
@@ -81,8 +95,8 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual([
-        "codex",
+      expect(baseCmd(result.cmd)).toBe("codex")
+      expect(result.cmd.slice(1)).toEqual([
         "--sandbox",
         "workspace-write",
         "--ask-for-approval",
@@ -107,8 +121,8 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual([
-        "codex",
+      expect(baseCmd(result.cmd)).toBe("codex")
+      expect(result.cmd.slice(1)).toEqual([
         "--sandbox",
         "workspace-write",
         "--ask-for-approval",
@@ -130,8 +144,8 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual([
-        "codex",
+      expect(baseCmd(result.cmd)).toBe("codex")
+      expect(result.cmd.slice(1)).toEqual([
         "--sandbox",
         "workspace-write",
         "--ask-for-approval",
@@ -152,7 +166,7 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd[0]).toBe("codex")
+      expect(baseCmd(result.cmd)).toBe("codex")
       // The provider config must come BEFORE the sandbox/model args so
       // Codex parses it as a root flag and the spawned model_provider
       // points at our proxy.

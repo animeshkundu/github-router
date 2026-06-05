@@ -25,6 +25,10 @@ const STYLE_MARKER_OPEN =
   "<!-- gh-router style directive — auto-injected, regenerated per launch -->"
 const STYLE_MARKER_CLOSE = "<!-- /gh-router style directive -->"
 
+const TOOLBELT_MARKER_OPEN =
+  "<!-- gh-router toolbelt awareness — auto-injected, regenerated per launch -->"
+const TOOLBELT_MARKER_CLOSE = "<!-- /gh-router toolbelt awareness -->"
+
 // Back-compat aliases used by existing tests. The peer block's
 // markers remain the "default" pair surfaced through __testExports.
 const MARKER_OPEN = PEER_MARKER_OPEN
@@ -609,6 +613,25 @@ export async function prependStyleDirectiveToMirroredClaudeMd(
     markerClose: STYLE_MARKER_CLOSE,
     position: "top",
     label: "style-directive",
+  })
+}
+
+/**
+ * Append the toolbelt awareness one-liner (which CLI tools are on PATH)
+ * to the bottom of the mirrored CLAUDE.md so descendant agents (Agent
+ * subagents, agent-teams teammates) learn about the provisioned tools.
+ * The main agent gets the same line via `--append-system-prompt`.
+ * Separate marker fence from the peer-awareness / style blocks.
+ */
+export async function appendToolbeltAwarenessToMirroredClaudeMd(
+  snippet: string,
+): Promise<void> {
+  await injectMarkerBlock({
+    snippet,
+    markerOpen: TOOLBELT_MARKER_OPEN,
+    markerClose: TOOLBELT_MARKER_CLOSE,
+    position: "bottom",
+    label: "toolbelt-awareness",
   })
 }
 

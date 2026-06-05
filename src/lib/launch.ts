@@ -5,7 +5,9 @@ import consola from "consola"
 
 import type { Server } from "srvx"
 
+import { resolveExecutable } from "./exec"
 import { DEFAULT_CODEX_MODEL } from "./port"
+import { collapsePathKeys } from "./toolbelt/path-inject"
 import { sweepRegistry } from "./worker-agent/lifecycle"
 
 /**
@@ -203,10 +205,21 @@ export function buildLaunchCommand(target: LaunchTarget): {
       ? ["claude", "--dangerously-skip-permissions", ...target.extraArgs]
       : buildCodexCmd(target)
 
-  return {
-    cmd,
-    env: { ...sanitizeParentEnv(process.env), ...target.envVars },
-  }
+  // Anti-shadow: resolve the top-level CLI to an ABSOLUTE path against
+  // the clean parent PATH (excluding the cwd). The spawned child's env
+  // prepends the toolbelt bin dir to PATH; without this, a stray
+  // `claude.cmd`/`codex.cmd` in that dir — or in an untrusted repo's cwd
+  // (Windows resolves cwd before PATH under shell:true) — could shadow
+  // the real CLI. Resolving here means the toolbelt PATH only affects
+  // the agent's OWN tool lookups, never which CLI we launch.
+  const resolved = resolveExecutable(cmd[0], { env: process.env })
+  if (resolved) cmd[0] = resolved
+
+  const env = collapsePathKeys({
+    ...sanitizeParentEnv(process.env),
+    ...target.envVars,
+  })
+  return { cmd, env }
 }
 
 export function launchChild(
