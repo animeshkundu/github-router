@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterAll } from "bun:test"
+import { test, expect, describe, beforeEach, afterEach, afterAll } from "bun:test"
 import fs from "node:fs"
 import fsp from "node:fs/promises"
 import path from "node:path"
@@ -15,6 +15,17 @@ const tempDir = await fsp.mkdtemp(
 // Import the reporter class directly — avoids consola module identity issues
 // that arise from mock.module in the isolated test environment.
 const { FileLogReporter } = await import("../../src/lib/file-log-reporter")
+
+// The reporter now holds a persistent append fd for the file's lifetime, so
+// every test's reporter MUST be closed before afterAll's recursive rm —
+// Windows refuses to delete a file with an open handle. Track instances via a
+// factory and close them after each test.
+const openReporters: Array<{ close: () => void }> = []
+function newReporter(filePath: string): InstanceType<typeof FileLogReporter> {
+  const r = new FileLogReporter(filePath)
+  openReporters.push(r)
+  return r
+}
 
 const dummyCtx = { options: {} as ConsolaOptions }
 
@@ -41,6 +52,14 @@ beforeEach(async () => {
   try { fs.unlinkSync(logFile + ".1") } catch { /* may not exist */ }
 })
 
+afterEach(() => {
+  // Release every reporter's persistent append fd before the next test's
+  // beforeEach unlink / the suite's afterAll rm — Windows can't delete a file
+  // with an open handle.
+  for (const r of openReporters) r.close()
+  openReporters.length = 0
+})
+
 function readLog(): string {
   try { return fs.readFileSync(logFile, "utf-8") } catch { return "" }
 }
@@ -51,7 +70,7 @@ describe("FileLogReporter", () => {
   })
 
   test("error messages are written to the log file", () => {
-    const reporter = new FileLogReporter(logFile)
+    const reporter = newReporter(logFile)
     reporter.log(makeLogObj("error", "something broke"), dummyCtx)
 
     const content = readLog()
@@ -60,7 +79,7 @@ describe("FileLogReporter", () => {
   })
 
   test("warn messages are written to the log file", () => {
-    const reporter = new FileLogReporter(logFile)
+    const reporter = newReporter(logFile)
     reporter.log(makeLogObj("warn", "slow query"), dummyCtx)
 
     const content = readLog()
@@ -69,7 +88,7 @@ describe("FileLogReporter", () => {
   })
 
   test("fatal messages are written to the log file", () => {
-    const reporter = new FileLogReporter(logFile)
+    const reporter = newReporter(logFile)
     reporter.log(makeLogObj("fatal", "crash"), dummyCtx)
 
     const content = readLog()
@@ -78,28 +97,28 @@ describe("FileLogReporter", () => {
   })
 
   test("info messages are NOT written to the log file", () => {
-    const reporter = new FileLogReporter(logFile)
+    const reporter = newReporter(logFile)
     reporter.log(makeLogObj("info", "status update"), dummyCtx)
 
     expect(readLog()).toBe("")
   })
 
   test("debug messages are NOT written to the log file", () => {
-    const reporter = new FileLogReporter(logFile)
+    const reporter = newReporter(logFile)
     reporter.log(makeLogObj("debug", "trace data"), dummyCtx)
 
     expect(readLog()).toBe("")
   })
 
   test("success messages are NOT written to the log file", () => {
-    const reporter = new FileLogReporter(logFile)
+    const reporter = newReporter(logFile)
     reporter.log(makeLogObj("success", "all good"), dummyCtx)
 
     expect(readLog()).toBe("")
   })
 
   test("duplicate messages are only written once", () => {
-    const reporter = new FileLogReporter(logFile)
+    const reporter = newReporter(logFile)
     reporter.log(makeLogObj("error", "same error"), dummyCtx)
     reporter.log(makeLogObj("error", "same error"), dummyCtx)
     reporter.log(makeLogObj("error", "same error"), dummyCtx)
@@ -109,7 +128,7 @@ describe("FileLogReporter", () => {
   })
 
   test("different messages are each written", () => {
-    const reporter = new FileLogReporter(logFile)
+    const reporter = newReporter(logFile)
     reporter.log(makeLogObj("error", "error-a"), dummyCtx)
     reporter.log(makeLogObj("error", "error-b"), dummyCtx)
 
@@ -121,7 +140,7 @@ describe("FileLogReporter", () => {
   })
 
   test("Error objects are serialized safely", () => {
-    const reporter = new FileLogReporter(logFile)
+    const reporter = newReporter(logFile)
     const err = new Error("boom")
     reporter.log(makeLogObj("error", "failed:", err), dummyCtx)
 
@@ -131,7 +150,7 @@ describe("FileLogReporter", () => {
   })
 
   test("credential patterns are redacted", () => {
-    const reporter = new FileLogReporter(logFile)
+    const reporter = newReporter(logFile)
     const jwt = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"
     const ghToken = "gho_abc123def456ghi789jkl012mno345pqr678"
     reporter.log(makeLogObj("error", `Token: ${jwt}`), dummyCtx)
@@ -144,7 +163,7 @@ describe("FileLogReporter", () => {
   })
 
   test("newlines in args are escaped to prevent log injection", () => {
-    const reporter = new FileLogReporter(logFile)
+    const reporter = newReporter(logFile)
     reporter.log(
       makeLogObj("error", "Model \"evil\nFake [ERROR] injected\""),
       dummyCtx,
@@ -158,7 +177,7 @@ describe("FileLogReporter", () => {
   test("file is created with 0o600 permissions on Unix", () => {
     if (process.platform === "win32") return
 
-    const reporter = new FileLogReporter(logFile)
+    const reporter = newReporter(logFile)
     reporter.log(makeLogObj("error", "permission test"), dummyCtx)
 
     const stats = fs.statSync(logFile)
@@ -170,7 +189,7 @@ describe("FileLogReporter", () => {
     const big = "x".repeat(1024 * 1024 + 100)
     fs.writeFileSync(logFile, big)
 
-    const reporter = new FileLogReporter(logFile) // construction triggers rotation
+    const reporter = newReporter(logFile) // construction triggers rotation
     reporter.log(makeLogObj("error", "after rotation"), dummyCtx)
 
     // Original file should be small (just the new entry)
@@ -186,7 +205,7 @@ describe("FileLogReporter", () => {
   test("no rotation when file is under 1MB", () => {
     fs.writeFileSync(logFile, "small content")
 
-    const reporter = new FileLogReporter(logFile)
+    const reporter = newReporter(logFile)
     reporter.log(makeLogObj("error", "new entry"), dummyCtx)
 
     // Rotated file should NOT exist
@@ -201,7 +220,7 @@ describe("FileLogReporter", () => {
     const dirPath = path.join(tempDir, `error-dir-${testIndex}`)
     fs.mkdirSync(dirPath, { recursive: true })
 
-    const reporter = new FileLogReporter(dirPath)
+    const reporter = newReporter(dirPath)
     // Should not throw
     expect(() =>
       reporter.log(makeLogObj("error", "should not crash"), dummyCtx),
@@ -209,7 +228,7 @@ describe("FileLogReporter", () => {
   })
 
   test("log lines have ISO timestamp format", () => {
-    const reporter = new FileLogReporter(logFile)
+    const reporter = newReporter(logFile)
     reporter.log(makeLogObj("error", "timestamp check"), dummyCtx)
 
     const content = readLog()
@@ -217,7 +236,7 @@ describe("FileLogReporter", () => {
   })
 
   test("each log line ends with newline", () => {
-    const reporter = new FileLogReporter(logFile)
+    const reporter = newReporter(logFile)
     reporter.log(makeLogObj("error", "line-a"), dummyCtx)
     reporter.log(makeLogObj("warn", "line-b"), dummyCtx)
 
@@ -242,7 +261,7 @@ describe("FileLogReporter", () => {
   test("rotation fires from log() after the file grows past 1MB during a long-lived daemon run", () => {
     // Start with an empty file — construction does NOT rotate.
     fs.writeFileSync(logFile, "")
-    const reporter = new FileLogReporter(logFile)
+    const reporter = newReporter(logFile)
 
     // Each line is ~120 bytes; 1 MiB / 120 ≈ 8738 lines per MB.
     // Write 3 * 9000 = 27 000 unique error lines so we exceed 1 MiB three times.
