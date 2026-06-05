@@ -79,9 +79,30 @@ describe("systemPromptFor", () => {
     expect(impl).toContain("gpt-5.3-codex")
   })
 
+  test("review mode: reviewer role-frame + read-only tools, no write tools", () => {
+    const review = systemPromptFor("review")
+    // Security boundary still present.
+    expect(review).toContain("sandboxed coding worker")
+    // Reviewer ROLE frame (what it's for) — not prescriptive step-advice.
+    expect(review.toLowerCase()).toContain("reviewing code for correctness")
+    expect(review.toLowerCase()).toContain("verify")
+    expect(review).toContain("severity")
+    expect(review).toContain("file:line")
+    // Same read-only surface as explore.
+    expect(review).toContain("Read-only mode")
+    expect(review).toContain("`read`")
+    expect(review).toContain("`code_search`")
+    // No write tools.
+    expect(review).not.toContain("`edit`")
+    expect(review).not.toContain("`write`")
+    expect(review).not.toContain("`bash`")
+    expect(review).not.toContain("`codex_review`")
+  })
+
   test("both modes are deterministic for the same input", () => {
     expect(systemPromptFor("explore")).toBe(systemPromptFor("explore"))
     expect(systemPromptFor("implement")).toBe(systemPromptFor("implement"))
+    expect(systemPromptFor("review")).toBe(systemPromptFor("review"))
   })
 
   test("byte cap holds — neither mode exceeds ~2000 bytes", () => {

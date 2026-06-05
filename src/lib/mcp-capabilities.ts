@@ -83,6 +83,25 @@ export function workerToolsEnabled(): boolean {
 }
 
 /**
+ * Gate for the `gemini-reviewer` persona (a `gemini-3.5-flash` code reviewer
+ * on the `peers` server).
+ *
+ * Returns true iff `gemini-3.5-flash` is present in the live Copilot catalog.
+ * Unlike `workerToolsEnabled()` this does NOT require `tool_calls` — the
+ * reviewer persona is a plain `/v1/chat/completions` call with no tools, so
+ * presence in the catalog is sufficient. Mirrors the dormant-register pattern
+ * of the other gates: when absent, `gemini-reviewer` is dropped from the
+ * persona list (and thus from `tools/list`, the subagent `.md` set, and the
+ * coordinator's routing) so the surface never names a model the catalog
+ * can't serve.
+ */
+export function geminiFlashAvailable(): boolean {
+  const models = state.models?.data
+  if (!models) return false
+  return models.some((m) => m.id === "gemini-3.5-flash")
+}
+
+/**
  * Gate for the compound L2 browser tools (`browser_find`, `browser_act`
  * in intent mode, `browser_extract`).
  *

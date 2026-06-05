@@ -69,14 +69,30 @@ const EXPLORE_MODE_NOTE = `Read-only mode — tools:\n${buildToolBlock(READ_TOOL
 
 const IMPLEMENT_MODE_NOTE = `Read+write mode — tools:\n${buildToolBlock([...READ_TOOL_NOTES, ...WRITE_TOOL_NOTES])}`
 
+// Review mode shares explore's read-only tool surface. The only addition is
+// a one-line reviewer ROLE frame — what the worker is for (verify correctness
+// against the real code, report findings) — NOT prescriptive step-advice
+// ("first glob, then read…"), keeping faith with the no-scaffolding principle
+// above. The caller's prompt still supplies the specific artifact to review.
+const REVIEW_ROLE = `You are reviewing code for correctness. Verify against the actual code by reading it — never assume. Report concrete findings (bugs, edge cases, security / concurrency / resource risks, missing handling) with a severity and a \`file:line\` citation; if nothing material is wrong, say so plainly rather than inventing issues.`
+
+const REVIEW_MODE_NOTE = `${REVIEW_ROLE}\n\nRead-only mode — tools:\n${buildToolBlock(READ_TOOL_NOTES)}`
+
 /**
  * Build the system prompt for a given worker mode. Returns the
  * security-boundary paragraph followed by a bulletted capability
- * inventory. No prescriptive task advice, no examples, no
- * chain-of-thought scaffolding — Pi's coding-agent harness covers
- * all of that.
+ * inventory (and, for `review`, a one-line reviewer role frame). No
+ * prescriptive task advice, no examples, no chain-of-thought scaffolding —
+ * Pi's coding-agent harness covers all of that.
  */
-export function systemPromptFor(mode: "explore" | "implement"): string {
-  const note = mode === "explore" ? EXPLORE_MODE_NOTE : IMPLEMENT_MODE_NOTE
+export function systemPromptFor(
+  mode: "explore" | "review" | "implement",
+): string {
+  const note =
+    mode === "explore"
+      ? EXPLORE_MODE_NOTE
+      : mode === "review"
+        ? REVIEW_MODE_NOTE
+        : IMPLEMENT_MODE_NOTE
   return `${SECURITY_BOUNDARY}\n\n${note}`
 }

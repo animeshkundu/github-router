@@ -85,15 +85,16 @@ Each persona is exposed both as a Claude Code subagent (callable via the `Task` 
 |---|---|---|---|
 | `codex-critic` | gpt-5.5 | `/v1/responses` | low \| medium \| high \| xhigh (xhigh) |
 | `codex-reviewer` | gpt-5.3-codex | `/v1/responses` | low \| medium \| high \| xhigh (xhigh) |
+| `gemini-reviewer` | gemini-3.5-flash | `/v1/chat/completions` | low \| medium \| high (high) |
 | `opus-critic` | claude-opus-4-6 | `/v1/messages` | low \| medium \| high (high) |
 | `gemini-critic` | gemini-3.1-pro-preview | `/v1/chat/completions` | low \| medium \| high (high) |
 | `peer-review-coordinator` | (meta) | — | — |
 
-`peer-review-coordinator` is a subagent (not an MCP tool) that fans out to the right combination of the four critics in parallel based on artifact type — plan, diff, single file, or long-context — and aggregates findings.
+`peer-review-coordinator` is a subagent (not an MCP tool) that fans out to the right combination of the critics in parallel based on artifact type — plan, diff, single file, or long-context — and aggregates findings.
 
-**Effort tiers** are exposed via the MCP tool's `effort` argument; subagents pass it through. All four tiers are accepted on every persona. `xhigh` routinely runs 60–90s; the proxy responds to `tools/call` requests with SSE-streamed responses (per MCP 2025-06-18 Streamable HTTP transport spec) so the connection stays open past the standard ~60s MCP per-tool-call ceiling and long calls complete transparently with no user setup.
+**Effort tiers** are exposed via the MCP tool's `effort` argument; subagents pass it through. `xhigh` routinely runs 60–90s; the proxy responds to `tools/call` requests with SSE-streamed responses (per MCP 2025-06-18 Streamable HTTP transport spec) so the connection stays open past the standard ~60s MCP per-tool-call ceiling and long calls complete transparently with no user setup.
 
-`gemini-critic` only registers when `gemini-3.1-pro-preview` is present in your Copilot model catalog. If absent, the persona is silently dropped from both the MCP `tools/list` and the subagent set, and `peer-review-coordinator` skips it in routing decisions.
+`gemini-critic` only registers when `gemini-3.1-pro-preview` is present in your Copilot model catalog, and `gemini-reviewer` (a fast, cheap second-lab line-level code reviewer on `gemini-3.5-flash`) only when `gemini-3.5-flash` is present. If absent, the persona is silently dropped from both the MCP `tools/list` and the subagent set, and `peer-review-coordinator` skips it in routing decisions.
 
 For codex-side write capability (a `codex-implementer` persona that can mutate files via Codex's tool-use sandbox), pass `--codex-cli`. Requires `codex` CLI 0.129+ on `PATH`; falls back to HTTP-only with a warning if codex is missing or older. Pass `--codex-mcp-only` to also pass `--strict-mcp-config` to Claude Code so only the proxy's MCP servers are loaded (hides any MCP servers in your existing `~/.claude/mcp.json`).
 

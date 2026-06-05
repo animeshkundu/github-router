@@ -144,6 +144,12 @@ export interface PersonaSpec {
    *  separate from `requiresHttp` so a persona can require HTTP without
    *  also requiring gemini in the catalog (e.g. opus-critic). */
   requiresGeminiCatalog?: boolean
+  /** True when the persona needs `gemini-3.5-flash` in the live catalog
+   *  (gemini-reviewer). When true, `personasFor` / `activePersonas` drop the
+   *  persona if `geminiFlashAvailable()` is false. Distinct from
+   *  `requiresGeminiCatalog` (that gate is the `gemini-3.x-pro` family used by
+   *  gemini-critic). Optional: defaults to false. */
+  requiresGeminiFlashCatalog?: boolean
   /** Effort tiers this persona accepts. Subset of EFFORT_LEVELS. Driven
    *  by empirical latency data — see the EFFORT_LEVELS doc above. Tiers
    *  outside this list are rejected with a clean RPC_INVALID_PARAMS at
@@ -213,6 +219,29 @@ ${COLD_START_CONTRACT}
 ${CRITIC_RUBRIC}`
 
 const REVIEWER_BASE = `You are codex-reviewer, a line-level code reviewer running on gpt-5.3-codex. You are the code-specialist persona — your job is to read concrete code (diffs, single files, function bodies) and surface bugs, edge cases, security issues, and idiom violations.
+
+You are not a critic-of-architecture. If the brief is a plan or a high-level design, redirect: "this looks like architecture review; consider codex-critic or gemini-critic." Your tool is the magnifying glass, not the wide-angle lens.
+
+${COLD_START_CONTRACT}
+
+Reply format (markdown):
+  ## Summary
+  <one sentence: clean / N findings / blocking issue>
+  ## Findings
+  For each:
+    ### <severity: info | low | medium | high | critical> — <one-line title>
+    - location: <file:line[-line]>
+    - issue: <what's wrong, why it matters in this codebase>
+    - suggested fix: <minimal change OR "needs design discussion">
+  Number the findings if there are more than one. List them in severity-descending order (critical first).
+  If there are zero findings of any severity, reply only with "## Summary\\nClean review — no findings." and stop.
+
+Self-reminder (read before every reply):
+  Am I citing real code at real line numbers in the brief? If a finding doesn't have a concrete file:line citation, drop it.
+  Did I rank the finding's severity by impact-in-this-codebase, not by general-principle?
+  If everything looks fine, say so cleanly — do not pad with stylistic nitpicks.`
+
+const GEMINI_REVIEWER_BASE = `You are gemini-reviewer, a line-level code reviewer running on Gemini 3.5 Flash at high reasoning. Like codex-reviewer you read concrete code — diffs, single files, function bodies — and surface bugs, edge cases, security issues, and idiom violations at specific line numbers. You are a SECOND-LAB reviewer (Google): your training data and priors differ from the lead (Anthropic) and from codex-reviewer (OpenAI), so you catch a different slice of defects, fast and cheap.
 
 You are not a critic-of-architecture. If the brief is a plan or a high-level design, redirect: "this looks like architecture review; consider codex-critic or gemini-critic." Your tool is the magnifying glass, not the wide-angle lens.
 
@@ -314,6 +343,28 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     requiresHttp: false,
     allowedEfforts: ["low", "medium", "high", "xhigh"] as const,
     defaultEffort: "xhigh",
+  },
+  {
+    agentName: "gemini-reviewer",
+    toolNameHttp: "gemini_reviewer",
+    model: "gemini-3.5-flash",
+    endpoint: "/v1/chat/completions",
+    description:
+      "Line-level review of a concrete diff or single file on gemini-3.5-flash (Google, high reasoning): a fast, cheap second-lab code reviewer that catches different defects than codex_reviewer (OpenAI). Use for a quick pass or alongside codex_reviewer for cross-lab coverage. Not for architecture (use codex_critic). Pass artifact verbatim.",
+    baseInstructions: GEMINI_REVIEWER_BASE,
+    agentPrompt: "",
+    writeCapable: false,
+    // gemini routes only via /v1/chat/completions — the codex-cli stdio
+    // bridge can't run it, so it must always use the HTTP backend.
+    requiresHttp: true,
+    // Dropped from the persona set when gemini-3.5-flash is absent from the
+    // live catalog (geminiFlashAvailable()). Distinct from gemini-critic's
+    // gemini-3.x-pro gate.
+    requiresGeminiFlashCatalog: true,
+    // gemini chat-completions tops out at "high" reasoning in this codebase
+    // (same as gemini-critic — no xhigh tier exposed); default to the max.
+    allowedEfforts: ["low", "medium", "high"] as const,
+    defaultEffort: "high",
   },
   {
     agentName: "opus-critic",
@@ -462,6 +513,7 @@ export function buildAgentPrompt(
 export function buildPeerAwarenessSnippet(opts: {
   codexCli: boolean
   geminiAvailable: boolean
+  geminiFlashAvailable?: boolean
   workerToolsAvailable: boolean
   standInAvailable: boolean
   browseAvailable: boolean
@@ -482,6 +534,9 @@ export function buildPeerAwarenessSnippet(opts: {
     "`codex_critic` (gpt-5.5)",
     "`codex_reviewer` (gpt-5.3-codex)",
   ]
+  if (opts.geminiFlashAvailable) {
+    criticList.push("`gemini_reviewer` (gemini-3.5-flash, fast code review)")
+  }
   if (opts.geminiAvailable) {
     criticList.push("`gemini_critic` (gemini-3.1-pro)")
   }
@@ -501,6 +556,7 @@ export function buildPeerAwarenessSnippet(opts: {
   if (opts.workerToolsAvailable) {
     para2Parts.push(
       `\`mcp__${workersKey}__explore\` runs a Gemini-backed read-only worker that returns a summary, using its own context rather than yours; concurrent launches share the \`MAX_INFLIGHT_TOOLS_CALL=8\` cap with operator traffic.`,
+      `\`mcp__${workersKey}__review\` is the same read-only worker framed as a code reviewer that reads the relevant code itself to verify a change or claim and reports findings with severity, so it checks surrounding context the \`peers\` critics (single stateless calls on the pasted artifact) cannot.`,
       `\`mcp__${workersKey}__implement\` is the same worker with edit/write/bash; \`worktree: true\` runs it in an isolated git worktree and returns the diff.`,
       "Workers themselves have `code_search` in their toolset.",
     )
@@ -535,14 +591,20 @@ export function buildPeerAwarenessSnippet(opts: {
 export function personasFor(opts: {
   codexCli: boolean
   geminiAvailable: boolean
+  /** Whether `gemini-3.5-flash` is in the live catalog. Gates gemini-reviewer.
+   *  Optional (defaults to false) so existing test callers that don't register
+   *  the flash persona don't need to thread it. */
+  geminiFlashAvailable?: boolean
 }): Array<PersonaSpec> {
   const result: Array<PersonaSpec> = []
   for (const p of PERSONAS_READ) {
     // Drop personas whose model family is missing from Copilot's live
-    // catalog (currently only gemini-critic, gated by `requiresGeminiCatalog`).
-    // Decoupled from `requiresHttp` so a persona can require HTTP without
-    // also requiring gemini in the catalog (e.g. opus-critic).
+    // catalog (gemini-critic via `requiresGeminiCatalog`, gemini-reviewer via
+    // `requiresGeminiFlashCatalog`). Decoupled from `requiresHttp` so a
+    // persona can require HTTP without also requiring gemini in the catalog
+    // (e.g. opus-critic).
     if (p.requiresGeminiCatalog && !opts.geminiAvailable) continue
+    if (p.requiresGeminiFlashCatalog && !opts.geminiFlashAvailable) continue
     result.push(p)
   }
   if (opts.codexCli) {
@@ -1065,6 +1127,77 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       },
     },
     {
+      toolNameHttp: "review",
+      group: "workers",
+      capability: "worker",
+      description:
+        "Read-only code review by an autonomous worker (Pi runtime; "
+        + "default model `gemini-3.5-flash`, override via `model` with any "
+        + "Copilot-catalog model that advertises `tool_calls`). Same "
+        + "read-only toolset as `explore` (read, glob, grep, code_search, "
+        + "web_search, fetch_url) — it CANNOT edit — but the worker is framed "
+        + "as a reviewer: it verifies correctness against the actual code "
+        + "itself rather than trusting a claim, and reports findings (bugs, "
+        + "edge cases, security / concurrency / resource risks, missing "
+        + "handling) with a severity and `file:line`. Brief it with the "
+        + "change / diff / claim to verify (paste it, or name the files) — it "
+        + "reads the code to confirm, so you get a self-verifying second "
+        + "opinion that doesn't depend on you having pre-extracted the "
+        + "relevant code. Unlike the `peers` critics (single stateless model "
+        + "calls on the artifact you paste), this worker can navigate the "
+        + "repo to check surrounding context for itself.",
+      inputSchema: {
+        type: "object",
+        required: ["prompt"],
+        additionalProperties: false,
+        properties: {
+          prompt: {
+            type: "string",
+            description:
+              "What to review / verify — a diff, a claim about the code, "
+              + "or a file / function to audit. The worker reads the "
+              + "relevant code itself and reports findings; it does not "
+              + "need the code pre-pasted, but pasting the diff helps.",
+          },
+          model: {
+            type: "string",
+            description:
+              "Optional Copilot catalog model id (defaults to "
+              + "gemini-3.5-flash). Must advertise tool_calls "
+              + "support; the engine emits an isError envelope listing "
+              + "the eligible catalog models on mismatch.",
+          },
+          thinking: {
+            type: "string",
+            enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
+            description:
+              "Optional reasoning depth (default high). Silently "
+              + "clamped to the model's allowed range; \"off\" drops "
+              + "the parameter entirely.",
+          },
+          workspace: {
+            type: "string",
+            description:
+              "Optional absolute path to the workspace the worker "
+              + "operates in. Defaults to the proxy's launch cwd. "
+              + "Use this when the parent agent has multiple "
+              + "workspaces open and the worker must operate in a "
+              + "specific one. Must be absolute (relative paths "
+              + "rejected).",
+          },
+        },
+      },
+      async handler(
+        args: Record<string, unknown>,
+        signal?: AbortSignal,
+      ): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        return runWorkerToolCall({ mode: "review", args, signal })
+      },
+    },
+    {
       // stand_in — three-lab away-mode advisor. Polls gpt-5.5 xhigh +
       // claude-opus-4-7 xhigh + gemini-3.1-pro-preview high in two
       // structured voting rounds (blind R1 → informed R2) and returns
@@ -1237,7 +1370,7 @@ export function assertMcpToolSurfaceConsistent(): void {
  * client that ignores the schema.
  */
 async function runWorkerToolCall(call: {
-  mode: "explore" | "implement"
+  mode: "explore" | "review" | "implement"
   args: Record<string, unknown>
   signal?: AbortSignal
 }): Promise<{

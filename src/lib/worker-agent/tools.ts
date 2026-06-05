@@ -157,8 +157,9 @@ const NETWORK_BIN_RE =
 // ============================================================
 
 export interface BuildWorkerToolsOpts {
-  /** Worker mode — picks which tools are returned. */
-  mode: "explore" | "implement"
+  /** Worker mode — picks which tools are returned. `review` is read-only and
+   *  returns the same tool surface as `explore`. */
+  mode: "explore" | "review" | "implement"
   /**
    * Absolute path to the worker's workspace. MUST be pre-realpath-
    * canonicalized by the engine; `confineToWorkspace` re-asserts on
@@ -1353,8 +1354,10 @@ function advisorTool(
 /**
  * Build the AgentTool array for the requested mode.
  *
- *   - explore  → 8 read-only tools
- *   - implement → explore + edit/write/bash
+ *   - explore  → 6 read-only tools
+ *   - review   → same 6 read-only tools as explore (reviewer framing lives
+ *                in the system prompt, not the toolset)
+ *   - implement → explore + edit/write/bash/codex_review
  *
  * Order matches the brief and the prompt-mode-note for stability —
  * Pi's tool-injection shape includes the list verbatim, so a stable
@@ -1376,7 +1379,7 @@ export function buildWorkerTools(
     webSearchTool(),
     fetchUrlTool(),
   ]
-  if (mode === "explore") return explore
+  if (mode === "explore" || mode === "review") return explore
   return [
     ...explore,
     editTool(workspace),

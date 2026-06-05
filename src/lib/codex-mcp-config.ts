@@ -71,6 +71,10 @@ interface BuildOpts {
   codexCli: boolean
   /** Whether gemini-3.1-pro-preview is in the live model catalog. */
   geminiAvailable: boolean
+  /** Whether gemini-3.5-flash is in the live catalog (gates gemini-reviewer).
+   *  Optional — `buildPeerMcpConfig` ignores it; only the persona/agent
+   *  builders consume it. */
+  geminiFlashAvailable?: boolean
   /** Resolved config key per enabled group — one `mcpServers` HTTP entry is
    *  emitted per present key, pointing at its scoped `/mcp/<group>` URL. */
   groupKeys: ResolvedGroupKeys
@@ -166,16 +170,19 @@ export type PeerAgentDefinitions = Record<
 function buildCoordinatorAgent(opts: {
   codexCli: boolean
   geminiAvailable: boolean
+  geminiFlashAvailable?: boolean
 }): { description: string; prompt: string } {
   // opus-critic is always registered (Anthropic models are always present
   // in the Copilot catalog), so no `geminiAvailable`-style guard is
   // required. Order: codex-critic first (strongest reasoning, cross-lab),
   // opus-critic second (largest context window — 1M when available),
   // gemini-critic third (third-lab triangulation, formal reasoning, only
-  // when registered), codex-reviewer last (code-specialist, line-level).
+  // when registered), codex-reviewer + gemini-reviewer last (code-specialist
+  // line-level reviewers; gemini-reviewer only when gemini-3.5-flash served).
   const peers: Array<string> = ["codex-critic", "opus-critic"]
   if (opts.geminiAvailable) peers.push("gemini-critic")
   peers.push("codex-reviewer")
+  if (opts.geminiFlashAvailable) peers.push("gemini-reviewer")
 
   const description =
     "Coordinates cross-lab adversarial review across codex-critic, opus-critic, gemini-critic, codex-reviewer. Use proactively before non-trivial plans and after non-trivial commits. Always pass artifacts verbatim — peers are fresh-context."
@@ -197,6 +204,7 @@ function buildCoordinatorAgent(opts: {
       + (opts.geminiAvailable ? " AND `gemini-critic` (third-lab triangulation, strong on formal reasoning) in parallel" : "")
       + ". codex-reviewer is the wrong tool for plans (it's a code-specialist, not an architecture critic).",
     "- **Concrete diff or single file** → fan out to `codex-reviewer` (gpt-5.3-codex, line-level code specialist, fastest at ~16s)"
+      + (opts.geminiFlashAvailable ? " AND `gemini-reviewer` (gemini-3.5-flash, fast second-lab line-level review)" : "")
       + (opts.geminiAvailable ? " AND `gemini-critic` for cross-lab triangulation" : "")
       + ". For very small changes (<20 lines), one `codex-reviewer` call is enough.",
     "- **Large artifact** → the only peers that take a large artifact WHOLE are `codex-critic` (gpt-5.5, ≈922K-token input window) and `opus-critic` (Opus-4.7-1M, ≈936K-token input on enterprise catalogs; ≈168K otherwise). Route the full artifact to those for cross-lab coverage. `codex-reviewer` (≈272K) and `gemini-critic` (≈136K) have small windows — see Decomposition below: never summarize or downsize the request to squeeze a large artifact into a small-window peer.",
@@ -260,6 +268,7 @@ export function buildPeerAgentDefinitions(
   const personas = personasFor({
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
+    geminiFlashAvailable: opts.geminiFlashAvailable,
   })
   const peersKey = peersKeyOf(opts.groupKeys)
   for (const persona of personas) {
@@ -271,6 +280,7 @@ export function buildPeerAgentDefinitions(
   out["peer-review-coordinator"] = buildCoordinatorAgent({
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
+    geminiFlashAvailable: opts.geminiFlashAvailable,
   })
   return out
 }
@@ -293,6 +303,9 @@ export interface PeerMcpRuntimeFiles {
 interface WriteOpts {
   codexCli: boolean
   geminiAvailable: boolean
+  /** Whether gemini-3.5-flash is in the live catalog (gates gemini-reviewer
+   *  in the persona / .md set). */
+  geminiFlashAvailable?: boolean
   /** Resolved config keys per enabled group (from `resolveGroupKeysFromMirror`).
    *  Threaded into both the --mcp-config payload and the persona .md routing
    *  strings so every reference points at OUR server even after a collision
@@ -729,6 +742,7 @@ export async function writePeerMcpRuntimeFiles(
   const agents = buildPeerAgentDefinitions({
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
+    geminiFlashAvailable: opts.geminiFlashAvailable,
     groupKeys: opts.groupKeys,
     nonce,
     codexHome,
@@ -759,6 +773,7 @@ export async function writePeerMcpRuntimeFiles(
   const personas = personasFor({
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
+    geminiFlashAvailable: opts.geminiFlashAvailable,
   })
 
   const cleanup = async (): Promise<void> => {
