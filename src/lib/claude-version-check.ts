@@ -7,7 +7,6 @@ import consola from "consola"
 import {
   resolveExecutable,
   runCommandCapture,
-  runCommandInherit,
   runCommandVoid,
 } from "./exec"
 import { withInstallLock } from "./update-lock"
@@ -241,61 +240,84 @@ export async function checkClaudeVersion(opts: {
 }
 
 /**
- * Probe whether the installed `claude` supports the `update`
- * subcommand. Older builds predate it; for those we fall back to npm so
- * the user is never permanently stranded on a version too old to
- * self-update.
+ * Heuristic: did `claude update` fail because the subcommand does not
+ * exist (a build predating `claude update`), as opposed to a transient
+ * update error? We only npm-fall-back on this specific signal — falling
+ * back on any failure would install a conflicting npm copy on
+ * native-installer machines.
+ *
+ * Matches the usage/Commander-style "unknown command" messages CLIs emit
+ * for an unrecognized subcommand. Deliberately narrow.
  */
-async function supportsClaudeUpdate(claudePath: string): Promise<boolean> {
-  try {
-    const { stdout, stderr, code } = await runCommandCapture(
-      [claudePath, "--help"],
-      { timeoutMs: CLAUDE_VERSION_TIMEOUT_MS },
-    )
-    if (code !== 0) return false
-    // `update` appears as a listed command in `claude --help` output.
-    return /(^|\s)update(\s|$)/m.test(`${stdout}\n${stderr}`)
-  } catch {
-    return false
-  }
+export function looksLikeUnknownUpdateCommand(output: string): boolean {
+  return /unknown command|unknown subcommand|unrecognized (sub)?command|invalid command|command not found|is not a (known|valid) command/i.test(
+    output,
+  )
 }
 
 /**
  * Update Claude Code to the latest version.
  *
- * Strategy (decided in the plan):
- *   1. Prefer `claude update` — it respects the user's actual install
- *      method (native installer or npm), so it never creates a
- *      conflicting second install, and it is NOT blocked by the
- *      `DISABLE_AUTOUPDATER` the proxy sets in the *child* env (this
- *      runs from the proxy's own env, and `claude update` is a manual
- *      command unaffected by that flag).
- *   2. Fallback for builds too old to have `claude update`: run
- *      `npm install -g @anthropic-ai/claude-code@latest` and emit a
- *      VISIBLE warning. This only triggers for npm-era installs (the
- *      native installer always ships a modern `claude update`).
+ * Strategy (decided in the plan, corrected after a real-world false
+ * negative): run `claude update` directly — it respects the user's
+ * actual install method (native installer or npm), so it never creates a
+ * conflicting second install, and it is NOT blocked by the
+ * `DISABLE_AUTOUPDATER` the proxy sets in the *child* env (this runs from
+ * the proxy's own env, and `claude update` is a manual command
+ * unaffected by that flag).
+ *
+ * Only if `claude update` reports the subcommand is unknown (a build too
+ * old to have it) do we fall back to `npm install -g
+ * @anthropic-ai/claude-code@latest` with a VISIBLE warning. The earlier
+ * `claude --help` capability probe was removed: it timed out / mismatched
+ * on slow cold starts and wrongly forced the npm path every launch,
+ * creating dual npm-global + native installs.
  *
  * Serialized across concurrent proxies via an install lock. Throws on
  * failure — the caller decides whether to warn and continue.
  */
-export async function updateClaude(latestVersion: string): Promise<void> {
-  const claudePath = resolveExecutable("claude")
+export interface UpdateClaudeDeps {
+  resolveExecutable: typeof resolveExecutable
+  runCommandCapture: typeof runCommandCapture
+  runCommandVoid: typeof runCommandVoid
+  withInstallLock: typeof withInstallLock
+}
+
+export async function updateClaude(
+  latestVersion: string,
+  deps: Partial<UpdateClaudeDeps> = {},
+): Promise<void> {
+  const _resolve = deps.resolveExecutable ?? resolveExecutable
+  const _capture = deps.runCommandCapture ?? runCommandCapture
+  const _void = deps.runCommandVoid ?? runCommandVoid
+  const _lock = deps.withInstallLock ?? withInstallLock
+
+  const claudePath = _resolve("claude")
   if (!claudePath) throw new Error("claude not found on PATH")
 
-  const ran = await withInstallLock("claude-update.lock", async () => {
-    if (await supportsClaudeUpdate(claudePath)) {
-      consola.info(`Updating Claude Code to ${latestVersion} via \`claude update\`...`)
-      const { code } = await runCommandInherit([claudePath, "update"], {
-        timeoutMs: NPM_INSTALL_TIMEOUT_MS,
-      })
-      if (code !== 0) throw new Error(`\`claude update\` exited with code ${code}`)
+  const ran = await _lock("claude-update.lock", async () => {
+    consola.info(`Updating Claude Code to ${latestVersion} via \`claude update\`...`)
+    // Capture (not inherit) so we can detect an unknown-command signal;
+    // echo the output afterward so the user still sees what happened.
+    const { code, stdout, stderr } = await _capture([claudePath, "update"], {
+      timeoutMs: NPM_INSTALL_TIMEOUT_MS,
+    })
+    const combined = `${stdout}${stderr}`
+    const trimmed = combined.trim()
+    if (trimmed) process.stdout.write(trimmed.endsWith("\n") ? trimmed : `${trimmed}\n`)
+
+    if (code === 0) {
       consola.success(`Claude Code updated to ${latestVersion}`)
       return
     }
 
-    // Fallback: npm. Only reachable on npm-era installs old enough to
-    // lack `claude update`.
-    const npmPath = resolveExecutable("npm")
+    if (!looksLikeUnknownUpdateCommand(combined)) {
+      throw new Error(`\`claude update\` exited with code ${code}`)
+    }
+
+    // Fallback: npm. Only reachable on installs too old to have
+    // `claude update` at all.
+    const npmPath = _resolve("npm")
     if (!npmPath) {
       throw new Error(
         "this Claude Code build predates `claude update` and npm is not on PATH; " +
@@ -306,12 +328,12 @@ export async function updateClaude(latestVersion: string): Promise<void> {
       "This Claude Code build predates `claude update`; falling back to " +
         `\`npm install -g ${NPM_PACKAGE}@latest\`.`,
     )
-    const { code, stderr } = await runCommandVoid(
+    const { code: npmCode, stderr: npmStderr } = await _void(
       [npmPath, "install", "-g", `${NPM_PACKAGE}@latest`, "--silent"],
       { timeoutMs: NPM_INSTALL_TIMEOUT_MS },
     )
-    if (code !== 0) {
-      throw new Error(`npm install failed: ${stderr.trim() || `exit ${code}`}`)
+    if (npmCode !== 0) {
+      throw new Error(`npm install failed: ${npmStderr.trim() || `exit ${npmCode}`}`)
     }
     consola.success(`${NPM_PACKAGE} updated to ${latestVersion}`)
   })

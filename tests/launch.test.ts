@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 
 import {
   buildLaunchCommand,
+  isExecutableAvailable,
   sanitizeParentEnv,
   type LaunchTarget,
 } from "../src/lib/launch"
@@ -19,6 +23,31 @@ function baseCmd(cmd: string[]): string {
       .pop() ?? cmd[0]
   ).replace(/\.(cmd|exe)$/i, "")
 }
+
+describe("isExecutableAvailable", () => {
+  // Regression: buildLaunchCommand resolves the CLI to an ABSOLUTE path
+  // (anti-shadow). The launcher's pre-flight must accept that path —
+  // `where.exe`/`which` reject a full-path argument, which previously
+  // aborted every launch with a spurious "not found on PATH".
+  test("absolute path that exists → true (resolved CLI can launch)", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "launch-exec-"))
+    try {
+      const bin = path.join(
+        dir,
+        process.platform === "win32" ? "claude.cmd" : "claude",
+      )
+      await fs.writeFile(bin, "")
+      expect(isExecutableAvailable(bin)).toBe(true)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("absolute path that does not exist → false", () => {
+    const missing = path.join(os.tmpdir(), `definitely-missing-${Date.now()}.bin`)
+    expect(isExecutableAvailable(missing)).toBe(false)
+  })
+})
 
 describe("buildLaunchCommand", () => {
   describe("claude-code", () => {

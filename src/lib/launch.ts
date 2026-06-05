@@ -1,4 +1,6 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process"
+import { existsSync } from "node:fs"
+import path from "node:path"
 import process from "node:process"
 
 import consola from "consola"
@@ -107,6 +109,23 @@ function commandExists(name: string): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * Whether the launcher can execute `executable`.
+ *
+ * `buildLaunchCommand` resolves the CLI to an ABSOLUTE path (anti-shadow).
+ * `where.exe` (and POSIX `which`) reject a full path argument — `where`
+ * returns "Could not find files for the given pattern(s)" for an absolute
+ * path even when the file exists — so the where/which probe is only valid
+ * for bare command names. For an absolute path (already resolved against
+ * PATH and existence-checked by `resolveExecutable`), check the
+ * filesystem directly. Without this split, every launch where the CLI is
+ * installed fails with a spurious "not found on PATH".
+ */
+export function isExecutableAvailable(executable: string): boolean {
+  if (path.isAbsolute(executable)) return existsSync(executable)
+  return commandExists(executable)
 }
 
 /**
@@ -230,7 +249,7 @@ export function launchChild(
   const { cmd, env } = buildLaunchCommand(target)
 
   const executable = cmd[0]
-  if (!commandExists(executable)) {
+  if (!isExecutableAvailable(executable)) {
     const msg = `"${executable}" not found on PATH. Install it first, then try again.`
     consola.error(msg)
     process.stderr.write(msg + "\n")
