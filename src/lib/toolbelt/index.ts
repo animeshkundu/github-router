@@ -45,23 +45,30 @@ export function vscodeRipgrepPath(): string | null {
 }
 
 /**
- * The commands the toolbelt WILL expose this launch (gap-fill plan):
- * each tool that is supported on this platform, not skipped, and not
- * already on the user's PATH. Used for the awareness one-liner.
+ * Every curated tool the spawned agent can actually invoke this launch
+ * — whether it is already on the user's system PATH OR will be
+ * materialized into the toolbelt bin (gap-fill). Used for the awareness
+ * one-liner so the model is told about ALL available fast tools, not
+ * just the ones we had to download. (Provisioning still only downloads
+ * the gap-fill subset; this is purely the advertised set.)
  */
-export function planExposedCommands(): string[] {
+export function availableToolCommands(): string[] {
   if (!toolbeltEnabled()) return []
   const skip = toolbeltSkipSet()
   const out: string[] = []
 
-  if (!skip.has("rg") && !resolveExecutable("rg") && vscodeRipgrepPath()) {
+  // rg: available if on the system PATH OR materializable from the
+  // bundled @vscode/ripgrep binary.
+  if (!skip.has("rg") && (resolveExecutable("rg") || vscodeRipgrepPath())) {
     out.push("rg")
   }
   for (const spec of TOOLBELT_TOOLS) {
     if (skip.has(spec.command)) continue
-    if (!assetFor(spec)) continue // unsupported platform/arch
-    if (resolveExecutable(spec.command)) continue // user already has it
-    out.push(spec.command)
+    // Available if the user already has it OR we can provision it on
+    // this platform/arch.
+    if (resolveExecutable(spec.command) || assetFor(spec)) {
+      out.push(spec.command)
+    }
   }
   return out
 }

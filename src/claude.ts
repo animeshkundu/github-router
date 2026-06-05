@@ -19,7 +19,7 @@ import { listModelsForEndpoint } from "./lib/model-validation"
 import { ensureClaudeConfigMirror, removeOwnClaudeConfigMirror } from "./lib/paths"
 import { buildPeerAwarenessSnippet } from "./lib/peer-mcp-personas"
 import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
-import { buildToolbeltAwareness, planExposedCommands, toolbeltEnabled } from "./lib/toolbelt"
+import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import {
   DEFAULT_CLAUDE_MODEL_FALLBACKS,
@@ -294,14 +294,14 @@ export const claude = defineCommand({
     // into the router bin dir prepended to the agent's PATH (the prepend
     // itself is done in getClaudeCodeEnvVars). Materialization runs in
     // the BACKGROUND so it never delays launch; the awareness one-liner
-    // is computed synchronously from the gap-fill plan and appended to
-    // the mirrored CLAUDE.md so the main agent AND descendants learn
-    // which tools are on PATH. Best-effort.
+    // lists EVERY curated tool reachable this launch (system installs +
+    // the toolbelt bin), appended to the mirrored CLAUDE.md so the main
+    // agent AND descendants know which fast tools to prefer. Best-effort.
     if (toolbeltEnabled()) {
       void provisionToolbelt().catch((err) =>
         consola.debug("Toolbelt provisioning failed:", err),
       )
-      const toolbeltLine = buildToolbeltAwareness(planExposedCommands())
+      const toolbeltLine = buildToolbeltAwareness(availableToolCommands())
       if (toolbeltLine) {
         try {
           await appendToolbeltAwarenessToMirroredClaudeMd(toolbeltLine)
