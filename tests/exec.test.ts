@@ -117,14 +117,14 @@ describe("resolveExecutable", () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "exec-win-"))
     try {
       await fs.writeFile(path.join(dir, "npm.cmd"), "")
+      // PATHEXT casing matches the file so the test is fs-case-agnostic
+      // (Linux CI runs the win32 branch on a case-sensitive fs).
       const got = resolveExecutable("npm", {
-        env: { PATH: dir, PATHEXT: ".COM;.EXE;.CMD" },
+        env: { PATH: dir, PATHEXT: ".COM;.EXE;.cmd" },
         platform: "win32",
         cwd: os.tmpdir(),
       })
-      // Match is case-insensitive on Windows; the returned ext takes
-      // PATHEXT's casing (.CMD), which still points at the real file.
-      expect(got?.toLowerCase()).toBe(path.join(dir, "npm.cmd").toLowerCase())
+      expect(got).toBe(path.join(dir, "npm.cmd"))
     } finally {
       await fs.rm(dir, { recursive: true, force: true })
     }
@@ -134,9 +134,10 @@ describe("resolveExecutable", () => {
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "exec-cwd-win-"))
     try {
       await fs.writeFile(path.join(cwd, "npm.cmd"), "")
-      // PATH lists the cwd explicitly — must still be skipped.
+      // The candidate WOULD match (same casing) if cwd weren't excluded —
+      // so a null result proves the exclusion, on any filesystem.
       const got = resolveExecutable("npm", {
-        env: { PATH: cwd, PATHEXT: ".CMD" },
+        env: { PATH: cwd, PATHEXT: ".cmd" },
         platform: "win32",
         cwd,
       })
