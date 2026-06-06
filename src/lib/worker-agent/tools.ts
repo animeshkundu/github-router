@@ -869,6 +869,17 @@ const CODE_SEARCH_PARAMS = Type.Object({
       description: "Structural-ranking depth (ranked mode only).",
     }),
   ),
+  complete: Type.Optional(
+    Type.Boolean({
+      description:
+        "When true, return the COMPLETE ranked match set (every line "
+        + "ripgrep would find, capped only by `limit`) — disables the "
+        + "default precision shoulder cut + per-file cap. Use it when you "
+        + "must not miss any occurrence (every caller of X, a rename, an "
+        + "audit). The default response `notice` says when matches were "
+        + "hidden.",
+    }),
+  ),
 })
 
 function codeSearchTool(workspace: string): AgentTool<typeof CODE_SEARCH_PARAMS> {
@@ -896,6 +907,11 @@ function codeSearchTool(workspace: string): AgentTool<typeof CODE_SEARCH_PARAMS>
           file_glob: params.file_glob,
           limit: params.limit,
           structural: params.structural,
+          complete: params.complete,
+          // The worker surface trims to {file,line,snippet} and never
+          // forwards outlines, so skip the (default-on) summary pass
+          // rather than parse files only to discard the result.
+          summary: false,
         },
         signal,
       )

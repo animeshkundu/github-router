@@ -47,6 +47,7 @@ import { state } from "~/lib/state"
 import { isControllerClosedError } from "~/lib/stream-relay"
 import { getTokenizerFromModel, loadEncoder } from "~/lib/tokenizer"
 import { resolveModel } from "~/lib/utils"
+import { withTransientRetry } from "~/lib/upstream-retry"
 import { createMessages } from "~/services/copilot/create-messages"
 import {
   createResponses,
@@ -438,7 +439,10 @@ async function runAdvisor(
       // ADVISOR_TOOL_INSTRUCTIONS line 31), so don't be cheap.
       reasoning: { effort: advisorEffort },
     }
-    const response = (await createResponses(payload, undefined, signal)) as ResponsesApiResponse
+    const response = (await withTransientRetry(
+      () => createResponses(payload, undefined, signal),
+      { signal, label: resolvedAdvisorModel },
+    )) as ResponsesApiResponse
     const out: Array<string> = []
     for (const item of response.output) {
       if (typeof item !== "object" || item === null) continue
@@ -476,7 +480,10 @@ async function runAdvisor(
     messages: [{ role: "user", content: conversationText }],
     stream: false,
   })
-  const response = await createMessages(advisorBody, {}, signal)
+  const response = await withTransientRetry(
+    () => createMessages(advisorBody, {}, signal),
+    { signal, label: resolvedAdvisorModel },
+  )
   const json = (await response.json()) as AnyRecord
   const blocks = Array.isArray(json.content) ? json.content : []
   const text = blocks

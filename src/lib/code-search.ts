@@ -54,6 +54,18 @@ import * as path from "node:path"
 import consola from "consola"
 import Parser from "web-tree-sitter"
 
+import {
+  DEFINITION_NODE_TYPES,
+  type FileOutlineEntry,
+  type FileOutlineResult,
+  getGrammarBundle,
+  getLanguageKeyForPath,
+  IDENTIFIER_NODE_TYPES,
+  outlineFile,
+  outlineFromTree,
+  STRUCTURAL_MAX_FILE_BYTES,
+} from "~/lib/tree-sitter-grammars"
+
 // ============================================================
 // Constants
 // ============================================================
@@ -91,16 +103,29 @@ const FIELD_LEN_NORMS = {
 } as const
 
 /**
- * Shoulder cut: drop results below this fraction of the top score.
- * 0.5 is the convention from learning-to-rank literature (Burges
- * 2010); chosen as the deliberate single-place constant.
+ * Shoulder cut threshold: in DEFAULT (non-`complete`) ranked mode, drop
+ * hits below this fraction of the top score for precision. `complete:
+ * true` disables it — see `docs/code-search-floor.md`.
  */
 const SHOULDER_THRESHOLD = 0.5
 
 const MAX_QUERY_LEN = 1024
 const MAX_GLOB_LEN = 512
-const DEFAULT_LIMIT = 20
+const DEFAULT_LIMIT = 200
 const MAX_CONTEXT_LINES = 10
+/**
+ * `summary: true` outlines at most this many distinct result files (in
+ * result order) — a structural map of where the matches live, bounded
+ * so a broad query doesn't trigger hundreds of tree-sitter parses.
+ */
+const CODE_SUMMARY_MAX_FILES = 10
+/**
+ * Per-file match cap applied in DEFAULT (non-`complete`) ranked mode:
+ * keeps one match-dense file from filling the global limit and blinding
+ * BM25F to the rest of the workspace. `complete: true` disables it (and
+ * the shoulder cut) to return the full grep set — the floor guarantee.
+ */
+const RANKED_MAX_PER_FILE = 50
 const DEFAULT_CONTEXT_LINES = 2
 const MAX_SNIPPET_BYTES = 2048
 const MAX_STDOUT_BYTES = 10 * 1024 * 1024
@@ -117,14 +142,6 @@ const WALL_TIME_MS = 30_000
 const STRUCTURAL_BUDGET_MS = 200
 const STRUCTURAL_TOPN_FULL = 50
 const STRUCTURAL_TOPN_FAST = 10
-
-/**
- * Cap the per-file size we'll parse. 1MB of source covers all
- * reasonable hand-written files; bigger files are almost always
- * generated code or vendored bundles whose AST signal is worthless
- * for ranking real definitions.
- */
-const STRUCTURAL_MAX_FILE_BYTES = 1024 * 1024
 
 /**
  * LRU bound on the parsed-tree cache. Each Tree pins ~roughly the
@@ -167,6 +184,27 @@ export interface CodeSearchInput {
    * with a human-readable explanation.
    */
   structural?: "full" | "topN"
+  /**
+   * Structural summary, ON BY DEFAULT. The response carries a
+   * tree-sitter STRUCTURAL OUTLINE (`outlines`) of the distinct files in
+   * the result set (top-level symbols + line numbers), capped at the
+   * first `CODE_SUMMARY_MAX_FILES` files in result order — a compact map
+   * of where the matches live that augments, never replaces, `snippet`.
+   * Set `summary: false` to omit it (e.g. when only the matching lines
+   * are needed).
+   */
+  summary?: boolean
+  /**
+   * Exhaustiveness control. Default `false`: ranked mode applies a
+   * precision shoulder cut (drops hits below 50% of the top score) and a
+   * per-file match cap for cross-file diversity, so the model isn't
+   * overwhelmed. `true`: BOTH are disabled, so ranked mode returns the
+   * COMPLETE ripgrep match set (reordered by relevance), capped only by
+   * the explicit `limit` — the provable floor (never drops a match grep
+   * would return). When the default hides matches, the response `notice`
+   * says so and points the model here.
+   */
+  complete?: boolean
 }
 
 export interface CodeSearchHit {
@@ -176,12 +214,19 @@ export interface CodeSearchHit {
   match_byte_range: [number, number]
   score?: number
   field_contributions?: Readonly<Record<string, number>> | null
+  /**
+   * Present (always `"definition"`) ONLY when the structural pass
+   * AST-confirmed this hit is the symbol's definition site. Absent
+   * otherwise — absence is NOT a claim that the hit is a usage (the hit
+   * may simply not have been AST-checked: unsupported language, file over
+   * the 1 MiB cap, parse error, or the structural budget was exhausted).
+   */
+  role?: "definition"
 }
 
 export interface CodeSearchResponse {
   results: Array<CodeSearchHit>
   truncated: boolean
-  pruned_below_shoulder?: number
   scanned_files: number
   elapsed_ms: number
   ranking: {
@@ -189,6 +234,12 @@ export interface CodeSearchResponse {
     citation?: string
     k1?: number
   }
+  /**
+   * Present only when `summary: true` was requested: a tree-sitter
+   * structural outline of each distinct file in the result set (capped
+   * at `CODE_SUMMARY_MAX_FILES`, in result order). Absent otherwise.
+   */
+  outlines?: Array<{ file: string; outline: Array<FileOutlineEntry> }>
   /**
    * Single actionable degradation notice for the model. `null` on the
    * happy path. A string when something the model can correct fired:
@@ -577,6 +628,8 @@ function buildRgArgs(input: {
    * identifiers (no regex metacharacters).
    */
   expansionPattern?: string
+  /** When true, skip the per-file `--max-count` cap (floor mode). */
+  complete?: boolean
 }): Array<string> {
   const args: Array<string> = ["--json", "--no-binary", "--no-follow"]
 
@@ -602,6 +655,14 @@ function buildRgArgs(input: {
 
   if (input.fileGlob && input.fileGlob !== "**/*") {
     args.push("-g", input.fileGlob)
+  }
+
+  // Per-file match cap in DEFAULT ranked mode (see RANKED_MAX_PER_FILE):
+  // keeps one match-dense file from filling the global limit and blinding
+  // BM25F. `complete: true` and literal/regex modes skip it so the full
+  // match set is returned.
+  if (input.mode === "ranked" && !input.complete) {
+    args.push("--max-count", String(RANKED_MAX_PER_FILE))
   }
 
   // CVE fix HIGH-2: positional separator. Without `--`, a query
@@ -798,252 +859,13 @@ function stripTrailingNewline(s: string): string {
 // ============================================================
 // Tree-sitter structural ranking
 // ============================================================
-
-/**
- * Extension → grammar key. Grammars not in this map skip structural
- * parsing (the hit falls back to the regex SYMBOL_REGEX heuristic for
- * `symbol_context`). Keep this list aligned with `GRAMMAR_FILES`
- * below — adding a language requires both an extension mapping and a
- * `.wasm` to load.
- */
-const EXTENSION_TO_LANG: Readonly<Record<string, string>> = {
-  ".ts": "typescript",
-  ".tsx": "tsx",
-  ".js": "javascript",
-  ".mjs": "javascript",
-  ".cjs": "javascript",
-  ".jsx": "javascript",
-  ".py": "python",
-  ".go": "go",
-  ".rs": "rust",
-  ".java": "java",
-  ".c": "c",
-  ".h": "c",
-  ".cpp": "cpp",
-  ".cc": "cpp",
-  ".cxx": "cpp",
-  ".hpp": "cpp",
-  ".hxx": "cpp",
-}
-
-/**
- * Grammar key → wasm filename under `node_modules/tree-sitter-wasms/out/`.
- * Resolved at runtime from `node_modules`; the file paths are stable
- * because `tree-sitter-wasms` ships prebuilt binaries (no per-install
- * codegen).
- */
-const GRAMMAR_FILES: Readonly<Record<string, string>> = {
-  typescript: "tree-sitter-typescript.wasm",
-  tsx: "tree-sitter-tsx.wasm",
-  javascript: "tree-sitter-javascript.wasm",
-  python: "tree-sitter-python.wasm",
-  go: "tree-sitter-go.wasm",
-  rust: "tree-sitter-rust.wasm",
-  java: "tree-sitter-java.wasm",
-  c: "tree-sitter-c.wasm",
-  cpp: "tree-sitter-cpp.wasm",
-}
-
-/**
- * Per-language definition-shape node types. When a matched identifier
- * sits inside one of these nodes AND is at the node's "name" position,
- * we have AST-confirmed evidence the line is an identifier-definition
- * site. The brief's enumeration plus a handful of language-idiomatic
- * extras (e.g., `lexical_declaration` for TS/JS top-level `const`s,
- * `mod_item` for Rust modules).
- *
- * The set lookup is per-language so a node type that means
- * "definition" in one language but "reference" in another won't
- * cross-pollute.
- */
-const DEFINITION_NODE_TYPES: Readonly<Record<string, ReadonlySet<string>>> = {
-  typescript: new Set([
-    "function_declaration",
-    "function_signature",
-    "function_expression",
-    "method_definition",
-    "method_signature",
-    "class_declaration",
-    "interface_declaration",
-    "type_alias_declaration",
-    "enum_declaration",
-    "variable_declarator",
-    "generator_function_declaration",
-    "abstract_method_signature",
-    "public_field_definition",
-    "property_signature",
-  ]),
-  tsx: new Set([
-    "function_declaration",
-    "function_signature",
-    "function_expression",
-    "method_definition",
-    "method_signature",
-    "class_declaration",
-    "interface_declaration",
-    "type_alias_declaration",
-    "enum_declaration",
-    "variable_declarator",
-    "generator_function_declaration",
-    "abstract_method_signature",
-    "public_field_definition",
-    "property_signature",
-  ]),
-  javascript: new Set([
-    "function_declaration",
-    "function_expression",
-    "method_definition",
-    "class_declaration",
-    "variable_declarator",
-    "generator_function_declaration",
-  ]),
-  python: new Set([
-    "function_definition",
-    "class_definition",
-    "decorated_definition",
-  ]),
-  go: new Set([
-    "function_declaration",
-    "method_declaration",
-    "type_spec",
-    "type_alias",
-    "const_spec",
-    "var_spec",
-  ]),
-  rust: new Set([
-    "function_item",
-    "impl_item",
-    "trait_item",
-    "struct_item",
-    "enum_item",
-    "mod_item",
-    "type_item",
-    "const_item",
-    "static_item",
-    "macro_definition",
-  ]),
-  java: new Set([
-    "class_declaration",
-    "interface_declaration",
-    "method_declaration",
-    "constructor_declaration",
-    "enum_declaration",
-    "field_declaration",
-    "annotation_type_declaration",
-  ]),
-  c: new Set([
-    "function_definition",
-    "declaration",
-    "struct_specifier",
-    "enum_specifier",
-    "union_specifier",
-    "type_definition",
-  ]),
-  cpp: new Set([
-    "function_definition",
-    "declaration",
-    "struct_specifier",
-    "class_specifier",
-    "enum_specifier",
-    "union_specifier",
-    "type_definition",
-    "namespace_definition",
-    "template_declaration",
-  ]),
-}
-
-/**
- * Node types that the AST exposes as "this token is an identifier".
- * The match-position lookup uses these to filter out parent-node hits
- * before checking the definition-site predicate.
- */
-const IDENTIFIER_NODE_TYPES = new Set([
-  "identifier",
-  "type_identifier",
-  "field_identifier",
-  "property_identifier",
-  "shorthand_property_identifier_pattern",
-  "shorthand_property_identifier",
-  "scoped_identifier",
-  "name",
-])
-
-interface GrammarBundle {
-  /** Lazy promise of the language registry. Awaited per-call so the
-   *  init cost overlaps with any other module-load work. */
-  ready: Promise<Map<string, Parser.Language>>
-}
-
-let _grammarBundle: GrammarBundle | undefined
-
-/**
- * Resolve the `tree-sitter-wasms/out/` directory at the package root.
- * `require.resolve` is used through a try/catch — the bundled-only
- * fallback runs in environments where node_modules has been pruned to
- * just runtime deps.
- */
-function resolveGrammarRoot(): string | null {
-  try {
-    const pkgPath = require.resolve("tree-sitter-wasms/package.json")
-    return path.join(path.dirname(pkgPath), "out")
-  } catch {
-    return null
-  }
-}
-
-/**
- * Pre-load all grammars at module-init time so the first search
- * doesn't pay a ~500ms cold-start cost. The Promise is captured at
- * import time and awaited per-call; per-grammar failures are caught
- * individually so one broken grammar can't take the whole tool down.
- */
-function getGrammarBundle(): GrammarBundle {
-  if (_grammarBundle) return _grammarBundle
-  const ready = (async (): Promise<Map<string, Parser.Language>> => {
-    const out = new Map<string, Parser.Language>()
-    try {
-      await Parser.init()
-    } catch (err) {
-      consola.warn(
-        `[code_search] tree-sitter Parser.init failed; structural ranking disabled: ${(err as Error).message}`,
-      )
-      return out
-    }
-    const root = resolveGrammarRoot()
-    if (!root) {
-      consola.warn(
-        "[code_search] tree-sitter-wasms package not resolvable; structural ranking disabled",
-      )
-      return out
-    }
-    for (const [key, filename] of Object.entries(GRAMMAR_FILES)) {
-      const wasmPath = path.join(root, filename)
-      try {
-        const lang = await Parser.Language.load(wasmPath)
-        out.set(key, lang)
-      } catch (err) {
-        consola.warn(
-          `[code_search] failed to load tree-sitter grammar '${key}' from ${filename}: ${(err as Error).message}`,
-        )
-      }
-    }
-    return out
-  })()
-  _grammarBundle = { ready }
-  return _grammarBundle
-}
-
-// Kick off grammar pre-load at module import time. The brief calls
-// this out explicitly: amortize the WASM init cost across module load
-// rather than the first search call.
-void getGrammarBundle().ready.catch(() => {
-  /* errors already logged per-grammar */
-})
-
-function getLanguageKeyForPath(filePath: string): string | null {
-  const ext = path.extname(filePath).toLowerCase()
-  return EXTENSION_TO_LANG[ext] ?? null
-}
+//
+// The grammar layer this pass depends on — the extension/grammar
+// tables, the definition-/identifier-node-type sets, and the lazily
+// initialized `web-tree-sitter` parser cache — lives in
+// `~/lib/tree-sitter-grammars` and is imported at the top of this file.
+// Only the BM25F-coupled tree cache + structural-confirmation walk stay
+// here.
 
 /**
  * Tree cache. Keyed by canonical file path with mtime gate — on
@@ -1605,39 +1427,47 @@ function bm25fScore(
 }
 
 // ============================================================
-// Shoulder pruning
+// Ranking order
 // ============================================================
 
-interface PrunedResult {
-  kept: Array<ScoredHit>
-  prunedBelowShoulder: number
-}
-
-function shoulderPrune(scored: Array<ScoredHit>): PrunedResult {
-  if (scored.length === 0) return { kept: [], prunedBelowShoulder: 0 }
-  // Sort by score desc, then by (file, line) for determinism.
+/**
+ * Deterministic ranking order, in place: score desc, then (file, line)
+ * ascending as a stable tiebreak.
+ *
+ * There is NO score-based cut. The floor guarantee (see
+ * `docs/code-search-floor.md`) is that ranked mode never drops a hit
+ * ripgrep would return — it returns exactly the ripgrep match set,
+ * reordered, capped only by the explicit `limit`. An earlier
+ * "shoulder prune" (drop below 50% of the top score) silently removed
+ * real matches a `grep` would surface; it was removed.
+ */
+function sortByScore(scored: Array<ScoredHit>): void {
   scored.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score
     if (a.hit.file !== b.hit.file) return a.hit.file < b.hit.file ? -1 : 1
     return a.hit.line - b.hit.line
   })
-  const topScore = scored[0].score
-  if (topScore <= 0) {
-    // No ranking signal — return all (caller will apply limit).
-    return { kept: scored, prunedBelowShoulder: 0 }
-  }
+}
+
+/**
+ * Default-mode precision filter: given a score-sorted array, keep the
+ * prefix at or above `SHOULDER_THRESHOLD` × top score. Returns ALL when
+ * there is no ranking signal (top score 0). Skipped entirely under
+ * `complete: true` — the caller then gets the full ranked set.
+ */
+function shoulderCut(sorted: Array<ScoredHit>): Array<ScoredHit> {
+  if (sorted.length === 0) return sorted
+  const topScore = sorted[0].score
+  if (topScore <= 0) return sorted
   const threshold = topScore * SHOULDER_THRESHOLD
-  let cut = scored.length
-  for (let i = 0; i < scored.length; i++) {
-    if (scored[i].score < threshold) {
+  let cut = sorted.length
+  for (let i = 0; i < sorted.length; i++) {
+    if (sorted[i].score < threshold) {
       cut = i
       break
     }
   }
-  return {
-    kept: scored.slice(0, cut),
-    prunedBelowShoulder: scored.length - cut,
-  }
+  return sorted.slice(0, cut)
 }
 
 // ============================================================
@@ -1729,6 +1559,7 @@ export async function searchCode(
     contextLines,
     query: rawInput.query,
     expansionPattern,
+    complete: rawInput.complete,
   })
 
   let child: ChildProcess
@@ -1828,7 +1659,14 @@ export async function searchCode(
 
   // Apply ranking.
   let kept: Array<ScoredHit>
-  let prunedBelowShoulder: number | undefined
+  // Stable keys (`file:line:byteStart:byteEnd`) of hits the structural
+  // pass AST-confirmed as definition sites — used to tag those hits with
+  // `role: "definition"` at render time. A logical key (not object
+  // identity) so a clone/rehydrate in scoring can't silently drop the
+  // tag. Only populated in ranked mode (the only mode that runs the
+  // structural pass). It NEVER claims "usage": absence of the tag is not
+  // a claim, since a hit may simply not have been AST-checked.
+  let confirmedKeys: Set<string> | undefined
   let notice: string | null = null
   if (mode === "ranked") {
     const queryTokens = tokenize(rawInput.query)
@@ -1857,8 +1695,6 @@ export async function searchCode(
       budgetMs: STRUCTURAL_BUDGET_MS,
       signal: ac.signal,
     })
-    notice = structural.fallback
-
     // Pass 2: re-score with AST confirmation. Corpus stats are
     // re-computed against the structurally-enriched symbol_context
     // fields so token IDFs reflect the new field contents.
@@ -1867,9 +1703,62 @@ export async function searchCode(
       queryTokens,
       structural.confirmedHitIndexes,
     )
-    const pruned = shoulderPrune(pass2)
-    kept = pruned.kept.slice(0, limit)
-    prunedBelowShoulder = pruned.prunedBelowShoulder
+    // Accumulate every actionable notice (structural-budget fallback +
+    // the two default-mode precision disclosures) so none silently
+    // overwrites another.
+    const notices: Array<string> = []
+    if (structural.fallback) notices.push(structural.fallback)
+
+    // Floor vs precision. `complete: true` returns the full ranked set
+    // (capped only by `limit`). The default applies the precision
+    // shoulder cut + per-file cap — but discloses BOTH, so a miss is
+    // never silent: the model can always recover the full set with
+    // `complete: true`.
+    sortByScore(pass2)
+    if (rawInput.complete) {
+      kept = pass2.slice(0, limit)
+    } else {
+      const cut = shoulderCut(pass2)
+      const hidden = pass2.length - cut.length
+      kept = cut.slice(0, limit)
+      if (hidden > 0) {
+        notices.push(
+          `${hidden} lower-relevance match${hidden === 1 ? "" : "es"} ` +
+            `hidden by precision pruning — pass complete:true for the full set`,
+        )
+      }
+      // Per-file cap disclosure. ripgrep's `--max-count` silently
+      // truncates a file at RANKED_MAX_PER_FILE; we can't know the true
+      // count, but a file AT the cap was (probably) truncated — disclose
+      // it so the cap, like the shoulder cut, is never a silent miss.
+      const perFileCounts = new Map<string, number>()
+      for (const h of parseResult.hits) {
+        perFileCounts.set(h.file, (perFileCounts.get(h.file) ?? 0) + 1)
+      }
+      let cappedFiles = 0
+      for (const c of perFileCounts.values()) {
+        if (c >= RANKED_MAX_PER_FILE) cappedFiles++
+      }
+      if (cappedFiles > 0) {
+        notices.push(
+          `${cappedFiles} file${cappedFiles === 1 ? "" : "s"} hit the ` +
+            `per-file match cap — pass complete:true for every match`,
+        )
+      }
+    }
+    notice = notices.length > 0 ? notices.join(" · ") : null
+
+    // Confirmed-definition keys (stable file:line:byte-range, NOT object
+    // identity) for the render-time `role` tag.
+    confirmedKeys = new Set<string>()
+    for (const idx of structural.confirmedHitIndexes) {
+      const h = parseResult.hits[idx]
+      if (h) {
+        confirmedKeys.add(
+          `${h.file}:${h.line}:${h.match_start}:${h.match_end}`,
+        )
+      }
+    }
   } else {
     // Literal / regex: ripgrep document order, no scoring.
     kept = parseResult.hits.map((h) => ({
@@ -1907,8 +1796,61 @@ export async function searchCode(
     } else {
       baseHit.field_contributions = null
     }
+    if (
+      confirmedKeys?.has(
+        `${sh.hit.file}:${sh.hit.line}:${sh.hit.match_start}:${sh.hit.match_end}`,
+      )
+    ) {
+      baseHit.role = "definition"
+    }
     return baseHit
   })
+
+  // Structural summary is ON by default — outline the distinct files in
+  // the result set (capped, in result order) unless the caller opts out
+  // with `summary: false`. Reuses the shared tree-sitter outliner; each
+  // file is bounded by its own 1 MiB parse cap and the outliner never
+  // throws. Computed BEFORE `elapsed_ms` so telemetry reflects the real
+  // (summary-inclusive) latency.
+  let outlines:
+    | Array<{ file: string; outline: Array<FileOutlineEntry> }>
+    | undefined
+  if (rawInput.summary !== false) {
+    const seen = new Set<string>()
+    const distinct: Array<string> = []
+    for (const r of results) {
+      if (seen.has(r.file)) continue
+      seen.add(r.file)
+      distinct.push(r.file)
+      if (distinct.length >= CODE_SUMMARY_MAX_FILES) break
+    }
+    outlines = []
+    const outlineDeadline = Date.now() + 2000
+    for (const file of distinct) {
+      // Self-bound: the wall-clock timer + external-signal listener are
+      // already torn down by here, so cap the outline pass independently
+      // (≤10 files, each ≤1 MiB parse, but be defensive on both axes).
+      if (ac.signal.aborted || Date.now() > outlineDeadline) break
+      const abs = path.resolve(ws.canonical, file)
+      let result: FileOutlineResult | undefined
+      // Reuse the structural pass's cached tree when it's still fresh —
+      // avoids re-reading + re-parsing a file we already parsed this
+      // call. `outlineFromTree` is walk-only and does NOT free the tree
+      // (the cache owns it). On any miss / mtime change / unknown lang,
+      // fall back to a full `outlineFile`.
+      try {
+        const cached = cacheGet(abs, statSync(abs).mtimeMs)
+        if (cached?.tree) {
+          const lang = getLanguageKeyForPath(abs)
+          if (lang) result = outlineFromTree(cached.tree, lang, ac.signal)
+        }
+      } catch {
+        // fall through to a full parse
+      }
+      const o = result ?? (await outlineFile(abs, ac.signal))
+      outlines.push({ file, outline: o.outline })
+    }
+  }
 
   const elapsed_ms = Date.now() - t0
 
@@ -1919,6 +1861,7 @@ export async function searchCode(
     `[code_search] mode=${mode} structural=${structuralMode} ` +
       `expansion=${expansion ? expansion.length : 0} ` +
       `results=${results.length} truncated=${parseResult.truncated} ` +
+      `outlines=${outlines ? outlines.length : 0} ` +
       `scanned_files=${parseResult.scannedFiles} elapsed_ms=${elapsed_ms} ` +
       `abort=${parseResult.cancelled} rg=${rgResolution.source} ` +
       `notice=${notice ? "yes" : "no"}` +
@@ -1928,7 +1871,6 @@ export async function searchCode(
   return {
     results,
     truncated: parseResult.truncated,
-    pruned_below_shoulder: mode === "ranked" ? prunedBelowShoulder : undefined,
     scanned_files: parseResult.scannedFiles,
     elapsed_ms,
     ranking:
@@ -1939,6 +1881,7 @@ export async function searchCode(
             k1: BM25F_K1,
           }
         : { algorithm: "ripgrep_document_order" },
+    outlines,
     notice,
   }
 }

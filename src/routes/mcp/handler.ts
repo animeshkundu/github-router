@@ -25,6 +25,7 @@ import {
   type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
 import { createMessages } from "~/services/copilot/create-messages"
+import { withTransientRetry } from "~/lib/upstream-retry"
 import {
   createResponses,
   type ResponsesApiResponse,
@@ -716,10 +717,9 @@ export async function dispatchModelCall(args: {
       // levels (CLAUDE.md "Thinking-mode translation").
       reasoning: { effort: args.effort },
     }
-    const response = (await createResponses(
-      payload,
-      undefined,
-      args.signal,
+    const response = (await withTransientRetry(
+      () => createResponses(payload, undefined, args.signal),
+      { signal: args.signal, label: resolvedModel },
     )) as ResponsesApiResponse
     return extractResponsesText(response)
   }
@@ -751,7 +751,10 @@ export async function dispatchModelCall(args: {
       output_config: { effort: args.effort },
       messages: [{ role: "user", content: args.userText }],
     })
-    const response = await createMessages(body, undefined, args.signal)
+    const response = await withTransientRetry(
+      () => createMessages(body, undefined, args.signal),
+      { signal: args.signal, label: resolvedModel },
+    )
     const json = (await response.json()) as MessagesApiResponse
     return extractMessagesText(json)
   }
@@ -770,10 +773,9 @@ export async function dispatchModelCall(args: {
     // schema; the latter surfaces through the existing tool-error path.
     reasoning_effort: args.effort,
   }
-  const response = (await createChatCompletions(
-    payload,
-    undefined,
-    args.signal,
+  const response = (await withTransientRetry(
+    () => createChatCompletions(payload, undefined, args.signal),
+    { signal: args.signal, label: resolvedModel },
   )) as ChatCompletionResponse
   return extractChatCompletionText(response)
 }

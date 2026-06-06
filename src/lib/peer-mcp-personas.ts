@@ -791,7 +791,9 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         "and Glob for file-name patterns (no content match). " +
         "`workspace` is any absolute path the proxy process can " +
         "read — typically the project root or a sub-tree you're " +
-        "working in.",
+        "working in. Each response also carries a tree-sitter structural " +
+        "outline of the matched files (`summary` on by default; set it " +
+        "false to omit).",
       inputSchema: {
         type: "object",
         required: ["query", "workspace"],
@@ -828,7 +830,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           },
           limit: {
             type: "number",
-            description: "Max hits to return (default 20).",
+            description: "Max hits to return (default 200).",
           },
           structural: {
             type: "string",
@@ -841,6 +843,28 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               "Both modes share a 200ms wall-clock budget; on budget " +
               "exhaustion the response includes `notice` and remaining " +
               "hits fall back to the regex symbol heuristic.",
+          },
+          summary: {
+            type: "boolean",
+            description:
+              "Structural summary, ON BY DEFAULT: the response includes " +
+              "`outlines` — a tree-sitter outline (top-level symbols + " +
+              "line numbers) of the distinct files in the result set " +
+              "(first 10, in result order), a compact map of where the " +
+              "matches live that augments each hit's `snippet`. Set false " +
+              "to omit it when you only need the matching lines.",
+          },
+          complete: {
+            type: "boolean",
+            description:
+              "Exhaustiveness. Default false — ranked mode applies a " +
+              "precision shoulder cut + a per-file cap so you aren't " +
+              "overwhelmed, and the response `notice` tells you when " +
+              "matches were hidden. Set true to disable both and return " +
+              "the COMPLETE match set (every line `grep` would find, " +
+              "reordered by relevance), capped only by `limit` — use it " +
+              "when you must not miss any occurrence (e.g. \"every caller " +
+              "of X\", a rename, an audit).",
           },
         },
       },
@@ -869,6 +893,10 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
                 args.structural === "full" || args.structural === "topN"
                   ? args.structural
                   : undefined,
+              summary:
+                typeof args.summary === "boolean" ? args.summary : undefined,
+              complete:
+                typeof args.complete === "boolean" ? args.complete : undefined,
             },
             signal,
           )
@@ -890,15 +918,22 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             file: string
             line: number
             snippet: string
+            role?: "definition"
           }> = []
           let totalBytes = 0
           let sizeCapped = false
           for (const hit of result.results) {
-            const next = {
+            const next: {
+              file: string
+              line: number
+              snippet: string
+              role?: "definition"
+            } = {
               file: hit.file,
               line: hit.line,
               snippet: hit.snippet,
             }
+            if (hit.role) next.role = hit.role
             const nextBytes = Buffer.byteLength(JSON.stringify(next), "utf8")
             if (trimmedHits.length > 0 && totalBytes + nextBytes > SIZE_CAP_BYTES) {
               sizeCapped = true
@@ -909,12 +944,37 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           }
 
           const minimal: {
-            results: Array<{ file: string; line: number; snippet: string }>
+            results: Array<{
+              file: string
+              line: number
+              snippet: string
+              role?: "definition"
+            }>
             truncated: boolean
+            outlines?: typeof result.outlines
             notice?: string
           } = {
             results: trimmedHits,
             truncated: result.truncated || sizeCapped,
+          }
+          // Outlines are supplementary to the hits — fit them into
+          // whatever response budget the (already-capped) results left,
+          // so the default-on summary can never push the envelope past
+          // SIZE_CAP_BYTES.
+          let outlinesDropped = false
+          if (result.outlines && result.outlines.length > 0) {
+            const fitted: NonNullable<typeof result.outlines> = []
+            let outlineBytes = 0
+            for (const o of result.outlines) {
+              const ob = Buffer.byteLength(JSON.stringify(o), "utf8")
+              if (totalBytes + outlineBytes + ob > SIZE_CAP_BYTES) {
+                outlinesDropped = true
+                break
+              }
+              fitted.push(o)
+              outlineBytes += ob
+            }
+            if (fitted.length > 0) minimal.outlines = fitted
           }
           // Notice priority: size-cap > structural-budget. Size-cap
           // means the model is missing results entirely and should
@@ -926,6 +986,9 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               `response size limit reached at ${trimmedHits.length} hits ` +
               `(~${Math.round(totalBytes / 1024)}KB); narrow your query ` +
               `or lower 'limit' to get all relevant matches`
+          } else if (outlinesDropped) {
+            minimal.notice =
+              "some file outlines were omitted to fit the response size cap"
           } else if (typeof result.notice === "string") {
             minimal.notice = result.notice
           }

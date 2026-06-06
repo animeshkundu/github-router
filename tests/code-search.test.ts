@@ -438,7 +438,6 @@ describe("BM25F ranking", () => {
       const stable = {
         results: r.results,
         truncated: r.truncated,
-        pruned_below_shoulder: r.pruned_below_shoulder,
         scanned_files: r.scanned_files,
         ranking: r.ranking,
       }
@@ -750,6 +749,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
       "results",
       "truncated",
       "notice",
+      "outlines",
     ])
     for (const k of Object.keys(body)) {
       expect(allowedTopKeys.has(k)).toBe(true)
@@ -807,6 +807,40 @@ describe("MCP handler trims the response per the minimality principle", () => {
       const body = JSON.parse(result.content[0].text) as Record<string, unknown>
       expect((body.results as Array<unknown>).length).toBeGreaterThan(0)
     }
+  })
+
+  test("summary is forwarded through the handler: default → outlines present; summary:false → absent", async () => {
+    const { NON_PERSONA_MCP_TOOLS } = await import(
+      "../src/lib/peer-mcp-personas"
+    )
+    const tool = NON_PERSONA_MCP_TOOLS.find((t) => t.toolNameHttp === "code")!
+
+    // Default (no summary arg) → outlines present (on by default).
+    const onByDefault = await tool.handler({
+      query: "findMe",
+      workspace: fx.root,
+      mode: "literal",
+      limit: 5,
+    })
+    const onBody = JSON.parse(onByDefault.content[0].text) as Record<
+      string,
+      unknown
+    >
+    expect("outlines" in onBody).toBe(true)
+
+    // summary:false MUST reach searchCode → outlines omitted.
+    const optedOut = await tool.handler({
+      query: "findMe",
+      workspace: fx.root,
+      mode: "literal",
+      limit: 5,
+      summary: false,
+    })
+    const offBody = JSON.parse(optedOut.content[0].text) as Record<
+      string,
+      unknown
+    >
+    expect("outlines" in offBody).toBe(false)
   })
 
   test("context_lines param is no longer accepted in the schema", async () => {
@@ -989,5 +1023,186 @@ describe("binary file handling (NUL-byte defense)", () => {
     expect(serialized).not.toContain("\0")
     // Should still find the clean file
     expect(r.results.some((h) => h.file.includes("clean.ts"))).toBe(true)
+  })
+})
+
+describe("searchCode — structural summary (summary: true)", () => {
+  test("outlines matched files by default; omitted with summary:false", async () => {
+    const fx = makeFixture((root) => {
+      writeFileSync(
+        path.join(root, "svc.ts"),
+        [
+          "export class UserService {",
+          "  getUser() { return MARKER }",
+          "}",
+          "export function makeUser() { return new UserService() }",
+          "export const MARKER = 1",
+        ].join("\n") + "\n",
+      )
+    })
+    try {
+      // Default (no summary arg) — outlines are attached.
+      const byDefault = await searchCode({
+        query: "MARKER",
+        workspace: fx.root,
+      })
+      expect(byDefault.results.length).toBeGreaterThan(0)
+      const outlines = byDefault.outlines ?? []
+      const svc = outlines.find((o) => o.file.includes("svc.ts"))
+      expect(svc).toBeDefined()
+      const names = (svc?.outline ?? []).map((e) => e.name)
+      // Top-level symbols present...
+      expect(names).toContain("UserService")
+      expect(names).toContain("makeUser")
+      // ...and nested members too (robust, full-tree outline).
+      expect(names).toContain("getUser")
+      // The method is marked deeper than its enclosing class.
+      const cls = (svc?.outline ?? []).find((e) => e.name === "UserService")
+      const method = (svc?.outline ?? []).find((e) => e.name === "getUser")
+      expect(method?.depth ?? 0).toBeGreaterThan(cls?.depth ?? 0)
+
+      // Opt out → outlines omitted entirely.
+      const optedOut = await searchCode({
+        query: "MARKER",
+        workspace: fx.root,
+        summary: false,
+      })
+      expect(optedOut.outlines).toBeUndefined()
+    } finally {
+      fx.cleanup()
+    }
+  })
+
+  test("dedupes files and caps the outline count at 10", async () => {
+    const fx = makeFixture((root) => {
+      for (let i = 0; i < 12; i++) {
+        writeFileSync(
+          path.join(root, `f${i}.ts`),
+          `export function fn${i}() { return TOKEN }\nexport const TOKEN = ${i}\n`,
+        )
+      }
+    })
+    try {
+      const r = await searchCode({
+        query: "TOKEN",
+        workspace: fx.root,
+        mode: "literal", // document order, no shoulder prune → all 12 files
+        summary: true,
+        limit: 200,
+      })
+      const outlines = r.outlines ?? []
+      expect(outlines.length).toBeLessThanOrEqual(10)
+      const files = new Set(outlines.map((o) => o.file))
+      expect(files.size).toBe(outlines.length) // deduped
+    } finally {
+      fx.cleanup()
+    }
+  })
+})
+
+// ============================================================
+// Floor guarantee: ranked never drops a match grep would return
+// ============================================================
+
+describe("searchCode — floor guarantee (ranked ⊇ grep)", () => {
+  // "ab" substring-matches `ab`, `grab`, `fabric`, `label` — but BM25F
+  // tokenizes grab/fabric/label away (they score 0), so the precision
+  // shoulder cut drops them. complete:true must return them.
+  const AB_LINES =
+    [
+      "const ab = 1",
+      "const grab = 2",
+      'const material = "fabric"',
+      "function label() { return 0 }",
+    ].join("\n") + "\n"
+
+  test("complete:true ranked contains every match literal (raw ripgrep) finds", async () => {
+    const fx = makeFixture((root) => {
+      writeFileSync(path.join(root, "f.ts"), AB_LINES)
+    })
+    try {
+      const ranked = await searchCode({
+        query: "ab",
+        workspace: fx.root,
+        mode: "ranked",
+        complete: true,
+        summary: false,
+      })
+      const literal = await searchCode({
+        query: "ab",
+        workspace: fx.root,
+        mode: "literal",
+        summary: false,
+      })
+      const rankedKeys = new Set(
+        ranked.results.map((h) => `${h.file}:${h.line}`),
+      )
+      const literalKeys = new Set(
+        literal.results.map((h) => `${h.file}:${h.line}`),
+      )
+      // Raw ripgrep finds all four lines.
+      expect(literalKeys.size).toBeGreaterThanOrEqual(4)
+      // FLOOR: complete:true ranked contains every lexical match.
+      for (const k of literalKeys) {
+        expect(rankedKeys.has(k)).toBe(true)
+      }
+    } finally {
+      fx.cleanup()
+    }
+  })
+
+  test("default ranked prunes low-relevance matches but never silently — notice points at complete:true", async () => {
+    const fx = makeFixture((root) => {
+      writeFileSync(path.join(root, "f.ts"), AB_LINES)
+    })
+    try {
+      const ranked = await searchCode({
+        query: "ab",
+        workspace: fx.root,
+        mode: "ranked",
+        summary: false,
+      })
+      const literal = await searchCode({
+        query: "ab",
+        workspace: fx.root,
+        mode: "literal",
+        summary: false,
+      })
+      // Default hides the score-0 matches → fewer than the raw set...
+      expect(ranked.results.length).toBeLessThan(literal.results.length)
+      // ...but the notice tells the model how to get them all.
+      expect(ranked.notice ?? "").toMatch(/complete:true/)
+    } finally {
+      fx.cleanup()
+    }
+  })
+
+  test("role:'definition' only on AST-confirmed definitions; usages untagged", async () => {
+    const fx = makeFixture((root) => {
+      writeFileSync(
+        path.join(root, "m.ts"),
+        [
+          "export function processData() { return 1 }",
+          "const a = processData()",
+          "const b = processData()",
+        ].join("\n") + "\n",
+      )
+    })
+    try {
+      const r = await searchCode({
+        query: "processData",
+        workspace: fx.root,
+        mode: "ranked",
+        summary: false,
+      })
+      const defHit = r.results.find((h) => h.line === 1)
+      const usageHit = r.results.find((h) => h.line === 2)
+      expect(defHit?.role).toBe("definition")
+      // Absence of the tag is NOT a "usage" claim — usages are simply
+      // untagged.
+      expect(usageHit?.role).toBeUndefined()
+    } finally {
+      fx.cleanup()
+    }
   })
 })
