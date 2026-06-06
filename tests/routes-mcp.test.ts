@@ -90,6 +90,38 @@ async function rpc(body: unknown, opts: { auth?: string; host?: string } = {}) {
   return { status: res.status, json: await res.json() as Record<string, unknown> }
 }
 
+/**
+ * Build a request against a SCOPED `/mcp/<group>` endpoint. The unscoped
+ * `buildReq`/`rpc` helpers hit `/` (scope "all"); these target the
+ * path-scoped routes the split introduced so a single group's tool
+ * surface (and the per-group serverInfo.name / scope reject) can be
+ * exercised.
+ */
+function buildScopedReq(
+  group: string,
+  body: unknown,
+  opts: { auth?: string; host?: string } = {},
+) {
+  return new Request(`http://${PROXY_HOST}/${group}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: opts.auth ?? AUTH_HEADER,
+      host: opts.host ?? PROXY_HOST,
+    },
+    body: JSON.stringify(body),
+  })
+}
+
+async function scopedRpc(
+  group: string,
+  body: unknown,
+  opts: { auth?: string; host?: string } = {},
+) {
+  const res = await mcpRoutes.request(buildScopedReq(group, body, opts))
+  return { status: res.status, json: await res.json() as Record<string, unknown> }
+}
+
 describe("/mcp auth + host", () => {
   test("rejects non-loopback Host header with 403", async () => {
     const res = await mcpRoutes.request(
@@ -149,7 +181,7 @@ describe("/mcp protocol methods", () => {
     expect(res.status).toBe(202)
   })
 
-  test("tools/list returns 4 personas + web_search + code_search + stand_in when all required models are in catalog", async () => {
+  test("tools/list returns 5 personas + web + code + stand_in when all required models are in catalog", async () => {
     const { status, json } = await rpc({
       jsonrpc: "2.0",
       id: 2,
@@ -160,13 +192,14 @@ describe("/mcp protocol methods", () => {
       tools: Array<{ name: string; description: string; inputSchema: unknown }>
     }
     expect(result.tools.map((t) => t.name).sort()).toEqual([
-      "code_search",
+      "code",
       "codex_critic",
       "codex_reviewer",
       "gemini_critic",
+      "gemini_reviewer",
       "opus_critic",
       "stand_in",
-      "web_search",
+      "web",
     ])
     for (const t of result.tools) {
       expect(t.description.length).toBeGreaterThan(20)
@@ -174,7 +207,7 @@ describe("/mcp protocol methods", () => {
     }
   })
 
-  test("tools/list omits gemini_critic AND stand_in when no gemini-3.x-pro in catalog (web_search + code_search still present)", async () => {
+  test("tools/list omits gemini_critic AND stand_in when no gemini-3.x-pro in catalog (web + code still present)", async () => {
     state.models = {
       object: "list",
       data: baseModels.data.filter((m) => !m.id.startsWith("gemini")),
@@ -186,15 +219,15 @@ describe("/mcp protocol methods", () => {
     })
     const result = json.result as { tools: Array<{ name: string }> }
     expect(result.tools.map((t) => t.name).sort()).toEqual([
-      "code_search",
+      "code",
       "codex_critic",
       "codex_reviewer",
       "opus_critic",
-      "web_search",
+      "web",
     ])
   })
 
-  test("tools/list web_search entry has {query} input schema (no prompt/effort)", async () => {
+  test("tools/list web entry has {query} input schema (no prompt/effort)", async () => {
     const { json } = await rpc({
       jsonrpc: "2.0",
       id: 2,
@@ -203,7 +236,7 @@ describe("/mcp protocol methods", () => {
     const result = json.result as {
       tools: Array<{ name: string; inputSchema: Record<string, unknown> }>
     }
-    const entry = result.tools.find((t) => t.name === "web_search")
+    const entry = result.tools.find((t) => t.name === "web")
     expect(entry).toBeDefined()
     const schema = entry!.inputSchema as {
       type: string
@@ -398,6 +431,187 @@ describe("/mcp protocol methods", () => {
     )
     // Notifications return 202 with empty body per JSON-RPC 2.0
     expect(res.status).toBe(202)
+  })
+})
+
+describe("/mcp scoped endpoints (/mcp/:group)", () => {
+  test("POST /mcp/search tools/list returns ONLY the search group's tools (code + web), no personas or browser", async () => {
+    const { status, json } = await scopedRpc("search", {
+      jsonrpc: "2.0",
+      id: 800,
+      method: "tools/list",
+    })
+    expect(status).toBe(200)
+    const result = json.result as { tools: Array<{ name: string }> }
+    const names = result.tools.map((t) => t.name).sort()
+    // Scoped to `search`: exactly `code` + `web`.
+    expect(names).toEqual(["code", "web"])
+    // Personas live in the `peers` group — must NOT leak onto /mcp/search.
+    expect(names).not.toContain("codex_critic")
+    expect(names).not.toContain("opus_critic")
+    expect(names).not.toContain("gemini_critic")
+    // stand_in is the `decide` group; browser tools the `browser` group.
+    expect(names).not.toContain("stand_in")
+    expect(names).not.toContain("navigate")
+  })
+
+  test("POST /mcp/peers tools/list returns the persona tools, not search/decide tools", async () => {
+    const { status, json } = await scopedRpc("peers", {
+      jsonrpc: "2.0",
+      id: 801,
+      method: "tools/list",
+    })
+    expect(status).toBe(200)
+    const names = (json.result as { tools: Array<{ name: string }> }).tools
+      .map((t) => t.name)
+      .sort()
+    // Personas present (4 read personas with gemini in the base catalog).
+    expect(names).toContain("codex_critic")
+    expect(names).toContain("codex_reviewer")
+    expect(names).toContain("gemini_critic")
+    expect(names).toContain("opus_critic")
+    // Other groups' tools absent.
+    expect(names).not.toContain("code")
+    expect(names).not.toContain("web")
+    expect(names).not.toContain("stand_in")
+  })
+
+  test("calling a persona on /mcp/search returns -32601 (tool not in this group)", async () => {
+    // The scope reject mirrors an unknown-tool rejection: codex_critic is a
+    // `peers`-group tool, so dispatching it on the `search` endpoint must
+    // fail with method-not-found, NOT route to the persona.
+    const sentinel = mock(async () => {
+      throw new Error("upstream MUST NOT be called for a cross-group tool")
+    })
+    globalThis.fetch = sentinel as unknown as typeof globalThis.fetch
+    const { status, json } = await scopedRpc("search", {
+      jsonrpc: "2.0",
+      id: 802,
+      method: "tools/call",
+      params: { name: "codex_critic", arguments: { prompt: "x" } },
+    })
+    expect(status).toBe(200)
+    const err = json.error as { code: number; message: string }
+    expect(err.code).toBe(-32601)
+    expect(err.message).toMatch(/unknown tool/i)
+    expect(sentinel).not.toHaveBeenCalled()
+  })
+
+  test("calling the search-group `web` tool on /mcp/search dispatches normally (in-group)", async () => {
+    // Positive control: a tool that DOES belong to the scoped group routes
+    // through to its handler. Mocks the Copilot /mcp upstream the web tool
+    // relays to (initialize → notifications/initialized → tools/call SSE).
+    globalThis.fetch = mock(async (_url: unknown, init?: { method?: string; body?: string }) => {
+      const method = init?.method ?? "GET"
+      if (method === "DELETE") return new Response(null, { status: 204 })
+      let body: { method?: string; id?: number } = {}
+      try {
+        body = JSON.parse(init?.body ?? "{}") as typeof body
+      } catch {
+        // ignore
+      }
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { protocolVersion: "2024-11-05", capabilities: {} },
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+              "mcp-session-id": "test-sid",
+            },
+          },
+        )
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 202 })
+      }
+      // tools/call → SSE result envelope
+      const inner = { text: { value: "in-group ok", annotations: null } }
+      return new Response(
+        `event: message\ndata: ${JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { content: [{ type: "text", text: JSON.stringify(inner) }] },
+        })}\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      )
+    }) as unknown as typeof globalThis.fetch
+
+    const { status, json } = await scopedRpc("search", {
+      jsonrpc: "2.0",
+      id: 803,
+      method: "tools/call",
+      params: { name: "web", arguments: { query: "hi" } },
+    })
+    expect(status).toBe(200)
+    const result = json.result as { content: Array<{ text: string }>; isError?: boolean }
+    expect(result.isError).toBeUndefined()
+    expect(result.content[0].text).toContain("in-group ok")
+  })
+
+  test("POST /mcp/bogus (unknown group) returns 404 with a JSON-RPC -32601 envelope and id:null", async () => {
+    const res = await mcpRoutes.request(
+      buildScopedReq("bogus", {
+        jsonrpc: "2.0",
+        id: 804,
+        method: "tools/list",
+      }),
+    )
+    expect(res.status).toBe(404)
+    const json = (await res.json()) as {
+      jsonrpc: string
+      id: unknown
+      error: { code: number; message: string }
+    }
+    expect(json.jsonrpc).toBe("2.0")
+    expect(json.id).toBeNull()
+    expect(json.error.code).toBe(-32601)
+    expect(json.error.message).toMatch(/unknown mcp group/i)
+  })
+
+  test("initialize serverInfo.name is scope-specific: /mcp/search → github-router-search", async () => {
+    const { status, json } = await scopedRpc("search", {
+      jsonrpc: "2.0",
+      id: 805,
+      method: "initialize",
+    })
+    expect(status).toBe(200)
+    const result = json.result as { serverInfo: { name: string } }
+    expect(result.serverInfo.name).toBe("github-router-search")
+  })
+
+  test("initialize serverInfo.name on the unscoped / union stays github-router-peers", async () => {
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 806,
+      method: "initialize",
+    })
+    const result = json.result as { serverInfo: { name: string } }
+    expect(result.serverInfo.name).toBe("github-router-peers")
+  })
+
+  test("unscoped / tools/list returns the FULL union across groups (personas + code + web + stand_in)", async () => {
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 807,
+      method: "tools/list",
+    })
+    expect(status).toBe(200)
+    const names = (json.result as { tools: Array<{ name: string }> }).tools.map(
+      (t) => t.name,
+    )
+    // Personas (peers group).
+    expect(names).toContain("codex_critic")
+    expect(names).toContain("opus_critic")
+    // search group.
+    expect(names).toContain("code")
+    expect(names).toContain("web")
+    // decide group (gpt-5.5 + opus-4-7 + gemini present in base catalog).
+    expect(names).toContain("stand_in")
   })
 })
 
@@ -1173,7 +1387,7 @@ describe("/mcp stand_in tool", () => {
     // requiresGeminiCatalog). Verify by presence:
     expect(names).toContain("codex_critic")
     expect(names).toContain("opus_critic")
-    expect(names).toContain("web_search")
+    expect(names).toContain("web")
   })
 })
 
@@ -1432,7 +1646,7 @@ describe("/mcp web_search tool", () => {
       jsonrpc: "2.0",
       id: 600,
       method: "tools/call",
-      params: { name: "web_search", arguments: { query: "Hono latest version" } },
+      params: { name: "web", arguments: { query: "Hono latest version" } },
     })
     expect(status).toBe(200)
     expect(captured.tcCalled).toBe(true)
@@ -1462,7 +1676,7 @@ describe("/mcp web_search tool", () => {
       jsonrpc: "2.0",
       id: 601,
       method: "tools/call",
-      params: { name: "web_search", arguments: { query: "obscure niche query" } },
+      params: { name: "web", arguments: { query: "obscure niche query" } },
     })
     const result = json.result as {
       content: Array<{ type: string; text: string }>
@@ -1502,7 +1716,7 @@ describe("/mcp web_search tool", () => {
       jsonrpc: "2.0",
       id: 602,
       method: "tools/call",
-      params: { name: "web_search", arguments: { query: "x" } },
+      params: { name: "web", arguments: { query: "x" } },
     })
     const result = json.result as { content: Array<{ text: string }> }
     expect(result.content[0].text).toContain("Real source")
@@ -1518,7 +1732,7 @@ describe("/mcp web_search tool", () => {
       jsonrpc: "2.0",
       id: 603,
       method: "tools/call",
-      params: { name: "web_search", arguments: {} },
+      params: { name: "web", arguments: {} },
     })
     expect(status).toBe(200)
     const result = json.result as {
@@ -1534,7 +1748,7 @@ describe("/mcp web_search tool", () => {
       jsonrpc: "2.0",
       id: 604,
       method: "tools/call",
-      params: { name: "web_search", arguments: { query: 42 } },
+      params: { name: "web", arguments: { query: 42 } },
     })
     const result = json.result as {
       content: Array<{ text: string }>
@@ -1550,7 +1764,7 @@ describe("/mcp web_search tool", () => {
       jsonrpc: "2.0",
       id: 605,
       method: "tools/call",
-      params: { name: "web_search", arguments: { query: "x" } },
+      params: { name: "web", arguments: { query: "x" } },
     })
     expect(status).toBe(200)
     const result = json.result as {
@@ -1607,7 +1821,7 @@ describe("/mcp web_search tool", () => {
       jsonrpc: "2.0",
       id: 606,
       method: "tools/call",
-      params: { name: "web_search", arguments: { query: "hold" } },
+      params: { name: "web", arguments: { query: "hold" } },
     })
     // Brief tick so the call increments the in-flight counter.
     await new Promise((r) => setTimeout(r, 10))
@@ -1656,7 +1870,7 @@ describe("/mcp web_search tool", () => {
           jsonrpc: "2.0",
           id: 607,
           method: "tools/call",
-          params: { name: "web_search", arguments: { query: oversize } },
+          params: { name: "web", arguments: { query: oversize } },
         }),
       }),
     )
@@ -1672,7 +1886,7 @@ describe("/mcp web_search tool", () => {
 // =============================================================================
 // The gate has two arms (both must hold for the tools to appear in tools/list
 // AND for tools/call to dispatch):
-//   1. state.models?.data contains `gemini-3.5-flash` with
+//   1. state.models?.data contains `gemini-3.1-pro-preview` with
 //      capabilities.supports.tool_calls === true
 //   2. process.env.GH_ROUTER_DISABLE_WORKER_TOOLS !== "1"
 // The tests below exercise each arm independently plus the full mocked-call
@@ -1751,10 +1965,13 @@ function workerSseResponse(
 }
 
 describe("/mcp worker_* tools — registration + gating", () => {
-  test("tools/list includes worker_explore + worker_implement when gemini-3.5-flash is present with tool_calls", async () => {
+  test("tools/list includes worker_explore + worker_implement when gemini-3.1-pro-preview is present with tool_calls", async () => {
     state.models = {
       object: "list",
-      data: [...baseModels.data, fakeWorkerModel("gemini-3.5-flash")],
+      data: [
+        ...baseModels.data.filter((m) => m.id !== "gemini-3.1-pro-preview"),
+        fakeWorkerModel("gemini-3.1-pro-preview"),
+      ],
     }
     const { status, json } = await rpc({
       jsonrpc: "2.0",
@@ -1764,8 +1981,8 @@ describe("/mcp worker_* tools — registration + gating", () => {
     expect(status).toBe(200)
     const result = json.result as { tools: Array<{ name: string }> }
     const names = result.tools.map((t) => t.name)
-    expect(names).toContain("worker_explore")
-    expect(names).toContain("worker_implement")
+    expect(names).toContain("explore")
+    expect(names).toContain("implement")
   })
 
   test("tools/list omits both worker tools when GH_ROUTER_DISABLE_WORKER_TOOLS=1 (even if model is present)", async () => {
@@ -1774,7 +1991,10 @@ describe("/mcp worker_* tools — registration + gating", () => {
     try {
       state.models = {
         object: "list",
-        data: [...baseModels.data, fakeWorkerModel("gemini-3.5-flash")],
+        data: [
+        ...baseModels.data.filter((m) => m.id !== "gemini-3.1-pro-preview"),
+        fakeWorkerModel("gemini-3.1-pro-preview"),
+      ],
       }
       const { json } = await rpc({
         jsonrpc: "2.0",
@@ -1784,16 +2004,19 @@ describe("/mcp worker_* tools — registration + gating", () => {
       const names = (json.result as { tools: Array<{ name: string }> }).tools.map(
         (t) => t.name,
       )
-      expect(names).not.toContain("worker_explore")
-      expect(names).not.toContain("worker_implement")
+      expect(names).not.toContain("explore")
+      expect(names).not.toContain("implement")
     } finally {
       if (prev === undefined) delete process.env.GH_ROUTER_DISABLE_WORKER_TOOLS
       else process.env.GH_ROUTER_DISABLE_WORKER_TOOLS = prev
     }
   })
 
-  test("tools/list omits both worker tools when gemini-3.5-flash is absent from catalog", async () => {
-    // baseModels already has NO gemini-3.5-flash — just confirm.
+  test("tools/list omits both worker tools when gemini-3.1-pro-preview is absent from catalog", async () => {
+    state.models = {
+      object: "list",
+      data: baseModels.data.filter((m) => m.id !== "gemini-3.1-pro-preview"),
+    }
     const { json } = await rpc({
       jsonrpc: "2.0",
       id: 702,
@@ -1802,16 +2025,16 @@ describe("/mcp worker_* tools — registration + gating", () => {
     const names = (json.result as { tools: Array<{ name: string }> }).tools.map(
       (t) => t.name,
     )
-    expect(names).not.toContain("worker_explore")
-    expect(names).not.toContain("worker_implement")
+    expect(names).not.toContain("explore")
+    expect(names).not.toContain("implement")
   })
 
-  test("tools/list omits both when gemini-3.5-flash is present WITHOUT tool_calls support", async () => {
+  test("tools/list omits both when gemini-3.1-pro-preview is present WITHOUT tool_calls support", async () => {
     state.models = {
       object: "list",
       data: [
-        ...baseModels.data,
-        fakeWorkerModel("gemini-3.5-flash", { tool_calls: false }),
+        ...baseModels.data.filter((m) => m.id !== "gemini-3.1-pro-preview"),
+        fakeWorkerModel("gemini-3.1-pro-preview", { tool_calls: false }),
       ],
     }
     const { json } = await rpc({
@@ -1822,12 +2045,12 @@ describe("/mcp worker_* tools — registration + gating", () => {
     const names = (json.result as { tools: Array<{ name: string }> }).tools.map(
       (t) => t.name,
     )
-    expect(names).not.toContain("worker_explore")
-    expect(names).not.toContain("worker_implement")
+    expect(names).not.toContain("explore")
+    expect(names).not.toContain("implement")
   })
 
   test("defense-in-depth: tools/call for worker_explore returns method-not-found when gate fails (even if client bypasses tools/list)", async () => {
-    // No gemini-3.5-flash in catalog → gate fails. A naive client could
+    // No gemini-3.1-pro-preview in catalog → gate fails. A naive client could
     // skip tools/list and hard-code the name; the call-time gate must
     // reject identically to an unknown tool (-32601), keeping the gated
     // surface functionally invisible.
@@ -1835,7 +2058,7 @@ describe("/mcp worker_* tools — registration + gating", () => {
       jsonrpc: "2.0",
       id: 704,
       method: "tools/call",
-      params: { name: "worker_explore", arguments: { prompt: "hi" } },
+      params: { name: "explore", arguments: { prompt: "hi" } },
     })
     expect(status).toBe(200)
     const err = (json as { error?: { code: number; message: string } }).error
@@ -1849,8 +2072,8 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
     state.models = {
       object: "list",
       data: [
-        ...baseModels.data,
-        fakeWorkerModel("gemini-3.5-flash", {
+        ...baseModels.data.filter((m) => m.id !== "gemini-3.1-pro-preview"),
+        fakeWorkerModel("gemini-3.1-pro-preview", {
           reasoning_effort: ["low", "medium", "high"],
         }),
       ],
@@ -1864,7 +2087,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
       id: 710,
       method: "tools/call",
       params: {
-        name: "worker_explore",
+        name: "explore",
         arguments: { prompt: "what does foo do?" },
       },
     })
@@ -1884,7 +2107,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
       id: 711,
       method: "tools/call",
       params: {
-        name: "worker_implement",
+        name: "implement",
         arguments: { prompt: "add a comment to README" },
       },
     })
@@ -1906,7 +2129,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
       id: 712,
       method: "tools/call",
       params: {
-        name: "worker_implement",
+        name: "implement",
         arguments: {
           prompt: "fix the typo",
           worktree: true,
@@ -1931,7 +2154,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
       id: 720,
       method: "tools/call",
       params: {
-        name: "worker_explore",
+        name: "explore",
         arguments: {
           prompt: "investigate something",
           workspace: process.cwd(),
@@ -1954,7 +2177,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
       id: 721,
       method: "tools/call",
       params: {
-        name: "worker_explore",
+        name: "explore",
         arguments: {
           prompt: "anything",
           workspace: "./relative/path",
@@ -1976,7 +2199,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
       id: 722,
       method: "tools/call",
       params: {
-        name: "worker_implement",
+        name: "implement",
         arguments: {
           prompt: "do a thing",
           workspace: 42,
@@ -2007,7 +2230,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
         id: 713,
         method: "tools/call",
         params: {
-          name: "worker_explore",
+          name: "explore",
           arguments: { prompt: "anything" },
         },
       })
@@ -2025,7 +2248,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
   test("model:'nonexistent' returns isError listing the catalog's tool_call-capable model ids", async () => {
     // No fetch mock needed: resolveModelAndThinking fails BEFORE fetch.
     // The error message must enumerate the catalog candidates so the
-    // caller can correct without guessing — gemini-3.5-flash is the
+    // caller can correct without guessing — gemini-3.1-pro-preview is the
     // only tool_call-capable model in the test catalog, so it should
     // be the only one listed.
     const { json } = await rpc({
@@ -2033,7 +2256,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
       id: 714,
       method: "tools/call",
       params: {
-        name: "worker_explore",
+        name: "explore",
         arguments: { prompt: "anything", model: "nonexistent" },
       },
     })
@@ -2043,10 +2266,10 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
     }
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain("Unknown model: nonexistent")
-    expect(result.content[0].text).toContain("gemini-3.5-flash")
+    expect(result.content[0].text).toContain("gemini-3.1-pro-preview")
   })
 
-  test("thinking:'xhigh' against gemini-3.5-flash (max 'high') silently clamps to 'high' — no clamp notice in response text", async () => {
+  test("thinking:'xhigh' against gemini-3.1-pro-preview (max 'high') silently clamps to 'high' — no clamp notice in response text", async () => {
     let captured: Record<string, unknown> | undefined
     globalThis.fetch = workerSseResponse("silent-thinking-result", {
       capturePayload: (p) => {
@@ -2058,7 +2281,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
       id: 715,
       method: "tools/call",
       params: {
-        name: "worker_explore",
+        name: "explore",
         arguments: { prompt: "hi", thinking: "xhigh" },
       },
     })
@@ -2096,7 +2319,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
         id: 716,
         method: "tools/call",
         params: {
-          name: "worker_implement",
+          name: "implement",
           arguments: { prompt: "make a change", worktree: true },
         },
       })

@@ -1254,6 +1254,23 @@ describe("buildWorkerTools", () => {
     expect(names).not.toContain("advisor")
   })
 
+  test("review mode returns the SAME 6 read-only tools as explore (no write tools)", () => {
+    const tools = buildWorkerTools({
+      mode: "review",
+      workspace: realpathSync.native(os.tmpdir()),
+    })
+    expect(tools.length).toBe(6)
+    const names = tools.map((t) => t.name).sort()
+    expect(names).toEqual(
+      ["code_search", "fetch_url", "glob", "grep", "read", "web_search"].sort(),
+    )
+    // review is read-only — the reviewer framing lives in the system prompt,
+    // not the toolset, so the write tools must be absent.
+    for (const w of ["edit", "write", "bash", "codex_review"]) {
+      expect(names).not.toContain(w)
+    }
+  })
+
   test("implement mode returns 10 tools (explore + edit/write/bash + codex_review)", () => {
     const tools = buildWorkerTools({
       mode: "implement",

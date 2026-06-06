@@ -289,7 +289,7 @@ function mockUpstreamMcp(
 
 describe("MCP SSE cancel — slot + heartbeat leak regression", () => {
   test(
-    "consumer cancel mid web_search frees inflight slot within 500ms (was: leaked for full upstream wall time)",
+    "consumer cancel mid web search frees inflight slot within 500ms (was: leaked for full upstream wall time)",
     async () => {
       const tracker: UpstreamTracker = {
         tcStarted: false,
@@ -303,8 +303,9 @@ describe("MCP SSE cancel — slot + heartbeat leak regression", () => {
       // Establish baseline.
       expect(__getInFlightForTests()).toBe(0)
 
-      // Hit /mcp tools/call for web_search with SSE Accept so the
-      // handleToolsCallSSE path runs. AbortController on the fetch
+      // Hit /mcp tools/call for the `web` tool (the search MCP's
+      // web-search entry; renamed from `web_search` in the five-server
+      // split) with SSE Accept so the handleToolsCallSSE path runs. AbortController on the fetch
       // request is the most reliable way to trigger the server-side
       // ReadableStream.cancel() callback under Bun.serve — bare
       // reader.cancel() can fail to propagate through the HTTP
@@ -316,7 +317,7 @@ describe("MCP SSE cancel — slot + heartbeat leak regression", () => {
         id: 9001,
         method: "tools/call",
         params: {
-          name: "web_search",
+          name: "web",
           arguments: { query: "test query" },
         },
       })
@@ -459,7 +460,7 @@ describe("MCP SSE cancel — slot + heartbeat leak regression", () => {
           id: 9002,
           method: "tools/call",
           params: {
-            name: "web_search",
+            name: "web",
             arguments: { query: "another query" },
           },
         })

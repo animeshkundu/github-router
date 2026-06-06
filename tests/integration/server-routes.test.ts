@@ -715,3 +715,141 @@ test("messages stream mid-stream upstream error appends event:error to wire byte
   expect(body).toContain('"type":"api_error"')
   expect(body).toContain("terminated")
 })
+
+// --- /mcp scoped + union routing (five-server split) ---
+//
+// The proxy mounts the MCP surface at `/mcp` (union — full tool surface)
+// and `/mcp/<group>` (scoped — only that group's tools). The `claude`
+// subcommand registers one mcpServers entry per group pointing at its
+// scoped endpoint so the model namespaces tools as `mcp__<group>__<tool>`.
+// These tests pin the routing contract through the full server: the
+// scoped endpoint filters by group, the union exposes everything, and an
+// unknown group is a routing-level 404 (-32601) before auth.
+
+const MCP_NONCE = "0123456789abcdef".repeat(4)
+const MCP_HOST = "127.0.0.1:8787"
+
+async function mcpListNames(
+  path: string,
+): Promise<{ status: number; names?: Array<string>; error?: { code: number; message: string } }> {
+  const res = await server.request(path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${MCP_NONCE}`,
+      host: MCP_HOST,
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+  })
+  const json = (await res.json()) as {
+    result?: { tools: Array<{ name: string }> }
+    error?: { code: number; message: string }
+  }
+  return {
+    status: res.status,
+    names: json.result?.tools.map((t) => t.name),
+    error: json.error,
+  }
+}
+
+test("mcp scoped /mcp/search exposes only the search group's tools (code + web)", async () => {
+  resetState()
+  state.peerMcpNonce = MCP_NONCE
+  // Pin worker / browser / stand_in gates off so the search group is the
+  // deterministic {code, web} pair regardless of the host catalog.
+  const savedDisableWorker = process.env.GH_ROUTER_DISABLE_WORKER_TOOLS
+  process.env.GH_ROUTER_DISABLE_WORKER_TOOLS = "1"
+  try {
+    const { status, names } = await mcpListNames("/mcp/search")
+    expect(status).toBe(200)
+    expect([...(names ?? [])].sort()).toEqual(["code", "web"])
+  } finally {
+    state.peerMcpNonce = undefined
+    if (savedDisableWorker === undefined) delete process.env.GH_ROUTER_DISABLE_WORKER_TOOLS
+    else process.env.GH_ROUTER_DISABLE_WORKER_TOOLS = savedDisableWorker
+  }
+})
+
+test("mcp scoped /mcp/peers exposes the persona critics, not the search tools", async () => {
+  resetState()
+  state.peerMcpNonce = MCP_NONCE
+  try {
+    const { status, names } = await mcpListNames("/mcp/peers")
+    expect(status).toBe(200)
+    // opus_critic is always registered; codex_critic + codex_reviewer too.
+    // gemini_critic only appears when a gemini-3.x-pro model is in the
+    // catalog (it isn't in this test's single-model state), so we don't
+    // pin it. The search-group tools must NOT leak onto the peers scope.
+    expect(names).toContain("codex_critic")
+    expect(names).toContain("codex_reviewer")
+    expect(names).toContain("opus_critic")
+    expect(names).not.toContain("code")
+    expect(names).not.toContain("web")
+  } finally {
+    state.peerMcpNonce = undefined
+  }
+})
+
+test("mcp union /mcp exposes both peers and search tools together", async () => {
+  resetState()
+  state.peerMcpNonce = MCP_NONCE
+  const savedDisableWorker = process.env.GH_ROUTER_DISABLE_WORKER_TOOLS
+  process.env.GH_ROUTER_DISABLE_WORKER_TOOLS = "1"
+  try {
+    const { status, names } = await mcpListNames("/mcp")
+    expect(status).toBe(200)
+    // The union carries every enabled group's tools on one surface.
+    expect(names).toContain("codex_critic")
+    expect(names).toContain("code")
+    expect(names).toContain("web")
+  } finally {
+    state.peerMcpNonce = undefined
+    if (savedDisableWorker === undefined) delete process.env.GH_ROUTER_DISABLE_WORKER_TOOLS
+    else process.env.GH_ROUTER_DISABLE_WORKER_TOOLS = savedDisableWorker
+  }
+})
+
+test("mcp unknown group → 404 with JSON-RPC -32601 (validated AFTER auth)", async () => {
+  resetState()
+  // Group validation runs AFTER the nonce auth check (so an unauthenticated
+  // probe can't enumerate valid vs. invalid groups). Supply a valid nonce so
+  // we reach the post-auth scope check and observe the 404.
+  state.peerMcpNonce = MCP_NONCE
+  try {
+    const res = await server.request("/mcp/bogus", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${MCP_NONCE}`,
+        host: MCP_HOST,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    })
+    expect(res.status).toBe(404)
+    const json = (await res.json()) as {
+      error?: { code: number; message: string }
+    }
+    expect(json.error?.code).toBe(-32601)
+    expect(json.error?.message).toMatch(/unknown MCP group "bogus"/)
+  } finally {
+    state.peerMcpNonce = undefined
+  }
+})
+
+test("mcp unknown group withOUT valid auth → auth failure, NOT a 404 oracle", async () => {
+  resetState()
+  // No nonce configured → checkAuth rejects. The response must be the SAME
+  // auth failure a valid group would give (no pre-auth group enumeration).
+  const res = await server.request("/mcp/bogus", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: "Bearer wrong-nonce",
+      host: MCP_HOST,
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+  })
+  // Whatever checkAuth returns for a bad nonce, it must NOT be the 404
+  // unknown-group response (which would leak that "bogus" is invalid).
+  expect(res.status).not.toBe(404)
+})

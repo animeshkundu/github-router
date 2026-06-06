@@ -32,7 +32,7 @@ import { createHash } from "node:crypto"
 import consola from "consola"
 
 export interface AuditCtx {
-  mode: "explore" | "implement"
+  mode: "explore" | "review" | "implement"
   tool: string
   /** Raw tool args object. Walked for known field names; never logged. */
   args: unknown

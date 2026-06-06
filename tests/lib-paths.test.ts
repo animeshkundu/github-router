@@ -1539,6 +1539,7 @@ test("ensureClaudeConfigMirror + injectPeerMcpIntoMirror: gate fields survive th
   const result = await injectPeerMcpIntoMirror("http://127.0.0.1:18787", {
     codexCli: false,
     geminiAvailable: true,
+    groupKeys: { peers: "peers", search: "search" },
     nonce: "0".repeat(64),
     codexHome: "/tmp/codex-test",
     claudeConfigDir: PATHS.CLAUDE_CONFIG_DIR,
@@ -1552,11 +1553,12 @@ test("ensureClaudeConfigMirror + injectPeerMcpIntoMirror: gate fields survive th
   expect(parsed.bypassPermissionsModeAccepted).toBe(true)
   expect(parsed.oauthAccount).toBeDefined()
   expect(parsed.oauthAccount.emailAddress).toBe("github-router@local")
-  // And the peer-MCP entry IS present (proves injectPeerMcpIntoMirror
+  // And the peer-MCP entries ARE present (proves injectPeerMcpIntoMirror
   // actually ran — guards against the integration test silently
   // becoming a no-op).
   expect(parsed.mcpServers).toBeDefined()
-  expect(parsed.mcpServers["gh-router-peers"]).toBeDefined()
+  expect(parsed.mcpServers["peers"]).toBeDefined()
+  expect(parsed.mcpServers["search"]).toBeDefined()
 })
 
 test("policyFor regression guard: agents/ MUST stay MIRRORED (sweep deletes inside it)", () => {

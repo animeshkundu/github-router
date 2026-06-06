@@ -589,7 +589,7 @@ describe("resolveModelAndThinking", () => {
   const baseModels: ModelsResponse = {
     object: "list",
     data: [
-      fakeModel("gemini-3.5-flash", {
+      fakeModel("gemini-3.1-pro-preview", {
         tool_calls: true,
         reasoning_effort: ["low", "medium", "high"],
       }),
@@ -620,7 +620,7 @@ describe("resolveModelAndThinking", () => {
     expect(r.ok).toBe(false)
     if (!r.ok) {
       expect(r.error).toContain("Unknown model: nonexistent")
-      expect(r.error).toContain("gemini-3.5-flash")
+      expect(r.error).toContain("gemini-3.1-pro-preview")
       expect(r.error).toContain("gpt-5.5")
       expect(r.error).toContain("gemini-2.5-pro")
       expect(r.error).not.toContain("embedding-model")
@@ -642,19 +642,19 @@ describe("resolveModelAndThinking", () => {
 
   test("happy path: thinking in allowlist passes through", () => {
     const r = resolveModelAndThinking({
-      model: "gemini-3.5-flash",
+      model: "gemini-3.1-pro-preview",
       thinking: "medium",
     })
     expect(r.ok).toBe(true)
     if (r.ok) {
-      expect(r.modelId).toBe("gemini-3.5-flash")
+      expect(r.modelId).toBe("gemini-3.1-pro-preview")
       expect(r.thinking).toBe("medium")
     }
   })
 
   test("clamps xhigh → high when allowed=[low,medium,high]", () => {
     const r = resolveModelAndThinking({
-      model: "gemini-3.5-flash",
+      model: "gemini-3.1-pro-preview",
       thinking: "xhigh",
     })
     expect(r.ok).toBe(true)
@@ -690,7 +690,7 @@ describe("resolveModelAndThinking", () => {
 
   test("thinking=off is always passed through unchanged", () => {
     const r = resolveModelAndThinking({
-      model: "gemini-3.5-flash",
+      model: "gemini-3.1-pro-preview",
       thinking: "off",
     })
     expect(r.ok).toBe(true)

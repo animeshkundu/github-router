@@ -11,13 +11,14 @@ import { runSelfUpdate } from "./lib/self-update"
 import {
   injectPeerMcpIntoMirror,
   resolveCodexCliBackend,
+  resolveGroupKeysFromMirror,
   writePeerMcpRuntimeFiles,
 } from "./lib/codex-mcp-config"
 import { enableFileLogging } from "./lib/file-log-reporter"
 import { getCodexVersion, launchChild } from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
 import { ensureClaudeConfigMirror, removeOwnClaudeConfigMirror } from "./lib/paths"
-import { buildPeerAwarenessSnippet } from "./lib/peer-mcp-personas"
+import { buildPeerAwarenessSnippet, type McpGroup } from "./lib/peer-mcp-personas"
 import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
@@ -26,6 +27,7 @@ import {
   pickClaudeDefault,
 } from "./lib/port"
 import {
+  browserToolsEnabled,
   standInToolEnabled,
   workerToolsEnabled,
 } from "./lib/mcp-capabilities"
@@ -361,9 +363,26 @@ export const claude = defineCommand({
           )
         }
 
+        // Which scoped MCP servers to register. `peers` + `search` are
+        // always on; `workers` / `decide` / `browser` only when their gate
+        // passes at launch (avoids registering a server whose tools would
+        // all be filtered out of tools/list). Resolve each group's
+        // `.claude.json` config key ONCE (bare, or `gh-router-<group>` on
+        // collision) and thread it into every channel — the mcpServers
+        // entries, the persona .md routing strings, and the awareness
+        // snippet — so a user-side `browser`/`search` MCP never silently
+        // hijacks or drops one of ours.
+        const enabledGroups: Array<McpGroup> = ["peers", "search"]
+        if (workerToolsEnabled()) enabledGroups.push("workers")
+        if (standInToolEnabled()) enabledGroups.push("decide")
+        if (browserToolsEnabled()) enabledGroups.push("browser")
+        const { keys: groupKeys, skipped: skippedGroups } =
+          await resolveGroupKeysFromMirror(enabledGroups)
+
         const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
           codexCli: backend === "cli",
           geminiAvailable,
+          groupKeys,
         })
         state.peerMcpNonce = runtime.nonce
         onShutdown = async (): Promise<void> => {
@@ -388,6 +407,7 @@ export const claude = defineCommand({
         const injected = await injectPeerMcpIntoMirror(serverUrl, {
           codexCli: backend === "cli",
           geminiAvailable,
+          groupKeys,
           nonce: runtime.nonce,
         })
 
@@ -418,9 +438,13 @@ export const claude = defineCommand({
         const subagentVisibility = injected.ok
           ? `subagent-visible (mirrored mcpServers: [${injected.serversAdded.join(", ")}])`
           : `subagent-INVISIBLE (collision on user-side mcpServers: [${injected.conflictingServers.join(", ")}]; parent-only via --mcp-config)`
+        const skippedNote =
+          skippedGroups.length > 0
+            ? ` WARNING: groups [${skippedGroups.join(", ")}] skipped — both the bare and \`gh-router-<group>\` keys collide with your own mcpServers; those tools are unavailable this session (rename the user-side server to re-enable).`
+            : ""
         process.stderr.write(
           `Peer MCP wired (backend=${backend}, personas=[${personaNames}], `
-            + `subagent .md files=${runtime.agentMdPaths.length}, ${subagentVisibility}).\n`,
+            + `subagent .md files=${runtime.agentMdPaths.length}, ${subagentVisibility}).${skippedNote}\n`,
         )
 
         // Awareness snippet: append a short, descriptive system-prompt
@@ -452,6 +476,7 @@ export const claude = defineCommand({
           standInAvailable: standInToolEnabled(),
           browseAvailable: state.browseEnabled,
           powerBrowseAvailable: state.powerBrowseEnabled,
+          groupKeys,
         })
         extraArgs.push("--append-system-prompt", peerSnippet)
         // Ordering invariant: this MUST run AFTER ensureClaudeConfigMirror()

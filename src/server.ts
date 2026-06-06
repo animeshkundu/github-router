@@ -12,6 +12,13 @@ import { responsesRoutes } from "./routes/responses/route"
 import { searchRoutes } from "./routes/search/route"
 import { tokenRoute } from "./routes/token/route"
 import { usageRoute } from "./routes/usage/route"
+import { assertMcpToolSurfaceConsistent } from "./lib/peer-mcp-personas"
+
+// Fail-fast invariant (runs once at module load for every proxy-serving
+// command): MCP tool names must be unique within each group AND across the
+// unscoped `/mcp` union, since `handleToolsCall` dispatches on the bare
+// tool name. A duplicate would silently shadow — throw loudly instead.
+assertMcpToolSurfaceConsistent()
 
 export const server = new Hono()
 

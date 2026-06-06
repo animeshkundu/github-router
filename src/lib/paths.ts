@@ -1428,7 +1428,7 @@ export async function sweepStalePeerAgentMdFiles(): Promise<void> {
  * new coordinator-style agent is added in `codex-mcp-config.ts`.
  */
 const PEER_AGENT_MD_FILENAME =
-  /^peer-(\d+)-[0-9a-f]{8}-(?:codex-critic|codex-reviewer|gemini-critic|codex-implementer|peer-review-coordinator)\.md$/
+  /^peer-(\d+)-[0-9a-f]{8}-(?:codex-critic|codex-reviewer|gemini-critic|gemini-reviewer|opus-critic|codex-implementer|peer-review-coordinator)\.md$/
 
 /**
  * Strict regex matching only per-launch claude-config mirror dirs this

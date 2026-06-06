@@ -65,7 +65,7 @@ export type ResolvedThinking =
  * standalone with no inbound dependency on sibling files.
  */
 export interface ResolvedModel {
-  /** Copilot catalog model id (e.g. "gemini-3.5-flash"). */
+  /** Copilot catalog model id (e.g. "gemini-3.1-pro-preview"). */
   modelId: string
   /** Effective (post-clamp) thinking level. "off" drops reasoning_effort. */
   thinking: ResolvedThinking

@@ -43,10 +43,13 @@ export interface WorkerAgentOpts {
   prompt: string
   /**
    * Tool surface:
-   *  - `"explore"`: read/glob/grep/code_search/web_search/fetch_url/peer_review/advisor
-   *  - `"implement"`: explore tools plus edit/write/bash.
+   *  - `"explore"`: read/glob/grep/code_search/web_search/fetch_url (read-only)
+   *  - `"review"`: identical read-only tool surface to `"explore"`, but the
+   *    system prompt frames the worker as a code reviewer that verifies
+   *    correctness against the actual code rather than summarizing.
+   *  - `"implement"`: explore tools plus edit/write/bash + codex_review.
    */
-  mode: "explore" | "implement"
+  mode: "explore" | "review" | "implement"
   /** Absolute path to the workspace (real, realpath-canonicalized). */
   workspace: string
   /**

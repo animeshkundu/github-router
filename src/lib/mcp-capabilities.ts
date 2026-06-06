@@ -14,6 +14,7 @@
  * a tool the live catalog doesn't expose).
  */
 
+import { hasSupportedBrowserInstalled } from "./browser-mcp/browser-detect"
 import { compressorAvailable } from "./browser-mcp/compressor"
 import { state } from "./state"
 import { DEFAULT_MODEL as WORKER_DEFAULT_MODEL } from "./worker-agent"
@@ -55,7 +56,7 @@ export function standInToolEnabled(): boolean {
  *
  * Returns true iff BOTH:
  *   1. Copilot's live catalog (`state.models?.data`) contains the
- *      worker's default model (`gemini-3.5-flash`) AND that entry
+ *      worker's default model (`gemini-3.1-pro-preview`) AND that entry
  *      advertises `capabilities.supports.tool_calls === true`. The
  *      worker loop is function-calling; a model that can't emit
  *      tool_calls is unusable, so dormant-register (omit from
@@ -122,4 +123,26 @@ export function browserCompoundToolsEnabled(): boolean {
  */
 export function browserPowerToolsEnabled(): boolean {
   return state.powerBrowseEnabled === true
+}
+
+/**
+ * Gate for the whole `browser` MCP server (the `--browse` opt-in surface).
+ *
+ * Returns true iff BOTH:
+ *   1. The operator opted in (`state.browseEnabled`, set by `--browse`, OR
+ *      `GH_ROUTER_ENABLE_BROWSE=1` read directly so non-`setupAndServe`
+ *      startup paths — tests, embedded use — can still flip the gate).
+ *   2. At least one Chromium-family browser is detected on disk
+ *      (`hasSupportedBrowserInstalled()`, cached for the proxy lifetime).
+ *
+ * Moved here from `handler.ts` so both the route handler (list-time +
+ * call-time gating) AND `claude.ts` (deciding whether to register the
+ * `browser` scoped MCP server at launch) share one predicate — registering
+ * a server whose tools would all be gated out produces an empty-server smell.
+ */
+export function browserToolsEnabled(): boolean {
+  const optedIn =
+    state.browseEnabled || process.env.GH_ROUTER_ENABLE_BROWSE === "1"
+  if (!optedIn) return false
+  return hasSupportedBrowserInstalled()
 }

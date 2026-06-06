@@ -10,7 +10,25 @@ import {
   buildAgentPrompt,
   personasFor,
   type PersonaSpec,
+  GROUP_META,
+  MCP_GROUPS,
+  type McpGroup,
 } from "./peer-mcp-personas"
+
+/**
+ * Resolved `mcpServers` config key per enabled group. Bare preferred key
+ * (`peers`/`search`/…) or the `gh-router-<group>` fallback on collision;
+ * a group absent from the map is either disabled (gate off at launch) or
+ * skipped because BOTH its bare AND prefixed keys collided with a user
+ * entry. See `resolveGroupKeysFromMirror`.
+ */
+export type ResolvedGroupKeys = Partial<Record<McpGroup, string>>
+
+/** The `peers` server is always enabled, so its resolved key always exists;
+ *  this convenience reads it with the bare-key fallback for safety. */
+function peersKeyOf(groupKeys: ResolvedGroupKeys): string {
+  return groupKeys.peers ?? GROUP_META.peers.preferredKey
+}
 
 export type CodexMcpBackend = "http" | "cli"
 
@@ -51,8 +69,12 @@ export function resolveCodexCliBackend(
 interface BuildOpts {
   /** Whether the codex-cli stdio server should be added. */
   codexCli: boolean
-  /** Whether gemini-3.1-pro-preview is in the live model catalog. */
+  /** Whether gemini-3.1-pro-preview is in the live model catalog. Gates both
+   *  gemini-critic and gemini-reviewer. */
   geminiAvailable: boolean
+  /** Resolved config key per enabled group — one `mcpServers` HTTP entry is
+   *  emitted per present key, pointing at its scoped `/mcp/<group>` URL. */
+  groupKeys: ResolvedGroupKeys
   /** Per-launch nonce for the HTTP /mcp Authorization header. */
   nonce: string
   /** Isolated CODEX_HOME for the stdio child (only used when codexCli). */
@@ -76,27 +98,33 @@ export interface PeerMcpConfig {
 }
 
 /**
- * Build the JSON payload for `claude --mcp-config <path>`.
+ * Build the JSON payload for `claude --mcp-config <path>` (and the same
+ * entries that get merged into the mirrored `.claude.json`).
  *
- * Always registers `gh-router-peers` (HTTP) — that's the home of all
- * read-only personas, and it's the only path Gemini can take. When
+ * Emits one HTTP `mcpServers` entry per enabled group present in
+ * `opts.groupKeys`, each pointing at its scoped `/mcp/<group>` endpoint
+ * under the resolved (bare or prefixed-fallback) config key. When
  * `codexCli` is true, also registers `codex-cli` (stdio) which spawns
- * `codex mcp-server` with the proxy's provider-config flags so codex
- * runs through our Copilot-routed billing path rather than its
- * default api.openai.com.
+ * `codex mcp-server` with the proxy's provider-config flags so codex runs
+ * through our Copilot-routed billing path rather than its default
+ * api.openai.com.
  */
 export function buildPeerMcpConfig(
   serverUrl: string,
   opts: BuildOpts,
 ): PeerMcpConfig {
-  const mcpServers: Record<string, HttpMcpEntry | StdioMcpEntry> = {
-    "gh-router-peers": {
+  const mcpServers: Record<string, HttpMcpEntry | StdioMcpEntry> = {}
+
+  for (const group of MCP_GROUPS) {
+    const key = opts.groupKeys[group]
+    if (!key) continue // group disabled at launch, or both keys collided
+    mcpServers[key] = {
       type: "http",
-      url: `${serverUrl}/mcp`,
+      url: `${serverUrl}/mcp/${GROUP_META[group].urlSuffix}`,
       headers: {
         Authorization: `Bearer ${opts.nonce}`,
       },
-    },
+    }
   }
 
   if (opts.codexCli) {
@@ -145,10 +173,12 @@ function buildCoordinatorAgent(opts: {
   // required. Order: codex-critic first (strongest reasoning, cross-lab),
   // opus-critic second (largest context window — 1M when available),
   // gemini-critic third (third-lab triangulation, formal reasoning, only
-  // when registered), codex-reviewer last (code-specialist, line-level).
+  // when registered), codex-reviewer + gemini-reviewer last (line-level code
+  // reviewers; both gemini personas gate on the gemini-3.x-pro catalog).
   const peers: Array<string> = ["codex-critic", "opus-critic"]
   if (opts.geminiAvailable) peers.push("gemini-critic")
   peers.push("codex-reviewer")
+  if (opts.geminiAvailable) peers.push("gemini-reviewer")
 
   const description =
     "Coordinates cross-lab adversarial review across codex-critic, opus-critic, gemini-critic, codex-reviewer. Use proactively before non-trivial plans and after non-trivial commits. Always pass artifacts verbatim — peers are fresh-context."
@@ -170,6 +200,7 @@ function buildCoordinatorAgent(opts: {
       + (opts.geminiAvailable ? " AND `gemini-critic` (third-lab triangulation, strong on formal reasoning) in parallel" : "")
       + ". codex-reviewer is the wrong tool for plans (it's a code-specialist, not an architecture critic).",
     "- **Concrete diff or single file** → fan out to `codex-reviewer` (gpt-5.3-codex, line-level code specialist, fastest at ~16s)"
+      + (opts.geminiAvailable ? " AND `gemini-reviewer` (gemini-3.1-pro, second-lab line-level review)" : "")
       + (opts.geminiAvailable ? " AND `gemini-critic` for cross-lab triangulation" : "")
       + ". For very small changes (<20 lines), one `codex-reviewer` call is enough.",
     "- **Large artifact** → the only peers that take a large artifact WHOLE are `codex-critic` (gpt-5.5, ≈922K-token input window) and `opus-critic` (Opus-4.7-1M, ≈936K-token input on enterprise catalogs; ≈168K otherwise). Route the full artifact to those for cross-lab coverage. `codex-reviewer` (≈272K) and `gemini-critic` (≈136K) have small windows — see Decomposition below: never summarize or downsize the request to squeeze a large artifact into a small-window peer.",
@@ -234,10 +265,11 @@ export function buildPeerAgentDefinitions(
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
   })
+  const peersKey = peersKeyOf(opts.groupKeys)
   for (const persona of personas) {
     out[persona.agentName] = {
       description: persona.description,
-      prompt: buildAgentPrompt(persona, { codexCli: opts.codexCli }),
+      prompt: buildAgentPrompt(persona, { codexCli: opts.codexCli, peersKey }),
     }
   }
   out["peer-review-coordinator"] = buildCoordinatorAgent({
@@ -265,6 +297,11 @@ export interface PeerMcpRuntimeFiles {
 interface WriteOpts {
   codexCli: boolean
   geminiAvailable: boolean
+  /** Resolved config keys per enabled group (from `resolveGroupKeysFromMirror`).
+   *  Threaded into both the --mcp-config payload and the persona .md routing
+   *  strings so every reference points at OUR server even after a collision
+   *  fallback. */
+  groupKeys: ResolvedGroupKeys
   /** Override for tests. Defaults to PATHS.CODEX_HOME. */
   codexHome?: string
   /** Override for tests. Defaults to PATHS.CLAUDE_RUNTIME_DIR. */
@@ -425,6 +462,10 @@ export type InjectPeerMcpResult =
 interface InjectOpts {
   codexCli: boolean
   geminiAvailable: boolean
+  /** Resolved config keys per enabled group (from `resolveGroupKeysFromMirror`).
+   *  Collision-free by construction, so the merge below never overwrites a
+   *  user entry. */
+  groupKeys: ResolvedGroupKeys
   /** Per-launch nonce — must match what writePeerMcpRuntimeFiles wrote
    *  so the proxy's /mcp Authorization check passes. */
   nonce: string
@@ -432,6 +473,74 @@ interface InjectOpts {
   codexHome?: string
   /** Override for tests. Defaults to PATHS.CLAUDE_CONFIG_DIR (per-launch). */
   claudeConfigDir?: string
+}
+
+/**
+ * Read just the `mcpServers` object from a mirrored `.claude.json` (or `{}`
+ * on missing / malformed). Used by `resolveGroupKeysFromMirror` to detect
+ * which of our bare group keys would collide with a user-side entry.
+ */
+async function readMcpServersSnapshot(
+  target: string,
+): Promise<Record<string, unknown>> {
+  try {
+    const raw = await fs.readFile(target, "utf8")
+    const parsed = JSON.parse(raw) as unknown
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const servers = (parsed as Record<string, unknown>).mcpServers
+      if (servers && typeof servers === "object" && !Array.isArray(servers)) {
+        return servers as Record<string, unknown>
+      }
+    }
+  } catch {
+    // Missing / unparsable → treat as no existing servers (a fresh mirror).
+  }
+  return {}
+}
+
+/**
+ * Resolve a config-entry key for each enabled group, defending against
+ * collisions with the user's own `mcpServers`. Prefer the bare key
+ * (`peers`/`search`/…); on collision walk the numbered fallback sequence
+ * `gh-router-<group>`, `gh-router-<group>-2`, `gh-router-<group>-3`, …
+ * until a free name is found. This NEVER skips and NEVER returns a name the
+ * user already owns: every enabled group is guaranteed a key WE control, so
+ * a capability is never silently dropped AND the model is never routed at
+ * the user's same-named server (the caller threads these resolved keys into
+ * both the `mcpServers` entries AND the persona `.md` routing strings). The
+ * `skipped` field is retained for API stability but is always empty now.
+ *
+ * Reads the mirror snapshot once; the caller passes the result to BOTH
+ * `writePeerMcpRuntimeFiles` and `injectPeerMcpIntoMirror`. The mirror is a
+ * per-launch dir written ONLY by us (after `ensureClaudeConfigMirror`
+ * snapshotted the user's config) and nothing mutates it between this read
+ * and `injectPeerMcpIntoMirror`'s write, so the two reads see identical
+ * state — no TOCTOU window, and the inject-side defensive conflict check
+ * never fires for these resolved keys.
+ */
+export async function resolveGroupKeysFromMirror(
+  enabledGroups: ReadonlyArray<McpGroup>,
+  claudeConfigDir?: string,
+): Promise<{ keys: ResolvedGroupKeys; skipped: Array<McpGroup> }> {
+  const dir = claudeConfigDir ?? PATHS.CLAUDE_CONFIG_DIR
+  const existing = await readMcpServersSnapshot(path.join(dir, ".claude.json"))
+  const keys: ResolvedGroupKeys = {}
+  for (const group of enabledGroups) {
+    const bare = GROUP_META[group].preferredKey
+    if (existing[bare] === undefined) {
+      keys[group] = bare
+      continue
+    }
+    // Bare key taken — walk the prefixed sequence until a free name.
+    let candidate = `gh-router-${group}`
+    let n = 1
+    while (existing[candidate] !== undefined) {
+      n += 1
+      candidate = `gh-router-${group}-${n}`
+    }
+    keys[group] = candidate
+  }
+  return { keys, skipped: [] }
 }
 
 /**
@@ -524,18 +633,20 @@ export async function injectPeerMcpIntoMirror(
   }
 
   // 3. Build our desired entries from the SAME builder used for
-  //    --mcp-config so the two channels never drift.
+  //    --mcp-config so the two channels never drift. Keys are pre-resolved
+  //    (collision-free) by `resolveGroupKeysFromMirror`.
   const peerConfig = buildPeerMcpConfig(serverUrl, {
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
+    groupKeys: opts.groupKeys,
     nonce: opts.nonce,
     codexHome: opts.codexHome ?? PATHS.CODEX_HOME,
   })
 
-  // 4. Refuse to overwrite any same-named user-side entry. This is the
-  //    explicit-branch / "no silent precedence" requirement from the
-  //    plan — log a warning, return ok:false, and let the caller fall
-  //    back to --mcp-config (parent-session-only).
+  // 4. Defensive: the resolved keys are collision-free by construction, so
+  //    this should never fire. If it somehow does (a racing mutation of the
+  //    mirror between resolution and now), refuse to overwrite the user's
+  //    entry and let the caller fall back to --mcp-config (parent-only).
   const conflicts: Array<string> = []
   for (const name of Object.keys(peerConfig.mcpServers)) {
     if (mcpServers[name] !== undefined) conflicts.push(name)
@@ -544,8 +655,8 @@ export async function injectPeerMcpIntoMirror(
     consola.warn(
       `injectPeerMcpIntoMirror: your ~/.claude/.claude.json already has `
         + `mcpServers entries named [${conflicts.join(", ")}]; refusing to `
-        + `overwrite. Subagents will not see the peer-MCP tools — only the `
-        + `parent session via --mcp-config fallback. To resolve, rename the `
+        + `overwrite. Subagents will not see those tools — only the parent `
+        + `session via --mcp-config fallback. To resolve, rename the `
         + `user-side server(s) (e.g. via \`claude mcp remove\`) and relaunch.`,
     )
     return {
@@ -615,12 +726,14 @@ export async function writePeerMcpRuntimeFiles(
   const mcpConfig = buildPeerMcpConfig(serverUrl, {
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
+    groupKeys: opts.groupKeys,
     nonce,
     codexHome,
   })
   const agents = buildPeerAgentDefinitions({
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
+    groupKeys: opts.groupKeys,
     nonce,
     codexHome,
   })
