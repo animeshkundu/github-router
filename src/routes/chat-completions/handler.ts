@@ -52,6 +52,34 @@ export async function handleCompletion(c: Context) {
 
   if (state.manualApprove) await awaitApproval()
 
+  // Fail-fast on Anthropic's hosted `web_fetch` tool (see messages/handler.ts
+  // for the full rationale: model-chosen URL mid-generation can't be
+  // pre-fulfilled, and Copilot has no web_fetch backend). Match ONLY the
+  // hosted-tool `type` slug, NEVER a function/tool name, so a legitimate custom
+  // function named "web_fetch" still passes. Reject before
+  // injectWebSearchIfNeeded so a mixed request doesn't run a side-effecting
+  // search before failing.
+  const hasHostedWebFetch = payload.tools?.some((t) => {
+    const type = (t as unknown as Record<string, unknown>).type
+    return typeof type === "string" && /^web_fetch_\d{8}$/.test(type)
+  })
+  if (hasHostedWebFetch) {
+    return c.json(
+      {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message:
+            "Anthropic's hosted `web_fetch` tool is not supported by github-router. "
+            + "Copilot has no web_fetch backend, and the fetch URL is chosen by the model "
+            + "mid-generation so it cannot be pre-fulfilled the way `web_search` is. "
+            + "Remove the `web_fetch_*` tool; `web_search` is supported.",
+        },
+      },
+      400,
+    )
+  }
+
   await injectWebSearchIfNeeded(payload)
 
   // Resolve model name (e.g. opus → opus-1m variant)

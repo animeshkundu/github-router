@@ -13,7 +13,7 @@ The canonical end-user setup is **Windows 11 + Claude Code (the CLI client) + a 
 - [`docs/peer-mcp-design.md`](docs/peer-mcp-design.md) — current architecture and phased migration plan for the peer-model MCP integration (codex_critic gpt-5.5, codex_reviewer gpt-5.3-codex, gemini_critic gemini-3.1-pro), plus the deployed-state section covering auto-invocation triggers, allowedEfforts, the latency-by-effort matrix, and the predictedTooLong cap. Read this before changing anything in `src/routes/mcp/`, `src/lib/peer-mcp-personas.ts`, or `src/lib/codex-mcp-config.ts`.
 - [`docs/research/peer-mcp-investigation.md`](docs/research/peer-mcp-investigation.md) — multi-stage adversarial-review log behind the design: GitHub-issue refs (#50289 etc.), peer-critic verdicts at each iteration, the 7-batch sweep that proved decomposition works, and the concurrency-cap investigation. Read this when you want to know *why* a particular Phase ordering or specific value (cap=8, retention=30min, partial-buffer cap=1MB) was chosen.
 - [`docs/publishing.md`](docs/publishing.md) — npm/Docker release flow (OIDC trusted publishing), upgrade procedure for a running proxy, and the `UPSTREAM_FETCH_TIMEOUT_MS` / `UPSTREAM_INACTIVITY_TIMEOUT_MS` tunables.
-- [`docs/beta-headers.md`](docs/beta-headers.md) — `anthropic-beta` allowlist (3 stealth vs 20 leverage prefixes), the `EXPLICITLY_STRIPPED_BETA_PREFIXES` deny-list, body-field strips (`budget`, `output_config.schema`, `betas`, `eager_input_streaming`), and the stealth-vs-leverage policy rationale.
+- [`docs/beta-headers.md`](docs/beta-headers.md) — `anthropic-beta` allowlist (3 stealth vs 20 leverage prefixes), the `EXPLICITLY_STRIPPED_BETA_PREFIXES` deny-list, body-field strips (`budget`, `output_config.schema`/`.format`, `betas`, `speed`, `diagnostics`, `eager_input_streaming`), and the stealth-vs-leverage policy rationale.
 - [`docs/claude-env-injection.md`](docs/claude-env-injection.md) — the five experimental `CLAUDE_CODE_*` env vars `github-router claude` auto-enables (presence-based guard), per-feature opt-out, and why `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` is intentionally NOT auto-enabled.
 - [`docs/unsupported-features.md`](docs/unsupported-features.md) — Files API 404, ADVISOR Phase I server-side wiring, `mcp_servers` fail-fast 400, Bridge/CCR strip, and other Anthropic surfaces with no Copilot equivalent.
 - [`docs/default-models.md`](docs/default-models.md) — `claude` → `claude-opus-4-8` (Anthropic dashed slug, NOT the Copilot dotted slug — `/model` UI registry mismatch), `codex` → `gpt-5.5`, fallback chains, the dual-signal `[1m]` detector (sibling-slug regex OR base-slug `max_context_window_tokens`), and the `ANTHROPIC_SMALL_FAST_MODEL` default.
@@ -79,7 +79,7 @@ See [`docs/publishing.md`](docs/publishing.md) for npm/Docker release flow, the 
 
 ### Beta header filtering & stealth-vs-leverage
 
-`github-router claude` defaults to **leverage** (extended-betas ON; 20 prefixes forwarded, `EXPLICITLY_STRIPPED_BETA_PREFIXES` deny-list catches anything Copilot 400s on); `start`/`codex` default to **VS Code stealth** (3 prefixes only). Body-level `budget`, `output_config.schema`, `betas`, and per-tool `eager_input_streaming` are stripped on `/v1/messages` and `/v1/messages/count_tokens`. Full allowlist + strip-list + opt-out flags in [`docs/beta-headers.md`](docs/beta-headers.md).
+`github-router claude` defaults to **leverage** (extended-betas ON; 20 prefixes forwarded, `EXPLICITLY_STRIPPED_BETA_PREFIXES` deny-list catches anything Copilot 400s on); `start`/`codex` default to **VS Code stealth** (3 prefixes only). Body-level `budget`, `output_config.schema`/`.format`, `betas`, `speed`, `diagnostics`, and per-tool `eager_input_streaming` are stripped on `/v1/messages` and `/v1/messages/count_tokens`. Full allowlist + strip-list + opt-out flags in [`docs/beta-headers.md`](docs/beta-headers.md).
 
 ### Experimental Claude Code features auto-enabled
 
@@ -96,7 +96,7 @@ Three startup behaviors share one Windows-safe exec helper (`src/lib/exec.ts`): 
 
 ### Unsupported features (Copilot can't serve)
 
-Files API (`/v1/files/*`) → 404; ADVISOR (`advisor-tool-2026-03-01`) → Phase I server-side wiring (proxy injects `__anthropic_advisor`, dispatches to gpt-5.5 xhigh, streams `advisor_tool_result` back); `mcp_servers` non-empty → fail-fast 400; Bridge / CCR remote-session env stripped from spawned-child env. Full surface + opt-out paths in [`docs/unsupported-features.md`](docs/unsupported-features.md).
+Files API (`/v1/files/*`) → 404; ADVISOR (`advisor-tool-2026-03-01`) → Phase I server-side wiring (proxy injects `__anthropic_advisor`, dispatches to gpt-5.5 xhigh, streams `advisor_tool_result` back); `mcp_servers` non-empty → fail-fast 400; hosted `web_fetch` tool (`web_fetch_<date>` type slug) → fail-fast 400 on `/v1/messages` + `/v1/chat/completions` (no Copilot backend; model-chosen URL can't be pre-fulfilled; matched on type slug not name so custom tools named `web_fetch` pass); Bridge / CCR remote-session env stripped from spawned-child env. Full surface + opt-out paths in [`docs/unsupported-features.md`](docs/unsupported-features.md).
 
 ### `apiKeyHelper` and external credential scripts
 

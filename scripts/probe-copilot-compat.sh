@@ -83,6 +83,19 @@ declare -a PROBE_REGISTRY=(
   "eager_input_streaming_stripped|claude-emits|tools[i].eager_input_streaming sent through proxy returns 200 (proxy strips before forwarding; Copilot would 400 on the raw field)"
   "eager_input_streaming_with_type_custom_stripped|claude-emits|Same field with explicit type:custom returns 200 (same strip path)"
 
+  # ===== fast-mode `speed` body-field strip =====
+  # The `fast-mode-2026-02-01` beta HEADER is forwarded (extended/leverage mode),
+  # but the top-level `speed:"fast"` BODY field is unknown to Copilot's validator.
+  # The proxy strips the body field before forwarding so the request 200s; Copilot
+  # would 400 ("Extra inputs are not permitted") on the raw top-level field.
+  # count-tokens needs its own probe — the harness runs end-to-end through the
+  # proxy only, and a /v1/messages probe cannot honestly cover the separate
+  # count-tokens code path.
+  "speed_fast_stripped|claude-emits|top-level speed:\"fast\" (with fast-mode beta header) sent through proxy returns 200 (proxy strips body field before forwarding; Copilot would 400 on the raw top-level field)"
+  "speed_fast_count_tokens_stripped|claude-emits|top-level speed:\"fast\" on /v1/messages/count_tokens returns 200 (proxy strips before forwarding; Copilot would 400 on the raw field)"
+  "output_config_format_ga_stripped|anthropic-docs|output_config:{format:{type,schema}} (Structured Outputs GA 2026-02-17 nested shape) returns 200 (proxy strips output_config.format + injects schema as system instruction; Copilot would 400 on output_config.* other than effort)"
+  "cache_diagnostics_stripped|anthropic-docs|top-level diagnostics:{previous_message_id} (cache-diagnosis-2026-04-07) returns 200 (proxy strips the unknown top-level field; Copilot would 400 and has no cache-diagnostics backend)"
+
   # ===== Native Anthropic tool types =====
   "tooltype_memory_20250818|anthropic-docs|memory_20250818 returns 200; model emits tool_use{name:memory, command:view}"
   "tooltype_text_editor_20250728|anthropic-docs|text_editor_20250728 returns 200"
@@ -90,6 +103,8 @@ declare -a PROBE_REGISTRY=(
   "tooltype_bash_20241022_legacy|copilot-allowlist|bash_20241022 (legacy version) returns 400"
   "tooltype_code_execution_20250825|copilot-allowlist|code_execution_20250825 returns 400 (not in Copilot allowlist)"
   "tooltype_web_search_20250305|anthropic-docs|web_search_20250305 returns 200 in body validator (model invocation inconclusive)"
+  "tooltype_web_fetch_hosted_rejected|anthropic-docs|hosted web_fetch_20260209 returns 400 (proxy fail-fast: no Copilot backend, URL is model-chosen mid-generation so cannot be pre-fulfilled)"
+  "tooltype_web_fetch_custom_name_copilot_rejects|exploratory|a custom tool merely NAMED web_fetch (type:custom) is forwarded UNCHANGED by the proxy (no over-match on name) and rejected by Copilot itself with 400 'rejected tool(s): web_fetch' — distinct from the proxy's hosted-web_fetch message, proving the proxy did not reject it"
 
   # ===== Web search across endpoints (Task #2 — empirical native exposure map) =====
   # End-to-end through proxy: the Anthropic-shape web_search tool is rejected by
@@ -290,6 +305,39 @@ probe_eager_input_streaming_with_type_custom_stripped() {
   assert_status 200
 }
 
+probe_speed_fast_stripped() {
+  # Send the REAL fast-mode shape: the `fast-mode-2026-02-01` beta header is
+  # forwarded (extended/leverage mode) while the top-level `speed:"fast"` body
+  # field is stripped by the proxy before forwarding. End-user sees 200; Copilot
+  # would 400 on the raw top-level field.
+  do_request POST /v1/messages '{"model":"claude-haiku-4-5","max_tokens":50,"speed":"fast","messages":[{"role":"user","content":"hi"}]}' "anthropic-beta: fast-mode-2026-02-01"
+  assert_status 200
+}
+
+probe_speed_fast_count_tokens_stripped() {
+  # Same strip exercised through the independent count_tokens code path.
+  do_request POST /v1/messages/count_tokens '{"model":"claude-haiku-4-5","speed":"fast","messages":[{"role":"user","content":"hi"}]}' "anthropic-beta: fast-mode-2026-02-01"
+  assert_status 200
+}
+
+probe_output_config_format_ga_stripped() {
+  # Structured Outputs GA (2026-02-17) nests schema/type under
+  # output_config.format. The proxy strips output_config.* (Copilot 400s on
+  # everything but effort) and injects the schema as a system-prompt
+  # instruction so the structured-output intent survives. End-user sees 200.
+  do_request POST /v1/messages '{"model":"claude-haiku-4-5","max_tokens":50,"output_config":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}}},"messages":[{"role":"user","content":"hi"}]}'
+  assert_status 200
+}
+
+probe_cache_diagnostics_stripped() {
+  # cache-diagnosis-2026-04-07 adds a top-level `diagnostics` request field
+  # (and a `cache-diagnosis-` beta header). Copilot 400s on the unknown
+  # top-level field and has no cache-diagnostics backend, so the proxy strips
+  # the body field (the beta header is dropped by the allowlist). End-user 200.
+  do_request POST /v1/messages '{"model":"claude-haiku-4-5","max_tokens":50,"diagnostics":{"previous_message_id":"msg_abc123"},"messages":[{"role":"user","content":"hi"}]}' "anthropic-beta: cache-diagnosis-2026-04-07"
+  assert_status 200
+}
+
 probe_tooltype_memory_20250818() {
   do_request POST /v1/messages '{
     "model": "claude-opus-4-7",
@@ -350,6 +398,35 @@ probe_tooltype_web_search_20250305() {
     "messages": [{"role":"user","content":"hi"}]
   }'
   assert_status 200
+}
+
+probe_tooltype_web_fetch_hosted_rejected() {
+  # Proxy fail-fast 400 (generated proxy-side, independent of Copilot). The
+  # hosted web_fetch tool is matched on its `type` slug.
+  do_request POST /v1/messages '{
+    "model": "claude-opus-4-7",
+    "max_tokens": 50,
+    "tools": [{"type":"web_fetch_20260209"}],
+    "messages": [{"role":"user","content":"fetch https://example.com"}]
+  }'
+  assert_status 400
+}
+
+probe_tooltype_web_fetch_custom_name_copilot_rejects() {
+  # A CLIENT-SIDE custom tool that merely shares the name "web_fetch"
+  # (type:custom) must NOT be caught by the proxy's hosted-tool gate (which
+  # matches the `web_fetch_<date>` type slug, never the name). The proxy
+  # forwards it unchanged; Copilot then rejects it with its OWN message
+  # ("rejected tool(s): web_fetch") — distinct from the proxy's hosted-web_fetch
+  # error, proving the proxy did not over-match on the name.
+  do_request POST /v1/messages '{
+    "model": "claude-opus-4-7",
+    "max_tokens": 50,
+    "tools": [{"type":"custom","name":"web_fetch","input_schema":{"type":"object"}}],
+    "messages": [{"role":"user","content":"hi"}]
+  }'
+  assert_status 400 \
+    && assert_body_contains "rejected tool(s)"
 }
 
 # End-to-end via proxy: Anthropic-shape web_search tool on /v1/messages.

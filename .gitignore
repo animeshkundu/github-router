@@ -12,3 +12,6 @@ node_modules/
 
 # build output
 dist/
+
+# parity workflow runtime state (the engine .claude/workflows/parity.js is tracked; its run state is not)
+.claude/parity/

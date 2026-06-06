@@ -693,6 +693,184 @@ describe("Anthropic-only body field stripping (Phase B P0.2)", () => {
     expect(forwarded.metadata).toEqual({ user_id: "test-user-123" })
   })
 
+  test("strips top-level `speed` field (fast-mode body hint; Copilot 400 'Extra inputs are not permitted' — probe `speed_fast_stripped`)", async () => {
+    const captured: { body?: string } = {}
+    setupModelAndFetch(captured)
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+        speed: "fast",
+      }),
+    })
+    expect(response.status).toBe(200)
+
+    const forwarded = JSON.parse(captured.body ?? "{}") as {
+      speed?: unknown
+      max_tokens?: number
+    }
+    expect(forwarded.speed).toBeUndefined()
+    // Other fields preserved
+    expect(forwarded.max_tokens).toBe(100)
+  })
+
+  test("strips top-level `diagnostics` field (cache-diagnosis-2026-04-07; Copilot 400 on unknown top-level field — probe `cache_diagnostics_stripped`)", async () => {
+    const captured: { body?: string } = {}
+    setupModelAndFetch(captured)
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+        diagnostics: { previous_message_id: "msg_abc123" },
+      }),
+    })
+    expect(response.status).toBe(200)
+
+    const forwarded = JSON.parse(captured.body ?? "{}") as {
+      diagnostics?: unknown
+      max_tokens?: number
+    }
+    expect(forwarded.diagnostics).toBeUndefined()
+    expect(forwarded.max_tokens).toBe(100)
+  })
+
+  test("strips body `speed` while still forwarding the `fast-mode-2026-02-01` beta header (intent flows; latency hint dropped)", async () => {
+    state.models = { object: "list", data: [makeBareClaudeModel()] }
+    // Leverage/extended-betas mode is what `github-router claude` runs; only
+    // then does the `fast-mode-` prefix survive the beta-header allowlist.
+    const savedExtendedBetas = state.extendedBetas
+    state.extendedBetas = true
+    const captured: { body?: string; betaHeader?: string | null } = {}
+    const fetchMock = mock(
+      (url: string, opts?: { body?: string; headers?: Headers | Record<string, string> }) => {
+        if (url.includes("/v1/messages")) {
+          captured.body = opts?.body
+          const h = opts?.headers
+          captured.betaHeader =
+            h instanceof Headers
+              ? h.get("anthropic-beta")
+              : ((h as Record<string, string> | undefined)?.["anthropic-beta"] ?? null)
+          return emptyMessageResponse()
+        }
+        throw new Error(`Unexpected URL ${url}`)
+      },
+    )
+    // @ts-expect-error - override fetch for this test
+    globalThis.fetch = fetchMock
+
+    try {
+      const response = await server.request("/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "anthropic-beta": "fast-mode-2026-02-01",
+        },
+        body: JSON.stringify({
+          model: "claude-opus-4.7",
+          max_tokens: 100,
+          messages: [{ role: "user", content: "hi" }],
+          speed: "fast",
+        }),
+      })
+      expect(response.status).toBe(200)
+
+      const forwarded = JSON.parse(captured.body ?? "{}") as { speed?: unknown }
+      // Body field stripped...
+      expect(forwarded.speed).toBeUndefined()
+      // ...but the fast-mode beta header still flows upstream (extended/leverage mode).
+      expect(captured.betaHeader).toContain("fast-mode-2026-02-01")
+    } finally {
+      state.extendedBetas = savedExtendedBetas
+    }
+  })
+
+  test("strips top-level `speed` on /v1/messages/count_tokens (independent code path; probe `speed_fast_count_tokens_stripped`)", async () => {
+    state.models = { object: "list", data: [makeBareClaudeModel()] }
+    const captured: { body?: string } = {}
+    const fetchMock = mock((url: string, opts?: { body?: string }) => {
+      if (url.includes("/v1/messages/count_tokens")) {
+        captured.body = opts?.body
+        return new Response(JSON.stringify({ input_tokens: 42 }))
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    })
+    // @ts-expect-error - override fetch for this test
+    globalThis.fetch = fetchMock
+
+    const response = await server.request("/v1/messages/count_tokens", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-beta": "fast-mode-2026-02-01",
+      },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        messages: [{ role: "user", content: "hi" }],
+        speed: "fast",
+      }),
+    })
+    expect(response.status).toBe(200)
+
+    const forwarded = JSON.parse(captured.body ?? "{}") as { speed?: unknown }
+    expect(forwarded.speed).toBeUndefined()
+  })
+
+  test("does NOT strip a nested `speed` property inside a tool input_schema, and forwards the body verbatim when no top-level field is stripped (regression: top-level property-access delete only)", async () => {
+    const captured: { body?: string } = {}
+    setupModelAndFetch(captured)
+
+    // Body carries the substring `"speed"` (which trips the fast-path
+    // trigger) but ONLY as a nested input_schema property — no top-level
+    // `speed`. Nothing should be stripped, and the body must be forwarded
+    // byte-for-byte (no re-serialize / escaping / precision drift).
+    const rawBody = JSON.stringify({
+      model: "claude-opus-4.7",
+      max_tokens: 100,
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        {
+          name: "set_speed",
+          description: "Set speed",
+          input_schema: {
+            type: "object",
+            properties: { speed: { type: "string", enum: ["fast", "slow"] } },
+          },
+        },
+      ],
+    })
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: rawBody,
+    })
+    expect(response.status).toBe(200)
+
+    const forwarded = JSON.parse(captured.body ?? "{}") as {
+      speed?: unknown
+      tools?: Array<{
+        input_schema?: { properties?: { speed?: unknown } }
+      }>
+    }
+    // No top-level speed existed; nested property preserved.
+    expect(forwarded.speed).toBeUndefined()
+    expect(forwarded.tools?.[0]?.input_schema?.properties?.speed).toEqual({
+      type: "string",
+      enum: ["fast", "slow"],
+    })
+    // Verbatim passthrough: no top-level strip → handler forwards the
+    // ORIGINAL rawBody (modified ? JSON.stringify(parsed) : rawBody).
+    expect(captured.body).toBe(rawBody)
+  })
+
   test("REJECTS `mcp_servers` with fail-fast 400 (Phase G — translate path deferred per codex-critic)", async () => {
     // Phase G design (proxy-side translate via inline-MCP client pool +
     // multi-turn tool loop) was deferred because codex-critic surfaced

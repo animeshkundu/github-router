@@ -28,6 +28,14 @@ const isWebSearchTool = (tool: AnyRecord): boolean =>
   (typeof tool.type === "string" && tool.type.startsWith("web_search")) ||
   tool.name === "web_search"
 
+// Anthropic hosted `web_fetch` tool (beta web-fetch-2025-09-10 / GA 2026-02-17;
+// type slugs web_fetch_20250910, web_fetch_20260209). Matched ONLY on the
+// hosted-tool `type` slug — NEVER on tool name — because a client-side custom
+// tool that merely shares the name (`{type:"custom", name:"web_fetch"}`) is a
+// legitimate request Copilot's allowlist accepts and must not be rejected.
+const isHostedWebFetchTool = (tool: AnyRecord): boolean =>
+  typeof tool?.type === "string" && /^web_fetch_\d{8}$/.test(tool.type)
+
 /**
  * Extract whitelisted beta headers from the incoming request to forward
  * to the Copilot API. VS Code sends these to enable extended features
@@ -219,6 +227,39 @@ export async function handleCompletion(c: Context) {
   // incoming header to know whether the user asked for ADVISOR.
   const incomingBeta = c.req.header("anthropic-beta")
   const advisorEnabled = isAdvisorRequested(incomingBeta)
+
+  // Fail-fast on the Anthropic hosted `web_fetch` tool (mirrors the
+  // mcp_servers deferral). web_fetch's URL is chosen by the model
+  // mid-generation (server_tool_use{web_fetch}), so unlike web_search there is
+  // nothing to pre-fulfill at request time, and Copilot's tool-type allowlist
+  // has no web_fetch backend. Silently stripping it would make the model
+  // hallucinate it has the tool (the mcp_servers / gemini-critic lesson).
+  // Reject BEFORE processWebSearch so a request carrying BOTH web_search and
+  // web_fetch does not perform a side-effecting MCP search before failing.
+  // Parse the body directly (rather than a raw-substring pre-gate) so a
+  // JSON-escaped `type` slug (e.g. "web_fetch_…") cannot bypass the reject.
+  try {
+    const probe = JSON.parse(rawBody) as AnyRecord
+    if (Array.isArray(probe.tools) && probe.tools.some(isHostedWebFetchTool)) {
+      return c.json(
+        {
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message:
+              "Anthropic's hosted `web_fetch` tool is not supported by github-router. "
+              + "Copilot has no web_fetch backend, and the fetch URL is chosen by the model "
+              + "mid-generation so it cannot be pre-fulfilled the way `web_search` is. "
+              + "Remove the `web_fetch_*` tool; `web_search` is supported.",
+          },
+        },
+        400,
+      )
+    }
+  } catch {
+    // Body wasn't valid JSON — fall through; downstream handlers surface
+    // the parse error in their own way.
+  }
 
   let finalBody = await processWebSearch(rawBody)
   // Inbound advisor-history sanitization: rewrite malformed
@@ -569,6 +610,8 @@ function resolveModelInBody(rawBody: string): {
     || rawBody.includes('"output_config"')
     || rawBody.includes('"betas"')
     || rawBody.includes('"eager_input_streaming"')
+    || rawBody.includes('"speed"')
+    || rawBody.includes('"diagnostics"')
   if (needsAnthropicOnlyStrip && stripAnthropicOnlyFields(parsed)) {
     modified = true
   }
@@ -794,6 +837,11 @@ function applyDefaultBetas(
  *   POST /v1/messages?beta=true { ..., budget: {total_tokens: 10000} } → 400
  *   POST /v1/messages?beta=true { ..., output_config: {schema: {...}} }  → 400
  *   POST /v1/messages?beta=true { ..., betas: ["..."] }                  → 400
+ *   POST /v1/messages?beta=true { ..., speed: "fast" }                   → 400
+ *     (probe id `speed_fast_stripped`). The body-field strip never touches
+ *     the `fast-mode-2026-02-01` beta header (which forwards in extended/
+ *     leverage mode), but Copilot has no fast-mode backend so the latency
+ *     hint is dropped, NOT honored.
  *
  * Each strip emits a one-line consola.warn so users running with these
  * features (e.g. `claude --max-budget-usd`, `--json-schema`) understand
@@ -806,6 +854,13 @@ function applyDefaultBetas(
  *   - `mcp_servers` (Phase G translate path — silent strip causes LLM
  *     to hallucinate tools per gemini-critic finding)
  *   - `metadata` (Copilot 200s, ignores harmlessly)
+ *
+ * Known limitation (shared by all raw-substring triggers above): the
+ * fast-path `needsAnthropicOnlyStrip` gate matches on the literal
+ * substring `"speed"` (etc.) in the raw body, so a JSON-escaped top-level
+ * key would parse to `speed` but miss the trigger. Real Claude Code /
+ * Anthropic-SDK clients emit unescaped keys; rewriting the trigger is out
+ * of scope (would perturb the 4 incumbent strips).
  */
 function stripAnthropicOnlyFields(body: AnyRecord): boolean {
   let stripped = false
@@ -814,6 +869,20 @@ function stripAnthropicOnlyFields(body: AnyRecord): boolean {
       "Stripping body-level `budget` field (Copilot 400s; the `task-budgets-` beta header is preserved but cost ceiling is not enforced server-side)",
     )
     delete body.budget
+    stripped = true
+  }
+  if (body.speed !== undefined) {
+    consola.warn(
+      "Stripping body-level `speed` field (Copilot 400s; the `fast-mode-` beta header is preserved but the fast-mode latency hint is not enforced upstream)",
+    )
+    delete body.speed
+    stripped = true
+  }
+  if (body.diagnostics !== undefined) {
+    consola.warn(
+      "Stripping body-level `diagnostics` field (cache-diagnosis-2026-04-07; Copilot 400s on the unknown top-level field, and has no cache-diagnostics backend so the request still succeeds without it)",
+    )
+    delete body.diagnostics
     stripped = true
   }
   if (body.output_config !== undefined) {
@@ -845,9 +914,18 @@ function stripAnthropicOnlyFields(body: AnyRecord): boolean {
     if (body.output_config && typeof body.output_config === "object") {
       const oc = body.output_config as AnyRecord
       const PROXY_OWNED_FIELDS = new Set(["effort"])
-      // Capture the schema BEFORE stripping so we can inject it.
-      const schema = oc.schema
-      const ocType = oc.type
+      // Capture the schema BEFORE stripping so we can inject it. Structured
+      // Outputs GA (2026-02-17) nested the schema/type under
+      // `output_config.format` (`{format:{type,schema}}`); pre-GA used the
+      // flat `output_config.schema` / `output_config.type`. Read both, with
+      // the flat (legacy) location taking precedence so existing callers are
+      // unaffected. The strip loop below removes `format` either way (it is
+      // not proxy-owned), so without this the GA shape would lose its schema
+      // intent silently and the prompt-injection compensation never fire.
+      const fmt =
+        oc.format && typeof oc.format === "object" ? (oc.format as AnyRecord) : undefined
+      const schema = oc.schema !== undefined ? oc.schema : fmt?.schema
+      const ocType = oc.type !== undefined ? oc.type : fmt?.type
       let strippedAny = false
       for (const key of Object.keys(oc)) {
         if (!PROXY_OWNED_FIELDS.has(key)) {
