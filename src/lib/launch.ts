@@ -1,11 +1,15 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process"
+import { existsSync } from "node:fs"
+import path from "node:path"
 import process from "node:process"
 
 import consola from "consola"
 
 import type { Server } from "srvx"
 
+import { resolveExecutable } from "./exec"
 import { DEFAULT_CODEX_MODEL } from "./port"
+import { collapsePathKeys } from "./toolbelt/path-inject"
 import { sweepRegistry } from "./worker-agent/lifecycle"
 
 /**
@@ -108,6 +112,23 @@ function commandExists(name: string): boolean {
 }
 
 /**
+ * Whether the launcher can execute `executable`.
+ *
+ * `buildLaunchCommand` resolves the CLI to an ABSOLUTE path (anti-shadow).
+ * `where.exe` (and POSIX `which`) reject a full path argument — `where`
+ * returns "Could not find files for the given pattern(s)" for an absolute
+ * path even when the file exists — so the where/which probe is only valid
+ * for bare command names. For an absolute path (already resolved against
+ * PATH and existence-checked by `resolveExecutable`), check the
+ * filesystem directly. Without this split, every launch where the CLI is
+ * installed fails with a spurious "not found on PATH".
+ */
+export function isExecutableAvailable(executable: string): boolean {
+  if (path.isAbsolute(executable)) return existsSync(executable)
+  return commandExists(executable)
+}
+
+/**
  * Provider-config flags (`-c model_providers.github_router=...`) that
  * point Codex at our proxy. Extracted from `buildCodexCmd` so the new
  * `codex mcp-server` MCP-config builder can reuse the exact same
@@ -203,10 +224,21 @@ export function buildLaunchCommand(target: LaunchTarget): {
       ? ["claude", "--dangerously-skip-permissions", ...target.extraArgs]
       : buildCodexCmd(target)
 
-  return {
-    cmd,
-    env: { ...sanitizeParentEnv(process.env), ...target.envVars },
-  }
+  // Anti-shadow: resolve the top-level CLI to an ABSOLUTE path against
+  // the clean parent PATH (excluding the cwd). The spawned child's env
+  // prepends the toolbelt bin dir to PATH; without this, a stray
+  // `claude.cmd`/`codex.cmd` in that dir — or in an untrusted repo's cwd
+  // (Windows resolves cwd before PATH under shell:true) — could shadow
+  // the real CLI. Resolving here means the toolbelt PATH only affects
+  // the agent's OWN tool lookups, never which CLI we launch.
+  const resolved = resolveExecutable(cmd[0], { env: process.env })
+  if (resolved) cmd[0] = resolved
+
+  const env = collapsePathKeys({
+    ...sanitizeParentEnv(process.env),
+    ...target.envVars,
+  })
+  return { cmd, env }
 }
 
 export function launchChild(
@@ -217,7 +249,7 @@ export function launchChild(
   const { cmd, env } = buildLaunchCommand(target)
 
   const executable = cmd[0]
-  if (!commandExists(executable)) {
+  if (!isExecutableAvailable(executable)) {
     const msg = `"${executable}" not found on PATH. Install it first, then try again.`
     consola.error(msg)
     process.stderr.write(msg + "\n")

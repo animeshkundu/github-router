@@ -1,11 +1,53 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 
 import {
   buildLaunchCommand,
+  isExecutableAvailable,
   sanitizeParentEnv,
   type LaunchTarget,
 } from "../src/lib/launch"
 import { DEFAULT_CODEX_MODEL } from "../src/lib/port"
+
+// buildLaunchCommand now resolves the top-level CLI to an absolute path
+// (anti-shadow) when it is installed on the host, so cmd[0] may be e.g.
+// "C:\\...\\codex.CMD" instead of the bare name. Assert on the basename
+// so the tests are deterministic across machines.
+function baseCmd(cmd: string[]): string {
+  return (
+    cmd[0]
+      .replace(/\\/g, "/")
+      .split("/")
+      .pop() ?? cmd[0]
+  ).replace(/\.(cmd|exe)$/i, "")
+}
+
+describe("isExecutableAvailable", () => {
+  // Regression: buildLaunchCommand resolves the CLI to an ABSOLUTE path
+  // (anti-shadow). The launcher's pre-flight must accept that path —
+  // `where.exe`/`which` reject a full-path argument, which previously
+  // aborted every launch with a spurious "not found on PATH".
+  test("absolute path that exists → true (resolved CLI can launch)", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "launch-exec-"))
+    try {
+      const bin = path.join(
+        dir,
+        process.platform === "win32" ? "claude.cmd" : "claude",
+      )
+      await fs.writeFile(bin, "")
+      expect(isExecutableAvailable(bin)).toBe(true)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("absolute path that does not exist → false", () => {
+    const missing = path.join(os.tmpdir(), `definitely-missing-${Date.now()}.bin`)
+    expect(isExecutableAvailable(missing)).toBe(false)
+  })
+})
 
 describe("buildLaunchCommand", () => {
   describe("claude-code", () => {
@@ -23,7 +65,8 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual(["claude", "--dangerously-skip-permissions"])
+      expect(baseCmd(result.cmd)).toBe("claude")
+      expect(result.cmd.slice(1)).toEqual(["--dangerously-skip-permissions"])
       expect(result.env.ANTHROPIC_BASE_URL).toBe("http://localhost:12345")
       expect(result.env.ANTHROPIC_AUTH_TOKEN).toBe("dummy")
       expect(result.env.DISABLE_NON_ESSENTIAL_MODEL_CALLS).toBe("1")
@@ -59,8 +102,8 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual([
-        "claude",
+      expect(baseCmd(result.cmd)).toBe("claude")
+      expect(result.cmd.slice(1)).toEqual([
         "--dangerously-skip-permissions",
         "--verbose",
         "--debug",
@@ -81,8 +124,8 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual([
-        "codex",
+      expect(baseCmd(result.cmd)).toBe("codex")
+      expect(result.cmd.slice(1)).toEqual([
         "--sandbox",
         "workspace-write",
         "--ask-for-approval",
@@ -107,8 +150,8 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual([
-        "codex",
+      expect(baseCmd(result.cmd)).toBe("codex")
+      expect(result.cmd.slice(1)).toEqual([
         "--sandbox",
         "workspace-write",
         "--ask-for-approval",
@@ -130,8 +173,8 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd).toEqual([
-        "codex",
+      expect(baseCmd(result.cmd)).toBe("codex")
+      expect(result.cmd.slice(1)).toEqual([
         "--sandbox",
         "workspace-write",
         "--ask-for-approval",
@@ -152,7 +195,7 @@ describe("buildLaunchCommand", () => {
 
       const result = buildLaunchCommand(target)
 
-      expect(result.cmd[0]).toBe("codex")
+      expect(baseCmd(result.cmd)).toBe("codex")
       // The provider config must come BEFORE the sandbox/model args so
       // Codex parses it as a root flag and the spawned model_provider
       // points at our proxy.

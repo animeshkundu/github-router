@@ -62,6 +62,16 @@ export const PATHS = {
   get CLAUDE_CONFIG_DIR() {
     return path.join(appDir(), "claude-config", claudeConfigDirSuffix())
   },
+  /**
+   * Durable router-owned `bin/` for the LLM toolbelt — curated CLI
+   * tools (rg/fd/jq/sd/sg/yq) materialized here and prepended to the
+   * spawned agent's PATH. Intentionally OUTSIDE the per-launch
+   * CLAUDE_CONFIG_DIR mirror (which is swept per launch): the toolbelt
+   * is a cross-launch cache, like `last-update-check`.
+   */
+  get TOOLBELT_BIN_DIR() {
+    return path.join(appDir(), "bin")
+  },
 }
 
 /**
