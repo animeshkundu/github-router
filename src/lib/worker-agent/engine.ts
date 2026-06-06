@@ -111,15 +111,18 @@ import { type WorktreeHandle, createWorktree } from "./worktree"
 const WORKTREE_REGISTRY = new WorktreeRegistry()
 registerExitHandlers(WORKTREE_REGISTRY)
 
-/** Default model + thinking. See plan: gemini-3.5-flash + "high" — the
- *  defaults are sized for the model that backs the worker tool's
- *  description string in `peer-mcp-personas.ts`. Caller can override.
+/** Default model + thinking. `gemini-3.1-pro-preview` + "high" — the worker
+ *  loop is function-calling, and the pro model is materially less prone to
+ *  early-stopping with an empty turn than `gemini-3.5-flash` was (the
+ *  reliability win is worth the higher per-call cost for autonomous workers).
+ *  It advertises `tool_calls` and reasoning low/medium/high. Caller can
+ *  override per call via the `model` arg.
  *
  *  Exported so the MCP handler (which renders the worker tool's
  *  description to the LLM and pins a probe row against the model)
  *  reads the same constant — drift between the two would silently
  *  ship a tool whose docs disagree with its runtime default. */
-export const DEFAULT_MODEL = "gemini-3.5-flash"
+export const DEFAULT_MODEL = "gemini-3.1-pro-preview"
 const DEFAULT_THINKING: WorkerThinkingLevel = "high"
 
 /**

@@ -25,7 +25,6 @@ import {
 } from "./lib/port"
 import {
   browserToolsEnabled,
-  geminiFlashAvailable,
   standInToolEnabled,
   workerToolsEnabled,
 } from "./lib/mcp-capabilities"
@@ -330,10 +329,6 @@ export const claude = defineCommand({
             "gemini-3.1-pro-preview not found in your Copilot model catalog; gemini-critic persona will not be registered.",
           )
         }
-        // gemini-3.5-flash gates the gemini-reviewer persona (a fast code
-        // reviewer on the peers server). Reuses the shared mcp-capabilities
-        // predicate so the snippet / .md set never name it when unavailable.
-        const geminiFlash = geminiFlashAvailable()
 
         // Which scoped MCP servers to register. `peers` + `search` are
         // always on; `workers` / `decide` / `browser` only when their gate
@@ -354,7 +349,6 @@ export const claude = defineCommand({
         const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
           codexCli: backend === "cli",
           geminiAvailable,
-          geminiFlashAvailable: geminiFlash,
           groupKeys,
         })
         state.peerMcpNonce = runtime.nonce
@@ -445,7 +439,6 @@ export const claude = defineCommand({
         const peerSnippet = buildPeerAwarenessSnippet({
           codexCli: backend === "cli",
           geminiAvailable,
-          geminiFlashAvailable: geminiFlash,
           workerToolsAvailable: workerToolsEnabled(),
           standInAvailable: standInToolEnabled(),
           browseAvailable: state.browseEnabled,

@@ -139,7 +139,7 @@ beforeEach(() => {
   state.models = {
     object: "list",
     data: [
-      fakeModel("gemini-3.5-flash", {
+      fakeModel("gemini-3.1-pro-preview", {
         tool_calls: true,
         reasoning_effort: ["low", "medium", "high"],
       }),
@@ -206,9 +206,9 @@ describe("extractAssistantText", () => {
 
 describe("makeModelShim", () => {
   test("stamps the requested id and uses openai-completions API/provider", () => {
-    const m = makeModelShim("gemini-3.5-flash")
-    expect(m.id).toBe("gemini-3.5-flash")
-    expect(m.name).toBe("gemini-3.5-flash")
+    const m = makeModelShim("gemini-3.1-pro-preview")
+    expect(m.id).toBe("gemini-3.1-pro-preview")
+    expect(m.name).toBe("gemini-3.1-pro-preview")
     expect(m.api).toBe("openai-completions")
     expect(m.provider).toBe("github-copilot")
     expect(m.reasoning).toBe(true)

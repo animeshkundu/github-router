@@ -136,7 +136,7 @@ describe("buildPeerMcpConfig", () => {
 })
 
 describe("buildPeerAgentDefinitions", () => {
-  test("HTTP backend with gemini = 4 personas + peer-review-coordinator (5 agents total)", () => {
+  test("HTTP backend with gemini = 5 personas + peer-review-coordinator (6 agents total)", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: false,
       geminiAvailable: true,
@@ -148,13 +148,14 @@ describe("buildPeerAgentDefinitions", () => {
       "codex-critic",
       "codex-reviewer",
       "gemini-critic",
+      "gemini-reviewer",
       "opus-critic",
       "peer-review-coordinator",
     ])
     // Each persona prompt routes to the HTTP MCP server name; the
     // coordinator prompt does NOT route to mcp tools directly (it
     // delegates to the persona subagents instead).
-    for (const name of ["codex-critic", "codex-reviewer", "gemini-critic", "opus-critic"]) {
+    for (const name of ["codex-critic", "codex-reviewer", "gemini-critic", "gemini-reviewer", "opus-critic"]) {
       expect(agents[name]!.prompt).toContain("mcp__peers__")
       expect(agents[name]!.description.length).toBeGreaterThan(0)
     }
@@ -193,7 +194,7 @@ describe("buildPeerAgentDefinitions", () => {
     expect(agents["peer-review-coordinator"]!.prompt).toContain("opus-critic")
   })
 
-  test("CLI backend with gemini = 5 personas + coordinator (6 agents total)", () => {
+  test("CLI backend with gemini = 6 personas + coordinator (7 agents total)", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: true,
       geminiAvailable: true,
@@ -206,6 +207,7 @@ describe("buildPeerAgentDefinitions", () => {
       "codex-implementer",
       "codex-reviewer",
       "gemini-critic",
+      "gemini-reviewer",
       "opus-critic",
       "peer-review-coordinator",
     ])
@@ -307,8 +309,8 @@ describe("writePeerMcpRuntimeFiles", () => {
       expect(path.dirname(runtime.agentsPath)).toBe(runtimeDir)
 
       // Phase 2.5: .md subagent files written into agentsDir, one per
-      // registered agent (4 personas + peer-review-coordinator = 5).
-      expect(runtime.agentMdPaths.length).toBe(5)
+      // registered agent (5 personas + peer-review-coordinator = 6).
+      expect(runtime.agentMdPaths.length).toBe(6)
       for (const p of runtime.agentMdPaths) {
         expect(path.dirname(p)).toBe(agentsDir)
         expect(p).toMatch(
@@ -578,6 +580,7 @@ describe("writePeerMcpRuntimeFiles", () => {
         "codex-critic",
         "codex-reviewer",
         "gemini-critic",
+        "gemini-reviewer",
         "opus-critic",
       ])
       expect(cliNames).toEqual([
@@ -585,6 +588,7 @@ describe("writePeerMcpRuntimeFiles", () => {
         "codex-implementer",
         "codex-reviewer",
         "gemini-critic",
+        "gemini-reviewer",
         "opus-critic",
       ])
       await httpMode.cleanup()

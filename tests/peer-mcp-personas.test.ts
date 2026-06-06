@@ -36,14 +36,13 @@ describe("PERSONAS_READ", () => {
     expect(byName["codex-reviewer"]?.endpoint).toBe("/v1/responses")
     expect(byName["codex-reviewer"]?.requiresHttp).toBe(false)
 
-    expect(byName["gemini-reviewer"]?.model).toBe("gemini-3.5-flash")
+    expect(byName["gemini-reviewer"]?.model).toBe("gemini-3.1-pro-preview")
     expect(byName["gemini-reviewer"]?.endpoint).toBe("/v1/chat/completions")
     // gemini routes only via HTTP (codex-cli stdio can't run it).
     expect(byName["gemini-reviewer"]?.requiresHttp).toBe(true)
-    // Gated on gemini-3.5-flash in the catalog (distinct from gemini-critic's
-    // gemini-3.x-pro gate).
-    expect(byName["gemini-reviewer"]?.requiresGeminiFlashCatalog).toBe(true)
-    expect(byName["gemini-reviewer"]?.requiresGeminiCatalog).toBeUndefined()
+    // Same gemini-3.x-pro catalog gate as gemini-critic (both run on
+    // gemini-3.1-pro-preview; reviewer prompt vs. critic prompt).
+    expect(byName["gemini-reviewer"]?.requiresGeminiCatalog).toBe(true)
 
     expect(byName["opus-critic"]?.model).toBe("claude-opus-4-6")
     expect(byName["opus-critic"]?.endpoint).toBe("/v1/messages")
@@ -73,7 +72,7 @@ describe("PERSONAS_READ", () => {
     expect(byName["codex-critic"]?.description).toContain("gpt-5.5")
     expect(byName["gemini-critic"]?.description).toContain("gemini-3.1-pro")
     expect(byName["codex-reviewer"]?.description).toContain("gpt-5.3-codex")
-    expect(byName["gemini-reviewer"]?.description).toContain("gemini-3.5-flash")
+    expect(byName["gemini-reviewer"]?.description).toContain("gemini-3.1-pro")
     expect(byName["opus-critic"]?.description).toContain("Opus 4.6")
     for (const p of PERSONAS_READ) {
       // codex-reviewer AND gemini-reviewer are framed as code-specialists /
@@ -167,52 +166,8 @@ describe("PERSONAS_WRITE", () => {
 })
 
 describe("personasFor", () => {
-  test("HTTP backend (codexCli=false) with gemini available returns 4 read personas", () => {
+  test("HTTP backend (codexCli=false) with gemini available returns 5 read personas", () => {
     const list = personasFor({ codexCli: false, geminiAvailable: true })
-    expect(list.map((p) => p.agentName)).toEqual([
-      "codex-critic",
-      "gemini-critic",
-      "codex-reviewer",
-      "opus-critic",
-    ])
-  })
-
-  test("HTTP backend without gemini drops gemini-critic only", () => {
-    const list = personasFor({ codexCli: false, geminiAvailable: false })
-    expect(list.map((p) => p.agentName)).toEqual([
-      "codex-critic",
-      "codex-reviewer",
-      "opus-critic",
-    ])
-  })
-
-  test("CLI backend with gemini adds codex-implementer for 5 personas", () => {
-    const list = personasFor({ codexCli: true, geminiAvailable: true })
-    expect(list.map((p) => p.agentName)).toEqual([
-      "codex-critic",
-      "gemini-critic",
-      "codex-reviewer",
-      "opus-critic",
-      "codex-implementer",
-    ])
-  })
-
-  test("CLI backend without gemini = 4 personas (codex-critic, codex-reviewer, opus-critic, codex-implementer)", () => {
-    const list = personasFor({ codexCli: true, geminiAvailable: false })
-    expect(list.map((p) => p.agentName)).toEqual([
-      "codex-critic",
-      "codex-reviewer",
-      "opus-critic",
-      "codex-implementer",
-    ])
-  })
-
-  test("geminiFlashAvailable adds gemini-reviewer after codex-reviewer", () => {
-    const list = personasFor({
-      codexCli: false,
-      geminiAvailable: true,
-      geminiFlashAvailable: true,
-    })
     expect(list.map((p) => p.agentName)).toEqual([
       "codex-critic",
       "gemini-critic",
@@ -222,21 +177,44 @@ describe("personasFor", () => {
     ])
   })
 
-  test("gemini-reviewer is gated independently of gemini-critic (flash on, pro off)", () => {
-    const list = personasFor({
-      codexCli: false,
-      geminiAvailable: false,
-      geminiFlashAvailable: true,
-    })
-    const names = list.map((p) => p.agentName)
-    // pro-gated gemini-critic dropped; flash-gated gemini-reviewer present.
-    expect(names).not.toContain("gemini-critic")
-    expect(names).toContain("gemini-reviewer")
+  test("HTTP backend without gemini drops BOTH gemini personas", () => {
+    const list = personasFor({ codexCli: false, geminiAvailable: false })
+    expect(list.map((p) => p.agentName)).toEqual([
+      "codex-critic",
+      "codex-reviewer",
+      "opus-critic",
+    ])
   })
 
-  test("gemini-reviewer is dropped when geminiFlashAvailable is omitted/false", () => {
-    const list = personasFor({ codexCli: false, geminiAvailable: true })
-    expect(list.map((p) => p.agentName)).not.toContain("gemini-reviewer")
+  test("CLI backend with gemini adds codex-implementer for 6 personas", () => {
+    const list = personasFor({ codexCli: true, geminiAvailable: true })
+    expect(list.map((p) => p.agentName)).toEqual([
+      "codex-critic",
+      "gemini-critic",
+      "codex-reviewer",
+      "gemini-reviewer",
+      "opus-critic",
+      "codex-implementer",
+    ])
+  })
+
+  test("CLI backend without gemini = 4 personas (no gemini personas, + codex-implementer)", () => {
+    const list = personasFor({ codexCli: true, geminiAvailable: false })
+    expect(list.map((p) => p.agentName)).toEqual([
+      "codex-critic",
+      "codex-reviewer",
+      "opus-critic",
+      "codex-implementer",
+    ])
+  })
+
+  test("gemini-critic and gemini-reviewer gate together on geminiAvailable", () => {
+    const on = personasFor({ codexCli: false, geminiAvailable: true }).map((p) => p.agentName)
+    expect(on).toContain("gemini-critic")
+    expect(on).toContain("gemini-reviewer")
+    const off = personasFor({ codexCli: false, geminiAvailable: false }).map((p) => p.agentName)
+    expect(off).not.toContain("gemini-critic")
+    expect(off).not.toContain("gemini-reviewer")
   })
 })
 
@@ -312,7 +290,6 @@ describe("buildPeerAwarenessSnippet", () => {
   const MAXIMAL = {
     codexCli: true,
     geminiAvailable: true,
-    geminiFlashAvailable: true,
     workerToolsAvailable: true,
     standInAvailable: true,
     browseAvailable: true,

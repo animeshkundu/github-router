@@ -19,13 +19,13 @@ import {
 // ---------------------------------------------------------------------------
 
 const RESOLVED: ResolvedModel = {
-  modelId: "gemini-3.5-flash",
+  modelId: "gemini-3.1-pro-preview",
   thinking: "high",
 }
 
 // The model arg to the StreamFn is unused — Pi requires `Model<TApi>` but our
 // stream-fn ignores it because the resolved model comes from CreateCopilotStreamFnOptions.
-const NOOP_MODEL = { id: "gemini-3.5-flash" } as unknown as Model<"openai-completions">
+const NOOP_MODEL = { id: "gemini-3.1-pro-preview" } as unknown as Model<"openai-completions">
 
 const USER_CTX: Context = {
   messages: [
@@ -392,7 +392,7 @@ test("translates user + assistant + toolResult to OpenAI shape with tool_call_id
         ],
         api: "openai-completions",
         provider: "github-copilot",
-        model: "gemini-3.5-flash",
+        model: "gemini-3.1-pro-preview",
         usage: {
           input: 0,
           output: 0,
@@ -418,7 +418,7 @@ test("translates user + assistant + toolResult to OpenAI shape with tool_call_id
   await drain(createCopilotStreamFn({ resolved: RESOLVED }), ctx)
 
   const { body } = lastFetchBody()
-  expect(body.model).toBe("gemini-3.5-flash")
+  expect(body.model).toBe("gemini-3.1-pro-preview")
   expect(body.stream).toBe(true)
   const messages = body.messages as Array<Record<string, unknown>>
   expect(messages).toHaveLength(4)

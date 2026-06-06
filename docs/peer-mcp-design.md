@@ -346,7 +346,7 @@ For each proposed input or output field, answer in one sentence: **"What would t
 
 ## Worker tools (`explore`, `implement`)
 
-Two non-persona MCP tools — `mcp__workers__explore` and `mcp__workers__implement` — delegate scoped work to an **autonomous worker subagent** backed by the **Pi agent runtime** (vendored at `src/vendor/pi/`) and routed through Copilot's `gemini-3.5-flash` by default. The worker plans its own tool calls, decides when it's done, and returns a single text answer (plus a unified diff when `worktree: true`). Implementation: `src/lib/worker-agent/engine.ts` (`runWorkerAgent`) and `src/lib/worker-agent/tools.ts` (the 11 worker-side `AgentTool` definitions).
+Three non-persona MCP tools — `mcp__workers__explore`, `mcp__workers__review`, and `mcp__workers__implement` — delegate scoped work to an **autonomous worker subagent** backed by the **Pi agent runtime** (vendored at `src/vendor/pi/`) and routed through Copilot's `gemini-3.1-pro-preview` by default. The worker plans its own tool calls, decides when it's done, and returns a single text answer (plus a unified diff when `worktree: true`). Implementation: `src/lib/worker-agent/engine.ts` (`runWorkerAgent`) and `src/lib/worker-agent/tools.ts` (the 11 worker-side `AgentTool` definitions).
 
 These tools are exposed under the `workers` MCP server at `/mcp/workers` (or the `/mcp` union path).
 
@@ -357,7 +357,7 @@ These tools are exposed under the `workers` MCP server at `/mcp/workers` (or the
 | `explore` | read-only | `read`, `glob`, `grep`, `code_search`, `web_search`, `fetch_url`, `peer_review`, `advisor` (8) | n/a | Read-only investigation — the worker plans its own searches/reads and returns a single text answer. |
 | `implement` | read+write | explore tools + `edit`, `write`, `bash` (11) | `worktree: boolean` (default `false`) | Scoped coding task; modifies files in your workspace. With `worktree: true` runs in a fresh git worktree and returns Pi's text followed by the unified diff. With `worktree: false` edits in place — concurrent calls race. |
 
-Both tools accept optional `model` (any Copilot catalog model with `tool_calls` support; default `gemini-3.5-flash`) and `thinking` (one of `off`/`minimal`/`low`/`medium`/`high`/`xhigh`, default `high`, silently clamped to the model's allowed range).
+Both tools accept optional `model` (any Copilot catalog model with `tool_calls` support; default `gemini-3.1-pro-preview`) and `thinking` (one of `off`/`minimal`/`low`/`medium`/`high`/`xhigh`, default `high`, silently clamped to the model's allowed range).
 
 Both also accept an optional `workspace` (absolute path) — the working directory the worker operates in. **Default is the proxy's launch cwd** (the directory `github-router start` / `github-router claude` was invoked from); the model can override when the parent agent has multiple workspaces open and needs the worker pointed at a specific one. The override is absolute-only — relative paths are rejected at the MCP boundary with an actionable error so a typo doesn't silently resolve against `process.cwd()` and land somewhere surprising. For `implement` with `worktree: true`, the workspace must be inside a git repository (the engine's existing `createWorktree` hard-errors otherwise). Threat model matches code search: the proxy already runs as the user; no allowlist (the same operator could `Read` / `Bash` the same paths through Claude Code directly). See `runWorkerToolCall` in `src/lib/peer-mcp-personas.ts` for the validation.
 
@@ -366,7 +366,7 @@ Both also accept an optional `workspace` (absolute path) — the working directo
 `workerToolsEnabled()` in `src/routes/mcp/handler.ts` drops both worker tools from `tools/list` AND `tools/call` when EITHER:
 
 1. The operator set `GH_ROUTER_DISABLE_WORKER_TOOLS=1`, OR
-2. `gemini-3.5-flash` is missing from the live Copilot catalog, OR present but lacks `tool_calls` support.
+2. `gemini-3.1-pro-preview` is missing from the live Copilot catalog, OR present but lacks `tool_calls` support.
 
 This is defense-in-depth — a client that hard-codes the tool name still fails at call-time rather than seeing a useless dormant registration. The default model lives at `src/lib/worker-agent/engine.ts:DEFAULT_MODEL` and is re-imported by the handler (`import { DEFAULT_MODEL as WORKER_DEFAULT_MODEL } from "~/lib/worker-agent"`) so there is no parallel constant to drift.
 
@@ -417,9 +417,9 @@ The worker's read-only file tools refuse paths matching `.env*`, `*.pem`, `id_rs
 
 The Pi agent runtime (`@earendil-works/pi-agent-core` + a minimal `pi-ai` slice) is **vendored** at `src/vendor/pi/` rather than depended on via `package.json`. The vendor sync protocol — how to refresh the snapshot, what to keep in sync, and what to deliberately diverge on — is documented in [`pi-vendor-sync.md`](pi-vendor-sync.md). MIT attribution is preserved verbatim in `src/vendor/pi/LICENSE` and via comment headers on every vendored file.
 
-### Compatibility probe (`gemini-3.5-flash` accepts `tools` + `reasoning_effort`)
+### Compatibility probe (`gemini-3.1-pro-preview` accepts `tools` + `reasoning_effort`)
 
-The probe set asserts that Copilot's `/v1/chat/completions` accepts a `tools` array plus `reasoning_effort: "high"` on `gemini-3.5-flash`. Without this contract holding, both worker tools degrade to dormant (the dual gate fires on the catalog check). Probe id `worker_gemini_tools_reasoning` in `scripts/probe-copilot-compat.sh`; matrix row in `docs/copilot-compat-matrix.md`.
+The probe set asserts that Copilot's `/v1/chat/completions` accepts a `tools` array plus `reasoning_effort: "high"` on `gemini-3.1-pro-preview`. Without this contract holding, all worker tools degrade to dormant (the dual gate fires on the catalog check). Probe id `worker_gemini_tools_reasoning` in `scripts/probe-copilot-compat.sh`; matrix row in `docs/copilot-compat-matrix.md`.
 
 ## `stand_in` tool (away-mode advisor)
 

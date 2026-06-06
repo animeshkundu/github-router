@@ -56,7 +56,7 @@ export function standInToolEnabled(): boolean {
  *
  * Returns true iff BOTH:
  *   1. Copilot's live catalog (`state.models?.data`) contains the
- *      worker's default model (`gemini-3.5-flash`) AND that entry
+ *      worker's default model (`gemini-3.1-pro-preview`) AND that entry
  *      advertises `capabilities.supports.tool_calls === true`. The
  *      worker loop is function-calling; a model that can't emit
  *      tool_calls is unusable, so dormant-register (omit from
@@ -80,25 +80,6 @@ export function workerToolsEnabled(): boolean {
   const found = models.find((m) => m.id === WORKER_DEFAULT_MODEL)
   if (!found) return false
   return found.capabilities?.supports?.tool_calls === true
-}
-
-/**
- * Gate for the `gemini-reviewer` persona (a `gemini-3.5-flash` code reviewer
- * on the `peers` server).
- *
- * Returns true iff `gemini-3.5-flash` is present in the live Copilot catalog.
- * Unlike `workerToolsEnabled()` this does NOT require `tool_calls` — the
- * reviewer persona is a plain `/v1/chat/completions` call with no tools, so
- * presence in the catalog is sufficient. Mirrors the dormant-register pattern
- * of the other gates: when absent, `gemini-reviewer` is dropped from the
- * persona list (and thus from `tools/list`, the subagent `.md` set, and the
- * coordinator's routing) so the surface never names a model the catalog
- * can't serve.
- */
-export function geminiFlashAvailable(): boolean {
-  const models = state.models?.data
-  if (!models) return false
-  return models.some((m) => m.id === "gemini-3.5-flash")
 }
 
 /**

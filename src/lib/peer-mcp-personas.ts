@@ -144,12 +144,6 @@ export interface PersonaSpec {
    *  separate from `requiresHttp` so a persona can require HTTP without
    *  also requiring gemini in the catalog (e.g. opus-critic). */
   requiresGeminiCatalog?: boolean
-  /** True when the persona needs `gemini-3.5-flash` in the live catalog
-   *  (gemini-reviewer). When true, `personasFor` / `activePersonas` drop the
-   *  persona if `geminiFlashAvailable()` is false. Distinct from
-   *  `requiresGeminiCatalog` (that gate is the `gemini-3.x-pro` family used by
-   *  gemini-critic). Optional: defaults to false. */
-  requiresGeminiFlashCatalog?: boolean
   /** Effort tiers this persona accepts. Subset of EFFORT_LEVELS. Driven
    *  by empirical latency data — see the EFFORT_LEVELS doc above. Tiers
    *  outside this list are rejected with a clean RPC_INVALID_PARAMS at
@@ -205,14 +199,14 @@ ${COLD_START_CONTRACT}
 
 ${CRITIC_RUBRIC}`
 
-const GEMINI_CRITIC_BASE = `You are gemini-critic, an adversarial reviewer running on Gemini 3.1 Pro. You exist to provide a second-lab perspective: your training data, RLHF priors, and attention patterns are systematically different from the lead orchestrator's (Opus, Anthropic) and from codex-critic (gpt-5.5, OpenAI). Use that to surface blind spots both miss.
+const GEMINI_CRITIC_BASE = `You are gemini-critic, an adversarial reviewer. Your single job is to overcome the lead orchestrator's blind spots — assumptions it didn't notice it was making, failure modes it didn't enumerate, alternatives it didn't consider.
 
-Your strengths the lead may want to draw on:
+The lead routes a brief to you when it needs:
   - long-context reasoning over large artifacts (the brief may include >50k tokens of context)
   - math, proofs, and formally-stated invariants
-  - cross-checking conclusions where codex-critic has already weighed in (the lead may forward you both the artifact and codex-critic's verdict)
+  - a cross-check of a conclusion another critic already reached (the lead may forward you both the artifact and codex-critic's verdict)
 
-You are NOT a helpful assistant. Sycophancy is the failure mode you exist to fight; do not invent issues to look thorough.
+You are NOT a helpful assistant. Sycophancy is the failure mode you exist to fight. Manufactured contrarianism is a different failure of the same shape — silence on good work is a valid and welcome answer; do not invent issues to look thorough.
 
 ${COLD_START_CONTRACT}
 
@@ -241,9 +235,9 @@ Self-reminder (read before every reply):
   Did I rank the finding's severity by impact-in-this-codebase, not by general-principle?
   If everything looks fine, say so cleanly — do not pad with stylistic nitpicks.`
 
-const GEMINI_REVIEWER_BASE = `You are gemini-reviewer, a line-level code reviewer running on Gemini 3.5 Flash at high reasoning. Like codex-reviewer you read concrete code — diffs, single files, function bodies — and surface bugs, edge cases, security issues, and idiom violations at specific line numbers. You are a SECOND-LAB reviewer (Google): your training data and priors differ from the lead (Anthropic) and from codex-reviewer (OpenAI), so you catch a different slice of defects, fast and cheap.
+const GEMINI_REVIEWER_BASE = `You are a line-level code reviewer. You read concrete code — diffs, single files, function bodies — and surface real bugs, edge cases, security / concurrency / resource issues, and idiom violations at specific line numbers. Find what is actually wrong: do not invent issues to look thorough, and do not pad with stylistic nitpicks.
 
-You are not a critic-of-architecture. If the brief is a plan or a high-level design, redirect: "this looks like architecture review; consider codex-critic or gemini-critic." Your tool is the magnifying glass, not the wide-angle lens.
+You are not a critic-of-architecture. If the brief is a plan or a high-level design, say so and stop: "this looks like architecture review, not line-level code review." Your tool is the magnifying glass, not the wide-angle lens.
 
 ${COLD_START_CONTRACT}
 
@@ -347,20 +341,20 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
   {
     agentName: "gemini-reviewer",
     toolNameHttp: "gemini_reviewer",
-    model: "gemini-3.5-flash",
+    model: "gemini-3.1-pro-preview",
     endpoint: "/v1/chat/completions",
     description:
-      "Line-level review of a concrete diff or single file on gemini-3.5-flash (Google, high reasoning): a fast, cheap second-lab code reviewer that catches different defects than codex_reviewer (OpenAI). Use for a quick pass or alongside codex_reviewer for cross-lab coverage. Not for architecture (use codex_critic). Pass artifact verbatim.",
+      "Line-level review of a concrete diff or single file on gemini-3.1-pro (Google, high reasoning): a second-lab code reviewer that catches a different slice of defects than codex_reviewer (OpenAI). Use alongside codex_reviewer for cross-lab coverage of a diff. Not for architecture (use codex_critic / gemini_critic for plans). Pass artifact verbatim.",
     baseInstructions: GEMINI_REVIEWER_BASE,
     agentPrompt: "",
     writeCapable: false,
     // gemini routes only via /v1/chat/completions — the codex-cli stdio
     // bridge can't run it, so it must always use the HTTP backend.
     requiresHttp: true,
-    // Dropped from the persona set when gemini-3.5-flash is absent from the
-    // live catalog (geminiFlashAvailable()). Distinct from gemini-critic's
-    // gemini-3.x-pro gate.
-    requiresGeminiFlashCatalog: true,
+    // Same gemini-3.x-pro catalog gate as gemini-critic (gemini-reviewer runs
+    // on the same gemini-3.1-pro-preview model, just with a reviewer prompt
+    // instead of a critic prompt).
+    requiresGeminiCatalog: true,
     // gemini chat-completions tops out at "high" reasoning in this codebase
     // (same as gemini-critic — no xhigh tier exposed); default to the max.
     allowedEfforts: ["low", "medium", "high"] as const,
@@ -513,7 +507,6 @@ export function buildAgentPrompt(
 export function buildPeerAwarenessSnippet(opts: {
   codexCli: boolean
   geminiAvailable: boolean
-  geminiFlashAvailable?: boolean
   workerToolsAvailable: boolean
   standInAvailable: boolean
   browseAvailable: boolean
@@ -534,10 +527,9 @@ export function buildPeerAwarenessSnippet(opts: {
     "`codex_critic` (gpt-5.5)",
     "`codex_reviewer` (gpt-5.3-codex)",
   ]
-  if (opts.geminiFlashAvailable) {
-    criticList.push("`gemini_reviewer` (gemini-3.5-flash, fast code review)")
-  }
   if (opts.geminiAvailable) {
+    // Both gemini personas share the gemini-3.x-pro catalog gate.
+    criticList.push("`gemini_reviewer` (gemini-3.1-pro, line-level code review)")
     criticList.push("`gemini_critic` (gemini-3.1-pro)")
   }
   criticList.push("`opus_critic` (Opus 4.7)")
@@ -591,20 +583,15 @@ export function buildPeerAwarenessSnippet(opts: {
 export function personasFor(opts: {
   codexCli: boolean
   geminiAvailable: boolean
-  /** Whether `gemini-3.5-flash` is in the live catalog. Gates gemini-reviewer.
-   *  Optional (defaults to false) so existing test callers that don't register
-   *  the flash persona don't need to thread it. */
-  geminiFlashAvailable?: boolean
 }): Array<PersonaSpec> {
   const result: Array<PersonaSpec> = []
   for (const p of PERSONAS_READ) {
-    // Drop personas whose model family is missing from Copilot's live
-    // catalog (gemini-critic via `requiresGeminiCatalog`, gemini-reviewer via
-    // `requiresGeminiFlashCatalog`). Decoupled from `requiresHttp` so a
-    // persona can require HTTP without also requiring gemini in the catalog
-    // (e.g. opus-critic).
+    // Drop personas whose model family is missing from Copilot's live catalog.
+    // Both gemini personas (gemini-critic and gemini-reviewer) gate on the
+    // gemini-3.x-pro family via `requiresGeminiCatalog`. Decoupled from
+    // `requiresHttp` so a persona can require HTTP without also requiring
+    // gemini in the catalog (e.g. opus-critic).
     if (p.requiresGeminiCatalog && !opts.geminiAvailable) continue
-    if (p.requiresGeminiFlashCatalog && !opts.geminiFlashAvailable) continue
     result.push(p)
   }
   if (opts.codexCli) {
@@ -644,7 +631,7 @@ export interface NonPersonaMcpTool {
    * `tools/list` and `tools/call` when the runtime gate is off.
    *
    * - `"worker"` (worker_explore / worker_implement) requires Copilot's
-   *   `gemini-3.5-flash` to be in the live catalog with `tool_calls`
+   *   `gemini-3.1-pro-preview` to be in the live catalog with `tool_calls`
    *   support AND `GH_ROUTER_DISABLE_WORKER_TOOLS=1` to be unset
    *   (see `workerToolsEnabled()` in `routes/mcp/handler.ts`).
    * - `"stand_in"` requires all three of `gpt-5.5`, `claude-opus-4-7`,
@@ -956,11 +943,11 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     },
     // worker_explore / worker_implement — autonomous worker tools backed
     // by the Pi agent loop (`src/lib/worker-agent/engine.ts`), routed
-    // through Copilot's `gemini-3.5-flash` by default.
+    // through Copilot's `gemini-3.1-pro-preview` by default.
     //
     // GATING (`capability: "worker"`): the MCP handler drops both entries
     // from `tools/list` and `tools/call` when `workerToolsEnabled()` is
-    // false. The gate fires when (a) `gemini-3.5-flash` is missing from
+    // false. The gate fires when (a) `gemini-3.1-pro-preview` is missing from
     // the live Copilot catalog (or present but lacks `tool_calls`
     // support), OR (b) the operator opted out via
     // `GH_ROUTER_DISABLE_WORKER_TOOLS=1`. Defense-in-depth: the gate is
@@ -987,7 +974,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       capability: "worker",
       description:
         "Read-only investigation by an autonomous worker (Pi runtime; "
-        + "default model `gemini-3.5-flash`, override via the `model` "
+        + "default model `gemini-3.1-pro-preview`, override via the `model` "
         + "arg with any Copilot-catalog model that advertises "
         + "`tool_calls`). Tools: read, glob, grep, code_search, "
         + "web_search, fetch_url. The worker's system prompt sandboxes "
@@ -1014,7 +1001,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "gemini-3.5-flash). Must advertise tool_calls "
+              + "gemini-3.1-pro-preview). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
               + "the eligible catalog models on mismatch.",
           },
@@ -1054,7 +1041,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       capability: "worker",
       description:
         "Delegates a scoped coding task to an autonomous worker (Pi "
-        + "runtime; default model `gemini-3.5-flash`, override via the "
+        + "runtime; default model `gemini-3.1-pro-preview`, override via the "
         + "`model` arg with any Copilot-catalog model that advertises "
         + "`tool_calls`). Tools: the worker_explore read-only set plus "
         + "edit, write, bash, and codex_review (code review by "
@@ -1091,7 +1078,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "gemini-3.5-flash). Must advertise tool_calls "
+              + "gemini-3.1-pro-preview). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
               + "the eligible catalog models on mismatch.",
           },
@@ -1132,7 +1119,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       capability: "worker",
       description:
         "Read-only code review by an autonomous worker (Pi runtime; "
-        + "default model `gemini-3.5-flash`, override via `model` with any "
+        + "default model `gemini-3.1-pro-preview`, override via `model` with any "
         + "Copilot-catalog model that advertises `tool_calls`). Same "
         + "read-only toolset as `explore` (read, glob, grep, code_search, "
         + "web_search, fetch_url) — it CANNOT edit — but the worker is framed "
@@ -1163,7 +1150,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "gemini-3.5-flash). Must advertise tool_calls "
+              + "gemini-3.1-pro-preview). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
               + "the eligible catalog models on mismatch.",
           },

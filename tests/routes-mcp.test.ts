@@ -181,7 +181,7 @@ describe("/mcp protocol methods", () => {
     expect(res.status).toBe(202)
   })
 
-  test("tools/list returns 4 personas + web + code + stand_in when all required models are in catalog", async () => {
+  test("tools/list returns 5 personas + web + code + stand_in when all required models are in catalog", async () => {
     const { status, json } = await rpc({
       jsonrpc: "2.0",
       id: 2,
@@ -196,6 +196,7 @@ describe("/mcp protocol methods", () => {
       "codex_critic",
       "codex_reviewer",
       "gemini_critic",
+      "gemini_reviewer",
       "opus_critic",
       "stand_in",
       "web",
@@ -1885,7 +1886,7 @@ describe("/mcp web_search tool", () => {
 // =============================================================================
 // The gate has two arms (both must hold for the tools to appear in tools/list
 // AND for tools/call to dispatch):
-//   1. state.models?.data contains `gemini-3.5-flash` with
+//   1. state.models?.data contains `gemini-3.1-pro-preview` with
 //      capabilities.supports.tool_calls === true
 //   2. process.env.GH_ROUTER_DISABLE_WORKER_TOOLS !== "1"
 // The tests below exercise each arm independently plus the full mocked-call
@@ -1964,10 +1965,13 @@ function workerSseResponse(
 }
 
 describe("/mcp worker_* tools — registration + gating", () => {
-  test("tools/list includes worker_explore + worker_implement when gemini-3.5-flash is present with tool_calls", async () => {
+  test("tools/list includes worker_explore + worker_implement when gemini-3.1-pro-preview is present with tool_calls", async () => {
     state.models = {
       object: "list",
-      data: [...baseModels.data, fakeWorkerModel("gemini-3.5-flash")],
+      data: [
+        ...baseModels.data.filter((m) => m.id !== "gemini-3.1-pro-preview"),
+        fakeWorkerModel("gemini-3.1-pro-preview"),
+      ],
     }
     const { status, json } = await rpc({
       jsonrpc: "2.0",
@@ -1987,7 +1991,10 @@ describe("/mcp worker_* tools — registration + gating", () => {
     try {
       state.models = {
         object: "list",
-        data: [...baseModels.data, fakeWorkerModel("gemini-3.5-flash")],
+        data: [
+        ...baseModels.data.filter((m) => m.id !== "gemini-3.1-pro-preview"),
+        fakeWorkerModel("gemini-3.1-pro-preview"),
+      ],
       }
       const { json } = await rpc({
         jsonrpc: "2.0",
@@ -2005,8 +2012,11 @@ describe("/mcp worker_* tools — registration + gating", () => {
     }
   })
 
-  test("tools/list omits both worker tools when gemini-3.5-flash is absent from catalog", async () => {
-    // baseModels already has NO gemini-3.5-flash — just confirm.
+  test("tools/list omits both worker tools when gemini-3.1-pro-preview is absent from catalog", async () => {
+    state.models = {
+      object: "list",
+      data: baseModels.data.filter((m) => m.id !== "gemini-3.1-pro-preview"),
+    }
     const { json } = await rpc({
       jsonrpc: "2.0",
       id: 702,
@@ -2019,12 +2029,12 @@ describe("/mcp worker_* tools — registration + gating", () => {
     expect(names).not.toContain("implement")
   })
 
-  test("tools/list omits both when gemini-3.5-flash is present WITHOUT tool_calls support", async () => {
+  test("tools/list omits both when gemini-3.1-pro-preview is present WITHOUT tool_calls support", async () => {
     state.models = {
       object: "list",
       data: [
-        ...baseModels.data,
-        fakeWorkerModel("gemini-3.5-flash", { tool_calls: false }),
+        ...baseModels.data.filter((m) => m.id !== "gemini-3.1-pro-preview"),
+        fakeWorkerModel("gemini-3.1-pro-preview", { tool_calls: false }),
       ],
     }
     const { json } = await rpc({
@@ -2040,7 +2050,7 @@ describe("/mcp worker_* tools — registration + gating", () => {
   })
 
   test("defense-in-depth: tools/call for worker_explore returns method-not-found when gate fails (even if client bypasses tools/list)", async () => {
-    // No gemini-3.5-flash in catalog → gate fails. A naive client could
+    // No gemini-3.1-pro-preview in catalog → gate fails. A naive client could
     // skip tools/list and hard-code the name; the call-time gate must
     // reject identically to an unknown tool (-32601), keeping the gated
     // surface functionally invisible.
@@ -2062,8 +2072,8 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
     state.models = {
       object: "list",
       data: [
-        ...baseModels.data,
-        fakeWorkerModel("gemini-3.5-flash", {
+        ...baseModels.data.filter((m) => m.id !== "gemini-3.1-pro-preview"),
+        fakeWorkerModel("gemini-3.1-pro-preview", {
           reasoning_effort: ["low", "medium", "high"],
         }),
       ],
@@ -2238,7 +2248,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
   test("model:'nonexistent' returns isError listing the catalog's tool_call-capable model ids", async () => {
     // No fetch mock needed: resolveModelAndThinking fails BEFORE fetch.
     // The error message must enumerate the catalog candidates so the
-    // caller can correct without guessing — gemini-3.5-flash is the
+    // caller can correct without guessing — gemini-3.1-pro-preview is the
     // only tool_call-capable model in the test catalog, so it should
     // be the only one listed.
     const { json } = await rpc({
@@ -2256,10 +2266,10 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
     }
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain("Unknown model: nonexistent")
-    expect(result.content[0].text).toContain("gemini-3.5-flash")
+    expect(result.content[0].text).toContain("gemini-3.1-pro-preview")
   })
 
-  test("thinking:'xhigh' against gemini-3.5-flash (max 'high') silently clamps to 'high' — no clamp notice in response text", async () => {
+  test("thinking:'xhigh' against gemini-3.1-pro-preview (max 'high') silently clamps to 'high' — no clamp notice in response text", async () => {
     let captured: Record<string, unknown> | undefined
     globalThis.fetch = workerSseResponse("silent-thinking-result", {
       capturePayload: (p) => {

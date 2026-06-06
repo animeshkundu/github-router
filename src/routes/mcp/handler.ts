@@ -34,7 +34,6 @@ import {
   browserCompoundToolsEnabled,
   browserPowerToolsEnabled,
   browserToolsEnabled,
-  geminiFlashAvailable,
   standInToolEnabled,
   workerToolsEnabled,
 } from "~/lib/mcp-capabilities"
@@ -271,9 +270,7 @@ function activePersonas(): Array<PersonaSpec> {
   // downstream dispatch, telemetry, and the prompt-window guard all see the
   // SAME effective model with no extra threading.
   return PERSONAS_READ.filter(
-    (p) =>
-      (!p.requiresGeminiCatalog || geminiAvailable())
-      && (!p.requiresGeminiFlashCatalog || geminiFlashAvailable()),
+    (p) => !p.requiresGeminiCatalog || geminiAvailable(),
   ).map((p) =>
     p.toolNameHttp === "opus_critic"
       ? { ...p, model: resolveOpusCriticModel() }
