@@ -304,10 +304,13 @@ export async function handleCompletion(c: Context) {
 
   let response: Response
   try {
+    // retryTransient: true — pre-first-byte retry on a 429/5xx/network blip.
+    // The response body is not consumed until the streaming/non-streaming
+    // branch below, so re-issuing here cannot duplicate streamed output.
     response = await createMessages(resolvedBody, {
       ...selectedModel?.requestHeaders,
       ...effectiveBetas,
-    }, advisorAborter?.signal)
+    }, advisorAborter?.signal, true)
   } catch (error) {
     if (error instanceof HTTPError) {
       const errorBody = await error.response.clone().text().catch(() => "")

@@ -14,6 +14,7 @@ import { UPSTREAM_INACTIVITY_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
 import { buildOpenAIErrorEvent, isControllerClosedError, logStreamError, readIteratorWithTimeout } from "~/lib/stream-relay"
 import { tryRefreshAndRetry } from "~/lib/token"
+import { fetchWithTransientRetry } from "~/lib/upstream-retry"
 import { resolveModel } from "~/lib/utils"
 import {
   createResponses,
@@ -73,7 +74,15 @@ export async function handleResponses(c: Context) {
 
   await injectWebSearchIfNeeded(payload)
 
-  const response = await createResponses(payload, selectedModel?.requestHeaders).catch(
+  // retryTransient: true — pre-first-byte retry; the body is consumed only
+  // after the ok-check inside createResponses, so a re-issue here cannot
+  // duplicate streamed output.
+  const response = await createResponses(
+    payload,
+    selectedModel?.requestHeaders,
+    undefined,
+    true,
+  ).catch(
     async (error: unknown) => {
       if (error instanceof HTTPError) {
         const errorBody = await error.response.clone().text().catch(() => "")
@@ -407,7 +416,14 @@ export async function handleResponsesCompact(c: Context) {
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS || 300_000),
   })
-  const response = await tryRefreshAndRetry(doFetch, "/responses/compact")
+  // Non-streaming native compact — retry the transient class (429/5xx/
+  // network) around the 401-refresh path. A 404 (Copilot doesn't support
+  // this endpoint) is NOT in the retry set, so the synthetic-compaction
+  // fallback below still triggers on the first attempt.
+  const response = await fetchWithTransientRetry(
+    () => tryRefreshAndRetry(doFetch, "/responses/compact"),
+    { label: "/responses/compact" },
+  )
 
   if (response.ok) {
     logRequest(
@@ -465,7 +481,14 @@ async function syntheticCompact(
 
   let result: ResponsesApiResponse
   try {
-    result = (await createResponses(payload)) as ResponsesApiResponse
+    // Non-streaming synthetic compaction — whole call is pre-first-byte, so
+    // retryTransient: true is safe.
+    result = (await createResponses(
+      payload,
+      undefined,
+      undefined,
+      true,
+    )) as ResponsesApiResponse
   } catch (error) {
     if (error instanceof HTTPError) {
       logRequest(

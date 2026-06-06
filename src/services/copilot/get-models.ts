@@ -1,11 +1,28 @@
 import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
+import { tryRefreshAndRetry } from "~/lib/token"
+import { fetchWithTransientRetry } from "~/lib/upstream-retry"
 
 export const getModels = async () => {
-  const response = await fetch(`${copilotBaseUrl(state)}/models`, {
-    headers: copilotHeaders(state),
-  })
+  // Startup catalog fetch — a transient 429/5xx/network blip here leaves
+  // the model catalog empty for the whole session, so retry it. This is a
+  // Copilot-token GET, so it keeps the 401-refresh path
+  // (`tryRefreshAndRetry`) nested INSIDE the transient retry: 401 →
+  // refresh once (never retried by the transient layer); 429/5xx/network
+  // → bounded retry with backoff. A consumed (non-streamed) GET body is
+  // safe to replay.
+  const response = await fetchWithTransientRetry(
+    () =>
+      tryRefreshAndRetry(
+        () =>
+          fetch(`${copilotBaseUrl(state)}/models`, {
+            headers: copilotHeaders(state),
+          }),
+        "/models",
+      ),
+    { label: "/models" },
+  )
 
   if (!response.ok) throw new HTTPError("Failed to get models", response)
 

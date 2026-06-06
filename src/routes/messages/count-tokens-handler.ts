@@ -113,10 +113,12 @@ export async function handleCountTokens(c: Context) {
   const modelId = resolvedModel ?? originalModel
   const selectedModel = state.models?.data.find((m) => m.id === modelId)
 
+  // retryTransient: true — count_tokens is non-streaming, so the whole call
+  // is pre-first-byte and a transient retry is safe.
   const response = await countTokens(finalBody, {
     ...selectedModel?.requestHeaders,
     ...extraHeaders,
-  })
+  }, undefined, true)
   const responseBody = await parseJsonOrDiagnose<{ input_tokens?: number }>(
     response,
     c.req.path,
