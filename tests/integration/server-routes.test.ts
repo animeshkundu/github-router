@@ -756,7 +756,7 @@ test("mcp scoped /mcp/search exposes only the search group's tools (code + web)"
   resetState()
   state.peerMcpNonce = MCP_NONCE
   // Pin worker / browser / stand_in gates off so the search group is the
-  // deterministic {code, web} pair regardless of the host catalog.
+  // deterministic {code, web} set regardless of the host catalog.
   const savedDisableWorker = process.env.GH_ROUTER_DISABLE_WORKER_TOOLS
   process.env.GH_ROUTER_DISABLE_WORKER_TOOLS = "1"
   try {

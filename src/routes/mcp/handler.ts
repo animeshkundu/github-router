@@ -25,6 +25,7 @@ import {
   type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
 import { createMessages } from "~/services/copilot/create-messages"
+import { withTransientRetry } from "~/lib/upstream-retry"
 import {
   createResponses,
   type ResponsesApiResponse,
@@ -34,6 +35,7 @@ import {
   browserCompoundToolsEnabled,
   browserPowerToolsEnabled,
   browserToolsEnabled,
+  semanticSearchEnabled,
   standInToolEnabled,
   workerToolsEnabled,
 } from "~/lib/mcp-capabilities"
@@ -43,6 +45,7 @@ import {
   currentInFlight,
   __resetInFlightForTests as __resetInFlightSharedForTests,
 } from "~/lib/mcp-inflight"
+import { browserPreflight } from "~/lib/browser-mcp/dispatch"
 
 const MCP_PROTOCOL_VERSION = "2025-06-18"
 const SERVER_NAME = "github-router-peers"
@@ -331,6 +334,10 @@ function toolEntries(scope: McpScope): Array<ToolEntry> {
       if (t.capability === "worker") return workerToolsEnabled()
       if (t.capability === "stand_in") return standInToolEnabled()
       if (t.capability === "browser") return browserToolsEnabled()
+      // semantic_search is availability-gated (provisioned on disk +
+      // smoke-passed AND not opted out). Absent artifacts ⇒ invisible,
+      // so the CI/sandbox `{code, web}` surface is unchanged.
+      if (t.capability === "semantic_search") return semanticSearchEnabled()
       // Compound tools require BOTH the browser surface opt-in AND a
       // compressor backend in the catalog. Without browseEnabled the
       // compound tools must be invisible alongside the L0/L1 primitives.
@@ -419,6 +426,21 @@ function extractMessagesText(response: MessagesApiResponse): string {
 interface ToolErrorContent {
   content: Array<{ type: "text"; text: string }>
   isError: true
+}
+
+/**
+ * True for the capability tags whose tools dispatch through
+ * `dispatchBrowserTool` and therefore need the bridge-readiness
+ * pre-flight hoisted ahead of `acquireInFlightSlot()`. Every browser
+ * capability is a `browser*` literal (`browser` / `browser_compound` /
+ * `browser_power`), so a prefix test covers all current and future
+ * browser capabilities without a hardcoded list to keep in sync with
+ * the `capability === "browser*"` gate chain below.
+ */
+function isBrowserCapability(
+  capability: NonPersonaMcpTool["capability"],
+): boolean {
+  return typeof capability === "string" && capability.startsWith("browser")
 }
 
 function toolError(message: string): ToolErrorContent {
@@ -716,10 +738,9 @@ export async function dispatchModelCall(args: {
       // levels (CLAUDE.md "Thinking-mode translation").
       reasoning: { effort: args.effort },
     }
-    const response = (await createResponses(
-      payload,
-      undefined,
-      args.signal,
+    const response = (await withTransientRetry(
+      () => createResponses(payload, undefined, args.signal),
+      { signal: args.signal, label: resolvedModel },
     )) as ResponsesApiResponse
     return extractResponsesText(response)
   }
@@ -751,7 +772,10 @@ export async function dispatchModelCall(args: {
       output_config: { effort: args.effort },
       messages: [{ role: "user", content: args.userText }],
     })
-    const response = await createMessages(body, undefined, args.signal)
+    const response = await withTransientRetry(
+      () => createMessages(body, undefined, args.signal),
+      { signal: args.signal, label: resolvedModel },
+    )
     const json = (await response.json()) as MessagesApiResponse
     return extractMessagesText(json)
   }
@@ -770,10 +794,9 @@ export async function dispatchModelCall(args: {
     // schema; the latter surfaces through the existing tool-error path.
     reasoning_effort: args.effort,
   }
-  const response = (await createChatCompletions(
-    payload,
-    undefined,
-    args.signal,
+  const response = (await withTransientRetry(
+    () => createChatCompletions(payload, undefined, args.signal),
+    { signal: args.signal, label: resolvedModel },
   )) as ChatCompletionResponse
   return extractChatCompletionText(response)
 }
@@ -912,6 +935,17 @@ async function handleToolsCall(
   }
   if (
     nonPersonaTool
+    && nonPersonaTool.capability === "semantic_search"
+    && !semanticSearchEnabled()
+  ) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+  if (
+    nonPersonaTool
     && nonPersonaTool.capability === "browser"
     && !browserToolsEnabled()
   ) {
@@ -1021,10 +1055,31 @@ async function handleToolsCall(
   // jsonPathPreflightCap returns undefined when persona lookup misses,
   // which naturally exempts non-persona tools).
 
+  // Browser readiness pre-flight (BOTH paths). Browser tools dispatch
+  // through `dispatchBrowserTool`, whose head awaits `ensureBridgeReady()`.
+  // On a cold-start NMH install that probe can take a noticeable beat
+  // (Windows reg.exe spawn). Running it INSIDE the held slot meant up to
+  // MAX_INFLIGHT_TOOLS_CALL concurrent browser calls could park their
+  // slots on one shared probe and lock peers/search/workers/decide out of
+  // the pool. Hoist it here, before acquireInFlightSlot(), exactly like
+  // the persona pre-flights above: on a blocked URL or install_required
+  // we return the structured envelope WITHOUT taking a slot. MUST stay
+  // before acquireInFlightSlot per the load-bearing invariant (a reject
+  // after acquisition leaks a concurrency slot). The `_inFlightReady`
+  // single-flight keeps this cheap+idempotent under a concurrent burst;
+  // the slot-side `dispatchBrowserTool` re-runs `ensureBridgeReady()` to
+  // fetch fresh port/token at use time (NOT threaded across the slot wait,
+  // which would be a TOCTOU hazard if the bridge auto-reloads while this
+  // caller is parked).
+  if (nonPersonaTool && isBrowserCapability(nonPersonaTool.capability)) {
+    const { envelope } = await browserPreflight(nonPersonaTool.toolNameHttp, args)
+    if (envelope) return rpcResult(body.id, envelope)
+  }
+
   // Documented per-call cap. NOT silent serialization — surface the
   // backpressure so Opus knows to retry shortly. The slot is held in
   // the shared mcp-inflight counter so worker-side nested peer/advisor
-  // calls compete for the same 8-wide budget.
+  // calls compete for the same 32-wide budget.
   const release = acquireInFlightSlot()
   if (!release) {
     return rpcResult(body.id, {
@@ -1048,7 +1103,7 @@ async function handleToolsCall(
   // a closure-captured `release` callback. `cancelInflight()` (called
   // from `notifications/cancelled` and from `handleToolsCallSSE.cancel()`)
   // invokes BOTH: aborting the upstream fetch tears down the socket,
-  // and synchronously releasing the slot frees the cap=8 budget without
+  // and synchronously releasing the slot frees the cap=32 budget without
   // waiting for the upstream call's promise to settle.
   //
   // The `finally` block at the bottom of this function only deletes the

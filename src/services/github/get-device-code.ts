@@ -5,16 +5,24 @@ import {
   standardHeaders,
 } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
+import { fetchWithTransientRetry } from "~/lib/upstream-retry"
 
 export async function getDeviceCode(): Promise<DeviceCodeResponse> {
-  const response = await fetch(`${GITHUB_BASE_URL}/login/device/code`, {
-    method: "POST",
-    headers: standardHeaders(),
-    body: JSON.stringify({
-      client_id: GITHUB_CLIENT_ID,
-      scope: GITHUB_APP_SCOPES,
-    }),
-  })
+  // Idempotent device-code bootstrap POST (just requests a fresh code) — a
+  // transient 429/5xx/network blip here aborts the whole login flow, so
+  // retry the transient class. No auth on this call, so no 401 concern.
+  const response = await fetchWithTransientRetry(
+    () =>
+      fetch(`${GITHUB_BASE_URL}/login/device/code`, {
+        method: "POST",
+        headers: standardHeaders(),
+        body: JSON.stringify({
+          client_id: GITHUB_CLIENT_ID,
+          scope: GITHUB_APP_SCOPES,
+        }),
+      }),
+    { label: "/login/device/code" },
+  )
 
   if (!response.ok) throw new HTTPError("Failed to get device code", response)
 

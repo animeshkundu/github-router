@@ -18,6 +18,125 @@ function baseName(p: string): string {
 }
 
 /**
+ * Extract the first regular-file member whose basename equals
+ * `wantBasename` from an **xz-compressed tarball** (`.tar.xz`).
+ *
+ * Node's `zlib` has no xz/lzma decoder and the project carries no xz
+ * dependency, so this shells out to the system `tar` (universally
+ * present on macOS/Linux, which is the ONLY place a `.tar.xz` is ever
+ * fetched — the colgrep Windows asset is a `.zip` handled by
+ * `extractZipMember`). The xz path therefore never runs on the Windows
+ * primary deployment target.
+ *
+ * Safety: the archive is extracted into a fresh, caller-provided temp
+ * dir (NOT the cwd) and we read back ONLY the named regular-file member.
+ * `tar` is invoked with `shell:false` (argv array, no metacharacter
+ * surface) and `--no-same-owner` so a hostile archive can't request a
+ * uid/gid change. The colgrep tarball nests its binary one dir deep
+ * (`colgrep-<triple>/colgrep`), so we search recursively for the
+ * basename rather than assuming a flat layout, and never follow
+ * symlinks during the walk (closes the escape-the-extract-dir vector).
+ *
+ * Returns the member bytes, or null if the member is absent or `tar`
+ * fails. The provisioner treats null as "skip / mismatch".
+ */
+export async function extractTarXzMember(
+  buf: Buffer,
+  wantBasename: string,
+  tmpDir: string,
+): Promise<Buffer | null> {
+  const { spawn } = await import("node:child_process")
+  const fs = await import("node:fs/promises")
+  const path = await import("node:path")
+
+  const archivePath = path.join(tmpDir, "archive.tar.xz")
+  const extractDir = path.join(tmpDir, "x")
+  try {
+    await fs.mkdir(extractDir, { recursive: true })
+    await fs.writeFile(archivePath, buf)
+  } catch {
+    return null
+  }
+
+  const ok = await new Promise<boolean>((resolve) => {
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(
+        "tar",
+        ["-xJf", archivePath, "-C", extractDir, "--no-same-owner"],
+        { stdio: "ignore", windowsHide: true },
+      )
+    } catch {
+      resolve(false)
+      return
+    }
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL")
+      } catch {
+        // already gone
+      }
+      resolve(false)
+    }, 60_000)
+    timer.unref?.()
+    child.on("error", () => {
+      clearTimeout(timer)
+      resolve(false)
+    })
+    child.on("close", (code) => {
+      clearTimeout(timer)
+      resolve(code === 0)
+    })
+  })
+  if (!ok) return null
+
+  const wants = new Set([wantBasename, `${wantBasename}.exe`])
+  const found = await findRegularFile(fs, path, extractDir, wants, 6)
+  if (!found) return null
+  try {
+    return await fs.readFile(found)
+  } catch {
+    return null
+  }
+}
+
+async function findRegularFile(
+  fs: typeof import("node:fs/promises"),
+  path: typeof import("node:path"),
+  dir: string,
+  wants: Set<string>,
+  depthBudget: number,
+): Promise<string | null> {
+  if (depthBudget < 0) return null
+  let entries: Array<import("node:fs").Dirent>
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true })
+  } catch {
+    return null
+  }
+  // Files first (so a matching regular file outranks a same-named dir).
+  for (const e of entries) {
+    if (e.isFile() && wants.has(e.name)) {
+      return path.join(dir, e.name)
+    }
+  }
+  for (const e of entries) {
+    // Never follow symlinks during the walk — only descend real dirs.
+    if (e.isDirectory()) {
+      const hit = await findRegularFile(
+        fs,
+        path,
+        path.join(dir, e.name),
+        wants,
+        depthBudget - 1,
+      )
+      if (hit) return hit
+    }
+  }
+  return null
+}
+
+/**
  * Extract the first REGULAR-FILE tar member whose basename equals
  * `wantBasename` (optionally with a `.exe` suffix). Returns its bytes,
  * or null if absent. `buf` is the gzip-compressed tarball.

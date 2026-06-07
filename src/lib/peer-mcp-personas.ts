@@ -24,6 +24,7 @@
 import path from "node:path"
 
 import { searchCode } from "./code-search"
+import { runSemanticSearch } from "./colbert/runner"
 // Static import is safe: the previous module-init cycle (peer-mcp-personas
 // → worker-agent/index → engine → tools → peer-mcp-personas) was caused
 // by a top-level `assertCriticsMatchPersonas()` call in tools.ts that
@@ -509,6 +510,7 @@ export function buildPeerAwarenessSnippet(opts: {
   geminiAvailable: boolean
   workerToolsAvailable: boolean
   standInAvailable: boolean
+  semanticSearchAvailable?: boolean
   browseAvailable: boolean
   powerBrowseAvailable?: boolean
   /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
@@ -543,11 +545,11 @@ export function buildPeerAwarenessSnippet(opts: {
   // appear when their gate is on, so the snippet never names a tool
   // missing from the live tools/list.
   const para2Parts: Array<string> = [
-    `\`mcp__${searchKey}__code\` returns ranked code-discovery hits (BM25F + tree-sitter ranking, no additional model call). Multiple independent queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, \`.csv\`, \`.env*\`, config-only wiring), \`grep\`/\`glob\` still apply.`,
+    `\`mcp__${searchKey}__code\` returns ranked code-discovery hits (BM25F + tree-sitter ranking, no additional model call) and is the one-stop code search: \`complete\` for the exhaustive match set, \`ast_pattern\`+\`ast_lang\` for multi-line AST structures (via ast-grep), \`scan\` for a whole-workspace symbol outline, \`multiline\` for cross-line regex. Multiple independent queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, \`.csv\`, \`.env*\`, config-only wiring), \`grep\`/\`glob\` still apply.`,
   ]
   if (opts.workerToolsAvailable) {
     para2Parts.push(
-      `\`mcp__${workersKey}__explore\` runs a Gemini-backed read-only worker that returns a summary, using its own context rather than yours; concurrent launches share the \`MAX_INFLIGHT_TOOLS_CALL=8\` cap with operator traffic.`,
+      `\`mcp__${workersKey}__explore\` runs a Gemini-backed read-only worker that returns a summary, using its own context rather than yours; concurrent launches share the \`MAX_INFLIGHT_TOOLS_CALL=32\` cap with operator traffic.`,
       `\`mcp__${workersKey}__review\` is the same read-only worker framed as a code reviewer that reads the relevant code itself to verify a change or claim and reports findings with severity, so it checks surrounding context the \`peers\` critics (single stateless calls on the pasted artifact) cannot.`,
       `\`mcp__${workersKey}__implement\` is the same worker with edit/write/bash; \`worktree: true\` runs it in an isolated git worktree and returns the diff.`,
       "Workers themselves have `code_search` in their toolset.",
@@ -556,6 +558,11 @@ export function buildPeerAwarenessSnippet(opts: {
   para2Parts.push(
     `\`mcp__${searchKey}__web\` surfaces citable sources for docs, errors, and upstream issues.`,
   )
+  if (opts.semanticSearchAvailable) {
+    para2Parts.push(
+      `\`mcp__${searchKey}__semantic_search\` is ColBERT semantic code search over a per-workspace index and is the first search to try for intent/concept questions ("where is retry/backoff handled", "how does auth work") that a lexical \`code\`/grep search would miss; reserve lexical \`code\`/grep for exact symbols/strings. It returns honest \`building\`/\`stale\`/\`unavailable\` notices and never silently falls back to lexical.`,
+    )
+  }
   if (opts.standInAvailable) {
     para2Parts.push(
       `\`mcp__${decideKey}__stand_in\` provides three-lab consensus for decision tiebreak when the user is unavailable.`,
@@ -608,7 +615,7 @@ export function personasFor(opts: {
  *
  * Registered alongside personas in `handler.ts:toolEntries()` and
  * dispatched by `handler.ts:handleToolsCall` after the persona lookup
- * falls through. They count against the same MAX_INFLIGHT_TOOLS_CALL=8
+ * falls through. They count against the same MAX_INFLIGHT_TOOLS_CALL=32
  * cap (keeps slot accounting symmetric across all `tools/call`s) but
  * skip the per-persona effort gate and the `predictedTooLong` pre-flight
  * cap — those gates only make sense for thinking-budget-bearing peer LLM
@@ -657,7 +664,7 @@ export interface NonPersonaMcpTool {
    * once the proxy is in claude mode (loopback + nonce already gate
    * `/mcp` itself).
    */
-  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power"
+  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "semantic_search"
   /**
    * Server-side handler. Receives the raw `arguments` object from the
    * `tools/call` request and an optional AbortSignal that is signalled
@@ -791,7 +798,9 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         "and Glob for file-name patterns (no content match). " +
         "`workspace` is any absolute path the proxy process can " +
         "read — typically the project root or a sub-tree you're " +
-        "working in.",
+        "working in. Each response also carries a tree-sitter structural " +
+        "outline of the matched files (`summary` on by default; set it " +
+        "false to omit).",
       inputSchema: {
         type: "object",
         required: ["query", "workspace"],
@@ -828,7 +837,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           },
           limit: {
             type: "number",
-            description: "Max hits to return (default 20).",
+            description: "Max hits to return (default 200).",
           },
           structural: {
             type: "string",
@@ -841,6 +850,68 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               "Both modes share a 200ms wall-clock budget; on budget " +
               "exhaustion the response includes `notice` and remaining " +
               "hits fall back to the regex symbol heuristic.",
+          },
+          summary: {
+            type: "boolean",
+            description:
+              "Structural summary, ON BY DEFAULT: the response includes " +
+              "`outlines` — a tree-sitter outline (top-level symbols + " +
+              "line numbers) of the distinct files in the result set " +
+              "(first 10, in result order), a compact map of where the " +
+              "matches live that augments each hit's `snippet`. Set false " +
+              "to omit it when you only need the matching lines.",
+          },
+          complete: {
+            type: "boolean",
+            description:
+              "Exhaustiveness. Default false — ranked mode applies a " +
+              "precision shoulder cut + a per-file cap so you aren't " +
+              "overwhelmed, and the response `notice` tells you when " +
+              "matches were hidden. Set true to disable both and return " +
+              "the COMPLETE match set (every line `grep` would find, " +
+              "reordered by relevance), capped only by `limit` — use it " +
+              "when you must not miss any occurrence (e.g. \"every caller " +
+              "of X\", a rename, an audit).",
+          },
+          multiline: {
+            type: "boolean",
+            description:
+              "Default false. Set true WITH mode:'regex' to let a pattern " +
+              "span newlines (ripgrep -U), e.g. 'foo[\\s\\S]*?bar' across " +
+              "lines; the snippet is the whole matched region and `line` is " +
+              "its start. (literal/ranked queries can't contain a newline, " +
+              "so cross-line matching is a regex-mode feature.) Off by " +
+              "default keeps the line-oriented recall floor.",
+          },
+          scan: {
+            type: "boolean",
+            description:
+              "Default false. Set true to make `outlines` a tree-sitter " +
+              "symbol map of the ENTIRE workspace (every non-ignored " +
+              "source file), not just the matched files — use it to map " +
+              "an unfamiliar codebase in one call. Capped; `notice` " +
+              "reports coverage when truncated. Independent of which " +
+              "files matched the query.",
+          },
+          ast_pattern: {
+            type: "string",
+            description:
+              "ast-grep structural pattern (e.g. 'function $F($$$) { $$$ }'). " +
+              "When set, matches come from ast-grep INSTEAD of ripgrep — " +
+              "use it to match multi-line AST shapes the regex modes can't " +
+              "express. Takes PRECEDENCE over `query` for matching (but " +
+              "`query` is still required). REQUIRES `ast_lang`. Returns the " +
+              "same {file,line,snippet} shape. If ast-grep isn't installed, " +
+              "you get a `notice` to run it directly — it never falls back to regex.",
+          },
+          ast_lang: {
+            type: "string",
+            description:
+              "Grammar for `ast_pattern` (REQUIRED alongside it): 'ts' | " +
+              "'tsx' | 'js' | 'jsx' | 'py' | 'rust' | 'go' | 'java' | 'cpp' | " +
+              "'c' | … ast-grep parses the pattern in this language; omitting " +
+              "it returns a `notice` (no language is guessed, and without it " +
+              "ast-grep would cross-match every language and return garbage).",
           },
         },
       },
@@ -869,6 +940,21 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
                 args.structural === "full" || args.structural === "topN"
                   ? args.structural
                   : undefined,
+              summary:
+                typeof args.summary === "boolean" ? args.summary : undefined,
+              complete:
+                typeof args.complete === "boolean" ? args.complete : undefined,
+              multiline:
+                typeof args.multiline === "boolean"
+                  ? args.multiline
+                  : undefined,
+              scan: typeof args.scan === "boolean" ? args.scan : undefined,
+              ast_pattern:
+                typeof args.ast_pattern === "string"
+                  ? args.ast_pattern
+                  : undefined,
+              ast_lang:
+                typeof args.ast_lang === "string" ? args.ast_lang : undefined,
             },
             signal,
           )
@@ -890,15 +976,22 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             file: string
             line: number
             snippet: string
+            role?: "definition"
           }> = []
           let totalBytes = 0
           let sizeCapped = false
           for (const hit of result.results) {
-            const next = {
+            const next: {
+              file: string
+              line: number
+              snippet: string
+              role?: "definition"
+            } = {
               file: hit.file,
               line: hit.line,
               snippet: hit.snippet,
             }
+            if (hit.role) next.role = hit.role
             const nextBytes = Buffer.byteLength(JSON.stringify(next), "utf8")
             if (trimmedHits.length > 0 && totalBytes + nextBytes > SIZE_CAP_BYTES) {
               sizeCapped = true
@@ -909,12 +1002,37 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           }
 
           const minimal: {
-            results: Array<{ file: string; line: number; snippet: string }>
+            results: Array<{
+              file: string
+              line: number
+              snippet: string
+              role?: "definition"
+            }>
             truncated: boolean
+            outlines?: typeof result.outlines
             notice?: string
           } = {
             results: trimmedHits,
             truncated: result.truncated || sizeCapped,
+          }
+          // Outlines are supplementary to the hits — fit them into
+          // whatever response budget the (already-capped) results left,
+          // so the default-on summary can never push the envelope past
+          // SIZE_CAP_BYTES.
+          let outlinesDropped = false
+          if (result.outlines && result.outlines.length > 0) {
+            const fitted: NonNullable<typeof result.outlines> = []
+            let outlineBytes = 0
+            for (const o of result.outlines) {
+              const ob = Buffer.byteLength(JSON.stringify(o), "utf8")
+              if (totalBytes + outlineBytes + ob > SIZE_CAP_BYTES) {
+                outlinesDropped = true
+                break
+              }
+              fitted.push(o)
+              outlineBytes += ob
+            }
+            if (fitted.length > 0) minimal.outlines = fitted
           }
           // Notice priority: size-cap > structural-budget. Size-cap
           // means the model is missing results entirely and should
@@ -926,6 +1044,9 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               `response size limit reached at ${trimmedHits.length} hits ` +
               `(~${Math.round(totalBytes / 1024)}KB); narrow your query ` +
               `or lower 'limit' to get all relevant matches`
+          } else if (outlinesDropped) {
+            minimal.notice =
+              "some file outlines were omitted to fit the response size cap"
           } else if (typeof result.notice === "string") {
             minimal.notice = result.notice
           }
@@ -936,6 +1057,164 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           const msg = err instanceof Error ? err.message : String(err)
           return {
             content: [{ type: "text", text: `code_search failed: ${msg}` }],
+            isError: true,
+          }
+        }
+      },
+    },
+    // semantic_search — ColBERT/PLAID semantic code search via the
+    // github-router-managed `colgrep` sidecar (group `search`, joins
+    // `code` + `web`). Implementation: src/lib/colbert/.
+    //
+    // GATING (`capability: "semantic_search"`): the MCP handler drops
+    // this entry from `tools/list` AND `tools/call` when
+    // `semanticSearchEnabled()` is false — i.e. when opted out
+    // (`GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1`) OR the colgrep
+    // binary/model/ORT aren't provisioned + smoke-passed on disk. The
+    // availability check is the load-bearing regression guard: on CI /
+    // sandboxes / no-network the artifacts are absent, so the tool is
+    // invisible and the `{code, web}` surface is unchanged.
+    //
+    // CONTRACT (no lexical fallback): this tool NEVER runs another
+    // search. A building/stale index returns an honest `status` +
+    // `notice` (NO results, NOT isError); an absent/failed/unavailable
+    // index returns an `isError` envelope telling the model to use
+    // `code` (lexical) itself. Input-shape failures (missing/relative
+    // workspace, empty query) are `isError`.
+    //
+    // RESPONSE MINIMALITY: colgrep `--json` carries the full source + 5
+    // analysis layers per hit; the handler trims to {file, line,
+    // endLine?, name?, score, snippet} and NEVER logs raw colgrep
+    // stdout/stderr (it embeds source — a telemetry-leak vector).
+    {
+      toolNameHttp: "semantic_search",
+      group: "search",
+      capability: "semantic_search",
+      description:
+        "Semantic code search by MEANING, not text (ColBERT late-interaction "
+        + "over a per-workspace index). Best for natural-language intent queries "
+        + "where the literal keywords may not appear ('where do we rate-limit', "
+        + "'auth token refresh', 'retry/backoff around the upstream fetch'). For "
+        + "exact symbol lookup ('where is X defined', 'callers of Y') prefer "
+        + "`code` (lexical) — it's faster and exact. Returns a `status` field "
+        + "(ready / building / stale / unavailable / failed); while the index is "
+        + "building or stale it returns a status + notice and NO results (it does "
+        + "NOT fall back to another search) — run `code` yourself if you need "
+        + "results immediately. `workspace` is any absolute path; the index is "
+        + "built and cached by the proxy on first use.",
+      inputSchema: {
+        type: "object",
+        required: ["query"],
+        additionalProperties: false,
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "Natural-language intent, e.g. 'where do we validate JWT expiry' "
+              + "or 'retry/backoff around the upstream fetch'. Semantic — finds "
+              + "code by meaning even when the words don't appear literally.",
+          },
+          workspace: {
+            type: "string",
+            description:
+              "Absolute path to the repo/subtree to search. Defaults to the "
+              + "proxy launch cwd. Must be absolute.",
+          },
+          limit: {
+            type: "integer",
+            description: "Max results (default 15).",
+          },
+          pattern: {
+            type: "string",
+            description:
+              "Optional regex pre-filter (colgrep -e): grep first, then rank the "
+              + "matches semantically. Use to scope a semantic ranking to e.g. "
+              + "async fns.",
+          },
+        },
+      },
+      async handler(
+        args: Record<string, unknown>,
+        signal?: AbortSignal,
+      ): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        const query = typeof args.query === "string" ? args.query.trim() : ""
+        if (!query) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "semantic_search: arguments.query is required (must be a non-empty string)",
+              },
+            ],
+            isError: true,
+          }
+        }
+        // workspace defaults to the proxy launch cwd; if provided it
+        // MUST be absolute (mirrors runWorkerToolCall's absolute-only
+        // boundary check — a typo must not silently resolve against cwd).
+        let workspace: string
+        if (args.workspace === undefined) {
+          workspace = process.cwd()
+        } else if (typeof args.workspace === "string" && path.isAbsolute(args.workspace)) {
+          workspace = args.workspace
+        } else {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "semantic_search: arguments.workspace must be an ABSOLUTE path (or omitted to use the proxy launch cwd)",
+              },
+            ],
+            isError: true,
+          }
+        }
+        const limit =
+          typeof args.limit === "number" && Number.isFinite(args.limit)
+            ? args.limit
+            : undefined
+        const pattern =
+          typeof args.pattern === "string" && args.pattern.length > 0
+            ? args.pattern
+            : undefined
+        try {
+          const result = await runSemanticSearch({
+            query,
+            workspace,
+            limit,
+            pattern,
+            signal,
+          })
+          // Minimal-surface envelope: status + (results | notice) +
+          // source. isError is set by the runner for unavailable/failed
+          // (the model is told to use `code`); building/stale carry a
+          // notice and no results but are NOT errors.
+          const envelope: Record<string, unknown> = { status: result.status }
+          if (result.results) envelope.results = result.results
+          if (result.source) envelope.source = result.source
+          if (result.notice) envelope.notice = result.notice
+          return {
+            content: [{ type: "text", text: JSON.stringify(envelope, null, 2) }],
+            isError: result.isError === true,
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    status: "failed",
+                    notice: `semantic_search failed: ${msg}; use code (lexical) instead`,
+                  },
+                  null,
+                  2,
+                ),
+              },
+            ],
             isError: true,
           }
         }

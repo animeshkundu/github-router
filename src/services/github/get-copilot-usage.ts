@@ -1,11 +1,18 @@
 import { GITHUB_API_BASE_URL, githubHeaders } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
+import { fetchWithTransientRetry } from "~/lib/upstream-retry"
 
 export const getCopilotUsage = async (): Promise<CopilotUsageResponse> => {
-  const response = await fetch(`${GITHUB_API_BASE_URL}/copilot_internal/user`, {
-    headers: githubHeaders(state),
-  })
+  // GitHub PAT GET — retry transient 429/5xx/network; a 401 (bad PAT) fails
+  // fast (not retried by the helper).
+  const response = await fetchWithTransientRetry(
+    () =>
+      fetch(`${GITHUB_API_BASE_URL}/copilot_internal/user`, {
+        headers: githubHeaders(state),
+      }),
+    { label: "/copilot_internal/user" },
+  )
 
   if (!response.ok) {
     throw new HTTPError("Failed to get Copilot usage", response)

@@ -295,6 +295,78 @@ export interface DispatchOpts {
   timeoutMs?: number
 }
 
+type ToolEnvelope = {
+  content: Array<{ type: "text"; text: string }>
+  isError?: boolean
+}
+
+function blockedUrlEnvelope(reason: string | undefined): ToolEnvelope {
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({ blocked: true, reason }, null, 2),
+      },
+    ],
+    isError: true,
+  }
+}
+
+/**
+ * Pre-slot readiness gate for browser_* tools. Runs the SAME cheap,
+ * fail-fast checks `dispatchBrowserTool` runs at its head (the pure
+ * URL-policy block and `ensureBridgeReady()`), but is meant to be
+ * invoked by the MCP route handler BEFORE it acquires a concurrency
+ * slot, mirroring how persona pre-flights (`predictedWindowOverflow` /
+ * `jsonPathPreflightCap`) run before `acquireInFlightSlot()`.
+ *
+ * Returns `{ envelope }` when the call must be rejected up front (a
+ * blocked URL, or the bridge/extension isn't installed, i.e. the
+ * structured `install_required` payload). The handler returns that
+ * envelope WITHOUT having taken a slot, so a cold-start NMH install
+ * can't park up to N slots on one shared readiness probe and lock out
+ * peers / search / workers / decide. Returns `{ envelope: undefined }`
+ * when the call should proceed to slot acquisition + dispatch.
+ *
+ * INTENTIONALLY does NOT return the resolved `BridgeReady` port/token.
+ * Threading those across the (unbounded) slot-acquisition wait would be
+ * a TOCTOU hazard: the bridge can roll its port/token via the
+ * extension-version auto-reload path while this caller is parked waiting
+ * for a slot, leaving the threaded credentials stale. The slot-side
+ * `dispatchBrowserTool` re-runs `ensureBridgeReady()` to fetch fresh
+ * credentials at use time. The `_inFlightReady` single-flight makes the
+ * readiness probe idempotent under concurrency; the one redundant
+ * happy-path `ensureBridgeReady()` (and its NMH install) is the accepted
+ * cost of keeping the credentials fresh.
+ */
+export async function browserPreflight(
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<{ envelope: ToolEnvelope | undefined }> {
+  // Normalize to the WIRE name. The MCP route handler keys browser tools
+  // by the bare `toolNameHttp` (`open_tab`, `navigate`, ...); the
+  // `browser_` prefix is stripped when the tools are spread into
+  // NON_PERSONA_MCP_TOOLS. But `preflightUrlPolicy` matches on the wire
+  // name (`browser_open_tab` / `browser_navigate`, the literal each
+  // handler dispatches to the extension), so the bare name would slip
+  // past the URL block. Re-add the prefix if it's missing so a blocked
+  // open_tab / navigate URL fails closed here too. Idempotent if a caller
+  // already passes the wire name.
+  const wireTool = tool.startsWith("browser_") ? tool : `browser_${tool}`
+  // Same defense-in-depth URL block dispatchBrowserTool runs first: a
+  // blocked open_tab / navigate URL must fail closed WITHOUT probing or
+  // installing the bridge.
+  const policy = preflightUrlPolicy(wireTool, args)
+  if (policy.blocked) {
+    return { envelope: blockedUrlEnvelope(policy.reason) }
+  }
+  const ready = await ensureBridgeReady()
+  if (ready.install_required) {
+    return { envelope: installRequiredToolResult(ready) }
+  }
+  return { envelope: undefined }
+}
+
 /**
  * Real dispatcher for any browser_* tool. Used by the entries in
  * src/lib/browser-mcp/index.ts. Returns the standard MCP tool-result
@@ -311,18 +383,13 @@ export async function dispatchBrowserTool(
 }> {
   // Defense-in-depth: bridge-layer URL block runs BEFORE the install
   // check + WS round-trip. An extension regression that silently
-  // re-enables a blocked URL still fails closed here.
+  // re-enables a blocked URL still fails closed here. (Also runs in
+  // `browserPreflight` before slot acquisition; re-run here so internal
+  // compound-tool dispatches, which skip the pre-slot gate, stay
+  // fail-closed.)
   const policy = preflightUrlPolicy(tool, args)
   if (policy.blocked) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({ blocked: true, reason: policy.reason }, null, 2),
-        },
-      ],
-      isError: true,
-    }
+    return blockedUrlEnvelope(policy.reason)
   }
   const ready = await ensureBridgeReady()
   if (ready.install_required) {

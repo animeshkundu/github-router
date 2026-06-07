@@ -14,14 +14,16 @@
  * peer/advisor calls nested inside a worker (tools.ts), and any
  * future MCP-adjacent dispatcher all increment the same number.
  *
- * Cap = `MAX_INFLIGHT_TOOLS_CALL = 8`. Justification lives at the
- * historical home (`src/routes/mcp/handler.ts` comment block); do not
- * change the value without re-reading
+ * Cap = `MAX_INFLIGHT_TOOLS_CALL = 32`. Raised from 8 to widen
+ * parallelism (the prior 8 was a defensive pre-launch guess, not a
+ * measured Copilot rate-limit; persona handlers hold no shared mutable
+ * state). Justification + history live at the historical home
+ * (`src/routes/mcp/handler.ts` comment block) and
  * `docs/research/peer-mcp-investigation.md` § "Concurrency cap
  * investigation".
  */
 
-export const MAX_INFLIGHT_TOOLS_CALL = 8
+export const MAX_INFLIGHT_TOOLS_CALL = 32
 
 let inFlight = 0
 

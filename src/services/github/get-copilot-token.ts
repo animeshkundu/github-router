@@ -3,6 +3,7 @@ import consola from "consola"
 import { GITHUB_API_BASE_URL, githubHeaders } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
+import { fetchWithTransientRetry } from "~/lib/upstream-retry"
 
 /**
  * Allowlist of hosts the router will trust as the Copilot API base URL.
@@ -30,11 +31,18 @@ function isAllowedCopilotHost(rawUrl: string): boolean {
 }
 
 export const getCopilotToken = async () => {
-  const response = await fetch(
-    `${GITHUB_API_BASE_URL}/copilot_internal/v2/token`,
-    {
-      headers: githubHeaders(state),
-    },
+  // GitHub PAT → Copilot token exchange. A transient 429/5xx/network blip
+  // here aborts launch (and the interval-driven refresh that keeps the
+  // session alive), so retry the transient class with bounded backoff. NO
+  // 401-refresh compose: this call IS the token source, and a 401 means a
+  // bad/expired GitHub PAT — deterministic, fail fast (retrying would burn
+  // budget against a credential that can't recover without re-auth).
+  const response = await fetchWithTransientRetry(
+    () =>
+      fetch(`${GITHUB_API_BASE_URL}/copilot_internal/v2/token`, {
+        headers: githubHeaders(state),
+      }),
+    { label: "/copilot_internal/v2/token" },
   )
 
   if (!response.ok) throw new HTTPError("Failed to get Copilot token", response)

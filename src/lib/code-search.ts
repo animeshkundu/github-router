@@ -48,11 +48,32 @@
 
 import { spawn, execFile, execFileSync, type ChildProcess } from "node:child_process"
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
+import { performance } from "node:perf_hooks"
 import { createInterface } from "node:readline"
 import * as path from "node:path"
 
 import consola from "consola"
 import Parser from "web-tree-sitter"
+
+import {
+  confirmDefinitionSites,
+  type FileOutlineEntry,
+  type FileOutlineResult,
+  getGrammarBundle,
+  getLanguageKeyForPath,
+  outlineFile,
+  outlineFromTree,
+  type StructuralHit,
+  STRUCTURAL_MAX_FILE_BYTES,
+} from "~/lib/tree-sitter-grammars"
+import {
+  getTreeSitterPool,
+  type PoolJob,
+  type TreeSitterPool,
+} from "~/lib/tree-sitter-pool/pool"
+import { resolveExecutable, runManagedExeCapture } from "~/lib/exec"
+import { PATHS } from "~/lib/paths"
+import { isSensitivePath } from "~/lib/worker-agent/paths"
 
 // ============================================================
 // Constants
@@ -91,16 +112,38 @@ const FIELD_LEN_NORMS = {
 } as const
 
 /**
- * Shoulder cut: drop results below this fraction of the top score.
- * 0.5 is the convention from learning-to-rank literature (Burges
- * 2010); chosen as the deliberate single-place constant.
+ * Shoulder cut threshold: in DEFAULT (non-`complete`) ranked mode, drop
+ * hits below this fraction of the top score for precision. `complete:
+ * true` disables it — see `docs/code-search-floor.md`.
  */
 const SHOULDER_THRESHOLD = 0.5
 
 const MAX_QUERY_LEN = 1024
 const MAX_GLOB_LEN = 512
-const DEFAULT_LIMIT = 20
+const DEFAULT_LIMIT = 200
 const MAX_CONTEXT_LINES = 10
+/**
+ * `summary: true` outlines at most this many distinct result files (in
+ * result order) — a structural map of where the matches live, bounded
+ * so a broad query doesn't trigger hundreds of tree-sitter parses.
+ */
+const CODE_SUMMARY_MAX_FILES = 10
+/**
+ * `scan: true` outlines the ENTIRE workspace (every non-ignored,
+ * non-sensitive source file), not just the matched result files. Bounded
+ * well above `CODE_SUMMARY_MAX_FILES` (a whole-workspace map is the whole
+ * point) but still capped so a giant monorepo can't blow the 256 KB
+ * response or stall the tree-sitter pool. On truncation the response
+ * `notice` reports files-covered vs total.
+ */
+const SCAN_MAX_FILES = 400
+/**
+ * Per-file match cap applied in DEFAULT (non-`complete`) ranked mode:
+ * keeps one match-dense file from filling the global limit and blinding
+ * BM25F to the rest of the workspace. `complete: true` disables it (and
+ * the shoulder cut) to return the full grep set — the floor guarantee.
+ */
+const RANKED_MAX_PER_FILE = 50
 const DEFAULT_CONTEXT_LINES = 2
 const MAX_SNIPPET_BYTES = 2048
 const MAX_STDOUT_BYTES = 10 * 1024 * 1024
@@ -117,14 +160,6 @@ const WALL_TIME_MS = 30_000
 const STRUCTURAL_BUDGET_MS = 200
 const STRUCTURAL_TOPN_FULL = 50
 const STRUCTURAL_TOPN_FAST = 10
-
-/**
- * Cap the per-file size we'll parse. 1MB of source covers all
- * reasonable hand-written files; bigger files are almost always
- * generated code or vendored bundles whose AST signal is worthless
- * for ranking real definitions.
- */
-const STRUCTURAL_MAX_FILE_BYTES = 1024 * 1024
 
 /**
  * LRU bound on the parsed-tree cache. Each Tree pins ~roughly the
@@ -167,6 +202,73 @@ export interface CodeSearchInput {
    * with a human-readable explanation.
    */
   structural?: "full" | "topN"
+  /**
+   * Structural summary, ON BY DEFAULT. The response carries a
+   * tree-sitter STRUCTURAL OUTLINE (`outlines`) of the distinct files in
+   * the result set (top-level symbols + line numbers), capped at the
+   * first `CODE_SUMMARY_MAX_FILES` files in result order — a compact map
+   * of where the matches live that augments, never replaces, `snippet`.
+   * Set `summary: false` to omit it (e.g. when only the matching lines
+   * are needed).
+   */
+  summary?: boolean
+  /**
+   * Exhaustiveness control. Default `false`: ranked mode applies a
+   * precision shoulder cut (drops hits below 50% of the top score) and a
+   * per-file match cap for cross-file diversity, so the model isn't
+   * overwhelmed. `true`: BOTH are disabled, so ranked mode returns the
+   * COMPLETE ripgrep match set (reordered by relevance), capped only by
+   * the explicit `limit` — the provable floor (never drops a match grep
+   * would return). When the default hides matches, the response `notice`
+   * says so and points the model here.
+   */
+  complete?: boolean
+  /**
+   * Multi-line matching. Default `false` (line-oriented, the proven
+   * floor). When `true`, ripgrep runs with `-U --multiline-dotall` so a
+   * pattern can span newlines (e.g. `foo[\s\S]*?bar` across two lines).
+   * The match snippet is the whole spanned region, capped to the snippet
+   * byte budget; the reported `line` is the START of the span. Use it with
+   * `mode: "regex"` — that is the only mode where a cross-line pattern is
+   * expressible (the `query` validator rejects literal newlines, so a
+   * literal/ranked multi-line LITERAL can't be typed). Composes with every
+   * other param.
+   */
+  multiline?: boolean
+  /**
+   * Whole-workspace structural outline. Default `false`. When `true`,
+   * `outlines` covers EVERY non-ignored, non-sensitive source file in the
+   * workspace (a tree-sitter symbol map of the whole tree), not just the
+   * files that text-matched `query`. Capped at `SCAN_MAX_FILES` and
+   * budget-fitted into the response; on truncation `notice` reports
+   * coverage. Use it to map an unfamiliar codebase's symbols in one call.
+   * Independent of the match generation (the hit set still comes from the
+   * query / `ast_pattern`).
+   */
+  scan?: boolean
+  /**
+   * ast-grep structural pattern. When set, match generation runs ast-grep
+   * (`sg`) with this pattern INSTEAD of ripgrep — results come back in the
+   * same `{file, line, snippet}` shape, so a multi-line AST construct the
+   * line-oriented regex modes can't express is matched directly. Takes
+   * PRECEDENCE over `query` for match generation (`query` is then ignored
+   * for matching; it is still required by the schema but unused). Requires
+   * ast-grep (`sg`) to be available (toolbelt bin dir or system PATH); if
+   * it isn't, `code_search` returns no results plus a `notice` telling you
+   * to run ast-grep directly or omit `ast_pattern` (it never silently
+   * falls back to regex). Read-only subprocess, workspace-confined.
+   */
+  ast_pattern?: string
+  /**
+   * Language grammar for `ast_pattern` — REQUIRED whenever `ast_pattern` is
+   * set. e.g. `"ts"`, `"tsx"`, `"js"`, `"jsx"`, `"py"`, `"rust"`, `"go"`,
+   * `"java"`, `"cpp"`, `"c"`. ast-grep parses the pattern in this grammar;
+   * WITHOUT it ast-grep cross-matches every language (e.g. matching markdown
+   * prose) and returns garbage, so if `ast_pattern` is set but `ast_lang`
+   * is omitted, `code_search` returns no results plus a `notice` asking for
+   * it (it does NOT guess a language).
+   */
+  ast_lang?: string
 }
 
 export interface CodeSearchHit {
@@ -176,12 +278,19 @@ export interface CodeSearchHit {
   match_byte_range: [number, number]
   score?: number
   field_contributions?: Readonly<Record<string, number>> | null
+  /**
+   * Present (always `"definition"`) ONLY when the structural pass
+   * AST-confirmed this hit is the symbol's definition site. Absent
+   * otherwise — absence is NOT a claim that the hit is a usage (the hit
+   * may simply not have been AST-checked: unsupported language, file over
+   * the 1 MiB cap, parse error, or the structural budget was exhausted).
+   */
+  role?: "definition"
 }
 
 export interface CodeSearchResponse {
   results: Array<CodeSearchHit>
   truncated: boolean
-  pruned_below_shoulder?: number
   scanned_files: number
   elapsed_ms: number
   ranking: {
@@ -189,6 +298,12 @@ export interface CodeSearchResponse {
     citation?: string
     k1?: number
   }
+  /**
+   * Present only when `summary: true` was requested: a tree-sitter
+   * structural outline of each distinct file in the result set (capped
+   * at `CODE_SUMMARY_MAX_FILES`, in result order). Absent otherwise.
+   */
+  outlines?: Array<{ file: string; outline: Array<FileOutlineEntry> }>
   /**
    * Single actionable degradation notice for the model. `null` on the
    * happy path. A string when something the model can correct fired:
@@ -577,8 +692,21 @@ function buildRgArgs(input: {
    * identifiers (no regex metacharacters).
    */
   expansionPattern?: string
+  /** When true, skip the per-file `--max-count` cap (floor mode). */
+  complete?: boolean
+  /** When true, add `-U --multiline-dotall` so a pattern can span lines. */
+  multiline?: boolean
 }): Array<string> {
   const args: Array<string> = ["--json", "--no-binary", "--no-follow"]
+
+  // Multi-line matching: `-U` lets a pattern span newlines, and
+  // `--multiline-dotall` makes `.` match `\n` too (so `foo.*bar` crosses
+  // lines). Opt-in only — the default stays line-oriented, which is the
+  // proven recall floor. With `-F` (fixed-string) `-U` still matches a
+  // multi-line literal; with regex it enables cross-line patterns.
+  if (input.multiline) {
+    args.push("-U", "--multiline-dotall")
+  }
 
   // -C N means N lines BEFORE and N AFTER. We always want context
   // for snippet rendering AND for the BM25F context field.
@@ -602,6 +730,14 @@ function buildRgArgs(input: {
 
   if (input.fileGlob && input.fileGlob !== "**/*") {
     args.push("-g", input.fileGlob)
+  }
+
+  // Per-file match cap in DEFAULT ranked mode (see RANKED_MAX_PER_FILE):
+  // keeps one match-dense file from filling the global limit and blinding
+  // BM25F. `complete: true` and literal/regex modes skip it so the full
+  // match set is returned.
+  if (input.mode === "ranked" && !input.complete) {
+    args.push("--max-count", String(RANKED_MAX_PER_FILE))
   }
 
   // CVE fix HIGH-2: positional separator. Without `--`, a query
@@ -795,255 +931,28 @@ function stripTrailingNewline(s: string): string {
   return s
 }
 
+/**
+ * Normalize a ripgrep-relative path to the form used in the rendered output
+ * (strip a leading "./" or ".\", convert "\" → "/"). Used to key the pooled
+ * structural-outline map so the outline loop's lookup (which iterates rendered
+ * result files) matches regardless of OS path separators or rg's "./" prefix.
+ */
+function normalizeRelFile(file: string): string {
+  let f = file
+  if (f.startsWith("./") || f.startsWith(".\\")) f = f.slice(2)
+  return f.replace(/\\/g, "/")
+}
+
 // ============================================================
 // Tree-sitter structural ranking
 // ============================================================
-
-/**
- * Extension → grammar key. Grammars not in this map skip structural
- * parsing (the hit falls back to the regex SYMBOL_REGEX heuristic for
- * `symbol_context`). Keep this list aligned with `GRAMMAR_FILES`
- * below — adding a language requires both an extension mapping and a
- * `.wasm` to load.
- */
-const EXTENSION_TO_LANG: Readonly<Record<string, string>> = {
-  ".ts": "typescript",
-  ".tsx": "tsx",
-  ".js": "javascript",
-  ".mjs": "javascript",
-  ".cjs": "javascript",
-  ".jsx": "javascript",
-  ".py": "python",
-  ".go": "go",
-  ".rs": "rust",
-  ".java": "java",
-  ".c": "c",
-  ".h": "c",
-  ".cpp": "cpp",
-  ".cc": "cpp",
-  ".cxx": "cpp",
-  ".hpp": "cpp",
-  ".hxx": "cpp",
-}
-
-/**
- * Grammar key → wasm filename under `node_modules/tree-sitter-wasms/out/`.
- * Resolved at runtime from `node_modules`; the file paths are stable
- * because `tree-sitter-wasms` ships prebuilt binaries (no per-install
- * codegen).
- */
-const GRAMMAR_FILES: Readonly<Record<string, string>> = {
-  typescript: "tree-sitter-typescript.wasm",
-  tsx: "tree-sitter-tsx.wasm",
-  javascript: "tree-sitter-javascript.wasm",
-  python: "tree-sitter-python.wasm",
-  go: "tree-sitter-go.wasm",
-  rust: "tree-sitter-rust.wasm",
-  java: "tree-sitter-java.wasm",
-  c: "tree-sitter-c.wasm",
-  cpp: "tree-sitter-cpp.wasm",
-}
-
-/**
- * Per-language definition-shape node types. When a matched identifier
- * sits inside one of these nodes AND is at the node's "name" position,
- * we have AST-confirmed evidence the line is an identifier-definition
- * site. The brief's enumeration plus a handful of language-idiomatic
- * extras (e.g., `lexical_declaration` for TS/JS top-level `const`s,
- * `mod_item` for Rust modules).
- *
- * The set lookup is per-language so a node type that means
- * "definition" in one language but "reference" in another won't
- * cross-pollute.
- */
-const DEFINITION_NODE_TYPES: Readonly<Record<string, ReadonlySet<string>>> = {
-  typescript: new Set([
-    "function_declaration",
-    "function_signature",
-    "function_expression",
-    "method_definition",
-    "method_signature",
-    "class_declaration",
-    "interface_declaration",
-    "type_alias_declaration",
-    "enum_declaration",
-    "variable_declarator",
-    "generator_function_declaration",
-    "abstract_method_signature",
-    "public_field_definition",
-    "property_signature",
-  ]),
-  tsx: new Set([
-    "function_declaration",
-    "function_signature",
-    "function_expression",
-    "method_definition",
-    "method_signature",
-    "class_declaration",
-    "interface_declaration",
-    "type_alias_declaration",
-    "enum_declaration",
-    "variable_declarator",
-    "generator_function_declaration",
-    "abstract_method_signature",
-    "public_field_definition",
-    "property_signature",
-  ]),
-  javascript: new Set([
-    "function_declaration",
-    "function_expression",
-    "method_definition",
-    "class_declaration",
-    "variable_declarator",
-    "generator_function_declaration",
-  ]),
-  python: new Set([
-    "function_definition",
-    "class_definition",
-    "decorated_definition",
-  ]),
-  go: new Set([
-    "function_declaration",
-    "method_declaration",
-    "type_spec",
-    "type_alias",
-    "const_spec",
-    "var_spec",
-  ]),
-  rust: new Set([
-    "function_item",
-    "impl_item",
-    "trait_item",
-    "struct_item",
-    "enum_item",
-    "mod_item",
-    "type_item",
-    "const_item",
-    "static_item",
-    "macro_definition",
-  ]),
-  java: new Set([
-    "class_declaration",
-    "interface_declaration",
-    "method_declaration",
-    "constructor_declaration",
-    "enum_declaration",
-    "field_declaration",
-    "annotation_type_declaration",
-  ]),
-  c: new Set([
-    "function_definition",
-    "declaration",
-    "struct_specifier",
-    "enum_specifier",
-    "union_specifier",
-    "type_definition",
-  ]),
-  cpp: new Set([
-    "function_definition",
-    "declaration",
-    "struct_specifier",
-    "class_specifier",
-    "enum_specifier",
-    "union_specifier",
-    "type_definition",
-    "namespace_definition",
-    "template_declaration",
-  ]),
-}
-
-/**
- * Node types that the AST exposes as "this token is an identifier".
- * The match-position lookup uses these to filter out parent-node hits
- * before checking the definition-site predicate.
- */
-const IDENTIFIER_NODE_TYPES = new Set([
-  "identifier",
-  "type_identifier",
-  "field_identifier",
-  "property_identifier",
-  "shorthand_property_identifier_pattern",
-  "shorthand_property_identifier",
-  "scoped_identifier",
-  "name",
-])
-
-interface GrammarBundle {
-  /** Lazy promise of the language registry. Awaited per-call so the
-   *  init cost overlaps with any other module-load work. */
-  ready: Promise<Map<string, Parser.Language>>
-}
-
-let _grammarBundle: GrammarBundle | undefined
-
-/**
- * Resolve the `tree-sitter-wasms/out/` directory at the package root.
- * `require.resolve` is used through a try/catch — the bundled-only
- * fallback runs in environments where node_modules has been pruned to
- * just runtime deps.
- */
-function resolveGrammarRoot(): string | null {
-  try {
-    const pkgPath = require.resolve("tree-sitter-wasms/package.json")
-    return path.join(path.dirname(pkgPath), "out")
-  } catch {
-    return null
-  }
-}
-
-/**
- * Pre-load all grammars at module-init time so the first search
- * doesn't pay a ~500ms cold-start cost. The Promise is captured at
- * import time and awaited per-call; per-grammar failures are caught
- * individually so one broken grammar can't take the whole tool down.
- */
-function getGrammarBundle(): GrammarBundle {
-  if (_grammarBundle) return _grammarBundle
-  const ready = (async (): Promise<Map<string, Parser.Language>> => {
-    const out = new Map<string, Parser.Language>()
-    try {
-      await Parser.init()
-    } catch (err) {
-      consola.warn(
-        `[code_search] tree-sitter Parser.init failed; structural ranking disabled: ${(err as Error).message}`,
-      )
-      return out
-    }
-    const root = resolveGrammarRoot()
-    if (!root) {
-      consola.warn(
-        "[code_search] tree-sitter-wasms package not resolvable; structural ranking disabled",
-      )
-      return out
-    }
-    for (const [key, filename] of Object.entries(GRAMMAR_FILES)) {
-      const wasmPath = path.join(root, filename)
-      try {
-        const lang = await Parser.Language.load(wasmPath)
-        out.set(key, lang)
-      } catch (err) {
-        consola.warn(
-          `[code_search] failed to load tree-sitter grammar '${key}' from ${filename}: ${(err as Error).message}`,
-        )
-      }
-    }
-    return out
-  })()
-  _grammarBundle = { ready }
-  return _grammarBundle
-}
-
-// Kick off grammar pre-load at module import time. The brief calls
-// this out explicitly: amortize the WASM init cost across module load
-// rather than the first search call.
-void getGrammarBundle().ready.catch(() => {
-  /* errors already logged per-grammar */
-})
-
-function getLanguageKeyForPath(filePath: string): string | null {
-  const ext = path.extname(filePath).toLowerCase()
-  return EXTENSION_TO_LANG[ext] ?? null
-}
+//
+// The grammar layer this pass depends on — the extension/grammar
+// tables, the definition-/identifier-node-type sets, and the lazily
+// initialized `web-tree-sitter` parser cache — lives in
+// `~/lib/tree-sitter-grammars` and is imported at the top of this file.
+// Only the BM25F-coupled tree cache + structural-confirmation walk stay
+// here.
 
 /**
  * Tree cache. Keyed by canonical file path with mtime gate — on
@@ -1105,104 +1014,6 @@ function cachePut(absPath: string, entry: CachedTree): void {
   _treeCache.set(absPath, entry)
 }
 
-/**
- * Compute the absolute byte offset where line `lineNumber1` starts
- * in `source`. Lines are counted by LF; CRLF files have the same
- * line starts as LF files (the \r is part of the previous line's
- * content, not the line break). `lineNumber1` is 1-indexed to match
- * ripgrep's output. Returns -1 if the line is past EOF.
- */
-function lineStartByte(source: string, lineNumber1: number): number {
-  if (lineNumber1 <= 1) return 0
-  let line = 1
-  for (let i = 0; i < source.length; i++) {
-    if (source.charCodeAt(i) === 0x0a /* \n */) {
-      line += 1
-      if (line === lineNumber1) return i + 1
-    }
-  }
-  return -1
-}
-
-/**
- * Walk up from a matched identifier node looking for the closest
- * definition-shape ancestor (per the language's allowed types). When
- * we find one, verify the matched identifier is at the definition's
- * "name" slot — NOT inside a parameter type, a body, or a parent's
- * signature. Returns true iff this is a real definition site for
- * the identifier the rg submatch landed on.
- *
- * The walk has a small depth bound (6) — definition names sit very
- * close to their definition node in every supported grammar; deeper
- * walks risk false positives (e.g., matching `name` inside the body
- * of an enclosing function and concluding "yes, definition").
- */
-function isDefiningSite(
-  matchedNode: Parser.SyntaxNode,
-  langKey: string,
-): boolean {
-  const defTypes = DEFINITION_NODE_TYPES[langKey]
-  if (!defTypes) return false
-  let cur: Parser.SyntaxNode | null = matchedNode.parent
-  let depth = 0
-  while (cur && depth < 6) {
-    if (defTypes.has(cur.type)) {
-      // Try the language's standard "name" field first. Almost all
-      // grammars expose this for class/method/function/variable
-      // declarations.
-      const nameField = cur.childForFieldName("name")
-      if (nameField && containsByteRange(nameField, matchedNode)) {
-        return true
-      }
-      // C / C++ function_definition: name lives inside the
-      // `declarator` field, possibly nested through pointer or
-      // reference declarators. Same trick works for Java
-      // field_declaration's `declarator` field.
-      const declarator = cur.childForFieldName("declarator")
-      if (declarator && containsByteRange(declarator, matchedNode)) {
-        // The matched identifier is somewhere in the declarator
-        // subtree. Confirm it's the first identifier-leaf — that
-        // disambiguates `int foo(int bar)`'s `foo` (definition) from
-        // its `bar` (parameter, also inside declarator).
-        const first = firstIdentifierLeaf(declarator)
-        if (first && first.startIndex === matchedNode.startIndex) {
-          return true
-        }
-      }
-      // Rust `impl_item` and Go `type_spec`: the identifier is in
-      // the `type` field rather than `name`.
-      const typeField = cur.childForFieldName("type")
-      if (typeField && containsByteRange(typeField, matchedNode)) {
-        const first = firstIdentifierLeaf(typeField)
-        if (first && first.startIndex === matchedNode.startIndex) {
-          return true
-        }
-      }
-    }
-    cur = cur.parent
-    depth += 1
-  }
-  return false
-}
-
-function containsByteRange(
-  outer: Parser.SyntaxNode,
-  inner: Parser.SyntaxNode,
-): boolean {
-  return outer.startIndex <= inner.startIndex && outer.endIndex >= inner.endIndex
-}
-
-function firstIdentifierLeaf(
-  node: Parser.SyntaxNode,
-): Parser.SyntaxNode | null {
-  if (IDENTIFIER_NODE_TYPES.has(node.type)) return node
-  for (const child of node.namedChildren) {
-    const r = firstIdentifierLeaf(child)
-    if (r) return r
-  }
-  return null
-}
-
 interface StructuralPassResult {
   /** Indexes (into the input hits array) where AST confirmed the
    *  matched identifier is at a definition site. */
@@ -1212,6 +1023,51 @@ interface StructuralPassResult {
    *  to the model as the `notice` field (overridden by size-cap notice
    *  at the handler boundary when both fire). */
   fallback: string | null
+  /**
+   * Outline entries the parse PRODUCED for each file, keyed by RELATIVE file
+   * path. Populated ONLY on the worker-pool path: a `Tree` can't cross the
+   * thread boundary, so Lever 1's in-process tree reuse can't apply across
+   * threads — instead the pool returns outline entries alongside the confirm
+   * result (the coalesced job), and `searchCode`'s outline loop reuses these
+   * before falling back. On the in-process path this is undefined and the
+   * outline loop reuses `_treeCache` directly, exactly as before.
+   */
+  outlinesByFile?: Map<string, Array<FileOutlineEntry>>
+}
+
+/**
+ * Benchmark-only instrumentation. Zero cost in production: nothing writes
+ * here unless `GH_ROUTER_BENCH_STRUCTURAL=1`. Exposes the actual number of
+ * DISTINCT files the structural pass parsed (vs the ≤topN *hits* it
+ * considered) and the wall-clock spent inside it, so the parallelism
+ * benchmark can attribute end-to-end cost honestly rather than infer it.
+ * Read + reset by `scripts/bench-code-search-parallelism.ts`.
+ */
+export interface BenchStructuralStats {
+  calls: number
+  filesParsed: number
+  filesConsidered: number
+  budgetHit: number
+  parseMsTotal: number
+}
+const _benchStructural: BenchStructuralStats = {
+  calls: 0,
+  filesParsed: 0,
+  filesConsidered: 0,
+  budgetHit: 0,
+  parseMsTotal: 0,
+}
+const _benchStructuralOn = (): boolean =>
+  process.env.GH_ROUTER_BENCH_STRUCTURAL === "1"
+export function __readBenchStructuralStats(): BenchStructuralStats {
+  return { ..._benchStructural }
+}
+export function __resetBenchStructuralStats(): void {
+  _benchStructural.calls = 0
+  _benchStructural.filesParsed = 0
+  _benchStructural.filesConsidered = 0
+  _benchStructural.budgetHit = 0
+  _benchStructural.parseMsTotal = 0
 }
 
 /**
@@ -1224,6 +1080,38 @@ interface StructuralPassResult {
  * `symbol_context` heuristic. Only the wall-clock budget fires the
  * user-visible `fallback` message.
  */
+/**
+ * Group the top-`topN` ranked hits by file, preserving rank order of files
+ * (first-seen). Shared by the in-process and pooled structural passes so both
+ * consider the identical file set. Each file maps to its hits' rg offsets +
+ * the original hit index.
+ */
+function groupHitsByFile(
+  hitsRanked: Array<{ hit: RawHit; index: number }>,
+  topN: number,
+): Map<string, Array<{ hit: RawHit; index: number }>> {
+  const cap = Math.min(hitsRanked.length, topN)
+  const byFile = new Map<string, Array<{ hit: RawHit; index: number }>>()
+  for (let i = 0; i < cap; i++) {
+    const entry = hitsRanked[i]
+    const list = byFile.get(entry.hit.file) ?? []
+    list.push(entry)
+    byFile.set(entry.hit.file, list)
+  }
+  return byFile
+}
+
+/**
+ * Run the structural-confirmation pass over the top-N ranked hits. Tries the
+ * warm worker-thread parse pool first (parallel parses off the main event
+ * loop — the measured win for concurrent `code` calls; see
+ * `docs/research/tree-sitter-parallelism.md`); on pool unavailability,
+ * disablement, or total pool failure it falls back to the in-process path,
+ * which is behavior-identical to pre-Lever-2. Both paths produce the SAME
+ * confirmed-index set for the same inputs (the shared `confirmDefinitionSites`
+ * walk + order-independent Set merge), so the determinism test holds either
+ * way.
+ */
 async function runStructuralPass(opts: {
   hitsRanked: Array<{ hit: RawHit; index: number }>
   workspaceRoot: string
@@ -1235,29 +1123,163 @@ async function runStructuralPass(opts: {
     confirmedHitIndexes: new Set(),
     fallback: null,
   }
-  if (opts.hitsRanked.length === 0) return result
-
-  if (opts.signal.aborted) return result
+  if (opts.hitsRanked.length === 0 || opts.signal.aborted) return result
 
   const grammars = await getGrammarBundle().ready
-  if (grammars.size === 0) {
-    // No grammars loaded — log already done in getGrammarBundle.
-    // Don't surface as user-facing fallback; this is a setup-side
-    // failure, not a per-search budget overrun.
-    return result
-  }
+  if (grammars.size === 0) return result
 
-  // Group hits by file so we parse each file once across all its
-  // hits within the top-N slice.
+  const byFile = groupHitsByFile(opts.hitsRanked, opts.topN)
   const cap = Math.min(opts.hitsRanked.length, opts.topN)
-  const byFile = new Map<string, Array<{ hit: RawHit; index: number }>>()
-  for (let i = 0; i < cap; i++) {
-    const entry = opts.hitsRanked[i]
-    const list = byFile.get(entry.hit.file) ?? []
-    list.push(entry)
-    byFile.set(entry.hit.file, list)
+  const benchOn = _benchStructuralOn()
+  if (benchOn) {
+    _benchStructural.calls += 1
+    _benchStructural.filesConsidered += byFile.size
   }
 
+  const pool = getTreeSitterPool()
+  if (pool) {
+    const pooled = await runStructuralPassPooled({
+      pool,
+      byFile,
+      grammars,
+      workspaceRoot: opts.workspaceRoot,
+      cap,
+      budgetMs: opts.budgetMs,
+      signal: opts.signal,
+      benchOn,
+    })
+    if (pooled) return pooled
+    // Pool returned null (total failure / unavailable mid-run) → fall through
+    // to the in-process path below, which is the always-correct baseline.
+  }
+
+  return runStructuralPassInProcess({
+    byFile,
+    grammars,
+    workspaceRoot: opts.workspaceRoot,
+    cap,
+    budgetMs: opts.budgetMs,
+    signal: opts.signal,
+    benchOn,
+    result,
+  })
+}
+
+/**
+ * Pooled structural pass. Builds one COALESCED job per file (confirm + outline
+ * in a single parse), dispatches across the pool under the wall-clock budget,
+ * and merges replies order-independently. Returns `null` when the pool produced
+ * no usable result (so the caller falls back in-process).
+ */
+async function runStructuralPassPooled(opts: {
+  pool: TreeSitterPool
+  byFile: Map<string, Array<{ hit: RawHit; index: number }>>
+  grammars: Map<string, Parser.Language>
+  workspaceRoot: string
+  cap: number
+  budgetMs: number
+  signal: AbortSignal
+  benchOn: boolean
+}): Promise<StructuralPassResult | null> {
+  const jobs: Array<PoolJob> = []
+  // Per file: the list of hit indexes in dispatch order, so we can map the
+  // worker's returned positions back to original hit indexes.
+  const indexMap = new Map<string, Array<number>>()
+  for (const [relFile, entries] of opts.byFile) {
+    const langKey = getLanguageKeyForPath(relFile)
+    if (!langKey || !opts.grammars.has(langKey)) continue
+    const absPath = path.join(opts.workspaceRoot, relFile)
+    let mtimeMs: number
+    try {
+      const st = statSync(absPath)
+      if (st.size > STRUCTURAL_MAX_FILE_BYTES) continue
+      mtimeMs = st.mtimeMs
+    } catch {
+      continue
+    }
+    const confirmHits: Array<StructuralHit> = entries.map((e) => ({
+      line: e.hit.line,
+      matchStart: e.hit.match_start,
+      matchEnd: e.hit.match_end,
+    }))
+    indexMap.set(
+      relFile,
+      entries.map((e) => e.index),
+    )
+    jobs.push({
+      file: relFile,
+      absPath,
+      language: langKey,
+      mtimeMs,
+      confirmHits,
+      // Coalesce the outline walk so a file used by both the structural pass
+      // and the outline summary is parsed exactly once worker-side (the
+      // threaded equivalent of Lever 1's in-process tree reuse).
+      outline: true,
+    })
+  }
+
+  const run = await opts.pool.parseFiles(jobs, {
+    budgetMs: opts.budgetMs,
+    signal: opts.signal,
+  })
+  if (!run) return null // pool unavailable / total failure → in-process fallback
+
+  const confirmedHitIndexes = new Set<number>()
+  const outlinesByFile = new Map<string, Array<FileOutlineEntry>>()
+  for (const job of jobs) {
+    const fileResult = run.byFile.get(job.file)
+    if (!fileResult || !fileResult.ok) continue
+    const origIndexes = indexMap.get(job.file) ?? []
+    // Map worker-returned positions (into confirmHits) → original hit indexes.
+    for (const pos of fileResult.confirmedHitIndexes) {
+      const orig = origIndexes[pos]
+      if (orig !== undefined) confirmedHitIndexes.add(orig)
+    }
+    if (fileResult.outlineEntries) {
+      // Key by the normalized (rendered) path so the outline loop's lookup —
+      // which iterates rendered result files — matches across OS separators.
+      outlinesByFile.set(normalizeRelFile(job.file), fileResult.outlineEntries)
+    }
+  }
+
+  if (opts.benchOn) {
+    _benchStructural.filesParsed += run.byFile.size
+    if (run.budgetHit) _benchStructural.budgetHit += 1
+  }
+
+  return {
+    confirmedHitIndexes,
+    fallback: run.budgetHit
+      ? `structural budget exceeded after parsing ${run.byFile.size}/${opts.cap} hits; ` +
+        `retry with structural: "topN" or narrow your query`
+      : null,
+    outlinesByFile,
+  }
+}
+
+/**
+ * In-process structural pass (the always-correct baseline; identical to
+ * pre-Lever-2 behavior). Parses each file synchronously on the main thread,
+ * caches the tree in `_treeCache` for the outline loop to reuse (Lever 1), and
+ * walks each hit. Wall-clock-bounded — checked between files, not mid-parse
+ * (web-tree-sitter@0.22 doesn't expose a usable cancel hook).
+ *
+ * Per-file failure modes (file too big, language unsupported, parse error, I/O
+ * error) are silent: the file's hits keep the regex `symbol_context` heuristic.
+ * Only the wall-clock budget fires the user-visible `fallback` message.
+ */
+function runStructuralPassInProcess(opts: {
+  byFile: Map<string, Array<{ hit: RawHit; index: number }>>
+  grammars: Map<string, Parser.Language>
+  workspaceRoot: string
+  cap: number
+  budgetMs: number
+  signal: AbortSignal
+  benchOn: boolean
+  result: StructuralPassResult
+}): StructuralPassResult {
+  const { byFile, grammars, cap, benchOn, result } = opts
   const t0 = Date.now()
   let filesParsed = 0
   let parsersUsed = new Map<string, Parser>()
@@ -1267,6 +1289,7 @@ async function runStructuralPass(opts: {
       if (opts.signal.aborted) break
       const elapsed = Date.now() - t0
       if (elapsed >= opts.budgetMs) {
+        if (benchOn) _benchStructural.budgetHit += 1
         result.fallback =
           `structural budget exceeded after parsing ${filesParsed}/${cap} hits; ` +
           `retry with structural: "topN" or narrow your query`
@@ -1318,7 +1341,9 @@ async function runStructuralPass(opts: {
         }
         let tree: Parser.Tree | null = null
         try {
+          const pt0 = benchOn ? performance.now() : 0
           tree = parser.parse(source)
+          if (benchOn) _benchStructural.parseMsTotal += performance.now() - pt0
         } catch (err) {
           consola.debug(
             `[code_search] tree-sitter parse failed for ${relFile}: ${(err as Error).message}`,
@@ -1327,51 +1352,30 @@ async function runStructuralPass(opts: {
         cached = { mtimeMs, tree, source: tree ? source : null }
         cachePut(absPath, cached)
         filesParsed += 1
+        if (benchOn) _benchStructural.filesParsed += 1
       }
 
       if (!cached.tree || !cached.source) continue
 
-      // Walk every hit's matched identifier in this file.
-      for (const entry of entries) {
-        const lineStart = lineStartByte(cached.source, entry.hit.line)
-        if (lineStart < 0) continue
-        const matchByteStart = lineStart + entry.hit.match_start
-        const matchByteEnd = lineStart + entry.hit.match_end
-        let node: Parser.SyntaxNode | null
-        try {
-          node = cached.tree.rootNode.descendantForIndex(
-            matchByteStart,
-            matchByteEnd,
-          )
-        } catch {
-          node = null
-        }
-        if (!node) continue
-        // Climb to the nearest identifier-typed node, since
-        // descendantForIndex may land on a parent for off-by-one
-        // byte ranges in CRLF files.
-        if (!IDENTIFIER_NODE_TYPES.has(node.type)) {
-          let cur: Parser.SyntaxNode | null = node
-          let depth = 0
-          while (cur && !IDENTIFIER_NODE_TYPES.has(cur.type) && depth < 3) {
-            // Try descending to an identifier leaf at the match
-            // start before climbing — handles the case where the
-            // grammar wraps the identifier in e.g. shorthand_*
-            // patterns.
-            const leaf = firstIdentifierLeaf(cur)
-            if (leaf && leaf.startIndex === matchByteStart) {
-              cur = leaf
-              break
-            }
-            cur = cur.parent
-            depth += 1
-          }
-          node = cur
-        }
-        if (!node || !IDENTIFIER_NODE_TYPES.has(node.type)) continue
-        if (isDefiningSite(node, langKey)) {
-          result.confirmedHitIndexes.add(entry.index)
-        }
+      // Confirm every hit's matched identifier via the SHARED walk — the same
+      // `confirmDefinitionSites` the worker pool runs, so the in-process and
+      // pooled paths produce byte-identical confirmed sets (the determinism
+      // requirement). Returns positions into `entries`; map back to the
+      // original hit indexes.
+      const confirmedPositions = confirmDefinitionSites(
+        cached.tree,
+        cached.source,
+        langKey,
+        entries.map((e) => ({
+          line: e.hit.line,
+          matchStart: e.hit.match_start,
+          matchEnd: e.hit.match_end,
+        })),
+        opts.signal,
+      )
+      for (const pos of confirmedPositions) {
+        const entry = entries[pos]
+        if (entry) result.confirmedHitIndexes.add(entry.index)
       }
     }
   } finally {
@@ -1605,39 +1609,47 @@ function bm25fScore(
 }
 
 // ============================================================
-// Shoulder pruning
+// Ranking order
 // ============================================================
 
-interface PrunedResult {
-  kept: Array<ScoredHit>
-  prunedBelowShoulder: number
-}
-
-function shoulderPrune(scored: Array<ScoredHit>): PrunedResult {
-  if (scored.length === 0) return { kept: [], prunedBelowShoulder: 0 }
-  // Sort by score desc, then by (file, line) for determinism.
+/**
+ * Deterministic ranking order, in place: score desc, then (file, line)
+ * ascending as a stable tiebreak.
+ *
+ * There is NO score-based cut. The floor guarantee (see
+ * `docs/code-search-floor.md`) is that ranked mode never drops a hit
+ * ripgrep would return — it returns exactly the ripgrep match set,
+ * reordered, capped only by the explicit `limit`. An earlier
+ * "shoulder prune" (drop below 50% of the top score) silently removed
+ * real matches a `grep` would surface; it was removed.
+ */
+function sortByScore(scored: Array<ScoredHit>): void {
   scored.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score
     if (a.hit.file !== b.hit.file) return a.hit.file < b.hit.file ? -1 : 1
     return a.hit.line - b.hit.line
   })
-  const topScore = scored[0].score
-  if (topScore <= 0) {
-    // No ranking signal — return all (caller will apply limit).
-    return { kept: scored, prunedBelowShoulder: 0 }
-  }
+}
+
+/**
+ * Default-mode precision filter: given a score-sorted array, keep the
+ * prefix at or above `SHOULDER_THRESHOLD` × top score. Returns ALL when
+ * there is no ranking signal (top score 0). Skipped entirely under
+ * `complete: true` — the caller then gets the full ranked set.
+ */
+function shoulderCut(sorted: Array<ScoredHit>): Array<ScoredHit> {
+  if (sorted.length === 0) return sorted
+  const topScore = sorted[0].score
+  if (topScore <= 0) return sorted
   const threshold = topScore * SHOULDER_THRESHOLD
-  let cut = scored.length
-  for (let i = 0; i < scored.length; i++) {
-    if (scored[i].score < threshold) {
+  let cut = sorted.length
+  for (let i = 0; i < sorted.length; i++) {
+    if (sorted[i].score < threshold) {
       cut = i
       break
     }
   }
-  return {
-    kept: scored.slice(0, cut),
-    prunedBelowShoulder: scored.length - cut,
-  }
+  return sorted.slice(0, cut)
 }
 
 // ============================================================
@@ -1661,6 +1673,414 @@ function renderSnippet(hit: RawHit): string {
       buf.slice(buf.length - halfCap).toString("utf8")
   }
   return snippet
+}
+
+// ============================================================
+// ast-grep (structural pattern match generation)
+// ============================================================
+
+/**
+ * Router credentials that must NEVER reach the ast-grep child. Same key
+ * set as `dropColgrepSecrets` (colbert/provision.ts) and the worker-bash
+ * env allowlist. We keep a LOCAL strip rather than importing
+ * `dropColgrepSecrets` to avoid pulling the heavyweight colbert
+ * provisioning module into the core code-search import graph. ast-grep is
+ * a SHA-pinned local binary, but it is still a child process that could
+ * be coaxed (config, network) — no router secret belongs in its env.
+ */
+const AST_GREP_SECRET_ENV_KEYS = [
+  "GITHUB_TOKEN",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_API_KEY",
+  "OPENAI_API_KEY",
+  "COPILOT_TOKEN",
+]
+
+/**
+ * Strip router credentials from a child-env COPY (never the live env).
+ * Key matching is case-INSENSITIVE because Windows env names are
+ * case-insensitive — `Github_Token` / `openai_api_key` must be dropped
+ * too, or a mixed-case shell export would leak into the ast-grep child.
+ */
+function dropAstGrepSecrets(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  for (const k of Object.keys(env)) {
+    const up = k.toUpperCase()
+    if (up.startsWith("GH_ROUTER_") || AST_GREP_SECRET_ENV_KEYS.includes(up)) {
+      delete env[k]
+    }
+  }
+  return env
+}
+
+/**
+ * Resolve the ast-grep binary. Checks the toolbelt bin dir (where the
+ * proxy materializes `sg` + `ast-grep`) AND the system PATH, trying `sg`
+ * first then `ast-grep`. Returns an ABSOLUTE path or `null` when neither
+ * is found. `resolveExecutable` honors PATHEXT on Windows and excludes
+ * the cwd (no planted-`sg.exe` vector). The toolbelt dir is searched by
+ * prepending it to a PATH copy so the same resolver handles both sources.
+ */
+export function resolveAstGrep(): string | null {
+  const toolbeltDir = PATHS.TOOLBELT_BIN_DIR
+  // `sg` is the toolbelt's alias for ast-grep, but it is ONLY trusted from
+  // OUR toolbelt dir — on Linux a bare `sg` on the system PATH is
+  // `/usr/bin/sg` (the shadow-utils setgid command), NOT ast-grep. Resolving
+  // that ran the wrong binary in CI (the ast_pattern tests failed because
+  // setgid produced no matches). So search `sg` in the toolbelt dir ONLY.
+  const sgInToolbelt = resolveExecutable("sg", {
+    env: { ...process.env, PATH: toolbeltDir },
+  })
+  if (sgInToolbelt) return sgInToolbelt
+  // `ast-grep` is the unambiguous name — safe from the toolbelt OR the system
+  // PATH (no system command collides with it).
+  const astGrep = resolveExecutable("ast-grep", {
+    env: {
+      ...process.env,
+      PATH: `${toolbeltDir}${path.delimiter}${pathEnvValue()}`,
+    },
+  })
+  if (astGrep) return astGrep
+  return null
+}
+
+/**
+ * Test-only override for the ast-grep resolver. `undefined` = use the real
+ * `resolveAstGrep`. Set to a function (e.g. `() => null` to force the
+ * binary-absent path deterministically even on a host that HAS sg) via
+ * `__setAstGrepResolverForTest`. Mirrors the `__readBenchStructuralStats`
+ * test-export convention already used in this module.
+ */
+let _astGrepResolverOverride: (() => string | null) | undefined
+
+export function __setAstGrepResolverForTest(
+  fn: (() => string | null) | undefined,
+): void {
+  _astGrepResolverOverride = fn
+}
+
+/** Resolve ast-grep, honoring the test override when set. */
+function resolveAstGrepForRun(): string | null {
+  return (_astGrepResolverOverride ?? resolveAstGrep)()
+}
+
+/** Read PATH case-insensitively from the live env. */
+function pathEnvValue(): string {
+  for (const key of Object.keys(process.env)) {
+    if (key.toLowerCase() === "path") return process.env[key] ?? ""
+  }
+  return ""
+}
+
+/** One `sg run --json=stream` JSON-line shape (only the fields we read). */
+interface AstGrepMatch {
+  text?: string
+  lines?: string
+  file?: string
+  range?: {
+    start?: { line?: number; column?: number }
+    end?: { line?: number; column?: number }
+  }
+}
+
+interface AstGrepResult {
+  /** RawHit set (relative paths, 1-indexed lines). */
+  hits: Array<RawHit>
+  /** Non-null when something the model can act on fired (binary missing,
+   *  truncated, timed out, error) — surfaced as the response `notice`. */
+  notice: string | null
+}
+
+/**
+ * Run ast-grep with `pattern` over `workspaceCanonical` and return its
+ * matches in `RawHit` shape (relativized, 1-indexed). Read-only,
+ * workspace-confined, secret-stripped, stdout-capped, timeout-bounded.
+ *
+ * Security posture (mirrors `src/lib/colbert/runner.ts`):
+ *   - `runManagedExeCapture(absExe, argv, {shell:false})` — pattern and
+ *     workspace are ARGV elements, never a shell string. A workspace path
+ *     containing `%`, `&`, `|`, quotes, or spaces cannot inject a command
+ *     on Windows (no cmd.exe in the path; CreateProcess resolves the
+ *     `.exe` directly).
+ *   - `dropAstGrepSecrets` strips every `GH_ROUTER_*` + the named
+ *     credential keys from the child env copy.
+ *   - workspace is the absolute, realpath-canonicalized directory; the
+ *     binary's own `.gitignore` handling scopes the file universe (same
+ *     ignore semantics as ripgrep here).
+ */
+async function runAstGrep(opts: {
+  pattern: string
+  lang: string | undefined
+  workspaceCanonical: string
+  limit: number
+  signal: AbortSignal
+}): Promise<AstGrepResult> {
+  const binary = resolveAstGrepForRun()
+  if (!binary) {
+    return {
+      hits: [],
+      notice:
+        "ast_pattern requires ast-grep (sg), which isn't available here; " +
+        "the model can run ast-grep directly or omit ast_pattern",
+    }
+  }
+  // `--lang` is REQUIRED for correct matching. Without it ast-grep parses
+  // the pattern against every language's grammar and emits cross-language
+  // false positives (e.g. matching markdown prose). A missing/malformed
+  // lang therefore fails closed with an actionable notice rather than
+  // returning garbage. The token is validated (ast-grep lang ids are short
+  // ascii) before it reaches the argv — though shell:false already makes it
+  // non-injectable, this gives a clean notice instead of an sg error.
+  if (!opts.lang || !/^[A-Za-z0-9_+-]{1,20}$/.test(opts.lang)) {
+    return {
+      hits: [],
+      notice:
+        "ast_pattern requires ast_lang (the grammar to parse the pattern), " +
+        "e.g. 'ts' | 'tsx' | 'js' | 'py' | 'rust' | 'go'",
+    }
+  }
+
+  // `sg run -p <pattern> --lang <lang> --json=stream <workspace>` — VERIFIED
+  // on ast-grep 0.43.0. `--json=stream` emits one JSON object per line. The
+  // workspace is passed as an absolute positional; sg then reports `file` as
+  // an absolute path, which we relativize below.
+  const args = [
+    "run",
+    "-p",
+    opts.pattern,
+    "--lang",
+    opts.lang,
+    "--json=stream",
+    opts.workspaceCanonical,
+  ]
+
+  let res
+  try {
+    res = await runManagedExeCapture(binary, args, {
+      cwd: opts.workspaceCanonical,
+      env: dropAstGrepSecrets({ ...process.env }),
+      timeoutMs: WALL_TIME_MS,
+      maxStdoutBytes: MAX_STDOUT_BYTES,
+    })
+  } catch {
+    return {
+      hits: [],
+      notice: "ast-grep failed to launch; omit ast_pattern or run it directly",
+    }
+  }
+
+  if (opts.signal.aborted) {
+    return { hits: [], notice: null }
+  }
+  if (res.timedOut) {
+    return {
+      hits: [],
+      notice: "ast-grep timed out; narrow the pattern or run it directly",
+    }
+  }
+  // sg exits 1 on "no matches" (not an error). Any other non-zero with no
+  // stdout is a real failure (bad pattern, IO). We don't surface raw
+  // stderr (it can embed source); a class label is enough.
+  if (res.code !== null && res.code !== 0 && res.code !== 1 && !res.stdout) {
+    return {
+      hits: [],
+      notice:
+        "ast-grep returned an error (check the pattern syntax) or omit ast_pattern",
+    }
+  }
+
+  const hits: Array<RawHit> = []
+  for (const rawLine of res.stdout.split("\n")) {
+    if (hits.length >= opts.limit) break
+    const line = rawLine.trim()
+    if (line.length === 0) continue
+    let m: AstGrepMatch
+    try {
+      m = JSON.parse(line) as AstGrepMatch
+    } catch {
+      continue // skip a partial/garbage line rather than fail the call
+    }
+    if (typeof m.file !== "string") continue
+    // Confine: drop any path ast-grep reports that resolves OUTSIDE the
+    // workspace (e.g. a symlink it traversed). `relativizeToWorkspace`
+    // returns null on escape; we skip rather than emit an absolute system
+    // path. Then apply the sensitive-path denylist (defense-in-depth, same
+    // as the scan path) so a hit never surfaces a credential file.
+    const rel = relativizeToWorkspace(m.file, opts.workspaceCanonical)
+    if (rel === null) continue
+    const abs = path.join(opts.workspaceCanonical, rel)
+    if (isSensitivePath(abs, opts.workspaceCanonical)) continue
+    const startLine = m.range?.start?.line
+    // sg is 0-indexed; our contract is 1-indexed.
+    const line1 = typeof startLine === "number" ? startLine + 1 : 1
+    const snippetSrc =
+      typeof m.text === "string" && m.text.length > 0
+        ? m.text
+        : typeof m.lines === "string"
+          ? m.lines
+          : ""
+    hits.push({
+      file: normalizeRelFile(rel),
+      line: line1,
+      matched_line: snippetSrc,
+      // ast-grep offsets are into the file, not the snippet line; we don't
+      // expose a byte range for AST hits, so 0:0 (renderSnippet uses the
+      // whole matched_line; the symbol_context slice path is never reached
+      // because AST hits render literal, not ranked).
+      match_start: 0,
+      match_end: 0,
+      context_before: [],
+      context_after: [],
+    })
+  }
+
+  const truncatedBySize = res.stdoutTruncated || hits.length >= opts.limit
+  return {
+    hits,
+    notice: truncatedBySize
+      ? "ast-grep results were truncated (size cap or limit reached); " +
+        "narrow the pattern or raise limit"
+      : null,
+  }
+}
+
+/**
+ * Relativize an ast-grep-reported file path against the workspace. sg
+ * reports absolute paths when handed an absolute positional. Returns the
+ * workspace-relative path, or `null` when the path resolves OUTSIDE the
+ * workspace (e.g. a traversed symlink) — the caller drops such hits rather
+ * than emit an absolute system path. A relative input that stays inside is
+ * returned as-is; normalizeRelFile cleans separators afterward.
+ */
+function relativizeToWorkspace(
+  file: string,
+  workspaceCanonical: string,
+): string | null {
+  try {
+    const abs = path.resolve(workspaceCanonical, file)
+    const rel = path.relative(workspaceCanonical, abs)
+    // Empty rel = the workspace dir itself (not a file hit); ".." / absolute
+    // = escaped. Either way, not a valid in-workspace file hit.
+    if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
+      return null
+    }
+    return rel
+  } catch {
+    return null
+  }
+}
+
+// ============================================================
+// Whole-workspace file enumeration (scan mode)
+// ============================================================
+
+/**
+ * Enumerate every non-ignored file in the workspace via `rg --files`
+ * (respecting `.gitignore` / `.ignore` exactly like the search path),
+ * then drop sensitive-shaped paths (`.env*`, `*.pem`, `id_rsa*`, `.git/`
+ * interior, `.ssh/`, …) via the shared worker denylist. Returns paths
+ * RELATIVE to the workspace, in rg's enumeration order, capped at
+ * `SCAN_MAX_FILES`.
+ *
+ * `total` is the count of enumerated source files BEFORE the cap (after
+ * the sensitive-path filter), so the caller can disclose coverage when
+ * the outline set is truncated.
+ */
+async function enumerateWorkspaceFiles(opts: {
+  rgPath: string
+  workspaceCanonical: string
+  signal: AbortSignal
+  /** Absolute wall-clock deadline (Date.now() ms) — the search-phase
+   *  `wallTimer` is already cleared by the time scan runs, so the
+   *  enumeration self-bounds against this. */
+  deadlineMs: number
+}): Promise<{ files: Array<string>; total: number; capped: boolean }> {
+  const files: Array<string> = []
+  let total = 0
+  let capped = false
+
+  if (opts.signal.aborted) return { files, total, capped }
+
+  let child: ChildProcess
+  try {
+    // `--no-follow`: don't traverse symlinks (matches the search path's
+    // scoping; keeps enumeration inside the workspace tree). stderr is
+    // IGNORED, not piped: an undrained stderr pipe can fill its OS buffer
+    // (e.g. rg "Permission denied" spam on Windows) and deadlock the child,
+    // which would defeat the deadline check below (it only runs per stdout
+    // line). rg's file LIST goes to stdout; stderr is non-essential here.
+    child = spawn(opts.rgPath, ["--files", "--no-follow"], {
+      cwd: opts.workspaceCanonical, // kernel-level pin, same as the search path
+      shell: false,
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+  } catch {
+    return { files, total, capped }
+  }
+
+  // Async spawn failures (ENOENT/EACCES) emit an 'error' event rather than
+  // throwing; without a listener Node escalates it to an uncaught crash.
+  // A no-op listener lets the for-await loop end naturally and we return
+  // whatever (nothing) was enumerated.
+  child.on("error", () => {})
+
+  // Out-of-band kill at the deadline. The per-line deadline check below
+  // only fires when rg emits a line; this guarantees termination even if
+  // rg stalls before its first line on a pathological tree.
+  const deadlineTimer = setTimeout(
+    () => killChild(child),
+    Math.max(0, opts.deadlineMs - Date.now()),
+  )
+  deadlineTimer.unref()
+
+  const onAbort = (): void => killChild(child)
+  opts.signal.addEventListener("abort", onAbort, { once: true })
+
+  try {
+    if (!child.stdout) return { files, total, capped }
+    child.stdout.setEncoding("utf8")
+    const rl = createInterface({ input: child.stdout, crlfDelay: Infinity })
+    let stdoutBytes = 0
+    for await (const rawLine of rl) {
+      if (opts.signal.aborted || Date.now() > opts.deadlineMs) {
+        killChild(child)
+        break
+      }
+      // Byte-accurate cap (multibyte UTF-8 paths must not undercount).
+      stdoutBytes += Buffer.byteLength(rawLine, "utf8") + 1
+      if (stdoutBytes > MAX_STDOUT_BYTES) {
+        killChild(child)
+        break
+      }
+      const rel = normalizeRelFile(rawLine.trim())
+      if (rel.length === 0) continue
+      // Defensive containment re-check: rg --files emits workspace-relative
+      // paths, but never trust a subprocess unconditionally — reject any
+      // absolute or `..`-escaping path before joining.
+      if (path.isAbsolute(rel) || rel.split("/").includes("..")) continue
+      // Skip files whose extension has no tree-sitter grammar — outlining
+      // them would just parse-fail. Cheap pre-filter before the cap so the
+      // cap counts outlineable files, not READMEs.
+      if (!getLanguageKeyForPath(rel)) continue
+      // Drop credential-shaped paths (defense-in-depth — the outline would
+      // surface symbol names from a sensitive file).
+      const abs = path.join(opts.workspaceCanonical, rel)
+      if (isSensitivePath(abs, opts.workspaceCanonical)) continue
+      total += 1
+      if (files.length < SCAN_MAX_FILES) {
+        files.push(rel)
+      } else {
+        capped = true
+      }
+    }
+  } catch {
+    // Best-effort: return whatever we enumerated.
+  } finally {
+    clearTimeout(deadlineTimer)
+    opts.signal.removeEventListener("abort", onAbort)
+    if (!child.killed) killChild(child)
+  }
+
+  return { files, total, capped }
 }
 
 // ============================================================
@@ -1689,6 +2109,25 @@ export async function searchCode(
     MAX_CONTEXT_LINES,
   )
 
+  // ast_pattern takes PRECEDENCE over the regex query for match
+  // generation: when set, matches come from ast-grep, not ripgrep, and
+  // are rendered in literal (document-order) shape — BM25F doesn't apply
+  // to AST hits. `query` is still required by the schema but unused for
+  // matching. The whole-workspace `scan` outline is independent and still
+  // runs afterward either way.
+  const astPattern =
+    typeof rawInput.ast_pattern === "string" && rawInput.ast_pattern.length > 0
+      ? rawInput.ast_pattern
+      : undefined
+  const astLang =
+    typeof rawInput.ast_lang === "string" && rawInput.ast_lang.length > 0
+      ? rawInput.ast_lang
+      : undefined
+  // Effective ranking mode: AST hits are never BM25F-scored (there is no
+  // text-token relevance signal for a structural match), so force the
+  // literal render path for them.
+  const effectiveMode = astPattern ? "literal" : mode
+
   // Identifier skeleton-form expansion. When the user's query is a
   // single identifier in any of the five canonical conventions, we
   // expand to all of them and feed rg a regex alternation. This is
@@ -1696,7 +2135,9 @@ export async function searchCode(
   // get_user_name. Regex mode is excluded — the user is explicit
   // about regex semantics there.
   const expansion =
-    mode === "regex" ? null : expandIdentifierVariants(rawInput.query)
+    astPattern || mode === "regex"
+      ? null
+      : expandIdentifierVariants(rawInput.query)
   const expansionPattern = expansion
     ? buildExpansionPattern(expansion)
     : undefined
@@ -1714,6 +2155,7 @@ export async function searchCode(
   wallTimer.unref()
 
   let parseResult: ParseResult
+  let astNotice: string | null = null
   let rgResolution: RipgrepResolution
   try {
     rgResolution = resolveRipgrep()
@@ -1723,114 +2165,178 @@ export async function searchCode(
     throw err
   }
 
-  const args = buildRgArgs({
-    mode,
-    fileGlob: rawInput.file_glob,
-    contextLines,
-    query: rawInput.query,
-    expansionPattern,
-  })
-
-  let child: ChildProcess
-  try {
-    child = spawn(rgResolution.rgPath, args, {
-      cwd: ws.canonical, // TOCTOU mitigation: kernel-level pin
-      shell: false, // never via shell
-      stdio: ["ignore", "pipe", "pipe"],
-    })
-  } catch (err) {
-    clearTimeout(wallTimer)
-    if (externalSignal) externalSignal.removeEventListener("abort", onExternal)
-    throw new Error(`failed to spawn ripgrep: ${(err as Error).message}`)
+  if (astPattern) {
+    // ----- ast-grep match generation (precedence over ripgrep) -----
+    let astRes: AstGrepResult
+    try {
+      astRes = await runAstGrep({
+        pattern: astPattern,
+        lang: astLang,
+        workspaceCanonical: ws.canonical,
+        limit,
+        signal: ac.signal,
+      })
+    } finally {
+      clearTimeout(wallTimer)
+      if (externalSignal) {
+        externalSignal.removeEventListener("abort", onExternal)
+      }
+    }
+    if (ac.signal.aborted && astRes.hits.length === 0) {
+      const reason = String(ac.signal.reason ?? "aborted")
+      throw new Error(`code_search aborted (${reason})`)
+    }
+    astNotice = astRes.notice
+    parseResult = {
+      hits: astRes.hits,
+      scannedFiles: 0,
+      truncated: astRes.hits.length >= limit,
+      cancelled: ac.signal.aborted,
+      stdoutBytes: 0,
+    }
+  } else {
+    parseResult = await runRipgrep()
   }
 
-  // Capture stderr as text (bounded to 64KB — rg errors are short,
-  // but the existing 1MB byte cap stays as a runaway-input guard).
-  // We surface stderr on exit code 2 so model gets actionable errors
-  // (e.g. regex compile failures) rather than empty results.
-  const STDERR_TEXT_CAP = 64 * 1024
-  let stderrBytes = 0
-  let stderrText = ""
-  if (child.stderr) {
-    child.stderr.setEncoding("utf8")
-    child.stderr.on("data", (chunk: string) => {
-      stderrBytes += chunk.length
-      if (stderrText.length < STDERR_TEXT_CAP) {
-        stderrText = (stderrText + chunk).slice(0, STDERR_TEXT_CAP)
-      }
-      if (stderrBytes > 1024 * 1024) {
-        // 1MB stderr is excessive — kill.
-        ac.abort("stderr_cap")
-      }
-    })
-  }
-
-  // Track rg's exit code so we can distinguish "no matches" (code 1)
-  // from a real error (code 2: bad regex, IO failure after our
-  // workspace validation, etc.) Per `man rg`:
-  //   0 = matches found
-  //   1 = no matches (not an error)
-  //   2 = error (regex, IO, ...)
-  let exitCode: number | null = null
-  const exitPromise = new Promise<void>((resolve) => {
-    child.on("close", (code) => {
-      exitCode = code
-      resolve()
-    })
-  })
-
-  try {
-    parseResult = await parseRgJsonStream(child, {
-      limit,
+  // Inlined ripgrep generation: spawn + parse + exit-code error mapping.
+  // Hoisted into a closure so the ast_pattern branch above can bypass it
+  // cleanly while preserving the exact original control flow (and the
+  // load-bearing cancel-race / exit-code handling) on the default path.
+  async function runRipgrep(): Promise<ParseResult> {
+    const args = buildRgArgs({
+      mode,
+      fileGlob: rawInput.file_glob,
       contextLines,
-      signal: ac.signal,
+      query: rawInput.query,
+      expansionPattern,
+      complete: rawInput.complete,
+      multiline: rawInput.multiline,
     })
-  } finally {
-    clearTimeout(wallTimer)
-    if (externalSignal) externalSignal.removeEventListener("abort", onExternal)
-    if (!child.killed) killChild(child)
+
+    let child: ChildProcess
+    try {
+      child = spawn(rgResolution.rgPath, args, {
+        cwd: ws.canonical, // TOCTOU mitigation: kernel-level pin
+        shell: false, // never via shell
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+    } catch (err) {
+      clearTimeout(wallTimer)
+      if (externalSignal) {
+        externalSignal.removeEventListener("abort", onExternal)
+      }
+      throw new Error(`failed to spawn ripgrep: ${(err as Error).message}`)
+    }
+
+    // Capture stderr as text (bounded to 64KB — rg errors are short,
+    // but the existing 1MB byte cap stays as a runaway-input guard).
+    // We surface stderr on exit code 2 so model gets actionable errors
+    // (e.g. regex compile failures) rather than empty results.
+    const STDERR_TEXT_CAP = 64 * 1024
+    let stderrBytes = 0
+    let stderrText = ""
+    if (child.stderr) {
+      child.stderr.setEncoding("utf8")
+      child.stderr.on("data", (chunk: string) => {
+        stderrBytes += chunk.length
+        if (stderrText.length < STDERR_TEXT_CAP) {
+          stderrText = (stderrText + chunk).slice(0, STDERR_TEXT_CAP)
+        }
+        if (stderrBytes > 1024 * 1024) {
+          // 1MB stderr is excessive — kill.
+          ac.abort("stderr_cap")
+        }
+      })
+    }
+
+    // Track rg's exit code so we can distinguish "no matches" (code 1)
+    // from a real error (code 2: bad regex, IO failure after our
+    // workspace validation, etc.) Per `man rg`:
+    //   0 = matches found
+    //   1 = no matches (not an error)
+    //   2 = error (regex, IO, ...)
+    let exitCode: number | null = null
+    const exitPromise = new Promise<void>((resolve) => {
+      child.on("close", (code) => {
+        exitCode = code
+        resolve()
+      })
+    })
+
+    let pr: ParseResult
+    try {
+      pr = await parseRgJsonStream(child, {
+        limit,
+        contextLines,
+        signal: ac.signal,
+      })
+    } finally {
+      clearTimeout(wallTimer)
+      if (externalSignal) {
+        externalSignal.removeEventListener("abort", onExternal)
+      }
+      if (!child.killed) killChild(child)
+    }
+
+    // If the abort was due to timeout/cap/external, surface that.
+    if (ac.signal.aborted && pr.hits.length === 0) {
+      const reason = String(ac.signal.reason ?? "aborted")
+      throw new Error(`code_search aborted (${reason})`)
+    }
+
+    // Surface rg errors (regex compile failures, etc.) to the caller.
+    // Exit code 2 means "rg encountered an error" — typically a malformed
+    // regex in mode="regex". Without this, an invalid regex returns
+    // empty results with no indication of why; the model can't tell
+    // "no matches" from "your pattern is broken." We re-check
+    // !signal.aborted so timeout/cap-driven aborts (which also produce
+    // non-zero exit) keep their existing error path above.
+    //
+    // Await rg's full exit before reading exitCode — the parseRgJsonStream
+    // for-await terminates on stdout EOF, which may slightly precede the
+    // child's 'close' event in Node's event-loop ordering.
+    if (!ac.signal.aborted) {
+      await exitPromise
+    }
+    if (
+      exitCode !== null &&
+      exitCode !== 0 &&
+      exitCode !== 1 &&
+      !ac.signal.aborted &&
+      pr.hits.length === 0
+    ) {
+      const trimmed = stderrText.trim()
+      const detail =
+        trimmed.length > 0
+          ? trimmed.replace(/^rg:\s*/i, "").slice(0, 600)
+          : `ripgrep exited with code ${exitCode}`
+      throw new Error(`code_search: ${detail}`)
+    }
+    return pr
   }
 
-  // If the abort was due to timeout/cap/external, surface that.
-  if (ac.signal.aborted && parseResult.hits.length === 0) {
-    const reason = String(ac.signal.reason ?? "aborted")
-    throw new Error(`code_search aborted (${reason})`)
-  }
-
-  // Surface rg errors (regex compile failures, etc.) to the caller.
-  // Exit code 2 means "rg encountered an error" — typically a malformed
-  // regex in mode="regex". Without this, an invalid regex returns
-  // empty results with no indication of why; the model can't tell
-  // "no matches" from "your pattern is broken." We re-check
-  // !signal.aborted so timeout/cap-driven aborts (which also produce
-  // non-zero exit) keep their existing error path above.
-  //
-  // Await rg's full exit before reading exitCode — the parseRgJsonStream
-  // for-await terminates on stdout EOF, which may slightly precede the
-  // child's 'close' event in Node's event-loop ordering.
-  if (!ac.signal.aborted) {
-    await exitPromise
-  }
-  if (
-    exitCode !== null &&
-    exitCode !== 0 &&
-    exitCode !== 1 &&
-    !ac.signal.aborted &&
-    parseResult.hits.length === 0
-  ) {
-    const trimmed = stderrText.trim()
-    const detail =
-      trimmed.length > 0
-        ? trimmed.replace(/^rg:\s*/i, "").slice(0, 600)
-        : `ripgrep exited with code ${exitCode}`
-    throw new Error(`code_search: ${detail}`)
-  }
 
   // Apply ranking.
   let kept: Array<ScoredHit>
-  let prunedBelowShoulder: number | undefined
+  // Stable keys (`file:line:byteStart:byteEnd`) of hits the structural
+  // pass AST-confirmed as definition sites — used to tag those hits with
+  // `role: "definition"` at render time. A logical key (not object
+  // identity) so a clone/rehydrate in scoring can't silently drop the
+  // tag. Only populated in ranked mode (the only mode that runs the
+  // structural pass). It NEVER claims "usage": absence of the tag is not
+  // a claim, since a hit may simply not have been AST-checked.
+  let confirmedKeys: Set<string> | undefined
   let notice: string | null = null
-  if (mode === "ranked") {
+  /**
+   * Outlines the structural pass already computed (worker-pool path only),
+   * keyed by RELATIVE file path. The outline loop reuses these before falling
+   * back to `_treeCache` / `outlineFile` — the threaded equivalent of Lever 1's
+   * tree reuse (a Tree can't cross threads, so the pool ships outline entries
+   * instead). Undefined on the in-process path, where `_treeCache` reuse
+   * applies directly.
+   */
+  let structuralOutlines: Map<string, Array<FileOutlineEntry>> | undefined
+  if (effectiveMode === "ranked") {
     const queryTokens = tokenize(rawInput.query)
     // Pass 1: regex-only BM25F. Cheap and gives us a reliable
     // ordering to pick the top-N for structural confirmation.
@@ -1857,8 +2363,7 @@ export async function searchCode(
       budgetMs: STRUCTURAL_BUDGET_MS,
       signal: ac.signal,
     })
-    notice = structural.fallback
-
+    structuralOutlines = structural.outlinesByFile
     // Pass 2: re-score with AST confirmation. Corpus stats are
     // re-computed against the structurally-enriched symbol_context
     // fields so token IDFs reflect the new field contents.
@@ -1867,9 +2372,62 @@ export async function searchCode(
       queryTokens,
       structural.confirmedHitIndexes,
     )
-    const pruned = shoulderPrune(pass2)
-    kept = pruned.kept.slice(0, limit)
-    prunedBelowShoulder = pruned.prunedBelowShoulder
+    // Accumulate every actionable notice (structural-budget fallback +
+    // the two default-mode precision disclosures) so none silently
+    // overwrites another.
+    const notices: Array<string> = []
+    if (structural.fallback) notices.push(structural.fallback)
+
+    // Floor vs precision. `complete: true` returns the full ranked set
+    // (capped only by `limit`). The default applies the precision
+    // shoulder cut + per-file cap — but discloses BOTH, so a miss is
+    // never silent: the model can always recover the full set with
+    // `complete: true`.
+    sortByScore(pass2)
+    if (rawInput.complete) {
+      kept = pass2.slice(0, limit)
+    } else {
+      const cut = shoulderCut(pass2)
+      const hidden = pass2.length - cut.length
+      kept = cut.slice(0, limit)
+      if (hidden > 0) {
+        notices.push(
+          `${hidden} lower-relevance match${hidden === 1 ? "" : "es"} ` +
+            `hidden by precision pruning — pass complete:true for the full set`,
+        )
+      }
+      // Per-file cap disclosure. ripgrep's `--max-count` silently
+      // truncates a file at RANKED_MAX_PER_FILE; we can't know the true
+      // count, but a file AT the cap was (probably) truncated — disclose
+      // it so the cap, like the shoulder cut, is never a silent miss.
+      const perFileCounts = new Map<string, number>()
+      for (const h of parseResult.hits) {
+        perFileCounts.set(h.file, (perFileCounts.get(h.file) ?? 0) + 1)
+      }
+      let cappedFiles = 0
+      for (const c of perFileCounts.values()) {
+        if (c >= RANKED_MAX_PER_FILE) cappedFiles++
+      }
+      if (cappedFiles > 0) {
+        notices.push(
+          `${cappedFiles} file${cappedFiles === 1 ? "" : "s"} hit the ` +
+            `per-file match cap — pass complete:true for every match`,
+        )
+      }
+    }
+    notice = notices.length > 0 ? notices.join(" · ") : null
+
+    // Confirmed-definition keys (stable file:line:byte-range, NOT object
+    // identity) for the render-time `role` tag.
+    confirmedKeys = new Set<string>()
+    for (const idx of structural.confirmedHitIndexes) {
+      const h = parseResult.hits[idx]
+      if (h) {
+        confirmedKeys.add(
+          `${h.file}:${h.line}:${h.match_start}:${h.match_end}`,
+        )
+      }
+    }
   } else {
     // Literal / regex: ripgrep document order, no scoring.
     kept = parseResult.hits.map((h) => ({
@@ -1885,18 +2443,14 @@ export async function searchCode(
   // Then normalize separators to "/" so output is platform-agnostic
   // (Windows rg returns "src\foo.ts"; models and tests expect "/").
   const results: Array<CodeSearchHit> = kept.map((sh) => {
-    let file = sh.hit.file
-    if (file.startsWith("./") || file.startsWith(".\\")) {
-      file = file.slice(2)
-    }
-    file = file.replace(/\\/g, "/")
+    const file = normalizeRelFile(sh.hit.file)
     const baseHit: CodeSearchHit = {
       file,
       line: sh.hit.line,
       snippet: renderSnippet(sh.hit),
       match_byte_range: [sh.hit.match_start, sh.hit.match_end],
     }
-    if (mode === "ranked") {
+    if (effectiveMode === "ranked") {
       baseHit.score = round4(sh.score)
       baseHit.field_contributions = {
         match_line: round4(sh.field_contributions.match_line ?? 0),
@@ -1907,8 +2461,113 @@ export async function searchCode(
     } else {
       baseHit.field_contributions = null
     }
+    if (
+      confirmedKeys?.has(
+        `${sh.hit.file}:${sh.hit.line}:${sh.hit.match_start}:${sh.hit.match_end}`,
+      )
+    ) {
+      baseHit.role = "definition"
+    }
     return baseHit
   })
+
+  // Structural summary is ON by default — outline the distinct files in
+  // the result set (capped, in result order) unless the caller opts out
+  // with `summary: false`. `scan: true` instead outlines the ENTIRE
+  // workspace (every non-ignored, non-sensitive source file), up to
+  // SCAN_MAX_FILES, so the model gets a whole-tree symbol map in one call.
+  // Reuses the shared tree-sitter outliner; each file is bounded by its
+  // own 1 MiB parse cap and the outliner never throws. Computed BEFORE
+  // `elapsed_ms` so telemetry reflects the real latency.
+  let outlines:
+    | Array<{ file: string; outline: Array<FileOutlineEntry> }>
+    | undefined
+  let scanNotice: string | null = null
+  const wantScan = rawInput.scan === true
+  // A whole-workspace scan (enumerate + outline up to SCAN_MAX_FILES) is
+  // the heaviest path and runs AFTER the search-phase wallTimer is torn
+  // down, so it self-bounds against this absolute deadline.
+  const scanDeadline = Date.now() + WALL_TIME_MS
+  if (rawInput.summary !== false || wantScan) {
+    let distinct: Array<string>
+    if (wantScan) {
+      // Whole-workspace enumeration (respects ignore rules; sensitive
+      // paths + non-outlineable extensions filtered). Capped at
+      // SCAN_MAX_FILES; coverage disclosed via `scanNotice` on truncation.
+      const enumed = await enumerateWorkspaceFiles({
+        rgPath: rgResolution.rgPath,
+        workspaceCanonical: ws.canonical,
+        signal: ac.signal,
+        deadlineMs: scanDeadline,
+      })
+      distinct = enumed.files
+      if (enumed.capped) {
+        scanNotice =
+          `scan outlined ${enumed.files.length} of ${enumed.total} workspace ` +
+          `source files (capped at ${SCAN_MAX_FILES}); narrow with file_glob ` +
+          `or inspect a sub-tree for full coverage`
+      }
+    } else {
+      const seen = new Set<string>()
+      distinct = []
+      for (const r of results) {
+        if (seen.has(r.file)) continue
+        seen.add(r.file)
+        distinct.push(r.file)
+        if (distinct.length >= CODE_SUMMARY_MAX_FILES) break
+      }
+    }
+    outlines = []
+    // A whole-workspace scan shares the single `scanDeadline` across
+    // enumeration + outlining; the result-summary path keeps its tight
+    // 2s self-bound.
+    const outlineDeadline = wantScan ? scanDeadline : Date.now() + 2000
+    for (const file of distinct) {
+      // Self-bound: the wall-clock timer + external-signal listener are
+      // already torn down by here, so cap the outline pass independently.
+      if (ac.signal.aborted || Date.now() > outlineDeadline) break
+      const abs = path.resolve(ws.canonical, file)
+      let result: FileOutlineResult | undefined
+      // 1. Reuse the worker-pool's already-computed outline (the threaded
+      //    equivalent of Lever 1: the pool parsed this file and shipped its
+      //    outline entries alongside the confirm result). `file` is the
+      //    normalized result path, matching how the pool keyed its map.
+      const pooled = structuralOutlines?.get(file)
+      if (pooled) {
+        result = { outline: pooled, language: getLanguageKeyForPath(abs) }
+      }
+      // 2. Else reuse the in-process structural pass's cached tree when it's
+      //    still fresh — avoids re-reading + re-parsing a file we already
+      //    parsed this call. `outlineFromTree` is walk-only and does NOT free
+      //    the tree (the cache owns it). On any miss / mtime change / unknown
+      //    lang, fall back to a full `outlineFile`.
+      if (!result) {
+        try {
+          const cached = cacheGet(abs, statSync(abs).mtimeMs)
+          if (cached?.tree) {
+            const lang = getLanguageKeyForPath(abs)
+            if (lang) result = outlineFromTree(cached.tree, lang, ac.signal)
+          }
+        } catch {
+          // fall through to a full parse
+        }
+      }
+      const o = result ?? (await outlineFile(abs, ac.signal))
+      // Skip files with no recoverable symbols in scan mode so the map
+      // stays a list of real symbol-bearing files, not empty noise.
+      if (wantScan && o.outline.length === 0) continue
+      outlines.push({ file, outline: o.outline })
+    }
+  }
+
+  // Merge every actionable notice: ast-grep diagnostics + scan coverage +
+  // the ranked-mode precision/structural notice. Joined with ` · ` so none
+  // overwrites another (same convention as the ranked-mode notice merge).
+  const finalNotices: Array<string> = []
+  if (astNotice) finalNotices.push(astNotice)
+  if (scanNotice) finalNotices.push(scanNotice)
+  if (notice) finalNotices.push(notice)
+  const mergedNotice = finalNotices.length > 0 ? finalNotices.join(" · ") : null
 
   const elapsed_ms = Date.now() - t0
 
@@ -1916,30 +2575,33 @@ export async function searchCode(
   // absolute paths unless explicitly enabled.
   const debugLog = process.env.GH_ROUTER_DEBUG_CODE_SEARCH === "1"
   consola.info(
-    `[code_search] mode=${mode} structural=${structuralMode} ` +
+    `[code_search] mode=${effectiveMode}${astPattern ? " ast_pattern" : ""}` +
+      `${wantScan ? " scan" : ""}${rawInput.multiline ? " multiline" : ""} ` +
+      `structural=${structuralMode} ` +
       `expansion=${expansion ? expansion.length : 0} ` +
       `results=${results.length} truncated=${parseResult.truncated} ` +
+      `outlines=${outlines ? outlines.length : 0} ` +
       `scanned_files=${parseResult.scannedFiles} elapsed_ms=${elapsed_ms} ` +
       `abort=${parseResult.cancelled} rg=${rgResolution.source} ` +
-      `notice=${notice ? "yes" : "no"}` +
+      `notice=${mergedNotice ? "yes" : "no"}` +
       (debugLog ? ` query="${rawInput.query}" workspace="${ws.canonical}"` : ""),
   )
 
   return {
     results,
     truncated: parseResult.truncated,
-    pruned_below_shoulder: mode === "ranked" ? prunedBelowShoulder : undefined,
     scanned_files: parseResult.scannedFiles,
     elapsed_ms,
     ranking:
-      mode === "ranked"
+      effectiveMode === "ranked"
         ? {
             algorithm: "BM25F",
             citation: "Robertson, Zaragoza, Taylor 2004",
             k1: BM25F_K1,
           }
         : { algorithm: "ripgrep_document_order" },
-    notice,
+    outlines,
+    notice: mergedNotice,
   }
 }
 

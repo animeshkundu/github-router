@@ -12,3 +12,9 @@ node_modules/
 
 # build output
 dist/
+
+# Claude Code local working state (worktrees, session notes, local settings).
+# Never tracked; gitignoring it also keeps worker_implement(worktree:true)'s
+# untracked-file copy from descending into agent worktrees (which can hold
+# live sockets -> ENOTSUP on copyfile).
+.claude/

@@ -29,6 +29,8 @@ import {
   tokenize,
   validateWorkspace,
   resolveRipgrep,
+  resolveAstGrep,
+  __setAstGrepResolverForTest,
 } from "../src/lib/code-search"
 
 // ============================================================
@@ -438,7 +440,6 @@ describe("BM25F ranking", () => {
       const stable = {
         results: r.results,
         truncated: r.truncated,
-        pruned_below_shoulder: r.pruned_below_shoulder,
         scanned_files: r.scanned_files,
         ranking: r.ranking,
       }
@@ -750,6 +751,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
       "results",
       "truncated",
       "notice",
+      "outlines",
     ])
     for (const k of Object.keys(body)) {
       expect(allowedTopKeys.has(k)).toBe(true)
@@ -807,6 +809,40 @@ describe("MCP handler trims the response per the minimality principle", () => {
       const body = JSON.parse(result.content[0].text) as Record<string, unknown>
       expect((body.results as Array<unknown>).length).toBeGreaterThan(0)
     }
+  })
+
+  test("summary is forwarded through the handler: default → outlines present; summary:false → absent", async () => {
+    const { NON_PERSONA_MCP_TOOLS } = await import(
+      "../src/lib/peer-mcp-personas"
+    )
+    const tool = NON_PERSONA_MCP_TOOLS.find((t) => t.toolNameHttp === "code")!
+
+    // Default (no summary arg) → outlines present (on by default).
+    const onByDefault = await tool.handler({
+      query: "findMe",
+      workspace: fx.root,
+      mode: "literal",
+      limit: 5,
+    })
+    const onBody = JSON.parse(onByDefault.content[0].text) as Record<
+      string,
+      unknown
+    >
+    expect("outlines" in onBody).toBe(true)
+
+    // summary:false MUST reach searchCode → outlines omitted.
+    const optedOut = await tool.handler({
+      query: "findMe",
+      workspace: fx.root,
+      mode: "literal",
+      limit: 5,
+      summary: false,
+    })
+    const offBody = JSON.parse(optedOut.content[0].text) as Record<
+      string,
+      unknown
+    >
+    expect("outlines" in offBody).toBe(false)
   })
 
   test("context_lines param is no longer accepted in the schema", async () => {
@@ -990,4 +1026,554 @@ describe("binary file handling (NUL-byte defense)", () => {
     // Should still find the clean file
     expect(r.results.some((h) => h.file.includes("clean.ts"))).toBe(true)
   })
+})
+
+describe("searchCode — structural summary (summary: true)", () => {
+  test("outlines matched files by default; omitted with summary:false", async () => {
+    const fx = makeFixture((root) => {
+      writeFileSync(
+        path.join(root, "svc.ts"),
+        [
+          "export class UserService {",
+          "  getUser() { return MARKER }",
+          "}",
+          "export function makeUser() { return new UserService() }",
+          "export const MARKER = 1",
+        ].join("\n") + "\n",
+      )
+    })
+    try {
+      // Default (no summary arg) — outlines are attached.
+      const byDefault = await searchCode({
+        query: "MARKER",
+        workspace: fx.root,
+      })
+      expect(byDefault.results.length).toBeGreaterThan(0)
+      const outlines = byDefault.outlines ?? []
+      const svc = outlines.find((o) => o.file.includes("svc.ts"))
+      expect(svc).toBeDefined()
+      const names = (svc?.outline ?? []).map((e) => e.name)
+      // Top-level symbols present...
+      expect(names).toContain("UserService")
+      expect(names).toContain("makeUser")
+      // ...and nested members too (robust, full-tree outline).
+      expect(names).toContain("getUser")
+      // The method is marked deeper than its enclosing class.
+      const cls = (svc?.outline ?? []).find((e) => e.name === "UserService")
+      const method = (svc?.outline ?? []).find((e) => e.name === "getUser")
+      expect(method?.depth ?? 0).toBeGreaterThan(cls?.depth ?? 0)
+
+      // Opt out → outlines omitted entirely.
+      const optedOut = await searchCode({
+        query: "MARKER",
+        workspace: fx.root,
+        summary: false,
+      })
+      expect(optedOut.outlines).toBeUndefined()
+    } finally {
+      fx.cleanup()
+    }
+  })
+
+  test("dedupes files and caps the outline count at 10", async () => {
+    const fx = makeFixture((root) => {
+      for (let i = 0; i < 12; i++) {
+        writeFileSync(
+          path.join(root, `f${i}.ts`),
+          `export function fn${i}() { return TOKEN }\nexport const TOKEN = ${i}\n`,
+        )
+      }
+    })
+    try {
+      const r = await searchCode({
+        query: "TOKEN",
+        workspace: fx.root,
+        mode: "literal", // document order, no shoulder prune → all 12 files
+        summary: true,
+        limit: 200,
+      })
+      const outlines = r.outlines ?? []
+      expect(outlines.length).toBeLessThanOrEqual(10)
+      const files = new Set(outlines.map((o) => o.file))
+      expect(files.size).toBe(outlines.length) // deduped
+    } finally {
+      fx.cleanup()
+    }
+  })
+})
+
+// ============================================================
+// Floor guarantee: ranked never drops a match grep would return
+// ============================================================
+
+describe("searchCode — floor guarantee (ranked ⊇ grep)", () => {
+  // "ab" substring-matches `ab`, `grab`, `fabric`, `label` — but BM25F
+  // tokenizes grab/fabric/label away (they score 0), so the precision
+  // shoulder cut drops them. complete:true must return them.
+  const AB_LINES =
+    [
+      "const ab = 1",
+      "const grab = 2",
+      'const material = "fabric"',
+      "function label() { return 0 }",
+    ].join("\n") + "\n"
+
+  test("complete:true ranked contains every match literal (raw ripgrep) finds", async () => {
+    const fx = makeFixture((root) => {
+      writeFileSync(path.join(root, "f.ts"), AB_LINES)
+    })
+    try {
+      const ranked = await searchCode({
+        query: "ab",
+        workspace: fx.root,
+        mode: "ranked",
+        complete: true,
+        summary: false,
+      })
+      const literal = await searchCode({
+        query: "ab",
+        workspace: fx.root,
+        mode: "literal",
+        summary: false,
+      })
+      const rankedKeys = new Set(
+        ranked.results.map((h) => `${h.file}:${h.line}`),
+      )
+      const literalKeys = new Set(
+        literal.results.map((h) => `${h.file}:${h.line}`),
+      )
+      // Raw ripgrep finds all four lines.
+      expect(literalKeys.size).toBeGreaterThanOrEqual(4)
+      // FLOOR: complete:true ranked contains every lexical match.
+      for (const k of literalKeys) {
+        expect(rankedKeys.has(k)).toBe(true)
+      }
+    } finally {
+      fx.cleanup()
+    }
+  })
+
+  test("default ranked prunes low-relevance matches but never silently — notice points at complete:true", async () => {
+    const fx = makeFixture((root) => {
+      writeFileSync(path.join(root, "f.ts"), AB_LINES)
+    })
+    try {
+      const ranked = await searchCode({
+        query: "ab",
+        workspace: fx.root,
+        mode: "ranked",
+        summary: false,
+      })
+      const literal = await searchCode({
+        query: "ab",
+        workspace: fx.root,
+        mode: "literal",
+        summary: false,
+      })
+      // Default hides the score-0 matches → fewer than the raw set...
+      expect(ranked.results.length).toBeLessThan(literal.results.length)
+      // ...but the notice tells the model how to get them all.
+      expect(ranked.notice ?? "").toMatch(/complete:true/)
+    } finally {
+      fx.cleanup()
+    }
+  })
+
+  test("role:'definition' only on AST-confirmed definitions; usages untagged", async () => {
+    const fx = makeFixture((root) => {
+      writeFileSync(
+        path.join(root, "m.ts"),
+        [
+          "export function processData() { return 1 }",
+          "const a = processData()",
+          "const b = processData()",
+        ].join("\n") + "\n",
+      )
+    })
+    try {
+      const r = await searchCode({
+        query: "processData",
+        workspace: fx.root,
+        mode: "ranked",
+        summary: false,
+      })
+      const defHit = r.results.find((h) => h.line === 1)
+      const usageHit = r.results.find((h) => h.line === 2)
+      expect(defHit?.role).toBe("definition")
+      // Absence of the tag is NOT a "usage" claim — usages are simply
+      // untagged.
+      expect(usageHit?.role).toBeUndefined()
+    } finally {
+      fx.cleanup()
+    }
+  })
+})
+
+// ============================================================
+// Multi-engine modes (multiline / scan / ast_pattern)
+// ============================================================
+
+describe("multi-engine: default behavior is unchanged (recall floor preserved)", () => {
+  // The proven floor: with NONE of the three new params set, the response
+  // must be byte-identical to the pre-change behavior. We pin it by
+  // asserting the new params, when left unset/false, produce the SAME
+  // result object as an explicit no-op invocation.
+  const SRC =
+    [
+      "export function alpha() { return 1 }",
+      "const beta = alpha()",
+      "function gamma() {",
+      "  return alpha()",
+      "}",
+    ].join("\n") + "\n"
+
+  test("multiline:false / scan:false / ast_pattern unset === omitting them", async () => {
+    const fx = makeFixture((root) => {
+      writeFileSync(path.join(root, "a.ts"), SRC)
+    })
+    try {
+      const baseline = await searchCode({
+        query: "alpha",
+        workspace: fx.root,
+        mode: "ranked",
+      })
+      const explicit = await searchCode({
+        query: "alpha",
+        workspace: fx.root,
+        mode: "ranked",
+        multiline: false,
+        scan: false,
+        // ast_pattern intentionally unset
+      })
+      // elapsed_ms differs run-to-run; compare everything else.
+      const strip = (r: Awaited<ReturnType<typeof searchCode>>): unknown => ({
+        ...r,
+        elapsed_ms: 0,
+      })
+      expect(strip(explicit)).toEqual(strip(baseline))
+    } finally {
+      fx.cleanup()
+    }
+  })
+
+  test("default mode does NOT match a cross-line pattern", async () => {
+    const fx = makeFixture((root) => {
+      writeFileSync(path.join(root, "m.ts"), "const x = foo(\n  bar\n)\n")
+    })
+    try {
+      const r = await searchCode({
+        query: "foo[\\s\\S]*?bar",
+        workspace: fx.root,
+        mode: "regex",
+        // multiline NOT set → line-oriented → no cross-line match
+        summary: false,
+      })
+      expect(r.results.length).toBe(0)
+    } finally {
+      fx.cleanup()
+    }
+  })
+})
+
+describe("multi-engine: multiline", () => {
+  test("multiline:true finds a two-line pattern the default mode misses", async () => {
+    const fx = makeFixture((root) => {
+      writeFileSync(path.join(root, "m.ts"), "const x = foo(\n  1,\n  bar\n)\n")
+    })
+    try {
+      const withML = await searchCode({
+        query: "foo[\\s\\S]*?bar",
+        workspace: fx.root,
+        mode: "regex",
+        multiline: true,
+        summary: false,
+      })
+      const withoutML = await searchCode({
+        query: "foo[\\s\\S]*?bar",
+        workspace: fx.root,
+        mode: "regex",
+        summary: false,
+      })
+      expect(withML.results.length).toBe(1)
+      expect(withoutML.results.length).toBe(0)
+      // Snippet spans the matched region (contains both foo and bar).
+      expect(withML.results[0].snippet).toContain("foo")
+      expect(withML.results[0].snippet).toContain("bar")
+      // Reported line is the START of the multi-line match.
+      expect(withML.results[0].line).toBe(1)
+    } finally {
+      fx.cleanup()
+    }
+  })
+})
+
+describe("multi-engine: scan (whole-workspace outline)", () => {
+  test("scan:true outlines a file that does NOT text-match the query", async () => {
+    const fx = makeFixture((root) => {
+      mkdirSync(path.join(root, "src"))
+      // Matches the query.
+      writeFileSync(
+        path.join(root, "src", "match.ts"),
+        "export function needle() { return 1 }\n",
+      )
+      // Does NOT contain the query token at all.
+      writeFileSync(
+        path.join(root, "src", "elsewhere.ts"),
+        "export class Unrelated {\n  go() { return 2 }\n}\n",
+      )
+    })
+    try {
+      const r = await searchCode({
+        query: "needle",
+        workspace: fx.root,
+        scan: true,
+      })
+      const files = new Set((r.outlines ?? []).map((o) => o.file))
+      // The non-matching file is outlined because scan covers the whole tree.
+      expect(files.has("src/elsewhere.ts")).toBe(true)
+      expect(files.has("src/match.ts")).toBe(true)
+      // The hit set is still driven by the query (only match.ts matches).
+      expect(r.results.every((h) => h.file === "src/match.ts")).toBe(true)
+    } finally {
+      fx.cleanup()
+    }
+  })
+
+  test("scan respects ignore rules and the sensitive-path denylist", async () => {
+    const fx = makeFixture((root) => {
+      // A git repo so rg --files honors .gitignore.
+      mkdirSync(path.join(root, ".git"))
+      writeFileSync(path.join(root, ".gitignore"), "ignored.ts\n.env\n")
+      writeFileSync(
+        path.join(root, "kept.ts"),
+        "export function kept() { return 1 }\n",
+      )
+      writeFileSync(
+        path.join(root, "ignored.ts"),
+        "export function ignored() { return 2 }\n",
+      )
+      // Sensitive-shaped file — must never be outlined even if not ignored.
+      writeFileSync(path.join(root, ".env"), "SECRET=abc\n")
+    })
+    try {
+      const r = await searchCode({
+        query: "function",
+        workspace: fx.root,
+        scan: true,
+        mode: "literal",
+      })
+      const files = new Set((r.outlines ?? []).map((o) => o.file))
+      expect(files.has("kept.ts")).toBe(true)
+      expect(files.has("ignored.ts")).toBe(false) // gitignored
+      expect(files.has(".env")).toBe(false) // sensitive + not a grammar
+    } finally {
+      fx.cleanup()
+    }
+  })
+})
+
+describe("multi-engine: ast_pattern", () => {
+  const sgAvailable = resolveAstGrep() !== null
+
+  test.if(sgAvailable)(
+    "ast_pattern matches a multi-line construct the default regex misses",
+    async () => {
+      const fx = makeFixture((root) => {
+        mkdirSync(path.join(root, "src"))
+        writeFileSync(
+          path.join(root, "src", "a.ts"),
+          "function wrap() {\n  return inner(\n    1,\n    2\n  )\n}\n",
+        )
+      })
+      try {
+        const r = await searchCode({
+          query: "ignored-query",
+          workspace: fx.root,
+          ast_pattern: "function $F() { $$$ }",
+          ast_lang: "ts",
+        })
+        // ast-grep found the whole multi-line function.
+        expect(r.results.length).toBeGreaterThanOrEqual(1)
+        expect(r.results[0].file).toBe("src/a.ts")
+        // 1-indexed line (sg reports 0-indexed; we add 1).
+        expect(r.results[0].line).toBe(1)
+        // ast hits are document-order (literal), not BM25F.
+        expect(r.ranking.algorithm).toBe("ripgrep_document_order")
+        // No false ast-absent notice.
+        expect(r.notice ?? "").not.toMatch(/ast-grep \(sg\), which isn't/)
+      } finally {
+        fx.cleanup()
+      }
+    },
+  )
+
+  test.if(sgAvailable)(
+    "ast_pattern takes precedence over the regex query for match generation",
+    async () => {
+      const fx = makeFixture((root) => {
+        writeFileSync(
+          path.join(root, "a.ts"),
+          "function onlyAstFinds() { return 1 }\nconst queryWord = 5\n",
+        )
+      })
+      try {
+        // 'queryWord' would match line 2 in regex mode; the ast_pattern for a
+        // function instead returns line 1, proving query is ignored for
+        // matching when ast_pattern is set.
+        const r = await searchCode({
+          query: "queryWord",
+          workspace: fx.root,
+          ast_pattern: "function $F() { $$$ }",
+          ast_lang: "ts",
+        })
+        expect(r.results.length).toBe(1)
+        expect(r.results[0].line).toBe(1)
+      } finally {
+        fx.cleanup()
+      }
+    },
+  )
+
+  test.if(sgAvailable)(
+    "ast_pattern survives a workspace path with shell metacharacters (no injection)",
+    async () => {
+      // The workspace dir name carries `& ( ) !` + spaces — runManagedExeCapture
+      // passes it as an argv element (shell:false), so it cannot inject.
+      const fx = makeFixture((root) => {
+        const evil = path.join(root, "a & b (c) ! d")
+        mkdirSync(evil)
+        writeFileSync(path.join(evil, "x.ts"), "function zap() { return 1 }\n")
+      })
+      try {
+        const evil = path.join(fx.root, "a & b (c) ! d")
+        const r = await searchCode({
+          query: "ignored",
+          workspace: evil,
+          ast_pattern: "function $F() { $$$ }",
+          ast_lang: "ts",
+        })
+        expect(r.results.length).toBe(1)
+        expect(r.results[0].file).toBe("x.ts")
+      } finally {
+        fx.cleanup()
+      }
+    },
+  )
+
+  test.if(sgAvailable && process.platform !== "win32")(
+    "ast_pattern drops out-of-workspace hits reached via a symlink (no path leak)",
+    async () => {
+      // A secret target OUTSIDE the workspace, reachable only through an
+      // in-workspace symlink. ast-grep may traverse the link and report the
+      // outside file's absolute path; the relativize-confinement must drop it.
+      const outside = realpathSync(
+        mkdtempSync(path.join(os.tmpdir(), "gh-router-cs-out-")),
+      )
+      writeFileSync(
+        path.join(outside, "secret.ts"),
+        "function leaked() { return 'SECRET' }\n",
+      )
+      const fx = makeFixture((root) => {
+        writeFileSync(
+          path.join(root, "ok.ts"),
+          "function inside() { return 1 }\n",
+        )
+        symlinkSync(outside, path.join(root, "escape"), "dir")
+      })
+      try {
+        const r = await searchCode({
+          query: "x",
+          workspace: fx.root,
+          ast_pattern: "function $F() { $$$ }",
+          ast_lang: "ts",
+        })
+        // No hit may be absolute, escape with "..", or name the outside file.
+        for (const h of r.results) {
+          expect(path.isAbsolute(h.file)).toBe(false)
+          expect(h.file.startsWith("..")).toBe(false)
+          expect(h.file).not.toContain("secret")
+        }
+        // The in-workspace match still comes through.
+        expect(r.results.some((h) => h.file === "ok.ts")).toBe(true)
+      } finally {
+        fx.cleanup()
+        rmSync(outside, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test("ast_pattern returns a graceful notice (no results, not thrown) when sg is absent", async () => {
+    // Force the binary-absent path deterministically — even on a host (like
+    // the toolbelt-provisioned dev/CI machine) that HAS sg — via the
+    // test-only resolver override.
+    __setAstGrepResolverForTest(() => null)
+    const fx = makeFixture((root) => {
+      writeFileSync(path.join(root, "a.ts"), "function f() {}\n")
+    })
+    try {
+      const r = await searchCode({
+        query: "ignored",
+        workspace: fx.root,
+        ast_pattern: "function $F() { $$$ }",
+      })
+      expect(r.results.length).toBe(0)
+      expect(r.notice ?? "").toMatch(/ast-grep \(sg\), which isn't available/)
+    } finally {
+      __setAstGrepResolverForTest(undefined)
+      fx.cleanup()
+    }
+  })
+
+  test.if(sgAvailable)(
+    "ast_pattern WITHOUT ast_lang returns the lang-required notice (fails closed, no garbage)",
+    async () => {
+      const fx = makeFixture((root) => {
+        writeFileSync(path.join(root, "a.ts"), "function f() { return 1 }\n")
+      })
+      try {
+        const r = await searchCode({
+          query: "ignored",
+          workspace: fx.root,
+          ast_pattern: "function $F() { $$$ }",
+          // ast_lang intentionally omitted
+        })
+        expect(r.results.length).toBe(0)
+        expect(r.notice ?? "").toMatch(/requires ast_lang/)
+      } finally {
+        fx.cleanup()
+      }
+    },
+  )
+
+  test.if(sgAvailable)(
+    "ast_pattern with ast_lang matches only the named grammar, not other files (cross-language-garbage regression)",
+    async () => {
+      // Without `--lang`, ast-grep parses the pattern against every language
+      // and matched unrelated files (e.g. markdown prose). `ast_lang` scopes
+      // it to the one grammar.
+      const fx = makeFixture((root) => {
+        writeFileSync(
+          path.join(root, "a.ts"),
+          "function realFn() { return 1 }\n",
+        )
+        writeFileSync(
+          path.join(root, "README.md"),
+          "# docs\nThis function returns things with braces { like this }.\n",
+        )
+      })
+      try {
+        const r = await searchCode({
+          query: "ignored",
+          workspace: fx.root,
+          ast_pattern: "function $F() { $$$ }",
+          ast_lang: "ts",
+        })
+        expect(r.results.length).toBeGreaterThanOrEqual(1)
+        expect(r.results.every((h) => h.file.endsWith(".ts"))).toBe(true)
+        expect(r.results.some((h) => h.file.endsWith(".md"))).toBe(false)
+      } finally {
+        fx.cleanup()
+      }
+    },
+  )
 })

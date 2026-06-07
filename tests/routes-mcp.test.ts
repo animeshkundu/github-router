@@ -8,6 +8,7 @@ import {
   __getInFlightForTests,
   __resetInFlightForTests,
 } from "../src/routes/mcp/handler"
+import { MAX_INFLIGHT_TOOLS_CALL } from "../src/lib/mcp-inflight"
 import { state } from "../src/lib/state"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 import {
@@ -54,10 +55,18 @@ const baseModels: ModelsResponse = {
 }
 
 const originalFetch = globalThis.fetch
+let savedDisableSemantic: string | undefined
 
 beforeEach(() => {
   __resetInFlightForTests()
   __resetWorkerSlotsForTests()
+  // Pin semantic_search OFF so tools/list surface assertions are
+  // deterministic regardless of whether the colgrep sidecar happens to
+  // be provisioned on the test host (the availability gate would
+  // otherwise add `semantic_search` to the search group on a dev box
+  // that has run it). Mirrors the GH_ROUTER_DISABLE_WORKER_TOOLS pin.
+  savedDisableSemantic = process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH
+  process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH = "1"
   state.peerMcpNonce = NONCE
   state.copilotToken = "test-copilot-token"
   state.githubToken = "test-gh-token"
@@ -70,6 +79,11 @@ beforeEach(() => {
 afterEach(() => {
   state.peerMcpNonce = undefined
   state.models = undefined
+  if (savedDisableSemantic === undefined) {
+    delete process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH
+  } else {
+    process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH = savedDisableSemantic
+  }
   globalThis.fetch = originalFetch
 })
 
@@ -1392,13 +1406,11 @@ describe("/mcp stand_in tool", () => {
 })
 
 describe("/mcp concurrency cap", () => {
-  test("9th in-flight tools/call returns queue-full isError (cap = 8)", async () => {
-    // Phase 2D of the peer-MCP plan raised MAX_INFLIGHT_TOOLS_CALL from 2
-    // to 8 so the decomposition pattern (Track 2B) — "split a >20 KB
-    // artifact into 2-4 batches and call in parallel" — can actually run
-    // in parallel without the (3+)th call returning isError "queue full".
-    // The cap at 8 covers a 7-fork wave with one slot of headroom and is
-    // still a hard upper bound against runaway clients.
+  test("the (cap+1)th in-flight tools/call returns queue-full isError", async () => {
+    // The shared MAX_INFLIGHT_TOOLS_CALL slots bound concurrent tool
+    // calls; the next call past the cap returns a clean "queue full"
+    // isError so a runaway client (or a fan-out wave) backs off instead
+    // of growing unbounded.
     let resolveSlow: ((res: Response) => void) | null = null
     const slow = new Promise<Response>((r) => {
       resolveSlow = r
@@ -1413,18 +1425,17 @@ describe("/mcp concurrency cap", () => {
         params: { name: "codex_critic", arguments: { prompt: "x" } },
       })
 
-    // Fire 8 calls — all should occupy in-flight slots.
-    const inflight = [
-      fire(), fire(), fire(), fire(),
-      fire(), fire(), fire(), fire(),
-    ]
+    // Fire exactly the cap — all occupy in-flight slots.
+    const inflight = Array.from({ length: MAX_INFLIGHT_TOOLS_CALL }, () =>
+      fire(),
+    )
     // Brief tick so the calls increment the in-flight counter.
     await new Promise((r) => setTimeout(r, 10))
-    expect(__getInFlightForTests()).toBe(8)
+    expect(__getInFlightForTests()).toBe(MAX_INFLIGHT_TOOLS_CALL)
 
-    // Ninth call should immediately return queue-full.
-    const ninth = await fire()
-    const result = ninth.json.result as { isError: boolean; content: Array<{ text: string }> }
+    // The next call should immediately return queue-full.
+    const overflow = await fire()
+    const result = overflow.json.result as { isError: boolean; content: Array<{ text: string }> }
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toMatch(/queue full/i)
 
@@ -1775,7 +1786,7 @@ describe("/mcp web_search tool", () => {
     expect(result.content[0].text).toMatch(/^web_search failed:/i)
   })
 
-  test("web_search counts against MAX_INFLIGHT_TOOLS_CALL=8 (slot accounting symmetric with personas)", async () => {
+  test("web_search counts against MAX_INFLIGHT_TOOLS_CALL (slot accounting symmetric with personas)", async () => {
     // Hold the upstream tools/call open with a never-resolving promise so
     // the slot stays incremented; verify __getInFlightForTests bumps to 1
     // mid-call. (Architect's spec point 5: keeps accounting symmetric.)

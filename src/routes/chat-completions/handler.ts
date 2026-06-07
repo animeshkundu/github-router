@@ -89,7 +89,15 @@ export async function handleCompletion(c: Context) {
     }
   }
 
-  const response = await createChatCompletions(payload, selectedModel?.requestHeaders).catch(
+  // retryTransient: true — pre-first-byte retry; the body is consumed only
+  // after the ok-check inside createChatCompletions, so a re-issue here
+  // cannot duplicate streamed output.
+  const response = await createChatCompletions(
+    payload,
+    selectedModel?.requestHeaders,
+    undefined,
+    true,
+  ).catch(
     async (error: unknown) => {
       if (error instanceof HTTPError) {
         const errorBody = await error.response.clone().text().catch(() => "")

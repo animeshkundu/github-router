@@ -46,9 +46,13 @@ function voteJson(opts: {
 // the NEXT entry in its queue. Throws if a queue is exhausted (helps
 // catch tests that under-prime the mocks).
 //
-// Use `null` as a queue entry to simulate an upstream HTTP error
-// (returns 500). Use a string to return that string as the assistant
-// text in the appropriate response shape.
+// Use `null` as a queue entry to simulate a terminal upstream error.
+// Status 400 (NOT 5xx) so it is non-retryable — the shared transient-retry
+// in `dispatchModelCall` retries 5xx/429, which would otherwise consume the
+// next queued response. These resilience tests exercise the "a model call
+// fails → tolerate it" path; the retry-recover path is covered directly in
+// `tests/upstream-retry.test.ts`. Use a string to return that string as the
+// assistant text in the appropriate response shape.
 function mockThreePeers(queues: Record<ModelKey, Array<string | null>>) {
   const consumed: Record<ModelKey, number> = {
     "gpt-5.5": 0,
@@ -70,7 +74,7 @@ function mockThreePeers(queues: Record<ModelKey, Array<string | null>>) {
       throw new Error(`mock queue for ${key} exhausted at call ${idx + 1}`)
     }
     if (entry === null) {
-      return new Response("upstream is sick", { status: 500, headers: { "content-type": "text/plain" } })
+      return new Response("upstream rejected", { status: 400, headers: { "content-type": "text/plain" } })
     }
 
     if (key === "gpt-5.5") {

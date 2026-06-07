@@ -22,12 +22,14 @@ import { buildPeerAwarenessSnippet, type McpGroup } from "./lib/peer-mcp-persona
 import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
+import { provisionAndIndexColbert } from "./lib/colbert"
 import {
   DEFAULT_CLAUDE_MODEL_FALLBACKS,
   pickClaudeDefault,
 } from "./lib/port"
 import {
   browserToolsEnabled,
+  semanticSearchEnabled,
   standInToolEnabled,
   workerToolsEnabled,
 } from "./lib/mcp-capabilities"
@@ -317,6 +319,11 @@ export const claude = defineCommand({
       }
     }
 
+    // Best-effort ColBERT semantic-search provision + background index of
+    // the launch cwd (if a git repo). ON by default; never blocks launch,
+    // never throws. Opt out with GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1.
+    void provisionAndIndexColbert()
+
     // Peer-MCP wiring. Default-on. When enabled:
     //   1. Decide between HTTP backend (always works, read-only personas)
     //      and the `--codex-cli` stdio backend (requires codex 0.129+,
@@ -474,6 +481,7 @@ export const claude = defineCommand({
           geminiAvailable,
           workerToolsAvailable: workerToolsEnabled(),
           standInAvailable: standInToolEnabled(),
+          semanticSearchAvailable: semanticSearchEnabled(),
           browseAvailable: state.browseEnabled,
           powerBrowseAvailable: state.powerBrowseEnabled,
           groupKeys,

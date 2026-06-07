@@ -7,6 +7,7 @@ import { HTTPError } from "~/lib/error"
 import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
 import { tryRefreshAndRetry } from "~/lib/token"
+import { fetchWithTransientRetry } from "~/lib/upstream-retry"
 
 /**
  * Build headers that match what VS Code Copilot Chat sends to the Copilot API.
@@ -51,11 +52,21 @@ function buildHeaders(
  * peer-MCP `opus-critic` persona) can cancel the upstream call when
  * Claude Code's MCP per-tool-call ceiling fires. Mirrors the pattern
  * in createResponses / createChatCompletions.
+ *
+ * `retryTransient` (opt-in, default false) wraps the upstream fetch in a
+ * bounded transient-failure retry (429/5xx/network, backoff+jitter) AROUND
+ * the 401-refresh path — this is the PRE-FIRST-BYTE window: the response
+ * body is never read here (the caller streams or parses it later), so a
+ * retry re-issues a fresh request without risk of duplicating already-
+ * streamed output. Only user-facing route handlers pass `true`; internal
+ * callers (e.g. `dispatchModelCall`) already wrap this function in their own
+ * `withTransientRetry`, so they MUST omit it to avoid nested retry.
  */
 export async function createMessages(
   body: string,
   extraHeaders?: Record<string, string>,
   callerSignal?: AbortSignal,
+  retryTransient = false,
 ): Promise<Response> {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
@@ -75,7 +86,15 @@ export async function createMessages(
     else if (signals.length > 1) fetchInit.signal = AbortSignal.any(signals)
     return fetch(url, fetchInit)
   }
-  const response = await tryRefreshAndRetry(doFetch, "/v1/messages")
+  const withRefresh = (): Promise<Response> =>
+    tryRefreshAndRetry(doFetch, "/v1/messages")
+  const response =
+    retryTransient ?
+      await fetchWithTransientRetry(withRefresh, {
+        signal: callerSignal,
+        label: "/v1/messages",
+      })
+    : await withRefresh()
 
   if (!response.ok) {
     let errorBody = ""
@@ -103,12 +122,15 @@ export async function createMessages(
  * Returns the raw Response.
  *
  * `callerSignal` is composed with UPSTREAM_FETCH_TIMEOUT_MS — same pattern
- * as createMessages.
+ * as createMessages. `retryTransient` (opt-in) adds the same pre-first-byte
+ * transient retry — count_tokens is non-streaming, so the whole call is in
+ * the safe window.
  */
 export async function countTokens(
   body: string,
   extraHeaders?: Record<string, string>,
   callerSignal?: AbortSignal,
+  retryTransient = false,
 ): Promise<Response> {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
@@ -127,10 +149,15 @@ export async function countTokens(
     else if (signals.length > 1) fetchInit.signal = AbortSignal.any(signals)
     return fetch(url, fetchInit)
   }
-  const response = await tryRefreshAndRetry(
-    doFetch,
-    "/v1/messages/count_tokens",
-  )
+  const withRefresh = (): Promise<Response> =>
+    tryRefreshAndRetry(doFetch, "/v1/messages/count_tokens")
+  const response =
+    retryTransient ?
+      await fetchWithTransientRetry(withRefresh, {
+        signal: callerSignal,
+        label: "/v1/messages/count_tokens",
+      })
+    : await withRefresh()
 
   if (!response.ok) {
     let errorBody = ""

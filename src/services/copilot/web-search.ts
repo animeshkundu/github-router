@@ -6,6 +6,7 @@ import { copilotBaseUrl, copilotVersion } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
 import { sleep } from "~/lib/utils"
+import { fetchWithTransientRetry } from "~/lib/upstream-retry"
 
 export interface WebSearchResult {
   content: string
@@ -106,17 +107,19 @@ async function postMcp(
   signal?: AbortSignal,
 ): Promise<Response> {
   const url = `${copilotBaseUrl(state)}/mcp`
-  const res = await fetch(url, {
-    method: "POST",
-    headers: mcpHeaders(sid),
-    body: JSON.stringify(body),
-    signal,
-  })
-  if (!res.ok && retry && res.status >= 500) {
-    await sleep(500)
-    return postMcp(body, sid, false, signal)
-  }
-  return res
+  // Shared transient-failure retry (429 / 5xx / network, backoff + jitter)
+  // — replaces the prior one-shot 5xx-only retry that missed 429 and
+  // network errors. `retry=false` callers get a single attempt.
+  return fetchWithTransientRetry(
+    () =>
+      fetch(url, {
+        method: "POST",
+        headers: mcpHeaders(sid),
+        body: JSON.stringify(body),
+        signal,
+      }),
+    { signal, label: "web-search", attempts: retry ? 3 : 1 },
+  )
 }
 
 export async function searchWeb(

@@ -162,7 +162,7 @@ The `claude` subcommand auto-injects three peer-model review tools as Claude Cod
 
 **Reasoning effort** (Phase 2C): each persona MCP tool accepts an `effort?: "low"|"medium"|"high"|"xhigh"` argument, default **`high`** (cost-conscious; raise to `xhigh` for explicit deep dives, drop to `medium` for quick sanity checks). For `/v1/responses` personas (codex-critic, codex-reviewer) the effort is set as `payload.reasoning.effort`. For `/v1/chat/completions` (gemini-critic) it's set as `payload.reasoning_effort` and may be silently ignored by Copilot's gemini route — gemini-3.x reasoning is largely auto-applied. Invalid effort values are rejected with JSON-RPC `-32602`.
 
-**Concurrency cap** (Phase 2D): `MAX_INFLIGHT_TOOLS_CALL = 8` in `src/routes/mcp/handler.ts` (raised from the original defensive 2). 9th in-flight `tools/call` returns clean isError `"queue full"`. Cap exists to bound runaway clients; persona handlers are stateless. Decomposition fan-out of 4-7 parallel batches now fits comfortably under the cap.
+**Concurrency cap** (Phase 2D): `MAX_INFLIGHT_TOOLS_CALL = 32` in `src/routes/mcp/handler.ts` (raised from the original defensive 2). 9th in-flight `tools/call` returns clean isError `"queue full"`. Cap exists to bound runaway clients; persona handlers are stateless. Decomposition fan-out of 4-7 parallel batches now fits comfortably under the cap.
 
 **Empirical latency-by-effort matrix** (Phase A3; probed live 2026-05-14 against `api.enterprise.githubcopilot.com` via the proxy on a ~600B representative review prompt with `max_output_tokens: 4096`):
 
@@ -397,7 +397,7 @@ With `implement` + `worktree: true`, the engine provisions a fresh git worktree 
 
 ### MCP in-flight cap participation
 
-The worker's `peer_review` and `advisor` tools (which dispatch to peer-model personas / the advisor responses endpoint from inside the worker's Pi loop) acquire the **same** `MAX_INFLIGHT_TOOLS_CALL = 8` slot as MCP-boundary persona calls. Implementation: `src/lib/mcp-inflight.ts` exports `acquireInFlightSlot()`; both `src/routes/mcp/handler.ts` (for `tools/call` dispatch) and `src/lib/worker-agent/tools.ts` (for nested peer/advisor) acquire from it. Without this shared counter, a single worker could fan out unboundedly to peers and starve the operator's own MCP traffic; with it, nested calls return a clean `Peer MCP queue full` tool error and the worker model can back off.
+The worker's `peer_review` and `advisor` tools (which dispatch to peer-model personas / the advisor responses endpoint from inside the worker's Pi loop) acquire the **same** `MAX_INFLIGHT_TOOLS_CALL = 32` slot as MCP-boundary persona calls. Implementation: `src/lib/mcp-inflight.ts` exports `acquireInFlightSlot()`; both `src/routes/mcp/handler.ts` (for `tools/call` dispatch) and `src/lib/worker-agent/tools.ts` (for nested peer/advisor) acquire from it. Without this shared counter, a single worker could fan out unboundedly to peers and starve the operator's own MCP traffic; with it, nested calls return a clean `Peer MCP queue full` tool error and the worker model can back off.
 
 ### Bash hardening
 
@@ -488,7 +488,7 @@ The MCP handler drops `stand_in` from `tools/list` AND fails-fast on `tools/call
 
 ### Slot accounting & pre-flight cap
 
-- **One slot per `stand_in` invocation**, NOT one per internal model call. The MCP boundary in `handleToolsCall` acquires the slot; `dispatchModelCall` (the shared per-endpoint wire helper extracted from `callPersona`) does NOT re-acquire. A single `stand_in` call making 6 internal upstream fetches (3 models × 2 rounds) consumes exactly 1 slot from the cap=8 budget. Regression test: `tests/routes-mcp.test.ts` "stand_in holds exactly ONE in-flight slot…".
+- **One slot per `stand_in` invocation**, NOT one per internal model call. The MCP boundary in `handleToolsCall` acquires the slot; `dispatchModelCall` (the shared per-endpoint wire helper extracted from `callPersona`) does NOT re-acquire. A single `stand_in` call making 6 internal upstream fetches (3 models × 2 rounds) consumes exactly 1 slot from the cap=32 budget. Regression test: `tests/routes-mcp.test.ts` "stand_in holds exactly ONE in-flight slot…".
 - **`predictedTooLong` cap = 6KB** on `decision + options + context` byte-size, JSON-path only. Fires BEFORE `acquireInFlightSlot` per the load-bearing invariant. Rationale: `stand_in` runs two sequential rounds across three frontier models, typical wall-clock 2-3 minutes; on the JSON path this always busts the 60s tools/call ceiling on non-trivial inputs. The cap surfaces "use SSE" as a fast actionable error instead of leaking a slot for the duration.
 
 ### Future: idle-trigger auto-invocation (out of scope for this PR)

@@ -20,6 +20,7 @@ import { runSelfUpdate } from "./lib/self-update"
 import { state } from "./lib/state"
 import { toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
+import { provisionAndIndexColbert } from "./lib/colbert"
 import { resolveCodexModel } from "./lib/utils"
 
 export const codex = defineCommand({
@@ -66,6 +67,10 @@ export const codex = defineCommand({
     if (toolbeltEnabled()) {
       void provisionToolbelt().catch(() => {})
     }
+
+    // Best-effort ColBERT semantic-search provision + background index of
+    // the launch cwd. ON by default; never blocks launch, never throws.
+    void provisionAndIndexColbert()
 
     const usingDefault = !args.model
     const requestedModel = args.model ?? DEFAULT_CODEX_MODEL

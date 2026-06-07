@@ -157,10 +157,11 @@ mock.module("~/lib/mcp-capabilities", () => ({
   standInToolEnabled: standInToolEnabledMock,
   browserToolsEnabled: browserToolsEnabledMock,
   // handler.ts (pulled in transitively via the static import graph)
-  // also imports these two; re-export stubs so the module mock doesn't
+  // also imports these; re-export stubs so the module mock doesn't
   // break that import. claude.ts itself only uses the three above.
   browserCompoundToolsEnabled: mock(() => false),
   browserPowerToolsEnabled: mock(() => false),
+  semanticSearchEnabled: mock(() => false),
 }))
 
 // The CLAUDE.md append + prepend helpers are the new descendant-reach
@@ -185,6 +186,31 @@ const realLaunch = await import("../../src/lib/launch")
 mock.module("~/lib/launch", () => ({
   ...realLaunch,
   getCodexVersion: getCodexVersionMock,
+}))
+
+// Fire-and-forget launch work — `void runSelfUpdate()`, `void provisionToolbelt()`,
+// `void provisionAndIndexColbert()` in claude.ts — spawns child processes and is
+// NOT awaited by the launch. Unmocked, those async calls settle AFTER `await
+// run()` returns and leak a `spawn` (the mocked node:child_process) into the
+// NEXT test's count — an intermittent "Expected 1, got 2" flake under CI load.
+// Mock them to no-op. Mock `~/lib/colbert` with its FULL export set so a
+// transitive static import of any export doesn't fail under bun-on-Windows
+// (the strict-named-export trap that already bit `semanticSearchEnabled`).
+mock.module("~/lib/self-update", () => ({
+  runSelfUpdate: mock(async () => {}),
+}))
+mock.module("~/lib/toolbelt/provision", () => ({
+  provisionToolbelt: mock(async () => []),
+}))
+mock.module("~/lib/colbert", () => ({
+  provisionAndIndexColbert: mock(async () => {}),
+  semanticSearchOptedIn: mock(() => false),
+  runSemanticSearch: mock(async () => ({
+    status: "unavailable",
+    isError: true,
+    notice: "",
+  })),
+  __resetColbertStartedForTests: mock(() => {}),
 }))
 
 // --- Import module under test AFTER mocks ---

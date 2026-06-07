@@ -42,5 +42,29 @@ export default defineConfig([
     // no node_modules lookup at the NMH launch path.
     noExternal: ["ws"],
   },
+  {
+    // Tree-sitter parse worker: separate entry. Spawned via worker_threads by
+    // src/lib/tree-sitter-pool/pool.ts to parallelize structural-pass parses
+    // off the main event loop. Needs its own bundled file because a worker is
+    // loaded by file PATH (not imported into the main bundle); the pool's
+    // resolveWorkerPath() looks for dist/lib/tree-sitter-pool/worker.js here.
+    // web-tree-sitter is left external (resolved from node_modules at runtime,
+    // same as the main bundle) — it carries a .wasm sidecar that must not be
+    // inlined.
+    entry: ["src/lib/tree-sitter-pool/worker.ts"],
+    outDir: "dist/lib/tree-sitter-pool",
+
+    format: ["esm"],
+    target: "es2022",
+    platform: "node",
+
+    sourcemap: false,
+    clean: false,
+    removeNodeProtocol: false,
+
+    env: {
+      NODE_ENV: "production",
+    },
+  },
 ])
 

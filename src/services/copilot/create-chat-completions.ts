@@ -7,11 +7,21 @@ import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { MAX_RESPONSE_BODY_BYTES, readResponseBodyCapped } from "~/lib/response-cap"
 import { state } from "~/lib/state"
 import { tryRefreshAndRetry } from "~/lib/token"
+import { fetchWithTransientRetry } from "~/lib/upstream-retry"
 
+/**
+ * `retryTransient` (opt-in, default false) adds a bounded pre-first-byte
+ * transient retry (429/5xx/network) AROUND the 401-refresh path. Safe
+ * because the body is not consumed until AFTER the `!response.ok` check.
+ * Only user-facing route handlers pass `true`; internal callers
+ * (`dispatchModelCall`) already have their own outer `withTransientRetry`
+ * and MUST omit it to avoid nested retry.
+ */
 export const createChatCompletions = async (
   payload: ChatCompletionsPayload,
   modelHeaders?: Record<string, string>,
   callerSignal?: AbortSignal,
+  retryTransient = false,
 ) => {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
@@ -49,7 +59,15 @@ export const createChatCompletions = async (
     else if (signals.length > 1) fetchInit.signal = AbortSignal.any(signals)
     return fetch(url, fetchInit)
   }
-  const response = await tryRefreshAndRetry(doFetch, "/chat/completions")
+  const withRefresh = (): Promise<Response> =>
+    tryRefreshAndRetry(doFetch, "/chat/completions")
+  const response =
+    retryTransient ?
+      await fetchWithTransientRetry(withRefresh, {
+        signal: callerSignal,
+        label: "/chat/completions",
+      })
+    : await withRefresh()
 
   if (!response.ok) {
     let errorBody = ""
