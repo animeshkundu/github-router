@@ -1722,15 +1722,24 @@ function dropAstGrepSecrets(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  */
 export function resolveAstGrep(): string | null {
   const toolbeltDir = PATHS.TOOLBELT_BIN_DIR
-  const basePath = pathEnvValue()
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    PATH: `${toolbeltDir}${path.delimiter}${basePath}`,
-  }
-  for (const name of ["sg", "ast-grep"]) {
-    const resolved = resolveExecutable(name, { env })
-    if (resolved) return resolved
-  }
+  // `sg` is the toolbelt's alias for ast-grep, but it is ONLY trusted from
+  // OUR toolbelt dir — on Linux a bare `sg` on the system PATH is
+  // `/usr/bin/sg` (the shadow-utils setgid command), NOT ast-grep. Resolving
+  // that ran the wrong binary in CI (the ast_pattern tests failed because
+  // setgid produced no matches). So search `sg` in the toolbelt dir ONLY.
+  const sgInToolbelt = resolveExecutable("sg", {
+    env: { ...process.env, PATH: toolbeltDir },
+  })
+  if (sgInToolbelt) return sgInToolbelt
+  // `ast-grep` is the unambiguous name — safe from the toolbelt OR the system
+  // PATH (no system command collides with it).
+  const astGrep = resolveExecutable("ast-grep", {
+    env: {
+      ...process.env,
+      PATH: `${toolbeltDir}${path.delimiter}${pathEnvValue()}`,
+    },
+  })
+  if (astGrep) return astGrep
   return null
 }
 

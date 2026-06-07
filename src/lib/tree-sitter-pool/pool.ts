@@ -586,16 +586,27 @@ function resolveWorkerPath(): string | null {
 
 let _pool: TreeSitterPool | null = null
 let _shutdownRegistered = false
-/** Disable the pool entirely (force the in-process path). */
-const poolDisabled = (): boolean => process.env.GH_ROUTER_DISABLE_TS_POOL === "1"
+/**
+ * The pool is OPT-IN. Its worker_threads + WASM grammar heap fails to
+ * initialize under some sandboxes (CI runners on BOTH ubuntu and windows),
+ * where it then yields degraded (role-tag-poorer) output instead of the
+ * in-process result. The in-process structural pass is correct and is the
+ * proven default. Enable the pool with `GH_ROUTER_ENABLE_TS_POOL=1` once
+ * validated on the target host — it gives a large event-loop-latency win
+ * under concurrent searches (see `scripts/bench-code-search-parallelism.ts`).
+ * `GH_ROUTER_DISABLE_TS_POOL=1` still hard-disables and takes precedence.
+ */
+const poolEnabled = (): boolean =>
+  process.env.GH_ROUTER_DISABLE_TS_POOL !== "1" &&
+  process.env.GH_ROUTER_ENABLE_TS_POOL === "1"
 
 /**
  * Get the process-wide pool, spawning it lazily on first use (NOT at import —
  * a `claude` passthrough session that never calls `code` should pay nothing).
- * Returns null when disabled or unavailable.
+ * Returns null when not opted-in or unavailable.
  */
 export function getTreeSitterPool(): TreeSitterPool | null {
-  if (poolDisabled()) return null
+  if (!poolEnabled()) return null
   if (_pool) return _pool
   _pool = new TreeSitterPool()
   if (_pool.unavailable) {
