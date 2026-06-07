@@ -859,7 +859,7 @@ function clampNum(v, min, max) {
 // attachment, so two parallel browser_mouse / browser_drag / browser_type
 // calls on the same tab would interleave and corrupt each other (one
 // call's mouseMoved would land mid-drag of another). The global
-// MAX_INFLIGHT_TOOLS_CALL=8 cap doesn't help — it's global, not per-tab.
+// MAX_INFLIGHT_TOOLS_CALL=32 cap doesn't help — it's global, not per-tab.
 // This mutex is per-tab, layered on top.
 const tabInputLockTails = new Map() // tabId → Promise (tail of the lock chain)
 

@@ -1079,7 +1079,7 @@ async function handleToolsCall(
   // Documented per-call cap. NOT silent serialization — surface the
   // backpressure so Opus knows to retry shortly. The slot is held in
   // the shared mcp-inflight counter so worker-side nested peer/advisor
-  // calls compete for the same 8-wide budget.
+  // calls compete for the same 32-wide budget.
   const release = acquireInFlightSlot()
   if (!release) {
     return rpcResult(body.id, {
@@ -1103,7 +1103,7 @@ async function handleToolsCall(
   // a closure-captured `release` callback. `cancelInflight()` (called
   // from `notifications/cancelled` and from `handleToolsCallSSE.cancel()`)
   // invokes BOTH: aborting the upstream fetch tears down the socket,
-  // and synchronously releasing the slot frees the cap=8 budget without
+  // and synchronously releasing the slot frees the cap=32 budget without
   // waiting for the upstream call's promise to settle.
   //
   // The `finally` block at the bottom of this function only deletes the

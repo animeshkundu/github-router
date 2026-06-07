@@ -18,7 +18,7 @@
 // of the proxy session.
 //
 // Concurrency: every compressor call acquires from the shared
-// `MAX_INFLIGHT_TOOLS_CALL` budget (cap = 8), same pool as peer-MCP
+// `MAX_INFLIGHT_TOOLS_CALL` budget (cap = 32), same pool as peer-MCP
 // and worker tools. A wedged compressor can't starve operator traffic.
 //
 // All call helpers accept an `AbortSignal` for caller-driven cancel.

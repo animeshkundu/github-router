@@ -548,7 +548,7 @@ export function buildPeerAwarenessSnippet(opts: {
   ]
   if (opts.workerToolsAvailable) {
     para2Parts.push(
-      `\`mcp__${workersKey}__explore\` runs a Gemini-backed read-only worker that returns a summary, using its own context rather than yours; concurrent launches share the \`MAX_INFLIGHT_TOOLS_CALL=8\` cap with operator traffic.`,
+      `\`mcp__${workersKey}__explore\` runs a Gemini-backed read-only worker that returns a summary, using its own context rather than yours; concurrent launches share the \`MAX_INFLIGHT_TOOLS_CALL=32\` cap with operator traffic.`,
       `\`mcp__${workersKey}__review\` is the same read-only worker framed as a code reviewer that reads the relevant code itself to verify a change or claim and reports findings with severity, so it checks surrounding context the \`peers\` critics (single stateless calls on the pasted artifact) cannot.`,
       `\`mcp__${workersKey}__implement\` is the same worker with edit/write/bash; \`worktree: true\` runs it in an isolated git worktree and returns the diff.`,
       "Workers themselves have `code_search` in their toolset.",
@@ -609,7 +609,7 @@ export function personasFor(opts: {
  *
  * Registered alongside personas in `handler.ts:toolEntries()` and
  * dispatched by `handler.ts:handleToolsCall` after the persona lookup
- * falls through. They count against the same MAX_INFLIGHT_TOOLS_CALL=8
+ * falls through. They count against the same MAX_INFLIGHT_TOOLS_CALL=32
  * cap (keeps slot accounting symmetric across all `tools/call`s) but
  * skip the per-persona effort gate and the `predictedTooLong` pre-flight
  * cap — those gates only make sense for thinking-budget-bearing peer LLM
