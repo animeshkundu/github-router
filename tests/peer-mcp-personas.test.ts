@@ -294,6 +294,7 @@ describe("buildPeerAwarenessSnippet", () => {
     standInAvailable: true,
     semanticSearchAvailable: true,
     browseAvailable: true,
+    powerBrowseAvailable: true,
   } as const
 
   test("always advertises the three always-on critic tools, coordinator, and namespace prefix", () => {
@@ -315,13 +316,13 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(1700)
   })
 
-  test("snippet stays under ~520 tokens (~3200 bytes) in the maximal case", () => {
-    // Maximal = every gate on, including gemini_reviewer (peers), the
-    // `review` worker, and `semantic_search`. The cap is the smallest
-    // envelope the implementation fits inside; if a future tightening
-    // shaves bytes, lower it too.
+  test("snippet stays under ~540 tokens (~3300 bytes) in the maximal case", () => {
+    // Maximal = EVERY gate on (gemini_reviewer, the `review` worker,
+    // `semantic_search`, browse + power). The cap is the smallest envelope
+    // the implementation fits inside; if a future tightening shaves bytes,
+    // lower it too.
     const full = buildPeerAwarenessSnippet(MAXIMAL)
-    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(3200)
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(3300)
   })
 
   test("mentions Claude Code's advisor built-in tool", () => {

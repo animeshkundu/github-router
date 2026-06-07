@@ -560,7 +560,7 @@ export function buildPeerAwarenessSnippet(opts: {
   )
   if (opts.semanticSearchAvailable) {
     para2Parts.push(
-      `\`mcp__${searchKey}__semantic_search\` is ColBERT semantic code search over a per-workspace index, for intent/concept queries ("where is retry/backoff handled") that lexical \`code\` misses; it returns honest \`building\`/\`stale\`/\`unavailable\` notices and never silently falls back to lexical.`,
+      `\`mcp__${searchKey}__semantic_search\` is ColBERT semantic code search over a per-workspace index and is the first search to try for intent/concept questions ("where is retry/backoff handled", "how does auth work") that a lexical \`code\`/grep search would miss; reserve lexical \`code\`/grep for exact symbols/strings. It returns honest \`building\`/\`stale\`/\`unavailable\` notices and never silently falls back to lexical.`,
     )
   }
   if (opts.standInAvailable) {
