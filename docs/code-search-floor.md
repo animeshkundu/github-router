@@ -97,13 +97,59 @@ The empirically-proven prior violation it fixes: `"ab"` in old ranked mode retur
 while `M(C)` had 5 — the shoulder cut silently dropped `fabric`. Under `complete: true` that
 cannot happen; pinned by `tests/code-search.test.ts` ("floor guarantee").
 
+## Multi-engine modes: raising the floor over all four
+
+By DEFAULT (none of `multiline`, `scan`, `ast_pattern` set), `code_search` is the
+single-engine scoped ripgrep described above — the floor theorem and all caveats hold
+unchanged, and the response is byte-identical to before these modes existed (pinned by
+`tests/code-search.test.ts`, "default behavior is unchanged"). The three opt-in modes each
+RUN the corresponding engine on demand, so the OUTPUT (not a regex approximation) provably
+covers that engine when its mode is used:
+
+| Mode | Engine RUN | Floor relationship |
+| --- | --- | --- |
+| *(default, no mode)* | ripgrep (line-oriented) | `⊇` rg/grep with the same flags (the theorem above). **Never** claimed `⊇` ast-grep. |
+| `multiline: true` | ripgrep `-U --multiline-dotall` | `⊇` a multi-line `rg -U` run: it IS that run. Cross-line patterns (`foo[\s\S]*?bar`) the default line-oriented mode cannot match are found. Cross-line matching is a **`mode: "regex"`** feature — the `query` validator rejects literal newlines, so a `literal`/`ranked` multi-line LITERAL can't be expressed (the `-U -F` combo is valid but un-feedable). |
+| `ast_pattern: <p>` | ast-grep (`sg run -p <p> --json=stream`) | `=` ast-grep's own output for that pattern — it RUNS ast-grep and returns its matches in `{file,line,snippet}` shape. Match generation comes from ast-grep, NOT regex, so a multi-line AST construct is matched directly. |
+| `scan: true` | ripgrep `--files` + tree-sitter outline of the whole tree | `⊇` a whole-workspace tree-sitter scan (up to `SCAN_MAX_FILES`): `outlines` covers EVERY non-ignored, non-sensitive source file, not just matched files. |
+
+**Honest caveats (unchanged in spirit):**
+
+- With **no mode set**, the original single-engine scoping still holds: the default is
+  line-oriented ripgrep and is NOT a superset of ast-grep's structural patterns. We never
+  assert `⊇ ast-grep` for the DEFAULT (regex) mode — only when `ast_pattern` is used does the
+  output equal ast-grep's, because ast-grep is the engine that produced it.
+- `ast_pattern` requires **ast-grep (`sg`) to be present** (toolbelt bin dir or system PATH).
+  When it is absent, `code_search` returns `{results: [], notice: "ast_pattern requires
+  ast-grep (sg), which isn't available here; the model can run ast-grep directly or omit
+  ast_pattern"}` with `isError: false` — a graceful disclosure, NOT a silent fall-back to
+  regex (which would quietly violate the `= ast-grep` claim). `ast_pattern` takes precedence
+  over `query` for match generation; AST hits are document-order (no BM25F — there is no
+  text-token relevance signal for a structural match).
+- `scan` is **budget-capped at `SCAN_MAX_FILES` and the 256 KB response envelope**, with
+  disclosure: when truncated, `notice` reports `outlined N of M workspace source files`. The
+  enumeration respects the same `.gitignore`/`.ignore` rules as the search path (it is the
+  same `rg --files`), and the sensitive-path denylist (`.env*`, `*.pem`, `id_rsa*`, `.git/`
+  interior, `.ssh/`, …) is applied so a scan never surfaces symbol names from a credential
+  file. `scan` is independent of match generation: the hit set still comes from the query (or
+  `ast_pattern`); only `outlines` widens to the whole tree.
+
+The bottom line: `code_search`'s OUTPUT is `⊇` each engine WHEN that engine's mode is used (and
+ast-grep present) — it raises the floor over rg/grep AND ast-grep AND a tree-sitter scan by
+RUNNING those engines, not by regex emulation. The default stays the proven single-engine floor.
+
 ## Side effects
 
 `code_search` performs **no repository writes and maintains no persistent or cross-call index**.
-Its only observable effects are spawning a read-only `rg` child process and updating an
-in-memory, mtime-gated parse cache (`_treeCache`, freed on eviction) — nothing survives the
-process. That is the side-effect bound: no workspace mutation, no on-disk artifact, no
-background process.
+Its only observable effects are spawning read-only child processes — `rg` (search; plus a
+second `rg --files` enumeration under `scan: true`), and a read-only `ast-grep` (`sg`)
+subprocess under `ast_pattern` — and updating an in-memory, mtime-gated parse cache
+(`_treeCache`, freed on eviction); nothing survives the process. The `ast-grep` child is
+spawned with `shell: false` (argv form, no shell-metacharacter injection from a workspace path
+containing `% & | ( ) ! "` or spaces), workspace-confined, with router credentials
+(`GH_ROUTER_*`, `GITHUB_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+`COPILOT_TOKEN`) stripped from its env, stdout-capped, and timeout-bounded. That is the
+side-effect bound: no workspace mutation, no on-disk artifact, no background process.
 
 ## The default is precise — but never *silently* lossy
 

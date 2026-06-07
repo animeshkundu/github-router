@@ -867,6 +867,37 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               "when you must not miss any occurrence (e.g. \"every caller " +
               "of X\", a rename, an audit).",
           },
+          multiline: {
+            type: "boolean",
+            description:
+              "Default false. Set true WITH mode:'regex' to let a pattern " +
+              "span newlines (ripgrep -U), e.g. 'foo[\\s\\S]*?bar' across " +
+              "lines; the snippet is the whole matched region and `line` is " +
+              "its start. (literal/ranked queries can't contain a newline, " +
+              "so cross-line matching is a regex-mode feature.) Off by " +
+              "default keeps the line-oriented recall floor.",
+          },
+          scan: {
+            type: "boolean",
+            description:
+              "Default false. Set true to make `outlines` a tree-sitter " +
+              "symbol map of the ENTIRE workspace (every non-ignored " +
+              "source file), not just the matched files — use it to map " +
+              "an unfamiliar codebase in one call. Capped; `notice` " +
+              "reports coverage when truncated. Independent of which " +
+              "files matched the query.",
+          },
+          ast_pattern: {
+            type: "string",
+            description:
+              "ast-grep structural pattern (e.g. 'function $F($$$) { $$$ }'). " +
+              "When set, matches come from ast-grep INSTEAD of ripgrep — " +
+              "use it to match multi-line AST shapes the regex modes can't " +
+              "express. Takes PRECEDENCE over `query` for matching (but " +
+              "`query` is still required). Returns the same {file,line," +
+              "snippet} shape. If ast-grep isn't installed, you get a " +
+              "`notice` to run it directly — it never falls back to regex.",
+          },
         },
       },
       async handler(
@@ -898,6 +929,15 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
                 typeof args.summary === "boolean" ? args.summary : undefined,
               complete:
                 typeof args.complete === "boolean" ? args.complete : undefined,
+              multiline:
+                typeof args.multiline === "boolean"
+                  ? args.multiline
+                  : undefined,
+              scan: typeof args.scan === "boolean" ? args.scan : undefined,
+              ast_pattern:
+                typeof args.ast_pattern === "string"
+                  ? args.ast_pattern
+                  : undefined,
             },
             signal,
           )

@@ -71,6 +71,9 @@ import {
   type PoolJob,
   type TreeSitterPool,
 } from "~/lib/tree-sitter-pool/pool"
+import { resolveExecutable, runManagedExeCapture } from "~/lib/exec"
+import { PATHS } from "~/lib/paths"
+import { isSensitivePath } from "~/lib/worker-agent/paths"
 
 // ============================================================
 // Constants
@@ -125,6 +128,15 @@ const MAX_CONTEXT_LINES = 10
  * so a broad query doesn't trigger hundreds of tree-sitter parses.
  */
 const CODE_SUMMARY_MAX_FILES = 10
+/**
+ * `scan: true` outlines the ENTIRE workspace (every non-ignored,
+ * non-sensitive source file), not just the matched result files. Bounded
+ * well above `CODE_SUMMARY_MAX_FILES` (a whole-workspace map is the whole
+ * point) but still capped so a giant monorepo can't blow the 256 KB
+ * response or stall the tree-sitter pool. On truncation the response
+ * `notice` reports files-covered vs total.
+ */
+const SCAN_MAX_FILES = 400
 /**
  * Per-file match cap applied in DEFAULT (non-`complete`) ranked mode:
  * keeps one match-dense file from filling the global limit and blinding
@@ -211,6 +223,42 @@ export interface CodeSearchInput {
    * says so and points the model here.
    */
   complete?: boolean
+  /**
+   * Multi-line matching. Default `false` (line-oriented, the proven
+   * floor). When `true`, ripgrep runs with `-U --multiline-dotall` so a
+   * pattern can span newlines (e.g. `foo[\s\S]*?bar` across two lines).
+   * The match snippet is the whole spanned region, capped to the snippet
+   * byte budget; the reported `line` is the START of the span. Use it with
+   * `mode: "regex"` — that is the only mode where a cross-line pattern is
+   * expressible (the `query` validator rejects literal newlines, so a
+   * literal/ranked multi-line LITERAL can't be typed). Composes with every
+   * other param.
+   */
+  multiline?: boolean
+  /**
+   * Whole-workspace structural outline. Default `false`. When `true`,
+   * `outlines` covers EVERY non-ignored, non-sensitive source file in the
+   * workspace (a tree-sitter symbol map of the whole tree), not just the
+   * files that text-matched `query`. Capped at `SCAN_MAX_FILES` and
+   * budget-fitted into the response; on truncation `notice` reports
+   * coverage. Use it to map an unfamiliar codebase's symbols in one call.
+   * Independent of the match generation (the hit set still comes from the
+   * query / `ast_pattern`).
+   */
+  scan?: boolean
+  /**
+   * ast-grep structural pattern. When set, match generation runs ast-grep
+   * (`sg`) with this pattern INSTEAD of ripgrep — results come back in the
+   * same `{file, line, snippet}` shape, so a multi-line AST construct the
+   * line-oriented regex modes can't express is matched directly. Takes
+   * PRECEDENCE over `query` for match generation (`query` is then ignored
+   * for matching; it is still required by the schema but unused). Requires
+   * ast-grep (`sg`) to be available (toolbelt bin dir or system PATH); if
+   * it isn't, `code_search` returns no results plus a `notice` telling you
+   * to run ast-grep directly or omit `ast_pattern` (it never silently
+   * falls back to regex). Read-only subprocess, workspace-confined.
+   */
+  ast_pattern?: string
 }
 
 export interface CodeSearchHit {
@@ -636,8 +684,19 @@ function buildRgArgs(input: {
   expansionPattern?: string
   /** When true, skip the per-file `--max-count` cap (floor mode). */
   complete?: boolean
+  /** When true, add `-U --multiline-dotall` so a pattern can span lines. */
+  multiline?: boolean
 }): Array<string> {
   const args: Array<string> = ["--json", "--no-binary", "--no-follow"]
+
+  // Multi-line matching: `-U` lets a pattern span newlines, and
+  // `--multiline-dotall` makes `.` match `\n` too (so `foo.*bar` crosses
+  // lines). Opt-in only — the default stays line-oriented, which is the
+  // proven recall floor. With `-F` (fixed-string) `-U` still matches a
+  // multi-line literal; with regex it enables cross-line patterns.
+  if (input.multiline) {
+    args.push("-U", "--multiline-dotall")
+  }
 
   // -C N means N lines BEFORE and N AFTER. We always want context
   // for snippet rendering AND for the BM25F context field.
@@ -1607,6 +1666,387 @@ function renderSnippet(hit: RawHit): string {
 }
 
 // ============================================================
+// ast-grep (structural pattern match generation)
+// ============================================================
+
+/**
+ * Router credentials that must NEVER reach the ast-grep child. Same key
+ * set as `dropColgrepSecrets` (colbert/provision.ts) and the worker-bash
+ * env allowlist. We keep a LOCAL strip rather than importing
+ * `dropColgrepSecrets` to avoid pulling the heavyweight colbert
+ * provisioning module into the core code-search import graph. ast-grep is
+ * a SHA-pinned local binary, but it is still a child process that could
+ * be coaxed (config, network) — no router secret belongs in its env.
+ */
+const AST_GREP_SECRET_ENV_KEYS = [
+  "GITHUB_TOKEN",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_API_KEY",
+  "OPENAI_API_KEY",
+  "COPILOT_TOKEN",
+]
+
+/**
+ * Strip router credentials from a child-env COPY (never the live env).
+ * Key matching is case-INSENSITIVE because Windows env names are
+ * case-insensitive — `Github_Token` / `openai_api_key` must be dropped
+ * too, or a mixed-case shell export would leak into the ast-grep child.
+ */
+function dropAstGrepSecrets(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  for (const k of Object.keys(env)) {
+    const up = k.toUpperCase()
+    if (up.startsWith("GH_ROUTER_") || AST_GREP_SECRET_ENV_KEYS.includes(up)) {
+      delete env[k]
+    }
+  }
+  return env
+}
+
+/**
+ * Resolve the ast-grep binary. Checks the toolbelt bin dir (where the
+ * proxy materializes `sg` + `ast-grep`) AND the system PATH, trying `sg`
+ * first then `ast-grep`. Returns an ABSOLUTE path or `null` when neither
+ * is found. `resolveExecutable` honors PATHEXT on Windows and excludes
+ * the cwd (no planted-`sg.exe` vector). The toolbelt dir is searched by
+ * prepending it to a PATH copy so the same resolver handles both sources.
+ */
+export function resolveAstGrep(): string | null {
+  const toolbeltDir = PATHS.TOOLBELT_BIN_DIR
+  const basePath = pathEnvValue()
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: `${toolbeltDir}${path.delimiter}${basePath}`,
+  }
+  for (const name of ["sg", "ast-grep"]) {
+    const resolved = resolveExecutable(name, { env })
+    if (resolved) return resolved
+  }
+  return null
+}
+
+/**
+ * Test-only override for the ast-grep resolver. `undefined` = use the real
+ * `resolveAstGrep`. Set to a function (e.g. `() => null` to force the
+ * binary-absent path deterministically even on a host that HAS sg) via
+ * `__setAstGrepResolverForTest`. Mirrors the `__readBenchStructuralStats`
+ * test-export convention already used in this module.
+ */
+let _astGrepResolverOverride: (() => string | null) | undefined
+
+export function __setAstGrepResolverForTest(
+  fn: (() => string | null) | undefined,
+): void {
+  _astGrepResolverOverride = fn
+}
+
+/** Resolve ast-grep, honoring the test override when set. */
+function resolveAstGrepForRun(): string | null {
+  return (_astGrepResolverOverride ?? resolveAstGrep)()
+}
+
+/** Read PATH case-insensitively from the live env. */
+function pathEnvValue(): string {
+  for (const key of Object.keys(process.env)) {
+    if (key.toLowerCase() === "path") return process.env[key] ?? ""
+  }
+  return ""
+}
+
+/** One `sg run --json=stream` JSON-line shape (only the fields we read). */
+interface AstGrepMatch {
+  text?: string
+  lines?: string
+  file?: string
+  range?: {
+    start?: { line?: number; column?: number }
+    end?: { line?: number; column?: number }
+  }
+}
+
+interface AstGrepResult {
+  /** RawHit set (relative paths, 1-indexed lines). */
+  hits: Array<RawHit>
+  /** Non-null when something the model can act on fired (binary missing,
+   *  truncated, timed out, error) — surfaced as the response `notice`. */
+  notice: string | null
+}
+
+/**
+ * Run ast-grep with `pattern` over `workspaceCanonical` and return its
+ * matches in `RawHit` shape (relativized, 1-indexed). Read-only,
+ * workspace-confined, secret-stripped, stdout-capped, timeout-bounded.
+ *
+ * Security posture (mirrors `src/lib/colbert/runner.ts`):
+ *   - `runManagedExeCapture(absExe, argv, {shell:false})` — pattern and
+ *     workspace are ARGV elements, never a shell string. A workspace path
+ *     containing `%`, `&`, `|`, quotes, or spaces cannot inject a command
+ *     on Windows (no cmd.exe in the path; CreateProcess resolves the
+ *     `.exe` directly).
+ *   - `dropAstGrepSecrets` strips every `GH_ROUTER_*` + the named
+ *     credential keys from the child env copy.
+ *   - workspace is the absolute, realpath-canonicalized directory; the
+ *     binary's own `.gitignore` handling scopes the file universe (same
+ *     ignore semantics as ripgrep here).
+ */
+async function runAstGrep(opts: {
+  pattern: string
+  workspaceCanonical: string
+  limit: number
+  signal: AbortSignal
+}): Promise<AstGrepResult> {
+  const binary = resolveAstGrepForRun()
+  if (!binary) {
+    return {
+      hits: [],
+      notice:
+        "ast_pattern requires ast-grep (sg), which isn't available here; " +
+        "the model can run ast-grep directly or omit ast_pattern",
+    }
+  }
+
+  // `sg run -p <pattern> --json=stream <workspace>` — VERIFIED on
+  // ast-grep 0.43.0. `--json=stream` emits one JSON object per line.
+  // The workspace is passed as an absolute positional; sg then reports
+  // `file` as an absolute path, which we relativize below.
+  const args = [
+    "run",
+    "-p",
+    opts.pattern,
+    "--json=stream",
+    opts.workspaceCanonical,
+  ]
+
+  let res
+  try {
+    res = await runManagedExeCapture(binary, args, {
+      cwd: opts.workspaceCanonical,
+      env: dropAstGrepSecrets({ ...process.env }),
+      timeoutMs: WALL_TIME_MS,
+      maxStdoutBytes: MAX_STDOUT_BYTES,
+    })
+  } catch {
+    return {
+      hits: [],
+      notice: "ast-grep failed to launch; omit ast_pattern or run it directly",
+    }
+  }
+
+  if (opts.signal.aborted) {
+    return { hits: [], notice: null }
+  }
+  if (res.timedOut) {
+    return {
+      hits: [],
+      notice: "ast-grep timed out; narrow the pattern or run it directly",
+    }
+  }
+  // sg exits 1 on "no matches" (not an error). Any other non-zero with no
+  // stdout is a real failure (bad pattern, IO). We don't surface raw
+  // stderr (it can embed source); a class label is enough.
+  if (res.code !== null && res.code !== 0 && res.code !== 1 && !res.stdout) {
+    return {
+      hits: [],
+      notice:
+        "ast-grep returned an error (check the pattern syntax) or omit ast_pattern",
+    }
+  }
+
+  const hits: Array<RawHit> = []
+  for (const rawLine of res.stdout.split("\n")) {
+    if (hits.length >= opts.limit) break
+    const line = rawLine.trim()
+    if (line.length === 0) continue
+    let m: AstGrepMatch
+    try {
+      m = JSON.parse(line) as AstGrepMatch
+    } catch {
+      continue // skip a partial/garbage line rather than fail the call
+    }
+    if (typeof m.file !== "string") continue
+    // Confine: drop any path ast-grep reports that resolves OUTSIDE the
+    // workspace (e.g. a symlink it traversed). `relativizeToWorkspace`
+    // returns null on escape; we skip rather than emit an absolute system
+    // path. Then apply the sensitive-path denylist (defense-in-depth, same
+    // as the scan path) so a hit never surfaces a credential file.
+    const rel = relativizeToWorkspace(m.file, opts.workspaceCanonical)
+    if (rel === null) continue
+    const abs = path.join(opts.workspaceCanonical, rel)
+    if (isSensitivePath(abs, opts.workspaceCanonical)) continue
+    const startLine = m.range?.start?.line
+    // sg is 0-indexed; our contract is 1-indexed.
+    const line1 = typeof startLine === "number" ? startLine + 1 : 1
+    const snippetSrc =
+      typeof m.text === "string" && m.text.length > 0
+        ? m.text
+        : typeof m.lines === "string"
+          ? m.lines
+          : ""
+    hits.push({
+      file: normalizeRelFile(rel),
+      line: line1,
+      matched_line: snippetSrc,
+      // ast-grep offsets are into the file, not the snippet line; we don't
+      // expose a byte range for AST hits, so 0:0 (renderSnippet uses the
+      // whole matched_line; the symbol_context slice path is never reached
+      // because AST hits render literal, not ranked).
+      match_start: 0,
+      match_end: 0,
+      context_before: [],
+      context_after: [],
+    })
+  }
+
+  const truncatedBySize = res.stdoutTruncated || hits.length >= opts.limit
+  return {
+    hits,
+    notice: truncatedBySize
+      ? "ast-grep results were truncated (size cap or limit reached); " +
+        "narrow the pattern or raise limit"
+      : null,
+  }
+}
+
+/**
+ * Relativize an ast-grep-reported file path against the workspace. sg
+ * reports absolute paths when handed an absolute positional. Returns the
+ * workspace-relative path, or `null` when the path resolves OUTSIDE the
+ * workspace (e.g. a traversed symlink) — the caller drops such hits rather
+ * than emit an absolute system path. A relative input that stays inside is
+ * returned as-is; normalizeRelFile cleans separators afterward.
+ */
+function relativizeToWorkspace(
+  file: string,
+  workspaceCanonical: string,
+): string | null {
+  try {
+    const abs = path.resolve(workspaceCanonical, file)
+    const rel = path.relative(workspaceCanonical, abs)
+    // Empty rel = the workspace dir itself (not a file hit); ".." / absolute
+    // = escaped. Either way, not a valid in-workspace file hit.
+    if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
+      return null
+    }
+    return rel
+  } catch {
+    return null
+  }
+}
+
+// ============================================================
+// Whole-workspace file enumeration (scan mode)
+// ============================================================
+
+/**
+ * Enumerate every non-ignored file in the workspace via `rg --files`
+ * (respecting `.gitignore` / `.ignore` exactly like the search path),
+ * then drop sensitive-shaped paths (`.env*`, `*.pem`, `id_rsa*`, `.git/`
+ * interior, `.ssh/`, …) via the shared worker denylist. Returns paths
+ * RELATIVE to the workspace, in rg's enumeration order, capped at
+ * `SCAN_MAX_FILES`.
+ *
+ * `total` is the count of enumerated source files BEFORE the cap (after
+ * the sensitive-path filter), so the caller can disclose coverage when
+ * the outline set is truncated.
+ */
+async function enumerateWorkspaceFiles(opts: {
+  rgPath: string
+  workspaceCanonical: string
+  signal: AbortSignal
+  /** Absolute wall-clock deadline (Date.now() ms) — the search-phase
+   *  `wallTimer` is already cleared by the time scan runs, so the
+   *  enumeration self-bounds against this. */
+  deadlineMs: number
+}): Promise<{ files: Array<string>; total: number; capped: boolean }> {
+  const files: Array<string> = []
+  let total = 0
+  let capped = false
+
+  if (opts.signal.aborted) return { files, total, capped }
+
+  let child: ChildProcess
+  try {
+    // `--no-follow`: don't traverse symlinks (matches the search path's
+    // scoping; keeps enumeration inside the workspace tree). stderr is
+    // IGNORED, not piped: an undrained stderr pipe can fill its OS buffer
+    // (e.g. rg "Permission denied" spam on Windows) and deadlock the child,
+    // which would defeat the deadline check below (it only runs per stdout
+    // line). rg's file LIST goes to stdout; stderr is non-essential here.
+    child = spawn(opts.rgPath, ["--files", "--no-follow"], {
+      cwd: opts.workspaceCanonical, // kernel-level pin, same as the search path
+      shell: false,
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+  } catch {
+    return { files, total, capped }
+  }
+
+  // Async spawn failures (ENOENT/EACCES) emit an 'error' event rather than
+  // throwing; without a listener Node escalates it to an uncaught crash.
+  // A no-op listener lets the for-await loop end naturally and we return
+  // whatever (nothing) was enumerated.
+  child.on("error", () => {})
+
+  // Out-of-band kill at the deadline. The per-line deadline check below
+  // only fires when rg emits a line; this guarantees termination even if
+  // rg stalls before its first line on a pathological tree.
+  const deadlineTimer = setTimeout(
+    () => killChild(child),
+    Math.max(0, opts.deadlineMs - Date.now()),
+  )
+  deadlineTimer.unref()
+
+  const onAbort = (): void => killChild(child)
+  opts.signal.addEventListener("abort", onAbort, { once: true })
+
+  try {
+    if (!child.stdout) return { files, total, capped }
+    child.stdout.setEncoding("utf8")
+    const rl = createInterface({ input: child.stdout, crlfDelay: Infinity })
+    let stdoutBytes = 0
+    for await (const rawLine of rl) {
+      if (opts.signal.aborted || Date.now() > opts.deadlineMs) {
+        killChild(child)
+        break
+      }
+      // Byte-accurate cap (multibyte UTF-8 paths must not undercount).
+      stdoutBytes += Buffer.byteLength(rawLine, "utf8") + 1
+      if (stdoutBytes > MAX_STDOUT_BYTES) {
+        killChild(child)
+        break
+      }
+      const rel = normalizeRelFile(rawLine.trim())
+      if (rel.length === 0) continue
+      // Defensive containment re-check: rg --files emits workspace-relative
+      // paths, but never trust a subprocess unconditionally — reject any
+      // absolute or `..`-escaping path before joining.
+      if (path.isAbsolute(rel) || rel.split("/").includes("..")) continue
+      // Skip files whose extension has no tree-sitter grammar — outlining
+      // them would just parse-fail. Cheap pre-filter before the cap so the
+      // cap counts outlineable files, not READMEs.
+      if (!getLanguageKeyForPath(rel)) continue
+      // Drop credential-shaped paths (defense-in-depth — the outline would
+      // surface symbol names from a sensitive file).
+      const abs = path.join(opts.workspaceCanonical, rel)
+      if (isSensitivePath(abs, opts.workspaceCanonical)) continue
+      total += 1
+      if (files.length < SCAN_MAX_FILES) {
+        files.push(rel)
+      } else {
+        capped = true
+      }
+    }
+  } catch {
+    // Best-effort: return whatever we enumerated.
+  } finally {
+    clearTimeout(deadlineTimer)
+    opts.signal.removeEventListener("abort", onAbort)
+    if (!child.killed) killChild(child)
+  }
+
+  return { files, total, capped }
+}
+
+// ============================================================
 // Main entry point
 // ============================================================
 
@@ -1632,6 +2072,21 @@ export async function searchCode(
     MAX_CONTEXT_LINES,
   )
 
+  // ast_pattern takes PRECEDENCE over the regex query for match
+  // generation: when set, matches come from ast-grep, not ripgrep, and
+  // are rendered in literal (document-order) shape — BM25F doesn't apply
+  // to AST hits. `query` is still required by the schema but unused for
+  // matching. The whole-workspace `scan` outline is independent and still
+  // runs afterward either way.
+  const astPattern =
+    typeof rawInput.ast_pattern === "string" && rawInput.ast_pattern.length > 0
+      ? rawInput.ast_pattern
+      : undefined
+  // Effective ranking mode: AST hits are never BM25F-scored (there is no
+  // text-token relevance signal for a structural match), so force the
+  // literal render path for them.
+  const effectiveMode = astPattern ? "literal" : mode
+
   // Identifier skeleton-form expansion. When the user's query is a
   // single identifier in any of the five canonical conventions, we
   // expand to all of them and feed rg a regex alternation. This is
@@ -1639,7 +2094,9 @@ export async function searchCode(
   // get_user_name. Regex mode is excluded — the user is explicit
   // about regex semantics there.
   const expansion =
-    mode === "regex" ? null : expandIdentifierVariants(rawInput.query)
+    astPattern || mode === "regex"
+      ? null
+      : expandIdentifierVariants(rawInput.query)
   const expansionPattern = expansion
     ? buildExpansionPattern(expansion)
     : undefined
@@ -1657,6 +2114,7 @@ export async function searchCode(
   wallTimer.unref()
 
   let parseResult: ParseResult
+  let astNotice: string | null = null
   let rgResolution: RipgrepResolution
   try {
     rgResolution = resolveRipgrep()
@@ -1666,109 +2124,155 @@ export async function searchCode(
     throw err
   }
 
-  const args = buildRgArgs({
-    mode,
-    fileGlob: rawInput.file_glob,
-    contextLines,
-    query: rawInput.query,
-    expansionPattern,
-    complete: rawInput.complete,
-  })
-
-  let child: ChildProcess
-  try {
-    child = spawn(rgResolution.rgPath, args, {
-      cwd: ws.canonical, // TOCTOU mitigation: kernel-level pin
-      shell: false, // never via shell
-      stdio: ["ignore", "pipe", "pipe"],
-    })
-  } catch (err) {
-    clearTimeout(wallTimer)
-    if (externalSignal) externalSignal.removeEventListener("abort", onExternal)
-    throw new Error(`failed to spawn ripgrep: ${(err as Error).message}`)
+  if (astPattern) {
+    // ----- ast-grep match generation (precedence over ripgrep) -----
+    let astRes: AstGrepResult
+    try {
+      astRes = await runAstGrep({
+        pattern: astPattern,
+        workspaceCanonical: ws.canonical,
+        limit,
+        signal: ac.signal,
+      })
+    } finally {
+      clearTimeout(wallTimer)
+      if (externalSignal) {
+        externalSignal.removeEventListener("abort", onExternal)
+      }
+    }
+    if (ac.signal.aborted && astRes.hits.length === 0) {
+      const reason = String(ac.signal.reason ?? "aborted")
+      throw new Error(`code_search aborted (${reason})`)
+    }
+    astNotice = astRes.notice
+    parseResult = {
+      hits: astRes.hits,
+      scannedFiles: 0,
+      truncated: astRes.hits.length >= limit,
+      cancelled: ac.signal.aborted,
+      stdoutBytes: 0,
+    }
+  } else {
+    parseResult = await runRipgrep()
   }
 
-  // Capture stderr as text (bounded to 64KB — rg errors are short,
-  // but the existing 1MB byte cap stays as a runaway-input guard).
-  // We surface stderr on exit code 2 so model gets actionable errors
-  // (e.g. regex compile failures) rather than empty results.
-  const STDERR_TEXT_CAP = 64 * 1024
-  let stderrBytes = 0
-  let stderrText = ""
-  if (child.stderr) {
-    child.stderr.setEncoding("utf8")
-    child.stderr.on("data", (chunk: string) => {
-      stderrBytes += chunk.length
-      if (stderrText.length < STDERR_TEXT_CAP) {
-        stderrText = (stderrText + chunk).slice(0, STDERR_TEXT_CAP)
-      }
-      if (stderrBytes > 1024 * 1024) {
-        // 1MB stderr is excessive — kill.
-        ac.abort("stderr_cap")
-      }
-    })
-  }
-
-  // Track rg's exit code so we can distinguish "no matches" (code 1)
-  // from a real error (code 2: bad regex, IO failure after our
-  // workspace validation, etc.) Per `man rg`:
-  //   0 = matches found
-  //   1 = no matches (not an error)
-  //   2 = error (regex, IO, ...)
-  let exitCode: number | null = null
-  const exitPromise = new Promise<void>((resolve) => {
-    child.on("close", (code) => {
-      exitCode = code
-      resolve()
-    })
-  })
-
-  try {
-    parseResult = await parseRgJsonStream(child, {
-      limit,
+  // Inlined ripgrep generation: spawn + parse + exit-code error mapping.
+  // Hoisted into a closure so the ast_pattern branch above can bypass it
+  // cleanly while preserving the exact original control flow (and the
+  // load-bearing cancel-race / exit-code handling) on the default path.
+  async function runRipgrep(): Promise<ParseResult> {
+    const args = buildRgArgs({
+      mode,
+      fileGlob: rawInput.file_glob,
       contextLines,
-      signal: ac.signal,
+      query: rawInput.query,
+      expansionPattern,
+      complete: rawInput.complete,
+      multiline: rawInput.multiline,
     })
-  } finally {
-    clearTimeout(wallTimer)
-    if (externalSignal) externalSignal.removeEventListener("abort", onExternal)
-    if (!child.killed) killChild(child)
+
+    let child: ChildProcess
+    try {
+      child = spawn(rgResolution.rgPath, args, {
+        cwd: ws.canonical, // TOCTOU mitigation: kernel-level pin
+        shell: false, // never via shell
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+    } catch (err) {
+      clearTimeout(wallTimer)
+      if (externalSignal) {
+        externalSignal.removeEventListener("abort", onExternal)
+      }
+      throw new Error(`failed to spawn ripgrep: ${(err as Error).message}`)
+    }
+
+    // Capture stderr as text (bounded to 64KB — rg errors are short,
+    // but the existing 1MB byte cap stays as a runaway-input guard).
+    // We surface stderr on exit code 2 so model gets actionable errors
+    // (e.g. regex compile failures) rather than empty results.
+    const STDERR_TEXT_CAP = 64 * 1024
+    let stderrBytes = 0
+    let stderrText = ""
+    if (child.stderr) {
+      child.stderr.setEncoding("utf8")
+      child.stderr.on("data", (chunk: string) => {
+        stderrBytes += chunk.length
+        if (stderrText.length < STDERR_TEXT_CAP) {
+          stderrText = (stderrText + chunk).slice(0, STDERR_TEXT_CAP)
+        }
+        if (stderrBytes > 1024 * 1024) {
+          // 1MB stderr is excessive — kill.
+          ac.abort("stderr_cap")
+        }
+      })
+    }
+
+    // Track rg's exit code so we can distinguish "no matches" (code 1)
+    // from a real error (code 2: bad regex, IO failure after our
+    // workspace validation, etc.) Per `man rg`:
+    //   0 = matches found
+    //   1 = no matches (not an error)
+    //   2 = error (regex, IO, ...)
+    let exitCode: number | null = null
+    const exitPromise = new Promise<void>((resolve) => {
+      child.on("close", (code) => {
+        exitCode = code
+        resolve()
+      })
+    })
+
+    let pr: ParseResult
+    try {
+      pr = await parseRgJsonStream(child, {
+        limit,
+        contextLines,
+        signal: ac.signal,
+      })
+    } finally {
+      clearTimeout(wallTimer)
+      if (externalSignal) {
+        externalSignal.removeEventListener("abort", onExternal)
+      }
+      if (!child.killed) killChild(child)
+    }
+
+    // If the abort was due to timeout/cap/external, surface that.
+    if (ac.signal.aborted && pr.hits.length === 0) {
+      const reason = String(ac.signal.reason ?? "aborted")
+      throw new Error(`code_search aborted (${reason})`)
+    }
+
+    // Surface rg errors (regex compile failures, etc.) to the caller.
+    // Exit code 2 means "rg encountered an error" — typically a malformed
+    // regex in mode="regex". Without this, an invalid regex returns
+    // empty results with no indication of why; the model can't tell
+    // "no matches" from "your pattern is broken." We re-check
+    // !signal.aborted so timeout/cap-driven aborts (which also produce
+    // non-zero exit) keep their existing error path above.
+    //
+    // Await rg's full exit before reading exitCode — the parseRgJsonStream
+    // for-await terminates on stdout EOF, which may slightly precede the
+    // child's 'close' event in Node's event-loop ordering.
+    if (!ac.signal.aborted) {
+      await exitPromise
+    }
+    if (
+      exitCode !== null &&
+      exitCode !== 0 &&
+      exitCode !== 1 &&
+      !ac.signal.aborted &&
+      pr.hits.length === 0
+    ) {
+      const trimmed = stderrText.trim()
+      const detail =
+        trimmed.length > 0
+          ? trimmed.replace(/^rg:\s*/i, "").slice(0, 600)
+          : `ripgrep exited with code ${exitCode}`
+      throw new Error(`code_search: ${detail}`)
+    }
+    return pr
   }
 
-  // If the abort was due to timeout/cap/external, surface that.
-  if (ac.signal.aborted && parseResult.hits.length === 0) {
-    const reason = String(ac.signal.reason ?? "aborted")
-    throw new Error(`code_search aborted (${reason})`)
-  }
-
-  // Surface rg errors (regex compile failures, etc.) to the caller.
-  // Exit code 2 means "rg encountered an error" — typically a malformed
-  // regex in mode="regex". Without this, an invalid regex returns
-  // empty results with no indication of why; the model can't tell
-  // "no matches" from "your pattern is broken." We re-check
-  // !signal.aborted so timeout/cap-driven aborts (which also produce
-  // non-zero exit) keep their existing error path above.
-  //
-  // Await rg's full exit before reading exitCode — the parseRgJsonStream
-  // for-await terminates on stdout EOF, which may slightly precede the
-  // child's 'close' event in Node's event-loop ordering.
-  if (!ac.signal.aborted) {
-    await exitPromise
-  }
-  if (
-    exitCode !== null &&
-    exitCode !== 0 &&
-    exitCode !== 1 &&
-    !ac.signal.aborted &&
-    parseResult.hits.length === 0
-  ) {
-    const trimmed = stderrText.trim()
-    const detail =
-      trimmed.length > 0
-        ? trimmed.replace(/^rg:\s*/i, "").slice(0, 600)
-        : `ripgrep exited with code ${exitCode}`
-    throw new Error(`code_search: ${detail}`)
-  }
 
   // Apply ranking.
   let kept: Array<ScoredHit>
@@ -1790,7 +2294,7 @@ export async function searchCode(
    * applies directly.
    */
   let structuralOutlines: Map<string, Array<FileOutlineEntry>> | undefined
-  if (mode === "ranked") {
+  if (effectiveMode === "ranked") {
     const queryTokens = tokenize(rawInput.query)
     // Pass 1: regex-only BM25F. Cheap and gives us a reliable
     // ordering to pick the top-N for structural confirmation.
@@ -1904,7 +2408,7 @@ export async function searchCode(
       snippet: renderSnippet(sh.hit),
       match_byte_range: [sh.hit.match_start, sh.hit.match_end],
     }
-    if (mode === "ranked") {
+    if (effectiveMode === "ranked") {
       baseHit.score = round4(sh.score)
       baseHit.field_contributions = {
         match_line: round4(sh.field_contributions.match_line ?? 0),
@@ -1927,28 +2431,58 @@ export async function searchCode(
 
   // Structural summary is ON by default — outline the distinct files in
   // the result set (capped, in result order) unless the caller opts out
-  // with `summary: false`. Reuses the shared tree-sitter outliner; each
-  // file is bounded by its own 1 MiB parse cap and the outliner never
-  // throws. Computed BEFORE `elapsed_ms` so telemetry reflects the real
-  // (summary-inclusive) latency.
+  // with `summary: false`. `scan: true` instead outlines the ENTIRE
+  // workspace (every non-ignored, non-sensitive source file), up to
+  // SCAN_MAX_FILES, so the model gets a whole-tree symbol map in one call.
+  // Reuses the shared tree-sitter outliner; each file is bounded by its
+  // own 1 MiB parse cap and the outliner never throws. Computed BEFORE
+  // `elapsed_ms` so telemetry reflects the real latency.
   let outlines:
     | Array<{ file: string; outline: Array<FileOutlineEntry> }>
     | undefined
-  if (rawInput.summary !== false) {
-    const seen = new Set<string>()
-    const distinct: Array<string> = []
-    for (const r of results) {
-      if (seen.has(r.file)) continue
-      seen.add(r.file)
-      distinct.push(r.file)
-      if (distinct.length >= CODE_SUMMARY_MAX_FILES) break
+  let scanNotice: string | null = null
+  const wantScan = rawInput.scan === true
+  // A whole-workspace scan (enumerate + outline up to SCAN_MAX_FILES) is
+  // the heaviest path and runs AFTER the search-phase wallTimer is torn
+  // down, so it self-bounds against this absolute deadline.
+  const scanDeadline = Date.now() + WALL_TIME_MS
+  if (rawInput.summary !== false || wantScan) {
+    let distinct: Array<string>
+    if (wantScan) {
+      // Whole-workspace enumeration (respects ignore rules; sensitive
+      // paths + non-outlineable extensions filtered). Capped at
+      // SCAN_MAX_FILES; coverage disclosed via `scanNotice` on truncation.
+      const enumed = await enumerateWorkspaceFiles({
+        rgPath: rgResolution.rgPath,
+        workspaceCanonical: ws.canonical,
+        signal: ac.signal,
+        deadlineMs: scanDeadline,
+      })
+      distinct = enumed.files
+      if (enumed.capped) {
+        scanNotice =
+          `scan outlined ${enumed.files.length} of ${enumed.total} workspace ` +
+          `source files (capped at ${SCAN_MAX_FILES}); narrow with file_glob ` +
+          `or inspect a sub-tree for full coverage`
+      }
+    } else {
+      const seen = new Set<string>()
+      distinct = []
+      for (const r of results) {
+        if (seen.has(r.file)) continue
+        seen.add(r.file)
+        distinct.push(r.file)
+        if (distinct.length >= CODE_SUMMARY_MAX_FILES) break
+      }
     }
     outlines = []
-    const outlineDeadline = Date.now() + 2000
+    // A whole-workspace scan shares the single `scanDeadline` across
+    // enumeration + outlining; the result-summary path keeps its tight
+    // 2s self-bound.
+    const outlineDeadline = wantScan ? scanDeadline : Date.now() + 2000
     for (const file of distinct) {
       // Self-bound: the wall-clock timer + external-signal listener are
-      // already torn down by here, so cap the outline pass independently
-      // (≤10 files, each ≤1 MiB parse, but be defensive on both axes).
+      // already torn down by here, so cap the outline pass independently.
       if (ac.signal.aborted || Date.now() > outlineDeadline) break
       const abs = path.resolve(ws.canonical, file)
       let result: FileOutlineResult | undefined
@@ -1977,9 +2511,21 @@ export async function searchCode(
         }
       }
       const o = result ?? (await outlineFile(abs, ac.signal))
+      // Skip files with no recoverable symbols in scan mode so the map
+      // stays a list of real symbol-bearing files, not empty noise.
+      if (wantScan && o.outline.length === 0) continue
       outlines.push({ file, outline: o.outline })
     }
   }
+
+  // Merge every actionable notice: ast-grep diagnostics + scan coverage +
+  // the ranked-mode precision/structural notice. Joined with ` · ` so none
+  // overwrites another (same convention as the ranked-mode notice merge).
+  const finalNotices: Array<string> = []
+  if (astNotice) finalNotices.push(astNotice)
+  if (scanNotice) finalNotices.push(scanNotice)
+  if (notice) finalNotices.push(notice)
+  const mergedNotice = finalNotices.length > 0 ? finalNotices.join(" · ") : null
 
   const elapsed_ms = Date.now() - t0
 
@@ -1987,13 +2533,15 @@ export async function searchCode(
   // absolute paths unless explicitly enabled.
   const debugLog = process.env.GH_ROUTER_DEBUG_CODE_SEARCH === "1"
   consola.info(
-    `[code_search] mode=${mode} structural=${structuralMode} ` +
+    `[code_search] mode=${effectiveMode}${astPattern ? " ast_pattern" : ""}` +
+      `${wantScan ? " scan" : ""}${rawInput.multiline ? " multiline" : ""} ` +
+      `structural=${structuralMode} ` +
       `expansion=${expansion ? expansion.length : 0} ` +
       `results=${results.length} truncated=${parseResult.truncated} ` +
       `outlines=${outlines ? outlines.length : 0} ` +
       `scanned_files=${parseResult.scannedFiles} elapsed_ms=${elapsed_ms} ` +
       `abort=${parseResult.cancelled} rg=${rgResolution.source} ` +
-      `notice=${notice ? "yes" : "no"}` +
+      `notice=${mergedNotice ? "yes" : "no"}` +
       (debugLog ? ` query="${rawInput.query}" workspace="${ws.canonical}"` : ""),
   )
 
@@ -2003,7 +2551,7 @@ export async function searchCode(
     scanned_files: parseResult.scannedFiles,
     elapsed_ms,
     ranking:
-      mode === "ranked"
+      effectiveMode === "ranked"
         ? {
             algorithm: "BM25F",
             citation: "Robertson, Zaragoza, Taylor 2004",
@@ -2011,7 +2559,7 @@ export async function searchCode(
           }
         : { algorithm: "ripgrep_document_order" },
     outlines,
-    notice,
+    notice: mergedNotice,
   }
 }
 

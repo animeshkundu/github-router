@@ -880,6 +880,24 @@ const CODE_SEARCH_PARAMS = Type.Object({
         + "hidden.",
     }),
   ),
+  multiline: Type.Optional(
+    Type.Boolean({
+      description:
+        "Set true with mode:'regex' to let a pattern span newlines "
+        + "(ripgrep -U), e.g. 'foo[\\s\\S]*?bar' across lines. (literal/"
+        + "ranked queries can't contain a newline.)",
+    }),
+  ),
+  ast_pattern: Type.Optional(
+    Type.String({
+      description:
+        "ast-grep structural pattern (e.g. 'function $F($$$) { $$$ }'). "
+        + "When set, matches come from ast-grep instead of ripgrep — for "
+        + "multi-line AST shapes the regex modes can't express. Takes "
+        + "precedence over `query`. If ast-grep isn't installed you get a "
+        + "`notice`; it never falls back to regex.",
+    }),
+  ),
 })
 
 function codeSearchTool(workspace: string): AgentTool<typeof CODE_SEARCH_PARAMS> {
@@ -908,6 +926,8 @@ function codeSearchTool(workspace: string): AgentTool<typeof CODE_SEARCH_PARAMS>
           limit: params.limit,
           structural: params.structural,
           complete: params.complete,
+          multiline: params.multiline,
+          ast_pattern: params.ast_pattern,
           // The worker surface trims to {file,line,snippet} and never
           // forwards outlines, so skip the (default-on) summary pass
           // rather than parse files only to discard the result.

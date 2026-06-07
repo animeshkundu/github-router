@@ -29,6 +29,8 @@ import {
   tokenize,
   validateWorkspace,
   resolveRipgrep,
+  resolveAstGrep,
+  __setAstGrepResolverForTest,
 } from "../src/lib/code-search"
 
 // ============================================================
@@ -1202,6 +1204,318 @@ describe("searchCode — floor guarantee (ranked ⊇ grep)", () => {
       // untagged.
       expect(usageHit?.role).toBeUndefined()
     } finally {
+      fx.cleanup()
+    }
+  })
+})
+
+// ============================================================
+// Multi-engine modes (multiline / scan / ast_pattern)
+// ============================================================
+
+describe("multi-engine: default behavior is unchanged (recall floor preserved)", () => {
+  // The proven floor: with NONE of the three new params set, the response
+  // must be byte-identical to the pre-change behavior. We pin it by
+  // asserting the new params, when left unset/false, produce the SAME
+  // result object as an explicit no-op invocation.
+  const SRC =
+    [
+      "export function alpha() { return 1 }",
+      "const beta = alpha()",
+      "function gamma() {",
+      "  return alpha()",
+      "}",
+    ].join("\n") + "\n"
+
+  test("multiline:false / scan:false / ast_pattern unset === omitting them", async () => {
+    const fx = makeFixture((root) => {
+      writeFileSync(path.join(root, "a.ts"), SRC)
+    })
+    try {
+      const baseline = await searchCode({
+        query: "alpha",
+        workspace: fx.root,
+        mode: "ranked",
+      })
+      const explicit = await searchCode({
+        query: "alpha",
+        workspace: fx.root,
+        mode: "ranked",
+        multiline: false,
+        scan: false,
+        // ast_pattern intentionally unset
+      })
+      // elapsed_ms differs run-to-run; compare everything else.
+      const strip = (r: Awaited<ReturnType<typeof searchCode>>): unknown => ({
+        ...r,
+        elapsed_ms: 0,
+      })
+      expect(strip(explicit)).toEqual(strip(baseline))
+    } finally {
+      fx.cleanup()
+    }
+  })
+
+  test("default mode does NOT match a cross-line pattern", async () => {
+    const fx = makeFixture((root) => {
+      writeFileSync(path.join(root, "m.ts"), "const x = foo(\n  bar\n)\n")
+    })
+    try {
+      const r = await searchCode({
+        query: "foo[\\s\\S]*?bar",
+        workspace: fx.root,
+        mode: "regex",
+        // multiline NOT set → line-oriented → no cross-line match
+        summary: false,
+      })
+      expect(r.results.length).toBe(0)
+    } finally {
+      fx.cleanup()
+    }
+  })
+})
+
+describe("multi-engine: multiline", () => {
+  test("multiline:true finds a two-line pattern the default mode misses", async () => {
+    const fx = makeFixture((root) => {
+      writeFileSync(path.join(root, "m.ts"), "const x = foo(\n  1,\n  bar\n)\n")
+    })
+    try {
+      const withML = await searchCode({
+        query: "foo[\\s\\S]*?bar",
+        workspace: fx.root,
+        mode: "regex",
+        multiline: true,
+        summary: false,
+      })
+      const withoutML = await searchCode({
+        query: "foo[\\s\\S]*?bar",
+        workspace: fx.root,
+        mode: "regex",
+        summary: false,
+      })
+      expect(withML.results.length).toBe(1)
+      expect(withoutML.results.length).toBe(0)
+      // Snippet spans the matched region (contains both foo and bar).
+      expect(withML.results[0].snippet).toContain("foo")
+      expect(withML.results[0].snippet).toContain("bar")
+      // Reported line is the START of the multi-line match.
+      expect(withML.results[0].line).toBe(1)
+    } finally {
+      fx.cleanup()
+    }
+  })
+})
+
+describe("multi-engine: scan (whole-workspace outline)", () => {
+  test("scan:true outlines a file that does NOT text-match the query", async () => {
+    const fx = makeFixture((root) => {
+      mkdirSync(path.join(root, "src"))
+      // Matches the query.
+      writeFileSync(
+        path.join(root, "src", "match.ts"),
+        "export function needle() { return 1 }\n",
+      )
+      // Does NOT contain the query token at all.
+      writeFileSync(
+        path.join(root, "src", "elsewhere.ts"),
+        "export class Unrelated {\n  go() { return 2 }\n}\n",
+      )
+    })
+    try {
+      const r = await searchCode({
+        query: "needle",
+        workspace: fx.root,
+        scan: true,
+      })
+      const files = new Set((r.outlines ?? []).map((o) => o.file))
+      // The non-matching file is outlined because scan covers the whole tree.
+      expect(files.has("src/elsewhere.ts")).toBe(true)
+      expect(files.has("src/match.ts")).toBe(true)
+      // The hit set is still driven by the query (only match.ts matches).
+      expect(r.results.every((h) => h.file === "src/match.ts")).toBe(true)
+    } finally {
+      fx.cleanup()
+    }
+  })
+
+  test("scan respects ignore rules and the sensitive-path denylist", async () => {
+    const fx = makeFixture((root) => {
+      // A git repo so rg --files honors .gitignore.
+      mkdirSync(path.join(root, ".git"))
+      writeFileSync(path.join(root, ".gitignore"), "ignored.ts\n.env\n")
+      writeFileSync(
+        path.join(root, "kept.ts"),
+        "export function kept() { return 1 }\n",
+      )
+      writeFileSync(
+        path.join(root, "ignored.ts"),
+        "export function ignored() { return 2 }\n",
+      )
+      // Sensitive-shaped file — must never be outlined even if not ignored.
+      writeFileSync(path.join(root, ".env"), "SECRET=abc\n")
+    })
+    try {
+      const r = await searchCode({
+        query: "function",
+        workspace: fx.root,
+        scan: true,
+        mode: "literal",
+      })
+      const files = new Set((r.outlines ?? []).map((o) => o.file))
+      expect(files.has("kept.ts")).toBe(true)
+      expect(files.has("ignored.ts")).toBe(false) // gitignored
+      expect(files.has(".env")).toBe(false) // sensitive + not a grammar
+    } finally {
+      fx.cleanup()
+    }
+  })
+})
+
+describe("multi-engine: ast_pattern", () => {
+  const sgAvailable = resolveAstGrep() !== null
+
+  test.if(sgAvailable)(
+    "ast_pattern matches a multi-line construct the default regex misses",
+    async () => {
+      const fx = makeFixture((root) => {
+        mkdirSync(path.join(root, "src"))
+        writeFileSync(
+          path.join(root, "src", "a.ts"),
+          "function wrap() {\n  return inner(\n    1,\n    2\n  )\n}\n",
+        )
+      })
+      try {
+        const r = await searchCode({
+          query: "ignored-query",
+          workspace: fx.root,
+          ast_pattern: "function $F() { $$$ }",
+        })
+        // ast-grep found the whole multi-line function.
+        expect(r.results.length).toBeGreaterThanOrEqual(1)
+        expect(r.results[0].file).toBe("src/a.ts")
+        // 1-indexed line (sg reports 0-indexed; we add 1).
+        expect(r.results[0].line).toBe(1)
+        // ast hits are document-order (literal), not BM25F.
+        expect(r.ranking.algorithm).toBe("ripgrep_document_order")
+        // No false ast-absent notice.
+        expect(r.notice ?? "").not.toMatch(/ast-grep \(sg\), which isn't/)
+      } finally {
+        fx.cleanup()
+      }
+    },
+  )
+
+  test.if(sgAvailable)(
+    "ast_pattern takes precedence over the regex query for match generation",
+    async () => {
+      const fx = makeFixture((root) => {
+        writeFileSync(
+          path.join(root, "a.ts"),
+          "function onlyAstFinds() { return 1 }\nconst queryWord = 5\n",
+        )
+      })
+      try {
+        // 'queryWord' would match line 2 in regex mode; the ast_pattern for a
+        // function instead returns line 1, proving query is ignored for
+        // matching when ast_pattern is set.
+        const r = await searchCode({
+          query: "queryWord",
+          workspace: fx.root,
+          ast_pattern: "function $F() { $$$ }",
+        })
+        expect(r.results.length).toBe(1)
+        expect(r.results[0].line).toBe(1)
+      } finally {
+        fx.cleanup()
+      }
+    },
+  )
+
+  test.if(sgAvailable)(
+    "ast_pattern survives a workspace path with shell metacharacters (no injection)",
+    async () => {
+      // The workspace dir name carries `& ( ) !` + spaces — runManagedExeCapture
+      // passes it as an argv element (shell:false), so it cannot inject.
+      const fx = makeFixture((root) => {
+        const evil = path.join(root, "a & b (c) ! d")
+        mkdirSync(evil)
+        writeFileSync(path.join(evil, "x.ts"), "function zap() { return 1 }\n")
+      })
+      try {
+        const evil = path.join(fx.root, "a & b (c) ! d")
+        const r = await searchCode({
+          query: "ignored",
+          workspace: evil,
+          ast_pattern: "function $F() { $$$ }",
+        })
+        expect(r.results.length).toBe(1)
+        expect(r.results[0].file).toBe("x.ts")
+      } finally {
+        fx.cleanup()
+      }
+    },
+  )
+
+  test.if(sgAvailable && process.platform !== "win32")(
+    "ast_pattern drops out-of-workspace hits reached via a symlink (no path leak)",
+    async () => {
+      // A secret target OUTSIDE the workspace, reachable only through an
+      // in-workspace symlink. ast-grep may traverse the link and report the
+      // outside file's absolute path; the relativize-confinement must drop it.
+      const outside = realpathSync(
+        mkdtempSync(path.join(os.tmpdir(), "gh-router-cs-out-")),
+      )
+      writeFileSync(
+        path.join(outside, "secret.ts"),
+        "function leaked() { return 'SECRET' }\n",
+      )
+      const fx = makeFixture((root) => {
+        writeFileSync(
+          path.join(root, "ok.ts"),
+          "function inside() { return 1 }\n",
+        )
+        symlinkSync(outside, path.join(root, "escape"), "dir")
+      })
+      try {
+        const r = await searchCode({
+          query: "x",
+          workspace: fx.root,
+          ast_pattern: "function $F() { $$$ }",
+        })
+        // No hit may be absolute, escape with "..", or name the outside file.
+        for (const h of r.results) {
+          expect(path.isAbsolute(h.file)).toBe(false)
+          expect(h.file.startsWith("..")).toBe(false)
+          expect(h.file).not.toContain("secret")
+        }
+        // The in-workspace match still comes through.
+        expect(r.results.some((h) => h.file === "ok.ts")).toBe(true)
+      } finally {
+        fx.cleanup()
+        rmSync(outside, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test("ast_pattern returns a graceful notice (no results, not thrown) when sg is absent", async () => {
+    // Force the binary-absent path deterministically — even on a host (like
+    // the toolbelt-provisioned dev/CI machine) that HAS sg — via the
+    // test-only resolver override.
+    __setAstGrepResolverForTest(() => null)
+    const fx = makeFixture((root) => {
+      writeFileSync(path.join(root, "a.ts"), "function f() {}\n")
+    })
+    try {
+      const r = await searchCode({
+        query: "ignored",
+        workspace: fx.root,
+        ast_pattern: "function $F() { $$$ }",
+      })
+      expect(r.results.length).toBe(0)
+      expect(r.notice ?? "").toMatch(/ast-grep \(sg\), which isn't available/)
+    } finally {
+      __setAstGrepResolverForTest(undefined)
       fx.cleanup()
     }
   })
