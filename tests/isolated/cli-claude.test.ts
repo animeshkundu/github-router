@@ -157,10 +157,11 @@ mock.module("~/lib/mcp-capabilities", () => ({
   standInToolEnabled: standInToolEnabledMock,
   browserToolsEnabled: browserToolsEnabledMock,
   // handler.ts (pulled in transitively via the static import graph)
-  // also imports these two; re-export stubs so the module mock doesn't
+  // also imports these; re-export stubs so the module mock doesn't
   // break that import. claude.ts itself only uses the three above.
   browserCompoundToolsEnabled: mock(() => false),
   browserPowerToolsEnabled: mock(() => false),
+  semanticSearchEnabled: mock(() => false),
 }))
 
 // The CLAUDE.md append + prepend helpers are the new descendant-reach
