@@ -292,6 +292,7 @@ describe("buildPeerAwarenessSnippet", () => {
     geminiAvailable: true,
     workerToolsAvailable: true,
     standInAvailable: true,
+    semanticSearchAvailable: true,
     browseAvailable: true,
   } as const
 
@@ -314,12 +315,13 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(1700)
   })
 
-  test("snippet stays under ~440 tokens (~2800 bytes) in the maximal case", () => {
-    // Maximal = every gate on, including gemini_reviewer (peers) and the
-    // `review` worker. The cap is the smallest envelope the implementation
-    // fits inside; if a future tightening shaves bytes, lower it too.
+  test("snippet stays under ~520 tokens (~3200 bytes) in the maximal case", () => {
+    // Maximal = every gate on, including gemini_reviewer (peers), the
+    // `review` worker, and `semantic_search`. The cap is the smallest
+    // envelope the implementation fits inside; if a future tightening
+    // shaves bytes, lower it too.
     const full = buildPeerAwarenessSnippet(MAXIMAL)
-    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(2800)
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(3200)
   })
 
   test("mentions Claude Code's advisor built-in tool", () => {
@@ -342,6 +344,22 @@ describe("buildPeerAwarenessSnippet", () => {
     // also keeps the substring satisfied for the lower-case check.
     expect(snippet.toLowerCase()).toContain("parallel")
     expect(snippet).toContain("in a single turn")
+    // The orchestrator modes are surfaced holistically so Claude knows the
+    // one-stop search can do AST + whole-workspace structure, not just rg.
+    expect(snippet).toContain("ast_pattern")
+    expect(snippet).toContain("scan")
+    expect(snippet).toContain("complete")
+  })
+
+  test("semantic_search is mentioned ONLY when available (availability-gated, like workers/stand_in)", () => {
+    const off = buildPeerAwarenessSnippet(MINIMAL)
+    expect(off).not.toContain("semantic_search")
+    const on = buildPeerAwarenessSnippet({
+      ...MINIMAL,
+      semanticSearchAvailable: true,
+    })
+    expect(on).toContain("mcp__search__semantic_search")
+    expect(on).toContain("ColBERT")
   })
 
   test("describes the non-code fallback (per peer-review #4 — grep/glob still apply)", () => {

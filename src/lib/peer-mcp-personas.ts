@@ -510,6 +510,7 @@ export function buildPeerAwarenessSnippet(opts: {
   geminiAvailable: boolean
   workerToolsAvailable: boolean
   standInAvailable: boolean
+  semanticSearchAvailable?: boolean
   browseAvailable: boolean
   powerBrowseAvailable?: boolean
   /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
@@ -544,7 +545,7 @@ export function buildPeerAwarenessSnippet(opts: {
   // appear when their gate is on, so the snippet never names a tool
   // missing from the live tools/list.
   const para2Parts: Array<string> = [
-    `\`mcp__${searchKey}__code\` returns ranked code-discovery hits (BM25F + tree-sitter ranking, no additional model call). Multiple independent queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, \`.csv\`, \`.env*\`, config-only wiring), \`grep\`/\`glob\` still apply.`,
+    `\`mcp__${searchKey}__code\` returns ranked code-discovery hits (BM25F + tree-sitter ranking, no additional model call) and is the one-stop code search: \`complete\` for the exhaustive match set, \`ast_pattern\`+\`ast_lang\` for multi-line AST structures (via ast-grep), \`scan\` for a whole-workspace symbol outline, \`multiline\` for cross-line regex. Multiple independent queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, \`.csv\`, \`.env*\`, config-only wiring), \`grep\`/\`glob\` still apply.`,
   ]
   if (opts.workerToolsAvailable) {
     para2Parts.push(
@@ -557,6 +558,11 @@ export function buildPeerAwarenessSnippet(opts: {
   para2Parts.push(
     `\`mcp__${searchKey}__web\` surfaces citable sources for docs, errors, and upstream issues.`,
   )
+  if (opts.semanticSearchAvailable) {
+    para2Parts.push(
+      `\`mcp__${searchKey}__semantic_search\` is ColBERT semantic code search over a per-workspace index, for intent/concept queries ("where is retry/backoff handled") that lexical \`code\` misses; it returns honest \`building\`/\`stale\`/\`unavailable\` notices and never silently falls back to lexical.`,
+    )
+  }
   if (opts.standInAvailable) {
     para2Parts.push(
       `\`mcp__${decideKey}__stand_in\` provides three-lab consensus for decision tiebreak when the user is unavailable.`,
