@@ -123,20 +123,20 @@ async function runRanked(workspace: string): Promise<Awaited<ReturnType<typeof s
 
 // ---------------------------------------------------------------------------
 
-// The pool is OPT-IN and its worker_threads + web-tree-sitter WASM path is
-// bun-runtime-fragile: it works on local bun/macOS, but under bun on the CI
-// runners the worker can't reliably init its grammar heap — a nondeterministic
-// race where parse jobs dispatch before the async grammar load completes, so
-// the pooled output degrades to role-tag-poorer results. A runtime probe is
-// therefore unreliable (it can pass on a small fixture and the real test still
-// race). Gate the pool-specific describes on an EXPLICIT env opt-in instead:
-// they run ONLY when GH_ROUTER_ENABLE_TS_POOL=1 is set in the ENVIRONMENT
-// before `bun test` (e.g. `GH_ROUTER_ENABLE_TS_POOL=1 bun test
-// tests/tree-sitter-pool.test.ts` when validating the pool on a host). A plain
-// `bun test` (local or CI) skips them; the default in-process path is covered
-// by the rest of the suite. Deterministic — no flaky runtime probe.
+// The pool is ON by default for real (non-CI) runs and OFF under CI, where
+// its worker_threads + web-tree-sitter WASM path is bun-runtime-fragile: the
+// worker can't reliably init its grammar heap under bun on the hosted CI
+// runners (a nondeterministic race where parse jobs dispatch before the async
+// grammar load completes), so the pooled output degrades to role-tag-poorer
+// results. So gate the pool-specific describes the SAME way the pool itself
+// defaults: run them on real (non-CI) hosts where the pool works, skip them
+// under CI. The default in-process path is covered by the rest of the suite.
+// Force-disable (GH_ROUTER_DISABLE_TS_POOL=1) also skips them.
+const isCiEnv = process.env.CI === "true" || process.env.CI === "1"
 const poolDescribe =
-  process.env.GH_ROUTER_ENABLE_TS_POOL === "1" ? describe : describe.skip
+  isCiEnv || process.env.GH_ROUTER_DISABLE_TS_POOL === "1"
+    ? describe.skip
+    : describe
 
 poolDescribe("tree-sitter pool — determinism (pooled ≡ in-process)", () => {
   test("pooled output is byte-identical to the in-process path", async () => {

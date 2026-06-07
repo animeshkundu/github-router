@@ -587,18 +587,31 @@ function resolveWorkerPath(): string | null {
 let _pool: TreeSitterPool | null = null
 let _shutdownRegistered = false
 /**
- * The pool is OPT-IN. Its worker_threads + WASM grammar heap fails to
- * initialize under some sandboxes (CI runners on BOTH ubuntu and windows),
- * where it then yields degraded (role-tag-poorer) output instead of the
- * in-process result. The in-process structural pass is correct and is the
- * proven default. Enable the pool with `GH_ROUTER_ENABLE_TS_POOL=1` once
- * validated on the target host — it gives a large event-loop-latency win
- * under concurrent searches (see `scripts/bench-code-search-parallelism.ts`).
- * `GH_ROUTER_DISABLE_TS_POOL=1` still hard-disables and takes precedence.
+ * The pool is ON by default for real (non-CI) runs and OFF under CI.
+ *
+ * It gives a large event-loop-latency win under concurrent searches (see
+ * `scripts/bench-code-search-parallelism.ts`), but its worker_threads + WASM
+ * grammar heap fails to initialize under bun on the hosted CI runners (BOTH
+ * ubuntu and windows), where it then yields degraded (role-tag-poorer)
+ * RANKING — never wrong recall, the floor is unaffected — instead of the
+ * in-process result. So:
+ *   - `GH_ROUTER_DISABLE_TS_POOL=1` → hard OFF (takes precedence everywhere).
+ *   - `GH_ROUTER_ENABLE_TS_POOL=1`  → hard ON (force it even under CI, e.g.
+ *     when validating the pool on a CI-like host).
+ *   - otherwise → ON unless a CI env is detected (`CI=true`/`1`, which
+ *     GitHub Actions and most CIs set).
+ * The in-process structural pass remains the correct fallback when the pool
+ * is unavailable.
  */
-const poolEnabled = (): boolean =>
-  process.env.GH_ROUTER_DISABLE_TS_POOL !== "1" &&
-  process.env.GH_ROUTER_ENABLE_TS_POOL === "1"
+function isCiEnv(): boolean {
+  const ci = process.env.CI
+  return ci === "true" || ci === "1"
+}
+const poolEnabled = (): boolean => {
+  if (process.env.GH_ROUTER_DISABLE_TS_POOL === "1") return false
+  if (process.env.GH_ROUTER_ENABLE_TS_POOL === "1") return true
+  return !isCiEnv()
+}
 
 /**
  * Get the process-wide pool, spawning it lazily on first use (NOT at import —
