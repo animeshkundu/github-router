@@ -192,6 +192,13 @@ already capped at 8 concurrent `tools/call`s — a per-call pool of 4 across up 
 concurrent `code` calls would oversubscribe cores. One worker on a single-core
 box (still better than nothing: it offloads parse CPU off the main event loop).
 
+> **Implemented value: `cpus - 2`, not `cpus - 1`.** Phase 2 shipped
+> `Math.max(1, Math.min(4, os.cpus().length - 2))` (overridable via
+> `GH_ROUTER_TS_POOL_SIZE`). The extra reserved core leaves headroom for the
+> main event loop AND the `rg` child processes that run alongside the pool under
+> the cap-of-8 MCP concurrency; on a ≤3-core box it degrades to a single worker.
+> See the "Phase 2 decision" section below for the as-built sizing rationale.
+
 **Warm lifecycle.** Spawn **lazily on first structural pass**, not at module
 import — module-import spawn would pay the pool cost even for a proxy run that
 never calls `code` (e.g. a pure `claude` passthrough session). Each worker, on
@@ -360,3 +367,96 @@ for the default path."** Reasoning:
 both Bun and Node (verified), but its benefit is capped by the 200ms structural
 budget and its real value is only the concurrent-`code` case — so it should be
 built only against measured evidence, not on spec.
+
+---
+
+## Phase 2 decision — MEASURED, then BUILT (the warm worker pool)
+
+The "gate on profiling" demanded by the phased recommendation was carried out.
+The benchmark is committed at `scripts/bench-code-search-parallelism.ts`
+(reproduce with `GH_ROUTER_BENCH_STRUCTURAL=1 bun
+scripts/bench-code-search-parallelism.ts`, add `BENCH_SPREAD=1` for the
+worst case). Numbers below are medians of 5 trials, Bun 1.3.14, macOS, 8 cores,
+80 TS files × ~160 lines.
+
+### The serialization is real, and bimodal
+
+The structural pass groups hits **by file** and parses each file once, so the
+realized parse load depends entirely on how the top-50 *hits* distribute across
+*files*:
+
+| Fixture | files parsed/call | parse-CPU/call | ranked wall conc8 / conc1 | LLM-stream worst gap (idle → 8 concurrent) |
+|---|---|---|---|---|
+| **Clustered** (one recurring symbol → hits cluster) | ~2 | ~2 ms | ~6.3x | 9 ms → ~40 ms |
+| **Spread** (diverse hits, ~1/file) | 50 | ~38 ms | **6.98x** | 10 ms → **303 ms** |
+
+The **ranked-vs-literal control** is the load-bearing attribution: in the spread
+case ranked scales **6.98x** to 350 ms at conc=8 while **literal (no tree-sitter)
+stays flat at ~10 ms (1.5x)**. The 340 ms "ranked-extra" at conc=8 is therefore
+the structural parse pass serializing on the one WASM heap — *not* rg or I/O,
+which the literal control proves do not serialize materially. (An earlier
+benchmark draft over-attributed this; the fix was per-call structural-pass
+instrumentation `__readBenchStructuralStats`, which revealed the clustered case
+parses only ~2 files — the top-50 *hits* collapse — while the spread case parses
+the full 50.)
+
+### Why the pool, not the cheaper alternatives
+
+- **Widening `STRUCTURAL_BUDGET_MS` (200→300) is the wrong fix** and was rejected:
+  it does nothing for the dominant harm (event-loop freezes) and, if anything,
+  makes a single uninterrupted synchronous parse stretch *longer*.
+- **The dominant measured harm is the event-loop freeze, not code_search
+  latency.** The proxy serves SSE/LLM streaming on the same event loop; 8
+  concurrent diverse `code` calls freeze unrelated stream chunks for **~300 ms**
+  (idle baseline ~10 ms). That is user-visible jitter on traffic that has nothing
+  to do with `code`.
+- A **single warm worker** would remove the freeze but still serialize all 340 ms
+  of spread-case parse on its one thread. The **pool** removes the freeze
+  **and** parallelizes that 340 ms ~Nx (≈85 ms across 4 workers). On a 1–2 core
+  box the sizing formula `max(1, min(4, cpus-2))` degrades the pool to a single
+  worker automatically — so the pool *is* the staged design, not a heavier
+  alternative to it.
+
+**Verdict: build the warm `worker_threads` pool**, scoped to the structural
+pass's parses, with coalesced confirm+outline jobs, order-independent Set/Map
+merges (preserves the 5-run determinism test), lazy warm spawn,
+never-orphan terminate-on-exit, abort propagation, and total-failure degradation
+to exactly today's regex-heuristic + own-`Parser` `outlineFile` path. Sizing
+`max(1, min(4, os.cpus().length - 2))` (cap 4; leaves 2 cores for the main loop
++ rg under the cap-of-8 MCP concurrency; degrades to a single worker on a ≤3-core
+box). Override with `GH_ROUTER_TS_POOL_SIZE`. The implementation keeps
+the synchronous in-process path as the fallback, so a worker/spawn failure or a
+non-pool environment is behavior-identical to pre-Lever-2.
+
+### Measured outcome (pool ON vs OFF, spread worst case, 80 files / 50 parsed/call)
+
+| Metric (conc=8) | Pool OFF (in-process) | Pool ON | Δ |
+|---|---|---|---|
+| **LLM-stream jitter under 8 concurrent searches** | **303 ms** | **7 ms** | freeze ELIMINATED (≈ idle) |
+| ranked end-to-end wall | 350 ms | 143 ms | **2.4× faster** |
+| ranked-vs-conc1 scale factor | 6.98× | 5.09× | serialization cut |
+
+The headline win is the **event-loop freeze elimination**: the dominant harm
+(unrelated proxy SSE/LLM traffic starved ~300 ms while diverse `code` searches
+parse) drops to the ~7 ms idle baseline because the synchronous parses now run
+off-thread. The in-process path remains byte-identical and is exercised as the
+fallback (worker crash, pool disabled, ≤1-core box, or `GH_ROUTER_DISABLE_TS_POOL=1`).
+
+> **Implementation note — shared singleton + central scheduler.** The pool is a
+> process-wide singleton shared across all concurrent `code` searches (under the
+> MCP cap of 8). The first design leased workers per-`parseFiles`-call and
+> **deadlocked** under concurrency: two searches dispatched to the same idle
+> worker and clobbered each other's pending-reply state. The fix is a single
+> central scheduler — one shared FIFO queue, workers leased atomically, replies
+> routed by job id — so concurrent searches feed one arbiter. A bounded
+> `READY_TIMEOUT_MS` handshake and a `MAX_CRASHES` storm guard prevent a stuck
+> or crash-looping worker from wedging every search. (A standalone script must
+> also keep the loop alive: the workers are `unref()`-ed, correct for the proxy
+> where the HTTP server holds the loop, but a bare script needs a ref'd timer or
+> Bun exits before a pooled call resolves — see the benchmark's keep-alive.)
+
+> **Windows-first caveat (unchanged from above):** `worker_threads` + WASM is
+> expected to work cross-platform and the probe confirmed it on POSIX, but it is
+> a NEW `windows-latest` surface and must be proven green there before merge.
+> `worker.terminate()` is the cross-platform teardown — no `taskkill`/PATHEXT
+> machinery is in play since no child *process* is spawned.

@@ -48,6 +48,7 @@
 
 import { spawn, execFile, execFileSync, type ChildProcess } from "node:child_process"
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
+import { performance } from "node:perf_hooks"
 import { createInterface } from "node:readline"
 import * as path from "node:path"
 
@@ -55,16 +56,21 @@ import consola from "consola"
 import Parser from "web-tree-sitter"
 
 import {
-  DEFINITION_NODE_TYPES,
+  confirmDefinitionSites,
   type FileOutlineEntry,
   type FileOutlineResult,
   getGrammarBundle,
   getLanguageKeyForPath,
-  IDENTIFIER_NODE_TYPES,
   outlineFile,
   outlineFromTree,
+  type StructuralHit,
   STRUCTURAL_MAX_FILE_BYTES,
 } from "~/lib/tree-sitter-grammars"
+import {
+  getTreeSitterPool,
+  type PoolJob,
+  type TreeSitterPool,
+} from "~/lib/tree-sitter-pool/pool"
 
 // ============================================================
 // Constants
@@ -856,6 +862,18 @@ function stripTrailingNewline(s: string): string {
   return s
 }
 
+/**
+ * Normalize a ripgrep-relative path to the form used in the rendered output
+ * (strip a leading "./" or ".\", convert "\" → "/"). Used to key the pooled
+ * structural-outline map so the outline loop's lookup (which iterates rendered
+ * result files) matches regardless of OS path separators or rg's "./" prefix.
+ */
+function normalizeRelFile(file: string): string {
+  let f = file
+  if (f.startsWith("./") || f.startsWith(".\\")) f = f.slice(2)
+  return f.replace(/\\/g, "/")
+}
+
 // ============================================================
 // Tree-sitter structural ranking
 // ============================================================
@@ -927,104 +945,6 @@ function cachePut(absPath: string, entry: CachedTree): void {
   _treeCache.set(absPath, entry)
 }
 
-/**
- * Compute the absolute byte offset where line `lineNumber1` starts
- * in `source`. Lines are counted by LF; CRLF files have the same
- * line starts as LF files (the \r is part of the previous line's
- * content, not the line break). `lineNumber1` is 1-indexed to match
- * ripgrep's output. Returns -1 if the line is past EOF.
- */
-function lineStartByte(source: string, lineNumber1: number): number {
-  if (lineNumber1 <= 1) return 0
-  let line = 1
-  for (let i = 0; i < source.length; i++) {
-    if (source.charCodeAt(i) === 0x0a /* \n */) {
-      line += 1
-      if (line === lineNumber1) return i + 1
-    }
-  }
-  return -1
-}
-
-/**
- * Walk up from a matched identifier node looking for the closest
- * definition-shape ancestor (per the language's allowed types). When
- * we find one, verify the matched identifier is at the definition's
- * "name" slot — NOT inside a parameter type, a body, or a parent's
- * signature. Returns true iff this is a real definition site for
- * the identifier the rg submatch landed on.
- *
- * The walk has a small depth bound (6) — definition names sit very
- * close to their definition node in every supported grammar; deeper
- * walks risk false positives (e.g., matching `name` inside the body
- * of an enclosing function and concluding "yes, definition").
- */
-function isDefiningSite(
-  matchedNode: Parser.SyntaxNode,
-  langKey: string,
-): boolean {
-  const defTypes = DEFINITION_NODE_TYPES[langKey]
-  if (!defTypes) return false
-  let cur: Parser.SyntaxNode | null = matchedNode.parent
-  let depth = 0
-  while (cur && depth < 6) {
-    if (defTypes.has(cur.type)) {
-      // Try the language's standard "name" field first. Almost all
-      // grammars expose this for class/method/function/variable
-      // declarations.
-      const nameField = cur.childForFieldName("name")
-      if (nameField && containsByteRange(nameField, matchedNode)) {
-        return true
-      }
-      // C / C++ function_definition: name lives inside the
-      // `declarator` field, possibly nested through pointer or
-      // reference declarators. Same trick works for Java
-      // field_declaration's `declarator` field.
-      const declarator = cur.childForFieldName("declarator")
-      if (declarator && containsByteRange(declarator, matchedNode)) {
-        // The matched identifier is somewhere in the declarator
-        // subtree. Confirm it's the first identifier-leaf — that
-        // disambiguates `int foo(int bar)`'s `foo` (definition) from
-        // its `bar` (parameter, also inside declarator).
-        const first = firstIdentifierLeaf(declarator)
-        if (first && first.startIndex === matchedNode.startIndex) {
-          return true
-        }
-      }
-      // Rust `impl_item` and Go `type_spec`: the identifier is in
-      // the `type` field rather than `name`.
-      const typeField = cur.childForFieldName("type")
-      if (typeField && containsByteRange(typeField, matchedNode)) {
-        const first = firstIdentifierLeaf(typeField)
-        if (first && first.startIndex === matchedNode.startIndex) {
-          return true
-        }
-      }
-    }
-    cur = cur.parent
-    depth += 1
-  }
-  return false
-}
-
-function containsByteRange(
-  outer: Parser.SyntaxNode,
-  inner: Parser.SyntaxNode,
-): boolean {
-  return outer.startIndex <= inner.startIndex && outer.endIndex >= inner.endIndex
-}
-
-function firstIdentifierLeaf(
-  node: Parser.SyntaxNode,
-): Parser.SyntaxNode | null {
-  if (IDENTIFIER_NODE_TYPES.has(node.type)) return node
-  for (const child of node.namedChildren) {
-    const r = firstIdentifierLeaf(child)
-    if (r) return r
-  }
-  return null
-}
-
 interface StructuralPassResult {
   /** Indexes (into the input hits array) where AST confirmed the
    *  matched identifier is at a definition site. */
@@ -1034,6 +954,51 @@ interface StructuralPassResult {
    *  to the model as the `notice` field (overridden by size-cap notice
    *  at the handler boundary when both fire). */
   fallback: string | null
+  /**
+   * Outline entries the parse PRODUCED for each file, keyed by RELATIVE file
+   * path. Populated ONLY on the worker-pool path: a `Tree` can't cross the
+   * thread boundary, so Lever 1's in-process tree reuse can't apply across
+   * threads — instead the pool returns outline entries alongside the confirm
+   * result (the coalesced job), and `searchCode`'s outline loop reuses these
+   * before falling back. On the in-process path this is undefined and the
+   * outline loop reuses `_treeCache` directly, exactly as before.
+   */
+  outlinesByFile?: Map<string, Array<FileOutlineEntry>>
+}
+
+/**
+ * Benchmark-only instrumentation. Zero cost in production: nothing writes
+ * here unless `GH_ROUTER_BENCH_STRUCTURAL=1`. Exposes the actual number of
+ * DISTINCT files the structural pass parsed (vs the ≤topN *hits* it
+ * considered) and the wall-clock spent inside it, so the parallelism
+ * benchmark can attribute end-to-end cost honestly rather than infer it.
+ * Read + reset by `scripts/bench-code-search-parallelism.ts`.
+ */
+export interface BenchStructuralStats {
+  calls: number
+  filesParsed: number
+  filesConsidered: number
+  budgetHit: number
+  parseMsTotal: number
+}
+const _benchStructural: BenchStructuralStats = {
+  calls: 0,
+  filesParsed: 0,
+  filesConsidered: 0,
+  budgetHit: 0,
+  parseMsTotal: 0,
+}
+const _benchStructuralOn = (): boolean =>
+  process.env.GH_ROUTER_BENCH_STRUCTURAL === "1"
+export function __readBenchStructuralStats(): BenchStructuralStats {
+  return { ..._benchStructural }
+}
+export function __resetBenchStructuralStats(): void {
+  _benchStructural.calls = 0
+  _benchStructural.filesParsed = 0
+  _benchStructural.filesConsidered = 0
+  _benchStructural.budgetHit = 0
+  _benchStructural.parseMsTotal = 0
 }
 
 /**
@@ -1046,6 +1011,38 @@ interface StructuralPassResult {
  * `symbol_context` heuristic. Only the wall-clock budget fires the
  * user-visible `fallback` message.
  */
+/**
+ * Group the top-`topN` ranked hits by file, preserving rank order of files
+ * (first-seen). Shared by the in-process and pooled structural passes so both
+ * consider the identical file set. Each file maps to its hits' rg offsets +
+ * the original hit index.
+ */
+function groupHitsByFile(
+  hitsRanked: Array<{ hit: RawHit; index: number }>,
+  topN: number,
+): Map<string, Array<{ hit: RawHit; index: number }>> {
+  const cap = Math.min(hitsRanked.length, topN)
+  const byFile = new Map<string, Array<{ hit: RawHit; index: number }>>()
+  for (let i = 0; i < cap; i++) {
+    const entry = hitsRanked[i]
+    const list = byFile.get(entry.hit.file) ?? []
+    list.push(entry)
+    byFile.set(entry.hit.file, list)
+  }
+  return byFile
+}
+
+/**
+ * Run the structural-confirmation pass over the top-N ranked hits. Tries the
+ * warm worker-thread parse pool first (parallel parses off the main event
+ * loop — the measured win for concurrent `code` calls; see
+ * `docs/research/tree-sitter-parallelism.md`); on pool unavailability,
+ * disablement, or total pool failure it falls back to the in-process path,
+ * which is behavior-identical to pre-Lever-2. Both paths produce the SAME
+ * confirmed-index set for the same inputs (the shared `confirmDefinitionSites`
+ * walk + order-independent Set merge), so the determinism test holds either
+ * way.
+ */
 async function runStructuralPass(opts: {
   hitsRanked: Array<{ hit: RawHit; index: number }>
   workspaceRoot: string
@@ -1057,29 +1054,163 @@ async function runStructuralPass(opts: {
     confirmedHitIndexes: new Set(),
     fallback: null,
   }
-  if (opts.hitsRanked.length === 0) return result
-
-  if (opts.signal.aborted) return result
+  if (opts.hitsRanked.length === 0 || opts.signal.aborted) return result
 
   const grammars = await getGrammarBundle().ready
-  if (grammars.size === 0) {
-    // No grammars loaded — log already done in getGrammarBundle.
-    // Don't surface as user-facing fallback; this is a setup-side
-    // failure, not a per-search budget overrun.
-    return result
-  }
+  if (grammars.size === 0) return result
 
-  // Group hits by file so we parse each file once across all its
-  // hits within the top-N slice.
+  const byFile = groupHitsByFile(opts.hitsRanked, opts.topN)
   const cap = Math.min(opts.hitsRanked.length, opts.topN)
-  const byFile = new Map<string, Array<{ hit: RawHit; index: number }>>()
-  for (let i = 0; i < cap; i++) {
-    const entry = opts.hitsRanked[i]
-    const list = byFile.get(entry.hit.file) ?? []
-    list.push(entry)
-    byFile.set(entry.hit.file, list)
+  const benchOn = _benchStructuralOn()
+  if (benchOn) {
+    _benchStructural.calls += 1
+    _benchStructural.filesConsidered += byFile.size
   }
 
+  const pool = getTreeSitterPool()
+  if (pool) {
+    const pooled = await runStructuralPassPooled({
+      pool,
+      byFile,
+      grammars,
+      workspaceRoot: opts.workspaceRoot,
+      cap,
+      budgetMs: opts.budgetMs,
+      signal: opts.signal,
+      benchOn,
+    })
+    if (pooled) return pooled
+    // Pool returned null (total failure / unavailable mid-run) → fall through
+    // to the in-process path below, which is the always-correct baseline.
+  }
+
+  return runStructuralPassInProcess({
+    byFile,
+    grammars,
+    workspaceRoot: opts.workspaceRoot,
+    cap,
+    budgetMs: opts.budgetMs,
+    signal: opts.signal,
+    benchOn,
+    result,
+  })
+}
+
+/**
+ * Pooled structural pass. Builds one COALESCED job per file (confirm + outline
+ * in a single parse), dispatches across the pool under the wall-clock budget,
+ * and merges replies order-independently. Returns `null` when the pool produced
+ * no usable result (so the caller falls back in-process).
+ */
+async function runStructuralPassPooled(opts: {
+  pool: TreeSitterPool
+  byFile: Map<string, Array<{ hit: RawHit; index: number }>>
+  grammars: Map<string, Parser.Language>
+  workspaceRoot: string
+  cap: number
+  budgetMs: number
+  signal: AbortSignal
+  benchOn: boolean
+}): Promise<StructuralPassResult | null> {
+  const jobs: Array<PoolJob> = []
+  // Per file: the list of hit indexes in dispatch order, so we can map the
+  // worker's returned positions back to original hit indexes.
+  const indexMap = new Map<string, Array<number>>()
+  for (const [relFile, entries] of opts.byFile) {
+    const langKey = getLanguageKeyForPath(relFile)
+    if (!langKey || !opts.grammars.has(langKey)) continue
+    const absPath = path.join(opts.workspaceRoot, relFile)
+    let mtimeMs: number
+    try {
+      const st = statSync(absPath)
+      if (st.size > STRUCTURAL_MAX_FILE_BYTES) continue
+      mtimeMs = st.mtimeMs
+    } catch {
+      continue
+    }
+    const confirmHits: Array<StructuralHit> = entries.map((e) => ({
+      line: e.hit.line,
+      matchStart: e.hit.match_start,
+      matchEnd: e.hit.match_end,
+    }))
+    indexMap.set(
+      relFile,
+      entries.map((e) => e.index),
+    )
+    jobs.push({
+      file: relFile,
+      absPath,
+      language: langKey,
+      mtimeMs,
+      confirmHits,
+      // Coalesce the outline walk so a file used by both the structural pass
+      // and the outline summary is parsed exactly once worker-side (the
+      // threaded equivalent of Lever 1's in-process tree reuse).
+      outline: true,
+    })
+  }
+
+  const run = await opts.pool.parseFiles(jobs, {
+    budgetMs: opts.budgetMs,
+    signal: opts.signal,
+  })
+  if (!run) return null // pool unavailable / total failure → in-process fallback
+
+  const confirmedHitIndexes = new Set<number>()
+  const outlinesByFile = new Map<string, Array<FileOutlineEntry>>()
+  for (const job of jobs) {
+    const fileResult = run.byFile.get(job.file)
+    if (!fileResult || !fileResult.ok) continue
+    const origIndexes = indexMap.get(job.file) ?? []
+    // Map worker-returned positions (into confirmHits) → original hit indexes.
+    for (const pos of fileResult.confirmedHitIndexes) {
+      const orig = origIndexes[pos]
+      if (orig !== undefined) confirmedHitIndexes.add(orig)
+    }
+    if (fileResult.outlineEntries) {
+      // Key by the normalized (rendered) path so the outline loop's lookup —
+      // which iterates rendered result files — matches across OS separators.
+      outlinesByFile.set(normalizeRelFile(job.file), fileResult.outlineEntries)
+    }
+  }
+
+  if (opts.benchOn) {
+    _benchStructural.filesParsed += run.byFile.size
+    if (run.budgetHit) _benchStructural.budgetHit += 1
+  }
+
+  return {
+    confirmedHitIndexes,
+    fallback: run.budgetHit
+      ? `structural budget exceeded after parsing ${run.byFile.size}/${opts.cap} hits; ` +
+        `retry with structural: "topN" or narrow your query`
+      : null,
+    outlinesByFile,
+  }
+}
+
+/**
+ * In-process structural pass (the always-correct baseline; identical to
+ * pre-Lever-2 behavior). Parses each file synchronously on the main thread,
+ * caches the tree in `_treeCache` for the outline loop to reuse (Lever 1), and
+ * walks each hit. Wall-clock-bounded — checked between files, not mid-parse
+ * (web-tree-sitter@0.22 doesn't expose a usable cancel hook).
+ *
+ * Per-file failure modes (file too big, language unsupported, parse error, I/O
+ * error) are silent: the file's hits keep the regex `symbol_context` heuristic.
+ * Only the wall-clock budget fires the user-visible `fallback` message.
+ */
+function runStructuralPassInProcess(opts: {
+  byFile: Map<string, Array<{ hit: RawHit; index: number }>>
+  grammars: Map<string, Parser.Language>
+  workspaceRoot: string
+  cap: number
+  budgetMs: number
+  signal: AbortSignal
+  benchOn: boolean
+  result: StructuralPassResult
+}): StructuralPassResult {
+  const { byFile, grammars, cap, benchOn, result } = opts
   const t0 = Date.now()
   let filesParsed = 0
   let parsersUsed = new Map<string, Parser>()
@@ -1089,6 +1220,7 @@ async function runStructuralPass(opts: {
       if (opts.signal.aborted) break
       const elapsed = Date.now() - t0
       if (elapsed >= opts.budgetMs) {
+        if (benchOn) _benchStructural.budgetHit += 1
         result.fallback =
           `structural budget exceeded after parsing ${filesParsed}/${cap} hits; ` +
           `retry with structural: "topN" or narrow your query`
@@ -1140,7 +1272,9 @@ async function runStructuralPass(opts: {
         }
         let tree: Parser.Tree | null = null
         try {
+          const pt0 = benchOn ? performance.now() : 0
           tree = parser.parse(source)
+          if (benchOn) _benchStructural.parseMsTotal += performance.now() - pt0
         } catch (err) {
           consola.debug(
             `[code_search] tree-sitter parse failed for ${relFile}: ${(err as Error).message}`,
@@ -1149,51 +1283,30 @@ async function runStructuralPass(opts: {
         cached = { mtimeMs, tree, source: tree ? source : null }
         cachePut(absPath, cached)
         filesParsed += 1
+        if (benchOn) _benchStructural.filesParsed += 1
       }
 
       if (!cached.tree || !cached.source) continue
 
-      // Walk every hit's matched identifier in this file.
-      for (const entry of entries) {
-        const lineStart = lineStartByte(cached.source, entry.hit.line)
-        if (lineStart < 0) continue
-        const matchByteStart = lineStart + entry.hit.match_start
-        const matchByteEnd = lineStart + entry.hit.match_end
-        let node: Parser.SyntaxNode | null
-        try {
-          node = cached.tree.rootNode.descendantForIndex(
-            matchByteStart,
-            matchByteEnd,
-          )
-        } catch {
-          node = null
-        }
-        if (!node) continue
-        // Climb to the nearest identifier-typed node, since
-        // descendantForIndex may land on a parent for off-by-one
-        // byte ranges in CRLF files.
-        if (!IDENTIFIER_NODE_TYPES.has(node.type)) {
-          let cur: Parser.SyntaxNode | null = node
-          let depth = 0
-          while (cur && !IDENTIFIER_NODE_TYPES.has(cur.type) && depth < 3) {
-            // Try descending to an identifier leaf at the match
-            // start before climbing — handles the case where the
-            // grammar wraps the identifier in e.g. shorthand_*
-            // patterns.
-            const leaf = firstIdentifierLeaf(cur)
-            if (leaf && leaf.startIndex === matchByteStart) {
-              cur = leaf
-              break
-            }
-            cur = cur.parent
-            depth += 1
-          }
-          node = cur
-        }
-        if (!node || !IDENTIFIER_NODE_TYPES.has(node.type)) continue
-        if (isDefiningSite(node, langKey)) {
-          result.confirmedHitIndexes.add(entry.index)
-        }
+      // Confirm every hit's matched identifier via the SHARED walk — the same
+      // `confirmDefinitionSites` the worker pool runs, so the in-process and
+      // pooled paths produce byte-identical confirmed sets (the determinism
+      // requirement). Returns positions into `entries`; map back to the
+      // original hit indexes.
+      const confirmedPositions = confirmDefinitionSites(
+        cached.tree,
+        cached.source,
+        langKey,
+        entries.map((e) => ({
+          line: e.hit.line,
+          matchStart: e.hit.match_start,
+          matchEnd: e.hit.match_end,
+        })),
+        opts.signal,
+      )
+      for (const pos of confirmedPositions) {
+        const entry = entries[pos]
+        if (entry) result.confirmedHitIndexes.add(entry.index)
       }
     }
   } finally {
@@ -1668,6 +1781,15 @@ export async function searchCode(
   // a claim, since a hit may simply not have been AST-checked.
   let confirmedKeys: Set<string> | undefined
   let notice: string | null = null
+  /**
+   * Outlines the structural pass already computed (worker-pool path only),
+   * keyed by RELATIVE file path. The outline loop reuses these before falling
+   * back to `_treeCache` / `outlineFile` — the threaded equivalent of Lever 1's
+   * tree reuse (a Tree can't cross threads, so the pool ships outline entries
+   * instead). Undefined on the in-process path, where `_treeCache` reuse
+   * applies directly.
+   */
+  let structuralOutlines: Map<string, Array<FileOutlineEntry>> | undefined
   if (mode === "ranked") {
     const queryTokens = tokenize(rawInput.query)
     // Pass 1: regex-only BM25F. Cheap and gives us a reliable
@@ -1695,6 +1817,7 @@ export async function searchCode(
       budgetMs: STRUCTURAL_BUDGET_MS,
       signal: ac.signal,
     })
+    structuralOutlines = structural.outlinesByFile
     // Pass 2: re-score with AST confirmation. Corpus stats are
     // re-computed against the structurally-enriched symbol_context
     // fields so token IDFs reflect the new field contents.
@@ -1774,11 +1897,7 @@ export async function searchCode(
   // Then normalize separators to "/" so output is platform-agnostic
   // (Windows rg returns "src\foo.ts"; models and tests expect "/").
   const results: Array<CodeSearchHit> = kept.map((sh) => {
-    let file = sh.hit.file
-    if (file.startsWith("./") || file.startsWith(".\\")) {
-      file = file.slice(2)
-    }
-    file = file.replace(/\\/g, "/")
+    const file = normalizeRelFile(sh.hit.file)
     const baseHit: CodeSearchHit = {
       file,
       line: sh.hit.line,
@@ -1833,19 +1952,29 @@ export async function searchCode(
       if (ac.signal.aborted || Date.now() > outlineDeadline) break
       const abs = path.resolve(ws.canonical, file)
       let result: FileOutlineResult | undefined
-      // Reuse the structural pass's cached tree when it's still fresh —
-      // avoids re-reading + re-parsing a file we already parsed this
-      // call. `outlineFromTree` is walk-only and does NOT free the tree
-      // (the cache owns it). On any miss / mtime change / unknown lang,
-      // fall back to a full `outlineFile`.
-      try {
-        const cached = cacheGet(abs, statSync(abs).mtimeMs)
-        if (cached?.tree) {
-          const lang = getLanguageKeyForPath(abs)
-          if (lang) result = outlineFromTree(cached.tree, lang, ac.signal)
+      // 1. Reuse the worker-pool's already-computed outline (the threaded
+      //    equivalent of Lever 1: the pool parsed this file and shipped its
+      //    outline entries alongside the confirm result). `file` is the
+      //    normalized result path, matching how the pool keyed its map.
+      const pooled = structuralOutlines?.get(file)
+      if (pooled) {
+        result = { outline: pooled, language: getLanguageKeyForPath(abs) }
+      }
+      // 2. Else reuse the in-process structural pass's cached tree when it's
+      //    still fresh — avoids re-reading + re-parsing a file we already
+      //    parsed this call. `outlineFromTree` is walk-only and does NOT free
+      //    the tree (the cache owns it). On any miss / mtime change / unknown
+      //    lang, fall back to a full `outlineFile`.
+      if (!result) {
+        try {
+          const cached = cacheGet(abs, statSync(abs).mtimeMs)
+          if (cached?.tree) {
+            const lang = getLanguageKeyForPath(abs)
+            if (lang) result = outlineFromTree(cached.tree, lang, ac.signal)
+          }
+        } catch {
+          // fall through to a full parse
         }
-      } catch {
-        // fall through to a full parse
       }
       const o = result ?? (await outlineFile(abs, ac.signal))
       outlines.push({ file, outline: o.outline })

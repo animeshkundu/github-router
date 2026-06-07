@@ -462,6 +462,150 @@ export function outlineFromTree(
   }
 }
 
+// ============================================================
+// Structural definition-site confirmation (shared walk)
+// ============================================================
+//
+// This is the AST-confirmation walk the `code_search` structural pass runs
+// over each parsed file. It lived in `code-search.ts` originally; it moved
+// here so that BOTH the in-process structural pass AND the worker-thread parse
+// pool (`tree-sitter-pool/`) call the SAME implementation over a borrowed
+// `Tree`, guaranteeing byte-identical confirmed-index sets regardless of which
+// path produced them (the load-bearing determinism requirement). Pure: it
+// borrows the tree, never `.delete()`s it, never reads/parses.
+
+/** One matched hit to AST-confirm: line is 1-indexed (ripgrep), match
+ *  start/end are byte offsets within the matched line. */
+export interface StructuralHit {
+  line: number
+  matchStart: number
+  matchEnd: number
+}
+
+/**
+ * Compute the absolute byte offset where line `lineNumber1` starts in
+ * `source`. Lines are counted by LF; CRLF files have the same line starts as
+ * LF files (the \r is part of the previous line's content). 1-indexed to match
+ * ripgrep. Returns -1 if the line is past EOF.
+ */
+function lineStartByte(source: string, lineNumber1: number): number {
+  if (lineNumber1 <= 1) return 0
+  let line = 1
+  for (let i = 0; i < source.length; i++) {
+    if (source.charCodeAt(i) === 0x0a /* \n */) {
+      line += 1
+      if (line === lineNumber1) return i + 1
+    }
+  }
+  return -1
+}
+
+function containsByteRange(
+  outer: Parser.SyntaxNode,
+  inner: Parser.SyntaxNode,
+): boolean {
+  return outer.startIndex <= inner.startIndex && outer.endIndex >= inner.endIndex
+}
+
+/**
+ * Walk up from a matched identifier node looking for the closest
+ * definition-shape ancestor (per the language's allowed types). When found,
+ * verify the matched identifier is at the definition's "name" slot — NOT inside
+ * a parameter type, a body, or a parent's signature. Returns true iff this is a
+ * real definition site for the identifier the rg submatch landed on. Depth
+ * bound 6 — definition names sit close to their definition node in every
+ * supported grammar; deeper walks risk false positives.
+ */
+function isDefiningSite(
+  matchedNode: Parser.SyntaxNode,
+  langKey: string,
+): boolean {
+  const defTypes = DEFINITION_NODE_TYPES[langKey]
+  if (!defTypes) return false
+  let cur: Parser.SyntaxNode | null = matchedNode.parent
+  let depth = 0
+  while (cur && depth < 6) {
+    if (defTypes.has(cur.type)) {
+      const nameField = cur.childForFieldName("name")
+      if (nameField && containsByteRange(nameField, matchedNode)) {
+        return true
+      }
+      const declarator = cur.childForFieldName("declarator")
+      if (declarator && containsByteRange(declarator, matchedNode)) {
+        const first = firstIdentifierLeaf(declarator)
+        if (first && first.startIndex === matchedNode.startIndex) {
+          return true
+        }
+      }
+      const typeField = cur.childForFieldName("type")
+      if (typeField && containsByteRange(typeField, matchedNode)) {
+        const first = firstIdentifierLeaf(typeField)
+        if (first && first.startIndex === matchedNode.startIndex) {
+          return true
+        }
+      }
+    }
+    cur = cur.parent
+    depth += 1
+  }
+  return false
+}
+
+/**
+ * Run the AST-confirmation walk over `hits` against an ALREADY-PARSED tree.
+ * Returns the subset of input indices whose matched identifier is at a real
+ * definition site. Borrowed tree — never deleted. Pure + deterministic: the
+ * output set is a function of (tree, source, hits) only, independent of call
+ * order, so the in-process path and the worker path return identical sets.
+ *
+ * Never throws — a per-hit walk failure just omits that index (matches the
+ * in-process pass's per-hit try/catch). `signal` short-circuits between hits.
+ */
+export function confirmDefinitionSites(
+  tree: Parser.Tree,
+  source: string,
+  language: string,
+  hits: ReadonlyArray<StructuralHit>,
+  signal?: AbortSignal,
+): Array<number> {
+  const confirmed: Array<number> = []
+  if (!DEFINITION_NODE_TYPES[language]) return confirmed
+  for (let i = 0; i < hits.length; i++) {
+    if (signal?.aborted) break
+    const hit = hits[i]
+    const lineStart = lineStartByte(source, hit.line)
+    if (lineStart < 0) continue
+    const matchByteStart = lineStart + hit.matchStart
+    const matchByteEnd = lineStart + hit.matchEnd
+    let node: Parser.SyntaxNode | null
+    try {
+      node = tree.rootNode.descendantForIndex(matchByteStart, matchByteEnd)
+    } catch {
+      node = null
+    }
+    if (!node) continue
+    // Climb to the nearest identifier-typed node, since descendantForIndex may
+    // land on a parent for off-by-one byte ranges in CRLF files.
+    if (!IDENTIFIER_NODE_TYPES.has(node.type)) {
+      let cur: Parser.SyntaxNode | null = node
+      let depth = 0
+      while (cur && !IDENTIFIER_NODE_TYPES.has(cur.type) && depth < 3) {
+        const leaf = firstIdentifierLeaf(cur)
+        if (leaf && leaf.startIndex === matchByteStart) {
+          cur = leaf
+          break
+        }
+        cur = cur.parent
+        depth += 1
+      }
+      node = cur
+    }
+    if (!node || !IDENTIFIER_NODE_TYPES.has(node.type)) continue
+    if (isDefiningSite(node, language)) confirmed.push(i)
+  }
+  return confirmed
+}
+
 /**
  * Full structural outline of a single file — EVERY definition, top-level
  * AND nested (functions, classes, methods, nested functions, interfaces,
