@@ -259,6 +259,16 @@ export interface CodeSearchInput {
    * falls back to regex). Read-only subprocess, workspace-confined.
    */
   ast_pattern?: string
+  /**
+   * Language grammar for `ast_pattern` — REQUIRED whenever `ast_pattern` is
+   * set. e.g. `"ts"`, `"tsx"`, `"js"`, `"jsx"`, `"py"`, `"rust"`, `"go"`,
+   * `"java"`, `"cpp"`, `"c"`. ast-grep parses the pattern in this grammar;
+   * WITHOUT it ast-grep cross-matches every language (e.g. matching markdown
+   * prose) and returns garbage, so if `ast_pattern` is set but `ast_lang`
+   * is omitted, `code_search` returns no results plus a `notice` asking for
+   * it (it does NOT guess a language).
+   */
+  ast_lang?: string
 }
 
 export interface CodeSearchHit {
@@ -1790,6 +1800,7 @@ interface AstGrepResult {
  */
 async function runAstGrep(opts: {
   pattern: string
+  lang: string | undefined
   workspaceCanonical: string
   limit: number
   signal: AbortSignal
@@ -1803,15 +1814,32 @@ async function runAstGrep(opts: {
         "the model can run ast-grep directly or omit ast_pattern",
     }
   }
+  // `--lang` is REQUIRED for correct matching. Without it ast-grep parses
+  // the pattern against every language's grammar and emits cross-language
+  // false positives (e.g. matching markdown prose). A missing/malformed
+  // lang therefore fails closed with an actionable notice rather than
+  // returning garbage. The token is validated (ast-grep lang ids are short
+  // ascii) before it reaches the argv — though shell:false already makes it
+  // non-injectable, this gives a clean notice instead of an sg error.
+  if (!opts.lang || !/^[A-Za-z0-9_+-]{1,20}$/.test(opts.lang)) {
+    return {
+      hits: [],
+      notice:
+        "ast_pattern requires ast_lang (the grammar to parse the pattern), " +
+        "e.g. 'ts' | 'tsx' | 'js' | 'py' | 'rust' | 'go'",
+    }
+  }
 
-  // `sg run -p <pattern> --json=stream <workspace>` — VERIFIED on
-  // ast-grep 0.43.0. `--json=stream` emits one JSON object per line.
-  // The workspace is passed as an absolute positional; sg then reports
-  // `file` as an absolute path, which we relativize below.
+  // `sg run -p <pattern> --lang <lang> --json=stream <workspace>` — VERIFIED
+  // on ast-grep 0.43.0. `--json=stream` emits one JSON object per line. The
+  // workspace is passed as an absolute positional; sg then reports `file` as
+  // an absolute path, which we relativize below.
   const args = [
     "run",
     "-p",
     opts.pattern,
+    "--lang",
+    opts.lang,
     "--json=stream",
     opts.workspaceCanonical,
   ]
@@ -2082,6 +2110,10 @@ export async function searchCode(
     typeof rawInput.ast_pattern === "string" && rawInput.ast_pattern.length > 0
       ? rawInput.ast_pattern
       : undefined
+  const astLang =
+    typeof rawInput.ast_lang === "string" && rawInput.ast_lang.length > 0
+      ? rawInput.ast_lang
+      : undefined
   // Effective ranking mode: AST hits are never BM25F-scored (there is no
   // text-token relevance signal for a structural match), so force the
   // literal render path for them.
@@ -2130,6 +2162,7 @@ export async function searchCode(
     try {
       astRes = await runAstGrep({
         pattern: astPattern,
+        lang: astLang,
         workspaceCanonical: ws.canonical,
         limit,
         signal: ac.signal,

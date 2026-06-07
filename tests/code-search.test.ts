@@ -1390,6 +1390,7 @@ describe("multi-engine: ast_pattern", () => {
           query: "ignored-query",
           workspace: fx.root,
           ast_pattern: "function $F() { $$$ }",
+          ast_lang: "ts",
         })
         // ast-grep found the whole multi-line function.
         expect(r.results.length).toBeGreaterThanOrEqual(1)
@@ -1423,6 +1424,7 @@ describe("multi-engine: ast_pattern", () => {
           query: "queryWord",
           workspace: fx.root,
           ast_pattern: "function $F() { $$$ }",
+          ast_lang: "ts",
         })
         expect(r.results.length).toBe(1)
         expect(r.results[0].line).toBe(1)
@@ -1448,6 +1450,7 @@ describe("multi-engine: ast_pattern", () => {
           query: "ignored",
           workspace: evil,
           ast_pattern: "function $F() { $$$ }",
+          ast_lang: "ts",
         })
         expect(r.results.length).toBe(1)
         expect(r.results[0].file).toBe("x.ts")
@@ -1482,6 +1485,7 @@ describe("multi-engine: ast_pattern", () => {
           query: "x",
           workspace: fx.root,
           ast_pattern: "function $F() { $$$ }",
+          ast_lang: "ts",
         })
         // No hit may be absolute, escape with "..", or name the outside file.
         for (const h of r.results) {
@@ -1519,4 +1523,57 @@ describe("multi-engine: ast_pattern", () => {
       fx.cleanup()
     }
   })
+
+  test.if(sgAvailable)(
+    "ast_pattern WITHOUT ast_lang returns the lang-required notice (fails closed, no garbage)",
+    async () => {
+      const fx = makeFixture((root) => {
+        writeFileSync(path.join(root, "a.ts"), "function f() { return 1 }\n")
+      })
+      try {
+        const r = await searchCode({
+          query: "ignored",
+          workspace: fx.root,
+          ast_pattern: "function $F() { $$$ }",
+          // ast_lang intentionally omitted
+        })
+        expect(r.results.length).toBe(0)
+        expect(r.notice ?? "").toMatch(/requires ast_lang/)
+      } finally {
+        fx.cleanup()
+      }
+    },
+  )
+
+  test.if(sgAvailable)(
+    "ast_pattern with ast_lang matches only the named grammar, not other files (cross-language-garbage regression)",
+    async () => {
+      // Without `--lang`, ast-grep parses the pattern against every language
+      // and matched unrelated files (e.g. markdown prose). `ast_lang` scopes
+      // it to the one grammar.
+      const fx = makeFixture((root) => {
+        writeFileSync(
+          path.join(root, "a.ts"),
+          "function realFn() { return 1 }\n",
+        )
+        writeFileSync(
+          path.join(root, "README.md"),
+          "# docs\nThis function returns things with braces { like this }.\n",
+        )
+      })
+      try {
+        const r = await searchCode({
+          query: "ignored",
+          workspace: fx.root,
+          ast_pattern: "function $F() { $$$ }",
+          ast_lang: "ts",
+        })
+        expect(r.results.length).toBeGreaterThanOrEqual(1)
+        expect(r.results.every((h) => h.file.endsWith(".ts"))).toBe(true)
+        expect(r.results.some((h) => h.file.endsWith(".md"))).toBe(false)
+      } finally {
+        fx.cleanup()
+      }
+    },
+  )
 })

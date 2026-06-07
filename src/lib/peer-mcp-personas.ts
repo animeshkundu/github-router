@@ -894,9 +894,18 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               "When set, matches come from ast-grep INSTEAD of ripgrep — " +
               "use it to match multi-line AST shapes the regex modes can't " +
               "express. Takes PRECEDENCE over `query` for matching (but " +
-              "`query` is still required). Returns the same {file,line," +
-              "snippet} shape. If ast-grep isn't installed, you get a " +
-              "`notice` to run it directly — it never falls back to regex.",
+              "`query` is still required). REQUIRES `ast_lang`. Returns the " +
+              "same {file,line,snippet} shape. If ast-grep isn't installed, " +
+              "you get a `notice` to run it directly — it never falls back to regex.",
+          },
+          ast_lang: {
+            type: "string",
+            description:
+              "Grammar for `ast_pattern` (REQUIRED alongside it): 'ts' | " +
+              "'tsx' | 'js' | 'jsx' | 'py' | 'rust' | 'go' | 'java' | 'cpp' | " +
+              "'c' | … ast-grep parses the pattern in this language; omitting " +
+              "it returns a `notice` (no language is guessed, and without it " +
+              "ast-grep would cross-match every language and return garbage).",
           },
         },
       },
@@ -938,6 +947,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
                 typeof args.ast_pattern === "string"
                   ? args.ast_pattern
                   : undefined,
+              ast_lang:
+                typeof args.ast_lang === "string" ? args.ast_lang : undefined,
             },
             signal,
           )

@@ -894,8 +894,16 @@ const CODE_SEARCH_PARAMS = Type.Object({
         "ast-grep structural pattern (e.g. 'function $F($$$) { $$$ }'). "
         + "When set, matches come from ast-grep instead of ripgrep — for "
         + "multi-line AST shapes the regex modes can't express. Takes "
-        + "precedence over `query`. If ast-grep isn't installed you get a "
-        + "`notice`; it never falls back to regex.",
+        + "precedence over `query`. REQUIRES `ast_lang`. If ast-grep isn't "
+        + "installed you get a `notice`; it never falls back to regex.",
+    }),
+  ),
+  ast_lang: Type.Optional(
+    Type.String({
+      description:
+        "Language grammar for `ast_pattern` (REQUIRED with it): 'ts' | "
+        + "'tsx' | 'js' | 'py' | 'rust' | 'go' | … Without it ast-grep "
+        + "cross-matches every language and returns garbage.",
     }),
   ),
 })
@@ -928,6 +936,7 @@ function codeSearchTool(workspace: string): AgentTool<typeof CODE_SEARCH_PARAMS>
           complete: params.complete,
           multiline: params.multiline,
           ast_pattern: params.ast_pattern,
+          ast_lang: params.ast_lang,
           // The worker surface trims to {file,line,snippet} and never
           // forwards outlines, so skip the (default-on) summary pass
           // rather than parse files only to discard the result.

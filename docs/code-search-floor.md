@@ -110,7 +110,7 @@ covers that engine when its mode is used:
 | --- | --- | --- |
 | *(default, no mode)* | ripgrep (line-oriented) | `⊇` rg/grep with the same flags (the theorem above). **Never** claimed `⊇` ast-grep. |
 | `multiline: true` | ripgrep `-U --multiline-dotall` | `⊇` a multi-line `rg -U` run: it IS that run. Cross-line patterns (`foo[\s\S]*?bar`) the default line-oriented mode cannot match are found. Cross-line matching is a **`mode: "regex"`** feature — the `query` validator rejects literal newlines, so a `literal`/`ranked` multi-line LITERAL can't be expressed (the `-U -F` combo is valid but un-feedable). |
-| `ast_pattern: <p>` | ast-grep (`sg run -p <p> --json=stream`) | `=` ast-grep's own output for that pattern — it RUNS ast-grep and returns its matches in `{file,line,snippet}` shape. Match generation comes from ast-grep, NOT regex, so a multi-line AST construct is matched directly. |
+| `ast_pattern: <p>` + `ast_lang: <L>` | ast-grep (`sg run -p <p> --lang <L> --json=stream`) | `=` ast-grep's own output for that pattern in grammar `<L>` — it RUNS ast-grep and returns its matches in `{file,line,snippet}` shape. Match generation comes from ast-grep, NOT regex, so a multi-line AST construct is matched directly. `ast_lang` is **required** (see caveat). |
 | `scan: true` | ripgrep `--files` + tree-sitter outline of the whole tree | `⊇` a whole-workspace tree-sitter scan (up to `SCAN_MAX_FILES`): `outlines` covers EVERY non-ignored, non-sensitive source file, not just matched files. |
 
 **Honest caveats (unchanged in spirit):**
@@ -126,6 +126,13 @@ covers that engine when its mode is used:
   regex (which would quietly violate the `= ast-grep` claim). `ast_pattern` takes precedence
   over `query` for match generation; AST hits are document-order (no BM25F — there is no
   text-token relevance signal for a structural match).
+- `ast_pattern` **requires `ast_lang`** (the grammar id: `ts` / `tsx` / `js` / `py` / `rust` /
+  `go` / …). ast-grep parses the pattern in that grammar; WITHOUT a language it cross-matches
+  every language and returns garbage (e.g. matching markdown prose). So `code_search` fails
+  closed — `ast_pattern` set without `ast_lang` returns `{results: [], notice: "ast_pattern
+  requires ast_lang …"}`, never garbage. The `= ast-grep` floor relationship therefore holds
+  for `ast_pattern` + `ast_lang` together, scoped to grammar `<L>`. Pinned by
+  `tests/code-search.test.ts` ("cross-language-garbage regression").
 - `scan` is **budget-capped at `SCAN_MAX_FILES` and the 256 KB response envelope**, with
   disclosure: when truncated, `notice` reports `outlined N of M workspace source files`. The
   enumeration respects the same `.gitignore`/`.ignore` rules as the search path (it is the
