@@ -35,6 +35,7 @@ import {
   browserCompoundToolsEnabled,
   browserPowerToolsEnabled,
   browserToolsEnabled,
+  semanticSearchEnabled,
   standInToolEnabled,
   workerToolsEnabled,
 } from "~/lib/mcp-capabilities"
@@ -333,6 +334,10 @@ function toolEntries(scope: McpScope): Array<ToolEntry> {
       if (t.capability === "worker") return workerToolsEnabled()
       if (t.capability === "stand_in") return standInToolEnabled()
       if (t.capability === "browser") return browserToolsEnabled()
+      // semantic_search is availability-gated (provisioned on disk +
+      // smoke-passed AND not opted out). Absent artifacts ⇒ invisible,
+      // so the CI/sandbox `{code, web}` surface is unchanged.
+      if (t.capability === "semantic_search") return semanticSearchEnabled()
       // Compound tools require BOTH the browser surface opt-in AND a
       // compressor backend in the catalog. Without browseEnabled the
       // compound tools must be invisible alongside the L0/L1 primitives.
@@ -921,6 +926,17 @@ async function handleToolsCall(
     nonPersonaTool
     && nonPersonaTool.capability === "stand_in"
     && !standInToolEnabled()
+  ) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+  if (
+    nonPersonaTool
+    && nonPersonaTool.capability === "semantic_search"
+    && !semanticSearchEnabled()
   ) {
     return rpcError(
       body.id,

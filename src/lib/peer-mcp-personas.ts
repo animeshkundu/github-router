@@ -24,6 +24,7 @@
 import path from "node:path"
 
 import { searchCode } from "./code-search"
+import { runSemanticSearch } from "./colbert/runner"
 // Static import is safe: the previous module-init cycle (peer-mcp-personas
 // → worker-agent/index → engine → tools → peer-mcp-personas) was caused
 // by a top-level `assertCriticsMatchPersonas()` call in tools.ts that
@@ -657,7 +658,7 @@ export interface NonPersonaMcpTool {
    * once the proxy is in claude mode (loopback + nonce already gate
    * `/mcp` itself).
    */
-  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power"
+  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "semantic_search"
   /**
    * Server-side handler. Receives the raw `arguments` object from the
    * `tools/call` request and an optional AbortSignal that is signalled
@@ -999,6 +1000,164 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           const msg = err instanceof Error ? err.message : String(err)
           return {
             content: [{ type: "text", text: `code_search failed: ${msg}` }],
+            isError: true,
+          }
+        }
+      },
+    },
+    // semantic_search — ColBERT/PLAID semantic code search via the
+    // github-router-managed `colgrep` sidecar (group `search`, joins
+    // `code` + `web`). Implementation: src/lib/colbert/.
+    //
+    // GATING (`capability: "semantic_search"`): the MCP handler drops
+    // this entry from `tools/list` AND `tools/call` when
+    // `semanticSearchEnabled()` is false — i.e. when opted out
+    // (`GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1`) OR the colgrep
+    // binary/model/ORT aren't provisioned + smoke-passed on disk. The
+    // availability check is the load-bearing regression guard: on CI /
+    // sandboxes / no-network the artifacts are absent, so the tool is
+    // invisible and the `{code, web}` surface is unchanged.
+    //
+    // CONTRACT (no lexical fallback): this tool NEVER runs another
+    // search. A building/stale index returns an honest `status` +
+    // `notice` (NO results, NOT isError); an absent/failed/unavailable
+    // index returns an `isError` envelope telling the model to use
+    // `code` (lexical) itself. Input-shape failures (missing/relative
+    // workspace, empty query) are `isError`.
+    //
+    // RESPONSE MINIMALITY: colgrep `--json` carries the full source + 5
+    // analysis layers per hit; the handler trims to {file, line,
+    // endLine?, name?, score, snippet} and NEVER logs raw colgrep
+    // stdout/stderr (it embeds source — a telemetry-leak vector).
+    {
+      toolNameHttp: "semantic_search",
+      group: "search",
+      capability: "semantic_search",
+      description:
+        "Semantic code search by MEANING, not text (ColBERT late-interaction "
+        + "over a per-workspace index). Best for natural-language intent queries "
+        + "where the literal keywords may not appear ('where do we rate-limit', "
+        + "'auth token refresh', 'retry/backoff around the upstream fetch'). For "
+        + "exact symbol lookup ('where is X defined', 'callers of Y') prefer "
+        + "`code` (lexical) — it's faster and exact. Returns a `status` field "
+        + "(ready / building / stale / unavailable / failed); while the index is "
+        + "building or stale it returns a status + notice and NO results (it does "
+        + "NOT fall back to another search) — run `code` yourself if you need "
+        + "results immediately. `workspace` is any absolute path; the index is "
+        + "built and cached by the proxy on first use.",
+      inputSchema: {
+        type: "object",
+        required: ["query"],
+        additionalProperties: false,
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "Natural-language intent, e.g. 'where do we validate JWT expiry' "
+              + "or 'retry/backoff around the upstream fetch'. Semantic — finds "
+              + "code by meaning even when the words don't appear literally.",
+          },
+          workspace: {
+            type: "string",
+            description:
+              "Absolute path to the repo/subtree to search. Defaults to the "
+              + "proxy launch cwd. Must be absolute.",
+          },
+          limit: {
+            type: "integer",
+            description: "Max results (default 15).",
+          },
+          pattern: {
+            type: "string",
+            description:
+              "Optional regex pre-filter (colgrep -e): grep first, then rank the "
+              + "matches semantically. Use to scope a semantic ranking to e.g. "
+              + "async fns.",
+          },
+        },
+      },
+      async handler(
+        args: Record<string, unknown>,
+        signal?: AbortSignal,
+      ): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        const query = typeof args.query === "string" ? args.query.trim() : ""
+        if (!query) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "semantic_search: arguments.query is required (must be a non-empty string)",
+              },
+            ],
+            isError: true,
+          }
+        }
+        // workspace defaults to the proxy launch cwd; if provided it
+        // MUST be absolute (mirrors runWorkerToolCall's absolute-only
+        // boundary check — a typo must not silently resolve against cwd).
+        let workspace: string
+        if (args.workspace === undefined) {
+          workspace = process.cwd()
+        } else if (typeof args.workspace === "string" && path.isAbsolute(args.workspace)) {
+          workspace = args.workspace
+        } else {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "semantic_search: arguments.workspace must be an ABSOLUTE path (or omitted to use the proxy launch cwd)",
+              },
+            ],
+            isError: true,
+          }
+        }
+        const limit =
+          typeof args.limit === "number" && Number.isFinite(args.limit)
+            ? args.limit
+            : undefined
+        const pattern =
+          typeof args.pattern === "string" && args.pattern.length > 0
+            ? args.pattern
+            : undefined
+        try {
+          const result = await runSemanticSearch({
+            query,
+            workspace,
+            limit,
+            pattern,
+            signal,
+          })
+          // Minimal-surface envelope: status + (results | notice) +
+          // source. isError is set by the runner for unavailable/failed
+          // (the model is told to use `code`); building/stale carry a
+          // notice and no results but are NOT errors.
+          const envelope: Record<string, unknown> = { status: result.status }
+          if (result.results) envelope.results = result.results
+          if (result.source) envelope.source = result.source
+          if (result.notice) envelope.notice = result.notice
+          return {
+            content: [{ type: "text", text: JSON.stringify(envelope, null, 2) }],
+            isError: result.isError === true,
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    status: "failed",
+                    notice: `semantic_search failed: ${msg}; use code (lexical) instead`,
+                  },
+                  null,
+                  2,
+                ),
+              },
+            ],
             isError: true,
           }
         }

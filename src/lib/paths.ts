@@ -72,6 +72,49 @@ export const PATHS = {
   get TOOLBELT_BIN_DIR() {
     return path.join(appDir(), "bin")
   },
+  /**
+   * Root of the github-router-managed ColBERT semantic-search sidecar
+   * (the `--semantic-search` opt-in). Everything heavy that the
+   * `colgrep` child needs is provisioned, SHA-verified, and stored here
+   * by the router — never in the user's repo, never in colgrep's own
+   * global `%APPDATA%\colgrep` / `~/.config/colgrep`. Cross-launch cache
+   * (like TOOLBELT_BIN_DIR), deliberately OUTSIDE the per-launch
+   * CLAUDE_CONFIG_DIR mirror.
+   *
+   * Layout (see docs/research/colbert-sidecar-design.md §4):
+   *   colbert/
+   *     bin/colgrep[.exe]                  # provisioned binary
+   *     models/LateOn-Code-edge/<rev>/     # 5 model files
+   *     onnxruntime/1.23.0/cpu/<libname>   # ORT dylib (ORT_DYLIB_PATH)
+   *     indices/                           # === COLGREP_DATA_DIR ===
+   *       <project>-<xxh3(path|model)>/    # colgrep-owned per-(path,model)
+   *       .gh-router-meta/<hash>.json      # router-owned sidecar metadata
+   */
+  get COLBERT_DIR() {
+    return path.join(appDir(), "colbert")
+  },
+  get COLBERT_BIN_DIR() {
+    return path.join(appDir(), "colbert", "bin")
+  },
+  get COLBERT_MODELS_DIR() {
+    return path.join(appDir(), "colbert", "models")
+  },
+  get COLBERT_ORT_DIR() {
+    return path.join(appDir(), "colbert", "onnxruntime")
+  },
+  /**
+   * Value passed to colgrep as `COLGREP_DATA_DIR`. colgrep keys the
+   * physical index dir by `xxh3(canonical_project_path | model)` under
+   * here, so every distinct workspace gets its own index dir for free.
+   * The router-owned freshness sidecar lives at
+   * `<COLBERT_INDICES_DIR>/.gh-router-meta/<hash>.json`.
+   */
+  get COLBERT_INDICES_DIR() {
+    return path.join(appDir(), "colbert", "indices")
+  },
+  get COLBERT_META_DIR() {
+    return path.join(appDir(), "colbert", "indices", ".gh-router-meta")
+  },
 }
 
 /**
@@ -156,6 +199,18 @@ export async function ensurePaths(): Promise<void> {
     await mod.sweepStaleWorktreesAtBoot()
   })().catch((err) => {
     consola.debug("Worker worktree boot sweep skipped:", err)
+  })
+  // ColBERT sidecar boot sweep: reclassify any `.gh-router-meta/*.json`
+  // entry stuck in `building` with a dead `buildPid` → `failed`, so the
+  // next semantic_search re-kicks a build instead of routing to a
+  // never-finishing one. NEVER kills a PID from a prior boot. Lazy-
+  // imported so paths.ts doesn't drag the colbert module into every
+  // consumer.
+  await (async () => {
+    const mod = await import("./colbert/lifecycle")
+    await mod.sweepStaleColbertMetaAtBoot()
+  })().catch((err) => {
+    consola.debug("ColBERT meta boot sweep skipped:", err)
   })
 }
 

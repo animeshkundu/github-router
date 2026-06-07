@@ -6,6 +6,7 @@ import consola from "consola"
 
 import { generateEnvScript } from "./lib/shell"
 import { DEFAULT_CODEX_MODEL, DEFAULT_PORT } from "./lib/port"
+import { provisionAndIndexColbert } from "./lib/colbert"
 import {
   getClaudeCodeEnvVars,
   getCodexEnvVars,
@@ -75,6 +76,11 @@ export const start = defineCommand({
     // Best-effort self-update (detached, applies next launch). Runs
     // after the server is listening so the bounded probe can't delay it.
     void runSelfUpdate({ selfUpdate: args["self-update"] !== false })
+
+    // Best-effort ColBERT semantic-search provision + background index of
+    // the launch cwd (if a git repo). ON by default; never blocks launch,
+    // never throws. Opt out with GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1.
+    void provisionAndIndexColbert()
 
     if (args.cc) generateClaudeCodeCommand(serverUrl, args.model)
     if (args.cx) generateCodexCommand(serverUrl, args.model)

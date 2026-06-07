@@ -55,10 +55,18 @@ const baseModels: ModelsResponse = {
 }
 
 const originalFetch = globalThis.fetch
+let savedDisableSemantic: string | undefined
 
 beforeEach(() => {
   __resetInFlightForTests()
   __resetWorkerSlotsForTests()
+  // Pin semantic_search OFF so tools/list surface assertions are
+  // deterministic regardless of whether the colgrep sidecar happens to
+  // be provisioned on the test host (the availability gate would
+  // otherwise add `semantic_search` to the search group on a dev box
+  // that has run it). Mirrors the GH_ROUTER_DISABLE_WORKER_TOOLS pin.
+  savedDisableSemantic = process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH
+  process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH = "1"
   state.peerMcpNonce = NONCE
   state.copilotToken = "test-copilot-token"
   state.githubToken = "test-gh-token"
@@ -71,6 +79,11 @@ beforeEach(() => {
 afterEach(() => {
   state.peerMcpNonce = undefined
   state.models = undefined
+  if (savedDisableSemantic === undefined) {
+    delete process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH
+  } else {
+    process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH = savedDisableSemantic
+  }
   globalThis.fetch = originalFetch
 })
 

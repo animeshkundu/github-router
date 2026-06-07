@@ -320,3 +320,185 @@ export function runCommandInherit(
 ): Promise<RunResult> {
   return runInternal(cmd, "inherit", opts)
 }
+
+export interface ManagedExeOpts extends RunOpts {
+  /**
+   * Hard cap on captured stdout bytes. On overflow the child is
+   * tree-killed and the result carries `stdoutTruncated: true`. Defends
+   * against a full-`CodeUnit` colgrep `--json` payload (source + 5
+   * analysis layers per hit) bloating memory.
+   */
+  maxStdoutBytes?: number
+  /**
+   * Called synchronously with the spawned child right after spawn
+   * succeeds, BEFORE any output arrives. The colbert lifecycle ledger
+   * uses this to register the child so a session-exit sweep can
+   * tree-kill an orphan. Never throws into the runner.
+   */
+  onSpawn?: (child: ReturnType<typeof spawn>) => void
+}
+
+export interface ManagedExeResult extends RunResult {
+  /** True iff stdout was truncated at `maxStdoutBytes` (child was killed). */
+  stdoutTruncated: boolean
+}
+
+/**
+ * Run a **native executable** (a real `.exe`/Mach-O/ELF, NOT a `.cmd`
+ * shim) capturing stdout/stderr, with `shell:false` on EVERY platform.
+ *
+ * Why a separate runner from `runCommandCapture`: that path routes
+ * through `buildExecInvocation`, which on Windows builds a
+ * `cmd.exe`-quoted command string and **throws on `%`** (`quoteWinArg`).
+ * A workspace path can legally contain `%` (and `&`, `(`, `)`, `!`, …),
+ * so the managed colgrep binary — which IS a native `.exe`, not a shim —
+ * must bypass cmd.exe entirely. `spawn(absExe, args, {shell:false})`
+ * resolves the `.exe` via CreateProcess directly: no cmd.exe, no
+ * metacharacter hazard, no `%` refusal. POSIX was already `shell:false`.
+ * This is what makes "ANY absolute workspace" hold on Windows.
+ *
+ * Lifecycle:
+ *   - `timeoutMs` → tree-kill on expiry (`taskkill /T /F` on Windows,
+ *     POSIX process-group `kill(-pgid)` so colgrep's rayon worker
+ *     children die too). `timedOut: true` in the result.
+ *   - `maxStdoutBytes` → tree-kill + `stdoutTruncated: true` once the
+ *     captured stdout exceeds the cap.
+ *   - `onSpawn(child)` → register the child with the caller's ledger.
+ *
+ * `command` MUST be an absolute path to the executable (the caller
+ * resolves it; we never search PATH here — there is nothing to inject).
+ */
+export function runManagedExeCapture(
+  command: string,
+  args: ReadonlyArray<string>,
+  opts: ManagedExeOpts = {},
+): Promise<ManagedExeResult> {
+  const isWin = process.platform === "win32"
+  return new Promise<ManagedExeResult>((resolve, reject) => {
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(command, [...args], {
+        cwd: opts.cwd,
+        env: opts.env ?? process.env,
+        shell: false,
+        windowsHide: true,
+        // POSIX: new process group so we can kill the whole tree
+        // (colgrep + rayon workers) with kill(-pgid). Windows uses
+        // taskkill /T instead; `detached` there has no group semantics.
+        detached: !isWin,
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error(String(err)))
+      return
+    }
+
+    try {
+      opts.onSpawn?.(child)
+    } catch {
+      // ledger registration must never break the spawn
+    }
+
+    const chunks: Array<Buffer> = []
+    let stdoutBytes = 0
+    const stderrChunks: Array<Buffer> = []
+    let stderrBytes = 0
+    const STDERR_CAP = 64 * 1024
+    let timedOut = false
+    let stdoutTruncated = false
+    let settled = false
+
+    const killNow = (): void => killManagedTree(child, isWin)
+
+    const timer = opts.timeoutMs
+      ? setTimeout(() => {
+          timedOut = true
+          killNow()
+        }, opts.timeoutMs)
+      : undefined
+    timer?.unref?.()
+
+    child.stdout?.on("data", (c: Buffer) => {
+      if (stdoutTruncated) return
+      stdoutBytes += c.length
+      if (
+        opts.maxStdoutBytes !== undefined &&
+        stdoutBytes > opts.maxStdoutBytes
+      ) {
+        stdoutTruncated = true
+        killNow()
+        return
+      }
+      chunks.push(c)
+    })
+    child.stderr?.on("data", (c: Buffer) => {
+      // Hard byte cap on stderr — append only the slice that fits so a
+      // single huge chunk can't overshoot. Never logged raw (it can
+      // embed source code from colgrep).
+      if (stderrBytes >= STDERR_CAP) return
+      const remaining = STDERR_CAP - stderrBytes
+      const slice = c.length > remaining ? c.subarray(0, remaining) : c
+      stderrChunks.push(slice)
+      stderrBytes += slice.length
+    })
+    child.stdout?.on("error", () => {})
+    child.stderr?.on("error", () => {})
+
+    const finish = (code: number | null): void => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolve({
+        stdout: Buffer.concat(chunks).toString("utf8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf8"),
+        code,
+        timedOut,
+        stdoutTruncated,
+      })
+    }
+
+    child.on("error", (err) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      reject(err)
+    })
+    child.on("close", (code) => finish(code))
+  })
+}
+
+/**
+ * Tree-kill a managed child. Windows: `taskkill /T /F /PID` (whole
+ * tree). POSIX: kill the process GROUP (`-pgid`) so colgrep's rayon
+ * worker children die with the parent.
+ *
+ * `runManagedExeCapture` always spawns POSIX children `detached:true`
+ * (their own process group), so the group kill is the correct and
+ * sufficient primitive. We deliberately do NOT fall back to a positive-
+ * pid `process.kill(pid)` when the group kill fails: by the time a kill
+ * fires (timeout / byte-cap race), the child may have already exited and
+ * its PID been recycled by an unrelated process — a positive-pid kill
+ * would then target the wrong process. `ESRCH` (group already gone) is
+ * the success case for our purposes; any other error is swallowed.
+ */
+export function killManagedTree(
+  child: ReturnType<typeof spawn>,
+  isWin: boolean = process.platform === "win32",
+): void {
+  const pid = child.pid
+  if (!pid) return
+  try {
+    if (isWin) {
+      spawn("taskkill", ["/T", "/F", "/PID", String(pid)], {
+        stdio: "ignore",
+        windowsHide: true,
+      })
+    } else {
+      // Negative pid → the process group (we spawned detached). No
+      // positive-pid fallback (PID-reuse hazard — see doc comment).
+      process.kill(-pid, "SIGKILL")
+    }
+  } catch {
+    // ESRCH (already gone) / EPERM — best-effort, nothing more to do.
+  }
+}

@@ -22,6 +22,7 @@ import { buildPeerAwarenessSnippet, type McpGroup } from "./lib/peer-mcp-persona
 import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
+import { provisionAndIndexColbert } from "./lib/colbert"
 import {
   DEFAULT_CLAUDE_MODEL_FALLBACKS,
   pickClaudeDefault,
@@ -316,6 +317,11 @@ export const claude = defineCommand({
         }
       }
     }
+
+    // Best-effort ColBERT semantic-search provision + background index of
+    // the launch cwd (if a git repo). ON by default; never blocks launch,
+    // never throws. Opt out with GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1.
+    void provisionAndIndexColbert()
 
     // Peer-MCP wiring. Default-on. When enabled:
     //   1. Decide between HTTP backend (always works, read-only personas)
