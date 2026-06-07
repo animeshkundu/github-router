@@ -44,6 +44,7 @@ import {
   currentInFlight,
   __resetInFlightForTests as __resetInFlightSharedForTests,
 } from "~/lib/mcp-inflight"
+import { browserPreflight } from "~/lib/browser-mcp/dispatch"
 
 const MCP_PROTOCOL_VERSION = "2025-06-18"
 const SERVER_NAME = "github-router-peers"
@@ -420,6 +421,21 @@ function extractMessagesText(response: MessagesApiResponse): string {
 interface ToolErrorContent {
   content: Array<{ type: "text"; text: string }>
   isError: true
+}
+
+/**
+ * True for the capability tags whose tools dispatch through
+ * `dispatchBrowserTool` and therefore need the bridge-readiness
+ * pre-flight hoisted ahead of `acquireInFlightSlot()`. Every browser
+ * capability is a `browser*` literal (`browser` / `browser_compound` /
+ * `browser_power`), so a prefix test covers all current and future
+ * browser capabilities without a hardcoded list to keep in sync with
+ * the `capability === "browser*"` gate chain below.
+ */
+function isBrowserCapability(
+  capability: NonPersonaMcpTool["capability"],
+): boolean {
+  return typeof capability === "string" && capability.startsWith("browser")
 }
 
 function toolError(message: string): ToolErrorContent {
@@ -1022,6 +1038,27 @@ async function handleToolsCall(
   // the predictedTooLong cap doesn't apply to them either (the
   // jsonPathPreflightCap returns undefined when persona lookup misses,
   // which naturally exempts non-persona tools).
+
+  // Browser readiness pre-flight (BOTH paths). Browser tools dispatch
+  // through `dispatchBrowserTool`, whose head awaits `ensureBridgeReady()`.
+  // On a cold-start NMH install that probe can take a noticeable beat
+  // (Windows reg.exe spawn). Running it INSIDE the held slot meant up to
+  // MAX_INFLIGHT_TOOLS_CALL concurrent browser calls could park their
+  // slots on one shared probe and lock peers/search/workers/decide out of
+  // the pool. Hoist it here, before acquireInFlightSlot(), exactly like
+  // the persona pre-flights above: on a blocked URL or install_required
+  // we return the structured envelope WITHOUT taking a slot. MUST stay
+  // before acquireInFlightSlot per the load-bearing invariant (a reject
+  // after acquisition leaks a concurrency slot). The `_inFlightReady`
+  // single-flight keeps this cheap+idempotent under a concurrent burst;
+  // the slot-side `dispatchBrowserTool` re-runs `ensureBridgeReady()` to
+  // fetch fresh port/token at use time (NOT threaded across the slot wait,
+  // which would be a TOCTOU hazard if the bridge auto-reloads while this
+  // caller is parked).
+  if (nonPersonaTool && isBrowserCapability(nonPersonaTool.capability)) {
+    const { envelope } = await browserPreflight(nonPersonaTool.toolNameHttp, args)
+    if (envelope) return rpcResult(body.id, envelope)
+  }
 
   // Documented per-call cap. NOT silent serialization — surface the
   // backpressure so Opus knows to retry shortly. The slot is held in
