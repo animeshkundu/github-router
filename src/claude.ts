@@ -23,6 +23,7 @@ import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirrore
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { provisionAndIndexColbert } from "./lib/colbert"
+import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
 import {
   DEFAULT_CLAUDE_MODEL_FALLBACKS,
   pickClaudeDefault,
@@ -323,6 +324,16 @@ export const claude = defineCommand({
     // the launch cwd (if a git repo). ON by default; never blocks launch,
     // never throws. Opt out with GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1.
     void provisionAndIndexColbert()
+
+    // Best-effort: materialize the browser extension + bridge into the
+    // stable app-dir and stamp the running version, so a one-time "Load
+    // unpacked" survives npx/bunx upgrades. Gated on --browse; never
+    // blocks launch, never throws.
+    if (browserToolsEnabled()) {
+      void provisionBrowserAssets().catch((err) =>
+        consola.debug("Browser extension provisioning failed:", err),
+      )
+    }
 
     // Peer-MCP wiring. Default-on. When enabled:
     //   1. Decide between HTTP backend (always works, read-only personas)

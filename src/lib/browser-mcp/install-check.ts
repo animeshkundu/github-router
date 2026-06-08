@@ -34,6 +34,7 @@ import {
   extensionDir,
   installNativeHostForAll,
 } from "./native-host-installer"
+import { provisionBrowserAssets } from "./provision"
 
 export interface BridgeDiscovery {
   pid: number
@@ -334,6 +335,14 @@ async function _ensureBridgeReadyImpl(): Promise<
   BridgeReady | InstallRequiredPayload
 > {
   __implInvocationsForTests++
+  // Materialize the extension + bridge into the stable app-dir and stamp
+  // the running version BEFORE we resolve extensionDir()/bridgeBundlePath()
+  // below — guarantees the stable "Load unpacked" target and the launcher
+  // exist even when this is the first browser_* call before startup
+  // provisioning has settled (or for BYO clients). Single-flight + once-
+  // guarded in provision.ts, so this is near-free after the first run and
+  // never throws.
+  await provisionBrowserAssets()
   const browsers = detectSupportedBrowsers()
   if (browsers.length === 0) {
     return buildInstallRequired("no_supported_browser", [])

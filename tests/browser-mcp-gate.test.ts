@@ -44,6 +44,7 @@ let savedBrowseEnabled: boolean
 let savedPowerBrowseEnabled: boolean
 let savedEnvBrowseFlag: string | undefined
 let savedEnvDisableWorker: string | undefined
+let savedEnvDisableProvision: string | undefined
 
 function buildReq(body: unknown, opts: { auth?: string; host?: string } = {}) {
   return new Request(`http://${PROXY_HOST}/`, {
@@ -69,10 +70,15 @@ beforeEach(() => {
   savedPowerBrowseEnabled = state.powerBrowseEnabled
   savedEnvBrowseFlag = process.env.GH_ROUTER_ENABLE_BROWSE
   savedEnvDisableWorker = process.env.GH_ROUTER_DISABLE_WORKER_TOOLS
+  savedEnvDisableProvision = process.env.GH_ROUTER_DISABLE_BROWSER_PROVISION
   // Pin worker tools OFF so tools/list output is deterministic across
   // hosts (some dev boxes have gemini-3.5-flash in their catalog, which
   // would inflate the tool count in ways unrelated to this test).
   process.env.GH_ROUTER_DISABLE_WORKER_TOOLS = "1"
+  // Keep the stable-dir provisioning that ensureBridgeReady() now awaits
+  // hermetic: skip the materialize/stamp/NMH writes so this test asserts
+  // the bundled load_unpacked_dir without copying into the user's home.
+  process.env.GH_ROUTER_DISABLE_BROWSER_PROVISION = "1"
   delete process.env.GH_ROUTER_ENABLE_BROWSE
   state.peerMcpNonce = NONCE
   state.copilotToken = "test-copilot-token"
@@ -92,6 +98,8 @@ afterEach(() => {
   else process.env.GH_ROUTER_ENABLE_BROWSE = savedEnvBrowseFlag
   if (savedEnvDisableWorker === undefined) delete process.env.GH_ROUTER_DISABLE_WORKER_TOOLS
   else process.env.GH_ROUTER_DISABLE_WORKER_TOOLS = savedEnvDisableWorker
+  if (savedEnvDisableProvision === undefined) delete process.env.GH_ROUTER_DISABLE_BROWSER_PROVISION
+  else process.env.GH_ROUTER_DISABLE_BROWSER_PROVISION = savedEnvDisableProvision
   _resetSupportedBrowserCache()
   mock.restore()
 })

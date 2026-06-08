@@ -29,7 +29,7 @@
 
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir, platform } from "node:os"
 import path from "node:path"
 import process from "node:process"
@@ -80,8 +80,10 @@ export function computeExtensionIdFromKey(keyB64: string): string {
 }
 
 function readManifestKey(): string {
-  // Tries dist first (installed npm package layout) then src (dev /
-  // running from a checkout). Either path works.
+  // Reads the resolved runtime extension dir's manifest (stable copy
+  // when materialized, else the bundled dist/src dir). The `key` field
+  // is identical across all of them, so the derived extension ID is
+  // stable regardless of which path wins.
   const candidates = [
     path.resolve(extensionDir(), "manifest.json"),
   ]
@@ -151,38 +153,91 @@ function packageRoot(): string {
   return process?.cwd?.() ?? "."
 }
 
+function fileExists(p: string): boolean {
+  // Metadata-only check — never opens the file, so a Windows share-lock on
+  // a live bridge bundle can't produce a false negative that would wrongly
+  // fall the resolvers back to the bundled path.
+  return existsSync(p)
+}
+
+// ---------------------------------------------------------------------
+// Stable app-dir locations (materialized by provisionBrowserAssets()).
+//
+// `npx` / `bunx` install the package into an ephemeral cache directory
+// whose path changes per version, so loading the extension straight out
+// of `<package>/dist/browser-ext/` means a one-time Chrome "Load
+// unpacked" breaks the moment the package upgrades and the old cache
+// path is GC'd. The launcher shim's `path` and the extension auto-reload
+// both read from the directory Chrome originally loaded from, so they
+// break too.
+//
+// `provisionBrowserAssets()` (provision.ts) copies the bundled extension
+// + bridge into these STABLE paths under `<APP_DIR>` on every launch and
+// stamps the running version into the materialized manifest. The runtime
+// resolvers below prefer the stable copy, so the "Load unpacked" target,
+// the bridge launcher, and `install_required.load_unpacked_dir` all point
+// at a path that never changes across npx/bunx version churn.
+// ---------------------------------------------------------------------
+
+/** Stable materialized extension dir: `<APP_DIR>/browser-ext`. */
+export function stableExtensionDir(): string {
+  return path.join(PATHS.APP_DIR, "browser-ext")
+}
+
+/** Stable materialized bridge bundle: `<APP_DIR>/browser-bridge/index.js`. */
+export function stableBridgeBundlePath(): string {
+  return path.join(PATHS.APP_DIR, "browser-bridge", "index.js")
+}
+
 /**
- * Absolute path to the extension's source directory. Layouts:
+ * The bundled (shipped) extension dir — the SOURCE for provisioning,
+ * never the runtime load path. Layouts:
  *
  *   - Installed via npm: `<package>/dist/browser-ext/` (the published
  *     tarball ships only `dist/`, see package.json "files"). The build
- *     step copies `src/browser-ext/` → `dist/browser-ext/` so the
- *     unpacked extension is available to users.
- *   - Running from this repo: dist/browser-ext/ if it exists (after
- *     `bun run build`), else src/browser-ext/ for fresh-clone-pre-build.
+ *     step copies `src/browser-ext/` → `dist/browser-ext/`.
+ *   - Running from this repo: `dist/browser-ext/` if built, else
+ *     `src/browser-ext/` for fresh-clone-pre-build.
+ */
+export function bundledExtensionDir(): string {
+  const root = packageRoot()
+  const distExt = path.join(root, "dist", "browser-ext")
+  if (fileExists(path.join(distExt, "manifest.json"))) return distExt
+  return path.join(root, "src", "browser-ext")
+}
+
+/** The bundled (shipped) bridge entrypoint — SOURCE for provisioning. */
+export function bundledBridgeBundlePath(): string {
+  return path.join(packageRoot(), "dist", "browser-bridge", "index.js")
+}
+
+/**
+ * Runtime extension directory — the path Chrome "Load unpacked"s and the
+ * path the NMH manifest's stable-id derivation reads. Resolution order:
  *
- * Override with `GH_ROUTER_BROWSER_EXT_DIR=<abs path>` for development
- * (lets you point at a working copy of the extension you're editing
- * without rebuilding between iterations).
+ *   1. `GH_ROUTER_BROWSER_EXT_DIR=<abs path>` dev override (lets you
+ *      point at a working copy you're editing without rebuilding).
+ *   2. The stable materialized copy under `<APP_DIR>` if present.
+ *   3. The bundled dir (dist, then src) as the pre-provision fallback.
  */
 export function extensionDir(): string {
   const override = process.env.GH_ROUTER_BROWSER_EXT_DIR
   if (override && override.length > 0) return override
-  const root = packageRoot()
-  const distExt = path.join(root, "dist", "browser-ext")
-  try {
-    if (readFileSync(path.join(distExt, "manifest.json")).length > 0) {
-      return distExt
-    }
-  } catch {
-    // dist/browser-ext not built yet — fall back to src/.
+  if (fileExists(path.join(stableExtensionDir(), "manifest.json"))) {
+    return stableExtensionDir()
   }
-  return path.join(root, "src", "browser-ext")
+  return bundledExtensionDir()
 }
 
-/** Absolute path to the bundled bridge entrypoint. */
+/**
+ * Runtime bridge bundle path — what the launcher shim invokes. Prefers
+ * the stable materialized copy; falls back to the bundled bundle when
+ * provisioning hasn't run yet (or couldn't, on a fresh unbuilt checkout).
+ */
 export function bridgeBundlePath(): string {
-  return path.join(packageRoot(), "dist", "browser-bridge", "index.js")
+  const stable = stableBridgeBundlePath()
+  if (fileExists(stable)) return stable
+  return bundledBridgeBundlePath()
 }
 
 // ---------------------------------------------------------------------

@@ -70,6 +70,12 @@ mock.module("~/lib/browser-mcp/native-host-installer", () => ({
   __NMH_HOST_ID_FOR_TESTS: "com.githubrouter.browser",
 }))
 
+// Stub stable-dir provisioning that ensureBridgeReady() now awaits.
+mock.module("~/lib/browser-mcp/provision", () => ({
+  provisionBrowserAssets: async () => {},
+  __resetProvisionForTests: () => undefined,
+}))
+
 // Mock the "ws" module so `new WebSocket(...)` returns our FakeWs.
 // This is the core mock needed for Bug #3: we control when "open" fires.
 class FakeWs extends EventEmitter {

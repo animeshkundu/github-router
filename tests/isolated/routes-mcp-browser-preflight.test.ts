@@ -71,6 +71,13 @@ mock.module("~/lib/browser-mcp/bridge-paths", () => ({
   discoveryPath: () => nonExistentDiscovery,
 }))
 
+// Stub the stable-dir provisioning that ensureBridgeReady() now awaits so
+// the pre-flight path doesn't touch the real filesystem.
+mock.module("~/lib/browser-mcp/provision", () => ({
+  provisionBrowserAssets: async () => {},
+  __resetProvisionForTests: () => undefined,
+}))
+
 const PROXY_PORT = 18799
 const PROXY_HOST = `127.0.0.1:${PROXY_PORT}`
 const NONCE = "fedcba9876543210".repeat(4) // 64 chars
