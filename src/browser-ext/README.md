@@ -34,14 +34,19 @@ right Chrome API.
 ## How it will install (Phase 3+)
 
 1. `github-router claude --browse` flips the capability gate.
-2. First `browser_*` tool call triggers the pre-flight: dispatcher
-   writes the NMH manifest JSON + (Windows) registry key pointing at
-   the bundled bridge launcher script.
-3. Dispatcher returns `install_required` with this extension's path
-   under `node_modules/@animeshkundu/github-router/dist/browser-ext/`
-   for the user / model to Load Unpacked.
+2. On launch the proxy materializes the extension into a stable app dir
+   (`<APP_DIR>/browser-ext/`, i.e. `~/.local/share/github-router/browser-ext/`
+   on POSIX, `%LOCALAPPDATA%\github-router\browser-ext\` on Windows) and
+   stamps the running version into its `manifest.json`. The first
+   `browser_*` tool call's pre-flight writes the NMH manifest JSON +
+   (Windows) registry key pointing at the bundled bridge launcher.
+3. Dispatcher returns `install_required` with `load_unpacked_dir` set to
+   that stable `<APP_DIR>/browser-ext/` path for the user / model to Load
+   Unpacked.
 4. User loads the extension → it auto-connects to the bridge → the
-   next tool call succeeds.
+   next tool call succeeds. Because the stable path never changes across
+   npx/bunx upgrades, that one-time Load Unpacked stays valid and later
+   upgrades reload transparently (version-mismatch → `chrome.runtime.reload()`).
 
 ## Manifest key (stable extension ID)
 

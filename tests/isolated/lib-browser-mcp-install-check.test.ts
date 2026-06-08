@@ -57,6 +57,14 @@ mock.module("~/lib/browser-mcp/bridge-paths", () => ({
   discoveryPath: () => nonExistentDiscovery,
 }))
 
+// Stub the stable-dir provisioning that ensureBridgeReady() now awaits, so
+// the single-flight install count below reflects only the install-check
+// path (and provision never touches the real filesystem).
+mock.module("~/lib/browser-mcp/provision", () => ({
+  provisionBrowserAssets: async () => {},
+  __resetProvisionForTests: () => undefined,
+}))
+
 afterEach(() => {
   installCallCount = 0
 })

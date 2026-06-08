@@ -27,8 +27,8 @@ import WebSocket from "ws"
 
 import {
   bridgeBundlePath,
+  bundledExtensionDir,
   computeExtensionIdFromKey,
-  extensionDir,
 } from "../../src/lib/browser-mcp/native-host-installer"
 
 const NMH_HOST_ID = "com.githubrouter.browser"
@@ -42,7 +42,7 @@ let cachedExtensionId: string | undefined
 export function stableExtensionId(): string {
   if (cachedExtensionId) return cachedExtensionId
   const manifest = JSON.parse(
-    readFileSync(path.join(extensionDir(), "manifest.json"), "utf8"),
+    readFileSync(path.join(bundledExtensionDir(), "manifest.json"), "utf8"),
   ) as { key?: string }
   if (typeof manifest.key !== "string") {
     throw new Error("harness: extension manifest.json has no key field")
@@ -303,7 +303,11 @@ export interface LaunchedBrowser {
 
 export async function launchBrowserWithExtension(opts: { userDataDir?: string } = {}): Promise<LaunchedBrowser> {
   const userDataDir = opts.userDataDir ?? mkdtemp("browser-mcp-e2e-profile-")
-  const extDir = extensionDir()
+  // Load the freshly-built bundled extension, NOT the materialized stable
+  // copy under <APP_DIR> (which may be a different version from a prior
+  // `--browse` run on this machine). The E2E must exercise the dist this
+  // checkout just built.
+  const extDir = bundledExtensionDir()
   // MV3 service workers need persistent context; --headless=new
   // enables true headless that still supports SWs + native messaging.
   const context = await chromium.launchPersistentContext(userDataDir, {

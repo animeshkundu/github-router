@@ -148,7 +148,7 @@ Every browser tool runs a pre-flight `ensureBridgeReady()` (in [`src/lib/browser
 5. Check `health.extension_connected`. Returns `install_required {reason: "extension_not_loaded"}` if no extension is currently attached.
 6. Compare `health.extension_loaded_version` (reported by the extension on connect — see "Auto-update flow" below) against the version stamped into `dist/browser-ext/manifest.json` at build. On mismatch, POST `/reload` to the bridge (which forwards a `__reload__` control frame to the extension; the extension calls `chrome.runtime.reload()`). Poll the discovery file + `/health` for up to 3 s waiting for the new bridge process to spawn and the new extension to report the expected version. On success, continue with the new port/token/pid. On failure (Chrome refused to silently reload — typically because the new manifest declared new permissions), return `install_required {reason: "extension_outdated"}` with the loaded/expected pair in `version_mismatch` so the model can surface both numbers.
 
-The structured `install_required` response is returned as a JSON text block with `isError: true` so the model treats it as actionable failure (not a normal success). The payload includes a `load_unpacked_dir` path pointing at the bundled extension under `src/browser-ext/` so the model or user can complete the install by enabling Developer Mode in chrome://extensions and clicking "Load unpacked".
+The structured `install_required` response is returned as a JSON text block with `isError: true` so the model treats it as actionable failure (not a normal success). The payload includes a `load_unpacked_dir` path pointing at the stable materialized extension under `<APP_DIR>/browser-ext/` (a path that survives package upgrades — see "Where the extension files come from" below) so the model or user can complete the install by enabling Developer Mode in chrome://extensions and clicking "Load unpacked".
 
 The pre-flight fires BEFORE any inflight-slot acquisition, preserving the same load-bearing invariant called out in CLAUDE.md for `predictedTooLong`.
 
@@ -172,16 +172,30 @@ Registry writes on Windows go through `reg.exe add ... /f` (no PowerShell, no ad
 The extension is plain JSON + JS (no bundler needed), but it has to land under `dist/` so the npm tarball's `"files": ["dist"]` allowlist actually ships it. The `build` script does `tsdown && bun scripts/copy-browser-ext.ts`, so a published package looks like:
 
 ```
-node_modules/@animeshkundu/github-router/
+node_modules/@animeshkundu/github-router/      (or the npx/bunx cache dir)
 ├── dist/
 │   ├── main.js                       (the proxy)
 │   ├── browser-bridge/index.js       (the native-messaging host, bundled with ws)
-│   └── browser-ext/                  (Load Unpacked target)
+│   └── browser-ext/                  (the BUNDLED extension — provisioning source)
 │       ├── manifest.json
 │       └── background.js
 ```
 
-`extensionDir()` in [`src/lib/browser-mcp/native-host-installer.ts`](../src/lib/browser-mcp/native-host-installer.ts) prefers `dist/browser-ext/` (production), falls back to `src/browser-ext/` if dist hasn't been built (fresh clone), and can be overridden with `GH_ROUTER_BROWSER_EXT_DIR=<abs path>` for rapid extension iteration without rebuilding between edits.
+**The package dir is NOT the Load-Unpacked target.** Under `npx` / `bunx` it's an ephemeral cache path that changes per version, so loading the extension straight out of it means a one-time "Load unpacked" breaks the instant the package upgrades and the old cache path is GC'd (and the bridge launcher's `path` + the auto-reload both read from the dir Chrome originally loaded from, so they break too). Instead, `provisionBrowserAssets()` ([`src/lib/browser-mcp/provision.ts`](../src/lib/browser-mcp/provision.ts)) materializes the bundled extension + bridge into a **stable app-dir** on every launch:
+
+```
+<APP_DIR>/browser-ext/          (the Load-Unpacked target — never moves)
+<APP_DIR>/browser-bridge/index.js   (what the launcher shim invokes)
+```
+
+This is the single place the version is stamped on start (`getPackageVersion()` → the materialized `manifest.json`), so a "Load unpacked" of the stable dir survives every upgrade and the existing version-mismatch auto-reload picks up the new code. The resolvers split accordingly in [`native-host-installer.ts`](../src/lib/browser-mcp/native-host-installer.ts):
+
+- `bundledExtensionDir()` / `bundledBridgeBundlePath()` — the SOURCE (dist preferred, src fallback). Provisioning copies FROM these; they are never the runtime load path (so provisioning can't copy a stale dir onto itself).
+- `extensionDir()` / `bridgeBundlePath()` — the RUNTIME path: `GH_ROUTER_BROWSER_EXT_DIR` override → the stable `<APP_DIR>` copy if materialized → the bundled dir as the pre-provision fallback.
+
+Provisioning is idempotent (a content-signature sidecar `<APP_DIR>/browser-ext/.provisioned` skips the copy when nothing changed), single-flight + once-guarded, and NEVER throws — it runs fire-and-forget after `setupAndServe` (gated on the browse opt-in, next to `provisionToolbelt()` / `provisionAndIndexColbert()`) AND lazily at the head of `ensureBridgeReady()` so the stable dir is guaranteed populated before the `install_required` path computes `load_unpacked_dir`. Opt out with `GH_ROUTER_DISABLE_BROWSER_PROVISION=1` (an advanced dev/testing lever — the extension then loads from the bundled dir / your `GH_ROUTER_BROWSER_EXT_DIR` override, weakening the stable-path guarantee).
+
+**Windows locked-bridge edge.** The bridge bundle is written via temp-write + atomic `renameSync`. In practice Node doesn't hold `index.js` open after the bridge process reads it at startup, so the replace succeeds even while a bridge runs. If a rename ever fails with a sharing violation AND a usable stable bridge already exists, `tryMaterializeBridge()` defers (logs, returns false, leaves the `.provisioned` sidecar unwritten) so the next launch / next `browser_*` call retries — `provisionBrowserAssets()` does NOT latch its once-guard on a deferred or failed step. The old (running) bridge is the version about to be reloaded; Chrome respawns the bridge from `index.js` on the next `connectNative`, picking up the new bytes once the deferred copy lands. The manifest stamp uses the same atomic temp+rename so two concurrent launches can't corrupt it (last writer wins a whole, valid file); the `cpSync` of the other extension files is benign under concurrency (identical source content, last-writer-wins per file).
 
 ### Stable extension ID
 
@@ -196,7 +210,7 @@ The unpacked extension does not auto-update via Chrome Web Store (it's never pub
 - **`__hello__` frame** (extension → bridge, sent immediately on `connectNative`): `{type: "__hello__", version: chrome.runtime.getManifest().version}`. The bridge stores this in a module-level `extensionLoadedVersion` and exposes it via `/health`. Older bridge versions that don't recognize the frame just ignore it (it doesn't match the `{id, ok, data}` response shape they expect from a tool reply).
 - **`__reload__` frame** (bridge → extension, triggered by `POST /reload` on the bridge's HTTP endpoint): `{type: "__reload__"}`. The extension's handler calls `chrome.runtime.reload()`, which terminates the current SW. Chrome / Edge then re-read the extension files from disk and start a fresh SW — picking up whatever `dist/browser-ext/background.js` looks like NOW. The fresh SW connects to a new bridge process (Chrome spawns one per `connectNative`) which writes a new `bridge.json` discovery file; pre-flight re-reads the discovery file each poll cycle to follow the bridge restart.
 
-The version stamped into `dist/browser-ext/manifest.json` is read from `package.json` by [`scripts/copy-browser-ext.ts`](../scripts/copy-browser-ext.ts) during build — `src/browser-ext/manifest.json` carries the sentinel `0.0.0` so source-checkout loads (via `GH_ROUTER_BROWSER_EXT_DIR` pointing at `src/browser-ext/`) are visually distinguishable from a real release. Pre-flight skips the mismatch check entirely when either side reports `0.0.0` so dev-iteration loops don't trigger reloads.
+The version stamped into `dist/browser-ext/manifest.json` is read from `package.json` by [`scripts/copy-browser-ext.ts`](../scripts/copy-browser-ext.ts) during build — `src/browser-ext/manifest.json` carries the sentinel `0.0.0` so source-checkout loads (via `GH_ROUTER_BROWSER_EXT_DIR` pointing at `src/browser-ext/`) are visually distinguishable from a real release. On launch, `provisionBrowserAssets()` re-stamps the running `getPackageVersion()` into the MATERIALIZED `<APP_DIR>/browser-ext/manifest.json` (skipped when the version is `"unknown"`, which would be a non-semver value Chrome rejects) — so the "expected version" the pre-flight reads via `extensionDir()` and the version the loaded extension reports via `__hello__` are compared against the same single source. Pre-flight skips the mismatch check entirely when either side reports `0.0.0` so dev-iteration loops don't trigger reloads.
 
 **Cases auto-reload cannot fix.** Chrome / Edge refuse to silently reload an unpacked extension and instead disable it when the new manifest declares new `permissions` or `host_permissions`, when the `key` field changes (different extension ID → effectively a new install), or for some manifest schema changes. In those cases, pre-flight's poll times out, the loaded version stays stale, and the fallback `install_required {reason: "extension_outdated"}` response tells the user to manually re-enable + reload via `chrome://extensions` / `edge://extensions`. The `attemptedReloads` set (keyed by `${extensionId}::${expectedVersion}`) prevents a reload loop — at most one `__reload__` per `(id, expectedVersion)` pair per proxy process.
 

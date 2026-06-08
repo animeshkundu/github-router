@@ -21,6 +21,8 @@ import { state } from "./lib/state"
 import { toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { provisionAndIndexColbert } from "./lib/colbert"
+import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
+import { hasSupportedBrowserInstalled } from "./lib/browser-mcp/browser-detect"
 import { resolveCodexModel } from "./lib/utils"
 
 export const codex = defineCommand({
@@ -71,6 +73,19 @@ export const codex = defineCommand({
     // Best-effort ColBERT semantic-search provision + background index of
     // the launch cwd. ON by default; never blocks launch, never throws.
     void provisionAndIndexColbert()
+
+    // Best-effort: materialize the browser extension + bridge into the
+    // stable app-dir and stamp the running version. Gated inline (browse
+    // opt-in + a supported browser) rather than via browserToolsEnabled()
+    // so the codex command path doesn't eagerly pull the compressor /
+    // worker-agent graph. Never blocks launch, never throws.
+    const browseOptIn =
+      state.browseEnabled || process.env.GH_ROUTER_ENABLE_BROWSE === "1"
+    if (browseOptIn && hasSupportedBrowserInstalled()) {
+      void provisionBrowserAssets().catch((err) =>
+        consola.debug("Browser extension provisioning failed:", err),
+      )
+    }
 
     const usingDefault = !args.model
     const requestedModel = args.model ?? DEFAULT_CODEX_MODEL
