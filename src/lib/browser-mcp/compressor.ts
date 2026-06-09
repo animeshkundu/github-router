@@ -1,6 +1,7 @@
 // compressor.ts — inner-LLM helpers that translate model intent into
-// concrete browser actions, using a small fast hosted model (Gemini
-// Flash class) routed through the existing Copilot client.
+// concrete browser actions, using a small fast hosted model
+// (catalog-selected; see COMPRESSOR_FALLBACK_CHAIN) routed through the
+// existing Copilot client.
 //
 // The compressor sits between the lead model (Opus / Sonnet / GPT-5)
 // and the browser tool primitives. Lead model issues natural-language
@@ -12,7 +13,7 @@
 //
 // Backend selection is catalog-time: at startup (and on catalog
 // refresh) `pickBackendFromCatalog` walks a static fallback chain
-// (Gemini Flash → GPT-5.4 mini → Claude Haiku 4.5) and picks the first
+// (GPT-5.4 mini → Claude Haiku 4.5 → Gemini Flash) and picks the first
 // entry present in `state.models` with `tool_calls` support. The
 // picked id is stored in `selectedBackend` and reused for the lifetime
 // of the proxy session.
@@ -38,13 +39,17 @@ import type { Model } from "~/services/copilot/get-models"
 
 /**
  * Static fallback chain. Order is preference: faster + multimodal +
- * cheaper at the top. All three support `tool_calls` and image input
- * (the latter is required for Phase D visual fallback).
+ * cheaper near the top, AND tool-calling reliability. All three support
+ * `tool_calls` and image input (the latter is required for Phase D
+ * visual fallback). `gemini-3.5-flash` is intentionally last: it
+ * early-stops / mishandles forced tool-calls (the same failure mode
+ * that pushed the worker engine off it), so it is only selected when
+ * neither `gpt-5.4-mini` nor `claude-haiku-4-5` is in the catalog.
  */
 const COMPRESSOR_FALLBACK_CHAIN: ReadonlyArray<string> = [
-  "gemini-3.5-flash",
   "gpt-5.4-mini",
   "claude-haiku-4-5",
+  "gemini-3.5-flash",
 ]
 
 let selectedBackend: string | undefined

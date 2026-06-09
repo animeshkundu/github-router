@@ -92,8 +92,8 @@ export function workerToolsEnabled(): boolean {
  * in intent mode, `browser_extract`).
  *
  * Returns true iff `compressorAvailable()` — i.e. at least one model in
- * the compressor fallback chain (`gemini-3.5-flash` → `gpt-5.4-mini` →
- * `claude-haiku-4-5`) is present in the live catalog with `tool_calls`
+ * the compressor fallback chain (`gpt-5.4-mini` → `claude-haiku-4-5` →
+ * `gemini-3.5-flash`) is present in the live catalog with `tool_calls`
  * support. When none are reachable the compound tools are dropped from
  * `tools/list` AND fail `tools/call` with -32601.
  *

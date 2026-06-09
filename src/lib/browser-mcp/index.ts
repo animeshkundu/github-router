@@ -559,7 +559,7 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_find",
     description:
-      "Find up to 5 elements matching a natural-language intent ('the search box at the top', 'the Submit button at the bottom of the login form'). Returns ranked candidates with stable refs the model can pass to browser_act (ref mode) or browser_mouse. Cheaper than browser_read_page when you know what you're looking for — the inner compressor (Gemini Flash class) filters the snapshot for you instead of sending the full element list to the lead model.",
+      "Find up to 5 elements matching a natural-language intent ('the search box at the top', 'the Submit button at the bottom of the login form'). Returns ranked candidates with stable refs the model can pass to browser_act (ref mode) or browser_mouse. Cheaper than browser_read_page when you know what you're looking for — the inner compressor (a small fast model) filters the snapshot for you instead of sending the full element list to the lead model.",
     inputSchema: {
       type: "object",
       required: ["tabId", "intent"],
@@ -593,7 +593,7 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_act",
     description:
-      "Preferred for any click / fill / type / scroll-to action against a tab. Two modes: (1) INTENT mode — pass `intent` as natural language ('click the submit button'); the inner compressor (Gemini Flash class) maps it to an element + action. Auto-escalates to visual fallback (screenshot + multimodal model + pixel-coord click) when the intent points into a canvas / svg region the a11y tree can't see. (2) REF mode — pass `ref` (from a prior browser_find or browser_read_page) and optionally `value`; dispatches directly with zero compressor latency. This is the fold-in path for the now-removed browser_click and browser_fill. Returns {ok, action_taken, target_ref, navigated}.",
+      "Preferred for any click / fill / type / scroll-to action against a tab. Two modes: (1) INTENT mode — pass `intent` as natural language ('click the submit button'); the inner compressor (a small fast model) maps it to an element + action. Auto-escalates to visual fallback (screenshot + multimodal model + pixel-coord click) when the intent points into a canvas / svg region the a11y tree can't see. (2) REF mode — pass `ref` (from a prior browser_find or browser_read_page) and optionally `value`; dispatches directly with zero compressor latency. This is the fold-in path for the now-removed browser_click and browser_fill. Returns {ok, action_taken, target_ref, navigated}.",
     inputSchema: {
       type: "object",
       required: ["tabId"],
