@@ -8,10 +8,13 @@ import {
 import { state } from "../src/lib/state"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
-// A catalog model that advertises tool_calls support (the only capability
-// `pickBackendFromCatalog` gates on). `withToolCalls: false` produces an
-// otherwise-identical entry that the picker must skip.
-const model = (id: string, withToolCalls = true) => ({
+// A catalog model. `toolCalls` gates the tool_calls capability; `endpoints`
+// is the catalog `supported_endpoints` the endpoint-aware selector reads
+// (live strings are "/chat/completions" and "/responses" — NO /v1 prefix).
+const model = (
+  id: string,
+  opts: { toolCalls?: boolean; endpoints?: Array<string> } = {},
+) => ({
   id,
   name: id,
   vendor: "Test" as const,
@@ -25,16 +28,16 @@ const model = (id: string, withToolCalls = true) => ({
     object: "model_capabilities",
     tokenizer: "o200k_base",
     limits: { max_context_window_tokens: 200_000 },
-    supports: withToolCalls ? { tool_calls: true } : {},
+    supports: opts.toolCalls === false ? {} : { tool_calls: true },
   },
-  supported_endpoints: ["/v1/chat/completions"],
+  supported_endpoints: opts.endpoints ?? ["/chat/completions"],
 })
 
 function setCatalog(entries: Array<ReturnType<typeof model>>) {
   state.models = { object: "list", data: entries } as ModelsResponse
 }
 
-describe("browser-mcp compressor backend selection", () => {
+describe("browser-mcp compressor backend selection (endpoint-aware)", () => {
   let savedModels: typeof state.models
 
   beforeEach(() => {
@@ -46,33 +49,43 @@ describe("browser-mcp compressor backend selection", () => {
     __resetCompressorBackendForTests()
   })
 
-  test("prefers gpt-5.4-mini when all three chain entries are present (catalog order irrelevant)", () => {
-    // Scrambled catalog order proves CHAIN order, not catalog order, wins.
+  test("prefers gpt-5.4-mini (selected for /responses) when present", () => {
+    // gpt-5.4-mini is /responses-only — the chain head must still pick it.
     setCatalog([
       model("claude-haiku-4-5"),
-      model("gemini-3.5-flash"),
-      model("gpt-5.4-mini"),
+      model("claude-sonnet-4-6"),
+      model("gpt-5.4-mini", { endpoints: ["/responses", "ws:/responses"] }),
     ])
     expect(pickBackendFromCatalog()).toBe("gpt-5.4-mini")
   })
 
-  test("falls through to claude-haiku-4-5 when gpt-5.4-mini is absent", () => {
-    setCatalog([model("gemini-3.5-flash"), model("claude-haiku-4-5")])
-    expect(pickBackendFromCatalog()).toBe("claude-haiku-4-5")
+  test("falls through to claude-sonnet-4-6 when gpt-5.4-mini is absent", () => {
+    setCatalog([model("claude-sonnet-4-6"), model("claude-haiku-4-5")])
+    expect(pickBackendFromCatalog()).toBe("claude-sonnet-4-6")
   })
 
-  test("selects gemini-3.5-flash only as the last resort", () => {
-    setCatalog([model("gemini-3.5-flash")])
-    expect(pickBackendFromCatalog()).toBe("gemini-3.5-flash")
+  test("selects claude-haiku-4-5 as the last resort", () => {
+    setCatalog([model("claude-haiku-4-5")])
+    expect(pickBackendFromCatalog()).toBe("claude-haiku-4-5")
   })
 
   test("skips a chain entry that lacks tool_calls support", () => {
-    // gpt-5.4-mini present but without tool_calls → demote to haiku.
     setCatalog([
-      model("gpt-5.4-mini", false),
-      model("claude-haiku-4-5"),
+      model("gpt-5.4-mini", { toolCalls: false, endpoints: ["/responses"] }),
+      model("claude-sonnet-4-6"),
     ])
-    expect(pickBackendFromCatalog()).toBe("claude-haiku-4-5")
+    expect(pickBackendFromCatalog()).toBe("claude-sonnet-4-6")
+  })
+
+  test("regression: skips a chain entry that serves NEITHER /chat/completions NOR /responses", () => {
+    // The class of bug that broke the compressor: a model advertising
+    // tool_calls but reachable through neither of our clients must be
+    // skipped, not cached as a dead backend that 400s every call.
+    setCatalog([
+      model("gpt-5.4-mini", { endpoints: ["ws:/responses"] }),
+      model("claude-sonnet-4-6"),
+    ])
+    expect(pickBackendFromCatalog()).toBe("claude-sonnet-4-6")
   })
 
   test("compressorAvailable() is false when no chain entry is in the catalog", () => {

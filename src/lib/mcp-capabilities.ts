@@ -92,10 +92,11 @@ export function workerToolsEnabled(): boolean {
  * in intent mode, `browser_extract`).
  *
  * Returns true iff `compressorAvailable()` — i.e. at least one model in
- * the compressor fallback chain (`gpt-5.4-mini` → `claude-haiku-4-5` →
- * `gemini-3.5-flash`) is present in the live catalog with `tool_calls`
- * support. When none are reachable the compound tools are dropped from
- * `tools/list` AND fail `tools/call` with -32601.
+ * the compressor fallback chain (`gpt-5.4-mini` → `claude-sonnet-4-6` →
+ * `claude-haiku-4-5`) is present in the live catalog with `tool_calls`
+ * AND a reachable endpoint (`/chat/completions` or `/responses`). When
+ * none are reachable the compound tools are dropped from `tools/list`
+ * AND fail `tools/call` with -32601.
  *
  * Note: this gate does NOT additionally re-check the `browser` opt-in.
  * The `handler.ts` filter chain runs `browser` and `browser_compound`
