@@ -126,19 +126,23 @@ const REASONING_PROLOGUE = [
 // ---------------------------------------------------------------------------
 
 test("/responses function_call SSE assembles into a Pi toolCall", async () => {
+  // Distinct per-event ids + a shared output_index — mirrors LIVE Copilot,
+  // which re-encrypts item.id/item_id on every event. Correlation MUST key
+  // off output_index, not the id.
   globalThis.fetch = mock(() =>
     sseResponse([
       ...REASONING_PROLOGUE,
       {
         type: "response.output_item.added",
         output_index: 1,
-        item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "navigate" },
+        item: { type: "function_call", id: "fc_added", call_id: "call_1", name: "navigate" },
       },
-      { type: "response.function_call_arguments.delta", item_id: "fc_1", delta: '{"tabId"' },
-      { type: "response.function_call_arguments.delta", item_id: "fc_1", delta: ':1,"action":"goto"}' },
+      { type: "response.function_call_arguments.delta", output_index: 1, item_id: "fc_d1", delta: '{"tabId"' },
+      { type: "response.function_call_arguments.delta", output_index: 1, item_id: "fc_d2", delta: ':1,"action":"goto"}' },
       {
         type: "response.function_call_arguments.done",
-        item_id: "fc_1",
+        output_index: 1,
+        item_id: "fc_done",
         arguments: '{"tabId":1,"action":"goto"}',
       },
       {
@@ -146,7 +150,7 @@ test("/responses function_call SSE assembles into a Pi toolCall", async () => {
         output_index: 1,
         item: {
           type: "function_call",
-          id: "fc_1",
+          id: "fc_itemdone",
           call_id: "call_1",
           name: "navigate",
           arguments: '{"tabId":1,"action":"goto"}',
@@ -243,27 +247,27 @@ test("/responses output_text.done with no prior deltas is not dropped", async ()
 
 test("corrupted arg-deltas are superseded by the authoritative function_call_arguments.done", async () => {
   // gpt-5.4-mini's loop bug: deltas arrive but are partial/corrupt; the .done
-  // event carries the full valid args. The final tool call MUST use the .done
-  // args, not the unparseable delta accumulation (which → {} → empty-args
-  // no-op → the model repeats the call forever).
+  // event carries the full valid args. DISTINCT per-event ids + shared
+  // output_index (live shape) — so this fails the OLD id-keyed code (deltas
+  // miss → {} → empty-args no-op loop) and passes only with output_index keying.
   globalThis.fetch = mock(() =>
     sseResponse([
       ...REASONING_PROLOGUE,
       {
         type: "response.output_item.added",
         output_index: 1,
-        item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "navigate" },
+        item: { type: "function_call", id: "fc_a", call_id: "call_1", name: "navigate" },
       },
-      // Partial / corrupted delta stream (invalid JSON on its own).
-      { type: "response.function_call_arguments.delta", item_id: "fc_1", delta: '{"tabId":1,"act' },
-      // Authoritative full args.
-      { type: "response.function_call_arguments.done", item_id: "fc_1", arguments: '{"tabId":1,"action":"goto"}' },
+      // Partial / corrupted delta stream (invalid JSON on its own), distinct id.
+      { type: "response.function_call_arguments.delta", output_index: 1, item_id: "fc_d1", delta: '{"tabId":1,"act' },
+      // Authoritative full args, distinct id.
+      { type: "response.function_call_arguments.done", output_index: 1, item_id: "fc_done", arguments: '{"tabId":1,"action":"goto"}' },
       {
         type: "response.output_item.done",
         output_index: 1,
         item: {
           type: "function_call",
-          id: "fc_1",
+          id: "fc_id_done",
           call_id: "call_1",
           name: "navigate",
           arguments: '{"tabId":1,"action":"goto"}',
@@ -283,26 +287,27 @@ test("corrupted arg-deltas are superseded by the authoritative function_call_arg
   })
 })
 
-test("a duplicate output_item.added for the same item.id yields ONE tool call", async () => {
+test("a duplicate output_item.added (re-encrypted id, same output_index) yields ONE tool call", async () => {
   globalThis.fetch = mock(() =>
     sseResponse([
       ...REASONING_PROLOGUE,
       {
         type: "response.output_item.added",
         output_index: 1,
-        item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "navigate" },
+        item: { type: "function_call", id: "fc_a1", call_id: "call_1", name: "navigate" },
       },
-      // Duplicate added for the SAME item.id — must be ignored.
+      // Duplicate added for the SAME output_index but a re-encrypted id —
+      // dedup must key off output_index, not the id.
       {
         type: "response.output_item.added",
         output_index: 1,
-        item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "navigate" },
+        item: { type: "function_call", id: "fc_a2", call_id: "call_1", name: "navigate" },
       },
-      { type: "response.function_call_arguments.done", item_id: "fc_1", arguments: '{"tabId":1}' },
+      { type: "response.function_call_arguments.done", output_index: 1, item_id: "fc_done", arguments: '{"tabId":1}' },
       {
         type: "response.output_item.done",
         output_index: 1,
-        item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "navigate", arguments: '{"tabId":1}' },
+        item: { type: "function_call", id: "fc_id_done", call_id: "call_1", name: "navigate", arguments: '{"tabId":1}' },
       },
       { type: "response.completed", response: { status: "completed" } },
     ]),
@@ -322,13 +327,13 @@ test("tool item is ended at its output_item.done, before a following text block"
       {
         type: "response.output_item.added",
         output_index: 1,
-        item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "read_page" },
+        item: { type: "function_call", id: "fc_a", call_id: "call_1", name: "read_page" },
       },
-      { type: "response.function_call_arguments.delta", item_id: "fc_1", delta: '{"tabId":1}' },
+      { type: "response.function_call_arguments.delta", output_index: 1, item_id: "fc_d1", delta: '{"tabId":1}' },
       {
         type: "response.output_item.done",
         output_index: 1,
-        item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "read_page", arguments: '{"tabId":1}' },
+        item: { type: "function_call", id: "fc_id_done", call_id: "call_1", name: "read_page", arguments: '{"tabId":1}' },
       },
       // A trailing message item after the tool call.
       { type: "response.output_item.added", output_index: 2, item: { type: "message", id: "m0" } },

@@ -518,6 +518,16 @@ function joinAssistantText(
  */
 interface ResponsesSseEvent {
   type?: string
+  /**
+   * STABLE per-output-item index (reasoning=0, first function_call=1, …).
+   * Constant across output_item.added → arg deltas → arg done →
+   * output_item.done for ONE item — UNLIKE `item.id`/`item_id`, which Copilot
+   * re-encrypts on every event (verified live: 10 arg-deltas, 10 distinct
+   * item_ids, 1 output_index). This is the load-bearing key for the tool map;
+   * keying off the per-event id makes every delta lookup miss → args stay
+   * empty → the tool runs with {} → the model loops forever.
+   */
+  output_index?: number
   delta?: string
   text?: string
   arguments?: string
@@ -535,6 +545,21 @@ interface ResponsesSseEvent {
     incomplete_details?: { reason?: string }
     error?: { message?: string }
   }
+}
+
+/**
+ * The stable map key for a /responses output item: prefer `output_index`
+ * (constant per item); fall back to the opaque id only when output_index is
+ * absent (older/alt upstreams). Namespaced so a numeric index and a string id
+ * can never collide.
+ */
+function responsesToolKey(
+  outputIndex: number | undefined,
+  fallbackId: string | undefined,
+): string | undefined {
+  if (typeof outputIndex === "number") return `oi:${outputIndex}`
+  if (typeof fallbackId === "string" && fallbackId.length > 0) return `id:${fallbackId}`
+  return undefined
 }
 
 interface ResponsesUsage {
@@ -608,7 +633,10 @@ async function runResponsesStreamLoop(
   }
   let nextContentIndex = 0
   let activeTextIndex: number | null = null
-  const toolPiIndexByItemId = new Map<string, number>()
+  // Keyed by `responsesToolKey` (output_index-first), NOT the per-event
+  // item.id/item_id — Copilot re-encrypts those every event, so an id key
+  // makes every delta/done lookup miss and tool args drop to {}.
+  const toolPiIndexByKey = new Map<string, number>()
   // Tool items already closed with a `toolcall_end` at their per-item
   // `output_item.done`. The post-loop sweep skips these and only ends
   // tool calls the stream left dangling (no done event).
@@ -694,23 +722,24 @@ async function runResponsesStreamLoop(
         case "response.output_item.added": {
           const item = ev.item
           if (item?.type !== "function_call") break
-          const itemId = item.id
-          if (typeof itemId !== "string") break
-          // Dedup: a duplicate `added` for the same item.id would otherwise
+          // Key off the STABLE output_index (fall back to the opaque id only
+          // when absent). The live id is re-encrypted per event.
+          const key = responsesToolKey(ev.output_index, item.id)
+          if (key == null) break
+          // Dedup: a duplicate `added` for the same item would otherwise
           // remap its pi-index → a second toolcall_start + a dangling end.
-          // Mirrors the chat path's already-mapped guard.
-          if (toolPiIndexByItemId.has(itemId)) break
+          if (toolPiIndexByKey.has(key)) break
           // A tool call supersedes any open text block.
           closeActiveText()
           const piIdx = nextContentIndex++
-          toolPiIndexByItemId.set(itemId, piIdx)
+          toolPiIndexByKey.set(key, piIdx)
           accum.blocks.push({
             kind: "tool",
             contentIndex: piIdx,
             openaiIndex: piIdx,
           })
           accum.toolByIndex.set(piIdx, {
-            id: item.call_id ?? itemId,
+            id: item.call_id ?? item.id ?? key,
             name: item.name ?? "",
             argumentChunks: [],
           })
@@ -723,9 +752,11 @@ async function runResponsesStreamLoop(
         }
 
         case "response.function_call_arguments.delta": {
-          const itemId = ev.item_id
-          if (typeof itemId !== "string") break
-          const piIdx = toolPiIndexByItemId.get(itemId)
+          // Look up by output_index-first key (deltas carry a re-encrypted
+          // item_id that never matches what output_item.added recorded).
+          const key = responsesToolKey(ev.output_index, ev.item_id)
+          if (key == null) break
+          const piIdx = toolPiIndexByKey.get(key)
           if (piIdx == null) break
           const entry = accum.toolByIndex.get(piIdx)
           if (!entry) break
@@ -748,9 +779,9 @@ async function runResponsesStreamLoop(
           // that makePiToolCall parses to {} — the tool then runs with EMPTY
           // args (a no-op) and the model repeats the call forever. The full
           // `.done` string supersedes whatever the deltas left.
-          const itemId = ev.item_id
-          if (typeof itemId !== "string") break
-          const piIdx = toolPiIndexByItemId.get(itemId)
+          const key = responsesToolKey(ev.output_index, ev.item_id)
+          if (key == null) break
+          const piIdx = toolPiIndexByKey.get(key)
           if (piIdx == null) break
           const entry = accum.toolByIndex.get(piIdx)
           if (entry && typeof ev.arguments === "string") {
@@ -766,8 +797,10 @@ async function runResponsesStreamLoop(
           // per-item completion signal, so we don't defer to stream end —
           // that keeps lifecycle order correct when a later item follows).
           const item = ev.item
-          if (item?.type !== "function_call" || typeof item.id !== "string") break
-          const piIdx = toolPiIndexByItemId.get(item.id)
+          if (item?.type !== "function_call") break
+          const key = responsesToolKey(ev.output_index, item.id)
+          if (key == null) break
+          const piIdx = toolPiIndexByKey.get(key)
           if (piIdx == null) break
           const entry = accum.toolByIndex.get(piIdx)
           if (!entry) break
