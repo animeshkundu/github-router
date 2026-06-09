@@ -60,8 +60,8 @@ import type { Model } from "~/services/copilot/get-models"
  */
 const COMPRESSOR_FALLBACK_CHAIN: ReadonlyArray<string> = [
   "gpt-5.4-mini",
-  "claude-sonnet-4-6",
-  "claude-haiku-4-5",
+  "claude-sonnet-4.6",
+  "claude-haiku-4.5",
 ]
 
 interface CompressorBackend {

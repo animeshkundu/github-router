@@ -52,29 +52,29 @@ describe("browser-mcp compressor backend selection (endpoint-aware)", () => {
   test("prefers gpt-5.4-mini (selected for /responses) when present", () => {
     // gpt-5.4-mini is /responses-only — the chain head must still pick it.
     setCatalog([
-      model("claude-haiku-4-5"),
-      model("claude-sonnet-4-6"),
+      model("claude-haiku-4.5"),
+      model("claude-sonnet-4.6"),
       model("gpt-5.4-mini", { endpoints: ["/responses", "ws:/responses"] }),
     ])
     expect(pickBackendFromCatalog()).toBe("gpt-5.4-mini")
   })
 
-  test("falls through to claude-sonnet-4-6 when gpt-5.4-mini is absent", () => {
-    setCatalog([model("claude-sonnet-4-6"), model("claude-haiku-4-5")])
-    expect(pickBackendFromCatalog()).toBe("claude-sonnet-4-6")
+  test("falls through to claude-sonnet-4.6 when gpt-5.4-mini is absent", () => {
+    setCatalog([model("claude-sonnet-4.6"), model("claude-haiku-4.5")])
+    expect(pickBackendFromCatalog()).toBe("claude-sonnet-4.6")
   })
 
-  test("selects claude-haiku-4-5 as the last resort", () => {
-    setCatalog([model("claude-haiku-4-5")])
-    expect(pickBackendFromCatalog()).toBe("claude-haiku-4-5")
+  test("selects claude-haiku-4.5 as the last resort", () => {
+    setCatalog([model("claude-haiku-4.5")])
+    expect(pickBackendFromCatalog()).toBe("claude-haiku-4.5")
   })
 
   test("skips a chain entry that lacks tool_calls support", () => {
     setCatalog([
       model("gpt-5.4-mini", { toolCalls: false, endpoints: ["/responses"] }),
-      model("claude-sonnet-4-6"),
+      model("claude-sonnet-4.6"),
     ])
-    expect(pickBackendFromCatalog()).toBe("claude-sonnet-4-6")
+    expect(pickBackendFromCatalog()).toBe("claude-sonnet-4.6")
   })
 
   test("regression: skips a chain entry that serves NEITHER /chat/completions NOR /responses", () => {
@@ -83,9 +83,9 @@ describe("browser-mcp compressor backend selection (endpoint-aware)", () => {
     // skipped, not cached as a dead backend that 400s every call.
     setCatalog([
       model("gpt-5.4-mini", { endpoints: ["ws:/responses"] }),
-      model("claude-sonnet-4-6"),
+      model("claude-sonnet-4.6"),
     ])
-    expect(pickBackendFromCatalog()).toBe("claude-sonnet-4-6")
+    expect(pickBackendFromCatalog()).toBe("claude-sonnet-4.6")
   })
 
   test("compressorAvailable() is false when no chain entry is in the catalog", () => {

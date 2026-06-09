@@ -49,6 +49,15 @@ import type {
   ToolCall as OAIToolCall,
 } from "~/services/copilot/create-chat-completions"
 import { createChatCompletions } from "~/services/copilot/create-chat-completions"
+import {
+  createResponses,
+} from "~/services/copilot/create-responses"
+import type {
+  ResponsesInputItem,
+  ResponsesPayload,
+  ResponsesTool,
+} from "~/services/copilot/create-responses"
+import { endpointForModelId } from "~/services/copilot/endpoint"
 
 export type ResolvedThinking =
   | "off"
@@ -159,6 +168,16 @@ async function runStreamLoop(
   options: SimpleStreamOptions | undefined,
 ): Promise<void> {
   const { resolved } = opts
+
+  // Endpoint split: the gpt-5.x family (gpt-5.4-mini, gpt-5.5, *-codex) is
+  // `/responses`-only and 400s on `/chat/completions`. Route those through
+  // the parallel Responses parser; everything else keeps the chat path
+  // below byte-for-byte. `endpointForModelId` consults the live catalog's
+  // `supported_endpoints` (shared with the rest of the proxy).
+  if (endpointForModelId(resolved.modelId) === "responses") {
+    await runResponsesStreamLoop(stream, context, opts, options)
+    return
+  }
 
   let payload: ChatCompletionsPayload
   try {
@@ -476,6 +495,488 @@ function joinAssistantText(
     // top-level `tool_calls` field instead.
   }
   return s
+}
+
+// ----- /responses streaming path ---------------------------------------------
+
+/**
+ * Shape of the `/responses` streaming SSE events we consume. Captured
+ * empirically against gpt-5.4-mini (forced-tool + plain-text turns):
+ *   response.created / response.in_progress      — prologue (ignored)
+ *   response.output_item.added {item.type:reasoning}   — ignored
+ *   response.output_item.added {item.type:message}     — text block opens
+ *   response.content_part.added                  — ignored (text via deltas)
+ *   response.output_text.delta {delta}           — text delta
+ *   response.output_text.done {text}             — text block closes
+ *   response.output_item.added {item.type:function_call, name, call_id, id} — tool starts
+ *   response.function_call_arguments.delta {delta, item_id}  — arg delta
+ *   response.function_call_arguments.done {arguments, item_id} — full args
+ *   response.output_item.done {item:function_call}  — tool item closes
+ *   response.completed {response.status, usage}  — terminal (no [DONE])
+ * Arg-delta events key off the item's opaque `id` (`item_id`), NOT the
+ * `call_id`; we map id→pi-index at `output_item.added` time.
+ */
+interface ResponsesSseEvent {
+  type?: string
+  delta?: string
+  text?: string
+  arguments?: string
+  item_id?: string
+  item?: {
+    type?: string
+    id?: string
+    call_id?: string
+    name?: string
+    arguments?: string
+  }
+  response?: {
+    status?: string
+    usage?: ResponsesUsage
+    incomplete_details?: { reason?: string }
+    error?: { message?: string }
+  }
+}
+
+interface ResponsesUsage {
+  input_tokens?: number
+  output_tokens?: number
+  total_tokens?: number
+  input_tokens_details?: { cached_tokens?: number }
+}
+
+function mapResponsesUsage(
+  u: ResponsesUsage | undefined,
+): ChatCompletionChunk["usage"] | undefined {
+  if (!u) return undefined
+  return {
+    prompt_tokens: u.input_tokens ?? 0,
+    completion_tokens: u.output_tokens ?? 0,
+    total_tokens: u.total_tokens ?? 0,
+    prompt_tokens_details:
+      u.input_tokens_details?.cached_tokens != null
+        ? { cached_tokens: u.input_tokens_details.cached_tokens }
+        : undefined,
+  }
+}
+
+/**
+ * The Responses-API analogue of `runStreamLoop`'s chat body. Builds a
+ * `ResponsesPayload`, streams `/responses`, and emits the SAME Pi
+ * `AssistantMessageEventStream` protocol (start already pushed by the
+ * caller, then text / toolcall events, then done/error). Reuses the chat
+ * path's `Accumulator` + final-message helpers so the produced
+ * AssistantMessage is structurally identical regardless of endpoint.
+ */
+async function runResponsesStreamLoop(
+  stream: AssistantMessageEventStream,
+  context: Context,
+  opts: CreateCopilotStreamFnOptions,
+  options: SimpleStreamOptions | undefined,
+): Promise<void> {
+  const { resolved } = opts
+
+  let payload: ResponsesPayload
+  try {
+    payload = buildResponsesPayload(context, resolved)
+  } catch (err) {
+    pushTerminalError(stream, resolved, err)
+    return
+  }
+
+  let sseStream: AsyncIterable<{ data?: string }>
+  try {
+    const result = await createResponses(payload, undefined, options?.signal)
+    if (
+      result == null
+      || typeof (result as AsyncIterable<unknown>)[Symbol.asyncIterator]
+        !== "function"
+    ) {
+      throw new Error(
+        "Upstream did not return an SSE stream (stream: true expected)",
+      )
+    }
+    sseStream = result as AsyncIterable<{ data?: string }>
+  } catch (err) {
+    pushTerminalError(stream, resolved, err)
+    return
+  }
+
+  const accum: Accumulator = {
+    blocks: [],
+    textChunksByIndex: new Map(),
+    toolByIndex: new Map(),
+  }
+  let nextContentIndex = 0
+  let activeTextIndex: number | null = null
+  const toolPiIndexByItemId = new Map<string, number>()
+  // Tool items already closed with a `toolcall_end` at their per-item
+  // `output_item.done`. The post-loop sweep skips these and only ends
+  // tool calls the stream left dangling (no done event).
+  const closedToolItems = new Set<number>()
+
+  const closeActiveText = (): void => {
+    if (activeTextIndex == null) return
+    stream.push({
+      type: "text_end",
+      contentIndex: activeTextIndex,
+      content: joinTextChunks(accum, activeTextIndex),
+      partial: buildPartial(resolved, accum),
+    })
+    activeTextIndex = null
+  }
+
+  try {
+    for await (const evt of sseStream) {
+      const data = evt?.data
+      if (data == null) continue
+      if (data === "[DONE]") break // not emitted by /responses, but harmless
+
+      let ev: ResponsesSseEvent
+      try {
+        ev = JSON.parse(data) as ResponsesSseEvent
+      } catch {
+        continue
+      }
+
+      switch (ev.type) {
+        case "response.output_text.delta": {
+          const delta = ev.delta
+          if (typeof delta !== "string" || delta.length === 0) break
+          if (activeTextIndex == null) {
+            activeTextIndex = nextContentIndex++
+            accum.blocks.push({ kind: "text", contentIndex: activeTextIndex })
+            accum.textChunksByIndex.set(activeTextIndex, [])
+            stream.push({
+              type: "text_start",
+              contentIndex: activeTextIndex,
+              partial: buildPartial(resolved, accum),
+            })
+          }
+          accum.textChunksByIndex.get(activeTextIndex)!.push(delta)
+          stream.push({
+            type: "text_delta",
+            contentIndex: activeTextIndex,
+            delta,
+            partial: buildPartial(resolved, accum),
+          })
+          break
+        }
+
+        case "response.output_text.done": {
+          // Normally the block is already open from deltas. Guard the
+          // no-delta case (a `done` carrying the full text with no prior
+          // deltas) so the text isn't silently lost.
+          if (
+            activeTextIndex == null
+            && typeof ev.text === "string"
+            && ev.text.length > 0
+          ) {
+            activeTextIndex = nextContentIndex++
+            accum.blocks.push({ kind: "text", contentIndex: activeTextIndex })
+            accum.textChunksByIndex.set(activeTextIndex, [])
+            stream.push({
+              type: "text_start",
+              contentIndex: activeTextIndex,
+              partial: buildPartial(resolved, accum),
+            })
+            accum.textChunksByIndex.get(activeTextIndex)!.push(ev.text)
+            stream.push({
+              type: "text_delta",
+              contentIndex: activeTextIndex,
+              delta: ev.text,
+              partial: buildPartial(resolved, accum),
+            })
+          }
+          closeActiveText()
+          break
+        }
+
+        case "response.output_item.added": {
+          const item = ev.item
+          if (item?.type !== "function_call") break
+          const itemId = item.id
+          if (typeof itemId !== "string") break
+          // Dedup: a duplicate `added` for the same item.id would otherwise
+          // remap its pi-index → a second toolcall_start + a dangling end.
+          // Mirrors the chat path's already-mapped guard.
+          if (toolPiIndexByItemId.has(itemId)) break
+          // A tool call supersedes any open text block.
+          closeActiveText()
+          const piIdx = nextContentIndex++
+          toolPiIndexByItemId.set(itemId, piIdx)
+          accum.blocks.push({
+            kind: "tool",
+            contentIndex: piIdx,
+            openaiIndex: piIdx,
+          })
+          accum.toolByIndex.set(piIdx, {
+            id: item.call_id ?? itemId,
+            name: item.name ?? "",
+            argumentChunks: [],
+          })
+          stream.push({
+            type: "toolcall_start",
+            contentIndex: piIdx,
+            partial: buildPartial(resolved, accum),
+          })
+          break
+        }
+
+        case "response.function_call_arguments.delta": {
+          const itemId = ev.item_id
+          if (typeof itemId !== "string") break
+          const piIdx = toolPiIndexByItemId.get(itemId)
+          if (piIdx == null) break
+          const entry = accum.toolByIndex.get(piIdx)
+          if (!entry) break
+          const delta = ev.delta
+          if (typeof delta !== "string" || delta.length === 0) break
+          entry.argumentChunks.push(delta)
+          stream.push({
+            type: "toolcall_delta",
+            contentIndex: piIdx,
+            delta,
+            partial: buildPartial(resolved, accum),
+          })
+          break
+        }
+
+        case "response.function_call_arguments.done": {
+          // The `.done` event carries the AUTHORITATIVE full args string.
+          // OVERWRITE (not a length-gated append): if the delta stream was
+          // corrupted/partial, the accumulated chunks would be invalid JSON
+          // that makePiToolCall parses to {} — the tool then runs with EMPTY
+          // args (a no-op) and the model repeats the call forever. The full
+          // `.done` string supersedes whatever the deltas left.
+          const itemId = ev.item_id
+          if (typeof itemId !== "string") break
+          const piIdx = toolPiIndexByItemId.get(itemId)
+          if (piIdx == null) break
+          const entry = accum.toolByIndex.get(piIdx)
+          if (entry && typeof ev.arguments === "string") {
+            entry.argumentChunks = [ev.arguments]
+          }
+          break
+        }
+
+        case "response.output_item.done": {
+          // Authoritative final view of the function_call item: backfill
+          // name / call_id / args if the streaming deltas missed anything,
+          // then close the tool call HERE (the Responses API gives a clean
+          // per-item completion signal, so we don't defer to stream end —
+          // that keeps lifecycle order correct when a later item follows).
+          const item = ev.item
+          if (item?.type !== "function_call" || typeof item.id !== "string") break
+          const piIdx = toolPiIndexByItemId.get(item.id)
+          if (piIdx == null) break
+          const entry = accum.toolByIndex.get(piIdx)
+          if (!entry) break
+          if (item.call_id) entry.id = item.call_id
+          if (item.name) entry.name = item.name
+          if (typeof item.arguments === "string") {
+            // Authoritative full args — overwrite any partial delta stream
+            // (same rationale as function_call_arguments.done above).
+            entry.argumentChunks = [item.arguments]
+          }
+          stream.push({
+            type: "toolcall_end",
+            contentIndex: piIdx,
+            toolCall: makePiToolCall(entry),
+            partial: buildPartial(resolved, accum),
+          })
+          closedToolItems.add(piIdx)
+          break
+        }
+
+        case "response.completed":
+        case "response.incomplete": {
+          accum.usage = mapResponsesUsage(ev.response?.usage)
+          if (
+            ev.type === "response.incomplete"
+            && ev.response?.incomplete_details?.reason === "max_output_tokens"
+          ) {
+            accum.finishReason = "length"
+          }
+          if (opts.onChunk && accum.usage) {
+            try {
+              opts.onChunk({
+                id: "",
+                object: "chat.completion.chunk",
+                created: 0,
+                model: resolved.modelId,
+                choices: [],
+                usage: accum.usage,
+              })
+            } catch {
+              // onChunk MUST NOT break the stream — swallow.
+            }
+          }
+          break
+        }
+
+        case "response.failed": {
+          closeActiveText()
+          pushTerminalError(
+            stream,
+            resolved,
+            new Error(ev.response?.error?.message ?? "response.failed"),
+          )
+          return
+        }
+
+        default:
+          // response.created / in_progress / content_part.* / reasoning
+          // items / unknown events: nothing to emit.
+          break
+      }
+    }
+  } catch (err) {
+    pushTerminalError(stream, resolved, err)
+    return
+  }
+
+  // Close any still-open text block (defensive — output_text.done should
+  // have fired).
+  closeActiveText()
+
+  // Fallback: emit toolcall_end for any tool call the stream left
+  // dangling (no `response.output_item.done`). Calls already closed
+  // inline above are skipped to avoid a duplicate end event.
+  for (const block of accum.blocks) {
+    if (block.kind !== "tool") continue
+    if (closedToolItems.has(block.contentIndex)) continue
+    const entry = accum.toolByIndex.get(block.contentIndex)
+    if (!entry) continue
+    stream.push({
+      type: "toolcall_end",
+      contentIndex: block.contentIndex,
+      toolCall: makePiToolCall(entry),
+      partial: buildPartial(resolved, accum),
+    })
+  }
+
+  // Finish reason: tool calls → toolUse, max-tokens → length (set above),
+  // else stop. `mapFinishReason` maps the chat vocabulary we reuse here.
+  if (accum.finishReason == null) {
+    accum.finishReason = accum.blocks.some((b) => b.kind === "tool")
+      ? "tool_calls"
+      : "stop"
+  }
+  const finalMessage = buildFinalMessage(resolved, accum)
+  const reason = mapFinishReason(accum.finishReason)
+  stream.push({ type: "done", reason, message: finalMessage })
+}
+
+// ----- /responses payload construction ---------------------------------------
+
+function buildResponsesPayload(
+  context: Context,
+  resolved: ResolvedModel,
+): ResponsesPayload {
+  const input: Array<ResponsesInputItem> = []
+  for (const m of context.messages) {
+    for (const item of translateMessageToResponses(m)) input.push(item)
+  }
+
+  const payload: ResponsesPayload = {
+    model: resolved.modelId,
+    input,
+    stream: true,
+  }
+  if (context.systemPrompt) payload.instructions = context.systemPrompt
+  const tools = translateToolsToResponses(context.tools)
+  if (tools && tools.length > 0) {
+    payload.tools = tools
+    payload.tool_choice = "auto"
+  }
+  if (resolved.thinking !== "off") {
+    payload.reasoning = { effort: resolved.thinking }
+  }
+  return payload
+}
+
+function translateMessageToResponses(m: PiMessage): Array<ResponsesInputItem> {
+  if (m.role === "user") return translateUserToResponses(m)
+  if (m.role === "assistant") return translateAssistantToResponses(m)
+  if (m.role === "toolResult") {
+    return [
+      {
+        type: "function_call_output",
+        call_id: m.toolCallId,
+        output: joinTextParts(m.content),
+      },
+    ]
+  }
+  return []
+}
+
+function translateUserToResponses(
+  m: Extract<PiMessage, { role: "user" }>,
+): Array<ResponsesInputItem> {
+  if (typeof m.content === "string") {
+    return [{ role: "user", content: m.content }]
+  }
+  const hasImage = m.content.some((c) => c.type === "image")
+  if (!hasImage) {
+    return [{ role: "user", content: joinTextParts(m.content) }]
+  }
+  const parts: Array<Record<string, unknown>> = []
+  for (const c of m.content) {
+    if (c.type === "text") {
+      parts.push({ type: "input_text", text: c.text })
+    } else if (c.type === "image") {
+      parts.push({
+        type: "input_image",
+        image_url: `data:${c.mimeType};base64,${c.data}`,
+      })
+    }
+  }
+  return [{ role: "user", content: parts }]
+}
+
+function translateAssistantToResponses(
+  m: Extract<PiMessage, { role: "assistant" }>,
+): Array<ResponsesInputItem> {
+  // Preserve the original text/toolCall ordering: flush the pending text
+  // buffer as a message item whenever a tool call is reached, so an
+  // assistant turn like [text, call, text, call] round-trips in order
+  // instead of collapsing into one text blob followed by all calls.
+  const items: Array<ResponsesInputItem> = []
+  let buffer = ""
+  const flush = (): void => {
+    if (buffer.length === 0) return
+    items.push({ role: "assistant", content: [{ type: "output_text", text: buffer }] })
+    buffer = ""
+  }
+  for (const c of m.content) {
+    if (c.type === "text") {
+      buffer += c.text
+    } else if (c.type === "toolCall") {
+      flush()
+      items.push({
+        type: "function_call",
+        call_id: c.id,
+        name: c.name,
+        arguments: JSON.stringify(c.arguments ?? {}),
+      })
+    }
+    // thinking parts are dropped — the Responses API doesn't accept them
+    // as replayed input.
+  }
+  flush()
+  return items
+}
+
+function translateToolsToResponses(
+  tools: ReadonlyArray<PiTool> | undefined,
+): Array<ResponsesTool> | undefined {
+  if (!tools || tools.length === 0) return undefined
+  return tools.map((t) => ({
+    type: "function",
+    name: t.name,
+    description: t.description,
+    parameters: t.parameters as unknown as Record<string, unknown>,
+  }))
 }
 
 // ----- message + event helpers -----------------------------------------------

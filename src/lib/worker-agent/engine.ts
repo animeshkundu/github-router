@@ -65,6 +65,7 @@
  */
 
 import { realpathSync } from "node:fs"
+import process from "node:process"
 
 import { Agent } from "@earendil-works/pi-agent-core"
 import type {
@@ -88,9 +89,10 @@ import {
 } from "./lifecycle"
 import { resolveModelAndThinking } from "./model-resolve"
 import { systemPromptFor } from "./prompts"
-import { logAudit } from "./redact"
+import { type AuditCtx, logAudit } from "./redact"
 import { acquireWorkerSlot } from "./semaphore"
 import { createCopilotStreamFn } from "./stream-fn"
+import { buildBrowseTools } from "./browse-tools"
 import { buildWorkerTools } from "./tools"
 import type {
   WorkerAgentOpts,
@@ -124,6 +126,23 @@ registerExitHandlers(WORKTREE_REGISTRY)
  *  ship a tool whose docs disagree with its runtime default. */
 export const DEFAULT_MODEL = "gemini-3.1-pro-preview"
 const DEFAULT_THINKING: WorkerThinkingLevel = "high"
+
+/** Default model for `browse` mode. `gpt-5.4-mini` — the Gate-B-winning
+ *  browse model (small + fast enough to drive a tab at human pace, with
+ *  enough tool-calling discipline to terminate). This is DISTINCT from the
+ *  gemini worker `DEFAULT_MODEL`: browse is a different workload (drive a
+ *  page, not read a repo) and was tuned separately. May be retuned after
+ *  the flash-vs-mini eval settles. Routed through `/responses` by the
+ *  stream-fn's endpoint split (it's a gpt-5.x model). Caller can override
+ *  per call via the `model` arg.
+ *
+ *  Exported so the MCP browse handler reads the same constant — drift
+ *  between the two would ship a tool whose docs disagree with its runtime
+ *  default. */
+export const BROWSE_DEFAULT_MODEL = "gpt-5.4-mini"
+/** Default thinking for `browse`. Higher than the page-driving workload
+ *  strictly needs, but the termination discipline benefits from it. */
+const BROWSE_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 
 /**
  * `Model<any>` shim used to satisfy `Agent.initialState.model` typing.
@@ -230,9 +249,15 @@ export async function runWorkerAgent(
     // returns a Result; on `ok:false` we emit the diagnostic verbatim
     // (it already enumerates the catalog's tool_call-capable models
     // on unknown-model errors, so the caller knows what to retry with).
+    //
+    // Browse mode picks a DIFFERENT default model (`BROWSE_DEFAULT_MODEL`)
+    // than the gemini worker default — the workload (drive a tab) is
+    // distinct from reading a repo. An explicit `opts.model` still wins.
+    const isBrowse = opts.mode === "browse"
     const resolved = resolveModelAndThinking({
-      model: opts.model ?? DEFAULT_MODEL,
-      thinking: opts.thinking ?? DEFAULT_THINKING,
+      model: opts.model ?? (isBrowse ? BROWSE_DEFAULT_MODEL : DEFAULT_MODEL),
+      thinking:
+        opts.thinking ?? (isBrowse ? BROWSE_DEFAULT_THINKING : DEFAULT_THINKING),
     })
     if (!resolved.ok) {
       return { text: resolved.error, isError: true }
@@ -244,9 +269,22 @@ export async function runWorkerAgent(
     // here is cheaper than realpathing on every tool call and keeps
     // the trailing-separator check honest on macOS (`/var` →
     // `/private/var`) and Windows (junction-resolved drive letters).
+    //
+    // Browse doesn't use the filesystem — its tools drive a real browser
+    // and ignore `ws.dir`. So an omitted `browse` workspace defaults to
+    // `process.cwd()` purely to keep canonicalization (and the no-worktree
+    // handle) happy; the value is never read by the browse tools.
+    const workspaceInput =
+      opts.workspace ?? (isBrowse ? process.cwd() : undefined)
+    if (workspaceInput === undefined) {
+      return {
+        text: "workspace not accessible: a workspace path is required",
+        isError: true,
+      }
+    }
     let workspaceAbs: string
     try {
-      workspaceAbs = realpathSync.native(opts.workspace)
+      workspaceAbs = realpathSync.native(workspaceInput)
     } catch (err) {
       return {
         text: `workspace not accessible: ${(err as Error).message}`,
@@ -289,10 +327,19 @@ export async function runWorkerAgent(
     // grep/code_search/web_search/fetch_url; implement adds edit/write/
     // bash/codex_review). No remaining tool needs the transcript, so
     // `getMessages` is no longer threaded through.
-    const tools = buildWorkerTools({
-      mode: opts.mode,
-      workspace: ws.dir,
-    })
+    //
+    // Browse mode swaps the filesystem toolset for the browser-control
+    // tools (`buildBrowseTools`), scoped to the caller's browse session so
+    // the tools enforce per-session tab ownership. The else-branch narrows
+    // `opts.mode` to the three filesystem modes (browse is excluded by the
+    // ternary), so `buildWorkerTools` keeps its narrower mode type.
+    const tools =
+      opts.mode === "browse"
+        ? buildBrowseTools({ sessionId: opts.sessionId })
+        : buildWorkerTools({
+            mode: opts.mode,
+            workspace: ws.dir,
+          })
 
     // Step 7: Agent. `streamFn` is the routing override (per Pi docs
     // and our verified facts in the plan, this is the documented hook
@@ -318,8 +365,12 @@ export async function runWorkerAgent(
         // Audit FIRST — even blocked calls should be visible to the
         // operator (otherwise a budget-exhausted run looks silent).
         // logAudit catches its own errors so it can't break the loop.
+        // The `mode` cast is type-only: `AuditCtx["mode"]` predates the
+        // `"browse"` mode; the runtime value is forwarded verbatim, so the
+        // audit line reads `mode=browse` correctly. (Widening AuditCtx in
+        // redact.ts would drop the cast — left to that file's owner.)
         logAudit({
-          mode: opts.mode,
+          mode: opts.mode as AuditCtx["mode"],
           tool: ctx.toolCall.name,
           args: ctx.args,
           workspace: ws.dir,
