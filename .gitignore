@@ -18,3 +18,5 @@ dist/
 # untracked-file copy from descending into agent worktrees (which can hold
 # live sockets -> ENOTSUP on copyfile).
 .claude/
+# gate-b fixture server writes this at runtime (live ports) — never commit
+tests/fixtures/browser/manifest.runtime.json

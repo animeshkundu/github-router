@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Long Page</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 24px;
+           background: #fafafa; color: #1a1a1a; max-width: 720px; }
+    ul { list-style: none; padding: 0; margin: 16px 0; }
+    li { padding: 8px 10px; border-bottom: 1px solid #eee; font-size: 14px; }
+    li .label { font-weight: 600; margin-right: 8px; }
+    li.target { background: #fff8e1; border: 2px solid #f1c40f; border-radius: 6px; }
+    .count { color: #666; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Long list</h1>
+  <p class="count">This list contains <strong id="item-count">0</strong> items. Most
+     reading tools cap a single page snapshot well below this, so the item you need may
+     be off-screen until you scroll. Each item is labelled <code>Item-N</code>.</p>
+  <ul id="item-list" aria-label="item list"></ul>
+
+  <script>
+    // 800 list items are generated at load. Only Item-757 carries a unique, greppable
+    // value; it is base64-encoded here so the value is not trivially lifted from the
+    // page source. Item-757 sits far below the snapshot element/byte cap, so an agent
+    // must scroll / re-read (or otherwise handle truncation) to reach it.
+    (function () {
+      var TARGET_INDEX = 757;
+      var TARGET_ENC = "SVRNX2EyMDlmNA=="; // base64("<Item-757 value>")
+      var TOTAL = 800;
+      var list = document.getElementById("item-list");
+      var frag = document.createDocumentFragment();
+      for (var i = 1; i <= TOTAL; i++) {
+        var li = document.createElement("li");
+        li.id = "item-" + i;
+        var label = document.createElement("span");
+        label.className = "label";
+        label.textContent = "Item-" + i;
+        var value = document.createElement("span");
+        value.className = "value";
+        if (i === TARGET_INDEX) {
+          li.className = "target";
+          li.setAttribute("data-role", "target-item");
+          value.textContent = atob(TARGET_ENC);
+        } else {
+          // Filler value with no unique token, so scoring can't be satisfied by a
+          // lucky grep of a non-target row.
+          value.textContent = "filler-row-no-unique-value";
+        }
+        li.appendChild(label);
+        li.appendChild(value);
+        frag.appendChild(li);
+      }
+      list.appendChild(frag);
+      document.getElementById("item-count").textContent = String(TOTAL);
+      document.body.setAttribute("data-items-rendered", String(TOTAL));
+    })();
+  </script>
+</body>
+</html>

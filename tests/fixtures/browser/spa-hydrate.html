@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SPA Hydration</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 24px;
+           background: #fafafa; color: #1a1a1a; max-width: 720px; }
+    #app { margin-top: 16px; padding: 16px; border: 1px solid #ddd;
+           border-radius: 10px; background: #fff; min-height: 60px; }
+    .spinner { color: #888; font-style: italic; }
+    .marker { font-size: 20px; font-weight: 700; padding: 12px;
+              border: 2px solid #1e8449; border-radius: 8px;
+              background: #fff; display: inline-block; }
+  </style>
+</head>
+<body>
+  <h1>Single-page app</h1>
+  <p>This app renders nothing useful on first paint. Content hydrates asynchronously
+     about 1.5 seconds after load. An agent that reads once, too early, sees only the
+     loading state and must wait and re-read.</p>
+  <div id="app">
+    <span class="spinner" id="loading-state">Loading content…</span>
+  </div>
+
+  <script>
+    // The hydrated marker is base64-encoded so it is absent from the initial HTML
+    // source. It is decoded and injected into the DOM only after the simulated
+    // hydration delay, so a too-early read (or a source grep) will not find it.
+    (function () {
+      var ENC = "SFlEXzNjOGE0Zg=="; // base64("<hydratedText>")
+      var HYDRATE_DELAY_MS = 1500;
+      setTimeout(function () {
+        var app = document.getElementById("app");
+        app.innerHTML = "";
+        var box = document.createElement("div");
+        box.className = "marker";
+        box.id = "hydrated-content";
+        box.setAttribute("data-role", "hydrated-text");
+        box.textContent = atob(ENC);
+        app.appendChild(box);
+        document.body.setAttribute("data-hydrated", "true");
+      }, HYDRATE_DELAY_MS);
+    })();
+  </script>
+</body>
+</html>
