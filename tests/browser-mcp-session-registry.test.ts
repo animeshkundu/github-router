@@ -21,10 +21,12 @@ import {
   assertSessionOwnsTab,
   browseSessionCount,
   browseSessionTabs,
+  acquireBrowseSession,
   closeBrowseSession,
   createBrowseSession,
   hasBrowseSession,
   recordSessionTab,
+  releaseBrowseSession,
   releaseSessionTab,
   type CloseTabDispatch,
 } from "../src/lib/browser-mcp/session-registry"
@@ -137,17 +139,66 @@ describe("session registry core", () => {
 // ============================================================
 
 describe("session cap", () => {
-  test("default cap is 6; the 7th create throws a clear error", () => {
-    for (let i = 0; i < 6; i++) createBrowseSession()
+  test("at the cap, a new create evicts the LRU idle session (no throw)", () => {
+    const first = createBrowseSession()
+    for (let i = 0; i < 5; i++) createBrowseSession()
     expect(browseSessionCount()).toBe(6)
-    expect(() => createBrowseSession()).toThrow("browse session cap reached (6")
+    // 7th create: oldest idle (`first`) is evicted to make room; count holds.
+    const seventh = createBrowseSession()
+    expect(browseSessionCount()).toBe(6)
+    expect(hasBrowseSession(first)).toBe(false)
+    expect(hasBrowseSession(seventh)).toBe(true)
   })
 
-  test("GH_ROUTER_BROWSE_MAX_SESSIONS overrides the cap", () => {
+  test("evicts the LEAST-RECENTLY-USED idle session, not just the oldest", () => {
+    process.env.GH_ROUTER_BROWSE_MAX_SESSIONS = "2"
+    const a = createBrowseSession()
+    const b = createBrowseSession()
+    // Touch `a` so it's more recently used than `b` despite being older.
+    acquireBrowseSession(a)
+    releaseBrowseSession(a)
+    const c = createBrowseSession()
+    expect(hasBrowseSession(a)).toBe(true) // recently used → survives
+    expect(hasBrowseSession(b)).toBe(false) // LRU → evicted
+    expect(hasBrowseSession(c)).toBe(true)
+  })
+
+  test("never evicts an in-flight session; throws when all are in use", () => {
+    process.env.GH_ROUTER_BROWSE_MAX_SESSIONS = "2"
+    const a = createBrowseSession()
+    const b = createBrowseSession()
+    acquireBrowseSession(a)
+    acquireBrowseSession(b)
+    // Both in-flight → no idle victim → genuine backpressure.
+    expect(() => createBrowseSession()).toThrow(
+      "browse session cap reached (2 active, all in use)",
+    )
+    // Releasing one makes it evictable again.
+    releaseBrowseSession(a)
+    const c = createBrowseSession()
+    expect(hasBrowseSession(a)).toBe(false) // released → evicted
+    expect(hasBrowseSession(b)).toBe(true) // still in-flight → kept
+    expect(hasBrowseSession(c)).toBe(true)
+  })
+
+  test("a ref-counted session stays in-flight until the last release", () => {
+    process.env.GH_ROUTER_BROWSE_MAX_SESSIONS = "1"
+    const a = createBrowseSession()
+    acquireBrowseSession(a)
+    acquireBrowseSession(a) // two concurrent drivers
+    releaseBrowseSession(a) // one finishes; still in-flight
+    expect(() => createBrowseSession()).toThrow("all in use")
+    releaseBrowseSession(a) // last finishes; now idle
+    expect(() => createBrowseSession()).not.toThrow()
+    expect(hasBrowseSession(a)).toBe(false)
+  })
+
+  test("GH_ROUTER_BROWSE_MAX_SESSIONS sizes the cap", () => {
     process.env.GH_ROUTER_BROWSE_MAX_SESSIONS = "2"
     createBrowseSession()
     createBrowseSession()
-    expect(() => createBrowseSession()).toThrow("browse session cap reached (2")
+    createBrowseSession() // evicts LRU idle rather than growing past 2
+    expect(browseSessionCount()).toBe(2)
   })
 
   test("invalid env value falls back to the default", () => {
@@ -158,11 +209,28 @@ describe("session cap", () => {
   test("closing a session frees a cap slot", () => {
     process.env.GH_ROUTER_BROWSE_MAX_SESSIONS = "1"
     const s = createBrowseSession()
-    expect(() => createBrowseSession()).toThrow()
+    acquireBrowseSession(s) // in-flight → next create can't evict it
+    expect(() => createBrowseSession()).toThrow("all in use")
     return closeBrowseSession(s, async () => okEnvelope({ closed: 1 })).then(() => {
       expect(browseSessionCount()).toBe(0)
       expect(() => createBrowseSession()).not.toThrow()
     })
+  })
+
+  test("acquire/release on an unknown session id is a safe no-op (no orphan tracking)", () => {
+    acquireBrowseSession("ghost")
+    releaseBrowseSession("ghost")
+    expect(hasBrowseSession("ghost")).toBe(false)
+    expect(browseSessionCount()).toBe(0)
+    // The ghost id never occupies or protects a slot: at the cap the next
+    // create still evicts a REAL idle session, unaffected by the ghost.
+    process.env.GH_ROUTER_BROWSE_MAX_SESSIONS = "1"
+    const a = createBrowseSession()
+    acquireBrowseSession("ghost") // still a no-op
+    const b = createBrowseSession() // evicts the only idle real session (a)
+    expect(hasBrowseSession(a)).toBe(false)
+    expect(hasBrowseSession(b)).toBe(true)
+    expect(browseSessionCount()).toBe(1)
   })
 })
 

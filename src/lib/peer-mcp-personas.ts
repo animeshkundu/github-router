@@ -33,8 +33,10 @@ import { runSemanticSearch } from "./colbert/runner"
 // longer closes and a normal static import works.
 import { BROWSER_TOOLS } from "~/lib/browser-mcp"
 import {
+  acquireBrowseSession,
   createBrowseSession,
   hasBrowseSession,
+  releaseBrowseSession,
 } from "~/lib/browser-mcp/session-registry"
 import { runWorkerAgent, type WorkerThinkingLevel } from "~/lib/worker-agent"
 import { searchWeb } from "~/services/copilot/web-search"
@@ -1941,13 +1943,23 @@ async function runBrowseToolCall(
     }
   }
 
-  const result = await runWorkerAgent({
-    mode: "browse",
-    prompt: task,
-    sessionId,
-    workspace,
-    signal,
-  })
+  // Mark the session in-flight SYNCHRONOUSLY here — no `await` between
+  // resolving `sessionId` above and this acquire — so a concurrent
+  // `createBrowseSession` at the cap can't pick this just-resolved session as
+  // its LRU-evict victim while we're about to drive it. Released in `finally`.
+  acquireBrowseSession(sessionId)
+  let result: { text: string; isError?: boolean }
+  try {
+    result = await runWorkerAgent({
+      mode: "browse",
+      prompt: task,
+      sessionId,
+      workspace,
+      signal,
+    })
+  } finally {
+    releaseBrowseSession(sessionId)
+  }
 
   // Echo the session id so the caller can continue (or inspect) this
   // session on a later call via the `sessionId` arg. Appended regardless of

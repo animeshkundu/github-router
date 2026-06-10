@@ -79,26 +79,131 @@ const sessions = new Map<string, Set<number>>()
  */
 const tabOwners = new Map<number, string>()
 
+/**
+ * sessionId → number of in-flight browse runs currently driving it. A session
+ * is "in use" (never evictable) while this is > 0. Ref-counted so a session
+ * continued by two concurrent calls isn't freed when the first finishes.
+ * Absent ⇒ 0. The cap-eviction (`lruIdleSession`) skips any session in here.
+ */
+const inFlight = new Map<string, number>()
+
+/**
+ * sessionId → monotonic last-use sequence (NOT a wall-clock — `Date.now`
+ * throws in some contexts here). Bumped on create and on every
+ * `acquireBrowseSession`, so the cap victim is the least-recently-DRIVEN idle
+ * session, not merely the oldest-created.
+ */
+const lastUsedSeq = new Map<string, number>()
+let useSeq = 0
+
+function touchSession(sessionId: string): void {
+  lastUsedSeq.set(sessionId, ++useSeq)
+}
+
 // ============================================================
 // Session lifecycle
 // ============================================================
 
 /**
- * Create a new browse session and return its id. Enforces the
- * `GH_ROUTER_BROWSE_MAX_SESSIONS` cap (throws a clear error when the cap
- * is already reached — the caller should close a session or raise the cap).
+ * Create a new browse session and return its id. At the
+ * `GH_ROUTER_BROWSE_MAX_SESSIONS` cap, evict the least-recently-used IDLE
+ * session to make room (persistent-session + LRU-evict policy) rather than
+ * failing the call. Only sessions with NO in-flight run are evictable, so a
+ * session a parallel browse call is actively driving is never torn out. When
+ * every session is in-flight there is nothing safe to evict — that is genuine
+ * backpressure, so we throw (the caller surfaces it as an actionable error).
  */
 export function createBrowseSession(): string {
   const cap = maxSessions()
   if (sessions.size >= cap) {
-    throw new Error(
-      `browse session cap reached (${cap} active); close a session or raise `
-        + "GH_ROUTER_BROWSE_MAX_SESSIONS.",
-    )
+    const victim = lruIdleSession()
+    if (victim === undefined) {
+      throw new Error(
+        `browse session cap reached (${cap} active, all in use); retry when a `
+          + "session frees, or raise GH_ROUTER_BROWSE_MAX_SESSIONS.",
+      )
+    }
+    evictForCapacity(victim)
   }
   const id = randomUUID()
   sessions.set(id, new Set<number>())
+  touchSession(id)
   return id
+}
+
+/**
+ * The least-recently-used session with no in-flight run, or `undefined` when
+ * every session is currently being driven. Picks the idle entry with the
+ * smallest last-use sequence.
+ */
+function lruIdleSession(): string | undefined {
+  let victim: string | undefined
+  let victimSeq = Number.POSITIVE_INFINITY
+  for (const id of sessions.keys()) {
+    if ((inFlight.get(id) ?? 0) > 0) continue
+    const seq = lastUsedSeq.get(id) ?? 0
+    if (seq < victimSeq) {
+      victimSeq = seq
+      victim = id
+    }
+  }
+  return victim
+}
+
+/**
+ * Synchronously evict `sessionId` to free a cap slot: drop it from the
+ * registry NOW (so the slot is free before the caller's `sessions.set`, with
+ * no `await` in between — keeps create race-free under concurrent calls),
+ * then best-effort close its tabs in the background. The victim is always
+ * idle (see `lruIdleSession`), so no in-flight run can be reading its tabs.
+ */
+function evictForCapacity(sessionId: string): void {
+  const set = sessions.get(sessionId)
+  if (!set) return
+  const tabIds = [...set]
+  sessions.delete(sessionId)
+  for (const tabId of tabIds) {
+    if (tabOwners.get(tabId) === sessionId) tabOwners.delete(tabId)
+  }
+  inFlight.delete(sessionId)
+  lastUsedSeq.delete(sessionId)
+  if (tabIds.length > 0) void closeTabsBestEffort(tabIds)
+}
+
+/** Best-effort background tab close for an evicted session; never throws. */
+async function closeTabsBestEffort(tabIds: Array<number>): Promise<void> {
+  for (const tabId of tabIds) {
+    try {
+      await dispatchBrowserTool("browser_close_tab", { tabIds: [tabId] })
+    } catch {
+      /* best-effort: an orphaned browser tab is cosmetic; the slot is freed */
+    }
+  }
+}
+
+/**
+ * Mark a browse session as in-flight (a run is actively driving it) so
+ * cap-eviction can't reclaim it. Ref-counted. The caller MUST invoke this
+ * SYNCHRONOUSLY right after resolving the session id — with no `await` between
+ * resolution and acquisition — so a concurrent `createBrowseSession` can't
+ * evict the just-resolved session in the gap. Pair with `releaseBrowseSession`
+ * in a `finally`. A no-op-safe touch keeps the LRU order fresh.
+ */
+export function acquireBrowseSession(sessionId: string): void {
+  // Guard against orphan tracking entries: an unknown id (misuse, or a
+  // session evicted out from under a caller) must NOT seed `inFlight` /
+  // `lastUsedSeq`, since `lruIdleSession`/`evictForCapacity` only walk live
+  // `sessions` keys and would never reclaim those orphans.
+  if (!sessions.has(sessionId)) return
+  inFlight.set(sessionId, (inFlight.get(sessionId) ?? 0) + 1)
+  touchSession(sessionId)
+}
+
+/** Release one in-flight hold; the session is evictable again at 0. */
+export function releaseBrowseSession(sessionId: string): void {
+  const n = inFlight.get(sessionId) ?? 0
+  if (n <= 1) inFlight.delete(sessionId)
+  else inFlight.set(sessionId, n - 1)
 }
 
 /** True iff `sessionId` is a live session. */
@@ -209,6 +314,8 @@ export async function closeBrowseSession(
       if (tabOwners.get(tabId) === sessionId) tabOwners.delete(tabId)
     }
     sessions.delete(sessionId)
+    inFlight.delete(sessionId)
+    lastUsedSeq.delete(sessionId)
   }
 }
 
@@ -249,6 +356,8 @@ const sigtermHandler = (): void => {
 const exitHandler = (): void => {
   sessions.clear()
   tabOwners.clear()
+  inFlight.clear()
+  lastUsedSeq.clear()
 }
 
 process.on("SIGINT", sigintHandler)
@@ -270,6 +379,9 @@ export const __testExports = {
   reset(): void {
     sessions.clear()
     tabOwners.clear()
+    inFlight.clear()
+    lastUsedSeq.clear()
+    useSeq = 0
   },
   /** Remove the process-exit handlers (so a test process doesn't accumulate them). */
   unregisterExitHandlers(): void {
