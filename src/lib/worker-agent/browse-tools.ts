@@ -394,6 +394,43 @@ export function isBrowseTerminalTool(name: string): boolean {
   return BROWSE_TERMINAL_TOOL_NAMES.has(name)
 }
 
+/**
+ * Render a terminal tool's validated args into the human-readable answer the
+ * browse run returns to its caller.
+ *
+ * Load-bearing: the agent finishes by CALLING a terminal tool, so its answer
+ * lives in the tool-call ARGS, not in any assistant text. The terminal turn's
+ * assistant message is just the tool call (stopReason=toolUse, usually no
+ * text), so without this the engine would see empty `finalText` and report
+ * "[worker exited with no output]" on a perfectly successful run. The engine
+ * captures the args in `beforeToolCall` and routes them through here.
+ *
+ * Returns "" only when the model called a terminal with an empty payload; the
+ * engine treats that as "no answer" and falls back to assistant text.
+ */
+export function formatBrowseTerminalAnswer(name: string, args: unknown): string {
+  const a = argsRecord(args)
+  const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "")
+
+  if (name === REPORT_INSUFFICIENT_TOOL) {
+    const reason = str(a.reason)
+    const partial = str(a.partial)
+    const head = reason
+      ? `Insufficient evidence: ${reason}`
+      : "Insufficient evidence: the requested value was not found on the page."
+    return partial
+      ? `${head}\n\nPartial (NOT the requested value): ${partial}`
+      : head
+  }
+
+  // submit_answer
+  const answer = str(a.answer)
+  const evidence = str(a.evidence)
+  if (!answer) return ""
+  const head = str(a.status) === "blocked" ? `Blocked: ${answer}` : answer
+  return evidence ? `${head}\n\nEvidence: ${evidence}` : head
+}
+
 const SUBMIT_ANSWER_SCHEMA = {
   type: "object",
   required: ["status", "answer", "evidence"],

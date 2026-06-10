@@ -26,6 +26,7 @@ import {
   __testExports,
   BROWSE_TERMINAL_TOOL_NAMES,
   buildBrowseTools,
+  formatBrowseTerminalAnswer,
   isBrowseTerminalTool,
   REPORT_INSUFFICIENT_TOOL,
   SUBMIT_ANSWER_TOOL,
@@ -259,6 +260,78 @@ describe("synthetic terminal tools", () => {
     expect(isBrowseTerminalTool("navigate")).toBe(false)
     expect([...BROWSE_TERMINAL_TOOL_NAMES].sort()).toEqual(
       [REPORT_INSUFFICIENT_TOOL, SUBMIT_ANSWER_TOOL].sort(),
+    )
+  })
+})
+
+describe("formatBrowseTerminalAnswer (engine surfaces the terminal payload)", () => {
+  // The agent finishes by CALLING a terminal tool, so its answer is in the
+  // tool args — NOT in assistant text. Without this formatter the engine saw
+  // empty text and returned "[worker exited with no output]" on success.
+  test("submit_answer complete: answer + evidence", () => {
+    expect(
+      formatBrowseTerminalAnswer(SUBMIT_ANSWER_TOOL, {
+        status: "complete",
+        answer: "XOM_7f3a91",
+        evidence: "cross-origin frame",
+      }),
+    ).toBe("XOM_7f3a91\n\nEvidence: cross-origin frame")
+  })
+
+  test("submit_answer blocked: prefixes the blocker", () => {
+    expect(
+      formatBrowseTerminalAnswer(SUBMIT_ANSWER_TOOL, {
+        status: "blocked",
+        answer: "Cloudflare Turnstile challenge",
+        evidence: "full-page interstitial",
+      }),
+    ).toBe("Blocked: Cloudflare Turnstile challenge\n\nEvidence: full-page interstitial")
+  })
+
+  test("submit_answer without evidence omits the Evidence line", () => {
+    expect(
+      formatBrowseTerminalAnswer(SUBMIT_ANSWER_TOOL, {
+        status: "complete",
+        answer: "42",
+        evidence: "",
+      }),
+    ).toBe("42")
+  })
+
+  test("report_insufficient: honest no-data outcome", () => {
+    expect(
+      formatBrowseTerminalAnswer(REPORT_INSUFFICIENT_TOOL, {
+        reason: "no phone number in any frame or footer",
+      }),
+    ).toBe("Insufficient evidence: no phone number in any frame or footer")
+  })
+
+  test("report_insufficient with partial labels it as NOT the answer", () => {
+    expect(
+      formatBrowseTerminalAnswer(REPORT_INSUFFICIENT_TOOL, {
+        reason: "no support phone present",
+        partial: "a generic contact form",
+      }),
+    ).toBe(
+      "Insufficient evidence: no support phone present\n\n" +
+        "Partial (NOT the requested value): a generic contact form",
+    )
+  })
+
+  test("empty answer returns '' so the engine falls back to assistant text", () => {
+    expect(
+      formatBrowseTerminalAnswer(SUBMIT_ANSWER_TOOL, {
+        status: "complete",
+        answer: "",
+        evidence: "",
+      }),
+    ).toBe("")
+  })
+
+  test("non-object / missing args degrade gracefully (no throw)", () => {
+    expect(formatBrowseTerminalAnswer(SUBMIT_ANSWER_TOOL, null)).toBe("")
+    expect(formatBrowseTerminalAnswer(REPORT_INSUFFICIENT_TOOL, undefined)).toBe(
+      "Insufficient evidence: the requested value was not found on the page.",
     )
   })
 })

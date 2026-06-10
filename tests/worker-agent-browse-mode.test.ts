@@ -109,6 +109,40 @@ function sseFinalText(text: string): Response {
   })
 }
 
+/**
+ * "Model calls one tool then finishes (finish_reason=tool_calls)" — the shape
+ * Pi's chat stream-fn parses into a tool call. The browse terminal tools
+ * (`submit_answer` / `report_insufficient`) set `terminate:true`, so the loop
+ * stops after this single turn with the answer living in the tool ARGS.
+ */
+function sseToolCall(name: string, args: Record<string, unknown>): Response {
+  const body =
+    `data: ${JSON.stringify({
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: "call_1",
+                type: "function",
+                function: { name, arguments: JSON.stringify(args) },
+              },
+            ],
+          },
+          finish_reason: null,
+        },
+      ],
+    })}\n\n` +
+    `data: ${JSON.stringify({
+      choices: [{ delta: {}, finish_reason: "tool_calls" }],
+    })}\n\n` +
+    "data: [DONE]\n\n"
+  return new Response(body, {
+    headers: { "content-type": "text/event-stream" },
+  })
+}
+
 interface CapturedBody {
   model?: string
   tools?: Array<{ type: string; function: { name: string } }>
@@ -323,6 +357,70 @@ describe("browse mode workspace + worktree handling", () => {
       expect(r.text).not.toMatch(/not a repository|worktree/i)
     } finally {
       rmSync(nonGit, { recursive: true, force: true })
+    }
+  })
+})
+
+// ============================================================
+// Terminal-answer surfacing (regression: "[exited with no output]")
+// ============================================================
+
+describe("browse mode surfaces the terminal tool's answer", () => {
+  // The browse agent finishes by CALLING `submit_answer` /
+  // `report_insufficient` — its answer is the tool ARGS, not assistant text.
+  // The terminal turn's assistant message is just the tool call (empty text,
+  // stopReason=toolUse), so before the engine captured the args a successful
+  // run returned "[worker exited with no output]". These pin the capture.
+  test("submit_answer payload becomes result.text (not '[no output]')", async () => {
+    const { fetchMock } = recordingFetch(() =>
+      sseToolCall("submit_answer", {
+        status: "complete",
+        answer: "Top story: macOS Container Machines",
+        evidence: "Hacker News front page, row 1",
+      }),
+    )
+    globalThis.fetch = fetchMock
+
+    const dir = tmpDir("terminal")
+    try {
+      const before = __getInFlightForTests()
+      const r = await runWorkerAgent({
+        prompt: "report the top story",
+        mode: "browse",
+        workspace: dir,
+      })
+      expect(r.isError).toBeUndefined()
+      expect(r.text).toBe(
+        "Top story: macOS Container Machines\n\nEvidence: Hacker News front page, row 1",
+      )
+      expect(r.text).not.toContain("exited with no output")
+      expect(__getInFlightForTests()).toBe(before)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("report_insufficient payload becomes result.text", async () => {
+    const { fetchMock } = recordingFetch(() =>
+      sseToolCall("report_insufficient", {
+        reason: "no price shown in any frame on the page",
+      }),
+    )
+    globalThis.fetch = fetchMock
+
+    const dir = tmpDir("insufficient")
+    try {
+      const r = await runWorkerAgent({
+        prompt: "find the price",
+        mode: "browse",
+        workspace: dir,
+      })
+      expect(r.isError).toBeUndefined()
+      expect(r.text).toBe(
+        "Insufficient evidence: no price shown in any frame on the page",
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })

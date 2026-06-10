@@ -92,7 +92,11 @@ import { systemPromptFor } from "./prompts"
 import { type AuditCtx, logAudit } from "./redact"
 import { acquireWorkerSlot } from "./semaphore"
 import { createCopilotStreamFn } from "./stream-fn"
-import { buildBrowseTools } from "./browse-tools"
+import {
+  buildBrowseTools,
+  formatBrowseTerminalAnswer,
+  isBrowseTerminalTool,
+} from "./browse-tools"
 import { buildWorkerTools } from "./tools"
 import type {
   WorkerAgentOpts,
@@ -377,6 +381,17 @@ export async function runWorkerAgent(
         })
         const v = budget.checkBeforeCall(ctx.toolCall.name, ctx.args)
         if (v.block) return { block: true, reason: v.reason }
+        // Browse terminal capture. The agent finishes by CALLING
+        // `submit_answer` / `report_insufficient`; the answer lives in
+        // the tool-call args, not in assistant text (the terminal turn's
+        // assistant message is just the tool call → empty `finalText`).
+        // Capture AFTER the budget gate so a capped-out terminal isn't
+        // surfaced as a real answer. The terminal `execute` only echoes
+        // args + sets `terminate:true`, so it can't fail past this point.
+        if (isBrowse && isBrowseTerminalTool(ctx.toolCall.name)) {
+          const a = formatBrowseTerminalAnswer(ctx.toolCall.name, ctx.args)
+          if (a.trim()) terminalText = a
+        }
         return undefined
       },
       afterToolCall: async (ctx: AfterToolCallContext) => {
@@ -427,6 +442,11 @@ export async function runWorkerAgent(
     // just `.toString()`.
     let finalText = ""
     let lastStopReason: string | null = null
+    // Browse-only: the answer captured from a terminal tool's args (see
+    // the `beforeToolCall` capture). Preferred over `finalText` for browse
+    // because the agent's authoritative answer is the terminal payload,
+    // not any preamble text it may have emitted alongside the tool call.
+    let terminalText: string | null = null
     const unsubscribe = agent.subscribe((event) => {
       if (event.type !== "message_end") return
       const msg = event.message
@@ -487,7 +507,15 @@ export async function runWorkerAgent(
         // boot-time PID+instance sweep are the safety nets.
       }
 
-      const text = diff ? `${finalText}\n\n${diff}` : finalText
+      // Browse mode finishes by calling a terminal tool, so its answer is
+      // `terminalText` (captured from the tool args), NOT assistant text or
+      // a worktree diff (browse has neither). Fall back to `finalText` for
+      // the rare case the model emitted text but no terminal payload.
+      const text = isBrowse
+        ? (terminalText ?? finalText)
+        : diff
+          ? `${finalText}\n\n${diff}`
+          : finalText
       // Never return empty text — the harness has no signal to act on.
       // Distinguish (a) Pi exited silently after tool work from (b) a
       // legitimate no-op so the caller can decide to retry/rephrase.
