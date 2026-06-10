@@ -158,6 +158,62 @@ function joinEnvelopeText(env: BrowserToolEnvelope): string {
   return (env.content ?? []).map((c) => c.text).join("\n")
 }
 
+// Per-tool cap on the model-visible TEXT a browser tool admits into context.
+// A single uncapped result — a `read_page` snapshot of a giant DOM (Google
+// Maps renders thousands of elements) — would otherwise overflow the NEXT
+// `/responses` request and abort the whole run with stopReason="error" (the
+// model never gets to answer; see the engine's empty-output branch). `read_page`
+// is the content tool so it gets the larger budget; every other tool returns
+// small JSON, so a tighter default catches a runaway `eval_js`/`find` too.
+const READ_PAGE_TEXT_CAP_BYTES = 48 * 1024
+const DEFAULT_TOOL_TEXT_CAP_BYTES = 16 * 1024
+
+function toolTextCapBytes(toolName: string): number {
+  return toolName === "read_page"
+    ? READ_PAGE_TEXT_CAP_BYTES
+    : DEFAULT_TOOL_TEXT_CAP_BYTES
+}
+
+/**
+ * Cap a tool result's model-visible text. Keeps a head+tail window (the answer
+ * is usually near the top; the tail preserves footers/totals/pagination) with
+ * a notice between them telling the agent how to narrow. UTF-8 safe: the head
+ * uses a streaming decode that holds back a split trailing code point, and the
+ * tail skips any leading continuation bytes — so no replacement char (�)
+ * appears at either boundary. Applied to BOTH the success and isError paths,
+ * because an error envelope is model-visible (via Pi's catch) and can be large
+ * too.
+ */
+function capModelText(toolName: string, text: string): string {
+  const cap = toolTextCapBytes(toolName)
+  const bytes = new TextEncoder().encode(text)
+  if (bytes.length <= cap) return text
+  const notice =
+    `\n\n[…truncated: result was ${Math.round(bytes.length / 1024)}KB, over the `
+    + `${Math.round(cap / 1024)}KB cap, and was shortened to fit the model's `
+    + "context. Narrow the read — scroll to the relevant section, or use "
+    + "find/eval_js to target the specific content, then read again.…]\n\n"
+  const noticeBytes = new TextEncoder().encode(notice)
+  // Degenerate cap (smaller than the notice itself — unreachable with the
+  // 16KB/48KB constants, but keeps the "output ≤ cap" invariant total):
+  // return a boundary-safe truncation of the notice and nothing else.
+  if (noticeBytes.length >= cap) {
+    return new TextDecoder().decode(noticeBytes.subarray(0, cap), { stream: true })
+  }
+  const budget = cap - noticeBytes.length
+  const headBytes = Math.floor(budget * 0.7)
+  const tailBytes = budget - headBytes
+  const head = new TextDecoder().decode(bytes.subarray(0, headBytes), {
+    stream: true,
+  })
+  let tailStart = bytes.length - tailBytes
+  while (tailStart < bytes.length && (bytes[tailStart]! & 0xc0) === 0x80) {
+    tailStart++
+  }
+  const tail = new TextDecoder().decode(bytes.subarray(tailStart))
+  return head + notice + tail
+}
+
 /**
  * How a tool interacts with a session's owned tabs:
  *   - "opens"  — `open_tab` (no tabId in; records the returned tabId);
@@ -543,7 +599,10 @@ function makeBrowserTool(
         }
       }
       const env = await dispatch(wireName, args, signal)
-      const text = joinEnvelopeText(env)
+      // Cap the model-visible text BEFORE both the isError throw and the
+      // success return — a single oversized result (e.g. a Maps `read_page`)
+      // must not overflow the next request and kill the run.
+      const text = capModelText(meta.name, joinEnvelopeText(env))
       if (env.isError) {
         // Re-throw so Pi's loop records an isError tool result the model
         // sees and can react to (gather more / try another path / report
@@ -650,6 +709,7 @@ export function buildBrowseTools(
  */
 export const __testExports = {
   argsRecord,
+  capModelText,
   inputSchemaFor,
   joinEnvelopeText,
   parseOpenedTabId,

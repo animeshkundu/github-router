@@ -520,6 +520,22 @@ export async function runWorkerAgent(
       // Distinguish (a) Pi exited silently after tool work from (b) a
       // legitimate no-op so the caller can decide to retry/rephrase.
       if (!text.trim()) {
+        // A browse run that aborted on an upstream stream error (commonly the
+        // next request's input overflowing context right after a very large
+        // page read) lands here with stopReason="error" and empty text.
+        // Return a browse-shaped, actionable message instead of the opaque
+        // worker-exit string — and do NOT echo the raw upstream error (it can
+        // carry request ids / payload excerpts).
+        if (isBrowse && lastStopReason === "error") {
+          return {
+            text:
+              "Browse run failed before producing an answer — the model's input "
+              + "likely overflowed after a large page read (or the upstream "
+              + "errored). Retry with a narrower task: target a specific section "
+              + "or element rather than reading the whole page at once.",
+            isError: true,
+          }
+        }
         return {
           text:
             `[worker exited with no output `

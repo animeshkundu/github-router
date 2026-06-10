@@ -34,6 +34,7 @@ import { runSemanticSearch } from "./colbert/runner"
 import { BROWSER_TOOLS } from "~/lib/browser-mcp"
 import {
   acquireBrowseSession,
+  browseSessionTabs,
   createBrowseSession,
   hasBrowseSession,
   releaseBrowseSession,
@@ -1948,11 +1949,25 @@ async function runBrowseToolCall(
   // `createBrowseSession` at the cap can't pick this just-resolved session as
   // its LRU-evict victim while we're about to drive it. Released in `finally`.
   acquireBrowseSession(sessionId)
+  // Continuation context: a continued session already owns the tab(s) the
+  // prior run opened, but a fresh browse agent has NO memory of those ids and
+  // there is no list-tabs tool — so without this it guesses `tabId: 1` and
+  // hits "tab not owned by session". Tell it which tabs it owns so it can
+  // resume the existing page instead of re-navigating blindly. Empty for a
+  // fresh session ⇒ no preamble.
+  const ownedTabs = browseSessionTabs(sessionId)
+  const prompt =
+    ownedTabs.length > 0
+      ? `[Continuing a browse session that already owns open tab(s): `
+        + `${ownedTabs.join(", ")}. To resume work on an already-open page, call `
+        + `read_page (or other tools) with that tabId — do NOT assume tabId 1. `
+        + `Open a new tab only for something unrelated.]\n\n${task}`
+      : task
   let result: { text: string; isError?: boolean }
   try {
     result = await runWorkerAgent({
       mode: "browse",
-      prompt: task,
+      prompt,
       sessionId,
       workspace,
       signal,

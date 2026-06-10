@@ -424,3 +424,37 @@ describe("browse mode surfaces the terminal tool's answer", () => {
     }
   })
 })
+
+// ============================================================
+// Graceful degradation on an upstream stream error
+// ============================================================
+
+describe("browse mode degrades gracefully when the run aborts on an error", () => {
+  // A non-2xx upstream makes the chat stream-fn push a terminal error
+  // (stopReason="error"), so the browse run produces no terminal answer. The
+  // engine must return a browse-shaped, actionable message — NOT the opaque
+  // "[worker exited with no output ...]" — and must not echo the raw error.
+  test("stopReason=error + empty text → browse-shaped message", async () => {
+    const fetchMock = mock(() =>
+      Promise.resolve(new Response("upstream boom xreq-abc123", { status: 400 })),
+    )
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const dir = tmpDir("browse-err")
+    try {
+      const r = await runWorkerAgent({
+        prompt: "find the listed price",
+        mode: "browse",
+        workspace: dir,
+      })
+      expect(r.isError).toBe(true)
+      expect(r.text).toContain("Browse run failed")
+      expect(r.text).not.toContain("exited with no output")
+      // Sanitized — the raw upstream body / request id is not echoed.
+      expect(r.text).not.toContain("upstream boom")
+      expect(r.text).not.toContain("xreq-abc123")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

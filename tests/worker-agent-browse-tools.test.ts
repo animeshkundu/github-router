@@ -337,6 +337,44 @@ describe("formatBrowseTerminalAnswer (engine surfaces the terminal payload)", ()
 })
 
 // ============================================================
+// capModelText — oversized tool-result guard
+// ============================================================
+
+describe("capModelText (oversized tool-result guard)", () => {
+  const { capModelText } = __testExports
+
+  test("returns under-cap text unchanged", () => {
+    expect(capModelText("read_page", "small page")).toBe("small page")
+    expect(capModelText("navigate", "ok")).toBe("ok")
+  })
+
+  test("caps an oversized read_page result with a head+tail + notice", () => {
+    const big = "A".repeat(80 * 1024) // 80KB > 48KB read_page cap
+    const out = capModelText("read_page", big)
+    expect(Buffer.byteLength(out, "utf8")).toBeLessThanOrEqual(48 * 1024)
+    expect(out).toContain("truncated")
+    expect(out.startsWith("A")).toBe(true) // head preserved
+    expect(out.endsWith("A")).toBe(true) // tail preserved
+  })
+
+  test("non-read_page tools use the tighter 16KB default cap", () => {
+    const mid = "B".repeat(40 * 1024) // 40KB: over default 16KB, under read_page 48KB
+    const capped = capModelText("eval_js", mid)
+    expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(16 * 1024)
+    expect(capped).toContain("truncated")
+    // read_page would NOT cap the same 40KB (under its 48KB budget)
+    expect(capModelText("read_page", mid)).toBe(mid)
+  })
+
+  test("UTF-8 safe: no replacement char at the truncation boundaries", () => {
+    const big = "😀".repeat(20 * 1024) // 4 bytes each = 80KB of multi-byte chars
+    const out = capModelText("read_page", big)
+    expect(out).not.toContain("�") // no � from a split code point
+    expect(Buffer.byteLength(out, "utf8")).toBeLessThanOrEqual(48 * 1024)
+  })
+})
+
+// ============================================================
 // Schema derivation
 // ============================================================
 

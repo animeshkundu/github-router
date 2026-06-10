@@ -38,6 +38,7 @@ import {
   browseSessionCount,
   createBrowseSession,
   hasBrowseSession,
+  recordSessionTab,
 } from "../../src/lib/browser-mcp/session-registry"
 
 // ---------------------------------------------------------------------
@@ -297,6 +298,43 @@ describe("browse tool session handling", () => {
     // The echoed id is the reused one.
     const m = SESSION_SUFFIX_RE.exec(result.content[0]!.text)
     expect(m![1]).toBe(existing)
+  })
+
+  test("continuing a session injects its owned tab ids into the prompt", async () => {
+    const existing = createBrowseSession()
+    recordSessionTab(existing, 7) // prior run left tab 7 open + owned
+
+    await rpc(
+      {
+        jsonrpc: "2.0",
+        id: 41,
+        method: "tools/call",
+        params: {
+          name: "browse",
+          arguments: { task: "read the current page", sessionId: existing },
+        },
+      },
+      "/workers",
+    )
+    // The fresh browse agent has no tab memory; the handler must tell it which
+    // tab(s) it owns so it resumes the page instead of guessing tabId 1.
+    const prompt = runWorkerAgentCalls.at(-1)!.prompt
+    expect(prompt).toContain("7")
+    expect(prompt).toContain("read the current page") // original task preserved
+    expect(prompt.toLowerCase()).toContain("tabid")
+  })
+
+  test("a fresh session (no owned tabs) gets the task verbatim (no preamble)", async () => {
+    await rpc(
+      {
+        jsonrpc: "2.0",
+        id: 42,
+        method: "tools/call",
+        params: { name: "browse", arguments: { task: "go to example.com" } },
+      },
+      "/workers",
+    )
+    expect(runWorkerAgentCalls.at(-1)!.prompt).toBe("go to example.com")
   })
 
   test("an UNKNOWN sessionId falls back to a fresh session", async () => {
