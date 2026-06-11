@@ -59,7 +59,7 @@ import type {
 } from "~/services/copilot/create-responses"
 import { endpointForModelId } from "~/services/copilot/endpoint"
 
-import { type ContextBudget, tokensFromBytes } from "./context-budget"
+import { type ContextBudget, IMAGE_BYTES_EQUIV, tokensFromBytes } from "./context-budget"
 
 export type ResolvedThinking =
   | "off"
@@ -188,9 +188,7 @@ async function runStreamLoop(
   // upstream reject it with an opaque error. The structural compactor is
   // best-effort (a byte-floor estimate); this is the hard guarantee.
   if (opts.contextBudget) {
-    const assembledTokens = tokensFromBytes(
-      Buffer.byteLength(safeStringifyContext(context), "utf8"),
-    )
+    const assembledTokens = tokensFromBytes(estimateContextBytes(context))
     if (assembledTokens > opts.contextBudget.inputHardLimitTokens) {
       pushBackstopDiagnostic(
         stream,
@@ -1259,24 +1257,71 @@ function pushTerminalError(
 }
 
 /**
- * Estimate-friendly stringify of the LLM context for the request-boundary
- * backstop. Never throws (a non-serializable field falls back to a coarse
- * per-part estimate) — the backstop must not crash the stream.
+ * Estimate the assembled request's byte size for the request-boundary backstop
+ * — system prompt + tool schemas + wire messages — counting any image part at
+ * a fixed token-equivalent (`IMAGE_BYTES_EQUIV`) rather than its base64 byte
+ * length. A vision image costs ~1.5k tokens regardless of base64 size, so
+ * counting the raw base64 (as a naive `JSON.stringify` would) over-estimates
+ * by ~45× and false-positives the backstop on any screenshot. Counting text
+ * parts by their bytes keeps it consistent with the compactor. Never throws.
  */
-function safeStringifyContext(context: Context): string {
+function estimateContextBytes(context: Context): number {
+  let bytes = Buffer.byteLength(context.systemPrompt ?? "", "utf8")
   try {
-    return JSON.stringify(context)
+    bytes += Buffer.byteLength(JSON.stringify(context.tools ?? []), "utf8")
   } catch {
-    let s = context.systemPrompt ?? ""
-    for (const m of context.messages ?? []) {
-      try {
-        s += JSON.stringify(m)
-      } catch {
-        s += String((m as { content?: unknown }).content ?? "")
+    /* tool schemas are bounded + base64-free; a stringify failure is non-fatal */
+  }
+  for (const m of context.messages ?? []) {
+    bytes += messageWireBytes(m)
+  }
+  return bytes
+}
+
+/** Bytes of one wire message: text content + per-image equivalent + bulk fields. */
+function messageWireBytes(m: unknown): number {
+  if (!m || typeof m !== "object") return 0
+  const mo = m as Record<string, unknown>
+  let b = 0
+  const content = mo.content
+  if (typeof content === "string") {
+    b += Buffer.byteLength(content, "utf8")
+  } else if (Array.isArray(content)) {
+    for (const part of content) {
+      if (!part || typeof part !== "object") continue
+      const p = part as { type?: unknown; text?: unknown; refusal?: unknown }
+      if (typeof p.text === "string") b += Buffer.byteLength(p.text, "utf8")
+      else if (typeof p.refusal === "string") b += Buffer.byteLength(p.refusal, "utf8")
+      else if (typeof p.type === "string" && p.type.includes("image")) {
+        // image part (image / image_url / input_image) — DON'T count the base64
+        b += IMAGE_BYTES_EQUIV
       }
     }
-    return s
   }
+  // Bulk text also lives in top-level fields on some wire shapes — chat
+  // `tool_calls`, /responses `function_call.arguments` / `function_call_output.output`,
+  // chat `refusal`. Count them so a large payload can't slip past the backstop
+  // as ~0 bytes (an UNDER-count is the dangerous direction — it would let a real
+  // overflow reach the upstream as a 400). These fields carry no base64.
+  const toolCalls = mo.tool_calls
+  if (Array.isArray(toolCalls)) {
+    for (const t of toolCalls) b += fieldBytes(t)
+  }
+  b += fieldBytes(mo.arguments) + fieldBytes(mo.output) + fieldBytes(mo.refusal)
+  return b
+}
+
+/** UTF-8 bytes of a string, or of the JSON of an object; 0 otherwise. */
+function fieldBytes(v: unknown): number {
+  if (typeof v === "string") return Buffer.byteLength(v, "utf8")
+  if (v && typeof v === "object") {
+    try {
+      return Buffer.byteLength(JSON.stringify(v), "utf8")
+    } catch {
+      return 0
+    }
+  }
+  return 0
 }
 
 /**
@@ -1326,4 +1371,9 @@ function isAbortError(err: unknown): boolean {
   const code = (err as { code?: unknown }).code
   if (typeof code === "string" && code === "ABORT_ERR") return true
   return false
+}
+
+/** Test-only internals. */
+export const __testExports = {
+  estimateContextBytes,
 }

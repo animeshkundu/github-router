@@ -39,6 +39,15 @@ const SYSTEM_RESERVE_TOKENS = 2_000
 /** Fraction of the window reserved for assembly framing / separators. */
 const ASSEMBLY_MARGIN_FRACTION = 0.02
 
+/**
+ * Byte-equivalent of one image for token estimation. A vision image costs the
+ * model ~1.5k tokens regardless of its (base64) byte length, so counting it as
+ * ~1.6k tokens (4800 bytes / 3) is right — counting the raw base64 bytes would
+ * over-estimate by ~45×. Used by BOTH the compactor and the request backstop
+ * so they treat images consistently.
+ */
+export const IMAGE_BYTES_EQUIV = 4800
+
 const COMPACT_TRIGGER_FRACTION = 0.8
 const PRUNE_TARGET_FRACTION = 0.6
 const HARD_LIMIT_FRACTION = 0.92

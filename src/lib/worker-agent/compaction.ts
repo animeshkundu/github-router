@@ -36,12 +36,10 @@
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core"
 
-import { type ContextBudget, tokensFromBytes } from "./context-budget"
+import { type ContextBudget, IMAGE_BYTES_EQUIV, tokensFromBytes } from "./context-budget"
 
 /** Content already at/below this byte size isn't worth stubbing (idempotency). */
 const STUB_SKIP_BYTES = 256
-/** Per-image byte weight, matching the vendored estimateTokens heuristic. */
-const IMAGE_BYTES_EQUIV = 4800
 
 function toolResultStub(toolName: unknown): string {
   const name = typeof toolName === "string" && toolName ? toolName : "tool"

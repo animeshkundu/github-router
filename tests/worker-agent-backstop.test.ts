@@ -11,7 +11,7 @@
  * called — proving the backstop prevents the upstream request.
  */
 
-import { afterEach, beforeEach, expect, mock, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 
 import { mkdtempSync, realpathSync, rmSync } from "node:fs"
 import os from "node:os"
@@ -20,6 +20,7 @@ import path from "node:path"
 import { state } from "~/lib/state"
 import { runWorkerAgent } from "~/lib/worker-agent/engine"
 import { __resetForTests as resetWorkerSemaphore } from "~/lib/worker-agent/semaphore"
+import { __testExports as streamFnInternals } from "~/lib/worker-agent/stream-fn"
 
 // Tiny window → inputHardLimit ≈ floor(12500·0.98) − 12000 = 250 tokens, which
 // any real system-prompt + tool-schema payload exceeds → the backstop fires.
@@ -104,3 +105,53 @@ for (const [label, model, mode] of [
     }
   })
 }
+
+describe("estimateContextBytes — image cost is the token-equivalent, not base64", () => {
+  const { estimateContextBytes } = streamFnInternals
+  const big = "A".repeat(500_000)
+
+  test("a huge base64 image is counted at ~the image equivalent, NOT its bytes", () => {
+    const ctx = {
+      systemPrompt: "",
+      tools: [],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "image_url", image_url: { url: `data:image/png;base64,${big}` } }],
+        },
+      ],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any
+    // ~4800 bytes for the image, NOT ~500_000 — the base64 must not be counted.
+    expect(estimateContextBytes(ctx)).toBeLessThan(10_000)
+  })
+
+  test("huge TEXT content IS counted fully (the backstop still fires on real overflow)", () => {
+    const ctx = {
+      systemPrompt: "",
+      tools: [],
+      messages: [{ role: "user", content: [{ type: "text", text: big }] }],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any
+    expect(estimateContextBytes(ctx)).toBeGreaterThan(490_000)
+  })
+
+  test("bulk /responses fields (arguments / output) are counted, not slipped past", () => {
+    const fnCall = {
+      systemPrompt: "",
+      tools: [],
+      // /responses function_call shape: bulk text on a top-level `arguments`.
+      messages: [{ type: "function_call", name: "write", arguments: big }],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any
+    const fnOutput = {
+      systemPrompt: "",
+      tools: [],
+      // /responses function_call_output shape: bulk text on top-level `output`.
+      messages: [{ type: "function_call_output", output: big }],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any
+    expect(estimateContextBytes(fnCall)).toBeGreaterThan(490_000)
+    expect(estimateContextBytes(fnOutput)).toBeGreaterThan(490_000)
+  })
+})
