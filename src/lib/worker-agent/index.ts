@@ -10,7 +10,7 @@
  * stable.
  */
 
-export { DEFAULT_MODEL, runWorkerAgent } from "./engine"
+export { BROWSE_DEFAULT_MODEL, DEFAULT_MODEL, runWorkerAgent } from "./engine"
 export type {
   BudgetConfig,
   ThinkingLevel,

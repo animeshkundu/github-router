@@ -161,6 +161,7 @@ mock.module("~/lib/mcp-capabilities", () => ({
   // break that import. claude.ts itself only uses the three above.
   browserCompoundToolsEnabled: mock(() => false),
   browserPowerToolsEnabled: mock(() => false),
+  browseAgentEnabled: mock(() => false),
   semanticSearchEnabled: mock(() => false),
 }))
 

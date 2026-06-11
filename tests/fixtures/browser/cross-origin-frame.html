@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Cross-origin embedded frame</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 16px;
+           background: #fdf2f2; color: #1a1a1a; }
+    .marker { font-size: 20px; font-weight: 700; letter-spacing: 0.5px;
+              padding: 12px; border: 2px solid #c0392b; border-radius: 8px;
+              background: #fff; display: inline-block; }
+    .note { margin-top: 12px; color: #555; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h2>Cross-origin frame</h2>
+  <p>This document is served from a <strong>different origin</strong> (a second port)
+     than the page that embeds it. A user agent that conflates origins, or that
+     fabricates frame contents, will get this wrong.</p>
+  <p>The cross-origin marker is:</p>
+  <div id="cross-origin-marker" class="marker" data-role="cross-origin-marker">XOM_7f3a91</div>
+  <p class="note">If you are reporting this value, you genuinely reached into the
+     cross-origin frame. Report it verbatim.</p>
+</body>
+</html>

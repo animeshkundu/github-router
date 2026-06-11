@@ -48,10 +48,21 @@ export interface WorkerAgentOpts {
    *    system prompt frames the worker as a code reviewer that verifies
    *    correctness against the actual code rather than summarizing.
    *  - `"implement"`: explore tools plus edit/write/bash + codex_review.
+   *  - `"browse"`: the browser-control tool surface (`buildBrowseTools`) —
+   *    drives a real Chrome/Edge tab via the browser-MCP bridge. Does NOT
+   *    touch the filesystem; `workspace` is irrelevant (defaulted to cwd by
+   *    the engine purely so canonicalization stays happy) and `worktree` is
+   *    ignored (worktrees stay implement-only).
    */
-  mode: "explore" | "review" | "implement"
-  /** Absolute path to the workspace (real, realpath-canonicalized). */
-  workspace: string
+  mode: "explore" | "review" | "implement" | "browse"
+  /**
+   * Absolute path to the workspace (real, realpath-canonicalized). Required
+   * in practice for the filesystem modes (`explore`/`review`/`implement`);
+   * OPTIONAL for `browse`, which ignores it — the engine defaults an omitted
+   * `browse` workspace to `process.cwd()`. The MCP handler may therefore omit
+   * it for browse calls.
+   */
+  workspace?: string
   /**
    * Optional Copilot catalog model id. Validated and clamped by
    * `resolveModelAndThinking`. Defaults applied by the caller
@@ -65,9 +76,16 @@ export interface WorkerAgentOpts {
   /**
    * Implement-only. When `true`, run the worker inside a fresh git
    * worktree and return the diff alongside the final text. When
-   * `false`/omitted, edit the workspace in place.
+   * `false`/omitted, edit the workspace in place. Ignored for `browse`
+   * (which never provisions a worktree).
    */
   worktree?: boolean
+  /**
+   * Browse-only. The browse-session id (from the browser-MCP session
+   * registry) the browse tools scope their tab ownership to. Threaded into
+   * `buildBrowseTools`; ignored by the other modes.
+   */
+  sessionId?: string
   /** Caller's AbortSignal — propagates through Pi via `agent.abort()`. */
   signal?: AbortSignal
 }
@@ -107,4 +125,12 @@ export interface BudgetConfig {
   maxTurns: number
   maxWallClockMs: number
   maxToolBytes: number
+  /** Absolute cap on total tool calls per run (fan-out bound). */
+  maxToolCalls: number
+  /**
+   * Max CONSECUTIVE identical tool calls (same name + args) before the next
+   * identical one is blocked — the duplicate-read / anti-loop guard that
+   * curbs the heavy-DOM re-read burn without halting the run.
+   */
+  maxRepeatedCalls: number
 }

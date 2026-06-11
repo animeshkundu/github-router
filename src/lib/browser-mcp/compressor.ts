@@ -1,6 +1,7 @@
 // compressor.ts — inner-LLM helpers that translate model intent into
-// concrete browser actions, using a small fast hosted model (Gemini
-// Flash class) routed through the existing Copilot client.
+// concrete browser actions, using a small fast hosted model
+// (catalog-selected; see COMPRESSOR_FALLBACK_CHAIN) routed through the
+// existing Copilot client.
 //
 // The compressor sits between the lead model (Opus / Sonnet / GPT-5)
 // and the browser tool primitives. Lead model issues natural-language
@@ -12,10 +13,12 @@
 //
 // Backend selection is catalog-time: at startup (and on catalog
 // refresh) `pickBackendFromCatalog` walks a static fallback chain
-// (Gemini Flash → GPT-5.4 mini → Claude Haiku 4.5) and picks the first
-// entry present in `state.models` with `tool_calls` support. The
-// picked id is stored in `selectedBackend` and reused for the lifetime
-// of the proxy session.
+// (gpt-5.4-mini → Claude Sonnet 4.6 → Claude Haiku 4.5) and picks the
+// first entry present in `state.models` with `tool_calls` AND a
+// reachable endpoint (`/chat/completions` or `/responses`). The picked
+// id + endpoint are stored in `selectedBackend` and reused for the
+// lifetime of the proxy session; `callCompressor` routes to the matching
+// client (gpt-5.4-mini is `/responses`-only).
 //
 // Concurrency: every compressor call acquires from the shared
 // `MAX_INFLIGHT_TOOLS_CALL` budget (cap = 32), same pool as peer-MCP
@@ -34,29 +37,49 @@ import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
+import {
+  createResponses,
+  type ResponsesApiResponse,
+  type ResponsesInputItem,
+  type ResponsesPayload,
+} from "~/services/copilot/create-responses"
+import { pickEndpoint, type CopilotEndpoint } from "~/services/copilot/endpoint"
 import type { Model } from "~/services/copilot/get-models"
 
 /**
- * Static fallback chain. Order is preference: faster + multimodal +
- * cheaper at the top. All three support `tool_calls` and image input
- * (the latter is required for Phase D visual fallback).
+ * Static fallback chain for the inner compressor. Order is preference:
+ * faster + cheaper near the top, with vision (required for the Phase D
+ * visual fallback) and reliable forced-tool-calling. The compressor is
+ * endpoint-aware: a backend may serve `/chat/completions` (the claudes)
+ * or `/responses` (gpt-5.4-mini and the rest of the `/responses`-only
+ * gpt-5.x family) — `callCompressor` routes to the right client per the
+ * `pickEndpoint` verdict cached at selection time. A model serving
+ * NEITHER endpoint is skipped rather than cached as a dead backend (the
+ * regression that shipped when gpt-5.4-mini was put on the chat-only path
+ * and 400'd every call with `unsupported_api_for_model`).
  */
 const COMPRESSOR_FALLBACK_CHAIN: ReadonlyArray<string> = [
-  "gemini-3.5-flash",
   "gpt-5.4-mini",
-  "claude-haiku-4-5",
+  "claude-sonnet-4.6",
+  "claude-haiku-4.5",
 ]
 
-let selectedBackend: string | undefined
+interface CompressorBackend {
+  id: string
+  endpoint: CopilotEndpoint
+}
+
+let selectedBackend: CompressorBackend | undefined
 
 /**
- * Walk the fallback chain against the live Copilot catalog. Returns
- * the first id present AND advertising `tool_calls` support, or
- * undefined when none match. Cached after first successful selection
- * so all compressor calls in a session hit the same backend; clear
- * the cache by calling `__resetCompressorBackendForTests`.
+ * Walk the fallback chain against the live Copilot catalog. Returns the
+ * first entry present, advertising `tool_calls`, AND reachable via one of
+ * our two clients (`pickEndpoint` !== undefined), or undefined when none
+ * match. Cached after first successful selection so all compressor calls
+ * in a session hit the same backend + endpoint; clear via
+ * `__resetCompressorBackendForTests`.
  */
-export function pickBackendFromCatalog(): string | undefined {
+function pickBackend(): CompressorBackend | undefined {
   if (selectedBackend) return selectedBackend
   const models = state.models?.data
   if (!models) return undefined
@@ -64,11 +87,26 @@ export function pickBackendFromCatalog(): string | undefined {
     const found = models.find((m: Model) => m.id === candidate)
     if (!found) continue
     if (found.capabilities?.supports?.tool_calls !== true) continue
-    selectedBackend = candidate
-    consola.info(`[browser-mcp] compressor backend: ${candidate}`)
-    return candidate
+    // Endpoint gate: a backend serving neither `/chat/completions` nor
+    // `/responses` (per its catalog `supported_endpoints`) can't be driven
+    // by either client — skip it so we never cache a dead backend that
+    // 400s every call with `unsupported_api_for_model`.
+    const endpoint = pickEndpoint(found)
+    if (!endpoint) continue
+    selectedBackend = { id: candidate, endpoint }
+    consola.info(`[browser-mcp] compressor backend: ${candidate} (${endpoint})`)
+    return selectedBackend
   }
   return undefined
+}
+
+/**
+ * Public id-only view of the picked backend, kept for callers / tests that
+ * only care about which model was chosen (the endpoint is an internal
+ * routing detail of `callCompressor`).
+ */
+export function pickBackendFromCatalog(): string | undefined {
+  return pickBackend()?.id
 }
 
 /** @internal — tests reset the cached selection between cases. */
@@ -105,8 +143,8 @@ async function callCompressor(
   tool: { name: string; description: string; parameters: Record<string, unknown> },
   signal?: AbortSignal,
 ): Promise<unknown> {
-  const model = pickBackendFromCatalog()
-  if (!model) {
+  const backend = pickBackend()
+  if (!backend) {
     throw new Error(
       `browser-mcp compressor: no backend available in catalog. Checked: ${COMPRESSOR_FALLBACK_CHAIN.join(", ")}`,
     )
@@ -116,47 +154,132 @@ async function callCompressor(
     throw new Error("browser-mcp compressor: inflight slot saturated (cap 8); try again shortly")
   }
   try {
-    const payload: ChatCompletionsPayload = {
-      model,
-      stream: false,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage },
-      ],
-      tools: [
-        {
-          type: "function",
-          function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.parameters,
-          },
-        },
-      ],
-      tool_choice: { type: "function", function: { name: tool.name } },
-    } as ChatCompletionsPayload
-    const resp = (await createChatCompletions(payload, undefined, signal)) as ChatCompletionResponse
-    const choice = resp.choices?.[0]
-    const msg = choice?.message as
-      | {
-          content?: string | null
-          tool_calls?: Array<{ function?: { arguments?: string } }>
-        }
-      | undefined
-    const toolArgs = msg?.tool_calls?.[0]?.function?.arguments
-    if (typeof toolArgs === "string" && toolArgs.length > 0) {
-      return JSON.parse(toolArgs)
-    }
-    // Fallback path: model ignored tool_choice and returned content
-    // directly. Strip any markdown code fence wrapper before parsing.
-    const text = typeof msg?.content === "string" ? msg.content : ""
-    if (text.length === 0) {
-      throw new Error("browser-mcp compressor: empty response from backend (no tool_calls and no content)")
-    }
-    return JSON.parse(stripCodeFence(text))
+    return backend.endpoint === "responses"
+      ? await callViaResponses(backend.id, systemPrompt, userMessage, tool, signal)
+      : await callViaChat(backend.id, systemPrompt, userMessage, tool, signal)
   } finally {
     release()
   }
+}
+
+/** Forced-tool-call over `/chat/completions`. Parses the function-call
+ *  arguments, falling back to fenced free-form content. */
+async function callViaChat(
+  model: string,
+  systemPrompt: string,
+  userMessage: ChatCompletionsPayload["messages"][number]["content"],
+  tool: { name: string; description: string; parameters: Record<string, unknown> },
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const payload: ChatCompletionsPayload = {
+    model,
+    stream: false,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userMessage },
+    ],
+    tools: [
+      {
+        type: "function",
+        function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+      },
+    ],
+    tool_choice: { type: "function", function: { name: tool.name } },
+  } as ChatCompletionsPayload
+  const resp = (await createChatCompletions(payload, undefined, signal)) as ChatCompletionResponse
+  const msg = resp.choices?.[0]?.message as
+    | { content?: string | null; tool_calls?: Array<{ function?: { arguments?: string } }> }
+    | undefined
+  const toolArgs = msg?.tool_calls?.[0]?.function?.arguments
+  if (typeof toolArgs === "string" && toolArgs.length > 0) {
+    return JSON.parse(toolArgs)
+  }
+  const text = typeof msg?.content === "string" ? msg.content : ""
+  if (text.length === 0) {
+    throw new Error("browser-mcp compressor: empty response from backend (no tool_calls and no content)")
+  }
+  return JSON.parse(stripCodeFence(text))
+}
+
+/** Forced-tool-call over `/responses` (gpt-5.x family). The Responses API
+ *  uses flat `tools` + `input` items and returns tool calls as `output`
+ *  items of `type: "function_call"` carrying the `arguments` JSON string.
+ *  Image parts use `input_image` (vs chat's `image_url`) — see
+ *  `toResponsesContent`. */
+async function callViaResponses(
+  model: string,
+  systemPrompt: string,
+  userMessage: ChatCompletionsPayload["messages"][number]["content"],
+  tool: { name: string; description: string; parameters: Record<string, unknown> },
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const input: Array<ResponsesInputItem> = [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: toResponsesContent(userMessage) },
+  ]
+  const payload: ResponsesPayload = {
+    model,
+    stream: false,
+    input,
+    tools: [
+      { type: "function", name: tool.name, description: tool.description, parameters: tool.parameters },
+    ],
+    tool_choice: { type: "function", name: tool.name },
+  }
+  const resp = (await createResponses(payload, undefined, signal)) as ResponsesApiResponse
+  const output = Array.isArray(resp.output) ? resp.output : []
+  for (const item of output) {
+    if (!item || typeof item !== "object") continue
+    const o = item as { type?: unknown; arguments?: unknown }
+    if (o.type === "function_call" && typeof o.arguments === "string" && o.arguments.length > 0) {
+      return JSON.parse(o.arguments)
+    }
+  }
+  // Fallback: model returned free-form text instead of the forced call.
+  const text = extractResponsesText(output)
+  if (text.length === 0) {
+    throw new Error("browser-mcp compressor: empty response from /responses backend (no function_call and no text)")
+  }
+  return JSON.parse(stripCodeFence(text))
+}
+
+/** Translate chat-style message content (string | text/image_url parts)
+ *  into Responses input content (`input_text` / `input_image`). */
+function toResponsesContent(
+  content: ChatCompletionsPayload["messages"][number]["content"],
+): string | Array<Record<string, unknown>> {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return String(content ?? "")
+  return content.map((part) => {
+    const p = part as { type?: string; text?: string; image_url?: { url?: string } }
+    if (p.type === "image_url") {
+      return { type: "input_image", image_url: p.image_url?.url ?? "" }
+    }
+    return { type: "input_text", text: typeof p.text === "string" ? p.text : "" }
+  })
+}
+
+/** Best-effort extraction of free-form text from a `/responses` output
+ *  array, for the rare case a backend ignores the forced tool_choice. */
+function extractResponsesText(output: Array<unknown>): string {
+  for (const item of output) {
+    if (!item || typeof item !== "object") continue
+    const o = item as { text?: unknown; content?: unknown }
+    if (typeof o.text === "string" && o.text.length > 0) return o.text
+    if (Array.isArray(o.content)) {
+      for (const c of o.content) {
+        const cc = c as { type?: string; text?: string }
+        if (
+          (cc.type === "output_text" || cc.type === "text")
+          && typeof cc.text === "string"
+          && cc.text.length > 0
+        ) {
+          return cc.text
+        }
+      }
+    }
+  }
+  return ""
 }
 
 /**

@@ -65,6 +65,7 @@
  */
 
 import { realpathSync } from "node:fs"
+import process from "node:process"
 
 import { Agent } from "@earendil-works/pi-agent-core"
 import type {
@@ -88,9 +89,17 @@ import {
 } from "./lifecycle"
 import { resolveModelAndThinking } from "./model-resolve"
 import { systemPromptFor } from "./prompts"
-import { logAudit } from "./redact"
+import { type AuditCtx, logAudit } from "./redact"
 import { acquireWorkerSlot } from "./semaphore"
 import { createCopilotStreamFn } from "./stream-fn"
+import {
+  buildBrowseTools,
+  formatBrowseTerminalAnswer,
+  isBrowseTerminalTool,
+} from "./browse-tools"
+import { makeContextBudget } from "./context-budget"
+import { compactWorkerContext } from "./compaction"
+import { capToolResultText } from "./tool-output-cap"
 import { buildWorkerTools } from "./tools"
 import type {
   WorkerAgentOpts,
@@ -124,6 +133,23 @@ registerExitHandlers(WORKTREE_REGISTRY)
  *  ship a tool whose docs disagree with its runtime default. */
 export const DEFAULT_MODEL = "gemini-3.1-pro-preview"
 const DEFAULT_THINKING: WorkerThinkingLevel = "high"
+
+/** Default model for `browse` mode. `gpt-5.4-mini` — the Gate-B-winning
+ *  browse model (small + fast enough to drive a tab at human pace, with
+ *  enough tool-calling discipline to terminate). This is DISTINCT from the
+ *  gemini worker `DEFAULT_MODEL`: browse is a different workload (drive a
+ *  page, not read a repo) and was tuned separately. May be retuned after
+ *  the flash-vs-mini eval settles. Routed through `/responses` by the
+ *  stream-fn's endpoint split (it's a gpt-5.x model). Caller can override
+ *  per call via the `model` arg.
+ *
+ *  Exported so the MCP browse handler reads the same constant — drift
+ *  between the two would ship a tool whose docs disagree with its runtime
+ *  default. */
+export const BROWSE_DEFAULT_MODEL = "gpt-5.4-mini"
+/** Default thinking for `browse`. Higher than the page-driving workload
+ *  strictly needs, but the termination discipline benefits from it. */
+const BROWSE_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 
 /**
  * `Model<any>` shim used to satisfy `Agent.initialState.model` typing.
@@ -230,13 +256,27 @@ export async function runWorkerAgent(
     // returns a Result; on `ok:false` we emit the diagnostic verbatim
     // (it already enumerates the catalog's tool_call-capable models
     // on unknown-model errors, so the caller knows what to retry with).
+    //
+    // Browse mode picks a DIFFERENT default model (`BROWSE_DEFAULT_MODEL`)
+    // than the gemini worker default — the workload (drive a tab) is
+    // distinct from reading a repo. An explicit `opts.model` still wins.
+    const isBrowse = opts.mode === "browse"
     const resolved = resolveModelAndThinking({
-      model: opts.model ?? DEFAULT_MODEL,
-      thinking: opts.thinking ?? DEFAULT_THINKING,
+      model: opts.model ?? (isBrowse ? BROWSE_DEFAULT_MODEL : DEFAULT_MODEL),
+      thinking:
+        opts.thinking ?? (isBrowse ? BROWSE_DEFAULT_THINKING : DEFAULT_THINKING),
     })
     if (!resolved.ok) {
       return { text: resolved.error, isError: true }
     }
+
+    // Per-run context budget from the resolved model's catalog window.
+    // Undefined when the window is unknown → compaction + the per-result cap
+    // no-op (the request backstop still guards). Sized ONCE and threaded into
+    // `transformContext` (compaction) + `afterToolCall` (the per-result cap)
+    // so the two defenses derive from one window and never drift. Per-run
+    // (parallel runs resolve different windows) — never module state.
+    const ctxBudget = makeContextBudget(resolved.contextWindow)
 
     // Step 3: workspace canonicalization. The per-call `confineToWorkspace`
     // chokepoint inside `tools.ts` requires its `workspaceAbs` to be
@@ -244,9 +284,22 @@ export async function runWorkerAgent(
     // here is cheaper than realpathing on every tool call and keeps
     // the trailing-separator check honest on macOS (`/var` →
     // `/private/var`) and Windows (junction-resolved drive letters).
+    //
+    // Browse doesn't use the filesystem — its tools drive a real browser
+    // and ignore `ws.dir`. So an omitted `browse` workspace defaults to
+    // `process.cwd()` purely to keep canonicalization (and the no-worktree
+    // handle) happy; the value is never read by the browse tools.
+    const workspaceInput =
+      opts.workspace ?? (isBrowse ? process.cwd() : undefined)
+    if (workspaceInput === undefined) {
+      return {
+        text: "workspace not accessible: a workspace path is required",
+        isError: true,
+      }
+    }
     let workspaceAbs: string
     try {
-      workspaceAbs = realpathSync.native(opts.workspace)
+      workspaceAbs = realpathSync.native(workspaceInput)
     } catch (err) {
       return {
         text: `workspace not accessible: ${(err as Error).message}`,
@@ -289,10 +342,19 @@ export async function runWorkerAgent(
     // grep/code_search/web_search/fetch_url; implement adds edit/write/
     // bash/codex_review). No remaining tool needs the transcript, so
     // `getMessages` is no longer threaded through.
-    const tools = buildWorkerTools({
-      mode: opts.mode,
-      workspace: ws.dir,
-    })
+    //
+    // Browse mode swaps the filesystem toolset for the browser-control
+    // tools (`buildBrowseTools`), scoped to the caller's browse session so
+    // the tools enforce per-session tab ownership. The else-branch narrows
+    // `opts.mode` to the three filesystem modes (browse is excluded by the
+    // ternary), so `buildWorkerTools` keeps its narrower mode type.
+    const tools =
+      opts.mode === "browse"
+        ? buildBrowseTools({ sessionId: opts.sessionId })
+        : buildWorkerTools({
+            mode: opts.mode,
+            workspace: ws.dir,
+          })
 
     // Step 7: Agent. `streamFn` is the routing override (per Pi docs
     // and our verified facts in the plan, this is the documented hook
@@ -310,22 +372,52 @@ export async function runWorkerAgent(
         thinkingLevel: resolved.thinking,
         tools,
       },
-      streamFn: createCopilotStreamFn({ resolved }),
+      streamFn: createCopilotStreamFn({ resolved, contextBudget: ctxBudget }),
       toolExecution: opts.mode === "implement" ? "sequential" : "parallel",
+      // Structural, model-free compaction (Pi's documented seam). No-op below
+      // the budget trigger; on the compacting branch it `structuredClone`s
+      // before mutating (the hook receives the LIVE transcript reference) and
+      // never throws past here (contract: transformContext must not throw —
+      // on any failure return the input and let the request backstop guard).
+      // Disabled when the model window is unknown (no blind pruning).
+      transformContext: ctxBudget
+        ? async (messages) => {
+            try {
+              return compactWorkerContext(messages, ctxBudget)
+            } catch {
+              return messages
+            }
+          }
+        : undefined,
       beforeToolCall: async (
         ctx: BeforeToolCallContext,
       ): Promise<BeforeToolCallResult | undefined> => {
         // Audit FIRST — even blocked calls should be visible to the
         // operator (otherwise a budget-exhausted run looks silent).
         // logAudit catches its own errors so it can't break the loop.
+        // The `mode` cast is type-only: `AuditCtx["mode"]` predates the
+        // `"browse"` mode; the runtime value is forwarded verbatim, so the
+        // audit line reads `mode=browse` correctly. (Widening AuditCtx in
+        // redact.ts would drop the cast — left to that file's owner.)
         logAudit({
-          mode: opts.mode,
+          mode: opts.mode as AuditCtx["mode"],
           tool: ctx.toolCall.name,
           args: ctx.args,
           workspace: ws.dir,
         })
         const v = budget.checkBeforeCall(ctx.toolCall.name, ctx.args)
         if (v.block) return { block: true, reason: v.reason }
+        // Browse terminal capture. The agent finishes by CALLING
+        // `submit_answer` / `report_insufficient`; the answer lives in
+        // the tool-call args, not in assistant text (the terminal turn's
+        // assistant message is just the tool call → empty `finalText`).
+        // Capture AFTER the budget gate so a capped-out terminal isn't
+        // surfaced as a real answer. The terminal `execute` only echoes
+        // args + sets `terminate:true`, so it can't fail past this point.
+        if (isBrowse && isBrowseTerminalTool(ctx.toolCall.name)) {
+          const a = formatBrowseTerminalAnswer(ctx.toolCall.name, ctx.args)
+          if (a.trim()) terminalText = a
+        }
         return undefined
       },
       afterToolCall: async (ctx: AfterToolCallContext) => {
@@ -335,6 +427,20 @@ export async function runWorkerAgent(
         // model sees them, but they're not a context-pollution proxy
         // concern for our cap).
         budget.recordToolBytes(ctx.result)
+        // Per-result source cap. `afterToolCall` runs after the tool's
+        // execute and can REPLACE the result content; each parallel tool's
+        // hook caps its OWN result (no shared state → race-free across the
+        // batch). One giant read_page/bash/grep is shortened to the budget's
+        // per-result cap so it can't dominate the next request; the per-turn
+        // AGGREGATE across parallel results is bounded by the compactor's
+        // current-turn truncation. No-op when the budget is unknown.
+        if (ctxBudget) {
+          const capped = capToolResultText(
+            (ctx.result as { content?: unknown }).content,
+            ctxBudget.perResultCapBytes,
+          )
+          if (capped) return { content: capped }
+        }
         return undefined
       },
       // Pi calls `prepareNextTurn` after `turn_end` and before the loop
@@ -376,6 +482,11 @@ export async function runWorkerAgent(
     // just `.toString()`.
     let finalText = ""
     let lastStopReason: string | null = null
+    // Browse-only: the answer captured from a terminal tool's args (see
+    // the `beforeToolCall` capture). Preferred over `finalText` for browse
+    // because the agent's authoritative answer is the terminal payload,
+    // not any preamble text it may have emitted alongside the tool call.
+    let terminalText: string | null = null
     const unsubscribe = agent.subscribe((event) => {
       if (event.type !== "message_end") return
       const msg = event.message
@@ -436,10 +547,34 @@ export async function runWorkerAgent(
         // boot-time PID+instance sweep are the safety nets.
       }
 
-      const text = diff ? `${finalText}\n\n${diff}` : finalText
+      // Browse mode finishes by calling a terminal tool, so its answer is
+      // `terminalText` (captured from the tool args), NOT assistant text or
+      // a worktree diff (browse has neither). Fall back to `finalText` for
+      // the rare case the model emitted text but no terminal payload.
+      const text = isBrowse
+        ? (terminalText ?? finalText)
+        : diff
+          ? `${finalText}\n\n${diff}`
+          : finalText
+      // A run that aborted on a terminal stream error (stopReason="error") is
+      // a FAILURE even if it emitted text. The request-boundary backstop puts
+      // an actionable diagnostic in the assistant text on a predicted
+      // overflow; a raw upstream error arrives with empty text. Surface the
+      // diagnostic when present, else a generic sanitized message — never echo
+      // a raw upstream error body, and never report an error as success.
+      if (lastStopReason === "error") {
+        const diag = (terminalText ?? finalText).trim()
+        return {
+          text:
+            diag
+            || "Worker run failed before producing an answer — the model's input "
+              + "likely overflowed (a large tool result), or the upstream errored. "
+              + "Retry with a narrower task: target a specific section / file / "
+              + "element rather than reading everything at once.",
+          isError: true,
+        }
+      }
       // Never return empty text — the harness has no signal to act on.
-      // Distinguish (a) Pi exited silently after tool work from (b) a
-      // legitimate no-op so the caller can decide to retry/rephrase.
       if (!text.trim()) {
         return {
           text:

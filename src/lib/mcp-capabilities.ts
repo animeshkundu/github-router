@@ -22,7 +22,11 @@ import {
 } from "./colbert/provision"
 import { parseBoolEnv } from "./exec"
 import { state } from "./state"
-import { DEFAULT_MODEL as WORKER_DEFAULT_MODEL } from "./worker-agent"
+import {
+  BROWSE_DEFAULT_MODEL,
+  DEFAULT_MODEL as WORKER_DEFAULT_MODEL,
+} from "./worker-agent"
+import { pickEndpoint } from "../services/copilot/endpoint"
 
 /**
  * Gate for the `stand_in` tool.
@@ -92,10 +96,11 @@ export function workerToolsEnabled(): boolean {
  * in intent mode, `browser_extract`).
  *
  * Returns true iff `compressorAvailable()` — i.e. at least one model in
- * the compressor fallback chain (`gemini-3.5-flash` → `gpt-5.4-mini` →
- * `claude-haiku-4-5`) is present in the live catalog with `tool_calls`
- * support. When none are reachable the compound tools are dropped from
- * `tools/list` AND fail `tools/call` with -32601.
+ * the compressor fallback chain (`gpt-5.4-mini` → `claude-sonnet-4.6` →
+ * `claude-haiku-4.5`) is present in the live catalog with `tool_calls`
+ * AND a reachable endpoint (`/chat/completions` or `/responses`). When
+ * none are reachable the compound tools are dropped from `tools/list`
+ * AND fail `tools/call` with -32601.
  *
  * Note: this gate does NOT additionally re-check the `browser` opt-in.
  * The `handler.ts` filter chain runs `browser` and `browser_compound`
@@ -150,6 +155,43 @@ export function browserToolsEnabled(): boolean {
     state.browseEnabled || process.env.GH_ROUTER_ENABLE_BROWSE === "1"
   if (!optedIn) return false
   return hasSupportedBrowserInstalled()
+}
+
+/**
+ * Gate for the `browse` worker tool (the Pi-driven autonomous browser
+ * agent that delegates a browsing task to its own context).
+ *
+ * Returns true iff BOTH:
+ *   1. `browserToolsEnabled()` — the `--browse` opt-in AND a supported
+ *      browser is on disk. The browse agent drives the SAME Chrome/Edge
+ *      bridge as the raw `browser_*` tools, so it can't be useful without
+ *      that surface enabled.
+ *   2. The browse default model (`BROWSE_DEFAULT_MODEL`, `gpt-5.4-mini`)
+ *      is in Copilot's live catalog AND `pickEndpoint()` resolves a
+ *      reachable endpoint for it. Unlike `workerToolsEnabled()` (which
+ *      checks `tool_calls` on the gemini default), the browse default is
+ *      a `/responses`-only gpt-5.x model — `pickEndpoint` is the right
+ *      reachability probe (it returns undefined only when the model
+ *      serves neither chat nor responses).
+ *
+ * Callers that pass an explicit `model` to the browse tool still hit the
+ * per-call `resolveModelAndThinking` validation in the engine; this
+ * list-time gate is about the DEFAULT being reachable.
+ *
+ * `BROWSE_DEFAULT_MODEL` is imported from `src/lib/worker-agent` so the
+ * engine owns the single source of truth (no parallel slug to drift).
+ *
+ * Gate fires symmetrically at `tools/list` and `tools/call` (drop +
+ * -32601), the same defense-in-depth pattern as the other capability
+ * tags.
+ */
+export function browseAgentEnabled(): boolean {
+  if (!browserToolsEnabled()) return false
+  const models = state.models?.data
+  if (!models) return false
+  const found = models.find((m) => m.id === BROWSE_DEFAULT_MODEL)
+  if (!found) return false
+  return pickEndpoint(found) !== undefined
 }
 
 /**

@@ -1,0 +1,132 @@
+[
+  {
+    "id": "t01",
+    "capability": "control",
+    "fixture": "blocker",
+    "urlField": "baseUrl",
+    "path": "/blocker.html",
+    "prompt": "The target page shows a consent dialog. Report the exact text label shown on its primary consent button.",
+    "expect": { "kind": "equals", "ref": "groundTruth.acceptLabel" },
+    "maxTurns": 6
+  },
+  {
+    "id": "t02",
+    "capability": "control",
+    "fixture": "longpage",
+    "urlField": "baseUrl",
+    "path": "/longpage.html",
+    "prompt": "The target page displays a list and states, near the top, how many items the list contains in total. Report that total number.",
+    "expect": { "kind": "equals", "ref": "groundTruth.itemCount" },
+    "maxTurns": 6
+  },
+  {
+    "id": "t03",
+    "capability": "same-origin-iframe",
+    "fixture": "iframe-torture",
+    "urlField": "baseUrl",
+    "path": "/iframe-torture.html",
+    "prompt": "The target page embeds a same-origin frame that displays a marker token. Report the marker token shown inside that same-origin frame, verbatim.",
+    "expect": { "kind": "equals", "ref": "groundTruth.sameOriginMarker" },
+    "maxTurns": 10
+  },
+  {
+    "id": "t04",
+    "capability": "cross-origin-iframe",
+    "fixture": "iframe-torture",
+    "urlField": "baseUrl",
+    "path": "/iframe-torture.html",
+    "prompt": "The target page embeds a cross-origin frame (served from a different origin) that displays a marker token. Report the marker token shown inside that cross-origin frame, verbatim.",
+    "expect": { "kind": "equals", "ref": "groundTruth.crossOriginMarker" },
+    "maxTurns": 12
+  },
+  {
+    "id": "t05",
+    "capability": "closed-shadow-dom",
+    "fixture": "iframe-torture",
+    "urlField": "baseUrl",
+    "path": "/iframe-torture.html",
+    "prompt": "The target page contains a custom element whose content is rendered inside a closed shadow root. A marker token is displayed there on screen. Report that marker token, verbatim.",
+    "expect": { "kind": "equals", "ref": "groundTruth.closedShadowMarker" },
+    "maxTurns": 12
+  },
+  {
+    "id": "t06",
+    "capability": "spa-hydration",
+    "fixture": "spa-hydrate",
+    "urlField": "baseUrl",
+    "path": "/spa-hydrate.html",
+    "prompt": "The target page renders nothing useful on first paint and loads its real content asynchronously a moment later. Once the content has finished loading, report the marker token it displays, verbatim.",
+    "expect": { "kind": "equals", "ref": "groundTruth.hydratedText" },
+    "maxTurns": 10
+  },
+  {
+    "id": "t07",
+    "capability": "blocker",
+    "fixture": "blocker",
+    "urlField": "baseUrl",
+    "path": "/blocker.html",
+    "prompt": "The target page is an article whose body is covered by a consent notice (a cookie/privacy gate, not a login and not real authentication). Get past the consent notice and report the marker token shown in the now-visible article body, verbatim.",
+    "expect": { "kind": "equals", "ref": "groundTruth.behindWall" },
+    "maxTurns": 10
+  },
+  {
+    "id": "t08",
+    "capability": "long-page-truncation",
+    "fixture": "longpage",
+    "urlField": "baseUrl",
+    "path": "/longpage.html",
+    "prompt": "The target page lists many items, each labelled Item-N. Find the row labelled \"Item-757\" and report the unique value token shown in that row, verbatim.",
+    "expect": { "kind": "equals", "ref": "groundTruth.target.value" },
+    "maxTurns": 14
+  },
+  {
+    "id": "t09",
+    "capability": "multi-step",
+    "fixture": "blocker",
+    "urlField": "baseUrl",
+    "path": "/blocker.html",
+    "prompt": "Complete this task on the target page in order: (1) open the page, (2) dismiss the consent notice that blocks the content, (3) read the marker token revealed in the article body. Report only that marker token, verbatim. In your evidence, state that you dismissed the consent notice and where you read the token.",
+    "expect": { "kind": "equals", "ref": "groundTruth.behindWall" },
+    "maxTurns": 12
+  },
+  {
+    "id": "t10",
+    "capability": "cross-origin-direct",
+    "fixture": "iframe-torture",
+    "urlField": "crossOriginBaseUrl",
+    "path": "/cross-origin-frame.html",
+    "prompt": "The target page displays a single marker token. Report that marker token, verbatim.",
+    "expect": { "kind": "equals", "ref": "groundTruth.crossOriginMarker" },
+    "maxTurns": 8
+  },
+  {
+    "id": "t11",
+    "capability": "trap",
+    "fixture": "missing-data",
+    "urlField": "baseUrl",
+    "path": "/iframe-torture.html",
+    "prompt": "Report the customer-support phone number listed on the target page.",
+    "expect": { "kind": "insufficient", "ref": "groundTruth.absentField" },
+    "maxTurns": 8
+  },
+  {
+    "id": "t12",
+    "capability": "trap",
+    "fixture": "longpage",
+    "urlField": "baseUrl",
+    "path": "/longpage.html",
+    "prompt": "The target page lists items labelled Item-N. Find the row labelled \"Item-801\" and report the unique value token shown in that row, verbatim.",
+    "expect": { "kind": "insufficient", "ref": "groundTruth.itemCount" },
+    "maxTurns": 14
+  },
+  {
+    "id": "t13",
+    "capability": "trap",
+    "fixture": "longpage",
+    "urlField": "baseUrl",
+    "path": "/longpage.html",
+    "prompt": "The target page lists items labelled Item-N. Find the row labelled \"Item-0\" and report the unique value token shown in that row, verbatim.",
+    "expect": { "kind": "insufficient", "ref": "groundTruth.itemCount" },
+    "maxTurns": 8
+  }
+]

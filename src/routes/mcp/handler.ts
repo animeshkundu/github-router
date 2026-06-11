@@ -32,6 +32,7 @@ import {
   type ResponsesPayload,
 } from "~/services/copilot/create-responses"
 import {
+  browseAgentEnabled,
   browserCompoundToolsEnabled,
   browserPowerToolsEnabled,
   browserToolsEnabled,
@@ -332,6 +333,7 @@ function toolEntries(scope: McpScope): Array<ToolEntry> {
     (t) => {
       if (scope !== "all" && t.group !== scope) return false
       if (t.capability === "worker") return workerToolsEnabled()
+      if (t.capability === "browse_agent") return browseAgentEnabled()
       if (t.capability === "stand_in") return standInToolEnabled()
       if (t.capability === "browser") return browserToolsEnabled()
       // semantic_search is availability-gated (provisioned on disk +
@@ -915,6 +917,17 @@ async function handleToolsCall(
     nonPersonaTool
     && nonPersonaTool.capability === "worker"
     && !workerToolsEnabled()
+  ) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+  if (
+    nonPersonaTool
+    && nonPersonaTool.capability === "browse_agent"
+    && !browseAgentEnabled()
   ) {
     return rpcError(
       body.id,

@@ -1,0 +1,49 @@
+{
+  "_comment": "Static schema + ground truth for the Gate B browser fixtures. serve.ts reads this, starts the two servers on ephemeral ports, and writes manifest.runtime.json with baseUrl / crossOriginBaseUrl filled in. Markers are unique non-dictionary tokens so harness scoring is exact and fabrication is detectable. Markers tagged \"renderOnly\" are NOT present in served HTML source (base64-decoded at runtime) so a fetch-source grep can't shortcut the genuine interaction/render the task is meant to exercise.",
+  "baseUrl": "http://127.0.0.1:<PORT>",
+  "crossOriginBaseUrl": "http://127.0.0.1:<PORT2>",
+  "fixtures": [
+    {
+      "id": "iframe-torture",
+      "path": "/iframe-torture.html",
+      "groundTruth": {
+        "crossOriginMarker": "XOM_7f3a91",
+        "sameOriginMarker": "SOM_b4e2c8",
+        "closedShadowMarker": "CSM_9d1f06"
+      }
+    },
+    {
+      "id": "spa-hydrate",
+      "path": "/spa-hydrate.html",
+      "groundTruth": {
+        "hydratedText": "HYD_3c8a4f"
+      }
+    },
+    {
+      "id": "blocker",
+      "path": "/blocker.html",
+      "groundTruth": {
+        "behindWall": "WALL_e51d72",
+        "acceptLabel": "Accept all"
+      }
+    },
+    {
+      "id": "longpage",
+      "path": "/longpage.html",
+      "groundTruth": {
+        "itemCount": 800,
+        "target": {
+          "label": "Item-757",
+          "value": "ITM_a209f4"
+        }
+      }
+    },
+    {
+      "id": "missing-data",
+      "path": "/iframe-torture.html",
+      "groundTruth": {
+        "absentField": "there is NO phone number on this page"
+      }
+    }
+  ]
+}

@@ -18,6 +18,8 @@
 // fails (enterprise DeveloperToolsAvailability=2, DevTools already
 // open on the tab, etc.).
 
+import { buildVisibleTextExpr } from "./visible-text.js"
+
 const ELEMENT_CAP = 500            // total elements across all frames
 const PER_FRAME_CAP = 200          // per-frame element cap
 const TEXT_CAP = 32 * 1024         // viewport-visible text cap
@@ -89,7 +91,7 @@ export async function extractSnapshotCDP(tabId, opts, deps) {
     const elements = []
     const refCounter = { next: 1 }
     const usedRefs = new Set()
-    const diag = { frames: frames.length, axNodes: 0, interesting: 0, resolved: 0, withRef: 0 }
+    const diag = { frames: frames.length, axNodes: 0, interesting: 0, resolved: 0, withRef: 0, textFramesSkipped: 0 }
     for (const frame of frames) {
       if (timedOut) break
       if (elements.length >= ELEMENT_CAP) {
@@ -119,7 +121,7 @@ export async function extractSnapshotCDP(tabId, opts, deps) {
         // attach already succeeded so an enable failure is rare.
       }
     }
-    const text = await extractVisibleText(tabId, sendCommand).catch(() => "")
+    const text = await extractVisibleText(tabId, frames, sendCommand, diag, () => timedOut).catch(() => "")
     const truncatedText = text.length >= TEXT_CAP
     const visualSurfaces = await extractVisualSurfaces(tabId, sendCommand).catch(() => [])
     const out = {
@@ -368,40 +370,71 @@ function attrFromList(attrList, name) {
   return undefined
 }
 
-async function extractVisibleText(tabId, sendCommand) {
-  // Single Runtime.evaluate call into the page's main world to grab
-  // viewport-visible text. Same logic as the legacy extractor.
-  const expr = `
-    (function() {
-      const out = [];
-      let total = 0;
-      const CAP = ${TEXT_CAP};
-      const root = document.body || document.documentElement;
-      if (!root) return "";
-      const tw = document.createTreeWalker(root, 4);
-      const vp = { w: window.innerWidth, h: window.innerHeight };
-      function inV(r) { return r.bottom > 0 && r.right > 0 && r.top < vp.h && r.left < vp.w; }
-      let n;
-      while ((n = tw.nextNode())) {
-        const p = n.parentElement;
-        if (!p) continue;
-        const t = p.tagName ? p.tagName.toLowerCase() : "";
-        if (t === "script" || t === "style" || t === "noscript") continue;
-        const r = p.getBoundingClientRect();
-        if (!inV(r)) continue;
-        const s = (n.textContent || "").replace(/\\s+/g, " ").trim();
-        if (!s) continue;
-        if (total + s.length + 1 > CAP) { out.push(s.slice(0, Math.max(0, CAP - total))); break; }
-        out.push(s);
-        total += s.length + 1;
-      }
-      return out.join("\\n");
-    })()
-  `
-  const res = await sendCommand(tabId, "Runtime.evaluate", {
-    expression: expr,
-    returnByValue: true,
-  })
+async function extractVisibleText(tabId, frames, sendCommand, diag, isTimedOut) {
+  // Per-frame visible text. The old implementation ran a single
+  // Runtime.evaluate in the top frame's default context, so text inside
+  // child frames (same-origin app frames, embedded widgets) was invisible
+  // even though the element extractor already pierces frames. We now run the
+  // shared collectVisibleText expression in EACH frame: the top frame in its
+  // default context, child frames in a per-frame isolated world (Runtime
+  // .evaluate has no frameId — Page.createIsolatedWorld({frameId}) is the
+  // CDP-blessed way to get an executionContextId for a specific frame).
+  //
+  // Per-frame failures are non-fatal (cross-process OOPIFs may refuse
+  // createIsolatedWorld; we count them in diag and keep the rest) — mirroring
+  // the element loop's best-effort cross-origin handling. The merged result
+  // is bounded by the same global TEXT_CAP.
+  //
+  // Caveat: a child frame's "viewport" gate is the FRAME's own viewport
+  // (window/getBoundingClientRect are frame-local), not the top-page viewport,
+  // so a frame scrolled out of the top viewport can still contribute text.
+  // Gating on top-viewport visibility needs the owner-iframe rect in top
+  // coordinates (the deferred per-frame bbox transform). Bounded here by
+  // processing the top frame first and the global TEXT_CAP.
+  const parts = []
+  let total = 0
+  for (let i = 0; i < frames.length; i++) {
+    if (total >= TEXT_CAP) break
+    if (typeof isTimedOut === "function" && isTimedOut()) break
+    const frame = frames[i]
+    const isTopFrame = i === 0
+    // Ask each frame only for the budget still remaining so a later frame
+    // can't serialize text we'd immediately discard.
+    const expr = buildVisibleTextExpr("viewport", TEXT_CAP - total)
+    let frameText = ""
+    try {
+      frameText = await evaluateTextInFrame(tabId, frame, isTopFrame, expr, sendCommand)
+    } catch {
+      if (diag) diag.textFramesSkipped = (diag.textFramesSkipped || 0) + 1
+      continue
+    }
+    if (!frameText) continue
+    parts.push(frameText)
+    total += frameText.length + 1
+  }
+  const joined = parts.join("\n")
+  return joined.length > TEXT_CAP ? joined.slice(0, TEXT_CAP) : joined
+}
+
+/**
+ * Run the visible-text expression in one frame. The top frame uses the
+ * attachment's default execution context; a child frame needs an isolated
+ * world minted for its frameId. Returns "" when no context could be obtained
+ * (e.g. a cross-process frame that refuses createIsolatedWorld) — the caller
+ * treats a throw as a skipped frame, but a missing context degrades quietly.
+ */
+async function evaluateTextInFrame(tabId, frame, isTopFrame, expr, sendCommand) {
+  const params = { expression: expr, returnByValue: true }
+  if (!isTopFrame) {
+    const world = await sendCommand(tabId, "Page.createIsolatedWorld", {
+      frameId: frame.frameId,
+      worldName: "gh_router_text",
+    })
+    const contextId = world && world.executionContextId
+    if (!contextId) return ""
+    params.contextId = contextId
+  }
+  const res = await sendCommand(tabId, "Runtime.evaluate", params)
   return res?.result?.value ?? ""
 }
 

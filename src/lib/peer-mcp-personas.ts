@@ -32,6 +32,13 @@ import { runSemanticSearch } from "./colbert/runner"
 // a test (`tests/peer-mcp-persona-drift.test.ts`), so the cycle no
 // longer closes and a normal static import works.
 import { BROWSER_TOOLS } from "~/lib/browser-mcp"
+import {
+  acquireBrowseSession,
+  browseSessionTabs,
+  createBrowseSession,
+  hasBrowseSession,
+  releaseBrowseSession,
+} from "~/lib/browser-mcp/session-registry"
 import { runWorkerAgent, type WorkerThinkingLevel } from "~/lib/worker-agent"
 import { searchWeb } from "~/services/copilot/web-search"
 import { runStandIn, type StandInInput } from "~/lib/stand-in"
@@ -659,12 +666,20 @@ export interface NonPersonaMcpTool {
    *   `state.powerBrowseEnabled` (set by `--power-browse` or
    *   `GH_ROUTER_ENABLE_POWER_BROWSE=1`). Default `--browse` exposes
    *   only the 6 lead-model tools; power mode adds the raw primitives.
+   * - `"browse_agent"` (the `browse` worker tool) requires
+   *   `browseAgentEnabled()` — `browserToolsEnabled()` AND the browse
+   *   default model (`gpt-5.4-mini`) reachable in the live catalog (see
+   *   `browseAgentEnabled()` in `lib/mcp-capabilities.ts`). NOTE: this
+   *   capability deliberately does NOT start with the literal `"browser"`
+   *   so `isBrowserCapability()` in handler.ts treats it as a normal
+   *   non-persona tool (no per-call URL/tab bridge pre-flight — the
+   *   browse agent's INNER browser tools run their own readiness probe).
    *
    * Absent on `web_search` / `code_search` — those are always available
    * once the proxy is in claude mode (loopback + nonce already gate
    * `/mcp` itself).
    */
-  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "semantic_search"
+  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "browse_agent" | "semantic_search"
   /**
    * Server-side handler. Receives the raw `arguments` object from the
    * `tools/call` request and an optional AbortSignal that is signalled
@@ -1463,6 +1478,80 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         return runWorkerToolCall({ mode: "review", args, signal })
       },
     },
+    // browse — a Pi-driven autonomous browser agent (mode: "browse" of the
+    // SAME `runWorkerAgent` engine as explore/review/implement), routed
+    // through Copilot's `gpt-5.4-mini` by default. It drives a real
+    // Chrome/Edge tab via the browser-MCP bridge to accomplish `task` and
+    // returns the result — runs in its OWN context so the lead's window
+    // isn't burned by raw DOM / page snapshots.
+    //
+    // GATING (`capability: "browse_agent"`): the MCP handler drops this
+    // entry from `tools/list` AND `tools/call` when `browseAgentEnabled()`
+    // is false — i.e. when `--browse` is off / no supported browser is on
+    // disk, OR the `gpt-5.4-mini` default isn't reachable in the live
+    // catalog. Same defense-in-depth (list-time filter + call-time -32601)
+    // as the other capability tags.
+    //
+    // SESSIONS: each call is scoped to a browse session (tab-ownership over
+    // the one shared Chrome, so parallel browse calls don't mix up tabs).
+    // Omit `sessionId` for a fresh isolated session; pass a prior call's
+    // returned session id to CONTINUE that session. The session id is
+    // appended to the result text as `[browse session: <id>]` so the caller
+    // can thread it into a follow-up call. Dispatch logic: `runBrowseToolCall`.
+    {
+      toolNameHttp: "browse",
+      group: "workers",
+      capability: "browse_agent",
+      description:
+        "A Pi-driven autonomous browser agent (gpt-5.4-mini) that drives a "
+        + "real browser to accomplish `task` and returns the result. Runs in "
+        + "its own context to preserve the lead's window (raw DOM / page "
+        + "snapshots stay inside the agent). Pass `sessionId` to continue a "
+        + "prior session (its id is returned appended to the result as "
+        + "`[browse session: <id>]`); omit it for a fresh isolated session. "
+        + "Multiple concurrent calls run as parallel sessions on the one "
+        + "shared browser. Examples: \"find the cheapest flight LHR-JFK next "
+        + "Tuesday\", \"log into the dashboard and read the current MRR\", "
+        + "\"summarize the top 3 HN front-page stories\".",
+      inputSchema: {
+        type: "object",
+        required: ["task"],
+        additionalProperties: false,
+        properties: {
+          task: {
+            type: "string",
+            description:
+              "The browsing task — what to find, read, or do on the web. "
+              + "The agent plans its own navigate/click/read sequence and "
+              + "returns a single text answer.",
+          },
+          sessionId: {
+            type: "string",
+            description:
+              "Optional. The id of a prior browse session to CONTINUE "
+              + "(reuses its owned tabs). Read it from a previous call's "
+              + "`[browse session: <id>]` suffix. Omit for a fresh isolated "
+              + "session. An unknown id starts a fresh session.",
+          },
+          workspace: {
+            type: "string",
+            description:
+              "Optional absolute path. Browse ignores the filesystem, so "
+              + "this rarely matters; provided for parity with the other "
+              + "worker tools. Must be absolute when set.",
+          },
+        },
+      },
+      async handler(
+        args: Record<string, unknown>,
+        signal?: AbortSignal,
+      ): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        return runBrowseToolCall(args, signal)
+      },
+    },
     {
       // stand_in — three-lab away-mode advisor. Polls gpt-5.5 xhigh +
       // claude-opus-4-7 xhigh + gemini-3.1-pro-preview high in two
@@ -1753,6 +1842,151 @@ async function runWorkerToolCall(call: {
   })
   return {
     content: [{ type: "text", text: result.text }],
+    isError: result.isError,
+  }
+}
+
+/**
+ * Shared closure body for the `browse` MCP tool. Mirrors
+ * `runWorkerToolCall` (minimal arg validation → `runWorkerAgent`) with two
+ * browse-specific responsibilities:
+ *
+ *   1. SESSION RESOLUTION. A browse agent's tools are scoped to a browse
+ *      session id (tab-ownership over the one shared Chrome — see
+ *      `src/lib/browser-mcp/session-registry.ts`). If the caller passes a
+ *      `sessionId` that still exists, we CONTINUE it; otherwise (omitted,
+ *      non-string, or unknown id) we open a FRESH session. Concurrent
+ *      `browse` calls each get their own session ⇒ parallel sessions.
+ *   2. SESSION ECHO. The resolved session id is appended to the result
+ *      text as `[browse session: <id>]` so the caller can thread it into a
+ *      follow-up `browse` call to continue the same session.
+ *
+ * `createBrowseSession()` throws when the per-process session cap is
+ * reached; we convert that into a clean `isError` envelope (actionable —
+ * "close a session or raise GH_ROUTER_BROWSE_MAX_SESSIONS") rather than
+ * letting it bubble to the generic handler catch.
+ *
+ * Arg-validation policy mirrors `runWorkerToolCall`: shape errors surface
+ * as `isError: true` tool-result envelopes (NOT JSON-RPC -32602). The
+ * `tools/list` JSON schema documents the required/optional fields; this
+ * runtime check defends against a schema-ignoring client.
+ *
+ * `runWorkerAgent` never throws — its `{text, isError?}` envelope is
+ * forwarded verbatim (with the session suffix), `isError` passed through.
+ */
+async function runBrowseToolCall(
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<{
+  content: Array<{ type: "text"; text: string }>
+  isError?: boolean
+}> {
+  const task = typeof args.task === "string" ? args.task : ""
+  if (!task) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: "browse: arguments.task is required (must be a non-empty string)",
+        },
+      ],
+      isError: true,
+    }
+  }
+
+  // Optional workspace override (absolute-only at the boundary — mirrors
+  // runWorkerToolCall). Browse ignores the filesystem, but the engine still
+  // realpath-canonicalizes the workspace, so a bad path should reject
+  // cleanly rather than silently resolve against process.cwd().
+  let workspace: string | undefined
+  if (args.workspace !== undefined) {
+    if (typeof args.workspace !== "string" || args.workspace.length === 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "browse: arguments.workspace must be a non-empty string when provided",
+          },
+        ],
+        isError: true,
+      }
+    }
+    if (!path.isAbsolute(args.workspace)) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `browse: arguments.workspace must be an absolute path (got "${args.workspace}")`,
+          },
+        ],
+        isError: true,
+      }
+    }
+    workspace = args.workspace
+  }
+
+  // Resolve the browse session: continue an existing one when the caller
+  // supplies a live id, else open a fresh isolated session. A non-string or
+  // unknown sessionId is treated as "no session to continue" ⇒ fresh.
+  const requested = typeof args.sessionId === "string" ? args.sessionId : ""
+  let sessionId: string
+  if (requested && hasBrowseSession(requested)) {
+    sessionId = requested
+  } else {
+    try {
+      sessionId = createBrowseSession()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return {
+        content: [{ type: "text", text: `browse: ${msg}` }],
+        isError: true,
+      }
+    }
+  }
+
+  // Mark the session in-flight SYNCHRONOUSLY here — no `await` between
+  // resolving `sessionId` above and this acquire — so a concurrent
+  // `createBrowseSession` at the cap can't pick this just-resolved session as
+  // its LRU-evict victim while we're about to drive it. Released in `finally`.
+  acquireBrowseSession(sessionId)
+  // Continuation context: a continued session already owns the tab(s) the
+  // prior run opened, but a fresh browse agent has NO memory of those ids and
+  // there is no list-tabs tool — so without this it guesses `tabId: 1` and
+  // hits "tab not owned by session". Tell it which tabs it owns so it can
+  // resume the existing page instead of re-navigating blindly. Empty for a
+  // fresh session ⇒ no preamble.
+  const ownedTabs = browseSessionTabs(sessionId)
+  const prompt =
+    ownedTabs.length > 0
+      ? `[Continuing a browse session that already owns open tab(s): `
+        + `${ownedTabs.join(", ")}. To resume work on an already-open page, call `
+        + `read_page (or other tools) with that tabId — do NOT assume tabId 1. `
+        + `Open a new tab only for something unrelated.]\n\n${task}`
+      : task
+  let result: { text: string; isError?: boolean }
+  try {
+    result = await runWorkerAgent({
+      mode: "browse",
+      prompt,
+      sessionId,
+      workspace,
+      signal,
+    })
+  } finally {
+    releaseBrowseSession(sessionId)
+  }
+
+  // Echo the session id so the caller can continue (or inspect) this
+  // session on a later call via the `sessionId` arg. Appended regardless of
+  // isError — the session exists either way, so a failed run can be retried
+  // on the same session.
+  return {
+    content: [
+      {
+        type: "text",
+        text: `${result.text}\n\n[browse session: ${sessionId}]`,
+      },
+    ],
     isError: result.isError,
   }
 }

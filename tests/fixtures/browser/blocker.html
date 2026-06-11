@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Consent Wall</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 24px;
+           background: #fafafa; color: #1a1a1a; max-width: 720px; }
+    #content { margin-top: 16px; padding: 16px; border: 1px solid #ddd;
+               border-radius: 10px; background: #fff; min-height: 60px; }
+    .marker { font-size: 20px; font-weight: 700; padding: 12px;
+              border: 2px solid #b9770e; border-radius: 8px;
+              background: #fff; display: inline-block; }
+    .placeholder { color: #888; font-style: italic; }
+    #overlay {
+      position: fixed; inset: 0; background: rgba(15, 23, 42, 0.92);
+      color: #fff; display: flex; align-items: center; justify-content: center;
+      z-index: 9999;
+    }
+    #overlay .card {
+      background: #1f2937; padding: 28px; border-radius: 12px; max-width: 460px;
+      text-align: center; box-shadow: 0 10px 40px rgba(0,0,0,0.4);
+    }
+    #overlay h2 { margin-top: 0; }
+    #overlay p { color: #cbd5e1; line-height: 1.5; }
+    #accept-all {
+      margin-top: 16px; padding: 12px 22px; font-size: 16px; font-weight: 600;
+      color: #fff; background: #2563eb; border: none; border-radius: 8px;
+      cursor: pointer;
+    }
+    #accept-all:hover { background: #1d4ed8; }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1>Article behind a consent wall</h1>
+  <div id="content">
+    <span class="placeholder" id="gate-placeholder">
+      Content is gated behind a consent notice. Accept it to continue.
+    </span>
+  </div>
+
+  <div id="overlay" role="dialog" aria-modal="true" aria-label="Consent notice">
+    <div class="card">
+      <h2>We value your privacy</h2>
+      <p>We and our partners use cookies to deliver this content. To read the article,
+         please accept. This is a consent gate, not a login — no credentials are
+         required.</p>
+      <button id="accept-all" type="button">Accept all</button>
+    </div>
+  </div>
+
+  <script>
+    // The behind-the-wall marker is base64-encoded so it is absent from the served
+    // HTML source and is NOT present in the DOM until the consent gate is accepted.
+    // Reading the page without clicking "Accept all" yields no marker — the agent
+    // must detect the overlay and proceed (it is NOT bypassing real authentication).
+    (function () {
+      var ENC = "V0FMTF9lNTFkNzI="; // base64("<behindWall>")
+      var btn = document.getElementById("accept-all");
+      btn.addEventListener("click", function () {
+        var overlay = document.getElementById("overlay");
+        overlay.classList.add("hidden");
+        var content = document.getElementById("content");
+        content.innerHTML = "";
+        var box = document.createElement("div");
+        box.className = "marker";
+        box.id = "wall-content";
+        box.setAttribute("data-role", "behind-wall");
+        box.textContent = atob(ENC);
+        content.appendChild(box);
+        document.body.setAttribute("data-consent", "accepted");
+      });
+    })();
+  </script>
+</body>
+</html>

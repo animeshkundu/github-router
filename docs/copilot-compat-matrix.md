@@ -119,7 +119,8 @@ The proxy filters via `filterBetaHeader` in `src/lib/utils.ts`. Two lists:
 | `gpt-5.5` | (untested via this matrix — covered by codex-critic peer-MCP) | codex-emits | (TODO) | `/v1/responses` |
 | `gpt-5.3-codex` | (untested via this matrix) | codex-emits | (TODO) | `/v1/responses` |
 | `gemini-3.1-pro-preview` | ✅ 200 (`/v1/chat/completions` accepts `tools[]` + `reasoning_effort:"high"`) | exploratory | `worker_gemini_tools_reasoning` | Default model for `worker_explore` / `worker_review` / `worker_implement` MCP tools, and the `gemini-critic` / `gemini-reviewer` personas. Probe is load-bearing for the worker-tools dual gate (catalog arm verifies presence + `tool_calls`; this probe verifies the actual request shape Copilot's validator accepts). See [`docs/peer-mcp-design.md`](peer-mcp-design.md) "Worker tools" and [`docs/pi-vendor-sync.md`](pi-vendor-sync.md). |
-| `gemini-3.5-flash` | (untested via this matrix) | exploratory | (none) | Browser-MCP inner compressor / extraction model (intent resolution for `act` / `observe` / `extract`; see [`docs/browser-mcp-design.md`](browser-mcp-design.md)). Plain chat-completions calls, no special request shape to pin here. |
+| `gpt-5.4-mini` | (untested via this matrix) | exploratory | (none) | Browser-MCP inner compressor / extraction model — **chain head**, driven via **`/responses`** (gpt-5.4-mini is `/responses`-only; the compressor is endpoint-aware — see [`docs/browser-mcp-design.md`](browser-mcp-design.md)). `tool_calls` + vision; forced-tool-call verified live. Fallback chain `gpt-5.4-mini` → `claude-sonnet-4-6` → `claude-haiku-4-5`. |
+| `gemini-3.5-flash` | (untested via this matrix) | exploratory | (none) | NO LONGER in the browser-MCP compressor chain (removed in the endpoint-aware fix; it early-stops on forced tool-calls). Listed here only as a catalog reference; `/chat/completions` + `tool_calls` + vision. |
 
 ## Web search — cross-endpoint native exposure (Task #2 empirical map)
 
