@@ -487,12 +487,43 @@ async function extractSnapshotLegacy(tabId, opts) {
       // summary: walk text nodes whose parent is in the viewport; cap
       // at 20 KB. The model sees what a user could read without
       // scrolling. Off-screen content remains reachable via mode:"full".
-      // full: 256 KiB innerText cap (legacy behavior).
+      // full: walk all rendered text nodes; cap at 256 KiB.
       let text = ""
       if (mode === "full") {
+        // Mirror of collectVisibleText(root, cap, "rendered") in
+        // src/browser-ext/visible-text.js — executeScript serializes only
+        // this func and drops its module closure, so it cannot import that
+        // helper; keep the two in sync by hand. We walk text nodes and join
+        // with "\n" instead of using document.body.innerText, which glues
+        // adjacent inline siblings with no separator
+        // (<span>A</span><span>B</span> -> "AB" instead of "A\nB").
         const MAX_FULL = 256 * 1024
-        text = document.body ? document.body.innerText : ""
-        if (text.length > MAX_FULL) text = text.slice(0, MAX_FULL)
+        const parts = []
+        let total = 0
+        const root = document.body || document.documentElement
+        if (root) {
+          const tw = document.createTreeWalker(root, 4) // NodeFilter.SHOW_TEXT === 4
+          let n
+          while ((n = tw.nextNode())) {
+            const parent = n.parentElement
+            if (!parent) continue
+            const ptag = parent.tagName ? parent.tagName.toLowerCase() : ""
+            if (ptag === "script" || ptag === "style" || ptag === "noscript") continue
+            // display:none / detached parents report zero client rects;
+            // off-screen (scrolled-out) parents still report rects, so full
+            // mode keeps them — matching innerText's "rendered text" intent.
+            if (parent.getClientRects().length === 0) continue
+            const t = (n.textContent || "").replace(/\s+/g, " ").trim()
+            if (!t) continue
+            if (total + t.length + 1 > MAX_FULL) {
+              parts.push(t.slice(0, Math.max(0, MAX_FULL - total)))
+              break
+            }
+            parts.push(t)
+            total += t.length + 1
+          }
+        }
+        text = parts.join("\n")
       } else {
         const TEXT_CAP = 20 * 1024
         const parts = []
