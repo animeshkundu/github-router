@@ -24,6 +24,8 @@ import type { BudgetConfig } from "./types"
 const DEFAULT_MAX_TURNS = 500
 const DEFAULT_MAX_WALLCLOCK_MS = 30 * 60_000
 const DEFAULT_MAX_TOOL_BYTES = 16 * 1024 * 1024
+const DEFAULT_MAX_TOOL_CALLS = 250
+const DEFAULT_MAX_REPEATED_CALLS = 3
 
 /**
  * Thrown when the wall-clock budget is exceeded. Engine catches this
@@ -83,6 +85,14 @@ export function resolveBudgetConfig(
       overrides?.maxToolBytes ??
       envInt("GH_ROUTER_WORKER_MAX_TOOL_BYTES") ??
       DEFAULT_MAX_TOOL_BYTES,
+    maxToolCalls:
+      overrides?.maxToolCalls ??
+      envInt("GH_ROUTER_WORKER_MAX_TOOL_CALLS") ??
+      DEFAULT_MAX_TOOL_CALLS,
+    maxRepeatedCalls:
+      overrides?.maxRepeatedCalls ??
+      envInt("GH_ROUTER_WORKER_MAX_REPEATED_CALLS") ??
+      DEFAULT_MAX_REPEATED_CALLS,
   }
 }
 
@@ -106,6 +116,9 @@ export class Budget {
   private readonly startMs: number
   private turnCount = 0
   private toolBytes = 0
+  private toolCallCount = 0
+  private lastCallKey: string | null = null
+  private consecutiveRepeats = 0
 
   constructor(overrides?: Partial<BudgetConfig>) {
     this.config = resolveBudgetConfig(overrides)
@@ -162,7 +175,7 @@ export class Budget {
    * caps are tool-agnostic — and to satisfy the `BeforeToolCallContext`
    * signature in Pi without forcing the engine into a wrapper.
    */
-  checkBeforeCall(_toolName: string, _args: unknown): BlockResult {
+  checkBeforeCall(toolName: string, args: unknown): BlockResult {
     if (this.turnCount > this.config.maxTurns) {
       return { block: true, reason: "[halted: turns]" }
     }
@@ -171,6 +184,33 @@ export class Budget {
     }
     if (this.toolBytes > this.config.maxToolBytes) {
       return { block: true, reason: "[halted: tool-bytes]" }
+    }
+    this.toolCallCount += 1
+    if (this.toolCallCount > this.config.maxToolCalls) {
+      return { block: true, reason: "[halted: tool-calls]" }
+    }
+    // Duplicate-read / anti-loop guard. Block (NOT halt) the next identical
+    // call after `maxRepeatedCalls` CONSECUTIVE repeats — the model sees the
+    // block as a tool result and must vary the call or finish. A different
+    // call resets the counter, so legit re-reads after a scroll/click are
+    // unaffected. Repeated ignores still burn `toolCallCount` toward the
+    // hard cap, so a stuck model eventually halts.
+    const key = `${toolName}:${stableArgs(args)}`
+    if (key === this.lastCallKey) {
+      this.consecutiveRepeats += 1
+    } else {
+      this.lastCallKey = key
+      this.consecutiveRepeats = 1
+    }
+    if (this.consecutiveRepeats > this.config.maxRepeatedCalls) {
+      return {
+        block: true,
+        reason:
+          `Blocked: this exact ${toolName} call was repeated `
+          + `${this.consecutiveRepeats}× with no change. Vary it (scroll / a `
+          + "different selector or query / a different tool) or finish with the "
+          + "result you already have.",
+      }
     }
     return { block: false }
   }
@@ -200,6 +240,19 @@ export class Budget {
  * Defensive against unknown shapes — anything we can't read returns
  * 0 (don't crash the agent loop over an unrecognized tool result).
  */
+/**
+ * Stable string key for a tool call's args, for the duplicate-call guard.
+ * Defensive: a non-serializable value collapses to "" (treated as "no args"),
+ * which can only make two calls look MORE alike — never crashes the loop.
+ */
+function stableArgs(args: unknown): string {
+  try {
+    return JSON.stringify(args) ?? ""
+  } catch {
+    return ""
+  }
+}
+
 function extractTextByteLength(result: unknown): number {
   if (!result || typeof result !== "object") return 0
   const r = result as { content?: unknown }

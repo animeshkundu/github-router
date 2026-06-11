@@ -61,6 +61,13 @@ export interface ResolveOk {
   ok: true
   modelId: string
   thinking: WorkerThinkingLevel
+  /**
+   * Catalog context window (tokens) for the resolved model, or undefined
+   * when the catalog doesn't report one. The engine sizes its per-run
+   * `ContextBudget` from this; undefined ⇒ the budget no-ops (no blind
+   * compaction/capping).
+   */
+  contextWindow?: number
 }
 export interface ResolveErr {
   ok: false
@@ -109,11 +116,22 @@ export function resolveModelAndThinking(opts: ResolveOpts): ResolveResult {
     }
   }
 
+  // Surface the catalog context window so the engine can size its per-run
+  // context budget (compaction + per-result caps + request backstop). Absent
+  // ⇒ undefined ⇒ the budget no-ops rather than prune against a guessed window.
+  const contextWindow = found.capabilities?.limits?.max_context_window_tokens
+  const mkOk = (thinking: WorkerThinkingLevel): ResolveOk => ({
+    ok: true,
+    modelId: found.id,
+    thinking,
+    contextWindow,
+  })
+
   const allowedRaw = found.capabilities?.supports?.reasoning_effort
   if (!allowedRaw || allowedRaw.length === 0) {
     // No reasoning_effort knob → drop the param entirely. Pi reads
     // `"off"` and skips the `reasoning` field on the outbound request.
-    return { ok: true, modelId: found.id, thinking: "off" }
+    return mkOk("off")
   }
 
   // Narrow the allowlist to known levels and rank them by tier.
@@ -128,17 +146,17 @@ export function resolveModelAndThinking(opts: ResolveOpts): ResolveResult {
   if (allowed.length === 0) {
     // Same effect as "no field at all" — catalog reported the field
     // but none of the values matched a known tier. Drop param.
-    return { ok: true, modelId: found.id, thinking: "off" }
+    return mkOk("off")
   }
 
   // "off" always passes through — it's a valid "no thinking" override
   // regardless of what the model's allowlist contains.
   if (opts.thinking === "off") {
-    return { ok: true, modelId: found.id, thinking: "off" }
+    return mkOk("off")
   }
 
   if (allowed.includes(opts.thinking as ThinkingLevel)) {
-    return { ok: true, modelId: found.id, thinking: opts.thinking }
+    return mkOk(opts.thinking)
   }
 
   const reqTier = tier(opts.thinking)
@@ -158,5 +176,5 @@ export function resolveModelAndThinking(opts: ResolveOpts): ResolveResult {
     clamp = allowed[0]
   }
 
-  return { ok: true, modelId: found.id, thinking: clamp as ThinkingLevel }
+  return mkOk(clamp as ThinkingLevel)
 }

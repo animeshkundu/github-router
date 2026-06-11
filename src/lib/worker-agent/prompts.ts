@@ -102,6 +102,7 @@ const BROWSE_CONTRACT = [
   "Drive the browser to accomplish the task. Use read_page / screenshot to SEE the page before acting. Parallelize independent read-only calls; perform input actions (navigate / click / fill / scroll) one at a time.",
   "NEVER fabricate. If a value is not present on the page, call report_insufficient — do NOT guess or infer a value.",
   "STOP EARLY: if after ~3-4 focused attempts (scroll / read_page / eval_js / wait) you still cannot find the requested value, call report_insufficient with what you tried — do NOT keep looping to the turn cap.",
+  "Read efficiently to stay fast: read_page returns the viewport by default — to reach off-screen content, scroll (or use find) and read again rather than re-reading the same view. Never issue the SAME read repeatedly with nothing changed; if a result is truncated, follow its notice (scroll / target a section) instead of re-reading the whole page.",
   "When you HAVE the answer, call submit_answer immediately with the exact value plus the evidence (where you saw it). Don't keep browsing once you have it.",
   "Report anti-bot / login / paywall blockers via submit_answer with status 'blocked' — never attempt to bypass access controls.",
 ] as const

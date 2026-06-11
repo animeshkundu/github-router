@@ -125,4 +125,12 @@ export interface BudgetConfig {
   maxTurns: number
   maxWallClockMs: number
   maxToolBytes: number
+  /** Absolute cap on total tool calls per run (fan-out bound). */
+  maxToolCalls: number
+  /**
+   * Max CONSECUTIVE identical tool calls (same name + args) before the next
+   * identical one is blocked — the duplicate-read / anti-loop guard that
+   * curbs the heavy-DOM re-read burn without halting the run.
+   */
+  maxRepeatedCalls: number
 }

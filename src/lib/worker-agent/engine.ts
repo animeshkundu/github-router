@@ -97,6 +97,9 @@ import {
   formatBrowseTerminalAnswer,
   isBrowseTerminalTool,
 } from "./browse-tools"
+import { makeContextBudget } from "./context-budget"
+import { compactWorkerContext } from "./compaction"
+import { capToolResultText } from "./tool-output-cap"
 import { buildWorkerTools } from "./tools"
 import type {
   WorkerAgentOpts,
@@ -267,6 +270,14 @@ export async function runWorkerAgent(
       return { text: resolved.error, isError: true }
     }
 
+    // Per-run context budget from the resolved model's catalog window.
+    // Undefined when the window is unknown → compaction + the per-result cap
+    // no-op (the request backstop still guards). Sized ONCE and threaded into
+    // `transformContext` (compaction) + `afterToolCall` (the per-result cap)
+    // so the two defenses derive from one window and never drift. Per-run
+    // (parallel runs resolve different windows) — never module state.
+    const ctxBudget = makeContextBudget(resolved.contextWindow)
+
     // Step 3: workspace canonicalization. The per-call `confineToWorkspace`
     // chokepoint inside `tools.ts` requires its `workspaceAbs` to be
     // pre-realpath-resolved (see `paths.ts` docstring). Doing it once
@@ -361,8 +372,23 @@ export async function runWorkerAgent(
         thinkingLevel: resolved.thinking,
         tools,
       },
-      streamFn: createCopilotStreamFn({ resolved }),
+      streamFn: createCopilotStreamFn({ resolved, contextBudget: ctxBudget }),
       toolExecution: opts.mode === "implement" ? "sequential" : "parallel",
+      // Structural, model-free compaction (Pi's documented seam). No-op below
+      // the budget trigger; on the compacting branch it `structuredClone`s
+      // before mutating (the hook receives the LIVE transcript reference) and
+      // never throws past here (contract: transformContext must not throw —
+      // on any failure return the input and let the request backstop guard).
+      // Disabled when the model window is unknown (no blind pruning).
+      transformContext: ctxBudget
+        ? async (messages) => {
+            try {
+              return compactWorkerContext(messages, ctxBudget)
+            } catch {
+              return messages
+            }
+          }
+        : undefined,
       beforeToolCall: async (
         ctx: BeforeToolCallContext,
       ): Promise<BeforeToolCallResult | undefined> => {
@@ -401,6 +427,20 @@ export async function runWorkerAgent(
         // model sees them, but they're not a context-pollution proxy
         // concern for our cap).
         budget.recordToolBytes(ctx.result)
+        // Per-result source cap. `afterToolCall` runs after the tool's
+        // execute and can REPLACE the result content; each parallel tool's
+        // hook caps its OWN result (no shared state → race-free across the
+        // batch). One giant read_page/bash/grep is shortened to the budget's
+        // per-result cap so it can't dominate the next request; the per-turn
+        // AGGREGATE across parallel results is bounded by the compactor's
+        // current-turn truncation. No-op when the budget is unknown.
+        if (ctxBudget) {
+          const capped = capToolResultText(
+            (ctx.result as { content?: unknown }).content,
+            ctxBudget.perResultCapBytes,
+          )
+          if (capped) return { content: capped }
+        }
         return undefined
       },
       // Pi calls `prepareNextTurn` after `turn_end` and before the loop
@@ -516,26 +556,26 @@ export async function runWorkerAgent(
         : diff
           ? `${finalText}\n\n${diff}`
           : finalText
-      // Never return empty text — the harness has no signal to act on.
-      // Distinguish (a) Pi exited silently after tool work from (b) a
-      // legitimate no-op so the caller can decide to retry/rephrase.
-      if (!text.trim()) {
-        // A browse run that aborted on an upstream stream error (commonly the
-        // next request's input overflowing context right after a very large
-        // page read) lands here with stopReason="error" and empty text.
-        // Return a browse-shaped, actionable message instead of the opaque
-        // worker-exit string — and do NOT echo the raw upstream error (it can
-        // carry request ids / payload excerpts).
-        if (isBrowse && lastStopReason === "error") {
-          return {
-            text:
-              "Browse run failed before producing an answer — the model's input "
-              + "likely overflowed after a large page read (or the upstream "
-              + "errored). Retry with a narrower task: target a specific section "
-              + "or element rather than reading the whole page at once.",
-            isError: true,
-          }
+      // A run that aborted on a terminal stream error (stopReason="error") is
+      // a FAILURE even if it emitted text. The request-boundary backstop puts
+      // an actionable diagnostic in the assistant text on a predicted
+      // overflow; a raw upstream error arrives with empty text. Surface the
+      // diagnostic when present, else a generic sanitized message — never echo
+      // a raw upstream error body, and never report an error as success.
+      if (lastStopReason === "error") {
+        const diag = (terminalText ?? finalText).trim()
+        return {
+          text:
+            diag
+            || "Worker run failed before producing an answer — the model's input "
+              + "likely overflowed (a large tool result), or the upstream errored. "
+              + "Retry with a narrower task: target a specific section / file / "
+              + "element rather than reading everything at once.",
+          isError: true,
         }
+      }
+      // Never return empty text — the harness has no signal to act on.
+      if (!text.trim()) {
         return {
           text:
             `[worker exited with no output `

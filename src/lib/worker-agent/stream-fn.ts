@@ -59,6 +59,8 @@ import type {
 } from "~/services/copilot/create-responses"
 import { endpointForModelId } from "~/services/copilot/endpoint"
 
+import { type ContextBudget, tokensFromBytes } from "./context-budget"
+
 export type ResolvedThinking =
   | "off"
   | "minimal"
@@ -92,6 +94,14 @@ export interface CreateCopilotStreamFnOptions {
    * forbids it; any exception is caught and encoded as a terminal error.
    */
   onChunk?: (chunk: ChatCompletionChunk) => void
+  /**
+   * Per-run context budget. When set, a request-boundary backstop estimates
+   * the assembled payload BEFORE the endpoint split and, on predicted
+   * overflow, stops the run with an actionable diagnostic instead of letting
+   * the upstream return an opaque 413/400. The structural compactor is
+   * best-effort; this is the hard correctness boundary.
+   */
+  contextBudget?: ContextBudget
 }
 
 export function createCopilotStreamFn(
@@ -168,6 +178,29 @@ async function runStreamLoop(
   options: SimpleStreamOptions | undefined,
 ): Promise<void> {
   const { resolved } = opts
+
+  // Request-boundary backstop. Runs BEFORE the endpoint split so it guards
+  // BOTH the chat and `/responses` paths (browse routes through `/responses`).
+  // Estimates the assembled payload (system prompt + tool schemas + the
+  // post-compaction wire messages) and, if it exceeds the model's input bound,
+  // stops the run with an actionable diagnostic carried as assistant TEXT —
+  // which the engine surfaces as an isError result — instead of letting the
+  // upstream reject it with an opaque error. The structural compactor is
+  // best-effort (a byte-floor estimate); this is the hard guarantee.
+  if (opts.contextBudget) {
+    const assembledTokens = tokensFromBytes(
+      Buffer.byteLength(safeStringifyContext(context), "utf8"),
+    )
+    if (assembledTokens > opts.contextBudget.inputHardLimitTokens) {
+      pushBackstopDiagnostic(
+        stream,
+        resolved,
+        assembledTokens,
+        opts.contextBudget.inputHardLimitTokens,
+      )
+      return
+    }
+  }
 
   // Endpoint split: the gpt-5.x family (gpt-5.4-mini, gpt-5.5, *-codex) is
   // `/responses`-only and 400s on `/chat/completions`. Route those through
@@ -1223,6 +1256,54 @@ function pushTerminalError(
     errorMessage,
   }
   stream.push({ type: "error", reason, error: final })
+}
+
+/**
+ * Estimate-friendly stringify of the LLM context for the request-boundary
+ * backstop. Never throws (a non-serializable field falls back to a coarse
+ * per-part estimate) — the backstop must not crash the stream.
+ */
+function safeStringifyContext(context: Context): string {
+  try {
+    return JSON.stringify(context)
+  } catch {
+    let s = context.systemPrompt ?? ""
+    for (const m of context.messages ?? []) {
+      try {
+        s += JSON.stringify(m)
+      } catch {
+        s += String((m as { content?: unknown }).content ?? "")
+      }
+    }
+    return s
+  }
+}
+
+/**
+ * Emit a terminal diagnostic when the assembled request would overflow the
+ * model's input bound. Carries the actionable message as assistant TEXT (so
+ * the engine's `finalText` capture surfaces it) with stopReason "error" (so
+ * the engine marks the result isError). No upstream call is made — this
+ * replaces an opaque upstream 4xx with an actionable, sanitized message.
+ */
+function pushBackstopDiagnostic(
+  stream: AssistantMessageEventStream,
+  resolved: ResolvedModel,
+  assembledTokens: number,
+  limitTokens: number,
+): void {
+  const text =
+    `Request too large: the assembled input is ~${assembledTokens} tokens, over `
+    + `the ~${limitTokens}-token budget for ${resolved.modelId}. The run was `
+    + "stopped before an overflow error. Retry with a narrower task — target a "
+    + "specific section / file / element rather than reading everything at once."
+  const final: AssistantMessage = {
+    ...makeBaseMessage(resolved),
+    content: [{ type: "text", text }],
+    stopReason: "error",
+    errorMessage: "context budget exceeded (request-boundary backstop)",
+  }
+  stream.push({ type: "error", reason: "error", error: final })
 }
 
 function describeError(err: unknown): string {
