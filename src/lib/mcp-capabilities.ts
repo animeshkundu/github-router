@@ -59,15 +59,18 @@ export function standInToolEnabled(): boolean {
 }
 
 /**
- * Gate for the worker tools (`worker_explore`, `worker_implement`).
+ * Gate for the worker tools (`explore`, `review`, `implement`).
  *
  * Returns true iff BOTH:
  *   1. Copilot's live catalog (`state.models?.data`) contains the
- *      worker's default model (`gemini-3.1-pro-preview`) AND that entry
- *      advertises `capabilities.supports.tool_calls === true`. The
- *      worker loop is function-calling; a model that can't emit
- *      tool_calls is unusable, so dormant-register (omit from
- *      `tools/list`) keeps the surface honest.
+ *      worker default model (`gemini-3.5-flash`, used by explore/review)
+ *      AND that entry advertises `capabilities.supports.tool_calls ===
+ *      true`. The worker loop is function-calling; a model that can't
+ *      emit tool_calls is unusable, so dormant-register (omit from
+ *      `tools/list`) keeps the surface honest. (The implement default
+ *      `gpt-5.5` is NOT gated here — if it's absent, implement calls
+ *      surface a clean resolve error rather than disabling all worker
+ *      tools, since explore/review still work.)
  *   2. The operator hasn't set `GH_ROUTER_DISABLE_WORKER_TOOLS=1`
  *      (opt-out — workers ship enabled by default per plan).
  *

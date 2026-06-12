@@ -37,6 +37,7 @@ describe("systemPromptFor", () => {
       expect(prompt).toContain("`code_search`")
       expect(prompt).toContain("`web_search`")
       expect(prompt).toContain("`fetch_url`")
+      expect(prompt).toContain("`toolbelt`")
       // Each is on its own bullet line.
       expect(prompt).toMatch(/^- `read`/m)
       expect(prompt).toMatch(/^- `glob`/m)

@@ -143,6 +143,16 @@ beforeEach(() => {
         tool_calls: true,
         reasoning_effort: ["low", "medium", "high"],
       }),
+      // explore/review default
+      fakeModel("gemini-3.5-flash", {
+        tool_calls: true,
+        reasoning_effort: ["minimal", "low", "medium", "high"],
+      }),
+      // implement default (routes to /responses via the stream-fn split)
+      fakeModel("gpt-5.5", {
+        tool_calls: true,
+        reasoning_effort: ["none", "low", "medium", "high", "xhigh"],
+      }),
     ],
   }
   state.copilotToken = "test-token"
@@ -444,6 +454,10 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
       const r = await runWorkerAgent({
         prompt: "do a thing",
         mode: "implement",
+        // Pin a chat-endpoint model so the chat-SSE mock applies — this
+        // test exercises the worktree diff-suffix mechanic, not the
+        // implement default (gpt-5.5, which routes to /responses).
+        model: "gemini-3.1-pro-preview",
         workspace: repo,
         worktree: true,
       })

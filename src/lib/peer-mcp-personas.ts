@@ -637,10 +637,12 @@ export interface NonPersonaMcpTool {
    * Optional capability tag the handler uses to drop the tool from
    * `tools/list` and `tools/call` when the runtime gate is off.
    *
-   * - `"worker"` (worker_explore / worker_implement) requires Copilot's
-   *   `gemini-3.1-pro-preview` to be in the live catalog with `tool_calls`
-   *   support AND `GH_ROUTER_DISABLE_WORKER_TOOLS=1` to be unset
-   *   (see `workerToolsEnabled()` in `routes/mcp/handler.ts`).
+   * - `"worker"` (explore / review / implement) requires Copilot's
+   *   `gemini-3.5-flash` (the worker default) to be in the live catalog
+   *   with `tool_calls` support AND `GH_ROUTER_DISABLE_WORKER_TOOLS=1` to
+   *   be unset (see `workerToolsEnabled()`). implement's `gpt-5.5` default
+   *   is not gated here — if absent, implement calls return a helpful
+   *   resolve error.
    * - `"stand_in"` requires all three of `gpt-5.5`, `claude-opus-4-7`,
    *   and a `gemini-3.X.*pro` model to be in the live catalog (see
    *   `standInToolEnabled()` in `routes/mcp/handler.ts`).
@@ -1088,16 +1090,19 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     },
     // worker_explore / worker_implement — autonomous worker tools backed
     // by the Pi agent loop (`src/lib/worker-agent/engine.ts`), routed
-    // through Copilot's `gemini-3.1-pro-preview` by default.
+    // through per-mode default models: explore/review → `gemini-3.5-flash`
+    // (high); implement → `gpt-5.5` (xhigh). An explicit `model` arg wins.
     //
     // GATING (`capability: "worker"`): the MCP handler drops both entries
     // from `tools/list` and `tools/call` when `workerToolsEnabled()` is
-    // false. The gate fires when (a) `gemini-3.1-pro-preview` is missing from
-    // the live Copilot catalog (or present but lacks `tool_calls`
-    // support), OR (b) the operator opted out via
-    // `GH_ROUTER_DISABLE_WORKER_TOOLS=1`. Defense-in-depth: the gate is
-    // checked at BOTH list-time and call-time so a client that hard-
-    // codes the tool name can't bypass the list-side filter.
+    // false. The gate fires when (a) the worker default model
+    // (`gemini-3.5-flash`) is missing from the live Copilot catalog (or
+    // present but lacks `tool_calls` support), OR (b) the operator opted
+    // out via `GH_ROUTER_DISABLE_WORKER_TOOLS=1`. Defense-in-depth: the
+    // gate is checked at BOTH list-time and call-time so a client that
+    // hard-codes the tool name can't bypass the list-side filter. (If the
+    // implement default `gpt-5.5` is absent, implement calls return a
+    // helpful resolve error listing the catalog's tool_call models.)
     //
     // SCHEMA SHAPE: `prompt` is required; `model` / `thinking` are
     // optional fine-tunes the worker engine validates against the live
@@ -1119,10 +1124,13 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       capability: "worker",
       description:
         "Read-only investigation by an autonomous worker (Pi runtime; "
-        + "default model `gemini-3.1-pro-preview`, override via the `model` "
-        + "arg with any Copilot-catalog model that advertises "
-        + "`tool_calls`). Tools: read, glob, grep, code_search, "
-        + "web_search, fetch_url. The worker's system prompt sandboxes "
+        + "default model `gemini-3.5-flash` at high reasoning, override via "
+        + "the `model` arg with any Copilot-catalog model that advertises "
+        + "`tool_calls`). Tools: read, glob, grep, code_search "
+        + "(semantic-first), web_search, fetch_url, advisor (consult a "
+        + "stronger cross-lab model), update_plan (planning checklist), and "
+        + "toolbelt (run a read-only analysis CLI: rg/fd/jq/yq/sg/gron/tokei/"
+        + "difft/git). The worker's system prompt sandboxes "
         + "it and gives one-line descriptions of each tool, so brief "
         + "it on the investigation, not on tool semantics. Offloads "
         + "bounded research that would otherwise eat your context "
@@ -1146,7 +1154,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "gemini-3.1-pro-preview). Must advertise tool_calls "
+              + "gemini-3.5-flash). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
               + "the eligible catalog models on mismatch.",
           },
@@ -1186,11 +1194,12 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       capability: "worker",
       description:
         "Delegates a scoped coding task to an autonomous worker (Pi "
-        + "runtime; default model `gemini-3.1-pro-preview`, override via the "
-        + "`model` arg with any Copilot-catalog model that advertises "
-        + "`tool_calls`). Tools: the worker_explore read-only set plus "
-        + "edit, write, bash, and codex_review (code review by "
-        + "codex-reviewer / gpt-5.3-codex). The worker's system prompt "
+        + "runtime; default model `gpt-5.5` at xhigh reasoning, override via "
+        + "the `model` arg with any Copilot-catalog model that advertises "
+        + "`tool_calls`). Tools: the explore read-only set (read, glob, "
+        + "grep, code_search, web_search, fetch_url, advisor, update_plan, "
+        + "toolbelt) plus edit, write, bash, and codex_review (code review "
+        + "by codex-reviewer / gpt-5.3-codex). The worker's system prompt "
         + "sandboxes it and gives one-line descriptions of each tool, "
         + "so brief it on the task, not on tool semantics. With "
         + "`worktree: false` (default) edits in place — concurrent "
@@ -1223,7 +1232,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "gemini-3.1-pro-preview). Must advertise tool_calls "
+              + "gpt-5.5). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
               + "the eligible catalog models on mismatch.",
           },
@@ -1231,7 +1240,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
             description:
-              "Optional reasoning depth (default high). Silently "
+              "Optional reasoning depth (default xhigh). Silently "
               + "clamped to the model's allowed range; \"off\" drops "
               + "the parameter entirely.",
           },
@@ -1264,10 +1273,11 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       capability: "worker",
       description:
         "Read-only code review by an autonomous worker (Pi runtime; "
-        + "default model `gemini-3.1-pro-preview`, override via `model` with any "
+        + "default model `gemini-3.5-flash`, override via `model` with any "
         + "Copilot-catalog model that advertises `tool_calls`). Same "
         + "read-only toolset as `explore` (read, glob, grep, code_search, "
-        + "web_search, fetch_url) — it CANNOT edit — but the worker is framed "
+        + "web_search, fetch_url, advisor, update_plan, toolbelt) — it CANNOT "
+        + "edit — but the worker is framed "
         + "as a reviewer: it verifies correctness against the actual code "
         + "itself rather than trusting a claim, and reports findings (bugs, "
         + "edge cases, security / concurrency / resource risks, missing "
@@ -1295,7 +1305,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "gemini-3.1-pro-preview). Must advertise tool_calls "
+              + "gemini-3.5-flash). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
               + "the eligible catalog models on mismatch.",
           },

@@ -348,7 +348,7 @@ For each proposed input or output field, answer in one sentence: **"What would t
 
 ## Worker tools (`explore`, `implement`)
 
-Three non-persona MCP tools - `mcp__workers__explore`, `mcp__workers__review`, and `mcp__workers__implement` - delegate scoped work to an **autonomous worker subagent** backed by the **Pi agent runtime** (vendored at `src/vendor/pi/`) and routed through Copilot's `gemini-3.1-pro-preview` by default. The worker plans its own tool calls, decides when it's done, and returns a single text answer (plus a unified diff when `worktree: true`). Implementation: `src/lib/worker-agent/engine.ts` (`runWorkerAgent`) and `src/lib/worker-agent/tools.ts` (the 11 worker-side `AgentTool` definitions).
+Three non-persona MCP tools - `mcp__workers__explore`, `mcp__workers__review`, and `mcp__workers__implement` - delegate scoped work to an **autonomous worker subagent** backed by the **Pi agent runtime** (vendored at `src/vendor/pi/`). **Per-mode model defaults** (caller `model` arg always wins): read-only `explore`/`review` → `gemini-3.5-flash` at `high` (1M context); read+write `implement` → `gpt-5.5` at `xhigh` (coding wants max reasoning). The worker plans its own tool calls, decides when it's done, and returns a single text answer (plus a unified diff when `worktree: true`). Implementation: `src/lib/worker-agent/engine.ts` (`runWorkerAgent`, which holds the `DEFAULT_MODEL`/`IMPLEMENT_DEFAULT_MODEL`/`BROWSE_DEFAULT_MODEL` constants) and `src/lib/worker-agent/tools.ts` (the worker-side `AgentTool` definitions).
 
 These tools are exposed under the `workers` MCP server at `/mcp/workers` (or the `/mcp` union path).
 
@@ -356,23 +356,24 @@ These tools are exposed under the `workers` MCP server at `/mcp/workers` (or the
 
 | Tool | Mode | Tools the worker can call | Worktree opt-in | Description |
 | --- | --- | --- | --- | --- |
-| `explore` | read-only | `read`, `glob`, `grep`, `code_search`, `web_search`, `fetch_url`, `advisor`, `update_plan` (8) | n/a | Read-only investigation - the worker plans its own searches/reads and returns a single text answer. |
-| `implement` | read+write | explore tools + `edit`, `write`, `bash`, `codex_review` (12) | `worktree: boolean` (default `false`) | Scoped coding task; modifies files in your workspace. With `worktree: true` runs in a fresh git worktree and returns Pi's text followed by the unified diff. With `worktree: false` edits in place - concurrent calls race. |
+| `explore` | read-only | `read`, `glob`, `grep`, `code_search`, `web_search`, `fetch_url`, `toolbelt`, `advisor`, `update_plan` (9) | n/a | Read-only investigation - the worker plans its own searches/reads and returns a single text answer. |
+| `review` | read-only | same 9 read-only tools as `explore` | n/a | Same surface as `explore` with a reviewer ROLE frame (verify correctness, report findings with severity + `file:line`). |
+| `implement` | read+write | explore tools + `edit`, `write`, `bash`, `codex_review` (13) | `worktree: boolean` (default `false`) | Scoped coding task; modifies files in your workspace. With `worktree: true` runs in a fresh git worktree and returns Pi's text followed by the unified diff. With `worktree: false` edits in place - concurrent calls race. |
 
-Workers stay strictly TERMINAL (no recursive sub-worker spawning is allowed). Implement mode is no longer forced agent-wide sequential; pure read/search batches run in parallel, while `edit`, `write`, `bash`, `codex_review`, and `update_plan` execute sequentially via per-tool `executionMode`.
+Workers stay strictly TERMINAL (no recursive sub-worker spawning is allowed). Implement mode is no longer forced agent-wide sequential; pure read/search batches (incl. `toolbelt`, which runs read-only CLIs with `shell:false` and carries no `executionMode`) run in parallel, while `edit`, `write`, `bash`, `codex_review`, and `update_plan` execute sequentially via per-tool `executionMode`.
 
-Both tools accept optional `model` (any Copilot catalog model with `tool_calls` support; default `gemini-3.1-pro-preview`) and `thinking` (one of `off`/`minimal`/`low`/`medium`/`high`/`xhigh`, default `high`, silently clamped to the model's allowed range).
+The `model` arg accepts any Copilot catalog model with `tool_calls` support; defaults are per-mode (explore/review `gemini-3.5-flash`, implement `gpt-5.5` — see above). `thinking` (one of `off`/`minimal`/`low`/`medium`/`high`/`xhigh`) defaults to the mode's tier (`high` for explore/review, `xhigh` for implement) and is silently clamped to the resolved model's `reasoning_effort` allowlist.
 
 Both also accept an optional `workspace` (absolute path) - the working directory the worker operates in. **Default is the proxy's launch cwd** (the directory `github-router start` / `github-router claude` was invoked from); the model can override when the parent agent has multiple workspaces open and needs the worker pointed at a specific one. The override is absolute-only - relative paths are rejected at the MCP boundary with an actionable error so a typo doesn't silently resolve against `process.cwd()` and land somewhere surprising. For `implement` with `worktree: true`, the workspace must be inside a git repository (the engine's existing `createWorktree` hard-errors otherwise). Threat model matches code search: the proxy already runs as the user; no allowlist (the same operator could `Read` / `Bash` the same paths through Claude Code directly). See `runWorkerToolCall` in `src/lib/peer-mcp-personas.ts` for the validation.
 
 ### Dual gate (catalog + opt-out)
 
-`workerToolsEnabled()` in `src/routes/mcp/handler.ts` drops both worker tools from `tools/list` AND `tools/call` when EITHER:
+`workerToolsEnabled()` in `src/routes/mcp/handler.ts` drops all three worker tools from `tools/list` AND `tools/call` when EITHER:
 
 1. The operator set `GH_ROUTER_DISABLE_WORKER_TOOLS=1`, OR
-2. `gemini-3.1-pro-preview` is missing from the live Copilot catalog, OR present but lacks `tool_calls` support.
+2. `gemini-3.5-flash` (the explore/review default) is missing from the live Copilot catalog, or present but lacks `tool_calls` support.
 
-This is defense-in-depth - a client that hard-codes the tool name still fails at call-time rather than seeing a useless dormant registration. The default model lives at `src/lib/worker-agent/engine.ts:DEFAULT_MODEL` and is re-imported by the handler (`import { DEFAULT_MODEL as WORKER_DEFAULT_MODEL } from "~/lib/worker-agent"`) so there is no parallel constant to drift.
+This is defense-in-depth - a client that hard-codes the tool name still fails at call-time rather than seeing a useless dormant registration. The gate model lives at `src/lib/worker-agent/engine.ts:DEFAULT_MODEL` and is re-imported by the handler (`import { DEFAULT_MODEL as WORKER_DEFAULT_MODEL } from "~/lib/worker-agent"`) so there is no parallel constant to drift. Implement's `gpt-5.5` is deliberately NOT a gate input: if it's absent the worker surface stays live and `implement` errors helpfully at call time (only `gpt-5.5`-backed implement breaks, not explore/review).
 
 ### Budget caps (turns / wallclock / tool-bytes - NOT tokens or cost)
 
@@ -417,13 +418,22 @@ Worker `bash` runs through `src/lib/worker-agent/bash.ts` with:
 
 The worker's read-only file tools refuse paths matching `.env*`, `*.pem`, `id_rsa*`, `id_ed25519*`, anything under `.git/` (interior, not the worktree root), `.ssh/`, `.gnupg/`, `.npmrc`, `.netrc`. The intent is "don't make it trivial for a confused worker to exfiltrate the operator's secrets via tool-result text"; the threat model is honest about not being defense against a determined caller (the same operator could run `implement` with `bash` and `cat` the file directly).
 
+**The `toolbelt` tool is NOT covered by this path denylist** (its CLIs - `rg`/`fd`/`git show`/… - take patterns/refs/globs, not just file paths, so an arg-level denylist would be both leaky and easy to bypass). This is deliberate and consistent with the project-wide threat model: the worker is spawned by a Claude Code session that already has `Read`/`Bash`/`Edit` reaching the same paths, so a read-only CLI runner is not a new exfiltration surface relative to its parent. The denylist on the internal `read`/`grep`/`glob`/`code_search` tools is a low-effort "confused worker" guard, not a security boundary; `toolbelt` does not claim to extend it.
+
+**`toolbelt` read-only enforcement** (`src/lib/worker-agent/tools.ts`): every CLI runs through `runManagedExeCapture` with `shell:false` (args are literal — no pipes / redirects / chaining / glob expansion), and the model-chosen `tool` is re-checked against the allowlist set (defense-in-depth on top of the schema enum). Per-tool the exec / file-write flags are rejected with a cluster-aware matcher so attached / combined short forms (`fd -Hx`, `sg -iU`) can't slip past an exact-token check: `fd -x/--exec`/`-X`, `rg --pre`/`--hostname-bin`, `sg --rewrite`/`-U`/`-i`, `yq -i`/`-s`, `scc -o`/`--output`/`--format-multi`. `sg`'s file-writing / server subcommands (`new`, `lsp`) are blocked positionally. `git` is locked to a read-only subcommand allowlist (`grep` and `reflog` are excluded — they hide exec / mutate modes), runs with forced `--no-pager --no-optional-locks` (so `status` can't write the index) and `--no-ext-diff --no-textconv` on diff-producing subcommands, and a write/exec flag denylist (`--output`, `--ext-diff`, `--textconv`, `--filters`, `--open-files-in-pager`) that also catches git's unambiguous long-option abbreviations (`--ext-d` ⇒ `--ext-diff`). **Accepted residual** (documented, within threat model): working-tree git subcommands (`status`, bare `diff`, `blame`) still apply configured clean/textconv filters to files an attacker-controlled `.gitattributes` maps to a driver — but that only runs filter commands the USER already configured (e.g. global git-lfs); the tree cannot introduce a NEW command (that needs a local `.git/config` write = full compromise), so no attacker-CHOSEN program executes. This is identical to what the user's own `git status` would run and is not a new capability over the parent session's `Bash`.
+
 ### Vendored Pi runtime
 
 The Pi agent runtime (`@earendil-works/pi-agent-core` + a minimal `pi-ai` slice) is **vendored** at `src/vendor/pi/` rather than depended on via `package.json`. The vendor sync protocol - how to refresh the snapshot, what to keep in sync, and what to deliberately diverge on - is documented in [`pi-vendor-sync.md`](pi-vendor-sync.md). MIT attribution is preserved verbatim in `src/vendor/pi/LICENSE` and via comment headers on every vendored file.
 
-### Compatibility probe (`gemini-3.1-pro-preview` accepts `tools` + `reasoning_effort`)
+### Compatibility probes (worker model + body-shape contracts)
 
-The probe set asserts that Copilot's `/v1/chat/completions` accepts a `tools` array plus `reasoning_effort: "high"` on `gemini-3.1-pro-preview`. Without this contract holding, all worker tools degrade to dormant (the dual gate fires on the catalog check). Probe id `worker_gemini_tools_reasoning` in `scripts/probe-copilot-compat.sh`; matrix row in `docs/copilot-compat-matrix.md`.
+Two probes assert that Copilot accepts the exact body shapes the worker-agent stream-fn emits:
+
+- `worker_gemini_tools_reasoning` — `gemini-3.5-flash` on `/v1/chat/completions` with a `tools[]` array + `reasoning_effort:"high"` (the explore/review contract AND the dual-gate model). The dual gate's catalog arm only checks "model present + `tool_calls` advertised"; it does NOT exercise the request shape. If Copilot tightens the `gemini-3.5-flash` validator, the gate would leave the tools advertised but every explore/review call would 400 — this probe surfaces that regression upstream.
+- `worker_gpt5_responses_tools_reasoning` — `gpt-5.5` on `/v1/responses` with function-shaped `tools[]` (flat `{type:"function",name,description,parameters}`) + `reasoning:{effort:"xhigh"}` (the implement contract). `gpt-5.5` is NOT a dual-gate input, so a shape regression here breaks `implement` while explore/review keep working — only this probe catches it.
+
+Probe ids in `scripts/probe-copilot-compat.sh`; matrix rows in `docs/copilot-compat-matrix.md` (see also [`docs/pi-vendor-sync.md`](pi-vendor-sync.md)).
 
 ## `stand_in` tool (away-mode advisor)
 

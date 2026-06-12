@@ -50,6 +50,7 @@ const READ_TOOL_NOTES = [
   "`code_search` — semantic-first code search: the default `semantic` mode ranks by MEANING (ColBERT), falling back to lexical BM25F-ranked hits when the index isn't ready (the `source` field says which ran); use `lexical`/`exact`/`regex`/`ast` for exact symbols. Multiple independent queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, `.csv`, `.env*`, config-only wiring) and when a search returns no hits, `grep`/`glob` apply.",
   "`web_search` — Copilot-backed web search; returns titles, URLs, and snippets.",
   "`fetch_url` — fetch a single URL and return body text.",
+  "`toolbelt` — run a read-only analysis CLI (no shell): rg, fd, sg, jq, yq, gron, scc, tokei, difft, git (read-only subcommands).",
   "`advisor` — consult a stronger cross-lab reviewer model on a focused concern (your approach, a blocker, a decision); it sees the recent transcript automatically.",
   "`update_plan` — maintain a short ordered checklist of your steps (send the full list each call); it's re-surfaced to you each turn so it survives context compaction.",
 ] as const

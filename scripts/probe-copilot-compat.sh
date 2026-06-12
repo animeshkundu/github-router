@@ -148,14 +148,17 @@ declare -a PROBE_REGISTRY=(
   "gemini_critic_xhigh_rejected|proxy-internal|peer-mcp-personas.ts: gemini-critic.allowedEfforts EXCLUDES 'xhigh' (Copilot upstream-rejects) — static check"
 
   # ===== Worker tools (load-bearing model+shape contract) =====
-  # The worker_explore / worker_implement MCP tools default to gemini-3.1-pro-preview
-  # on /v1/chat/completions with stream:true + tools[] + reasoning_effort:"high".
-  # If Copilot ever tightens the validator (rejects the field combination, or
-  # drops reasoning_effort on this model), the worker tools degrade silently —
-  # the dual gate's first arm catches catalog miss / tool_calls=false, but only
-  # this probe catches the case where the model IS present and tool-capable but
-  # the body shape is rejected. See docs/peer-mcp-design.md "Worker tools".
-  "worker_gemini_tools_reasoning|exploratory|gemini-3.1-pro-preview on /v1/chat/completions accepts tools[] + reasoning_effort:'high' (load-bearing contract for worker_explore/worker_implement MCP tools)"
+  # The worker_explore / worker_review MCP tools default to gemini-3.5-flash
+  # on /v1/chat/completions with stream:true + tools[] + reasoning_effort:"high";
+  # worker_implement defaults to gpt-5.5 on /v1/responses with tools[] (function
+  # shape) + reasoning:{effort:"xhigh"}. If Copilot ever tightens either
+  # validator (rejects the field combination, or drops reasoning on the model),
+  # the worker tools degrade — the dual gate's first arm catches catalog miss /
+  # tool_calls=false on the gemini gate model, but only these probes catch the
+  # case where the model IS present and tool-capable but the body shape is
+  # rejected. See docs/peer-mcp-design.md "Worker tools".
+  "worker_gemini_tools_reasoning|exploratory|gemini-3.5-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'high' (load-bearing contract for worker_explore/worker_review MCP tools + the worker-tools dual gate)"
+  "worker_gpt5_responses_tools_reasoning|exploratory|gpt-5.5 on /v1/responses accepts function tools[] + reasoning:{effort:'xhigh'} (load-bearing contract for the worker_implement MCP tool)"
 )
 
 # ===========================================================================
@@ -618,26 +621,47 @@ probe_smallfast_sonnet_baseline() {
 # ===========================================================================
 
 # End-to-end live probe: assert Copilot's /v1/chat/completions accepts the
-# exact body shape the worker-agent stream-fn emits — gemini-3.1-pro-preview
-# with a tools[] array + reasoning_effort:"high". This is the load-bearing
-# contract for the worker_explore / worker_implement MCP tools (see
+# exact body shape the worker-agent stream-fn emits for explore/review —
+# gemini-3.5-flash with a tools[] array + reasoning_effort:"high". This is the
+# load-bearing contract for the worker_explore / worker_review MCP tools AND
+# the worker-tools dual gate (gemini-3.5-flash is the gate model — see
 # docs/peer-mcp-design.md "Worker tools" and docs/pi-vendor-sync.md).
 #
-# Failure mode this catches: Copilot tightens the gemini-3.1-pro-preview
-# validator in a way that the dual gate cannot detect. The dual gate's catalog
-# arm only checks "model present + tool_calls advertised"; it does NOT exercise
-# the actual request shape. If the validator starts rejecting the
-# combination (or drops reasoning_effort on this model), the gate would
-# leave the tools advertised but every call would 400 — this probe surfaces
+# Failure mode this catches: Copilot tightens the gemini-3.5-flash validator in
+# a way that the dual gate cannot detect. The dual gate's catalog arm only
+# checks "model present + tool_calls advertised"; it does NOT exercise the
+# actual request shape. If the validator starts rejecting the combination (or
+# drops reasoning_effort on this model), the gate would leave the tools
+# advertised but every explore/review call would 400 — this probe surfaces
 # that regression upstream.
 probe_worker_gemini_tools_reasoning() {
   do_request POST /v1/chat/completions '{
-    "model": "gemini-3.1-pro-preview",
+    "model": "gemini-3.5-flash",
     "messages": [{"role":"user","content":"reply with the literal string ok"}],
     "tools": [{"type":"function","function":{"name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}}],
     "tool_choice": "auto",
     "reasoning_effort": "high",
     "max_tokens": 50
+  }'
+  assert_status 200
+}
+
+# End-to-end live probe: assert Copilot's /v1/responses accepts the exact body
+# shape the worker-agent stream-fn emits for implement — gpt-5.5 with a
+# function-shaped tools[] array (flat {type:"function",name,description,
+# parameters}, NOT chat's nested {function:{...}}) + reasoning:{effort:"xhigh"}.
+# This is the load-bearing contract for the worker_implement MCP tool. gpt-5.5
+# is NOT a dual-gate input (only the gemini gate model is), so if this shape
+# regresses, implement breaks while explore/review keep working — only this
+# probe surfaces it.
+probe_worker_gpt5_responses_tools_reasoning() {
+  do_request POST /v1/responses '{
+    "model": "gpt-5.5",
+    "input": "reply with the literal string ok",
+    "tools": [{"type":"function","name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
+    "tool_choice": "auto",
+    "reasoning": {"effort":"xhigh"},
+    "max_output_tokens": 50
   }'
   assert_status 200
 }

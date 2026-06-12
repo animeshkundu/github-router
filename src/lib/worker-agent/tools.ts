@@ -3,13 +3,13 @@
  *
  * Plan: see `plans/we-have-added-a-dreamy-tide.md` ("Tools" section).
  *
- * 12 tools across the modes:
+ * 13 tools across the modes:
  *
- *   - Explore / review mode (8, read-only):
+ *   - Explore / review mode (9, read-only):
  *       read, glob, grep, code_search, web_search, fetch_url,
- *       advisor, update_plan.
+ *       toolbelt, advisor, update_plan.
  *
- *   - Implement mode (12): explore + edit, write, bash, codex_review.
+ *   - Implement mode (13): explore + edit, write, bash, codex_review.
  *
  * (`peer_review` is implemented but intentionally NOT wired into
  * `buildWorkerTools` — peer critics aren't part of the worker surface.)
@@ -80,6 +80,7 @@ import type {
 import { type TSchema, Type } from "@earendil-works/pi-ai"
 
 import { resolveRipgrep } from "~/lib/code-search"
+import { resolveExecutable, runManagedExeCapture } from "~/lib/exec"
 import { runUnifiedCodeSearch } from "~/lib/unified-code-search"
 import {
   MAX_INFLIGHT_TOOLS_CALL,
@@ -102,7 +103,7 @@ import {
 } from "~/services/copilot/create-responses"
 import { searchWeb } from "~/services/copilot/web-search"
 
-import { runBash } from "./bash"
+import { runBash, buildEnv } from "./bash"
 import {
   confineToWorkspaceResult,
   isSensitivePath,
@@ -1010,6 +1011,344 @@ function codeSearchTool(workspace: string): AgentTool<typeof CODE_SEARCH_PARAMS>
   }
 }
 
+// ============================================================
+// toolbelt — read-only analysis CLIs (no shell)
+// ============================================================
+
+/**
+ * Allowlisted read-only analysis CLIs the worker may invoke through the
+ * `toolbelt` tool. Each runs via `runManagedExeCapture` with `shell:false`,
+ * so args are passed LITERALLY — no pipes / redirects / chaining / glob
+ * expansion / `rm`. `sd` is deliberately ABSENT (it rewrites files in
+ * place); it stays available to `implement` via `bash`.
+ */
+const TOOLBELT_TOOLS = [
+  "rg",
+  "fd",
+  "sg",
+  "jq",
+  "yq",
+  "gron",
+  "scc",
+  "tokei",
+  "difft",
+  "git",
+] as const
+type ToolbeltToolName = (typeof TOOLBELT_TOOLS)[number]
+
+/**
+ * Per-tool denied flags, split into `short` (single chars, matched
+ * per-character across a cluster so attached / combined forms like
+ * `fd -Hx`, `fd -xCMD`, `sg -iU` can't slip past an exact-token check) and
+ * `long` (`--flag`, matched on the name even with an `=value` suffix). The
+ * no-shell spawn already blocks the big vectors (redirects, chaining,
+ * arbitrary programs); these block the specific exec / file-write flags the
+ * individual CLIs expose. PER-TOOL, not global, because the same flag means
+ * different things across tools (`rg -i` = ignore-case [read]; `yq -i` =
+ * in-place [write]).
+ */
+const TOOLBELT_DENIED_FLAGS: Readonly<
+  Record<string, { short: ReadonlyArray<string>; long: ReadonlyArray<string> }>
+> = {
+  // fd -x/--exec, -X/--exec-batch: run an arbitrary command per result.
+  fd: { short: ["x", "X"], long: ["--exec", "--exec-batch"] },
+  // rg --pre: preprocessor command per file; --hostname-bin: runs a command
+  // to resolve the hostname for hyperlinks.
+  rg: { short: [], long: ["--pre", "--hostname-bin"] },
+  // ast-grep rewrite / update / interactive write modes.
+  sg: {
+    short: ["U", "i"],
+    long: ["--rewrite", "--update-all", "--update", "--interactive"],
+  },
+  // yq -i in-place write; -s/--split-exp writes one file per document.
+  yq: { short: ["i", "s"], long: ["--inplace", "--in-place", "--split-exp"] },
+  // scc -o/--output writes the report to a file; --format-multi can route a
+  // format to a file (e.g. `csv:out.csv`). Default is stdout.
+  scc: { short: ["o"], long: ["--output", "--format-multi"] },
+  // jq, gron, tokei, difft: stdout-only, no write/exec flags.
+}
+
+/**
+ * ast-grep (`sg`) subcommands that write files (`new` scaffolds a project /
+ * rules / tests) or start a long-running server (`lsp`). The default
+ * subcommand is `run` (search), and `scan`/`test` are read-only unless a
+ * denied write flag (`-U`/`-i`/`--rewrite`) is also passed — so only these
+ * two need an explicit positional block.
+ */
+const SG_DENIED_SUBCOMMANDS: ReadonlySet<string> = new Set(["new", "lsp"])
+
+/** Runtime allowlist guard (defense-in-depth on top of the schema enum). */
+const TOOLBELT_TOOL_SET: ReadonlySet<string> = new Set(TOOLBELT_TOOLS)
+
+/**
+ * Read-only git subcommands. The worker must pass the subcommand as
+ * `args[0]` (no leading global flags like `-C`/`-c`, which can redirect
+ * git or inject config); everything not in this set — every mutating
+ * subcommand (commit/checkout/reset/rebase/push/clean/rm/…) — is rejected.
+ * `cwd` is already the workspace, so `-C` is unnecessary.
+ */
+const GIT_READONLY_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  "log", "show", "diff", "blame", "status", "ls-files", "ls-tree",
+  "rev-parse", "shortlog", "describe", "cat-file", "for-each-ref",
+  "name-rev", "rev-list",
+])
+// `grep` (-O/--open-files-in-pager runs an arbitrary pager command) and
+// `reflog` (`expire`/`delete`/`drop` mutate .git/logs) are deliberately
+// EXCLUDED — their read-only-looking surface hides exec / write modes that
+// args[0] validation alone wouldn't catch.
+//
+// Accepted residual: working-tree subcommands (`status`, `diff` with no
+// revs, `blame`) apply configured clean/smudge filters to files an
+// attacker-controlled `.gitattributes` maps to a driver. That only invokes
+// filter commands the USER already configured (e.g. git-lfs in global
+// config) — the tree cannot introduce a NEW command (that needs a local
+// `.git/config` write = filesystem write = full compromise, out of scope),
+// and it is identical to what the user's own `git status` would run. So no
+// attacker-CHOSEN program executes; this is consistent with the parent
+// Claude session already having Bash on the same workspace.
+
+/**
+ * git flags that write files or execute helper programs, rejected in ANY
+ * position (args[0] is the validated subcommand; these can follow it).
+ * Matched on the `--flag` name, tolerating an `=value` suffix. Short
+ * aliases (`-o`, `-O`) are intentionally NOT denied — they are overloaded
+ * with read-only meanings across the allowed subcommands (`ls-files -o`
+ * = --others; `diff -O<orderfile>` reads an order file).
+ */
+const GIT_DENIED_FLAGS: ReadonlySet<string> = new Set([
+  "--output", // diff/log: write output to a file
+  "--open-files-in-pager", // grep: run a pager command (grep is dropped; belt-and-suspenders)
+  "--ext-diff", // enable the configured external diff driver (exec)
+  "--textconv", // run the configured textconv driver (exec)
+  "--filters", // cat-file: run the configured filter driver (exec)
+])
+
+/**
+ * Diff-producing subcommands where git would otherwise honor a configured
+ * external-diff / textconv helper (exec) on matching files. We force
+ * `--no-ext-diff --no-textconv` after the subcommand so a repo with a
+ * malicious local config can't turn a plain `git log -p` / `git show` into
+ * code execution. (User-supplied `--ext-diff`/`--textconv` are separately
+ * denied, so they can't re-enable it after our defaults.)
+ */
+const GIT_DIFF_PRODUCING: ReadonlySet<string> = new Set(["log", "show", "diff"])
+
+const TOOLBELT_PARAMS = Type.Object({
+  tool: Type.Union(
+    // Single source of truth: the union literals are derived from
+    // `TOOLBELT_TOOLS` (also the `ToolbeltToolName` type source) so the
+    // allowlist and the schema can never drift.
+    TOOLBELT_TOOLS.map((t) => Type.Literal(t)),
+    {
+      description:
+        "Which read-only analysis CLI to run: rg (ripgrep search), fd " +
+        "(file find), sg (ast-grep structural search), jq (JSON), yq " +
+        "(YAML/TOML/XML), gron (flatten JSON to greppable lines), scc " +
+        "(code stats: LOC + complexity), tokei (code stats), difft " +
+        "(difftastic structural diff), git (read-only subcommands only).",
+    },
+  ),
+  args: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Arguments passed LITERALLY to the tool (no shell: no pipes, " +
+        "redirects, chaining, or glob expansion). For git, args[0] must be " +
+        "a read-only subcommand (log/show/diff/blame/ls-files/…).",
+    }),
+  ),
+})
+
+/**
+ * True iff `arg` triggers a denied flag. Long flags (`--foo`) match on the
+ * name, tolerating a `=value` suffix. Short flags are matched per-character
+ * across a cluster (`-Hx`, `-xVALUE`) so attached / combined forms can't
+ * bypass an exact-token check. Conservative: a denied short char appearing
+ * as the value of a preceding value-taking short flag is also rejected (the
+ * worker can re-issue with a space-separated form).
+ */
+function argViolatesDenylist(
+  denied: { short: ReadonlyArray<string>; long: ReadonlyArray<string> },
+  arg: string,
+): boolean {
+  if (arg.startsWith("--")) {
+    const eq = arg.indexOf("=")
+    const name = eq === -1 ? arg : arg.slice(0, eq)
+    return denied.long.includes(name)
+  }
+  if (arg.length >= 2 && arg[0] === "-" && arg[1] !== "-") {
+    for (const ch of arg.slice(1)) {
+      if (denied.short.includes(ch)) return true
+    }
+  }
+  return false
+}
+
+/** True iff `arg` is a git denied flag (`--name`, `--name=value`, or a git
+ * long-option abbreviation of one — git's parseopt accepts unambiguous
+ * prefixes, so `--ext-d` resolves to `--ext-diff`). */
+function gitArgDenied(arg: string): boolean {
+  if (!arg.startsWith("--")) return false
+  const eq = arg.indexOf("=")
+  const name = eq === -1 ? arg : arg.slice(0, eq)
+  if (GIT_DENIED_FLAGS.has(name)) return true
+  if (name.length >= 3) {
+    for (const flag of GIT_DENIED_FLAGS) {
+      if (flag.startsWith(name)) return true
+    }
+  }
+  return false
+}
+
+/**
+ * Build the actual git argv: prepend safe global options + force read-only
+ * diff defaults so a repo with a malicious local config can't turn a git
+ * call into code execution or a file write. `--no-pager` (also
+ * GIT_PAGER=cat) kills the pager; `--no-optional-locks` (also
+ * GIT_OPTIONAL_LOCKS=0) stops `status` from refreshing/writing `.git/index`;
+ * `--no-ext-diff`/`--no-textconv` on diff-producing subcommands disable
+ * configured external-diff / textconv helpers. `args[0]` is the validated
+ * subcommand.
+ */
+function buildGitExecArgs(args: ReadonlyArray<string>): Array<string> {
+  const sub = args[0] ?? ""
+  const out = ["--no-pager", "--no-optional-locks", sub]
+  if (GIT_DIFF_PRODUCING.has(sub)) out.push("--no-ext-diff", "--no-textconv")
+  out.push(...args.slice(1))
+  return out
+}
+
+function toolbeltTool(workspace: string): AgentTool<typeof TOOLBELT_PARAMS> {
+  return {
+    name: "toolbelt",
+    label: "Toolbelt CLI (read-only)",
+    description:
+      "Run a read-only code-analysis CLI in the workspace with NO shell " +
+      "(args are literal — no pipes / redirects / chaining / globbing). " +
+      "Tools: rg, fd, sg (ast-grep), jq, yq, gron, scc, tokei, difft " +
+      "(difftastic), and git (read-only subcommands). Write/exec flags " +
+      "(fd -x, rg --pre, ast-grep --rewrite, yq -i) and mutating git " +
+      "subcommands are rejected. Returns combined stdout (stderr appended " +
+      "on non-zero exit).",
+    parameters: TOOLBELT_PARAMS,
+    async execute(
+      _toolCallId,
+      params,
+      signal,
+    ): Promise<AgentToolResult<Record<string, never>>> {
+      const tool = params.tool as ToolbeltToolName
+      const args = Array.isArray(params.args) ? params.args.map(String) : []
+
+      // Defense-in-depth: the schema enum already rejects unknown tools at
+      // Pi's `validateToolArguments` boundary; re-check here so a future
+      // dispatch/schema change can't open an arbitrary-exec hole.
+      if (!TOOLBELT_TOOL_SET.has(tool)) {
+        throw new Error(`toolbelt: unknown tool '${tool}'`)
+      }
+
+      if (tool === "git") {
+        const sub = args[0]
+        if (!sub || !GIT_READONLY_SUBCOMMANDS.has(sub)) {
+          throw new Error(
+            "git: only read-only subcommands are allowed and the " +
+              "subcommand must be args[0] (no leading -C/-c). Allowed: " +
+              `${[...GIT_READONLY_SUBCOMMANDS].join(", ")}. Got: ` +
+              `${sub ? `'${sub}'` : "<none>"}`,
+          )
+        }
+        for (const arg of args) {
+          if (gitArgDenied(arg)) {
+            throw new Error(
+              `git: flag '${arg}' is not allowed (toolbelt is read-only)`,
+            )
+          }
+        }
+      } else {
+        // ast-grep dispatches its first positional as a subcommand when it
+        // names one; block the file-writing / server ones before the flag
+        // scan (the flag denylist alone wouldn't catch `sg new`).
+        if (tool === "sg" && args[0] && SG_DENIED_SUBCOMMANDS.has(args[0])) {
+          throw new Error(
+            `sg: subcommand '${args[0]}' is not allowed (toolbelt is read-only)`,
+          )
+        }
+        const denied = TOOLBELT_DENIED_FLAGS[tool]
+        if (denied) {
+          for (const arg of args) {
+            if (argViolatesDenylist(denied, arg)) {
+              throw new Error(
+                `${tool}: arg '${arg}' carries a write/exec flag (toolbelt is read-only)`,
+              )
+            }
+          }
+        }
+      }
+
+      const env = buildEnv()
+      if (tool === "git") {
+        // No TTY here, but pin pager off + never prompt for credentials so
+        // a read-only git call can never hang; GIT_OPTIONAL_LOCKS=0 stops
+        // status from writing the index (belt with --no-optional-locks).
+        env.GIT_PAGER = "cat"
+        env.PAGER = "cat"
+        env.GIT_TERMINAL_PROMPT = "0"
+        env.GIT_OPTIONAL_LOCKS = "0"
+      }
+
+      const binPath = resolveExecutable(tool, { env })
+      if (!binPath) {
+        return textResult(
+          `${tool}: not available on this host (not on PATH / toolbelt). ` +
+            "rg/fd/jq/yq/sg/gron/scc/difft ship with the toolbelt; git " +
+            "and tokei may require a system install.",
+        )
+      }
+
+      const TOOLBELT_TIMEOUT_MS = 60_000
+      const TOOLBELT_STDOUT_CAP = 1024 * 1024
+      // git: prepend safe global options + force read-only diff defaults
+      // (see buildGitExecArgs); other tools pass args through unchanged.
+      const execArgs = tool === "git" ? buildGitExecArgs(args) : args
+      const res = await runManagedExeCapture(binPath, execArgs, {
+        cwd: workspace,
+        env,
+        timeoutMs: TOOLBELT_TIMEOUT_MS,
+        maxStdoutBytes: TOOLBELT_STDOUT_CAP,
+        onSpawn: (child) => {
+          if (signal?.aborted) {
+            killChildTree(child)
+          } else {
+            signal?.addEventListener("abort", () => killChildTree(child), {
+              once: true,
+            })
+          }
+        },
+      })
+
+      if (signal?.aborted) throw new Error(`${tool} aborted`)
+      if (res.timedOut) {
+        throw new Error(`${tool} timed out after ${TOOLBELT_TIMEOUT_MS}ms`)
+      }
+
+      const parts: Array<string> = []
+      if (res.stdout) parts.push(res.stdout)
+      // Surface stderr only when it carries signal (non-zero exit or empty
+      // stdout) — many CLIs print progress/warnings to stderr on success.
+      if ((res.code !== 0 || !res.stdout) && res.stderr.trim()) {
+        parts.push(`[stderr] ${res.stderr.trim()}`)
+      }
+      if (res.stdoutTruncated) {
+        parts.push(
+          `[truncated at ${TOOLBELT_STDOUT_CAP} bytes — narrow the query]`,
+        )
+      }
+      if (parts.length === 0) {
+        parts.push(`(${tool} exited ${res.code} with no output)`)
+      }
+      return textResult(parts.join("\n"))
+    },
+  }
+}
+
 // Hardcode the literal tuple so `Static<typeof PEER_REVIEW_PARAMS>`
 // preserves a discriminated union (`"codex_critic" | "gemini_critic" |
 // …`) rather than collapsing to `string`. Drift between this tuple and
@@ -1555,11 +1894,11 @@ function updatePlanTool(
 /**
  * Build the AgentTool array for the requested mode.
  *
- *   - explore  → 8 read-only tools (read, glob, grep, code_search,
- *                web_search, fetch_url, advisor, update_plan)
- *   - review   → same 8 read-only tools as explore (reviewer framing lives
+ *   - explore  → 9 read-only tools (read, glob, grep, code_search,
+ *                web_search, fetch_url, toolbelt, advisor, update_plan)
+ *   - review   → same 9 read-only tools as explore (reviewer framing lives
  *                in the system prompt, not the toolset)
- *   - implement → explore + edit/write/bash/codex_review (12 total)
+ *   - implement → explore + edit/write/bash/codex_review (13 total)
  *
  * `peer_review` is intentionally NOT wired in (peer critics aren't part of
  * the worker surface); `advisor` is the worker's consultation path.
@@ -1583,6 +1922,7 @@ export function buildWorkerTools(
     codeSearchTool(workspace),
     webSearchTool(),
     fetchUrlTool(),
+    toolbeltTool(workspace),
     advisorTool(getMessages),
     updatePlanTool(planState),
   ]
@@ -1621,6 +1961,7 @@ export const __testExports = {
   renderPiMessagesAsText,
   renderPlan,
   resolvePathOrThrow,
+  toolbeltTool,
   updatePlanTool,
   webSearchTool,
   writeTool,

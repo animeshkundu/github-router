@@ -1976,12 +1976,12 @@ function workerSseResponse(
 }
 
 describe("/mcp worker_* tools — registration + gating", () => {
-  test("tools/list includes worker_explore + worker_implement when gemini-3.1-pro-preview is present with tool_calls", async () => {
+  test("tools/list includes worker_explore + worker_implement when gemini-3.5-flash is present with tool_calls", async () => {
     state.models = {
       object: "list",
       data: [
-        ...baseModels.data.filter((m) => m.id !== "gemini-3.1-pro-preview"),
-        fakeWorkerModel("gemini-3.1-pro-preview"),
+        ...baseModels.data.filter((m) => m.id !== "gemini-3.5-flash"),
+        fakeWorkerModel("gemini-3.5-flash"),
       ],
     }
     const { status, json } = await rpc({
@@ -2003,8 +2003,8 @@ describe("/mcp worker_* tools — registration + gating", () => {
       state.models = {
         object: "list",
         data: [
-        ...baseModels.data.filter((m) => m.id !== "gemini-3.1-pro-preview"),
-        fakeWorkerModel("gemini-3.1-pro-preview"),
+        ...baseModels.data.filter((m) => m.id !== "gemini-3.5-flash"),
+        fakeWorkerModel("gemini-3.5-flash"),
       ],
       }
       const { json } = await rpc({
@@ -2023,10 +2023,10 @@ describe("/mcp worker_* tools — registration + gating", () => {
     }
   })
 
-  test("tools/list omits both worker tools when gemini-3.1-pro-preview is absent from catalog", async () => {
+  test("tools/list omits both worker tools when gemini-3.5-flash is absent from catalog", async () => {
     state.models = {
       object: "list",
-      data: baseModels.data.filter((m) => m.id !== "gemini-3.1-pro-preview"),
+      data: baseModels.data.filter((m) => m.id !== "gemini-3.5-flash"),
     }
     const { json } = await rpc({
       jsonrpc: "2.0",
@@ -2040,12 +2040,12 @@ describe("/mcp worker_* tools — registration + gating", () => {
     expect(names).not.toContain("implement")
   })
 
-  test("tools/list omits both when gemini-3.1-pro-preview is present WITHOUT tool_calls support", async () => {
+  test("tools/list omits both when gemini-3.5-flash is present WITHOUT tool_calls support", async () => {
     state.models = {
       object: "list",
       data: [
-        ...baseModels.data.filter((m) => m.id !== "gemini-3.1-pro-preview"),
-        fakeWorkerModel("gemini-3.1-pro-preview", { tool_calls: false }),
+        ...baseModels.data.filter((m) => m.id !== "gemini-3.5-flash"),
+        fakeWorkerModel("gemini-3.5-flash", { tool_calls: false }),
       ],
     }
     const { json } = await rpc({
@@ -2061,7 +2061,7 @@ describe("/mcp worker_* tools — registration + gating", () => {
   })
 
   test("defense-in-depth: tools/call for worker_explore returns method-not-found when gate fails (even if client bypasses tools/list)", async () => {
-    // No gemini-3.1-pro-preview in catalog → gate fails. A naive client could
+    // No gemini-3.5-flash in catalog → gate fails. A naive client could
     // skip tools/list and hard-code the name; the call-time gate must
     // reject identically to an unknown tool (-32601), keeping the gated
     // surface functionally invisible.
@@ -2083,7 +2083,21 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
     state.models = {
       object: "list",
       data: [
-        ...baseModels.data.filter((m) => m.id !== "gemini-3.1-pro-preview"),
+        ...baseModels.data.filter(
+          (m) =>
+            !["gemini-3.5-flash", "gpt-5.5", "gemini-3.1-pro-preview"].includes(
+              m.id,
+            ),
+        ),
+        // explore/review default + worker gate model
+        fakeWorkerModel("gemini-3.5-flash", {
+          reasoning_effort: ["minimal", "low", "medium", "high"],
+        }),
+        // implement default (routes to /responses)
+        fakeWorkerModel("gpt-5.5", {
+          reasoning_effort: ["none", "low", "medium", "high", "xhigh"],
+        }),
+        // kept for the explicit-model clamp + unknown-model tests below
         fakeWorkerModel("gemini-3.1-pro-preview", {
           reasoning_effort: ["low", "medium", "high"],
         }),
@@ -2119,7 +2133,13 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
       method: "tools/call",
       params: {
         name: "implement",
-        arguments: { prompt: "add a comment to README" },
+        arguments: {
+          prompt: "add a comment to README",
+          // Pin a chat-endpoint model so the chat-SSE mock applies — this
+          // test covers the in-place implement path, not the implement
+          // default (gpt-5.5, which routes to /responses).
+          model: "gemini-3.1-pro-preview",
+        },
       },
     })
     const result = json.result as {
@@ -2144,6 +2164,9 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
         arguments: {
           prompt: "fix the typo",
           worktree: true,
+          // Chat-endpoint pin (see above) — gpt-5.5 default routes to
+          // /responses, which the chat-SSE mock doesn't serve.
+          model: "gemini-3.1-pro-preview",
         },
       },
     })

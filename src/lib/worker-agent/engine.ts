@@ -122,19 +122,30 @@ import { type WorktreeHandle, createWorktree } from "./worktree"
 const WORKTREE_REGISTRY = new WorktreeRegistry()
 registerExitHandlers(WORKTREE_REGISTRY)
 
-/** Default model + thinking. `gemini-3.1-pro-preview` + "high" — the worker
- *  loop is function-calling, and the pro model is materially less prone to
- *  early-stopping with an empty turn than `gemini-3.5-flash` was (the
- *  reliability win is worth the higher per-call cost for autonomous workers).
- *  It advertises `tool_calls` and reasoning low/medium/high. Caller can
- *  override per call via the `model` arg.
+/** Default model + thinking for the READ-ONLY worker modes (`explore`,
+ *  `review`). `gemini-3.5-flash` at `high` (its top reasoning tier) — fast,
+ *  1M-context, tool-call-capable.
  *
- *  Exported so the MCP handler (which renders the worker tool's
- *  description to the LLM and pins a probe row against the model)
- *  reads the same constant — drift between the two would silently
- *  ship a tool whose docs disagree with its runtime default. */
-export const DEFAULT_MODEL = "gemini-3.1-pro-preview"
+ *  HISTORY / CAVEAT: an earlier iteration moved OFF flash to
+ *  `gemini-3.1-pro-preview` because *that* flash early-stopped with empty
+ *  turns on the function-calling loop. `gemini-3.5-flash` is a NEWER model
+ *  and is being re-evaluated for the read-only workload, where parallel
+ *  read/search batches and sound stop/continue decisions matter. If it
+ *  regresses to early-stopping, revert this to `gemini-3.1-pro-preview`.
+ *
+ *  Exported so the MCP handler + the gate (`workerToolsEnabled`) read the
+ *  same constant — drift would ship a tool whose docs/gate disagree with
+ *  its runtime default. Caller can override per call via the `model` arg. */
+export const DEFAULT_MODEL = "gemini-3.5-flash"
 const DEFAULT_THINKING: WorkerThinkingLevel = "high"
+
+/** Default model + thinking for the READ+WRITE `implement` mode. `gpt-5.5`
+ *  at `xhigh` — the strongest reasoning tier in the catalog, 1M+ context,
+ *  routed through `/responses` by the stream-fn endpoint split. Coding edits
+ *  benefit from maximum reasoning; the higher per-call cost is justified for
+ *  autonomous implementation. An explicit `opts.model` still wins. */
+export const IMPLEMENT_DEFAULT_MODEL = "gpt-5.5"
+const IMPLEMENT_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 
 /** Default model for `browse` mode. `gpt-5.4-mini` — the Gate-B-winning
  *  browse model (small + fast enough to drive a tab at human pace, with
@@ -259,14 +270,27 @@ export async function runWorkerAgent(
     // (it already enumerates the catalog's tool_call-capable models
     // on unknown-model errors, so the caller knows what to retry with).
     //
-    // Browse mode picks a DIFFERENT default model (`BROWSE_DEFAULT_MODEL`)
-    // than the gemini worker default — the workload (drive a tab) is
-    // distinct from reading a repo. An explicit `opts.model` still wins.
+    // Per-mode defaults (an explicit `opts.model`/`opts.thinking` always
+    // wins): read-only `explore`/`review` → `DEFAULT_MODEL` (gemini-3.5-flash,
+    // high); read+write `implement` → `IMPLEMENT_DEFAULT_MODEL` (gpt-5.5,
+    // xhigh — coding wants max reasoning); `browse` → `BROWSE_DEFAULT_MODEL`
+    // (gpt-5.4-mini). The workloads are distinct enough to warrant distinct
+    // defaults.
     const isBrowse = opts.mode === "browse"
+    const isImplement = opts.mode === "implement"
+    const defaultModel = isBrowse
+      ? BROWSE_DEFAULT_MODEL
+      : isImplement
+        ? IMPLEMENT_DEFAULT_MODEL
+        : DEFAULT_MODEL
+    const defaultThinking = isBrowse
+      ? BROWSE_DEFAULT_THINKING
+      : isImplement
+        ? IMPLEMENT_DEFAULT_THINKING
+        : DEFAULT_THINKING
     const resolved = resolveModelAndThinking({
-      model: opts.model ?? (isBrowse ? BROWSE_DEFAULT_MODEL : DEFAULT_MODEL),
-      thinking:
-        opts.thinking ?? (isBrowse ? BROWSE_DEFAULT_THINKING : DEFAULT_THINKING),
+      model: opts.model ?? defaultModel,
+      thinking: opts.thinking ?? defaultThinking,
     })
     if (!resolved.ok) {
       return { text: resolved.error, isError: true }
