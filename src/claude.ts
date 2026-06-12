@@ -30,7 +30,6 @@ import {
 } from "./lib/port"
 import {
   browserToolsEnabled,
-  semanticSearchEnabled,
   standInToolEnabled,
   workerToolsEnabled,
 } from "./lib/mcp-capabilities"
@@ -492,7 +491,6 @@ export const claude = defineCommand({
           geminiAvailable,
           workerToolsAvailable: workerToolsEnabled(),
           standInAvailable: standInToolEnabled(),
-          semanticSearchAvailable: semanticSearchEnabled(),
           browseAvailable: state.browseEnabled,
           powerBrowseAvailable: state.powerBrowseEnabled,
           groupKeys,

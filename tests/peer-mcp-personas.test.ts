@@ -292,7 +292,6 @@ describe("buildPeerAwarenessSnippet", () => {
     geminiAvailable: true,
     workerToolsAvailable: true,
     standInAvailable: true,
-    semanticSearchAvailable: true,
     browseAvailable: true,
     powerBrowseAvailable: true,
   } as const
@@ -318,9 +317,8 @@ describe("buildPeerAwarenessSnippet", () => {
 
   test("snippet stays under ~540 tokens (~3300 bytes) in the maximal case", () => {
     // Maximal = EVERY gate on (gemini_reviewer, the `review` worker,
-    // `semantic_search`, browse + power). The cap is the smallest envelope
-    // the implementation fits inside; if a future tightening shaves bytes,
-    // lower it too.
+    // browse + power). The cap is the smallest envelope the implementation
+    // fits inside; if a future tightening shaves bytes, lower it too.
     const full = buildPeerAwarenessSnippet(MAXIMAL)
     expect(Buffer.byteLength(full, "utf8")).toBeLessThan(3300)
   })
@@ -352,15 +350,14 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(snippet).toContain("complete")
   })
 
-  test("semantic_search is mentioned ONLY when available (availability-gated, like workers/stand_in)", () => {
-    const off = buildPeerAwarenessSnippet(MINIMAL)
-    expect(off).not.toContain("semantic_search")
-    const on = buildPeerAwarenessSnippet({
-      ...MINIMAL,
-      semanticSearchAvailable: true,
-    })
-    expect(on).toContain("mcp__search__semantic_search")
-    expect(on).toContain("ColBERT")
+  test("code tool is described as semantic-first with transparent lexical fallback (no standalone semantic_search)", () => {
+    // semantic_search is folded into the unified `code` tool — it is no
+    // longer a separate, availability-gated tool, so the snippet describes
+    // the merged behavior unconditionally and never names `semantic_search`.
+    const snippet = buildPeerAwarenessSnippet(MINIMAL)
+    expect(snippet).not.toContain("semantic_search")
+    expect(snippet).toContain("ColBERT")
+    expect(snippet).toContain("source")
   })
 
   test("describes the non-code fallback (per peer-review #4 — grep/glob still apply)", () => {

@@ -1,10 +1,6 @@
 # Semantic code search (ColBERT sidecar)
 
-`github-router` ships an opt-OUT semantic code search tool,
-`mcp__search__semantic_search`, backed by a router-managed
-[`colgrep`](https://github.com/lightonai/next-plaid) sidecar (ColBERT /
-PLAID late-interaction). It complements — never replaces — the lexical
-`mcp__search__code` tool.
+`github-router` ships an opt-OUT semantic code search capability, backed by a router-managed [`colgrep`](https://github.com/lightonai/next-plaid) sidecar (ColBERT / PLAID late-interaction). It is folded into the unified `mcp__search__code` tool as the default `mode: "semantic"`.
 
 Design + adversarial-review record:
 [`research/colbert-sidecar-design.md`](research/colbert-sidecar-design.md).
@@ -18,12 +14,12 @@ launch the proxy, fire-and-forget and non-blocking:
    (`~/.local/share/github-router/colbert/`): the `colgrep` binary, the
    ONNX Runtime CPU dylib (`ORT_DYLIB_PATH`), and the ColBERT INT8 model
    (`--model <local-dir>`). Pinning closes the two supply-chain holes
-   colgrep leaves open — it does **no** checksum on its own ORT / HF-model
+   colgrep leaves open - it does **no** checksum on its own ORT / HF-model
    downloads.
 2. Runs a **post-provision smoke test** (one colgrep invocation with the
    exact isolating env) and only marks the capability available if the
    ORT dylib actually loaded. An invalid `ORT_DYLIB_PATH` makes colgrep
-   silently fall through to its own unverified download — the smoke test
+   silently fall through to its own unverified download - the smoke test
    is the guard against that.
 3. **Background-indexes** the launch cwd if it is a git repo.
 
@@ -31,27 +27,25 @@ The capability gate `semanticSearchEnabled()` is **availability-based**
 (exactly like `browserToolsEnabled()`): the tool is listed/callable only
 when the artifacts are present on disk **and** the smoke test passed
 **and** the operator has not opted out. On CI, sandboxes, or any host
-where provisioning hasn't completed, the tool is simply absent — the
+where provisioning hasn't completed, the tool is simply absent - the
 `tools/list` surface stays `{code, web}`.
 
 **Opt out:** `GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1`.
 
-## No lexical fallback — honest status, never a silent re-search
+## Contract split: Strict runner, fallback tool
 
-`semantic_search` **never runs another search engine.** It returns an
-honest `status` and stops:
+The underlying ColBERT runner (`src/lib/colbert/runner.ts`) **never runs another search engine.** It returns an honest `status` (ready, building, stale, unavailable, failed) and stops.
 
-| State | Response |
-|---|---|
-| `ready` | semantic results, `source: "semantic"` |
-| `building` | `{status:"building", notice}` — no results, **not** an error |
-| `stale` (HEAD moved / tree newly dirty since the index) | `{status:"stale", notice}` — no results, **not** an error |
-| `unavailable` (no index yet; a background build was kicked) | `isError` envelope advising `code_search` |
-| `failed` (nonzero exit / parse / dlopen failure) | `isError` envelope advising `code_search` |
+However, the unified `code` MCP tool (`src/lib/unified-code-search.ts`) provides a **transparent fallback**. The tool exposes a `mode` argument: `semantic` (default) | `lexical` | `exact` | `regex` | `ast`. 
 
-Input-shape failures (empty `query`, relative `workspace`) are `isError`.
-The model decides what to do next; the proxy never silently substitutes a
-different search under the `semantic_search` name.
+When called in the default `semantic` mode, the tool attempts ColBERT. If the index is not ready, building, stale, or failed, it **transparently falls back to lexical BM25F**. Forced lexical modes (`lexical`, `exact`, `regex`, `ast`) never touch colgrep.
+
+The tool response carries a 3-valued top-level `source` field to tell the model what engine actually ran:
+- `"semantic"` (colgrep ran successfully)
+- `"lexical"` (caller forced a lexical mode)
+- `"lexical-fallback"` (a semantic/default query degraded to lexical because the index wasn't ready)
+
+Semantic-ready result rows carry a `score` field (ColBERT relevance, interpretable). Lexical rows omit it.
 
 ## Freshness verdict (the staleness correctness guard)
 
@@ -63,9 +57,9 @@ metadata sidecar (`indices/.gh-router-meta/<hash>.json`) and computes a
 freshness verdict on each query from `git rev-parse HEAD` +
 `git status --porcelain`:
 
-- **fresh** — `ready` AND HEAD matches the last index AND the tree is not
+- **fresh** - `ready` AND HEAD matches the last index AND the tree is not
   newly dirty → serve semantic.
-- **stale** — HEAD moved or the tree is dirty since indexing → honest
+- **stale** - HEAD moved or the tree is dirty since indexing → honest
   `stale` notice, **no** possibly-deleted-content hits labeled `ready`.
 
 A non-git workspace falls back to colgrep's own mtime-based incremental
@@ -82,16 +76,16 @@ tracking + cancellation + boot/exit sweep, not keep-alive:
 - An in-memory PID ledger holds this run's live children; SIGINT /
   SIGTERM / exit tree-kills them.
 - A boot-time sweep reclassifies any `building` metadata entry whose
-  `buildPid` is dead to `failed` (it never kills a PID from a prior boot —
+  `buildPid` is dead to `failed` (it never kills a PID from a prior boot -
   a recycled PID could belong to an unrelated process).
 
 ## When semantic beats lexical (drives the tool description)
 
 | Query | Prefer |
 |---|---|
-| "where is `verifyJwt` defined", "callers of `Foo`" | `code` (lexical) — exact, sub-10ms |
-| "auth middleware", "retry/backoff around the upstream fetch" | `semantic_search` — recall over intent |
-| "async fns ranked by error handling" (regex-narrow then rank) | `semantic_search` `pattern` pre-filter |
+| "where is `verifyJwt` defined", "callers of `Foo`" | `mode: "lexical"` |
+| "auth middleware", "retry/backoff around the upstream fetch" | `mode: "semantic"` (default) |
+| "async fns ranked by error handling" (regex-narrow then rank) | `mode: "semantic"` `pattern` pre-filter |
 
 ## Storage
 

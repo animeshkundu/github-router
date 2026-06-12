@@ -70,6 +70,7 @@ import process from "node:process"
 import { Agent } from "@earendil-works/pi-agent-core"
 import type {
   AfterToolCallContext,
+  AgentMessage,
   BeforeToolCallContext,
   BeforeToolCallResult,
 } from "@earendil-works/pi-agent-core"
@@ -100,7 +101,8 @@ import {
 import { makeContextBudget } from "./context-budget"
 import { compactWorkerContext } from "./compaction"
 import { capToolResultText } from "./tool-output-cap"
-import { buildWorkerTools } from "./tools"
+import { buildWorkerTools, createPlanState, renderPlan } from "./tools"
+import type { PlanState } from "./tools"
 import type {
   WorkerAgentOpts,
   WorkerAgentResult,
@@ -336,35 +338,46 @@ export async function runWorkerAgent(
     // a code change.
     const budget = new Budget()
 
-    // Step 6: tools. The `advisor` tool (which consumed the live
-    // Pi transcript via a `getMessages` getter) was removed from the
-    // worker surface — workers now have a narrower toolset (read/glob/
-    // grep/code_search/web_search/fetch_url; implement adds edit/write/
-    // bash/codex_review). No remaining tool needs the transcript, so
-    // `getMessages` is no longer threaded through.
+    // Step 6: tools. `getMessages` exposes the LIVE Pi transcript to the
+    // `advisor` tool so it can include the recent conversation as context;
+    // `planState` is the per-run scratchpad the `update_plan` tool writes
+    // and `transformContext` re-surfaces each turn so the plan survives
+    // compaction. `agent` is assigned just below — the `getMessages`
+    // closure reads it at tool-execute time, long after assignment.
     //
     // Browse mode swaps the filesystem toolset for the browser-control
     // tools (`buildBrowseTools`), scoped to the caller's browse session so
     // the tools enforce per-session tab ownership. The else-branch narrows
     // `opts.mode` to the three filesystem modes (browse is excluded by the
     // ternary), so `buildWorkerTools` keeps its narrower mode type.
+    // `agentHolder` lets the `getMessages` closure (built before the Agent
+    // exists, to pass into the tools) read the live transcript once the
+    // Agent is assigned below. A const holder with a mutated field keeps
+    // prefer-const happy while preserving the deferred-assignment shape.
+    const agentHolder: { agent?: Agent } = {}
+    const planState: PlanState = createPlanState()
+    const getMessages = (): ReadonlyArray<AgentMessage> =>
+      agentHolder.agent?.state.messages ?? []
     const tools =
       opts.mode === "browse"
         ? buildBrowseTools({ sessionId: opts.sessionId })
         : buildWorkerTools({
             mode: opts.mode,
             workspace: ws.dir,
+            getMessages,
+            planState,
           })
 
     // Step 7: Agent. `streamFn` is the routing override (per Pi docs
     // and our verified facts in the plan, this is the documented hook
     // for "all LLM traffic for this agent goes through MY function").
-    // `toolExecution` is `"sequential"` for implement mode so the
-    // model can't fire two write tools in parallel against the same
-    // file — peer-review HIGH, 2-lab confirmed. (Edit/write/bash all
-    // also declare `executionMode: "sequential"` per-tool, but the
-    // agent-level setting belts-and-suspenders against future tool
-    // additions that forget the per-tool flag.)
+    // `toolExecution` is `"parallel"`: pure read/search batches run
+    // concurrently for the latency win, while edit/write/bash/codex_review/
+    // update_plan each declare `executionMode: "sequential"`, so Pi's
+    // dispatch serializes ANY batch containing one of them — a write or a
+    // stateful tool never runs concurrently with anything. (peer-review
+    // HIGH, 2-lab confirmed; the per-tool flags are now the sole
+    // serialization source.)
     const agent = new Agent({
       initialState: {
         systemPrompt: systemPromptFor(opts.mode),
@@ -373,22 +386,40 @@ export async function runWorkerAgent(
         tools,
       },
       streamFn: createCopilotStreamFn({ resolved, contextBudget: ctxBudget }),
-      toolExecution: opts.mode === "implement" ? "sequential" : "parallel",
-      // Structural, model-free compaction (Pi's documented seam). No-op below
-      // the budget trigger; on the compacting branch it `structuredClone`s
-      // before mutating (the hook receives the LIVE transcript reference) and
-      // never throws past here (contract: transformContext must not throw —
-      // on any failure return the input and let the request backstop guard).
-      // Disabled when the model window is unknown (no blind pruning).
-      transformContext: ctxBudget
-        ? async (messages) => {
-            try {
-              return compactWorkerContext(messages, ctxBudget)
-            } catch {
-              return messages
-            }
+      toolExecution: "parallel",
+      // transformContext is installed UNCONDITIONALLY — it is the seam for
+      // BOTH structural compaction AND the per-turn plan reminder. Two
+      // independent jobs under a single no-throw try/catch:
+      //   (1) compaction — only when the model window is known
+      //       (`ctxBudget`); skipped otherwise (no blind pruning). The
+      //       compactor `structuredClone`s before mutating the live ref.
+      //   (2) plan reminder — when `planState` is non-empty, append ONE
+      //       synthetic `user`-role message with the current plan, but only
+      //       when the last message isn't already a `user` message (avoid
+      //       two consecutive user turns on the Copilot wire).
+      // The output is a send-time view (never persisted), and `[...compacted,
+      // reminder]` is a fresh array, so the canonical transcript is never
+      // mutated: exactly one always-current plan copy, no accumulation, no
+      // orphaned toolCall/toolResult pair. On any failure the original
+      // messages are returned and the stream-fn request backstop guards
+      // overflow.
+      transformContext: async (messages) => {
+        // Two independent, separately-guarded jobs so a failure in one
+        // can't discard the other's result.
+        let compacted = messages
+        if (ctxBudget) {
+          try {
+            compacted = compactWorkerContext(messages, ctxBudget)
+          } catch {
+            compacted = messages
           }
-        : undefined,
+        }
+        try {
+          return appendPlanReminder(compacted, planState)
+        } catch {
+          return compacted
+        }
+      },
       beforeToolCall: async (
         ctx: BeforeToolCallContext,
       ): Promise<BeforeToolCallResult | undefined> => {
@@ -453,6 +484,9 @@ export async function runWorkerAgent(
         return undefined
       },
     })
+    // Publish the agent to the `getMessages` closure (used by the advisor
+    // tool) now that it exists.
+    agentHolder.agent = agent
 
     // Step 8: bridge outer abort → agent.abort(). The listener is
     // `{once: true}` so it auto-removes after first fire; we ALSO
@@ -642,7 +676,38 @@ export async function runWorkerAgent(
  * the helpers below for direct extract-assistant-text assertions
  * without spinning up the full agent.
  */
+/**
+ * Append a single synthetic `user`-role plan reminder to a send-time
+ * message view, so the current `update_plan` checklist survives context
+ * compaction. Pure: returns the SAME array reference when there's nothing
+ * to add, and a NEW array otherwise (never mutates the input). Appends
+ * ONLY after a tool-result turn — that's the multi-step boundary where the
+ * reminder is useful, and it can never double a `user` turn or split an
+ * assistant→toolResult pair. Called inside the engine's `transformContext`,
+ * whose output is a send-time view never persisted to the canonical
+ * transcript.
+ */
+export function appendPlanReminder(
+  messages: AgentMessage[],
+  planState: PlanState,
+): AgentMessage[] {
+  if (planState.current.length === 0) return messages
+  const last = messages[messages.length - 1]
+  const lastRole = last ? (last as { role?: unknown }).role : undefined
+  // Skip after a user turn (would create two consecutive user messages) and
+  // after an assistant turn (would orphan any pending toolCalls / disrupt a
+  // terminal assistant message). The plan reminder belongs after toolResults.
+  if (lastRole === "user" || lastRole === "assistant") return messages
+  const reminder: AgentMessage = {
+    role: "user",
+    content: `Current plan (update via update_plan if it changed):\n${renderPlan(planState)}`,
+    timestamp: Date.now(),
+  }
+  return [...messages, reminder]
+}
+
 export const __testExports = {
+  appendPlanReminder,
   extractAssistantText,
   makeModelShim,
   makeNoWorktreeHandle,

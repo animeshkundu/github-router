@@ -206,6 +206,7 @@ mock.module("~/lib/toolbelt/provision", () => ({
 mock.module("~/lib/colbert", () => ({
   provisionAndIndexColbert: mock(async () => {}),
   semanticSearchOptedIn: mock(() => false),
+  colbertSearchEnabled: mock(() => false),
   runSemanticSearch: mock(async () => ({
     status: "unavailable",
     isError: true,

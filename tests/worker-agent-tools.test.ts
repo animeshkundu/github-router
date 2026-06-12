@@ -728,7 +728,7 @@ describe("web_search", () => {
 // ============================================================
 
 describe("code_search", () => {
-  test("returns JSON minimal-surface (file/line/snippet)", async () => {
+  test("returns JSON minimal-surface (source + file/line/snippet)", async () => {
     const { dir, cleanup } = freshWorkspace()
     try {
       mkdirSync(path.join(dir, "src"))
@@ -743,8 +743,15 @@ describe("code_search", () => {
         new AbortController().signal,
       )
       const parsed = JSON.parse((r.content[0] as { text: string }).text) as {
+        source: string
         results: Array<{ file: string; line: number; snippet: string }>
       }
+      // Default mode is semantic-first; the unified helper labels the
+      // engine that ran. In a test env without a colbert index this is
+      // "lexical-fallback", but pin the contract, not the env.
+      expect(["semantic", "lexical", "lexical-fallback"]).toContain(
+        parsed.source,
+      )
       expect(Array.isArray(parsed.results)).toBe(true)
       expect(parsed.results.length).toBeGreaterThan(0)
       const first = parsed.results[0]!
@@ -754,6 +761,107 @@ describe("code_search", () => {
     } finally {
       cleanup()
     }
+  })
+
+  test("forced mode:'lexical' never touches colgrep — source is 'lexical'", async () => {
+    const { dir, cleanup } = freshWorkspace()
+    try {
+      mkdirSync(path.join(dir, "src"))
+      writeFileSync(
+        path.join(dir, "src", "user.ts"),
+        "export function getUserName() { return 'kundus' }\n",
+      )
+      const tool = __testExports.codeSearchTool(dir)
+      const r = await tool.execute(
+        "c1",
+        { query: "getUserName", mode: "lexical" },
+        new AbortController().signal,
+      )
+      const parsed = JSON.parse((r.content[0] as { text: string }).text) as {
+        source: string
+        results: Array<{ file: string; line: number; snippet: string }>
+      }
+      expect(parsed.source).toBe("lexical")
+      expect(parsed.results.length).toBeGreaterThan(0)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+// ============================================================
+// update_plan
+// ============================================================
+
+describe("update_plan", () => {
+  test("mutates the shared PlanState in place and echoes the rendered plan", async () => {
+    const planState = __testExports.createPlanState()
+    const tool = __testExports.updatePlanTool(planState)
+    const r = await tool.execute(
+      "c1",
+      {
+        steps: [
+          { title: "locate token refresh path", status: "in_progress" },
+          { title: "add retry/backoff", status: "pending" },
+        ],
+        explanation: "starting",
+      },
+      new AbortController().signal,
+    )
+    expect(planState.current.length).toBe(2)
+    expect(planState.current[0]!.status).toBe("in_progress")
+    const text = (r.content[0] as { text: string }).text
+    expect(text).toContain("locate token refresh path")
+    expect(text).toContain("[~]")
+    expect(text).toContain("[ ]")
+  })
+
+  test("each call REPLACES the plan (latest wins)", async () => {
+    const planState = __testExports.createPlanState()
+    const tool = __testExports.updatePlanTool(planState)
+    await tool.execute(
+      "c1",
+      { steps: [{ title: "step one", status: "pending" }] },
+      new AbortController().signal,
+    )
+    await tool.execute(
+      "c2",
+      {
+        steps: [
+          { title: "step one", status: "completed" },
+          { title: "step two", status: "in_progress" },
+        ],
+      },
+      new AbortController().signal,
+    )
+    expect(planState.current.length).toBe(2)
+    expect(planState.current[0]!.status).toBe("completed")
+  })
+
+  test("is sequential (stateful) and needs no network", () => {
+    const tool = __testExports.updatePlanTool(__testExports.createPlanState())
+    expect(tool.executionMode).toBe("sequential")
+    // No network gate: even with DISABLE_NETWORK set, update_plan works.
+    process.env.GH_ROUTER_WORKER_DISABLE_NETWORK = "1"
+    expect(
+      tool.execute(
+        "c1",
+        { steps: [{ title: "x", status: "pending" }] },
+        new AbortController().signal,
+      ),
+    ).resolves.toBeDefined()
+    delete process.env.GH_ROUTER_WORKER_DISABLE_NETWORK
+  })
+
+  test("renderPlan is deterministic with [ ]/[~]/[x] markers", () => {
+    const rendered = __testExports.renderPlan({
+      current: [
+        { title: "a", status: "completed" },
+        { title: "b", status: "in_progress" },
+        { title: "c", status: "pending" },
+      ],
+    })
+    expect(rendered).toBe("1. [x] a\n2. [~] b\n3. [ ] c")
   })
 })
 
@@ -1229,40 +1337,51 @@ describe("renderPiMessagesAsText", () => {
 // ============================================================
 
 describe("buildWorkerTools", () => {
-  test("explore mode returns 6 read-only tools (peer_review/advisor dropped from worker surface)", () => {
+  test("explore mode returns 8 read-only tools (incl. advisor + update_plan; peer_review dropped)", () => {
     const tools = buildWorkerTools({
       mode: "explore",
       workspace: realpathSync.native(os.tmpdir()),
     })
-    expect(tools.length).toBe(6)
+    expect(tools.length).toBe(8)
     const names = tools.map((t) => t.name).sort()
     expect(names).toEqual(
       [
+        "advisor",
         "code_search",
         "fetch_url",
         "glob",
         "grep",
         "read",
+        "update_plan",
         "web_search",
       ].sort(),
     )
-    // peer_review and advisor are intentionally NOT in the worker
-    // surface (per user directive). They remain implemented as helper
-    // factories for legacy callers, but buildWorkerTools no longer
-    // wires them.
+    // peer_review is intentionally NOT in the worker surface (peer critics
+    // aren't required for workers). It remains an implemented helper factory
+    // for legacy callers, but buildWorkerTools no longer wires it. `advisor`
+    // IS wired — it's the worker's consultation path.
     expect(names).not.toContain("peer_review")
-    expect(names).not.toContain("advisor")
+    expect(names).toContain("advisor")
   })
 
-  test("review mode returns the SAME 6 read-only tools as explore (no write tools)", () => {
+  test("review mode returns the SAME 8 read-only tools as explore (no write tools)", () => {
     const tools = buildWorkerTools({
       mode: "review",
       workspace: realpathSync.native(os.tmpdir()),
     })
-    expect(tools.length).toBe(6)
+    expect(tools.length).toBe(8)
     const names = tools.map((t) => t.name).sort()
     expect(names).toEqual(
-      ["code_search", "fetch_url", "glob", "grep", "read", "web_search"].sort(),
+      [
+        "advisor",
+        "code_search",
+        "fetch_url",
+        "glob",
+        "grep",
+        "read",
+        "update_plan",
+        "web_search",
+      ].sort(),
     )
     // review is read-only — the reviewer framing lives in the system prompt,
     // not the toolset, so the write tools must be absent.
@@ -1271,20 +1390,46 @@ describe("buildWorkerTools", () => {
     }
   })
 
-  test("implement mode returns 10 tools (explore + edit/write/bash + codex_review)", () => {
+  test("implement mode returns 12 tools (explore + edit/write/bash + codex_review)", () => {
     const tools = buildWorkerTools({
       mode: "implement",
       workspace: realpathSync.native(os.tmpdir()),
     })
-    expect(tools.length).toBe(10)
+    expect(tools.length).toBe(12)
     const names = tools.map((t) => t.name)
     for (const w of ["edit", "write", "bash", "codex_review"]) {
       expect(names).toContain(w)
     }
-    // Same narrowing: no peer_review, no advisor — only the
-    // codex-reviewer-locked codex_review is exposed for code review.
+    // advisor + update_plan are inherited from explore; peer_review stays out.
+    expect(names).toContain("advisor")
+    expect(names).toContain("update_plan")
     expect(names).not.toContain("peer_review")
-    expect(names).not.toContain("advisor")
+  })
+
+  test("codex_review and the write tools declare executionMode:'sequential'", () => {
+    // The engine no longer forces agent-wide sequential execution for
+    // implement mode; correctness now depends on these per-tool flags so a
+    // batch containing a write / stateful tool serializes. update_plan is
+    // also sequential (stateful); pure read/search tools are NOT.
+    const tools = buildWorkerTools({
+      mode: "implement",
+      workspace: realpathSync.native(os.tmpdir()),
+    })
+    const byName = new Map(tools.map((t) => [t.name, t]))
+    for (const seq of ["edit", "write", "bash", "codex_review", "update_plan"]) {
+      expect(byName.get(seq)?.executionMode).toBe("sequential")
+    }
+    for (const par of [
+      "read",
+      "glob",
+      "grep",
+      "code_search",
+      "web_search",
+      "fetch_url",
+      "advisor",
+    ]) {
+      expect(byName.get(par)?.executionMode).toBeUndefined()
+    }
   })
 
   test("each tool has the required Pi AgentTool shape", () => {

@@ -3,13 +3,16 @@
  *
  * Plan: see `plans/we-have-added-a-dreamy-tide.md` ("Tools" section).
  *
- * 11 tools across two modes:
+ * 12 tools across the modes:
  *
- *   - Explore mode (8, read-only):
+ *   - Explore / review mode (8, read-only):
  *       read, glob, grep, code_search, web_search, fetch_url,
- *       peer_review, advisor.
+ *       advisor, update_plan.
  *
- *   - Implement mode (11): explore + edit, write, bash.
+ *   - Implement mode (12): explore + edit, write, bash, codex_review.
+ *
+ * (`peer_review` is implemented but intentionally NOT wired into
+ * `buildWorkerTools` — peer critics aren't part of the worker surface.)
  *
  * All tools follow Pi's `AgentTool<TParameters, TDetails>` contract:
  *
@@ -76,7 +79,8 @@ import type {
 } from "@earendil-works/pi-agent-core"
 import { type TSchema, Type } from "@earendil-works/pi-ai"
 
-import { resolveRipgrep, searchCode } from "~/lib/code-search"
+import { resolveRipgrep } from "~/lib/code-search"
+import { runUnifiedCodeSearch } from "~/lib/unified-code-search"
 import {
   MAX_INFLIGHT_TOOLS_CALL,
   acquireInFlightSlot,
@@ -167,6 +171,19 @@ export interface BuildWorkerToolsOpts {
    * `paths.ts`'s docstring).
    */
   workspace: string
+  /**
+   * Live accessor for the running Pi transcript, threaded into the
+   * `advisor` tool so it can include the recent conversation as context.
+   * The engine supplies `() => agent.state.messages`; omitted in unit
+   * tests that exercise tools in isolation (advisor then runs context-free).
+   */
+  getMessages?: () => ReadonlyArray<AgentMessage>
+  /**
+   * Per-run planning scratchpad shared with the `update_plan` tool and
+   * re-surfaced each turn by the engine. Omitted ⇒ `update_plan` still
+   * works but its state isn't persisted across turns.
+   */
+  planState?: PlanState
 }
 
 /**
@@ -851,12 +868,36 @@ function fetchUrlTool(): AgentTool<typeof FETCH_URL_PARAMS> {
 }
 
 const CODE_SEARCH_PARAMS = Type.Object({
-  query: Type.String({ description: "Search text (literal by default)." }),
+  query: Type.String({
+    description:
+      "Search text. Natural-language intent in the default `semantic` " +
+      "mode; a literal string in `lexical`/`exact`; a PCRE2 regex in `regex`.",
+  }),
   mode: Type.Optional(
     Type.Union(
-      [Type.Literal("ranked"), Type.Literal("literal"), Type.Literal("regex")],
-      { description: "Ranking mode (default `ranked`)." },
+      [
+        Type.Literal("semantic"),
+        Type.Literal("lexical"),
+        Type.Literal("exact"),
+        Type.Literal("regex"),
+        Type.Literal("ast"),
+      ],
+      {
+        description:
+          "Search mode. `semantic` (DEFAULT): ColBERT meaning-based ranking, " +
+          "falls back to lexical when the index isn't ready (response " +
+          "`source` says which engine ran). `lexical`: BM25F + tree-sitter " +
+          "(best for exact symbols). `exact`: fixed-string. `regex`: PCRE2. " +
+          "`ast`: ast-grep structural (needs `ast_pattern` + `ast_lang`).",
+      },
     ),
+  ),
+  pattern: Type.Optional(
+    Type.String({
+      description:
+        "Semantic mode only: regex pre-filter (colgrep -e) — grep first, " +
+        "then rank semantically. Ignored in lexical modes.",
+    }),
   ),
   file_glob: Type.Optional(
     Type.String({ description: "ripgrep glob filter." }),
@@ -866,13 +907,13 @@ const CODE_SEARCH_PARAMS = Type.Object({
   ),
   structural: Type.Optional(
     Type.Union([Type.Literal("full"), Type.Literal("topN")], {
-      description: "Structural-ranking depth (ranked mode only).",
+      description: "Structural-ranking depth (lexical mode only).",
     }),
   ),
   complete: Type.Optional(
     Type.Boolean({
       description:
-        "When true, return the COMPLETE ranked match set (every line "
+        "Lexical mode: when true, return the COMPLETE match set (every line "
         + "ripgrep would find, capped only by `limit`) — disables the "
         + "default precision shoulder cut + per-file cap. Use it when you "
         + "must not miss any occurrence (every caller of X, a rename, an "
@@ -885,14 +926,14 @@ const CODE_SEARCH_PARAMS = Type.Object({
       description:
         "Set true with mode:'regex' to let a pattern span newlines "
         + "(ripgrep -U), e.g. 'foo[\\s\\S]*?bar' across lines. (literal/"
-        + "ranked queries can't contain a newline.)",
+        + "lexical queries can't contain a newline.)",
     }),
   ),
   ast_pattern: Type.Optional(
     Type.String({
       description:
-        "ast-grep structural pattern (e.g. 'function $F($$$) { $$$ }'). "
-        + "When set, matches come from ast-grep instead of ripgrep — for "
+        "mode:'ast' structural pattern (e.g. 'function $F($$$) { $$$ }'). "
+        + "Matches come from ast-grep instead of ripgrep — for "
         + "multi-line AST shapes the regex modes can't express. Takes "
         + "precedence over `query`. REQUIRES `ast_lang`. If ast-grep isn't "
         + "installed you get a `notice`; it never falls back to regex.",
@@ -911,25 +952,30 @@ const CODE_SEARCH_PARAMS = Type.Object({
 function codeSearchTool(workspace: string): AgentTool<typeof CODE_SEARCH_PARAMS> {
   return {
     name: "code_search",
-    label: "Ranked code search",
+    label: "Code search (semantic-first)",
     description:
-      "BM25F + tree-sitter ranked code search over the worker's " +
-      "workspace. Prefer over `grep` for \"where is X defined / which " +
-      "files reference Y\" discovery. Returns `file:line:snippet` per " +
-      "hit in JSON.",
+      "Semantic-first code search over the worker's workspace. Default " +
+      "(`mode:\"semantic\"`) ranks by MEANING via ColBERT and transparently " +
+      "falls back to lexical BM25F when the index isn't ready (the response " +
+      "`source` is \"semantic\" | \"lexical\" | \"lexical-fallback\"). Force " +
+      "lexical with mode `lexical` (exact symbols) / `exact` / `regex` / " +
+      "`ast`. Prefer over `grep` for \"where is X / which files reference " +
+      "Y\" discovery. Returns `{source, results:[{file,line,snippet}], ...}` " +
+      "in JSON.",
     parameters: CODE_SEARCH_PARAMS,
     async execute(
       _toolCallId,
       params,
       signal,
     ): Promise<AgentToolResult<Record<string, never>>> {
-      const r = await searchCode(
+      const r = await runUnifiedCodeSearch(
         {
           query: params.query,
           // Workspace is FORCED — the model can't escape the worker's
           // sandbox by passing a different path here.
           workspace,
           mode: params.mode,
+          pattern: params.pattern,
           file_glob: params.file_glob,
           limit: params.limit,
           structural: params.structural,
@@ -944,18 +990,19 @@ function codeSearchTool(workspace: string): AgentTool<typeof CODE_SEARCH_PARAMS>
         },
         signal,
       )
-      // Match the MCP code_search tool's minimal-surface shape — same
-      // `{file,line,snippet}` per hit + `truncated` + optional
-      // `notice`. We don't bother with the 256 KB byte cap here
-      // because the worker's per-call tool-bytes budget already
-      // bounds it (see `budget.ts`).
+      // Minimal worker surface — same `{file,line,snippet}` per hit as the
+      // MCP `code` tool, plus the top-level `source` so the worker knows
+      // which engine ran (a `lexical-fallback` on a concept query means the
+      // index wasn't ready — retry mode:"semantic" or use exact keywords).
+      // No 256 KB byte cap here — the per-call tool-bytes budget bounds it.
       const minimal = {
+        source: r.source,
         results: r.results.map((h) => ({
           file: h.file,
           line: h.line,
           snippet: h.snippet,
         })),
-        truncated: r.truncated,
+        truncated: r.truncated ?? false,
         notice: r.notice ?? undefined,
       }
       return textResult(JSON.stringify(minimal))
@@ -1137,6 +1184,11 @@ function codexReviewTool(): AgentTool<typeof CODEX_REVIEW_PARAMS> {
       + "critic). Returns line-level findings on a diff or single file. "
       + "Use to overcome blind spots on a coding change before committing.",
     parameters: CODEX_REVIEW_PARAMS,
+    // Serialize against itself and the write tools. The engine no longer
+    // forces agent-wide sequential execution for implement mode (pure
+    // read/search batches run in parallel), so this per-tool flag is what
+    // keeps a `[codex_review, codex_review]` batch from running concurrently.
+    executionMode: "sequential",
     async execute(
       _toolCallId,
       params,
@@ -1153,8 +1205,8 @@ function codexReviewTool(): AgentTool<typeof CODEX_REVIEW_PARAMS> {
           : persona.defaultEffort
       // Slot accounting: `worker_implement` already holds 1 slot from
       // the MCP boundary; this nested `codex_review` call needs a
-      // 2nd slot from the same shared `MAX_INFLIGHT_TOOLS_CALL=8`
-      // counter. Under modest concurrency (≥8 simultaneous
+      // 2nd slot from the same shared `MAX_INFLIGHT_TOOLS_CALL`
+      // counter. Under modest concurrency (≥cap simultaneous
       // worker_implement runs) every slot is held by a parent, and
       // every nested codex_review attempt starves indefinitely
       // because the parent can't release until the nested call
@@ -1393,20 +1445,128 @@ function advisorTool(
 }
 
 // ============================================================
+// Planning (update_plan) — stateful, local, terminal
+// ============================================================
+
+const UPDATE_PLAN_PARAMS = Type.Object({
+  steps: Type.Array(
+    Type.Object({
+      title: Type.String({
+        minLength: 1,
+        description: "Short imperative description of the step.",
+      }),
+      status: Type.Union(
+        [
+          Type.Literal("pending"),
+          Type.Literal("in_progress"),
+          Type.Literal("completed"),
+        ],
+        { description: "Current status of this step." },
+      ),
+    }),
+    {
+      minItems: 1,
+      description:
+        "The FULL ordered plan. Each call replaces the previous plan, so " +
+        "always send every step (not just the changed one).",
+    },
+  ),
+  explanation: Type.Optional(
+    Type.String({
+      description: "Optional one-line note on what changed this update.",
+    }),
+  ),
+})
+
+export interface PlanStep {
+  title: string
+  status: "pending" | "in_progress" | "completed"
+}
+
+/** Per-run planning scratchpad, owned by the engine and passed into the
+ *  `update_plan` tool + re-surfaced each turn via `transformContext`. */
+export interface PlanState {
+  current: Array<PlanStep>
+  explanation?: string
+}
+
+export function createPlanState(): PlanState {
+  return { current: [] }
+}
+
+/** Deterministic checklist render: `N. [ |~|x] title`, optional leading
+ *  explanation line. Used both as the tool's return value and as the
+ *  per-turn reminder injected at the request boundary. */
+export function renderPlan(state: PlanState): string {
+  if (state.current.length === 0) return "(no plan yet)"
+  const mark = (s: PlanStep["status"]): string =>
+    s === "completed" ? "x" : s === "in_progress" ? "~" : " "
+  const lines = state.current.map(
+    (step, i) => `${i + 1}. [${mark(step.status)}] ${step.title}`,
+  )
+  const head = state.explanation ? `${state.explanation}\n` : ""
+  return `${head}${lines.join("\n")}`
+}
+
+function updatePlanTool(
+  planState?: PlanState,
+): AgentTool<typeof UPDATE_PLAN_PARAMS> {
+  return {
+    name: "update_plan",
+    label: "Update plan",
+    description:
+      "Maintain a short, ordered checklist for the delegated task. Call it " +
+      "at the start (lay out the steps) and again whenever a step's status " +
+      "changes (mark one in_progress / completed). Each call REPLACES the " +
+      "whole plan — always send the full ordered list. The current plan is " +
+      "re-surfaced to you every turn so it survives context compaction; use " +
+      "it to stay oriented on long, multi-step work.",
+    parameters: UPDATE_PLAN_PARAMS,
+    // Stateful: serialize so two update_plan calls (or an update_plan + a
+    // write) in one batch can't interleave. The engine relies on this flag
+    // now that it no longer forces agent-wide sequential execution.
+    executionMode: "sequential",
+    async execute(
+      _toolCallId,
+      params,
+    ): Promise<AgentToolResult<Record<string, never>>> {
+      const steps: Array<PlanStep> = params.steps.map((s) => ({
+        title: s.title,
+        status: s.status,
+      }))
+      // Local mutation only — no network, no spawning, no other side
+      // effects (preserves the worker's terminal invariant).
+      if (planState) {
+        planState.current = steps
+        planState.explanation = params.explanation
+      }
+      const rendered = renderPlan(
+        planState ?? { current: steps, explanation: params.explanation },
+      )
+      return textResult(rendered)
+    },
+  }
+}
+
+// ============================================================
 // Tool sets
 // ============================================================
 
 /**
  * Build the AgentTool array for the requested mode.
  *
- *   - explore  → 6 read-only tools
- *   - review   → same 6 read-only tools as explore (reviewer framing lives
+ *   - explore  → 8 read-only tools (read, glob, grep, code_search,
+ *                web_search, fetch_url, advisor, update_plan)
+ *   - review   → same 8 read-only tools as explore (reviewer framing lives
  *                in the system prompt, not the toolset)
- *   - implement → explore + edit/write/bash/codex_review
+ *   - implement → explore + edit/write/bash/codex_review (12 total)
  *
- * Order matches the brief and the prompt-mode-note for stability —
- * Pi's tool-injection shape includes the list verbatim, so a stable
- * order keeps the model's tool-name prediction cache warm.
+ * `peer_review` is intentionally NOT wired in (peer critics aren't part of
+ * the worker surface); `advisor` is the worker's consultation path.
+ *
+ * Order matches the prompt-mode-note for stability — Pi's tool-injection
+ * shape includes the list verbatim, so a stable order keeps the model's
+ * tool-name prediction cache warm.
  *
  * Each call returns FRESH tool objects (workspace is closure-captured
  * per call), so two concurrent worker runs against different
@@ -1415,7 +1575,7 @@ function advisorTool(
 export function buildWorkerTools(
   opts: BuildWorkerToolsOpts,
 ): Array<AgentTool<TSchema, Record<string, never>>> {
-  const { mode, workspace } = opts
+  const { mode, workspace, getMessages, planState } = opts
   const explore: Array<AgentTool<TSchema, Record<string, never>>> = [
     readTool(workspace),
     globTool(workspace),
@@ -1423,6 +1583,8 @@ export function buildWorkerTools(
     codeSearchTool(workspace),
     webSearchTool(),
     fetchUrlTool(),
+    advisorTool(getMessages),
+    updatePlanTool(planState),
   ]
   if (mode === "explore" || mode === "review") return explore
   return [
@@ -1448,6 +1610,7 @@ export const __testExports = {
   atomicWriteSync,
   bashTool,
   codeSearchTool,
+  createPlanState,
   editTool,
   fetchUrlTool,
   globTool,
@@ -1456,7 +1619,9 @@ export const __testExports = {
   advisorTool,
   readTool,
   renderPiMessagesAsText,
+  renderPlan,
   resolvePathOrThrow,
+  updatePlanTool,
   webSearchTool,
   writeTool,
 }

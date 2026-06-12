@@ -135,7 +135,7 @@ describe("dropColgrepSecrets (child-env credential strip)", () => {
 // Capability gate — off by default in an unprovisioned env
 // ---------------------------------------------------------------------
 
-describe("semanticSearchEnabled gate (availability-based)", () => {
+describe("semanticSearchEnabled (internal colgrep-availability predicate)", () => {
   test("false when artifacts are absent (CI / sandbox / pre-provision)", async () => {
     const cap = await import("../src/lib/mcp-capabilities")
     // No artifacts on disk in the temp home → gate must be false so the
@@ -538,7 +538,7 @@ describe("runManagedExeCapture lifecycle (real child)", () => {
 
 
 // ---------------------------------------------------------------------
-// MCP surface regression — semantic_search absent by default
+// MCP surface regression — semantic_search folded into the `code` tool
 // ---------------------------------------------------------------------
 
 describe("MCP tools/list surface (regression guard)", () => {
@@ -565,50 +565,19 @@ describe("MCP tools/list surface (regression guard)", () => {
     return json.result.tools.map((t) => t.name)
   }
 
-  test("semantic_search NOT listed when artifacts absent (search group stays {code, web})", async () => {
+  test("search group is {code, web}; `semantic_search` is no longer a standalone tool", async () => {
+    // semantic_search was folded into the unified `code` tool (its default
+    // mode runs ColBERT and transparently falls back to lexical), so the
+    // search surface is stable at {code, web} regardless of colgrep
+    // availability — `code` is always listed (it always returns results).
     const { state } = await import("../src/lib/state")
     state.peerMcpNonce = NONCE
     state.models = { object: "list", data: [] } as never
     try {
       const names = await listToolNames()
       expect(names).not.toContain("semantic_search")
-      // The always-on search-group tools are still present.
       expect(names).toContain("code")
       expect(names).toContain("web")
-    } finally {
-      state.peerMcpNonce = undefined
-      state.models = undefined
-    }
-  })
-
-  test("defense-in-depth: tools/call semantic_search → -32601 when gate off", async () => {
-    const { state } = await import("../src/lib/state")
-    const { mcpRoutes } = await import("../src/routes/mcp/route")
-    const { __resetInFlightForTests } = await import("../src/routes/mcp/handler")
-    __resetInFlightForTests()
-    state.peerMcpNonce = NONCE
-    state.models = { object: "list", data: [] } as never
-    try {
-      const req = new Request(`http://${PROXY_HOST}/`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${NONCE}`,
-          host: PROXY_HOST,
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 2,
-          method: "tools/call",
-          params: { name: "semantic_search", arguments: { query: "auth" } },
-        }),
-      })
-      const res = await mcpRoutes.request(req)
-      const json = (await res.json()) as {
-        error?: { code: number; message: string }
-      }
-      expect(json.error?.code).toBe(-32601)
-      expect(json.error?.message).toMatch(/unknown tool/i)
     } finally {
       state.peerMcpNonce = undefined
       state.models = undefined

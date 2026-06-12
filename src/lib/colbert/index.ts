@@ -24,7 +24,11 @@ import { parseBoolEnv } from "../exec"
 
 import { gitState } from "./index-store"
 import { registerColbertExitHandlers } from "./lifecycle"
-import { provisionColbert } from "./provision"
+import {
+  colbertArtifactsPresent,
+  colbertSmokeOk,
+  provisionColbert,
+} from "./provision"
 import { kickBackgroundInit } from "./runner"
 
 /**
@@ -37,6 +41,22 @@ import { kickBackgroundInit } from "./runner"
  */
 export function semanticSearchOptedIn(): boolean {
   return parseBoolEnv(process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH) !== true
+}
+
+/**
+ * Availability predicate for ColBERT semantic search — the single
+ * source of truth, living in this leaf module so callers that must not
+ * import `mcp-capabilities` (notably the unified code-search helper)
+ * can read it without closing an import cycle through `worker-agent`.
+ *
+ * True iff the operator hasn't opted out AND the colgrep binary + model
+ * + ORT are provisioned on disk AND the post-provision smoke test
+ * passed. `mcp-capabilities.semanticSearchEnabled()` delegates here.
+ */
+export function colbertSearchEnabled(): boolean {
+  return (
+    semanticSearchOptedIn() && colbertArtifactsPresent() && colbertSmokeOk()
+  )
 }
 
 let _started = false

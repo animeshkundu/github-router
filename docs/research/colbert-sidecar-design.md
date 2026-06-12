@@ -1,17 +1,17 @@
-# ColBERT semantic code search — github-router-managed sidecar (build-ready design)
+# ColBERT semantic code search - github-router-managed sidecar (build-ready design)
 
-**Status:** GO (with conditions — see §13). Supersedes the NO-GO in
+**Status:** GO (with conditions - see §13). Supersedes the NO-GO in
 [`colgrep-investigation.md`](colgrep-investigation.md). The user has explicitly
 opted in to a dedicated process; that earlier verdict's binding objections
 ("persistent index + model download + native ONNX") are now *requirements
 github-router fulfils*, not reasons to abstain.
 
 **Target:** `colgrep` from [`lightonai/next-plaid`](https://github.com/lightonai/next-plaid)
-— ColBERT/PLAID late-interaction semantic code search. Rust, CPU-by-default,
+- ColBERT/PLAID late-interaction semantic code search. Rust, CPU-by-default,
 native ONNX Runtime, Windows-first. Latest release **v1.5.2** (2026-06-03).
 
 **One-paragraph digest.** colgrep is **CLI-per-invocation, not a daemon** (no
-`serve`/`server`/`listen` anywhere in its source — verified by command tree and
+`serve`/`server`/`listen` anywhere in its source - verified by command tree and
 keyword scan). So github-router does not run a persistent socket service; it
 runs a **managed sidecar runner**: short-lived, PID-tracked `colgrep search` /
 `colgrep init` child processes that the proxy spins up, cancels, and cleans up,
@@ -21,19 +21,19 @@ router-owned data dir and injected via env (`COLGREP_DATA_DIR`, `--model
 <local-dir>`, `ORT_DYLIB_PATH`). The single biggest risk is **per-query
 cold-start latency**: because there's no warm process, EVERY `semantic_search`
 re-loads the ONNX Runtime, builds an ONNX session, loads the model+tokenizer,
-and mmaps the index — costs the OS page cache does NOT eliminate — on top of the
+and mmaps the index - costs the OS page cache does NOT eliminate - on top of the
 one-time multi-second-to-minutes full index build on a fresh machine. This makes
 a **measured warm-query latency budget a hard GO gate** (§11 spike, §13
 condition 1): if warm p95 is unacceptable the architecture must change, not just
 its cleanup. The mitigations that hold regardless: non-blocking background
 indexing on `start`, and a `status`/freshness field on the MCP tool that
 degrades to lexical `code_search` while the index is
-`provisioning`/`building`/`absent`/`stale` — the tool NEVER errors on a missing
+`provisioning`/`building`/`absent`/`stale` - the tool NEVER errors on a missing
 index.
 
 ---
 
-## 1. Process model — managed sidecar runner (NOT a daemon)
+## 1. Process model - managed sidecar runner (NOT a daemon)
 
 ### Evidence
 
@@ -50,13 +50,13 @@ incremental index update, searches, prints, and exits.
 
 Do **not** invent a long-running TCP/stdio server wrapper around colgrep. It
 would add a custom protocol, a port, a health endpoint, and a keep-alive
-problem — all to wrap a tool that has no resident state to keep warm between
+problem - all to wrap a tool that has no resident state to keep warm between
 calls anyway (colgrep memory-maps the PLAID index fresh per process; warm-cache
 benefit is OS page cache, which survives across short-lived processes for free).
 
 The "dedicated process" the user opted into is satisfied by treating colgrep as
 a **managed binary the proxy provisions and drives**, exactly like the toolbelt
-binaries — but with PID tracking, cancellation, and a boot/exit sweep layered on
+binaries - but with PID tracking, cancellation, and a boot/exit sweep layered on
 because the index-build invocations can be long. This is *simpler* than the
 browser bridge (which IS a persistent process kept alive across MV3 SW dormancy)
 because colgrep has nothing to keep alive.
@@ -97,10 +97,10 @@ pays, even with a warm on-disk index: process spawn → ORT dylib `dlopen` → O
 **session construction** → model + tokenizer load → index mmap/open → incremental
 update scan → query encode → JSON serialize. Page cache makes the *index mmap*
 cheap on repeat calls, but it does **not** eliminate ONNX session construction or
-model init — those are per-process. Realistic CPU cost is plausibly
+model init - those are per-process. Realistic CPU cost is plausibly
 **multi-hundred-ms to low-seconds per query**, vs ripgrep's <10ms. That is
 acceptable for an **opt-in NL-intent tool** but would be unacceptable as the
-default path — which is precisely why `semantic_search` is a *separate* tool from
+default path - which is precisely why `semantic_search` is a *separate* tool from
 lexical `code` (§6), and why the spike phase (§11.1) MUST measure warm p95
 before the architecture is blessed.
 
@@ -109,14 +109,14 @@ Alternatives weighed (and why per-invocation still wins *for v1*):
 | Option | Verdict |
 |---|---|
 | **Per-invocation CLI (chosen)** | Simplest; no protocol/port/keep-alive; matches colgrep's actual shape. Accepts per-query model-load cost. **GO for v1, gated on a measured budget.** |
-| Upstream a `colgrep serve` mode | Best long-term latency (model stays warm), but requires an upstream contribution + a wire protocol + a keep-alive/dormancy story github-router would own. Deferred — revisit if the v1 budget proves the model-load cost dominant. |
+| Upstream a `colgrep serve` mode | Best long-term latency (model stays warm), but requires an upstream contribution + a wire protocol + a keep-alive/dormancy story github-router would own. Deferred - revisit if the v1 budget proves the model-load cost dominant. |
 | Thin Rust daemon wrapping `next-plaid` crate internals | Most control, highest build cost, forks us off the prebuilt-release supply chain (we'd build from source → no fresh-Windows guarantee). Rejected for v1. |
 | Index/build-only, no query tool | Defeats the purpose (the user asked for a *search* tool). Rejected. |
-| Freshness/latency predicate gating semantic vs lexical | **Adopted as a complement, not a replacement** — §6's degradation matrix routes building/stale/slow states to lexical. Doesn't remove the warm-path cost but bounds the worst case. |
+| Freshness/latency predicate gating semantic vs lexical | **Adopted as a complement, not a replacement** - §6's degradation matrix routes building/stale/slow states to lexical. Doesn't remove the warm-path cost but bounds the worst case. |
 
 If the spike shows warm p95 is unacceptable, the fallback is the
 freshness-predicate-default posture (lexical by default, semantic only when a
-freshness+latency predicate passes) plus prioritizing an upstream `serve` mode —
+freshness+latency predicate passes) plus prioritizing an upstream `serve` mode -
 **not** shipping a slow default.
 
 ---
@@ -131,7 +131,7 @@ first-class colgrep env var or CLI flag. **No fork, no patch.**
 | Concern | Mechanism | Source evidence |
 |---|---|---|
 | **Index storage location** | `COLGREP_DATA_DIR` env var | `index/paths.rs:67-78` (`get_colgrep_data_dir` checks `COLGREP_DATA_DIR` first, falls back to `dirs::data_dir()/colgrep/indices`) |
-| **Config isolation** | *also* `COLGREP_DATA_DIR` — config path is derived as `data_dir.parent()/config.json` | `config.rs:486-493` (`get_config_path` = `get_colgrep_data_dir().parent().join(CONFIG_FILE)`). Setting `COLGREP_DATA_DIR` to `<router>/colbert/indices` ⇒ config lands at `<router>/colbert/config.json`, fully decoupled from the user's `~/.config/colgrep` / `%APPDATA%\colgrep`. |
+| **Config isolation** | *also* `COLGREP_DATA_DIR` - config path is derived as `data_dir.parent()/config.json` | `config.rs:486-493` (`get_config_path` = `get_colgrep_data_dir().parent().join(CONFIG_FILE)`). Setting `COLGREP_DATA_DIR` to `<router>/colbert/indices` ⇒ config lands at `<router>/colbert/config.json`, fully decoupled from the user's `~/.config/colgrep` / `%APPDATA%\colgrep`. |
 | **Model (skip HF download)** | `--model <local-dir>` (a path that `exists() && is_dir()` is used verbatim, no HF call) | `model.rs:27-30` (local-path short-circuit before the `hf-hub` download) |
 | **ONNX Runtime (skip GH download)** | `ORT_DYLIB_PATH` env var (checked first; if valid, used directly) | `onnx_runtime.rs:133-148` |
 | **Force CPU** | `--force-cpu` flag OR `COLGREP_FORCE_CPU=1` | `cli.rs:443-445`, `onnx_runtime.rs:61-70` |
@@ -155,14 +155,14 @@ results.
 
 github-router provisions **three** artifacts. For each: a SHA256-pinned,
 size-capped, timeout-bounded download into the router data dir, verified BEFORE
-use — the exact pattern in `src/lib/toolbelt/provision.ts` +
+use - the exact pattern in `src/lib/toolbelt/provision.ts` +
 `src/lib/toolbelt/manifest.ts`. **colgrep itself does zero checksum
 verification** on its own HF-model and ORT downloads (read the source: `model.rs`
 trusts `hf-hub`; `onnx_runtime.rs:578-586` `ureq::get(...).into_reader()` with no
-digest check) — so pre-supplying both is not just convenience, it **closes a
+digest check) - so pre-supplying both is not just convenience, it **closes a
 supply-chain hole colgrep leaves open**.
 
-### 3a. The colgrep binary — prebuilt release, SHA-pinned
+### 3a. The colgrep binary - prebuilt release, SHA-pinned
 
 **v1.5.2 ships prebuilt binaries with `.sha256` sidecars** (cargo-dist), so we
 download a known-good binary; we do NOT build from source (no Rust toolchain on
@@ -188,7 +188,7 @@ URL shape:
   toolbelt's `extractTarGzMember` only does **gzip** (`gunzipSync`); xz is not in
   Node's `zlib`. Build note: add an `xz` decode path (either a tiny pure-JS
   lzma/xz inflater, or shell out to the system `tar`/`xz` which is universally
-  present on macOS/Linux — POSIX-only path, never hit on the Windows primary
+  present on macOS/Linux - POSIX-only path, never hit on the Windows primary
   target). Keep the regular-files-only extraction guard from
   `extract.ts` (rejects symlink/hardlink/device entries).
 - **Storage:** `<router>/colbert/bin/colgrep[.exe]` + `.sha256` sidecar.
@@ -200,7 +200,7 @@ URL shape:
 > user's PATH, and run unverified `irm | iex`. github-router must own the binary
 > in its data dir and never run a remote script.
 
-### 3b. The ColBERT model — HF download, per-file SHA-pinned, local-dir handoff
+### 3b. The ColBERT model - HF download, per-file SHA-pinned, local-dir handoff
 
 The model is `lightonai/LateOn-Code-edge` (`model.rs:5`), ModernBERT-based
 ColBERT, ~16.8M params. Five required files (`model.rs:8-14`), total **~21 MB**:
@@ -221,21 +221,21 @@ caches under the HF cache dir, outside our control). Instead github-router:
 3. Stores them under
    `<router>/colbert/models/LateOn-Code-edge/<rev>/`.
 4. Passes `--model <that-dir>` on every `init`/`search`. `model.rs:27-30` uses a
-   local dir verbatim when it exists — **no HF call happens at all.**
+   local dir verbatim when it exists - **no HF call happens at all.**
 
 This pins both *integrity* (SHA) and *version* (revision), so a model
 re-publish upstream can't silently change ranking. Note: colgrep defaults to
 FP32 (`model.onnx`, 68 MB) per `settings --fp32` being default; we deliberately
 ship **only INT8** (`model_int8.onnx`) and select it. (colgrep's `--int8` toggle
 lives in `settings`; since we control the local model dir we simply omit
-`model.onnx` so INT8 is the only option present — smaller footprint, faster CPU
+`model.onnx` so INT8 is the only option present - smaller footprint, faster CPU
 inference, the published-recommended edge config.)
 
-### 3c. ONNX Runtime 1.23.0 — GH-release download, SHA-pinned, `ORT_DYLIB_PATH` handoff
+### 3c. ONNX Runtime 1.23.0 - GH-release download, SHA-pinned, `ORT_DYLIB_PATH` handoff
 
 colgrep pins ORT **1.23.0** (`onnx_runtime.rs:33`) and auto-downloads the
 platform dylib from `microsoft/onnxruntime` GitHub releases
-(`onnx_runtime.rs:595-718`) — **with no checksum.** github-router pre-supplies it
+(`onnx_runtime.rs:595-718`) - **with no checksum.** github-router pre-supplies it
 the same way:
 
 | `platform-arch` | Archive (from `get_download_info`) | Member |
@@ -249,7 +249,7 @@ Base URL: `https://github.com/microsoft/onnxruntime/releases/download/v1.23.0/`.
 
 - SHA256-pin each archive in the manifest. Windows `.zip` → `extractZipMember`;
   macOS/Linux `.tgz` → `extractTarGzMember` (these are **gzip**, unlike the
-  colgrep `.tar.xz` — so the existing gzip extractor covers all three POSIX ORT
+  colgrep `.tar.xz` - so the existing gzip extractor covers all three POSIX ORT
   archives). Extract the named dylib into
   `<router>/colbert/onnxruntime/1.23.0/cpu/<libname>`. **Note:** the ORT archive
   ships more than one file (versioned dylib, possibly a symlink/companion); on
@@ -258,7 +258,7 @@ Base URL: `https://github.com/microsoft/onnxruntime/releases/download/v1.23.0/`.
   just the one named member), and on POSIX create the `libonnxruntime.so` →
   `libonnxruntime.so.1.23.0` soname symlink colgrep's `ORT_LIB_NAME` expects.
 - Pass `ORT_DYLIB_PATH=<that file>` in the colgrep child env. colgrep validates
-  it loads (`is_valid_ort_dylib`) and uses it directly — **but if the path is
+  it loads (`is_valid_ort_dylib`) and uses it directly - **but if the path is
   invalid it CLEARS the env and falls through to its own unverified GH download**
   (`onnx_runtime.rs:135-160`). So a broken handoff silently re-opens the
   supply-chain hole. Mitigate: (a) verify the extracted dylib is loadable in the
@@ -273,12 +273,12 @@ Base URL: `https://github.com/microsoft/onnxruntime/releases/download/v1.23.0/`.
 
 After provisioning binary+model+ORT, run ONE cheap colgrep invocation with the
 **exact** isolating env (`COLGREP_DATA_DIR`, `ORT_DYLIB_PATH`, `--model <dir>`,
-`--force-cpu`) — e.g. `colgrep status <tmp>` or a search against a 1-file fixture
-— and confirm it exits 0 and the ORT dylib actually `dlopen`'d. This catches:
+`--force-cpu`) - e.g. `colgrep status <tmp>` or a search against a 1-file fixture
+- and confirm it exits 0 and the ORT dylib actually `dlopen`'d. This catches:
 ORT MSVC-runtime missing (Windows), missing dependent DLL, glibc/CPU-feature
 incompatibility (Linux), macOS quarantine/codesign block, an incomplete model
 dir. On smoke-test failure, the capability stays *visible* but every call returns
-`status:"failed"` + lexical fallback + an actionable notice — never a hard error,
+`status:"failed"` + lexical fallback + an actionable notice - never a hard error,
 never colgrep's silent re-download.
 
 ### Supply-chain risk register
@@ -288,7 +288,7 @@ never colgrep's silent re-download.
 | colgrep binary tampered/republished | hardcoded SHA256 (not runtime-fetched), regular-files-only extraction |
 | ORT dylib tampered (colgrep does NO checksum) | github-router pre-supplies SHA-pinned ORT; `ORT_DYLIB_PATH` short-circuits colgrep's unverified downloader |
 | HF model swapped under us (colgrep does NO checksum) | per-file SHA + pinned revision; `--model <local-dir>` short-circuits HF entirely |
-| Untrusted network at install | size cap (`MAX_DOWNLOAD_BYTES`), timeout, HTTPS-only, `User-Agent` tag — all from `toolbelt/provision.ts` |
+| Untrusted network at install | size cap (`MAX_DOWNLOAD_BYTES`), timeout, HTTPS-only, `User-Agent` tag - all from `toolbelt/provision.ts` |
 | Remote-script install vector (`irm\|iex`, `installer.sh`) | never used; github-router owns the binary in its data dir |
 | User `config.json` / env (`COLGREP_ALPHA`, `set-model`) changing results | router-owned `COLGREP_DATA_DIR` relocates config; explicit flags on every call override config |
 
@@ -316,20 +316,20 @@ Router-owned, NOT in the user's repo, NOT in the global `%APPDATA%\colgrep`:
 ```
 
 `COLGREP_DATA_DIR=<router>/colbert/indices` makes colgrep key the physical index
-by `xxh3(canonical_project_path | model)` (`paths.rs:84-119`) — deterministic,
+by `xxh3(canonical_project_path | model)` (`paths.rs:84-119`) - deterministic,
 collision-resistant, and (critically) **keyed by absolute workspace path**, so
 "works with ANY workspace" falls out for free: every distinct workspace gets its
 own index dir, and queries route to the right one by passing that workspace as
 the colgrep search `PATH` arg.
 
-### Staleness — DO NOT key the physical dir by commit, but DO distinguish fresh from stale
+### Staleness - DO NOT key the physical dir by commit, but DO distinguish fresh from stale
 
 colgrep does **incremental** updates: `state.json` stores per-file
 `content_hash`+`mtime`, and every `search`/`init` runs a **non-blocking**
 `try_index` that re-encodes only changed files (`search.rs:1144-1228`). Keying
 the *physical* index directory by git commit/tree hash (as Phase B's staleness
 reasoning suggested for a from-scratch index) would force a **full rebuild every
-commit** and duplicate the entire PLAID index per commit — pathological. So
+commit** and duplicate the entire PLAID index per commit - pathological. So
 **let colgrep own the physical dir (path+model keyed) and let its incremental
 updater handle file-level reconciliation.**
 
@@ -339,7 +339,7 @@ advisory notice:
 
 1. **Non-blocking update ⇒ a query can run against the OLD index.** When
    `try_index` can't get the lock (a background `init`/`search` holds it), the
-   foreground search runs against whatever's on disk — which may predate recent
+   foreground search runs against whatever's on disk - which may predate recent
    edits. Returning `status:"ready"` there is a lie.
 2. **Deletions / renames / branch switches.** colgrep's incremental update keys
    on per-file `content_hash`+`mtime`; a file deleted on disk or swapped by a
@@ -374,11 +374,11 @@ Windows-safe runner, all bounded):
   --porcelain`, capped).
 - **`fresh`** ⇔ `status:"ready"` AND current `HEAD == lastIndexedHead` AND
   neither the last index nor the current tree is dirty (or the dirty delta is
-  within colgrep's just-completed incremental update — see below). Run semantic
+  within colgrep's just-completed incremental update - see below). Run semantic
   search; return `status:"ready"`.
 - **`stale`** ⇔ `status:"ready"` but `HEAD` moved (branch switch / new commits)
   OR the working tree is dirty since the last index. Here the choice is: (a)
-  **bounded-wait** — kick a foreground incremental update with a short budget
+  **bounded-wait** - kick a foreground incremental update with a short budget
   (e.g. 3-5s) and, if it completes, serve `fresh`; or (b) if it can't get the
   lock or exceeds the budget, **degrade to lexical** with `status:"stale"` +
   a notice ("index predates current HEAD; showing lexical results"). The tool
@@ -387,7 +387,7 @@ Windows-safe runner, all bounded):
 - **`building`/`provisioning`/`absent`/`failed`** → lexical fallback (§6).
 
 Note the non-blocking `try_index` colgrep itself runs on every `search` is a
-best-effort *delta* — it helps, but the router-side freshness verdict is what
+best-effort *delta* - it helps, but the router-side freshness verdict is what
 guarantees we never *label* a stale result as fresh. A **full rebuild** (`colgrep
 clear <ws>` then `init`) is forced only when `model`/`modelRev`/`binarySha`/
 `ortSha` change (embedding dims or engine changed → index invalid).
@@ -434,16 +434,16 @@ ledger keyed by PID. On proxy exit:
   `process.kill(-pgid, SIGTERM)`) so colgrep's rayon worker children don't
   outlive the parent; `taskkill /T` already covers the tree on Windows.
 - **Per-call `finally`** kills/awaits the child it spawned (search calls are
-  bounded; a wedged search is force-killed at its timeout — see §7).
+  bounded; a wedged search is force-killed at its timeout - see §7).
 - **Boot-time sweep** (`ensurePaths`-adjacent, mirror
   `sweepStaleWorktreesAtBoot`): on startup, read `.gh-router-meta/*.json`; any
   `status:"building"` whose `buildPid` is **dead** is a crashed-build escapee →
   reset to `status:"failed"` (do NOT auto-kill: a live PID matching a stale
-  `buildPid` may be a **reused PID** belonging to an unrelated process — the
+  `buildPid` may be a **reused PID** belonging to an unrelated process - the
   boot sweep only *reclassifies metadata*, it never sends a kill to a PID from a
   prior boot). Ownership is disambiguated by `ownerInstanceId` (a per-proxy-run
   UUID, mirror the worker-agent's instance gating): only the SIGINT/SIGTERM
-  handler — which kills PIDs *this* run actually spawned and tracks in memory —
+  handler - which kills PIDs *this* run actually spawned and tracks in memory -
   ever issues a kill. Stale colgrep `.lock` files are left to colgrep's own 5s
   fs2 timeout (`paths.rs:250-276`); we never delete `.lock` ourselves (racing
   the fs2 lock is unsafe).
@@ -454,7 +454,7 @@ ledger keyed by PID. On proxy exit:
   one-shot `status:"building"` notice. colgrep also does an **atomic swap** of
   the index dir on rebuild (`index/mod.rs:2120` "Atomic swap: replace old index
   with newly built one"), so a kill mid-build leaves the *old* index intact
-  rather than a half-written one — important for the "force-kill on timeout/exit"
+  rather than a half-written one - important for the "force-kill on timeout/exit"
   path not corrupting a usable index.
 - A **crashed init** (host crash / OOM / SIGKILL) leaves `status:"building"` in
   our sidecar with a dead PID → boot sweep reclassifies; next search re-kicks
@@ -466,16 +466,16 @@ ledger keyed by PID. On proxy exit:
   the *provision* step (binary/model/ORT download) to avoid duplicate downloads.
 
 ### PID/lock/resource hygiene summary
-- **No port.** (CLI, not a server — nothing to leak on the network surface.) But
+- **No port.** (CLI, not a server - nothing to leak on the network surface.) But
   a CLI sidecar still leaks **processes, temp download dirs, partial model/ORT
-  dirs, large stdout buffers, FDs, and CPU/threadpool** if unmanaged — all of
+  dirs, large stdout buffers, FDs, and CPU/threadpool** if unmanaged - all of
   which the lifecycle + stdout cap + atomic-rename-into-versioned-dirs above
   account for.
 - **PID:** in-memory ledger (this run, the only thing ever killed) + `buildPid` +
   `ownerInstanceId` in sidecar meta for cross-process boot *reclassification*.
 - **Lock:** colgrep owns the index `.lock` (fs2, 5s timeout, self-stealing);
   github-router owns a provision lock via `withInstallLock` (`O_EXCL` +
-  mtime-based stale-stealing already built into `update-lock.ts:30-60` — so a
+  mtime-based stale-stealing already built into `update-lock.ts:30-60` - so a
   crash mid-provision doesn't wedge provisioning forever). Partial downloads land
   in a temp dir and are atomically renamed into a **versioned** artifact dir
   (`models/<name>/<rev>/`, `onnxruntime/<ver>/`) so a failed upgrade never
@@ -484,6 +484,8 @@ ledger keyed by PID. On proxy exit:
 ---
 
 ## 6. MCP tool surface
+
+*(Update: `semantic_search` is no longer a standalone tool. It has been merged into the unified `mcp__search__code` tool. The default `mode: "semantic"` transparently attempts ColBERT and falls back to lexical search if the index is unavailable, returning a `source` field indicating the engine used. The original standalone design is preserved below for historical context.)*
 
 One tool, under the existing **`search`** group (joins `code` and `web`):
 `mcp__search__semantic_search` (wire `toolNameHttp: "semantic_search"`). Shape
@@ -498,7 +500,7 @@ inputSchema: {
   required: ["query"],
   additionalProperties: false,
   properties: {
-    query:     { type: "string", description: "Natural-language intent, e.g. 'where do we validate JWT expiry' or 'retry/backoff around the upstream fetch'. Semantic — finds code by meaning even when the words don't appear literally." },
+    query:     { type: "string", description: "Natural-language intent, e.g. 'where do we validate JWT expiry' or 'retry/backoff around the upstream fetch'. Semantic - finds code by meaning even when the words don't appear literally." },
     workspace: { type: "string", description: "Absolute path to the repo/subtree to search. Defaults to the proxy launch cwd. Must be absolute." },
     limit:     { type: "integer", description: "Max results (default 15)." },
     pattern:   { type: "string", description: "Optional regex pre-filter (colgrep -e): grep first, then rank the matches semantically. Use to scope a semantic ranking to e.g. async fns." }
@@ -506,12 +508,12 @@ inputSchema: {
 }
 ```
 
-(No `alpha`/`pool-factor`/`model` knobs exposed — fixed router defaults; per the
+(No `alpha`/`pool-factor`/`model` knobs exposed - fixed router defaults; per the
 surface-minimality rule, a knob that muddies the signal without a clear "what
 would the model do with this" answer is cut. `pattern` stays because hybrid
 grep-then-rank is a genuine capability the model can act on.)
 
-### Returns (trimmed — NEVER raw colgrep JSON)
+### Returns (trimmed - NEVER raw colgrep JSON)
 
 colgrep `--json` emits `Vec<{ unit: CodeUnit, score: f32 }>` where `CodeUnit`
 (`parser/types.rs:116-155`) carries **the full source code + all 5 analysis
@@ -541,7 +543,7 @@ source + analysis layers** for every hit, which can be large. So: cap the child
 stdout buffer with a hard byte limit (reuse `MAX_STDOUT_BYTES` from
 `code-search.ts`), reject + fall back to lexical if exceeded, pass a modest
 default `-k` (15), and **never log raw colgrep stdout/stderr** (it embeds source
-code — a telemetry-leak vector). Parse failures (truncated/garbage JSON) →
+code - a telemetry-leak vector). Parse failures (truncated/garbage JSON) →
 `status:"failed"` + lexical fallback, not a throw.
 
 ### Graceful degradation (the load-bearing reliability property)
@@ -549,7 +551,7 @@ code — a telemetry-leak vector). Parse failures (truncated/garbage JSON) →
 The tool **never returns an MCP error for a missing/building/stale index.** The
 routing decision is made by a **deterministic router-side preflight**, NOT by
 parsing colgrep's stderr (string-matching "index is being built" across colgrep
-versions/locales is brittle — the critic's finding). The preflight checks, in
+versions/locales is brittle - the critic's finding). The preflight checks, in
 order, before deciding whether to spawn colgrep at all:
 
 1. **Capability/provision:** binary+model+ORT present? If not → `provisioning`,
@@ -566,19 +568,19 @@ Only when the preflight says "ready + completed-index-on-disk + fresh (or
 freshened within budget)" does the handler spawn `colgrep search`. A nonzero
 exit / unparseable output from that spawn is classified as
 `status:"failed"` + lexical fallback (with stderr **truncated and never logged
-raw**) — we never trust the exact error text.
+raw**) - we never trust the exact error text.
 
 | State | Behavior |
 |---|---|
 | `ready` (preflight: completed index on disk, fresh) | run `colgrep search --json`, return trimmed semantic hits, `source:"semantic"`, `status:"ready"` |
 | `stale` (HEAD moved / tree dirty since index) | bounded foreground incremental update (3-5s); if freshened → semantic; else lexical, `status:"stale"`, `source:"lexical"`, notice |
-| `building` (tracked `init` live, no completed index yet) | lexical `code_search` on the SAME query, `status:"building"`, `source:"lexical"`, notice ("semantic available shortly") — do NOT spawn a competing colgrep |
+| `building` (tracked `init` live, no completed index yet) | lexical `code_search` on the SAME query, `status:"building"`, `source:"lexical"`, notice ("semantic available shortly") - do NOT spawn a competing colgrep |
 | `provisioning` (binary/model/ORT not yet downloaded) | kick provision, lexical fallback now, `status:"provisioning"` |
 | `absent` (never indexed; new on-demand workspace) | kick a **debounced** background `init` (one per workspace+model), lexical fallback now, `status:"absent"` |
 | `failed` (colgrep nonzero exit / parse fail / dlopen fail) | lexical fallback, `status:"failed"`, notice with failure class (truncated) |
 
 `isError:true` is reserved for **input-shape** failures only (missing/relative
-`workspace`, empty `query`) — mirroring the `stand_in` / worker-tool invariant
+`workspace`, empty `query`) - mirroring the `stand_in` / worker-tool invariant
 that protocol-valid degradations are NOT errors.
 
 **Self-contention avoidance (critic finding #3):** the preflight's rule "if a
@@ -588,16 +590,16 @@ fighting over the lock and triggering redundant builds. On-demand `init` is
 **debounced per (workspace, model)** so repeated first-queries don't spawn N
 builders. A global cap bounds concurrent colgrep processes regardless.
 
-### Capability gate — `semanticSearchEnabled()`
+### Capability gate - `semanticSearchEnabled()`
 
 New predicate in `src/lib/mcp-capabilities.ts`, mirroring
 `browserToolsEnabled()`. Returns true iff BOTH:
 1. **Opt-in:** `--semantic-search` flag (on `start`/`claude`/`codex`) OR
    `GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1`. (Opt-in because it provisions ~60-80 MB
-   and runs a native binary — same posture as `--browse`.)
+   and runs a native binary - same posture as `--browse`.)
 2. **Platform supported:** a prebuilt colgrep asset + ORT archive exist for the
    running `platform-arch` (i.e. `manifest` has an entry). NOT gated on "already
-   downloaded" — gating on download would hide the very tool whose first call
+   downloaded" - gating on download would hide the very tool whose first call
    triggers provisioning. The pre-flight handles not-yet-downloaded by returning
    `status:"provisioning"` + lexical fallback.
 
@@ -616,7 +618,7 @@ exactly like the other capability tags. Add `"semantic_search"` to the
 
 ### Works with ANY absolute workspace
 - `workspace` is absolute-only, enforced at the MCP boundary (mirror
-  `runWorkerToolCall`'s absolute-only check) — a relative path is an `isError`
+  `runWorkerToolCall`'s absolute-only check) - a relative path is an `isError`
   input failure, never silently resolved against `process.cwd()`.
 - Pass the workspace as the colgrep search `PATH` arg; colgrep's
   `find_index_for_project` / `find_parent_index` (`paths.rs:123-214`) route to
@@ -634,14 +636,14 @@ exactly like the other capability tags. Add `"semantic_search"` to the
   modest on CPU; no GPU memory. A single search process is well under a few
   hundred MB.
 - **Wall-clock:** each `search` child gets a **hard timeout** (recommend ~30s;
-  the query encode + incremental delta should be sub-second to seconds — a 30s
+  the query encode + incremental delta should be sub-second to seconds - a 30s
   ceiling catches a pathological re-index triggered by a huge uncommitted diff).
   On timeout, force-kill (`taskkill /T /F` on Windows) and fall back to
   `code_search` with a `notice`. The `init` background build gets a generous cap
   (e.g. the worker-agent's 30-min wall-clock) and is non-blocking regardless.
 - **Inflight slot:** the `semantic_search` call acquires ONE slot from the
   shared `MAX_INFLIGHT_TOOLS_CALL=8` semaphore (`src/lib/mcp-inflight.ts`), after
-  the pre-flight, before spawn — same ordering invariant as `predictedTooLong` /
+  the pre-flight, before spawn - same ordering invariant as `predictedTooLong` /
   `ensureBridgeReady` (pre-flight BEFORE slot acquisition so a reject can't leak
   a slot). The background `init` does NOT take a slot (it's not operator
   traffic; it's provisioning).
@@ -649,15 +651,15 @@ exactly like the other capability tags. Add `"semantic_search"` to the
 ### Windows correctness (primary deployment target)
 - **The managed colgrep binary is a native `.exe`, not a `.cmd` shim**, so we do
   NOT route it through `buildExecInvocation`'s Windows `shell:true` path. That
-  path calls `quoteWinArg`, which **throws on `%`** (`exec.ts:140-146`) — and a
+  path calls `quoteWinArg`, which **throws on `%`** (`exec.ts:140-146`) - and a
   workspace path can legally contain `%` (and `&`, `(`, `)`, …). **Build
-  requirement:** add a native-executable runner to `exec.ts` — e.g.
-  `runManagedExeCapture(absExe, args, opts)` — that on Windows uses `spawn(absExe,
+  requirement:** add a native-executable runner to `exec.ts` - e.g.
+  `runManagedExeCapture(absExe, args, opts)` - that on Windows uses `spawn(absExe,
   args, { shell: false, windowsHide: true })` (CreateProcess resolves `.exe`
   directly, no cmd.exe, no metacharacter hazard, no `%` refusal) while keeping
   the timeout + `taskkill /T /F` tree-kill. POSIX is already `shell:false`. This
   is what makes "ANY workspace" actually hold on Windows.
-- **Index path on Windows:** `%LOCALAPPDATA%`-class concern is avoided — we force
+- **Index path on Windows:** `%LOCALAPPDATA%`-class concern is avoided - we force
   `COLGREP_DATA_DIR` into the router data dir (`~/.local/share/github-router`
   resolves under the user profile on Windows via `os.homedir()`), so we never
   touch the global `%APPDATA%\colgrep`.
@@ -679,27 +681,27 @@ exactly like the other capability tags. Add `"semantic_search"` to the
 
 ---
 
-## 8. Honest cost/benefit — where semantic beats lexical (and where it doesn't)
+## 8. Honest cost/benefit - where semantic beats lexical (and where it doesn't)
 
 This drives the **tool description** so the model routes queries correctly.
 
 | Query shape | Lexical `code_search` (ripgrep + BM25F + tree-sitter) | `semantic_search` (ColBERT + FTS5 + RRF) |
 |---|---|---|
 | Exact symbol: "where is `verifyJwt` defined", "callers of `Foo`" | **Use this.** Exact, sub-10ms, stateless, tree-sitter boosts defs. | No edge; slower; adds index dependency. |
-| NL intent: "auth middleware", "db connection pooling", "retry/backoff logic" | Weak when the literal words aren't in the code. | **Use this.** Genuine semantic recall over prose/intent — colgrep's published Semble NDCG@10 ≈0.85 is exactly this regime. |
+| NL intent: "auth middleware", "db connection pooling", "retry/backoff logic" | Weak when the literal words aren't in the code. | **Use this.** Genuine semantic recall over prose/intent - colgrep's published Semble NDCG@10 ≈0.85 is exactly this regime. |
 | Hybrid "regex-narrow then rank by relevance" ("async fns ranked by error handling") | Not a single op. | Native (`-e` pre-filter → semantic rank). A capability the lexical path lacks. |
 
 **Description steer (draft):** *"Semantic code search by MEANING, not text. Best
 for natural-language intent queries where the literal keywords may not appear
 ('where do we rate-limit', 'auth token refresh'). For exact symbol lookup
-('where is X defined', 'callers of Y') prefer `code` (lexical) — it's faster and
+('where is X defined', 'callers of Y') prefer `code` (lexical) - it's faster and
 exact. Returns a status field; while the index builds it transparently falls
 back to lexical results."*
 
 ### Cost ledger (be skeptical about a fresh Windows box)
 - **Build complexity:** a new `src/lib/colbert/` module (provision, index-store,
   runner, lifecycle) + manifest + one MCP tool + one gate + one `exec.ts` runner
-  + an xz path (POSIX). Moderate — but every piece has a direct precedent
+  + an xz path (POSIX). Moderate - but every piece has a direct precedent
   (toolbelt, worker-agent lifecycle, browser pre-flight, non-persona tool).
 - **Disk:** colgrep binary (single-digit-to-low-tens MB) + INT8 model ~21 MB +
   ORT dylib (~15-40 MB) + per-repo index (corpus-proportional, ~50% reduced by
@@ -707,7 +709,7 @@ back to lexical results."*
 - **First-run latency:** provision downloads (~60-80 MB over the network) + first
   full index (multi-second to minutes, CPU-bound). **This is the headline cost**
   and the reason indexing-on-start + transparent lexical fallback are
-  non-negotiable — the user must never *wait* on it.
+  non-negotiable - the user must never *wait* on it.
 - **Per-query latency:** tens-to-low-hundreds of ms on CPU vs ripgrep's <10ms.
   Acceptable for an opt-in NL-intent tool; would NOT be acceptable as the default
   `code` path (which is why we keep them separate).
@@ -717,7 +719,7 @@ back to lexical results."*
   (network, AV quarantine of an unsigned `.exe`, ORT MSVC-runtime dependency).
   **Every failure must degrade to lexical, never to an error**, and surface a
   `notice` the user/model can act on. The MSVC-runtime dependency of the ORT DLL
-  on Windows is the one external prerequisite we can't fully control — flag it in
+  on Windows is the one external prerequisite we can't fully control - flag it in
   the `notice` if dlopen fails ("ONNX Runtime failed to load; semantic search
   unavailable, using lexical").
 
@@ -729,7 +731,7 @@ Mirror `provisionToolbelt()`'s fire-and-forget call site in
 `src/start.ts` / `src/claude.ts` / `src/codex.ts` (after `setupAndServe`, like
 `runSelfUpdate`). New `provisionAndIndexColbert()`:
 
-1. Gate: `semanticSearchEnabled()` — bail if opt-out.
+1. Gate: `semanticSearchEnabled()` - bail if opt-out.
 2. Provision (binary/model/ORT) under a provision lock; best-effort, never throws
    to the launcher (toolbelt pattern).
 3. **git-repo detection** for the launch cwd: `git rev-parse --is-inside-work-tree`
@@ -737,7 +739,7 @@ Mirror `provisionToolbelt()`'s fire-and-forget call site in
    user can still trigger on-demand for any workspace via the tool).
 4. If git repo and index `absent`/`stale` → spawn a background, tracked `colgrep
    init -y --model … --force-cpu <cwd>`, register `buildPid` in sidecar meta,
-   set `status:"building"`. **Non-blocking** — the launcher proceeds; the server
+   set `status:"building"`. **Non-blocking** - the launcher proceeds; the server
    is already listening.
 5. **On-demand for non-cwd workspaces:** any `semantic_search(workspace=X)` for
    an unindexed X kicks the same background `init` and returns lexical fallback
@@ -759,12 +761,12 @@ workspace, on-demand for others, always background, never blocking launch.
 | `src/lib/colbert/lifecycle.ts` | `worker-agent/lifecycle.ts` | PID ledger, SIGINT/SIGTERM kill, boot sweep |
 | `scripts/gen-colbert-manifest.ts` | `gen-toolbelt-manifest.ts` | regenerate SHA pins |
 | **Edits (lead-owned integration files):** | | |
-| `src/lib/exec.ts` | — | add `runManagedExeCapture` (native-exe, `shell:false`, `%`-safe) |
-| `src/lib/peer-mcp-personas.ts` | — | add `semantic_search` to `NON_PERSONA_MCP_TOOLS` + `"semantic_search"` to `capability` union |
-| `src/lib/mcp-capabilities.ts` | — | add `semanticSearchEnabled()` |
-| `src/routes/mcp/handler.ts` | — | wire the capability into list/call gating |
-| `src/start.ts` / `src/claude.ts` / `src/codex.ts` | — | `--semantic-search` flag + `provisionAndIndexColbert()` call site |
-| `src/lib/toolbelt/extract.ts` | — | add `extractTarXzMember` (POSIX-only xz path) |
+| `src/lib/exec.ts` | - | add `runManagedExeCapture` (native-exe, `shell:false`, `%`-safe) |
+| `src/lib/peer-mcp-personas.ts` | - | add `semantic_search` to `NON_PERSONA_MCP_TOOLS` + `"semantic_search"` to `capability` union |
+| `src/lib/mcp-capabilities.ts` | - | add `semanticSearchEnabled()` |
+| `src/routes/mcp/handler.ts` | - | wire the capability into list/call gating |
+| `src/start.ts` / `src/claude.ts` / `src/codex.ts` | - | `--semantic-search` flag + `provisionAndIndexColbert()` call site |
+| `src/lib/toolbelt/extract.ts` | - | add `extractTarXzMember` (POSIX-only xz path) |
 
 ---
 
@@ -780,7 +782,7 @@ workspace, on-demand for others, always background, never blocking launch.
    path works via `shell:false`, (f) an INVALID `ORT_DYLIB_PATH` does NOT
    silently fall back to a network download (confirm the smoke-test guard is
    needed), (g) branch-switch + file-deletion: index a repo, `git checkout` a
-   branch that deletes a file, search — does a stale hit for the deleted symbol
+   branch that deletes a file, search - does a stale hit for the deleted symbol
    appear before/after the incremental update? (validates the §4 freshness
    verdict).
    **Then MEASURE** (the load-bearing gate): warm-query p50/p95 after a prior
@@ -788,7 +790,7 @@ workspace, on-demand for others, always background, never blocking launch.
    holds-lock, large-repo-with-existing-index, and Windows process-startup
    overhead. **Gate: if any of a-g fails, STOP. If warm p95 exceeds the agreed
    budget (propose ≤1.5s warm p95 on a mid repo), DO NOT proceed with the
-   per-invocation default — pivot to the freshness-predicate-default posture
+   per-invocation default - pivot to the freshness-predicate-default posture
    (§1) and/or pursue an upstream `serve` mode before shipping.**
 2. **Prep/download (manifest + provision).** `colbert/manifest.ts` +
    `provision.ts` + `gen-colbert-manifest.ts` + the xz extractor. SHA-pinned,
@@ -815,14 +817,14 @@ landing never regresses existing behavior.
 
 | # | Risk | Severity | Mitigation |
 |---|---|---|---|
-| 1 | **Per-query cold-start latency** — no warm process; every call re-loads ORT + builds an ONNX session + loads the model + mmaps the index (page cache does NOT eliminate session/model init) | **High** | Measured-warm-p95 GO gate in the spike (§11.1, §13.1); separate opt-in tool (never the default path); degradation routes building/stale/slow to lexical; if budget fails, pivot to freshness-predicate-default + upstream `serve` |
+| 1 | **Per-query cold-start latency** - no warm process; every call re-loads ORT + builds an ONNX session + loads the model + mmaps the index (page cache does NOT eliminate session/model init) | **High** | Measured-warm-p95 GO gate in the spike (§11.1, §13.1); separate opt-in tool (never the default path); degradation routes building/stale/slow to lexical; if budget fails, pivot to freshness-predicate-default + upstream `serve` |
 | 2 | First-run setup latency: ~60-80 MB download + minutes-long full index on a fresh box | High | Background provision + index-on-start; tool degrades to lexical with `status`/`notice`; user never waits |
 | 3 | Stale semantic hit after branch switch / file deletion (non-blocking incremental update ⇒ query can hit old index) | **High** | Router-side **freshness verdict** (§4): HEAD/dirty check → `fresh` serves semantic, `stale` does bounded-wait-then-lexical; never label possibly-deleted content as `ready` |
-| 4 | Windows `%`/metachar in workspace path breaks `quoteWinArg` | High | Native-exe `shell:false` runner (`runManagedExeCapture`) — colgrep is a real `.exe`, bypass cmd.exe; tested against the path-edge matrix (§7) |
+| 4 | Windows `%`/metachar in workspace path breaks `quoteWinArg` | High | Native-exe `shell:false` runner (`runManagedExeCapture`) - colgrep is a real `.exe`, bypass cmd.exe; tested against the path-edge matrix (§7) |
 | 5 | colgrep does NO checksum on its own ORT/model downloads; an invalid `ORT_DYLIB_PATH` silently re-triggers its download | High | Pre-supply both SHA-pinned via `ORT_DYLIB_PATH` + `--model <local-dir>`; **post-provision smoke test** (§3c) confirms the handoff before advertising `ready` |
 | 6 | Brittle fallback classification (stderr string-match across colgrep versions) | Med | Deterministic router-side **preflight** (§6) decides routing from on-disk index markers + router state, NOT colgrep stderr; unknown spawn failures → `failed` + lexical |
 | 7 | ORT DLL needs MSVC runtime / dependent DLLs on a bare box; dlopen fails | Med | Smoke test detects it; co-locate ORT files + PATH-prepend their dir; degrade to lexical + actionable `notice` |
-| 8 | `.tar.xz` not decodable by Node `zlib` (macOS/Linux assets) | Med | xz path (pure-JS or system `tar`); Windows (`.zip`) unaffected — primary target safe |
+| 8 | `.tar.xz` not decodable by Node `zlib` (macOS/Linux assets) | Med | xz path (pure-JS or system `tar`); Windows (`.zip`) unaffected - primary target safe |
 | 9 | Orphaned `colgrep init` + rayon children after host crash | Med | `buildPid`+`ownerInstanceId` boot **reclassify** (never kill a reused PID from a prior boot); POSIX process-group kill + Windows `taskkill /T` for THIS run's children |
 | 10 | Self-contention: start-up `init` vs immediate user query fighting the lock; repeated first-queries spawning N builders | Med | Preflight skips foreground colgrep while a tracked `init` is live / no completed index; on-demand `init` **debounced** per (workspace,model); global concurrent-colgrep cap |
 | 11 | Full index per commit (if mis-keyed) | Med | Do NOT key physical dir by commit; rely on colgrep incremental updater; commit drives freshness verdict only |
@@ -837,8 +839,8 @@ landing never regresses existing behavior.
 
 ## 13. GO / NO-GO
 
-**GO, with conditions.** The original NO-GO rested on three objections —
-persistent index, model download, native ONNX — all of which the user's opt-in
+**GO, with conditions.** The original NO-GO rested on three objections -
+persistent index, model download, native ONNX - all of which the user's opt-in
 converts into github-router responsibilities the existing patterns already
 discharge (toolbelt provision, worker-agent lifecycle, browser pre-flight). The
 investigation found that colgrep exposes **every** control surface we need as a
@@ -850,18 +852,18 @@ the lifecycle *simpler* than the browser bridge, not harder.
 
 **Conditions (must hold or downgrade to NO-GO):**
 1. **Spike phase passes a-g AND meets the warm-latency budget** (§11.1) on
-   Windows AND macOS — especially the `--model <local-dir>` / `ORT_DYLIB_PATH`
+   Windows AND macOS - especially the `--model <local-dir>` / `ORT_DYLIB_PATH`
    bypass, the `%`-in-path `shell:false` spawn, and the branch-switch/deletion
    freshness check. If colgrep ignores the local-dir or env handoffs, the
    no-unverified-download guarantee breaks → NO-GO. **If warm p95 exceeds the
-   agreed budget, the per-invocation default is NO-GO** — pivot to
+   agreed budget, the per-invocation default is NO-GO** - pivot to
    freshness-predicate-default and/or an upstream `serve` mode before shipping.
 2. **Tool NEVER errors on missing/building/stale index, and NEVER labels a stale
-   result `ready`** — lexical fallback + an honest `status`/`source`/freshness
+   result `ready`** - lexical fallback + an honest `status`/`source`/freshness
    verdict is mandatory. A version that 500s on a not-ready index, OR returns
    possibly-deleted-content semantic hits as `ready` after a branch switch, fails
    the "works reliably with ANY workspace" requirement.
-3. **Off by default** (`--semantic-search` opt-in) and **never blocks launch** —
+3. **Off by default** (`--semantic-search` opt-in) and **never blocks launch** -
    provision/index are background, best-effort, swallow-to-log.
 4. **`windows-latest` CI** green on a provision→init→search→fallback round-trip
    before merge (primary-target gate per CLAUDE.md).
@@ -871,7 +873,7 @@ that complements (never replaces) the lexical `code` tool.
 
 ---
 
-## Appendix — primary-source citations
+## Appendix - primary-source citations
 
 - No daemon: `colgrep/src/cli.rs:452-719` (command set) + whole-crate scan for
   server/listener keywords (only incidental hits).
