@@ -48,9 +48,16 @@ import {
 } from "./provision"
 import { PATHS } from "../paths"
 
-/** Hard per-search timeout. The encode + incremental delta is sub-second
- * to seconds; 30s catches a pathological re-index on a huge diff. */
-const SEARCH_TIMEOUT_MS = 30_000
+/** Caller responsiveness budget for a search. A warm search is sub-second;
+ * if colgrep instead starts a foreground auto-index / reconcile (its index is
+ * behind) and hasn't returned results by this point, the search DETACHES —
+ * the caller gets a `building` fallback now and the colgrep child finishes
+ * the index in the background (never killed mid-write — that would orphan
+ * docs and desync the index). The next query is then fast. */
+const SEARCH_RESPOND_MS = envIntMs(
+  "GH_ROUTER_COLBERT_SEARCH_RESPOND_MS",
+  20_000,
+)
 /** Inactivity (stall) watchdog for the background init: if the colgrep
  * index dir stops growing for this long, the build is hung → kill it. This
  * is the PRIMARY "stuck vs slow" signal — a build that keeps writing shards
@@ -83,6 +90,44 @@ function envIntMs(name: string, fallback: number): number {
   if (raw === undefined) return fallback
   const n = Number(raw)
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback
+}
+
+/**
+ * A progress probe for the inactivity watchdog: returns `false` (→ kill)
+ * only when colgrep's index dir for `workspace` has stopped growing. colgrep
+ * is SILENT on a non-TTY pipe during the encode, so disk growth — not output
+ * — is the progress signal. `null` (dir not found yet) gets one window of
+ * grace, then counts as no-progress (a build/search hung before it ever
+ * wrote anything). Shared by BOTH the background init and the foreground
+ * search so neither colgrep child is killed mid-write (which orphans docs).
+ */
+export function makeIndexProgressProbe(workspace: string): () => boolean {
+  let lastSig: string | null | undefined
+  let nullStreak = 0
+  return () => {
+    const sig = indexDirSignature(workspace)
+    if (sig === null) {
+      nullStreak += 1
+      return nullStreak <= 1
+    }
+    nullStreak = 0
+    const prev = lastSig
+    lastSig = sig
+    if (prev === undefined) return true // first measurement → baseline
+    return sig !== prev // progressing iff the signature changed
+  }
+}
+
+/** Workspaces with a DETACHED indexing search in flight. A new search for
+ * such a workspace returns `building` instead of spawning a concurrent
+ * colgrep that could collide on the index write — serving the same "one
+ * colgrep writer per workspace" goal as the init debounce. Cleared when the
+ * detached search completes. */
+const _searchIndexInFlight = new Set<string>()
+
+/** Test-only: clear the detached-search in-flight set. */
+export function __resetSearchInFlightForTests(): void {
+  _searchIndexInFlight.clear()
 }
 
 export type SemanticStatus =
@@ -330,15 +375,94 @@ async function spawnSearch(opts: {
   if (opts.pattern) args.push("-e", opts.pattern)
   args.push(opts.query, opts.workspace)
 
-  let res
+  const wsKey = path.resolve(opts.workspace)
+  if (_searchIndexInFlight.has(wsKey)) {
+    // Conservative per-workspace guard: only ONE colgrep search runs per
+    // workspace at a time. colgrep auto-indexes/reconciles during a search
+    // (no read-only flag), and two concurrent searches that both reconcile
+    // would be unsynchronized writers — so we serialize rather than risk it.
+    // The lock is held only while the search runs (sub-second for a warm
+    // read; until the background index completes for a detached one), so a
+    // SEQUENTIAL search pattern never contends — only a simultaneous batch on
+    // the same workspace, where the losers get an immediate lexical fallback.
+    return {
+      status: "building",
+      notice:
+        "semantic index is busy (another search is running); retry shortly",
+    }
+  }
+  _searchIndexInFlight.add(wsKey)
+
+  // Run colgrep under the GENEROUS (build-grade) watchdog: a search that
+  // triggers a foreground auto-index / reconcile is NEVER killed mid-write
+  // (that orphans docs and desyncs the index) — only a genuinely hung one is,
+  // after INIT_STALL_MS of no progress (no output AND no index-dir growth).
+  // INIT_TIMEOUT_MS is a pure runaway backstop. The CALLER doesn't wait this
+  // long — see the responsiveness race below.
+  let searchPromise: ReturnType<typeof runManagedExeCapture>
   try {
-    res = await runManagedExeCapture(binary, args, {
+    searchPromise = runManagedExeCapture(binary, args, {
       env: colgrepEnv(),
-      timeoutMs: SEARCH_TIMEOUT_MS,
+      inactivityTimeoutMs: INIT_STALL_MS,
+      onInactivityCheck: makeIndexProgressProbe(opts.workspace),
+      timeoutMs: INIT_TIMEOUT_MS,
       maxStdoutBytes: MAX_STDOUT_BYTES,
+      // Byte-cap TRUNCATES (stops capturing) instead of killing — a huge
+      // result must never tree-kill colgrep, which (post-index) is a non-hang
+      // kill path that could interrupt a write. The child drains to completion.
+      truncateInsteadOfKill: true,
       onSpawn: trackChild,
     })
   } catch {
+    // Synchronous failure before a promise existed → release the lock now
+    // (the .finally below never got attached).
+    _searchIndexInFlight.delete(wsKey)
+    consola.debug("colbert: search failed to launch")
+    return {
+      status: "failed",
+      isError: true,
+      notice: "semantic search failed to launch; use code_search",
+    }
+  }
+  // Release the workspace lock when the colgrep child actually exits — covers
+  // a fast read (sub-second), a detached background index (much later), AND
+  // every async failure path. The lock outlives the responsiveness race below.
+  void searchPromise
+    .catch(() => undefined)
+    .finally(() => _searchIndexInFlight.delete(wsKey))
+
+  // A warm search resolves in <1s; only a slow foreground-indexing search hits
+  // the responsiveness deadline. The timer is cleared on a fast win so rapid
+  // searches don't accumulate live timeouts.
+  let respondTimer: ReturnType<typeof setTimeout> | undefined
+  const slow = new Promise<{ kind: "slow" }>((resolve) => {
+    respondTimer = setTimeout(() => resolve({ kind: "slow" }), SEARCH_RESPOND_MS)
+    respondTimer.unref?.()
+  })
+  const raced = await Promise.race([
+    searchPromise.then(
+      (res) => ({ kind: "done" as const, res }),
+      (err) => ({ kind: "error" as const, err }),
+    ),
+    slow,
+  ])
+  if (respondTimer) clearTimeout(respondTimer)
+
+  if (raced.kind === "slow") {
+    // colgrep is foreground-indexing / reconciling. DETACH: let it finish in
+    // the background (the generous watchdog reaps only a true hang, never a
+    // mid-write kill; the workspace lock above stays held until it exits, so
+    // no concurrent search collides), and return a fallback now so the caller
+    // never hangs. The next query is fast once the index settles.
+    consola.debug(`colbert: search detached (indexing) for ${opts.workspace}`)
+    return {
+      status: "building",
+      notice:
+        'semantic index is updating in the background; retry mode:"semantic" shortly',
+    }
+  }
+
+  if (raced.kind === "error") {
     consola.debug("colbert: search failed to launch")
     return {
       status: "failed",
@@ -347,8 +471,11 @@ async function spawnSearch(opts: {
     }
   }
 
-  if (res.timedOut) {
-    consola.debug(`colbert: search timed out (>${SEARCH_TIMEOUT_MS}ms)`)
+  const res = raced.res
+  if (res.timedOut || res.stalled) {
+    consola.debug(
+      `colbert: search ${res.stalled ? "stalled (hung, no progress)" : "hit the runaway backstop"}`,
+    )
     return {
       status: "failed",
       isError: true,
@@ -563,23 +690,12 @@ async function runInit(workspace: string): Promise<void> {
   // signature ⇒ hung ⇒ killed (stalled). `null` (dir not found yet) is
   // inconclusive → don't kill (the absolute timeout backstop covers a build
   // that never writes anything).
-  let lastSig: string | null | undefined
-  let nullStreak = 0
-  const onInactivityCheck = (): boolean => {
-    const sig = indexDirSignature(workspace)
-    if (sig === null) {
-      // No index dir yet. colgrep creates it within seconds of starting, so
-      // `null` past the FIRST stall window means it hung before writing
-      // anything (e.g. wedged at model load) → one window of grace, then stuck.
-      nullStreak += 1
-      return nullStreak <= 1
-    }
-    nullStreak = 0
-    const prev = lastSig
-    lastSig = sig
-    if (prev === undefined) return true // first measurement → baseline
-    return sig !== prev // progressing iff the signature changed
-  }
+  // Disk-growth progress probe (shared with the search path): colgrep is
+  // SILENT on a non-TTY pipe during the (possibly multi-hour) encode, so
+  // output can't signal progress — but it writes index shards incrementally.
+  // The probe re-arms the inactivity watchdog while the index dir grows; a
+  // frozen signature ⇒ hung ⇒ killed (stalled).
+  const onInactivityCheck = makeIndexProgressProbe(workspace)
 
   const startMs = Date.now()
   let ok = false

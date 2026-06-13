@@ -330,6 +330,15 @@ export interface ManagedExeOpts extends RunOpts {
    */
   maxStdoutBytes?: number
   /**
+   * When true, exceeding `maxStdoutBytes` does NOT tree-kill the child — it
+   * sets `stdoutTruncated` and stops BUFFERING further stdout while still
+   * draining the pipe (no backpressure). Use for a child whose kill is unsafe
+   * (e.g. colgrep, which writes a non-atomic index — a byte-cap kill during
+   * its result output could interrupt a write). The child runs to completion
+   * (bounded by `timeoutMs` / `inactivityTimeoutMs`). Default false (kill).
+   */
+  truncateInsteadOfKill?: boolean
+  /**
    * Called synchronously with the spawned child right after spawn
    * succeeds, BEFORE any output arrives. The colbert lifecycle ledger
    * uses this to register the child so a session-exit sweep can
@@ -490,7 +499,12 @@ export function runManagedExeCapture(
         opts.maxStdoutBytes !== undefined &&
         stdoutBytes > opts.maxStdoutBytes
       ) {
-        terminate("truncate")
+        stdoutTruncated = true
+        // Default: tree-kill on overflow. Opt-in: keep the child alive and
+        // just stop buffering (the data handler keeps firing + discarding via
+        // the `if (stdoutTruncated) return` guard above, so the pipe drains
+        // and the child never blocks on a full buffer).
+        if (!opts.truncateInsteadOfKill) terminate("truncate")
         return
       }
       chunks.push(c)

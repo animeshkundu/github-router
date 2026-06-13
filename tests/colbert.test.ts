@@ -16,6 +16,7 @@
 
 import { afterEach, describe, expect, mock, test } from "bun:test"
 import fs from "node:fs/promises"
+import fsSync from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
@@ -340,6 +341,47 @@ describe("index-store: meta keying + freshness verdict", () => {
 // ---------------------------------------------------------------------
 // Runner — no-fallback status envelopes
 // ---------------------------------------------------------------------
+
+describe("index progress probe (shared init/search stall signal)", () => {
+  test("indexDirSignature + makeIndexProgressProbe: progress vs frozen vs null grace", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    const { makeIndexProgressProbe } = await import("../src/lib/colbert/runner")
+    const { PATHS } = await import("../src/lib/paths")
+
+    // Unknown workspace → no project dir → null signature → one window of
+    // grace (true), then no-progress (false).
+    const unknown = path.join(TEST_HOME, "probe-unknown")
+    fsSync.mkdirSync(unknown, { recursive: true })
+    expect(store.indexDirSignature(unknown)).toBeNull()
+    const pUnknown = makeIndexProgressProbe(unknown)
+    expect(pUnknown()).toBe(true) // null grace #1
+    expect(pUnknown()).toBe(false) // null streak → stuck
+
+    // A real colgrep-style project dir whose project.json points at `ws`.
+    const ws = path.join(TEST_HOME, "probe-ws")
+    fsSync.mkdirSync(ws, { recursive: true })
+    const projDir = path.join(PATHS.COLBERT_INDICES_DIR, "probe-proj")
+    fsSync.mkdirSync(path.join(projDir, "index"), { recursive: true })
+    fsSync.writeFileSync(
+      path.join(projDir, "project.json"),
+      JSON.stringify({ path: ws }),
+    )
+    fsSync.writeFileSync(path.join(projDir, "index", "a"), "x".repeat(10))
+
+    const sig1 = store.indexDirSignature(ws)
+    expect(sig1).not.toBeNull()
+
+    const probe = makeIndexProgressProbe(ws)
+    expect(probe()).toBe(true) // baseline
+    // No change since baseline → frozen → no progress.
+    expect(probe()).toBe(false)
+    // Grow the index dir → progressing again.
+    fsSync.writeFileSync(path.join(projDir, "index", "b"), "y".repeat(100))
+    expect(probe()).toBe(true)
+    // Frozen again.
+    expect(probe()).toBe(false)
+  })
+})
 
 describe("runSemanticSearch: no-fallback contract", () => {
   test("absent workspace → unavailable isError (no other search run)", async () => {

@@ -113,9 +113,23 @@ is steered to use the right lever rather than fed noisy OR-matches.
 colgrep is CLI-per-invocation (no daemon), so the lifecycle is process
 tracking + cancellation + boot/exit sweep, not keep-alive:
 
-- Each `search` child has a hard 30s timeout and a stdout byte cap; on
-  expiry it is tree-killed (`taskkill /T /F` on Windows, POSIX
-  process-group kill so colgrep's rayon workers die too).
+- A `search` NEVER kills colgrep mid-write. colgrep auto-indexes /
+  reconciles during a search when its index is behind (it has no read-only
+  flag), and killing that mid-write **orphans index docs** (a DB↔index desync
+  that every later search then re-triggers — the original corruption bug). So
+  a search runs colgrep under the build-grade watchdog (only a truly hung
+  child — no output AND no index-dir growth for `INIT_STALL_MS` — is reaped;
+  `INIT_TIMEOUT_MS` is a pure runaway backstop), and the byte cap TRUNCATES
+  rather than kills (a huge result must not tree-kill a non-atomic colgrep).
+  The CALLER never waits that long: if the search hasn't returned results
+  within `GH_ROUTER_COLBERT_SEARCH_RESPOND_MS` (default 20s) it **detaches** —
+  returns a `building` fallback now and lets the colgrep child finish the
+  index in the background (tracked, never killed mid-write). The next query is
+  then fast. A per-workspace lock serializes searches (held from spawn until
+  the colgrep child exits) so two concurrent searches can't both reconcile as
+  unsynchronized writers; a SEQUENTIAL search pattern never contends, only a
+  simultaneous batch on the same workspace (where the losers get an immediate
+  lexical fallback + can retry). A warm search is sub-second → `semantic`.
 - An in-memory PID ledger holds this run's live children; SIGINT /
   SIGTERM / exit tree-kills them.
 - A boot-time sweep reclassifies any `building` metadata entry whose

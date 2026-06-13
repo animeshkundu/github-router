@@ -211,4 +211,24 @@ describe("runManagedExeCapture — inactivity watchdog", () => {
     expect(res.timedOut).toBe(true)
     expect(res.stalled).toBe(false)
   }, 15_000)
+
+  test("byte cap: default kills; truncateInsteadOfKill drains + completes", async () => {
+    // Emit 1KB every 20ms for 30 ticks (~600ms), then exit 0. With a 4KB cap
+    // the overflow lands mid-run (~5 ticks) while the child is still alive.
+    const bigScript =
+      'let i=0;const t=setInterval(()=>{if(i++>=30){clearInterval(t);process.exit(0)}' +
+      'else process.stdout.write("x".repeat(1000))},20)'
+    const killed = await runManagedExeCapture(node, ["-e", bigScript], {
+      maxStdoutBytes: 4096,
+    })
+    expect(killed.stdoutTruncated).toBe(true)
+    expect(killed.code).not.toBe(0) // tree-killed mid-output
+
+    const drained = await runManagedExeCapture(node, ["-e", bigScript], {
+      maxStdoutBytes: 4096,
+      truncateInsteadOfKill: true,
+    })
+    expect(drained.stdoutTruncated).toBe(true)
+    expect(drained.code).toBe(0) // ran to completion, never killed
+  }, 15_000)
 })
