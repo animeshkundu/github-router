@@ -108,15 +108,58 @@ const TOOLS: ToolGen[] = [
     archive: () => "zip",
   },
   {
-    command: "tokei",
-    repo: "XAMPPRocky/tokei",
+    // scc: code stats (LOC + complexity). Bundlable substitute for tokei,
+    // which stopped attaching prebuilt binaries to its GitHub releases
+    // (every release since 2024 has 0 assets). tokei stays allowed in the
+    // worker `toolbelt` tool opportunistically (runs if system-installed).
+    command: "scc",
+    repo: "boyter/scc",
+    match: (pa) => {
+      const m: Record<PA, string | null> = {
+        "win32-x64": "scc_Windows_x86_64\\.zip",
+        "win32-arm64": "scc_Windows_arm64\\.zip",
+        "darwin-x64": "scc_Darwin_x86_64\\.tar\\.gz",
+        "darwin-arm64": "scc_Darwin_arm64\\.tar\\.gz",
+        "linux-x64": "scc_Linux_x86_64\\.tar\\.gz",
+        "linux-arm64": "scc_Linux_arm64\\.tar\\.gz",
+      }
+      const f = m[pa]
+      return f ? new RegExp(`^${f}$`) : null
+    },
+    archive: (pa) => (pa.startsWith("win32") ? "zip" : "tar.gz"),
+  },
+  {
+    // difftastic: structural diffs an LLM can reason about. Binary is `difft`.
+    command: "difftastic",
+    repo: "Wilfred/difftastic",
     match: (pa) => {
       const t = rustTripleGnu[pa]
       if (!t) return null
-      const ext = pa.startsWith("win32") ? "exe" : "tar\\.gz"
-      return new RegExp(`^tokei-${t}\\.${ext}$`)
+      const ext = pa.startsWith("win32") ? "zip" : "tar\\.gz"
+      return new RegExp(`^difft-${t}\\.${ext}$`)
     },
-    archive: (pa) => (pa.startsWith("win32") ? "raw" : "tar.gz"),
+    archive: (pa) => (pa.startsWith("win32") ? "zip" : "tar.gz"),
+  },
+  {
+    // gron: flatten JSON to greppable lines. Go-style asset naming;
+    // non-Windows assets are `.tgz` (gzipped tar → archive "tar.gz").
+    command: "gron",
+    repo: "tomnomnom/gron",
+    match: (pa) => {
+      const osArch: Record<PA, string | null> = {
+        "win32-x64": "windows-amd64",
+        "win32-arm64": "windows-arm64",
+        "darwin-x64": "darwin-amd64",
+        "darwin-arm64": "darwin-arm64",
+        "linux-x64": "linux-amd64",
+        "linux-arm64": "linux-arm64",
+      }
+      const oa = osArch[pa]
+      if (!oa) return null
+      const ext = pa.startsWith("win32") ? "zip" : "tgz"
+      return new RegExp(`^gron-${oa}-[\\d.]+\\.${ext}$`)
+    },
+    archive: (pa) => (pa.startsWith("win32") ? "zip" : "tar.gz"),
   },
 ]
 
@@ -143,7 +186,16 @@ async function sha256(url: string): Promise<string> {
 
 const out: Record<string, { command: string; archive: Record<string, ArchiveKind>; assets: Record<string, { url: string; sha256: string; archive: ArchiveKind }> }> = {}
 
+// Optional `--only <csv>` filter to re-pin just a subset (cheaper than
+// re-downloading every tool's assets across all platforms).
+const onlyIdx = process.argv.indexOf("--only")
+const onlyFilter =
+  onlyIdx >= 0 && process.argv[onlyIdx + 1]
+    ? new Set(process.argv[onlyIdx + 1]!.split(","))
+    : null
+
 for (const tool of TOOLS) {
+  if (onlyFilter && !onlyFilter.has(tool.command)) continue
   const { tag, assets } = await ghLatest(tool.repo)
   console.error(`# ${tool.command} ${tag} (${assets.length} assets)`)
   out[tool.command] = { command: tool.command, archive: {}, assets: {} }

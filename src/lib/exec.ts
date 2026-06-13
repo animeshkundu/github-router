@@ -330,17 +330,45 @@ export interface ManagedExeOpts extends RunOpts {
    */
   maxStdoutBytes?: number
   /**
+   * When true, exceeding `maxStdoutBytes` does NOT tree-kill the child — it
+   * sets `stdoutTruncated` and stops BUFFERING further stdout while still
+   * draining the pipe (no backpressure). Use for a child whose kill is unsafe
+   * (e.g. colgrep, which writes a non-atomic index — a byte-cap kill during
+   * its result output could interrupt a write). The child runs to completion
+   * (bounded by `timeoutMs` / `inactivityTimeoutMs`). Default false (kill).
+   */
+  truncateInsteadOfKill?: boolean
+  /**
    * Called synchronously with the spawned child right after spawn
    * succeeds, BEFORE any output arrives. The colbert lifecycle ledger
    * uses this to register the child so a session-exit sweep can
    * tree-kill an orphan. Never throws into the runner.
    */
   onSpawn?: (child: ReturnType<typeof spawn>) => void
+  /**
+   * Inactivity (stall) watchdog. When set, a timer is armed for
+   * `inactivityTimeoutMs` and RESET on every stdout/stderr data chunk. On
+   * expiry (no output for the window) it consults `onInactivityCheck`: a
+   * `true` return means "still making progress via an out-of-band signal"
+   * (e.g. the colgrep index dir is still growing on disk even though the
+   * process is silent on a non-TTY pipe) and the watchdog re-arms; a
+   * `false`/absent return tree-kills the child and sets `stalled: true`.
+   * This is the progress-based "stuck" detector that lets a long-but-
+   * progressing build run to completion while still killing a hung one —
+   * independent of the coarse total `timeoutMs` backstop.
+   */
+  inactivityTimeoutMs?: number
+  /** External progress probe consulted when the inactivity timer fires.
+   * Return `true` to re-arm (still progressing), `false`/throw to kill.
+   * MUST be cheap + synchronous (called on a timer, not awaited). */
+  onInactivityCheck?: () => boolean
 }
 
 export interface ManagedExeResult extends RunResult {
   /** True iff stdout was truncated at `maxStdoutBytes` (child was killed). */
   stdoutTruncated: boolean
+  /** True iff the inactivity watchdog killed the child (no progress). */
+  stalled: boolean
 }
 
 /**
@@ -406,19 +434,65 @@ export function runManagedExeCapture(
     const STDERR_CAP = 64 * 1024
     let timedOut = false
     let stdoutTruncated = false
+    let stalled = false
     let settled = false
 
-    const killNow = (): void => killManagedTree(child, isWin)
+    // Exactly one terminator wins: the first to fire records its reason and
+    // tree-kills; later ones no-op. Keeps timedOut / stalled / stdoutTruncated
+    // mutually exclusive and avoids a double tree-kill.
+    let terminated = false
+    const terminate = (reason: "timeout" | "stall" | "truncate"): void => {
+      if (terminated) return
+      terminated = true
+      if (reason === "timeout") timedOut = true
+      else if (reason === "stall") stalled = true
+      else stdoutTruncated = true
+      if (timer) clearTimeout(timer)
+      if (inactivityTimer) clearTimeout(inactivityTimer)
+      killManagedTree(child, isWin)
+    }
 
     const timer = opts.timeoutMs
-      ? setTimeout(() => {
-          timedOut = true
-          killNow()
-        }, opts.timeoutMs)
+      ? setTimeout(() => terminate("timeout"), opts.timeoutMs)
       : undefined
     timer?.unref?.()
 
+    // Inactivity (stall) watchdog. Re-arms itself: when the window elapses
+    // with no output, consult the external progress probe — re-arm if it
+    // says "still progressing" (e.g. the index dir grew), else kill + mark
+    // stalled. Reset on every data chunk (a chatty process never stalls).
+    let inactivityTimer: ReturnType<typeof setTimeout> | undefined
+    const armInactivity = (): void => {
+      if (opts.inactivityTimeoutMs === undefined || settled || terminated) return
+      inactivityTimer = setTimeout(() => {
+        if (settled) return
+        // No probe → pure output-inactivity kill. A probe that THROWS is
+        // inconclusive → don't kill (re-arm); the absolute timeoutMs backstop
+        // still catches a genuinely wedged process.
+        let progressing = false
+        if (opts.onInactivityCheck) {
+          try {
+            progressing = opts.onInactivityCheck() === true
+          } catch {
+            progressing = true
+          }
+        }
+        if (progressing) {
+          armInactivity()
+          return
+        }
+        terminate("stall")
+      }, opts.inactivityTimeoutMs)
+      inactivityTimer?.unref?.()
+    }
+    const resetInactivity = (): void => {
+      if (inactivityTimer) clearTimeout(inactivityTimer)
+      armInactivity()
+    }
+    armInactivity()
+
     child.stdout?.on("data", (c: Buffer) => {
+      resetInactivity()
       if (stdoutTruncated) return
       stdoutBytes += c.length
       if (
@@ -426,12 +500,17 @@ export function runManagedExeCapture(
         stdoutBytes > opts.maxStdoutBytes
       ) {
         stdoutTruncated = true
-        killNow()
+        // Default: tree-kill on overflow. Opt-in: keep the child alive and
+        // just stop buffering (the data handler keeps firing + discarding via
+        // the `if (stdoutTruncated) return` guard above, so the pipe drains
+        // and the child never blocks on a full buffer).
+        if (!opts.truncateInsteadOfKill) terminate("truncate")
         return
       }
       chunks.push(c)
     })
     child.stderr?.on("data", (c: Buffer) => {
+      resetInactivity()
       // Hard byte cap on stderr — append only the slice that fits so a
       // single huge chunk can't overshoot. Never logged raw (it can
       // embed source code from colgrep).
@@ -448,12 +527,14 @@ export function runManagedExeCapture(
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
+      if (inactivityTimer) clearTimeout(inactivityTimer)
       resolve({
         stdout: Buffer.concat(chunks).toString("utf8"),
         stderr: Buffer.concat(stderrChunks).toString("utf8"),
         code,
         timedOut,
         stdoutTruncated,
+        stalled,
       })
     }
 
@@ -461,6 +542,7 @@ export function runManagedExeCapture(
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
+      if (inactivityTimer) clearTimeout(inactivityTimer)
       reject(err)
     })
     child.on("close", (code) => finish(code))

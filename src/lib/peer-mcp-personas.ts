@@ -23,8 +23,7 @@
 
 import path from "node:path"
 
-import { searchCode } from "./code-search"
-import { runSemanticSearch } from "./colbert/runner"
+import { runUnifiedCodeSearch } from "./unified-code-search"
 // Static import is safe: the previous module-init cycle (peer-mcp-personas
 // → worker-agent/index → engine → tools → peer-mcp-personas) was caused
 // by a top-level `assertCriticsMatchPersonas()` call in tools.ts that
@@ -517,7 +516,6 @@ export function buildPeerAwarenessSnippet(opts: {
   geminiAvailable: boolean
   workerToolsAvailable: boolean
   standInAvailable: boolean
-  semanticSearchAvailable?: boolean
   browseAvailable: boolean
   powerBrowseAvailable?: boolean
   /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
@@ -552,7 +550,7 @@ export function buildPeerAwarenessSnippet(opts: {
   // appear when their gate is on, so the snippet never names a tool
   // missing from the live tools/list.
   const para2Parts: Array<string> = [
-    `\`mcp__${searchKey}__code\` returns ranked code-discovery hits (BM25F + tree-sitter ranking, no additional model call) and is the one-stop code search: \`complete\` for the exhaustive match set, \`ast_pattern\`+\`ast_lang\` for multi-line AST structures (via ast-grep), \`scan\` for a whole-workspace symbol outline, \`multiline\` for cross-line regex. Multiple independent queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, \`.csv\`, \`.env*\`, config-only wiring), \`grep\`/\`glob\` still apply.`,
+    `\`mcp__${searchKey}__code\` is the one-stop code search (no extra model call). Its DEFAULT mode (or \`mode:"semantic"\`) ranks by MEANING via ColBERT over a per-workspace index, the first thing to reach for on intent/concept questions ("where is retry/backoff handled", "how does auth work"); when that index isn't ready it transparently falls back to lexical (the response \`source\` says which engine ran). Forced modes cover the rest: \`lexical\` (BM25F-ranked + tree-sitter, best for exact symbols), \`exact\`, \`regex\`, \`complete\` for the exhaustive match set, \`ast_pattern\`+\`ast_lang\` for multi-line AST structures (via ast-grep), \`scan\` for a whole-workspace symbol outline, \`multiline\` for cross-line regex. Multiple independent queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, \`.csv\`, \`.env*\`, config-only wiring), \`grep\`/\`glob\` still apply.`,
   ]
   if (opts.workerToolsAvailable) {
     para2Parts.push(
@@ -565,11 +563,6 @@ export function buildPeerAwarenessSnippet(opts: {
   para2Parts.push(
     `\`mcp__${searchKey}__web\` surfaces citable sources for docs, errors, and upstream issues.`,
   )
-  if (opts.semanticSearchAvailable) {
-    para2Parts.push(
-      `\`mcp__${searchKey}__semantic_search\` is ColBERT semantic code search over a per-workspace index and is the first search to try for intent/concept questions ("where is retry/backoff handled", "how does auth work") that a lexical \`code\`/grep search would miss; reserve lexical \`code\`/grep for exact symbols/strings. It returns honest \`building\`/\`stale\`/\`unavailable\` notices and never silently falls back to lexical.`,
-    )
-  }
   if (opts.standInAvailable) {
     para2Parts.push(
       `\`mcp__${decideKey}__stand_in\` provides three-lab consensus for decision tiebreak when the user is unavailable.`,
@@ -644,10 +637,12 @@ export interface NonPersonaMcpTool {
    * Optional capability tag the handler uses to drop the tool from
    * `tools/list` and `tools/call` when the runtime gate is off.
    *
-   * - `"worker"` (worker_explore / worker_implement) requires Copilot's
-   *   `gemini-3.1-pro-preview` to be in the live catalog with `tool_calls`
-   *   support AND `GH_ROUTER_DISABLE_WORKER_TOOLS=1` to be unset
-   *   (see `workerToolsEnabled()` in `routes/mcp/handler.ts`).
+   * - `"worker"` (explore / review / implement) requires Copilot's
+   *   `gemini-3.5-flash` (the worker default) to be in the live catalog
+   *   with `tool_calls` support AND `GH_ROUTER_DISABLE_WORKER_TOOLS=1` to
+   *   be unset (see `workerToolsEnabled()`). implement's `gpt-5.5` default
+   *   is not gated here — if absent, implement calls return a helpful
+   *   resolve error.
    * - `"stand_in"` requires all three of `gpt-5.5`, `claude-opus-4-7`,
    *   and a `gemini-3.X.*pro` model to be in the live catalog (see
    *   `standInToolEnabled()` in `routes/mcp/handler.ts`).
@@ -679,7 +674,7 @@ export interface NonPersonaMcpTool {
    * once the proxy is in claude mode (loopback + nonce already gate
    * `/mcp` itself).
    */
-  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "browse_agent" | "semantic_search"
+  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "browse_agent"
   /**
    * Server-side handler. Receives the raw `arguments` object from the
    * `tools/call` request and an optional AbortSignal that is signalled
@@ -781,34 +776,48 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       },
     },
     {
-      // code_search — proxy-side MCP tool exposing ripgrep + BM25F +
-      // tree-sitter structural-aware ranking to all clients (Claude
-      // Code, codex, gemini callers). Implementation: src/lib/code-search.ts.
+      // code — proxy-side MCP tool, the SINGLE semantic-first code search
+      // for all clients (Claude Code, codex, gemini callers). Backed by the
+      // shared `runUnifiedCodeSearch` helper (src/lib/unified-code-search.ts):
+      // default/`mode:"semantic"` ranks by MEANING via ColBERT and falls back
+      // to lexical BM25F when the index isn't ready; `lexical|exact|regex|ast`
+      // force the lexical engine (src/lib/code-search.ts). This entry absorbs
+      // the former standalone `semantic_search` tool.
       //
-      // SCHEMA + RESPONSE MINIMALITY: this entry is the canonical
-      // worked example for the "ruthlessly minimal MCP tool surface"
-      // principle (docs/peer-mcp-design.md). The handler below trims
-      // the rich internal `CodeSearchResponse` to {file, line, snippet}
-      // per hit and a tiny top-level envelope. Internal diagnostics
-      // (scores, field_contributions, scanned_files, elapsed_ms, the
-      // ranking metadata block) are intentionally NOT forwarded — the
-      // model cannot act on them, so they would only burn its context.
-      // Do NOT re-export them without re-reading the principle section.
+      // SCHEMA + RESPONSE MINIMALITY: still the canonical worked example for
+      // the "ruthlessly minimal MCP tool surface" principle
+      // (docs/peer-mcp-design.md). The handler trims to {file, line, snippet}
+      // plus a tiny envelope, and adds exactly the fields the model can ACT
+      // on: top-level `source` (semantic | lexical | lexical-fallback — so a
+      // silent degrade is visible) and, on `source:"semantic"` rows only, the
+      // ColBERT `score`/`endLine`/`name` (interpretable relevance + span +
+      // symbol). Internal diagnostics (BM25F scores, field_contributions,
+      // scanned_files, elapsed_ms, the ranking block) are still NOT forwarded.
+      // Do NOT widen further without re-reading the principle section.
       toolNameHttp: "code",
       group: "search",
       description:
-        "Fast structured code search over a local workspace. Returns " +
-        "ranked, deduplicated hits with snippets. Ranks with BM25F " +
-        "across matched-line / file-path / surrounding-context / " +
-        "symbol-context fields, then refines `symbol-context` with " +
-        "tree-sitter AST analysis on the top hits so identifier " +
-        "definitions outrank incidental string matches. Launch " +
+        "Fast structured code search over a local workspace. Default " +
+        "(`mode:\"semantic\"`, or omit `mode`) ranks by MEANING via ColBERT " +
+        "over a per-workspace index — best for intent/concept queries where " +
+        "the literal keywords may not appear (\"where do we rate-limit\", " +
+        "\"auth token refresh\"). When that index is building/stale/absent it " +
+        "TRANSPARENTLY returns lexical (BM25F) results and labels the " +
+        "response `source` (\"lexical-fallback\") so a degrade is never " +
+        "silent. On a `lexical-fallback` the `notice` says how to proceed: " +
+        "retry `mode:\"semantic\"` shortly (the index self-heals in the " +
+        "background) or re-query with specific symbols — the lexical engine " +
+        "matches keywords/symbols, not natural-language phrases. " +
+        "Other modes force the lexical engine: `lexical` (BM25F " +
+        "ranked, best for exact symbols), `exact` (fixed-string), `regex` " +
+        "(PCRE2), `ast` (ast-grep structural via `ast_pattern`+`ast_lang`). " +
+        "Lexical ranking refines a `symbol-context` field with tree-sitter " +
+        "AST analysis so definitions outrank incidental matches. Launch " +
         "multiple code searches in parallel to triangulate — " +
         "e.g. definition + callers + tests in one round-trip. " +
         "Prefer this over Grep/Bash+grep for ranked discovery " +
         "(\"where is X defined\", \"which files reference Y\", " +
-        "\"find code that does Z\") — ranked mode surfaces the few " +
-        "right answers instead of every match. Use Grep for " +
+        "\"find code that does Z\"). Use Grep for " +
         "exact-pattern enumeration when you need every hit unranked, " +
         "and Glob for file-name patterns (no content match). " +
         "`workspace` is any absolute path the proxy process can " +
@@ -824,12 +833,13 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           query: {
             type: "string",
             description:
-              "Search text. In 'ranked' (default) and 'literal' modes, " +
-              "interpreted as a literal string. In 'regex' mode, " +
-              "interpreted as a PCRE2 regex. In 'ranked' and 'literal' " +
-              "modes, single-identifier queries are auto-expanded across " +
-              "camelCase / snake_case / kebab-case / SCREAMING_SNAKE " +
-              "skeletons so `getUserName` also matches `get_user_name`.",
+              "Search text. In the default 'semantic' mode it's " +
+              "natural-language intent (finds code by meaning even when the " +
+              "words don't appear literally). In 'lexical'/'exact' modes it's " +
+              "a literal string (single-identifier queries auto-expand across " +
+              "camelCase / snake_case / kebab-case / SCREAMING_SNAKE so " +
+              "`getUserName` also matches `get_user_name`). In 'regex' mode " +
+              "it's a PCRE2 regex.",
           },
           workspace: {
             type: "string",
@@ -838,13 +848,24 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           },
           mode: {
             type: "string",
-            enum: ["ranked", "literal", "regex"],
+            enum: ["semantic", "lexical", "exact", "regex", "ast"],
             description:
-              "Ranking mode. 'ranked' (default): BM25F + tree-sitter " +
-              "structural boost; results ordered by score with shoulder " +
-              "pruning (drops results below 50% of the top score). " +
-              "'literal': fixed-string search, ripgrep document order. " +
-              "'regex': PCRE2 search, ripgrep document order.",
+              "Search mode. 'semantic' (DEFAULT): ColBERT meaning-based " +
+              "ranking over a per-workspace index; transparently falls back " +
+              "to lexical when the index is building/stale/absent (the " +
+              "response `source` says which engine ran). 'lexical': BM25F + " +
+              "tree-sitter structural boost, ordered by score with shoulder " +
+              "pruning — best for exact symbols. 'exact': fixed-string, " +
+              "ripgrep document order. 'regex': PCRE2, ripgrep document " +
+              "order. 'ast': ast-grep structural match (requires " +
+              "`ast_pattern` + `ast_lang`).",
+          },
+          pattern: {
+            type: "string",
+            description:
+              "Semantic mode only: regex pre-filter (colgrep -e) — grep " +
+              "first, then rank the matches semantically. Use to scope a " +
+              "semantic ranking to e.g. async fns. Ignored in lexical modes.",
           },
           file_glob: {
             type: "string",
@@ -858,7 +879,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             enum: ["full", "topN"],
             description:
-              "Structural-ranking depth (ranked mode only). 'full' " +
+              "Structural-ranking depth (lexical mode only). 'full' " +
               "(default) runs tree-sitter on the top 50 BM25F hits — " +
               "best signal, fine for typical repos. 'topN' restricts to " +
               "the top 10 for tighter latency on very large workspaces. " +
@@ -879,7 +900,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           complete: {
             type: "boolean",
             description:
-              "Exhaustiveness. Default false — ranked mode applies a " +
+              "Exhaustiveness (lexical mode). Default false — lexical mode " +
+              "applies a " +
               "precision shoulder cut + a per-file cap so you aren't " +
               "overwhelmed, and the response `notice` tells you when " +
               "matches were hidden. Set true to disable both and return " +
@@ -938,14 +960,15 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         isError?: boolean
       }> {
         try {
-          const result = await searchCode(
+          const result = await runUnifiedCodeSearch(
             {
               query: typeof args.query === "string" ? args.query : "",
               workspace:
                 typeof args.workspace === "string" ? args.workspace : "",
               mode:
-                args.mode === "literal" || args.mode === "regex" ||
-                args.mode === "ranked"
+                args.mode === "semantic" || args.mode === "lexical" ||
+                args.mode === "exact" || args.mode === "regex" ||
+                args.mode === "ast"
                   ? args.mode
                   : undefined,
               file_glob:
@@ -970,43 +993,40 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
                   : undefined,
               ast_lang:
                 typeof args.ast_lang === "string" ? args.ast_lang : undefined,
+              pattern:
+                typeof args.pattern === "string" ? args.pattern : undefined,
             },
             signal,
           )
-          // Minimal-surface response shape. See the SCHEMA + RESPONSE
-          // MINIMALITY comment above for why these fields and only
-          // these fields are forwarded to the model.
-          //
-          // Response-size cap (256KB): MCP clients can't ingest
-          // multi-megabyte tool results in one shot, so a runaway
-          // `limit: 1000000` against a hit-heavy repo would produce
-          // a blob the model can't actually use. We accumulate hits
-          // up to a hard byte budget and surface `notice` when the
-          // cap fires so the model knows to narrow its query or
-          // lower `limit`. Always returns at least one hit when
-          // there are any hits to return (per-hit oversize is
-          // bounded separately by `max_snippet_bytes`).
+          // Minimal-surface response shape (see the SCHEMA + RESPONSE
+          // MINIMALITY comment above). Forward: top-level `source`
+          // (provenance: semantic | lexical | lexical-fallback) plus, per
+          // hit, {file, line, snippet} and whichever of role / endLine /
+          // name / score the row actually carries (role on lexical hits;
+          // endLine/name/score on semantic hits). 256KB size cap as before.
           const SIZE_CAP_BYTES = 256 * 1024
-          const trimmedHits: Array<{
+          type TrimmedHit = {
             file: string
             line: number
             snippet: string
             role?: "definition"
-          }> = []
+            endLine?: number
+            name?: string
+            score?: number
+          }
+          const trimmedHits: Array<TrimmedHit> = []
           let totalBytes = 0
           let sizeCapped = false
           for (const hit of result.results) {
-            const next: {
-              file: string
-              line: number
-              snippet: string
-              role?: "definition"
-            } = {
+            const next: TrimmedHit = {
               file: hit.file,
               line: hit.line,
               snippet: hit.snippet,
             }
             if (hit.role) next.role = hit.role
+            if (hit.endLine !== undefined) next.endLine = hit.endLine
+            if (hit.name !== undefined) next.name = hit.name
+            if (hit.score !== undefined) next.score = hit.score
             const nextBytes = Buffer.byteLength(JSON.stringify(next), "utf8")
             if (trimmedHits.length > 0 && totalBytes + nextBytes > SIZE_CAP_BYTES) {
               sizeCapped = true
@@ -1017,23 +1037,19 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           }
 
           const minimal: {
-            results: Array<{
-              file: string
-              line: number
-              snippet: string
-              role?: "definition"
-            }>
+            source: typeof result.source
+            results: Array<TrimmedHit>
             truncated: boolean
             outlines?: typeof result.outlines
             notice?: string
           } = {
+            source: result.source,
             results: trimmedHits,
-            truncated: result.truncated || sizeCapped,
+            truncated: (result.truncated ?? false) || sizeCapped,
           }
-          // Outlines are supplementary to the hits — fit them into
-          // whatever response budget the (already-capped) results left,
-          // so the default-on summary can never push the envelope past
-          // SIZE_CAP_BYTES.
+          // Outlines (lexical path only) are supplementary — fit them into
+          // whatever response budget the (already-capped) results left, so
+          // the default-on summary never pushes the envelope past the cap.
           let outlinesDropped = false
           if (result.outlines && result.outlines.length > 0) {
             const fitted: NonNullable<typeof result.outlines> = []
@@ -1049,11 +1065,10 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             }
             if (fitted.length > 0) minimal.outlines = fitted
           }
-          // Notice priority: size-cap > structural-budget. Size-cap
-          // means the model is missing results entirely and should
-          // narrow; structural-budget just means the ranking was
-          // less precise but the result set is complete. The size-
-          // cap message is the more urgent action.
+          // Notice priority: size-cap > outline-drop > backend notice
+          // (which includes the helper's fallback hint). `source` carries
+          // the fallback provenance independently, so a size-cap notice
+          // winning here never hides that a degrade happened.
           if (sizeCapped) {
             minimal.notice =
               `response size limit reached at ${trimmedHits.length} hits ` +
@@ -1071,165 +1086,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           return {
-            content: [{ type: "text", text: `code_search failed: ${msg}` }],
-            isError: true,
-          }
-        }
-      },
-    },
-    // semantic_search — ColBERT/PLAID semantic code search via the
-    // github-router-managed `colgrep` sidecar (group `search`, joins
-    // `code` + `web`). Implementation: src/lib/colbert/.
-    //
-    // GATING (`capability: "semantic_search"`): the MCP handler drops
-    // this entry from `tools/list` AND `tools/call` when
-    // `semanticSearchEnabled()` is false — i.e. when opted out
-    // (`GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1`) OR the colgrep
-    // binary/model/ORT aren't provisioned + smoke-passed on disk. The
-    // availability check is the load-bearing regression guard: on CI /
-    // sandboxes / no-network the artifacts are absent, so the tool is
-    // invisible and the `{code, web}` surface is unchanged.
-    //
-    // CONTRACT (no lexical fallback): this tool NEVER runs another
-    // search. A building/stale index returns an honest `status` +
-    // `notice` (NO results, NOT isError); an absent/failed/unavailable
-    // index returns an `isError` envelope telling the model to use
-    // `code` (lexical) itself. Input-shape failures (missing/relative
-    // workspace, empty query) are `isError`.
-    //
-    // RESPONSE MINIMALITY: colgrep `--json` carries the full source + 5
-    // analysis layers per hit; the handler trims to {file, line,
-    // endLine?, name?, score, snippet} and NEVER logs raw colgrep
-    // stdout/stderr (it embeds source — a telemetry-leak vector).
-    {
-      toolNameHttp: "semantic_search",
-      group: "search",
-      capability: "semantic_search",
-      description:
-        "Semantic code search by MEANING, not text (ColBERT late-interaction "
-        + "over a per-workspace index). Best for natural-language intent queries "
-        + "where the literal keywords may not appear ('where do we rate-limit', "
-        + "'auth token refresh', 'retry/backoff around the upstream fetch'). For "
-        + "exact symbol lookup ('where is X defined', 'callers of Y') prefer "
-        + "`code` (lexical) — it's faster and exact. Returns a `status` field "
-        + "(ready / building / stale / unavailable / failed); while the index is "
-        + "building or stale it returns a status + notice and NO results (it does "
-        + "NOT fall back to another search) — run `code` yourself if you need "
-        + "results immediately. `workspace` is any absolute path; the index is "
-        + "built and cached by the proxy on first use.",
-      inputSchema: {
-        type: "object",
-        required: ["query"],
-        additionalProperties: false,
-        properties: {
-          query: {
-            type: "string",
-            description:
-              "Natural-language intent, e.g. 'where do we validate JWT expiry' "
-              + "or 'retry/backoff around the upstream fetch'. Semantic — finds "
-              + "code by meaning even when the words don't appear literally.",
-          },
-          workspace: {
-            type: "string",
-            description:
-              "Absolute path to the repo/subtree to search. Defaults to the "
-              + "proxy launch cwd. Must be absolute.",
-          },
-          limit: {
-            type: "integer",
-            description: "Max results (default 15).",
-          },
-          pattern: {
-            type: "string",
-            description:
-              "Optional regex pre-filter (colgrep -e): grep first, then rank the "
-              + "matches semantically. Use to scope a semantic ranking to e.g. "
-              + "async fns.",
-          },
-        },
-      },
-      async handler(
-        args: Record<string, unknown>,
-        signal?: AbortSignal,
-      ): Promise<{
-        content: Array<{ type: "text"; text: string }>
-        isError?: boolean
-      }> {
-        const query = typeof args.query === "string" ? args.query.trim() : ""
-        if (!query) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "semantic_search: arguments.query is required (must be a non-empty string)",
-              },
-            ],
-            isError: true,
-          }
-        }
-        // workspace defaults to the proxy launch cwd; if provided it
-        // MUST be absolute (mirrors runWorkerToolCall's absolute-only
-        // boundary check — a typo must not silently resolve against cwd).
-        let workspace: string
-        if (args.workspace === undefined) {
-          workspace = process.cwd()
-        } else if (typeof args.workspace === "string" && path.isAbsolute(args.workspace)) {
-          workspace = args.workspace
-        } else {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "semantic_search: arguments.workspace must be an ABSOLUTE path (or omitted to use the proxy launch cwd)",
-              },
-            ],
-            isError: true,
-          }
-        }
-        const limit =
-          typeof args.limit === "number" && Number.isFinite(args.limit)
-            ? args.limit
-            : undefined
-        const pattern =
-          typeof args.pattern === "string" && args.pattern.length > 0
-            ? args.pattern
-            : undefined
-        try {
-          const result = await runSemanticSearch({
-            query,
-            workspace,
-            limit,
-            pattern,
-            signal,
-          })
-          // Minimal-surface envelope: status + (results | notice) +
-          // source. isError is set by the runner for unavailable/failed
-          // (the model is told to use `code`); building/stale carry a
-          // notice and no results but are NOT errors.
-          const envelope: Record<string, unknown> = { status: result.status }
-          if (result.results) envelope.results = result.results
-          if (result.source) envelope.source = result.source
-          if (result.notice) envelope.notice = result.notice
-          return {
-            content: [{ type: "text", text: JSON.stringify(envelope, null, 2) }],
-            isError: result.isError === true,
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(
-                  {
-                    status: "failed",
-                    notice: `semantic_search failed: ${msg}; use code (lexical) instead`,
-                  },
-                  null,
-                  2,
-                ),
-              },
-            ],
+            content: [{ type: "text", text: `code search failed: ${msg}` }],
             isError: true,
           }
         }
@@ -1237,16 +1094,19 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     },
     // worker_explore / worker_implement — autonomous worker tools backed
     // by the Pi agent loop (`src/lib/worker-agent/engine.ts`), routed
-    // through Copilot's `gemini-3.1-pro-preview` by default.
+    // through per-mode default models: explore/review → `gemini-3.5-flash`
+    // (high); implement → `gpt-5.5` (xhigh). An explicit `model` arg wins.
     //
     // GATING (`capability: "worker"`): the MCP handler drops both entries
     // from `tools/list` and `tools/call` when `workerToolsEnabled()` is
-    // false. The gate fires when (a) `gemini-3.1-pro-preview` is missing from
-    // the live Copilot catalog (or present but lacks `tool_calls`
-    // support), OR (b) the operator opted out via
-    // `GH_ROUTER_DISABLE_WORKER_TOOLS=1`. Defense-in-depth: the gate is
-    // checked at BOTH list-time and call-time so a client that hard-
-    // codes the tool name can't bypass the list-side filter.
+    // false. The gate fires when (a) the worker default model
+    // (`gemini-3.5-flash`) is missing from the live Copilot catalog (or
+    // present but lacks `tool_calls` support), OR (b) the operator opted
+    // out via `GH_ROUTER_DISABLE_WORKER_TOOLS=1`. Defense-in-depth: the
+    // gate is checked at BOTH list-time and call-time so a client that
+    // hard-codes the tool name can't bypass the list-side filter. (If the
+    // implement default `gpt-5.5` is absent, implement calls return a
+    // helpful resolve error listing the catalog's tool_call models.)
     //
     // SCHEMA SHAPE: `prompt` is required; `model` / `thinking` are
     // optional fine-tunes the worker engine validates against the live
@@ -1268,10 +1128,13 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       capability: "worker",
       description:
         "Read-only investigation by an autonomous worker (Pi runtime; "
-        + "default model `gemini-3.1-pro-preview`, override via the `model` "
-        + "arg with any Copilot-catalog model that advertises "
-        + "`tool_calls`). Tools: read, glob, grep, code_search, "
-        + "web_search, fetch_url. The worker's system prompt sandboxes "
+        + "default model `gemini-3.5-flash` at high reasoning, override via "
+        + "the `model` arg with any Copilot-catalog model that advertises "
+        + "`tool_calls`). Tools: read, glob, grep, code_search "
+        + "(semantic-first), web_search, fetch_url, advisor (consult a "
+        + "stronger cross-lab model), update_plan (planning checklist), and "
+        + "toolbelt (run a read-only analysis CLI: rg/fd/jq/yq/sg/gron/tokei/"
+        + "difft/git). The worker's system prompt sandboxes "
         + "it and gives one-line descriptions of each tool, so brief "
         + "it on the investigation, not on tool semantics. Offloads "
         + "bounded research that would otherwise eat your context "
@@ -1295,7 +1158,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "gemini-3.1-pro-preview). Must advertise tool_calls "
+              + "gemini-3.5-flash). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
               + "the eligible catalog models on mismatch.",
           },
@@ -1335,11 +1198,12 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       capability: "worker",
       description:
         "Delegates a scoped coding task to an autonomous worker (Pi "
-        + "runtime; default model `gemini-3.1-pro-preview`, override via the "
-        + "`model` arg with any Copilot-catalog model that advertises "
-        + "`tool_calls`). Tools: the worker_explore read-only set plus "
-        + "edit, write, bash, and codex_review (code review by "
-        + "codex-reviewer / gpt-5.3-codex). The worker's system prompt "
+        + "runtime; default model `gpt-5.5` at xhigh reasoning, override via "
+        + "the `model` arg with any Copilot-catalog model that advertises "
+        + "`tool_calls`). Tools: the explore read-only set (read, glob, "
+        + "grep, code_search, web_search, fetch_url, advisor, update_plan, "
+        + "toolbelt) plus edit, write, bash, and codex_review (code review "
+        + "by codex-reviewer / gpt-5.3-codex). The worker's system prompt "
         + "sandboxes it and gives one-line descriptions of each tool, "
         + "so brief it on the task, not on tool semantics. With "
         + "`worktree: false` (default) edits in place — concurrent "
@@ -1372,7 +1236,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "gemini-3.1-pro-preview). Must advertise tool_calls "
+              + "gpt-5.5). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
               + "the eligible catalog models on mismatch.",
           },
@@ -1380,7 +1244,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
             description:
-              "Optional reasoning depth (default high). Silently "
+              "Optional reasoning depth (default xhigh). Silently "
               + "clamped to the model's allowed range; \"off\" drops "
               + "the parameter entirely.",
           },
@@ -1413,10 +1277,11 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       capability: "worker",
       description:
         "Read-only code review by an autonomous worker (Pi runtime; "
-        + "default model `gemini-3.1-pro-preview`, override via `model` with any "
+        + "default model `gemini-3.5-flash`, override via `model` with any "
         + "Copilot-catalog model that advertises `tool_calls`). Same "
         + "read-only toolset as `explore` (read, glob, grep, code_search, "
-        + "web_search, fetch_url) — it CANNOT edit — but the worker is framed "
+        + "web_search, fetch_url, advisor, update_plan, toolbelt) — it CANNOT "
+        + "edit — but the worker is framed "
         + "as a reviewer: it verifies correctness against the actual code "
         + "itself rather than trusting a claim, and reports findings (bugs, "
         + "edge cases, security / concurrency / resource risks, missing "
@@ -1444,7 +1309,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "gemini-3.1-pro-preview). Must advertise tool_calls "
+              + "gemini-3.5-flash). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
               + "the eligible catalog models on mismatch.",
           },

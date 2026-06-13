@@ -141,7 +141,7 @@ export interface RunBashResult {
   killed: boolean
 }
 
-function buildEnv(): NodeJS.ProcessEnv {
+export function buildEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {}
   for (const key of ENV_ALLOWLIST) {
     const v = process.env[key]

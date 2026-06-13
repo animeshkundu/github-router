@@ -143,6 +143,16 @@ beforeEach(() => {
         tool_calls: true,
         reasoning_effort: ["low", "medium", "high"],
       }),
+      // explore/review default
+      fakeModel("gemini-3.5-flash", {
+        tool_calls: true,
+        reasoning_effort: ["minimal", "low", "medium", "high"],
+      }),
+      // implement default (routes to /responses via the stream-fn split)
+      fakeModel("gpt-5.5", {
+        tool_calls: true,
+        reasoning_effort: ["none", "low", "medium", "high", "xhigh"],
+      }),
     ],
   }
   state.copilotToken = "test-token"
@@ -212,6 +222,58 @@ describe("makeModelShim", () => {
     expect(m.api).toBe("openai-completions")
     expect(m.provider).toBe("github-copilot")
     expect(m.reasoning).toBe(true)
+  })
+})
+
+describe("appendPlanReminder (plan survives compaction)", () => {
+  const { appendPlanReminder } = __testExports
+  const msg = (role: string, content: string) =>
+    ({ role, content, timestamp: 0 }) as never
+
+  test("empty plan → returns the SAME array reference, no append", () => {
+    const messages = [msg("user", "do the thing"), msg("assistant", "ok")]
+    const out = appendPlanReminder(messages, { current: [] })
+    expect(out).toBe(messages)
+  })
+
+  test("non-empty plan after a tool-result message → appends ONE user reminder (input unmutated)", () => {
+    const messages = [
+      msg("user", "do the thing"),
+      msg("toolResult", "done step"),
+    ]
+    const planState = {
+      current: [
+        { title: "step one", status: "completed" as const },
+        { title: "step two", status: "in_progress" as const },
+      ],
+    }
+    const out = appendPlanReminder(messages, planState)
+    expect(out.length).toBe(messages.length + 1) // input not mutated
+    expect(messages.length).toBe(2)
+    const last = out[out.length - 1] as { role: string; content: string }
+    expect(last.role).toBe("user")
+    expect(last.content).toContain("Current plan")
+    expect(last.content).toContain("step one")
+    expect(last.content).toContain("[x]")
+    expect(last.content).toContain("[~]")
+  })
+
+  test("non-empty plan but last message is already user → no append (no double user turn)", () => {
+    const messages = [msg("assistant", "ok"), msg("user", "now do X")]
+    const planState = {
+      current: [{ title: "step", status: "pending" as const }],
+    }
+    const out = appendPlanReminder(messages, planState)
+    expect(out).toBe(messages)
+  })
+
+  test("non-empty plan but last message is assistant → no append (don't orphan toolCalls / disrupt the turn)", () => {
+    const messages = [msg("user", "go"), msg("assistant", "thinking")]
+    const planState = {
+      current: [{ title: "step", status: "pending" as const }],
+    }
+    const out = appendPlanReminder(messages, planState)
+    expect(out).toBe(messages)
   })
 })
 
@@ -392,6 +454,10 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
       const r = await runWorkerAgent({
         prompt: "do a thing",
         mode: "implement",
+        // Pin a chat-endpoint model so the chat-SSE mock applies — this
+        // test exercises the worktree diff-suffix mechanic, not the
+        // implement default (gpt-5.5, which routes to /responses).
+        model: "gemini-3.1-pro-preview",
         workspace: repo,
         worktree: true,
       })

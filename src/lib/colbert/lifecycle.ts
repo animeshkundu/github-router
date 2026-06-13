@@ -153,7 +153,13 @@ export function __unregisterColbertExitHandlersForTests(): void {
 // Boot-time metadata reclassification sweep
 // ---------------------------------------------------------------------
 
-function isPidAlive(pid: number): boolean {
+/**
+ * True iff `pid` names a live process. `process.kill(pid, 0)` probes
+ * existence without signalling; `EPERM` means the process exists but is
+ * owned by another user (still alive). Exported so the per-query freshness
+ * verdict can mirror the boot sweep's liveness check.
+ */
+export function isPidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false
   try {
     process.kill(pid, 0)
@@ -202,8 +208,11 @@ export async function sweepStaleColbertMetaAtBoot(): Promise<void> {
       // the entry; the runner's own ownership check governs.
       continue
     }
-    // Dead build PID → reclassify to failed (atomic temp+rename).
+    // Dead build PID → reclassify to failed (atomic temp+rename). Stamp the
+    // crash class so the per-query self-heal treats it as transient (re-kick)
+    // rather than operator-actionable.
     meta.status = "failed"
+    meta.failureClass = "crashed"
     const tmp = `${file}.${process.pid}.tmp`
     try {
       await fs.writeFile(tmp, JSON.stringify(meta, null, 2))

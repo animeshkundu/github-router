@@ -17,10 +17,8 @@
 import { hasSupportedBrowserInstalled } from "./browser-mcp/browser-detect"
 import { compressorAvailable } from "./browser-mcp/compressor"
 import {
-  colbertArtifactsPresent,
-  colbertSmokeOk,
-} from "./colbert/provision"
-import { parseBoolEnv } from "./exec"
+  colbertSearchEnabled,
+} from "./colbert"
 import { state } from "./state"
 import {
   BROWSE_DEFAULT_MODEL,
@@ -61,15 +59,18 @@ export function standInToolEnabled(): boolean {
 }
 
 /**
- * Gate for the worker tools (`worker_explore`, `worker_implement`).
+ * Gate for the worker tools (`explore`, `review`, `implement`).
  *
  * Returns true iff BOTH:
  *   1. Copilot's live catalog (`state.models?.data`) contains the
- *      worker's default model (`gemini-3.1-pro-preview`) AND that entry
- *      advertises `capabilities.supports.tool_calls === true`. The
- *      worker loop is function-calling; a model that can't emit
- *      tool_calls is unusable, so dormant-register (omit from
- *      `tools/list`) keeps the surface honest.
+ *      worker default model (`gemini-3.5-flash`, used by explore/review)
+ *      AND that entry advertises `capabilities.supports.tool_calls ===
+ *      true`. The worker loop is function-calling; a model that can't
+ *      emit tool_calls is unusable, so dormant-register (omit from
+ *      `tools/list`) keeps the surface honest. (The implement default
+ *      `gpt-5.5` is NOT gated here — if it's absent, implement calls
+ *      surface a clean resolve error rather than disabling all worker
+ *      tools, since explore/review still work.)
  *   2. The operator hasn't set `GH_ROUTER_DISABLE_WORKER_TOOLS=1`
  *      (opt-out — workers ship enabled by default per plan).
  *
@@ -195,36 +196,24 @@ export function browseAgentEnabled(): boolean {
 }
 
 /**
- * Gate for the `semantic_search` tool (the ColBERT sidecar).
+ * Internal availability predicate for ColBERT semantic search.
  *
- * Semantic search is ON BY DEFAULT (the proxy auto-provisions the
- * colgrep binary + ONNX Runtime + ColBERT model and background-indexes
- * the cwd at launch), so unlike `--browse` there is no opt-IN flag —
- * only an opt-OUT env var, mirroring the toolbelt convention.
+ * NOTE: semantic search is no longer a standalone `semantic_search` MCP
+ * tool — it is folded into the unified `code` tool, whose default mode
+ * attempts ColBERT and transparently falls back to lexical when this
+ * predicate is false or the index isn't ready. This function therefore
+ * no longer gates a tool's `tools/list` visibility; it answers the
+ * single question "should the `code` tool attempt ColBERT before
+ * falling back to lexical?"
  *
- * Returns true iff BOTH:
- *   1. **Not opted out:** `GH_ROUTER_DISABLE_SEMANTIC_SEARCH` is unset /
- *      falsy.
- *   2. **Actually available on disk:** the colgrep binary + model + ORT
- *      are provisioned AND the post-provision smoke test passed
- *      (`colbertArtifactsPresent()` && `colbertSmokeOk()`).
- *
- * This is **availability-based**, exactly like `browserToolsEnabled()`'s
- * `hasSupportedBrowserInstalled()` check — and it's the load-bearing
- * regression guard: in any environment where provisioning hasn't
- * completed or can't run (CI, sandboxes, no network), the artifacts are
- * absent ⇒ the gate is false ⇒ `semantic_search` is NOT listed and NOT
- * callable ⇒ the existing `{code, web}` `tools/list` surface is
- * unchanged. The tool appears only on a machine where provisioning
- * succeeded.
- *
- * Gate fires symmetrically at `tools/list` and `tools/call` (drop +
- * -32601), exactly like the other capability tags.
+ * Delegates to the leaf `colbertSearchEnabled()` (the single source of
+ * truth, in `src/lib/colbert/`) so the unified helper can read the same
+ * decision without importing this module (cycle avoidance). True iff the
+ * operator hasn't opted out (`GH_ROUTER_DISABLE_SEMANTIC_SEARCH`) AND the
+ * colgrep binary + model + ORT are provisioned on disk AND the
+ * post-provision smoke test passed.
  */
 export function semanticSearchEnabled(): boolean {
-  if (parseBoolEnv(process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH) === true) {
-    return false
-  }
-  return colbertArtifactsPresent() && colbertSmokeOk()
+  return colbertSearchEnabled()
 }
 

@@ -34,12 +34,14 @@ import {
 import {
   mkdirSync,
   mkdtempSync,
+  existsSync,
   readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs"
+import { execFileSync } from "node:child_process"
 import * as os from "node:os"
 import * as path from "node:path"
 
@@ -728,7 +730,7 @@ describe("web_search", () => {
 // ============================================================
 
 describe("code_search", () => {
-  test("returns JSON minimal-surface (file/line/snippet)", async () => {
+  test("returns JSON minimal-surface (source + file/line/snippet)", async () => {
     const { dir, cleanup } = freshWorkspace()
     try {
       mkdirSync(path.join(dir, "src"))
@@ -743,8 +745,15 @@ describe("code_search", () => {
         new AbortController().signal,
       )
       const parsed = JSON.parse((r.content[0] as { text: string }).text) as {
+        source: string
         results: Array<{ file: string; line: number; snippet: string }>
       }
+      // Default mode is semantic-first; the unified helper labels the
+      // engine that ran. In a test env without a colbert index this is
+      // "lexical-fallback", but pin the contract, not the env.
+      expect(["semantic", "lexical", "lexical-fallback"]).toContain(
+        parsed.source,
+      )
       expect(Array.isArray(parsed.results)).toBe(true)
       expect(parsed.results.length).toBeGreaterThan(0)
       const first = parsed.results[0]!
@@ -754,6 +763,107 @@ describe("code_search", () => {
     } finally {
       cleanup()
     }
+  })
+
+  test("forced mode:'lexical' never touches colgrep — source is 'lexical'", async () => {
+    const { dir, cleanup } = freshWorkspace()
+    try {
+      mkdirSync(path.join(dir, "src"))
+      writeFileSync(
+        path.join(dir, "src", "user.ts"),
+        "export function getUserName() { return 'kundus' }\n",
+      )
+      const tool = __testExports.codeSearchTool(dir)
+      const r = await tool.execute(
+        "c1",
+        { query: "getUserName", mode: "lexical" },
+        new AbortController().signal,
+      )
+      const parsed = JSON.parse((r.content[0] as { text: string }).text) as {
+        source: string
+        results: Array<{ file: string; line: number; snippet: string }>
+      }
+      expect(parsed.source).toBe("lexical")
+      expect(parsed.results.length).toBeGreaterThan(0)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+// ============================================================
+// update_plan
+// ============================================================
+
+describe("update_plan", () => {
+  test("mutates the shared PlanState in place and echoes the rendered plan", async () => {
+    const planState = __testExports.createPlanState()
+    const tool = __testExports.updatePlanTool(planState)
+    const r = await tool.execute(
+      "c1",
+      {
+        steps: [
+          { title: "locate token refresh path", status: "in_progress" },
+          { title: "add retry/backoff", status: "pending" },
+        ],
+        explanation: "starting",
+      },
+      new AbortController().signal,
+    )
+    expect(planState.current.length).toBe(2)
+    expect(planState.current[0]!.status).toBe("in_progress")
+    const text = (r.content[0] as { text: string }).text
+    expect(text).toContain("locate token refresh path")
+    expect(text).toContain("[~]")
+    expect(text).toContain("[ ]")
+  })
+
+  test("each call REPLACES the plan (latest wins)", async () => {
+    const planState = __testExports.createPlanState()
+    const tool = __testExports.updatePlanTool(planState)
+    await tool.execute(
+      "c1",
+      { steps: [{ title: "step one", status: "pending" }] },
+      new AbortController().signal,
+    )
+    await tool.execute(
+      "c2",
+      {
+        steps: [
+          { title: "step one", status: "completed" },
+          { title: "step two", status: "in_progress" },
+        ],
+      },
+      new AbortController().signal,
+    )
+    expect(planState.current.length).toBe(2)
+    expect(planState.current[0]!.status).toBe("completed")
+  })
+
+  test("is sequential (stateful) and needs no network", () => {
+    const tool = __testExports.updatePlanTool(__testExports.createPlanState())
+    expect(tool.executionMode).toBe("sequential")
+    // No network gate: even with DISABLE_NETWORK set, update_plan works.
+    process.env.GH_ROUTER_WORKER_DISABLE_NETWORK = "1"
+    expect(
+      tool.execute(
+        "c1",
+        { steps: [{ title: "x", status: "pending" }] },
+        new AbortController().signal,
+      ),
+    ).resolves.toBeDefined()
+    delete process.env.GH_ROUTER_WORKER_DISABLE_NETWORK
+  })
+
+  test("renderPlan is deterministic with [ ]/[~]/[x] markers", () => {
+    const rendered = __testExports.renderPlan({
+      current: [
+        { title: "a", status: "completed" },
+        { title: "b", status: "in_progress" },
+        { title: "c", status: "pending" },
+      ],
+    })
+    expect(rendered).toBe("1. [x] a\n2. [~] b\n3. [ ] c")
   })
 })
 
@@ -1228,41 +1338,242 @@ describe("renderPiMessagesAsText", () => {
 // buildWorkerTools (mode selection)
 // ============================================================
 
+describe("toolbelt (read-only CLI runner)", () => {
+  const sig = (): AbortSignal => new AbortController().signal
+  const run = (dir: string, tool: string, args: Array<string>) =>
+    __testExports
+      .toolbeltTool(dir)
+      .execute("c1", { tool, args } as never, sig())
+
+  test("git: subcommand must be a read-only one at args[0]; mutating ones rejected", async () => {
+    const { dir, cleanup } = freshWorkspace()
+    try {
+      await expect(run(dir, "git", ["commit", "-m", "x"])).rejects.toThrow(
+        /read-only subcommand/i,
+      )
+      await expect(run(dir, "git", [])).rejects.toThrow(/read-only subcommand/i)
+      // A leading global flag as args[0] is rejected (no -C / -c injection).
+      await expect(run(dir, "git", ["-c", "x=y", "log"])).rejects.toThrow(
+        /read-only subcommand/i,
+      )
+      await expect(run(dir, "git", ["push"])).rejects.toThrow(
+        /read-only subcommand/i,
+      )
+      // `grep` (-O exec) and `reflog` (expire/delete mutate) are dropped
+      // from the allowlist entirely.
+      await expect(run(dir, "git", ["grep", "foo"])).rejects.toThrow(
+        /read-only subcommand/i,
+      )
+      await expect(run(dir, "git", ["reflog"])).rejects.toThrow(
+        /read-only subcommand/i,
+      )
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("git: write/exec flags rejected even on an allowed subcommand", async () => {
+    const { dir, cleanup } = freshWorkspace()
+    try {
+      // --output writes a file.
+      await expect(
+        run(dir, "git", ["diff", "--output=/tmp/pwn"]),
+      ).rejects.toThrow(/not allowed/i)
+      await expect(run(dir, "git", ["log", "--output", "x"])).rejects.toThrow(
+        /not allowed/i,
+      )
+      // --ext-diff / --textconv run configured helper programs.
+      await expect(run(dir, "git", ["show", "--ext-diff"])).rejects.toThrow(
+        /not allowed/i,
+      )
+      await expect(
+        run(dir, "git", ["cat-file", "--textconv", "HEAD:x"]),
+      ).rejects.toThrow(/not allowed/i)
+      // git accepts unambiguous long-option abbreviations — `--ext-d`
+      // resolves to `--ext-diff`, so the denylist must catch the prefix.
+      await expect(run(dir, "git", ["show", "--ext-d"])).rejects.toThrow(
+        /not allowed/i,
+      )
+      await expect(run(dir, "git", ["diff", "--outp=x"])).rejects.toThrow(
+        /not allowed/i,
+      )
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("per-tool write/exec flags rejected (fd -x, yq -i, sg --rewrite/-U)", async () => {
+    const { dir, cleanup } = freshWorkspace()
+    try {
+      await expect(run(dir, "fd", ["-x", "rm"])).rejects.toThrow(/write\/exec/i)
+      await expect(run(dir, "fd", ["--exec", "rm"])).rejects.toThrow(
+        /write\/exec/i,
+      )
+      await expect(run(dir, "yq", ["-i", "."])).rejects.toThrow(/write\/exec/i)
+      await expect(run(dir, "sg", ["--rewrite", "x"])).rejects.toThrow(
+        /write\/exec/i,
+      )
+      await expect(run(dir, "sg", ["-U"])).rejects.toThrow(/write\/exec/i)
+      await expect(run(dir, "rg", ["--pre", "cat"])).rejects.toThrow(
+        /write\/exec/i,
+      )
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("clustered + attached short flags cannot bypass the denylist", async () => {
+    const { dir, cleanup } = freshWorkspace()
+    try {
+      // `-Hx` clusters the (allowed) -H with the (denied) -x exec flag.
+      await expect(run(dir, "fd", ["-Hx", "rm"])).rejects.toThrow(/write\/exec/i)
+      // `-xrm` attaches the command to -x.
+      await expect(run(dir, "fd", ["-xrm"])).rejects.toThrow(/write\/exec/i)
+      // ast-grep `-iU` clusters interactive (-i) + update-all (-U).
+      await expect(run(dir, "sg", ["-iU"])).rejects.toThrow(/write\/exec/i)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("file-write / exec flags on scc, yq, rg are rejected", async () => {
+    const { dir, cleanup } = freshWorkspace()
+    try {
+      // scc -o/--output AND --format-multi (csv:file.csv) write files.
+      await expect(run(dir, "scc", ["-o", "out.json"])).rejects.toThrow(
+        /write\/exec/i,
+      )
+      await expect(run(dir, "scc", ["--output", "out.json"])).rejects.toThrow(
+        /write\/exec/i,
+      )
+      await expect(
+        run(dir, "scc", ["--format-multi", "csv:out.csv"]),
+      ).rejects.toThrow(/write\/exec/i)
+      // yq -s/--split-exp writes one file per document.
+      await expect(run(dir, "yq", ["-s", "f"])).rejects.toThrow(/write\/exec/i)
+      await expect(run(dir, "yq", ["--split-exp", "f"])).rejects.toThrow(
+        /write\/exec/i,
+      )
+      // rg --hostname-bin runs a command to resolve the hostname.
+      await expect(run(dir, "rg", ["--hostname-bin", "id"])).rejects.toThrow(
+        /write\/exec/i,
+      )
+      // ast-grep `new` writes files; `lsp` starts a server — both blocked.
+      await expect(run(dir, "sg", ["new", "rule"])).rejects.toThrow(
+        /not allowed/i,
+      )
+      await expect(run(dir, "sg", ["lsp"])).rejects.toThrow(/not allowed/i)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("rg -i (ignore-case) is NOT a denied flag — proceeds without throwing", async () => {
+    const { dir, cleanup } = freshWorkspace()
+    try {
+      writeFileSync(path.join(dir, "f.txt"), "NeEdLe\n")
+      // -i means ignore-case for rg (read-only), unlike yq -i; must not throw.
+      const r = await run(dir, "rg", ["-i", "needle", "."])
+      const text = (r.content[0] as { text: string }).text
+      expect(typeof text).toBe("string")
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("git read-only run executes (real repo) and is no-shell (metachars literal)", async () => {
+    const { dir, cleanup } = freshWorkspace()
+    try {
+      execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir })
+      writeFileSync(path.join(dir, "alpha.txt"), "hi\n")
+      execFileSync("git", ["add", "-A"], { cwd: dir })
+      execFileSync("git", ["commit", "-q", "-m", "init"], {
+        cwd: dir,
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@e.x",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@e.x",
+        },
+      })
+      const r = await run(dir, "git", ["ls-files"])
+      expect((r.content[0] as { text: string }).text).toContain("alpha.txt")
+
+      // The forced global hardening (--no-pager --no-optional-locks) and the
+      // diff-producing --no-ext-diff/--no-textconv defaults must not break a
+      // real read-only run. `git log` is diff-producing; `git status` is the
+      // no-optional-locks case.
+      const log = await run(dir, "git", ["log", "--oneline"])
+      expect((log.content[0] as { text: string }).text).toMatch(/init/i)
+      const status = await run(dir, "git", ["status", "--short"])
+      expect(typeof (status.content[0] as { text: string }).text).toBe("string")
+
+      // No shell: a metachar arg is passed LITERALLY to git (a pathspec),
+      // never interpreted — the sentinel file is not created.
+      const sentinel = path.join(dir, "PWNED")
+      await run(dir, "git", ["ls-files", `;touch ${sentinel}`])
+      expect(existsSync(sentinel)).toBe(false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("is parallel-safe (no executionMode) — read-only", () => {
+    const tool = __testExports.toolbeltTool(realpathSync.native(os.tmpdir()))
+    expect(tool.executionMode).toBeUndefined()
+  })
+})
+
 describe("buildWorkerTools", () => {
-  test("explore mode returns 6 read-only tools (peer_review/advisor dropped from worker surface)", () => {
+  test("explore mode returns 9 read-only tools (incl. toolbelt + advisor + update_plan; peer_review dropped)", () => {
     const tools = buildWorkerTools({
       mode: "explore",
       workspace: realpathSync.native(os.tmpdir()),
     })
-    expect(tools.length).toBe(6)
+    expect(tools.length).toBe(9)
     const names = tools.map((t) => t.name).sort()
     expect(names).toEqual(
       [
+        "advisor",
         "code_search",
         "fetch_url",
         "glob",
         "grep",
         "read",
+        "toolbelt",
+        "update_plan",
         "web_search",
       ].sort(),
     )
-    // peer_review and advisor are intentionally NOT in the worker
-    // surface (per user directive). They remain implemented as helper
-    // factories for legacy callers, but buildWorkerTools no longer
-    // wires them.
+    // peer_review is intentionally NOT in the worker surface (peer critics
+    // aren't required for workers). It remains an implemented helper factory
+    // for legacy callers, but buildWorkerTools no longer wires it. `advisor`
+    // IS wired — it's the worker's consultation path.
     expect(names).not.toContain("peer_review")
-    expect(names).not.toContain("advisor")
+    expect(names).toContain("advisor")
+    expect(names).toContain("toolbelt")
   })
 
-  test("review mode returns the SAME 6 read-only tools as explore (no write tools)", () => {
+  test("review mode returns the SAME 9 read-only tools as explore (no write tools)", () => {
     const tools = buildWorkerTools({
       mode: "review",
       workspace: realpathSync.native(os.tmpdir()),
     })
-    expect(tools.length).toBe(6)
+    expect(tools.length).toBe(9)
     const names = tools.map((t) => t.name).sort()
     expect(names).toEqual(
-      ["code_search", "fetch_url", "glob", "grep", "read", "web_search"].sort(),
+      [
+        "advisor",
+        "code_search",
+        "fetch_url",
+        "glob",
+        "grep",
+        "read",
+        "toolbelt",
+        "update_plan",
+        "web_search",
+      ].sort(),
     )
     // review is read-only — the reviewer framing lives in the system prompt,
     // not the toolset, so the write tools must be absent.
@@ -1271,20 +1582,49 @@ describe("buildWorkerTools", () => {
     }
   })
 
-  test("implement mode returns 10 tools (explore + edit/write/bash + codex_review)", () => {
+  test("implement mode returns 13 tools (explore + edit/write/bash + codex_review)", () => {
     const tools = buildWorkerTools({
       mode: "implement",
       workspace: realpathSync.native(os.tmpdir()),
     })
-    expect(tools.length).toBe(10)
+    expect(tools.length).toBe(13)
     const names = tools.map((t) => t.name)
     for (const w of ["edit", "write", "bash", "codex_review"]) {
       expect(names).toContain(w)
     }
-    // Same narrowing: no peer_review, no advisor — only the
-    // codex-reviewer-locked codex_review is exposed for code review.
+    // toolbelt + advisor + update_plan are inherited from explore; peer_review stays out.
+    expect(names).toContain("toolbelt")
+    expect(names).toContain("advisor")
+    expect(names).toContain("update_plan")
     expect(names).not.toContain("peer_review")
-    expect(names).not.toContain("advisor")
+  })
+
+  test("codex_review and the write tools declare executionMode:'sequential'", () => {
+    // The engine no longer forces agent-wide sequential execution for
+    // implement mode; correctness now depends on these per-tool flags so a
+    // batch containing a write / stateful tool serializes. update_plan is
+    // also sequential (stateful); pure read/search tools (incl. the
+    // read-only toolbelt) are NOT.
+    const tools = buildWorkerTools({
+      mode: "implement",
+      workspace: realpathSync.native(os.tmpdir()),
+    })
+    const byName = new Map(tools.map((t) => [t.name, t]))
+    for (const seq of ["edit", "write", "bash", "codex_review", "update_plan"]) {
+      expect(byName.get(seq)?.executionMode).toBe("sequential")
+    }
+    for (const par of [
+      "read",
+      "glob",
+      "grep",
+      "code_search",
+      "web_search",
+      "fetch_url",
+      "toolbelt",
+      "advisor",
+    ]) {
+      expect(byName.get(par)?.executionMode).toBeUndefined()
+    }
   })
 
   test("each tool has the required Pi AgentTool shape", () => {

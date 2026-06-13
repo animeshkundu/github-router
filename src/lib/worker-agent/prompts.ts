@@ -20,7 +20,7 @@
  *      doesn't redirect Pi.
  *   3. State what each tool does in one short sentence — Pi runs on
  *      `gemini-3.1-pro-preview` and has no built-in knowledge of the
- *      proxy-specific tools (`code_search`, `peer_review`, `advisor`,
+ *      proxy-specific tools (`code_search`, `advisor`, `update_plan`,
  *      `fetch_url`). Listing names alone wastes the first turn on
  *      discovery probing.
  *
@@ -39,19 +39,20 @@ const SECURITY_BOUNDARY = `You are operating inside a sandboxed coding worker. I
 // and has no built-in knowledge of proxy-specific tools, so each line
 // states what the tool does in factual present tense.
 //
-// `peer_review` and `advisor` are intentionally NOT listed here AND
-// are not wired into `buildWorkerTools` (see src/lib/worker-agent/tools.ts).
-// The worker's narrow escalation path for code review is the single
-// `codex_review` tool (implement mode only) — peer_review's broader
-// critic-selection surface and advisor's free-form second-opinion
-// surface are reserved for the main agent.
+// `advisor` and `update_plan` are wired into every mode; `peer_review`
+// is implemented but intentionally NOT wired into `buildWorkerTools`
+// (peer critics aren't part of the worker surface). `codex_review`
+// (implement mode only) is the worker's code-review escalation.
 const READ_TOOL_NOTES = [
   "`read` — return a file's content.",
   "`glob` — list files matching a glob pattern.",
   "`grep` — regex search across files.",
-  "`code_search` — ranked code-discovery hits (BM25F + tree-sitter, no additional model call). Multiple independent queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, `.csv`, `.env*`, config-only wiring) and when `code_search` returns no hits, `grep`/`glob` apply.",
+  "`code_search` — semantic-first code search: the default `semantic` mode ranks by MEANING (ColBERT), falling back to lexical BM25F-ranked hits when the index isn't ready (the `source` field says which ran); use `lexical`/`exact`/`regex`/`ast` for exact symbols. Multiple independent queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, `.csv`, `.env*`, config-only wiring) and when a search returns no hits, `grep`/`glob` apply.",
   "`web_search` — Copilot-backed web search; returns titles, URLs, and snippets.",
   "`fetch_url` — fetch a single URL and return body text.",
+  "`toolbelt` — run a read-only analysis CLI (no shell): rg, fd, sg, jq, yq, gron, scc, tokei, difft, git (read-only subcommands).",
+  "`advisor` — consult a stronger cross-lab reviewer model on a focused concern (your approach, a blocker, a decision); it sees the recent transcript automatically.",
+  "`update_plan` — maintain a short ordered checklist of your steps (send the full list each call); it's re-surfaced to you each turn so it survives context compaction.",
 ] as const
 
 const WRITE_TOOL_NOTES = [

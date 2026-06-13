@@ -740,14 +740,16 @@ describe("MCP handler trims the response per the minimality principle", () => {
     const result = await tool.handler({
       query: "findMe",
       workspace: fx.root,
-      mode: "literal",
+      mode: "exact",
       limit: 5,
     })
     expect(result.isError).toBeUndefined()
     const body = JSON.parse(result.content[0].text) as Record<string, unknown>
 
-    // Top-level shape — only these keys allowed:
+    // Top-level shape — only these keys allowed (`source` is the unified
+    // tool's provenance field; semantic | lexical | lexical-fallback):
     const allowedTopKeys = new Set([
+      "source",
       "results",
       "truncated",
       "notice",
@@ -756,6 +758,8 @@ describe("MCP handler trims the response per the minimality principle", () => {
     for (const k of Object.keys(body)) {
       expect(allowedTopKeys.has(k)).toBe(true)
     }
+    // A forced lexical mode reports source "lexical" (never touches colgrep).
+    expect(body.source).toBe("lexical")
 
     // No internals leaked:
     expect(body).not.toHaveProperty("scanned_files")
@@ -765,7 +769,9 @@ describe("MCP handler trims the response per the minimality principle", () => {
     expect(body).not.toHaveProperty("structuralFallback")
     expect(body).not.toHaveProperty("ranking_fallback")
 
-    // Per-hit shape — exactly these three keys:
+    // Per-hit shape — forced lexical hits carry only file/line/snippet
+    // (no score/match_byte_range/field_contributions; role only when the
+    // structural pass AST-confirms, which literal mode doesn't run):
     const results = body.results as Array<Record<string, unknown>>
     expect(results.length).toBeGreaterThan(0)
     for (const hit of results) {
@@ -783,7 +789,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
     const result = await tool.handler({
       query: "findMe",
       workspace: fx.root,
-      mode: "literal",
+      mode: "exact",
       limit: 5,
     })
     const body = JSON.parse(result.content[0].text) as Record<string, unknown>
@@ -801,7 +807,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
       const result = await tool.handler({
         query: "findMe",
         workspace: fx.root,
-        mode: "ranked",
+        mode: "lexical",
         structural,
         limit: 5,
       })
@@ -821,7 +827,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
     const onByDefault = await tool.handler({
       query: "findMe",
       workspace: fx.root,
-      mode: "literal",
+      mode: "exact",
       limit: 5,
     })
     const onBody = JSON.parse(onByDefault.content[0].text) as Record<
@@ -834,7 +840,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
     const optedOut = await tool.handler({
       query: "findMe",
       workspace: fx.root,
-      mode: "literal",
+      mode: "exact",
       limit: 5,
       summary: false,
     })
@@ -886,7 +892,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
       const result = await tool.handler({
         query: "HIT_LINE_",
         workspace: fatFx.root,
-        mode: "literal",
+        mode: "exact",
         limit: 5000,
       })
       expect(result.isError).toBeUndefined()
@@ -923,7 +929,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
     const result = await tool.handler({
       query: "findMe",
       workspace: fx.root,
-      mode: "ranked",
+      mode: "lexical",
       limit: 5,
     })
     const body = JSON.parse(result.content[0].text) as Record<string, unknown>

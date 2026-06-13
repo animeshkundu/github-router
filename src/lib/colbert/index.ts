@@ -24,8 +24,12 @@ import { parseBoolEnv } from "../exec"
 
 import { gitState } from "./index-store"
 import { registerColbertExitHandlers } from "./lifecycle"
-import { provisionColbert } from "./provision"
-import { kickBackgroundInit } from "./runner"
+import {
+  colbertArtifactsPresent,
+  colbertSmokeOk,
+  provisionColbert,
+} from "./provision"
+import { kickBackgroundInit, startupKickAllowed } from "./runner"
 
 /**
  * True unless the operator opted out via
@@ -37,6 +41,22 @@ import { kickBackgroundInit } from "./runner"
  */
 export function semanticSearchOptedIn(): boolean {
   return parseBoolEnv(process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH) !== true
+}
+
+/**
+ * Availability predicate for ColBERT semantic search — the single
+ * source of truth, living in this leaf module so callers that must not
+ * import `mcp-capabilities` (notably the unified code-search helper)
+ * can read it without closing an import cycle through `worker-agent`.
+ *
+ * True iff the operator hasn't opted out AND the colgrep binary + model
+ * + ORT are provisioned on disk AND the post-provision smoke test
+ * passed. `mcp-capabilities.semanticSearchEnabled()` delegates here.
+ */
+export function colbertSearchEnabled(): boolean {
+  return (
+    semanticSearchOptedIn() && colbertArtifactsPresent() && colbertSmokeOk()
+  )
 }
 
 let _started = false
@@ -74,10 +94,13 @@ export async function provisionAndIndexColbert(opts: {
   if (!provisioned) return
 
   // Background-index the launch cwd if it's a git repo. Non-blocking.
+  // Skip when the index is already in a capped/persistent failure state so a
+  // restart loop doesn't re-burn a known-bad build (the per-query self-heal
+  // still gives it its bounded retries).
   const cwd = opts.cwd ?? process.cwd()
   try {
     const g = await gitState(cwd)
-    if (g.isRepo) {
+    if (g.isRepo && (await startupKickAllowed(cwd))) {
       kickBackgroundInit(cwd)
     }
   } catch (err) {

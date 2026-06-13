@@ -202,8 +202,8 @@ export async function ensurePaths(): Promise<void> {
   })
   // ColBERT sidecar boot sweep: reclassify any `.gh-router-meta/*.json`
   // entry stuck in `building` with a dead `buildPid` → `failed`, so the
-  // next semantic_search re-kicks a build instead of routing to a
-  // never-finishing one. NEVER kills a PID from a prior boot. Lazy-
+  // next `code` semantic-mode call re-kicks a build instead of routing to
+  // a never-finishing one. NEVER kills a PID from a prior boot. Lazy-
   // imported so paths.ts doesn't drag the colbert module into every
   // consumer.
   await (async () => {

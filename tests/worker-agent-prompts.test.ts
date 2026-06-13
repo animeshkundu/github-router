@@ -37,6 +37,7 @@ describe("systemPromptFor", () => {
       expect(prompt).toContain("`code_search`")
       expect(prompt).toContain("`web_search`")
       expect(prompt).toContain("`fetch_url`")
+      expect(prompt).toContain("`toolbelt`")
       // Each is on its own bullet line.
       expect(prompt).toMatch(/^- `read`/m)
       expect(prompt).toMatch(/^- `glob`/m)
@@ -44,13 +45,14 @@ describe("systemPromptFor", () => {
       expect(prompt).toMatch(/^- `code_search`/m)
       expect(prompt).toMatch(/^- `web_search`/m)
       expect(prompt).toMatch(/^- `fetch_url`/m)
-      // peer_review and advisor are intentionally NOT in the prompt
-      // awareness (per user directive). They remain in the worker's
-      // tool surface only if buildWorkerTools wires them, but the
-      // current narrow surface drops them entirely from explore and
-      // replaces them with `codex_review` in implement.
+      // `advisor` and `update_plan` ARE now wired into every mode (advisor
+      // is the worker's consultation path; update_plan its planning tool).
+      // `peer_review` stays out (peer critics aren't part of the surface).
+      expect(prompt).toContain("`advisor`")
+      expect(prompt).toContain("`update_plan`")
+      expect(prompt).toMatch(/^- `advisor`/m)
+      expect(prompt).toMatch(/^- `update_plan`/m)
       expect(prompt).not.toContain("`peer_review`")
-      expect(prompt).not.toContain("`advisor`")
     }
   })
 
@@ -105,13 +107,17 @@ describe("systemPromptFor", () => {
     expect(systemPromptFor("review")).toBe(systemPromptFor("review"))
   })
 
-  test("byte cap holds — neither mode exceeds ~2000 bytes", () => {
+  test("byte cap holds — no mode exceeds ~2000 bytes", () => {
     // Re-derived after the descriptive rewrite. The prompt is sent
     // on every worker invocation, so the cap is real budget pressure.
-    // If a future tightening shaves bytes, lower this cap too.
+    // If a future tightening shaves bytes, lower this cap too. `review`
+    // is the LARGEST mode (reviewer role frame + the full read-only tool
+    // list), so it's the one closest to the cap — assert it explicitly.
     const exploreBytes = Buffer.byteLength(systemPromptFor("explore"), "utf8")
+    const reviewBytes = Buffer.byteLength(systemPromptFor("review"), "utf8")
     const implBytes = Buffer.byteLength(systemPromptFor("implement"), "utf8")
     expect(exploreBytes).toBeLessThan(2000)
+    expect(reviewBytes).toBeLessThan(2000)
     expect(implBytes).toBeLessThan(2000)
   })
 

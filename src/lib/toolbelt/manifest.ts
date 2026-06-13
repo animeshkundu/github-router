@@ -218,4 +218,113 @@ export const TOOLBELT_TOOLS: ToolSpec[] = [
       },
     },
   },
+  {
+    command: "scc",
+    binBasename: "scc",
+    assets: {
+      "win32-x64": {
+        url: "https://github.com/boyter/scc/releases/download/v3.7.0/scc_Windows_x86_64.zip",
+        sha256: "97abf9d55d4b79d3310536d576ccbdf5017aeb425780e850336120b6e67622e1",
+        archive: "zip",
+      },
+      "win32-arm64": {
+        url: "https://github.com/boyter/scc/releases/download/v3.7.0/scc_Windows_arm64.zip",
+        sha256: "fd114614c10382c9ed2e32d5455cc4b51960a9f71691c5c1ca42b31adea5b84d",
+        archive: "zip",
+      },
+      "darwin-x64": {
+        url: "https://github.com/boyter/scc/releases/download/v3.7.0/scc_Darwin_x86_64.tar.gz",
+        sha256: "c3f7457856b9169ccb3c1dd14198e67f730bee065f24d9051bf52cdc2a719ecc",
+        archive: "tar.gz",
+      },
+      "darwin-arm64": {
+        url: "https://github.com/boyter/scc/releases/download/v3.7.0/scc_Darwin_arm64.tar.gz",
+        sha256: "376cbae670be59ee64f398de20e0694ec434bf8a9b842642952b0ab0be5f3961",
+        archive: "tar.gz",
+      },
+      "linux-x64": {
+        url: "https://github.com/boyter/scc/releases/download/v3.7.0/scc_Linux_x86_64.tar.gz",
+        sha256: "3d9d65b00ca874c2b29151abe7e1480736f5229edc3ce8e4b2791460cdfabf5a",
+        archive: "tar.gz",
+      },
+      "linux-arm64": {
+        url: "https://github.com/boyter/scc/releases/download/v3.7.0/scc_Linux_arm64.tar.gz",
+        sha256: "dcb05c6e993bb2d8d2da4765ff018f2e752325dd205a41698929c55e4123575d",
+        archive: "tar.gz",
+      },
+    },
+  },
+  {
+    // difftastic ships its binary as `difft`.
+    command: "difftastic",
+    binBasename: "difft",
+    assets: {
+      "win32-x64": {
+        url: "https://github.com/Wilfred/difftastic/releases/download/0.69.0/difft-x86_64-pc-windows-msvc.zip",
+        sha256: "a5adbf57eb1b923b62d1c3596c4f827df143f5b52cfba48bb9e83f41dea90c02",
+        archive: "zip",
+      },
+      "win32-arm64": {
+        url: "https://github.com/Wilfred/difftastic/releases/download/0.69.0/difft-aarch64-pc-windows-msvc.zip",
+        sha256: "fa709e803088b54774adf0111409483ee5edfbbc1f9dcc5610e81e4ed3841e53",
+        archive: "zip",
+      },
+      "darwin-x64": {
+        url: "https://github.com/Wilfred/difftastic/releases/download/0.69.0/difft-x86_64-apple-darwin.tar.gz",
+        sha256: "5f5487e7a6e817194a1cef297d2ffb300454371635a4cde865087dbc064730a2",
+        archive: "tar.gz",
+      },
+      "darwin-arm64": {
+        url: "https://github.com/Wilfred/difftastic/releases/download/0.69.0/difft-aarch64-apple-darwin.tar.gz",
+        sha256: "c958b87885a5825a356c5899ac7ecdd752a7942084199f2be4bc0bf8c9de8e33",
+        archive: "tar.gz",
+      },
+      "linux-x64": {
+        url: "https://github.com/Wilfred/difftastic/releases/download/0.69.0/difft-x86_64-unknown-linux-gnu.tar.gz",
+        sha256: "038db96a0e8fce69f2554e33e04ff75fbf6f96ea45cb4edb9ed6203a2c4750ff",
+        archive: "tar.gz",
+      },
+      "linux-arm64": {
+        url: "https://github.com/Wilfred/difftastic/releases/download/0.69.0/difft-aarch64-unknown-linux-gnu.tar.gz",
+        sha256: "abd2f42d2afd424312b4862aa7c7bb0320447670ae22fabcc5159db03e2dccbd",
+        archive: "tar.gz",
+      },
+    },
+  },
+  {
+    command: "gron",
+    binBasename: "gron",
+    assets: {
+      "win32-x64": {
+        url: "https://github.com/tomnomnom/gron/releases/download/v0.7.1/gron-windows-amd64-0.7.1.zip",
+        sha256: "5ed427a4a504d8e03a1770b71d4ad16a3764179e085b5ae84e51a57b299f300d",
+        archive: "zip",
+      },
+      "win32-arm64": {
+        url: "https://github.com/tomnomnom/gron/releases/download/v0.7.1/gron-windows-arm64-0.7.1.zip",
+        sha256: "9bd38a241f1afdbd3c8f952b92b7090e7a446cac5251bfed3fdf28f219c9dda8",
+        archive: "zip",
+      },
+      "darwin-x64": {
+        url: "https://github.com/tomnomnom/gron/releases/download/v0.7.1/gron-darwin-amd64-0.7.1.tgz",
+        sha256: "59034d4aa883c5815784b290567d104669a51f20eaf97f1d8baa4f74e22047d6",
+        archive: "tar.gz",
+      },
+      "darwin-arm64": {
+        url: "https://github.com/tomnomnom/gron/releases/download/v0.7.1/gron-darwin-arm64-0.7.1.tgz",
+        sha256: "1b9b987c6ead684a992db91b7a32fd15ef946013dfabfe84d00b2fa6f55d7182",
+        archive: "tar.gz",
+      },
+      "linux-x64": {
+        url: "https://github.com/tomnomnom/gron/releases/download/v0.7.1/gron-linux-amd64-0.7.1.tgz",
+        sha256: "ca0335826b02b044fa05d7e951521e45c6ced1c381a73ed5803450088e18bf22",
+        archive: "tar.gz",
+      },
+      "linux-arm64": {
+        url: "https://github.com/tomnomnom/gron/releases/download/v0.7.1/gron-linux-arm64-0.7.1.tgz",
+        sha256: "5d1d4764723a0f768d9ddef0685a052f564c8bbf5e475382342faf4224a07d80",
+        archive: "tar.gz",
+      },
+    },
+  },
 ]

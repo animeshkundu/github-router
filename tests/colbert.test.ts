@@ -16,6 +16,7 @@
 
 import { afterEach, describe, expect, mock, test } from "bun:test"
 import fs from "node:fs/promises"
+import fsSync from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
@@ -135,7 +136,7 @@ describe("dropColgrepSecrets (child-env credential strip)", () => {
 // Capability gate — off by default in an unprovisioned env
 // ---------------------------------------------------------------------
 
-describe("semanticSearchEnabled gate (availability-based)", () => {
+describe("semanticSearchEnabled (internal colgrep-availability predicate)", () => {
   test("false when artifacts are absent (CI / sandbox / pre-provision)", async () => {
     const cap = await import("../src/lib/mcp-capabilities")
     // No artifacts on disk in the temp home → gate must be false so the
@@ -269,6 +270,60 @@ describe("index-store: meta keying + freshness verdict", () => {
     expect(v.verdict).toBe("building")
   })
 
+  test("building with a DEAD/absent build PID + no index → verdict crashed", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    store.__resetInitDebounceForTests() // ensure no in-flight init for ws
+    const ws = path.join(TEST_HOME, "ws-crashed")
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "building",
+      // No buildPid → treated as not-running; no init in flight + no index
+      // on disk → a crashed-mid-build escapee.
+    })
+    const v = await store.freshnessVerdict(ws)
+    expect(v.verdict).toBe("crashed")
+  })
+
+  test("building with a LIVE build PID → still building (never reclassified)", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    const ws = path.join(TEST_HOME, "ws-building-live")
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "building",
+      buildPid: process.pid, // this test process — definitely alive
+    })
+    const v = await store.freshnessVerdict(ws)
+    expect(v.verdict).toBe("building")
+  })
+
+  test("building, no PID, RECENT start → grace (building); OLD start → crashed", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    store.__resetInitDebounceForTests()
+    const mk = async (name: string, ageMs: number) => {
+      const ws = path.join(TEST_HOME, name)
+      await store.writeColbertMeta({
+        workspace: ws,
+        model: "LateOn-Code-edge",
+        modelRev: "rev",
+        status: "building",
+        lastIndexedAt: new Date(Date.now() - ageMs).toISOString(),
+      })
+      return ws
+    }
+    // Within the 30s spawn-grace → cross-process spawn window, not crashed.
+    expect((await store.freshnessVerdict(await mk("ws-grace", 1000))).verdict).toBe(
+      "building",
+    )
+    // Past the grace, dead/absent PID, no index → crashed.
+    expect(
+      (await store.freshnessVerdict(await mk("ws-grace-old", 120_000))).verdict,
+    ).toBe("crashed")
+  })
+
   test("init debounce: second claim returns false until released", async () => {
     const store = await import("../src/lib/colbert/index-store")
     store.__resetInitDebounceForTests()
@@ -286,6 +341,47 @@ describe("index-store: meta keying + freshness verdict", () => {
 // ---------------------------------------------------------------------
 // Runner — no-fallback status envelopes
 // ---------------------------------------------------------------------
+
+describe("index progress probe (shared init/search stall signal)", () => {
+  test("indexDirSignature + makeIndexProgressProbe: progress vs frozen vs null grace", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    const { makeIndexProgressProbe } = await import("../src/lib/colbert/runner")
+    const { PATHS } = await import("../src/lib/paths")
+
+    // Unknown workspace → no project dir → null signature → one window of
+    // grace (true), then no-progress (false).
+    const unknown = path.join(TEST_HOME, "probe-unknown")
+    fsSync.mkdirSync(unknown, { recursive: true })
+    expect(store.indexDirSignature(unknown)).toBeNull()
+    const pUnknown = makeIndexProgressProbe(unknown)
+    expect(pUnknown()).toBe(true) // null grace #1
+    expect(pUnknown()).toBe(false) // null streak → stuck
+
+    // A real colgrep-style project dir whose project.json points at `ws`.
+    const ws = path.join(TEST_HOME, "probe-ws")
+    fsSync.mkdirSync(ws, { recursive: true })
+    const projDir = path.join(PATHS.COLBERT_INDICES_DIR, "probe-proj")
+    fsSync.mkdirSync(path.join(projDir, "index"), { recursive: true })
+    fsSync.writeFileSync(
+      path.join(projDir, "project.json"),
+      JSON.stringify({ path: ws }),
+    )
+    fsSync.writeFileSync(path.join(projDir, "index", "a"), "x".repeat(10))
+
+    const sig1 = store.indexDirSignature(ws)
+    expect(sig1).not.toBeNull()
+
+    const probe = makeIndexProgressProbe(ws)
+    expect(probe()).toBe(true) // baseline
+    // No change since baseline → frozen → no progress.
+    expect(probe()).toBe(false)
+    // Grow the index dir → progressing again.
+    fsSync.writeFileSync(path.join(projDir, "index", "b"), "y".repeat(100))
+    expect(probe()).toBe(true)
+    // Frozen again.
+    expect(probe()).toBe(false)
+  })
+})
 
 describe("runSemanticSearch: no-fallback contract", () => {
   test("absent workspace → unavailable isError (no other search run)", async () => {
@@ -334,6 +430,116 @@ describe("runSemanticSearch: no-fallback contract", () => {
     expect(r.status).toBe("failed")
     expect(r.isError).toBe(true)
     expect(r.results).toBeUndefined()
+  })
+
+  test("failed (transient, under cap, backoff elapsed) → self-heal kicks + retry notice", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    store.__resetInitDebounceForTests()
+    const ws = path.join(TEST_HOME, "ws-failed-retry")
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "failed",
+      failureClass: "error",
+      failedAttempts: 1,
+      lastIndexedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(), // 1h ago
+    })
+    const { runSemanticSearch } = await import("../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+    expect(r.status).toBe("failed")
+    expect(r.isError).toBe(true)
+    expect(r.notice).toMatch(/re-index was started|retry/i)
+  })
+
+  test("failed (capped: failedAttempts >= MAX) → operator-actionable, no retry promise", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    store.__resetInitDebounceForTests()
+    const ws = path.join(TEST_HOME, "ws-failed-capped")
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "failed",
+      failureClass: "error",
+      failedAttempts: 3,
+      lastIndexedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    })
+    const { runSemanticSearch } = await import("../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+    expect(r.status).toBe("failed")
+    expect(r.isError).toBe(true)
+    expect(r.notice).toMatch(/keeps failing/i)
+  })
+
+  test("crashed (building + dead PID + no index) → persists failed+crashed, retry notice", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    store.__resetInitDebounceForTests()
+    const ws = path.join(TEST_HOME, "ws-runner-crashed")
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "building", // stranded, no buildPid → crashed verdict
+    })
+    const { runSemanticSearch } = await import("../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+    expect(r.status).toBe("failed")
+    expect(r.isError).toBe(true)
+    // The crash was persisted as failed+crashed with an incremented counter.
+    const meta = await store.readColbertMeta(ws)
+    expect(meta?.status).toBe("failed")
+    expect(meta?.failureClass).toBe("crashed")
+    expect(meta?.failedAttempts).toBe(1)
+  })
+
+  test("crashed streak survives the building write → cap still trips", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    store.__resetInitDebounceForTests()
+    const ws = path.join(TEST_HOME, "ws-crash-streak")
+    // A re-kicked build that carried the streak into its `building` write,
+    // then crashed abruptly (no final write): building + failedAttempts=2.
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "building",
+      failedAttempts: 2,
+      lastIndexedAt: new Date(Date.now() - 120_000).toISOString(), // past grace
+    })
+    const { runSemanticSearch } = await import("../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+    // crashed verdict reads the carried streak (2) + 1 = 3 → at the cap →
+    // operator-actionable, NOT another retry (this is the storm guard).
+    expect(r.notice).toMatch(/keeps failing/i)
+    const meta = await store.readColbertMeta(ws)
+    expect(meta?.failedAttempts).toBe(3)
+  })
+})
+
+describe("startupKickAllowed (restart anti-burn guard)", () => {
+  test("absent / ready / under-cap-error → allowed; capped / stuck → blocked", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    const { startupKickAllowed } = await import("../src/lib/colbert/runner")
+
+    const wsAbsent = path.join(TEST_HOME, "sk-absent")
+    expect(await startupKickAllowed(wsAbsent)).toBe(true) // no meta
+
+    const mk = async (name: string, m: Partial<Record<string, unknown>>) => {
+      const ws = path.join(TEST_HOME, name)
+      await store.writeColbertMeta({
+        workspace: ws,
+        model: "LateOn-Code-edge",
+        modelRev: "rev",
+        status: "failed",
+        ...m,
+      } as never)
+      return ws
+    }
+
+    expect(await startupKickAllowed(await mk("sk-under", { failureClass: "error", failedAttempts: 1 }))).toBe(true)
+    expect(await startupKickAllowed(await mk("sk-capped", { failureClass: "error", failedAttempts: 3 }))).toBe(false)
+    expect(await startupKickAllowed(await mk("sk-stuck", { failureClass: "stuck", failedAttempts: 1 }))).toBe(false)
   })
 })
 
@@ -538,7 +744,7 @@ describe("runManagedExeCapture lifecycle (real child)", () => {
 
 
 // ---------------------------------------------------------------------
-// MCP surface regression — semantic_search absent by default
+// MCP surface regression — semantic_search folded into the `code` tool
 // ---------------------------------------------------------------------
 
 describe("MCP tools/list surface (regression guard)", () => {
@@ -565,50 +771,19 @@ describe("MCP tools/list surface (regression guard)", () => {
     return json.result.tools.map((t) => t.name)
   }
 
-  test("semantic_search NOT listed when artifacts absent (search group stays {code, web})", async () => {
+  test("search group is {code, web}; `semantic_search` is no longer a standalone tool", async () => {
+    // semantic_search was folded into the unified `code` tool (its default
+    // mode runs ColBERT and transparently falls back to lexical), so the
+    // search surface is stable at {code, web} regardless of colgrep
+    // availability — `code` is always listed (it always returns results).
     const { state } = await import("../src/lib/state")
     state.peerMcpNonce = NONCE
     state.models = { object: "list", data: [] } as never
     try {
       const names = await listToolNames()
       expect(names).not.toContain("semantic_search")
-      // The always-on search-group tools are still present.
       expect(names).toContain("code")
       expect(names).toContain("web")
-    } finally {
-      state.peerMcpNonce = undefined
-      state.models = undefined
-    }
-  })
-
-  test("defense-in-depth: tools/call semantic_search → -32601 when gate off", async () => {
-    const { state } = await import("../src/lib/state")
-    const { mcpRoutes } = await import("../src/routes/mcp/route")
-    const { __resetInFlightForTests } = await import("../src/routes/mcp/handler")
-    __resetInFlightForTests()
-    state.peerMcpNonce = NONCE
-    state.models = { object: "list", data: [] } as never
-    try {
-      const req = new Request(`http://${PROXY_HOST}/`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${NONCE}`,
-          host: PROXY_HOST,
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 2,
-          method: "tools/call",
-          params: { name: "semantic_search", arguments: { query: "auth" } },
-        }),
-      })
-      const res = await mcpRoutes.request(req)
-      const json = (await res.json()) as {
-        error?: { code: number; message: string }
-      }
-      expect(json.error?.code).toBe(-32601)
-      expect(json.error?.message).toMatch(/unknown tool/i)
     } finally {
       state.peerMcpNonce = undefined
       state.models = undefined

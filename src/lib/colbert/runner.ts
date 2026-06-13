@@ -30,7 +30,9 @@ import { runManagedExeCapture } from "../exec"
 import {
   freshnessVerdict,
   gitState,
+  indexDirSignature,
   isInitInFlight,
+  readColbertMeta,
   releaseInit,
   tryClaimInit,
   writeColbertMeta,
@@ -46,14 +48,87 @@ import {
 } from "./provision"
 import { PATHS } from "../paths"
 
-/** Hard per-search timeout. The encode + incremental delta is sub-second
- * to seconds; 30s catches a pathological re-index on a huge diff. */
-const SEARCH_TIMEOUT_MS = 30_000
-/** Generous cap on the background init build (matches the worker-agent). */
-const INIT_TIMEOUT_MS = 30 * 60 * 1000
+/** Caller responsiveness budget for a search. A warm search is sub-second;
+ * if colgrep instead starts a foreground auto-index / reconcile (its index is
+ * behind) and hasn't returned results by this point, the search DETACHES —
+ * the caller gets a `building` fallback now and the colgrep child finishes
+ * the index in the background (never killed mid-write — that would orphan
+ * docs and desync the index). The next query is then fast. */
+const SEARCH_RESPOND_MS = envIntMs(
+  "GH_ROUTER_COLBERT_SEARCH_RESPOND_MS",
+  20_000,
+)
+/** Inactivity (stall) watchdog for the background init: if the colgrep
+ * index dir stops growing for this long, the build is hung → kill it. This
+ * is the PRIMARY "stuck vs slow" signal — a build that keeps writing shards
+ * runs as long as it needs (a 50GB repo can take hours), only a genuinely
+ * hung build is killed. colgrep is silent on a non-TTY pipe during the
+ * encode, so disk growth (not output) is the progress signal. */
+const INIT_STALL_MS = envIntMs("GH_ROUTER_COLBERT_INIT_STALL_MS", 5 * 60 * 1000)
+/** Absolute backstop on the background init — a generous ceiling so a truly
+ * runaway process can't live forever, NOT the primary mechanism (the stall
+ * watchdog is). Raised well above the old 30-min cap so a legitimately huge
+ * repo isn't cut off mid-progress. */
+const INIT_TIMEOUT_MS = envIntMs(
+  "GH_ROUTER_COLBERT_INIT_TIMEOUT_MS",
+  6 * 60 * 60 * 1000,
+)
+/** After a failed build, don't re-kick a fresh one until this long has
+ * elapsed (throttles a fast-failing init; the per-workspace debounce +
+ * attempt cap are the other two guards). */
+const FAILED_RETRY_BACKOFF_MS = 5 * 60 * 1000
+/** Consecutive failed-build attempts before the self-heal gives up and the
+ * notice goes operator-actionable. Reset to 0 on a successful build. */
+const MAX_FAILED_ATTEMPTS = 3
 /** Reuse code-search's stdout cap (10 MiB) for the full-CodeUnit payload. */
 const MAX_STDOUT_BYTES = 10 * 1024 * 1024
 const DEFAULT_LIMIT = 15
+
+/** Parse a positive-integer-milliseconds env override, else the default. */
+function envIntMs(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (raw === undefined) return fallback
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback
+}
+
+/**
+ * A progress probe for the inactivity watchdog: returns `false` (→ kill)
+ * only when colgrep's index dir for `workspace` has stopped growing. colgrep
+ * is SILENT on a non-TTY pipe during the encode, so disk growth — not output
+ * — is the progress signal. `null` (dir not found yet) gets one window of
+ * grace, then counts as no-progress (a build/search hung before it ever
+ * wrote anything). Shared by BOTH the background init and the foreground
+ * search so neither colgrep child is killed mid-write (which orphans docs).
+ */
+export function makeIndexProgressProbe(workspace: string): () => boolean {
+  let lastSig: string | null | undefined
+  let nullStreak = 0
+  return () => {
+    const sig = indexDirSignature(workspace)
+    if (sig === null) {
+      nullStreak += 1
+      return nullStreak <= 1
+    }
+    nullStreak = 0
+    const prev = lastSig
+    lastSig = sig
+    if (prev === undefined) return true // first measurement → baseline
+    return sig !== prev // progressing iff the signature changed
+  }
+}
+
+/** Workspaces with a DETACHED indexing search in flight. A new search for
+ * such a workspace returns `building` instead of spawning a concurrent
+ * colgrep that could collide on the index write — serving the same "one
+ * colgrep writer per workspace" goal as the init debounce. Cleared when the
+ * detached search completes. */
+const _searchIndexInFlight = new Set<string>()
+
+/** Test-only: clear the detached-search in-flight set. */
+export function __resetSearchInFlightForTests(): void {
+  _searchIndexInFlight.clear()
+}
 
 export type SemanticStatus =
   | "ready"
@@ -144,14 +219,12 @@ export async function runSemanticSearch(opts: {
           "no semantic index for this workspace yet — a background index was started; retry shortly or use code_search",
       }
     }
-    case "failed": {
-      return {
-        status: "failed",
-        isError: true,
-        notice:
-          "semantic index build failed for this workspace; use code_search",
-      }
-    }
+    case "failed":
+      return handleFailure(workspace, fresh.meta, false)
+    case "crashed":
+      // A build whose PID died without recording a result (proxy kill / OOM)
+      // — detected per-query by the freshness verdict, not yet persisted.
+      return handleFailure(workspace, fresh.meta, true)
     case "building": {
       return {
         status: "building",
@@ -177,6 +250,89 @@ export async function runSemanticSearch(opts: {
 
   // Fresh + completed index on disk → spawn colgrep search.
   return spawnSearch({ query, workspace, limit, pattern: opts.pattern })
+}
+
+/**
+ * Decide how to respond to a failed/crashed index and SELF-HEAL when the
+ * failure looks transient: re-kick a debounced background re-index when the
+ * attempt count is under the per-class cap AND the backoff has elapsed,
+ * else return an actionable notice (transient-throttled vs operator-action).
+ *
+ * A `crashed` verdict is a per-query detection of a build whose PID died
+ * without recording a result (proxy kill / OOM); persist it as
+ * `failed`+`crashed` (incrementing the attempt counter) before deciding so a
+ * later query sees a consistent `failed` state. `stuck` (hung build killed
+ * by the inactivity watchdog) retries at most once — re-running a hung build
+ * usually hangs again; transient classes retry up to `MAX_FAILED_ATTEMPTS`.
+ */
+async function handleFailure(
+  workspace: string,
+  meta: ColbertMeta | null,
+  crashedVerdict: boolean,
+): Promise<SemanticSearchResult> {
+  const cls: NonNullable<ColbertMeta["failureClass"]> = crashedVerdict
+    ? "crashed"
+    : (meta?.failureClass ?? "error")
+  const attempts = crashedVerdict
+    ? (meta?.failedAttempts ?? 0) + 1
+    : (meta?.failedAttempts ?? 1)
+  const lastAt = meta?.lastIndexedAt
+
+  if (crashedVerdict) {
+    // Persist the crash (was a stranded `building` entry). Keep the existing
+    // lastIndexedAt (build-start) so the backoff measures from when the
+    // build began, not from this detection.
+    await writeColbertMeta({
+      workspace,
+      model: meta?.model ?? MODEL_ID,
+      modelRev: meta?.modelRev ?? MODEL_REVISION,
+      status: "failed",
+      failureClass: "crashed",
+      failedAttempts: attempts,
+      lastIndexedAt: lastAt ?? new Date().toISOString(),
+      lastIndexedHead: meta?.lastIndexedHead,
+      lastIndexedDirty: meta?.lastIndexedDirty,
+      ownerInstanceId: getColbertInstanceUuid(),
+    }).catch(() => {})
+  }
+
+  const cap = cls === "stuck" ? 2 : MAX_FAILED_ATTEMPTS
+  // NaN-safe: a missing/corrupt timestamp counts as "elapsed" (allow retry)
+  // rather than NaN-comparing to false and blocking retries forever.
+  const lastMs = lastAt ? Date.parse(lastAt) : NaN
+  const backoffElapsed =
+    !Number.isFinite(lastMs) || Date.now() - lastMs >= FAILED_RETRY_BACKOFF_MS
+
+  if (attempts < cap && backoffElapsed) {
+    kickBackgroundInit(workspace)
+    consola.debug(
+      `colbert: re-kicking index (class=${cls}, attempt=${attempts}/${cap})`,
+    )
+    return {
+      status: "failed",
+      isError: true,
+      notice:
+        'semantic index unavailable; a background re-index was started — retry mode:"semantic" shortly, or use code_search with specific symbol/keyword terms now',
+    }
+  }
+
+  if (attempts < cap) {
+    // Under the cap but inside the backoff window — a retry is pending.
+    return {
+      status: "failed",
+      isError: true,
+      notice:
+        'semantic index unavailable (recent build failure); retry mode:"semantic" shortly, or use code_search with specific symbol/keyword terms now',
+    }
+  }
+
+  // Capped → stop retrying; operator-actionable.
+  consola.debug(`colbert: index ${cls}, giving up (attempts=${attempts})`)
+  return {
+    status: "failed",
+    isError: true,
+    notice: `semantic index keeps failing (${cls}); use code_search. See logs; for a very large repo raise GH_ROUTER_COLBERT_INIT_STALL_MS / GH_ROUTER_COLBERT_INIT_TIMEOUT_MS`,
+  }
 }
 
 async function spawnSearch(opts: {
@@ -219,15 +375,95 @@ async function spawnSearch(opts: {
   if (opts.pattern) args.push("-e", opts.pattern)
   args.push(opts.query, opts.workspace)
 
-  let res
+  const wsKey = path.resolve(opts.workspace)
+  if (_searchIndexInFlight.has(wsKey)) {
+    // Conservative per-workspace guard: only ONE colgrep search runs per
+    // workspace at a time. colgrep auto-indexes/reconciles during a search
+    // (no read-only flag), and two concurrent searches that both reconcile
+    // would be unsynchronized writers — so we serialize rather than risk it.
+    // The lock is held only while the search runs (sub-second for a warm
+    // read; until the background index completes for a detached one), so a
+    // SEQUENTIAL search pattern never contends — only a simultaneous batch on
+    // the same workspace, where the losers get an immediate lexical fallback.
+    return {
+      status: "building",
+      notice:
+        "semantic index is busy (another search is running); retry shortly",
+    }
+  }
+  _searchIndexInFlight.add(wsKey)
+
+  // Run colgrep under the GENEROUS (build-grade) watchdog: a search that
+  // triggers a foreground auto-index / reconcile is NEVER killed mid-write
+  // (that orphans docs and desyncs the index) — only a genuinely hung one is,
+  // after INIT_STALL_MS of no progress (no output AND no index-dir growth).
+  // INIT_TIMEOUT_MS is a pure runaway backstop. The CALLER doesn't wait this
+  // long — see the responsiveness race below.
+  let searchPromise: ReturnType<typeof runManagedExeCapture>
   try {
-    res = await runManagedExeCapture(binary, args, {
+    searchPromise = runManagedExeCapture(binary, args, {
       env: colgrepEnv(),
-      timeoutMs: SEARCH_TIMEOUT_MS,
+      inactivityTimeoutMs: INIT_STALL_MS,
+      onInactivityCheck: makeIndexProgressProbe(opts.workspace),
+      timeoutMs: INIT_TIMEOUT_MS,
       maxStdoutBytes: MAX_STDOUT_BYTES,
+      // Byte-cap TRUNCATES (stops capturing) instead of killing — a huge
+      // result must never tree-kill colgrep, which (post-index) is a non-hang
+      // kill path that could interrupt a write. The child drains to completion.
+      truncateInsteadOfKill: true,
       onSpawn: trackChild,
     })
   } catch {
+    // Synchronous failure before a promise existed → release the lock now
+    // (the .finally below never got attached).
+    _searchIndexInFlight.delete(wsKey)
+    consola.debug("colbert: search failed to launch")
+    return {
+      status: "failed",
+      isError: true,
+      notice: "semantic search failed to launch; use code_search",
+    }
+  }
+  // Release the workspace lock when the colgrep child actually exits — covers
+  // a fast read (sub-second), a detached background index (much later), AND
+  // every async failure path. The lock outlives the responsiveness race below.
+  void searchPromise
+    .catch(() => undefined)
+    .finally(() => _searchIndexInFlight.delete(wsKey))
+
+  // A warm search resolves in <1s; only a slow foreground-indexing search hits
+  // the responsiveness deadline. The timer is cleared on a fast win so rapid
+  // searches don't accumulate live timeouts.
+  let respondTimer: ReturnType<typeof setTimeout> | undefined
+  const slow = new Promise<{ kind: "slow" }>((resolve) => {
+    respondTimer = setTimeout(() => resolve({ kind: "slow" }), SEARCH_RESPOND_MS)
+    respondTimer.unref?.()
+  })
+  const raced = await Promise.race([
+    searchPromise.then(
+      (res) => ({ kind: "done" as const, res }),
+      (err) => ({ kind: "error" as const, err }),
+    ),
+    slow,
+  ])
+  if (respondTimer) clearTimeout(respondTimer)
+
+  if (raced.kind === "slow") {
+    // colgrep is foreground-indexing / reconciling. DETACH: let it finish in
+    // the background (the generous watchdog reaps only a true hang, never a
+    // mid-write kill; the workspace lock above stays held until it exits, so
+    // no concurrent search collides), and return a fallback now so the caller
+    // never hangs. The next query is fast once the index settles.
+    consola.debug(`colbert: search detached (indexing) for ${opts.workspace}`)
+    return {
+      status: "building",
+      notice:
+        'semantic index is updating in the background; retry mode:"semantic" shortly',
+    }
+  }
+
+  if (raced.kind === "error") {
+    consola.debug("colbert: search failed to launch")
     return {
       status: "failed",
       isError: true,
@@ -235,7 +471,11 @@ async function spawnSearch(opts: {
     }
   }
 
-  if (res.timedOut) {
+  const res = raced.res
+  if (res.timedOut || res.stalled) {
+    consola.debug(
+      `colbert: search ${res.stalled ? "stalled (hung, no progress)" : "hit the runaway backstop"}`,
+    )
     return {
       status: "failed",
       isError: true,
@@ -252,6 +492,7 @@ async function spawnSearch(opts: {
   }
   if (res.code !== 0) {
     // NEVER surface raw stderr (embeds source). Just a class label.
+    consola.debug(`colbert: search exited ${res.code}`)
     return {
       status: "failed",
       isError: true,
@@ -367,6 +608,22 @@ export function kickBackgroundInit(workspace: string): void {
   })
 }
 
+/**
+ * Whether the STARTUP auto-kick should fire for a workspace. Skips a build
+ * that's already in a capped/persistent failure state (`failedAttempts >=
+ * MAX`) or was killed as `stuck` (hung) — so a restart loop doesn't re-burn
+ * a known-bad build on every launch. The per-query self-heal still gives a
+ * `stuck` build its one retry and a capped one its post-backoff probe;
+ * absent/stale/under-cap/ready all kick normally.
+ */
+export async function startupKickAllowed(workspace: string): Promise<boolean> {
+  const meta = await readColbertMeta(workspace)
+  if (!meta || meta.status !== "failed") return true
+  if ((meta.failedAttempts ?? 0) >= MAX_FAILED_ATTEMPTS) return false
+  if (meta.failureClass === "stuck") return false
+  return true
+}
+
 async function runInit(workspace: string): Promise<void> {
   const binary = colgrepBinaryPath()
   if (!existsSync(binary)) {
@@ -380,6 +637,9 @@ async function runInit(workspace: string): Promise<void> {
     releaseInit(workspace)
     return
   }
+  // Carry the failure streak across the building→done transition so the
+  // attempt cap accrues (reset to 0 only on a successful build).
+  const prior = await readColbertMeta(workspace)
   const baseMeta: ColbertMeta = {
     workspace,
     model: MODEL_ID,
@@ -393,6 +653,11 @@ async function runInit(workspace: string): Promise<void> {
     buildPid: undefined,
     ownerInstanceId: getColbertInstanceUuid(),
     lastIndexedAt: new Date().toISOString(),
+    // Carry the streak INTO the `building` write so it survives even an
+    // ABRUPT crash (OOM / proxy kill) that skips the final write — otherwise
+    // the per-query `crashed` reclassification would read a missing counter,
+    // reset the streak to 1 every time, and never hit the cap (retry storm).
+    failedAttempts: prior?.failedAttempts ?? 0,
   }
   // Capture git state at index start so the freshness verdict has a
   // baseline (best-effort; non-git workspaces leave these undefined).
@@ -417,16 +682,36 @@ async function runInit(workspace: string): Promise<void> {
     colbertModelDir(),
     workspace,
   ]
+
+  // Disk-growth progress probe. colgrep is SILENT on a non-TTY pipe during
+  // the (possibly multi-hour) encode phase, so output can't signal progress
+  // — but it writes index shards incrementally. The probe re-arms the
+  // inactivity watchdog while the index dir keeps growing; a frozen
+  // signature ⇒ hung ⇒ killed (stalled). `null` (dir not found yet) is
+  // inconclusive → don't kill (the absolute timeout backstop covers a build
+  // that never writes anything).
+  // Disk-growth progress probe (shared with the search path): colgrep is
+  // SILENT on a non-TTY pipe during the (possibly multi-hour) encode, so
+  // output can't signal progress — but it writes index shards incrementally.
+  // The probe re-arms the inactivity watchdog while the index dir grows; a
+  // frozen signature ⇒ hung ⇒ killed (stalled).
+  const onInactivityCheck = makeIndexProgressProbe(workspace)
+
+  const startMs = Date.now()
   let ok = false
+  let failureClass: NonNullable<ColbertMeta["failureClass"]> | undefined
   try {
     const res = await runManagedExeCapture(binary, args, {
       env: colgrepEnv(),
       timeoutMs: INIT_TIMEOUT_MS,
+      inactivityTimeoutMs: INIT_STALL_MS,
+      onInactivityCheck,
       maxStdoutBytes: MAX_STDOUT_BYTES,
       onSpawn: (child) => {
         trackChild(child)
-        // Record the colgrep child PID so the boot sweep can detect a
-        // crashed build (dead child PID) and reclassify to `failed`.
+        // Record the colgrep child PID so the boot sweep AND the per-query
+        // freshness verdict can detect a crashed build (dead child PID) and
+        // reclassify to `failed`.
         if (typeof child.pid === "number") {
           void writeColbertMeta({ ...baseMeta, buildPid: child.pid }).catch(
             () => {},
@@ -434,12 +719,20 @@ async function runInit(workspace: string): Promise<void> {
         }
       },
     })
-    ok = !res.timedOut && res.code === 0
+    ok = !res.stalled && !res.timedOut && res.code === 0
+    if (!ok) {
+      // stalled (inactivity watchdog) or timedOut (absolute backstop) both
+      // mean "didn't finish, killed" → `stuck`; a clean non-zero exit is a
+      // colgrep `error`. NEVER inspect res.stderr (embeds source).
+      failureClass = res.stalled || res.timedOut ? "stuck" : "error"
+    }
   } catch {
     ok = false
+    failureClass = "launch"
   } finally {
     releaseInit(workspace)
   }
+  const elapsedMs = Date.now() - startMs
 
   // Re-read git state at completion so lastIndexedHead reflects the tree
   // we actually indexed.
@@ -455,5 +748,16 @@ async function runInit(workspace: string): Promise<void> {
   }
   finalMeta.status = ok ? "ready" : "failed"
   finalMeta.lastIndexedAt = new Date().toISOString()
+  if (ok) {
+    finalMeta.failedAttempts = 0
+    finalMeta.failureClass = undefined
+  } else {
+    finalMeta.failureClass = failureClass
+    finalMeta.failedAttempts = (prior?.failedAttempts ?? 0) + 1
+    consola.debug(
+      `colbert: init ${failureClass} after ${Math.round(elapsedMs / 1000)}s ` +
+        `(attempt ${finalMeta.failedAttempts}) for ${workspace}`,
+    )
+  }
   await writeColbertMeta(finalMeta).catch(() => {})
 }
