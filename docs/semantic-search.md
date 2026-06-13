@@ -65,6 +65,49 @@ freshness verdict on each query from `git rev-parse HEAD` +
 A non-git workspace falls back to colgrep's own mtime-based incremental
 signal.
 
+## Definitive index state (not a blunt timeout)
+
+A fixed total build timeout can't distinguish "slow but progressing" (a
+legitimately huge repo whose CPU ColBERT encode takes hours) from "hung."
+The state is instead derived from real signals, so the right thing happens
+in each case:
+
+| State | Signal |
+|---|---|
+| **completed** | a completed index is on disk (`completedIndexOnDisk`). |
+| **running** | the recorded `buildPid` is alive (`isPidAlive`), or this proxy has an init in flight for the workspace. |
+| **crashed** | `buildPid` dead + no index. Caught **per-query** by the freshness verdict (`verdict:"crashed"`), not only at boot, so a mid-session proxy-kill / OOM build self-heals on the next query. |
+| **stuck** | `buildPid` alive but making no progress — see the watchdog below. |
+
+**Stall watchdog** (`runManagedExeCapture` `inactivityTimeoutMs` +
+`onInactivityCheck`): colgrep is SILENT on a non-TTY pipe during the encode,
+so output can't signal progress — but it writes index shards incrementally,
+so the watchdog re-arms while the index dir keeps **growing on disk**
+(`indexDirSignature`) and kills (`stalled`) only when the dir is frozen for
+`GH_ROUTER_COLBERT_INIT_STALL_MS` (default 5 min). A progressing 50GB build
+runs as long as it needs; a hung one dies fast. A generous absolute
+`GH_ROUTER_COLBERT_INIT_TIMEOUT_MS` (default 6h) is only a runaway backstop.
+
+**Failure-class-aware self-heal.** A failed build records a `failureClass`
+(`crashed` | `stuck` | `error` | `launch`) and increments a `failedAttempts`
+counter (reset to 0 on success). On a later query the runner re-kicks a
+debounced background re-index when the attempt is under the per-class cap
+(`stuck` retries once, transient classes up to 3) AND a 5-min backoff has
+elapsed; past the cap it returns an operator-actionable notice instead of
+looping. The startup auto-kick (`provisionAndIndexColbert`) skips a workspace
+that is already capped or `stuck`, so a restart loop can't re-burn a
+known-bad build. `failed` is no longer a terminal dead-end within a session.
+
+## Model guidance during the unavailable window
+
+When semantic degrades, the `code` tool's `lexical-fallback` notice is
+**instructive**: it tells the model that the results are literal keyword
+matches (sparse for a natural-language phrase) and that it can either retry
+`mode:"semantic"` shortly (the index is self-healing in the background) or
+re-query with specific symbol/keyword terms. The lexical backend
+(`code-search.ts`) is deliberately NOT tokenized for NL phrases — the model
+is steered to use the right lever rather than fed noisy OR-matches.
+
 ## Lifecycle
 
 colgrep is CLI-per-invocation (no daemon), so the lifecycle is process
@@ -76,8 +119,9 @@ tracking + cancellation + boot/exit sweep, not keep-alive:
 - An in-memory PID ledger holds this run's live children; SIGINT /
   SIGTERM / exit tree-kills them.
 - A boot-time sweep reclassifies any `building` metadata entry whose
-  `buildPid` is dead to `failed` (it never kills a PID from a prior boot -
-  a recycled PID could belong to an unrelated process).
+  `buildPid` is dead to `failed` (stamping `failureClass:"crashed"` so the
+  self-heal treats it as transient); it never kills a PID from a prior boot -
+  a recycled PID could belong to an unrelated process.
 
 ## When semantic beats lexical (drives the tool description)
 

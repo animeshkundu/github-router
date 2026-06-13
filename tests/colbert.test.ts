@@ -269,6 +269,60 @@ describe("index-store: meta keying + freshness verdict", () => {
     expect(v.verdict).toBe("building")
   })
 
+  test("building with a DEAD/absent build PID + no index → verdict crashed", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    store.__resetInitDebounceForTests() // ensure no in-flight init for ws
+    const ws = path.join(TEST_HOME, "ws-crashed")
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "building",
+      // No buildPid → treated as not-running; no init in flight + no index
+      // on disk → a crashed-mid-build escapee.
+    })
+    const v = await store.freshnessVerdict(ws)
+    expect(v.verdict).toBe("crashed")
+  })
+
+  test("building with a LIVE build PID → still building (never reclassified)", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    const ws = path.join(TEST_HOME, "ws-building-live")
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "building",
+      buildPid: process.pid, // this test process — definitely alive
+    })
+    const v = await store.freshnessVerdict(ws)
+    expect(v.verdict).toBe("building")
+  })
+
+  test("building, no PID, RECENT start → grace (building); OLD start → crashed", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    store.__resetInitDebounceForTests()
+    const mk = async (name: string, ageMs: number) => {
+      const ws = path.join(TEST_HOME, name)
+      await store.writeColbertMeta({
+        workspace: ws,
+        model: "LateOn-Code-edge",
+        modelRev: "rev",
+        status: "building",
+        lastIndexedAt: new Date(Date.now() - ageMs).toISOString(),
+      })
+      return ws
+    }
+    // Within the 30s spawn-grace → cross-process spawn window, not crashed.
+    expect((await store.freshnessVerdict(await mk("ws-grace", 1000))).verdict).toBe(
+      "building",
+    )
+    // Past the grace, dead/absent PID, no index → crashed.
+    expect(
+      (await store.freshnessVerdict(await mk("ws-grace-old", 120_000))).verdict,
+    ).toBe("crashed")
+  })
+
   test("init debounce: second claim returns false until released", async () => {
     const store = await import("../src/lib/colbert/index-store")
     store.__resetInitDebounceForTests()
@@ -334,6 +388,116 @@ describe("runSemanticSearch: no-fallback contract", () => {
     expect(r.status).toBe("failed")
     expect(r.isError).toBe(true)
     expect(r.results).toBeUndefined()
+  })
+
+  test("failed (transient, under cap, backoff elapsed) → self-heal kicks + retry notice", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    store.__resetInitDebounceForTests()
+    const ws = path.join(TEST_HOME, "ws-failed-retry")
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "failed",
+      failureClass: "error",
+      failedAttempts: 1,
+      lastIndexedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(), // 1h ago
+    })
+    const { runSemanticSearch } = await import("../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+    expect(r.status).toBe("failed")
+    expect(r.isError).toBe(true)
+    expect(r.notice).toMatch(/re-index was started|retry/i)
+  })
+
+  test("failed (capped: failedAttempts >= MAX) → operator-actionable, no retry promise", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    store.__resetInitDebounceForTests()
+    const ws = path.join(TEST_HOME, "ws-failed-capped")
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "failed",
+      failureClass: "error",
+      failedAttempts: 3,
+      lastIndexedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    })
+    const { runSemanticSearch } = await import("../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+    expect(r.status).toBe("failed")
+    expect(r.isError).toBe(true)
+    expect(r.notice).toMatch(/keeps failing/i)
+  })
+
+  test("crashed (building + dead PID + no index) → persists failed+crashed, retry notice", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    store.__resetInitDebounceForTests()
+    const ws = path.join(TEST_HOME, "ws-runner-crashed")
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "building", // stranded, no buildPid → crashed verdict
+    })
+    const { runSemanticSearch } = await import("../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+    expect(r.status).toBe("failed")
+    expect(r.isError).toBe(true)
+    // The crash was persisted as failed+crashed with an incremented counter.
+    const meta = await store.readColbertMeta(ws)
+    expect(meta?.status).toBe("failed")
+    expect(meta?.failureClass).toBe("crashed")
+    expect(meta?.failedAttempts).toBe(1)
+  })
+
+  test("crashed streak survives the building write → cap still trips", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    store.__resetInitDebounceForTests()
+    const ws = path.join(TEST_HOME, "ws-crash-streak")
+    // A re-kicked build that carried the streak into its `building` write,
+    // then crashed abruptly (no final write): building + failedAttempts=2.
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "building",
+      failedAttempts: 2,
+      lastIndexedAt: new Date(Date.now() - 120_000).toISOString(), // past grace
+    })
+    const { runSemanticSearch } = await import("../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+    // crashed verdict reads the carried streak (2) + 1 = 3 → at the cap →
+    // operator-actionable, NOT another retry (this is the storm guard).
+    expect(r.notice).toMatch(/keeps failing/i)
+    const meta = await store.readColbertMeta(ws)
+    expect(meta?.failedAttempts).toBe(3)
+  })
+})
+
+describe("startupKickAllowed (restart anti-burn guard)", () => {
+  test("absent / ready / under-cap-error → allowed; capped / stuck → blocked", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    const { startupKickAllowed } = await import("../src/lib/colbert/runner")
+
+    const wsAbsent = path.join(TEST_HOME, "sk-absent")
+    expect(await startupKickAllowed(wsAbsent)).toBe(true) // no meta
+
+    const mk = async (name: string, m: Partial<Record<string, unknown>>) => {
+      const ws = path.join(TEST_HOME, name)
+      await store.writeColbertMeta({
+        workspace: ws,
+        model: "LateOn-Code-edge",
+        modelRev: "rev",
+        status: "failed",
+        ...m,
+      } as never)
+      return ws
+    }
+
+    expect(await startupKickAllowed(await mk("sk-under", { failureClass: "error", failedAttempts: 1 }))).toBe(true)
+    expect(await startupKickAllowed(await mk("sk-capped", { failureClass: "error", failedAttempts: 3 }))).toBe(false)
+    expect(await startupKickAllowed(await mk("sk-stuck", { failureClass: "stuck", failedAttempts: 1 }))).toBe(false)
   })
 })
 

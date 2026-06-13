@@ -94,17 +94,25 @@ function lexicalSearchCodeMode(mode: UnifiedMode): "ranked" | "literal" | "regex
   }
 }
 
-/** Status-specific, actionable fallback hint. */
+/**
+ * Status-specific, actionable fallback hint. The semantic index isn't ready,
+ * so the model got LEXICAL results (great for exact symbols, sparse for a
+ * natural-language phrase since the lexical backend matches literally). Tell
+ * it both levers: retry `mode:"semantic"` shortly (the index is self-healing
+ * in the background) OR re-query now with specific symbol/keyword terms.
+ */
 function fallbackNoticeFor(status: SemanticStatus): string {
+  const tail =
+    'retry mode:"semantic" shortly, or re-query now with specific symbol/keyword terms'
   switch (status) {
     case "building":
-      return 'semantic index is building; returned lexical results. Retry mode:"semantic" shortly'
+      return `semantic index is building; returned lexical keyword matches — ${tail}`
     case "stale":
-      return 'semantic index predates the current HEAD/tree; returned lexical results. Retry mode:"semantic" after the background re-index'
+      return `semantic index predates the current HEAD/tree (a background re-index was started); returned lexical keyword matches — ${tail}`
     case "unavailable":
-      return 'no semantic index for this workspace yet (a background build was started); returned lexical results. Retry mode:"semantic" shortly'
+      return `no semantic index for this workspace yet (a background build was started); returned lexical keyword matches — ${tail}`
     case "failed":
-      return "semantic index build failed for this workspace; returned lexical results"
+      return `semantic index unavailable (build failing — see proxy logs); returned lexical keyword matches — ${tail}`
     default:
       return "returned lexical results"
   }

@@ -161,7 +161,7 @@ describe("semantic / default mode", () => {
     expect(r.notice).toMatch(/stale|re-index|retry/i)
   })
 
-  test("status 'failed' → lexical-fallback", async () => {
+  test("status 'failed' → lexical-fallback with actionable guidance", async () => {
     semanticEnabled = true
     semanticResult = { status: "failed", isError: true, notice: "failed" }
     const r = await runUnifiedCodeSearch({
@@ -169,6 +169,8 @@ describe("semantic / default mode", () => {
       workspace: root,
     })
     expect(r.source).toBe("lexical-fallback")
+    // The model-facing notice guides it: retry semantic OR use symbols.
+    expect(r.notice).toMatch(/retry mode:"semantic"|symbol/i)
   })
 
   test("runSemanticSearch THROWS → transparent lexical-fallback (never rejects)", async () => {

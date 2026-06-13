@@ -804,7 +804,11 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         "\"auth token refresh\"). When that index is building/stale/absent it " +
         "TRANSPARENTLY returns lexical (BM25F) results and labels the " +
         "response `source` (\"lexical-fallback\") so a degrade is never " +
-        "silent. Other modes force the lexical engine: `lexical` (BM25F " +
+        "silent. On a `lexical-fallback` the `notice` says how to proceed: " +
+        "retry `mode:\"semantic\"` shortly (the index self-heals in the " +
+        "background) or re-query with specific symbols — the lexical engine " +
+        "matches keywords/symbols, not natural-language phrases. " +
+        "Other modes force the lexical engine: `lexical` (BM25F " +
         "ranked, best for exact symbols), `exact` (fixed-string), `regex` " +
         "(PCRE2), `ast` (ast-grep structural via `ast_pattern`+`ast_lang`). " +
         "Lexical ranking refines a `symbol-context` field with tree-sitter " +

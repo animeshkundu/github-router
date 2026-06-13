@@ -8,7 +8,9 @@ import {
   parseBoolEnv,
   quoteWinArg,
   resolveExecutable,
+  runManagedExeCapture,
 } from "../src/lib/exec"
+import process from "node:process"
 
 describe("parseBoolEnv", () => {
   test("truthy values", () => {
@@ -146,4 +148,67 @@ describe("resolveExecutable", () => {
       await fs.rm(cwd, { recursive: true, force: true })
     }
   })
+})
+
+describe("runManagedExeCapture — inactivity watchdog", () => {
+  const node = process.execPath
+  // A node `-e` script: emit `out` lines spaced `gapMs` apart, then exit.
+  // `out: 0` + `idleMs` = stay silent then exit (no output).
+  const emitScript = (out: number, gapMs: number, idleMs: number) =>
+    `let n=${out};const t=setInterval(()=>{if(n--<=0){clearInterval(t);` +
+    `setTimeout(()=>process.exit(0),${idleMs})}else process.stdout.write("tick\\n")},${gapMs});` +
+    (out === 0 ? `clearInterval(t);setTimeout(()=>process.exit(0),${idleMs});` : ``)
+
+  test("silent child past the window is killed with stalled:true", async () => {
+    const res = await runManagedExeCapture(
+      node,
+      ["-e", "setTimeout(()=>process.exit(0), 60000)"], // 60s, no output
+      { inactivityTimeoutMs: 250 },
+    )
+    expect(res.stalled).toBe(true)
+    expect(res.timedOut).toBe(false)
+  }, 15_000)
+
+  test("a chatty child resets the watchdog and runs to completion", async () => {
+    // 4 ticks 100ms apart (< the 400ms window each), then exit cleanly.
+    const res = await runManagedExeCapture(
+      node,
+      ["-e", emitScript(4, 100, 50)],
+      { inactivityTimeoutMs: 400 },
+    )
+    expect(res.stalled).toBe(false)
+    expect(res.code).toBe(0)
+    expect(res.stdout).toContain("tick")
+  }, 15_000)
+
+  test("onInactivityCheck:true re-arms (silent-but-progressing not killed)", async () => {
+    // Silent for 800ms, but the probe always reports progress → not killed.
+    const res = await runManagedExeCapture(
+      node,
+      ["-e", "setTimeout(()=>process.exit(0), 800)"],
+      { inactivityTimeoutMs: 150, onInactivityCheck: () => true },
+    )
+    expect(res.stalled).toBe(false)
+    expect(res.code).toBe(0)
+  }, 15_000)
+
+  test("onInactivityCheck:false kills (silent + no progress)", async () => {
+    const res = await runManagedExeCapture(
+      node,
+      ["-e", "setTimeout(()=>process.exit(0), 60000)"],
+      { inactivityTimeoutMs: 200, onInactivityCheck: () => false },
+    )
+    expect(res.stalled).toBe(true)
+  }, 15_000)
+
+  test("total timeoutMs backstop fires independently of inactivity", async () => {
+    // Chatty (inactivity never fires) but runs past the total timeout.
+    const res = await runManagedExeCapture(
+      node,
+      ["-e", emitScript(1000, 50, 0)], // ticks forever
+      { timeoutMs: 400, inactivityTimeoutMs: 10_000 },
+    )
+    expect(res.timedOut).toBe(true)
+    expect(res.stalled).toBe(false)
+  }, 15_000)
 })
