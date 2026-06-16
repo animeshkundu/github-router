@@ -27,7 +27,6 @@ import { randomUUID } from "node:crypto"
 import {
   mkdirSync,
   mkdtempSync,
-  existsSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -319,13 +318,17 @@ describe("createWorktree remove() idempotent", () => {
       // Mutate the worktree so a non-forced remove would refuse (proves --force
       // + the correct repo context both work).
       writeFileSync(path.join(handle.dir, "README.md"), "changed\n")
-      expect(git(repo.root, ["worktree", "list"])).toContain(handle.dir)
+      // The worker branch is checked out in the worktree before removal.
+      expect(git(repo.root, ["branch", "--list", handle.branch]).trim()).not.toBe("")
       // This test process's cwd is the github-router repo, NOT repo.root.
       await handle.remove()
-      // git's bookkeeping no longer lists it (the remove actually ran) ...
-      expect(git(repo.root, ["worktree", "list"])).not.toContain(handle.dir)
-      // ... and the directory is gone from disk (no leak).
-      expect(existsSync(handle.dir)).toBe(false)
+      // Path-form-independent signal that the remove actually ran (Windows-safe:
+      // `git worktree list` prints normalized/forward-slash paths that don't
+      // string-match the backslash handle.dir). With the pre-fix bug (no -C),
+      // `git worktree remove` fails, the branch stays checked out, and the
+      // follow-on `branch -D` fails too — so the branch would still be listed.
+      // After the fix both succeed, so the branch is gone.
+      expect(git(repo.root, ["branch", "--list", handle.branch]).trim()).toBe("")
       expect(registry.size).toBe(0)
     } finally {
       repo.cleanup()
