@@ -164,6 +164,18 @@ export const BROWSE_DEFAULT_MODEL = "gpt-5.4-mini"
  *  strictly needs, but the termination discipline benefits from it. */
 const BROWSE_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 
+/** Default model + thinking for the read-only `plan` mode. `claude-opus-4.8`
+ *  at `xhigh` — planning is the highest-leverage read-only step (the plan
+ *  shapes everything downstream), so it gets the strongest reasoning model
+ *  rather than the cheap `gemini-3.5-flash` explore default. Uses the DOTTED
+ *  Copilot catalog id (the worker resolver exact-matches `catalog.id`, it does
+ *  NOT translate the Anthropic dashed slug). Falls back to a helpful
+ *  unknown-model error at call time if opus-4.8 isn't in the catalog (e.g. a
+ *  non-enterprise tier), exactly like `implement`'s `gpt-5.5`. Caller's `model`
+ *  arg still wins. */
+export const PLAN_DEFAULT_MODEL = "claude-opus-4.8"
+const PLAN_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
+
 /**
  * `Model<any>` shim used to satisfy `Agent.initialState.model` typing.
  *
@@ -271,23 +283,30 @@ async function runWorkerAgentOnce(
     // on unknown-model errors, so the caller knows what to retry with).
     //
     // Per-mode defaults (an explicit `opts.model`/`opts.thinking` always
-    // wins): read-only `explore`/`review`/`plan` → `DEFAULT_MODEL`
-    // (gemini-3.5-flash, high); read+write `implement`/`test` →
-    // `IMPLEMENT_DEFAULT_MODEL` (gpt-5.5, xhigh — coding/test-authoring wants
-    // max reasoning); `browse` → `BROWSE_DEFAULT_MODEL` (gpt-5.4-mini). The
-    // workloads are distinct enough to warrant distinct defaults.
+    // wins): read-only `explore`/`review` → `DEFAULT_MODEL` (gemini-3.5-flash,
+    // high); read-only `plan` → `PLAN_DEFAULT_MODEL` (claude-opus-4.8, xhigh —
+    // planning is the highest-leverage step, so it gets the strongest model);
+    // read+write `implement`/`test` → `IMPLEMENT_DEFAULT_MODEL` (gpt-5.5, xhigh
+    // — coding/test-authoring wants max reasoning); `browse` →
+    // `BROWSE_DEFAULT_MODEL` (gpt-5.4-mini). Distinct workloads, distinct
+    // defaults.
     const isBrowse = opts.mode === "browse"
+    const isPlan = opts.mode === "plan"
     const isWriteCapable = opts.mode === "implement" || opts.mode === "test"
     const defaultModel = isBrowse
       ? BROWSE_DEFAULT_MODEL
-      : isWriteCapable
-        ? IMPLEMENT_DEFAULT_MODEL
-        : DEFAULT_MODEL
+      : isPlan
+        ? PLAN_DEFAULT_MODEL
+        : isWriteCapable
+          ? IMPLEMENT_DEFAULT_MODEL
+          : DEFAULT_MODEL
     const defaultThinking = isBrowse
       ? BROWSE_DEFAULT_THINKING
-      : isWriteCapable
-        ? IMPLEMENT_DEFAULT_THINKING
-        : DEFAULT_THINKING
+      : isPlan
+        ? PLAN_DEFAULT_THINKING
+        : isWriteCapable
+          ? IMPLEMENT_DEFAULT_THINKING
+          : DEFAULT_THINKING
     const resolved = resolveModelAndThinking({
       model: opts.model ?? defaultModel,
       thinking: opts.thinking ?? defaultThinking,

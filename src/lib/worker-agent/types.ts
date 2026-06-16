@@ -117,7 +117,7 @@ export interface WorkerAgentResult {
  *
  * Defaults (applied by `class Budget`):
  *   - maxTurns: 500
- *   - maxWallClockMs: 9 * 60_000 (9 min, sized under the 600s MCP timeout)
+ *   - maxWallClockMs: 30 * 60_000 (30 min, sized under the 35-min MCP timeout)
  *   - maxToolBytes: 16 * 1024 * 1024 (16 MiB)
  *
  * Env overrides read at construction time:

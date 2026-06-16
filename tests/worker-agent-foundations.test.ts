@@ -316,10 +316,10 @@ describe("Budget", () => {
     }
   })
 
-  test("defaults are 500 / 540_000 / 16_777_216", () => {
+  test("defaults are 500 / 1_800_000 / 16_777_216", () => {
     const b = new Budget()
     expect(b.config.maxTurns).toBe(500)
-    expect(b.config.maxWallClockMs).toBe(9 * 60_000)
+    expect(b.config.maxWallClockMs).toBe(30 * 60_000)
     expect(b.config.maxToolBytes).toBe(16 * 1024 * 1024)
   })
 
@@ -339,7 +339,7 @@ describe("Budget", () => {
     process.env.GH_ROUTER_WORKER_MAX_TOOL_BYTES = "0"
     const cfg = resolveBudgetConfig()
     expect(cfg.maxTurns).toBe(500)
-    expect(cfg.maxWallClockMs).toBe(9 * 60_000)
+    expect(cfg.maxWallClockMs).toBe(30 * 60_000)
     expect(cfg.maxToolBytes).toBe(16 * 1024 * 1024)
   })
 

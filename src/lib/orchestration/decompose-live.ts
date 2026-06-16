@@ -91,7 +91,9 @@ const CRITIQUE_INSTRUCTIONS =
   + "array if the IR is sound. Concerns are advisory."
 
 export interface LiveDecomposeOpts {
-  /** The driver model + endpoint + effort (default gpt-5.5 /responses high). */
+  /** The driver model + endpoint + effort (default claude-opus-4-8 xhigh on
+   *  /v1/messages — decomposition shapes the whole run, so it gets the
+   *  strongest model; dashed slug because dispatchModelCall translates). */
   driver?: { model: string; endpoint: Endpoint; effort: Effort }
   /** Optional cross-lab critic (a different lab than the driver). */
   critic?: { model: string; endpoint: Endpoint; effort: Effort }
@@ -101,7 +103,7 @@ export interface LiveDecomposeOpts {
 }
 
 export function buildLiveDecomposeDeps(opts: LiveDecomposeOpts): DecomposeDeps {
-  const driver = opts.driver ?? { model: "gpt-5.5", endpoint: "/v1/responses" as Endpoint, effort: "high" as Effort }
+  const driver = opts.driver ?? { model: "claude-opus-4-8", endpoint: "/v1/messages" as Endpoint, effort: "xhigh" as Effort }
   const deps: DecomposeDeps = {
     async draftIR({ ask, feedback }) {
       const userText =
