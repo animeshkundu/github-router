@@ -8,6 +8,7 @@ import { checkUsage } from "./check-usage"
 import { claude } from "./claude"
 import { codex } from "./codex"
 import { debug } from "./debug"
+import { internalStopHook } from "./internal-stop-hook"
 import { getPackageVersion } from "./lib/version"
 import { models } from "./models"
 import { start } from "./start"
@@ -31,7 +32,10 @@ const version = getPackageVersion()
 // the banner — which is the closest thing to "show me the version".
 const argv = process.argv.slice(2)
 const isVersionFlag = argv.includes("--version")
-if (!isVersionFlag) {
+// Suppress the banner for the internal Stop hook: its stderr is the message
+// Claude Code shows on a block (exit 2), so it must stay clean.
+const isInternalHook = argv[0] === "internal-stop-hook"
+if (!isVersionFlag && !isInternalHook) {
   consola.info(`github-router v${version}`)
 }
 
@@ -42,7 +46,7 @@ const main = defineCommand({
     description:
       "A reverse proxy that exposes GitHub Copilot as OpenAI and Anthropic compatible API endpoints.",
   },
-  subCommands: { auth, start, claude, codex, models, "check-usage": checkUsage, debug },
+  subCommands: { auth, start, claude, codex, models, "check-usage": checkUsage, debug, "internal-stop-hook": internalStopHook },
 })
 
 await runMain(main)

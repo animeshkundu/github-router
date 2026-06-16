@@ -14,16 +14,23 @@
  * peer/advisor calls nested inside a worker (tools.ts), and any
  * future MCP-adjacent dispatcher all increment the same number.
  *
- * Cap = `MAX_INFLIGHT_TOOLS_CALL = 32`. Raised from 8 to widen
- * parallelism (the prior 8 was a defensive pre-launch guess, not a
- * measured Copilot rate-limit; persona handlers hold no shared mutable
- * state). Justification + history live at the historical home
+ * Cap = `MAX_INFLIGHT_TOOLS_CALL` (default 128, override with
+ * `GH_ROUTER_MAX_INFLIGHT_TOOLS_CALL`). Raised from 32 to widen
+ * parallelism for orchestration fan-out (decompose / run_workflow drive
+ * many nested persona + worker dispatches); persona handlers hold no
+ * shared mutable state, so the ceiling is about not starving operator
+ * traffic / upstream rate limits, not correctness. Set the env to 512+
+ * for heavier fan-out, or lower if Copilot starts returning 429s.
+ * Justification + history live at the historical home
  * (`src/routes/mcp/handler.ts` comment block) and
  * `docs/research/peer-mcp-investigation.md` § "Concurrency cap
  * investigation".
  */
 
-export const MAX_INFLIGHT_TOOLS_CALL = 32
+export const MAX_INFLIGHT_TOOLS_CALL = ((): number => {
+  const raw = Number.parseInt(process.env.GH_ROUTER_MAX_INFLIGHT_TOOLS_CALL ?? "", 10)
+  return Number.isFinite(raw) && raw > 0 ? raw : 128
+})()
 
 let inFlight = 0
 

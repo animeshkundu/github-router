@@ -306,21 +306,23 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(snippet).toContain("## Peer review and advisor")
   })
 
-  test("snippet stays under ~280 tokens (~1700 bytes) in the minimal case", () => {
-    // Re-derived per peer-review I5 after the descriptive-only rewrite.
-    // The cap is the smallest envelope the actual implementation fits
-    // inside, not a target driving copy growth. If a future tightening
-    // shaves bytes, lower this cap too.
+  test("snippet stays under ~330 tokens (~2000 bytes) in the minimal case", () => {
+    // Re-derived per peer-review I5 after the descriptive-only rewrite, then
+    // bumped when the always-on orchestration tools (verify_workflow /
+    // attest_step) were added to the minimal snippet. The cap is the smallest
+    // envelope the actual implementation fits inside, not a target driving copy
+    // growth. If a future tightening shaves bytes, lower this cap too.
     const minimal = buildPeerAwarenessSnippet(MINIMAL)
-    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(1700)
+    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(2000)
   })
 
-  test("snippet stays under ~540 tokens (~3300 bytes) in the maximal case", () => {
-    // Maximal = EVERY gate on (gemini_reviewer, the `review` worker,
-    // browse + power). The cap is the smallest envelope the implementation
-    // fits inside; if a future tightening shaves bytes, lower it too.
+  test("snippet stays under ~770 tokens (~4600 bytes) in the maximal case", () => {
+    // Maximal = EVERY gate on (gemini_reviewer, the `review`/`plan`/`test`
+    // workers, the decompose/run_workflow orchestration pipeline, browse +
+    // power). The cap is the smallest envelope the implementation fits inside;
+    // if a future tightening shaves bytes, lower it too.
     const full = buildPeerAwarenessSnippet(MAXIMAL)
-    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(3300)
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(4600)
   })
 
   test("mentions Claude Code's advisor built-in tool", () => {
@@ -529,6 +531,22 @@ describe("buildPeerAwarenessSnippet", () => {
     const a = buildPeerAwarenessSnippet(MAXIMAL)
     const b = buildPeerAwarenessSnippet(MAXIMAL)
     expect(a).toBe(b)
+  })
+
+  test("mentions the orchestration tools under mcp__orchestrate__, gated like the live tools/list", () => {
+    // verify_workflow + attest_step are pure (no capability gate) → present even
+    // in the minimal snippet; decompose/run_workflow share the worker backend
+    // gate → only when workers are available.
+    const minimal = buildPeerAwarenessSnippet(MINIMAL)
+    expect(minimal).toContain("mcp__orchestrate__verify_workflow")
+    expect(minimal).toContain("mcp__orchestrate__attest_step")
+    // The CALLABLE composer/runner are namespaced only in the workers-on branch.
+    // (The minimal branch may name them in prose to say they're unavailable.)
+    expect(minimal).not.toContain("mcp__orchestrate__decompose")
+    expect(minimal).not.toContain("mcp__orchestrate__run_workflow")
+    const withWorkers = buildPeerAwarenessSnippet({ ...MINIMAL, workerToolsAvailable: true })
+    expect(withWorkers).toContain("mcp__orchestrate__decompose")
+    expect(withWorkers).toContain("mcp__orchestrate__run_workflow")
   })
 
   test("mentions subagent inheritance (the load-bearing UX claim)", () => {

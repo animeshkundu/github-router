@@ -367,11 +367,15 @@ export function getClaudeCodeEnvVars(
     //     reads `parseInt(process.env.MCP_TOOL_TIMEOUT)` for the per-
     //     tool-call timeout passed to MCP SDK's `.callTool({...},
     //     schema, {timeout: W})`. Default `1e8` ms (~27.7 hours) when
-    //     the env is unset. Setting it to a finite-but-large value
-    //     (10 min) is safer than relying on the implicit 27.7-hour
-    //     default — surfaces regressions where the SDK silently caps
-    //     at 60s, AND prevents long-tail runaway calls from holding
-    //     resources indefinitely.
+    //     the env is unset. Set to 35 min: finite-but-large (surfaces
+    //     regressions where the SDK silently caps at 60s, AND bounds
+    //     runaway calls) but high enough that an autonomous worker can do
+    //     up to its 30-min wall-clock of real work AND still return its
+    //     result before the harness gives up. The worker wall-clock
+    //     (`GH_ROUTER_WORKER_MAX_WALLCLOCK_MS`, default 30 min) is sized a
+    //     few minutes UNDER this so a slow/runaway worker aborts
+    //     gracefully (partial work + `[halted: wallclock]`) inside the
+    //     window rather than being hard-killed with nothing.
     //
     // Without the SDK's `resetTimeoutOnProgress` opt-in (which Claude
     // Code does not pass), SSE notifications/progress events DO NOT
@@ -380,8 +384,8 @@ export function getClaudeCodeEnvVars(
     // calls, not the SSE response transport. SSE remains valuable as
     // the canonical Streamable HTTP shape and for progress UI, but the
     // ceiling-busting work is done by these env vars.
-    MCP_TIMEOUT: "600000",
-    MCP_TOOL_TIMEOUT: "600000",
+    MCP_TIMEOUT: "2100000",
+    MCP_TOOL_TIMEOUT: "2100000",
     // Suppress non-essential telemetry/model calls. The first two are
     // Anthropic's own knobs (per cc-backup managedEnv.ts); the third
     // (`DISABLE_TELEMETRY`) suppresses Datadog/Statsig/etc. external

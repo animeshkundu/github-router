@@ -303,6 +303,37 @@ describe("createWorktree remove() idempotent", () => {
       repo.cleanup()
     }
   })
+
+  test("remove() works when the repo is NOT the process cwd (uses -C repoRoot; no leak)", async () => {
+    // Regression: remove() ran `git worktree remove` WITHOUT -C repoRoot, so it
+    // executed in the process cwd (a DIFFERENT repo) and failed silently,
+    // leaking the worktree. Surfaces whenever the workspace != cwd, e.g.
+    // run_workflow / worker_implement with an absolute `workspace` override.
+    const repo = makeRepo((root) => {
+      writeFileSync(path.join(root, "README.md"), "hello\n")
+    })
+    const { registry, instanceUuid } = makeRegistry()
+    try {
+      const handle = await createWorktree(repo.root, { instanceUuid, registry })
+      // Mutate the worktree so a non-forced remove would refuse (proves --force
+      // + the correct repo context both work).
+      writeFileSync(path.join(handle.dir, "README.md"), "changed\n")
+      // The worker branch is checked out in the worktree before removal.
+      expect(git(repo.root, ["branch", "--list", handle.branch]).trim()).not.toBe("")
+      // This test process's cwd is the github-router repo, NOT repo.root.
+      await handle.remove()
+      // Path-form-independent signal that the remove actually ran (Windows-safe:
+      // `git worktree list` prints normalized/forward-slash paths that don't
+      // string-match the backslash handle.dir). With the pre-fix bug (no -C),
+      // `git worktree remove` fails, the branch stays checked out, and the
+      // follow-on `branch -D` fails too — so the branch would still be listed.
+      // After the fix both succeed, so the branch is gone.
+      expect(git(repo.root, ["branch", "--list", handle.branch]).trim()).toBe("")
+      expect(registry.size).toBe(0)
+    } finally {
+      repo.cleanup()
+    }
+  })
 })
 
 describe("createWorktree no-git hard error", () => {

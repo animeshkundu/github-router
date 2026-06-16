@@ -103,7 +103,7 @@ describe("getClaudeCodeEnvVars", () => {
     expect(vars).not.toHaveProperty("ANTHROPIC_AUTH_TOKEN")
   })
 
-  test("sets MCP_TIMEOUT=600000 (legacy belt-and-suspenders) and MCP_TOOL_TIMEOUT=600000 (the load-bearing per-tool-call timeout on v2.1.141)", () => {
+  test("sets MCP_TIMEOUT=2100000 (legacy belt-and-suspenders) and MCP_TOOL_TIMEOUT=2100000 (the load-bearing per-tool-call timeout on v2.1.141)", () => {
     // Two distinct env vars at play (per binary inspection of v2.1.141
     // `y13()`, 2026-05-14):
     //
@@ -126,8 +126,8 @@ describe("getClaudeCodeEnvVars", () => {
     // timer. Claude Code v2.1.141 does NOT pass it, so SSE heartbeats
     // alone don't help — MCP_TOOL_TIMEOUT is the actual lever.
     const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
-    expect(vars.MCP_TIMEOUT).toBe("600000")
-    expect(vars.MCP_TOOL_TIMEOUT).toBe("600000")
+    expect(vars.MCP_TIMEOUT).toBe("2100000")
+    expect(vars.MCP_TOOL_TIMEOUT).toBe("2100000")
   })
 
   test("sets CLAUDE_CONFIG_DIR to the router-owned snapshot mirror (not ~/.claude)", () => {
