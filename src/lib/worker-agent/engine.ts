@@ -249,7 +249,7 @@ function makeNoWorktreeHandle(workspace: string): WorktreeHandle {
  *     `AbortSignal` (e.g. an `AbortSignal.timeout(60_000)` reused
  *     across multiple worker calls) can't leak listeners.
  */
-export async function runWorkerAgent(
+async function runWorkerAgentOnce(
   opts: WorkerAgentOpts,
 ): Promise<WorkerAgentResult> {
   // Step 1: semaphore slot. Pre-aborted signal AND cap-exhausted
@@ -638,7 +638,7 @@ export async function runWorkerAgent(
       if (!text.trim()) {
         return {
           text:
-            `[worker exited with no output `
+            `${NO_OUTPUT_PREFIX} `
             + `(stopReason=${lastStopReason ?? "unknown"}, `
             + `turns=${budget.turns}, elapsed=${budget.elapsedMs}ms)]`,
           isError: true,
@@ -690,6 +690,49 @@ export async function runWorkerAgent(
     // idempotent (see semaphore.ts) so a double-fire is harmless.
     release()
   }
+}
+
+/**
+ * Prefix of the sentinel `runWorkerAgentOnce` returns when a worker stops
+ * CLEANLY but emits no usable text — the model occasionally ends a turn right
+ * after a tool call without summarizing. Stable so the retry wrapper can detect
+ * exactly this case. Distinct from a budget cap (`WorkerAbort` → halt message),
+ * a stream error (`stopReason="error"` → overflow/upstream diagnostic), and a
+ * real failure — none of which carry this prefix, so none are retried.
+ */
+const NO_OUTPUT_PREFIX = "[worker exited with no output"
+
+/** True iff `r` is the transient no-output sentinel (a clean stop with empty
+ *  text), the one case worth a fresh retry. */
+function isTransientNoOutput(r: WorkerAgentResult): boolean {
+  return r.isError === true && typeof r.text === "string" && r.text.startsWith(NO_OUTPUT_PREFIX)
+}
+
+/**
+ * Run `runOnce`, and on the transient no-output sentinel retry EXACTLY ONCE with
+ * a fresh run before surfacing it. Real errors, budget caps, and stream errors
+ * are returned as-is (they have distinct, actionable messages and a retry would
+ * not help). A consumed abort signal short-circuits the retry. If the retry also
+ * produces no output, the ORIGINAL is returned (one is enough signal; the
+ * failure isn't hidden). Extracted + injected for unit-testability.
+ */
+export async function withNoOutputRetry(
+  runOnce: (opts: WorkerAgentOpts) => Promise<WorkerAgentResult>,
+  opts: WorkerAgentOpts,
+): Promise<WorkerAgentResult> {
+  const first = await runOnce(opts)
+  if (!isTransientNoOutput(first) || opts.signal?.aborted) return first
+  const second = await runOnce(opts)
+  return isTransientNoOutput(second) ? first : second
+}
+
+/**
+ * Public entry: a worker run with a single transient-no-output retry. Wraps the
+ * implementation (`runWorkerAgentOnce`); the signature is unchanged so every
+ * caller (MCP dispatch, the orchestration runner) gets the retry for free.
+ */
+export async function runWorkerAgent(opts: WorkerAgentOpts): Promise<WorkerAgentResult> {
+  return withNoOutputRetry(runWorkerAgentOnce, opts)
 }
 
 // ============================================================
