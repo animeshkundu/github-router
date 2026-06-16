@@ -168,6 +168,7 @@ unit-tested, demonstrated executing a real `WorkflowIR` end-to-end (kernel + run
 | `gate-immutability.ts` | detect a producer weakening its own gates (invariant 5) | 8 unit tests |
 | `gate-runner.ts` | run the sealed check commands → `GateOutcome` | 5 unit tests |
 | `stop-gate.ts` / `live-exec.ts` | compose the executable gate + gate-weakening check; Windows-safe exec | 4 + 5 unit tests |
+| `stop-gate-hook.ts` | Stop-hook glue: fail-OPEN gate eval + opt-in flag + idempotent settings merge | 10 unit tests |
 | `run-workflow-live.ts` | live composition: validate → verify → kernel-execute → always-cleanup | 6 unit tests (validation) |
 | `mcp__workers__verify_workflow` | Claude-callable pre-flight verifier | dispatch test |
 | `mcp__workers__decompose` | compose a verified IR (driver + cross-lab critic) | wired (worker-gated) |
@@ -188,9 +189,21 @@ symmetric threat model; a sealed gate needing installed deps may not pass in a b
 (floor-safe: fails to the baseline); process-kill worktree leaks are reclaimed by the worker-agent
 age/boot sweep.
 
+The Phase-0 structural-gate Stop hook is **opt-in and default-OFF** (it changes the spawned
+session's stop behavior). The CORE is delivered + unit-tested: `runStopGateForLaunch` (fail-OPEN on
+a config error so it never wedges the session; blocks only on a red gate or a gate-weakening diff),
+`stopGateEnabled` (`GH_ROUTER_ENABLE_STOP_GATE`, via the canonical `parseBoolEnv`), `stopGateId`
+(`GH_ROUTER_STOP_GATE_ID`, default `default-ci`), and `mergeStopHookIntoSettings` (idempotent, never
+clobbers other hooks). The launcher AUTO-INJECTION (merge into the mirrored `settings.json` in
+`src/claude.ts`, gated on the flag) + the `internal-stop-hook` subcommand (`src/main.ts` dispatch:
+capture `git diff` via `runCommandCapture`, call `runStopGateForLaunch`, exit 0/2) + the
+live-session E2E are the **deferred follow-up** (PR 2): the Stop event firing is only verifiable on a
+real Windows-first spawned session, so it lands with its own gated E2E rather than bundled into the
+logic PR.
+
 **Remaining (the launch layer + Phase 3):**
-- the **structural-gate Stop-hook** (Phase 0, inject a non-skippable harness gate + the
-  gate-immutability check into the spawned session; the cheap, certain floor win);
+- the **Stop-hook launcher auto-injection** + `internal-stop-hook` subcommand + gated live-session
+  E2E (the core above is done; this is the wiring into the Windows-first launch path);
 - worktree dep-provisioning so the executable gate can pass (unlocks the orchestration upside on
   dep-bearing repos);
 - cost/token accounting and `attest_step` (Phase 3).
