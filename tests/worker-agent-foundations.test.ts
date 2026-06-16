@@ -258,16 +258,35 @@ describe("systemPromptFor", () => {
     expect(p).toContain("`codex_review`")
   })
 
-  test("prompts are short — no prescriptive task advice", () => {
-    // Soft sanity: keep the prompt under 2000 chars. The plan calls
-    // out that the prompt is security-boundary + brief capability
-    // inventory ONLY; if someone tacks on a giant style guide they'll
-    // trip this. Cap raised from the original 800 to accommodate the
-    // per-tool bullets added per the Section 3 + user directive (Pi
-    // needs short descriptions; Gemini has no built-in knowledge of
-    // the proxy-specific tools).
-    expect(systemPromptFor("explore").length).toBeLessThan(2000)
-    expect(systemPromptFor("implement").length).toBeLessThan(2000)
+  test("plan prompt is read-only and frames the planner role", () => {
+    const p = systemPromptFor("plan")
+    expect(p).toContain("You are operating inside a sandboxed coding worker.")
+    expect(p).toContain("Read-only mode")
+    expect(p).not.toContain("edit/write/bash")
+    expect(p).toContain("planning specialist")
+    expect(p).toContain("Do NOT write or edit code")
+  })
+
+  test("test prompt is write-capable and frames the independent test author", () => {
+    const p = systemPromptFor("test")
+    expect(p).toContain("You are operating inside a sandboxed coding worker.")
+    expect(p).toContain("`edit`")
+    expect(p).toContain("`write`")
+    expect(p).toContain("`bash`")
+    expect(p).toContain("`codex_review`")
+    expect(p).toContain("INDEPENDENT test author")
+    expect(p).toContain("did NOT write the code under test")
+  })
+
+  test("plan/test prompts stay short — no prescriptive task advice", () => {
+    // Sanity bound (see the explore/implement test above). `plan` is a
+    // read-only block + a one-line role frame, so it stays under 2000 like
+    // `review`. `test` is the only mode carrying BOTH the write-tool
+    // inventory AND a role frame, so it runs a little longer — still just a
+    // security boundary + brief capability inventory + one role line, not a
+    // style guide.
+    expect(systemPromptFor("plan").length).toBeLessThan(2000)
+    expect(systemPromptFor("test").length).toBeLessThan(2300)
   })
 })
 

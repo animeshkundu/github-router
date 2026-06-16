@@ -28,8 +28,8 @@
  *   3. realpath-canonicalize the workspace (so every per-call
  *      `confineToWorkspace` inside `tools.ts` operates on a stable
  *      base — the docstring there requires this);
- *   4. provision the worktree (only for `implement` + `worktree:
- *      true`; HARD ERROR if no git);
+ *   4. provision the worktree (only for write-capable filesystem modes
+ *      with `worktree: true`; HARD ERROR if no git);
  *   5. construct the `Budget` (which reads env overrides on its own);
  *   6. construct the tool array bound to the resolved workspace
  *      + a live getter for the advisor's transcript;
@@ -164,6 +164,18 @@ export const BROWSE_DEFAULT_MODEL = "gpt-5.4-mini"
  *  strictly needs, but the termination discipline benefits from it. */
 const BROWSE_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 
+/** Default model + thinking for the read-only `plan` mode. `claude-opus-4.8`
+ *  at `xhigh` — planning is the highest-leverage read-only step (the plan
+ *  shapes everything downstream), so it gets the strongest reasoning model
+ *  rather than the cheap `gemini-3.5-flash` explore default. Uses the DOTTED
+ *  Copilot catalog id (the worker resolver exact-matches `catalog.id`, it does
+ *  NOT translate the Anthropic dashed slug). Falls back to a helpful
+ *  unknown-model error at call time if opus-4.8 isn't in the catalog (e.g. a
+ *  non-enterprise tier), exactly like `implement`'s `gpt-5.5`. Caller's `model`
+ *  arg still wins. */
+export const PLAN_DEFAULT_MODEL = "claude-opus-4.8"
+const PLAN_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
+
 /**
  * `Model<any>` shim used to satisfy `Agent.initialState.model` typing.
  *
@@ -249,7 +261,7 @@ function makeNoWorktreeHandle(workspace: string): WorktreeHandle {
  *     `AbortSignal` (e.g. an `AbortSignal.timeout(60_000)` reused
  *     across multiple worker calls) can't leak listeners.
  */
-export async function runWorkerAgent(
+async function runWorkerAgentOnce(
   opts: WorkerAgentOpts,
 ): Promise<WorkerAgentResult> {
   // Step 1: semaphore slot. Pre-aborted signal AND cap-exhausted
@@ -272,22 +284,29 @@ export async function runWorkerAgent(
     //
     // Per-mode defaults (an explicit `opts.model`/`opts.thinking` always
     // wins): read-only `explore`/`review` → `DEFAULT_MODEL` (gemini-3.5-flash,
-    // high); read+write `implement` → `IMPLEMENT_DEFAULT_MODEL` (gpt-5.5,
-    // xhigh — coding wants max reasoning); `browse` → `BROWSE_DEFAULT_MODEL`
-    // (gpt-5.4-mini). The workloads are distinct enough to warrant distinct
+    // high); read-only `plan` → `PLAN_DEFAULT_MODEL` (claude-opus-4.8, xhigh —
+    // planning is the highest-leverage step, so it gets the strongest model);
+    // read+write `implement`/`test` → `IMPLEMENT_DEFAULT_MODEL` (gpt-5.5, xhigh
+    // — coding/test-authoring wants max reasoning); `browse` →
+    // `BROWSE_DEFAULT_MODEL` (gpt-5.4-mini). Distinct workloads, distinct
     // defaults.
     const isBrowse = opts.mode === "browse"
-    const isImplement = opts.mode === "implement"
+    const isPlan = opts.mode === "plan"
+    const isWriteCapable = opts.mode === "implement" || opts.mode === "test"
     const defaultModel = isBrowse
       ? BROWSE_DEFAULT_MODEL
-      : isImplement
-        ? IMPLEMENT_DEFAULT_MODEL
-        : DEFAULT_MODEL
+      : isPlan
+        ? PLAN_DEFAULT_MODEL
+        : isWriteCapable
+          ? IMPLEMENT_DEFAULT_MODEL
+          : DEFAULT_MODEL
     const defaultThinking = isBrowse
       ? BROWSE_DEFAULT_THINKING
-      : isImplement
-        ? IMPLEMENT_DEFAULT_THINKING
-        : DEFAULT_THINKING
+      : isPlan
+        ? PLAN_DEFAULT_THINKING
+        : isWriteCapable
+          ? IMPLEMENT_DEFAULT_THINKING
+          : DEFAULT_THINKING
     const resolved = resolveModelAndThinking({
       model: opts.model ?? defaultModel,
       thinking: opts.thinking ?? defaultThinking,
@@ -333,12 +352,14 @@ export async function runWorkerAgent(
       }
     }
 
-    // Step 4: worktree provisioning (implement + worktree only).
-    // HARD ERROR if no git — `createWorktree` throws for us. We do NOT
-    // silently fall back to the no-worktree path: the caller asked for
-    // isolation, and an undetected fallback would race with their other
+    // Step 4: worktree provisioning (write-capable `implement`/`test` +
+    // worktree only). HARD ERROR if no git — `createWorktree` throws for us.
+    // We do NOT silently fall back to the no-worktree path: the caller asked
+    // for isolation, and an undetected fallback would race with their other
     // edits (plan: peer-review HIGH, explicit policy).
-    const useWorktree = opts.mode === "implement" && opts.worktree === true
+    const useWorktree =
+      (opts.mode === "implement" || opts.mode === "test") &&
+      opts.worktree === true
     let ws: WorktreeHandle
     if (useWorktree) {
       try {
@@ -636,7 +657,7 @@ export async function runWorkerAgent(
       if (!text.trim()) {
         return {
           text:
-            `[worker exited with no output `
+            `${NO_OUTPUT_PREFIX} `
             + `(stopReason=${lastStopReason ?? "unknown"}, `
             + `turns=${budget.turns}, elapsed=${budget.elapsedMs}ms)]`,
           isError: true,
@@ -688,6 +709,52 @@ export async function runWorkerAgent(
     // idempotent (see semaphore.ts) so a double-fire is harmless.
     release()
   }
+}
+
+/**
+ * Prefix of the sentinel `runWorkerAgentOnce` returns when a worker stops
+ * CLEANLY but emits no usable text — the model occasionally ends a turn right
+ * after a tool call without summarizing. Stable so the retry wrapper can detect
+ * exactly this case. Distinct from a budget cap (`WorkerAbort` → halt message),
+ * a stream error (`stopReason="error"` → overflow/upstream diagnostic), and a
+ * real failure — none of which carry this prefix, so none are retried.
+ */
+const NO_OUTPUT_PREFIX = "[worker exited with no output"
+
+/** True iff `r` is the transient no-output sentinel (a clean stop with empty
+ *  text), the one case worth a fresh retry. Keyed on the specific sentinel
+ *  PREFIX, not on `isError` — so the retry can't be silently decoupled if the
+ *  sentinel's error flag ever changes, and a real worker answer never begins
+ *  with this string. */
+function isTransientNoOutput(r: WorkerAgentResult): boolean {
+  return typeof r.text === "string" && r.text.startsWith(NO_OUTPUT_PREFIX)
+}
+
+/**
+ * Run `runOnce`, and on the transient no-output sentinel retry EXACTLY ONCE with
+ * a fresh run before surfacing it. Real errors, budget caps, and stream errors
+ * are returned as-is (they have distinct, actionable messages and a retry would
+ * not help). A consumed abort signal short-circuits the retry. If the retry also
+ * produces no output, the ORIGINAL is returned (one is enough signal; the
+ * failure isn't hidden). Extracted + injected for unit-testability.
+ */
+export async function withNoOutputRetry(
+  runOnce: (opts: WorkerAgentOpts) => Promise<WorkerAgentResult>,
+  opts: WorkerAgentOpts,
+): Promise<WorkerAgentResult> {
+  const first = await runOnce(opts)
+  if (!isTransientNoOutput(first) || opts.signal?.aborted) return first
+  const second = await runOnce(opts)
+  return isTransientNoOutput(second) ? first : second
+}
+
+/**
+ * Public entry: a worker run with a single transient-no-output retry. Wraps the
+ * implementation (`runWorkerAgentOnce`); the signature is unchanged so every
+ * caller (MCP dispatch, the orchestration runner) gets the retry for free.
+ */
+export async function runWorkerAgent(opts: WorkerAgentOpts): Promise<WorkerAgentResult> {
+  return withNoOutputRetry(runWorkerAgentOnce, opts)
 }
 
 // ============================================================

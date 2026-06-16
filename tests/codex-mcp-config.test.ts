@@ -1178,6 +1178,7 @@ describe("resolveGroupKeysFromMirror", () => {
         peers: "peers",
         search: "search",
         workers: "workers",
+        orchestrate: "orchestrate",
         browser: "browser",
         decide: "decide",
       })

@@ -206,6 +206,7 @@ describe("/mcp protocol methods", () => {
       tools: Array<{ name: string; description: string; inputSchema: unknown }>
     }
     expect(result.tools.map((t) => t.name).sort()).toEqual([
+      "attest_step",
       "code",
       "codex_critic",
       "codex_reviewer",
@@ -213,6 +214,7 @@ describe("/mcp protocol methods", () => {
       "gemini_reviewer",
       "opus_critic",
       "stand_in",
+      "verify_workflow",
       "web",
     ])
     for (const t of result.tools) {
@@ -233,10 +235,12 @@ describe("/mcp protocol methods", () => {
     })
     const result = json.result as { tools: Array<{ name: string }> }
     expect(result.tools.map((t) => t.name).sort()).toEqual([
+      "attest_step",
       "code",
       "codex_critic",
       "codex_reviewer",
       "opus_critic",
+      "verify_workflow",
       "web",
     ])
   })
@@ -490,6 +494,28 @@ describe("/mcp scoped endpoints (/mcp/:group)", () => {
     expect(names).not.toContain("stand_in")
   })
 
+  test("POST /mcp/orchestrate tools/list returns the always-on orchestration tools, not other groups'", async () => {
+    const { status, json } = await scopedRpc("orchestrate", {
+      jsonrpc: "2.0",
+      id: 803,
+      method: "tools/list",
+    })
+    expect(status).toBe(200)
+    const names = (json.result as { tools: Array<{ name: string }> }).tools
+      .map((t) => t.name)
+      .sort()
+    // Pure, always-on orchestration tools (no capability gate).
+    expect(names).toContain("verify_workflow")
+    expect(names).toContain("attest_step")
+    // decompose / run_workflow are worker-gated; this catalog has no worker
+    // backend, so they are filtered out of the scoped list.
+    expect(names).not.toContain("decompose")
+    expect(names).not.toContain("run_workflow")
+    // Other groups' tools absent.
+    expect(names).not.toContain("code")
+    expect(names).not.toContain("codex_critic")
+  })
+
   test("calling a persona on /mcp/search returns -32601 (tool not in this group)", async () => {
     // The scope reject mirrors an unknown-tool rejection: codex_critic is a
     // `peers`-group tool, so dispatching it on the `search` endpoint must
@@ -737,6 +763,34 @@ describe("/mcp tools/call routing", () => {
     }
     expect(result.isError).toBeUndefined()
     expect(result.content[0].text).toBe("no material objection")
+  })
+
+  test("verify_workflow dispatches to the static verifier (ok IR vs invalid IR)", async () => {
+    const validIr = {
+      rawAskHash: "r", acceptanceCriteriaHash: "a", maxDepth: 1,
+      nodes: [
+        { id: "baseline", role: "baseline", inputs: [], gate: { kind: "none" }, onFail: "baseline" },
+        { id: "impl", role: "implement", producerLab: "openai", inputs: [], gate: { kind: "executable", gateId: "tests" }, onFail: "loop" },
+        { id: "select", role: "selector", inputs: ["baseline", "impl"], gate: { kind: "none" }, onFail: "baseline", judgesOnRawAsk: true },
+      ],
+    }
+    const ok = await rpc({
+      jsonrpc: "2.0", id: 200, method: "tools/call",
+      params: { name: "verify_workflow", arguments: { ir: validIr } },
+    })
+    expect(ok.status).toBe(200)
+    const okResult = ok.json.result as { content: Array<{ text: string }>; isError?: boolean }
+    expect(okResult.isError).toBeUndefined()
+    expect(JSON.parse(okResult.content[0].text).ok).toBe(true)
+
+    const bad = await rpc({
+      jsonrpc: "2.0", id: 201, method: "tools/call",
+      params: { name: "verify_workflow", arguments: { ir: { nodes: [] } } },
+    })
+    const badResult = bad.json.result as { content: Array<{ text: string }> }
+    const parsed = JSON.parse(badResult.content[0].text) as { ok: boolean; violations: unknown[] }
+    expect(parsed.ok).toBe(false)
+    expect(parsed.violations.length).toBeGreaterThan(0)
   })
 
   test("explicit effort:xhigh on codex_critic reaches the upstream payload", async () => {

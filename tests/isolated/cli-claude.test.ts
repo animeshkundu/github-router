@@ -674,10 +674,11 @@ describe("claude command", () => {
 
       // The always-on groups (peers + search) are resolved against the
       // mirror snapshot; workers/decide/browser stay off because their
-      // capability mocks return false by default.
+      // capability mocks return false by default. `orchestrate` is always-on
+      // (its verify_workflow/attest_step are pure, ungated), like peers/search.
       expect(resolveGroupKeysFromMirrorMock).toHaveBeenCalledTimes(1)
       const [enabledGroups] = resolveGroupKeysFromMirrorMock.mock.calls[0]
-      expect(enabledGroups).toEqual(["peers", "search"])
+      expect(enabledGroups).toEqual(["peers", "search", "orchestrate"])
 
       expect(writePeerMcpRuntimeFilesMock).toHaveBeenCalledTimes(1)
       const [serverUrl, opts] = writePeerMcpRuntimeFilesMock.mock.calls[0]

@@ -5,11 +5,11 @@
  *
  * 13 tools across the modes:
  *
- *   - Explore / review mode (9, read-only):
+ *   - Explore / review / plan mode (9, read-only):
  *       read, glob, grep, code_search, web_search, fetch_url,
  *       toolbelt, advisor, update_plan.
  *
- *   - Implement mode (13): explore + edit, write, bash, codex_review.
+ *   - Implement / test mode (13): explore + edit, write, bash, codex_review.
  *
  * (`peer_review` is implemented but intentionally NOT wired into
  * `buildWorkerTools` — peer critics aren't part of the worker surface.)
@@ -162,9 +162,10 @@ const NETWORK_BIN_RE =
 // ============================================================
 
 export interface BuildWorkerToolsOpts {
-  /** Worker mode — picks which tools are returned. `review` is read-only and
-   *  returns the same tool surface as `explore`. */
-  mode: "explore" | "review" | "implement"
+  /** Worker mode — picks which tools are returned. `review` and `plan` are
+   *  read-only and return the same tool surface as `explore`; `test` mirrors
+   *  `implement`'s write-capable surface. */
+  mode: "explore" | "review" | "plan" | "implement" | "test"
   /**
    * Absolute path to the worker's workspace. MUST be pre-realpath-
    * canonicalized by the engine; `confineToWorkspace` re-asserts on
@@ -1898,7 +1899,10 @@ function updatePlanTool(
  *                web_search, fetch_url, toolbelt, advisor, update_plan)
  *   - review   → same 9 read-only tools as explore (reviewer framing lives
  *                in the system prompt, not the toolset)
+ *   - plan     → same 9 read-only tools as explore (planning framing lives
+ *                in the system prompt, not the toolset)
  *   - implement → explore + edit/write/bash/codex_review (13 total)
+ *   - test      → same 13 write-capable tools as implement
  *
  * `peer_review` is intentionally NOT wired in (peer critics aren't part of
  * the worker surface); `advisor` is the worker's consultation path.
@@ -1926,7 +1930,9 @@ export function buildWorkerTools(
     advisorTool(getMessages),
     updatePlanTool(planState),
   ]
-  if (mode === "explore" || mode === "review") return explore
+  if (mode === "explore" || mode === "review" || mode === "plan") {
+    return explore
+  }
   return [
     ...explore,
     editTool(workspace),

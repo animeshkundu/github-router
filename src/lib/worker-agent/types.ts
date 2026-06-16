@@ -47,14 +47,18 @@ export interface WorkerAgentOpts {
    *  - `"review"`: identical read-only tool surface to `"explore"`, but the
    *    system prompt frames the worker as a code reviewer that verifies
    *    correctness against the actual code rather than summarizing.
+   *  - `"plan"`: identical read-only tool surface to `"explore"`, but the
+   *    system prompt frames the worker as an implementation planner.
    *  - `"implement"`: explore tools plus edit/write/bash + codex_review.
+   *  - `"test"`: identical read+write tool surface to `"implement"`, but the
+   *    system prompt frames the worker as an independent test author.
    *  - `"browse"`: the browser-control tool surface (`buildBrowseTools`) —
    *    drives a real Chrome/Edge tab via the browser-MCP bridge. Does NOT
    *    touch the filesystem; `workspace` is irrelevant (defaulted to cwd by
    *    the engine purely so canonicalization stays happy) and `worktree` is
-   *    ignored (worktrees stay implement-only).
+   *    ignored (worktrees stay implement/test-only).
    */
-  mode: "explore" | "review" | "implement" | "browse"
+  mode: "explore" | "review" | "plan" | "implement" | "test" | "browse"
   /**
    * Absolute path to the workspace (real, realpath-canonicalized). Required
    * in practice for the filesystem modes (`explore`/`review`/`implement`);
@@ -113,7 +117,7 @@ export interface WorkerAgentResult {
  *
  * Defaults (applied by `class Budget`):
  *   - maxTurns: 500
- *   - maxWallClockMs: 30 * 60_000 (30 min)
+ *   - maxWallClockMs: 30 * 60_000 (30 min, sized under the 35-min MCP timeout)
  *   - maxToolBytes: 16 * 1024 * 1024 (16 MiB)
  *
  * Env overrides read at construction time:

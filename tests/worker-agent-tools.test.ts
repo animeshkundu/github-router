@@ -1599,6 +1599,49 @@ describe("buildWorkerTools", () => {
     expect(names).not.toContain("peer_review")
   })
 
+  test("plan mode returns the SAME 9 read-only tools as explore (no write tools)", () => {
+    const tools = buildWorkerTools({
+      mode: "plan",
+      workspace: realpathSync.native(os.tmpdir()),
+    })
+    expect(tools.length).toBe(9)
+    const names = tools.map((t) => t.name).sort()
+    expect(names).toEqual(
+      [
+        "advisor",
+        "code_search",
+        "fetch_url",
+        "glob",
+        "grep",
+        "read",
+        "toolbelt",
+        "update_plan",
+        "web_search",
+      ].sort(),
+    )
+    // plan is read-only — the planner framing lives in the system prompt,
+    // not the toolset, so the write tools must be absent.
+    for (const w of ["edit", "write", "bash", "codex_review"]) {
+      expect(names).not.toContain(w)
+    }
+  })
+
+  test("test mode returns the SAME 13 write-capable tools as implement", () => {
+    const tools = buildWorkerTools({
+      mode: "test",
+      workspace: realpathSync.native(os.tmpdir()),
+    })
+    expect(tools.length).toBe(13)
+    const names = tools.map((t) => t.name)
+    for (const w of ["edit", "write", "bash", "codex_review"]) {
+      expect(names).toContain(w)
+    }
+    expect(names).toContain("toolbelt")
+    expect(names).toContain("advisor")
+    expect(names).toContain("update_plan")
+    expect(names).not.toContain("peer_review")
+  })
+
   test("codex_review and the write tools declare executionMode:'sequential'", () => {
     // The engine no longer forces agent-wide sequential execution for
     // implement mode; correctness now depends on these per-tool flags so a
