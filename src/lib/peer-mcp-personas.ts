@@ -1620,7 +1620,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         content: Array<{ type: "text"; text: string }>
         isError?: boolean
       }> {
-        const ask = typeof args.ask === "string" ? args.ask : ""
+        const ask = typeof args.ask === "string" ? args.ask.trim() : ""
         if (!ask) {
           return { content: [{ type: "text", text: "decompose: arguments.ask is required (a non-empty string)" }], isError: true }
         }
