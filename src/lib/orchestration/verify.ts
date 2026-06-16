@@ -199,9 +199,18 @@ export function verifyWorkflowIR(ir: WorkflowIR, opts: VerifyOpts = {}): IRVerif
     }
     // An "orchestrated candidate" is any input that is neither the baseline nor
     // another selector — a producer in the single-branch case, or the
-    // `integration` node's assembled output in the coupled case.
-    if (!inputRoles.some((r) => r !== undefined && r !== "baseline" && r !== "selector")) {
+    // `integration` node's assembled output in the coupled case. The selector
+    // compares the baseline against EXACTLY ONE such candidate (route coupled
+    // producers through an integration node); more than one is ambiguous and
+    // lets the kernel silently compare only one branch.
+    const orchestratedInputs = (s.inputs ?? []).filter((id) => {
+      const r = roleById.get(id)
+      return r !== undefined && r !== "baseline" && r !== "selector"
+    })
+    if (orchestratedInputs.length === 0) {
       push("SELECTOR_NO_ORCHESTRATED_INPUT", `selector "${s.id}" must take at least one orchestrated candidate (a producer or the integration output) as an input`, s.id)
+    } else if (orchestratedInputs.length > 1) {
+      push("SELECTOR_MULTIPLE_ORCHESTRATED", `selector "${s.id}" must take exactly one orchestrated candidate (route coupled producers through an integration node); got ${orchestratedInputs.length}`, s.id)
     }
     if (dependedOn.has(s.id)) {
       push("SELECTOR_NOT_TERMINAL", `selector "${s.id}" must be terminal (nothing may depend on it)`, s.id)

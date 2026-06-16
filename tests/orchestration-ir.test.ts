@@ -216,6 +216,12 @@ describe("verifyWorkflowIR", () => {
     expect(codes(ir)).toContain("SELECTOR_NO_ORCHESTRATED_INPUT")
   })
 
+  test("selector with more than one orchestrated input → SELECTOR_MULTIPLE_ORCHESTRATED", () => {
+    const ir = validIR()
+    ir.nodes[3]!.inputs = ["baseline", "review", "impl"] // review + impl both orchestrated
+    expect(codes(ir)).toContain("SELECTOR_MULTIPLE_ORCHESTRATED")
+  })
+
   test("selector that something depends on → SELECTOR_NOT_TERMINAL", () => {
     const ir = validIR()
     ir.nodes.push({ id: "after", role: "verify", inputs: ["select"], gate: { kind: "none" }, onFail: "escalate" })
