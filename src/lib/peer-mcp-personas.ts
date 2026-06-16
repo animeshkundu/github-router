@@ -43,6 +43,7 @@ import { searchWeb } from "~/services/copilot/web-search"
 import { runStandIn, type StandInInput } from "~/lib/stand-in"
 import { verifyWorkflowIR, decomposeWorkflow, type WorkflowIR } from "~/lib/orchestration"
 import { buildLiveDecomposeDeps } from "~/lib/orchestration/decompose-live"
+import { runWorkflowLive } from "~/lib/orchestration/run-workflow-live"
 
 /**
  * MCP server groups. Each group is surfaced to Claude Code as its OWN MCP
@@ -1605,6 +1606,67 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           signal,
         })
         const result = await decomposeWorkflow(ask, deps, { maxRounds: 3 })
+        return { content: [{ type: "text", text: JSON.stringify(result) }], isError: !result.ok }
+      },
+    },
+    {
+      // run_workflow — execute a VERIFIED workflow IR through the frozen kernel.
+      // The kernel (not the model) runs the baseline + the orchestrated DAG,
+      // executes the SEALED gate the caller names by id (never a model-authored
+      // command), and ships max(orchestrated, baseline) by champion-retention.
+      // Gated `capability: "worker"`: it drives worker agents + worktrees + real
+      // gate subprocesses, so it shares the worker availability gate.
+      toolNameHttp: "run_workflow",
+      group: "workers",
+      capability: "worker",
+      description:
+        "Execute a VERIFIED workflow IR (from decompose / verify_workflow) through "
+        + "the frozen orchestration kernel. The kernel runs the single-model "
+        + "BASELINE plus the orchestrated DAG, gates every producer over a SEALED "
+        + "executable gate you name by `gateId` (the kernel owns the command; the "
+        + "IR cannot author it), and delivers max(orchestrated, baseline) by "
+        + "champion-retention: the orchestrated result ships only if it verifiably "
+        + "does not regress the baseline's executable checks, else the baseline "
+        + "ships. Returns {ok, outcome:{status, winner?, artifact?, reason, "
+        + "gatesPassed?}}. Use after decompose for non-trivial asks; the executable "
+        + "gate makes the floor monotone on harness-bearing repos.",
+      inputSchema: {
+        type: "object",
+        required: ["ir", "ask", "workspace", "gateId"],
+        additionalProperties: false,
+        properties: {
+          ir: { type: "object", description: "The verified WorkflowIR to execute." },
+          ask: { type: "string", description: "The raw user ask (the baseline and producers run on this)." },
+          workspace: { type: "string", description: "Absolute path to the git workspace the kernel runs in." },
+          gateId: {
+            type: "string",
+            enum: ["default-ci", "typecheck-test", "typecheck-only"],
+            description: "Which SEALED executable gate to run (the kernel owns the commands).",
+          },
+          tiePolicy: {
+            type: "string",
+            enum: ["strict", "superset"],
+            description: "On an exact tie vs the baseline: 'strict' ships the baseline (default), 'superset' ships the orchestrated candidate.",
+          },
+          maxRetries: { type: "number", description: "Retries after the first attempt for a loop node / baseline infra failure." },
+        },
+      },
+      async handler(
+        args: Record<string, unknown>,
+        signal?: AbortSignal,
+      ): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        const result = await runWorkflowLive({
+          ir: args.ir,
+          ask: typeof args.ask === "string" ? args.ask : "",
+          workspace: typeof args.workspace === "string" ? args.workspace : "",
+          gateId: typeof args.gateId === "string" ? args.gateId : "",
+          tiePolicy: args.tiePolicy === "superset" ? "superset" : "strict",
+          maxRetries: typeof args.maxRetries === "number" ? args.maxRetries : undefined,
+          signal,
+        })
         return { content: [{ type: "text", text: JSON.stringify(result) }], isError: !result.ok }
       },
     },

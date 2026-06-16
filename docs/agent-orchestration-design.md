@@ -149,32 +149,48 @@ the floor-critical layer must be code.
 
 ## Implementation status (PR #67)
 
-The orchestration **logic core is complete and verified** — pure modules under
-`src/lib/orchestration/`, each cross-lab reviewed (gpt-5.3-codex / gemini-3.1-pro) and unit-tested,
-demonstrated executing a real `WorkflowIR` end-to-end (kernel + runner with mock deps). Delivered:
+The orchestration **logic core is complete and verified**, and the **live execution layer is wired
+and unit-tested with fakes** (the genuinely-live composition ships behind a gated E2E). Pure modules
+under `src/lib/orchestration/`, each cross-lab reviewed (gpt-5.3-codex / gemini-3.1-pro) and
+unit-tested, demonstrated executing a real `WorkflowIR` end-to-end (kernel + runner). Delivered:
 
 | Module | Role | Verification |
 |---|---|---|
 | `ir.ts` | typed `WorkflowIR` + the 8 invariants | types |
-| `verify.ts` | static verifier (`verifyWorkflowIR`) — floor invariants checked on the IR | 32 unit tests |
+| `verify.ts` | static verifier (`verifyWorkflowIR`), floor invariants checked on the IR | 32 unit tests |
 | `select.ts` | champion-retention `max(orchestrated, baseline)` over the canonical gate set | 9 unit tests |
-| `kernel.ts` | frozen executor (`executeWorkflow`) — baseline-first, fail-to-baseline, selection | 9 unit tests |
+| `kernel.ts` | frozen executor (`executeWorkflow`), baseline-first, fail-to-baseline, selection | 9 unit tests |
 | `decompose.ts` | driver + cross-lab critique loop emitting a verified IR | 9 unit tests |
+| `decompose-live.ts` | live `DecomposeDeps` (driver/critic via `dispatchModelCall`) + JSON extraction | 11 unit tests |
 | `runner.ts` | role→action mapping, threads the executable outcome to the selector | 5 + 3 E2E tests |
+| `runner-live.ts` | live adapter: worktree-per-producer, worker engine, sealed gate, advisory critic, cleanup | 15 unit tests (fakes) |
+| `gate-registry.ts` | the SEALED gate registry (id→commands, defensive clone, no model-authored shell) | 4 unit tests |
 | `gate-immutability.ts` | detect a producer weakening its own gates (invariant 5) | 8 unit tests |
 | `gate-runner.ts` | run the sealed check commands → `GateOutcome` | 5 unit tests |
+| `stop-gate.ts` / `live-exec.ts` | compose the executable gate + gate-weakening check; Windows-safe exec | 4 + 5 unit tests |
+| `run-workflow-live.ts` | live composition: validate → verify → kernel-execute → always-cleanup | 6 unit tests (validation) |
 | `mcp__workers__verify_workflow` | Claude-callable pre-flight verifier | dispatch test |
+| `mcp__workers__decompose` | compose a verified IR (driver + cross-lab critic) | wired (worker-gated) |
+| `mcp__workers__run_workflow` | execute a verified IR through the frozen kernel | wired (worker-gated) |
 
 Worker modes `worker_plan` + `worker_test` (Phase 0) are wired (the independent test author is the
 one floor-raise a single context can't do).
 
-**Remaining (the live-integration + launch layer)** — each needs E2E against real systems (live
-models, git worktrees, the spawned-session launch path), so it ships behind a **gated E2E harness**
-(this repo's pattern, e.g. `GH_ROUTER_RUN_BROWSER_E2E`) with unit-tested wiring, NOT claimed
-green in unit CI:
-- the **live runner adapter** (wire the runner's injected deps to `runWorkerAgent`,
-  `createWorktree`, `dispatchModelCall`, and a sandboxed `Bun.spawn` exec);
-- the **`run_workflow`** and **`decompose`** MCP tools (expose the live-wired kernel + decompose);
-- the **structural-gate Stop-hook** (Phase 0 — inject a non-skippable harness gate + the
+The live `decompose` + `run_workflow` paths (real models, git worktrees, gate subprocesses) ship
+behind a **gated E2E harness** (`GH_ROUTER_RUN_ORCHESTRATION_E2E=1`, this repo's
+`GH_ROUTER_RUN_BROWSER_E2E` pattern) with unit-tested wiring, NOT claimed green in unit CI.
+`run_workflow` was cross-lab reviewed (gpt-5.3-codex + gemini-3.1-pro); the must-fix findings landed
+(gate-consistency: the IR is verified against the SELECTED gate so the kernel never runs a gate the
+IR did not declare; finalize-failure disqualifies a write node to the baseline rather than ship
+un-appliable text; `maxRetries` clamped 0..3). Accepted/documented limitations (recorded in
+`run-workflow-live.ts`): the caller-supplied `workspace` matches `worker_implement`'s existing
+symmetric threat model; a sealed gate needing installed deps may not pass in a bare worktree
+(floor-safe: fails to the baseline); process-kill worktree leaks are reclaimed by the worker-agent
+age/boot sweep.
+
+**Remaining (the launch layer + Phase 3):**
+- the **structural-gate Stop-hook** (Phase 0, inject a non-skippable harness gate + the
   gate-immutability check into the spawned session; the cheap, certain floor win);
+- worktree dep-provisioning so the executable gate can pass (unlocks the orchestration upside on
+  dep-bearing repos);
 - cost/token accounting and `attest_step` (Phase 3).
