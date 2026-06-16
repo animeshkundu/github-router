@@ -22,7 +22,16 @@
 import type { BudgetConfig } from "./types"
 
 const DEFAULT_MAX_TURNS = 500
-const DEFAULT_MAX_WALLCLOCK_MS = 30 * 60_000
+// Sized to abort GRACEFULLY just UNDER the 600s MCP per-tool-call timeout the
+// proxy injects (`MCP_TIMEOUT=600000`, server-setup.ts). All worker callers run
+// behind an MCP tool (explore/review/.../run_workflow), so the harness hard-kills
+// the call at ~600s regardless of this value. At the old 30min it never aborted
+// before that hard-kill, so a non-converging worker returned NOTHING. At 9min it
+// hits its own wallclock first, raising WorkerAbort -> the engine returns the
+// PARTIAL work + a "[halted: wallclock]" message that IS delivered before the
+// harness gives up. Override with GH_ROUTER_WORKER_MAX_WALLCLOCK_MS (raise it if
+// you also raise MCP_TIMEOUT).
+const DEFAULT_MAX_WALLCLOCK_MS = 9 * 60_000
 const DEFAULT_MAX_TOOL_BYTES = 16 * 1024 * 1024
 const DEFAULT_MAX_TOOL_CALLS = 250
 const DEFAULT_MAX_REPEATED_CALLS = 3
