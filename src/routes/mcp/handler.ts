@@ -1401,6 +1401,26 @@ export async function handleMcpPost(
     )
   }
 
+  // Diagnostic (opt-in, GH_ROUTER_LOG_PEER_MCP=1): log the ARRIVAL of each
+  // tools/call with a wall-clock stamp + the current in-flight count. The proxy
+  // handles requests concurrently, so this isolates CLIENT dispatch behavior: a
+  // batch that arrives with near-identical `t=` (and a climbing `inflight=`) is
+  // dispatched in parallel by the client (any "one at a time" is then display-
+  // side); arrivals staggered by full tool durations mean the client serializes
+  // dispatch. Pairs with the completion-time `logTelemetry` line.
+  if (
+    process.env.GH_ROUTER_LOG_PEER_MCP === "1"
+    && typeof body === "object"
+    && body !== null
+    && !Array.isArray(body)
+    && body.method === "tools/call"
+  ) {
+    const nm = typeof (body.params as { name?: unknown } | undefined)?.name === "string"
+      ? (body.params as { name: string }).name
+      : "?"
+    process.stderr.write(`[peer-mcp] recv t=${Date.now()} name=${nm} scope=${scope} inflight=${currentInFlight()}\n`)
+  }
+
   // SSE-streamed response branch for `tools/call` when the client
   // advertises text/event-stream Accept (Claude Code's MCP HTTP client
   // does, per MCP 2025-06-18 Streamable HTTP transport spec). Streamed
