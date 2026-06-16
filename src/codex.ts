@@ -21,6 +21,7 @@ import { state } from "./lib/state"
 import { toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { provisionAndIndexColbert } from "./lib/colbert"
+import { startKeepAwake } from "./lib/keep-awake"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
 import { hasSupportedBrowserInstalled } from "./lib/browser-mcp/browser-detect"
 import { resolveCodexModel } from "./lib/utils"
@@ -73,6 +74,11 @@ export const codex = defineCommand({
     // Best-effort ColBERT semantic-search provision + background index of
     // the launch cwd. ON by default; never blocks launch, never throws.
     void provisionAndIndexColbert()
+
+    // Best-effort: keep the machine awake while the proxy/Codex session
+    // runs (win32 default-on; opt out GH_ROUTER_DISABLE_KEEP_AWAKE=1).
+    // Self-registered SIGINT/SIGTERM/exit reaper releases the assertion.
+    startKeepAwake()
 
     // Best-effort: materialize the browser extension + bridge into the
     // stable app-dir and stamp the running version. Gated inline (browse

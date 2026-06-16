@@ -23,6 +23,7 @@ import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirrore
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { provisionAndIndexColbert } from "./lib/colbert"
+import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
 import {
   DEFAULT_CLAUDE_MODEL_FALLBACKS,
@@ -324,6 +325,12 @@ export const claude = defineCommand({
     // never throws. Opt out with GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1.
     void provisionAndIndexColbert()
 
+    // Best-effort: keep the machine awake while the proxy/Claude Code
+    // session runs (win32 default-on; opt out GH_ROUTER_DISABLE_KEEP_AWAKE=1).
+    // Released via stopKeepAwake() in the shutdown chain below AND via the
+    // module's own self-registered SIGINT/SIGTERM/exit reaper.
+    startKeepAwake()
+
     // Best-effort: materialize the browser extension + bridge into the
     // stable app-dir and stamp the running version, so a one-time "Load
     // unpacked" survives npx/bunx upgrades. Gated on --browse; never
@@ -360,6 +367,7 @@ export const claude = defineCommand({
     // get unlinked first via known paths; the recursive `fs.rm` is
     // belt-and-braces for everything else.
     const baseShutdown = async (): Promise<void> => {
+      await stopKeepAwake()
       await removeOwnClaudeConfigMirror()
     }
     let onShutdown: () => Promise<void> = baseShutdown
