@@ -41,6 +41,7 @@ import {
 import { runWorkerAgent, type WorkerThinkingLevel } from "~/lib/worker-agent"
 import { searchWeb } from "~/services/copilot/web-search"
 import { runStandIn, type StandInInput } from "~/lib/stand-in"
+import { verifyWorkflowIR, type WorkflowIR } from "~/lib/orchestration"
 
 /**
  * MCP server groups. Each group is surfaced to Claude Code as its OWN MCP
@@ -1488,6 +1489,62 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         isError?: boolean
       }> {
         return runWorkerToolCall({ mode: "test", args, signal })
+      },
+    },
+    {
+      // verify_workflow — pure static check of a workflow IR against the
+      // orchestration floor invariants. No capability gate (like code/web, it's
+      // a local pure function); the IR is untrusted input the verifier never
+      // throws on. The kernel runs the SAME verifier before executing; this tool
+      // is the pre-flight Claude calls while composing a workflow.
+      toolNameHttp: "verify_workflow",
+      group: "workers",
+      description:
+        "Statically verify a workflow IR against the orchestration floor "
+        + "invariants BEFORE running it. Input `ir`: the typed WorkflowIR "
+        + "(rawAskHash, acceptanceCriteriaHash, nodes[] with role/inputs/gate/"
+        + "onFail, maxDepth). Returns {ok, violations:[{code, message, nodeId?}]}. "
+        + "Each violation carries a stable code (e.g. NO_BASELINE, "
+        + "SELECTOR_NOT_RAW_ASK, SAME_LAB_CHECK, ORPHAN_NODE, "
+        + "MISSING_INTEGRATION_GATE) — fix every one until `ok` is true. Pure and "
+        + "side-effect-free; call it pre-flight after composing/decomposing a "
+        + "workflow and before execution.",
+      inputSchema: {
+        type: "object",
+        required: ["ir"],
+        additionalProperties: false,
+        properties: {
+          ir: {
+            type: "object",
+            description:
+              "The typed WorkflowIR to verify: { rawAskHash, "
+              + "acceptanceCriteriaHash, nodes: [{id, role, inputs, gate, "
+              + "onFail, ...}], maxDepth }.",
+          },
+          knownGateIds: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Optional allowlist of the kernel's sealed executable gate ids. "
+              + "When present, every executable gate's gateId must be in it "
+              + "(gate-immutability).",
+          },
+        },
+      },
+      async handler(
+        args: Record<string, unknown>,
+      ): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        const knownGateIds = Array.isArray(args.knownGateIds)
+          ? new Set(args.knownGateIds.filter((x): x is string => typeof x === "string"))
+          : undefined
+        const result = verifyWorkflowIR(
+          args.ir as WorkflowIR,
+          knownGateIds ? { knownGateIds } : {},
+        )
+        return { content: [{ type: "text", text: JSON.stringify(result) }] }
       },
     },
     // browse — a Pi-driven autonomous browser agent (mode: "browse" of the

@@ -213,6 +213,7 @@ describe("/mcp protocol methods", () => {
       "gemini_reviewer",
       "opus_critic",
       "stand_in",
+      "verify_workflow",
       "web",
     ])
     for (const t of result.tools) {
@@ -237,6 +238,7 @@ describe("/mcp protocol methods", () => {
       "codex_critic",
       "codex_reviewer",
       "opus_critic",
+      "verify_workflow",
       "web",
     ])
   })
@@ -737,6 +739,34 @@ describe("/mcp tools/call routing", () => {
     }
     expect(result.isError).toBeUndefined()
     expect(result.content[0].text).toBe("no material objection")
+  })
+
+  test("verify_workflow dispatches to the static verifier (ok IR vs invalid IR)", async () => {
+    const validIr = {
+      rawAskHash: "r", acceptanceCriteriaHash: "a", maxDepth: 1,
+      nodes: [
+        { id: "baseline", role: "baseline", inputs: [], gate: { kind: "none" }, onFail: "baseline" },
+        { id: "impl", role: "implement", producerLab: "openai", inputs: [], gate: { kind: "executable", gateId: "tests" }, onFail: "loop" },
+        { id: "select", role: "selector", inputs: ["baseline", "impl"], gate: { kind: "none" }, onFail: "baseline", judgesOnRawAsk: true },
+      ],
+    }
+    const ok = await rpc({
+      jsonrpc: "2.0", id: 200, method: "tools/call",
+      params: { name: "verify_workflow", arguments: { ir: validIr } },
+    })
+    expect(ok.status).toBe(200)
+    const okResult = ok.json.result as { content: Array<{ text: string }>; isError?: boolean }
+    expect(okResult.isError).toBeUndefined()
+    expect(JSON.parse(okResult.content[0].text).ok).toBe(true)
+
+    const bad = await rpc({
+      jsonrpc: "2.0", id: 201, method: "tools/call",
+      params: { name: "verify_workflow", arguments: { ir: { nodes: [] } } },
+    })
+    const badResult = bad.json.result as { content: Array<{ text: string }> }
+    const parsed = JSON.parse(badResult.content[0].text) as { ok: boolean; violations: unknown[] }
+    expect(parsed.ok).toBe(false)
+    expect(parsed.violations.length).toBeGreaterThan(0)
   })
 
   test("explicit effort:xhigh on codex_critic reaches the upstream payload", async () => {
