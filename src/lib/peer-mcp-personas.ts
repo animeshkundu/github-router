@@ -41,7 +41,8 @@ import {
 import { runWorkerAgent, type WorkerThinkingLevel } from "~/lib/worker-agent"
 import { searchWeb } from "~/services/copilot/web-search"
 import { runStandIn, type StandInInput } from "~/lib/stand-in"
-import { verifyWorkflowIR, type WorkflowIR } from "~/lib/orchestration"
+import { verifyWorkflowIR, decomposeWorkflow, type WorkflowIR } from "~/lib/orchestration"
+import { buildLiveDecomposeDeps } from "~/lib/orchestration/decompose-live"
 
 /**
  * MCP server groups. Each group is surfaced to Claude Code as its OWN MCP
@@ -1545,6 +1546,66 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           knownGateIds ? { knownGateIds } : {},
         )
         return { content: [{ type: "text", text: JSON.stringify(result) }] }
+      },
+    },
+    {
+      // decompose — compose a VERIFIED workflow IR from an open-ended ask. A
+      // single driver model drafts the IR; the static verifier checks it; on a
+      // violation the driver re-drafts with the violations as feedback; a
+      // cross-lab critic reviews a clean draft (bounded). Gated `capability:
+      // "worker"` (it dispatches models; the gpt-5.5 driver errors at call time
+      // if absent, like worker_implement).
+      toolNameHttp: "decompose",
+      group: "workers",
+      capability: "worker",
+      description:
+        "Compose a VERIFIED, tool-routed workflow IR from an open-ended software "
+        + "ask. A single strong driver model drafts a typed WorkflowIR; a static "
+        + "verifier checks it against the floor invariants and the driver "
+        + "re-drafts on any violation; a cross-lab critic reviews a clean draft. "
+        + "Returns {ok, ir, rounds, concerns?} on success, or {ok:false, "
+        + "violations, rounds} if it never converged. The IR is DATA the kernel "
+        + "executes — pass it to a run step (or verify it again with "
+        + "verify_workflow). Use for non-trivial asks that warrant role-separated, "
+        + "floor-guaranteed orchestration; a trivial ask does not need it.",
+      inputSchema: {
+        type: "object",
+        required: ["ask"],
+        additionalProperties: false,
+        properties: {
+          ask: {
+            type: "string",
+            description: "The open-ended software task to decompose into a verified workflow.",
+          },
+          context: {
+            type: "string",
+            description: "Optional extra context (repo facts, constraints) for the driver.",
+          },
+        },
+      },
+      async handler(
+        args: Record<string, unknown>,
+        signal?: AbortSignal,
+      ): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        const ask = typeof args.ask === "string" ? args.ask : ""
+        if (!ask) {
+          return { content: [{ type: "text", text: "decompose: arguments.ask is required (a non-empty string)" }], isError: true }
+        }
+        const deps = buildLiveDecomposeDeps({
+          toolCatalog:
+            "roles: research, plan, implement, review, test, verify, baseline, "
+            + "selector, integration. Producer workers: explore/plan/implement/"
+            + "test. Cross-lab critics: codex_critic (openai), gemini_critic "
+            + "(google), opus_critic (anthropic). Gate kinds: executable "
+            + "(tests/types/lint/build), cross_lab (a different-lab critic), none.",
+          critic: { model: "gemini-3.1-pro-preview", endpoint: "/v1/chat/completions", effort: "high" },
+          signal,
+        })
+        const result = await decomposeWorkflow(ask, deps, { maxRounds: 3 })
+        return { content: [{ type: "text", text: JSON.stringify(result) }], isError: !result.ok }
       },
     },
     // browse — a Pi-driven autonomous browser agent (mode: "browse" of the
