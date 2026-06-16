@@ -1724,12 +1724,16 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         + "[{id, producerLab, artifactHash, checks:[{checkerLab, "
         + "verifiedArtifactHash}]}]. Returns {attested, recommendation: "
         + "'accept'|'ship_baseline', nodes:[{id, attested, reason}]}. "
-        + "WHY: run_workflow's frozen kernel enforces this in code, but a workflow "
-        + "you compose yourself (with your own Workflow tool) runs OUTSIDE the "
-        + "kernel. attest_step is the deterministic check that 'a cross-lab check "
-        + "ran on the final artifact' instead of trusting it from the model. "
-        + "Fail-closed: anything short of a valid different-lab check on EVERY node "
-        + "recommends shipping the baseline. It RECOMMENDS; it never executes.",
+        + "WHY: run_workflow's frozen kernel is the TAMPER-PROOF path (it controls "
+        + "the artifacts and computes the hashes). attest_step is for workflows you "
+        + "compose OUTSIDE the kernel: it deterministically checks your "
+        + "SELF-REPORTED lineage is structurally sound (a different-lab check whose "
+        + "hash equals each producer's final-artifact hash), catching the "
+        + "non-malicious failures (a missing / same-lab / stale check). It verifies "
+        + "consistency, NOT that the hashes are real — a completeness gate, not a "
+        + "security boundary. Fail-closed: anything short of a valid different-lab "
+        + "check on EVERY node recommends shipping the baseline. It RECOMMENDS; it "
+        + "never executes.",
       inputSchema: {
         type: "object",
         required: ["nodes"],

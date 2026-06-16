@@ -79,4 +79,19 @@ describe("attestRun", () => {
     })
     expect(r.attested).toBe(true)
   })
+
+  test("normalizes lab names: a casing/whitespace variant of the producer lab is NOT a different lab", () => {
+    const r = attestRun({
+      nodes: [node({ producerLab: "openai", checks: [{ checkerLab: "OpenAI ", verifiedArtifactHash: "sha:abc" }] })],
+    })
+    expect(r.attested).toBe(false)
+    expect(r.nodes[0]!.reason).toMatch(/cross a different lab/)
+  })
+
+  test("a genuinely different lab attests regardless of casing", () => {
+    const r = attestRun({
+      nodes: [node({ producerLab: "openai", checks: [{ checkerLab: "GOOGLE", verifiedArtifactHash: "sha:abc" }] })],
+    })
+    expect(r.attested).toBe(true)
+  })
 })

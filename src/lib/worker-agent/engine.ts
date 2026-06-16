@@ -703,9 +703,12 @@ async function runWorkerAgentOnce(
 const NO_OUTPUT_PREFIX = "[worker exited with no output"
 
 /** True iff `r` is the transient no-output sentinel (a clean stop with empty
- *  text), the one case worth a fresh retry. */
+ *  text), the one case worth a fresh retry. Keyed on the specific sentinel
+ *  PREFIX, not on `isError` — so the retry can't be silently decoupled if the
+ *  sentinel's error flag ever changes, and a real worker answer never begins
+ *  with this string. */
 function isTransientNoOutput(r: WorkerAgentResult): boolean {
-  return r.isError === true && typeof r.text === "string" && r.text.startsWith(NO_OUTPUT_PREFIX)
+  return typeof r.text === "string" && r.text.startsWith(NO_OUTPUT_PREFIX)
 }
 
 /**

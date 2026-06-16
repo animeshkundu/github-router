@@ -7,8 +7,19 @@
  * Why it exists: the frozen kernel (`run_workflow`) ENFORCES the invariants in
  * code, but a workflow Claude composes itself with its own Workflow tool runs
  * OUTSIDE the kernel. `attest_step` lets that composition submit its lineage and
- * get a code-enforced verdict, so "a cross-lab check ran on the final artifact"
- * is verified by a deterministic function instead of trusted from the model.
+ * get a deterministic verdict on its STRUCTURE (different-lab + final-hash).
+ *
+ * SCOPE / LIMITATION (be honest): every field here is SELF-REPORTED by the
+ * caller. `attest_step` verifies the reported lineage is internally consistent
+ * (a different-lab check whose verified hash equals the producer's final hash);
+ * it does NOT, and cannot, verify those hashes are REAL — a caller that
+ * fabricates a matching (artifactHash, verifiedArtifactHash) pair would pass.
+ * So it catches the NON-malicious failures (forgot to cross-lab, used the same
+ * lab, checked a stale version, omitted a check) and makes the lineage explicit
+ * and auditable; it is NOT tamper-proof. The tamper-proof guarantee lives in the
+ * KERNEL (`run_workflow`), which controls the artifacts and computes the hashes
+ * itself. Treat `attest_step` as a completeness/honesty gate, not a security
+ * boundary.
  *
  * Fail-closed to baseline (the floor-preserving default): anything short of a
  * valid cross-lab + hash-matching check for every submitted node yields
@@ -53,6 +64,13 @@ function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.length > 0
 }
 
+/** Canonicalize a lab id before comparison so a caller can't dodge the
+ *  "different lab" rule with casing/whitespace ("OpenAI" vs "openai " vs
+ *  "openai"). Applied to BOTH sides of every comparison. */
+function normLab(s: string): string {
+  return s.trim().toLowerCase()
+}
+
 /** Attest one node: it needs ≥1 check by a DIFFERENT lab whose verified hash
  *  equals the producer's final artifact hash. */
 function attestNode(node: AttestNode): NodeAttestation {
@@ -62,28 +80,25 @@ function attestNode(node: AttestNode): NodeAttestation {
   if (!isNonEmptyString(node.producerLab) || !isNonEmptyString(node.artifactHash)) {
     return { id: node.id, attested: false, reason: "node is missing producerLab or artifactHash" }
   }
+  const producer = normLab(node.producerLab)
   const checks = Array.isArray(node.checks) ? node.checks : []
   if (checks.length === 0) {
     return { id: node.id, attested: false, reason: "no independent check (a producer cannot bless itself)" }
   }
-  const sameLab = checks.filter((c) => isNonEmptyString(c?.checkerLab) && c.checkerLab === node.producerLab)
+  const isCrossLab = (c: AttestCheck): boolean => isNonEmptyString(c?.checkerLab) && normLab(c.checkerLab) !== producer
   const valid = checks.find(
-    (c) =>
-      isNonEmptyString(c?.checkerLab)
-      && c.checkerLab !== node.producerLab
-      && isNonEmptyString(c?.verifiedArtifactHash)
-      && c.verifiedArtifactHash === node.artifactHash,
+    (c) => isCrossLab(c) && isNonEmptyString(c?.verifiedArtifactHash) && c.verifiedArtifactHash === node.artifactHash,
   )
   if (valid) {
     return { id: node.id, attested: true, reason: `checked by ${valid.checkerLab} (different lab) on the final artifact` }
   }
   // Diagnose the most actionable failure.
-  const crossLab = checks.filter((c) => isNonEmptyString(c?.checkerLab) && c.checkerLab !== node.producerLab)
+  const crossLab = checks.filter(isCrossLab)
   if (crossLab.length === 0) {
     return {
       id: node.id,
       attested: false,
-      reason: `every check is by the producer's own lab "${node.producerLab}"${sameLab.length > 0 ? "" : ""} — the check must cross a different lab`,
+      reason: `every check is by the producer's own lab "${node.producerLab}" — the check must cross a different lab`,
     }
   }
   return {
