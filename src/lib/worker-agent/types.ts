@@ -47,14 +47,18 @@ export interface WorkerAgentOpts {
    *  - `"review"`: identical read-only tool surface to `"explore"`, but the
    *    system prompt frames the worker as a code reviewer that verifies
    *    correctness against the actual code rather than summarizing.
+   *  - `"plan"`: identical read-only tool surface to `"explore"`, but the
+   *    system prompt frames the worker as an implementation planner.
    *  - `"implement"`: explore tools plus edit/write/bash + codex_review.
+   *  - `"test"`: identical read+write tool surface to `"implement"`, but the
+   *    system prompt frames the worker as an independent test author.
    *  - `"browse"`: the browser-control tool surface (`buildBrowseTools`) —
    *    drives a real Chrome/Edge tab via the browser-MCP bridge. Does NOT
    *    touch the filesystem; `workspace` is irrelevant (defaulted to cwd by
    *    the engine purely so canonicalization stays happy) and `worktree` is
-   *    ignored (worktrees stay implement-only).
+   *    ignored (worktrees stay implement/test-only).
    */
-  mode: "explore" | "review" | "implement" | "browse"
+  mode: "explore" | "review" | "plan" | "implement" | "test" | "browse"
   /**
    * Absolute path to the workspace (real, realpath-canonicalized). Required
    * in practice for the filesystem modes (`explore`/`review`/`implement`);

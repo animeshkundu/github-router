@@ -28,8 +28,8 @@
  *   3. realpath-canonicalize the workspace (so every per-call
  *      `confineToWorkspace` inside `tools.ts` operates on a stable
  *      base — the docstring there requires this);
- *   4. provision the worktree (only for `implement` + `worktree:
- *      true`; HARD ERROR if no git);
+ *   4. provision the worktree (only for write-capable filesystem modes
+ *      with `worktree: true`; HARD ERROR if no git);
  *   5. construct the `Budget` (which reads env overrides on its own);
  *   6. construct the tool array bound to the resolved workspace
  *      + a live getter for the advisor's transcript;
@@ -271,21 +271,21 @@ export async function runWorkerAgent(
     // on unknown-model errors, so the caller knows what to retry with).
     //
     // Per-mode defaults (an explicit `opts.model`/`opts.thinking` always
-    // wins): read-only `explore`/`review` → `DEFAULT_MODEL` (gemini-3.5-flash,
-    // high); read+write `implement` → `IMPLEMENT_DEFAULT_MODEL` (gpt-5.5,
-    // xhigh — coding wants max reasoning); `browse` → `BROWSE_DEFAULT_MODEL`
-    // (gpt-5.4-mini). The workloads are distinct enough to warrant distinct
-    // defaults.
+    // wins): read-only `explore`/`review`/`plan` → `DEFAULT_MODEL`
+    // (gemini-3.5-flash, high); read+write `implement`/`test` →
+    // `IMPLEMENT_DEFAULT_MODEL` (gpt-5.5, xhigh — coding/test-authoring wants
+    // max reasoning); `browse` → `BROWSE_DEFAULT_MODEL` (gpt-5.4-mini). The
+    // workloads are distinct enough to warrant distinct defaults.
     const isBrowse = opts.mode === "browse"
-    const isImplement = opts.mode === "implement"
+    const isWriteCapable = opts.mode === "implement" || opts.mode === "test"
     const defaultModel = isBrowse
       ? BROWSE_DEFAULT_MODEL
-      : isImplement
+      : isWriteCapable
         ? IMPLEMENT_DEFAULT_MODEL
         : DEFAULT_MODEL
     const defaultThinking = isBrowse
       ? BROWSE_DEFAULT_THINKING
-      : isImplement
+      : isWriteCapable
         ? IMPLEMENT_DEFAULT_THINKING
         : DEFAULT_THINKING
     const resolved = resolveModelAndThinking({
@@ -333,12 +333,14 @@ export async function runWorkerAgent(
       }
     }
 
-    // Step 4: worktree provisioning (implement + worktree only).
-    // HARD ERROR if no git — `createWorktree` throws for us. We do NOT
-    // silently fall back to the no-worktree path: the caller asked for
-    // isolation, and an undetected fallback would race with their other
+    // Step 4: worktree provisioning (write-capable `implement`/`test` +
+    // worktree only). HARD ERROR if no git — `createWorktree` throws for us.
+    // We do NOT silently fall back to the no-worktree path: the caller asked
+    // for isolation, and an undetected fallback would race with their other
     // edits (plan: peer-review HIGH, explicit policy).
-    const useWorktree = opts.mode === "implement" && opts.worktree === true
+    const useWorktree =
+      (opts.mode === "implement" || opts.mode === "test") &&
+      opts.worktree === true
     let ws: WorktreeHandle
     if (useWorktree) {
       try {

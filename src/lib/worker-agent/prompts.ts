@@ -70,14 +70,21 @@ const EXPLORE_MODE_NOTE = `Read-only mode — tools:\n${buildToolBlock(READ_TOOL
 
 const IMPLEMENT_MODE_NOTE = `Read+write mode — tools:\n${buildToolBlock([...READ_TOOL_NOTES, ...WRITE_TOOL_NOTES])}`
 
-// Review mode shares explore's read-only tool surface. The only addition is
-// a one-line reviewer ROLE frame — what the worker is for (verify correctness
-// against the real code, report findings) — NOT prescriptive step-advice
+// Review/plan modes share explore's read-only tool surface. Each adds a
+// one-line ROLE frame — what the worker is for — NOT prescriptive step-advice
 // ("first glob, then read…"), keeping faith with the no-scaffolding principle
-// above. The caller's prompt still supplies the specific artifact to review.
+// above. The caller's prompt still supplies the specific artifact / task.
 const REVIEW_ROLE = `You are reviewing code for correctness. Verify against the actual code by reading it — never assume. Report concrete findings (bugs, edge cases, security / concurrency / resource risks, missing handling) with a severity and a \`file:line\` citation; if nothing material is wrong, say so plainly rather than inventing issues.`
 
+const PLAN_ROLE = `You are a planning specialist. From the task and acceptance criteria, produce a concrete, ordered implementation plan: the files to change, the approach, the key risks, and how each acceptance criterion will be verified. Read the codebase to ground it. Do NOT write or edit code.`
+
+const TEST_ROLE = `You are an INDEPENDENT test author; you did NOT write the code under test. From the task and acceptance criteria, write tests that try to BREAK the implementation (edge cases, error paths, and the acceptance criteria as executable checks), then run them and report which pass and which fail. Do NOT modify the implementation to make tests pass.`
+
 const REVIEW_MODE_NOTE = `${REVIEW_ROLE}\n\nRead-only mode — tools:\n${buildToolBlock(READ_TOOL_NOTES)}`
+
+const PLAN_MODE_NOTE = `${PLAN_ROLE}\n\nRead-only mode — tools:\n${buildToolBlock(READ_TOOL_NOTES)}`
+
+const TEST_MODE_NOTE = `${TEST_ROLE}\n\nRead+write mode — tools:\n${buildToolBlock([...READ_TOOL_NOTES, ...WRITE_TOOL_NOTES])}`
 
 // ============================================================
 // Browse mode
@@ -113,7 +120,7 @@ const BROWSE_MODE_NOTE = `Browser-control mode. Finish by calling submit_answer 
 /**
  * Build the system prompt for a given worker mode. Returns the
  * security-boundary paragraph followed by a bulletted capability
- * inventory (and, for `review`, a one-line reviewer role frame). No
+ * inventory (and, for role-framed modes, a one-line role frame). No
  * prescriptive task advice, no examples, no chain-of-thought scaffolding —
  * Pi's coding-agent harness covers all of that.
  *
@@ -124,16 +131,29 @@ const BROWSE_MODE_NOTE = `Browser-control mode. Finish by calling submit_answer 
  * tool list.
  */
 export function systemPromptFor(
-  mode: "explore" | "review" | "implement" | "browse",
+  mode: "explore" | "review" | "plan" | "implement" | "test" | "browse",
 ): string {
   if (mode === "browse") {
     return `${BROWSE_BOUNDARY}\n\n${BROWSE_MODE_NOTE}`
   }
-  const note =
-    mode === "explore"
-      ? EXPLORE_MODE_NOTE
-      : mode === "review"
-        ? REVIEW_MODE_NOTE
-        : IMPLEMENT_MODE_NOTE
+
+  let note: string
+  switch (mode) {
+    case "explore":
+      note = EXPLORE_MODE_NOTE
+      break
+    case "review":
+      note = REVIEW_MODE_NOTE
+      break
+    case "plan":
+      note = PLAN_MODE_NOTE
+      break
+    case "implement":
+      note = IMPLEMENT_MODE_NOTE
+      break
+    case "test":
+      note = TEST_MODE_NOTE
+      break
+  }
   return `${SECURITY_BOUNDARY}\n\n${note}`
 }

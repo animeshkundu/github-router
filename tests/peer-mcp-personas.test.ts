@@ -315,12 +315,12 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(1700)
   })
 
-  test("snippet stays under ~540 tokens (~3300 bytes) in the maximal case", () => {
-    // Maximal = EVERY gate on (gemini_reviewer, the `review` worker,
-    // browse + power). The cap is the smallest envelope the implementation
-    // fits inside; if a future tightening shaves bytes, lower it too.
+  test("snippet stays under ~590 tokens (~3650 bytes) in the maximal case", () => {
+    // Maximal = EVERY gate on (gemini_reviewer, the `review`/`plan`/`test`
+    // workers, browse + power). The cap is the smallest envelope the
+    // implementation fits inside; if a future tightening shaves bytes, lower it too.
     const full = buildPeerAwarenessSnippet(MAXIMAL)
-    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(3300)
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(3650)
   })
 
   test("mentions Claude Code's advisor built-in tool", () => {

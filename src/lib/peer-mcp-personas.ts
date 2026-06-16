@@ -556,7 +556,9 @@ export function buildPeerAwarenessSnippet(opts: {
     para2Parts.push(
       `\`mcp__${workersKey}__explore\` runs a Gemini-backed read-only worker that returns a summary, using its own context rather than yours; concurrent launches share the \`MAX_INFLIGHT_TOOLS_CALL=32\` cap with operator traffic.`,
       `\`mcp__${workersKey}__review\` is the same read-only worker framed as a code reviewer that reads the relevant code itself to verify a change or claim and reports findings with severity, so it checks surrounding context the \`peers\` critics (single stateless calls on the pasted artifact) cannot.`,
+      `\`mcp__${workersKey}__plan\` is the same read-only worker framed as a planner: from a task + acceptance criteria it returns an ordered implementation plan.`,
       `\`mcp__${workersKey}__implement\` is the same worker with edit/write/bash; \`worktree: true\` runs it in an isolated git worktree and returns the diff.`,
+      `\`mcp__${workersKey}__test\` is a write-capable worker framed as an independent test author: it authors tests that try to break the implementation and reports pass/fail, never editing the implementation to make them pass.`,
       "Workers themselves have `code_search` in their toolset.",
     )
   }
@@ -1343,6 +1345,151 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         return runWorkerToolCall({ mode: "review", args, signal })
       },
     },
+    {
+      toolNameHttp: "plan",
+      group: "workers",
+      capability: "worker",
+      description:
+        "Read-only implementation planning by an autonomous worker (Pi "
+        + "runtime; default model `gemini-3.5-flash`, override via `model` "
+        + "with any Copilot-catalog model that advertises `tool_calls`). Same "
+        + "read-only toolset as `explore` (read, glob, grep, code_search, "
+        + "web_search, fetch_url, advisor, update_plan, toolbelt) — it CANNOT "
+        + "edit — but the worker is framed as a planner: from the task and "
+        + "acceptance criteria it produces a concrete, ordered implementation "
+        + "plan (the files to change, the approach, the key risks, and how "
+        + "each acceptance criterion will be verified), grounded by reading "
+        + "the actual code. Brief it with the task and any acceptance "
+        + "criteria; it returns a single plan, not code.",
+      inputSchema: {
+        type: "object",
+        required: ["prompt"],
+        additionalProperties: false,
+        properties: {
+          prompt: {
+            type: "string",
+            description:
+              "The task to plan — what to build or change, plus any "
+              + "acceptance criteria. The worker reads the codebase and "
+              + "returns an ordered implementation plan.",
+          },
+          model: {
+            type: "string",
+            description:
+              "Optional Copilot catalog model id (defaults to "
+              + "gemini-3.5-flash). Must advertise tool_calls "
+              + "support; the engine emits an isError envelope listing "
+              + "the eligible catalog models on mismatch.",
+          },
+          thinking: {
+            type: "string",
+            enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
+            description:
+              "Optional reasoning depth (default high). Silently "
+              + "clamped to the model's allowed range; \"off\" drops "
+              + "the parameter entirely.",
+          },
+          workspace: {
+            type: "string",
+            description:
+              "Optional absolute path to the workspace the worker "
+              + "operates in. Defaults to the proxy's launch cwd. "
+              + "Use this when the parent agent has multiple "
+              + "workspaces open and the worker must operate in a "
+              + "specific one. Must be absolute (relative paths "
+              + "rejected).",
+          },
+        },
+      },
+      async handler(
+        args: Record<string, unknown>,
+        signal?: AbortSignal,
+      ): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        return runWorkerToolCall({ mode: "plan", args, signal })
+      },
+    },
+    {
+      toolNameHttp: "test",
+      group: "workers",
+      capability: "worker",
+      description:
+        "Independent adversarial test authoring by an autonomous worker (Pi "
+        + "runtime; default model `gpt-5.5` at xhigh reasoning, override via "
+        + "`model` with any Copilot-catalog model that advertises "
+        + "`tool_calls`). Same read+write toolset as `implement` (the explore "
+        + "set plus edit, write, bash, codex_review). The worker is framed as "
+        + "an INDEPENDENT test author that did NOT write the code under test: "
+        + "from the task and acceptance criteria it writes tests that try to "
+        + "BREAK the implementation (edge cases, error paths, the acceptance "
+        + "criteria as executable checks), runs them, and reports which pass "
+        + "and fail — it does NOT modify the implementation to make tests "
+        + "pass. With `worktree: true` runs in an isolated git worktree and "
+        + "returns the diff; HARD ERROR if true and the workspace is not a "
+        + "git repository.",
+      inputSchema: {
+        type: "object",
+        required: ["prompt"],
+        additionalProperties: false,
+        properties: {
+          prompt: {
+            type: "string",
+            description:
+              "What to test — the feature or change and its acceptance "
+              + "criteria. The worker authors and runs tests that try to "
+              + "break it and reports which pass and fail.",
+          },
+          worktree: {
+            type: "boolean",
+            description:
+              "When true, run inside a fresh git worktree and return "
+              + "Pi's final text followed by the unified diff (so the "
+              + "lead can review the authored tests before merging). When "
+              + "false/omitted, writes tests in place — concurrent worker "
+              + "calls and Claude's own edits will race. HARD ERROR if "
+              + "true and the workspace is not a git repository.",
+          },
+          model: {
+            type: "string",
+            description:
+              "Optional Copilot catalog model id (defaults to "
+              + "gpt-5.5). Must advertise tool_calls "
+              + "support; the engine emits an isError envelope listing "
+              + "the eligible catalog models on mismatch.",
+          },
+          thinking: {
+            type: "string",
+            enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
+            description:
+              "Optional reasoning depth (default xhigh). Silently "
+              + "clamped to the model's allowed range; \"off\" drops "
+              + "the parameter entirely.",
+          },
+          workspace: {
+            type: "string",
+            description:
+              "Optional absolute path to the workspace the worker "
+              + "operates in. Defaults to the proxy's launch cwd. "
+              + "Use this when the parent agent has multiple "
+              + "workspaces open and the worker must operate in a "
+              + "specific one. Must be absolute (relative paths "
+              + "rejected). For worktree:true, must be inside a "
+              + "git repo.",
+          },
+        },
+      },
+      async handler(
+        args: Record<string, unknown>,
+        signal?: AbortSignal,
+      ): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        return runWorkerToolCall({ mode: "test", args, signal })
+      },
+    },
     // browse — a Pi-driven autonomous browser agent (mode: "browse" of the
     // SAME `runWorkerAgent` engine as explore/review/implement), routed
     // through Copilot's `gpt-5.4-mini` by default. It drives a real
@@ -1590,7 +1737,7 @@ export function assertMcpToolSurfaceConsistent(): void {
  * client that ignores the schema.
  */
 async function runWorkerToolCall(call: {
-  mode: "explore" | "review" | "implement"
+  mode: "explore" | "review" | "plan" | "implement" | "test"
   args: Record<string, unknown>
   signal?: AbortSignal
 }): Promise<{
@@ -1653,11 +1800,11 @@ async function runWorkerToolCall(call: {
   }
 
   let worktree: boolean | undefined
-  if (mode === "implement" && args.worktree !== undefined) {
+  if ((mode === "implement" || mode === "test") && args.worktree !== undefined) {
     if (typeof args.worktree !== "boolean") {
       return {
         content: [
-          { type: "text", text: `worker_implement: arguments.worktree must be a boolean when provided` },
+          { type: "text", text: `worker_${mode}: arguments.worktree must be a boolean when provided` },
         ],
         isError: true,
       }
