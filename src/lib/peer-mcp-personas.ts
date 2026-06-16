@@ -41,7 +41,7 @@ import {
 import { runWorkerAgent, type WorkerThinkingLevel } from "~/lib/worker-agent"
 import { searchWeb } from "~/services/copilot/web-search"
 import { runStandIn, type StandInInput } from "~/lib/stand-in"
-import { verifyWorkflowIR, decomposeWorkflow, type WorkflowIR } from "~/lib/orchestration"
+import { verifyWorkflowIR, decomposeWorkflow, attestRun, type AttestNode, type WorkflowIR } from "~/lib/orchestration"
 import { buildLiveDecomposeDeps } from "~/lib/orchestration/decompose-live"
 import { runWorkflowLive } from "~/lib/orchestration/run-workflow-live"
 
@@ -56,16 +56,22 @@ import { runWorkflowLive } from "~/lib/orchestration/run-workflow-live"
  *                 gemini_critic, opus_critic, + codex_implementer in cli mode)
  *   - `search`  — `code` (ranked code search) + `web` (web search)
  *   - `workers` — `explore` / `implement` (autonomous Pi-runtime workers)
+ *   - `orchestrate` — the workflow tools (`decompose` composes a typed IR,
+ *                 `verify_workflow` statically checks it, `run_workflow` runs the
+ *                 frozen kernel, `attest_step` audits a run's cross-lab lineage).
+ *                 A distinct category from `workers`: these compose/verify/run a
+ *                 workflow (the workers are what a workflow delegates to).
  *   - `browser` — the browser-control tools (only with `--browse`)
  *   - `decide`  — `stand_in` (three-lab away-mode decision advisor)
  */
-export type McpGroup = "peers" | "search" | "workers" | "browser" | "decide"
+export type McpGroup = "peers" | "search" | "workers" | "orchestrate" | "browser" | "decide"
 /** Either a single group (scoped endpoint) or the full union (`/mcp`). */
 export type McpScope = McpGroup | "all"
 export const MCP_GROUPS: ReadonlyArray<McpGroup> = Object.freeze([
   "peers",
   "search",
   "workers",
+  "orchestrate",
   "browser",
   "decide",
 ])
@@ -90,6 +96,7 @@ export const GROUP_META: Record<McpGroup, McpGroupMeta> = Object.freeze({
   peers: { preferredKey: "peers", urlSuffix: "peers", serverInfoName: "github-router-peers" },
   search: { preferredKey: "search", urlSuffix: "search", serverInfoName: "github-router-search" },
   workers: { preferredKey: "workers", urlSuffix: "workers", serverInfoName: "github-router-workers" },
+  orchestrate: { preferredKey: "orchestrate", urlSuffix: "orchestrate", serverInfoName: "github-router-orchestrate" },
   browser: { preferredKey: "browser", urlSuffix: "browser", serverInfoName: "github-router-browser" },
   decide: { preferredKey: "decide", urlSuffix: "decide", serverInfoName: "github-router-decide" },
 })
@@ -530,6 +537,7 @@ export function buildPeerAwarenessSnippet(opts: {
   const peersKey = key("peers")
   const searchKey = key("search")
   const workersKey = key("workers")
+  const orchestrateKey = key("orchestrate")
   const browserKey = key("browser")
   const decideKey = key("decide")
 
@@ -557,12 +565,25 @@ export function buildPeerAwarenessSnippet(opts: {
   ]
   if (opts.workerToolsAvailable) {
     para2Parts.push(
-      `\`mcp__${workersKey}__explore\` runs a Gemini-backed read-only worker that returns a summary, using its own context rather than yours; concurrent launches share the \`MAX_INFLIGHT_TOOLS_CALL=32\` cap with operator traffic.`,
+      `\`mcp__${workersKey}__explore\` runs a Gemini-backed read-only worker that returns a summary, using its own context rather than yours; concurrent launches share the \`MAX_INFLIGHT_TOOLS_CALL\` cap (default 128) with operator traffic.`,
       `\`mcp__${workersKey}__review\` is the same read-only worker framed as a code reviewer that reads the relevant code itself to verify a change or claim and reports findings with severity, so it checks surrounding context the \`peers\` critics (single stateless calls on the pasted artifact) cannot.`,
       `\`mcp__${workersKey}__plan\` is the same read-only worker framed as a planner: from a task + acceptance criteria it returns an ordered implementation plan.`,
       `\`mcp__${workersKey}__implement\` is the same worker with edit/write/bash; \`worktree: true\` runs it in an isolated git worktree and returns the diff.`,
       `\`mcp__${workersKey}__test\` is a write-capable worker framed as an independent test author: it authors tests that try to break the implementation and reports pass/fail, never editing the implementation to make them pass.`,
       "Workers themselves have `code_search` in their toolset.",
+    )
+  }
+  // Orchestration group. `decompose`/`run_workflow` share the worker backend gate
+  // (they dispatch models / drive workers); `verify_workflow`/`attest_step` are
+  // pure and always available. Gate the mentions exactly like the live
+  // tools/list so the snippet never names a tool that isn't served.
+  if (opts.workerToolsAvailable) {
+    para2Parts.push(
+      `\`mcp__${orchestrateKey}__decompose\` composes an open-ended ask into a typed, VERIFIED workflow IR (a strong driver model decorrelated by a cross-lab critic, so the decompose step isn't a single point of failure), and \`mcp__${orchestrateKey}__run_workflow\` executes that IR through a frozen kernel that delivers max(orchestrated, baseline) over a sealed executable gate, so it never ships worse than a plain single-model run on the same ask. \`mcp__${orchestrateKey}__verify_workflow\` statically checks an IR's floor invariants before you run it, and \`mcp__${orchestrateKey}__attest_step\` audits that a finished run's producers were each checked by a different lab. Reach for these on non-trivial, role-separated asks; a trivial ask does not need them.`,
+    )
+  } else {
+    para2Parts.push(
+      `\`mcp__${orchestrateKey}__verify_workflow\` statically checks a workflow IR's floor invariants and \`mcp__${orchestrateKey}__attest_step\` audits a run's cross-lab lineage (the \`decompose\`/\`run_workflow\` composer + kernel need the worker backend, unavailable here).`,
     )
   }
   para2Parts.push(
@@ -1500,7 +1521,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       // throws on. The kernel runs the SAME verifier before executing; this tool
       // is the pre-flight Claude calls while composing a workflow.
       toolNameHttp: "verify_workflow",
-      group: "workers",
+      group: "orchestrate",
       description:
         "Statically verify a workflow IR against the orchestration floor "
         + "invariants BEFORE running it. Input `ir`: the typed WorkflowIR "
@@ -1508,9 +1529,13 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         + "onFail, maxDepth). Returns {ok, violations:[{code, message, nodeId?}]}. "
         + "Each violation carries a stable code (e.g. NO_BASELINE, "
         + "SELECTOR_NOT_RAW_ASK, SAME_LAB_CHECK, ORPHAN_NODE, "
-        + "MISSING_INTEGRATION_GATE) — fix every one until `ok` is true. Pure and "
-        + "side-effect-free; call it pre-flight after composing/decomposing a "
-        + "workflow and before execution.",
+        + "MISSING_INTEGRATION_GATE) — fix every one until `ok` is true. "
+        + "WHY: a workflow's floor guarantee (deliver max(orchestrated, baseline), "
+        + "producer != checker, cross-lab checks, sealed gates) is only as good as "
+        + "the IR's structure; a probabilistically-composed IR can silently violate "
+        + "it. This is the cheap, pure, side-effect-free pre-flight that catches "
+        + "those violations with actionable codes so you self-correct BEFORE paying "
+        + "for execution. Call it right after composing/decomposing a workflow.",
       inputSchema: {
         type: "object",
         required: ["ir"],
@@ -1557,7 +1582,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       // "worker"` (it dispatches models; the gpt-5.5 driver errors at call time
       // if absent, like worker_implement).
       toolNameHttp: "decompose",
-      group: "workers",
+      group: "orchestrate",
       capability: "worker",
       description:
         "Compose a VERIFIED, tool-routed workflow IR from an open-ended software "
@@ -1565,10 +1590,14 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         + "verifier checks it against the floor invariants and the driver "
         + "re-drafts on any violation; a cross-lab critic reviews a clean draft. "
         + "Returns {ok, ir, rounds, concerns?} on success, or {ok:false, "
-        + "violations, rounds} if it never converged. The IR is DATA the kernel "
-        + "executes — pass it to a run step (or verify it again with "
-        + "verify_workflow). Use for non-trivial asks that warrant role-separated, "
-        + "floor-guaranteed orchestration; a trivial ask does not need it.",
+        + "violations, rounds} if it never converged. "
+        + "WHY: a single model anchors on its own framing of a task (the decompose "
+        + "step is itself a single point of failure), so the driver is decorrelated "
+        + "by a cross-lab critic, and the output is a typed IR a verifier/kernel "
+        + "enforce in CODE rather than prose the model could quietly violate. The "
+        + "IR is DATA you then pass to run_workflow (or re-check with "
+        + "verify_workflow). Reach for it on non-trivial, role-separated asks where "
+        + "blind-spot reduction pays off; a trivial ask does not need it.",
       inputSchema: {
         type: "object",
         required: ["ask"],
@@ -1600,8 +1629,11 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             "roles: research, plan, implement, review, test, verify, baseline, "
             + "selector, integration. Producer workers: explore/plan/implement/"
             + "test. Cross-lab critics: codex_critic (openai), gemini_critic "
-            + "(google), opus_critic (anthropic). Gate kinds: executable "
-            + "(tests/types/lint/build), cross_lab (a different-lab critic), none.",
+            + "(google), opus_critic (anthropic). producerLab/checkerLab MUST be a "
+            + "lab id: exactly one of openai, google, anthropic. Gate kinds: "
+            + "executable (gateId is exactly one of the SEALED ids default-ci | "
+            + "typecheck-test | typecheck-only), cross_lab (a different-lab critic), "
+            + "none.",
           critic: { model: "gemini-3.1-pro-preview", endpoint: "/v1/chat/completions", effort: "high" },
           signal,
         })
@@ -1617,7 +1649,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       // Gated `capability: "worker"`: it drives worker agents + worktrees + real
       // gate subprocesses, so it shares the worker availability gate.
       toolNameHttp: "run_workflow",
-      group: "workers",
+      group: "orchestrate",
       capability: "worker",
       description:
         "Execute a VERIFIED workflow IR (from decompose / verify_workflow) through "
@@ -1628,8 +1660,14 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         + "champion-retention: the orchestrated result ships only if it verifiably "
         + "does not regress the baseline's executable checks, else the baseline "
         + "ships. Returns {ok, outcome:{status, winner?, artifact?, reason, "
-        + "gatesPassed?}}. Use after decompose for non-trivial asks; the executable "
-        + "gate makes the floor monotone on harness-bearing repos.",
+        + "gatesPassed?}}. "
+        + "WHY: orchestration is a conditional bet (it helps on blind-spot/ambiguous "
+        + "asks, backfires on others), so the kernel NEVER ships something worse "
+        + "than a plain single-model run on the same ask. It enforces the floor in "
+        + "code (the model can't be trusted to honor it): a parallel baseline, a "
+        + "sealed executable gate as the selector, fail-to-baseline on any infra "
+        + "failure. Use after decompose for non-trivial asks on a harness-bearing "
+        + "repo.",
       inputSchema: {
         type: "object",
         required: ["ir", "ask", "workspace", "gateId"],
@@ -1668,6 +1706,73 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           signal,
         })
         return { content: [{ type: "text", text: JSON.stringify(result) }], isError: !result.ok }
+      },
+    },
+    {
+      // attest_step — code-driven attestation that a run honored bias isolation:
+      // every producer was checked by a DIFFERENT lab on its FINAL artifact hash.
+      // No capability gate (pure logic, like verify_workflow). For workflows
+      // composed OUTSIDE the kernel, where the model self-reports its lineage and
+      // we want a deterministic check rather than trust.
+      toolNameHttp: "attest_step",
+      group: "orchestrate",
+      description:
+        "Attest (audit) that an orchestrated run actually honored bias isolation: "
+        + "every producer node was checked by a DIFFERENT lab, and that check "
+        + "covered the producer's FINAL artifact (matched by content hash, so a "
+        + "check of a stale earlier version does not count). Input `nodes`: "
+        + "[{id, producerLab, artifactHash, checks:[{checkerLab, "
+        + "verifiedArtifactHash}]}]. Returns {attested, recommendation: "
+        + "'accept'|'ship_baseline', nodes:[{id, attested, reason}]}. "
+        + "WHY: run_workflow's frozen kernel enforces this in code, but a workflow "
+        + "you compose yourself (with your own Workflow tool) runs OUTSIDE the "
+        + "kernel. attest_step is the deterministic check that 'a cross-lab check "
+        + "ran on the final artifact' instead of trusting it from the model. "
+        + "Fail-closed: anything short of a valid different-lab check on EVERY node "
+        + "recommends shipping the baseline. It RECOMMENDS; it never executes.",
+      inputSchema: {
+        type: "object",
+        required: ["nodes"],
+        additionalProperties: false,
+        properties: {
+          nodes: {
+            type: "array",
+            description:
+              "The run's producer lineage to attest. Each: {id, producerLab, "
+              + "artifactHash (the producer's final artifact hash), checks: "
+              + "[{checkerLab, verifiedArtifactHash}]}.",
+            items: {
+              type: "object",
+              required: ["id", "producerLab", "artifactHash", "checks"],
+              additionalProperties: false,
+              properties: {
+                id: { type: "string" },
+                producerLab: { type: "string", description: "The lab that produced this node (openai/google/anthropic/...)." },
+                artifactHash: { type: "string", description: "Content hash of the producer's FINAL artifact." },
+                checks: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    required: ["checkerLab", "verifiedArtifactHash"],
+                    additionalProperties: false,
+                    properties: {
+                      checkerLab: { type: "string" },
+                      verifiedArtifactHash: { type: "string", description: "The hash this check actually verified (must equal artifactHash)." },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      async handler(args: Record<string, unknown>): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        const nodes = Array.isArray(args.nodes) ? (args.nodes as AttestNode[]) : []
+        const result = attestRun({ nodes })
+        return { content: [{ type: "text", text: JSON.stringify(result) }] }
       },
     },
     // browse — a Pi-driven autonomous browser agent (mode: "browse" of the

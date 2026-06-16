@@ -206,6 +206,7 @@ describe("/mcp protocol methods", () => {
       tools: Array<{ name: string; description: string; inputSchema: unknown }>
     }
     expect(result.tools.map((t) => t.name).sort()).toEqual([
+      "attest_step",
       "code",
       "codex_critic",
       "codex_reviewer",
@@ -234,6 +235,7 @@ describe("/mcp protocol methods", () => {
     })
     const result = json.result as { tools: Array<{ name: string }> }
     expect(result.tools.map((t) => t.name).sort()).toEqual([
+      "attest_step",
       "code",
       "codex_critic",
       "codex_reviewer",
@@ -490,6 +492,28 @@ describe("/mcp scoped endpoints (/mcp/:group)", () => {
     expect(names).not.toContain("code")
     expect(names).not.toContain("web")
     expect(names).not.toContain("stand_in")
+  })
+
+  test("POST /mcp/orchestrate tools/list returns the always-on orchestration tools, not other groups'", async () => {
+    const { status, json } = await scopedRpc("orchestrate", {
+      jsonrpc: "2.0",
+      id: 803,
+      method: "tools/list",
+    })
+    expect(status).toBe(200)
+    const names = (json.result as { tools: Array<{ name: string }> }).tools
+      .map((t) => t.name)
+      .sort()
+    // Pure, always-on orchestration tools (no capability gate).
+    expect(names).toContain("verify_workflow")
+    expect(names).toContain("attest_step")
+    // decompose / run_workflow are worker-gated; this catalog has no worker
+    // backend, so they are filtered out of the scoped list.
+    expect(names).not.toContain("decompose")
+    expect(names).not.toContain("run_workflow")
+    // Other groups' tools absent.
+    expect(names).not.toContain("code")
+    expect(names).not.toContain("codex_critic")
   })
 
   test("calling a persona on /mcp/search returns -32601 (tool not in this group)", async () => {

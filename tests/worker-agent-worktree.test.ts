@@ -27,6 +27,7 @@ import { randomUUID } from "node:crypto"
 import {
   mkdirSync,
   mkdtempSync,
+  existsSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -298,6 +299,33 @@ describe("createWorktree remove() idempotent", () => {
       await handle.remove()
       // Second call is a true no-op.
       await handle.remove()
+      expect(registry.size).toBe(0)
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  test("remove() works when the repo is NOT the process cwd (uses -C repoRoot; no leak)", async () => {
+    // Regression: remove() ran `git worktree remove` WITHOUT -C repoRoot, so it
+    // executed in the process cwd (a DIFFERENT repo) and failed silently,
+    // leaking the worktree. Surfaces whenever the workspace != cwd, e.g.
+    // run_workflow / worker_implement with an absolute `workspace` override.
+    const repo = makeRepo((root) => {
+      writeFileSync(path.join(root, "README.md"), "hello\n")
+    })
+    const { registry, instanceUuid } = makeRegistry()
+    try {
+      const handle = await createWorktree(repo.root, { instanceUuid, registry })
+      // Mutate the worktree so a non-forced remove would refuse (proves --force
+      // + the correct repo context both work).
+      writeFileSync(path.join(handle.dir, "README.md"), "changed\n")
+      expect(git(repo.root, ["worktree", "list"])).toContain(handle.dir)
+      // This test process's cwd is the github-router repo, NOT repo.root.
+      await handle.remove()
+      // git's bookkeeping no longer lists it (the remove actually ran) ...
+      expect(git(repo.root, ["worktree", "list"])).not.toContain(handle.dir)
+      // ... and the directory is gone from disk (no leak).
+      expect(existsSync(handle.dir)).toBe(false)
       expect(registry.size).toBe(0)
     } finally {
       repo.cleanup()

@@ -360,7 +360,7 @@ export async function createWorktree(
     // leave a half-initialized dir under `worker-worktrees/`. The
     // engine's per-call age sweep + boot-time sweep would catch this
     // eventually, but failing fast and clean is much nicer.
-    await execFileP("git", ["worktree", "remove", "--force", dir], {
+    await execFileP("git", ["-C", repoRoot, "worktree", "remove", "--force", dir], {
       timeout: 10_000,
     }).catch(() => {})
     await execFileP("git", ["-C", repoRoot, "branch", "-D", branch]).catch(
@@ -378,7 +378,7 @@ export async function createWorktree(
     // the bookkeeping under `.git/worktrees/<name>`. We swallow
     // ENOENT/EBUSY — re-runs of this function (from the engine's
     // finally + lifecycle signal-handler + boot sweep) are expected.
-    await execFileP("git", ["worktree", "remove", "--force", dir], {
+    await execFileP("git", ["-C", repoRoot, "worktree", "remove", "--force", dir], {
       timeout: 10_000,
     }).catch(() => {})
     await execFileP("git", ["-C", repoRoot, "branch", "-D", branch]).catch(

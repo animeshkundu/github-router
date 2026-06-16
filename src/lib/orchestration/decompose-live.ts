@@ -77,8 +77,8 @@ Shape: { rawAskHash: string, acceptanceCriteriaHash: string, maxDepth: 1..3, nod
 Floor invariants the IR MUST satisfy (a static verifier rejects violations):
 - exactly one node role "baseline" (inputs: [], runs the raw ask off the chain);
 - exactly one node role "selector": judgesOnRawAsk: true, onFail: "baseline", takes the baseline + EXACTLY ONE orchestrated candidate, and is the terminal sink every node feeds;
-- a cross_lab gate's checkerLab must differ from the node's producerLab;
-- an executable gate must reference a sealed gateId;
+- "producerLab" and a cross_lab gate's "checkerLab" are LAB identifiers, one of exactly: "openai", "google", "anthropic" (NEVER a role name like "implement"); a cross_lab gate's checkerLab must DIFFER from the node's producerLab;
+- an "executable" gate's "gateId" MUST be one of exactly: "default-ci", "typecheck-test", "typecheck-only" (the kernel's SEALED gate ids; any other value is rejected, so do NOT invent ids like "tests" or "lint"). Use the SAME gateId on every executable gate (the kernel runs one canonical gate per run);
 - two or more "implement" nodes require an "integration" node (executable gate) they all feed;
 - the graph is a DAG; every node feeds the selector.
 

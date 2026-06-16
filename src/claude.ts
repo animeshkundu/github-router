@@ -396,7 +396,7 @@ export const claude = defineCommand({
         // entries, the persona .md routing strings, and the awareness
         // snippet — so a user-side `browser`/`search` MCP never silently
         // hijacks or drops one of ours.
-        const enabledGroups: Array<McpGroup> = ["peers", "search"]
+        const enabledGroups: Array<McpGroup> = ["peers", "search", "orchestrate"]
         if (workerToolsEnabled()) enabledGroups.push("workers")
         if (standInToolEnabled()) enabledGroups.push("decide")
         if (browserToolsEnabled()) enabledGroups.push("browser")
