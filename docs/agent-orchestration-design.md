@@ -146,3 +146,35 @@ emits a typed IR; a frozen kernel enforces; a static verifier checks; structural
 Two findings reshaped the whole design: (a) the *floor analysis* — orchestration does not raise the
 floor unconditionally; structural gates are the cheap, certain win; (b) the *IR/kernel correction* —
 the floor-critical layer must be code.
+
+## Implementation status (PR #67)
+
+The orchestration **logic core is complete and verified** — pure modules under
+`src/lib/orchestration/`, each cross-lab reviewed (gpt-5.3-codex / gemini-3.1-pro) and unit-tested,
+demonstrated executing a real `WorkflowIR` end-to-end (kernel + runner with mock deps). Delivered:
+
+| Module | Role | Verification |
+|---|---|---|
+| `ir.ts` | typed `WorkflowIR` + the 8 invariants | types |
+| `verify.ts` | static verifier (`verifyWorkflowIR`) — floor invariants checked on the IR | 32 unit tests |
+| `select.ts` | champion-retention `max(orchestrated, baseline)` over the canonical gate set | 9 unit tests |
+| `kernel.ts` | frozen executor (`executeWorkflow`) — baseline-first, fail-to-baseline, selection | 9 unit tests |
+| `decompose.ts` | driver + cross-lab critique loop emitting a verified IR | 9 unit tests |
+| `runner.ts` | role→action mapping, threads the executable outcome to the selector | 5 + 3 E2E tests |
+| `gate-immutability.ts` | detect a producer weakening its own gates (invariant 5) | 8 unit tests |
+| `gate-runner.ts` | run the sealed check commands → `GateOutcome` | 5 unit tests |
+| `mcp__workers__verify_workflow` | Claude-callable pre-flight verifier | dispatch test |
+
+Worker modes `worker_plan` + `worker_test` (Phase 0) are wired (the independent test author is the
+one floor-raise a single context can't do).
+
+**Remaining (the live-integration + launch layer)** — each needs E2E against real systems (live
+models, git worktrees, the spawned-session launch path), so it ships behind a **gated E2E harness**
+(this repo's pattern, e.g. `GH_ROUTER_RUN_BROWSER_E2E`) with unit-tested wiring, NOT claimed
+green in unit CI:
+- the **live runner adapter** (wire the runner's injected deps to `runWorkerAgent`,
+  `createWorktree`, `dispatchModelCall`, and a sandboxed `Bun.spawn` exec);
+- the **`run_workflow`** and **`decompose`** MCP tools (expose the live-wired kernel + decompose);
+- the **structural-gate Stop-hook** (Phase 0 — inject a non-skippable harness gate + the
+  gate-immutability check into the spawned session; the cheap, certain floor win);
+- cost/token accounting and `attest_step` (Phase 3).
