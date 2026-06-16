@@ -17,7 +17,14 @@ import {
 import { enableFileLogging } from "./lib/file-log-reporter"
 import { getCodexVersion, launchChild } from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
-import { ensureClaudeConfigMirror, removeOwnClaudeConfigMirror } from "./lib/paths"
+import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror } from "./lib/paths"
+import {
+  buildStopHookCommand,
+  injectStopHookIntoSettingsFile,
+  stopGateEnabled,
+  stopGateId,
+} from "./lib/orchestration/stop-gate-hook"
+import nodePath from "node:path"
 import { buildPeerAwarenessSnippet, type McpGroup } from "./lib/peer-mcp-personas"
 import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
@@ -463,6 +470,28 @@ export const claude = defineCommand({
           `Peer MCP wired (backend=${backend}, personas=[${personaNames}], `
             + `subagent .md files=${runtime.agentMdPaths.length}, ${subagentVisibility}).${skippedNote}\n`,
         )
+
+        // Phase-0 structural-gate Stop hook (OPT-IN, default-OFF via
+        // GH_ROUTER_ENABLE_STOP_GATE). When enabled, register the
+        // `internal-stop-hook` subcommand as a Stop hook in the mirrored
+        // settings.json so the spawned session refuses "done" while the sealed
+        // gate is red or the diff weakens a gate. Default users are untouched.
+        // The hook itself fails OPEN on any config error and has a
+        // stop_hook_active loop guard, so it can never wedge the session.
+        if (stopGateEnabled()) {
+          try {
+            const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+            const command = buildStopHookCommand(process.execPath, process.argv[1])
+            await injectStopHookIntoSettingsFile(settingsPath, command)
+            process.stderr.write(
+              `Structural-gate Stop hook enabled (gate=${stopGateId()}); a red gate or a `
+                + "gate-weakening diff will block stopping until fixed.\n",
+            )
+          } catch (err) {
+            // Never fail the launch over the opt-in hook; surface and continue.
+            consola.warn(`Could not register the structural-gate Stop hook: ${String(err)}`)
+          }
+        }
 
         // Awareness snippet: append a short, descriptive system-prompt
         // section telling Claude *what* peer-review tools exist — Claude

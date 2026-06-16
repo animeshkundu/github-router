@@ -189,21 +189,27 @@ symmetric threat model; a sealed gate needing installed deps may not pass in a b
 (floor-safe: fails to the baseline); process-kill worktree leaks are reclaimed by the worker-agent
 age/boot sweep.
 
-The Phase-0 structural-gate Stop hook is **opt-in and default-OFF** (it changes the spawned
-session's stop behavior). The CORE is delivered + unit-tested: `runStopGateForLaunch` (fail-OPEN on
-a config error so it never wedges the session; blocks only on a red gate or a gate-weakening diff),
-`stopGateEnabled` (`GH_ROUTER_ENABLE_STOP_GATE`, via the canonical `parseBoolEnv`), `stopGateId`
-(`GH_ROUTER_STOP_GATE_ID`, default `default-ci`), and `mergeStopHookIntoSettings` (idempotent, never
-clobbers other hooks). The launcher AUTO-INJECTION (merge into the mirrored `settings.json` in
-`src/claude.ts`, gated on the flag) + the `internal-stop-hook` subcommand (`src/main.ts` dispatch:
-capture `git diff` via `runCommandCapture`, call `runStopGateForLaunch`, exit 0/2) + the
-live-session E2E are the **deferred follow-up** (PR 2): the Stop event firing is only verifiable on a
-real Windows-first spawned session, so it lands with its own gated E2E rather than bundled into the
-logic PR.
+The Phase-0 structural-gate Stop hook is **opt-in and default-OFF** (`GH_ROUTER_ENABLE_STOP_GATE`).
+When enabled, `github-router claude` registers the `internal-stop-hook` subcommand as a Stop hook in
+the mirrored `settings.json` (`mergeStopHookIntoSettings`, idempotent, never clobbers other hooks;
+refuses to overwrite a settings file it can't parse). The hook reads Claude Code's stop payload on
+stdin, runs the SEALED gate over the working-tree diff, and exits 2 (blocking the stop, reason on
+stderr) when a gate is red or the diff weakens a gate, else exit 0.
 
-**Remaining (the launch layer + Phase 3):**
-- the **Stop-hook launcher auto-injection** + `internal-stop-hook` subcommand + gated live-session
-  E2E (the core above is done; this is the wiring into the Windows-first launch path);
+The overriding property is **never wedge the session**, enforced by THREE independent stand-down
+paths (all → exit 0): unparseable stdin / no `session_id`; Claude Code's `stop_hook_active`
+re-entry signal; and a HARD per-session block budget (`maxBlocks`, default 3, file-backed, keyed by
+`sha256(session_id)`) that is the load-bearing guard because `stop_hook_active` can reset when the
+model does intervening tool calls. Plus: an absolute fail-open timeout on the diff+gate evaluation,
+a per-command tree-kill timeout in `liveExec` (so a hung gate command can't hang the hook), a
+non-mutating diff capture (`git diff HEAD`, no `git add -N`), a diff-size cap, and a flushed stderr
+before exit. Cross-lab reviewed twice (gpt-5.3-codex + gemini-3.1-pro); every wedge/clobber finding
+landed. The launcher injection logic + the subcommand decision are unit-tested (loop-guard, budget
+cap, timeout fail-open, settings merge/no-overwrite) and the subcommand was smoke-verified live
+(exit 2 ×3 then exit 0 at the budget cap); only Claude Code actually firing the Stop event needs a
+live spawned session (manual / gated E2E).
+
+**Remaining (Phase 3 power-ups):**
 - worktree dep-provisioning so the executable gate can pass (unlocks the orchestration upside on
   dep-bearing repos);
 - cost/token accounting and `attest_step` (Phase 3).
