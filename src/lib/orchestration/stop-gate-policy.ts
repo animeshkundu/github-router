@@ -230,3 +230,73 @@ export function fileBaselineStore(stateDir: string): BaselineStore {
     },
   }
 }
+
+// ─── Advisory review: debounce + findings stores (hook V2) ───────────────────
+// The Stop hook runs a background advisory review only when the diff CHANGED
+// since the last review (debounce), and the review writes its findings to a
+// per-session file that the next UserPromptSubmit reads + clears (so the Stop
+// review's notes reach Claude non-authoritatively on the next turn).
+
+/** Per-session "last reviewed diff hash" so an unchanged tree isn't re-reviewed. */
+export interface ReviewDebounce {
+  /** True iff `diffHash` differs from the last reviewed hash for this session. */
+  shouldReview: (sessionId: string, diffHash: string) => Promise<boolean>
+  /** Record `diffHash` as the last reviewed hash for this session. */
+  markReviewed: (sessionId: string, diffHash: string) => Promise<void>
+}
+
+export function fileReviewDebounce(stateDir: string): ReviewDebounce {
+  const fileFor = (sid: string): string =>
+    nodePath.join(stateDir, `review-hash-${createHash("sha256").update(sid).digest("hex").slice(0, 32)}`)
+  const readLast = async (sid: string): Promise<string> => {
+    try {
+      return (await fs.readFile(fileFor(sid), "utf8")).trim()
+    } catch {
+      return ""
+    }
+  }
+  return {
+    async shouldReview(sid, diffHash) {
+      // Never re-review the identical tree; an empty diffHash (no diff) is a no-op.
+      if (diffHash.length === 0) return false
+      return (await readLast(sid)) !== diffHash
+    },
+    async markReviewed(sid, diffHash) {
+      await fs.mkdir(stateDir, { recursive: true })
+      await fs.writeFile(fileFor(sid), diffHash, { mode: 0o600 })
+    },
+  }
+}
+
+/** Per-session pending advisory findings: the review WRITES, the next
+ *  UserPromptSubmit READS then CLEARS (one-shot delivery, non-authoritative). */
+export interface FindingsStore {
+  read: (sessionId: string) => Promise<string | null>
+  write: (sessionId: string, findings: string) => Promise<void>
+  clear: (sessionId: string) => Promise<void>
+}
+
+export function fileFindingsStore(stateDir: string): FindingsStore {
+  const fileFor = (sid: string): string =>
+    nodePath.join(stateDir, `findings-${createHash("sha256").update(sid).digest("hex").slice(0, 32)}`)
+  return {
+    async read(sid) {
+      try {
+        const raw = await fs.readFile(fileFor(sid), "utf8")
+        return raw.length > 0 ? raw : null
+      } catch {
+        return null
+      }
+    },
+    async write(sid, findings) {
+      await fs.mkdir(stateDir, { recursive: true })
+      // Atomic temp+rename so a concurrent reader never sees a half-written file.
+      const tmp = `${fileFor(sid)}.${process.pid}.tmp`
+      await fs.writeFile(tmp, findings, { mode: 0o600 })
+      await fs.rename(tmp, fileFor(sid))
+    },
+    async clear(sid) {
+      await fs.unlink(fileFor(sid)).catch(() => {})
+    },
+  }
+}
