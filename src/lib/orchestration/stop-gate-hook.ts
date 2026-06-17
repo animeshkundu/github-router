@@ -89,23 +89,24 @@ function entryHasCommand(entry: unknown, command: string): boolean {
 }
 
 /**
- * Idempotently merge a Stop hook running `command` into an existing Claude Code
- * settings object WITHOUT clobbering other hook events or other `Stop` entries.
- * Returns a new object (never mutates the input). Re-running the launcher with
- * the same command does not duplicate the hook.
+ * Idempotently merge a hook running `command` for `event` (default `Stop`) into
+ * an existing Claude Code settings object WITHOUT clobbering other hook events or
+ * other entries. Returns a new object (never mutates the input). Re-running the
+ * launcher with the same command+event does not duplicate the hook.
  */
 export function mergeStopHookIntoSettings(
   existing: Record<string, unknown> | undefined,
   command: string,
+  event: string = "Stop",
 ): Record<string, unknown> {
   const base: Record<string, unknown> = existing && typeof existing === "object" ? { ...existing } : {}
   const hooks: Record<string, unknown> =
     base.hooks && typeof base.hooks === "object" ? { ...(base.hooks as Record<string, unknown>) } : {}
-  const stop: unknown[] = Array.isArray(hooks.Stop) ? [...(hooks.Stop as unknown[])] : []
-  if (!stop.some((e) => entryHasCommand(e, command))) {
-    stop.push({ hooks: [{ type: "command", command }] })
+  const arr: unknown[] = Array.isArray(hooks[event]) ? [...(hooks[event] as unknown[])] : []
+  if (!arr.some((e) => entryHasCommand(e, command))) {
+    arr.push({ hooks: [{ type: "command", command }] })
   }
-  hooks.Stop = stop
+  hooks[event] = arr
   base.hooks = hooks
   return base
 }
@@ -334,6 +335,7 @@ export function buildStopHookCommand(execPath: string, scriptPath: string | unde
 export async function injectStopHookIntoSettingsFile(
   settingsPath: string,
   command: string,
+  event: string = "Stop",
 ): Promise<Record<string, unknown>> {
   let existing: Record<string, unknown> = {}
   let raw: string | undefined
@@ -352,7 +354,7 @@ export async function injectStopHookIntoSettingsFile(
       throw new Error(`settings.json at ${settingsPath} is not a JSON object; refusing to overwrite`)
     }
   }
-  const merged = mergeStopHookIntoSettings(existing, command)
+  const merged = mergeStopHookIntoSettings(existing, command, event)
   const tmp = `${settingsPath}.${process.pid}.tmp`
   await fs.writeFile(tmp, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 })
   await fs.rename(tmp, settingsPath)
