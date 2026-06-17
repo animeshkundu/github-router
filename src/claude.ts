@@ -488,6 +488,16 @@ export const claude = defineCommand({
         )
 
         // ── Floor-raising agent surface (docs/floor-raising-agent-surface.md) ──
+        // NOTE (intentional coupling, gemini integration review): this block is
+        // nested in `if (codexMcpEnabled)` — the github-router "enhancement
+        // layer" master switch — alongside the MCP server injection above. The
+        // skills REQUIRE that injection (they call mcp__workers__* /
+        // mcp__orchestrate__* / mcp__search__* tools), so coupling them here is
+        // correct. The Stop-gate is MCP-independent and could live outside;
+        // keeping it here means `--no-codex-mcp` opts out of the whole layer
+        // (consistent: that flag also hides --trust-gate, so the gate was never
+        // enabled in such a session anyway). Decoupling the Stop-gate + moving
+        // the per-prompt reset out is a clean follow-up.
         // When the worker/orchestrate backend is available, materialize the
         // gh-research / gh-orchestrate / gh-floor-keeper skills into the mirror
         // and register the front-end UserPromptSubmit hook (per-prompt Stop-gate
