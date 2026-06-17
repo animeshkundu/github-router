@@ -19,6 +19,7 @@
 
 import { createHash } from "node:crypto"
 import { promises as fs } from "node:fs"
+import { tmpdir } from "node:os"
 import nodePath from "node:path"
 
 import { parseBoolEnv, resolveExecutable, runCommandCapture } from "~/lib/exec"
@@ -297,6 +298,52 @@ export function fileFindingsStore(stateDir: string): FindingsStore {
     },
     async clear(sid) {
       await fs.unlink(fileFor(sid)).catch(() => {})
+    },
+  }
+}
+
+/**
+ * The single canonical state dir for the advisory-review layer (hook V2): the
+ * Stop hook's review debounce, the background review's findings file, and the
+ * UserPromptSubmit hook's last-user-prompt store all live here, keyed by
+ * sha256(session_id). One dir so the three independent subcommand processes
+ * (`internal-stop-hook`, `internal-stop-review`, `internal-prompt-submit`)
+ * agree on where to read/write without threading a path through env. Distinct
+ * from the deterministic gate's `gh-router-stopgate*` dirs (block budget +
+ * baseline) so the advisory layer can be wiped independently.
+ */
+export function stopReviewStateDir(): string {
+  return nodePath.join(tmpdir(), "gh-router-stop-review")
+}
+
+/**
+ * Per-session "last user prompt": the UserPromptSubmit hook WRITES the current
+ * prompt; the Stop hook READS it to give the background reviewer the user's
+ * actual ask (the Stop payload itself carries no prompt). Plain overwrite — only
+ * the latest prompt matters, and the reviewer judges the diff against it.
+ */
+export interface LastPromptStore {
+  read: (sessionId: string) => Promise<string | null>
+  write: (sessionId: string, prompt: string) => Promise<void>
+}
+
+export function fileLastPromptStore(stateDir: string): LastPromptStore {
+  const fileFor = (sid: string): string =>
+    nodePath.join(stateDir, `last-prompt-${createHash("sha256").update(sid).digest("hex").slice(0, 32)}`)
+  return {
+    async read(sid) {
+      try {
+        const raw = await fs.readFile(fileFor(sid), "utf8")
+        return raw.length > 0 ? raw : null
+      } catch {
+        return null
+      }
+    },
+    async write(sid, prompt) {
+      await fs.mkdir(stateDir, { recursive: true })
+      const tmp = `${fileFor(sid)}.${process.pid}.tmp`
+      await fs.writeFile(tmp, prompt, { mode: 0o600 })
+      await fs.rename(tmp, fileFor(sid))
     },
   }
 }

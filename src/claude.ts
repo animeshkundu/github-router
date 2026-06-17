@@ -426,6 +426,14 @@ export const claude = defineCommand({
           groupKeys,
         })
         state.peerMcpNonce = runtime.nonce
+        // Reach-back channel for the advisory-review hooks (hook V2): the
+        // detached Stop reviewer and the UserPromptSubmit hook run as separate
+        // processes with no in-proc state, so they call the proxy over loopback
+        // HTTP using this URL + the per-launch nonce (the same nonce the /mcp
+        // handler validates). Set on the spawned child's env so the hooks — and
+        // the detached reviewer they spawn — inherit it.
+        envVars.GH_ROUTER_HOOK_MCP_URL = serverUrl
+        envVars.GH_ROUTER_HOOK_NONCE = runtime.nonce
         onShutdown = async (): Promise<void> => {
           await runtime.cleanup()
           await baseShutdown()
@@ -515,7 +523,11 @@ export const claude = defineCommand({
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const cmd = buildPromptSubmitHookCommand(process.execPath, process.argv[1])
-            await injectStopHookIntoSettingsFile(settingsPath, cmd, "UserPromptSubmit")
+            // Raise the host hook timeout to 45s (default 30s): the V2 path may
+            // make one gpt-5.5 scope call + a parallel code search. The hook's
+            // own enrichment is bounded well under this (≈22s) and fails open,
+            // so 45s is headroom, not a tax the user routinely pays.
+            await injectStopHookIntoSettingsFile(settingsPath, cmd, "UserPromptSubmit", 45)
           } catch (err) {
             consola.warn(`Could not register the UserPromptSubmit hook: ${String(err)}`)
           }

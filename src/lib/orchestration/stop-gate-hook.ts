@@ -17,7 +17,7 @@
 import { resolveSealedGate } from "./gate-registry"
 import { type ExecFn } from "./gate-runner"
 import { evaluateStopGate, type StopGateResult } from "./stop-gate"
-import { isSubagentContext, regressions, type BaselineStore } from "./stop-gate-policy"
+import { isSubagentContext, regressions, type BaselineStore, type ReviewDebounce } from "./stop-gate-policy"
 import { parseBoolEnv } from "~/lib/exec"
 
 import { createHash } from "node:crypto"
@@ -59,6 +59,18 @@ export function stopGateEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return parseBoolEnv(env.GH_ROUTER_ENABLE_STOP_GATE) === true
 }
 
+/**
+ * The advisory background review (hook V2) is ON by default whenever the Stop
+ * gate runs; it is the cross-lab accountability layer. Opt out with
+ * `GH_ROUTER_DISABLE_STOP_REVIEW=1` to keep the deterministic gate but drop the
+ * LLM review. (Disabling the whole gate with `GH_ROUTER_DISABLE_STOP_GATE=1`
+ * also drops the review, since the review only ever fires from the gate's green
+ * path.)
+ */
+export function stopReviewEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return parseBoolEnv(env.GH_ROUTER_DISABLE_STOP_REVIEW) !== true
+}
+
 /** The sealed gate the Stop hook runs, overridable via `GH_ROUTER_STOP_GATE_ID`
  *  (must be a registered sealed id; the live wrapper falls open on an unknown
  *  id). Defaults to `default-ci`. */
@@ -98,13 +110,18 @@ export function mergeStopHookIntoSettings(
   existing: Record<string, unknown> | undefined,
   command: string,
   event: string = "Stop",
+  timeoutSec?: number,
 ): Record<string, unknown> {
   const base: Record<string, unknown> = existing && typeof existing === "object" ? { ...existing } : {}
   const hooks: Record<string, unknown> =
     base.hooks && typeof base.hooks === "object" ? { ...(base.hooks as Record<string, unknown>) } : {}
   const arr: unknown[] = Array.isArray(hooks[event]) ? [...(hooks[event] as unknown[])] : []
   if (!arr.some((e) => entryHasCommand(e, command))) {
-    arr.push({ hooks: [{ type: "command", command }] })
+    const hook: { type: "command"; command: string; timeout?: number } = { type: "command", command }
+    if (typeof timeoutSec === "number" && Number.isFinite(timeoutSec) && timeoutSec > 0) {
+      hook.timeout = timeoutSec
+    }
+    arr.push({ hooks: [hook] })
   }
   hooks[event] = arr
   base.hooks = hooks
@@ -134,6 +151,14 @@ export interface StopHookDecision {
   exitCode: 0 | 2
   /** stderr text shown to Claude on a block (exit 2). */
   stderr?: string
+}
+
+/** Inputs the detached background reviewer needs (assembled on the green path). */
+export interface StopReviewContext {
+  sessionId: string
+  cwd: string
+  diff: string
+  diffHash: string
 }
 
 /** A persistent per-session count of how many times the gate has blocked, so the
@@ -172,6 +197,19 @@ export async function decideStopHook(input: {
   /** Absolute wall-clock cap on the diff+gate evaluation; on timeout the hook
    *  FAILS OPEN (exit 0) and never claims the gate passed. Default 300s. */
   timeoutMs?: number
+  /**
+   * Advisory-review layer (hook V2), entirely OPTIONAL and side-effect-only.
+   * When BOTH `reviewDebounce` and `spawnReview` are provided, a GREEN stop with
+   * a substantive diff (and a not-yet-reviewed diff hash) spawns a detached,
+   * background read-only review. This NEVER affects the exit code — the
+   * deterministic gate above is the only blocker. Any failure in this block is
+   * swallowed (the stop still ends exit 0). Omitted in tests / when
+   * `GH_ROUTER_DISABLE_STOP_REVIEW` is set → the deterministic gate is unchanged.
+   */
+  reviewDebounce?: ReviewDebounce
+  /** Fire-and-forget spawn of the detached background reviewer. Must return
+   *  immediately (detached + unref'd); decideStopHook never awaits the review. */
+  spawnReview?: (ctx: StopReviewContext) => void
 }): Promise<StopHookDecision> {
   const maxBlocks = input.maxBlocks ?? 2
   let payload: { cwd?: unknown; session_id?: unknown; agent_id?: unknown; agent_type?: unknown } = {}
@@ -231,17 +269,26 @@ export async function decideStopHook(input: {
   //     seed or poison the baseline (codex review #5). The gate's child process
   //     is bounded + tree-killed by liveExec's per-command timeout, and the
   //     wrapper process.exit()s, so a timeout never wedges the session.
-  const runGate = async (): Promise<{ failedChecks: string[]; weakeningPatterns: string[] }> => {
+  //
+  //     The working-tree diff is captured INSIDE the raced promise (so a stalled
+  //     `git diff` is covered by the same absolute timeout, not run unbounded on
+  //     the critical path) and RETURNED so the advisory review below judges the
+  //     exact same tree without a second capture. captureDiff swallows its own
+  //     failures to "".
+  const runGate = async (): Promise<{ failedChecks: string[]; weakeningPatterns: string[]; diff: string }> => {
     const diff = await input.captureDiff(cwd).catch(() => "")
     const result = await runStopGateForLaunch({ workspace: cwd, gateId: input.gateId, exec: input.exec, diff })
     return {
       failedChecks: [...result.failedChecks],
       weakeningPatterns: [...new Set(result.weakening.map((w) => w.pattern))],
+      diff,
     }
   }
   const timeoutMs = input.timeoutMs ?? 300_000
   let timer: ReturnType<typeof setTimeout> | undefined
-  const raced = await Promise.race<{ failedChecks: string[]; weakeningPatterns: string[] } | "timeout">([
+  const raced = await Promise.race<
+    { failedChecks: string[]; weakeningPatterns: string[]; diff: string } | "timeout"
+  >([
     runGate(),
     new Promise<"timeout">((resolve) => {
       timer = setTimeout(() => resolve("timeout"), timeoutMs)
@@ -260,7 +307,14 @@ export async function decideStopHook(input: {
   }
   const regressed = regressions(raced.failedChecks, recorded)
   const weakened = raced.weakeningPatterns.length > 0
-  if (regressed.length === 0 && !weakened) return { exitCode: 0 }
+  if (regressed.length === 0 && !weakened) {
+    // GREEN stop. Fire the advisory background review (never blocks, never
+    // changes the exit code). Fully isolated + time-bounded so a store or spawn
+    // failure (or a stalled debounce read/write) can't turn a clean stop into
+    // anything but a prompt exit 0.
+    await maybeSpawnReview(input, sessionId, cwd, raced.diff)
+    return { exitCode: 0 }
+  }
   try {
     await input.budget.record(sessionId)
   } catch {
@@ -275,6 +329,54 @@ export async function decideStopHook(input: {
       `structural gate failed (block ${priorBlocks + 1}/${maxBlocks}): ${parts.join("; ")}. `
       + `Fix the failing checks and revert any gate-weakening (no new .skip / as any / `
       + `lint-disable) before finishing.`,
+  }
+}
+
+/**
+ * The advisory-review side-effect on a GREEN stop: debounce by diff hash, then
+ * fire the detached background reviewer. ADVISORY-ONLY — it returns void, never
+ * throws (every step is swallowed), and the caller does not await its result for
+ * the exit decision. A no-op when the review layer isn't wired (no debounce /
+ * spawn injected, e.g. GH_ROUTER_DISABLE_STOP_REVIEW) or the diff is empty.
+ *
+ * `markReviewed` runs BEFORE the spawn so a crashing spawn still records the
+ * debounce (an identical tree won't re-trigger on the next stop). The review is
+ * gated on the diff CHANGING since the last review — without it, every stop of
+ * an unchanged tree would re-spend a background gpt-5.5 review.
+ *
+ * The whole body is bounded by a short timeout (the stores are local temp files
+ * that complete in well under a millisecond in practice, so the timeout never
+ * fires normally — but if the debounce read/write ever stalled, the stop must
+ * still proceed promptly; the advisory layer never delays a clean stop).
+ */
+const REVIEW_SIDE_EFFECT_BUDGET_MS = 2_000
+
+async function maybeSpawnReview(
+  input: { reviewDebounce?: ReviewDebounce; spawnReview?: (ctx: StopReviewContext) => void },
+  sessionId: string,
+  cwd: string,
+  diff: string,
+): Promise<void> {
+  if (!input.reviewDebounce || !input.spawnReview) return
+  if (diff.trim().length === 0) return // no substantive diff -> nothing to review.
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const work = (async (): Promise<void> => {
+      const diffHash = createHash("sha256").update(diff).digest("hex")
+      if (!(await input.reviewDebounce!.shouldReview(sessionId, diffHash))) return
+      await input.reviewDebounce!.markReviewed(sessionId, diffHash)
+      input.spawnReview!({ sessionId, cwd, diff, diffHash })
+    })()
+    await Promise.race([
+      work,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, REVIEW_SIDE_EFFECT_BUDGET_MS)
+      }),
+    ])
+  } catch {
+    // Advisory layer must never affect the stop. Swallow everything.
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 }
 
@@ -336,6 +438,7 @@ export async function injectStopHookIntoSettingsFile(
   settingsPath: string,
   command: string,
   event: string = "Stop",
+  timeoutSec?: number,
 ): Promise<Record<string, unknown>> {
   let existing: Record<string, unknown> = {}
   let raw: string | undefined
@@ -354,7 +457,7 @@ export async function injectStopHookIntoSettingsFile(
       throw new Error(`settings.json at ${settingsPath} is not a JSON object; refusing to overwrite`)
     }
   }
-  const merged = mergeStopHookIntoSettings(existing, command, event)
+  const merged = mergeStopHookIntoSettings(existing, command, event, timeoutSec)
   const tmp = `${settingsPath}.${process.pid}.tmp`
   await fs.writeFile(tmp, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 })
   await fs.rename(tmp, settingsPath)
