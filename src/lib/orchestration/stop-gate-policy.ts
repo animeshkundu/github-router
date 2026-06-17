@@ -39,14 +39,14 @@ export interface HookPayloadCommon {
  * the prompt-steer hook both stand down when this is true, scoping them to the
  * top-level session.
  */
-export function isSubagentContext(payload: HookPayloadCommon): boolean {
+export function isSubagentContext(payload: HookPayloadCommon | null | undefined): boolean {
   // Fail CLOSED: ANY present, non-null agent marker means "not the top-level
   // session" -> stand down. Main-agent payloads omit these keys entirely
   // (undefined), so this never disables the gate for the top-level session; but
   // a numeric / empty-string / null marker (malformed or future shape) still
   // scopes us OUT, which is the safe direction for the top-level-only invariant.
   const present = (v: unknown): boolean => v !== undefined && v !== null
-  return present(payload.agent_type) || present(payload.agent_id)
+  return present(payload?.agent_type) || present(payload?.agent_id)
 }
 
 // ─── Per-repo trust (consent once) ───────────────────────────────────────────

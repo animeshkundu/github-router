@@ -64,18 +64,26 @@ export const internalStopHook = defineCommand({
   },
   async run() {
     const stdin = await readStdin()
-    const timeoutEnv = Number.parseInt(process.env.GH_ROUTER_STOP_GATE_TIMEOUT_MS ?? "", 10)
-    const decision = await decideStopHook({
-      stdin,
-      gateId: stopGateId(),
-      exec: liveExec,
-      captureDiff,
-      fallbackCwd: process.cwd(),
-      budget: fileBlockBudget(path.join(tmpdir(), "gh-router-stopgate")),
-      baseline: fileBaselineStore(path.join(tmpdir(), "gh-router-stopgate-baseline")),
-      isEnabledForRepo: (cwd) => stopGateEnabledForRepo(cwd),
-      timeoutMs: Number.isFinite(timeoutEnv) && timeoutEnv > 0 ? timeoutEnv : undefined,
-    })
+    let decision: { exitCode: 0 | 2; stderr?: string }
+    try {
+      const timeoutEnv = Number.parseInt(process.env.GH_ROUTER_STOP_GATE_TIMEOUT_MS ?? "", 10)
+      decision = await decideStopHook({
+        stdin,
+        gateId: stopGateId(),
+        exec: liveExec,
+        captureDiff,
+        fallbackCwd: process.cwd(),
+        budget: fileBlockBudget(path.join(tmpdir(), "gh-router-stopgate")),
+        baseline: fileBaselineStore(path.join(tmpdir(), "gh-router-stopgate-baseline")),
+        isEnabledForRepo: (cwd) => stopGateEnabledForRepo(cwd),
+        timeoutMs: Number.isFinite(timeoutEnv) && timeoutEnv > 0 ? timeoutEnv : undefined,
+      })
+    } catch {
+      // Fail OPEN on ANY unexpected error: a Stop hook must never wedge the
+      // session, so an internal crash allows the stop (exit 0) rather than
+      // surfacing a non-blocking error or a hang.
+      process.exit(0)
+    }
     if (decision.exitCode === 2 && decision.stderr) {
       await writeStderr(`${decision.stderr}\n`)
     }
