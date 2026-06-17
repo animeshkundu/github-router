@@ -21,6 +21,7 @@ import path from "node:path"
 import { runCommandCapture } from "./lib/exec"
 import { liveExec } from "./lib/orchestration"
 import { decideStopHook, fileBlockBudget, stopGateId } from "./lib/orchestration/stop-gate-hook"
+import { fileBaselineStore, stopGateEnabledForRepo } from "./lib/orchestration/stop-gate-policy"
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = []
@@ -71,6 +72,8 @@ export const internalStopHook = defineCommand({
       captureDiff,
       fallbackCwd: process.cwd(),
       budget: fileBlockBudget(path.join(tmpdir(), "gh-router-stopgate")),
+      baseline: fileBaselineStore(path.join(tmpdir(), "gh-router-stopgate-baseline")),
+      isEnabledForRepo: (cwd) => stopGateEnabledForRepo(cwd),
       timeoutMs: Number.isFinite(timeoutEnv) && timeoutEnv > 0 ? timeoutEnv : undefined,
     })
     if (decision.exitCode === 2 && decision.stderr) {

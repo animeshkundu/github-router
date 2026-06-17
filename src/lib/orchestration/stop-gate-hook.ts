@@ -17,6 +17,7 @@
 import { resolveSealedGate } from "./gate-registry"
 import { type ExecFn } from "./gate-runner"
 import { evaluateStopGate, type StopGateResult } from "./stop-gate"
+import { isSubagentContext, regressions, type BaselineStore } from "./stop-gate-policy"
 import { parseBoolEnv } from "~/lib/exec"
 
 import { createHash } from "node:crypto"
@@ -139,6 +140,9 @@ export interface StopHookDecision {
 export interface BlockBudget {
   count: (sessionId: string) => Promise<number>
   record: (sessionId: string) => Promise<void>
+  /** Clear the count for a session (called by the per-prompt reset hook so the
+   *  budget is per-user-prompt, not per-session-lifetime). */
+  reset: (sessionId: string) => Promise<void>
 }
 
 export async function decideStopHook(input: {
@@ -152,15 +156,24 @@ export async function decideStopHook(input: {
   fallbackCwd: string
   /** Persistent per-session block budget (the hard termination guard). */
   budget: BlockBudget
-  /** Max blocks per session before the gate always allows (default 3). */
+  /** Per-session baseline of pre-existing failures (block only on regressions). */
+  baseline: BaselineStore
+  /**
+   * Runtime trust re-check: act ONLY in a repo the user consented to (or
+   * force-enabled). Injected for testability; the live wrapper passes
+   * `stopGateEnabledForRepo`. This is the security gate — even though the
+   * launcher only registers the hook for a trusted repo, re-checking at runtime
+   * against `payload.cwd` defends against a mid-session cwd change.
+   */
+  isEnabledForRepo: (cwd: string) => Promise<boolean>
+  /** Max blocks per prompt before the gate always allows (default 2). */
   maxBlocks?: number
   /** Absolute wall-clock cap on the diff+gate evaluation; on timeout the hook
-   *  FAILS OPEN (exit 0). Bounds a single attempt so a hung gate command can't
-   *  hang the session even before the per-command timeout fires. Default 300s. */
+   *  FAILS OPEN (exit 0) and never claims the gate passed. Default 300s. */
   timeoutMs?: number
 }): Promise<StopHookDecision> {
-  const maxBlocks = input.maxBlocks ?? 3
-  let payload: { cwd?: unknown; stop_hook_active?: unknown; session_id?: unknown } = {}
+  const maxBlocks = input.maxBlocks ?? 2
+  let payload: { cwd?: unknown; session_id?: unknown; agent_id?: unknown; agent_type?: unknown } = {}
   let parsed = false
   try {
     const p: unknown = JSON.parse(input.stdin)
@@ -173,12 +186,36 @@ export async function decideStopHook(input: {
   }
   // (1) abnormal payload -> fail OPEN (can't budget-track safely).
   if (!parsed) return { exitCode: 0 }
-  // (2) Claude Code's own re-entry signal.
-  if (payload.stop_hook_active === true) return { exitCode: 0 }
+  // (2) SCOPING: stand down in any subagent / teammate context. A Stop hook is
+  //     converted to SubagentStop for subagents, so this command CAN run there;
+  //     the payload's agent_type/agent_id mark it. The gate is top-level-only.
+  if (isSubagentContext(payload)) return { exitCode: 0 }
   const sessionId = typeof payload.session_id === "string" && payload.session_id.length > 0 ? payload.session_id : ""
-  // (1b) without a session id we cannot enforce the termination budget -> allow.
+  // (3) without a session id we cannot enforce the termination budget -> allow.
   if (!sessionId) return { exitCode: 0 }
-  // (3) hard budget: never block more than maxBlocks times per session.
+  const cwdRaw = typeof payload.cwd === "string" && payload.cwd.length > 0 ? payload.cwd : input.fallbackCwd
+  // Resolve symlinks ONCE so the consent check and the gate's exec target are
+  // the same immutable path — defends against a symlink/rename swap between the
+  // trust check and the exec (codex review #3). Keep the raw path if realpath
+  // fails (e.g. the dir was removed) — the consent check then simply denies.
+  let cwd = cwdRaw
+  try {
+    cwd = await fs.realpath(cwdRaw)
+  } catch {
+    /* keep raw */
+  }
+  // (4) CONSENT: only run the repo's scripts if the user trusted it (or forced).
+  //     Any failure -> allow (never wedge, never run untrusted code).
+  let enabled = false
+  try {
+    enabled = await input.isEnabledForRepo(cwd)
+  } catch {
+    return { exitCode: 0 }
+  }
+  if (!enabled) return { exitCode: 0 }
+  // (5) hard per-prompt budget: never block more than maxBlocks times per
+  //     prompt. This — NOT the (now-absent) stop_hook_active flag — is the
+  //     termination guard; relying on stop_hook_active would defeat block-twice.
   let priorBlocks = 0
   try {
     priorBlocks = await input.budget.count(sessionId)
@@ -187,40 +224,57 @@ export async function decideStopHook(input: {
   }
   if (priorBlocks >= maxBlocks) return { exitCode: 0 }
 
-  const cwd = typeof payload.cwd === "string" && payload.cwd.length > 0 ? payload.cwd : input.fallbackCwd
-  // (4) absolute timeout on the evaluation: a hung gate command (or diff) must
-  //     never hang the session. On timeout FAIL OPEN. The underlying subprocess
-  //     is separately tree-killed by the per-command timeout in liveExec.
-  const evaluate = async (): Promise<StopGateResult> => {
+  // (6) Run the gate under an absolute timeout. The gate result is computed
+  //     inside the raced promise; the BASELINE read/write happens AFTER the race
+  //     resolves to a real result, so a timed-out (abandoned) eval can never
+  //     seed or poison the baseline (codex review #5). The gate's child process
+  //     is bounded + tree-killed by liveExec's per-command timeout, and the
+  //     wrapper process.exit()s, so a timeout never wedges the session.
+  const runGate = async (): Promise<{ failedChecks: string[]; weakeningPatterns: string[] }> => {
     const diff = await input.captureDiff(cwd).catch(() => "")
-    return runStopGateForLaunch({ workspace: cwd, gateId: input.gateId, exec: input.exec, diff })
+    const result = await runStopGateForLaunch({ workspace: cwd, gateId: input.gateId, exec: input.exec, diff })
+    return {
+      failedChecks: [...result.failedChecks],
+      weakeningPatterns: [...new Set(result.weakening.map((w) => w.pattern))],
+    }
   }
   const timeoutMs = input.timeoutMs ?? 300_000
   let timer: ReturnType<typeof setTimeout> | undefined
-  const result = await Promise.race<StopGateResult | "timeout">([
-    evaluate(),
+  const raced = await Promise.race<{ failedChecks: string[]; weakeningPatterns: string[] } | "timeout">([
+    runGate(),
     new Promise<"timeout">((resolve) => {
       timer = setTimeout(() => resolve("timeout"), timeoutMs)
     }),
   ])
   if (timer) clearTimeout(timer)
-  if (result === "timeout") return { exitCode: 0 } // couldn't determine in time -> allow.
+  if (raced === "timeout") return { exitCode: 0 } // gate did not complete -> allow; never a claimed pass.
 
-  if (result.block) {
-    try {
-      await input.budget.record(sessionId)
-    } catch {
-      return { exitCode: 0 } // can't persist the block -> can't bound the loop -> allow.
-    }
-    return {
-      exitCode: 2,
-      stderr:
-        `structural gate failed (block ${priorBlocks + 1}/${maxBlocks}): ${result.reason}. `
-        + `Fix the failing checks and revert any gate-weakening (no new .skip / as any / `
-        + `lint-disable) before finishing.`,
-    }
+  // Baseline isolation, keyed by (session, cwd, gate) so a mid-session repo/gate
+  // change can't mask or invent regressions (codex review #7). Only a COMPLETED
+  // eval reads/writes it.
+  const baselineKey = JSON.stringify([sessionId, cwd, input.gateId])
+  const recorded = await input.baseline.get(baselineKey).catch(() => null)
+  if (recorded === null) {
+    await input.baseline.set(baselineKey, raced.failedChecks).catch(() => {})
   }
-  return { exitCode: 0 }
+  const regressed = regressions(raced.failedChecks, recorded)
+  const weakened = raced.weakeningPatterns.length > 0
+  if (regressed.length === 0 && !weakened) return { exitCode: 0 }
+  try {
+    await input.budget.record(sessionId)
+  } catch {
+    return { exitCode: 0 } // can't persist the block -> can't bound the loop -> allow.
+  }
+  const parts: string[] = []
+  if (regressed.length > 0) parts.push(`regressed gates: ${regressed.join(", ")}`)
+  if (weakened) parts.push(`gate-weakening in the diff: ${raced.weakeningPatterns.join(", ")}`)
+  return {
+    exitCode: 2,
+    stderr:
+      `structural gate failed (block ${priorBlocks + 1}/${maxBlocks}): ${parts.join("; ")}. `
+      + `Fix the failing checks and revert any gate-weakening (no new .skip / as any / `
+      + `lint-disable) before finishing.`,
+  }
 }
 
 /**
@@ -248,6 +302,9 @@ export function fileBlockBudget(stateDir: string): BlockBudget {
       const next = (await readCount(sid)) + 1
       await fs.mkdir(stateDir, { recursive: true })
       await fs.writeFile(fileFor(sid), String(next), { mode: 0o600 })
+    },
+    async reset(sid) {
+      await fs.unlink(fileFor(sid)).catch(() => {})
     },
   }
 }

@@ -203,7 +203,7 @@ function joinLines(lines: ReadonlyArray<string>, eol: "\r\n" | "\n"): string {
  *     the root check has already succeeded a missing parent means the
  *     root vanished between checks (TOCTOU race).
  */
-async function isUnderClaudeConfigMirrorRealpath(
+export async function isUnderClaudeConfigMirrorRealpath(
   target: string,
 ): Promise<boolean> {
   // Fast lexical reject first: if even the lexical check fails the
@@ -291,7 +291,7 @@ async function isUnderClaudeConfigMirrorRealpath(
  * is safe because replacing a path entry doesn't follow the link; the
  * `copyFile` degradation reintroduces the escape. Fail-closed instead.
  */
-async function renameWithRetry(
+export async function renameWithRetry(
   tempPath: string,
   target: string,
   desiredContent: string,
