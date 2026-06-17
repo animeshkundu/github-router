@@ -586,6 +586,11 @@ export function buildPeerAwarenessSnippet(opts: {
       `\`mcp__${orchestrateKey}__verify_workflow\` statically checks a workflow IR's floor invariants and \`mcp__${orchestrateKey}__attest_step\` audits a run's cross-lab lineage (the \`decompose\`/\`run_workflow\` composer + kernel need the worker backend, unavailable here).`,
     )
   }
+  if (opts.workerToolsAvailable) {
+    para2Parts.push(
+      "Three injected skills chain these tools into a floor-raising discipline (invoke by name): `/gh-research` resolves the unknowns for an ask to information saturation and returns a confidence-tagged, root-cause brief — verify load-bearing claims against the real code before planning; `/gh-orchestrate` right-sizes a blind-spot-elimination workflow (research → decompose → plan → a native Workflow whose nodes delegate to these tools → checkpoint → run); `/gh-floor-keeper` is the done-checkpoint cross-lab verification (different-lab reviewers propose, the executable gate decides). Use them for non-trivial, role-separable work. Honest about limits: only executable checks are deterministic, and they do NOT catch a wrong spec — user-blessed acceptance criteria plus the checkpoint are the defense.",
+    )
+  }
   para2Parts.push(
     `\`mcp__${searchKey}__web\` surfaces citable sources for docs, errors, and upstream issues.`,
   )

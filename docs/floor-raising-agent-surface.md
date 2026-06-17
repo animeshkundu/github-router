@@ -127,3 +127,14 @@ Earlier this was called an "invariant." The Stop-gate cannot verify *who* author
 2. **Research skill (R)** — bounded saturation engine; foundation for A and B.
 3. **Floor-keeper (B)** — internal-session subagent + skill, reusing R.
 4. **Orchestrate skill (A)** — right-sized, no-nesting, opt-in baseline; depends on R.
+
+## Implementation status (deltas from the design above)
+
+Landed on `feat/floor-raising-agent-surface` (verified: typecheck + lint clean; stop-gate 46 tests, hook/skill 17 tests; security core reviewed by gpt-5.3-codex + gemini-3.1-pro with findings fixed):
+
+- **Scoping is payload-based, not an env marker.** Verified against the official hooks docs: stand down when the hook payload has a non-null `agent_type`/`agent_id` (`isSubagentContext`, fail-closed). Supersedes every `GH_ROUTER_INTERNAL_SESSION` reference above. Pi workers fire no Claude Code hooks, so they need no marker.
+- **Consent UX is `--trust-gate`** (not an interactive prompt): `github-router claude --trust-gate` records per-repo consent (pinned to the repo's root-commit fingerprint); otherwise the launcher prints a one-time opt-in notice when a harness is detected. Force via `GH_ROUTER_ENABLE_STOP_GATE`, off via `GH_ROUTER_DISABLE_STOP_GATE`.
+- **Per-prompt block budget** (`maxBlocks=2`) reset by the `UserPromptSubmit` hook; the `stop_hook_active` stand-down was removed (absent from the current payload, and it defeated block-twice).
+- **Baseline isolation v1** records the first eval's failing checks as the baseline (keyed by session+cwd+gate, written only on a completed eval) and blocks only on later regressions + gate-weakening. Known limitation: a regression introduced *before* the first eval is baselined-in; a `SessionStart(startup)` pre-capture is the future upgrade.
+- **Skills shipped:** `gh-research`, `gh-orchestrate`, `gh-floor-keeper` (content + injection). A drift test asserts every `mcp__*` tool name in the skill bodies is real.
+- **Deferred:** the named `floor-keeper` *subagent* persona (the `gh-floor-keeper` skill delivers the behavior by invoking the cross-lab reviewers + gate directly); widening the sealed gates beyond Bun; the `SessionStart` baseline pre-capture.
