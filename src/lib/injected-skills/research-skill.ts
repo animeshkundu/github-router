@@ -52,7 +52,7 @@ Default caps unless the user explicitly gives a smaller or larger budget:
    - Add newly discovered unknowns as they appear.
 
 3. Fan out in parallel.
-   - Run independent code, web, history, and explore calls concurrently where possible; only the semantic-to-lexical code-search refinement is ordered.
+   - Run independent code, web, history, and explore calls concurrently where possible; only the semantic-to-lexical code-search refinement is ordered. Issue the independent calls in a SINGLE turn (one message, multiple tool calls) so the harness actually runs them in parallel rather than serializing.
    - Use mcp__search__code semantically first to find concepts and likely files.
    - Then use mcp__search__code lexically for exact symbols, filenames, errors, routes, flags, and config keys.
    - Use git blame or history when authorship, regression timing, or intent matters.

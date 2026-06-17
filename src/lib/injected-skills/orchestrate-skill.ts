@@ -56,17 +56,12 @@ Create a blind-spot table before decomposing:
 
 Tag every blind spot as executable-checkable or judgment-only.
 
-## Phase 3: decompose
+## Phase 3 and 4: decompose and plan (run in parallel)
 
-Call mcp__orchestrate__decompose({ ask, context: research brief plus blind-spots }).
-Use the decomposer output as a proposal, not gospel.
-Reject or revise nodes that do not map to a real blind spot.
+These two are INDEPENDENT: mcp__orchestrate__decompose consumes { ask, context: research brief plus blind-spots }, and mcp__workers__plan consumes the ask, acceptance criteria, research pointer, and blind-spot table. Neither needs the other's output. So issue BOTH calls in a SINGLE parallel batch (same turn) — do not wait for decompose before calling plan.
 
-## Phase 4: plan
-
-Call mcp__workers__plan with the ask, acceptance criteria, research pointer, and blind-spot table.
-Ask for a plan that identifies files, tests, rollback concerns, and minimal safe increments.
-Keep the plan bounded and suited to the change size.
+- decompose: mcp__orchestrate__decompose({ ask, context: research brief plus blind-spots }). Treat the output as a proposal, not gospel; reject or revise nodes that do not map to a real blind spot.
+- plan: mcp__workers__plan with the ask, acceptance criteria, research pointer, and blind-spot table. Ask for files, tests, rollback concerns, and minimal safe increments; keep it bounded and suited to the change size.
 
 ## Phase 5: compose a native Workflow
 
@@ -79,6 +74,12 @@ Compose a native Workflow using the Workflow tool where every node has:
 - blind spot it kills
 - deterministic or advisory annotation
 - producer and checker lab where relevant
+
+Parallelism (the Workflow tool's core optimization rule):
+
+- DEFAULT to pipeline(): items flow through stages with NO barrier, so the slowest single item, not the slowest stage, sets wall-clock.
+- Use parallel() ONLY at a genuine barrier — a stage that needs ALL prior results at once (dedup/merge across the set, an early-exit on the total, or a cross-item comparison). "It is cleaner" or "I need to map/flatten first" is NOT a barrier; do that transform inside a pipeline stage.
+- Independent nodes within a phase run concurrently; never serialize work that has no data dependency.
 
 Role to tool mapping:
 
