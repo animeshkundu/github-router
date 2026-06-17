@@ -139,3 +139,12 @@ Landed on `feat/floor-raising-agent-surface` (verified: typecheck + lint clean; 
 - **Skills shipped:** `gh-research`, `gh-orchestrate`, `gh-floor-keeper` (content + injection). A drift test asserts every `mcp__*` tool name in the skill bodies is real.
 - **Deferred:** the named `floor-keeper` *subagent* persona (the `gh-floor-keeper` skill delivers the behavior by invoking the cross-lab reviewers + gate directly); widening the sealed gates beyond Bun; the `SessionStart` baseline pre-capture.
 - **Known follow-ups (gemini integration review):** (1) the Stop-gate is currently coupled to `--codex-mcp` (the enhancement-layer master switch) — decoupling it so the deterministic gate runs under `--no-codex-mcp` is a clean follow-up; (2) `injectStopHookIntoSettingsFile` uses an un-retried `fs.rename` — adding the `renameWithRetry` pattern would harden the two `settings.json` writes against transient Windows `EBUSY`/`EPERM`.
+
+## Default posture update (the Stop-gate is now ON by default)
+
+Per the maintainer's decision, the Stop-gate is **enabled by default** via **consent-by-launching** (supersedes the "default OFF / `--trust-gate` required" framing above):
+
+- When `github-router claude` launches in a repo with a detectable Bun harness and the gate is not disabled, the launcher **auto-trusts that repo** (records it, pinned to the root-commit) and registers the Stop hook, printing a one-time notice. No `--trust-gate` needed (the flag remains for explicit/scripted use).
+- The gate still runs **only the launched repo's own** `typecheck`/`test`/`lint`, is **baseline-isolated** (blocks only on regressions), **top-level-only**, and **per-prompt-bounded**. Because trust is recorded and the runtime hook re-checks it, a mid-session `cd` into an UNtrusted repo still won't run that repo's scripts.
+- **Opt out** entirely with `GH_ROUTER_DISABLE_STOP_GATE=1`.
+- **Security note:** on-by-default means the first launch in a repo runs that repo's scripts at stop. The launch notice precedes any gate execution, and the gate only runs the dev scripts a developer working in that repo runs anyway. Users who open untrusted repos should set `GH_ROUTER_DISABLE_STOP_GATE=1`.

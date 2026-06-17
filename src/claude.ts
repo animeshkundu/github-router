@@ -26,6 +26,7 @@ import {
 import { detectHarnessGateId, stopGateEnabledForRepo, trustRepo } from "./lib/orchestration/stop-gate-policy"
 import { buildPromptSubmitHookCommand } from "./lib/orchestration/prompt-submit-hook"
 import { INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
+import { parseBoolEnv } from "./lib/exec"
 import nodePath from "node:path"
 import { buildPeerAwarenessSnippet, type McpGroup } from "./lib/peer-mcp-personas"
 import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
@@ -93,7 +94,7 @@ export const claude = defineCommand({
       type: "boolean" as const,
       default: false,
       description:
-        "Consent (once) to the structural Stop-gate running THIS repo's typecheck/test/lint scripts to block finishing with a regression. Records per-repo trust (pinned to the repo's root-commit) so it auto-enables here on future launches. Default OFF; the gate never runs an untrusted repo's scripts.",
+        "Explicitly record consent for the structural Stop-gate in THIS repo (pinned to the repo's root-commit). The gate is ON BY DEFAULT when a harness is detected (consent-by-launching), so this is now mostly redundant; it stays for explicit/scripted use. Disable the gate entirely with GH_ROUTER_DISABLE_STOP_GATE=1.",
     },
     "auto-update": {
       type: "boolean" as const,
@@ -540,8 +541,26 @@ export const claude = defineCommand({
             consola.warn(`Could not record gate trust: ${String(err)}`)
           }
         }
-        const gateEnabled = await stopGateEnabledForRepo(sessionCwd).catch(() => false)
         const detectedGate = await detectHarnessGateId(sessionCwd).catch(() => null)
+        const gateDisabled = parseBoolEnv(process.env.GH_ROUTER_DISABLE_STOP_GATE) === true
+        let gateEnabled = await stopGateEnabledForRepo(sessionCwd).catch(() => false)
+        let autoTrusted = false
+        // Default-ON (consent-by-launching): when a runnable harness is present
+        // and the user hasn't disabled the gate, auto-trust THIS repo so the gate
+        // runs here without an explicit --trust-gate. It is RECORDED so the
+        // runtime hook (which checks the trust store) honors it AND a mid-session
+        // `cd` into an untrusted repo still won't run that repo's scripts. The
+        // gate only ever runs the launched repo's own typecheck/test/lint and is
+        // baseline-isolated; opt out entirely with GH_ROUTER_DISABLE_STOP_GATE=1.
+        if (!gateEnabled && !gateDisabled && detectedGate) {
+          try {
+            await trustRepo(sessionCwd)
+            gateEnabled = true
+            autoTrusted = true
+          } catch (err) {
+            consola.warn(`Could not auto-trust this repo for the structural gate: ${String(err)}`)
+          }
+        }
         if (gateEnabled) {
           try {
             const gateForRepo = detectedGate ?? stopGateId()
@@ -550,21 +569,16 @@ export const claude = defineCommand({
             const command = buildStopHookCommand(process.execPath, process.argv[1])
             await injectStopHookIntoSettingsFile(settingsPath, command)
             process.stderr.write(
-              `Structural-gate Stop hook enabled (gate=${gateForRepo}); a regression or a `
-                + "gate-weakening diff will block stopping until fixed (per-prompt, max 2).\n",
+              (autoTrusted
+                ? `Structural-gate Stop hook enabled by default for this repo (gate=${gateForRepo}; runs typecheck/test/lint at stop). `
+                : `Structural-gate Stop hook enabled (gate=${gateForRepo}). `)
+                + "A regression or a gate-weakening diff blocks stopping until fixed (per-prompt, max 2). "
+                + "Opt out with GH_ROUTER_DISABLE_STOP_GATE=1.\n",
             )
           } catch (err) {
             // Never fail the launch over the hook; surface and continue.
             consola.warn(`Could not register the structural-gate Stop hook: ${String(err)}`)
           }
-        } else if (detectedGate) {
-          // A harness is present but the repo isn't trusted — tell the user how
-          // to consent, ONCE (this is the consent prompt; default stays OFF).
-          process.stderr.write(
-            `Structural gate available for this repo (would run the \`${detectedGate}\` checks to block `
-              + "finishing with a regression). It is OFF until you consent: relaunch with `--trust-gate` "
-              + "to enable it for this repo, or set GH_ROUTER_ENABLE_STOP_GATE=1.\n",
-          )
         }
 
         // Awareness snippet: append a short, descriptive system-prompt
