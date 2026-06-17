@@ -17,7 +17,7 @@ import { defineCommand } from "citty"
 
 import { spawn } from "node:child_process"
 import { randomBytes } from "node:crypto"
-import { mkdirSync, unlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -39,14 +39,20 @@ import {
   stopReviewStateDir,
 } from "./lib/orchestration/stop-gate-policy"
 
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = []
+/**
+ * Read the hook payload from stdin SYNCHRONOUSLY (`readFileSync(0)`). An async
+ * stdin read leaves an in-flight libuv FS request that, on Windows, races the
+ * process teardown and trips a `uv_async_send` assertion; a synchronous read has
+ * no such handle. Hooks always receive piped/redirected stdin, so this never
+ * blocks (guarded against an interactive TTY, and any error -> "").
+ */
+function readStdin(): string {
   try {
-    for await (const c of process.stdin) chunks.push(c as Buffer)
+    if (process.stdin.isTTY) return ""
+    return readFileSync(0, "utf8")
   } catch {
-    // no stdin / closed early -> treat as empty (decideStopHook tolerates it).
+    return ""
   }
-  return Buffer.concat(chunks).toString("utf8")
 }
 
 /** Max diff bytes scanned for gate-weakening: a hard cap so a huge generated diff
@@ -145,7 +151,7 @@ export const internalStopHook = defineCommand({
       + "runs the sealed gate, exits 2 (blocks the stop) on a red gate or gate-weakening diff.",
   },
   async run() {
-    const stdin = await readStdin()
+    const stdin = readStdin()
     // The advisory review (hook V2) is wired only when it's enabled AND the
     // launcher injected the proxy URL/nonce. It is side-effect-only: the
     // deterministic gate below is unchanged and remains the only blocker.
@@ -194,11 +200,17 @@ export const internalStopHook = defineCommand({
       // Fail OPEN on ANY unexpected error: a Stop hook must never wedge the
       // session, so an internal crash allows the stop (exit 0) rather than
       // surfacing a non-blocking error or a hang.
-      process.exit(0)
+      process.exitCode = 0
+      return
     }
     if (decision.exitCode === 2 && decision.stderr) {
       await writeStderr(`${decision.stderr}\n`)
     }
-    process.exit(decision.exitCode)
+    // Natural exit: set the code and return. A hard process.exit() races libuv's
+    // stdio teardown on Windows (uv_async_send assertion) on the fast-return
+    // paths. The detached review child is unref'd and the gate's children are
+    // reaped, so no handle keeps the loop alive — the process exits with this
+    // code. The exit-2 block contract is preserved (stderr is flushed above).
+    process.exitCode = decision.exitCode
   },
 })

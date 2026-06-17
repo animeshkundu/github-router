@@ -94,6 +94,32 @@ describe("decidePromptSubmitV2", () => {
     expect(infer.mock.calls[0]?.[1]).toContain("semantic auth handler result")
   })
 
+  test("threads an AbortSignal into searchCode and infer, and aborts it after the race", async () => {
+    let inferSignal: AbortSignal | undefined
+    const { io, searchCode } = makeIo({
+      searchCode: async () => "hit",
+      infer: async (_s, _u, signal) => {
+        inferSignal = signal
+        return "SCOPE: focused\nGOAL: do X"
+      },
+    })
+
+    await decidePromptSubmitV2({
+      stdin: JSON.stringify({ session_id: "s1", prompt: "Please refactor the auth handler across all modules" }),
+      steerEnabled: true,
+      io,
+    })
+
+    // Both search calls and the inference receive the SAME AbortSignal instance.
+    const sigs = searchCode.mock.calls.map((c) => c[2])
+    expect(sigs.every((s) => s instanceof AbortSignal)).toBe(true)
+    expect(inferSignal).toBeInstanceOf(AbortSignal)
+    expect(sigs[0]).toBe(inferSignal)
+    // The orchestrator aborts the controller once the race settles (so a lost
+    // fetch can't keep the short-lived hook process alive).
+    expect(inferSignal?.aborted).toBe(true)
+  })
+
   test("fail-open: infer rejection falls back to the static steer goal and returns normally", async () => {
     const { io, infer } = makeIo({
       infer: async () => { throw new Error("model unavailable") },

@@ -21,7 +21,7 @@
 
 import { defineCommand } from "citty"
 
-import { promises as fs } from "node:fs"
+import { promises as fs, readFileSync } from "node:fs"
 
 import { callMcpTool, hookMcpRuntimeFromEnv } from "./lib/orchestration/hook-mcp-client"
 import { fileFindingsStore, stopReviewStateDir } from "./lib/orchestration/stop-gate-policy"
@@ -30,8 +30,10 @@ import { fileFindingsStore, stopReviewStateDir } from "./lib/orchestration/stop-
  * Read the JSON payload. The Stop hook writes it to a temp file (synchronously,
  * before spawning) and passes the path via `GH_ROUTER_STOP_REVIEW_PAYLOAD` — this
  * avoids the stdin-flush-before-parent-exit race a pipe would have for a large
- * (up to 2 MiB) diff. The file is unlinked after reading. Falls back to stdin
- * when the env var is unset (used by tests).
+ * (up to 2 MiB) diff. The file is unlinked after reading. Falls back to a
+ * SYNCHRONOUS stdin read when the env var is unset (used by tests) — sync because
+ * an async stdin read leaves a libuv FS request that races process teardown on
+ * Windows.
  */
 async function readPayload(): Promise<string> {
   const payloadPath = (process.env.GH_ROUTER_STOP_REVIEW_PAYLOAD ?? "").trim()
@@ -46,13 +48,12 @@ async function readPayload(): Promise<string> {
       return ""
     }
   }
-  const chunks: Buffer[] = []
   try {
-    for await (const c of process.stdin) chunks.push(c as Buffer)
+    if (process.stdin.isTTY) return ""
+    return readFileSync(0, "utf8")
   } catch {
-    /* no stdin -> empty payload -> no-op */
+    return ""
   }
-  return Buffer.concat(chunks).toString("utf8")
 }
 
 interface ReviewPayload {
@@ -116,7 +117,7 @@ export const internalStopReview = defineCommand({
   async run() {
     try {
       const runtime = hookMcpRuntimeFromEnv()
-      if (!runtime) return process.exit(0) // proxy URL/nonce absent -> review layer off.
+      if (!runtime) return // proxy URL/nonce absent -> review layer off.
 
       const raw = await readPayload()
       let payload: ReviewPayload = {}
@@ -124,12 +125,12 @@ export const internalStopReview = defineCommand({
         const p: unknown = JSON.parse(raw)
         if (p && typeof p === "object") payload = p as ReviewPayload
       } catch {
-        return process.exit(0)
+        return
       }
       const sessionId = typeof payload.session_id === "string" ? payload.session_id : ""
       const cwd = typeof payload.cwd === "string" ? payload.cwd : ""
       const diff = typeof payload.diff === "string" ? payload.diff : ""
-      if (!sessionId || !cwd || diff.trim().length === 0) return process.exit(0)
+      if (!sessionId || !cwd || diff.trim().length === 0) return
 
       const brief = buildReviewBrief({
         prompt: typeof payload.prompt === "string" ? payload.prompt : "",
@@ -149,11 +150,13 @@ export const internalStopReview = defineCommand({
       // absent) or an empty body leaves no findings — the next prompt simply has
       // nothing to surface.
       const text = result.text.trim()
-      if (result.isError || text.length === 0) return process.exit(0)
+      if (result.isError || text.length === 0) return
       await fileFindingsStore(stopReviewStateDir()).write(sessionId, text)
     } catch {
       /* advisory layer must never surface an error to the session */
     }
-    process.exit(0)
+    // Natural exit (code 0): a hard process.exit() races libuv's stdio teardown
+    // on Windows. This process is detached and awaits its one HTTP call to
+    // completion, so no handle lingers — returning exits cleanly with code 0.
   },
 })

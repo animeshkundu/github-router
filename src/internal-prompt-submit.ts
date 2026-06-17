@@ -19,6 +19,7 @@
 
 import { defineCommand } from "citty"
 
+import { readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -36,14 +37,20 @@ import {
   stopReviewStateDir,
 } from "./lib/orchestration/stop-gate-policy"
 
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = []
+/**
+ * Read the hook payload from stdin SYNCHRONOUSLY (`readFileSync(0)`). An async
+ * stdin read leaves an in-flight libuv FS request that, on Windows, races the
+ * process teardown and trips a `uv_async_send` assertion; a synchronous read has
+ * no such handle. Hooks always receive piped/redirected stdin, so this never
+ * blocks (guarded against an interactive TTY, and any error -> "").
+ */
+function readStdin(): string {
   try {
-    for await (const c of process.stdin) chunks.push(c as Buffer)
+    if (process.stdin.isTTY) return ""
+    return readFileSync(0, "utf8")
   } catch {
-    /* no stdin -> empty; the decision fns tolerate it */
+    return ""
   }
-  return Buffer.concat(chunks).toString("utf8")
 }
 
 /** Parse the session cwd from the payload — the workspace the grounding search
@@ -76,7 +83,7 @@ export const internalPromptSubmit = defineCommand({
   },
   async run() {
     try {
-      const stdin = await readStdin()
+      const stdin = readStdin()
       const steerEnabled = parseBoolEnv(process.env.GH_ROUTER_DISABLE_PROMPT_STEER) !== true
       const runtime = hookMcpRuntimeFromEnv()
 
@@ -87,17 +94,18 @@ export const internalPromptSubmit = defineCommand({
           stdin,
           steerEnabled,
           io: {
-            searchCode: async (query, mode) => {
+            searchCode: async (query, mode, signal) => {
               const r = await callMcpTool({
                 runtime,
                 group: "search",
                 tool: "code",
                 args: { query, workspace, mode, limit: 10, summary: false },
                 timeoutMs: SEARCH_TIMEOUT_MS,
+                signal,
               })
               return r.isError ? "" : r.text
             },
-            infer: (system, user) =>
+            infer: (system, user, signal) =>
               callInference({
                 serverUrl: runtime.serverUrl,
                 model: "gpt-5.5",
@@ -105,6 +113,7 @@ export const internalPromptSubmit = defineCommand({
                 input: user,
                 effort: "low",
                 timeoutMs: INFER_TIMEOUT_MS,
+                signal,
               }),
             readFindings: (sid) => fileFindingsStore(stopReviewStateDir()).read(sid),
             clearFindings: (sid) => fileFindingsStore(stopReviewStateDir()).clear(sid),
@@ -128,6 +137,9 @@ export const internalPromptSubmit = defineCommand({
     } catch {
       /* never let the front-end hook disrupt a prompt */
     }
-    process.exit(0)
+    // Natural exit (exit code 0): a hard process.exit() races libuv stdio teardown
+    // on Windows. No handles are kept alive once the (aborted) enrichment settles,
+    // so returning lets the process exit cleanly with code 0.
+    process.exitCode = 0
   },
 })

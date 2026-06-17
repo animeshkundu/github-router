@@ -109,10 +109,13 @@ export const PROMPT_SCOPE_SYSTEM =
  *  would leave a socket open until the hook process's terminal `process.exit(0)`,
  *  which is the hard backstop but not a substitute for the per-call bound. */
 export interface PromptSubmitV2IO {
-  /** One `mcp__search__code` call; returns the raw result text ("" on failure). */
-  searchCode: (query: string, mode: "lexical" | "semantic") => Promise<string>
-  /** One gpt-5.5 `/v1/responses` inference; returns assistant text ("" on failure). */
-  infer: (system: string, user: string) => Promise<string>
+  /** One `mcp__search__code` call; returns the raw result text ("" on failure).
+   *  Receives the orchestrator's AbortSignal so a timed-out enrichment cancels
+   *  the in-flight request (live callers thread it into the HTTP fetch). */
+  searchCode: (query: string, mode: "lexical" | "semantic", signal?: AbortSignal) => Promise<string>
+  /** One gpt-5.5 `/v1/responses` inference; returns assistant text ("" on failure).
+   *  Receives the orchestrator's AbortSignal (see `searchCode`). */
+  infer: (system: string, user: string, signal?: AbortSignal) => Promise<string>
   /** Pending advisory findings from the prior turn's background review. */
   readFindings: (sessionId: string) => Promise<string | null>
   clearFindings: (sessionId: string) => Promise<void>
@@ -205,11 +208,15 @@ export async function decidePromptSubmitV2(input: {
   const timeoutMs = input.io.timeoutMs ?? 22_000
   let goal = PROMPT_STEER_GOAL // fail-open default.
   let timer: ReturnType<typeof setTimeout> | undefined
+  // One controller cancels BOTH search calls + the inference when the race ends
+  // (timeout OR success), so a lost-race fetch never keeps the short-lived hook
+  // process alive past its decision. Aborting after success is a harmless no-op.
+  const controller = new AbortController()
   try {
     const enrich = (async (): Promise<string> => {
       const [lexical, semantic] = await Promise.all([
-        input.io.searchCode(prompt, "lexical").catch(() => ""),
-        input.io.searchCode(prompt, "semantic").catch(() => ""),
+        input.io.searchCode(prompt, "lexical", controller.signal).catch(() => ""),
+        input.io.searchCode(prompt, "semantic", controller.signal).catch(() => ""),
       ])
       const searchContext =
         `Lexical search results:\n${lexical.slice(0, SEARCH_CONTEXT_CAP)}\n\n`
@@ -217,13 +224,15 @@ export async function decidePromptSubmitV2(input: {
       const note = await input.io.infer(
         PROMPT_SCOPE_SYSTEM,
         `USER REQUEST:\n${prompt}\n\n${searchContext}`,
+        controller.signal,
       )
       return note.trim()
     })()
+    // Mark `enrich` handled so a post-race rejection (e.g. the inference aborting
+    // after the timeout already won) can't surface as an unhandled rejection.
+    enrich.catch(() => {})
     // The timer is cleared in `finally` (so when `enrich` wins, no live timer
-    // lingers for the rest of `timeoutMs`). The in-flight search/infer fetches
-    // carry their own per-call timeouts in the live IO, so a lost race
-    // self-terminates.
+    // lingers for the rest of `timeoutMs`).
     const raced = await Promise.race<string | "__timeout__">([
       enrich,
       new Promise<"__timeout__">((resolve) => {
@@ -235,6 +244,7 @@ export async function decidePromptSubmitV2(input: {
     // keep the fail-open regex goal.
   } finally {
     if (timer) clearTimeout(timer)
+    controller.abort()
   }
 
   decision.inject = joinSections([goal, findingsBlock])
