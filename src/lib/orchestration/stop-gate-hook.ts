@@ -427,6 +427,24 @@ export function buildStopHookCommand(execPath: string, scriptPath: string | unde
 }
 
 /**
+ * Build the shell command Claude Code runs for the SessionStart/SessionEnd hooks
+ * (registered only when github-router runs inside an ai-or-die Terminal tab). The
+ * sidecar path is baked in as a literal `--out` arg — NOT passed via env — so it
+ * survives `AIORDIE_CLAUDE_BIND` being stripped from the child's environment and a
+ * nested `github-router claude` can't inherit it. Pure (binary + script + out
+ * paths) for unit-testable quoting; the live firing is verified end-to-end.
+ */
+export function buildSessionBindHookCommand(
+  execPath: string,
+  scriptPath: string | undefined,
+  outPath: string,
+): string {
+  const q = (s: string): string => `"${s}"`
+  const head = scriptPath && scriptPath !== execPath ? `${q(execPath)} ${q(scriptPath)}` : q(execPath)
+  return `${head} internal-session-bind --out ${q(outPath)}`
+}
+
+/**
  * Read-merge-atomic-write the Stop hook into a Claude Code `settings.json` file
  * (the mirrored one). A MISSING file (ENOENT) starts from `{}`; any OTHER read or
  * parse error THROWS (the caller's try/catch warns and continues) rather than
