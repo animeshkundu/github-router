@@ -561,12 +561,12 @@ export function buildPeerAwarenessSnippet(opts: {
   // appear when their gate is on, so the snippet never names a tool
   // missing from the live tools/list.
   const para2Parts: Array<string> = [
-    `\`mcp__${searchKey}__code\` is the one-stop code search (no extra model call). Its DEFAULT mode (or \`mode:"semantic"\`) ranks by MEANING via ColBERT over a per-workspace index, the first thing to reach for on intent/concept questions ("where is retry/backoff handled", "how does auth work"); when that index isn't ready it transparently falls back to lexical (the response \`source\` says which engine ran). Forced modes cover the rest: \`lexical\` (BM25F-ranked + tree-sitter, best for exact symbols), \`exact\`, \`regex\`, \`complete\` for the exhaustive match set, \`ast_pattern\`+\`ast_lang\` for multi-line AST structures (via ast-grep), \`scan\` for a whole-workspace symbol outline, \`multiline\` for cross-line regex. Multiple independent queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, \`.csv\`, \`.env*\`, config-only wiring), \`grep\`/\`glob\` still apply.`,
+    `\`mcp__${searchKey}__code\` is the one-stop code search (no extra model call). Its DEFAULT mode (or \`mode:"semantic"\`) ranks by MEANING via ColBERT over a per-workspace index, the first thing to reach for on intent/concept questions ("where is retry/backoff handled", "how does auth work"); when that index isn't ready it transparently falls back to lexical (the response \`source\` says which engine ran). Forced modes cover the rest: \`lexical\` (BM25F-ranked + tree-sitter, best for exact symbols), \`exact\`, \`regex\`, \`complete\` (exhaustive set), \`ast_pattern\`+\`ast_lang\` for multi-line AST shapes, \`scan\` for a whole-workspace symbol outline, \`multiline\` for cross-line regex. Multiple queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, \`.csv\`, \`.env*\`, config-only wiring), \`grep\`/\`glob\` still apply.`,
   ]
   if (opts.workerToolsAvailable) {
     para2Parts.push(
       `\`mcp__${workersKey}__explore\` runs a Gemini-backed read-only worker that returns a summary, using its own context rather than yours; concurrent launches share the \`MAX_INFLIGHT_TOOLS_CALL\` cap (default 128) with operator traffic.`,
-      `\`mcp__${workersKey}__review\` is the same read-only worker framed as a code reviewer that reads the relevant code itself to verify a change or claim and reports findings with severity, so it checks surrounding context the \`peers\` critics (single stateless calls on the pasted artifact) cannot.`,
+      `\`mcp__${workersKey}__review\` is the same worker framed as a code reviewer that reads the code itself to verify a change or claim, reporting findings with severity, so it checks context the \`peers\` critics (stateless calls on the pasted artifact) cannot.`,
       `\`mcp__${workersKey}__plan\` is the same read-only worker framed as a planner: from a task + acceptance criteria it returns an ordered implementation plan.`,
       `\`mcp__${workersKey}__implement\` is the same worker with edit/write/bash; \`worktree: true\` runs it in an isolated git worktree and returns the diff.`,
       `\`mcp__${workersKey}__test\` is a write-capable worker framed as an independent test author: it authors tests that try to break the implementation and reports pass/fail, never editing the implementation to make them pass.`,
@@ -579,11 +579,16 @@ export function buildPeerAwarenessSnippet(opts: {
   // tools/list so the snippet never names a tool that isn't served.
   if (opts.workerToolsAvailable) {
     para2Parts.push(
-      `\`mcp__${orchestrateKey}__decompose\` composes an open-ended ask into a typed, VERIFIED workflow IR (a strong driver model decorrelated by a cross-lab critic, so the decompose step isn't a single point of failure), and \`mcp__${orchestrateKey}__run_workflow\` executes that IR through a frozen kernel that delivers max(orchestrated, baseline) over a sealed executable gate, so it never ships worse than a plain single-model run on the same ask. \`mcp__${orchestrateKey}__verify_workflow\` statically checks an IR's floor invariants before you run it, and \`mcp__${orchestrateKey}__attest_step\` audits that a finished run's producers were each checked by a different lab. Reach for these on non-trivial, role-separated asks; a trivial ask does not need them.`,
+      `\`mcp__${orchestrateKey}__decompose\` composes an open-ended ask into a typed, VERIFIED workflow IR (a strong driver decorrelated by a cross-lab critic, so the decompose step isn't a single point of failure), and \`mcp__${orchestrateKey}__run_workflow\` executes that IR through a frozen kernel delivering max(orchestrated, baseline) over a sealed executable gate, so it never ships worse than a plain single-model run. \`mcp__${orchestrateKey}__verify_workflow\` checks an IR's floor invariants before you run it, and \`mcp__${orchestrateKey}__attest_step\` audits that a finished run's producers were each checked by a different lab. They suit non-trivial, role-separated asks; a trivial ask does not need them.`,
     )
   } else {
     para2Parts.push(
       `\`mcp__${orchestrateKey}__verify_workflow\` statically checks a workflow IR's floor invariants and \`mcp__${orchestrateKey}__attest_step\` audits a run's cross-lab lineage (the \`decompose\`/\`run_workflow\` composer + kernel need the worker backend, unavailable here).`,
+    )
+  }
+  if (opts.workerToolsAvailable) {
+    para2Parts.push(
+      "Three injected skills (invoke by name): `/gh-research` saturates an ask's unknowns into a confidence-tagged, root-cause brief that grounds planning; `/gh-orchestrate` right-sizes a blind-spot-elimination pipeline whose nodes delegate to these tools; `/gh-floor-keeper` is the done-checkpoint cross-lab verification, where different-lab reviewers propose and the executable gate decides. They suit non-trivial, role-separable work. Only executable checks are deterministic; they do not catch a wrong spec, so user-blessed acceptance criteria plus the checkpoint are the defense.",
     )
   }
   para2Parts.push(
@@ -596,10 +601,10 @@ export function buildPeerAwarenessSnippet(opts: {
   }
   if (opts.browseAvailable) {
     const powerNote = opts.powerBrowseAvailable
-      ? ` Power mode is on: the L0/L1 primitives (\`mcp__${browserKey}__mouse\`, \`__drag\`, \`__type\`, \`__keyboard\`, \`__scroll\`, \`__eval_js\`, \`__read_page\`, \`__diagnostics\`, \`__find\`) are also available for direct DOM / coordinate control.`
+      ? ` Power mode adds the L0/L1 primitives (\`mcp__${browserKey}__mouse\`, \`__drag\`, \`__type\`, \`__keyboard\`, \`__scroll\`, \`__eval_js\`, \`__read_page\`, \`__diagnostics\`, \`__find\`) for direct DOM / coordinate control.`
       : ""
     para2Parts.push(
-      `\`mcp__${browserKey}__*\` tools drive a real Chrome / Edge browser via a local extension. Lead surface: \`__act(intent, value?)\` for any click / fill / type / scroll-to (an inner fast model resolves intent), \`__observe(intent?)\` for a 2-4 sentence natural-language page description, \`__extract(schema, instruction)\` for typed extraction, \`__navigate\` / \`__open_tab\` / \`__screenshot\` for state and visuals. The lead model never sees raw DOM: refs, bboxes, and role/name dumps stay internal.${powerNote}`,
+      `\`mcp__${browserKey}__*\` tools drive a real Chrome / Edge browser via a local extension. Lead surface: \`__act(intent, value?)\` for any click / fill / type / scroll-to (an inner fast model resolves intent), \`__observe(intent?)\` for a 2-4 sentence natural-language page description, \`__extract(schema, instruction)\` for typed extraction, \`__navigate\` / \`__open_tab\` / \`__screenshot\` for state and visuals. The lead never sees raw DOM: refs and bboxes stay internal.${powerNote}`,
     )
   }
 

@@ -21,9 +21,12 @@ import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror } from "./
 import {
   buildStopHookCommand,
   injectStopHookIntoSettingsFile,
-  stopGateEnabled,
   stopGateId,
 } from "./lib/orchestration/stop-gate-hook"
+import { detectHarnessGateId, stopGateEnabledForRepo, trustRepo } from "./lib/orchestration/stop-gate-policy"
+import { buildPromptSubmitHookCommand } from "./lib/orchestration/prompt-submit-hook"
+import { INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
+import { parseBoolEnv } from "./lib/exec"
 import nodePath from "node:path"
 import { buildPeerAwarenessSnippet, type McpGroup } from "./lib/peer-mcp-personas"
 import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
@@ -86,6 +89,12 @@ export const claude = defineCommand({
       default: false,
       description:
         "Opt back into VS Code-only beta header filtering. Loses leverage features (task budgets, token-efficient tools, prompt caching, etc.) but minimizes the wire-fingerprint difference from VS Code Copilot Chat. By default the `claude` subcommand enables extended/leverage betas because the spawned Claude Code already identifies itself via UA and other headers — partial stealth doesn't buy much.",
+    },
+    "trust-gate": {
+      type: "boolean" as const,
+      default: false,
+      description:
+        "Explicitly record consent for the structural Stop-gate in THIS repo (pinned to the repo's root-commit). The gate is ON BY DEFAULT when a harness is detected (consent-by-launching), so this is now mostly redundant; it stays for explicit/scripted use. Disable the gate entirely with GH_ROUTER_DISABLE_STOP_GATE=1.",
     },
     "auto-update": {
       type: "boolean" as const,
@@ -417,6 +426,14 @@ export const claude = defineCommand({
           groupKeys,
         })
         state.peerMcpNonce = runtime.nonce
+        // Reach-back channel for the advisory-review hooks (hook V2): the
+        // detached Stop reviewer and the UserPromptSubmit hook run as separate
+        // processes with no in-proc state, so they call the proxy over loopback
+        // HTTP using this URL + the per-launch nonce (the same nonce the /mcp
+        // handler validates). Set on the spawned child's env so the hooks — and
+        // the detached reviewer they spawn — inherit it.
+        envVars.GH_ROUTER_HOOK_MCP_URL = serverUrl
+        envVars.GH_ROUTER_HOOK_NONCE = runtime.nonce
         onShutdown = async (): Promise<void> => {
           await runtime.cleanup()
           await baseShutdown()
@@ -479,24 +496,99 @@ export const claude = defineCommand({
             + `subagent .md files=${runtime.agentMdPaths.length}, ${subagentVisibility}).${skippedNote}\n`,
         )
 
-        // Phase-0 structural-gate Stop hook (OPT-IN, default-OFF via
-        // GH_ROUTER_ENABLE_STOP_GATE). When enabled, register the
-        // `internal-stop-hook` subcommand as a Stop hook in the mirrored
-        // settings.json so the spawned session refuses "done" while the sealed
-        // gate is red or the diff weakens a gate. Default users are untouched.
-        // The hook itself fails OPEN on any config error and has a
-        // stop_hook_active loop guard, so it can never wedge the session.
-        if (stopGateEnabled()) {
+        // ── Floor-raising agent surface (docs/floor-raising-agent-surface.md) ──
+        // NOTE (intentional coupling, gemini integration review): this block is
+        // nested in `if (codexMcpEnabled)` — the github-router "enhancement
+        // layer" master switch — alongside the MCP server injection above. The
+        // skills REQUIRE that injection (they call mcp__workers__* /
+        // mcp__orchestrate__* / mcp__search__* tools), so coupling them here is
+        // correct. The Stop-gate is MCP-independent and could live outside;
+        // keeping it here means `--no-codex-mcp` opts out of the whole layer
+        // (consistent: that flag also hides --trust-gate, so the gate was never
+        // enabled in such a session anyway). Decoupling the Stop-gate + moving
+        // the per-prompt reset out is a clean follow-up.
+        // When the worker/orchestrate backend is available, materialize the
+        // gh-research / gh-orchestrate / gh-floor-keeper skills into the mirror
+        // and register the front-end UserPromptSubmit hook (per-prompt Stop-gate
+        // budget reset + advisory goal steer). The hooks scope themselves to the
+        // top-level session via the payload's agent_type, so subagents/teammates
+        // are untouched.
+        const sessionCwd = process.cwd()
+        if (workerToolsEnabled()) {
+          let skillsWritten = 0
+          for (const s of INJECTED_SKILLS) {
+            const r = await writeInjectedSkill(s.name, s.md).catch(() => ({ written: false }))
+            if (r.written) skillsWritten++
+          }
           try {
+            const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+            const cmd = buildPromptSubmitHookCommand(process.execPath, process.argv[1])
+            // Raise the host hook timeout to 45s (default 30s): the V2 path may
+            // make one gpt-5.5 scope call + a parallel code search. The hook's
+            // own enrichment is bounded well under this (≈22s) and fails open,
+            // so 45s is headroom, not a tax the user routinely pays.
+            await injectStopHookIntoSettingsFile(settingsPath, cmd, "UserPromptSubmit", 45)
+          } catch (err) {
+            consola.warn(`Could not register the UserPromptSubmit hook: ${String(err)}`)
+          }
+          if (skillsWritten > 0) {
+            process.stderr.write(
+              `Floor-raising skills injected (${skillsWritten}/${INJECTED_SKILLS.length}): `
+                + "/gh-research, /gh-orchestrate, /gh-floor-keeper.\n",
+            )
+          }
+        }
+
+        // Structural-gate Stop hook — CONSENT-GATED per repo (default OFF; it
+        // never runs an UNTRUSTED repo's scripts). `--trust-gate` records consent
+        // for this repo; GH_ROUTER_ENABLE_STOP_GATE force-enables. The hook also
+        // re-checks trust at runtime and scopes to the top-level session.
+        if ((args as Record<string, unknown>)["trust-gate"] === true) {
+          try {
+            const root = await trustRepo(sessionCwd)
+            process.stderr.write(
+              `Structural gate trusted for this repo (${root}); it will run on launch here from now on.\n`,
+            )
+          } catch (err) {
+            consola.warn(`Could not record gate trust: ${String(err)}`)
+          }
+        }
+        const detectedGate = await detectHarnessGateId(sessionCwd).catch(() => null)
+        const gateDisabled = parseBoolEnv(process.env.GH_ROUTER_DISABLE_STOP_GATE) === true
+        let gateEnabled = await stopGateEnabledForRepo(sessionCwd).catch(() => false)
+        let autoTrusted = false
+        // Default-ON (consent-by-launching): when a runnable harness is present
+        // and the user hasn't disabled the gate, auto-trust THIS repo so the gate
+        // runs here without an explicit --trust-gate. It is RECORDED so the
+        // runtime hook (which checks the trust store) honors it AND a mid-session
+        // `cd` into an untrusted repo still won't run that repo's scripts. The
+        // gate only ever runs the launched repo's own typecheck/test/lint and is
+        // baseline-isolated; opt out entirely with GH_ROUTER_DISABLE_STOP_GATE=1.
+        if (!gateEnabled && !gateDisabled && detectedGate) {
+          try {
+            await trustRepo(sessionCwd)
+            gateEnabled = true
+            autoTrusted = true
+          } catch (err) {
+            consola.warn(`Could not auto-trust this repo for the structural gate: ${String(err)}`)
+          }
+        }
+        if (gateEnabled) {
+          try {
+            const gateForRepo = detectedGate ?? stopGateId()
+            envVars.GH_ROUTER_STOP_GATE_ID = gateForRepo
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const command = buildStopHookCommand(process.execPath, process.argv[1])
             await injectStopHookIntoSettingsFile(settingsPath, command)
             process.stderr.write(
-              `Structural-gate Stop hook enabled (gate=${stopGateId()}); a red gate or a `
-                + "gate-weakening diff will block stopping until fixed.\n",
+              (autoTrusted
+                ? `Structural-gate Stop hook enabled by default for this repo (gate=${gateForRepo}; runs typecheck/test/lint at stop). `
+                : `Structural-gate Stop hook enabled (gate=${gateForRepo}). `)
+                + "A regression or a gate-weakening diff blocks stopping until fixed (per-prompt, max 2). "
+                + "Opt out with GH_ROUTER_DISABLE_STOP_GATE=1.\n",
             )
           } catch (err) {
-            // Never fail the launch over the opt-in hook; surface and continue.
+            // Never fail the launch over the hook; surface and continue.
             consola.warn(`Could not register the structural-gate Stop hook: ${String(err)}`)
           }
         }

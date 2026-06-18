@@ -45,6 +45,10 @@ mock.module("node:process", () => ({
     env: mockProcessEnv,
     exit: exitMock,
     on: processOnMock,
+    // claude.ts's wiring calls `process.cwd()` (the structural Stop-gate's
+    // sessionCwd). Without this the wiring throws and the outer catch swallows
+    // it, silently dropping --append-system-prompt / the skill + hook wiring.
+    cwd: () => "/repo",
     stdout: { get isTTY() { return isTTY } },
     stderr: { write: mock() },
   },
@@ -179,6 +183,12 @@ mock.module("~/lib/claude-md-injection", () => ({
     prependStyleDirectiveToMirroredClaudeMdMock,
   appendToolbeltAwarenessToMirroredClaudeMd:
     appendToolbeltAwarenessToMirroredClaudeMdMock,
+  // injected-skills/write.ts statically imports these two from this module, so a
+  // partial mock trips bun-on-Windows' strict-named-export check ("Export named X
+  // not found"). Stub them: `isUnder…` -> false makes `writeInjectedSkill` a clean
+  // no-op (it bails before any real write), matching the no-op awareness helpers.
+  isUnderClaudeConfigMirrorRealpath: mock(async () => false),
+  renameWithRetry: mock(async () => true),
 }))
 
 // launch.ts also exports buildLaunchCommand etc. — re-export the real
@@ -187,6 +197,21 @@ const realLaunch = await import("../../src/lib/launch")
 mock.module("~/lib/launch", () => ({
   ...realLaunch,
   getCodexVersion: getCodexVersionMock,
+}))
+
+// The structural Stop-gate block in claude.ts calls `detectHarnessGateId` /
+// `stopGateEnabledForRepo` / `trustRepo`, which shell out to `git` through the
+// MOCKED `node:child_process` spawn — that would consume `spawnMock` calls BEFORE
+// `launchChild`, so `spawnMock.mock.calls[0]` would be a git spawn instead of the
+// claude launch (the wiring assertions read calls[0]). Spread the real module so
+// stop-gate-hook's `isSubagentContext`/`regressions` imports still resolve, and
+// override just the three git-spawners to no-op (gate stays off -> block is inert).
+const realStopGatePolicy = await import("../../src/lib/orchestration/stop-gate-policy")
+mock.module("~/lib/orchestration/stop-gate-policy", () => ({
+  ...realStopGatePolicy,
+  detectHarnessGateId: mock(async () => null),
+  stopGateEnabledForRepo: mock(async () => false),
+  trustRepo: mock(async () => "/repo"),
 }))
 
 // Fire-and-forget launch work — `void runSelfUpdate()`, `void provisionToolbelt()`,

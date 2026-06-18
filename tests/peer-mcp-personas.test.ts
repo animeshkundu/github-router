@@ -316,13 +316,17 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(2000)
   })
 
-  test("snippet stays under ~770 tokens (~4600 bytes) in the maximal case", () => {
+  test("snippet stays under ~800 tokens (~4800 bytes) in the maximal case", () => {
     // Maximal = EVERY gate on (gemini_reviewer, the `review`/`plan`/`test`
-    // workers, the decompose/run_workflow orchestration pipeline, browse +
-    // power). The cap is the smallest envelope the implementation fits inside;
-    // if a future tightening shaves bytes, lower it too.
+    // workers, the decompose/run_workflow orchestration pipeline, the three
+    // floor-raising skills, browse + power). The cap tracks the smallest envelope
+    // the implementation fits inside: it was bumped from 4600 when the
+    // orchestration pipeline + skills + browser-power tools were added (each is a
+    // distinct tool getting one descriptive sentence — not bloat), after the copy
+    // was de-duplicated and stripped of arrows/em-dashes. If a future tightening
+    // shaves bytes, lower it again.
     const full = buildPeerAwarenessSnippet(MAXIMAL)
-    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(4600)
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(4800)
   })
 
   test("mentions Claude Code's advisor built-in tool", () => {
