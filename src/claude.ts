@@ -19,6 +19,7 @@ import { getCodexVersion, launchChild } from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
 import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror } from "./lib/paths"
 import {
+  buildSessionBindHookCommand,
   buildStopHookCommand,
   injectStopHookIntoSettingsFile,
   stopGateId,
@@ -536,6 +537,33 @@ export const claude = defineCommand({
               `Floor-raising skills injected (${skillsWritten}/${INJECTED_SKILLS.length}): `
                 + "/gh-research, /gh-orchestrate, /gh-floor-keeper.\n",
             )
+          }
+        }
+
+        // ai-or-die session binding. When launched inside an ai-or-die Terminal
+        // tab, ai-or-die sets AIORDIE_CLAUDE_BIND to a per-tab sidecar path.
+        // Register a SessionStart/SessionEnd hook that records the active claude
+        // session id + transcript path to that sidecar on every startup / resume
+        // / clear / compact, so ai-or-die can bind the tab's sticky-note
+        // summariser to the exact transcript (surviving /resume, /clear and
+        // exit→relaunch). The path is baked into the hook command (not env), and
+        // AIORDIE_CLAUDE_BIND is stripped from the child's env (sanitizeParentEnv),
+        // so a nested `github-router claude` can't hijack the parent tab; the hook
+        // itself also skips subagent/teammate payloads (agent_id/agent_type).
+        const aiordieSidecar = (process.env.AIORDIE_CLAUDE_BIND ?? "").trim()
+        // The path is baked into the hook command string (double-quoted, like
+        // buildStopHookCommand). It is app-controlled (ai-or-die's data dir + a
+        // uuid), so it never contains a double-quote; refuse defensively if it
+        // somehow does rather than emit a malformed command (ai-or-die then falls
+        // back to its inference path).
+        if (aiordieSidecar.length > 0 && !aiordieSidecar.includes('"')) {
+          try {
+            const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+            const command = buildSessionBindHookCommand(process.execPath, process.argv[1], aiordieSidecar)
+            await injectStopHookIntoSettingsFile(settingsPath, command, "SessionStart")
+            await injectStopHookIntoSettingsFile(settingsPath, command, "SessionEnd")
+          } catch (err) {
+            consola.warn(`Could not register the ai-or-die session-bind hook: ${String(err)}`)
           }
         }
 
