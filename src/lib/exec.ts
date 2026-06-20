@@ -24,7 +24,7 @@
  * try/catch and never let an update/probe failure block launch.
  */
 
-import { spawn } from "node:child_process"
+import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { existsSync } from "node:fs"
 import path from "node:path"
 import process from "node:process"
@@ -583,4 +583,90 @@ export function killManagedTree(
   } catch {
     // ESRCH (already gone) / EPERM — best-effort, nothing more to do.
   }
+}
+
+/**
+ * Absolute path to Windows `taskkill.exe`. Bare `"taskkill"` would let
+ * `CreateProcess`'s search order (which can include the cwd) run a planted
+ * `taskkill.exe`; pinning the System32 path closes that hijack.
+ */
+function taskkillExe(): string {
+  const root =
+    process.env.SystemRoot || process.env.windir || "C:\\Windows"
+  return path.join(root, "System32", "taskkill.exe")
+}
+
+/**
+ * Tree-kill a child process on a SHUTDOWN/exit path, deterministically.
+ *
+ * Distinct from `killManagedTree` in two ways that matter when the proxy
+ * is about to call `process.exit`:
+ *
+ *   1. **Windows uses `spawnSync`, not async `spawn`.** An async taskkill
+ *      may never issue before `process.exit` tears the event loop down;
+ *      the synchronous form guarantees the kill command has run. It is
+ *      time-bounded so a wedged taskkill can't hang shutdown.
+ *   2. **POSIX honors `detachedGroup`.** The launched CLI is spawned
+ *      `detached:true` (its own process group) so `kill(-pid)` reaps the
+ *      whole group; other callers (e.g. ripgrep) are NOT detached, so
+ *      `child.kill()` on the positive pid is correct. A negative-pid kill
+ *      on a non-detached child would throw or hit the wrong target.
+ *
+ * Both branches escalate SIGTERM → SIGKILL after `graceMs` so a CLI that
+ * traps SIGTERM still dies. The escalation timer is `.unref()`'d so it
+ * never holds the event loop open. Errors are swallowed (already-gone /
+ * EBUSY / ESRCH are the success case for our purposes).
+ */
+export function killChildProcessTree(
+  child: ChildProcess,
+  opts: { detachedGroup: boolean; graceMs?: number } = { detachedGroup: false },
+): void {
+  const pid = child.pid
+  if (!pid) return
+  const graceMs = opts.graceMs ?? 500
+
+  if (process.platform === "win32") {
+    // /T = whole tree, /F = force. taskkill walks the live parent-PID
+    // chain, so it reaps grandchildren regardless of the cmd.exe-vs-direct
+    // spawn shape. Sync (completes before an imminent process.exit) and
+    // time-bounded (a wedged taskkill must not hang shutdown).
+    try {
+      spawnSync(taskkillExe(), ["/T", "/F", "/PID", String(pid)], {
+        stdio: "ignore",
+        windowsHide: true,
+        timeout: 5000,
+      })
+    } catch {
+      // Already gone / EBUSY race — best-effort.
+    }
+    return
+  }
+
+  // POSIX: signal the group (detached) or the lone child (non-detached).
+  const target = opts.detachedGroup ? -pid : pid
+  try {
+    process.kill(target, "SIGTERM")
+  } catch {
+    // ESRCH — already gone.
+  }
+  const t = setTimeout(() => {
+    // For a lone (non-detached) child, skip escalation once it has exited
+    // — its positive PID could have been recycled. For a process GROUP the
+    // leader's exit does NOT mean the group is empty (a SIGTERM-ignoring
+    // grandchild may survive), and the group id is only reused once the
+    // group is fully gone, so always attempt the group SIGKILL (ESRCH when
+    // already empty is the success case).
+    if (
+      !opts.detachedGroup &&
+      (child.exitCode !== null || child.signalCode !== null)
+    ) {
+      return
+    }
+    try {
+      process.kill(target, "SIGKILL")
+    } catch {
+      // Already dead.
+    }
+  }, graceMs)
+  t.unref?.()
 }

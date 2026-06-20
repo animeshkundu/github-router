@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test"
+import { spawn } from "node:child_process"
 import os from "node:os"
 import path from "node:path"
 import fs from "node:fs/promises"
 
 import {
   buildExecInvocation,
+  killChildProcessTree,
   parseBoolEnv,
   quoteWinArg,
   resolveExecutable,
@@ -231,4 +233,55 @@ describe("runManagedExeCapture — inactivity watchdog", () => {
     expect(drained.stdoutTruncated).toBe(true)
     expect(drained.code).toBe(0) // ran to completion, never killed
   }, 15_000)
+})
+
+describe("killChildProcessTree", () => {
+  test("no-op when the child has no pid", () => {
+    // A never-spawned child stub: should not throw.
+    expect(() =>
+      killChildProcessTree({ pid: undefined } as never, {
+        detachedGroup: false,
+      }),
+    ).not.toThrow()
+  })
+
+  test("tree-kills a real running child (current platform)", async () => {
+    const isWin = process.platform === "win32"
+    const child = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      // On POSIX, detached:true makes the child its own group leader so the
+      // detachedGroup kill(-pid) targets the group; on Windows taskkill /T
+      // walks the tree regardless.
+      { stdio: "ignore", detached: !isWin },
+    )
+    const pid = child.pid as number
+    await new Promise((r) => setTimeout(r, 250))
+    // Poll liveness with a generous deadline rather than racing a single
+    // fixed wait against the kill — under heavy parallel test load the
+    // spawn/taskkill round-trip can take seconds. Re-issue the kill each
+    // iteration (idempotent) so a busy box can't drop the one-shot.
+    const isAlive = (): boolean => {
+      try {
+        process.kill(pid, 0)
+        return true
+      } catch {
+        return false
+      }
+    }
+    let alive = true
+    for (let i = 0; i < 60 && alive; i++) {
+      killChildProcessTree(child, { detachedGroup: !isWin })
+      await new Promise((r) => setTimeout(r, 200))
+      alive = isAlive()
+    }
+    if (alive) {
+      try {
+        child.kill("SIGKILL")
+      } catch {
+        /* cleanup */
+      }
+    }
+    expect(alive).toBe(false)
+  }, 20_000)
 })

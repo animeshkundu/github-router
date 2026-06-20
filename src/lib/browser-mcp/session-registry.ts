@@ -360,9 +360,19 @@ const exitHandler = (): void => {
   lastUsedSeq.clear()
 }
 
-process.on("SIGINT", sigintHandler)
-process.on("SIGTERM", sigtermHandler)
-process.on("exit", exitHandler)
+// Idempotent registration latch — mirrors colbert/worker/keep-awake so a
+// re-import (or a future explicit re-register) can't accumulate duplicate
+// SIGINT/SIGTERM/exit listeners on the shared `process` emitter.
+let _exitHandlersRegistered = false
+function registerExitHandlers(): void {
+  if (_exitHandlersRegistered) return
+  _exitHandlersRegistered = true
+  process.on("SIGINT", sigintHandler)
+  process.on("SIGTERM", sigtermHandler)
+  process.on("exit", exitHandler)
+}
+
+registerExitHandlers()
 
 // ============================================================
 // Test-only
@@ -388,7 +398,10 @@ export const __testExports = {
     process.off("SIGINT", sigintHandler)
     process.off("SIGTERM", sigtermHandler)
     process.off("exit", exitHandler)
+    _exitHandlersRegistered = false
   },
+  /** Re-arm the idempotent registration (pairs with unregisterExitHandlers). */
+  registerExitHandlers,
   maxSessions,
   sigintHandler,
   sigtermHandler,
