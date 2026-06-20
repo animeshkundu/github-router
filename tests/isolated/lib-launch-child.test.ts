@@ -1,4 +1,4 @@
-import { test, expect, mock, describe, beforeEach } from "bun:test"
+import { test, expect, mock, describe, beforeEach, afterEach } from "bun:test"
 import { EventEmitter } from "node:events"
 import type { Server } from "srvx"
 import type { LaunchTarget } from "../../src/lib/launch"
@@ -17,15 +17,18 @@ class ExitError extends Error {
 
 const execFileSyncMock = mock()
 const spawnMock = mock()
+const spawnSyncMock = mock()
 
 mock.module("node:child_process", () => ({
   execFileSync: execFileSyncMock,
   spawn: spawnMock,
+  spawnSync: spawnSyncMock,
 }))
 
 const exitMock = mock((code: number) => {
   throw new ExitError(code)
 })
+const killMock = mock()
 const signalHandlers: Record<string, (...args: unknown[]) => void> = {}
 const processOnMock = mock((signal: string, handler: (...args: unknown[]) => void) => {
   signalHandlers[signal] = handler
@@ -34,8 +37,12 @@ const processOnMock = mock((signal: string, handler: (...args: unknown[]) => voi
 mock.module("node:process", () => ({
   default: {
     platform: "linux",
-    env: {},
+    // Disable the crash guard in these isolated tests so launchChild's
+    // child-spawn count stays 1 (the guard would otherwise spawn a reaper).
+    env: { GH_ROUTER_DISABLE_PROCESS_GUARD: "1" },
+    execPath: "/usr/bin/node",
     exit: exitMock,
+    kill: killMock,
     on: processOnMock,
     stdout: { isTTY: true },
     stderr: { write: mock() },
@@ -71,8 +78,10 @@ const { launchChild } = await import("../../src/lib/launch")
 function createFakeChild() {
   const child = new EventEmitter() as EventEmitter & {
     kill: ReturnType<typeof mock>
+    pid: number
   }
   child.kill = mock()
+  child.pid = 4242 // killChildProcessTree needs a pid to act
   return child
 }
 
@@ -98,10 +107,18 @@ beforeEach(() => {
   exitMock.mockImplementation((code: number) => {
     throw new ExitError(code)
   })
+  killMock.mockReset()
   processOnMock.mockReset()
   for (const key of Object.keys(signalHandlers)) {
     delete signalHandlers[key]
   }
+})
+
+// cleanup()'s POSIX tree-kill schedules an unref'd SIGKILL escalation 500ms
+// after the SIGTERM. Drain it here so a leaked timer from one test can't
+// fire a stray `process.kill` mock call during a later test.
+afterEach(async () => {
+  await new Promise((r) => setTimeout(r, 550))
 })
 
 describe("commandExists (tested indirectly through launchChild)", () => {
@@ -234,7 +251,7 @@ describe("launchChild", () => {
     expect(exitMock).toHaveBeenCalledWith(1)
   })
 
-  test("cleanup kills child process", async () => {
+  test("cleanup tree-kills the child process group", async () => {
     execFileSyncMock.mockReturnValue(Buffer.from("/usr/bin/claude"))
     const fakeChild = createFakeChild()
     spawnMock.mockReturnValue(fakeChild)
@@ -245,7 +262,9 @@ describe("launchChild", () => {
     fakeChild.emit("exit", 0)
     await new Promise((r) => setTimeout(r, 50))
 
-    expect(fakeChild.kill).toHaveBeenCalled()
+    // POSIX: kill the detached child's process GROUP (negative pid), not a
+    // bare child.kill(). (Windows would taskkill /T instead.)
+    expect(killMock).toHaveBeenCalledWith(-4242, "SIGTERM")
   })
 
   test("spawn failure: calls server.close(true) before exit", () => {
@@ -282,7 +301,9 @@ describe("launchChild", () => {
       await new Promise((r) => setTimeout(r, 50))
     }
 
-    expect(fakeChild.kill).toHaveBeenCalledTimes(1)
+    // The `cleaned` latch makes cleanup run once: server.close fires exactly
+    // once even though both the child-exit and the SIGINT paths reach it.
+    expect(server.close).toHaveBeenCalledTimes(1)
   })
 
   test("server close timeout: if server.close() hangs, timeout set for process.exit(1)", async () => {
@@ -297,7 +318,7 @@ describe("launchChild", () => {
     fakeChild.emit("exit", 0)
     await new Promise((r) => setTimeout(r, 50))
 
-    expect(fakeChild.kill).toHaveBeenCalled()
+    expect(killMock).toHaveBeenCalledWith(-4242, "SIGTERM")
     expect(server.close).toHaveBeenCalledWith(true)
   })
 

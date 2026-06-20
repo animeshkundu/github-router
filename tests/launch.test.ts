@@ -7,6 +7,7 @@ import {
   buildLaunchCommand,
   isExecutableAvailable,
   sanitizeParentEnv,
+  windowsLaunchNeedsShell,
   type LaunchTarget,
 } from "../src/lib/launch"
 import { DEFAULT_CODEX_MODEL } from "../src/lib/port"
@@ -379,5 +380,19 @@ describe("buildLaunchCommand", () => {
         "claude-haiku-4-5-20251001",
       )
     })
+  })
+})
+
+describe("windowsLaunchNeedsShell — drop the cmd.exe intermediary", () => {
+  test("batch shims (.cmd/.bat) still need cmd.exe", () => {
+    expect(windowsLaunchNeedsShell("C:/path/claude.cmd")).toBe(true)
+    expect(windowsLaunchNeedsShell("C:/path/codex.CMD")).toBe(true)
+    expect(windowsLaunchNeedsShell("C:/path/tool.bat")).toBe(true)
+  })
+  test("a real .exe is spawned directly (no shell, no cmd.exe wrapper)", () => {
+    // The native-installer claude.exe case: direct child → tree-kill/guard
+    // target the real process, not an orphan-leaking cmd.exe.
+    expect(windowsLaunchNeedsShell("C:/Users/me/.local/bin/claude.exe")).toBe(false)
+    expect(windowsLaunchNeedsShell("C:/path/claude.EXE")).toBe(false)
   })
 })

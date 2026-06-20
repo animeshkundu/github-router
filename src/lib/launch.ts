@@ -7,8 +7,9 @@ import consola from "consola"
 
 import type { Server } from "srvx"
 
-import { resolveExecutable } from "./exec"
+import { resolveExecutable, killChildProcessTree } from "./exec"
 import { DEFAULT_CODEX_MODEL } from "./port"
+import { startProcessGuard } from "./process-guard"
 import { collapsePathKeys } from "./toolbelt/path-inject"
 import { sweepRegistry } from "./worker-agent/lifecycle"
 
@@ -248,6 +249,19 @@ export function buildLaunchCommand(target: LaunchTarget): {
   return { cmd, env }
 }
 
+/**
+ * Whether a resolved Windows executable must be launched through cmd.exe
+ * (`shell:true`). Only batch shims (`.cmd`/`.bat`) need it — and even then
+ * cmd.exe stays alive as the CLI's parent, so `taskkill /T` reaps the
+ * whole tree. A real `.exe` (e.g. the native-installer `claude.exe`) is
+ * spawned DIRECTLY so the CLI is the direct child, with no cmd.exe
+ * intermediary to orphan its node/MCP grandchildren on a kill.
+ */
+export function windowsLaunchNeedsShell(executable: string): boolean {
+  const ext = path.extname(executable).toLowerCase()
+  return ext === ".cmd" || ext === ".bat"
+}
+
 export function launchChild(
   target: LaunchTarget,
   server: Server,
@@ -266,19 +280,38 @@ export function launchChild(
   let child: ChildProcess
   try {
     if (process.platform === "win32") {
-      // On Windows, npm-installed binaries are .cmd scripts that need
-      // shell execution. Use the full command as a single string to
-      // avoid DEP0190 deprecation warning about shell + args.
-      const quoted = cmd.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ")
-      child = spawn(quoted, [], {
-        env,
-        stdio: "inherit",
-        shell: true,
-      })
+      if (windowsLaunchNeedsShell(cmd[0])) {
+        // A batch shim genuinely needs cmd.exe. cmd.exe stays alive as the
+        // CLI's parent for the shim's lifetime, so the tree-kill (taskkill
+        // /T) and the crash guard both reap the whole tree through it. Use
+        // the full command as a single string to avoid the DEP0190
+        // deprecation warning about shell + args.
+        const quoted = cmd.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ")
+        child = spawn(quoted, [], {
+          env,
+          stdio: "inherit",
+          shell: true,
+        })
+      } else {
+        // A real .exe (e.g. the native-installer claude.exe) needs no
+        // shell. Spawning it directly makes the CLI the DIRECT child, so
+        // child.kill()/taskkill and the crash guard target the real
+        // process instead of a cmd.exe wrapper that would orphan its
+        // node/MCP grandchildren.
+        child = spawn(cmd[0], cmd.slice(1), {
+          env,
+          stdio: "inherit",
+        })
+      }
     } else {
+      // detached:true → the CLI leads its OWN process group, so cleanup()
+      // can kill(-pgid) the whole tree (grandchildren included). We still
+      // await its exit, so we do NOT unref(). Terminal Ctrl-C no longer
+      // reaches the child directly — the signal handlers below forward it.
       child = spawn(cmd[0], cmd.slice(1), {
         env,
         stdio: "inherit",
+        detached: true,
       })
     }
   } catch (error) {
@@ -292,19 +325,40 @@ export function launchChild(
     process.exit(1)
   }
 
+  // Crash-safe net: if the proxy dies WITHOUT running cleanup() (hard
+  // crash, SIGKILL/taskkill, OOM). On Windows this is the OS's job —
+  // Node's KILL_ON_JOB_CLOSE job object reaps the tree — so this is a
+  // no-op there. On POSIX (no such mechanism) it spawns a detached reaper
+  // that sees the proxy's stdin-pipe EOF, re-verifies the child's
+  // identity, and reaps the group (also backstopping a graceful shutdown
+  // where the child ignores SIGTERM and the proxy exits before the
+  // escalation lands). Fire-and-forget; self-acts and self-exits.
+  startProcessGuard(child)
+
   let cleaned = false
   let exiting = false
   async function cleanup(): Promise<void> {
     if (cleaned) return
     cleaned = true
 
+    // Arm the hard fail-safe FIRST, before any (potentially blocking) kill
+    // or async teardown, so a wedged taskkill / server.close can't hang
+    // shutdown indefinitely.
+    const timeout = setTimeout(() => process.exit(1), 5000)
+
+    // Tree-kill the whole CLI subtree, not just the direct child. On
+    // Windows taskkill /T reaps grandchildren; on POSIX kill(-pgid) reaps
+    // the detached process group. (Replaces a plain child.kill() that
+    // orphaned node/MCP grandchildren on Windows.) A SIGTERM-ignoring
+    // survivor that outlives our exit is caught by the crash guard above.
     try {
-      child.kill()
+      killChildProcessTree(child, {
+        detachedGroup: process.platform !== "win32",
+      })
     } catch {
-      // Already exited
+      // Already exited / best-effort.
     }
 
-    const timeout = setTimeout(() => process.exit(1), 5000)
     try {
       await server.close(true)
     } catch {
@@ -326,11 +380,50 @@ export function launchChild(
     process.exit(code)
   }
 
-  const onSignal = () => {
+  // On POSIX the CLI is in its own process group (detached), so terminal
+  // Ctrl-C reaches only the proxy. Forward the signal to the child group
+  // so the CLI's own interactive handler runs (e.g. Claude's "press
+  // Ctrl-C again to exit"); let its natural exit drive shutdown and
+  // escalate to a hard tree-kill only if it ignores us past a grace.
+  let forwardGrace: NodeJS.Timeout | null = null
+  const lastForwardAt: Record<"SIGINT" | "SIGTERM", number> = {
+    SIGINT: 0,
+    SIGTERM: 0,
+  }
+  const onSignal = (sig: "SIGINT" | "SIGTERM") => {
+    if (process.platform !== "win32" && child.pid && !cleaned) {
+      // Debounce PER SIGNAL a sub-second burst into ONE forward. The other
+      // subsystem signal handlers (keep-awake/colbert/worker/browser)
+      // re-raise the SAME signal to restore default-terminate, which
+      // re-invokes us several times within milliseconds — without this the
+      // child would receive a volley and Claude's "press Ctrl-C again"
+      // guard would never see a single press. Per-signal so a SIGTERM right
+      // after a SIGINT still forwards. A genuine second human Ctrl-C
+      // (seconds later) falls outside the window and forwards again.
+      const now = Date.now()
+      if (now - lastForwardAt[sig] > 250) {
+        lastForwardAt[sig] = now
+        try {
+          process.kill(-child.pid, sig)
+        } catch {
+          // group already gone — fall through to the grace escalation
+        }
+      }
+      const graceMs = sig === "SIGINT" ? 10000 : 3000
+      if (!forwardGrace) {
+        forwardGrace = setTimeout(() => {
+          cleanup().then(() => exit(130)).catch(() => exit(1))
+        }, graceMs)
+        forwardGrace.unref?.()
+      }
+      return
+    }
+    // Windows: the console already delivered Ctrl-C to the direct child;
+    // cleanup()'s taskkill /T is the escalation hammer.
     cleanup().then(() => exit(130)).catch(() => exit(1))
   }
-  process.on("SIGINT", onSignal)
-  process.on("SIGTERM", onSignal)
+  process.on("SIGINT", () => onSignal("SIGINT"))
+  process.on("SIGTERM", () => onSignal("SIGTERM"))
 
   child.on("exit", (exitCode, signal) => {
     // When the spawned CLI exits we may be holding worker-agent

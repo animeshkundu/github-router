@@ -563,6 +563,11 @@ function killChild(child: ChildProcess): void {
   if (process.platform === "win32") {
     // /T = kill tree (including children of children)
     // /F = force; rg has no graceful-shutdown signal handler on Win.
+    // ASYNC (execFile, not spawnSync): killChild fires MID-STREAM on a
+    // cap/abort/timeout while the event loop must keep draining ripgrep's
+    // output — a synchronous taskkill would block the loop and stall the
+    // very read it is racing. (This is why it does NOT use the shutdown-
+    // path killChildProcessTree, which is intentionally synchronous.)
     try {
       execFile("taskkill", ["/T", "/F", "/PID", String(child.pid)], () => {
         // Errors are swallowed: the process may already have exited,

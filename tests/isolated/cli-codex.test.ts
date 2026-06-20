@@ -19,6 +19,7 @@ const spawnMock = mock()
 mock.module("node:child_process", () => ({
   execFileSync: execFileSyncMock,
   spawn: spawnMock,
+  spawnSync: mock(),
 }))
 
 const exitMock = mock((code: number) => {
