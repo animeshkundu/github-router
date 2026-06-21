@@ -44,7 +44,7 @@ import {
   sourcesHash,
   writeDiscoveredGate,
 } from "./lib/orchestration/gate-discovery"
-import { liveExec } from "./lib/orchestration"
+import { liveExec } from "./lib/orchestration/live-exec"
 import { buildPromptSubmitHookCommand } from "./lib/orchestration/prompt-submit-hook"
 import { INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
 import { parseBoolEnv } from "./lib/exec"

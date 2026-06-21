@@ -26,7 +26,6 @@ import nodePath from "node:path"
 
 import { resolveExecutable } from "~/lib/exec"
 import { PATHS } from "~/lib/paths"
-import { runWorkerAgent } from "~/lib/worker-agent/engine"
 
 import { type CheckSpec } from "./gate-runner"
 import { isMutatingCommand, isSafeCommand, type CheckId } from "./harness-parse"
@@ -272,6 +271,11 @@ export async function discoverGateCommands(
 
   let result: { text: string; isError?: boolean }
   try {
+    // Lazy-import the heavy worker-agent engine ONLY when discovery actually
+    // runs — keeping it out of the module-load graph of `claude.ts` (which
+    // imports this module), so the mock.module-isolated CLI tests don't deadlock
+    // pulling the Pi runtime at load time.
+    const { runWorkerAgent } = await import("~/lib/worker-agent/engine")
     result = await runWorkerAgent({
       mode: "explore",
       workspace: root,
