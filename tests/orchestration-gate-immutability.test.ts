@@ -62,3 +62,29 @@ describe("detectGateWeakening", () => {
     expect(detectGateWeakening(d).weakened).toBe(false)
   })
 })
+
+describe("detectGateWeakening — per-language scoping", () => {
+  const inFile = (file: string, added: string): string =>
+    diff(`diff --git a/${file} b/${file}`, `+++ b/${file}`, `+${added}`)
+
+  test("python suppressions are flagged in a .py file", () => {
+    expect(patterns(inFile("x.py", "z = f()  # type: ignore"))).toContain("py-type-ignore")
+    expect(patterns(inFile("x.py", "import os  # noqa"))).toContain("py-noqa")
+    expect(patterns(inFile("x.py", "@pytest.mark.skip"))).toContain("py-skip")
+  })
+
+  test("go and rust suppressions are flagged in their files", () => {
+    expect(patterns(inFile("x.go", "  t.Skip(\"flaky\")"))).toContain("go-skip")
+    expect(patterns(inFile("x.go", "y := 1 //nolint"))).toContain("go-nolint")
+    expect(patterns(inFile("x.rs", "#[ignore]"))).toContain("rust-ignore")
+    expect(patterns(inFile("x.rs", "#[allow(dead_code)]"))).toContain("rust-allow")
+  })
+
+  test("a TS pattern is NOT applied to a non-TS file (no cross-language false positive)", () => {
+    // `: any` would trip any-cast in a .ts file, but a .py file is scoped to py + COMMON.
+    expect(patterns(inFile("conf.py", "x: any = 1"))).not.toContain("any-cast")
+    // an unknown extension gets COMMON only — a `.skip(` still flags, a TS cast does not.
+    expect(patterns(inFile("data.json", "x as any"))).not.toContain("any-cast")
+    expect(patterns(inFile("data.yaml", "it.skip("))).toContain("skipped-test")
+  })
+})

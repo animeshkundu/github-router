@@ -83,7 +83,7 @@ function trustFileFor(root: string): string {
  * trusted (codex review #2). Empty string when unavailable (no git / no commits)
  * — trust then falls back to path-only, the best we can do.
  */
-async function repoFingerprint(root: string): Promise<string> {
+export async function repoFingerprint(root: string): Promise<string> {
   const r = await runCommandCapture(["git", "rev-list", "--max-parents=0", "HEAD"], {
     cwd: root,
     timeoutMs: 5_000,

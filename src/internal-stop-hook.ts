@@ -21,12 +21,15 @@ import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
-import { runCommandCapture } from "./lib/exec"
+import { parseBoolEnv, runCommandCapture } from "./lib/exec"
 import { liveExec } from "./lib/orchestration"
+import { readDiscoveredGate } from "./lib/orchestration/gate-discovery"
+import { checksForDescriptor, descriptorHash, parseGateDescriptor, type GateDescriptor } from "./lib/orchestration/harness-parse"
 import { hookMcpRuntimeFromEnv } from "./lib/orchestration/hook-mcp-client"
 import {
   decideStopHook,
   fileBlockBudget,
+  launchBaselineKey,
   stopGateId,
   stopReviewEnabled,
   type StopReviewContext,
@@ -35,6 +38,7 @@ import {
   fileBaselineStore,
   fileLastPromptStore,
   fileReviewDebounce,
+  repoRoot,
   stopGateEnabledForRepo,
   stopReviewStateDir,
 } from "./lib/orchestration/stop-gate-policy"
@@ -143,6 +147,56 @@ function spawnStopReview(ctx: StopReviewContext, extras: { prompt: string; trans
   }
 }
 
+/** The checks for a resolved descriptor: sealed descriptors resolve their sealed
+ *  command set; parsed/discovered carry their own. */
+type ResolveChecks = NonNullable<Parameters<typeof decideStopHook>[0]["resolveChecks"]>
+
+/**
+ * Build the dynamic `resolveChecks` for the live Stop hook, per the env the
+ * launcher set:
+ *   - GH_ROUTER_STOP_GATE_PARSED → re-derive the deterministic parser at the
+ *     stop-time tree (stateless, no cache);
+ *   - GH_ROUTER_STOP_GATE_DISCOVERED → read the cached evidence-pinned record.
+ * Both pin the checks to the descriptor's `workdir` (the repo root) and compute
+ * the launch-stable baseline key so the launch-captured (pre-mutation) baseline
+ * is read. Any miss → null → the hook fails OPEN.
+ */
+function buildResolveChecks(mode: "parsed" | "discovered"): ResolveChecks {
+  const includeTests = parseBoolEnv(process.env.GH_ROUTER_STOP_GATE_RUN_TESTS) === true
+  return async (cwd: string) => {
+    const root = await repoRoot(cwd).catch(() => cwd)
+    let descriptor: GateDescriptor | null = null
+    if (mode === "parsed") {
+      descriptor = await parseGateDescriptor(root, { includeTests }).catch(() => null)
+    } else {
+      const rec = await readDiscoveredGate(root).catch(() => null)
+      if (rec) {
+        descriptor = {
+          kind: "discovered",
+          checks: rec.checks,
+          ecosystem: rec.ecosystem,
+          workdir: root,
+          evidence: rec.evidence,
+        }
+      }
+    }
+    if (!descriptor) return null
+    const checks = checksForDescriptor(descriptor)
+    if (checks.length === 0) return null
+    const descriptorKey = descriptorHash(descriptor)
+    const workdir = descriptor.workdir || root
+    const token = process.env.GH_ROUTER_STOP_GATE_BASELINE_TOKEN || undefined
+    return { checks, workdir, descriptorKey, baselineKey: launchBaselineKey(workdir, descriptorKey, token) }
+  }
+}
+
+/** Which dynamic gate mode the launcher armed (sealed → undefined). */
+function dynamicMode(): "parsed" | "discovered" | undefined {
+  if (parseBoolEnv(process.env.GH_ROUTER_STOP_GATE_PARSED) === true) return "parsed"
+  if (parseBoolEnv(process.env.GH_ROUTER_STOP_GATE_DISCOVERED) === true) return "discovered"
+  return undefined
+}
+
 export const internalStopHook = defineCommand({
   meta: {
     name: "internal-stop-hook",
@@ -181,6 +235,7 @@ export const internalStopHook = defineCommand({
     let decision: { exitCode: 0 | 2; stderr?: string }
     try {
       const timeoutEnv = Number.parseInt(process.env.GH_ROUTER_STOP_GATE_TIMEOUT_MS ?? "", 10)
+      const mode = dynamicMode()
       decision = await decideStopHook({
         stdin,
         gateId: stopGateId(),
@@ -190,6 +245,7 @@ export const internalStopHook = defineCommand({
         budget: fileBlockBudget(path.join(tmpdir(), "gh-router-stopgate")),
         baseline: fileBaselineStore(path.join(tmpdir(), "gh-router-stopgate-baseline")),
         isEnabledForRepo: (cwd) => stopGateEnabledForRepo(cwd),
+        resolveChecks: mode ? buildResolveChecks(mode) : undefined,
         timeoutMs: Number.isFinite(timeoutEnv) && timeoutEnv > 0 ? timeoutEnv : undefined,
         reviewDebounce: reviewEnabled ? fileReviewDebounce(stopReviewStateDir()) : undefined,
         spawnReview: reviewEnabled
@@ -203,7 +259,10 @@ export const internalStopHook = defineCommand({
       process.exitCode = 0
       return
     }
-    if (decision.exitCode === 2 && decision.stderr) {
+    // Write any stderr the decision carries — both the exit-2 block reason AND
+    // the LOUD exit-0 stand-down (max-block budget reached). A clean green stop
+    // carries no stderr, so this stays silent on the common path.
+    if (decision.stderr) {
       await writeStderr(`${decision.stderr}\n`)
     }
     // Natural exit: set the code and return. A hard process.exit() races libuv's

@@ -15,7 +15,7 @@
  */
 
 import { resolveSealedGate } from "./gate-registry"
-import { type ExecFn } from "./gate-runner"
+import { runGateChecks, type CheckSpec, type ExecFn } from "./gate-runner"
 import { evaluateStopGate, type StopGateResult } from "./stop-gate"
 import { isSubagentContext, regressions, type BaselineStore, type ReviewDebounce } from "./stop-gate-policy"
 import { parseBoolEnv } from "~/lib/exec"
@@ -47,6 +47,57 @@ export async function runStopGateForLaunch(input: StopGateLaunchInput): Promise<
     }
   }
   return evaluateStopGate({ checks: gate.checks, cwd: input.workspace, exec: input.exec, diff: input.diff })
+}
+
+/**
+ * The launch-stable baseline key for the dynamic gate path: keyed by the
+ * workdir + the descriptor's check set + a per-launch token, NOT the session id
+ * and NOT HEAD. The LAUNCHER generates the token (passed to the child via env),
+ * computes this key, and seeds the baseline (the set of checks already failing at
+ * launch, BEFORE the agent mutates the tree); the runtime hook recomputes the
+ * same key (reading the token from its env) and reads that baseline, so an
+ * agent-introduced failure is a REGRESSION rather than being silently adopted as
+ * the baseline at first stop. The per-launch token isolates concurrent sessions
+ * on the same repo (they don't clobber each other's baseline). HEAD is
+ * deliberately NOT in the key: an agent that COMMITS its work mid-session must
+ * still be judged against the pre-session baseline (a HEAD-keyed baseline would
+ * vanish on the commit — the exact moment it matters). A changed check set (the
+ * agent edited the harness) yields a different key → the launch baseline no
+ * longer matches and the hook degrades to first-stop baselining.
+ */
+export function launchBaselineKey(workdir: string, descriptorKey: string, token?: string): string {
+  return JSON.stringify(["launch", nodePath.resolve(workdir), descriptorKey, token ?? ""])
+}
+
+/**
+ * Run the resolved checks ONCE at launch (pre-mutation) and record the failing
+ * set as the baseline under `launchBaselineKey`. Best-effort: any failure is
+ * swallowed (the hook then degrades to first-stop baselining). The launcher MUST
+ * pass the SAME check set the hook will run (same `includeTests`) so a
+ * pre-existing test failure isn't later miscounted as a regression.
+ *
+ * NOTE: capture is best-effort pre-mutation — the launcher fires it before the
+ * child can edit, and in practice the agent does not mutate until well after a
+ * user prompt, so the checks see the clean tree. If the agent somehow mutates
+ * before this completes, the worst case is the legacy first-stop baseline (no
+ * regression, never a wedge).
+ */
+export async function captureLaunchBaseline(input: {
+  checks: ReadonlyArray<CheckSpec>
+  workdir: string
+  exec: ExecFn
+  descriptorKey: string
+  token?: string
+  baseline: BaselineStore
+}): Promise<void> {
+  if (input.checks.length === 0) return
+  try {
+    const gate = await runGateChecks(input.checks, input.workdir, input.exec)
+    const failed = input.checks.map((c) => c.id).filter((id) => !gate.passed.has(id))
+    await input.baseline.set(launchBaselineKey(input.workdir, input.descriptorKey, input.token), failed)
+  } catch {
+    /* best-effort: a launch-baseline miss only downgrades to first-stop baselining. */
+  }
 }
 
 /**
@@ -192,6 +243,23 @@ export async function decideStopHook(input: {
    * against `payload.cwd` defends against a mid-session cwd change.
    */
   isEnabledForRepo: (cwd: string) => Promise<boolean>
+  /**
+   * DYNAMIC gate source (language-agnostic path). When provided, the gate's
+   * check set is resolved at decision time from this resolver instead of the
+   * sealed `gateId` registry — re-derived from the live tree (parser path) or
+   * read from the cached evidence-pinned record (discovered path). It returns:
+   *   - `checks`        : the canonical `{id, command}` set to run;
+   *   - `workdir`       : the dir the checks run in (the repo/package root where
+   *                       the evidence was found — NOT the Stop payload cwd, so a
+   *                       monorepo stop from a nested dir runs the root's checks);
+   *   - `descriptorKey` : a stable key over the check set for baseline isolation.
+   * Returning `null` (no gate resolvable now — markers/tools vanished, empty set)
+   * makes the hook FAIL OPEN (exit 0), never wedging the session. When absent the
+   * hook falls through to the sealed `gateId` path (bun/TS, unchanged).
+   */
+  resolveChecks?: (
+    cwd: string,
+  ) => Promise<{ checks: CheckSpec[]; workdir: string; descriptorKey: string; baselineKey?: string } | null>
   /** Max blocks per prompt before the gate always allows (default 2). */
   maxBlocks?: number
   /** Absolute wall-clock cap on the diff+gate evaluation; on timeout the hook
@@ -261,7 +329,19 @@ export async function decideStopHook(input: {
   } catch {
     return { exitCode: 0 } // can't read the budget -> can't guarantee termination -> allow.
   }
-  if (priorBlocks >= maxBlocks) return { exitCode: 0 }
+  if (priorBlocks >= maxBlocks) {
+    // Termination guard: never block more than maxBlocks times per prompt. This
+    // is a deliberate trade-off (a stubborn agent gets through), so make the
+    // stand-down LOUD rather than a silent exit 0 — the user must know broken
+    // work may be shipping unverified.
+    return {
+      exitCode: 0,
+      stderr:
+        `structural gate: reached the ${maxBlocks}-block limit for this prompt; allowing the stop `
+        + `WITHOUT re-running the checks. If the failures from the last block are unfixed, they are `
+        + `shipping — run the checks manually to verify.`,
+    }
+  }
 
   // (6) Run the gate under an absolute timeout. The gate result is computed
   //     inside the raced promise; the BASELINE read/write happens AFTER the race
@@ -275,7 +355,33 @@ export async function decideStopHook(input: {
   //     the critical path) and RETURNED so the advisory review below judges the
   //     exact same tree without a second capture. captureDiff swallows its own
   //     failures to "".
-  const runGate = async (): Promise<{ failedChecks: string[]; weakeningPatterns: string[]; diff: string }> => {
+  // The check set comes from the dynamic resolver when injected (parser /
+  // discovered path) or the sealed `gateId` registry otherwise. `resolvedKey`
+  // (read AFTER the race) keys the baseline so a changed command set gets a
+  // fresh baseline. `resolvedWorkdir` is where the checks run (the repo root the
+  // evidence was found in, not necessarily the payload cwd — monorepo fix).
+  let resolvedKey = input.gateId
+  // When the dynamic resolver supplies a launch-stable baseline key (keyed by
+  // workdir + HEAD + descriptor, NOT the session), the gate reads the baseline
+  // the LAUNCHER captured BEFORE the agent mutated the tree — so an
+  // agent-introduced failure is a regression, not silently adopted as baseline.
+  let dynamicBaselineKey: string | undefined
+  const runGate = async (): Promise<{ failedChecks: string[]; weakeningPatterns: string[]; diff: string } | null> => {
+    if (input.resolveChecks) {
+      const resolved = await input.resolveChecks(cwd).catch(() => null)
+      // No gate resolvable now (markers/tools vanished, empty set) → fail OPEN.
+      if (!resolved || resolved.checks.length === 0) return null
+      resolvedKey = resolved.descriptorKey
+      dynamicBaselineKey = resolved.baselineKey
+      const workdir = resolved.workdir || cwd
+      const diff = await input.captureDiff(workdir).catch(() => "")
+      const result = await evaluateStopGate({ checks: resolved.checks, cwd: workdir, exec: input.exec, diff })
+      return {
+        failedChecks: [...result.failedChecks],
+        weakeningPatterns: [...new Set(result.weakening.map((w) => w.pattern))],
+        diff,
+      }
+    }
     const diff = await input.captureDiff(cwd).catch(() => "")
     const result = await runStopGateForLaunch({ workspace: cwd, gateId: input.gateId, exec: input.exec, diff })
     return {
@@ -287,7 +393,7 @@ export async function decideStopHook(input: {
   const timeoutMs = input.timeoutMs ?? 300_000
   let timer: ReturnType<typeof setTimeout> | undefined
   const raced = await Promise.race<
-    { failedChecks: string[]; weakeningPatterns: string[]; diff: string } | "timeout"
+    { failedChecks: string[]; weakeningPatterns: string[]; diff: string } | null | "timeout"
   >([
     runGate(),
     new Promise<"timeout">((resolve) => {
@@ -296,11 +402,13 @@ export async function decideStopHook(input: {
   ])
   if (timer) clearTimeout(timer)
   if (raced === "timeout") return { exitCode: 0 } // gate did not complete -> allow; never a claimed pass.
+  if (raced === null) return { exitCode: 0 } // no gate resolvable now -> allow (fail open).
 
-  // Baseline isolation, keyed by (session, cwd, gate) so a mid-session repo/gate
-  // change can't mask or invent regressions (codex review #7). Only a COMPLETED
-  // eval reads/writes it.
-  const baselineKey = JSON.stringify([sessionId, cwd, input.gateId])
+  // Baseline isolation, keyed by (session, workdir, descriptor) so a mid-session
+  // repo/gate change can't mask or invent regressions (codex review #7). The
+  // dynamic path prefers a launch-stable key (pre-mutation baseline). Only a
+  // COMPLETED eval reads/writes it.
+  const baselineKey = dynamicBaselineKey ?? JSON.stringify([sessionId, cwd, resolvedKey])
   const recorded = await input.baseline.get(baselineKey).catch(() => null)
   if (recorded === null) {
     await input.baseline.set(baselineKey, raced.failedChecks).catch(() => {})

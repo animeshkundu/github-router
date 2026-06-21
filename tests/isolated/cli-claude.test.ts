@@ -205,13 +205,19 @@ mock.module("~/lib/launch", () => ({
 // `launchChild`, so `spawnMock.mock.calls[0]` would be a git spawn instead of the
 // claude launch (the wiring assertions read calls[0]). Spread the real module so
 // stop-gate-hook's `isSubagentContext`/`regressions` imports still resolve, and
-// override just the three git-spawners to no-op (gate stays off -> block is inert).
+// override the git-spawners to no-op (gate stays off -> block is inert). The
+// language-agnostic gate also calls `repoRoot`/`repoFingerprint` directly (to
+// resolve the gate root + cache identity), so those are stubbed too — otherwise
+// the real `git rev-parse` runs through the mocked node:child_process and the
+// launch hangs / pollutes the spawn-call assertions.
 const realStopGatePolicy = await import("../../src/lib/orchestration/stop-gate-policy")
 mock.module("~/lib/orchestration/stop-gate-policy", () => ({
   ...realStopGatePolicy,
   detectHarnessGateId: mock(async () => null),
   stopGateEnabledForRepo: mock(async () => false),
   trustRepo: mock(async () => "/repo"),
+  repoRoot: mock(async (cwd: string) => cwd),
+  repoFingerprint: mock(async () => "test-fingerprint"),
 }))
 
 // Fire-and-forget launch work — `void runSelfUpdate()`, `void provisionToolbelt()`,
