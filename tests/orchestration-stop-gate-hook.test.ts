@@ -16,9 +16,11 @@ import {
   type BlockBudget,
   buildStopHookCommand,
   buildStopHookSettings,
+  captureLaunchBaseline,
   decideStopHook,
   fileBlockBudget,
   injectStopHookIntoSettingsFile,
+  launchBaselineKey,
   mergeStopHookIntoSettings,
   runStopGateForLaunch,
   stopGateEnabled,
@@ -468,5 +470,74 @@ describe("injectStopHookIntoSettingsFile", () => {
     } finally {
       await fs.rm(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe("decideStopHook — dynamic resolveChecks (parser/discovered path)", () => {
+  const dynChecks = [{ id: "typecheck", command: "x" }]
+
+  test("blocks on a regressed dynamic check (baseline empty)", async () => {
+    const resolveChecks = async () => ({ checks: dynChecks, workdir: "/w", descriptorKey: "k1" })
+    const d = await decideStopHook(decisionInput({
+      gateId: "unused",
+      exec: allFail,
+      resolveChecks,
+      baseline: singleSlotBaseline([]),
+    }))
+    expect(d.exitCode).toBe(2)
+    expect(d.stderr).toMatch(/typecheck/)
+  })
+
+  test("resolveChecks returning null FAILS OPEN (no gate resolvable now)", async () => {
+    const exec = mock(async () => ({ exitCode: 1 }))
+    const resolveChecks = async () => null
+    const d = await decideStopHook(decisionInput({ gateId: "unused", exec, resolveChecks }))
+    expect(d.exitCode).toBe(0)
+    expect(exec.mock.calls.length).toBe(0)
+  })
+
+  test("an empty check set FAILS OPEN", async () => {
+    const exec = mock(async () => ({ exitCode: 1 }))
+    const resolveChecks = async () => ({ checks: [], workdir: "/w", descriptorKey: "k" })
+    const d = await decideStopHook(decisionInput({ gateId: "unused", exec, resolveChecks }))
+    expect(d.exitCode).toBe(0)
+    expect(exec.mock.calls.length).toBe(0)
+  })
+
+  test("a launch-captured baseline EXCUSES a pre-existing failure but BLOCKS an agent-introduced one", async () => {
+    // Scenario A: the check already fails at launch → recorded as baseline → the
+    // same failure at stop is NOT a regression → allow.
+    const a = memBaseline()
+    await captureLaunchBaseline({
+      checks: dynChecks, workdir: "/w", exec: allFail, descriptorKey: "k", baseline: a.baseline,
+    })
+    const keyA = launchBaselineKey("/w", "k")
+    const dA = await decideStopHook(decisionInput({
+      gateId: "unused", exec: allFail, baseline: a.baseline,
+      resolveChecks: async () => ({ checks: dynChecks, workdir: "/w", descriptorKey: "k", baselineKey: keyA }),
+    }))
+    expect(a.state.get(keyA)).toEqual(["typecheck"]) // captured pre-mutation
+    expect(dA.exitCode).toBe(0) // pre-existing failure excused
+
+    // Scenario B: the check PASSES at launch (baseline empty) but the agent broke
+    // it → the stop-time failure IS a regression → block.
+    const b = memBaseline()
+    await captureLaunchBaseline({
+      checks: dynChecks, workdir: "/w", exec: allPass, descriptorKey: "k", baseline: b.baseline,
+    })
+    const keyB = launchBaselineKey("/w", "k")
+    const dB = await decideStopHook(decisionInput({
+      gateId: "unused", exec: allFail, baseline: b.baseline,
+      resolveChecks: async () => ({ checks: dynChecks, workdir: "/w", descriptorKey: "k", baselineKey: keyB }),
+    }))
+    expect(b.state.get(keyB)).toEqual([]) // clean at launch
+    expect(dB.exitCode).toBe(2) // agent-introduced failure blocked
+  })
+
+  test("the max-block stand-down is LOUD (carries stderr on the allowing exit 0)", async () => {
+    const { budget } = mockedBudget(async () => 2)
+    const d = await decideStopHook(decisionInput({ exec: allFail, budget, maxBlocks: 2 }))
+    expect(d.exitCode).toBe(0)
+    expect(d.stderr).toMatch(/limit/i)
   })
 })

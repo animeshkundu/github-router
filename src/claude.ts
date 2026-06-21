@@ -21,14 +21,36 @@ import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror } from "./
 import {
   buildSessionBindHookCommand,
   buildStopHookCommand,
+  captureLaunchBaseline,
   injectStopHookIntoSettingsFile,
   stopGateId,
 } from "./lib/orchestration/stop-gate-hook"
-import { detectHarnessGateId, stopGateEnabledForRepo, trustRepo } from "./lib/orchestration/stop-gate-policy"
+import {
+  fileBaselineStore,
+  repoFingerprint,
+  repoRoot,
+  stopGateEnabledForRepo,
+  trustRepo,
+} from "./lib/orchestration/stop-gate-policy"
+import {
+  checksForDescriptor,
+  descriptorHash,
+  parseGateDescriptor,
+  type GateDescriptor,
+} from "./lib/orchestration/harness-parse"
+import {
+  discoverGateCommands,
+  readDiscoveredGate,
+  sourcesHash,
+  writeDiscoveredGate,
+} from "./lib/orchestration/gate-discovery"
+import { liveExec } from "./lib/orchestration"
 import { buildPromptSubmitHookCommand } from "./lib/orchestration/prompt-submit-hook"
 import { INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
 import { parseBoolEnv } from "./lib/exec"
 import nodePath from "node:path"
+import { tmpdir } from "node:os"
+import { randomBytes } from "node:crypto"
 import { buildPeerAwarenessSnippet, type McpGroup } from "./lib/peer-mcp-personas"
 import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
@@ -581,18 +603,45 @@ export const claude = defineCommand({
             consola.warn(`Could not record gate trust: ${String(err)}`)
           }
         }
-        const detectedGate = await detectHarnessGateId(sessionCwd).catch(() => null)
         const gateDisabled = parseBoolEnv(process.env.GH_ROUTER_DISABLE_STOP_GATE) === true
-        let gateEnabled = await stopGateEnabledForRepo(sessionCwd).catch(() => false)
-        let autoTrusted = false
-        // Default-ON (consent-by-launching): when a runnable harness is present
-        // and the user hasn't disabled the gate, auto-trust THIS repo so the gate
-        // runs here without an explicit --trust-gate. It is RECORDED so the
-        // runtime hook (which checks the trust store) honors it AND a mid-session
-        // `cd` into an untrusted repo still won't run that repo's scripts. The
-        // gate only ever runs the launched repo's own typecheck/test/lint and is
+        const forceEnabled = parseBoolEnv(process.env.GH_ROUTER_ENABLE_STOP_GATE) === true
+        const includeTests = parseBoolEnv(process.env.GH_ROUTER_STOP_GATE_RUN_TESTS) === true
+        const gateRoot = await repoRoot(sessionCwd).catch(() => sessionCwd)
+        // Resolve the gate source: the deterministic parser first (the bun/TS
+        // sealed fast-path OR a parsed multi-language check set), then the cached
+        // model-discovered record. A cache MISS marks `discovering` (background
+        // discovery arms the gate on the NEXT launch — no launch-time model
+        // latency). Discovery is OPT-IN (GH_ROUTER_ENABLE_GATE_DISCOVERY=1): it
+        // runs a read-only worker that reads repo files, so it stays off by
+        // default; the parser covers the common ecosystems with no model at all.
+        let descriptor: GateDescriptor | null = null
+        let discovering = false
+        if (!gateDisabled) {
+          descriptor = await parseGateDescriptor(gateRoot, { includeTests }).catch(() => null)
+          if (!descriptor) {
+            const cached = await readDiscoveredGate(gateRoot).catch(() => null)
+            if (cached) {
+              descriptor = {
+                kind: "discovered",
+                checks: cached.checks,
+                ecosystem: cached.ecosystem,
+                workdir: gateRoot,
+                evidence: cached.evidence,
+              }
+              // Force-enable wants a gate NOW (not a next-launch background discovery);
+              // when nothing parsed/cached, it falls back to the sealed default below.
+            } else if (!forceEnabled && workerToolsEnabled() && parseBoolEnv(process.env.GH_ROUTER_ENABLE_GATE_DISCOVERY) === true) {
+              discovering = true
+            }
+          }
+        }
+        // Enable when forced-on, already trusted, or auto-trust-on-detection (a
+        // resolved descriptor OR a kicked discovery is consent-by-launching). The
+        // gate only ever runs the launched repo's own checks and is
         // baseline-isolated; opt out entirely with GH_ROUTER_DISABLE_STOP_GATE=1.
-        if (!gateEnabled && !gateDisabled && detectedGate) {
+        let gateEnabled = gateDisabled ? false : await stopGateEnabledForRepo(sessionCwd).catch(() => false)
+        let autoTrusted = false
+        if (!gateEnabled && !gateDisabled && (descriptor || discovering)) {
           try {
             await trustRepo(sessionCwd)
             gateEnabled = true
@@ -601,24 +650,111 @@ export const claude = defineCommand({
             consola.warn(`Could not auto-trust this repo for the structural gate: ${String(err)}`)
           }
         }
-        if (gateEnabled) {
+        // Force-enable (GH_ROUTER_ENABLE_STOP_GATE / --trust-gate) with no parsed
+        // or discovered descriptor falls back to the sealed default gate, matching
+        // the legacy behavior of explicit enablement (takes precedence over a
+        // background discovery, which `forceEnabled` already suppressed above).
+        if (gateEnabled && !descriptor && !discovering) {
+          descriptor = { kind: "sealed", gateId: stopGateId(), workdir: gateRoot }
+        }
+        if (gateEnabled && descriptor) {
+          const armed = descriptor
           try {
-            const gateForRepo = detectedGate ?? stopGateId()
-            envVars.GH_ROUTER_STOP_GATE_ID = gateForRepo
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const command = buildStopHookCommand(process.execPath, process.argv[1])
+            // Arm the matching runtime resolver (env reaches the child via envVars).
+            if (armed.kind === "sealed") envVars.GH_ROUTER_STOP_GATE_ID = armed.gateId
+            else if (armed.kind === "parsed") envVars.GH_ROUTER_STOP_GATE_PARSED = "1"
+            else envVars.GH_ROUTER_STOP_GATE_DISCOVERED = "1"
+            if (includeTests) envVars.GH_ROUTER_STOP_GATE_RUN_TESTS = "1"
             await injectStopHookIntoSettingsFile(settingsPath, command)
-            process.stderr.write(
-              (autoTrusted
-                ? `Structural-gate Stop hook enabled by default for this repo (gate=${gateForRepo}; runs typecheck/test/lint at stop). `
-                : `Structural-gate Stop hook enabled (gate=${gateForRepo}). `)
-                + "A regression or a gate-weakening diff blocks stopping until fixed (per-prompt, max 2). "
-                + "Opt out with GH_ROUTER_DISABLE_STOP_GATE=1.\n",
-            )
+            // Capture the baseline at LAUNCH (pre-mutation) for the dynamic paths,
+            // so an agent-introduced failure is a regression — not silently adopted
+            // as the baseline at first stop. Sealed keeps its legacy first-stop
+            // baseline (unchanged). Fire-and-forget: never blocks the launch.
+            if (armed.kind !== "sealed") {
+              const checks = checksForDescriptor(armed)
+              const descriptorKey = descriptorHash(armed)
+              // Per-launch token isolates concurrent sessions' baselines; the child
+              // reads it back to recompute the same launch-baseline key.
+              const token = randomBytes(8).toString("hex")
+              envVars.GH_ROUTER_STOP_GATE_BASELINE_TOKEN = token
+              void (async () => {
+                await captureLaunchBaseline({
+                  checks,
+                  workdir: armed.workdir,
+                  exec: liveExec,
+                  descriptorKey,
+                  token,
+                  baseline: fileBaselineStore(nodePath.join(tmpdir(), "gh-router-stopgate-baseline")),
+                })
+              })().catch(() => {})
+            }
+            const tail =
+              "A regression or a gate-weakening diff blocks stopping until fixed (per-prompt, max 2). "
+              + "Opt out with GH_ROUTER_DISABLE_STOP_GATE=1.\n"
+            if (armed.kind === "sealed") {
+              process.stderr.write(
+                (autoTrusted
+                  ? `Structural-gate Stop hook enabled by default for this repo (gate=${armed.gateId}; runs typecheck/test/lint at stop). `
+                  : `Structural-gate Stop hook enabled (gate=${armed.gateId}). `) + tail,
+              )
+            } else {
+              const ids = checksForDescriptor(armed).map((c) => c.id).join(", ")
+              const testNote = includeTests
+                ? "Full test suite ON. "
+                : "Full test suite off by default (enable with GH_ROUTER_STOP_GATE_RUN_TESTS=1). "
+              process.stderr.write(
+                `Structural-gate Stop hook armed for this ${armed.ecosystem} repo (checks: ${ids}; `
+                  + `from ${armed.evidence.join(", ")}). ${testNote}${tail}`,
+              )
+            }
           } catch (err) {
             // Never fail the launch over the hook; surface and continue.
             consola.warn(`Could not register the structural-gate Stop hook: ${String(err)}`)
           }
+        } else if (gateEnabled && discovering) {
+          // Kick a background discovery; the gate arms on the next launch.
+          process.stderr.write(
+            "Structural Stop-gate: no checks parsed for this repo — discovering check commands in the "
+              + "background (arms on the next launch). Disable with GH_ROUTER_ENABLE_GATE_DISCOVERY=0.\n",
+          )
+          void (async () => {
+            try {
+              const disc = await discoverGateCommands(gateRoot, {
+                includeTests,
+                signal: AbortSignal.timeout(120_000),
+              })
+              if (disc) {
+                const [fingerprint, sh] = await Promise.all([
+                  repoFingerprint(gateRoot).catch(() => ""),
+                  sourcesHash(gateRoot).catch(() => ""),
+                ])
+                await writeDiscoveredGate({
+                  root: gateRoot,
+                  fingerprint,
+                  sourcesHash: sh,
+                  discoveredAt: new Date().toISOString(),
+                  model: "gemini-3.5-flash",
+                  ecosystem: disc.ecosystem,
+                  checks: disc.checks,
+                  confidence: disc.confidence,
+                  evidence: disc.evidence,
+                })
+              }
+            } catch {
+              /* best-effort: discovery never blocks or fails the launch. */
+            }
+          })().catch(() => {})
+        } else if (!gateDisabled && !descriptor && !discovering) {
+          // The original "silent skip" fix: say WHY the gate is off.
+          process.stderr.write(
+            "Structural Stop-gate not enabled: no checks found in this repo "
+              + "(looked at package.json scripts / CI workflows / Makefile / Cargo.toml / go.mod / pyproject). "
+              + "Force a sealed gate with GH_ROUTER_ENABLE_STOP_GATE=1"
+              + (workerToolsEnabled() ? ", or let a model discover them with GH_ROUTER_ENABLE_GATE_DISCOVERY=1" : "")
+              + ".\n",
+          )
         }
 
         // Awareness snippet: append a short, descriptive system-prompt
