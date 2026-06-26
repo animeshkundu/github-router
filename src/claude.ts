@@ -64,6 +64,7 @@ import {
 } from "./lib/port"
 import {
   browserToolsEnabled,
+  fleetToolsEnabled,
   standInToolEnabled,
   workerToolsEnabled,
 } from "./lib/mcp-capabilities"
@@ -440,6 +441,7 @@ export const claude = defineCommand({
         if (workerToolsEnabled()) enabledGroups.push("workers")
         if (standInToolEnabled()) enabledGroups.push("decide")
         if (browserToolsEnabled()) enabledGroups.push("browser")
+        if (fleetToolsEnabled()) enabledGroups.push("fleet")
         const { keys: groupKeys, skipped: skippedGroups } =
           await resolveGroupKeysFromMirror(enabledGroups)
 

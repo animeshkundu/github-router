@@ -23,6 +23,8 @@
 
 import path from "node:path"
 
+import { ARTIFACT_TOOLS } from "./artifact/tools"
+import { FLEET_TOOLS } from "./fleet/tools"
 import { runUnifiedCodeSearch } from "./unified-code-search"
 // Static import is safe: the previous module-init cycle (peer-mcp-personas
 // → worker-agent/index → engine → tools → peer-mcp-personas) was caused
@@ -64,7 +66,7 @@ import { runWorkflowLive } from "~/lib/orchestration/run-workflow-live"
  *   - `browser` — the browser-control tools (only with `--browse`)
  *   - `decide`  — `stand_in` (three-lab away-mode decision advisor)
  */
-export type McpGroup = "peers" | "search" | "workers" | "orchestrate" | "browser" | "decide"
+export type McpGroup = "peers" | "search" | "workers" | "orchestrate" | "browser" | "decide" | "fleet"
 /** Either a single group (scoped endpoint) or the full union (`/mcp`). */
 export type McpScope = McpGroup | "all"
 export const MCP_GROUPS: ReadonlyArray<McpGroup> = Object.freeze([
@@ -74,6 +76,7 @@ export const MCP_GROUPS: ReadonlyArray<McpGroup> = Object.freeze([
   "orchestrate",
   "browser",
   "decide",
+  "fleet",
 ])
 
 export interface McpGroupMeta {
@@ -99,6 +102,7 @@ export const GROUP_META: Record<McpGroup, McpGroupMeta> = Object.freeze({
   orchestrate: { preferredKey: "orchestrate", urlSuffix: "orchestrate", serverInfoName: "github-router-orchestrate" },
   browser: { preferredKey: "browser", urlSuffix: "browser", serverInfoName: "github-router-browser" },
   decide: { preferredKey: "decide", urlSuffix: "decide", serverInfoName: "github-router-decide" },
+  fleet: { preferredKey: "fleet", urlSuffix: "fleet", serverInfoName: "github-router-fleet" },
 })
 
 /** True iff `s` is a registered group name (route `:group` param validation). */
@@ -700,12 +704,16 @@ export interface NonPersonaMcpTool {
    *   so `isBrowserCapability()` in handler.ts treats it as a normal
    *   non-persona tool (no per-call URL/tab bridge pre-flight — the
    *   browse agent's INNER browser tools run their own readiness probe).
+   * - "artifact" (artifact_open / artifact_poll / artifact_reply) requires
+   *   the ai-or-die tab-scoped env trio (`AIORDIE_BASE_URL`,
+   *   `AIORDIE_TOKEN`, `AIORDIE_SESSION_ID`; see `artifactToolsEnabled()`
+   *   in `lib/mcp-capabilities.ts`).
    *
    * Absent on `web_search` / `code_search` — those are always available
    * once the proxy is in claude mode (loopback + nonce already gate
    * `/mcp` itself).
    */
-  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "browse_agent"
+  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "browse_agent" | "fleet" | "artifact"
   /**
    * Server-side handler. Receives the raw `arguments` object from the
    * `tools/call` request and an optional AbortSignal that is signalled
@@ -1957,6 +1965,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         return runStandInToolCall(args, signal)
       },
     },
+    ...ARTIFACT_TOOLS,
+    ...FLEET_TOOLS,
     // Browser-control tools. Defined in a sibling module so the dispatch
     // implementation can grow without bloating this file.
     //

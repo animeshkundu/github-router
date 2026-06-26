@@ -83,13 +83,16 @@ const STRIPPED_PARENT_ENV_KEYS = [
   "OPENAI_API_KEY",
   "OPENAI_BASE_URL",
   "CODEX_HOME",
-  // ai-or-die session-bind handshake. ai-or-die sets this (a per-tab sidecar
-  // path) on the Terminal shell so THIS github-router registers the
-  // SessionStart/SessionEnd bind hook. The hook receives the path baked into its
-  // command, so it does NOT need the env — and stripping it here means a nested
-  // `github-router claude` (a teammate/tool re-invocation) can't inherit it and
-  // hijack the parent tab's sidecar.
+  // ai-or-die session-bind / artifact-review surface. ai-or-die sets
+  // AIORDIE_CLAUDE_BIND (a per-tab sidecar path) on the Terminal shell so THIS
+  // github-router registers the SessionStart/SessionEnd bind hook. The hook
+  // receives the path baked into its command, so it does NOT need the env — and
+  // stripping it here means a nested `github-router claude` (a teammate/tool
+  // re-invocation) can't inherit it and hijack the parent tab's sidecar.
+  // AIORDIE_TOKEN is similarly tab-scoped for Artifact review; nested launches
+  // must not inherit the parent tab's bearer token.
   "AIORDIE_CLAUDE_BIND",
+  "AIORDIE_TOKEN",
 ] as const
 
 /**
