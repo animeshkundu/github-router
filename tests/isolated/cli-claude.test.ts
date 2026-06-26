@@ -167,6 +167,8 @@ mock.module("~/lib/mcp-capabilities", () => ({
   browserPowerToolsEnabled: mock(() => false),
   browseAgentEnabled: mock(() => false),
   semanticSearchEnabled: mock(() => false),
+  fleetToolsEnabled: mock(() => false),
+  artifactToolsEnabled: mock(() => false),
 }))
 
 // The CLAUDE.md append + prepend helpers are the new descendant-reach
