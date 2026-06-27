@@ -94,3 +94,88 @@ describe("FleetClient error mapping", () => {
     await expectFleetError(client.listSessions(), "UNREACHABLE")
   })
 })
+
+describe("FleetClient F4 connectivity classification", () => {
+  const DEVTUNNEL_URL = "https://abc-3000.uks1.devtunnels.ms"
+
+  function clientWith(url: string, fetchFn: typeof fetch): FleetClient {
+    return new FleetClient({ url, token: "secret", fetchFn })
+  }
+
+  test("Dev Tunnel fast 502 with a no-host body signal → NO_HOST", async () => {
+    const fetchFn = mock(async () =>
+      new Response("no host is currently connected to this tunnel", { status: 502 }),
+    ) as unknown as typeof fetch
+
+    await expectFleetError(clientWith(DEVTUNNEL_URL, fetchFn).listSessions(), "NO_HOST")
+  })
+
+  test("Dev Tunnel no-host body in a JSON error envelope → NO_HOST", async () => {
+    const fetchFn = mock(async () =>
+      new Response(
+        JSON.stringify({ error: { message: "The tunnel host is not connected." } }),
+        { status: 503 },
+      ),
+    ) as unknown as typeof fetch
+
+    await expectFleetError(clientWith(DEVTUNNEL_URL, fetchFn).listSessions(), "NO_HOST")
+  })
+
+  test("Dev Tunnel 502 WITHOUT a no-host signal → RELAY_ERROR (no over-assertion)", async () => {
+    const fetchFn = mock(async () =>
+      new Response("502 Bad Gateway", { status: 502 }),
+    ) as unknown as typeof fetch
+
+    await expectFleetError(clientWith(DEVTUNNEL_URL, fetchFn).listSessions(), "RELAY_ERROR")
+  })
+
+  test("Dev Tunnel generic 500 → UPSTREAM_ERROR (not RELAY_ERROR/NO_HOST)", async () => {
+    const fetchFn = mock(async () =>
+      new Response("kaboom", { status: 500 }),
+    ) as unknown as typeof fetch
+
+    await expectFleetError(clientWith(DEVTUNNEL_URL, fetchFn).listSessions(), "UPSTREAM_ERROR")
+  })
+
+  test("non-Dev-Tunnel 502 is UPSTREAM_ERROR even with a no-host body (NO_HOST not over-asserted)", async () => {
+    const fetchFn = mock(async () =>
+      new Response("no host is currently connected", { status: 502 }),
+    ) as unknown as typeof fetch
+
+    await expectFleetError(clientWith("https://alpha.example", fetchFn).listSessions(), "UPSTREAM_ERROR")
+  })
+
+  test("connection refused → UNREACHABLE, never NO_HOST (even on a Dev Tunnel url)", async () => {
+    const fetchFn = mock(async () => {
+      throw new TypeError("fetch failed: ECONNREFUSED")
+    }) as unknown as typeof fetch
+
+    await expectFleetError(clientWith(DEVTUNNEL_URL, fetchFn).listSessions(), "UNREACHABLE")
+  })
+
+  test("DNS failure → UNREACHABLE, never NO_HOST", async () => {
+    const fetchFn = mock(async () => {
+      throw new TypeError("getaddrinfo ENOTFOUND abc-3000.uks1.devtunnels.ms")
+    }) as unknown as typeof fetch
+
+    await expectFleetError(clientWith(DEVTUNNEL_URL, fetchFn).listSessions(), "UNREACHABLE")
+  })
+
+  test("abort/timeout → TIMEOUT, kept distinct from NO_HOST", async () => {
+    const fetchFn = mock(async () => {
+      const err = new Error("aborted")
+      err.name = "AbortError"
+      throw err
+    }) as unknown as typeof fetch
+
+    await expectFleetError(clientWith(DEVTUNNEL_URL, fetchFn).listSessions(), "TIMEOUT")
+  })
+
+  test("Dev Tunnel 504 gateway timeout → TIMEOUT, not NO_HOST", async () => {
+    const fetchFn = mock(async () =>
+      new Response("gateway timeout", { status: 504 }),
+    ) as unknown as typeof fetch
+
+    await expectFleetError(clientWith(DEVTUNNEL_URL, fetchFn).listSessions(), "TIMEOUT")
+  })
+})

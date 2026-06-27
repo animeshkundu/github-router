@@ -5,6 +5,15 @@ export type FleetErrorCode =
   | "PRECONDITION_FAILED"
   | "TIMEOUT"
   | "UPSTREAM_ERROR"
+  // F4 connectivity diagnostics:
+  // NO_HOST — a Dev Tunnel relay answered but reports no host is connected
+  //   (asserted ONLY on a Dev-Tunnel-specific body/header signal, never on a
+  //   generic connection-refused/DNS failure or a plain upstream 5xx).
+  // RELAY_ERROR — a Dev Tunnel relay returned an error we can't pin to "no host"
+  //   (a live host under load also returns 502/503), so this is the neutral
+  //   "tunnel up, can't confirm" bucket, kept distinct from TIMEOUT/UPSTREAM_ERROR.
+  | "NO_HOST"
+  | "RELAY_ERROR"
 
 export class FleetError extends Error {
   code: FleetErrorCode
@@ -93,6 +102,8 @@ export interface CreateSessionInput {
   agent?: string
   start?: boolean
   idempotencyKey?: string
+  /** F17: bounded readiness wait (ms) before create returns; 0 = return immediately. */
+  readyTimeoutMs?: number
 }
 
 export interface StopSessionInput {
@@ -100,10 +111,23 @@ export interface StopSessionInput {
   idempotencyKey?: string
 }
 
+/** F17: a concrete reason a freshly-started session is not yet driveable. */
+export interface FleetReadinessBlocker {
+  kind: string
+  message?: string
+}
+
 export interface CreateSessionResponse {
   sessionId: string
   lifecycle: string
   name?: string
+  /** F17 readiness barrier: true once the agent is actually driveable. */
+  ready?: boolean
+  /** F17: true when a claude JSONL turn-binding is live (deterministic turn detection). */
+  bound?: boolean
+  /** F17: present when not ready — names the blocker (trust modal, binding_pending, …). */
+  blocker?: FleetReadinessBlocker
+  startError?: string
 }
 
 export interface StopSessionResponse {
@@ -111,10 +135,24 @@ export interface StopSessionResponse {
   lifecycle: string
 }
 
+/** F9/F18: structured per-stage status for a send_message. */
+export interface FleetSubStatus {
+  status: string
+  awaiting?: unknown
+}
+
 export interface SendMessageResponse {
   messageId: string
   delivered: boolean
   confirmed: boolean
+  /** F18: 'turn_completed' | 'submitted' | 'delivered' | 'unconfirmed' | 'no_turn_binding'. */
+  confirmation?: string
+  /** F9: true when the message submitted but its turn outran awaitMs (NOT a failure). */
+  confirmationTimedOut?: boolean
+  /** F18: delivery (bytes written), submission (message reached the composer), turn (ran to completion). */
+  delivery?: FleetSubStatus
+  submission?: FleetSubStatus
+  turn?: FleetSubStatus
   confidence?: unknown
   interactionState?: string
   sessionStateSeq?: number
@@ -335,60 +373,130 @@ export class FleetClient {
     }
 
     if (!response.ok) {
-      throw await mapHttpError(response)
+      throw await mapHttpError(response, url.toString())
     }
 
     return (await response.json()) as T
   }
 }
 
-async function mapHttpError(response: Response): Promise<FleetError> {
+async function mapHttpError(response: Response, requestUrl: string): Promise<FleetError> {
   const detail = await readErrorDetail(response)
   const upstreamMessage = detailToMessage(detail)
   const suffix = upstreamMessage ? `: ${upstreamMessage}` : ""
-  if (response.status === 401 || response.status === 403) {
+  const status = response.status
+
+  // F4: a Dev Tunnel relay that reports "no host connected" — assert NO_HOST ONLY
+  // when the host is a Dev Tunnel host AND a Dev-Tunnel-specific body signal
+  // confirms it. Runs before the status table so a no-host 502/503/404 is not
+  // mis-bucketed as a generic upstream error or a missing session.
+  if (isDevTunnelHost(requestUrl) && detectDevTunnelNoHost(status, detail)) {
     return new FleetError({
-      code: "AUTH_FAILED",
-      message: `fleet instance authentication failed (${response.status})${suffix}`,
-      retryable: false,
-      status: response.status,
+      code: "NO_HOST",
+      message: `dev tunnel relay reports no host connected (${status})${suffix}`,
+      retryable: true,
+      status,
       detail,
     })
   }
-  if (response.status === 404) {
+
+  if (status === 401 || status === 403) {
+    return new FleetError({
+      code: "AUTH_FAILED",
+      message: `fleet instance authentication failed (${status})${suffix}`,
+      retryable: false,
+      status,
+      detail,
+    })
+  }
+  if (status === 404) {
     return new FleetError({
       code: "SESSION_NOT_FOUND",
       message: `fleet session or resource not found (404)${suffix}`,
       retryable: false,
-      status: response.status,
+      status,
       detail,
     })
   }
-  if (response.status === 409 || response.status === 412) {
+  if (status === 409 || status === 412) {
     return new FleetError({
       code: "PRECONDITION_FAILED",
-      message: `fleet instance precondition failed (${response.status})${suffix}`,
+      message: `fleet instance precondition failed (${status})${suffix}`,
       retryable: false,
-      status: response.status,
+      status,
       detail,
     })
   }
-  if (response.status === 408 || response.status === 504) {
+  if (status === 408 || status === 504) {
     return new FleetError({
       code: "TIMEOUT",
-      message: `fleet instance request timed out (${response.status})${suffix}`,
+      message: `fleet instance request timed out (${status})${suffix}`,
       retryable: true,
-      status: response.status,
+      status,
+      detail,
+    })
+  }
+  // F4: a Dev Tunnel relay 502/503 with no no-host proof is the neutral RELAY_ERROR.
+  // A live host under load also returns 502/503, so we must NOT over-claim NO_HOST;
+  // scoped to Dev Tunnel hosts so a plain upstream 5xx from a direct host stays
+  // UPSTREAM_ERROR.
+  if ((status === 502 || status === 503) && isDevTunnelHost(requestUrl)) {
+    return new FleetError({
+      code: "RELAY_ERROR",
+      message: `dev tunnel relay returned HTTP ${status} (host may be down, restarting, or under load)${suffix}`,
+      retryable: true,
+      status,
       detail,
     })
   }
   return new FleetError({
     code: "UPSTREAM_ERROR",
-    message: `fleet instance returned HTTP ${response.status}${suffix}`,
-    retryable: response.status === 429 || response.status >= 500,
-    status: response.status,
+    message: `fleet instance returned HTTP ${status}${suffix}`,
+    retryable: status === 429 || status >= 500,
+    status,
     detail,
   })
+}
+
+const DEVTUNNEL_HOST_RE = /(?:^|\.)devtunnels\.ms$|(?:^|\.)tunnels\.api\.visualstudio\.com$/i
+
+/** F4: only Dev Tunnel relay hosts may be classified NO_HOST / RELAY_ERROR. */
+function isDevTunnelHost(requestUrl: string): boolean {
+  try {
+    return DEVTUNNEL_HOST_RE.test(new URL(requestUrl).hostname)
+  } catch {
+    return false
+  }
+}
+
+// High-precision substrings the Dev Tunnel relay emits when no host is connected.
+// The exact wording/status varies by cluster, so we match on the body signal
+// rather than the status alone, and require one of these tokens before asserting
+// NO_HOST (a bare 502 is RELAY_ERROR, not proof of no host).
+const DEVTUNNEL_NO_HOST_SIGNALS = [
+  "no host is currently connected",
+  "tunnel is not currently hosted",
+  "host is not accepting connections",
+  "tunnel host is not connected",
+  "no connection to the host",
+  "tunnelporthostnotconnected",
+] as const
+
+function detectDevTunnelNoHost(status: number, detail: unknown): boolean {
+  if (status !== 502 && status !== 503 && status !== 404) return false
+  const haystack = detailToSearchString(detail).toLowerCase()
+  if (haystack === "") return false
+  return DEVTUNNEL_NO_HOST_SIGNALS.some((signal) => haystack.includes(signal))
+}
+
+function detailToSearchString(detail: unknown): string {
+  if (detail === undefined || detail === null) return ""
+  if (typeof detail === "string") return detail
+  try {
+    return JSON.stringify(detail)
+  } catch {
+    return String(detail)
+  }
 }
 
 function mapNetworkError(err: unknown): FleetError {

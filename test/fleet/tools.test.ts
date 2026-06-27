@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from "bun:test"
 
-import { FleetError, encodeSessionId } from "../../src/lib/fleet/client"
+import { FleetError, encodeSessionId, type SendMessageResponse } from "../../src/lib/fleet/client"
 import { createFleetTools, type CreateFleetToolsOptions } from "../../src/lib/fleet/tools"
 import { FleetRegistry } from "../../src/lib/fleet/registry"
 
@@ -89,8 +89,10 @@ function toolMap() {
     if (parsed.hostname === "alpha.example" && parsed.pathname === "/api/control/sessions/create") {
       return Response.json({
         sessionId: "created-a",
-        lifecycle: "created",
+        lifecycle: "running",
         name: "Created Session",
+        ready: true,
+        bound: true,
       })
     }
     if (parsed.hostname === "beta.example" && parsed.pathname === "/api/control/sessions/local-b/stop") {
@@ -170,7 +172,7 @@ describe("fleet MCP tools", () => {
     expect(calls[0]?.auth).toBe("Bearer tok-beta")
   })
 
-  test("send_message returns isError when awaited confirmation is false", async () => {
+  test("send_message: delivered but confirmation timed out is NOT an error (F9)", async () => {
     const { tools, calls } = toolMap()
 
     const { result, json } = await callTool(tools, "send_message", {
@@ -180,15 +182,98 @@ describe("fleet MCP tools", () => {
       awaitMs: 250,
     })
 
-    expect(result.isError).toBe(true)
+    // Delivered + unconfirmed after the await window is a SUCCESS with a pending
+    // confirmation, not an error.
+    expect(result.isError).toBeUndefined()
     expect(json).toMatchObject({
       resolvedInstance: { id: "beta", label: "Beta" },
       sessionId: "beta:local-b",
       delivered: true,
       confirmed: false,
-      message: "message delivery was not confirmed within awaitMs=250",
+      confirmationPending: true,
+      confirmationTimedOut: true,
     })
+    expect((json as { message?: string }).message).toContain("await_turn")
     expect(calls[0]?.body).toEqual({ message: "continue", idempotencyKey: "idem-1", awaitMs: 250 })
+  })
+
+  test("send_message: delivery failure is the ONLY isError case (F9)", async () => {
+    const registry = new FleetRegistry({
+      config: { instances: [{ id: "beta", label: "Beta", url: "https://beta.example", token: "tok-beta" }] },
+    })
+    const createClient = mock(() => fleetClientStub({
+      sendMessage: mock(async () => ({
+        messageId: "msg-fail",
+        delivered: false,
+        confirmed: false,
+        delivery: { status: "failed" },
+      })),
+    })) satisfies NonNullable<CreateFleetToolsOptions["createClient"]>
+    const tools = new Map(createFleetTools({ registry, createClient }).map((tool) => [tool.toolNameHttp, tool]))
+
+    const { result, json } = await callTool(tools, "send_message", {
+      sessionId: "beta:local-b",
+      message: "continue",
+      idempotencyKey: "idem-fail",
+      awaitMs: 0,
+    })
+
+    expect(result.isError).toBe(true)
+    expect(json).toMatchObject({ delivered: false, confirmed: false })
+    expect((json as { confirmationPending?: boolean }).confirmationPending).toBeUndefined()
+    expect((json as { message?: string }).message).toContain("not delivered")
+  })
+
+  test("send_message: structured delivery.status=failed sets isError even when delivered!==false (F9)", async () => {
+    const registry = new FleetRegistry({
+      config: { instances: [{ id: "beta", label: "Beta", url: "https://beta.example", token: "tok-beta" }] },
+    })
+    const createClient = mock(() => fleetClientStub({
+      sendMessage: mock(async () => ({
+        messageId: "msg-fail2",
+        // delivered boolean omitted; the structured sub-status is the failure signal.
+        confirmed: false,
+        delivery: { status: "error" },
+      } as unknown as SendMessageResponse)),
+    })) satisfies NonNullable<CreateFleetToolsOptions["createClient"]>
+    const tools = new Map(createFleetTools({ registry, createClient }).map((tool) => [tool.toolNameHttp, tool]))
+
+    const { result, json } = await callTool(tools, "send_message", {
+      sessionId: "beta:local-b",
+      message: "continue",
+      idempotencyKey: "idem-fail2",
+    })
+
+    expect(result.isError).toBe(true)
+    expect(json).toMatchObject({ delivered: false })
+  })
+
+  test("send_message: delivered and confirmed is a clean success (F9)", async () => {
+    const registry = new FleetRegistry({
+      config: { instances: [{ id: "beta", label: "Beta", url: "https://beta.example", token: "tok-beta" }] },
+    })
+    const createClient = mock(() => fleetClientStub({
+      sendMessage: mock(async () => ({
+        messageId: "msg-ok",
+        delivered: true,
+        confirmed: true,
+        confirmation: "turn_completed",
+        turn: { status: "completed" },
+      })),
+    })) satisfies NonNullable<CreateFleetToolsOptions["createClient"]>
+    const tools = new Map(createFleetTools({ registry, createClient }).map((tool) => [tool.toolNameHttp, tool]))
+
+    const { result, json } = await callTool(tools, "send_message", {
+      sessionId: "beta:local-b",
+      message: "continue",
+      idempotencyKey: "idem-ok",
+      awaitMs: 500,
+    })
+
+    expect(result.isError).toBeUndefined()
+    expect(json).toMatchObject({ delivered: true, confirmed: true, confirmation: "turn_completed" })
+    expect((json as { confirmationPending?: boolean }).confirmationPending).toBeUndefined()
+    expect((json as { confirmationTimedOut?: boolean }).confirmationTimedOut).toBeUndefined()
   })
 
   test("respond passes a keys override through", async () => {
@@ -256,6 +341,40 @@ describe("fleet MCP tools", () => {
     expect(downListSessions).toHaveBeenCalledTimes(1)
   })
 
+  test("list_instances surfaces F4 NO_HOST with an actionable hint", async () => {
+    const registry = new FleetRegistry({
+      config: {
+        instances: [
+          { id: "no-host", label: "No Host", url: "https://nh-3000.uks1.devtunnels.ms", token: "tok-nh" },
+          { id: "slow", label: "Slow", url: "https://slow.example", token: "tok-slow" },
+          { id: "gone", label: "Gone", url: "https://gone.example", token: "tok-gone" },
+        ],
+      },
+    })
+    const createClient = mock((instance) => fleetClientStub({
+      listSessions: mock(async (_signal?: AbortSignal) => {
+        if (instance.id === "no-host") {
+          throw new FleetError({ code: "NO_HOST", message: "no host connected", retryable: true })
+        }
+        if (instance.id === "slow") {
+          throw new FleetError({ code: "TIMEOUT", message: "timed out", retryable: true })
+        }
+        throw new FleetError({ code: "UNREACHABLE", message: "dns failure", retryable: true })
+      }),
+    })) satisfies NonNullable<CreateFleetToolsOptions["createClient"]>
+    const tools = new Map(createFleetTools({ registry, createClient }).map((tool) => [tool.toolNameHttp, tool]))
+
+    const { result, json } = await callTool(tools, "list_instances", {})
+    const instances = (json as { instances: Array<Record<string, unknown>> }).instances
+
+    expect(result.isError).toBeUndefined()
+    expect(instances[0]).toMatchObject({ id: "no-host", reachable: false, error: "NO_HOST" })
+    expect(typeof instances[0]?.hint).toBe("string")
+    expect(instances[0]?.hint).toContain("no ai-or-die host connected")
+    expect(instances[1]).toMatchObject({ id: "slow", reachable: false, error: "TIMEOUT" })
+    expect(instances[2]).toMatchObject({ id: "gone", reachable: false, error: "UNREACHABLE" })
+  })
+
   test("create_session forwards idempotencyKey", async () => {
     const { tools, calls } = toolMap()
 
@@ -272,8 +391,10 @@ describe("fleet MCP tools", () => {
     expect(json).toMatchObject({
       resolvedInstance: { id: "alpha", label: "Alpha" },
       sessionId: "alpha:created-a",
-      lifecycle: "created",
+      lifecycle: "running",
       name: "Created Session",
+      ready: true,
+      bound: true,
     })
     expect(calls[0]?.url).toBe("https://alpha.example/api/control/sessions/create")
     expect(calls[0]?.body).toEqual({
@@ -282,6 +403,27 @@ describe("fleet MCP tools", () => {
       workingDir: "/work",
       start: true,
       idempotencyKey: "idem-create",
+    })
+  })
+
+  test("create_session forwards readyTimeoutMs and surfaces ready/bound (F17)", async () => {
+    const { tools, calls } = toolMap()
+
+    const { result, json } = await callTool(tools, "create_session", {
+      instance: "alpha",
+      agent: "claude",
+      start: true,
+      readyTimeoutMs: 8000,
+      idempotencyKey: "idem-ready",
+    })
+
+    expect(result.isError).toBeUndefined()
+    expect(json).toMatchObject({ ready: true, bound: true })
+    expect(calls[0]?.body).toEqual({
+      agent: "claude",
+      start: true,
+      readyTimeoutMs: 8000,
+      idempotencyKey: "idem-ready",
     })
   })
 

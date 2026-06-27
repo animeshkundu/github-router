@@ -121,4 +121,97 @@ describe("FleetRegistry", () => {
       "http://localhost:8787",
     ])
   })
+
+  describe("F5 Dev Tunnel URL shape", () => {
+    test("rejects the wrong <id>.<cluster>.devtunnels.ms:<port> form with a corrective hint", async () => {
+      const registry = new FleetRegistry({
+        config: {
+          instances: [
+            { id: "dt", label: "Dev Tunnel", url: "https://abc.uks1.devtunnels.ms:3000", token: "tok-dt" },
+          ],
+        },
+      })
+
+      let caught: unknown
+      try {
+        await registry.listInstances()
+        throw new Error("expected FleetRegistryError")
+      } catch (err) {
+        caught = err
+      }
+      expect(caught).toBeInstanceOf(FleetRegistryError)
+      expect((caught as FleetRegistryError).code).toBe("INVALID_CONFIG")
+      // Echoes back the corrected port-as-subdomain form.
+      expect((caught as FleetRegistryError).message).toContain("https://abc-3000.uks1.devtunnels.ms")
+    })
+
+    test("accepts the correct <id>-<port>.<cluster>.devtunnels.ms form", async () => {
+      const registry = new FleetRegistry({
+        config: {
+          instances: [
+            { id: "dt", label: "Dev Tunnel", url: "https://abc-3000.uks1.devtunnels.ms", token: "tok-dt" },
+          ],
+        },
+      })
+
+      const instances = await registry.listInstances()
+
+      expect(instances[0]?.url).toBe("https://abc-3000.uks1.devtunnels.ms")
+    })
+
+    test("accepts the correct form even with an explicit default :443", async () => {
+      const registry = new FleetRegistry({
+        config: {
+          instances: [
+            { id: "dt", label: "Dev Tunnel", url: "https://abc-3000.uks1.devtunnels.ms:443", token: "tok-dt" },
+          ],
+        },
+      })
+
+      const instances = await registry.listInstances()
+
+      // URL normalizes away the default https port.
+      expect(instances[0]?.url).toBe("https://abc-3000.uks1.devtunnels.ms:443")
+    })
+
+    test("does NOT touch non-devtunnels urls with explicit ports", async () => {
+      const registry = new FleetRegistry({
+        config: {
+          instances: [
+            { id: "local", label: "Local", url: "http://localhost:8787", token: "tok-local" },
+            { id: "ip", label: "Ip", url: "http://127.0.0.1:9000", token: "tok-ip" },
+            { id: "other", label: "Other", url: "https://example.com:3000", token: "tok-other" },
+          ],
+        },
+      })
+
+      const instances = await registry.listInstances()
+
+      expect(instances.map((instance) => instance.url)).toEqual([
+        "http://localhost:8787",
+        "http://127.0.0.1:9000",
+        "https://example.com:3000",
+      ])
+    })
+
+    test("rejects the wrong form on the legacy tunnels.api.visualstudio.com host", async () => {
+      const registry = new FleetRegistry({
+        config: {
+          instances: [
+            { id: "dt", label: "Dev Tunnel", url: "https://abc.usw2.tunnels.api.visualstudio.com:8080", token: "tok-dt" },
+          ],
+        },
+      })
+
+      let caught: unknown
+      try {
+        await registry.listInstances()
+        throw new Error("expected FleetRegistryError")
+      } catch (err) {
+        caught = err
+      }
+      expect(caught).toBeInstanceOf(FleetRegistryError)
+      expect((caught as FleetRegistryError).message).toContain("https://abc-8080.usw2.tunnels.api.visualstudio.com")
+    })
+  })
 })

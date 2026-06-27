@@ -30,7 +30,7 @@ const INSTANCE_PROBE_CACHE_TTL_MS = 5_000
 
 type FleetInstanceProbeResult =
   | { id: string; label: string; reachable: true; sessionCount: number; lastSeen: number }
-  | { id: string; label: string; reachable: false; error: FleetErrorCode }
+  | { id: string; label: string; reachable: false; error: FleetErrorCode; hint?: string }
 
 interface McpToolResult {
   content: Array<{ type: "text"; text: string }>
@@ -160,11 +160,14 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
       instanceProbeCache.set(cacheKey, { result, at: lastSeen })
       return result
     } catch (err) {
+      const code = fleetProbeErrorCode(err)
+      const hint = fleetProbeHint(code)
       const result: FleetInstanceProbeResult = {
         id: info.id,
         label: info.label,
         reachable: false,
-        error: fleetProbeErrorCode(err),
+        error: code,
+        ...(hint ? { hint } : {}),
       }
       instanceProbeCache.set(cacheKey, { result, at: Date.now() })
       return result
@@ -250,13 +253,13 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     ),
     tool(
       "send_message",
-      "Send a message to a fleet session. Returns isError if delivery failed or an awaited confirmation did not arrive.",
+      "Send a message to a fleet session. isError reflects DELIVERY ONLY: it is true only when the message could not be delivered to the session (transport/precondition failure). A delivered message whose confirmation did not arrive within awaitMs is NOT an error — it returns delivered:true with confirmationPending/confirmationTimedOut, because a long turn legitimately outruns awaitMs. Recommended pattern: send with awaitMs:0 for a fast delivery ack that never blocks on confirmation, then call await_turn (filtered to this sessionId) to observe the session's actual turn completion. The idempotencyKey makes a retried send safe (a retry never re-types the message).",
       objectSchema({
         sessionId: stringProp("Global session id in the form instanceId:localSessionId."),
         instance: stringProp("Optional instance id/label; when supplied it must agree with sessionId."),
         message: stringProp("Message text to deliver to the session."),
-        idempotencyKey: stringProp("Caller-generated idempotency key."),
-        awaitMs: numberProp("Optional confirmation wait time in milliseconds."),
+        idempotencyKey: stringProp("Caller-generated idempotency key. Reuse the same key on retry; the upstream dedupes so a retry never re-types."),
+        awaitMs: numberProp("Optional best-effort confirmation wait (ms) — NOT a deadline. Prefer awaitMs:0 plus await_turn; a turn that outruns awaitMs returns confirmationPending, not an error."),
       }, ["sessionId", "message", "idempotencyKey"]),
       async (args, signal) => {
         const { instance, localId, globalId } = await resolveSession(args)
@@ -270,21 +273,37 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
           },
           signal,
         )
-        const delivered = response.delivered !== false
-        const confirmed = response.confirmed !== false
-        const unconfirmedAfterAwait = awaitMs !== undefined && awaitMs > 0 && !confirmed
-        const isError = !delivered || unconfirmedAfterAwait
+        // F9: isError keys on delivery alone. Delivery fails only when the upstream
+        // says so (delivered:false) or the structured delivery sub-status is a hard
+        // failure. Confirmation/turn states are surfaced as NON-error fields.
+        const deliveryFailed =
+          response.delivered === false
+          || response.delivery?.status === "failed"
+          || response.delivery?.status === "error"
+        const delivered = !deliveryFailed
+        const confirmed = delivered && response.confirmed === true
+        const awaited = awaitMs !== undefined && awaitMs > 0
+        // confirmationTimedOut: delivered + unconfirmed after an await window (ours or
+        // the upstream's). It is a successful delivery with completion still pending —
+        // the caller resolves it via await_turn, never by re-sending.
+        const confirmationTimedOut =
+          delivered && !confirmed && (awaited || response.confirmationTimedOut === true)
+        const isError = !delivered
         return jsonResult({
           resolvedInstance: publicInstance(instance),
           sessionId: globalId,
           ...response,
+          delivered,
+          confirmed,
+          ...(confirmationTimedOut ? { confirmationPending: true, confirmationTimedOut: true } : {}),
           ...(isError
-            ? {
-                message: !delivered
-                  ? "message was not delivered by the upstream instance"
-                  : `message delivery was not confirmed within awaitMs=${awaitMs}`,
-              }
-            : {}),
+            ? { message: "message was not delivered to the session by the upstream instance" }
+            : confirmationTimedOut
+              ? {
+                  message:
+                    "delivered; turn completion not confirmed in the await window. Use await_turn filtered to this sessionId to observe completion (the idempotencyKey makes a retried send safe).",
+                }
+              : {}),
         }, isError)
       },
     ),
@@ -346,6 +365,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
         workingDir: stringProp("Optional working directory on the remote instance."),
         idempotencyKey: stringProp("Caller-generated idempotency key."),
         start: booleanProp("Whether the remote instance should start the session immediately."),
+        readyTimeoutMs: numberProp("F17: bounded ms to wait for the agent to become driveable before returning. The response carries ready/bound/blocker."),
       }, ["instance", "agent", "idempotencyKey"]),
       async (args, signal) => {
         const instance = await resolve(requiredString(args, "instance"))
@@ -357,6 +377,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
             name: optionalString(args, "name"),
             workingDir: optionalString(args, "workingDir"),
             start: optionalBoolean(args, "start"),
+            readyTimeoutMs: optionalNumber(args, "readyTimeoutMs"),
             idempotencyKey,
           }),
           signal,
@@ -526,6 +547,23 @@ function fleetProbeErrorCode(err: unknown): FleetErrorCode {
   return "UNREACHABLE"
 }
 
+// F4: a short, actionable hint the model can read off a failed probe so the
+// connectivity class (relay-up-no-host vs slow vs unreachable) is legible.
+function fleetProbeHint(code: FleetErrorCode): string | undefined {
+  switch (code) {
+    case "NO_HOST":
+      return "tunnel relay up, no ai-or-die host connected (start the host on that machine)"
+    case "RELAY_ERROR":
+      return "tunnel relay returned an error; the host may be down, restarting, or under load"
+    case "TIMEOUT":
+      return "no response before the probe deadline; the host may be slow or the tunnel may have no host"
+    case "UNREACHABLE":
+      return "could not connect (DNS or connection failure); check the instance url"
+    default:
+      return undefined
+  }
+}
+
 function isFleetErrorCode(code: string): code is FleetErrorCode {
   switch (code) {
     case "UNREACHABLE":
@@ -534,6 +572,8 @@ function isFleetErrorCode(code: string): code is FleetErrorCode {
     case "PRECONDITION_FAILED":
     case "TIMEOUT":
     case "UPSTREAM_ERROR":
+    case "NO_HOST":
+    case "RELAY_ERROR":
       return true
     default:
       return false

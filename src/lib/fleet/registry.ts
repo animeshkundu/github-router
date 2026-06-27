@@ -201,6 +201,7 @@ function parseInstance(raw: unknown): FleetInstanceConfig {
   if (!isAllowedInstanceUrl(parsedUrl)) {
     throw invalidInstanceUrlError(id)
   }
+  assertDevTunnelUrlShape(id, parsedUrl)
   if (typeof token !== "string" || token === "") {
     throw new FleetRegistryError("INVALID_CONFIG", `fleet registry instance ${id} token must be a non-empty string`)
   }
@@ -226,6 +227,34 @@ function isAllowedInstanceUrl(url: URL): boolean {
   if (url.protocol === "https:") return true
   if (url.protocol !== "http:") return false
   return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]"
+}
+
+// F5: scope this check STRICTLY to Dev Tunnel relay hosts. Other domains
+// (localhost, raw IPs, generic https://host:port) are unaffected.
+const DEVTUNNEL_HOST_RE = /(?:^|\.)devtunnels\.ms$|(?:^|\.)tunnels\.api\.visualstudio\.com$/i
+
+// F5: the canonical Dev Tunnel forwarded-port host fuses the port into the
+// hostname with a hyphen: `<id>-<port>.<cluster>.devtunnels.ms`. The common
+// mistake is `<id>.<cluster>.devtunnels.ms:<port>` — a bare tunnel id host plus
+// an explicit `:port`. That addresses the tunnel-management endpoint, not the
+// forwarded service, and silently 302s. `URL.port` is empty for a default port
+// (`:443` on https), so an explicit non-default port on a Dev Tunnel host is
+// unambiguously the wrong shape.
+function assertDevTunnelUrlShape(id: string, url: URL): void {
+  if (!DEVTUNNEL_HOST_RE.test(url.hostname)) return
+  if (url.port === "") return
+  const firstDot = url.hostname.indexOf(".")
+  const firstLabel = firstDot < 0 ? url.hostname : url.hostname.slice(0, firstDot)
+  const rest = firstDot < 0 ? "" : url.hostname.slice(firstDot + 1)
+  const corrected = rest === ""
+    ? `https://${firstLabel}-${url.port}.devtunnels.ms`
+    : `https://${firstLabel}-${url.port}.${rest}`
+  throw new FleetRegistryError(
+    "INVALID_CONFIG",
+    `${id.trim()} url ${url.href} uses the wrong Dev Tunnel form: the forwarded port must be fused into the `
+      + `hostname, not given as a :port suffix. Use ${corrected} instead `
+      + "(the bare `<id>.<cluster>.devtunnels.ms:<port>` host addresses the tunnel-management endpoint, not the relayed service).",
+  )
 }
 
 function resolvedInstance(instance: FleetInstanceConfig): FleetResolvedInstance {
