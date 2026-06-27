@@ -179,6 +179,22 @@ describe("FleetClient F4 connectivity classification", () => {
 
     await expectFleetError(clientWith(DEVTUNNEL_URL, fetchFn).listSessions(), "TIMEOUT")
   })
+
+  test("400 → BAD_REQUEST (F10 invalid permissionMode/agentArgs)", async () => {
+    const fetchFn = mock(async () =>
+      new Response(JSON.stringify({ error: { message: "unknown permissionMode" } }), { status: 400 }),
+    ) as unknown as typeof fetch
+
+    await expectFleetError(clientWith(DEVTUNNEL_URL, fetchFn).listSessions(), "BAD_REQUEST")
+  })
+
+  test("429 → RATE_LIMITED (F21 fan-out backoff path)", async () => {
+    const fetchFn = mock(async () =>
+      new Response("slow down", { status: 429 }),
+    ) as unknown as typeof fetch
+
+    await expectFleetError(clientWith(DEVTUNNEL_URL, fetchFn).listSessions(), "RATE_LIMITED")
+  })
 })
 
 function headerOf(init: RequestInit | undefined, name: string): string | undefined {

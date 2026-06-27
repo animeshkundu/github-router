@@ -16,6 +16,13 @@ export type FleetErrorCode =
   //   "tunnel up, can't confirm" bucket, kept distinct from TIMEOUT/UPSTREAM_ERROR.
   | "NO_HOST"
   | "RELAY_ERROR"
+  // F10/F21 request diagnostics:
+  // BAD_REQUEST — the control plane rejected the request shape (e.g. an unknown
+  //   permissionMode or an agentArgs conflict → ai-or-die 400 INVALID_ARGUMENT).
+  //   Non-retryable: the model must fix the arguments, not retry.
+  // RATE_LIMITED — a 429 under fan-out load; retryable WITH backoff (F21).
+  | "BAD_REQUEST"
+  | "RATE_LIMITED"
 
 export class FleetError extends Error {
   code: FleetErrorCode
@@ -123,6 +130,10 @@ export interface CreateSessionInput {
   idempotencyKey?: string
   /** F17: bounded readiness wait (ms) before create returns; 0 = return immediately. */
   readyTimeoutMs?: number
+  /** F10: claude-only permission mode forwarded to the launcher. ai-or-die 400s on an unknown value or a conflict with agentArgs. */
+  permissionMode?: "plan" | "acceptEdits" | "default" | "bypassPermissions"
+  /** F10: extra launcher args appended after the github-router prefix (claude only). Must NOT carry --permission-mode / --dangerously-skip-permissions — ai-or-die 400s. */
+  agentArgs?: ReadonlyArray<string>
 }
 
 export interface StopSessionInput {
@@ -530,6 +541,18 @@ async function mapHttpError(response: Response, requestUrl: string): Promise<Fle
       detail,
     })
   }
+  if (status === 400) {
+    // F10: ai-or-die returns 400 INVALID_ARGUMENT on a bad permissionMode / agentArgs
+    // conflict. Surface the upstream message so the model fixes the arguments;
+    // never retried (a retry would re-fail identically).
+    return new FleetError({
+      code: "BAD_REQUEST",
+      message: `fleet instance rejected the request (400)${suffix}`,
+      retryable: false,
+      status,
+      detail,
+    })
+  }
   if (status === 408 || status === 504) {
     return new FleetError({
       code: "TIMEOUT",
@@ -552,10 +575,21 @@ async function mapHttpError(response: Response, requestUrl: string): Promise<Fle
       detail,
     })
   }
+  if (status === 429) {
+    // F21: rate-limited under fan-out load — kept distinct from a 5xx so the
+    // caller's backoff path is explicit. Retryable.
+    return new FleetError({
+      code: "RATE_LIMITED",
+      message: `fleet instance rate-limited the request (429)${suffix}`,
+      retryable: true,
+      status,
+      detail,
+    })
+  }
   return new FleetError({
     code: "UPSTREAM_ERROR",
     message: `fleet instance returned HTTP ${status}${suffix}`,
-    retryable: status === 429 || status >= 500,
+    retryable: status >= 500,
     status,
     detail,
   })

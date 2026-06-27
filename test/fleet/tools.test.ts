@@ -428,6 +428,28 @@ describe("fleet MCP tools", () => {
     })
   })
 
+  test("create_session forwards permissionMode + agentArgs (F10)", async () => {
+    const { tools, calls } = toolMap()
+
+    const { result } = await callTool(tools, "create_session", {
+      instance: "alpha",
+      agent: "claude",
+      start: true,
+      permissionMode: "plan",
+      agentArgs: ["--model", "opus"],
+      idempotencyKey: "idem-f10",
+    })
+
+    expect(result.isError).toBeUndefined()
+    expect(calls[0]?.body).toEqual({
+      agent: "claude",
+      start: true,
+      permissionMode: "plan",
+      agentArgs: ["--model", "opus"],
+      idempotencyKey: "idem-f10",
+    })
+  })
+
   test("stop_session forwards idempotencyKey", async () => {
     const { tools, calls } = toolMap()
 

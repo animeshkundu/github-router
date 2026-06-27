@@ -230,9 +230,18 @@ export function buildLaunchCommand(target: LaunchTarget): {
   cmd: string[]
   env: Record<string, string | undefined>
 } {
+  // F10: don't force `--dangerously-skip-permissions` when the caller already
+  // requested an explicit `--permission-mode` (e.g. ai-or-die's claude-bridge
+  // appends one for a fleet create_session with permissionMode). The two flags
+  // conflict — claude rejects them together — and the explicit mode must win.
+  const wantsPermissionMode =
+    target.kind === "claude-code" &&
+    target.extraArgs.some((arg) => arg === "--permission-mode" || arg.startsWith("--permission-mode="))
   const cmd: string[] =
     target.kind === "claude-code"
-      ? ["claude", "--dangerously-skip-permissions", ...target.extraArgs]
+      ? wantsPermissionMode
+        ? ["claude", ...target.extraArgs]
+        : ["claude", "--dangerously-skip-permissions", ...target.extraArgs]
       : buildCodexCmd(target)
 
   // Anti-shadow: resolve the top-level CLI to an ABSOLUTE path against

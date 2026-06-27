@@ -376,6 +376,8 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
         idempotencyKey: stringProp("Caller-generated idempotency key."),
         start: booleanProp("Whether the remote instance should start the session immediately."),
         readyTimeoutMs: numberProp("F17: bounded ms to wait for the agent to become driveable before returning. The response carries ready/bound/blocker."),
+        permissionMode: stringProp("F10 (claude only): permission mode the launched agent starts in — one of plan | acceptEdits | default | bypassPermissions. Rejected with BAD_REQUEST if unknown or if agentArgs also sets it."),
+        agentArgs: arrayProp("F10 (claude only): extra launcher args appended after the github-router prefix. Must NOT include --permission-mode or --dangerously-skip-permissions (use permissionMode) — rejected with BAD_REQUEST."),
       }, ["instance", "agent", "idempotencyKey"]),
       async (args, signal) => {
         const instance = await resolve(requiredString(args, "instance"))
@@ -388,6 +390,8 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
             workingDir: optionalString(args, "workingDir"),
             start: optionalBoolean(args, "start"),
             readyTimeoutMs: optionalNumber(args, "readyTimeoutMs"),
+            permissionMode: optionalString(args, "permissionMode"),
+            agentArgs: optionalStringArray(args, "agentArgs"),
             idempotencyKey,
           }),
           signal,
@@ -584,6 +588,8 @@ function isFleetErrorCode(code: string): code is FleetErrorCode {
     case "UPSTREAM_ERROR":
     case "NO_HOST":
     case "RELAY_ERROR":
+    case "BAD_REQUEST":
+    case "RATE_LIMITED":
       return true
     default:
       return false
