@@ -6,6 +6,7 @@ import {
   decodeSessionId,
   encodeSessionId,
 } from "../../src/lib/fleet/client"
+import { TunnelAuthError } from "../../src/lib/fleet/tunnel-auth"
 
 async function expectFleetError(promise: Promise<unknown>, code: FleetError["code"]): Promise<void> {
   try {
@@ -177,5 +178,125 @@ describe("FleetClient F4 connectivity classification", () => {
     ) as unknown as typeof fetch
 
     await expectFleetError(clientWith(DEVTUNNEL_URL, fetchFn).listSessions(), "TIMEOUT")
+  })
+})
+
+function headerOf(init: RequestInit | undefined, name: string): string | undefined {
+  const h = init?.headers
+  if (h instanceof Headers) return h.get(name) ?? undefined
+  const rec = h as Record<string, string> | undefined
+  if (!rec) return undefined
+  for (const key of Object.keys(rec)) {
+    if (key.toLowerCase() === name.toLowerCase()) return rec[key]
+  }
+  return undefined
+}
+
+describe("FleetClient dev tunnel auth headers", () => {
+  test("attaches X-Tunnel-Authorization + skip header on a devtunnels host", async () => {
+    let lastInit: RequestInit | undefined
+    const fetchFn = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+      lastInit = init
+      return Response.json({ sessions: [] })
+    }) as unknown as typeof fetch
+    const client = new FleetClient({
+      url: "https://abc.usw2.devtunnels.ms",
+      token: "bearer-1",
+      fetchFn,
+      getTunnelToken: async () => "connect-tok",
+    })
+
+    await client.listSessions()
+
+    expect(headerOf(lastInit, "authorization")).toBe("Bearer bearer-1")
+    expect(headerOf(lastInit, "x-tunnel-authorization")).toBe("tunnel connect-tok")
+    expect(headerOf(lastInit, "x-tunnel-skip-anti-phishing-page")).toBe("true")
+  })
+
+  test("sends the skip header but no tunnel header when no provider is configured", async () => {
+    let lastInit: RequestInit | undefined
+    const fetchFn = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+      lastInit = init
+      return Response.json({ sessions: [] })
+    }) as unknown as typeof fetch
+    const client = new FleetClient({ url: "https://abc.usw2.devtunnels.ms", token: "bearer-1", fetchFn })
+
+    await client.listSessions()
+
+    expect(headerOf(lastInit, "x-tunnel-skip-anti-phishing-page")).toBe("true")
+    expect(headerOf(lastInit, "x-tunnel-authorization")).toBeUndefined()
+  })
+
+  test("does NOT attach the tunnel header on a non-devtunnels host (origin scoping)", async () => {
+    let lastInit: RequestInit | undefined
+    const fetchFn = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+      lastInit = init
+      return Response.json({ sessions: [] })
+    }) as unknown as typeof fetch
+    const client = new FleetClient({
+      url: "https://alpha.example",
+      token: "bearer-1",
+      fetchFn,
+      getTunnelToken: async () => "connect-tok",
+    })
+
+    await client.listSessions()
+
+    expect(headerOf(lastInit, "x-tunnel-authorization")).toBeUndefined()
+  })
+
+  test("does NOT attach the tunnel header over cleartext http even on a devtunnels host", async () => {
+    let lastInit: RequestInit | undefined
+    const fetchFn = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+      lastInit = init
+      return Response.json({ sessions: [] })
+    }) as unknown as typeof fetch
+    const client = new FleetClient({
+      url: "http://abc.usw2.devtunnels.ms",
+      token: "bearer-1",
+      fetchFn,
+      getTunnelToken: async () => "connect-tok",
+    })
+
+    await client.listSessions()
+
+    expect(headerOf(lastInit, "x-tunnel-authorization")).toBeUndefined()
+  })
+
+  test("maps a tunnel-auth provider failure to AUTH_FAILED without calling fetch", async () => {
+    const fetchFn = mock(async () => Response.json({ sessions: [] })) as unknown as typeof fetch
+    const client = new FleetClient({
+      url: "https://abc.usw2.devtunnels.ms",
+      token: "bearer-1",
+      fetchFn,
+      getTunnelToken: async () => {
+        throw new TunnelAuthError("NOT_LOGGED_IN", "run `devtunnel user login`")
+      },
+    })
+
+    await expectFleetError(client.listSessions(), "AUTH_FAILED")
+    expect(fetchFn).toHaveBeenCalledTimes(0)
+  })
+
+  test("evicts + re-mints once and retries when the first attempt fails", async () => {
+    let calls = 0
+    let invalidated = 0
+    const fetchFn = mock(async () => {
+      calls += 1
+      if (calls === 1) throw new Error("unexpected redirect")
+      return Response.json({ sessions: [] })
+    }) as unknown as typeof fetch
+    const client = new FleetClient({
+      url: "https://abc.usw2.devtunnels.ms",
+      token: "bearer-1",
+      fetchFn,
+      getTunnelToken: async () => "connect-tok",
+      onTunnelAuthInvalidate: () => { invalidated += 1 },
+    })
+
+    await client.listSessions()
+
+    expect(calls).toBe(2)
+    expect(invalidated).toBe(1)
   })
 })

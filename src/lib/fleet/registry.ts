@@ -9,6 +9,22 @@ export interface FleetInstanceConfig {
   token: string
   default?: boolean
   allowExec?: boolean
+  /**
+   * VS Code Dev Tunnel id (e.g. `aiordie-myhost-gh` or `aiordie-myhost-gh.usw2`)
+   * for a PRIVATE tunnel. When set, github-router auto-mints + auto-refreshes a
+   * `connect`-scoped Dev Tunnel access token via the `devtunnel` CLI and sends it
+   * as `X-Tunnel-Authorization`. Obtain it from `devtunnel list` on the host — it
+   * is the tunnel NAME, NOT the public URL subdomain. A credential precursor: kept
+   * out of `FleetInstanceInfo` / `list_instances` and never logged.
+   */
+  tunnelId?: string
+  /**
+   * Static (manually-pasted) Dev Tunnel `connect` access token for a private
+   * tunnel. Used only when `tunnelId` is absent. Dev Tunnel tokens are 24h and
+   * not refreshable, so this goes stale daily — prefer `tunnelId` (auto-refresh)
+   * or an anonymous tunnel. A credential: kept out of `FleetInstanceInfo` and logs.
+   */
+  tunnelToken?: string
 }
 
 export interface FleetRegistryConfig {
@@ -21,6 +37,8 @@ export interface FleetResolvedInstance {
   url: string
   token: string
   allowExec?: boolean
+  tunnelId?: string
+  tunnelToken?: string
 }
 
 export interface FleetInstanceInfo {
@@ -29,6 +47,9 @@ export interface FleetInstanceInfo {
   url: string
   default?: boolean
   allowExec?: boolean
+  // NO-LEAK INVARIANT: this is the shape `listInstances()` returns to the model.
+  // `token`, `tunnelToken`, and `tunnelId` are credentials / credential precursors
+  // and are deliberately omitted — never add them here.
 }
 
 export type FleetRegistryErrorCode =
@@ -71,7 +92,7 @@ export async function loadFleetRegistryConfig(configPath = defaultFleetConfigPat
 
   if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) {
     console.warn(
-      `[fleet] Registry file ${configPath} is group/other-readable; it contains bearer tokens. `
+      `[fleet] Registry file ${configPath} is group/other-readable; it contains bearer / tunnel credentials. `
         + "Consider chmod 600.",
     )
   }
@@ -202,9 +223,22 @@ function parseInstance(raw: unknown): FleetInstanceConfig {
     throw invalidInstanceUrlError(id)
   }
   assertDevTunnelUrlShape(id, parsedUrl)
+  // Reject embedded credentials in the URL — a `https://user:pass@host` form
+  // would (a) be a credential sink in the registry/url and (b) muddy the
+  // origin-pinning that scopes the tunnel auth header. The bearer/tunnel token
+  // are the auth mechanisms, never URL userinfo.
+  if (parsedUrl.username !== "" || parsedUrl.password !== "") {
+    throw new FleetRegistryError(
+      "INVALID_CONFIG",
+      `fleet registry instance ${id} url must not contain embedded credentials (userinfo)`,
+    )
+  }
   if (typeof token !== "string" || token === "") {
     throw new FleetRegistryError("INVALID_CONFIG", `fleet registry instance ${id} token must be a non-empty string`)
   }
+
+  const tunnelId = parseTunnelId(id, instance.tunnelId)
+  const tunnelToken = parseTunnelToken(id, instance.tunnelToken)
 
   return {
     id: id.trim(),
@@ -213,7 +247,49 @@ function parseInstance(raw: unknown): FleetInstanceConfig {
     token,
     default: instance.default === true ? true : undefined,
     allowExec: instance.allowExec === true ? true : undefined,
+    tunnelId,
+    tunnelToken,
   }
+}
+
+// Dev Tunnel id charset: must START with an alphanumeric (a leading `-` would be
+// parsed as a flag by the `devtunnel` CLI — flag-injection guard) and contain
+// only `[A-Za-z0-9._-]` (the `.` admits the `name.cluster` form). No whitespace,
+// no shell metacharacters, no `%`.
+const TUNNEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+function parseTunnelId(id: string, raw: unknown): string | undefined {
+  if (raw === undefined) return undefined
+  if (typeof raw !== "string" || !TUNNEL_ID_RE.test(raw.trim())) {
+    throw new FleetRegistryError(
+      "INVALID_CONFIG",
+      `fleet registry instance ${id} tunnelId must match ${TUNNEL_ID_RE.source} (a devtunnel tunnel name from \`devtunnel list\`)`,
+    )
+  }
+  return raw.trim()
+}
+
+function parseTunnelToken(id: string, raw: unknown): string | undefined {
+  if (raw === undefined) return undefined
+  if (typeof raw !== "string") {
+    throw new FleetRegistryError("INVALID_CONFIG", `fleet registry instance ${id} tunnelToken must be a string`)
+  }
+  // Normalize human paste forms: surrounding quotes, a leading
+  // `X-Tunnel-Authorization:` header label, and the `tunnel ` scheme prefix.
+  let t = raw.trim()
+  if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
+    t = t.slice(1, -1).trim()
+  }
+  t = t.replace(/^X-Tunnel-Authorization:\s*/i, "").replace(/^tunnel\s+/i, "").trim()
+  // The value rides in an HTTP header, so a CR/LF/control char would be a header
+  // injection vector; a single-line non-empty token is required.
+  if (t === "" || /\s/.test(t)) {
+    throw new FleetRegistryError(
+      "INVALID_CONFIG",
+      `fleet registry instance ${id} tunnelToken must be a non-empty single-line token`,
+    )
+  }
+  return t
 }
 
 function invalidInstanceUrlError(id: string): FleetRegistryError {
@@ -264,6 +340,8 @@ function resolvedInstance(instance: FleetInstanceConfig): FleetResolvedInstance 
     url: instance.url,
     token: instance.token,
     allowExec: instance.allowExec,
+    tunnelId: instance.tunnelId,
+    tunnelToken: instance.tunnelToken,
   }
 }
 

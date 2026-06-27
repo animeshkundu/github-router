@@ -23,6 +23,7 @@ import {
   type FleetInstanceInfo,
   type FleetResolvedInstance,
 } from "./registry"
+import { createTunnelTokenProvider, type TunnelTokenProvider } from "./tunnel-auth"
 
 const FLEET_GROUP: McpGroup = "fleet"
 const INSTANCE_PROBE_TIMEOUT_MS = 2_000
@@ -79,6 +80,8 @@ export interface CreateFleetToolsOptions {
   registry?: FleetRegistryLike
   fetchFn?: typeof fetch
   createClient?: (instance: FleetResolvedInstance) => FleetClientLike
+  /** Override the Dev Tunnel connect-token provider (tests inject a fake). */
+  tunnelTokenProvider?: TunnelTokenProvider
 }
 
 class FleetToolInputError extends Error {
@@ -92,12 +95,14 @@ class FleetToolInputError extends Error {
 }
 
 let defaultRegistry: FleetRegistry | undefined
+let defaultTunnelProvider: TunnelTokenProvider | undefined
 const awaitTurnCursors = new Map<string, Map<string, string>>()
 const instanceProbeCache = new Map<string, { result: FleetInstanceProbeResult; at: number }>()
 
 export function createFleetTools(options: CreateFleetToolsOptions = {}): ReadonlyArray<NonPersonaMcpTool> {
   const registry = options.registry
   const clients = new Map<string, FleetClientLike>()
+  const tunnelProvider = options.tunnelTokenProvider ?? (defaultTunnelProvider ??= createTunnelTokenProvider())
 
   function getRegistry(): FleetRegistryLike {
     if (registry) return registry
@@ -106,12 +111,17 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
   }
 
   function clientFor(instance: FleetResolvedInstance): FleetClientLike {
-    const key = `${instance.id}\0${instance.url}\0${instance.token}`
+    const key = `${instance.id}\0${instance.url}\0${instance.token}\0${instance.tunnelId ?? ""}\0${instance.tunnelToken ?? ""}`
     const existing = clients.get(key)
     if (existing) return existing
     const created = options.createClient
       ? options.createClient(instance)
-      : new FleetClient({ url: instance.url, token: instance.token, fetchFn: options.fetchFn })
+      : new FleetClient({
+          url: instance.url,
+          token: instance.token,
+          fetchFn: options.fetchFn,
+          ...tunnelClientOptions(instance, tunnelProvider),
+        })
     clients.set(key, created)
     return created
   }
@@ -636,10 +646,23 @@ function stampEvent(instance: FleetResolvedInstance, event: FleetEvent): Record<
   }
 }
 
+// Event `at` is epoch-ms NUMBER on the wire (ai-or-die `Date.now()`). Coerce
+// defensively (a future producer could emit an ISO string) so cross-instance
+// await_turn merge sorts by real time, not by per-instance seq (which is
+// meaningless across instances).
+function eventAtMs(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value
+  if (typeof value === "string") {
+    const parsed = Date.parse(value)
+    if (!Number.isNaN(parsed)) return parsed
+  }
+  return 0
+}
+
 function compareStampedEvents(a: Record<string, unknown>, b: Record<string, unknown>): number {
-  const atA = typeof a.at === "string" ? a.at : ""
-  const atB = typeof b.at === "string" ? b.at : ""
-  if (atA !== atB) return atA < atB ? -1 : 1
+  const atA = eventAtMs(a.at)
+  const atB = eventAtMs(b.at)
+  if (atA !== atB) return atA - atB
   const seqA = typeof a.seq === "number" ? a.seq : 0
   const seqB = typeof b.seq === "number" ? b.seq : 0
   return seqA - seqB
@@ -669,6 +692,30 @@ function uniqueInstances(instances: Array<FleetResolvedInstance>): Array<FleetRe
 
 function publicInstance(instance: FleetResolvedInstance): { id: string; label: string } {
   return { id: instance.id, label: instance.label }
+}
+
+/**
+ * Build the FleetClient tunnel-auth options for a resolved instance.
+ * Resolution order: a `tunnelId` enables auto-mint + auto-refresh (and the
+ * evict-on-failure hook); else a static `tunnelToken` is sent directly (no
+ * retry, since it cannot be re-minted); else no tunnel auth.
+ */
+function tunnelClientOptions(
+  instance: FleetResolvedInstance,
+  provider: TunnelTokenProvider,
+): { getTunnelToken?: () => Promise<string | undefined>; onTunnelAuthInvalidate?: () => void } {
+  if (instance.tunnelId) {
+    const cfg = { tunnelId: instance.tunnelId }
+    return {
+      getTunnelToken: () => provider.getToken(cfg),
+      onTunnelAuthInvalidate: () => provider.invalidate(cfg),
+    }
+  }
+  if (instance.tunnelToken) {
+    const token = instance.tunnelToken
+    return { getTunnelToken: async () => token }
+  }
+  return {}
 }
 
 function ok(value: unknown): McpToolResult {

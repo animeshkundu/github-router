@@ -1,3 +1,5 @@
+import { TunnelAuthError } from "./tunnel-auth"
+
 export type FleetErrorCode =
   | "UNREACHABLE"
   | "AUTH_FAILED"
@@ -41,6 +43,20 @@ export interface FleetClientOptions {
   url: string
   token: string
   fetchFn?: typeof fetch
+  /**
+   * Optional async provider for a VS Code Dev Tunnel `connect` access token.
+   * When present and it returns a non-empty value, the value is sent as
+   * `X-Tunnel-Authorization: tunnel <token>` — but ONLY on a request whose host
+   * is the pinned tunnel origin under `.devtunnels.ms` (origin scoping). It is
+   * awaited per request so a re-minted token is always current.
+   */
+  getTunnelToken?: () => Promise<string | undefined>
+  /**
+   * Called once on a tunnel-auth failure so the provider can evict its cached
+   * token before the single retry re-mints. Absent for the static-token path
+   * (a static token cannot be re-minted, so no retry is attempted).
+   */
+  onTunnelAuthInvalidate?: () => void
 }
 
 export interface FleetSessionSummary {
@@ -67,9 +83,12 @@ export interface FleetSessionStatus {
 
 export interface FleetEvent {
   seq: number
-  sessionId?: string
+  // Producer (ai-or-die) sends `null` (not omitted) when an event has no session.
+  sessionId?: string | null
   kind: string
-  at: string
+  // Wire type is a NUMBER (epoch ms via `Date.now()`), NOT a string. Cross-instance
+  // await_turn ordering sorts on this — see compareStampedEvents in tools.ts.
+  at: number
   detail?: unknown
   [key: string]: unknown
 }
@@ -220,13 +239,22 @@ export function decodeSessionId(globalId: string): { instanceId: string; localId
 
 export class FleetClient {
   private readonly baseUrl: string
+  private readonly origin: string
   private readonly token: string
   private readonly fetchFn: typeof fetch
+  private readonly getTunnelToken?: () => Promise<string | undefined>
+  private readonly onTunnelAuthInvalidate?: () => void
 
   constructor(options: FleetClientOptions) {
     this.baseUrl = options.url.replace(/\/+$/, "")
+    // Pin the base origin once. Every composed request URL is asserted equal to
+    // this before sending, so neither the bearer nor the tunnel token can be
+    // emitted to an unexpected origin.
+    this.origin = new URL(this.baseUrl).origin
     this.token = options.token
     this.fetchFn = options.fetchFn ?? globalThis.fetch.bind(globalThis)
+    this.getTunnelToken = options.getTunnelToken
+    this.onTunnelAuthInvalidate = options.onTunnelAuthInvalidate
   }
 
   listSessions(signal?: AbortSignal): Promise<ListSessionsResponse> {
@@ -351,33 +379,108 @@ export class FleetClient {
     for (const [key, value] of Object.entries(query ?? {})) {
       url.searchParams.set(key, value)
     }
-
-    let response: Response
-    try {
-      response = await this.fetchFn(url.toString(), {
-        method,
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-        // Never follow redirects: a 3xx to another origin must not re-send the
-        // bearer token, and an http->https upgrade redirect should surface as a
-        // loud error (the registry url should already be https) rather than a
-        // silent cleartext first hop.
-        redirect: "error",
-        signal,
+    // Origin pinning: the composed URL must stay on the pinned base origin.
+    // Pathnames are controlled and file paths ride in query params, so this
+    // should always hold; the assertion is the credential boundary (NOT
+    // `redirect:"error"`, which only declines to follow a 3xx).
+    if (url.origin !== this.origin) {
+      throw new FleetError({
+        code: "UNREACHABLE",
+        message: "fleet request URL origin did not match the registered instance origin",
+        retryable: false,
       })
-    } catch (err) {
-      throw mapNetworkError(err)
     }
 
-    if (!response.ok) {
-      throw await mapHttpError(response, url.toString())
+    // Send the anti-phishing-skip header to any Dev Tunnel host (it helps an
+    // anonymous tunnel and is ignored elsewhere). Attach the connect token ONLY
+    // on a SECURE (https) Dev Tunnel origin — a credential must never ride a
+    // cleartext hop — and only when a provider is configured.
+    const devtunnelHost = isDevtunnelHost(url.hostname)
+    const tunnelEligible = this.getTunnelToken !== undefined && devtunnelHost && url.protocol === "https:"
+
+    // One forced re-mint + retry on a tunnel-auth failure (expired/rotated
+    // connect token). attempt 0 = normal; attempt 1 = post-eviction retry.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let tunnelToken: string | undefined
+      if (tunnelEligible) {
+        try {
+          tunnelToken = await this.getTunnelToken!()
+        } catch (err) {
+          throw mapTunnelAuthError(err)
+        }
+      }
+      const attachTunnel = tunnelToken !== undefined && tunnelToken !== ""
+      const canRetry = attachTunnel && !!this.onTunnelAuthInvalidate && attempt === 0
+
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${this.token}`,
+        ...(devtunnelHost ? { "X-Tunnel-Skip-Anti-Phishing-Page": "true" } : {}),
+        ...(attachTunnel ? { "X-Tunnel-Authorization": `tunnel ${tunnelToken}` } : {}),
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      }
+
+      let response: Response
+      try {
+        response = await this.fetchFn(url.toString(), {
+          method,
+          headers,
+          body: body === undefined ? undefined : JSON.stringify(body),
+          // Never follow redirects: a 3xx to another origin must not re-send the
+          // bearer/tunnel token, and a private Dev Tunnel's 302->github-auth must
+          // surface loudly rather than as a silent cleartext first hop.
+          redirect: "error",
+          signal,
+        })
+      } catch (err) {
+        // A private Dev Tunnel rejecting a stale connect token 302s -> github
+        // auth, which `redirect:"error"` turns into a network-style throw. Evict
+        // and retry once — but ONLY for an idempotent GET, since a throw on a
+        // mutating request could have already reached (and run on) the server.
+        if (canRetry && method === "GET") {
+          this.onTunnelAuthInvalidate!()
+          continue
+        }
+        throw mapNetworkError(err, devtunnelHost)
+      }
+
+      if (!response.ok) {
+        // A 401/403 RESPONSE means the request was rejected (not executed), so a
+        // re-mint + retry is safe for any method.
+        if ((response.status === 401 || response.status === 403) && canRetry) {
+          this.onTunnelAuthInvalidate!()
+          continue
+        }
+        throw await mapHttpError(response, url.toString())
+      }
+
+      return (await response.json()) as T
     }
 
-    return (await response.json()) as T
+    // Both attempts failed without throwing (defensive; the loop normally
+    // returns or throws inside).
+    throw new FleetError({
+      code: "AUTH_FAILED",
+      message: "fleet instance tunnel authentication failed after re-mint; verify the tunnel and `devtunnel user login`",
+      retryable: false,
+    })
   }
+}
+
+/** Dev Tunnel access tokens are only ever scoped to the `*.devtunnels.ms` service. */
+function isDevtunnelHost(hostname: string): boolean {
+  return hostname === "devtunnels.ms" || hostname.endsWith(".devtunnels.ms")
+}
+
+function mapTunnelAuthError(err: unknown): FleetError {
+  if (err instanceof TunnelAuthError) {
+    return new FleetError({
+      code: "AUTH_FAILED",
+      message: err.message,
+      retryable: err.code === "TIMEOUT",
+      detail: { tunnelAuth: err.code },
+    })
+  }
+  return mapNetworkError(err)
 }
 
 async function mapHttpError(response: Response, requestUrl: string): Promise<FleetError> {
@@ -499,7 +602,7 @@ function detailToSearchString(detail: unknown): string {
   }
 }
 
-function mapNetworkError(err: unknown): FleetError {
+function mapNetworkError(err: unknown, devtunnelHost = false): FleetError {
   if (isAbortLike(err)) {
     return new FleetError({
       code: "TIMEOUT",
@@ -509,9 +612,12 @@ function mapNetworkError(err: unknown): FleetError {
     })
   }
   const message = err instanceof Error ? err.message : String(err)
+  const hint = devtunnelHost
+    ? " — if this is a private VS Code Dev Tunnel, an unauthenticated request is redirected to GitHub auth (which we refuse to follow): set a `tunnelId` (auto-mint) / `tunnelToken` in the registry, or make the tunnel anonymous"
+    : ""
   return new FleetError({
     code: "UNREACHABLE",
-    message: `fleet instance unreachable: ${message}`,
+    message: `fleet instance unreachable: ${message}${hint}`,
     retryable: true,
     detail: err,
   })
