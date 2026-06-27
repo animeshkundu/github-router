@@ -2,7 +2,8 @@ import { describe, expect, mock, test } from "bun:test"
 
 import { FleetError, encodeSessionId } from "../../src/lib/fleet/client"
 import { createFleetTools, type CreateFleetToolsOptions } from "../../src/lib/fleet/tools"
-import { FleetRegistry } from "../../src/lib/fleet/registry"
+import { FleetRegistry, type FleetInstanceConfig } from "../../src/lib/fleet/registry"
+import { TunnelAuthError, type TunnelTokenProvider } from "../../src/lib/fleet/tunnel-auth"
 
 type FleetToolClient = ReturnType<NonNullable<CreateFleetToolsOptions["createClient"]>>
 
@@ -303,5 +304,105 @@ describe("fleet MCP tools", () => {
     })
     expect(calls[0]?.url).toBe("https://beta.example/api/control/sessions/local-b/stop")
     expect(calls[0]?.body).toEqual({ mode: "graceful", idempotencyKey: "idem-stop" })
+  })
+})
+
+function tunnelHeaderOf(init: RequestInit | undefined, name: string): string | undefined {
+  const h = init?.headers
+  if (h instanceof Headers) return h.get(name) ?? undefined
+  const rec = h as Record<string, string> | undefined
+  if (!rec) return undefined
+  for (const key of Object.keys(rec)) {
+    if (key.toLowerCase() === name.toLowerCase()) return rec[key]
+  }
+  return undefined
+}
+
+function tunnelToolMap(instance: FleetInstanceConfig, provider?: TunnelTokenProvider) {
+  const registry = new FleetRegistry({ config: { instances: [instance] } })
+  const calls: Array<{ url: string; tunnelAuth?: string; skip?: string; auth?: string }> = []
+  const fetchFn = mock(async (url: string | URL | Request, init?: RequestInit) => {
+    calls.push({
+      url: url.toString(),
+      tunnelAuth: tunnelHeaderOf(init, "x-tunnel-authorization"),
+      skip: tunnelHeaderOf(init, "x-tunnel-skip-anti-phishing-page"),
+      auth: tunnelHeaderOf(init, "authorization"),
+    })
+    return Response.json({ sessions: [] })
+  }) as unknown as typeof fetch
+  const tools = new Map(
+    createFleetTools({ registry, fetchFn, tunnelTokenProvider: provider }).map((tool) => [tool.toolNameHttp, tool]),
+  )
+  return { tools, calls }
+}
+
+describe("fleet MCP tools dev tunnel auth", () => {
+  test("auto-mint: forwards the provider connect token as X-Tunnel-Authorization", async () => {
+    const provider: TunnelTokenProvider = { getToken: async () => "connect-xyz", invalidate: () => {} }
+    const { tools, calls } = tunnelToolMap(
+      { id: "t", label: "T", url: "https://t.usw2.devtunnels.ms", token: "btok", tunnelId: "aiordie-h.usw2" },
+      provider,
+    )
+
+    const { result } = await callTool(tools, "list_sessions", { instance: "t" })
+
+    expect(result.isError).toBeUndefined()
+    expect(calls[0]?.auth).toBe("Bearer btok")
+    expect(calls[0]?.tunnelAuth).toBe("tunnel connect-xyz")
+    expect(calls[0]?.skip).toBe("true")
+    expect(result.content[0]?.text).not.toContain("connect-xyz")
+  })
+
+  test("static token path: sends the configured tunnelToken without the provider", async () => {
+    const provider: TunnelTokenProvider = {
+      getToken: async () => { throw new Error("provider must not be used for a static token") },
+      invalidate: () => {},
+    }
+    const { tools, calls } = tunnelToolMap(
+      { id: "t", label: "T", url: "https://t.usw2.devtunnels.ms", token: "btok", tunnelToken: "static-tok" },
+      provider,
+    )
+
+    const { result } = await callTool(tools, "list_sessions", { instance: "t" })
+
+    expect(result.isError).toBeUndefined()
+    expect(calls[0]?.tunnelAuth).toBe("tunnel static-tok")
+  })
+
+  test("precedence: tunnelId (provider) wins over a static tunnelToken", async () => {
+    const provider: TunnelTokenProvider = { getToken: async () => "from-provider", invalidate: () => {} }
+    const { tools, calls } = tunnelToolMap(
+      {
+        id: "t",
+        label: "T",
+        url: "https://t.usw2.devtunnels.ms",
+        token: "btok",
+        tunnelId: "aiordie-h.usw2",
+        tunnelToken: "static-tok",
+      },
+      provider,
+    )
+
+    await callTool(tools, "list_sessions", { instance: "t" })
+
+    expect(calls[0]?.tunnelAuth).toBe("tunnel from-provider")
+  })
+
+  test("a tunnel-auth failure surfaces an actionable isError result and never calls fetch or leaks", async () => {
+    const provider: TunnelTokenProvider = {
+      getToken: async () => { throw new TunnelAuthError("NOT_INSTALLED", "install the devtunnel CLI and run `devtunnel user login`") },
+      invalidate: () => {},
+    }
+    const { tools, calls } = tunnelToolMap(
+      { id: "t", label: "T", url: "https://t.usw2.devtunnels.ms", token: "btok", tunnelId: "aiordie-h.usw2" },
+      provider,
+    )
+
+    const { result, json } = await callTool(tools, "list_sessions", { instance: "t" })
+
+    expect(result.isError).toBe(true)
+    expect(json).toMatchObject({ error: { code: "AUTH_FAILED" } })
+    expect((json as { error: { message: string } }).error.message).toContain("devtunnel")
+    expect(calls.length).toBe(0)
   })
 })

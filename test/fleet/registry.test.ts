@@ -122,3 +122,96 @@ describe("FleetRegistry", () => {
     ])
   })
 })
+
+describe("FleetRegistry tunnel auth fields", () => {
+  test("parses and forwards tunnelId and tunnelToken", async () => {
+    const registry = new FleetRegistry({
+      config: {
+        instances: [
+          { id: "t", label: "T", url: "https://t.usw2.devtunnels.ms", token: "tok", tunnelId: "aiordie-h.usw2", tunnelToken: "eyJ.a.b" },
+        ],
+      },
+    })
+
+    const resolved = await registry.resolveInstance("t")
+
+    expect(resolved.tunnelId).toBe("aiordie-h.usw2")
+    expect(resolved.tunnelToken).toBe("eyJ.a.b")
+  })
+
+  test("normalizes a tunnelToken carrying a `tunnel ` scheme prefix", async () => {
+    const registry = new FleetRegistry({
+      config: {
+        instances: [
+          { id: "t", label: "T", url: "https://t.usw2.devtunnels.ms", token: "tok", tunnelToken: "tunnel eyJ.a.b" },
+        ],
+      },
+    })
+
+    const resolved = await registry.resolveInstance("t")
+
+    expect(resolved.tunnelToken).toBe("eyJ.a.b")
+  })
+
+  test("rejects an empty tunnelToken", async () => {
+    const registry = new FleetRegistry({
+      config: { instances: [{ id: "t", label: "T", url: "https://t.devtunnels.ms", token: "tok", tunnelToken: "" }] },
+    })
+    await expectRegistryError(registry.listInstances(), "INVALID_CONFIG")
+  })
+
+  test("rejects a tunnelToken with internal whitespace", async () => {
+    const registry = new FleetRegistry({
+      config: { instances: [{ id: "t", label: "T", url: "https://t.devtunnels.ms", token: "tok", tunnelToken: "ey J" }] },
+    })
+    await expectRegistryError(registry.listInstances(), "INVALID_CONFIG")
+  })
+
+  test("rejects a tunnelId with a leading hyphen (flag-injection guard)", async () => {
+    const registry = new FleetRegistry({
+      config: { instances: [{ id: "t", label: "T", url: "https://t.devtunnels.ms", token: "tok", tunnelId: "-h" }] },
+    })
+    await expectRegistryError(registry.listInstances(), "INVALID_CONFIG")
+  })
+
+  test("rejects a tunnelId with shell metacharacters or percent", async () => {
+    for (const bad of ["a b", "a;rm -rf /", "a%PATH%", "a|b"]) {
+      const registry = new FleetRegistry({
+        config: { instances: [{ id: "t", label: "T", url: "https://t.devtunnels.ms", token: "tok", tunnelId: bad }] },
+      })
+      await expectRegistryError(registry.listInstances(), "INVALID_CONFIG")
+    }
+  })
+
+  test("rejects a url with embedded credentials (userinfo)", async () => {
+    const registry = new FleetRegistry({
+      config: { instances: [{ id: "t", label: "T", url: "https://user:pass@t.devtunnels.ms", token: "tok" }] },
+    })
+    await expectRegistryError(registry.listInstances(), "INVALID_CONFIG")
+  })
+
+  test("never exposes tunnelId or tunnelToken in listInstances output", async () => {
+    const registry = new FleetRegistry({
+      config: {
+        instances: [
+          {
+            id: "t",
+            label: "T",
+            url: "https://t.usw2.devtunnels.ms",
+            token: "tok",
+            tunnelId: "aiordie-secretid.usw2",
+            tunnelToken: "eyJsecrettoken.a.b",
+          },
+        ],
+      },
+    })
+
+    const infos = await registry.listInstances()
+    const text = JSON.stringify(infos)
+
+    expect(text).not.toContain("eyJsecrettoken")
+    expect(text).not.toContain("aiordie-secretid")
+    expect(infos[0]).not.toHaveProperty("tunnelToken")
+    expect(infos[0]).not.toHaveProperty("tunnelId")
+  })
+})
