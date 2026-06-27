@@ -29,9 +29,9 @@ describe("GROUP_META + group helpers", () => {
     }
   })
 
-  test("MCP_GROUPS is exactly the six intent groups", () => {
+  test("MCP_GROUPS is exactly the seven intent groups", () => {
     expect(([...MCP_GROUPS] as Array<string>).sort()).toEqual(
-      ["browser", "decide", "orchestrate", "peers", "search", "workers"].sort(),
+      ["browser", "decide", "fleet", "orchestrate", "peers", "search", "workers"].sort(),
     )
   })
 

@@ -25,6 +25,7 @@ export interface ServerSetupOptions {
   proxyEnv: boolean
   extendedBetas: boolean
   browseEnabled: boolean
+  fleetEnabled: boolean
   powerBrowseEnabled: boolean
   humanlikeEnabled: boolean
   silent: boolean
@@ -58,6 +59,8 @@ export async function setupAndServe(
   // the GH_ROUTER_DISABLE_WORKER_TOOLS / GH_ROUTER_LOG_PEER_MCP convention.
   state.browseEnabled =
     options.browseEnabled || process.env.GH_ROUTER_ENABLE_BROWSE === "1"
+  state.fleetEnabled =
+    options.fleetEnabled || process.env.GH_ROUTER_ENABLE_FLEET === "1"
   // --power-browse implies --browse: power mode exposes the FULL
   // browser tool surface (read_page, mouse, drag, scroll, keyboard,
   // type, eval_js, diagnostics, find, locate) on top of the lead
@@ -213,6 +216,12 @@ export const sharedServerArgs = {
     description:
       "Enable the browser-control MCP tools (browser_open_tab, browser_screenshot, browser_click, etc.) on /mcp. Requires Chrome or Edge installed; the bundled extension must be loaded on first tool call (the proxy returns install_required with Web Store URLs + a Load Unpacked fallback path). Off by default; can also be enabled with GH_ROUTER_ENABLE_BROWSE=1.",
   },
+  fleet: {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Enable the fleet session-control MCP tools (mcp__fleet__*) on /mcp for driving sessions across remote ai-or-die instances over their tunnels. Off by default; also enabled with GH_ROUTER_ENABLE_FLEET=1.",
+  },
   "power-browse": {
     type: "boolean" as const,
     default: false,
@@ -248,6 +257,7 @@ export function parseSharedArgs(args: Record<string, unknown>): {
   proxyEnv: boolean
   extendedBetas: boolean
   browseEnabled: boolean
+  fleetEnabled: boolean
   powerBrowseEnabled: boolean
   humanlikeEnabled: boolean
 } {
@@ -296,6 +306,7 @@ export function parseSharedArgs(args: Record<string, unknown>): {
     proxyEnv: args["proxy-env"] as boolean,
     extendedBetas: args["extended-betas"] as boolean,
     browseEnabled: args.browse as boolean,
+    fleetEnabled: args.fleet as boolean,
     powerBrowseEnabled: args["power-browse"] as boolean,
     humanlikeEnabled: args.humanlike as boolean,
   }

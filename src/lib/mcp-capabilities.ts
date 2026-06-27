@@ -159,6 +159,34 @@ export function browserToolsEnabled(): boolean {
 }
 
 /**
+ * Gate for the fleet session-control MCP tools (`mcp__fleet__*`).
+ *
+ * Returns true iff the operator opted in (`state.fleetEnabled`, set by
+ * `--fleet`, OR `GH_ROUTER_ENABLE_FLEET=1` read directly so non-
+ * `setupAndServe` startup paths — tests, embedded use — can still flip
+ * the gate). Fleet needs no local installed dependency check.
+ */
+export function fleetToolsEnabled(): boolean {
+  return state.fleetEnabled || process.env.GH_ROUTER_ENABLE_FLEET === "1"
+}
+
+/**
+ * Gate for ai-or-die Artifact review tools.
+ *
+ * Returns true iff this github-router process was launched inside an
+ * ai-or-die tab and received the tab-scoped API trio. The tools are
+ * otherwise invisible at `tools/list` and rejected at `tools/call`; direct
+ * handler calls still return a friendly isError envelope.
+ */
+export function artifactToolsEnabled(): boolean {
+  return !!(
+    process.env.AIORDIE_BASE_URL
+    && process.env.AIORDIE_TOKEN
+    && process.env.AIORDIE_SESSION_ID
+  )
+}
+
+/**
  * Gate for the `browse` worker tool (the Pi-driven autonomous browser
  * agent that delegates a browsing task to its own context).
  *

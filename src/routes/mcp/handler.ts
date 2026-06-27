@@ -32,10 +32,12 @@ import {
   type ResponsesPayload,
 } from "~/services/copilot/create-responses"
 import {
+  artifactToolsEnabled,
   browseAgentEnabled,
   browserCompoundToolsEnabled,
   browserPowerToolsEnabled,
   browserToolsEnabled,
+  fleetToolsEnabled,
   standInToolEnabled,
   workerToolsEnabled,
 } from "~/lib/mcp-capabilities"
@@ -335,6 +337,8 @@ function toolEntries(scope: McpScope): Array<ToolEntry> {
       if (t.capability === "browse_agent") return browseAgentEnabled()
       if (t.capability === "stand_in") return standInToolEnabled()
       if (t.capability === "browser") return browserToolsEnabled()
+      if (t.capability === "fleet") return fleetToolsEnabled()
+      if (t.capability === "artifact") return artifactToolsEnabled()
       // Compound tools require BOTH the browser surface opt-in AND a
       // compressor backend in the catalog. Without browseEnabled the
       // compound tools must be invisible alongside the L0/L1 primitives.
@@ -945,6 +949,28 @@ async function handleToolsCall(
     nonPersonaTool
     && nonPersonaTool.capability === "browser"
     && !browserToolsEnabled()
+  ) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+  if (
+    nonPersonaTool
+    && nonPersonaTool.capability === "fleet"
+    && !fleetToolsEnabled()
+  ) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+  if (
+    nonPersonaTool
+    && nonPersonaTool.capability === "artifact"
+    && !artifactToolsEnabled()
   ) {
     return rpcError(
       body.id,

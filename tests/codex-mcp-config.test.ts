@@ -1181,6 +1181,7 @@ describe("resolveGroupKeysFromMirror", () => {
         orchestrate: "orchestrate",
         browser: "browser",
         decide: "decide",
+        fleet: "fleet",
       })
     })
   })

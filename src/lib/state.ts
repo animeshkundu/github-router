@@ -29,6 +29,17 @@ export interface State {
   browseEnabled: boolean
 
   /**
+   * Opt-in flag for the fleet session-control MCP tools (`mcp__fleet__*`).
+   * Set by `setupAndServe` from the `--fleet` CLI flag or
+   * `GH_ROUTER_ENABLE_FLEET=1` env var. When false, all fleet tools are
+   * dropped from `tools/list` AND `tools/call` returns -32601 — same
+   * defense-in-depth pattern as `workerToolsEnabled()` /
+   * `standInToolEnabled()`. See `fleetToolsEnabled()` in
+   * `src/lib/mcp-capabilities.ts`.
+   */
+  fleetEnabled: boolean
+
+  /**
    * When true, --power-browse was passed (or GH_ROUTER_ENABLE_POWER_BROWSE=1
    * is set). Exposes the FULL browser MCP surface (~18 tools) on /mcp,
    * including the L0/L1 primitives that hand DOM details (refs,
@@ -80,6 +91,7 @@ export const state: State = {
   showToken: false,
   extendedBetas: false,
   browseEnabled: false,
+  fleetEnabled: false,
   powerBrowseEnabled: false,
   humanlikeForce: "auto",
   sessionId: randomUUID(),
