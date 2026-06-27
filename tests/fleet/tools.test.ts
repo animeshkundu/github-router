@@ -13,6 +13,7 @@ function unusedClientCall(): Promise<never> {
 
 function fleetClientStub(overrides: Partial<FleetToolClient>): FleetToolClient {
   return {
+    capabilities: unusedClientCall,
     listSessions: unusedClientCall,
     readSession: unusedClientCall,
     status: unusedClientCall,
@@ -125,6 +126,47 @@ async function callTool(
   expect(tool).toBeDefined()
   const result = await tool!.handler(args)
   return { result, json: JSON.parse(result.content[0]!.text) as unknown }
+}
+
+function createSessionCapabilityToolMap(capabilityResponse: {
+  status: number
+  capabilities?: Array<string>
+}) {
+  const registry = new FleetRegistry({
+    config: { instances: [{ id: "alpha", label: "Alpha", url: "https://alpha.example", token: "tok-alpha" }] },
+  })
+  const calls: Array<{ url: string; method: string; body?: unknown }> = []
+  const fetchFn = mock(async (url: string | URL | Request, init?: RequestInit) => {
+    const urlString = url.toString()
+    const parsed = new URL(urlString)
+    calls.push({
+      url: urlString,
+      method: init?.method ?? "GET",
+      body: typeof init?.body === "string" ? JSON.parse(init.body) as unknown : undefined,
+    })
+    if (parsed.pathname === "/api/control/capabilities") {
+      if (capabilityResponse.status === 200) {
+        return Response.json({ capabilities: capabilityResponse.capabilities ?? [], controlVersion: "f19-test" })
+      }
+      return Response.json(
+        { error: { message: `capabilities returned ${capabilityResponse.status}` } },
+        { status: capabilityResponse.status },
+      )
+    }
+    if (parsed.pathname === "/api/control/sessions/create") {
+      return Response.json({ sessionId: "created-a", lifecycle: "running" })
+    }
+    return Response.json({ error: { message: `unhandled ${parsed.pathname}` } }, { status: 500 })
+  }) as unknown as typeof fetch
+  const tools = new Map(createFleetTools({ registry, fetchFn }).map((tool) => [tool.toolNameHttp, tool]))
+  return { tools, calls }
+}
+
+function callsToPath(
+  calls: Array<{ url: string; method: string; body?: unknown }>,
+  pathname: string,
+): Array<{ url: string; method: string; body?: unknown }> {
+  return calls.filter((call) => new URL(call.url).pathname === pathname)
 }
 
 async function withFleetFanoutConcurrency<T>(value: string, fn: () => Promise<T>): Promise<T> {
@@ -711,14 +753,113 @@ describe("fleet MCP tools", () => {
       idempotencyKey: "idem-f10",
     })
 
+    const createCalls = callsToPath(calls, "/api/control/sessions/create")
     expect(result.isError).toBeUndefined()
-    expect(calls[0]?.body).toEqual({
+    expect(callsToPath(calls, "/api/control/capabilities")).toHaveLength(1)
+    expect(createCalls[0]?.body).toEqual({
       agent: "claude",
       start: true,
       permissionMode: "plan",
       agentArgs: ["--model", "opus"],
       idempotencyKey: "idem-f10",
     })
+  })
+
+  test("create_session allows permissionMode when the instance advertises permission_mode", async () => {
+    const { tools, calls } = createSessionCapabilityToolMap({
+      status: 200,
+      capabilities: ["readiness_barrier", "permission_mode"],
+    })
+
+    const { result } = await callTool(tools, "create_session", {
+      instance: "alpha",
+      agent: "claude",
+      permissionMode: "plan",
+      idempotencyKey: "idem-cap-allow",
+    })
+
+    const createCalls = callsToPath(calls, "/api/control/sessions/create")
+    expect(result.isError).toBeUndefined()
+    expect(callsToPath(calls, "/api/control/capabilities")).toHaveLength(1)
+    expect(createCalls).toHaveLength(1)
+    expect(createCalls[0]?.body).toMatchObject({
+      agent: "claude",
+      permissionMode: "plan",
+      idempotencyKey: "idem-cap-allow",
+    })
+  })
+
+  test("create_session rejects permissionMode when capabilities omit permission_mode", async () => {
+    const { tools, calls } = createSessionCapabilityToolMap({
+      status: 200,
+      capabilities: ["readiness_barrier", "turn_binding"],
+    })
+
+    const { result, json } = await callTool(tools, "create_session", {
+      instance: "alpha",
+      agent: "claude",
+      permissionMode: "plan",
+      idempotencyKey: "idem-cap-deny",
+    })
+
+    expect(result.isError).toBe(true)
+    expect(json).toMatchObject({ error: { code: "UNSUPPORTED_CAPABILITY" } })
+    expect((json as { error: { message: string } }).error.message).toContain("permission_mode")
+    expect(callsToPath(calls, "/api/control/capabilities")).toHaveLength(1)
+    expect(callsToPath(calls, "/api/control/sessions/create")).toHaveLength(0)
+  })
+
+  test("create_session fail-opens permissionMode when capabilities is 404 on a legacy server", async () => {
+    const { tools, calls } = createSessionCapabilityToolMap({ status: 404 })
+
+    const { result } = await callTool(tools, "create_session", {
+      instance: "alpha",
+      agent: "claude",
+      permissionMode: "plan",
+      idempotencyKey: "idem-cap-404",
+    })
+
+    expect(result.isError).toBeUndefined()
+    expect(callsToPath(calls, "/api/control/capabilities")).toHaveLength(1)
+    expect(callsToPath(calls, "/api/control/sessions/create")).toHaveLength(1)
+  })
+
+  test("create_session fail-opens permissionMode when capabilities returns 500", async () => {
+    const { tools, calls } = createSessionCapabilityToolMap({ status: 500 })
+
+    const { result } = await callTool(tools, "create_session", {
+      instance: "alpha",
+      agent: "claude",
+      permissionMode: "plan",
+      idempotencyKey: "idem-cap-500",
+    })
+
+    expect(result.isError).toBeUndefined()
+    expect(callsToPath(calls, "/api/control/capabilities")).toHaveLength(1)
+    expect(callsToPath(calls, "/api/control/sessions/create")).toHaveLength(1)
+  })
+
+  test("create_session caches capabilities per instance", async () => {
+    const { tools, calls } = createSessionCapabilityToolMap({
+      status: 200,
+      capabilities: ["permission_mode"],
+    })
+
+    await callTool(tools, "create_session", {
+      instance: "alpha",
+      agent: "claude",
+      permissionMode: "plan",
+      idempotencyKey: "idem-cap-cache-1",
+    })
+    await callTool(tools, "create_session", {
+      instance: "alpha",
+      agent: "claude",
+      permissionMode: "plan",
+      idempotencyKey: "idem-cap-cache-2",
+    })
+
+    expect(callsToPath(calls, "/api/control/capabilities")).toHaveLength(1)
+    expect(callsToPath(calls, "/api/control/sessions/create")).toHaveLength(2)
   })
 
   test("stop_session forwards idempotencyKey", async () => {
