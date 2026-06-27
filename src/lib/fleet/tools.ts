@@ -3,6 +3,7 @@ import {
   FleetClient,
   decodeSessionId,
   encodeSessionId,
+  type CapabilitiesResponse,
   type CreateSessionInput,
   type CreateSessionResponse,
   type FleetErrorCode,
@@ -28,6 +29,7 @@ import { createTunnelTokenProvider, type TunnelTokenProvider } from "./tunnel-au
 const FLEET_GROUP: McpGroup = "fleet"
 const INSTANCE_PROBE_TIMEOUT_MS = 2_000
 const INSTANCE_PROBE_CACHE_TTL_MS = 5_000
+const CAPABILITIES_CACHE_TTL_MS = 60_000
 const AWAIT_TURN_DEFAULT_TIMEOUT_MS = 30_000
 const AWAIT_TURN_TIMEOUT_SLACK_MS = 5_000
 const LIST_INSTANCES_FANOUT_CONCURRENCY = 16
@@ -58,6 +60,7 @@ interface FleetRegistryLike {
 }
 
 interface FleetClientLike {
+  capabilities(signal?: AbortSignal): Promise<CapabilitiesResponse>
   listSessions(signal?: AbortSignal): Promise<{ sessions: Array<FleetSessionSummary> }>
   readSession(sessionId: string, lines?: number, signal?: AbortSignal): Promise<ReadSessionResponse>
   status(sessionId: string, signal?: AbortSignal): Promise<StatusResponse>
@@ -120,6 +123,7 @@ const instanceProbeCache = new Map<string, { result: FleetInstanceProbeResult; a
 export function createFleetTools(options: CreateFleetToolsOptions = {}): ReadonlyArray<NonPersonaMcpTool> {
   const registry = options.registry
   const clients = new Map<string, FleetClientLike>()
+  const capabilitiesCache = new Map<string, { caps: Set<string> | null; at: number }>()
   const tunnelProvider = options.tunnelTokenProvider ?? (defaultTunnelProvider ??= createTunnelTokenProvider())
   const probeRetryDelay = options.probeRetryDelay ?? delay
   const awaitTurnDeadlineSlackMs = nonNegativeNumberOrDefault(
@@ -147,6 +151,42 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
         })
     clients.set(key, created)
     return created
+  }
+
+  async function getInstanceCapabilities(
+    instance: FleetResolvedInstance,
+    signal?: AbortSignal,
+  ): Promise<Set<string> | null> {
+    const now = Date.now()
+    const cached = capabilitiesCache.get(instance.id)
+    if (cached && now - cached.at < CAPABILITIES_CACHE_TTL_MS) return cached.caps
+
+    try {
+      const response = await clientFor(instance).capabilities(signal)
+      const caps = new Set(response.capabilities)
+      capabilitiesCache.set(instance.id, { caps, at: Date.now() })
+      return caps
+    } catch {
+      // Capabilities are an optimization over the server-side BAD_REQUEST path.
+      // Legacy/unknown/broken probes must not block a create the server might accept.
+      capabilitiesCache.set(instance.id, { caps: null, at: Date.now() })
+      return null
+    }
+  }
+
+  async function assertCapability(
+    instance: FleetResolvedInstance,
+    cap: string,
+    featureName: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const caps = await getInstanceCapabilities(instance, signal)
+    if (caps !== null && !caps.has(cap)) {
+      throw new FleetToolInputError(
+        "UNSUPPORTED_CAPABILITY",
+        `fleet instance ${instance.id} does not advertise the '${cap}' capability required for ${featureName}; omit it or upgrade the ai-or-die control plane`,
+      )
+    }
   }
 
   async function resolve(arg?: string): Promise<FleetResolvedInstance> {
@@ -412,17 +452,26 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
       }, ["instance", "agent", "idempotencyKey"]),
       async (args, signal) => {
         const instance = await resolve(requiredString(args, "instance"))
+        const agent = requiredString(args, "agent")
         const idempotencyKey = requiredString(args, "idempotencyKey")
+        const permissionMode = optionalString(args, "permissionMode")
+        const agentArgs = optionalStringArray(args, "agentArgs")
+        if (permissionMode !== undefined) {
+          await assertCapability(instance, "permission_mode", "permissionMode", signal)
+        }
+        if (agentArgs !== undefined) {
+          await assertCapability(instance, "agent_args", "agentArgs", signal)
+        }
         // End-to-end idempotency also requires the ai-or-die control plane to dedupe by this key.
         const response = await clientFor(instance).createSession(
           definedObject({
-            agent: requiredString(args, "agent"),
+            agent,
             name: optionalString(args, "name"),
             workingDir: optionalString(args, "workingDir"),
             start: optionalBoolean(args, "start"),
             readyTimeoutMs: optionalNumber(args, "readyTimeoutMs"),
-            permissionMode: optionalString(args, "permissionMode"),
-            agentArgs: optionalStringArray(args, "agentArgs"),
+            permissionMode,
+            agentArgs,
             idempotencyKey,
           }),
           signal,

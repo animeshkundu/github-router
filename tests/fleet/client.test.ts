@@ -65,6 +65,32 @@ describe("FleetClient request bodies", () => {
       body: { mode: "graceful", idempotencyKey: "idem-stop" },
     })
   })
+
+  test("capabilities reads the frozen F19 response", async () => {
+    const calls: Array<{ url: string; method: string }> = []
+    const fetchFn = mock(async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: url.toString(), method: init?.method ?? "GET" })
+      return Response.json({ capabilities: ["permission_mode", "agent_args"], controlVersion: "f19" })
+    }) as unknown as typeof fetch
+    const client = new FleetClient({ url: "https://alpha.example", token: "secret", fetchFn })
+
+    const response = await client.capabilities()
+
+    expect(response).toEqual({ capabilities: ["permission_mode", "agent_args"], controlVersion: "f19" })
+    expect(calls[0]).toEqual({
+      url: "https://alpha.example/api/control/capabilities",
+      method: "GET",
+    })
+  })
+
+  test("capabilities rejects on 404", async () => {
+    const fetchFn = mock(async () =>
+      new Response(JSON.stringify({ error: { code: "missing", message: "missing" } }), { status: 404 }),
+    ) as unknown as typeof fetch
+    const client = new FleetClient({ url: "https://alpha.example", token: "secret", fetchFn })
+
+    await expectFleetError(client.capabilities(), "SESSION_NOT_FOUND")
+  })
 })
 
 describe("FleetClient error mapping", () => {

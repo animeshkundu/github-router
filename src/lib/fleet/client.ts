@@ -66,6 +66,11 @@ export interface FleetClientOptions {
   onTunnelAuthInvalidate?: () => void
 }
 
+export interface CapabilitiesResponse {
+  capabilities: string[]
+  controlVersion?: string
+}
+
 export interface FleetSessionSummary {
   sessionId: string
   name?: string
@@ -266,6 +271,10 @@ export class FleetClient {
     this.fetchFn = options.fetchFn ?? globalThis.fetch.bind(globalThis)
     this.getTunnelToken = options.getTunnelToken
     this.onTunnelAuthInvalidate = options.onTunnelAuthInvalidate
+  }
+
+  capabilities(signal?: AbortSignal): Promise<CapabilitiesResponse> {
+    return this.request("GET", "/api/control/capabilities", undefined, undefined, signal)
   }
 
   listSessions(signal?: AbortSignal): Promise<ListSessionsResponse> {
