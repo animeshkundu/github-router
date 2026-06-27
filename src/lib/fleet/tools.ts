@@ -28,10 +28,24 @@ import { createTunnelTokenProvider, type TunnelTokenProvider } from "./tunnel-au
 const FLEET_GROUP: McpGroup = "fleet"
 const INSTANCE_PROBE_TIMEOUT_MS = 2_000
 const INSTANCE_PROBE_CACHE_TTL_MS = 5_000
+const AWAIT_TURN_DEFAULT_TIMEOUT_MS = 30_000
+const AWAIT_TURN_TIMEOUT_SLACK_MS = 5_000
+const LIST_INSTANCES_FANOUT_CONCURRENCY = 16
+const AWAIT_TURN_FANOUT_CONCURRENCY = 256
+const INSTANCE_PROBE_RATE_LIMIT_MAX_RETRIES = 1
+const INSTANCE_PROBE_RATE_LIMIT_BACKOFF_BASE_MS = 250
+const INSTANCE_PROBE_RATE_LIMIT_BACKOFF_MAX_MS = 1_000
+const FLEET_FANOUT_CONCURRENCY_ENV = "GH_ROUTER_FLEET_FANOUT_CONCURRENCY"
+
+type DelayFn = (ms: number) => Promise<void>
 
 type FleetInstanceProbeResult =
   | { id: string; label: string; reachable: true; sessionCount: number; lastSeen: number }
   | { id: string; label: string; reachable: false; error: FleetErrorCode; hint?: string }
+
+type AwaitTurnInstanceResult =
+  | { ok: true; instance: FleetResolvedInstance; response: WaitEventsResponse }
+  | { ok: false; instance: FleetResolvedInstance; error: FleetErrorCode; hint?: string }
 
 interface McpToolResult {
   content: Array<{ type: "text"; text: string }>
@@ -82,6 +96,10 @@ export interface CreateFleetToolsOptions {
   createClient?: (instance: FleetResolvedInstance) => FleetClientLike
   /** Override the Dev Tunnel connect-token provider (tests inject a fake). */
   tunnelTokenProvider?: TunnelTokenProvider
+  /** Tests shorten this so per-instance await_turn deadlines stay instant. */
+  awaitTurnDeadlineSlackMs?: number
+  /** Tests inject this so RATE_LIMITED probe backoff stays instant. */
+  probeRetryDelay?: DelayFn
 }
 
 class FleetToolInputError extends Error {
@@ -103,6 +121,11 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
   const registry = options.registry
   const clients = new Map<string, FleetClientLike>()
   const tunnelProvider = options.tunnelTokenProvider ?? (defaultTunnelProvider ??= createTunnelTokenProvider())
+  const probeRetryDelay = options.probeRetryDelay ?? delay
+  const awaitTurnDeadlineSlackMs = nonNegativeNumberOrDefault(
+    options.awaitTurnDeadlineSlackMs,
+    AWAIT_TURN_TIMEOUT_SLACK_MS,
+  )
 
   function getRegistry(): FleetRegistryLike {
     if (registry) return registry
@@ -155,35 +178,39 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     const cached = instanceProbeCache.get(cacheKey)
     if (cached && now - cached.at < INSTANCE_PROBE_CACHE_TTL_MS) return cached.result
 
-    const timeout = createProbeTimeout()
-    try {
-      const instance = await resolve(info.id)
-      const response = await clientFor(instance).listSessions(timeout.signal)
-      const lastSeen = Date.now()
-      const result: FleetInstanceProbeResult = {
-        id: info.id,
-        label: info.label,
-        reachable: true,
-        sessionCount: response.sessions.length,
-        lastSeen,
+    for (let attempt = 0; attempt <= INSTANCE_PROBE_RATE_LIMIT_MAX_RETRIES; attempt++) {
+      const timeout = createProbeTimeout()
+      try {
+        const instance = await resolve(info.id)
+        const response = await clientFor(instance).listSessions(timeout.signal)
+        const lastSeen = Date.now()
+        const result: FleetInstanceProbeResult = {
+          id: info.id,
+          label: info.label,
+          reachable: true,
+          sessionCount: response.sessions.length,
+          lastSeen,
+        }
+        instanceProbeCache.set(cacheKey, { result, at: lastSeen })
+        return result
+      } catch (err) {
+        const code = fleetProbeErrorCode(err)
+        if (code === "RATE_LIMITED" && attempt < INSTANCE_PROBE_RATE_LIMIT_MAX_RETRIES) {
+          timeout.cleanup()
+          await probeRetryDelay(probeRateLimitBackoffMs(attempt))
+          continue
+        }
+        const result = failedProbeResult(info, code)
+        instanceProbeCache.set(cacheKey, { result, at: Date.now() })
+        return result
+      } finally {
+        timeout.cleanup()
       }
-      instanceProbeCache.set(cacheKey, { result, at: lastSeen })
-      return result
-    } catch (err) {
-      const code = fleetProbeErrorCode(err)
-      const hint = fleetProbeHint(code)
-      const result: FleetInstanceProbeResult = {
-        id: info.id,
-        label: info.label,
-        reachable: false,
-        error: code,
-        ...(hint ? { hint } : {}),
-      }
-      instanceProbeCache.set(cacheKey, { result, at: Date.now() })
-      return result
-    } finally {
-      timeout.cleanup()
     }
+
+    const result = failedProbeResult(info, "UNREACHABLE")
+    instanceProbeCache.set(cacheKey, { result, at: Date.now() })
+    return result
   }
 
   function tool(
@@ -215,7 +242,11 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
       objectSchema({}, []),
       async () => {
         const instances = await getRegistry().listInstances()
-        const probed = await Promise.all(instances.map((instance) => probeInstance(instance)))
+        const probed = await mapWithConcurrency(
+          instances,
+          fleetFanoutConcurrency(LIST_INSTANCES_FANOUT_CONCURRENCY),
+          (instance) => probeInstance(instance),
+        )
         return ok({ instances: probed })
       },
     ),
@@ -427,37 +458,62 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     ),
     tool(
       "await_turn",
-      "Long-poll session events across fleet instances. The server owns per-target cursors, so callers do not pass cursor tokens.",
+      "Long-poll session events across fleet instances. The server owns per-target opaque cursors, so callers do not pass cursor tokens. Distinct concurrent watchers over the same instance set should pass a distinct watcherId so they do not share a cursor.",
       objectSchema({
         instances: arrayProp("Instance ids or labels to poll. Omit with sessionIds to target those session instances; omit both to poll every registered instance."),
         sessionIds: arrayProp("Global session ids to filter to."),
         timeoutMs: numberProp("Long-poll timeout per instance in milliseconds."),
         kinds: arrayProp("Optional event kinds to filter to."),
+        watcherId: stringProp("Optional stable id for this watcher. Use a distinct value for concurrent watchers over the same target set to keep cursors isolated."),
       }, []),
       async (args, signal) => {
         const target = await resolveAwaitTarget(args, getRegistry())
-        const clientKey = target.instances.map((instance) => instance.id).sort().join(",")
-        const cursorByInstance = awaitTurnCursors.get(clientKey) ?? new Map<string, string>()
-        awaitTurnCursors.set(clientKey, cursorByInstance)
+        const watcherId = optionalString(args, "watcherId")
+        const clientKey = awaitTurnCursorKey(watcherId)
+        const cursorByInstance = takeAwaitTurnCursorMap(clientKey)
         const timeoutMs = optionalNumber(args, "timeoutMs")
         const kinds = optionalStringArray(args, "kinds")
-        const responses = await Promise.all(target.instances.map(async (instance) => {
-          const response = await clientFor(instance).waitEvents(
-            definedObject({
-              cursor: cursorByInstance.get(instance.id),
-              timeoutMs,
-              sessionIds: target.localSessionIdsByInstance.get(instance.id),
-              kinds,
-            }) as {
-              cursor?: string
-              timeoutMs?: number
-              sessionIds?: ReadonlyArray<string>
-              kinds?: ReadonlyArray<string>
-            },
-            signal,
-          )
-          cursorByInstance.set(instance.id, response.cursor)
-          return { instance, response }
+        // F23: this is intentionally one waitEvents call per instance. The
+        // sessionIds filter multiplexes all requested sessions on that instance;
+        // do not fan out per session or 100-instance watches become N*M polls.
+        const results = await mapWithConcurrency(
+          target.instances,
+          fleetFanoutConcurrency(AWAIT_TURN_FANOUT_CONCURRENCY),
+          async (instance): Promise<AwaitTurnInstanceResult> => {
+            const deadline = createAwaitTurnDeadline(timeoutMs, awaitTurnDeadlineSlackMs)
+            const combined = combineAbortSignals([signal, deadline.signal])
+            try {
+              const response = await clientFor(instance).waitEvents(
+                definedObject({
+                  cursor: cursorByInstance.get(instance.id),
+                  timeoutMs,
+                  sessionIds: target.localSessionIdsByInstance.get(instance.id),
+                  kinds,
+                }) as {
+                  cursor?: string
+                  timeoutMs?: number
+                  sessionIds?: ReadonlyArray<string>
+                  kinds?: ReadonlyArray<string>
+                },
+                combined.signal,
+              )
+              cursorByInstance.set(instance.id, response.cursor)
+              return { ok: true, instance, response }
+            } catch (err) {
+              const error = fleetProbeErrorCode(err)
+              const hint = fleetProbeHint(error)
+              return { ok: false, instance, error, ...(hint ? { hint } : {}) }
+            } finally {
+              combined.cleanup()
+              deadline.cleanup()
+            }
+          },
+        )
+        const responses = results.filter(isAwaitTurnSuccess)
+        const errors = results.filter(isAwaitTurnFailure).map(({ instance, error, hint }) => ({
+          instance: publicInstance(instance),
+          error,
+          ...(hint ? { hint } : {}),
         }))
         const events = responses.flatMap(({ instance, response }) =>
           response.events.map((event) => stampEvent(instance, event)),
@@ -471,9 +527,10 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
           gaps,
           cursors: responses.map(({ instance, response }) => ({
             instance: publicInstance(instance),
-            ...parseCursor(response.cursor),
+            cursor: response.cursor,
           })),
           more: responses.some(({ response }) => response.more),
+          ...(errors.length > 0 ? { errors } : {}),
         })
       },
     ),
@@ -553,11 +610,57 @@ function createProbeTimeout(): { signal: AbortSignal; cleanup: () => void } {
   return { signal: controller.signal, cleanup: () => clearTimeout(timer) }
 }
 
+function createAwaitTurnDeadline(timeoutMs: number | undefined, slackMs: number): { signal: AbortSignal; cleanup: () => void } {
+  const waitMs = Math.max(0, timeoutMs ?? AWAIT_TURN_DEFAULT_TIMEOUT_MS)
+  const deadlineMs = waitMs + slackMs
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    const err = new Error("await_turn per-instance deadline exceeded")
+    err.name = "TimeoutError"
+    controller.abort(err)
+  }, deadlineMs)
+  return { signal: controller.signal, cleanup: () => clearTimeout(timer) }
+}
+
+function combineAbortSignals(signals: Array<AbortSignal | undefined>): { signal: AbortSignal | undefined; cleanup: () => void } {
+  const noop = () => {}
+  const present = signals.filter((signal): signal is AbortSignal => signal !== undefined)
+  if (present.length === 0) return { signal: undefined, cleanup: noop }
+  if (present.length === 1) return { signal: present[0], cleanup: noop }
+  const any = (AbortSignal as typeof AbortSignal & { any?: (signals: Array<AbortSignal>) => AbortSignal }).any
+  if (typeof any === "function") return { signal: any(present), cleanup: noop }
+
+  // Fallback for runtimes without AbortSignal.any: forward the first abort. The
+  // listeners are removed by cleanup() so they can't accumulate on a long-lived
+  // parent signal across many fan-out turns (the incoming request signal is
+  // shared by every instance in a turn).
+  const controller = new AbortController()
+  const listeners: Array<{ signal: AbortSignal; handler: () => void }> = []
+  const cleanup = () => {
+    for (const { signal, handler } of listeners) signal.removeEventListener("abort", handler)
+    listeners.length = 0
+  }
+  for (const signal of present) {
+    if (signal.aborted) {
+      if (!controller.signal.aborted) controller.abort(signal.reason)
+      cleanup()
+      return { signal: controller.signal, cleanup: noop }
+    }
+    const handler = () => {
+      if (!controller.signal.aborted) controller.abort(signal.reason)
+    }
+    signal.addEventListener("abort", handler, { once: true })
+    listeners.push({ signal, handler })
+  }
+  return { signal: controller.signal, cleanup }
+}
+
 function fleetProbeErrorCode(err: unknown): FleetErrorCode {
   if (typeof err === "object" && err !== null && "code" in err) {
     const code = (err as { code?: unknown }).code
     if (typeof code === "string" && isFleetErrorCode(code)) return code
   }
+  if (isAbortLike(err)) return "TIMEOUT"
   return "UNREACHABLE"
 }
 
@@ -674,15 +777,109 @@ function compareStampedEvents(a: Record<string, unknown>, b: Record<string, unkn
   return seqA - seqB
 }
 
-function parseCursor(cursor: string): { cursor: string; epoch?: string; seq?: number } {
-  const idx = cursor.indexOf(":")
-  if (idx < 0) return { cursor }
-  const seq = Number(cursor.slice(idx + 1))
-  return {
-    cursor,
-    epoch: cursor.slice(0, idx),
-    ...(Number.isFinite(seq) ? { seq } : {}),
+const MAX_WATCHER_ID_LEN = 200
+const MAX_AWAIT_TURN_CURSOR_KEYS = 1024
+
+// Per-watcher cursor isolation keys on watcherId ALONE — NOT the instance set.
+// The inner cursorByInstance Map already isolates by instance.id, so adding or
+// removing an instance from a watch must not drop the others' cursors. watcherId
+// is client-controlled, so it is length-capped here and the key count is
+// LRU-bounded in takeAwaitTurnCursorMap so a flood of unique ids can't grow the
+// module-level Map without bound.
+function awaitTurnCursorKey(watcherId: string | undefined): string {
+  const id = watcherId ?? "default"
+  return id.length > MAX_WATCHER_ID_LEN ? id.slice(0, MAX_WATCHER_ID_LEN) : id
+}
+
+// LRU access to the per-watcher cursor map: re-insert on hit so the most recently
+// used keys stay, and a hard cap evicts the least recently used.
+function takeAwaitTurnCursorMap(clientKey: string): Map<string, string> {
+  const existing = awaitTurnCursors.get(clientKey)
+  if (existing) {
+    awaitTurnCursors.delete(clientKey)
+    awaitTurnCursors.set(clientKey, existing)
+    return existing
   }
+  const created = new Map<string, string>()
+  awaitTurnCursors.set(clientKey, created)
+  while (awaitTurnCursors.size > MAX_AWAIT_TURN_CURSOR_KEYS) {
+    const oldest = awaitTurnCursors.keys().next().value
+    if (oldest === undefined) break
+    awaitTurnCursors.delete(oldest)
+  }
+  return created
+}
+
+function isAwaitTurnSuccess(
+  result: AwaitTurnInstanceResult,
+): result is Extract<AwaitTurnInstanceResult, { ok: true }> {
+  return result.ok
+}
+
+function isAwaitTurnFailure(
+  result: AwaitTurnInstanceResult,
+): result is Extract<AwaitTurnInstanceResult, { ok: false }> {
+  return !result.ok
+}
+
+function failedProbeResult(info: FleetInstanceInfo, code: FleetErrorCode): FleetInstanceProbeResult {
+  const hint = fleetProbeHint(code)
+  return {
+    id: info.id,
+    label: info.label,
+    reachable: false,
+    error: code,
+    ...(hint ? { hint } : {}),
+  }
+}
+
+async function mapWithConcurrency<T, R>(
+  items: ReadonlyArray<T>,
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<Array<R>> {
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 1
+  const concurrency = Math.max(1, Math.min(items.length || 1, safeLimit))
+  const results = new Array<R>(items.length)
+  let nextIndex = 0
+
+  async function worker(): Promise<void> {
+    while (nextIndex < items.length) {
+      const index = nextIndex++
+      results[index] = await fn(items[index]!, index)
+    }
+  }
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()))
+  return results
+}
+
+function fleetFanoutConcurrency(defaultLimit: number): number {
+  const raw = process.env[FLEET_FANOUT_CONCURRENCY_ENV]
+  const parsed = raw === undefined ? Number.NaN : Number.parseInt(raw, 10)
+  if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed)
+  return defaultLimit
+}
+
+function probeRateLimitBackoffMs(attempt: number): number {
+  return Math.min(
+    INSTANCE_PROBE_RATE_LIMIT_BACKOFF_BASE_MS * (2 ** attempt),
+    INSTANCE_PROBE_RATE_LIMIT_BACKOFF_MAX_MS,
+  )
+}
+
+function nonNegativeNumberOrDefault(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback
+}
+
+async function delay(ms: number): Promise<void> {
+  if (ms <= 0) return
+  await new Promise<void>((resolve) => setTimeout(resolve, ms))
+}
+
+function isAbortLike(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  return err.name === "AbortError" || err.name === "TimeoutError"
 }
 
 function uniqueInstances(instances: Array<FleetResolvedInstance>): Array<FleetResolvedInstance> {

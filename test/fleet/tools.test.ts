@@ -127,6 +127,23 @@ async function callTool(
   return { result, json: JSON.parse(result.content[0]!.text) as unknown }
 }
 
+async function withFleetFanoutConcurrency<T>(value: string, fn: () => Promise<T>): Promise<T> {
+  const previous = process.env.GH_ROUTER_FLEET_FANOUT_CONCURRENCY
+  process.env.GH_ROUTER_FLEET_FANOUT_CONCURRENCY = value
+  try {
+    return await fn()
+  } finally {
+    if (previous === undefined) delete process.env.GH_ROUTER_FLEET_FANOUT_CONCURRENCY
+    else process.env.GH_ROUTER_FLEET_FANOUT_CONCURRENCY = previous
+  }
+}
+
+function abortLikeError(): Error {
+  const err = new Error("aborted")
+  err.name = "AbortError"
+  return err
+}
+
 describe("fleet MCP tools", () => {
   test("list_sessions echoes resolvedInstance and globalizes session ids", async () => {
     const { tools, calls } = toolMap()
@@ -374,6 +391,260 @@ describe("fleet MCP tools", () => {
     expect(instances[0]?.hint).toContain("no ai-or-die host connected")
     expect(instances[1]).toMatchObject({ id: "slow", reachable: false, error: "TIMEOUT" })
     expect(instances[2]).toMatchObject({ id: "gone", reachable: false, error: "UNREACHABLE" })
+  })
+
+  test("await_turn keeps healthy results when one instance fails and does not advance the failed cursor", async () => {
+    const registry = new FleetRegistry({
+      config: {
+        instances: [
+          { id: "partial-ok-f20", label: "Partial OK", url: "https://partial-ok-f20.example", token: "tok-ok" },
+          { id: "partial-fail-f20", label: "Partial Fail", url: "https://partial-fail-f20.example", token: "tok-fail" },
+        ],
+      },
+    })
+    const healthyInputs: Array<{ cursor?: string }> = []
+    const failedInputs: Array<{ cursor?: string }> = []
+    let healthyCall = 0
+    let failedCall = 0
+    const createClient = mock((instance) => fleetClientStub({
+      waitEvents: mock(async (input: Parameters<FleetToolClient["waitEvents"]>[0]) => {
+        if (instance.id === "partial-ok-f20") {
+          healthyInputs.push({ cursor: input.cursor })
+          healthyCall += 1
+          return {
+            events: healthyCall === 1
+              ? [{ seq: 1, sessionId: "session-ok", kind: "turn_ended", at: 1_000 }]
+              : [],
+            gaps: [],
+            cursor: `healthy-cursor-${healthyCall}`,
+            more: healthyCall === 1,
+          }
+        }
+        failedInputs.push({ cursor: input.cursor })
+        failedCall += 1
+        if (failedCall === 1) {
+          throw new FleetError({ code: "UNREACHABLE", message: "host down", retryable: true })
+        }
+        return { events: [], gaps: [], cursor: `failed-cursor-${failedCall}`, more: false }
+      }),
+    })) satisfies NonNullable<CreateFleetToolsOptions["createClient"]>
+    const tools = new Map(createFleetTools({ registry, createClient }).map((tool) => [tool.toolNameHttp, tool]))
+
+    const { result, json } = await callTool(tools, "await_turn", {
+      instances: ["partial-ok-f20", "partial-fail-f20"],
+      watcherId: "partial-f20",
+      timeoutMs: 25,
+    })
+    const first = json as {
+      events: Array<Record<string, unknown>>
+      cursors: Array<Record<string, unknown>>
+      errors?: Array<Record<string, unknown>>
+      more?: boolean
+    }
+
+    expect(result.isError).toBeUndefined()
+    expect(first.events).toEqual([
+      expect.objectContaining({
+        seq: 1,
+        sessionId: "partial-ok-f20:session-ok",
+        kind: "turn_ended",
+        instance: { id: "partial-ok-f20", label: "Partial OK" },
+      }),
+    ])
+    expect(first.errors).toEqual([
+      expect.objectContaining({
+        instance: { id: "partial-fail-f20", label: "Partial Fail" },
+        error: "UNREACHABLE",
+      }),
+    ])
+    expect(first.cursors).toEqual([
+      { instance: { id: "partial-ok-f20", label: "Partial OK" }, cursor: "healthy-cursor-1" },
+    ])
+    expect(first.more).toBe(true)
+
+    await callTool(tools, "await_turn", {
+      instances: ["partial-ok-f20", "partial-fail-f20"],
+      watcherId: "partial-f20",
+      timeoutMs: 25,
+    })
+
+    expect(healthyInputs.map((input) => input.cursor)).toEqual([undefined, "healthy-cursor-1"])
+    expect(failedInputs.map((input) => input.cursor)).toEqual([undefined, undefined])
+  })
+
+  test("await_turn cuts a hung instance at the per-instance deadline", async () => {
+    const registry = new FleetRegistry({
+      config: {
+        instances: [
+          { id: "deadline-f20", label: "Deadline", url: "https://deadline-f20.example", token: "tok-deadline" },
+        ],
+      },
+    })
+    let observedAbort = false
+    const fetchFn = mock((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal
+      if (!signal) {
+        reject(new Error("expected an abort signal"))
+        return
+      }
+      const rejectAbort = () => {
+        observedAbort = true
+        reject(signal.reason instanceof Error ? signal.reason : abortLikeError())
+      }
+      if (signal.aborted) {
+        rejectAbort()
+        return
+      }
+      signal.addEventListener("abort", rejectAbort, { once: true })
+    })) as unknown as typeof fetch
+    const tools = new Map(
+      createFleetTools({ registry, fetchFn, awaitTurnDeadlineSlackMs: 0 }).map((tool) => [tool.toolNameHttp, tool]),
+    )
+
+    const { result, json } = await callTool(tools, "await_turn", {
+      instances: ["deadline-f20"],
+      watcherId: "deadline-f20",
+      timeoutMs: 1,
+    })
+    const body = json as { events: Array<unknown>; errors?: Array<Record<string, unknown>> }
+
+    expect(result.isError).toBeUndefined()
+    expect(observedAbort).toBe(true)
+    expect(body.events).toEqual([])
+    expect(body.errors).toEqual([
+      expect.objectContaining({
+        instance: { id: "deadline-f20", label: "Deadline" },
+        error: "TIMEOUT",
+      }),
+    ])
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  test("await_turn watcherId keeps concurrent watchers on the same set isolated", async () => {
+    const registry = new FleetRegistry({
+      config: {
+        instances: [
+          { id: "watcher-f22", label: "Watcher", url: "https://watcher-f22.example", token: "tok-watch" },
+        ],
+      },
+    })
+    const inputs: Array<{ cursor?: string }> = []
+    let callCount = 0
+    const createClient = mock(() => fleetClientStub({
+      waitEvents: mock(async (input: Parameters<FleetToolClient["waitEvents"]>[0]) => {
+        inputs.push({ cursor: input.cursor })
+        callCount += 1
+        return { events: [], gaps: [], cursor: `cursor-${callCount}`, more: false }
+      }),
+    })) satisfies NonNullable<CreateFleetToolsOptions["createClient"]>
+    const tools = new Map(createFleetTools({ registry, createClient }).map((tool) => [tool.toolNameHttp, tool]))
+
+    await callTool(tools, "await_turn", { instances: ["watcher-f22"], watcherId: "watcher-a", timeoutMs: 25 })
+    await callTool(tools, "await_turn", { instances: ["watcher-f22"], watcherId: "watcher-b", timeoutMs: 25 })
+    await callTool(tools, "await_turn", { instances: ["watcher-f22"], watcherId: "watcher-a", timeoutMs: 25 })
+
+    expect(inputs.map((input) => input.cursor)).toEqual([undefined, undefined, "cursor-1"])
+  })
+
+  test("await_turn keeps a watcher's per-instance cursor when the instance set changes", async () => {
+    const registry = new FleetRegistry({
+      config: {
+        instances: [
+          { id: "set-a", label: "Set A", url: "https://set-a.example", token: "tok-a" },
+          { id: "set-b", label: "Set B", url: "https://set-b.example", token: "tok-b" },
+        ],
+      },
+    })
+    const cursorInputsByInstance = new Map<string, Array<string | undefined>>()
+    const createClient = mock((instance) => fleetClientStub({
+      waitEvents: mock(async (input: Parameters<FleetToolClient["waitEvents"]>[0]) => {
+        const seen = cursorInputsByInstance.get(instance.id) ?? []
+        seen.push(input.cursor)
+        cursorInputsByInstance.set(instance.id, seen)
+        return { events: [], gaps: [], cursor: `${instance.id}-cursor`, more: false }
+      }),
+    })) satisfies NonNullable<CreateFleetToolsOptions["createClient"]>
+    const tools = new Map(createFleetTools({ registry, createClient }).map((tool) => [tool.toolNameHttp, tool]))
+
+    // Same watcher polls BOTH instances, then only set-a (set-b dropped). The
+    // cursor key is watcherId-only, NOT the instance set, so set-a's cursor from
+    // the first call must still be passed on the second despite the set change.
+    await callTool(tools, "await_turn", { instances: ["set-a", "set-b"], watcherId: "w1", timeoutMs: 25 })
+    await callTool(tools, "await_turn", { instances: ["set-a"], watcherId: "w1", timeoutMs: 25 })
+
+    expect(cursorInputsByInstance.get("set-a")).toEqual([undefined, "set-a-cursor"])
+  })
+
+  test("list_instances caps probe fan-out concurrency", async () => {
+    await withFleetFanoutConcurrency("3", async () => {
+      const instances = Array.from({ length: 12 }, (_, index) => ({
+        id: `cap-f21-${index}`,
+        label: `Cap ${index}`,
+        url: `https://cap-f21-${index}.example`,
+        token: `tok-cap-${index}`,
+      }))
+      const registry = new FleetRegistry({ config: { instances } })
+      let inFlight = 0
+      let maxInFlight = 0
+      const fetchFn = mock(async (_url: string | URL | Request, _init?: RequestInit) => {
+        inFlight += 1
+        maxInFlight = Math.max(maxInFlight, inFlight)
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 5))
+          return Response.json({ sessions: [] })
+        } finally {
+          inFlight -= 1
+        }
+      }) as unknown as typeof fetch
+      const tools = new Map(createFleetTools({ registry, fetchFn }).map((tool) => [tool.toolNameHttp, tool]))
+
+      const { result, json } = await callTool(tools, "list_instances", {})
+      const body = json as { instances: Array<Record<string, unknown>> }
+
+      expect(result.isError).toBeUndefined()
+      expect(fetchFn).toHaveBeenCalledTimes(instances.length)
+      expect(maxInFlight).toBeLessThanOrEqual(3)
+      expect(body.instances.every((instance) => instance.reachable === true)).toBe(true)
+    })
+  })
+
+  test("list_instances retries one RATE_LIMITED probe after injected backoff", async () => {
+    const registry = new FleetRegistry({
+      config: {
+        instances: [
+          { id: "rate-limited-f21", label: "Rate Limited", url: "https://rate-limited-f21.example", token: "tok-rate" },
+        ],
+      },
+    })
+    let attempts = 0
+    const delays: Array<number> = []
+    const fetchFn = mock(async (_url: string | URL | Request, _init?: RequestInit) => {
+      attempts += 1
+      if (attempts === 1) {
+        return Response.json({ error: { message: "slow down" } }, { status: 429 })
+      }
+      return Response.json({ sessions: [{ sessionId: "after-retry" }] })
+    }) as unknown as typeof fetch
+    const tools = new Map(
+      createFleetTools({
+        registry,
+        fetchFn,
+        probeRetryDelay: async (ms) => { delays.push(ms) },
+      }).map((tool) => [tool.toolNameHttp, tool]),
+    )
+
+    const { result, json } = await callTool(tools, "list_instances", {})
+    const body = json as { instances: Array<Record<string, unknown>> }
+
+    expect(result.isError).toBeUndefined()
+    expect(attempts).toBe(2)
+    expect(delays).toEqual([250])
+    expect(body.instances[0]).toMatchObject({
+      id: "rate-limited-f21",
+      label: "Rate Limited",
+      reachable: true,
+      sessionCount: 1,
+    })
   })
 
   test("create_session forwards idempotencyKey", async () => {
