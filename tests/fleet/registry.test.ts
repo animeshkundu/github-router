@@ -377,4 +377,47 @@ describe("FleetRegistry insecureTLS flag", () => {
 
     await expectRegistryError(registry.listInstances(), "INVALID_CONFIG")
   })
+
+  describe("local-network-only restriction", () => {
+    const ALLOWED = [
+      "https://localhost:7777",
+      "https://127.0.0.1:7777",
+      "https://[::1]:7777",
+      "https://mini.local:7777",
+      "https://ani.local:7777",
+      "https://10.0.0.220:7777",
+      "https://172.16.0.1:7777",
+      "https://172.31.255.254:7777",
+      "https://192.168.1.5:7777",
+      "https://169.254.10.10:7777", // link-local
+      "https://[fe80::1]:7777", // IPv6 link-local
+      "https://[fd00::1]:7777", // IPv6 ULA
+    ]
+    const REJECTED = [
+      "https://api.example.com:7777", // public FQDN
+      "https://8.8.8.8:7777", // public IPv4
+      "https://172.15.0.1:7777", // just below the 172.16/12 block (public)
+      "https://172.32.0.1:7777", // just above the block (public)
+      "https://[2606:4700::1111]:7777", // public IPv6
+      "https://mini:7777", // bare hostname, not .local
+    ]
+
+    for (const url of ALLOWED) {
+      test(`allows insecureTLS on local host ${url}`, async () => {
+        const registry = new FleetRegistry({
+          config: { instances: [{ id: "x", label: "X", url, token: "none", insecureTLS: true }] },
+        })
+        expect((await registry.resolveInstance("x")).insecureTLS).toBe(true)
+      })
+    }
+
+    for (const url of REJECTED) {
+      test(`rejects insecureTLS on public host ${url}`, async () => {
+        const registry = new FleetRegistry({
+          config: { instances: [{ id: "x", label: "X", url, token: "none", insecureTLS: true }] },
+        })
+        await expectRegistryError(registry.listInstances(), "INVALID_CONFIG")
+      })
+    }
+  })
 })

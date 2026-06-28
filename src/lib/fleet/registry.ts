@@ -257,23 +257,35 @@ function parseInstance(raw: unknown): FleetInstanceConfig {
   const tunnelToken = parseTunnelToken(id, instance.tunnelToken)
   const insecureTLS = parseInsecureTLS(id, instance.insecureTLS)
   if (insecureTLS) {
-    // Reject the foot-gun combinations rather than silently honoring them:
-    // - an http url has no TLS to relax (insecureTLS is meaningless there);
-    // - a Dev Tunnel instance (host under .devtunnels.ms, or one using tunnelId/
-    //   tunnelToken auth) already gets a VALID public cert from the relay, so
-    //   disabling verification buys nothing and only exposes the bearer / tunnel
-    //   token to a MITM. insecureTLS is exclusively for a direct-HTTPS self-signed host.
+    // insecureTLS exists ONLY to reach a direct-HTTPS self-signed instance on the
+    // local machine / trusted LAN. Reject every other shape rather than silently
+    // honoring it, since each only weakens security:
+    // - an http url has no TLS to relax;
+    // - a Dev Tunnel (tunnelId/tunnelToken, or a *.devtunnels.ms host) already gets
+    //   a VALID public cert from the relay;
+    // - any other PUBLIC/routable host would have verification disabled on a
+    //   public-internet hop, exposing the bearer to a MITM.
     if (parsedUrl.protocol !== "https:") {
       throw new FleetRegistryError(
         "INVALID_CONFIG",
         `fleet registry instance ${id} insecureTLS only applies to an https url (an http url has no TLS to relax)`,
       )
     }
-    if (DEVTUNNEL_HOST_RE.test(parsedUrl.hostname) || tunnelId !== undefined || tunnelToken !== undefined) {
+    if (tunnelId !== undefined || tunnelToken !== undefined) {
       throw new FleetRegistryError(
         "INVALID_CONFIG",
-        `fleet registry instance ${id} insecureTLS must not be set on a Dev Tunnel instance; `
-          + "*.devtunnels.ms presents a valid public cert, so disabling verification only exposes the bearer/tunnel token to MITM",
+        `fleet registry instance ${id} insecureTLS must not be combined with a Dev Tunnel (tunnelId/tunnelToken); `
+          + "the relay presents a valid public cert, so disabling verification only exposes the bearer/tunnel token to MITM",
+      )
+    }
+    if (!isLocalNetworkHost(parsedUrl.hostname)) {
+      const devtunnel = DEVTUNNEL_HOST_RE.test(parsedUrl.hostname)
+      throw new FleetRegistryError(
+        "INVALID_CONFIG",
+        devtunnel
+          ? `fleet registry instance ${id} insecureTLS must not be set on a Dev Tunnel host; *.devtunnels.ms presents a valid public cert`
+          : `fleet registry instance ${id} insecureTLS is only allowed for a local-network host `
+            + `(loopback, a private/LAN IP, or a .local name); refusing to disable TLS verification for public host ${parsedUrl.hostname}`,
       )
     }
   }
@@ -356,6 +368,41 @@ function isAllowedInstanceUrl(url: URL): boolean {
   if (url.protocol === "https:") return true
   if (url.protocol !== "http:") return false
   return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]"
+}
+
+// insecureTLS is scoped to local-network targets ONLY. A host qualifies when it is
+// loopback, an RFC1918 / link-local IPv4, a loopback / link-local / ULA IPv6, or an
+// mDNS `.local` name. Everything else (public FQDNs, public IPs, Dev Tunnel relays)
+// is rejected so TLS verification is never disabled on a routable internet hop.
+// NB: 100.64.0.0/10 (CGNAT, e.g. Tailscale) is intentionally NOT treated as local —
+// add it explicitly if you ever front instances over a CGNAT overlay.
+function isLocalNetworkHost(hostnameRaw: string): boolean {
+  const host = hostnameRaw.replace(/^\[/, "").replace(/\]$/, "").toLowerCase()
+  if (host === "localhost") return true
+  if (host.endsWith(".local")) return true
+
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
+  if (v4) {
+    const octets = [Number(v4[1]), Number(v4[2]), Number(v4[3]), Number(v4[4])]
+    if (octets.some((o) => o > 255)) return false
+    const a = octets[0]!
+    const b = octets[1]!
+    if (a === 127) return true // 127.0.0.0/8 loopback
+    if (a === 10) return true // 10.0.0.0/8
+    if (a === 172 && b >= 16 && b <= 31) return true // 172.16.0.0/12
+    if (a === 192 && b === 168) return true // 192.168.0.0/16
+    if (a === 169 && b === 254) return true // 169.254.0.0/16 link-local
+    return false
+  }
+
+  if (host.includes(":")) { // IPv6 literal
+    if (host === "::1") return true // loopback
+    if (/^fe[89ab]/.test(host)) return true // fe80::/10 link-local
+    if (/^f[cd]/.test(host)) return true // fc00::/7 ULA
+    return false
+  }
+
+  return false // bare or public hostname / FQDN
 }
 
 // F5: scope this check STRICTLY to Dev Tunnel relay hosts. Other domains
