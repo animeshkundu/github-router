@@ -62,8 +62,12 @@ lands) · ⚠️ known drift to fix. Producer literals below are auditor-confirm
 
 **F10 validation (✅ ai-or-die side landed):** unknown `permissionMode`, non-array `agentArgs`,
 or `agentArgs` carrying `--permission-mode` / `--dangerously-skip-permissions` →
-`INVALID_ARGUMENT` → **HTTP 400**. Exact 400 body shape: **[PENDING driver confirm]**. Client
-maps it to 🔶 `BAD_REQUEST` (retryable:no), surfacing the upstream `message`.
+`INVALID_ARGUMENT` → **HTTP 400**. Exact 400 body (✅ verified + fixed ai-or-die side):
+`{ error: { code: "INVALID_ARGUMENT", message } }`. (The create path originally fell through to
+Express's default HTML error body — classification still worked via the 400 status, but the client
+surfaced an HTML blob instead of the reason; fixed ai-or-die side to the structured envelope so the
+client's `detailToMessage` extracts the clean `error.message`.) Client maps the 400 to ✅
+`BAD_REQUEST` (retryable:no), surfacing the upstream `message`.
 
 **Response body** (`CreateSessionResponse`) ✅ F17 — three exit shapes:
 - start-fail: `{sessionId, lifecycle:'exited', name, agent:null, ready:false, bound:false, blocker:{kind:'start_error', message}, startError}`
@@ -146,16 +150,26 @@ best-effort window, NOT a deadline (recommended: `awaitMs:0` + `await_turn`).
 
 ---
 
-## `GET /api/control/capabilities` 🔶 F19 (NOT YET IMPLEMENTED — freeze before F19 lands)
+## `GET /api/control/capabilities` ✅ F19 (IMPLEMENTED both sides)
 
-Client queries once per instance (cached), **fails closed** on a missing capability rather
-than sending a field the producer can't honor.
+Client queries once per instance (cached), **fails closed** on a known-absent capability,
+**fails open** when capabilities can't be determined (404 legacy / 500 / timeout) so an older
+server is never blocked.
 
-**Frozen response:** `{ capabilities: string[]; controlVersion?: string }`. **Token vocabulary**
-(producer emits its supported subset; consumer gates feature use on membership):
-`readiness_barrier` · `turn_binding` · `permission_mode` · `agent_args` · `events_cursor` ·
-`events_retention` · `multiplex_watch` · `session_state_seq`. Producer (ai-or-die F19 driver)
-MUST confirm this exact shape + token set HERE before either side codes against it.
+**Response (✅ verified both sides):** `{ capabilities: string[]; controlVersion?: string }`.
+`controlVersion` is a STRING. `capabilities` is a flat `string[]` of snake_case tokens — NOT an
+object of booleans (the original ai-or-die build emitted `{ capabilities: { camelCaseBooleans } }`,
+which made the client's `new Set(response.capabilities)` throw → fail-open always; fixed ai-or-die
+side to the flat array so gating actually works).
+
+**Advertised vocabulary (✅ what ai-or-die emits today — only genuinely-implemented affordances):**
+`permission_mode` · `agent_args` · `turn_binding` · `events_cursor` · `events_retention` ·
+`session_state_seq`. The client gates `create_session` on `permission_mode` / `agent_args`; the
+other four are forward-declarations. **RESERVED, not advertised:** `readiness_barrier` (it's the
+F17 create-response behavior, not a queryable flag) and `multiplex_watch` (client-side F23 fan-out,
+not a distinct server affordance). The producer MAY keep additive extra keys
+(`permissionModes`/`events`/`limits`/…); the client ignores unknown keys.
+
 
 ---
 
