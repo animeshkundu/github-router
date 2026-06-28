@@ -1,4 +1,36 @@
+import { Agent } from "undici"
+
 import { TunnelAuthError } from "./tunnel-auth"
+
+// Runtime-aware "skip TLS verification" for a self-signed direct-HTTPS instance.
+// The mechanism differs by runtime and getting it wrong is silent: the BUILT
+// proxy runs under Node (bin shebang `#!/usr/bin/env node`), whose fetch (undici)
+// IGNORES a per-request `tls` option — only a `dispatcher` relaxes verification.
+// `bun run dev` and the test suite run under Bun, whose fetch honors `tls`. So we
+// detect the runtime and attach the field it actually understands.
+const IS_BUN = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined"
+
+// One lazily-created insecure dispatcher (Node path), shared across instances. It
+// is a SEPARATE connection pool from the global/verified dispatcher, so an
+// unverified socket can never be reused by a verified request.
+let sharedInsecureDispatcher: Agent | undefined
+function insecureDispatcher(): Agent {
+  return (sharedInsecureDispatcher ??= new Agent({ connect: { rejectUnauthorized: false } }))
+}
+
+/**
+ * Attach the runtime-correct TLS-verification-off mechanism to a fetch init for a
+ * single self-signed direct-HTTPS instance: Bun → `tls`, Node → an undici
+ * `dispatcher`. Exported so BOTH runtime branches are unit-testable under one
+ * interpreter (the untested Node branch is exactly what shipped broken).
+ */
+export function applyInsecureTls(init: Record<string, unknown>, isBun: boolean = IS_BUN): void {
+  if (isBun) {
+    init.tls = { rejectUnauthorized: false }
+  } else {
+    init.dispatcher = insecureDispatcher()
+  }
+}
 
 export type FleetErrorCode =
   | "UNREACHABLE"
@@ -64,6 +96,14 @@ export interface FleetClientOptions {
    * (a static token cannot be re-minted, so no retry is attempted).
    */
   onTunnelAuthInvalidate?: () => void
+  /**
+   * Disable TLS certificate verification for this client's requests (for a
+   * direct-HTTPS ai-or-die instance with a SELF-SIGNED cert). Applied per-request
+   * via the runtime-correct mechanism (Bun `tls` / Node undici `dispatcher`).
+   * SECURITY: relaxes chain AND hostname verification; the origin-pinning +
+   * `redirect:"error"` credential boundaries are unaffected. Off unless explicitly true.
+   */
+  insecureTLS?: boolean
 }
 
 export interface CapabilitiesResponse {
@@ -260,6 +300,7 @@ export class FleetClient {
   private readonly fetchFn: typeof fetch
   private readonly getTunnelToken?: () => Promise<string | undefined>
   private readonly onTunnelAuthInvalidate?: () => void
+  private readonly insecureTLS: boolean
 
   constructor(options: FleetClientOptions) {
     this.baseUrl = options.url.replace(/\/+$/, "")
@@ -271,6 +312,7 @@ export class FleetClient {
     this.fetchFn = options.fetchFn ?? globalThis.fetch.bind(globalThis)
     this.getTunnelToken = options.getTunnelToken
     this.onTunnelAuthInvalidate = options.onTunnelAuthInvalidate
+    this.insecureTLS = options.insecureTLS === true
   }
 
   capabilities(signal?: AbortSignal): Promise<CapabilitiesResponse> {
@@ -441,7 +483,7 @@ export class FleetClient {
 
       let response: Response
       try {
-        response = await this.fetchFn(url.toString(), {
+        const init: RequestInit = {
           method,
           headers,
           body: body === undefined ? undefined : JSON.stringify(body),
@@ -450,7 +492,15 @@ export class FleetClient {
           // surface loudly rather than as a silent cleartext first hop.
           redirect: "error",
           signal,
-        })
+        }
+        if (this.insecureTLS) {
+          // Runtime-aware TLS relaxation for a self-signed direct-HTTPS instance,
+          // scoped to THIS request only — the global TLS posture (and Copilot
+          // upstream) is untouched. Origin-pinning above + `redirect:"error"`
+          // still bound credentials.
+          applyInsecureTls(init as unknown as Record<string, unknown>)
+        }
+        response = await this.fetchFn(url.toString(), init)
       } catch (err) {
         // A private Dev Tunnel rejecting a stale connect token 302s -> github
         // auth, which `redirect:"error"` turns into a network-style throw. Evict

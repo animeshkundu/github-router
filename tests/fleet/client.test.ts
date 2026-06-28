@@ -3,6 +3,7 @@ import { describe, expect, mock, test } from "bun:test"
 import {
   FleetClient,
   FleetError,
+  applyInsecureTls,
   decodeSessionId,
   encodeSessionId,
 } from "../../src/lib/fleet/client"
@@ -340,5 +341,50 @@ describe("FleetClient dev tunnel auth headers", () => {
 
     expect(calls).toBe(2)
     expect(invalidated).toBe(1)
+  })
+})
+
+describe("FleetClient insecureTLS", () => {
+  test("attaches tls:{rejectUnauthorized:false} to the fetch init when insecureTLS is set", async () => {
+    let captured: RequestInit | undefined
+    const fetchFn = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+      captured = init
+      return Response.json({ sessions: [] })
+    }) as unknown as typeof fetch
+    const client = new FleetClient({ url: "https://localhost:7777", token: "none", fetchFn, insecureTLS: true })
+
+    await client.listSessions()
+
+    expect((captured as { tls?: unknown }).tls).toEqual({ rejectUnauthorized: false })
+  })
+
+  test("omits the tls field by default so verification stays on", async () => {
+    let captured: RequestInit | undefined
+    const fetchFn = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+      captured = init
+      return Response.json({ sessions: [] })
+    }) as unknown as typeof fetch
+    const client = new FleetClient({ url: "https://localhost:7777", token: "none", fetchFn })
+
+    await client.listSessions()
+
+    expect("tls" in (captured as object)).toBe(false)
+    expect("dispatcher" in (captured as object)).toBe(false)
+  })
+})
+
+describe("applyInsecureTls runtime branches", () => {
+  test("Bun branch attaches `tls`, never a dispatcher", () => {
+    const init: Record<string, unknown> = {}
+    applyInsecureTls(init, true)
+    expect(init.tls).toEqual({ rejectUnauthorized: false })
+    expect("dispatcher" in init).toBe(false)
+  })
+
+  test("Node branch attaches an undici `dispatcher`, never `tls` (the path that shipped broken)", () => {
+    const init: Record<string, unknown> = {}
+    applyInsecureTls(init, false)
+    expect(init.dispatcher).toBeDefined()
+    expect("tls" in init).toBe(false)
   })
 })

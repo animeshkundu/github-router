@@ -982,3 +982,34 @@ describe("fleet MCP tools dev tunnel auth", () => {
     expect(calls.length).toBe(0)
   })
 })
+
+describe("createFleetTools insecureTLS wiring", () => {
+  test("threads insecureTLS into the FleetClient fetch; cache key keeps same-url instances distinct", async () => {
+    const inits: Array<RequestInit | undefined> = []
+    const fetchFn = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+      inits.push(init)
+      return Response.json({ sessions: [] })
+    }) as unknown as typeof fetch
+
+    // Two instances, identical url, differing ONLY by insecureTLS. Exercises the
+    // real clientFor -> new FleetClient path (no createClient override). If the
+    // flag were dropped from the cache key, both would share one client and BOTH
+    // (or neither) inits would carry tls.
+    const registry = new FleetRegistry({
+      config: {
+        instances: [
+          { id: "li", label: "li", url: "https://localhost:7777", token: "none", insecureTLS: true },
+          { id: "ln", label: "ln", url: "https://localhost:7777", token: "none" },
+        ],
+      },
+    })
+    const tools = new Map(createFleetTools({ registry, fetchFn }).map((tool) => [tool.toolNameHttp, tool]))
+
+    await tools.get("list_instances")!.handler({})
+
+    expect(inits.length).toBe(2)
+    const withTls = inits.filter((i) => (i as { tls?: unknown } | undefined)?.tls !== undefined)
+    expect(withTls.length).toBe(1)
+    expect((withTls[0] as { tls?: unknown }).tls).toEqual({ rejectUnauthorized: false })
+  })
+})
