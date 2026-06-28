@@ -1,4 +1,36 @@
+import { Agent } from "undici"
+
 import { TunnelAuthError } from "./tunnel-auth"
+
+// Runtime-aware "skip TLS verification" for a self-signed direct-HTTPS instance.
+// The mechanism differs by runtime and getting it wrong is silent: the BUILT
+// proxy runs under Node (bin shebang `#!/usr/bin/env node`), whose fetch (undici)
+// IGNORES a per-request `tls` option — only a `dispatcher` relaxes verification.
+// `bun run dev` and the test suite run under Bun, whose fetch honors `tls`. So we
+// detect the runtime and attach the field it actually understands.
+const IS_BUN = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined"
+
+// One lazily-created insecure dispatcher (Node path), shared across instances. It
+// is a SEPARATE connection pool from the global/verified dispatcher, so an
+// unverified socket can never be reused by a verified request.
+let sharedInsecureDispatcher: Agent | undefined
+function insecureDispatcher(): Agent {
+  return (sharedInsecureDispatcher ??= new Agent({ connect: { rejectUnauthorized: false } }))
+}
+
+/**
+ * Attach the runtime-correct TLS-verification-off mechanism to a fetch init for a
+ * single self-signed direct-HTTPS instance: Bun → `tls`, Node → an undici
+ * `dispatcher`. Exported so BOTH runtime branches are unit-testable under one
+ * interpreter (the untested Node branch is exactly what shipped broken).
+ */
+export function applyInsecureTls(init: Record<string, unknown>, isBun: boolean = IS_BUN): void {
+  if (isBun) {
+    init.tls = { rejectUnauthorized: false }
+  } else {
+    init.dispatcher = insecureDispatcher()
+  }
+}
 
 export type FleetErrorCode =
   | "UNREACHABLE"
@@ -65,11 +97,11 @@ export interface FleetClientOptions {
    */
   onTunnelAuthInvalidate?: () => void
   /**
-   * Disable TLS certificate verification for this client's requests (sends
-   * `tls: { rejectUnauthorized: false }` on each fetch). For a direct-HTTPS
-   * ai-or-die instance with a SELF-SIGNED cert. SECURITY: relaxes chain AND
-   * hostname verification; the origin-pinning + `redirect:"error"` credential
-   * boundaries are unaffected. Off unless explicitly true.
+   * Disable TLS certificate verification for this client's requests (for a
+   * direct-HTTPS ai-or-die instance with a SELF-SIGNED cert). Applied per-request
+   * via the runtime-correct mechanism (Bun `tls` / Node undici `dispatcher`).
+   * SECURITY: relaxes chain AND hostname verification; the origin-pinning +
+   * `redirect:"error"` credential boundaries are unaffected. Off unless explicitly true.
    */
   insecureTLS?: boolean
 }
@@ -462,11 +494,11 @@ export class FleetClient {
           signal,
         }
         if (this.insecureTLS) {
-          // Bun-specific per-request TLS relaxation for a self-signed direct-HTTPS
-          // instance. `RequestInit` has no `tls` field, so attach via a cast. Scoped
-          // to THIS client only — the global TLS posture (and Copilot upstream) is
-          // untouched. Origin-pinning above + `redirect:"error"` still bound credentials.
-          ;(init as { tls?: { rejectUnauthorized: boolean } }).tls = { rejectUnauthorized: false }
+          // Runtime-aware TLS relaxation for a self-signed direct-HTTPS instance,
+          // scoped to THIS request only — the global TLS posture (and Copilot
+          // upstream) is untouched. Origin-pinning above + `redirect:"error"`
+          // still bound credentials.
+          applyInsecureTls(init as unknown as Record<string, unknown>)
         }
         response = await this.fetchFn(url.toString(), init)
       } catch (err) {

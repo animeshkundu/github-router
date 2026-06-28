@@ -3,6 +3,7 @@ import { describe, expect, mock, test } from "bun:test"
 import {
   FleetClient,
   FleetError,
+  applyInsecureTls,
   decodeSessionId,
   encodeSessionId,
 } from "../../src/lib/fleet/client"
@@ -368,5 +369,22 @@ describe("FleetClient insecureTLS", () => {
     await client.listSessions()
 
     expect("tls" in (captured as object)).toBe(false)
+    expect("dispatcher" in (captured as object)).toBe(false)
+  })
+})
+
+describe("applyInsecureTls runtime branches", () => {
+  test("Bun branch attaches `tls`, never a dispatcher", () => {
+    const init: Record<string, unknown> = {}
+    applyInsecureTls(init, true)
+    expect(init.tls).toEqual({ rejectUnauthorized: false })
+    expect("dispatcher" in init).toBe(false)
+  })
+
+  test("Node branch attaches an undici `dispatcher`, never `tls` (the path that shipped broken)", () => {
+    const init: Record<string, unknown> = {}
+    applyInsecureTls(init, false)
+    expect(init.dispatcher).toBeDefined()
+    expect("tls" in init).toBe(false)
   })
 })

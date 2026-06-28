@@ -49,8 +49,10 @@ long-polls out across instances.
   is rejected at load (no silent coercion); so is `insecureTLS` on an `http` url (no TLS to relax) or on a Dev
   Tunnel instance (host under `*.devtunnels.ms`, or one carrying `tunnelId`/`tunnelToken`) — those already get a
   valid public cert, so the flag there would only weaken security. `insecureTLS` is never returned by
-  `list_instances`. (Runtime note: the relax uses Bun's per-request `tls` option; under a Node/undici `fetch` it
-  would silently no-op — the proxy runs on Bun.)
+  `list_instances`. (Runtime note: the relax is runtime-aware — an undici `Agent` dispatcher under Node, which
+  is the BUILT proxy's runtime (`dist/main.js` shebang `#!/usr/bin/env node`), and Bun's `tls` fetch option
+  under `bun run dev` / the test suite. Node's fetch ignores a per-request `tls` option, so a Bun-only
+  implementation would silently no-op in production.)
 - **Addressing:** existing-session ops take a global `sessionId` of the form `instanceId:localId` and route by
   it; instance-scoped ops (`list_sessions`, `create_session`, reads) take an `instance` (id or label, resolved
   and echoed as `resolvedInstance`); ambiguous labels error; **no default** for create/exec/write.
