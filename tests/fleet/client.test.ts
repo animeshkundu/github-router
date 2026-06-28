@@ -342,3 +342,31 @@ describe("FleetClient dev tunnel auth headers", () => {
     expect(invalidated).toBe(1)
   })
 })
+
+describe("FleetClient insecureTLS", () => {
+  test("attaches tls:{rejectUnauthorized:false} to the fetch init when insecureTLS is set", async () => {
+    let captured: RequestInit | undefined
+    const fetchFn = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+      captured = init
+      return Response.json({ sessions: [] })
+    }) as unknown as typeof fetch
+    const client = new FleetClient({ url: "https://localhost:7777", token: "none", fetchFn, insecureTLS: true })
+
+    await client.listSessions()
+
+    expect((captured as { tls?: unknown }).tls).toEqual({ rejectUnauthorized: false })
+  })
+
+  test("omits the tls field by default so verification stays on", async () => {
+    let captured: RequestInit | undefined
+    const fetchFn = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+      captured = init
+      return Response.json({ sessions: [] })
+    }) as unknown as typeof fetch
+    const client = new FleetClient({ url: "https://localhost:7777", token: "none", fetchFn })
+
+    await client.listSessions()
+
+    expect("tls" in (captured as object)).toBe(false)
+  })
+})

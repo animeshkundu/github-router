@@ -308,3 +308,73 @@ describe("FleetRegistry tunnel auth fields", () => {
     expect(infos[0]).not.toHaveProperty("tunnelId")
   })
 })
+
+describe("FleetRegistry insecureTLS flag", () => {
+  test("resolveInstance carries insecureTLS when set true", async () => {
+    const registry = new FleetRegistry({
+      config: { instances: [{ id: "local", label: "Local", url: "https://localhost:7777", token: "none", insecureTLS: true }] },
+    })
+
+    expect((await registry.resolveInstance("local")).insecureTLS).toBe(true)
+  })
+
+  test("leaves insecureTLS undefined when absent or explicitly false (fails closed)", async () => {
+    const registry = new FleetRegistry({
+      config: {
+        instances: [
+          { id: "a", label: "A", url: "https://a.example", token: "t", insecureTLS: false },
+          { id: "b", label: "B", url: "https://b.example", token: "t" },
+        ],
+      },
+    })
+
+    expect((await registry.resolveInstance("a")).insecureTLS).toBeUndefined()
+    expect((await registry.resolveInstance("b")).insecureTLS).toBeUndefined()
+  })
+
+  test("rejects a non-boolean insecureTLS with INVALID_CONFIG (no silent coercion)", async () => {
+    const registry = new FleetRegistry({
+      config: {
+        instances: [
+          { id: "x", label: "X", url: "https://x.example", token: "t", insecureTLS: "true" as unknown as boolean },
+        ],
+      },
+    })
+
+    await expectRegistryError(registry.listInstances(), "INVALID_CONFIG")
+  })
+
+  test("never exposes insecureTLS in listInstances output", async () => {
+    const registry = new FleetRegistry({
+      config: { instances: [{ id: "local", label: "Local", url: "https://localhost:7777", token: "none", insecureTLS: true }] },
+    })
+
+    const [info] = await registry.listInstances()
+
+    expect(info).not.toHaveProperty("insecureTLS")
+  })
+
+  test("rejects insecureTLS on an http (localhost) url — no TLS to relax", async () => {
+    const registry = new FleetRegistry({
+      config: { instances: [{ id: "h", label: "H", url: "http://localhost:7777", token: "none", insecureTLS: true }] },
+    })
+
+    await expectRegistryError(registry.listInstances(), "INVALID_CONFIG")
+  })
+
+  test("rejects insecureTLS on a Dev Tunnel host (valid public cert; foot-gun)", async () => {
+    const registry = new FleetRegistry({
+      config: { instances: [{ id: "t", label: "T", url: "https://abc-7777.usw2.devtunnels.ms", token: "none", insecureTLS: true }] },
+    })
+
+    await expectRegistryError(registry.listInstances(), "INVALID_CONFIG")
+  })
+
+  test("rejects insecureTLS when tunnelId is present (a tunnel instance)", async () => {
+    const registry = new FleetRegistry({
+      config: { instances: [{ id: "t", label: "T", url: "https://host.example", token: "none", tunnelId: "aiordie-x-gh.usw2", insecureTLS: true }] },
+    })
+
+    await expectRegistryError(registry.listInstances(), "INVALID_CONFIG")
+  })
+})

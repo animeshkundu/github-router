@@ -138,7 +138,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
   }
 
   function clientFor(instance: FleetResolvedInstance): FleetClientLike {
-    const key = `${instance.id}\0${instance.url}\0${instance.token}\0${instance.tunnelId ?? ""}\0${instance.tunnelToken ?? ""}`
+    const key = `${instance.id}\0${instance.url}\0${instance.token}\0${instance.tunnelId ?? ""}\0${instance.tunnelToken ?? ""}\0${instance.insecureTLS === true ? "1" : "0"}`
     const existing = clients.get(key)
     if (existing) return existing
     const created = options.createClient
@@ -147,6 +147,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
           url: instance.url,
           token: instance.token,
           fetchFn: options.fetchFn,
+          insecureTLS: instance.insecureTLS,
           ...tunnelClientOptions(instance, tunnelProvider),
         })
     clients.set(key, created)

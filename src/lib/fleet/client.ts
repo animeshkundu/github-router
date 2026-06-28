@@ -64,6 +64,14 @@ export interface FleetClientOptions {
    * (a static token cannot be re-minted, so no retry is attempted).
    */
   onTunnelAuthInvalidate?: () => void
+  /**
+   * Disable TLS certificate verification for this client's requests (sends
+   * `tls: { rejectUnauthorized: false }` on each fetch). For a direct-HTTPS
+   * ai-or-die instance with a SELF-SIGNED cert. SECURITY: relaxes chain AND
+   * hostname verification; the origin-pinning + `redirect:"error"` credential
+   * boundaries are unaffected. Off unless explicitly true.
+   */
+  insecureTLS?: boolean
 }
 
 export interface CapabilitiesResponse {
@@ -260,6 +268,7 @@ export class FleetClient {
   private readonly fetchFn: typeof fetch
   private readonly getTunnelToken?: () => Promise<string | undefined>
   private readonly onTunnelAuthInvalidate?: () => void
+  private readonly insecureTLS: boolean
 
   constructor(options: FleetClientOptions) {
     this.baseUrl = options.url.replace(/\/+$/, "")
@@ -271,6 +280,7 @@ export class FleetClient {
     this.fetchFn = options.fetchFn ?? globalThis.fetch.bind(globalThis)
     this.getTunnelToken = options.getTunnelToken
     this.onTunnelAuthInvalidate = options.onTunnelAuthInvalidate
+    this.insecureTLS = options.insecureTLS === true
   }
 
   capabilities(signal?: AbortSignal): Promise<CapabilitiesResponse> {
@@ -441,7 +451,7 @@ export class FleetClient {
 
       let response: Response
       try {
-        response = await this.fetchFn(url.toString(), {
+        const init: RequestInit = {
           method,
           headers,
           body: body === undefined ? undefined : JSON.stringify(body),
@@ -450,7 +460,15 @@ export class FleetClient {
           // surface loudly rather than as a silent cleartext first hop.
           redirect: "error",
           signal,
-        })
+        }
+        if (this.insecureTLS) {
+          // Bun-specific per-request TLS relaxation for a self-signed direct-HTTPS
+          // instance. `RequestInit` has no `tls` field, so attach via a cast. Scoped
+          // to THIS client only — the global TLS posture (and Copilot upstream) is
+          // untouched. Origin-pinning above + `redirect:"error"` still bound credentials.
+          ;(init as { tls?: { rejectUnauthorized: boolean } }).tls = { rejectUnauthorized: false }
+        }
+        response = await this.fetchFn(url.toString(), init)
       } catch (err) {
         // A private Dev Tunnel rejecting a stale connect token 302s -> github
         // auth, which `redirect:"error"` turns into a network-style throw. Evict

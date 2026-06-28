@@ -25,6 +25,21 @@ export interface FleetInstanceConfig {
    * or an anonymous tunnel. A credential: kept out of `FleetInstanceInfo` and logs.
    */
   tunnelToken?: string
+  /**
+   * Disable TLS certificate verification for THIS instance's requests only
+   * (sends `tls: { rejectUnauthorized: false }` on each fetch). Intended for a
+   * direct-HTTPS ai-or-die instance that serves a SELF-SIGNED cert (e.g.
+   * `ai-or-die --https` on loopback or the LAN) — the FleetClient otherwise
+   * rejects it with `self signed certificate`. Tunnel instances never need this
+   * (`*.devtunnels.ms` presents a valid public cert).
+   *
+   * SECURITY: this disables both chain AND hostname verification for this one
+   * instance, so a MITM on the path could impersonate the host and capture the
+   * Bearer. Safe on loopback; a deliberate trade-off on a trusted LAN. The
+   * origin-pinning + `redirect:"error"` credential boundaries still hold — only
+   * cert verification is relaxed. Off (verification on) unless explicitly `true`.
+   */
+  insecureTLS?: boolean
 }
 
 export interface FleetRegistryConfig {
@@ -39,6 +54,7 @@ export interface FleetResolvedInstance {
   allowExec?: boolean
   tunnelId?: string
   tunnelToken?: string
+  insecureTLS?: boolean
 }
 
 export interface FleetInstanceInfo {
@@ -239,6 +255,28 @@ function parseInstance(raw: unknown): FleetInstanceConfig {
 
   const tunnelId = parseTunnelId(id, instance.tunnelId)
   const tunnelToken = parseTunnelToken(id, instance.tunnelToken)
+  const insecureTLS = parseInsecureTLS(id, instance.insecureTLS)
+  if (insecureTLS) {
+    // Reject the foot-gun combinations rather than silently honoring them:
+    // - an http url has no TLS to relax (insecureTLS is meaningless there);
+    // - a Dev Tunnel instance (host under .devtunnels.ms, or one using tunnelId/
+    //   tunnelToken auth) already gets a VALID public cert from the relay, so
+    //   disabling verification buys nothing and only exposes the bearer / tunnel
+    //   token to a MITM. insecureTLS is exclusively for a direct-HTTPS self-signed host.
+    if (parsedUrl.protocol !== "https:") {
+      throw new FleetRegistryError(
+        "INVALID_CONFIG",
+        `fleet registry instance ${id} insecureTLS only applies to an https url (an http url has no TLS to relax)`,
+      )
+    }
+    if (DEVTUNNEL_HOST_RE.test(parsedUrl.hostname) || tunnelId !== undefined || tunnelToken !== undefined) {
+      throw new FleetRegistryError(
+        "INVALID_CONFIG",
+        `fleet registry instance ${id} insecureTLS must not be set on a Dev Tunnel instance; `
+          + "*.devtunnels.ms presents a valid public cert, so disabling verification only exposes the bearer/tunnel token to MITM",
+      )
+    }
+  }
 
   return {
     id: id.trim(),
@@ -249,6 +287,7 @@ function parseInstance(raw: unknown): FleetInstanceConfig {
     allowExec: instance.allowExec === true ? true : undefined,
     tunnelId,
     tunnelToken,
+    insecureTLS,
   }
 }
 
@@ -290,6 +329,20 @@ function parseTunnelToken(id: string, raw: unknown): string | undefined {
     )
   }
   return t
+}
+
+function parseInsecureTLS(id: string, raw: unknown): boolean | undefined {
+  if (raw === undefined) return undefined
+  // A security flag must not be silently coerced: a `"true"` string or `1` is a
+  // misconfiguration the user expects to ENABLE the relax, so reject loudly
+  // rather than fail closed and leave them staring at a `self signed certificate`.
+  if (typeof raw !== "boolean") {
+    throw new FleetRegistryError(
+      "INVALID_CONFIG",
+      `fleet registry instance ${id} insecureTLS must be a boolean`,
+    )
+  }
+  return raw === true ? true : undefined
 }
 
 function invalidInstanceUrlError(id: string): FleetRegistryError {
@@ -342,6 +395,7 @@ function resolvedInstance(instance: FleetInstanceConfig): FleetResolvedInstance 
     allowExec: instance.allowExec,
     tunnelId: instance.tunnelId,
     tunnelToken: instance.tunnelToken,
+    insecureTLS: instance.insecureTLS,
   }
 }
 

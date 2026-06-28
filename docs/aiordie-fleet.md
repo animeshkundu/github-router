@@ -12,7 +12,7 @@ long-polls out across instances.
 
 - **Opt-in:** `--fleet` or `GH_ROUTER_ENABLE_FLEET=1` (gated like `--browse`). Off by default.
 - **Registry:** `~/.local/share/github-router/fleet.json` (override `GH_ROUTER_FLEET_CONFIG`):
-  `{ "instances": [ { "id", "label", "url", "token", "tunnelId?", "tunnelToken?", "default?", "allowExec?" } ] }`.
+  `{ "instances": [ { "id", "label", "url", "token", "tunnelId?", "tunnelToken?", "insecureTLS?", "default?", "allowExec?" } ] }`.
   `url` must be **https** (or `http://localhost` for local testing) and carry no embedded userinfo. `token` is
   the instance's ai-or-die Bearer; it lives ONLY here, is sent as `Authorization: Bearer`, is NEVER returned by
   `list_instances`, and never enters the model's context. Keep the file `0600` (a warning is logged if it is
@@ -36,6 +36,21 @@ long-polls out across instances.
   `.devtunnels.ms` origin. Failures surface as an actionable `AUTH_FAILED` in the tool result (e.g. *"run
   `devtunnel user login`"* / *"verify tunnelId with `devtunnel list`"*), never an opaque `UNREACHABLE`; the
   provider backs off on repeated failures and force-re-mints once on a mid-session auth failure.
+- **Direct-HTTPS self-signed instance (`insecureTLS`):** an ai-or-die instance reached directly over HTTPS
+  WITHOUT a tunnel (e.g. `ai-or-die --https` on loopback or a trusted LAN host) serves a SELF-SIGNED cert
+  (`CN=ai-or-die`, SAN = `localhost` / loopback / the primary LAN IP — note: NOT the `.local` mDNS name). The
+  FleetClient uses the runtime's default `fetch`, which rejects that cert with `self signed certificate`, so set
+  `"insecureTLS": true` on that instance to send `tls: { rejectUnauthorized: false }` for its requests only.
+  Tunnel instances never need it (`*.devtunnels.ms` presents a valid public cert). **SECURITY:** this disables
+  chain AND hostname verification for the one instance (so the IP/`.local`/`localhost` URL forms all work, but a
+  MITM on the path could impersonate the host and capture the Bearer) — safe on loopback, a deliberate
+  trade-off on a trusted LAN. It is scoped to that instance: the global TLS posture and the Copilot upstream are
+  untouched, and the origin-pinning + `redirect:"error"` credential boundaries still hold. A non-boolean value
+  is rejected at load (no silent coercion); so is `insecureTLS` on an `http` url (no TLS to relax) or on a Dev
+  Tunnel instance (host under `*.devtunnels.ms`, or one carrying `tunnelId`/`tunnelToken`) — those already get a
+  valid public cert, so the flag there would only weaken security. `insecureTLS` is never returned by
+  `list_instances`. (Runtime note: the relax uses Bun's per-request `tls` option; under a Node/undici `fetch` it
+  would silently no-op — the proxy runs on Bun.)
 - **Addressing:** existing-session ops take a global `sessionId` of the form `instanceId:localId` and route by
   it; instance-scoped ops (`list_sessions`, `create_session`, reads) take an `instance` (id or label, resolved
   and echoed as `resolvedInstance`); ambiguous labels error; **no default** for create/exec/write.
