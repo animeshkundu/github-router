@@ -12,21 +12,44 @@ long-polls out across instances.
 
 - **Opt-in:** `--fleet` or `GH_ROUTER_ENABLE_FLEET=1` (gated like `--browse`). Off by default.
 - **Registry:** `~/.local/share/github-router/fleet.json` (override `GH_ROUTER_FLEET_CONFIG`):
-  `{ "instances": [ { "id", "label", "url", "token", "default?", "allowExec?" } ] }`. `url` must be **https**
-  (or `http://localhost` for local testing). `token` is the instance's ai-or-die Bearer; it lives ONLY here,
-  is sent as `Authorization: Bearer`, is NEVER returned by `list_instances`, and never enters the model's
-  context. Keep the file `0600` (a warning is logged if it is group/other-readable).
+  `{ "instances": [ { "id", "label", "url", "token", "tunnelId?", "tunnelToken?", "default?", "allowExec?" } ] }`.
+  `url` must be **https** (or `http://localhost` for local testing) and carry no embedded userinfo. `token` is
+  the instance's ai-or-die Bearer; it lives ONLY here, is sent as `Authorization: Bearer`, is NEVER returned by
+  `list_instances`, and never enters the model's context. Keep the file `0600` (a warning is logged if it is
+  group/other-readable).
+- **Private Dev Tunnel auth (`tunnelId` / `tunnelToken`):** ai-or-die hosts its tunnel with
+  `devtunnel ... --allow-anonymous` by default (ADR-0002/0032 there), so the **simplest setup is an anonymous
+  tunnel** — the required ai-or-die Bearer is the real access control, and github-router needs no tunnel auth
+  (it always sends `X-Tunnel-Skip-Anti-Phishing-Page: true`). For a **private** tunnel (one that 302-redirects to
+  GitHub auth), set per instance one of:
+  - **`tunnelId`** (recommended for private): the devtunnel tunnel NAME from `devtunnel list` on the host
+    (e.g. `aiordie-myhost-gh` or `aiordie-myhost-gh.usw2`) — NOT the public URL subdomain. github-router
+    auto-mints a `connect`-scope token via `devtunnel token <id> --scopes connect --json`, caches it per tunnel,
+    and re-mints ~5 min before its 24h expiry. **Prerequisite:** the `devtunnel` CLI installed AND a one-time
+    `devtunnel user login` **on the control-plane machine**, whose identity must have mint rights on **every**
+    fleet tunnel. The connect token never enters logs or model context.
+  - **`tunnelToken`** (manual fallback): a static `connect` token. Dev Tunnel tokens are 24h, fixed, and NOT
+    refreshable, so this goes stale daily and must be re-pasted — prefer `tunnelId` or anonymous. A `tunnel `
+    scheme prefix is normalized off; whitespace/empty is rejected.
+
+  The token is sent as `X-Tunnel-Authorization: tunnel <token>` ONLY on a request whose host is the pinned
+  `.devtunnels.ms` origin. Failures surface as an actionable `AUTH_FAILED` in the tool result (e.g. *"run
+  `devtunnel user login`"* / *"verify tunnelId with `devtunnel list`"*), never an opaque `UNREACHABLE`; the
+  provider backs off on repeated failures and force-re-mints once on a mid-session auth failure.
 - **Addressing:** existing-session ops take a global `sessionId` of the form `instanceId:localId` and route by
   it; instance-scoped ops (`list_sessions`, `create_session`, reads) take an `instance` (id or label, resolved
   and echoed as `resolvedInstance`); ambiguous labels error; **no default** for create/exec/write.
 - **Tools (`mcp__fleet__*`):** `list_instances` (probes reachability, ~5s cached), `list_sessions`,
   `read_session`, `session_status`, `send_message` (LOUD `isError` on unconfirmed delivery), `send_keys`,
   `respond`, `create_session`, `stop_session`, `await_turn` (server-managed per-client cursor; epoch/gap-safe;
-  merges events across instances), `read_file`/`list_dir`/`search`/`git_show`.
-- **Safety:** the client (`FleetClient`) sends the bearer with `redirect:"error"` so a redirect can never
-  re-send the token to another origin and an http→https hop surfaces loudly. `create`/`stop` forward an
+  merges events across instances), `read_file`/`list_dir`/`search`/`git_show`. To spin up a remote
+  `npx github-router@latest claude --browse`, call `create_session` with `agent: "claude"` + `start: true`
+  (ai-or-die's claude bridge resolves that command); confirm headless start works on your ai-or-die build.
+- **Safety:** the client (`FleetClient`) pins the registry origin and asserts every request stays on it, then
+  sends the bearer (and any tunnel token) with `redirect:"error"` so a redirect can never re-send a credential
+  to another origin and a private tunnel's 302→github-auth surfaces loudly. `create`/`stop` forward an
   `idempotencyKey` (ai-or-die dedupes it).
-- **Implementation:** `src/lib/fleet/{registry,client,tools}.ts`; group registered in
+- **Implementation:** `src/lib/fleet/{registry,client,tools,tunnel-auth}.ts`; group registered in
   `src/lib/peer-mcp-personas.ts`; gate `fleetToolsEnabled()` in `src/lib/mcp-capabilities.ts` + `handler.ts`;
   opt-in in `src/lib/server-setup.ts` / `src/claude.ts`.
 
