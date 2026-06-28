@@ -135,8 +135,17 @@ best-effort window, NOT a deadline (recommended: `awaitMs:0` + `await_turn`).
 
 **Query:** `cursor?`, `timeoutMs?`, `sessionIds?` (comma-joined), `kinds?` (comma-joined).
 **Response** (`WaitEventsResponse`): `{ events[], gaps[], cursor, more }`.
-- `cursor` is a **STRING** on the wire (`"epoch:seq"`); **OPAQUE** to the client (🔶 F22 — never
-  parse it). `more` is always **`false`**.
+- `cursor` is a **STRING** on the wire (`"epoch:seq"`); **OPAQUE** to the client (✅ F22 — never
+  parse it; the client only echoes back what the server gave). `more` is always **`false`**.
+- **Cursor semantics (✅ verified + review-hardened both sides):**
+  - **absent cursor = watch-from-current-head**: the server anchors at the head when no cursor is
+    passed, returns events STRICTLY AFTER the wait starts — no history replay, and (post FIX-A) **no
+    dropped waking event**. The client correctly sends NO cursor on a watcher's first poll. (The
+    original server dropped a fresh watcher's first waking event on a falsy cursor — the core
+    create→message→await_turn path; fixed server-side.)
+  - **present-but-malformed cursor → HTTP 400 `INVALID_ARGUMENT`** (negative / fractional /
+    unsafe-int). The client never malforms a cursor (opaque echo), so it never trips this; if it
+    did, it maps 400 → `BAD_REQUEST`.
 - event: `{ seq: number, sessionId: string|null, kind: string, at: number, detail? }`.
   ⚠️ **`at` is a NUMBER** (DRIFT A above); `sessionId` is `null` (not omitted) when absent.
 - **`kind` literals (✅ frozen `EVENT_KINDS`):** `turn_ended` \| `became_idle` \| `became_busy`
@@ -144,9 +153,14 @@ best-effort window, NOT a deadline (recommended: `awaitMs:0` + `await_turn`).
   (`crashed` is declared but never appended — lifecycle `'crashed'` is derived by
   `deriveStatus`, not emitted as an event; treat the live set as 7.)
 - `gaps[]`: ✅ `{ reason: "restart" }` or `{ reason: "overflow", fromSeq, toSeq }`. The
-  consumer's `{reason?}` is a harmless superset. 🔶 F15 retention reuses **`overflow`** (with
-  `fromSeq`/`toSeq`) when a cursor is older than the retained window — do NOT invent a new
-  `cursor_too_old` reason; the client treats `overflow` as "resync from the returned cursor."
+  consumer's `{reason?}` is a harmless superset. ✅ F15 retention reuses **`overflow`** (with
+  `fromSeq`/`toSeq`) when a cursor is older than the retained window — never a new `cursor_too_old`
+  reason. **Overflow policy (✅ decided):** the client treats `overflow` as a **model-surfaced
+  signal** — it surfaces the gap + advances to the returned fresh cursor (+ post-gap events) and
+  does NOT auto-call `GET /snapshot`. `/snapshot` exists for an explicit full-resync but is not
+  required (await_turn is a turn-completion watcher; the model gets current state from the fresh
+  cursor + a `session_status` re-query). A filtered watcher (post FIX-B per-bucket evicted
+  watermark) only sees `overflow` caused by ITS OWN filtered eviction, never another session's.
 
 ---
 
