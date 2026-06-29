@@ -153,10 +153,44 @@ describe("artifact MCP tools", () => {
     ])
   })
 
+  test("artifact_end posts the end request and returns ok", async () => {
+    setArtifactEnv()
+    const calls: Array<{ url: string; method: string; body?: unknown; auth?: string; redirect?: string }> = []
+    globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({
+        url: url.toString(),
+        method: init?.method ?? "GET",
+        body: typeof init?.body === "string" ? JSON.parse(init.body) as unknown : undefined,
+        auth: init?.headers instanceof Headers
+          ? init.headers.get("authorization") ?? undefined
+          : (init?.headers as Record<string, string> | undefined)?.Authorization,
+        redirect: init?.redirect,
+      })
+      return new Response(null, { status: 204 })
+    }) as unknown as typeof fetch
+
+    const { result, json } = await callTool("artifact_end", {})
+
+    expect(result.isError).toBeUndefined()
+    expect(json).toEqual({
+      ok: true,
+      next_step: "Artifact review loop ended.",
+    })
+    expect(calls).toEqual([
+      {
+        url: "https://ai.example/api/artifact/sess-1/end",
+        method: "POST",
+        body: undefined,
+        auth: "Bearer tok-artifact",
+        redirect: "error",
+      },
+    ])
+  })
+
   test("returns isError when the ai-or-die environment trio is missing", async () => {
     clearArtifactEnv()
 
-    for (const name of ["artifact_open", "artifact_poll", "artifact_reply"]) {
+    for (const name of ["artifact_open", "artifact_poll", "artifact_reply", "artifact_end"]) {
       const { result, json } = await callTool(name, { file: "src/App.tsx", text: "done" })
 
       expect(result.isError).toBe(true)
