@@ -17,8 +17,9 @@ import {
 import { enableFileLogging } from "./lib/file-log-reporter"
 import { getCodexVersion, launchChild } from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
-import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror } from "./lib/paths"
+import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror, writeArtifactCredsToMirror } from "./lib/paths"
 import {
+  buildArtifactOpenHookCommand,
   buildSessionBindHookCommand,
   buildStopHookCommand,
   captureLaunchBaseline,
@@ -47,6 +48,7 @@ import {
 import { liveExec } from "./lib/orchestration/live-exec"
 import { buildPromptSubmitHookCommand } from "./lib/orchestration/prompt-submit-hook"
 import { ARTIFACT_REVIEW_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
+import { shouldUseInsecureTls } from "./lib/artifact/tools"
 import { parseBoolEnv } from "./lib/exec"
 import nodePath from "node:path"
 import { tmpdir } from "node:os"
@@ -604,6 +606,18 @@ export const claude = defineCommand({
             await prependArtifactPanelDirectiveToMirroredClaudeMd()
           } catch (err) {
             consola.warn(`Artifact-panel directive prepend failed: ${String(err)}`)
+          }
+          // Hands-off auto-open: write the artifact creds to a mode-600 mirror
+          // file (AIORDIE_TOKEN is stripped from the child env, and argv leaks to
+          // ps), then register a PostToolUse(ExitPlanMode) hook so the finalized
+          // plan opens in the panel without the model calling artifact_open.
+          try {
+            await writeArtifactCredsToMirror(shouldUseInsecureTls(process.env.AIORDIE_BASE_URL ?? ""))
+            const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+            const cmd = buildArtifactOpenHookCommand(process.execPath, process.argv[1])
+            await injectStopHookIntoSettingsFile(settingsPath, cmd, "PostToolUse", undefined, "ExitPlanMode")
+          } catch (err) {
+            consola.warn(`Could not register the artifact auto-open hook: ${String(err)}`)
           }
         }
 

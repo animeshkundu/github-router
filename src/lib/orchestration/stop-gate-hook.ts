@@ -162,6 +162,7 @@ export function mergeStopHookIntoSettings(
   command: string,
   event: string = "Stop",
   timeoutSec?: number,
+  matcher?: string,
 ): Record<string, unknown> {
   const base: Record<string, unknown> = existing && typeof existing === "object" ? { ...existing } : {}
   const hooks: Record<string, unknown> =
@@ -172,7 +173,7 @@ export function mergeStopHookIntoSettings(
     if (typeof timeoutSec === "number" && Number.isFinite(timeoutSec) && timeoutSec > 0) {
       hook.timeout = timeoutSec
     }
-    arr.push({ hooks: [hook] })
+    arr.push(matcher ? { matcher, hooks: [hook] } : { hooks: [hook] })
   }
   hooks[event] = arr
   base.hooks = hooks
@@ -552,6 +553,14 @@ export function buildSessionBindHookCommand(
   return `${head} internal-session-bind --out ${q(outPath)}`
 }
 
+/** Command for the `internal-artifact-open` hook (no args — token comes from the
+ *  mirror creds file, plan from the plans dir; nothing secret in argv). */
+export function buildArtifactOpenHookCommand(execPath: string, scriptPath: string | undefined): string {
+  const q = (s: string): string => `"${s}"`
+  const head = scriptPath && scriptPath !== execPath ? `${q(execPath)} ${q(scriptPath)}` : q(execPath)
+  return `${head} internal-artifact-open`
+}
+
 /**
  * Read-merge-atomic-write the Stop hook into a Claude Code `settings.json` file
  * (the mirrored one). A MISSING file (ENOENT) starts from `{}`; any OTHER read or
@@ -565,6 +574,7 @@ export async function injectStopHookIntoSettingsFile(
   command: string,
   event: string = "Stop",
   timeoutSec?: number,
+  matcher?: string,
 ): Promise<Record<string, unknown>> {
   let existing: Record<string, unknown> = {}
   let raw: string | undefined
@@ -583,7 +593,7 @@ export async function injectStopHookIntoSettingsFile(
       throw new Error(`settings.json at ${settingsPath} is not a JSON object; refusing to overwrite`)
     }
   }
-  const merged = mergeStopHookIntoSettings(existing, command, event, timeoutSec)
+  const merged = mergeStopHookIntoSettings(existing, command, event, timeoutSec, matcher)
   const tmp = `${settingsPath}.${process.pid}.tmp`
   await fs.writeFile(tmp, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 })
   await fs.rename(tmp, settingsPath)

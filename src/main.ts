@@ -10,6 +10,7 @@ import { codex } from "./codex"
 import { debug } from "./debug"
 import { internalPromptSubmit } from "./internal-prompt-submit"
 import { internalSessionBind } from "./internal-session-bind"
+import { internalArtifactOpen } from "./internal-artifact-open"
 import { internalStopHook } from "./internal-stop-hook"
 import { internalStopReview } from "./internal-stop-review"
 import { getPackageVersion } from "./lib/version"
@@ -44,6 +45,7 @@ const isInternalHook =
   || argv[0] === "internal-prompt-submit"
   || argv[0] === "internal-stop-review"
   || argv[0] === "internal-session-bind"
+  || argv[0] === "internal-artifact-open"
 if (!isVersionFlag && !isInternalHook) {
   consola.info(`github-router v${version}`)
 }
@@ -55,7 +57,7 @@ const main = defineCommand({
     description:
       "A reverse proxy that exposes GitHub Copilot as OpenAI and Anthropic compatible API endpoints.",
   },
-  subCommands: { auth, start, claude, codex, models, "check-usage": checkUsage, debug, "internal-stop-hook": internalStopHook, "internal-prompt-submit": internalPromptSubmit, "internal-stop-review": internalStopReview, "internal-session-bind": internalSessionBind },
+  subCommands: { auth, start, claude, codex, models, "check-usage": checkUsage, debug, "internal-stop-hook": internalStopHook, "internal-prompt-submit": internalPromptSubmit, "internal-stop-review": internalStopReview, "internal-session-bind": internalSessionBind, "internal-artifact-open": internalArtifactOpen },
 })
 
 await runMain(main)

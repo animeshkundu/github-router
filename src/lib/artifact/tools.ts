@@ -122,7 +122,7 @@ function readArtifactEnv(): ArtifactEnv | undefined {
 // other host. `localhost` is excluded from auto-detect (it can be remapped to a
 // non-loopback IP) — it requires an explicit AIORDIE_INSECURE_TLS=1; AIORDIE
 // emits the explicit flag for the https case, so this stays belt-and-suspenders.
-function shouldUseInsecureTls(baseUrl: string): boolean {
+export function shouldUseInsecureTls(baseUrl: string): boolean {
   let url: URL
   try {
     url = new URL(baseUrl)
