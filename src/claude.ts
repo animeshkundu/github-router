@@ -46,13 +46,13 @@ import {
 } from "./lib/orchestration/gate-discovery"
 import { liveExec } from "./lib/orchestration/live-exec"
 import { buildPromptSubmitHookCommand } from "./lib/orchestration/prompt-submit-hook"
-import { INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
+import { ARTIFACT_REVIEW_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
 import { parseBoolEnv } from "./lib/exec"
 import nodePath from "node:path"
 import { tmpdir } from "node:os"
 import { randomBytes } from "node:crypto"
 import { buildPeerAwarenessSnippet, type McpGroup } from "./lib/peer-mcp-personas"
-import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
+import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, prependArtifactPanelDirectiveToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { provisionAndIndexColbert } from "./lib/colbert"
@@ -588,6 +588,22 @@ export const claude = defineCommand({
             await injectStopHookIntoSettingsFile(settingsPath, command, "SessionEnd")
           } catch (err) {
             consola.warn(`Could not register the ai-or-die session-bind hook: ${String(err)}`)
+          }
+        }
+
+        // Default-on plan review in the artifact panel: when inside an ai-or-die
+        // tab (AIORDIE_SESSION_ID set), the artifact_* tools reach a real review
+        // panel, so materialize the gh-artifact-review skill and steer the agent
+        // to open plans there by default. Skill is written here (not in
+        // INJECTED_SKILLS) so it only appears inside a tab; the CLAUDE.md
+        // directive reaches descendants. Both best-effort.
+        if ((process.env.AIORDIE_SESSION_ID ?? "").trim().length > 0) {
+          await writeInjectedSkill(ARTIFACT_REVIEW_SKILL.name, ARTIFACT_REVIEW_SKILL.md)
+            .catch(() => ({ written: false }))
+          try {
+            await prependArtifactPanelDirectiveToMirroredClaudeMd()
+          } catch (err) {
+            consola.warn(`Artifact-panel directive prepend failed: ${String(err)}`)
           }
         }
 

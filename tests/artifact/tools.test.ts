@@ -9,6 +9,7 @@ const ARTIFACT_ENV_KEYS = [
   "AIORDIE_BASE_URL",
   "AIORDIE_TOKEN",
   "AIORDIE_SESSION_ID",
+  "AIORDIE_INSECURE_TLS",
 ] as const
 
 let previousEnv: Record<(typeof ARTIFACT_ENV_KEYS)[number], string | undefined>
@@ -54,6 +55,7 @@ beforeEach(() => {
     AIORDIE_BASE_URL: process.env.AIORDIE_BASE_URL,
     AIORDIE_TOKEN: process.env.AIORDIE_TOKEN,
     AIORDIE_SESSION_ID: process.env.AIORDIE_SESSION_ID,
+    AIORDIE_INSECURE_TLS: process.env.AIORDIE_INSECURE_TLS,
   }
   originalFetch = globalThis.fetch
   clearArtifactEnv()
@@ -202,5 +204,42 @@ describe("artifact MCP tools", () => {
         },
       })
     }
+  })
+})
+
+describe("artifact insecure-TLS detection", () => {
+  async function tlsAppliedFor(baseUrl: string): Promise<boolean> {
+    process.env.AIORDIE_BASE_URL = baseUrl
+    process.env.AIORDIE_TOKEN = "tok"
+    process.env.AIORDIE_SESSION_ID = "sess-1"
+    let sawTls = false
+    globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+      // Under bun:test, applyInsecureTls sets init.tls; under Node it sets dispatcher.
+      sawTls = Boolean((init as Record<string, unknown> | undefined)?.tls
+        || (init as Record<string, unknown> | undefined)?.dispatcher)
+      return Response.json({ sessionId: "sess-1", key: "k", viewUrl: "x" })
+    }) as unknown as typeof fetch
+    await callTool("artifact_open", { file: "p" })
+    return sawTls
+  }
+
+  test("literal loopback IP https → insecure TLS applied", async () => {
+    expect(await tlsAppliedFor("https://127.0.0.1:7777")).toBe(true)
+    expect(await tlsAppliedFor("https://[::1]:7777")).toBe(true)
+  })
+
+  test("non-loopback https → fail closed (no bypass)", async () => {
+    expect(await tlsAppliedFor("https://ai.example")).toBe(false)
+  })
+
+  test("localhost requires explicit opt-in (resolver can be remapped)", async () => {
+    expect(await tlsAppliedFor("https://localhost:7777")).toBe(false)
+    process.env.AIORDIE_INSECURE_TLS = "1"
+    expect(await tlsAppliedFor("https://localhost:7777")).toBe(true)
+  })
+
+  test("AIORDIE_INSECURE_TLS=0 disables bypass even on loopback", async () => {
+    process.env.AIORDIE_INSECURE_TLS = "0"
+    expect(await tlsAppliedFor("https://127.0.0.1:7777")).toBe(false)
   })
 })

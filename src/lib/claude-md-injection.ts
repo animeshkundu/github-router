@@ -29,6 +29,18 @@ const TOOLBELT_MARKER_OPEN =
   "<!-- gh-router toolbelt awareness — auto-injected, regenerated per launch -->"
 const TOOLBELT_MARKER_CLOSE = "<!-- /gh-router toolbelt awareness -->"
 
+const ARTIFACT_MARKER_OPEN =
+  "<!-- gh-router artifact-panel directive — auto-injected when in an ai-or-die tab -->"
+const ARTIFACT_MARKER_CLOSE = "<!-- /gh-router artifact-panel directive -->"
+
+// Default-on plan review in the panel: when running inside an ai-or-die tab the
+// artifact_* tools reach a real review panel, so steer the agent to use it.
+const ARTIFACT_PANEL_DIRECTIVE =
+  "## Review plans in the artifact panel\n\n"
+  + "You are running inside an ai-or-die tab, so the `mcp__peers__artifact_open/poll/reply/end` tools drive a live human-review panel. "
+  + "When you finish a plan or produce a file/diff the user should review, call `mcp__peers__artifact_open` on it, tell the user to review in the panel, then `mcp__peers__artifact_poll` for feedback, revise, and `mcp__peers__artifact_end` when done. "
+  + "Default to this for plans before asking the user to proceed."
+
 // Back-compat aliases used by existing tests. The peer block's
 // markers remain the "default" pair surfaced through __testExports.
 const MARKER_OPEN = PEER_MARKER_OPEN
@@ -632,6 +644,24 @@ export async function appendToolbeltAwarenessToMirroredClaudeMd(
     markerClose: TOOLBELT_MARKER_CLOSE,
     position: "bottom",
     label: "toolbelt-awareness",
+  })
+}
+
+/**
+ * Prepend the artifact-panel review directive to the TOP of the mirrored
+ * CLAUDE.md so plans/artifacts are reviewed in the ai-or-die panel by default.
+ * Gated by the caller on AIORDIE_SESSION_ID (only useful inside a tab). Separate
+ * marker fence; best-effort like the style/peer blocks.
+ */
+export async function prependArtifactPanelDirectiveToMirroredClaudeMd(
+  directive: string = ARTIFACT_PANEL_DIRECTIVE,
+): Promise<void> {
+  await injectMarkerBlock({
+    snippet: directive,
+    markerOpen: ARTIFACT_MARKER_OPEN,
+    markerClose: ARTIFACT_MARKER_CLOSE,
+    position: "top",
+    label: "artifact-panel-directive",
   })
 }
 

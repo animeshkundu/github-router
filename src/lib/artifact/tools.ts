@@ -1,5 +1,7 @@
 import type { McpGroup, NonPersonaMcpTool } from "../peer-mcp-personas"
 
+import consola from "consola"
+
 import { ArtifactClient, ArtifactError, type ArtifactPollResponse } from "./client"
 
 const ARTIFACT_GROUP: McpGroup = "peers"
@@ -17,6 +19,7 @@ interface ArtifactEnv {
   baseUrl: string
   token: string
   sessionId: string
+  insecureTLS: boolean
 }
 
 function tool(
@@ -110,10 +113,40 @@ function readArtifactEnv(): ArtifactEnv | undefined {
   const token = process.env.AIORDIE_TOKEN
   const sessionId = process.env.AIORDIE_SESSION_ID
   if (!baseUrl || !token || !sessionId) return undefined
-  return { baseUrl, token, sessionId }
+  return { baseUrl, token, sessionId, insecureTLS: shouldUseInsecureTls(baseUrl) }
+}
+
+// ai-or-die serves the artifact API over a self-signed cert on the literal
+// loopback IP (https://127.0.0.1:<port>), so a plain fetch fails with "fetch
+// failed". Relax verification ONLY for a literal loopback IP; FAIL CLOSED for any
+// other host. `localhost` is excluded from auto-detect (it can be remapped to a
+// non-loopback IP) — it requires an explicit AIORDIE_INSECURE_TLS=1; AIORDIE
+// emits the explicit flag for the https case, so this stays belt-and-suspenders.
+function shouldUseInsecureTls(baseUrl: string): boolean {
+  let url: URL
+  try {
+    url = new URL(baseUrl)
+  } catch {
+    return false
+  }
+  if (url.protocol !== "https:") return false
+  const explicit = (process.env.AIORDIE_INSECURE_TLS ?? "").trim().toLowerCase()
+  if (explicit === "0" || explicit === "false" || explicit === "off") return false
+  if (isLoopbackIp(url.hostname)) return true
+  // `localhost` only when explicitly opted in (resolver could point off-loopback).
+  return url.hostname === "localhost" && (explicit === "1" || explicit === "true")
+}
+
+function isLoopbackIp(hostname: string): boolean {
+  // new URL() wraps an IPv6 literal in brackets; strip for comparison.
+  const host = hostname.replace(/^\[|\]$/g, "")
+  return host === "::1" || /^127(?:\.\d{1,3}){3}$/.test(host)
 }
 
 function clientFromEnv(env: ArtifactEnv): ArtifactClient {
+  // Diagnostics only: token presence (bool, never the value) + TLS posture, so a
+  // 401-vs-UNREACHABLE failure is distinguishable without leaking secrets.
+  consola.debug(`ARTIFACT_ENV: token present=${env.token.length > 0}, insecureTLS=${env.insecureTLS}`)
   return new ArtifactClient(env)
 }
 
