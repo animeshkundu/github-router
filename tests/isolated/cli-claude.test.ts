@@ -178,6 +178,7 @@ mock.module("~/lib/mcp-capabilities", () => ({
 const appendPeerAwarenessToMirroredClaudeMdMock = mock()
 const prependStyleDirectiveToMirroredClaudeMdMock = mock()
 const appendToolbeltAwarenessToMirroredClaudeMdMock = mock()
+const prependArtifactPanelDirectiveToMirroredClaudeMdMock = mock()
 mock.module("~/lib/claude-md-injection", () => ({
   appendPeerAwarenessToMirroredClaudeMd:
     appendPeerAwarenessToMirroredClaudeMdMock,
@@ -185,6 +186,8 @@ mock.module("~/lib/claude-md-injection", () => ({
     prependStyleDirectiveToMirroredClaudeMdMock,
   appendToolbeltAwarenessToMirroredClaudeMd:
     appendToolbeltAwarenessToMirroredClaudeMdMock,
+  prependArtifactPanelDirectiveToMirroredClaudeMd:
+    prependArtifactPanelDirectiveToMirroredClaudeMdMock,
   // injected-skills/write.ts statically imports these two from this module, so a
   // partial mock trips bun-on-Windows' strict-named-export check ("Export named X
   // not found"). Stub them: `isUnder…` -> false makes `writeInjectedSkill` a clean
@@ -354,6 +357,8 @@ beforeEach(() => {
   prependStyleDirectiveToMirroredClaudeMdMock.mockResolvedValue(undefined)
   appendToolbeltAwarenessToMirroredClaudeMdMock.mockReset()
   appendToolbeltAwarenessToMirroredClaudeMdMock.mockResolvedValue(undefined)
+  prependArtifactPanelDirectiveToMirroredClaudeMdMock.mockReset()
+  prependArtifactPanelDirectiveToMirroredClaudeMdMock.mockResolvedValue(undefined)
   getCodexVersionMock.mockReset()
   getCodexVersionMock.mockReturnValue({ ok: false })
 
