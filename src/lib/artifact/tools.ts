@@ -88,6 +88,21 @@ export const ARTIFACT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
       })
     },
   ),
+  tool(
+    "artifact_end",
+    "End/close the ai-or-die Artifact review panel when the review loop is complete. Only works inside an ai-or-die tab-backed Claude session.",
+    objectSchema({}, []),
+    async (_args, signal) => {
+      const env = readArtifactEnv()
+      if (!env) return missingEnvResult()
+      const response = await clientFromEnv(env).end(signal)
+      return ok({
+        ok: true,
+        ...response,
+        next_step: "Artifact review loop ended.",
+      })
+    },
+  ),
 ])
 
 function readArtifactEnv(): ArtifactEnv | undefined {

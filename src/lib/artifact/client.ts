@@ -54,6 +54,10 @@ export interface ArtifactAgentReplyResponse {
   [key: string]: unknown
 }
 
+export interface ArtifactEndResponse {
+  [key: string]: unknown
+}
+
 export class ArtifactClient {
   private readonly baseUrl: string
   private readonly token: string
@@ -91,6 +95,17 @@ export class ArtifactClient {
       "POST",
       `/api/artifact/${encodeURIComponent(this.sessionId)}/agent-reply`,
       { text },
+      signal,
+      undefined,
+      true,
+    )
+  }
+
+  end(signal?: AbortSignal): Promise<ArtifactEndResponse> {
+    return this.request(
+      "POST",
+      `/api/artifact/${encodeURIComponent(this.sessionId)}/end`,
+      undefined,
       signal,
       undefined,
       true,
