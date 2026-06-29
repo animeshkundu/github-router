@@ -122,22 +122,32 @@ import { type WorktreeHandle, createWorktree } from "./worktree"
 const WORKTREE_REGISTRY = new WorktreeRegistry()
 registerExitHandlers(WORKTREE_REGISTRY)
 
-/** Default model + thinking for the READ-ONLY worker modes (`explore`,
- *  `review`). `gemini-3.5-flash` at `high` (its top reasoning tier) — fast,
- *  1M-context, tool-call-capable.
+/** Default model + thinking for the `explore` mode. `gpt-5.4-mini` at
+ *  `xhigh` — fast, cheap, 400k-context, tool-call-capable, with tight
+ *  function-calling-loop discipline.
  *
- *  HISTORY / CAVEAT: an earlier iteration moved OFF flash to
- *  `gemini-3.1-pro-preview` because *that* flash early-stopped with empty
- *  turns on the function-calling loop. `gemini-3.5-flash` is a NEWER model
- *  and is being re-evaluated for the read-only workload, where parallel
- *  read/search batches and sound stop/continue decisions matter. If it
- *  regresses to early-stopping, revert this to `gemini-3.1-pro-preview`.
+ *  HISTORY / CAVEAT: earlier iterations used `gemini-3.1-pro-preview` then
+ *  `gemini-3.5-flash`; both flash defaults early-stopped with empty turns
+ *  on the function-calling loop (read a file then end the turn with no
+ *  summary), which the single no-output retry couldn't reliably recover.
+ *  `gpt-5.4-mini` does not show that pathology and is the proven `browse`
+ *  default. Routed through `/responses` by the stream-fn endpoint split.
  *
  *  Exported so the MCP handler + the gate (`workerToolsEnabled`) read the
  *  same constant — drift would ship a tool whose docs/gate disagree with
  *  its runtime default. Caller can override per call via the `model` arg. */
-export const DEFAULT_MODEL = "gemini-3.5-flash"
-const DEFAULT_THINKING: WorkerThinkingLevel = "high"
+export const DEFAULT_MODEL = "gpt-5.4-mini"
+const DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
+
+/** Default model + thinking for the READ-ONLY `review` mode. `gpt-5.5` at
+ *  `xhigh` — the strongest reasoning tier, 1M+ context, so the reviewer
+ *  has full headroom to verify correctness against the actual code. Same
+ *  model as `implement`; like it, this is NOT a `workerToolsEnabled` gate
+ *  input — if absent (e.g. a non-enterprise tier) `review` errors helpfully
+ *  at call time rather than vanishing the whole worker surface. Caller can
+ *  override per call via the `model` arg. */
+export const REVIEW_DEFAULT_MODEL = "gpt-5.5"
+const REVIEW_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 
 /** Default model + thinking for the READ+WRITE `implement` mode. `gpt-5.5`
  *  at `xhigh` — the strongest reasoning tier in the catalog, 1M+ context,
@@ -283,30 +293,37 @@ async function runWorkerAgentOnce(
     // on unknown-model errors, so the caller knows what to retry with).
     //
     // Per-mode defaults (an explicit `opts.model`/`opts.thinking` always
-    // wins): read-only `explore`/`review` → `DEFAULT_MODEL` (gemini-3.5-flash,
-    // high); read-only `plan` → `PLAN_DEFAULT_MODEL` (claude-opus-4.8, xhigh —
-    // planning is the highest-leverage step, so it gets the strongest model);
+    // wins): read-only `explore` → `DEFAULT_MODEL` (gpt-5.4-mini, xhigh);
+    // read-only `review` → `REVIEW_DEFAULT_MODEL` (gpt-5.5, xhigh — the
+    // reviewer wants max reasoning to verify correctness); read-only `plan`
+    // → `PLAN_DEFAULT_MODEL` (claude-opus-4.8, xhigh — planning is the
+    // highest-leverage step, so it gets the strongest model);
     // read+write `implement`/`test` → `IMPLEMENT_DEFAULT_MODEL` (gpt-5.5, xhigh
     // — coding/test-authoring wants max reasoning); `browse` →
     // `BROWSE_DEFAULT_MODEL` (gpt-5.4-mini). Distinct workloads, distinct
     // defaults.
     const isBrowse = opts.mode === "browse"
     const isPlan = opts.mode === "plan"
+    const isReview = opts.mode === "review"
     const isWriteCapable = opts.mode === "implement" || opts.mode === "test"
     const defaultModel = isBrowse
       ? BROWSE_DEFAULT_MODEL
       : isPlan
         ? PLAN_DEFAULT_MODEL
-        : isWriteCapable
-          ? IMPLEMENT_DEFAULT_MODEL
-          : DEFAULT_MODEL
+        : isReview
+          ? REVIEW_DEFAULT_MODEL
+          : isWriteCapable
+            ? IMPLEMENT_DEFAULT_MODEL
+            : DEFAULT_MODEL
     const defaultThinking = isBrowse
       ? BROWSE_DEFAULT_THINKING
       : isPlan
         ? PLAN_DEFAULT_THINKING
-        : isWriteCapable
-          ? IMPLEMENT_DEFAULT_THINKING
-          : DEFAULT_THINKING
+        : isReview
+          ? REVIEW_DEFAULT_THINKING
+          : isWriteCapable
+            ? IMPLEMENT_DEFAULT_THINKING
+            : DEFAULT_THINKING
     const resolved = resolveModelAndThinking({
       model: opts.model ?? defaultModel,
       thinking: opts.thinking ?? defaultThinking,
