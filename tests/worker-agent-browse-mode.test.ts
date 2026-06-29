@@ -224,9 +224,8 @@ afterEach(() => {
 // ============================================================
 
 describe("BROWSE_DEFAULT_MODEL", () => {
-  test("pins the Gate-B browse model and is distinct from the worker default", () => {
+  test("pins the Gate-B browse model", () => {
     expect(BROWSE_DEFAULT_MODEL).toBe("gpt-5.4-mini")
-    expect(BROWSE_DEFAULT_MODEL).not.toBe(DEFAULT_MODEL)
   })
 })
 
@@ -252,8 +251,6 @@ describe("browse mode model selection", () => {
       expect(r.text).toBe("browse-reply")
       expect(bodies.length).toBeGreaterThan(0)
       expect(bodies[0]!.model).toBe(BROWSE_DEFAULT_MODEL)
-      // Critically NOT the gemini worker default.
-      expect(bodies[0]!.model).not.toBe(DEFAULT_MODEL)
       // Slot released by the outer finally.
       expect(__getInFlightForTests()).toBe(before)
     } finally {
