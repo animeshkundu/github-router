@@ -143,8 +143,8 @@ beforeEach(() => {
         tool_calls: true,
         reasoning_effort: ["low", "medium", "high"],
       }),
-      // explore/review default
-      fakeModel("gemini-3.5-flash", {
+      // explore default
+      fakeModel("gpt-5.4-mini", {
         tool_calls: true,
         reasoning_effort: ["minimal", "low", "medium", "high"],
       }),

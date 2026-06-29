@@ -63,7 +63,7 @@ export function standInToolEnabled(): boolean {
  *
  * Returns true iff BOTH:
  *   1. Copilot's live catalog (`state.models?.data`) contains the
- *      worker default model (`gemini-3.5-flash`, used by explore/review)
+ *      worker default model (`gpt-5.4-mini`, used by explore)
  *      AND that entry advertises `capabilities.supports.tool_calls ===
  *      true`. The worker loop is function-calling; a model that can't
  *      emit tool_calls is unusable, so dormant-register (omit from

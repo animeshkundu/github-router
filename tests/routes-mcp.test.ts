@@ -2030,12 +2030,12 @@ function workerSseResponse(
 }
 
 describe("/mcp worker_* tools — registration + gating", () => {
-  test("tools/list includes worker_explore + worker_implement when gemini-3.5-flash is present with tool_calls", async () => {
+  test("tools/list includes worker_explore + worker_implement when gpt-5.4-mini is present with tool_calls", async () => {
     state.models = {
       object: "list",
       data: [
-        ...baseModels.data.filter((m) => m.id !== "gemini-3.5-flash"),
-        fakeWorkerModel("gemini-3.5-flash"),
+        ...baseModels.data.filter((m) => m.id !== "gpt-5.4-mini"),
+        fakeWorkerModel("gpt-5.4-mini"),
       ],
     }
     const { status, json } = await rpc({
@@ -2057,8 +2057,8 @@ describe("/mcp worker_* tools — registration + gating", () => {
       state.models = {
         object: "list",
         data: [
-        ...baseModels.data.filter((m) => m.id !== "gemini-3.5-flash"),
-        fakeWorkerModel("gemini-3.5-flash"),
+        ...baseModels.data.filter((m) => m.id !== "gpt-5.4-mini"),
+        fakeWorkerModel("gpt-5.4-mini"),
       ],
       }
       const { json } = await rpc({
@@ -2077,10 +2077,10 @@ describe("/mcp worker_* tools — registration + gating", () => {
     }
   })
 
-  test("tools/list omits both worker tools when gemini-3.5-flash is absent from catalog", async () => {
+  test("tools/list omits both worker tools when gpt-5.4-mini is absent from catalog", async () => {
     state.models = {
       object: "list",
-      data: baseModels.data.filter((m) => m.id !== "gemini-3.5-flash"),
+      data: baseModels.data.filter((m) => m.id !== "gpt-5.4-mini"),
     }
     const { json } = await rpc({
       jsonrpc: "2.0",
@@ -2094,12 +2094,12 @@ describe("/mcp worker_* tools — registration + gating", () => {
     expect(names).not.toContain("implement")
   })
 
-  test("tools/list omits both when gemini-3.5-flash is present WITHOUT tool_calls support", async () => {
+  test("tools/list omits both when gpt-5.4-mini is present WITHOUT tool_calls support", async () => {
     state.models = {
       object: "list",
       data: [
-        ...baseModels.data.filter((m) => m.id !== "gemini-3.5-flash"),
-        fakeWorkerModel("gemini-3.5-flash", { tool_calls: false }),
+        ...baseModels.data.filter((m) => m.id !== "gpt-5.4-mini"),
+        fakeWorkerModel("gpt-5.4-mini", { tool_calls: false }),
       ],
     }
     const { json } = await rpc({
@@ -2115,7 +2115,7 @@ describe("/mcp worker_* tools — registration + gating", () => {
   })
 
   test("defense-in-depth: tools/call for worker_explore returns method-not-found when gate fails (even if client bypasses tools/list)", async () => {
-    // No gemini-3.5-flash in catalog → gate fails. A naive client could
+    // No gpt-5.4-mini in catalog → gate fails. A naive client could
     // skip tools/list and hard-code the name; the call-time gate must
     // reject identically to an unknown tool (-32601), keeping the gated
     // surface functionally invisible.
@@ -2139,12 +2139,12 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
       data: [
         ...baseModels.data.filter(
           (m) =>
-            !["gemini-3.5-flash", "gpt-5.5", "gemini-3.1-pro-preview"].includes(
+            !["gpt-5.4-mini", "gpt-5.5", "gemini-3.1-pro-preview"].includes(
               m.id,
             ),
         ),
-        // explore/review default + worker gate model
-        fakeWorkerModel("gemini-3.5-flash", {
+        // explore default + worker gate model
+        fakeWorkerModel("gpt-5.4-mini", {
           reasoning_effort: ["minimal", "low", "medium", "high"],
         }),
         // implement default (routes to /responses)

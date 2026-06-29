@@ -348,7 +348,7 @@ For each proposed input or output field, answer in one sentence: **"What would t
 
 ## Worker tools (`explore`, `implement`)
 
-Three non-persona MCP tools - `mcp__workers__explore`, `mcp__workers__review`, and `mcp__workers__implement` - delegate scoped work to an **autonomous worker subagent** backed by the **Pi agent runtime** (vendored at `src/vendor/pi/`). **Per-mode model defaults** (caller `model` arg always wins): read-only `explore`/`review` → `gemini-3.5-flash` at `high` (1M context); read+write `implement` → `gpt-5.5` at `xhigh` (coding wants max reasoning). The worker plans its own tool calls, decides when it's done, and returns a single text answer (plus a unified diff when `worktree: true`). Implementation: `src/lib/worker-agent/engine.ts` (`runWorkerAgent`, which holds the `DEFAULT_MODEL`/`IMPLEMENT_DEFAULT_MODEL`/`BROWSE_DEFAULT_MODEL` constants) and `src/lib/worker-agent/tools.ts` (the worker-side `AgentTool` definitions).
+Three non-persona MCP tools - `mcp__workers__explore`, `mcp__workers__review`, and `mcp__workers__implement` - delegate scoped work to an **autonomous worker subagent** backed by the **Pi agent runtime** (vendored at `src/vendor/pi/`). **Per-mode model defaults** (caller `model` arg always wins): read-only `explore`/`review` → `gpt-5.5` at `xhigh`; read+write `implement` → `gpt-5.5` at `xhigh` (coding wants max reasoning). The worker plans its own tool calls, decides when it's done, and returns a single text answer (plus a unified diff when `worktree: true`). Implementation: `src/lib/worker-agent/engine.ts` (`runWorkerAgent`, which holds the `DEFAULT_MODEL`/`IMPLEMENT_DEFAULT_MODEL`/`BROWSE_DEFAULT_MODEL` constants) and `src/lib/worker-agent/tools.ts` (the worker-side `AgentTool` definitions).
 
 These tools are exposed under the `workers` MCP server at `/mcp/workers` (or the `/mcp` union path).
 
@@ -362,7 +362,7 @@ These tools are exposed under the `workers` MCP server at `/mcp/workers` (or the
 
 Workers stay strictly TERMINAL (no recursive sub-worker spawning is allowed). Implement mode is no longer forced agent-wide sequential; pure read/search batches (incl. `toolbelt`, which runs read-only CLIs with `shell:false` and carries no `executionMode`) run in parallel, while `edit`, `write`, `bash`, `codex_review`, and `update_plan` execute sequentially via per-tool `executionMode`.
 
-The `model` arg accepts any Copilot catalog model with `tool_calls` support; defaults are per-mode (explore/review `gemini-3.5-flash`, implement `gpt-5.5` — see above). `thinking` (one of `off`/`minimal`/`low`/`medium`/`high`/`xhigh`) defaults to the mode's tier (`high` for explore/review, `xhigh` for implement) and is silently clamped to the resolved model's `reasoning_effort` allowlist.
+The `model` arg accepts any Copilot catalog model with `tool_calls` support; defaults are per-mode (explore `gpt-5.4-mini`, review `gpt-5.5`, implement `gpt-5.5` — see above). `thinking` (one of `off`/`minimal`/`low`/`medium`/`high`/`xhigh`) defaults to the mode's tier (`xhigh` for explore/review/implement) and is silently clamped to the resolved model's `reasoning_effort` allowlist.
 
 Both also accept an optional `workspace` (absolute path) - the working directory the worker operates in. **Default is the proxy's launch cwd** (the directory `github-router start` / `github-router claude` was invoked from); the model can override when the parent agent has multiple workspaces open and needs the worker pointed at a specific one. The override is absolute-only - relative paths are rejected at the MCP boundary with an actionable error so a typo doesn't silently resolve against `process.cwd()` and land somewhere surprising. For `implement` with `worktree: true`, the workspace must be inside a git repository (the engine's existing `createWorktree` hard-errors otherwise). Threat model matches code search: the proxy already runs as the user; no allowlist (the same operator could `Read` / `Bash` the same paths through Claude Code directly). See `runWorkerToolCall` in `src/lib/peer-mcp-personas.ts` for the validation.
 
@@ -371,7 +371,7 @@ Both also accept an optional `workspace` (absolute path) - the working directory
 `workerToolsEnabled()` in `src/routes/mcp/handler.ts` drops all three worker tools from `tools/list` AND `tools/call` when EITHER:
 
 1. The operator set `GH_ROUTER_DISABLE_WORKER_TOOLS=1`, OR
-2. `gemini-3.5-flash` (the explore/review default) is missing from the live Copilot catalog, or present but lacks `tool_calls` support.
+2. `gpt-5.4-mini` (the explore default) is missing from the live Copilot catalog, or present but lacks `tool_calls` support.
 
 This is defense-in-depth - a client that hard-codes the tool name still fails at call-time rather than seeing a useless dormant registration. The gate model lives at `src/lib/worker-agent/engine.ts:DEFAULT_MODEL` and is re-imported by the handler (`import { DEFAULT_MODEL as WORKER_DEFAULT_MODEL } from "~/lib/worker-agent"`) so there is no parallel constant to drift. Implement's `gpt-5.5` is deliberately NOT a gate input: if it's absent the worker surface stays live and `implement` errors helpfully at call time (only `gpt-5.5`-backed implement breaks, not explore/review).
 
@@ -430,7 +430,7 @@ The Pi agent runtime (`@earendil-works/pi-agent-core` + a minimal `pi-ai` slice)
 
 Two probes assert that Copilot accepts the exact body shapes the worker-agent stream-fn emits:
 
-- `worker_gemini_tools_reasoning` — `gemini-3.5-flash` on `/v1/chat/completions` with a `tools[]` array + `reasoning_effort:"high"` (the explore/review contract AND the dual-gate model). The dual gate's catalog arm only checks "model present + `tool_calls` advertised"; it does NOT exercise the request shape. If Copilot tightens the `gemini-3.5-flash` validator, the gate would leave the tools advertised but every explore/review call would 400 — this probe surfaces that regression upstream.
+- `worker_gemini_tools_reasoning` — `gemini-3.5-flash` on `/v1/chat/completions` with a `tools[]` array + `reasoning_effort:"high"` (a valid worker tool+reasoning shape; explore moved to `gpt-5.4-mini`). The dual gate's catalog arm only checks "model present + `tool_calls` advertised"; it does NOT exercise the request shape. If Copilot tightens the `gemini-3.5-flash` validator, the gate would leave the tools advertised but every explore/review call would 400 — this probe surfaces that regression upstream.
 - `worker_gpt5_responses_tools_reasoning` — `gpt-5.5` on `/v1/responses` with function-shaped `tools[]` (flat `{type:"function",name,description,parameters}`) + `reasoning:{effort:"xhigh"}` (the implement contract). `gpt-5.5` is NOT a dual-gate input, so a shape regression here breaks `implement` while explore/review keep working — only this probe catches it.
 
 Probe ids in `scripts/probe-copilot-compat.sh`; matrix rows in `docs/copilot-compat-matrix.md` (see also [`docs/pi-vendor-sync.md`](pi-vendor-sync.md)).
