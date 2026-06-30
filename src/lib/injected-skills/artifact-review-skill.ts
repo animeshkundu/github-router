@@ -17,6 +17,23 @@ HTML is the canonical review artifact — it renders richly and is annotatable e
 - Plan-mode plans: the panel auto-opens them already rendered to HTML — you do not need to convert them by hand.
 - Do not paste raw markdown into an \`.html\`; write real HTML (headings, lists, tables, \`<pre>\` for code). Opening a raw \`.md\` still renders, but a purpose-built HTML artifact reads better and annotates cleanly.
 
+## When to reach for an artifact
+
+Default to one for anything easier to grasp visually than as terminal prose: plans, design proposals, comparisons / trade-offs, decisions that need the user's input, diagrams / architecture, tables, code diffs, reports. Skip it only for trivial one-line answers.
+
+## Playbooks (what a good artifact of each type contains)
+
+- **plan**: goal, current state, the proposed approach (high-level decisions, not every line), then risks and open questions at the end.
+- **comparison**: options as columns, trade-offs as rows, current-vs-target where relevant, and an explicit recommendation. Do not make the reader infer the winner.
+- **table**: scannable rows, a sticky header, aligned numeric columns; group/section dense records rather than one flat wall.
+- **diagram**: boxes + arrows. Mermaid when automatic layout matters; positioned SVG/CSS when each node needs prose, code, or controls.
+- **code / diff**: \`<pre>\` with before/after or unified-diff styling; keep line context tight; call out the changed lines.
+- **report / dashboard**: lead with the headline number / verdict, then supporting detail; keep one idea per section.
+
+## Design system
+
+Artifacts stay portable (they must render identically opened standalone), so do not depend on a server-injected theme. Pick the look in priority order: (1) a look the user named; (2) the **subject project's** own design system, its Tailwind / theme config, CSS variables / tokens, component library, or existing styled pages, especially when the artifact previews that app's UI; (3) only when both come up empty, clean readable defaults (system font stack, generous spacing, a single accent).
+
 ## Loop
 
 1. Open: \`mcp__peers__artifact_open\` with the absolute path of the \`.html\` (or the file). Relay the returned \`viewUrl\` and tell the user to review in the panel — they can click a block or select text to comment.
