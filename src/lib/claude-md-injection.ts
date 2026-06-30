@@ -29,6 +29,19 @@ const TOOLBELT_MARKER_OPEN =
   "<!-- gh-router toolbelt awareness — auto-injected, regenerated per launch -->"
 const TOOLBELT_MARKER_CLOSE = "<!-- /gh-router toolbelt awareness -->"
 
+const ARTIFACT_MARKER_OPEN =
+  "<!-- gh-router artifact-panel directive — auto-injected when in an ai-or-die tab -->"
+const ARTIFACT_MARKER_CLOSE = "<!-- /gh-router artifact-panel directive -->"
+
+// Default-on plan review in the panel: when running inside an ai-or-die tab the
+// artifact_* tools reach a real review panel, so steer the agent to use it.
+const ARTIFACT_PANEL_DIRECTIVE =
+  "## Review plans in the artifact panel\n\n"
+  + "You are running inside an ai-or-die tab, so the `mcp__peers__artifact_open/poll/reply/end` tools drive a live human-review panel. "
+  + "When you finish a plan or produce something the user should review, open it in the panel: `mcp__peers__artifact_open`, tell the user to review (they can click a block or select text to comment), then `mcp__peers__artifact_poll` for feedback, revise, and `mcp__peers__artifact_end` when done. "
+  + "Prefer HTML: for anything rich or structured, author a self-contained `.html` artifact and open THAT (the panel renders and annotates HTML natively). Plan-mode plans are auto-rendered to HTML for you; raw markdown is only a fallback. "
+  + "Default to this for plans before asking the user to proceed."
+
 // Back-compat aliases used by existing tests. The peer block's
 // markers remain the "default" pair surfaced through __testExports.
 const MARKER_OPEN = PEER_MARKER_OPEN
@@ -636,6 +649,24 @@ export async function appendToolbeltAwarenessToMirroredClaudeMd(
 }
 
 /**
+ * Prepend the artifact-panel review directive to the TOP of the mirrored
+ * CLAUDE.md so plans/artifacts are reviewed in the ai-or-die panel by default.
+ * Gated by the caller on AIORDIE_SESSION_ID (only useful inside a tab). Separate
+ * marker fence; best-effort like the style/peer blocks.
+ */
+export async function prependArtifactPanelDirectiveToMirroredClaudeMd(
+  directive: string = ARTIFACT_PANEL_DIRECTIVE,
+): Promise<void> {
+  await injectMarkerBlock({
+    snippet: directive,
+    markerOpen: ARTIFACT_MARKER_OPEN,
+    markerClose: ARTIFACT_MARKER_CLOSE,
+    position: "top",
+    label: "artifact-panel-directive",
+  })
+}
+
+/**
  * Test-only exports — internal helpers exposed so unit tests can
  * exercise marker handling and line-ending logic without writing
  * files. NOT part of the public API.
@@ -648,6 +679,9 @@ export const __testExports = {
   STYLE_MARKER_OPEN,
   STYLE_MARKER_CLOSE,
   STYLE_DIRECTIVE,
+  ARTIFACT_MARKER_OPEN,
+  ARTIFACT_MARKER_CLOSE,
+  ARTIFACT_PANEL_DIRECTIVE,
   MAX_CLAUDE_MD_BYTES,
   ERROR_CODE,
   RENAME_RETRY_DELAYS_MS,

@@ -31,6 +31,7 @@ const {
   STYLE_MARKER_OPEN,
   STYLE_MARKER_CLOSE,
   STYLE_DIRECTIVE,
+  ARTIFACT_PANEL_DIRECTIVE,
   MAX_CLAUDE_MD_BYTES,
   ERROR_CODE,
   detectLineEnding,
@@ -563,6 +564,17 @@ test("style directive content is self-compliant — no em dashes, no Claude/AI/A
   expect(STYLE_DIRECTIVE.toLowerCase()).toContain("anthropic")
 })
 
+test("artifact-panel directive steers HTML-by-default for review", () => {
+  // The always-injected primary instruction must reflect the HTML-default
+  // decision (the hook auto-renders plans to HTML; markdown is the fallback).
+  const d = ARTIFACT_PANEL_DIRECTIVE.toLowerCase()
+  expect(d).toContain("html")
+  expect(d).toContain("artifact panel")
+  expect(d).toContain("mcp__peers__artifact_open")
+  // It explicitly prefers HTML and frames raw markdown as the fallback.
+  expect(d).toMatch(/prefer html|self-contained `?\.?html/)
+  expect(d).toContain("fallback")
+})
 test("style directive is prepended at the TOP of CLAUDE.md with user content preserved below", async () => {
   await freshMirrorDir()
   const userContent = "# Title\n\nReal content.\n"

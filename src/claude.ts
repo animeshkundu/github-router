@@ -17,8 +17,9 @@ import {
 import { enableFileLogging } from "./lib/file-log-reporter"
 import { getCodexVersion, launchChild } from "./lib/launch"
 import { listModelsForEndpoint } from "./lib/model-validation"
-import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror } from "./lib/paths"
+import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror, writeArtifactCredsToMirror } from "./lib/paths"
 import {
+  buildArtifactOpenHookCommand,
   buildSessionBindHookCommand,
   buildStopHookCommand,
   captureLaunchBaseline,
@@ -46,13 +47,14 @@ import {
 } from "./lib/orchestration/gate-discovery"
 import { liveExec } from "./lib/orchestration/live-exec"
 import { buildPromptSubmitHookCommand } from "./lib/orchestration/prompt-submit-hook"
-import { INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
+import { ARTIFACT_REVIEW_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
+import { shouldUseInsecureTls } from "./lib/artifact/tools"
 import { parseBoolEnv } from "./lib/exec"
 import nodePath from "node:path"
 import { tmpdir } from "node:os"
 import { randomBytes } from "node:crypto"
 import { buildPeerAwarenessSnippet, type McpGroup } from "./lib/peer-mcp-personas"
-import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
+import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, prependArtifactPanelDirectiveToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { provisionAndIndexColbert } from "./lib/colbert"
@@ -588,6 +590,34 @@ export const claude = defineCommand({
             await injectStopHookIntoSettingsFile(settingsPath, command, "SessionEnd")
           } catch (err) {
             consola.warn(`Could not register the ai-or-die session-bind hook: ${String(err)}`)
+          }
+        }
+
+        // Default-on plan review in the artifact panel: when inside an ai-or-die
+        // tab (AIORDIE_SESSION_ID set), the artifact_* tools reach a real review
+        // panel, so materialize the gh-artifact-review skill and steer the agent
+        // to open plans there by default. Skill is written here (not in
+        // INJECTED_SKILLS) so it only appears inside a tab; the CLAUDE.md
+        // directive reaches descendants. Both best-effort.
+        if ((process.env.AIORDIE_SESSION_ID ?? "").trim().length > 0) {
+          await writeInjectedSkill(ARTIFACT_REVIEW_SKILL.name, ARTIFACT_REVIEW_SKILL.md)
+            .catch(() => ({ written: false }))
+          try {
+            await prependArtifactPanelDirectiveToMirroredClaudeMd()
+          } catch (err) {
+            consola.warn(`Artifact-panel directive prepend failed: ${String(err)}`)
+          }
+          // Hands-off auto-open: write the artifact creds to a mode-600 mirror
+          // file (AIORDIE_TOKEN is stripped from the child env, and argv leaks to
+          // ps), then register a PostToolUse(ExitPlanMode) hook so the finalized
+          // plan opens in the panel without the model calling artifact_open.
+          try {
+            await writeArtifactCredsToMirror(shouldUseInsecureTls(process.env.AIORDIE_BASE_URL ?? ""))
+            const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+            const cmd = buildArtifactOpenHookCommand(process.execPath, process.argv[1])
+            await injectStopHookIntoSettingsFile(settingsPath, cmd, "PostToolUse", undefined, "ExitPlanMode")
+          } catch (err) {
+            consola.warn(`Could not register the artifact auto-open hook: ${String(err)}`)
           }
         }
 

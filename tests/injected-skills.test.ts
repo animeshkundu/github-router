@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { INJECTED_SKILLS, writeInjectedSkill } from "../src/lib/injected-skills"
+import { ARTIFACT_REVIEW_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "../src/lib/injected-skills"
 
 function frontmatterFor(md: string): string {
   const lines = md.split(/\r?\n/)
@@ -25,6 +25,20 @@ describe("INJECTED_SKILLS", () => {
       const lines = frontmatter.split(/\r?\n/)
       expect(lines).toContain(`name: ${skill.name}`)
       expect(lines.some((line) => /^description:\s*\S/.test(line))).toBe(true)
+    }
+  })
+})
+
+describe("ARTIFACT_REVIEW_SKILL (tab-gated, not in INJECTED_SKILLS)", () => {
+  test("has matching kebab name + description and references only real artifact tools", () => {
+    expect(ARTIFACT_REVIEW_SKILL.name).toBe("gh-artifact-review")
+    expect(INJECTED_SKILLS.some((s) => s.name === ARTIFACT_REVIEW_SKILL.name)).toBe(false)
+    const lines = frontmatterFor(ARTIFACT_REVIEW_SKILL.md).split(/\r?\n/)
+    expect(lines).toContain(`name: ${ARTIFACT_REVIEW_SKILL.name}`)
+    expect(lines.some((line) => /^description:\s*\S/.test(line))).toBe(true)
+    const tokens = ARTIFACT_REVIEW_SKILL.md.match(/mcp__peers__artifact_[a-z]+/g) ?? []
+    for (const t of tokens) {
+      expect(["mcp__peers__artifact_open", "mcp__peers__artifact_poll", "mcp__peers__artifact_reply", "mcp__peers__artifact_end"]).toContain(t)
     }
   })
 })

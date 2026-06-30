@@ -1,3 +1,5 @@
+import { applyInsecureTls } from "../insecure-tls"
+
 export type ArtifactErrorCode =
   | "UNREACHABLE"
   | "AUTH_FAILED"
@@ -33,6 +35,13 @@ export interface ArtifactClientOptions {
   token: string
   sessionId: string
   fetchFn?: typeof fetch
+  /**
+   * Disable TLS certificate verification for this client's requests (ai-or-die
+   * serves the artifact API over a SELF-SIGNED cert on loopback). Applied
+   * per-request via the runtime-correct mechanism (Bun `tls` / Node undici
+   * `dispatcher`); the global TLS posture is untouched. Off unless explicitly true.
+   */
+  insecureTLS?: boolean
 }
 
 export interface ArtifactOpenResponse {
@@ -63,12 +72,14 @@ export class ArtifactClient {
   private readonly token: string
   private readonly sessionId: string
   private readonly fetchFn: typeof fetch
+  private readonly insecureTLS: boolean
 
   constructor(options: ArtifactClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "")
     this.token = options.token
     this.sessionId = options.sessionId
     this.fetchFn = options.fetchFn ?? globalThis.fetch.bind(globalThis)
+    this.insecureTLS = options.insecureTLS ?? false
   }
 
   open(file: string, signal?: AbortSignal): Promise<ArtifactOpenResponse> {
@@ -135,7 +146,7 @@ export class ArtifactClient {
 
     let response: Response
     try {
-      response = await this.fetchFn(url.toString(), {
+      const init: RequestInit = {
         method,
         headers: {
           Authorization: `Bearer ${this.token}`,
@@ -144,7 +155,14 @@ export class ArtifactClient {
         body: body === undefined ? undefined : JSON.stringify(body),
         redirect: "error",
         signal: timeout.signal,
-      })
+      }
+      if (this.insecureTLS) {
+        // Self-signed direct-HTTPS ai-or-die on loopback: relax verification for
+        // THIS request only (Bun `tls` / Node undici `dispatcher`). Bearer +
+        // `redirect:"error"` still bound the token to the pinned loopback origin.
+        applyInsecureTls(init as unknown as Record<string, unknown>)
+      }
+      response = await this.fetchFn(url.toString(), init)
     } catch (err) {
       throw mapNetworkError(err)
     } finally {

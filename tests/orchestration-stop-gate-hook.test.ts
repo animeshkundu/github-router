@@ -168,6 +168,15 @@ describe("settings config generation", () => {
     expect((twice.hooks as { Stop: unknown[] }).Stop.length).toBe(1)
   })
 
+  test("matcher writes a PostToolUse(ExitPlanMode) entry, idempotent", () => {
+    const once = mergeStopHookIntoSettings({}, "gh-router internal-artifact-open", "PostToolUse", undefined, "ExitPlanMode")
+    const entries = (once.hooks as { PostToolUse: Array<{ matcher: string; hooks: unknown[] }> }).PostToolUse
+    expect(entries[0]!.matcher).toBe("ExitPlanMode")
+    expect(entries[0]!.hooks[0]).toEqual({ type: "command", command: "gh-router internal-artifact-open" })
+    const twice = mergeStopHookIntoSettings(once, "gh-router internal-artifact-open", "PostToolUse", undefined, "ExitPlanMode")
+    expect((twice.hooks as { PostToolUse: unknown[] }).PostToolUse.length).toBe(1)
+  })
+
   test("merge does not mutate the input object", () => {
     const input = { hooks: { Stop: [] as unknown[] } }
     const out = mergeStopHookIntoSettings(input, "gh-stop")

@@ -1370,6 +1370,32 @@ export async function writeRuntimeFileSecure(
 }
 
 /**
+ * Write the ai-or-die artifact creds (base/token/sessionId/insecureTLS) to a
+ * mode-600 file in the per-launch mirror so the `internal-artifact-open` hook can
+ * authenticate: AIORDIE_TOKEN is stripped from the spawned child env, and passing
+ * a token via argv would leak it to `ps`. Insecure-TLS mirrors the artifact
+ * client's loopback-only fail-closed policy. Best-effort; atomic temp+rename.
+ */
+export async function writeArtifactCredsToMirror(
+  insecureTLS: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  const baseUrl = env.AIORDIE_BASE_URL
+  const token = env.AIORDIE_TOKEN
+  const sessionId = env.AIORDIE_SESSION_ID
+  if (!baseUrl || !token || !sessionId) return
+  const target = path.join(PATHS.CLAUDE_CONFIG_DIR, ".aiordie-artifact.json")
+  const tempPath = `${target}.${process.pid}.tmp`
+  const body = JSON.stringify({ baseUrl, token, sessionId, insecureTLS }) + "\n"
+  await fs.writeFile(tempPath, body, { mode: 0o600, flag: "wx" }).catch(async (err) => {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return
+    throw err
+  })
+  await fs.rename(tempPath, target).catch(() => {})
+  await chmodIfPossible(target, 0o600)
+}
+
+/**
  * Sweep stale runtime tempfiles. Removes files whose embedded PID is no
  * longer a live process. A proxy crash (`kill -9`, OS reboot) leaves
  * orphans that would otherwise accumulate forever — and worse, a stale

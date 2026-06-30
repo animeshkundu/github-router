@@ -93,6 +93,7 @@ const STRIPPED_PARENT_ENV_KEYS = [
   // must not inherit the parent tab's bearer token.
   "AIORDIE_CLAUDE_BIND",
   "AIORDIE_TOKEN",
+  "AIORDIE_INSECURE_TLS",
 ] as const
 
 /**
