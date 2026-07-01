@@ -100,6 +100,7 @@ The service layer under `src/lib/agent/` is intentionally agent-agnostic:
   discovery/state, checks, reviews, workflow dispatch, reruns, merge, and
   ready-for-review.
 - `tasks.ts` is the Agent-Tasks preview client.
+- `capi.ts` is the Copilot-host (CAPI) session-log client — see below.
 - `types.ts` defines compact DTOs.
 
 Roster discovery uses `repository.suggestedActors(capabilities: [CAN_BE_ASSIGNED])`
@@ -108,6 +109,34 @@ and maps bot logins to `copilot`, `anthropic`, or `openai` via
 `2026-03-10` and returns compact handles (`taskId`, state, PR URL/number,
 bounded tail log excerpt) instead of full transcripts. If `startTask()` fails,
 the controller falls back to creating an issue and assigning the selected bot.
+
+### Copilot-host session log (the agent's plan / progress / questions)
+
+The cloud agent's plan, reasoning, progress, and any question it asks are NOT
+on `api.github.com` — they live in its *session log* on the Copilot host, and
+`capi.ts` is the read-only client for it. Three facts are load-bearing and were
+established empirically (not from docs):
+
+1. **Auth** is the raw `gho_` device-flow OAuth token (`state.githubAgentToken`)
+   sent as `Bearer`. The structured `/copilot_internal/v2/token` output
+   (`tid=…;exp=…:sig`) is rejected here as "invalid authorization header format".
+2. **The host is discovered per-viewer** via GraphQL `viewer.copilotEndpoints.api`
+   (memoised 10 min), not hard-coded.
+3. Required headers `Copilot-Integration-Id: copilot-4-cli` +
+   `X-GitHub-Api-Version: 2026-01-09`; the logs endpoint
+   `GET {host}/agents/sessions/{sessionId}/logs` streams SSE
+   `chat.completion.chunk` objects. There are **no** follow-up / steer / cancel
+   endpoints — steering is via PR comments.
+
+`getTask()` resolves the latest `sessions[].id` from the api.github.com task
+detail, calls `getSessionLog()`, and folds the distilled excerpt (the
+`report_progress.prDescription` plan + reasoning + progress + tool names, hard
+truncated) into `logExcerpt`. `observeUnit()` surfaces it as `Observed.logExcerpt`
+(and, when `provider === "waiting_for_user"`, `Observed.question`), so the
+plan-ready / stuck / question micro-classifiers get real evidence and
+`review_plan` / `answer_agent_question` carry the actual agent text. The client
+is best-effort: any CAPI miss falls back to the api.github.com task text, and
+all log content is treated as untrusted agent text.
 
 ## Durable registry and rehydration
 

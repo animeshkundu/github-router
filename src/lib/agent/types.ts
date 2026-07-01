@@ -177,6 +177,8 @@ export interface TaskStatusResult {
   prUrl?: string
   pr?: number | null
   logExcerpt: string
+  /** Copilot-host session id (from the task detail) that fed `logExcerpt`. */
+  sessionId?: string
 }
 
 export interface TaskFollowUpResult {

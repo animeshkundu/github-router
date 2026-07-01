@@ -129,6 +129,14 @@ export interface Observed {
   // --- micro-classifier distillations (T0 model, validated by the engine) ---
   /** A plan-mode task completed and produced a reviewable plan. */
   planReady?: boolean
+  /**
+   * The cloud-agent's distilled session log (plan + reasoning + progress),
+   * fetched from the Copilot host and hard-truncated. Untrusted agent text.
+   * Feeds the plan-ready / stuck micro-classifiers.
+   */
+  logExcerpt?: string
+  /** For waiting_for_user: the agent's question, distilled from its log. */
+  question?: string
   /** For waiting_for_user: is the agent's question answerable from the AC? */
   agentQuestionAnswerableFromAC?: boolean | null
   /** Did the last steer visibly land (log cursor / head sha advanced)? */

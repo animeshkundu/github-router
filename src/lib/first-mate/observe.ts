@@ -185,11 +185,19 @@ export async function observeUnit(unit: UnitRow): Promise<Observed> {
 
   const mutation = externalMutation(unit, primaryState)
 
+  // The distilled session log carries the agent's plan/reasoning/progress and,
+  // when it is blocked, the question it is asking. Feed both to the engine so
+  // the plan-ready / stuck / question micro-classifiers have real evidence.
+  const logExcerpt = task?.logExcerpt && task.logExcerpt.length > 0 ? task.logExcerpt : undefined
+  const question = provider === "waiting_for_user" ? logExcerpt : undefined
+
   return {
     provider,
     prs: observedPrs(prSummaries, primaryState),
     ...(ci ? { ci } : {}),
     ...(reviewDecision !== undefined ? { reviewDecision } : {}),
     ...(mutation ? { externalMutation: mutation } : {}),
+    ...(logExcerpt ? { logExcerpt } : {}),
+    ...(question ? { question } : {}),
   }
 }

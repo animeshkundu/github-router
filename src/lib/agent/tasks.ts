@@ -1,3 +1,4 @@
+import { getSessionLog } from "./capi"
 import { ghRest } from "./rest"
 import type {
   RepoRef,
@@ -111,6 +112,17 @@ function taskPrNumber(record: Record<string, unknown> | undefined): number | nul
   return nested ?? undefined
 }
 
+function latestSessionId(record: Record<string, unknown> | undefined): string | undefined {
+  const sessions = record?.sessions
+  if (!Array.isArray(sessions) || sessions.length === 0) return undefined
+  // The most recent session (last in the array) drives the live plan/progress.
+  for (let i = sessions.length - 1; i >= 0; i -= 1) {
+    const id = stringField(asRecord(sessions[i]), ["id", "session_id", "sessionId"])
+    if (id) return id
+  }
+  return undefined
+}
+
 export async function startTask(
   repo: RepoRef,
   input: StartTaskInput,
@@ -136,10 +148,18 @@ export async function getTask(repo: RepoRef, taskId: string): Promise<TaskStatus
     apiVersion: AGENT_TASKS_API_VERSION,
   })
   const record = asRecord(response)
-  const logText = collectText(record).join("\n\n")
-  const logExcerpt = tailExcerpt(
-    logText.length > 0 ? logText : compactKnownKeysSummary(record),
-  )
+
+  // The real plan/progress lives in the Copilot-host session log, keyed by the
+  // task detail's session id. Best-effort: on any CAPI miss we fall back to
+  // whatever text the api.github.com task response carried.
+  const sessionId = latestSessionId(record)
+  const sessionLog = sessionId ? await getSessionLog(sessionId) : null
+
+  const fallbackText = collectText(record).join("\n\n")
+  const logExcerpt =
+    sessionLog?.excerpt && sessionLog.excerpt.length > 0
+      ? sessionLog.excerpt
+      : tailExcerpt(fallbackText.length > 0 ? fallbackText : compactKnownKeysSummary(record))
 
   return {
     taskId: stringField(record, ["task_id", "taskId", "id"]) ?? taskId,
@@ -147,6 +167,7 @@ export async function getTask(repo: RepoRef, taskId: string): Promise<TaskStatus
     prUrl: taskPrUrl(record),
     pr: taskPrNumber(record),
     logExcerpt,
+    ...(sessionId ? { sessionId } : {}),
   }
 }
 
