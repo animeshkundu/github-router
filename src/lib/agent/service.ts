@@ -70,11 +70,28 @@ function botAssigneeLogin(login: string): string {
   return login.toLowerCase().endsWith("[bot]") ? login : `${login}[bot]`
 }
 
+/** Classify a GitHub login to an agent key via the roster matchers, or null. */
+function agentKeyForLogin(login: string): AgentKey | null {
+  const normalized = login.replace(/\[bot\]$/i, "")
+  for (const [key, matcher] of Object.entries(AGENT_LOGIN_MATCHERS) as [
+    AgentKey,
+    RegExp,
+  ][]) {
+    if (matcher.test(normalized)) return key
+  }
+  return null
+}
+
 function authorMatchesBot(authorLogin: string | undefined, botLogin: string): boolean {
   if (!authorLogin) return false
   const author = authorLogin.toLowerCase()
   const raw = botLogin.toLowerCase()
-  return author === raw || author === botAssigneeLogin(botLogin).toLowerCase()
+  if (author === raw || author === botAssigneeLogin(botLogin).toLowerCase()) return true
+  // The coding agent authors PRs under a display login ("Copilot") distinct from
+  // its assignee login ("copilot-swe-agent"); match when both map to the same
+  // agent via the roster matchers.
+  const authorKey = agentKeyForLogin(authorLogin)
+  return authorKey !== null && authorKey === agentKeyForLogin(botLogin)
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -302,7 +319,7 @@ interface PullRestResponse {
 
 export async function findAgentPRs(
   repo: RepoRef,
-  input: { issueNumber: number; botLogin: string },
+  input: { issueNumber: number; botLogin: string; branch?: string },
 ): Promise<AgentPRSummary[]> {
   void input.issueNumber
   const pulls = await ghRest<PullRestResponse[]>(
@@ -311,7 +328,16 @@ export async function findAgentPRs(
   )
 
   return pulls
-    .filter((pull) => authorMatchesBot(pull.user?.login ?? undefined, input.botLogin))
+    .filter((pull) => {
+      // The branch is the authoritative per-task correlator. The Agent-Tasks
+      // API authors EVERY PR as "Copilot" regardless of the requested model, so
+      // author matching cannot identify a non-copilot unit's PR — prefer the
+      // branch whenever we know it, and fall back to author only otherwise.
+      if (input.branch !== undefined && input.branch.length > 0) {
+        return pull.head?.ref === input.branch
+      }
+      return authorMatchesBot(pull.user?.login ?? undefined, input.botLogin)
+    })
     .map((pull) => ({
       number: pull.number ?? 0,
       headSha: pull.head?.sha ?? "",

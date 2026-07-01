@@ -117,6 +117,7 @@ async function findPrsSafe(
     return await findAgentPRs(repo, {
       issueNumber: unit.issue ?? 0,
       botLogin: unit.botLogin,
+      ...(unit.branch ? { branch: unit.branch } : {}),
     })
   } catch (err) {
     consola.debug("first-mate observe: PR discovery skipped:", err)

@@ -245,6 +245,43 @@ test("findAgentPRs returns 0, 1, or many PRs filtered only by author login", asy
   ])
 })
 
+test("findAgentPRs is branch-authoritative when a branch is given (author-agnostic)", async () => {
+  // The cloud API authors every PR as "Copilot" regardless of model, so branch
+  // is the only reliable per-task correlator. When given, it wins over author.
+  const fetchMock = mock(() =>
+    jsonResponse([
+      { number: 2, user: { login: "Copilot" }, head: { sha: "a", ref: "copilot/modernize" } },
+      { number: 3, user: { login: "Copilot" }, head: { sha: "b", ref: "copilot/add-ci" } },
+    ]),
+  )
+  setFetch(fetchMock)
+
+  // An anthropic unit whose PR is (per the API) authored by "Copilot" is still
+  // found by its branch.
+  expect(await findAgentPRs({ owner: "octo", repo: "r" }, {
+    issueNumber: 0,
+    botLogin: "anthropic-code-agent",
+    branch: "copilot/add-ci",
+  })).toEqual([{ number: 3, headSha: "b", headRef: "copilot/add-ci", isDraft: false }])
+})
+
+test("findAgentPRs matches a Copilot-authored PR to a copilot-swe-agent unit by login alias", async () => {
+  // Branch-unknown fallback: author "Copilot" must map to the copilot unit
+  // whose assignee login is "copilot-swe-agent".
+  const fetchMock = mock(() =>
+    jsonResponse([
+      { number: 8, user: { login: "Copilot" }, head: { sha: "h8", ref: "copilot/x" } },
+      { number: 9, user: { login: "human" }, head: { sha: "h9", ref: "feature/y" } },
+    ]),
+  )
+  setFetch(fetchMock)
+
+  expect(await findAgentPRs({ owner: "octo", repo: "r" }, {
+    issueNumber: 0,
+    botLogin: "copilot-swe-agent",
+  })).toEqual([{ number: 8, headSha: "h8", headRef: "copilot/x", isDraft: false }])
+})
+
 test("getPullRequestDiffSummary is compact, omits patches, and caps files", async () => {
   const files = Array.from({ length: 60 }, (_, index) => ({
     filename: `file-${index}.ts`,
