@@ -260,6 +260,28 @@ test("completed plan-mode unit emits a review_plan model request with plan excer
   expect(h.deps.classifyPlanReady).not.toHaveBeenCalled()
 })
 
+test("review_plan falls back to the raw session log when the classifier extracts an empty planExcerpt", async () => {
+  // Reproduces the live smoke bug: getTask retrieved a real 4000-char session
+  // log, but the T0 classifier returned planExcerpt:"" (its schema allows it),
+  // which used to clobber the log via `?? ` and emit an empty plan_excerpt.
+  const row = unit({ provider: "completed", phase: "plan", dispatchMode: "plan" })
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "completed",
+    prs: [],
+    logExcerpt: "Progress:\nCloned repo and drafted the dependency upgrade.",
+  })
+  h.deps.classifyPlanReady = mock(async () => ({ planReady: true, planExcerpt: "" }))
+
+  const result = await advance({}, h.deps)
+
+  expect(h.deps.classifyPlanReady).toHaveBeenCalledTimes(1)
+  expect(result.needsModel[0]?.kind).toBe("review_plan")
+  expect(result.needsModel[0]?.payload.plan_excerpt).toBe(
+    "Progress:\nCloned repo and drafted the dependency upgrade.",
+  )
+})
+
 test("human merge-approve records an approval bound to the engine-fetched live head/base", async () => {
   const row = unit({
     issue: 7,
@@ -704,4 +726,45 @@ test("advance clamps a long wake cadence into the scheduler's [60, 3600] range",
   expect(result.nextWakeSeconds).not.toBeNull()
   expect(result.nextWakeSeconds!).toBeGreaterThanOrEqual(60)
   expect(result.nextWakeSeconds!).toBeLessThanOrEqual(3600)
+})
+
+test("advance isolates a throwing unit and still sweeps every other mission", async () => {
+  // Reproduces the resilience gap: one unit's observe/step throwing used to
+  // abort the entire global sweep (no board, no other missions advanced).
+  const u1 = unit({ missionId: "m1", issue: 1, taskId: "t1" })
+  const u2 = unit({ missionId: "m2", issue: 2, taskId: "t2" })
+  const h = harness([u1, u2], [mission({ id: "m1" }), mission({ id: "m2" })])
+  const realObserve = h.deps.observeUnit
+  h.deps.observeUnit = mock(async (row: UnitRow) => {
+    if (row.issue === 1) throw new Error("observe boom")
+    return realObserve(row)
+  })
+
+  const result = await advance({}, h.deps)
+
+  // The sweep completed: both missions are on the board despite unit 1 failing.
+  expect(result.board.map((b) => b.missionId).sort()).toEqual(["m1", "m2"])
+  expect(
+    result.applied.some((a) => a.includes("error advancing") && a.includes("m1")),
+  ).toBe(true)
+})
+
+test("advance isolates a throwing model answer instead of aborting the wake", async () => {
+  // A one-shot steer that 405s (or any answer failure) must not nuke the wake.
+  const u = unit({ provider: "completed", phase: "plan", dispatchMode: "plan" })
+  const h = harness([u])
+  h.deps.followUpTask = mock(async () => {
+    throw new Error("POST /tasks/{id} → 405 (one-shot)")
+  })
+
+  const result = await advance(
+    { modelAnswers: [{ requestId: "m1:1:review_plan", verdict: { decision: "approve" } }] },
+    h.deps,
+  )
+
+  expect(
+    result.applied.some((a) => a.includes("error applying answer") && a.includes("review_plan")),
+  ).toBe(true)
+  // The wake still produced a board rather than throwing.
+  expect(Array.isArray(result.board)).toBe(true)
 })

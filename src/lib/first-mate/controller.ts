@@ -286,6 +286,12 @@ function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined
 }
 
+/** Compact single-line error text for the `applied` audit trail. */
+function errText(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err)
+  return message.replace(/\s+/g, " ").slice(0, 200)
+}
+
 function compact(value: string | undefined, max = 1200): string | undefined {
   if (value === undefined) return undefined
   const trimmed = value.trim()
@@ -373,7 +379,10 @@ async function fillFuzzyFields(
     const result = await deps.classifyPlanReady(evidence.logExcerpt)
     if (result !== null) {
       observed.planReady = result.planReady
-      evidence.planExcerpt = result.planExcerpt
+      // The T0 classifier may extract an empty planExcerpt (its schema allows
+      // "or empty"); never let that clobber the real log — leave planExcerpt
+      // undefined so the payload falls back to logExcerpt.
+      if (result.planExcerpt.length > 0) evidence.planExcerpt = result.planExcerpt
     }
   }
 
@@ -448,7 +457,8 @@ function modelPayload(
   if (kind === "review_plan") {
     return {
       ...common,
-      plan_excerpt: compact(evidence.planExcerpt ?? evidence.logExcerpt, 1200),
+      // Falsy fallback (not ??) so an empty planExcerpt yields the raw log.
+      plan_excerpt: compact(evidence.planExcerpt || evidence.logExcerpt, 1200),
     }
   }
 
@@ -798,14 +808,26 @@ async function applySubmittedAnswers(
   const units = await deps.loadAllUnits()
   const missions = await deps.readMissions()
   for (const answer of input.modelAnswers ?? []) {
-    if (answer.requestId.startsWith("decompose:")) {
-      await applyDecomposeAnswer(answer, missions, deps, applied)
-    } else {
-      await applyModelAnswer(answer, units, deps, applied)
+    // Isolate each answer: a single failing steer/dispatch must not abort the
+    // whole sweep. Record the failure in the audit trail and continue.
+    try {
+      if (answer.requestId.startsWith("decompose:")) {
+        await applyDecomposeAnswer(answer, missions, deps, applied)
+      } else {
+        await applyModelAnswer(answer, units, deps, applied)
+      }
+    } catch (err) {
+      consola.warn(`first-mate: model answer ${answer.requestId} failed to apply:`, err)
+      applied.push(`error applying answer ${answer.requestId}: ${errText(err)}`)
     }
   }
   for (const decision of input.humanDecisions ?? []) {
-    await applyHumanDecision(decision, units, deps, applied)
+    try {
+      await applyHumanDecision(decision, units, deps, applied)
+    } catch (err) {
+      consola.warn(`first-mate: human decision ${decision.requestId} failed to apply:`, err)
+      applied.push(`error applying decision ${decision.requestId}: ${errText(err)}`)
+    }
   }
 }
 
@@ -1329,36 +1351,46 @@ export async function advance(
     const mission = missionsById.get(unit.missionId)
     if (mission === undefined) continue
 
-    const observed = await deps.observeUnit(unit)
-    const evidence = await fillFuzzyFields(unit, mission, observed, deps)
-    updateUnitFromObservedPrs(unit, observed)
-    unit.lastCheckedMs = Date.now()
+    // Isolate each unit: a transient observe/classify/dispatch/steer failure on
+    // one unit must not abort the global sweep across every other mission.
+    try {
+      const observed = await deps.observeUnit(unit)
+      const evidence = await fillFuzzyFields(unit, mission, observed, deps)
+      updateUnitFromObservedPrs(unit, observed)
+      unit.lastCheckedMs = Date.now()
 
-    if (await maybeMergeWithApproval(unit, observed, evidence, deps, applied)) {
-      continue
+      if (await maybeMergeWithApproval(unit, observed, evidence, deps, applied)) {
+        continue
+      }
+
+      const classified = classify(observed, unit)
+      unit.provider = classified.provider
+      unit.phase = classified.phase
+      unit.artifact = classified.artifact
+      unit.validation = classified.validation
+
+      const action = nextAction(classified, unit, policy)
+      await executeAction(
+        action,
+        unit,
+        mission,
+        observed,
+        evidence,
+        policy,
+        deps,
+        needsModel,
+        needsHuman,
+        applied,
+        requestOrder,
+      )
+      await deps.upsertUnit(unit.repo, unit)
+    } catch (err) {
+      consola.warn(
+        `first-mate: unit ${unit.missionId}:${unitHandle(unit)} step failed:`,
+        err,
+      )
+      applied.push(`error advancing ${unit.missionId}:${unitHandle(unit)}: ${errText(err)}`)
     }
-
-    const classified = classify(observed, unit)
-    unit.provider = classified.provider
-    unit.phase = classified.phase
-    unit.artifact = classified.artifact
-    unit.validation = classified.validation
-
-    const action = nextAction(classified, unit, policy)
-    await executeAction(
-      action,
-      unit,
-      mission,
-      observed,
-      evidence,
-      policy,
-      deps,
-      needsModel,
-      needsHuman,
-      applied,
-      requestOrder,
-    )
-    await deps.upsertUnit(unit.repo, unit)
   }
 
   // Missions with no units yet need decomposition into dispatchable units.
