@@ -27,7 +27,8 @@ preferred tool names are:
   criteria, optional priority, optional house rules.
 - `mcp__first-mate__advance` — wake the deterministic controller once; apply
   submitted model/human answers; return compact `board`, `needsModel`,
-  `needsHuman`, `applied_count`, and `nextWakeAt`.
+  `needsHuman`, `applied_count`, `nextWakeAt`, and `nextWakeSeconds` (the
+  ready-to-use self-wake delay; `null` when idle).
 - `mcp__first-mate__board` — read the active board without a wake.
 - `mcp__first-mate__mission_status` — read compact status for all missions, or
   one mission id.
@@ -70,6 +71,47 @@ requests: `review_plan`, `answer_agent_question`, `author_fix`, and
 therefore tells Claude to run a thin loop: start a mission, call `advance`, answer
 model requests with small typed verdicts, surface human requests, and report from
 the board/ledger rather than rereading full diffs or logs.
+
+## Self-driving loop (push-based, durable heartbeat)
+
+The loop is push-based so it scales to many missions without a human babysitting
+it. `advance()` never schedules itself server-side — the scheduling primitives
+are lead-model tools — so the mechanism is split:
+
+- **Server** returns `nextWakeSeconds`: a ready-to-use self-wake delay clamped to
+  the scheduler's `[60, 3600]` range (derived from the same buckets as
+  `nextWakeAt` — 90s while a unit is in-progress/CI-running, 900s while all units
+  are queued/blocked, 300s otherwise), or `null` when the whole portfolio is idle
+  (no active units). No client-side arithmetic; `null` is the explicit DISARM
+  signal. A human-blocked unit stays active, so `nextWakeSeconds` is non-null
+  while any `needsHuman` decision is pending.
+- **Skill** drains all ready work each turn, then manages exactly ONE durable
+  heartbeat identified by a stable `[fm-heartbeat]` marker token. It arms with a
+  **create-fresh-then-reap** step: `CronCreate` a new `durable`/`recurring`
+  heartbeat (cadence bucket chosen from `nextWakeSeconds` — ~2 min for imminent
+  work, ~5 min mid, ~10 min when all queued/blocked, all fixed cron expressions
+  so there is no client-side time math), then `CronDelete` every other
+  `[fm-heartbeat]` job. Creating before deleting keeps at least one heartbeat
+  live at all times; reaping the rest converges to exactly one, clears
+  duplicate/old-version orphans, and — because it recreates each wake — resets
+  the 7-day recurring-cron expiry so a long mission never silently stops. When
+  `nextWakeSeconds` is `null` and no decision is pending, it disarms (deletes all
+  `[fm-heartbeat]` jobs) and yields.
+
+Disarm is safe against stranding by construction: work only ever becomes active
+inside a turn (`start_mission` is a tool call; nothing activates a mission
+server-side), and the skill's Start-a-mission invariant requires that same turn
+to run advance + arm before yielding. So a disarmed idle portfolio can only be
+reactivated by a turn that immediately re-arms.
+
+Because the cron is durable (persisted to `.claude/scheduled_tasks.json`) and one
+`advance()` sweeps the WHOLE registry, a single heartbeat drives every mission
+across every repo, and the loop survives idle, compaction, restart, and `/clear`
+— the ledger on disk is the only state that matters, and the heartbeat re-hydrates
+it each wake. `CronCreate` is the primary primitive (available in any interactive
+session, fires while the REPL is idle); `ScheduleWakeup` is used only for a
+tighter one-shot wake when the session is a `/loop`. The recreate-each-wake arm
+step keeps the recurring cron well inside its 7-day expiry.
 
 ## Dual-token auth
 

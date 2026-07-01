@@ -135,6 +135,7 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
           needsHuman: result.needsHuman,
           applied_count: result.applied.length,
           nextWakeAt: result.nextWakeAt,
+          nextWakeSeconds: result.nextWakeSeconds,
         })
       },
     ),

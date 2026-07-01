@@ -679,3 +679,29 @@ test("decompose: unit-less mission emits a decompose request, and a decompose an
   // dispatched in the same wake (each got a taskId or issue) — no duplicates.
   expect(h.units.every((u) => u.taskId !== null || u.issue !== null)).toBe(true)
 })
+
+test("advance returns a clamped nextWakeSeconds for active work and null when idle", async () => {
+  // Active in-progress unit → the 90s cadence, surfaced as ready-to-use seconds.
+  const active = harness([unit({ provider: "in_progress", phase: "plan" })])
+  const activeResult = await advance({}, active.deps)
+  expect(activeResult.nextWakeAt).not.toBeNull()
+  expect(activeResult.nextWakeSeconds).toBe(90)
+  expect(activeResult.nextWakeSeconds).toBeGreaterThanOrEqual(60)
+  expect(activeResult.nextWakeSeconds).toBeLessThanOrEqual(3600)
+
+  // No units → idle → null on both, the skill's DISARM signal.
+  const idle = harness([])
+  const idleResult = await advance({}, idle.deps)
+  expect(idleResult.nextWakeAt).toBeNull()
+  expect(idleResult.nextWakeSeconds).toBeNull()
+})
+
+test("advance clamps a long wake cadence into the scheduler's [60, 3600] range", async () => {
+  // All-queued/blocked units use the 900s cadence — still within range, but the
+  // clamp guarantees any cadence the controller picks is scheduler-safe.
+  const h = harness([unit({ provider: "queued", phase: "plan" })])
+  const result = await advance({}, h.deps)
+  expect(result.nextWakeSeconds).not.toBeNull()
+  expect(result.nextWakeSeconds!).toBeGreaterThanOrEqual(60)
+  expect(result.nextWakeSeconds!).toBeLessThanOrEqual(3600)
+})

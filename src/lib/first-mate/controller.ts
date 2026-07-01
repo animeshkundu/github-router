@@ -155,6 +155,13 @@ export interface AdvanceResult {
   needsHuman: HumanRequest[]
   applied: string[]
   nextWakeAt: number | null
+  /**
+   * Ready-to-use self-wake delay in seconds, clamped to the scheduler's
+   * [60, 3600] range, or `null` when the portfolio is idle (no active units).
+   * The skill feeds this straight to the scheduler and uses `null` as the
+   * signal to DISARM the heartbeat — no client-side arithmetic.
+   */
+  nextWakeSeconds: number | null
 }
 
 interface Evidence {
@@ -1235,8 +1242,7 @@ function capQueued<T>(entries: QueuedRequest<T>[], topK: number): T[] {
   return entries.sort(compareQueued).slice(0, topK).map((entry) => entry.request)
 }
 
-function nextWakeAt(units: UnitRow[], missions: Map<string, Mission>): number | null {
-  const active = units.filter((unit) => isActiveUnit(unit, missions))
+function nextWakeAt(units: UnitRow[], missions: Map<string, Mission>): number | null {  const active = units.filter((unit) => isActiveUnit(unit, missions))
   if (active.length === 0) return null
 
   const now = Date.now()
@@ -1260,6 +1266,17 @@ function nextWakeAt(units: UnitRow[], missions: Map<string, Mission>): number | 
   }
 
   return now + 300_000
+}
+
+// Scheduler bounds: ScheduleWakeup clamps to [60, 3600]s and cron granularity
+// is 60s, so the self-wake delay we hand the skill lives in that range.
+const MIN_WAKE_SECONDS = 60
+const MAX_WAKE_SECONDS = 3600
+
+function wakeSeconds(wakeAt: number | null): number | null {
+  if (wakeAt === null) return null
+  const seconds = Math.round((wakeAt - Date.now()) / 1000)
+  return Math.min(MAX_WAKE_SECONDS, Math.max(MIN_WAKE_SECONDS, seconds))
 }
 
 async function pruneTerminalRepos(
@@ -1391,5 +1408,6 @@ export async function advance(
     needsHuman: capQueued(needsHuman, topK),
     applied,
     nextWakeAt: wakeAt,
+    nextWakeSeconds: wakeSeconds(wakeAt),
   }
 }

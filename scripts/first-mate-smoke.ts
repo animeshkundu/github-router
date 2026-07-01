@@ -43,7 +43,7 @@ console.log("SMOKE 1 — empty world (edge)")
 {
   const r = await advance({}, deps)
   check("empty board", r.board.length === 0)
-  check("no requests + null wake", r.needsModel.length === 0 && r.needsHuman.length === 0 && r.nextWakeAt === null)
+  check("no requests + null wake", r.needsModel.length === 0 && r.needsHuman.length === 0 && r.nextWakeAt === null && r.nextWakeSeconds === null)
 }
 
 console.log("SMOKE 2 — register mission → advance emits a decompose request (real registry)")
