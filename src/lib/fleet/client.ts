@@ -1,4 +1,5 @@
 import { applyInsecureTls } from "../insecure-tls"
+import type { FleetAuth } from "./registry"
 import { TunnelAuthError } from "./tunnel-auth"
 
 // `applyInsecureTls` (runtime-aware self-signed-cert bypass) is shared with the
@@ -29,6 +30,12 @@ export type FleetErrorCode =
   // RATE_LIMITED — a 429 under fan-out load; retryable WITH backoff (F21).
   | "BAD_REQUEST"
   | "RATE_LIMITED"
+  // Mesh diagnostic: a mesh peer (auth:{type:"mesh"}) was unreachable at the
+  // network layer. Distinct from UNREACHABLE so a SILENT tailnet-ACL drop (no
+  // loud relay error like devtunnel's NO_HOST) is actionable — the peer is on
+  // the tailnet but the request didn't land; the likely cause is the
+  // `tag:aiordie` ACL, not a dead instance.
+  | "TAILNET_UNREACHABLE"
 
 export class FleetError extends Error {
   code: FleetErrorCode
@@ -54,7 +61,17 @@ export class FleetError extends Error {
 
 export interface FleetClientOptions {
   url: string
-  token: string
+  /**
+   * Bearer token. Optional: when omitted, pass `auth` instead. Retained for
+   * backward-compat with callers that construct a bearer client by token.
+   */
+  token?: string
+  /**
+   * Explicit, discriminated auth. `{type:"mesh"}` sends NO Authorization header
+   * (the peer's sidecar injects the bearer over the tailnet). When absent it is
+   * derived from `token` (→ `{type:"bearer"}`).
+   */
+  auth?: FleetAuth
   fetchFn?: typeof fetch
   /**
    * Optional async provider for a VS Code Dev Tunnel `connect` access token.
@@ -270,7 +287,7 @@ export function decodeSessionId(globalId: string): { instanceId: string; localId
 export class FleetClient {
   private readonly baseUrl: string
   private readonly origin: string
-  private readonly token: string
+  private readonly auth: FleetAuth
   private readonly fetchFn: typeof fetch
   private readonly getTunnelToken?: () => Promise<string | undefined>
   private readonly onTunnelAuthInvalidate?: () => void
@@ -282,7 +299,7 @@ export class FleetClient {
     // this before sending, so neither the bearer nor the tunnel token can be
     // emitted to an unexpected origin.
     this.origin = new URL(this.baseUrl).origin
-    this.token = options.token
+    this.auth = options.auth ?? { type: "bearer", token: options.token ?? "" }
     this.fetchFn = options.fetchFn ?? globalThis.fetch.bind(globalThis)
     this.getTunnelToken = options.getTunnelToken
     this.onTunnelAuthInvalidate = options.onTunnelAuthInvalidate
@@ -449,7 +466,7 @@ export class FleetClient {
       const canRetry = attachTunnel && !!this.onTunnelAuthInvalidate && attempt === 0
 
       const headers: Record<string, string> = {
-        Authorization: `Bearer ${this.token}`,
+        ...(this.auth.type === "bearer" ? { Authorization: `Bearer ${this.auth.token}` } : {}),
         ...(devtunnelHost ? { "X-Tunnel-Skip-Anti-Phishing-Page": "true" } : {}),
         ...(attachTunnel ? { "X-Tunnel-Authorization": `tunnel ${tunnelToken}` } : {}),
         ...(body === undefined ? {} : { "Content-Type": "application/json" }),
@@ -484,7 +501,7 @@ export class FleetClient {
           this.onTunnelAuthInvalidate!()
           continue
         }
-        throw mapNetworkError(err, devtunnelHost)
+        throw this.auth.type === "mesh" ? mapMeshUnreachable(err) : mapNetworkError(err, devtunnelHost)
       }
 
       if (!response.ok) {
@@ -667,6 +684,27 @@ function detailToSearchString(detail: unknown): string {
   } catch {
     return String(detail)
   }
+}
+
+function mapMeshUnreachable(err: unknown): FleetError {
+  if (isAbortLike(err)) {
+    return new FleetError({
+      code: "TIMEOUT",
+      message: "fleet mesh peer request timed out or was aborted",
+      retryable: true,
+      detail: err,
+    })
+  }
+  const message = err instanceof Error ? err.message : String(err)
+  return new FleetError({
+    code: "TAILNET_UNREACHABLE",
+    message:
+      `fleet mesh peer unreachable: ${message} — the peer is a tailnet node but the request did not land. `
+      + "A mesh ACL drops blocked traffic SILENTLY, so the likely cause is the `tag:aiordie` ACL (verify the peer permits this node), "
+      + "not a dead instance; also confirm the peer's mesh sidecar is up and serving HTTPS on the tailnet.",
+    retryable: true,
+    detail: err,
+  })
 }
 
 function mapNetworkError(err: unknown, devtunnelHost = false): FleetError {

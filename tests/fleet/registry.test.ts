@@ -32,6 +32,7 @@ describe("FleetRegistry", () => {
       label: "Beta Lab",
       url: "https://beta.example",
       token: "tok-beta",
+      auth: { type: "bearer", token: "tok-beta" },
       allowExec: undefined,
     })
   })

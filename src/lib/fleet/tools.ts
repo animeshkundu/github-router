@@ -1,4 +1,5 @@
 import type { McpGroup, NonPersonaMcpTool } from "../peer-mcp-personas"
+import { randomUUID } from "node:crypto"
 import {
   FleetClient,
   decodeSessionId,
@@ -19,11 +20,11 @@ import {
   type WaitEventsResponse,
 } from "./client"
 import {
-  FleetRegistry,
   FleetRegistryError,
   type FleetInstanceInfo,
   type FleetResolvedInstance,
 } from "./registry"
+import { MergedFleetRegistry } from "./discovery"
 import { createTunnelTokenProvider, type TunnelTokenProvider } from "./tunnel-auth"
 
 const FLEET_GROUP: McpGroup = "fleet"
@@ -115,7 +116,7 @@ class FleetToolInputError extends Error {
   }
 }
 
-let defaultRegistry: FleetRegistry | undefined
+let defaultRegistry: MergedFleetRegistry | undefined
 let defaultTunnelProvider: TunnelTokenProvider | undefined
 const awaitTurnCursors = new Map<string, Map<string, string>>()
 const instanceProbeCache = new Map<string, { result: FleetInstanceProbeResult; at: number }>()
@@ -133,19 +134,19 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
 
   function getRegistry(): FleetRegistryLike {
     if (registry) return registry
-    defaultRegistry ??= new FleetRegistry()
+    defaultRegistry ??= new MergedFleetRegistry()
     return defaultRegistry
   }
 
   function clientFor(instance: FleetResolvedInstance): FleetClientLike {
-    const key = `${instance.id}\0${instance.url}\0${instance.token}\0${instance.tunnelId ?? ""}\0${instance.tunnelToken ?? ""}\0${instance.insecureTLS === true ? "1" : "0"}`
+    const key = `${instance.id}\0${instance.url}\0${instance.auth.type}\0${instance.token}\0${instance.tunnelId ?? ""}\0${instance.tunnelToken ?? ""}\0${instance.insecureTLS === true ? "1" : "0"}`
     const existing = clients.get(key)
     if (existing) return existing
     const created = options.createClient
       ? options.createClient(instance)
       : new FleetClient({
           url: instance.url,
-          token: instance.token,
+          auth: instance.auth,
           fetchFn: options.fetchFn,
           insecureTLS: instance.insecureTLS,
           ...tunnelClientOptions(instance, tunnelProvider),
@@ -340,9 +341,9 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
         sessionId: stringProp("Global session id in the form instanceId:localSessionId."),
         instance: stringProp("Optional instance id/label; when supplied it must agree with sessionId."),
         message: stringProp("Message text to deliver to the session."),
-        idempotencyKey: stringProp("Caller-generated idempotency key. Reuse the same key on retry; the upstream dedupes so a retry never re-types."),
+        idempotencyKey: stringProp("Optional caller idempotency key; AUTO-GENERATED when omitted, so you normally never pass it. Supply your OWN stable key only when you will retry the SAME send and need the upstream to dedupe it."),
         awaitMs: numberProp("Optional best-effort confirmation wait (ms) — NOT a deadline. Prefer awaitMs:0 plus await_turn; a turn that outruns awaitMs returns confirmationPending, not an error."),
-      }, ["sessionId", "message", "idempotencyKey"]),
+      }, ["sessionId", "message"]),
       async (args, signal) => {
         const { instance, localId, globalId } = await resolveSession(args)
         const awaitMs = optionalNumber(args, "awaitMs")
@@ -350,7 +351,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
           localId,
           {
             message: requiredString(args, "message"),
-            idempotencyKey: requiredString(args, "idempotencyKey"),
+            idempotencyKey: optionalString(args, "idempotencyKey") ?? randomUUID(),
             ...(awaitMs === undefined ? {} : { awaitMs }),
           },
           signal,
@@ -396,9 +397,9 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
         sessionId: stringProp("Global session id in the form instanceId:localSessionId."),
         instance: stringProp("Optional instance id/label; when supplied it must agree with sessionId."),
         keys: stringProp("Key sequence to send."),
-        idempotencyKey: stringProp("Caller-generated idempotency key."),
+        idempotencyKey: stringProp("Optional caller idempotency key; auto-generated when omitted."),
         raw: booleanProp("Pass keys through as raw input when the instance supports it."),
-      }, ["sessionId", "keys", "idempotencyKey"]),
+      }, ["sessionId", "keys"]),
       async (args, signal) => {
         const { instance, localId, globalId } = await resolveSession(args)
         const raw = optionalBoolean(args, "raw")
@@ -406,7 +407,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
           localId,
           {
             keys: requiredString(args, "keys"),
-            idempotencyKey: requiredString(args, "idempotencyKey"),
+            idempotencyKey: optionalString(args, "idempotencyKey") ?? randomUUID(),
             ...(raw === undefined ? {} : { raw }),
           },
           signal,
@@ -423,15 +424,15 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
         choice: stringProp("Named or numbered choice to select."),
         optionValue: stringProp("Exact option value to select."),
         keys: stringProp("Explicit key override to send instead of a mapped choice."),
-        idempotencyKey: stringProp("Caller-generated idempotency key."),
-      }, ["sessionId", "idempotencyKey"]),
+        idempotencyKey: stringProp("Optional caller idempotency key; auto-generated when omitted."),
+      }, ["sessionId"]),
       async (args, signal) => {
         const { instance, localId, globalId } = await resolveSession(args)
         const input = definedObject({
           choice: optionalString(args, "choice"),
           optionValue: optionalString(args, "optionValue"),
           keys: optionalString(args, "keys"),
-          idempotencyKey: requiredString(args, "idempotencyKey"),
+          idempotencyKey: optionalString(args, "idempotencyKey") ?? randomUUID(),
         }) as { choice?: string; optionValue?: string; keys?: string; idempotencyKey: string }
         const response = await clientFor(instance).respond(localId, input, signal)
         return ok({ resolvedInstance: publicInstance(instance), sessionId: globalId, ...response })
@@ -445,16 +446,16 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
         agent: stringProp("Agent/runtime to create on the instance."),
         name: stringProp("Optional display name for the session."),
         workingDir: stringProp("Optional working directory on the remote instance."),
-        idempotencyKey: stringProp("Caller-generated idempotency key."),
+        idempotencyKey: stringProp("Optional caller idempotency key; auto-generated when omitted."),
         start: booleanProp("Whether the remote instance should start the session immediately."),
         readyTimeoutMs: numberProp("F17: bounded ms to wait for the agent to become driveable before returning. The response carries ready/bound/blocker."),
         permissionMode: stringProp("F10 (claude only): permission mode the launched agent starts in — one of plan | acceptEdits | default | bypassPermissions. Rejected with BAD_REQUEST if unknown or if agentArgs also sets it."),
         agentArgs: arrayProp("F10 (claude only): extra launcher args appended after the github-router prefix. Must NOT include --permission-mode or --dangerously-skip-permissions (use permissionMode) — rejected with BAD_REQUEST."),
-      }, ["instance", "agent", "idempotencyKey"]),
+      }, ["instance", "agent"]),
       async (args, signal) => {
         const instance = await resolve(requiredString(args, "instance"))
         const agent = requiredString(args, "agent")
-        const idempotencyKey = requiredString(args, "idempotencyKey")
+        const idempotencyKey = optionalString(args, "idempotencyKey") ?? randomUUID()
         const permissionMode = optionalString(args, "permissionMode")
         const agentArgs = optionalStringArray(args, "agentArgs")
         if (permissionMode !== undefined) {
@@ -491,12 +492,12 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
       objectSchema({
         sessionId: stringProp("Global session id in the form instanceId:localSessionId."),
         instance: stringProp("Optional instance id/label; when supplied it must agree with sessionId."),
-        idempotencyKey: stringProp("Caller-generated idempotency key."),
+        idempotencyKey: stringProp("Optional caller idempotency key; auto-generated when omitted."),
         mode: stringProp("Optional stop mode understood by the remote instance."),
-      }, ["sessionId", "idempotencyKey"]),
+      }, ["sessionId"]),
       async (args, signal) => {
         const { instance, localId, globalId } = await resolveSession(args)
-        const idempotencyKey = requiredString(args, "idempotencyKey")
+        const idempotencyKey = optionalString(args, "idempotencyKey") ?? randomUUID()
         // End-to-end idempotency also requires the ai-or-die control plane to dedupe by this key.
         const response = await clientFor(instance).stopSession(
           localId,
