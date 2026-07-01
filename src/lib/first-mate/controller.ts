@@ -1,0 +1,1193 @@
+import fs from "node:fs/promises"
+import path from "node:path"
+
+import consola from "consola"
+
+import {
+  assignAgent as realAssignAgent,
+  createIssue as realCreateIssue,
+  findAgentPRs as realFindAgentPRs,
+  getPullRequestState as realGetPullRequestState,
+  markReadyForReview as realMarkReadyForReview,
+  mergePullRequest as realMergePullRequest,
+  rerunChecks as realRerunChecks,
+  resolveAgentActor as realResolveAgentActor,
+  resolveAgentRoster as realResolveAgentRoster,
+  submitReview as realSubmitReview,
+} from "~/lib/agent/service"
+import {
+  cancelTask as realCancelTask,
+  followUpTask as realFollowUpTask,
+  startTask as realStartTask,
+} from "~/lib/agent/tasks"
+import type { RepoRef as AgentRepoRef } from "~/lib/agent/types"
+import { PATHS } from "~/lib/paths"
+import { verifyAndConsumeApproval as realVerifyAndConsumeApproval } from "~/lib/first-mate/approval"
+import {
+  classifyFixAddressed as realClassifyFixAddressed,
+  classifyPlanReady as realClassifyPlanReady,
+  classifyQuestionAnswerable as realClassifyQuestionAnswerable,
+  classifyStuck as realClassifyStuck,
+} from "~/lib/first-mate/classifier"
+import {
+  findByKey as realFindByKey,
+  markAnswered as realMarkAnswered,
+  upsertDecision as realUpsertDecision,
+  type DecisionRecord,
+} from "~/lib/first-mate/decisions"
+import {
+  buildDecisionPacket as realBuildDecisionPacket,
+  type DecisionPacketInput,
+} from "~/lib/first-mate/decision-packet"
+import {
+  loadAllUnits as realLoadAllUnits,
+  readMissions as realReadMissions,
+  type Mission,
+} from "~/lib/first-mate/registry"
+import {
+  pruneTerminal as realPruneTerminal,
+  upsertUnit as realUpsertUnit,
+} from "~/lib/first-mate/ledger"
+import { observeUnit as realObserveUnit } from "~/lib/first-mate/observe"
+import {
+  classify,
+  nextAction,
+} from "~/lib/first-mate/state-machine"
+import {
+  DEFAULT_POLICY,
+  type Action,
+  type AgentKey,
+  type ModelRequestKind,
+  type Observed,
+  type Policy,
+  type ProviderState,
+  type RepoRef,
+  type UnitRow,
+} from "~/lib/first-mate/types"
+
+export interface ControllerDeps {
+  loadAllUnits: typeof realLoadAllUnits
+  readMissions: typeof realReadMissions
+  upsertUnit: typeof realUpsertUnit
+  pruneTerminal: typeof realPruneTerminal
+  observeUnit: typeof realObserveUnit
+  classifyPlanReady: typeof realClassifyPlanReady
+  classifyQuestionAnswerable: typeof realClassifyQuestionAnswerable
+  classifyFixAddressed: typeof realClassifyFixAddressed
+  classifyStuck: typeof realClassifyStuck
+  verifyAndConsumeApproval: typeof realVerifyAndConsumeApproval
+  upsertDecision: typeof realUpsertDecision
+  findByKey: typeof realFindByKey
+  markAnswered: typeof realMarkAnswered
+  startTask: typeof realStartTask
+  followUpTask: typeof realFollowUpTask
+  cancelTask: typeof realCancelTask
+  createIssue: typeof realCreateIssue
+  resolveAgentActor: typeof realResolveAgentActor
+  resolveAgentRoster: typeof realResolveAgentRoster
+  assignAgent: typeof realAssignAgent
+  findAgentPRs: typeof realFindAgentPRs
+  getPullRequestState: typeof realGetPullRequestState
+  submitReview: typeof realSubmitReview
+  rerunChecks: typeof realRerunChecks
+  mergePullRequest: typeof realMergePullRequest
+  markReadyForReview: typeof realMarkReadyForReview
+  buildDecisionPacket: typeof realBuildDecisionPacket
+  writeDecisionPacketHtml: (packetId: string, html: string) => Promise<string>
+}
+
+export interface AdvanceInput {
+  modelAnswers?: ModelAnswer[]
+  humanDecisions?: HumanDecision[]
+  policy?: Partial<Policy>
+  maxInFlightPerProvider?: number
+  topK?: number
+}
+
+export interface ModelAnswer {
+  requestId: string
+  // Verdict shape depends on the model request kind.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  verdict: any
+}
+
+export interface HumanDecision {
+  requestId: string
+  choice: string
+}
+
+export interface ModelRequest {
+  requestId: string
+  kind: ModelRequestKind
+  missionId: string
+  repo: RepoRef
+  issue: number | null
+  pr: number | null
+  payload: Record<string, unknown>
+}
+
+export interface HumanRequest {
+  requestId: string
+  decisionId: string
+  missionId: string
+  repo: RepoRef
+  issue: number | null
+  pr: number | null
+  reason: string
+  packetHtmlPath?: string
+}
+
+export interface BoardRow {
+  missionId: string
+  title: string
+  repos: string[]
+  counts: Record<string, number>
+  blocked: number
+}
+
+export interface AdvanceResult {
+  board: BoardRow[]
+  needsModel: ModelRequest[]
+  needsHuman: HumanRequest[]
+  applied: string[]
+  nextWakeAt: number | null
+}
+
+interface Evidence {
+  planExcerpt?: string
+  logExcerpt?: string
+  question?: string
+  suggestedAnswer?: string
+  failureSummary?: string
+  latestLogExcerpt?: string
+  runId?: number
+  prNodeId?: string
+}
+
+interface QueuedRequest<T> {
+  request: T
+  sortKey: number
+  order: number
+}
+
+const MODEL_KINDS: ModelRequestKind[] = [
+  "review_plan",
+  "answer_agent_question",
+  "author_fix",
+  "judge_review",
+]
+
+const PROVIDER_STATES = new Set<ProviderState>([
+  "none",
+  "queued",
+  "in_progress",
+  "waiting_for_user",
+  "completed",
+  "failed",
+  "timed_out",
+  "cancelled",
+])
+
+const AGENT_ORDER: AgentKey[] = ["copilot", "anthropic", "openai"]
+const DEFAULT_MAX_IN_FLIGHT_PER_PROVIDER = 6
+const DEFAULT_TOP_K = 6
+
+export const defaultDeps: ControllerDeps = {
+  loadAllUnits: realLoadAllUnits,
+  readMissions: realReadMissions,
+  upsertUnit: realUpsertUnit,
+  pruneTerminal: realPruneTerminal,
+  observeUnit: realObserveUnit,
+  classifyPlanReady: realClassifyPlanReady,
+  classifyQuestionAnswerable: realClassifyQuestionAnswerable,
+  classifyFixAddressed: realClassifyFixAddressed,
+  classifyStuck: realClassifyStuck,
+  verifyAndConsumeApproval: realVerifyAndConsumeApproval,
+  upsertDecision: realUpsertDecision,
+  findByKey: realFindByKey,
+  markAnswered: realMarkAnswered,
+  startTask: realStartTask,
+  followUpTask: realFollowUpTask,
+  cancelTask: realCancelTask,
+  createIssue: realCreateIssue,
+  resolveAgentActor: realResolveAgentActor,
+  resolveAgentRoster: realResolveAgentRoster,
+  assignAgent: realAssignAgent,
+  findAgentPRs: realFindAgentPRs,
+  getPullRequestState: realGetPullRequestState,
+  submitReview: realSubmitReview,
+  rerunChecks: realRerunChecks,
+  mergePullRequest: realMergePullRequest,
+  markReadyForReview: realMarkReadyForReview,
+  buildDecisionPacket: realBuildDecisionPacket,
+  writeDecisionPacketHtml,
+}
+
+function sanitizeSegment(value: string): string {
+  const cleaned = value.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+$/, "_")
+  return cleaned.length > 0 ? cleaned : "_"
+}
+
+async function writeDecisionPacketHtml(
+  packetId: string,
+  html: string,
+): Promise<string> {
+  const dir = path.join(PATHS.FIRST_MATE_DIR, "packets")
+  await fs.mkdir(dir, { recursive: true })
+  const target = path.join(dir, `${sanitizeSegment(packetId)}.html`)
+  await fs.writeFile(target, html, { mode: 0o600 })
+  return target
+}
+
+function agentRepo(repo: RepoRef): AgentRepoRef {
+  return { owner: repo.owner, repo: repo.name }
+}
+
+function unitHandle(unit: UnitRow): string {
+  return String(unit.issue ?? unit.taskId)
+}
+
+function requestIdFor(unit: UnitRow, kind: ModelRequestKind): string {
+  return `${unit.missionId}:${unitHandle(unit)}:${kind}`
+}
+
+function humanRequestBase(unit: UnitRow, type: string): string {
+  return `${unit.missionId}:${unitHandle(unit)}:${type}`
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
+function booleanValue(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
+}
+
+function compact(value: string | undefined, max = 1200): string | undefined {
+  if (value === undefined) return undefined
+  const trimmed = value.trim()
+  if (trimmed.length <= max) return trimmed
+  return `${trimmed.slice(0, max - 16)}…[truncated]…`
+}
+
+function providerState(value: string, fallback: ProviderState): ProviderState {
+  return PROVIDER_STATES.has(value as ProviderState)
+    ? (value as ProviderState)
+    : fallback
+}
+
+function missionMap(missions: Mission[]): Map<string, Mission> {
+  return new Map(missions.map((mission) => [mission.id, mission]))
+}
+
+function repoLabel(repo: RepoRef): string {
+  return `${repo.owner}/${repo.name}`
+}
+
+function sortKey(unit: UnitRow): number {
+  return unit.lastCheckedMs ?? unit.lastSteer?.atMs ?? 0
+}
+
+function findModelTarget(
+  units: UnitRow[],
+  requestId: string,
+): { unit: UnitRow; kind: ModelRequestKind } | undefined {
+  for (const unit of units) {
+    for (const kind of MODEL_KINDS) {
+      if (requestIdFor(unit, kind) === requestId) return { unit, kind }
+    }
+  }
+  return undefined
+}
+
+function mergePolicy(input: Partial<Policy> | undefined): Policy {
+  return { ...DEFAULT_POLICY, ...(input ?? {}) }
+}
+
+function positiveInteger(value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback
+  return Number.isInteger(value) && value > 0 ? value : fallback
+}
+
+function observedRecord(observed: Observed): Record<string, unknown> {
+  return observed as unknown as Record<string, unknown>
+}
+
+function initialEvidence(observed: Observed): Evidence {
+  const record = observedRecord(observed)
+  return {
+    planExcerpt: stringValue(record.planExcerpt),
+    logExcerpt: stringValue(record.logExcerpt),
+    question:
+      stringValue(record.question) ??
+      stringValue(record.agentQuestion) ??
+      stringValue(record.prompt),
+    suggestedAnswer: stringValue(record.suggestedAnswer),
+    failureSummary:
+      stringValue(record.failureSummary) ??
+      stringValue(record.ciExcerpt) ??
+      stringValue(record.reviewExcerpt),
+    latestLogExcerpt: stringValue(record.latestLogExcerpt),
+    runId: numberValue(record.runId),
+    prNodeId: stringValue(record.prNodeId),
+  }
+}
+
+async function fillFuzzyFields(
+  unit: UnitRow,
+  mission: Mission,
+  observed: Observed,
+  deps: ControllerDeps,
+): Promise<Evidence> {
+  const evidence = initialEvidence(observed)
+
+  if (
+    observed.provider === "completed" &&
+    observed.prs.length === 0 &&
+    observed.planReady === undefined &&
+    evidence.logExcerpt !== undefined
+  ) {
+    const result = await deps.classifyPlanReady(evidence.logExcerpt)
+    if (result !== null) {
+      observed.planReady = result.planReady
+      evidence.planExcerpt = result.planExcerpt
+    }
+  }
+
+  if (
+    observed.provider === "waiting_for_user" &&
+    observed.agentQuestionAnswerableFromAC === undefined &&
+    evidence.question !== undefined
+  ) {
+    const result = await deps.classifyQuestionAnswerable(
+      evidence.question,
+      mission.acceptanceCriteria,
+    )
+    if (result !== null) {
+      observed.agentQuestionAnswerableFromAC = result.answerable
+      evidence.suggestedAnswer = result.answer
+    }
+  }
+
+  if (
+    unit.lastSteer !== undefined &&
+    observed.steerAcknowledged === undefined &&
+    evidence.failureSummary !== undefined &&
+    evidence.latestLogExcerpt !== undefined
+  ) {
+    const result = await deps.classifyFixAddressed(
+      evidence.failureSummary,
+      evidence.latestLogExcerpt,
+    )
+    if (result !== null) observed.steerAcknowledged = result.addressed
+  }
+
+  if (
+    observed.provider === "in_progress" &&
+    observed.steerAcknowledged === undefined &&
+    evidence.logExcerpt !== undefined
+  ) {
+    const result = await deps.classifyStuck(evidence.logExcerpt)
+    if (result !== null && result.stuck) observed.steerAcknowledged = false
+  }
+
+  return evidence
+}
+
+function updateUnitFromObservedPrs(unit: UnitRow, observed: Observed): void {
+  if (observed.prs.length !== 1) return
+  const pr = observed.prs[0]!
+  unit.pr = pr.number
+  unit.headSha = pr.headSha || unit.headSha
+}
+
+function modelPayload(
+  kind: ModelRequestKind,
+  unit: UnitRow,
+  mission: Mission,
+  observed: Observed,
+  evidence: Evidence,
+): Record<string, unknown> {
+  const common: Record<string, unknown> = {
+    goal: compact(mission.goal, 1000),
+    acceptance_criteria: compact(mission.acceptanceCriteria, 1600),
+    house_rules: compact(mission.houseRules, 1000),
+    unit_title: compact(unit.title, 500),
+    repo: repoLabel(unit.repo),
+    issue: unit.issue,
+    pr: unit.pr,
+    phase: unit.phase,
+    validation: unit.validation,
+    head_sha: unit.headSha,
+    base_sha: unit.baseSha,
+  }
+
+  if (kind === "review_plan") {
+    return {
+      ...common,
+      plan_excerpt: compact(evidence.planExcerpt ?? evidence.logExcerpt, 1200),
+    }
+  }
+
+  if (kind === "answer_agent_question") {
+    return {
+      ...common,
+      question: compact(evidence.question, 1000),
+      suggested_answer_from_ac: compact(evidence.suggestedAnswer, 1000),
+      answerable_from_acceptance_criteria:
+        observed.agentQuestionAnswerableFromAC ?? null,
+    }
+  }
+
+  if (kind === "author_fix") {
+    return {
+      ...common,
+      failure_summary: compact(
+        evidence.failureSummary ?? `${unit.validation} on PR #${unit.pr ?? "unknown"}`,
+        1400,
+      ),
+      ci_rollup: observed.ci?.rollup,
+      review_decision: observed.reviewDecision,
+      floor_verdict: observed.floor,
+    }
+  }
+
+  return {
+    ...common,
+    review_summary: compact(evidence.failureSummary, 1400),
+    ci_rollup: observed.ci?.rollup,
+    floor_verdict: observed.floor,
+  }
+}
+
+function buildModelRequest(
+  unit: UnitRow,
+  mission: Mission,
+  kind: ModelRequestKind,
+  observed: Observed,
+  evidence: Evidence,
+): ModelRequest {
+  return {
+    requestId: requestIdFor(unit, kind),
+    kind,
+    missionId: unit.missionId,
+    repo: unit.repo,
+    issue: unit.issue,
+    pr: unit.pr,
+    payload: modelPayload(kind, unit, mission, observed, evidence),
+  }
+}
+
+function isMergeEscalation(unit: UnitRow, reason: string): boolean {
+  return unit.validation === "floor_passed" || reason.toLowerCase().includes("merge")
+}
+
+function decisionType(unit: UnitRow, reason: string): string {
+  return isMergeEscalation(unit, reason) ? "merge_approval" : "human_decision"
+}
+
+function inputFingerprint(
+  unit: UnitRow,
+  observed: Observed,
+  reason: string,
+): string {
+  const observedHead = observed.prs.length === 1 ? observed.prs[0]?.headSha : undefined
+  return [
+    `pr=${unit.pr ?? "none"}`,
+    `head=${unit.headSha ?? observedHead ?? "none"}`,
+    `base=${unit.baseSha ?? "none"}`,
+    `validation=${unit.validation}`,
+    `artifact=${unit.artifact}`,
+    `reason=${reason}`,
+  ].join("|")
+}
+
+function decisionKeyFor(
+  unit: UnitRow,
+  observed: Observed,
+  reason: string,
+): { decisionKey: string; fingerprint: string; type: string } {
+  const type = decisionType(unit, reason)
+  const fingerprint = inputFingerprint(unit, observed, reason)
+  return {
+    type,
+    fingerprint,
+    decisionKey: `${humanRequestBase(unit, type)}:${fingerprint}`,
+  }
+}
+
+function decisionOptions(type: string): DecisionPacketInput["options"] {
+  if (type === "merge_approval") {
+    return [
+      {
+        id: "approve_merge",
+        label: "Approve merge",
+        consequence:
+          "If a matching durable approval is recorded, the next wake may merge the live PR head.",
+        recommended: true,
+      },
+      {
+        id: "hold",
+        label: "Hold",
+        consequence: "The controller will leave the PR open and ask again later.",
+      },
+      {
+        id: "abandon",
+        label: "Abandon",
+        consequence: "The unit will be marked terminal without merging.",
+      },
+    ]
+  }
+
+  return [
+    {
+      id: "continue",
+      label: "Continue manually",
+      consequence: "A human should decide the next implementation step.",
+      recommended: true,
+    },
+    {
+      id: "abandon",
+      label: "Abandon",
+      consequence: "The unit will be marked terminal without merging.",
+    },
+  ]
+}
+
+function packetInput(
+  unit: UnitRow,
+  mission: Mission,
+  observed: Observed,
+  reason: string,
+  type: string,
+): DecisionPacketInput {
+  const pr = unit.pr ?? (observed.prs.length === 1 ? observed.prs[0]?.number ?? null : null)
+  return {
+    type,
+    tldr:
+      type === "merge_approval"
+        ? `Merge approval needed for ${unit.title}`
+        : `${mission.goal}: ${reason}`,
+    question:
+      type === "merge_approval"
+        ? `Approve merging ${repoLabel(unit.repo)} PR #${pr ?? "unknown"}?`
+        : `How should first mate proceed? ${reason}`,
+    options: decisionOptions(type),
+    evidence: {
+      prSummary: pr === null ? undefined : `${repoLabel(unit.repo)} PR #${pr}`,
+      ciExcerpt: observed.ci?.rollup,
+      floorVerdict: observed.floor ?? unit.validation,
+      links:
+        pr === null
+          ? undefined
+          : [
+              {
+                label: `PR #${pr}`,
+                url: `https://github.com/${unit.repo.owner}/${unit.repo.name}/pull/${pr}`,
+              },
+            ],
+    },
+    missionId: unit.missionId,
+    repo: unit.repo,
+    unit: { issue: unit.issue, pr },
+  }
+}
+
+function isAbandonChoice(choice: string): boolean {
+  const normalized = choice.toLowerCase()
+  return normalized.includes("abandon") || normalized.includes("cancel")
+}
+
+async function applyModelAnswer(
+  answer: ModelAnswer,
+  units: UnitRow[],
+  deps: ControllerDeps,
+  applied: string[],
+): Promise<void> {
+  const target = findModelTarget(units, answer.requestId)
+  if (target === undefined) {
+    consola.debug(`first-mate controller ignored unknown model answer ${answer.requestId}`)
+    return
+  }
+
+  const { unit, kind } = target
+  const verdict = asRecord(answer.verdict) ?? {}
+  const repo = agentRepo(unit.repo)
+
+  if (kind === "review_plan") {
+    const decision = stringValue(verdict.decision)
+    if (decision === "approve") {
+      const instruction = "Plan approved — implement it and open a PR."
+      if (unit.taskId !== null) await deps.followUpTask(repo, unit.taskId, instruction)
+      unit.phase = "build"
+      unit.dispatchMode = "build"
+      unit.lastSteer = { sha: unit.headSha ?? undefined, atMs: Date.now() }
+      applied.push(`approved plan for ${unit.missionId}:${unitHandle(unit)}`)
+    } else if (decision === "refine") {
+      const instruction =
+        stringValue(verdict.instruction) ?? "Refine the plan with more concrete implementation steps."
+      if (unit.taskId !== null) await deps.followUpTask(repo, unit.taskId, instruction)
+      unit.lastSteer = { sha: unit.headSha ?? undefined, atMs: Date.now() }
+      applied.push(`requested plan refinement for ${unit.missionId}:${unitHandle(unit)}`)
+    }
+  } else if (kind === "author_fix") {
+    const instruction =
+      stringValue(verdict.instruction) ?? "Fix the reported validation failure and update the PR."
+    if (unit.taskId !== null) {
+      await deps.followUpTask(repo, unit.taskId, instruction)
+    } else if (unit.pr !== null) {
+      await deps.submitReview(repo, unit.pr, "REQUEST_CHANGES", instruction)
+    }
+    unit.retries += 1
+    unit.phase = "fix"
+    unit.lastSteer = { sha: unit.headSha ?? undefined, atMs: Date.now() }
+    applied.push(`sent fix instruction for ${unit.missionId}:${unitHandle(unit)}`)
+  } else if (kind === "answer_agent_question") {
+    const answerText = stringValue(verdict.answer)
+    if (answerText !== undefined && unit.taskId !== null) {
+      await deps.followUpTask(repo, unit.taskId, answerText)
+      unit.lastSteer = { sha: unit.headSha ?? undefined, atMs: Date.now() }
+      applied.push(`answered agent question for ${unit.missionId}:${unitHandle(unit)}`)
+    }
+  } else if (kind === "judge_review") {
+    unit.validation = booleanValue(verdict.pass) === true ? "floor_passed" : "floor_failed"
+    unit.verifierAssigned = true
+    applied.push(`recorded verifier judgment for ${unit.missionId}:${unitHandle(unit)}`)
+  }
+
+  await deps.upsertUnit(unit.repo, unit)
+}
+
+async function applyHumanDecision(
+  decision: HumanDecision,
+  units: UnitRow[],
+  deps: ControllerDeps,
+  applied: string[],
+): Promise<void> {
+  const record = await deps.findByKey(decision.requestId)
+  const decisionId =
+    record?.decisionId ??
+    units.find((unit) => unit.blockingDecisionId === decision.requestId)
+      ?.blockingDecisionId
+
+  if (decisionId === undefined || decisionId === null) {
+    consola.debug(`first-mate controller ignored unknown human decision ${decision.requestId}`)
+    return
+  }
+
+  await deps.markAnswered(decisionId, decision.choice, "human")
+
+  for (const unit of units.filter((row) => row.blockingDecisionId === decisionId)) {
+    unit.blockingDecisionId = null
+    if (isAbandonChoice(decision.choice)) {
+      unit.terminal = true
+      unit.phase = "done"
+      unit.cancelledBy = "external"
+    }
+    await deps.upsertUnit(unit.repo, unit)
+  }
+
+  applied.push(`recorded human decision ${decision.choice}`)
+}
+
+async function applySubmittedAnswers(
+  input: AdvanceInput,
+  deps: ControllerDeps,
+  applied: string[],
+): Promise<void> {
+  const units = await deps.loadAllUnits()
+  for (const answer of input.modelAnswers ?? []) {
+    await applyModelAnswer(answer, units, deps, applied)
+  }
+  for (const decision of input.humanDecisions ?? []) {
+    await applyHumanDecision(decision, units, deps, applied)
+  }
+}
+
+async function maybeMergeWithApproval(
+  unit: UnitRow,
+  observed: Observed,
+  evidence: Evidence,
+  deps: ControllerDeps,
+  applied: string[],
+): Promise<boolean> {
+  if (unit.validation !== "floor_passed" && observed.floor !== "passed") return false
+
+  const pr = unit.pr ?? (observed.prs.length === 1 ? observed.prs[0]?.number ?? null : null)
+  if (pr === null) return false
+
+  const live = await deps.getPullRequestState(agentRepo(unit.repo), pr)
+  unit.pr = live.number
+  unit.headSha = live.headSha || unit.headSha
+  unit.baseSha = live.baseSha ?? unit.baseSha
+  unit.branch = live.baseRef || unit.branch
+
+  const head = live.headSha.length > 0 ? live.headSha : unit.headSha ?? undefined
+  if (head === undefined || head.length === 0) return false
+
+  const approval = await deps.verifyAndConsumeApproval({
+    repo: unit.repo,
+    pr: live.number,
+    liveHeadSha: head,
+    liveBaseSha: live.baseSha,
+  })
+  if (!approval.ok) return false
+
+  if (live.isDraft && evidence.prNodeId !== undefined) {
+    await deps.markReadyForReview(evidence.prNodeId)
+  }
+  // TODO wire markReadyForReview when getPullRequestState exposes a PR node id.
+
+  await deps.mergePullRequest(agentRepo(unit.repo), {
+    pr: live.number,
+    expectedHeadSha: head,
+  })
+  unit.terminal = true
+  unit.phase = "done"
+  unit.artifact = "pr_merged"
+  unit.validation = "floor_passed"
+  applied.push(`merged ${repoLabel(unit.repo)}#${live.number}`)
+  await deps.upsertUnit(unit.repo, unit)
+  return true
+}
+
+async function createHumanRequest(
+  unit: UnitRow,
+  mission: Mission,
+  observed: Observed,
+  reason: string,
+  deps: ControllerDeps,
+): Promise<HumanRequest> {
+  const { decisionKey, fingerprint, type } = decisionKeyFor(unit, observed, reason)
+  const existing = await deps.findByKey(decisionKey)
+  let record: DecisionRecord | undefined =
+    existing?.status === "pending" ? existing : undefined
+  let packetHtmlPath: string | undefined
+
+  if (record === undefined) {
+    const packet = deps.buildDecisionPacket(
+      packetInput(unit, mission, observed, reason, type),
+    )
+    packetHtmlPath = await deps.writeDecisionPacketHtml(packet.packetId, packet.html)
+    record = {
+      decisionId: packet.decisionId,
+      decisionKey,
+      type,
+      status: "pending",
+      packetId: packet.packetId,
+      inputFingerprint: fingerprint,
+      options: decisionOptions(type).map((option) => ({ id: option.id })),
+      createdMs: Date.now(),
+    }
+    await deps.upsertDecision(record)
+  }
+
+  unit.blockingDecisionId = record.decisionId
+  return {
+    requestId: decisionKey,
+    decisionId: record.decisionId,
+    missionId: unit.missionId,
+    repo: unit.repo,
+    issue: unit.issue,
+    pr: unit.pr,
+    reason,
+    ...(packetHtmlPath !== undefined ? { packetHtmlPath } : {}),
+  }
+}
+
+async function assignVerifier(
+  unit: UnitRow,
+  deps: ControllerDeps,
+  applied: string[],
+): Promise<boolean> {
+  const roster = await deps.resolveAgentRoster(agentRepo(unit.repo))
+  const implementer = unit.implementerLab ?? unit.agent
+  const verifier = AGENT_ORDER.find(
+    (key) => key !== implementer && roster.has(key),
+  )
+  if (verifier === undefined) return false
+
+  unit.verifierAssigned = true
+  unit.validation = "floor_pending"
+  applied.push(`assigned ${verifier} verifier for ${unit.missionId}:${unitHandle(unit)}`)
+  // TODO wire verifier dispatch / peer-review task. v1 records the intent so it does not loop.
+  return true
+}
+
+async function executeAction(
+  action: Action,
+  unit: UnitRow,
+  mission: Mission,
+  observed: Observed,
+  evidence: Evidence,
+  policy: Policy,
+  deps: ControllerDeps,
+  needsModel: QueuedRequest<ModelRequest>[],
+  needsHuman: QueuedRequest<HumanRequest>[],
+  applied: string[],
+  order: number,
+): Promise<void> {
+  void policy
+  switch (action.kind) {
+    case "dispatch":
+      return
+    case "steer":
+      consola.debug("first-mate controller received direct steer action; v1 skips it")
+      return
+    case "assign_verifier":
+      if (await assignVerifier(unit, deps, applied)) return
+      needsHuman.push({
+        request: await createHumanRequest(
+          unit,
+          mission,
+          observed,
+          "no different-lab verifier is available",
+          deps,
+        ),
+        sortKey: sortKey(unit),
+        order,
+      })
+      return
+    case "rerun_ci":
+      if (evidence.runId !== undefined) {
+        await deps.rerunChecks(agentRepo(unit.repo), {
+          runId: evidence.runId,
+          failedOnly: true,
+        })
+        applied.push(`reran checks for ${unit.missionId}:${unitHandle(unit)}`)
+      }
+      return
+    case "cancel":
+      if (unit.taskId !== null) await deps.cancelTask(agentRepo(unit.repo), unit.taskId)
+      unit.terminal = true
+      unit.phase = "done"
+      unit.cancelledBy = "controller"
+      applied.push(`cancelled ${unit.missionId}:${unitHandle(unit)}`)
+      return
+    case "mark_done":
+      unit.terminal = true
+      unit.phase = "done"
+      applied.push(`marked done ${unit.missionId}:${unitHandle(unit)}`)
+      return
+    case "ask_model":
+      needsModel.push({
+        request: buildModelRequest(unit, mission, action.request, observed, evidence),
+        sortKey: sortKey(unit),
+        order,
+      })
+      return
+    case "escalate_human":
+      needsHuman.push({
+        request: await createHumanRequest(
+          unit,
+          mission,
+          observed,
+          action.reason,
+          deps,
+        ),
+        sortKey: sortKey(unit),
+        order,
+      })
+      return
+    case "merge":
+    case "mark_rebase":
+    case "noop":
+      return
+  }
+}
+
+function isUndispatched(unit: UnitRow): boolean {
+  return unit.provider === "none" && unit.taskId === null
+}
+
+function isActiveMissionUnit(unit: UnitRow, missions: Map<string, Mission>): boolean {
+  return missions.get(unit.missionId)?.status === "active"
+}
+
+function isActiveUnit(unit: UnitRow, missions: Map<string, Mission>): boolean {
+  return isActiveMissionUnit(unit, missions) && unit.terminal !== true
+}
+
+function isInFlight(unit: UnitRow): boolean {
+  return (
+    unit.terminal !== true &&
+    unit.taskId !== null &&
+    (unit.provider === "queued" ||
+      unit.provider === "in_progress" ||
+      unit.provider === "waiting_for_user")
+  )
+}
+
+function depsSatisfied(unit: UnitRow, units: UnitRow[]): boolean {
+  return unit.dependsOn.every((issue) =>
+    units.some(
+      (candidate) =>
+        candidate.missionId === unit.missionId &&
+        candidate.issue === issue &&
+        candidate.terminal === true &&
+        candidate.artifact === "pr_merged",
+    ),
+  )
+}
+
+function activeCountsByAgent(units: UnitRow[]): Map<AgentKey, number> {
+  const counts = new Map<AgentKey, number>()
+  for (const unit of units) {
+    if (!isInFlight(unit)) continue
+    counts.set(unit.agent, (counts.get(unit.agent) ?? 0) + 1)
+  }
+  return counts
+}
+
+function dispatchPrompt(unit: UnitRow, mission: Mission): string {
+  const parts = [
+    `Mission goal:\n${mission.goal}`,
+    `Acceptance criteria:\n${mission.acceptanceCriteria}`,
+    `Work unit:\n${unit.title}`,
+    "Start in plan mode: produce a concise implementation plan for review. Do not open a PR until the plan is approved.",
+  ]
+  if (mission.houseRules !== undefined) parts.splice(2, 0, `House rules:\n${mission.houseRules}`)
+  return parts.join("\n\n")
+}
+
+async function dispatchUnit(
+  unit: UnitRow,
+  mission: Mission,
+  deps: ControllerDeps,
+): Promise<void> {
+  const repo = agentRepo(unit.repo)
+  const actor = await deps.resolveAgentActor(repo, unit.agent)
+  const prompt = dispatchPrompt(unit, mission)
+
+  try {
+    const task = await deps.startTask(repo, {
+      prompt,
+      createPullRequest: false,
+    })
+    if (task.taskId.length === 0) throw new Error("startTask returned no taskId")
+    unit.taskId = task.taskId
+    unit.provider = providerState(task.state, "queued")
+    unit.botLogin = actor.login
+  } catch (err) {
+    consola.debug("first-mate startTask failed; falling back to issue assignment:", err)
+    const issue = await deps.createIssue(repo, {
+      title: unit.title,
+      body: prompt,
+    })
+    await deps.assignAgent(repo, {
+      issueNodeId: issue.nodeId,
+      issueNumber: issue.number,
+      botId: actor.botId,
+      botLogin: actor.login,
+    })
+    unit.issue = issue.number
+    unit.taskId = null
+    unit.provider = "queued"
+    unit.botLogin = actor.login
+  }
+
+  unit.dispatchMode = "plan"
+  unit.phase = "plan"
+  unit.implementerLab = unit.agent
+  unit.lastSteer = { atMs: Date.now() }
+}
+
+async function dispatchWave(
+  units: UnitRow[],
+  missions: Map<string, Mission>,
+  maxInFlightPerProvider: number,
+  deps: ControllerDeps,
+  applied: string[],
+): Promise<void> {
+  const counts = activeCountsByAgent(units)
+  const candidates = units
+    .filter((unit) => isActiveUnit(unit, missions))
+    // A unit parked on a human decision must never be (re-)dispatched — it is
+    // awaiting an answer, not capacity. Guard here in addition to the main
+    // loop's skip so the dispatch wave can't resurrect a blocked unit.
+    .filter((unit) => !unit.blockingDecisionId)
+    .filter(isUndispatched)
+    .filter((unit) => depsSatisfied(unit, units))
+    .map((unit, index) => ({ unit, index }))
+    .sort((a, b) => sortKey(a.unit) - sortKey(b.unit) || a.index - b.index)
+
+  for (const { unit } of candidates) {
+    const current = counts.get(unit.agent) ?? 0
+    if (current >= maxInFlightPerProvider) continue
+    const mission = missions.get(unit.missionId)
+    if (mission === undefined) continue
+
+    await dispatchUnit(unit, mission, deps)
+    counts.set(unit.agent, current + 1)
+    await deps.upsertUnit(unit.repo, unit)
+    applied.push(`dispatched ${unit.missionId}:${unitHandle(unit)} to ${unit.agent}`)
+  }
+}
+
+function buildBoard(units: UnitRow[], missions: Mission[]): BoardRow[] {
+  const rows: BoardRow[] = []
+  for (const mission of missions.filter((entry) => entry.status === "active")) {
+    const missionUnits = units.filter((unit) => unit.missionId === mission.id)
+    if (missionUnits.length === 0) continue
+    const counts: Record<string, number> = {}
+    for (const unit of missionUnits) {
+      counts[unit.phase] = (counts[unit.phase] ?? 0) + 1
+    }
+    rows.push({
+      missionId: mission.id,
+      title: mission.goal,
+      repos: mission.repos.map(repoLabel),
+      counts,
+      blocked: missionUnits.filter((unit) => unit.blockingDecisionId).length,
+    })
+  }
+  return rows
+}
+
+function compareQueued<T>(a: QueuedRequest<T>, b: QueuedRequest<T>): number {
+  return a.sortKey - b.sortKey || a.order - b.order
+}
+
+function capQueued<T>(entries: QueuedRequest<T>[], topK: number): T[] {
+  return entries.sort(compareQueued).slice(0, topK).map((entry) => entry.request)
+}
+
+function nextWakeAt(units: UnitRow[], missions: Map<string, Mission>): number | null {
+  const active = units.filter((unit) => isActiveUnit(unit, missions))
+  if (active.length === 0) return null
+
+  const now = Date.now()
+  if (
+    active.some(
+      (unit) => unit.validation === "ci_running" || unit.provider === "in_progress",
+    )
+  ) {
+    return now + 90_000
+  }
+
+  if (
+    active.every(
+      (unit) =>
+        Boolean(unit.blockingDecisionId) ||
+        unit.provider === "none" ||
+        unit.provider === "queued",
+    )
+  ) {
+    return now + 900_000
+  }
+
+  return now + 300_000
+}
+
+async function pruneTerminalRepos(
+  units: UnitRow[],
+  deps: ControllerDeps,
+): Promise<void> {
+  const repos = new Map<string, RepoRef>()
+  for (const unit of units) {
+    if (unit.terminal !== true) continue
+    repos.set(repoLabel(unit.repo), unit.repo)
+  }
+  for (const repo of repos.values()) {
+    await deps.pruneTerminal(repo)
+  }
+}
+
+/**
+ * Single-pass deterministic controller wake. Real deployments should wrap this
+ * in a per-repo lock before durable ledger writes; the engine itself is kept
+ * dependency-injected so tests can run without network or filesystem effects.
+ */
+export async function advance(
+  input: AdvanceInput = {},
+  deps: ControllerDeps = defaultDeps,
+): Promise<AdvanceResult> {
+  const applied: string[] = []
+  const needsModel: QueuedRequest<ModelRequest>[] = []
+  const needsHuman: QueuedRequest<HumanRequest>[] = []
+  const policy = mergePolicy(input.policy)
+  const maxInFlightPerProvider = positiveInteger(
+    input.maxInFlightPerProvider,
+    DEFAULT_MAX_IN_FLIGHT_PER_PROVIDER,
+  )
+  const topK = positiveInteger(input.topK, DEFAULT_TOP_K)
+
+  await applySubmittedAnswers(input, deps, applied)
+
+  const units = await deps.loadAllUnits()
+  const missions = await deps.readMissions()
+  const missionsById = missionMap(missions)
+  let order = 0
+
+  for (const unit of units.filter((row) => isActiveUnit(row, missionsById))) {
+    const requestOrder = order
+    order += 1
+
+    if (unit.blockingDecisionId) continue
+    if (isUndispatched(unit)) continue
+
+    const mission = missionsById.get(unit.missionId)
+    if (mission === undefined) continue
+
+    const observed = await deps.observeUnit(unit)
+    const evidence = await fillFuzzyFields(unit, mission, observed, deps)
+    updateUnitFromObservedPrs(unit, observed)
+    unit.lastCheckedMs = Date.now()
+
+    if (await maybeMergeWithApproval(unit, observed, evidence, deps, applied)) {
+      continue
+    }
+
+    const classified = classify(observed, unit)
+    unit.provider = classified.provider
+    unit.phase = classified.phase
+    unit.artifact = classified.artifact
+    unit.validation = classified.validation
+
+    const action = nextAction(classified, unit, policy)
+    await executeAction(
+      action,
+      unit,
+      mission,
+      observed,
+      evidence,
+      policy,
+      deps,
+      needsModel,
+      needsHuman,
+      applied,
+      requestOrder,
+    )
+    await deps.upsertUnit(unit.repo, unit)
+  }
+
+  await dispatchWave(
+    units,
+    missionsById,
+    maxInFlightPerProvider,
+    deps,
+    applied,
+  )
+
+  const board = buildBoard(units, missions)
+  const wakeAt = nextWakeAt(units, missionsById)
+  await pruneTerminalRepos(units, deps)
+
+  return {
+    board,
+    needsModel: capQueued(needsModel, topK),
+    needsHuman: capQueued(needsHuman, topK),
+    applied,
+    nextWakeAt: wakeAt,
+  }
+}
