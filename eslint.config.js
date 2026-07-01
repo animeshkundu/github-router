@@ -44,6 +44,23 @@ export default tseslint.config(
     },
   },
   {
+    // CommonJS test fixtures spawned as a plain `node` child process (not part of
+    // the TS build). They need Node globals and the CJS require() form.
+    files: ["tests/**/fixtures/**/*.cjs"],
+    languageOptions: {
+      globals: {
+        require: "readonly",
+        process: "readonly",
+        module: "readonly",
+        __dirname: "readonly",
+        console: "readonly",
+      },
+    },
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
+  {
     rules: {
       "@typescript-eslint/no-unused-vars": [
         "error",
