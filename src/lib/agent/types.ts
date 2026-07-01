@@ -179,6 +179,8 @@ export interface TaskStatusResult {
   logExcerpt: string
   /** Copilot-host session id (from the task detail) that fed `logExcerpt`. */
   sessionId?: string
+  /** The branch the agent checked out, parsed from the session log. */
+  branch?: string
 }
 
 export interface TaskFollowUpResult {

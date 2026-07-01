@@ -93,6 +93,8 @@ export interface SessionLogExcerpt {
   finished: boolean
   /** Distinct tool names the agent invoked, in first-seen order. */
   tools: string[]
+  /** The branch the agent checked out (from "checked out branch X"), if seen. */
+  branch?: string
 }
 
 interface ToolCallAccum {
@@ -131,6 +133,17 @@ function extractPlanBlock(text: string): string | null {
   const match = /<plan>([\s\S]*?)<\/plan>/i.exec(text)
   const inner = match?.[1]?.trim()
   return inner && inner.length > 0 ? inner : null
+}
+
+/** Extract the branch the agent checked out ("checked out branch X"). */
+function extractBranch(text: string): string | undefined {
+  // Agent branches are lowercase kebab-with-slash (e.g. copilot/upgrade-deps).
+  // The log often glues the next line on with no delimiter
+  // ("…dependenciesMCP server started"), so match case-sensitively and stop at
+  // the first non-branch char (an uppercase letter ends the match).
+  const match = /checked out branch\s+([a-z0-9][a-z0-9._/-]*)/.exec(text)
+  const branch = match?.[1]?.replace(/[.\-_/]+$/, "")
+  return branch && branch.length > 0 ? branch : undefined
 }
 
 /**
@@ -288,7 +301,13 @@ export function parseSessionLog(body: string): SessionLogExcerpt {
   if (progress) parts.push(`Progress:\n${tailTruncate(progress, PROGRESS_LIMIT)}`)
   if (uniqueTools.length > 0) parts.push(`Tools: ${uniqueTools.join(", ")}`)
 
-  return { excerpt: truncateHead(parts.join("\n\n")), finished, tools: uniqueTools }
+  const branch = extractBranch(content)
+  return {
+    excerpt: truncateHead(parts.join("\n\n")),
+    finished,
+    tools: uniqueTools,
+    ...(branch ? { branch } : {}),
+  }
 }
 
 /**

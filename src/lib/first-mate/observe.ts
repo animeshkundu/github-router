@@ -64,13 +64,25 @@ function firstSummaryNumber(prs: AgentPRSummary[]): number | null {
   return summary?.number ?? null
 }
 
+function branchMatchNumber(prs: AgentPRSummary[], branch: string | undefined): number | null {
+  if (!branch) return null
+  const match = prs.find((pr) => pr.headRef === branch && Number.isInteger(pr.number) && pr.number > 0)
+  return match?.number ?? null
+}
+
 function primaryPrNumber(
   unit: UnitRow,
   task: TaskStatusResult | null,
   prs: AgentPRSummary[],
 ): number | null {
   if (unit.pr !== null && unit.pr > 0) return unit.pr
-  return taskPrNumber(task) ?? firstSummaryNumber(prs)
+  // Correlate by branch first (unambiguous when several same-bot units each
+  // have their own PR); fall back to the task's own PR link, then any bot PR.
+  return (
+    branchMatchNumber(prs, unit.branch ?? task?.branch ?? undefined) ??
+    taskPrNumber(task) ??
+    firstSummaryNumber(prs)
+  )
 }
 
 async function getTaskSafe(
@@ -90,10 +102,13 @@ async function findPrsSafe(
   repo: AgentRepoRef,
   unit: UnitRow,
 ): Promise<AgentPRSummary[]> {
-  if (unit.issue === null) return []
+  // findAgentPRs searches by bot AUTHOR (it ignores the issue number), so it
+  // works for task-based units too — do NOT gate on unit.issue. Without this,
+  // a build task that opens a PR would never be discovered (its task detail
+  // carries no pr_url; the branch/PR is only findable by author + head ref).
   try {
     return await findAgentPRs(repo, {
-      issueNumber: unit.issue,
+      issueNumber: unit.issue ?? 0,
       botLogin: unit.botLogin,
     })
   } catch (err) {
@@ -176,6 +191,9 @@ function externalMutation(
 export async function observeUnit(unit: UnitRow): Promise<Observed> {
   const repo = agentRepo(unit)
   const task = await getTaskSafe(repo, unit.taskId)
+  // Remember the agent's branch (parsed from the session log) so later observes
+  // can correlate the right PR to this unit even before its PR is linked.
+  if (task?.branch && task.branch.length > 0) unit.branch = task.branch
   const provider = providerState(task?.state, unit.provider)
   const prSummaries = await findPrsSafe(repo, unit)
   const primaryNumber = primaryPrNumber(unit, task, prSummaries)

@@ -102,6 +102,17 @@ test("parseSessionLog joins multi-line SSE data events (spec-compliant)", () => 
   expect(result.excerpt).toContain("hello world")
 })
 
+test("parseSessionLog extracts the checked-out branch", () => {
+  const content = "Cloned animeshkundu/yt-flask and checked out branch copilot/upgrade-python-dependencies\nMCP server started successfully with 5 tools"
+  const result = parseSessionLog(`data: ${JSON.stringify(chunk({ content }, "stop"))}`)
+  expect(result.branch).toBe("copilot/upgrade-python-dependencies")
+})
+
+test("parseSessionLog leaves branch undefined when none is mentioned", () => {
+  const result = parseSessionLog(`data: ${JSON.stringify(chunk({ content: "just working" }, "stop"))}`)
+  expect(result.branch).toBeUndefined()
+})
+
 test("getTask never sends the token to a non-allowlisted discovered host", async () => {
   const calls: string[] = []
   const fetchMock = mock((url: string) => {

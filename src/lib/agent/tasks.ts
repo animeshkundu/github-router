@@ -168,6 +168,7 @@ export async function getTask(repo: RepoRef, taskId: string): Promise<TaskStatus
     pr: taskPrNumber(record),
     logExcerpt,
     ...(sessionId ? { sessionId } : {}),
+    ...(sessionLog?.branch ? { branch: sessionLog.branch } : {}),
   }
 }
 
