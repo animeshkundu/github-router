@@ -171,6 +171,24 @@ export function fleetToolsEnabled(): boolean {
 }
 
 /**
+ * Gate for the first-mate cloud-agent MCP tools (`mcp__first-mate__*`).
+ *
+ * Returns true iff the operator opted in (`state.agentsEnabled`, set by
+ * `--agents`, OR `GH_ROUTER_ENABLE_AGENTS=1` read directly so non-
+ * `setupAndServe` startup paths — tests, embedded use — can still flip
+ * the gate) AND the write-capable GitHub agent token is present. First-mate
+ * drives GitHub cloud agents, so exposing the surface without that token would
+ * only produce unactionable auth failures.
+ */
+export function agentToolsEnabled(): boolean {
+  return (
+    (state.agentsEnabled || process.env.GH_ROUTER_ENABLE_AGENTS === "1")
+    && typeof state.githubAgentToken === "string"
+    && state.githubAgentToken.length > 0
+  )
+}
+
+/**
  * Gate for ai-or-die Artifact review tools.
  *
  * Returns true iff this github-router process was launched inside an

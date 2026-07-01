@@ -25,6 +25,7 @@ import path from "node:path"
 
 import { ARTIFACT_TOOLS } from "./artifact/tools"
 import { FLEET_TOOLS } from "./fleet/tools"
+import { FIRST_MATE_TOOLS } from "./first-mate/tools"
 import { runUnifiedCodeSearch } from "./unified-code-search"
 // Static import is safe: the previous module-init cycle (peer-mcp-personas
 // → worker-agent/index → engine → tools → peer-mcp-personas) was caused
@@ -65,8 +66,10 @@ import { runWorkflowLive } from "~/lib/orchestration/run-workflow-live"
  *                 workflow (the workers are what a workflow delegates to).
  *   - `browser` — the browser-control tools (only with `--browse`)
  *   - `decide`  — `stand_in` (three-lab away-mode decision advisor)
+ *   - `fleet`   — remote ai-or-die session-control tools
+ *   - `first-mate` — durable GitHub cloud-agent controller tools
  */
-export type McpGroup = "peers" | "search" | "workers" | "orchestrate" | "browser" | "decide" | "fleet"
+export type McpGroup = "peers" | "search" | "workers" | "orchestrate" | "browser" | "decide" | "fleet" | "first-mate"
 /** Either a single group (scoped endpoint) or the full union (`/mcp`). */
 export type McpScope = McpGroup | "all"
 export const MCP_GROUPS: ReadonlyArray<McpGroup> = Object.freeze([
@@ -77,6 +80,7 @@ export const MCP_GROUPS: ReadonlyArray<McpGroup> = Object.freeze([
   "browser",
   "decide",
   "fleet",
+  "first-mate",
 ])
 
 export interface McpGroupMeta {
@@ -103,6 +107,7 @@ export const GROUP_META: Record<McpGroup, McpGroupMeta> = Object.freeze({
   browser: { preferredKey: "browser", urlSuffix: "browser", serverInfoName: "github-router-browser" },
   decide: { preferredKey: "decide", urlSuffix: "decide", serverInfoName: "github-router-decide" },
   fleet: { preferredKey: "fleet", urlSuffix: "fleet", serverInfoName: "github-router-fleet" },
+  "first-mate": { preferredKey: "first-mate", urlSuffix: "first-mate", serverInfoName: "github-router-first-mate" },
 })
 
 /** True iff `s` is a registered group name (route `:group` param validation). */
@@ -518,6 +523,8 @@ export function buildAgentPrompt(
  *     out of the live catalog).
  *   - Conditionally lists stand_in only when `standInAvailable`
  *     (mirrors `standInToolEnabled()`).
+ *   - Conditionally lists gh-first-mate only when `agentToolsAvailable`
+ *     (mirrors `agentToolsEnabled()`).
  *   - Mentions `codex-cli` stdio bridge only when `codexCli`.
  *   - Does NOT re-document Claude Code's built-in delegation semantics
  *     (Agent-tool recursion, agent-teams coordination) — Claude
@@ -532,6 +539,7 @@ export function buildPeerAwarenessSnippet(opts: {
   standInAvailable: boolean
   browseAvailable: boolean
   powerBrowseAvailable?: boolean
+  agentToolsAvailable?: boolean
   /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
    *  collision). Missing key → use the preferred bare key. Keeps the
    *  `mcp__<server>__<tool>` paths in this snippet pointing at OUR servers. */
@@ -591,9 +599,10 @@ export function buildPeerAwarenessSnippet(opts: {
     )
   }
   if (opts.workerToolsAvailable) {
-    para2Parts.push(
-      "Three injected skills (invoke by name): `/gh-research` saturates an ask's unknowns into a confidence-tagged, root-cause brief that grounds planning; `/gh-orchestrate` right-sizes a blind-spot-elimination pipeline whose nodes delegate to these tools; `/gh-floor-keeper` is the done-checkpoint cross-lab verification, where different-lab reviewers propose and the executable gate decides. They suit non-trivial, role-separable work. Only executable checks are deterministic; they do not catch a wrong spec, so user-blessed acceptance criteria plus the checkpoint are the defense.",
-    )
+    const skillSentence = opts.agentToolsAvailable === true
+      ? "Four injected skills (invoke by name): `/gh-research` saturates an ask's unknowns into a confidence-tagged, root-cause brief that grounds planning; `/gh-orchestrate` right-sizes a blind-spot-elimination pipeline whose nodes delegate to these tools; `/gh-floor-keeper` is the done-checkpoint cross-lab verification, where different-lab reviewers propose and the executable gate decides; `/gh-first-mate` drives the durable GitHub cloud-agent loop. They suit non-trivial, role-separable work. Only executable checks are deterministic; they do not catch a wrong spec, so user-blessed acceptance criteria plus the checkpoint are the defense."
+      : "Three injected skills (invoke by name): `/gh-research` saturates an ask's unknowns into a confidence-tagged, root-cause brief that grounds planning; `/gh-orchestrate` right-sizes a blind-spot-elimination pipeline whose nodes delegate to these tools; `/gh-floor-keeper` is the done-checkpoint cross-lab verification, where different-lab reviewers propose and the executable gate decides. They suit non-trivial, role-separable work. Only executable checks are deterministic; they do not catch a wrong spec, so user-blessed acceptance criteria plus the checkpoint are the defense."
+    para2Parts.push(skillSentence)
   }
   para2Parts.push(
     `\`mcp__${searchKey}__web\` surfaces citable sources for docs, errors, and upstream issues.`,
@@ -704,6 +713,11 @@ export interface NonPersonaMcpTool {
    *   so `isBrowserCapability()` in handler.ts treats it as a normal
    *   non-persona tool (no per-call URL/tab bridge pre-flight — the
    *   browse agent's INNER browser tools run their own readiness probe).
+   * - `"fleet"` (fleet session-control tools) requires `fleetToolsEnabled()`
+   *   — the operator opted in via `--fleet` or `GH_ROUTER_ENABLE_FLEET=1`.
+   * - `"agents"` (first-mate cloud-agent controller tools) requires
+   *   `agentToolsEnabled()` — the operator opted in via `--agents` or
+   *   `GH_ROUTER_ENABLE_AGENTS=1` AND a GitHub agent token is present.
    * - "artifact" (artifact_open / artifact_poll / artifact_reply) requires
    *   the ai-or-die tab-scoped env trio (`AIORDIE_BASE_URL`,
    *   `AIORDIE_TOKEN`, `AIORDIE_SESSION_ID`; see `artifactToolsEnabled()`
@@ -713,7 +727,7 @@ export interface NonPersonaMcpTool {
    * once the proxy is in claude mode (loopback + nonce already gate
    * `/mcp` itself).
    */
-  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "browse_agent" | "fleet" | "artifact"
+  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "browse_agent" | "fleet" | "agents" | "artifact"
   /**
    * Server-side handler. Receives the raw `arguments` object from the
    * `tools/call` request and an optional AbortSignal that is signalled
@@ -1967,6 +1981,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     },
     ...ARTIFACT_TOOLS,
     ...FLEET_TOOLS,
+    ...FIRST_MATE_TOOLS,
     // Browser-control tools. Defined in a sibling module so the dispatch
     // implementation can grow without bloating this file.
     //

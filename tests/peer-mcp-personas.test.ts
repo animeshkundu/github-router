@@ -294,6 +294,7 @@ describe("buildPeerAwarenessSnippet", () => {
     standInAvailable: true,
     browseAvailable: true,
     powerBrowseAvailable: true,
+    agentToolsAvailable: true,
   } as const
 
   test("always advertises the three always-on critic tools, coordinator, and namespace prefix", () => {
