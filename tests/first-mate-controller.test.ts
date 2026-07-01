@@ -144,6 +144,7 @@ function harness(
         liveBaseSha?: string
       }) => ({ ok: false, reason: "no_approval" }),
     ),
+    recordApproval: mock(async (_a: unknown) => {}),
     upsertDecision: mock(async (record: DecisionRecord) => {
       const index = decisions.findIndex(
         (entry) =>
@@ -256,6 +257,37 @@ test("completed plan-mode unit emits a review_plan model request with plan excer
     "1. Update controller. 2. Add tests.",
   )
   expect(h.deps.classifyPlanReady).not.toHaveBeenCalled()
+})
+
+test("human merge-approve records an approval bound to the engine-fetched live head/base", async () => {
+  const row = unit({
+    issue: 7,
+    pr: 7,
+    provider: "in_progress",
+    phase: "merge",
+    validation: "floor_passed",
+    verifierAssigned: true,
+    blockingDecisionId: "dec-merge",
+  })
+  const h = harness([row])
+  h.deps.findByKey = mock(async () => ({ decisionId: "dec-merge" }) as never)
+
+  await advance(
+    { humanDecisions: [{ requestId: "req-merge", choice: "approve" }] },
+    h.deps,
+  )
+
+  expect(h.deps.recordApproval).toHaveBeenCalledTimes(1)
+  const arg = (h.deps.recordApproval as unknown as { mock: { calls: unknown[][] } })
+    .mock.calls[0]![0] as Record<string, unknown>
+  // The engine binds head/base from its OWN getPullRequestState read, not from
+  // anything the model supplied.
+  expect(arg).toMatchObject({
+    decisionId: "dec-merge",
+    pr: 7,
+    headSha: "head-7",
+    baseSha: "base-7",
+  })
 })
 
 test("review_plan approve answer follows up and flips the unit to build", async () => {

@@ -22,7 +22,7 @@ import {
 } from "~/lib/agent/tasks"
 import type { RepoRef as AgentRepoRef } from "~/lib/agent/types"
 import { PATHS } from "~/lib/paths"
-import { verifyAndConsumeApproval as realVerifyAndConsumeApproval } from "~/lib/first-mate/approval"
+import { recordApproval as realRecordApproval, verifyAndConsumeApproval as realVerifyAndConsumeApproval } from "~/lib/first-mate/approval"
 import {
   classifyFixAddressed as realClassifyFixAddressed,
   classifyPlanReady as realClassifyPlanReady,
@@ -76,6 +76,7 @@ export interface ControllerDeps {
   classifyFixAddressed: typeof realClassifyFixAddressed
   classifyStuck: typeof realClassifyStuck
   verifyAndConsumeApproval: typeof realVerifyAndConsumeApproval
+  recordApproval: typeof realRecordApproval
   upsertDecision: typeof realUpsertDecision
   findByKey: typeof realFindByKey
   markAnswered: typeof realMarkAnswered
@@ -203,6 +204,7 @@ export const defaultDeps: ControllerDeps = {
   classifyFixAddressed: realClassifyFixAddressed,
   classifyStuck: realClassifyStuck,
   verifyAndConsumeApproval: realVerifyAndConsumeApproval,
+  recordApproval: realRecordApproval,
   upsertDecision: realUpsertDecision,
   findByKey: realFindByKey,
   markAnswered: realMarkAnswered,
@@ -608,6 +610,11 @@ function isAbandonChoice(choice: string): boolean {
   return normalized.includes("abandon") || normalized.includes("cancel")
 }
 
+function isApproveMergeChoice(choice: string): boolean {
+  const normalized = choice.toLowerCase()
+  return normalized.includes("approve") || normalized === "merge"
+}
+
 async function applyModelAnswer(
   answer: ModelAnswer,
   units: UnitRow[],
@@ -693,6 +700,36 @@ async function applyHumanDecision(
       unit.terminal = true
       unit.phase = "done"
       unit.cancelledBy = "external"
+    } else if (isApproveMergeChoice(decision.choice) && unit.pr !== null) {
+      // Record a durable, single-use approval BOUND TO THE LIVE head/base the
+      // engine fetches itself (never model-supplied). The merge gate
+      // (maybeMergeWithApproval) re-validates + consumes it, this same wake.
+      //
+      // v1 guarantee (open item #2): the human's Approve is relayed by the
+      // model, but the approval can ONLY exist for a PR that already reached
+      // floor_passed AND was escalated (a pending DecisionRecord exists), is
+      // bound to the live head/base the engine reads, and is re-validated +
+      // single-use at consume time. So a relay can at most merge the CURRENT
+      // verified-green PR — never arbitrary/unapproved content, and any drift
+      // invalidates it. A server-side ai-or-die panel read (via ArtifactClient)
+      // is the hardening follow-up for a fully model-unforgeable path.
+      try {
+        const live = await deps.getPullRequestState(agentRepo(unit.repo), unit.pr)
+        if (live.headSha.length > 0) {
+          await deps.recordApproval({
+            decisionId,
+            repo: unit.repo,
+            pr: live.number,
+            headSha: live.headSha,
+            baseSha: live.baseSha,
+          })
+          applied.push(
+            `recorded merge approval for ${repoLabel(unit.repo)}#${live.number}`,
+          )
+        }
+      } catch (err) {
+        consola.debug("first-mate: could not record merge approval", err)
+      }
     }
     await deps.upsertUnit(unit.repo, unit)
   }
