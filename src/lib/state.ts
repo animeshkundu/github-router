@@ -6,6 +6,18 @@ export interface State {
   githubToken?: string
   copilotToken?: string
 
+  /**
+   * Second, WRITE-capable GitHub token for the first-mate
+   * agent-orchestration surface (`--agents`). Minted by a separate
+   * device-flow login against the GitHub CLI's OAuth client
+   * (`GITHUB_AGENT_CLIENT_ID`, scopes `repo workflow read:org`) and
+   * stored at `PATHS.GITHUB_AGENT_TOKEN_PATH`, apart from `githubToken`
+   * (the Copilot App token, read:user). The first-mate GitHub service
+   * layer uses this for ALL its calls (reads included, so it also works
+   * on private repos). Undefined until the agent login has run.
+   */
+  githubAgentToken?: string
+
   accountType: string
   copilotApiUrl?: string
   models?: ModelsResponse
@@ -38,6 +50,19 @@ export interface State {
    * `src/lib/mcp-capabilities.ts`.
    */
   fleetEnabled: boolean
+
+  /**
+   * Opt-in flag for the first-mate agent-orchestration MCP tools
+   * (`mcp__first-mate__*`) and the in-process GitHub cloud-agent driving
+   * layer. Set by `setupAndServe` from the `--agents` CLI flag or
+   * `GH_ROUTER_ENABLE_AGENTS=1`. When false, the first-mate tools are
+   * dropped from `tools/list` AND `tools/call` returns -32601 — same
+   * defense-in-depth pattern as `fleetToolsEnabled()`. Additionally
+   * requires `state.githubAgentToken` present (the write login), so the
+   * surface is invisible rather than 401-ing when unauthenticated. See
+   * `agentToolsEnabled()` in `src/lib/mcp-capabilities.ts`.
+   */
+  agentsEnabled: boolean
 
   /**
    * When true, --power-browse was passed (or GH_ROUTER_ENABLE_POWER_BROWSE=1
@@ -92,6 +117,7 @@ export const state: State = {
   extendedBetas: false,
   browseEnabled: false,
   fleetEnabled: false,
+  agentsEnabled: false,
   powerBrowseEnabled: false,
   humanlikeForce: "auto",
   sessionId: randomUUID(),
