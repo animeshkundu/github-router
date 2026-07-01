@@ -1,0 +1,258 @@
+# First-mate — durable GitHub cloud-agent controller
+
+> Status: **shipped v1, gated behind `--agents` / `GH_ROUTER_ENABLE_AGENTS=1`.**
+> This document describes the implementation in this repo today.
+
+## Goal
+
+Run a single long-lived Claude "first mate" as the operator-facing brain for a
+fleet of GitHub CLOUD coding agents (Copilot / Anthropic / OpenAI), while
+protecting Claude's own context. The first mate coordinates the outer loop —
+research → plan → implement → test/review → merge — but the mechanism lives in
+github-router, not in chat scrollback.
+
+The shipped shape is a control inversion: Claude is a thin judgment oracle and
+human-choice relay; the deterministic server-side controller owns durable state,
+GitHub I/O, dispatch, retries, decision packets, and merge gates. If Claude
+compacts, restarts, or clears context, the next controller wake rehydrates from
+ledgers and continues from handles.
+
+## MCP surface and gating
+
+The scoped server is `first-mate` (`GROUP_META` / `MCP_GROUPS` in
+`src/lib/peer-mcp-personas.ts`; route scope in `src/routes/mcp/route.ts`). The
+preferred tool names are:
+
+- `mcp__first-mate__start_mission` — persist a mission: goal, repos, acceptance
+  criteria, optional priority, optional house rules.
+- `mcp__first-mate__advance` — wake the deterministic controller once; apply
+  submitted model/human answers; return compact `board`, `needsModel`,
+  `needsHuman`, `applied_count`, and `nextWakeAt`.
+- `mcp__first-mate__board` — read the active board without a wake.
+- `mcp__first-mate__mission_status` — read compact status for all missions, or
+  one mission id.
+
+So the operational surface is the start/advance/board triad plus the status read.
+All four entries are created in `src/lib/first-mate/tools.ts`, carry
+`capability: "agents"`, and are filtered at BOTH `tools/list` and `tools/call` by
+`agentToolsEnabled()` (`src/lib/mcp-capabilities.ts`, `src/routes/mcp/handler.ts`).
+That predicate requires:
+
+1. operator opt-in: `--agents` or `GH_ROUTER_ENABLE_AGENTS=1`; and
+2. `state.githubAgentToken` populated by the second GitHub login.
+
+`src/claude.ts` only registers the `first-mate` MCP server when the predicate
+passes, and only writes the `/gh-first-mate` skill when the surface is available.
+On MCP-name collision, `resolveGroupKeysFromMirror()` in
+`src/lib/codex-mcp-config.ts` gives the group a `gh-router-first-mate`-style key
+rather than dropping or hijacking a user server.
+
+## Controller: model as oracle, `advance()` as mechanism
+
+`src/lib/first-mate/controller.ts` is the load-bearing engine. One `advance()`
+wake does the mechanism in code:
+
+1. `applySubmittedAnswers()` consumes prior `model_answers` and
+   `human_decisions`.
+2. `loadAllUnits()` + `readMissions()` rebuild the board from disk.
+3. `observeUnit()` reads GitHub/Task state for each active, unblocked unit.
+4. T0 classifiers distill fuzzy text signals into booleans/excerpts.
+5. `classify()` + `nextAction()` run the pure decision table.
+6. The engine executes the action: follow-up, ask model, human packet,
+   verifier intent, cancel, mark done, or merge-gate attempt.
+7. `dispatchWave()` starts eligible undispatched units within the per-provider
+   capacity cap.
+8. The wake returns compact queues and the next suggested wake time.
+
+Claude does not own the state machine. It answers only bounded `needsModel`
+requests: `review_plan`, `answer_agent_question`, `author_fix`, and
+`judge_review`. The `/gh-first-mate` skill (`src/lib/injected-skills/first-mate-skill.ts`)
+therefore tells Claude to run a thin loop: start a mission, call `advance`, answer
+model requests with small typed verdicts, surface human requests, and report from
+the board/ledger rather than rereading full diffs or logs.
+
+## Dual-token auth
+
+The existing Copilot login remains unchanged. `state.githubToken` is the original
+GitHub App token path (`read:user`) used to fetch the Copilot token. First-mate
+adds a second, write-capable identity:
+
+- `GITHUB_AGENT_CLIENT_ID` and `GITHUB_AGENT_SCOPES` (`repo workflow read:org`) in
+  `src/lib/api-config.ts`.
+- `setupGitHubAgentToken()` in `src/lib/token.ts`.
+- `PATHS.GITHUB_AGENT_TOKEN_PATH` in `src/lib/paths.ts`.
+
+The second device-flow login uses the GitHub CLI OAuth client, stores
+`~/.local/share/github-router/github_agent_token` with `0o600` best-effort mode,
+and populates `state.githubAgentToken`. It never overwrites
+`PATHS.GITHUB_TOKEN_PATH` or the Copilot App token. `githubAgentHeaders()` /
+`githubAgentGraphQLHeaders()` are then used by the first-mate GitHub service
+layer for reads and writes, including private repos. A best-effort scope check
+warns if `repo` / `workflow` are absent.
+
+## GitHub / Agent-Tasks service layer
+
+The service layer under `src/lib/agent/` is intentionally agent-agnostic:
+
+- `graphql.ts` / `rest.ts` wrap GitHub GraphQL and REST with the agent token,
+  transient retry, compact `AgentError` codes, and per-call API versions.
+- `service.ts` handles repo/actor discovery, issue creation, assignment, PR
+  discovery/state, checks, reviews, workflow dispatch, reruns, merge, and
+  ready-for-review.
+- `tasks.ts` is the Agent-Tasks preview client.
+- `types.ts` defines compact DTOs.
+
+Roster discovery uses `repository.suggestedActors(capabilities: [CAN_BE_ASSIGNED])`
+and maps bot logins to `copilot`, `anthropic`, or `openai` via
+`AGENT_LOGIN_MATCHERS`. The Agent-Tasks client uses preview API version
+`2026-03-10` and returns compact handles (`taskId`, state, PR URL/number,
+bounded tail log excerpt) instead of full transcripts. If `startTask()` fails,
+the controller falls back to creating an issue and assigning the selected bot.
+
+## Durable registry and rehydration
+
+Durable state lives under `PATHS.FIRST_MATE_DIR`
+(`~/.local/share/github-router/first-mate`), outside the per-launch
+`CLAUDE_CONFIG_DIR` mirror:
+
+- `missions.json` — mission index (`src/lib/first-mate/registry.ts`).
+- `<owner>__<repo>.json` — per-repo unit ledgers (`src/lib/first-mate/ledger.ts`).
+- `decisions.json` — human decisions and approvals
+  (`src/lib/first-mate/decisions.ts`, `approval.ts`).
+- `packets/*.html` — generated decision packets (`controller.ts`,
+  `decision-packet.ts`).
+
+Writers use temp-file + atomic rename and tighten files to `0o600` where possible.
+Readers validate shape and drop corrupt rows with debug logging. `loadAllUnits()`
+rehydrates by reading missions, collecting all repos named by active/known
+missions, then loading each repo ledger. Unit rows store handles and
+classification — issue, PR, task id, bot login, SHAs, phase, validation,
+dependencies, blocking decision id — not full diffs, logs, or transcripts.
+
+Accuracy note for v1: `start_mission` registers a mission only. It does not yet
+decompose the goal into `UnitRow`s. The controller dispatches undispatched units
+once they exist; exact plan→unit creation is a follow-up.
+
+## Orthogonal state model and pure decision table
+
+`src/lib/first-mate/types.ts` defines the state axes:
+
+- provider: GitHub/Task state (`none`, `queued`, `in_progress`,
+  `waiting_for_user`, `completed`, `failed`, `timed_out`, `cancelled`).
+- phase: controller lifecycle (`plan`, `build`, `fix`, `review`, `merge`, `done`).
+- artifact: PR artifact state (`no_pr`, `pr_open`, `pr_closed`, `pr_merged`,
+  `multiple_prs`).
+- validation: CI/review/floor state (`unknown`, `ci_running`, `ci_passed`,
+  `ci_failed`, `review_pending`, `changes_requested`, `floor_pending`,
+  `floor_passed`, `floor_failed`).
+
+`src/lib/first-mate/state-machine.ts` is pure: no network, no filesystem, no LLM.
+`classify(observed, row)` computes the orthogonal state and events.
+`nextAction(classified, row, policy)` is the decision table. Model inference only
+enters when the returned action is `ask_model`; human gating only enters through
+`escalate_human`. At `floor_passed`, the table escalates for approval — it never
+merges directly.
+
+## Tiered LLM policy and micro-classification
+
+Model-tier policy is centralized in `src/lib/first-mate/model-tiers.ts`. T0 is
+fastest-first and catalog-verified:
+
+`gemini-3.5-flash` → `gemini-3-flash-preview` → `gpt-5.4-mini` → `gpt-5-mini` →
+`claude-haiku-4.5` → `gpt-4o-mini` → small-model regex fallback.
+
+`resolveTierModel()` picks the first present model from the live Copilot catalog
+and memoizes briefly. `src/lib/first-mate/classifier.ts` uses that T0 tier for
+small JSON-only classifiers: `classifyPlanReady`, `classifyQuestionAnswerable`,
+`classifyFixAddressed`, and `classifyStuck`. `microClassify()` calls the same
+Copilot chat-completions backend (`copilotBaseUrl(state)`, `copilotHeaders(state)`),
+with temperature 0, small token caps, JSON-object response format, schema
+validation, and confidence ≥ 0.6. Failure or low confidence returns `null`; the
+pure state machine never calls an LLM.
+
+## Cross-model verification, not bake-off
+
+The shipped invariant is producer≠checker. A unit records `implementerLab`; after
+CI passes or review is pending, `assignVerifier()` chooses the first available
+agent in `copilot → anthropic → openai` order whose lab differs from the producer,
+then marks `verifierAssigned` and `floor_pending`. The controller is not doing a
+parallel bake-off or champion selection; it is one producer plus a different-lab
+checker, with executable checks and human approval deciding release.
+
+v1 caveat: verifier dispatch is intentionally stubbed today. `assignVerifier()`
+records the intent and avoids a loop, but the controller still has `TODO wire
+verifier dispatch / peer-review task`.
+
+## Decision packets and merge approval gate
+
+Human requests are durable `DecisionRecord`s, not chat-only state. For an
+escalation, `createHumanRequest()` fingerprints the live context (PR, head/base,
+validation, artifact, reason), creates or reuses a decision row, and writes an
+HTML packet. `src/lib/first-mate/decision-packet.ts` HTML-escapes all strings via
+`esc()` and only allows `http:` / `https:` links.
+
+The merge path is the irreversible special case:
+
+1. `floor_passed` emits a `merge_approval` packet.
+2. Claude may relay the user's choice through `advance({ human_decisions })`.
+3. `applyHumanDecision()` fetches the live PR state itself and records approval
+   with repo, PR, live head SHA, and optional live base SHA.
+4. `maybeMergeWithApproval()` fetches live PR state again, calls
+   `verifyAndConsumeApproval()`, and only then calls `mergePullRequest()` with
+   `expectedHeadSha`.
+5. `verifyAndConsumeApproval()` rejects no approval, replay, moved head, or moved
+   base; success flips `consumed:true` in the durable decisions ledger.
+
+v1 guarantee: the model relays the human Approve, but the server-side engine binds
+the approval to live head/base, makes it single-use, and re-validates before
+merge. A stale or forged relay cannot merge arbitrary content. The hardening
+follow-up is server-side ai-or-die panel read so the human approval path is no
+longer model-relayed.
+
+## Where learnings live
+
+The first-mate ledger is operational memory: missions, units, handles, decisions,
+SHAs, and controller state. Durable knowledge belongs in git. Repo-specific
+learnings should be committed to instruction files/docs/ADRs/tests that GitHub
+agents auto-read. Cross-repo or portfolio facts should live in a private memory
+repo that agents can read by handle.
+
+## Open items / v1 limitations
+
+- **Plan→build steerability / unit creation:** `start_mission` is registration,
+  not automatic decomposition; Agent-Tasks preview plan→build behavior is a
+  verify-live item.
+- **Agent-Tasks preview details:** `followUpTask()` and `cancelTask()` still have
+  TODOs for endpoint suffix shape in `src/lib/agent/tasks.ts`.
+- **Non-Copilot Tasks parity:** Anthropic/OpenAI cloud-agent task behavior is
+  represented in the roster model but still needs live parity verification.
+- **Server-side panel-read hardening:** merge approval is head/base-bound and
+  single-use today, but the human choice is still relayed by the model.
+- **Verifier dispatch:** `assignVerifier()` records different-lab verifier intent;
+  actual verifier task/review dispatch is stubbed TODO in the controller.
+
+### Cross-lab review — residual hardening (v1)
+
+An independent review hardened the merge gate: a forged `judge_review` is now
+ignored (only a unit the engine placed into verification receives a floor
+verdict), floor verdicts are bound to the head they were judged against
+(`UnitRow.floorSha`, preserved by `classify` only while the head is unchanged),
+and a merge approval is refused for a non-`floor_passed` unit or a moved head.
+These items remain open:
+
+- **Model-relayed approval:** the human "approve" still reaches the engine via
+  the model. It is bounded (only a `floor_passed` unit whose live head still
+  matches the verdict, single-use, engine-bound to the live head/base), but a
+  fully model-unforgeable path needs the server-side ai-or-die panel read
+  (`ArtifactClient`).
+- **PR ↔ issue correlation:** `findAgentPRs` matches by bot-author login; a unit
+  should prefer the Agent-Tasks `getTask` PR and correlate the PR to its issue so
+  an unrelated bot PR is never attached/merged. Treat ambiguous multi-PR cases as
+  `multiple_prs` (escalate), never silently pick one.
+- **Cross-process single-use:** the approval-consume serializer is in-process
+  (v1 assumes a single router process); a file-CAS / lock would make it
+  multi-process safe, and consume-after-merge-success avoids burning an approval
+  on a transient failure.
+- **Repo-qualified request ids:** request/decision ids are
+  `missionId:issue:kind`; adding the repo prevents collisions when one mission
+  spans two repos that share an issue number.
