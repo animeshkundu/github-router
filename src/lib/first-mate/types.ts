@@ -97,6 +97,12 @@ export interface UnitRow {
    */
   floorSha?: string | null
   title: string
+  /**
+   * The plan the agent produced in the plan phase (distilled from its session
+   * log), stashed at review_plan time so an approve can re-dispatch a build
+   * task carrying it. Cleared once the build task is dispatched.
+   */
+  planExcerpt?: string
   branch?: string | null
   headSha?: string | null
   baseSha?: string | null

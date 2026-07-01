@@ -290,11 +290,20 @@ repo that agents can read by handle.
 
 ## Open items / v1 limitations
 
-- **Plan→build steerability / unit creation:** `start_mission` is registration,
-  not automatic decomposition; Agent-Tasks preview plan→build behavior is a
-  verify-live item.
+- **Plan→build via a two-task flow (resolved):** `start_mission` is registration,
+  not automatic decomposition. Dispatch is **plan-first**: the initial task runs
+  with `create_pull_request:false` and produces an implementation plan, which the
+  controller reads from the CAPI session log and surfaces as `review_plan`. On
+  `approve`, `applyModelAnswer` starts a FRESH build task (`create_pull_request:true`)
+  carrying the stashed plan (`unit.planExcerpt`); on `refine`, a fresh plan task
+  carrying the feedback. The plan task is never steered into building (POST
+  `/tasks/{id}` → 405, one-shot), so the two-task flow sidesteps the steerability
+  problem. If `startTask` is unavailable, dispatch falls back to issue-assignment,
+  which implements directly (no plan phase) — a degraded path.
 - **Agent-Tasks preview details:** `followUpTask()` and `cancelTask()` still have
-  TODOs for endpoint suffix shape in `src/lib/agent/tasks.ts`.
+  TODOs for endpoint suffix shape in `src/lib/agent/tasks.ts`. `followUpTask()` is
+  no longer on any hot path (steering is via fresh tasks / PR reviews) because the
+  task is one-shot.
 - **Non-Copilot Tasks parity:** Anthropic/OpenAI cloud-agent task behavior is
   represented in the roster model but still needs live parity verification.
 - **Server-side panel-read hardening:** merge approval is head/base-bound and

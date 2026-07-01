@@ -381,28 +381,63 @@ test("merge approval is refused for a unit that is not floor_passed", async () =
   expect(h.deps.recordApproval).not.toHaveBeenCalled()
 })
 
-test("review_plan approve answer follows up and flips the unit to build", async () => {
-  const row = unit({ provider: "completed", phase: "plan", dispatchMode: "plan" })
+test("review_plan approve re-dispatches a fresh build task carrying the approved plan", async () => {
+  const row = unit({
+    provider: "completed",
+    phase: "plan",
+    dispatchMode: "plan",
+    planExcerpt: "1. Bump Flask to 3.x. 2. Add pyproject.toml.",
+  })
   const h = harness([row])
-  h.observations.set("1", { provider: "completed", prs: [] })
+  h.observations.set("1", { provider: "queued", prs: [] })
+
+  await advance(
+    { modelAnswers: [{ requestId: "m1:1:review_plan", verdict: { decision: "approve" } }] },
+    h.deps,
+  )
+
+  // A fresh build task was dispatched (createPullRequest:true) carrying the plan —
+  // NOT a followUpTask (the one-shot plan task 405s on follow-up).
+  expect(h.deps.followUpTask).not.toHaveBeenCalled()
+  const buildCall = (
+    h.deps.startTask as unknown as { mock: { calls: unknown[][] } }
+  ).mock.calls.find((c) => (c[1] as { createPullRequest?: boolean }).createPullRequest === true)
+  expect(buildCall).toBeDefined()
+  expect((buildCall![1] as { prompt: string }).prompt).toContain("1. Bump Flask to 3.x.")
+  expect(row.dispatchMode).toBe("build")
+})
+
+test("review_plan refine re-dispatches a fresh plan task with the feedback and stays in plan", async () => {
+  const row = unit({
+    provider: "completed",
+    phase: "plan",
+    dispatchMode: "plan",
+    planExcerpt: "old plan",
+  })
+  const h = harness([row])
+  h.observations.set("1", { provider: "queued", prs: [] })
 
   await advance(
     {
       modelAnswers: [
-        { requestId: "m1:1:review_plan", verdict: { decision: "approve" } },
+        {
+          requestId: "m1:1:review_plan",
+          verdict: { decision: "refine", instruction: "Cover Python 3.12 too." },
+        },
       ],
     },
     h.deps,
   )
 
-  expect(h.deps.followUpTask).toHaveBeenCalledTimes(1)
-  expect(h.deps.followUpTask).toHaveBeenCalledWith(
-    { owner: "octo", repo: "repo" },
-    "task-1",
-    expect.stringContaining("implement"),
-  )
-  expect(row.phase).toBe("build")
-  expect(row.dispatchMode).toBe("build")
+  expect(h.deps.followUpTask).not.toHaveBeenCalled()
+  const planCall = (
+    h.deps.startTask as unknown as { mock: { calls: unknown[][] } }
+  ).mock.calls.find((c) => {
+    const input = c[1] as { createPullRequest?: boolean; prompt: string }
+    return input.createPullRequest === false && input.prompt.includes("Cover Python 3.12 too.")
+  })
+  expect(planCall).toBeDefined()
+  expect(row.dispatchMode).toBe("plan")
 })
 
 test("ci_failed asks the model under retry cap and escalates to human at cap", async () => {
@@ -750,11 +785,11 @@ test("advance isolates a throwing unit and still sweeps every other mission", as
 })
 
 test("advance isolates a throwing model answer instead of aborting the wake", async () => {
-  // A one-shot steer that 405s (or any answer failure) must not nuke the wake.
+  // A failing re-dispatch on approve (or any answer failure) must not nuke the wake.
   const u = unit({ provider: "completed", phase: "plan", dispatchMode: "plan" })
   const h = harness([u])
-  h.deps.followUpTask = mock(async () => {
-    throw new Error("POST /tasks/{id} → 405 (one-shot)")
+  h.deps.startTask = mock(async () => {
+    throw new Error("startTask 503 (dispatch failed)")
   })
 
   const result = await advance(

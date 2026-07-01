@@ -384,6 +384,9 @@ async function fillFuzzyFields(
       // undefined so the payload falls back to logExcerpt.
       if (result.planExcerpt.length > 0) evidence.planExcerpt = result.planExcerpt
     }
+    // Stash the plan (or raw log) durably so an approve can re-dispatch a build
+    // task carrying it, even after the model's context is gone.
+    unit.planExcerpt = evidence.planExcerpt ?? evidence.logExcerpt
   }
 
   if (
@@ -639,6 +642,7 @@ function isApproveMergeChoice(choice: string): boolean {
 async function applyModelAnswer(
   answer: ModelAnswer,
   units: UnitRow[],
+  missions: Mission[],
   deps: ControllerDeps,
   applied: string[],
 ): Promise<void> {
@@ -654,19 +658,45 @@ async function applyModelAnswer(
 
   if (kind === "review_plan") {
     const decision = stringValue(verdict.decision)
+    const mission = missions.find((entry) => entry.id === unit.missionId)
     if (decision === "approve") {
-      const instruction = "Plan approved — implement it and open a PR."
-      if (unit.taskId !== null) await deps.followUpTask(repo, unit.taskId, instruction)
-      unit.phase = "build"
-      unit.dispatchMode = "build"
-      unit.lastSteer = { sha: unit.headSha ?? undefined, atMs: Date.now() }
-      applied.push(`approved plan for ${unit.missionId}:${unitHandle(unit)}`)
+      // The plan task is one-shot (can't be steered into building). Re-dispatch
+      // a FRESH build task carrying the approved plan (stashed on the unit).
+      // Flip to the build phase ONLY on a successful dispatch, so a missing
+      // mission or a failed startTask leaves the unit in plan for a clean retry.
+      if (mission !== undefined) {
+        const task = await deps.startTask(repo, {
+          prompt: buildPrompt(unit, mission),
+          createPullRequest: true,
+        })
+        if (task.taskId.length > 0) {
+          unit.taskId = task.taskId
+          unit.provider = providerState(task.state, "queued")
+          unit.phase = "build"
+          unit.dispatchMode = "build"
+          unit.implementerLab = unit.agent
+          unit.lastSteer = { atMs: Date.now() }
+          applied.push(`approved plan → dispatched build for ${unit.missionId}:${unitHandle(unit)}`)
+        }
+      }
     } else if (decision === "refine") {
+      // Re-run planning: a fresh plan task carrying the refinement (the prior
+      // plan task is one-shot). Unit stays in the plan phase for another review.
       const instruction =
         stringValue(verdict.instruction) ?? "Refine the plan with more concrete implementation steps."
-      if (unit.taskId !== null) await deps.followUpTask(repo, unit.taskId, instruction)
-      unit.lastSteer = { sha: unit.headSha ?? undefined, atMs: Date.now() }
-      applied.push(`requested plan refinement for ${unit.missionId}:${unitHandle(unit)}`)
+      if (mission !== undefined) {
+        const prompt = `${planPrompt(unit, mission)}\n\nRefine your previous plan per this feedback:\n${instruction}`
+        const task = await deps.startTask(repo, { prompt, createPullRequest: false })
+        if (task.taskId.length > 0) {
+          unit.taskId = task.taskId
+          unit.provider = providerState(task.state, "queued")
+          unit.phase = "plan"
+          unit.dispatchMode = "plan"
+          unit.planExcerpt = undefined
+          unit.lastSteer = { atMs: Date.now() }
+          applied.push(`requested plan refinement for ${unit.missionId}:${unitHandle(unit)}`)
+        }
+      }
     }
   } else if (kind === "author_fix") {
     const instruction =
@@ -814,7 +844,7 @@ async function applySubmittedAnswers(
       if (answer.requestId.startsWith("decompose:")) {
         await applyDecomposeAnswer(answer, missions, deps, applied)
       } else {
-        await applyModelAnswer(answer, units, deps, applied)
+        await applyModelAnswer(answer, units, missions, deps, applied)
       }
     } catch (err) {
       consola.warn(`first-mate: model answer ${answer.requestId} failed to apply:`, err)
@@ -1147,14 +1177,30 @@ function activeCountsByAgent(units: UnitRow[]): Map<AgentKey, number> {
   return counts
 }
 
-function dispatchPrompt(unit: UnitRow, mission: Mission): string {
+function planPrompt(unit: UnitRow, mission: Mission): string {
   const parts = [
     `Mission goal:\n${mission.goal}`,
     `Acceptance criteria:\n${mission.acceptanceCriteria}`,
     `Work unit:\n${unit.title}`,
-    "Implement this work unit end-to-end on a new branch and open a pull request for review. Keep the change focused on this unit and do not modify unrelated files. If anything about the acceptance criteria is ambiguous, make a reasonable choice and note it in the PR description.",
+    "Analyze the repository and produce a concrete, step-by-step implementation plan for this work unit: the files you will change, the approach, key risks, and how each acceptance criterion will be verified. Do NOT edit code or open a pull request yet — output the plan and stop. It will be reviewed before implementation.",
   ]
   if (mission.houseRules !== undefined) parts.splice(2, 0, `House rules:\n${mission.houseRules}`)
+  return parts.join("\n\n")
+}
+
+function buildPrompt(unit: UnitRow, mission: Mission): string {
+  const parts = [
+    `Mission goal:\n${mission.goal}`,
+    `Acceptance criteria:\n${mission.acceptanceCriteria}`,
+    `Work unit:\n${unit.title}`,
+  ]
+  if (mission.houseRules !== undefined) parts.push(`House rules:\n${mission.houseRules}`)
+  if (unit.planExcerpt !== undefined && unit.planExcerpt.trim().length > 0) {
+    parts.push(`Approved plan (implement this):\n${unit.planExcerpt.trim()}`)
+  }
+  parts.push(
+    "Implement this work unit end-to-end on a new branch and open a pull request for review. Follow the approved plan above. Keep the change focused on this unit and do not modify unrelated files. If anything about the acceptance criteria is ambiguous, make a reasonable choice and note it in the PR description.",
+  )
   return parts.join("\n\n")
 }
 
@@ -1165,27 +1211,30 @@ async function dispatchUnit(
 ): Promise<void> {
   const repo = agentRepo(unit.repo)
   const actor = await deps.resolveAgentActor(repo, unit.agent)
-  const prompt = dispatchPrompt(unit, mission)
 
   try {
+    // Plan-first: the initial task produces an implementation plan (readable
+    // from its session log via the CAPI client) and stops — no PR yet. On
+    // approval, applyModelAnswer re-dispatches a fresh build task carrying the
+    // plan. We never steer the plan task into building (POST /tasks/{id} → 405,
+    // one-shot); the two-task flow sidesteps that.
     const task = await deps.startTask(repo, {
-      prompt,
-      // Build-first: the agent implements and opens a PR in one task. The
-      // Agent-Tasks API is one-shot (no follow-up: POST /tasks/{id} → 405) and
-      // does not expose the session plan/log, so plan-mode-without-a-PR gives
-      // us no artifact to read or channel to steer. The PR the agent opens IS
-      // the plan (in its description) + the diff + the two-way comment thread.
-      createPullRequest: true,
+      prompt: planPrompt(unit, mission),
+      createPullRequest: false,
     })
     if (task.taskId.length === 0) throw new Error("startTask returned no taskId")
     unit.taskId = task.taskId
     unit.provider = providerState(task.state, "queued")
     unit.botLogin = actor.login
+    unit.dispatchMode = "plan"
+    unit.phase = "plan"
   } catch (err) {
+    // Degraded fallback: issue assignment always implements (there is no plan
+    // phase via assignment), so this path goes straight to build.
     consola.debug("first-mate startTask failed; falling back to issue assignment:", err)
     const issue = await deps.createIssue(repo, {
       title: unit.title,
-      body: prompt,
+      body: buildPrompt(unit, mission),
     })
     await deps.assignAgent(repo, {
       issueNodeId: issue.nodeId,
@@ -1197,10 +1246,10 @@ async function dispatchUnit(
     unit.taskId = null
     unit.provider = "queued"
     unit.botLogin = actor.login
+    unit.dispatchMode = "build"
+    unit.phase = "build"
   }
 
-  unit.dispatchMode = "build"
-  unit.phase = "build"
   unit.implementerLab = unit.agent
   unit.lastSteer = { atMs: Date.now() }
 }
