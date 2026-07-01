@@ -667,8 +667,27 @@ async function applyModelAnswer(
       applied.push(`answered agent question for ${unit.missionId}:${unitHandle(unit)}`)
     }
   } else if (kind === "judge_review") {
-    unit.validation = booleanValue(verdict.pass) === true ? "floor_passed" : "floor_failed"
-    unit.verifierAssigned = true
+    // Only a unit the engine actually placed into verification can receive a
+    // floor verdict. Without this guard a forged judge_review could fabricate
+    // `floor_passed` on any unit and (combined with a merge approval) merge an
+    // unverified PR. verifierAssigned is set by the engine's assign_verifier
+    // step, never by an answer.
+    const inVerify =
+      unit.verifierAssigned === true
+      && (unit.validation === "review_pending"
+        || unit.validation === "ci_passed"
+        || unit.validation === "floor_pending")
+    if (!inVerify) {
+      consola.debug(
+        `first-mate: ignoring judge_review for ${unit.missionId}:${unitHandle(unit)} — unit is not in a verification state`,
+      )
+      return
+    }
+    const passed = booleanValue(verdict.pass) === true
+    unit.validation = passed ? "floor_passed" : "floor_failed"
+    // Bind the verdict to the head it was judged against so a later commit
+    // invalidates it (classify won't preserve a floor for a different head).
+    if (passed) unit.floorSha = unit.headSha ?? null
     applied.push(`recorded verifier judgment for ${unit.missionId}:${unitHandle(unit)}`)
   }
 
@@ -701,21 +720,40 @@ async function applyHumanDecision(
       unit.phase = "done"
       unit.cancelledBy = "external"
     } else if (isApproveMergeChoice(decision.choice) && unit.pr !== null) {
+      // SAFETY: an "approve" records a merge approval ONLY for a unit that is
+      // genuinely merge-ready right now (floor_passed). Combined with the
+      // judge_review guard, this stops a forged approve on an unrelated or
+      // unverified decision from producing a merge approval.
+      if (unit.validation !== "floor_passed") {
+        consola.debug(
+          `first-mate: ignoring merge approval for ${unitHandle(unit)} — unit is not floor_passed`,
+        )
+        await deps.upsertUnit(unit.repo, unit)
+        continue
+      }
       // Record a durable, single-use approval BOUND TO THE LIVE head/base the
       // engine fetches itself (never model-supplied). The merge gate
       // (maybeMergeWithApproval) re-validates + consumes it, this same wake.
       //
       // v1 guarantee (open item #2): the human's Approve is relayed by the
-      // model, but the approval can ONLY exist for a PR that already reached
-      // floor_passed AND was escalated (a pending DecisionRecord exists), is
-      // bound to the live head/base the engine reads, and is re-validated +
-      // single-use at consume time. So a relay can at most merge the CURRENT
-      // verified-green PR — never arbitrary/unapproved content, and any drift
-      // invalidates it. A server-side ai-or-die panel read (via ArtifactClient)
+      // model. The approval can ONLY exist for a floor_passed unit whose LIVE
+      // head still equals the head the floor verdict was recorded against
+      // (`floorSha`) — a moved head is refused and re-verifies. It is
+      // engine-bound to the live head/base, single-use, and re-validated at
+      // consume. So a relay can at most merge the CURRENT verified-green PR,
+      // never arbitrary/unapproved content. A server-side ai-or-die panel read
       // is the hardening follow-up for a fully model-unforgeable path.
       try {
         const live = await deps.getPullRequestState(agentRepo(unit.repo), unit.pr)
-        if (live.headSha.length > 0) {
+        const staleHead =
+          unit.floorSha != null
+          && unit.floorSha.length > 0
+          && live.headSha !== unit.floorSha
+        if (staleHead) {
+          consola.warn(
+            `first-mate: refusing merge approval for ${repoLabel(unit.repo)}#${live.number} — head moved since the floor verdict; re-verification required`,
+          )
+        } else if (live.headSha.length > 0) {
           await deps.recordApproval({
             decisionId,
             repo: unit.repo,
@@ -768,6 +806,19 @@ async function maybeMergeWithApproval(
   unit.headSha = live.headSha || unit.headSha
   unit.baseSha = live.baseSha ?? unit.baseSha
   unit.branch = live.baseRef || unit.branch
+
+  // SAFETY: the floor verdict must be for the exact head we're about to merge.
+  // A moved head means the verified state is stale — refuse and let the unit
+  // re-verify against the new head (an approval bound to a different head is
+  // also rejected by verifyAndConsumeApproval).
+  if (
+    unit.floorSha != null
+    && unit.floorSha.length > 0
+    && live.headSha.length > 0
+    && live.headSha !== unit.floorSha
+  ) {
+    return false
+  }
 
   const head = live.headSha.length > 0 ? live.headSha : unit.headSha ?? undefined
   if (head === undefined || head.length === 0) return false

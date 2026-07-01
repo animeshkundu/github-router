@@ -82,6 +82,13 @@ export interface UnitRow {
   verifierAssigned?: boolean
   /** The lab that produced this unit's work (for producer≠checker). */
   implementerLab?: AgentKey
+  /**
+   * The head SHA the floor verdict (floor_passed/floor_failed) was recorded
+   * against. Binds the verdict — and any merge approval derived from it — to a
+   * specific head, so a new commit after the verdict auto-invalidates the floor
+   * (classify won't preserve it) and the merge gate refuses a moved head.
+   */
+  floorSha?: string | null
   title: string
   branch?: string | null
   headSha?: string | null

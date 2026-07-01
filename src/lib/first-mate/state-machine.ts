@@ -36,7 +36,7 @@ export function classify(observed: Observed, row: UnitRow): Classified {
   const provider = observed.provider
 
   const artifact = classifyArtifact(observed, events)
-  const validation = classifyValidation(observed, artifact)
+  const validation = classifyValidation(observed, artifact, row)
   const phase = classifyPhase(observed, row, artifact, validation)
 
   if (observed.externalMutation) {
@@ -63,8 +63,23 @@ function classifyArtifact(observed: Observed, events: string[]): Artifact {
   return "pr_open"
 }
 
-function classifyValidation(observed: Observed, artifact: Artifact): Validation {
+function classifyValidation(observed: Observed, artifact: Artifact, row: UnitRow): Validation {
   if (artifact !== "pr_open") return "unknown"
+  // Preserve a floor verdict that was recorded for the CURRENT head. The floor
+  // comes from an out-of-band different-lab verifier (a judge_review answer),
+  // not from GitHub, so it lives in the ledger, not `observed`. Binding it to
+  // `floorSha` means a new commit (head change) auto-invalidates the verdict
+  // and the unit re-verifies — closing the stale-floor merge hole.
+  const head = observed.prs[0]?.headSha
+  if (
+    (row.validation === "floor_passed" || row.validation === "floor_failed")
+    && row.floorSha != null
+    && row.floorSha.length > 0
+    && head !== undefined
+    && head === row.floorSha
+  ) {
+    return row.validation
+  }
   // Floor verdict (only meaningful after CI passes) takes precedence.
   if (observed.floor === "failed") return "floor_failed"
   if (observed.floor === "passed") return "floor_passed"
