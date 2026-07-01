@@ -214,8 +214,12 @@ once they exist; exact plan→unit creation is a follow-up.
 - artifact: PR artifact state (`no_pr`, `pr_open`, `pr_closed`, `pr_merged`,
   `multiple_prs`).
 - validation: CI/review/floor state (`unknown`, `ci_running`, `ci_passed`,
-  `ci_failed`, `review_pending`, `changes_requested`, `floor_pending`,
-  `floor_passed`, `floor_failed`).
+  `ci_failed`, `no_ci`, `review_pending`, `changes_requested`, `floor_pending`,
+  `floor_passed`, `floor_failed`). `no_ci` is a completed build whose PR has zero
+  check runs AND whose base branch has no workflow files — the cross-lab review
+  is then the gate, so it routes to `assign_verifier` like `ci_passed` (never a
+  silent stall). Zero check runs WITH workflows present stays `ci_running` (the
+  checks just haven't registered), so real CI is never skipped.
 
 `src/lib/first-mate/state-machine.ts` is pure: no network, no filesystem, no LLM.
 `classify(observed, row)` computes the orthogonal state and events.

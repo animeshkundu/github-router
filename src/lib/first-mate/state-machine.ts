@@ -96,6 +96,12 @@ function classifyValidation(observed: Observed, artifact: Artifact, row: UnitRow
     if (observed.reviewDecision === "REVIEW_REQUIRED") return "review_pending"
     return "ci_passed"
   }
+  if (rollup === "none") {
+    // Zero check runs. If the repo genuinely has no CI, the cross-lab review is
+    // the gate → route to verification. If CI is configured but hasn't
+    // registered yet, keep waiting rather than skipping it.
+    return observed.ci?.noCi === true ? "no_ci" : "ci_running"
+  }
   return "unknown"
 }
 
@@ -115,7 +121,8 @@ function classifyPhase(
   // A PR exists — derive from validation.
   if (validation === "floor_passed") return "merge"
   if (validation === "ci_failed" || validation === "changes_requested") return "fix"
-  if (validation === "ci_passed" || validation === "review_pending") return "review"
+  if (validation === "ci_passed" || validation === "review_pending" || validation === "no_ci")
+    return "review"
   return "build"
 }
 
@@ -174,7 +181,9 @@ export function nextAction(
             : "changes still requested after the self-heal retry cap",
       }
     case "ci_passed":
-      // Green → independent, different-lab verification before merge.
+    case "no_ci":
+      // Green (or no CI to gate on) → independent, different-lab verification
+      // before merge. The cross-lab review is the real gate; CI is a bonus.
       if (!row.verifierAssigned) return { kind: "assign_verifier" }
       return { kind: "noop" } // awaiting the verifier's floor verdict
     case "review_pending":

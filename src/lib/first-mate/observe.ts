@@ -4,6 +4,7 @@ import {
   findAgentPRs,
   getPullRequestState,
   getRequiredChecksForSha,
+  repoHasWorkflows,
 } from "~/lib/agent/service"
 import { getTask } from "~/lib/agent/tasks"
 import type {
@@ -141,11 +142,16 @@ async function getPullRequestStateSafe(
 async function getCiSafe(
   repo: AgentRepoRef,
   headSha: string,
+  baseRef: string | undefined,
 ): Promise<Observed["ci"] | undefined> {
   if (headSha.length === 0) return undefined
   try {
     const checks = await getRequiredChecksForSha(repo, headSha)
-    return { rollup: checks.rollup }
+    if (checks.rollup !== "none") return { rollup: checks.rollup }
+    // Zero check runs: distinguish a repo with NO CI (→ cross-lab verify is the
+    // gate) from one whose checks just haven't registered yet (→ keep waiting).
+    const hasWorkflows = baseRef ? await repoHasWorkflows(repo, baseRef) : false
+    return { rollup: "none", noCi: !hasWorkflows }
   } catch (err) {
     consola.debug("first-mate observe: required checks read skipped:", err)
     return undefined
@@ -206,7 +212,9 @@ export async function observeUnit(unit: UnitRow): Promise<Observed> {
   const prSummaries = await findPrsSafe(repo, unit)
   const primaryNumber = primaryPrNumber(unit, task, prSummaries)
   const primaryState = await getPullRequestStateSafe(repo, primaryNumber)
-  const ci = primaryState ? await getCiSafe(repo, primaryState.headSha) : undefined
+  const ci = primaryState
+    ? await getCiSafe(repo, primaryState.headSha, primaryState.baseRef)
+    : undefined
   const reviewDecision = primaryState ? primaryState.reviewDecision ?? null : undefined
 
   const mutation = externalMutation(unit, primaryState)

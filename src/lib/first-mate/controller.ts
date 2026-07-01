@@ -731,6 +731,7 @@ async function applyModelAnswer(
       unit.verifierAssigned === true
       && (unit.validation === "review_pending"
         || unit.validation === "ci_passed"
+        || unit.validation === "no_ci"
         || unit.validation === "floor_pending")
     if (!inVerify) {
       consola.debug(

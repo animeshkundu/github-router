@@ -92,6 +92,24 @@ test("ci_passed with no verifier → assign a different-lab verifier", () => {
   expect(after.kind).toBe("noop")
 })
 
+test("no CI configured (rollup none + noCi) verifies via a different lab, not a stall", () => {
+  const o = obs({ prs: [openPr()], ci: { rollup: "none", noCi: true } })
+  const c = classify(o, row({ pr: 7 }))
+  expect(c.validation).toBe("no_ci")
+  expect(c.phase).toBe("review")
+  expect(nextAction(c, row({ pr: 7, verifierAssigned: false }), DEFAULT_POLICY).kind).toBe(
+    "assign_verifier",
+  )
+  expect(nextAction(c, row({ pr: 7, verifierAssigned: true }), DEFAULT_POLICY).kind).toBe("noop")
+})
+
+test("no check runs yet but CI is configured (noCi false) waits instead of skipping CI", () => {
+  const o = obs({ prs: [openPr()], ci: { rollup: "none", noCi: false } })
+  const c = classify(o, row({ pr: 7 }))
+  expect(c.validation).toBe("ci_running")
+  expect(nextAction(c, row({ pr: 7 }), DEFAULT_POLICY).kind).toBe("noop")
+})
+
 test("floor_passed → escalate for human merge approval (never auto-merges)", () => {
   const o = obs({ prs: [openPr()], ci: { rollup: "passing" }, floor: "passed" })
   const c = classify(o, row({ pr: 7 }))

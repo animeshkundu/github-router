@@ -38,6 +38,7 @@ export type Validation =
   | "ci_running"
   | "ci_passed"
   | "ci_failed"
+  | "no_ci"
   | "review_pending"
   | "changes_requested"
   | "floor_pending"
@@ -127,7 +128,7 @@ export interface Observed {
     state: string
     merged?: boolean
   }>
-  ci?: { rollup: "pending" | "passing" | "failing" | "none" }
+  ci?: { rollup: "pending" | "passing" | "failing" | "none"; noCi?: boolean }
   /** GitHub reviewDecision: APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | null. */
   reviewDecision?: string | null
   /** /gh-floor-keeper verdict for the current head, when it has run. */

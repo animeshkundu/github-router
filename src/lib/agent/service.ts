@@ -475,6 +475,48 @@ export async function getRequiredChecksForSha(
   return { rollup, checks, failing, runningCount }
 }
 
+const workflowCache = new Map<string, { timestamp: number; value: boolean }>()
+
+interface ContentsEntry {
+  name?: string
+  type?: string
+}
+
+/**
+ * Whether the repo has any GitHub Actions workflow on `ref`. Lets the
+ * controller distinguish "genuinely no CI" (route to cross-lab verify) from
+ * "CI configured but checks not registered yet" (keep waiting) when a commit's
+ * check-run rollup is "none". Cached per repo+ref; a 404 (no dir) means no CI.
+ */
+export async function repoHasWorkflows(repo: RepoRef, ref: string): Promise<boolean> {
+  const key = `${repoPath(repo)}@${ref}`
+  const hit = cached(workflowCache.get(key))
+  if (hit !== undefined) return hit
+
+  let value = false
+  try {
+    const entries = await ghRest<ContentsEntry[]>(
+      "GET",
+      `${repoPath(repo)}/contents/.github/workflows?ref=${segment(ref)}`,
+    )
+    value =
+      Array.isArray(entries) &&
+      entries.some(
+        (entry) =>
+          entry.type === "file" && /\.ya?ml$/i.test(entry.name ?? ""),
+      )
+  } catch (err) {
+    // 404 → no workflows dir → no CI. Other errors: assume no CI (best-effort).
+    if (!(err instanceof AgentError && err.code === "NOT_FOUND")) {
+      consola.debug("first-mate: workflow probe failed, assuming no CI:", err)
+    }
+    value = false
+  }
+
+  workflowCache.set(key, { timestamp: Date.now(), value })
+  return value
+}
+
 interface PullFileRestResponse {
   filename?: string
   additions?: number
