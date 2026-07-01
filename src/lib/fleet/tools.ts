@@ -139,6 +139,21 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
   }
 
   function clientFor(instance: FleetResolvedInstance): FleetClientLike {
+    // Mesh clients are NOT cached: the egress proxy's Proxy-Authorization is a
+    // credential that can ROTATE (sidecar restart) and must never enter the cache
+    // key, and a cached client would pin a stale authHeader captured at construction.
+    // Rebuilding a FleetClient is cheap (URL parse only), so build one per call with
+    // the CURRENT meshProxy. (A mesh instance carries no tunnel provider.)
+    if (instance.auth.type === "mesh") {
+      return options.createClient
+        ? options.createClient(instance)
+        : new FleetClient({
+            url: instance.url,
+            auth: instance.auth,
+            fetchFn: options.fetchFn,
+            meshProxy: instance.meshProxy,
+          })
+    }
     const key = `${instance.id}\0${instance.url}\0${instance.auth.type}\0${instance.token}\0${instance.tunnelId ?? ""}\0${instance.tunnelToken ?? ""}\0${instance.insecureTLS === true ? "1" : "0"}`
     const existing = clients.get(key)
     if (existing) return existing
@@ -727,6 +742,10 @@ function fleetProbeHint(code: FleetErrorCode): string | undefined {
       return "no response before the probe deadline; the host may be slow or the tunnel may have no host"
     case "UNREACHABLE":
       return "could not connect (DNS or connection failure); check the instance url"
+    case "MESH_UNCONFIGURED":
+      return "mesh egress unconfigured or stale; (re)start the local ai-or-die --mesh sidecar so it publishes a fresh mesh/egress.json"
+    case "TAILNET_UNREACHABLE":
+      return "reached the local egress proxy but the request did not land on the tailnet peer; likely the tag:aiordie ACL, or the peer's sidecar is down"
     default:
       return undefined
   }
@@ -744,6 +763,8 @@ function isFleetErrorCode(code: string): code is FleetErrorCode {
     case "RELAY_ERROR":
     case "BAD_REQUEST":
     case "RATE_LIMITED":
+    case "TAILNET_UNREACHABLE":
+    case "MESH_UNCONFIGURED":
       return true
     default:
       return false

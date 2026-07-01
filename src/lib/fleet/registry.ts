@@ -56,6 +56,21 @@ export interface FleetRegistryConfig {
  */
 export type FleetAuth = { type: "bearer"; token: string } | { type: "mesh" }
 
+/**
+ * The same-box loopback HTTP CONNECT egress proxy that a mesh sidecar exposes so
+ * this (off-tailnet) host can reach `.ts.net` peers. `url` is ALWAYS loopback
+ * http; `authHeader` is the full `Proxy-Authorization` value (`Bearer <token>`).
+ *
+ * SECURITY: `authHeader` is a CREDENTIAL on the same boundary as a bearer/tunnel
+ * token. It lives ONLY here and inside the ProxyAgent's `Proxy-Authorization`
+ * header — NEVER in `FleetInstanceInfo`, `list_instances` output, a client-cache
+ * key, an error message, a `notice`, or a log. Do not add it to `FleetInstanceInfo`.
+ */
+export interface FleetMeshProxy {
+  url: string
+  authHeader: string
+}
+
 export interface FleetResolvedInstance {
   id: string
   label: string
@@ -67,6 +82,13 @@ export interface FleetResolvedInstance {
    */
   token: string
   auth: FleetAuth
+  /**
+   * For a mesh peer (`auth.type === "mesh"`): the loopback egress proxy to tunnel
+   * the request through (the local sidecar reaches the tailnet, this host does
+   * not). Absent for static bearer instances. Credential-bearing (`authHeader`) —
+   * see {@link FleetMeshProxy}; never serialized into `FleetInstanceInfo`.
+   */
+  meshProxy?: FleetMeshProxy
   default?: boolean
   allowExec?: boolean
   tunnelId?: string
