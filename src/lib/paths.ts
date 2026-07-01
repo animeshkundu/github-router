@@ -35,7 +35,9 @@ export const PATHS = {
    * clears. Modeled on the worker-agent lifecycle ledger.
    */
   get FIRST_MATE_DIR() {
-    return path.join(appDir(), "first-mate")
+    return (
+      process.env.GH_ROUTER_FIRST_MATE_DIR ?? path.join(appDir(), "first-mate")
+    )
   },
   get ERROR_LOG_PATH() {
     return path.join(appDir(), "error.log")
