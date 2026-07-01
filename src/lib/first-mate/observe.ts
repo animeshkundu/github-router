@@ -76,13 +76,20 @@ function primaryPrNumber(
   prs: AgentPRSummary[],
 ): number | null {
   if (unit.pr !== null && unit.pr > 0) return unit.pr
-  // Correlate by branch first (unambiguous when several same-bot units each
-  // have their own PR); fall back to the task's own PR link, then any bot PR.
-  return (
-    branchMatchNumber(prs, unit.branch ?? task?.branch ?? undefined) ??
-    taskPrNumber(task) ??
-    firstSummaryNumber(prs)
-  )
+
+  const branch = unit.branch ?? task?.branch ?? undefined
+  const byBranch = branchMatchNumber(prs, branch)
+  if (byBranch !== null) return byBranch
+
+  const byTask = taskPrNumber(task)
+  if (byTask !== null) return byTask
+
+  // If the unit's branch is KNOWN but no PR matches it, the PR simply is not
+  // open yet — do NOT grab an unrelated same-bot PR (author matching alone is
+  // ambiguous). Only guess by first author-matched PR when the branch is
+  // unknown (e.g. legacy issue-based units with no branch signal).
+  if (branch !== undefined) return null
+  return firstSummaryNumber(prs)
 }
 
 async function getTaskSafe(
