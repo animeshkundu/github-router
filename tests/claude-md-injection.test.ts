@@ -574,6 +574,12 @@ test("artifact-panel directive steers HTML-by-default for review", () => {
   // It explicitly prefers HTML and frames raw markdown as the fallback.
   expect(d).toMatch(/prefer html|self-contained `?\.?html/)
   expect(d).toContain("fallback")
+  // Broadened beyond plans: the trigger now names other review-worthy shapes.
+  expect(d).toContain("comparison")
+  expect(d).toContain("table")
+  // Carries the per-type playbook cheatsheet + a design-system steer.
+  expect(d).toContain("diagram")
+  expect(d).toContain("design system")
 })
 test("style directive is prepended at the TOP of CLAUDE.md with user content preserved below", async () => {
   await freshMirrorDir()

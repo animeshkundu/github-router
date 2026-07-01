@@ -1771,6 +1771,9 @@ function advisorTool(
           },
           undefined,
           signal,
+          // retryTransient: true: non-streaming, whole call is pre-first-byte,
+          // so a transient network/5xx retry is safe.
+          true,
         )) as ResponsesApiResponse
         const text = extractResponsesText(response)
         if (!text) {

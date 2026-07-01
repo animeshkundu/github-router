@@ -223,10 +223,15 @@ async function runStreamLoop(
   // boundary. Encode either as a terminal error.
   let sseStream: AsyncIterable<{ data?: string }>
   try {
+    // retryTransient: true: pre-first-byte retry on a transient network/5xx
+    // blip. The SSE body is iterated below, not inside createChatCompletions, so
+    // a re-issue at the fetch boundary cannot duplicate already-streamed output;
+    // mid-stream body errors still surface via pushTerminalError (not retried).
     const result = await createChatCompletions(
       payload,
       undefined,
       options?.signal,
+      true,
     )
     if (
       result == null
@@ -641,7 +646,10 @@ async function runResponsesStreamLoop(
 
   let sseStream: AsyncIterable<{ data?: string }>
   try {
-    const result = await createResponses(payload, undefined, options?.signal)
+    // retryTransient: true: pre-first-byte retry; SSE body is iterated below
+    // (not inside createResponses), so a fetch-boundary re-issue can't duplicate
+    // streamed output. Mid-stream errors still surface via pushTerminalError.
+    const result = await createResponses(payload, undefined, options?.signal, true)
     if (
       result == null
       || typeof (result as AsyncIterable<unknown>)[Symbol.asyncIterator]
