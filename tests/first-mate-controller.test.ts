@@ -214,6 +214,7 @@ function harness(
         baseSha: `base-${pr}`,
       }),
     ),
+    postComment: mock(async () => ({ url: "https://gh/c/1" })),
     submitReview: mock(async () => ({ reviewId: 1, state: "CHANGES_REQUESTED" })),
     rerunChecks: mock(async () => ({ rerun: true as const })),
     mergePullRequest: mock(async () => ({ merged: true as const, sha: "merge-sha" })),

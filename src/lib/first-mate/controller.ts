@@ -14,6 +14,7 @@ import {
   rerunChecks as realRerunChecks,
   resolveAgentActor as realResolveAgentActor,
   resolveAgentRoster as realResolveAgentRoster,
+  postComment as realPostComment,
   submitReview as realSubmitReview,
 } from "~/lib/agent/service"
 import {
@@ -90,6 +91,7 @@ export interface ControllerDeps {
   assignAgent: typeof realAssignAgent
   findAgentPRs: typeof realFindAgentPRs
   getPullRequestState: typeof realGetPullRequestState
+  postComment: typeof realPostComment
   submitReview: typeof realSubmitReview
   rerunChecks: typeof realRerunChecks
   mergePullRequest: typeof realMergePullRequest
@@ -218,6 +220,7 @@ export const defaultDeps: ControllerDeps = {
   assignAgent: realAssignAgent,
   findAgentPRs: realFindAgentPRs,
   getPullRequestState: realGetPullRequestState,
+  postComment: realPostComment,
   submitReview: realSubmitReview,
   rerunChecks: realRerunChecks,
   mergePullRequest: realMergePullRequest,
@@ -651,9 +654,12 @@ async function applyModelAnswer(
   } else if (kind === "author_fix") {
     const instruction =
       stringValue(verdict.instruction) ?? "Fix the reported validation failure and update the PR."
-    if (unit.taskId !== null) {
-      await deps.followUpTask(repo, unit.taskId, instruction)
-    } else if (unit.pr !== null) {
+    // Steer through the PR, the agent's two-way channel — the Agent-Tasks task
+    // is one-shot (POST /tasks/{id} → 405, no follow-up). A REQUEST_CHANGES
+    // review is the agent's cue to push a fix. If there's no PR yet the agent
+    // is still working; the retry counter still advances so a stuck unit
+    // eventually escalates.
+    if (unit.pr !== null) {
       await deps.submitReview(repo, unit.pr, "REQUEST_CHANGES", instruction)
     }
     unit.retries += 1
@@ -662,8 +668,9 @@ async function applyModelAnswer(
     applied.push(`sent fix instruction for ${unit.missionId}:${unitHandle(unit)}`)
   } else if (kind === "answer_agent_question") {
     const answerText = stringValue(verdict.answer)
-    if (answerText !== undefined && unit.taskId !== null) {
-      await deps.followUpTask(repo, unit.taskId, answerText)
+    // The agent surfaces questions in its PR thread; answer there via a comment.
+    if (answerText !== undefined && unit.pr !== null) {
+      await deps.postComment(repo, unit.pr, answerText)
       unit.lastSteer = { sha: unit.headSha ?? undefined, atMs: Date.now() }
       applied.push(`answered agent question for ${unit.missionId}:${unitHandle(unit)}`)
     }
@@ -1116,7 +1123,7 @@ function dispatchPrompt(unit: UnitRow, mission: Mission): string {
     `Mission goal:\n${mission.goal}`,
     `Acceptance criteria:\n${mission.acceptanceCriteria}`,
     `Work unit:\n${unit.title}`,
-    "Start in plan mode: produce a concise implementation plan for review. Do not open a PR until the plan is approved.",
+    "Implement this work unit end-to-end on a new branch and open a pull request for review. Keep the change focused on this unit and do not modify unrelated files. If anything about the acceptance criteria is ambiguous, make a reasonable choice and note it in the PR description.",
   ]
   if (mission.houseRules !== undefined) parts.splice(2, 0, `House rules:\n${mission.houseRules}`)
   return parts.join("\n\n")
@@ -1134,7 +1141,12 @@ async function dispatchUnit(
   try {
     const task = await deps.startTask(repo, {
       prompt,
-      createPullRequest: false,
+      // Build-first: the agent implements and opens a PR in one task. The
+      // Agent-Tasks API is one-shot (no follow-up: POST /tasks/{id} → 405) and
+      // does not expose the session plan/log, so plan-mode-without-a-PR gives
+      // us no artifact to read or channel to steer. The PR the agent opens IS
+      // the plan (in its description) + the diff + the two-way comment thread.
+      createPullRequest: true,
     })
     if (task.taskId.length === 0) throw new Error("startTask returned no taskId")
     unit.taskId = task.taskId
@@ -1158,8 +1170,8 @@ async function dispatchUnit(
     unit.botLogin = actor.login
   }
 
-  unit.dispatchMode = "plan"
-  unit.phase = "plan"
+  unit.dispatchMode = "build"
+  unit.phase = "build"
   unit.implementerLab = unit.agent
   unit.lastSteer = { atMs: Date.now() }
 }
