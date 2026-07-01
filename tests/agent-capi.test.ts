@@ -69,7 +69,27 @@ test("parseSessionLog hard-truncates a huge log", () => {
   const big = "x".repeat(9000)
   const result = parseSessionLog(`data: ${JSON.stringify(chunk({ content: big }))}`)
   expect(result.excerpt.length).toBeLessThanOrEqual(4000)
-  expect(result.excerpt.endsWith("…[truncated]…")).toBe(true)
+  // Progress is tail-kept, so the truncation marker leads the progress section.
+  expect(result.excerpt).toContain("…[truncated]…")
+})
+
+test("parseSessionLog surfaces a tail <plan> block over the leading MCP boilerplate", () => {
+  // Reproduces the live bug: the agent emits a large MCP-registration preamble
+  // first, then the actual plan (wrapped in <plan>…</plan>) at the very end.
+  // Head-truncation used to keep only the boilerplate and drop the plan.
+  const boilerplate =
+    "Cloned repo and checked out branch\nMCP server started successfully with 36 tools\n" +
+    Array.from({ length: 40 }, (_, i) => `- github-mcp-server/tool_${i}`).join("\n")
+  const planText = "### Steps\n1. Replace setup.py with pyproject.toml\n2. Drop six\n3. Add CI"
+  const content = `${boilerplate}\n\n<plan>\n${planText}\n</plan>`
+  const result = parseSessionLog(`data: ${JSON.stringify(chunk({ content }, "stop"))}`)
+
+  expect(result.excerpt).toContain("Plan:")
+  expect(result.excerpt).toContain("Replace setup.py with pyproject.toml")
+  expect(result.excerpt).toContain("Drop six")
+  // The tool-registration boilerplate is stripped out of the excerpt.
+  expect(result.excerpt).not.toContain("github-mcp-server/tool_0")
+  expect(result.excerpt).not.toContain("MCP server started successfully")
 })
 
 test("parseSessionLog joins multi-line SSE data events (spec-compliant)", () => {

@@ -111,6 +111,47 @@ function truncateHead(text: string): string {
   return `${text.slice(0, LOG_EXCERPT_LIMIT - TRUNCATED_MARKER.length)}${TRUNCATED_MARKER}`
 }
 
+// Per-section budgets. The distilled plan reads top-down (head-kept); progress
+// and reasoning are most useful at their tail (the recent state / conclusion).
+const PLAN_LIMIT = 2800
+const PROGRESS_LIMIT = 900
+
+function headTruncate(text: string, limit: number): string {
+  if (text.length <= limit) return text
+  return `${text.slice(0, limit - TRUNCATED_MARKER.length)}${TRUNCATED_MARKER}`
+}
+
+function tailTruncate(text: string, limit: number): string {
+  if (text.length <= limit) return text
+  return `${TRUNCATED_MARKER}${text.slice(-(limit - TRUNCATED_MARKER.length))}`
+}
+
+/** Extract a `<plan>…</plan>` block (the plan-mode agent wraps its plan in it). */
+function extractPlanBlock(text: string): string | null {
+  const match = /<plan>([\s\S]*?)<\/plan>/i.exec(text)
+  const inner = match?.[1]?.trim()
+  return inner && inner.length > 0 ? inner : null
+}
+
+/**
+ * Drop the agent's MCP-server registration preamble. Every cloud-agent session
+ * emits a large, signal-free tool-registration dump ("MCP server started
+ * successfully with N tools", "- github-mcp-server/actions_get", …) at the
+ * START, which would otherwise dominate a head-truncated excerpt and bury the
+ * actual plan/progress that lands at the tail.
+ */
+function stripMcpBoilerplate(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => {
+      const l = line.trim()
+      if (/^MCP server started successfully/i.test(l)) return false
+      if (/^-\s+(runtime-tools|github-mcp-server)\//i.test(l)) return false
+      return true
+    })
+    .join("\n")
+}
+
 /** Append with a per-field cap; once at the cap, further growth is dropped. */
 function capped(current: string, addition: string): string {
   if (current.length >= MAX_FIELD_CHARS) return current
@@ -228,10 +269,23 @@ export function parseSessionLog(body: string): SessionLogExcerpt {
   }
 
   const uniqueTools = [...new Set(toolNames)]
+
+  // Plan sources, best first: the report_progress.prDescription (build tasks),
+  // then a <plan>…</plan> block the agent emits in its content (plan tasks).
+  const planBlock = extractPlanBlock(content)
+  const plan = planDescription.trim() || planBlock || ""
+
+  // Progress = content minus the plan block minus the MCP boilerplate, TAIL-kept
+  // (the recent state / conclusion is at the end, not the head).
+  const progressSource = planBlock
+    ? content.replace(/<plan>[\s\S]*?<\/plan>/i, "")
+    : content
+  const progress = stripMcpBoilerplate(progressSource).trim()
+
   const parts: string[] = []
-  if (planDescription.trim()) parts.push(`Plan:\n${planDescription.trim()}`)
-  if (reasoning.trim()) parts.push(`Reasoning:\n${reasoning.trim()}`)
-  if (content.trim()) parts.push(`Progress:\n${content.trim()}`)
+  if (plan) parts.push(`Plan:\n${headTruncate(plan, PLAN_LIMIT)}`)
+  if (reasoning.trim()) parts.push(`Reasoning:\n${tailTruncate(reasoning.trim(), PROGRESS_LIMIT)}`)
+  if (progress) parts.push(`Progress:\n${tailTruncate(progress, PROGRESS_LIMIT)}`)
   if (uniqueTools.length > 0) parts.push(`Tools: ${uniqueTools.join(", ")}`)
 
   return { excerpt: truncateHead(parts.join("\n\n")), finished, tools: uniqueTools }
