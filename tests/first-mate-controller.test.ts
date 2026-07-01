@@ -644,3 +644,37 @@ test("topK caps model and human requests independently", async () => {
     "decision-2",
   ])
 })
+
+test("decompose: unit-less mission emits a decompose request, and a decompose answer creates + dispatches units", async () => {
+  const m = mission({ id: "m-dec", goal: "Build the widget" })
+  const h = harness([], [m])
+
+  // (1) advance on a unit-less mission emits a per-mission decompose request.
+  const r1 = await advance({}, h.deps)
+  const dec = r1.needsModel.find((x) => x.kind === "decompose")
+  expect(dec?.requestId).toBe("decompose:m-dec")
+  expect((dec?.payload as Record<string, unknown>).goal).toBe("Build the widget")
+  expect(h.units.length).toBe(0) // nothing created yet
+
+  // (2) answering the decompose creates the units — which then dispatch in the
+  //     same wake (queued → startTask).
+  await advance(
+    {
+      modelAnswers: [
+        {
+          requestId: "decompose:m-dec",
+          verdict: {
+            units: [{ title: "part A" }, { title: "part B", agent: "anthropic" }],
+          },
+        },
+      ],
+    },
+    h.deps,
+  )
+
+  expect(h.units.map((u) => u.title).sort()).toEqual(["part A", "part B"])
+  expect(h.units.every((u) => typeof u.id === "string" && u.id.length > 0)).toBe(true)
+  expect(h.units.find((u) => u.title === "part B")?.agent).toBe("anthropic")
+  // dispatched in the same wake (each got a taskId or issue) — no duplicates.
+  expect(h.units.every((u) => u.taskId !== null || u.issue !== null)).toBe(true)
+})

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 
@@ -781,12 +782,85 @@ async function applySubmittedAnswers(
   applied: string[],
 ): Promise<void> {
   const units = await deps.loadAllUnits()
+  const missions = await deps.readMissions()
   for (const answer of input.modelAnswers ?? []) {
-    await applyModelAnswer(answer, units, deps, applied)
+    if (answer.requestId.startsWith("decompose:")) {
+      await applyDecomposeAnswer(answer, missions, deps, applied)
+    } else {
+      await applyModelAnswer(answer, units, deps, applied)
+    }
   }
   for (const decision of input.humanDecisions ?? []) {
     await applyHumanDecision(decision, units, deps, applied)
   }
+}
+
+/** Parse an "owner/name" repo string into a RepoRef. */
+function parseRepoRef(value: string | undefined): RepoRef | undefined {
+  if (value === undefined) return undefined
+  const parts = value.split("/")
+  if (parts.length !== 2 || parts[0]!.length === 0 || parts[1]!.length === 0) {
+    return undefined
+  }
+  return { owner: parts[0]!, name: parts[1]! }
+}
+
+function asAgentKey(value: string | undefined): AgentKey | undefined {
+  return value === "copilot" || value === "anthropic" || value === "openai"
+    ? value
+    : undefined
+}
+
+/**
+ * Turn a model `decompose` answer into queued units. This is the mission→units
+ * step: `start_mission` only registers the mission; `advance` emits one
+ * `decompose` request per unit-less active mission, and the model answers with
+ * `{ units: [{ title, repo?, agent?, dependsOn? }] }`. Each unit gets a stable
+ * `id` so it survives the queued→dispatched transition without duplicating.
+ */
+async function applyDecomposeAnswer(
+  answer: ModelAnswer,
+  missions: Mission[],
+  deps: ControllerDeps,
+  applied: string[],
+): Promise<void> {
+  const missionId = answer.requestId.slice("decompose:".length)
+  const mission = missions.find((m) => m.id === missionId)
+  if (mission === undefined) return
+  const verdict = asRecord(answer.verdict) ?? {}
+  const rawUnits = Array.isArray(verdict.units) ? verdict.units : []
+  let created = 0
+  for (const raw of rawUnits) {
+    const spec = asRecord(raw) ?? {}
+    const title = stringValue(spec.title)
+    if (title === undefined || title.length === 0) continue
+    const repo = parseRepoRef(stringValue(spec.repo)) ?? mission.repos[0]
+    if (repo === undefined) continue
+    const dependsOn = Array.isArray(spec.dependsOn)
+      ? spec.dependsOn.filter((n): n is number => typeof n === "number")
+      : []
+    const unit: UnitRow = {
+      id: randomUUID(),
+      missionId,
+      repo,
+      issue: null,
+      pr: null,
+      taskId: null,
+      agent: asAgentKey(stringValue(spec.agent)) ?? "copilot",
+      botLogin: "",
+      dispatchMode: "plan",
+      provider: "none",
+      phase: "plan",
+      artifact: "no_pr",
+      validation: "unknown",
+      retries: 0,
+      dependsOn,
+      title,
+    }
+    await deps.upsertUnit(repo, unit)
+    created += 1
+  }
+  if (created > 0) applied.push(`decomposed ${missionId} into ${created} unit(s)`)
 }
 
 async function maybeMergeWithApproval(
@@ -1126,7 +1200,6 @@ function buildBoard(units: UnitRow[], missions: Mission[]): BoardRow[] {
   const rows: BoardRow[] = []
   for (const mission of missions.filter((entry) => entry.status === "active")) {
     const missionUnits = units.filter((unit) => unit.missionId === mission.id)
-    if (missionUnits.length === 0) continue
     const counts: Record<string, number> = {}
     for (const unit of missionUnits) {
       counts[unit.phase] = (counts[unit.phase] ?? 0) + 1
@@ -1257,6 +1330,35 @@ export async function advance(
       requestOrder,
     )
     await deps.upsertUnit(unit.repo, unit)
+  }
+
+  // Missions with no units yet need decomposition into dispatchable units.
+  // `start_mission` only registers a mission; emit one decompose request per
+  // unit-less active mission so the model returns the unit set (created on the
+  // next wake by applyDecomposeAnswer).
+  for (const mission of missions) {
+    if (mission.status !== "active") continue
+    if (units.some((unit) => unit.missionId === mission.id)) continue
+    const repo = mission.repos[0]
+    if (repo === undefined) continue
+    needsModel.push({
+      request: {
+        requestId: `decompose:${mission.id}`,
+        kind: "decompose",
+        missionId: mission.id,
+        repo,
+        issue: null,
+        pr: null,
+        payload: {
+          goal: mission.goal,
+          acceptance_criteria: mission.acceptanceCriteria,
+          repos: mission.repos.map((entry) => `${entry.owner}/${entry.name}`),
+          house_rules: mission.houseRules ?? null,
+        },
+      },
+      sortKey: 0,
+      order: order++,
+    })
   }
 
   await dispatchWave(

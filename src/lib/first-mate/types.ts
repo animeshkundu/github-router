@@ -56,6 +56,13 @@ export interface RepoRef {
  * bookkeeping — never diffs, logs, or PR bodies (those are re-fetchable).
  */
 export interface UnitRow {
+  /**
+   * Stable per-unit identity, independent of GitHub handles. Set when a unit
+   * is created (e.g. from a decompose answer) so it can be correlated across
+   * its queued→dispatched transition (before it has an issue/taskId) without
+   * duplicating in the ledger. Optional for backward compatibility.
+   */
+  id?: string
   missionId: string
   repo: RepoRef
   issue: number | null
@@ -149,6 +156,7 @@ export interface Classified {
 
 /** Kinds of judgment the engine can ask the LEAD model for (macro-tier). */
 export type ModelRequestKind =
+  | "decompose"
   | "review_plan"
   | "answer_agent_question"
   | "author_fix"

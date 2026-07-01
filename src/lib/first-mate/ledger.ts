@@ -205,6 +205,7 @@ function serializeLedgerWrite(work: () => Promise<void>): Promise<void> {
 
 function sameUnitHandle(a: UnitRow, b: UnitRow): boolean {
   return (
+    (b.id != null && a.id === b.id) ||
     (b.issue !== null && a.issue === b.issue) ||
     (b.taskId !== null && a.taskId === b.taskId)
   )
