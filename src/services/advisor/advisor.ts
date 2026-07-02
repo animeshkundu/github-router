@@ -1052,10 +1052,16 @@ export function buildAdvisorStream(opts: {
             messages: conversation,
             stream: true,
           })
+          // retryTransient: true: pre-first-byte retry on a 429/5xx/network
+          // blip. The continuation Response body is not read until processOneTurn
+          // streams it, so re-issuing here cannot duplicate already-streamed
+          // output. Matches the first-call retry in routes/messages/handler.ts so
+          // the advisor turn no longer dies to a lone "fetch failed".
           response = await createMessages(
             continuationBody,
             opts.requestHeaders,
             aborter.signal,
+            true,
           )
         }
 

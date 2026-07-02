@@ -1,4 +1,6 @@
 import { applyInsecureTls } from "../insecure-tls"
+import { applyMeshEgressProxy, MeshEgressUnsupportedRuntimeError } from "./mesh-egress-agent"
+import type { FleetAuth, FleetMeshProxy } from "./registry"
 import { TunnelAuthError } from "./tunnel-auth"
 
 // `applyInsecureTls` (runtime-aware self-signed-cert bypass) is shared with the
@@ -29,6 +31,17 @@ export type FleetErrorCode =
   // RATE_LIMITED — a 429 under fan-out load; retryable WITH backoff (F21).
   | "BAD_REQUEST"
   | "RATE_LIMITED"
+  // Mesh diagnostic: a mesh peer (auth:{type:"mesh"}) was unreachable at the
+  // network layer. Distinct from UNREACHABLE so a SILENT tailnet-ACL drop (no
+  // loud relay error like devtunnel's NO_HOST) is actionable — the peer is on
+  // the tailnet but the request didn't land; the likely cause is the
+  // `tag:aiordie` ACL, not a dead instance.
+  | "TAILNET_UNREACHABLE"
+  // Mesh diagnostic: the peer is on the tailnet but this host has NO live loopback
+  // egress proxy to reach it (egress.json absent / stale / dead sidecar pid). The
+  // request fails CLOSED before any fetch — we never attempt a direct `.ts.net`
+  // hop. Actionable: (re)start the local ai-or-die `--mesh` sidecar.
+  | "MESH_UNCONFIGURED"
 
 export class FleetError extends Error {
   code: FleetErrorCode
@@ -54,7 +67,17 @@ export class FleetError extends Error {
 
 export interface FleetClientOptions {
   url: string
-  token: string
+  /**
+   * Bearer token. Optional: when omitted, pass `auth` instead. Retained for
+   * backward-compat with callers that construct a bearer client by token.
+   */
+  token?: string
+  /**
+   * Explicit, discriminated auth. `{type:"mesh"}` sends NO Authorization header
+   * (the peer's sidecar injects the bearer over the tailnet). When absent it is
+   * derived from `token` (→ `{type:"bearer"}`).
+   */
+  auth?: FleetAuth
   fetchFn?: typeof fetch
   /**
    * Optional async provider for a VS Code Dev Tunnel `connect` access token.
@@ -78,6 +101,27 @@ export interface FleetClientOptions {
    * `redirect:"error"` credential boundaries are unaffected. Off unless explicitly true.
    */
   insecureTLS?: boolean
+  /**
+   * For a mesh peer (`auth.type === "mesh"`): the loopback egress proxy to tunnel
+   * the request through (this host is off-tailnet; the local sidecar reaches the
+   * `.ts.net` peer). When `auth.type === "mesh"` and this is ABSENT, the client
+   * FAILS CLOSED before any fetch rather than attempt a direct (unroutable)
+   * `.ts.net` request. Ignored for bearer instances.
+   *
+   * SECURITY: `meshProxy.authHeader` is a credential — it is used ONLY to build the
+   * ProxyAgent's `Proxy-Authorization` header and is never logged / serialized.
+   */
+  meshProxy?: FleetMeshProxy
+  /**
+   * Test seam: override the mesh egress-proxy applicator. Defaults to the real
+   * runtime-aware {@link applyMeshEgressProxy}. Injected so a test can force the
+   * Node (ProxyAgent) branch under the Bun test runtime and inspect the fetch init.
+   * Returns a closeable agent (or undefined); the client `close()`s it per request.
+   */
+  applyMeshEgress?: (
+    init: Record<string, unknown>,
+    meshProxy: FleetMeshProxy,
+  ) => { close?: () => Promise<void>; destroy?: () => Promise<void> } | undefined
 }
 
 export interface CapabilitiesResponse {
@@ -270,11 +314,16 @@ export function decodeSessionId(globalId: string): { instanceId: string; localId
 export class FleetClient {
   private readonly baseUrl: string
   private readonly origin: string
-  private readonly token: string
+  private readonly auth: FleetAuth
   private readonly fetchFn: typeof fetch
   private readonly getTunnelToken?: () => Promise<string | undefined>
   private readonly onTunnelAuthInvalidate?: () => void
   private readonly insecureTLS: boolean
+  private readonly meshProxy?: FleetMeshProxy
+  private readonly applyMeshEgress: (
+    init: Record<string, unknown>,
+    meshProxy: FleetMeshProxy,
+  ) => { close?: () => Promise<void>; destroy?: () => Promise<void> } | undefined
 
   constructor(options: FleetClientOptions) {
     this.baseUrl = options.url.replace(/\/+$/, "")
@@ -282,11 +331,13 @@ export class FleetClient {
     // this before sending, so neither the bearer nor the tunnel token can be
     // emitted to an unexpected origin.
     this.origin = new URL(this.baseUrl).origin
-    this.token = options.token
+    this.auth = options.auth ?? { type: "bearer", token: options.token ?? "" }
     this.fetchFn = options.fetchFn ?? globalThis.fetch.bind(globalThis)
     this.getTunnelToken = options.getTunnelToken
     this.onTunnelAuthInvalidate = options.onTunnelAuthInvalidate
     this.insecureTLS = options.insecureTLS === true
+    this.meshProxy = options.meshProxy
+    this.applyMeshEgress = options.applyMeshEgress ?? applyMeshEgressProxy
   }
 
   capabilities(signal?: AbortSignal): Promise<CapabilitiesResponse> {
@@ -427,6 +478,22 @@ export class FleetClient {
       })
     }
 
+    // Mesh peers live on a tailnet this host is NOT on, so they are reachable ONLY
+    // through the local sidecar's loopback egress proxy. Fail CLOSED when a mesh
+    // peer has no valid egress (egress.json absent / stale / dead sidecar pid)
+    // rather than attempt a direct — and unroutable — `.ts.net` fetch. The notice
+    // is actionable and carries NO credential.
+    if (this.auth.type === "mesh" && this.meshProxy === undefined) {
+      throw new FleetError({
+        code: "MESH_UNCONFIGURED",
+        message:
+          "mesh egress unconfigured or stale: no live loopback egress proxy for this tailnet peer. "
+          + "Start (or restart) the local ai-or-die `--mesh` sidecar so it publishes a fresh mesh/egress.json; "
+          + "this host cannot reach a `.ts.net` peer directly.",
+        retryable: true,
+      })
+    }
+
     // Send the anti-phishing-skip header to any Dev Tunnel host (it helps an
     // anonymous tunnel and is ignored elsewhere). Attach the connect token ONLY
     // on a SECURE (https) Dev Tunnel origin — a credential must never ride a
@@ -449,13 +516,14 @@ export class FleetClient {
       const canRetry = attachTunnel && !!this.onTunnelAuthInvalidate && attempt === 0
 
       const headers: Record<string, string> = {
-        Authorization: `Bearer ${this.token}`,
+        ...(this.auth.type === "bearer" ? { Authorization: `Bearer ${this.auth.token}` } : {}),
         ...(devtunnelHost ? { "X-Tunnel-Skip-Anti-Phishing-Page": "true" } : {}),
         ...(attachTunnel ? { "X-Tunnel-Authorization": `tunnel ${tunnelToken}` } : {}),
         ...(body === undefined ? {} : { "Content-Type": "application/json" }),
       }
 
       let response: Response
+      let meshAgent: { close?: () => Promise<void>; destroy?: () => Promise<void> } | undefined
       try {
         const init: RequestInit = {
           method,
@@ -474,8 +542,27 @@ export class FleetClient {
           // still bound credentials.
           applyInsecureTls(init as unknown as Record<string, unknown>)
         }
+        if (this.auth.type === "mesh") {
+          // A mesh request must NEVER reach fetch without the egress proxy attached
+          // (the pre-loop guard already threw when meshProxy is absent; this local
+          // invariant defends against any refactor that could reach here without it,
+          // so we can never silently fall through to a direct — unroutable and
+          // credential-unprotected — `.ts.net` fetch). Route through the loopback
+          // egress proxy the runtime-aware way insecureTLS is applied; the egress
+          // token rides only in the ProxyAgent's Proxy-Authorization header (never
+          // the URI). The per-request agent is torn down below so it can't leak.
+          if (this.meshProxy === undefined) {
+            throw new FleetError({
+              code: "MESH_UNCONFIGURED",
+              message: "mesh egress unconfigured or stale: refusing a direct fetch to a tailnet peer.",
+              retryable: true,
+            })
+          }
+          meshAgent = this.applyMeshEgress(init as unknown as Record<string, unknown>, this.meshProxy)
+        }
         response = await this.fetchFn(url.toString(), init)
       } catch (err) {
+        await closeQuietly(meshAgent)
         // A private Dev Tunnel rejecting a stale connect token 302s -> github
         // auth, which `redirect:"error"` turns into a network-style throw. Evict
         // and retry once — but ONLY for an idempotent GET, since a throw on a
@@ -484,10 +571,11 @@ export class FleetClient {
           this.onTunnelAuthInvalidate!()
           continue
         }
-        throw mapNetworkError(err, devtunnelHost)
+        throw this.auth.type === "mesh" ? mapMeshUnreachable(err) : mapNetworkError(err, devtunnelHost)
       }
 
       if (!response.ok) {
+        await closeQuietly(meshAgent)
         // A 401/403 RESPONSE means the request was rejected (not executed), so a
         // re-mint + retry is safe for any method.
         if ((response.status === 401 || response.status === 403) && canRetry) {
@@ -497,7 +585,11 @@ export class FleetClient {
         throw await mapHttpError(response, url.toString())
       }
 
-      return (await response.json()) as T
+      try {
+        return (await response.json()) as T
+      } finally {
+        await closeQuietly(meshAgent)
+      }
     }
 
     // Both attempts failed without throwing (defensive; the loop normally
@@ -669,6 +761,56 @@ function detailToSearchString(detail: unknown): string {
   }
 }
 
+function mapMeshUnreachable(err: unknown): FleetError {
+  // An already-mapped FleetError (e.g. the defensive in-loop MESH_UNCONFIGURED
+  // fail-closed) passes through unchanged — never re-wrap our own error into a
+  // different code.
+  if (err instanceof FleetError) return err
+  // NO-LEAK: the egress credential rides in a Proxy-Authorization HEADER we set on
+  // the ProxyAgent. undici does not echo request headers in its error messages, but
+  // to be defense-in-depth we NEVER interpolate the raw `err.message` and NEVER
+  // attach `detail: err` on the mesh path — a fixed, actionable message only, so no
+  // proxy internals (or a future error shape that captured the header) can surface
+  // in tool output. `err.name`/`err.code` are safe, non-credential class markers.
+  if (err instanceof MeshEgressUnsupportedRuntimeError) {
+    return new FleetError({
+      code: "MESH_UNCONFIGURED",
+      message: err.message,
+      retryable: false,
+    })
+  }
+  if (isAbortLike(err)) {
+    return new FleetError({
+      code: "TIMEOUT",
+      message: "fleet mesh peer request timed out or was aborted",
+      retryable: true,
+    })
+  }
+  const errClass = meshErrorClass(err)
+  return new FleetError({
+    code: "TAILNET_UNREACHABLE",
+    message:
+      `fleet mesh peer unreachable${errClass} — the request went through the local egress proxy but did not land on the peer. `
+      + "A mesh ACL drops blocked traffic SILENTLY, so the likely cause is the `tag:aiordie` ACL (verify the peer permits this node), "
+      + "not a dead instance; also confirm the peer's mesh sidecar is up and serving HTTPS on the tailnet, "
+      + "and that the local egress sidecar is still running.",
+    retryable: true,
+  })
+}
+
+// A coarse, credential-free class marker for a mesh network error: the error's
+// `name` and a Node/undici `code` (e.g. ECONNREFUSED, UND_ERR_*) are safe to show,
+// but the free-form `message` is NOT interpolated (it could, in some error shapes,
+// carry request internals). Returns "" when nothing safe is available.
+function meshErrorClass(err: unknown): string {
+  if (typeof err !== "object" || err === null) return ""
+  const record = err as { name?: unknown; code?: unknown }
+  const parts: Array<string> = []
+  if (typeof record.name === "string" && record.name !== "" && record.name !== "Error") parts.push(record.name)
+  if (typeof record.code === "string" && record.code !== "") parts.push(record.code)
+  return parts.length === 0 ? "" : ` (${parts.join(" ")})`
+}
+
 function mapNetworkError(err: unknown, devtunnelHost = false): FleetError {
   if (isAbortLike(err)) {
     return new FleetError({
@@ -717,4 +859,22 @@ function detailToMessage(detail: unknown): string | undefined {
 
 function isAbortLike(err: unknown): boolean {
   return err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")
+}
+
+// Tear down a per-request undici ProxyAgent (mesh egress) WITHOUT waiting on
+// in-flight sockets. `destroy()` (not `close()`) is deliberate: on a non-OK / error
+// path the response body may be unread, and undici's `close()` waits gracefully for
+// active dispatchers — which would HANG on an abandoned stream. `destroy()` forcibly
+// aborts the pool. Best-effort: a teardown failure must never mask the request
+// outcome. Accepts either shape so the injectable test applicator can stub it.
+async function closeQuietly(
+  agent: { close?: () => Promise<void>; destroy?: () => Promise<void> } | undefined,
+): Promise<void> {
+  if (agent === undefined) return
+  try {
+    if (typeof agent.destroy === "function") await agent.destroy()
+    else if (typeof agent.close === "function") await agent.close()
+  } catch {
+    // ignore
+  }
 }

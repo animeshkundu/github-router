@@ -646,6 +646,107 @@ describe("ADVISOR streaming integration (Phase I)", () => {
     // Tool was NOT injected (advisor disabled).
     expect(injectedTool).toBe(false)
   })
+
+  test("transient 'fetch failed' on the continuation call is retried, not surfaced as 'advisor loop failed'", async () => {
+    // Regression: the advisor continuation createMessages call previously omitted
+    // retryTransient, so a single transient network blip aborted the whole turn
+    // with `advisor loop failed: fetch failed`. With retryTransient:true the
+    // continuation fetch retries pre-first-byte and the turn completes.
+    let messagesFetchCount = 0
+    let advisorResponsesCallCount = 0
+    const fetchMock = mock((url: string) => {
+      if (url.includes("/responses")) {
+        advisorResponsesCallCount++
+        return new Response(
+          JSON.stringify({
+            id: "advisor_resp",
+            object: "response",
+            status: "completed",
+            output: [
+              {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Advisor says: proceed." }],
+              },
+            ],
+            usage: { input_tokens: 10, output_tokens: 5 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+
+      if (url.includes("/v1/messages")) {
+        messagesFetchCount++
+        // 1: main call → advisor tool_use. 2: continuation attempt 1 → transient
+        // throw. 3: continuation attempt 2 (retry) → final text + message_stop.
+        if (messagesFetchCount === 1) {
+          return new Response(
+            buildSseStream([
+              { event: "message_start", data: { type: "message_start", message: { id: "m1" } } },
+              { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } },
+              { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Let me consult." } } },
+              { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+              { event: "content_block_start", data: { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "toolu_advisor_1", name: ADVISOR_INTERNAL_TOOL_NAME, input: {} } } },
+              { event: "content_block_stop", data: { type: "content_block_stop", index: 1 } },
+              { event: "message_stop", data: { type: "message_stop" } },
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          )
+        }
+        if (messagesFetchCount === 2) {
+          // Transient network failure on the FIRST continuation attempt. The
+          // message "fetch failed" is what Node/Bun/undici throw and what
+          // isTransientNetworkError matches.
+          throw new TypeError("fetch failed")
+        }
+        // Continuation retry (attempt 2) succeeds.
+        return new Response(
+          buildSseStream([
+            { event: "message_start", data: { type: "message_start", message: { id: "m2" } } },
+            { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } },
+            { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Based on advisor: proceeding." } } },
+            { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+            { event: "message_stop", data: { type: "message_stop" } },
+          ]),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        )
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    })
+    // @ts-expect-error - override
+    globalThis.fetch = fetchMock
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        "anthropic-beta": "advisor-tool-2026-03-01",
+      },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      }),
+    })
+    expect(response.status).toBe(200)
+    const text = await streamToString(response.body!)
+
+    // The transient blip must NOT surface as an error event.
+    expect(text).not.toContain("advisor loop failed")
+    expect(text).not.toContain('"type":"error"')
+    // The advisor ran and its result was delivered.
+    expect(text).toContain("Advisor says: proceed.")
+    // The continuation succeeded after the retry → its final text is delivered.
+    expect(text).toContain("Based on advisor: proceeding")
+    // Exactly one message_stop for the whole loop.
+    expect((text.match(/^event: message_stop$/gm) ?? []).length).toBe(1)
+    // The advisor model was called once; /v1/messages was hit three times
+    // (main + 2 continuation attempts: 1 transient failure + 1 retry success).
+    expect(advisorResponsesCallCount).toBe(1)
+    expect(messagesFetchCount).toBe(3)
+  })
 })
 
 describe("toClientServerToolUseId charset hardening (round-5 codex critic)", () => {

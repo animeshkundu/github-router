@@ -46,11 +46,50 @@ export interface FleetRegistryConfig {
   instances?: ReadonlyArray<FleetInstanceConfig>
 }
 
+/**
+ * Explicit, discriminated auth for a resolved instance. A static `fleet.json`
+ * instance is `{ type: "bearer", token }`; a mesh-discovered peer is
+ * `{ type: "mesh" }` (no token — the peer's OWN sidecar injects the bearer on
+ * the tailnet->loopback hop, gated by the `tag:aiordie` ACL). Token-less is an
+ * EXPLICIT type, never "token happens to be empty", so a typoed/blank static
+ * token can never silently degrade into an unauthenticated request.
+ */
+export type FleetAuth = { type: "bearer"; token: string } | { type: "mesh" }
+
+/**
+ * The same-box loopback HTTP CONNECT egress proxy that a mesh sidecar exposes so
+ * this (off-tailnet) host can reach `.ts.net` peers. `url` is ALWAYS loopback
+ * http; `authHeader` is the full `Proxy-Authorization` value (`Bearer <token>`).
+ *
+ * SECURITY: `authHeader` is a CREDENTIAL on the same boundary as a bearer/tunnel
+ * token. It lives ONLY here and inside the ProxyAgent's `Proxy-Authorization`
+ * header — NEVER in `FleetInstanceInfo`, `list_instances` output, a client-cache
+ * key, an error message, a `notice`, or a log. Do not add it to `FleetInstanceInfo`.
+ */
+export interface FleetMeshProxy {
+  url: string
+  authHeader: string
+}
+
 export interface FleetResolvedInstance {
   id: string
   label: string
   url: string
+  /**
+   * Bearer token for `type:"bearer"` instances; `""` for mesh peers. Retained
+   * (alongside `auth`) so the client-cache key and existing readers keep working;
+   * the AUTHORITATIVE auth decision is `auth`, not this field.
+   */
   token: string
+  auth: FleetAuth
+  /**
+   * For a mesh peer (`auth.type === "mesh"`): the loopback egress proxy to tunnel
+   * the request through (the local sidecar reaches the tailnet, this host does
+   * not). Absent for static bearer instances. Credential-bearing (`authHeader`) —
+   * see {@link FleetMeshProxy}; never serialized into `FleetInstanceInfo`.
+   */
+  meshProxy?: FleetMeshProxy
+  default?: boolean
   allowExec?: boolean
   tunnelId?: string
   tunnelToken?: string
@@ -144,40 +183,13 @@ export class FleetRegistry {
   }
 
   async resolveInstance(arg?: string): Promise<FleetResolvedInstance> {
-    const instances = await this.instancesWithTokens()
-    const wanted = typeof arg === "string" ? arg.trim() : ""
+    const resolved = (await this.instancesWithTokens()).map(resolvedInstance)
+    return selectInstance(resolved, arg)
+  }
 
-    if (wanted) {
-      const byId = instances.find((instance) => instance.id === wanted)
-      if (byId) return resolvedInstance(byId)
-
-      const labelMatches = instances.filter(
-        (instance) => instance.label.toLocaleLowerCase() === wanted.toLocaleLowerCase(),
-      )
-      if (labelMatches.length > 1) {
-        throw new FleetRegistryError(
-          "AMBIGUOUS_LABEL",
-          `fleet instance label ${JSON.stringify(wanted)} matches ${labelMatches.length} instances; use an id`,
-        )
-      }
-      if (labelMatches.length === 1) return resolvedInstance(labelMatches[0]!)
-
-      throw new FleetRegistryError(
-        "INSTANCE_NOT_FOUND",
-        `fleet instance ${JSON.stringify(wanted)} was not found`,
-      )
-    }
-
-    const defaultInstance = instances.find((instance) => instance.default === true)
-    if (defaultInstance) return resolvedInstance(defaultInstance)
-    if (instances.length === 1) return resolvedInstance(instances[0]!)
-
-    throw new FleetRegistryError(
-      "INSTANCE_REQUIRED",
-      instances.length === 0
-        ? "fleet instance is required; registry is empty"
-        : "fleet instance is required; specify an instance id or label",
-    )
+  /** All static instances, fully resolved (with tokens). Used to build the merged static∪discovered set. */
+  async resolveAll(): Promise<Array<FleetResolvedInstance>> {
+    return (await this.instancesWithTokens()).map(resolvedInstance)
   }
 
   async listInstances(): Promise<Array<FleetInstanceInfo>> {
@@ -197,6 +209,51 @@ export class FleetRegistry {
     }
     return this.loaded
   }
+}
+
+/**
+ * Pure instance selection over an already-resolved set: id (exact) → label
+ * (case-insensitive, ambiguity-checked) → default → single. Shared by the static
+ * registry and the merged static∪discovered registry so both apply identical
+ * matching + error semantics.
+ */
+export function selectInstance(
+  instances: ReadonlyArray<FleetResolvedInstance>,
+  arg?: string,
+): FleetResolvedInstance {
+  const wanted = typeof arg === "string" ? arg.trim() : ""
+
+  if (wanted) {
+    const byId = instances.find((instance) => instance.id === wanted)
+    if (byId) return byId
+
+    const labelMatches = instances.filter(
+      (instance) => instance.label.toLocaleLowerCase() === wanted.toLocaleLowerCase(),
+    )
+    if (labelMatches.length > 1) {
+      throw new FleetRegistryError(
+        "AMBIGUOUS_LABEL",
+        `fleet instance label ${JSON.stringify(wanted)} matches ${labelMatches.length} instances; use an id`,
+      )
+    }
+    if (labelMatches.length === 1) return labelMatches[0]!
+
+    throw new FleetRegistryError(
+      "INSTANCE_NOT_FOUND",
+      `fleet instance ${JSON.stringify(wanted)} was not found`,
+    )
+  }
+
+  const defaultInstance = instances.find((instance) => instance.default === true)
+  if (defaultInstance) return defaultInstance
+  if (instances.length === 1) return instances[0]!
+
+  throw new FleetRegistryError(
+    "INSTANCE_REQUIRED",
+    instances.length === 0
+      ? "fleet instance is required; registry is empty"
+      : "fleet instance is required; specify an instance id or label",
+  )
 }
 
 function normalizeConfig(config: FleetRegistryConfig): ReadonlyArray<FleetInstanceConfig> {
@@ -439,6 +496,8 @@ function resolvedInstance(instance: FleetInstanceConfig): FleetResolvedInstance 
     label: instance.label,
     url: instance.url,
     token: instance.token,
+    auth: { type: "bearer", token: instance.token },
+    default: instance.default,
     allowExec: instance.allowExec,
     tunnelId: instance.tunnelId,
     tunnelToken: instance.tunnelToken,

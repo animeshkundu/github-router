@@ -33,14 +33,23 @@ const ARTIFACT_MARKER_OPEN =
   "<!-- gh-router artifact-panel directive — auto-injected when in an ai-or-die tab -->"
 const ARTIFACT_MARKER_CLOSE = "<!-- /gh-router artifact-panel directive -->"
 
-// Default-on plan review in the panel: when running inside an ai-or-die tab the
+// Default-on review in the panel: when running inside an ai-or-die tab the
 // artifact_* tools reach a real review panel, so steer the agent to use it.
+// Lever split: this directive is the SOFT steer for the model-judgment cases
+// (show a comparison/table/diagram mid-conversation, which no hook can detect).
+// The one DETERMINISTIC artifact-open is the PostToolUse(ExitPlanMode) hook
+// (buildArtifactOpenHookCommand in claude.ts) that auto-opens a finalized plan.
+// A Stop / UserPromptSubmit hook is deliberately NOT added: it would either
+// mis-fire on ordinary turns or merely duplicate this soft steer.
 const ARTIFACT_PANEL_DIRECTIVE =
-  "## Review plans in the artifact panel\n\n"
+  "## Review in the artifact panel (HTML by default)\n\n"
   + "You are running inside an ai-or-die tab, so the `mcp__peers__artifact_open/poll/reply/end` tools drive a live human-review panel. "
-  + "When you finish a plan or produce something the user should review, open it in the panel: `mcp__peers__artifact_open`, tell the user to review (they can click a block or select text to comment), then `mcp__peers__artifact_poll` for feedback, revise, and `mcp__peers__artifact_end` when done. "
-  + "Prefer HTML: for anything rich or structured, author a self-contained `.html` artifact and open THAT (the panel renders and annotates HTML natively). Plan-mode plans are auto-rendered to HTML for you; raw markdown is only a fallback. "
-  + "Default to this for plans before asking the user to proceed."
+  + "Default to an HTML artifact for anything the user should review before you proceed, not just plans but also design proposals, comparisons / trade-offs, decisions that need their input, diagrams, tables, code diffs, and reports. "
+  + "Author a self-contained `.html` (inline CSS, no external deps, readable typography) and open it with `mcp__peers__artifact_open`; tell the user to review (they can click a block or select text to comment), then `mcp__peers__artifact_poll` for feedback, revise, `mcp__peers__artifact_reply`, and `mcp__peers__artifact_end` when done. "
+  + "Plan-mode plans are auto-rendered to HTML and auto-opened for you; raw markdown is only a fallback. Skip the panel only for trivial one-line answers.\n\n"
+  + "Make the HTML good: match the subject project's design system (its Tailwind / theme / tokens) when the artifact represents a specific app, otherwise clean readable defaults. "
+  + "Per-type cheatsheet. plan: goal, current state, proposed approach, risks / open questions. comparison: options as columns with trade-off rows and a recommendation. table: scannable rows with a sticky header. diagram: boxes + arrows (SVG/CSS or Mermaid). code / diff: `<pre>` with before/after. "
+  + "The `gh-artifact-review` skill carries the fuller playbook."
 
 // Back-compat aliases used by existing tests. The peer block's
 // markers remain the "default" pair surfaced through __testExports.

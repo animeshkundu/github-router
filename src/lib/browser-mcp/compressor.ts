@@ -186,7 +186,9 @@ async function callViaChat(
     ],
     tool_choice: { type: "function", function: { name: tool.name } },
   } as ChatCompletionsPayload
-  const resp = (await createChatCompletions(payload, undefined, signal)) as ChatCompletionResponse
+  // retryTransient: true: non-streaming (stream:false), so the whole call is
+  // pre-first-byte and a transient network/5xx retry is safe.
+  const resp = (await createChatCompletions(payload, undefined, signal, true)) as ChatCompletionResponse
   const msg = resp.choices?.[0]?.message as
     | { content?: string | null; tool_calls?: Array<{ function?: { arguments?: string } }> }
     | undefined
@@ -226,7 +228,8 @@ async function callViaResponses(
     ],
     tool_choice: { type: "function", name: tool.name },
   }
-  const resp = (await createResponses(payload, undefined, signal)) as ResponsesApiResponse
+  // retryTransient: true: non-streaming (stream:false), pre-first-byte, safe.
+  const resp = (await createResponses(payload, undefined, signal, true)) as ResponsesApiResponse
   const output = Array.isArray(resp.output) ? resp.output : []
   for (const item of output) {
     if (!item || typeof item !== "object") continue

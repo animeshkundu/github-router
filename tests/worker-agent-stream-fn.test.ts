@@ -534,11 +534,14 @@ test("options.signal threads through to the underlying fetch", async () => {
     ])
   }) as unknown as typeof fetch
 
+  // Use a LIVE (non-aborted) signal: the streaming calls now request a
+  // pre-first-byte transient retry, and fetchWithTransientRetry short-circuits a
+  // signal that is ALREADY aborted before it ever calls fetch (correct: don't
+  // attempt a fetch for an already-cancelled run). Graceful handling of an
+  // already-aborted signal is covered by the next test (AbortError → aborted).
   const ac = new AbortController()
-  ac.abort()
 
   const streamFn = createCopilotStreamFn({ resolved: RESOLVED })
-  // Drain — should complete cleanly even though the signal is aborted.
   let threw = false
   try {
     await drain(streamFn, USER_CTX, ac.signal)
@@ -547,12 +550,10 @@ test("options.signal threads through to the underlying fetch", async () => {
   }
 
   expect(threw).toBe(false)
+  // The signal we passed to streamFn made it all the way through to the fetch
+  // init (createChatCompletions composes it with the upstream timeout via
+  // AbortSignal.any, so the captured value is a live AbortSignal, not null).
   expect(capturedSignal).not.toBeNull()
-  // createChatCompletions wraps inputs in AbortSignal.any when a timeout is
-  // also active — the composite inherits the aborted flag from our signal.
-  // This is the threading proof: the signal we passed to streamFn made it
-  // all the way through to the fetch init.
-  expect((capturedSignal as unknown as AbortSignal).aborted).toBe(true)
 })
 
 test("AbortError from upstream is encoded as stopReason='aborted' (NOT thrown)", async () => {
