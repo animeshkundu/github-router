@@ -1182,6 +1182,7 @@ describe("resolveGroupKeysFromMirror", () => {
         browser: "browser",
         decide: "decide",
         fleet: "fleet",
+        "first-mate": "first-mate",
       })
     })
   })

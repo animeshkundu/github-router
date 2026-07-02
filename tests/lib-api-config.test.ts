@@ -16,6 +16,7 @@ const baseState: State = {
   extendedBetas: false,
   browseEnabled: false,
   fleetEnabled: false,
+  agentsEnabled: false,
   powerBrowseEnabled: false,
   humanlikeForce: "auto",
   sessionId: "test-session-id",

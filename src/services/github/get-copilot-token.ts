@@ -19,7 +19,12 @@ const COPILOT_HOST_ALLOWLIST = [
   "api.enterprise.githubcopilot.com",
 ]
 
-function isAllowedCopilotHost(rawUrl: string): boolean {
+/**
+ * True iff `rawUrl` is an HTTPS URL whose host is a trusted Copilot API host.
+ * Exported so every path that sends a long-lived token to a discovered
+ * Copilot host (web search, first-mate CAPI session logs) shares one allowlist.
+ */
+export function isAllowedCopilotHost(rawUrl: string): boolean {
   let parsed: URL
   try {
     parsed = new URL(rawUrl)

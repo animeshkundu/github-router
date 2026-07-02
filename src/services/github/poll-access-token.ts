@@ -11,6 +11,7 @@ import type { DeviceCodeResponse } from "./get-device-code"
 
 export async function pollAccessToken(
   deviceCode: DeviceCodeResponse,
+  clientId: string = GITHUB_CLIENT_ID,
 ): Promise<string> {
   // Interval is in seconds, we need to multiply by 1000 to get milliseconds
   // I'm also adding another second, just to be safe
@@ -25,7 +26,7 @@ export async function pollAccessToken(
         method: "POST",
         headers: standardHeaders(),
         body: JSON.stringify({
-          client_id: GITHUB_CLIENT_ID,
+          client_id: clientId,
           device_code: deviceCode.device_code,
           grant_type: "urn:ietf:params:oauth:grant-type:device_code",
         }),

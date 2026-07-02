@@ -149,17 +149,19 @@ mock.module("~/lib/codex-mcp-config", () => ({
 
 // Capability-gate predicates. claude.ts imports these from
 // ~/lib/mcp-capabilities to decide which scoped MCP servers to register
-// (workers / decide / browser only when their catalog gate passes). Pin
-// them OFF by default so the enabled-group set is the deterministic
-// `["peers", "search"]` for every test that doesn't override; tests that
-// exercise a group's gate rebind the relevant mock per-case.
+// (workers / decide / browser / first-mate only when their catalog or token
+// gate passes). Pin them OFF by default so the enabled-group set is the
+// deterministic `["peers", "search"]` for every test that doesn't override;
+// tests that exercise a group's gate rebind the relevant mock per-case.
 const workerToolsEnabledMock = mock(() => false)
 const standInToolEnabledMock = mock(() => false)
 const browserToolsEnabledMock = mock(() => false)
+const agentToolsEnabledMock = mock(() => false)
 mock.module("~/lib/mcp-capabilities", () => ({
   workerToolsEnabled: workerToolsEnabledMock,
   standInToolEnabled: standInToolEnabledMock,
   browserToolsEnabled: browserToolsEnabledMock,
+  agentToolsEnabled: agentToolsEnabledMock,
   // handler.ts (pulled in transitively via the static import graph)
   // also imports these; re-export stubs so the module mock doesn't
   // break that import. claude.ts itself only uses the three above.
@@ -351,6 +353,8 @@ beforeEach(() => {
   standInToolEnabledMock.mockReturnValue(false)
   browserToolsEnabledMock.mockReset()
   browserToolsEnabledMock.mockReturnValue(false)
+  agentToolsEnabledMock.mockReset()
+  agentToolsEnabledMock.mockReturnValue(false)
   appendPeerAwarenessToMirroredClaudeMdMock.mockReset()
   appendPeerAwarenessToMirroredClaudeMdMock.mockResolvedValue(undefined)
   prependStyleDirectiveToMirroredClaudeMdMock.mockReset()

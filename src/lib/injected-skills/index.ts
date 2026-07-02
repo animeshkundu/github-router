@@ -1,10 +1,12 @@
 /**
- * Injected-skill registry: the three floor-raising skills the `claude` launcher
- * materializes into the per-launch `CLAUDE_CONFIG_DIR` mirror so the spawned
- * Claude Code session discovers them (`/gh-research`, `/gh-orchestrate`,
- * `/gh-floor-keeper`). See `docs/floor-raising-agent-surface.md`.
+ * Injected-skill registry: the floor-raising / controller skills the `claude`
+ * launcher materializes into the per-launch `CLAUDE_CONFIG_DIR` mirror so the
+ * spawned Claude Code session discovers them (`/gh-research`,
+ * `/gh-orchestrate`, `/gh-floor-keeper`, `/gh-first-mate`). See
+ * `docs/floor-raising-agent-surface.md`.
  */
 
+import { FIRST_MATE_SKILL } from "./first-mate-skill"
 import { FLOOR_KEEPER_SKILL } from "./floor-keeper-skill"
 import { ORCHESTRATE_SKILL } from "./orchestrate-skill"
 import { RESEARCH_SKILL } from "./research-skill"
@@ -24,4 +26,5 @@ export const INJECTED_SKILLS: ReadonlyArray<InjectedSkill> = [
   RESEARCH_SKILL,
   ORCHESTRATE_SKILL,
   FLOOR_KEEPER_SKILL,
+  FIRST_MATE_SKILL,
 ]

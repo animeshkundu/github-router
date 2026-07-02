@@ -32,6 +32,7 @@ import {
   type ResponsesPayload,
 } from "~/services/copilot/create-responses"
 import {
+  agentToolsEnabled,
   artifactToolsEnabled,
   browseAgentEnabled,
   browserCompoundToolsEnabled,
@@ -338,6 +339,7 @@ function toolEntries(scope: McpScope): Array<ToolEntry> {
       if (t.capability === "stand_in") return standInToolEnabled()
       if (t.capability === "browser") return browserToolsEnabled()
       if (t.capability === "fleet") return fleetToolsEnabled()
+      if (t.capability === "agents") return agentToolsEnabled()
       if (t.capability === "artifact") return artifactToolsEnabled()
       // Compound tools require BOTH the browser surface opt-in AND a
       // compressor backend in the catalog. Without browseEnabled the
@@ -960,6 +962,17 @@ async function handleToolsCall(
     nonPersonaTool
     && nonPersonaTool.capability === "fleet"
     && !fleetToolsEnabled()
+  ) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+  if (
+    nonPersonaTool
+    && nonPersonaTool.capability === "agents"
+    && !agentToolsEnabled()
   ) {
     return rpcError(
       body.id,

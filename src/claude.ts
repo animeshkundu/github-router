@@ -65,6 +65,7 @@ import {
   pickClaudeDefault,
 } from "./lib/port"
 import {
+  agentToolsEnabled,
   browserToolsEnabled,
   fleetToolsEnabled,
   standInToolEnabled,
@@ -444,6 +445,7 @@ export const claude = defineCommand({
         if (standInToolEnabled()) enabledGroups.push("decide")
         if (browserToolsEnabled()) enabledGroups.push("browser")
         if (fleetToolsEnabled()) enabledGroups.push("fleet")
+        if (agentToolsEnabled()) enabledGroups.push("first-mate")
         const { keys: groupKeys, skipped: skippedGroups } =
           await resolveGroupKeysFromMirror(enabledGroups)
 
@@ -535,15 +537,19 @@ export const claude = defineCommand({
         // enabled in such a session anyway). Decoupling the Stop-gate + moving
         // the per-prompt reset out is a clean follow-up.
         // When the worker/orchestrate backend is available, materialize the
-        // gh-research / gh-orchestrate / gh-floor-keeper skills into the mirror
-        // and register the front-end UserPromptSubmit hook (per-prompt Stop-gate
-        // budget reset + advisory goal steer). The hooks scope themselves to the
-        // top-level session via the payload's agent_type, so subagents/teammates
-        // are untouched.
+        // injected skills into the mirror and register the front-end
+        // UserPromptSubmit hook (per-prompt Stop-gate budget reset + advisory
+        // goal steer). gh-first-mate is additionally gated on the first-mate MCP
+        // server so the slash command does not advertise an unavailable tool.
+        // The hooks scope themselves to the top-level session via the payload's
+        // agent_type, so subagents/teammates are untouched.
         const sessionCwd = process.cwd()
         if (workerToolsEnabled()) {
+          const skillsToWrite = INJECTED_SKILLS.filter(
+            (s) => s.name !== "gh-first-mate" || agentToolsEnabled(),
+          )
           let skillsWritten = 0
-          for (const s of INJECTED_SKILLS) {
+          for (const s of skillsToWrite) {
             const r = await writeInjectedSkill(s.name, s.md).catch(() => ({ written: false }))
             if (r.written) skillsWritten++
           }
@@ -559,9 +565,9 @@ export const claude = defineCommand({
             consola.warn(`Could not register the UserPromptSubmit hook: ${String(err)}`)
           }
           if (skillsWritten > 0) {
+            const skillNames = skillsToWrite.map((s) => `/${s.name}`).join(", ")
             process.stderr.write(
-              `Floor-raising skills injected (${skillsWritten}/${INJECTED_SKILLS.length}): `
-                + "/gh-research, /gh-orchestrate, /gh-floor-keeper.\n",
+              `Injected skills (${skillsWritten}/${skillsToWrite.length}): ${skillNames}.\n`,
             )
           }
         }
@@ -818,6 +824,7 @@ export const claude = defineCommand({
           standInAvailable: standInToolEnabled(),
           browseAvailable: state.browseEnabled,
           powerBrowseAvailable: state.powerBrowseEnabled,
+          agentToolsAvailable: agentToolsEnabled(),
           groupKeys,
         })
         extraArgs.push("--append-system-prompt", peerSnippet)

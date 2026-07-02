@@ -16,6 +16,29 @@ export const PATHS = {
   get GITHUB_TOKEN_PATH() {
     return path.join(appDir(), "github_token")
   },
+  /**
+   * Second, WRITE-capable GitHub token for the first-mate
+   * agent-orchestration surface (`--agents`), stored apart from
+   * `github_token` (the Copilot App token). Minted by
+   * `setupGitHubAgentToken()` via a device-flow login against the GitHub
+   * CLI OAuth client. Mode 0o600.
+   */
+  get GITHUB_AGENT_TOKEN_PATH() {
+    return path.join(appDir(), "github_agent_token")
+  },
+  /**
+   * Root of the durable first-mate fleet registry (`--agents`): the
+   * global `missions.json` mission index + per-repo `<owner>__<repo>.json`
+   * unit ledgers + the decisions/approvals ledger. Cross-launch and
+   * OUTSIDE the per-launch CLAUDE_CONFIG_DIR mirror (which is swept each
+   * launch) — the first mate must survive proxy restarts / context
+   * clears. Modeled on the worker-agent lifecycle ledger.
+   */
+  get FIRST_MATE_DIR() {
+    return (
+      process.env.GH_ROUTER_FIRST_MATE_DIR ?? path.join(appDir(), "first-mate")
+    )
+  },
   get ERROR_LOG_PATH() {
     return path.join(appDir(), "error.log")
   },
@@ -170,6 +193,12 @@ export async function ensurePaths(): Promise<void> {
   // explicitly tighten in case the dir was created by an older version.
   await chmodIfPossible(PATHS.CLAUDE_RUNTIME_DIR, 0o700)
   await ensureFile(PATHS.GITHUB_TOKEN_PATH)
+  // Second (write-capable) GitHub token file for `--agents`. Always
+  // ensured so the path exists; only populated by a device-flow login
+  // when the agent surface is opted in. Tightened to 0o600 (it holds a
+  // repo/workflow-scoped credential).
+  await ensureFile(PATHS.GITHUB_AGENT_TOKEN_PATH)
+  await chmodIfPossible(PATHS.GITHUB_AGENT_TOKEN_PATH, 0o600)
   await sweepStaleRuntimeFiles().catch((err) => {
     consola.debug("Runtime sweep skipped:", err)
   })

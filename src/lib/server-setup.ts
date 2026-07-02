@@ -5,7 +5,7 @@ import { PATHS, ensurePaths } from "./paths"
 import { generateRandomPort } from "./port"
 import { initProxyFromEnv } from "./proxy"
 import { state } from "./state"
-import { setupCopilotToken, setupGitHubToken } from "./token"
+import { setupCopilotToken, setupGitHubAgentToken, setupGitHubToken } from "./token"
 import { toolbeltEnabled } from "./toolbelt"
 import { toolbeltPathOverride } from "./toolbelt/path-inject"
 import { cacheModels, cacheCopilotVersion, cacheVSCodeVersion } from "./utils"
@@ -26,6 +26,7 @@ export interface ServerSetupOptions {
   extendedBetas: boolean
   browseEnabled: boolean
   fleetEnabled: boolean
+  agentsEnabled: boolean
   powerBrowseEnabled: boolean
   humanlikeEnabled: boolean
   silent: boolean
@@ -61,6 +62,13 @@ export async function setupAndServe(
     options.browseEnabled || process.env.GH_ROUTER_ENABLE_BROWSE === "1"
   state.fleetEnabled =
     options.fleetEnabled || process.env.GH_ROUTER_ENABLE_FLEET === "1"
+  // --agents + GH_ROUTER_ENABLE_AGENTS=1 enable the first-mate
+  // cloud-agent orchestration surface (the write-token GitHub layer +
+  // the `mcp__first-mate__*` tools). The tools additionally require the
+  // write token to be present (see `agentToolsEnabled()`), so the flag
+  // alone doesn't expose an unauthenticated surface.
+  state.agentsEnabled =
+    options.agentsEnabled || process.env.GH_ROUTER_ENABLE_AGENTS === "1"
   // --power-browse implies --browse: power mode exposes the FULL
   // browser tool surface (read_page, mouse, drag, scroll, keyboard,
   // type, eval_js, diagnostics, find, locate) on top of the lead
@@ -92,6 +100,15 @@ export async function setupAndServe(
     consola.info("Using provided GitHub token")
   } else {
     await setupGitHubToken()
+  }
+
+  // First-mate agent orchestration needs a second, write-capable GitHub
+  // token (repo/workflow/read:org via the GitHub CLI OAuth client). Only
+  // when opted in via --agents / GH_ROUTER_ENABLE_AGENTS. A failure here
+  // is fatal to the opted-in surface (the tools won't work without it)
+  // but must not break plain proxy operation — so it's gated on the flag.
+  if (state.agentsEnabled) {
+    await setupGitHubAgentToken()
   }
 
   await setupCopilotToken()
@@ -222,6 +239,12 @@ export const sharedServerArgs = {
     description:
       "Enable the fleet session-control MCP tools (mcp__fleet__*) on /mcp for driving sessions across remote ai-or-die instances over their tunnels. Off by default; also enabled with GH_ROUTER_ENABLE_FLEET=1.",
   },
+  agents: {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Enable the first-mate cloud-agent orchestration surface (mcp__first-mate__*): a durable controller that drives GitHub cloud coding agents (Copilot/Anthropic/OpenAI) across research/plan/implement/test/merge. Triggers a second GitHub device-login for a write-capable token (repo, workflow, read:org). Off by default; also enabled with GH_ROUTER_ENABLE_AGENTS=1.",
+  },
   "power-browse": {
     type: "boolean" as const,
     default: false,
@@ -258,6 +281,7 @@ export function parseSharedArgs(args: Record<string, unknown>): {
   extendedBetas: boolean
   browseEnabled: boolean
   fleetEnabled: boolean
+  agentsEnabled: boolean
   powerBrowseEnabled: boolean
   humanlikeEnabled: boolean
 } {
@@ -307,6 +331,7 @@ export function parseSharedArgs(args: Record<string, unknown>): {
     extendedBetas: args["extended-betas"] as boolean,
     browseEnabled: args.browse as boolean,
     fleetEnabled: args.fleet as boolean,
+    agentsEnabled: args.agents as boolean,
     powerBrowseEnabled: args["power-browse"] as boolean,
     humanlikeEnabled: args.humanlike as boolean,
   }

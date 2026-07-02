@@ -11,8 +11,8 @@ function frontmatterFor(md: string): string {
 }
 
 describe("INJECTED_SKILLS", () => {
-  test("contains the three injected skills with non-empty names and markdown", () => {
-    expect(INJECTED_SKILLS.length).toBe(3)
+  test("contains the injected skills with non-empty names and markdown", () => {
+    expect(INJECTED_SKILLS.length).toBe(4)
     for (const skill of INJECTED_SKILLS) {
       expect(skill.name.length).toBeGreaterThan(0)
       expect(skill.md.length).toBeGreaterThan(0)

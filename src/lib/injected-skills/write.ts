@@ -31,8 +31,8 @@ const ERROR_CODE = "INJECTED_SKILL_WRITE"
 /**
  * Strict skill-name allowlist. Lowercase kebab so the folder name is a safe path
  * segment AND a valid Claude Code skill `name` (loader asserts folder == name).
- * All our injected skills (`gh-research`, `gh-orchestrate`, `gh-floor-keeper`)
- * pass.
+ * All our injected skills (`gh-research`, `gh-orchestrate`, `gh-floor-keeper`,
+ * `gh-first-mate`) pass.
  */
 const VALID_SKILL_NAME = /^[a-z][a-z0-9-]*$/
 
