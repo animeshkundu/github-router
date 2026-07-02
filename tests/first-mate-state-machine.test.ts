@@ -110,6 +110,16 @@ test("no check runs yet but CI is configured (noCi false) waits instead of skipp
   expect(nextAction(c, row({ pr: 7 }), DEFAULT_POLICY).kind).toBe("noop")
 })
 
+test("verifier review landed → floor_pending → emit judge_review to the lead", () => {
+  const o = obs({ prs: [openPr()], ci: { rollup: "none", noCi: true }, verifierReviewed: true })
+  const c = classify(o, row({ pr: 7, verifierAssigned: true }))
+  expect(c.validation).toBe("floor_pending")
+  expect(nextAction(c, row({ pr: 7, verifierAssigned: true }), DEFAULT_POLICY)).toEqual({
+    kind: "ask_model",
+    request: "judge_review",
+  })
+})
+
 test("floor_passed → escalate for human merge approval (never auto-merges)", () => {
   const o = obs({ prs: [openPr()], ci: { rollup: "passing" }, floor: "passed" })
   const c = classify(o, row({ pr: 7 }))

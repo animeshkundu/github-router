@@ -84,6 +84,12 @@ function classifyValidation(observed: Observed, artifact: Artifact, row: UnitRow
   if (observed.floor === "failed") return "floor_failed"
   if (observed.floor === "passed") return "floor_passed"
   if (observed.floor === "pending") return "floor_pending"
+  // A verifier was assigned and its review has landed → time to judge it.
+  // (Reached only after assign_verifier set verifierAssigned; before the review
+  // lands the unit sits in its CI state and waits.)
+  if (row.verifierAssigned === true && observed.verifierReviewed === true) {
+    return "floor_pending"
+  }
   // Then an explicit human/reviewer changes-requested.
   if (observed.reviewDecision === "CHANGES_REQUESTED") return "changes_requested"
   // Then CI.
@@ -199,8 +205,11 @@ export function nextAction(
       // live-valid approval record exists; absent that, surface the packet.
       return { kind: "escalate_human", reason: "ready to merge — approval required" }
     case "ci_running":
-    case "floor_pending":
       return { kind: "noop" }
+    case "floor_pending":
+      // The verifier's review has landed → have the lead judge it (a different
+      // lab than the copilot producer). Until answered, re-emit each wake.
+      return { kind: "ask_model", request: "judge_review" }
     default:
       break
   }

@@ -216,6 +216,7 @@ function harness(
     ),
     postComment: mock(async () => ({ url: "https://gh/c/1" })),
     submitReview: mock(async () => ({ reviewId: 1, state: "CHANGES_REQUESTED" })),
+    requestReview: mock(async () => ({ requested: true as const })),
     rerunChecks: mock(async () => ({ rerun: true as const })),
     mergePullRequest: mock(async () => ({ merged: true as const, sha: "merge-sha" })),
     markReadyForReview: mock(async () => ({ ready: true as const })),
@@ -492,6 +493,32 @@ test("ci_failed asks the model under retry cap and escalates to human at cap", a
   expect(resultAtCap.needsHuman).toHaveLength(1)
   expect(resultAtCap.needsHuman[0]?.packetHtmlPath).toBe("/tmp/first-mate/packet-1.html")
   expect(atCap.blockingDecisionId).toBe("decision-1")
+})
+
+test("a no_ci unit with no verifier requests a Copilot code review (assign_verifier)", async () => {
+  const row = unit({
+    issue: null,
+    pr: 5,
+    provider: "completed",
+    phase: "review",
+    dispatchMode: "build",
+    verifierAssigned: false,
+    branch: "copilot/feat",
+  })
+  const h = harness([row])
+  h.observations.set("task-1", {
+    provider: "completed",
+    prs: [{ number: 5, headSha: "h5", isDraft: false, state: "OPEN" }],
+    ci: { rollup: "none", noCi: true },
+  })
+
+  await advance({}, h.deps)
+
+  expect(h.deps.requestReview).toHaveBeenCalledTimes(1)
+  const call = (h.deps.requestReview as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]!
+  expect(call[1]).toBe(5)
+  expect(String(call[2])).toContain("copilot-pull-request-reviewer[bot]")
+  expect(row.verifierAssigned).toBe(true)
 })
 
 test("floor_passed with valid approval merges and marks the unit terminal", async () => {

@@ -346,6 +346,73 @@ export async function findAgentPRs(
     }))
 }
 
+// GitHub Copilot code review is requested via the standard review-request
+// endpoint with this exact bot login (verified empirically: the bare "Copilot"
+// / "copilot-swe-agent" forms 201 but silently no-op; only the [bot] form
+// registers and produces a review). Copilot always posts a COMMENTED review
+// (never approve/request-changes), so the findings — not the state — are the
+// signal the verifier judges. See docs/first-mate-design.md.
+export const COPILOT_REVIEWER_LOGIN = "copilot-pull-request-reviewer[bot]"
+
+/**
+ * Request a code review from `reviewerLogin` on a PR. Best-effort: a 422
+ * (already requested / not a collaborator) or any other error is swallowed and
+ * reported as `requested:false` — a failed review request must not abort the
+ * controller sweep.
+ */
+export async function requestReview(
+  repo: RepoRef,
+  pr: number,
+  reviewerLogin: string,
+): Promise<{ requested: boolean }> {
+  try {
+    await ghRest<unknown>(
+      "POST",
+      `${repoPath(repo)}/pulls/${segment(pr)}/requested_reviewers`,
+      { body: { reviewers: [reviewerLogin] } },
+    )
+    return { requested: true }
+  } catch (err) {
+    consola.debug(`first-mate: requestReview(${reviewerLogin}) on PR #${pr} skipped:`, err)
+    return { requested: false }
+  }
+}
+
+interface ReviewRestResponse {
+  user?: { login?: string | null } | null
+  state?: string | null
+  body?: string | null
+  submitted_at?: string | null
+}
+
+export interface ReviewSummary {
+  author: string
+  /** COMMENTED | APPROVED | CHANGES_REQUESTED | ... */
+  state: string
+  bodyExcerpt: string
+  submittedAt?: string
+}
+
+const REVIEW_BODY_LIMIT = 4000
+
+/** Compact review summaries for a PR (author + state + hard-truncated body). */
+export async function getPullRequestReviews(
+  repo: RepoRef,
+  pr: number,
+): Promise<ReviewSummary[]> {
+  const reviews = await ghRest<ReviewRestResponse[]>(
+    "GET",
+    `${repoPath(repo)}/pulls/${segment(pr)}/reviews?per_page=50`,
+  )
+  return (reviews ?? []).map((review) => ({
+    author: review.user?.login ?? "",
+    state: review.state ?? "",
+    bodyExcerpt: (review.body ?? "").slice(0, REVIEW_BODY_LIMIT),
+    ...(review.submitted_at ? { submittedAt: review.submitted_at } : {}),
+  }))
+}
+
+
 interface PullRequestGraphQLData {
   repository?: {
     pullRequest?: {

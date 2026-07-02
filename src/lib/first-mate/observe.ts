@@ -1,7 +1,9 @@
 import consola from "consola"
 
 import {
+  COPILOT_REVIEWER_LOGIN,
   findAgentPRs,
+  getPullRequestReviews,
   getPullRequestState,
   getRequiredChecksForSha,
   repoHasWorkflows,
@@ -158,6 +160,26 @@ async function getCiSafe(
   }
 }
 
+async function verifierReviewSafe(
+  repo: AgentRepoRef,
+  unit: UnitRow,
+  pr: number | null,
+): Promise<{ reviewed: boolean; findings?: string }> {
+  if (!unit.verifierAssigned || pr === null) return { reviewed: false }
+  try {
+    const reviews = await getPullRequestReviews(repo, pr)
+    // The Copilot code-review bot posts a COMMENTED review; its body is what the
+    // lead judges. Take the latest review from that author.
+    const copilotReviews = reviews.filter((r) => r.author === COPILOT_REVIEWER_LOGIN)
+    const latest = copilotReviews[copilotReviews.length - 1]
+    if (latest === undefined) return { reviewed: false }
+    return { reviewed: true, findings: latest.bodyExcerpt }
+  } catch (err) {
+    consola.debug("first-mate observe: review read skipped:", err)
+    return { reviewed: false }
+  }
+}
+
 function observedPrs(
   summaries: AgentPRSummary[],
   primaryState: PullRequestState | null,
@@ -225,6 +247,10 @@ export async function observeUnit(unit: UnitRow): Promise<Observed> {
   const logExcerpt = task?.logExcerpt && task.logExcerpt.length > 0 ? task.logExcerpt : undefined
   const question = provider === "waiting_for_user" ? logExcerpt : undefined
 
+  // Once a verifier (Copilot code review) has been assigned, check whether its
+  // review has landed; its findings become the judge_review evidence.
+  const review = await verifierReviewSafe(repo, unit, primaryNumber)
+
   return {
     provider,
     prs: observedPrs(prSummaries, primaryState),
@@ -233,5 +259,7 @@ export async function observeUnit(unit: UnitRow): Promise<Observed> {
     ...(mutation ? { externalMutation: mutation } : {}),
     ...(logExcerpt ? { logExcerpt } : {}),
     ...(question ? { question } : {}),
+    ...(review.reviewed ? { verifierReviewed: true } : {}),
+    ...(review.findings ? { reviewExcerpt: review.findings } : {}),
   }
 }

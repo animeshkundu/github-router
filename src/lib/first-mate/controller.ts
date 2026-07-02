@@ -6,11 +6,13 @@ import consola from "consola"
 
 import {
   assignAgent as realAssignAgent,
+  COPILOT_REVIEWER_LOGIN,
   createIssue as realCreateIssue,
   findAgentPRs as realFindAgentPRs,
   getPullRequestState as realGetPullRequestState,
   markReadyForReview as realMarkReadyForReview,
   mergePullRequest as realMergePullRequest,
+  requestReview as realRequestReview,
   rerunChecks as realRerunChecks,
   resolveAgentActor as realResolveAgentActor,
   resolveAgentRoster as realResolveAgentRoster,
@@ -93,6 +95,7 @@ export interface ControllerDeps {
   getPullRequestState: typeof realGetPullRequestState
   postComment: typeof realPostComment
   submitReview: typeof realSubmitReview
+  requestReview: typeof realRequestReview
   rerunChecks: typeof realRerunChecks
   mergePullRequest: typeof realMergePullRequest
   markReadyForReview: typeof realMarkReadyForReview
@@ -199,7 +202,6 @@ const PROVIDER_STATES = new Set<ProviderState>([
   "cancelled",
 ])
 
-const AGENT_ORDER: AgentKey[] = ["copilot", "anthropic", "openai"]
 const DEFAULT_MAX_IN_FLIGHT_PER_PROVIDER = 6
 const DEFAULT_TOP_K = 6
 
@@ -229,6 +231,7 @@ export const defaultDeps: ControllerDeps = {
   getPullRequestState: realGetPullRequestState,
   postComment: realPostComment,
   submitReview: realSubmitReview,
+  requestReview: realRequestReview,
   rerunChecks: realRerunChecks,
   mergePullRequest: realMergePullRequest,
   markReadyForReview: realMarkReadyForReview,
@@ -491,6 +494,7 @@ function modelPayload(
   return {
     ...common,
     review_summary: compact(evidence.failureSummary, 1400),
+    plan_excerpt: compact(unit.planExcerpt, 1000),
     ci_rollup: observed.ci?.rollup,
     floor_verdict: observed.floor,
   }
@@ -744,7 +748,18 @@ async function applyModelAnswer(
     // Bind the verdict to the head it was judged against so a later commit
     // invalidates it (classify won't preserve a floor for a different head).
     if (passed) unit.floorSha = unit.headSha ?? null
-    applied.push(`recorded verifier judgment for ${unit.missionId}:${unitHandle(unit)}`)
+    // Post the verdict as a real PR review so the floor decision is visible on
+    // the portal (and an APPROVE counts toward any required-review protection).
+    // Best-effort: a review-post failure must not lose the recorded verdict.
+    if (unit.pr !== null) {
+      const reason = stringValue(verdict.reason) ?? (passed ? "Verified: meets acceptance criteria." : "Changes requested by cross-lab verification.")
+      try {
+        await deps.submitReview(repo, unit.pr, passed ? "APPROVE" : "REQUEST_CHANGES", reason)
+      } catch (err) {
+        consola.debug(`first-mate: posting judge verdict review failed for ${unit.missionId}:${unitHandle(unit)}:`, err)
+      }
+    }
+    applied.push(`recorded verifier judgment (${passed ? "pass" : "fail"}) for ${unit.missionId}:${unitHandle(unit)}`)
   }
 
   await deps.upsertUnit(unit.repo, unit)
@@ -1039,17 +1054,21 @@ async function assignVerifier(
   deps: ControllerDeps,
   applied: string[],
 ): Promise<boolean> {
-  const roster = await deps.resolveAgentRoster(agentRepo(unit.repo))
-  const implementer = unit.implementerLab ?? unit.agent
-  const verifier = AGENT_ORDER.find(
-    (key) => key !== implementer && roster.has(key),
-  )
-  if (verifier === undefined) return false
+  if (unit.pr === null) return false
 
+  // Cross-lab verification that actually happens on the GitHub portal: request
+  // a Copilot code review on the PR. It posts a COMMENTED review whose findings
+  // the lead then judges (judge_review) — the lead / peer critics are a
+  // different lab than the copilot producer, so producer≠checker holds at the
+  // decision. (The other cloud agents cannot be requested as reviewers; only
+  // Copilot code review is served — see docs/first-mate-design.md.)
+  await deps.requestReview(agentRepo(unit.repo), unit.pr, COPILOT_REVIEWER_LOGIN)
   unit.verifierAssigned = true
   unit.validation = "floor_pending"
-  applied.push(`assigned ${verifier} verifier for ${unit.missionId}:${unitHandle(unit)}`)
-  // TODO wire verifier dispatch / peer-review task. v1 records the intent so it does not loop.
+  unit.lastSteer = { atMs: Date.now() }
+  applied.push(
+    `requested Copilot code review for ${unit.missionId}:${unitHandle(unit)} PR #${unit.pr}`,
+  )
   return true
 }
 

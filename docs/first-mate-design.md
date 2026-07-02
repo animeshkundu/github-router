@@ -247,16 +247,24 @@ pure state machine never calls an LLM.
 
 ## Cross-model verification, not bake-off
 
-The shipped invariant is producer≠checker. A unit records `implementerLab`; after
-CI passes or review is pending, `assignVerifier()` chooses the first available
-agent in `copilot → anthropic → openai` order whose lab differs from the producer,
-then marks `verifierAssigned` and `floor_pending`. The controller is not doing a
-parallel bake-off or champion selection; it is one producer plus a different-lab
-checker, with executable checks and human approval deciding release.
-
-v1 caveat: verifier dispatch is intentionally stubbed today. `assignVerifier()`
-records the intent and avoids a loop, but the controller still has `TODO wire
-verifier dispatch / peer-review task`.
+The shipped invariant is producer≠checker, and it happens **on the GitHub portal**.
+When a unit's PR reaches `ci_passed`/`no_ci`, `assignVerifier()` requests a
+**Copilot code review** via the review-request API using the exact bot login
+`copilot-pull-request-reviewer[bot]` (verified empirically: the bare `Copilot`
+and `copilot-swe-agent` forms 201 but silently no-op; the other cloud agents
+cannot be requested as reviewers at all — only Copilot code review is served).
+Copilot posts a `COMMENTED` review (never approve/request-changes) whose findings
+are the signal. `observe` reads it (`getPullRequestReviews`, matched by author),
+surfaces `verifierReviewed` + `reviewExcerpt`; the state machine then routes to
+`floor_pending` and emits `judge_review` carrying the findings + plan + AC. The
+**lead** judges — a different lab (claude/anthropic + the peer critics) than the
+copilot producer, so producer≠checker holds at the decision — and the verdict is
+also posted back as a real PR review (`APPROVE`/`REQUEST_CHANGES`), making the
+floor decision a portal artifact that can satisfy required-review protection.
+`floor_passed` (bound to `floorSha`) → merge packet → human approval → the gate.
+The controller is not doing a parallel bake-off; it is one producer plus a
+different-lab checker, with the review on the portal and human approval deciding
+release.
 
 ## Decision packets and merge approval gate
 

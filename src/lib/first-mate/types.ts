@@ -146,6 +146,10 @@ export interface Observed {
   question?: string
   /** For waiting_for_user: is the agent's question answerable from the AC? */
   agentQuestionAnswerableFromAC?: boolean | null
+  /** A different-lab verifier (Copilot code review) has posted its review. */
+  verifierReviewed?: boolean
+  /** The verifier's review findings, fed to judge_review as the review summary. */
+  reviewExcerpt?: string
   /** Did the last steer visibly land (log cursor / head sha advanced)? */
   steerAcknowledged?: boolean | null
   /** An out-of-band change to the unit's PR the controller didn't make. */

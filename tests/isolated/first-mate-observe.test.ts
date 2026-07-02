@@ -5,6 +5,7 @@ import type { RepoRef, UnitRow } from "~/lib/first-mate/types"
 // Controllable stubs for the agent service/task layer observe.ts calls.
 let taskResult: { state: string; branch?: string; prUrl?: string; pr?: number | null; logExcerpt: string } | null
 let agentPRs: Array<{ number: number; headSha: string; headRef: string; isDraft: boolean }>
+let reviewsFixture: Array<{ author: string; state: string; bodyExcerpt: string }>
 const prStateCalls: number[] = []
 
 mock.module("~/lib/agent/tasks", () => ({
@@ -15,6 +16,7 @@ mock.module("~/lib/agent/tasks", () => ({
 }))
 
 mock.module("~/lib/agent/service", () => ({
+  COPILOT_REVIEWER_LOGIN: "copilot-pull-request-reviewer[bot]",
   findAgentPRs: mock(async () => agentPRs),
   getPullRequestState: mock(async (_repo: RepoRef, pr: number) => {
     prStateCalls.push(pr)
@@ -36,6 +38,8 @@ mock.module("~/lib/agent/service", () => ({
     failing: [],
     runningCount: 0,
   })),
+  repoHasWorkflows: mock(async () => false),
+  getPullRequestReviews: mock(async () => reviewsFixture),
 }))
 
 const { observeUnit } = await import("~/lib/first-mate/observe")
@@ -66,6 +70,7 @@ function unit(overrides: Partial<UnitRow> = {}): UnitRow {
 beforeEach(() => {
   taskResult = { state: "completed", logExcerpt: "" }
   agentPRs = []
+  reviewsFixture = []
   prStateCalls.length = 0
 })
 
@@ -106,4 +111,27 @@ test("falls back to the first author-matched PR only when the branch is unknown"
   await observeUnit(unit())
 
   expect(prStateCalls).toEqual([7])
+})
+
+test("surfaces the Copilot verifier review (verifierReviewed + findings) once it lands", async () => {
+  taskResult = { state: "completed", branch: "copilot/feat-a", logExcerpt: "" }
+  agentPRs = [{ number: 5, headSha: "h5", headRef: "copilot/feat-a", isDraft: false }]
+  reviewsFixture = [
+    { author: "someone-else", state: "COMMENTED", bodyExcerpt: "ignore me" },
+    { author: "copilot-pull-request-reviewer[bot]", state: "COMMENTED", bodyExcerpt: "PR overview: LGTM with 2 nits" },
+  ]
+
+  const observed = await observeUnit(unit({ verifierAssigned: true }))
+
+  expect(observed.verifierReviewed).toBe(true)
+  expect(observed.reviewExcerpt).toContain("LGTM with 2 nits")
+})
+
+test("no verifier review surfaced before one is assigned", async () => {
+  taskResult = { state: "completed", branch: "copilot/feat-a", logExcerpt: "" }
+  agentPRs = [{ number: 5, headSha: "h5", headRef: "copilot/feat-a", isDraft: false }]
+  reviewsFixture = [{ author: "copilot-pull-request-reviewer[bot]", state: "COMMENTED", bodyExcerpt: "x" }]
+
+  const observed = await observeUnit(unit({ verifierAssigned: false }))
+  expect(observed.verifierReviewed).toBeUndefined()
 })
