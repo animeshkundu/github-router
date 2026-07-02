@@ -164,13 +164,20 @@ async function verifierReviewSafe(
   repo: AgentRepoRef,
   unit: UnitRow,
   pr: number | null,
+  headSha: string | undefined,
 ): Promise<{ reviewed: boolean; findings?: string }> {
   if (!unit.verifierAssigned || pr === null) return { reviewed: false }
   try {
     const reviews = await getPullRequestReviews(repo, pr)
     // The Copilot code-review bot posts a COMMENTED review; its body is what the
-    // lead judges. Take the latest review from that author.
-    const copilotReviews = reviews.filter((r) => r.author === COPILOT_REVIEWER_LOGIN)
+    // lead judges. Only count a review made against the CURRENT head — a review
+    // from an earlier commit is stale (the agent has pushed a fix since) and
+    // must not be used to judge the new code.
+    const copilotReviews = reviews.filter(
+      (r) =>
+        r.author === COPILOT_REVIEWER_LOGIN &&
+        (headSha === undefined || r.commitId === undefined || r.commitId === headSha),
+    )
     const latest = copilotReviews[copilotReviews.length - 1]
     if (latest === undefined) return { reviewed: false }
     return { reviewed: true, findings: latest.bodyExcerpt }
@@ -248,8 +255,9 @@ export async function observeUnit(unit: UnitRow): Promise<Observed> {
   const question = provider === "waiting_for_user" ? logExcerpt : undefined
 
   // Once a verifier (Copilot code review) has been assigned, check whether its
-  // review has landed; its findings become the judge_review evidence.
-  const review = await verifierReviewSafe(repo, unit, primaryNumber)
+  // review for the CURRENT head has landed; its findings become the judge_review
+  // evidence.
+  const review = await verifierReviewSafe(repo, unit, primaryNumber, primaryState?.headSha)
 
   return {
     provider,

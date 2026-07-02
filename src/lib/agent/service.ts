@@ -383,6 +383,7 @@ interface ReviewRestResponse {
   state?: string | null
   body?: string | null
   submitted_at?: string | null
+  commit_id?: string | null
 }
 
 export interface ReviewSummary {
@@ -391,6 +392,8 @@ export interface ReviewSummary {
   state: string
   bodyExcerpt: string
   submittedAt?: string
+  /** The commit the review was made against — used to reject stale reviews. */
+  commitId?: string
 }
 
 const REVIEW_BODY_LIMIT = 4000
@@ -409,6 +412,7 @@ export async function getPullRequestReviews(
     state: review.state ?? "",
     bodyExcerpt: (review.body ?? "").slice(0, REVIEW_BODY_LIMIT),
     ...(review.submitted_at ? { submittedAt: review.submitted_at } : {}),
+    ...(review.commit_id ? { commitId: review.commit_id } : {}),
   }))
 }
 

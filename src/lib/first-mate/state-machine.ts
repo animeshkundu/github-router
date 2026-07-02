@@ -190,7 +190,16 @@ export function nextAction(
     case "no_ci":
       // Green (or no CI to gate on) → independent, different-lab verification
       // before merge. The cross-lab review is the real gate; CI is a bonus.
-      if (!row.verifierAssigned) return { kind: "assign_verifier" }
+      // Re-request when the head has moved past the reviewed SHA (the agent
+      // pushed a fix) so a stale review never judges new commits.
+      if (
+        !row.verifierAssigned ||
+        (row.verifierSha != null &&
+          row.headSha != null &&
+          row.verifierSha !== row.headSha)
+      ) {
+        return { kind: "assign_verifier" }
+      }
       return { kind: "noop" } // awaiting the verifier's floor verdict
     case "review_pending":
       if (!row.verifierAssigned) return { kind: "assign_verifier" }

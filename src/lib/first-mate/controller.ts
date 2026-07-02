@@ -1066,6 +1066,7 @@ async function assignVerifier(
   // Copilot code review is served — see docs/first-mate-design.md.)
   await deps.requestReview(agentRepo(unit.repo), unit.pr, COPILOT_REVIEWER_LOGIN)
   unit.verifierAssigned = true
+  unit.verifierSha = unit.headSha ?? undefined
   unit.validation = "floor_pending"
   unit.lastSteer = { atMs: Date.now() }
   applied.push(

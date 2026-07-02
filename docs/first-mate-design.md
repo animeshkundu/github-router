@@ -264,7 +264,10 @@ floor decision a portal artifact that can satisfy required-review protection.
 `floor_passed` (bound to `floorSha`) → merge packet → human approval → the gate.
 The controller is not doing a parallel bake-off; it is one producer plus a
 different-lab checker, with the review on the portal and human approval deciding
-release.
+release. The verifier review is **head-bound**: `observe` only counts a Copilot
+review whose `commit_id` equals the PR's current head, and when the head moves
+past `verifierSha` (the agent pushed a fix) the controller re-requests a fresh
+review — so a stale review never judges new commits.
 
 ## Decision packets and merge approval gate
 

@@ -130,6 +130,16 @@ test("a bound floor_failed verdict is preserved (→ author_fix), not reverted t
   expect(nextAction(c, r, DEFAULT_POLICY).kind).toBe("ask_model") // author_fix under the cap
 })
 
+test("verifier is re-requested when the head moved past the reviewed sha (no stale review)", () => {
+  const o = obs({ prs: [openPr("new-head")], ci: { rollup: "none", noCi: true } })
+  // verifier was assigned against an OLD head; the agent has since pushed new-head.
+  const moved = row({ pr: 7, verifierAssigned: true, verifierSha: "old-head", headSha: "new-head" })
+  expect(nextAction(classify(o, moved), moved, DEFAULT_POLICY).kind).toBe("assign_verifier")
+  // same head → keep waiting, do not re-request.
+  const same = row({ pr: 7, verifierAssigned: true, verifierSha: "new-head", headSha: "new-head" })
+  expect(nextAction(classify(o, same), same, DEFAULT_POLICY).kind).toBe("noop")
+})
+
 test("floor_passed → escalate for human merge approval (never auto-merges)", () => {
   const o = obs({ prs: [openPr()], ci: { rollup: "passing" }, floor: "passed" })
   const c = classify(o, row({ pr: 7 }))

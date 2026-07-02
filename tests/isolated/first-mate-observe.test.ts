@@ -5,7 +5,7 @@ import type { RepoRef, UnitRow } from "~/lib/first-mate/types"
 // Controllable stubs for the agent service/task layer observe.ts calls.
 let taskResult: { state: string; branch?: string; prUrl?: string; pr?: number | null; logExcerpt: string } | null
 let agentPRs: Array<{ number: number; headSha: string; headRef: string; isDraft: boolean }>
-let reviewsFixture: Array<{ author: string; state: string; bodyExcerpt: string }>
+let reviewsFixture: Array<{ author: string; state: string; bodyExcerpt: string; commitId?: string }>
 const prStateCalls: number[] = []
 
 mock.module("~/lib/agent/tasks", () => ({
@@ -134,4 +134,28 @@ test("no verifier review surfaced before one is assigned", async () => {
 
   const observed = await observeUnit(unit({ verifierAssigned: false }))
   expect(observed.verifierReviewed).toBeUndefined()
+})
+
+test("ignores a STALE verifier review whose commit predates the current head", async () => {
+  taskResult = { state: "completed", branch: "copilot/feat-a", logExcerpt: "" }
+  agentPRs = [{ number: 5, headSha: "h5", headRef: "copilot/feat-a", isDraft: false }]
+  // getPullRequestState mock returns headSha `head-5`; this review is for an older commit.
+  reviewsFixture = [
+    { author: "copilot-pull-request-reviewer[bot]", state: "COMMENTED", bodyExcerpt: "old review", commitId: "old-sha" },
+  ]
+
+  const observed = await observeUnit(unit({ verifierAssigned: true }))
+  expect(observed.verifierReviewed).toBeUndefined()
+})
+
+test("counts a verifier review whose commit matches the current head", async () => {
+  taskResult = { state: "completed", branch: "copilot/feat-a", logExcerpt: "" }
+  agentPRs = [{ number: 5, headSha: "h5", headRef: "copilot/feat-a", isDraft: false }]
+  reviewsFixture = [
+    { author: "copilot-pull-request-reviewer[bot]", state: "COMMENTED", bodyExcerpt: "fresh review", commitId: "head-5" },
+  ]
+
+  const observed = await observeUnit(unit({ verifierAssigned: true }))
+  expect(observed.verifierReviewed).toBe(true)
+  expect(observed.reviewExcerpt).toContain("fresh review")
 })

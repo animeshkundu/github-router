@@ -88,6 +88,12 @@ export interface UnitRow {
   blockingDecisionId?: string | null
   /** True once an independent (different-lab) verifier has been assigned. */
   verifierAssigned?: boolean
+  /**
+   * The head SHA the current verifier review was requested for. When the head
+   * moves past this (the agent pushed a fix), the controller re-requests a
+   * review so a stale review never judges new commits.
+   */
+  verifierSha?: string
   /** The lab that produced this unit's work (for producer≠checker). */
   implementerLab?: AgentKey
   /**
