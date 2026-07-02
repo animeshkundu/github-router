@@ -76,12 +76,16 @@ function keyFor(row: UnitRow): string {
 }
 
 function sameHandle(a: UnitRow, b: UnitRow): boolean {
+  // Mirror the production ledger's sameUnitHandle: match by stable `id` FIRST.
+  // The dispatch outbox upserts a unit while taskId is still null (intent), so
+  // id-matching is what prevents a duplicate — the harness must model that.
   return (
-    a.repo.owner === b.repo.owner &&
-    a.repo.name === b.repo.name &&
-    a.missionId === b.missionId &&
-    ((b.issue !== null && a.issue === b.issue) ||
-      (b.taskId !== null && a.taskId === b.taskId))
+    (b.id != null && a.id === b.id) ||
+    (a.repo.owner === b.repo.owner &&
+      a.repo.name === b.repo.name &&
+      a.missionId === b.missionId &&
+      ((b.issue !== null && a.issue === b.issue) ||
+        (b.taskId !== null && a.taskId === b.taskId)))
   )
 }
 
@@ -829,4 +833,57 @@ test("advance isolates a throwing model answer instead of aborting the wake", as
   ).toBe(true)
   // The wake still produced a board rather than throwing.
   expect(Array.isArray(result.board)).toBe(true)
+})
+
+test("dispatch goes through the outbox: intent persisted before startTask, idempotency key + correlation tag sent, intent cleared on success", async () => {
+  const row = unit({ provider: "none", taskId: null, phase: "plan", dispatchMode: "plan" })
+  const h = harness([row])
+  const upsertOrder: string[] = []
+  const realUpsert = h.deps.upsertUnit
+  h.deps.upsertUnit = mock(async (repo: RepoRef, u: UnitRow) => {
+    upsertOrder.push(u.dispatch ? "intent" : "cleared")
+    return realUpsert(repo, u)
+  })
+  let captured: { prompt: string; idempotencyKey?: string } | undefined
+  h.deps.startTask = mock(async (_repo: unknown, input: { prompt: string; idempotencyKey?: string }) => {
+    captured = input
+    return { taskId: "task-new", state: "queued" }
+  })
+
+  await advance({}, h.deps)
+
+  expect(captured?.idempotencyKey).toBeTruthy()
+  expect(captured?.prompt).toContain(`fm-dispatch:${captured?.idempotencyKey}`)
+  // The intent was persisted BEFORE the result (outbox ordering).
+  expect(upsertOrder[0]).toBe("intent")
+  expect(row.dispatch).toBeUndefined()
+  expect(row.taskId).toBe("task-new")
+})
+
+test("an interrupted dispatch (intent set, no taskId) escalates to a human and never re-dispatches", async () => {
+  const row = unit({
+    provider: "none",
+    taskId: null,
+    dispatch: { id: "corr-1", requestedMs: 1, attempts: 1 },
+  })
+  const h = harness([row])
+
+  const result = await advance({}, h.deps)
+
+  expect(h.deps.startTask).not.toHaveBeenCalled()
+  expect(result.needsHuman.some((r) => r.reason.includes("dispatch interrupted"))).toBe(true)
+})
+
+test("a startTask response with no taskId leaves the intent pending (no auto-retry into a duplicate)", async () => {
+  const row = unit({ provider: "none", taskId: null, phase: "plan", dispatchMode: "plan" })
+  const h = harness([row])
+  h.deps.startTask = mock(async () => ({ taskId: "", state: "unknown" }))
+
+  await advance({}, h.deps)
+
+  // Ambiguous empty id → intent stays pending (recovery escalates next wake),
+  // and the unit was dispatched exactly once (not blindly retried).
+  expect(row.dispatch).toBeDefined()
+  expect(row.taskId).toBeNull()
+  expect((h.deps.startTask as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(1)
 })

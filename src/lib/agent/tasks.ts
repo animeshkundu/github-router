@@ -137,6 +137,13 @@ export async function startTask(
   const response = await ghRest<Record<string, unknown>>("POST", repoTasksPath(repo), {
     apiVersion: AGENT_TASKS_API_VERSION,
     body,
+    // Task creation is NOT idempotent server-side (unverified for the preview
+    // API), so never auto-retry — a retry after a lost-success would create a
+    // duplicate. Send the correlation id as Idempotency-Key defensively.
+    retry: false,
+    ...(input.idempotencyKey
+      ? { headers: { "Idempotency-Key": input.idempotencyKey } }
+      : {}),
   })
   const taskId = stringField(response, ["task_id", "taskId", "id"]) ?? ""
   const state = stringField(response, ["state", "status"]) ?? "unknown"

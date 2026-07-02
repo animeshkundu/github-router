@@ -164,6 +164,12 @@ export interface StartTaskInput {
   baseRef?: string
   model?: string
   createPullRequest?: boolean
+  /**
+   * Client dispatch-correlation id. Sent as `Idempotency-Key` (defensive) and
+   * embedded in the prompt so a crashed dispatch can be reconciled by exact
+   * match rather than a time-window guess. See docs/research/first-mate-dispatch-durability.md.
+   */
+  idempotencyKey?: string
 }
 
 export interface TaskStartResult {

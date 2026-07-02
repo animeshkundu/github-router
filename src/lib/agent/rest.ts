@@ -13,11 +13,20 @@ export interface GhRestOptions {
   body?: unknown
   signal?: AbortSignal
   apiVersion?: string
+  /** Extra request headers (e.g. Idempotency-Key). */
+  headers?: Record<string, string>
+  /**
+   * Auto-retry transient failures. Default true. Set false for
+   * non-idempotent POSTs (e.g. task creation) where a retry after a
+   * lost-success response would create a duplicate.
+   */
+  retry?: boolean
 }
 
-function restHeaders(apiVersion?: string): Record<string, string> {
+function restHeaders(apiVersion?: string, extra?: Record<string, string>): Record<string, string> {
   const headers = githubAgentHeaders(state)
   if (apiVersion) headers["x-github-api-version"] = apiVersion
+  if (extra) Object.assign(headers, extra)
   return headers
 }
 
@@ -29,13 +38,16 @@ export async function ghRestRaw(
   const url = `${GITHUB_API_BASE_URL}${path}`
   const requestInit: RequestInit = {
     method,
-    headers: restHeaders(opts.apiVersion),
+    headers: restHeaders(opts.apiVersion, opts.headers),
     signal: opts.signal,
   }
 
   if (opts.body !== undefined) requestInit.body = JSON.stringify(opts.body)
 
   try {
+    // A non-idempotent POST (opts.retry === false) is issued exactly once: a
+    // transient-retry after a lost-success response would double-create.
+    if (opts.retry === false) return await fetch(url, requestInit)
     return await fetchWithTransientRetry(
       () => fetch(url, requestInit),
       { label: `github-rest ${method} ${path}`, signal: opts.signal },

@@ -669,11 +669,14 @@ async function applyModelAnswer(
       // Flip to the build phase ONLY on a successful dispatch, so a missing
       // mission or a failed startTask leaves the unit in plan for a clean retry.
       if (mission !== undefined) {
-        const task = await deps.startTask(repo, {
-          prompt: buildPrompt(unit, mission),
-          createPullRequest: true,
-        })
-        if (task.taskId.length > 0) {
+        const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
+          deps.startTask(repo, {
+            prompt: buildPrompt(unit, mission) + promptTag,
+            createPullRequest: true,
+            idempotencyKey,
+          }),
+        )
+        if (task) {
           unit.taskId = task.taskId
           unit.provider = providerState(task.state, "queued")
           unit.phase = "build"
@@ -690,8 +693,10 @@ async function applyModelAnswer(
         stringValue(verdict.instruction) ?? "Refine the plan with more concrete implementation steps."
       if (mission !== undefined) {
         const prompt = `${planPrompt(unit, mission)}\n\nRefine your previous plan per this feedback:\n${instruction}`
-        const task = await deps.startTask(repo, { prompt, createPullRequest: false })
-        if (task.taskId.length > 0) {
+        const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
+          deps.startTask(repo, { prompt: prompt + promptTag, createPullRequest: false, idempotencyKey }),
+        )
+        if (task) {
           unit.taskId = task.taskId
           unit.provider = providerState(task.state, "queued")
           unit.phase = "plan"
@@ -1158,7 +1163,15 @@ async function executeAction(
 }
 
 function isUndispatched(unit: UnitRow): boolean {
-  return unit.provider === "none" && unit.taskId === null
+  // A unit with a pending dispatch-intent is NOT undispatched: a task may have
+  // been created but the taskId not yet persisted (crash window). Re-dispatching
+  // it would duplicate. Recovery, not the dispatch wave, resolves a pending intent.
+  return unit.provider === "none" && unit.taskId === null && unit.dispatch === undefined
+}
+
+/** A dispatch that was interrupted mid-flight (intent persisted, no taskId yet). */
+function isDispatchInterrupted(unit: UnitRow): boolean {
+  return unit.dispatch !== undefined && unit.taskId === null
 }
 
 function isActiveMissionUnit(unit: UnitRow, missions: Map<string, Mission>): boolean {
@@ -1227,6 +1240,34 @@ function buildPrompt(unit: UnitRow, mission: Mission): string {
   return parts.join("\n\n")
 }
 
+/**
+ * Durable dispatch outbox. Persists a dispatch-intent (with a correlation id)
+ * BEFORE the irreversible startTask, so a crash in the startTask→persist window
+ * leaves the unit marked (not `isUndispatched`) and is never blind-re-dispatched.
+ * `start` receives the correlation id to embed in the prompt and send as the
+ * Idempotency-Key. On success the intent is cleared (in memory; the caller's
+ * upsertUnit persists it alongside the taskId). On throw the intent stays
+ * pending on disk (unknown outcome — recovery, not re-dispatch, resolves it).
+ * Returns null when the API returned no taskId — treated as ambiguous, so the
+ * intent is LEFT pending (recovery escalates; never auto-re-dispatch).
+ */
+async function dispatchWithOutbox(
+  unit: UnitRow,
+  deps: ControllerDeps,
+  start: (c: { idempotencyKey: string; promptTag: string }) => Promise<{ taskId: string; state: string }>,
+): Promise<{ taskId: string; state: string } | null> {
+  const id = randomUUID()
+  unit.dispatch = { id, requestedMs: Date.now(), attempts: (unit.dispatch?.attempts ?? 0) + 1 }
+  await deps.upsertUnit(unit.repo, unit) // persist intent BEFORE the side effect (hard stop if this throws)
+  const task = await start({ idempotencyKey: id, promptTag: `\n\n<!-- fm-dispatch:${id} -->` })
+  // Empty taskId on a 2xx is AMBIGUOUS (a task may have been created but the id
+  // not echoed) — leave the intent pending so recovery escalates rather than
+  // auto-re-dispatching into a possible duplicate. Only a real id clears it.
+  if (task.taskId.length === 0) return null
+  unit.dispatch = undefined
+  return task
+}
+
 async function dispatchUnit(
   unit: UnitRow,
   mission: Mission,
@@ -1235,44 +1276,27 @@ async function dispatchUnit(
   const repo = agentRepo(unit.repo)
   const actor = await deps.resolveAgentActor(repo, unit.agent)
 
-  try {
-    // Plan-first: the initial task produces an implementation plan (readable
-    // from its session log via the CAPI client) and stops — no PR yet. On
-    // approval, applyModelAnswer re-dispatches a fresh build task carrying the
-    // plan. We never steer the plan task into building (POST /tasks/{id} → 405,
-    // one-shot); the two-task flow sidesteps that.
-    const task = await deps.startTask(repo, {
-      prompt: planPrompt(unit, mission),
+  // Plan-first: the initial task produces an implementation plan (readable from
+  // its session log via the CAPI client) and stops — no PR yet. On approval,
+  // applyModelAnswer re-dispatches a fresh build task carrying the plan.
+  // Dispatched through the outbox so a crash never blind-re-dispatches.
+  const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
+    deps.startTask(repo, {
+      prompt: planPrompt(unit, mission) + promptTag,
       createPullRequest: false,
-    })
-    if (task.taskId.length === 0) throw new Error("startTask returned no taskId")
-    unit.taskId = task.taskId
-    unit.provider = providerState(task.state, "queued")
-    unit.botLogin = actor.login
-    unit.dispatchMode = "plan"
-    unit.phase = "plan"
-  } catch (err) {
-    // Degraded fallback: issue assignment always implements (there is no plan
-    // phase via assignment), so this path goes straight to build.
-    consola.debug("first-mate startTask failed; falling back to issue assignment:", err)
-    const issue = await deps.createIssue(repo, {
-      title: unit.title,
-      body: buildPrompt(unit, mission),
-    })
-    await deps.assignAgent(repo, {
-      issueNodeId: issue.nodeId,
-      issueNumber: issue.number,
-      botId: actor.botId,
-      botLogin: actor.login,
-    })
-    unit.issue = issue.number
-    unit.taskId = null
-    unit.provider = "queued"
-    unit.botLogin = actor.login
-    unit.dispatchMode = "build"
-    unit.phase = "build"
-  }
-
+      idempotencyKey,
+    }),
+  )
+  // A definitive no-task response clears the intent and leaves the unit
+  // undispatched to retry next wake; a startTask THROW leaves the intent pending
+  // (handled by recovery). We no longer auto-fall-back to issue-assignment on a
+  // throw — that is a second irreversible side effect with an unknown outcome.
+  if (task === null) return
+  unit.taskId = task.taskId
+  unit.provider = providerState(task.state, "queued")
+  unit.botLogin = actor.login
+  unit.dispatchMode = "plan"
+  unit.phase = "plan"
   unit.implementerLab = unit.agent
   unit.lastSteer = { atMs: Date.now() }
 }
@@ -1302,10 +1326,18 @@ async function dispatchWave(
     const mission = missions.get(unit.missionId)
     if (mission === undefined) continue
 
-    await dispatchUnit(unit, mission, deps)
-    counts.set(unit.agent, current + 1)
-    await deps.upsertUnit(unit.repo, unit)
-    applied.push(`dispatched ${unit.missionId}:${unitHandle(unit)} to ${unit.agent}`)
+    // Isolate each dispatch: a startTask throw (unknown outcome) leaves this
+    // unit's intent pending on disk (recovery escalates it next wake) and must
+    // not abort the wave for the other eligible units.
+    try {
+      await dispatchUnit(unit, mission, deps)
+      counts.set(unit.agent, current + 1)
+      await deps.upsertUnit(unit.repo, unit)
+      applied.push(`dispatched ${unit.missionId}:${unitHandle(unit)} to ${unit.agent}`)
+    } catch (err) {
+      consola.warn(`first-mate: dispatch of ${unit.missionId}:${unitHandle(unit)} failed:`, err)
+      applied.push(`error dispatching ${unit.missionId}:${unitHandle(unit)}: ${errText(err)}`)
+    }
   }
 }
 
@@ -1426,6 +1458,26 @@ export async function advance(
     // Isolate each unit: a transient observe/classify/dispatch/steer failure on
     // one unit must not abort the global sweep across every other mission.
     try {
+      // Recovery: a dispatch-intent that persisted but never recorded a taskId
+      // means a prior wake crashed mid-dispatch. NEVER blind-re-dispatch (would
+      // duplicate); surface it to a human with the correlation id so any orphan
+      // task can be verified before re-dispatch.
+      if (isDispatchInterrupted(unit)) {
+        needsHuman.push({
+          request: await createHumanRequest(
+            unit,
+            mission,
+            { provider: unit.provider, prs: [] },
+            `dispatch interrupted before the task id was recorded (correlation ${unit.dispatch?.id ?? "?"}) — verify no orphan task on ${repoLabel(unit.repo)} before re-dispatch`,
+            deps,
+          ),
+          sortKey: sortKey(unit),
+          order: requestOrder,
+        })
+        await deps.upsertUnit(unit.repo, unit)
+        continue
+      }
+
       const observed = await deps.observeUnit(unit)
       const evidence = await fillFuzzyFields(unit, mission, observed, deps)
       updateUnitFromObservedPrs(unit, observed)

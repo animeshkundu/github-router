@@ -90,6 +90,18 @@ describe("first-mate durable ledger", () => {
     expect(persisted.map((u) => u.validation).sort()).toEqual([...validations].sort())
   })
 
+  test("a unit's dispatch-intent (outbox) field round-trips through the ledger", async () => {
+    const withIntent = unit({
+      issue: 200,
+      taskId: null,
+      provider: "none",
+      dispatch: { id: "corr-abc", requestedMs: 123, attempts: 1 },
+    })
+    await upsertUnit(repoA, withIntent)
+    const [persisted] = await readRepoLedger(repoA)
+    expect(persisted?.dispatch).toEqual({ id: "corr-abc", requestedMs: 123, attempts: 1 })
+  })
+
   test("upsertUnit replaces by issue", async () => {
     await upsertUnit(repoA, unit({ issue: 7, taskId: "task-a", title: "first" }))
     await upsertUnit(repoA, unit({ issue: 7, taskId: "task-b", title: "second" }))

@@ -105,6 +105,14 @@ export interface UnitRow {
   floorSha?: string | null
   title: string
   /**
+   * Durable dispatch-intent (outbox), persisted BEFORE the irreversible
+   * startTask so a crash in the startTask→persist window never blind-re-dispatches
+   * (at-most-once). Cleared once the taskId is persisted. `id` is the correlation
+   * id (embedded in the task prompt) and the Idempotency-Key. See
+   * docs/research/first-mate-dispatch-durability.md.
+   */
+  dispatch?: { id: string; requestedMs: number; attempts: number }
+  /**
    * The plan the agent produced in the plan phase (distilled from its session
    * log), stashed at review_plan time so an approve can re-dispatch a build
    * task carrying it. Cleared once the build task is dispatched.
