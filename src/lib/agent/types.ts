@@ -86,6 +86,8 @@ export interface PullRequestState {
   baseRef: string
   baseSha?: string
   authorLogin?: string
+  /** GraphQL PR node id — needed to mark a draft PR ready for review before merge. */
+  nodeId?: string
 }
 
 export interface CheckSummary {

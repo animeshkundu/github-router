@@ -269,5 +269,6 @@ export async function observeUnit(unit: UnitRow): Promise<Observed> {
     ...(question ? { question } : {}),
     ...(review.reviewed ? { verifierReviewed: true } : {}),
     ...(review.findings ? { reviewExcerpt: review.findings } : {}),
+    ...(primaryState?.nodeId ? { prNodeId: primaryState.nodeId } : {}),
   }
 }

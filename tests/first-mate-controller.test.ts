@@ -606,6 +606,7 @@ test("dispatch wave respects provider cap and does not dispatch children of unme
   })
   const parent = unit({
     issue: 20,
+    id: "parent-id",
     taskId: "task-20",
     provider: "completed",
     terminal: true,
@@ -617,7 +618,7 @@ test("dispatch wave respects provider cap and does not dispatch children of unme
     taskId: null,
     provider: "none",
     agent: "anthropic",
-    dependsOn: [20],
+    dependsOn: ["parent-id"],
     title: "child",
   })
   const eligible = unit({
@@ -648,9 +649,9 @@ test("board groups counts by mission and reports blocked units", async () => {
     mission({ id: "m2", goal: "Mission two" }),
   ]
   const rows = [
-    unit({ missionId: "m1", issue: 31, taskId: null, provider: "none", phase: "plan", dependsOn: [999] }),
+    unit({ missionId: "m1", issue: 31, taskId: null, provider: "none", phase: "plan", dependsOn: ["missing-id"] }),
     unit({ missionId: "m1", issue: 32, taskId: null, provider: "none", phase: "build", blockingDecisionId: "decision-x" }),
-    unit({ missionId: "m2", issue: 41, taskId: null, provider: "none", phase: "fix", dependsOn: [999] }),
+    unit({ missionId: "m2", issue: 41, taskId: null, provider: "none", phase: "fix", dependsOn: ["missing-id"] }),
   ]
   const h = harness(rows, missions)
 
@@ -886,4 +887,74 @@ test("a startTask response with no taskId leaves the intent pending (no auto-ret
   expect(row.dispatch).toBeDefined()
   expect(row.taskId).toBeNull()
   expect((h.deps.startTask as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(1)
+})
+
+test("decompose resolves dependsOn indices to sibling unit ids and gates dispatch on merge (#18)", async () => {
+  const m = mission({ id: "m-dep", repos: [repo] })
+  const h = harness([], [m])
+
+  await advance(
+    {
+      modelAnswers: [
+        {
+          requestId: "decompose:m-dep",
+          verdict: {
+            units: [{ title: "coverage" }, { title: "migrate", dependsOn: [0] }],
+          },
+        },
+      ],
+    },
+    h.deps,
+  )
+
+  const coverage = h.units.find((u) => u.title === "coverage")!
+  const migrate = h.units.find((u) => u.title === "migrate")!
+  // The index-0 dependency resolved to coverage's stable id (not an issue number).
+  expect(coverage.id).toBeTruthy()
+  expect(migrate.dependsOn).toEqual([coverage.id!])
+  // coverage (no deps) dispatched; migrate is gated until coverage MERGES.
+  expect(coverage.taskId).not.toBeNull()
+  expect(migrate.taskId).toBeNull()
+})
+
+test("merge-gate un-drafts a draft PR (via node id) before merging (#17)", async () => {
+  const row = unit({
+    issue: 7,
+    pr: 7,
+    provider: "in_progress",
+    phase: "merge",
+    dispatchMode: "build",
+    validation: "floor_passed",
+    floorSha: "head-7",
+    verifierAssigned: true,
+  })
+  const h = harness([row])
+  h.observations.set("7", {
+    provider: "in_progress",
+    prs: [openPr(7, "head-7")],
+    prNodeId: "PR_node_7",
+  })
+  // A draft PR that is otherwise merge-ready.
+  h.deps.getPullRequestState = mock(async (_repo: { owner: string; repo: string }, pr: number) => ({
+    number: pr,
+    title: "PR",
+    isDraft: true,
+    state: "OPEN",
+    mergeable: "MERGEABLE",
+    reviewDecision: null,
+    headSha: "head-7",
+    baseRef: "main",
+    baseSha: "base-7",
+    nodeId: "PR_node_7",
+  }))
+  h.deps.findByKey = mock(async () => ({ decisionId: "dec-merge" }) as never)
+  h.deps.verifyAndConsumeApproval = mock(async () => ({ ok: true }))
+
+  await advance(
+    { humanDecisions: [{ requestId: "dec-merge", choice: "approve" }] },
+    h.deps,
+  )
+
+  expect(h.deps.markReadyForReview).toHaveBeenCalledWith("PR_node_7")
+  expect(h.deps.mergePullRequest).toHaveBeenCalledTimes(1)
 })

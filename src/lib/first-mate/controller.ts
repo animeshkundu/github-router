@@ -918,18 +918,32 @@ async function applyDecomposeAnswer(
   if (mission === undefined) return
   const verdict = asRecord(answer.verdict) ?? {}
   const rawUnits = Array.isArray(verdict.units) ? verdict.units : []
-  let created = 0
+
+  // Collect the valid specs in order first, so a unit's `dependsOn` (0-based
+  // decompose-list indices) can be resolved to the created units' stable ids —
+  // plan-first units have no issue number to depend on.
+  const specs: Array<{ spec: Record<string, unknown>; title: string; repo: RepoRef }> = []
   for (const raw of rawUnits) {
     const spec = asRecord(raw) ?? {}
     const title = stringValue(spec.title)
     if (title === undefined || title.length === 0) continue
     const repo = parseRepoRef(stringValue(spec.repo)) ?? mission.repos[0]
     if (repo === undefined) continue
-    const dependsOn = Array.isArray(spec.dependsOn)
-      ? spec.dependsOn.filter((n): n is number => typeof n === "number")
-      : []
+    specs.push({ spec, title, repo })
+  }
+  const ids = specs.map(() => randomUUID())
+
+  let created = 0
+  for (let i = 0; i < specs.length; i += 1) {
+    const { spec, title, repo } = specs[i]!
+    const dependsOn = (Array.isArray(spec.dependsOn) ? spec.dependsOn : [])
+      .filter(
+        (idx): idx is number =>
+          typeof idx === "number" && Number.isInteger(idx) && idx >= 0 && idx < ids.length && idx !== i,
+      )
+      .map((idx) => ids[idx]!)
     const unit: UnitRow = {
-      id: randomUUID(),
+      id: ids[i]!,
       missionId,
       repo,
       issue: null,
@@ -997,7 +1011,6 @@ async function maybeMergeWithApproval(
   if (live.isDraft && evidence.prNodeId !== undefined) {
     await deps.markReadyForReview(evidence.prNodeId)
   }
-  // TODO wire markReadyForReview when getPullRequestState exposes a PR node id.
 
   await deps.mergePullRequest(agentRepo(unit.repo), {
     pr: live.number,
@@ -1193,11 +1206,13 @@ function isInFlight(unit: UnitRow): boolean {
 }
 
 function depsSatisfied(unit: UnitRow, units: UnitRow[]): boolean {
-  return unit.dependsOn.every((issue) =>
+  // A dependency is satisfied only when the depended-on unit (by stable id) has
+  // MERGED. Matching by id (not issue) is what makes ordering work for
+  // plan-first/task-based units, which have no issue number.
+  return unit.dependsOn.every((depId) =>
     units.some(
       (candidate) =>
-        candidate.missionId === unit.missionId &&
-        candidate.issue === issue &&
+        candidate.id === depId &&
         candidate.terminal === true &&
         candidate.artifact === "pr_merged",
     ),

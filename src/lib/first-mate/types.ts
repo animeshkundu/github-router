@@ -83,7 +83,13 @@ export interface UnitRow {
   cancelledBy?: "controller" | "external"
   bakeoffGroupId?: string | null
   /** Issue numbers (same mission) that must MERGE before this unit dispatches. */
-  dependsOn: number[]
+  /**
+   * Ids of sibling units that must MERGE before this unit dispatches. Uses unit
+   * `id` (not issue number) because plan-first/task-based units have no issue;
+   * the model expresses deps as decompose-list indices, resolved to ids at
+   * decomposition. See applyDecomposeAnswer / depsSatisfied.
+   */
+  dependsOn: string[]
   /** Set iff this unit is waiting on a human decision (its decisionId). */
   blockingDecisionId?: string | null
   /** True once an independent (different-lab) verifier has been assigned. */
@@ -164,6 +170,8 @@ export interface Observed {
   verifierReviewed?: boolean
   /** The verifier's review findings, fed to judge_review as the review summary. */
   reviewExcerpt?: string
+  /** The primary PR's GraphQL node id — lets the merge-gate un-draft before merge. */
+  prNodeId?: string
   /** Did the last steer visibly land (log cursor / head sha advanced)? */
   steerAcknowledged?: boolean | null
   /** An out-of-band change to the unit's PR the controller didn't make. */

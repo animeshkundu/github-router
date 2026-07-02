@@ -284,7 +284,10 @@ The merge path is the irreversible special case:
 3. `applyHumanDecision()` fetches the live PR state itself and records approval
    with repo, PR, live head SHA, and optional live base SHA.
 4. `maybeMergeWithApproval()` fetches live PR state again, calls
-   `verifyAndConsumeApproval()`, and only then calls `mergePullRequest()` with
+   `verifyAndConsumeApproval()`, un-drafts the PR when needed
+   (`markReadyForReview(prNodeId)` — the PR node id now flows from
+   `getPullRequestState`, so a draft agent PR is made ready before merge rather
+   than rejected as unmergeable), and only then calls `mergePullRequest()` with
    `expectedHeadSha`.
 5. `verifyAndConsumeApproval()` rejects no approval, replay, moved head, or moved
    base; success flips `consumed:true` in the durable decisions ledger.

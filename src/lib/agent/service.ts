@@ -420,6 +420,7 @@ export async function getPullRequestReviews(
 interface PullRequestGraphQLData {
   repository?: {
     pullRequest?: {
+      id?: string | null
       number?: number | null
       title?: string | null
       isDraft?: boolean | null
@@ -442,6 +443,7 @@ export async function getPullRequestState(
     `query FirstMatePullRequestState($owner: String!, $name: String!, $number: Int!) {
       repository(owner: $owner, name: $name) {
         pullRequest(number: $number) {
+          id
           number
           title
           isDraft
@@ -486,6 +488,7 @@ export async function getPullRequestState(
     baseRef,
     baseSha,
     authorLogin: pullRequest.author?.login ?? undefined,
+    nodeId: pullRequest.id ?? undefined,
   }
 }
 

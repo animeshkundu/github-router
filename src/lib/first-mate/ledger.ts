@@ -142,8 +142,8 @@ function isRepoRef(value: unknown): value is RepoRef {
   )
 }
 
-function isIntegerArray(value: unknown): value is number[] {
-  return Array.isArray(value) && value.every(isNonNegativeInteger)
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((v) => typeof v === "string")
 }
 
 function isLastSteer(value: unknown): value is NonNullable<UnitRow["lastSteer"]> {
@@ -176,7 +176,7 @@ function isUnitRow(value: unknown): value is UnitRow {
     isOneOf(row.artifact, ARTIFACTS) &&
     isOneOf(row.validation, VALIDATIONS) &&
     isNonNegativeInteger(row.retries) &&
-    isIntegerArray(row.dependsOn) &&
+    isStringArray(row.dependsOn) &&
     typeof row.title === "string" &&
     isLastSteer(row.lastSteer) &&
     (row.cancelledBy === undefined ||
