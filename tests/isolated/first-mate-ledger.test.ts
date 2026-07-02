@@ -75,6 +75,21 @@ describe("first-mate durable ledger", () => {
     expect(await readRepoLedger(repoA)).toEqual([expected])
   })
 
+  test("a unit in every validation state survives the read filter (no silent drop)", async () => {
+    // Regression: "no_ci" was added to the Validation type but not the ledger's
+    // runtime validator set, so isUnitRow dropped no_ci units on read (data loss).
+    const validations = [
+      "unknown", "ci_running", "ci_passed", "ci_failed", "no_ci",
+      "review_pending", "changes_requested", "floor_pending", "floor_passed", "floor_failed",
+    ] as const
+    for (const [i, validation] of validations.entries()) {
+      await upsertUnit(repoA, unit({ issue: 100 + i, taskId: `t-${validation}`, validation }))
+    }
+    const persisted = await readRepoLedger(repoA)
+    expect(persisted).toHaveLength(validations.length)
+    expect(persisted.map((u) => u.validation).sort()).toEqual([...validations].sort())
+  })
+
   test("upsertUnit replaces by issue", async () => {
     await upsertUnit(repoA, unit({ issue: 7, taskId: "task-a", title: "first" }))
     await upsertUnit(repoA, unit({ issue: 7, taskId: "task-b", title: "second" }))

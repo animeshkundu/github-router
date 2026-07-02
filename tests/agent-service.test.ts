@@ -6,6 +6,7 @@ import {
   assignAgent,
   findAgentPRs,
   getPullRequestDiffSummary,
+  getRequiredChecksForSha,
   mergePullRequest,
   resolveAgentRoster,
   __resetAgentServiceCachesForTests,
@@ -280,6 +281,31 @@ test("findAgentPRs matches a Copilot-authored PR to a copilot-swe-agent unit by 
     issueNumber: 0,
     botLogin: "copilot-swe-agent",
   })).toEqual([{ number: 8, headSha: "h8", headRef: "copilot/x", isDraft: false }])
+})
+
+test("getRequiredChecksForSha excludes the Copilot review-bot check-run from CI rollup", async () => {
+  // The copilot-pull-request-reviewer check-run is a review marker, not a test —
+  // counting it would report "passing" for a PR whose real CI never ran.
+  const onlyReviewer = mock(() =>
+    jsonResponse({
+      check_runs: [
+        { id: 1, name: "copilot-pull-request-reviewer", status: "completed", conclusion: "success" },
+      ],
+    }),
+  )
+  setFetch(onlyReviewer)
+  expect((await getRequiredChecksForSha(repo, "sha1")).rollup).toBe("none")
+
+  const withRealCi = mock(() =>
+    jsonResponse({
+      check_runs: [
+        { id: 1, name: "copilot-pull-request-reviewer", status: "completed", conclusion: "success" },
+        { id: 2, name: "test (3.12)", status: "completed", conclusion: "success" },
+      ],
+    }),
+  )
+  setFetch(withRealCi)
+  expect((await getRequiredChecksForSha(repo, "sha2")).rollup).toBe("passing")
 })
 
 test("getPullRequestDiffSummary is compact, omits patches, and caps files", async () => {

@@ -745,9 +745,11 @@ async function applyModelAnswer(
     }
     const passed = booleanValue(verdict.pass) === true
     unit.validation = passed ? "floor_passed" : "floor_failed"
-    // Bind the verdict to the head it was judged against so a later commit
-    // invalidates it (classify won't preserve a floor for a different head).
-    if (passed) unit.floorSha = unit.headSha ?? null
+    // Bind the verdict to the head it was judged against (BOTH pass and fail) so
+    // classify preserves it until a new commit — a failed verdict must not
+    // revert to floor_pending and re-emit judge_review in a loop; it routes to
+    // author_fix, and the agent's fix (a new head) re-triggers verification.
+    unit.floorSha = unit.headSha ?? null
     // Post the verdict as a real PR review so the floor decision is visible on
     // the portal (and an APPROVE counts toward any required-review protection).
     // Best-effort: a review-post failure must not lose the recorded verdict.

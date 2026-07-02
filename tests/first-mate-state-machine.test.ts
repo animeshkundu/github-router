@@ -120,6 +120,16 @@ test("verifier review landed → floor_pending → emit judge_review to the lead
   })
 })
 
+test("a bound floor_failed verdict is preserved (→ author_fix), not reverted to a re-judge loop", () => {
+  // Regression: floor_failed must bind floorSha too, else classify reverts it to
+  // floor_pending each wake and re-emits judge_review forever.
+  const o = obs({ prs: [openPr("sha-x")], ci: { rollup: "none", noCi: true }, verifierReviewed: true })
+  const r = row({ pr: 7, verifierAssigned: true, validation: "floor_failed", floorSha: "sha-x", retries: 0 })
+  const c = classify(o, r)
+  expect(c.validation).toBe("floor_failed")
+  expect(nextAction(c, r, DEFAULT_POLICY).kind).toBe("ask_model") // author_fix under the cap
+})
+
 test("floor_passed → escalate for human merge approval (never auto-merges)", () => {
   const o = obs({ prs: [openPr()], ci: { rollup: "passing" }, floor: "passed" })
   const c = classify(o, row({ pr: 7 }))

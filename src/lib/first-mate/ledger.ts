@@ -21,36 +21,53 @@ const DEFAULT_TERMINAL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 const TERMINAL_MAX_ENTRIES = 200
 
 const AGENTS = new Set<AgentKey>(["copilot", "anthropic", "openai"])
-const DISPATCH_MODES = new Set<DispatchMode>(["plan", "build"])
-const PROVIDER_STATES = new Set<ProviderState>([
-  "none",
-  "queued",
-  "in_progress",
-  "waiting_for_user",
-  "completed",
-  "failed",
-  "timed_out",
-  "cancelled",
-])
-const PHASES = new Set<Phase>(["plan", "build", "fix", "review", "merge", "done"])
-const ARTIFACTS = new Set<Artifact>([
-  "no_pr",
-  "pr_open",
-  "pr_closed",
-  "pr_merged",
-  "multiple_prs",
-])
-const VALIDATIONS = new Set<Validation>([
-  "unknown",
-  "ci_running",
-  "ci_passed",
-  "ci_failed",
-  "review_pending",
-  "changes_requested",
-  "floor_pending",
-  "floor_passed",
-  "floor_failed",
-])
+// Runtime validator sets for the union types isUnitRow checks. Each is built
+// from a Record<Union, true> so the COMPILER enforces that every member of the
+// union is present — a future union addition that forgets the set fails to
+// compile instead of silently dropping units on read (the "no_ci" data-loss
+// bug). Keep these keyed exhaustively.
+function membersOf<T extends string>(record: Record<T, true>): Set<T> {
+  return new Set(Object.keys(record) as T[])
+}
+
+const DISPATCH_MODES = membersOf<DispatchMode>({ plan: true, build: true })
+const PROVIDER_STATES = membersOf<ProviderState>({
+  none: true,
+  queued: true,
+  in_progress: true,
+  waiting_for_user: true,
+  completed: true,
+  failed: true,
+  timed_out: true,
+  cancelled: true,
+})
+const PHASES = membersOf<Phase>({
+  plan: true,
+  build: true,
+  fix: true,
+  review: true,
+  merge: true,
+  done: true,
+})
+const ARTIFACTS = membersOf<Artifact>({
+  no_pr: true,
+  pr_open: true,
+  pr_closed: true,
+  pr_merged: true,
+  multiple_prs: true,
+})
+const VALIDATIONS = membersOf<Validation>({
+  unknown: true,
+  ci_running: true,
+  ci_passed: true,
+  ci_failed: true,
+  no_ci: true,
+  review_pending: true,
+  changes_requested: true,
+  floor_pending: true,
+  floor_passed: true,
+  floor_failed: true,
+})
 
 interface RepoLedgerFile {
   version: 1

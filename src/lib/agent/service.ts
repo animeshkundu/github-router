@@ -514,7 +514,13 @@ export async function getRequiredChecksForSha(
     "GET",
     `${repoPath(repo)}/commits/${segment(sha)}/check-runs`,
   )
-  const checkRuns = response.check_runs ?? []
+  // The Copilot code-review bot registers its own check-run
+  // ("copilot-pull-request-reviewer": success). That is a REVIEW marker, not a
+  // test — counting it would report ci_rollup "passing" for a PR whose actual
+  // lint/test suite never ran. Exclude review-bot check-runs from CI.
+  const checkRuns = (response.check_runs ?? []).filter(
+    (check) => !/pull-request-reviewer/i.test(check.name ?? ""),
+  )
   const runningCount = checkRuns.filter(
     (check) => check.status !== "completed" || !check.conclusion,
   ).length
