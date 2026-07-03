@@ -958,3 +958,42 @@ test("merge-gate un-drafts a draft PR (via node id) before merging (#17)", async
   expect(h.deps.markReadyForReview).toHaveBeenCalledWith("PR_node_7")
   expect(h.deps.mergePullRequest).toHaveBeenCalledTimes(1)
 })
+
+test("#5: dispatch persists taskId + clears intent BEFORE settling the outbox", async () => {
+  const row = unit({
+    provider: "none",
+    taskId: null,
+    phase: "plan",
+    dispatchMode: "plan",
+    issue: 5,
+  })
+  const h = harness([row])
+  const events: string[] = []
+  const origUpsert = h.deps.upsertUnit
+  h.deps.upsertUnit = mock(async (r: RepoRef, u: UnitRow) => {
+    if (u.taskId !== null && u.dispatch === undefined) events.push("persist:dispatched")
+    else if (u.dispatch !== undefined) events.push("persist:intent")
+    await origUpsert(r, u)
+  })
+  h.deps.dispatchOutbox = {
+    record: mock(async () => {
+      events.push("outbox:record")
+      return {}
+    }),
+    markDone: mock(async () => {
+      events.push("outbox:markDone")
+    }),
+  }
+
+  await advance({}, h.deps)
+
+  // Intent is recorded (ledger + outbox) before the side effect; then the
+  // dispatched-state ledger write (taskId set, intent cleared) MUST land before
+  // the outbox is settled — so a crash never leaves outbox=done + ledger=pending.
+  const persistIdx = events.indexOf("persist:dispatched")
+  const markDoneIdx = events.indexOf("outbox:markDone")
+  expect(persistIdx).toBeGreaterThanOrEqual(0)
+  expect(markDoneIdx).toBeGreaterThan(persistIdx)
+  expect(events.indexOf("outbox:record")).toBeLessThan(persistIdx)
+  expect(events.indexOf("persist:intent")).toBeLessThan(events.indexOf("outbox:record"))
+})

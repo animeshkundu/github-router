@@ -108,8 +108,11 @@ export interface ControllerDeps {
   /**
    * Chunk A step 1: durable dispatch outbox. Optional so existing callers/tests
    * are unaffected; the daemon/prod supply a real Outbox. dispatchWithOutbox
-   * records the intent before startTask and marks it done after, so a crash in
-   * between is recovered exactly-once via the stable idempotency key.
+   * records the intent before startTask and settles it after the taskId is
+   * persisted. RECOVERY of a crash mid-dispatch is the persisted-intent +
+   * isDispatchInterrupted escalation (see dispatchWithOutbox), NOT an automatic
+   * reconcile re-run — Outbox.reconcile is exercised by tests but is not wired
+   * into the live loop, so nothing here silently re-fires startTask.
    */
   dispatchOutbox?: {
     record(a: { key: string; kind: string }): Promise<unknown>
@@ -1349,9 +1352,10 @@ function buildPrompt(unit: UnitRow, mission: Mission): string {
  * BEFORE the irreversible startTask, so a crash in the startTask→persist window
  * leaves the unit marked (not `isUndispatched`) and is never blind-re-dispatched.
  * `start` receives the correlation id to embed in the prompt and send as the
- * Idempotency-Key. On success the intent is cleared (in memory; the caller's
- * upsertUnit persists it alongside the taskId). On throw the intent stays
- * pending on disk (unknown outcome — recovery, not re-dispatch, resolves it).
+ * Idempotency-Key. On success the taskId is recorded and the intent cleared, and
+ * that is PERSISTED before the outbox is settled (see #5 below). On throw the
+ * intent stays pending on disk (unknown outcome) — recovery is the
+ * isDispatchInterrupted escalation on the next healthy wake, NOT re-dispatch.
  * Returns null when the API returned no taskId — treated as ambiguous, so the
  * intent is LEFT pending (recovery escalates; never auto-re-dispatch).
  */
@@ -1375,9 +1379,13 @@ async function dispatchWithOutbox(
   const key = dispatchIdempotencyKey(unit, attempt)
   unit.dispatch = { id: key, requestedMs: Date.now(), attempts: attempt }
   await deps.upsertUnit(unit.repo, unit) // persist intent BEFORE the side effect (hard stop if this throws)
-  // Durable outbox: record the intent before the irreversible startTask; a crash
-  // between startTask and clearing leaves the entry pending, and reconcile re-runs
-  // startTask with the SAME idempotency key → the provider dedupes → exactly once.
+  // Durable outbox: record the intent before the irreversible startTask. If a
+  // crash lands between startTask and clearing the intent, RECOVERY is the
+  // isDispatchInterrupted escalation (persisted intent + no taskId → surfaced to
+  // a human to verify no orphan task), NOT an automatic re-dispatch. The stable
+  // idempotency key is what makes any deliberate re-run (e.g. a future wired
+  // reconcile, or a manual replay) a provider-side no-op — it is not itself a
+  // recovery mechanism here.
   await deps.dispatchOutbox?.record({ key, kind: "dispatch" })
   // #3 — re-check the fencing lease IMMEDIATELY before the irreversible startTask.
   // The fenced intent-write above already aborts if the lease was stale then; this
@@ -1385,8 +1393,7 @@ async function dispatchWithOutbox(
   // effect, and it covers EVERY dispatch path uniformly (the dispatch wave AND the
   // answer-driven approve/refine re-dispatches) — not just dispatchWave's pre-loop
   // renew. If fenced out we throw before startTask; the intent stays pending and a
-  // healthy driver escalates it. (Even in the residual sub-await window, the stable
-  // idempotency key makes a duplicate startTask a provider-side no-op.)
+  // healthy driver escalates it.
   const token = currentFenceToken()
   if (token !== undefined && !(await isCurrentFencingToken(token))) {
     throw new Error(`first-mate: drive lease lost before dispatch side effect (token ${token})`)
@@ -1396,8 +1403,18 @@ async function dispatchWithOutbox(
   // not echoed) — leave the intent pending so recovery escalates rather than
   // auto-re-dispatching into a possible duplicate. Only a real id clears it.
   if (task.taskId.length === 0) return null
-  await deps.dispatchOutbox?.markDone(key)
+  // #5 — PERSIST the dispatch outcome (taskId recorded, intent cleared) to the
+  // ledger BEFORE settling the outbox. Ordering the durable ledger write first
+  // means a crash in this window leaves at worst outbox=pending + ledger=done —
+  // the SAFE direction (an idempotent replay at most). The reverse order could
+  // leave outbox=done + ledger=intent-pending, which recovery would misread as an
+  // interrupted dispatch and needlessly escalate. taskId and intent-clear MUST be
+  // set together: clearing the intent while taskId is still null would flip the
+  // unit back to isUndispatched and risk a double dispatch.
+  unit.taskId = task.taskId
   unit.dispatch = undefined
+  await deps.upsertUnit(unit.repo, unit)
+  await deps.dispatchOutbox?.markDone(key)
   return task
 }
 
