@@ -237,7 +237,7 @@ export function classifyTurnEvents(events: ReadonlyArray<Record<string, unknown>
   }))
 }
 
-export type TurnSettleReason = "turn_ended" | "waiting_input" | "timeout"
+export type TurnSettleReason = "turn_ended" | "waiting_input" | "timeout" | "aborted"
 
 export interface TurnSettleResult {
   settled: boolean
@@ -327,7 +327,7 @@ export async function waitForTurnSettled(
   let cursor = options.cursor
 
   do {
-    if (options.signal?.aborted) return { settled: false, reason: "timeout", cursor }
+    if (options.signal?.aborted) return { settled: false, reason: "aborted", cursor }
     const remaining = deadline - now()
     const poll = remaining <= 0 ? 0 : Math.min(pollTimeoutMs, remaining)
     let response: WaitEventsResponse
@@ -338,8 +338,10 @@ export async function waitForTurnSettled(
       )
     } catch {
       // Transient poll failure: back off (a fast-failing poll must not hot-spin the
-      // control plane) then retry until the deadline.
-      if (now() >= deadline || options.signal?.aborted) return { settled: false, reason: "timeout", cursor }
+      // control plane) then retry until the deadline. A caller abort is distinct from a
+      // timeout — surface it so driveTask does not mistake a cancel for a stuck turn.
+      if (options.signal?.aborted) return { settled: false, reason: "aborted", cursor }
+      if (now() >= deadline) return { settled: false, reason: "timeout", cursor }
       await sleep(Math.min(TURN_POLL_ERROR_BACKOFF_MS, Math.max(0, deadline - now())))
       continue
     }
@@ -360,7 +362,7 @@ export async function waitForTurnSettled(
 export const OPERATOR_REPORT_HEADER = "=== OPERATOR REPORT ==="
 export const OPERATOR_REPORT_FOOTER = "=== END OPERATOR REPORT ==="
 
-const OPERATOR_REPORT_LABELS = ["STATE", "SUMMARY", "ASK", "ARTIFACT"] as const
+const OPERATOR_REPORT_LABELS = ["REPORT_ID", "STATE", "SUMMARY", "ASK", "ARTIFACT"] as const
 
 export interface OperatorReport {
   /** Parsed STATE, or "unknown" when the trailer (or the field) is absent. */
@@ -368,6 +370,10 @@ export interface OperatorReport {
   summary?: string
   ask?: string
   artifact?: string
+  /** Parsed REPORT_ID nonce (a WS2 convention), or undefined when absent. The caller
+   *  matches it against the per-call nonce to confirm the report is for THIS turn and
+   *  not a stale prior-turn trailer still inside the transcript tail window. */
+  reportId?: string
   /** The transcript tail that was parsed. */
   raw: string
   /** true when a trailer block was located. */
@@ -392,7 +398,8 @@ export function parseOperatorReport(text: string): OperatorReport {
   const values: Record<string, Array<string>> = {}
   let current: string | undefined
   for (const line of block.split(/\r?\n/)) {
-    const match = /^\s*([A-Za-z]+)\s*:\s*(.*)$/.exec(line)
+    // Labels are letters plus underscore so REPORT_ID is recognized (STATE/SUMMARY/… stay letters).
+    const match = /^\s*([A-Za-z_]+)\s*:\s*(.*)$/.exec(line)
     const label = match?.[1]?.toUpperCase()
     if (match && label && (OPERATOR_REPORT_LABELS as ReadonlyArray<string>).includes(label)) {
       current = label
@@ -407,12 +414,15 @@ export function parseOperatorReport(text: string): OperatorReport {
     if (parts === undefined) return undefined
     const joined = parts.join("\n").trim()
     if (joined === "") return undefined
-    // Reject the instruction TEMPLATE's own placeholders (e.g. "<done | blocked | …>").
-    // The trailer instruction drive_task appends contains this exact header + bracketed
-    // placeholders; if the session echoes it without emitting a real report, lastIndexOf
-    // would otherwise parse the template as a report. Any "<…>" token (even multi-line)
-    // is a placeholder, not a real value.
-    if (/^<[\s\S]*>$/.test(joined)) return undefined
+    // Reject the instruction TEMPLATE's own placeholders (e.g. "<done | blocked | …>"),
+    // which are a single angle-bracket token whose inner text is descriptive prose (it
+    // carries whitespace). If the session echoes the appended instruction without emitting
+    // a real report, lastIndexOf would otherwise parse the template as a report — this is
+    // load-bearing for the REPORT_ID-nonce guard (the echoed template carries the real
+    // nonce). A real value that is fully wrapped but has NO inner whitespace (a
+    // "<https://…>" autolink), spans multiple angle tokens ("<Foo> renders <Bar>"), or
+    // spans newlines (an HTML/XML snippet) is NOT a placeholder and is kept.
+    if (/^<[^>\n]*\s[^>\n]*>$/.test(joined)) return undefined
     return joined
   }
 
@@ -421,24 +431,34 @@ export function parseOperatorReport(text: string): OperatorReport {
     summary: join("SUMMARY"),
     ask: join("ASK"),
     artifact: join("ARTIFACT"),
+    reportId: join("REPORT_ID"),
     raw,
     found: true,
   }
 }
 
 /** The trailer instruction `drive_task` appends when `expectReport` is on, so a
- *  driven session ends its turn with a parseable {@link parseOperatorReport} block. */
-export function operatorReportInstruction(): string {
-  return [
+ *  driven session ends its turn with a parseable {@link parseOperatorReport} block.
+ *  When `reportId` is supplied it is embedded as a `REPORT_ID` line the session must
+ *  copy verbatim, so the driver can confirm the parsed report is for THIS turn and not
+ *  a stale prior-turn trailer still inside the transcript tail window. */
+export function operatorReportInstruction(reportId?: string): string {
+  const lines = [
     "",
-    "When you have completely finished this task, end your FINAL message with EXACTLY this trailer, filling in each field:",
+    reportId !== undefined
+      ? "When you have completely finished this task, end your FINAL message with EXACTLY this trailer. Copy the REPORT_ID line verbatim and fill in each other field:"
+      : "When you have completely finished this task, end your FINAL message with EXACTLY this trailer, filling in each field:",
     OPERATOR_REPORT_HEADER,
+  ]
+  if (reportId !== undefined) lines.push(`REPORT_ID: ${reportId}`)
+  lines.push(
     "STATE: <done | blocked | needs_input | in_progress>",
     "SUMMARY: <1-3 sentence summary of what you did>",
     "ASK: <what you need from the operator, or 'none'>",
     "ARTIFACT: <path or URL to the primary artifact, or 'none'>",
     OPERATOR_REPORT_FOOTER,
-  ].join("\n")
+  )
+  return lines.join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -454,6 +474,12 @@ export interface DriveTaskDeps {
   expectReport: boolean
   idempotencyKey: string
   interruptKey: string
+  /** Per-call nonce echoed into the trailer instruction and required to match the
+   *  parsed report's REPORT_ID before its STATE/summary are trusted — defeats a stale
+   *  prior-turn trailer being returned as this turn's result. MUST be unique per call
+   *  (the caller generates a fresh value, e.g. `randomUUID()`); reusing a value within a
+   *  session could let an older trailer with the same id be accepted as current. */
+  reportId: string
   /** Ms to wait for the session to become idle before sending (C1). */
   idleWaitMs?: number
   primeTimeoutMs?: number
@@ -537,6 +563,7 @@ export async function driveTask(deps: DriveTaskDeps): Promise<DriveTaskResult> {
     expectReport,
     idempotencyKey,
     interruptKey,
+    reportId,
     signal,
   } = deps
   const now = deps.now ?? Date.now
@@ -575,8 +602,9 @@ export async function driveTask(deps: DriveTaskDeps): Promise<DriveTaskResult> {
   let cursor = await primeTurnCursor(client, localId, deps.primeTimeoutMs ?? DEFAULT_PRIME_TIMEOUT_MS, signal)
   const cursorPrimed = cursor !== undefined
 
-  // 3. Send + verify the message actually reached the composer.
-  const message = expectReport ? `${prompt}\n${operatorReportInstruction()}` : prompt
+  // 3. Send + verify the message actually reached the composer. The trailer instruction
+  //    carries the per-call nonce so the parsed report can be proven to be THIS turn's.
+  const message = expectReport ? `${prompt}\n${operatorReportInstruction(reportId)}` : prompt
   const send = await client.sendMessage(localId, { message, idempotencyKey, awaitMs: 0 }, signal)
   const submitted = send.submission?.status === "submitted"
   const deliveryFailed =
@@ -601,16 +629,27 @@ export async function driveTask(deps: DriveTaskDeps): Promise<DriveTaskResult> {
   let settle = await waitForTurnSettled(client, localId, { timeoutMs, pollTimeoutMs, cursor, now, sleep, signal })
   cursor = settle.cursor
 
-  // 5. Read the transcript tail + parse the operator report.
-  let tail = await readTail(client, localId, tailLines, signal)
+  // A report is "current" only when we asked for one this turn (expectReport, so the
+  // nonce was actually sent) AND its REPORT_ID matches the per-call nonce. Used both to
+  // choose which read to keep across a recovery and to decide whether to trust the report.
+  const isCurrentReport = (r: OperatorReport): boolean =>
+    expectReport && r.found && r.reportId !== undefined && r.reportId === reportId
+
+  // 5. Read the transcript tail + parse the operator report. Skip the read when the caller
+  //    aborted (the settle already returned "aborted") — no point issuing an RPC with an
+  //    aborted signal (readTail would swallow the error to "" anyway).
+  let tail = signal?.aborted ? "" : await readTail(client, localId, tailLines, signal)
   let report = parseOperatorReport(tail)
 
-  // 6. C4 recovery: if the turn never settled, the stop hook may be blocking the
-  //    stop (~10 min). Interrupt to regain control rather than blocking, then
-  //    re-wait briefly and re-read the (now-settled) tail.
+  // 6. C4 recovery: if the turn never settled AND the caller did not cancel, the stop
+  //    hook may be blocking the stop (~10 min). Interrupt to regain control rather than
+  //    blocking, then re-wait briefly and re-read the (now-settled) tail. A caller ABORT
+  //    is NOT a stuck turn: never inject a Ctrl-C into a live session on cancel — that
+  //    could interrupt an in-flight command. Only a genuine timeout triggers recovery.
   let interrupted = false
   let recovered = false
-  if (!settle.settled) {
+  const aborted = settle.reason === "aborted" || signal?.aborted === true
+  if (!settle.settled && !aborted) {
     interrupted = true
     await client
       .sendKeys(localId, { keys: INTERRUPT_KEY, idempotencyKey: interruptKey, raw: false }, signal)
@@ -625,28 +664,50 @@ export async function driveTask(deps: DriveTaskDeps): Promise<DriveTaskResult> {
     })
     recovered = recovery.settled
     if (recovery.settled) settle = recovery
+    // Adopt the recovery re-read only when it yields a CURRENT (nonce-matched) report, or
+    // when the pre-interrupt read had no current report to lose. This prevents a
+    // trailer-less OR stale-trailer re-read (interrupt scrollback pushed the real report
+    // out of the tail window, leaving an older one) from clobbering a valid current report
+    // captured before the interrupt.
     const recoveredTail = await readTail(client, localId, tailLines, signal)
-    if (recoveredTail !== "") {
+    const recoveredReport = parseOperatorReport(recoveredTail)
+    if (recoveredTail !== "" && (isCurrentReport(recoveredReport) || !isCurrentReport(report))) {
       tail = recoveredTail
-      report = parseOperatorReport(recoveredTail)
+      report = recoveredReport
     }
   }
 
-  const settledReason: TurnSettleReason = settle.settled ? settle.reason : "timeout"
+  const settledReason: TurnSettleReason = settle.settled
+    ? settle.reason
+    : settle.reason === "aborted" || signal?.aborted === true
+      ? "aborted"
+      : "timeout"
   const settleDerivedState =
-    settledReason === "waiting_input" ? "awaiting_input" : settledReason === "timeout" ? "timeout" : "unknown"
+    settledReason === "waiting_input"
+      ? "awaiting_input"
+      : settledReason === "aborted"
+        ? "aborted"
+        : settledReason === "timeout"
+          ? "timeout"
+          : "unknown"
+  // A report is trusted only when it is CURRENT (see isCurrentReport): we asked for one
+  // this turn, it was found, and its REPORT_ID matches the per-call nonce. This defeats a
+  // stale prior-turn trailer still inside the tail window (which would otherwise be
+  // returned as a false success), and never trusts a leftover trailer when the caller
+  // opted out of a report (expectReport:false — the session was never handed the nonce).
+  const reportCurrent = isCurrentReport(report)
   // State precedence: a reliable `waiting_input` (the session is blocked awaiting the
   // operator RIGHT NOW) is authoritative and must NOT be overridden by the model's
   // self-reported STATE (e.g. an emitted "done" just before it hit a prompt would
   // otherwise make a caller drop a still-blocked session). Otherwise trust the parsed
-  // STATE only when a report was found AND carried a real (non-placeholder) STATE — a
-  // partial trailer must not clobber the settle-derived state. On a timeout WITH a real
-  // report (the hung-hook signature: model finished, turn_ended never fired), the
-  // report's STATE is more accurate than "timeout", so it is allowed to win there.
+  // STATE only when the report is current (nonce-matched) AND carried a real
+  // (non-placeholder) STATE. On a timeout WITH a current report (the hung-hook signature:
+  // model finished, turn_ended never fired), that STATE is more accurate than "timeout",
+  // so it is allowed to win there — the nonce guarantees it is not stale.
   const state =
     settledReason === "waiting_input"
       ? "awaiting_input"
-      : report.found && report.state !== "unknown"
+      : reportCurrent && report.state !== "unknown"
         ? report.state
         : settleDerivedState
 
@@ -655,11 +716,11 @@ export async function driveTask(deps: DriveTaskDeps): Promise<DriveTaskResult> {
     delivered: true,
     settled: settledReason,
     state,
-    summary: report.summary,
-    ask: report.ask,
-    artifact: report.artifact,
+    summary: reportCurrent ? report.summary : undefined,
+    ask: reportCurrent ? report.ask : undefined,
+    artifact: reportCurrent ? report.artifact : undefined,
     raw: tail,
-    reportFound: report.found,
+    reportFound: reportCurrent,
     interrupted,
     recovered,
     cursorPrimed,

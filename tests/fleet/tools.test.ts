@@ -1113,10 +1113,14 @@ describe("fleet MCP tools — C2 await_turn settled classification", () => {
 describe("fleet MCP tools — C5 drive_task", () => {
   test("drives to completion and returns the parsed operator report", async () => {
     let sent = false
+    // A well-behaved session echoes the REPORT_ID nonce it was handed in the prompt, so
+    // capture it from the sent message and reflect it back in the trailer.
+    let echoedReportId = ""
     const tools = betaTools({
       status: mock(async () => ({ sessionId: "local-b", status: { interactionState: "idle" } })),
-      sendMessage: mock(async () => {
+      sendMessage: mock(async (_id: string, input: { message: string }) => {
         sent = true
+        echoedReportId = /REPORT_ID:\s*(\S+)/.exec(input.message)?.[1] ?? ""
         return { messageId: "m", delivered: true, confirmed: true, submission: { status: "submitted" } }
       }) as unknown as FleetToolClient["sendMessage"],
       waitEvents: mock(async (): Promise<import("../../src/lib/fleet/client").WaitEventsResponse> =>
@@ -1125,7 +1129,7 @@ describe("fleet MCP tools — C5 drive_task", () => {
           : { events: [], gaps: [], cursor: "c-prime", more: false }) as unknown as FleetToolClient["waitEvents"],
       readSession: mock(async () => ({
         sessionId: "local-b",
-        text: "=== OPERATOR REPORT ===\nSTATE: done\nSUMMARY: shipped it\nASK: none\nARTIFACT: /tmp/z\n=== END OPERATOR REPORT ===",
+        text: `=== OPERATOR REPORT ===\nREPORT_ID: ${echoedReportId}\nSTATE: done\nSUMMARY: shipped it\nASK: none\nARTIFACT: /tmp/z\n=== END OPERATOR REPORT ===`,
         truncated: false,
         source: "pty",
         status: {},

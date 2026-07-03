@@ -307,7 +307,24 @@ describe("driver: waitForTurnSettled (C2)", () => {
     const waitEvents = mock(async (): Promise<WaitEventsResponse> => ({ events: [], gaps: [], cursor: "c", more: false }))
     const result = await waitForTurnSettled(driverClientStub({ waitEvents }), LOCAL, { timeoutMs: 1_000, signal: controller.signal })
     expect(result.settled).toBe(false)
+    expect(result.reason).toBe("aborted")
     expect(waitEvents).toHaveBeenCalledTimes(0)
+  })
+
+  test("a mid-wait abort surfaces reason 'aborted', distinct from a deadline timeout", async () => {
+    const controller = new AbortController()
+    let calls = 0
+    const waitEvents = mock(async (): Promise<WaitEventsResponse> => {
+      calls += 1
+      controller.abort() // abort after the first poll returns nothing
+      return { events: [], gaps: [], cursor: `c-${calls}`, more: false }
+    })
+    const result = await waitForTurnSettled(driverClientStub({ waitEvents }), LOCAL, {
+      timeoutMs: 10_000,
+      pollTimeoutMs: 10,
+      signal: controller.signal,
+    })
+    expect(result).toMatchObject({ settled: false, reason: "aborted" })
   })
 
   test("a non-finite timeoutMs does not poison the deadline (terminates)", async () => {
@@ -418,14 +435,53 @@ describe("driver: parseOperatorReport", () => {
     expect(report.ask).toBeUndefined()
     expect(report.artifact).toBeUndefined()
   })
+
+  test("extracts the REPORT_ID nonce (underscore label) when present", () => {
+    const tail = `${OPERATOR_REPORT_HEADER}\nREPORT_ID: abc-123\nSTATE: done\n${OPERATOR_REPORT_FOOTER}`
+    expect(parseOperatorReport(tail)).toMatchObject({ reportId: "abc-123", state: "done", found: true })
+  })
+
+  test("reportId is undefined when no REPORT_ID line is present", () => {
+    expect(parseOperatorReport(`${OPERATOR_REPORT_HEADER}\nSTATE: done`).reportId).toBeUndefined()
+  })
+
+  test("operatorReportInstruction embeds the REPORT_ID nonce verbatim when given", () => {
+    const text = operatorReportInstruction("nonce-xyz")
+    expect(text).toContain("REPORT_ID: nonce-xyz")
+    expect(text).toContain("verbatim")
+    // Round-trips: parsing the instruction back recovers the nonce.
+    expect(parseOperatorReport(text).reportId).toBe("nonce-xyz")
+  })
+
+  test("keeps real angle-bracket values (autolink URL, interior tags, HTML) — only spaced placeholders are dropped", () => {
+    // A bare autolink: single token, no inner whitespace -> kept.
+    expect(parseOperatorReport(`${OPERATOR_REPORT_HEADER}\nSTATE: done\nARTIFACT: <https://example.com/pr/84>`).artifact)
+      .toBe("<https://example.com/pr/84>")
+    // Interior '>' (multiple tags) -> not a single wrapped token -> kept.
+    expect(parseOperatorReport(`${OPERATOR_REPORT_HEADER}\nSTATE: done\nSUMMARY: <Foo> now renders <Bar>`).summary)
+      .toBe("<Foo> now renders <Bar>")
+    // Multi-line HTML value -> kept.
+    const html = parseOperatorReport(`${OPERATOR_REPORT_HEADER}\nSTATE: done\nSUMMARY: <div class="x">\nbody\n</div>`)
+    expect(html.summary).toBe(`<div class="x">\nbody\n</div>`)
+  })
+
+  test("still drops the descriptive template placeholders (spaced single tokens)", () => {
+    // Load-bearing for the nonce guard: an echoed empty template must not parse as a report.
+    const r = parseOperatorReport(`${OPERATOR_REPORT_HEADER}\nSTATE: <done | blocked | needs_input | in_progress>\nSUMMARY: <1-3 sentence summary of what you did>`)
+    expect(r.state).toBe("unknown")
+    expect(r.summary).toBeUndefined()
+  })
 })
 
 // ---------------------------------------------------------------------------
 // C5: driveTask orchestration
 // ---------------------------------------------------------------------------
 
+const RID = "rid-1"
+
 const TRAILER = [
   OPERATOR_REPORT_HEADER,
+  `REPORT_ID: ${RID}`,
   "STATE: done",
   "SUMMARY: did the thing",
   "ASK: none",
@@ -443,6 +499,7 @@ function baseDeps(overrides: Partial<Parameters<typeof driveTask>[0]>): Paramete
     expectReport: true,
     idempotencyKey: "idem-drive",
     interruptKey: "idem-int",
+    reportId: RID,
     idleWaitMs: 0,
     primeTimeoutMs: 0,
     pollTimeoutMs: 10,
@@ -695,8 +752,8 @@ describe("driver: driveTask (C5)", () => {
         sent
           ? { events: [{ seq: 1, sessionId: LOCAL, kind: "waiting_input", at: 1 }], gaps: [], cursor: "c", more: false }
           : { events: [], gaps: [], cursor: "c-prime", more: false },
-      // The tail only contains the echoed instruction template (header + placeholders).
-      readSession: async (): Promise<ReadSessionResponse> => ({ sessionId: LOCAL, text: operatorReportInstruction(), truncated: false, source: "pty", status: {} }),
+      // The tail only contains the echoed instruction template (header + placeholders + nonce).
+      readSession: async (): Promise<ReadSessionResponse> => ({ sessionId: LOCAL, text: operatorReportInstruction(RID), truncated: false, source: "pty", status: {} }),
     })
     const result = await driveTask(baseDeps({ client }))
     // Header present -> reportFound true, but the placeholder STATE must NOT overwrite
@@ -718,8 +775,8 @@ describe("driver: driveTask (C5)", () => {
           : { events: [], gaps: [], cursor: "c-prime", more: false },
       readSession: async (): Promise<ReadSessionResponse> => ({
         sessionId: LOCAL,
-        // A real report claiming done — but the control plane says it is awaiting input.
-        text: `${OPERATOR_REPORT_HEADER}\nSTATE: done\nASK: need the db creds\n${OPERATOR_REPORT_FOOTER}`,
+        // A real, current (nonce-matched) report claiming done — but the control plane says awaiting input.
+        text: `${OPERATOR_REPORT_HEADER}\nREPORT_ID: ${RID}\nSTATE: done\nASK: need the db creds\n${OPERATOR_REPORT_FOOTER}`,
         truncated: false,
         source: "pty",
         status: {},
@@ -753,5 +810,217 @@ describe("driver: driveTask (C5)", () => {
     const result = await driveTask(baseDeps({ client }))
     expect(primeCalls).toBeGreaterThanOrEqual(2)
     expect(result).toMatchObject({ settled: "turn_ended", state: "done", submitted: true })
+  })
+
+  // ---- Fix #1: per-call nonce defeats a stale prior-turn trailer being returned as this turn's result ----
+
+  test("a stale PRIOR-turn trailer (different REPORT_ID) is NOT trusted — no false success", async () => {
+    let sent = false
+    // The tail carries a REAL, fully-populated trailer, but from a PRIOR turn (different nonce).
+    // The current turn produced no matching report. It must NOT be reported as done.
+    const stalePriorTrailer = [
+      "output from an earlier turn...",
+      OPERATOR_REPORT_HEADER,
+      "REPORT_ID: OLD-nonce-999",
+      "STATE: done",
+      "SUMMARY: fixed the OTHER bug last turn",
+      "ASK: none",
+      "ARTIFACT: /tmp/prev.json",
+      OPERATOR_REPORT_FOOTER,
+    ].join("\n")
+    const client = driverClientStub({
+      status: async () => statusResponse({ interactionState: "idle" }),
+      sendMessage: async (): Promise<SendMessageResponse> => {
+        sent = true
+        return { messageId: "m", delivered: true, confirmed: true, submission: { status: "submitted" } }
+      },
+      waitEvents: async (): Promise<WaitEventsResponse> =>
+        sent
+          ? { events: [{ seq: 1, sessionId: LOCAL, kind: "turn_ended", at: 1 }], gaps: [], cursor: "c", more: false }
+          : { events: [], gaps: [], cursor: "c-prime", more: false },
+      readSession: async (): Promise<ReadSessionResponse> => ({ sessionId: LOCAL, text: stalePriorTrailer, truncated: false, source: "pty", status: {} }),
+    })
+    const result = await driveTask(baseDeps({ client, reportId: "rid-CURRENT" }))
+    // turn_ended settled, but the only trailer is stale -> state is settle-derived, not "done",
+    // and none of the prior report's fields leak through.
+    expect(result).toMatchObject({ settled: "turn_ended", state: "unknown", reportFound: false })
+    expect(result.summary).toBeUndefined()
+    expect(result.artifact).toBeUndefined()
+  })
+
+  test("expectReport:false never trusts a trailer left in the tail (opted out of a report this turn)", async () => {
+    let sent = false
+    const client = driverClientStub({
+      status: async () => statusResponse({ interactionState: "idle" }),
+      sendMessage: async (): Promise<SendMessageResponse> => {
+        sent = true
+        return { messageId: "m", delivered: true, confirmed: true, submission: { status: "submitted" } }
+      },
+      waitEvents: async (): Promise<WaitEventsResponse> =>
+        sent
+          ? { events: [{ seq: 1, sessionId: LOCAL, kind: "turn_ended", at: 1 }], gaps: [], cursor: "c", more: false }
+          : { events: [], gaps: [], cursor: "c-prime", more: false },
+      // The tail still contains a matching-looking trailer, but we did NOT append the instruction.
+      readSession: async (): Promise<ReadSessionResponse> => ({ sessionId: LOCAL, text: TRAILER, truncated: false, source: "pty", status: {} }),
+    })
+    const result = await driveTask(baseDeps({ client, expectReport: false }))
+    expect(result).toMatchObject({ settled: "turn_ended", state: "unknown", reportFound: false })
+    expect(result.summary).toBeUndefined()
+  })
+
+  // ---- Fix #2: a caller abort must NOT inject a Ctrl-C into the live session ----
+
+  test("a caller abort during the turn wait returns state 'aborted' and never sends Ctrl-C", async () => {
+    const controller = new AbortController()
+    let sent = false
+    const sendKeys = mock(async (): Promise<SendKeysResponse> => ({ keysId: "k", delivered: true }))
+    const client = driverClientStub({
+      status: async () => statusResponse({ interactionState: "idle" }),
+      sendMessage: async (): Promise<SendMessageResponse> => {
+        sent = true
+        return { messageId: "m", delivered: true, confirmed: false, submission: { status: "submitted" } }
+      },
+      sendKeys,
+      waitEvents: async (): Promise<WaitEventsResponse> => {
+        if (sent) controller.abort() // caller cancels while we wait for the turn
+        return { events: [], gaps: [], cursor: "c", more: false }
+      },
+      readSession: async (): Promise<ReadSessionResponse> => ({ sessionId: LOCAL, text: "work in progress", truncated: false, source: "pty", status: {} }),
+    })
+    const result = await driveTask(baseDeps({ client, signal: controller.signal }))
+    expect(sendKeys).toHaveBeenCalledTimes(0)
+    expect(result).toMatchObject({ settled: "aborted", state: "aborted", interrupted: false, recovered: false })
+    expect(result.error).toBeUndefined()
+  })
+
+  // ---- Fix #3: a trailer-less recovery re-read must not clobber a good pre-interrupt report ----
+
+  test("recovery re-read without a trailer does NOT clobber a report captured before the interrupt", async () => {
+    let sent = false
+    let interrupted = false
+    const clock = makeClock()
+    const sendKeys = mock(async (): Promise<SendKeysResponse> => {
+      interrupted = true
+      return { keysId: "k", delivered: true }
+    })
+    const client = driverClientStub({
+      status: async () => statusResponse({ interactionState: "idle" }),
+      sendMessage: async (): Promise<SendMessageResponse> => {
+        sent = true
+        return { messageId: "m", delivered: true, confirmed: false, submission: { status: "submitted" } }
+      },
+      sendKeys,
+      waitEvents: async (input: { timeoutMs?: number }): Promise<WaitEventsResponse> => {
+        if (!sent) return { events: [], gaps: [], cursor: "c-prime", more: false }
+        if (!interrupted) {
+          clock.advance(input.timeoutMs ?? 0) // first wait times out (hung hook)
+          return { events: [], gaps: [], cursor: "c-wait", more: false }
+        }
+        return { events: [{ seq: 9, sessionId: LOCAL, kind: "turn_ended", at: 9 }], gaps: [], cursor: "c-recover", more: false }
+      },
+      // Before interrupt: a real current report. After: a non-empty tail WITHOUT the trailer.
+      readSession: async (): Promise<ReadSessionResponse> => ({
+        sessionId: LOCAL,
+        text: interrupted ? "^C\nRequest interrupted by user" : TRAILER,
+        truncated: false,
+        source: "pty",
+        status: {},
+      }),
+    })
+    const result = await driveTask(baseDeps({ client, now: clock.now, sleep: clock.sleep, timeoutMs: 30, recoverTimeoutMs: 30 }))
+    expect(sendKeys).toHaveBeenCalledTimes(1)
+    // The good pre-interrupt report survived the trailer-less recovery re-read.
+    expect(result).toMatchObject({ interrupted: true, recovered: true, state: "done", reportFound: true, summary: "did the thing" })
+  })
+
+  test("recovery re-read that surfaces a STALE trailer does NOT clobber the current pre-interrupt report", async () => {
+    let sent = false
+    let interrupted = false
+    const clock = makeClock()
+    const sendKeys = mock(async (): Promise<SendKeysResponse> => {
+      interrupted = true
+      return { keysId: "k", delivered: true }
+    })
+    const stalePrior = [
+      OPERATOR_REPORT_HEADER,
+      "REPORT_ID: OLD-nonce-999",
+      "STATE: done",
+      "SUMMARY: an OLD turn's report still in the scrollback",
+      OPERATOR_REPORT_FOOTER,
+    ].join("\n")
+    const client = driverClientStub({
+      status: async () => statusResponse({ interactionState: "idle" }),
+      sendMessage: async (): Promise<SendMessageResponse> => {
+        sent = true
+        return { messageId: "m", delivered: true, confirmed: false, submission: { status: "submitted" } }
+      },
+      sendKeys,
+      waitEvents: async (input: { timeoutMs?: number }): Promise<WaitEventsResponse> => {
+        if (!sent) return { events: [], gaps: [], cursor: "c-prime", more: false }
+        if (!interrupted) {
+          clock.advance(input.timeoutMs ?? 0)
+          return { events: [], gaps: [], cursor: "c-wait", more: false }
+        }
+        return { events: [{ seq: 9, sessionId: LOCAL, kind: "turn_ended", at: 9 }], gaps: [], cursor: "c-recover", more: false }
+      },
+      // Before interrupt: the CURRENT report (rid-1). After: only a STALE trailer (found=true,
+      // but a different nonce) — it must not clobber the current one.
+      readSession: async (): Promise<ReadSessionResponse> => ({
+        sessionId: LOCAL,
+        text: interrupted ? stalePrior : TRAILER,
+        truncated: false,
+        source: "pty",
+        status: {},
+      }),
+    })
+    const result = await driveTask(baseDeps({ client, now: clock.now, sleep: clock.sleep, timeoutMs: 30, recoverTimeoutMs: 30 }))
+    expect(result).toMatchObject({ interrupted: true, recovered: true, state: "done", reportFound: true, summary: "did the thing" })
+    // The stale report's fields must NOT have leaked in.
+    expect(result.summary).not.toContain("OLD turn")
+  })
+
+  test("no current report + a stale recovery trailer -> settle-derived state, reportFound false, no stale leak", async () => {
+    let sent = false
+    let interrupted = false
+    const clock = makeClock()
+    const staleOnly = [
+      OPERATOR_REPORT_HEADER,
+      "REPORT_ID: OLD-nonce-42",
+      "STATE: done",
+      "SUMMARY: STALE-VALUE-must-not-leak",
+      OPERATOR_REPORT_FOOTER,
+    ].join("\n")
+    const client = driverClientStub({
+      status: async () => statusResponse({ interactionState: "idle" }),
+      sendMessage: async (): Promise<SendMessageResponse> => {
+        sent = true
+        return { messageId: "m", delivered: true, confirmed: false, submission: { status: "submitted" } }
+      },
+      sendKeys: async (): Promise<SendKeysResponse> => {
+        interrupted = true
+        return { keysId: "k", delivered: true }
+      },
+      waitEvents: async (input: { timeoutMs?: number }): Promise<WaitEventsResponse> => {
+        if (!sent) return { events: [], gaps: [], cursor: "c-prime", more: false }
+        if (!interrupted) {
+          clock.advance(input.timeoutMs ?? 0)
+          return { events: [], gaps: [], cursor: "c-wait", more: false }
+        }
+        return { events: [{ seq: 9, sessionId: LOCAL, kind: "turn_ended", at: 9 }], gaps: [], cursor: "c-recover", more: false }
+      },
+      // Before interrupt: no trailer at all. After: only a STALE (non-current) trailer.
+      readSession: async (): Promise<ReadSessionResponse> => ({
+        sessionId: LOCAL,
+        text: interrupted ? staleOnly : "still working, no report yet",
+        truncated: false,
+        source: "pty",
+        status: {},
+      }),
+    })
+    const result = await driveTask(baseDeps({ client, now: clock.now, sleep: clock.sleep, timeoutMs: 30, recoverTimeoutMs: 30 }))
+    // Recovery settled turn_ended, but the only trailer is stale -> not trusted.
+    expect(result).toMatchObject({ interrupted: true, recovered: true, state: "unknown", reportFound: false })
+    expect(result.summary).toBeUndefined()
+    expect(result.raw).toContain("STALE-VALUE-must-not-leak") // raw still carries it, but no field leaks
   })
 })
