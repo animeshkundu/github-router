@@ -1645,6 +1645,20 @@ export async function advance(
   // resolved (the gate renews/acquires, so it's current). Omitted → unfenced.
   const fenceToken = input.fenceToken?.()
 
+  // #6 fail-CLOSED. A supervisor drive PROVIDES a fenceToken provider to fence
+  // every write in the sweep. If that provider resolves to `undefined` while we
+  // are about to drive (e.g. the lease is not actually held, or a wiring bug),
+  // driving would run the ENTIRE sweep UNFENCED — reopening split-brain. Refuse
+  // to drive rather than drive unfenced. Callers that intentionally drive
+  // unfenced (tests / tools / the non-daemon lead) simply omit `fenceToken`, so
+  // this only fires when fencing was requested but no token materialized.
+  if (input.fenceToken !== undefined && fenceToken === undefined) {
+    throw new Error(
+      "first-mate: drive requested with a fenceToken provider that returned no token — " +
+        "refusing to drive UNFENCED (fail-closed). The drive lease is not held.",
+    )
+  }
+
   const runDrive = async (): Promise<AdvanceResult> => {
     // Holder path: drain any answers queued by deferring callers and merge them
     // with answers submitted on THIS call, then apply all of them.

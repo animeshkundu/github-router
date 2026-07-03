@@ -192,6 +192,19 @@ describe("Phase A — answer submission decoupled from driving", () => {
   })
 })
 
+describe("#6 — fail-closed fencing on the supervisor drive path", () => {
+  test("a fence-required drive whose token resolves undefined refuses to drive", async () => {
+    await expect(
+      advance({ driveGate: () => true, fenceToken: () => undefined }, fakeDeps()),
+    ).rejects.toThrow(/fail-closed/i)
+  })
+
+  test("omitting the fenceToken provider still allows an unfenced drive (opt-out)", async () => {
+    const res = await advance({ driveGate: () => true }, fakeDeps())
+    expect(res.drove).toBe(true)
+  })
+})
+
 describe("F1 — a failed answer apply is re-enqueued, never marked answered", () => {
   test("upsertUnit throwing under contention re-enqueues the decision and does not wedge", async () => {
     const inbox = new AnswerInbox({ dir })
