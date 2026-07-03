@@ -1,25 +1,25 @@
 #!/usr/bin/env bun
 /**
- * GATED entry point for the first-mate server-side scheduler daemon (Phase 1).
+ * Entry point for the first-mate server-side scheduler daemon.
  *
- * This drives the LIVE first-mate ledger via advance(). It is intentionally not
- * wired into `bun run start` and refuses to run without an explicit opt-in.
+ * This drives the LIVE first-mate ledger via advance(). ON BY DEFAULT
+ * (GH_ROUTER_FM_DAEMON=0 disables). It is not auto-spawned by `bun run start`;
+ * launching it is still a deliberate step, but the gate now defaults open.
  *
- * BEFORE starting it you MUST disarm the Claude-side `[fm-heartbeat]` cron,
- * otherwise the daemon and the heartbeat both drive advance() → split-brain.
- * The fencing lease guards ledger commits, but running two drivers is still
- * wasteful and confusing. Cutover is a deliberate operator step.
+ * With Phase 1.3 wiring, the Claude `[fm-heartbeat]` auto-degrades to a passive
+ * failover (it defers via the fencing lease while this daemon holds it), so
+ * running both no longer double-drives — but disarming the heartbeat is still
+ * cleaner. The fencing lease + OCC guard ledger commits either way.
  *
- *   GH_ROUTER_FM_DAEMON=1 bun run scripts/first-mate-daemon.ts
+ *   bun run scripts/first-mate-daemon.ts            # on by default
+ *   GH_ROUTER_FM_DAEMON=0 bun run scripts/first-mate-daemon.ts   # disabled
  */
 import consola from "consola"
 
 import { createControllerDaemon } from "~/lib/first-mate/scheduler"
 
-if (process.env.GH_ROUTER_FM_DAEMON !== "1") {
-  consola.warn(
-    "first-mate daemon is GATED. Set GH_ROUTER_FM_DAEMON=1 to start it, and disarm the Claude [fm-heartbeat] cron first to avoid split-brain.",
-  )
+if (process.env.GH_ROUTER_FM_DAEMON === "0") {
+  consola.warn("first-mate daemon disabled (GH_ROUTER_FM_DAEMON=0).")
   process.exit(0)
 }
 

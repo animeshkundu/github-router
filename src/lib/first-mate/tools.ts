@@ -2,11 +2,28 @@ import { randomUUID } from "node:crypto"
 
 import { advance as advanceController, type HumanDecision, type ModelAnswer } from "~/lib/first-mate/controller"
 import { loadAllUnits, readMissions, upsertMission, type Mission } from "~/lib/first-mate/registry"
+import { SchedulerLease, makeDriveGate } from "~/lib/first-mate/scheduler/lease"
+import { Tier1Shadow, fromModelRequest, shadowEnabled } from "~/lib/first-mate/scheduler/shadow"
 import type { RepoRef, UnitRow } from "~/lib/first-mate/types"
 import type { McpGroup, NonPersonaMcpTool } from "~/lib/peer-mcp-personas"
 import { state } from "~/lib/state"
 
 const FIRST_MATE_GROUP: McpGroup = "first-mate"
+
+/**
+ * Phase 1.3 — the heartbeat/lead's drive lease. Shared (default first-mate dir)
+ * with the daemon's lease, so when the daemon holds it this MCP advance path
+ * defers (observe-only, drove:false) instead of double-driving. When no daemon
+ * runs, this path acquires the lease and drives as before. Gated by
+ * GH_ROUTER_FM_OCC (=0 disables the lease gate → today's unconditional drive).
+ */
+const heartbeatLease = new SchedulerLease()
+function leaseGateEnabled(): boolean {
+  return process.env.GH_ROUTER_FM_OCC !== "0"
+}
+
+/** Phase 2 Tier1 shadow (log-only; active only when GH_ROUTER_FM_SHADOW=1). */
+const tier1Shadow = new Tier1Shadow()
 
 interface McpToolResult {
   content: Array<{ type: "text"; text: string }>
@@ -123,12 +140,23 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
         max_in_flight_per_provider: numberProp("Maximum active units per cloud-agent provider."),
       }, []),
       async (args) => {
+        const modelAnswers = optionalModelAnswers(args)
         const result = await advanceController({
-          modelAnswers: optionalModelAnswers(args),
+          modelAnswers,
           humanDecisions: optionalHumanDecisions(args),
           topK: optionalNumber(args, "top_k"),
           maxInFlightPerProvider: optionalNumber(args, "max_in_flight_per_provider"),
+          ...(leaseGateEnabled() ? { driveGate: makeDriveGate(heartbeatLease) } : {}),
         })
+        // Phase 2: Tier1 SHADOW (log-only, fire-and-forget, never blocks/decides).
+        if (shadowEnabled()) {
+          for (const a of modelAnswers ?? []) {
+            void tier1Shadow.recordLeadOutcome(a.requestId, a.verdict).catch(() => {})
+          }
+          for (const r of result.needsModel) {
+            void tier1Shadow.observe(fromModelRequest(r)).catch(() => {})
+          }
+        }
         return ok({
           board: result.board,
           needsModel: result.needsModel,
@@ -136,6 +164,9 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
           applied_count: result.applied.length,
           nextWakeAt: result.nextWakeAt,
           nextWakeSeconds: result.nextWakeSeconds,
+          // Phase 1.3: false when a daemon holds the lease and this heartbeat
+          // observed-and-deferred (no drive) — the caller should just yield.
+          drove: result.drove !== false,
         })
       },
     ),
