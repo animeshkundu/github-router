@@ -35,6 +35,12 @@ export interface DaemonOptions {
   /** Consecutive no-progress ticks (with active units) before escalating. */
   stuckThreshold?: number
   onStuck?: (info: { progressKey: string; cycles: number }) => void
+  /**
+   * Test seam: force a fixed inter-tick delay (ms), bypassing the
+   * nextWakeSeconds [60,3600]s clamp. For the E2E harness only — production
+   * leaves this unset so real cadence applies.
+   */
+  delayOverrideMs?: number
 }
 
 const CLAMP_MIN_S = 60
@@ -52,9 +58,13 @@ export interface TickResult {
 
 export class SchedulerDaemon {
   private readonly opts: Required<
-    Omit<DaemonOptions, "onStuck" | "setTimer" | "clearTimer" | "nowMs">
+    Omit<
+      DaemonOptions,
+      "onStuck" | "setTimer" | "clearTimer" | "nowMs" | "delayOverrideMs"
+    >
   > &
     Pick<DaemonOptions, "onStuck">
+  private readonly delayOverrideMs: number | undefined
   private readonly setTimer: NonNullable<DaemonOptions["setTimer"]>
   private readonly clearTimer: NonNullable<DaemonOptions["clearTimer"]>
   private readonly lease: SchedulerLease
@@ -69,6 +79,7 @@ export class SchedulerDaemon {
     this.lease = options.lease
     this.setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms))
     this.clearTimer = options.clearTimer ?? ((h) => clearTimeout(h))
+    this.delayOverrideMs = options.delayOverrideMs
     this.opts = {
       advance: options.advance,
       lease: options.lease,
@@ -110,9 +121,10 @@ export class SchedulerDaemon {
     const stuckEscalated = this.runWatchdog(result)
 
     const nextDelayMs =
-      result.nextWakeSeconds === null
+      this.delayOverrideMs ??
+      (result.nextWakeSeconds === null
         ? this.opts.maxBackoffMs // idle portfolio: check back slowly
-        : Math.min(Math.max(result.nextWakeSeconds, CLAMP_MIN_S), CLAMP_MAX_S) * 1000
+        : Math.min(Math.max(result.nextWakeSeconds, CLAMP_MIN_S), CLAMP_MAX_S) * 1000)
 
     return { ran: true, nextDelayMs, stuckEscalated }
   }

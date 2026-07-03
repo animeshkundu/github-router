@@ -109,6 +109,12 @@ export interface AdvanceInput {
   policy?: Partial<Policy>
   maxInFlightPerProvider?: number
   topK?: number
+  /**
+   * Phase 1.3 lease gate. Returns whether THIS caller currently holds the
+   * drive lease. When it returns false, advance() observes-and-defers (no
+   * drive). Omitted → always drives (backward-compatible single-driver).
+   */
+  driveGate?: () => boolean | Promise<boolean>
 }
 
 export interface ModelAnswer {
@@ -165,6 +171,8 @@ export interface AdvanceResult {
    * signal to DISARM the heartbeat — no client-side arithmetic.
    */
   nextWakeSeconds: number | null
+  /** Phase 1.3: whether this call actually drove (false when it deferred as a non-lease-holder). */
+  drove?: boolean
 }
 
 interface Evidence {
@@ -1453,6 +1461,31 @@ export async function advance(
   )
   const topK = positiveInteger(input.topK, DEFAULT_TOP_K)
 
+  // Phase 1.3 — lease-gate the DRIVE path. When a driveGate is supplied and
+  // reports we do NOT hold the lease, observe-and-defer: return the current
+  // board WITHOUT applying answers, executing per-unit actions, or dispatching.
+  // A non-holder (e.g. a fallback heartbeat while the daemon owns the lease)
+  // thus never double-drives. Backward-compatible: no driveGate → full drive.
+  if (input.driveGate) {
+    const canDrive = await input.driveGate()
+    if (!canDrive) {
+      const observedUnits = await deps.loadAllUnits()
+      const observedMissions = await deps.readMissions()
+      const observedById = missionMap(observedMissions)
+      const observedBoard = buildBoard(observedUnits, observedMissions)
+      const observedWakeAt = nextWakeAt(observedUnits, observedById)
+      return {
+        board: observedBoard,
+        needsModel: [],
+        needsHuman: [],
+        applied: [],
+        nextWakeAt: observedWakeAt,
+        nextWakeSeconds: wakeSeconds(observedWakeAt),
+        drove: false,
+      }
+    }
+  }
+
   await applySubmittedAnswers(input, deps, applied)
 
   const units = await deps.loadAllUnits()
@@ -1580,5 +1613,6 @@ export async function advance(
     applied,
     nextWakeAt: wakeAt,
     nextWakeSeconds: wakeSeconds(wakeAt),
+    drove: true,
   }
 }

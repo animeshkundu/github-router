@@ -186,3 +186,15 @@ export class SchedulerLease {
     return this.held?.fencingToken
   }
 }
+
+/**
+ * A drive gate for advance(): renew (or acquire) the lease and report whether
+ * we now hold it. Passed as `advance({ driveGate })` so a non-holder
+ * observes-and-defers instead of double-driving.
+ */
+export function makeDriveGate(lease: SchedulerLease): () => Promise<boolean> {
+  return async () => {
+    const held = (await lease.renew()) ?? (await lease.tryAcquire())
+    return held !== undefined
+  }
+}
