@@ -210,4 +210,64 @@ describe("SchedulerLease", () => {
     await dDone
     expect(events).toEqual(["A:enter", "C:enter", "A:exit", "C:exit", "D:enter"])
   })
+
+  test("withLeaseLock: a waiter that observed a stale lock must NOT delete a lock re-taken since (R3 #1)", async () => {
+    const file = path.join(dir, "scheduler.lease.json")
+    const lockPath = `${file}.lock`
+    // Seed a stale lock left by a crashed holder, aged past the lock TTL.
+    await fs.writeFile(lockPath, "dead-holder-token")
+    const stale = new Date(Date.now() - LEASE_LOCK_TTL_MS - 5_000)
+    await fs.utimes(lockPath, stale, stale)
+
+    let active = 0
+    let maxActive = 0
+    const bSawStale = deferred()
+    const allowBToBreak = deferred()
+    const releaseA = deferred()
+    const aEntered = deferred()
+
+    // B observes the stale lock, then PAUSES before breaking it — modelling the
+    // real cross-process gap between "stat says stale" and the destructive
+    // break, which single-process Promise.all timing will not reproduce.
+    const bDone = withLeaseLock(
+      file,
+      async () => {
+        active += 1
+        maxActive = Math.max(maxActive, active)
+        active -= 1
+      },
+      {
+        onObservedStale: async () => {
+          bSawStale.resolve()
+          await allowBToBreak.promise
+        },
+      },
+    )
+    await bSawStale.promise
+
+    // While B is paused, A breaks the (genuinely) stale lock, acquires a FRESH
+    // lock, and enters the critical section.
+    const aDone = withLeaseLock(file, async () => {
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      aEntered.resolve()
+      await releaseA.promise
+      active -= 1
+    })
+    await aEntered.promise
+
+    // Now B resumes its break. With the OLD unlink-to-steal it would delete A's
+    // FRESH lock and enter alongside A (maxActive === 2). The fix confirms the
+    // moved inode is no longer the stale token it saw, restores it, and waits.
+    allowBToBreak.resolve()
+    // Give a (wrongly) unblocked B time to enter while A still holds.
+    await sleep(80)
+    expect(maxActive).toBe(1)
+
+    releaseA.resolve()
+    await Promise.all([aDone, bDone])
+    // B eventually acquired once A released; the lock is clean afterwards.
+    expect(maxActive).toBe(1)
+    expect(await readLock(lockPath)).toBeUndefined()
+  })
 })

@@ -85,50 +85,121 @@ export const LEASE_LOCK_TTL_MS = 10_000
 const LEASE_LOCK_MAX_WAIT_MS = 10_000
 
 /**
- * Serialize read-modify-write of the lease file across processes with an
- * exclusive (O_EXCL) lock. Without this, tryAcquire() and renew() interleave:
+ * Serialize read-modify-write of the lease file across processes with an atomic
+ * create-if-absent lock. Without this, tryAcquire() and renew() interleave:
  * B.tryAcquire can write token N+1 while A.renew (having read the pre-steal
  * state) then writes token N on top, silently REGRESSING the fencing token and
  * leaving BOTH drivers believing they hold the lease. Under the lock the
  * read+write is atomic, so tokens are monotonic and exactly one driver wins.
  * Uses REAL time (not the injectable lease clock) for lock liveness.
  *
+ * ATOMICITY (R3 #1). Acquisition is a single atomic assert: we stage our owner
+ * token in a private file and `fs.link()` it onto the lock path. link() is
+ * create-if-absent, so EXACTLY ONE contender can create the lock — there is no
+ * unlink-then-recreate window. The previous "stat-stale then unlink then
+ * open(wx)" broke this: a waiter that had already observed a stale lock would,
+ * on resuming, blindly `unlink(lockPath)` — deleting whatever sat there NOW,
+ * including a FRESH lock a peer had re-taken in the meantime — letting both into
+ * the critical section to read the same lease and mint the same fencing token
+ * (double dispatch). We now NEVER unlink-to-steal. A stale lock is retired by
+ * moving it aside with a single-source `fs.rename()` and then CONFIRMING the
+ * moved inode still carries the exact stale token we observed; if a fresh holder
+ * had re-taken the path between our observe and our rename, we PUT IT BACK
+ * (restore) and wait our turn rather than stealing it. link() stays the only
+ * winner-picker.
+ *
+ * HONEST LIMITATION: POSIX offers no compare-and-swap on a path, so a stale-lock
+ * steal cannot be made fully race-free — a third contender that re-links during
+ * our restore window is not covered here. The fencing token (checked at commit)
+ * and the ledger's rev-based CAS are the true safety boundary; this lock is a
+ * best-effort contention optimizer that no longer actively deletes live locks.
+ *
  * Exported for the regression tests that exercise the stolen-lock finally.
+ * `hooks` is a test-only injection point (default undefined = no-op) used to
+ * force the observe→break interleaving deterministically.
  */
-export async function withLeaseLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
+export interface LeaseLockTestHooks {
+  /** Awaited AFTER a stale lock is observed but BEFORE it is broken. */
+  onObservedStale?: () => Promise<void>
+}
+
+export async function withLeaseLock<T>(
+  file: string,
+  fn: () => Promise<T>,
+  hooks?: LeaseLockTestHooks,
+): Promise<T> {
   const lockPath = `${file}.lock`
   await fs.mkdir(path.dirname(lockPath), { recursive: true })
   // Unique per-acquisition owner token. The lock TTL (10s) < lease TTL (30s), so
   // a stalled driver holding the lock can be broken-as-stale and its lock
   // re-taken by another driver. When the stalled driver resumes it still
   // believes it holds the lock — the owner-token re-check in `finally` is what
-  // stops it deleting a DIFFERENT active driver's lock (which, left dangling,
-  // would let two acquirers read the same lease and mint the same fencing
-  // token → double dispatch). Mirrors withRepoLock in ledger.ts.
+  // stops it deleting a DIFFERENT active driver's lock. Mirrors withRepoLock.
   const ownerToken = `${process.pid}-${randomBytes(8).toString("hex")}`
+  // Staging file holding our token; the lock is a HARDLINK to it. Acquiring via
+  // link(staging → lockPath) is atomic create-if-absent, the sole winner-picker.
+  const staging = `${lockPath}.acq.${ownerToken}`
+  await fs.writeFile(staging, ownerToken, { mode: 0o600 })
   const start = Date.now()
-  for (;;) {
-    try {
-      const fh = await fs.open(lockPath, "wx")
-      await fh.writeFile(ownerToken)
-      await fh.close()
-      break
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
+  try {
+    for (;;) {
       try {
-        const st = await fs.stat(lockPath)
-        if (Date.now() - st.mtimeMs > LEASE_LOCK_TTL_MS) {
-          await fs.unlink(lockPath).catch(() => {})
-          continue
+        await fs.link(staging, lockPath)
+        break // won — lockPath is now our token
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
+        // A lock exists. Retire it ONLY if stale, and never by unlink-to-steal.
+        let observed: string | undefined
+        try {
+          observed = (await fs.readFile(lockPath, "utf8")).trim()
+          const st = await fs.stat(lockPath)
+          if (Date.now() - st.mtimeMs > LEASE_LOCK_TTL_MS) {
+            if (hooks?.onObservedStale) await hooks.onObservedStale()
+            // Move the stale lock aside with a single-source rename (at most one
+            // waiter moves a given inode; the rest get ENOENT and re-contend).
+            const breaker = `${lockPath}.stale.${ownerToken}`
+            let moved = false
+            try {
+              await fs.rename(lockPath, breaker)
+              moved = true
+            } catch (e) {
+              if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e
+              // a peer already retired/re-took it — re-contend on link()
+            }
+            if (moved) {
+              // Confirm we moved the SAME stale lock. If a fresh holder re-took
+              // the path between our observe and our rename, the moved token
+              // differs → restore it and wait rather than stealing a live lock.
+              let movedToken: string | undefined
+              try {
+                movedToken = (await fs.readFile(breaker, "utf8")).trim()
+              } catch {
+                movedToken = undefined
+              }
+              if (movedToken === observed) {
+                await fs.unlink(breaker).catch(() => {}) // genuinely stale — retire
+              } else {
+                // Turned fresh under us — put it back for its rightful holder.
+                await fs.rename(breaker, lockPath).catch(async () => {
+                  await fs.unlink(breaker).catch(() => {}) // a peer re-linked first
+                })
+              }
+            }
+            continue // re-contend immediately
+          }
+        } catch {
+          // vanished/unreadable between ops — re-contend immediately
         }
-      } catch {
-        // vanished — retry
+        if (Date.now() - start > LEASE_LOCK_MAX_WAIT_MS) {
+          throw new Error(`first-mate lease lock timeout for ${file}`)
+        }
+        await new Promise((r) => setTimeout(r, 15))
       }
-      if (Date.now() - start > LEASE_LOCK_MAX_WAIT_MS) {
-        throw new Error(`first-mate lease lock timeout for ${file}`)
-      }
-      await new Promise((r) => setTimeout(r, 15))
     }
+  } finally {
+    // The lock now stands on its own hardlink; drop the staging name. On a
+    // timeout throw we also land here and clean up the unused staging file.
+    await fs.unlink(staging).catch(() => {})
   }
   // True iff the lock file still holds OUR token (no one broke + re-took it).
   const verifyOwner = async (): Promise<boolean> => {
