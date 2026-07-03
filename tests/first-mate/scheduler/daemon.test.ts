@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 
 import { SchedulerDaemon, type AdvanceLike } from "~/lib/first-mate/scheduler/daemon"
+import { EscalationQueue } from "~/lib/first-mate/scheduler/escalation"
 import { SchedulerLease } from "~/lib/first-mate/scheduler/lease"
 
 let dir: string
@@ -115,6 +116,82 @@ describe("SchedulerDaemon.tickOnce", () => {
     })
     for (let i = 0; i < 5; i += 1) await d.tickOnce()
     expect(escalations.length).toBe(0)
+  })
+
+  test("persistent-error watchdog escalates once after N consecutive failures", async () => {
+    const errors: Array<{ consecutiveFailures: number; error: string }> = []
+    const d = new SchedulerDaemon({
+      advance: async () => {
+        throw new Error("bad creds")
+      },
+      lease: lease(),
+      nowMs: now,
+      errorThreshold: 3,
+      minBackoffMs: 1,
+      maxBackoffMs: 1,
+      onError: (info) => errors.push(info),
+    })
+    // Ticks 1,2 accumulate; the 3rd crosses the threshold and fires once. Further
+    // failing ticks are debounced (no flood) until a success re-arms it.
+    const r1 = await d.tickOnce()
+    const r2 = await d.tickOnce()
+    const r3 = await d.tickOnce()
+    const r4 = await d.tickOnce()
+    expect(r1.errorEscalated).toBe(false)
+    expect(r2.errorEscalated).toBe(false)
+    expect(r3.errorEscalated).toBe(true)
+    expect(r4.errorEscalated).toBe(false)
+    expect(errors.length).toBe(1)
+    expect(errors[0]?.consecutiveFailures).toBe(3)
+    expect(errors[0]?.error).toBe("bad creds")
+  })
+
+  test("a successful tick re-arms the persistent-error escalation", async () => {
+    let fail = true
+    const errors: number[] = []
+    const d = new SchedulerDaemon({
+      advance: async () => {
+        if (fail) throw new Error("down")
+        return { nextWakeSeconds: 60 }
+      },
+      lease: lease(),
+      nowMs: now,
+      errorThreshold: 2,
+      minBackoffMs: 1,
+      maxBackoffMs: 1,
+      onError: () => errors.push(1),
+    })
+    await d.tickOnce()
+    await d.tickOnce() // escalates (streak 2)
+    expect(errors.length).toBe(1)
+    fail = false
+    await d.tickOnce() // success → resets streak + re-arms
+    fail = true
+    await d.tickOnce()
+    await d.tickOnce() // escalates again (fresh streak 2)
+    expect(errors.length).toBe(2)
+  })
+
+  test("onStuck/onError wired to an EscalationQueue durably record (index.ts shape)", async () => {
+    const q = new EscalationQueue({ dir })
+    const d = new SchedulerDaemon({
+      advance: async () => ({ nextWakeSeconds: 60, activeUnits: 1, progressKey: "frozen" }),
+      lease: lease(),
+      nowMs: now,
+      stuckThreshold: 2,
+      onStuck: (info) => {
+        void q.enqueue({
+          requestId: `stuck:${info.cycles}`,
+          kind: "stuck_portfolio",
+          target: "human",
+          reason: "no progress",
+        })
+      },
+    })
+    for (let i = 0; i < 3; i += 1) await d.tickOnce() // baseline + 2 no-progress cycles
+    await new Promise((r) => setTimeout(r, 20)) // let the fire-and-forget enqueue land
+    const items = await q.list()
+    expect(items.some((i) => i.kind === "stuck_portfolio" && i.target === "human")).toBe(true)
   })
 
   test("stop() is a kill switch: releases the lease and halts", async () => {

@@ -36,6 +36,16 @@ export interface DaemonOptions {
   stuckThreshold?: number
   onStuck?: (info: { progressKey: string; cycles: number }) => void
   /**
+   * Consecutive `tickOnce` throws (advance() failing) before escalating a
+   * persistent error. The error path never reaches the stuck watchdog, so
+   * without this a permanently-failing advance() (bad creds, GitHub outage,
+   * poison state) would back off forever in silence. Debounced: fires once when
+   * the streak first crosses the threshold, then not again until a success
+   * resets the streak.
+   */
+  errorThreshold?: number
+  onError?: (info: { consecutiveFailures: number; error: string }) => void
+  /**
    * Test seam: force a fixed inter-tick delay (ms), bypassing the
    * nextWakeSeconds [60,3600]s clamp. For the E2E harness only — production
    * leaves this unset so real cadence applies.
@@ -48,22 +58,25 @@ const CLAMP_MAX_S = 3600
 const DEFAULT_MIN_BACKOFF_MS = 5_000
 const DEFAULT_MAX_BACKOFF_MS = 300_000
 const DEFAULT_STUCK_THRESHOLD = 4
+const DEFAULT_ERROR_THRESHOLD = 5
 
 export interface TickResult {
   ran: boolean
   reason?: "not_owner"
   nextDelayMs: number
   stuckEscalated: boolean
+  /** True on the tick where a persistent-error escalation fired. */
+  errorEscalated?: boolean
 }
 
 export class SchedulerDaemon {
   private readonly opts: Required<
     Omit<
       DaemonOptions,
-      "onStuck" | "setTimer" | "clearTimer" | "nowMs" | "delayOverrideMs"
+      "onStuck" | "onError" | "setTimer" | "clearTimer" | "nowMs" | "delayOverrideMs"
     >
   > &
-    Pick<DaemonOptions, "onStuck">
+    Pick<DaemonOptions, "onStuck" | "onError">
   private readonly delayOverrideMs: number | undefined
   private readonly setTimer: NonNullable<DaemonOptions["setTimer"]>
   private readonly clearTimer: NonNullable<DaemonOptions["clearTimer"]>
@@ -72,6 +85,7 @@ export class SchedulerDaemon {
   private running = false
   private timer: ReturnType<typeof setTimeout> | undefined
   private consecutiveFailures = 0
+  private errorEscalated = false
   private lastProgressKey: string | undefined
   private noProgressCycles = 0
 
@@ -86,7 +100,9 @@ export class SchedulerDaemon {
       minBackoffMs: options.minBackoffMs ?? DEFAULT_MIN_BACKOFF_MS,
       maxBackoffMs: options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS,
       stuckThreshold: options.stuckThreshold ?? DEFAULT_STUCK_THRESHOLD,
+      errorThreshold: options.errorThreshold ?? DEFAULT_ERROR_THRESHOLD,
       onStuck: options.onStuck,
+      onError: options.onError,
     }
   }
 
@@ -111,11 +127,22 @@ export class SchedulerDaemon {
     try {
       result = await this.opts.advance()
       this.consecutiveFailures = 0
+      this.errorEscalated = false // healthy tick re-arms error escalation
     } catch (err) {
       this.consecutiveFailures += 1
       const delay = this.backoffMs()
+      const message = err instanceof Error ? err.message : String(err)
       consola.warn(`first-mate daemon tick failed (#${this.consecutiveFailures}); backoff ${delay}ms:`, err)
-      return { ran: true, nextDelayMs: delay, stuckEscalated: false }
+      // Persistent-error escalation. The error path never reaches the stuck
+      // watchdog, so escalate once when the failure streak first crosses the
+      // threshold (debounced by errorEscalated until a success resets it).
+      let errorEscalated = false
+      if (this.consecutiveFailures >= this.opts.errorThreshold && !this.errorEscalated) {
+        this.errorEscalated = true
+        errorEscalated = true
+        this.opts.onError?.({ consecutiveFailures: this.consecutiveFailures, error: message })
+      }
+      return { ran: true, nextDelayMs: delay, stuckEscalated: false, errorEscalated }
     }
 
     const stuckEscalated = this.runWatchdog(result)

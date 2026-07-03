@@ -142,6 +142,32 @@ export function createControllerDaemon(opts: ControllerDaemonOptions = {}): Sche
 
   return new SchedulerDaemon({
     lease,
+    // #8 — the watchdog signals surface to the human via the durable escalation
+    // queue (+ push hook). onStuck: a portfolio that stopped making progress
+    // while units remain active. onError: advance() has failed N ticks in a row
+    // (bad creds / outage / poison state) — the error path never reaches the
+    // stuck watchdog, so this is its own escalation. Both are debounced by the
+    // daemon; enqueue is fire-and-forget and never throws the tick.
+    onStuck: (info) => {
+      void escalation
+        .enqueue({
+          requestId: `stuck:${info.cycles}:${info.progressKey}`,
+          kind: "stuck_portfolio",
+          target: "human",
+          reason: `no progress for ${info.cycles} consecutive wake(s) while units are active`,
+        })
+        .catch(() => undefined)
+    },
+    onError: (info) => {
+      void escalation
+        .enqueue({
+          requestId: `daemon-error:${info.consecutiveFailures}`,
+          kind: "persistent_error",
+          target: "human",
+          reason: `first-mate daemon advance() failed ${info.consecutiveFailures} ticks in a row: ${info.error}`,
+        })
+        .catch(() => undefined)
+    },
     advance: async () => {
       const res = await advance({
         driveGate: makeDriveGate(lease),
