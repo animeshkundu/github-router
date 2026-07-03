@@ -161,7 +161,18 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
           topK: optionalNumber(args, "top_k"),
           maxInFlightPerProvider: optionalNumber(args, "max_in_flight_per_provider"),
           answerQueue: answerInbox,
-          ...(leaseGateEnabled() ? { driveGate: makeDriveGate(heartbeatLease) } : {}),
+          // When this MCP/heartbeat path is the drive holder it must apply the
+          // SAME safety envelope as the daemon: fence every ledger write in the
+          // sweep with the held lease token, and renew before each dispatch so a
+          // lost lease stops the wave before the irreversible startTask. (When a
+          // daemon holds the lease this path defers and none of this runs.)
+          ...(leaseGateEnabled()
+            ? {
+                driveGate: makeDriveGate(heartbeatLease),
+                fenceToken: () => heartbeatLease.fencingToken,
+                renewLease: async () => (await heartbeatLease.renew()) !== undefined,
+              }
+            : {}),
         })
         // Phase 2: Tier1 SHADOW (log-only, fire-and-forget, never blocks/decides).
         if (shadowEnabled()) {

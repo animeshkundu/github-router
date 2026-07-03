@@ -49,12 +49,14 @@ import {
   type Mission,
 } from "~/lib/first-mate/registry"
 import {
+  currentFenceToken,
   pruneTerminal as realPruneTerminal,
   runFenced,
   upsertUnit as realUpsertUnit,
 } from "~/lib/first-mate/ledger"
 import { observeUnit as realObserveUnit } from "~/lib/first-mate/observe"
 import { Outbox } from "~/lib/first-mate/scheduler/outbox"
+import { isCurrentFencingToken } from "~/lib/first-mate/scheduler/lease"
 import {
   classify,
   nextAction,
@@ -1347,6 +1349,18 @@ async function dispatchWithOutbox(
   // between startTask and clearing leaves the entry pending, and reconcile re-runs
   // startTask with the SAME idempotency key → the provider dedupes → exactly once.
   await deps.dispatchOutbox?.record({ key, kind: "dispatch" })
+  // #3 — re-check the fencing lease IMMEDIATELY before the irreversible startTask.
+  // The fenced intent-write above already aborts if the lease was stale then; this
+  // closes the window where it is stolen AFTER that write but before the side
+  // effect, and it covers EVERY dispatch path uniformly (the dispatch wave AND the
+  // answer-driven approve/refine re-dispatches) — not just dispatchWave's pre-loop
+  // renew. If fenced out we throw before startTask; the intent stays pending and a
+  // healthy driver escalates it. (Even in the residual sub-await window, the stable
+  // idempotency key makes a duplicate startTask a provider-side no-op.)
+  const token = currentFenceToken()
+  if (token !== undefined && !(await isCurrentFencingToken(token))) {
+    throw new Error(`first-mate: drive lease lost before dispatch side effect (token ${token})`)
+  }
   const task = await start({ idempotencyKey: key, promptTag: `\n\n<!-- fm-dispatch:${key} -->` })
   // Empty taskId on a 2xx is AMBIGUOUS (a task may have been created but the id
   // not echoed) — leave the intent pending so recovery escalates rather than

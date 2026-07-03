@@ -386,4 +386,47 @@ describe("first-mate wired-path E2E (real advance + real durable queues)", () =>
     const esc = await escalation.list()
     expect(esc.map((e) => e.kind)).toEqual(["review_plan"])
   })
+
+  test("a fenced drive with a STALE lease token performs no dispatch", async () => {
+    await seedMission()
+    // One undispatched unit the wave would otherwise dispatch.
+    await realUpsertUnit(repo, {
+      id: "u-fence",
+      missionId: "m1",
+      repo,
+      issue: null,
+      pr: null,
+      taskId: null,
+      agent: "copilot",
+      botLogin: "",
+      dispatchMode: "plan",
+      provider: "none",
+      phase: "plan",
+      artifact: "no_pr",
+      validation: "unknown",
+      retries: 0,
+      dependsOn: [],
+      title: "u-fence",
+    })
+    const { deps, calls } = makeDeps(new Map())
+    // Establish an on-disk fencing token, then let a second lease steal it so
+    // OUR token is stale.
+    const l1 = new SchedulerLease({ dir, ttlMs: 30_000 })
+    const held1 = await l1.tryAcquire()
+    await l1.release()
+    const l2 = new SchedulerLease({ dir, ttlMs: 30_000 })
+    const held2 = await l2.tryAcquire()
+    expect(held2!.fencingToken).toBeGreaterThan(held1!.fencingToken)
+
+    // Drive as the (self-declared) holder but under the STALE token: every fenced
+    // ledger write in the sweep is rejected, so the dispatch never reaches
+    // startTask — no external side effect.
+    const res = await advance(
+      { driveGate: () => true, fenceToken: () => held1!.fencingToken },
+      deps,
+    )
+    expect(res.drove).toBe(true)
+    expect(calls.startTask ?? 0).toBe(0)
+    expect(ghCount()).toBe(0)
+  })
 })
