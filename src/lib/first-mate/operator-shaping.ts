@@ -105,8 +105,14 @@ const GIT_READONLY_SUBCOMMANDS = new Set<string>([
   "log", "show", "diff", "status", "rev-parse", "describe", "blame",
   "shortlog", "reflog", "ls-files", "ls-tree", "ls-remote", "cat-file",
   "for-each-ref", "rev-list", "whatchanged", "grep", "annotate", "show-ref",
-  "symbolic-ref", "var", "count-objects",
+  "var", "count-objects",
 ])
+// NB: `symbolic-ref` is NOT read-only — `git symbolic-ref HEAD <ref>` REWRITES
+// HEAD — so it is deliberately excluded. `reflog` is read-only only for
+// show/default; its mutating sub-actions (expire/delete) are vetted below.
+
+/** reflog sub-actions that only READ; any other (expire/delete/drop/…) mutates. */
+const GIT_REFLOG_READONLY = new Set<string>(["show", "exists"])
 
 /** git global options that CONSUME the following token (so it isn't the subcommand). */
 const GIT_GLOBAL_ARG_FLAGS = new Set<string>([
@@ -117,6 +123,9 @@ const GIT_GLOBAL_ARG_FLAGS = new Set<string>([
 const GH_READONLY_ACTIONS = new Set<string>([
   "view", "list", "diff", "checks", "status",
 ])
+
+/** gh top-level commands that read with no action word (e.g. `gh status`). */
+const GH_READONLY_TOPLEVEL = new Set<string>(["status"])
 
 /** gh global options that consume the following token. */
 const GH_GLOBAL_ARG_FLAGS = new Set<string>(["-R", "--repo"])
@@ -149,8 +158,11 @@ function splitSegments(command: string): string[] | undefined {
       current += ch
       continue
     }
-    // operators: | || & && ; newline, and grouping ( ) { }
-    if (ch === "|" || ch === "&" || ch === ";" || ch === "\n" || ch === "(" || ch === ")" || ch === "{" || ch === "}") {
+    // operators: | || & && ; newline, and subshell grouping ( ). NOTE `{` / `}`
+    // are intentionally NOT separators so brace expansion (`echo {a,b}`) is one
+    // word; a `{ …; }` command group still fails closed because its `{` becomes
+    // a non-allowlisted "binary" token.
+    if (ch === "|" || ch === "&" || ch === ";" || ch === "\n" || ch === "(" || ch === ")") {
       segments.push(current)
       current = ""
       continue
@@ -193,20 +205,41 @@ function tokenize(segment: string): string[] {
 
 /** Validate a `git …` invocation is read-only. Returns a deny reason or undefined. */
 function gitDenyReason(args: string[]): string | undefined {
+  let subcommand: string | undefined
+  const bareAfterSub: string[] = []
   for (let i = 0; i < args.length; i++) {
     const tok = args[i]!
-    if (tok.startsWith("--") && tok.includes("=")) continue // --git-dir=… (self-contained)
-    if (GIT_GLOBAL_ARG_FLAGS.has(tok)) {
-      i++ // skip its argument
+    // `--output[=file]` (git diff / format-patch) WRITES a file — never read-only,
+    // wherever it appears. (`-o` is left alone: `git ls-files -o` is read-only.)
+    if (tok === "--output" || tok.startsWith("--output=")) {
+      return "git --output writes a file"
+    }
+    if (subcommand === undefined) {
+      if (tok.startsWith("--") && tok.includes("=")) continue // --git-dir=… (self-contained)
+      if (GIT_GLOBAL_ARG_FLAGS.has(tok)) {
+        i++ // skip its argument
+        continue
+      }
+      if (tok.startsWith("-")) continue // lone global flag (-p, --no-pager, …)
+      // first bareword is the subcommand
+      subcommand = tok
+      if (!GIT_READONLY_SUBCOMMANDS.has(tok)) return `git subcommand '${tok}' is not read-only`
       continue
     }
-    if (tok.startsWith("-")) continue // lone global flag (-p, --no-pager, …)
-    // first bareword is the subcommand
-    return GIT_READONLY_SUBCOMMANDS.has(tok)
-      ? undefined
-      : `git subcommand '${tok}' is not read-only`
+    // After the subcommand: collect barewords so a mutating sub-action is vetted.
+    if (!tok.startsWith("-")) bareAfterSub.push(tok)
   }
-  return "git invocation has no inspectable subcommand (fail-closed)"
+  if (subcommand === undefined) return "git invocation has no inspectable subcommand (fail-closed)"
+  // `reflog` reads only for show/exists (or bare `git reflog`); expire/delete/
+  // drop/write/… mutate — allowlist the read-only actions and deny the rest.
+  if (
+    subcommand === "reflog" &&
+    bareAfterSub[0] !== undefined &&
+    !GIT_REFLOG_READONLY.has(bareAfterSub[0])
+  ) {
+    return `git reflog ${bareAfterSub[0]} is not read-only`
+  }
+  return undefined
 }
 
 /** Validate a `gh …` invocation is read-only. Returns a deny reason or undefined. */
@@ -222,11 +255,102 @@ function ghDenyReason(args: string[]): string | undefined {
     bare.push(tok)
     if (bare.length === 2) break
   }
-  // `gh <cmd> <action>` — the action decides read vs write. `gh api …` has no
-  // read-only action word, so it fails closed (it can POST/PATCH/DELETE).
+  // `gh <cmd> <action>` — the action decides read vs write; `gh api …` has no
+  // read-only action word, so it fails closed (it can POST/PATCH/DELETE). A few
+  // top-level commands read with no action word (e.g. `gh status`).
+  const cmd = bare[0]
   const action = bare[1]
   if (action !== undefined && GH_READONLY_ACTIONS.has(action)) return undefined
+  if (action === undefined && cmd !== undefined && GH_READONLY_TOPLEVEL.has(cmd)) return undefined
   return `gh ${bare.join(" ") || "(no subcommand)"} is not an allowlisted read-only action`
+}
+
+/**
+ * Per-binary argument vetting for otherwise-read-only binaries that grow a
+ * write/exec capability under a specific flag (a bare-name allowlist entry alone
+ * would wave these through). Returns a deny reason or undefined.
+ */
+function argDenyReason(binary: string, args: string[]): string | undefined {
+  const has = (...flags: string[]): boolean => args.some((a) => flags.includes(a))
+  switch (binary) {
+    case "find":
+      // -exec/-execdir/-ok/-okdir run a command; -delete removes files;
+      // -fprint*/-fprint0/-fls write a named file.
+      if (
+        args.some(
+          (a) =>
+            a === "-exec" || a === "-execdir" || a === "-ok" || a === "-okdir" ||
+            a === "-delete" || a === "-fprint" || a === "-fprint0" ||
+            a === "-fprintf" || a === "-fls",
+        )
+      ) {
+        return "find -exec/-delete/-fprint can execute or write (fail-closed)"
+      }
+      return undefined
+    case "fd":
+      if (has("-x", "--exec", "-X", "--exec-batch")) {
+        return "fd -x/--exec executes a command (fail-closed)"
+      }
+      return undefined
+    case "yq":
+      if (has("-i", "--inplace")) return "yq -i writes the file in place"
+      return undefined
+    case "sort":
+      if (
+        args.some(
+          (a) => a === "-o" || a === "--output" || a.startsWith("--output=") || (a.startsWith("-o") && a.length > 2),
+        )
+      ) {
+        return "sort -o writes an output file"
+      }
+      return undefined
+    case "tree":
+      if (
+        args.some(
+          (a) => a === "-o" || a === "--output" || a.startsWith("--output=") || (a.startsWith("-o") && a.length > 2),
+        )
+      ) {
+        return "tree -o writes an output file"
+      }
+      return undefined
+    case "xxd":
+      if (has("-r", "-revert")) return "xxd -r reconstructs/writes binary"
+      return undefined
+    case "diff":
+      if (args.some((a) => a === "--output" || a.startsWith("--output="))) {
+        return "diff --output writes a file"
+      }
+      return undefined
+    default:
+      return undefined
+  }
+}
+
+/**
+ * Replace the CONTENT of single/double-quoted spans (and the quotes themselves)
+ * with spaces, preserving length. Used only for shell-metacharacter detection so
+ * a metacharacter inside a quoted literal (`rg 'a>b'`) is not mistaken for an
+ * operator. Returns undefined on an unterminated quote (fail-closed).
+ */
+function maskQuotes(command: string): string | undefined {
+  let out = ""
+  let quote: '"' | "'" | undefined
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!
+    if (quote) {
+      out += " "
+      if (ch === quote) quote = undefined
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      out += " "
+      continue
+    }
+    out += ch
+  }
+  if (quote) return undefined
+  return out
 }
 
 export function bashDenyReason(command: string): string | undefined {
@@ -235,12 +359,19 @@ export function bashDenyReason(command: string): string | undefined {
   if (/\$\(|`|<\(|>\(/.test(command)) {
     return "command/process substitution cannot be vetted (fail-closed)"
   }
-  // Strip redirections that do NOT write a real file, then any remaining `>`
-  // writes a file. (fd duplication 2>&1/>&2/>&-, discard to /dev/null.)
+  // Strip redirections that do NOT write a real file (fd duplication 2>&1/>&2/
+  // >&-, discard to /dev/null), then any remaining `>` writes a file. The
+  // /dev/null strip requires a boundary after `null` so a longer path like
+  // `>/dev/null.log` is NOT mistaken for the discard sink (that `>` survives and
+  // is caught). The `>` check runs over a QUOTE-MASKED copy so a `>` inside a
+  // quoted literal (`rg 'a>b'`) is not mistaken for a redirection; the un-masked
+  // `benign` is what we tokenize (quotes carry real arg content).
   const benign = command
     .replace(/\d*>&\s*[\d-]+/g, " ")
-    .replace(/&?\d*>{1,2}\s*\/dev\/null/g, " ")
-  if (/>/.test(benign)) return "shell output redirection writes a file"
+    .replace(/&?\d*>{1,2}\s*\/dev\/null(?=$|[\s;|&)])/g, " ")
+  const maskedBenign = maskQuotes(benign)
+  if (maskedBenign === undefined) return "unterminated quote (fail-closed)"
+  if (/>/.test(maskedBenign)) return "shell output redirection writes a file"
 
   // Segment/tokenize the redirection-stripped form so an fd-dup like `2>&1`
   // (which contains `&`) is not mistaken for a background-job separator.
@@ -274,6 +405,10 @@ export function bashDenyReason(command: string): string | undefined {
     if (!READ_ONLY_BINARIES.has(binary)) {
       return `'${binary}' is not on the read-only allowlist`
     }
+    // An allowlisted binary can still grow a write/exec capability under a
+    // specific flag (find -exec, yq -i, sort -o, …) — vet its args.
+    const argReason = argDenyReason(binary, rest)
+    if (argReason !== undefined) return argReason
   }
   return undefined
 }

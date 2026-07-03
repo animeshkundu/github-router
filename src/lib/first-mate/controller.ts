@@ -26,7 +26,7 @@ import {
 } from "~/lib/agent/tasks"
 import type { RepoRef as AgentRepoRef } from "~/lib/agent/types"
 import { PATHS } from "~/lib/paths"
-import { recordApproval as realRecordApproval, verifyAndConsumeApproval as realVerifyAndConsumeApproval } from "~/lib/first-mate/approval"
+import { recordApproval as realRecordApproval, releaseApproval as realReleaseApproval, verifyAndConsumeApproval as realVerifyAndConsumeApproval } from "~/lib/first-mate/approval"
 import {
   classifyFixAddressed as realClassifyFixAddressed,
   classifyPlanReady as realClassifyPlanReady,
@@ -85,6 +85,7 @@ export interface ControllerDeps {
   classifyStuck: typeof realClassifyStuck
   verifyAndConsumeApproval: typeof realVerifyAndConsumeApproval
   recordApproval: typeof realRecordApproval
+  releaseApproval: typeof realReleaseApproval
   upsertDecision: typeof realUpsertDecision
   findByKey: typeof realFindByKey
   markAnswered: typeof realMarkAnswered
@@ -282,6 +283,7 @@ export const defaultDeps: ControllerDeps = {
   classifyStuck: realClassifyStuck,
   verifyAndConsumeApproval: realVerifyAndConsumeApproval,
   recordApproval: realRecordApproval,
+  releaseApproval: realReleaseApproval,
   upsertDecision: realUpsertDecision,
   findByKey: realFindByKey,
   markAnswered: realMarkAnswered,
@@ -715,6 +717,7 @@ async function applyModelAnswer(
   missions: Mission[],
   deps: ControllerDeps,
   applied: string[],
+  renewLease?: () => Promise<boolean>,
 ): Promise<void> {
   const target = findModelTarget(units, answer.requestId)
   if (target === undefined) {
@@ -727,6 +730,19 @@ async function applyModelAnswer(
   const repo = agentRepo(unit.repo)
 
   if (kind === "review_plan") {
+    // #3 (replay guard) — a review_plan answer is only actionable while the unit
+    // is still AWAITING its plan review (provider "completed" with a ready plan).
+    // Once an approve/refine has re-dispatched a successor task the provider
+    // moves to queued/in_progress; a REDELIVERED review_plan answer (e.g. a
+    // re-drained inbox entry after a crash-before-ack) must NOT dispatch a second
+    // task. Gating on the provider state covers BOTH approve→build and
+    // refine→plan, which taskId/dispatchMode alone do not distinguish.
+    if (unit.provider !== "completed") {
+      consola.debug(
+        `first-mate: ignoring stale/duplicate review_plan for ${unit.missionId}:${unitHandle(unit)} — provider is ${unit.provider}, not awaiting a plan review`,
+      )
+      return
+    }
     const decision = stringValue(verdict.decision)
     const mission = missions.find((entry) => entry.id === unit.missionId)
     if (decision === "approve") {
@@ -741,6 +757,7 @@ async function applyModelAnswer(
             createPullRequest: true,
             idempotencyKey,
           }),
+          renewLease,
         )
         if (task) {
           unit.taskId = task.taskId
@@ -761,6 +778,7 @@ async function applyModelAnswer(
         const prompt = `${planPrompt(unit, mission)}\n\nRefine your previous plan per this feedback:\n${instruction}`
         const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
           deps.startTask(repo, { prompt: prompt + promptTag, createPullRequest: false, idempotencyKey }),
+          renewLease,
         )
         if (task) {
           unit.taskId = task.taskId
@@ -866,12 +884,18 @@ async function applyHumanDecision(
   // the drained answer, and the retry re-applies cleanly. (A blocked unit is
   // skipped by the drive sweep, so re-emission does NOT self-heal a wedge — the
   // ordering + re-enqueue is the actual guarantee.)
+  //
+  // #4b: the blocking id is cleared only AFTER the branch's durable side effect
+  // (approval recording) succeeds — never unconditionally up front — so a
+  // getPullRequestState/recordApproval throw leaves the unit blocked + the
+  // decision un-answered (the human's Approve is not silently lost).
   for (const unit of units.filter((row) => row.blockingDecisionId === decisionId)) {
-    unit.blockingDecisionId = null
     if (isAbandonChoice(decision.choice)) {
+      unit.blockingDecisionId = null
       unit.terminal = true
       unit.phase = "done"
       unit.cancelledBy = "external"
+      await deps.upsertUnit(unit.repo, unit)
     } else if (isApproveMergeChoice(decision.choice) && unit.pr !== null) {
       // SAFETY: an "approve" records a merge approval ONLY for a unit that is
       // genuinely merge-ready right now (floor_passed). Combined with the
@@ -881,6 +905,7 @@ async function applyHumanDecision(
         consola.debug(
           `first-mate: ignoring merge approval for ${unitHandle(unit)} — unit is not floor_passed`,
         )
+        unit.blockingDecisionId = null
         await deps.upsertUnit(unit.repo, unit)
         continue
       }
@@ -896,33 +921,39 @@ async function applyHumanDecision(
       // consume. So a relay can at most merge the CURRENT verified-green PR,
       // never arbitrary/unapproved content. A server-side ai-or-die panel read
       // is the hardening follow-up for a fully model-unforgeable path.
-      try {
-        const live = await deps.getPullRequestState(agentRepo(unit.repo), unit.pr)
-        const staleHead =
-          unit.floorSha != null
-          && unit.floorSha.length > 0
-          && live.headSha !== unit.floorSha
-        if (staleHead) {
-          consola.warn(
-            `first-mate: refusing merge approval for ${repoLabel(unit.repo)}#${live.number} — head moved since the floor verdict; re-verification required`,
-          )
-        } else if (live.headSha.length > 0) {
-          await deps.recordApproval({
-            decisionId,
-            repo: unit.repo,
-            pr: live.number,
-            headSha: live.headSha,
-            baseSha: live.baseSha,
-          })
-          applied.push(
-            `recorded merge approval for ${repoLabel(unit.repo)}#${live.number}`,
-          )
-        }
-      } catch (err) {
-        consola.debug("first-mate: could not record merge approval", err)
+      //
+      // #4b — a getPullRequestState / recordApproval THROW is NOT swallowed: it
+      // propagates so the block below is NOT cleared and markAnswered never runs,
+      // leaving the decision pending for a clean re-enqueued retry rather than
+      // losing the approval. A staleHead is a legitimate REFUSE (not a failure)
+      // and still answers, matching v1 re-verification behavior.
+      const live = await deps.getPullRequestState(agentRepo(unit.repo), unit.pr)
+      const staleHead =
+        unit.floorSha != null
+        && unit.floorSha.length > 0
+        && live.headSha !== unit.floorSha
+      if (staleHead) {
+        consola.warn(
+          `first-mate: refusing merge approval for ${repoLabel(unit.repo)}#${live.number} — head moved since the floor verdict; re-verification required`,
+        )
+      } else if (live.headSha.length > 0) {
+        await deps.recordApproval({
+          decisionId,
+          repo: unit.repo,
+          pr: live.number,
+          headSha: live.headSha,
+          baseSha: live.baseSha,
+        })
+        applied.push(
+          `recorded merge approval for ${repoLabel(unit.repo)}#${live.number}`,
+        )
       }
+      unit.blockingDecisionId = null
+      await deps.upsertUnit(unit.repo, unit)
+    } else {
+      unit.blockingDecisionId = null
+      await deps.upsertUnit(unit.repo, unit)
     }
-    await deps.upsertUnit(unit.repo, unit)
   }
 
   // markAnswered LAST — only durably record "answered" once every affected unit
@@ -946,7 +977,7 @@ async function applySubmittedAnswers(
       if (answer.requestId.startsWith("decompose:")) {
         await applyDecomposeAnswer(answer, missions, deps, applied)
       } else {
-        await applyModelAnswer(answer, units, missions, deps, applied)
+        await applyModelAnswer(answer, units, missions, deps, applied, input.renewLease)
       }
     } catch (err) {
       consola.warn(`first-mate: model answer ${answer.requestId} failed to apply:`, err)
@@ -1079,6 +1110,21 @@ async function maybeMergeWithApproval(
   unit.baseSha = live.baseSha ?? unit.baseSha
   unit.branch = live.baseRef || unit.branch
 
+  // #4a reconciliation: if GitHub reports the PR already MERGED, a prior merge
+  // attempt succeeded server-side even if the client saw a 5xx/timeout and
+  // restored its approval for retry. Treat as SUCCESS — mark the unit terminal
+  // WITHOUT calling merge again. This is what makes restore-on-throw (below)
+  // safe against a double merge on an ambiguous merge outcome.
+  if (live.state === "MERGED") {
+    unit.terminal = true
+    unit.phase = "done"
+    unit.artifact = "pr_merged"
+    unit.validation = "floor_passed"
+    applied.push(`reconciled already-merged ${repoLabel(unit.repo)}#${live.number}`)
+    await deps.upsertUnit(unit.repo, unit)
+    return true
+  }
+
   // SAFETY: the floor verdict must be for the exact head we're about to merge.
   // A moved head means the verified state is stale — refuse and let the unit
   // re-verify against the new head (an approval bound to a different head is
@@ -1095,6 +1141,14 @@ async function maybeMergeWithApproval(
   const head = live.headSha.length > 0 ? live.headSha : unit.headSha ?? undefined
   if (head === undefined || head.length === 0) return false
 
+  // Consume the single-use approval BEFORE the merge: consuming first keeps the
+  // no-DOUBLE-MERGE backstop live during the merge window (a concurrent driver
+  // finds no unconsumed approval). #4a — if markReadyForReview/mergePullRequest
+  // then THROWS, the human's approval must NOT be silently lost: RESTORE it
+  // (releaseApproval) so a later wake can retry with the same approval, and
+  // re-throw so the unit is NOT marked terminal. An ambiguous 5xx that actually
+  // merged is caught by the already-MERGED reconciliation above, so the restored
+  // approval is never consumed into a second merge.
   const approval = await deps.verifyAndConsumeApproval({
     repo: unit.repo,
     pr: live.number,
@@ -1103,14 +1157,25 @@ async function maybeMergeWithApproval(
   })
   if (!approval.ok) return false
 
-  if (live.isDraft && evidence.prNodeId !== undefined) {
-    await deps.markReadyForReview(evidence.prNodeId)
+  try {
+    if (live.isDraft && evidence.prNodeId !== undefined) {
+      await deps.markReadyForReview(evidence.prNodeId)
+    }
+    await deps.mergePullRequest(agentRepo(unit.repo), {
+      pr: live.number,
+      expectedHeadSha: head,
+    })
+  } catch (err) {
+    await deps
+      .releaseApproval({ repo: unit.repo, pr: live.number, headSha: head })
+      .catch((restoreErr) => {
+        consola.error(
+          `first-mate: FAILED to restore merge approval for ${repoLabel(unit.repo)}#${live.number} after a merge failure — manual re-approval may be needed:`,
+          restoreErr,
+        )
+      })
+    throw err
   }
-
-  await deps.mergePullRequest(agentRepo(unit.repo), {
-    pr: live.number,
-    expectedHeadSha: head,
-  })
   unit.terminal = true
   unit.phase = "done"
   unit.artifact = "pr_merged"
@@ -1405,8 +1470,42 @@ async function dispatchWithOutbox(
   unit: UnitRow,
   deps: ControllerDeps,
   start: (c: { idempotencyKey: string; promptTag: string }) => Promise<{ taskId: string; state: string }>,
+  renewLease?: () => Promise<boolean>,
 ): Promise<{ taskId: string; state: string } | null> {
-  const attempt = (unit.dispatch?.attempts ?? 0) + 1
+  // #3 (replay guard) — a dispatch intent already persisted means a startTask
+  // may already be in flight (or a prior wake was interrupted mid-dispatch).
+  // NEVER start a second task and do NOT bump `attempt`: reuse the existing
+  // pending key and let the isDispatchInterrupted recovery (a human escalation
+  // carrying the correlation id) resolve it. This closes the replay window where
+  // a redelivered answer or a re-drained inbox entry (crash-before-ack) would
+  // otherwise fire startTask twice for the same unit+attempt.
+  if (unit.dispatch !== undefined) {
+    consola.debug(
+      `first-mate: skipping dispatch for ${unit.missionId}:${unitHandle(unit)} — a dispatch intent (${unit.dispatch.id}) is already pending; recovery resolves it`,
+    )
+    return null
+  }
+  // #1 (cutover) — require a LIVE-LEASE PROOF (a SUCCESSFUL renewal), not just
+  // token equality, BEFORE we persist a dispatch intent or fire startTask. Token
+  // equality (below) is EXPIRY-BLIND: an expired-but-unstolen lease keeps the
+  // same token number, so a dispatch could fire on a dead lease. renewLease
+  // extends the lease AND confirms we still own it; a false result means we are
+  // no longer the sole driver, so we abort. Checking this BEFORE recording the
+  // intent means an aborted dispatch leaves NO residue — the next wake retries
+  // cleanly. This matters on the answer path (approve/refine), where taskId is
+  // the prior PLAN task (non-null): a stuck intent there would NOT be caught by
+  // isDispatchInterrupted (which requires taskId===null) and would wedge the
+  // replay guard above. dispatchWave renews in its own pre-loop and omits this,
+  // relying on the token-equality guard + isDispatchInterrupted recovery.
+  if (renewLease !== undefined && !(await renewLease())) {
+    throw new Error(
+      `first-mate: drive lease renewal failed before dispatch side effect for ${unit.missionId}:${unitHandle(unit)} — aborting`,
+    )
+  }
+  // A fresh dispatch is always attempt 1: the guard above returns early when a
+  // prior intent exists (recovery, not a re-dispatch, resolves that), so we never
+  // bump the counter here.
+  const attempt = 1
   const key = dispatchIdempotencyKey(unit, attempt)
   unit.dispatch = { id: key, requestedMs: Date.now(), attempts: attempt }
   await deps.upsertUnit(unit.repo, unit) // persist intent BEFORE the side effect (hard stop if this throws)

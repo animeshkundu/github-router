@@ -349,8 +349,21 @@ These items remain open:
   `multiple_prs` (escalate), never silently pick one.
 - **Cross-process single-use:** the approval-consume serializer is in-process
   (v1 assumes a single router process); a file-CAS / lock would make it
-  multi-process safe, and consume-after-merge-success avoids burning an approval
-  on a transient failure.
+  multi-process safe. Consume-after-merge is handled: the approval is consumed
+  before the merge (keeping the single-use no-double-merge backstop live) but
+  RESTORED on a merge throw so a transient failure does not burn it, and an
+  already-`MERGED` PR is reconciled as success without re-merging (so a restored
+  approval is never consumed into a second merge on an ambiguous 5xx).
+- **Lease token-uniqueness residual (FOLLOWUP):** `isCurrentFencingToken`
+  compares the token NUMBER only and is expiry-blind, and a fully race-free
+  cross-process lease is not achievable with POSIX file locks (no path-level
+  compare-and-swap). The hot path additionally requires a successful lease
+  `renew()` (live-lease proof) before an irreversible dispatch. Backstops:
+  deterministic dispatch idempotency key (no double-dispatch), single-use
+  approval consume (no double-merge), ledger rev-CAS (no lost update). The
+  residual is duplicate best-effort side effects (reviews / comments / reruns)
+  in a narrow break-a-fresh-lock window; the robust future fix is atomic token
+  minting or a per-(unit,attempt) atomic single-dispatch claim (`wx`-create).
 - **Repo-qualified request ids:** request/decision ids are
   `missionId:issue:kind`; adding the repo prevents collisions when one mission
   spans two repos that share an issue number.

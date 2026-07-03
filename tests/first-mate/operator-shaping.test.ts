@@ -105,6 +105,65 @@ describe("capability shaping — config assertions", () => {
     expect(bashDenyReason("echo `id`")).toContain("substitution")
   })
 
+  test("B2: per-binary arg vetting blocks write/exec forms and legit reads still pass", () => {
+    const ok = (c: string): boolean => operatorPreToolUse("Bash", true, { command: c }).block
+    // BLOCKED: allowlisted binaries that grow a write/exec capability under a flag.
+    expect(ok("yq -i '.a=1' f.yaml")).toBe(true)
+    expect(ok("sort -o out.txt f.txt")).toBe(true)
+    expect(ok("sort --output=out.txt f.txt")).toBe(true)
+    expect(ok("sort -oout.txt f.txt")).toBe(true)
+    expect(ok("find . -name '*.ts' -delete")).toBe(true)
+    expect(ok("find . -type f -exec rm {} ;")).toBe(true)
+    expect(ok("fd -x rm")).toBe(true)
+    expect(ok("fd --exec-batch rm")).toBe(true)
+    expect(ok("tree -o out.html")).toBe(true)
+    expect(ok("xxd -r dump.hex")).toBe(true)
+    expect(ok("diff --output=patch a b")).toBe(true)
+    // BLOCKED: mutating git that a subcommand/`--output`/reflog-action check catches.
+    expect(ok("git symbolic-ref HEAD refs/heads/x")).toBe(true)
+    expect(ok("git reflog expire --all --expire=now")).toBe(true)
+    expect(ok("git diff --output=/tmp/x HEAD~1")).toBe(true)
+    // ALLOWED: the legit read-only forms of the same binaries.
+    expect(ok("rg 'a>b' file.txt")).toBe(false) // `>` inside a quoted arg is not a redirect
+    expect(ok("echo {a,b}")).toBe(false) // brace expansion is one word
+    expect(ok("gh status")).toBe(false) // single-token read-only gh action
+    expect(ok("git log --oneline")).toBe(false)
+    expect(ok("git reflog")).toBe(false)
+    expect(ok("git reflog show")).toBe(false)
+    expect(ok("git ls-files -o")).toBe(false) // `-o` (--others) is read-only for ls-files
+    expect(ok("sort f.txt")).toBe(false)
+    expect(ok("find . -name '*.ts'")).toBe(false)
+    expect(ok("yq '.a' f.yaml")).toBe(false)
+  })
+
+  test("B2: /dev/null-prefix write, reflog write actions, and find -fprint0 fail closed", () => {
+    const ok = (c: string): boolean => operatorPreToolUse("Bash", true, { command: c }).block
+    // A path that merely BEGINS with /dev/null still writes a real file.
+    expect(ok("cat x >/dev/null.log")).toBe(true)
+    expect(ok("cat x >>/dev/null_backup")).toBe(true)
+    // reflog is read-only ONLY for show/exists/bare; other actions fail closed.
+    expect(ok("git reflog expire --all")).toBe(true)
+    expect(ok("git reflog delete HEAD@{0}")).toBe(true)
+    expect(ok("git reflog show")).toBe(false)
+    expect(ok("git reflog exists refs/heads/main")).toBe(false)
+    expect(ok("find . -fprint0 out")).toBe(true)
+    // The genuine discard idiom is still allowed.
+    expect(ok("gh pr view 42 2>/dev/null")).toBe(false)
+    expect(ok("gh pr list 1>/dev/null 2>&1")).toBe(false)
+  })
+
+  test("B2: bashDenyReason pinpoints the write/exec vector", () => {
+    expect(bashDenyReason("yq -i '.a=1' f.yaml")).toContain("yq -i")
+    expect(bashDenyReason("sort -o out f")).toContain("sort -o")
+    expect(bashDenyReason("find . -delete")).toContain("find")
+    expect(bashDenyReason("git symbolic-ref HEAD x")).toContain("symbolic-ref")
+    expect(bashDenyReason("git reflog expire")).toContain("reflog")
+    expect(bashDenyReason("git diff --output=/tmp/x")).toContain("--output")
+    expect(bashDenyReason("rg 'a>b' file.txt")).toBeUndefined()
+    expect(bashDenyReason("gh status")).toBeUndefined()
+    expect(bashDenyReason("echo {a,b}")).toBeUndefined()
+  })
+
   test("the mode banner names the boundary", () => {
     expect(OPERATOR_MODE_BANNER).toContain("cloud-agent operator")
     expect(OPERATOR_MODE_BANNER).toContain("do NOT hand-code")

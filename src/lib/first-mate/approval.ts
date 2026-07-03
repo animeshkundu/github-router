@@ -66,6 +66,42 @@ export async function recordApproval(
   })
 }
 
+/**
+ * Release (un-consume) a merge approval that was consumed for a merge attempt
+ * that then FAILED, so a later wake can retry the merge with the SAME single-use
+ * approval instead of silently losing the human's decision (item 4a). Targeted
+ * by (repo, pr, headSha) so only the approval bound to the failed attempt's head
+ * is restored.
+ *
+ * SAFETY (no double-merge): consuming BEFORE the merge keeps the single-use
+ * backstop live during the merge window; restoring only re-opens retry. A merge
+ * that threw with an AMBIGUOUS outcome (a 5xx after GitHub actually merged) is
+ * covered by the caller reconciling an already-MERGED PR as success WITHOUT
+ * re-merging, so a restored approval is never consumed into a second merge.
+ */
+export async function releaseApproval(args: {
+  repo: RepoRef
+  pr: number
+  headSha: string
+}): Promise<void> {
+  await withDecisionsMutation((decisions) => {
+    for (const decision of decisions) {
+      const approval = decision.approval
+      if (
+        approval !== undefined &&
+        approval.consumed &&
+        sameRepo(approval.repo, args.repo) &&
+        approval.pr === args.pr &&
+        approval.headSha === args.headSha
+      ) {
+        approval.consumed = false
+        approval.consumedMs = undefined
+        return
+      }
+    }
+  })
+}
+
 export async function verifyAndConsumeApproval(args: {
   repo: RepoRef
   pr: number

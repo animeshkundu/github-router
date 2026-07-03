@@ -231,6 +231,22 @@ export async function currentFencingToken(dir = PATHS.FIRST_MATE_DIR): Promise<n
  * driver has stolen the lease since it was issued. A driver MUST call this
  * immediately before any external side effect / ledger write; if it returns
  * false, the driver has been fenced out and must abort without writing.
+ *
+ * TOKEN-UNIQUENESS RESIDUAL (FOLLOWUP). This compares the token NUMBER only; it
+ * is EXPIRY-BLIND (an expired-but-unstolen lease keeps the same token — the
+ * answer/dispatch hot path additionally requires a SUCCESSFUL `renew()` as a
+ * live-lease proof, see controller `dispatchWithOutbox`). A fully race-free
+ * cross-process lease is NOT achievable with POSIX file locks (no path-level
+ * compare-and-swap — see {@link withLeaseLock}'s HONEST LIMITATION), so a
+ * narrow break-a-fresh-lock window can let two drivers briefly both believe
+ * they hold the lease. The safety BACKSTOPS that make this survivable are:
+ *   - deterministic dispatch idempotency key → no double-DISPATCH,
+ *   - single-use approval consume → no double-MERGE,
+ *   - ledger rev-CAS → no lost update.
+ * The RESIDUAL is duplicate best-effort side effects (reviews / comments /
+ * check-reruns) in that window, which are individually harmless. A robust
+ * future fix is atomic token minting or a per-(unit,attempt) atomic
+ * single-dispatch claim (an O_CREAT|O_EXCL `wx` create) — out of scope here.
  */
 export async function isCurrentFencingToken(
   token: number,

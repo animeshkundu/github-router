@@ -149,6 +149,7 @@ function harness(
       }) => ({ ok: false, reason: "no_approval" }),
     ),
     recordApproval: mock(async (_a: unknown) => {}),
+    releaseApproval: mock(async (_a: unknown) => {}),
     upsertDecision: mock(async (record: DecisionRecord) => {
       const index = decisions.findIndex(
         (entry) =>
@@ -996,4 +997,214 @@ test("#5: dispatch persists taskId + clears intent BEFORE settling the outbox", 
   expect(markDoneIdx).toBeGreaterThan(persistIdx)
   expect(events.indexOf("outbox:record")).toBeLessThan(persistIdx)
   expect(events.indexOf("persist:intent")).toBeLessThan(events.indexOf("outbox:record"))
+})
+
+test("#1 (cutover): answer-driven dispatch does NOT startTask when the lease renewal fails (expired/stolen)", async () => {
+  const row = unit({
+    provider: "completed",
+    phase: "plan",
+    dispatchMode: "plan",
+    planExcerpt: "1. Do the thing.",
+  })
+  const h = harness([row])
+  h.observations.set("1", { provider: "queued", prs: [] })
+
+  const result = await advance(
+    {
+      modelAnswers: [{ requestId: "m1:1:review_plan", verdict: { decision: "approve" } }],
+      renewLease: async () => false, // lease lost/expired mid-flight
+    },
+    h.deps,
+  )
+
+  // The irreversible build dispatch is aborted BEFORE startTask AND before any
+  // intent is persisted, so no stuck intent wedges a retry — the next wake
+  // re-asks and re-dispatches cleanly. The failure is audited.
+  expect(h.deps.startTask).not.toHaveBeenCalled()
+  expect(row.dispatch).toBeUndefined()
+  expect(row.dispatchMode).toBe("plan") // never flipped to build
+  expect(
+    result.applied.some((a) => a.includes("error applying answer") && a.includes("review_plan")),
+  ).toBe(true)
+})
+
+test("#1 (cutover): a SUCCESSFUL lease renewal lets the answer-driven dispatch proceed", async () => {
+  const row = unit({
+    provider: "completed",
+    phase: "plan",
+    dispatchMode: "plan",
+    planExcerpt: "1. Do the thing.",
+  })
+  const h = harness([row])
+  h.observations.set("1", { provider: "queued", prs: [] })
+  const renew = mock(async () => true)
+
+  await advance(
+    {
+      modelAnswers: [{ requestId: "m1:1:review_plan", verdict: { decision: "approve" } }],
+      renewLease: renew,
+    },
+    h.deps,
+  )
+
+  expect(renew).toHaveBeenCalled()
+  const buildCall = (
+    h.deps.startTask as unknown as { mock: { calls: unknown[][] } }
+  ).mock.calls.find((c) => (c[1] as { createPullRequest?: boolean }).createPullRequest === true)
+  expect(buildCall).toBeDefined()
+  expect(row.dispatchMode).toBe("build")
+})
+
+test("#3 (replay guard): a redelivered review_plan answer with a dispatch intent already set does NOT start a second task", async () => {
+  const row = unit({
+    provider: "completed",
+    phase: "plan",
+    dispatchMode: "plan",
+    planExcerpt: "1. Do the thing.",
+    dispatch: { id: "dispatch:octo/repo#unit@1", requestedMs: 1, attempts: 1 },
+  })
+  const h = harness([row])
+  h.observations.set("1", { provider: "completed", prs: [] })
+
+  await advance(
+    { modelAnswers: [{ requestId: "m1:1:review_plan", verdict: { decision: "approve" } }] },
+    h.deps,
+  )
+
+  expect(h.deps.startTask).not.toHaveBeenCalled()
+  // The pending intent is preserved — recovery, not a re-dispatch, resolves it,
+  // and `attempt` is NOT bumped.
+  expect(row.dispatch?.id).toBe("dispatch:octo/repo#unit@1")
+})
+
+test("#3 (replay guard): a review_plan answer is ignored once the unit has left the plan-review state (covers refine replay)", async () => {
+  // A redelivered approve/refine (e.g. a re-drained inbox entry after a
+  // crash-before-ack) must not re-dispatch: a successor task has already moved
+  // the provider off "completed".
+  const row = unit({
+    provider: "queued",
+    phase: "plan",
+    dispatchMode: "plan",
+    planExcerpt: "1. Do the thing.",
+  })
+  const h = harness([row])
+  h.observations.set("1", { provider: "queued", prs: [] })
+
+  await advance(
+    {
+      modelAnswers: [
+        { requestId: "m1:1:review_plan", verdict: { decision: "refine", instruction: "again" } },
+      ],
+    },
+    h.deps,
+  )
+
+  expect(h.deps.startTask).not.toHaveBeenCalled()
+})
+
+test("#4a: a merge throw restores the approval (retryable) and does NOT mark the unit terminal", async () => {
+  const row = unit({
+    issue: 7,
+    pr: 7,
+    provider: "completed",
+    phase: "merge",
+    artifact: "pr_open",
+    validation: "floor_passed",
+    dispatchMode: "build",
+    floorSha: "head-7",
+  })
+  const h = harness([row])
+  h.observations.set("7", {
+    provider: "completed",
+    prs: [openPr(7, "head-7")],
+    ci: { rollup: "passing" },
+    floor: "passed",
+  })
+  h.deps.verifyAndConsumeApproval = mock(async () => ({ ok: true }))
+  h.deps.mergePullRequest = mock(async () => {
+    throw new Error("merge 503")
+  })
+
+  await advance({}, h.deps)
+
+  expect(h.deps.verifyAndConsumeApproval).toHaveBeenCalledTimes(1)
+  expect(h.deps.mergePullRequest).toHaveBeenCalledTimes(1)
+  // The single-use approval is RESTORED so a later wake can retry rather than
+  // silently losing the human's Approve.
+  expect(h.deps.releaseApproval).toHaveBeenCalledTimes(1)
+  expect(h.deps.releaseApproval).toHaveBeenCalledWith({
+    repo: { owner: "octo", name: "repo" },
+    pr: 7,
+    headSha: "head-7",
+  })
+  expect(row.terminal ?? false).toBe(false)
+  expect(row.artifact).not.toBe("pr_merged")
+})
+
+test("#4a: an already-MERGED PR is reconciled as success without calling merge again", async () => {
+  const row = unit({
+    issue: 7,
+    pr: 7,
+    provider: "completed",
+    phase: "merge",
+    artifact: "pr_open",
+    validation: "floor_passed",
+    dispatchMode: "build",
+  })
+  const h = harness([row])
+  h.observations.set("7", {
+    provider: "completed",
+    prs: [openPr(7, "head-7")],
+    floor: "passed",
+  })
+  h.deps.getPullRequestState = mock(async (_r: { owner: string; repo: string }, pr: number) => ({
+    number: pr,
+    title: "PR",
+    isDraft: false,
+    state: "MERGED",
+    mergeable: "MERGEABLE",
+    reviewDecision: null,
+    headSha: `head-${pr}`,
+    baseRef: "main",
+    baseSha: `base-${pr}`,
+  }))
+
+  const result = await advance({}, h.deps)
+
+  // Reconciled as success (a prior 5xx that actually merged) — no second merge,
+  // no approval consumed, so a restored approval can never be double-spent.
+  expect(h.deps.mergePullRequest).not.toHaveBeenCalled()
+  expect(h.deps.verifyAndConsumeApproval).not.toHaveBeenCalled()
+  expect(row.terminal).toBe(true)
+  expect(row.artifact).toBe("pr_merged")
+  expect(result.applied.some((a) => a.includes("already-merged"))).toBe(true)
+})
+
+test("#4b: a recordApproval failure aborts before clearing the block or answering the decision", async () => {
+  const row = unit({
+    issue: 7,
+    pr: 7,
+    provider: "in_progress",
+    phase: "merge",
+    validation: "floor_passed",
+    verifierAssigned: true,
+    blockingDecisionId: "dec-rec",
+  })
+  const h = harness([row])
+  h.deps.findByKey = mock(async () => ({ decisionId: "dec-rec" }) as never)
+  h.deps.recordApproval = mock(async () => {
+    throw new Error("ledger 503")
+  })
+
+  const result = await advance(
+    { humanDecisions: [{ requestId: "req-rec", choice: "approve" }] },
+    h.deps,
+  )
+
+  expect(h.deps.recordApproval).toHaveBeenCalledTimes(1)
+  // The human's Approve is not lost: the decision stays un-answered and the unit
+  // stays blocked for a clean re-enqueued retry.
+  expect(h.deps.markAnswered).not.toHaveBeenCalled()
+  expect(row.blockingDecisionId).toBe("dec-rec")
+  expect(result.applied.some((a) => a.includes("error applying decision"))).toBe(true)
 })
