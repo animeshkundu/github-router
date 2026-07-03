@@ -782,6 +782,7 @@ async function applyModelAnswer(
     // is still working; the retry counter still advances so a stuck unit
     // eventually escalates.
     if (unit.pr !== null) {
+      await assertFenceHeld("fix-instruction review")
       await deps.submitReview(repo, unit.pr, "REQUEST_CHANGES", instruction)
     }
     unit.retries += 1
@@ -792,6 +793,7 @@ async function applyModelAnswer(
     const answerText = stringValue(verdict.answer)
     // The agent surfaces questions in its PR thread; answer there via a comment.
     if (answerText !== undefined && unit.pr !== null) {
+      await assertFenceHeld("agent-question comment")
       await deps.postComment(repo, unit.pr, answerText)
       unit.lastSteer = { sha: unit.headSha ?? undefined, atMs: Date.now() }
       applied.push(`answered agent question for ${unit.missionId}:${unitHandle(unit)}`)
@@ -826,6 +828,7 @@ async function applyModelAnswer(
     // Best-effort: a review-post failure must not lose the recorded verdict.
     if (unit.pr !== null) {
       const reason = stringValue(verdict.reason) ?? (passed ? "Verified: meets acceptance criteria." : "Changes requested by cross-lab verification.")
+      await assertFenceHeld("judge-verdict review")
       try {
         await deps.submitReview(repo, unit.pr, passed ? "APPROVE" : "REQUEST_CHANGES", reason)
       } catch (err) {
@@ -1174,6 +1177,7 @@ async function assignVerifier(
   // different lab than the copilot producer, so producer≠checker holds at the
   // decision. (The other cloud agents cannot be requested as reviewers; only
   // Copilot code review is served — see docs/first-mate-design.md.)
+  await assertFenceHeld("verifier review request")
   await deps.requestReview(agentRepo(unit.repo), unit.pr, COPILOT_REVIEWER_LOGIN)
   unit.verifierAssigned = true
   unit.verifierSha = unit.headSha ?? undefined
@@ -1183,6 +1187,29 @@ async function assignVerifier(
     `requested Copilot code review for ${unit.missionId}:${unitHandle(unit)} PR #${unit.pr}`,
   )
   return true
+}
+
+/**
+ * #8 — guard a duplicate-able external side effect with the ambient fencing
+ * lease. A driver fenced out mid-sweep (its lease stolen) must not perform
+ * external effects that have no OCC/idempotency backstop — reviews, comments,
+ * review requests, check re-runs, task cancels. The ledger write is already
+ * fenced (runFenced); this re-checks the lease IMMEDIATELY before the effect and
+ * throws if we no longer hold it, so a fenced-out driver skips it (the throw is
+ * caught by the per-unit / per-answer isolation and the effect never fires).
+ * Outside a runFenced scope (tests / tools / the non-daemon lead) there is no
+ * ambient token → no-op. (Merge is additionally protected by the single-use
+ * approval it consumes, so it cannot be duplicated regardless.)
+ *
+ * Exported for the regression test.
+ */
+export async function assertFenceHeld(effect: string): Promise<void> {
+  const token = currentFenceToken()
+  if (token !== undefined && !(await isCurrentFencingToken(token))) {
+    throw new Error(
+      `first-mate: drive lease lost before ${effect} (token ${token}) — skipping side effect`,
+    )
+  }
 }
 
 async function executeAction(
@@ -1221,6 +1248,7 @@ async function executeAction(
       return
     case "rerun_ci":
       if (evidence.runId !== undefined) {
+        await assertFenceHeld("CI re-run")
         await deps.rerunChecks(agentRepo(unit.repo), {
           runId: evidence.runId,
           failedOnly: true,
@@ -1229,7 +1257,10 @@ async function executeAction(
       }
       return
     case "cancel":
-      if (unit.taskId !== null) await deps.cancelTask(agentRepo(unit.repo), unit.taskId)
+      if (unit.taskId !== null) {
+        await assertFenceHeld("task cancel")
+        await deps.cancelTask(agentRepo(unit.repo), unit.taskId)
+      }
       unit.terminal = true
       unit.phase = "done"
       unit.cancelledBy = "controller"
