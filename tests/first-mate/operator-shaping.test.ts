@@ -4,6 +4,7 @@ import {
   OPERATOR_DENIED_TOOLS,
   OPERATOR_KEPT_TOOLS,
   OPERATOR_MODE_BANNER,
+  assertShapingInstalled,
   operatorPreToolUse,
   shouldDenyOperatorTool,
 } from "~/lib/first-mate/operator-shaping"
@@ -49,5 +50,13 @@ describe("capability shaping — config assertions", () => {
   test("the mode banner names the boundary", () => {
     expect(OPERATOR_MODE_BANNER).toContain("cloud-agent operator")
     expect(OPERATOR_MODE_BANNER).toContain("do NOT hand-code")
+  })
+
+  test("#M4: fail-CLOSED — agents mode with failed injection aborts; other cases pass", () => {
+    // Guard could not be installed in operator mode → must throw (abort launch).
+    expect(() => assertShapingInstalled(true, false)).toThrow(/unshaded/)
+    // Installed, or non-operator session → no throw.
+    expect(() => assertShapingInstalled(true, true)).not.toThrow()
+    expect(() => assertShapingInstalled(false, false)).not.toThrow()
   })
 })

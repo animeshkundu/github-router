@@ -62,6 +62,22 @@ export interface PreToolUseDecision {
   reason?: string
 }
 
+/**
+ * M4 — fail-CLOSED. If operator/`--agents` mode is active but the capability
+ * -shaping guard could NOT be installed (e.g. settings.json unwritable), the
+ * operator session must NOT start unshaded. The launcher calls this after
+ * attempting injection; it throws to abort the launch. Non-agents sessions are
+ * never affected.
+ */
+export function assertShapingInstalled(agentsMode: boolean, injectionSucceeded: boolean): void {
+  if (agentsMode && !injectionSucceeded) {
+    throw new Error(
+      "cloud-agent operator mode requires the capability-shaping PreToolUse hook, " +
+        "but it could not be installed — refusing to start an unshaded operator session.",
+    )
+  }
+}
+
 /** The PreToolUse hook decision for a given tool name in operator mode. */
 export function operatorPreToolUse(
   toolName: string,

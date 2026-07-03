@@ -51,6 +51,7 @@ import {
   FIRST_MATE_GUARD_MATCHER,
   buildFirstMateGuardHookCommand,
 } from "./internal-first-mate-guard"
+import { assertShapingInstalled } from "./lib/first-mate/operator-shaping"
 import { ARTIFACT_REVIEW_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
 import { shouldUseInsecureTls } from "./lib/artifact/tools"
 import { parseBoolEnv } from "./lib/exec"
@@ -582,6 +583,7 @@ export const claude = defineCommand({
         // ALL implementation to GitHub cloud agents. Fail-open, scoped by
         // matcher; non-agents sessions are untouched (no injection).
         if (agentToolsEnabled()) {
+          let shapingInstalled = false
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const guardCmd = buildFirstMateGuardHookCommand(process.execPath, process.argv[1])
@@ -592,11 +594,14 @@ export const claude = defineCommand({
               undefined,
               FIRST_MATE_GUARD_MATCHER,
             )
+            shapingInstalled = true
           } catch (err) {
-            consola.warn(
+            consola.error(
               `Could not register the operator capability-shaping hook: ${String(err)}`,
             )
           }
+          // M4 — fail-CLOSED: never start an operator session without the guard.
+          assertShapingInstalled(true, shapingInstalled)
         }
 
         // ai-or-die session binding. When launched inside an ai-or-die Terminal

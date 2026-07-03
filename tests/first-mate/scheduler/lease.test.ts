@@ -84,4 +84,26 @@ describe("SchedulerLease", () => {
     expect((await b.renew())?.fencingToken).toBe(2)
     expect(await currentFencingToken(dir)).toBe(2)
   })
+
+  test("B2: N concurrent acquirers on an expired lease → EXACTLY ONE holder, no token collision", async () => {
+    const seed = new SchedulerLease({ dir, ttlMs: 1000, nowMs: now })
+    expect((await seed.tryAcquire())?.fencingToken).toBe(1)
+    clock.ms += 5000 // seed lease has expired
+
+    const racers = Array.from({ length: 6 }, () => new SchedulerLease({ dir, ttlMs: 10_000, nowMs: now }))
+    const results = await Promise.all(racers.map((l) => l.tryAcquire()))
+    const winners = results.filter((r): r is NonNullable<typeof r> => r !== undefined)
+
+    // The codex collision would let >1 acquirer return the SAME token. O_EXCL
+    // serialization means the first steals a fresh live lease and the rest see
+    // it live → exactly one winner, and its token is the current fencing token.
+    expect(winners.length).toBe(1)
+    const finalToken = await currentFencingToken(dir)
+    expect(winners[0]?.fencingToken).toBe(finalToken)
+    for (const r of racers) {
+      const held = r.fencingToken
+      if (held === undefined) continue
+      expect(await isCurrentFencingToken(held, dir)).toBe(held === finalToken)
+    }
+  })
 })
