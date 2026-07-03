@@ -16,11 +16,28 @@ import { PATHS } from "~/lib/paths"
  *
  * `drain()` uses atomic rename (not read-then-truncate) so an enqueue that
  * races the drain lands in a fresh file and is picked up next drain rather than
- * being lost.
+ * being lost. It also runs on the SAME promise-chain as `enqueue()`, so a late
+ * append can never interleave between the rename and a reader and hit an
+ * unlinked inode.
+ *
+ * Durability (ack-after-apply): `drain()` claims the queued answers by renaming
+ * the inbox to a `.draining.*` file but does NOT delete it. The caller applies
+ * the answers and then calls the returned `ack()` to unlink the claimed file(s)
+ * — a checkpoint. A crash between drain and apply leaves the `.draining.*` file
+ * on disk, and the next drain replays it, so answers are never dropped.
  */
 export interface QueuedAnswers {
   modelAnswers: ModelAnswer[]
   humanDecisions: HumanDecision[]
+}
+
+export interface DrainedAnswers extends QueuedAnswers {
+  /**
+   * Delete the claimed inbox file(s). Call ONLY after the drained answers have
+   * been durably applied (or their failures re-enqueued). Until ack, a crash
+   * leaves the claim on disk for the next drain to replay.
+   */
+  ack: () => Promise<void>
 }
 
 interface InboxLine {
@@ -37,6 +54,12 @@ export interface AnswerInboxOptions {
 export class AnswerInbox {
   private readonly file: string
   private chain: Promise<void> = Promise.resolve()
+  /**
+   * `.draining.*` files this instance has claimed but not yet acked. The
+   * orphan-replay in `claim()` skips these so a second drain before ack does
+   * not re-read our own still-in-flight claim.
+   */
+  private readonly inflight = new Set<string>()
 
   constructor(opts: AnswerInboxOptions = {}) {
     this.file = path.join(opts.dir ?? PATHS.FIRST_MATE_DIR, "answers.jsonl")
@@ -94,15 +117,28 @@ export class AnswerInbox {
     }
   }
 
-  async drain(): Promise<QueuedAnswers> {
+  async drain(): Promise<DrainedAnswers> {
+    // Serialize on the SAME chain as enqueue() so a late append cannot land
+    // between the rename and a reader (unlinked-inode race).
+    const run = this.chain.then(() => this.claim())
+    this.chain = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
+  }
+
+  private async claim(): Promise<DrainedAnswers> {
     const out: QueuedAnswers = { modelAnswers: [], humanDecisions: [] }
     const dir = path.dirname(this.file)
     const base = path.basename(this.file)
+    const claimed: string[] = []
     // Crash-mid-drain recovery: a prior drain that renamed the inbox to a
-    // `.draining.*` file but died before consuming it leaves the answers
-    // orphaned. Replay any such orphans FIRST so answers are never lost.
-    // (The lease holder is the single drainer, so a live concurrent drain
-    // stealing another's in-flight file is not a real scenario here.)
+    // `.draining.*` file but died before acking leaves the answers orphaned.
+    // Replay any such orphans FIRST so answers are never lost. Skip files this
+    // instance still holds in-flight (claimed, not yet acked) so a re-drain
+    // before ack does not double-read its own claim. Orphans are returned but
+    // NOT unlinked here — ack does that once the caller has applied them.
     let siblings: string[] = []
     try {
       siblings = await fs.readdir(dir)
@@ -112,27 +148,31 @@ export class AnswerInbox {
     for (const name of siblings) {
       if (!name.startsWith(`${base}.draining.`)) continue
       const orphan = path.join(dir, name)
+      if (this.inflight.has(orphan)) continue
       try {
         this.mergeLines(await fs.readFile(orphan, "utf8"), out)
+        claimed.push(orphan)
       } catch {
-        // unreadable — drop
-      } finally {
+        // unreadable — drop it so it cannot block the queue forever
         await fs.unlink(orphan).catch(() => {})
       }
     }
     // Claim the current inbox atomically.
-    const claimed = `${this.file}.draining.${process.pid}.${randomBytes(4).toString("hex")}`
+    const target = `${this.file}.draining.${process.pid}.${randomBytes(4).toString("hex")}`
     try {
-      await fs.rename(this.file, claimed)
+      await fs.rename(this.file, target)
+      this.mergeLines(await fs.readFile(target, "utf8"), out)
+      claimed.push(target)
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return out
-      throw err
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err
     }
-    try {
-      this.mergeLines(await fs.readFile(claimed, "utf8"), out)
-    } finally {
-      await fs.unlink(claimed).catch(() => {})
+    for (const p of claimed) this.inflight.add(p)
+    const ack = async (): Promise<void> => {
+      for (const p of claimed) {
+        await fs.unlink(p).catch(() => {})
+        this.inflight.delete(p)
+      }
     }
-    return out
+    return { ...out, ack }
   }
 }

@@ -140,7 +140,11 @@ export interface AdvanceInput {
       modelAnswers?: ModelAnswer[]
       humanDecisions?: HumanDecision[]
     }): Promise<number>
-    drain(): Promise<{ modelAnswers: ModelAnswer[]; humanDecisions: HumanDecision[] }>
+    drain(): Promise<{
+      modelAnswers: ModelAnswer[]
+      humanDecisions: HumanDecision[]
+      ack: () => Promise<void>
+    }>
   }
   /**
    * Chunk A step 2: when this call defers (non-holder), it surfaces the work the
@@ -848,8 +852,14 @@ async function applyHumanDecision(
     return
   }
 
-  await deps.markAnswered(decisionId, decision.choice, "human")
-
+  // F1 ORDERING: mutate the units (and record any merge approval) FIRST, then
+  // markAnswered LAST. The unit writes (upsertUnit) are the fenced/OCC writes
+  // that can throw under contention; if one does, this function throws BEFORE
+  // markAnswered so the decision stays un-answered and the unit stays blocked —
+  // never a durable "answered but still blocked" wedge. The caller re-enqueues
+  // the drained answer, and the retry re-applies cleanly. (A blocked unit is
+  // skipped by the drive sweep, so re-emission does NOT self-heal a wedge — the
+  // ordering + re-enqueue is the actual guarantee.)
   for (const unit of units.filter((row) => row.blockingDecisionId === decisionId)) {
     unit.blockingDecisionId = null
     if (isAbandonChoice(decision.choice)) {
@@ -909,6 +919,10 @@ async function applyHumanDecision(
     await deps.upsertUnit(unit.repo, unit)
   }
 
+  // markAnswered LAST — only durably record "answered" once every affected unit
+  // has been durably updated above (see F1 ORDERING).
+  await deps.markAnswered(decisionId, decision.choice, "human")
+
   applied.push(`recorded human decision ${decision.choice}`)
 }
 
@@ -939,6 +953,22 @@ async function applySubmittedAnswers(
     } catch (err) {
       consola.warn(`first-mate: human decision ${decision.requestId} failed to apply:`, err)
       applied.push(`error applying decision ${decision.requestId}: ${errText(err)}`)
+      // F1: the answer was destructively drained from the inbox. A failed apply
+      // (OCC exhaustion / fenced upsertUnit) must NOT drop it — re-enqueue so a
+      // later wake retries. markAnswered runs LAST in applyHumanDecision, so a
+      // failure here leaves the decision un-answered and the unit still blocked
+      // (never "answered but blocked"), and the retry applies cleanly.
+      if (input.answerQueue) {
+        try {
+          await input.answerQueue.enqueue({ humanDecisions: [decision] })
+          applied.push(`re-enqueued decision ${decision.requestId} after apply failure`)
+        } catch (reErr) {
+          consola.error(
+            `first-mate: FAILED to re-enqueue decision ${decision.requestId} — answer may be lost:`,
+            reErr,
+          )
+        }
+      }
     }
   }
 }
@@ -1602,8 +1632,10 @@ export async function advance(
     // Holder path: drain any answers queued by deferring callers and merge them
     // with answers submitted on THIS call, then apply all of them.
     let answersInput = input
+    let ackDrained: (() => Promise<void>) | undefined
     if (input.answerQueue) {
       const drained = await input.answerQueue.drain()
+      ackDrained = drained.ack
       if (drained.modelAnswers.length > 0 || drained.humanDecisions.length > 0) {
         answersInput = {
           ...input,
@@ -1614,6 +1646,11 @@ export async function advance(
     }
 
     await applySubmittedAnswers(answersInput, deps, applied)
+    // Checkpoint: the drained answers are now durably applied (and any that
+    // failed to apply were re-enqueued by applySubmittedAnswers). Only now
+    // delete the claimed inbox file(s). A crash before this ack leaves the
+    // claim on disk for the next drain to replay, so no answer is dropped.
+    if (ackDrained) await ackDrained()
 
     const units = await deps.loadAllUnits()
     const missions = await deps.readMissions()
