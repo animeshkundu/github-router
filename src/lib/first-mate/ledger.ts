@@ -140,7 +140,7 @@ function sanitizeSegment(value: string): string {
   return cleaned.length > 0 ? cleaned : "_"
 }
 
-function repoLedgerPath(repo: RepoRef): string {
+export function repoLedgerPath(repo: RepoRef): string {
   return path.join(
     PATHS.FIRST_MATE_DIR,
     `${sanitizeSegment(repo.owner)}__${sanitizeSegment(repo.name)}.json`,
@@ -347,15 +347,26 @@ const LOCK_MAX_WAIT_MS = 10_000
  * writes within ONE process; this closes the daemon-vs-lead cross-process race.
  * A stale lock (older than {@link LOCK_TTL_MS}, e.g. from a crashed writer) is
  * broken so a dead process can't wedge the ledger forever.
+ *
+ * #2 — the lock file carries a unique OWNER TOKEN and `fn` receives a
+ * `verifyOwner()` it MUST call immediately before any durable write. A writer
+ * that paused past the TTL can have its lock broken-as-stale and re-taken by
+ * another process; when it resumes it still believes it holds the lock, so the
+ * owner-token re-check is what stops it clobbering the thief's write. The
+ * release also only unlinks a lock we still own, so we never delete the thief's.
  */
-async function withRepoLock<T>(repo: RepoRef, fn: () => Promise<T>): Promise<T> {
+export async function withRepoLock<T>(
+  repo: RepoRef,
+  fn: (verifyOwner: () => Promise<boolean>) => Promise<T>,
+): Promise<T> {
   const lockPath = `${repoLedgerPath(repo)}.lock`
   await fs.mkdir(path.dirname(lockPath), { recursive: true })
+  const ownerToken = `${process.pid}-${randomBytes(8).toString("hex")}`
   const start = Date.now()
   for (;;) {
     try {
       const fh = await fs.open(lockPath, "wx")
-      await fh.writeFile(`${process.pid}`)
+      await fh.writeFile(ownerToken)
       await fh.close()
       break
     } catch (err) {
@@ -377,10 +388,19 @@ async function withRepoLock<T>(repo: RepoRef, fn: () => Promise<T>): Promise<T> 
       await sleep(LOCK_RETRY_MS)
     }
   }
+  // True iff the lock file still holds OUR token (no one broke + re-took it).
+  const verifyOwner = async (): Promise<boolean> => {
+    try {
+      return (await fs.readFile(lockPath, "utf8")).trim() === ownerToken
+    } catch {
+      return false // vanished / unreadable → we no longer own it
+    }
+  }
   try {
-    return await fn()
+    return await fn(verifyOwner)
   } finally {
-    await fs.unlink(lockPath).catch(() => {})
+    // Only remove the lock if it is still ours — never delete a thief's lock.
+    if (await verifyOwner()) await fs.unlink(lockPath).catch(() => {})
   }
 }
 
@@ -412,7 +432,7 @@ async function tryCasWrite(
   expectedRev: number,
   fencingToken: number | undefined,
 ): Promise<"ok" | "conflict"> {
-  return withRepoLock(repo, async () => {
+  return withRepoLock(repo, async (verifyOwner) => {
     const { rev } = await readRepoLedgerWithRev(repo)
     if (fencingToken !== undefined && !(await isCurrentFencingToken(fencingToken))) {
       throw new LedgerFencedError(
@@ -420,6 +440,11 @@ async function tryCasWrite(
       )
     }
     if (rev !== expectedRev) return "conflict"
+    // #2 — re-verify ownership immediately before the write. If our lock was
+    // broken as stale (a >TTL pause) and re-taken by another writer, we are no
+    // longer the exclusive owner: treat it as a conflict and retry rather than
+    // clobber their write.
+    if (!(await verifyOwner())) return "conflict"
     await writeRepoLedger(repo, next, rev + 1)
     return "ok"
   })

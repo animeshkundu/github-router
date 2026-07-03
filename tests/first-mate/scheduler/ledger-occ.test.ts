@@ -16,6 +16,8 @@ const {
   commitUnits,
   runFenced,
   currentFenceToken,
+  withRepoLock,
+  repoLedgerPath,
   LedgerConflictError,
   LedgerFencedError,
 } = await import("~/lib/first-mate/ledger")
@@ -162,6 +164,35 @@ describe("ledger OCC / CAS on the shared write path", () => {
       })
     })
     expect(ids((await readRepoLedgerWithRev(repo)).units)).toEqual(["a", "b", "c"])
+  })
+
+  test("#2 owner-token verify: a stolen lock is rejected, the thief's lock is preserved", async () => {
+    const repo: RepoRef = { owner: "o", name: "steal" }
+    await commitUnits(repo, () => [unit("a", repo)]) // rev 1
+    const lockPath = `${repoLedgerPath(repo)}.lock`
+
+    let ownedBefore = false
+    let ownedAfterSteal = true
+    await withRepoLock(repo, async (verifyOwner) => {
+      ownedBefore = await verifyOwner() // we currently hold the lock
+      // Simulate a >TTL pause: another writer broke our stale lock and re-took it.
+      await fs.writeFile(lockPath, "thief-token")
+      // This is exactly the check tryCasWrite makes immediately before writing —
+      // false here means it returns "conflict" and does NOT clobber the thief.
+      ownedAfterSteal = await verifyOwner()
+    })
+    expect(ownedBefore).toBe(true)
+    expect(ownedAfterSteal).toBe(false)
+    // The release must NOT delete the thief's lock — we no longer own it.
+    expect((await fs.readFile(lockPath, "utf8")).trim()).toBe("thief-token")
+    await fs.unlink(lockPath).catch(() => {}) // cleanup
+
+    // The stale foreign lock left behind is broken normally on the next write,
+    // and no update is lost.
+    await fs.writeFile(lockPath, "thief-token")
+    await fs.utimes(lockPath, new Date(0), new Date(0)) // force it >TTL stale
+    await commitUnits(repo, (u) => [...u, unit("b", repo)])
+    expect(ids((await readRepoLedgerWithRev(repo)).units)).toEqual(["a", "b"])
   })
 
   test("concurrent commits do not lose updates (cross-process lock)", async () => {
