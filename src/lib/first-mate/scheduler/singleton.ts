@@ -1,4 +1,5 @@
-import { open, readFile, unlink, writeFile } from "node:fs/promises"
+import { link, readFile, stat, unlink, writeFile } from "node:fs/promises"
+import type { Stats } from "node:fs"
 import { randomBytes } from "node:crypto"
 import path from "node:path"
 
@@ -11,10 +12,14 @@ import { PATHS } from "~/lib/paths"
  * the same first-mate dir either refuses to start or (opt-in) terminates the
  * incumbent first.
  *
- * Hardening (#7):
- *  - ATOMIC acquisition via `open(..., "wx")` (O_EXCL). Two racing daemons can no
- *    longer both pass a read-then-write check — exactly one creates the file; the
- *    loser sees EEXIST and consults the incumbent.
+ * Hardening (#7, R3 #2):
+ *  - ATOMIC, FULLY-FORMED acquisition. We write the whole record to a private
+ *    temp then `fs.link()` it onto the pidfile path. link() is create-if-absent
+ *    (only one daemon wins) AND the pidfile is never observed empty — closing the
+ *    "open(wx) creates an empty file, JSON written a tick later" window in which
+ *    a second daemon read the empty file, mistook it for stale, deleted the
+ *    incumbent's file, and both-acquired. A loser sees EEXIST and consults the
+ *    incumbent; an undefined/empty record is NOT blind-deleted (see below).
  *  - IDENTITY, not PID alone. The pidfile stores `{pid, token, startedMs}` with a
  *    per-acquisition random token. Release and stale-takeover only remove a file
  *    that still carries OUR token, so we never delete a successor's pidfile, and
@@ -87,6 +92,14 @@ export interface SingletonResult {
 
 const DEFAULT_TERMINATE_WAIT_MS = 5_000
 const DEFAULT_POLL_MS = 50
+/**
+ * How recently a ZERO-BYTE pidfile must have been touched for us to treat it as
+ * a peer possibly mid-create rather than crash debris. Atomic link-create means
+ * the pidfile is never actually observed empty, so this is belt & suspenders: a
+ * fresh empty file is respected (refuse, never delete → never both-run); an aged
+ * empty file is retired as stale.
+ */
+const EMPTY_PIDFILE_GRACE_MS = 5_000
 
 function parseRecord(raw: string): PidRecord | undefined {
   const trimmed = raw.trim()
@@ -138,6 +151,7 @@ export async function acquireDaemonSingleton(
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
   const pidPath = daemonPidPath(dir)
   const serialized = JSON.stringify({ pid: selfPid, token, startedMs: now() } satisfies PidRecord)
+  const tmpPath = `${pidPath}.tmp.${selfPid}.${token}`
 
   const readRecord = async (): Promise<PidRecord | undefined> => {
     try {
@@ -157,17 +171,26 @@ export async function acquireDaemonSingleton(
   }
 
   const tryCreate = async (): Promise<boolean> => {
+    // Write the FULL record to a private temp, then atomically hard-link it into
+    // place. link() is create-if-absent AND the pidfile is fully-formed the
+    // instant it appears — this closes the "open(wx) creates an empty file, JSON
+    // is written a tick later" window in which a second daemon could read the
+    // empty file, mistake it for stale/corrupt, delete the incumbent's file, and
+    // both-acquire.
     try {
-      const fh = await open(pidPath, "wx", 0o600)
-      try {
-        await fh.writeFile(serialized)
-      } finally {
-        await fh.close()
-      }
+      await writeFile(tmpPath, serialized, { mode: 0o600 })
+    } catch {
+      return false
+    }
+    try {
+      await link(tmpPath, pidPath)
       return true
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
       return false
+    } finally {
+      // The pidfile now stands on its own hardlink (on success) — drop the temp.
+      await unlink(tmpPath).catch(() => {})
     }
   }
 
@@ -191,7 +214,26 @@ export async function acquireDaemonSingleton(
 
     const existing = await readRecord()
     if (existing === undefined) {
-      // Vanished/corrupt between our create attempt and read — retry create.
+      // No valid record on disk. Do NOT blind-delete: an empty file may be a
+      // peer that just created the pidfile and has not written the JSON yet
+      // (the empty-file window). Distinguish it from genuine debris.
+      let st: Stats | undefined
+      try {
+        st = await stat(pidPath)
+      } catch {
+        st = undefined
+      }
+      if (st === undefined) {
+        // Vanished between our create attempt and the read — retry create.
+        continue
+      }
+      if (st.size === 0 && now() - st.mtimeMs < EMPTY_PIDFILE_GRACE_MS) {
+        // A peer likely just created the pidfile and is about to write it. We
+        // cannot read its pid, so REFUSE conservatively rather than delete it
+        // and risk two daemons; a later start resolves it once it is written.
+        return refused(selfPid)
+      }
+      // Aged-empty (crashed mid-create) or non-empty corruption → stale; retire.
       await unlink(pidPath).catch(() => {})
       continue
     }

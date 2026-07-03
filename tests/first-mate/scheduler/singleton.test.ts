@@ -119,4 +119,27 @@ describe("daemon process singleton (pidfile)", () => {
     expect(r.acquired).toBe(true)
     expect(recordedPid()).toBe(300)
   })
+
+  test("a created-but-not-yet-written (empty) pidfile is preserved; B refuses (R3 #2)", async () => {
+    // Simulate an incumbent that created the pidfile but has not yet written its
+    // JSON — the empty-file window. A second daemon must NOT delete it (that is
+    // the double-acquire) and must NOT acquire.
+    await fsp.writeFile(pidPath(), "")
+    const r = await acquireDaemonSingleton({ dir, selfPid: 200, isAlive: () => true })
+    expect(r.acquired).toBe(false)
+    // The incumbent's file is left intact and untouched for it to finish writing.
+    expect(fs.existsSync(pidPath())).toBe(true)
+    expect(await fsp.readFile(pidPath(), "utf8")).toBe("")
+  })
+
+  test("an AGED empty pidfile (crashed mid-create) is retired and taken over (R3 #2)", async () => {
+    // An empty file older than the grace window is debris, not a live peer — it
+    // must not wedge startup forever.
+    await fsp.writeFile(pidPath(), "")
+    const old = new Date(Date.now() - 60_000)
+    await fsp.utimes(pidPath(), old, old)
+    const r = await acquireDaemonSingleton({ dir, selfPid: 300, isAlive: () => true })
+    expect(r.acquired).toBe(true)
+    expect(recordedPid()).toBe(300)
+  })
 })
