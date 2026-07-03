@@ -78,6 +78,15 @@ export interface PreToolUseDecision {
  * command/process substitution, file-writing redirection, an unknown binary, or
  * an unknown/mutating subcommand of an allowlisted multiplexer (git/gh).
  *
+ * KNOWN LIMITATION (documented, accepted for a guardrail): this uses a
+ * hand-rolled tokenizer (quote- and backslash-aware), NOT a full shell parser,
+ * so validate can still DESYNC from execute on adversarial input (exotic
+ * quoting/expansion/heredocs). It is defense-in-depth against a COOPERATING
+ * operator, NOT a boundary against a hostile one — a determined operator with a
+ * shell can still get code to run. The robust future step is a real shell
+ * tokenizer (e.g. the `shell-quote` parser) so validate == execute, or simply
+ * not exposing arbitrary Bash; true isolation needs OS-level sandboxing.
+ *
  * Returns a human reason when the command is DENIED, else undefined (allowed).
  */
 
@@ -89,7 +98,9 @@ const READ_ONLY_BINARIES = new Set<string>([
   // file inspection
   "ls", "cat", "bat", "head", "tail", "wc", "stat", "file", "du", "df", "tree",
   "readlink", "realpath", "dirname", "basename", "nl", "tac", "od", "hexdump",
-  "xxd", "strings", "less", "more",
+  "strings", "less", "more",
+  // NB: `xxd` is deliberately excluded — `xxd infile outfile` (and `xxd -r`)
+  // write a file with no redirection; od/hexdump/strings cover read-only dumps.
   // search / find
   "grep", "egrep", "fgrep", "rg", "ag", "ack", "fd", "find", "locate", "glob",
   // read-only text processing (a file-write via redirection is caught
@@ -116,8 +127,26 @@ const GIT_REFLOG_READONLY = new Set<string>(["show", "exists"])
 
 /** git global options that CONSUME the following token (so it isn't the subcommand). */
 const GIT_GLOBAL_ARG_FLAGS = new Set<string>([
-  "-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+  "-C", "--git-dir", "--work-tree", "--namespace",
 ])
+// `-c` and `--exec-path` are NOT here (and are rejected outright below): they are
+// config/exec injection vectors — `git -c core.pager=<cmd>` / `core.sshCommand=` /
+// `core.fsmonitor=` and `--exec-path=<dir>` run arbitrary commands.
+
+/**
+ * git argument forms that inject command execution or write a file, anywhere in
+ * the invocation (before OR after the subcommand). `-c`/`--exec-path` are RCE;
+ * `--output`/`-O`/`--open-files-in-pager` write or spawn a pager.
+ */
+function gitArgIsDangerous(tok: string): string | undefined {
+  if (tok === "-c") return "git -c can inject config that executes commands"
+  if (tok === "--exec-path" || tok.startsWith("--exec-path=")) {
+    return "git --exec-path can run commands from an attacker path"
+  }
+  if (tok === "--output" || tok.startsWith("--output=")) return "git --output writes a file"
+  if (tok === "-O" || tok === "--open-files-in-pager") return "git -O opens files in a pager (executes)"
+  return undefined
+}
 
 /** gh actions that only read. Structure: `gh <cmd> <action> …`. */
 const GH_READONLY_ACTIONS = new Set<string>([
@@ -158,6 +187,13 @@ function splitSegments(command: string): string[] | undefined {
       current += ch
       continue
     }
+    // A backslash escapes the next char (e.g. `\;` in `find … -exec … \;`) so it
+    // is NOT treated as a separator — keeps validate aligned with execute.
+    if (ch === "\\" && i + 1 < command.length) {
+      current += ch + command[i + 1]!
+      i++
+      continue
+    }
     // operators: | || & && ; newline, and subshell grouping ( ). NOTE `{` / `}`
     // are intentionally NOT separators so brace expansion (`echo {a,b}`) is one
     // word; a `{ …; }` command group still fails closed because its `{` becomes
@@ -190,6 +226,13 @@ function tokenize(segment: string): string[] {
       quote = ch
       continue
     }
+    // Backslash escapes the next char into the current token (so `\;`/`\ ` are a
+    // literal token char, not a separator/whitespace boundary).
+    if (ch === "\\" && i + 1 < segment.length) {
+      current += segment[i + 1]!
+      i++
+      continue
+    }
     if (ch === " " || ch === "\t") {
       if (current.length > 0) {
         tokens.push(current)
@@ -209,11 +252,10 @@ function gitDenyReason(args: string[]): string | undefined {
   const bareAfterSub: string[] = []
   for (let i = 0; i < args.length; i++) {
     const tok = args[i]!
-    // `--output[=file]` (git diff / format-patch) WRITES a file — never read-only,
-    // wherever it appears. (`-o` is left alone: `git ls-files -o` is read-only.)
-    if (tok === "--output" || tok.startsWith("--output=")) {
-      return "git --output writes a file"
-    }
+    // Injection/write forms are denied wherever they appear (before OR after the
+    // subcommand): `-c` config-injection, `--exec-path`, `--output`, `-O` pager.
+    const danger = gitArgIsDangerous(tok)
+    if (danger !== undefined) return danger
     if (subcommand === undefined) {
       if (tok.startsWith("--") && tok.includes("=")) continue // --git-dir=… (self-contained)
       if (GIT_GLOBAL_ARG_FLAGS.has(tok)) {
@@ -313,9 +355,6 @@ function argDenyReason(binary: string, args: string[]): string | undefined {
         return "tree -o writes an output file"
       }
       return undefined
-    case "xxd":
-      if (has("-r", "-revert")) return "xxd -r reconstructs/writes binary"
-      return undefined
     case "diff":
       if (args.some((a) => a === "--output" || a.startsWith("--output="))) {
         return "diff --output writes a file"
@@ -353,6 +392,24 @@ function maskQuotes(command: string): string | undefined {
   return out
 }
 
+/**
+ * Env-var names whose VALUE is executed as a command by a subsequent read-only
+ * tool (git/less/…). A leading `NAME=… cmd` assignment to one of these turns an
+ * allowlisted read into arbitrary execution, so it fails closed.
+ */
+const COMMAND_HOOK_ENV = new Set<string>([
+  "GIT_PAGER", "PAGER", "GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS", "GIT_SEQUENCE_EDITOR",
+  "VISUAL", "BASH_ENV", "ENV", "IFS", "PROMPT_COMMAND",
+])
+function isCommandHookEnv(name: string): boolean {
+  if (COMMAND_HOOK_ENV.has(name)) return true
+  if (name.endsWith("EDITOR")) return true // EDITOR, GIT_EDITOR, HGEDITOR, …
+  if (name.endsWith("_COMMAND")) return true // GIT_SSH_COMMAND, GIT_PROXY_COMMAND, …
+  if (name.startsWith("LESS")) return true // LESSOPEN, LESSCLOSE, LESS, LESSSECURE, …
+  if (name.startsWith("GIT_SSH")) return true // GIT_SSH, GIT_SSH_COMMAND/VARIANT
+  return false
+}
+
 export function bashDenyReason(command: string): string | undefined {
   // Command / process substitution can hide an arbitrary mutating command; we
   // cannot vet it, so fail closed.
@@ -382,8 +439,17 @@ export function bashDenyReason(command: string): string | undefined {
   for (const segment of segments) {
     const tokens = tokenize(segment)
     // Skip leading VAR=value environment assignments; the next token is the cmd.
+    // BUT reject assignments to env vars that HOOK command execution (a pager /
+    // editor / diff-helper / ssh-command the subsequent git/less/… then runs):
+    // e.g. `GIT_PAGER='touch x' git log`, `LESSOPEN='|touch x %s' less f`.
     let idx = 0
-    while (idx < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[idx]!)) idx++
+    while (idx < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[idx]!)) {
+      const name = tokens[idx]!.slice(0, tokens[idx]!.indexOf("="))
+      if (isCommandHookEnv(name)) {
+        return `environment assignment ${name}= can hook command execution (fail-closed)`
+      }
+      idx++
+    }
     if (idx >= tokens.length) {
       // A segment that is only assignments (`FOO=bar`) mutates only the shell
       // env — harmless read-only-wise. But a lone `<` input redirect token, etc.

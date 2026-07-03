@@ -55,7 +55,6 @@ describe("capability shaping — config assertions", () => {
     expect(ok("gh pr list --json number 2>/dev/null")).toBe(false)
     expect(ok("gh -R o/n run list")).toBe(false)
     expect(ok("git log --oneline -5")).toBe(false)
-    expect(ok("git -c core.pager=cat show HEAD")).toBe(false)
     expect(ok("cat package.json | jq .name 2>&1")).toBe(false)
     expect(ok("rg -n TODO src")).toBe(false)
     expect(ok("ls -la && cat README.md")).toBe(false)
@@ -117,7 +116,8 @@ describe("capability shaping — config assertions", () => {
     expect(ok("fd -x rm")).toBe(true)
     expect(ok("fd --exec-batch rm")).toBe(true)
     expect(ok("tree -o out.html")).toBe(true)
-    expect(ok("xxd -r dump.hex")).toBe(true)
+    expect(ok("xxd -r dump.hex")).toBe(true) // xxd dropped from the allowlist (writes a file)
+    expect(ok("xxd f.bin out.bin")).toBe(true) // 2nd positional is an output file
     expect(ok("diff --output=patch a b")).toBe(true)
     // BLOCKED: mutating git that a subcommand/`--output`/reflog-action check catches.
     expect(ok("git symbolic-ref HEAD refs/heads/x")).toBe(true)
@@ -150,6 +150,38 @@ describe("capability shaping — config assertions", () => {
     // The genuine discard idiom is still allowed.
     expect(ok("gh pr view 42 2>/dev/null")).toBe(false)
     expect(ok("gh pr list 1>/dev/null 2>&1")).toBe(false)
+  })
+
+  test("B3: git config/exec injection, env command-hooks, and escaped-separator desync fail closed", () => {
+    const ok = (c: string): boolean => operatorPreToolUse("Bash", true, { command: c }).block
+    // git -c config-injection RCE (core.pager/sshCommand/fsmonitor run commands).
+    expect(ok("git -c core.pager=cat show HEAD")).toBe(true)
+    expect(ok("git -c core.sshCommand='touch x' log")).toBe(true)
+    expect(ok("git -c core.fsmonitor='touch x' status")).toBe(true)
+    // --exec-path / -O (open-files-in-pager) are exec vectors; --output writes.
+    expect(ok("git --exec-path=/tmp/evil log")).toBe(true)
+    expect(ok("git grep -O foo")).toBe(true)
+    expect(ok("git log --output=/tmp/x")).toBe(true)
+    // Leading env assignments that hook a command the read-only tool then runs.
+    expect(ok("GIT_PAGER='touch x' git log")).toBe(true)
+    expect(ok("LESSOPEN='|touch x %s' less f")).toBe(true)
+    expect(ok("GIT_EXTERNAL_DIFF='touch x' git diff")).toBe(true)
+    expect(ok("EDITOR=vim git log")).toBe(true)
+    expect(ok("GIT_SSH_COMMAND='touch x' git log")).toBe(true)
+    // Escaped separator must not desync the parser away from the real -exec.
+    expect(ok("find . -type f -exec touch x \\;")).toBe(true)
+    // A benign leading assignment before a read-only command still passes.
+    expect(ok("LC_ALL=C git log")).toBe(false)
+    expect(ok("GIT_DIR=.git git status")).toBe(false)
+  })
+
+  test("B3: legit reads with shell metacharacters inside quotes/braces are NOT over-blocked", () => {
+    const ok = (c: string): boolean => operatorPreToolUse("Bash", true, { command: c }).block
+    expect(ok("rg 'a->b' src")).toBe(false)
+    expect(ok("grep \"=>\" f")).toBe(false)
+    expect(ok("git log --grep='>'")).toBe(false)
+    expect(ok("jq '.a>1' f.json")).toBe(false)
+    expect(ok("cat src/{a,b}.ts")).toBe(false)
   })
 
   test("B2: bashDenyReason pinpoints the write/exec vector", () => {
