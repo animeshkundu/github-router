@@ -63,36 +63,217 @@ export interface PreToolUseDecision {
 }
 
 /**
- * B1 — detect a Bash command that MUTATES the filesystem/repo. Bash stays
- * available to the operator for read-only `gh` and inspection, but hand-coding
- * via the shell (writing files, applying patches, committing) is the exact
- * vector the Edit/Write deny-list closes, so it must be blocked here too.
+ * B1 — decide whether a Bash command is READ-ONLY enough for the operator.
  *
- * Returns a human reason when the command mutates, else undefined. Conservative
- * by design (fail-toward-blocking): output redirection to a real file, tee,
- * in-place sed, dd, patch, and mutating git subcommands all block. The only
- * redirection exceptions are pure file-descriptor duplication (`2>&1`, `>&2`)
- * and discarding to `/dev/null`, which do not write a real file — so the common
- * read-only idioms (`gh ... 2>/dev/null`) stay usable.
+ * THREAT MODEL: this is a guardrail against a COOPERATING operator accidentally
+ * hand-coding via the shell (the same vector the Edit/Write deny-list closes),
+ * NOT a security sandbox against a determined adversary. A denylist is trivially
+ * bypassable (python -c/node -e writes, cp/mv/install/tee-by-path, `git -c …
+ * commit`, …), so this is an ALLOWLIST: only provably read-only commands pass;
+ * everything else is denied. True isolation against a hostile process requires
+ * OS-level sandboxing (a restricted user, container, seccomp) — out of scope for
+ * an in-process hook and documented as such.
+ *
+ * FAIL-CLOSED: anything we cannot confidently prove read-only is denied —
+ * command/process substitution, file-writing redirection, an unknown binary, or
+ * an unknown/mutating subcommand of an allowlisted multiplexer (git/gh).
+ *
+ * Returns a human reason when the command is DENIED, else undefined (allowed).
  */
-export function bashMutationReason(command: string): string | undefined {
-  // Strip redirections that do NOT write a real file before testing for `>`:
-  //   - fd duplication: 2>&1, >&2, >&-
-  //   - discard to /dev/null: >/dev/null, 2>/dev/null, &>/dev/null
+
+/** Bare binaries that are read-only in any invocation (basename-matched). */
+const READ_ONLY_BINARIES = new Set<string>([
+  // trivial / builtins
+  "echo", "printf", "true", "false", "test", "[", "pwd",
+  "whoami", "hostname", "uname", "date", "which", "type", "id", "uptime", "tty",
+  // file inspection
+  "ls", "cat", "bat", "head", "tail", "wc", "stat", "file", "du", "df", "tree",
+  "readlink", "realpath", "dirname", "basename", "nl", "tac", "od", "hexdump",
+  "xxd", "strings", "less", "more",
+  // search / find
+  "grep", "egrep", "fgrep", "rg", "ag", "ack", "fd", "find", "locate", "glob",
+  // read-only text processing (a file-write via redirection is caught
+  // separately; a write hidden inside a program string over-blocks, which is
+  // safe for a guardrail)
+  "sort", "uniq", "cut", "tr", "column", "comm", "join", "paste", "fold",
+  "expand", "unexpand", "seq", "rev", "cksum", "md5sum", "sha1sum", "sha256sum",
+  "jq", "yq", "gron", "diff", "difft", "cmp", "scc", "tokei", "cloc",
+])
+
+/** git subcommands that never mutate the repo or working tree. */
+const GIT_READONLY_SUBCOMMANDS = new Set<string>([
+  "log", "show", "diff", "status", "rev-parse", "describe", "blame",
+  "shortlog", "reflog", "ls-files", "ls-tree", "ls-remote", "cat-file",
+  "for-each-ref", "rev-list", "whatchanged", "grep", "annotate", "show-ref",
+  "symbolic-ref", "var", "count-objects",
+])
+
+/** git global options that CONSUME the following token (so it isn't the subcommand). */
+const GIT_GLOBAL_ARG_FLAGS = new Set<string>([
+  "-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+])
+
+/** gh actions that only read. Structure: `gh <cmd> <action> …`. */
+const GH_READONLY_ACTIONS = new Set<string>([
+  "view", "list", "diff", "checks", "status",
+])
+
+/** gh global options that consume the following token. */
+const GH_GLOBAL_ARG_FLAGS = new Set<string>(["-R", "--repo"])
+
+/** Basename a binary path so `/usr/bin/tee` → `tee`. */
+function binaryBasename(token: string): string {
+  const slash = token.lastIndexOf("/")
+  return slash === -1 ? token : token.slice(slash + 1)
+}
+
+/**
+ * Split a command into pipeline/list segments, respecting single and double
+ * quotes so an operator inside a quoted string is not treated as a separator.
+ * Grouping `()`/`{}` are treated as separators. Returns undefined when the input
+ * is un-vettable (an unterminated quote) so the caller fails closed.
+ */
+function splitSegments(command: string): string[] | undefined {
+  const segments: string[] = []
+  let current = ""
+  let quote: '"' | "'" | undefined
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!
+    if (quote) {
+      current += ch
+      if (ch === quote) quote = undefined
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      current += ch
+      continue
+    }
+    // operators: | || & && ; newline, and grouping ( ) { }
+    if (ch === "|" || ch === "&" || ch === ";" || ch === "\n" || ch === "(" || ch === ")" || ch === "{" || ch === "}") {
+      segments.push(current)
+      current = ""
+      continue
+    }
+    current += ch
+  }
+  if (quote) return undefined // unterminated quote — un-vettable
+  segments.push(current)
+  return segments.map((s) => s.trim()).filter((s) => s.length > 0)
+}
+
+/** Tokenize a single segment on whitespace, respecting quotes. */
+function tokenize(segment: string): string[] {
+  const tokens: string[] = []
+  let current = ""
+  let quote: '"' | "'" | undefined
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]!
+    if (quote) {
+      if (ch === quote) quote = undefined
+      else current += ch
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === " " || ch === "\t") {
+      if (current.length > 0) {
+        tokens.push(current)
+        current = ""
+      }
+      continue
+    }
+    current += ch
+  }
+  if (current.length > 0) tokens.push(current)
+  return tokens
+}
+
+/** Validate a `git …` invocation is read-only. Returns a deny reason or undefined. */
+function gitDenyReason(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const tok = args[i]!
+    if (tok.startsWith("--") && tok.includes("=")) continue // --git-dir=… (self-contained)
+    if (GIT_GLOBAL_ARG_FLAGS.has(tok)) {
+      i++ // skip its argument
+      continue
+    }
+    if (tok.startsWith("-")) continue // lone global flag (-p, --no-pager, …)
+    // first bareword is the subcommand
+    return GIT_READONLY_SUBCOMMANDS.has(tok)
+      ? undefined
+      : `git subcommand '${tok}' is not read-only`
+  }
+  return "git invocation has no inspectable subcommand (fail-closed)"
+}
+
+/** Validate a `gh …` invocation is read-only. Returns a deny reason or undefined. */
+function ghDenyReason(args: string[]): string | undefined {
+  const bare: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const tok = args[i]!
+    if (GH_GLOBAL_ARG_FLAGS.has(tok)) {
+      i++ // skip its argument
+      continue
+    }
+    if (tok.startsWith("-")) continue
+    bare.push(tok)
+    if (bare.length === 2) break
+  }
+  // `gh <cmd> <action>` — the action decides read vs write. `gh api …` has no
+  // read-only action word, so it fails closed (it can POST/PATCH/DELETE).
+  const action = bare[1]
+  if (action !== undefined && GH_READONLY_ACTIONS.has(action)) return undefined
+  return `gh ${bare.join(" ") || "(no subcommand)"} is not an allowlisted read-only action`
+}
+
+export function bashDenyReason(command: string): string | undefined {
+  // Command / process substitution can hide an arbitrary mutating command; we
+  // cannot vet it, so fail closed.
+  if (/\$\(|`|<\(|>\(/.test(command)) {
+    return "command/process substitution cannot be vetted (fail-closed)"
+  }
+  // Strip redirections that do NOT write a real file, then any remaining `>`
+  // writes a file. (fd duplication 2>&1/>&2/>&-, discard to /dev/null.)
   const benign = command
     .replace(/\d*>&\s*[\d-]+/g, " ")
     .replace(/&?\d*>{1,2}\s*\/dev\/null/g, " ")
   if (/>/.test(benign)) return "shell output redirection writes a file"
-  if (/(^|[|&;(\s])tee(\s|$)/.test(command)) return "tee writes files"
-  if (/\bsed\b[^|&;]*(\s-[a-z]*i|--in-place)/.test(command)) return "sed -i edits files in place"
-  if (/(^|[|&;(\s])dd(\s|$)/.test(command)) return "dd writes to disk"
-  if (/(^|[|&;(\s])patch(\s|$)/.test(command)) return "patch mutates files"
-  if (
-    /\bgit\s+(apply|commit|checkout|switch|reset|restore|rm|mv|push|stash|clean|revert|cherry-pick|merge|rebase|tag|am|format-patch)\b/.test(
-      command,
-    )
-  ) {
-    return "git subcommand mutates the repository"
+
+  // Segment/tokenize the redirection-stripped form so an fd-dup like `2>&1`
+  // (which contains `&`) is not mistaken for a background-job separator.
+  const segments = splitSegments(benign)
+  if (segments === undefined) return "unparseable shell command (fail-closed)"
+  if (segments.length === 0) return "empty shell command (fail-closed)"
+
+  for (const segment of segments) {
+    const tokens = tokenize(segment)
+    // Skip leading VAR=value environment assignments; the next token is the cmd.
+    let idx = 0
+    while (idx < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[idx]!)) idx++
+    if (idx >= tokens.length) {
+      // A segment that is only assignments (`FOO=bar`) mutates only the shell
+      // env — harmless read-only-wise. But a lone `<` input redirect token, etc.
+      // Allow a pure-assignment segment.
+      continue
+    }
+    const binary = binaryBasename(tokens[idx]!)
+    const rest = tokens.slice(idx + 1)
+    if (binary === "git") {
+      const reason = gitDenyReason(rest)
+      if (reason !== undefined) return reason
+      continue
+    }
+    if (binary === "gh") {
+      const reason = ghDenyReason(rest)
+      if (reason !== undefined) return reason
+      continue
+    }
+    if (!READ_ONLY_BINARIES.has(binary)) {
+      return `'${binary}' is not on the read-only allowlist`
+    }
   }
   return undefined
 }
@@ -150,11 +331,11 @@ export function operatorPreToolUse(
           "Bash call blocked in cloud-agent operator mode — its command could not be inspected (fail-closed).",
       }
     }
-    const reason = bashMutationReason(command)
+    const reason = bashDenyReason(command)
     if (reason !== undefined) {
       return {
         block: true,
-        reason: `Bash file-mutation blocked in cloud-agent operator mode (${reason}) — delegate implementation to a GitHub cloud agent instead of hand-coding via the shell.`,
+        reason: `Bash blocked in cloud-agent operator mode (${reason}) — only read-only shell is allowed; delegate implementation to a GitHub cloud agent instead of hand-coding via the shell.`,
       }
     }
   }
