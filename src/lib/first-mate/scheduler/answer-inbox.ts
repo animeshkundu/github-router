@@ -73,22 +73,7 @@ export class AnswerInbox {
   }
 
   /** Atomically claim all queued answers and clear the inbox. */
-  async drain(): Promise<QueuedAnswers> {
-    const empty: QueuedAnswers = { modelAnswers: [], humanDecisions: [] }
-    const claimed = `${this.file}.draining.${process.pid}.${randomBytes(4).toString("hex")}`
-    try {
-      await fs.rename(this.file, claimed)
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return empty
-      throw err
-    }
-    let raw: string
-    try {
-      raw = await fs.readFile(claimed, "utf8")
-    } finally {
-      await fs.unlink(claimed).catch(() => {})
-    }
-    const out: QueuedAnswers = { modelAnswers: [], humanDecisions: [] }
+  private mergeLines(raw: string, out: QueuedAnswers): void {
     for (const line of raw.split("\n")) {
       if (line.trim().length === 0) continue
       let parsed: InboxLine
@@ -106,6 +91,47 @@ export class AnswerInbox {
       ) {
         out.humanDecisions.push({ requestId: parsed.requestId, choice: parsed.choice })
       }
+    }
+  }
+
+  async drain(): Promise<QueuedAnswers> {
+    const out: QueuedAnswers = { modelAnswers: [], humanDecisions: [] }
+    const dir = path.dirname(this.file)
+    const base = path.basename(this.file)
+    // Crash-mid-drain recovery: a prior drain that renamed the inbox to a
+    // `.draining.*` file but died before consuming it leaves the answers
+    // orphaned. Replay any such orphans FIRST so answers are never lost.
+    // (The lease holder is the single drainer, so a live concurrent drain
+    // stealing another's in-flight file is not a real scenario here.)
+    let siblings: string[] = []
+    try {
+      siblings = await fs.readdir(dir)
+    } catch {
+      siblings = []
+    }
+    for (const name of siblings) {
+      if (!name.startsWith(`${base}.draining.`)) continue
+      const orphan = path.join(dir, name)
+      try {
+        this.mergeLines(await fs.readFile(orphan, "utf8"), out)
+      } catch {
+        // unreadable — drop
+      } finally {
+        await fs.unlink(orphan).catch(() => {})
+      }
+    }
+    // Claim the current inbox atomically.
+    const claimed = `${this.file}.draining.${process.pid}.${randomBytes(4).toString("hex")}`
+    try {
+      await fs.rename(this.file, claimed)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return out
+      throw err
+    }
+    try {
+      this.mergeLines(await fs.readFile(claimed, "utf8"), out)
+    } finally {
+      await fs.unlink(claimed).catch(() => {})
     }
     return out
   }

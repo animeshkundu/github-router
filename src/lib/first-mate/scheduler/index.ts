@@ -1,4 +1,9 @@
-import { advance, type AdvanceResult, type ModelRequest } from "~/lib/first-mate/controller"
+import {
+  advance,
+  type AdvanceResult,
+  type HumanRequest,
+  type ModelRequest,
+} from "~/lib/first-mate/controller"
 
 import { AnswerInbox } from "./answer-inbox"
 import { SchedulerDaemon, type AdvanceLike, type DaemonOptions } from "./daemon"
@@ -52,10 +57,6 @@ export interface ControllerDaemonOptions extends DaemonOverrides {
   push?: PushHook
 }
 
-function toRepo(req: ModelRequest): { owner: string; name: string } | undefined {
-  return req.repo ? { owner: req.repo.owner, name: req.repo.name } : undefined
-}
-
 /**
  * Build the server-side driver daemon. It:
  *  - holds a fencing lease (driveGate) so it never double-drives the heartbeat;
@@ -66,6 +67,72 @@ function toRepo(req: ModelRequest): { owner: string; name: string } | undefined 
  *    push hook). Shadow logging always records for calibration.
  * With both flags off (default) it behaves exactly like the pre-Phase-3 daemon.
  */
+export interface EscalationSink {
+  enqueue: (item: {
+    requestId: string
+    kind: string
+    target: "lead" | "human"
+    reason: string
+    repo?: string
+    missionId?: string
+  }) => Promise<unknown>
+}
+
+function repoStr(repo?: { owner: string; name: string }): string | undefined {
+  return repo ? `${repo.owner}/${repo.name}` : undefined
+}
+
+/**
+ * Routing-gap fix (opus BLOCKER). When the daemon is the drive holder it CONSUMES
+ * the advance() call, so the lead never sees the requests unless the daemon
+ * surfaces them. This ALWAYS routes — independent of shadow/Tier1:
+ *   - every needsModel escalates to the lead (unless an optional autoAnswer path
+ *     auto-accepts it), and
+ *   - every needsHuman escalates to the human queue.
+ * Nothing is dropped when the daemon is primary.
+ */
+export async function routeAdvanceResult(
+  res: { needsModel: ModelRequest[]; needsHuman: HumanRequest[] },
+  deps: {
+    escalation: EscalationSink
+    autoAnswer?: (req: ModelRequest) => Promise<{ accepted: boolean }>
+  },
+): Promise<{ escalatedModel: number; escalatedHuman: number; autoAnswered: number }> {
+  let escalatedModel = 0
+  let escalatedHuman = 0
+  let autoAnswered = 0
+  for (const req of res.needsModel) {
+    if (deps.autoAnswer) {
+      const { accepted } = await deps.autoAnswer(req)
+      if (accepted) {
+        autoAnswered += 1
+        continue
+      }
+    }
+    await deps.escalation.enqueue({
+      requestId: req.requestId,
+      kind: req.kind,
+      target: "lead",
+      reason: "needs lead judgment",
+      repo: repoStr(req.repo),
+      missionId: req.missionId,
+    })
+    escalatedModel += 1
+  }
+  for (const h of res.needsHuman) {
+    await deps.escalation.enqueue({
+      requestId: h.requestId,
+      kind: "human_decision",
+      target: "human",
+      reason: h.reason,
+      repo: repoStr(h.repo),
+      missionId: h.missionId,
+    })
+    escalatedHuman += 1
+  }
+  return { escalatedModel, escalatedHuman, autoAnswered }
+}
+
 export function createControllerDaemon(opts: ControllerDaemonOptions = {}): SchedulerDaemon {
   const { push, ...daemonOverrides } = opts
   const lease = new SchedulerLease()
@@ -77,25 +144,22 @@ export function createControllerDaemon(opts: ControllerDaemonOptions = {}): Sche
     lease,
     advance: async () => {
       const res = await advance({ driveGate: makeDriveGate(lease), answerQueue: inbox })
-      if ((shadowEnabled() || tier1LiveEnabled()) && res.needsModel.length > 0) {
-        for (const req of res.needsModel) {
-          const decision = await shadow.route(fromModelRequest(req))
-          if (decision.autoAccept) {
-            await inbox.enqueue({
-              modelAnswers: [{ requestId: req.requestId, verdict: decision.verdict }],
-            })
-          } else {
-            await escalation.enqueue({
-              requestId: req.requestId,
-              kind: req.kind,
-              target: "lead",
-              reason: decision.reason,
-              repo: toRepo(req) ? `${req.repo.owner}/${req.repo.name}` : undefined,
-              missionId: req.missionId,
-            })
-          }
-        }
-      }
+      // Auto-answer path is only wired when shadow/Tier1 is on; escalation of
+      // everything else happens ALWAYS (routing-gap fix).
+      const autoAnswer =
+        shadowEnabled() || tier1LiveEnabled()
+          ? async (req: ModelRequest): Promise<{ accepted: boolean }> => {
+              const decision = await shadow.route(fromModelRequest(req))
+              if (decision.autoAccept) {
+                await inbox.enqueue({
+                  modelAnswers: [{ requestId: req.requestId, verdict: decision.verdict }],
+                })
+                return { accepted: true }
+              }
+              return { accepted: false }
+            }
+          : undefined
+      await routeAdvanceResult(res, { escalation, autoAnswer })
       return advanceResultToAdvanceLike(res)
     },
     ...daemonOverrides,

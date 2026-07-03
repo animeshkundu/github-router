@@ -186,18 +186,33 @@ export class Outbox {
   }
 
   /**
-   * Drive every pending entry through `executor`. `done`/`already` both settle
-   * the entry to `done` (idempotency — an already-applied effect is success);
-   * `retry` marks it failed with the error and leaves it for a later pass.
-   * Returns a small summary for observability.
+   * Drive due entries through `executor`. Drives BOTH `pending` entries and
+   * previously-`failed` ones that are still under the retry budget and past
+   * their backoff window (finding #4 — a transient blip must not permanently
+   * drop a merge/pages-enable). `done`/`already` settle to `done` (idempotency);
+   * `retry`/throw marks `failed` (attempts++) and re-arms it for a later pass;
+   * once `attempts >= maxAttempts` the entry is left `failed` (a permanent
+   * dead-letter) and no longer re-driven. Returns a small summary.
    */
   async reconcile(
     executor: (entry: OutboxEntry) => Promise<ExecOutcome>,
-  ): Promise<{ done: number; retried: number }> {
-    const pending = await this.list("pending")
+    opts: { maxAttempts?: number; baseBackoffMs?: number } = {},
+  ): Promise<{ done: number; retried: number; deadLettered: number }> {
+    const maxAttempts = opts.maxAttempts ?? 5
+    const base = opts.baseBackoffMs ?? 1000
+    const now = this.now()
+    const all = await this.list()
+    // Re-arm failed→retryable: pending always; failed if under budget AND due.
+    const due = all.filter((e) => {
+      if (e.status === "pending") return true
+      if (e.status !== "failed") return false
+      if (e.attempts >= maxAttempts) return false // permanent dead-letter
+      const backoff = base * 2 ** (e.attempts - 1)
+      return now - e.updatedMs >= backoff
+    })
     let done = 0
     let retried = 0
-    for (const entry of pending) {
+    for (const entry of due) {
       let outcome: ExecOutcome
       try {
         outcome = await executor(entry)
@@ -214,6 +229,7 @@ export class Outbox {
         retried += 1
       }
     }
-    return { done, retried }
+    const deadLettered = (await this.list("failed")).filter((e) => e.attempts >= maxAttempts).length
+    return { done, retried, deadLettered }
   }
 }

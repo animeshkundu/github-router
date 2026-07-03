@@ -41,6 +41,22 @@ describe("AnswerInbox", () => {
     const d2 = await inbox.drain()
     expect(d2.modelAnswers.map((m) => m.requestId)).toEqual(["second"])
   })
+
+  test("recovers orphaned .draining.* answers from a crashed prior drain", async () => {
+    const inbox = new AnswerInbox({ dir })
+    // A prior drain renamed the inbox then died before consuming it.
+    await fs.writeFile(
+      path.join(dir, "answers.jsonl.draining.9999.dead"),
+      `${JSON.stringify({ t: "m", requestId: "orphan-1", verdict: { decision: "approve" } })}\n`,
+    )
+    await inbox.enqueue({ modelAnswers: [{ requestId: "live-1", verdict: 1 }] })
+    const drained = await inbox.drain()
+    expect(drained.modelAnswers.map((m) => m.requestId).sort()).toEqual(["live-1", "orphan-1"])
+    // Orphan file was consumed + removed; a subsequent drain is empty.
+    const stragglers = (await fs.readdir(dir)).filter((n) => n.includes(".draining."))
+    expect(stragglers.length).toBe(0)
+    expect((await inbox.drain()).modelAnswers).toEqual([])
+  })
 })
 
 // Fake deps: loadAllUnits/readMissions are exercised; a decompose answer's
