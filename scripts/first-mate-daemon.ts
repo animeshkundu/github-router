@@ -16,11 +16,26 @@
  */
 import consola from "consola"
 
-import { acquireDaemonSingleton, createControllerDaemon } from "~/lib/first-mate/scheduler"
+import {
+  acquireDaemonSingleton,
+  assertOccSafeForDaemon,
+  createControllerDaemon,
+} from "~/lib/first-mate/scheduler"
 
 if (process.env.GH_ROUTER_FM_DAEMON === "0") {
   consola.warn("first-mate daemon disabled (GH_ROUTER_FM_DAEMON=0).")
   process.exit(0)
+}
+
+// F5 — refuse to start under GH_ROUTER_FM_OCC=0 (unless the explicit single-driver
+// override is set): OCC is the only guard that rejects a fenced-out driver's
+// writes, so daemon+heartbeat with OCC off reopens split-brain. Checked BEFORE
+// acquiring the pidfile so a refusal leaves no state behind.
+try {
+  assertOccSafeForDaemon()
+} catch (err) {
+  consola.error(err instanceof Error ? err.message : String(err))
+  process.exit(1)
 }
 
 // Process singleton: refuse to start a second daemon on the same first-mate dir

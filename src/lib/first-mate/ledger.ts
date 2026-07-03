@@ -106,7 +106,7 @@ export class LedgerFencedError extends Error {
  * Escape hatch: set `GH_ROUTER_FM_OCC=0` to fall back to the legacy
  * in-process-serialized write (no lock, no CAS).
  */
-function occEnabled(): boolean {
+export function occEnabled(): boolean {
   return process.env.GH_ROUTER_FM_OCC !== "0"
 }
 

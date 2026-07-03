@@ -4,6 +4,7 @@ import {
   type HumanRequest,
   type ModelRequest,
 } from "~/lib/first-mate/controller"
+import { occEnabled } from "~/lib/first-mate/ledger"
 
 import { AnswerInbox } from "./answer-inbox"
 import { SchedulerDaemon, type AdvanceLike, type DaemonOptions } from "./daemon"
@@ -22,6 +23,29 @@ import {
  * decouples answer-submission (queued by deferring leads) from driving.
  * Auto-starting it at bootstrap is the capstone step (not done here).
  */
+
+/**
+ * F5 — refuse to start the server-side daemon when ledger OCC is disabled.
+ * GH_ROUTER_FM_OCC=0 turns off the cross-process lock, CAS, AND fencing on the
+ * shared write path. The daemon is a SECOND driver alongside the in-process
+ * `[fm-heartbeat]`; the lease gate makes a non-holder defer, but a driver whose
+ * lease is stolen MID-sweep is only stopped from clobbering by fencing — which
+ * is off under OCC=0. So daemon + heartbeat with OCC=0 reopens split-brain /
+ * lost updates. Fail closed: the daemon does not start unless the operator both
+ * disables OCC AND sets the explicit, separate GH_ROUTER_FM_ALLOW_UNSAFE_OCC=1
+ * override (acknowledging a single-driver deployment). Exported for the test.
+ */
+export function assertOccSafeForDaemon(): void {
+  if (occEnabled()) return
+  if (process.env.GH_ROUTER_FM_ALLOW_UNSAFE_OCC === "1") return
+  throw new Error(
+    "first-mate daemon refuses to start with GH_ROUTER_FM_OCC=0: OCC is the only " +
+      "thing that rejects a fenced-out driver's writes, so daemon+heartbeat with OCC " +
+      "off reopens split-brain / lost updates. Re-enable OCC (unset GH_ROUTER_FM_OCC), " +
+      "or — only if you truly run a SINGLE driver — set GH_ROUTER_FM_ALLOW_UNSAFE_OCC=1 " +
+      "to override.",
+  )
+}
 
 /** Map the controller's rich result onto the daemon's minimal contract. */
 export function advanceResultToAdvanceLike(res: AdvanceResult): AdvanceLike {
@@ -142,6 +166,7 @@ export async function routeAdvanceResult(
 }
 
 export function createControllerDaemon(opts: ControllerDaemonOptions = {}): SchedulerDaemon {
+  assertOccSafeForDaemon()
   const { push, onStuck: userOnStuck, onError: userOnError, ...daemonOverrides } = opts
   const lease = new SchedulerLease()
   const inbox = new AnswerInbox()
