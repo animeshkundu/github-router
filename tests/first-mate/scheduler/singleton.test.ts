@@ -8,6 +8,9 @@ import { acquireDaemonSingleton } from "~/lib/first-mate/scheduler/singleton"
 
 let dir: string
 const pidPath = (): string => path.join(dir, "scheduler.daemon.pid")
+const recordedPid = (): number =>
+  (JSON.parse(fs.readFileSync(pidPath(), "utf8")) as { pid: number }).pid
+const noSleep = async (): Promise<void> => {}
 
 beforeEach(async () => {
   dir = await fsp.mkdtemp(path.join(tmpdir(), "fm-singleton-"))
@@ -17,56 +20,103 @@ afterEach(async () => {
 })
 
 describe("daemon process singleton (pidfile)", () => {
-  test("first acquire wins and writes the pidfile", () => {
-    const r = acquireDaemonSingleton({ dir, selfPid: 100, isAlive: () => true })
+  test("first acquire wins and writes an identity record", async () => {
+    const r = await acquireDaemonSingleton({ dir, selfPid: 100, isAlive: () => true })
     expect(r.acquired).toBe(true)
-    expect(fs.readFileSync(pidPath(), "utf8").trim()).toBe("100")
+    expect(recordedPid()).toBe(100)
   })
 
-  test("a second live daemon is refused (default policy)", () => {
-    acquireDaemonSingleton({ dir, selfPid: 100, isAlive: () => true })
-    const r2 = acquireDaemonSingleton({ dir, selfPid: 200, isAlive: () => true })
+  test("a second live daemon is refused (default policy)", async () => {
+    await acquireDaemonSingleton({ dir, selfPid: 100, isAlive: () => true })
+    const r2 = await acquireDaemonSingleton({ dir, selfPid: 200, isAlive: () => true })
     expect(r2.acquired).toBe(false)
     expect(r2.existingPid).toBe(100)
-    // The incumbent's pid is left intact.
-    expect(fs.readFileSync(pidPath(), "utf8").trim()).toBe("100")
+    // The incumbent's record is left intact.
+    expect(recordedPid()).toBe(100)
   })
 
-  test("a stale pidfile (dead pid) is taken over", () => {
-    acquireDaemonSingleton({ dir, selfPid: 100, isAlive: () => true })
+  test("a stale pidfile (dead pid) is taken over", async () => {
+    await acquireDaemonSingleton({ dir, selfPid: 100, isAlive: () => true })
     // pid 100 is now dead; a fresh daemon takes over.
-    const r2 = acquireDaemonSingleton({ dir, selfPid: 200, isAlive: (pid) => pid !== 100 })
-    expect(r2.acquired).toBe(true)
-    expect(fs.readFileSync(pidPath(), "utf8").trim()).toBe("200")
-  })
-
-  test("terminate policy stops the incumbent then takes over", () => {
-    acquireDaemonSingleton({ dir, selfPid: 100, isAlive: () => true })
-    const killed: number[] = []
-    const r2 = acquireDaemonSingleton({
+    const r2 = await acquireDaemonSingleton({
       dir,
       selfPid: 200,
-      isAlive: () => true,
+      isAlive: (pid) => pid !== 100,
+    })
+    expect(r2.acquired).toBe(true)
+    expect(recordedPid()).toBe(200)
+  })
+
+  test("terminate policy waits for the incumbent to EXIT, then takes over", async () => {
+    await acquireDaemonSingleton({ dir, selfPid: 100, isAlive: () => true })
+    const killed: number[] = []
+    // The incumbent stays alive for a few probes after SIGTERM, then exits.
+    let aliveProbes = 0
+    const r2 = await acquireDaemonSingleton({
+      dir,
+      selfPid: 200,
+      isAlive: (pid) => {
+        if (pid !== 100) return false
+        aliveProbes += 1
+        return aliveProbes <= 3 // alive at the initial check + 2 poll probes
+      },
       onConflict: "terminate",
       terminate: (pid) => killed.push(pid),
+      pollMs: 1,
+      terminateWaitMs: 100,
+      sleep: noSleep,
     })
     expect(r2.acquired).toBe(true)
     expect(killed).toEqual([100])
-    expect(fs.readFileSync(pidPath(), "utf8").trim()).toBe("200")
+    expect(recordedPid()).toBe(200)
   })
 
-  test("release only removes the pidfile if it is still ours", () => {
-    const r = acquireDaemonSingleton({ dir, selfPid: 100, isAlive: () => true })
-    // A successor took over the pidfile.
-    fs.writeFileSync(pidPath(), "999")
-    r.release()
+  test("terminate policy REFUSES if the incumbent never exits (no double-run)", async () => {
+    await acquireDaemonSingleton({ dir, selfPid: 100, isAlive: () => true })
+    const r2 = await acquireDaemonSingleton({
+      dir,
+      selfPid: 200,
+      isAlive: () => true, // incumbent never dies
+      onConflict: "terminate",
+      terminate: () => {},
+      pollMs: 1,
+      terminateWaitMs: 10,
+      sleep: noSleep,
+    })
+    expect(r2.acquired).toBe(false)
+    expect(r2.existingPid).toBe(100)
+    expect(recordedPid()).toBe(100) // the live incumbent is NOT overwritten
+  })
+
+  test("release only removes the pidfile if it still carries our token", async () => {
+    const r = await acquireDaemonSingleton({ dir, selfPid: 100, isAlive: () => true })
+    // A successor took over the pidfile (100 looks dead) — different token.
+    await acquireDaemonSingleton({
+      dir,
+      selfPid: 999,
+      isAlive: (pid) => pid !== 100,
+    })
+    await r.release()
     expect(fs.existsSync(pidPath())).toBe(true) // successor's pidfile preserved
-    expect(fs.readFileSync(pidPath(), "utf8").trim()).toBe("999")
+    expect(recordedPid()).toBe(999)
   })
 
-  test("re-acquire by the SAME pid is idempotent (not a conflict)", () => {
-    acquireDaemonSingleton({ dir, selfPid: 100, isAlive: () => true })
-    const again = acquireDaemonSingleton({ dir, selfPid: 100, isAlive: () => true })
+  test("release removes our own pidfile", async () => {
+    const r = await acquireDaemonSingleton({ dir, selfPid: 100, isAlive: () => true })
+    await r.release()
+    expect(fs.existsSync(pidPath())).toBe(false)
+  })
+
+  test("re-acquire by the SAME pid is idempotent (not a conflict)", async () => {
+    await acquireDaemonSingleton({ dir, selfPid: 100, isAlive: () => true })
+    const again = await acquireDaemonSingleton({ dir, selfPid: 100, isAlive: () => true })
     expect(again.acquired).toBe(true)
+  })
+
+  test("a corrupt pidfile is treated as stale and taken over", async () => {
+    await fsp.writeFile(pidPath(), "not-json{{{")
+    const r = await acquireDaemonSingleton({ dir, selfPid: 300, isAlive: () => true })
+    expect(r.acquired).toBe(true)
+    expect(recordedPid()).toBe(300)
   })
 })
