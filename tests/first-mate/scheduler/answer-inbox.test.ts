@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "bun:test"
+import { beforeEach, describe, expect, spyOn, test } from "bun:test"
 import fs from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -93,6 +93,52 @@ describe("AnswerInbox", () => {
     const d2 = await inbox.drain()
     await d2.ack()
     expect(d2.modelAnswers.map((m) => m.requestId)).toEqual(["during"])
+  })
+
+  test("two concurrent drainers claim a given orphan EXACTLY ONCE (R3 #3)", async () => {
+    // A crashed prior drain left an orphan. Two live drainers — separate
+    // instances with SEPARATE process-local inflight sets, i.e. two processes —
+    // drain concurrently. The old in-place readFile let BOTH read and return the
+    // same orphan (→ double-apply); the atomic single-source rename-claim means
+    // exactly one drainer claims it and the other gets ENOENT.
+    await fs.writeFile(
+      path.join(dir, "answers.jsonl.draining.9999.dead"),
+      `${JSON.stringify({ t: "h", requestId: "orphan-1", choice: "merge" })}\n`,
+    )
+    const a = new AnswerInbox({ dir })
+    const b = new AnswerInbox({ dir })
+    const [da, db] = await Promise.all([a.drain(), b.drain()])
+    const surfaced = [...da.humanDecisions, ...db.humanDecisions]
+    expect(surfaced).toEqual([{ requestId: "orphan-1", choice: "merge" }]) // once, not twice
+    await Promise.all([da.ack(), db.ack()])
+    // Nothing left behind.
+    expect((await fs.readdir(dir)).filter((n) => n.includes(".draining."))).toEqual([])
+  })
+
+  test("a transient read error PRESERVES the orphan (never deletes an unread answer) (R3 #4)", async () => {
+    await fs.writeFile(
+      path.join(dir, "answers.jsonl.draining.9999.dead"),
+      `${JSON.stringify({ t: "h", requestId: "keep-me", choice: "merge" })}\n`,
+    )
+    const inbox = new AnswerInbox({ dir })
+    // Force a transient read failure (EACCES) on the claimed file exactly once —
+    // the old blind `catch { unlink }` would permanently delete the answer.
+    const spy = spyOn(fs, "readFile").mockImplementationOnce(async () => {
+      const e = new Error("simulated transient read failure") as NodeJS.ErrnoException
+      e.code = "EACCES"
+      throw e
+    })
+    const drained = await inbox.drain()
+    spy.mockRestore()
+    // The read failed → not surfaced this drain, and NOT deleted.
+    expect(drained.humanDecisions).toEqual([])
+    await drained.ack()
+    const survivors = (await fs.readdir(dir)).filter((n) => n.includes(".draining."))
+    expect(survivors.length).toBeGreaterThan(0)
+    // A later drain recovers the preserved answer — nothing was lost.
+    const recovered = await inbox.drain()
+    expect(recovered.humanDecisions).toEqual([{ requestId: "keep-me", choice: "merge" }])
+    await recovered.ack()
   })
 })
 

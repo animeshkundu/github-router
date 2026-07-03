@@ -2,6 +2,8 @@ import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 
+import consola from "consola"
+
 import type { HumanDecision, ModelAnswer } from "~/lib/first-mate/controller"
 import { PATHS } from "~/lib/paths"
 
@@ -149,12 +151,32 @@ export class AnswerInbox {
       if (!name.startsWith(`${base}.draining.`)) continue
       const orphan = path.join(dir, name)
       if (this.inflight.has(orphan)) continue
+      // R3 #3: CLAIM the orphan ATOMICALLY before reading. The old code read the
+      // orphan in place, so two concurrent drainers (separate processes → separate
+      // process-local `inflight` sets) both read and applied the SAME orphan →
+      // double-apply. A single-source rename to a process-unique name means only
+      // ONE drainer can claim a given orphan; the rest get ENOENT and skip. The
+      // claim keeps the `.draining.` prefix so a crash before ack still leaves it
+      // discoverable for a later replay.
+      const claim = `${orphan}.claim.${process.pid}.${randomBytes(4).toString("hex")}`
       try {
-        this.mergeLines(await fs.readFile(orphan, "utf8"), out)
-        claimed.push(orphan)
-      } catch {
-        // unreadable — drop it so it cannot block the queue forever
-        await fs.unlink(orphan).catch(() => {})
+        await fs.rename(orphan, claim)
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue // a peer claimed it
+        throw err
+      }
+      try {
+        this.mergeLines(await fs.readFile(claim, "utf8"), out)
+        claimed.push(claim)
+      } catch (err) {
+        // R3 #4: NEVER delete an unread answer on a transient read error
+        // (EMFILE/ENOMEM/EACCES) — the old blind `catch { unlink }` permanently
+        // dropped human decisions. Leave the claimed file on disk (it keeps the
+        // `.draining.` prefix) so a later drain retries it; losing nothing beats
+        // losing a decision. ENOENT just means it was already consumed.
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+          consola.warn(`first-mate: deferring unreadable answer claim ${claim} for retry:`, err)
+        }
       }
     }
     // Claim the current inbox atomically.
