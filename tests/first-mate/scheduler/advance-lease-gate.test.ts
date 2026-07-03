@@ -85,4 +85,41 @@ describe("advance() lease gate (the MCP advance-tool wiring)", () => {
     await new Promise((r) => setTimeout(r, 40))
     expect((await advance({ driveGate: makeDriveGate(heartbeatLease) }, emptyDeps())).drove).toBe(true)
   })
+
+  test("step 2: a deferring advance RETURNS pending needsModel/needsHuman (not empty)", async () => {
+    const daemonLease = new SchedulerLease({ dir, ttlMs: 30_000 })
+    await daemonLease.tryAcquire() // daemon holds it → heartbeat defers
+    const heartbeatLease = new SchedulerLease({ dir, ttlMs: 30_000 })
+    const pendingEscalations = async () => ({
+      needsModel: [
+        {
+          requestId: "rp-1",
+          kind: "review_plan" as const,
+          missionId: "m1",
+          repo: { owner: "o", name: "n" },
+          issue: null,
+          pr: null,
+          payload: {},
+        },
+      ],
+      needsHuman: [
+        {
+          requestId: "h-1",
+          decisionId: "d-1",
+          missionId: "m1",
+          repo: { owner: "o", name: "n" },
+          issue: null,
+          pr: 7,
+          reason: "merge approval",
+        },
+      ],
+    })
+    const res = await advance(
+      { driveGate: makeDriveGate(heartbeatLease), pendingEscalations },
+      emptyDeps(),
+    )
+    expect(res.drove).toBe(false)
+    expect(res.needsModel.map((m) => m.requestId)).toEqual(["rp-1"])
+    expect(res.needsHuman.map((h) => h.requestId)).toEqual(["h-1"])
+  })
 })

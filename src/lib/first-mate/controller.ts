@@ -53,6 +53,7 @@ import {
   upsertUnit as realUpsertUnit,
 } from "~/lib/first-mate/ledger"
 import { observeUnit as realObserveUnit } from "~/lib/first-mate/observe"
+import { Outbox } from "~/lib/first-mate/scheduler/outbox"
 import {
   classify,
   nextAction,
@@ -101,6 +102,16 @@ export interface ControllerDeps {
   markReadyForReview: typeof realMarkReadyForReview
   buildDecisionPacket: typeof realBuildDecisionPacket
   writeDecisionPacketHtml: (packetId: string, html: string) => Promise<string>
+  /**
+   * Chunk A step 1: durable dispatch outbox. Optional so existing callers/tests
+   * are unaffected; the daemon/prod supply a real Outbox. dispatchWithOutbox
+   * records the intent before startTask and marks it done after, so a crash in
+   * between is recovered exactly-once via the stable idempotency key.
+   */
+  dispatchOutbox?: {
+    record(a: { key: string; kind: string }): Promise<unknown>
+    markDone(key: string): Promise<void>
+  }
 }
 
 export interface AdvanceInput {
@@ -128,6 +139,12 @@ export interface AdvanceInput {
     }): Promise<number>
     drain(): Promise<{ modelAnswers: ModelAnswer[]; humanDecisions: HumanDecision[] }>
   }
+  /**
+   * Chunk A step 2: when this call defers (non-holder), it surfaces the work the
+   * drive-holder has escalated by returning these as needsModel/needsHuman
+   * instead of an empty board. Typically reads the EscalationQueue.
+   */
+  pendingEscalations?: () => Promise<{ needsModel: ModelRequest[]; needsHuman: HumanRequest[] }>
 }
 
 export interface ModelAnswer {
@@ -258,6 +275,7 @@ export const defaultDeps: ControllerDeps = {
   markReadyForReview: realMarkReadyForReview,
   buildDecisionPacket: realBuildDecisionPacket,
   writeDecisionPacketHtml,
+  dispatchOutbox: new Outbox(),
 }
 
 function sanitizeSegment(value: string): string {
@@ -1287,19 +1305,36 @@ function buildPrompt(unit: UnitRow, mission: Mission): string {
  * Returns null when the API returned no taskId — treated as ambiguous, so the
  * intent is LEFT pending (recovery escalates; never auto-re-dispatch).
  */
+/**
+ * Chunk A step 1 + #1b: STABLE dispatch idempotency key derived from the repo,
+ * unit id, and attempt — NOT a fresh uuid — so a re-dispatch of the SAME attempt
+ * dedupes at the provider and in the durable outbox; a genuinely new attempt
+ * gets a new key. Exported for the regression test.
+ */
+export function dispatchIdempotencyKey(unit: UnitRow, attempt: number): string {
+  const unitId = unit.id ?? (unit.issue !== null ? `issue-${unit.issue}` : "unit")
+  return `dispatch:${unit.repo.owner}/${unit.repo.name}#${unitId}@${attempt}`
+}
+
 async function dispatchWithOutbox(
   unit: UnitRow,
   deps: ControllerDeps,
   start: (c: { idempotencyKey: string; promptTag: string }) => Promise<{ taskId: string; state: string }>,
 ): Promise<{ taskId: string; state: string } | null> {
-  const id = randomUUID()
-  unit.dispatch = { id, requestedMs: Date.now(), attempts: (unit.dispatch?.attempts ?? 0) + 1 }
+  const attempt = (unit.dispatch?.attempts ?? 0) + 1
+  const key = dispatchIdempotencyKey(unit, attempt)
+  unit.dispatch = { id: key, requestedMs: Date.now(), attempts: attempt }
   await deps.upsertUnit(unit.repo, unit) // persist intent BEFORE the side effect (hard stop if this throws)
-  const task = await start({ idempotencyKey: id, promptTag: `\n\n<!-- fm-dispatch:${id} -->` })
+  // Durable outbox: record the intent before the irreversible startTask; a crash
+  // between startTask and clearing leaves the entry pending, and reconcile re-runs
+  // startTask with the SAME idempotency key → the provider dedupes → exactly once.
+  await deps.dispatchOutbox?.record({ key, kind: "dispatch" })
+  const task = await start({ idempotencyKey: key, promptTag: `\n\n<!-- fm-dispatch:${key} -->` })
   // Empty taskId on a 2xx is AMBIGUOUS (a task may have been created but the id
   // not echoed) — leave the intent pending so recovery escalates rather than
   // auto-re-dispatching into a possible duplicate. Only a real id clears it.
   if (task.taskId.length === 0) return null
+  await deps.dispatchOutbox?.markDone(key)
   unit.dispatch = undefined
   return task
 }
@@ -1497,10 +1532,15 @@ export async function advance(
       const observedById = missionMap(observedMissions)
       const observedBoard = buildBoard(observedUnits, observedMissions)
       const observedWakeAt = nextWakeAt(observedUnits, observedById)
+      // Routing-gap (Chunk A step 2): a deferring non-holder still SURFACES the
+      // work pending for the lead/human. The drive-holder (daemon) has escalated
+      // needsModel/needsHuman to the queue; reading it back here means the
+      // heartbeat's advance observes real pending requests, never a blank board.
+      const pending = input.pendingEscalations ? await input.pendingEscalations() : undefined
       return {
         board: observedBoard,
-        needsModel: [],
-        needsHuman: [],
+        needsModel: pending?.needsModel ?? [],
+        needsHuman: pending?.needsHuman ?? [],
         applied: deferApplied,
         nextWakeAt: observedWakeAt,
         nextWakeSeconds: wakeSeconds(observedWakeAt),
