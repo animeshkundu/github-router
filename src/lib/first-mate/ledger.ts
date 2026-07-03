@@ -99,11 +99,14 @@ export class LedgerFencedError extends Error {
 }
 
 /**
- * OCC + cross-process lock + fencing on the shared write path are GATED so the
- * live behavior is unchanged until a deliberate cutover flips this on.
+ * OCC + cross-process lock + fencing on the shared write path are ON by
+ * default. Normal callers never see a conflict (transparent retry); a caller
+ * that passes an explicit `expectedRev` gets true compare-and-swap semantics.
+ * Escape hatch: set `GH_ROUTER_FM_OCC=0` to fall back to the legacy
+ * in-process-serialized write (no lock, no CAS).
  */
 function occEnabled(): boolean {
-  return process.env.GH_ROUTER_FM_OCC === "1"
+  return process.env.GH_ROUTER_FM_OCC !== "0"
 }
 
 function sleep(ms: number): Promise<void> {
@@ -360,56 +363,103 @@ async function withRepoLock<T>(repo: RepoRef, fn: () => Promise<T>): Promise<T> 
 }
 
 export interface CommitOptions {
-  /** CAS: reject if the on-disk rev differs (only enforced when OCC is enabled). */
+  /**
+   * True compare-and-swap: reject if the on-disk rev differs. When set, a
+   * conflict SURFACES as {@link LedgerConflictError} (no transparent retry) so
+   * the caller's "world unchanged since rev N" assertion is honored. Only
+   * meaningful when OCC is enabled.
+   */
   expectedRev?: number
   /** Reject if this is no longer the current fencing token (OCC-enabled only). */
   fencingToken?: number
 }
 
+const OCC_MAX_ATTEMPTS = 5
+const OCC_BACKOFF_MS = 10
+
+/**
+ * Write `next` at `expectedRev + 1` iff the on-disk rev still equals
+ * `expectedRev`, all inside the cross-process lock (so the check and write are
+ * atomic). Returns "conflict" when the rev moved. Throws {@link LedgerFencedError}
+ * — never retried — when the caller's fencing token is no longer current
+ * (a non-owner / split-brain writer).
+ */
+async function tryCasWrite(
+  repo: RepoRef,
+  next: UnitRow[],
+  expectedRev: number,
+  fencingToken: number | undefined,
+): Promise<"ok" | "conflict"> {
+  return withRepoLock(repo, async () => {
+    const { rev } = await readRepoLedgerWithRev(repo)
+    if (fencingToken !== undefined && !(await isCurrentFencingToken(fencingToken))) {
+      throw new LedgerFencedError(
+        `stale fencing token ${fencingToken} for ${repo.owner}/${repo.name}`,
+      )
+    }
+    if (rev !== expectedRev) return "conflict"
+    await writeRepoLedger(repo, next, rev + 1)
+    return "ok"
+  })
+}
+
 /**
  * The single shared write path for unit mutations. Reads the current
- * {rev, units}, applies `mutate`, and writes with `rev + 1`.
+ * {rev, units}, applies `mutate`, writes with `rev + 1`.
  *
- * Default (OCC off): behaves exactly as before — in-process serialized,
- * atomic, never rejects — but now stamps the additive `rev`.
+ * OCC off (`GH_ROUTER_FM_OCC=0`): legacy in-process-serialized write, no lock,
+ * never rejects — stamps the additive `rev` only.
  *
- * OCC on (`GH_ROUTER_FM_OCC=1`): also takes a cross-process lock and, when the
- * caller supplies them, enforces `expectedRev` (compare-and-swap) and
- * `fencingToken`, throwing {@link LedgerConflictError} / {@link LedgerFencedError}
- * WITHOUT writing (fail-safe — never clobbers a newer version). Mutators that
- * pass neither still commit; the guard is opt-in per caller.
+ * OCC on (default): each attempt reads the latest rev, applies `mutate`, and
+ * CAS-writes under a cross-process lock. On a version conflict a normal caller
+ * (no `expectedRev`) transparently RETRIES — reload, re-apply `mutate` to the
+ * fresh units, re-commit — up to {@link OCC_MAX_ATTEMPTS} with small backoff, so
+ * a single writer is a no-op and concurrent writers converge with no lost
+ * update. A caller that passed an explicit `expectedRev` gets the conflict
+ * SURFACED (true CAS). A stale `fencingToken` always fails hard.
  */
 export async function commitUnits(
   repo: RepoRef,
   mutate: (units: UnitRow[]) => UnitRow[],
   opts: CommitOptions = {},
 ): Promise<{ rev: number }> {
-  let outRev = 0
-  const doWork = async (): Promise<void> => {
+  if (!occEnabled()) {
+    let outRev = 0
+    await serializeLedgerWrite(async () => {
+      const { rev, units } = await readRepoLedgerWithRev(repo)
+      outRev = rev + 1
+      await writeRepoLedger(repo, mutate(units), outRev)
+    })
+    return { rev: outRev }
+  }
+
+  const explicit = opts.expectedRev !== undefined
+  let lastConflict: LedgerConflictError | undefined
+  for (let attempt = 0; attempt < OCC_MAX_ATTEMPTS; attempt += 1) {
     const { rev, units } = await readRepoLedgerWithRev(repo)
-    if (occEnabled()) {
-      if (opts.expectedRev !== undefined && opts.expectedRev !== rev) {
-        throw new LedgerConflictError(
-          `ledger rev mismatch for ${repo.owner}/${repo.name}: expected ${opts.expectedRev}, on-disk ${rev}`,
-        )
-      }
-      if (
-        opts.fencingToken !== undefined &&
-        !(await isCurrentFencingToken(opts.fencingToken))
-      ) {
-        throw new LedgerFencedError(
-          `stale fencing token ${opts.fencingToken} for ${repo.owner}/${repo.name}`,
-        )
-      }
+    const base = explicit ? (opts.expectedRev as number) : rev
+    if (explicit && base !== rev) {
+      throw new LedgerConflictError(
+        `ledger rev mismatch for ${repo.owner}/${repo.name}: expected ${base}, on-disk ${rev}`,
+      )
     }
     const next = mutate(units)
-    outRev = rev + 1
-    await writeRepoLedger(repo, next, outRev)
+    const outcome = await tryCasWrite(repo, next, base, opts.fencingToken)
+    if (outcome === "ok") return { rev: base + 1 }
+    if (explicit) {
+      throw new LedgerConflictError(
+        `ledger rev changed under CAS for ${repo.owner}/${repo.name} (expected ${base})`,
+      )
+    }
+    lastConflict = new LedgerConflictError(
+      `ledger contention for ${repo.owner}/${repo.name} (attempt ${attempt + 1}/${OCC_MAX_ATTEMPTS})`,
+    )
+    await sleep(OCC_BACKOFF_MS * (attempt + 1))
   }
-  await serializeLedgerWrite(() =>
-    occEnabled() ? withRepoLock(repo, doWork) : doWork(),
+  throw (
+    lastConflict ??
+    new LedgerConflictError(`ledger failed to converge for ${repo.owner}/${repo.name}`)
   )
-  return { rev: outRev }
 }
 
 export async function upsertUnit(repo: RepoRef, unit: UnitRow): Promise<void> {

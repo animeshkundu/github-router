@@ -44,17 +44,34 @@ function unit(id: string, repo: RepoRef): UnitRow {
 const ids = (units: UnitRow[]): string[] => units.map((u) => u.id ?? "").sort()
 
 beforeEach(() => {
-  process.env.GH_ROUTER_FM_OCC = "1"
+  // OCC is ON by default now; ensure no stray escape-hatch leaks between tests.
+  delete process.env.GH_ROUTER_FM_OCC
 })
 afterEach(() => {
   delete process.env.GH_ROUTER_FM_OCC
 })
 
 describe("ledger OCC / CAS on the shared write path", () => {
-  test("default (OCC off) still commits and never rejects", async () => {
-    delete process.env.GH_ROUTER_FM_OCC
+  test("single writer with OCC on never rejects a caller (safe for restart)", async () => {
+    const repo: RepoRef = { owner: "o", name: "single" }
+    // Sequential writes with no expectedRev — mirrors the heartbeat-only runtime.
+    for (let i = 0; i < 5; i += 1) {
+      const { rev } = await commitUnits(repo, (u) => [...u, unit(`u${i}`, repo)])
+      expect(rev).toBe(i + 1)
+    }
+    expect(ids((await readRepoLedgerWithRev(repo)).units)).toEqual([
+      "u0",
+      "u1",
+      "u2",
+      "u3",
+      "u4",
+    ])
+  })
+
+  test("escape hatch (GH_ROUTER_FM_OCC=0) uses legacy behavior and never rejects", async () => {
+    process.env.GH_ROUTER_FM_OCC = "0"
     const repo: RepoRef = { owner: "o", name: "off" }
-    // A stale expectedRev is IGNORED when OCC is off (behavior unchanged).
+    // A stale expectedRev is IGNORED when OCC is off (legacy behavior).
     const { rev } = await commitUnits(repo, () => [unit("a", repo)], { expectedRev: 999 })
     expect(rev).toBe(1)
     expect(ids((await readRepoLedgerWithRev(repo)).units)).toEqual(["a"])
