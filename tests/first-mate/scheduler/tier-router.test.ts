@@ -17,14 +17,22 @@ afterEach(() => {
 })
 
 describe("Phase 3 — decideRoute (escalate-by-default gate)", () => {
-  test("auto-accepts an allowlisted, high-confidence, known, low-stakes verdict", () => {
+  test("#7: allowlisted + high-confidence still ESCALATES with no deterministic verifier", () => {
+    // Self-report is not a safety boundary; with no verifier registered, escalate.
     const d = decideRoute("author_fix", good)
-    expect(d.autoAccept).toBe(true)
-    expect(d.verdict).toEqual({ instruction: "tidy up" })
+    expect(d.autoAccept).toBe(false)
+    expect(d.reason).toContain("verifier")
   })
 
-  test("decompose is also allowlisted", () => {
-    expect(decideRoute("decompose", good).autoAccept).toBe(true)
+  test("decompose also escalates (no verifier registered)", () => {
+    expect(decideRoute("decompose", good).autoAccept).toBe(false)
+  })
+
+  test("#6: a null/undefined verdict payload NEVER auto-accepts", () => {
+    const nullV = decideRoute("author_fix", { ...good, wouldVerdict: null })
+    expect(nullV.autoAccept).toBe(false)
+    expect(nullV.reason).toContain("null")
+    expect(decideRoute("author_fix", { ...good, wouldVerdict: undefined }).autoAccept).toBe(false)
   })
 
   test("review_plan and judge_review NEVER auto-accept (not allowlisted)", () => {

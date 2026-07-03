@@ -68,4 +68,20 @@ describe("SchedulerLease", () => {
     const held = await b.tryAcquire()
     expect(held?.fencingToken).toBe(2)
   })
+
+  test("renew after a steal FAILS and never regresses the fencing token (#1)", async () => {
+    const a = new SchedulerLease({ dir, ttlMs: 1000, nowMs: now })
+    const b = new SchedulerLease({ dir, ttlMs: 1000, nowMs: now })
+    expect((await a.tryAcquire())?.fencingToken).toBe(1)
+    // A's lease lapses; B steals it -> token advances to 2.
+    clock.ms += 2000
+    expect((await b.tryAcquire())?.fencingToken).toBe(2)
+    // A (unaware) tries to renew: it MUST fail (owner changed), and MUST NOT
+    // write token 1 back over B's token 2 (the monotonicity/clobber invariant).
+    expect(await a.renew()).toBeUndefined()
+    expect(await currentFencingToken(dir)).toBe(2) // never regressed to 1
+    // B still holds and can renew at its own token.
+    expect((await b.renew())?.fencingToken).toBe(2)
+    expect(await currentFencingToken(dir)).toBe(2)
+  })
 })

@@ -274,10 +274,29 @@ export interface RouteDecision {
   reason: string
 }
 
+/**
+ * Deterministic-verifier seam (finding #7). Live auto-accept must NEVER rest on
+ * the model's self-reported confidence/novelty/stakes alone — those are
+ * bypassable by indirect prompt injection from the model-visible untrusted
+ * text. A judgment kind may be auto-accepted live ONLY if a deterministic,
+ * non-LLM verifier exists for it. None exist yet, so this registry is empty and
+ * every kind escalates; widening requires registering a real verifier here PLUS
+ * calibration evidence.
+ */
+export type DeterministicVerifier = (verdict: unknown) => boolean
+const DETERMINISTIC_VERIFIERS: Record<string, DeterministicVerifier> = {}
+export function hasDeterministicVerifier(kind: string): boolean {
+  return Object.prototype.hasOwnProperty.call(DETERMINISTIC_VERIFIERS, kind)
+}
+
 /** Pure escalate-by-default gate. */
 export function decideRoute(kind: string, verdict: Tier1Verdict | null): RouteDecision {
   if (!tier1LiveEnabled()) return { autoAccept: false, reason: "tier1 live disabled" }
   if (!verdict) return { autoAccept: false, reason: "no tier1 verdict" }
+  // #6 — never auto-accept without an explicit, non-null verdict payload.
+  if (verdict.wouldVerdict === null || verdict.wouldVerdict === undefined) {
+    return { autoAccept: false, reason: "missing/null verdict payload" }
+  }
   if (!TIER1_LIVE_ALLOWLIST.has(kind)) {
     return { autoAccept: false, reason: `kind '${kind}' not allowlisted` }
   }
@@ -286,9 +305,16 @@ export function decideRoute(kind: string, verdict: Tier1Verdict | null): RouteDe
   }
   if (verdict.novelty !== "known") return { autoAccept: false, reason: "novel" }
   if (verdict.stakes !== "low") return { autoAccept: false, reason: "high stakes" }
+  // #7 — self-report is not a safety boundary; require a deterministic verifier.
+  if (!hasDeterministicVerifier(kind)) {
+    return {
+      autoAccept: false,
+      reason: "no deterministic verifier — escalate (self-report is not a safety boundary)",
+    }
+  }
   return {
     autoAccept: true,
     verdict: verdict.wouldVerdict,
-    reason: "allowlisted, high-confidence, known, low-stakes",
+    reason: "allowlisted, high-confidence, known, low-stakes, verifier-backed",
   }
 }

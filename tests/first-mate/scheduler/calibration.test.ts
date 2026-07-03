@@ -44,7 +44,9 @@ describe("Phase 4 — calibration", () => {
     expect(rp.wouldAutoAccept).toBe(0) // review_plan is not allowlisted
     const af = stats.find((s) => s.kind === "author_fix")!
     expect(af.shadowCount).toBe(1)
-    expect(af.wouldAutoAccept).toBe(1) // allowlisted, high-confidence, known, low
+    // Post-#7: 0 — decideRoute requires a deterministic verifier (none
+    // registered), so even an allowlisted high-confidence verdict escalates.
+    expect(af.wouldAutoAccept).toBe(0)
   })
 
   test("report is stable and human-readable; empty is handled", async () => {

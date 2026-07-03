@@ -81,6 +81,52 @@ async function writeLeaseAtomic(file: string, lease: Lease): Promise<void> {
   }
 }
 
+const LEASE_LOCK_TTL_MS = 10_000
+const LEASE_LOCK_MAX_WAIT_MS = 10_000
+
+/**
+ * Serialize read-modify-write of the lease file across processes with an
+ * exclusive (O_EXCL) lock. Without this, tryAcquire() and renew() interleave:
+ * B.tryAcquire can write token N+1 while A.renew (having read the pre-steal
+ * state) then writes token N on top, silently REGRESSING the fencing token and
+ * leaving BOTH drivers believing they hold the lease. Under the lock the
+ * read+write is atomic, so tokens are monotonic and exactly one driver wins.
+ * Uses REAL time (not the injectable lease clock) for lock liveness.
+ */
+async function withLeaseLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
+  const lockPath = `${file}.lock`
+  await fs.mkdir(path.dirname(lockPath), { recursive: true })
+  const start = Date.now()
+  for (;;) {
+    try {
+      const fh = await fs.open(lockPath, "wx")
+      await fh.writeFile(`${process.pid}`)
+      await fh.close()
+      break
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
+      try {
+        const st = await fs.stat(lockPath)
+        if (Date.now() - st.mtimeMs > LEASE_LOCK_TTL_MS) {
+          await fs.unlink(lockPath).catch(() => {})
+          continue
+        }
+      } catch {
+        // vanished — retry
+      }
+      if (Date.now() - start > LEASE_LOCK_MAX_WAIT_MS) {
+        throw new Error(`first-mate lease lock timeout for ${file}`)
+      }
+      await new Promise((r) => setTimeout(r, 15))
+    }
+  }
+  try {
+    return await fn()
+  } finally {
+    await fs.unlink(lockPath).catch(() => {})
+  }
+}
+
 /**
  * Read the fencing token currently recorded on disk, or 0 if there is no lease.
  * Used by commit-time guards to reject a stale writer.
@@ -123,61 +169,58 @@ export class SchedulerLease {
    * else is present (we do not steal a lease that has not expired).
    */
   async tryAcquire(): Promise<Lease | undefined> {
-    const current = await readLeaseFile(this.file)
-    const now = this.now()
-    if (current && current.owner !== this.owner && current.expiresMs > now) {
-      return undefined
-    }
-    const next: Lease = {
-      owner: this.owner,
-      fencingToken: (current?.fencingToken ?? 0) + 1,
-      acquiredMs: now,
-      expiresMs: now + this.ttlMs,
-    }
-    await writeLeaseAtomic(this.file, next)
-    // Confirm we won: atomic rename is last-writer-wins, so re-read and verify
-    // our owner+token survived a possible concurrent acquirer.
-    const confirmed = await readLeaseFile(this.file)
-    if (
-      !confirmed ||
-      confirmed.owner !== this.owner ||
-      confirmed.fencingToken !== next.fencingToken
-    ) {
-      this.held = undefined
-      return undefined
-    }
-    this.held = confirmed
-    return confirmed
+    return withLeaseLock(this.file, async () => {
+      const current = await readLeaseFile(this.file)
+      const now = this.now()
+      if (current && current.owner !== this.owner && current.expiresMs > now) {
+        return undefined
+      }
+      const next: Lease = {
+        owner: this.owner,
+        fencingToken: (current?.fencingToken ?? 0) + 1,
+        acquiredMs: now,
+        expiresMs: now + this.ttlMs,
+      }
+      await writeLeaseAtomic(this.file, next)
+      this.held = next
+      return next
+    })
   }
 
   /**
-   * Extend an already-held lease WITHOUT bumping the fencing token (a renewal
-   * is the same reign). Returns undefined if the lease was lost/stolen.
+   * Extend an already-held lease WITHOUT bumping the fencing token. Runs under
+   * the lease lock so it cannot interleave with a concurrent acquire: if the
+   * lease was stolen (owner changed), renew FAILS (caller stops driving) rather
+   * than clobbering the stealer's higher token — the token is monotonic.
    */
   async renew(): Promise<Lease | undefined> {
-    const current = await readLeaseFile(this.file)
-    const now = this.now()
-    if (!current || current.owner !== this.owner) {
-      this.held = undefined
-      return undefined
-    }
-    const next: Lease = {
-      owner: this.owner,
-      fencingToken: current.fencingToken,
-      acquiredMs: now,
-      expiresMs: now + this.ttlMs,
-    }
-    await writeLeaseAtomic(this.file, next)
-    this.held = next
-    return next
+    return withLeaseLock(this.file, async () => {
+      const current = await readLeaseFile(this.file)
+      const now = this.now()
+      if (!current || current.owner !== this.owner) {
+        this.held = undefined
+        return undefined // lost/stolen — never regress the token
+      }
+      const next: Lease = {
+        owner: this.owner,
+        fencingToken: current.fencingToken,
+        acquiredMs: now,
+        expiresMs: now + this.ttlMs,
+      }
+      await writeLeaseAtomic(this.file, next)
+      this.held = next
+      return next
+    })
   }
 
   /** Voluntarily give up the lease (expire it now) while keeping the token monotonic. */
   async release(): Promise<void> {
-    const current = await readLeaseFile(this.file)
-    if (current && current.owner === this.owner) {
-      await writeLeaseAtomic(this.file, { ...current, expiresMs: this.now() })
-    }
+    await withLeaseLock(this.file, async () => {
+      const current = await readLeaseFile(this.file)
+      if (current && current.owner === this.owner) {
+        await writeLeaseAtomic(this.file, { ...current, expiresMs: this.now() })
+      }
+    })
     this.held = undefined
   }
 
