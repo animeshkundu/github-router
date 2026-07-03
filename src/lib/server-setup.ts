@@ -2,6 +2,8 @@ import consola from "consola"
 import { serve, type ServerHandler } from "srvx"
 
 import { PATHS, ensurePaths } from "./paths"
+import { maybeSpawnDaemon } from "./first-mate/scheduler/autospawn"
+import { agentToolsEnabled } from "./mcp-capabilities"
 import { generateRandomPort } from "./port"
 import { initProxyFromEnv } from "./proxy"
 import { state } from "./state"
@@ -165,6 +167,18 @@ export async function setupAndServe(
     throw new Error("Server started but URL is not available")
   }
   const serverUrl = url.replace(/\/$/, "")
+
+  // Capstone — auto-spawn the first-mate scheduler daemon as a SEPARATE process
+  // when operator/agents mode is active (default ON; GH_ROUTER_FM_DAEMON=0
+  // disables). Safe now that answer-decoupling + driveGate + push are in: the
+  // daemon is drive-primary and the [fm-heartbeat] is a passive failover. Never
+  // throws; a spawn failure must not take down the proxy.
+  try {
+    const handle = maybeSpawnDaemon({ agentsEnabled: agentToolsEnabled() })
+    if (handle) consola.info(`first-mate daemon spawned (pid ${handle.pid ?? "?"}).`)
+  } catch (err) {
+    consola.debug("first-mate daemon auto-spawn skipped:", err)
+  }
 
   return { server: srvxServer, serverUrl }
 }

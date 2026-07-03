@@ -103,6 +103,8 @@ export function createControllerDaemon(opts: ControllerDaemonOptions = {}): Sche
 }
 
 export * from "./answer-inbox"
+export * from "./autospawn"
+export * from "./calibration"
 export * from "./escalation"
 export * from "./lease"
 export * from "./outbox"
