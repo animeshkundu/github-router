@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 
 import { advance as advanceController, type HumanDecision, type ModelAnswer } from "~/lib/first-mate/controller"
 import { loadAllUnits, readMissions, upsertMission, type Mission } from "~/lib/first-mate/registry"
+import { AnswerInbox } from "~/lib/first-mate/scheduler/answer-inbox"
 import { SchedulerLease, makeDriveGate } from "~/lib/first-mate/scheduler/lease"
 import { Tier1Shadow, fromModelRequest, shadowEnabled } from "~/lib/first-mate/scheduler/shadow"
 import type { RepoRef, UnitRow } from "~/lib/first-mate/types"
@@ -24,6 +25,13 @@ function leaseGateEnabled(): boolean {
 
 /** Phase 2 Tier1 shadow (log-only; active only when GH_ROUTER_FM_SHADOW=1). */
 const tier1Shadow = new Tier1Shadow()
+
+/**
+ * Phase A — shared durable answer inbox. When this MCP path defers (a daemon
+ * holds the lease), submitted answers are persisted here and the daemon applies
+ * them on its next tick. Same default dir as the daemon's inbox.
+ */
+const answerInbox = new AnswerInbox()
 
 interface McpToolResult {
   content: Array<{ type: "text"; text: string }>
@@ -146,6 +154,7 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
           humanDecisions: optionalHumanDecisions(args),
           topK: optionalNumber(args, "top_k"),
           maxInFlightPerProvider: optionalNumber(args, "max_in_flight_per_provider"),
+          answerQueue: answerInbox,
           ...(leaseGateEnabled() ? { driveGate: makeDriveGate(heartbeatLease) } : {}),
         })
         // Phase 2: Tier1 SHADOW (log-only, fire-and-forget, never blocks/decides).

@@ -233,4 +233,62 @@ export class Tier1Shadow {
   async recordLeadOutcome(requestId: string, leadOutcome: unknown): Promise<void> {
     await this.append({ type: "outcome", atMs: this.now(), requestId, leadOutcome })
   }
+
+  /**
+   * Phase 3 — run the shadow judge (always logs) and return whether the verdict
+   * may be AUTO-ACCEPTED live. Escalate-by-default via {@link decideRoute}.
+   */
+  async route(req: ShadowJudgmentRequest): Promise<RouteDecision> {
+    const rec = await this.observe(req)
+    const verdict: Tier1Verdict | null = rec
+      ? {
+          wouldVerdict: rec.wouldVerdict,
+          confidence: rec.confidence,
+          novelty: rec.novelty,
+          stakes: rec.stakes,
+        }
+      : null
+    return decideRoute(req.kind, verdict)
+  }
+}
+
+/**
+ * Phase 3 — narrow LIVE Tier1 gate. Auto-accept is OFF unless
+ * GH_ROUTER_FM_TIER1_LIVE=1, and even then only for a conservative allowlist of
+ * REVERSIBLE + deterministically-checkable judgment kinds, above a confidence
+ * floor, and only when the model marks the case known + low-stakes. Everything
+ * else — not-allowlisted, low-confidence, novel, high-stakes, review_plan,
+ * judge_review — ESCALATES. Self-confidence alone is never sufficient: the
+ * allowlist (reversibility/verifiability) is the real boundary.
+ */
+export const TIER1_LIVE_ALLOWLIST: ReadonlySet<string> = new Set(["author_fix", "decompose"])
+export const TIER1_CONFIDENCE_FLOOR = 0.85
+
+export function tier1LiveEnabled(): boolean {
+  return process.env.GH_ROUTER_FM_TIER1_LIVE === "1"
+}
+
+export interface RouteDecision {
+  autoAccept: boolean
+  verdict?: unknown
+  reason: string
+}
+
+/** Pure escalate-by-default gate. */
+export function decideRoute(kind: string, verdict: Tier1Verdict | null): RouteDecision {
+  if (!tier1LiveEnabled()) return { autoAccept: false, reason: "tier1 live disabled" }
+  if (!verdict) return { autoAccept: false, reason: "no tier1 verdict" }
+  if (!TIER1_LIVE_ALLOWLIST.has(kind)) {
+    return { autoAccept: false, reason: `kind '${kind}' not allowlisted` }
+  }
+  if (verdict.confidence < TIER1_CONFIDENCE_FLOOR) {
+    return { autoAccept: false, reason: "below confidence floor" }
+  }
+  if (verdict.novelty !== "known") return { autoAccept: false, reason: "novel" }
+  if (verdict.stakes !== "low") return { autoAccept: false, reason: "high stakes" }
+  return {
+    autoAccept: true,
+    verdict: verdict.wouldVerdict,
+    reason: "allowlisted, high-confidence, known, low-stakes",
+  }
 }

@@ -112,9 +112,22 @@ export interface AdvanceInput {
   /**
    * Phase 1.3 lease gate. Returns whether THIS caller currently holds the
    * drive lease. When it returns false, advance() observes-and-defers (no
-   * drive). Omitted → always drives (backward-compatible single-driver).
+   * drive) but still PERSISTS submitted answers via answerQueue. Omitted →
+   * always drives (backward-compatible single-driver).
    */
   driveGate?: () => boolean | Promise<boolean>
+  /**
+   * Durable answer queue that decouples answer-submission from driving. A
+   * deferring (non-holder) call enqueues submitted answers here; the holder
+   * drains + applies them. Omitted → answers apply inline (today's behavior).
+   */
+  answerQueue?: {
+    enqueue(a: {
+      modelAnswers?: ModelAnswer[]
+      humanDecisions?: HumanDecision[]
+    }): Promise<number>
+    drain(): Promise<{ modelAnswers: ModelAnswer[]; humanDecisions: HumanDecision[] }>
+  }
 }
 
 export interface ModelAnswer {
@@ -1461,14 +1474,24 @@ export async function advance(
   )
   const topK = positiveInteger(input.topK, DEFAULT_TOP_K)
 
-  // Phase 1.3 — lease-gate the DRIVE path. When a driveGate is supplied and
-  // reports we do NOT hold the lease, observe-and-defer: return the current
-  // board WITHOUT applying answers, executing per-unit actions, or dispatching.
-  // A non-holder (e.g. a fallback heartbeat while the daemon owns the lease)
-  // thus never double-drives. Backward-compatible: no driveGate → full drive.
+  // Phase 1.3 — lease-gate the DRIVE path; Phase A — decouple answer-submission
+  // from driving. When a driveGate reports we do NOT hold the lease we
+  // observe-and-defer (no execute/dispatch) — BUT submitting answers must still
+  // succeed, else the lead's judgments never reach the daemon and the loop
+  // stalls. So we PERSIST submitted answers to the durable queue here (a ledger
+  // write, always allowed); the lease-holding driver drains + applies them on
+  // its next tick. Backward-compatible: no driveGate → full drive.
   if (input.driveGate) {
     const canDrive = await input.driveGate()
     if (!canDrive) {
+      const deferApplied: string[] = []
+      if (input.answerQueue) {
+        const queued = await input.answerQueue.enqueue({
+          modelAnswers: input.modelAnswers,
+          humanDecisions: input.humanDecisions,
+        })
+        if (queued > 0) deferApplied.push(`queued ${queued} answer(s) for the drive-holder`)
+      }
       const observedUnits = await deps.loadAllUnits()
       const observedMissions = await deps.readMissions()
       const observedById = missionMap(observedMissions)
@@ -1478,7 +1501,7 @@ export async function advance(
         board: observedBoard,
         needsModel: [],
         needsHuman: [],
-        applied: [],
+        applied: deferApplied,
         nextWakeAt: observedWakeAt,
         nextWakeSeconds: wakeSeconds(observedWakeAt),
         drove: false,
@@ -1486,7 +1509,21 @@ export async function advance(
     }
   }
 
-  await applySubmittedAnswers(input, deps, applied)
+  // Holder path: drain any answers queued by deferring callers and merge them
+  // with answers submitted on THIS call, then apply all of them.
+  let answersInput = input
+  if (input.answerQueue) {
+    const drained = await input.answerQueue.drain()
+    if (drained.modelAnswers.length > 0 || drained.humanDecisions.length > 0) {
+      answersInput = {
+        ...input,
+        modelAnswers: [...drained.modelAnswers, ...(input.modelAnswers ?? [])],
+        humanDecisions: [...drained.humanDecisions, ...(input.humanDecisions ?? [])],
+      }
+    }
+  }
+
+  await applySubmittedAnswers(answersInput, deps, applied)
 
   const units = await deps.loadAllUnits()
   const missions = await deps.readMissions()
