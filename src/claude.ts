@@ -47,6 +47,10 @@ import {
 } from "./lib/orchestration/gate-discovery"
 import { liveExec } from "./lib/orchestration/live-exec"
 import { buildPromptSubmitHookCommand } from "./lib/orchestration/prompt-submit-hook"
+import {
+  FIRST_MATE_GUARD_MATCHER,
+  buildFirstMateGuardHookCommand,
+} from "./internal-first-mate-guard"
 import { ARTIFACT_REVIEW_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
 import { shouldUseInsecureTls } from "./lib/artifact/tools"
 import { parseBoolEnv } from "./lib/exec"
@@ -568,6 +572,29 @@ export const claude = defineCommand({
             const skillNames = skillsToWrite.map((s) => `/${s.name}`).join(", ")
             process.stderr.write(
               `Injected skills (${skillsWritten}/${skillsToWrite.length}): ${skillNames}.\n`,
+            )
+          }
+        }
+
+        // Capstone — capability shaping. In operator/`--agents` mode, inject a
+        // PreToolUse guard that blocks the file-authoring + local-worker tools
+        // (Edit/Write/NotebookEdit/mcp__workers__*) so the operator delegates
+        // ALL implementation to GitHub cloud agents. Fail-open, scoped by
+        // matcher; non-agents sessions are untouched (no injection).
+        if (agentToolsEnabled()) {
+          try {
+            const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+            const guardCmd = buildFirstMateGuardHookCommand(process.execPath, process.argv[1])
+            await injectStopHookIntoSettingsFile(
+              settingsPath,
+              guardCmd,
+              "PreToolUse",
+              undefined,
+              FIRST_MATE_GUARD_MATCHER,
+            )
+          } catch (err) {
+            consola.warn(
+              `Could not register the operator capability-shaping hook: ${String(err)}`,
             )
           }
         }
