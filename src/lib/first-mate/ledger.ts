@@ -440,11 +440,24 @@ async function tryCasWrite(
       )
     }
     if (rev !== expectedRev) return "conflict"
-    // #2 — re-verify ownership immediately before the write. If our lock was
-    // broken as stale (a >TTL pause) and re-taken by another writer, we are no
-    // longer the exclusive owner: treat it as a conflict and retry rather than
-    // clobber their write.
+    // #4 — re-check BOTH guards IMMEDIATELY before the physical write, closing
+    // the window between the initial checks above and the rename below:
+    //  - lock ownership: if our lock was broken as stale (a >TTL pause) and
+    //    re-taken by another writer, we no longer hold exclusivity → conflict +
+    //    retry rather than clobber their write (silent lost update).
+    //  - fencing token: if the lease rotated since the top check (another driver
+    //    took over), a fenced-out driver must NOT write at all → fail hard.
+    // A residual sub-write-duration gap remains between these checks and the
+    // rename; true mutual exclusion for the whole write would need an OS-level
+    // advisory lock held across the write (flock). The lock-ownership recheck
+    // makes a lost update require a >TTL stall inside a sub-millisecond window,
+    // which is negligible in practice.
     if (!(await verifyOwner())) return "conflict"
+    if (fencingToken !== undefined && !(await isCurrentFencingToken(fencingToken))) {
+      throw new LedgerFencedError(
+        `stale fencing token ${fencingToken} for ${repo.owner}/${repo.name} (rotated before write)`,
+      )
+    }
     await writeRepoLedger(repo, next, rev + 1)
     return "ok"
   })
