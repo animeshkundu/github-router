@@ -8,6 +8,9 @@
  *   E2E_DIR    scratch first-mate dir (also set as GH_ROUTER_FIRST_MATE_DIR)
  *   E2E_GH     fake-GitHub file; a "dispatch" appends its idempotency key here
  *   E2E_MODE   "drive" (daemon drives a scratch mission) | "writer" (raw commits)
+ *              | "real-drive" (ONE real controller.advance() against fake GitHub,
+ *                routed through the real EscalationQueue; crashes mid-dispatch
+ *                when E2E_CRASH=after_sideeffect to prove exactly-once recovery)
  *   E2E_REPO   "owner/name" (default o/e2e)
  *   E2E_TTL_MS lease TTL (default 30000)
  *   E2E_CRASH  "after_sideeffect" → hard-exit(137) inside the outbox executor
@@ -20,10 +23,19 @@
  */
 import fs from "node:fs"
 
-import { commitUnits, readRepoLedgerWithRev } from "~/lib/first-mate/ledger"
+import {
+  advance,
+  type ControllerDeps,
+  type ModelRequest,
+  type HumanRequest,
+} from "~/lib/first-mate/controller"
+import { commitUnits, readRepoLedgerWithRev, upsertUnit } from "~/lib/first-mate/ledger"
+import { upsertMission } from "~/lib/first-mate/registry"
+import { EscalationQueue } from "~/lib/first-mate/scheduler/escalation"
 import { SchedulerDaemon } from "~/lib/first-mate/scheduler/daemon"
-import { SchedulerLease } from "~/lib/first-mate/scheduler/lease"
+import { SchedulerLease, makeDriveGate } from "~/lib/first-mate/scheduler/lease"
 import { Outbox } from "~/lib/first-mate/scheduler/outbox"
+import { routeAdvanceResult } from "~/lib/first-mate/scheduler/index"
 import type { RepoRef, UnitRow } from "~/lib/first-mate/types"
 
 const dir = process.env.E2E_DIR
@@ -133,6 +145,113 @@ async function runDriveDaemon(): Promise<void> {
   await new Promise<void>(() => {}) // keep alive
 }
 
+/**
+ * Real-advance driver (test-only). Runs ONE `controller.advance()` as the lease
+ * holder against a fake GitHub (startTask appends its idempotency key to the gh
+ * log — the single external side effect), with the REAL durable Outbox and the
+ * REAL EscalationQueue. With E2E_CRASH=after_sideeffect the fake startTask
+ * hard-exits(137) AFTER the append but BEFORE the outbox is marked done, so a
+ * restart must reconcile via the persisted dispatch-intent: it escalates the
+ * interrupted dispatch to a human and NEVER re-dispatches (exactly-once).
+ */
+async function runRealDrive(): Promise<void> {
+  const crash = process.env.E2E_CRASH === "after_sideeffect"
+  const escalation = new EscalationQueue({ dir })
+
+  // Seed a mission + one undispatched unit on first run (idempotent).
+  await upsertMission({
+    id: "m1",
+    goal: "g",
+    acceptanceCriteria: "ac",
+    repos: [repo],
+    status: "active",
+    createdMs: Date.now(),
+    updatedMs: Date.now(),
+  })
+  const { units: existing } = await readRepoLedgerWithRev(repo)
+  if (!existing.some((u) => u.id === "u1")) {
+    await upsertUnit(repo, mkUnit("u1", "plan"))
+  }
+
+  const fail =
+    (name: string) =>
+    async (): Promise<never> => {
+      throw new Error(`unexpected dep ${name} in real-drive`)
+    }
+  const deps = {
+    loadAllUnits: async () => (await readRepoLedgerWithRev(repo)).units,
+    readMissions: async () => [
+      {
+        id: "m1",
+        goal: "g",
+        acceptanceCriteria: "ac",
+        repos: [repo],
+        status: "active" as const,
+        createdMs: 0,
+        updatedMs: 0,
+      },
+    ],
+    upsertUnit,
+    pruneTerminal: async () => {},
+    dispatchOutbox: new Outbox({ dir }),
+    resolveAgentActor: async () => ({ login: "copilot[bot]" }),
+    startTask: async (_r: unknown, opts: { idempotencyKey?: string }) => {
+      fs.appendFileSync(ghFile, `${opts.idempotencyKey ?? "?"}\n`) // the side effect
+      if (crash) process.exit(137) // crash AFTER side effect, BEFORE mark-done
+      return { taskId: "task-1", state: "queued" }
+    },
+    // Recovery path (restart): the interrupted dispatch is surfaced to a human.
+    findByKey: async () => undefined,
+    buildDecisionPacket: () => ({ html: "<html></html>", packetId: "p", decisionId: "d" }),
+    writeDecisionPacketHtml: async () => `${dir}/packet.html`,
+    upsertDecision: async () => {},
+    observeUnit: fail("observeUnit"),
+    classifyPlanReady: fail("classifyPlanReady"),
+    classifyQuestionAnswerable: fail("classifyQuestionAnswerable"),
+    classifyFixAddressed: fail("classifyFixAddressed"),
+    classifyStuck: fail("classifyStuck"),
+    verifyAndConsumeApproval: fail("verifyAndConsumeApproval"),
+    recordApproval: fail("recordApproval"),
+    markAnswered: fail("markAnswered"),
+    followUpTask: fail("followUpTask"),
+    cancelTask: fail("cancelTask"),
+    createIssue: fail("createIssue"),
+    resolveAgentRoster: fail("resolveAgentRoster"),
+    assignAgent: fail("assignAgent"),
+    findAgentPRs: fail("findAgentPRs"),
+    getPullRequestState: fail("getPullRequestState"),
+    postComment: fail("postComment"),
+    submitReview: fail("submitReview"),
+    requestReview: fail("requestReview"),
+    rerunChecks: fail("rerunChecks"),
+    mergePullRequest: fail("mergePullRequest"),
+    markReadyForReview: fail("markReadyForReview"),
+  } as unknown as ControllerDeps
+
+  const lease = new SchedulerLease({ dir, ttlMs })
+  // Poll until we actually hold the drive lease (a crashed prior holder's lease
+  // only frees after its TTL). Only the drive path performs dispatch/recovery.
+  const deadline = Date.now() + 20_000
+  for (;;) {
+    const res = await advance({ driveGate: makeDriveGate(lease) }, deps)
+    if (res.drove) {
+      await routeAdvanceResult(
+        res as { needsModel: ModelRequest[]; needsHuman: HumanRequest[] },
+        { escalation },
+      )
+      break
+    }
+    if (Date.now() > deadline) {
+      process.stderr.write("real-drive never acquired lease\n")
+      process.exit(3)
+    }
+    await new Promise((r) => setTimeout(r, 50))
+  }
+  process.stdout.write("advanced\n")
+  process.exit(0)
+}
+
 const mode = process.env.E2E_MODE ?? "drive"
 if (mode === "writer") await runWriter()
+else if (mode === "real-drive") await runRealDrive()
 else await runDriveDaemon()

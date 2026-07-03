@@ -168,4 +168,38 @@ describe("first-mate scheduler — TRUE multi-process E2E", () => {
     ) as { expiresMs: number }
     expect(lease.expiresMs).toBeLessThanOrEqual(Date.now())
   }, 30_000)
+
+  test("7. REAL advance crash mid-dispatch → restart escalates, exactly-once", async () => {
+    const { dir, gh } = await scratch()
+    const REAL = { E2E_MODE: "real-drive", E2E_REPO: "o/e2e" }
+    // First run: real advance() dispatches, the fake startTask appends to gh
+    // then hard-crashes BEFORE the outbox is marked done.
+    const p1 = spawnHarness({
+      ...REAL,
+      E2E_DIR: dir,
+      E2E_GH: gh,
+      E2E_CRASH: "after_sideeffect",
+      E2E_TTL_MS: "600",
+    })
+    expect(await p1.exited).toBe(137)
+    expect(ghCount(gh)).toBe(1) // the side effect happened exactly once
+    // The dispatch intent persisted but no taskId was recorded (interrupted).
+    const mid = ledgerUnits(dir).find((u) => u.id === "u1") as
+      | { taskId?: string | null; dispatch?: unknown }
+      | undefined
+    expect(mid?.taskId ?? null).toBeNull()
+    expect(mid?.dispatch).toBeDefined()
+
+    // Restart clean: recovery must surface the interrupted dispatch to a human
+    // and NEVER re-dispatch — the side effect stays at exactly one.
+    const p2 = spawnHarness({ ...REAL, E2E_DIR: dir, E2E_GH: gh, E2E_TTL_MS: "600" })
+    expect(await p2.exited).toBe(0)
+    expect(ghCount(gh)).toBe(1) // no re-dispatch after recovery
+    const escalations = fs
+      .readFileSync(path.join(dir, "escalations.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as { target: string })
+    expect(escalations.some((e) => e.target === "human")).toBe(true)
+  }, 30_000)
 })
