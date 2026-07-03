@@ -11,6 +11,14 @@ function unusedClientCall(): Promise<never> {
   return Promise.reject(new Error("unexpected fleet client call"))
 }
 
+/** An idle status stub so a C1 send_message idle-check passes and proceeds to send. */
+function idleStatusStub() {
+  return mock(async () => ({
+    sessionId: "local-b",
+    status: { lifecycle: "running", interactionState: "idle", canAcceptInput: true },
+  }))
+}
+
 function fleetClientStub(overrides: Partial<FleetToolClient>): FleetToolClient {
   return {
     capabilities: unusedClientCall,
@@ -75,6 +83,12 @@ function toolMap() {
         truncated: false,
         source: "pty",
         status: { lifecycle: "running", canAcceptInput: true },
+      })
+    }
+    if (parsed.hostname === "beta.example" && parsed.pathname === "/api/control/sessions/local-b/status") {
+      return Response.json({
+        sessionId: "local-b",
+        status: { lifecycle: "running", interactionState: "idle", canAcceptInput: true },
       })
     }
     if (parsed.hostname === "beta.example" && parsed.pathname === "/api/control/sessions/local-b/message") {
@@ -254,7 +268,14 @@ describe("fleet MCP tools", () => {
       confirmationTimedOut: true,
     })
     expect((json as { message?: string }).message).toContain("await_turn")
-    expect(calls[0]?.body).toEqual({ message: "continue", idempotencyKey: "idem-1", awaitMs: 250 })
+    // The send is now preceded by a C1 idle-check GET /status; assert the message
+    // POST body by path rather than call index.
+    expect(callsToPath(calls, "/api/control/sessions/local-b/message")[0]?.body).toEqual({
+      message: "continue",
+      idempotencyKey: "idem-1",
+      awaitMs: 250,
+    })
+    expect(callsToPath(calls, "/api/control/sessions/local-b/status")).toHaveLength(1)
   })
 
   test("send_message: delivery failure is the ONLY isError case (F9)", async () => {
@@ -262,6 +283,7 @@ describe("fleet MCP tools", () => {
       config: { instances: [{ id: "beta", label: "Beta", url: "https://beta.example", token: "tok-beta" }] },
     })
     const createClient = mock(() => fleetClientStub({
+      status: idleStatusStub(),
       sendMessage: mock(async () => ({
         messageId: "msg-fail",
         delivered: false,
@@ -289,6 +311,7 @@ describe("fleet MCP tools", () => {
       config: { instances: [{ id: "beta", label: "Beta", url: "https://beta.example", token: "tok-beta" }] },
     })
     const createClient = mock(() => fleetClientStub({
+      status: idleStatusStub(),
       sendMessage: mock(async () => ({
         messageId: "msg-fail2",
         // delivered boolean omitted; the structured sub-status is the failure signal.
@@ -313,6 +336,7 @@ describe("fleet MCP tools", () => {
       config: { instances: [{ id: "beta", label: "Beta", url: "https://beta.example", token: "tok-beta" }] },
     })
     const createClient = mock(() => fleetClientStub({
+      status: idleStatusStub(),
       sendMessage: mock(async () => ({
         messageId: "msg-ok",
         delivered: true,
@@ -880,6 +904,269 @@ describe("fleet MCP tools", () => {
     })
     expect(calls[0]?.url).toBe("https://beta.example/api/control/sessions/local-b/stop")
     expect(calls[0]?.body).toEqual({ mode: "graceful", idempotencyKey: "idem-stop" })
+  })
+})
+
+function betaTools(overrides: Partial<FleetToolClient>) {
+  const registry = new FleetRegistry({
+    config: { instances: [{ id: "beta", label: "Beta", url: "https://beta.example", token: "tok-beta" }] },
+  })
+  const createClient = mock(() => fleetClientStub(overrides)) satisfies NonNullable<CreateFleetToolsOptions["createClient"]>
+  return new Map(createFleetTools({ registry, createClient }).map((tool) => [tool.toolNameHttp, tool]))
+}
+
+describe("fleet MCP tools — C1 send-when-idle guard", () => {
+  test("refuses a busy session by default and never sends (C1)", async () => {
+    const sendMessage = mock(async () => { throw new Error("must not send into a busy composer") })
+    const tools = betaTools({
+      status: mock(async () => ({ sessionId: "local-b", status: { interactionState: "busy" } })),
+      sendMessage: sendMessage as unknown as FleetToolClient["sendMessage"],
+    })
+
+    const { result, json } = await callTool(tools, "send_message", { sessionId: "beta:local-b", message: "hi" })
+
+    expect(result.isError).toBe(true)
+    expect(json).toMatchObject({ notReady: true, reason: "busy", delivered: false, submitted: false })
+    expect(sendMessage).toHaveBeenCalledTimes(0)
+  })
+
+  test("awaiting a non-message prompt refuses and advises respond", async () => {
+    const tools = betaTools({
+      status: mock(async () => ({ sessionId: "local-b", status: { interactionState: "waiting_input", awaiting: { kind: "plan_approval" } } })),
+    })
+
+    const { result, json } = await callTool(tools, "send_message", { sessionId: "beta:local-b", message: "hi" })
+
+    expect(result.isError).toBe(true)
+    expect(json).toMatchObject({ notReady: true, reason: "awaiting_other" })
+    expect((json as { message: string }).message).toContain("respond")
+  })
+
+  test("requireIdle:false is the escape hatch — no status probe, sends anyway", async () => {
+    const status = mock(async () => { throw new Error("status must not be probed") })
+    const sendMessage = mock(async () => ({ messageId: "m", delivered: true, confirmed: false, submission: { status: "submitted" } }))
+    const tools = betaTools({
+      status: status as unknown as FleetToolClient["status"],
+      sendMessage: sendMessage as unknown as FleetToolClient["sendMessage"],
+    })
+
+    const { result, json } = await callTool(tools, "send_message", { sessionId: "beta:local-b", message: "hi", requireIdle: false })
+
+    expect(result.isError).toBeUndefined()
+    expect(status).toHaveBeenCalledTimes(0)
+    expect(json).toMatchObject({ delivered: true, submitted: true })
+  })
+
+  test("surfaces submitted:true from the submission sub-status, false when unconfirmed", async () => {
+    const submittedTools = betaTools({
+      status: mock(async () => ({ sessionId: "local-b", status: { interactionState: "idle" } })),
+      sendMessage: mock(async () => ({ messageId: "m", delivered: true, confirmed: false, submission: { status: "submitted" } })),
+    })
+    const unconfirmedTools = betaTools({
+      status: mock(async () => ({ sessionId: "local-b", status: { interactionState: "idle" } })),
+      sendMessage: mock(async () => ({ messageId: "m", delivered: true, confirmed: false, submission: { status: "unconfirmed" } })),
+    })
+
+    const submitted = await callTool(submittedTools, "send_message", { sessionId: "beta:local-b", message: "go" })
+    const unconfirmed = await callTool(unconfirmedTools, "send_message", { sessionId: "beta:local-b", message: "go" })
+
+    expect(submitted.result.isError).toBeUndefined()
+    expect(submitted.json).toMatchObject({ delivered: true, submitted: true })
+    expect(unconfirmed.json).toMatchObject({ delivered: true, submitted: false })
+  })
+})
+
+describe("fleet MCP tools — C4 send_keys named ops", () => {
+  test("op:submit maps to the enter named key with raw off", async () => {
+    let captured: { keys: string; raw?: boolean } | undefined
+    const tools = betaTools({
+      sendKeys: mock(async (_id: string, input: { keys: string; raw?: boolean }) => {
+        captured = input
+        return { keysId: "k", delivered: true }
+      }) as unknown as FleetToolClient["sendKeys"],
+    })
+
+    const { result, json } = await callTool(tools, "send_keys", { sessionId: "beta:local-b", op: "submit" })
+
+    expect(result.isError).toBeUndefined()
+    expect(captured).toMatchObject({ keys: "enter", raw: false })
+    expect(json).toMatchObject({ op: "submit", mappedKeys: "enter", delivered: true })
+  })
+
+  test("op:interrupt maps to ctrl-c with raw off", async () => {
+    let captured: { keys: string; raw?: boolean } | undefined
+    const tools = betaTools({
+      sendKeys: mock(async (_id: string, input: { keys: string; raw?: boolean }) => {
+        captured = input
+        return { keysId: "k", delivered: true }
+      }) as unknown as FleetToolClient["sendKeys"],
+    })
+
+    await callTool(tools, "send_keys", { sessionId: "beta:local-b", op: "interrupt" })
+
+    expect(captured).toMatchObject({ keys: "ctrl-c", raw: false })
+  })
+
+  test("literal keys still pass through with raw for byte-level input", async () => {
+    let captured: { keys: string; raw?: boolean } | undefined
+    const tools = betaTools({
+      sendKeys: mock(async (_id: string, input: { keys: string; raw?: boolean }) => {
+        captured = input
+        return { keysId: "k", delivered: true }
+      }) as unknown as FleetToolClient["sendKeys"],
+    })
+
+    await callTool(tools, "send_keys", { sessionId: "beta:local-b", keys: "abc", raw: true })
+
+    expect(captured).toMatchObject({ keys: "abc", raw: true })
+  })
+
+  test("rejects passing both op and keys, or neither", async () => {
+    const tools = betaTools({
+      sendKeys: mock(async () => ({ keysId: "k", delivered: true })) as unknown as FleetToolClient["sendKeys"],
+    })
+
+    const both = await callTool(tools, "send_keys", { sessionId: "beta:local-b", op: "submit", keys: "x" })
+    const neither = await callTool(tools, "send_keys", { sessionId: "beta:local-b" })
+    const badOp = await callTool(tools, "send_keys", { sessionId: "beta:local-b", op: "nope" })
+
+    expect(both.result.isError).toBe(true)
+    expect(neither.result.isError).toBe(true)
+    expect(badOp.result.isError).toBe(true)
+    expect((badOp.json as { error: { code: string } }).error.code).toBe("INVALID_ARGUMENT")
+  })
+})
+
+describe("fleet MCP tools — C3 create_session disableStopGate", () => {
+  test("injects --no-stop-gate into agentArgs (needs agent_args capability)", async () => {
+    const { tools, calls } = createSessionCapabilityToolMap({ status: 200, capabilities: ["agent_args"] })
+
+    const { result } = await callTool(tools, "create_session", {
+      instance: "alpha",
+      agent: "claude",
+      disableStopGate: true,
+      idempotencyKey: "idem-c3",
+    })
+
+    const createCalls = callsToPath(calls, "/api/control/sessions/create")
+    expect(result.isError).toBeUndefined()
+    expect(callsToPath(calls, "/api/control/capabilities")).toHaveLength(1)
+    expect((createCalls[0]?.body as { agentArgs?: Array<string> }).agentArgs).toEqual(["--no-stop-gate"])
+  })
+
+  test("merges --no-stop-gate after user-supplied agentArgs", async () => {
+    const { tools, calls } = createSessionCapabilityToolMap({ status: 200, capabilities: ["agent_args"] })
+
+    await callTool(tools, "create_session", {
+      instance: "alpha",
+      agent: "claude",
+      agentArgs: ["--model", "opus"],
+      disableStopGate: true,
+      idempotencyKey: "idem-c3-merge",
+    })
+
+    const createCalls = callsToPath(calls, "/api/control/sessions/create")
+    expect((createCalls[0]?.body as { agentArgs?: Array<string> }).agentArgs).toEqual(["--model", "opus", "--no-stop-gate"])
+  })
+
+  test("is rejected when the instance lacks the agent_args capability", async () => {
+    const { tools, calls } = createSessionCapabilityToolMap({ status: 200, capabilities: ["permission_mode"] })
+
+    const { result, json } = await callTool(tools, "create_session", {
+      instance: "alpha",
+      agent: "claude",
+      disableStopGate: true,
+      idempotencyKey: "idem-c3-deny",
+    })
+
+    expect(result.isError).toBe(true)
+    expect(json).toMatchObject({ error: { code: "UNSUPPORTED_CAPABILITY" } })
+    expect(callsToPath(calls, "/api/control/sessions/create")).toHaveLength(0)
+  })
+})
+
+describe("fleet MCP tools — C2 await_turn settled classification", () => {
+  test("adds a per-session settle classification keyed on the reliable events", async () => {
+    const tools = betaTools({
+      waitEvents: mock(async (): Promise<import("../../src/lib/fleet/client").WaitEventsResponse> => ({
+        events: [
+          { seq: 1, sessionId: "s-done", kind: "turn_ended", at: 1 },
+          { seq: 2, sessionId: "s-wait", kind: "waiting_input", at: 2 },
+          { seq: 3, sessionId: "s-flicker", kind: "became_idle", at: 3 },
+        ],
+        gaps: [],
+        cursor: "c",
+        more: false,
+      })) as unknown as FleetToolClient["waitEvents"],
+    })
+
+    const { result, json } = await callTool(tools, "await_turn", { instances: ["beta"], watcherId: "settle-w", timeoutMs: 25 })
+    const settled = (json as { settled: Array<{ sessionId: string; status: string; reliable: boolean }> }).settled
+
+    expect(result.isError).toBeUndefined()
+    expect(settled).toContainEqual({ sessionId: "beta:s-done", status: "completed", reliable: true })
+    expect(settled).toContainEqual({ sessionId: "beta:s-wait", status: "awaiting_input", reliable: true })
+    expect(settled).toContainEqual({ sessionId: "beta:s-flicker", status: "idle_flicker", reliable: false })
+  })
+})
+
+describe("fleet MCP tools — C5 drive_task", () => {
+  test("drives to completion and returns the parsed operator report", async () => {
+    let sent = false
+    const tools = betaTools({
+      status: mock(async () => ({ sessionId: "local-b", status: { interactionState: "idle" } })),
+      sendMessage: mock(async () => {
+        sent = true
+        return { messageId: "m", delivered: true, confirmed: true, submission: { status: "submitted" } }
+      }) as unknown as FleetToolClient["sendMessage"],
+      waitEvents: mock(async (): Promise<import("../../src/lib/fleet/client").WaitEventsResponse> =>
+        sent
+          ? { events: [{ seq: 1, sessionId: "local-b", kind: "turn_ended", at: 1 }], gaps: [], cursor: "c", more: false }
+          : { events: [], gaps: [], cursor: "c-prime", more: false }) as unknown as FleetToolClient["waitEvents"],
+      readSession: mock(async () => ({
+        sessionId: "local-b",
+        text: "=== OPERATOR REPORT ===\nSTATE: done\nSUMMARY: shipped it\nASK: none\nARTIFACT: /tmp/z\n=== END OPERATOR REPORT ===",
+        truncated: false,
+        source: "pty",
+        status: {},
+      })) as unknown as FleetToolClient["readSession"],
+    })
+
+    const { result, json } = await callTool(tools, "drive_task", {
+      sessionId: "beta:local-b",
+      prompt: "ship it",
+      timeoutMs: 1_000,
+    })
+
+    expect(result.isError).toBeUndefined()
+    expect(json).toMatchObject({
+      resolvedInstance: { id: "beta", label: "Beta" },
+      sessionId: "beta:local-b",
+      submitted: true,
+      settled: "turn_ended",
+      state: "done",
+      summary: "shipped it",
+      artifact: "/tmp/z",
+      reportFound: true,
+      interrupted: false,
+    })
+  })
+
+  test("maps a hard failure (delivery failed) to isError", async () => {
+    const tools = betaTools({
+      status: mock(async () => ({ sessionId: "local-b", status: { interactionState: "idle" } })),
+      waitEvents: mock(async () => ({ events: [], gaps: [], cursor: "c", more: false })) as unknown as FleetToolClient["waitEvents"],
+      sendMessage: mock(async () => ({ messageId: "m", delivered: false, confirmed: false, delivery: { status: "failed" } })) as unknown as FleetToolClient["sendMessage"],
+    })
+
+    const { result, json } = await callTool(tools, "drive_task", {
+      sessionId: "beta:local-b",
+      prompt: "go",
+      timeoutMs: 1_000,
+    })
+
+    expect(result.isError).toBe(true)
+    expect(json).toMatchObject({ error: "delivery_failed", delivered: false, state: "send_failed" })
   })
 })
 

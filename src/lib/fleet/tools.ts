@@ -26,6 +26,15 @@ import {
 } from "./registry"
 import { MergedFleetRegistry } from "./discovery"
 import { createTunnelTokenProvider, type TunnelTokenProvider } from "./tunnel-auth"
+import {
+  classifyTurnEvents,
+  driveTask,
+  isHardNotReady,
+  isNamedKeyOp,
+  mapNamedKeyOp,
+  waitForMessageReady,
+  type DriverClient,
+} from "./driver"
 
 const FLEET_GROUP: McpGroup = "fleet"
 const INSTANCE_PROBE_TIMEOUT_MS = 2_000
@@ -33,6 +42,7 @@ const INSTANCE_PROBE_CACHE_TTL_MS = 5_000
 const CAPABILITIES_CACHE_TTL_MS = 60_000
 const AWAIT_TURN_DEFAULT_TIMEOUT_MS = 30_000
 const AWAIT_TURN_TIMEOUT_SLACK_MS = 5_000
+const DRIVE_TASK_DEFAULT_TIMEOUT_MS = 120_000
 const LIST_INSTANCES_FANOUT_CONCURRENCY = 16
 const AWAIT_TURN_FANOUT_CONCURRENCY = 256
 const INSTANCE_PROBE_RATE_LIMIT_MAX_RETRIES = 1
@@ -351,18 +361,54 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     ),
     tool(
       "send_message",
-      "Send a message to a fleet session. isError reflects DELIVERY ONLY: it is true only when the message could not be delivered to the session (transport/precondition failure). A delivered message whose confirmation did not arrive within awaitMs is NOT an error — it returns delivered:true with confirmationPending/confirmationTimedOut, because a long turn legitimately outruns awaitMs. Recommended pattern: send with awaitMs:0 for a fast delivery ack that never blocks on confirmation, then call await_turn (filtered to this sessionId) to observe the session's actual turn completion. The idempotencyKey makes a retried send safe (a retry never re-types the message).",
+      "Send a message to a fleet session. By DEFAULT it first checks the session is idle / awaiting the next message and REFUSES (structured notReady, isError) rather than blind-type into a busy composer or a pending prompt — set requireIdle:false to force the legacy unconditional send, or waitForIdleMs to wait briefly for idle first. isError reflects DELIVERY: true when the message was not delivered (transport/precondition failure) OR refused as notReady. A delivered message whose confirmation did not arrive within awaitMs is NOT an error — it returns delivered:true with confirmationPending/confirmationTimedOut, because a long turn legitimately outruns awaitMs. The additive `submitted` field is true only when ai-or-die's submission sub-status proves the message reached the composer. Recommended pattern: send with awaitMs:0 for a fast delivery ack, then call await_turn (filtered to this sessionId) to observe the session's actual turn completion. The idempotencyKey makes a retried send safe (a retry never re-types the message).",
       objectSchema({
         sessionId: stringProp("Global session id in the form instanceId:localSessionId."),
         instance: stringProp("Optional instance id/label; when supplied it must agree with sessionId."),
         message: stringProp("Message text to deliver to the session."),
         idempotencyKey: stringProp("Optional caller idempotency key; AUTO-GENERATED when omitted, so you normally never pass it. Supply your OWN stable key only when you will retry the SAME send and need the upstream to dedupe it."),
         awaitMs: numberProp("Optional best-effort confirmation wait (ms) — NOT a deadline. Prefer awaitMs:0 plus await_turn; a turn that outruns awaitMs returns confirmationPending, not an error."),
+        requireIdle: booleanProp("Default true: check status and refuse a busy/awaiting-prompt/dead session with a structured notReady result. Set false to force an unconditional send (unsafe: may type into a busy composer)."),
+        waitForIdleMs: numberProp("When requireIdle, wait up to this many ms for the session to become idle before deciding (default 0 = decide immediately)."),
       }, ["sessionId", "message"]),
       async (args, signal) => {
         const { instance, localId, globalId } = await resolveSession(args)
         const awaitMs = optionalNumber(args, "awaitMs")
-        const response = await clientFor(instance).sendMessage(
+        const requireIdle = optionalBoolean(args, "requireIdle") ?? true
+        const client = clientFor(instance)
+
+        // C1: never blind-type into a busy composer. Refuse ONLY on positive evidence
+        // (busy / a non-message pending prompt / a dead session); a status probe that
+        // fails, or an ambiguous "unknown" state, fails OPEN so a transient status
+        // hiccup can't wedge a legitimate send (the send carries its own submission
+        // signal). Opt out entirely with requireIdle:false.
+        if (requireIdle) {
+          const readyResult = await waitForMessageReady(client, localId, {
+            waitMs: optionalNumber(args, "waitForIdleMs") ?? 0,
+            signal,
+          })
+          if (!readyResult.ready && isHardNotReady(readyResult.readiness.reason)) {
+            const advise =
+              readyResult.readiness.reason === "awaiting_other"
+                ? " The session is awaiting a prompt — use `respond`, not a free-text message."
+                : readyResult.readiness.reason === "terminal"
+                  ? " The session has exited."
+                  : " Wait for it to go idle (await_turn) or set requireIdle:false to force."
+            return jsonResult({
+              resolvedInstance: publicInstance(instance),
+              sessionId: globalId,
+              delivered: false,
+              submitted: false,
+              notReady: true,
+              reason: readyResult.readiness.reason,
+              interactionState: readyResult.readiness.interactionState,
+              awaitingKind: readyResult.readiness.awaitingKind,
+              message: `not sent: session is not ready for a message (${readyResult.readiness.reason}).${advise}`,
+            }, true)
+          }
+        }
+
+        const response = await client.sendMessage(
           localId,
           {
             message: requiredString(args, "message"),
@@ -380,6 +426,9 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
           || response.delivery?.status === "error"
         const delivered = !deliveryFailed
         const confirmed = delivered && response.confirmed === true
+        // C1: a reliable submitted-vs-unconfirmed signal from ai-or-die's submission
+        // sub-status ("submitted" proves the bytes reached the composer).
+        const submitted = delivered && response.submission?.status === "submitted"
         const awaited = awaitMs !== undefined && awaitMs > 0
         // confirmationTimedOut: delivered + unconfirmed after an await window (ours or
         // the upstream's). It is a successful delivery with completion still pending —
@@ -393,6 +442,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
           ...response,
           delivered,
           confirmed,
+          submitted,
           ...(confirmationTimedOut ? { confirmationPending: true, confirmationTimedOut: true } : {}),
           ...(isError
             ? { message: "message was not delivered to the session by the upstream instance" }
@@ -407,27 +457,53 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     ),
     tool(
       "send_keys",
-      "Send key input to a fleet session.",
+      "Send key input to a fleet session. Prefer the higher-level `op`: 'submit' presses Enter and 'interrupt' sends Ctrl-C, each mapped to ai-or-die's NAMED key (never a literal control byte like \"\\r\"). Use `keys` only for literal input; `raw` is strictly for literal bytes. Provide exactly one of `op` or `keys`.",
       objectSchema({
         sessionId: stringProp("Global session id in the form instanceId:localSessionId."),
         instance: stringProp("Optional instance id/label; when supplied it must agree with sessionId."),
-        keys: stringProp("Key sequence to send."),
+        op: stringProp("Higher-level named op: 'submit' (Enter) or 'interrupt' (Ctrl-C). Mapped to the ai-or-die named key with raw off. Do NOT also pass keys."),
+        keys: stringProp("Literal key sequence to send. Provide instead of op."),
         idempotencyKey: stringProp("Optional caller idempotency key; auto-generated when omitted."),
-        raw: booleanProp("Pass keys through as raw input when the instance supports it."),
-      }, ["sessionId", "keys"]),
+        raw: booleanProp("Pass keys through as raw literal bytes when the instance supports it. Ignored when op is set."),
+      }, ["sessionId"]),
       async (args, signal) => {
         const { instance, localId, globalId } = await resolveSession(args)
-        const raw = optionalBoolean(args, "raw")
+        const op = optionalString(args, "op")
+        const literalKeys = optionalString(args, "keys")
+        if (op !== undefined && literalKeys !== undefined) {
+          throw new FleetToolInputError("INVALID_ARGUMENT", "provide either arguments.op or arguments.keys, not both")
+        }
+        if (op === undefined && literalKeys === undefined) {
+          throw new FleetToolInputError("INVALID_ARGUMENT", "one of arguments.op or arguments.keys is required")
+        }
+        let keys: string
+        let raw: boolean | undefined
+        if (op !== undefined) {
+          if (!isNamedKeyOp(op)) {
+            throw new FleetToolInputError("INVALID_ARGUMENT", `arguments.op must be 'submit' or 'interrupt' (got ${JSON.stringify(op)})`)
+          }
+          // A NAMED key rides with raw:false so ai-or-die resolves it (never a literal byte).
+          keys = mapNamedKeyOp(op)
+          raw = false
+        } else {
+          keys = literalKeys!
+          raw = optionalBoolean(args, "raw")
+        }
         const response = await clientFor(instance).sendKeys(
           localId,
           {
-            keys: requiredString(args, "keys"),
+            keys,
             idempotencyKey: optionalString(args, "idempotencyKey") ?? randomUUID(),
             ...(raw === undefined ? {} : { raw }),
           },
           signal,
         )
-        return ok({ resolvedInstance: publicInstance(instance), sessionId: globalId, ...response })
+        return ok({
+          resolvedInstance: publicInstance(instance),
+          sessionId: globalId,
+          ...(op === undefined ? {} : { op, mappedKeys: keys }),
+          ...response,
+        })
       },
     ),
     tool(
@@ -466,18 +542,25 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
         readyTimeoutMs: numberProp("F17: bounded ms to wait for the agent to become driveable before returning. The response carries ready/bound/blocker."),
         permissionMode: stringProp("F10 (claude only): permission mode the launched agent starts in — one of plan | acceptEdits | default | bypassPermissions. Rejected with BAD_REQUEST if unknown or if agentArgs also sets it."),
         agentArgs: arrayProp("F10 (claude only): extra launcher args appended after the github-router prefix. Must NOT include --permission-mode or --dangerously-skip-permissions (use permissionMode) — rejected with BAD_REQUEST."),
+        disableStopGate: booleanProp("C3 (claude only): disable the structural Stop-gate on the launched session by injecting --no-stop-gate into agentArgs, so a driven session's turn-end never hangs on a blocking Stop hook. Requires a remote github-router that understands the flag (uses the agent_args capability)."),
       }, ["instance", "agent"]),
       async (args, signal) => {
         const instance = await resolve(requiredString(args, "instance"))
         const agent = requiredString(args, "agent")
         const idempotencyKey = optionalString(args, "idempotencyKey") ?? randomUUID()
         const permissionMode = optionalString(args, "permissionMode")
-        const agentArgs = optionalStringArray(args, "agentArgs")
+        const disableStopGate = optionalBoolean(args, "disableStopGate") === true
+        const requestedAgentArgs = optionalStringArray(args, "agentArgs")
+        // C3: injecting --no-stop-gate rides the same launcher-args channel, so it
+        // needs the agent_args capability just like an explicit agentArgs.
+        const agentArgs = disableStopGate
+          ? [...(requestedAgentArgs ?? []), "--no-stop-gate"]
+          : requestedAgentArgs
         if (permissionMode !== undefined) {
           await assertCapability(instance, "permission_mode", "permissionMode", signal)
         }
         if (agentArgs !== undefined) {
-          await assertCapability(instance, "agent_args", "agentArgs", signal)
+          await assertCapability(instance, "agent_args", disableStopGate ? "disableStopGate" : "agentArgs", signal)
         }
         // End-to-end idempotency also requires the ai-or-die control plane to dedupe by this key.
         const response = await clientFor(instance).createSession(
@@ -587,10 +670,16 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
         const gaps = responses.flatMap(({ instance, response }) =>
           response.gaps.map((gap) => ({ instance: publicInstance(instance), ...gap })),
         )
+        // C2: an additive per-session settle classification so a caller keys on the
+        // RELIABLE signal — `turn_ended` = completed, `waiting_input` = awaiting input;
+        // a bare `became_idle` is surfaced as idle_flicker/reliable:false and is NEVER
+        // reported as completion. Purely additive to the raw `events` above.
+        const settled = classifyTurnEvents(events)
         return ok({
           resolvedInstances: target.instances.map(publicInstance),
           events,
           gaps,
+          ...(settled.length > 0 ? { settled } : {}),
           cursors: responses.map(({ instance, response }) => ({
             instance: publicInstance(instance),
             cursor: response.cursor,
@@ -598,6 +687,34 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
           more: responses.some(({ response }) => response.more),
           ...(errors.length > 0 ? { errors } : {}),
         })
+      },
+    ),
+    tool(
+      "drive_task",
+      "Drive one prompt on a session to completion and return the parsed operator report. Composes the reliable path: ensure the composer is idle (else return a structured busy/not-ready result), send and surface whether the message reached the composer (submitted; a delivered-but-unconfirmed send still proceeds), wait for the RELIABLE turn boundary (turn_ended / waiting_input — never the became_idle flicker), read the transcript tail, and parse the OPERATOR REPORT trailer into {state, summary, ask, artifact, raw}. A reliable waiting_input outranks the model's self-reported STATE (a still-blocked session is never reported as done). If the turn does not end within timeoutMs (e.g. a blocking Stop hook that would otherwise hang ~10 min), it AUTO-RECOVERS with a Ctrl-C interrupt rather than blocking, then re-waits briefly and re-reads. Robust to a busy session (state:'busy'), a missing trailer (state:'unknown' + raw), and a hung hook (interrupted:true, recovered:true/false). By default it appends the trailer instruction so the driven session emits a parseable report; set expectReport:false to send the prompt verbatim.",
+      objectSchema({
+        sessionId: stringProp("Global session id in the form instanceId:localSessionId."),
+        instance: stringProp("Optional instance id/label; when supplied it must agree with sessionId."),
+        prompt: stringProp("The task/prompt to drive on the session."),
+        timeoutMs: numberProp(`Ms to wait for the turn to end before auto-recovering via interrupt (default ${DRIVE_TASK_DEFAULT_TIMEOUT_MS}). Set generously — exceeding it triggers a Ctrl-C recovery.`),
+        expectReport: booleanProp("Default true: append the OPERATOR REPORT trailer instruction so the driven session ends its turn with a parseable {state,summary,ask,artifact}. Set false to send the prompt verbatim."),
+      }, ["sessionId", "prompt"]),
+      async (args, signal) => {
+        const { instance, localId, globalId } = await resolveSession(args)
+        const result = await driveTask({
+          client: clientFor(instance) as DriverClient,
+          localId,
+          prompt: requiredString(args, "prompt"),
+          timeoutMs: optionalNumber(args, "timeoutMs") ?? DRIVE_TASK_DEFAULT_TIMEOUT_MS,
+          expectReport: optionalBoolean(args, "expectReport") ?? true,
+          idempotencyKey: randomUUID(),
+          interruptKey: randomUUID(),
+          signal,
+        })
+        return jsonResult(
+          { resolvedInstance: publicInstance(instance), sessionId: globalId, ...result },
+          result.error !== undefined,
+        )
       },
     ),
     tool(
