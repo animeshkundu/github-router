@@ -2,7 +2,13 @@ import type { McpGroup, NonPersonaMcpTool } from "../peer-mcp-personas"
 
 import consola from "consola"
 
-import { ArtifactClient, ArtifactError, type ArtifactPollResponse } from "./client"
+import {
+  ArtifactClient,
+  ArtifactError,
+  type ArtifactAwaitResponse,
+  type ArtifactEvent,
+  type ArtifactPollResponse,
+} from "./client"
 
 const ARTIFACT_GROUP: McpGroup = "peers"
 const ARTIFACT_POLL_TOOL_BUDGET_MS = 50_000
@@ -47,30 +53,100 @@ function tool(
 export const ARTIFACT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
   tool(
     "artifact_open",
-    "Open a workspace file in ai-or-die's Artifact review panel for human review. Only works inside an ai-or-die tab-backed Claude session.",
+    "Open a workspace file in ai-or-die's Artifact review panel for human review. Pass mode:\"interactive\" when the HTML carries data-aod-* action controls. Only works inside an ai-or-die tab-backed Claude session.",
     objectSchema({
       file: stringProp("Workspace-relative or absolute file path to show in the Artifact panel."),
+      mode: enumProp(
+        ["static", "interactive"],
+        "Advisory. \"interactive\" signals the HTML contains data-aod-* action controls the panel should wire; \"static\" (default) is a read-and-annotate artifact.",
+      ),
     }, ["file"]),
     async (args, signal) => {
       const env = readArtifactEnv()
       if (!env) return missingEnvResult()
       const file = requiredString(args, "file")
-      const response = await clientFromEnv(env).open(file, signal)
+      const mode = optionalEnum(args, "mode", ["static", "interactive"])
+      const response = await clientFromEnv(env).open(file, { mode, signal })
       return ok({
         viewUrl: response.viewUrl,
-        next_step: "Tell the user to review at the Artifact panel, then call artifact_poll.",
+        sessionId: response.sessionId,
+        key: response.key,
+        next_step: "Tell the user to review at the Artifact panel, then call artifact_await to receive their feedback.",
       })
     },
   ),
   tool(
-    "artifact_poll",
-    "Wait for human Artifact review feedback from ai-or-die and return the prompts/layout warnings/DOM snapshot for the agent to act on. Only works inside an ai-or-die tab-backed Claude session.",
+    "artifact_update",
+    "Replace the current Artifact review's content in place. Provide EXACTLY ONE of file (a workspace file path) or html (raw HTML the server writes to the review's sandboxed file). html requires an already-open review. Only works inside an ai-or-die tab-backed Claude session.",
+    objectSchema({
+      file: stringProp("Workspace-relative or absolute file path to become the review's new content."),
+      html: stringProp("Raw HTML to write into the review's existing sandboxed file, then reload."),
+      idempotencyKey: stringProp("Optional stable key so a retried update is de-duplicated by the server."),
+    }, []),
+    async (args, signal) => {
+      const env = readArtifactEnv()
+      if (!env) return missingEnvResult()
+      const file = optionalString(args, "file")
+      const html = optionalString(args, "html")
+      if ((file === undefined) === (html === undefined)) {
+        throw new ArtifactToolInputError(
+          "INVALID_ARGUMENT",
+          "artifact_update requires EXACTLY ONE of arguments.file or arguments.html",
+        )
+      }
+      const idempotencyKey = optionalString(args, "idempotencyKey")
+      const response = await clientFromEnv(env).update({ file, html, idempotencyKey, signal })
+      return ok({
+        ...response,
+        ok: true,
+        next_step: "The panel now shows the updated content. Call artifact_await for further feedback.",
+      })
+    },
+  ),
+  tool(
+    "artifact_refresh",
+    "Force the ai-or-die Artifact panel to reload the current artifact from disk (no content change). Only works inside an ai-or-die tab-backed Claude session.",
     objectSchema({}, []),
     async (_args, signal) => {
       const env = readArtifactEnv()
       if (!env) return missingEnvResult()
-      const response = await pollUntilReady(clientFromEnv(env), signal)
-      return ok(formatPollResponse(response))
+      const response = await clientFromEnv(env).refresh(signal)
+      return ok({
+        ...response,
+        ok: true,
+        next_step: "The panel reloaded the artifact. Call artifact_await for feedback.",
+      })
+    },
+  ),
+  tool(
+    "artifact_await",
+    "Wait for the human's next Artifact review events (typed drain: comments AND structured action-button/checkbox events) and return them with a cursor. Pass the returned cursor on the next call to receive only newer events. Supersedes artifact_poll. Only works inside an ai-or-die tab-backed Claude session.",
+    objectSchema({
+      cursor: stringProp("High-water cursor from the previous artifact_await response. Omit on the first call."),
+      timeoutMs: numberProp("Optional server long-hold budget in ms (default ~25000)."),
+    }, []),
+    async (args, signal) => {
+      const env = readArtifactEnv()
+      if (!env) return missingEnvResult()
+      const cursor = optionalString(args, "cursor")
+      const timeoutMs = optionalNumber(args, "timeoutMs")
+      const response = await clientFromEnv(env).awaitEvents({ cursor, timeoutMs, signal })
+      return ok(formatAwaitResponse(response))
+    },
+  ),
+  tool(
+    "artifact_dismiss",
+    "Hide the ai-or-die Artifact panel UI while keeping the review alive (queued feedback preserved, channel open, re-openable). Only works inside an ai-or-die tab-backed Claude session.",
+    objectSchema({}, []),
+    async (_args, signal) => {
+      const env = readArtifactEnv()
+      if (!env) return missingEnvResult()
+      const response = await clientFromEnv(env).dismiss(signal)
+      return ok({
+        ...response,
+        ok: true,
+        next_step: "The panel is hidden but the review is still live. Re-open the artifact or call artifact_await when ready.",
+      })
     },
   ),
   tool(
@@ -85,8 +161,8 @@ export const ARTIFACT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
       const text = requiredString(args, "text")
       const response = await clientFromEnv(env).agentReply(text, signal)
       return ok({
-        ok: true,
         ...response,
+        ok: true,
         next_step: "Wait for further human review, or continue if the review loop is complete.",
       })
     },
@@ -100,10 +176,23 @@ export const ARTIFACT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
       if (!env) return missingEnvResult()
       const response = await clientFromEnv(env).end(signal)
       return ok({
-        ok: true,
         ...response,
+        ok: true,
         next_step: "Artifact review loop ended.",
       })
+    },
+  ),
+  tool(
+    "artifact_poll",
+    "FROZEN legacy alias for artifact_await (old payload, human comments only, no structured actions). New agents should call artifact_await instead. Only works inside an ai-or-die tab-backed Claude session.",
+    objectSchema({
+      timeoutMs: numberProp("Optional per-call budget hint in ms (advisory)."),
+    }, []),
+    async (_args, signal) => {
+      const env = readArtifactEnv()
+      if (!env) return missingEnvResult()
+      const response = await pollUntilReady(clientFromEnv(env), signal)
+      return ok(formatPollResponse(response))
     },
   ),
 ])
@@ -206,6 +295,42 @@ function formatPollResponse(response: ArtifactPollResponse): Record<string, unkn
   })
 }
 
+/**
+ * Shape the typed drain for the model: pass events through verbatim (unknown
+ * `kind`s preserved — the model ignores what it does not understand), echo the
+ * cursor to thread into the next call, and pick a next_step from the events.
+ */
+function formatAwaitResponse(response: ArtifactAwaitResponse): Record<string, unknown> {
+  const events = Array.isArray(response.events) ? response.events : []
+  // `status` comes from JSON.parse, so a degraded/older server payload may omit
+  // it — coerce so awaitNextStep never sees `undefined`.
+  const status = typeof response.status === "string" ? response.status : undefined
+  return definedObject({
+    events,
+    status,
+    cursor: response.cursor,
+    next_step: awaitNextStep(status ?? "", events),
+  })
+}
+
+function awaitNextStep(status: string, events: ArtifactEvent[]): string {
+  if ((status ?? "").toLowerCase() === "ended") {
+    return "The review has ended. No further feedback will arrive."
+  }
+  if (events.length === 0) {
+    return "No feedback yet. Call artifact_await again, passing the returned cursor."
+  }
+  const hasAction = events.some((e) => e.kind === "action")
+  const hasComment = events.some((e) => e.kind === "comment")
+  if (hasAction && hasComment) {
+    return "Act on the action events (buttons/checkboxes) and the comments, reply with artifact_reply, then call artifact_await with the returned cursor."
+  }
+  if (hasAction) {
+    return "The human triggered action controls. Act on them, optionally artifact_reply, then call artifact_await with the returned cursor."
+  }
+  return "Apply the human comments, call artifact_reply with a concise summary, then artifact_await with the returned cursor."
+}
+
 function defaultPollNextStep(status: string): string {
   return isWaitingStatus(status)
     ? "No human feedback is ready yet. Call artifact_poll again."
@@ -228,6 +353,46 @@ function requiredString(args: Record<string, unknown>, key: string): string {
     throw new ArtifactToolInputError(
       "INVALID_ARGUMENT",
       `arguments.${key} is required and must be a non-empty string`,
+    )
+  }
+  return value
+}
+
+function optionalString(args: Record<string, unknown>, key: string): string | undefined {
+  const value = args[key]
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new ArtifactToolInputError(
+      "INVALID_ARGUMENT",
+      `arguments.${key} must be a non-empty string when provided`,
+    )
+  }
+  return value
+}
+
+function optionalNumber(args: Record<string, unknown>, key: string): number | undefined {
+  const value = args[key]
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new ArtifactToolInputError(
+      "INVALID_ARGUMENT",
+      `arguments.${key} must be a positive number when provided`,
+    )
+  }
+  return value
+}
+
+function optionalEnum(
+  args: Record<string, unknown>,
+  key: string,
+  allowed: ReadonlyArray<string>,
+): string | undefined {
+  const value = optionalString(args, key)
+  if (value === undefined) return undefined
+  if (!allowed.includes(value)) {
+    throw new ArtifactToolInputError(
+      "INVALID_ARGUMENT",
+      `arguments.${key} must be one of ${allowed.join(", ")}`,
     )
   }
   return value
@@ -307,4 +472,12 @@ function objectSchema(properties: Record<string, unknown>, required: Array<strin
 
 function stringProp(description: string): Record<string, unknown> {
   return { type: "string", description }
+}
+
+function numberProp(description: string): Record<string, unknown> {
+  return { type: "number", description }
+}
+
+function enumProp(values: ReadonlyArray<string>, description: string): Record<string, unknown> {
+  return { type: "string", enum: [...values], description }
 }
