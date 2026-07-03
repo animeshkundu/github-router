@@ -63,6 +63,41 @@ export interface PreToolUseDecision {
 }
 
 /**
+ * B1 — detect a Bash command that MUTATES the filesystem/repo. Bash stays
+ * available to the operator for read-only `gh` and inspection, but hand-coding
+ * via the shell (writing files, applying patches, committing) is the exact
+ * vector the Edit/Write deny-list closes, so it must be blocked here too.
+ *
+ * Returns a human reason when the command mutates, else undefined. Conservative
+ * by design (fail-toward-blocking): output redirection to a real file, tee,
+ * in-place sed, dd, patch, and mutating git subcommands all block. The only
+ * redirection exceptions are pure file-descriptor duplication (`2>&1`, `>&2`)
+ * and discarding to `/dev/null`, which do not write a real file — so the common
+ * read-only idioms (`gh ... 2>/dev/null`) stay usable.
+ */
+export function bashMutationReason(command: string): string | undefined {
+  // Strip redirections that do NOT write a real file before testing for `>`:
+  //   - fd duplication: 2>&1, >&2, >&-
+  //   - discard to /dev/null: >/dev/null, 2>/dev/null, &>/dev/null
+  const benign = command
+    .replace(/\d*>&\s*[\d-]+/g, " ")
+    .replace(/&?\d*>{1,2}\s*\/dev\/null/g, " ")
+  if (/>/.test(benign)) return "shell output redirection writes a file"
+  if (/(^|[|&;(\s])tee(\s|$)/.test(command)) return "tee writes files"
+  if (/\bsed\b[^|&;]*(\s-[a-z]*i|--in-place)/.test(command)) return "sed -i edits files in place"
+  if (/(^|[|&;(\s])dd(\s|$)/.test(command)) return "dd writes to disk"
+  if (/(^|[|&;(\s])patch(\s|$)/.test(command)) return "patch mutates files"
+  if (
+    /\bgit\s+(apply|commit|checkout|switch|reset|restore|rm|mv|push|stash|clean|revert|cherry-pick|merge|rebase|tag|am|format-patch)\b/.test(
+      command,
+    )
+  ) {
+    return "git subcommand mutates the repository"
+  }
+  return undefined
+}
+
+/**
  * M4 — fail-CLOSED. If operator/`--agents` mode is active but the capability
  * -shaping guard could NOT be installed (e.g. settings.json unwritable), the
  * operator session must NOT start unshaded. The launcher calls this after
@@ -78,15 +113,49 @@ export function assertShapingInstalled(agentsMode: boolean, injectionSucceeded: 
   }
 }
 
-/** The PreToolUse hook decision for a given tool name in operator mode. */
+/**
+ * The PreToolUse hook decision for a given tool name in operator mode.
+ *
+ * For Bash the command is inspected: a file-mutating command is blocked, a
+ * read-only one is allowed. FAIL-CLOSED — if operator mode is on and a Bash
+ * call arrives with no inspectable command string, block it (a malformed /
+ * unparseable Bash payload must not slip an unchecked shell through).
+ *
+ * Task propagation: this guard is a PreToolUse hook in the spawned session's
+ * settings.json, which also governs subagents spawned via Task/Agent — their
+ * Bash calls hit the same hook. Agent/Task themselves stay allowed (the
+ * operator orchestrates), but a subagent cannot use Bash to hand-code around
+ * the block. (A subagent launched with an isolated settings dir would be the
+ * only residual; the launcher does not do that in operator mode.)
+ */
 export function operatorPreToolUse(
   toolName: string,
   operatorMode: boolean,
+  input?: { command?: unknown },
 ): PreToolUseDecision {
+  if (!operatorMode) return { block: false }
   if (shouldDenyOperatorTool(toolName, operatorMode)) {
     return {
       block: true,
       reason: `${toolName} is disabled in cloud-agent operator mode — delegate implementation to a GitHub cloud agent via the first-mate MCP instead of hand-coding.`,
+    }
+  }
+  if (toolName === "Bash") {
+    const command = input?.command
+    if (typeof command !== "string" || command.length === 0) {
+      // Fail-closed: a Bash call we cannot inspect is treated as unsafe.
+      return {
+        block: true,
+        reason:
+          "Bash call blocked in cloud-agent operator mode — its command could not be inspected (fail-closed).",
+      }
+    }
+    const reason = bashMutationReason(command)
+    if (reason !== undefined) {
+      return {
+        block: true,
+        reason: `Bash file-mutation blocked in cloud-agent operator mode (${reason}) — delegate implementation to a GitHub cloud agent instead of hand-coding via the shell.`,
+      }
     }
   }
   return { block: false }

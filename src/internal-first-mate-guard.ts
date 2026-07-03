@@ -6,10 +6,12 @@
  * local-worker tool calls and blocks them (the operator must delegate to GitHub
  * cloud agents, not hand-code).
  *
- * Reads the PreToolUse payload from stdin (`{tool_name, ...}`) and, if the tool
- * is denied in operator mode, blocks via exit code 2 with a reason on stderr
- * (the repo's hook convention). FAIL-OPEN: any parse/uncertainty exits 0
- * (allow), so a malformed payload never wedges the session.
+ * Reads the PreToolUse payload from stdin (`{tool_name, tool_input, ...}`) and,
+ * if the tool is denied in operator mode, blocks via exit code 2 with a reason
+ * on stderr (the repo's hook convention). For Bash the command is inspected for
+ * file-mutation patterns. FAIL-CLOSED: a payload that names a tool but cannot be
+ * parsed/inspected blocks; only a truly empty tool name (nothing to guard)
+ * exits 0.
  */
 import { defineCommand } from "citty"
 
@@ -32,15 +34,34 @@ export const internalFirstMateGuard = defineCommand({
   },
   run() {
     let toolName = ""
+    let toolInput: { command?: unknown } | undefined
+    let parsed = false
     try {
-      const payload = JSON.parse(readStdinSync()) as { tool_name?: unknown }
+      const payload = JSON.parse(readStdinSync()) as {
+        tool_name?: unknown
+        tool_input?: unknown
+      }
       if (typeof payload.tool_name === "string") toolName = payload.tool_name
+      if (typeof payload.tool_input === "object" && payload.tool_input !== null) {
+        toolInput = payload.tool_input as { command?: unknown }
+      }
+      parsed = true
     } catch {
-      toolName = "" // fail-open
+      parsed = false // fail-closed below for a named-but-unparseable payload
     }
-    if (toolName.length === 0) process.exit(0)
+    if (toolName.length === 0) {
+      // Nothing to guard (empty/absent tool name) → allow. But if the payload
+      // did not even parse we cannot know it was empty; the matcher only routes
+      // the denied tools here, so a parse failure means one of THOSE arrived
+      // unreadable → fail-closed.
+      if (!parsed) {
+        process.stderr.write("operator guard: unparseable PreToolUse payload — blocking (fail-closed)")
+        process.exit(2)
+      }
+      process.exit(0)
+    }
     // This hook is only injected in operator mode, so operatorMode = true.
-    const decision = operatorPreToolUse(toolName, true)
+    const decision = operatorPreToolUse(toolName, true, toolInput)
     if (decision.block) {
       process.stderr.write(decision.reason ?? `${toolName} is disabled in operator mode`)
       process.exit(2) // exit 2 blocks the tool call (Claude Code hook convention)
@@ -50,7 +71,7 @@ export const internalFirstMateGuard = defineCommand({
 })
 
 /** The regex matcher scoping the guard hook to exactly the denied tools. */
-export const FIRST_MATE_GUARD_MATCHER = "Edit|Write|NotebookEdit|mcp__workers__.*"
+export const FIRST_MATE_GUARD_MATCHER = "Bash|Edit|Write|NotebookEdit|mcp__workers__.*"
 
 /** Build the hook command string that runs this subcommand. */
 export function buildFirstMateGuardHookCommand(execPath: string, entry: string): string {

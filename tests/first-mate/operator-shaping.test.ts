@@ -5,6 +5,7 @@ import {
   OPERATOR_KEPT_TOOLS,
   OPERATOR_MODE_BANNER,
   assertShapingInstalled,
+  bashMutationReason,
   operatorPreToolUse,
   shouldDenyOperatorTool,
 } from "~/lib/first-mate/operator-shaping"
@@ -44,7 +45,40 @@ describe("capability shaping — config assertions", () => {
     const d = operatorPreToolUse("Write", true)
     expect(d.block).toBe(true)
     expect(d.reason).toContain("cloud-agent operator mode")
-    expect(operatorPreToolUse("Bash", true).block).toBe(false)
+    expect(operatorPreToolUse("Bash", true, { command: "gh pr view 42" }).block).toBe(false)
+  })
+
+  test("B1: read-only Bash allowed, file-mutating Bash blocked", () => {
+    const ok = (c: string): boolean => operatorPreToolUse("Bash", true, { command: c }).block
+    // Allowed: read-only gh + inspection, including the discard idiom.
+    expect(ok("gh pr view 42")).toBe(false)
+    expect(ok("gh pr list --json number 2>/dev/null")).toBe(false)
+    expect(ok("cat package.json | jq .name 2>&1")).toBe(false)
+    expect(ok("rg -n TODO src")).toBe(false)
+    // Blocked: the file-mutation vectors.
+    expect(ok("echo x > f")).toBe(true)
+    expect(ok("echo x >> f")).toBe(true)
+    expect(ok("printf hi | tee out.txt")).toBe(true)
+    expect(ok("sed -i 's/a/b/' file.ts")).toBe(true)
+    expect(ok("dd if=/dev/zero of=f bs=1 count=1")).toBe(true)
+    expect(ok("patch -p1 < change.diff")).toBe(true)
+    expect(ok("git commit -am wip")).toBe(true)
+    expect(ok("git checkout -- src/x.ts")).toBe(true)
+    expect(ok("git apply change.diff")).toBe(true)
+  })
+
+  test("B1: a Bash call with no inspectable command fails CLOSED", () => {
+    expect(operatorPreToolUse("Bash", true, {}).block).toBe(true)
+    expect(operatorPreToolUse("Bash", true).block).toBe(true)
+    expect(operatorPreToolUse("Bash", true, { command: "" }).block).toBe(true)
+    // Non-operator sessions never block Bash.
+    expect(operatorPreToolUse("Bash", false, {}).block).toBe(false)
+  })
+
+  test("B1: bashMutationReason pinpoints the vector", () => {
+    expect(bashMutationReason("gh pr view 2>/dev/null")).toBeUndefined()
+    expect(bashMutationReason("echo x > f")).toContain("redirection")
+    expect(bashMutationReason("git push origin main")).toContain("git")
   })
 
   test("the mode banner names the boundary", () => {
