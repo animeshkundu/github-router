@@ -16,10 +16,21 @@
  */
 import consola from "consola"
 
-import { createControllerDaemon } from "~/lib/first-mate/scheduler"
+import { acquireDaemonSingleton, createControllerDaemon } from "~/lib/first-mate/scheduler"
 
 if (process.env.GH_ROUTER_FM_DAEMON === "0") {
   consola.warn("first-mate daemon disabled (GH_ROUTER_FM_DAEMON=0).")
+  process.exit(0)
+}
+
+// Process singleton: refuse to start a second daemon on the same first-mate dir
+// (the fencing lease already prevents double-driving, but one process per dir is
+// cleaner). A stale pidfile from a crashed daemon is taken over automatically.
+const singleton = acquireDaemonSingleton()
+if (!singleton.acquired) {
+  consola.warn(
+    `first-mate daemon already running (pid ${singleton.existingPid}); refusing to start a second.`,
+  )
   process.exit(0)
 }
 
@@ -31,6 +42,7 @@ daemon.start()
 consola.info("first-mate daemon started (fencing lease; ticking advance()).")
 
 function shutdown(): void {
+  singleton.release()
   void daemon.stop().finally(() => process.exit(0))
 }
 process.on("SIGINT", shutdown)

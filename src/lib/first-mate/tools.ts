@@ -15,12 +15,18 @@ const FIRST_MATE_GROUP: McpGroup = "first-mate"
  * Phase 1.3 — the heartbeat/lead's drive lease. Shared (default first-mate dir)
  * with the daemon's lease, so when the daemon holds it this MCP advance path
  * defers (observe-only, drove:false) instead of double-driving. When no daemon
- * runs, this path acquires the lease and drives as before. Gated by
- * GH_ROUTER_FM_OCC (=0 disables the lease gate → today's unconditional drive).
+ * runs, this path acquires the lease and drives as before.
+ *
+ * Gated by its OWN hatch GH_ROUTER_FM_LEASE_GATE (default ON). Previously this
+ * shared GH_ROUTER_FM_OCC with the ledger's OCC/CAS/fencing, so disabling OCC
+ * silently ALSO disabled the single-driver lease gate — one hatch quietly
+ * turning off two independent safety mechanisms. They are now separate:
+ * GH_ROUTER_FM_OCC controls only ledger OCC; GH_ROUTER_FM_LEASE_GATE=0 is the
+ * dedicated escape hatch back to today's unconditional drive.
  */
 const heartbeatLease = new SchedulerLease()
-function leaseGateEnabled(): boolean {
-  return process.env.GH_ROUTER_FM_OCC !== "0"
+export function leaseGateEnabled(): boolean {
+  return process.env.GH_ROUTER_FM_LEASE_GATE !== "0"
 }
 
 /** Phase 2 Tier1 shadow (log-only; active only when GH_ROUTER_FM_SHADOW=1). */

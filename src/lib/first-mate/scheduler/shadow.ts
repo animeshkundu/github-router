@@ -289,6 +289,43 @@ export function hasDeterministicVerifier(kind: string): boolean {
   return Object.prototype.hasOwnProperty.call(DETERMINISTIC_VERIFIERS, kind)
 }
 
+/**
+ * Validate the SHAPE of an auto-accepted verdict for its judgment kind, before
+ * it is enqueued as an answer. The confidence gate says a verdict MAY be
+ * auto-applied; this says the payload is well-formed enough that applying it is
+ * meaningful (never a silent no-op or a malformed apply). Unknown kinds fail.
+ */
+export function isValidVerdictShape(kind: string, verdict: unknown): boolean {
+  if (typeof verdict !== "object" || verdict === null) return false
+  const v = verdict as Record<string, unknown>
+  switch (kind) {
+    case "author_fix":
+      // A steer instruction the agent can act on.
+      return typeof v.instruction === "string" && v.instruction.trim().length > 0
+    case "decompose":
+      // A non-empty unit list, each with a usable title.
+      return (
+        Array.isArray(v.units) &&
+        v.units.length > 0 &&
+        v.units.every(
+          (u) =>
+            typeof u === "object" &&
+            u !== null &&
+            typeof (u as Record<string, unknown>).title === "string" &&
+            ((u as Record<string, unknown>).title as string).trim().length > 0,
+        )
+      )
+    case "review_plan":
+      return v.decision === "approve" || v.decision === "refine"
+    case "judge_review":
+      return typeof v.pass === "boolean"
+    case "answer_agent_question":
+      return typeof v.answer === "string" && v.answer.trim().length > 0
+    default:
+      return false
+  }
+}
+
 /** Pure escalate-by-default gate. */
 export function decideRoute(kind: string, verdict: Tier1Verdict | null): RouteDecision {
   if (!tier1LiveEnabled()) return { autoAccept: false, reason: "tier1 live disabled" }
@@ -311,6 +348,11 @@ export function decideRoute(kind: string, verdict: Tier1Verdict | null): RouteDe
       autoAccept: false,
       reason: "no deterministic verifier — escalate (self-report is not a safety boundary)",
     }
+  }
+  // Shape gate: never auto-apply a verdict whose payload is malformed for its
+  // kind (would be a silent no-op or a broken apply) — escalate instead.
+  if (!isValidVerdictShape(kind, verdict.wouldVerdict)) {
+    return { autoAccept: false, reason: "verdict payload shape invalid for kind" }
   }
   return {
     autoAccept: true,

@@ -12,6 +12,7 @@ import { SchedulerLease, makeDriveGate } from "./lease"
 import {
   Tier1Shadow,
   fromModelRequest,
+  isValidVerdictShape,
   shadowEnabled,
   tier1LiveEnabled,
 } from "./shadow"
@@ -41,10 +42,10 @@ export function advanceResultToAdvanceLike(res: AdvanceResult): AdvanceLike {
 type DaemonOverrides = Partial<
   Pick<
     DaemonOptions,
-    | "onStuck"
     | "minBackoffMs"
     | "maxBackoffMs"
     | "stuckThreshold"
+    | "errorThreshold"
     | "setTimer"
     | "clearTimer"
     | "nowMs"
@@ -55,6 +56,13 @@ type DaemonOverrides = Partial<
 export interface ControllerDaemonOptions extends DaemonOverrides {
   /** Injectable push hook for escalations (tests / real wake channel). */
   push?: PushHook
+  /**
+   * Optional extra watchdog observers. These COMPOSE with (do not replace) the
+   * built-in escalation-queue wiring, so a caller adding logging can never
+   * silently unwire the durable escalation.
+   */
+  onStuck?: DaemonOptions["onStuck"]
+  onError?: DaemonOptions["onError"]
 }
 
 /**
@@ -134,7 +142,7 @@ export async function routeAdvanceResult(
 }
 
 export function createControllerDaemon(opts: ControllerDaemonOptions = {}): SchedulerDaemon {
-  const { push, ...daemonOverrides } = opts
+  const { push, onStuck: userOnStuck, onError: userOnError, ...daemonOverrides } = opts
   const lease = new SchedulerLease()
   const inbox = new AnswerInbox()
   const shadow = new Tier1Shadow()
@@ -147,7 +155,9 @@ export function createControllerDaemon(opts: ControllerDaemonOptions = {}): Sche
     // while units remain active. onError: advance() has failed N ticks in a row
     // (bad creds / outage / poison state) — the error path never reaches the
     // stuck watchdog, so this is its own escalation. Both are debounced by the
-    // daemon; enqueue is fire-and-forget and never throws the tick.
+    // daemon; enqueue is fire-and-forget and never throws the tick. A
+    // caller-supplied onStuck/onError COMPOSES (runs after) — it cannot unwire
+    // the escalation.
     onStuck: (info) => {
       void escalation
         .enqueue({
@@ -157,6 +167,7 @@ export function createControllerDaemon(opts: ControllerDaemonOptions = {}): Sche
           reason: `no progress for ${info.cycles} consecutive wake(s) while units are active`,
         })
         .catch(() => undefined)
+      userOnStuck?.(info)
     },
     onError: (info) => {
       void escalation
@@ -167,6 +178,7 @@ export function createControllerDaemon(opts: ControllerDaemonOptions = {}): Sche
           reason: `first-mate daemon advance() failed ${info.consecutiveFailures} ticks in a row: ${info.error}`,
         })
         .catch(() => undefined)
+      userOnError?.(info)
     },
     advance: async () => {
       const res = await advance({
@@ -185,7 +197,11 @@ export function createControllerDaemon(opts: ControllerDaemonOptions = {}): Sche
         shadowEnabled() || tier1LiveEnabled()
           ? async (req: ModelRequest): Promise<{ accepted: boolean }> => {
               const decision = await shadow.route(fromModelRequest(req))
-              if (decision.autoAccept) {
+              // Validate the verdict shape for this kind before enqueue — a
+              // shape-invalid auto-accept must escalate, not apply as a no-op or
+              // a malformed answer. (decideRoute already gates this; this is a
+              // defence-in-depth check at the enqueue boundary.)
+              if (decision.autoAccept && isValidVerdictShape(req.kind, decision.verdict)) {
                 await inbox.enqueue({
                   modelAnswers: [{ requestId: req.requestId, verdict: decision.verdict }],
                 })
@@ -209,3 +225,4 @@ export * from "./lease"
 export * from "./outbox"
 export * from "./daemon"
 export * from "./shadow"
+export * from "./singleton"
