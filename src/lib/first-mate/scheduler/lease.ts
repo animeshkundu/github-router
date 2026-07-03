@@ -81,7 +81,7 @@ async function writeLeaseAtomic(file: string, lease: Lease): Promise<void> {
   }
 }
 
-const LEASE_LOCK_TTL_MS = 10_000
+export const LEASE_LOCK_TTL_MS = 10_000
 const LEASE_LOCK_MAX_WAIT_MS = 10_000
 
 /**
@@ -92,15 +92,25 @@ const LEASE_LOCK_MAX_WAIT_MS = 10_000
  * leaving BOTH drivers believing they hold the lease. Under the lock the
  * read+write is atomic, so tokens are monotonic and exactly one driver wins.
  * Uses REAL time (not the injectable lease clock) for lock liveness.
+ *
+ * Exported for the regression tests that exercise the stolen-lock finally.
  */
-async function withLeaseLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
+export async function withLeaseLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
   const lockPath = `${file}.lock`
   await fs.mkdir(path.dirname(lockPath), { recursive: true })
+  // Unique per-acquisition owner token. The lock TTL (10s) < lease TTL (30s), so
+  // a stalled driver holding the lock can be broken-as-stale and its lock
+  // re-taken by another driver. When the stalled driver resumes it still
+  // believes it holds the lock — the owner-token re-check in `finally` is what
+  // stops it deleting a DIFFERENT active driver's lock (which, left dangling,
+  // would let two acquirers read the same lease and mint the same fencing
+  // token → double dispatch). Mirrors withRepoLock in ledger.ts.
+  const ownerToken = `${process.pid}-${randomBytes(8).toString("hex")}`
   const start = Date.now()
   for (;;) {
     try {
       const fh = await fs.open(lockPath, "wx")
-      await fh.writeFile(`${process.pid}`)
+      await fh.writeFile(ownerToken)
       await fh.close()
       break
     } catch (err) {
@@ -120,10 +130,19 @@ async function withLeaseLock<T>(file: string, fn: () => Promise<T>): Promise<T> 
       await new Promise((r) => setTimeout(r, 15))
     }
   }
+  // True iff the lock file still holds OUR token (no one broke + re-took it).
+  const verifyOwner = async (): Promise<boolean> => {
+    try {
+      return (await fs.readFile(lockPath, "utf8")).trim() === ownerToken
+    } catch {
+      return false // vanished / unreadable → we no longer own it
+    }
+  }
   try {
     return await fn()
   } finally {
-    await fs.unlink(lockPath).catch(() => {})
+    // Only remove the lock if it is still ours — never delete a thief's lock.
+    if (await verifyOwner()) await fs.unlink(lockPath).catch(() => {})
   }
 }
 
