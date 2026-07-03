@@ -143,7 +143,16 @@ export function createControllerDaemon(opts: ControllerDaemonOptions = {}): Sche
   return new SchedulerDaemon({
     lease,
     advance: async () => {
-      const res = await advance({ driveGate: makeDriveGate(lease), answerQueue: inbox })
+      const res = await advance({
+        driveGate: makeDriveGate(lease),
+        answerQueue: inbox,
+        // #3 — fence every ledger write in the sweep with the held lease token,
+        // and renew the lease before each dispatch (stop the wave if it was
+        // stolen). makeDriveGate above has already renewed/acquired, so the
+        // token is current by the time advance reads it.
+        fenceToken: () => lease.fencingToken,
+        renewLease: async () => (await lease.renew()) !== undefined,
+      })
       // Auto-answer path is only wired when shadow/Tier1 is on; escalation of
       // everything else happens ALWAYS (routing-gap fix).
       const autoAnswer =

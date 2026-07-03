@@ -126,4 +126,19 @@ describe("Phase 1.3 — driveGate on advance()", () => {
     expect(res.drove).toBe(true)
     expect(Array.isArray(res.board)).toBe(true)
   })
+
+  test("#3 mid-sweep: a lost lease stops the dispatch wave before any side effect", async () => {
+    // An undispatched unit would be dispatched — but renewLease reports the lease
+    // was lost, so the wave stops BEFORE the irreversible startTask. No mutating
+    // dep (startTask/upsertUnit) is touched; drove is still true.
+    const { deps, calls } = fakeDeps([unit()])
+    const res = await advance(
+      { driveGate: () => true, renewLease: async () => false },
+      deps,
+    )
+    expect(res.drove).toBe(true)
+    expect(calls.startTask ?? 0).toBe(0)
+    expect(calls.upsertUnit ?? 0).toBe(0)
+    expect(res.applied.some((a) => a.includes("drive lease lost mid-sweep"))).toBe(true)
+  })
 })

@@ -50,6 +50,7 @@ import {
 } from "~/lib/first-mate/registry"
 import {
   pruneTerminal as realPruneTerminal,
+  runFenced,
   upsertUnit as realUpsertUnit,
 } from "~/lib/first-mate/ledger"
 import { observeUnit as realObserveUnit } from "~/lib/first-mate/observe"
@@ -145,6 +146,23 @@ export interface AdvanceInput {
    * instead of an empty board. Typically reads the EscalationQueue.
    */
   pendingEscalations?: () => Promise<{ needsModel: ModelRequest[]; needsHuman: HumanRequest[] }>
+  /**
+   * #3 hot-path fencing. When the caller holds a fencing lease it passes the
+   * token accessor here; advance() wraps the ENTIRE drive in `runFenced(token)`
+   * so every ledger write in the sweep is rejected if the lease was stolen
+   * mid-flight. Read AFTER driveGate resolves (the gate renews/acquires the
+   * lease, so the token is current). Omitted → unfenced (backward-compatible).
+   */
+  fenceToken?: () => number | undefined
+  /**
+   * #3 mid-sweep lease renewal. Called before each external dispatch; renews the
+   * held lease and returns whether it is STILL held. A false result means the
+   * lease was lost/stolen, so the dispatch wave stops WITHOUT performing the
+   * irreversible startTask (fencing protects the ledger write, but not the
+   * external side effect — this guards the side effect). Omitted → no mid-sweep
+   * renew (single-driver / test callers).
+   */
+  renewLease?: () => Promise<boolean>
 }
 
 export interface ModelAnswer {
@@ -1378,6 +1396,7 @@ async function dispatchWave(
   maxInFlightPerProvider: number,
   deps: ControllerDeps,
   applied: string[],
+  renewLease?: () => Promise<boolean>,
 ): Promise<void> {
   const counts = activeCountsByAgent(units)
   const candidates = units
@@ -1396,6 +1415,15 @@ async function dispatchWave(
     if (current >= maxInFlightPerProvider) continue
     const mission = missions.get(unit.missionId)
     if (mission === undefined) continue
+
+    // #3 — renew the lease immediately BEFORE the irreversible startTask. If the
+    // lease was lost/stolen mid-sweep we are no longer the sole driver; STOP the
+    // wave rather than perform an external side effect a second driver may also
+    // perform. (Fencing rejects the ledger write; this guards the side effect.)
+    if (renewLease !== undefined && !(await renewLease())) {
+      applied.push("dispatch wave stopped: drive lease lost mid-sweep")
+      break
+    }
 
     // Isolate each dispatch: a startTask throw (unknown outcome) leaves this
     // unit's intent pending on disk (recovery escalates it next wake) and must
@@ -1549,147 +1577,159 @@ export async function advance(
     }
   }
 
-  // Holder path: drain any answers queued by deferring callers and merge them
-  // with answers submitted on THIS call, then apply all of them.
-  let answersInput = input
-  if (input.answerQueue) {
-    const drained = await input.answerQueue.drain()
-    if (drained.modelAnswers.length > 0 || drained.humanDecisions.length > 0) {
-      answersInput = {
-        ...input,
-        modelAnswers: [...drained.modelAnswers, ...(input.modelAnswers ?? [])],
-        humanDecisions: [...drained.humanDecisions, ...(input.humanDecisions ?? [])],
+  // #3 hot-path fencing — wrap the ENTIRE held drive in the lease's fencing
+  // scope. runFenced sets an AsyncLocalStorage token that every commitUnits
+  // below defaults to, so a driver fenced out mid-sweep (its lease stolen) is
+  // rejected at every ledger write. The token is read AFTER the driveGate above
+  // resolved (the gate renews/acquires, so it's current). Omitted → unfenced.
+  const fenceToken = input.fenceToken?.()
+
+  const runDrive = async (): Promise<AdvanceResult> => {
+    // Holder path: drain any answers queued by deferring callers and merge them
+    // with answers submitted on THIS call, then apply all of them.
+    let answersInput = input
+    if (input.answerQueue) {
+      const drained = await input.answerQueue.drain()
+      if (drained.modelAnswers.length > 0 || drained.humanDecisions.length > 0) {
+        answersInput = {
+          ...input,
+          modelAnswers: [...drained.modelAnswers, ...(input.modelAnswers ?? [])],
+          humanDecisions: [...drained.humanDecisions, ...(input.humanDecisions ?? [])],
+        }
       }
     }
-  }
 
-  await applySubmittedAnswers(answersInput, deps, applied)
+    await applySubmittedAnswers(answersInput, deps, applied)
 
-  const units = await deps.loadAllUnits()
-  const missions = await deps.readMissions()
-  const missionsById = missionMap(missions)
-  let order = 0
+    const units = await deps.loadAllUnits()
+    const missions = await deps.readMissions()
+    const missionsById = missionMap(missions)
+    let order = 0
 
-  for (const unit of units.filter((row) => isActiveUnit(row, missionsById))) {
-    const requestOrder = order
-    order += 1
+    for (const unit of units.filter((row) => isActiveUnit(row, missionsById))) {
+      const requestOrder = order
+      order += 1
 
-    if (unit.blockingDecisionId) continue
-    if (isUndispatched(unit)) continue
+      if (unit.blockingDecisionId) continue
+      if (isUndispatched(unit)) continue
 
-    const mission = missionsById.get(unit.missionId)
-    if (mission === undefined) continue
+      const mission = missionsById.get(unit.missionId)
+      if (mission === undefined) continue
 
-    // Isolate each unit: a transient observe/classify/dispatch/steer failure on
-    // one unit must not abort the global sweep across every other mission.
-    try {
-      // Recovery: a dispatch-intent that persisted but never recorded a taskId
-      // means a prior wake crashed mid-dispatch. NEVER blind-re-dispatch (would
-      // duplicate); surface it to a human with the correlation id so any orphan
-      // task can be verified before re-dispatch.
-      if (isDispatchInterrupted(unit)) {
-        needsHuman.push({
-          request: await createHumanRequest(
-            unit,
-            mission,
-            { provider: unit.provider, prs: [] },
-            `dispatch interrupted before the task id was recorded (correlation ${unit.dispatch?.id ?? "?"}) — verify no orphan task on ${repoLabel(unit.repo)} before re-dispatch`,
-            deps,
-          ),
-          sortKey: sortKey(unit),
-          order: requestOrder,
-        })
+      // Isolate each unit: a transient observe/classify/dispatch/steer failure on
+      // one unit must not abort the global sweep across every other mission.
+      try {
+        // Recovery: a dispatch-intent that persisted but never recorded a taskId
+        // means a prior wake crashed mid-dispatch. NEVER blind-re-dispatch (would
+        // duplicate); surface it to a human with the correlation id so any orphan
+        // task can be verified before re-dispatch.
+        if (isDispatchInterrupted(unit)) {
+          needsHuman.push({
+            request: await createHumanRequest(
+              unit,
+              mission,
+              { provider: unit.provider, prs: [] },
+              `dispatch interrupted before the task id was recorded (correlation ${unit.dispatch?.id ?? "?"}) — verify no orphan task on ${repoLabel(unit.repo)} before re-dispatch`,
+              deps,
+            ),
+            sortKey: sortKey(unit),
+            order: requestOrder,
+          })
+          await deps.upsertUnit(unit.repo, unit)
+          continue
+        }
+
+        const observed = await deps.observeUnit(unit)
+        const evidence = await fillFuzzyFields(unit, mission, observed, deps)
+        updateUnitFromObservedPrs(unit, observed)
+        unit.lastCheckedMs = Date.now()
+
+        if (await maybeMergeWithApproval(unit, observed, evidence, deps, applied)) {
+          continue
+        }
+
+        const classified = classify(observed, unit)
+        unit.provider = classified.provider
+        unit.phase = classified.phase
+        unit.artifact = classified.artifact
+        unit.validation = classified.validation
+
+        const action = nextAction(classified, unit, policy)
+        await executeAction(
+          action,
+          unit,
+          mission,
+          observed,
+          evidence,
+          policy,
+          deps,
+          needsModel,
+          needsHuman,
+          applied,
+          requestOrder,
+        )
         await deps.upsertUnit(unit.repo, unit)
-        continue
+      } catch (err) {
+        consola.warn(
+          `first-mate: unit ${unit.missionId}:${unitHandle(unit)} step failed:`,
+          err,
+        )
+        applied.push(`error advancing ${unit.missionId}:${unitHandle(unit)}: ${errText(err)}`)
       }
+    }
 
-      const observed = await deps.observeUnit(unit)
-      const evidence = await fillFuzzyFields(unit, mission, observed, deps)
-      updateUnitFromObservedPrs(unit, observed)
-      unit.lastCheckedMs = Date.now()
+    // Missions with no units yet need decomposition into dispatchable units.
+    // `start_mission` only registers a mission; emit one decompose request per
+    // unit-less active mission so the model returns the unit set (created on the
+    // next wake by applyDecomposeAnswer).
+    for (const mission of missions) {
+      if (mission.status !== "active") continue
+      if (units.some((unit) => unit.missionId === mission.id)) continue
+      const repo = mission.repos[0]
+      if (repo === undefined) continue
+      needsModel.push({
+        request: {
+          requestId: `decompose:${mission.id}`,
+          kind: "decompose",
+          missionId: mission.id,
+          repo,
+          issue: null,
+          pr: null,
+          payload: {
+            goal: mission.goal,
+            acceptance_criteria: mission.acceptanceCriteria,
+            repos: mission.repos.map((entry) => `${entry.owner}/${entry.name}`),
+            house_rules: mission.houseRules ?? null,
+          },
+        },
+        sortKey: 0,
+        order: order++,
+      })
+    }
 
-      if (await maybeMergeWithApproval(unit, observed, evidence, deps, applied)) {
-        continue
-      }
+    await dispatchWave(
+      units,
+      missionsById,
+      maxInFlightPerProvider,
+      deps,
+      applied,
+      input.renewLease,
+    )
 
-      const classified = classify(observed, unit)
-      unit.provider = classified.provider
-      unit.phase = classified.phase
-      unit.artifact = classified.artifact
-      unit.validation = classified.validation
+    const board = buildBoard(units, missions)
+    const wakeAt = nextWakeAt(units, missionsById)
+    await pruneTerminalRepos(units, deps)
 
-      const action = nextAction(classified, unit, policy)
-      await executeAction(
-        action,
-        unit,
-        mission,
-        observed,
-        evidence,
-        policy,
-        deps,
-        needsModel,
-        needsHuman,
-        applied,
-        requestOrder,
-      )
-      await deps.upsertUnit(unit.repo, unit)
-    } catch (err) {
-      consola.warn(
-        `first-mate: unit ${unit.missionId}:${unitHandle(unit)} step failed:`,
-        err,
-      )
-      applied.push(`error advancing ${unit.missionId}:${unitHandle(unit)}: ${errText(err)}`)
+    return {
+      board,
+      needsModel: capQueued(needsModel, topK),
+      needsHuman: capQueued(needsHuman, topK),
+      applied,
+      nextWakeAt: wakeAt,
+      nextWakeSeconds: wakeSeconds(wakeAt),
+      drove: true,
     }
   }
 
-  // Missions with no units yet need decomposition into dispatchable units.
-  // `start_mission` only registers a mission; emit one decompose request per
-  // unit-less active mission so the model returns the unit set (created on the
-  // next wake by applyDecomposeAnswer).
-  for (const mission of missions) {
-    if (mission.status !== "active") continue
-    if (units.some((unit) => unit.missionId === mission.id)) continue
-    const repo = mission.repos[0]
-    if (repo === undefined) continue
-    needsModel.push({
-      request: {
-        requestId: `decompose:${mission.id}`,
-        kind: "decompose",
-        missionId: mission.id,
-        repo,
-        issue: null,
-        pr: null,
-        payload: {
-          goal: mission.goal,
-          acceptance_criteria: mission.acceptanceCriteria,
-          repos: mission.repos.map((entry) => `${entry.owner}/${entry.name}`),
-          house_rules: mission.houseRules ?? null,
-        },
-      },
-      sortKey: 0,
-      order: order++,
-    })
-  }
-
-  await dispatchWave(
-    units,
-    missionsById,
-    maxInFlightPerProvider,
-    deps,
-    applied,
-  )
-
-  const board = buildBoard(units, missions)
-  const wakeAt = nextWakeAt(units, missionsById)
-  await pruneTerminalRepos(units, deps)
-
-  return {
-    board,
-    needsModel: capQueued(needsModel, topK),
-    needsHuman: capQueued(needsHuman, topK),
-    applied,
-    nextWakeAt: wakeAt,
-    nextWakeSeconds: wakeSeconds(wakeAt),
-    drove: true,
-  }
+  return fenceToken !== undefined ? runFenced(fenceToken, runDrive) : runDrive()
 }

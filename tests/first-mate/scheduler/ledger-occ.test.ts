@@ -14,6 +14,8 @@ mock.module("~/lib/paths", () => ({
 const {
   readRepoLedgerWithRev,
   commitUnits,
+  runFenced,
+  currentFenceToken,
   LedgerConflictError,
   LedgerFencedError,
 } = await import("~/lib/first-mate/ledger")
@@ -116,6 +118,50 @@ describe("ledger OCC / CAS on the shared write path", () => {
       fencingToken: held2!.fencingToken,
     })
     expect(ids((await readRepoLedgerWithRev(repo)).units)).toEqual(["a", "b"])
+    await lease2.release() // free the shared lease file for later tests
+  })
+
+  test("hot-path fencing: runFenced sets the ambient token for every write", async () => {
+    const repo: RepoRef = { owner: "o", name: "als" }
+    const lease1 = new SchedulerLease({ dir: firstMateDir, ttlMs: 10_000 })
+    const held1 = await lease1.tryAcquire()
+    expect(held1).toBeDefined()
+
+    // Inside runFenced, commitUnits with NO explicit fencingToken picks up the
+    // ambient token — a bare upsert on the hot path is fenced automatically.
+    await runFenced(held1!.fencingToken, async () => {
+      expect(currentFenceToken()).toBe(held1!.fencingToken)
+      await commitUnits(repo, () => [unit("a", repo)])
+    })
+    expect(currentFenceToken()).toBeUndefined() // scope cleared
+
+    // A second driver steals the lease (bumps the token). The first driver's
+    // ambient token is now stale: every write in its scope is rejected — not
+    // just the ones that happened to pass an explicit token.
+    await lease1.release()
+    const lease2 = new SchedulerLease({ dir: firstMateDir, ttlMs: 10_000 })
+    const held2 = await lease2.tryAcquire()
+    expect(held2!.fencingToken).toBeGreaterThan(held1!.fencingToken)
+
+    await expect(
+      runFenced(held1!.fencingToken, async () => {
+        await commitUnits(repo, (u) => [...u, unit("b", repo)])
+      }),
+    ).rejects.toBeInstanceOf(LedgerFencedError)
+
+    // The current holder's scope commits fine.
+    await runFenced(held2!.fencingToken, async () => {
+      await commitUnits(repo, (u) => [...u, unit("b", repo)])
+    })
+    expect(ids((await readRepoLedgerWithRev(repo)).units)).toEqual(["a", "b"])
+
+    // An explicit fencingToken still overrides the ambient one.
+    await runFenced(held1!.fencingToken, async () => {
+      await commitUnits(repo, (u) => [...u, unit("c", repo)], {
+        fencingToken: held2!.fencingToken,
+      })
+    })
+    expect(ids((await readRepoLedgerWithRev(repo)).units)).toEqual(["a", "b", "c"])
   })
 
   test("concurrent commits do not lose updates (cross-process lock)", async () => {

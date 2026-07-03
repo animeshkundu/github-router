@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto"
+import { AsyncLocalStorage } from "node:async_hooks"
 import fs from "node:fs/promises"
 import path from "node:path"
 
@@ -107,6 +108,27 @@ export class LedgerFencedError extends Error {
  */
 function occEnabled(): boolean {
   return process.env.GH_ROUTER_FM_OCC !== "0"
+}
+
+/**
+ * Hot-path fencing (finding #3). A driver wraps its whole sweep in
+ * {@link runFenced} with the fencing token of the lease it holds; every
+ * {@link commitUnits} inside that scope then DEFAULTS its `fencingToken` from
+ * this AsyncLocalStorage, so a driver that was fenced out mid-sweep (its lease
+ * stolen) is rejected at EVERY ledger write — not just the ones that happened to
+ * pass an explicit token. Absent a surrounding {@link runFenced} the store is
+ * empty and writes are unfenced (backward-compatible for non-driver callers).
+ */
+const fenceStore = new AsyncLocalStorage<number>()
+
+/** Run `fn` with `token` as the ambient fencing token for all ledger writes. */
+export function runFenced<T>(token: number, fn: () => Promise<T>): Promise<T> {
+  return fenceStore.run(token, fn)
+}
+
+/** The ambient fencing token, if the caller is inside {@link runFenced}. */
+export function currentFenceToken(): number | undefined {
+  return fenceStore.getStore()
 }
 
 function sleep(ms: number): Promise<void> {
@@ -434,6 +456,9 @@ export async function commitUnits(
   }
 
   const explicit = opts.expectedRev !== undefined
+  // Default the fencing token from the ambient runFenced() scope, so every write
+  // in a driver's sweep is fenced even when the caller passed no explicit token.
+  const fencingToken = opts.fencingToken ?? currentFenceToken()
   let lastConflict: LedgerConflictError | undefined
   for (let attempt = 0; attempt < OCC_MAX_ATTEMPTS; attempt += 1) {
     const { rev, units } = await readRepoLedgerWithRev(repo)
@@ -444,7 +469,7 @@ export async function commitUnits(
       )
     }
     const next = mutate(units)
-    const outcome = await tryCasWrite(repo, next, base, opts.fencingToken)
+    const outcome = await tryCasWrite(repo, next, base, fencingToken)
     if (outcome === "ok") return { rev: base + 1 }
     if (explicit) {
       throw new LedgerConflictError(
