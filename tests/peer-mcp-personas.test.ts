@@ -3,10 +3,26 @@ import { describe, expect, test } from "bun:test"
 import {
   buildAgentPrompt,
   buildPeerAwarenessSnippet,
+  NON_PERSONA_MCP_TOOLS,
   PERSONAS_READ,
   PERSONAS_WRITE,
   personasFor,
 } from "../src/lib/peer-mcp-personas"
+
+describe("worker tool descriptions point at the worker-* dispatcher", () => {
+  test("each raw workers-group tool description leads with its worker-<mode> agent + Agent-tool dispatch", () => {
+    for (const mode of ["explore", "implement", "review", "plan", "test", "browse"]) {
+      const tool = NON_PERSONA_MCP_TOOLS.find(
+        (t) => t.group === "workers" && t.toolNameHttp === mode,
+      )
+      expect(tool, `workers/${mode} tool should exist`).toBeDefined()
+      const desc = tool!.description
+      expect(desc).toContain(`worker-${mode}`)
+      expect(desc).toContain("Agent tool")
+      expect(desc.toLowerCase()).toContain("completion notification")
+    }
+  })
+})
 
 describe("PERSONAS_READ", () => {
   test("exposes the five load-bearing read personas", () => {

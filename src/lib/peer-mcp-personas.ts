@@ -1183,7 +1183,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       group: "workers",
       capability: "worker",
       description:
-        "Read-only investigation by an autonomous worker (Pi runtime; "
+        "Runs as the background `worker-explore` agent. Dispatch via the Agent tool (subagent_type: worker-explore) so your turn is never blocked; the result arrives as a completion notification. "
+        + "Read-only investigation by an autonomous worker (Pi runtime; "
         + "default model `gpt-5.4-mini` at xhigh reasoning, override via "
         + "the `model` arg with any Copilot-catalog model that advertises "
         + "`tool_calls`). Tools: read, glob, grep, code_search "
@@ -1253,7 +1254,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       group: "workers",
       capability: "worker",
       description:
-        "Delegates a scoped coding task to an autonomous worker (Pi "
+        "Runs as the background `worker-implement` agent. Dispatch via the Agent tool (subagent_type: worker-implement) so your turn is never blocked; the result arrives as a completion notification. "
+        + "Delegates a scoped coding task to an autonomous worker (Pi "
         + "runtime; default model `gpt-5.5` at xhigh reasoning, override via "
         + "the `model` arg with any Copilot-catalog model that advertises "
         + "`tool_calls`). Tools: the explore read-only set (read, glob, "
@@ -1332,7 +1334,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       group: "workers",
       capability: "worker",
       description:
-        "Read-only code review by an autonomous worker (Pi runtime; "
+        "Runs as the background `worker-review` agent. Dispatch via the Agent tool (subagent_type: worker-review) so your turn is never blocked; the result arrives as a completion notification. "
+        + "Read-only code review by an autonomous worker (Pi runtime; "
         + "default model `gpt-5.5` at xhigh reasoning, override via `model` with any "
         + "Copilot-catalog model that advertises `tool_calls`). Same "
         + "read-only toolset as `explore` (read, glob, grep, code_search, "
@@ -1404,7 +1407,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       group: "workers",
       capability: "worker",
       description:
-        "Read-only implementation planning by an autonomous worker (Pi "
+        "Runs as the background `worker-plan` agent. Dispatch via the Agent tool (subagent_type: worker-plan) so your turn is never blocked; the result arrives as a completion notification. "
+        + "Read-only implementation planning by an autonomous worker (Pi "
         + "runtime; default model `claude-opus-4.8`, override via `model` "
         + "with any Copilot-catalog model that advertises `tool_calls`). Same "
         + "read-only toolset as `explore` (read, glob, grep, code_search, "
@@ -1470,7 +1474,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       group: "workers",
       capability: "worker",
       description:
-        "Independent adversarial test authoring by an autonomous worker (Pi "
+        "Runs as the background `worker-test` agent. Dispatch via the Agent tool (subagent_type: worker-test) so your turn is never blocked; the result arrives as a completion notification. "
+        + "Independent adversarial test authoring by an autonomous worker (Pi "
         + "runtime; default model `gpt-5.5` at xhigh reasoning, override via "
         + "`model` with any Copilot-catalog model that advertises "
         + "`tool_calls`). Same read+write toolset as `implement` (the explore "
@@ -1834,7 +1839,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       group: "workers",
       capability: "browse_agent",
       description:
-        "A Pi-driven autonomous browser agent (gpt-5.4-mini) that drives a "
+        "Runs as the background `worker-browse` agent. Dispatch via the Agent tool (subagent_type: worker-browse) so your turn is never blocked; the result arrives as a completion notification. "
+        + "A Pi-driven autonomous browser agent (gpt-5.4-mini) that drives a "
         + "real browser to accomplish `task` and returns the result. Runs in "
         + "its own context to preserve the lead's window (raw DOM / page "
         + "snapshots stay inside the agent). Pass `sessionId` to continue a "

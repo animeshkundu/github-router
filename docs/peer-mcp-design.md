@@ -375,6 +375,17 @@ Both also accept an optional `workspace` (absolute path) - the working directory
 
 This is defense-in-depth - a client that hard-codes the tool name still fails at call-time rather than seeing a useless dormant registration. The gate model lives at `src/lib/worker-agent/engine.ts:DEFAULT_MODEL` and is re-imported by the handler (`import { DEFAULT_MODEL as WORKER_DEFAULT_MODEL } from "~/lib/worker-agent"`) so there is no parallel constant to drift. Implement's `gpt-5.5` is deliberately NOT a gate input: if it's absent the worker surface stays live and `implement` errors helpfully at call time (only `gpt-5.5`-backed implement breaks, not explore/review).
 
+### Non-blocking dispatch (`worker-*` subagents + PreToolUse guard)
+
+A raw worker MCP call blocks the caller for up to the 30-min wall-clock, and an MCP server cannot push a completion into Claude's conversation. So `github-router claude` makes the workers non-blocking on the MAIN thread by routing them through background **`worker-*` dispatcher subagents** (`worker-explore`/`implement`/`review`/`plan`/`test`, + `worker-browse` when the browse agent is enabled). Each is a per-launch `.md` subagent (generated in `buildPeerAgentDefinitions`, `src/lib/codex-mcp-config.ts`) that calls its one worker tool and relays the result; the lead invokes it via `Agent(subagent_type: "worker-<mode>")`, which returns immediately and delivers the worker's result as a completion notification. Each dispatcher is pinned by a `tools: [mcp__<workersKey>__*]` allowlist (the workers server wildcard — Claude Code `tools:` supports MCP at server granularity), so it has no `Agent`/`Bash`/`Read`: it cannot spawn further agents or do extra work.
+
+The **PreToolUse guard** (`internal-worker-guard`, decision in `src/lib/worker-dispatch.ts:decideWorkerGuard`) enforces this: it DENIES a raw `mcp__<workersKey>__<mode>` call unless the payload's `agent_type` is exactly the matching `worker-<mode>` dispatcher, redirecting the main agent (and any non-dispatcher subagent — closing the transitive-blocking hole) to that dispatcher. It fails CLOSED on malformed input and is scoped by an exact-regex matcher (`guardToolMatcher`) so unrelated tools never invoke it. Registered per-launch into the mirrored `settings.json` (`src/claude.ts`), **only when subagent-visible MCP injection succeeded** (`injected.ok`) — otherwise `worker-*` dispatchers could not reach the workers server, so the guard is skipped and raw (blocking) workers stay usable rather than deadlocking.
+
+Claude's own tools and every other MCP group are untouched; only the raw workers *invocation path* is guarded. The raw tool `description`s point at the matching `worker-*` agent so the model reaches for it first.
+
+**Hybrid opt-out** — `GH_ROUTER_DISABLE_WORKER_GUARD=1` keeps the non-blocking guarantee ON by default but skips the guard registration, restoring the raw `mcp__workers__*` escape hatch on the main thread (for guaranteed structured-arg fidelity, or when a blocking call is acceptable). The `worker-*` agents remain the steered, non-blocking default, so the two surfaces complement rather than replace each other. `/gh-worker` documents the model to the agent.
+
+
 ### Budget caps (turns / wallclock / tool-bytes - NOT tokens or cost)
 
 Every worker run gets a `Budget` (`src/lib/worker-agent/budget.ts`) wired through Pi's `beforeToolCall` (cap check, blocks the call with a clear reason) and `prepareNextTurn` (turn counter) hooks. Three caps, all env-overridable:

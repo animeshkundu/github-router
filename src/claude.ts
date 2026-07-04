@@ -595,7 +595,26 @@ export const claude = defineCommand({
           // then would deny the main agent AND leave it no working dispatcher, a
           // fully-broken state. So when injection failed we skip the guard and
           // leave raw (blocking) workers usable on the main thread.
-          if (injected.ok) {
+          //
+          // HYBRID opt-out (`GH_ROUTER_DISABLE_WORKER_GUARD=1`): keeps the
+          // non-blocking guarantee ON by default, but lets an operator restore the
+          // raw `mcp__workers__*` escape hatch on demand (e.g. for guaranteed
+          // structured-arg fidelity, or when a blocking call is acceptable) — so
+          // the worker-* agents COMPLEMENT rather than hard-replace the raw tools.
+          if (!injected.ok) {
+            consola.warn(
+              "Workers non-blocking guard NOT registered: subagent MCP injection "
+                + "fell back to parent-only (--mcp-config), so worker-* dispatchers "
+                + "cannot reach the workers server. Raw (blocking) worker tools remain "
+                + "usable on the main thread this session.",
+            )
+          } else if (process.env.GH_ROUTER_DISABLE_WORKER_GUARD === "1") {
+            consola.info(
+              "Workers non-blocking guard disabled via GH_ROUTER_DISABLE_WORKER_GUARD=1 "
+                + "— raw mcp__workers__* is callable on the main thread (blocking); the "
+                + "worker-* background agents remain the steered, non-blocking default.",
+            )
+          } else {
             try {
               const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
               const workersKey = workersKeyOf(groupKeys)
@@ -611,13 +630,6 @@ export const claude = defineCommand({
             } catch (err) {
               consola.warn(`Could not register the workers PreToolUse guard hook: ${String(err)}`)
             }
-          } else {
-            consola.warn(
-              "Workers non-blocking guard NOT registered: subagent MCP injection "
-                + "fell back to parent-only (--mcp-config), so worker-* dispatchers "
-                + "cannot reach the workers server. Raw (blocking) worker tools remain "
-                + "usable on the main thread this session.",
-            )
           }
           if (skillsWritten > 0) {
             const skillNames = skillsToWrite.map((s) => `/${s.name}`).join(", ")
