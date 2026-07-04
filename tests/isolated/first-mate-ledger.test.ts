@@ -90,7 +90,8 @@ describe("first-mate durable ledger", () => {
     expect(persisted.map((u) => u.validation).sort()).toEqual([...validations].sort())
   })
 
-  test("a unit's dispatch-intent (outbox) field round-trips through the ledger", async () => {    const withIntent = unit({
+  test("a unit's dispatch-intent (outbox) field round-trips through the ledger", async () => {
+    const withIntent = unit({
       issue: 200,
       taskId: null,
       provider: "none",

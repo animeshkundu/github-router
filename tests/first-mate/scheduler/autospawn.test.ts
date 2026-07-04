@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 
 import {
   maybeSpawnDaemon,
+  nodeDaemonSpawn,
   shouldAutoSpawnDaemon,
   wireDaemonTeardown,
   type DaemonSpawnOptions,
@@ -109,6 +110,50 @@ describe("daemon auto-spawn gate", () => {
     })
     expect(handle).toBeDefined()
     expect(() => handle?.endStdin()).not.toThrow() // safe no-op
+  })
+})
+
+describe("nodeDaemonSpawn (the real spawner)", () => {
+  test("finding 3: the hard-kill backstop uses SIGKILL, not the catchable SIGTERM", () => {
+    // The graceful stop is endStdin() (EOF); the child's graceful-shutdown handler
+    // TRAPS SIGTERM and no-ops it, so a SIGTERM backstop could not force-kill a
+    // wedged child on POSIX. The backstop MUST be the uncatchable SIGKILL.
+    const signals: Array<NodeJS.Signals | number | undefined> = []
+    const fakeSpawn = () => ({
+      pid: 55,
+      on: (_event: "error", _listener: (err: Error) => void) => undefined,
+      kill: (signal?: NodeJS.Signals | number) => {
+        signals.push(signal)
+        return true
+      },
+      stdin: { end: () => {} },
+    })
+    const child = nodeDaemonSpawn(["bun", "daemon.ts"], { env: {}, stdio: ["pipe", "ignore", "ignore"] }, fakeSpawn)
+    expect(child.pid).toBe(55)
+    child.kill()
+    expect(signals).toEqual(["SIGKILL"])
+  })
+
+  test("nodeDaemonSpawn attaches an 'error' listener and pipes stdin end() through endStdin", () => {
+    let errorWired = false
+    let ended = false
+    const fakeSpawn = () => ({
+      pid: 7,
+      on: (event: "error", _listener: (err: Error) => void) => {
+        if (event === "error") errorWired = true
+        return undefined
+      },
+      kill: () => true,
+      stdin: {
+        end: () => {
+          ended = true
+        },
+      },
+    })
+    const child = nodeDaemonSpawn(["bun", "daemon.ts"], { env: {}, stdio: ["pipe", "ignore", "ignore"] }, fakeSpawn)
+    expect(errorWired).toBe(true) // async ENOENT can't crash bootstrap
+    child.endStdin?.()
+    expect(ended).toBe(true)
   })
 })
 

@@ -5,6 +5,7 @@ import { loadAllUnits, readMissions, upsertMission, type Mission } from "~/lib/f
 import { AnswerInbox } from "~/lib/first-mate/scheduler/answer-inbox"
 import { SchedulerLease, makeDriveGate } from "~/lib/first-mate/scheduler/lease"
 import { Tier1Shadow, fromModelRequest, shadowEnabled } from "~/lib/first-mate/scheduler/shadow"
+import { resolveCloudAgentModel } from "~/lib/first-mate/task-model"
 import type { RepoRef, UnitRow } from "~/lib/first-mate/types"
 import type { McpGroup, NonPersonaMcpTool } from "~/lib/peer-mcp-personas"
 import { state } from "~/lib/state"
@@ -117,13 +118,19 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
         const repos = requiredStringArray(args, "repos").map(parseRepoRef)
         const now = Date.now()
         const missionId = randomUUID()
+        // #2 — validate an explicit default_model at INPUT time (inside the tool
+        // wrapper's try/catch), so a typo fails FAST with the actionable message
+        // where the operator supplied it rather than throwing every controller
+        // wake at dispatch. Unspecified → gpt-5.5 default → resolves silently.
+        const defaultModel = optionalString(args, "default_model")
+        resolveCloudAgentModel(defaultModel)
         await upsertMission({
           id: missionId,
           goal: requiredString(args, "goal"),
           acceptanceCriteria: requiredString(args, "acceptance_criteria"),
           houseRules: optionalString(args, "house_rules"),
           priority: optionalNumber(args, "priority"),
-          defaultModel: optionalString(args, "default_model"),
+          defaultModel,
           repos,
           status: "active",
           createdMs: now,

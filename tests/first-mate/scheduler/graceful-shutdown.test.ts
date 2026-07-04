@@ -94,4 +94,38 @@ describe("installGracefulShutdown", () => {
     emit("end")
     expect(count).toBe(1)
   })
+
+  test("finding #6: stdinIsPipe=false skips the EOF wiring (no false instant shutdown) but keeps signals", () => {
+    // A direct / process-manager launch with stdin from /dev/null (a char device)
+    // or a file redirect emits 'end' IMMEDIATELY. When we can prove stdin is NOT a
+    // pipe/socket we must NOT wire EOF, or the daemon would self-shutdown the moment
+    // it starts. SIGINT/SIGTERM stay wired (the POSIX path).
+    const { proc, stdin, wasResumed, listenerCount } = makeFakes()
+    installGracefulShutdown({ onShutdown: () => {}, proc, stdin, stdinIsPipe: false })
+    expect(listenerCount("end")).toBe(0) // EOF NOT wired
+    expect(listenerCount("close")).toBe(0)
+    expect(wasResumed()).toBe(false) // stdin not resumed (nothing to read)
+    expect(listenerCount("SIGINT")).toBe(1) // signals still wired
+    expect(listenerCount("SIGTERM")).toBe(1)
+  })
+
+  test("finding #6: an 'end' event on a non-pipe stdin does NOT trigger shutdown; SIGTERM still does", () => {
+    const { proc, stdin, emit } = makeFakes()
+    let count = 0
+    installGracefulShutdown({ onShutdown: () => (count += 1), proc, stdin, stdinIsPipe: false })
+    emit("end") // the /dev/null instant-EOF — must be ignored
+    emit("close")
+    expect(count).toBe(0)
+    emit("SIGTERM") // the real POSIX teardown still works
+    expect(count).toBe(1)
+  })
+
+  test("finding #6: an injected stdin defaults to a pipe (EOF wired) so tests/embedded callers are unaffected", () => {
+    const { proc, stdin, emit } = makeFakes()
+    let count = 0
+    // stdinIsPipe unset + an INJECTED stdin → default true → EOF wired.
+    installGracefulShutdown({ onShutdown: () => (count += 1), proc, stdin })
+    emit("end")
+    expect(count).toBe(1)
+  })
 })

@@ -4,7 +4,13 @@ import { resolveModel } from "~/lib/utils"
 
 /**
  * Resolve the model the GitHub cloud coding agent should run a first-mate task
- * with. Pure + catalog-injectable so it is unit-testable without global state.
+ * with.
+ *
+ * NOTE (not pure): slug normalization goes through {@link resolveModel}, which
+ * reads the global `state.models` for its slug cascade. The `catalog` parameter
+ * is TEST-ONLY — it overrides the MEMBERSHIP check (is the normalized id
+ * serveable?), NOT the normalization step. In production leave it unset: both
+ * the normalization and the membership check then read the live `state.models`.
  *
  * - `chosen` set (a mission `default_model` or a per-unit override): normalize
  *   it via {@link resolveModel} (the same slug cascade the proxy uses at request
@@ -20,7 +26,8 @@ import { resolveModel } from "~/lib/utils"
  * explicit choice is returned normalized, an absent choice returns the default.
  *
  * @param chosen  the per-unit model, else the mission default, else undefined
- * @param catalog optional catalog override (defaults to the live `state.models`)
+ * @param catalog TEST-ONLY membership-check override (defaults to the live
+ *   `state.models`); does not affect slug normalization
  */
 export function resolveCloudAgentModel(
   chosen: string | undefined,

@@ -1947,3 +1947,72 @@ test("decompose stamps unit.model from the spec, else the mission default, else 
   expect(withOverride?.model).toBe("gpt-5.3-codex")
   expect(inherited?.model).toBe("gpt-5.4")
 })
+
+test("catalog present: a bad-model unit leaves no dispatch residue and does not abort the wave", async () => {
+  // #4 — the model-selection tests above all run with state.models=undefined, so
+  // resolveCloudAgentModel's throw path (explicit-invalid model + live catalog)
+  // was NEVER exercised through dispatchWithOutbox. With a populated catalog the
+  // per-unit model resolves BEFORE the dispatch intent is persisted (#1), so a
+  // bad model throws with ZERO durable residue while the valid sibling dispatches.
+  const savedModels = state.models
+  // @ts-expect-error - partial model data for testing
+  state.models = { object: "list", data: [{ id: "gpt-5.5" }, { id: "gpt-5.4" }] }
+  try {
+    const good = unit({ issue: 30, taskId: null, provider: "none", title: "good", model: "gpt-5.4" })
+    const bad = unit({
+      issue: 31,
+      taskId: null,
+      provider: "none",
+      title: "bad",
+      model: "gpt-does-not-exist",
+    })
+    const h = harness([good, bad])
+
+    const result = await advance({ maxInFlightPerProvider: 5 }, h.deps)
+
+    // (a) the valid-model unit still dispatches — a bad sibling doesn't abort the wave.
+    expect(good.taskId).toBe("started-1")
+    expect(startTaskModels(h)).toEqual(["gpt-5.4"])
+
+    // (b) the invalid-model unit leaves NO durable residue: no dangling dispatch
+    //     intent, still undispatched, and no false-orphan "dispatch interrupted"
+    //     human escalation on the next wake.
+    expect(bad.dispatch).toBeUndefined()
+    expect(bad.taskId).toBeNull()
+    expect(bad.provider).toBe("none")
+    expect(result.needsHuman.some((r) => r.reason.includes("dispatch interrupted"))).toBe(false)
+  } finally {
+    state.models = savedModels
+  }
+})
+
+test("catalog present: decompose with an invalid explicit unit model fails fast (no units created)", async () => {
+  // #2 — an invalid per-unit model in a decompose spec is validated at INPUT time
+  // (before any unit is created), so it never persists a unit that would throw
+  // every wake at dispatch. The applySubmittedAnswers per-answer catch surfaces
+  // the actionable message; no partial units land.
+  const savedModels = state.models
+  // @ts-expect-error - partial model data for testing
+  state.models = { object: "list", data: [{ id: "gpt-5.5" }] }
+  try {
+    const m = mission({ id: "m-bad", goal: "Build it" })
+    const h = harness([], [m])
+
+    const result = await advance(
+      {
+        modelAnswers: [
+          {
+            requestId: "decompose:m-bad",
+            verdict: { units: [{ title: "bad model", model: "gpt-nope" }] },
+          },
+        ],
+      },
+      h.deps,
+    )
+
+    expect(h.units.length).toBe(0) // validation threw before any upsertUnit
+    expect(result.applied.some((a) => a.includes("not in the Copilot catalog"))).toBe(true)
+  } finally {
+    state.models = savedModels
+  }
+})

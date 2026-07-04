@@ -795,10 +795,17 @@ async function applyModelAnswer(
       // Flip to the build phase ONLY on a successful dispatch, so a missing
       // mission or a failed startTask leaves the unit in plan for a clean retry.
       if (mission !== undefined) {
+        // #1 — resolve the model to a plain string BEFORE dispatchWithOutbox
+        // persists the dispatch intent. A throw from resolveCloudAgentModel
+        // (explicit-invalid model + live catalog) must happen ABOVE the persist
+        // so it leaves NO durable residue: a stale `unit.dispatch` with a
+        // non-null taskId here would wedge the replay guard forever and silently
+        // lose the drained review_plan approval. The per-answer catch handles it.
+        const model = resolveCloudAgentModel(unit.model ?? mission.defaultModel)
         const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
           deps.startTask(repo, {
             prompt: buildPrompt(unit, mission) + promptTag,
-            model: resolveCloudAgentModel(unit.model ?? mission.defaultModel),
+            model,
             createPullRequest: true,
             idempotencyKey,
           }),
@@ -821,10 +828,14 @@ async function applyModelAnswer(
         stringValue(verdict.instruction) ?? "Refine the plan with more concrete implementation steps."
       if (mission !== undefined) {
         const prompt = `${planPrompt(unit, mission)}\n\nRefine your previous plan per this feedback:\n${instruction}`
+        // #1 — resolve the model BEFORE the persist inside dispatchWithOutbox
+        // (see the approve branch above): a resolveCloudAgentModel throw must
+        // leave no dangling dispatch intent.
+        const model = resolveCloudAgentModel(unit.model ?? mission.defaultModel)
         const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
           deps.startTask(repo, {
             prompt: prompt + promptTag,
-            model: resolveCloudAgentModel(unit.model ?? mission.defaultModel),
+            model,
             createPullRequest: false,
             idempotencyKey,
           }),
@@ -1114,6 +1125,13 @@ async function applyDecomposeAnswer(
     if (title === undefined || title.length === 0) continue
     const repo = parseRepoRef(stringValue(spec.repo)) ?? mission.repos[0]
     if (repo === undefined) continue
+    // #2 — validate the explicit per-unit model at INPUT time (before any unit
+    // is created), so a typo fails FAST with the actionable message here rather
+    // than throwing every wake at dispatch (retries never bump for a bad model,
+    // so it would never converge). Runs inside applySubmittedAnswers' per-answer
+    // try/catch. Unspecified per-unit model → the mission default (already
+    // validated at start_mission) → resolves silently.
+    resolveCloudAgentModel(stringValue(spec.model) ?? mission.defaultModel)
     specs.push({ spec, title, repo })
   }
   const ids = specs.map(() => randomUUID())
@@ -1900,10 +1918,15 @@ async function dispatchUnit(
   // its session log via the CAPI client) and stops — no PR yet. On approval,
   // applyModelAnswer re-dispatches a fresh build task carrying the plan.
   // Dispatched through the outbox so a crash never blind-re-dispatches.
+  // #1 — resolve the model to a plain string BEFORE dispatchWithOutbox persists
+  // the dispatch intent, so a resolveCloudAgentModel throw (explicit-invalid
+  // model + live catalog) leaves no dangling intent for the next wake to
+  // misread as an interrupted dispatch / false orphan.
+  const model = resolveCloudAgentModel(unit.model ?? mission.defaultModel)
   const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
     deps.startTask(repo, {
       prompt: planPrompt(unit, mission) + promptTag,
-      model: resolveCloudAgentModel(unit.model ?? mission.defaultModel),
+      model,
       createPullRequest: false,
       idempotencyKey,
     }),

@@ -107,7 +107,8 @@ describe("mission registry OCC", () => {
     await lease2.release()
   })
 
-  test("back-compat pre-rev missions.json is read as rev 0 and first commit writes rev 1", async () => {    await fs.writeFile(
+  test("back-compat pre-rev missions.json is read as rev 0 and first commit writes rev 1", async () => {
+    await fs.writeFile(
       missionsPath(),
       `${JSON.stringify({ version: 1, missions: [mission("old")] }, null, 2)}\n`,
       { mode: 0o600 },

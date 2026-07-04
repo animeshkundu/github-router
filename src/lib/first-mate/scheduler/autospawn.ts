@@ -68,6 +68,67 @@ export interface SpawnedChild {
 }
 
 /**
+ * The minimal `child_process.spawn` surface {@link nodeDaemonSpawn} needs. A
+ * narrow interface (not `typeof spawnChild`) so a test can inject a fake child
+ * whose `kill` records the signal — the only way to assert the SIGKILL backstop,
+ * since the injected `spawn` in {@link maybeSpawnDaemon} replaces `kill` wholesale.
+ */
+export type LowLevelSpawn = (
+  command: string,
+  args: string[],
+  options: { env: NodeJS.ProcessEnv; stdio: Array<"pipe" | "ignore" | "inherit"> },
+) => {
+  pid?: number
+  on(event: "error", listener: (err: Error) => void): unknown
+  kill(signal?: NodeJS.Signals | number): boolean
+  stdin?: { end(): void } | null
+}
+
+/**
+ * The real (non-injected) spawner: node:child_process (not Bun.spawn) so the
+ * bundled dist/main.js stays node-loadable. No `detached` — the caller kills
+ * this on shutdown. stdin is "pipe" (parent holds the write end for a graceful
+ * EOF stop); stdout/stderr stay "ignore".
+ */
+export function nodeDaemonSpawn(
+  cmd: string[],
+  spawnOpts: DaemonSpawnOptions,
+  spawnImpl: LowLevelSpawn = spawnChild,
+): SpawnedChild {
+  const proc = spawnImpl(cmd[0]!, cmd.slice(1), {
+    env: spawnOpts.env,
+    stdio: spawnOpts.stdio,
+  })
+  // Finding 1: ENOENT (e.g. `bun` not on PATH) is delivered ASYNC as an
+  // 'error' event. Without a listener the emitter re-throws on a later tick →
+  // uncaughtException → the proxy exits(1). Swallow it.
+  proc.on("error", (err) =>
+    consola.debug("first-mate daemon spawn error (ignored):", err),
+  )
+  return {
+    pid: proc.pid,
+    // Finding 3: SIGKILL, not the default SIGTERM. This is the HARD backstop
+    // that only runs AFTER endStdin()'s graceful EOF already fired the child's
+    // shutdown trigger — and the child's graceful-shutdown handler TRAPS SIGTERM
+    // and no-ops it. So a catchable SIGTERM here could NOT force-kill a wedged
+    // child on POSIX → an orphaned drive-primary daemon that keeps merging PRs.
+    // SIGKILL is uncatchable, restoring the "wedged child is never orphaned"
+    // guarantee cross-platform. (On Windows any signal maps to an unconditional
+    // TerminateProcess, so it was already safe there.)
+    kill: () => void proc.kill("SIGKILL"),
+    // EOF the child's stdin → graceful shutdown. Best-effort: a closed or
+    // never-opened stdin must not throw during teardown.
+    endStdin: () => {
+      try {
+        proc.stdin?.end()
+      } catch {
+        /* best-effort */
+      }
+    },
+  }
+}
+
+/**
  * Spawn the daemon child if the opt-in gate passes AND the daemon script is
  * present; else return undefined. Never throws, and never lets an async spawn
  * error crash bootstrap.
@@ -88,37 +149,7 @@ export function maybeSpawnDaemon(opts: {
     return undefined
   }
   try {
-    const spawn =
-      opts.spawn ??
-      ((cmd, spawnOpts): SpawnedChild => {
-        // node:child_process (not Bun.spawn) so the bundled dist/main.js stays
-        // node-loadable. No `detached` — the caller kills this on shutdown.
-        // stdin is "pipe" (parent holds the write end for a graceful EOF stop);
-        // stdout/stderr stay "ignore".
-        const proc = spawnChild(cmd[0]!, cmd.slice(1), {
-          env: spawnOpts.env,
-          stdio: spawnOpts.stdio,
-        })
-        // Finding 1: ENOENT (e.g. `bun` not on PATH) is delivered ASYNC as an
-        // 'error' event. Without a listener the emitter re-throws on a later
-        // tick → uncaughtException → the proxy exits(1). Swallow it.
-        proc.on("error", (err) =>
-          consola.debug("first-mate daemon spawn error (ignored):", err),
-        )
-        return {
-          pid: proc.pid,
-          kill: () => void proc.kill(),
-          // EOF the child's stdin → graceful shutdown. Best-effort: a closed or
-          // never-opened stdin must not throw during teardown.
-          endStdin: () => {
-            try {
-              proc.stdin?.end()
-            } catch {
-              /* best-effort */
-            }
-          },
-        }
-      })
+    const spawn = opts.spawn ?? ((cmd, spawnOpts): SpawnedChild => nodeDaemonSpawn(cmd, spawnOpts))
     const child = spawn(["bun", script], {
       env,
       stdio: ["pipe", "ignore", "ignore"],
