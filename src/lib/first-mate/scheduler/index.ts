@@ -21,7 +21,9 @@ import {
 /**
  * Wiring for the server-side driver. The daemon holds a fencing lease and
  * decouples answer-submission (queued by deferring leads) from driving.
- * Auto-starting it at bootstrap is the capstone step (not done here).
+ * It IS auto-started at bootstrap: `server-setup.ts` calls
+ * `maybeSpawnDaemon({ agentsEnabled })` after the server is ready (default-ON
+ * under `--agents` via `GH_ROUTER_FM_DAEMON!=0`).
  */
 
 /**

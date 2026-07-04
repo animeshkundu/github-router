@@ -3,8 +3,9 @@
  * Entry point for the first-mate server-side scheduler daemon.
  *
  * This drives the LIVE first-mate ledger via advance(). ON BY DEFAULT
- * (GH_ROUTER_FM_DAEMON=0 disables). It is not auto-spawned by `bun run start`;
- * launching it is still a deliberate step, but the gate now defaults open.
+ * (GH_ROUTER_FM_DAEMON=0 disables). It is ALSO auto-spawned at server boot under
+ * `--agents` (`server-setup.ts` → `maybeSpawnDaemon`); this script is the
+ * standalone entry point for running the daemon by itself.
  *
  * With Phase 1.3 wiring, the Claude `[fm-heartbeat]` auto-degrades to a passive
  * failover (it defers via the fencing lease while this daemon holds it), so

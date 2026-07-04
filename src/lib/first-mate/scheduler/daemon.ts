@@ -12,8 +12,13 @@ import { SchedulerLease } from "~/lib/first-mate/scheduler/lease"
  *
  * It is intentionally driven through {@link tickOnce} so tests use a fake clock
  * with zero real timers. `start()` chains `tickOnce` via the injected timer.
- * Nothing here is auto-started; wiring to the live controller + cutover is a
- * separate, gated step.
+ * The daemon IS auto-spawned at boot under `--agents` (see
+ * `autospawn.maybeSpawnDaemon`, called from `server-setup.ts`), default-ON via
+ * `GH_ROUTER_FM_DAEMON!=0`. The Claude `[fm-heartbeat]` stays armed as a passive
+ * failover (it defers via the fencing lease while this daemon owns it). Honest
+ * boundary: this only removes lead POLLING for the deterministic drive loop; it
+ * does NOT push judgments to the lead — every judgment still wakes the lead via
+ * the heartbeat.
  */
 export interface AdvanceLike {
   nextWakeSeconds: number | null

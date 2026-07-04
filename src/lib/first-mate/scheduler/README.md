@@ -26,18 +26,36 @@ escalates to the lead exactly as today.
   the calibration record that later gates a narrow, verifiability-scoped live
   rollout. Never influences control flow; disabled unless `GH_ROUTER_FM_SHADOW=1`.
 - **`index.ts`** — `createControllerDaemon()` wires the daemon to the real
-  `advance()`. Not auto-started.
+  `advance()`; auto-spawned at boot (see below).
 
 ## Safety / status
 
-- Nothing here is wired into `bun run start`. The daemon runs only via the gated
-  `scripts/first-mate-daemon.ts` (`GH_ROUTER_FM_DAEMON=1`).
-- **Cutover is a separate operator step**: disarm the Claude `[fm-heartbeat]`
-  cron BEFORE starting the daemon against the live ledger.
-- Deferred to later phases (per review): full ledger-version CAS on the shared
-  write path, live Tier1 routing behind verifiability/reversibility/policy gates
-  + outcome calibration, running the daemon on an always-on host, and per-action
-  allowlists for what agents may touch.
+- **The daemon IS auto-spawned at boot** under `--agents`: `server-setup.ts`
+  calls `maybeSpawnDaemon({ agentsEnabled })` after the server is ready,
+  default-ON via `GH_ROUTER_FM_DAEMON!=0` (set `=0` to disable).
+  `scripts/first-mate-daemon.ts` is the standalone entry point for running it by
+  itself.
+- **The Claude `[fm-heartbeat]` stays armed as a passive failover** — it defers
+  via the fencing lease while the daemon owns it, so the two never double-drive.
+  Cutover does NOT require disarming the heartbeat; leaving it armed is the
+  intended belt-and-suspenders.
+- **Honest boundaries (not yet delivered):** the daemon removes lead *polling*
+  for the deterministic drive loop but does NOT push judgments to the lead —
+  every judgment still wakes the lead via the heartbeat (no server→lead push).
+  The heartbeat failover covers an in-server daemon-task crash, not a host /
+  process exit (there is no second always-on instance).
+- **Landed since Phase 1:** holistic ledger-version CAS + fencing now covers the
+  whole shared write path — unit ledger, missions registry, and decisions/
+  approvals all route through `durable-store.commitJsonCas` (a stale-lease driver
+  is rejected on any of them). The always-on host is now an assumed operating
+  condition.
+- **Still deferred (before enabling live Tier-1 auto-judge):** the AnswerInbox
+  consumer must hard-reject `mode:"shadow"` records independent of
+  `GH_ROUTER_FM_TIER1_LIVE` (so a future live flip can't consume a stale
+  uncalibrated shadow verdict); live Tier1 routing behind
+  verifiability/reversibility/policy gates + outcome calibration; per-action
+  allowlists for what agents may touch. `GH_ROUTER_FM_TIER1_LIVE` stays OFF and
+  `DETERMINISTIC_VERIFIERS` stays empty until those land.
 
 ## Test
 

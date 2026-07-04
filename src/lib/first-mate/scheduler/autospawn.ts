@@ -8,8 +8,12 @@ import path from "node:path"
  *
  * Safe now because answer-decoupling + driveGate + push escalation are in: the
  * daemon is drive-primary via the fencing lease and the existing [fm-heartbeat]
- * degrades to a passive failover + escalation-wake (NOT disarmed). Dormant on
- * the branch — it only activates on the human's rebuild with agents enabled.
+ * degrades to a passive failover + escalation-wake (NOT disarmed). Wired live:
+ * `server-setup.ts` calls this at boot, so it auto-spawns whenever `--agents`
+ * is enabled (agentToolsEnabled()). Honest boundary: it owns the deterministic
+ * drive loop only; live judgments still wake the lead via the heartbeat (no
+ * server->lead push), and the heartbeat failover covers an in-server daemon-task
+ * crash, not host/process exit (there is no second always-on instance).
  */
 
 export function shouldAutoSpawnDaemon(
