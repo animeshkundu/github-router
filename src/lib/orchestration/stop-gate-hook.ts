@@ -131,6 +131,20 @@ export function stopGateId(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
+ * C3: whether the structural Stop-gate is disabled for THIS launch. True when the
+ * `GH_ROUTER_DISABLE_STOP_GATE` env is set OR the `--no-stop-gate` launcher flag was
+ * passed (`args["no-stop-gate"] === true`). A DRIVEN session sets the flag so a
+ * blocking Stop hook never hangs its turn-end (~10 min) waiting on the fleet driver.
+ * Pure so it is unit-testable without the live launch path.
+ */
+export function stopGateDisabled(
+  args: Record<string, unknown>,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return parseBoolEnv(env.GH_ROUTER_DISABLE_STOP_GATE) === true || args["no-stop-gate"] === true
+}
+
+/**
  * Build the Claude Code `settings.json` fragment that registers `command` as a
  * Stop hook. Returns just the `hooks` object so the caller merges it into the
  * mirrored settings (never clobbering existing hooks). The Stop event takes no
