@@ -2,7 +2,7 @@ import consola from "consola"
 import { serve, type ServerHandler } from "srvx"
 
 import { PATHS, ensurePaths } from "./paths"
-import { maybeSpawnDaemon } from "./first-mate/scheduler/autospawn"
+import { maybeSpawnDaemon, wireDaemonTeardown } from "./first-mate/scheduler/autospawn"
 import { agentToolsEnabled } from "./mcp-capabilities"
 import { generateRandomPort } from "./port"
 import { initProxyFromEnv } from "./proxy"
@@ -173,22 +173,12 @@ export async function setupAndServe(
   // default driver; this is experimental. Never throws. The returned handle is
   // wired to shutdown so a drive-primary daemon can never orphan and keep
   // merging PRs after the proxy exits (Windows has no process-group reaping).
+  // Teardown EOFs the child's stdin first (graceful lease/pidfile release — the
+  // only graceful path on Windows), then hard-kills as a non-blocking backstop.
   try {
     const handle = maybeSpawnDaemon({ agentsEnabled: agentToolsEnabled() })
     if (handle) {
-      let killed = false
-      const killDaemon = () => {
-        if (killed) return
-        killed = true
-        try {
-          handle.kill()
-        } catch {
-          /* best-effort */
-        }
-      }
-      process.once("exit", killDaemon)
-      process.once("SIGINT", killDaemon)
-      process.once("SIGTERM", killDaemon)
+      wireDaemonTeardown(handle)
       consola.debug(`first-mate daemon spawn attempted (pid ${handle.pid ?? "?"}).`)
     }
   } catch (err) {

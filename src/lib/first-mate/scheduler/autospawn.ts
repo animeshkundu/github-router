@@ -24,7 +24,12 @@ import consola from "consola"
  *    listener (without it the emitter re-throws → uncaughtException → exit(1)).
  *  - The returned handle MUST be killed by the caller on shutdown (no `detached`);
  *    an orphaned drive-primary daemon would keep merging PRs after the proxy is
- *    gone.
+ *    gone. The parent ALSO holds the child's stdin write end (`stdio[0]==="pipe"`)
+ *    so it can EOF the child for a GRACEFUL stop (lease + pidfile released
+ *    immediately, not by expiry) — the cross-platform teardown trigger, since an
+ *    external SIGTERM on Windows is a hard kill the child can't observe. `kill()`
+ *    stays the hard backstop so a wedged child is never orphaned (see
+ *    `wireDaemonTeardown`).
  *  - It owns the deterministic drive loop only; live judgments still wake the
  *    lead via the heartbeat (no server->lead push).
  */
@@ -40,6 +45,26 @@ export function shouldAutoSpawnDaemon(
 export interface DaemonHandle {
   pid: number | undefined
   kill: () => void
+  /**
+   * Close the child's stdin write end (EOF). The daemon observes this as a
+   * cross-platform graceful-shutdown trigger and releases its lease/pidfile
+   * cleanly. Best-effort + non-throwing (a missing/closed stdin is a no-op).
+   */
+  endStdin: () => void
+}
+
+/** Options an injected spawner receives (so tests can assert the stdio shape). */
+export interface DaemonSpawnOptions {
+  env: NodeJS.ProcessEnv
+  /** stdin MUST be "pipe" so the parent can EOF the child; 1/2 stay "ignore". */
+  stdio: Array<"pipe" | "ignore" | "inherit">
+}
+
+/** What a spawner returns; `endStdin` is optional (defaulted to a no-op). */
+export interface SpawnedChild {
+  pid?: number
+  kill: () => void
+  endStdin?: () => void
 }
 
 /**
@@ -51,7 +76,7 @@ export function maybeSpawnDaemon(opts: {
   env?: NodeJS.ProcessEnv
   agentsEnabled: boolean
   repoRoot?: string
-  spawn?: (cmd: string[], env: NodeJS.ProcessEnv) => { pid?: number; kill: () => void }
+  spawn?: (cmd: string[], spawnOpts: DaemonSpawnOptions) => SpawnedChild
 }): DaemonHandle | undefined {
   const env = opts.env ?? process.env
   if (!shouldAutoSpawnDaemon(env, opts.agentsEnabled)) return undefined
@@ -65,12 +90,14 @@ export function maybeSpawnDaemon(opts: {
   try {
     const spawn =
       opts.spawn ??
-      ((cmd, e) => {
+      ((cmd, spawnOpts): SpawnedChild => {
         // node:child_process (not Bun.spawn) so the bundled dist/main.js stays
         // node-loadable. No `detached` — the caller kills this on shutdown.
+        // stdin is "pipe" (parent holds the write end for a graceful EOF stop);
+        // stdout/stderr stay "ignore".
         const proc = spawnChild(cmd[0]!, cmd.slice(1), {
-          env: e,
-          stdio: "ignore",
+          env: spawnOpts.env,
+          stdio: spawnOpts.stdio,
         })
         // Finding 1: ENOENT (e.g. `bun` not on PATH) is delivered ASYNC as an
         // 'error' event. Without a listener the emitter re-throws on a later
@@ -78,11 +105,91 @@ export function maybeSpawnDaemon(opts: {
         proc.on("error", (err) =>
           consola.debug("first-mate daemon spawn error (ignored):", err),
         )
-        return { pid: proc.pid, kill: () => void proc.kill() }
+        return {
+          pid: proc.pid,
+          kill: () => void proc.kill(),
+          // EOF the child's stdin → graceful shutdown. Best-effort: a closed or
+          // never-opened stdin must not throw during teardown.
+          endStdin: () => {
+            try {
+              proc.stdin?.end()
+            } catch {
+              /* best-effort */
+            }
+          },
+        }
       })
-    const child = spawn(["bun", script], env)
-    return { pid: child.pid, kill: child.kill }
+    const child = spawn(["bun", script], {
+      env,
+      stdio: ["pipe", "ignore", "ignore"],
+    })
+    return {
+      pid: child.pid,
+      kill: child.kill,
+      endStdin: child.endStdin ?? (() => {}),
+    }
   } catch {
     return undefined // never let a spawn failure crash bootstrap
   }
+}
+
+/**
+ * Wire the proxy's teardown to shut the daemon child down GRACEFULLY, then hard
+ * kill as a backstop. Ordering (per teardown path):
+ *  1. `endStdin()` — EOF the child so it releases its lease/pidfile cleanly (the
+ *     cross-platform trigger; on Windows an external SIGTERM would never run the
+ *     child's handler, so this EOF is the ONLY graceful path there).
+ *  2. `kill()` — hard backstop so a wedged child is never orphaned (a prior
+ *     review blocker: an orphaned drive-primary daemon keeps merging PRs).
+ *
+ * On SIGINT/SIGTERM the kill is deferred by a short, NON-BLOCKING, unref'd grace
+ * window (proxy exit is never delayed for it). On `'exit'` — where timers cannot
+ * run — we EOF then kill synchronously as a last resort. All steps are
+ * once-guarded and non-throwing.
+ */
+export function wireDaemonTeardown(
+  handle: DaemonHandle,
+  opts: {
+    proc?: Pick<NodeJS.Process, "once">
+    graceMs?: number
+    setTimer?: (fn: () => void, ms: number) => { unref?: () => void }
+  } = {},
+): void {
+  const proc = opts.proc ?? process
+  const graceMs = opts.graceMs ?? 300
+  const setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms))
+
+  let killed = false
+  const kill = (): void => {
+    if (killed) return
+    killed = true
+    try {
+      handle.kill()
+    } catch {
+      /* best-effort */
+    }
+  }
+  let ended = false
+  const endStdin = (): void => {
+    if (ended) return
+    ended = true
+    try {
+      handle.endStdin()
+    } catch {
+      /* best-effort: a missing/closed stdin must not throw during teardown */
+    }
+  }
+
+  const onSignal = (): void => {
+    endStdin() // 1) graceful EOF first
+    const t = setTimer(kill, graceMs) // 2) hard backstop, non-blocking
+    if (t && typeof t.unref === "function") t.unref()
+  }
+  proc.once("SIGINT", onSignal)
+  proc.once("SIGTERM", onSignal)
+  // 'exit' handlers cannot schedule timers — EOF then kill synchronously.
+  proc.once("exit", () => {
+    endStdin()
+    kill()
+  })
 }

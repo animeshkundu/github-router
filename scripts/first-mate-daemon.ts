@@ -21,6 +21,7 @@ import {
   acquireDaemonSingleton,
   assertOccSafeForDaemon,
   createControllerDaemon,
+  installGracefulShutdown,
 } from "~/lib/first-mate/scheduler"
 
 if (process.env.GH_ROUTER_FM_DAEMON === "0") {
@@ -63,5 +64,11 @@ function shutdown(): void {
     void daemon.stop().finally(() => process.exit(0))
   })
 }
-process.on("SIGINT", shutdown)
-process.on("SIGTERM", shutdown)
+// Cross-platform teardown: SIGINT/SIGTERM (POSIX) PLUS stdin EOF. The parent
+// (autospawn) holds this child's stdin write end and closes it on proxy
+// teardown; libuv fires 'end'/'close' identically on Windows named pipes and
+// POSIX pipes, which is the ONLY graceful trigger on Windows (an external
+// SIGTERM there is a hard TerminateProcess that never runs the signal handler).
+// All triggers share a single once-guard inside installGracefulShutdown, so
+// shutdown() runs at most once.
+installGracefulShutdown({ onShutdown: shutdown })

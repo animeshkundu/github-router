@@ -32,6 +32,7 @@ import {
 import { commitUnits, readRepoLedgerWithRev, upsertUnit } from "~/lib/first-mate/ledger"
 import { upsertMission } from "~/lib/first-mate/registry"
 import { EscalationQueue } from "~/lib/first-mate/scheduler/escalation"
+import { installGracefulShutdown } from "~/lib/first-mate/scheduler/graceful-shutdown"
 import { SchedulerDaemon } from "~/lib/first-mate/scheduler/daemon"
 import { SchedulerLease, makeDriveGate } from "~/lib/first-mate/scheduler/lease"
 import { Outbox } from "~/lib/first-mate/scheduler/outbox"
@@ -136,23 +137,16 @@ async function runDriveDaemon(): Promise<void> {
   daemon.start()
   process.stdout.write("started\n")
 
-  let shuttingDown = false
   const shutdown = (): void => {
-    if (shuttingDown) return
-    shuttingDown = true
     void daemon.stop().finally(() => process.exit(0))
   }
-  process.on("SIGTERM", shutdown)
-  process.on("SIGINT", shutdown)
-  // Cross-platform kill switch. Windows has no real POSIX signals — an external
-  // SIGTERM is a hard TerminateProcess that never runs the handler above — so the
-  // graceful stop() path is unobservable there via signals. stdin EOF is a
-  // termination trigger Node/Bun observes identically on every platform: when the
-  // parent closes the write end of the pipe, 'end' fires and we stop() cleanly
-  // and release the lease. This is the trigger the E2E kill-switch test uses.
-  process.stdin.on("end", shutdown)
-  process.stdin.on("close", shutdown)
-  process.stdin.resume()
+  // Wire the SAME production teardown (SIGINT/SIGTERM + stdin EOF, once-guarded)
+  // the daemon script uses, so this E2E exercises the real wiring rather than a
+  // divergent copy. stdin EOF is the cross-platform kill switch the kill-switch
+  // test relies on: Windows has no observable POSIX signal (an external SIGTERM
+  // is a hard TerminateProcess), but the parent closing the stdin write end
+  // fires 'end' identically on Windows named pipes and POSIX pipes.
+  installGracefulShutdown({ onShutdown: shutdown })
 
   await new Promise<void>(() => {}) // keep alive
 }

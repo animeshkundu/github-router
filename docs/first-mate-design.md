@@ -356,6 +356,28 @@ repo that agents can read by handle.
 - **Verifier dispatch:** `assignVerifier()` records different-lab verifier intent;
   actual verifier task/review dispatch is stubbed TODO in the controller.
 
+### Opt-in scheduler daemon — cross-platform graceful shutdown
+
+The opt-in server-side scheduler daemon (`GH_ROUTER_FM_DAEMON=1` under `--agents`;
+default OFF, the `[fm-heartbeat]` cron drives) runs as a SEPARATE child process
+(`scripts/first-mate-daemon.ts`) so a hung tick can't starve the proxy event
+loop. On proxy teardown it must release its fencing lease + singleton pidfile
+IMMEDIATELY and cleanly — not by TTL expiry / takeover. The trigger is
+cross-platform: `installGracefulShutdown()` (in `src/lib/first-mate/scheduler/`)
+wires SIGINT/SIGTERM (POSIX) PLUS stdin `end`/`close` (EOF) behind one once-guard,
+and the parent (`autospawn.ts`) spawns the child with `stdio[0]==="pipe"` so it
+holds the write end. This matters because the primary deployment target is
+Windows, where an external SIGTERM is a hard `TerminateProcess` that never runs a
+`process.on('SIGTERM')` handler — libuv's pipe-close `'end'`/`'close'` is the only
+graceful trigger observable identically on Windows named pipes and POSIX pipes.
+On teardown (`wireDaemonTeardown()`) the proxy EOFs the child's stdin FIRST
+(graceful lease/pidfile release), then hard-kills as a NON-BLOCKING, unref'd
+grace-window backstop (on `'exit'`, where timers can't run, it EOFs then kills
+synchronously) so a wedged child is never orphaned — an orphaned drive-primary
+daemon would keep merging PRs after the proxy is gone. The E2E harness imports
+the same `installGracefulShutdown()`, so the kill-switch test exercises the real
+production wiring rather than a divergent copy.
+
 ### Cross-lab review — residual hardening (v1)
 
 An independent review hardened the merge gate: a forged `judge_review` is now
