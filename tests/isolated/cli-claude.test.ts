@@ -182,6 +182,7 @@ mock.module("~/lib/mcp-capabilities", () => ({
 // tests/claude-md-injection.test.ts in isolation.
 const appendPeerAwarenessToMirroredClaudeMdMock = mock()
 const prependStyleDirectiveToMirroredClaudeMdMock = mock()
+const prependOperatingDefaultsToMirroredClaudeMdMock = mock()
 const appendToolbeltAwarenessToMirroredClaudeMdMock = mock()
 const prependArtifactPanelDirectiveToMirroredClaudeMdMock = mock()
 mock.module("~/lib/claude-md-injection", () => ({
@@ -189,6 +190,11 @@ mock.module("~/lib/claude-md-injection", () => ({
     appendPeerAwarenessToMirroredClaudeMdMock,
   prependStyleDirectiveToMirroredClaudeMd:
     prependStyleDirectiveToMirroredClaudeMdMock,
+  prependOperatingDefaultsToMirroredClaudeMd:
+    prependOperatingDefaultsToMirroredClaudeMdMock,
+  // claude.ts leads the --append-system-prompt with this directive; a stub with
+  // a recognizable marker keeps the value assertion meaningful.
+  OPERATING_DEFAULTS_DIRECTIVE: "## Operating defaults (test stub)",
   appendToolbeltAwarenessToMirroredClaudeMd:
     appendToolbeltAwarenessToMirroredClaudeMdMock,
   prependArtifactPanelDirectiveToMirroredClaudeMd:
@@ -362,6 +368,8 @@ beforeEach(() => {
   appendPeerAwarenessToMirroredClaudeMdMock.mockResolvedValue(undefined)
   prependStyleDirectiveToMirroredClaudeMdMock.mockReset()
   prependStyleDirectiveToMirroredClaudeMdMock.mockResolvedValue(undefined)
+  prependOperatingDefaultsToMirroredClaudeMdMock.mockReset()
+  prependOperatingDefaultsToMirroredClaudeMdMock.mockResolvedValue(undefined)
   appendToolbeltAwarenessToMirroredClaudeMdMock.mockReset()
   appendToolbeltAwarenessToMirroredClaudeMdMock.mockResolvedValue(undefined)
   prependArtifactPanelDirectiveToMirroredClaudeMdMock.mockReset()
@@ -911,15 +919,21 @@ describe("claude command", () => {
       expect(idx).toBeGreaterThanOrEqual(0)
       const snippet = args[idx + 1] as string
       expect(snippet).toContain("Peer review and advisor")
+      // The operating-defaults directive leads the --append-system-prompt.
+      expect(snippet).toContain("Operating defaults")
 
-      // The peer-MCP awareness append at the bottom of CLAUDE.md.
+      // The peer-MCP awareness append at the bottom of CLAUDE.md gets the peer
+      // snippet, which is contained in (not equal to) the --append-system-prompt
+      // value now that the operating-defaults directive leads it.
       expect(appendPeerAwarenessToMirroredClaudeMdMock).toHaveBeenCalledTimes(1)
       const [appendedSnippet] = appendPeerAwarenessToMirroredClaudeMdMock
         .mock.calls[0]
-      expect(appendedSnippet).toBe(snippet)
+      expect(snippet).toContain(appendedSnippet as string)
+      expect(appendedSnippet).toContain("Peer review and advisor")
 
-      // The style-directive prepend at the top of CLAUDE.md.
+      // The style-directive + operating-defaults prepends at the top of CLAUDE.md.
       expect(prependStyleDirectiveToMirroredClaudeMdMock).toHaveBeenCalledTimes(1)
+      expect(prependOperatingDefaultsToMirroredClaudeMdMock).toHaveBeenCalledTimes(1)
     })
 
     test("--append-system-prompt is pushed exactly once (no accidental double-injection)", async () => {

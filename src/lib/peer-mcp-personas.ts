@@ -510,6 +510,14 @@ export function buildAgentPrompt(
  * anchors disguised as description ("cheapest first move", "saves them
  * the discovery step", "waste wall-clock"). Pure capability inventory.
  *
+ * Wording budget (minimal sufficient guidance, NOT sentence-count parity):
+ * each tool/group gets only the wording needed for correct, safe, high-value
+ * use; extra wording must earn its attention cost. "Importance" shows up via
+ * cost-of-misuse / ambiguity / invocation complexity, not proportional length
+ * (a critical-but-simple tool can be one clause). When editing this snippet or
+ * any injected guidance, re-check the whole surface for balance rather than
+ * only expanding whatever was last touched.
+ *
  * Surface contract (regression-pinned in tests/peer-mcp-personas.test.ts):
  *   - Always lists codex_critic, codex_reviewer, opus_critic, advisor,
  *     peer-review-coordinator, and the subagent-inheritance fact (the
@@ -580,12 +588,7 @@ export function buildPeerAwarenessSnippet(opts: {
   ]
   if (opts.workerToolsAvailable) {
     para2Parts.push(
-      `\`worker-explore\` is a background Agent subagent (subagent_type) that runs a read-only worker in its own context and returns a summary on completion; concurrent launches share the \`MAX_INFLIGHT_TOOLS_CALL\` cap (default 128) with operator traffic.`,
-      `\`worker-review\` is the same worker as a code reviewer that reads the code itself to verify a change or claim, reporting findings with severity.`,
-      `\`worker-plan\` returns an ordered implementation plan from a task plus acceptance criteria.`,
-      `\`worker-implement\` is the same worker with edit/write/bash; \`worktree: true\` runs it in an isolated git worktree and returns the diff.`,
-      `\`worker-test\` is an independent test author that writes tests trying to break the implementation and reports pass/fail.`,
-      `These \`worker-*\` subagents run in the background and report via a completion notification, so a worker's long run never blocks the turn; the raw \`mcp__${workersKey}__*\` tools they call are guarded, so a direct main-thread call is redirected to the matching \`worker-*\` agent. Workers themselves have \`code_search\` in their toolset.`,
+      `\`worker-*\` are background Agent subagents (subagent_type) that run the matching worker in its own context and deliver the result as a completion notification, so a long run never blocks the turn: \`worker-explore\` (read-only research), \`worker-review\` (reads the code to verify a change or claim), \`worker-plan\` (ordered implementation plan), \`worker-implement\` (edit/write/bash; \`worktree: true\` isolates in a git worktree and returns the diff), \`worker-test\` (independent test author). The raw \`mcp__${workersKey}__*\` tools they call are guarded (a direct main-thread call is redirected to the matching agent); Workers themselves have \`code_search\`.`,
     )
   }
   // Orchestration group. `decompose`/`run_workflow` share the worker backend gate

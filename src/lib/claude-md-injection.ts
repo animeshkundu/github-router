@@ -25,6 +25,10 @@ const STYLE_MARKER_OPEN =
   "<!-- gh-router style directive — auto-injected, regenerated per launch -->"
 const STYLE_MARKER_CLOSE = "<!-- /gh-router style directive -->"
 
+const OPERATING_MARKER_OPEN =
+  "<!-- gh-router operating defaults — auto-injected, regenerated per launch -->"
+const OPERATING_MARKER_CLOSE = "<!-- /gh-router operating defaults -->"
+
 const TOOLBELT_MARKER_OPEN =
   "<!-- gh-router toolbelt awareness — auto-injected, regenerated per launch -->"
 const TOOLBELT_MARKER_CLOSE = "<!-- /gh-router toolbelt awareness -->"
@@ -72,6 +76,45 @@ const STYLE_DIRECTIVE =
   + "Avoid em dashes. "
   + "Do not attribute work to Claude, AI, LLM, or Anthropic anywhere "
   + "(commits, PRs, issues, code, comments, docs)."
+
+/**
+ * Operating-defaults directive injected at the TOP of the mirrored CLAUDE.md
+ * AND into the main agent's system prompt (`--append-system-prompt`), so it is
+ * the highest-salience behavioral default. Two defaults, both explicitly
+ * overridden by the user's own direction and the domain's standards:
+ *
+ *   1. Orchestrate (strong default): delegate the heavy / parallel /
+ *      context-heavy work to the right subagent / worker / model, keeping the
+ *      main context free to reason and collaborate with the user, while still
+ *      doing trivial / surgical / last-mile work directly (delegating that
+ *      would only add relay-fidelity loss + latency).
+ *   2. Excellence lens (HYBRID per the peer review): the reliable control
+ *      signal is the PRINCIPLE stated plainly; the well-known names appear only
+ *      as a "bar to clear" calibration, NOT as "channel X", with an explicit
+ *      no-impersonation / no-theatrics guardrail (cross-lab critics: a named
+ *      entity is a dense, high-variance vector that pulls in noise + persona
+ *      mannerisms at top salience, so the principle leads and the name calibrates).
+ *
+ * Self-referentially compliant with the style directive: no em dashes, no
+ * Claude / Anthropic attribution.
+ */
+export const OPERATING_DEFAULTS_DIRECTIVE =
+  "## Operating defaults (apply when the user has not specified otherwise; the "
+  + "user's explicit direction and the domain's own standards always override)\n\n"
+  + "Orchestrate. Delegate research, implementation, review, and large reads to the "
+  + "right subagent, worker, or model (worker-* agents for background non-blocking "
+  + "runs, Task subagents for parallel work, peer critics for review) so your own "
+  + "context stays free to reason and collaborate with the user. Prefer parallel "
+  + "delegation for independent work. Do trivial, surgical, and last-mile work "
+  + "directly; delegate the rest rather than doing it yourself and filling your own "
+  + "context.\n\n"
+  + "Aim high. Default to radical simplicity and relentless focus on the user's real "
+  + "experience (the Jobs and Ive bar for design), whole-systems first-principles "
+  + "thinking that anticipates scale and the long arc (the Gates bar for architecture "
+  + "and tech), and customer obsession that works backwards from the outcome (the "
+  + "Bezos bar for product and business). Question every assumption and prefer what "
+  + "you can derive, reproduce, or test. Adopt the principles, not a persona: no "
+  + "impersonation, name-dropping, or theatrics."
 
 /**
  * Skip the helper if the user's `~/.claude/CLAUDE.md` (or, equivalently,
@@ -637,6 +680,26 @@ export async function prependStyleDirectiveToMirroredClaudeMd(
     markerClose: STYLE_MARKER_CLOSE,
     position: "top",
     label: "style-directive",
+  })
+}
+
+/**
+ * Prepend the operating-defaults directive (orchestrator posture + hybrid
+ * excellence lens; `OPERATING_DEFAULTS_DIRECTIVE` above) to the TOP of the
+ * mirrored CLAUDE.md so descendant agents (Agent subagents, agent-teams
+ * teammates) inherit it. The main agent gets the same text at higher salience
+ * via `--append-system-prompt`. Separate marker fence from the style / peer
+ * blocks so all coexist; best-effort (warn-and-continue) like its siblings.
+ */
+export async function prependOperatingDefaultsToMirroredClaudeMd(
+  directive: string = OPERATING_DEFAULTS_DIRECTIVE,
+): Promise<void> {
+  await injectMarkerBlock({
+    snippet: directive,
+    markerOpen: OPERATING_MARKER_OPEN,
+    markerClose: OPERATING_MARKER_CLOSE,
+    position: "top",
+    label: "operating-defaults",
   })
 }
 

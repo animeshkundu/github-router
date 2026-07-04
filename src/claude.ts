@@ -61,7 +61,7 @@ import nodePath from "node:path"
 import { tmpdir } from "node:os"
 import { randomBytes } from "node:crypto"
 import { buildPeerAwarenessSnippet, type McpGroup } from "./lib/peer-mcp-personas"
-import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, prependArtifactPanelDirectiveToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
+import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, OPERATING_DEFAULTS_DIRECTIVE, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { provisionAndIndexColbert } from "./lib/colbert"
@@ -894,7 +894,12 @@ export const claude = defineCommand({
           agentToolsAvailable: agentToolsEnabled(),
           groupKeys,
         })
-        extraArgs.push("--append-system-prompt", peerSnippet)
+        // --append-system-prompt reaches the main agent at highest salience.
+        // Lead with the operating-defaults directive (orchestrator posture +
+        // excellence lens) so it sits above the capability inventory, then the
+        // peer-awareness snippet. Descendants get the same directive via the
+        // mirrored CLAUDE.md prepend below.
+        extraArgs.push("--append-system-prompt", `${OPERATING_DEFAULTS_DIRECTIVE}\n\n${peerSnippet}`)
         // Ordering invariant: this MUST run AFTER ensureClaudeConfigMirror()
         // has resolved (above in this same handler), so the snapshot of
         // the user's ~/.claude/CLAUDE.md is already in place before we
@@ -923,6 +928,20 @@ export const claude = defineCommand({
         } catch (err) {
           consola.warn(
             `Style-directive CLAUDE.md prepend failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          )
+        }
+        // Operating-defaults directive (orchestrator posture + hybrid excellence
+        // lens): prepend to the mirrored CLAUDE.md TOP so descendant agents
+        // inherit it (the main agent already has it, at higher salience, via the
+        // --append-system-prompt above). Prepended AFTER the style directive so
+        // it lands at the very top. Separate marker fence; best-effort.
+        try {
+          await prependOperatingDefaultsToMirroredClaudeMd()
+        } catch (err) {
+          consola.warn(
+            `Operating-defaults CLAUDE.md prepend failed: ${
               err instanceof Error ? err.message : String(err)
             }`,
           )
