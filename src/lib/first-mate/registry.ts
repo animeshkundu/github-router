@@ -1,10 +1,10 @@
-import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 
 import consola from "consola"
 
 import { PATHS } from "~/lib/paths"
+import { commitJsonCas } from "./durable-store"
 import { readRepoLedger } from "~/lib/first-mate/ledger"
 import type { RepoRef, UnitRow } from "~/lib/first-mate/types"
 
@@ -24,6 +24,7 @@ export interface Mission {
 
 interface MissionRegistryFile {
   version: 1
+  rev?: number
   missions: Mission[]
 }
 
@@ -39,6 +40,10 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value)
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
 }
 
 function isOptionalString(value: unknown): boolean {
@@ -80,43 +85,8 @@ function isMission(value: unknown): value is Mission {
   )
 }
 
-async function writeRegistry(value: MissionRegistryFile): Promise<void> {
-  await fs.mkdir(PATHS.FIRST_MATE_DIR, { recursive: true })
-  const target = registryPath()
-  const tmp = `${target}.tmp.${process.pid}.${randomBytes(4).toString("hex")}`
-  try {
-    await fs.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
-    await fs.chmod(tmp, 0o600).catch(() => {})
-    await fs.rename(tmp, target)
-    await fs.chmod(target, 0o600).catch(() => {})
-  } catch (err) {
-    await fs.unlink(tmp).catch(() => {})
-    throw err
-  }
-}
-
-let _registryChain: Promise<void> = Promise.resolve()
-
-function serializeRegistryWrite(work: () => Promise<void>): Promise<void> {
-  const next = _registryChain.then(work)
-  _registryChain = next.catch(() => undefined)
-  return next
-}
-
-function repoKey(repo: RepoRef): string {
-  return `${repo.owner.toLowerCase()}\0${repo.name.toLowerCase()}`
-}
-
-export async function readMissions(): Promise<Mission[]> {
-  let raw: string
-  try {
-    raw = await fs.readFile(registryPath(), "utf8")
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      consola.debug("first-mate registry read skipped:", err)
-    }
-    return []
-  }
+function parseRegistry(raw: string | undefined): { rev: number; missions: Mission[] } {
+  if (raw === undefined) return { rev: 0, missions: [] }
 
   try {
     const parsed = asRecord(JSON.parse(raw))
@@ -125,26 +95,56 @@ export async function readMissions(): Promise<Mission[]> {
       parsed.version !== REGISTRY_VERSION ||
       !Array.isArray(parsed.missions)
     ) {
-      return []
+      return { rev: 0, missions: [] }
     }
+    const rev = isNonNegativeInteger(parsed.rev) ? parsed.rev : 0
     const cleaned = parsed.missions.filter(isMission)
     if (cleaned.length !== parsed.missions.length) {
       consola.debug(
         `first-mate registry dropped ${parsed.missions.length - cleaned.length} corrupt mission(s)`,
       )
     }
-    return cleaned
+    return { rev, missions: cleaned }
   } catch (err) {
     consola.debug("first-mate registry corrupt, starting empty:", err)
-    return []
+    return { rev: 0, missions: [] }
   }
 }
 
+function repoKey(repo: RepoRef): string {
+  return `${repo.owner.toLowerCase()}\0${repo.name.toLowerCase()}`
+}
+
+export async function readMissions(): Promise<Mission[]> {
+  let raw: string | undefined
+  try {
+    raw = await fs.readFile(registryPath(), "utf8")
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      consola.debug("first-mate registry read skipped:", err)
+    }
+    raw = undefined
+  }
+
+  return parseRegistry(raw).missions
+}
+
 export async function upsertMission(mission: Mission): Promise<void> {
-  await serializeRegistryWrite(async () => {
-    const missions = (await readMissions()).filter((entry) => entry.id !== mission.id)
-    missions.push(mission)
-    await writeRegistry({ version: REGISTRY_VERSION, missions })
+  await commitJsonCas<Mission[], void>({
+    path: registryPath(),
+    parse: (raw) => {
+      const parsed = parseRegistry(raw)
+      return { rev: parsed.rev, value: parsed.missions }
+    },
+    mutate: (missions) => ({
+      value: [...missions.filter((entry) => entry.id !== mission.id), mission],
+      result: undefined,
+    }),
+    build: (missions, rev): MissionRegistryFile => ({
+      version: REGISTRY_VERSION,
+      rev,
+      missions,
+    }),
   })
 }
 
