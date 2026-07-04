@@ -38,7 +38,16 @@ describe("ARTIFACT_REVIEW_SKILL (tab-gated, not in INJECTED_SKILLS)", () => {
     expect(lines.some((line) => /^description:\s*\S/.test(line))).toBe(true)
     const tokens = ARTIFACT_REVIEW_SKILL.md.match(/mcp__peers__artifact_[a-z]+/g) ?? []
     for (const t of tokens) {
-      expect(["mcp__peers__artifact_open", "mcp__peers__artifact_poll", "mcp__peers__artifact_reply", "mcp__peers__artifact_end"]).toContain(t)
+      expect([
+        "mcp__peers__artifact_open",
+        "mcp__peers__artifact_update",
+        "mcp__peers__artifact_refresh",
+        "mcp__peers__artifact_await",
+        "mcp__peers__artifact_dismiss",
+        "mcp__peers__artifact_reply",
+        "mcp__peers__artifact_end",
+        "mcp__peers__artifact_poll",
+      ]).toContain(t)
     }
   })
 })
