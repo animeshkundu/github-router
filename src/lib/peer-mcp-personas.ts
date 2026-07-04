@@ -516,11 +516,14 @@ export function buildAgentPrompt(
  *     load-bearing UX claim: spawned subagents inherit the peer-MCP
  *     toolset via the mirrored `.claude.json`).
  *   - Conditionally lists gemini_critic only when `geminiAvailable`.
- *   - Conditionally lists worker_explore / worker_implement /
- *     "Workers themselves have code_search" only when
- *     `workerToolsAvailable` (mirrors `workerToolsEnabled()` in
- *     src/routes/mcp/handler.ts so the snippet never names a tool gated
- *     out of the live catalog).
+ *   - Conditionally lists the `worker-*` background dispatcher subagents
+ *     (worker-explore / worker-review / worker-plan / worker-implement /
+ *     worker-test), the non-blocking-guard fact, and "Workers themselves
+ *     have code_search" only when `workerToolsAvailable` (mirrors
+ *     `workerToolsEnabled()` so the snippet never names a surface gated out
+ *     of the live catalog). The raw `mcp__<workers>__*` tools are named only
+ *     as the guarded plumbing the dispatchers call, never as a main-agent
+ *     interface.
  *   - Conditionally lists stand_in only when `standInAvailable`
  *     (mirrors `standInToolEnabled()`).
  *   - Conditionally lists gh-first-mate only when `agentToolsAvailable`
@@ -577,12 +580,12 @@ export function buildPeerAwarenessSnippet(opts: {
   ]
   if (opts.workerToolsAvailable) {
     para2Parts.push(
-      `\`mcp__${workersKey}__explore\` runs a Gemini-backed read-only worker that returns a summary, using its own context rather than yours; concurrent launches share the \`MAX_INFLIGHT_TOOLS_CALL\` cap (default 128) with operator traffic.`,
-      `\`mcp__${workersKey}__review\` is the same worker framed as a code reviewer that reads the code itself to verify a change or claim, reporting findings with severity, so it checks context the \`peers\` critics (stateless calls on the pasted artifact) cannot.`,
-      `\`mcp__${workersKey}__plan\` is the same read-only worker framed as a planner: from a task + acceptance criteria it returns an ordered implementation plan.`,
-      `\`mcp__${workersKey}__implement\` is the same worker with edit/write/bash; \`worktree: true\` runs it in an isolated git worktree and returns the diff.`,
-      `\`mcp__${workersKey}__test\` is a write-capable worker framed as an independent test author: it authors tests that try to break the implementation and reports pass/fail, never editing the implementation to make them pass.`,
-      "Workers themselves have `code_search` in their toolset.",
+      `\`worker-explore\` is a background Agent subagent (subagent_type) that runs a read-only worker in its own context and returns a summary on completion; concurrent launches share the \`MAX_INFLIGHT_TOOLS_CALL\` cap (default 128) with operator traffic.`,
+      `\`worker-review\` is the same worker as a code reviewer that reads the code itself to verify a change or claim, reporting findings with severity.`,
+      `\`worker-plan\` returns an ordered implementation plan from a task plus acceptance criteria.`,
+      `\`worker-implement\` is the same worker with edit/write/bash; \`worktree: true\` runs it in an isolated git worktree and returns the diff.`,
+      `\`worker-test\` is an independent test author that writes tests trying to break the implementation and reports pass/fail.`,
+      `These \`worker-*\` subagents run in the background and report via a completion notification, so a worker's long run never blocks the turn; the raw \`mcp__${workersKey}__*\` tools they call are guarded, so a direct main-thread call is redirected to the matching \`worker-*\` agent. Workers themselves have \`code_search\` in their toolset.`,
     )
   }
   // Orchestration group. `decompose`/`run_workflow` share the worker backend gate

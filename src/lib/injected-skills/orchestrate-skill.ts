@@ -58,10 +58,10 @@ Tag every blind spot as executable-checkable or judgment-only.
 
 ## Phase 3 and 4: decompose and plan (run in parallel)
 
-These two are INDEPENDENT: mcp__orchestrate__decompose consumes { ask, context: research brief plus blind-spots }, and mcp__workers__plan consumes the ask, acceptance criteria, research pointer, and blind-spot table. Neither needs the other's output. So issue BOTH calls in a SINGLE parallel batch (same turn) — do not wait for decompose before calling plan.
+These two are INDEPENDENT: mcp__orchestrate__decompose consumes { ask, context: research brief plus blind-spots }, and the worker-plan subagent consumes the ask, acceptance criteria, research pointer, and blind-spot table. Neither needs the other's output. So issue BOTH in a SINGLE parallel batch (same turn) — call mcp__orchestrate__decompose and dispatch the worker-plan subagent together; do not wait for decompose first.
 
 - decompose: mcp__orchestrate__decompose({ ask, context: research brief plus blind-spots }). Treat the output as a proposal, not gospel; reject or revise nodes that do not map to a real blind spot.
-- plan: mcp__workers__plan with the ask, acceptance criteria, research pointer, and blind-spot table. Ask for files, tests, rollback concerns, and minimal safe increments; keep it bounded and suited to the change size.
+- plan: dispatch the worker-plan subagent (Agent tool, subagent_type worker-plan) with the ask, acceptance criteria, research pointer, and blind-spot table. Ask for files, tests, rollback concerns, and minimal safe increments; keep it bounded and suited to the change size.
 
 ## Phase 5: compose a native Workflow
 
@@ -83,10 +83,10 @@ Parallelism (the Workflow tool's core optimization rule):
 
 Role to tool mapping:
 
-- research: mcp__workers__explore and mcp__search__code for focused follow-ups.
-- plan: mcp__workers__plan.
-- implement: mcp__workers__implement, with worktree:true for parallel writers.
-- test: mcp__workers__test, authored by a DIFFERENT LAB than the implementer when possible. This is an advisory practice, not enforced provenance.
+- research: worker-explore (Agent subagent) and mcp__search__code for focused follow-ups.
+- plan: worker-plan (Agent subagent).
+- implement: worker-implement (Agent subagent), with worktree:true for parallel writers.
+- test: worker-test (Agent subagent), authored by a DIFFERENT LAB than the implementer when possible. This is an advisory practice, not enforced provenance.
 - review: mcp__peers__codex_reviewer plus mcp__peers__gemini_reviewer. Advisory unless findings are converted into executable checks or code changes.
 - baseline and selector: OPT-IN only because it doubles cost. Choose max(orchestrated, baseline) by EXECUTABLE gate result, not model judgment. If no executable oracle exists, say the selector is advisory.
 - verify: cross-lab checker plus mcp__orchestrate__attest_step with producer not equal to checker lab.

@@ -247,6 +247,65 @@ describe("buildPeerAgentDefinitions", () => {
       "mcp__gh-router-peers__opus_critic",
     )
   })
+
+  test("workerToolsAvailable adds the 5 core worker-* dispatchers, each pinned to its one tool", () => {
+    const agents = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: false,
+      groupKeys: { peers: "peers", workers: "workers" },
+      workerToolsAvailable: true,
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    for (const mode of ["explore", "implement", "review", "plan", "test"]) {
+      const name = `worker-${mode}`
+      expect(agents[name]).toBeDefined()
+      // Pinned to the workers server wildcard (no Agent/Read/Bash → no recursion).
+      expect(agents[name]!.tools).toEqual(["mcp__workers__*"])
+      expect(agents[name]!.prompt).toContain(`mcp__workers__${mode}`)
+      expect(agents[name]!.description).toContain("Use proactively")
+    }
+    // No browse dispatcher unless browseAvailable.
+    expect(agents["worker-browse"]).toBeUndefined()
+  })
+
+  test("no worker-* dispatchers when workerToolsAvailable is falsy (default)", () => {
+    const agents = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: false,
+      groupKeys: { peers: "peers", workers: "workers" },
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    expect(Object.keys(agents).some((k) => k.startsWith("worker-"))).toBe(false)
+  })
+
+  test("browseAvailable adds worker-browse", () => {
+    const agents = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: false,
+      groupKeys: { peers: "peers", workers: "workers" },
+      workerToolsAvailable: true,
+      browseAvailable: true,
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    expect(agents["worker-browse"]).toBeDefined()
+    expect(agents["worker-browse"]!.tools).toEqual(["mcp__workers__*"])
+  })
+
+  test("collision-fallback workers key threads into the dispatcher tool + prompt", () => {
+    const agents = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: false,
+      groupKeys: { peers: "peers", workers: "gh-router-workers" },
+      workerToolsAvailable: true,
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    expect(agents["worker-implement"]!.tools).toEqual(["mcp__gh-router-workers__*"])
+    expect(agents["worker-implement"]!.prompt).toContain("mcp__gh-router-workers__implement")
+  })
 })
 
 describe("resolveCodexCliBackend", () => {
@@ -803,6 +862,36 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
           // change emits `tools:` outside the parsed YAML somehow):
           const fmText = body.split("---")[1] ?? ""
           expect(fmText).not.toMatch(/^tools\s*:/m)
+        }
+      } finally {
+        await runtime.cleanup()
+      }
+    })
+  })
+
+  test("worker-* dispatcher .md emits a `tools:` array (server wildcard) that passes the cc-backup schema", async () => {
+    await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
+      const runtime = await writePeerMcpRuntimeFiles(URL, {
+        codexCli: false,
+        geminiAvailable: false,
+        groupKeys: { peers: "peers", workers: "workers" },
+        workerToolsAvailable: true,
+        runtimeDir,
+        codexHome,
+        agentsDir,
+      })
+      try {
+        const workerFiles = runtime.agentMdPaths.filter((p) => /-worker-[a-z]+\.md$/.test(p))
+        expect(workerFiles.length).toBe(5) // explore/implement/review/plan/test
+        for (const filePath of workerFiles) {
+          const body = await fs.readFile(filePath, "utf8")
+          const { frontmatter } = parseAgentMd(body)
+          const result = ClaudeCodeAgentMdFrontmatterSchema.safeParse(frontmatter)
+          expect(result.success).toBe(true)
+          const fm = frontmatter as { tools?: unknown }
+          // tools MUST parse as an array of strings = the workers server wildcard.
+          expect(Array.isArray(fm.tools)).toBe(true)
+          expect(fm.tools).toEqual(["mcp__workers__*"])
         }
       } finally {
         await runtime.cleanup()

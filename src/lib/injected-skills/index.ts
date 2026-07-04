@@ -10,6 +10,7 @@ import { FIRST_MATE_SKILL } from "./first-mate-skill"
 import { FLOOR_KEEPER_SKILL } from "./floor-keeper-skill"
 import { ORCHESTRATE_SKILL } from "./orchestrate-skill"
 import { RESEARCH_SKILL } from "./research-skill"
+import { WORKER_SKILL } from "./worker-skill"
 
 export { ARTIFACT_REVIEW_SKILL } from "./artifact-review-skill"
 export { writeInjectedSkill, type WriteInjectedSkillResult } from "./write"
@@ -26,5 +27,6 @@ export const INJECTED_SKILLS: ReadonlyArray<InjectedSkill> = [
   RESEARCH_SKILL,
   ORCHESTRATE_SKILL,
   FLOOR_KEEPER_SKILL,
+  WORKER_SKILL,
   FIRST_MATE_SKILL,
 ]

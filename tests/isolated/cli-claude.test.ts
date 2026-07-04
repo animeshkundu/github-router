@@ -145,6 +145,9 @@ mock.module("~/lib/codex-mcp-config", () => ({
   resolveCodexCliBackend: resolveCodexCliBackendMock,
   injectPeerMcpIntoMirror: injectPeerMcpIntoMirrorMock,
   resolveGroupKeysFromMirror: resolveGroupKeysFromMirrorMock,
+  // Pure key resolver (claude.ts uses it to build the workers PreToolUse
+  // guard matcher/command); mirror the real fallback behavior.
+  workersKeyOf: (groupKeys?: Record<string, string>) => groupKeys?.workers ?? "workers",
 }))
 
 // Capability-gate predicates. claude.ts imports these from

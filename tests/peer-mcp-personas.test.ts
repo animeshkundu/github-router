@@ -327,7 +327,7 @@ describe("buildPeerAwarenessSnippet", () => {
     // was de-duplicated and stripped of arrows/em-dashes. If a future tightening
     // shaves bytes, lower it again.
     const full = buildPeerAwarenessSnippet(MAXIMAL)
-    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(4800)
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(4900)
   })
 
   test("mentions Claude Code's advisor built-in tool", () => {
@@ -392,24 +392,27 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(withStandIn).toContain("mcp__decide__stand_in")
   })
 
-  test("worker explore / implement mentions are gated on workerToolsAvailable", () => {
+  test("worker dispatcher mentions are gated on workerToolsAvailable", () => {
     const off = buildPeerAwarenessSnippet({
       ...MINIMAL,
       workerToolsAvailable: false,
     })
-    expect(off).not.toContain("mcp__workers__explore")
-    expect(off).not.toContain("mcp__workers__implement")
+    expect(off).not.toContain("worker-explore")
+    expect(off).not.toContain("worker-implement")
     expect(off).not.toContain("Workers themselves")
 
     const on = buildPeerAwarenessSnippet({
       ...MINIMAL,
       workerToolsAvailable: true,
     })
-    // Worker tools are now namespaced under the `workers` server as
-    // `mcp__workers__explore` / `mcp__workers__implement` (renamed from
-    // the flat `worker_explore` / `worker_implement`).
-    expect(on).toContain("mcp__workers__explore")
-    expect(on).toContain("mcp__workers__implement")
+    // Workers are presented as the NON-BLOCKING `worker-*` background
+    // dispatcher subagents, never as a raw main-agent tool. The raw
+    // `mcp__workers__*` tools appear only as the guarded plumbing the
+    // dispatchers call, so the flat per-tool names must NOT surface here.
+    expect(on).toContain("worker-explore")
+    expect(on).toContain("worker-implement")
+    expect(on).not.toContain("mcp__workers__explore")
+    expect(on).not.toContain("mcp__workers__implement")
     expect(on).toContain("Workers themselves")
     expect(on).toContain("worktree: true")
   })

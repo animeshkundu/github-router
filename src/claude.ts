@@ -12,6 +12,7 @@ import {
   injectPeerMcpIntoMirror,
   resolveCodexCliBackend,
   resolveGroupKeysFromMirror,
+  workersKeyOf,
   writePeerMcpRuntimeFiles,
 } from "./lib/codex-mcp-config"
 import { enableFileLogging } from "./lib/file-log-reporter"
@@ -48,6 +49,11 @@ import {
 } from "./lib/orchestration/gate-discovery"
 import { liveExec } from "./lib/orchestration/live-exec"
 import { buildPromptSubmitHookCommand } from "./lib/orchestration/prompt-submit-hook"
+import {
+  activeDispatchModes,
+  buildWorkerGuardHookCommand,
+  guardToolMatcher,
+} from "./lib/worker-dispatch"
 import { ARTIFACT_REVIEW_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
 import { shouldUseInsecureTls } from "./lib/artifact/tools"
 import { parseBoolEnv } from "./lib/exec"
@@ -67,6 +73,7 @@ import {
 } from "./lib/port"
 import {
   agentToolsEnabled,
+  browseAgentEnabled,
   browserToolsEnabled,
   fleetToolsEnabled,
   standInToolEnabled,
@@ -460,6 +467,8 @@ export const claude = defineCommand({
           codexCli: backend === "cli",
           geminiAvailable,
           groupKeys,
+          workerToolsAvailable: workerToolsEnabled(),
+          browseAvailable: browseAgentEnabled(),
         })
         state.peerMcpNonce = runtime.nonce
         // Reach-back channel for the advisory-review hooks (hook V2): the
@@ -570,6 +579,45 @@ export const claude = defineCommand({
             await injectStopHookIntoSettingsFile(settingsPath, cmd, "UserPromptSubmit", 45)
           } catch (err) {
             consola.warn(`Could not register the UserPromptSubmit hook: ${String(err)}`)
+          }
+          // Workers non-blocking guard: a PreToolUse hook scoped (matcher) to the
+          // active worker tools that DENIES a raw `mcp__<workersKey>__<mode>` call
+          // from the main agent (redirecting it to the `worker-<mode>` background
+          // dispatcher) and ALLOWS it only from that dispatcher subagent. The
+          // resolved workersKey + active modes are baked into the command
+          // (dedup-distinct) and the matcher. Local + instant, so a short 10s
+          // timeout is ample.
+          //
+          // GATED ON `injected.ok`: the guard only makes sense when subagents can
+          // SEE the workers MCP (mirror injection succeeded). On the collision
+          // fallback (parent-only --mcp-config, subagents blind), a `worker-*`
+          // dispatcher could not reach the worker tool — registering the guard
+          // then would deny the main agent AND leave it no working dispatcher, a
+          // fully-broken state. So when injection failed we skip the guard and
+          // leave raw (blocking) workers usable on the main thread.
+          if (injected.ok) {
+            try {
+              const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+              const workersKey = workersKeyOf(groupKeys)
+              const modes = activeDispatchModes({ browse: browseAgentEnabled() })
+              const cmd = buildWorkerGuardHookCommand(
+                process.execPath,
+                process.argv[1],
+                workersKey,
+                modes,
+              )
+              const matcher = guardToolMatcher(workersKey, modes)
+              await injectStopHookIntoSettingsFile(settingsPath, cmd, "PreToolUse", 10, matcher)
+            } catch (err) {
+              consola.warn(`Could not register the workers PreToolUse guard hook: ${String(err)}`)
+            }
+          } else {
+            consola.warn(
+              "Workers non-blocking guard NOT registered: subagent MCP injection "
+                + "fell back to parent-only (--mcp-config), so worker-* dispatchers "
+                + "cannot reach the workers server. Raw (blocking) worker tools remain "
+                + "usable on the main thread this session.",
+            )
           }
           if (skillsWritten > 0) {
             const skillNames = skillsToWrite.map((s) => `/${s.name}`).join(", ")
