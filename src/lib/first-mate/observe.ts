@@ -306,7 +306,12 @@ export async function observeUnit(unit: UnitRow): Promise<Observed> {
 
   return {
     provider,
-    prs: observedPrs(prSummaries, artifactPrimaryState),
+    // A3: build the artifact PR list from CORRELATED sources ONLY. An
+    // uncorrelated author-fallback summary must never enter observed.prs — else
+    // updateUnitFromObservedPrs's singleton path would bind a sibling PR to the
+    // unit, which the NEXT wake reads back as `unit.pr` (now "correlated") and
+    // marks done. The uncorrelated signal is surfaced solely via externalMutation.
+    prs: observedPrs(correlated ? prSummaries : [], artifactPrimaryState),
     ...(correlated && primaryNumber !== null ? { primaryPr: primaryNumber } : {}),
     ...(ci ? { ci } : {}),
     ...(reviewDecision !== undefined ? { reviewDecision } : {}),

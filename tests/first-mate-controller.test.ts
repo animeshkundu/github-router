@@ -1280,6 +1280,7 @@ test("A1: a blocked merge_approval whose pinned PR merged out-of-band reconciles
     validation: "floor_passed",
     verifierAssigned: true,
     headSha: "head-7",
+    floorSha: "head-7",
     blockingDecisionId: "dec-m",
   })
   const h = harness([row])
@@ -1299,6 +1300,35 @@ test("A1: a blocked merge_approval whose pinned PR merged out-of-band reconciles
   expect(h.deps.markAnswered).toHaveBeenCalledWith("dec-m", "superseded_external_merge", "external")
   // A blocked unit never runs classify/execute — no review side effects.
   expect(h.deps.requestReview).not.toHaveBeenCalled()
+})
+
+test("A1: a blocked merge_approval merged at a head PAST the floor verdict is NOT laundered into floor_passed", async () => {
+  const row = unit({
+    issue: 12,
+    pr: 12,
+    provider: "in_progress",
+    phase: "merge",
+    validation: "floor_passed",
+    verifierAssigned: true,
+    headSha: "new-head",
+    floorSha: "old-verified-head",
+    blockingDecisionId: "dec-stale",
+  })
+  const h = harness([row])
+  h.decisions.push(pending("dec-stale", "merge_approval"))
+  h.observations.set("12", {
+    provider: "in_progress",
+    prs: [mergedPr(12, "new-head")],
+    externalMutation: "merged",
+  })
+
+  await advance({}, h.deps)
+
+  // Merged at new-head, but the floor verdict was for old-verified-head → the
+  // verified state is stale; record the honest unverified merge, never launder.
+  expect(row.terminal).toBe(true)
+  expect(row.validation).toBe("external_merge_unverified")
+  expect(row.validation).not.toBe("floor_passed")
 })
 
 test("A1: a blocked retry-cap (human_decision) unit merged out-of-band is external_merge_unverified, NOT floor_passed", async () => {

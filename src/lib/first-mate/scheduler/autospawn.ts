@@ -1,3 +1,4 @@
+import { spawn as spawnChild } from "node:child_process"
 import path from "node:path"
 
 /**
@@ -48,8 +49,15 @@ export function maybeSpawnDaemon(opts: {
     const spawn =
       opts.spawn ??
       ((cmd, e) => {
-        const proc = Bun.spawn(cmd, { env: e, stdout: "ignore", stderr: "ignore" })
-        return { pid: proc.pid, kill: () => proc.kill() }
+        // node:child_process (not Bun.spawn) so the bundled dist/main.js stays
+        // node-loadable — the node-compat gate forbids unguarded `Bun.` refs.
+        // Works under both Bun and Node; no `detached`, so the daemon stays
+        // tied to the proxy's lifecycle (killed by the shutdown handler).
+        const proc = spawnChild(cmd[0]!, cmd.slice(1), {
+          env: e,
+          stdio: "ignore",
+        })
+        return { pid: proc.pid, kill: () => void proc.kill() }
       })
     const child = spawn(["bun", script], env)
     return { pid: child.pid, kill: child.kill }

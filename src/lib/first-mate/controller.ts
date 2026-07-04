@@ -355,7 +355,11 @@ const FM_REVIEW_SENTINEL = "first-mate-review:"
 
 function stampReviewSentinel(unit: UnitRow, body: string): string {
   const id = unit.id ?? unitHandle(unit)
-  return `${body}\n\n<!-- ${FM_REVIEW_SENTINEL}${id} -->`
+  // PREPEND (not append): getPullRequestReviews truncates the body to the first
+  // 4000 chars, so a long review body would drop a trailing marker and defeat
+  // A5's own-review detection. A leading HTML comment is invisible on GitHub and
+  // always survives the excerpt.
+  return `<!-- ${FM_REVIEW_SENTINEL}${id} -->\n\n${body}`
 }
 
 /** A5 (5e): auto-dismiss defaults ON; any user-set 0/false/off disables it. */
@@ -1447,11 +1451,23 @@ async function observeBlockedUnit(
 
   const mergedPr = observed.prs.find((pr) => pr.merged || pr.state === "MERGED")
   const mergedIsPinned = mergedPr != null && unit.pr != null && mergedPr.number === unit.pr
+  // The merge is only "verified" if it landed the EXACT head the floor verdict
+  // was recorded against. A blocked unit skips classify's stale-floor
+  // invalidation, so without this a PR that was floor_passed at an OLD head,
+  // then pushed and externally merged at a NEW head, would launder the stale
+  // verdict into floor_passed. Mirror maybeMergeWithApproval's staleHead guard.
+  const floorHeadMatches =
+    unit.floorSha != null &&
+    unit.floorSha.length > 0 &&
+    mergedPr != null &&
+    mergedPr.headSha.length > 0 &&
+    mergedPr.headSha === unit.floorSha
 
   if (mutation === "merged") {
     if (
       decision?.type === "merge_approval" &&
       mergedIsPinned &&
+      floorHeadMatches &&
       unit.validation === "floor_passed"
     ) {
       // Legitimate: the human approved a merge of exactly this floor_passed PR
