@@ -85,7 +85,7 @@ export type LowLevelSpawn = (
 }
 
 /**
- * The real (non-injected) spawner: node:child_process (not Bun.spawn) so the
+ * The real (non-injected) spawner: node:child_process (not the Bun runtime's spawn) so the
  * bundled dist/main.js stays node-loadable. No `detached` — the caller kills
  * this on shutdown. stdin is "pipe" (parent holds the write end for a graceful
  * EOF stop); stdout/stderr stay "ignore".
