@@ -2,6 +2,7 @@ import { expect, mock, test } from "bun:test"
 
 import {
   advance,
+  failureSignature,
   type ControllerDeps,
 } from "~/lib/first-mate/controller"
 import type { DecisionRecord } from "~/lib/first-mate/decisions"
@@ -162,6 +163,7 @@ function harness(
     findByKey: mock(async (decisionKey: string) =>
       decisions.find((record) => record.decisionKey === decisionKey),
     ),
+    readDecisions: mock(async () => decisions),
     markAnswered: mock(
       async (
         decisionId: string,
@@ -220,6 +222,21 @@ function harness(
       }),
     ),
     postComment: mock(async () => ({ url: "https://gh/c/1" })),
+    getPullRequestReviews: mock(
+      async (_repo: { owner: string; repo: string }, _pr: number) =>
+        [] as Array<{
+          author: string
+          state: string
+          bodyExcerpt: string
+          submittedAt?: string
+          commitId?: string
+          nodeId?: string
+        }>,
+    ),
+    dismissPullRequestReview: mock(async (_nodeId: string, _message?: string) => ({
+      dismissed: true as const,
+    })),
+    getSelfLogin: mock(async () => "octo-bot"),
     submitReview: mock(async () => ({ reviewId: 1, state: "CHANGES_REQUESTED" })),
     requestReview: mock(async () => ({ requested: true as const })),
     rerunChecks: mock(async () => ({ rerun: true as const })),
@@ -483,7 +500,7 @@ test("ci_failed asks the model under retry cap and escalates to human at cap", a
     provider: "completed",
     phase: "fix",
     dispatchMode: "build",
-    retries: 3,
+    retries: 6,
   })
   const h2 = harness([atCap])
   h2.observations.set("3", {
@@ -655,6 +672,16 @@ test("board groups counts by mission and reports blocked units", async () => {
     unit({ missionId: "m2", issue: 41, taskId: null, provider: "none", phase: "fix", dependsOn: ["missing-id"] }),
   ]
   const h = harness(rows, missions)
+  // The blocked unit's decision must exist (pending) so the start-of-drive
+  // reconciliation doesn't treat the block as stale and clear it.
+  h.decisions.push({
+    decisionId: "decision-x",
+    decisionKey: "m1:32:human_decision:fp",
+    type: "human_decision",
+    status: "pending",
+    inputFingerprint: "fp",
+    createdMs: 1,
+  })
 
   const result = await advance({}, h.deps)
 
@@ -711,7 +738,7 @@ test("topK caps model and human requests independently", async () => {
         provider: "completed",
         dispatchMode: "build",
         phase: "fix",
-        retries: 3,
+        retries: 6,
         title: `fix-${index}`,
       }),
     )
@@ -1192,6 +1219,16 @@ test("#4b: a recordApproval failure aborts before clearing the block or answerin
   })
   const h = harness([row])
   h.deps.findByKey = mock(async () => ({ decisionId: "dec-rec" }) as never)
+  // The decision must exist (pending) so reconciliation leaves the block intact
+  // when recordApproval fails — the invariant under test.
+  h.decisions.push({
+    decisionId: "dec-rec",
+    decisionKey: "req-rec",
+    type: "merge_approval",
+    status: "pending",
+    inputFingerprint: "fp",
+    createdMs: 1,
+  })
   h.deps.recordApproval = mock(async () => {
     throw new Error("ledger 503")
   })
@@ -1207,4 +1244,546 @@ test("#4b: a recordApproval failure aborts before clearing the block or answerin
   expect(h.deps.markAnswered).not.toHaveBeenCalled()
   expect(row.blockingDecisionId).toBe("dec-rec")
   expect(result.applied.some((a) => a.includes("error applying decision"))).toBe(true)
+})
+
+// ---------------------------------------------------------------------------
+// Commit A friction fixes: A1 (blocked-observe), A2 (retry cap), A3 (spurious
+// done), A4 (draft verifier), A5 (stale-review dismiss), A6 (empty-PR guard),
+// and the reconciliation sweep.
+// ---------------------------------------------------------------------------
+
+function pending(decisionId: string, type: string): DecisionRecord {
+  return {
+    decisionId,
+    decisionKey: `key-${decisionId}`,
+    type,
+    status: "pending",
+    inputFingerprint: "fp",
+    createdMs: 1,
+  }
+}
+
+const mergedPr = (number: number, headSha: string): Observed["prs"][number] => ({
+  number,
+  headSha,
+  isDraft: false,
+  state: "MERGED",
+  merged: true,
+})
+
+test("A1: a blocked merge_approval whose pinned PR merged out-of-band reconciles to floor_passed done", async () => {
+  const row = unit({
+    issue: 7,
+    pr: 7,
+    provider: "in_progress",
+    phase: "merge",
+    validation: "floor_passed",
+    verifierAssigned: true,
+    headSha: "head-7",
+    blockingDecisionId: "dec-m",
+  })
+  const h = harness([row])
+  h.decisions.push(pending("dec-m", "merge_approval"))
+  h.observations.set("7", {
+    provider: "in_progress",
+    prs: [mergedPr(7, "head-7")],
+    externalMutation: "merged",
+  })
+
+  await advance({}, h.deps)
+
+  expect(row.terminal).toBe(true)
+  expect(row.artifact).toBe("pr_merged")
+  expect(row.validation).toBe("floor_passed")
+  expect(row.blockingDecisionId).toBeNull()
+  expect(h.deps.markAnswered).toHaveBeenCalledWith("dec-m", "superseded_external_merge", "external")
+  // A blocked unit never runs classify/execute — no review side effects.
+  expect(h.deps.requestReview).not.toHaveBeenCalled()
+})
+
+test("A1: a blocked retry-cap (human_decision) unit merged out-of-band is external_merge_unverified, NOT floor_passed", async () => {
+  const row = unit({
+    issue: 8,
+    pr: 8,
+    provider: "in_progress",
+    phase: "fix",
+    validation: "ci_failed",
+    headSha: "head-8",
+    blockingDecisionId: "dec-h",
+  })
+  const h = harness([row])
+  h.decisions.push(pending("dec-h", "human_decision"))
+  h.observations.set("8", {
+    provider: "in_progress",
+    prs: [mergedPr(8, "head-8")],
+    externalMutation: "merged",
+  })
+
+  await advance({}, h.deps)
+
+  expect(row.terminal).toBe(true)
+  expect(row.artifact).toBe("pr_merged")
+  expect(row.validation).toBe("external_merge_unverified")
+  expect(row.validation).not.toBe("floor_passed")
+  expect(h.deps.markAnswered).toHaveBeenCalledWith(
+    "dec-h",
+    "superseded_external_merge_unverified",
+    "external",
+  )
+})
+
+test("A1: an uncorrelated external merge on a blocked unit does NOT mark it done", async () => {
+  const row = unit({
+    issue: 9,
+    pr: null,
+    provider: "in_progress",
+    blockingDecisionId: "dec-u",
+  })
+  const h = harness([row])
+  h.decisions.push(pending("dec-u", "human_decision"))
+  h.observations.set("9", {
+    provider: "in_progress",
+    prs: [],
+    externalMutation: "merged_uncorrelated",
+  })
+
+  await advance({}, h.deps)
+
+  expect(row.terminal ?? false).toBe(false)
+  expect(row.blockingDecisionId).toBe("dec-u")
+  expect(h.deps.markAnswered).not.toHaveBeenCalled()
+})
+
+test("A1: a blocked unit whose PR was closed out-of-band reconciles to cancelled_external_close", async () => {
+  const row = unit({
+    issue: 10,
+    pr: 10,
+    provider: "in_progress",
+    headSha: "head-10",
+    blockingDecisionId: "dec-c",
+  })
+  const h = harness([row])
+  h.decisions.push(pending("dec-c", "human_decision"))
+  h.observations.set("10", {
+    provider: "in_progress",
+    prs: [{ number: 10, headSha: "head-10", isDraft: false, state: "CLOSED" }],
+    externalMutation: "closed",
+  })
+
+  await advance({}, h.deps)
+
+  expect(row.terminal).toBe(true)
+  expect(row.artifact).toBe("pr_closed")
+  expect(row.validation).toBe("cancelled_external_close")
+  expect(h.deps.markAnswered).toHaveBeenCalledWith("dec-c", "cancelled_external_close", "external")
+})
+
+test("A1: a benign blocked unit stays blocked with no side effects", async () => {
+  const row = unit({
+    issue: 11,
+    pr: 11,
+    provider: "in_progress",
+    validation: "floor_passed",
+    blockingDecisionId: "dec-b",
+  })
+  const h = harness([row])
+  h.decisions.push(pending("dec-b", "merge_approval"))
+  h.observations.set("11", { provider: "in_progress", prs: [openPr(11, "head-11")] })
+
+  await advance({}, h.deps)
+
+  expect(row.terminal ?? false).toBe(false)
+  expect(row.blockingDecisionId).toBe("dec-b")
+  expect(h.deps.requestReview).not.toHaveBeenCalled()
+  expect(h.deps.submitReview).not.toHaveBeenCalled()
+  expect(h.deps.markAnswered).not.toHaveBeenCalled()
+})
+
+test("A2: retries reset only when the failure signature changes; a head-move with the same signature does not reset", async () => {
+  const obsSame: Observed = {
+    provider: "completed",
+    prs: [openPr(7, "new-head")],
+    ci: { rollup: "failing" },
+  }
+  const sameSig = failureSignature(obsSame)
+  const rowSame = unit({
+    issue: 2,
+    pr: 7,
+    taskId: "task-2",
+    provider: "completed",
+    phase: "fix",
+    dispatchMode: "build",
+    retries: 3,
+    headSha: "old-head",
+    lastFailSig: sameSig,
+  })
+  const h1 = harness([rowSame])
+  h1.observations.set("2", obsSame)
+
+  await advance({}, h1.deps)
+  // Same failure recurring — even though the head moved — does NOT reset.
+  expect(rowSame.retries).toBe(3)
+
+  const rowDiff = unit({
+    issue: 3,
+    pr: 8,
+    taskId: "task-3",
+    provider: "completed",
+    phase: "fix",
+    dispatchMode: "build",
+    retries: 3,
+    headSha: "h8",
+    lastFailSig: "ci=passing|review=none|floor=none|findings=x",
+  })
+  const h2 = harness([rowDiff])
+  h2.observations.set("3", { provider: "completed", prs: [openPr(8, "h8")], ci: { rollup: "failing" } })
+
+  await advance({}, h2.deps)
+  // A different (new) failure is genuine progress → reset to 0.
+  expect(rowDiff.retries).toBe(0)
+})
+
+test("A2: applying an author_fix answer increments both retries and totalFixes and stamps the sentinel", async () => {
+  const row = unit({
+    issue: 5,
+    pr: 10,
+    taskId: "task-5",
+    provider: "in_progress",
+    phase: "fix",
+    retries: 2,
+    totalFixes: 4,
+  })
+  const h = harness([row])
+  h.observations.set("5", { provider: "in_progress", prs: [openPr(10, "h10")], ci: { rollup: "failing" } })
+
+  await advance(
+    { modelAnswers: [{ requestId: "m1:5:author_fix", verdict: { instruction: "fix it" } }] },
+    h.deps,
+  )
+
+  expect(row.totalFixes).toBe(5)
+  expect(row.retries).toBe(3)
+  const call = (h.deps.submitReview as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]!
+  expect(String(call[3])).toContain("first-mate-review:")
+})
+
+test("A2: a unit at the total-fix hard cap escalates even under the per-failure cap", async () => {
+  const row = unit({
+    issue: 4,
+    pr: 9,
+    taskId: "task-4",
+    provider: "completed",
+    phase: "fix",
+    dispatchMode: "build",
+    retries: 0,
+    totalFixes: 10,
+  })
+  const h = harness([row])
+  h.observations.set("4", { provider: "completed", prs: [openPr(9, "h9")], ci: { rollup: "failing" } })
+
+  const result = await advance({}, h.deps)
+
+  expect(result.needsModel).toHaveLength(0)
+  expect(result.needsHuman).toHaveLength(1)
+  expect(row.blockingDecisionId).toBeTruthy()
+})
+
+test("A3: an uncorrelated merged PR does not mark the unit done, so its dependents stay gated", async () => {
+  const dep = unit({ id: "depA", issue: 1, taskId: "task-A", provider: "in_progress", title: "A" })
+  const child = unit({
+    id: "childB",
+    issue: 2,
+    taskId: null,
+    provider: "none",
+    dependsOn: ["depA"],
+    title: "B",
+  })
+  const h = harness([dep, child])
+  h.observations.set("1", { provider: "in_progress", prs: [], externalMutation: "merged_uncorrelated" })
+
+  await advance({}, h.deps)
+
+  expect(dep.terminal ?? false).toBe(false)
+  expect(dep.artifact).not.toBe("pr_merged")
+  expect(child.taskId).toBeNull()
+})
+
+test("A3: depsSatisfied rejects a dependency marked pr_merged with pr:null", async () => {
+  const dep = unit({
+    id: "dep",
+    issue: 1,
+    taskId: "task-1",
+    terminal: true,
+    artifact: "pr_merged",
+    pr: null,
+    phase: "done",
+    provider: "completed",
+  })
+  const child = unit({
+    id: "child",
+    issue: 2,
+    taskId: null,
+    provider: "none",
+    dependsOn: ["dep"],
+    title: "child",
+  })
+  const h = harness([dep, child])
+
+  await advance({}, h.deps)
+
+  expect(child.taskId).toBeNull()
+})
+
+test("A3: a correlated primaryPr is adopted as unit.pr even in the multi-PR case", async () => {
+  const row = unit({ issue: 1, pr: null, taskId: "task-1", provider: "in_progress" })
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [openPr(5, "h5"), openPr(6, "h6")],
+    primaryPr: 5,
+  })
+
+  await advance({}, h.deps)
+
+  expect(row.pr).toBe(5)
+})
+
+test("A4: a draft PR is marked ready for review before the verifier is requested", async () => {
+  const row = unit({
+    issue: null,
+    pr: 5,
+    taskId: "task-1",
+    provider: "completed",
+    phase: "review",
+    dispatchMode: "build",
+    verifierAssigned: false,
+    branch: "copilot/feat",
+  })
+  const h = harness([row])
+  h.observations.set("task-1", {
+    provider: "completed",
+    prs: [{ number: 5, headSha: "h5", isDraft: true, state: "OPEN" }],
+    ci: { rollup: "none", noCi: true },
+    prNodeId: "PR_5",
+  })
+
+  await advance({}, h.deps)
+
+  expect(h.deps.markReadyForReview).toHaveBeenCalledWith("PR_5")
+  expect(h.deps.requestReview).toHaveBeenCalledTimes(1)
+})
+
+test("A4: a non-draft PR is not marked ready before the verifier", async () => {
+  const row = unit({
+    issue: null,
+    pr: 5,
+    taskId: "task-1",
+    provider: "completed",
+    phase: "review",
+    dispatchMode: "build",
+    verifierAssigned: false,
+    branch: "copilot/feat",
+  })
+  const h = harness([row])
+  h.observations.set("task-1", {
+    provider: "completed",
+    prs: [{ number: 5, headSha: "h5", isDraft: false, state: "OPEN" }],
+    ci: { rollup: "none", noCi: true },
+  })
+
+  await advance({}, h.deps)
+
+  expect(h.deps.markReadyForReview).not.toHaveBeenCalled()
+  expect(h.deps.requestReview).toHaveBeenCalledTimes(1)
+})
+
+test("A5: dismisses only first-mate's own stale review; a human CHANGES_REQUESTED survives", async () => {
+  const row = unit({ issue: 1, pr: 7, taskId: "task-1", provider: "in_progress", headSha: "head-new" })
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [openPr(7, "head-new")],
+    reviewDecision: "CHANGES_REQUESTED",
+  })
+  const dismissed = new Set<string>()
+  const allReviews = [
+    { author: "copilot", state: "CHANGES_REQUESTED", bodyExcerpt: "old <!-- first-mate-review:1 -->", commitId: "head-old", nodeId: "R_fm" },
+    { author: "human", state: "CHANGES_REQUESTED", bodyExcerpt: "I disagree", commitId: "head-old", nodeId: "R_human" },
+    { author: "copilot", state: "CHANGES_REQUESTED", bodyExcerpt: "at head <!-- first-mate-review:1 -->", commitId: "head-new", nodeId: "R_fm_athead" },
+  ]
+  h.deps.getPullRequestReviews = mock(async () => allReviews.filter((r) => !dismissed.has(r.nodeId)))
+  h.deps.dismissPullRequestReview = mock(async (nodeId: string) => {
+    dismissed.add(nodeId)
+    return { dismissed: true as const }
+  })
+
+  await advance({}, h.deps)
+
+  // Only the stale (commit != head) sentinel-stamped review is dismissed.
+  expect([...dismissed]).toEqual(["R_fm"])
+})
+
+test("A5: after dismissing a stale own review, a human APPROVE is preserved (no author_fix)", async () => {
+  const row = unit({
+    issue: 1,
+    pr: 7,
+    taskId: "task-1",
+    provider: "in_progress",
+    headSha: "head-new",
+    verifierAssigned: false,
+  })
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [openPr(7, "head-new")],
+    ci: { rollup: "passing" },
+    reviewDecision: "CHANGES_REQUESTED",
+  })
+  const dismissed = new Set<string>()
+  const allReviews = [
+    { author: "copilot", state: "CHANGES_REQUESTED", bodyExcerpt: "stale <!-- first-mate-review:1 -->", commitId: "head-old", nodeId: "R_fm" },
+    { author: "human", state: "APPROVED", bodyExcerpt: "lgtm", commitId: "head-new", nodeId: "R_h" },
+  ]
+  h.deps.getPullRequestReviews = mock(async () => allReviews.filter((r) => !dismissed.has(r.nodeId)))
+  h.deps.dismissPullRequestReview = mock(async (nodeId: string) => {
+    dismissed.add(nodeId)
+    return { dismissed: true as const }
+  })
+
+  await advance({}, h.deps)
+
+  // reviewDecision recomputed to APPROVED → ci_passed → assign_verifier, NOT the
+  // changes_requested → author_fix path (which would post a REQUEST_CHANGES).
+  expect([...dismissed]).toEqual(["R_fm"])
+  expect(h.deps.requestReview).toHaveBeenCalledTimes(1)
+  expect(h.deps.submitReview).not.toHaveBeenCalled()
+})
+
+test("A5: GH_ROUTER_FM_AUTO_DISMISS=0 disables the dismiss step", async () => {
+  process.env.GH_ROUTER_FM_AUTO_DISMISS = "0"
+  try {
+    const row = unit({ issue: 1, pr: 7, taskId: "task-1", provider: "in_progress", headSha: "head-new" })
+    const h = harness([row])
+    h.observations.set("1", {
+      provider: "in_progress",
+      prs: [openPr(7, "head-new")],
+      reviewDecision: "CHANGES_REQUESTED",
+    })
+    h.deps.getPullRequestReviews = mock(async () => [
+      { author: "copilot", state: "CHANGES_REQUESTED", bodyExcerpt: "old <!-- first-mate-review:1 -->", commitId: "head-old", nodeId: "R_fm" },
+    ])
+
+    await advance({}, h.deps)
+
+    expect(h.deps.dismissPullRequestReview).not.toHaveBeenCalled()
+  } finally {
+    delete process.env.GH_ROUTER_FM_AUTO_DISMISS
+  }
+})
+
+test("A6: consecutive empty-PR observations escalate at the cap", async () => {
+  const row = unit({
+    issue: 1,
+    pr: 7,
+    taskId: "task-1",
+    provider: "completed",
+    phase: "review",
+    dispatchMode: "build",
+    emptyObservations: 2,
+  })
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "completed",
+    prs: [openPr(7, "h7")],
+    ci: { rollup: "passing" },
+    changedFiles: 0,
+    diffTruncated: false,
+  })
+
+  const result = await advance({}, h.deps)
+
+  expect(row.emptyObservations).toBe(3)
+  expect(result.needsHuman).toHaveLength(1)
+})
+
+test("A6: a truncated empty summary does NOT count toward the empty cap, and changes reset it", async () => {
+  const truncated = unit({
+    issue: 1,
+    pr: 7,
+    taskId: "task-1",
+    provider: "completed",
+    phase: "review",
+    dispatchMode: "build",
+    emptyObservations: 2,
+    verifierAssigned: false,
+  })
+  const h1 = harness([truncated])
+  h1.observations.set("1", {
+    provider: "completed",
+    prs: [openPr(7, "h7")],
+    ci: { rollup: "passing" },
+    changedFiles: 0,
+    diffTruncated: true,
+  })
+  const r1 = await advance({}, h1.deps)
+  // A truncated 0 is not a certain empty → no escalation, counter untouched.
+  expect(r1.needsHuman).toHaveLength(0)
+  expect(truncated.emptyObservations).toBe(2)
+
+  const withChanges = unit({
+    issue: 2,
+    pr: 8,
+    taskId: "task-2",
+    provider: "completed",
+    phase: "review",
+    dispatchMode: "build",
+    emptyObservations: 2,
+    verifierAssigned: false,
+  })
+  const h2 = harness([withChanges])
+  h2.observations.set("2", {
+    provider: "completed",
+    prs: [openPr(8, "h8")],
+    ci: { rollup: "passing" },
+    changedFiles: 4,
+    diffTruncated: false,
+  })
+  await advance({}, h2.deps)
+  expect(withChanges.emptyObservations).toBe(0)
+})
+
+test("reconcile: a blockingDecisionId pointing at an absent decision is cleared", async () => {
+  const row = unit({
+    issue: 1,
+    pr: 7,
+    taskId: "task-1",
+    provider: "in_progress",
+    blockingDecisionId: "ghost",
+  })
+  const h = harness([row])
+  h.observations.set("1", { provider: "in_progress", prs: [openPr(7, "h7")], ci: { rollup: "pending" } })
+
+  await advance({}, h.deps)
+
+  expect(row.blockingDecisionId).toBeNull()
+})
+
+test("reconcile: a terminal unit still holding a pending decision gets it answered", async () => {
+  const row = unit({
+    issue: 1,
+    pr: 7,
+    taskId: "task-1",
+    terminal: true,
+    phase: "done",
+    artifact: "pr_merged",
+    provider: "completed",
+    blockingDecisionId: "dec-t",
+  })
+  const h = harness([row])
+  h.decisions.push(pending("dec-t", "merge_approval"))
+
+  await advance({}, h.deps)
+
+  expect(h.deps.markAnswered).toHaveBeenCalledWith("dec-t", "reconciled_terminal", "system")
+  expect(row.blockingDecisionId).toBeNull()
 })

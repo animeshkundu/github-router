@@ -8,8 +8,11 @@ import {
   assignAgent as realAssignAgent,
   COPILOT_REVIEWER_LOGIN,
   createIssue as realCreateIssue,
+  dismissPullRequestReview as realDismissPullRequestReview,
   findAgentPRs as realFindAgentPRs,
+  getPullRequestReviews as realGetPullRequestReviews,
   getPullRequestState as realGetPullRequestState,
+  getSelfLogin as realGetSelfLogin,
   markReadyForReview as realMarkReadyForReview,
   mergePullRequest as realMergePullRequest,
   requestReview as realRequestReview,
@@ -18,6 +21,7 @@ import {
   resolveAgentRoster as realResolveAgentRoster,
   postComment as realPostComment,
   submitReview as realSubmitReview,
+  type ReviewSummary,
 } from "~/lib/agent/service"
 import {
   cancelTask as realCancelTask,
@@ -36,6 +40,7 @@ import {
 import {
   findByKey as realFindByKey,
   markAnswered as realMarkAnswered,
+  readDecisions as realReadDecisions,
   upsertDecision as realUpsertDecision,
   type DecisionRecord,
 } from "~/lib/first-mate/decisions"
@@ -63,6 +68,7 @@ import {
 } from "~/lib/first-mate/state-machine"
 import {
   DEFAULT_POLICY,
+  EMPTY_PR_OBSERVATION_CAP,
   type Action,
   type AgentKey,
   type ModelRequestKind,
@@ -88,6 +94,7 @@ export interface ControllerDeps {
   releaseApproval: typeof realReleaseApproval
   upsertDecision: typeof realUpsertDecision
   findByKey: typeof realFindByKey
+  readDecisions: typeof realReadDecisions
   markAnswered: typeof realMarkAnswered
   startTask: typeof realStartTask
   followUpTask: typeof realFollowUpTask
@@ -98,6 +105,9 @@ export interface ControllerDeps {
   assignAgent: typeof realAssignAgent
   findAgentPRs: typeof realFindAgentPRs
   getPullRequestState: typeof realGetPullRequestState
+  getPullRequestReviews: typeof realGetPullRequestReviews
+  dismissPullRequestReview: typeof realDismissPullRequestReview
+  getSelfLogin: typeof realGetSelfLogin
   postComment: typeof realPostComment
   submitReview: typeof realSubmitReview
   requestReview: typeof realRequestReview
@@ -286,6 +296,7 @@ export const defaultDeps: ControllerDeps = {
   releaseApproval: realReleaseApproval,
   upsertDecision: realUpsertDecision,
   findByKey: realFindByKey,
+  readDecisions: realReadDecisions,
   markAnswered: realMarkAnswered,
   startTask: realStartTask,
   followUpTask: realFollowUpTask,
@@ -296,6 +307,9 @@ export const defaultDeps: ControllerDeps = {
   assignAgent: realAssignAgent,
   findAgentPRs: realFindAgentPRs,
   getPullRequestState: realGetPullRequestState,
+  getPullRequestReviews: realGetPullRequestReviews,
+  dismissPullRequestReview: realDismissPullRequestReview,
+  getSelfLogin: realGetSelfLogin,
   postComment: realPostComment,
   submitReview: realSubmitReview,
   requestReview: realRequestReview,
@@ -329,6 +343,25 @@ function agentRepo(repo: RepoRef): AgentRepoRef {
 
 function unitHandle(unit: UnitRow): string {
   return String(unit.issue ?? unit.taskId)
+}
+
+/**
+ * A5 provable-ownership sentinel. Every REQUEST_CHANGES review the controller
+ * posts embeds this hidden marker so `dismissStaleOwnReviews` can dismiss ONLY
+ * first-mate's own stale reviews — never a human's — without relying on author
+ * identity (the solo operator's account may BE the router PAT).
+ */
+const FM_REVIEW_SENTINEL = "first-mate-review:"
+
+function stampReviewSentinel(unit: UnitRow, body: string): string {
+  const id = unit.id ?? unitHandle(unit)
+  return `${body}\n\n<!-- ${FM_REVIEW_SENTINEL}${id} -->`
+}
+
+/** A5 (5e): auto-dismiss defaults ON; any user-set 0/false/off disables it. */
+function autoDismissEnabled(): boolean {
+  const value = process.env.GH_ROUTER_FM_AUTO_DISMISS?.toLowerCase()
+  return value !== "0" && value !== "false" && value !== "off"
 }
 
 function requestIdFor(unit: UnitRow, kind: ModelRequestKind): string {
@@ -501,10 +534,16 @@ async function fillFuzzyFields(
 }
 
 function updateUnitFromObservedPrs(unit: UnitRow, observed: Observed): void {
-  if (observed.prs.length !== 1) return
-  const pr = observed.prs[0]!
-  unit.pr = pr.number
-  unit.headSha = pr.headSha || unit.headSha
+  if (observed.prs.length === 1) {
+    const pr = observed.prs[0]!
+    unit.pr = pr.number
+    unit.headSha = pr.headSha || unit.headSha
+  }
+  // A3: adopt the CORRELATED primary PR (set by observe only when it came from
+  // unit.pr / branch / task, never the bare author-match fallback) when the unit
+  // has no PR bound yet — covers the multi-PR case the length===1 path misses,
+  // without ever binding an uncorrelated sibling PR to the unit.
+  if (unit.pr === null && observed.primaryPr != null) unit.pr = observed.primaryPr
 }
 
 function modelPayload(
@@ -801,9 +840,14 @@ async function applyModelAnswer(
     // eventually escalates.
     if (unit.pr !== null) {
       await assertFenceHeld("fix-instruction review")
-      await deps.submitReview(repo, unit.pr, "REQUEST_CHANGES", instruction)
+      await deps.submitReview(repo, unit.pr, "REQUEST_CHANGES", stampReviewSentinel(unit, instruction))
     }
     unit.retries += 1
+    // A2: total author_fix dispatches over the unit's life — the hard bound that
+    // the per-failure signature-reset can never zero. Kept UNCONDITIONAL (not
+    // gated on pr!==null) so a unit that never opens a PR still escalates at the
+    // cap rather than looping forever.
+    unit.totalFixes = (unit.totalFixes ?? 0) + 1
     unit.phase = "fix"
     unit.lastSteer = { sha: unit.headSha ?? undefined, atMs: Date.now() }
     applied.push(`sent fix instruction for ${unit.missionId}:${unitHandle(unit)}`)
@@ -848,7 +892,11 @@ async function applyModelAnswer(
       const reason = stringValue(verdict.reason) ?? (passed ? "Verified: meets acceptance criteria." : "Changes requested by cross-lab verification.")
       await assertFenceHeld("judge-verdict review")
       try {
-        await deps.submitReview(repo, unit.pr, passed ? "APPROVE" : "REQUEST_CHANGES", reason)
+        // A5: stamp the sentinel on a REQUEST_CHANGES so the controller can later
+        // dismiss its OWN stale verdict once the agent pushes a fix (an APPROVE
+        // is never dismissed, so it needs no marker).
+        const body = passed ? reason : stampReviewSentinel(unit, reason)
+        await deps.submitReview(repo, unit.pr, passed ? "APPROVE" : "REQUEST_CHANGES", body)
       } catch (err) {
         consola.debug(`first-mate: posting judge verdict review failed for ${unit.missionId}:${unitHandle(unit)}:`, err)
       }
@@ -1233,8 +1281,27 @@ async function assignVerifier(
   unit: UnitRow,
   deps: ControllerDeps,
   applied: string[],
+  primary?: { isDraft?: boolean; prNodeId?: string },
 ): Promise<boolean> {
   if (unit.pr === null) return false
+
+  // A4: a Copilot code review requested on a DRAFT PR silently no-ops — mark the
+  // PR ready for review first (fence-guarded, best-effort) so the verifier
+  // actually runs. Non-draft PRs are unchanged.
+  if (primary?.isDraft === true && primary.prNodeId !== undefined) {
+    await assertFenceHeld("mark ready before verifier")
+    try {
+      await deps.markReadyForReview(primary.prNodeId)
+      applied.push(
+        `marked ${unit.missionId}:${unitHandle(unit)} PR #${unit.pr} ready for review before verification`,
+      )
+    } catch (err) {
+      consola.debug(
+        `first-mate: markReadyForReview before verifier failed for ${unit.missionId}:${unitHandle(unit)}:`,
+        err,
+      )
+    }
+  }
 
   // Cross-lab verification that actually happens on the GitHub portal: request
   // a Copilot code review on the PR. It posts a COMMENTED review whose findings
@@ -1252,6 +1319,239 @@ async function assignVerifier(
     `requested Copilot code review for ${unit.missionId}:${unitHandle(unit)} PR #${unit.pr}`,
   )
   return true
+}
+
+/** Small stable digest (djb2) so a failure fingerprint stays short + comparable. */
+function digest(value: string): string {
+  let hash = 5381
+  for (let i = 0; i < value.length; i += 1) {
+    hash = ((hash << 5) + hash + value.charCodeAt(i)) | 0
+  }
+  return (hash >>> 0).toString(36)
+}
+
+/**
+ * A2 failure fingerprint. A stable string of the CURRENT blocking-failure
+ * identity (CI rollup + review decision + floor verdict + a digest of the active
+ * verifier findings). `retries` resets to 0 only when this changes wake-over-wake
+ * (genuine progress on a NEW failure); the same failure recurring keeps climbing
+ * toward the cap. Computed from `observed` (pre-classify) so it never depends on
+ * a value the same sweep is about to overwrite.
+ */
+export function failureSignature(observed: Observed): string {
+  return [
+    `ci=${observed.ci?.rollup ?? "none"}`,
+    `review=${observed.reviewDecision ?? "none"}`,
+    `floor=${observed.floor ?? "none"}`,
+    `findings=${digest(observed.reviewExcerpt ?? "")}`,
+  ].join("|")
+}
+
+/**
+ * A5 (5d) — dismiss first-mate's OWN stale CHANGES_REQUESTED reviews (sentinel
+ * in the body, commit id older than the current head) so a fix the agent pushed
+ * isn't blocked forever by a superseded review, then REFETCH and RECOMPUTE
+ * `observed.reviewDecision` from what remains — never blind-clear, so a human
+ * APPROVE or an at-head / human CHANGES_REQUESTED survives.
+ */
+async function dismissStaleOwnReviews(
+  unit: UnitRow,
+  observed: Observed,
+  deps: ControllerDeps,
+): Promise<void> {
+  if (!autoDismissEnabled()) return
+  if (
+    observed.reviewDecision !== "CHANGES_REQUESTED" ||
+    unit.pr === null ||
+    !unit.headSha
+  ) {
+    return
+  }
+
+  const repo = agentRepo(unit.repo)
+  const reviews = await deps.getPullRequestReviews(repo, unit.pr)
+  const stale = reviews.filter(
+    (review) =>
+      review.state === "CHANGES_REQUESTED" &&
+      review.bodyExcerpt.includes(FM_REVIEW_SENTINEL) &&
+      review.commitId !== undefined &&
+      review.commitId !== unit.headSha &&
+      review.nodeId !== undefined,
+  )
+  if (stale.length === 0) return
+
+  await assertFenceHeld("dismiss stale own review")
+  for (const review of stale) {
+    await deps.dismissPullRequestReview(
+      review.nodeId!,
+      "Superseded by a newer commit; first mate dismissing its own stale review.",
+    )
+  }
+
+  // Recompute from the post-dismiss reality (a refetch reflects the DISMISSED
+  // state), taking the latest state per author so a human's standing wins.
+  const remaining = await deps.getPullRequestReviews(repo, unit.pr)
+  observed.reviewDecision = recomputeReviewDecision(remaining)
+}
+
+/** Latest-state-per-author reduction to a GitHub-style reviewDecision. */
+function recomputeReviewDecision(reviews: ReviewSummary[]): string | null {
+  const latestByAuthor = new Map<string, string>()
+  for (const review of reviews) {
+    // Dismissed/commented/pending don't change a reviewer's standing.
+    if (review.state !== "APPROVED" && review.state !== "CHANGES_REQUESTED") continue
+    latestByAuthor.set(review.author, review.state)
+  }
+  const states = [...latestByAuthor.values()]
+  if (states.includes("CHANGES_REQUESTED")) return "CHANGES_REQUESTED"
+  if (states.includes("APPROVED")) return "APPROVED"
+  return null
+}
+
+/**
+ * A1 — a BLOCKED unit still gets OBSERVED (never dispatched/steered) so an
+ * out-of-band merge/close of its PR is reconciled instead of leaving the unit
+ * blocked forever. Decision-type aware: only a legitimate merge_approval merge
+ * of the pinned, floor_passed PR is laundered into floor_passed; any other
+ * external merge is recorded as `external_merge_unverified` (loud warn), a close
+ * as `cancelled_external_close`, and an uncorrelated merge stays blocked for a
+ * human. Returns after handling; the caller `continue`s.
+ */
+async function observeBlockedUnit(
+  unit: UnitRow,
+  deps: ControllerDeps,
+  applied: string[],
+): Promise<void> {
+  const decisionId = unit.blockingDecisionId
+  if (!decisionId) return
+
+  const observed = await deps.observeUnit(unit)
+  updateUnitFromObservedPrs(unit, observed)
+  unit.lastCheckedMs = Date.now()
+
+  const mutation = observed.externalMutation
+  let decision: DecisionRecord | undefined
+  try {
+    decision = (await deps.readDecisions()).find((d) => d.decisionId === decisionId)
+  } catch (err) {
+    consola.debug(`first-mate: readDecisions for blocked unit failed:`, err)
+  }
+
+  const answer = async (choice: string): Promise<void> => {
+    try {
+      await deps.markAnswered(decisionId, choice, "external")
+    } catch (err) {
+      consola.debug(`first-mate: markAnswered(${choice}) for external mutation failed:`, err)
+    }
+  }
+
+  const mergedPr = observed.prs.find((pr) => pr.merged || pr.state === "MERGED")
+  const mergedIsPinned = mergedPr != null && unit.pr != null && mergedPr.number === unit.pr
+
+  if (mutation === "merged") {
+    if (
+      decision?.type === "merge_approval" &&
+      mergedIsPinned &&
+      unit.validation === "floor_passed"
+    ) {
+      // Legitimate: the human approved a merge of exactly this floor_passed PR
+      // and it merged out-of-band (or a client-side 5xx hid the success).
+      unit.terminal = true
+      unit.phase = "done"
+      unit.artifact = "pr_merged"
+      unit.validation = "floor_passed"
+      unit.blockingDecisionId = null
+      await answer("superseded_external_merge")
+      applied.push(`reconciled approved external merge for ${repoLabel(unit.repo)}#${unit.pr}`)
+    } else {
+      // Merged out-of-band under a human_decision / retry-cap block, or never
+      // floor_passed / CI-red: mark terminal but NEVER launder it into
+      // floor_passed. Record the honest unverified state and warn loudly.
+      unit.terminal = true
+      unit.phase = "done"
+      unit.artifact = "pr_merged"
+      unit.validation = "external_merge_unverified"
+      unit.blockingDecisionId = null
+      await answer("superseded_external_merge_unverified")
+      consola.warn(
+        `first-mate: ${repoLabel(unit.repo)}#${unit.pr ?? "?"} was merged out-of-band WITHOUT a verified floor pass (decision ${decision?.type ?? "unknown"}) — recorded external_merge_unverified`,
+      )
+      applied.push(`recorded UNVERIFIED external merge for ${repoLabel(unit.repo)}#${unit.pr ?? "?"}`)
+    }
+  } else if (mutation === "closed") {
+    unit.terminal = true
+    unit.phase = "done"
+    unit.artifact = "pr_closed"
+    unit.validation = "cancelled_external_close"
+    unit.blockingDecisionId = null
+    await answer("cancelled_external_close")
+    applied.push(`reconciled external close for ${repoLabel(unit.repo)}#${unit.pr ?? "?"}`)
+  } else if (mutation === "merged_uncorrelated") {
+    // A merge was seen only via the ambiguous author fallback — do NOT mark done.
+    // Leave it blocked; the still-pending decision surfaces it for a human.
+    consola.warn(
+      `first-mate: an UNCORRELATED merged PR was observed for blocked ${unit.missionId}:${unitHandle(unit)} — leaving blocked for human reconciliation`,
+    )
+  }
+
+  await deps.upsertUnit(unit.repo, unit)
+}
+
+/**
+ * Lightweight, idempotent, best-effort reconciliation at the start of a drive.
+ * (1) a stale blockingDecisionId (decision answered/absent) → clear it; (2) a
+ * terminal unit still pointing at a pending decision → answer it; (3) warn on a
+ * consumed approval whose unit never reached pr_merged. Never throws.
+ */
+async function reconcile(
+  units: UnitRow[],
+  deps: ControllerDeps,
+  applied: string[],
+): Promise<void> {
+  let decisions: DecisionRecord[]
+  try {
+    decisions = await deps.readDecisions()
+  } catch (err) {
+    consola.debug("first-mate reconcile: readDecisions failed, skipping:", err)
+    return
+  }
+  const byId = new Map(decisions.map((d) => [d.decisionId, d]))
+
+  for (const unit of units) {
+    const decisionId = unit.blockingDecisionId
+    if (!decisionId) continue
+    const decision = byId.get(decisionId)
+    if (decision === undefined || decision.status === "answered") {
+      // (1) the decision is gone or already resolved — the block is stale.
+      unit.blockingDecisionId = null
+      await deps.upsertUnit(unit.repo, unit)
+      applied.push(`reconciled: cleared stale block on ${unit.missionId}:${unitHandle(unit)}`)
+    } else if (unit.terminal === true) {
+      // (2) a terminal unit shouldn't still hold a pending decision.
+      try {
+        await deps.markAnswered(decisionId, "reconciled_terminal", "system")
+      } catch (err) {
+        consola.debug("first-mate reconcile: markAnswered failed:", err)
+      }
+      unit.blockingDecisionId = null
+      await deps.upsertUnit(unit.repo, unit)
+      applied.push(`reconciled: answered pending decision on terminal ${unit.missionId}:${unitHandle(unit)}`)
+    }
+  }
+
+  // (3) a consumed approval whose unit never reached pr_merged is an anomaly.
+  for (const decision of decisions) {
+    const approval = decision.approval
+    if (approval?.consumed !== true) continue
+    const owner = units.find(
+      (unit) => repoLabel(unit.repo) === repoLabel(approval.repo) && unit.pr === approval.pr,
+    )
+    if (owner && !(owner.terminal === true && owner.artifact === "pr_merged")) {
+      consola.warn(
+        `first-mate reconcile: a consumed merge approval for ${repoLabel(approval.repo)}#${approval.pr} has no merged unit — manual verification may be needed`,
+      )
+    }
+  }
 }
 
 /**
@@ -1297,8 +1597,16 @@ async function executeAction(
     case "steer":
       consola.debug("first-mate controller received direct steer action; v1 skips it")
       return
-    case "assign_verifier":
-      if (await assignVerifier(unit, deps, applied)) return
+    case "assign_verifier": {
+      const primaryPr =
+        observed.prs.find((entry) => entry.number === unit.pr) ?? observed.prs[0]
+      if (
+        await assignVerifier(unit, deps, applied, {
+          isDraft: primaryPr?.isDraft,
+          prNodeId: evidence.prNodeId,
+        })
+      )
+        return
       needsHuman.push({
         request: await createHumanRequest(
           unit,
@@ -1311,6 +1619,7 @@ async function executeAction(
         order,
       })
       return
+    }
     case "rerun_ci":
       if (evidence.runId !== undefined) {
         await assertFenceHeld("CI re-run")
@@ -1402,7 +1711,11 @@ function depsSatisfied(unit: UnitRow, units: UnitRow[]): boolean {
       (candidate) =>
         candidate.id === depId &&
         candidate.terminal === true &&
-        candidate.artifact === "pr_merged",
+        candidate.artifact === "pr_merged" &&
+        // A3: a genuinely merged dependency has its OWN PR bound. `pr != null`
+        // rejects a unit that was spuriously marked pr_merged from an
+        // uncorrelated sibling PR (which never adopts unit.pr).
+        candidate.pr != null,
     ),
   )
 }
@@ -1818,11 +2131,34 @@ export async function advance(
     const missionsById = missionMap(missions)
     let order = 0
 
+    // Start-of-drive reconciliation: clear stale blocks, answer pending
+    // decisions on terminal units, warn on orphaned consumed approvals. Best
+    // effort — never let a reconciliation hiccup abort the sweep.
+    try {
+      await reconcile(units, deps, applied)
+    } catch (err) {
+      consola.debug("first-mate: reconciliation sweep skipped:", err)
+    }
+
     for (const unit of units.filter((row) => isActiveUnit(row, missionsById))) {
       const requestOrder = order
       order += 1
 
-      if (unit.blockingDecisionId) continue
+      // A1: a BLOCKED unit is never dispatched/steered, but it IS observed so an
+      // out-of-band merge/close is reconciled (decision-type aware) rather than
+      // wedging the unit forever. It never runs classify/executeAction.
+      if (unit.blockingDecisionId) {
+        try {
+          await observeBlockedUnit(unit, deps, applied)
+        } catch (err) {
+          consola.warn(
+            `first-mate: blocked unit ${unit.missionId}:${unitHandle(unit)} observe failed:`,
+            err,
+          )
+          applied.push(`error observing blocked ${unit.missionId}:${unitHandle(unit)}: ${errText(err)}`)
+        }
+        continue
+      }
       if (isUndispatched(unit)) continue
 
       const mission = missionsById.get(unit.missionId)
@@ -1856,6 +2192,26 @@ export async function advance(
         updateUnitFromObservedPrs(unit, observed)
         unit.lastCheckedMs = Date.now()
 
+        // A2 signature-reset: reset the per-failure retry counter only when the
+        // blocking failure fingerprint CHANGES (genuine progress on a new
+        // failure). The SAME failure recurring — even across a head move — keeps
+        // climbing toward maxRetries. Runs BEFORE classify so retries reflects
+        // this wake. (totalFixes, the hard bound, is never reset here.)
+        const failSig = failureSignature(observed)
+        if (unit.lastFailSig !== undefined && unit.lastFailSig !== null && failSig !== unit.lastFailSig) {
+          unit.retries = 0
+        }
+        unit.lastFailSig = failSig
+
+        // A5: dismiss first-mate's OWN stale CHANGES_REQUESTED reviews and
+        // recompute reviewDecision, so a fix the agent pushed isn't blocked by a
+        // superseded review. Best-effort; a human review always survives.
+        try {
+          await dismissStaleOwnReviews(unit, observed, deps)
+        } catch (err) {
+          consola.debug(`first-mate: dismissStaleOwnReviews skipped for ${unit.missionId}:${unitHandle(unit)}:`, err)
+        }
+
         if (await maybeMergeWithApproval(unit, observed, evidence, deps, applied)) {
           continue
         }
@@ -1866,7 +2222,27 @@ export async function advance(
         unit.artifact = classified.artifact
         unit.validation = classified.validation
 
-        const action = nextAction(classified, unit, policy)
+        // A6 empty-PR tracking: classifyValidation already gates an empty PR to
+        // a non-advancing "unknown" (→ noop). Track consecutive empties here and
+        // ESCALATE at the cap so it never noops forever; a PR with changes resets
+        // the counter.
+        const isEmptyPr =
+          classified.artifact === "pr_open" &&
+          observed.changedFiles === 0 &&
+          observed.diffTruncated !== true
+        if (isEmptyPr) {
+          unit.emptyObservations = (unit.emptyObservations ?? 0) + 1
+        } else if ((observed.changedFiles ?? 0) > 0) {
+          unit.emptyObservations = 0
+        }
+
+        let action = nextAction(classified, unit, policy)
+        if (isEmptyPr && (unit.emptyObservations ?? 0) >= EMPTY_PR_OBSERVATION_CAP) {
+          action = {
+            kind: "escalate_human",
+            reason: "the agent's pull request has no changes after repeated observations",
+          }
+        }
         await executeAction(
           action,
           unit,

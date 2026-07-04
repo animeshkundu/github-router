@@ -67,6 +67,8 @@ const VALIDATIONS = membersOf<Validation>({
   floor_pending: true,
   floor_passed: true,
   floor_failed: true,
+  external_merge_unverified: true,
+  cancelled_external_close: true,
 })
 
 interface RepoLedgerFile {

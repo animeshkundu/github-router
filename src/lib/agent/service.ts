@@ -379,6 +379,7 @@ export async function requestReview(
 }
 
 interface ReviewRestResponse {
+  node_id?: string | null
   user?: { login?: string | null } | null
   state?: string | null
   body?: string | null
@@ -394,6 +395,8 @@ export interface ReviewSummary {
   submittedAt?: string
   /** The commit the review was made against — used to reject stale reviews. */
   commitId?: string
+  /** GraphQL review node id — needed to dismiss a stale own review (A5). */
+  nodeId?: string
 }
 
 const REVIEW_BODY_LIMIT = 4000
@@ -413,7 +416,53 @@ export async function getPullRequestReviews(
     bodyExcerpt: (review.body ?? "").slice(0, REVIEW_BODY_LIMIT),
     ...(review.submitted_at ? { submittedAt: review.submitted_at } : {}),
     ...(review.commit_id ? { commitId: review.commit_id } : {}),
+    ...(review.node_id ? { nodeId: review.node_id } : {}),
   }))
+}
+
+/**
+ * A5 (5a) — dismiss a PR review by its GraphQL node id. Best-effort: any failure
+ * (already dismissed, insufficient scope, race) is swallowed and reported as
+ * `{dismissed:false}` — a failed dismiss must not abort the controller sweep.
+ */
+export async function dismissPullRequestReview(
+  reviewNodeId: string,
+  message?: string,
+): Promise<{ dismissed: boolean }> {
+  try {
+    await ghGraphQL<unknown>(
+      `mutation FirstMateDismissReview($pullRequestReviewId: ID!, $message: String!) {
+        dismissPullRequestReview(input: { pullRequestReviewId: $pullRequestReviewId, message: $message }) {
+          pullRequestReview {
+            id
+            state
+          }
+        }
+      }`,
+      {
+        pullRequestReviewId: reviewNodeId,
+        message: message ?? "Superseded by a newer commit.",
+      },
+    )
+    return { dismissed: true }
+  } catch (err) {
+    consola.debug(`first-mate: dismissPullRequestReview(${reviewNodeId}) skipped:`, err)
+    return { dismissed: false }
+  }
+}
+
+/**
+ * The authenticated actor's login (`viewer { login }`). Exposed for the
+ * controller dep surface; A5 ownership uses a body sentinel rather than author
+ * identity (the solo operator's account may BE the router PAT), so this is a
+ * diagnostic/roster helper, not the dismiss gate.
+ */
+export async function getSelfLogin(): Promise<string> {
+  const data = await ghGraphQL<{ viewer?: { login?: string | null } | null }>(
+    `query FirstMateViewer { viewer { login } }`,
+    {},
+  )
+  return data.viewer?.login ?? ""
 }
 
 

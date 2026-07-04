@@ -44,6 +44,16 @@ export type Validation =
   | "floor_pending"
   | "floor_passed"
   | "floor_failed"
+  /**
+   * A1 terminal-anomaly states, set by the controller when a BLOCKED unit's PR
+   * is mutated out-of-band. `external_merge_unverified`: the PR was merged
+   * outside first mate without a verified floor pass (never launder it into
+   * floor_passed). `cancelled_external_close`: the PR was closed out-of-band.
+   * Never produced by the pure classifier — only stamped directly on a unit
+   * being marked terminal.
+   */
+  | "external_merge_unverified"
+  | "cancelled_external_close"
 
 export type DispatchMode = "plan" | "build"
 
@@ -78,6 +88,26 @@ export interface UnitRow {
   validation: Validation
   /** Bounded CI/review self-heal counter → blocked_on_human at the cap. */
   retries: number
+  /**
+   * A2 signature-reset (progress) fingerprint. A stable digest of the current
+   * blocking failure (validation kind + CI/review/floor identity). `retries`
+   * resets to 0 ONLY when this changes wake-over-wake (genuine progress); the
+   * SAME failure recurring keeps climbing toward the cap. Optional → back-compat.
+   */
+  lastFailSig?: string | null
+  /**
+   * A2 hard bound: TOTAL author_fix dispatches across this unit's whole life,
+   * independent of `retries` (which the signature-reset can zero). At
+   * `policy.totalFixCap` the unit escalates regardless of signature churn, so a
+   * unit that "makes progress" on a new failure every wake can't loop forever.
+   */
+  totalFixes?: number
+  /**
+   * A6 empty-PR guard: consecutive observations of a PR with zero changed files.
+   * Incremented while gated, reset when the PR has changes; at
+   * EMPTY_PR_OBSERVATION_CAP the unit escalates instead of noop-ing forever.
+   */
+  emptyObservations?: number
   lastSteer?: { cursor?: string; sha?: string; atMs: number }
   /** Distinguishes loser-cleanup (controller) from an external cancel. */
   cancelledBy?: "controller" | "external"
@@ -174,17 +204,44 @@ export interface Observed {
   prNodeId?: string
   /** Did the last steer visibly land (log cursor / head sha advanced)? */
   steerAcknowledged?: boolean | null
-  /** An out-of-band change to the unit's PR the controller didn't make. */
-  externalMutation?: "closed" | "merged" | "head_changed" | null
+  /**
+   * An out-of-band change to the unit's PR the controller didn't make.
+   * `merged_uncorrelated`: a MERGED PR found ONLY via the ambiguous bare
+   * author-match fallback (branch/task correlation missed) — never auto-mark
+   * done from it; escalate for human reconciliation.
+   */
+  externalMutation?: "closed" | "merged" | "merged_uncorrelated" | "head_changed" | null
+  /**
+   * A3: the primary PR number ONLY when it was CORRELATED (unit.pr / branch /
+   * task), never the bare author-match fallback. The controller adopts this as
+   * `unit.pr` so an uncorrelated sibling PR is never bound to the unit.
+   */
+  primaryPr?: number
+  /**
+   * A6: the primary open PR's changed-file count (from the diff summary), and
+   * whether that summary was truncated. `changedFiles === 0 && !diffTruncated`
+   * is the empty-PR gate; a truncated 0 does NOT gate (we couldn't tell).
+   */
+  changedFiles?: number
+  diffTruncated?: boolean
 }
 
 /** Tunable policy the pure functions read (no globals). */
 export interface Policy {
-  /** CI/review self-heal cap before escalating to a human. Default 3. */
+  /** Per-failure CI/review self-heal cap before escalating. Reset on progress. */
   maxRetries: number
+  /**
+   * A2 hard bound on TOTAL author_fix dispatches over a unit's life. Independent
+   * of `maxRetries` (which the signature-reset zeroes on genuine progress), so a
+   * unit that churns a new failure each wake still escalates here.
+   */
+  totalFixCap: number
 }
 
-export const DEFAULT_POLICY: Policy = { maxRetries: 3 }
+export const DEFAULT_POLICY: Policy = { maxRetries: 6, totalFixCap: 10 }
+
+/** A6: consecutive empty-PR observations before escalating to a human. */
+export const EMPTY_PR_OBSERVATION_CAP = 3
 
 /** The classified orthogonal state + the events observed this step. */
 export interface Classified {
