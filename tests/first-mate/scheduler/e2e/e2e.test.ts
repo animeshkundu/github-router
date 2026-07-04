@@ -17,6 +17,8 @@ const REPO_ROOT = path.resolve(import.meta.dir, "../../../..")
 
 interface Proc {
   kill: (sig?: number | NodeJS.Signals) => void
+  /** Close the child's stdin (EOF) — the cross-platform graceful kill switch. */
+  closeStdin: () => void
   readonly exited: Promise<number>
 }
 
@@ -26,10 +28,21 @@ function spawnHarness(env: Record<string, string>): Proc {
   const proc = Bun.spawn(["bun", HARNESS], {
     cwd: REPO_ROOT,
     env: { ...process.env, ...env },
+    stdin: "pipe",
     stdout: "ignore",
     stderr: "pipe",
   })
-  const p: Proc = { kill: (sig) => proc.kill(sig as number), exited: proc.exited }
+  const p: Proc = {
+    kill: (sig) => proc.kill(sig as number),
+    closeStdin: () => {
+      try {
+        proc.stdin.end()
+      } catch {
+        // already closed
+      }
+    },
+    exited: proc.exited,
+  }
   live.push(p)
   return p
 }
@@ -153,12 +166,18 @@ describe("first-mate scheduler — TRUE multi-process E2E", () => {
     expect(ghCount(gh)).toBe(1) // failover did not re-dispatch
   }, 40_000)
 
-  test("6. kill switch: SIGTERM halts cleanly and releases the lease", async () => {
+  test("6. kill switch: shutdown request halts cleanly and releases the lease", async () => {
     const { dir, gh } = await scratch()
     const p = spawnHarness({ ...DRIVE, E2E_DIR: dir, E2E_GH: gh, E2E_TTL_MS: "60000" })
     const up = await waitFor(() => fs.existsSync(path.join(dir, "scheduler.lease.json")), 20_000)
     expect(up).toBe(true)
-    p.kill("SIGTERM")
+    // Cross-platform kill switch: close stdin (EOF) to trigger the daemon's
+    // graceful shutdown. This drives the SAME stop()→release()→exit(0) path an
+    // external SIGTERM would on POSIX, but works identically on Windows, which
+    // has no real POSIX signals (an external SIGTERM there is a hard
+    // TerminateProcess that never runs the handler, so a signal-based assertion
+    // would assert POSIX semantics Windows doesn't provide).
+    p.closeStdin()
     const code = await p.exited
     expect(code).toBe(0) // stop() ran and the process exited cleanly
 

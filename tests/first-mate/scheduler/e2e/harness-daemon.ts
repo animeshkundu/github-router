@@ -136,11 +136,23 @@ async function runDriveDaemon(): Promise<void> {
   daemon.start()
   process.stdout.write("started\n")
 
+  let shuttingDown = false
   const shutdown = (): void => {
+    if (shuttingDown) return
+    shuttingDown = true
     void daemon.stop().finally(() => process.exit(0))
   }
   process.on("SIGTERM", shutdown)
   process.on("SIGINT", shutdown)
+  // Cross-platform kill switch. Windows has no real POSIX signals — an external
+  // SIGTERM is a hard TerminateProcess that never runs the handler above — so the
+  // graceful stop() path is unobservable there via signals. stdin EOF is a
+  // termination trigger Node/Bun observes identically on every platform: when the
+  // parent closes the write end of the pipe, 'end' fires and we stop() cleanly
+  // and release the lease. This is the trigger the E2E kill-switch test uses.
+  process.stdin.on("end", shutdown)
+  process.stdin.on("close", shutdown)
+  process.stdin.resume()
 
   await new Promise<void>(() => {}) // keep alive
 }
