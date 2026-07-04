@@ -107,8 +107,7 @@ describe("mission registry OCC", () => {
     await lease2.release()
   })
 
-  test("back-compat pre-rev missions.json is read as rev 0 and first commit writes rev 1", async () => {
-    await fs.writeFile(
+  test("back-compat pre-rev missions.json is read as rev 0 and first commit writes rev 1", async () => {    await fs.writeFile(
       missionsPath(),
       `${JSON.stringify({ version: 1, missions: [mission("old")] }, null, 2)}\n`,
       { mode: 0o600 },
@@ -120,5 +119,18 @@ describe("mission registry OCC", () => {
     const after = await readRegistryFile()
     expect(after.rev).toBe(1)
     expect(after.missions.map((entry) => entry.id).sort()).toEqual(["new", "old"])
+  })
+
+  test("Mission.defaultModel round-trips through the registry", async () => {
+    await upsertMission(mission("m-model", { defaultModel: "gpt-5.4" }))
+    const [persisted] = await readMissions()
+    expect(persisted?.defaultModel).toBe("gpt-5.4")
+  })
+
+  test("a mission without defaultModel still loads (back-compat)", async () => {
+    await upsertMission(mission("m-nomodel"))
+    const [persisted] = await readMissions()
+    expect(persisted?.id).toBe("m-nomodel")
+    expect(persisted?.defaultModel).toBeUndefined()
   })
 })

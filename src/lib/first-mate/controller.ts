@@ -60,6 +60,7 @@ import {
   upsertUnit as realUpsertUnit,
 } from "~/lib/first-mate/ledger"
 import { observeUnit as realObserveUnit } from "~/lib/first-mate/observe"
+import { resolveCloudAgentModel } from "~/lib/first-mate/task-model"
 import { Outbox } from "~/lib/first-mate/scheduler/outbox"
 import { isCurrentFencingToken } from "~/lib/first-mate/scheduler/lease"
 import {
@@ -797,6 +798,7 @@ async function applyModelAnswer(
         const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
           deps.startTask(repo, {
             prompt: buildPrompt(unit, mission) + promptTag,
+            model: resolveCloudAgentModel(unit.model ?? mission.defaultModel),
             createPullRequest: true,
             idempotencyKey,
           }),
@@ -820,7 +822,12 @@ async function applyModelAnswer(
       if (mission !== undefined) {
         const prompt = `${planPrompt(unit, mission)}\n\nRefine your previous plan per this feedback:\n${instruction}`
         const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
-          deps.startTask(repo, { prompt: prompt + promptTag, createPullRequest: false, idempotencyKey }),
+          deps.startTask(repo, {
+            prompt: prompt + promptTag,
+            model: resolveCloudAgentModel(unit.model ?? mission.defaultModel),
+            createPullRequest: false,
+            idempotencyKey,
+          }),
           renewLease,
         )
         if (task) {
@@ -1130,6 +1137,10 @@ async function applyDecomposeAnswer(
       agent: asAgentKey(stringValue(spec.agent)) ?? "copilot",
       botLogin: "",
       dispatchMode: "plan",
+      // Per-unit model override from the decompose spec, else the mission
+      // default. Absent → the controller resolves to DEFAULT_CODEX_MODEL at
+      // dispatch (see resolveCloudAgentModel).
+      model: stringValue(spec.model) ?? mission.defaultModel,
       provider: "none",
       phase: "plan",
       artifact: "no_pr",
@@ -1892,6 +1903,7 @@ async function dispatchUnit(
   const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
     deps.startTask(repo, {
       prompt: planPrompt(unit, mission) + promptTag,
+      model: resolveCloudAgentModel(unit.model ?? mission.defaultModel),
       createPullRequest: false,
       idempotencyKey,
     }),

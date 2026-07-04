@@ -11,7 +11,7 @@ import {
   resolveAgentRoster,
   __resetAgentServiceCachesForTests,
 } from "~/lib/agent/service"
-import { getTask } from "~/lib/agent/tasks"
+import { getTask, startTask } from "~/lib/agent/tasks"
 import { AgentError, type AgentErrorCode, type RepoRef } from "~/lib/agent/types"
 import { state } from "~/lib/state"
 
@@ -373,4 +373,40 @@ test("mergePullRequest sends expected head sha and maps head-moved status to HEA
     mergePullRequest(repo, { pr: 31, expectedHeadSha: "old-head-sha" }),
     "HEAD_MOVED",
   )
+})
+
+test("startTask includes the model in the POST body when provided", async () => {
+  let capturedBody: unknown
+  const fetchMock = mock((_url: string, init?: RequestInit) => {
+    capturedBody = JSON.parse(String(init?.body))
+    return jsonResponse({ task_id: "task-42", state: "queued" })
+  })
+  setFetch(fetchMock)
+
+  const result = await startTask(repo, {
+    prompt: "do the work",
+    model: "gpt-5.5",
+    createPullRequest: true,
+  })
+
+  expect(result).toEqual({ taskId: "task-42", state: "queued" })
+  expect(capturedBody).toMatchObject({
+    prompt: "do the work",
+    model: "gpt-5.5",
+    create_pull_request: true,
+  })
+})
+
+test("startTask omits the model field when none is provided", async () => {
+  let capturedBody: Record<string, unknown> = {}
+  const fetchMock = mock((_url: string, init?: RequestInit) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+    return jsonResponse({ task_id: "task-43", state: "queued" })
+  })
+  setFetch(fetchMock)
+
+  await startTask(repo, { prompt: "no model here" })
+
+  expect(capturedBody.prompt).toBe("no model here")
+  expect("model" in capturedBody).toBe(false)
 })

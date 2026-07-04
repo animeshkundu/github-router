@@ -82,6 +82,13 @@ export interface UnitRow {
   agent: AgentKey
   botLogin: string
   dispatchMode: DispatchMode
+  /**
+   * The GitHub cloud coding agent model this unit's tasks dispatch with (e.g.
+   * `gpt-5.5`). Stamped at decomposition from the unit spec's `model` (if any)
+   * else the mission's `defaultModel`. Optional → back-compat; absent means the
+   * controller resolves to DEFAULT_CODEX_MODEL at dispatch.
+   */
+  model?: string
   provider: ProviderState
   phase: Phase
   artifact: Artifact

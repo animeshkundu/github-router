@@ -16,6 +16,12 @@ export interface Mission {
   acceptanceCriteria: string
   houseRules?: string
   priority?: number
+  /**
+   * The GitHub cloud coding agent model this mission's tasks default to (e.g.
+   * `gpt-5.5`). Optional → back-compat; absent means the controller falls back
+   * to DEFAULT_CODEX_MODEL. A per-unit `UnitRow.model` overrides this.
+   */
+  defaultModel?: string
   repos: RepoRef[]
   status: "active" | "done" | "abandoned"
   createdMs: number
@@ -75,6 +81,7 @@ function isMission(value: unknown): value is Mission {
     typeof mission.acceptanceCriteria === "string" &&
     isOptionalString(mission.houseRules) &&
     isOptionalFiniteNumber(mission.priority) &&
+    isOptionalString(mission.defaultModel) &&
     Array.isArray(mission.repos) &&
     mission.repos.every(isRepoRef) &&
     (mission.status === "active" ||

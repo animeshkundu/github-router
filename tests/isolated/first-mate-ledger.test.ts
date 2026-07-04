@@ -90,8 +90,7 @@ describe("first-mate durable ledger", () => {
     expect(persisted.map((u) => u.validation).sort()).toEqual([...validations].sort())
   })
 
-  test("a unit's dispatch-intent (outbox) field round-trips through the ledger", async () => {
-    const withIntent = unit({
+  test("a unit's dispatch-intent (outbox) field round-trips through the ledger", async () => {    const withIntent = unit({
       issue: 200,
       taskId: null,
       provider: "none",
@@ -100,6 +99,21 @@ describe("first-mate durable ledger", () => {
     await upsertUnit(repoA, withIntent)
     const [persisted] = await readRepoLedger(repoA)
     expect(persisted?.dispatch).toEqual({ id: "corr-abc", requestedMs: 123, attempts: 1 })
+  })
+
+  test("a unit's model field round-trips through the ledger", async () => {
+    await upsertUnit(repoA, unit({ issue: 300, taskId: "t-mdl", model: "gpt-5.4" }))
+    const [persisted] = await readRepoLedger(repoA)
+    expect(persisted?.model).toBe("gpt-5.4")
+  })
+
+  test("a legacy unit without a model still loads (back-compat)", async () => {
+    const legacy = unit({ issue: 301, taskId: "t-legacy" })
+    delete (legacy as { model?: string }).model
+    await upsertUnit(repoA, legacy)
+    const [persisted] = await readRepoLedger(repoA)
+    expect(persisted?.issue).toBe(301)
+    expect(persisted?.model).toBeUndefined()
   })
 
   test("upsertUnit replaces by issue", async () => {

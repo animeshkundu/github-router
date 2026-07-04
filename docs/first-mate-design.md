@@ -24,7 +24,8 @@ The scoped server is `first-mate` (`GROUP_META` / `MCP_GROUPS` in
 preferred tool names are:
 
 - `mcp__first-mate__start_mission` — persist a mission: goal, repos, acceptance
-  criteria, optional priority, optional house rules.
+  criteria, optional priority, optional house rules, optional `default_model`
+  (the cloud coding agent's model for this mission's tasks; defaults to gpt-5.5).
 - `mcp__first-mate__advance` — wake the deterministic controller once; apply
   submitted model/human answers; return compact `board`, `needsModel`,
   `needsHuman`, `applied_count`, `nextWakeAt`, and `nextWakeSeconds` (the
@@ -151,6 +152,32 @@ and maps bot logins to `copilot`, `anthropic`, or `openai` via
 `2026-03-10` and returns compact handles (`taskId`, state, PR URL/number,
 bounded tail log excerpt) instead of full transcripts. If `startTask()` fails,
 the controller falls back to creating an issue and assigning the selected bot.
+
+### Cloud-agent model selection
+
+Which model the GitHub cloud coding agent runs a task with is selectable, with a
+`gpt-5.5` default (the same `DEFAULT_CODEX_MODEL` the codex launcher uses). The
+choice threads mission→unit→dispatch:
+
+1. `start_mission` accepts an optional `default_model` string, persisted as
+   `Mission.defaultModel`.
+2. At decomposition (`applyDecomposeAnswer`) each `UnitRow.model` is stamped from
+   the decompose spec's per-unit `model` (if the verdict provided one) else the
+   mission's `defaultModel`.
+3. All three dispatch call sites (initial plan dispatch, approve→build, and
+   refine→plan) resolve the effective model as `unit.model ?? mission.defaultModel`
+   through `resolveCloudAgentModel()` (`src/lib/first-mate/task-model.ts`) and pass
+   it as `StartTaskInput.model` (the transport already forwarded a `model` field).
+
+`resolveCloudAgentModel(chosen, catalog?)` is pure and catalog-injectable. An
+explicitly-chosen model is normalized via the proxy's `resolveModel()` slug
+cascade and, when a live catalog is present, REQUIRED to be in it — an
+explicit model Copilot can't serve THROWS rather than being silently swapped for
+a fallback (no silent model-class switch). An unspecified choice defaults to
+`gpt-5.5`, walking `DEFAULT_CODEX_MODEL_FALLBACKS` only when a catalog says the
+preferred default is absent for the tier. `Mission.defaultModel` and
+`UnitRow.model` are both optional → back-compat: pre-existing missions/units load
+and dispatch on the `gpt-5.5` default.
 
 ### Copilot-host session log (the agent's plan / progress / questions)
 

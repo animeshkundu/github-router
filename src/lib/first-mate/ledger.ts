@@ -186,6 +186,7 @@ function isUnitRow(value: unknown): value is UnitRow {
     isOneOf(row.agent, AGENTS) &&
     typeof row.botLogin === "string" &&
     isOneOf(row.dispatchMode, DISPATCH_MODES) &&
+    isOptionalString(row.model) &&
     isOneOf(row.provider, PROVIDER_STATES) &&
     isOneOf(row.phase, PHASES) &&
     isOneOf(row.artifact, ARTIFACTS) &&

@@ -111,6 +111,7 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
         acceptance_criteria: stringProp("User-blessed acceptance criteria for the mission."),
         priority: numberProp("Optional numeric priority; higher values are handled by controller policy."),
         house_rules: stringProp("Optional repository or operator constraints."),
+        default_model: stringProp("Model the GitHub cloud coding agent uses for this mission's tasks; defaults to gpt-5.5."),
       }, ["goal", "repos", "acceptance_criteria"]),
       async (args) => {
         const repos = requiredStringArray(args, "repos").map(parseRepoRef)
@@ -122,6 +123,7 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
           acceptanceCriteria: requiredString(args, "acceptance_criteria"),
           houseRules: optionalString(args, "house_rules"),
           priority: optionalNumber(args, "priority"),
+          defaultModel: optionalString(args, "default_model"),
           repos,
           status: "active",
           createdMs: now,

@@ -13,6 +13,7 @@ import type {
   RepoRef,
   UnitRow,
 } from "~/lib/first-mate/types"
+import { state } from "~/lib/state"
 
 const repo: RepoRef = { owner: "octo", name: "repo" }
 
@@ -1816,4 +1817,133 @@ test("reconcile: a terminal unit still holding a pending decision gets it answer
 
   expect(h.deps.markAnswered).toHaveBeenCalledWith("dec-t", "reconciled_terminal", "system")
   expect(row.blockingDecisionId).toBeNull()
+})
+
+// --- cloud-agent model selection (mission.defaultModel → unit.model → dispatch) ---
+
+function startTaskModels(h: Harness): Array<string | undefined> {
+  return (h.deps.startTask as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(
+    (c) => (c[1] as { model?: string }).model,
+  )
+}
+
+test("initial dispatch sends the default gpt-5.5 model when neither unit nor mission specifies one", async () => {
+  state.models = undefined // no catalog → deterministic default
+  const eligible = unit({ issue: 22, taskId: null, provider: "none", title: "eligible" })
+  const h = harness([eligible])
+
+  await advance({ maxInFlightPerProvider: 1 }, h.deps)
+
+  expect(eligible.taskId).toBe("started-1")
+  expect(startTaskModels(h)).toEqual(["gpt-5.5"])
+})
+
+test("initial dispatch uses the mission defaultModel when the unit has no override", async () => {
+  state.models = undefined
+  const eligible = unit({ issue: 23, taskId: null, provider: "none", title: "eligible" })
+  const h = harness([eligible], [mission({ defaultModel: "gpt-5.4" })])
+
+  await advance({ maxInFlightPerProvider: 1 }, h.deps)
+
+  expect(startTaskModels(h)).toEqual(["gpt-5.4"])
+})
+
+test("initial dispatch — the per-unit model overrides the mission default", async () => {
+  state.models = undefined
+  const eligible = unit({
+    issue: 24,
+    taskId: null,
+    provider: "none",
+    title: "eligible",
+    model: "gpt-5.3-codex",
+  })
+  const h = harness([eligible], [mission({ defaultModel: "gpt-5.4" })])
+
+  await advance({ maxInFlightPerProvider: 1 }, h.deps)
+
+  expect(startTaskModels(h)).toEqual(["gpt-5.3-codex"])
+})
+
+test("approve→build re-dispatch carries the resolved model (mission default here)", async () => {
+  state.models = undefined
+  const row = unit({
+    provider: "completed",
+    phase: "plan",
+    dispatchMode: "plan",
+    planExcerpt: "1. do the thing.",
+  })
+  const h = harness([row], [mission({ defaultModel: "gpt-5.4" })])
+  h.observations.set("1", { provider: "queued", prs: [] })
+
+  await advance(
+    { modelAnswers: [{ requestId: "m1:1:review_plan", verdict: { decision: "approve" } }] },
+    h.deps,
+  )
+
+  const buildCall = (
+    h.deps.startTask as unknown as { mock: { calls: unknown[][] } }
+  ).mock.calls.find((c) => (c[1] as { createPullRequest?: boolean }).createPullRequest === true)
+  expect(buildCall).toBeDefined()
+  expect((buildCall![1] as { model?: string }).model).toBe("gpt-5.4")
+})
+
+test("refine→plan re-dispatch carries the resolved model (unit override here)", async () => {
+  state.models = undefined
+  const row = unit({
+    provider: "completed",
+    phase: "plan",
+    dispatchMode: "plan",
+    planExcerpt: "old plan",
+    model: "gpt-5.3-codex",
+  })
+  const h = harness([row], [mission({ defaultModel: "gpt-5.4" })])
+  h.observations.set("1", { provider: "queued", prs: [] })
+
+  await advance(
+    {
+      modelAnswers: [
+        {
+          requestId: "m1:1:review_plan",
+          verdict: { decision: "refine", instruction: "Add more detail." },
+        },
+      ],
+    },
+    h.deps,
+  )
+
+  const planCall = (
+    h.deps.startTask as unknown as { mock: { calls: unknown[][] } }
+  ).mock.calls.find(
+    (c) => (c[1] as { createPullRequest?: boolean }).createPullRequest === false,
+  )
+  expect(planCall).toBeDefined()
+  expect((planCall![1] as { model?: string }).model).toBe("gpt-5.3-codex")
+})
+
+test("decompose stamps unit.model from the spec, else the mission default, else undefined", async () => {
+  state.models = undefined
+  const m = mission({ id: "m-mdl", goal: "Build it", defaultModel: "gpt-5.4" })
+  const h = harness([], [m])
+
+  await advance(
+    {
+      modelAnswers: [
+        {
+          requestId: "decompose:m-mdl",
+          verdict: {
+            units: [
+              { title: "with override", model: "gpt-5.3-codex" },
+              { title: "inherits mission default" },
+            ],
+          },
+        },
+      ],
+    },
+    h.deps,
+  )
+
+  const withOverride = h.units.find((u) => u.title === "with override")
+  const inherited = h.units.find((u) => u.title === "inherits mission default")
+  expect(withOverride?.model).toBe("gpt-5.3-codex")
+  expect(inherited?.model).toBe("gpt-5.4")
 })
