@@ -257,7 +257,14 @@ describe("durable-store CAS primitive", () => {
     expect(await fs.readFile(file, "utf8")).toBe(
       `${JSON.stringify({ version: 1, rev: 1, items: ["a"] }, null, 2)}\n`,
     )
-    expect((await fs.stat(file)).mode & 0o777).toBe(0o600)
+    // POSIX-only: Node on Windows maps fs.chmod to the read-only attribute only,
+    // so a writable file always stat()s as 0o666 — 0o600 is not representable
+    // there (Received 438 vs Expected 384). The owner-only intent is enforced on
+    // Windows by the NTFS ACL of the per-user profile dir, not by mode bits. So
+    // this permission assertion is inherently POSIX-scoped, not a coverage gap.
+    if (process.platform !== "win32") {
+      expect((await fs.stat(file)).mode & 0o777).toBe(0o600)
+    }
     const entries = await fs.readdir(firstMateDir)
     expect(entries.some((entry) => entry.includes(".tmp."))).toBe(false)
   })
