@@ -21,9 +21,9 @@ import {
 /**
  * Wiring for the server-side driver. The daemon holds a fencing lease and
  * decouples answer-submission (queued by deferring leads) from driving.
- * It IS auto-started at bootstrap: `server-setup.ts` calls
- * `maybeSpawnDaemon({ agentsEnabled })` after the server is ready (default-ON
- * under `--agents` via `GH_ROUTER_FM_DAEMON!=0`).
+ * It auto-starts at bootstrap ONLY when opted in: `server-setup.ts` calls
+ * `maybeSpawnDaemon({ agentsEnabled })`, which spawns only if
+ * `GH_ROUTER_FM_DAEMON=1` (default OFF — the [fm-heartbeat] cron drives).
  */
 
 /**

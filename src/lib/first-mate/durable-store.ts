@@ -81,10 +81,33 @@ export async function withFileLock<T>(
       break
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
+      // Finding 4 — reclaim a stale lock WITHOUT unlink-to-steal. A blind
+      // `unlink(lockPath)` after a stat can delete a FRESH lock that another
+      // writer created between our stat and unlink (TOCTTOU → two holders →
+      // lost update). Instead: record the holder's token, and only if the SAME
+      // token is still there past the TTL, atomically `rename` it away and
+      // verify we moved exactly that stale lock; if we accidentally moved a
+      // fresh replacement, put it back.
+      let observedToken: string | undefined
       try {
+        observedToken = (await fs.readFile(lockPath, "utf8")).trim()
         const st = await fs.stat(lockPath)
         if (Date.now() - st.mtimeMs > LOCK_TTL_MS) {
-          await fs.unlink(lockPath).catch(() => {})
+          const stealPath = `${lockPath}.steal.${ownerToken}`
+          try {
+            await fs.rename(lockPath, stealPath)
+            const moved = (await fs.readFile(stealPath, "utf8").catch(() => "")).trim()
+            if (moved === observedToken) {
+              await fs.unlink(stealPath).catch(() => {}) // correctly reclaimed the stale lock
+            } else {
+              // We moved a fresh lock a third writer created — restore it.
+              await fs
+                .rename(stealPath, lockPath)
+                .catch(() => fs.unlink(stealPath).catch(() => {}))
+            }
+          } catch {
+            // Lost the steal race (another writer moved/replaced it) — just retry.
+          }
           continue
         }
       } catch {

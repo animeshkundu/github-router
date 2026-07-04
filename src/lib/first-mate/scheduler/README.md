@@ -30,32 +30,36 @@ escalates to the lead exactly as today.
 
 ## Safety / status
 
-- **The daemon IS auto-spawned at boot** under `--agents`: `server-setup.ts`
-  calls `maybeSpawnDaemon({ agentsEnabled })` after the server is ready,
-  default-ON via `GH_ROUTER_FM_DAEMON!=0` (set `=0` to disable).
-  `scripts/first-mate-daemon.ts` is the standalone entry point for running it by
-  itself.
-- **The Claude `[fm-heartbeat]` stays armed as a passive failover** — it defers
-  via the fencing lease while the daemon owns it, so the two never double-drive.
-  Cutover does NOT require disarming the heartbeat; leaving it armed is the
-  intended belt-and-suspenders.
-- **Honest boundaries (not yet delivered):** the daemon removes lead *polling*
-  for the deterministic drive loop but does NOT push judgments to the lead —
-  every judgment still wakes the lead via the heartbeat (no server→lead push).
-  The heartbeat failover covers an in-server daemon-task crash, not a host /
-  process exit (there is no second always-on instance).
-- **Landed since Phase 1:** holistic ledger-version CAS + fencing now covers the
-  whole shared write path — unit ledger, missions registry, and decisions/
-  approvals all route through `durable-store.commitJsonCas` (a stale-lease driver
-  is rejected on any of them). The always-on host is now an assumed operating
-  condition.
-- **Still deferred (before enabling live Tier-1 auto-judge):** the AnswerInbox
-  consumer must hard-reject `mode:"shadow"` records independent of
-  `GH_ROUTER_FM_TIER1_LIVE` (so a future live flip can't consume a stale
-  uncalibrated shadow verdict); live Tier1 routing behind
-  verifiability/reversibility/policy gates + outcome calibration; per-action
-  allowlists for what agents may touch. `GH_ROUTER_FM_TIER1_LIVE` stays OFF and
-  `DETERMINISTIC_VERIFIERS` stays empty until those land.
+- **The daemon is OPT-IN, default OFF** — auto-spawn at boot requires
+  `GH_ROUTER_FM_DAEMON=1` (under `--agents`). The **[fm-heartbeat] cron is the
+  default driver** and the proven path. Default-on is deferred until the two
+  remaining hardening items below land — a proxy that crashes or orphans a
+  drive-primary daemon on boot is worse than the heartbeat it replaces.
+- **Never crashes the proxy:** the spawn attaches an async `'error'` listener
+  (an ENOENT from a missing `bun` arrives as an event, not a sync throw — without
+  the listener it becomes `uncaughtException` → `exit(1)`), and no-ops when the
+  daemon `.ts` entry is absent (dist/global installs don't ship it).
+- **Never orphans:** `server-setup.ts` stores the spawn handle and kills it on
+  `exit`/`SIGINT`/`SIGTERM`. An orphaned drive-primary daemon would keep renewing
+  the lease and merging PRs after the proxy is gone. (Windows lacks process-group
+  reaping; a Job Object is a further hardening TODO for SIGKILL.)
+- **When opted in**, the daemon holds the fencing lease and the [fm-heartbeat]
+  degrades to a passive failover via the shared lease/`driveGate`, so the two
+  never double-drive. Honest boundary: this removes lead *polling* for the
+  deterministic drive loop only; live judgments still wake the lead via the
+  heartbeat (no server→lead push), and the failover covers an in-server
+  daemon-task crash, not a host/process exit.
+- **Landed:** holistic ledger-version CAS + fencing across the whole shared
+  write path (unit ledger + missions registry + decisions/approvals via
+  `durable-store.commitJsonCas`); a token-verified atomic-claim stale-lock break
+  in `withFileLock` (never unlink-to-steal). Always-on host is assumed.
+- **Before flipping default-on (remaining hardening):** a verifier-stall
+  wall-clock escalation (a unit awaiting a Copilot review that never lands
+  currently noops with no escalation — the `totalFixes` cap only advances on the
+  fix path); the AnswerInbox consumer must hard-reject `mode:"shadow"` records
+  independent of `GH_ROUTER_FM_TIER1_LIVE`; live Tier1 routing behind
+  verifiability gates + calibration; a Windows Job Object for the child.
+  `GH_ROUTER_FM_TIER1_LIVE` stays OFF and `DETERMINISTIC_VERIFIERS` stays empty.
 
 ## Test
 

@@ -168,14 +168,29 @@ export async function setupAndServe(
   }
   const serverUrl = url.replace(/\/$/, "")
 
-  // Capstone — auto-spawn the first-mate scheduler daemon as a SEPARATE process
-  // when operator/agents mode is active (default ON; GH_ROUTER_FM_DAEMON=0
-  // disables). Safe now that answer-decoupling + driveGate + push are in: the
-  // daemon is drive-primary and the [fm-heartbeat] is a passive failover. Never
-  // throws; a spawn failure must not take down the proxy.
+  // Opt-in (GH_ROUTER_FM_DAEMON=1; default OFF) auto-spawn of the first-mate
+  // scheduler daemon as a SEPARATE process. The [fm-heartbeat] cron is the
+  // default driver; this is experimental. Never throws. The returned handle is
+  // wired to shutdown so a drive-primary daemon can never orphan and keep
+  // merging PRs after the proxy exits (Windows has no process-group reaping).
   try {
     const handle = maybeSpawnDaemon({ agentsEnabled: agentToolsEnabled() })
-    if (handle) consola.info(`first-mate daemon spawned (pid ${handle.pid ?? "?"}).`)
+    if (handle) {
+      let killed = false
+      const killDaemon = () => {
+        if (killed) return
+        killed = true
+        try {
+          handle.kill()
+        } catch {
+          /* best-effort */
+        }
+      }
+      process.once("exit", killDaemon)
+      process.once("SIGINT", killDaemon)
+      process.once("SIGTERM", killDaemon)
+      consola.debug(`first-mate daemon spawn attempted (pid ${handle.pid ?? "?"}).`)
+    }
   } catch (err) {
     consola.debug("first-mate daemon auto-spawn skipped:", err)
   }
