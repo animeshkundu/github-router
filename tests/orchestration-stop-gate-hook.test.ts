@@ -23,6 +23,7 @@ import {
   launchBaselineKey,
   mergeStopHookIntoSettings,
   runStopGateForLaunch,
+  stopGateDisabled,
   stopGateEnabled,
   stopGateId,
 } from "../src/lib/orchestration/stop-gate-hook"
@@ -142,6 +143,19 @@ describe("stop-gate opt-in flag + gate id", () => {
   test("gate id defaults to default-ci, overridable", () => {
     expect(stopGateId({})).toBe("default-ci")
     expect(stopGateId({ GH_ROUTER_STOP_GATE_ID: "typecheck-only" })).toBe("typecheck-only")
+  })
+
+  test("stopGateDisabled: honors the env AND the --no-stop-gate launcher flag (C3)", () => {
+    // Neither set -> gate stays enabled.
+    expect(stopGateDisabled({}, {})).toBe(false)
+    expect(stopGateDisabled({ "no-stop-gate": false }, {})).toBe(false)
+    // The launcher flag disables it (a driven session sets this).
+    expect(stopGateDisabled({ "no-stop-gate": true }, {})).toBe(true)
+    // The env disables it regardless of the flag.
+    expect(stopGateDisabled({}, { GH_ROUTER_DISABLE_STOP_GATE: "1" })).toBe(true)
+    expect(stopGateDisabled({ "no-stop-gate": false }, { GH_ROUTER_DISABLE_STOP_GATE: "true" })).toBe(true)
+    // A falsy env value alone does not disable.
+    expect(stopGateDisabled({}, { GH_ROUTER_DISABLE_STOP_GATE: "0" })).toBe(false)
   })
 })
 

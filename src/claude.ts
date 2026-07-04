@@ -25,6 +25,7 @@ import {
   captureLaunchBaseline,
   injectStopHookIntoSettingsFile,
   stopGateId,
+  stopGateDisabled,
 } from "./lib/orchestration/stop-gate-hook"
 import {
   fileBaselineStore,
@@ -127,6 +128,12 @@ export const claude = defineCommand({
       default: false,
       description:
         "Explicitly record consent for the structural Stop-gate in THIS repo (pinned to the repo's root-commit). The gate is ON BY DEFAULT when a harness is detected (consent-by-launching), so this is now mostly redundant; it stays for explicit/scripted use. Disable the gate entirely with GH_ROUTER_DISABLE_STOP_GATE=1.",
+    },
+    "no-stop-gate": {
+      type: "boolean" as const,
+      default: false,
+      description:
+        "Disable the structural Stop-gate for THIS session (same effect as GH_ROUTER_DISABLE_STOP_GATE=1). Intended for driven/automated sessions where a blocking Stop hook would hang the turn-end while a fleet driver waits.",
     },
     "auto-update": {
       type: "boolean" as const,
@@ -673,7 +680,7 @@ export const claude = defineCommand({
             consola.warn(`Could not record gate trust: ${String(err)}`)
           }
         }
-        const gateDisabled = parseBoolEnv(process.env.GH_ROUTER_DISABLE_STOP_GATE) === true
+        const gateDisabled = stopGateDisabled(args as Record<string, unknown>)
         const forceEnabled = parseBoolEnv(process.env.GH_ROUTER_ENABLE_STOP_GATE) === true
         const includeTests = parseBoolEnv(process.env.GH_ROUTER_STOP_GATE_RUN_TESTS) === true
         const gateRoot = await repoRoot(sessionCwd).catch(() => sessionCwd)

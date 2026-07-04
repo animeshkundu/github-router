@@ -135,15 +135,10 @@ export function renderMarkdownBody(source: string): string {
  * readable typography (works even before ai-or-die injects its annotation SDK).
  */
 export function renderPlanHtml(source: string, title = "Plan"): string {
-  const body = renderMarkdownBody(source)
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(title)}</title>
-<style>
-  :root {
+  return wrapArtifactDocument(renderMarkdownBody(source), title)
+}
+
+const BASE_STYLE = `  :root {
     --bg: #0f1115; --fg: #f7f3ea; --muted: #aeb6c6; --border: #2a2f3a;
     --accent: #f4c95d; --code-bg: #171a21;
     --serif: 'Iowan Old Style', Georgia, 'Times New Roman', serif;
@@ -172,7 +167,39 @@ export function renderPlanHtml(source: string, title = "Plan"): string {
   th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
   th { background: var(--code-bg); }
   hr { border: 0; border-top: 1px solid var(--border); margin: 1.5em 0; }
-  ul, ol { padding-left: 1.4em; }
+  ul, ol { padding-left: 1.4em; }`
+
+const INTERACTIVE_STYLE = `
+  .aod-group { margin: 1.4em 0; padding: 14px 16px; border: 1px solid var(--border);
+    border-radius: 10px; background: var(--code-bg); }
+  .aod-prompt { font-family: var(--sans); font-weight: 600; margin: 0 0 0.6em; }
+  .aod-options { display: flex; flex-wrap: wrap; gap: 8px; }
+  .aod-multi-select .aod-options { flex-direction: column; gap: 6px; }
+  .aod-action, .aod-submit { font-family: var(--sans); font-size: 0.95em; font-weight: 600;
+    cursor: pointer; border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 12px; background: var(--bg); color: var(--fg); }
+  .aod-action:hover, .aod-submit:hover { border-color: var(--accent); }
+  .aod-submit { margin-top: 10px; background: var(--accent); color: #17130a; border-color: var(--accent); }
+  .aod-check { display: flex; align-items: center; gap: 8px; font-family: var(--sans); cursor: pointer; }
+  .aod-steps { list-style: decimal; }
+  .aod-step { margin: 0.5em 0; }
+  .aod-step-actions { display: inline-flex; gap: 6px; margin-left: 8px; }`
+
+/**
+ * Wrap rendered inner HTML in the self-contained document shell. `extraStyle` is
+ * appended to the inline stylesheet so the interactive variant can add its own
+ * rules without a second `<style>` block. Static callers pass "" (default), so
+ * the static document is byte-identical to the pre-refactor output.
+ */
+function wrapArtifactDocument(body: string, title: string, extraStyle = ""): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<style>
+${BASE_STYLE}${extraStyle}
 </style>
 </head>
 <body>
@@ -182,4 +209,184 @@ ${body}
 </body>
 </html>
 `
+}
+
+/* -------------------------------------------------------------------------- */
+/* Interactive artifacts (contract v2.2 §4: declarative data-aod-* vocab)      */
+/* -------------------------------------------------------------------------- */
+
+export interface InteractiveOption {
+  /** Stable id echoed back as `elementId` in the action event. Required. */
+  elementId: string
+  /** Human-visible label. */
+  label: string
+  /** Optional value echoed as `data-aod-value` (checkbox submits use "true"/"false"). */
+  value?: string
+}
+
+/** One immediate-fire choice group: each option posts an action the instant it is clicked. */
+export interface ChooseOneBlock {
+  kind: "choose-one"
+  /** `data-aod-group` shared by the options (marks them as one decision). */
+  group: string
+  prompt?: string
+  /** `data-aod-action` verb for every option (default "choose"). */
+  action?: string
+  options: InteractiveOption[]
+}
+
+/** A multi-select group: checkbox toggles plus one submit that carries {group, selected}. */
+export interface MultiSelectBlock {
+  kind: "multi-select"
+  group: string
+  prompt?: string
+  submitLabel?: string
+  submitElementId?: string
+  options: InteractiveOption[]
+}
+
+export interface StepAction {
+  /** `data-aod-action` verb (e.g. "approve", "skip"). */
+  action: string
+  label: string
+  value?: string
+}
+
+export interface StepItem {
+  /** Stable `data-aod-id` echoed as `elementId`. */
+  elementId: string
+  label: string
+  sourceLine?: number
+  actions: StepAction[]
+}
+
+/** An ordered list of plan steps, each with its own inline action buttons. */
+export interface StepsBlock {
+  kind: "steps"
+  steps: StepItem[]
+}
+
+export type InteractiveBlock = ChooseOneBlock | MultiSelectBlock | StepsBlock
+
+export interface InteractivePlanModel {
+  /** Optional prose rendered above the interactive blocks (same escaping as static). */
+  markdown?: string
+  blocks: InteractiveBlock[]
+}
+
+/** Build a ` data-x="y"` attribute string, dropping undefined values, all escaped. */
+function dataAttrs(pairs: Array<[string, string | undefined]>): string {
+  let out = ""
+  for (const [name, value] of pairs) {
+    if (value === undefined) continue
+    out += ` ${name}="${escapeHtml(value)}"`
+  }
+  return out
+}
+
+function renderChooseOne(block: ChooseOneBlock): string {
+  const action = block.action && block.action.trim() ? block.action : "choose"
+  const prompt = block.prompt ? `<p class="aod-prompt">${escapeHtml(block.prompt)}</p>` : ""
+  const options = block.options
+    .filter((o) => o.elementId.trim() !== "")
+    .map((o) => {
+      const attrs = dataAttrs([
+        ["data-aod-action", action],
+        ["data-aod-group", block.group],
+        ["data-aod-id", o.elementId],
+        ["data-aod-value", o.value],
+      ])
+      return `<button type="button" class="aod-action"${attrs}>${escapeHtml(o.label)}</button>`
+    })
+    .join("\n")
+  return `<div class="aod-group aod-choose-one"${dataAttrs([["data-aod-group", block.group]])}>
+${prompt}<div class="aod-options">
+${options}
+</div>
+</div>`
+}
+
+function renderMultiSelect(block: MultiSelectBlock): string {
+  const prompt = block.prompt ? `<p class="aod-prompt">${escapeHtml(block.prompt)}</p>` : ""
+  const options = block.options
+    .filter((o) => o.elementId.trim() !== "")
+    .map((o) => {
+      const attrs = dataAttrs([
+        ["data-aod-action", "check"],
+        ["data-aod-group", block.group],
+        ["data-aod-id", o.elementId],
+        ["data-aod-value", o.value],
+      ])
+      return `<label class="aod-check"><input type="checkbox"${attrs}> <span>${escapeHtml(o.label)}</span></label>`
+    })
+    .join("\n")
+  const submitId = block.submitElementId && block.submitElementId.trim()
+    ? block.submitElementId
+    : `${block.group}-submit`
+  const submitAttrs = dataAttrs([
+    ["data-aod-action", "submit"],
+    ["data-aod-group", block.group],
+    ["data-aod-id", submitId],
+  ])
+  const submitLabel = block.submitLabel && block.submitLabel.trim() ? block.submitLabel : "Submit"
+  return `<div class="aod-group aod-multi-select"${dataAttrs([["data-aod-group", block.group]])}>
+${prompt}<div class="aod-options">
+${options}
+</div>
+<button type="button" class="aod-submit"${submitAttrs}>${escapeHtml(submitLabel)}</button>
+</div>`
+}
+
+function renderSteps(block: StepsBlock): string {
+  const items = block.steps
+    .filter((s) => s.elementId.trim() !== "")
+    .map((s) => {
+      const liAttrs = dataAttrs([
+        ["data-aod-id", s.elementId],
+        ["data-source-line", s.sourceLine === undefined ? undefined : String(s.sourceLine)],
+      ])
+      const actions = s.actions
+        .map((a) => {
+          const attrs = dataAttrs([
+            ["data-aod-action", a.action],
+            ["data-aod-id", s.elementId],
+            ["data-aod-value", a.value],
+          ])
+          return `<button type="button" class="aod-action"${attrs}>${escapeHtml(a.label)}</button>`
+        })
+        .join("")
+      return `<li class="aod-step"${liAttrs}><span class="aod-step-label">${escapeHtml(s.label)}</span><span class="aod-step-actions">${actions}</span></li>`
+    })
+    .join("\n")
+  return `<ol class="aod-steps">
+${items}
+</ol>`
+}
+
+function renderInteractiveBlock(block: InteractiveBlock): string {
+  switch (block.kind) {
+    case "choose-one":
+      return renderChooseOne(block)
+    case "multi-select":
+      return renderMultiSelect(block)
+    case "steps":
+      return renderSteps(block)
+    default:
+      return ""
+  }
+}
+
+/**
+ * Render a typed interactive plan model into a self-contained HTML document that
+ * carries the declarative `data-aod-*` action vocabulary the ai-or-die panel SDK
+ * wires (contract v2.2 §4). Optional prose (`markdown`) is rendered with the SAME
+ * escaping + dangerous-URL neutralization as the static path; all control
+ * attributes and labels are HTML-escaped, so no author string can break out of an
+ * attribute or inject live markup.
+ */
+export function renderInteractivePlanHtml(model: InteractivePlanModel, title = "Plan"): string {
+  const prose = model.markdown && model.markdown.trim() ? renderMarkdownBody(model.markdown) : ""
+  const blocks = model.blocks.map(renderInteractiveBlock).filter((h) => h.trim() !== "").join("\n")
+  const body = [prose, blocks].filter((s) => s.trim() !== "").join("\n")
+  return wrapArtifactDocument(body || `<pre>${escapeHtml(JSON.stringify(model))}</pre>`, title, INTERACTIVE_STYLE)
 }
