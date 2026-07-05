@@ -129,6 +129,59 @@ function anthropicImageToNeutral(source: AnyRecord | undefined): NeutralContentP
   return null
 }
 
+/** Concatenate the text of an Anthropic `document` `content`-source block array. */
+function joinDocumentContentText(content: unknown): string {
+  if (!Array.isArray(content)) return ""
+  let text = ""
+  for (const block of content) {
+    if (block && typeof block === "object") {
+      const b = block as AnyRecord
+      if (b.type === "text" && typeof b.text === "string") text += b.text
+    }
+  }
+  return text
+}
+
+/**
+ * Map an Anthropic `document` block to a neutral content part.
+ *   - base64 source → neutral `document` (mimeType + data) → Responses
+ *     `input_file` with `file_data`; on the chat path → an inline text note
+ *     (Copilot's `/chat/completions` rejects file parts).
+ *   - url source → neutral `document` (url) → Responses `input_file.file_url`.
+ *   - text source (a plain-text document) → the doc's text folded into a `text`
+ *     part, so the model sees it on BOTH paths.
+ *   - content source (content-block document) → its text blocks folded into a
+ *     `text` part.
+ * Missing/invalid fields (unknown source type, `file`-id references Copilot has
+ * no Files API for, empty text) yield null and are dropped.
+ */
+function anthropicDocumentToNeutral(b: AnyRecord): NeutralContentPart | null {
+  const source = b.source
+  if (!source || typeof source !== "object") return null
+  const s = source as AnyRecord
+  const filename =
+    typeof b.title === "string" && b.title.length > 0 ? b.title : "document.pdf"
+  if (s.type === "base64" && typeof s.data === "string") {
+    return {
+      type: "document",
+      mimeType: typeof s.media_type === "string" ? s.media_type : "application/pdf",
+      data: s.data,
+      filename,
+    }
+  }
+  if (s.type === "url" && typeof s.url === "string") {
+    return { type: "document", url: s.url, filename }
+  }
+  if (s.type === "text" && typeof s.data === "string") {
+    return s.data.length > 0 ? { type: "text", text: s.data } : null
+  }
+  if (s.type === "content") {
+    const text = joinDocumentContentText(s.content)
+    return text.length > 0 ? { type: "text", text } : null
+  }
+  return null
+}
+
 /**
  * Convert one Anthropic message into zero-or-more neutral messages. A user
  * message with `tool_result` blocks fans out: text/image content becomes a
@@ -185,6 +238,12 @@ function anthropicMessageToNeutral(msg: AnyRecord): Array<NeutralMessage> {
       } else if (b.type === "image") {
         const img = anthropicImageToNeutral(b.source as AnyRecord)
         if (img) userParts.push(img)
+      } else if (b.type === "document") {
+        // A PDF / document block. base64 & url sources ride as a neutral
+        // `document` part (→ Responses input_file; chat path degrades to a text
+        // note); text/content sources fold into a text part right here.
+        const doc = anthropicDocumentToNeutral(b)
+        if (doc) userParts.push(doc)
       } else if (b.type === "tool_result") {
         // A tool result closes the current user text/image run and becomes its
         // own neutral message so it lands as a Responses function_call_output

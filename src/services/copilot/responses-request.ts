@@ -22,6 +22,21 @@ import type {
   ResponsesTool,
 } from "~/services/copilot/create-responses"
 
+/**
+ * Copilot's `/responses` endpoint rejects a positive `max_output_tokens` below
+ * 16 with an HTTP 400 (verified live on gpt-5.5 and gpt-5.3-codex):
+ *   Invalid 'max_output_tokens': integer below minimum value. Expected a value
+ *   >= 16, but got 1 instead.
+ * Anthropic's `/v1/messages` allows any `max_tokens >= 1`, so a valid low
+ * Anthropic request (`max_tokens` 1..15) would otherwise 400 on the Responses
+ * path. Clamp a positive sub-16 value UP to this minimum; leave `undefined`
+ * and normal (>= 16) values EXACTLY as-is so the worker hot path and all
+ * normal requests stay byte-identical. The chat path has NO such minimum
+ * (gemini / `/chat/completions` accepts small values, verified HTTP 200), so
+ * this clamp lives only here, never in `chat-request.ts`.
+ */
+const RESPONSES_MIN_MAX_OUTPUT_TOKENS = 16
+
 /** A single piece of message content in the neutral shape. */
 export type NeutralContentPart =
   | { type: "text"; text: string }
@@ -32,6 +47,17 @@ export type NeutralContentPart =
    * sends base64.
    */
   | { type: "image"; mimeType?: string; data?: string; url?: string }
+  /**
+   * A document (e.g. a PDF). Mirrors the `image` variant: a base64 document
+   * carries `mimeType` + `data` (wrapped into a `data:<mimeType>;base64,<data>`
+   * URI and emitted as a Responses `input_file`), a URL document carries `url`
+   * (emitted as `input_file.file_url`); `filename` is the document title. An
+   * Anthropic `document` block with a `text`/`content` source is folded into a
+   * `text` part at parse time and never reaches this variant. Only the
+   * Anthropic-translation shim produces documents; Pi (the worker path) never
+   * does, so a worker payload is unaffected.
+   */
+  | { type: "document"; mimeType?: string; data?: string; url?: string; filename?: string }
   | { type: "toolCall"; id: string; name: string; arguments: unknown }
 
 /** A neutral message. Tool results are their own role (as in the Pi shape and
@@ -83,6 +109,27 @@ function imageUrlFor(part: Extract<NeutralContentPart, { type: "image" }>): stri
   return `data:${mime};base64,${part.data ?? ""}`
 }
 
+/**
+ * Map a document part to a Responses `input_file` item. A base64 document is
+ * wrapped into a `data:<mime>;base64,<data>` `file_data` URI (the verified-working
+ * Copilot shape — gpt-5.5 reads it); a URL document carries `file_url`. Returns
+ * null when neither source is present (malformed) so it's dropped, not emitted
+ * as an invalid item.
+ */
+function documentInputFile(
+  part: Extract<NeutralContentPart, { type: "document" }>,
+): Record<string, unknown> | null {
+  const filename = part.filename ?? "document.pdf"
+  if (typeof part.data === "string" && part.data.length > 0) {
+    const mime = part.mimeType ?? "application/pdf"
+    return { type: "input_file", filename, file_data: `data:${mime};base64,${part.data}` }
+  }
+  if (typeof part.url === "string" && part.url.length > 0) {
+    return { type: "input_file", filename, file_url: part.url }
+  }
+  return null
+}
+
 function joinText(parts: ReadonlyArray<NeutralContentPart>): string {
   let s = ""
   for (const p of parts) {
@@ -97,8 +144,10 @@ function neutralUserToResponses(
   if (typeof m.content === "string") {
     return [{ role: "user", content: m.content }]
   }
-  const hasImage = m.content.some((c) => c.type === "image")
-  if (!hasImage) {
+  // A document or image forces the structured `content` parts form (input_file
+  // / input_image); a text-only turn collapses to a single string.
+  const needsParts = m.content.some((c) => c.type === "image" || c.type === "document")
+  if (!needsParts) {
     return [{ role: "user", content: joinText(m.content) }]
   }
   const parts: Array<Record<string, unknown>> = []
@@ -107,6 +156,9 @@ function neutralUserToResponses(
       parts.push({ type: "input_text", text: c.text })
     } else if (c.type === "image") {
       parts.push({ type: "input_image", image_url: imageUrlFor(c) })
+    } else if (c.type === "document") {
+      const item = documentInputFile(c)
+      if (item) parts.push(item)
     }
   }
   return [{ role: "user", content: parts }]
@@ -190,7 +242,12 @@ export function assembleResponsesPayload(
   }
 
   if (typeof opts.maxOutputTokens === "number" && opts.maxOutputTokens > 0) {
-    payload.max_output_tokens = opts.maxOutputTokens
+    // Raise a valid low Anthropic `max_tokens` (1..15) up to Copilot's minimum
+    // so it doesn't 400; >= 16 passes through untouched (Math.max is a no-op).
+    payload.max_output_tokens = Math.max(
+      opts.maxOutputTokens,
+      RESPONSES_MIN_MAX_OUTPUT_TOKENS,
+    )
   }
 
   if (opts.stopSequences && opts.stopSequences.length > 0) {

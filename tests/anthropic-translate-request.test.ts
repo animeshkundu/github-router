@@ -10,6 +10,9 @@ import {
 import type { Model } from "~/services/copilot/get-models"
 
 const MODEL_ID = "gpt-5.5"
+// The other model Copilot serves on the SAME `/responses` path. Both share the
+// one Responses shim — this is fixture fidelity, not a second code path.
+const CODEX_MODEL_ID = "gpt-5.3-codex"
 
 function gptModel(reasoningEfforts?: Array<string>): Model {
   return {
@@ -34,8 +37,38 @@ function gptModel(reasoningEfforts?: Array<string>): Model {
   }
 }
 
+function codexModel(reasoningEfforts?: Array<string>): Model {
+  return {
+    id: CODEX_MODEL_ID,
+    name: "GPT 5.3 Codex",
+    object: "model",
+    vendor: "openai",
+    version: "1",
+    preview: false,
+    model_picker_enabled: true,
+    capabilities: {
+      family: "gpt",
+      object: "model_capabilities",
+      tokenizer: "o200k_base",
+      type: "chat",
+      supports: {
+        tool_calls: true,
+        ...(reasoningEfforts && { reasoning_effort: reasoningEfforts }),
+      },
+    },
+    supported_endpoints: ["/responses"],
+  }
+}
+
 function build(body: Record<string, unknown>, model?: Model) {
   const parsed = parseAnthropicRequest(body, MODEL_ID, model)
+  const payload = parsedToResponsesPayload(parsed)
+  return { parsed, payload }
+}
+
+/** Same as `build`, but lets a test pin the request/catalog model id. */
+function buildFor(modelId: string, body: Record<string, unknown>, model?: Model) {
+  const parsed = parseAnthropicRequest(body, modelId, model)
   const payload = parsedToResponsesPayload(parsed)
   return { parsed, payload }
 }
@@ -108,6 +141,127 @@ describe("anthropic-translate request mapping", () => {
         content: [{ type: "input_image", image_url: "https://ex.com/a.png" }],
       },
     ])
+  })
+
+  test("document block (base64 PDF) → input_file with file_data data URI + filename", () => {
+    const { payload } = build({
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              title: "smoke.pdf",
+              source: { type: "base64", media_type: "application/pdf", data: "JVBERi0x" },
+            },
+            { type: "text", text: "what is in this pdf?" },
+          ],
+        },
+      ],
+    })
+    expect(payload.input).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_file",
+            filename: "smoke.pdf",
+            file_data: "data:application/pdf;base64,JVBERi0x",
+          },
+          { type: "input_text", text: "what is in this pdf?" },
+        ],
+      },
+    ])
+  })
+
+  test("document block without a title → default filename document.pdf", () => {
+    const { payload } = build({
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: { type: "base64", media_type: "application/pdf", data: "QUJD" },
+            },
+          ],
+        },
+      ],
+    })
+    expect(payload.input).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "input_file", filename: "document.pdf", file_data: "data:application/pdf;base64,QUJD" },
+        ],
+      },
+    ])
+  })
+
+  test("document block (url source) → input_file with file_url", () => {
+    const { payload } = build({
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              title: "spec.pdf",
+              source: { type: "url", url: "https://ex.com/spec.pdf" },
+            },
+          ],
+        },
+      ],
+    })
+    expect(payload.input).toEqual([
+      {
+        role: "user",
+        content: [{ type: "input_file", filename: "spec.pdf", file_url: "https://ex.com/spec.pdf" }],
+      },
+    ])
+  })
+
+  test("document block (text source) → folded into user text (no input_file part)", () => {
+    const { payload } = build({
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: { type: "text", media_type: "text/plain", data: "AAA" },
+            },
+            { type: "text", text: "BBB" },
+          ],
+        },
+      ],
+    })
+    // A plain-text document is inlined as text; with no image/document part left
+    // the turn collapses to a single string (doc text first, in wire order).
+    expect(payload.input).toEqual([{ role: "user", content: "AAABBB" }])
+  })
+
+  test("document block (content source) → text blocks folded into user text", () => {
+    const { payload } = build({
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: {
+                type: "content",
+                content: [
+                  { type: "text", text: "part1" },
+                  { type: "text", text: "part2" },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    })
+    expect(payload.input).toEqual([{ role: "user", content: "part1part2" }])
   })
 
   test("assistant text + tool_use → output_text message + function_call (order preserved)", () => {
@@ -355,6 +509,24 @@ describe("anthropic-translate request mapping", () => {
     expect(payload.max_output_tokens).toBe(2048)
   })
 
+  test("max_tokens below Copilot's /responses minimum (1, 15) clamps up to 16", () => {
+    // Copilot's /responses rejects max_output_tokens < 16 with a 400 (verified
+    // live: gpt-5.5, gpt-5.3-codex); Anthropic allows max_tokens >= 1. The shim
+    // must raise a sub-16 value so a valid low request doesn't 400.
+    expect(build({ messages: [], max_tokens: 1 }).payload.max_output_tokens).toBe(16)
+    expect(build({ messages: [], max_tokens: 15 }).payload.max_output_tokens).toBe(16)
+  })
+
+  test("max_tokens at/above the minimum (16, 256) passes through unchanged", () => {
+    expect(build({ messages: [], max_tokens: 16 }).payload.max_output_tokens).toBe(16)
+    expect(build({ messages: [], max_tokens: 256 }).payload.max_output_tokens).toBe(256)
+  })
+
+  test("max_tokens absent → no max_output_tokens field emitted", () => {
+    const { payload } = build({ messages: [] })
+    expect("max_output_tokens" in payload).toBe(false)
+  })
+
   test("I6: stop_sequences → Responses `stop` (forwarded; Copilot accepts it)", () => {
     const { parsed, payload } = build({
       messages: [],
@@ -408,5 +580,68 @@ describe("anthropic-translate request mapping", () => {
   test("stream flag is carried through", () => {
     expect(build({ messages: [], stream: true }).payload.stream).toBe(true)
     expect(build({ messages: [], stream: false }).payload.stream).toBe(false)
+  })
+})
+
+// Fixture-fidelity coverage: `gpt-5.3-codex` rides the SAME `/responses` shim as
+// `gpt-5.5` (the rest of this suite pins gpt-5.5). Explicitly assert the
+// document→input_file and the sub-16 max_output_tokens clamp on the codex id so
+// the codex surface can't regress unnoticed.
+describe("anthropic-translate request mapping (gpt-5.3-codex)", () => {
+  test("model id is carried onto the payload", () => {
+    const { payload } = buildFor(
+      CODEX_MODEL_ID,
+      { messages: [{ role: "user", content: "hi" }] },
+      codexModel(),
+    )
+    expect(payload.model).toBe(CODEX_MODEL_ID)
+  })
+
+  test("document (base64 PDF) → input_file with file_data data URI + filename", () => {
+    const { payload } = buildFor(
+      CODEX_MODEL_ID,
+      {
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                title: "smoke.pdf",
+                source: { type: "base64", media_type: "application/pdf", data: "JVBERi0x" },
+              },
+              { type: "text", text: "what is in this pdf?" },
+            ],
+          },
+        ],
+      },
+      codexModel(),
+    )
+    expect(payload.input).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_file",
+            filename: "smoke.pdf",
+            file_data: "data:application/pdf;base64,JVBERi0x",
+          },
+          { type: "input_text", text: "what is in this pdf?" },
+        ],
+      },
+    ])
+  })
+
+  test("max_output_tokens below the /responses minimum (1, 15) clamps up to 16", () => {
+    expect(
+      buildFor(CODEX_MODEL_ID, { messages: [], max_tokens: 1 }, codexModel()).payload.max_output_tokens,
+    ).toBe(16)
+    expect(
+      buildFor(CODEX_MODEL_ID, { messages: [], max_tokens: 15 }, codexModel()).payload.max_output_tokens,
+    ).toBe(16)
+    // At/above the minimum passes through unchanged.
+    expect(
+      buildFor(CODEX_MODEL_ID, { messages: [], max_tokens: 256 }, codexModel()).payload.max_output_tokens,
+    ).toBe(256)
   })
 })

@@ -312,6 +312,21 @@ surface.
 - Both fields are **omitted-by-default** on the shared assembler, so the
   worker-agent hot path (which never sets them) produces a byte-identical payload
   to before.
+- **`max_output_tokens` is clamped UP to 16 on the `/responses` path.** Copilot's
+  `/responses` hard-requires `max_output_tokens >= 16` (a positive sub-16 value
+  400s: `Invalid 'max_output_tokens': integer below minimum value. Expected a
+  value >= 16, but got 1 instead.` — verified live on gpt-5.5 and gpt-5.3-codex),
+  whereas Anthropic's `/v1/messages` allows any `max_tokens >= 1`. So the shim
+  raises a sub-16 `max_tokens` (`1..15`) up to `16`
+  (`RESPONSES_MIN_MAX_OUTPUT_TOKENS` in `responses-request.ts`); `>= 16` and
+  `undefined` pass through untouched. **Rationale:** avoid a 400 on an
+  otherwise-valid low request; Claude Code never sends `< 16` in practice.
+  **Trade-off:** for a `max_tokens: 1..15` request the model may emit up to 16
+  tokens, so Anthropic's "at most N" upper bound is not strictly honored below 16
+  — a small possible over-run vs the client's cap. This applies ONLY to the
+  `/responses` path (gpt); the `/chat/completions` path (gemini) has no such
+  minimum and forwards `max_tokens` verbatim (Copilot accepts small values,
+  live-verified HTTP 200), so chat/gemini are unaffected.
 - **Streaming usage rides the terminal chunk.** Copilot emits token usage on the
   stream unprompted (no `stream_options.include_usage` needed — live-verified):
   the `/responses` synthesizer reads it off `response.completed` /
@@ -333,6 +348,16 @@ honestly rather than papered over:
   handler strips `output_config` before the shim is reached).
 - **`gpt-5.3-codex` is a 400k-context model, not 1M.** Its window is smaller than
   `gpt-5.5`'s; plan long sessions accordingly.
+- **PDFs / `document` blocks work on the gpt/`/responses` path, not gemini/`/chat`.** An
+  Anthropic base64 or URL `document` block maps to a Responses `input_file` (base64 →
+  `file_data` data URI, verified: gpt-5.5 reads the PDF) — but Copilot's
+  `/chat/completions` rejects file content parts (HTTP 400), so on the Gemini path a
+  document degrades to a brief newline-delimited inline text note (`[document "<name>"
+  attached but not supported for this model]`) rather than being dropped or 400ing.
+  Text/content-source documents are folded into a text part and work on both paths.
+  **Verification caveat:** the base64 `document` → `input_file.file_data` mapping is
+  LIVE-verified (gpt-5.5 reads the PDF); the URL-source `document` → `input_file.file_url`
+  mapping is UNIT-tested only, not live-verified against Copilot.
 - **The "1M variant" is a misconception for these models.** Unlike Opus (whose 1M
   context is unlocked via a separate `[1m]`-decorated slug on enterprise tiers),
   the 1M window for `gpt-5.5` and the Gemini models is **native to the base

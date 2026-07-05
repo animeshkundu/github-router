@@ -46,13 +46,22 @@ function imageUrlFor(part: Extract<NeutralContentPart, { type: "image" }>): stri
   return `data:${mime};base64,${part.data ?? ""}`
 }
 
-/** Concatenate the text parts of a neutral content array. */
-function joinText(parts: ReadonlyArray<NeutralContentPart>): string {
-  let s = ""
-  for (const p of parts) {
-    if (p.type === "text") s += p.text
-  }
-  return s
+/**
+ * A brief inline note standing in for a document on the chat path. Copilot's
+ * `/chat/completions` rejects file content parts (`type` must be `image_url` or
+ * `text` → HTTP 400), so a document (PDF) can't be forwarded to a Gemini model;
+ * the note keeps the document from being silently dropped and tells the model
+ * one was provided but is unavailable, instead of 400ing the request.
+ *
+ * The note is wrapped in leading + trailing newlines so it is always DELIMITED
+ * from adjacent user text — in the string-collapse branch it can't glue onto a
+ * neighboring text run (`...[model]what is this?`), and in the content-parts
+ * branch it stands as its own line. Regular text-to-text concatenation is left
+ * untouched (only the note carries the delimiter), so wire order is preserved.
+ */
+function documentNote(part: Extract<NeutralContentPart, { type: "document" }>): string {
+  const name = part.filename ?? "document"
+  return `\n[document "${name}" attached but not supported for this model]\n`
 }
 
 /**
@@ -68,7 +77,15 @@ function neutralUserToChat(
   }
   const hasImage = m.content.some((c) => c.type === "image")
   if (!hasImage) {
-    return { role: "user", content: joinText(m.content) }
+    // No images → collapse to a single string. Documents can't be forwarded to
+    // Copilot's chat endpoint, so each becomes an inline text note rather than
+    // being silently lost.
+    let text = ""
+    for (const c of m.content) {
+      if (c.type === "text") text += c.text
+      else if (c.type === "document") text += documentNote(c)
+    }
+    return { role: "user", content: text }
   }
   const parts: Array<ContentPart> = []
   for (const c of m.content) {
@@ -76,6 +93,9 @@ function neutralUserToChat(
       parts.push({ type: "text", text: c.text })
     } else if (c.type === "image") {
       parts.push({ type: "image_url", image_url: { url: imageUrlFor(c) } })
+    } else if (c.type === "document") {
+      // Degrade to a text note — never an upstream-invalid file part.
+      parts.push({ type: "text", text: documentNote(c) })
     }
   }
   return { role: "user", content: parts }
