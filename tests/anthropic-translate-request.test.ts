@@ -7,6 +7,8 @@ import {
   parseAnthropicRequest,
   parsedToResponsesPayload,
 } from "~/lib/anthropic-translate/anthropic-request"
+import type { AnthropicStreamEvent } from "~/lib/anthropic-translate/anthropic-sse"
+import { synthAnthropicFromResponses } from "~/lib/anthropic-translate/responses-egress"
 import type { Model } from "~/services/copilot/get-models"
 
 const MODEL_ID = "gpt-5.5"
@@ -73,6 +75,35 @@ function buildFor(modelId: string, body: Record<string, unknown>, model?: Model)
   return { parsed, payload }
 }
 
+function hasOwnKeyDeep(value: unknown, key: string): boolean {
+  if (Array.isArray(value)) return value.some((item) => hasOwnKeyDeep(item, key))
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>
+    return (
+      Object.prototype.hasOwnProperty.call(record, key)
+      || Object.values(record).some((item) => hasOwnKeyDeep(item, key))
+    )
+  }
+  return false
+}
+
+async function* upstreamFrom(events: Array<object>): AsyncGenerator<{ data?: string }> {
+  for (const e of events) yield { data: JSON.stringify(e) }
+}
+
+async function collectStream(events: Array<object>): Promise<Array<AnthropicStreamEvent>> {
+  const out: Array<AnthropicStreamEvent> = []
+  for await (const ev of synthAnthropicFromResponses(upstreamFrom(events), {
+    modelId: MODEL_ID,
+    messageId: "msg_test",
+  })) {
+    out.push(ev)
+  }
+  return out
+}
+
+const streamTypes = (evs: Array<AnthropicStreamEvent>) => evs.map((e) => e.type)
+
 describe("anthropic-translate request mapping", () => {
   test("plain user text → input user message", () => {
     const { payload } = build({
@@ -96,6 +127,77 @@ describe("anthropic-translate request mapping", () => {
       ],
     }).payload
     expect(b.instructions).toBe("line1line2")
+  })
+
+  test("cache_control on system/content/tool blocks does not leak to Responses payload", () => {
+    const { payload } = build({
+      system: [
+        {
+          type: "text",
+          text: "be cached but do not forward cache metadata",
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "look",
+              cache_control: { type: "ephemeral" },
+            },
+            {
+              type: "image",
+              source: { type: "url", url: "https://ex.com/a.png" },
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        },
+      ],
+      tools: [
+        {
+          name: "search",
+          description: "search docs",
+          input_schema: { type: "object", properties: { q: { type: "string" } } },
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+    })
+
+    expect(payload.instructions).toBe("be cached but do not forward cache metadata")
+    expect(payload.input).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: "look" },
+          { type: "input_image", image_url: "https://ex.com/a.png" },
+        ],
+      },
+    ])
+    expect(payload.tools).toEqual([
+      {
+        type: "function",
+        name: "search",
+        description: "search docs",
+        parameters: { type: "object", properties: { q: { type: "string" } } },
+      },
+    ])
+    expect(hasOwnKeyDeep(payload, "cache_control")).toBe(false)
+  })
+
+  test("unicode text survives intact into Responses input", () => {
+    const text = "Hello 👋🏽 — café — 中文・日本語・한국어 — Привет — مرحبا"
+    const { payload } = build({
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text }],
+        },
+      ],
+    })
+
+    expect(payload.input).toEqual([{ role: "user", content: text }])
   })
 
   test("image block (base64) → input_image data URI", () => {
@@ -282,6 +384,31 @@ describe("anthropic-translate request mapping", () => {
     ])
   })
 
+  test("assistant thinking blocks are dropped from neutral IR and Responses payload", () => {
+    const { parsed, payload } = build({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "private chain", signature: "sig_1" },
+            { type: "text", text: "visible" },
+            { type: "redacted_thinking", data: "encrypted" },
+          ],
+        },
+      ],
+    })
+
+    expect(parsed.messages).toEqual([
+      { role: "assistant", content: [{ type: "text", text: "visible" }] },
+    ])
+    expect(payload.input).toEqual([
+      { role: "assistant", content: [{ type: "output_text", text: "visible" }] },
+    ])
+    expect(hasOwnKeyDeep(parsed.messages, "thinking")).toBe(false)
+    expect(hasOwnKeyDeep(payload.input, "thinking")).toBe(false)
+    expect(JSON.stringify(payload.input)).not.toContain("private chain")
+  })
+
   test("tool_result (string) → function_call_output", () => {
     const { payload } = build({
       messages: [
@@ -444,6 +571,73 @@ describe("anthropic-translate request mapping", () => {
     expect(build({ messages: [], tools }).payload.tool_choice).toBe("auto")
   })
 
+  test("complex nested tool input_schema is preserved verbatim as function parameters", () => {
+    const inputSchema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["query", "filters"],
+      properties: {
+        query: { type: "string" },
+        filters: {
+          type: "object",
+          required: ["tags", "range", "mode"],
+          properties: {
+            tags: {
+              type: "array",
+              items: {
+                type: "object",
+                required: ["name", "weight"],
+                properties: {
+                  name: { type: "string", enum: ["bug", "feature", "docs"] },
+                  weight: {
+                    anyOf: [
+                      { type: "integer", minimum: 1 },
+                      { type: "string", enum: ["low", "medium", "high"] },
+                    ],
+                  },
+                },
+              },
+            },
+            range: {
+              type: "object",
+              properties: {
+                start: { type: "string", format: "date-time" },
+                end: {
+                  anyOf: [
+                    { type: "string", format: "date-time" },
+                    { type: "null" },
+                  ],
+                },
+              },
+            },
+            mode: { type: "string", enum: ["fast", "thorough"] },
+          },
+        },
+        limit: {
+          anyOf: [
+            { type: "integer", minimum: 1, maximum: 100 },
+            { type: "null" },
+          ],
+        },
+      },
+    }
+
+    const { payload } = build({
+      messages: [],
+      tools: [{ name: "complex_search", description: "nested schema", input_schema: inputSchema }],
+    })
+
+    expect(payload.tools).toEqual([
+      {
+        type: "function",
+        name: "complex_search",
+        description: "nested schema",
+        parameters: inputSchema,
+      },
+    ])
+    expect(payload.tools?.[0]?.parameters).toEqual(inputSchema)
+  })
+
   test("I8a: name-less {type:'tool'} does NOT silently downgrade a forced call to auto", () => {
     // A forced tool call with no `name` is malformed; the shim must NOT flip it
     // to "auto" (model discretion). It leaves tool_choice unset so the caller's
@@ -493,6 +687,28 @@ describe("anthropic-translate request mapping", () => {
     expect(mk(30000)).toBe("xhigh")
     // no thinking → no reasoning field
     expect(build({ messages: [] }, model).payload.reasoning).toBeUndefined()
+  })
+
+  test("thinking budget bucket boundaries are exact", () => {
+    const model = gptModel(["low", "medium", "high", "xhigh"])
+    const mk = (budget: number) =>
+      build({ messages: [], thinking: { type: "enabled", budget_tokens: budget } }, model).payload
+        .reasoning?.effort
+
+    const lowToMedium = 2000
+    expect(mk(lowToMedium - 1)).toBe("low")
+    expect(mk(lowToMedium)).toBe("medium")
+    expect(mk(lowToMedium + 1)).toBe("medium")
+
+    const mediumToHigh = 8000
+    expect(mk(mediumToHigh - 1)).toBe("medium")
+    expect(mk(mediumToHigh)).toBe("high")
+    expect(mk(mediumToHigh + 1)).toBe("high")
+
+    const highToXhigh = 24000
+    expect(mk(highToXhigh - 1)).toBe("high")
+    expect(mk(highToXhigh)).toBe("xhigh")
+    expect(mk(highToXhigh + 1)).toBe("xhigh")
   })
 
   test("thinking effort clamps to a model without xhigh", () => {
@@ -580,6 +796,42 @@ describe("anthropic-translate request mapping", () => {
   test("stream flag is carried through", () => {
     expect(build({ messages: [], stream: true }).payload.stream).toBe(true)
     expect(build({ messages: [], stream: false }).payload.stream).toBe(false)
+  })
+
+  test("streamed response.incomplete terminates cleanly with max_tokens stop_reason", async () => {
+    const evs = await collectStream([
+      { type: "response.output_text.delta", output_index: 0, delta: "partial" },
+      {
+        type: "response.incomplete",
+        response: {
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          usage: {
+            input_tokens: 11,
+            output_tokens: 7,
+            input_tokens_details: { cached_tokens: 3 },
+          },
+        },
+      },
+    ])
+
+    expect(streamTypes(evs)).toEqual([
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_stop",
+      "message_delta",
+      "message_stop",
+    ])
+    expect((evs[2].delta as Record<string, unknown>)).toEqual({
+      type: "text_delta",
+      text: "partial",
+    })
+    const delta = evs[4]
+    expect((delta.delta as Record<string, unknown>).stop_reason).toBe("max_tokens")
+    expect((delta.usage as Record<string, unknown>).input_tokens).toBe(11)
+    expect((delta.usage as Record<string, unknown>).output_tokens).toBe(7)
+    expect((delta.usage as Record<string, unknown>).cache_read_input_tokens).toBe(3)
   })
 })
 

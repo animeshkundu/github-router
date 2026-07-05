@@ -219,6 +219,304 @@ describe("/v1/messages gemini chat-shim routing", () => {
     expect(forwarded).toContain("get_weather")
   })
 
+  test("base64 document block degrades to a delimited text note before forwarding", async () => {
+    const urls: Array<string> = []
+    let chatBody: Record<string, unknown> | undefined
+    globalThis.fetch = ((url: string, opts?: { body?: string }) => {
+      urls.push(url)
+      if (url.includes("/chat/completions")) {
+        chatBody = JSON.parse(opts?.body ?? "{}") as Record<string, unknown>
+        return chatObjectResponse()
+      }
+      if (url.includes("/v1/messages")) throw new Error("gemini request must NOT hit native /v1/messages")
+      throw new Error(`Unexpected URL ${url}`)
+    }) as unknown as typeof fetch
+
+    const res = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini-3.1-pro-preview",
+        max_tokens: 64,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Read this first:" },
+              {
+                type: "document",
+                title: "smoke.pdf",
+                source: { type: "base64", media_type: "application/pdf", data: "JVBERi0x" },
+              },
+              { type: "text", text: "What does it say?" },
+            ],
+          },
+        ],
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    expect(urls.some((u) => u.includes("/chat/completions"))).toBe(true)
+    expect(urls.some((u) => u.includes("/v1/messages"))).toBe(false)
+    expect(chatBody?.messages).toEqual([
+      {
+        role: "user",
+        content:
+          'Read this first:\n[document "smoke.pdf" attached but not supported for this model]\nWhat does it say?',
+      },
+    ])
+
+    const forwarded = JSON.stringify(chatBody)
+    expect(forwarded).toContain("[document")
+    expect(forwarded).toContain("smoke.pdf")
+    expect(forwarded).toContain("attached but not supported for this model")
+    expect(forwarded).not.toContain("JVBERi0x")
+    expect(forwarded).not.toContain('"type":"file"')
+    expect(forwarded).not.toContain("input_file")
+    expect(forwarded).not.toContain("file_data")
+
+    const body = (await res.json()) as {
+      type: string
+      content: Array<{ type: string; text: string }>
+      stop_reason: string
+    }
+    expect(body.type).toBe("message")
+    expect(body.content).toEqual([{ type: "text", text: "shimmed" }])
+    expect(body.stop_reason).toBe("end_turn")
+  })
+
+  test("base64 image block forwards as an image_url content part", async () => {
+    const urls: Array<string> = []
+    let chatBody: Record<string, unknown> | undefined
+    globalThis.fetch = ((url: string, opts?: { body?: string }) => {
+      urls.push(url)
+      if (url.includes("/chat/completions")) {
+        chatBody = JSON.parse(opts?.body ?? "{}") as Record<string, unknown>
+        return chatObjectResponse()
+      }
+      if (url.includes("/v1/messages")) throw new Error("gemini request must NOT hit native /v1/messages")
+      throw new Error(`Unexpected URL ${url}`)
+    }) as unknown as typeof fetch
+
+    const res = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini-3.1-pro-preview",
+        max_tokens: 64,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "describe" },
+              {
+                type: "image",
+                source: { type: "base64", media_type: "image/png", data: "aW1hZ2U=" },
+              },
+            ],
+          },
+        ],
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    expect(urls.some((u) => u.includes("/chat/completions"))).toBe(true)
+    expect(urls.some((u) => u.includes("/v1/messages"))).toBe(false)
+    expect(chatBody?.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "describe" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,aW1hZ2U=" } },
+        ],
+      },
+    ])
+
+    const body = (await res.json()) as {
+      type: string
+      content: Array<{ type: string; text: string }>
+      stop_reason: string
+    }
+    expect(body.type).toBe("message")
+    expect(body.content).toEqual([{ type: "text", text: "shimmed" }])
+    expect(body.stop_reason).toBe("end_turn")
+  })
+
+  test("tool_result is_error true forwards as a tool error message", async () => {
+    const urls: Array<string> = []
+    let chatBody: Record<string, unknown> | undefined
+    globalThis.fetch = ((url: string, opts?: { body?: string }) => {
+      urls.push(url)
+      if (url.includes("/chat/completions")) {
+        chatBody = JSON.parse(opts?.body ?? "{}") as Record<string, unknown>
+        return chatObjectResponse()
+      }
+      if (url.includes("/v1/messages")) throw new Error("gemini request must NOT hit native /v1/messages")
+      throw new Error(`Unexpected URL ${url}`)
+    }) as unknown as typeof fetch
+
+    const res = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini-3.1-pro-preview",
+        max_tokens: 64,
+        messages: [
+          { role: "user", content: "Divide 1 by 0" },
+          {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "toolu_divide", name: "divide", input: { a: 1, b: 0 } },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "toolu_divide",
+                is_error: true,
+                content: "division by zero",
+              },
+            ],
+          },
+        ],
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    expect(urls.some((u) => u.includes("/chat/completions"))).toBe(true)
+    expect(urls.some((u) => u.includes("/v1/messages"))).toBe(false)
+    expect(chatBody?.messages).toEqual([
+      { role: "user", content: "Divide 1 by 0" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "toolu_divide",
+            type: "function",
+            function: { name: "divide", arguments: '{"a":1,"b":0}' },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "toolu_divide", content: "[tool error] division by zero" },
+    ])
+
+    const body = (await res.json()) as {
+      type: string
+      content: Array<{ type: string; text: string }>
+      stop_reason: string
+    }
+    expect(body.type).toBe("message")
+    expect(body.content).toEqual([{ type: "text", text: "shimmed" }])
+    expect(body.stop_reason).toBe("end_turn")
+  })
+
+  test("non-streaming tool call response becomes a tool_use block", async () => {
+    const urls: Array<string> = []
+    let chatBody: Record<string, unknown> | undefined
+    globalThis.fetch = ((url: string, opts?: { body?: string }) => {
+      urls.push(url)
+      if (url.includes("/chat/completions")) {
+        chatBody = JSON.parse(opts?.body ?? "{}") as Record<string, unknown>
+        return new Response(
+          JSON.stringify({
+            id: "chatcmpl_tool",
+            object: "chat.completion",
+            created: 0,
+            model: "gemini-3.1-pro-preview",
+            choices: [
+              {
+                index: 0,
+                message: {
+                  role: "assistant",
+                  content: null,
+                  tool_calls: [
+                    {
+                      id: "call_weather_1",
+                      type: "function",
+                      function: { name: "get_weather", arguments: '{"location":"Paris","unit":"c"}' },
+                    },
+                  ],
+                },
+                logprobs: null,
+                finish_reason: "tool_calls",
+              },
+            ],
+            usage: { prompt_tokens: 7, completion_tokens: 3 },
+          }),
+          { headers: { "content-type": "application/json" } },
+        )
+      }
+      if (url.includes("/v1/messages")) throw new Error("gemini request must NOT hit native /v1/messages")
+      throw new Error(`Unexpected URL ${url}`)
+    }) as unknown as typeof fetch
+
+    const res = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini-3.1-pro-preview",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "weather in Paris" }],
+        tools: [
+          {
+            name: "get_weather",
+            description: "get the weather",
+            input_schema: {
+              type: "object",
+              properties: { location: { type: "string" }, unit: { type: "string" } },
+              required: ["location"],
+            },
+          },
+        ],
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    expect(urls.some((u) => u.includes("/chat/completions"))).toBe(true)
+    expect(urls.some((u) => u.includes("/v1/messages"))).toBe(false)
+    expect(chatBody?.tools).toEqual([
+      {
+        type: "function",
+        function: {
+          name: "get_weather",
+          description: "get the weather",
+          parameters: {
+            type: "object",
+            properties: { location: { type: "string" }, unit: { type: "string" } },
+            required: ["location"],
+          },
+        },
+      },
+    ])
+    expect(chatBody?.tool_choice).toBe("auto")
+
+    const body = (await res.json()) as {
+      type: string
+      content: Array<Record<string, unknown>>
+      stop_reason: string
+      usage: Record<string, unknown>
+    }
+    expect(body.type).toBe("message")
+    expect(body.content).toEqual([
+      {
+        type: "tool_use",
+        id: "call_weather_1",
+        name: "get_weather",
+        input: { location: "Paris", unit: "c" },
+      },
+    ])
+    expect(body.stop_reason).toBe("tool_use")
+    expect(body.usage).toEqual({
+      input_tokens: 7,
+      output_tokens: 3,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    })
+  })
+
   test("GUARD: a claude request NEVER hits /chat/completions", async () => {
     const urls: Array<string> = []
     globalThis.fetch = ((url: string) => {

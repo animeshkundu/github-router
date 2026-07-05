@@ -190,6 +190,16 @@ declare -a PROBE_REGISTRY=(
   "shim_stop_responses|exploratory|stop_sequences on /v1/messages → gpt-5.5 /responses shim: 200 ACCEPTANCE ('stop' does not 400 end-to-end; accepted-but-ignored on /responses/gpt). Forwarding of payload.stop is unit-tested in tests/anthropic-translate-request.test.ts"
   "shim_stop_chat|exploratory|stop_sequences on /v1/messages → gemini-3.5-flash /chat/completions shim: 200 ACCEPTANCE ('stop' does not 400 end-to-end; honoring is best-effort and NOT asserted by this probe). Forwarding of payload.stop is unit-tested in tests/anthropic-translate-gemini-request.test.ts"
   "shim_parallel_tool_calls_responses|exploratory|tool_choice.disable_parallel_tool_use:true on /v1/messages → gpt-5.5 /responses shim: 200 ACCEPTANCE (parallel_tool_calls:false does not 400 end-to-end). Forwarding is unit-tested in tests/anthropic-translate-request.test.ts"
+  "shim_document_pdf_gpt55|exploratory|base64 PDF document block on /v1/messages → gpt-5.5 /responses shim: 200 + well-formed Anthropic message that references PDF sentinel text"
+  "shim_document_pdf_degrade_gemini35flash|exploratory|base64 PDF document block on /v1/messages → gemini-3.5-flash /chat shim: 200 graceful text-note degrade (no 400) + well-formed Anthropic message"
+  "shim_max_tokens_clamp_gpt55|exploratory|max_tokens:1 on /v1/messages → gpt-5.5 /responses shim: 200 + well-formed Anthropic message (proves min-output clamp)"
+  "shim_image_gpt55|exploratory|base64 RGB PNG image block on /v1/messages → gpt-5.5 /responses shim: 200 + well-formed Anthropic message"
+  "shim_image_gemini35flash|exploratory|base64 RGB PNG image block on /v1/messages → gemini-3.5-flash /chat shim: 200 + well-formed Anthropic message"
+  "shim_advisor_degrade_gpt55|exploratory|advisor beta header + advisor tool on /v1/messages → gpt-5.5 /responses shim: 200 graceful degrade (advisor tool stripped, no 400)"
+  "shim_advisor_degrade_gemini35flash|exploratory|advisor beta header + advisor tool on /v1/messages → gemini-3.5-flash /chat shim: 200 graceful degrade (advisor tool stripped, no 400)"
+  "shim_count_tokens_gpt53codex|exploratory|/v1/messages/count_tokens with gpt-5.3-codex model id: 200 + input_tokens count"
+  "shim_thinking_effort_gpt55|exploratory|thinking.budget_tokens on /v1/messages → gpt-5.5 /responses shim: 200 + well-formed Anthropic message"
+  "shim_parallel_tool_emit_gpt55|exploratory|prompt asks gpt-5.5 /responses shim for two tool calls: 200 + tool_use block(s); asserts >=1 because parallel emission is model-nondeterministic"
 )
 
 # ===========================================================================
@@ -721,6 +731,32 @@ assert_anthropic_message() {
   return 0
 }
 
+body_occurrence_count() {
+  local needle="$1"
+  awk -v needle="$needle" '
+    {
+      line = $0
+      while ((pos = index(line, needle)) > 0) {
+        count++
+        line = substr(line, pos + length(needle))
+      }
+    }
+    END { print count + 0 }
+  ' "$LAST_BODY_FILE"
+}
+
+assert_tool_use_count_at_least() {
+  local minimum="$1"
+  local count
+  count="$(body_occurrence_count '"type":"tool_use"')"
+  if [ "$count" -lt "$minimum" ]; then
+    echo "  ${C_RED}FAIL${C_RESET}: expected at least ${minimum} tool_use block(s), got ${count}"
+    echo "  ${C_DIM}body: $(head -c 300 "$LAST_BODY_FILE")${C_RESET}"
+    return 1
+  fi
+  return 0
+}
+
 probe_shim_gpt55_messages() {
   # gpt-5.5 is a /responses-only model; naming it on /v1/messages diverts to the
   # Responses shim (handleNonClaudeResponses), which translates to a /responses
@@ -909,6 +945,161 @@ probe_shim_parallel_tool_calls_responses() {
   }'
   assert_status 200 \
     && assert_anthropic_message
+}
+
+probe_shim_document_pdf_gpt55() {
+  # Responses shim document path: Anthropic base64 PDF → neutral document →
+  # Responses input_file.file_data. The tiny PDF contains selectable text
+  # "ShimPDFProbeZebra42"; the response must reference it, proving the model
+  # can read the document rather than merely accepting the body shape.
+  do_request POST /v1/messages '{
+    "model": "gpt-5.5",
+    "max_tokens": 128,
+    "messages": [{"role":"user","content":[
+      {"type":"document","title":"shim-probe.pdf","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCAzMDAgMTQ0XSAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSA0IDAgUiA+PiA+PiAvQ29udGVudHMgNSAwIFIgPj4KZW5kb2JqCjQgMCBvYmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAvSGVsdmV0aWNhID4+CmVuZG9iago1IDAgb2JqCjw8IC9MZW5ndGggNTAgPj4Kc3RyZWFtCkJUIC9GMSAxOCBUZiAzNiA5NiBUZCAoU2hpbVBERlByb2JlWmVicmE0MikgVGogRVQKZW5kc3RyZWFtCmVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMTUgMDAwMDAgbiAKMDAwMDAwMDA2NCAwMDAwMCBuIAowMDAwMDAwMTIxIDAwMDAwIG4gCjAwMDAwMDAyNDcgMDAwMDAgbiAKMDAwMDAwMDMxNyAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDYgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjQxNgolJUVPRgo="}},
+      {"type":"text","text":"Read the attached PDF and reply with exactly the sentinel text it contains."}
+    ]}]
+  }'
+  assert_status 200 \
+    && assert_anthropic_message \
+    && assert_body_contains "ShimPDFProbeZebra42"
+}
+
+probe_shim_document_pdf_degrade_gemini35flash() {
+  # Chat shim document path: Anthropic base64 PDF cannot be forwarded to
+  # /chat/completions, so the shim degrades it to an inline text note. User-facing
+  # expectation is graceful 200 + Anthropic response, not actual PDF reading.
+  do_request POST /v1/messages '{
+    "model": "gemini-3.5-flash",
+    "max_tokens": 128,
+    "messages": [{"role":"user","content":[
+      {"type":"document","title":"shim-probe.pdf","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCAzMDAgMTQ0XSAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSA0IDAgUiA+PiA+PiAvQ29udGVudHMgNSAwIFIgPj4KZW5kb2JqCjQgMCBvYmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAvSGVsdmV0aWNhID4+CmVuZG9iago1IDAgb2JqCjw8IC9MZW5ndGggNTAgPj4Kc3RyZWFtCkJUIC9GMSAxOCBUZiAzNiA5NiBUZCAoU2hpbVBERlByb2JlWmVicmE0MikgVGogRVQKZW5kc3RyZWFtCmVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMTUgMDAwMDAgbiAKMDAwMDAwMDA2NCAwMDAwMCBuIAowMDAwMDAwMTIxIDAwMDAwIG4gCjAwMDAwMDAyNDcgMDAwMDAgbiAKMDAwMDAwMDMxNyAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDYgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjQxNgolJUVPRgo="}},
+      {"type":"text","text":"A PDF is attached. If the model cannot read it, reply with a brief acknowledgement instead of an error."}
+    ]}]
+  }'
+  assert_status 200 \
+    && assert_anthropic_message
+}
+
+probe_shim_max_tokens_clamp_gpt55() {
+  # max_tokens below Copilot's minimum is clamped by the Responses shim rather
+  # than forwarded raw (which would 400). User-facing expectation: 200.
+  do_request POST /v1/messages '{
+    "model": "gpt-5.5",
+    "max_tokens": 1,
+    "messages": [{"role":"user","content":"Reply with the single word: ok"}]
+  }'
+  assert_status 200 \
+    && assert_anthropic_message
+}
+
+probe_shim_image_gpt55() {
+  # Valid tiny RGB PNG (1x1 red pixel; color type 2), not a malformed/RGBA test
+  # string. The shim turns this Anthropic base64 source into a PNG data URI for
+  # the Responses input_image part.
+  do_request POST /v1/messages '{
+    "model": "gpt-5.5",
+    "max_tokens": 128,
+    "messages": [{"role":"user","content":[
+      {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}},
+      {"type":"text","text":"Describe this image in one short sentence."}
+    ]}]
+  }'
+  assert_status 200 \
+    && assert_anthropic_message
+}
+
+probe_shim_image_gemini35flash() {
+  # Same valid RGB PNG as shim_image_gpt55, through the chat shim's image_url
+  # translation path.
+  do_request POST /v1/messages '{
+    "model": "gemini-3.5-flash",
+    "max_tokens": 128,
+    "messages": [{"role":"user","content":[
+      {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}},
+      {"type":"text","text":"Describe this image in one short sentence."}
+    ]}]
+  }'
+  assert_status 200 \
+    && assert_anthropic_message
+}
+
+probe_shim_advisor_degrade_gpt55() {
+  # ADVISOR is Claude-only. On the non-Claude Responses shim path, the proxy
+  # strips the advisor beta/header effect plus both the proxy-internal and native
+  # advisor tools, then proceeds without advisor rather than returning 400.
+  do_request POST /v1/messages '{
+    "model": "gpt-5.5",
+    "max_tokens": 128,
+    "tools": [
+      {"name":"__anthropic_advisor","description":"advisor","input_schema":{"type":"object","properties":{},"required":[]}},
+      {"type":"advisor_20260301","name":"advisor"}
+    ],
+    "tool_choice": {"type":"tool","name":"__anthropic_advisor"},
+    "messages": [{"role":"user","content":"Reply with the single word: ok"}]
+  }' "anthropic-beta: advisor-tool-2026-03-01"
+  assert_status 200 \
+    && assert_anthropic_message
+}
+
+probe_shim_advisor_degrade_gemini35flash() {
+  # Same advisor graceful-degrade expectation on the chat shim path.
+  do_request POST /v1/messages '{
+    "model": "gemini-3.5-flash",
+    "max_tokens": 128,
+    "tools": [
+      {"name":"__anthropic_advisor","description":"advisor","input_schema":{"type":"object","properties":{},"required":[]}},
+      {"type":"advisor_20260301","name":"advisor"}
+    ],
+    "tool_choice": {"type":"tool","name":"__anthropic_advisor"},
+    "messages": [{"role":"user","content":"Reply with the single word: ok"}]
+  }' "anthropic-beta: advisor-tool-2026-03-01"
+  assert_status 200 \
+    && assert_anthropic_message
+}
+
+probe_shim_count_tokens_gpt53codex() {
+  # Non-Claude model id on Anthropic count_tokens must still return a token
+  # accounting object instead of rejecting the model at the Anthropic boundary.
+  do_request POST /v1/messages/count_tokens '{
+    "model": "gpt-5.3-codex",
+    "max_tokens": 16,
+    "messages": [{"role":"user","content":"Count this short prompt."}]
+  }'
+  assert_status 200 \
+    && assert_body_contains '"input_tokens":'
+}
+
+probe_shim_thinking_effort_gpt55() {
+  # Anthropic thinking.budget_tokens maps to the Responses reasoning effort and
+  # is clamped to the selected model's supported effort values.
+  do_request POST /v1/messages '{
+    "model": "gpt-5.5",
+    "max_tokens": 128,
+    "thinking": {"type":"enabled","budget_tokens":1024},
+    "messages": [{"role":"user","content":"Reply with the single word: ok"}]
+  }'
+  assert_status 200 \
+    && assert_anthropic_message
+}
+
+probe_shim_parallel_tool_emit_gpt55() {
+  # Ask for two independent tool calls. Live model behavior can be
+  # nondeterministic, so this probe asserts a well-formed 200 plus >=1 tool_use;
+  # the registry/matrix note records the best-effort multiple-tool intent.
+  do_request POST /v1/messages '{
+    "model": "gpt-5.5",
+    "max_tokens": 1024,
+    "tools": [
+      {"name":"lookup_weather","description":"Look up weather for a city","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}},
+      {"name":"lookup_time","description":"Look up local time for a city","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}
+    ],
+    "tool_choice": {"type":"auto"},
+    "messages": [{"role":"user","content":"Use both lookup_weather and lookup_time for Paris. The calls are independent; issue both tool calls before answering."}]
+  }'
+  assert_status 200 \
+    && assert_anthropic_message \
+    && assert_tool_use_count_at_least 1
 }
 
 # ===========================================================================

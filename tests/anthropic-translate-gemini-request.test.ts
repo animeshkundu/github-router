@@ -86,6 +86,14 @@ describe("anthropic-translate chat request mapping (Gemini)", () => {
     expect(payload.stream).toBe(true)
   })
 
+  test("unicode user text survives intact", () => {
+    const text = "Zażółć gęślą jaźń — こんにちは世界 / 你好世界 / 안녕하세요 🌍🚀👩🏽‍💻\n𝄞 café résumé"
+    const { payload } = build({
+      messages: [{ role: "user", content: text }],
+    })
+    expect(payload.messages).toEqual([{ role: "user", content: text }])
+  })
+
   test("system string → leading {role:'system'} message", () => {
     const { payload } = build({
       system: "be terse",
@@ -104,6 +112,47 @@ describe("anthropic-translate chat request mapping (Gemini)", () => {
       messages: [],
     })
     expect(payload.messages).toEqual([{ role: "system", content: "line1line2" }])
+  })
+
+  test("cache_control on system, content blocks, and tools does not leak", () => {
+    const { payload } = build({
+      system: [
+        { type: "text", text: "system seed", cache_control: { type: "ephemeral" } },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "question", cache_control: { type: "ephemeral" } },
+          ],
+        },
+      ],
+      tools: [
+        {
+          name: "lookup",
+          description: "lookup tool",
+          input_schema: { type: "object", properties: {} },
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+    })
+    expect(payload.messages).toEqual([
+      { role: "system", content: "system seed" },
+      { role: "user", content: "question" },
+    ])
+    expect(payload.tools).toEqual([
+      {
+        type: "function",
+        function: {
+          name: "lookup",
+          description: "lookup tool",
+          parameters: { type: "object", properties: {} },
+        },
+      },
+    ])
+    const raw = JSON.stringify(payload)
+    expect(raw).not.toContain("cache_control")
+    expect(raw).not.toContain("ephemeral")
   })
 
   test("image block (base64) → image_url data URI content part", () => {
@@ -300,6 +349,22 @@ describe("anthropic-translate chat request mapping (Gemini)", () => {
     ])
   })
 
+  test("tool_result is_error:true → chat tool message carries tool-error prefix", () => {
+    const { payload } = build({
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_err", content: "permission denied", is_error: true },
+          ],
+        },
+      ],
+    })
+    expect(payload.messages).toEqual([
+      { role: "tool", tool_call_id: "toolu_err", content: "[tool error] permission denied" },
+    ])
+  })
+
   test("tool_result with image → {role:'tool'} + follow-up user image_url message", () => {
     const { payload } = build({
       messages: [
@@ -323,6 +388,71 @@ describe("anthropic-translate chat request mapping (Gemini)", () => {
       {
         role: "user",
         content: [{ type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } }],
+      },
+    ])
+  })
+
+  test("complex nested tool input_schema → chat function parameters unchanged", () => {
+    const inputSchema = {
+      type: "object",
+      required: ["location", "units", "alerts"],
+      additionalProperties: false,
+      properties: {
+        location: {
+          type: "object",
+          required: ["city", "coordinates"],
+          properties: {
+            city: { type: "string" },
+            coordinates: {
+              type: "array",
+              minItems: 2,
+              maxItems: 2,
+              items: [
+                { type: "number", minimum: -90, maximum: 90 },
+                { type: "number", minimum: -180, maximum: 180 },
+              ],
+            },
+          },
+        },
+        units: { type: "string", enum: ["metric", "imperial"] },
+        alerts: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              severity: { type: "string", enum: ["info", "warning", "critical"] },
+              channels: {
+                type: "array",
+                items: {
+                  anyOf: [
+                    { type: "string", enum: ["email", "sms"] },
+                    {
+                      type: "object",
+                      required: ["webhook"],
+                      properties: {
+                        webhook: { type: "string", format: "uri" },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+    }
+    const { payload } = build({
+      messages: [],
+      tools: [{ name: "configure_weather", description: "configure", input_schema: inputSchema }],
+    })
+    expect(payload.tools).toEqual([
+      {
+        type: "function",
+        function: {
+          name: "configure_weather",
+          description: "configure",
+          parameters: inputSchema,
+        },
       },
     ])
   })
@@ -372,6 +502,32 @@ describe("anthropic-translate chat request mapping (Gemini)", () => {
       model,
     ).payload.reasoning_effort
     expect(effort).toBe("high")
+  })
+
+  test("reasoning: exact bucket boundaries are 2000 / 8000 / 24000", () => {
+    const model = geminiModel(["low", "medium", "high", "xhigh"])
+    const mk = (budget: number) =>
+      build({ messages: [], thinking: { type: "enabled", budget_tokens: budget } }, model)
+        .payload.reasoning_effort
+    expect(mk(1999)).toBe("low")
+    expect(mk(2000)).toBe("medium")
+    expect(mk(2001)).toBe("medium")
+    expect(mk(7999)).toBe("medium")
+    expect(mk(8000)).toBe("high")
+    expect(mk(8001)).toBe("high")
+    expect(mk(23999)).toBe("high")
+    expect(mk(24000)).toBe("xhigh")
+    expect(mk(24001)).toBe("xhigh")
+  })
+
+  test("reasoning: Gemini xhigh boundary clamps to high when xhigh is unsupported", () => {
+    const model = geminiModel(["low", "medium", "high"])
+    const mk = (budget: number) =>
+      build({ messages: [], thinking: { type: "enabled", budget_tokens: budget } }, model)
+        .payload.reasoning_effort
+    expect(mk(23999)).toBe("high")
+    expect(mk(24000)).toBe("high")
+    expect(mk(24001)).toBe("high")
   })
 
   test("reasoning: lower budgets bucket + pass through unchanged when supported", () => {

@@ -10,6 +10,7 @@ import { server } from "~/server"
 
 const originalFetch = globalThis.fetch
 let savedModels: typeof state.models
+let savedGithubToken: typeof state.githubToken
 
 const claudeModel = {
   id: "claude-opus-4.7",
@@ -78,9 +79,93 @@ function responsesObjectResponse() {
   )
 }
 
+function responsesToolCallResponse() {
+  return new Response(
+    JSON.stringify({
+      id: "resp_tool",
+      object: "response",
+      status: "completed",
+      output: [
+        {
+          type: "function_call",
+          id: "fc_weather",
+          call_id: "call_weather",
+          name: "get_weather",
+          arguments: JSON.stringify({ city: "Paris", unit: "celsius" }),
+        },
+      ],
+      usage: { input_tokens: 9, output_tokens: 4 },
+    }),
+    { headers: { "content-type": "application/json" } },
+  )
+}
+
+function responsesSseResponse(events: Array<Record<string, unknown>>) {
+  const sseBody =
+    events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("") + "data: [DONE]\n\n"
+  return new Response(sseBody, { headers: { "content-type": "text/event-stream" } })
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+function recordFrom(value: unknown): Record<string, unknown> {
+  if (isRecord(value)) return value
+  throw new Error("expected object")
+}
+
+function arrayFrom(value: unknown): Array<unknown> {
+  if (Array.isArray(value)) return value
+  throw new Error("expected array")
+}
+
+function stringFrom(value: unknown): string {
+  if (typeof value === "string") return value
+  throw new Error("expected string")
+}
+
+function numberFrom(value: unknown): number {
+  if (typeof value === "number") return value
+  throw new Error("expected number")
+}
+
+function parseRequestBody(opts?: { body?: string }): Record<string, unknown> {
+  return recordFrom(JSON.parse(opts?.body ?? "{}") as unknown)
+}
+
+function parseAnthropicSseData(text: string): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = []
+  for (const frame of text.split("\n\n")) {
+    const dataLine = frame.split("\n").find((line) => line.startsWith("data: "))
+    if (!dataLine) continue
+    const data = dataLine.slice("data: ".length)
+    if (data === "[DONE]") continue
+    out.push(recordFrom(JSON.parse(data) as unknown))
+  }
+  return out
+}
+
+function collectInputParts(payload: Record<string, unknown>): Array<Record<string, unknown>> {
+  const parts: Array<Record<string, unknown>> = []
+  const input = payload.input
+  if (!Array.isArray(input)) return parts
+  for (const item of input) {
+    if (!isRecord(item)) continue
+    const content = item.content
+    if (!Array.isArray(content)) continue
+    for (const part of content) {
+      if (isRecord(part)) parts.push(part)
+    }
+  }
+  return parts
+}
+
 beforeEach(() => {
   savedModels = state.models
+  savedGithubToken = state.githubToken
   state.copilotToken = "test-token"
+  state.githubToken = "test-gh-token"
   state.vsCodeVersion = "1.0.0"
   state.accountType = "individual"
   state.manualApprove = false
@@ -92,6 +177,7 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = originalFetch
   state.models = savedModels
+  state.githubToken = savedGithubToken
 })
 
 describe("/v1/messages branch routing", () => {
@@ -389,6 +475,419 @@ describe("/v1/messages branch routing", () => {
     // Passthrough returns the upstream Anthropic object verbatim.
     expect(body.id).toBe("msg_native")
     expect(urls.some((u) => u.includes("/v1/messages"))).toBe(true)
+    expect(urls.some((u) => u.includes("/responses"))).toBe(false)
+  })
+
+  test("gpt-5.5 streaming parallel function calls emit complete tool_use blocks", async () => {
+    const responsesEvents = [
+      { type: "response.created", response: { status: "in_progress" } },
+      {
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { type: "function_call", id: "fc_first", call_id: "call_first", name: "first_tool" },
+      },
+      {
+        type: "response.output_item.added",
+        output_index: 1,
+        item: { type: "function_call", id: "fc_second", call_id: "call_second", name: "second_tool" },
+      },
+      { type: "response.function_call_arguments.delta", output_index: 0, item_id: "fc_first", delta: "{\"alpha\":" },
+      { type: "response.function_call_arguments.delta", output_index: 1, item_id: "fc_second", delta: "{\"beta\":" },
+      { type: "response.function_call_arguments.delta", output_index: 0, item_id: "fc_first", delta: "\"one\",\"n\":1}" },
+      { type: "response.function_call_arguments.delta", output_index: 1, item_id: "fc_second", delta: "\"two\",\"flag\":true}" },
+      {
+        type: "response.function_call_arguments.done",
+        output_index: 0,
+        item_id: "fc_first",
+        arguments: JSON.stringify({ alpha: "one", n: 1 }),
+      },
+      {
+        type: "response.function_call_arguments.done",
+        output_index: 1,
+        item_id: "fc_second",
+        arguments: JSON.stringify({ beta: "two", flag: true }),
+      },
+      {
+        type: "response.output_item.done",
+        output_index: 0,
+        item: {
+          type: "function_call",
+          id: "fc_first",
+          call_id: "call_first",
+          name: "first_tool",
+          arguments: JSON.stringify({ alpha: "one", n: 1 }),
+        },
+      },
+      {
+        type: "response.output_item.done",
+        output_index: 1,
+        item: {
+          type: "function_call",
+          id: "fc_second",
+          call_id: "call_second",
+          name: "second_tool",
+          arguments: JSON.stringify({ beta: "two", flag: true }),
+        },
+      },
+      { type: "response.completed", response: { status: "completed", usage: { input_tokens: 12, output_tokens: 6 } } },
+    ]
+
+    const urls: Array<string> = []
+    globalThis.fetch =((url: string) => {
+      urls.push(url)
+      if (url.includes("/responses")) return responsesSseResponse(responsesEvents)
+      throw new Error(`Unexpected URL ${url}`)
+    }) as unknown as typeof fetch
+
+    const res = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      body: JSON.stringify({
+        model: "gpt-5.5",
+        max_tokens: 128,
+        stream: true,
+        messages: [{ role: "user", content: "call both tools" }],
+        tools: [
+          {
+            name: "first_tool",
+            description: "first",
+            input_schema: { type: "object", properties: { alpha: { type: "string" }, n: { type: "number" } } },
+          },
+          {
+            name: "second_tool",
+            description: "second",
+            input_schema: { type: "object", properties: { beta: { type: "string" }, flag: { type: "boolean" } } },
+          },
+        ],
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toContain("text/event-stream")
+    expect(urls.some((u) => u.includes("/responses"))).toBe(true)
+
+    const text = await res.text()
+    const events = parseAnthropicSseData(text)
+    const toolStarts: Array<{ index: number; id: string; name: string }> = []
+    const partialsByIndex = new Map<number, string>()
+    for (const ev of events) {
+      if (ev.type === "content_block_start") {
+        const block = recordFrom(ev.content_block)
+        if (block.type === "tool_use") {
+          toolStarts.push({
+            index: numberFrom(ev.index),
+            id: stringFrom(block.id),
+            name: stringFrom(block.name),
+          })
+        }
+      } else if (ev.type === "content_block_delta") {
+        const delta = recordFrom(ev.delta)
+        if (delta.type === "input_json_delta") {
+          const index = numberFrom(ev.index)
+          partialsByIndex.set(index, (partialsByIndex.get(index) ?? "") + stringFrom(delta.partial_json))
+        }
+      }
+    }
+
+    expect(toolStarts).toHaveLength(2)
+    expect(new Set(toolStarts.map((tool) => tool.index)).size).toBe(2)
+
+    const argsByName = new Map<string, Record<string, unknown>>()
+    for (const tool of toolStarts) {
+      expect(tool.id.length).toBeGreaterThan(0)
+      const partialJson = partialsByIndex.get(tool.index) ?? ""
+      expect(partialJson.length).toBeGreaterThan(2)
+      const parsed = recordFrom(JSON.parse(partialJson) as unknown)
+      expect(Object.keys(parsed).length).toBeGreaterThan(0)
+      argsByName.set(tool.name, parsed)
+    }
+    expect(argsByName.get("first_tool")).toEqual({ alpha: "one", n: 1 })
+    expect(argsByName.get("second_tool")).toEqual({ beta: "two", flag: true })
+    expect(text).toContain('"stop_reason":"tool_use"')
+  })
+
+  test("gpt-5.5 document block forwards as Responses input_file file_data", async () => {
+    const pdfData = "JVBERi0xLjQKJcTl8uXr"
+    let responsesBody: Record<string, unknown> | undefined
+    globalThis.fetch =((url: string, opts?: { body?: string }) => {
+      if (url.includes("/responses")) {
+        responsesBody = parseRequestBody(opts)
+        return responsesObjectResponse()
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    }) as unknown as typeof fetch
+
+    const res = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.5",
+        max_tokens: 64,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "summarize this" },
+              {
+                type: "document",
+                title: "brief.pdf",
+                source: { type: "base64", media_type: "application/pdf", data: pdfData },
+              },
+            ],
+          },
+        ],
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    const parts = collectInputParts(recordFrom(responsesBody))
+    const files = parts.filter((part) => part.type === "input_file")
+    expect(files).toHaveLength(1)
+    const file = recordFrom(files[0])
+    expect(file.filename).toBe("brief.pdf")
+    expect(file.file_data).toBe(`data:application/pdf;base64,${pdfData}`)
+  })
+
+  test("gpt-5.5 image block forwards as Responses input_image", async () => {
+    const imageData = "iVBORw0KGgoAAAANSUhEUgAAAAE="
+    let responsesBody: Record<string, unknown> | undefined
+    globalThis.fetch =((url: string, opts?: { body?: string }) => {
+      if (url.includes("/responses")) {
+        responsesBody = parseRequestBody(opts)
+        return responsesObjectResponse()
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    }) as unknown as typeof fetch
+
+    const res = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.5",
+        max_tokens: 64,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what is in this image?" },
+              { type: "image", source: { type: "base64", media_type: "image/png", data: imageData } },
+            ],
+          },
+        ],
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    const parts = collectInputParts(recordFrom(responsesBody))
+    const images = parts.filter((part) => part.type === "input_image")
+    expect(images).toHaveLength(1)
+    const image = recordFrom(images[0])
+    expect(image.image_url).toBe(`data:image/png;base64,${imageData}`)
+  })
+
+  test("gpt-5.5 thinking budget maps to Responses reasoning effort", async () => {
+    let responsesBody: Record<string, unknown> | undefined
+    globalThis.fetch =((url: string, opts?: { body?: string }) => {
+      if (url.includes("/responses")) {
+        responsesBody = parseRequestBody(opts)
+        return responsesObjectResponse()
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    }) as unknown as typeof fetch
+
+    const res = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.5",
+        max_tokens: 64,
+        thinking: { type: "enabled", budget_tokens: 1000 },
+        messages: [{ role: "user", content: "think briefly" }],
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    const payload = recordFrom(responsesBody)
+    const reasoning = recordFrom(payload.reasoning)
+    expect(reasoning.effort).toBe("low")
+  })
+
+  test("gpt-5.5 max_tokens below Responses minimum is clamped upstream", async () => {
+    let responsesBody: Record<string, unknown> | undefined
+    globalThis.fetch =((url: string, opts?: { body?: string }) => {
+      if (url.includes("/responses")) {
+        responsesBody = parseRequestBody(opts)
+        return responsesObjectResponse()
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    }) as unknown as typeof fetch
+
+    const res = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.5",
+        max_tokens: 1,
+        messages: [{ role: "user", content: "short" }],
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    const payload = recordFrom(responsesBody)
+    expect(numberFrom(payload.max_output_tokens)).toBeGreaterThanOrEqual(16)
+  })
+
+  test("gpt-5.5 non-streaming function_call returns an Anthropic tool_use block", async () => {
+    let responsesBody: Record<string, unknown> | undefined
+    globalThis.fetch =((url: string, opts?: { body?: string }) => {
+      if (url.includes("/responses")) {
+        responsesBody = parseRequestBody(opts)
+        return responsesToolCallResponse()
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    }) as unknown as typeof fetch
+
+    const res = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "what is the weather?" }],
+        tools: [
+          {
+            name: "get_weather",
+            description: "get the weather",
+            input_schema: {
+              type: "object",
+              properties: { city: { type: "string" }, unit: { type: "string" } },
+              required: ["city"],
+            },
+          },
+        ],
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    expect(JSON.stringify(responsesBody)).toContain("get_weather")
+    const body = recordFrom(await res.json())
+    expect(body.stop_reason).toBe("tool_use")
+    const content = arrayFrom(body.content)
+    expect(content).toHaveLength(1)
+    const tool = recordFrom(content[0])
+    expect(tool.type).toBe("tool_use")
+    expect(tool.id).toBe("call_weather")
+    expect(tool.name).toBe("get_weather")
+    expect(recordFrom(tool.input)).toEqual({ city: "Paris", unit: "celsius" })
+  })
+
+  test("gpt-5.5 web_search tool is handled then stripped before Responses shim", async () => {
+    const urls: Array<string> = []
+    let responsesBody: Record<string, unknown> | undefined
+    globalThis.fetch =((url: string, opts?: { body?: string; method?: string }) => {
+      urls.push(url)
+      if (url.includes("/mcp")) {
+        if (opts?.method === "DELETE") return new Response(null, { status: 202 })
+        const mcpBody = parseRequestBody(opts)
+        if (mcpBody.method === "initialize") {
+          return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), {
+            headers: { "content-type": "application/json", "mcp-session-id": "sid_test" },
+          })
+        }
+        if (mcpBody.method === "notifications/initialized") return new Response(null, { status: 202 })
+        if (mcpBody.method === "tools/call") {
+          const id = numberFrom(mcpBody.id)
+          const resultText = JSON.stringify({
+            text: {
+              value: "Search result body",
+              annotations: [{ url_citation: { title: "Result", url: "https://example.test/result" } }],
+            },
+            bing_searches: [],
+          })
+          return responsesSseResponse([
+            {
+              jsonrpc: "2.0",
+              id,
+              result: { content: [{ type: "text", text: resultText }], isError: false },
+            },
+          ])
+        }
+        throw new Error(`Unexpected MCP body ${JSON.stringify(mcpBody)}`)
+      }
+      if (url.includes("/responses")) {
+        responsesBody = parseRequestBody(opts)
+        const tools = responsesBody.tools
+        if (
+          Array.isArray(tools)
+          && tools.some((tool) => isRecord(tool) && tool.type === "function" && tool.name === "web_search")
+        ) {
+          throw new Error("web_search reached /responses as a plain function tool")
+        }
+        return responsesObjectResponse()
+      }
+      if (url.includes("/v1/messages")) throw new Error("gpt request must NOT hit native /v1/messages")
+      throw new Error(`Unexpected URL ${url}`)
+    }) as unknown as typeof fetch
+
+    const res = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "search for router docs" }],
+        tools: [
+          {
+            type: "web_search_20250305",
+            name: "web_search",
+            description: "search the web",
+            input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+          },
+        ],
+        tool_choice: { type: "tool", name: "web_search" },
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    const payload = recordFrom(responsesBody)
+    expect(urls.some((u) => u.includes("/mcp"))).toBe(true)
+    expect(urls.some((u) => u.includes("/responses"))).toBe(true)
+    expect(payload.tools).toBeUndefined()
+    expect(payload.tool_choice).toBeUndefined()
+    expect(stringFrom(payload.instructions)).toContain("Search result body")
+  })
+
+  test("count_tokens with a gpt model forwards to native count_tokens and returns input_tokens", async () => {
+    const urls: Array<string> = []
+    let countBody: Record<string, unknown> | undefined
+    globalThis.fetch =((url: string, opts?: { body?: string }) => {
+      urls.push(url)
+      if (url.includes("/responses")) throw new Error("count_tokens must NOT hit /responses")
+      if (url.includes("/v1/messages/count_tokens")) {
+        countBody = parseRequestBody(opts)
+        return new Response(JSON.stringify({ input_tokens: 123 }), {
+          headers: { "content-type": "application/json" },
+        })
+      }
+      if (url.includes("/v1/messages")) throw new Error("count_tokens must use the count_tokens endpoint")
+      throw new Error(`Unexpected URL ${url}`)
+    }) as unknown as typeof fetch
+
+    const res = await server.request("/v1/messages/count_tokens", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.5",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "count this" }],
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    const body = recordFrom(await res.json())
+    expect(body.input_tokens).toBe(123)
+    expect(recordFrom(countBody).model).toBe("gpt-5.5")
+    expect(urls.some((u) => u.includes("/v1/messages/count_tokens"))).toBe(true)
     expect(urls.some((u) => u.includes("/responses"))).toBe(false)
   })
 
