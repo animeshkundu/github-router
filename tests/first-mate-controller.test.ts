@@ -73,8 +73,20 @@ function unit(overrides: Partial<UnitRow> = {}): UnitRow {
   }
 }
 
-function openPr(number = 7, headSha = "head-1"): Observed["prs"][number] {
-  return { number, headSha, isDraft: false, state: "OPEN" }
+function openPr(
+  number = 7,
+  headSha = "head-1",
+  overrides: Partial<Observed["prs"][number]> = {},
+): Observed["prs"][number] {
+  return {
+    number,
+    headSha,
+    isDraft: false,
+    state: "OPEN",
+    baseRef: "main",
+    baseSha: `base-${number}`,
+    ...overrides,
+  }
 }
 
 function keyFor(row: UnitRow): string {
@@ -309,6 +321,33 @@ test("review_plan falls back to the raw session log when the classifier extracts
   expect(result.needsModel[0]?.payload.plan_excerpt).toBe(
     "Progress:\nCloned repo and drafted the dependency upgrade.",
   )
+})
+
+test("#10: the FULL session log (not the short classifier excerpt) is stashed on unit.planExcerpt for the build handoff", async () => {
+  const fullLog =
+    "Plan:\n1. Refactor the adapter\n2. Add a config flag\n3. Wire the flag through the router\n4. Add regression tests\n" +
+    "Progress:\nCloned the repo and drafted the full implementation plan across four steps."
+  const row = unit({ provider: "completed", phase: "plan", dispatchMode: "plan" })
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "completed",
+    prs: [],
+    logExcerpt: fullLog,
+  })
+  // The classifier returns a SHORT distilled excerpt — a review aid, not the
+  // build source. The build handoff must carry the fuller log instead.
+  h.deps.classifyPlanReady = mock(async () => ({
+    planReady: true,
+    planExcerpt: "Refactor the adapter and add a flag.",
+  }))
+
+  await advance({}, h.deps)
+
+  expect(row.planExcerpt).toBe(fullLog)
+  // And that full plan lands verbatim in the build prompt (no truncation).
+  const prompt = buildPrompt({ ...row, planExcerpt: row.planExcerpt }, mission(), "2026-07-05")
+  expect(prompt).toContain(fullLog)
+  expect(prompt).toContain("Approved plan (authoritative")
 })
 
 test("human merge-approve records an approval bound to the engine-fetched live head/base", async () => {
@@ -698,6 +737,7 @@ test("board groups counts by mission and reports blocked units", async () => {
       repos: ["octo/repo"],
       counts: { plan: 1, build: 1 },
       blocked: 1,
+      summary: { done: 0, failed: 0 },
     },
     {
       missionId: "m2",
@@ -705,6 +745,7 @@ test("board groups counts by mission and reports blocked units", async () => {
       repos: ["octo/repo"],
       counts: { fix: 1 },
       blocked: 0,
+      summary: { done: 0, failed: 0 },
     },
   ])
 })
@@ -1855,19 +1896,51 @@ test("A5: GH_ROUTER_FM_AUTO_DISMISS=0 disables the dismiss step", async () => {
   }
 })
 
-test("A6: consecutive empty-PR observations escalate at the cap", async () => {
+test("A6/#12: an in-progress empty PR that just pushed does NOT escalate (head moved resets the counter)", async () => {
   const row = unit({
     issue: 1,
     pr: 7,
     taskId: "task-1",
-    provider: "completed",
-    phase: "review",
+    provider: "in_progress",
+    phase: "build",
     dispatchMode: "build",
+    headSha: "old-head",
+    baseRef: "main",
+    baseSha: "base-7",
     emptyObservations: 2,
   })
   const h = harness([row])
   h.observations.set("1", {
-    provider: "completed",
+    provider: "in_progress",
+    prs: [openPr(7, "new-head")], // head advanced since last wake
+    ci: { rollup: "pending" },
+    changedFiles: 0,
+    diffTruncated: false,
+  })
+
+  const result = await advance({}, h.deps)
+
+  expect(result.needsHuman).toHaveLength(0)
+  // head moved → progress → counter reset to 0, then +1 for this empty observation.
+  expect(row.emptyObservations).toBe(1)
+})
+
+test("A6/#12: a completed genuinely-empty PR escalates immediately (terminal), even after a provider-change reset", async () => {
+  const row = unit({
+    issue: 1,
+    pr: 7,
+    taskId: "task-1",
+    provider: "in_progress", // was in progress last wake
+    phase: "build",
+    dispatchMode: "build",
+    headSha: "h7",
+    baseRef: "main",
+    baseSha: "base-7",
+    emptyObservations: 0,
+  })
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "completed", // now terminal
     prs: [openPr(7, "h7")],
     ci: { rollup: "passing" },
     changedFiles: 0,
@@ -1876,8 +1949,175 @@ test("A6: consecutive empty-PR observations escalate at the cap", async () => {
 
   const result = await advance({}, h.deps)
 
+  expect(result.needsHuman).toHaveLength(1)
+  expect(result.needsHuman[0]?.reason).toContain("finished but its pull request has no changes")
+})
+
+test("A6/#12: a completed empty DRAFT PR still escalates (draft suppression dropped; task-state decides)", async () => {
+  const row = unit({
+    issue: 1,
+    pr: 7,
+    taskId: "task-1",
+    provider: "completed",
+    phase: "build",
+    dispatchMode: "build",
+    headSha: "h7",
+    baseRef: "main",
+    baseSha: "base-7",
+    prIsDraft: true,
+    emptyObservations: 0,
+  })
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "completed",
+    prs: [openPr(7, "h7", { isDraft: true })],
+    changedFiles: 0,
+    diffTruncated: false,
+  })
+
+  const result = await advance({}, h.deps)
+
+  expect(result.needsHuman).toHaveLength(1)
+  expect(result.needsHuman[0]?.reason).toContain("finished but its pull request has no changes")
+})
+
+test("A6/#12: a hung in-progress empty PR (head frozen) escalates via the observation-cap fallback with a distinct reason", async () => {
+  const row = unit({
+    issue: 1,
+    pr: 7,
+    taskId: "task-1",
+    provider: "in_progress", // never terminal — but stuck
+    phase: "build",
+    dispatchMode: "build",
+    headSha: "h7", // matches observation → no head movement
+    baseRef: "main",
+    baseSha: "base-7",
+    emptyObservations: 2, // one below the cap
+  })
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [openPr(7, "h7")],
+    ci: { rollup: "pending" },
+    changedFiles: 0,
+    diffTruncated: false,
+  })
+
+  const result = await advance({}, h.deps)
+
   expect(row.emptyObservations).toBe(3)
   expect(result.needsHuman).toHaveLength(1)
+  expect(result.needsHuman[0]?.reason).toContain("head has not advanced")
+})
+
+test("A6/#12: an empty PR with NO resolved base does NOT escalate even when terminal (defense)", async () => {
+  const row = unit({
+    issue: 1,
+    pr: 7,
+    taskId: "task-1",
+    provider: "completed",
+    phase: "build",
+    dispatchMode: "build",
+    headSha: "h7",
+    emptyObservations: 5,
+  })
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "completed",
+    prs: [openPr(7, "h7", { baseRef: undefined, baseSha: undefined })],
+    changedFiles: 0,
+    diffTruncated: false,
+  })
+
+  const result = await advance({}, h.deps)
+
+  expect(result.needsHuman).toHaveLength(0)
+})
+
+test("A6/#12: a PR with real changes resets the empty counter and persists the observed base", async () => {
+  const row = unit({
+    issue: 1,
+    pr: 7,
+    taskId: "task-1",
+    provider: "in_progress",
+    phase: "build",
+    dispatchMode: "build",
+    headSha: "h7",
+    emptyObservations: 2,
+    verifierAssigned: false,
+  })
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [openPr(7, "h7")],
+    ci: { rollup: "passing" },
+    changedFiles: 4,
+    diffTruncated: false,
+  })
+
+  await advance({}, h.deps)
+
+  expect(row.emptyObservations).toBe(0)
+  // updateUnitFromObservedPrs pins the observed base identity on the unit.
+  expect(row.baseSha).toBe("base-7")
+  expect(row.baseRef).toBe("main")
+})
+
+test("A6/#12: a terminal task whose diff is not yet visible does NOT escalate as empty (changedFiles undefined ≠ 0)", async () => {
+  const row = unit({
+    issue: 1,
+    pr: 7,
+    taskId: "task-1",
+    provider: "completed",
+    phase: "build",
+    dispatchMode: "build",
+    headSha: "h7",
+    baseRef: "main",
+    baseSha: "base-7",
+    emptyObservations: 2,
+  })
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "completed",
+    prs: [openPr(7, "h7")],
+    ci: { rollup: "passing" },
+    // changedFiles intentionally omitted — the diff summary wasn't fetched.
+  })
+
+  const result = await advance({}, h.deps)
+
+  expect(result.needsHuman).toHaveLength(0)
+  // Not a certain empty → counter untouched (neither incremented nor reset).
+  expect(row.emptyObservations).toBe(2)
+})
+
+test("A6/#12: a flaky/missing provider status is a progress signal that resets the counter (no premature cap escalation)", async () => {
+  const row = unit({
+    issue: 1,
+    pr: 7,
+    taskId: "task-1",
+    provider: "in_progress",
+    phase: "build",
+    dispatchMode: "build",
+    headSha: "h7",
+    baseRef: "main",
+    baseSha: "base-7",
+    emptyObservations: 2, // one below the cap
+  })
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "none", // provider read flaked out / unknown this wake
+    prs: [openPr(7, "h7")],
+    changedFiles: 0,
+    diffTruncated: false,
+  })
+
+  const result = await advance({}, h.deps)
+
+  // provider changed (in_progress → none) → progress reset, so the cap is not
+  // tripped this wake; a non-terminal unknown provider never escalates as empty.
+  expect(result.needsHuman).toHaveLength(0)
+  expect(row.emptyObservations).toBe(1)
 })
 
 test("A6: a truncated empty summary does NOT count toward the empty cap, and changes reset it", async () => {
@@ -1888,6 +2128,9 @@ test("A6: a truncated empty summary does NOT count toward the empty cap, and cha
     provider: "completed",
     phase: "review",
     dispatchMode: "build",
+    headSha: "h7",
+    baseRef: "main",
+    baseSha: "base-7",
     emptyObservations: 2,
     verifierAssigned: false,
   })
@@ -1911,6 +2154,9 @@ test("A6: a truncated empty summary does NOT count toward the empty cap, and cha
     provider: "completed",
     phase: "review",
     dispatchMode: "build",
+    headSha: "h8",
+    baseRef: "main",
+    baseSha: "base-8",
     emptyObservations: 2,
     verifierAssigned: false,
   })

@@ -233,6 +233,10 @@ function observedPrs(
       isDraft: primaryState.isDraft,
       state,
       merged: state === "MERGED",
+      // A6/#12: carry the base identity so the controller can pin it at PR-open
+      // (resolved-base guard) and detect a retarget vs a base fast-forward.
+      ...(primaryState.baseRef ? { baseRef: primaryState.baseRef } : {}),
+      ...(primaryState.baseSha ? { baseSha: primaryState.baseSha } : {}),
     })
   }
 

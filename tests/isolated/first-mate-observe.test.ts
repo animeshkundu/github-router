@@ -184,6 +184,34 @@ test("A3: a correlated open PR sets primaryPr and changedFiles", async () => {
   expect(observed.externalMutation).toBeUndefined()
 })
 
+test("#12: the correlated primary PR entry carries baseRef/baseSha from getPullRequestState", async () => {
+  taskResult = { state: "completed", branch: "copilot/feat-a", logExcerpt: "" }
+  agentPRs = [{ number: 5, headSha: "h5", headRef: "copilot/feat-a", isDraft: false }]
+
+  const observed = await observeUnit(unit())
+
+  const primary = observed.prs.find((p) => p.number === 5)
+  expect(primary?.baseRef).toBe("main")
+  expect(primary?.baseSha).toBe("base-5")
+})
+
+test("#12: a non-primary author summary carries no base identity (base is primary-only)", async () => {
+  // Two author PRs, branch matches #5 (primary); #9 is a non-primary summary.
+  taskResult = { state: "completed", branch: "copilot/feat-a", logExcerpt: "" }
+  agentPRs = [
+    { number: 9, headSha: "h9", headRef: "copilot/other", isDraft: false },
+    { number: 5, headSha: "h5", headRef: "copilot/feat-a", isDraft: false },
+  ]
+
+  const observed = await observeUnit(unit())
+
+  const nonPrimary = observed.prs.find((p) => p.number === 9)
+  expect(nonPrimary?.baseRef).toBeUndefined()
+  expect(nonPrimary?.baseSha).toBeUndefined()
+  const primary = observed.prs.find((p) => p.number === 5)
+  expect(primary?.baseSha).toBe("base-5")
+})
+
 test("A3: an UNCORRELATED merged author PR surfaces merged_uncorrelated and does NOT set primaryPr or a merged artifact", async () => {
   // No branch → author fallback grabs #7, which is actually MERGED (a sibling's
   // squash-merge). It must NOT be adopted as the unit's PR nor marked merged in

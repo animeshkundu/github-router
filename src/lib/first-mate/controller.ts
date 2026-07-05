@@ -232,8 +232,15 @@ export interface BoardRow {
   missionId: string
   title: string
   repos: string[]
+  /** Phase tallies for ACTIVE (non-terminal) units only — keeps the board about live work. */
   counts: Record<string, number>
   blocked: number
+  /**
+   * #4: compact terminal-unit tally so finished work stays visible without
+   * inflating the per-phase counts. `done` = merged; `failed` = terminal without
+   * a merge (abandoned / cancelled).
+   */
+  summary: { done: number; failed: number }
 }
 
 export interface AdvanceResult {
@@ -500,12 +507,16 @@ async function fillFuzzyFields(
       observed.planReady = result.planReady
       // The T0 classifier may extract an empty planExcerpt (its schema allows
       // "or empty"); never let that clobber the real log — leave planExcerpt
-      // undefined so the payload falls back to logExcerpt.
+      // undefined so the review payload falls back to logExcerpt.
       if (result.planExcerpt.length > 0) evidence.planExcerpt = result.planExcerpt
     }
-    // Stash the plan (or raw log) durably so an approve can re-dispatch a build
-    // task carrying it, even after the model's context is gone.
-    unit.planExcerpt = evidence.planExcerpt ?? evidence.logExcerpt
+    // #10 (B1 plan→build handoff): stash the FULLEST available approved-plan text
+    // on the unit so the build task carries it in-prompt and never depends on the
+    // plan being committed on a separate git branch. The distilled logExcerpt
+    // (~4k chars, plan head-kept) is fuller than the classifier's short review
+    // excerpt (a 1200-char summary), so PREFER it here; the classifier excerpt is
+    // a review aid, not the build source. Fall back to it only if no log exists.
+    unit.planExcerpt = evidence.logExcerpt ?? evidence.planExcerpt
   }
 
   if (
@@ -548,6 +559,24 @@ async function fillFuzzyFields(
   return evidence
 }
 
+function primaryObservedPr(observed: Observed): Observed["prs"][number] | undefined {
+  if (observed.primaryPr != null) {
+    const match = observed.prs.find((pr) => pr.number === observed.primaryPr)
+    if (match) return match
+  }
+  return observed.prs.length === 1 ? observed.prs[0] : undefined
+}
+
+/** Cloud-agent provider states that mean the task has finished (no more work). */
+function isTerminalProvider(provider: ProviderState): boolean {
+  return (
+    provider === "completed" ||
+    provider === "failed" ||
+    provider === "timed_out" ||
+    provider === "cancelled"
+  )
+}
+
 function updateUnitFromObservedPrs(unit: UnitRow, observed: Observed): void {
   if (observed.prs.length === 1) {
     const pr = observed.prs[0]!
@@ -559,6 +588,24 @@ function updateUnitFromObservedPrs(unit: UnitRow, observed: Observed): void {
   // has no PR bound yet — covers the multi-PR case the length===1 path misses,
   // without ever binding an uncorrelated sibling PR to the unit.
   if (unit.pr === null && observed.primaryPr != null) unit.pr = observed.primaryPr
+
+  // #12: persist the primary PR's base identity + draft state so the empty-PR
+  // guard can require a RESOLVED base and detect progress. baseSha is PINNED at
+  // PR-open (set once, never overwritten) so a base fast-forward never reflaps;
+  // baseRef tracks the base branch NAME so a genuine retarget is still detected.
+  const primary = primaryObservedPr(observed)
+  if (primary) {
+    unit.headSha = primary.headSha || unit.headSha
+    if (primary.baseRef !== undefined) unit.baseRef = primary.baseRef
+    if (
+      primary.baseSha !== undefined &&
+      primary.baseSha.length > 0 &&
+      (unit.baseSha === undefined || unit.baseSha === null || unit.baseSha.length === 0)
+    ) {
+      unit.baseSha = primary.baseSha
+    }
+    unit.prIsDraft = primary.isDraft
+  }
 }
 
 function modelPayload(
@@ -739,6 +786,10 @@ function packetInput(
       prSummary: pr === null ? undefined : `${repoLabel(unit.repo)} PR #${pr}`,
       ciExcerpt: observed.ci?.rollup,
       floorVerdict: observed.floor ?? unit.validation,
+      // #3: attach the cloud-agent session-log tail so a timeout/failed (or any)
+      // escalation packet carries the failure/progress evidence, not just the
+      // verdict. Evidence only — no auto-retry / task re-dispatch.
+      logExcerpt: observed.logExcerpt,
       links:
         pr === null
           ? undefined
@@ -1927,14 +1978,23 @@ export function buildPrompt(unit: UnitRow, mission: Mission, dateStr: string): s
     `Work unit:\n${unit.title}`,
   ]
   if (mission.houseRules !== undefined) parts.push(`House rules:\n${mission.houseRules}`)
-  if (unit.planExcerpt !== undefined && unit.planExcerpt.trim().length > 0) {
-    parts.push(`Approved plan (implement this):\n${unit.planExcerpt.trim()}`)
+  const hasPlan = unit.planExcerpt !== undefined && unit.planExcerpt.trim().length > 0
+  if (hasPlan) {
+    parts.push(
+      `Approved plan (authoritative — implement this):\n${unit.planExcerpt!.trim()}`,
+    )
   }
   parts.push(
     "Implement this work unit end-to-end on a new branch and open a pull request for review. Follow the approved plan above. Keep the change focused on this unit and do not modify unrelated files. If anything about the acceptance criteria is ambiguous, make a reasonable choice and note it in the PR description.",
   )
+  // #10: the approved plan above is authoritative and self-contained; the
+  // committed docs/plans artifact is only a best-effort supplement (it may not
+  // exist on this build branch, since the build starts from base — not from the
+  // plan branch). Never block on its absence.
   parts.push(
-    `Read the committed implementation plan at \`docs/plans/${dateStr}-${slug}.md\` and the research at \`docs/research/${dateStr}-${slug}.md\` (if the exact dated filename is absent, locate the plan committed for this unit under \`docs/plans/\` whose name ends with \`-${slug}.md\`) and implement it. Keep those artifacts up to date with any deviations you make, and if a \`LEARNINGS.md\` exists at the repository root, append a dated entry summarizing what you learned.`,
+    hasPlan
+      ? `If a committed implementation plan for this unit is present (\`docs/plans/${dateStr}-${slug}.md\`, or a file under \`docs/plans/\` whose name ends with \`-${slug}.md\`) and the research at \`docs/research/${dateStr}-${slug}.md\`, read them for extra detail — but the approved plan above is authoritative and does not depend on those files existing. Keep any such artifacts up to date with deviations you make, and if a \`LEARNINGS.md\` exists at the repository root, append a dated entry summarizing what you learned.`
+      : `Read the committed implementation plan at \`docs/plans/${dateStr}-${slug}.md\` and the research at \`docs/research/${dateStr}-${slug}.md\` (if the exact dated filename is absent, locate the plan committed for this unit under \`docs/plans/\` whose name ends with \`-${slug}.md\`) and implement it. Keep those artifacts up to date with any deviations you make, and if a \`LEARNINGS.md\` exists at the repository root, append a dated entry summarizing what you learned.`,
   )
   parts.push(renderDod([mission.acceptanceCriteria]))
   return parts.join("\n\n")
@@ -2146,12 +2206,23 @@ async function dispatchWave(
   }
 }
 
-function buildBoard(units: UnitRow[], missions: Mission[]): BoardRow[] {
+export function buildBoard(units: UnitRow[], missions: Mission[]): BoardRow[] {
   const rows: BoardRow[] = []
   for (const mission of missions.filter((entry) => entry.status === "active")) {
     const missionUnits = units.filter((unit) => unit.missionId === mission.id)
     const counts: Record<string, number> = {}
+    let done = 0
+    let failed = 0
     for (const unit of missionUnits) {
+      // #4: terminal units drop OUT of the per-phase tallies (they'd otherwise
+      // pile up in `done` and drown the live phases) and into a compact summary.
+      // A merged PR is `done`; any other terminal end (abandoned / cancelled) is
+      // `failed` — status stays visible without inflating the active board.
+      if (unit.terminal === true) {
+        if (unit.artifact === "pr_merged") done += 1
+        else failed += 1
+        continue
+      }
       counts[unit.phase] = (counts[unit.phase] ?? 0) + 1
     }
     rows.push({
@@ -2159,7 +2230,10 @@ function buildBoard(units: UnitRow[], missions: Mission[]): BoardRow[] {
       title: mission.goal,
       repos: mission.repos.map(repoLabel),
       counts,
-      blocked: missionUnits.filter((unit) => unit.blockingDecisionId).length,
+      blocked: missionUnits.filter(
+        (unit) => unit.terminal !== true && unit.blockingDecisionId,
+      ).length,
+      summary: { done, failed },
     })
   }
   return rows
@@ -2409,6 +2483,15 @@ export async function advance(
 
         const observed = await deps.observeUnit(unit)
         const evidence = await fillFuzzyFields(unit, mission, observed, deps)
+        // #12: snapshot the progress-signal state BEFORE updateUnitFromObservedPrs
+        // overwrites it (and BEFORE classify reassigns unit.provider), so the
+        // empty-PR guard can reset its counter on any progress since last wake.
+        const prevEmptyState = {
+          headSha: unit.headSha ?? null,
+          baseRef: unit.baseRef ?? null,
+          provider: unit.provider,
+          isDraft: unit.prIsDraft,
+        }
         updateUnitFromObservedPrs(unit, observed)
         unit.lastCheckedMs = Date.now()
 
@@ -2442,14 +2525,35 @@ export async function advance(
         unit.artifact = classified.artifact
         unit.validation = classified.validation
 
-        // A6 empty-PR tracking: classifyValidation already gates an empty PR to
-        // a non-advancing "unknown" (→ noop). Track consecutive empties here and
-        // ESCALATE at the cap so it never noops forever; a PR with changes resets
-        // the counter.
+        // A6/#12 empty-PR handling. classifyValidation already gates an empty PR
+        // to a non-advancing "unknown" (→ noop). A cloud agent commonly opens a
+        // draft/empty PR EARLY and then pushes commits, so an empty PR alone is
+        // NOT a failure. We escalate an empty PR ONLY when the task is genuinely
+        // finished (TERMINAL provider) or demonstrably hung (head SHA frozen past
+        // the observation cap) — never while it is actively working. The counter
+        // resets on any progress signal so a working agent never trips it, and an
+        // escalation additionally requires a RESOLVED base (defense against
+        // acting on an unresolved/flaky observation).
+        const primaryPr = primaryObservedPr(observed)
         const isEmptyPr =
           classified.artifact === "pr_open" &&
           observed.changedFiles === 0 &&
           observed.diffTruncated !== true
+
+        // Progress since last wake: head moved, base retargeted (branch NAME
+        // changed — not a base fast-forward), draft→ready, or provider status
+        // changed. Any of these means the agent is advancing → reset the counter.
+        const progressed =
+          (primaryPr?.headSha !== undefined &&
+            primaryPr.headSha.length > 0 &&
+            primaryPr.headSha !== prevEmptyState.headSha) ||
+          (primaryPr?.baseRef !== undefined &&
+            prevEmptyState.baseRef !== null &&
+            primaryPr.baseRef !== prevEmptyState.baseRef) ||
+          (prevEmptyState.isDraft === true && primaryPr?.isDraft === false) ||
+          classified.provider !== prevEmptyState.provider
+        if (progressed) unit.emptyObservations = 0
+
         if (isEmptyPr) {
           unit.emptyObservations = (unit.emptyObservations ?? 0) + 1
         } else if ((observed.changedFiles ?? 0) > 0) {
@@ -2457,10 +2561,27 @@ export async function advance(
         }
 
         let action = nextAction(classified, unit, policy)
-        if (isEmptyPr && (unit.emptyObservations ?? 0) >= EMPTY_PR_OBSERVATION_CAP) {
-          action = {
-            kind: "escalate_human",
-            reason: "the agent's pull request has no changes after repeated observations",
+        // Only override a NON-terminal base action: a failed/timed_out task
+        // already escalates with a richer reason (and carries #3 log evidence),
+        // and a controller-cancelled loser / merged PR resolves to mark_done —
+        // neither should be clobbered by the empty-PR reason.
+        if (isEmptyPr && action.kind !== "escalate_human" && action.kind !== "mark_done") {
+          const baseResolved =
+            (unit.baseSha !== undefined && unit.baseSha !== null && unit.baseSha.length > 0) ||
+            (primaryPr?.baseSha !== undefined && primaryPr.baseSha.length > 0)
+          if (baseResolved) {
+            if (isTerminalProvider(classified.provider)) {
+              action = {
+                kind: "escalate_human",
+                reason: "the cloud agent finished but its pull request has no changes",
+              }
+            } else if ((unit.emptyObservations ?? 0) >= EMPTY_PR_OBSERVATION_CAP) {
+              action = {
+                kind: "escalate_human",
+                reason:
+                  "the agent's pull request still has no changes and its head has not advanced across repeated observations",
+              }
+            }
           }
         }
         await executeAction(

@@ -185,6 +185,18 @@ export interface UnitRow {
   branch?: string | null
   headSha?: string | null
   baseSha?: string | null
+  /**
+   * The PR's base branch NAME (e.g. `main`), pinned from the observed PR. Used
+   * to detect a RETARGET (base branch changed) — which resets the empty-PR
+   * counter — WITHOUT reflapping on a base fast-forward (the base tip SHA
+   * advancing while the branch name is unchanged). Optional → back-compat.
+   */
+  baseRef?: string | null
+  /**
+   * The PR's last-observed draft state. A draft→ready transition is a progress
+   * signal that resets the empty-PR counter. Optional → back-compat.
+   */
+  prIsDraft?: boolean
   lastCheckedMs?: number
   /** True once the unit is finished (merged) or abandoned. */
   terminal?: boolean
@@ -205,6 +217,10 @@ export interface Observed {
     /** GitHub PR state: "OPEN" | "CLOSED" | "MERGED". */
     state: string
     merged?: boolean
+    /** Base branch NAME (e.g. `main`), from getPullRequestState. Primary PR only. */
+    baseRef?: string
+    /** Base branch tip SHA, from getPullRequestState. Primary PR only. */
+    baseSha?: string
   }>
   ci?: { rollup: "pending" | "passing" | "failing" | "none"; noCi?: boolean }
   /** GitHub reviewDecision: APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | null. */

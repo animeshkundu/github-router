@@ -4,7 +4,7 @@ import consola from "consola"
 import { z } from "zod"
 
 import { commitFiles } from "~/lib/agent/service"
-import { advance as advanceController, type HumanDecision, type ModelAnswer } from "~/lib/first-mate/controller"
+import { advance as advanceController, buildBoard, type HumanDecision, type ModelAnswer } from "~/lib/first-mate/controller"
 import { buildScaffoldFiles } from "~/lib/first-mate/scaffold-spec"
 import {
   createScaffoldBranch,
@@ -56,14 +56,6 @@ const answerInbox = new AnswerInbox()
 interface McpToolResult {
   content: Array<{ type: "text"; text: string }>
   isError?: boolean
-}
-
-interface BoardRow {
-  missionId: string
-  title: string
-  repos: string[]
-  counts: Record<string, number>
-  blocked: number
 }
 
 interface MissionStatusRow {
@@ -284,7 +276,7 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
       objectSchema({}, []),
       async () => {
         const [missions, units] = await Promise.all([readMissions(), loadAllUnits()])
-        return ok({ board: buildBoard(missions, units) })
+        return ok({ board: buildBoard(units, missions) })
       },
     ),
     tool(
@@ -305,22 +297,6 @@ export const FIRST_MATE_TOOLS: ReadonlyArray<NonPersonaMcpTool> = createFirstMat
 
 function hasAgentToken(): boolean {
   return typeof state.githubAgentToken === "string" && state.githubAgentToken.length > 0
-}
-
-function buildBoard(missions: Mission[], units: UnitRow[]): BoardRow[] {
-  const unitsByMission = groupUnitsByMission(units)
-  return missions
-    .filter((mission) => mission.status === "active")
-    .map((mission) => {
-      const missionUnits = unitsByMission.get(mission.id) ?? []
-      return {
-        missionId: mission.id,
-        title: mission.goal,
-        repos: mission.repos.map(repoLabel),
-        counts: countsByPhase(missionUnits),
-        blocked: blockedCount(missionUnits),
-      }
-    })
 }
 
 function buildMissionStatus(
@@ -361,10 +337,6 @@ function countsByPhase(units: UnitRow[]): Record<string, number> {
 
 function blockedCount(units: UnitRow[]): number {
   return units.filter((unit) => Boolean(unit.blockingDecisionId)).length
-}
-
-function repoLabel(repo: RepoRef): string {
-  return `${repo.owner}/${repo.name}`
 }
 
 function parseRepoRef(value: string): RepoRef {
