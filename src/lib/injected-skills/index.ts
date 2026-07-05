@@ -6,6 +6,7 @@
  * `docs/floor-raising-agent-surface.md`.
  */
 
+import { FIRST_MATE_SETUP_SKILL } from "~/lib/injected-skills/first-mate-setup-skill"
 import { FIRST_MATE_SKILL } from "./first-mate-skill"
 import { FLOOR_KEEPER_SKILL } from "./floor-keeper-skill"
 import { ORCHESTRATE_SKILL } from "./orchestrate-skill"
@@ -29,4 +30,5 @@ export const INJECTED_SKILLS: ReadonlyArray<InjectedSkill> = [
   FLOOR_KEEPER_SKILL,
   WORKER_SKILL,
   FIRST_MATE_SKILL,
+  FIRST_MATE_SETUP_SKILL,
 ]

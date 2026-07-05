@@ -812,6 +812,247 @@ export async function markReadyForReview(
   return { ready: true }
 }
 
+export interface CommitFileEntry {
+  path: string
+  content: string
+}
+
+export type CommitMode = "add-missing-only" | "overwrite-approved"
+
+export interface CommitFilesResult {
+  committed: string[]
+  preserved: string[]
+}
+
+export class CommitFilesError extends Error {
+  readonly code: "branch-not-found" | "api-error"
+  readonly cause?: unknown
+
+  constructor(message: string, code: "branch-not-found" | "api-error", options?: { cause?: unknown }) {
+    super(message)
+    this.name = "CommitFilesError"
+    this.code = code
+    this.cause = options?.cause
+  }
+}
+
+interface CommitGitRefResponse {
+  object?: {
+    sha?: string | null
+  } | null
+}
+
+interface CommitGitCommitResponse {
+  tree?: {
+    sha?: string | null
+  } | null
+}
+
+interface CommitGitBlobResponse {
+  sha?: string | null
+}
+
+interface CommitGitTreeResponse {
+  sha?: string | null
+}
+
+interface CommitGitCreateCommitResponse {
+  sha?: string | null
+}
+
+interface CommitTreeEntry {
+  path: string
+  mode: "100644"
+  type: "blob"
+  sha: string
+}
+
+export async function commitFiles(
+  repo: string,
+  branch: string,
+  files: CommitFileEntry[],
+  opts: { mode?: CommitMode; message?: string } = {},
+): Promise<CommitFilesResult> {
+  const parsedRepo = parseCommitRepoSlug(repo)
+  const normalizedBranch = normalizeCommitBranch(branch)
+  const mode = opts.mode ?? "add-missing-only"
+  const message = opts.message ?? "scaffold: seed agentic-dev conventions"
+  const normalizedFiles = files.map((file) => ({
+    path: normalizeCommitFilePath(file.path),
+    content: file.content,
+  }))
+
+  let ref: CommitGitRefResponse
+  try {
+    ref = await ghRest<CommitGitRefResponse>(
+      "GET",
+      `${repoPath(parsedRepo)}/git/ref/heads/${gitRefBranchPath(normalizedBranch)}`,
+    )
+  } catch (err) {
+    if (err instanceof AgentError && err.code === "NOT_FOUND") {
+      throw new CommitFilesError(
+        `Branch ${normalizedBranch} was not found in ${repo}`,
+        "branch-not-found",
+        { cause: err },
+      )
+    }
+    throw new CommitFilesError("Failed to read branch ref", "api-error", { cause: err })
+  }
+
+  const parentSha = ref.object?.sha
+  if (!parentSha) {
+    throw new CommitFilesError("Branch ref did not include a commit sha", "api-error")
+  }
+
+  const committedCandidates: CommitFileEntry[] = []
+  const preserved: string[] = []
+  for (const file of normalizedFiles) {
+    const exists = await commitFileExists(parsedRepo, file.path, normalizedBranch)
+    if (exists && mode === "add-missing-only") {
+      preserved.push(file.path)
+    } else {
+      committedCandidates.push(file)
+    }
+  }
+
+  if (committedCandidates.length === 0) {
+    return { committed: [], preserved }
+  }
+
+  try {
+    const parentCommit = await ghRest<CommitGitCommitResponse>(
+      "GET",
+      `${repoPath(parsedRepo)}/git/commits/${segment(parentSha)}`,
+    )
+    const baseTree = parentCommit.tree?.sha
+    if (!baseTree) {
+      throw new CommitFilesError("Parent commit did not include a tree sha", "api-error")
+    }
+
+    const tree: CommitTreeEntry[] = []
+    for (const file of committedCandidates) {
+      const blob = await ghRest<CommitGitBlobResponse>("POST", `${repoPath(parsedRepo)}/git/blobs`, {
+        body: {
+          content: Buffer.from(file.content, "utf8").toString("base64"),
+          encoding: "base64",
+        },
+      })
+      const blobSha = blob.sha
+      if (!blobSha) {
+        throw new CommitFilesError(`Blob response for ${file.path} did not include a sha`, "api-error")
+      }
+      tree.push({ path: file.path, mode: "100644", type: "blob", sha: blobSha })
+    }
+
+    const nextTree = await ghRest<CommitGitTreeResponse>("POST", `${repoPath(parsedRepo)}/git/trees`, {
+      body: { base_tree: baseTree, tree },
+    })
+    const nextTreeSha = nextTree.sha
+    if (!nextTreeSha) {
+      throw new CommitFilesError("Tree response did not include a sha", "api-error")
+    }
+
+    const nextCommit = await ghRest<CommitGitCreateCommitResponse>(
+      "POST",
+      `${repoPath(parsedRepo)}/git/commits`,
+      { body: { message, tree: nextTreeSha, parents: [parentSha] } },
+    )
+    const nextCommitSha = nextCommit.sha
+    if (!nextCommitSha) {
+      throw new CommitFilesError("Commit response did not include a sha", "api-error")
+    }
+
+    await ghRest<unknown>("PATCH", `${repoPath(parsedRepo)}/git/refs/heads/${gitRefBranchPath(normalizedBranch)}`, {
+      body: { sha: nextCommitSha },
+    })
+
+    return {
+      committed: committedCandidates.map((file) => file.path),
+      preserved,
+    }
+  } catch (err) {
+    if (err instanceof CommitFilesError) throw err
+    throw new CommitFilesError("Failed to commit files", "api-error", { cause: err })
+  }
+}
+
+async function commitFileExists(repo: RepoRef, path: string, branch: string): Promise<boolean> {
+  try {
+    await ghRest<unknown>(
+      "GET",
+      `${repoPath(repo)}/contents/${repoContentPath(path)}?ref=${segment(branch)}`,
+    )
+    return true
+  } catch (err) {
+    if (err instanceof AgentError && err.code === "NOT_FOUND") return false
+    throw new CommitFilesError(`Failed to check whether ${path} exists`, "api-error", { cause: err })
+  }
+}
+
+function parseCommitRepoSlug(value: string): RepoRef {
+  const trimmed = value.trim()
+  const parts = trimmed.split("/")
+  if (
+    parts.length !== 2
+    || parts[0] === undefined
+    || parts[1] === undefined
+    || parts[0].trim() === ""
+    || parts[1].trim() === ""
+  ) {
+    throw new CommitFilesError(
+      `repo must be an owner/repo string; got ${JSON.stringify(value)}`,
+      "api-error",
+    )
+  }
+  return { owner: parts[0].trim(), repo: parts[1].trim() }
+}
+
+function normalizeCommitBranch(value: string): string {
+  const trimmed = value.trim()
+  const withoutRefsPrefix = trimmed.startsWith("refs/heads/")
+    ? trimmed.slice("refs/heads/".length)
+    : trimmed.startsWith("heads/")
+      ? trimmed.slice("heads/".length)
+      : trimmed
+  if (withoutRefsPrefix === "" || withoutRefsPrefix.includes("\\")) {
+    throw new CommitFilesError(
+      `branch must be a non-empty branch name; got ${JSON.stringify(value)}`,
+      "api-error",
+    )
+  }
+  return withoutRefsPrefix
+}
+
+function normalizeCommitFilePath(value: string): string {
+  const trimmed = value.trim()
+  if (trimmed === "" || trimmed.startsWith("/") || trimmed.includes("\\")) {
+    throw new CommitFilesError(
+      `file path must be a relative POSIX repository path; got ${JSON.stringify(value)}`,
+      "api-error",
+    )
+  }
+  const drivePrefix = /^[A-Za-z]:\//.test(trimmed)
+  const parts = trimmed.split("/")
+  if (
+    drivePrefix
+    || parts.some((part) => part === "" || part === "." || part === "..")
+  ) {
+    throw new CommitFilesError(
+      `file path must be a safe relative repository path; got ${JSON.stringify(value)}`,
+      "api-error",
+    )
+  }
+  return parts.join("/")
+}
+
+function repoContentPath(path: string): string {
+  return path.split("/").map(segment).join("/")
+}
+
+function gitRefBranchPath(branch: string): string {
+  return branch.split("/").map(segment).join("/")
+}
+
 export function __resetAgentServiceCachesForTests(): void {
   rosterCache.clear()
   repoNodeCache.clear()

@@ -1,6 +1,17 @@
 import { randomUUID } from "node:crypto"
 
+import { z } from "zod"
+
+import { commitFiles } from "~/lib/agent/service"
 import { advance as advanceController, type HumanDecision, type ModelAnswer } from "~/lib/first-mate/controller"
+import { buildScaffoldFiles } from "~/lib/first-mate/scaffold-spec"
+import {
+  createScaffoldBranch,
+  createScaffoldPullRequest,
+  getDefaultBranch,
+  normalizeBranchRef,
+  parseRepoSlug,
+} from "~/lib/first-mate/scaffold-helpers"
 import { loadAllUnits, readMissions, upsertMission, type Mission } from "~/lib/first-mate/registry"
 import { AnswerInbox } from "~/lib/first-mate/scheduler/answer-inbox"
 import { SchedulerLease, makeDriveGate } from "~/lib/first-mate/scheduler/lease"
@@ -71,6 +82,14 @@ class FirstMateToolInputError extends Error {
   }
 }
 
+const ScaffoldRepoArgsSchema = z.object({
+  repo: z.string().trim().min(1),
+  mode: z.enum(["add-missing-only", "overwrite-approved"]).optional(),
+  base_ref: z.string().trim().min(1).optional(),
+}).strict()
+
+type ScaffoldRepoArgs = z.infer<typeof ScaffoldRepoArgsSchema>
+
 export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
   function tool(
     toolNameHttp: string,
@@ -137,6 +156,33 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
           updatedMs: now,
         })
         return ok({ missionId, repos })
+      },
+    ),
+    tool(
+      "scaffold_repo",
+      "Seed deterministic agentic-dev convention files into a GitHub repository on a pull-request branch.",
+      objectSchema({
+        repo: stringProp("Repository as an owner/name string."),
+        mode: enumProp(
+          ["add-missing-only", "overwrite-approved"],
+          "How to handle files that already exist. Defaults to add-missing-only.",
+        ),
+        base_ref: stringProp("Optional base branch name. Defaults to the repository default branch."),
+      }, ["repo"]),
+      async (args, signal) => {
+        const input = parseScaffoldRepoArgs(args)
+        const repo = parseRepoSlug(input.repo)
+        const baseBranch = input.base_ref === undefined
+          ? await getDefaultBranch(repo, signal)
+          : normalizeBranchRef(input.base_ref)
+        const branch = await createScaffoldBranch(repo, baseBranch, signal)
+        const files = buildScaffoldFiles({ repoName: input.repo })
+        const result = await commitFiles(input.repo, branch, files, {
+          mode: input.mode ?? "add-missing-only",
+          message: "scaffold: seed agentic-dev conventions",
+        })
+        const pr = await createScaffoldPullRequest(repo, branch, baseBranch, signal)
+        return ok({ pr, committed: result.committed, preserved: result.preserved })
       },
     ),
     tool(
@@ -340,6 +386,22 @@ function optionalHumanDecisions(args: Record<string, unknown>): HumanDecision[] 
   }))
 }
 
+function parseScaffoldRepoArgs(args: Record<string, unknown>): ScaffoldRepoArgs {
+  const parsed = ScaffoldRepoArgsSchema.safeParse(args)
+  if (parsed.success) return parsed.data
+
+  const issueSummary = parsed.error.issues
+    .map((issue) => {
+      const key = issue.path.length === 0 ? "arguments" : `arguments.${issue.path.join(".")}`
+      return `${key}: ${issue.message}`
+    })
+    .join("; ")
+  throw new FirstMateToolInputError(
+    "INVALID_ARGUMENT",
+    issueSummary || "arguments must match the scaffold_repo schema",
+  )
+}
+
 function ok(value: unknown): McpToolResult {
   return jsonResult(value, false)
 }
@@ -446,6 +508,10 @@ function numberProp(description: string): Record<string, unknown> {
 
 function stringArrayProp(description: string): Record<string, unknown> {
   return { type: "array", items: { type: "string" }, description }
+}
+
+function enumProp(values: ReadonlyArray<string>, description: string): Record<string, unknown> {
+  return { type: "string", enum: [...values], description }
 }
 
 function arrayOfObjectsProp(

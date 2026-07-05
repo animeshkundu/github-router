@@ -93,6 +93,10 @@ import {
 import { state } from "./lib/state"
 import { resolveModel } from "./lib/utils"
 
+function isFirstMateSkillName(name: string): boolean {
+  return name === "gh-first-mate" || name === "gh-first-mate-scaffold"
+}
+
 export const claude = defineCommand({
   meta: {
     name: "claude",
@@ -572,7 +576,7 @@ export const claude = defineCommand({
         const sessionCwd = process.cwd()
         if (workerToolsEnabled()) {
           const skillsToWrite = INJECTED_SKILLS.filter(
-            (s) => s.name !== "gh-first-mate" || agentToolsEnabled(),
+            (s) => !isFirstMateSkillName(s.name) || agentToolsEnabled(),
           )
           let skillsWritten = 0
           for (const s of skillsToWrite) {
