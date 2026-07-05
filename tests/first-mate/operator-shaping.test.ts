@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 
+import fs from "node:fs/promises"
+import { tmpdir } from "node:os"
 import path from "node:path"
 
 import {
@@ -236,11 +238,14 @@ describe("operator plans/memory Write exemption", () => {
   const blocked = (tool: string, input: Record<string, unknown>): boolean =>
     operatorPreToolUse(tool, true, input).block
 
-  test("Write/Edit/NotebookEdit INTO plans or memory are ALLOWED", () => {
+  test("Write/Edit/NotebookEdit INTO the exempt shapes are ALLOWED", () => {
+    // <CFG>/plans/**
     expect(blocked("Write", { file_path: path.join(CONFIG, "plans", "todo.md") })).toBe(false)
-    expect(blocked("Write", { file_path: path.join(CONFIG, "memory", "notes.md") })).toBe(false)
     expect(blocked("Edit", { file_path: path.join(CONFIG, "plans", "sub", "deep.md") })).toBe(false)
-    expect(blocked("NotebookEdit", { notebook_path: path.join(CONFIG, "memory", "nb.ipynb") })).toBe(false)
+    // The REAL per-project memory + plans dirs: <CFG>/projects/<slug>/{memory,plans}/**
+    expect(blocked("Write", { file_path: path.join(CONFIG, "projects", "my-proj", "memory", "notes.md") })).toBe(false)
+    expect(blocked("Edit", { file_path: path.join(CONFIG, "projects", "my-proj", "memory", "sub", "deep.md") })).toBe(false)
+    expect(blocked("NotebookEdit", { notebook_path: path.join(CONFIG, "projects", "p", "plans", "nb.ipynb") })).toBe(false)
     // shouldDenyOperatorTool agrees when handed the same input.
     expect(shouldDenyOperatorTool("Write", true, { file_path: path.join(CONFIG, "plans", "x.md") })).toBe(false)
   })
@@ -248,10 +253,24 @@ describe("operator plans/memory Write exemption", () => {
   test("Write anywhere ELSE is still BLOCKED", () => {
     expect(blocked("Write", { file_path: path.join(CONFIG, "other", "x.ts") })).toBe(true)
     expect(blocked("Write", { file_path: path.resolve(path.sep === "\\" ? "C:\\repo\\src\\x.ts" : "/repo/src/x.ts") })).toBe(true)
+    // A TOP-LEVEL memory/ is NO LONGER exempt — the real memory lives at
+    // projects/<slug>/memory (tightened exemption).
+    expect(blocked("Write", { file_path: path.join(CONFIG, "memory", "notes.md") })).toBe(true)
     // A sibling dir whose name merely starts with the allowed prefix must NOT match.
     expect(blocked("Write", { file_path: path.join(CONFIG, "plansX", "x.md") })).toBe(true)
-    // The dir itself is not a writable file target.
+    // The dirs themselves are not writable file targets.
     expect(blocked("Write", { file_path: path.join(CONFIG, "plans") })).toBe(true)
+    expect(blocked("Write", { file_path: path.join(CONFIG, "projects", "p", "memory") })).toBe(true)
+    // projects/<slug>/<other> (a non-plans/memory subdir) is blocked.
+    expect(blocked("Write", { file_path: path.join(CONFIG, "projects", "p", "src", "x.ts") })).toBe(true)
+    // projects/<slug> requires a deeper plans|memory segment; projects/<slug>/plans
+    // needs a slug (single segment) — projects/plans/x is NOT projects/<slug>/plans.
+    expect(blocked("Write", { file_path: path.join(CONFIG, "projects", "plans") })).toBe(true)
+    // A PRODUCT file whose path merely CONTAINS a plans/ segment but lives OUTSIDE
+    // CLAUDE_CONFIG_DIR stays blocked (the exemption is not "any plans/ segment").
+    expect(
+      blocked("Write", { file_path: path.resolve(path.sep === "\\" ? "C:\\repo\\src\\plans\\x.ts" : "/repo/src/plans/x.ts") }),
+    ).toBe(true)
   })
 
   test("fail-CLOSED: missing/empty path, unset or non-absolute CLAUDE_CONFIG_DIR, and ../ escape", () => {
@@ -273,5 +292,102 @@ describe("operator plans/memory Write exemption", () => {
     expect(blocked("mcp__workers__implement", {})).toBe(true)
     expect(operatorPreToolUse("Bash", true, { command: "gh pr view 42" }).block).toBe(false)
     expect(operatorPreToolUse("Bash", true, { command: "echo x > f" }).block).toBe(true)
+  })
+})
+
+describe("#6 operator exemption — symlink escape (real fs)", () => {
+  const prior = process.env.CLAUDE_CONFIG_DIR
+  afterEach(() => {
+    if (prior === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = prior
+  })
+
+  test("a plans/ symlink escaping the config dir is BLOCKED (realpath containment)", async () => {
+    const base = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), "op-exempt-")))
+    try {
+      const cfg = path.join(base, "cfg")
+      const outside = path.join(base, "outside")
+      await fs.mkdir(cfg, { recursive: true })
+      await fs.mkdir(outside, { recursive: true })
+      // cfg/plans -> outside : the scratch dir is symlinked OUT of the sandbox.
+      await fs.symlink(outside, path.join(cfg, "plans"), "dir")
+      process.env.CLAUDE_CONFIG_DIR = cfg
+      // A write "into" cfg/plans actually lands in outside/ → NOT exempt.
+      expect(operatorPreToolUse("Write", true, { file_path: path.join(cfg, "plans", "x.md") }).block).toBe(true)
+      // A REAL (non-symlinked) plans dir under the same cfg IS exempt (control).
+      await fs.mkdir(path.join(cfg, "realcfg", "plans"), { recursive: true })
+      process.env.CLAUDE_CONFIG_DIR = path.join(cfg, "realcfg")
+      expect(
+        operatorPreToolUse("Write", true, { file_path: path.join(cfg, "realcfg", "plans", "x.md") }).block,
+      ).toBe(false)
+    } finally {
+      await fs.rm(base, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("#7 process-substitution false-positive fix + #11 control-flow guide-not-cripple", () => {
+  const ok = (c: string): boolean => operatorPreToolUse("Bash", true, { command: c }).block
+
+  test("#7: single-quoted proc-sub metachars pass; active $()/backticks are still caught", () => {
+    // `>(` / `<(` / `$(` inside a SINGLE-quoted regex arg is inert → allowed.
+    expect(ok("grep '>(' file")).toBe(false)
+    expect(ok("rg 'a>(b)' src")).toBe(false)
+    expect(ok("grep '<(x)' file")).toBe(false)
+    expect(ok("rg '$(id)' file")).toBe(false)
+    // Backslash-escaped metachars are inert too.
+    expect(ok("grep '\\$(id)' file")).toBe(false)
+    // Active substitution inside DOUBLE quotes / unquoted is still blocked.
+    expect(ok('echo "$(rm f)"')).toBe(true)
+    expect(ok("cat <(rm f)")).toBe(true)
+    expect(ok("echo `id`")).toBe(true)
+    expect(bashDenyReason("grep '>(' file")).toBeUndefined()
+    expect(bashDenyReason('echo "$(rm f)"')).toContain("substitution")
+    expect(bashDenyReason("cat <(rm f)")).toContain("substitution")
+  })
+
+  test("#11: read-only control-flow is ALLOWED with a steering reminder", () => {
+    const d = operatorPreToolUse("Bash", true, { command: "for f in a b; do gh pr view $f; done" })
+    expect(d.block).toBe(false)
+    expect(d.additionalContext).toBeDefined()
+    expect(d.additionalContext).toContain("control-flow")
+    // A read-only if/then that only inspects is allowed (with reminder).
+    const d2 = operatorPreToolUse("Bash", true, { command: "if grep -q x f; then cat f; fi" })
+    expect(d2.block).toBe(false)
+    expect(d2.additionalContext).toBeDefined()
+    // A brace group of read-only commands.
+    expect(ok("{ gh pr view 1; cat f; }")).toBe(false)
+    // A while loop over a read-only body.
+    expect(ok("while true; do git status; done")).toBe(false)
+  })
+
+  test("#11: control-flow hiding a write/exec is BLOCKED (exec-escape floor)", () => {
+    expect(ok('for f in *; do rm "$f"; done')).toBe(true)
+    expect(ok("if grep -q x f; then git commit -am y; fi")).toBe(true)
+    expect(ok('eval "$x"')).toBe(true)
+    expect(ok("find . -exec rm {} \\;")).toBe(true)
+    // ALWAYS-ON escape hatches, regardless of control-flow wrapping.
+    expect(ok("while true; do sh -c 'rm x'; done")).toBe(true)
+    expect(ok("bash -c 'rm x'")).toBe(true)
+    expect(ok("$CMD arg")).toBe(true) // indirect exec via a variable command word
+    expect(ok("for f in a; do npm install evil; done")).toBe(true)
+    expect(ok("sed -i 's/a/b/' f")).toBe(true)
+    // A hard-blocked control-flow command carries NO steering reminder.
+    expect(
+      operatorPreToolUse("Bash", true, { command: 'for f in *; do rm "$f"; done' }).additionalContext,
+    ).toBeUndefined()
+  })
+
+  test("#7/#11: bypass hardening — line-continuation proc-sub + quoted keywords", () => {
+    // A backslash-newline is a bash LINE CONTINUATION removed before parsing, so a
+    // split `$\<nl>(` rejoins to an active `$(` and must still be caught.
+    expect(ok("echo $\\\n(rm f)")).toBe(true)
+    expect(ok('cat "$\\\n(rm x)"')).toBe(true)
+    // A QUOTED reserved word is a command word, not a structural keyword — it must
+    // NOT skip allowlist vetting (here `'for'`/`'case'` are non-allowlisted → block).
+    expect(ok("'for' rm x")).toBe(true)
+    expect(ok("'case' rm x")).toBe(true)
+    // A bare `for` header is still structural (read-only body allowed w/ reminder).
+    expect(ok("for f in a b; do gh pr view $f; done")).toBe(false)
   })
 })

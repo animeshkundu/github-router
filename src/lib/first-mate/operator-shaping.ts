@@ -15,13 +15,17 @@
  *
  * ONE exemption to the file-authoring block: the operator may Write/Edit/
  * NotebookEdit its OWN plans/memory scratch files (planning notes, durable
- * memory) that live under `CLAUDE_CONFIG_DIR/plans/` or `CLAUDE_CONFIG_DIR/
- * memory/`. Those are the operator's own working state, NOT product code, so
- * authoring them is not "hand-coding". The exemption is path-scoped and
- * FAIL-CLOSED: anything we cannot prove lands strictly inside one of those two
- * dirs stays blocked (see `operatorWritePathAllowed`).
+ * memory). Those are the operator's own working state, NOT product code, so
+ * authoring them is not "hand-coding". The exemption is scoped to the EXACT
+ * shapes `CLAUDE_CONFIG_DIR/plans/**`, `CLAUDE_CONFIG_DIR/projects/<slug>/plans/**`
+ * and `CLAUDE_CONFIG_DIR/projects/<slug>/memory/**` (the real per-project memory
+ * lives at `projects/<slug>/memory`, NOT a top-level `memory/`), matched against
+ * symlink-resolved absolute paths, and FAIL-CLOSED: anything we cannot prove
+ * lands strictly inside one of those shapes stays blocked (see
+ * `operatorWritePathAllowed`).
  */
 
+import fs from "node:fs"
 import path from "node:path"
 
 /** Tools denied to the operator (exact names + the workers/orchestrate MCP prefixes). */
@@ -68,19 +72,51 @@ export interface OperatorToolInput {
 }
 
 /**
+ * Resolve `p` to an absolute path with symlinks resolved on the portion that
+ * EXISTS on disk. The write target itself usually does NOT exist yet (we are
+ * about to create it), so we walk up to the deepest existing ancestor, realpath
+ * THAT, then re-append the non-existent tail. This prevents a symlinked
+ * `plans`/`memory`/`projects` dir (or any symlinked ancestor) from escaping the
+ * CLAUDE_CONFIG_DIR containment check. When nothing on the chain exists, falls
+ * back to a pure `path.resolve` (so an in-memory unit test whose config dir is
+ * not on disk still resolves deterministically).
+ */
+function resolveWithExistingSymlinks(p: string): string {
+  const resolved = path.resolve(p)
+  const tail: string[] = []
+  let cursor = resolved
+  for (;;) {
+    try {
+      const real = fs.realpathSync(cursor)
+      return tail.length === 0 ? real : path.join(real, ...[...tail].reverse())
+    } catch {
+      const parent = path.dirname(cursor)
+      if (parent === cursor) return resolved // reached the filesystem root — nothing existed.
+      tail.push(path.basename(cursor))
+      cursor = parent
+    }
+  }
+}
+
+/**
  * Path-scoped exemption for the file-authoring tools. The operator MAY author a
- * file whose resolved path lands strictly inside `CLAUDE_CONFIG_DIR/plans/` or
- * `CLAUDE_CONFIG_DIR/memory/` (its own planning / durable-memory scratch space,
- * not product code).
+ * file whose symlink-resolved path lands strictly inside one of the operator's
+ * own scratch shapes:
+ *   - `<CLAUDE_CONFIG_DIR>/plans/**`
+ *   - `<CLAUDE_CONFIG_DIR>/projects/<slug>/plans/**`
+ *   - `<CLAUDE_CONFIG_DIR>/projects/<slug>/memory/**`
+ * where `<slug>` is a SINGLE path segment (the per-project dir). This matches the
+ * EXACT shapes, NOT "any path containing a plans/memory segment" (which would be
+ * overbroad — a product file at `src/plans/x.ts` must stay blocked).
  *
  * FAIL-CLOSED — returns `false` (not exempt → the caller keeps blocking) on any
  * of: `CLAUDE_CONFIG_DIR` unset / empty / NOT absolute; a missing / non-string /
- * empty target path; a `../` escape out of the allowed dir (caught structurally
- * by the `path.resolve` + `path.sep`-boundary containment, so a normalized
- * target that climbs out is simply not "inside"); or any resolution error.
- * Containment uses a real path-separator boundary (NOT a string prefix, which
- * would let `<dir>/plansX` masquerade as `<dir>/plans`). Windows-safe via
- * `path.resolve`/`path.sep`.
+ * empty target path; a `../` escape out of CLAUDE_CONFIG_DIR (caught by the
+ * `path.relative` sep-boundary containment, so a normalized target that climbs
+ * out is simply not "inside"); a symlink that escapes (realpath resolves it
+ * before the shape match); or any resolution error. Windows-safe via
+ * `path.resolve`/`path.relative`/`path.sep` (case-insensitive drive handling is
+ * `path.relative`'s job on win32).
  */
 function operatorWritePathAllowed(rawPath: unknown): boolean {
   if (typeof rawPath !== "string" || rawPath.length === 0) return false
@@ -89,14 +125,23 @@ function operatorWritePathAllowed(rawPath: unknown): boolean {
     return false
   }
   try {
-    const target = path.resolve(rawPath)
-    const isStrictlyInside = (root: string): boolean => {
-      const resolvedRoot = path.resolve(root)
-      // Strictly INSIDE: the dir itself is not a writable file target, and a
-      // sep boundary prevents `<root>foo` from matching `<root>`.
-      return target !== resolvedRoot && target.startsWith(resolvedRoot + path.sep)
+    const root = resolveWithExistingSymlinks(configDir)
+    const target = resolveWithExistingSymlinks(rawPath)
+    const rel = path.relative(root, target)
+    // Outside CLAUDE_CONFIG_DIR (a `../` climb-out, or a different Windows drive
+    // where `path.relative` returns an absolute path) → not exempt.
+    if (rel.length === 0 || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+      return false
     }
-    return isStrictlyInside(path.join(configDir, "plans")) || isStrictlyInside(path.join(configDir, "memory"))
+    const segs = rel.split(path.sep).filter((s) => s.length > 0)
+    // Each shape requires content BENEATH the leaf dir — the dir itself is never a
+    // writable target (so `<CFG>/plans` alone, or `<CFG>/projects/<slug>/memory`
+    // alone, stays blocked).
+    if (segs[0] === "plans" && segs.length >= 2) return true
+    if (segs[0] === "projects" && segs.length >= 4 && (segs[2] === "plans" || segs[2] === "memory")) {
+      return true
+    }
+    return false
   } catch {
     return false // any resolution error → fail closed.
   }
@@ -115,9 +160,11 @@ function operatorWriteTarget(toolName: string, input?: OperatorToolInput): unkno
  * mode is off, nothing is blocked (normal sessions unaffected).
  *
  * The file-authoring tools (Edit/Write/NotebookEdit) are denied EXCEPT when the
- * tool input names a target inside the operator's own `CLAUDE_CONFIG_DIR/plans/`
- * or `.../memory/` (see `operatorWritePathAllowed`). Without an inspectable
- * input the exemption cannot be proven, so the tool stays blocked (fail-closed).
+ * tool input names a target inside one of the operator's own scratch shapes
+ * (`<CLAUDE_CONFIG_DIR>/plans/**`, `<CLAUDE_CONFIG_DIR>/projects/<slug>/plans/**`,
+ * `<CLAUDE_CONFIG_DIR>/projects/<slug>/memory/**` — see `operatorWritePathAllowed`).
+ * Without an inspectable input the exemption cannot be proven, so the tool stays
+ * blocked (fail-closed).
  */
 export function shouldDenyOperatorTool(
   toolName: string,
@@ -135,6 +182,12 @@ export function shouldDenyOperatorTool(
 export interface PreToolUseDecision {
   block: boolean
   reason?: string
+  /**
+   * #11 — set on an ALLOW that should ALSO inject steering context to the model
+   * (a control-flow Bash construct we allowed but could not fully vet). The guard
+   * hook surfaces this as a PreToolUse `additionalContext` system reminder.
+   */
+  additionalContext?: string
 }
 
 /**
@@ -285,43 +338,51 @@ function splitSegments(command: string): string[] | undefined {
   return segments.map((s) => s.trim()).filter((s) => s.length > 0)
 }
 
-/** Tokenize a single segment on whitespace, respecting quotes. */
-function tokenize(segment: string): string[] {
-  const tokens: string[] = []
+/**
+ * Tokenize a single segment on whitespace, respecting quotes, and record whether
+ * each token was formed entirely OUTSIDE quotes and WITHOUT a backslash escape
+ * (`bare`). A shell reserved word (`for`, `case`, …) is only STRUCTURAL when bare
+ * — a QUOTED `'for'` is a normal command word, not a keyword, so treating it as
+ * structural would skip allowlist vetting.
+ */
+function tokenizeDetailed(segment: string): { text: string; bare: boolean }[] {
+  const tokens: { text: string; bare: boolean }[] = []
   let current = ""
+  let bare = true
   let quote: '"' | "'" | undefined
+  const flush = (): void => {
+    if (current.length > 0) tokens.push({ text: current, bare })
+    current = ""
+    bare = true
+  }
   for (let i = 0; i < segment.length; i++) {
     const ch = segment[i]!
     if (quote) {
+      bare = false
       if (ch === quote) quote = undefined
       else current += ch
       continue
     }
     if (ch === '"' || ch === "'") {
       quote = ch
+      bare = false
       continue
     }
-    // Backslash escapes the next char into the current token (so `\;`/`\ ` are a
-    // literal token char, not a separator/whitespace boundary).
     if (ch === "\\" && i + 1 < segment.length) {
       current += segment[i + 1]!
+      bare = false
       i++
       continue
     }
     if (ch === " " || ch === "\t") {
-      if (current.length > 0) {
-        tokens.push(current)
-        current = ""
-      }
+      flush()
       continue
     }
     current += ch
   }
-  if (current.length > 0) tokens.push(current)
+  flush()
   return tokens
 }
-
-/** Validate a `git …` invocation is read-only. Returns a deny reason or undefined. */
 function gitDenyReason(args: string[]): string | undefined {
   let subcommand: string | undefined
   const bareAfterSub: string[] = []
@@ -468,6 +529,58 @@ function maskQuotes(command: string): string | undefined {
 }
 
 /**
+ * Like `maskQuotes`, but masks ONLY single-quoted spans and backslash-escaped
+ * chars (replacing them with spaces), leaving DOUBLE-quoted content intact. Used
+ * for command/process-substitution detection: `$(…)` and backticks are INERT
+ * inside single quotes / after a backslash but ACTIVE inside double quotes, so
+ * `grep '>(x)'` (a single-quoted regex) must pass the proc-sub check while
+ * `echo "$(rm f)"` (active inside double quotes) must still be caught. Returns
+ * undefined on an unterminated single quote (un-vettable → fail-closed).
+ */
+function maskSingleQuotesAndEscapes(command: string): string | undefined {
+  let out = ""
+  let inSingle = false
+  let inDouble = false
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!
+    if (inSingle) {
+      out += " "
+      if (ch === "'") inSingle = false
+      continue
+    }
+    // A backslash-newline is a LINE CONTINUATION (bash joins the lines before
+    // parsing, outside single quotes) — DROP both chars so a split `$\<nl>(`
+    // rejoins to an active `$(` and is still detected (not masked into `$  (`).
+    if (ch === "\\" && (command[i + 1] === "\n" || command[i + 1] === "\r")) {
+      i++
+      if (command[i] === "\r" && command[i + 1] === "\n") i++
+      continue
+    }
+    // Any other backslash escapes the next char (outside single quotes, incl.
+    // inside double quotes): the escaped metachar (`\$`, `` \` ``, `\<`) is inert,
+    // so mask BOTH the backslash and the char it neutralizes.
+    if (ch === "\\" && i + 1 < command.length) {
+      out += "  "
+      i++
+      continue
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = true
+      out += " "
+      continue
+    }
+    if (ch === '"') {
+      inDouble = !inDouble
+      out += ch // keep the quote; double-quoted CONTENT is preserved for the check.
+      continue
+    }
+    out += ch
+  }
+  if (inSingle) return undefined // unterminated single quote — un-vettable.
+  return out
+}
+
+/**
  * Env-var names whose VALUE is executed as a command by a subsequent read-only
  * tool (git/less/…). A leading `NAME=… cmd` assignment to one of these turns an
  * allowlisted read into arbitrary execution, so it fails closed.
@@ -485,11 +598,129 @@ function isCommandHookEnv(name: string): boolean {
   return false
 }
 
-export function bashDenyReason(command: string): string | undefined {
-  // Command / process substitution can hide an arbitrary mutating command; we
-  // cannot vet it, so fail closed.
-  if (/\$\(|`|<\(|>\(/.test(command)) {
-    return "command/process substitution cannot be vetted (fail-closed)"
+/**
+ * #11 — shell control-flow keywords treated as STRUCTURAL (not commands): a
+ * segment that is only these, or these followed by a vettable inner command, is
+ * decomposed rather than blunt-blocked. `for`/`select`/`case` additionally
+ * consume their header (loop-variable + value list / match word) as DATA — those
+ * are never a command word. The remaining keywords (`while`/`until`/`if`/`elif`)
+ * are followed by a condition COMMAND, which is still vetted.
+ */
+const CONTROL_FLOW_KEYWORDS = new Set<string>([
+  "for", "while", "until", "if", "do", "done", "then", "elif", "else", "fi",
+  "case", "esac", "in", "select", "{", "}",
+])
+const CONTROL_FLOW_HEADER_KEYWORDS = new Set<string>(["for", "select", "case"])
+
+/**
+ * #11 — the steering reminder surfaced (as PreToolUse `additionalContext`) when a
+ * control-flow construct is ALLOWED. A hand-rolled tokenizer cannot fully vet a
+ * shell control-flow construct, so we allow the read-only-looking case but nudge
+ * the operator back toward delegation rather than shell-scripting.
+ */
+export const CONTROL_FLOW_REMINDER =
+  "Note: shell control-flow (loops/conditionals) is hard to fully vet from a "
+  + "guard hook. This ran because its inner commands look read-only, but prefer "
+  + "delegating multi-step work to a GitHub cloud agent via the first-mate MCP "
+  + "over scripting control-flow in the operator shell."
+
+/** Does this single segment contain a heredoc redirection (`<<` / `<<-`)? Checked
+ *  over a quote-masked copy so a literal `<<` inside a quoted arg doesn't count. */
+function hasHeredoc(segment: string): boolean {
+  const masked = maskQuotes(segment)
+  if (masked === undefined) return true // unterminated quote → be conservative.
+  return masked.includes("<<")
+}
+
+/** Bare interpreter names whose heredoc form runs arbitrary code. */
+const HEREDOC_INTERPRETERS = new Set<string>(["python", "python3", "node", "nodejs", "perl", "ruby"])
+/** Shells whose `-c` form runs an arbitrary command string. */
+const DASH_C_SHELLS = new Set<string>(["sh", "bash", "zsh", "dash", "ksh"])
+/** Package managers whose install/add subcommand mutates the environment. */
+const PACKAGE_MANAGERS = new Set<string>(["npm", "pnpm", "yarn", "pip", "pip3", "apt", "apt-get", "brew"])
+
+/**
+ * #11 layer 1 — ALWAYS-ON escape-hatch detection. These definite write/exec
+ * vectors are hard-blocked regardless of the surrounding (control-flow) syntax,
+ * so the leniency of the control-flow path can NEVER wave one of them through.
+ * `idx` is the resolved command-word position (after env assignments + stripped
+ * control-flow keywords). Returns a deny reason or undefined.
+ */
+function escapeHatchReason(tokens: string[], idx: number, segment: string): string | undefined {
+  const word = tokens[idx]!
+  // Indirect execution: the command word is itself a variable expansion
+  // (`$VAR foo`, `${VAR}`) — its value is un-vettable.
+  if (word.startsWith("$")) return "indirect command execution via a variable is un-vettable (fail-closed)"
+  const binary = binaryBasename(word)
+  const rest = tokens.slice(idx + 1)
+  if (binary === "eval") return "eval executes an arbitrary command (fail-closed)"
+  if (DASH_C_SHELLS.has(binary) && rest.includes("-c")) {
+    return `${binary} -c executes an arbitrary command (fail-closed)`
+  }
+  if (HEREDOC_INTERPRETERS.has(binary) && hasHeredoc(segment)) {
+    return `${binary} with a heredoc executes arbitrary code (fail-closed)`
+  }
+  if (
+    binary === "find" &&
+    rest.some((a) => a === "-exec" || a === "-execdir" || a === "-ok" || a === "-okdir" || a === "-delete")
+  ) {
+    return "find -exec/-execdir/-delete executes or deletes files (fail-closed)"
+  }
+  if (binary === "xargs") {
+    // xargs runs a command per input line; the target is the first non-flag arg.
+    const target = rest.find((a) => !a.startsWith("-"))
+    if (target === undefined || !READ_ONLY_BINARIES.has(binaryBasename(target))) {
+      return "xargs runs a non-read-only command (fail-closed)"
+    }
+  }
+  // In-place editors write the file back (`sed -i`, `perl -pi`). `-i`/`--in-place`
+  // or a bundled short-flag cluster containing `i`.
+  if (
+    binary === "sed" &&
+    rest.some((a) => a === "-i" || a === "--in-place" || (a.startsWith("-i") && !a.startsWith("--")) || (a.startsWith("-") && !a.startsWith("--") && a.includes("i")))
+  ) {
+    return "sed -i edits a file in place (fail-closed)"
+  }
+  if (
+    binary === "perl" &&
+    rest.some((a) => a.startsWith("-") && !a.startsWith("--") && a.includes("i"))
+  ) {
+    return "perl -i/-pi edits a file in place (fail-closed)"
+  }
+  if (PACKAGE_MANAGERS.has(binary) && rest.some((a) => a === "install" || a === "i" || a === "add")) {
+    return `${binary} install mutates the environment (fail-closed)`
+  }
+  return undefined
+}
+
+/**
+ * The read-only vet verdict for a Bash command:
+ *   - `block: true`  → a definite write/exec (with a `reason`) — deny.
+ *   - `block: false` + `reminder` → allowed, but a control-flow construct we
+ *     could not fully vet; the caller surfaces the reminder as steering context.
+ *   - `block: false` (no reminder) → provably read-only, allow silently.
+ */
+export interface BashVetResult {
+  block: boolean
+  reason?: string
+  reminder?: string
+}
+
+/**
+ * B1 — vet whether a Bash command is READ-ONLY enough for the operator. See the
+ * threat-model / known-limitation notes above: this is a guardrail against a
+ * COOPERATING operator hand-coding via the shell, an ALLOWLIST (only provably
+ * read-only commands pass), NOT a sandbox against a hostile process.
+ */
+export function vetBashCommand(command: string): BashVetResult {
+  // #7: command / process substitution can hide an arbitrary mutating command.
+  // Detect it over a copy with single-quoted spans + backslash escapes masked
+  // (so a `>(`/`$(` inside a single-quoted regex arg is inert) while DOUBLE-quoted
+  // content is preserved (`$(…)`/backticks are active there and MUST be caught).
+  const forProcSub = maskSingleQuotesAndEscapes(command)
+  if (forProcSub === undefined) return { block: true, reason: "unterminated quote (fail-closed)" }
+  if (/\$\(|`|<\(|>\(/.test(forProcSub)) {
+    return { block: true, reason: "command/process substitution cannot be vetted (fail-closed)" }
   }
   // Strip redirections that do NOT write a real file (fd duplication 2>&1/>&2/
   // >&-, discard to /dev/null), then any remaining `>` writes a file. The
@@ -502,56 +733,90 @@ export function bashDenyReason(command: string): string | undefined {
     .replace(/\d*>&\s*[\d-]+/g, " ")
     .replace(/&?\d*>{1,2}\s*\/dev\/null(?=$|[\s;|&)])/g, " ")
   const maskedBenign = maskQuotes(benign)
-  if (maskedBenign === undefined) return "unterminated quote (fail-closed)"
-  if (/>/.test(maskedBenign)) return "shell output redirection writes a file"
+  if (maskedBenign === undefined) return { block: true, reason: "unterminated quote (fail-closed)" }
+  if (/>/.test(maskedBenign)) return { block: true, reason: "shell output redirection writes a file" }
 
   // Segment/tokenize the redirection-stripped form so an fd-dup like `2>&1`
   // (which contains `&`) is not mistaken for a background-job separator.
   const segments = splitSegments(benign)
-  if (segments === undefined) return "unparseable shell command (fail-closed)"
-  if (segments.length === 0) return "empty shell command (fail-closed)"
+  if (segments === undefined) return { block: true, reason: "unparseable shell command (fail-closed)" }
+  if (segments.length === 0) return { block: true, reason: "empty shell command (fail-closed)" }
 
+  let sawControlFlow = false
   for (const segment of segments) {
-    const tokens = tokenize(segment)
+    const detailed = tokenizeDetailed(segment)
+    const tokens = detailed.map((d) => d.text)
     // Skip leading VAR=value environment assignments; the next token is the cmd.
     // BUT reject assignments to env vars that HOOK command execution (a pager /
-    // editor / diff-helper / ssh-command the subsequent git/less/… then runs):
-    // e.g. `GIT_PAGER='touch x' git log`, `LESSOPEN='|touch x %s' less f`.
+    // editor / diff-helper / ssh-command the subsequent git/less/… then runs).
     let idx = 0
     while (idx < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[idx]!)) {
       const name = tokens[idx]!.slice(0, tokens[idx]!.indexOf("="))
       if (isCommandHookEnv(name)) {
-        return `environment assignment ${name}= can hook command execution (fail-closed)`
+        return { block: true, reason: `environment assignment ${name}= can hook command execution (fail-closed)` }
       }
       idx++
     }
+    // #11 layer 2: strip leading control-flow keywords (STRUCTURAL, not commands).
+    // Only a BARE (unquoted, unescaped) keyword is structural — a quoted `'for'`
+    // is a command word and must fall through to allowlist vetting, not be treated
+    // as a header that skips the segment. A `for VAR in …` / `select VAR in …` /
+    // `case WORD in` header's remaining tokens are the loop variable + value list
+    // (DATA), consumed to the end of this segment — the loop BODY commands live in
+    // the `do …` segment(s) and are vetted there. `while`/`until`/`if`/`elif` are
+    // followed by a condition COMMAND, which the vet below still checks.
+    while (idx < tokens.length && detailed[idx]!.bare && CONTROL_FLOW_KEYWORDS.has(tokens[idx]!)) {
+      sawControlFlow = true
+      const kw = tokens[idx]!
+      idx++
+      if (CONTROL_FLOW_HEADER_KEYWORDS.has(kw)) {
+        idx = tokens.length // consume the header's variable + value list as data.
+      }
+    }
     if (idx >= tokens.length) {
-      // A segment that is only assignments (`FOO=bar`) mutates only the shell
-      // env — harmless read-only-wise. But a lone `<` input redirect token, etc.
-      // Allow a pure-assignment segment.
+      // A pure-assignment segment (`FOO=bar`) or a pure control-flow keyword /
+      // header segment (`done`, `fi`, `for f in a b`) — no command to vet.
       continue
     }
+    // #11 layer 1: ALWAYS-ON escape-hatch hard-blocks (fire regardless of the
+    // control-flow context we're inside).
+    const escapeReason = escapeHatchReason(tokens, idx, segment)
+    if (escapeReason !== undefined) return { block: true, reason: escapeReason }
+
     const binary = binaryBasename(tokens[idx]!)
     const rest = tokens.slice(idx + 1)
     if (binary === "git") {
       const reason = gitDenyReason(rest)
-      if (reason !== undefined) return reason
+      if (reason !== undefined) return { block: true, reason }
       continue
     }
     if (binary === "gh") {
       const reason = ghDenyReason(rest)
-      if (reason !== undefined) return reason
+      if (reason !== undefined) return { block: true, reason }
       continue
     }
     if (!READ_ONLY_BINARIES.has(binary)) {
-      return `'${binary}' is not on the read-only allowlist`
+      return { block: true, reason: `'${binary}' is not on the read-only allowlist` }
     }
     // An allowlisted binary can still grow a write/exec capability under a
     // specific flag (find -exec, yq -i, sort -o, …) — vet its args.
     const argReason = argDenyReason(binary, rest)
-    if (argReason !== undefined) return argReason
+    if (argReason !== undefined) return { block: true, reason: argReason }
   }
-  return undefined
+  // #11: a control-flow construct passed the read-only vet, but the hand-rolled
+  // tokenizer can't fully guarantee a shell construct is inert — allow, and steer.
+  if (sawControlFlow) return { block: false, reminder: CONTROL_FLOW_REMINDER }
+  return { block: false }
+}
+
+/**
+ * Back-compat thin wrapper over `vetBashCommand`: returns the deny reason when the
+ * command is BLOCKED, else undefined (allowed — the control-flow steering
+ * reminder, if any, is surfaced by `operatorPreToolUse`, not here).
+ */
+export function bashDenyReason(command: string): string | undefined {
+  const verdict = vetBashCommand(command)
+  return verdict.block ? verdict.reason : undefined
 }
 
 /**
@@ -594,7 +859,7 @@ export function operatorPreToolUse(
   if (shouldDenyOperatorTool(toolName, operatorMode, input)) {
     return {
       block: true,
-      reason: `${toolName} is disabled in cloud-agent operator mode — delegate implementation to a GitHub cloud agent via the first-mate MCP instead of hand-coding (only writes into CLAUDE_CONFIG_DIR/plans or /memory are exempt).`,
+      reason: `${toolName} is disabled in cloud-agent operator mode — delegate implementation to a GitHub cloud agent via the first-mate MCP instead of hand-coding (only writes into CLAUDE_CONFIG_DIR/plans/ or projects/<slug>/{plans,memory}/ are exempt).`,
     }
   }
   if (toolName === "Bash") {
@@ -607,12 +872,16 @@ export function operatorPreToolUse(
           "Bash call blocked in cloud-agent operator mode — its command could not be inspected (fail-closed).",
       }
     }
-    const reason = bashDenyReason(command)
-    if (reason !== undefined) {
+    const verdict = vetBashCommand(command)
+    if (verdict.block) {
       return {
         block: true,
-        reason: `Bash blocked in cloud-agent operator mode (${reason}) — only read-only shell is allowed; delegate implementation to a GitHub cloud agent instead of hand-coding via the shell.`,
+        reason: `Bash blocked in cloud-agent operator mode (${verdict.reason}) — only read-only shell is allowed; delegate implementation to a GitHub cloud agent instead of hand-coding via the shell.`,
       }
+    }
+    if (verdict.reminder !== undefined) {
+      // #11: allowed control-flow — surface the steering reminder to the model.
+      return { block: false, additionalContext: verdict.reminder }
     }
   }
   return { block: false }

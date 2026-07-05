@@ -58,6 +58,19 @@ async function runGuard(payload: string): Promise<number> {
   return proc.exited
 }
 
+/** Run the guard and capture stdout (for the allow+additionalContext path). */
+async function runGuardCapture(payload: string): Promise<{ code: number; stdout: string }> {
+  const proc = Bun.spawn(["bun", MAIN, "internal-first-mate-guard"], {
+    cwd: REPO_ROOT,
+    stdin: new TextEncoder().encode(payload),
+    stdout: "pipe",
+    stderr: "ignore",
+  })
+  const stdout = await new Response(proc.stdout).text()
+  const code = await proc.exited
+  return { code, stdout }
+}
+
 describe("capability-shaping PreToolUse hook (end-to-end enforcement)", () => {
   test("blocks Write, blocks a mutating Bash, allows read-only Bash", async () => {
     // exit 2 = block; exit 0 = allow (Claude Code hook convention).
@@ -78,5 +91,30 @@ describe("capability-shaping PreToolUse hook (end-to-end enforcement)", () => {
 
   test("fails CLOSED on an unparseable payload", async () => {
     expect(await runGuard("not json{")).toBe(2)
+  }, 20_000)
+
+  test("#11: allows read-only control-flow with a PreToolUse additionalContext reminder", async () => {
+    const { code, stdout } = await runGuardCapture(
+      JSON.stringify({ tool_name: "Bash", tool_input: { command: "for f in a b; do gh pr view $f; done" } }),
+    )
+    expect(code).toBe(0)
+    const parsed = JSON.parse(stdout) as {
+      hookSpecificOutput?: { hookEventName?: string; permissionDecision?: string; additionalContext?: string }
+    }
+    expect(parsed.hookSpecificOutput?.hookEventName).toBe("PreToolUse")
+    expect(parsed.hookSpecificOutput?.permissionDecision).toBe("allow")
+    expect(parsed.hookSpecificOutput?.additionalContext).toContain("control-flow")
+  }, 20_000)
+
+  test("#11: blocks control-flow that hides a write (exec-escape floor)", async () => {
+    expect(
+      await runGuard(JSON.stringify({ tool_name: "Bash", tool_input: { command: 'for f in *; do rm "$f"; done' } })),
+    ).toBe(2)
+    // A plain read-only allow still emits NO stdout (only the reminder path does).
+    const { code, stdout } = await runGuardCapture(
+      JSON.stringify({ tool_name: "Bash", tool_input: { command: "gh pr view 42" } }),
+    )
+    expect(code).toBe(0)
+    expect(stdout.trim()).toBe("")
   }, 20_000)
 })

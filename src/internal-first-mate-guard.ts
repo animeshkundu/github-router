@@ -69,6 +69,23 @@ export const internalFirstMateGuard = defineCommand({
       process.stderr.write(decision.reason ?? `${toolName} is disabled in operator mode`)
       process.exit(2) // exit 2 blocks the tool call (Claude Code hook convention)
     }
+    if (decision.additionalContext !== undefined) {
+      // ALLOW + inject steering context. Per the Claude Code PreToolUse hook
+      // contract, `hookSpecificOutput.additionalContext` on an exit-0 JSON stdout
+      // is added to the model's context as a system reminder next to the tool
+      // result (plain stdout is NOT surfaced to the model for PreToolUse) — so an
+      // allowed-but-unvettable control-flow command still carries guidance rather
+      // than being silently waved through.
+      process.stdout.write(
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "allow",
+            additionalContext: decision.additionalContext,
+          },
+        }),
+      )
+    }
     process.exit(0)
   },
 })
