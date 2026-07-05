@@ -76,13 +76,20 @@ describe("advance() lease gate (the MCP advance-tool wiring)", () => {
   })
 
   test("takes over once the daemon's lease expires (failover)", async () => {
-    const daemonLease = new SchedulerLease({ dir, ttlMs: 20, nowMs: () => Date.now() })
+    // Deterministic clock shared by both leases. Failover is driven by the
+    // lease's stored absolute `expiresMs` vs the checking lease's `now`, NOT by
+    // wall-clock timing. The prior version used a real 20ms TTL + setTimeout,
+    // which raced on slow Windows CI (the daemon lease expired before the first
+    // advance() ran, so the "defer" assertion flipped). Advance `now` explicitly.
+    let now = 1_000_000
+    const clock = (): number => now
+    const daemonLease = new SchedulerLease({ dir, ttlMs: 20, nowMs: clock })
     await daemonLease.tryAcquire()
-    const heartbeatLease = new SchedulerLease({ dir, ttlMs: 30_000 })
-    // Immediately: daemon holds it → defer.
+    const heartbeatLease = new SchedulerLease({ dir, ttlMs: 30_000, nowMs: clock })
+    // Clock unchanged: the daemon's lease is live → defer.
     expect((await advance({ driveGate: makeDriveGate(heartbeatLease) }, emptyDeps())).drove).toBe(false)
-    // After the short TTL: heartbeat can acquire → drive.
-    await new Promise((r) => setTimeout(r, 40))
+    // Advance past the daemon's 20ms TTL: its lease is now expired → take over.
+    now += 40
     expect((await advance({ driveGate: makeDriveGate(heartbeatLease) }, emptyDeps())).drove).toBe(true)
   })
 
