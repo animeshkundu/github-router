@@ -80,7 +80,14 @@ export async function withFileLock<T>(
       await fh.close()
       break
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
+      const code = (err as NodeJS.ErrnoException).code
+      // Windows returns EPERM (not EEXIST) when opening a `.lock` that another
+      // writer is concurrently creating/deleting — treat it as "contended,
+      // retry" exactly like EEXIST so a heavy concurrent burst converges instead
+      // of throwing. On POSIX, EPERM is a genuine error and still throws.
+      const contended =
+        code === "EEXIST" || (code === "EPERM" && process.platform === "win32")
+      if (!contended) throw err
       // Finding 4 — reclaim a stale lock WITHOUT unlink-to-steal. A blind
       // `unlink(lockPath)` after a stat can delete a FRESH lock that another
       // writer created between our stat and unlink (TOCTTOU → two holders →

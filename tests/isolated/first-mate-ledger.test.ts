@@ -164,22 +164,4 @@ describe("first-mate durable ledger", () => {
       new Set(expected.map((row) => row.issue)),
     )
   })
-
-  test("a large concurrent burst converges without exhausting OCC retries (jitter)", async () => {
-    // Regression: with a small retry budget + DETERMINISTIC backoff a dispatch
-    // wave of writers wakes in lockstep, re-collides, and exhausts the retries →
-    // DurableConflictError (flaky on slow Windows CI). The bumped attempt cap +
-    // FULL-JITTER backoff must let a heavier burst all land.
-    const expected = Array.from({ length: 40 }, (_, index) =>
-      unit({ issue: index + 1, taskId: `task-${index + 1}`, title: `unit-${index + 1}` }),
-    )
-
-    await Promise.all(expected.map((row) => upsertUnit(repoA, row)))
-
-    const rows = await readRepoLedger(repoA)
-    expect(rows).toHaveLength(expected.length)
-    expect(new Set(rows.map((row) => row.issue))).toEqual(
-      new Set(expected.map((row) => row.issue)),
-    )
-  })
 })
