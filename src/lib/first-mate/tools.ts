@@ -3,7 +3,16 @@ import { randomUUID } from "node:crypto"
 import consola from "consola"
 import { z } from "zod"
 
-import { commitFiles } from "~/lib/agent/service"
+import {
+  closePullRequest as realClosePullRequest,
+  commitFiles,
+  getPullRequestState as realGetPullRequestState,
+  getRequiredChecksForSha as realGetRequiredChecksForSha,
+  getSelfLogin as realGetSelfLogin,
+  mergePullRequest as realMergePullRequest,
+  repoHasWorkflows as realRepoHasWorkflows,
+} from "~/lib/agent/service"
+import type { RepoRef as AgentRepoRef } from "~/lib/agent/types"
 import { advance as advanceController, buildBoard, type HumanDecision, type ModelAnswer } from "~/lib/first-mate/controller"
 import { buildScaffoldFiles } from "~/lib/first-mate/scaffold-spec"
 import {
@@ -76,6 +85,43 @@ class FirstMateToolInputError extends Error {
   }
 }
 
+type MergeMethod = "merge" | "squash" | "rebase"
+
+/**
+ * Service dependencies the operator merge/close tools use. Injected so tests can
+ * drive the safety gate deterministically without live GitHub; production wires
+ * the real service functions. Kept minimal — only the PR read/merge/close/CI
+ * surface the two tools actually call.
+ */
+export interface MergeCloseDeps {
+  getPullRequestState: typeof realGetPullRequestState
+  getRequiredChecksForSha: typeof realGetRequiredChecksForSha
+  mergePullRequest: typeof realMergePullRequest
+  closePullRequest: typeof realClosePullRequest
+  repoHasWorkflows: typeof realRepoHasWorkflows
+  getSelfLogin: typeof realGetSelfLogin
+  readMissions: typeof readMissions
+}
+
+function defaultMergeCloseDeps(): MergeCloseDeps {
+  return {
+    getPullRequestState: realGetPullRequestState,
+    getRequiredChecksForSha: realGetRequiredChecksForSha,
+    mergePullRequest: realMergePullRequest,
+    closePullRequest: realClosePullRequest,
+    repoHasWorkflows: realRepoHasWorkflows,
+    getSelfLogin: realGetSelfLogin,
+    readMissions,
+  }
+}
+
+/**
+ * Backoff (ms) between mergeability polls when GitHub reports `mergeable: null`
+ * / `UNKNOWN` (it computes the mergeable flag asynchronously after a push). We
+ * NEVER merge on an unknown value — poll a few times, then refuse.
+ */
+const MERGEABLE_POLL_DELAYS_MS = [400, 800, 1600] as const
+
 const ScaffoldRepoArgsSchema = z.object({
   repo: z.string().trim().min(1),
   mode: z.enum(["add-missing-only", "overwrite-approved"]).optional(),
@@ -84,7 +130,10 @@ const ScaffoldRepoArgsSchema = z.object({
 
 type ScaffoldRepoArgs = z.infer<typeof ScaffoldRepoArgsSchema>
 
-export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
+export function createFirstMateTools(
+  depsOverride: Partial<MergeCloseDeps> = {},
+): ReadonlyArray<NonPersonaMcpTool> {
+  const deps: MergeCloseDeps = { ...defaultMergeCloseDeps(), ...depsOverride }
   function tool(
     toolNameHttp: string,
     description: string,
@@ -280,6 +329,110 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
       },
     ),
     tool(
+      "merge_pr",
+      "Merge a GitHub pull request the operator has reviewed. Head-guarded (rejects a moved head), ownership-scoped (agent-authored or an active first-mate mission repo, else requires allow_unowned), and gated on a pre-merge safety check (OPEN, not draft, MERGEABLE, CI green).",
+      objectSchema({
+        repo: stringProp("Repository as an owner/name string."),
+        pr: numberProp("Pull request number."),
+        expected_head_sha: stringProp("The exact head commit SHA the operator reviewed. The merge is REJECTED if the live head has moved from this value; re-review the new head before merging."),
+        expected_base: stringProp("Optional base branch name the operator reviewed against. When set, the merge is rejected if the live base ref differs."),
+        method: enumProp(["merge", "squash", "rebase"], "Merge method. Defaults to squash."),
+        allow_unowned: boolProp("Set true to merge a PR that is neither agent-authored nor part of an active first-mate mission. Dangerous, explicit opt-in; the override is audit-logged."),
+      }, ["repo", "pr", "expected_head_sha"]),
+      async (args) => {
+        const repoSlug = requiredString(args, "repo")
+        const repo = parseRepoSlug(repoSlug)
+        const pr = requiredPrNumber(args, "pr")
+        const expectedHead = requiredString(args, "expected_head_sha")
+        const expectedBase = optionalString(args, "expected_base")
+        const method = optionalMergeMethod(args, "method")
+        const allowUnowned = optionalBoolean(args, "allow_unowned") ?? false
+
+        const live = await deps.getPullRequestState(repo, pr)
+
+        // Head guard: the operator MUST pass the head it reviewed. A moved head
+        // means the review is stale — refuse rather than bless a new head.
+        if (live.headSha.length > 0 && live.headSha !== expectedHead) {
+          return errorResult(
+            new FirstMateToolInputError(
+              "HEAD_MOVED",
+              `live head ${live.headSha} does not match expected_head_sha ${expectedHead}; re-review the current head before merging`,
+            ),
+          )
+        }
+
+        const ownership = await resolveOwnership(repo, live.authorLogin, deps)
+        if (!ownership.owned) {
+          if (!allowUnowned) {
+            return errorResult(
+              new FirstMateToolInputError(
+                "UNOWNED_PR",
+                `${repoSlug}#${pr} is ${ownership.reason}; pass allow_unowned:true to override`,
+              ),
+            )
+          }
+          consola.warn(
+            `first-mate: merge_pr OVERRIDE on unowned PR ${repoSlug}#${pr} (author=${live.authorLogin ?? "unknown"}, actor=${ownership.selfLogin || "unknown"}, reason=${ownership.reason}) via allow_unowned`,
+          )
+        }
+
+        const gate = await evaluateMergeSafety(repo, pr, live, expectedHead, expectedBase, deps)
+        if (!gate.ok) {
+          return errorResult(new FirstMateToolInputError("MERGE_BLOCKED", gate.reason))
+        }
+
+        const merged = await deps.mergePullRequest(repo, {
+          pr,
+          expectedHeadSha: expectedHead,
+          ...(method !== undefined ? { method } : {}),
+        })
+        return ok({ merged: merged.merged, sha: merged.sha })
+      },
+    ),
+    tool(
+      "close_pr",
+      "Close a GitHub pull request WITHOUT merging it. Ownership-scoped identically to merge_pr (agent-authored or active first-mate mission repo, else requires allow_unowned).",
+      objectSchema({
+        repo: stringProp("Repository as an owner/name string."),
+        pr: numberProp("Pull request number."),
+        allow_unowned: boolProp("Set true to close a PR that is neither agent-authored nor part of an active first-mate mission. Explicit opt-in; audit-logged."),
+      }, ["repo", "pr"]),
+      async (args) => {
+        const repoSlug = requiredString(args, "repo")
+        const repo = parseRepoSlug(repoSlug)
+        const pr = requiredPrNumber(args, "pr")
+        const allowUnowned = optionalBoolean(args, "allow_unowned") ?? false
+
+        const live = await deps.getPullRequestState(repo, pr)
+        if (live.state.toUpperCase() === "MERGED") {
+          return errorResult(
+            new FirstMateToolInputError("ALREADY_MERGED", `${repoSlug}#${pr} is already merged and cannot be closed`),
+          )
+        }
+
+        const ownership = await resolveOwnership(repo, live.authorLogin, deps)
+        if (!ownership.owned) {
+          if (!allowUnowned) {
+            return errorResult(
+              new FirstMateToolInputError(
+                "UNOWNED_PR",
+                `${repoSlug}#${pr} is ${ownership.reason}; pass allow_unowned:true to override`,
+              ),
+            )
+          }
+          consola.warn(
+            `first-mate: close_pr OVERRIDE on unowned PR ${repoSlug}#${pr} (author=${live.authorLogin ?? "unknown"}, actor=${ownership.selfLogin || "unknown"}, reason=${ownership.reason}) via allow_unowned`,
+          )
+        }
+
+        if (live.state.toUpperCase() === "CLOSED") {
+          return ok({ closed: true, state: "CLOSED", note: "already closed" })
+        }
+        const result = await deps.closePullRequest(repo, pr)
+        return ok({ closed: result.closed, state: result.state })
+      },
+    ),
+    tool(
       "mission_status",
       "Read compact status for all first-mate missions, or for one mission id.",
       objectSchema({
@@ -297,6 +450,182 @@ export const FIRST_MATE_TOOLS: ReadonlyArray<NonPersonaMcpTool> = createFirstMat
 
 function hasAgentToken(): boolean {
   return typeof state.githubAgentToken === "string" && state.githubAgentToken.length > 0
+}
+
+interface OwnershipResult {
+  owned: boolean
+  reason: string
+  selfLogin: string
+}
+
+/**
+ * Ownership scope for the merge/close operator tools: a PR is "owned" when the
+ * agent-token bot authored it (self-login match) OR the repo has an active
+ * first-mate mission. Anything else is unowned and requires an explicit
+ * `allow_unowned` opt-in. `getSelfLogin`/`readMissions` failures degrade to
+ * NOT owned (fail-closed) so a transient error can't silently widen scope.
+ */
+async function resolveOwnership(
+  repo: AgentRepoRef,
+  authorLogin: string | undefined,
+  deps: MergeCloseDeps,
+): Promise<OwnershipResult> {
+  const selfLogin = await deps.getSelfLogin().catch(() => "")
+  if (loginMatches(authorLogin, selfLogin)) {
+    return { owned: true, reason: "agent-authored", selfLogin }
+  }
+
+  let missions: Mission[] = []
+  try {
+    missions = await deps.readMissions()
+  } catch (err) {
+    consola.debug("first-mate: mission read for ownership scope skipped:", err)
+  }
+  const hasActiveMission = missions.some(
+    (mission) => mission.status === "active" && mission.repos.some((r) => repoMatchesTarget(r, repo)),
+  )
+  if (hasActiveMission) {
+    return { owned: true, reason: "active-mission-repo", selfLogin }
+  }
+
+  return {
+    owned: false,
+    reason: "not agent-authored and has no active first-mate mission",
+    selfLogin,
+  }
+}
+
+type MergeSafety = { ok: true } | { ok: false; reason: string }
+
+/**
+ * Pre-merge safety gate. Refuses unless the PR is OPEN, not a draft, cleanly
+ * MERGEABLE, and CI is green. Mergeability is computed asynchronously by GitHub,
+ * so a `null`/`UNKNOWN` value is polled a few times with backoff and NEVER
+ * merged on unknown. CI-green is judged from the check-run rollup for the exact
+ * reviewed head (`getRequiredChecksForSha`) — `reviewDecision` alone is not a CI
+ * signal. Limitation: a repo with no CI workflows has no check runs to gate on,
+ * so a genuinely CI-less repo passes this gate on the human's review alone; a
+ * repo that HAS workflows but hasn't reported checks yet is refused.
+ */
+async function evaluateMergeSafety(
+  repo: AgentRepoRef,
+  pr: number,
+  initial: Awaited<ReturnType<MergeCloseDeps["getPullRequestState"]>>,
+  expectedHead: string,
+  expectedBase: string | undefined,
+  deps: MergeCloseDeps,
+): Promise<MergeSafety> {
+  let live = initial
+  let poll = 0
+  while (isUnknownMergeable(live.mergeable) && poll < MERGEABLE_POLL_DELAYS_MS.length) {
+    await delay(MERGEABLE_POLL_DELAYS_MS[poll]!)
+    poll += 1
+    live = await deps.getPullRequestState(repo, pr)
+  }
+
+  // Re-assert the head after any polling: a push during the window would make
+  // the mergeable/CI signals we validated belong to a different commit than the
+  // one merge would target. (mergePullRequest is also server-side head-guarded.)
+  if (live.headSha.length > 0 && live.headSha !== expectedHead) {
+    return { ok: false, reason: `head moved to ${live.headSha} during safety evaluation; re-review the current head` }
+  }
+  if (live.state.toUpperCase() !== "OPEN") {
+    return { ok: false, reason: `PR is not OPEN (state=${live.state})` }
+  }
+  if (live.isDraft) {
+    return { ok: false, reason: "PR is a draft; mark it ready for review before merging" }
+  }
+  if (expectedBase !== undefined && live.baseRef !== expectedBase) {
+    return { ok: false, reason: `live base ${live.baseRef} does not match expected_base ${expectedBase}` }
+  }
+  if (isUnknownMergeable(live.mergeable)) {
+    return { ok: false, reason: "mergeability is still UNKNOWN after retries; refusing to merge on an unknown state" }
+  }
+  if ((live.mergeable ?? "").toUpperCase() !== "MERGEABLE") {
+    return { ok: false, reason: `PR is not cleanly mergeable (mergeable=${live.mergeable})` }
+  }
+
+  const checks = await deps.getRequiredChecksForSha(repo, live.headSha)
+  if (checks.rollup === "failing") {
+    const names = checks.failing.map((f) => f.name).filter((n) => n.length > 0).join(", ")
+    return { ok: false, reason: `CI checks are failing${names ? ` (${names})` : ""}` }
+  }
+  if (checks.rollup === "pending") {
+    return { ok: false, reason: "CI checks are still running; refusing to merge before they complete" }
+  }
+  if (checks.rollup === "none") {
+    const hasWorkflows = live.baseRef.length > 0
+      ? await deps.repoHasWorkflows(repo, live.baseRef).catch(() => false)
+      : false
+    if (hasWorkflows) {
+      return {
+        ok: false,
+        reason: "repo has CI workflows but no check runs are reported for this head yet; refusing to merge before CI reports",
+      }
+    }
+    // No CI workflows in the repo: nothing to gate on. Documented limitation —
+    // absence of CI cannot be verified green; the merge rests on the operator's
+    // review plus the head/mergeable guards.
+  }
+  return { ok: true }
+}
+
+function isUnknownMergeable(mergeable: string | null | undefined): boolean {
+  return mergeable == null || mergeable.toUpperCase() === "UNKNOWN"
+}
+
+function normalizeLogin(login: string): string {
+  return login.trim().toLowerCase().replace(/\[bot\]$/i, "")
+}
+
+function loginMatches(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false
+  const na = normalizeLogin(a)
+  const nb = normalizeLogin(b)
+  return na.length > 0 && na === nb
+}
+
+function repoMatchesTarget(missionRepo: RepoRef, target: AgentRepoRef): boolean {
+  return (
+    missionRepo.owner.toLowerCase() === target.owner.toLowerCase()
+    && missionRepo.name.toLowerCase() === target.repo.toLowerCase()
+  )
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function requiredPrNumber(args: Record<string, unknown>, key: string): number {
+  const value = args[key]
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new FirstMateToolInputError(
+      "INVALID_ARGUMENT",
+      `arguments.${key} is required and must be a positive integer`,
+    )
+  }
+  return value
+}
+
+function optionalBoolean(args: Record<string, unknown>, key: string): boolean | undefined {
+  const value = args[key]
+  if (value === undefined) return undefined
+  if (typeof value !== "boolean") {
+    throw new FirstMateToolInputError("INVALID_ARGUMENT", `arguments.${key} must be a boolean`)
+  }
+  return value
+}
+
+function optionalMergeMethod(args: Record<string, unknown>, key: string): MergeMethod | undefined {
+  const value = optionalString(args, key)
+  if (value === undefined) return undefined
+  if (value !== "merge" && value !== "squash" && value !== "rebase") {
+    throw new FirstMateToolInputError(
+      "INVALID_ARGUMENT",
+      `arguments.${key} must be one of "merge", "squash", or "rebase"`,
+    )
+  }
+  return value
 }
 
 function buildMissionStatus(
@@ -516,6 +845,10 @@ function stringProp(description: string): Record<string, unknown> {
 
 function numberProp(description: string): Record<string, unknown> {
   return { type: "number", description }
+}
+
+function boolProp(description: string): Record<string, unknown> {
+  return { type: "boolean", description }
 }
 
 function stringArrayProp(description: string): Record<string, unknown> {

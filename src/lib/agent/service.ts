@@ -10,6 +10,7 @@ import {
   type AssignmentInput,
   type AssignmentResult,
   type CheckSummary,
+  type ClosePullRequestResult,
   type CommentResult,
   type FailingCheckSummary,
   type IssueCreateInput,
@@ -811,10 +812,28 @@ export async function mergePullRequest(
   return { merged: true, sha: stringValue(result.sha) ?? "" }
 }
 
+/**
+ * Close a pull request WITHOUT merging it, via REST
+ * `PATCH /repos/{owner}/{repo}/pulls/{pr}` with `{ state: "closed" }`. A merged
+ * PR cannot be closed this way (GitHub rejects it), so callers that must not
+ * touch a merged PR should gate on `getPullRequestState` first. Idempotent for
+ * an already-closed PR (GitHub returns the closed PR object).
+ */
+export async function closePullRequest(
+  repo: RepoRef,
+  pr: number,
+): Promise<ClosePullRequestResult> {
+  const result = await ghRest<{ state?: string | null }>(
+    "PATCH",
+    `${repoPath(repo)}/pulls/${segment(pr)}`,
+    { body: { state: "closed" } },
+  )
+  return { closed: true, state: result.state ?? "closed" }
+}
+
 export async function markReadyForReview(
   prNodeId: string,
-): Promise<ReadyForReviewResult> {
-  await ghGraphQL<unknown>(
+): Promise<ReadyForReviewResult> {  await ghGraphQL<unknown>(
     `mutation FirstMateReadyForReview($pullRequestId: ID!) {
       markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) {
         pullRequest {

@@ -157,6 +157,11 @@ export interface MergeResult {
   sha: string
 }
 
+export interface ClosePullRequestResult {
+  closed: true
+  state: string
+}
+
 export interface ReadyForReviewResult {
   ready: true
 }
