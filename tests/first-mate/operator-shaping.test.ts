@@ -31,6 +31,17 @@ describe("capability shaping — config assertions", () => {
     expect(shouldDenyOperatorTool("mcp__workers__review", true)).toBe(true)
   })
 
+  test("in operator mode: local orchestrate is denied (drives worker-implement backend)", () => {
+    // decompose/run_workflow route to the LOCAL worker-implement backend, which
+    // makes local file writes — they must be denied in operator mode alongside
+    // the raw worker tools.
+    expect(shouldDenyOperatorTool("mcp__orchestrate__run_workflow", true)).toBe(true)
+    expect(shouldDenyOperatorTool("mcp__orchestrate__decompose", true)).toBe(true)
+    expect(operatorPreToolUse("mcp__orchestrate__run_workflow", true).block).toBe(true)
+    // Non-operator sessions are unaffected.
+    expect(shouldDenyOperatorTool("mcp__orchestrate__run_workflow", false)).toBe(false)
+  })
+
   test("in operator mode: delegation + read-only remain allowed", () => {
     expect(shouldDenyOperatorTool("Agent", true)).toBe(false)
     expect(shouldDenyOperatorTool("Bash", true)).toBe(false)

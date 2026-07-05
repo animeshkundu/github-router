@@ -151,6 +151,35 @@ export async function createScaffoldPullRequest(
   }
 }
 
+/**
+ * Delete a scaffold branch. Used to avoid leaving an orphan branch behind when
+ * a no-op scaffold (everything already present) committed nothing and therefore
+ * skips PR creation. Best-effort: a delete failure is surfaced as an
+ * `api-error` so the caller can decide, but the no-op path itself already
+ * returned no PR.
+ */
+export async function deleteScaffoldBranch(
+  repo: RepoRef,
+  branch: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const normalizedBranch = normalizeBranchRef(branch)
+  try {
+    await ghRest<unknown>(
+      "DELETE",
+      `${repoPath(repo)}/git/refs/heads/${gitRefBranchPath(normalizedBranch)}`,
+      { signal },
+    )
+  } catch (err) {
+    if (err instanceof ScaffoldHelperError) throw err
+    throw new ScaffoldHelperError(
+      "api-error",
+      `Failed to delete scaffold branch ${normalizedBranch} for ${repoLabel(repo)}`,
+      { cause: err },
+    )
+  }
+}
+
 function repoLabel(repo: RepoRef): string {
   return `${repo.owner}/${repo.repo}`
 }

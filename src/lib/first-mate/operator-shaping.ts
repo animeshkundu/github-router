@@ -24,9 +24,9 @@
 
 import path from "node:path"
 
-/** Tools denied to the operator (exact names + the workers MCP prefix). */
+/** Tools denied to the operator (exact names + the workers/orchestrate MCP prefixes). */
 export const OPERATOR_DENIED_TOOLS = ["Edit", "Write", "NotebookEdit"] as const
-export const OPERATOR_DENIED_MCP_PREFIXES = ["mcp__workers__"] as const
+export const OPERATOR_DENIED_MCP_PREFIXES = ["mcp__workers__", "mcp__orchestrate__"] as const
 
 /** Tools explicitly preserved (documented; used by assertion tests). */
 export const OPERATOR_KEPT_TOOLS = [

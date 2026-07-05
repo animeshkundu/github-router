@@ -74,7 +74,7 @@ export const internalFirstMateGuard = defineCommand({
 })
 
 /** The regex matcher scoping the guard hook to exactly the denied tools. */
-export const FIRST_MATE_GUARD_MATCHER = "Bash|Edit|Write|NotebookEdit|mcp__workers__.*"
+export const FIRST_MATE_GUARD_MATCHER = "Bash|Edit|Write|NotebookEdit|mcp__workers__.*|mcp__orchestrate__.*"
 
 /** Build the hook command string that runs this subcommand. */
 export function buildFirstMateGuardHookCommand(execPath: string, entry: string): string {

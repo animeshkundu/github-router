@@ -816,7 +816,7 @@ async function applyModelAnswer(
         consola.debug(`first-mate: dispatching build task for ${unit.missionId}:${unitHandle(unit)} agent=${unit.agent}`)
         const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
           deps.startTask(repo, {
-            prompt: buildPrompt(unit, mission, artifactDate(Date.now())) + promptTag,
+            prompt: buildPrompt(unit, mission, unit.artifactDateStr ?? artifactDate(Date.now())) + promptTag,
             model,
             createPullRequest: true,
             idempotencyKey,
@@ -856,7 +856,7 @@ async function applyModelAnswer(
         applied.push(`plan review rejected → escalated to human for ${unit.missionId}:${unitHandle(unit)}`)
       } else if (mission !== undefined) {
         consola.debug(`first-mate: dispatching plan-refine task for ${unit.missionId}:${unitHandle(unit)} agent=${unit.agent}`)
-        const prompt = `${planPrompt(unit, mission, artifactDate(Date.now()))}\n\nRefine your previous plan per this feedback:\n${instruction}`
+        const prompt = `${planPrompt(unit, mission, unit.artifactDateStr ?? artifactDate(Date.now()))}\n\nRefine your previous plan per this feedback:\n${instruction}`
         // #1 — resolve the model BEFORE the persist inside dispatchWithOutbox
         // (see the approve branch above): a resolveCloudAgentModel throw must
         // leave no dangling dispatch intent.
@@ -2063,9 +2063,14 @@ async function dispatchUnit(
   // misread as an interrupted dispatch / false orphan.
   const model = resolveCloudAgentModel(unit.model ?? mission.defaultModel)
   consola.debug(`first-mate: dispatching plan task for ${unit.missionId}:${unitHandle(unit)} agent=${unit.agent}`)
+  // Stamp the artifact date ONCE at plan time and persist it on the unit, so the
+  // later build task (possibly a different calendar day) reuses the same
+  // `docs/plans/<date>-<slug>.md` filename instead of recomputing today's date.
+  const dateStr = unit.artifactDateStr ?? artifactDate(Date.now())
+  unit.artifactDateStr = dateStr
   const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
     deps.startTask(repo, {
-      prompt: planPrompt(unit, mission, artifactDate(Date.now())) + promptTag,
+      prompt: planPrompt(unit, mission, dateStr) + promptTag,
       model,
       createPullRequest: false,
       idempotencyKey,
@@ -2092,8 +2097,14 @@ async function dispatchWave(
   deps: ControllerDeps,
   applied: string[],
   renewLease?: () => Promise<boolean>,
+  countUnits?: UnitRow[],
 ): Promise<void> {
-  const counts = activeCountsByAgent(units)
+  // Per-provider in-flight counts are taken over ALL loaded units (when
+  // supplied), NOT just the dispatch set: a mission-scoped drive must still
+  // honor the GLOBAL per-provider cap, otherwise two scoped drives could each
+  // dispatch up to the cap and blow through 2x. Dispatch is still limited to
+  // `units` (the scoped set).
+  const counts = activeCountsByAgent(countUnits ?? units)
   const candidates = units
     .filter((unit) => isActiveUnit(unit, missions))
     // A unit parked on a human decision must never be (re-)dispatched — it is
@@ -2511,6 +2522,9 @@ export async function advance(
       deps,
       applied,
       input.renewLease,
+      // Count per-provider in-flight over ALL loaded units so a mission-scoped
+      // drive shares the global cap with every other mission's live tasks.
+      units,
     )
 
     const board = buildBoard(scopedUnits, scopedMissions)

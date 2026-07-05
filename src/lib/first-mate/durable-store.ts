@@ -163,7 +163,7 @@ export interface CommitJsonCasOptions<TValue, TResult> {
   fencingToken?: number
 }
 
-const OCC_MAX_ATTEMPTS = 5
+const OCC_MAX_ATTEMPTS = 16
 const OCC_BACKOFF_MS = 10
 
 async function readRaw(file: string): Promise<string | undefined> {
@@ -245,7 +245,13 @@ export async function commitJsonCas<TValue, TResult = void>(
     lastConflict = new DurableConflictError(
       `durable store contention for ${opts.path} (attempt ${attempt + 1}/${OCC_MAX_ATTEMPTS})`,
     )
-    await sleep(OCC_BACKOFF_MS * (attempt + 1))
+    // Full-jitter backoff: the base grows with attempt (bounded exponential-ish
+    // linear ramp) but the actual sleep is randomized in [0.5x, 1.5x) so a wave
+    // of concurrent writers that collided in lockstep desynchronizes instead of
+    // re-colliding on the next attempt (thundering-herd avoidance).
+    await sleep(
+      Math.floor(OCC_BACKOFF_MS * (attempt + 1) * (0.5 + Math.random())),
+    )
   }
   throw (
     lastConflict ??

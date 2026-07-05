@@ -36,6 +36,7 @@ describe("capability-shaping PreToolUse hook wiring (config assertion)", () => {
     expect(FIRST_MATE_GUARD_MATCHER).toContain("Edit")
     expect(FIRST_MATE_GUARD_MATCHER).toContain("Write")
     expect(FIRST_MATE_GUARD_MATCHER).toContain("mcp__workers__")
+    expect(FIRST_MATE_GUARD_MATCHER).toContain("mcp__orchestrate__")
     expect(FIRST_MATE_GUARD_MATCHER).toContain("Bash")
     // Round-trips to disk as valid JSON.
     const onDisk = JSON.parse(await fs.readFile(settingsPath, "utf8")) as Record<string, unknown>
@@ -66,6 +67,9 @@ describe("capability-shaping PreToolUse hook (end-to-end enforcement)", () => {
     ).toBe(2)
     expect(
       await runGuard(JSON.stringify({ tool_name: "mcp__workers__implement", tool_input: {} })),
+    ).toBe(2)
+    expect(
+      await runGuard(JSON.stringify({ tool_name: "mcp__orchestrate__run_workflow", tool_input: {} })),
     ).toBe(2)
     expect(
       await runGuard(JSON.stringify({ tool_name: "Bash", tool_input: { command: "gh pr view 42" } })),

@@ -2,6 +2,7 @@ import { expect, mock, test } from "bun:test"
 
 import {
   advance,
+  artifactDate,
   artifactSlug,
   buildPrompt,
   failureSignature,
@@ -2272,4 +2273,68 @@ test("buildPrompt instructs reading the committed plan and updating LEARNINGS.md
   expect(prompt).toContain(`docs/plans/2026-07-05-${slug}.md`)
   expect(prompt).toContain(`docs/research/2026-07-05-${slug}.md`)
   expect(prompt).toContain("LEARNINGS.md")
+})
+
+test("scoped drive counts the per-provider cap over ALL missions (not just the scoped set)", async () => {
+  // FIX 3: a mission-scoped advance must honor the GLOBAL per-provider cap. m2
+  // has a copilot task already in flight; a scoped drive on m1 (cap=1) must NOT
+  // dispatch m1's undispatched copilot unit — otherwise two scoped drives could
+  // each reach the cap and blow through 2x the intended global concurrency.
+  const inflightM2 = unit({
+    missionId: "m2",
+    issue: 50,
+    taskId: "t-m2",
+    provider: "in_progress",
+    phase: "build",
+    title: "m2 inflight",
+  })
+  const pendingM1 = unit({
+    missionId: "m1",
+    issue: 51,
+    taskId: null,
+    provider: "none",
+    phase: "plan",
+    title: "m1 pending",
+  })
+  const h = harness([inflightM2, pendingM1], [mission({ id: "m1" }), mission({ id: "m2" })])
+
+  await advance({ missionId: "m1", maxInFlightPerProvider: 1 }, h.deps)
+
+  // The global cap is already saturated by m2's in-flight copilot task, so m1's
+  // unit stays undispatched. (Counting only scopedUnits would have seen 0 and
+  // dispatched it — the 2x-over-cap bug.)
+  expect(pendingM1.taskId).toBeNull()
+  expect(pendingM1.provider).toBe("none")
+  expect(h.deps.startTask).not.toHaveBeenCalled()
+})
+
+test("build reuses the plan's persisted artifact date across a day boundary", async () => {
+  // FIX 5: the plan task stamps unit.artifactDateStr; the build task must reuse
+  // that SAME date so both reference the same docs/plans/<date>-<slug>.md, even
+  // when the build happens on a later calendar day.
+  const planDate = "2020-01-01"
+  const row = unit({
+    provider: "completed",
+    phase: "plan",
+    dispatchMode: "plan",
+    planExcerpt: "1. Do the thing.",
+    artifactDateStr: planDate,
+    title: "widget refactor",
+  })
+  const h = harness([row])
+  h.observations.set("1", { provider: "queued", prs: [] })
+
+  await advance(
+    { modelAnswers: [{ requestId: "m1:1:review_plan", verdict: { decision: "approve" } }] },
+    h.deps,
+  )
+
+  const buildCall = (
+    h.deps.startTask as unknown as { mock: { calls: unknown[][] } }
+  ).mock.calls.find((c) => (c[1] as { createPullRequest?: boolean }).createPullRequest === true)
+  expect(buildCall).toBeDefined()
+  const prompt = (buildCall![1] as { prompt: string }).prompt
+  expect(prompt).toContain(`docs/plans/${planDate}-`)
+  // Must NOT drift to today's date.
+  expect(prompt).not.toContain(`docs/plans/${artifactDate(Date.now())}-`)
 })

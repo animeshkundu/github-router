@@ -173,6 +173,15 @@ export interface UnitRow {
    * task carrying it. Cleared once the build task is dispatched.
    */
   planExcerpt?: string
+  /**
+   * The date string (`YYYY-MM-DD`) stamped into this unit's durable artifact
+   * filenames (`docs/research/<date>-<slug>.md`, `docs/plans/<date>-<slug>.md`)
+   * at plan-dispatch time. Persisted so the later build task reuses the SAME
+   * date instead of recomputing `artifactDate(now)` — otherwise a plan created
+   * one day and built the next would reference a different, non-existent plan
+   * file. Optional → back-compat (absent falls back to the current date).
+   */
+  artifactDateStr?: string
   branch?: string | null
   headSha?: string | null
   baseSha?: string | null

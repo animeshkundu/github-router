@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
 
+import consola from "consola"
 import { z } from "zod"
 
 import { commitFiles } from "~/lib/agent/service"
@@ -8,6 +9,7 @@ import { buildScaffoldFiles } from "~/lib/first-mate/scaffold-spec"
 import {
   createScaffoldBranch,
   createScaffoldPullRequest,
+  deleteScaffoldBranch,
   getDefaultBranch,
   normalizeBranchRef,
   parseRepoSlug,
@@ -187,6 +189,23 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
           mode: input.mode ?? "add-missing-only",
           message: "scaffold: seed agentic-dev conventions",
         })
+        // No-op scaffold: everything was already present, so nothing was
+        // committed. Creating a PR here would 422 ("no commits between base and
+        // head"), and the branch we created is an orphan — delete it (best
+        // effort) and short-circuit with pr:null.
+        if (result.committed.length === 0) {
+          try {
+            await deleteScaffoldBranch(repo, branch, signal)
+          } catch (err) {
+            consola.debug("first-mate: scaffold no-op branch cleanup skipped:", err)
+          }
+          return ok({
+            committed: [],
+            preserved: result.preserved,
+            pr: null,
+            note: "nothing to scaffold (all files present)",
+          })
+        }
         const pr = await createScaffoldPullRequest(repo, branch, baseBranch, signal)
         return ok({ pr, committed: result.committed, preserved: result.preserved })
       },
