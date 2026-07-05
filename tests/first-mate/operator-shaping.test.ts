@@ -1,4 +1,6 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+
+import path from "node:path"
 
 import {
   OPERATOR_DENIED_TOOLS,
@@ -207,5 +209,58 @@ describe("capability shaping — config assertions", () => {
     // Installed, or non-operator session → no throw.
     expect(() => assertShapingInstalled(true, true)).not.toThrow()
     expect(() => assertShapingInstalled(false, false)).not.toThrow()
+  })
+})
+
+describe("operator plans/memory Write exemption", () => {
+  const CONFIG = path.resolve(path.sep === "\\" ? "C:\\gh-cfg" : "/gh-cfg")
+  const prior = process.env.CLAUDE_CONFIG_DIR
+  beforeEach(() => {
+    process.env.CLAUDE_CONFIG_DIR = CONFIG
+  })
+  afterEach(() => {
+    if (prior === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = prior
+  })
+  const blocked = (tool: string, input: Record<string, unknown>): boolean =>
+    operatorPreToolUse(tool, true, input).block
+
+  test("Write/Edit/NotebookEdit INTO plans or memory are ALLOWED", () => {
+    expect(blocked("Write", { file_path: path.join(CONFIG, "plans", "todo.md") })).toBe(false)
+    expect(blocked("Write", { file_path: path.join(CONFIG, "memory", "notes.md") })).toBe(false)
+    expect(blocked("Edit", { file_path: path.join(CONFIG, "plans", "sub", "deep.md") })).toBe(false)
+    expect(blocked("NotebookEdit", { notebook_path: path.join(CONFIG, "memory", "nb.ipynb") })).toBe(false)
+    // shouldDenyOperatorTool agrees when handed the same input.
+    expect(shouldDenyOperatorTool("Write", true, { file_path: path.join(CONFIG, "plans", "x.md") })).toBe(false)
+  })
+
+  test("Write anywhere ELSE is still BLOCKED", () => {
+    expect(blocked("Write", { file_path: path.join(CONFIG, "other", "x.ts") })).toBe(true)
+    expect(blocked("Write", { file_path: path.resolve(path.sep === "\\" ? "C:\\repo\\src\\x.ts" : "/repo/src/x.ts") })).toBe(true)
+    // A sibling dir whose name merely starts with the allowed prefix must NOT match.
+    expect(blocked("Write", { file_path: path.join(CONFIG, "plansX", "x.md") })).toBe(true)
+    // The dir itself is not a writable file target.
+    expect(blocked("Write", { file_path: path.join(CONFIG, "plans") })).toBe(true)
+  })
+
+  test("fail-CLOSED: missing/empty path, unset or non-absolute CLAUDE_CONFIG_DIR, and ../ escape", () => {
+    // No target path at all.
+    expect(blocked("Write", {})).toBe(true)
+    expect(blocked("Write", { file_path: "" })).toBe(true)
+    expect(blocked("NotebookEdit", { file_path: path.join(CONFIG, "plans", "x.md") })).toBe(true) // wrong key
+    // A ../ escape out of the allowed dir resolves outside → blocked.
+    expect(blocked("Write", { file_path: path.join(CONFIG, "plans", "..", "..", "escape.ts") })).toBe(true)
+    // Unset CLAUDE_CONFIG_DIR → cannot prove containment → blocked.
+    delete process.env.CLAUDE_CONFIG_DIR
+    expect(blocked("Write", { file_path: path.join(CONFIG, "plans", "x.md") })).toBe(true)
+    // Non-absolute CLAUDE_CONFIG_DIR → blocked.
+    process.env.CLAUDE_CONFIG_DIR = "relative/cfg"
+    expect(blocked("Write", { file_path: "relative/cfg/plans/x.md" })).toBe(true)
+  })
+
+  test("workers + Bash behavior is unchanged by the exemption", () => {
+    expect(blocked("mcp__workers__implement", {})).toBe(true)
+    expect(operatorPreToolUse("Bash", true, { command: "gh pr view 42" }).block).toBe(false)
+    expect(operatorPreToolUse("Bash", true, { command: "echo x > f" }).block).toBe(true)
   })
 })

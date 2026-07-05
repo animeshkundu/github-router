@@ -12,7 +12,17 @@
  * via Bash, and read/search tools. Dropped: Edit/Write/NotebookEdit and
  * mcp__workers__* (local implementation agents). Gated: only in operator mode;
  * a normal session is untouched.
+ *
+ * ONE exemption to the file-authoring block: the operator may Write/Edit/
+ * NotebookEdit its OWN plans/memory scratch files (planning notes, durable
+ * memory) that live under `CLAUDE_CONFIG_DIR/plans/` or `CLAUDE_CONFIG_DIR/
+ * memory/`. Those are the operator's own working state, NOT product code, so
+ * authoring them is not "hand-coding". The exemption is path-scoped and
+ * FAIL-CLOSED: anything we cannot prove lands strictly inside one of those two
+ * dirs stays blocked (see `operatorWritePathAllowed`).
  */
+
+import path from "node:path"
 
 /** Tools denied to the operator (exact names + the workers MCP prefix). */
 export const OPERATOR_DENIED_TOOLS = ["Edit", "Write", "NotebookEdit"] as const
@@ -47,13 +57,78 @@ export const CLOUD_AGENT_SCOPE_NOTE =
   "Pages, and deletes require explicit human approval (first-mate merge gate)."
 
 /**
+ * The tool-input fields the operator guard inspects. `command` is the Bash
+ * command; `file_path` is the Write/Edit target; `notebook_path` is the
+ * NotebookEdit target. All `unknown` — the hook payload is untrusted JSON.
+ */
+export interface OperatorToolInput {
+  command?: unknown
+  file_path?: unknown
+  notebook_path?: unknown
+}
+
+/**
+ * Path-scoped exemption for the file-authoring tools. The operator MAY author a
+ * file whose resolved path lands strictly inside `CLAUDE_CONFIG_DIR/plans/` or
+ * `CLAUDE_CONFIG_DIR/memory/` (its own planning / durable-memory scratch space,
+ * not product code).
+ *
+ * FAIL-CLOSED — returns `false` (not exempt → the caller keeps blocking) on any
+ * of: `CLAUDE_CONFIG_DIR` unset / empty / NOT absolute; a missing / non-string /
+ * empty target path; a `../` escape out of the allowed dir (caught structurally
+ * by the `path.resolve` + `path.sep`-boundary containment, so a normalized
+ * target that climbs out is simply not "inside"); or any resolution error.
+ * Containment uses a real path-separator boundary (NOT a string prefix, which
+ * would let `<dir>/plansX` masquerade as `<dir>/plans`). Windows-safe via
+ * `path.resolve`/`path.sep`.
+ */
+function operatorWritePathAllowed(rawPath: unknown): boolean {
+  if (typeof rawPath !== "string" || rawPath.length === 0) return false
+  const configDir = process.env.CLAUDE_CONFIG_DIR
+  if (typeof configDir !== "string" || configDir.length === 0 || !path.isAbsolute(configDir)) {
+    return false
+  }
+  try {
+    const target = path.resolve(rawPath)
+    const isStrictlyInside = (root: string): boolean => {
+      const resolvedRoot = path.resolve(root)
+      // Strictly INSIDE: the dir itself is not a writable file target, and a
+      // sep boundary prevents `<root>foo` from matching `<root>`.
+      return target !== resolvedRoot && target.startsWith(resolvedRoot + path.sep)
+    }
+    return isStrictlyInside(path.join(configDir, "plans")) || isStrictlyInside(path.join(configDir, "memory"))
+  } catch {
+    return false // any resolution error → fail closed.
+  }
+}
+
+/** The file-authoring target for a tool, if it exposes one. */
+function operatorWriteTarget(toolName: string, input?: OperatorToolInput): unknown {
+  if (toolName === "Write" || toolName === "Edit") return input?.file_path
+  if (toolName === "NotebookEdit") return input?.notebook_path
+  return undefined
+}
+
+/**
  * Decide whether a tool call must be BLOCKED for the operator. Pure — used both
  * by the PreToolUse hook handler and by config-assertion tests. When operator
  * mode is off, nothing is blocked (normal sessions unaffected).
+ *
+ * The file-authoring tools (Edit/Write/NotebookEdit) are denied EXCEPT when the
+ * tool input names a target inside the operator's own `CLAUDE_CONFIG_DIR/plans/`
+ * or `.../memory/` (see `operatorWritePathAllowed`). Without an inspectable
+ * input the exemption cannot be proven, so the tool stays blocked (fail-closed).
  */
-export function shouldDenyOperatorTool(toolName: string, operatorMode: boolean): boolean {
+export function shouldDenyOperatorTool(
+  toolName: string,
+  operatorMode: boolean,
+  input?: OperatorToolInput,
+): boolean {
   if (!operatorMode) return false
-  if ((OPERATOR_DENIED_TOOLS as readonly string[]).includes(toolName)) return true
+  if ((OPERATOR_DENIED_TOOLS as readonly string[]).includes(toolName)) {
+    if (operatorWritePathAllowed(operatorWriteTarget(toolName, input))) return false
+    return true
+  }
   return OPERATOR_DENIED_MCP_PREFIXES.some((p) => toolName.startsWith(p))
 }
 
@@ -513,13 +588,13 @@ export function assertShapingInstalled(agentsMode: boolean, injectionSucceeded: 
 export function operatorPreToolUse(
   toolName: string,
   operatorMode: boolean,
-  input?: { command?: unknown },
+  input?: OperatorToolInput,
 ): PreToolUseDecision {
   if (!operatorMode) return { block: false }
-  if (shouldDenyOperatorTool(toolName, operatorMode)) {
+  if (shouldDenyOperatorTool(toolName, operatorMode, input)) {
     return {
       block: true,
-      reason: `${toolName} is disabled in cloud-agent operator mode — delegate implementation to a GitHub cloud agent via the first-mate MCP instead of hand-coding.`,
+      reason: `${toolName} is disabled in cloud-agent operator mode — delegate implementation to a GitHub cloud agent via the first-mate MCP instead of hand-coding (only writes into CLAUDE_CONFIG_DIR/plans or /memory are exempt).`,
     }
   }
   if (toolName === "Bash") {

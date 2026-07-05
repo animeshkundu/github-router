@@ -26,6 +26,8 @@ import {
   stopGateDisabled,
   stopGateEnabled,
   stopGateId,
+  stopGatePlanMode,
+  stripPlanMemoryDiffHunks,
 } from "../src/lib/orchestration/stop-gate-hook"
 import { fileBaselineStore, type BaselineStore } from "../src/lib/orchestration/stop-gate-policy"
 
@@ -562,5 +564,81 @@ describe("decideStopHook — dynamic resolveChecks (parser/discovered path)", ()
     const d = await decideStopHook(decisionInput({ exec: allFail, budget, maxBlocks: 2 }))
     expect(d.exitCode).toBe(0)
     expect(d.stderr).toMatch(/limit/i)
+  })
+})
+
+describe("stop-gate plan-mode scoping (Part 1)", () => {
+  test("stopGatePlanMode reads GH_ROUTER_STOP_GATE_PLAN_MODE (default off)", () => {
+    expect(stopGatePlanMode({})).toBe(false)
+    expect(stopGatePlanMode({ GH_ROUTER_STOP_GATE_PLAN_MODE: "0" })).toBe(false)
+    expect(stopGatePlanMode({ GH_ROUTER_STOP_GATE_PLAN_MODE: "1" })).toBe(true)
+    expect(stopGatePlanMode({ GH_ROUTER_STOP_GATE_PLAN_MODE: "true" })).toBe(true)
+  })
+
+  test("stripPlanMemoryDiffHunks drops plans/ + memory/ file sections, keeps src/", () => {
+    const diff = [
+      "diff --git a/plans/todo.md b/plans/todo.md",
+      "--- a/plans/todo.md",
+      "+++ b/plans/todo.md",
+      "@@ -0,0 +1 @@",
+      "+  it.skip('later', () => {})",
+      "diff --git a/src/x.ts b/src/x.ts",
+      "--- a/src/x.ts",
+      "+++ b/src/x.ts",
+      "@@ -0,0 +1 @@",
+      "+  const y = z as any",
+      "diff --git a/memory/notes.md b/memory/notes.md",
+      "--- a/memory/notes.md",
+      "+++ b/memory/notes.md",
+      "@@ -0,0 +1 @@",
+      "+  xit('nope', () => {})",
+    ].join("\n")
+    const out = stripPlanMemoryDiffHunks(diff)
+    expect(out).toContain("src/x.ts")
+    expect(out).toContain("const y = z as any")
+    expect(out).not.toContain("plans/todo.md")
+    expect(out).not.toContain("memory/notes.md")
+    expect(out).not.toContain("it.skip")
+    // A path whose filename merely contains "plans" is NOT stripped.
+    const keep = "diff --git a/docs/plans.md b/docs/plans.md\n+  it.only('x', () => {})"
+    expect(stripPlanMemoryDiffHunks(keep)).toBe(keep)
+  })
+
+  const weakPlanDiff = "diff --git a/plans/p.md b/plans/p.md\n--- a/plans/p.md\n+++ b/plans/p.md\n@@ -0,0 +1 @@\n+  it.skip('later', () => {})\n"
+
+  test("weakening confined to plans/ blocks WITHOUT plan mode but is EXCUSED with it", async () => {
+    const off = await decideStopHook(decisionInput({ exec: allPass, captureDiff: async () => weakPlanDiff }))
+    expect(off.exitCode).toBe(2)
+    expect(off.stderr).toContain("gate-weakening")
+
+    const onEnv = await decideStopHook(decisionInput({ exec: allPass, captureDiff: async () => weakPlanDiff, planMode: true }))
+    expect(onEnv.exitCode).toBe(0)
+
+    // Forward-compat: a truthy `plan_mode` payload field activates it too.
+    const onPayload = await decideStopHook(decisionInput({
+      stdin: JSON.stringify({ cwd: "/w", session_id: "s1", plan_mode: true }),
+      exec: allPass,
+      captureDiff: async () => weakPlanDiff,
+    }))
+    expect(onPayload.exitCode).toBe(0)
+  })
+
+  test("plan mode still catches src/ weakening in a MIXED diff", async () => {
+    const mixed = weakPlanDiff + "diff --git a/src/x.ts b/src/x.ts\n+++ b/src/x.ts\n@@ -0,0 +1 @@\n+  const y = z as any\n"
+    const d = await decideStopHook(decisionInput({ exec: allPass, captureDiff: async () => mixed, planMode: true }))
+    expect(d.exitCode).toBe(2)
+    expect(d.stderr).toContain("gate-weakening")
+  })
+
+  test("plan mode does NOT early-exit: the executable gate still runs (red gate blocks)", async () => {
+    // Diff only touches plans/ (no weakening survives the scan) but the gate is
+    // RED — plan mode must not skip the executable checks.
+    const d = await decideStopHook(decisionInput({
+      exec: allFail,
+      captureDiff: async () => "diff --git a/plans/p.md b/plans/p.md\n+  just a note\n",
+      planMode: true,
+    }))
+    expect(d.exitCode).toBe(2)
+    expect(d.stderr).toContain("regressed gates: typecheck")
   })
 })

@@ -17,7 +17,7 @@ import { defineCommand } from "citty"
 
 import { readFileSync } from "node:fs"
 
-import { operatorPreToolUse } from "./lib/first-mate/operator-shaping"
+import { operatorPreToolUse, type OperatorToolInput } from "./lib/first-mate/operator-shaping"
 
 function readStdinSync(): string {
   try {
@@ -34,7 +34,7 @@ export const internalFirstMateGuard = defineCommand({
   },
   run() {
     let toolName = ""
-    let toolInput: { command?: unknown } | undefined
+    let toolInput: OperatorToolInput | undefined
     let parsed = false
     try {
       const payload = JSON.parse(readStdinSync()) as {
@@ -43,7 +43,10 @@ export const internalFirstMateGuard = defineCommand({
       }
       if (typeof payload.tool_name === "string") toolName = payload.tool_name
       if (typeof payload.tool_input === "object" && payload.tool_input !== null) {
-        toolInput = payload.tool_input as { command?: unknown }
+        // The whole tool_input object flows through; operatorPreToolUse reads
+        // `command` (Bash), `file_path` (Write/Edit) and `notebook_path`
+        // (NotebookEdit) — the last two gate the plans/memory Write exemption.
+        toolInput = payload.tool_input as OperatorToolInput
       }
       parsed = true
     } catch {
