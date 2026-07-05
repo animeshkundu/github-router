@@ -110,6 +110,18 @@ export interface UnitRow {
    */
   totalFixes?: number
   /**
+   * Same-branch @copilot iteration: the PR head SHA the most recent `@copilot`
+   * fix mention was posted against. Enforces one-outstanding-mention-per-PR — a
+   * new mention is suppressed while this still equals the live head (the agent
+   * hasn't pushed yet), and once the head advances past it a fresh mention is
+   * allowed. Optional → back-compat.
+   */
+  copilotMentionSha?: string | null
+  /** Total `@copilot` fix mentions posted over this unit's life (per-mission budget counter). */
+  copilotComments?: number
+  /** Total author_fix cycles applied over this unit's life (per-mission budget counter). */
+  fixCycles?: number
+  /**
    * A6 empty-PR guard: consecutive observations of a PR with zero changed files.
    * Incremented while gated, reset when the PR has changes; at
    * EMPTY_PR_OBSERVATION_CAP the unit escalates instead of noop-ing forever.

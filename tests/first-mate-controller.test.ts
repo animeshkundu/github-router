@@ -226,6 +226,7 @@ function harness(
       }),
     ),
     postComment: mock(async () => ({ url: "https://gh/c/1" })),
+    mentionCopilot: mock(async () => ({ url: "https://gh/c/copilot" })),
     getPullRequestReviews: mock(
       async (_repo: { owner: string; repo: string }, _pr: number) =>
         [] as Array<{
@@ -1519,6 +1520,144 @@ test("A2: a unit at the total-fix hard cap escalates even under the per-failure 
 
   expect(result.needsModel).toHaveLength(0)
   expect(result.needsHuman).toHaveLength(1)
+  expect(row.blockingDecisionId).toBeTruthy()
+})
+
+test("author_fix mentions @copilot on the same branch (alongside the formal verdict) when an open PR exists", async () => {
+  const row = unit({
+    issue: 5,
+    pr: 10,
+    taskId: "task-5",
+    provider: "in_progress",
+    phase: "fix",
+    headSha: "h10",
+    retries: 1,
+    totalFixes: 1,
+  })
+  const h = harness([row])
+  h.observations.set("5", { provider: "in_progress", prs: [openPr(10, "h10")], ci: { rollup: "failing" } })
+
+  await advance(
+    { modelAnswers: [{ requestId: "m1:5:author_fix", verdict: { instruction: "fix the failing test" } }] },
+    h.deps,
+  )
+
+  const mention = h.deps.mentionCopilot as unknown as { mock: { calls: unknown[][] } }
+  expect(mention.mock.calls).toHaveLength(1)
+  const call = mention.mock.calls[0]!
+  expect(call[1]).toBe(10) // pr number
+  expect(String(call[2])).toContain("fix the failing test")
+  // The formal REQUEST_CHANGES verdict still rides alongside the mention.
+  expect(h.deps.submitReview).toHaveBeenCalled()
+  // Head SHA recorded at mention time; one-outstanding-per-PR bookkeeping.
+  expect(row.copilotMentionSha).toBe("h10")
+  expect(row.copilotComments).toBe(1)
+})
+
+test("author_fix falls back to the review-only steer when the head has NOT advanced past the last @copilot mention", async () => {
+  const row = unit({
+    issue: 5,
+    pr: 10,
+    taskId: "task-5",
+    provider: "in_progress",
+    phase: "fix",
+    headSha: "h10",
+    copilotMentionSha: "h10",
+    copilotComments: 1,
+    retries: 1,
+    totalFixes: 1,
+  })
+  const h = harness([row])
+  h.observations.set("5", { provider: "in_progress", prs: [openPr(10, "h10")], ci: { rollup: "failing" } })
+
+  await advance(
+    { modelAnswers: [{ requestId: "m1:5:author_fix", verdict: { instruction: "still failing" } }] },
+    h.deps,
+  )
+
+  // Mention already outstanding (head unchanged) → no fresh @copilot comment,
+  // but the formal REQUEST_CHANGES steer still fires (the fresh-dispatch fallback).
+  expect(h.deps.mentionCopilot).not.toHaveBeenCalled()
+  expect(h.deps.submitReview).toHaveBeenCalled()
+  expect(row.copilotComments).toBe(1) // unchanged
+})
+
+test("author_fix re-mentions @copilot once the head advances past the prior mention", async () => {
+  const row = unit({
+    issue: 5,
+    pr: 10,
+    taskId: "task-5",
+    provider: "in_progress",
+    phase: "fix",
+    headSha: "h11",
+    copilotMentionSha: "h10",
+    copilotComments: 1,
+    retries: 1,
+    totalFixes: 1,
+  })
+  const h = harness([row])
+  h.observations.set("5", { provider: "in_progress", prs: [openPr(10, "h11")], ci: { rollup: "failing" } })
+
+  await advance(
+    { modelAnswers: [{ requestId: "m1:5:author_fix", verdict: { instruction: "another pass" } }] },
+    h.deps,
+  )
+
+  expect(h.deps.mentionCopilot).toHaveBeenCalledTimes(1)
+  expect(row.copilotMentionSha).toBe("h11")
+  expect(row.copilotComments).toBe(2)
+})
+
+test("author_fix escalates to a human (no steer) when the per-mission fix-cycle budget is exhausted", async () => {
+  const row = unit({
+    issue: 5,
+    pr: 10,
+    taskId: "task-5",
+    provider: "in_progress",
+    phase: "fix",
+    headSha: "h10",
+    fixCycles: 2,
+    retries: 1,
+    totalFixes: 1,
+  })
+  const h = harness([row], [mission({ maxFixCycles: 2 })])
+  h.observations.set("5", { provider: "in_progress", prs: [openPr(10, "h10")], ci: { rollup: "failing" } })
+
+  const result = await advance(
+    { modelAnswers: [{ requestId: "m1:5:author_fix", verdict: { instruction: "fix" } }] },
+    h.deps,
+  )
+
+  // At the cap: STOP iterating — no mention, no review — and escalate to a human.
+  expect(h.deps.mentionCopilot).not.toHaveBeenCalled()
+  expect(h.deps.submitReview).not.toHaveBeenCalled()
+  expect(result.needsHuman.length).toBeGreaterThanOrEqual(1)
+  expect(row.blockingDecisionId).toBeTruthy()
+})
+
+test("author_fix escalates when the per-mission @copilot comment budget is exhausted", async () => {
+  const row = unit({
+    issue: 5,
+    pr: 10,
+    taskId: "task-5",
+    provider: "in_progress",
+    phase: "fix",
+    headSha: "h11",
+    copilotMentionSha: "h10", // head advanced → a fresh mention would be attempted
+    copilotComments: 3,
+    retries: 1,
+    totalFixes: 1,
+  })
+  const h = harness([row], [mission({ maxCopilotComments: 3 })])
+  h.observations.set("5", { provider: "in_progress", prs: [openPr(10, "h11")], ci: { rollup: "failing" } })
+
+  const result = await advance(
+    { modelAnswers: [{ requestId: "m1:5:author_fix", verdict: { instruction: "fix" } }] },
+    h.deps,
+  )
+
+  expect(h.deps.mentionCopilot).not.toHaveBeenCalled()
+  expect(result.needsHuman.length).toBeGreaterThanOrEqual(1)
   expect(row.blockingDecisionId).toBeTruthy()
 })
 

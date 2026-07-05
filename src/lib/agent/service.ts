@@ -694,6 +694,21 @@ export async function postComment(
   return { url: comment.html_url ?? comment.url ?? "" }
 }
 
+/**
+ * Post a comment that @-mentions the GitHub Copilot cloud agent so it iterates
+ * on the SAME branch/PR. A bare `REQUEST_CHANGES` review does NOT wake the cloud
+ * agent — the `@copilot` mention in an issue/PR comment is what actually
+ * triggers it to push a follow-up commit. Thin wrapper over `postComment` that
+ * prepends the mention; the caller supplies the consolidated fix instructions.
+ */
+export async function mentionCopilot(
+  repo: RepoRef,
+  pr: number,
+  body: string,
+): Promise<CommentResult> {
+  return postComment(repo, pr, `@copilot ${body}`)
+}
+
 export async function submitReview(
   repo: RepoRef,
   pr: number,

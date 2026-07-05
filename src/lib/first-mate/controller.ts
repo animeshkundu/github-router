@@ -15,6 +15,7 @@ import {
   getSelfLogin as realGetSelfLogin,
   markReadyForReview as realMarkReadyForReview,
   mergePullRequest as realMergePullRequest,
+  mentionCopilot as realMentionCopilot,
   requestReview as realRequestReview,
   rerunChecks as realRerunChecks,
   resolveAgentActor as realResolveAgentActor,
@@ -111,6 +112,7 @@ export interface ControllerDeps {
   dismissPullRequestReview: typeof realDismissPullRequestReview
   getSelfLogin: typeof realGetSelfLogin
   postComment: typeof realPostComment
+  mentionCopilot: typeof realMentionCopilot
   submitReview: typeof realSubmitReview
   requestReview: typeof realRequestReview
   rerunChecks: typeof realRerunChecks
@@ -319,6 +321,7 @@ export const defaultDeps: ControllerDeps = {
   dismissPullRequestReview: realDismissPullRequestReview,
   getSelfLogin: realGetSelfLogin,
   postComment: realPostComment,
+  mentionCopilot: realMentionCopilot,
   submitReview: realSubmitReview,
   requestReview: realRequestReview,
   rerunChecks: realRerunChecks,
@@ -881,15 +884,68 @@ async function applyModelAnswer(
   } else if (kind === "author_fix") {
     const instruction =
       stringValue(verdict.instruction) ?? "Fix the reported validation failure and update the PR."
+    const mission = missions.find((entry) => entry.id === unit.missionId)
+
+    // Per-mission fix-cycle budget — an ADDITIONAL cap beside policy.totalFixCap
+    // (A2 hard bound) and maxRetries (per-failure). At the cap, STOP steering and
+    // escalate to a human rather than burning another autonomous cycle.
+    const cyclesUsed = unit.fixCycles ?? 0
+    if (mission !== undefined && cyclesUsed >= maxFixCyclesOf(mission)) {
+      const request = await createHumanRequest(
+        unit,
+        mission,
+        { provider: unit.provider, prs: [] },
+        `per-mission fix-cycle budget (${maxFixCyclesOf(mission)}) exhausted — human input required`,
+        deps,
+      )
+      needsHuman.push({ request, sortKey: sortKey(unit), order: needsHuman.length })
+      await deps.upsertUnit(unit.repo, unit)
+      applied.push(`fix-cycle budget exhausted → escalated to human for ${unit.missionId}:${unitHandle(unit)}`)
+      return
+    }
+
     // Steer through the PR, the agent's two-way channel — the Agent-Tasks task
-    // is one-shot (POST /tasks/{id} → 405, no follow-up). A REQUEST_CHANGES
-    // review is the agent's cue to push a fix. If there's no PR yet the agent
-    // is still working; the retry counter still advances so a stuck unit
-    // eventually escalates.
+    // is one-shot (POST /tasks/{id} → 405, no follow-up). The @copilot mention is
+    // the actual trigger that wakes the cloud agent to push a fix on the SAME
+    // branch (a bare REQUEST_CHANGES review does NOT), so it rides ALONGSIDE the
+    // formal REQUEST_CHANGES verdict. If there's no PR yet the agent is still
+    // working; the retry counter still advances so a stuck unit eventually
+    // escalates.
     if (unit.pr !== null) {
+      const currentHead = unit.headSha ?? undefined
+      // One-outstanding-mention-per-PR: while the head still equals the SHA we
+      // last mentioned against (the agent hasn't pushed yet), suppress a fresh
+      // mention and FALL BACK to the review-only steer. Once the head advances a
+      // new mention is allowed again.
+      const mentionOutstanding =
+        unit.copilotMentionSha != null &&
+        currentHead != null &&
+        unit.copilotMentionSha === currentHead
+      if (!mentionOutstanding) {
+        const commentsUsed = unit.copilotComments ?? 0
+        if (mission !== undefined && commentsUsed >= maxCopilotCommentsOf(mission)) {
+          const request = await createHumanRequest(
+            unit,
+            mission,
+            { provider: unit.provider, prs: [] },
+            `per-mission @copilot comment budget (${maxCopilotCommentsOf(mission)}) exhausted — human input required`,
+            deps,
+          )
+          needsHuman.push({ request, sortKey: sortKey(unit), order: needsHuman.length })
+          await deps.upsertUnit(unit.repo, unit)
+          applied.push(`@copilot comment budget exhausted → escalated to human for ${unit.missionId}:${unitHandle(unit)}`)
+          return
+        }
+        await assertFenceHeld("copilot fix mention")
+        await deps.mentionCopilot(repo, unit.pr, instruction)
+        unit.copilotComments = commentsUsed + 1
+        unit.copilotMentionSha = currentHead ?? null
+        applied.push(`mentioned @copilot for same-branch fix on ${unit.missionId}:${unitHandle(unit)}`)
+      }
       await assertFenceHeld("fix-instruction review")
       await deps.submitReview(repo, unit.pr, "REQUEST_CHANGES", stampReviewSentinel(unit, instruction))
     }
+    unit.fixCycles = cyclesUsed + 1
     unit.retries += 1
     // A2: total author_fix dispatches over the unit's life — the hard bound that
     // the per-failure signature-reset can never zero. Kept UNCONDITIONAL (not
@@ -1804,6 +1860,28 @@ function activeCountsByAgent(units: UnitRow[]): Map<AgentKey, number> {
 /** Default plan-review gate for a mission (absent → the hard, current flow). */
 function planGateOf(mission: Mission | undefined): "hard" | "soft" {
   return mission?.planGate === "soft" ? "soft" : "hard"
+}
+
+/**
+ * Per-mission author_fix-cycle budget. An ADDITIONAL ceiling beside
+ * `policy.totalFixCap`/`maxRetries`: at the cap the controller escalates to a
+ * human instead of steering another cycle. Absent → the permissive default.
+ */
+const DEFAULT_MAX_FIX_CYCLES = 12
+const DEFAULT_MAX_COPILOT_COMMENTS = 8
+
+function maxFixCyclesOf(mission: Mission): number {
+  const value = mission.maxFixCycles
+  return typeof value === "number" && Number.isInteger(value) && value >= 1
+    ? value
+    : DEFAULT_MAX_FIX_CYCLES
+}
+
+function maxCopilotCommentsOf(mission: Mission): number {
+  const value = mission.maxCopilotComments
+  return typeof value === "number" && Number.isInteger(value) && value >= 1
+    ? value
+    : DEFAULT_MAX_COPILOT_COMMENTS
 }
 
 /** Format an epoch-ms timestamp as a UTC `YYYY-MM-DD` date for artifact paths. */

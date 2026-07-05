@@ -30,6 +30,19 @@ export interface Mission {
    * review escalates to a human instead of silently burning another plan cycle.
    */
   planGate?: "hard" | "soft"
+  /**
+   * Per-mission budget: the maximum number of author_fix cycles a single unit
+   * may burn before the controller STOPS iterating and escalates to a human.
+   * An ADDITIONAL cap beside `policy.totalFixCap`/`maxRetries` (not a
+   * replacement). Optional → back-compat; absent uses the controller default.
+   */
+  maxFixCycles?: number
+  /**
+   * Per-mission budget: the maximum number of `@copilot` fix mentions a single
+   * unit may post before the controller STOPS and escalates to a human.
+   * Optional → back-compat; absent uses the controller default.
+   */
+  maxCopilotComments?: number
   repos: RepoRef[]
   status: "active" | "done" | "abandoned"
   createdMs: number
@@ -68,6 +81,10 @@ function isOptionalFiniteNumber(value: unknown): boolean {
   return value === undefined || isFiniteNumber(value)
 }
 
+function isOptionalPositiveInteger(value: unknown): boolean {
+  return value === undefined || (Number.isInteger(value) && (value as number) >= 1)
+}
+
 function isRepoRef(value: unknown): value is RepoRef {
   const repo = asRecord(value)
   return (
@@ -93,6 +110,8 @@ function isMission(value: unknown): value is Mission {
     (mission.planGate === undefined ||
       mission.planGate === "hard" ||
       mission.planGate === "soft") &&
+    isOptionalPositiveInteger(mission.maxFixCycles) &&
+    isOptionalPositiveInteger(mission.maxCopilotComments) &&
     Array.isArray(mission.repos) &&
     mission.repos.every(isRepoRef) &&
     (mission.status === "active" ||

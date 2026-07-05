@@ -165,6 +165,7 @@ function harness(units: UnitRow[], missions: Mission[] = [mission()]) {
       headSha: `head-${pr}`, baseRef: "main", baseSha: `base-${pr}`,
     })),
     postComment: mock(async () => ({ url: "https://gh/c/1" })),
+    mentionCopilot: mock(async () => ({ url: "https://gh/c/copilot" })),
     getPullRequestReviews: mock(
       async (_repo: { owner: string; repo: string }, _pr: number) =>
         [] as Array<{
