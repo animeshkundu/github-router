@@ -59,6 +59,7 @@ import {
   runFenced,
   upsertUnit as realUpsertUnit,
 } from "~/lib/first-mate/ledger"
+import { renderDod } from "~/lib/first-mate/dod"
 import { observeUnit as realObserveUnit } from "~/lib/first-mate/observe"
 import { resolveCloudAgentModel } from "~/lib/first-mate/task-model"
 import { Outbox } from "~/lib/first-mate/scheduler/outbox"
@@ -808,6 +809,7 @@ async function applyModelAnswer(
         // non-null taskId here would wedge the replay guard forever and silently
         // lose the drained review_plan approval. The per-answer catch handles it.
         const model = resolveCloudAgentModel(unit.model ?? mission.defaultModel)
+        consola.debug(`first-mate: dispatching build task for ${unit.missionId}:${unitHandle(unit)} agent=${unit.agent}`)
         const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
           deps.startTask(repo, {
             prompt: buildPrompt(unit, mission) + promptTag,
@@ -833,6 +835,7 @@ async function applyModelAnswer(
       const instruction =
         stringValue(verdict.instruction) ?? "Refine the plan with more concrete implementation steps."
       if (mission !== undefined) {
+        consola.debug(`first-mate: dispatching plan-refine task for ${unit.missionId}:${unitHandle(unit)} agent=${unit.agent}`)
         const prompt = `${planPrompt(unit, mission)}\n\nRefine your previous plan per this feedback:\n${instruction}`
         // #1 — resolve the model BEFORE the persist inside dispatchWithOutbox
         // (see the approve branch above): a resolveCloudAgentModel throw must
@@ -1788,6 +1791,7 @@ function planPrompt(unit: UnitRow, mission: Mission): string {
     "Analyze the repository and produce a concrete, step-by-step implementation plan for this work unit: the files you will change, the approach, key risks, and how each acceptance criterion will be verified. Do NOT edit code or open a pull request yet — output the plan and stop. It will be reviewed before implementation.",
   ]
   if (mission.houseRules !== undefined) parts.splice(2, 0, `House rules:\n${mission.houseRules}`)
+  parts.push(renderDod([mission.acceptanceCriteria]))
   return parts.join("\n\n")
 }
 
@@ -1804,6 +1808,7 @@ function buildPrompt(unit: UnitRow, mission: Mission): string {
   parts.push(
     "Implement this work unit end-to-end on a new branch and open a pull request for review. Follow the approved plan above. Keep the change focused on this unit and do not modify unrelated files. If anything about the acceptance criteria is ambiguous, make a reasonable choice and note it in the PR description.",
   )
+  parts.push(renderDod([mission.acceptanceCriteria]))
   return parts.join("\n\n")
 }
 
@@ -1929,6 +1934,7 @@ async function dispatchUnit(
   // model + live catalog) leaves no dangling intent for the next wake to
   // misread as an interrupted dispatch / false orphan.
   const model = resolveCloudAgentModel(unit.model ?? mission.defaultModel)
+  consola.debug(`first-mate: dispatching plan task for ${unit.missionId}:${unitHandle(unit)} agent=${unit.agent}`)
   const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
     deps.startTask(repo, {
       prompt: planPrompt(unit, mission) + promptTag,
