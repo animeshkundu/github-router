@@ -566,10 +566,25 @@ describe("contract: spawned-Claude env defaults", () => {
     expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1")
   })
 
-  test("sets MCP_TIMEOUT and MCP_TOOL_TIMEOUT to 2100000ms (35 min — MCP_TOOL_TIMEOUT is the load-bearing per-tool-call lever on v2.1.141)", () => {
-    const env = getClaudeCodeEnvVars("http://127.0.0.1:8787")
-    expect(env.MCP_TIMEOUT).toBe("2100000")
-    expect(env.MCP_TOOL_TIMEOUT).toBe("2100000")
+  test("sets MCP_TIMEOUT and MCP_TOOL_TIMEOUT to the resolved default 22500000ms (6h15m — MCP_TOOL_TIMEOUT is the load-bearing per-tool-call lever on v2.1.141) when the parent env is unset", () => {
+    const origTimeout = process.env.MCP_TIMEOUT
+    const origToolTimeout = process.env.MCP_TOOL_TIMEOUT
+    const origOverride = process.env.GH_ROUTER_MCP_TOOL_TIMEOUT_MS
+    delete process.env.MCP_TIMEOUT
+    delete process.env.MCP_TOOL_TIMEOUT
+    delete process.env.GH_ROUTER_MCP_TOOL_TIMEOUT_MS
+    try {
+      const env = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      expect(env.MCP_TIMEOUT).toBe("22500000")
+      expect(env.MCP_TOOL_TIMEOUT).toBe("22500000")
+    } finally {
+      if (origTimeout === undefined) delete process.env.MCP_TIMEOUT
+      else process.env.MCP_TIMEOUT = origTimeout
+      if (origToolTimeout === undefined) delete process.env.MCP_TOOL_TIMEOUT
+      else process.env.MCP_TOOL_TIMEOUT = origToolTimeout
+      if (origOverride === undefined) delete process.env.GH_ROUTER_MCP_TOOL_TIMEOUT_MS
+      else process.env.GH_ROUTER_MCP_TOOL_TIMEOUT_MS = origOverride
+    }
   })
 
   test("sets CLAUDE_CONFIG_DIR to the router-owned snapshot mirror (per-config-dir keychain isolation, plus auth-substrate for spawned teammates)", () => {

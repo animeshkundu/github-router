@@ -305,7 +305,8 @@ export function buildPeerAgentDefinitions(
   // the result but has NO Agent/Read/Bash — it cannot spawn further agents
   // (no recursion) or do extra work; its prompt narrows it to the one mode.
   // The lead runs these in the background and is notified on completion, so a
-  // 30-min worker never blocks the main turn. Gated on `workerToolsAvailable`
+  // long-running (up to 6h) worker never blocks the main turn. Gated on
+  // `workerToolsAvailable`
   // (core modes) and `browseAvailable` (the extra `worker-browse`).
   if (opts.workerToolsAvailable) {
     const workersKey = workersKeyOf(opts.groupKeys)

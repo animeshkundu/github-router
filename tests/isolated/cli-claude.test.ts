@@ -266,10 +266,17 @@ mock.module("~/lib/colbert", () => ({
 const { claude } = await import("../../src/claude")
 const { state } = await import("../../src/lib/state")
 
-type CommandRunFn = (ctx: { args: Record<string, unknown> }) => Promise<void>
+type CommandRunFn = (ctx: {
+  args: Record<string, unknown>
+  rawArgs?: string[]
+}) => Promise<void>
 
-function getRunFn() {
-  return (claude as unknown as { run: CommandRunFn }).run
+function getRunFn(): CommandRunFn {
+  const run = (claude as unknown as { run: CommandRunFn }).run
+  // citty always supplies rawArgs at runtime; these unit calls omit it, so
+  // default to [] (the child-argv passthrough is derived from rawArgs now,
+  // not args._). A test can still pass rawArgs explicitly.
+  return (ctx) => run({ rawArgs: [], ...ctx })
 }
 
 const fakeServer = { close: mock(async () => {}), url: "http://127.0.0.1:12345" }
@@ -702,14 +709,23 @@ describe("claude command", () => {
     )
   })
 
-  test("extra positional args passed through", async () => {
+  test("extra args passed through to the child (from citty rawArgs, incl. an unknown flag)", async () => {
     const run = getRunFn()
 
-    await run({ args: { _: ["--verbose", "--debug"] } as Record<string, unknown> })
+    // citty routes unknown flags (like claude's --print) into rawArgs, not
+    // args._; the launcher forwards them by walking rawArgs and dropping only
+    // github-router's own flags. `-m …` here is consumed; the rest pass through.
+    await run({
+      args: { model: "claude-opus-4.7" },
+      rawArgs: ["-m", "claude-opus-4.7", "--print", "--debug"],
+    })
 
     const [, args] = spawnMock.mock.calls[0]
-    expect(args).toContain("--verbose")
+    expect(args).toContain("--print")
     expect(args).toContain("--debug")
+    // github-router's own -m + its value are NOT forwarded to the child.
+    expect(args).not.toContain("-m")
+    expect(args).not.toContain("claude-opus-4.7")
   })
 
   test("error from setupAndServe logs error and exits(1)", async () => {

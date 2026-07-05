@@ -164,6 +164,14 @@ export interface ResponsesPayload {
   max_output_tokens?: number
   temperature?: number
   top_p?: number
+  /** Stop sequences. Copilot's `/responses` accepts this (verified live, HTTP 200). */
+  stop?: Array<string>
+  /**
+   * Disable parallel tool calls. Copilot's `/responses` accepts this (verified
+   * live, HTTP 200). Only ever set to `false` (honor Anthropic's
+   * `disable_parallel_tool_use`); omitted otherwise.
+   */
+  parallel_tool_calls?: boolean
   stream?: boolean
   store?: boolean
   metadata?: Record<string, string>

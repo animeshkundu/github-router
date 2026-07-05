@@ -42,6 +42,15 @@ import {
   releaseBrowseSession,
 } from "~/lib/browser-mcp/session-registry"
 import { runWorkerAgent, type WorkerThinkingLevel } from "~/lib/worker-agent"
+// Budget helpers use a SUB-PATH import (`~/lib/worker-agent/budget`, not the
+// `~/lib/worker-agent` index above) so they pull in only the leaf `budget.ts`
+// (+ its type-only import) and do not reintroduce the
+// personas→worker-agent→engine→tools→personas cycle the index would.
+import {
+  MCP_TIMEOUT_HEADROOM_MS,
+  resolveMcpToolTimeoutMs,
+  workerWallClockCeilingMs,
+} from "~/lib/worker-agent/budget"
 import { searchWeb } from "~/services/copilot/web-search"
 import { runStandIn, type StandInInput } from "~/lib/stand-in"
 import { verifyWorkflowIR, decomposeWorkflow, attestRun, type AttestNode, type WorkflowIR } from "~/lib/orchestration"
@@ -1240,6 +1249,17 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               + "specific one. Must be absolute (relative paths "
               + "rejected).",
           },
+          maxWallClockMs: {
+            type: "integer",
+            description:
+              "Optional per-call wall-clock budget in ms; default 6h "
+              + "(21600000). Clamped just under the MCP tool-call "
+              + "ceiling (the injected MCP tool-call timeout minus a "
+              + "15-min teardown headroom) so the worker aborts "
+              + "gracefully with its partial work rather than being "
+              + "hard-killed; the effective value is reported in the "
+              + "result when a larger value is clamped down.",
+          },
         },
       },
       async handler(
@@ -1320,6 +1340,17 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               + "rejected). For worktree:true, must be inside a "
               + "git repo.",
           },
+          maxWallClockMs: {
+            type: "integer",
+            description:
+              "Optional per-call wall-clock budget in ms; default 6h "
+              + "(21600000). Clamped just under the MCP tool-call "
+              + "ceiling (the injected MCP tool-call timeout minus a "
+              + "15-min teardown headroom) so the worker aborts "
+              + "gracefully with its partial work rather than being "
+              + "hard-killed; the effective value is reported in the "
+              + "result when a larger value is clamped down.",
+          },
         },
       },
       async handler(
@@ -1393,6 +1424,17 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               + "specific one. Must be absolute (relative paths "
               + "rejected).",
           },
+          maxWallClockMs: {
+            type: "integer",
+            description:
+              "Optional per-call wall-clock budget in ms; default 6h "
+              + "(21600000). Clamped just under the MCP tool-call "
+              + "ceiling (the injected MCP tool-call timeout minus a "
+              + "15-min teardown headroom) so the worker aborts "
+              + "gracefully with its partial work rather than being "
+              + "hard-killed; the effective value is reported in the "
+              + "result when a larger value is clamped down.",
+          },
         },
       },
       async handler(
@@ -1459,6 +1501,17 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               + "workspaces open and the worker must operate in a "
               + "specific one. Must be absolute (relative paths "
               + "rejected).",
+          },
+          maxWallClockMs: {
+            type: "integer",
+            description:
+              "Optional per-call wall-clock budget in ms; default 6h "
+              + "(21600000). Clamped just under the MCP tool-call "
+              + "ceiling (the injected MCP tool-call timeout minus a "
+              + "15-min teardown headroom) so the worker aborts "
+              + "gracefully with its partial work rather than being "
+              + "hard-killed; the effective value is reported in the "
+              + "result when a larger value is clamped down.",
           },
         },
       },
@@ -1539,6 +1592,17 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               + "specific one. Must be absolute (relative paths "
               + "rejected). For worktree:true, must be inside a "
               + "git repo.",
+          },
+          maxWallClockMs: {
+            type: "integer",
+            description:
+              "Optional per-call wall-clock budget in ms; default 6h "
+              + "(21600000). Clamped just under the MCP tool-call "
+              + "ceiling (the injected MCP tool-call timeout minus a "
+              + "15-min teardown headroom) so the worker aborts "
+              + "gracefully with its partial work rather than being "
+              + "hard-killed; the effective value is reported in the "
+              + "result when a larger value is clamped down.",
           },
         },
       },
@@ -2170,6 +2234,39 @@ async function runWorkerToolCall(call: {
     workspace = args.workspace
   }
 
+  // Optional per-call wall-clock override (ms). Validate as a positive
+  // integer, then CLAMP to `workerWallClockCeilingMs()` (the injected MCP
+  // tool-call timeout minus the teardown headroom) so a caller can never grant
+  // a worker a budget that would let the harness hard-kill it mid-run — the
+  // worker must retain enough headroom to abort gracefully and deliver its
+  // partial work. When we clamp a larger request down, we report the effective
+  // value in the returned text so the caller isn't silently overridden.
+  let maxWallClockMs: number | undefined
+  let clampNote = ""
+  if (args.maxWallClockMs !== undefined) {
+    const raw = args.maxWallClockMs
+    if (typeof raw !== "number" || !Number.isInteger(raw) || raw <= 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `worker_${mode}: arguments.maxWallClockMs must be a positive integer (milliseconds) when provided`,
+          },
+        ],
+        isError: true,
+      }
+    }
+    const ceiling = workerWallClockCeilingMs()
+    maxWallClockMs = Math.min(raw, ceiling)
+    if (raw > ceiling) {
+      clampNote =
+        `[note: maxWallClockMs ${raw} exceeds the per-call ceiling; clamped to `
+        + `${ceiling} ms (the MCP tool-call timeout ${resolveMcpToolTimeoutMs()} ms `
+        + `minus the ${MCP_TIMEOUT_HEADROOM_MS} ms teardown headroom) so the worker `
+        + "aborts gracefully rather than being hard-killed mid-run.]\n\n"
+    }
+  }
+
   // `runWorkerAgent` is now statically imported at the top of this
   // file — the cycle that previously forced a dynamic import has
   // been broken by moving `assertCriticsMatchPersonas` out of
@@ -2181,10 +2278,11 @@ async function runWorkerToolCall(call: {
     model,
     thinking,
     worktree,
+    maxWallClockMs,
     signal,
   })
   return {
-    content: [{ type: "text", text: result.text }],
+    content: [{ type: "text", text: `${clampNote}${result.text}` }],
     isError: result.isError,
   }
 }

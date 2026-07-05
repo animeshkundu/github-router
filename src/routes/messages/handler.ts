@@ -3,9 +3,15 @@ import type { Context } from "hono"
 import consola from "consola"
 
 import { awaitApproval } from "~/lib/approval"
+import {
+  classifyMessagesRoute,
+  handleNonClaudeChat,
+  handleNonClaudeResponses,
+} from "~/lib/anthropic-translate"
 import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
+import { EFFORT_ORDER, bucketEffort, clampEffort } from "~/lib/reasoning-effort"
 import { logRequest, logRequestFields } from "~/lib/request-log"
 import { MAX_RESPONSE_BODY_BYTES, readResponseBodyCapped } from "~/lib/response-cap"
 import { sanitizeAnthropicBody } from "~/lib/sanitize-anthropic-body"
@@ -13,6 +19,7 @@ import { state } from "~/lib/state"
 import { relayAnthropicStream } from "~/lib/stream-relay"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import {
+  ADVISOR_INTERNAL_TOOL_NAME,
   buildAdvisorStream,
   injectAdvisorTool,
   isAdvisorRequested,
@@ -21,12 +28,13 @@ import { createMessages } from "~/services/copilot/create-messages"
 import type { Model } from "~/services/copilot/get-models"
 import { searchWeb } from "~/services/copilot/web-search"
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyRecord = Record<string, any>
+type AnyRecord = Record<string, unknown>
 
 const isWebSearchTool = (tool: AnyRecord): boolean =>
-  (typeof tool.type === "string" && tool.type.startsWith("web_search")) ||
-  tool.name === "web_search"
+  !!tool
+  && typeof tool === "object"
+  && ((typeof tool.type === "string" && tool.type.startsWith("web_search"))
+    || tool.name === "web_search")
 
 /**
  * Extract whitelisted beta headers from the incoming request to forward
@@ -109,27 +117,83 @@ function injectSearchResults(
 function stripWebSearchTool(body: AnyRecord): void {
   if (!body.tools) return
 
-  body.tools = body.tools.filter(
+  const tools = (body.tools as Array<AnyRecord>).filter(
     (tool: AnyRecord) => !isWebSearchTool(tool),
   )
+  body.tools = tools
 
-  if (body.tools.length === 0) {
+  if (tools.length === 0) {
     body.tools = undefined
     body.tool_choice = undefined
   } else if (
     body.tool_choice &&
     typeof body.tool_choice === "object" &&
-    body.tool_choice.type === "tool"
+    (body.tool_choice as AnyRecord).type === "tool"
   ) {
     // If tool_choice forced the removed web_search tool, fall back to auto
-    const choiceName = body.tool_choice.name
+    const choiceName = (body.tool_choice as AnyRecord).name
     if (
       choiceName &&
-      !body.tools.some((tool: AnyRecord) => tool.name === choiceName)
+      !tools.some(
+        (tool: AnyRecord) =>
+          tool && typeof tool === "object" && tool.name === choiceName,
+      )
     ) {
       body.tool_choice = { type: "auto" }
     }
   }
+}
+
+/**
+ * Strip the injected `__anthropic_advisor` tool (and any Anthropic-native
+ * `advisor_*` typed tool) from a request body. Used ONLY on the non-Claude
+ * shim path: ADVISOR's server-side translate-loop (buildAdvisorStream) lives
+ * on the native /v1/messages route, so a non-Claude model has no handler for
+ * the tool and it must be removed before forwarding — otherwise the model
+ * could emit a tool_use that nothing fulfils. Mirrors stripWebSearchTool's
+ * tool_choice cleanup. Returns the original string (same reference) when
+ * nothing was removed.
+ */
+function stripAdvisorTool(rawBody: string): string {
+  let body: AnyRecord
+  try {
+    body = JSON.parse(rawBody)
+  } catch {
+    return rawBody
+  }
+  if (!Array.isArray(body.tools)) return rawBody
+  const original = body.tools as Array<AnyRecord>
+  const tools = original.filter((tool: AnyRecord) => {
+    if (typeof tool !== "object" || tool === null) return true
+    if (tool.name === ADVISOR_INTERNAL_TOOL_NAME) return false
+    const type = tool.type
+    return typeof type !== "string" || !type.startsWith("advisor_")
+  })
+  if (tools.length === original.length) return rawBody
+
+  if (tools.length === 0) {
+    body.tools = undefined
+    body.tool_choice = undefined
+  } else {
+    body.tools = tools
+    if (
+      body.tool_choice
+      && typeof body.tool_choice === "object"
+      && (body.tool_choice as AnyRecord).type === "tool"
+    ) {
+      const choiceName = (body.tool_choice as AnyRecord).name
+      if (
+        choiceName
+        && !tools.some(
+          (tool: AnyRecord) =>
+            tool && typeof tool === "object" && tool.name === choiceName,
+        )
+      ) {
+        body.tool_choice = { type: "auto" }
+      }
+    }
+  }
+  return JSON.stringify(body)
 }
 
 /**
@@ -148,14 +212,15 @@ async function processWebSearch(rawBody: string): Promise<string> {
     return rawBody
   }
 
-  const hasWebSearch = body.tools?.some(
+  const hasWebSearch = (body.tools as Array<AnyRecord> | undefined)?.some(
     (tool: AnyRecord) => isWebSearchTool(tool),
   )
   if (!hasWebSearch) return rawBody
 
   // Skip search on follow-up messages (tool call results)
-  const hasToolResult = hasToolResultContent(body.messages ?? [])
-  const query = hasToolResult ? undefined : extractUserQuery(body.messages ?? [])
+  const messages = (body.messages ?? []) as Array<AnyRecord>
+  const hasToolResult = hasToolResultContent(messages)
+  const query = hasToolResult ? undefined : extractUserQuery(messages)
 
   if (query) {
     try {
@@ -287,6 +352,56 @@ export async function handleCompletion(c: Context) {
   } = resolveModelInBody(finalBody)
 
   const modelId = resolvedModel ?? originalModel
+
+  // Non-Claude models are diverted to the Anthropic-translation shim: those
+  // Copilot serves via `/responses` (gpt-5.5, gpt-5.3-codex) take the Responses
+  // path, those it serves via `/chat/completions` (gemini) take the chat path.
+  // Claude models fall through to the native `createMessages` passthrough below,
+  // byte-for-byte unchanged. The decision is keyed off the resolved model's
+  // identity + catalog endpoint (see classifyMessagesRoute), never a hardcoded
+  // slug list. The ORIGINAL (pre-resolution) request model id is passed as the
+  // 3rd arg so a Claude alias that resolveModel maps onto a non-Claude-looking
+  // id can never be diverted to either shim (fail-closed to Claude).
+  const messagesRoute = classifyMessagesRoute(modelId, selectedModel, originalModel)
+  if (messagesRoute !== "claude-passthrough") {
+    // ADVISOR is a Claude-only feature: the server-side advisor translate-loop
+    // (buildAdvisorStream) exists only on the native /v1/messages path, not on
+    // either shim. When a request carrying the advisor beta/tool routes to a
+    // non-Claude model — whether picked via `-m <model>` or switched at runtime
+    // via the /model picker — gracefully DEGRADE instead of 400ing every
+    // request (which would break `github-router claude -m gpt-5.5` entirely,
+    // since the claude launcher auto-enables the advisor beta). Strip the
+    // injected `__anthropic_advisor` tool (which would otherwise reach the
+    // model with no server-side handler) and ignore the advisor beta, then
+    // forward to the shim so the request succeeds. Advisor is simply
+    // unavailable on non-Claude models. The Claude passthrough path (below) is
+    // unchanged — the advisor loop still runs there.
+    // Strip the internal advisor tool UNCONDITIONALLY on every shim path
+    // (defense-in-depth): the reserved `__anthropic_advisor` / `advisor_*` tool
+    // is a proxy-internal contract with no server-side handler off the Claude
+    // path, so it must never reach gpt/gemini regardless of whether the advisor
+    // beta was present — a hand-crafted client could decouple the tool from the
+    // beta. stripAdvisorTool returns the same string when nothing matched.
+    const shimBody = stripAdvisorTool(resolvedBody)
+    if (advisorEnabled) {
+      consola.info(
+        "ADVISOR requested with a non-Claude model — stripping the injected "
+          + "__anthropic_advisor tool and proceeding without advisor (Claude-only "
+          + "feature; gracefully degraded).",
+      )
+    }
+    const shimOpts = {
+      rawBody: shimBody,
+      modelId: modelId!,
+      model: selectedModel,
+      originalModel,
+      startTime,
+    }
+    return messagesRoute === "chat-shim"
+      ? handleNonClaudeChat(c, shimOpts)
+      : handleNonClaudeResponses(c, shimOpts)
+  }
+
   if (modelId) logEndpointMismatch(modelId, "/v1/messages")
 
   // Apply default anthropic-beta for Claude models when client sends none
@@ -454,14 +569,18 @@ export async function handleCompletion(c: Context) {
 
   const responseBody = cappedResult.value
 
+  const usage = responseBody.usage as
+    | { input_tokens?: number; output_tokens?: number }
+    | undefined
+
   logRequest(
     {
       method: "POST",
       path: c.req.path,
       model: originalModel,
       resolvedModel,
-      inputTokens: responseBody.usage?.input_tokens,
-      outputTokens: responseBody.usage?.output_tokens,
+      inputTokens: usage?.input_tokens,
+      outputTokens: usage?.output_tokens,
       status: response.status,
     },
     selectedModel,
@@ -584,50 +703,9 @@ function resolveModelInBody(rawBody: string): {
   }
 }
 
-export const EFFORT_ORDER = ["low", "medium", "high", "xhigh"] as const
-
-/**
- * Bucket a thinking budget into a Copilot reasoning-effort string.
- * `<2000`→low, `<8000`→medium, `<24000`→high, else→xhigh.
- * Defaults missing/non-numeric budgets to 8000 ("high").
- */
-export function bucketEffort(budget: unknown): (typeof EFFORT_ORDER)[number] {
-  const n =
-    typeof budget === "number" && Number.isFinite(budget) ? budget : 8000
-  if (n < 2000) return "low"
-  if (n < 8000) return "medium"
-  if (n < 24000) return "high"
-  return "xhigh"
-}
-
-/**
- * Clamp a bucketed effort to the closest value in `supported`. Ties
- * resolve to the lower-tier option (per EFFORT_ORDER).
- *
- * Iterates EFFORT_ORDER (canonical low→xhigh) so the first match on a
- * given distance is always the lower-tier value, regardless of input
- * order in `supported`.
- */
-export function clampEffort(
-  bucketed: (typeof EFFORT_ORDER)[number],
-  supported: Array<string>,
-): string {
-  if (supported.includes(bucketed)) return bucketed
-  const targetIdx = EFFORT_ORDER.indexOf(bucketed)
-  let best: (typeof EFFORT_ORDER)[number] | undefined
-  let bestDist = Infinity
-  for (let i = 0; i < EFFORT_ORDER.length; i++) {
-    const value = EFFORT_ORDER[i]
-    if (!supported.includes(value)) continue
-    const dist = Math.abs(i - targetIdx)
-    // strict `<` keeps the first (lower-tier) on ties
-    if (dist < bestDist) {
-      bestDist = dist
-      best = value
-    }
-  }
-  return best ?? bucketed
-}
+// Re-exported for backward compatibility — the definitions moved to
+// `~/lib/reasoning-effort` (shared with the Anthropic-translation shim).
+export { EFFORT_ORDER, bucketEffort, clampEffort }
 
 /**
  * Clamp `body.output_config.effort` to the model's
@@ -699,9 +777,10 @@ function translateThinking(body: AnyRecord, model?: Model): boolean {
   if (!model?.capabilities?.supports?.adaptive_thinking) return false
   const thinking = body.thinking
   if (!thinking || typeof thinking !== "object") return false
-  if (thinking.type !== "enabled") return false
+  const t = thinking as AnyRecord
+  if (t.type !== "enabled") return false
 
-  const bucketed = bucketEffort(thinking.budget_tokens)
+  const bucketed = bucketEffort(t.budget_tokens)
   const supported = model.capabilities.supports.reasoning_effort
   const effort =
     Array.isArray(supported) && supported.length > 0
@@ -734,9 +813,10 @@ function translateThinking(body: AnyRecord, model?: Model): boolean {
 function sanitizeCacheControl(body: AnyRecord): boolean {
   let stripped = false
   function stripScope(block: AnyRecord): void {
-    if (block.cache_control?.scope !== undefined) {
-      delete block.cache_control.scope
-      if (Object.keys(block.cache_control).length === 0) {
+    const cc = block.cache_control as AnyRecord | undefined
+    if (cc?.scope !== undefined) {
+      delete cc.scope
+      if (Object.keys(cc).length === 0) {
         delete block.cache_control
       }
       stripped = true

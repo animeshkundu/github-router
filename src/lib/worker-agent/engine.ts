@@ -82,7 +82,7 @@ import type {
   ToolCall,
 } from "@earendil-works/pi-ai"
 
-import { Budget, WorkerAbort } from "./budget"
+import { Budget } from "./budget"
 import {
   WorktreeRegistry,
   getInstanceUuid,
@@ -397,8 +397,10 @@ async function runWorkerAgentOnce(
     // Step 5: budget construction. Defaults from the constructor;
     // env-overrides are read by `resolveBudgetConfig` (called inside
     // the `Budget` constructor) so users can tighten the caps without
-    // a code change.
-    const budget = new Budget()
+    // a code change. A per-call `maxWallClockMs` (already validated and
+    // clamped to `workerWallClockCeilingMs()` at the MCP boundary) wins
+    // over both when present; `undefined` falls through to env/default.
+    const budget = new Budget({ maxWallClockMs: opts.maxWallClockMs })
 
     // Step 6: tools. `getMessages` exposes the LIVE Pi transcript to the
     // `advisor` tool so it can include the recent conversation as context;
@@ -598,7 +600,7 @@ async function runWorkerAgentOnce(
     // Step 10: wall-clock timer. `Budget.checkBeforeCall` already
     // enforces wallclock on each tool boundary, but a runaway bash
     // (whose own timeout is up to 10 minutes) could exceed the
-    // 30-minute cap mid-run. The timer fires `agent.abort()` which
+    // wall-clock cap mid-run. The timer fires `agent.abort()` which
     // cascades into the per-tool signal and tears the bash down.
     // `.unref()` so the timer doesn't keep the event loop alive past
     // the test/scope that owns this call.
@@ -660,13 +662,17 @@ async function runWorkerAgentOnce(
       // a raw upstream error body, and never report an error as success.
       if (lastStopReason === "error") {
         const diag = (terminalText ?? finalText).trim()
+        const diagnostic =
+          diag
+          || "Worker run failed before producing an answer — the model's input "
+            + "likely overflowed (a large tool result), or the upstream errored. "
+            + "Retry with a narrower task: target a specific section / file / "
+            + "element rather than reading everything at once."
+        // The worktree diff was already captured above (before ws.remove);
+        // a terminal stream error must NOT throw that partial work away.
+        // Append it when present so the caller can still inspect / apply it.
         return {
-          text:
-            diag
-            || "Worker run failed before producing an answer — the model's input "
-              + "likely overflowed (a large tool result), or the upstream errored. "
-              + "Retry with a narrower task: target a specific section / file / "
-              + "element rather than reading everything at once.",
+          text: [diagnostic, diff].filter(Boolean).join("\n\n"),
           isError: true,
         }
       }
@@ -683,17 +689,24 @@ async function runWorkerAgentOnce(
       return { text }
     } catch (err) {
       // Step 13b: error-path cleanup. Mirror the success path so the
-      // worktree can't strand on a Pi-throws-mid-loop path. For
-      // `WorkerAbort` (budget cap hit), capture the diff before tearing
-      // the worktree down — the partial work Pi did is still useful for
-      // the caller to inspect.
+      // worktree can't strand on a Pi-throws-mid-loop path. Capture the
+      // diff BEFORE tearing the worktree down for ANY caught error (not
+      // just a budget cap) — the partial work Pi did is still useful for
+      // the caller to inspect, and it's destroyed the moment `ws.remove()`
+      // deletes the worktree. Own try/catch so a finalize failure can't
+      // mask the original thrown error (which is always appended below);
+      // a failure records a `[diff capture failed: …]` marker instead of
+      // silently dropping the signal.
       let diff = ""
-      if (err instanceof WorkerAbort) {
-        try {
-          diff = await ws.finalize()
-        } catch {
-          /* ignore — best-effort, halt message stands alone */
-        }
+      try {
+        diff = await ws.finalize()
+      } catch (err) {
+        // Consistent with the success path: surface the finalize failure in
+        // the diff slot so the caller learns the worktree change could not be
+        // captured, rather than silently losing that signal (the worktree is
+        // about to be removed). The original thrown error is still pushed
+        // below, so this never masks it.
+        diff = `[diff capture failed: ${(err as Error).message}]`
       }
       try {
         await ws.remove()

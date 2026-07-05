@@ -38,6 +38,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import process from "node:process"
 
+import { PATHS } from "../paths"
 import { recordWorkerRepo } from "./lifecycle"
 import type { WorktreeRegistry, WorktreeRegistryEntry } from "./lifecycle"
 
@@ -417,8 +418,71 @@ export async function createWorktree(
     // we just count lines and let the reader sanity-check.
     const lineCount = stat.split(/\r?\n/).filter((l) => l.length > 0).length
     const fileEstimate = Math.max(0, lineCount - 1)
-    return `[diff truncated at 256KB; ${fileEstimate} files changed]\n${stat}`
+    const summary = `[diff truncated at 256KB; ${fileEstimate} files changed]\n${stat}`
+    // The inline diff is truncated, but the worktree is about to be
+    // removed — so persist the FULL patch to a durable router-owned file
+    // OUTSIDE the worktree (and outside the user's repo) and hand the
+    // caller its absolute path, so the change is recoverable / appliable
+    // rather than destroyed.
+    let savedPath: string | null = null
+    let saveError: string | null = null
+    try {
+      savedPath = await saveOverflowPatch(dir)
+    } catch (err) {
+      saveError = (err as Error).message
+    }
+    if (savedPath !== null) {
+      return (
+        `${summary}\n` +
+        `Full patch (git apply-able; includes binary blobs) saved to: ${savedPath}`
+      )
+    }
+    // Durable persistence failed (e.g. the full patch exceeded the exec
+    // buffer, or the app dir was unwritable). Don't hide it — the worktree
+    // is about to be removed, so signal explicitly that only the summary
+    // survives rather than returning a summary that silently looks complete.
+    return (
+      `${summary}\n` +
+      `[full patch save failed: ${saveError ?? "unknown"}; only the summary above is available]`
+    )
   }
 
   return { dir, branch, finalize, remove }
+}
+
+/**
+ * Persist the FULL `git diff --binary --full-index HEAD` of `dir` to a
+ * durable, router-owned file under `PATHS.WORKER_DIFFS_DIR` and return its
+ * absolute path.
+ *
+ * Called by `finalize()` ONLY when the inline diff overflows
+ * `DIFF_CAP_BYTES`: the worktree is removed immediately after finalize, so a
+ * truncated inline diff would otherwise lose the actual patch forever. The
+ * durable dir lives under the app dir — never inside the worktree (deleted)
+ * nor the user's repo (don't pollute it).
+ *
+ * `--binary` keeps binary blobs recoverable (git base85-encodes them into
+ * the patch) and `--full-index` writes exact 40-char object indexes, so the
+ * saved patch reconstructs the change precisely under `git apply`. Uses the
+ * same `execFileP` git mechanism the rest of `finalize()` uses (shell:false).
+ *
+ * Unique filename `<pid>-<8hex>.patch` — collision-free across concurrent
+ * workers and repeated finalize calls.
+ */
+async function saveOverflowPatch(dir: string): Promise<string> {
+  const patch = await execFileP(
+    "git",
+    ["-C", dir, "diff", "--binary", "--full-index", "HEAD"],
+    { maxBuffer: 256 * 1024 * 1024 },
+  )
+  await fs.mkdir(PATHS.WORKER_DIFFS_DIR, { recursive: true })
+  const name = `${process.pid}-${randomBytes(4).toString("hex")}.patch`
+  const patchPath = path.join(PATHS.WORKER_DIFFS_DIR, name)
+  // `flag: "wx"` (exclusive create) matches the repo's secure-write
+  // convention and refuses to clobber a pre-existing file/symlink at the
+  // path; on the (astronomically rare) name collision the throw is caught by
+  // finalize()'s save-error handler, which signals the failure rather than
+  // silently overwriting.
+  await fs.writeFile(patchPath, patch.stdout, { mode: 0o600, flag: "wx" })
+  return patchPath
 }

@@ -2,7 +2,7 @@
  * Frozen contract for the NON-BLOCKING workers surface.
  *
  * The `workers` MCP tools (`explore`/`implement`/`review`/`plan`/`test`, and
- * `browse` when the browse agent is enabled) BLOCK the caller for up to 30 min
+ * `browse` when the browse agent is enabled) BLOCK the caller for up to 6h
  * (`runWorkerAgent`). The MAIN Claude Code agent must never block on one, so a
  * per-mode `worker-*` DISPATCHER SUBAGENT — which Claude Code runs in the
  * background and reports on via a completion notification — is the only
@@ -229,14 +229,15 @@ export function dispatcherPrompt(mode: WorkerDispatchMode, workersKey: string): 
     `# Subagent: ${dispatcherAgentName(mode)}`,
     "",
     `You are a thin DISPATCHER for the \`${mode}\` worker. You run in the background so the`,
-    "lead agent's turn is never blocked while the (up-to-30-minute) worker runs.",
+    "lead agent's turn is never blocked while the (up-to-6-hour) worker runs.",
     "",
     "## Your only job",
     "",
     `Call the \`${tool}\` tool EXACTLY ONCE, passing through the fields from the lead's brief:`,
     "  - `prompt`: the lead's worker brief, copied verbatim",
     "  - `workspace` (optional): absolute path, if the lead specified one",
-    "  - `model` / `thinking` (optional): only if the lead specified them"
+    "  - `model` / `thinking` (optional): only if the lead specified them",
+    "  - `maxWallClockMs` (optional): per-call wall-clock budget in ms, if the lead specified one"
       + (mode === "implement" || mode === "test" ? "\n  - `worktree` (optional): pass `true` if the lead asked for isolated-worktree execution" : ""),
     "",
     "When the tool returns, output its result VERBATIM as your final message. That final",

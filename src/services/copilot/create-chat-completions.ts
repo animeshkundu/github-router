@@ -214,6 +214,12 @@ export interface ChatCompletionsPayload {
     | "required"
     | { type: "function"; function: { name: string } }
     | null
+  /**
+   * Disable parallel tool calls. Copilot's `/chat/completions` accepts this;
+   * only ever set to `false` (honor Anthropic's `disable_parallel_tool_use`),
+   * omitted otherwise — never sent as `true`.
+   */
+  parallel_tool_calls?: boolean
   user?: string | null
   /**
    * OpenAI-compatible reasoning effort knob. Copilot accepts low/medium/high/xhigh
