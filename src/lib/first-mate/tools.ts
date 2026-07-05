@@ -132,6 +132,10 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
         priority: numberProp("Optional numeric priority; higher values are handled by controller policy."),
         house_rules: stringProp("Optional repository or operator constraints."),
         default_model: stringProp("Model the GitHub cloud coding agent uses for this mission's tasks; defaults to gpt-5.5."),
+        plan_gate: enumProp(
+          ["hard", "soft"],
+          "Plan-review gate. hard (default) requires the flow's review before build and re-plans on a rejecting review; soft auto-advances a passing plan review to build without human approval but escalates a rejecting review to a human.",
+        ),
       }, ["goal", "repos", "acceptance_criteria"]),
       async (args) => {
         const repos = requiredStringArray(args, "repos").map(parseRepoRef)
@@ -143,6 +147,7 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
         // wake at dispatch. Unspecified → gpt-5.5 default → resolves silently.
         const defaultModel = optionalString(args, "default_model")
         resolveCloudAgentModel(defaultModel)
+        const planGate = optionalPlanGate(args, "plan_gate")
         await upsertMission({
           id: missionId,
           goal: requiredString(args, "goal"),
@@ -150,6 +155,7 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
           houseRules: optionalString(args, "house_rules"),
           priority: optionalNumber(args, "priority"),
           defaultModel,
+          ...(planGate !== undefined ? { planGate } : {}),
           repos,
           status: "active",
           createdMs: now,
@@ -453,6 +459,21 @@ function optionalNumber(args: Record<string, unknown>, key: string): number | un
   if (value === undefined) return undefined
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new FirstMateToolInputError("INVALID_ARGUMENT", `arguments.${key} must be a finite number`)
+  }
+  return value
+}
+
+function optionalPlanGate(
+  args: Record<string, unknown>,
+  key: string,
+): "hard" | "soft" | undefined {
+  const value = optionalString(args, key)
+  if (value === undefined) return undefined
+  if (value !== "hard" && value !== "soft") {
+    throw new FirstMateToolInputError(
+      "INVALID_ARGUMENT",
+      `arguments.${key} must be one of "hard" or "soft"`,
+    )
   }
   return value
 }

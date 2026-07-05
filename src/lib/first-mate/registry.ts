@@ -22,6 +22,14 @@ export interface Mission {
    * to DEFAULT_CODEX_MODEL. A per-unit `UnitRow.model` overrides this.
    */
   defaultModel?: string
+  /**
+   * Plan-review gate policy. `hard` (default when absent) keeps the current
+   * flow: a model plan review's approve dispatches the build and a rejecting
+   * review re-runs planning autonomously. `soft` still auto-advances a PASSING
+   * plan review to the build dispatch without human approval, but a REJECTING
+   * review escalates to a human instead of silently burning another plan cycle.
+   */
+  planGate?: "hard" | "soft"
   repos: RepoRef[]
   status: "active" | "done" | "abandoned"
   createdMs: number
@@ -82,6 +90,9 @@ function isMission(value: unknown): value is Mission {
     isOptionalString(mission.houseRules) &&
     isOptionalFiniteNumber(mission.priority) &&
     isOptionalString(mission.defaultModel) &&
+    (mission.planGate === undefined ||
+      mission.planGate === "hard" ||
+      mission.planGate === "soft") &&
     Array.isArray(mission.repos) &&
     mission.repos.every(isRepoRef) &&
     (mission.status === "active" ||

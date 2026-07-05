@@ -768,6 +768,7 @@ async function applyModelAnswer(
   missions: Mission[],
   deps: ControllerDeps,
   applied: string[],
+  needsHuman: QueuedRequest<HumanRequest>[],
   renewLease?: () => Promise<boolean>,
 ): Promise<void> {
   const target = findModelTarget(units, answer.requestId)
@@ -812,7 +813,7 @@ async function applyModelAnswer(
         consola.debug(`first-mate: dispatching build task for ${unit.missionId}:${unitHandle(unit)} agent=${unit.agent}`)
         const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
           deps.startTask(repo, {
-            prompt: buildPrompt(unit, mission) + promptTag,
+            prompt: buildPrompt(unit, mission, artifactDate(Date.now())) + promptTag,
             model,
             createPullRequest: true,
             idempotencyKey,
@@ -834,9 +835,25 @@ async function applyModelAnswer(
       // plan task is one-shot). Unit stays in the plan phase for another review.
       const instruction =
         stringValue(verdict.instruction) ?? "Refine the plan with more concrete implementation steps."
-      if (mission !== undefined) {
+      if (mission !== undefined && planGateOf(mission) === "soft") {
+        // Soft plan gate: a REJECTING plan review is serious enough to pull a
+        // human in rather than silently burning another autonomous plan cycle.
+        // Block the unit on a human decision carrying the reviewer's feedback;
+        // createHumanRequest sets unit.blockingDecisionId, so the sweep observes
+        // (not re-asks) it and no second review_plan is emitted this wake.
+        const request = await createHumanRequest(
+          unit,
+          mission,
+          { provider: unit.provider, prs: [] },
+          `plan review rejected (soft gate) — human input required: ${instruction}`,
+          deps,
+        )
+        needsHuman.push({ request, sortKey: sortKey(unit), order: needsHuman.length })
+        await deps.upsertUnit(unit.repo, unit)
+        applied.push(`plan review rejected → escalated to human for ${unit.missionId}:${unitHandle(unit)}`)
+      } else if (mission !== undefined) {
         consola.debug(`first-mate: dispatching plan-refine task for ${unit.missionId}:${unitHandle(unit)} agent=${unit.agent}`)
-        const prompt = `${planPrompt(unit, mission)}\n\nRefine your previous plan per this feedback:\n${instruction}`
+        const prompt = `${planPrompt(unit, mission, artifactDate(Date.now()))}\n\nRefine your previous plan per this feedback:\n${instruction}`
         // #1 — resolve the model BEFORE the persist inside dispatchWithOutbox
         // (see the approve branch above): a resolveCloudAgentModel throw must
         // leave no dangling dispatch intent.
@@ -1046,6 +1063,7 @@ async function applySubmittedAnswers(
   input: AdvanceInput,
   deps: ControllerDeps,
   applied: string[],
+  needsHuman: QueuedRequest<HumanRequest>[],
 ): Promise<void> {
   const units = await deps.loadAllUnits()
   const missions = await deps.readMissions()
@@ -1056,7 +1074,7 @@ async function applySubmittedAnswers(
       if (answer.requestId.startsWith("decompose:")) {
         await applyDecomposeAnswer(answer, missions, deps, applied)
       } else {
-        await applyModelAnswer(answer, units, missions, deps, applied, input.renewLease)
+        await applyModelAnswer(answer, units, missions, deps, applied, needsHuman, input.renewLease)
       }
     } catch (err) {
       consola.warn(`first-mate: model answer ${answer.requestId} failed to apply:`, err)
@@ -1783,19 +1801,48 @@ function activeCountsByAgent(units: UnitRow[]): Map<AgentKey, number> {
   return counts
 }
 
-function planPrompt(unit: UnitRow, mission: Mission): string {
+/** Default plan-review gate for a mission (absent → the hard, current flow). */
+function planGateOf(mission: Mission | undefined): "hard" | "soft" {
+  return mission?.planGate === "soft" ? "soft" : "hard"
+}
+
+/** Format an epoch-ms timestamp as a UTC `YYYY-MM-DD` date for artifact paths. */
+export function artifactDate(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10)
+}
+
+/**
+ * Deterministic, filesystem-safe slug for a unit's durable artifacts. Derived
+ * from the unit title (stable `id` as a fallback) so the plan and build tasks
+ * agree on the same `docs/research`/`docs/plans` filenames without any clock.
+ */
+export function artifactSlug(unit: UnitRow): string {
+  const source = unit.title.trim() || unit.id || "unit"
+  const slug = source
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60)
+    .replace(/-+$/g, "")
+  return slug.length > 0 ? slug : "unit"
+}
+
+export function planPrompt(unit: UnitRow, mission: Mission, dateStr: string): string {
+  const slug = artifactSlug(unit)
   const parts = [
     `Mission goal:\n${mission.goal}`,
     `Acceptance criteria:\n${mission.acceptanceCriteria}`,
     `Work unit:\n${unit.title}`,
     "Analyze the repository and produce a concrete, step-by-step implementation plan for this work unit: the files you will change, the approach, key risks, and how each acceptance criterion will be verified. Do NOT edit code or open a pull request yet — output the plan and stop. It will be reviewed before implementation.",
+    `Persist your work as durable artifacts committed on the branch: write your research and findings to \`docs/research/${dateStr}-${slug}.md\` and your step-by-step implementation plan to \`docs/plans/${dateStr}-${slug}.md\`. Create the \`docs/research\` and \`docs/plans\` directories if they do not exist, and commit both files on the branch so the implementation task can read them.`,
   ]
   if (mission.houseRules !== undefined) parts.splice(2, 0, `House rules:\n${mission.houseRules}`)
   parts.push(renderDod([mission.acceptanceCriteria]))
   return parts.join("\n\n")
 }
 
-function buildPrompt(unit: UnitRow, mission: Mission): string {
+export function buildPrompt(unit: UnitRow, mission: Mission, dateStr: string): string {
+  const slug = artifactSlug(unit)
   const parts = [
     `Mission goal:\n${mission.goal}`,
     `Acceptance criteria:\n${mission.acceptanceCriteria}`,
@@ -1807,6 +1854,9 @@ function buildPrompt(unit: UnitRow, mission: Mission): string {
   }
   parts.push(
     "Implement this work unit end-to-end on a new branch and open a pull request for review. Follow the approved plan above. Keep the change focused on this unit and do not modify unrelated files. If anything about the acceptance criteria is ambiguous, make a reasonable choice and note it in the PR description.",
+  )
+  parts.push(
+    `Read the committed implementation plan at \`docs/plans/${dateStr}-${slug}.md\` and the research at \`docs/research/${dateStr}-${slug}.md\` (if the exact dated filename is absent, locate the plan committed for this unit under \`docs/plans/\` whose name ends with \`-${slug}.md\`) and implement it. Keep those artifacts up to date with any deviations you make, and if a \`LEARNINGS.md\` exists at the repository root, append a dated entry summarizing what you learned.`,
   )
   parts.push(renderDod([mission.acceptanceCriteria]))
   return parts.join("\n\n")
@@ -1937,7 +1987,7 @@ async function dispatchUnit(
   consola.debug(`first-mate: dispatching plan task for ${unit.missionId}:${unitHandle(unit)} agent=${unit.agent}`)
   const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
     deps.startTask(repo, {
-      prompt: planPrompt(unit, mission) + promptTag,
+      prompt: planPrompt(unit, mission, artifactDate(Date.now())) + promptTag,
       model,
       createPullRequest: false,
       idempotencyKey,
@@ -2188,7 +2238,7 @@ export async function advance(
       }
     }
 
-    await applySubmittedAnswers(answersInput, deps, applied)
+    await applySubmittedAnswers(answersInput, deps, applied, needsHuman)
     // Checkpoint: the drained answers are now durably applied (and any that
     // failed to apply were re-enqueued by applySubmittedAnswers). Only now
     // delete the claimed inbox file(s). A crash before this ack leaves the
@@ -2207,7 +2257,10 @@ export async function advance(
       ? missions.filter((m) => m.id === input.missionId)
       : missions
     const missionsById = missionMap(scopedMissions)
-    let order = 0
+    // Continue the request-order counter past any answer-phase escalations
+    // (soft plan-gate rejections push needsHuman before the sweep) so ordering
+    // stays monotonic and answer-phase requests never collide with sweep ones.
+    let order = needsHuman.length
 
     // Start-of-drive reconciliation: clear stale blocks, answer pending
     // decisions on terminal units, warn on orphaned consumed approvals. Best

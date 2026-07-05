@@ -2,7 +2,10 @@ import { expect, mock, test } from "bun:test"
 
 import {
   advance,
+  artifactSlug,
+  buildPrompt,
   failureSignature,
+  planPrompt,
   type ControllerDeps,
 } from "~/lib/first-mate/controller"
 import type { DecisionRecord } from "~/lib/first-mate/decisions"
@@ -2015,4 +2018,119 @@ test("catalog present: decompose with an invalid explicit unit model fails fast 
   } finally {
     state.models = savedModels
   }
+})
+
+test("soft plan gate: a passing plan review auto-dispatches build with NO needsHuman", async () => {
+  const row = unit({
+    provider: "completed",
+    phase: "plan",
+    dispatchMode: "plan",
+    planExcerpt: "1. Bump Flask to 3.x. 2. Add pyproject.toml.",
+  })
+  const h = harness([row], [mission({ planGate: "soft" })])
+  h.observations.set("1", { provider: "queued", prs: [] })
+
+  const result = await advance(
+    { modelAnswers: [{ requestId: "m1:1:review_plan", verdict: { decision: "approve" } }] },
+    h.deps,
+  )
+
+  // Passing review under a soft gate advances straight to build — same as hard —
+  // and never surfaces a human decision.
+  const buildCall = (
+    h.deps.startTask as unknown as { mock: { calls: unknown[][] } }
+  ).mock.calls.find((c) => (c[1] as { createPullRequest?: boolean }).createPullRequest === true)
+  expect(buildCall).toBeDefined()
+  expect((buildCall![1] as { prompt: string }).prompt).toContain("1. Bump Flask to 3.x.")
+  expect(row.dispatchMode).toBe("build")
+  expect(result.needsHuman).toHaveLength(0)
+})
+
+test("soft plan gate: a rejecting plan review escalates to a human and does NOT re-dispatch a plan task", async () => {
+  const row = unit({
+    provider: "completed",
+    phase: "plan",
+    dispatchMode: "plan",
+    planExcerpt: "old plan",
+  })
+  const h = harness([row], [mission({ planGate: "soft" })])
+  h.observations.set("1", { provider: "completed", prs: [] })
+
+  const result = await advance(
+    {
+      modelAnswers: [
+        {
+          requestId: "m1:1:review_plan",
+          verdict: { decision: "refine", instruction: "This plan is wrong." },
+        },
+      ],
+    },
+    h.deps,
+  )
+
+  // Escalated to a human decision carrying the reviewer feedback.
+  expect(result.needsHuman.length).toBeGreaterThanOrEqual(1)
+  const human = result.needsHuman.find((r) => r.reason.includes("plan review rejected"))
+  expect(human).toBeDefined()
+  expect(human!.reason).toContain("This plan is wrong.")
+  expect(row.blockingDecisionId).toBeDefined()
+  // No plan-refine task was dispatched (the human is now in the loop).
+  expect(h.deps.startTask).not.toHaveBeenCalled()
+  // And the unit is blocked, so the sweep did not re-emit a review_plan.
+  expect(result.needsModel.some((r) => r.kind === "review_plan")).toBe(false)
+})
+
+test("hard plan gate (default): a rejecting review re-dispatches a plan task, no human escalation", async () => {
+  const row = unit({
+    provider: "completed",
+    phase: "plan",
+    dispatchMode: "plan",
+    planExcerpt: "old plan",
+  })
+  // Default mission() has no planGate → treated as hard.
+  const h = harness([row])
+  h.observations.set("1", { provider: "queued", prs: [] })
+
+  const result = await advance(
+    {
+      modelAnswers: [
+        {
+          requestId: "m1:1:review_plan",
+          verdict: { decision: "refine", instruction: "Cover Python 3.12 too." },
+        },
+      ],
+    },
+    h.deps,
+  )
+
+  const planCall = (
+    h.deps.startTask as unknown as { mock: { calls: unknown[][] } }
+  ).mock.calls.find((c) => {
+    const input = c[1] as { createPullRequest?: boolean; prompt: string }
+    return input.createPullRequest === false && input.prompt.includes("Cover Python 3.12 too.")
+  })
+  expect(planCall).toBeDefined()
+  expect(row.dispatchMode).toBe("plan")
+  expect(result.needsHuman).toHaveLength(0)
+})
+
+test("planPrompt instructs writing durable research + plan artifacts under docs/", () => {
+  const prompt = planPrompt(
+    unit({ title: "Upgrade Flask to 3.x" }),
+    mission(),
+    "2026-07-05",
+  )
+  const slug = artifactSlug(unit({ title: "Upgrade Flask to 3.x" }))
+  expect(slug).toBe("upgrade-flask-to-3-x")
+  expect(prompt).toContain(`docs/research/2026-07-05-${slug}.md`)
+  expect(prompt).toContain(`docs/plans/2026-07-05-${slug}.md`)
+})
+
+test("buildPrompt instructs reading the committed plan and updating LEARNINGS.md", () => {
+  const row = unit({ title: "Upgrade Flask to 3.x", planExcerpt: "step 1" })
+  const prompt = buildPrompt(row, mission(), "2026-07-05")
+  const slug = artifactSlug(row)
+  expect(prompt).toContain(`docs/plans/2026-07-05-${slug}.md`)
+  expect(prompt).toContain(`docs/research/2026-07-05-${slug}.md`)
+  expect(prompt).toContain("LEARNINGS.md")
 })
