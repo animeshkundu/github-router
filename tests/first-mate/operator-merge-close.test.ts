@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, mock, test } from "bun:test"
 
+import { AgentError } from "~/lib/agent/types"
 import type { PullRequestState, RequiredChecksSummary } from "~/lib/agent/types"
 import { createFirstMateTools, type MergeCloseDeps } from "~/lib/first-mate/tools"
 import type { Mission } from "~/lib/first-mate/registry"
+import type { UnitRow } from "~/lib/first-mate/types"
 import { state } from "~/lib/state"
 
 /**
@@ -53,6 +55,27 @@ function activeMission(): Mission {
   }
 }
 
+function unit(overrides: Partial<UnitRow> = {}): UnitRow {
+  return {
+    missionId: "m1",
+    repo: { owner: "octo", name: "repo" },
+    issue: 1,
+    pr: 7,
+    taskId: "task-1",
+    agent: "copilot",
+    botLogin: "copilot-swe-agent",
+    dispatchMode: "plan",
+    provider: "in_progress",
+    phase: "plan",
+    artifact: "pr_open",
+    validation: "unknown",
+    retries: 0,
+    dependsOn: [],
+    title: "unit",
+    ...overrides,
+  }
+}
+
 function makeDeps(overrides: Partial<MergeCloseDeps> = {}): MergeCloseDeps {
   return {
     getPullRequestState: mock(async () => prState()),
@@ -62,6 +85,7 @@ function makeDeps(overrides: Partial<MergeCloseDeps> = {}): MergeCloseDeps {
     repoHasWorkflows: mock(async () => false),
     getSelfLogin: mock(async () => "octo-bot"),
     readMissions: mock(async () => []),
+    loadAllUnits: mock(async () => []),
     ...overrides,
   }
 }
@@ -177,11 +201,12 @@ describe("merge_pr", () => {
     )
   })
 
-  test("merges a clean PR owned via an active mission repo (non-bot author)", async () => {
+  test("merges a clean PR owned via a CORRELATED first-mate unit (non-bot author)", async () => {
     const deps = makeDeps({
       getPullRequestState: mock(async () => prState({ authorLogin: "Copilot" })),
       getSelfLogin: mock(async () => "octo-bot"),
       readMissions: mock(async () => [activeMission()]),
+      loadAllUnits: mock(async () => [unit({ pr: 7 })]),
     })
     const res = await toolOf("merge_pr", deps).handler({
       repo: "octo/repo",
@@ -191,6 +216,60 @@ describe("merge_pr", () => {
     expect(res.isError).toBeUndefined()
     expect(parsed(res).merged).toBe(true)
     expect(deps.mergePullRequest).toHaveBeenCalledTimes(1)
+  })
+
+  test("FIX 2 — a HUMAN PR in an active-mission repo with NO correlated unit is NOT owned", async () => {
+    // An active mission targeting the repo must NOT confer ownership over a
+    // human's PR — only a unit with unit.pr === thisPr does.
+    const deps = makeDeps({
+      getPullRequestState: mock(async () => prState({ authorLogin: "random-human" })),
+      getSelfLogin: mock(async () => "octo-bot"),
+      readMissions: mock(async () => [activeMission()]),
+      loadAllUnits: mock(async () => [unit({ pr: 99 })]), // a different PR
+    })
+    const res = await toolOf("merge_pr", deps).handler({
+      repo: "octo/repo",
+      pr: 7,
+      expected_head_sha: "reviewedsha",
+    })
+    expect(res.isError).toBe(true)
+    expect((parsed(res).error as { code: string }).code).toBe("UNOWNED_PR")
+    expect(deps.mergePullRequest).not.toHaveBeenCalled()
+  })
+
+  test("FIX 1 — refuses to merge when CI is indeterminate (rollup none + workflow probe error)", async () => {
+    const deps = makeDeps({
+      getRequiredChecksForSha: mock(async () => checks({ rollup: "none" })),
+      repoHasWorkflows: mock(async () => {
+        throw new AgentError("UPSTREAM", "probe failed")
+      }),
+    })
+    const res = await toolOf("merge_pr", deps).handler({
+      repo: "octo/repo",
+      pr: 7,
+      expected_head_sha: "reviewedsha",
+    })
+    expect(res.isError).toBe(true)
+    expect((parsed(res).error as { message: string }).message).toContain("indeterminate")
+    expect(deps.mergePullRequest).not.toHaveBeenCalled()
+  })
+
+  test("FIX 1 — refuses to merge a red LEGACY-status PR (rollup failing surfaced by getRequiredChecksForSha)", async () => {
+    const deps = makeDeps({
+      getRequiredChecksForSha: mock(async () =>
+        checks({ rollup: "failing", failing: [{ name: "ci/circleci" }] }),
+      ),
+    })
+    const res = await toolOf("merge_pr", deps).handler({
+      repo: "octo/repo",
+      pr: 7,
+      expected_head_sha: "reviewedsha",
+    })
+    expect(res.isError).toBe(true)
+    const msg = (parsed(res).error as { message: string }).message
+    expect(msg).toContain("failing")
+    expect(msg).toContain("ci/circleci")
+    expect(deps.mergePullRequest).not.toHaveBeenCalled()
   })
 
   test("merges an unowned PR when allow_unowned is set", async () => {

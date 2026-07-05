@@ -1322,7 +1322,13 @@ async function maybeMergeWithApproval(
   const live = await deps.getPullRequestState(agentRepo(unit.repo), pr)
   unit.pr = live.number
   unit.headSha = live.headSha || unit.headSha
-  unit.baseSha = live.baseSha ?? unit.baseSha
+  // Pin the base ONCE (at PR-open): the merge decision below uses the LIVE base
+  // (via verifyAndConsumeApproval's liveBaseSha), so we must NOT clobber the
+  // pinned base here — a fast-forward advances live.baseSha and overwriting it
+  // would silently move the approval's base target. Set only if still unset.
+  if (unit.baseSha === undefined || unit.baseSha === null || unit.baseSha.length === 0) {
+    unit.baseSha = live.baseSha ?? unit.baseSha
+  }
   unit.branch = live.baseRef || unit.branch
 
   // #4a reconciliation: if GitHub reports the PR already MERGED, a prior merge
@@ -2489,7 +2495,6 @@ export async function advance(
         const prevEmptyState = {
           headSha: unit.headSha ?? null,
           baseRef: unit.baseRef ?? null,
-          provider: unit.provider,
           isDraft: unit.prIsDraft,
         }
         updateUnitFromObservedPrs(unit, observed)
@@ -2541,8 +2546,10 @@ export async function advance(
           observed.diffTruncated !== true
 
         // Progress since last wake: head moved, base retargeted (branch NAME
-        // changed — not a base fast-forward), draft→ready, or provider status
-        // changed. Any of these means the agent is advancing → reset the counter.
+        // changed — not a base fast-forward), or draft→ready. A provider STATUS
+        // change (queued↔in_progress) is deliberately NOT progress: a flapping
+        // provider on a frozen-head empty PR would otherwise perpetually reset
+        // the counter and defeat the stuck cap. Only real advancement resets.
         const progressed =
           (primaryPr?.headSha !== undefined &&
             primaryPr.headSha.length > 0 &&
@@ -2550,8 +2557,7 @@ export async function advance(
           (primaryPr?.baseRef !== undefined &&
             prevEmptyState.baseRef !== null &&
             primaryPr.baseRef !== prevEmptyState.baseRef) ||
-          (prevEmptyState.isDraft === true && primaryPr?.isDraft === false) ||
-          classified.provider !== prevEmptyState.provider
+          (prevEmptyState.isDraft === true && primaryPr?.isDraft === false)
         if (progressed) unit.emptyObservations = 0
 
         if (isEmptyPr) {
@@ -2566,16 +2572,22 @@ export async function advance(
         // and a controller-cancelled loser / merged PR resolves to mark_done —
         // neither should be clobbered by the empty-PR reason.
         if (isEmptyPr && action.kind !== "escalate_human" && action.kind !== "mark_done") {
-          const baseResolved =
-            (unit.baseSha !== undefined && unit.baseSha !== null && unit.baseSha.length > 0) ||
-            (primaryPr?.baseSha !== undefined && primaryPr.baseSha.length > 0)
-          if (baseResolved) {
-            if (isTerminalProvider(classified.provider)) {
-              action = {
-                kind: "escalate_human",
-                reason: "the cloud agent finished but its pull request has no changes",
-              }
-            } else if ((unit.emptyObservations ?? 0) >= EMPTY_PR_OBSERVATION_CAP) {
+          if (isTerminalProvider(classified.provider)) {
+            // TERMINAL-empty: a finished task with 0 changes IS empty, so escalate
+            // regardless of whether a base SHA was ever observed — gating this on
+            // base-resolved produced a false-negative (a completed empty PR with no
+            // observed base never escalated).
+            action = {
+              kind: "escalate_human",
+              reason: "the cloud agent finished but its pull request has no changes",
+            }
+          } else {
+            // Non-terminal STUCK fallback: still requires a RESOLVED base as
+            // defense against acting on a transient pre-push 0 / flaky observation.
+            const baseResolved =
+              (unit.baseSha !== undefined && unit.baseSha !== null && unit.baseSha.length > 0) ||
+              (primaryPr?.baseSha !== undefined && primaryPr.baseSha.length > 0)
+            if (baseResolved && (unit.emptyObservations ?? 0) >= EMPTY_PR_OBSERVATION_CAP) {
               action = {
                 kind: "escalate_human",
                 reason:

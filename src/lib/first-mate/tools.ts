@@ -101,6 +101,7 @@ export interface MergeCloseDeps {
   repoHasWorkflows: typeof realRepoHasWorkflows
   getSelfLogin: typeof realGetSelfLogin
   readMissions: typeof readMissions
+  loadAllUnits: typeof loadAllUnits
 }
 
 function defaultMergeCloseDeps(): MergeCloseDeps {
@@ -112,6 +113,7 @@ function defaultMergeCloseDeps(): MergeCloseDeps {
     repoHasWorkflows: realRepoHasWorkflows,
     getSelfLogin: realGetSelfLogin,
     readMissions,
+    loadAllUnits,
   }
 }
 
@@ -361,7 +363,7 @@ export function createFirstMateTools(
           )
         }
 
-        const ownership = await resolveOwnership(repo, live.authorLogin, deps)
+        const ownership = await resolveOwnership(repo, pr, live.authorLogin, deps)
         if (!ownership.owned) {
           if (!allowUnowned) {
             return errorResult(
@@ -410,7 +412,7 @@ export function createFirstMateTools(
           )
         }
 
-        const ownership = await resolveOwnership(repo, live.authorLogin, deps)
+        const ownership = await resolveOwnership(repo, pr, live.authorLogin, deps)
         if (!ownership.owned) {
           if (!allowUnowned) {
             return errorResult(
@@ -459,14 +461,18 @@ interface OwnershipResult {
 }
 
 /**
- * Ownership scope for the merge/close operator tools: a PR is "owned" when the
- * agent-token bot authored it (self-login match) OR the repo has an active
- * first-mate mission. Anything else is unowned and requires an explicit
- * `allow_unowned` opt-in. `getSelfLogin`/`readMissions` failures degrade to
+ * Ownership scope for the merge/close operator tools: a PR is "owned" ONLY when
+ * (a) the agent-token bot authored it (self-login match), OR (b) the PR
+ * CORRELATES to a live first-mate UNIT — some unit from `loadAllUnits()` targets
+ * this repo AND has `unit.pr === thisPr`. A human's PR that merely happens to sit
+ * in a repo an active mission targets is NOT owned (it requires an explicit
+ * `allow_unowned` opt-in) — "an active mission targets the repo" is deliberately
+ * NOT sufficient. `getSelfLogin`/`readMissions`/`loadAllUnits` failures degrade to
  * NOT owned (fail-closed) so a transient error can't silently widen scope.
  */
 async function resolveOwnership(
   repo: AgentRepoRef,
+  pr: number,
   authorLogin: string | undefined,
   deps: MergeCloseDeps,
 ): Promise<OwnershipResult> {
@@ -475,22 +481,25 @@ async function resolveOwnership(
     return { owned: true, reason: "agent-authored", selfLogin }
   }
 
-  let missions: Mission[] = []
+  // (b) Correlate to a first-mate unit: a unit we created for THIS PR in THIS
+  // repo. This is the tight ownership signal — merely having an active mission
+  // that targets the repo is NOT enough (that would make a human PR mergeable).
   try {
-    missions = await deps.readMissions()
+    const units = await deps.loadAllUnits()
+    const correlated = units.some(
+      (unit) => unit.pr === pr && repoMatchesTarget(unit.repo, repo),
+    )
+    if (correlated) {
+      return { owned: true, reason: "correlated to a first-mate unit", selfLogin }
+    }
   } catch (err) {
-    consola.debug("first-mate: mission read for ownership scope skipped:", err)
-  }
-  const hasActiveMission = missions.some(
-    (mission) => mission.status === "active" && mission.repos.some((r) => repoMatchesTarget(r, repo)),
-  )
-  if (hasActiveMission) {
-    return { owned: true, reason: "active-mission-repo", selfLogin }
+    // Fail-closed: an unreadable unit ledger must NOT widen scope.
+    consola.debug("first-mate: unit load for ownership scope skipped:", err)
   }
 
   return {
     owned: false,
-    reason: "not agent-authored and has no active first-mate mission",
+    reason: "not agent-authored and not correlated to a first-mate unit",
     selfLogin,
   }
 }
@@ -554,13 +563,33 @@ async function evaluateMergeSafety(
     return { ok: false, reason: "CI checks are still running; refusing to merge before they complete" }
   }
   if (checks.rollup === "none") {
-    const hasWorkflows = live.baseRef.length > 0
-      ? await deps.repoHasWorkflows(repo, live.baseRef).catch(() => false)
-      : false
+    // Zero check-runs AND no legacy status. Distinguish a genuinely CI-less repo
+    // (merge rests on the human review + head/mergeable guards) from a repo that
+    // HAS workflows but hasn't reported yet (refuse). FAIL-SAFE: an INDETERMINATE
+    // picture — the workflow probe errored, or there is no base ref to probe —
+    // is treated as NOT-green and refuses, so we never merge on an unverifiable
+    // CI picture.
+    let hasWorkflows = false
+    let workflowsIndeterminate = false
+    if (live.baseRef.length > 0) {
+      try {
+        hasWorkflows = await deps.repoHasWorkflows(repo, live.baseRef)
+      } catch {
+        workflowsIndeterminate = true
+      }
+    } else {
+      workflowsIndeterminate = true
+    }
     if (hasWorkflows) {
       return {
         ok: false,
         reason: "repo has CI workflows but no check runs are reported for this head yet; refusing to merge before CI reports",
+      }
+    }
+    if (workflowsIndeterminate) {
+      return {
+        ok: false,
+        reason: "unable to determine whether the repo has CI workflows (indeterminate CI); refusing to merge until the CI picture is verifiable",
       }
     }
     // No CI workflows in the repo: nothing to gate on. Documented limitation —

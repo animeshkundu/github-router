@@ -622,6 +622,37 @@ test("floor_passed with valid approval merges and marks the unit terminal", asyn
   expect(result.needsHuman).toHaveLength(0)
 })
 
+test("FIX 6: a merge does NOT clobber the PR-open-pinned baseSha with a later live read (fast-forward)", async () => {
+  const row = unit({
+    issue: 4,
+    pr: 9,
+    taskId: "task-4",
+    provider: "completed",
+    phase: "merge",
+    artifact: "pr_open",
+    validation: "floor_passed",
+    dispatchMode: "build",
+    headSha: "old-head",
+    baseSha: "pinned-base", // pinned at PR-open
+  })
+  const h = harness([row])
+  h.observations.set("4", {
+    provider: "completed",
+    prs: [openPr(9, "live-head")],
+    ci: { rollup: "passing" },
+    floor: "passed",
+  })
+  // The live PR read reports a fast-forwarded base ("base-9" from the harness
+  // default) — different from the pinned value.
+  h.deps.verifyAndConsumeApproval = mock(async () => ({ ok: true }))
+
+  await advance({}, h.deps)
+
+  expect(h.deps.mergePullRequest).toHaveBeenCalledTimes(1)
+  // Pin-once: the pinned base survives the live read; it is NOT overwritten.
+  expect(row.baseSha).toBe("pinned-base")
+})
+
 test("floor_passed without approval emits a merge packet and does not merge", async () => {
   const row = unit({
     issue: 5,
@@ -2010,7 +2041,7 @@ test("A6/#12: a hung in-progress empty PR (head frozen) escalates via the observ
   expect(result.needsHuman[0]?.reason).toContain("head has not advanced")
 })
 
-test("A6/#12: an empty PR with NO resolved base does NOT escalate even when terminal (defense)", async () => {
+test("A6/#12 (FIX 4): a TERMINAL empty PR escalates even with NO resolved base (a finished 0-change task IS empty)", async () => {
   const row = unit({
     issue: 1,
     pr: 7,
@@ -2031,7 +2062,63 @@ test("A6/#12: an empty PR with NO resolved base does NOT escalate even when term
 
   const result = await advance({}, h.deps)
 
+  expect(result.needsHuman).toHaveLength(1)
+  expect(result.needsHuman[0]?.reason).toContain("finished but its pull request has no changes")
+})
+
+test("A6/#12 (FIX 4): a NON-terminal stuck empty PR with NO resolved base does NOT escalate (transient-0 defense)", async () => {
+  const row = unit({
+    issue: 1,
+    pr: 7,
+    taskId: "task-1",
+    provider: "in_progress", // NOT terminal → stuck fallback, which still needs a base
+    phase: "build",
+    dispatchMode: "build",
+    headSha: "h7",
+    emptyObservations: 5,
+  })
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [openPr(7, "h7", { baseRef: undefined, baseSha: undefined })],
+    ci: { rollup: "pending" },
+    changedFiles: 0,
+    diffTruncated: false,
+  })
+
+  const result = await advance({}, h.deps)
+
   expect(result.needsHuman).toHaveLength(0)
+})
+
+test("A6/#12 (FIX 3): a flapping provider status (queued↔in_progress) does NOT reset the stuck counter", async () => {
+  const row = unit({
+    issue: 1,
+    pr: 7,
+    taskId: "task-1",
+    provider: "queued", // last wake was queued
+    phase: "build",
+    dispatchMode: "build",
+    headSha: "h7", // frozen head → no real progress
+    baseRef: "main",
+    baseSha: "base-7",
+    emptyObservations: 2, // one below the cap
+  })
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "in_progress", // provider FLAPPED (queued → in_progress); NOT progress
+    prs: [openPr(7, "h7")],
+    ci: { rollup: "pending" },
+    changedFiles: 0,
+    diffTruncated: false,
+  })
+
+  const result = await advance({}, h.deps)
+
+  // Provider-status change is no longer a reset signal → counter climbs to the cap.
+  expect(row.emptyObservations).toBe(3)
+  expect(result.needsHuman).toHaveLength(1)
+  expect(result.needsHuman[0]?.reason).toContain("head has not advanced")
 })
 
 test("A6/#12: a PR with real changes resets the empty counter and persists the observed base", async () => {
@@ -2091,7 +2178,7 @@ test("A6/#12: a terminal task whose diff is not yet visible does NOT escalate as
   expect(row.emptyObservations).toBe(2)
 })
 
-test("A6/#12: a flaky/missing provider status is a progress signal that resets the counter (no premature cap escalation)", async () => {
+test("A6/#12 (FIX 3): a flaky/missing provider status is NOT a progress signal — a frozen-head empty PR still reaches the cap", async () => {
   const row = unit({
     issue: 1,
     pr: 7,
@@ -2114,10 +2201,12 @@ test("A6/#12: a flaky/missing provider status is a progress signal that resets t
 
   const result = await advance({}, h.deps)
 
-  // provider changed (in_progress → none) → progress reset, so the cap is not
-  // tripped this wake; a non-terminal unknown provider never escalates as empty.
-  expect(result.needsHuman).toHaveLength(0)
-  expect(row.emptyObservations).toBe(1)
+  // A provider-status change (in_progress → none) is no longer treated as
+  // progress: with the head frozen the empty counter climbs to the cap and the
+  // stuck fallback escalates, rather than being reset forever by flapping.
+  expect(row.emptyObservations).toBe(3)
+  expect(result.needsHuman).toHaveLength(1)
+  expect(result.needsHuman[0]?.reason).toContain("head has not advanced")
 })
 
 test("A6: a truncated empty summary does NOT count toward the empty cap, and changes reset it", async () => {

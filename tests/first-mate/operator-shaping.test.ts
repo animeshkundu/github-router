@@ -177,6 +177,11 @@ describe("capability shaping — config assertions", () => {
     expect(ok("git --exec-path=/tmp/evil log")).toBe(true)
     expect(ok("git grep -O foo")).toBe(true)
     expect(ok("git log --output=/tmp/x")).toBe(true)
+    // FIX 5: --config-env is the same config-injection RCE as -c, sourced from an
+    // env var — blocked in BOTH the `=`-attached and space-separated forms, and
+    // the `--config-env=` token must NOT be waved through as a self-contained flag.
+    expect(ok("git --config-env=core.sshCommand=EVIL ls-remote origin")).toBe(true)
+    expect(ok("git --config-env core.sshCommand=EVIL log")).toBe(true)
     // Leading env assignments that hook a command the read-only tool then runs.
     expect(ok("GIT_PAGER='touch x' git log")).toBe(true)
     expect(ok("LESSOPEN='|touch x %s' less f")).toBe(true)

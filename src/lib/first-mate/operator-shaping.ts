@@ -257,17 +257,23 @@ const GIT_REFLOG_READONLY = new Set<string>(["show", "exists"])
 const GIT_GLOBAL_ARG_FLAGS = new Set<string>([
   "-C", "--git-dir", "--work-tree", "--namespace",
 ])
-// `-c` and `--exec-path` are NOT here (and are rejected outright below): they are
-// config/exec injection vectors — `git -c core.pager=<cmd>` / `core.sshCommand=` /
-// `core.fsmonitor=` and `--exec-path=<dir>` run arbitrary commands.
+// `-c`, `--config-env`, and `--exec-path` are NOT here (and are rejected outright
+// below): they are config/exec injection vectors — `git -c core.pager=<cmd>` /
+// `core.sshCommand=` / `core.fsmonitor=`, `--config-env=core.sshCommand=<envvar>`
+// (same config injection, sourced from an env var), and `--exec-path=<dir>` run
+// arbitrary commands.
 
 /**
  * git argument forms that inject command execution or write a file, anywhere in
- * the invocation (before OR after the subcommand). `-c`/`--exec-path` are RCE;
- * `--output`/`-O`/`--open-files-in-pager` write or spawn a pager.
+ * the invocation (before OR after the subcommand). `-c`/`--config-env`/
+ * `--exec-path` are RCE; `--output`/`-O`/`--open-files-in-pager` write or spawn a
+ * pager.
  */
 function gitArgIsDangerous(tok: string): string | undefined {
   if (tok === "-c") return "git -c can inject config that executes commands"
+  if (tok === "--config-env" || tok.startsWith("--config-env=")) {
+    return "git --config-env can inject config (e.g. core.sshCommand) that executes commands"
+  }
   if (tok === "--exec-path" || tok.startsWith("--exec-path=")) {
     return "git --exec-path can run commands from an attacker path"
   }

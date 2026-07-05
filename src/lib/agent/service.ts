@@ -553,6 +553,16 @@ interface CheckRunRestResponse {
   }>
 }
 
+interface CombinedStatusRestResponse {
+  state?: string | null
+  total_count?: number
+  statuses?: Array<{
+    state?: string | null
+    context?: string | null
+    target_url?: string | null
+  }>
+}
+
 function isFailingConclusion(conclusion: string | null | undefined): boolean {
   return [
     "action_required",
@@ -583,10 +593,39 @@ export async function getRequiredChecksForSha(
   ).length
   const failingRuns = checkRuns.filter((check) => isFailingConclusion(check.conclusion))
 
+  // ALSO fold in the legacy Commit Status API (CircleCI/Travis/Jenkins and any
+  // required status context): a repo on the Status API can have a red/pending
+  // REQUIRED status while registering ZERO check-runs — reporting rollup "none"
+  // for that would let evaluateMergeSafety merge over failing/pending CI.
+  // GitHub returns state:"pending" with total_count:0 for a commit that has NO
+  // statuses at all, so the legacy signal is folded ONLY when at least one
+  // status context exists — otherwise a modern Actions-only repo (zero legacy
+  // statuses) would be spuriously reported pending and blocked from merge.
+  const statusResponse = await ghRest<CombinedStatusRestResponse>(
+    "GET",
+    `${repoPath(repo)}/commits/${segment(sha)}/status`,
+  )
+  const legacyStatuses = statusResponse.statuses ?? []
+  const hasLegacyStatuses =
+    (statusResponse.total_count ?? 0) > 0 || legacyStatuses.length > 0
+  const legacyState = (statusResponse.state ?? "").toLowerCase()
+  const legacyFailing = hasLegacyStatuses && (legacyState === "failure" || legacyState === "error")
+  const legacyPending = hasLegacyStatuses && legacyState === "pending"
+  const failingLegacy = hasLegacyStatuses
+    ? legacyStatuses.filter((s) => {
+        const st = (s.state ?? "").toLowerCase()
+        return st === "failure" || st === "error"
+      })
+    : []
+
+  const anyFailing = failingRuns.length > 0 || legacyFailing
+  const anyPending = runningCount > 0 || legacyPending
+  const anySignal = checkRuns.length > 0 || hasLegacyStatuses
+
   let rollup: RequiredChecksSummary["rollup"] = "none"
-  if (checkRuns.length > 0) {
-    if (failingRuns.length > 0) rollup = "failing"
-    else if (runningCount > 0) rollup = "pending"
+  if (anySignal) {
+    if (anyFailing) rollup = "failing"
+    else if (anyPending) rollup = "pending"
     else rollup = "passing"
   }
 
@@ -595,12 +634,16 @@ export async function getRequiredChecksForSha(
     name: check.name ?? "",
     conclusion: check.conclusion,
   }))
-  const failing: FailingCheckSummary[] = failingRuns
-    .slice(0, FAILING_CHECK_LIMIT)
-    .map((check) => ({
+  const failing: FailingCheckSummary[] = [
+    ...failingRuns.map((check) => ({
       name: check.name ?? "",
       url: check.html_url ?? check.details_url ?? undefined,
-    }))
+    })),
+    ...failingLegacy.map((s) => ({
+      name: s.context ?? "",
+      url: s.target_url ?? undefined,
+    })),
+  ].slice(0, FAILING_CHECK_LIMIT)
 
   return { rollup, checks, failing, runningCount }
 }
@@ -617,6 +660,10 @@ interface ContentsEntry {
  * controller distinguish "genuinely no CI" (route to cross-lab verify) from
  * "CI configured but checks not registered yet" (keep waiting) when a commit's
  * check-run rollup is "none". Cached per repo+ref; a 404 (no dir) means no CI.
+ * FAIL-SAFE: a 404 resolves to `false` (genuinely no workflows dir), but ANY
+ * other probe error is INDETERMINATE and is RE-THROWN — resolving an
+ * indeterminate probe to "no workflows" would permit a merge on an unverifiable
+ * CI picture. The caller treats a throw as NOT-green (refuse).
  */
 export async function repoHasWorkflows(repo: RepoRef, ref: string): Promise<boolean> {
   const key = `${repoPath(repo)}@${ref}`
@@ -636,11 +683,15 @@ export async function repoHasWorkflows(repo: RepoRef, ref: string): Promise<bool
           entry.type === "file" && /\.ya?ml$/i.test(entry.name ?? ""),
       )
   } catch (err) {
-    // 404 → no workflows dir → no CI. Other errors: assume no CI (best-effort).
-    if (!(err instanceof AgentError && err.code === "NOT_FOUND")) {
-      consola.debug("first-mate: workflow probe failed, assuming no CI:", err)
+    // 404 → no workflows dir → genuinely no CI (cache + return false). ANY other
+    // error is INDETERMINATE: do NOT resolve it to "no workflows" (fail-open) —
+    // re-throw so the caller refuses to merge on an unverifiable CI picture.
+    if (err instanceof AgentError && err.code === "NOT_FOUND") {
+      value = false
+    } else {
+      consola.debug("first-mate: workflow probe failed (indeterminate CI):", err)
+      throw err
     }
-    value = false
   }
 
   workflowCache.set(key, { timestamp: Date.now(), value })
@@ -1090,4 +1141,5 @@ function gitRefBranchPath(branch: string): string {
 export function __resetAgentServiceCachesForTests(): void {
   rosterCache.clear()
   repoNodeCache.clear()
+  workflowCache.clear()
 }

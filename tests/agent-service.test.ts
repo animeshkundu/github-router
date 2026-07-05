@@ -8,6 +8,7 @@ import {
   getPullRequestDiffSummary,
   getRequiredChecksForSha,
   mergePullRequest,
+  repoHasWorkflows,
   resolveAgentRoster,
   __resetAgentServiceCachesForTests,
 } from "~/lib/agent/service"
@@ -306,6 +307,79 @@ test("getRequiredChecksForSha excludes the Copilot review-bot check-run from CI 
   )
   setFetch(withRealCi)
   expect((await getRequiredChecksForSha(repo, "sha2")).rollup).toBe("passing")
+})
+
+// FIX 1 — legacy Commit Status API (CircleCI/Travis) must be folded into the CI
+// rollup so a red/pending REQUIRED status with ZERO check-runs can never merge.
+function routedFetch(route: (url: string) => Response): typeof fetch {
+  return ((input: Parameters<typeof fetch>[0]) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : (input as Request).url
+    return Promise.resolve(route(url))
+  }) as unknown as typeof fetch
+}
+
+test("getRequiredChecksForSha folds a RED legacy commit status into a failing rollup", async () => {
+  setFetch(
+    routedFetch((url) => {
+      if (url.includes("/check-runs")) return jsonResponse({ check_runs: [] })
+      if (url.includes("/status")) {
+        return jsonResponse({
+          state: "failure",
+          total_count: 1,
+          statuses: [{ state: "failure", context: "ci/circleci", target_url: "https://ci/x" }],
+        })
+      }
+      throw new Error(`unexpected fetch ${url}`)
+    }),
+  )
+  const summary = await getRequiredChecksForSha(repo, "sha-red")
+  expect(summary.rollup).toBe("failing")
+  expect(summary.failing.map((f) => f.name)).toContain("ci/circleci")
+})
+
+test("getRequiredChecksForSha folds a PENDING legacy commit status into a pending rollup", async () => {
+  setFetch(
+    routedFetch((url) => {
+      if (url.includes("/check-runs")) return jsonResponse({ check_runs: [] })
+      if (url.includes("/status")) {
+        return jsonResponse({
+          state: "pending",
+          total_count: 1,
+          statuses: [{ state: "pending", context: "ci/travis" }],
+        })
+      }
+      throw new Error(`unexpected fetch ${url}`)
+    }),
+  )
+  expect((await getRequiredChecksForSha(repo, "sha-pending")).rollup).toBe("pending")
+})
+
+test("getRequiredChecksForSha ignores an EMPTY combined status (total_count 0) so an Actions-only repo isn't spuriously pending", async () => {
+  // GitHub returns state:"pending" with total_count:0 for a commit with no
+  // legacy statuses — folding that would block every modern repo.
+  setFetch(
+    routedFetch((url) => {
+      if (url.includes("/check-runs")) return jsonResponse({ check_runs: [] })
+      if (url.includes("/status")) return jsonResponse({ state: "pending", total_count: 0, statuses: [] })
+      throw new Error(`unexpected fetch ${url}`)
+    }),
+  )
+  expect((await getRequiredChecksForSha(repo, "sha-empty")).rollup).toBe("none")
+})
+
+test("repoHasWorkflows returns false on 404 but RE-THROWS a non-404 probe error (indeterminate, fail-safe)", async () => {
+  setFetch(routedFetch(() => jsonResponse({ message: "not found" }, { status: 404 })))
+  expect(await repoHasWorkflows(repo, "main")).toBe(false)
+
+  __resetAgentServiceCachesForTests()
+  state.githubAgentToken = "test-token"
+  setFetch(routedFetch(() => jsonResponse({ message: "boom" }, { status: 500 })))
+  await expectAgentCode(repoHasWorkflows(repo, "other-branch"), "UPSTREAM")
 })
 
 test("getPullRequestDiffSummary is compact, omits patches, and caps files", async () => {
