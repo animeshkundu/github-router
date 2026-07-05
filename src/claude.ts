@@ -428,6 +428,11 @@ export const claude = defineCommand({
       await removeOwnClaudeConfigMirror()
     }
     let onShutdown: () => Promise<void> = baseShutdown
+    // Captured inside the codex-mcp block (when built) so the always-on
+    // operating-defaults injection below can ride the peer-awareness snippet
+    // along in the SAME --append-system-prompt arg. Undefined when codex-mcp is
+    // off (then only the operating-defaults directive is injected).
+    let peerAwarenessSnippet: string | undefined
     const codexMcpEnabled = (args as Record<string, unknown>)["codex-mcp"] !== false
     if (codexMcpEnabled) {
       try {
@@ -894,12 +899,10 @@ export const claude = defineCommand({
           agentToolsAvailable: agentToolsEnabled(),
           groupKeys,
         })
-        // --append-system-prompt reaches the main agent at highest salience.
-        // Lead with the operating-defaults directive (orchestrator posture +
-        // excellence lens) so it sits above the capability inventory, then the
-        // peer-awareness snippet. Descendants get the same directive via the
-        // mirrored CLAUDE.md prepend below.
-        extraArgs.push("--append-system-prompt", `${OPERATING_DEFAULTS_DIRECTIVE}\n\n${peerSnippet}`)
+        // Capture the peer-awareness snippet; the always-on operating-defaults
+        // injection after this block composes the single --append-system-prompt
+        // (operating-defaults first, then this snippet).
+        peerAwarenessSnippet = peerSnippet
         // Ordering invariant: this MUST run AFTER ensureClaudeConfigMirror()
         // has resolved (above in this same handler), so the snapshot of
         // the user's ~/.claude/CLAUDE.md is already in place before we
@@ -932,20 +935,6 @@ export const claude = defineCommand({
             }`,
           )
         }
-        // Operating-defaults directive (orchestrator posture + hybrid excellence
-        // lens): prepend to the mirrored CLAUDE.md TOP so descendant agents
-        // inherit it (the main agent already has it, at higher salience, via the
-        // --append-system-prompt above). Prepended AFTER the style directive so
-        // it lands at the very top. Separate marker fence; best-effort.
-        try {
-          await prependOperatingDefaultsToMirroredClaudeMd()
-        } catch (err) {
-          consola.warn(
-            `Operating-defaults CLAUDE.md prepend failed: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          )
-        }
       } catch (err) {
         consola.warn(
           `Peer MCP wiring failed (claude will launch without it): ${
@@ -953,6 +942,32 @@ export const claude = defineCommand({
           }`,
         )
       }
+    }
+
+    // Operating-defaults directive (orchestrator posture + hybrid excellence
+    // lens): injected by DEFAULT, NOT gated on codex-mcp, so the posture always
+    // reaches the agent even under --no-codex-mcp. Two surfaces:
+    //   1. --append-system-prompt (main agent, highest salience) — the single
+    //      such arg for the session; the peer-awareness snippet (MCP-dependent)
+    //      rides along after it only when it was built.
+    //   2. the mirrored CLAUDE.md TOP (descendant agents) — prepended AFTER the
+    //      style directive (when that ran) so it lands at the very top.
+    // ensureClaudeConfigMirror() ran unconditionally above, so the mirror exists
+    // regardless of codex-mcp; the prepend is best-effort (warn-and-continue).
+    extraArgs.push(
+      "--append-system-prompt",
+      peerAwarenessSnippet
+        ? `${OPERATING_DEFAULTS_DIRECTIVE}\n\n${peerAwarenessSnippet}`
+        : OPERATING_DEFAULTS_DIRECTIVE,
+    )
+    try {
+      await prependOperatingDefaultsToMirroredClaudeMd()
+    } catch (err) {
+      consola.warn(
+        `Operating-defaults CLAUDE.md prepend failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
     }
 
     launchChild(

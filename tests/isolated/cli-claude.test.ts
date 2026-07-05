@@ -819,15 +819,28 @@ describe("claude command", () => {
       expect(args).toContain("/tmp/peer-mcp-test.json")
     })
 
-    test("--no-codex-mcp → no MCP wiring, no mirror inject, no extra spawn args", async () => {
+    test("--no-codex-mcp → no MCP wiring, but operating-defaults still injected by default", async () => {
       const run = getRunFn()
       await run({ args: { "codex-mcp": false } })
 
+      // No MCP enhancement layer (peer wiring / skills / peer-awareness / style).
       expect(writePeerMcpRuntimeFilesMock).not.toHaveBeenCalled()
       expect(injectPeerMcpIntoMirrorMock).not.toHaveBeenCalled()
+      expect(appendPeerAwarenessToMirroredClaudeMdMock).not.toHaveBeenCalled()
+      expect(prependStyleDirectiveToMirroredClaudeMdMock).not.toHaveBeenCalled()
       const [, args] = spawnMock.mock.calls[0]
       expect(args).not.toContain("--mcp-config")
       expect(args).not.toContain("--agents")
+
+      // BUT the operating-defaults directive is injected BY DEFAULT (not gated
+      // on codex-mcp): --append-system-prompt carries it WITHOUT the peer
+      // snippet, and the CLAUDE.md prepend still fires.
+      const idx = args.indexOf("--append-system-prompt")
+      expect(idx).toBeGreaterThanOrEqual(0)
+      const snippet = args[idx + 1] as string
+      expect(snippet).toContain("Operating defaults")
+      expect(snippet).not.toContain("Peer review and advisor")
+      expect(prependOperatingDefaultsToMirroredClaudeMdMock).toHaveBeenCalledTimes(1)
     })
 
     test("--codex-cli requested + codex absent → falls back to http backend", async () => {
