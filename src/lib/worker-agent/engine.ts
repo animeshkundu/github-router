@@ -139,14 +139,19 @@ registerExitHandlers(WORKTREE_REGISTRY)
 export const DEFAULT_MODEL = "gpt-5.4-mini"
 const DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 
-/** Default model + thinking for the READ-ONLY `review` mode. `gpt-5.5` at
- *  `xhigh` — the strongest reasoning tier, 1M+ context, so the reviewer
- *  has full headroom to verify correctness against the actual code. Same
- *  model as `implement`; like it, this is NOT a `workerToolsEnabled` gate
- *  input — if absent (e.g. a non-enterprise tier) `review` errors helpfully
- *  at call time rather than vanishing the whole worker surface. Caller can
- *  override per call via the `model` arg. */
-export const REVIEW_DEFAULT_MODEL = "gpt-5.5"
+/** Default model + thinking for the READ-ONLY `review` mode.
+ *  `gemini-3.1-pro-preview` at `xhigh` (clamped to `high` at call time — gemini
+ *  advertises no xhigh). DELIBERATELY DECORRELATED FROM THE IMPLEMENTER: bounded
+ *  implementation now defaults to gpt-5.5 (OpenAI) — both the `implement` worker
+ *  and the native `implementer` subagent — and the main orchestrator is Opus
+ *  (Anthropic), so review runs on a THIRD lab (Google) to maximize blind-spot
+ *  diversity. A reviewer sharing the implementer's lab catches a correlated slice
+ *  of defects; a cross-lab reviewer is the point of the review step. Like
+ *  `implement`, this is NOT a `workerToolsEnabled` gate input — if absent (e.g. a
+ *  non-enterprise tier) `review` errors helpfully at call time rather than
+ *  vanishing the whole worker surface. Caller can override per call via the
+ *  `model` arg (e.g. `claude-opus-4.8` for an Anthropic-lab reviewer). */
+export const REVIEW_DEFAULT_MODEL = "gemini-3.1-pro-preview"
 const REVIEW_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 
 /** Default model + thinking for the READ+WRITE `implement` mode. `gpt-5.5`
@@ -294,8 +299,9 @@ async function runWorkerAgentOnce(
     //
     // Per-mode defaults (an explicit `opts.model`/`opts.thinking` always
     // wins): read-only `explore` → `DEFAULT_MODEL` (gpt-5.4-mini, xhigh);
-    // read-only `review` → `REVIEW_DEFAULT_MODEL` (gpt-5.5, xhigh — the
-    // reviewer wants max reasoning to verify correctness); read-only `plan`
+    // read-only `review` → `REVIEW_DEFAULT_MODEL` (gemini-3.1-pro-preview,
+    // xhigh→high — a cross-lab reviewer deliberately decorrelated from the
+    // gpt-5.5 implementer); read-only `plan`
     // → `PLAN_DEFAULT_MODEL` (claude-opus-4.8, xhigh — planning is the
     // highest-leverage step, so it gets the strongest model);
     // read+write `implement`/`test` → `IMPLEMENT_DEFAULT_MODEL` (gpt-5.5, xhigh

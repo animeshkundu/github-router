@@ -6,6 +6,7 @@ import { parse as parseYaml } from "yaml"
 import { z } from "zod"
 
 import {
+  buildAgentMd,
   buildPeerAgentDefinitions,
   buildPeerMcpConfig,
   injectPeerMcpIntoMirror,
@@ -48,6 +49,30 @@ async function withTempRuntimeDir<T>(
     await fs.rm(agentsDir, { recursive: true, force: true }).catch(() => {})
   }
 }
+
+describe("buildAgentMd", () => {
+  test("emits model frontmatter only when model is set", () => {
+    const withModel = buildAgentMd({
+      name: "implementer",
+      description: "Implementation agent",
+      prompt: "Implement the change.",
+      model: "gpt-5.5",
+    })
+    expect(withModel).toContain(
+      "---\nname: implementer\ndescription: \"Implementation agent\"\nmodel: \"gpt-5.5\"\n---\n",
+    )
+
+    const withoutModel = buildAgentMd({
+      name: "codex-critic",
+      description: "Review agent",
+      prompt: "Review the change.",
+    })
+    expect(withoutModel).toContain(
+      "---\nname: codex-critic\ndescription: \"Review agent\"\n---\n",
+    )
+    expect(withoutModel).not.toContain("\nmodel:")
+  })
+})
 
 describe("buildPeerMcpConfig", () => {
   test("HTTP backend emits one scoped http entry per group in groupKeys", () => {
@@ -278,6 +303,31 @@ describe("buildPeerAgentDefinitions", () => {
       codexHome: "/tmp/codex",
     })
     expect(Object.keys(agents).some((k) => k.startsWith("worker-"))).toBe(false)
+  })
+
+  test("implementerModel adds native implementer with model and no tools", () => {
+    const withImplementer = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: false,
+      groupKeys: { peers: "peers" },
+      implementerModel: "gpt-5.5",
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    const implementer = withImplementer.implementer
+    expect(implementer).toBeDefined()
+    expect(implementer.model).toBe("gpt-5.5")
+    expect("tools" in implementer).toBe(false)
+    expect(implementer.description).toContain("Model is overridable at spawn")
+
+    const withoutImplementer = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: false,
+      groupKeys: { peers: "peers" },
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    expect(Object.keys(withoutImplementer)).not.toContain("implementer")
   })
 
   test("browseAvailable adds worker-browse", () => {

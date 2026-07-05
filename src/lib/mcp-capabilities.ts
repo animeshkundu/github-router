@@ -58,6 +58,19 @@ export function standInToolEnabled(): boolean {
   return hasGpt55 && hasOpus && hasGeminiPro
 }
 
+export const IMPLEMENTER_SUBAGENT_MODEL = "gpt-5.5"
+
+/** Return the native implementer subagent model iff it is live with tool calls. */
+export function implementerSubagentModel(): string | undefined {
+  const models = state.models?.data
+  if (!models) return undefined
+  const found = models.find((m) => m.id === IMPLEMENTER_SUBAGENT_MODEL)
+  if (!found) return undefined
+  return found.capabilities?.supports?.tool_calls === true
+    ? IMPLEMENTER_SUBAGENT_MODEL
+    : undefined
+}
+
 /**
  * Gate for the worker tools (`explore`, `review`, `implement`).
  *

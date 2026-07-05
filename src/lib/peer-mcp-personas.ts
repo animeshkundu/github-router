@@ -1162,8 +1162,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     },
     // worker_explore / worker_implement — autonomous worker tools backed
     // by the Pi agent loop (`src/lib/worker-agent/engine.ts`), routed
-    // through per-mode default models: explore → `gpt-5.4-mini`, review → `gpt-5.5`
-    // (high); implement → `gpt-5.5` (xhigh). An explicit `model` arg wins.
+    // through per-mode default models: explore → `gpt-5.4-mini`, review → `gemini-3.1-pro-preview`
+    // (cross-lab, decorrelated from the gpt-5.5 implementer); implement → `gpt-5.5` (xhigh). An explicit `model` arg wins.
     //
     // GATING (`capability: "worker"`): the MCP handler drops both entries
     // from `tools/list` and `tools/call` when `workerToolsEnabled()` is

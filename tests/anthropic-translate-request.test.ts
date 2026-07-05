@@ -685,8 +685,8 @@ describe("anthropic-translate request mapping", () => {
     expect(mk(5000)).toBe("medium")
     expect(mk(10000)).toBe("high")
     expect(mk(30000)).toBe("xhigh")
-    // no thinking → no reasoning field
-    expect(build({ messages: [] }, model).payload.reasoning).toBeUndefined()
+    // no thinking → default high reasoning effort
+    expect(build({ messages: [] }, model).payload.reasoning?.effort).toBe("high")
   })
 
   test("thinking budget bucket boundaries are exact", () => {
@@ -718,6 +718,42 @@ describe("anthropic-translate request mapping", () => {
       model,
     ).payload.reasoning?.effort
     expect(effort).toBe("high")
+  })
+
+  test("absent thinking defaults to high reasoning effort", () => {
+    const model = gptModel(["low", "medium", "high", "xhigh"])
+    const { payload } = build({ messages: [] }, model)
+    expect(payload.reasoning?.effort).toBe("high")
+  })
+
+  test("absent thinking on a model with NO reasoning_effort allowlist → no reasoning field (not forced high)", () => {
+    const model = gptModel() // model does not advertise reasoning_effort support
+    const { payload } = build({ messages: [] }, model)
+    expect("reasoning" in payload).toBe(false)
+  })
+
+  test("enabled thinking budget overrides the default reasoning effort", () => {
+    const model = gptModel(["low", "medium", "high", "xhigh"])
+    const { payload } = build(
+      { messages: [], thinking: { type: "enabled", budget_tokens: 1000 } },
+      model,
+    )
+    expect(payload.reasoning?.effort).toBe("low")
+  })
+
+  test("disabled or non-enabled thinking suppresses reasoning effort", () => {
+    const model = gptModel(["low", "medium", "high", "xhigh"])
+    const disabled = build(
+      { messages: [], thinking: { type: "disabled", budget_tokens: 30000 } },
+      model,
+    ).payload
+    expect("reasoning" in disabled).toBe(false)
+
+    const nonEnabled = build(
+      { messages: [], thinking: { type: "auto", budget_tokens: 30000 } },
+      model,
+    ).payload
+    expect("reasoning" in nonEnabled).toBe(false)
   })
 
   test("max_tokens → max_output_tokens", () => {

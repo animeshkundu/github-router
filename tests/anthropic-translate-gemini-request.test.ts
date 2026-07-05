@@ -542,9 +542,44 @@ describe("anthropic-translate chat request mapping (Gemini)", () => {
     expect(mk(30000)).toBe("high")
   })
 
-  test("no thinking → no reasoning_effort field", () => {
-    const { payload } = build({ messages: [{ role: "user", content: "hi" }] }, geminiModel(["low", "medium", "high"]))
-    expect(payload.reasoning_effort).toBeUndefined()
+  test("absent thinking defaults to high reasoning effort", () => {
+    const { payload } = build(
+      { messages: [{ role: "user", content: "hi" }] },
+      geminiModel(["low", "medium", "high"]),
+    )
+    expect(payload.reasoning_effort).toBe("high")
+  })
+
+  test("enabled thinking budget overrides the default reasoning effort", () => {
+    const { payload } = build(
+      {
+        messages: [{ role: "user", content: "hi" }],
+        thinking: { type: "enabled", budget_tokens: 1000 },
+      },
+      geminiModel(["low", "medium", "high"]),
+    )
+    expect(payload.reasoning_effort).toBe("low")
+  })
+
+  test("disabled or non-enabled thinking suppresses reasoning effort", () => {
+    const model = geminiModel(["low", "medium", "high"])
+    const disabled = build(
+      {
+        messages: [{ role: "user", content: "hi" }],
+        thinking: { type: "disabled", budget_tokens: 30000 },
+      },
+      model,
+    ).payload
+    expect("reasoning_effort" in disabled).toBe(false)
+
+    const nonEnabled = build(
+      {
+        messages: [{ role: "user", content: "hi" }],
+        thinking: { type: "auto", budget_tokens: 30000 },
+      },
+      model,
+    ).payload
+    expect("reasoning_effort" in nonEnabled).toBe(false)
   })
 
   test("no structured_outputs: response_format is never emitted", () => {

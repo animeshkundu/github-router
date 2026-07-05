@@ -102,6 +102,8 @@ interface BuildOpts {
   /** Whether the browse worker tool is served (`browseAgentEnabled()`). Gates
    *  the extra `worker-browse` dispatcher. Optional (defaults false). */
   browseAvailable?: boolean
+  /** Native implementation subagent model when present in the live catalog. */
+  implementerModel?: string
 }
 
 interface HttpMcpEntry {
@@ -165,10 +167,14 @@ export function buildPeerMcpConfig(
   return { mcpServers }
 }
 
-export type PeerAgentDefinitions = Record<
-  string,
-  { description: string; prompt: string; tools?: ReadonlyArray<string> }
->
+export interface PeerAgentDefinition {
+  description: string
+  prompt: string
+  model?: string
+  tools?: ReadonlyArray<string>
+}
+
+export type PeerAgentDefinitions = Record<string, PeerAgentDefinition>
 
 /**
  * The `peer-review-coordinator` Claude Code subagent — the strongest
@@ -299,6 +305,15 @@ export function buildPeerAgentDefinitions(
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
   })
+  if (opts.implementerModel && opts.implementerModel.length > 0) {
+    out.implementer = {
+      description:
+        "Bounded implementation subagent running gpt-5.5 (strong non-Claude coder, high reasoning). Use for well-scoped coding tasks — edits, small features, fixes — you want implemented in an integrated subagent. Model is overridable at spawn.",
+      prompt:
+        "You are a bounded implementation subagent for well-scoped coding tasks. Implement the requested change surgically, matching the surrounding code style and minimizing unrelated churn. Verify with the project's build or tests where applicable. Do the work yourself — do not spawn further subagents. Report exactly what changed and any risks.",
+      model: opts.implementerModel,
+    }
+  }
   // Non-blocking workers surface: one `worker-<mode>` DISPATCHER subagent per
   // active worker tool. Each is pinned by a `tools:` allowlist to the workers
   // server only (`mcp__<workersKey>__*`), so it can run the worker and relay
@@ -350,6 +365,8 @@ interface WriteOpts {
   /** Whether the browse worker tool is served — adds the `worker-browse`
    *  dispatcher. */
   browseAvailable?: boolean
+  /** Native implementation subagent model when present in the live catalog. */
+  implementerModel?: string
   /** Override for tests. Defaults to PATHS.CODEX_HOME. */
   codexHome?: string
   /** Override for tests. Defaults to PATHS.CLAUDE_RUNTIME_DIR. */
@@ -430,10 +447,11 @@ const VALID_AGENT_NAME = /^[a-z][a-z0-9-]*$/
  * from spawning other agents or doing extra work. Names are validated by the
  * caller (`writePeerAgentMdFiles`) / are proxy-generated, so no escaping needed
  * beyond the comma-join Claude Code's frontmatter parser expects. */
-function buildAgentMd(spec: {
+export function buildAgentMd(spec: {
   name: string
   description: string
   prompt: string
+  model?: string
   tools?: ReadonlyArray<string>
 }): string {
   const lines = [
@@ -441,6 +459,9 @@ function buildAgentMd(spec: {
     `name: ${spec.name}`,
     `description: ${escapeYamlString(spec.description)}`,
   ]
+  if (spec.model) {
+    lines.push(`model: ${escapeYamlString(spec.model)}`)
+  }
   if (spec.tools && spec.tools.length > 0) {
     // YAML flow array of quoted strings — matches how Claude Code's loader
     // parses `tools:` (an array), and quoting keeps the `mcp__…__*` wildcard
@@ -469,7 +490,7 @@ function buildAgentMd(spec: {
  * Returns the file paths plus a cleanup() that unlinks them.
  */
 export async function writePeerAgentMdFiles(
-  agents: Record<string, { description: string; prompt: string; tools?: ReadonlyArray<string> }>,
+  agents: Record<string, PeerAgentDefinition>,
   opts: { agentsDir?: string; fileSuffix: string },
 ): Promise<{ paths: Array<string>; cleanup: () => Promise<void> }> {
   // Validate every agent name BEFORE touching the filesystem. Defense-
@@ -498,7 +519,13 @@ export async function writePeerAgentMdFiles(
       await fs.unlink(filePath).catch(() => {})
       await writeRuntimeFileSecure(
         filePath,
-        buildAgentMd({ name, description: def.description, prompt: def.prompt, tools: def.tools }),
+        buildAgentMd({
+          name,
+          description: def.description,
+          prompt: def.prompt,
+          model: def.model,
+          tools: def.tools,
+        }),
       )
       paths.push(filePath)
     }
@@ -801,6 +828,7 @@ export async function writePeerMcpRuntimeFiles(
     groupKeys: opts.groupKeys,
     workerToolsAvailable: opts.workerToolsAvailable,
     browseAvailable: opts.browseAvailable,
+    implementerModel: opts.implementerModel,
     nonce,
     codexHome,
   })

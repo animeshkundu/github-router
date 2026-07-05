@@ -76,6 +76,7 @@ import {
   browseAgentEnabled,
   browserToolsEnabled,
   fleetToolsEnabled,
+  implementerSubagentModel,
   standInToolEnabled,
   workerToolsEnabled,
 } from "./lib/mcp-capabilities"
@@ -565,6 +566,7 @@ export const claude = defineCommand({
           groupKeys,
           workerToolsAvailable: workerToolsEnabled(),
           browseAvailable: browseAgentEnabled(),
+          implementerModel: implementerSubagentModel(),
         })
         state.peerMcpNonce = runtime.nonce
         // Reach-back channel for the advisory-review hooks (hook V2): the

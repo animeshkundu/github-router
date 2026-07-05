@@ -15,6 +15,7 @@
  *   tools[] {name, input_schema}           → tools[] {type:function, name, parameters}
  *   tool_choice {auto|any|tool|none}       → tool_choice auto|required|{type:function,name}|none (name-less tool → unset)
  *   tool_choice.disable_parallel_tool_use  → parallel_tool_calls:false (only the disable; never sends true)
+ *   thinking absent                        → reasoning.effort high (clamped)
  *   thinking {enabled, budget_tokens}      → reasoning.effort (bucketed + clamped)
  *   max_tokens                             → max_output_tokens
  *   stop_sequences                         → stop (Copilot's /responses accepts it — verified live)
@@ -330,10 +331,21 @@ function parseDisableParallelToolUse(toolChoice: unknown): false | undefined {
     : undefined
 }
 
+/** Default absent Anthropic `thinking` to high effort, clamped by the model.
+ *  Returns undefined for a model that advertises NO `reasoning_effort` allowlist
+ *  — such a model may not support reasoning at all, so forcing an effort could
+ *  400; leaving it unset preserves the pre-default safe behavior for that case. */
+function defaultReasoningEffort(model?: Model): string | undefined {
+  const supported = model?.capabilities?.supports?.reasoning_effort
+  return Array.isArray(supported) && supported.length > 0
+    ? clampEffort("high", supported)
+    : undefined
+}
+
 /**
  * Map Anthropic `thinking` to a Responses reasoning effort, clamped to the
  * model's `reasoning_effort` allowlist. Returns undefined when thinking is
- * absent/disabled (no `reasoning` field is sent).
+ * absent/disabled/non-enabled; the absent default is applied at the call site.
  */
 function parseReasoningEffort(
   thinking: unknown,
@@ -385,7 +397,10 @@ export function parseAnthropicRequest(
     tools: parseTools(body.tools),
     toolChoice: parseToolChoice(body.tool_choice),
     parallelToolCalls: parseDisableParallelToolUse(body.tool_choice),
-    reasoningEffort: parseReasoningEffort(body.thinking, model),
+    reasoningEffort:
+      body.thinking === undefined
+        ? defaultReasoningEffort(model)
+        : parseReasoningEffort(body.thinking, model),
     maxOutputTokens: maxTokens,
     stopSequences: stopSequences && stopSequences.length > 0 ? stopSequences : undefined,
     stream: body.stream === true,
