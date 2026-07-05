@@ -12,6 +12,7 @@ import {
   injectPeerMcpIntoMirror,
   resolveCodexCliBackend,
   resolveGroupKeysFromMirror,
+  workersKeyOf,
   writePeerMcpRuntimeFiles,
 } from "./lib/codex-mcp-config"
 import { enableFileLogging } from "./lib/file-log-reporter"
@@ -53,6 +54,11 @@ import {
   buildFirstMateGuardHookCommand,
 } from "./internal-first-mate-guard"
 import { assertShapingInstalled } from "./lib/first-mate/operator-shaping"
+import {
+  activeDispatchModes,
+  buildWorkerGuardHookCommand,
+  guardToolMatcher,
+} from "./lib/worker-dispatch"
 import { ARTIFACT_REVIEW_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
 import { shouldUseInsecureTls } from "./lib/artifact/tools"
 import { parseBoolEnv } from "./lib/exec"
@@ -60,7 +66,7 @@ import nodePath from "node:path"
 import { tmpdir } from "node:os"
 import { randomBytes } from "node:crypto"
 import { buildPeerAwarenessSnippet, type McpGroup } from "./lib/peer-mcp-personas"
-import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, prependArtifactPanelDirectiveToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
+import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, OPERATING_DEFAULTS_DIRECTIVE, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { provisionAndIndexColbert } from "./lib/colbert"
@@ -72,6 +78,7 @@ import {
 } from "./lib/port"
 import {
   agentToolsEnabled,
+  browseAgentEnabled,
   browserToolsEnabled,
   fleetToolsEnabled,
   standInToolEnabled,
@@ -426,6 +433,11 @@ export const claude = defineCommand({
       await removeOwnClaudeConfigMirror()
     }
     let onShutdown: () => Promise<void> = baseShutdown
+    // Captured inside the codex-mcp block (when built) so the always-on
+    // operating-defaults injection below can ride the peer-awareness snippet
+    // along in the SAME --append-system-prompt arg. Undefined when codex-mcp is
+    // off (then only the operating-defaults directive is injected).
+    let peerAwarenessSnippet: string | undefined
     const codexMcpEnabled = (args as Record<string, unknown>)["codex-mcp"] !== false
     if (codexMcpEnabled) {
       try {
@@ -465,6 +477,8 @@ export const claude = defineCommand({
           codexCli: backend === "cli",
           geminiAvailable,
           groupKeys,
+          workerToolsAvailable: workerToolsEnabled(),
+          browseAvailable: browseAgentEnabled(),
         })
         state.peerMcpNonce = runtime.nonce
         // Reach-back channel for the advisory-review hooks (hook V2): the
@@ -575,6 +589,57 @@ export const claude = defineCommand({
             await injectStopHookIntoSettingsFile(settingsPath, cmd, "UserPromptSubmit", 45)
           } catch (err) {
             consola.warn(`Could not register the UserPromptSubmit hook: ${String(err)}`)
+          }
+          // Workers non-blocking guard: a PreToolUse hook scoped (matcher) to the
+          // active worker tools that DENIES a raw `mcp__<workersKey>__<mode>` call
+          // from the main agent (redirecting it to the `worker-<mode>` background
+          // dispatcher) and ALLOWS it only from that dispatcher subagent. The
+          // resolved workersKey + active modes are baked into the command
+          // (dedup-distinct) and the matcher. Local + instant, so a short 10s
+          // timeout is ample.
+          //
+          // GATED ON `injected.ok`: the guard only makes sense when subagents can
+          // SEE the workers MCP (mirror injection succeeded). On the collision
+          // fallback (parent-only --mcp-config, subagents blind), a `worker-*`
+          // dispatcher could not reach the worker tool — registering the guard
+          // then would deny the main agent AND leave it no working dispatcher, a
+          // fully-broken state. So when injection failed we skip the guard and
+          // leave raw (blocking) workers usable on the main thread.
+          //
+          // HYBRID opt-out (`GH_ROUTER_DISABLE_WORKER_GUARD=1`): keeps the
+          // non-blocking guarantee ON by default, but lets an operator restore the
+          // raw `mcp__workers__*` escape hatch on demand (e.g. for guaranteed
+          // structured-arg fidelity, or when a blocking call is acceptable) — so
+          // the worker-* agents COMPLEMENT rather than hard-replace the raw tools.
+          if (!injected.ok) {
+            consola.warn(
+              "Workers non-blocking guard NOT registered: subagent MCP injection "
+                + "fell back to parent-only (--mcp-config), so worker-* dispatchers "
+                + "cannot reach the workers server. Raw (blocking) worker tools remain "
+                + "usable on the main thread this session.",
+            )
+          } else if (process.env.GH_ROUTER_DISABLE_WORKER_GUARD === "1") {
+            consola.info(
+              "Workers non-blocking guard disabled via GH_ROUTER_DISABLE_WORKER_GUARD=1 "
+                + "— raw mcp__workers__* is callable on the main thread (blocking); the "
+                + "worker-* background agents remain the steered, non-blocking default.",
+            )
+          } else {
+            try {
+              const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+              const workersKey = workersKeyOf(groupKeys)
+              const modes = activeDispatchModes({ browse: browseAgentEnabled() })
+              const cmd = buildWorkerGuardHookCommand(
+                process.execPath,
+                process.argv[1],
+                workersKey,
+                modes,
+              )
+              const matcher = guardToolMatcher(workersKey, modes)
+              await injectStopHookIntoSettingsFile(settingsPath, cmd, "PreToolUse", 10, matcher)
+            } catch (err) {
+              consola.warn(`Could not register the workers PreToolUse guard hook: ${String(err)}`)
+            }
           }
           if (skillsWritten > 0) {
             const skillNames = skillsToWrite.map((s) => `/${s.name}`).join(", ")
@@ -866,7 +931,10 @@ export const claude = defineCommand({
           agentToolsAvailable: agentToolsEnabled(),
           groupKeys,
         })
-        extraArgs.push("--append-system-prompt", peerSnippet)
+        // Capture the peer-awareness snippet; the always-on operating-defaults
+        // injection after this block composes the single --append-system-prompt
+        // (operating-defaults first, then this snippet).
+        peerAwarenessSnippet = peerSnippet
         // Ordering invariant: this MUST run AFTER ensureClaudeConfigMirror()
         // has resolved (above in this same handler), so the snapshot of
         // the user's ~/.claude/CLAUDE.md is already in place before we
@@ -906,6 +974,32 @@ export const claude = defineCommand({
           }`,
         )
       }
+    }
+
+    // Operating-defaults directive (orchestrator posture + hybrid excellence
+    // lens): injected by DEFAULT, NOT gated on codex-mcp, so the posture always
+    // reaches the agent even under --no-codex-mcp. Two surfaces:
+    //   1. --append-system-prompt (main agent, highest salience) — the single
+    //      such arg for the session; the peer-awareness snippet (MCP-dependent)
+    //      rides along after it only when it was built.
+    //   2. the mirrored CLAUDE.md TOP (descendant agents) — prepended AFTER the
+    //      style directive (when that ran) so it lands at the very top.
+    // ensureClaudeConfigMirror() ran unconditionally above, so the mirror exists
+    // regardless of codex-mcp; the prepend is best-effort (warn-and-continue).
+    extraArgs.push(
+      "--append-system-prompt",
+      peerAwarenessSnippet
+        ? `${OPERATING_DEFAULTS_DIRECTIVE}\n\n${peerAwarenessSnippet}`
+        : OPERATING_DEFAULTS_DIRECTIVE,
+    )
+    try {
+      await prependOperatingDefaultsToMirroredClaudeMd()
+    } catch (err) {
+      consola.warn(
+        `Operating-defaults CLAUDE.md prepend failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
     }
 
     launchChild(
