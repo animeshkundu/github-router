@@ -139,6 +139,12 @@ export interface AdvanceInput {
   maxInFlightPerProvider?: number
   topK?: number
   /**
+   * Optional scope filter. When set, the entire drive — unit sweep, decompose
+   * emit, dispatchWave, board, and nextWakeAt — is restricted to this single
+   * mission. Absent → global sweep (today's behavior, unchanged).
+   */
+  missionId?: string
+  /**
    * Phase 1.3 lease gate. Returns whether THIS caller currently holds the
    * drive lease. When it returns false, advance() observes-and-defers (no
    * drive) but still PERSISTS submitted answers via answerQueue. Omitted →
@@ -2112,9 +2118,15 @@ export async function advance(
       }
       const observedUnits = await deps.loadAllUnits()
       const observedMissions = await deps.readMissions()
-      const observedById = missionMap(observedMissions)
-      const observedBoard = buildBoard(observedUnits, observedMissions)
-      const observedWakeAt = nextWakeAt(observedUnits, observedById)
+      const scopedUnits = input.missionId
+        ? observedUnits.filter((u) => u.missionId === input.missionId)
+        : observedUnits
+      const scopedMissions = input.missionId
+        ? observedMissions.filter((m) => m.id === input.missionId)
+        : observedMissions
+      const observedById = missionMap(scopedMissions)
+      const observedBoard = buildBoard(scopedUnits, scopedMissions)
+      const observedWakeAt = nextWakeAt(scopedUnits, observedById)
       // Routing-gap (Chunk A step 2): a deferring non-holder still SURFACES the
       // work pending for the lead/human. The drive-holder (daemon) has escalated
       // needsModel/needsHuman to the queue; reading it back here means the
@@ -2179,19 +2191,28 @@ export async function advance(
 
     const units = await deps.loadAllUnits()
     const missions = await deps.readMissions()
-    const missionsById = missionMap(missions)
+    // When missionId is set, scope the drive to that single mission — all
+    // loops, decompose emits, dispatchWave, board, and wake calculations see
+    // only the mission's units and the mission itself. Absent → global sweep.
+    const scopedUnits = input.missionId
+      ? units.filter((u) => u.missionId === input.missionId)
+      : units
+    const scopedMissions = input.missionId
+      ? missions.filter((m) => m.id === input.missionId)
+      : missions
+    const missionsById = missionMap(scopedMissions)
     let order = 0
 
     // Start-of-drive reconciliation: clear stale blocks, answer pending
     // decisions on terminal units, warn on orphaned consumed approvals. Best
     // effort — never let a reconciliation hiccup abort the sweep.
     try {
-      await reconcile(units, deps, applied)
+      await reconcile(scopedUnits, deps, applied)
     } catch (err) {
       consola.debug("first-mate: reconciliation sweep skipped:", err)
     }
 
-    for (const unit of units.filter((row) => isActiveUnit(row, missionsById))) {
+    for (const unit of scopedUnits.filter((row) => isActiveUnit(row, missionsById))) {
       const requestOrder = order
       order += 1
 
@@ -2321,9 +2342,9 @@ export async function advance(
     // `start_mission` only registers a mission; emit one decompose request per
     // unit-less active mission so the model returns the unit set (created on the
     // next wake by applyDecomposeAnswer).
-    for (const mission of missions) {
+    for (const mission of scopedMissions) {
       if (mission.status !== "active") continue
-      if (units.some((unit) => unit.missionId === mission.id)) continue
+      if (scopedUnits.some((unit) => unit.missionId === mission.id)) continue
       const repo = mission.repos[0]
       if (repo === undefined) continue
       needsModel.push({
@@ -2347,7 +2368,7 @@ export async function advance(
     }
 
     await dispatchWave(
-      units,
+      scopedUnits,
       missionsById,
       maxInFlightPerProvider,
       deps,
@@ -2355,9 +2376,9 @@ export async function advance(
       input.renewLease,
     )
 
-    const board = buildBoard(units, missions)
-    const wakeAt = nextWakeAt(units, missionsById)
-    await pruneTerminalRepos(units, deps)
+    const board = buildBoard(scopedUnits, scopedMissions)
+    const wakeAt = nextWakeAt(scopedUnits, missionsById)
+    await pruneTerminalRepos(scopedUnits, deps)
 
     return {
       board,

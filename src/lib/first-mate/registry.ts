@@ -159,10 +159,11 @@ export async function listActiveMissions(): Promise<Mission[]> {
   return (await readMissions()).filter((mission) => mission.status === "active")
 }
 
-export async function loadAllUnits(): Promise<UnitRow[]> {
+export async function loadAllUnits(missionIdFilter?: string): Promise<UnitRow[]> {
   const missions = await readMissions()
   const repos = new Map<string, RepoRef>()
   for (const mission of missions) {
+    if (missionIdFilter !== undefined && mission.id !== missionIdFilter) continue
     for (const repo of mission.repos) {
       repos.set(repoKey(repo), repo)
     }
@@ -170,7 +171,14 @@ export async function loadAllUnits(): Promise<UnitRow[]> {
 
   const units: UnitRow[] = []
   for (const repo of repos.values()) {
-    units.push(...(await readRepoLedger(repo)))
+    const repoUnits = await readRepoLedger(repo)
+    // When filtering by mission, exclude units that belong to other missions
+    // (a repo may be shared across multiple missions).
+    if (missionIdFilter !== undefined) {
+      units.push(...repoUnits.filter((u) => u.missionId === missionIdFilter))
+    } else {
+      units.push(...repoUnits)
+    }
   }
   return units
 }

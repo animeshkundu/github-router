@@ -161,6 +161,7 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
         ),
         top_k: numberProp("Maximum model and human requests to return."),
         max_in_flight_per_provider: numberProp("Maximum active units per cloud-agent provider."),
+        mission_id: stringProp("Optional mission id to scope the drive to a single mission. Absent → global sweep across all missions."),
       }, []),
       async (args) => {
         const modelAnswers = optionalModelAnswers(args)
@@ -169,6 +170,7 @@ export function createFirstMateTools(): ReadonlyArray<NonPersonaMcpTool> {
           humanDecisions: optionalHumanDecisions(args),
           topK: optionalNumber(args, "top_k"),
           maxInFlightPerProvider: optionalNumber(args, "max_in_flight_per_provider"),
+          missionId: optionalString(args, "mission_id"),
           answerQueue: answerInbox,
           // When this MCP/heartbeat path is the drive holder it must apply the
           // SAME safety envelope as the daemon: fence every ledger write in the
