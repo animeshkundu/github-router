@@ -543,6 +543,7 @@ export async function getPullRequestState(
 }
 
 interface CheckRunRestResponse {
+  total_count?: number
   check_runs?: Array<{
     id?: number
     name?: string
@@ -552,6 +553,15 @@ interface CheckRunRestResponse {
     details_url?: string | null
   }>
 }
+
+// The check-runs API has NO authoritative aggregate state (unlike the legacy
+// /status API's top-level `state`), so a failing/pending run sitting on an
+// un-fetched page is invisible and would yield a spurious "passing" rollup —
+// a real bypass for a matrix CI with >30 runs (GitHub's default page size).
+// Enumerate ALL runs (per_page=100); if a repo has more than PER_PAGE*MAX_PAGES
+// runs we cannot confirm green and FAIL-CLOSED (treat as pending → refuse merge).
+const CHECK_RUNS_PER_PAGE = 100
+const CHECK_RUNS_MAX_PAGES = 20
 
 interface CombinedStatusRestResponse {
   state?: string | null
@@ -577,15 +587,35 @@ export async function getRequiredChecksForSha(
   repo: RepoRef,
   sha: string,
 ): Promise<RequiredChecksSummary> {
-  const response = await ghRest<CheckRunRestResponse>(
-    "GET",
-    `${repoPath(repo)}/commits/${segment(sha)}/check-runs`,
-  )
+  // Enumerate every check-run page — a single page (≤30 by default) can hide a
+  // failing run behind an all-green first page. `checkRunsIncomplete` is set only
+  // when the repo exceeds our page cap so we can never miss a red tail silently.
+  const allCheckRuns: NonNullable<CheckRunRestResponse["check_runs"]> = []
+  let checkRunsIncomplete = false
+  {
+    let page = 1
+    let total = 0
+    for (;;) {
+      const response = await ghRest<CheckRunRestResponse>(
+        "GET",
+        `${repoPath(repo)}/commits/${segment(sha)}/check-runs?per_page=${CHECK_RUNS_PER_PAGE}&page=${page}`,
+      )
+      const runs = response.check_runs ?? []
+      if (page === 1) total = response.total_count ?? runs.length
+      allCheckRuns.push(...runs)
+      if (allCheckRuns.length >= total || runs.length === 0) break
+      page += 1
+      if (page > CHECK_RUNS_MAX_PAGES) {
+        checkRunsIncomplete = true
+        break
+      }
+    }
+  }
   // The Copilot code-review bot registers its own check-run
   // ("copilot-pull-request-reviewer": success). That is a REVIEW marker, not a
   // test — counting it would report ci_rollup "passing" for a PR whose actual
   // lint/test suite never ran. Exclude review-bot check-runs from CI.
-  const checkRuns = (response.check_runs ?? []).filter(
+  const checkRuns = allCheckRuns.filter(
     (check) => !/pull-request-reviewer/i.test(check.name ?? ""),
   )
   const runningCount = checkRuns.filter(
@@ -619,8 +649,11 @@ export async function getRequiredChecksForSha(
     : []
 
   const anyFailing = failingRuns.length > 0 || legacyFailing
-  const anyPending = runningCount > 0 || legacyPending
-  const anySignal = checkRuns.length > 0 || hasLegacyStatuses
+  // An un-enumerated check-run tail (repo exceeds the page cap) is treated as
+  // pending — we cannot prove those runs are green, so the rollup must not be
+  // "passing".
+  const anyPending = runningCount > 0 || legacyPending || checkRunsIncomplete
+  const anySignal = checkRuns.length > 0 || hasLegacyStatuses || checkRunsIncomplete
 
   let rollup: RequiredChecksSummary["rollup"] = "none"
   if (anySignal) {

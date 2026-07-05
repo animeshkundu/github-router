@@ -372,6 +372,63 @@ test("getRequiredChecksForSha ignores an EMPTY combined status (total_count 0) s
   expect((await getRequiredChecksForSha(repo, "sha-empty")).rollup).toBe("none")
 })
 
+// FIX (pagination bypass) — the check-runs API has no aggregate state, so a
+// failing run on page 2+ must not be hidden by an all-green page 1.
+function pageOf(url: string): number {
+  return Number(new URL(url).searchParams.get("page") ?? "1")
+}
+function greenRun(i: number) {
+  return { id: i, name: `test-${i}`, status: "completed", conclusion: "success" }
+}
+
+test("getRequiredChecksForSha enumerates every check-run page — a failing run on page 2 is not hidden by an all-green page 1", async () => {
+  setFetch(
+    routedFetch((url) => {
+      if (url.includes("/check-runs")) {
+        const page = pageOf(url)
+        if (page === 1) {
+          return jsonResponse({
+            total_count: 150,
+            check_runs: Array.from({ length: 100 }, (_, i) => greenRun(i)),
+          })
+        }
+        // page 2: 49 green + one failing run at the tail
+        return jsonResponse({
+          total_count: 150,
+          check_runs: [
+            ...Array.from({ length: 49 }, (_, i) => greenRun(100 + i)),
+            { id: 999, name: "e2e (windows-latest)", status: "completed", conclusion: "failure" },
+          ],
+        })
+      }
+      if (url.includes("/status")) return jsonResponse({ state: "success", total_count: 0, statuses: [] })
+      throw new Error(`unexpected fetch ${url}`)
+    }),
+  )
+  const summary = await getRequiredChecksForSha(repo, "sha-paged")
+  expect(summary.rollup).toBe("failing")
+  expect(summary.failing.map((f) => f.name)).toContain("e2e (windows-latest)")
+})
+
+test("getRequiredChecksForSha FAILS CLOSED (pending) when a repo exceeds the check-run page cap", async () => {
+  // Every page is all-green, but total_count exceeds PER_PAGE * MAX_PAGES, so we
+  // can never confirm the un-enumerated tail — the rollup must be pending, never
+  // passing.
+  setFetch(
+    routedFetch((url) => {
+      if (url.includes("/check-runs")) {
+        return jsonResponse({
+          total_count: 100_000,
+          check_runs: Array.from({ length: 100 }, (_, i) => greenRun(i)),
+        })
+      }
+      if (url.includes("/status")) return jsonResponse({ state: "success", total_count: 0, statuses: [] })
+      throw new Error(`unexpected fetch ${url}`)
+    }),
+  )
+  expect((await getRequiredChecksForSha(repo, "sha-huge")).rollup).toBe("pending")
+})
+
 test("repoHasWorkflows returns false on 404 but RE-THROWS a non-404 probe error (indeterminate, fail-safe)", async () => {
   setFetch(routedFetch(() => jsonResponse({ message: "not found" }, { status: 404 })))
   expect(await repoHasWorkflows(repo, "main")).toBe(false)
