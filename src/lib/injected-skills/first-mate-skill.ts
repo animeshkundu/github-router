@@ -56,9 +56,9 @@ Use the request's kind and payload as the contract:
 
 Delegate heavy reading to workers:
 
-- Use mcp__workers__explore for focused source or history gathering.
-- Use mcp__workers__review for compact review of a specific plan, PR summary, or suspicious change.
-- Use mcp__workers__test when a missing executable check is the blocker.
+- Use the worker-explore subagent (Agent tool) for focused source or history gathering.
+- Use the worker-review subagent (Agent tool) for compact review of a specific plan, PR summary, or suspicious change.
+- Use the worker-test subagent (Agent tool) when a missing executable check is the blocker.
 
 Do not read a full diff, full CI log, or full transcript in the lead context. Ask workers for narrow facts and compact excerpts. The ledger is durable memory; context is not.
 

@@ -60,7 +60,7 @@ Binding rule:
 
 Ask whether changed behavior has executable coverage.
 
-- If behavior changed and no relevant test exists, use mcp__workers__test to author a focused test through a DIFFERENT lab than the implementer when possible.
+- If behavior changed and no relevant test exists, dispatch the worker-test subagent (Agent tool, subagent_type worker-test) to author a focused test through a DIFFERENT lab than the implementer when possible.
 - Cap missing-test attempts; default to a small number of focused tries.
 - Run the new test and then the relevant existing gate.
 - If creating a large new harness, broad fixture system, or slow integration environment is required, ask the user before proceeding.

@@ -57,7 +57,7 @@ Default caps unless the user explicitly gives a smaller or larger budget:
    - Then use mcp__search__code lexically for exact symbols, filenames, errors, routes, flags, and config keys.
    - Use git blame or history when authorship, regression timing, or intent matters.
    - Use mcp__search__web for upstream APIs, package behavior, protocol docs, or public issues.
-   - Launch parallel mcp__workers__explore workers for heavy gathering, each with a narrow question and expected artifact.
+   - Launch parallel worker-explore background subagents (via the Agent tool, subagent_type worker-explore) for heavy gathering, each with a narrow question and expected artifact. They run non-blocking and report back on completion.
    - Keep worker results summarized; do not paste every detail into the main context.
 
 4. Form a root-cause hypothesis.
@@ -69,7 +69,7 @@ Default caps unless the user explicitly gives a smaller or larger budget:
 5. Verify load-bearing claims adversarially.
    - First preference: reproduce the bug, run the failing test, or run the direct check. Tag verified-executable.
    - If executable proof is not available, read the actual source or primary artifact and cite the lines. Tag verified-source.
-   - Ask mcp__workers__review to confirm the source-reading for important claims.
+   - Dispatch the worker-review subagent (via the Agent tool) to confirm the source-reading for important claims.
    - Ask a different-lab refuter through mcp__peers__codex_critic or mcp__peers__gemini_critic to try to refute the hypothesis.
    - Give the refuter the symptom, observed facts, and acceptance criteria, but not your proposed root cause. Avoid anchoring them.
    - If the refuter finds a plausible alternative, add it to the worklist and spend at most one bounded round resolving it.

@@ -24,6 +24,7 @@ mock.module("node:os", () => ({
 const { ensurePaths, PATHS, sweepStaleRuntimeFiles, sweepStalePeerAgentMdFiles, sweepStaleClaudeConfigMirrors, removeOwnClaudeConfigMirror, writeRuntimeFileSecure, ensureClaudeConfigMirror, __testing } =
   await import("../src/lib/paths")
 const { injectPeerMcpIntoMirror } = await import("../src/lib/codex-mcp-config")
+const { ALL_DISPATCHER_AGENT_NAMES } = await import("../src/lib/worker-dispatch")
 
 // Round-4 #4: verify that monkey-patching `fs.<name>` / `consola.<name>`
 // is actually intercepted by the library-side imports of those
@@ -274,6 +275,29 @@ test("sweepStalePeerAgentMdFiles deletes dead-PID peer-*.md but keeps live-PID a
   await fs.unlink(userPeerLike)
   await fs.unlink(userPidLike)
   await fs.unlink(userPidHexLike)
+})
+
+test("sweepStalePeerAgentMdFiles reaps a dead-PID .md for EVERY worker-* dispatcher name (regex drift guard)", async () => {
+  // Drift guard: if a new worker dispatcher mode is added in
+  // worker-dispatch.ts but NOT to the PEER_AGENT_MD_FILENAME allowlist in
+  // paths.ts, its stale .md files would leak forever. Assert the sweep
+  // recognizes (and reaps a dead-PID instance of) every dispatcher name.
+  const agentsDir = path.join(PATHS.CLAUDE_CONFIG_DIR, "agents")
+  await fs.mkdir(agentsDir, { recursive: true })
+  const deadPid = 2_147_483_641
+  const targets = ALL_DISPATCHER_AGENT_NAMES.map((name) =>
+    path.join(agentsDir, `peer-${deadPid}-deadbeef-${name}.md`),
+  )
+  expect(targets.length).toBeGreaterThanOrEqual(6)
+  for (const p of targets) {
+    await fs.writeFile(p, "---\nname: x\n---\n", { mode: 0o600 })
+  }
+
+  await sweepStalePeerAgentMdFiles()
+
+  for (const p of targets) {
+    await expect(fs.stat(p)).rejects.toThrow()
+  }
 })
 
 test("sweepStalePeerAgentMdFiles tolerates missing CLAUDE_CONFIG_DIR/agents dir", async () => {

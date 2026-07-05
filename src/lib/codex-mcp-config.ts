@@ -14,6 +14,13 @@ import {
   MCP_GROUPS,
   type McpGroup,
 } from "./peer-mcp-personas"
+import {
+  activeDispatchModes,
+  dispatcherAgentName,
+  dispatcherDescription,
+  dispatcherPrompt,
+  dispatcherTools,
+} from "./worker-dispatch"
 
 /**
  * Resolved `mcpServers` config key per enabled group. Bare preferred key
@@ -28,6 +35,14 @@ export type ResolvedGroupKeys = Partial<Record<McpGroup, string>>
  *  this convenience reads it with the bare-key fallback for safety. */
 function peersKeyOf(groupKeys: ResolvedGroupKeys): string {
   return groupKeys.peers ?? GROUP_META.peers.preferredKey
+}
+
+/** The resolved `workers` server key (bare `workers`, or the `gh-router-workers`
+ *  fallback on collision). Used to name the dispatcher tools and the guard
+ *  matcher. Falls back to the preferred bare key when the group is absent (the
+ *  caller only builds worker dispatchers when the group is enabled anyway). */
+export function workersKeyOf(groupKeys: ResolvedGroupKeys): string {
+  return groupKeys.workers ?? GROUP_META.workers.preferredKey
 }
 
 export type CodexMcpBackend = "http" | "cli"
@@ -79,6 +94,14 @@ interface BuildOpts {
   nonce: string
   /** Isolated CODEX_HOME for the stdio child (only used when codexCli). */
   codexHome: string
+  /** Whether the core worker tools are served (`workerToolsEnabled()`). When
+   *  true, the `worker-explore/implement/review/plan/test` dispatcher subagents
+   *  are generated. Optional (defaults false) so `buildPeerMcpConfig` callers
+   *  that don't build agents need not pass it. */
+  workerToolsAvailable?: boolean
+  /** Whether the browse worker tool is served (`browseAgentEnabled()`). Gates
+   *  the extra `worker-browse` dispatcher. Optional (defaults false). */
+  browseAvailable?: boolean
 }
 
 interface HttpMcpEntry {
@@ -144,7 +167,7 @@ export function buildPeerMcpConfig(
 
 export type PeerAgentDefinitions = Record<
   string,
-  { description: string; prompt: string }
+  { description: string; prompt: string; tools?: ReadonlyArray<string> }
 >
 
 /**
@@ -276,6 +299,24 @@ export function buildPeerAgentDefinitions(
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
   })
+  // Non-blocking workers surface: one `worker-<mode>` DISPATCHER subagent per
+  // active worker tool. Each is pinned by a `tools:` allowlist to the workers
+  // server only (`mcp__<workersKey>__*`), so it can run the worker and relay
+  // the result but has NO Agent/Read/Bash — it cannot spawn further agents
+  // (no recursion) or do extra work; its prompt narrows it to the one mode.
+  // The lead runs these in the background and is notified on completion, so a
+  // 30-min worker never blocks the main turn. Gated on `workerToolsAvailable`
+  // (core modes) and `browseAvailable` (the extra `worker-browse`).
+  if (opts.workerToolsAvailable) {
+    const workersKey = workersKeyOf(opts.groupKeys)
+    for (const mode of activeDispatchModes({ browse: opts.browseAvailable === true })) {
+      out[dispatcherAgentName(mode)] = {
+        description: dispatcherDescription(mode),
+        prompt: dispatcherPrompt(mode, workersKey),
+        tools: dispatcherTools(mode, workersKey),
+      }
+    }
+  }
   return out
 }
 
@@ -302,6 +343,12 @@ interface WriteOpts {
    *  strings so every reference points at OUR server even after a collision
    *  fallback. */
   groupKeys: ResolvedGroupKeys
+  /** Whether the core worker tools are served — generates the `worker-*`
+   *  dispatcher subagents. */
+  workerToolsAvailable?: boolean
+  /** Whether the browse worker tool is served — adds the `worker-browse`
+   *  dispatcher. */
+  browseAvailable?: boolean
   /** Override for tests. Defaults to PATHS.CODEX_HOME. */
   codexHome?: string
   /** Override for tests. Defaults to PATHS.CLAUDE_RUNTIME_DIR. */
@@ -373,17 +420,34 @@ function escapeYamlString(s: string): string {
  */
 const VALID_AGENT_NAME = /^[a-z][a-z0-9-]*$/
 
-/** Build a single subagent .md file body (frontmatter + system prompt). */
-function buildAgentMd(spec: { name: string; description: string; prompt: string }): string {
-  return [
+/** Build a single subagent .md file body (frontmatter + system prompt).
+ *
+ * `tools` (optional) becomes a `tools:` frontmatter allowlist RESTRICTING the
+ * subagent to exactly those tools (omission inherits the parent's full toolset,
+ * per Claude Code semantics). Used by the `worker-*` dispatchers to pin each to
+ * its single `mcp__<workersKey>__<mode>` tool — which physically prevents them
+ * from spawning other agents or doing extra work. Names are validated by the
+ * caller (`writePeerAgentMdFiles`) / are proxy-generated, so no escaping needed
+ * beyond the comma-join Claude Code's frontmatter parser expects. */
+function buildAgentMd(spec: {
+  name: string
+  description: string
+  prompt: string
+  tools?: ReadonlyArray<string>
+}): string {
+  const lines = [
     "---",
     `name: ${spec.name}`,
     `description: ${escapeYamlString(spec.description)}`,
-    "---",
-    "",
-    spec.prompt,
-    "",
-  ].join("\n")
+  ]
+  if (spec.tools && spec.tools.length > 0) {
+    // YAML flow array of quoted strings — matches how Claude Code's loader
+    // parses `tools:` (an array), and quoting keeps the `mcp__…__*` wildcard
+    // a plain string (the `*` is never mistaken for a YAML alias).
+    lines.push(`tools: [${spec.tools.map((t) => JSON.stringify(t)).join(", ")}]`)
+  }
+  lines.push("---", "", spec.prompt, "")
+  return lines.join("\n")
 }
 
 /**
@@ -404,7 +468,7 @@ function buildAgentMd(spec: { name: string; description: string; prompt: string 
  * Returns the file paths plus a cleanup() that unlinks them.
  */
 export async function writePeerAgentMdFiles(
-  agents: Record<string, { description: string; prompt: string }>,
+  agents: Record<string, { description: string; prompt: string; tools?: ReadonlyArray<string> }>,
   opts: { agentsDir?: string; fileSuffix: string },
 ): Promise<{ paths: Array<string>; cleanup: () => Promise<void> }> {
   // Validate every agent name BEFORE touching the filesystem. Defense-
@@ -433,7 +497,7 @@ export async function writePeerAgentMdFiles(
       await fs.unlink(filePath).catch(() => {})
       await writeRuntimeFileSecure(
         filePath,
-        buildAgentMd({ name, description: def.description, prompt: def.prompt }),
+        buildAgentMd({ name, description: def.description, prompt: def.prompt, tools: def.tools }),
       )
       paths.push(filePath)
     }
@@ -734,6 +798,8 @@ export async function writePeerMcpRuntimeFiles(
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
     groupKeys: opts.groupKeys,
+    workerToolsAvailable: opts.workerToolsAvailable,
+    browseAvailable: opts.browseAvailable,
     nonce,
     codexHome,
   })
