@@ -173,6 +173,13 @@ describe("capability shaping — config assertions", () => {
     expect(ok("git -c core.pager=cat show HEAD")).toBe(true)
     expect(ok("git -c core.sshCommand='touch x' log")).toBe(true)
     expect(ok("git -c core.fsmonitor='touch x' status")).toBe(true)
+    // ATTACHED short form: git parses `-ccore.sshCommand=…` as `-c core.…`, so a
+    // no-space `-c<key=value>` token is the same config-injection RCE and must NOT
+    // slip through as a "lone global flag".
+    expect(ok("git -ccore.sshCommand='sh -c \"touch x\"' ls-remote origin")).toBe(true)
+    expect(ok("git -ccore.pager=cat show HEAD")).toBe(true)
+    // `-C <dir>` (capital, the allowed dir flag) is distinct and stays allowed.
+    expect(ok("git -C /tmp/repo log")).toBe(false)
     // --exec-path / -O (open-files-in-pager) are exec vectors; --output writes.
     expect(ok("git --exec-path=/tmp/evil log")).toBe(true)
     expect(ok("git grep -O foo")).toBe(true)

@@ -270,7 +270,13 @@ const GIT_GLOBAL_ARG_FLAGS = new Set<string>([
  * pager.
  */
 function gitArgIsDangerous(tok: string): string | undefined {
-  if (tok === "-c") return "git -c can inject config that executes commands"
+  // `-c` exact OR git's ATTACHED short form `-c<key=value>` (git parses
+  // `-ccore.sshCommand=…` as `-c core.sshCommand=…`) — both inject config that
+  // executes commands. `-C` (capital, the allowed dir flag in GIT_GLOBAL_ARG_FLAGS)
+  // is distinct: `startsWith` is case-sensitive, so `-C…` never matches `-c`.
+  if (tok === "-c" || tok.startsWith("-c")) {
+    return "git -c can inject config that executes commands"
+  }
   if (tok === "--config-env" || tok.startsWith("--config-env=")) {
     return "git --config-env can inject config (e.g. core.sshCommand) that executes commands"
   }
