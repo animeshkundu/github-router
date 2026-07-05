@@ -60,6 +60,8 @@ Delegate heavy reading to workers:
 - Use the worker-review subagent (Agent tool) for compact review of a specific plan, PR summary, or suspicious change.
 - Use the worker-test subagent (Agent tool) when a missing executable check is the blocker.
 
+Operator / --agents mode constraint: in operator sessions the \`mcp__workers__*\` group is BLOCKED by the gateway. Fall back to read-only \`gh\` CLI calls (\`gh pr view\`, \`gh pr list\`, \`gh pr diff --name-only\`, \`gh run view\`, \`gh run list\`) or drive actions through \`mcp__first-mate__advance\`. Prefer authoring fix instructions that ask the cloud agent to diagnose on its own rather than pulling diffs or CI logs into the lead context.
+
 Do not read a full diff, full CI log, or full transcript in the lead context. Ask workers for narrow facts and compact excerpts. The ledger is durable memory; context is not.
 
 ## Human requests
@@ -93,6 +95,8 @@ Responsiveness (optional): the buckets above already tighten cadence to ~2 min f
 
 Guardrails: never leave more than one [fm-heartbeat] job; never busy-loop advance; if no scheduler tool is available, tell the user the next wake is in nextWakeSeconds seconds and stop.
 
+MCP unavailable: if the first-mate MCP server is not present (this is not a \`--agents\` session and \`mcp__first-mate__advance\` would return a tool-not-found error), do NOT attempt to advance. CronList then CronDelete every [fm-heartbeat] job (same as Disarm above), and report "first-mate paused — re-run under \`github-router claude --agents\` to resume." Stop without further action.
+
 ## Board reports
 
 Use mcp__first-mate__board or mcp__first-mate__mission_status for read-only status checks.
@@ -102,6 +106,7 @@ Report compactly:
 - repositories
 - phase counts
 - blocked count and why, when available
+- resolved cloud-agent model per unit (surfaced on the board — verify model choice before approving plans)
 - next wake time or the next requested action
 
 Never reconstruct status by rereading raw logs when the controller board already has the handles.
