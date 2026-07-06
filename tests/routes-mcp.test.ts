@@ -2139,11 +2139,18 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
       data: [
         ...baseModels.data.filter(
           (m) =>
-            !["gpt-5.4-mini", "gpt-5.5", "gemini-3.1-pro-preview"].includes(
-              m.id,
-            ),
+            ![
+              "gpt-5.4-mini",
+              "gpt-5.5",
+              "gemini-3.1-pro-preview",
+              "claude-sonnet-5",
+            ].includes(m.id),
         ),
-        // explore default + worker gate model
+        // explore default (native Claude worker via /chat/completions)
+        fakeWorkerModel("claude-sonnet-5", {
+          reasoning_effort: ["low", "medium", "high", "xhigh"],
+        }),
+        // worker gate sentinel + browse default
         fakeWorkerModel("gpt-5.4-mini", {
           reasoning_effort: ["minimal", "low", "medium", "high"],
         }),
@@ -2370,7 +2377,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
       method: "tools/call",
       params: {
         name: "explore",
-        arguments: { prompt: "hi", thinking: "xhigh" },
+        arguments: { prompt: "hi", thinking: "xhigh", model: "gemini-3.1-pro-preview" },
       },
     })
     const result = json.result as {
