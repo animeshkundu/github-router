@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 
@@ -469,6 +469,13 @@ function repoLabel(repo: RepoRef): string {
   return `${repo.owner}/${repo.name}`
 }
 
+export function unitGoalHash(mission: Mission, title: string, repo: RepoRef): string {
+  return createHash("sha256")
+    .update(`${mission.id}\0${repoLabel(repo).toLowerCase()}\0${mission.goal}\0${title.trim().toLowerCase()}`)
+    .digest("hex")
+    .slice(0, 12)
+}
+
 function sortKey(unit: UnitRow): number {
   return unit.lastCheckedMs ?? unit.lastSteer?.atMs ?? 0
 }
@@ -893,6 +900,18 @@ async function applyModelAnswer(
         // so it leaves NO durable residue: a stale `unit.dispatch` with a
         // non-null taskId here would wedge the replay guard forever and silently
         // lose the drained review_plan approval. The per-answer catch handles it.
+        if (hasActiveBuildUnit(unit.missionId, units)) {
+          const request = await createHumanRequest(
+            unit,
+            mission,
+            { provider: unit.provider, prs: [] },
+            "build dispatch is waiting because another build PR is already active for this mission",
+            deps,
+          )
+          needsHuman.push({ request, sortKey: sortKey(unit), order: needsHuman.length })
+          await deps.upsertUnit(unit.repo, unit)
+          return
+        }
         const model = resolveCloudAgentModel(unit.model ?? mission.defaultModel)
         consola.debug(`first-mate: dispatching build task for ${unit.missionId}:${unitHandle(unit)} agent=${unit.agent}`)
         const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
@@ -1271,29 +1290,40 @@ export async function addUnitsToMission(
   mission: Mission,
   rawUnits: unknown[],
   deps: Pick<ControllerDeps, "upsertUnit">,
+  existingUnits: UnitRow[] = [],
 ): Promise<number> {
   // Collect the valid specs in order first, so a unit's `dependsOn` (0-based
   // list indices) can be resolved to the created units' stable ids — plan-first
   // units have no issue number to depend on.
-  const specs: Array<{ rawIndex: number; id: string; spec: Record<string, unknown>; title: string; repo: RepoRef }> = []
+  const existingGoalHashes = new Set(
+    existingUnits
+      .filter((unit) => unit.missionId === mission.id && unit.terminal !== true)
+      .map((unit) => unit.goalHash)
+      .filter((hash): hash is string => hash !== undefined && hash.length > 0),
+  )
+  const seenGoalHashes = new Set<string>()
+  const specs: Array<{ rawIndex: number; id: string; spec: Record<string, unknown>; title: string; repo: RepoRef; goalHash: string }> = []
   for (let rawIndex = 0; rawIndex < rawUnits.length; rawIndex += 1) {
     const spec = asRecord(rawUnits[rawIndex]) ?? {}
     const title = stringValue(spec.title)
     if (title === undefined || title.length === 0) continue
     const repo = parseRepoRef(stringValue(spec.repo)) ?? mission.repos[0]
     if (repo === undefined) continue
+    const goalHash = unitGoalHash(mission, title, repo)
+    if (existingGoalHashes.has(goalHash) || seenGoalHashes.has(goalHash)) continue
     // #2 — validate the explicit per-unit model at INPUT time (before any unit
     // is created), so a typo fails FAST with the actionable message here rather
     // than throwing every wake at dispatch (retries never bump for a bad model,
     // so it would never converge). Unspecified per-unit model → the mission
     // default (already validated at start_mission) → resolves silently.
     resolveCloudAgentModel(stringValue(spec.model) ?? mission.defaultModel)
-    specs.push({ rawIndex, id: randomUUID(), spec, title, repo })
+    seenGoalHashes.add(goalHash)
+    specs.push({ rawIndex, id: randomUUID(), spec, title, repo, goalHash })
   }
   const idByRawIndex = new Map(specs.map((entry) => [entry.rawIndex, entry.id]))
 
   let created = 0
-  for (const { rawIndex, id, spec, title, repo } of specs) {
+  for (const { rawIndex, id, spec, title, repo, goalHash } of specs) {
     const dependsOn = (Array.isArray(spec.dependsOn) ? spec.dependsOn : [])
       .filter(
         (idx): idx is number =>
@@ -1319,6 +1349,7 @@ export async function addUnitsToMission(
       artifact: "no_pr",
       validation: "unknown",
       retries: 0,
+      goalHash,
       dependsOn,
       title,
     }
@@ -1339,7 +1370,8 @@ async function applyDecomposeAnswer(
   if (mission === undefined || mission.status !== "active") return
   const verdict = asRecord(answer.verdict) ?? {}
   const rawUnits = Array.isArray(verdict.units) ? verdict.units : []
-  const created = await addUnitsToMission(mission, rawUnits, deps)
+  const existing = await deps.loadAllUnits(mission.id)
+  const created = await addUnitsToMission(mission, rawUnits, deps, existing)
   if (created > 0) applied.push(`decomposed ${missionId} into ${created} unit(s)`)
 }
 
@@ -1626,6 +1658,54 @@ function recomputeReviewDecision(reviews: ReviewSummary[]): string | null {
  * as `cancelled_external_close`, and an uncorrelated merge stays blocked for a
  * human. Returns after handling; the caller `continue`s.
  */
+async function answerPendingDecision(
+  unit: UnitRow,
+  deps: ControllerDeps,
+  choice: string,
+): Promise<void> {
+  const decisionId = unit.blockingDecisionId
+  if (decisionId === undefined || decisionId === null) return
+  try {
+    await deps.markAnswered(decisionId, choice, "system")
+  } catch (err) {
+    consola.debug(`first-mate: markAnswered(${choice}) during reconcile failed:`, err)
+  }
+}
+
+async function reconcileKnownPrState(
+  unit: UnitRow,
+  deps: ControllerDeps,
+  applied: string[],
+): Promise<boolean> {
+  if (unit.pr === null || unit.terminal === true) return false
+  const live = await deps.getPullRequestState(agentRepo(unit.repo), unit.pr)
+  const state = live.state.toUpperCase()
+  if (state === "MERGED") {
+    unit.terminal = true
+    unit.phase = "done"
+    unit.artifact = "pr_merged"
+    unit.validation = unit.validation === "floor_passed" ? "floor_passed" : "external_merge_unverified"
+    await answerPendingDecision(unit, deps, "reconciled_live_merge")
+    unit.blockingDecisionId = null
+    await deps.upsertUnit(unit.repo, unit)
+    applied.push(`reconciled already-merged ${repoLabel(unit.repo)}#${unit.pr}`)
+    return true
+  }
+  if (state === "CLOSED") {
+    unit.terminal = true
+    unit.phase = "done"
+    unit.artifact = "pr_closed"
+    unit.validation = "cancelled_external_close"
+    unit.cancelledBy = "external"
+    await answerPendingDecision(unit, deps, "reconciled_live_close")
+    unit.blockingDecisionId = null
+    await deps.upsertUnit(unit.repo, unit)
+    applied.push(`reconciled live closed PR for ${repoLabel(unit.repo)}#${unit.pr}`)
+    return true
+  }
+  return false
+}
+
 async function observeBlockedUnit(
   unit: UnitRow,
   deps: ControllerDeps,
@@ -1707,11 +1787,11 @@ async function observeBlockedUnit(
     unit.blockingDecisionId = null
     await answer("cancelled_external_close")
     applied.push(`reconciled external close for ${repoLabel(unit.repo)}#${unit.pr ?? "?"}`)
-  } else if (mutation === "merged_uncorrelated") {
-    // A merge was seen only via the ambiguous author fallback — do NOT mark done.
+  } else if (mutation === "merged_uncorrelated" || mutation === "open_uncorrelated") {
+    // A PR was seen only via the ambiguous author fallback — do NOT mark done or bind it.
     // Leave it blocked; the still-pending decision surfaces it for a human.
     consola.warn(
-      `first-mate: an UNCORRELATED merged PR was observed for blocked ${unit.missionId}:${unitHandle(unit)} — leaving blocked for human reconciliation`,
+      `first-mate: an UNCORRELATED ${mutation === "merged_uncorrelated" ? "merged" : "open"} PR was observed for blocked ${unit.missionId}:${unitHandle(unit)} — leaving blocked for human reconciliation`,
     )
   }
 
@@ -1950,6 +2030,16 @@ function activeCountsByAgent(units: UnitRow[]): Map<AgentKey, number> {
   return counts
 }
 
+function hasActiveBuildUnit(missionId: string, units: UnitRow[]): boolean {
+  return units.some(
+    (unit) =>
+      unit.missionId === missionId &&
+      unit.dispatchMode === "build" &&
+      unit.terminal !== true &&
+      (unit.provider !== "none" || unit.taskId !== null || unit.dispatch !== undefined),
+  )
+}
+
 /** Default plan-review gate for a mission (absent → the hard, current flow). */
 function planGateOf(mission: Mission | undefined): "hard" | "soft" {
   return mission?.planGate === "soft" ? "soft" : "hard"
@@ -1998,12 +2088,18 @@ export function artifactSlug(unit: UnitRow): string {
   return slug.length > 0 ? slug : "unit"
 }
 
+function unitIdInstruction(unit: UnitRow): string {
+  const marker = `unit-id: ${unit.id ?? unitHandle(unit)}`
+  return `Controller correlation marker: ${marker}. The Agent-Tasks API has no branch/label field, so this is cooperative: include this marker in the branch name if possible, in the PR body, and in the first commit message trailer.`
+}
+
 export function planPrompt(unit: UnitRow, mission: Mission, dateStr: string): string {
   const slug = artifactSlug(unit)
   const parts = [
     `Mission goal:\n${mission.goal}`,
     `Acceptance criteria:\n${mission.acceptanceCriteria}`,
     `Work unit:\n${unit.title}`,
+    unitIdInstruction(unit),
     "Analyze the repository and produce a concrete, step-by-step implementation plan for this work unit: the files you will change, the approach, key risks, and how each acceptance criterion will be verified. Do NOT edit code or open a pull request yet — output the plan and stop. It will be reviewed before implementation.",
     `Persist your work as durable artifacts committed on the branch: write your research and findings to \`docs/research/${dateStr}-${slug}.md\` and your step-by-step implementation plan to \`docs/plans/${dateStr}-${slug}.md\`. Create the \`docs/research\` and \`docs/plans\` directories if they do not exist, and commit both files on the branch so the implementation task can read them.`,
   ]
@@ -2018,6 +2114,7 @@ export function buildPrompt(unit: UnitRow, mission: Mission, dateStr: string): s
     `Mission goal:\n${mission.goal}`,
     `Acceptance criteria:\n${mission.acceptanceCriteria}`,
     `Work unit:\n${unit.title}`,
+    unitIdInstruction(unit),
   ]
   if (mission.houseRules !== undefined) parts.push(`House rules:\n${mission.houseRules}`)
   const hasPlan = unit.planExcerpt !== undefined && unit.planExcerpt.trim().length > 0
@@ -2206,7 +2303,8 @@ async function dispatchWave(
   // honor the GLOBAL per-provider cap, otherwise two scoped drives could each
   // dispatch up to the cap and blow through 2x. Dispatch is still limited to
   // `units` (the scoped set).
-  const counts = activeCountsByAgent(countUnits ?? units)
+  const allCountUnits = countUnits ?? units
+  const counts = activeCountsByAgent(allCountUnits)
   const candidates = units
     .filter((unit) => isActiveUnit(unit, missions))
     // A unit parked on a human decision must never be (re-)dispatched — it is
@@ -2223,6 +2321,9 @@ async function dispatchWave(
     if (current >= maxInFlightPerProvider) continue
     const mission = missions.get(unit.missionId)
     if (mission === undefined) continue
+    if (unit.dispatchMode === "build" && hasActiveBuildUnit(unit.missionId, allCountUnits)) {
+      continue
+    }
 
     // #3 — renew the lease immediately BEFORE the irreversible startTask. If the
     // lease was lost/stolen mid-sweep we are no longer the sole driver; STOP the
@@ -2507,6 +2608,14 @@ export async function advance(
       const requestOrder = order
       order += 1
 
+      if (unit.pr !== null) {
+        try {
+          if (await reconcileKnownPrState(unit, deps, applied)) continue
+        } catch (err) {
+          consola.debug(`first-mate: live PR reconcile skipped for ${unit.missionId}:${unitHandle(unit)}:`, err)
+        }
+      }
+
       // A1: a BLOCKED unit is never dispatched/steered, but it IS observed so an
       // out-of-band merge/close is reconciled (decision-type aware) rather than
       // wedging the unit forever. It never runs classify/executeAction.
@@ -2551,6 +2660,21 @@ export async function advance(
         }
 
         const observed = await deps.observeUnit(unit)
+        if (observed.externalMutation === "open_uncorrelated") {
+          needsHuman.push({
+            request: await createHumanRequest(
+              unit,
+              mission,
+              observed,
+              `uncorrelated open same-bot PR #${observed.externalPr ?? "unknown"} observed — human reconciliation required before first mate can continue`,
+              deps,
+            ),
+            sortKey: sortKey(unit),
+            order: requestOrder,
+          })
+          await deps.upsertUnit(unit.repo, unit)
+          continue
+        }
         const evidence = await fillFuzzyFields(unit, mission, observed, deps)
         // #12: snapshot the progress-signal state BEFORE updateUnitFromObservedPrs
         // overwrites it (and BEFORE classify reassigns unit.provider), so the

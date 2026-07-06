@@ -43,6 +43,8 @@ export interface Mission {
    * Optional → back-compat; absent uses the controller default.
    */
   maxCopilotComments?: number
+  /** When true, a repo with no reported CI is not mergeable through first-mate. */
+  ciRequired?: boolean
   repos: RepoRef[]
   status: "active" | "done" | "abandoned"
   createdMs: number
@@ -112,6 +114,7 @@ function isMission(value: unknown): value is Mission {
       mission.planGate === "soft") &&
     isOptionalPositiveInteger(mission.maxFixCycles) &&
     isOptionalPositiveInteger(mission.maxCopilotComments) &&
+    (mission.ciRequired === undefined || typeof mission.ciRequired === "boolean") &&
     Array.isArray(mission.repos) &&
     mission.repos.every(isRepoRef) &&
     (mission.status === "active" ||

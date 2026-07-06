@@ -73,6 +73,8 @@ export interface AgentPRSummary {
   headSha: string
   headRef: string
   isDraft: boolean
+  /** Cooperative controller-issued marker found in the PR body, if any. */
+  unitIdMarker?: string
 }
 
 export interface PullRequestState {

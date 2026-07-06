@@ -4,6 +4,7 @@ import { AgentError } from "~/lib/agent/types"
 import type { PullRequestState, RequiredChecksSummary } from "~/lib/agent/types"
 import { createFirstMateTools, type MergeCloseDeps } from "~/lib/first-mate/tools"
 import { upsertUnit as realUpsertUnit } from "~/lib/first-mate/ledger"
+import type { DecisionRecord } from "~/lib/first-mate/decisions"
 import type { Mission } from "~/lib/first-mate/registry"
 import type { RepoRef, UnitRow } from "~/lib/first-mate/types"
 import { state } from "~/lib/state"
@@ -43,7 +44,7 @@ function checks(overrides: Partial<RequiredChecksSummary> = {}): RequiredChecksS
   return { rollup: "passing", checks: [], failing: [], runningCount: 0, ...overrides }
 }
 
-function activeMission(): Mission {
+function activeMission(overrides: Partial<Mission> = {}): Mission {
   const now = Date.now()
   return {
     id: "m1",
@@ -53,6 +54,7 @@ function activeMission(): Mission {
     status: "active",
     createdMs: now,
     updatedMs: now,
+    ...overrides,
   }
 }
 
@@ -90,6 +92,8 @@ function makeDeps(overrides: Partial<MergeCloseDeps> = {}): MergeCloseDeps {
     loadAllUnits: mock(async () => []),
     upsertMission: mock(async () => undefined),
     upsertUnit: mock(async () => undefined) as typeof realUpsertUnit,
+    markAnswered: mock(async () => undefined),
+    readDecisions: mock(async () => [] as DecisionRecord[]),
     ...overrides,
   }
 }
@@ -290,6 +294,74 @@ describe("merge_pr", () => {
     expect(deps.mergePullRequest).not.toHaveBeenCalled()
   })
 
+
+  test("refuses when the test-count ratchet decreases", async () => {
+    const row = unit({ pr: 7, baselineTestCount: 2 })
+    const deps = makeDeps({
+      loadAllUnits: mock(async () => [row]),
+      readMissions: mock(async () => [activeMission()]),
+      getPullRequestDiffSummary: mock(async () => ({
+        files: [{ path: "tests/foo.test.ts", additions: 1, deletions: 0, status: "modified" }],
+        totalAdditions: 1,
+        totalDeletions: 0,
+        fileCount: 1,
+        truncated: false,
+      })),
+    })
+    const res = await toolOf("merge_pr", deps).handler({
+      repo: "octo/repo",
+      pr: 7,
+      expected_head_sha: "reviewedsha",
+    })
+
+    expect(res.isError).toBe(true)
+    expect((parsed(res).error as { message: string }).message).toContain("test-count ratchet")
+    expect(deps.mergePullRequest).not.toHaveBeenCalled()
+  })
+
+  test("refuses docs-only diff for a build unit requiring code and tests", async () => {
+    const row = unit({ pr: 7, dispatchMode: "build", title: "change code and tests" })
+    const deps = makeDeps({
+      loadAllUnits: mock(async () => [row]),
+      readMissions: mock(async () => [activeMission({ acceptanceCriteria: "Must include code and tests." })]),
+      getPullRequestDiffSummary: mock(async () => ({
+        files: [{ path: "docs/plan.md", additions: 3, deletions: 0, status: "modified" }],
+        totalAdditions: 3,
+        totalDeletions: 0,
+        fileCount: 1,
+        truncated: false,
+      })),
+    })
+    const res = await toolOf("merge_pr", deps).handler({
+      repo: "octo/repo",
+      pr: 7,
+      expected_head_sha: "reviewedsha",
+    })
+
+    expect(res.isError).toBe(true)
+    expect((parsed(res).error as { message: string }).message).toContain("docs-only")
+    expect(deps.mergePullRequest).not.toHaveBeenCalled()
+  })
+
+  test("refuses CI-less merge when the mission requires CI", async () => {
+    const row = unit({ pr: 7 })
+    const deps = makeDeps({
+      loadAllUnits: mock(async () => [row]),
+      readMissions: mock(async () => [activeMission({ ciRequired: true })]),
+      getRequiredChecksForSha: mock(async () => checks({ rollup: "none" })),
+      repoHasWorkflows: mock(async () => false),
+    })
+    const res = await toolOf("merge_pr", deps).handler({
+      repo: "octo/repo",
+      pr: 7,
+      expected_head_sha: "reviewedsha",
+    })
+
+    expect(res.isError).toBe(true)
+    expect((parsed(res).error as { message: string }).message).toContain("requires CI")
+    expect(deps.mergePullRequest).not.toHaveBeenCalled()
+  })
+
   test("merges an unowned PR when allow_unowned is set", async () => {
     const deps = makeDeps({
       getPullRequestState: mock(async () => prState({ authorLogin: "random-human" })),
@@ -318,6 +390,42 @@ describe("mission unit tools", () => {
     expect(row.terminal).toBe(true)
     expect(row.blockingDecisionId).toBeNull()
     expect(deps.upsertUnit).toHaveBeenCalledWith({ owner: "octo", name: "repo" }, row)
+  })
+
+
+  test("abandon_mission refuses to convert a done mission to abandoned", async () => {
+    const m = activeMission({ status: "done" })
+    const deps = makeDeps({ readMissions: mock(async () => [m]), loadAllUnits: mock(async () => []) })
+    const res = await toolOf("abandon_mission", deps).handler({ mission_id: "m1", reason: "nope" })
+
+    expect(res.isError).toBe(true)
+    expect((parsed(res).error as { code: string }).code).toBe("MISSION_TERMINAL")
+    expect(deps.upsertMission).not.toHaveBeenCalled()
+  })
+
+  test("abandon_mission answers pending durable decisions before clearing blocks", async () => {
+    const m = activeMission()
+    const row = unit({ terminal: false, blockingDecisionId: "decision-1" })
+    const decisions: DecisionRecord[] = [{
+      decisionId: "decision-1",
+      decisionKey: "k",
+      type: "human_decision",
+      status: "pending",
+      packetId: "p",
+      inputFingerprint: "f",
+      options: [{ id: "abandon" }],
+      createdMs: 1,
+    }]
+    const deps = makeDeps({
+      readMissions: mock(async () => [m]),
+      loadAllUnits: mock(async () => [row]),
+      readDecisions: mock(async () => decisions),
+    })
+    const res = await toolOf("abandon_mission", deps).handler({ mission_id: "m1", reason: "paused" })
+
+    expect(res.isError).toBeUndefined()
+    expect(deps.markAnswered).toHaveBeenCalledWith("decision-1", "abandoned", "system")
+    expect(row.blockingDecisionId).toBeNull()
   })
 
   test("add_units appends units to an active mission", async () => {
@@ -362,6 +470,30 @@ describe("close_pr", () => {
     expect(row.validation).toBe("cancelled_external_close")
     expect(deps.upsertUnit).toHaveBeenCalledWith({ owner: "octo", name: "repo" }, row)
     expect(deps.closePullRequest).toHaveBeenCalledWith({ owner: "octo", repo: "repo" }, 7)
+  })
+
+
+  test("close_pr answers pending durable decisions before clearing correlated unit blocks", async () => {
+    const row = unit({ pr: 7, terminal: false, blockingDecisionId: "decision-close" })
+    const decisions: DecisionRecord[] = [{
+      decisionId: "decision-close",
+      decisionKey: "k",
+      type: "human_decision",
+      status: "pending",
+      packetId: "p",
+      inputFingerprint: "f",
+      options: [{ id: "continue" }],
+      createdMs: 1,
+    }]
+    const deps = makeDeps({
+      loadAllUnits: mock(async () => [row]),
+      readDecisions: mock(async () => decisions),
+    })
+    const res = await toolOf("close_pr", deps).handler({ repo: "octo/repo", pr: 7 })
+
+    expect(res.isError).toBeUndefined()
+    expect(deps.markAnswered).toHaveBeenCalledWith("decision-close", "closed_pr", "system")
+    expect(row.blockingDecisionId).toBeNull()
   })
 
   test("refuses to close an already-merged PR", async () => {

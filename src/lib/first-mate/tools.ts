@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import path from "node:path"
 
 import consola from "consola"
 import { z } from "zod"
@@ -26,6 +27,7 @@ import {
 } from "~/lib/first-mate/scaffold-helpers"
 import { loadAllUnits, readMissions, upsertMission, type Mission } from "~/lib/first-mate/registry"
 import { upsertUnit as realUpsertUnit } from "~/lib/first-mate/ledger"
+import { markAnswered as realMarkAnswered, readDecisions as realReadDecisions } from "~/lib/first-mate/decisions"
 import { AnswerInbox } from "~/lib/first-mate/scheduler/answer-inbox"
 import { SchedulerLease, makeDriveGate } from "~/lib/first-mate/scheduler/lease"
 import { Tier1Shadow, fromModelRequest, shadowEnabled } from "~/lib/first-mate/scheduler/shadow"
@@ -118,6 +120,8 @@ export interface MergeCloseDeps {
   loadAllUnits: typeof loadAllUnits
   upsertMission: typeof upsertMission
   upsertUnit: typeof realUpsertUnit
+  markAnswered: typeof realMarkAnswered
+  readDecisions: typeof realReadDecisions
 }
 
 function defaultMergeCloseDeps(): MergeCloseDeps {
@@ -133,6 +137,8 @@ function defaultMergeCloseDeps(): MergeCloseDeps {
     loadAllUnits,
     upsertMission,
     upsertUnit: realUpsertUnit,
+    markAnswered: realMarkAnswered,
+    readDecisions: realReadDecisions,
   }
 }
 
@@ -200,6 +206,7 @@ export function createFirstMateTools(
           ["hard", "soft"],
           "Plan-review gate. hard (default) requires the flow's review before build and re-plans on a rejecting review; soft auto-advances a passing plan review to build without human approval but escalates a rejecting review to a human.",
         ),
+        ci_required: boolProp("When true, refuse merge approval if the repository reports no CI for the PR head."),
       }, ["goal", "repos", "acceptance_criteria"]),
       async (args) => {
         const repos = requiredStringArray(args, "repos").map(parseRepoRef)
@@ -220,6 +227,9 @@ export function createFirstMateTools(
           priority: optionalNumber(args, "priority"),
           defaultModel,
           ...(planGate !== undefined ? { planGate } : {}),
+          ...(optionalBoolean(args, "ci_required") !== undefined
+            ? { ciRequired: optionalBoolean(args, "ci_required") }
+            : {}),
           repos,
           status: "active",
           createdMs: now,
@@ -491,11 +501,12 @@ export function createFirstMateTools(
         if (mission.status !== "active") {
           return errorResult(new FirstMateToolInputError("MISSION_NOT_ACTIVE", `mission ${missionId} is ${mission.status}; only active missions can receive units`))
         }
+        const existingUnits = await deps.loadAllUnits(mission.id)
         const units = optionalRecordArray(args, "units")
         if (units === undefined || units.length === 0) {
           return errorResult(new FirstMateToolInputError("INVALID_ARGUMENT", "arguments.units must contain at least one unit"))
         }
-        const created = await addUnitsToMission(mission, units, deps)
+        const created = await addUnitsToMission(mission, units, deps, existingUnits)
         return ok({ missionId, added: created })
       },
     ),
@@ -514,6 +525,9 @@ export function createFirstMateTools(
         if (mission === undefined) {
           return errorResult(new FirstMateToolInputError("MISSION_NOT_FOUND", `mission ${missionId} was not found`))
         }
+        if (mission.status === "done") {
+          return errorResult(new FirstMateToolInputError("MISSION_TERMINAL", `mission ${missionId} is done and cannot be abandoned`))
+        }
         if (mission.status !== "abandoned") {
           await deps.upsertMission({
             ...mission,
@@ -523,10 +537,14 @@ export function createFirstMateTools(
         }
         const units = (await deps.loadAllUnits(missionId)).filter((unit) => unit.terminal !== true)
         for (const unit of units) {
+          const decisionId = unit.blockingDecisionId
           unit.terminal = true
           unit.phase = "done"
           unit.cancelledBy = "external"
           unit.blockingDecisionId = null
+          if (decisionId !== undefined && decisionId !== null) {
+            await markDecisionAnsweredIfPending(deps, decisionId, "abandoned")
+          }
           await deps.upsertUnit(unit.repo, unit)
         }
         return ok({ abandoned: true, missionId, terminalUnits: units.length, ...(reason !== undefined ? { reason } : {}) })
@@ -623,6 +641,42 @@ type MergeSafety = { ok: true } | { ok: false; reason: string }
  * so a genuinely CI-less repo passes this gate on the human's review alone; a
  * repo that HAS workflows but hasn't reported checks yet is refused.
  */
+function isTestLikePath(filePath: string): boolean {
+  const base = path.basename(filePath).toLowerCase()
+  return /(?:^|[.\-_])(test|spec)(?:[.\-_]|$)/.test(base)
+}
+
+function estimateTestCountFromDiff(diff: Awaited<ReturnType<MergeCloseDeps["getPullRequestDiffSummary"]>>): number {
+  // Heuristic fallback when CI does not expose a test-count line: count changed
+  // test/spec files. It is intentionally conservative and documented in the gate
+  // reason because it measures coverage surface, not executed assertions.
+  return diff.files.filter((file) => isTestLikePath(file.path)).length
+}
+
+function requiresCodeAndTests(mission: Mission | undefined, unit: UnitRow | undefined): boolean {
+  const text = `${mission?.acceptanceCriteria ?? ""}\n${unit?.title ?? ""}`.toLowerCase()
+  return /\bcode\b/.test(text) && /\btests?\b/.test(text)
+}
+
+function isDocsOnlyDiff(diff: Awaited<ReturnType<MergeCloseDeps["getPullRequestDiffSummary"]>>): boolean {
+  if (diff.files.length === 0) return false
+  return diff.files.every((file) => {
+    const p = file.path.toLowerCase()
+    return p.startsWith("docs/") || p.endsWith(".md") || p.endsWith(".mdx") || p.endsWith(".txt")
+  })
+}
+
+async function findUnitForPr(
+  repo: AgentRepoRef,
+  pr: number,
+  deps: MergeCloseDeps,
+): Promise<{ unit?: UnitRow; mission?: Mission }> {
+  const [units, missions] = await Promise.all([deps.loadAllUnits(), deps.readMissions()])
+  const unit = units.find((entry) => entry.pr === pr && repoMatchesTarget(entry.repo, repo))
+  const mission = unit === undefined ? undefined : missions.find((entry) => entry.id === unit.missionId)
+  return { unit, mission }
+}
+
 async function evaluateMergeSafety(
   repo: AgentRepoRef,
   pr: number,
@@ -666,6 +720,28 @@ async function evaluateMergeSafety(
     return { ok: false, reason: "PR has no changed files and no additions/deletions; refusing to merge an empty diff" }
   }
 
+  const { unit, mission } = await findUnitForPr(repo, pr, deps)
+  if (
+    unit?.dispatchMode === "build" &&
+    requiresCodeAndTests(mission, unit) &&
+    !diff.truncated &&
+    isDocsOnlyDiff(diff)
+  ) {
+    return { ok: false, reason: "build unit requires code and tests but the PR diff is docs-only" }
+  }
+
+  const estimatedTests = estimateTestCountFromDiff(diff)
+  if (unit !== undefined) {
+    const baseline = unit.baselineTestCount
+    if (baseline !== undefined && estimatedTests < baseline) {
+      return { ok: false, reason: `test-count ratchet decreased from ${baseline} to ${estimatedTests} (heuristic: changed *.test.*/*.spec.* files when CI output has no explicit count)` }
+    }
+    if (baseline === undefined || estimatedTests > baseline) {
+      unit.baselineTestCount = estimatedTests
+      await deps.upsertUnit(unit.repo, unit)
+    }
+  }
+
   const checks = await deps.getRequiredChecksForSha(repo, live.headSha)
   if (checks.rollup === "failing") {
     const names = checks.failing.map((f) => f.name).filter((n) => n.length > 0).join(", ")
@@ -691,6 +767,12 @@ async function evaluateMergeSafety(
       }
     } else {
       workflowsIndeterminate = true
+    }
+    if (mission?.ciRequired === true) {
+      return {
+        ok: false,
+        reason: "mission requires CI but no check runs or legacy statuses are reported for this head",
+      }
     }
     if (hasWorkflows) {
       return {
@@ -726,6 +808,18 @@ function loginMatches(a: string | undefined, b: string | undefined): boolean {
   return na.length > 0 && na === nb
 }
 
+async function markDecisionAnsweredIfPending(
+  deps: MergeCloseDeps,
+  decisionId: string,
+  choice: string,
+): Promise<void> {
+  const decisions = await deps.readDecisions()
+  const decision = decisions.find((entry) => entry.decisionId === decisionId)
+  if (decision !== undefined && decision.status === "pending") {
+    await deps.markAnswered(decisionId, choice, "system")
+  }
+}
+
 async function reconcileClosedPr(
   repo: AgentRepoRef,
   pr: number,
@@ -741,7 +835,11 @@ async function reconcileClosedPr(
     unit.artifact = "pr_closed"
     unit.validation = "cancelled_external_close"
     unit.cancelledBy = "external"
+    const decisionId = unit.blockingDecisionId
     unit.blockingDecisionId = null
+    if (decisionId !== undefined && decisionId !== null) {
+      await markDecisionAnsweredIfPending(deps, decisionId, "closed_pr")
+    }
     await deps.upsertUnit(unit.repo, unit)
   }
   return { terminalUnits: targets.length }

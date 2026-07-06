@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 
 import {
+  assertTier1LiveAllowlistSafe,
   decideRoute,
   isValidVerdictShape,
+  TIER1_LIVE_ALLOWLIST,
   type Tier1Verdict,
 } from "~/lib/first-mate/scheduler/shadow"
 
@@ -42,6 +44,13 @@ describe("Phase 3 — decideRoute (escalate-by-default gate)", () => {
   test("review_plan and judge_review NEVER auto-accept (not allowlisted)", () => {
     expect(decideRoute("review_plan", good).autoAccept).toBe(false)
     expect(decideRoute("judge_review", good).autoAccept).toBe(false)
+  })
+
+  test("merge-authorizing kinds are pinned out of the Tier1 live allowlist", () => {
+    assertTier1LiveAllowlistSafe(TIER1_LIVE_ALLOWLIST)
+    expect(TIER1_LIVE_ALLOWLIST.has("review_plan")).toBe(false)
+    expect(TIER1_LIVE_ALLOWLIST.has("judge_review")).toBe(false)
+    expect(() => assertTier1LiveAllowlistSafe(new Set(["author_fix", "judge_review"]))).toThrow("merge-authorizing")
   })
 
   test("escalates below the confidence floor", () => {

@@ -119,6 +119,10 @@ export interface UnitRow {
   copilotMentionSha?: string | null
   /** Total `@copilot` fix mentions posted over this unit's life (per-mission budget counter). */
   copilotComments?: number
+  /** Stable digest of mission goal + repo + unit title used to skip duplicate queued/build units. */
+  goalHash?: string
+  /** Baseline test-count ratchet captured by the merge gate; later gates must not decrease it. */
+  baselineTestCount?: number
   /** Total author_fix cycles applied over this unit's life (per-mission budget counter). */
   fixCycles?: number
   /**
@@ -254,7 +258,9 @@ export interface Observed {
    * author-match fallback (branch/task correlation missed) — never auto-mark
    * done from it; escalate for human reconciliation.
    */
-  externalMutation?: "closed" | "merged" | "merged_uncorrelated" | "head_changed" | null
+  externalMutation?: "closed" | "merged" | "merged_uncorrelated" | "open_uncorrelated" | "head_changed" | null
+  /** PR number for an uncorrelated external mutation; evidence only, never adopted as unit.pr. */
+  externalPr?: number
   /**
    * A3: the primary PR number ONLY when it was CORRELATED (unit.pr / branch /
    * task), never the bare author-match fallback. The controller adopts this as

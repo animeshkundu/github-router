@@ -2744,3 +2744,116 @@ test("build reuses the plan's persisted artifact date across a day boundary", as
   // Must NOT drift to today's date.
   expect(prompt).not.toContain(`docs/plans/${artifactDate(Date.now())}-`)
 })
+
+
+test("uncorrelated open same-bot PR escalates to human and is not auto-merged", async () => {
+  const row = unit({ id: "u-open", provider: "in_progress", pr: null, taskId: "task-open", dispatchMode: "build", phase: "build" })
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [],
+    externalMutation: "open_uncorrelated",
+    externalPr: 47,
+  })
+
+  const result = await advance({}, h.deps)
+
+  expect(result.needsHuman.some((request) => request.reason.includes("uncorrelated open same-bot PR #47"))).toBe(true)
+  expect(row.pr).toBeNull()
+  expect(row.terminal).not.toBe(true)
+  expect(h.deps.mergePullRequest).not.toHaveBeenCalled()
+})
+
+test("live PR reconcile terminalizes a stale-open unit whose known PR is closed", async () => {
+  const row = unit({ pr: 42, provider: "in_progress", artifact: "pr_open", dispatchMode: "build", phase: "build" })
+  const h = harness([row])
+  h.deps.getPullRequestState = mock(async (_repo, pr) => ({
+    number: pr,
+    title: "PR",
+    isDraft: false,
+    state: "CLOSED",
+    mergeable: "UNKNOWN",
+    reviewDecision: null,
+    headSha: "head-42",
+    baseRef: "main",
+    baseSha: "base-42",
+  }))
+
+  await advance({}, h.deps)
+
+  expect(row.terminal).toBe(true)
+  expect(row.artifact).toBe("pr_closed")
+  expect(row.validation).toBe("cancelled_external_close")
+})
+
+test("live PR reconcile terminalizes a stale-open unit whose known PR is merged", async () => {
+  const row = unit({ pr: 44, provider: "in_progress", artifact: "pr_open", dispatchMode: "build", phase: "build" })
+  const h = harness([row])
+  h.deps.getPullRequestState = mock(async (_repo, pr) => ({
+    number: pr,
+    title: "PR",
+    isDraft: false,
+    state: "MERGED",
+    mergeable: "MERGEABLE",
+    reviewDecision: null,
+    headSha: "head-44",
+    baseRef: "main",
+    baseSha: "base-44",
+  }))
+
+  await advance({}, h.deps)
+
+  expect(row.terminal).toBe(true)
+  expect(row.artifact).toBe("pr_merged")
+  expect(row.validation).toBe("external_merge_unverified")
+})
+
+test("addUnitsToMission skips duplicate goalHash units", async () => {
+  const m = mission({ id: "m-dupe", goal: "same goal" })
+  const existing = unit({ missionId: "m-dupe", title: "Same title", goalHash: "preexisting" })
+  existing.goalHash = (await import("~/lib/first-mate/controller")).unitGoalHash(m, "Same title", repo)
+  const written: UnitRow[] = []
+
+  const created = await addUnitsToMission(
+    m,
+    [{ title: "Same title" }, { title: "Same title" }, { title: "Different title" }],
+    { upsertUnit: mock(async (_repo, row) => { written.push(row) }) },
+    [existing],
+  )
+
+  expect(created).toBe(1)
+  expect(written.map((row) => row.title)).toEqual(["Different title"])
+})
+
+test("PR body unit-id marker correlates and binds the PR without branch", async () => {
+  const { primaryPrNumber } = await import("~/lib/first-mate/observe")
+  const result = primaryPrNumber(
+    unit({ id: "unit-marker", pr: null, branch: null }),
+    null,
+    [{ number: 55, headSha: "head-55", headRef: "unknown", isDraft: false, unitIdMarker: "unit-marker" }],
+  )
+
+  expect(result).toEqual({ number: 55, correlated: true })
+})
+
+test("second build unit is not dispatched while a build is already active for the same mission", async () => {
+  const active = unit({ id: "active-build", issue: 1, taskId: "build-task", dispatchMode: "build", provider: "in_progress", phase: "build" })
+  const queued = unit({ id: "queued-build", issue: 2, taskId: null, dispatchMode: "build", provider: "none", phase: "build" })
+  const h = harness([active, queued])
+
+  await advance({ maxInFlightPerProvider: 5 }, h.deps)
+
+  expect(queued.taskId).toBeNull()
+  expect(h.deps.startTask).not.toHaveBeenCalled()
+})
+
+test("plan units still dispatch in parallel while a build is active", async () => {
+  const active = unit({ id: "active-build", issue: 1, taskId: "build-task", dispatchMode: "build", provider: "in_progress", phase: "build" })
+  const plan = unit({ id: "queued-plan", issue: 2, taskId: null, dispatchMode: "plan", provider: "none", phase: "plan" })
+  const h = harness([active, plan])
+
+  await advance({ maxInFlightPerProvider: 5 }, h.deps)
+
+  expect(plan.taskId).toBe("started-1")
+  expect(h.deps.startTask).toHaveBeenCalledTimes(1)
+})

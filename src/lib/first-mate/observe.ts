@@ -74,7 +74,13 @@ function branchMatchNumber(prs: AgentPRSummary[], branch: string | undefined): n
   return match?.number ?? null
 }
 
-function primaryPrNumber(
+function markerMatchNumber(prs: AgentPRSummary[], unitId: string | undefined): number | null {
+  if (!unitId) return null
+  const match = prs.find((pr) => pr.unitIdMarker === unitId && Number.isInteger(pr.number) && pr.number > 0)
+  return match?.number ?? null
+}
+
+export function primaryPrNumber(
   unit: UnitRow,
   task: TaskStatusResult | null,
   prs: AgentPRSummary[],
@@ -87,6 +93,12 @@ function primaryPrNumber(
 
   const byTask = taskPrNumber(task)
   if (byTask !== null) return { number: byTask, correlated: true }
+
+  // Cooperative marker: the Agent-Tasks API has no branch/label field, so the
+  // prompt asks the coding agent to put `unit-id: <id>` in the PR body. This is
+  // best-effort correlation only; uncorrelated PR escalation below is the safety net.
+  const byMarker = markerMatchNumber(prs, unit.id)
+  if (byMarker !== null) return { number: byMarker, correlated: true }
 
   // If the unit's branch is KNOWN but no PR matches it, the PR simply is not
   // open yet — do NOT grab an unrelated same-bot PR (author matching alone is
@@ -259,7 +271,9 @@ function externalMutation(
   // real squash-merge with the branch deleted escalates for human reconciliation
   // rather than becoming an immortal zombie.
   if (!correlated) {
-    return state === "MERGED" ? "merged_uncorrelated" : undefined
+    if (state === "MERGED") return "merged_uncorrelated"
+    if (state === "OPEN") return "open_uncorrelated"
+    return undefined
   }
   if (state === "MERGED") return "merged"
   if (state === "CLOSED") return "closed"
@@ -321,6 +335,7 @@ export async function observeUnit(unit: UnitRow): Promise<Observed> {
     ...(reviewDecision !== undefined ? { reviewDecision } : {}),
     ...(diff ? { changedFiles: diff.changedFiles, diffTruncated: diff.truncated } : {}),
     ...(mutation ? { externalMutation: mutation } : {}),
+    ...(mutation && primaryNumber !== null ? { externalPr: primaryNumber } : {}),
     ...(logExcerpt ? { logExcerpt } : {}),
     ...(question ? { question } : {}),
     ...(review.reviewed ? { verifierReviewed: true } : {}),

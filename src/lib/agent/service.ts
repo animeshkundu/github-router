@@ -314,6 +314,7 @@ export async function unassignAgent(
 interface PullRestResponse {
   number?: number
   draft?: boolean
+  body?: string | null
   user?: { login?: string | null } | null
   head?: { sha?: string | null; ref?: string | null } | null
 }
@@ -339,12 +340,22 @@ export async function findAgentPRs(
       }
       return authorMatchesBot(pull.user?.login ?? undefined, input.botLogin)
     })
-    .map((pull) => ({
-      number: pull.number ?? 0,
-      headSha: pull.head?.sha ?? "",
-      headRef: pull.head?.ref ?? "",
-      isDraft: pull.draft ?? false,
-    }))
+    .map((pull) => {
+      const unitIdMarker = unitIdMarkerFromBody(pull.body)
+      return {
+        number: pull.number ?? 0,
+        headSha: pull.head?.sha ?? "",
+        headRef: pull.head?.ref ?? "",
+        isDraft: pull.draft ?? false,
+        ...(unitIdMarker !== undefined ? { unitIdMarker } : {}),
+      }
+    })
+}
+
+function unitIdMarkerFromBody(body: string | null | undefined): string | undefined {
+  if (!body) return undefined
+  const match = /^\s*unit-id:\s*([^\s<]+)/im.exec(body)
+  return match?.[1]
 }
 
 // GitHub Copilot code review is requested via the standard review-request

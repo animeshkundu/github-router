@@ -262,6 +262,23 @@ export class Tier1Shadow {
  * allowlist (reversibility/verifiability) is the real boundary.
  */
 export const TIER1_LIVE_ALLOWLIST: ReadonlySet<string> = new Set(["author_fix", "decompose"])
+export const MERGE_AUTHORIZING_REQUEST_KINDS: ReadonlySet<string> = new Set([
+  "review_plan",
+  "judge_review",
+  "merge_approval",
+  "approve_merge",
+])
+
+export function assertTier1LiveAllowlistSafe(
+  allowlist: ReadonlySet<string> = TIER1_LIVE_ALLOWLIST,
+): void {
+  const forbidden = [...allowlist].filter((kind) => MERGE_AUTHORIZING_REQUEST_KINDS.has(kind))
+  if (forbidden.length > 0) {
+    throw new Error(`Tier1 live allowlist contains merge-authorizing kind(s): ${forbidden.join(", ")}`)
+  }
+}
+
+assertTier1LiveAllowlistSafe()
 export const TIER1_CONFIDENCE_FLOOR = 0.85
 
 export function tier1LiveEnabled(): boolean {
