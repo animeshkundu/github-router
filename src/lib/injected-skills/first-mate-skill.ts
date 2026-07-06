@@ -60,7 +60,7 @@ Delegate heavy reading to workers:
 - Use the worker-review subagent (Agent tool) for compact review of a specific plan, PR summary, or suspicious change.
 - Use the worker-test subagent (Agent tool) when a missing executable check is the blocker.
 
-Operator / --agents mode constraint: delegate product implementation to GitHub cloud agents. The local \`mcp__workers__*\` group is BLOCKED by the gateway; use read-only \`gh\` CLI calls (\`gh pr view\`, \`gh pr list\`, \`gh pr diff --name-only\`, \`gh run view\`, \`gh run list\`) or drive actions through \`mcp__first-mate__advance\`. Prefer authoring fix instructions that ask the cloud agent to diagnose on its own rather than pulling diffs or CI logs into the lead context.
+Operator / --agents mode constraint: delegate product implementation to GitHub cloud agents. Direct \`mcp__workers__*\` / \`mcp__orchestrate__*\` calls are subagent-only for the main operator; use the worker-* Agent subagents when local worker help is genuinely needed. Local tools (Edit/Write/Bash, \`gh\`, \`git\`) remain available, but prefer authoring fix instructions for the cloud agent rather than pulling large diffs or CI logs into the lead context.
 
 Do not read a full diff, full CI log, or full transcript in the lead context. Ask workers for narrow facts and compact excerpts. The ledger is durable memory; context is not.
 

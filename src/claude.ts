@@ -746,11 +746,10 @@ export const claude = defineCommand({
           }
         }
 
-        // Capstone — capability shaping. In operator/`--agents` mode, inject a
-        // PreToolUse guard that blocks local worker/orchestrate MCP tools and
-        // non-read-only Bash. File-authoring tools stay available; delegation is
-        // steered by the operator banner and /gh-first-mate skill. Fail-open,
-        // scoped by matcher; non-agents sessions are untouched (no injection).
+        // In operator/`--agents` mode, keep local worker/orchestrate MCP tools
+        // subagent-only for the MAIN operator. File-authoring tools and Bash stay
+        // available; steering to cloud-agent delegation lives in the banner and
+        // /gh-first-mate skill. Fail-closed only for this reduced PreToolUse guard.
         if (agentToolsEnabled()) {
           let shapingInstalled = false
           try {
@@ -766,10 +765,9 @@ export const claude = defineCommand({
             shapingInstalled = true
           } catch (err) {
             consola.error(
-              `Could not register the operator capability-shaping hook: ${String(err)}`,
+              `Could not register the operator worker/orchestrate guard hook: ${String(err)}`,
             )
           }
-          // M4 — fail-CLOSED: never start an operator session without the guard.
           assertShapingInstalled(true, shapingInstalled)
         }
 

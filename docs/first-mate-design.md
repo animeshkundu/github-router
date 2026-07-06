@@ -53,11 +53,11 @@ rather than dropping or hijacking a user server.
 
 In `--agents` mode the lead is an operator, not the product implementer. The
 operator-mode banner and `/gh-first-mate` skill steer product implementation to
-GitHub cloud agents, while local notes/config edits remain available. The
-PreToolUse guard is intentionally narrow: it blocks local `mcp__workers__*` and
-`mcp__orchestrate__*` calls plus non-read-only Bash, but it does not block
-Edit/Write/NotebookEdit. This keeps local implementation/orchestration backends
-off in operator mode without hard-blocking ordinary file-authoring tools.
+GitHub cloud agents. Local file writes and Bash remain available as escape
+hatches, but the main operator cannot call local `mcp__workers__*` or
+`mcp__orchestrate__*` tools directly. Those backends are subagent-only: use the
+worker-* Agent subagents when local worker help is genuinely needed, or delegate
+implementation to GitHub cloud agents through first-mate.
 
 ## Controller: model as oracle, `advance()` as mechanism
 

@@ -1,15 +1,13 @@
 /**
  * The internal `internal-first-mate-guard` subcommand: a PreToolUse hook that
- * enforces cloud-agent OPERATOR capability shaping. It is injected into the
- * spawned Claude session's settings ONLY in `--agents`/operator mode, with a
- * matcher scoped to Bash and local worker/orchestrate MCP tools.
+ * keeps local worker/orchestrate MCP tools subagent-only in cloud-agent OPERATOR
+ * mode. It is injected into the spawned Claude session's settings ONLY in
+ * `--agents`/operator mode, with a matcher scoped to those MCP tool prefixes.
  *
  * Reads the PreToolUse payload from stdin (`{tool_name, tool_input, ...}`) and,
  * if the tool is denied in operator mode, blocks via exit code 2 with a reason
- * on stderr (the repo's hook convention). For Bash the command is inspected for
- * file-mutation patterns. FAIL-CLOSED: a payload that names a guarded tool but
- * cannot be parsed/inspected blocks; only a truly empty tool name (nothing to
- * guard) exits 0.
+ * on stderr (the repo's hook convention). Bash and file-authoring tools are not
+ * matched by this guard and are not blocked.
  */
 import { defineCommand } from "citty"
 
@@ -41,8 +39,8 @@ export const internalFirstMateGuard = defineCommand({
       }
       if (typeof payload.tool_name === "string") toolName = payload.tool_name
       if (typeof payload.tool_input === "object" && payload.tool_input !== null) {
-        // The whole tool_input object flows through; operatorPreToolUse inspects
-        // only `command` for Bash.
+        // The whole tool_input object flows through for forwards compatibility;
+        // operatorPreToolUse currently gates only by tool name.
         toolInput = payload.tool_input as OperatorToolInput
       }
       parsed = true
@@ -66,29 +64,12 @@ export const internalFirstMateGuard = defineCommand({
       process.stderr.write(decision.reason ?? `${toolName} is disabled in operator mode`)
       process.exit(2) // exit 2 blocks the tool call (Claude Code hook convention)
     }
-    if (decision.additionalContext !== undefined) {
-      // ALLOW + inject steering context. Per the Claude Code PreToolUse hook
-      // contract, `hookSpecificOutput.additionalContext` on an exit-0 JSON stdout
-      // is added to the model's context as a system reminder next to the tool
-      // result (plain stdout is NOT surfaced to the model for PreToolUse) — so an
-      // allowed-but-unvettable control-flow command still carries guidance rather
-      // than being silently waved through.
-      process.stdout.write(
-        JSON.stringify({
-          hookSpecificOutput: {
-            hookEventName: "PreToolUse",
-            permissionDecision: "allow",
-            additionalContext: decision.additionalContext,
-          },
-        }),
-      )
-    }
     process.exit(0)
   },
 })
 
 /** The regex matcher scoping the guard hook to exactly the denied tools. */
-export const FIRST_MATE_GUARD_MATCHER = "Bash|mcp__workers__.*|mcp__orchestrate__.*"
+export const FIRST_MATE_GUARD_MATCHER = "mcp__workers__.*|mcp__orchestrate__.*"
 
 /** Build the hook command string that runs this subcommand. */
 export function buildFirstMateGuardHookCommand(execPath: string, entry: string): string {
