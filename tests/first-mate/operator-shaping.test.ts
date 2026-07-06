@@ -1,8 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-
-import fs from "node:fs/promises"
-import { tmpdir } from "node:os"
-import path from "node:path"
+import { describe, expect, test } from "bun:test"
 
 import {
   OPERATOR_DENIED_TOOLS,
@@ -14,21 +10,31 @@ import {
   shouldDenyOperatorTool,
 } from "~/lib/first-mate/operator-shaping"
 
+function uninspectedToolInput(input: Record<string, unknown>): { command?: unknown } {
+  return input
+}
+
 describe("capability shaping — config assertions", () => {
-  test("the deny list is exactly the file-authoring tools", () => {
-    expect([...OPERATOR_DENIED_TOOLS].sort()).toEqual(["Edit", "NotebookEdit", "Write"])
+  test("the exact-name deny list is empty", () => {
+    expect([...OPERATOR_DENIED_TOOLS]).toEqual([])
   })
 
-  test("delegation + read-only tools are preserved", () => {
+  test("delegation + read-only + file-authoring tools are preserved", () => {
     expect(OPERATOR_KEPT_TOOLS).toContain("Agent")
+    expect(OPERATOR_KEPT_TOOLS).toContain("Edit")
+    expect(OPERATOR_KEPT_TOOLS).toContain("Write")
+    expect(OPERATOR_KEPT_TOOLS).toContain("NotebookEdit")
     expect(OPERATOR_KEPT_TOOLS).toContain("Bash") // read-only gh
     expect(OPERATOR_KEPT_TOOLS.some((t) => t.startsWith("mcp__first-mate__"))).toBe(true)
   })
 
-  test("in operator mode: file-authoring + local workers are denied", () => {
-    expect(shouldDenyOperatorTool("Edit", true)).toBe(true)
-    expect(shouldDenyOperatorTool("Write", true)).toBe(true)
-    expect(shouldDenyOperatorTool("NotebookEdit", true)).toBe(true)
+  test("in operator mode: file-authoring is allowed and local workers are denied", () => {
+    expect(shouldDenyOperatorTool("Edit", true)).toBe(false)
+    expect(shouldDenyOperatorTool("Write", true)).toBe(false)
+    expect(shouldDenyOperatorTool("NotebookEdit", true)).toBe(false)
+    expect(operatorPreToolUse("Write", true, uninspectedToolInput({ file_path: "/anything" })).block).toBe(false)
+    expect(operatorPreToolUse("Edit", true, uninspectedToolInput({ file_path: "/Users/x/Software/github-router/src/foo.ts" })).block).toBe(false)
+    expect(operatorPreToolUse("NotebookEdit", true, uninspectedToolInput({ notebook_path: "/anything/notebook.ipynb" })).block).toBe(false)
     expect(shouldDenyOperatorTool("mcp__workers__implement", true)).toBe(true)
     expect(shouldDenyOperatorTool("mcp__workers__review", true)).toBe(true)
   })
@@ -56,10 +62,11 @@ describe("capability shaping — config assertions", () => {
     expect(shouldDenyOperatorTool("mcp__workers__implement", false)).toBe(false)
   })
 
-  test("PreToolUse decision blocks with an actionable reason", () => {
-    const d = operatorPreToolUse("Write", true)
+  test("PreToolUse decision blocks local worker tools with an actionable reason", () => {
+    const d = operatorPreToolUse("mcp__workers__implement", true)
     expect(d.block).toBe(true)
     expect(d.reason).toContain("cloud-agent operator mode")
+    expect(d.reason).toContain("local worker/orchestrate tools")
     expect(operatorPreToolUse("Bash", true, { command: "gh pr view 42" }).block).toBe(false)
   })
 
@@ -225,7 +232,8 @@ describe("capability shaping — config assertions", () => {
 
   test("the mode banner names the boundary", () => {
     expect(OPERATOR_MODE_BANNER).toContain("cloud-agent operator")
-    expect(OPERATOR_MODE_BANNER).toContain("do NOT hand-code")
+    expect(OPERATOR_MODE_BANNER).toContain("do not hand-code")
+    expect(OPERATOR_MODE_BANNER).not.toContain("Edit/Write")
   })
 
   test("#M4: fail-CLOSED — agents mode with failed injection aborts; other cases pass", () => {
@@ -237,104 +245,18 @@ describe("capability shaping — config assertions", () => {
   })
 })
 
-describe("operator plans/memory Write exemption", () => {
-  const CONFIG = path.resolve(path.sep === "\\" ? "C:\\gh-cfg" : "/gh-cfg")
-  const prior = process.env.CLAUDE_CONFIG_DIR
-  beforeEach(() => {
-    process.env.CLAUDE_CONFIG_DIR = CONFIG
-  })
-  afterEach(() => {
-    if (prior === undefined) delete process.env.CLAUDE_CONFIG_DIR
-    else process.env.CLAUDE_CONFIG_DIR = prior
-  })
-  const blocked = (tool: string, input: Record<string, unknown>): boolean =>
-    operatorPreToolUse(tool, true, input).block
-
-  test("Write/Edit/NotebookEdit INTO the exempt shapes are ALLOWED", () => {
-    // <CFG>/plans/**
-    expect(blocked("Write", { file_path: path.join(CONFIG, "plans", "todo.md") })).toBe(false)
-    expect(blocked("Edit", { file_path: path.join(CONFIG, "plans", "sub", "deep.md") })).toBe(false)
-    // The REAL per-project memory + plans dirs: <CFG>/projects/<slug>/{memory,plans}/**
-    expect(blocked("Write", { file_path: path.join(CONFIG, "projects", "my-proj", "memory", "notes.md") })).toBe(false)
-    expect(blocked("Edit", { file_path: path.join(CONFIG, "projects", "my-proj", "memory", "sub", "deep.md") })).toBe(false)
-    expect(blocked("NotebookEdit", { notebook_path: path.join(CONFIG, "projects", "p", "plans", "nb.ipynb") })).toBe(false)
-    // shouldDenyOperatorTool agrees when handed the same input.
-    expect(shouldDenyOperatorTool("Write", true, { file_path: path.join(CONFIG, "plans", "x.md") })).toBe(false)
+describe("operator file-authoring policy", () => {
+  test("Write/Edit/NotebookEdit are allowed anywhere in operator mode", () => {
+    expect(operatorPreToolUse("Write", true, uninspectedToolInput({ file_path: "/anything" })).block).toBe(false)
+    expect(operatorPreToolUse("Edit", true, uninspectedToolInput({ file_path: "/Users/x/Software/github-router/src/foo.ts" })).block).toBe(false)
+    expect(operatorPreToolUse("NotebookEdit", true, uninspectedToolInput({ notebook_path: "/anything/notebook.ipynb" })).block).toBe(false)
+    expect(operatorPreToolUse("Write", true, {}).block).toBe(false)
   })
 
-  test("Write anywhere ELSE is still BLOCKED", () => {
-    expect(blocked("Write", { file_path: path.join(CONFIG, "other", "x.ts") })).toBe(true)
-    expect(blocked("Write", { file_path: path.resolve(path.sep === "\\" ? "C:\\repo\\src\\x.ts" : "/repo/src/x.ts") })).toBe(true)
-    // A TOP-LEVEL memory/ is NO LONGER exempt — the real memory lives at
-    // projects/<slug>/memory (tightened exemption).
-    expect(blocked("Write", { file_path: path.join(CONFIG, "memory", "notes.md") })).toBe(true)
-    // A sibling dir whose name merely starts with the allowed prefix must NOT match.
-    expect(blocked("Write", { file_path: path.join(CONFIG, "plansX", "x.md") })).toBe(true)
-    // The dirs themselves are not writable file targets.
-    expect(blocked("Write", { file_path: path.join(CONFIG, "plans") })).toBe(true)
-    expect(blocked("Write", { file_path: path.join(CONFIG, "projects", "p", "memory") })).toBe(true)
-    // projects/<slug>/<other> (a non-plans/memory subdir) is blocked.
-    expect(blocked("Write", { file_path: path.join(CONFIG, "projects", "p", "src", "x.ts") })).toBe(true)
-    // projects/<slug> requires a deeper plans|memory segment; projects/<slug>/plans
-    // needs a slug (single segment) — projects/plans/x is NOT projects/<slug>/plans.
-    expect(blocked("Write", { file_path: path.join(CONFIG, "projects", "plans") })).toBe(true)
-    // A PRODUCT file whose path merely CONTAINS a plans/ segment but lives OUTSIDE
-    // CLAUDE_CONFIG_DIR stays blocked (the exemption is not "any plans/ segment").
-    expect(
-      blocked("Write", { file_path: path.resolve(path.sep === "\\" ? "C:\\repo\\src\\plans\\x.ts" : "/repo/src/plans/x.ts") }),
-    ).toBe(true)
-  })
-
-  test("fail-CLOSED: missing/empty path, unset or non-absolute CLAUDE_CONFIG_DIR, and ../ escape", () => {
-    // No target path at all.
-    expect(blocked("Write", {})).toBe(true)
-    expect(blocked("Write", { file_path: "" })).toBe(true)
-    expect(blocked("NotebookEdit", { file_path: path.join(CONFIG, "plans", "x.md") })).toBe(true) // wrong key
-    // A ../ escape out of the allowed dir resolves outside → blocked.
-    expect(blocked("Write", { file_path: path.join(CONFIG, "plans", "..", "..", "escape.ts") })).toBe(true)
-    // Unset CLAUDE_CONFIG_DIR → cannot prove containment → blocked.
-    delete process.env.CLAUDE_CONFIG_DIR
-    expect(blocked("Write", { file_path: path.join(CONFIG, "plans", "x.md") })).toBe(true)
-    // Non-absolute CLAUDE_CONFIG_DIR → blocked.
-    process.env.CLAUDE_CONFIG_DIR = "relative/cfg"
-    expect(blocked("Write", { file_path: "relative/cfg/plans/x.md" })).toBe(true)
-  })
-
-  test("workers + Bash behavior is unchanged by the exemption", () => {
-    expect(blocked("mcp__workers__implement", {})).toBe(true)
+  test("workers + Bash behavior is unchanged", () => {
+    expect(operatorPreToolUse("mcp__workers__implement", true, {}).block).toBe(true)
     expect(operatorPreToolUse("Bash", true, { command: "gh pr view 42" }).block).toBe(false)
     expect(operatorPreToolUse("Bash", true, { command: "echo x > f" }).block).toBe(true)
-  })
-})
-
-describe("#6 operator exemption — symlink escape (real fs)", () => {
-  const prior = process.env.CLAUDE_CONFIG_DIR
-  afterEach(() => {
-    if (prior === undefined) delete process.env.CLAUDE_CONFIG_DIR
-    else process.env.CLAUDE_CONFIG_DIR = prior
-  })
-
-  test("a plans/ symlink escaping the config dir is BLOCKED (realpath containment)", async () => {
-    const base = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), "op-exempt-")))
-    try {
-      const cfg = path.join(base, "cfg")
-      const outside = path.join(base, "outside")
-      await fs.mkdir(cfg, { recursive: true })
-      await fs.mkdir(outside, { recursive: true })
-      // cfg/plans -> outside : the scratch dir is symlinked OUT of the sandbox.
-      await fs.symlink(outside, path.join(cfg, "plans"), "dir")
-      process.env.CLAUDE_CONFIG_DIR = cfg
-      // A write "into" cfg/plans actually lands in outside/ → NOT exempt.
-      expect(operatorPreToolUse("Write", true, { file_path: path.join(cfg, "plans", "x.md") }).block).toBe(true)
-      // A REAL (non-symlinked) plans dir under the same cfg IS exempt (control).
-      await fs.mkdir(path.join(cfg, "realcfg", "plans"), { recursive: true })
-      process.env.CLAUDE_CONFIG_DIR = path.join(cfg, "realcfg")
-      expect(
-        operatorPreToolUse("Write", true, { file_path: path.join(cfg, "realcfg", "plans", "x.md") }).block,
-      ).toBe(false)
-    } finally {
-      await fs.rm(base, { recursive: true, force: true })
-    }
   })
 })
 

@@ -49,6 +49,16 @@ On MCP-name collision, `resolveGroupKeysFromMirror()` in
 `src/lib/codex-mcp-config.ts` gives the group a `gh-router-first-mate`-style key
 rather than dropping or hijacking a user server.
 
+### Operator capability shaping
+
+In `--agents` mode the lead is an operator, not the product implementer. The
+operator-mode banner and `/gh-first-mate` skill steer product implementation to
+GitHub cloud agents, while local notes/config edits remain available. The
+PreToolUse guard is intentionally narrow: it blocks local `mcp__workers__*` and
+`mcp__orchestrate__*` calls plus non-read-only Bash, but it does not block
+Edit/Write/NotebookEdit. This keeps local implementation/orchestration backends
+off in operator mode without hard-blocking ordinary file-authoring tools.
+
 ## Controller: model as oracle, `advance()` as mechanism
 
 `src/lib/first-mate/controller.ts` is the load-bearing engine. One `advance()`

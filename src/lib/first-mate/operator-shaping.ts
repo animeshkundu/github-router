@@ -2,40 +2,30 @@
  * Capability shaping for github-router operator/`--agents` mode.
  *
  * When first-mate/operator mode is active the spawned Claude is the cloud-agent
- * OPERATOR, not an implementer: it must delegate ALL implementation to GitHub
- * cloud agents (and may use subagents/first-mate to orchestrate), but it must
- * not hand-code. Because the launcher spawns `claude --dangerously-skip-permissions`
- * (which ignores settings `permissions.deny`), enforcement is a PreToolUse hook
- * that fires regardless and BLOCKS the file-authoring + local-worker vectors.
+ * OPERATOR, not an implementer: it is steered to delegate ALL product
+ * implementation to GitHub cloud agents via the operator-mode banner and the
+ * gh-first-mate skill (and may use subagents/first-mate to orchestrate), but
+ * file-authoring tools are NOT hard-blocked.
  *
- * Kept available: Agent (subagents/forks), the first-mate MCP, read-only `gh`
- * via Bash, and read/search tools. Dropped: Edit/Write/NotebookEdit and
- * mcp__workers__* (local implementation agents). Gated: only in operator mode;
- * a normal session is untouched.
- *
- * ONE exemption to the file-authoring block: the operator may Write/Edit/
- * NotebookEdit its OWN plans/memory scratch files (planning notes, durable
- * memory). Those are the operator's own working state, NOT product code, so
- * authoring them is not "hand-coding". The exemption is scoped to the EXACT
- * shapes `CLAUDE_CONFIG_DIR/plans/**`, `CLAUDE_CONFIG_DIR/projects/<slug>/plans/**`
- * and `CLAUDE_CONFIG_DIR/projects/<slug>/memory/**` (the real per-project memory
- * lives at `projects/<slug>/memory`, NOT a top-level `memory/`), matched against
- * symlink-resolved absolute paths, and FAIL-CLOSED: anything we cannot prove
- * lands strictly inside one of those shapes stays blocked (see
- * `operatorWritePathAllowed`).
+ * Because the launcher spawns `claude --dangerously-skip-permissions` (which
+ * ignores settings `permissions.deny`), enforcement is limited to vectors that
+ * must stay unavailable in operator mode: local worker/orchestrate MCP tools and
+ * non-read-only Bash. Kept available: Edit/Write/NotebookEdit, Agent
+ * (subagents/forks), the first-mate MCP, read-only `gh` via Bash, and
+ * read/search tools. Gated: only in operator mode; a normal session is untouched.
  */
 
-import fs from "node:fs"
-import path from "node:path"
-
 /** Tools denied to the operator (exact names + the workers/orchestrate MCP prefixes). */
-export const OPERATOR_DENIED_TOOLS = ["Edit", "Write", "NotebookEdit"] as const
+export const OPERATOR_DENIED_TOOLS = [] as const
 export const OPERATOR_DENIED_MCP_PREFIXES = ["mcp__workers__", "mcp__orchestrate__"] as const
 
 /** Tools explicitly preserved (documented; used by assertion tests). */
 export const OPERATOR_KEPT_TOOLS = [
   "Agent",
   "Task",
+  "Edit",
+  "Write",
+  "NotebookEdit",
   "Bash", // read-only gh + read-only shell
   "Read",
   "Grep",
@@ -44,10 +34,11 @@ export const OPERATOR_KEPT_TOOLS = [
 ] as const
 
 export const OPERATOR_MODE_BANNER =
-  "MODE: cloud-agent operator. You DELEGATE all implementation to GitHub cloud " +
-  "agents via the first-mate MCP (and may use subagents to orchestrate/protect " +
-  "context). You do NOT hand-code: Edit/Write/NotebookEdit and mcp__workers__* " +
-  "are disabled. Read-only gh, Agent, first-mate, and read/search remain."
+  "MODE: cloud-agent operator. DELEGATE all product implementation to GitHub " +
+  "cloud agents via the first-mate MCP (use subagents to orchestrate/protect " +
+  "context); do not hand-code product changes yourself. Editing your own " +
+  "plans/notes/config is fine. Local worker/orchestrate MCP tools and non-read-only " +
+  "shell are disabled; read-only gh, Agent, first-mate, and read/search remain."
 
 /**
  * Least-privilege note for what the cloud agents themselves may touch — the
@@ -62,120 +53,26 @@ export const CLOUD_AGENT_SCOPE_NOTE =
 
 /**
  * The tool-input fields the operator guard inspects. `command` is the Bash
- * command; `file_path` is the Write/Edit target; `notebook_path` is the
- * NotebookEdit target. All `unknown` — the hook payload is untrusted JSON.
+ * command. All `unknown` — the hook payload is untrusted JSON.
  */
 export interface OperatorToolInput {
   command?: unknown
-  file_path?: unknown
-  notebook_path?: unknown
 }
 
-/**
- * Resolve `p` to an absolute path with symlinks resolved on the portion that
- * EXISTS on disk. The write target itself usually does NOT exist yet (we are
- * about to create it), so we walk up to the deepest existing ancestor, realpath
- * THAT, then re-append the non-existent tail. This prevents a symlinked
- * `plans`/`memory`/`projects` dir (or any symlinked ancestor) from escaping the
- * CLAUDE_CONFIG_DIR containment check. When nothing on the chain exists, falls
- * back to a pure `path.resolve` (so an in-memory unit test whose config dir is
- * not on disk still resolves deterministically).
- */
-function resolveWithExistingSymlinks(p: string): string {
-  const resolved = path.resolve(p)
-  const tail: string[] = []
-  let cursor = resolved
-  for (;;) {
-    try {
-      const real = fs.realpathSync(cursor)
-      return tail.length === 0 ? real : path.join(real, ...[...tail].reverse())
-    } catch {
-      const parent = path.dirname(cursor)
-      if (parent === cursor) return resolved // reached the filesystem root — nothing existed.
-      tail.push(path.basename(cursor))
-      cursor = parent
-    }
-  }
-}
-
-/**
- * Path-scoped exemption for the file-authoring tools. The operator MAY author a
- * file whose symlink-resolved path lands strictly inside one of the operator's
- * own scratch shapes:
- *   - `<CLAUDE_CONFIG_DIR>/plans/**`
- *   - `<CLAUDE_CONFIG_DIR>/projects/<slug>/plans/**`
- *   - `<CLAUDE_CONFIG_DIR>/projects/<slug>/memory/**`
- * where `<slug>` is a SINGLE path segment (the per-project dir). This matches the
- * EXACT shapes, NOT "any path containing a plans/memory segment" (which would be
- * overbroad — a product file at `src/plans/x.ts` must stay blocked).
- *
- * FAIL-CLOSED — returns `false` (not exempt → the caller keeps blocking) on any
- * of: `CLAUDE_CONFIG_DIR` unset / empty / NOT absolute; a missing / non-string /
- * empty target path; a `../` escape out of CLAUDE_CONFIG_DIR (caught by the
- * `path.relative` sep-boundary containment, so a normalized target that climbs
- * out is simply not "inside"); a symlink that escapes (realpath resolves it
- * before the shape match); or any resolution error. Windows-safe via
- * `path.resolve`/`path.relative`/`path.sep` (case-insensitive drive handling is
- * `path.relative`'s job on win32).
- */
-function operatorWritePathAllowed(rawPath: unknown): boolean {
-  if (typeof rawPath !== "string" || rawPath.length === 0) return false
-  const configDir = process.env.CLAUDE_CONFIG_DIR
-  if (typeof configDir !== "string" || configDir.length === 0 || !path.isAbsolute(configDir)) {
-    return false
-  }
-  try {
-    const root = resolveWithExistingSymlinks(configDir)
-    const target = resolveWithExistingSymlinks(rawPath)
-    const rel = path.relative(root, target)
-    // Outside CLAUDE_CONFIG_DIR (a `../` climb-out, or a different Windows drive
-    // where `path.relative` returns an absolute path) → not exempt.
-    if (rel.length === 0 || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
-      return false
-    }
-    const segs = rel.split(path.sep).filter((s) => s.length > 0)
-    // Each shape requires content BENEATH the leaf dir — the dir itself is never a
-    // writable target (so `<CFG>/plans` alone, or `<CFG>/projects/<slug>/memory`
-    // alone, stays blocked).
-    if (segs[0] === "plans" && segs.length >= 2) return true
-    if (segs[0] === "projects" && segs.length >= 4 && (segs[2] === "plans" || segs[2] === "memory")) {
-      return true
-    }
-    return false
-  } catch {
-    return false // any resolution error → fail closed.
-  }
-}
-
-/** The file-authoring target for a tool, if it exposes one. */
-function operatorWriteTarget(toolName: string, input?: OperatorToolInput): unknown {
-  if (toolName === "Write" || toolName === "Edit") return input?.file_path
-  if (toolName === "NotebookEdit") return input?.notebook_path
-  return undefined
-}
 
 /**
  * Decide whether a tool call must be BLOCKED for the operator. Pure — used both
  * by the PreToolUse hook handler and by config-assertion tests. When operator
  * mode is off, nothing is blocked (normal sessions unaffected).
  *
- * The file-authoring tools (Edit/Write/NotebookEdit) are denied EXCEPT when the
- * tool input names a target inside one of the operator's own scratch shapes
- * (`<CLAUDE_CONFIG_DIR>/plans/**`, `<CLAUDE_CONFIG_DIR>/projects/<slug>/plans/**`,
- * `<CLAUDE_CONFIG_DIR>/projects/<slug>/memory/**` — see `operatorWritePathAllowed`).
- * Without an inspectable input the exemption cannot be proven, so the tool stays
- * blocked (fail-closed).
+ * File-authoring tools (Edit/Write/NotebookEdit) are NOT blocked here. The
+ * operator is steered toward delegation by the OPERATOR_MODE_BANNER and the
+ * gh-first-mate skill, not gated. Only local implementation/orchestration MCP
+ * tools (`mcp__workers__*` / `mcp__orchestrate__*`) are denied by name here;
+ * non-read-only Bash is handled separately by `operatorPreToolUse`.
  */
-export function shouldDenyOperatorTool(
-  toolName: string,
-  operatorMode: boolean,
-  input?: OperatorToolInput,
-): boolean {
+export function shouldDenyOperatorTool(toolName: string, operatorMode: boolean): boolean {
   if (!operatorMode) return false
-  if ((OPERATOR_DENIED_TOOLS as readonly string[]).includes(toolName)) {
-    if (operatorWritePathAllowed(operatorWriteTarget(toolName, input))) return false
-    return true
-  }
   return OPERATOR_DENIED_MCP_PREFIXES.some((p) => toolName.startsWith(p))
 }
 
@@ -194,8 +91,8 @@ export interface PreToolUseDecision {
  * B1 — decide whether a Bash command is READ-ONLY enough for the operator.
  *
  * THREAT MODEL: this is a guardrail against a COOPERATING operator accidentally
- * hand-coding via the shell (the same vector the Edit/Write deny-list closes),
- * NOT a security sandbox against a determined adversary. A denylist is trivially
+ * hand-coding via the shell, NOT a security sandbox against a determined
+ * adversary. A denylist is trivially
  * bypassable (python -c/node -e writes, cp/mv/install/tee-by-path, `git -c …
  * commit`, …), so this is an ALLOWLIST: only provably read-only commands pass;
  * everything else is denied. True isolation against a hostile process requires
@@ -868,10 +765,10 @@ export function operatorPreToolUse(
   input?: OperatorToolInput,
 ): PreToolUseDecision {
   if (!operatorMode) return { block: false }
-  if (shouldDenyOperatorTool(toolName, operatorMode, input)) {
+  if (shouldDenyOperatorTool(toolName, operatorMode)) {
     return {
       block: true,
-      reason: `${toolName} is disabled in cloud-agent operator mode — delegate implementation to a GitHub cloud agent via the first-mate MCP instead of hand-coding (only writes into CLAUDE_CONFIG_DIR/plans/ or projects/<slug>/{plans,memory}/ are exempt).`,
+      reason: `${toolName} is disabled in cloud-agent operator mode — delegate implementation to a GitHub cloud agent via the first-mate MCP (local worker/orchestrate tools are off in operator mode).`,
     }
   }
   if (toolName === "Bash") {

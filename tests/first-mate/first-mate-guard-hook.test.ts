@@ -18,7 +18,7 @@ afterEach(async () => {
 })
 
 describe("capability-shaping PreToolUse hook wiring (config assertion)", () => {
-  test("injects a PreToolUse hook scoped to the denied tools", async () => {
+  test("injects a PreToolUse hook scoped to Bash and local delegation tools", async () => {
     const settingsPath = path.join(dir, "settings.json")
     const command = buildFirstMateGuardHookCommand("/usr/bin/bun", "/app/main.ts")
     const merged = await injectStopHookIntoSettingsFile(
@@ -32,9 +32,10 @@ describe("capability-shaping PreToolUse hook wiring (config assertion)", () => {
     expect(serialized).toContain("PreToolUse")
     expect(serialized).toContain("internal-first-mate-guard")
     expect(serialized).toContain("mcp__workers__")
-    // The matcher scopes it to the authoring/worker tools + Bash (B1).
-    expect(FIRST_MATE_GUARD_MATCHER).toContain("Edit")
-    expect(FIRST_MATE_GUARD_MATCHER).toContain("Write")
+    // The matcher scopes it to local worker/orchestrate tools + Bash (B1), not file-authoring tools.
+    expect(FIRST_MATE_GUARD_MATCHER).not.toContain("Edit")
+    expect(FIRST_MATE_GUARD_MATCHER).not.toContain("Write")
+    expect(FIRST_MATE_GUARD_MATCHER).not.toContain("NotebookEdit")
     expect(FIRST_MATE_GUARD_MATCHER).toContain("mcp__workers__")
     expect(FIRST_MATE_GUARD_MATCHER).toContain("mcp__orchestrate__")
     expect(FIRST_MATE_GUARD_MATCHER).toContain("Bash")
@@ -72,9 +73,9 @@ async function runGuardCapture(payload: string): Promise<{ code: number; stdout:
 }
 
 describe("capability-shaping PreToolUse hook (end-to-end enforcement)", () => {
-  test("blocks Write, blocks a mutating Bash, allows read-only Bash", async () => {
+  test("allows Write, blocks a mutating Bash, allows read-only Bash", async () => {
     // exit 2 = block; exit 0 = allow (Claude Code hook convention).
-    expect(await runGuard(JSON.stringify({ tool_name: "Write", tool_input: { file_path: "x" } }))).toBe(2)
+    expect(await runGuard(JSON.stringify({ tool_name: "Write", tool_input: { file_path: "x" } }))).toBe(0)
     expect(
       await runGuard(JSON.stringify({ tool_name: "Bash", tool_input: { command: "echo x > f" } })),
     ).toBe(2)

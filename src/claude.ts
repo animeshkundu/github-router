@@ -747,10 +747,10 @@ export const claude = defineCommand({
         }
 
         // Capstone — capability shaping. In operator/`--agents` mode, inject a
-        // PreToolUse guard that blocks the file-authoring + local-worker tools
-        // (Edit/Write/NotebookEdit/mcp__workers__*) so the operator delegates
-        // ALL implementation to GitHub cloud agents. Fail-open, scoped by
-        // matcher; non-agents sessions are untouched (no injection).
+        // PreToolUse guard that blocks local worker/orchestrate MCP tools and
+        // non-read-only Bash. File-authoring tools stay available; delegation is
+        // steered by the operator banner and /gh-first-mate skill. Fail-open,
+        // scoped by matcher; non-agents sessions are untouched (no injection).
         if (agentToolsEnabled()) {
           let shapingInstalled = false
           try {
