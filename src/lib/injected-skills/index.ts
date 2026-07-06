@@ -14,6 +14,8 @@ import { RESEARCH_SKILL } from "./research-skill"
 import { WORKER_SKILL } from "./worker-skill"
 
 export { ARTIFACT_REVIEW_SKILL } from "./artifact-review-skill"
+export { FIRST_MATE_SETUP_SKILL } from "~/lib/injected-skills/first-mate-setup-skill"
+export { FIRST_MATE_SKILL } from "./first-mate-skill"
 export { writeInjectedSkill, type WriteInjectedSkillResult } from "./write"
 
 /** A skill to materialize: `name` is BOTH the frontmatter `name` and the folder

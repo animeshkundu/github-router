@@ -37,6 +37,8 @@ preferred tool names are:
   registry CAS path and terminalize its live units so it drops from the active board.
 - `mcp__first-mate__add_units` — append dispatchable units to an active mission
   using the same unit-creation path as decompose.
+- `mcp__first-mate__scaffold_repo` — seed or enhance the target repo's
+  agentic-dev foundation on a scaffold branch + PR before build waves begin.
 
 So the operational surface is the start/advance/board triad plus the status read,
 with abandon as the explicit cleanup lever. All entries are created in
@@ -73,6 +75,32 @@ hatches, but the main operator cannot call local `mcp__workers__*` or
 `mcp__orchestrate__*` tools directly. Those backends are subagent-only: use the
 worker-* Agent subagents when local worker help is genuinely needed, or delegate
 implementation to GitHub cloud agents through first-mate.
+
+### Foundation scaffold
+
+`scaffold_repo` is the foundation-first step for owned repositories. It never
+pushes directly to the default branch: the tool reads the target repository,
+creates a `scaffold/agentic-dev-*` branch, commits the foundation there, and opens
+a PR. The generated content is repo-geared rather than generic: repository
+description/README, default branch, manifests, package manager, package scripts,
+test framework, existing workflow hints, primary-OS signals, and UI-test
+dependencies are used to fill confident values. Ambiguous facts stay visible as
+`<!-- TODO: ... -->` instead of being guessed.
+
+The seeded foundation includes identical guidance in `CLAUDE.md`, `AGENTS.md`,
+`GEMINI.md`, and `.github/copilot-instructions.md`; mirrored role agents in
+`.github/agents/` and `.claude/agents/`; ADR template + initial ADR, changelog,
+learnings, history template, plans/research readmes, PR template, test
+instructions, Copilot setup, and starter CI. It deliberately does **not** seed
+factory-protocol or `docs/factory/` files: first-mate remains the external
+orchestrator, while the product repo holds only what agents and CI need to read.
+
+Non-clobber policy is three-way. `add-missing-only` seeds absent files and skips
+present files. `overwrite-approved` replaces existing files only when explicitly
+requested. `enhance` preserves tuned prose and appends only missing `##` sections
+for guidance files, the ADR index, changelog, and learnings; other present files
+are skipped. The tool response and PR body report each path as
+`seeded`, `skipped(present)`, or `enhanced(appended: ...)`.
 
 ## Controller: model as oracle, `advance()` as mechanism
 

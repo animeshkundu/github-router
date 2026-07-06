@@ -17,6 +17,19 @@ export class ScaffoldHelperError extends Error {
 
 interface RepositoryResponse {
   default_branch?: string | null
+  description?: string | null
+}
+
+interface RepositoryDetails {
+  defaultBranch: string
+  description?: string
+}
+
+interface ContentResponse {
+  type?: string | null
+  content?: string | null
+  encoding?: string | null
+  name?: string | null
 }
 
 interface GitRefResponse {
@@ -64,7 +77,7 @@ export function normalizeBranchRef(value: string): string {
   return withoutRefsPrefix
 }
 
-export async function getDefaultBranch(repo: RepoRef, signal?: AbortSignal): Promise<string> {
+export async function getRepositoryDetails(repo: RepoRef, signal?: AbortSignal): Promise<RepositoryDetails> {
   try {
     const response = await ghRest<RepositoryResponse>("GET", repoPath(repo), { signal })
     const branch = response.default_branch?.trim()
@@ -74,7 +87,11 @@ export async function getDefaultBranch(repo: RepoRef, signal?: AbortSignal): Pro
         `Repository ${repoLabel(repo)} did not report a default branch`,
       )
     }
-    return normalizeBranchRef(branch)
+    const description = response.description?.trim()
+    return {
+      defaultBranch: normalizeBranchRef(branch),
+      ...(description ? { description } : {}),
+    }
   } catch (err) {
     if (err instanceof ScaffoldHelperError) throw err
     throw new ScaffoldHelperError(
@@ -82,6 +99,55 @@ export async function getDefaultBranch(repo: RepoRef, signal?: AbortSignal): Pro
       `Failed to read repository ${repoLabel(repo)}`,
       { cause: err },
     )
+  }
+}
+
+export async function getDefaultBranch(repo: RepoRef, signal?: AbortSignal): Promise<string> {
+  return (await getRepositoryDetails(repo, signal)).defaultBranch
+}
+
+export async function readRepoTextFile(
+  repo: RepoRef,
+  path: string,
+  ref: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  try {
+    const response = await ghRest<ContentResponse>(
+      "GET",
+      `${repoPath(repo)}/contents/${repoContentPath(path)}?ref=${segment(ref)}`,
+      { signal },
+    )
+    const content = response.content
+    if (response.type !== "file" || typeof content !== "string") return undefined
+    if (response.encoding !== "base64") return undefined
+    return Buffer.from(content.replace(/\s/g, ""), "base64").toString("utf8")
+  } catch (err) {
+    if (isNotFoundError(err)) return undefined
+    throw new ScaffoldHelperError("api-error", `Failed to read ${path} in ${repoLabel(repo)}`, { cause: err })
+  }
+}
+
+export async function readRepoDirectoryNames(
+  repo: RepoRef,
+  path: string,
+  ref: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  try {
+    const response = await ghRest<ContentResponse[]>(
+      "GET",
+      `${repoPath(repo)}/contents/${repoContentPath(path)}?ref=${segment(ref)}`,
+      { signal },
+    )
+    if (!Array.isArray(response)) return []
+    return response.flatMap((entry) => {
+      const name = entry.name
+      return typeof name === "string" && name.trim() !== "" ? [name.trim()] : []
+    })
+  } catch (err) {
+    if (isNotFoundError(err)) return []
+    throw new ScaffoldHelperError("api-error", `Failed to list ${path} in ${repoLabel(repo)}`, { cause: err })
   }
 }
 
@@ -129,6 +195,7 @@ export async function createScaffoldPullRequest(
   branch: string,
   baseBranch: string,
   signal?: AbortSignal,
+  body = "Seeds deterministic repository convention files and living documentation templates.",
 ): Promise<string> {
   const normalizedBase = normalizeBranchRef(baseBranch)
   try {
@@ -138,7 +205,7 @@ export async function createScaffoldPullRequest(
         title: "Seed agentic-dev repository conventions",
         head: branch,
         base: normalizedBase,
-        body: "Seeds deterministic repository convention files and living documentation templates.",
+        body,
       },
     })
     return response.html_url ?? response.url ?? ""
@@ -186,6 +253,19 @@ function repoLabel(repo: RepoRef): string {
 
 function repoPath(repo: RepoRef): string {
   return `/repos/${segment(repo.owner)}/${segment(repo.repo)}`
+}
+
+function repoContentPath(path: string): string {
+  const trimmed = path.trim()
+  if (trimmed === "" || trimmed === ".") return ""
+  return trimmed.split("/").map(segment).join("/")
+}
+
+function isNotFoundError(err: unknown): boolean {
+  return typeof err === "object"
+    && err !== null
+    && "code" in err
+    && (err as { code?: unknown }).code === "NOT_FOUND"
 }
 
 function gitRefBranchPath(branch: string): string {

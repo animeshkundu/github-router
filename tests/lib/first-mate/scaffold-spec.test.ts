@@ -5,6 +5,7 @@ import {
   COPILOT_SETUP_ALLOWED_KEYS,
   COPILOT_SETUP_JOB_NAME,
   COPILOT_SETUP_TIMEOUT_MAX,
+  planScaffoldFiles,
 } from "~/lib/first-mate/scaffold-spec"
 import { createFirstMateTools } from "~/lib/first-mate/tools"
 import { state } from "~/lib/state"
@@ -14,8 +15,20 @@ describe("buildScaffoldFiles", () => {
     const files = buildScaffoldFiles({ repoName: "test-repo" })
     const paths = files.map((f) => f.path).sort()
     expect(paths).toEqual([
+      ".claude/agents/implementer.md",
+      ".claude/agents/planner.md",
+      ".claude/agents/researcher.md",
+      ".claude/agents/reviewer.md",
+      ".claude/agents/tester.md",
+      ".github/agents/implementer.md",
+      ".github/agents/planner.md",
+      ".github/agents/researcher.md",
+      ".github/agents/reviewer.md",
+      ".github/agents/tester.md",
       ".github/copilot-instructions.md",
       ".github/instructions/tests.instructions.md",
+      ".github/pull_request_template.md",
+      ".github/workflows/ci.yml",
       ".github/workflows/copilot-setup-steps.yml",
       "AGENTS.md",
       "CHANGELOG.md",
@@ -23,6 +36,8 @@ describe("buildScaffoldFiles", () => {
       "GEMINI.md",
       "LEARNINGS.md",
       "docs/adr/0001-record-architecture-decisions.md",
+      "docs/adrs/0000-template.md",
+      "docs/history/0000-template.md",
       "docs/plans/README.md",
       "docs/research/README.md",
     ].sort())
@@ -68,6 +83,52 @@ describe("buildScaffoldFiles", () => {
     const tests = files.find((f) => f.path === ".github/instructions/tests.instructions.md")!
     expect(tests.content).toContain("applyTo:")
   })
+
+  it("role agents use the fixed schema and are mirrored", () => {
+    const files = buildScaffoldFiles({ repoName: "test-repo" })
+    const githubPlanner = files.find((f) => f.path === ".github/agents/planner.md")!
+    const claudePlanner = files.find((f) => f.path === ".claude/agents/planner.md")!
+    expect(githubPlanner.content).toBe(claudePlanner.content)
+    expect(githubPlanner.content).toContain("name: planner")
+    for (const section of ["## Purpose", "## When to use", "## Inputs (cold-start contract)", "## Method", "## Quality bar", "## Output contract", "## Self-reminder"]) {
+      expect(githubPlanner.content).toContain(section)
+    }
+  })
+
+  it("gears guidance and CI from detected options", () => {
+    const files = buildScaffoldFiles({
+      repoName: "owner/web",
+      repoDescription: "A web product.",
+      defaultBranch: "trunk",
+      techStack: "TypeScript, React",
+      packageManager: "bun",
+      commands: { build: "bun run build", typecheck: "bun run typecheck", lint: "bun run lint", test: "bun test", dev: "bun run dev" },
+      tests: { framework: "bun:test", directory: "tests/", glob: "**/*.test.ts" },
+      ci: { primaryOs: "windows-latest", matrix: ["windows-latest", "ubuntu-latest"] },
+      uiEvidenceRequired: true,
+    })
+    const guidance = files.find((f) => f.path === "CLAUDE.md")!
+    const ci = files.find((f) => f.path === ".github/workflows/ci.yml")!
+    expect(guidance.content).toContain("A web product.")
+    expect(guidance.content).toContain("`bun run typecheck`")
+    expect(guidance.content).toContain("UI-impacting changes include before/after screenshots")
+    expect(ci.content).toContain("windows-latest")
+    expect(ci.content).toContain("bun run build")
+  })
+
+  it("enhance mode appends only missing ## sections for guidance files", () => {
+    const desired = [{ path: "CLAUDE.md", content: "# Title\n\n## Existing\n\nnew\n\n## Missing\n\nbody\n" }]
+    const plan = planScaffoldFiles({
+      mode: "enhance",
+      desired,
+      existing: [{ path: "CLAUDE.md", content: "# Custom\n\n## Existing\n\nkeep me\n" }],
+    })
+    expect(plan.filesToCommit).toHaveLength(1)
+    expect(plan.filesToCommit[0]!.content).toContain("keep me")
+    expect(plan.filesToCommit[0]!.content).toContain("## Missing")
+    expect(plan.filesToCommit[0]!.content).not.toContain("new")
+    expect(plan.reports[0]).toEqual({ path: "CLAUDE.md", status: "enhanced", appendedSections: ["## Missing"] })
+  })
 })
 
 describe("COPILOT_SETUP_ALLOWED_KEYS", () => {
@@ -87,7 +148,7 @@ describe("scaffold_repo no-op (all files already present)", () => {
     state.githubAgentToken = savedToken
   })
 
-  it("commits nothing, opens NO pull request, and deletes the orphan branch", async () => {
+  it("commits nothing, opens NO pull request, and creates no branch", async () => {
     state.githubAgentToken = "agent-token"
 
     const jsonResponse = (body: unknown, status = 200): Response =>
@@ -102,20 +163,20 @@ describe("scaffold_repo no-op (all files already present)", () => {
       const method = init?.method ?? "GET"
       const { pathname } = new URL(input)
 
-      // scaffold branch creation reads the base ref then creates the new ref.
+      // If the plan is no-op, branch creation should not happen.
       if (method === "GET" && pathname.endsWith("/git/ref/heads/main")) {
         return jsonResponse({ object: { sha: "basesha" } })
       }
       if (method === "POST" && pathname.endsWith("/git/refs")) {
-        return jsonResponse({}, 201)
+        return new Response("unexpected branch creation", { status: 500 })
       }
-      // commitFiles reads the scaffold branch head, then checks each file's
-      // existence — every file is present, so nothing is committed.
+      // Detection and existing-file reads find all scaffold files present, so
+      // nothing is committed.
       if (method === "GET" && pathname.includes("/git/ref/heads/scaffold/")) {
         return jsonResponse({ object: { sha: "basesha" } })
       }
       if (method === "GET" && pathname.includes("/contents/")) {
-        return jsonResponse({ type: "file" })
+        return jsonResponse({ type: "file", encoding: "base64", content: Buffer.from("# Existing\n\n## Project overview\n\nkeep\n", "utf8").toString("base64") })
       }
       // No-op cleanup: the orphan branch is deleted.
       if (method === "DELETE" && pathname.includes("/git/refs/heads/scaffold/")) {
@@ -146,6 +207,6 @@ describe("scaffold_repo no-op (all files already present)", () => {
     expect(payload.pr).toBeNull()
     expect(payload.note).toContain("nothing to scaffold")
     expect(pullsPosted).toBe(false)
-    expect(branchDeleted).toBe(true)
+    expect(branchDeleted).toBe(false)
   })
 })

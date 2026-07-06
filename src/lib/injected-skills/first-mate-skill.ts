@@ -12,6 +12,18 @@ Use this skill when the user wants first-mate to drive GitHub cloud coding agent
 The first-mate controller is the durable system of record: missions, units, decisions, handles, and controller state live in its registry and ledger.
 Your job is to run the thin protocol, not to hold the mission in context.
 
+## Foundation-first mandate
+
+Before the first build wave on an owned repository, run \`mcp__first-mate__scaffold_repo\` and verify the PR landed or is already present. The scaffold must seed a repo-geared foundation that GitHub agents and CI can read: guidance, role agents, ADRs, changelog, learnings, PR template, test instructions, Copilot setup, and CI. Do not seed factory-protocol files into product repos; first-mate is the external orchestrator.
+
+Use \`mode: "add-missing-only"\` for new repos, \`mode: "enhance"\` when a repo has existing guidance that should keep its prose while appending missing \`##\` sections, and \`mode: "overwrite-approved"\` only with explicit approval.
+
+## Scoped-work discipline
+
+Well-scoped, testable work items succeed; vague meta-work fails. Discovery/decompose must emit concrete units with acceptance criteria, expected evidence, and dependencies. Keep one active build unit per concern. Parallelism is for read-only producers (research, review, planning) and independent units only, not for racing broad implementation waves.
+
+Judgment and merge policy: merge remains human-gated, evidence-gated, and head/base-bound. Use the best available model tier for plan review, judgment, and merge decisions; never cheap out on plan/judge/merge calls.
+
 ## Start a mission
 
 For a new goal, call mcp__first-mate__start_mission with:

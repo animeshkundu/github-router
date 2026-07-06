@@ -16,14 +16,25 @@ import {
 } from "~/lib/agent/service"
 import type { RepoRef as AgentRepoRef } from "~/lib/agent/types"
 import { addUnitsToMission, advance as advanceController, buildBoard, summarizeInactiveMissions, type HumanDecision, type ModelAnswer } from "~/lib/first-mate/controller"
-import { buildScaffoldFiles } from "~/lib/first-mate/scaffold-spec"
+import {
+  buildScaffoldFiles,
+  planScaffoldFiles,
+  type ExistingScaffoldFile,
+  type ScaffoldCommandSet,
+  type ScaffoldFileReport,
+  type ScaffoldMode,
+  type ScaffoldOpts,
+  type ScaffoldTestContext,
+} from "~/lib/first-mate/scaffold-spec"
 import {
   createScaffoldBranch,
   createScaffoldPullRequest,
   deleteScaffoldBranch,
-  getDefaultBranch,
+  getRepositoryDetails,
   normalizeBranchRef,
   parseRepoSlug,
+  readRepoDirectoryNames,
+  readRepoTextFile,
 } from "~/lib/first-mate/scaffold-helpers"
 import { loadAllUnits, readMissions, upsertMission, type Mission } from "~/lib/first-mate/registry"
 import { upsertUnit as realUpsertUnit } from "~/lib/first-mate/ledger"
@@ -149,10 +160,23 @@ function defaultMergeCloseDeps(): MergeCloseDeps {
  */
 const MERGEABLE_POLL_DELAYS_MS = [400, 800, 1600] as const
 
+const ScaffoldDetectionOverridesSchema = z.object({
+  tech_stack: z.string().trim().min(1).optional(),
+  primary_os: z.string().trim().min(1).optional(),
+  package_manager: z.string().trim().min(1).optional(),
+  build_command: z.string().trim().min(1).optional(),
+  typecheck_command: z.string().trim().min(1).optional(),
+  lint_command: z.string().trim().min(1).optional(),
+  test_command: z.string().trim().min(1).optional(),
+  dev_command: z.string().trim().min(1).optional(),
+  ui_evidence_required: z.boolean().optional(),
+}).strict()
+
 const ScaffoldRepoArgsSchema = z.object({
   repo: z.string().trim().min(1),
-  mode: z.enum(["add-missing-only", "overwrite-approved"]).optional(),
+  mode: z.enum(["add-missing-only", "overwrite-approved", "enhance"]).optional(),
   base_ref: z.string().trim().min(1).optional(),
+  detection_overrides: ScaffoldDetectionOverridesSchema.optional(),
 }).strict()
 
 type ScaffoldRepoArgs = z.infer<typeof ScaffoldRepoArgsSchema>
@@ -244,27 +268,45 @@ export function createFirstMateTools(
       objectSchema({
         repo: stringProp("Repository as an owner/name string."),
         mode: enumProp(
-          ["add-missing-only", "overwrite-approved"],
-          "How to handle files that already exist. Defaults to add-missing-only.",
+          ["add-missing-only", "overwrite-approved", "enhance"],
+          "How to handle files that already exist. add-missing-only skips tuned files; overwrite-approved replaces; enhance appends missing ## sections to guidance/history foundation files. Defaults to add-missing-only.",
         ),
         base_ref: stringProp("Optional base branch name. Defaults to the repository default branch."),
+        detection_overrides: anyProp("Optional object of detection overrides: tech_stack, primary_os, package_manager, *_command, ui_evidence_required."),
       }, ["repo"]),
       async (args, signal) => {
         const input = parseScaffoldRepoArgs(args)
         const repo = parseRepoSlug(input.repo)
-        const baseBranch = input.base_ref === undefined
-          ? await getDefaultBranch(repo, signal)
-          : normalizeBranchRef(input.base_ref)
+        const repository = input.base_ref === undefined
+          ? await getRepositoryDetails(repo, signal)
+          : { defaultBranch: normalizeBranchRef(input.base_ref) }
+        const baseBranch = repository.defaultBranch
+        const scaffoldOpts = await detectScaffoldOptions({
+          repoSlug: input.repo,
+          repo,
+          baseBranch,
+          repoDescription: repository.description,
+          overrides: input.detection_overrides,
+          signal,
+        })
+        const desiredFiles = buildScaffoldFiles(scaffoldOpts)
+        const existingFiles = await readExistingScaffoldFiles(repo, baseBranch, desiredFiles.map((file) => file.path), signal)
+        const mode: ScaffoldMode = input.mode ?? "add-missing-only"
+        const plan = planScaffoldFiles({ mode, desired: desiredFiles, existing: existingFiles })
+        if (plan.filesToCommit.length === 0) {
+          return ok({
+            committed: [],
+            preserved: existingFiles.map((file) => file.path),
+            report: plan.reports,
+            pr: null,
+            note: "nothing to scaffold (all files present or no missing sections)",
+          })
+        }
         const branch = await createScaffoldBranch(repo, baseBranch, signal)
-        const files = buildScaffoldFiles({ repoName: input.repo })
-        const result = await commitFiles(input.repo, branch, files, {
-          mode: input.mode ?? "add-missing-only",
+        const result = await commitFiles(input.repo, branch, plan.filesToCommit, {
+          mode: "overwrite-approved",
           message: "scaffold: seed agentic-dev conventions",
         })
-        // No-op scaffold: everything was already present, so nothing was
-        // committed. Creating a PR here would 422 ("no commits between base and
-        // head"), and the branch we created is an orphan — delete it (best
-        // effort) and short-circuit with pr:null.
         if (result.committed.length === 0) {
           try {
             await deleteScaffoldBranch(repo, branch, signal)
@@ -274,12 +316,14 @@ export function createFirstMateTools(
           return ok({
             committed: [],
             preserved: result.preserved,
+            report: plan.reports,
             pr: null,
-            note: "nothing to scaffold (all files present)",
+            note: "nothing to scaffold (all files present or no missing sections)",
           })
         }
-        const pr = await createScaffoldPullRequest(repo, branch, baseBranch, signal)
-        return ok({ pr, committed: result.committed, preserved: result.preserved })
+        const body = buildScaffoldPrBody(plan.reports)
+        const pr = await createScaffoldPullRequest(repo, branch, baseBranch, signal, body)
+        return ok({ pr, committed: result.committed, preserved: result.preserved, report: plan.reports })
       },
     ),
     tool(
@@ -967,6 +1011,286 @@ function optionalHumanDecisions(args: Record<string, unknown>): HumanDecision[] 
     requestId: requiredString(entry, "requestId"),
     choice: requiredString(entry, "choice"),
   }))
+}
+
+interface ScaffoldDetectionInput {
+  repoSlug: string
+  repo: AgentRepoRef
+  baseBranch: string
+  repoDescription?: string
+  overrides?: ScaffoldRepoArgs["detection_overrides"]
+  signal?: AbortSignal
+}
+
+async function detectScaffoldOptions(input: ScaffoldDetectionInput): Promise<ScaffoldOpts> {
+  const [packageJsonText, goMod, pyproject, cargoToml, readme, workflowNames, rootNames] = await Promise.all([
+    readRepoTextFile(input.repo, "package.json", input.baseBranch, input.signal),
+    readRepoTextFile(input.repo, "go.mod", input.baseBranch, input.signal),
+    readRepoTextFile(input.repo, "pyproject.toml", input.baseBranch, input.signal),
+    readRepoTextFile(input.repo, "Cargo.toml", input.baseBranch, input.signal),
+    readFirstAvailableText(input.repo, ["README.md", "readme.md"], input.baseBranch, input.signal),
+    readRepoDirectoryNames(input.repo, ".github/workflows", input.baseBranch, input.signal),
+    readRepoDirectoryNames(input.repo, ".", input.baseBranch, input.signal),
+  ])
+  const workflowTexts = await readWorkflowTexts(input.repo, workflowNames, input.baseBranch, input.signal)
+  const packageJson = parsePackageJson(packageJsonText)
+  const commands = detectCommands(packageJson, input.overrides)
+  const packageManager = input.overrides?.package_manager ?? detectPackageManager(rootNames, packageJsonText)
+  const tests = detectTests(packageJson, rootNames, pyproject, cargoToml, goMod)
+  const stackParts = detectStackParts({ packageJson, goMod, pyproject, cargoToml, packageManager })
+  const frameworkNames = packageJson === undefined ? [] : Object.keys({ ...packageJson.dependencies, ...packageJson.devDependencies })
+  const uiEvidenceRequired = input.overrides?.ui_evidence_required ?? detectsUi(frameworkNames)
+  const workflowSignal = [...workflowNames, ...workflowTexts]
+  const primaryOs = input.overrides?.primary_os ?? detectPrimaryOs(readme, workflowSignal)
+  const matrix = detectCiMatrix(primaryOs, workflowSignal)
+  return {
+    repoName: input.repoSlug,
+    repoDescription: input.repoDescription ?? summarizeReadme(readme),
+    defaultBranch: input.baseBranch,
+    techStack: input.overrides?.tech_stack ?? (stackParts.length > 0 ? stackParts.join(", ") : undefined),
+    packageManager,
+    commands,
+    tests,
+    ci: { ...(primaryOs !== undefined ? { primaryOs } : {}), matrix },
+    uiEvidenceRequired,
+    projectStructure: detectProjectStructure(rootNames),
+    detectedNotes: detectNotes({ packageJson, goMod, pyproject, cargoToml, workflows: workflowNames, primaryOs }),
+  }
+}
+
+async function readFirstAvailableText(
+  repo: AgentRepoRef,
+  paths: ReadonlyArray<string>,
+  ref: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  for (const path of paths) {
+    const content = await readRepoTextFile(repo, path, ref, signal)
+    if (content !== undefined) return content
+  }
+  return undefined
+}
+
+async function readWorkflowTexts(
+  repo: AgentRepoRef,
+  workflowNames: ReadonlyArray<string>,
+  ref: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const workflowFiles = workflowNames.filter((name) => /\.(ya?ml)$/i.test(name))
+  const entries = await Promise.all(workflowFiles.map((name) => readRepoTextFile(repo, `.github/workflows/${name}`, ref, signal)))
+  return entries.filter((entry): entry is string => entry !== undefined)
+}
+
+interface ParsedPackageJson {
+  scripts: Record<string, string>
+  dependencies: Record<string, string>
+  devDependencies: Record<string, string>
+  packageManager?: string
+}
+
+function parsePackageJson(text: string | undefined): ParsedPackageJson | undefined {
+  if (text === undefined) return undefined
+  try {
+    const parsed: unknown = JSON.parse(text)
+    if (!isRecord(parsed)) return undefined
+    return {
+      scripts: stringRecord(parsed.scripts),
+      dependencies: stringRecord(parsed.dependencies),
+      devDependencies: stringRecord(parsed.devDependencies),
+      ...(typeof parsed.packageManager === "string" ? { packageManager: parsed.packageManager } : {}),
+    }
+  } catch (err) {
+    consola.debug("first-mate: package.json detection skipped:", err)
+    return undefined
+  }
+}
+
+function detectCommands(
+  packageJson: ParsedPackageJson | undefined,
+  overrides: ScaffoldRepoArgs["detection_overrides"],
+): ScaffoldCommandSet {
+  const commands: ScaffoldCommandSet = {}
+  const pm = overrides?.package_manager ?? packageJson?.packageManager?.split("@")[0]
+  const runner = pm === "bun" || pm === "pnpm" || pm === "yarn" || pm === "npm" ? pm : "npm"
+  const scripts = packageJson?.scripts ?? {}
+  if (packageJson !== undefined) {
+    commands.install = installCommand(runner)
+    for (const key of ["build", "typecheck", "lint", "test", "dev"] as const) {
+      if (scripts[key] !== undefined) commands[key] = runScriptCommand(runner, key)
+    }
+  }
+  if (overrides?.build_command !== undefined) commands.build = overrides.build_command
+  if (overrides?.typecheck_command !== undefined) commands.typecheck = overrides.typecheck_command
+  if (overrides?.lint_command !== undefined) commands.lint = overrides.lint_command
+  if (overrides?.test_command !== undefined) commands.test = overrides.test_command
+  if (overrides?.dev_command !== undefined) commands.dev = overrides.dev_command
+  return commands
+}
+
+function detectPackageManager(rootNames: ReadonlyArray<string>, packageJsonText: string | undefined): string | undefined {
+  const names = new Set(rootNames)
+  if (names.has("bun.lockb") || names.has("bun.lock")) return "bun"
+  if (names.has("pnpm-lock.yaml")) return "pnpm"
+  if (names.has("yarn.lock")) return "yarn"
+  if (names.has("package-lock.json") || packageJsonText !== undefined) return "npm"
+  if (names.has("go.mod")) return "go"
+  if (names.has("pyproject.toml")) return "python"
+  if (names.has("Cargo.toml")) return "cargo"
+  return undefined
+}
+
+function installCommand(packageManager: string): string {
+  if (packageManager === "bun") return "bun install --frozen-lockfile"
+  if (packageManager === "pnpm") return "pnpm install --frozen-lockfile"
+  if (packageManager === "yarn") return "yarn install --immutable"
+  return "npm ci"
+}
+
+function runScriptCommand(packageManager: string, script: string): string {
+  if (packageManager === "bun") return `bun run ${script}`
+  if (packageManager === "pnpm") return `pnpm ${script}`
+  if (packageManager === "yarn") return `yarn ${script}`
+  return `npm run ${script}`
+}
+
+function detectTests(
+  packageJson: ParsedPackageJson | undefined,
+  rootNames: ReadonlyArray<string>,
+  pyproject: string | undefined,
+  cargoToml: string | undefined,
+  goMod: string | undefined,
+): ScaffoldTestContext {
+  const deps = packageJson === undefined ? {} : { ...packageJson.dependencies, ...packageJson.devDependencies }
+  if (deps["bun-types"] !== undefined || packageJson?.scripts.test?.includes("bun test") === true) {
+    return { framework: "bun:test", directory: rootNames.includes("tests") ? "tests/" : "<!-- TODO: confirm test directory. -->", glob: "**/*.{test,spec}.{ts,tsx,js,jsx}" }
+  }
+  if (deps.vitest !== undefined) return { framework: "Vitest", directory: rootNames.includes("tests") ? "tests/" : "src/", glob: "**/*.{test,spec}.{ts,tsx,js,jsx}" }
+  if (deps.jest !== undefined) return { framework: "Jest", directory: rootNames.includes("tests") ? "tests/" : "__tests__/", glob: "**/*.{test,spec}.{ts,tsx,js,jsx}" }
+  if (deps.mocha !== undefined) return { framework: "Mocha", directory: rootNames.includes("test") ? "test/" : "tests/", glob: "**/*.test.{js,ts}" }
+  if (goMod !== undefined) return { framework: "go test", directory: "./...", glob: "**/*_test.go" }
+  if (cargoToml !== undefined) return { framework: "cargo test", directory: "tests/ and inline #[cfg(test)] modules", glob: "**/*.rs" }
+  if (pyproject !== undefined) return { framework: pyproject.includes("pytest") ? "pytest" : "python test runner", directory: rootNames.includes("tests") ? "tests/" : "<!-- TODO: confirm Python test directory. -->", glob: "**/test_*.py" }
+  return {}
+}
+
+function detectStackParts(input: {
+  packageJson: ParsedPackageJson | undefined
+  goMod: string | undefined
+  pyproject: string | undefined
+  cargoToml: string | undefined
+  packageManager: string | undefined
+}): string[] {
+  const parts: string[] = []
+  if (input.packageJson !== undefined) parts.push(`JavaScript/TypeScript (${input.packageManager ?? "package manager TODO"})`)
+  if (input.goMod !== undefined) parts.push("Go")
+  if (input.pyproject !== undefined) parts.push("Python")
+  if (input.cargoToml !== undefined) parts.push("Rust")
+  const deps = input.packageJson === undefined ? {} : { ...input.packageJson.dependencies, ...input.packageJson.devDependencies }
+  for (const framework of ["react", "next", "vite", "svelte", "vue", "hono", "express"] as const) {
+    if (deps[framework] !== undefined) parts.push(framework)
+  }
+  return parts
+}
+
+function detectsUi(frameworkNames: ReadonlyArray<string>): boolean {
+  return frameworkNames.some((name) => ["react", "next", "vite", "svelte", "vue", "@playwright/test", "cypress"].includes(name))
+}
+
+function detectPrimaryOs(readme: string | undefined, workflows: ReadonlyArray<string>): string | undefined {
+  const haystack = `${readme ?? ""}\n${workflows.join("\n")}`.toLowerCase()
+  if (haystack.includes("windows-first") || haystack.includes("windows 11 is the primary") || haystack.includes("primary deployment target") && haystack.includes("windows")) return "windows-latest"
+  if (haystack.includes("macos") && haystack.includes("primary")) return "macos-latest"
+  if (haystack.includes("linux") && haystack.includes("primary")) return "ubuntu-latest"
+  return undefined
+}
+
+function detectCiMatrix(primaryOs: string | undefined, workflows: ReadonlyArray<string>): string[] {
+  const matrix = new Set<string>()
+  if (primaryOs !== undefined) matrix.add(primaryOs)
+  const haystack = workflows.join("\n").toLowerCase()
+  if (haystack.includes("windows")) matrix.add("windows-latest")
+  if (haystack.includes("macos")) matrix.add("macos-latest")
+  if (haystack.includes("ubuntu") || haystack.includes("linux")) matrix.add("ubuntu-latest")
+  if (matrix.size === 0) {
+    matrix.add("ubuntu-latest")
+    matrix.add("windows-latest")
+  }
+  return [...matrix]
+}
+
+function summarizeReadme(readme: string | undefined): string | undefined {
+  if (readme === undefined) return undefined
+  const lines = readme.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== "" && !line.startsWith("#"))
+  return lines.slice(0, 3).join("\n\n") || undefined
+}
+
+function detectProjectStructure(rootNames: ReadonlyArray<string>): string[] {
+  const interesting = ["src", "app", "packages", "tests", "test", "docs", ".github", "scripts"].filter((name) => rootNames.includes(name))
+  return interesting.length > 0 ? interesting.map((name) => `\`${name}/\` — <!-- TODO: describe ownership and generated-file rules. -->`) : []
+}
+
+function detectNotes(input: {
+  packageJson: ParsedPackageJson | undefined
+  goMod: string | undefined
+  pyproject: string | undefined
+  cargoToml: string | undefined
+  workflows: ReadonlyArray<string>
+  primaryOs: string | undefined
+}): string[] {
+  const notes: string[] = []
+  if (input.primaryOs === undefined) notes.push("Primary OS was not confidently detected; choose one before relying on OS-specific behavior.")
+  if (input.workflows.length === 0) notes.push("No existing GitHub Actions workflows were detected; keep the starter CI matrix until branch protection is configured.")
+  if (input.packageJson === undefined && input.goMod === undefined && input.pyproject === undefined && input.cargoToml === undefined) {
+    notes.push("No package manifest was confidently detected; fill in stack and commands manually.")
+  }
+  return notes
+}
+
+async function readExistingScaffoldFiles(
+  repo: AgentRepoRef,
+  baseBranch: string,
+  paths: ReadonlyArray<string>,
+  signal?: AbortSignal,
+): Promise<ExistingScaffoldFile[]> {
+  const entries = await Promise.all(paths.map(async (path): Promise<ExistingScaffoldFile | undefined> => {
+    const content = await readRepoTextFile(repo, path, baseBranch, signal)
+    return content === undefined ? undefined : { path, content }
+  }))
+  return entries.filter((entry): entry is ExistingScaffoldFile => entry !== undefined)
+}
+
+function buildScaffoldPrBody(reports: ReadonlyArray<ScaffoldFileReport>): string {
+  const lines = reports.map((entry) => {
+    if (entry.status === "enhanced") {
+      const sections = entry.appendedSections?.join(", ") ?? "missing sections"
+      return `- ${entry.path}: enhanced(appended: ${sections})`
+    }
+    if (entry.status === "skipped") return `- ${entry.path}: skipped(present)`
+    return `- ${entry.path}: ${entry.status}`
+  })
+  return [
+    "Seeds a repo-geared agentic-dev foundation for Copilot, local agents, CI, ADRs, changelog, durable learnings, and handoff discipline.",
+    "",
+    "## Scaffold report",
+    "",
+    ...lines,
+    "",
+    "No factory protocol files are seeded; orchestration remains external to the repository.",
+  ].join("\n")
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function stringRecord(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {}
+  const result: Record<string, string> = {}
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry === "string") result[key] = entry
+  }
+  return result
 }
 
 function parseScaffoldRepoArgs(args: Record<string, unknown>): ScaffoldRepoArgs {
