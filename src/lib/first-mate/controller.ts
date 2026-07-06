@@ -901,15 +901,7 @@ async function applyModelAnswer(
         // non-null taskId here would wedge the replay guard forever and silently
         // lose the drained review_plan approval. The per-answer catch handles it.
         if (hasActiveBuildUnit(unit.missionId, units)) {
-          const request = await createHumanRequest(
-            unit,
-            mission,
-            { provider: unit.provider, prs: [] },
-            "build dispatch is waiting because another build PR is already active for this mission",
-            deps,
-          )
-          needsHuman.push({ request, sortKey: sortKey(unit), order: needsHuman.length })
-          await deps.upsertUnit(unit.repo, unit)
+          applied.push(`deferred build dispatch for ${unit.missionId}:${unitHandle(unit)}: another build is active`)
           return
         }
         const model = resolveCloudAgentModel(unit.model ?? mission.defaultModel)
@@ -1714,6 +1706,22 @@ function sameRepo(a: RepoRef, b: RepoRef): boolean {
   return a.owner.toLowerCase() === b.owner.toLowerCase() && a.name.toLowerCase() === b.name.toLowerCase()
 }
 
+function openUncorrelatedObservations(
+  unit: UnitRow,
+): Array<{ pr: number; count: number }> {
+  const raw = unit.openUncorrelatedObservations as unknown
+  if (Array.isArray(raw)) return raw
+  if (
+    typeof raw === "object" &&
+    raw !== null &&
+    typeof (raw as { pr?: unknown }).pr === "number" &&
+    typeof (raw as { count?: unknown }).count === "number"
+  ) {
+    return [{ pr: (raw as { pr: number }).pr, count: (raw as { count: number }).count }]
+  }
+  return []
+}
+
 function shouldEscalateOpenUncorrelated(
   unit: UnitRow,
   observed: Observed,
@@ -1731,15 +1739,21 @@ function shouldEscalateOpenUncorrelated(
 
   const sameRepoUnits = activeUnits.filter((entry) => sameRepo(entry.repo, unit.repo) && entry.terminal !== true)
   const belongsToKnownUnit = sameRepoUnits.some((entry) => entry.pr === externalPr)
-  const anyUnitAwaitingPr = sameRepoUnits.some((entry) => entry.pr === null)
-  if (belongsToKnownUnit || anyUnitAwaitingPr) {
-    unit.openUncorrelatedObservations = undefined
+  if (belongsToKnownUnit) {
+    unit.openUncorrelatedObservations = openUncorrelatedObservations(unit).filter(
+      (entry) => entry.pr !== externalPr,
+    )
     return false
   }
 
-  const previous = unit.openUncorrelatedObservations
-  const count = previous?.pr === externalPr ? previous.count + 1 : 1
-  unit.openUncorrelatedObservations = { pr: externalPr, count }
+  const observations = openUncorrelatedObservations(unit)
+  const index = observations.findIndex((entry) => entry.pr === externalPr)
+  const count = index === -1 ? 1 : observations[index]!.count + 1
+  const next = { pr: externalPr, count }
+  unit.openUncorrelatedObservations =
+    index === -1
+      ? [...observations, next]
+      : observations.map((entry, i) => (i === index ? next : entry))
   return count >= OPEN_UNCORRELATED_OBSERVATION_CAP
 }
 

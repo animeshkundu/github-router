@@ -2754,7 +2754,7 @@ test("genuine orphan open same-bot PR escalates after the observation threshold"
     taskId: "task-open",
     dispatchMode: "build",
     phase: "build",
-    openUncorrelatedObservations: { pr: 47, count: 2 },
+    openUncorrelatedObservations: [{ pr: 47, count: 2 }],
   })
   const h = harness([row])
   h.observations.set("1", {
@@ -2772,10 +2772,52 @@ test("genuine orphan open same-bot PR escalates after the observation threshold"
   expect(h.deps.mergePullRequest).not.toHaveBeenCalled()
 })
 
-test("fresh dispatched unit with no PR does not stall on an unrelated open same-bot PR", async () => {
+
+test("legacy single-object orphan observation counter is normalized and still escalates", async () => {
+  const row = unit({ id: "legacy-open", provider: "in_progress", pr: 7, taskId: "task-open", dispatchMode: "build", phase: "build" })
+  ;(row as unknown as { openUncorrelatedObservations: { pr: number; count: number } }).openUncorrelatedObservations = { pr: 47, count: 2 }
+  const h = harness([row])
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [openPr(7)],
+    externalMutation: "open_uncorrelated",
+    externalPr: 47,
+  })
+
+  const result = await advance({}, h.deps)
+
+  expect(result.needsHuman.some((request) => request.reason.includes("uncorrelated open same-bot PR #47"))).toBe(true)
+  expect(row.openUncorrelatedObservations).toEqual([{ pr: 47, count: 3 }])
+})
+
+test("fresh dispatched unit whose PR appears within grace does not stall on an unrelated open same-bot PR", async () => {
   const fresh = unit({ id: "fresh", issue: 1, provider: "in_progress", pr: null, taskId: "task-fresh", dispatchMode: "build", phase: "build" })
-  const sibling = unit({ id: "sibling", issue: 2, provider: "in_progress", pr: 47, taskId: "task-sibling", dispatchMode: "build", phase: "build" })
-  const h = harness([fresh, sibling])
+  const h = harness([fresh])
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [],
+    externalMutation: "open_uncorrelated",
+    externalPr: 47,
+  })
+
+  const r1 = await advance({}, h.deps)
+  expect(r1.needsHuman.some((request) => request.reason.includes("uncorrelated open same-bot PR #47"))).toBe(false)
+  expect(fresh.blockingDecisionId).toBeUndefined()
+  expect(fresh.openUncorrelatedObservations).toEqual([{ pr: 47, count: 1 }])
+
+  h.observations.set("1", { provider: "in_progress", prs: [openPr(51)], primaryPr: 51 })
+  const r2 = await advance({}, h.deps)
+
+  expect(r2.needsHuman.some((request) => request.reason.includes("uncorrelated open same-bot PR #47"))).toBe(false)
+  expect(fresh.blockingDecisionId).toBeUndefined()
+  expect(fresh.pr).toBe(51)
+  expect(fresh.terminal).not.toBe(true)
+})
+
+test("two awaiting units do not mutually suppress a marker-less orphan forever", async () => {
+  const a = unit({ id: "await-a", issue: 1, provider: "in_progress", pr: null, taskId: "task-a", dispatchMode: "build", phase: "build", openUncorrelatedObservations: [{ pr: 47, count: 2 }] })
+  const b = unit({ id: "await-b", issue: 2, provider: "in_progress", pr: null, taskId: "task-b", dispatchMode: "build", phase: "build" })
+  const h = harness([a, b])
   h.observations.set("1", {
     provider: "in_progress",
     prs: [],
@@ -2785,11 +2827,8 @@ test("fresh dispatched unit with no PR does not stall on an unrelated open same-
 
   const result = await advance({}, h.deps)
 
-  expect(result.needsHuman.some((request) => request.reason.includes("uncorrelated open same-bot PR #47"))).toBe(false)
-  expect(fresh.blockingDecisionId).toBeUndefined()
-  expect(fresh.openUncorrelatedObservations).toBeUndefined()
-  expect(fresh.pr).toBeNull()
-  expect(fresh.terminal).not.toBe(true)
+  expect(result.needsHuman.some((request) => request.reason.includes("uncorrelated open same-bot PR #47"))).toBe(true)
+  expect(a.blockingDecisionId).toBeDefined()
 })
 
 test("unit-id marker conflict on an open same-bot PR escalates immediately", async () => {
@@ -2876,6 +2915,35 @@ test("PR body unit-id marker correlates and binds the PR without branch", async 
   )
 
   expect(result).toEqual({ number: 55, correlated: true })
+})
+
+
+test("approved build waits without human block, then dispatches after the active build finishes", async () => {
+  const active = unit({ id: "active-build", issue: 1, taskId: "build-task", dispatchMode: "build", provider: "in_progress", phase: "build" })
+  const waiting = unit({ id: "waiting-build", issue: 2, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "approved plan" })
+  const h = harness([active, waiting])
+
+  const first = await advance(
+    { modelAnswers: [{ requestId: "m1:2:review_plan", verdict: { decision: "approve" } }] },
+    h.deps,
+  )
+
+  expect(first.needsHuman).toHaveLength(0)
+  expect(waiting.blockingDecisionId).toBeUndefined()
+  expect(waiting.taskId).toBe("task-1")
+  expect(waiting.provider).toBe("completed")
+
+  active.terminal = true
+  active.artifact = "pr_merged"
+  const second = await advance(
+    { modelAnswers: [{ requestId: "m1:2:review_plan", verdict: { decision: "approve" } }] },
+    h.deps,
+  )
+
+  expect(second.needsHuman).toHaveLength(0)
+  expect(waiting.dispatchMode).toBe("build")
+  expect(waiting.provider).toBe("queued")
+  expect(waiting.taskId).toBe("started-1")
 })
 
 test("second build unit is not dispatched while a build is already active for the same mission", async () => {

@@ -123,8 +123,8 @@ export interface UnitRow {
   goalHash?: string
   /** Baseline test-count ratchet captured by the merge gate; later gates must not decrease it. */
   baselineTestCount?: number
-  /** Consecutive wakes that saw the same OPEN same-bot PR uncorrelated to any unit. */
-  openUncorrelatedObservations?: { pr: number; count: number }
+  /** Consecutive wakes per OPEN same-bot PR that remained uncorrelated to any unit. */
+  openUncorrelatedObservations?: Array<{ pr: number; count: number }>
   /** Total author_fix cycles applied over this unit's life (per-mission budget counter). */
   fixCycles?: number
   /**

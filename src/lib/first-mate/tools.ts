@@ -1,6 +1,4 @@
 import { randomUUID } from "node:crypto"
-import path from "node:path"
-
 import consola from "consola"
 import { z } from "zod"
 
@@ -685,18 +683,6 @@ type MergeSafety = { ok: true } | { ok: false; reason: string }
  * so a genuinely CI-less repo passes this gate on the human's review alone; a
  * repo that HAS workflows but hasn't reported checks yet is refused.
  */
-function isTestLikePath(filePath: string): boolean {
-  const base = path.basename(filePath).toLowerCase()
-  return /(?:^|[.\-_])(test|spec)(?:[.\-_]|$)/.test(base)
-}
-
-function estimateTestCountFromDiff(diff: Awaited<ReturnType<MergeCloseDeps["getPullRequestDiffSummary"]>>): number {
-  // Heuristic fallback when CI does not expose a test-count line: count changed
-  // test/spec files. It is intentionally conservative and documented in the gate
-  // reason because it measures coverage surface, not executed assertions.
-  return diff.files.filter((file) => isTestLikePath(file.path)).length
-}
-
 function requiresCodeAndTests(mission: Mission | undefined, unit: UnitRow | undefined): boolean {
   const text = `${mission?.acceptanceCriteria ?? ""}\n${unit?.title ?? ""}`.toLowerCase()
   return /\bcode\b/.test(text) && /\btests?\b/.test(text)
@@ -774,19 +760,11 @@ async function evaluateMergeSafety(
     return { ok: false, reason: "build unit requires code and tests but the PR diff is docs-only" }
   }
 
-  if (!diff.truncated) {
-    const estimatedTests = estimateTestCountFromDiff(diff)
-    if (unit !== undefined) {
-      const baseline = unit.baselineTestCount
-      if (baseline !== undefined && estimatedTests < baseline) {
-        return { ok: false, reason: `test-count ratchet decreased from ${baseline} to ${estimatedTests} (heuristic: changed *.test.*/*.spec.* files when CI output has no explicit count)` }
-      }
-      if (baseline === undefined || estimatedTests > baseline) {
-        unit.baselineTestCount = estimatedTests
-        await deps.upsertUnit(unit.repo, unit)
-      }
-    }
-  }
+  // Test-count ratchet is intentionally advisory here: the diff file list is not
+  // an absolute repo test count, so enforcing it would false-block legitimate
+  // force-pushes/reverts/renames that reduce the cumulative base..head test-file
+  // diff. Keep the empty-diff and docs-only guards above as the merge blockers
+  // until a reliable absolute head-tree test count is available.
 
   const checks = await deps.getRequiredChecksForSha(repo, live.headSha)
   if (checks.rollup === "failing") {

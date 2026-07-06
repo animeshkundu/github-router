@@ -284,6 +284,32 @@ test("findAgentPRs matches a Copilot-authored PR to a copilot-swe-agent unit by 
   })).toEqual([{ number: 8, headSha: "h8", headRef: "copilot/x", isDraft: false }])
 })
 
+
+test("findAgentPRs extracts a constrained unit-id marker without HTML-comment over-capture", async () => {
+  const fetchMock = mock(() =>
+    jsonResponse([
+      {
+        number: 10,
+        user: { login: "Copilot" },
+        head: { sha: "h10", ref: "copilot/marker" },
+        body: "<!-- unit-id:abc-123--></p>",
+      },
+    ]),
+  )
+  setFetch(fetchMock)
+
+  expect(await findAgentPRs({ owner: "octo", repo: "r" }, {
+    issueNumber: 0,
+    botLogin: "copilot-swe-agent",
+  })).toEqual([{
+    number: 10,
+    headSha: "h10",
+    headRef: "copilot/marker",
+    isDraft: false,
+    unitIdMarker: "abc-123",
+  }])
+})
+
 test("getRequiredChecksForSha excludes the Copilot review-bot check-run from CI rollup", async () => {
   // The copilot-pull-request-reviewer check-run is a review marker, not a test —
   // counting it would report "passing" for a PR whose real CI never ran.

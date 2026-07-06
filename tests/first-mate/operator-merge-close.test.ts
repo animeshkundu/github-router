@@ -295,7 +295,7 @@ describe("merge_pr", () => {
   })
 
 
-  test("refuses when the test-count ratchet decreases", async () => {
+  test("does not false-block when the diff heuristic test count decreases", async () => {
     const row = unit({ pr: 7, baselineTestCount: 2 })
     const deps = makeDeps({
       loadAllUnits: mock(async () => [row]),
@@ -314,9 +314,9 @@ describe("merge_pr", () => {
       expected_head_sha: "reviewedsha",
     })
 
-    expect(res.isError).toBe(true)
-    expect((parsed(res).error as { message: string }).message).toContain("test-count ratchet")
-    expect(deps.mergePullRequest).not.toHaveBeenCalled()
+    expect(res.isError).toBeUndefined()
+    expect(parsed(res).merged).toBe(true)
+    expect(deps.mergePullRequest).toHaveBeenCalledTimes(1)
   })
 
 
