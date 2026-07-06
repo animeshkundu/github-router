@@ -1,7 +1,9 @@
 # Experimental Claude Code env-var injection
 
 How `github-router claude` auto-enables five Anthropic-internal feature gates that
-default off for non-Anthropic users, and which one is intentionally NOT injected.
+default off for non-Anthropic users, plus the gateway-model discovery gate it now
+CONDITIONALLY enables (cache-seeded) — and why that gate's network-fetch path
+stays closed.
 See [`../CLAUDE.md`](../CLAUDE.md) for project overview.
 
 ## Auto-enabled features
@@ -26,6 +28,43 @@ Independent of the Claude Code feature gates above, the proxy appends a short (~
 
 **Race-surface coverage**: enabling FORK_SUBAGENT and FINE_GRAINED_TOOL_STREAMING by default amplifies the SSE frame distribution through `relayAnthropicStream`. Per the Review checklist in `CLAUDE.md`, `tests/integration/fork-fgts-cancel.test.ts` exercises consumer cancels against fragmented `input_json_delta` streams to assert no smoking-gun warns surface.
 
-## Not auto-enabled (deferred)
+## Conditionally auto-enabled: `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`
 
-**`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`** would let the `/model` picker auto-populate from the proxy's `/v1/models` endpoint, but Claude Code's hardcoded slug registry maps slugs to **capabilities** (computer tool support, prompt caching, context window sizes, tool-use dialects), not just display labels. Copilot's slugs (`claude-opus-4.6-1m`, with dots) don't match Anthropic's registry entries (`claude-opus-4-6`, with dashes), so dynamic discovery would silently degrade to lowest-common-denominator fallback — quietly breaking advanced tool use. Enable it intentionally only after the proxy's `/v1/models` response is normalized to Anthropic-registry slugs.
+Gateway model discovery would let the `/model` picker auto-populate from a
+proxy-served model list, but Claude Code's hardcoded slug registry maps slugs to
+**capabilities** (computer tool support, prompt caching, context window sizes,
+tool-use dialects), not just display labels. Copilot's slugs (`claude-opus-4.6-1m`,
+with dots) don't match Anthropic's registry entries (`claude-opus-4-6`, with
+dashes). Discovery has two code paths and only one of them carries that hazard:
+
+- The **network-FETCH path** would discover Copilot's dotted `claude-*` slugs and
+  silently degrade advanced tool use to lowest-common-denominator fallback. It is
+  **never trusted** — and here it is permanently inert anyway: it bails when
+  nonessential traffic is disabled, and the proxy ALWAYS sets
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (and it never reads the synthetic
+  OAuth credential). So the fetch cannot run, cannot discover Copilot's Claude
+  slugs, and cannot overwrite anything.
+- The **cache-READ path** applies NO id filter (the `/^(claude|anthropic)/i`
+  filter lives only on the fetch path). So a pre-seeded cache can carry real
+  non-Claude Copilot ids and the picker builder APPENDS them as rows, leaving the
+  opus/sonnet/haiku tier rows untouched.
+
+Phase 3 of the Anthropic-translation shim exploits exactly that asymmetry.
+`getClaudeCodeEnvVars` (`src/lib/server-setup.ts`) pre-seeds
+`<CLAUDE_CONFIG_DIR>/cache/gateway-models.json` with the non-Claude models present
+in the live catalog (`gpt-5.5`, `gpt-5.3-codex`, `gemini-3.5-flash`,
+`gemini-3.1-pro-preview`) via `seedGatewayModelCache`, then enables
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` — but ONLY when the seed actually
+landed AND the key is unset in both the parent env and the injected `vars` (a
+user-set value always wins, same presence guard as the five features above). When
+no target model is in the catalog, any prior seed is cleared
+(`clearGatewayModelCache`) so a user-pinned flag can't surface stale rows.
+
+This is safe precisely because the capability-mapping hazard lived entirely on the
+blocked fetch path, and the cache-read path appends real ids without a filter and
+without degrading the Claude tiers. It is coupled to Claude Code's cache
+path/schema (verified against build 2.1.201); if a future build changes them, the
+seed is ignored and the rows simply don't appear (graceful degradation) — the
+models still run via explicit selection (`github-router claude -m <id>`), routed
+by the `/v1/messages` translation shim. Full mechanism and non-regression argument
+in [`anthropic-translation-shim.md`](anthropic-translation-shim.md).

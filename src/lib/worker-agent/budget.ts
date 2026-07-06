@@ -7,11 +7,19 @@
  *
  * Budget tracks three orthogonal axes:
  *   - turns: pathological-loop guard (default 500)
- *   - wall-clock: speed bound for the longest realistic task (30 min)
+ *   - wall-clock: speed bound for the longest realistic task (default 6h,
+ *     per-call overridable, clamped just under the MCP tool-call ceiling)
  *   - tool-bytes: cumulative tool-output bytes — context-pollution
  *     proxy. Token / cost tracking is intentionally NOT in scope
  *     (proxy doesn't bill, doesn't tokenize, and the model-side cost
  *     belongs to Copilot's quota).
+ *
+ * This module is also the single source of truth for the MCP per-tool-call
+ * timeout the launcher injects (`resolveMcpToolTimeoutMs`) and the teardown
+ * headroom between it and the worker wall-clock ceiling
+ * (`MCP_TIMEOUT_HEADROOM_MS`), so the invariant "worker wall-clock + headroom
+ * <= MCP tool-call timeout" lives in one place instead of being split between
+ * this file and `server-setup.ts`.
  *
  * Halt messages are deliberately terse — the plan calls them out as
  * `[halted: turns]`, `[halted: wallclock]`, `[halted: tool-bytes]`
@@ -22,16 +30,20 @@
 import type { BudgetConfig } from "./types"
 
 const DEFAULT_MAX_TURNS = 500
-// Sized a few minutes UNDER the MCP per-tool-call timeout the proxy injects
-// (`MCP_TOOL_TIMEOUT`, 35 min in server-setup.ts). Every worker runs behind an
-// MCP tool, so the harness hard-kills the call at the MCP cap regardless of this
-// value. Keeping the worker wall-clock below that cap means a non-converging
-// worker hits ITS OWN wallclock first, raising WorkerAbort -> the engine returns
-// the PARTIAL work + a "[halted: wallclock]" message that IS delivered before the
-// harness gives up (vs returning NOTHING). 30 min of real autonomous work, with
-// ~5 min of headroom under the 35-min MCP cap for graceful teardown + delivery.
-// Override with GH_ROUTER_WORKER_MAX_WALLCLOCK_MS (keep it under MCP_TOOL_TIMEOUT).
-const DEFAULT_MAX_WALLCLOCK_MS = 30 * 60_000
+// The longest realistic autonomous-worker run. Sized UNDER the MCP per-tool-call
+// timeout the proxy injects (`resolveMcpToolTimeoutMs`, default 6h15m in
+// server-setup.ts) by exactly `MCP_TIMEOUT_HEADROOM_MS` (15 min). Every worker
+// runs behind an MCP tool, so the harness hard-kills the call at the MCP cap
+// regardless of this value. Keeping the worker wall-clock at least a headroom
+// below that cap means a non-converging worker hits ITS OWN wallclock first,
+// raising WorkerAbort -> the engine returns the PARTIAL work + a
+// "[halted: wallclock]" message that IS delivered before the harness gives up
+// (vs returning NOTHING). 6h of real autonomous work, with ~15 min of headroom
+// under the 6h15m MCP cap for graceful teardown + delivery. Override with
+// GH_ROUTER_WORKER_MAX_WALLCLOCK_MS or the per-call `maxWallClockMs` arg (both
+// are clamped to `workerWallClockCeilingMs()` at the MCP boundary, so neither
+// can push a worker past the point where the harness would hard-kill it).
+export const DEFAULT_MAX_WALLCLOCK_MS = 6 * 60 * 60_000
 const DEFAULT_MAX_TOOL_BYTES = 16 * 1024 * 1024
 const DEFAULT_MAX_TOOL_CALLS = 250
 const DEFAULT_MAX_REPEATED_CALLS = 3
@@ -68,6 +80,48 @@ function envInt(name: string): number | undefined {
   const n = Number(raw)
   if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) return undefined
   return n
+}
+
+/**
+ * Default MCP per-tool-call timeout the launcher injects as
+ * `MCP_TIMEOUT` / `MCP_TOOL_TIMEOUT` (see `server-setup.ts`). 6h15m —
+ * one `MCP_TIMEOUT_HEADROOM_MS` above the 6h worker wall-clock default so a
+ * non-converging worker aborts gracefully (partial work + `[halted:
+ * wallclock]`) a full headroom before the harness hard-kills the call.
+ */
+const DEFAULT_MCP_TOOL_TIMEOUT_MS = 22_500_000
+
+/**
+ * Teardown headroom between the worker wall-clock ceiling and the MCP
+ * per-tool-call timeout — the graceful-abort + result-delivery budget. The
+ * worker wall-clock (default AND any per-call override) is clamped to
+ * `MCP_TOOL_TIMEOUT − MCP_TIMEOUT_HEADROOM_MS` so a worker is never silently
+ * hard-killed by the harness.
+ */
+export const MCP_TIMEOUT_HEADROOM_MS = 15 * 60_000
+
+/**
+ * The MCP per-tool-call timeout the proxy injects into the spawned CLI, in ms.
+ * Positive-integer override via `GH_ROUTER_MCP_TOOL_TIMEOUT_MS`; falls back to
+ * `DEFAULT_MCP_TOOL_TIMEOUT_MS` on unset/garbage input (same lenient parse as
+ * the worker-budget env overrides). Single source of truth for both
+ * `server-setup.ts` (which stringifies it into the child env) and the worker
+ * MCP boundary (which clamps a per-call wall-clock under it).
+ */
+export function resolveMcpToolTimeoutMs(): number {
+  return envInt("GH_ROUTER_MCP_TOOL_TIMEOUT_MS") ?? DEFAULT_MCP_TOOL_TIMEOUT_MS
+}
+
+/**
+ * The maximum wall-clock a single worker call may be granted: the MCP
+ * tool-call timeout minus the teardown headroom. A per-call `maxWallClockMs`
+ * override above this is clamped down to it (see `runWorkerToolCall`) so the
+ * worker always aborts gracefully at least `MCP_TIMEOUT_HEADROOM_MS` before the
+ * harness would hard-kill the MCP call. The 6h default equals this ceiling on
+ * the default MCP timeout (22_500_000 − 900_000 === 21_600_000).
+ */
+export function workerWallClockCeilingMs(): number {
+  return resolveMcpToolTimeoutMs() - MCP_TIMEOUT_HEADROOM_MS
 }
 
 /**

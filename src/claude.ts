@@ -1,6 +1,6 @@
 import process from "node:process"
 
-import { defineCommand } from "citty"
+import { defineCommand, type ArgsDef } from "citty"
 import consola from "consola"
 
 import {
@@ -81,6 +81,7 @@ import {
   browseAgentEnabled,
   browserToolsEnabled,
   fleetToolsEnabled,
+  implementerSubagentModel,
   standInToolEnabled,
   workerToolsEnabled,
 } from "./lib/mcp-capabilities"
@@ -97,69 +98,154 @@ function isFirstMateSkillName(name: string): boolean {
   return name === "gh-first-mate" || name === "gh-first-mate-scaffold"
 }
 
+export const claudeArgs = {
+  ...sharedServerArgs,
+  model: {
+    alias: "m",
+    type: "string",
+    description:
+      "Override the default model for Claude Code. Accepts a full slug (e.g. claude-opus-4-7) or an Opus family shorthand (e.g. 4.7, 4.8, 4.6) which expands to the best variant for that family — adding the [1m] suffix when a 1M-context backend is in the catalog.",
+  },
+  "codex-mcp": {
+    type: "boolean" as const,
+    default: true,
+    description:
+      "Wire peer-model MCP personas (codex-critic, codex-reviewer, gemini-critic) into the spawned Claude Code session",
+  },
+  "codex-cli": {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Add a `codex mcp-server` stdio backend so codex-implementer can mutate files. Requires codex CLI 0.129+; gracefully falls back to HTTP-only if absent.",
+  },
+  "codex-mcp-only": {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Pass --strict-mcp-config to claude code so only github-router's MCP servers are loaded (hides user's existing MCP servers)",
+  },
+  stealth: {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Opt back into VS Code-only beta header filtering. Loses leverage features (task budgets, token-efficient tools, prompt caching, etc.) but minimizes the wire-fingerprint difference from VS Code Copilot Chat. By default the `claude` subcommand enables extended/leverage betas because the spawned Claude Code already identifies itself via UA and other headers — partial stealth doesn't buy much.",
+  },
+  "trust-gate": {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Explicitly record consent for the structural Stop-gate in THIS repo (pinned to the repo's root-commit). The gate is ON BY DEFAULT when a harness is detected (consent-by-launching), so this is now mostly redundant; it stays for explicit/scripted use. Disable the gate entirely with GH_ROUTER_DISABLE_STOP_GATE=1.",
+  },
+  "no-stop-gate": {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Disable the structural Stop-gate for THIS session (same effect as GH_ROUTER_DISABLE_STOP_GATE=1). Intended for driven/automated sessions where a blocking Stop hook would hang the turn-end while a fleet driver waits.",
+  },
+  "auto-update": {
+    type: "boolean" as const,
+    default: true,
+    description:
+      "Check for and install the latest Claude Code on launch via `claude update` (throttled to once per hour via ~/.local/share/github-router/last-update-check). `claude update` respects the real install method (native installer or npm), so it never creates a conflicting second install; builds too old to support it fall back to `npm install -g @anthropic-ai/claude-code@latest`. Set to false (--no-auto-update) to check and warn only. Falls back gracefully if claude/npm/network unavailable.",
+  },
+  "update-check": {
+    type: "boolean" as const,
+    default: true,
+    description:
+      "Check the npm registry for a newer Claude Code version on launch and warn if stale (non-blocking ~500ms cost). Set to false (--no-update-check) to skip the check entirely (useful for offline/CI). Independent from --auto-update: --no-update-check implies no auto-install (nothing to install since we never check).",
+  },
+} satisfies ArgsDef
+
+/**
+ * Build the argv to forward to the spawned `claude` child from citty's
+ * rawArgs (every token after the `claude` subcommand). citty is non-strict,
+ * so an unknown flag such as `--print`/`-p`… `--output-format` is absorbed
+ * into the parsed `args` object AND its value swallowed, instead of landing
+ * in `args._`; forwarding only `args._` therefore drops headless flags unless
+ * the user wrapped them in `--`. Here we walk rawArgs and forward every token
+ * that is NOT one of github-router's OWN declared flags (or that flag's
+ * consumed value). Everything after a literal `--` is forwarded verbatim,
+ * preserving the prior explicit-passthrough behavior.
+ *
+ * A child flag whose NAME collides with a github-router flag (`-p`/`--port`,
+ * `-v`/`--verbose`, `-m`/`--model`, `-a`/`--account-type`, `-r`/`--rate-limit`,
+ * `-g`/`--github-token`) is owned by github-router; forward it to the child
+ * explicitly after `--` (e.g. `github-router claude -- -p`). Every other Claude
+ * flag (`--print`, `--output-format`, `--resume`, `--continue`, …) flows
+ * through automatically.
+ */
+export function collectChildPassthroughArgs(
+  rawArgs: ReadonlyArray<string>,
+  argsDef: ArgsDef,
+): string[] {
+  const known = new Set<string>()
+  const stringTyped = new Set<string>()
+  for (const [name, def] of Object.entries(argsDef)) {
+    const rawAlias = "alias" in def ? def.alias : undefined
+    const aliases =
+      rawAlias === undefined
+        ? []
+        : Array.isArray(rawAlias)
+          ? rawAlias
+          : [rawAlias]
+    for (const n of [name, ...aliases]) {
+      known.add(n)
+      if (def.type === "string") stringTyped.add(n)
+    }
+  }
+
+  const forwarded: string[] = []
+  for (let i = 0; i < rawArgs.length; i++) {
+    const tok = rawArgs[i]
+    // Explicit passthrough separator: forward everything after `--` verbatim
+    // (matches the prior `args._`-only behavior, where citty routed post-`--`
+    // tokens into `_`).
+    if (tok === "--") {
+      forwarded.push(...rawArgs.slice(i + 1))
+      break
+    }
+    // A bare `-` or a non-dash token is a positional / value → forward.
+    if (tok === "-" || !tok.startsWith("-")) {
+      forwarded.push(tok)
+      continue
+    }
+    const doubleDash = tok.startsWith("--")
+    const afterDashes = tok.slice(doubleDash ? 2 : 1)
+    const eq = afterDashes.indexOf("=")
+    const rawName = eq >= 0 ? afterDashes.slice(0, eq) : afterDashes
+    const hasInlineValue = eq >= 0
+    const negated = doubleDash && rawName.startsWith("no-")
+    const baseName = negated ? rawName.slice(3) : rawName
+
+    const isKnown = known.has(rawName) || (negated && known.has(baseName))
+    if (!isKnown) {
+      // Unknown to github-router → belongs to the child claude (e.g. --print).
+      forwarded.push(tok)
+      continue
+    }
+    // Own flag: drop it. Also drop a separately-tokenized value for a
+    // string-typed flag written as `--flag value` / `-a value` (no inline
+    // `=`, next token present and not itself a flag). Booleans and `--no-…`
+    // negations never consume a following token under citty/mri.
+    const consumesValue =
+      !negated
+      && !hasInlineValue
+      && stringTyped.has(rawName)
+      && i + 1 < rawArgs.length
+      && rawArgs[i + 1] !== "--"
+      && !rawArgs[i + 1].startsWith("-")
+    if (consumesValue) i++
+  }
+  return forwarded
+}
+
 export const claude = defineCommand({
   meta: {
     name: "claude",
     description: "Start the proxy server and launch Claude Code",
   },
-  args: {
-    ...sharedServerArgs,
-    model: {
-      alias: "m",
-      type: "string",
-      description:
-        "Override the default model for Claude Code. Accepts a full slug (e.g. claude-opus-4-7) or an Opus family shorthand (e.g. 4.7, 4.8, 4.6) which expands to the best variant for that family — adding the [1m] suffix when a 1M-context backend is in the catalog.",
-    },
-    "codex-mcp": {
-      type: "boolean" as const,
-      default: true,
-      description:
-        "Wire peer-model MCP personas (codex-critic, codex-reviewer, gemini-critic) into the spawned Claude Code session",
-    },
-    "codex-cli": {
-      type: "boolean" as const,
-      default: false,
-      description:
-        "Add a `codex mcp-server` stdio backend so codex-implementer can mutate files. Requires codex CLI 0.129+; gracefully falls back to HTTP-only if absent.",
-    },
-    "codex-mcp-only": {
-      type: "boolean" as const,
-      default: false,
-      description:
-        "Pass --strict-mcp-config to claude code so only github-router's MCP servers are loaded (hides user's existing MCP servers)",
-    },
-    stealth: {
-      type: "boolean" as const,
-      default: false,
-      description:
-        "Opt back into VS Code-only beta header filtering. Loses leverage features (task budgets, token-efficient tools, prompt caching, etc.) but minimizes the wire-fingerprint difference from VS Code Copilot Chat. By default the `claude` subcommand enables extended/leverage betas because the spawned Claude Code already identifies itself via UA and other headers — partial stealth doesn't buy much.",
-    },
-    "trust-gate": {
-      type: "boolean" as const,
-      default: false,
-      description:
-        "Explicitly record consent for the structural Stop-gate in THIS repo (pinned to the repo's root-commit). The gate is ON BY DEFAULT when a harness is detected (consent-by-launching), so this is now mostly redundant; it stays for explicit/scripted use. Disable the gate entirely with GH_ROUTER_DISABLE_STOP_GATE=1.",
-    },
-    "no-stop-gate": {
-      type: "boolean" as const,
-      default: false,
-      description:
-        "Disable the structural Stop-gate for THIS session (same effect as GH_ROUTER_DISABLE_STOP_GATE=1). Intended for driven/automated sessions where a blocking Stop hook would hang the turn-end while a fleet driver waits.",
-    },
-    "auto-update": {
-      type: "boolean" as const,
-      default: true,
-      description:
-        "Check for and install the latest Claude Code on launch via `claude update` (throttled to once per hour via ~/.local/share/github-router/last-update-check). `claude update` respects the real install method (native installer or npm), so it never creates a conflicting second install; builds too old to support it fall back to `npm install -g @anthropic-ai/claude-code@latest`. Set to false (--no-auto-update) to check and warn only. Falls back gracefully if claude/npm/network unavailable.",
-    },
-    "update-check": {
-      type: "boolean" as const,
-      default: true,
-      description:
-        "Check the npm registry for a newer Claude Code version on launch and warn if stale (non-blocking ~500ms cost). Set to false (--no-update-check) to skip the check entirely (useful for offline/CI). Independent from --auto-update: --no-update-check implies no auto-install (nothing to install since we never check).",
-    },
-  },
-  async run({ args }) {
+  args: claudeArgs,
+  async run({ args, rawArgs }) {
     if (!process.stdout.isTTY) {
       consola.error("The claude subcommand requires a TTY (interactive terminal).")
       process.exit(1)
@@ -359,7 +445,13 @@ export const claude = defineCommand({
     process.stderr.write(`Server ready on ${serverUrl}, launching Claude Code (${banner})...\n`)
 
     const envVars = getClaudeCodeEnvVars(serverUrl, chosenSlug)
-    const extraArgs = ((args as unknown as Record<string, unknown>)._ as string[]) ?? []
+    // Forward unrecognized flags (e.g. --print / --output-format / --resume)
+    // to the spawned Claude Code child. citty is non-strict, so those land in
+    // the parsed `args` object with their values swallowed rather than in
+    // `args._`; walking rawArgs and dropping only github-router's OWN flags
+    // makes `github-router claude -m <model> --print "…"` work headless
+    // without requiring the `--` separator. See collectChildPassthroughArgs.
+    const extraArgs = collectChildPassthroughArgs(rawArgs, claudeArgs)
 
     // LLM toolbelt: materialize curated CLI tools (rg/fd/jq/sd/sg/yq)
     // into the router bin dir prepended to the agent's PATH (the prepend
@@ -483,6 +575,7 @@ export const claude = defineCommand({
           groupKeys,
           workerToolsAvailable: workerToolsEnabled(),
           browseAvailable: browseAgentEnabled(),
+          implementerModel: implementerSubagentModel(),
         })
         state.peerMcpNonce = runtime.nonce
         // Reach-back channel for the advisory-review hooks (hook V2): the

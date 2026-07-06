@@ -1,3 +1,6 @@
+import * as fs from "node:fs"
+import * as nodePath from "node:path"
+
 import consola from "consola"
 import { serve, type ServerHandler } from "srvx"
 
@@ -11,6 +14,7 @@ import { setupCopilotToken, setupGitHubAgentToken, setupGitHubToken } from "./to
 import { toolbeltEnabled } from "./toolbelt"
 import { toolbeltPathOverride } from "./toolbelt/path-inject"
 import { cacheModels, cacheCopilotVersion, cacheVSCodeVersion } from "./utils"
+import { resolveMcpToolTimeoutMs } from "./worker-agent/budget"
 import { server as app } from "../server"
 
 const MAX_PORT_RETRIES = 10
@@ -357,6 +361,144 @@ export function parseSharedArgs(args: Record<string, unknown>): {
 }
 
 /**
+ * Non-Claude models we surface as first-class, selectable rows in Claude
+ * Code's model picker (Phase 3 of native-non-claude-models). The main
+ * agent loop runs on them through the `/v1/messages` translation shim
+ * (`src/lib/anthropic-translate/*`, branched in `routes/messages/handler.ts`)
+ * that forwards non-Claude targets to Copilot `/responses` (gpt) or
+ * `/chat/completions` (gemini). The exact gemini id is
+ * `gemini-3.1-pro-preview` (preview slug — NOT `gemini-3.1-pro`).
+ *
+ * Display labels only: the gateway-model cache schema Claude Code reads is
+ * `{id, display_name?}` per model — there is NO per-model context-window
+ * field, so context accounting for a selected row uses Claude Code's
+ * default window (safe under-accounting: it compacts earlier than the real
+ * 1M/400k window, never overflows). See `seedGatewayModelCache`.
+ */
+const NATIVE_NON_CLAUDE_MODELS: ReadonlyArray<{
+  id: string
+  displayName: string
+}> = [
+  { id: "gpt-5.5", displayName: "GPT-5.5" },
+  { id: "gpt-5.3-codex", displayName: "GPT-5.3 Codex" },
+  { id: "gemini-3.5-flash", displayName: "Gemini 3.5 Flash" },
+  { id: "gemini-3.1-pro-preview", displayName: "Gemini 3.1 Pro (preview)" },
+]
+
+/**
+ * The subset of `NATIVE_NON_CLAUDE_MODELS` actually present in the live
+ * Copilot catalog. License tiers differ (gpt-5.5 needs
+ * pro_plus/business/enterprise/max; gemini-3.5-flash is absent on
+ * edu/individual_trial), so a model missing from the catalog is silently
+ * dropped — the caller then neither enables discovery nor writes a cache
+ * for it, and lesser tiers see the unchanged picker. Pure (reads
+ * `state.models`), so it is unit-testable without side effects.
+ */
+export function nativeSelectableModelsInCatalog(): Array<{
+  id: string
+  display_name: string
+}> {
+  const catalog = state.models?.data
+  if (!catalog || catalog.length === 0) return []
+  const present = new Set(catalog.map((m) => m.id))
+  return NATIVE_NON_CLAUDE_MODELS.filter((m) => present.has(m.id)).map((m) => ({
+    id: m.id,
+    display_name: m.displayName,
+  }))
+}
+
+/**
+ * Pre-seed Claude Code's gateway-model discovery cache so the non-Claude
+ * models appear as selectable picker rows WITHOUT the network fetch.
+ *
+ * Verified against the installed Claude Code build (2.1.201): the picker
+ * builder reads `<CLAUDE_CONFIG_DIR>/cache/gateway-models.json`
+ * (schema `{baseUrl: string, fetchedAt: number, models: [{id, display_name?}]}`)
+ * and — when gateway discovery is enabled (first-party auth mode +
+ * `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` set + a non-`api.anthropic.com`
+ * `ANTHROPIC_BASE_URL`, all true for the proxy) — maps each cached model to
+ * a picker row `{value: id, label: display_name}`. Critically, the
+ * cache-READ path applies NO id filter; the `/^(claude|anthropic)/i` filter
+ * lives ONLY in the network-FETCH path. So a pre-seeded cache can carry the
+ * real Copilot ids (`gpt-5.5`, `gemini-3.1-pro-preview`, …) — no `claude-*`
+ * alias needed — and selecting a row sends that real id, which
+ * `resolveModel()` exact-matches and the `/v1/messages` shim routes.
+ *
+ * The network fetch never overwrites this seed: it bails when nonessential
+ * traffic is disabled, and the proxy ALWAYS sets
+ * `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, so the fetch returns before
+ * it can write. The seed is therefore authoritative for the session.
+ *
+ * `baseUrl` MUST equal the `ANTHROPIC_BASE_URL` Claude Code sees
+ * (`serverUrl`) or the cache is discarded. `configDir` defaults to
+ * `PATHS.CLAUDE_CONFIG_DIR` — the same dir the proxy points
+ * `CLAUDE_CONFIG_DIR` at — so the write target and Claude Code's read
+ * target are identical by construction.
+ *
+ * Best-effort: every failure is swallowed — a missing picker row must never
+ * break launch. This is coupled to Claude Code's internal cache path/schema;
+ * if a future build changes them the read simply ignores the seed and the
+ * rows don't appear (graceful degradation). Returns whether a file was
+ * written (for tests/observability).
+ *
+ * The write is atomic (temp file in the same dir + rename) so a Claude Code
+ * read can never observe a torn/partial JSON (which its safeParse would
+ * reject, dropping the rows). Rename-over-existing is atomic on POSIX and
+ * Windows (libuv MoveFileEx REPLACE_EXISTING).
+ */
+export function seedGatewayModelCache(
+  serverUrl: string,
+  models: ReadonlyArray<{ id: string; display_name: string }>,
+  configDir: string = PATHS.CLAUDE_CONFIG_DIR,
+): boolean {
+  if (models.length === 0) return false
+  const cacheDir = nodePath.join(configDir, "cache")
+  const target = nodePath.join(cacheDir, "gateway-models.json")
+  const tmp = nodePath.join(
+    cacheDir,
+    `gateway-models.json.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`,
+  )
+  try {
+    fs.mkdirSync(cacheDir, { recursive: true })
+    const payload = {
+      baseUrl: serverUrl,
+      fetchedAt: Date.now(),
+      models: models.map((m) => ({ id: m.id, display_name: m.display_name })),
+    }
+    fs.writeFileSync(tmp, JSON.stringify(payload), "utf-8")
+    fs.renameSync(tmp, target)
+    return true
+  } catch {
+    try {
+      fs.rmSync(tmp, { force: true })
+    } catch {
+      /* best-effort cleanup */
+    }
+    return false
+  }
+}
+
+/**
+ * Remove any seeded gateway-model cache. Called when the current catalog
+ * carries none of the target models, so a user who has pinned
+ * `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` on cannot surface rows for
+ * models that are no longer available. Best-effort (per-launch config dirs
+ * make a stale file rare, but this closes the pinned-port + catalog-change
+ * seam). Never throws.
+ */
+export function clearGatewayModelCache(
+  configDir: string = PATHS.CLAUDE_CONFIG_DIR,
+): void {
+  try {
+    fs.rmSync(nodePath.join(configDir, "cache", "gateway-models.json"), {
+      force: true,
+    })
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
  * Build environment variables for Claude Code.
  *
  * The parent env is sanitized of every key in `STRIPPED_PARENT_ENV_KEYS`
@@ -408,39 +550,6 @@ export function getClaudeCodeEnvVars(
     // accessToken that Claude Code sends as Bearer. See
     // `ensureClaudeConfigMirror` in `src/lib/paths.ts`.
     CLAUDE_CONFIG_DIR: PATHS.CLAUDE_CONFIG_DIR,
-    // Extend Claude Code's MCP per-tool-call wait window. Two distinct
-    // env vars are at play (per binary inspection of v2.1.141 by the
-    // peer-MCP team's empirical SDK test, 2026-05-14):
-    //
-    //   - MCP_TIMEOUT — historical/general MCP timeout, may apply to
-    //     server-startup or initial-handshake but NOT confirmed to reach
-    //     the per-tool-call HTTP wait on v2.1.138-141 (regressions
-    //     #50289 / #52137 documented this as silently-ignored on the
-    //     per-call path). Kept as belt-and-suspenders.
-    //
-    //   - MCP_TOOL_TIMEOUT — the load-bearing one. v2.1.141's `y13()`
-    //     reads `parseInt(process.env.MCP_TOOL_TIMEOUT)` for the per-
-    //     tool-call timeout passed to MCP SDK's `.callTool({...},
-    //     schema, {timeout: W})`. Default `1e8` ms (~27.7 hours) when
-    //     the env is unset. Set to 35 min: finite-but-large (surfaces
-    //     regressions where the SDK silently caps at 60s, AND bounds
-    //     runaway calls) but high enough that an autonomous worker can do
-    //     up to its 30-min wall-clock of real work AND still return its
-    //     result before the harness gives up. The worker wall-clock
-    //     (`GH_ROUTER_WORKER_MAX_WALLCLOCK_MS`, default 30 min) is sized a
-    //     few minutes UNDER this so a slow/runaway worker aborts
-    //     gracefully (partial work + `[halted: wallclock]`) inside the
-    //     window rather than being hard-killed with nothing.
-    //
-    // Without the SDK's `resetTimeoutOnProgress` opt-in (which Claude
-    // Code does not pass), SSE notifications/progress events DO NOT
-    // reset the per-call timer — they only fire UI callbacks. So
-    // MCP_TOOL_TIMEOUT is the actual lever for long-running peer-MCP
-    // calls, not the SSE response transport. SSE remains valuable as
-    // the canonical Streamable HTTP shape and for progress UI, but the
-    // ceiling-busting work is done by these env vars.
-    MCP_TIMEOUT: "2100000",
-    MCP_TOOL_TIMEOUT: "2100000",
     // Suppress non-essential telemetry/model calls. The first two are
     // Anthropic's own knobs (per cc-backup managedEnv.ts); the third
     // (`DISABLE_TELEMETRY`) suppresses Datadog/Statsig/etc. external
@@ -454,24 +563,75 @@ export function getClaudeCodeEnvVars(
   }
   if (model) vars.ANTHROPIC_MODEL = model
 
+  // Extend Claude Code's MCP per-tool-call wait window. Two distinct
+  // env vars are at play (per binary inspection of v2.1.141 by the
+  // peer-MCP team's empirical SDK test, 2026-05-14):
+  //
+  //   - MCP_TIMEOUT — historical/general MCP timeout, may apply to
+  //     server-startup or initial-handshake but NOT confirmed to reach
+  //     the per-tool-call HTTP wait on v2.1.138-141 (regressions
+  //     #50289 / #52137 documented this as silently-ignored on the
+  //     per-call path). Kept as belt-and-suspenders.
+  //
+  //   - MCP_TOOL_TIMEOUT — the load-bearing one. v2.1.141's `y13()`
+  //     reads `parseInt(process.env.MCP_TOOL_TIMEOUT)` for the per-
+  //     tool-call timeout passed to MCP SDK's `.callTool({...},
+  //     schema, {timeout: W})`. Default `1e8` ms (~27.7 hours) when
+  //     the env is unset. Set to 6h15m (`resolveMcpToolTimeoutMs()`,
+  //     override `GH_ROUTER_MCP_TOOL_TIMEOUT_MS`): finite-but-large
+  //     (surfaces regressions where the SDK silently caps at 60s, AND
+  //     bounds runaway calls) but high enough that an autonomous worker
+  //     can do up to its 6h wall-clock of real work AND still return its
+  //     result before the harness gives up. INVARIANT: the worker
+  //     wall-clock (default 6h, per-call overridable) is clamped to
+  //     `workerWallClockCeilingMs()` = this timeout − 15 min teardown
+  //     headroom (`MCP_TIMEOUT_HEADROOM_MS`), so a slow/runaway worker
+  //     aborts gracefully (partial work + `[halted: wallclock]`) a full
+  //     headroom before the harness hard-kills it — 6h worker < 6h15m
+  //     ceiling. Both live in `worker-agent/budget.ts` (single source of
+  //     truth) so the two numbers can never drift apart.
+  //
+  // Without the SDK's `resetTimeoutOnProgress` opt-in (which Claude
+  // Code does not pass), SSE notifications/progress events DO NOT
+  // reset the per-call timer — they only fire UI callbacks. So
+  // MCP_TOOL_TIMEOUT is the actual lever for long-running peer-MCP
+  // calls, not the SSE response transport. SSE remains valuable as
+  // the canonical Streamable HTTP shape and for progress UI, but the
+  // ceiling-busting work is done by these env vars.
+  //
+  // Presence-based guard (symmetric with ANTHROPIC_SMALL_FAST_MODEL /
+  // the tier-default / experimental-enables guards below): if the parent
+  // env already set either key, preserve the user's value — only inject
+  // our default when unset. Neither key is in `STRIPPED_PARENT_ENV_KEYS`,
+  // so an unset override lets the parent value flow through naturally.
+  const mcpToolTimeoutMs = String(resolveMcpToolTimeoutMs())
+  if (process.env.MCP_TIMEOUT === undefined) vars.MCP_TIMEOUT = mcpToolTimeoutMs
+  if (process.env.MCP_TOOL_TIMEOUT === undefined) {
+    vars.MCP_TOOL_TIMEOUT = mcpToolTimeoutMs
+  }
+
   // Default the small/fast tier model (used by Claude Code for status
   // text, auto-compact summaries, session titles, background ops) to
-  // claude-sonnet-4-6. Anthropic-published dashed slug; the proxy's
-  // resolveModel translates to Copilot's dotted slug at request time.
+  // claude-sonnet-5. Anthropic-published dashed slug that is also the
+  // Copilot catalog id verbatim (no dotted variant), so resolveModel
+  // resolves it via an exact catalog match at request time.
   // We deliberately pass Sonnet rather than Haiku here: on the canonical
   // Copilot-Enterprise deployment the quality lift on background ops
   // (compaction summaries, session titles) is worth more than Haiku's
   // marginal latency/cost edge, and Copilot bills per-request by
-  // multiplier rather than per-token. The /model picker's Haiku tier row
-  // (ANTHROPIC_DEFAULT_HAIKU_MODEL below) stays claude-haiku-4-5 so users
-  // who explicitly want the cheap tier still get it.
+  // multiplier rather than per-token. Sonnet 5 is both the newest Sonnet
+  // and cheaper than Sonnet 4.6 per the live catalog (input/output
+  // multipliers 200/1000 vs 300/1500), so it strictly dominates the
+  // prior default for this tier. The /model picker's Haiku tier row
+  // (ANTHROPIC_DEFAULT_HAIKU_MODEL below) is likewise seeded to
+  // claude-sonnet-5 so the cheap-tier pick also lands on Sonnet 5.
   // Presence-based guard preserves any user-set value, including the
   // dated slug variant or a different family (gemini, gpt) for users
   // who have custom Copilot mappings — symmetric with the
   // ANTHROPIC_SMALL_FAST_MODEL pass-through documented in launch.ts's
   // STRIPPED_PARENT_ENV_KEYS comment.
   if (process.env.ANTHROPIC_SMALL_FAST_MODEL === undefined) {
-    vars.ANTHROPIC_SMALL_FAST_MODEL = "claude-sonnet-4-6"
+    vars.ANTHROPIC_SMALL_FAST_MODEL = "claude-sonnet-5"
   }
 
   // Tier-default knobs read by Claude Code's /model picker (cc-backup
@@ -481,26 +641,27 @@ export function getClaudeCodeEnvVars(
   // to what Copilot has). Setting them seeds the three tier rows with
   // ids the proxy's resolveModel knows how to route.
   //
-  // Why NO [1m] suffix on Sonnet/Haiku: Copilot has no 1M backend for
-  // either family. Per the live catalog as of 2026-06-04: opus-4.6-1m
-  // (sibling-slug 1M), opus-4.7-1m-internal (sibling-slug 1M, enterprise),
-  // and opus-4.8 (base slug already 1M, no sibling) all exist; sonnet
-  // and haiku stay 200K. Anthropic-side modelSupports1M in cc-backup
-  // context.ts:43-49 only lists sonnet-4* and opus-4-6 — haiku has no
-  // 1M variant on either side. The [1m] decoration for the *active*
-  // default lives on ANTHROPIC_MODEL itself (see pickClaudeDefault in
-  // src/lib/port.ts) and is cap-aware against the live catalog via the
+  // Why NO [1m] suffix on the Sonnet/Haiku tier rows: the picker-row tier
+  // defaults are always the bare slug — the [1m] decoration for the
+  // *active* default lives on ANTHROPIC_MODEL itself (see pickClaudeDefault
+  // in src/lib/port.ts) and is cap-aware against the live catalog via the
   // dual-signal detector (sibling-slug regex OR base-slug
-  // max_context_window_tokens).
+  // max_context_window_tokens). Seeding a bracketed slug here would bypass
+  // that cap-awareness and risk a request Copilot 400s (unrecognized
+  // bracket) or local over-accounting of context. Note both the Sonnet and
+  // Haiku tier rows are seeded to claude-sonnet-5 (the Haiku row is NOT a
+  // haiku slug) to match the ANTHROPIC_SMALL_FAST_MODEL default above — the
+  // Sonnet/cheap-tier picks land on Sonnet 5, which is newer and cheaper than
+  // the prior Sonnet-4.6 / Haiku-4.5 defaults.
   //
   // Presence-based guard symmetric with the SMALL_FAST_MODEL guard
   // above — preserves any value (including 0/false/off/unrecognized)
   // the user has explicitly set.
   if (process.env.ANTHROPIC_DEFAULT_SONNET_MODEL === undefined) {
-    vars.ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-4-6"
+    vars.ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-5"
   }
   if (process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL === undefined) {
-    vars.ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-haiku-4-5"
+    vars.ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-sonnet-5"
   }
   if (process.env.ANTHROPIC_DEFAULT_OPUS_MODEL === undefined) {
     vars.ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-8"
@@ -566,6 +727,51 @@ export function getClaudeCodeEnvVars(
     if (process.env[key] === undefined) {
       vars[key] = "1"
     }
+  }
+
+  // Native selection of the four non-Claude models (Phase 3). Surface
+  // gpt-5.5, gpt-5.3-codex, gemini-3.5-flash, gemini-3.1-pro-preview as
+  // selectable rows in Claude Code's model picker — ADDITIVELY, without
+  // touching the opus/sonnet/haiku tier defaults (ANTHROPIC_DEFAULT_*,
+  // ANTHROPIC_MODEL, ANTHROPIC_SMALL_FAST_MODEL) seeded above.
+  //
+  // Mechanism (verified against installed Claude Code 2.1.201): the ONLY
+  // env lever that adds MORE THAN ONE selectable row is gateway model
+  // discovery — ANTHROPIC_CUSTOM_MODEL_OPTION adds exactly one. Discovery's
+  // NETWORK fetch is blocked here (it never reads the synthetic OAuth
+  // credential, and bails on CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1),
+  // but its cache-READ path is not — so we (1) enable discovery and (2)
+  // pre-seed its cache with the real Copilot ids (seedGatewayModelCache).
+  // The cache-read applies no id filter, so no claude-* alias / no
+  // /v1/models normalization is needed, and the picker rows carry the real
+  // ids the /v1/messages shim already routes.
+  //
+  // Non-regression is structural: the fetch that could otherwise discover
+  // Copilot's dotted claude-* slugs (and degrade tier capability mapping —
+  // the reason discovery is normally left off) is permanently blocked, and
+  // the cache we seed contains ONLY these four non-Claude models. Tiers are
+  // untouched.
+  //
+  // Gated on at least one target being in the live catalog (license tiers
+  // differ) and presence-guarded: a user-set discovery value always wins.
+  // The guard checks BOTH the parent env (consistent with every other guard
+  // in this function) AND `vars` (defence against a future in-function
+  // refactor that sets this key earlier). Discovery is enabled only when the
+  // cache seed actually landed, so we never turn on a feature with nothing
+  // to show. When no target is in the catalog we clear any prior seed so a
+  // user-pinned discovery flag can't surface stale rows.
+  const nativeModels = nativeSelectableModelsInCatalog()
+  if (nativeModels.length > 0) {
+    const seeded = seedGatewayModelCache(serverUrl, nativeModels)
+    if (
+      seeded
+      && process.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY === undefined
+      && vars.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY === undefined
+    ) {
+      vars.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1"
+    }
+  } else {
+    clearGatewayModelCache()
   }
 
   // Prepend the toolbelt bin dir to the spawned agent's PATH so it can

@@ -53,11 +53,15 @@ import {
   createResponses,
 } from "~/services/copilot/create-responses"
 import type {
-  ResponsesInputItem,
   ResponsesPayload,
-  ResponsesTool,
 } from "~/services/copilot/create-responses"
 import { endpointForModelId } from "~/services/copilot/endpoint"
+import {
+  assembleResponsesPayload,
+  type NeutralContentPart,
+  type NeutralMessage,
+  type NeutralTool,
+} from "~/services/copilot/responses-request"
 
 import { type ContextBudget, IMAGE_BYTES_EQUIV, tokensFromBytes } from "./context-budget"
 
@@ -940,111 +944,74 @@ async function runResponsesStreamLoop(
 }
 
 // ----- /responses payload construction ---------------------------------------
+//
+// The Responses request shape is assembled by the shared
+// `assembleResponsesPayload` (in `src/services/copilot/responses-request.ts`)
+// so the worker path and the Anthropic-translation shim can never drift on the
+// wire encoding. This module's only job here is the Pi `Context` → neutral
+// message conversion; the shared builder owns input_text / input_image /
+// function_call / function_call_output / reasoning.effort mapping.
 
 function buildResponsesPayload(
   context: Context,
   resolved: ResolvedModel,
 ): ResponsesPayload {
-  const input: Array<ResponsesInputItem> = []
+  const messages: Array<NeutralMessage> = []
   for (const m of context.messages) {
-    for (const item of translateMessageToResponses(m)) input.push(item)
+    const neutral = piMessageToNeutral(m)
+    if (neutral) messages.push(neutral)
   }
-
-  const payload: ResponsesPayload = {
+  return assembleResponsesPayload({
     model: resolved.modelId,
-    input,
+    instructions: context.systemPrompt || undefined,
+    messages,
+    tools: piToolsToNeutral(context.tools),
+    reasoningEffort: resolved.thinking,
     stream: true,
-  }
-  if (context.systemPrompt) payload.instructions = context.systemPrompt
-  const tools = translateToolsToResponses(context.tools)
-  if (tools && tools.length > 0) {
-    payload.tools = tools
-    payload.tool_choice = "auto"
-  }
-  if (resolved.thinking !== "off") {
-    payload.reasoning = { effort: resolved.thinking }
-  }
-  return payload
+  })
 }
 
-function translateMessageToResponses(m: PiMessage): Array<ResponsesInputItem> {
-  if (m.role === "user") return translateUserToResponses(m)
-  if (m.role === "assistant") return translateAssistantToResponses(m)
+function piMessageToNeutral(m: PiMessage): NeutralMessage | null {
+  if (m.role === "user") {
+    if (typeof m.content === "string") return { role: "user", content: m.content }
+    const parts: Array<NeutralContentPart> = []
+    for (const c of m.content) {
+      if (c.type === "text") {
+        parts.push({ type: "text", text: c.text })
+      } else if (c.type === "image") {
+        parts.push({ type: "image", mimeType: c.mimeType, data: c.data })
+      }
+    }
+    return { role: "user", content: parts }
+  }
+  if (m.role === "assistant") {
+    const parts: Array<NeutralContentPart> = []
+    for (const c of m.content) {
+      if (c.type === "text") {
+        parts.push({ type: "text", text: c.text })
+      } else if (c.type === "toolCall") {
+        parts.push({ type: "toolCall", id: c.id, name: c.name, arguments: c.arguments })
+      }
+      // thinking parts are dropped — the Responses API doesn't accept them
+      // as replayed input.
+    }
+    return { role: "assistant", content: parts }
+  }
   if (m.role === "toolResult") {
-    return [
-      {
-        type: "function_call_output",
-        call_id: m.toolCallId,
-        output: joinTextParts(m.content),
-      },
-    ]
-  }
-  return []
-}
-
-function translateUserToResponses(
-  m: Extract<PiMessage, { role: "user" }>,
-): Array<ResponsesInputItem> {
-  if (typeof m.content === "string") {
-    return [{ role: "user", content: m.content }]
-  }
-  const hasImage = m.content.some((c) => c.type === "image")
-  if (!hasImage) {
-    return [{ role: "user", content: joinTextParts(m.content) }]
-  }
-  const parts: Array<Record<string, unknown>> = []
-  for (const c of m.content) {
-    if (c.type === "text") {
-      parts.push({ type: "input_text", text: c.text })
-    } else if (c.type === "image") {
-      parts.push({
-        type: "input_image",
-        image_url: `data:${c.mimeType};base64,${c.data}`,
-      })
+    return {
+      role: "toolResult",
+      toolCallId: m.toolCallId,
+      output: joinTextParts(m.content),
     }
   }
-  return [{ role: "user", content: parts }]
+  return null
 }
 
-function translateAssistantToResponses(
-  m: Extract<PiMessage, { role: "assistant" }>,
-): Array<ResponsesInputItem> {
-  // Preserve the original text/toolCall ordering: flush the pending text
-  // buffer as a message item whenever a tool call is reached, so an
-  // assistant turn like [text, call, text, call] round-trips in order
-  // instead of collapsing into one text blob followed by all calls.
-  const items: Array<ResponsesInputItem> = []
-  let buffer = ""
-  const flush = (): void => {
-    if (buffer.length === 0) return
-    items.push({ role: "assistant", content: [{ type: "output_text", text: buffer }] })
-    buffer = ""
-  }
-  for (const c of m.content) {
-    if (c.type === "text") {
-      buffer += c.text
-    } else if (c.type === "toolCall") {
-      flush()
-      items.push({
-        type: "function_call",
-        call_id: c.id,
-        name: c.name,
-        arguments: JSON.stringify(c.arguments ?? {}),
-      })
-    }
-    // thinking parts are dropped — the Responses API doesn't accept them
-    // as replayed input.
-  }
-  flush()
-  return items
-}
-
-function translateToolsToResponses(
+function piToolsToNeutral(
   tools: ReadonlyArray<PiTool> | undefined,
-): Array<ResponsesTool> | undefined {
+): Array<NeutralTool> | undefined {
   if (!tools || tools.length === 0) return undefined
   return tools.map((t) => ({
-    type: "function",
     name: t.name,
     description: t.description,
     parameters: t.parameters as unknown as Record<string, unknown>,

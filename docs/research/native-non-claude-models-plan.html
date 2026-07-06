@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plan: native non-Claude models in Claude Code</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#161a21; --panel2:#1c222c; --ink:#e6e9ef; --muted:#9aa4b2;
+    --line:#2a313c; --accent:#6ea8fe; --good:#5fd08a; --warn:#f0b45b; --bad:#f07a7a;
+    --code:#0b0e13;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f7f8fa; --panel:#fff; --panel2:#f0f2f6; --ink:#1a1e26; --muted:#5a6472;
+      --line:#e2e6ee; --accent:#2f6fe0; --good:#1f9d57; --warn:#b9781e; --bad:#c94a4a; --code:#f2f4f8; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:960px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:26px;margin:0 0 4px;letter-spacing:-.01em}
+  h2{font-size:19px;margin:34px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  h3{font-size:15px;margin:20px 0 6px;color:var(--accent)}
+  p{margin:8px 0}
+  .sub{color:var(--muted);margin:0 0 18px}
+  code{background:var(--code);padding:1px 5px;border-radius:4px;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow:auto;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:12px 0}
+  .card.tight{padding:10px 14px}
+  table{border-collapse:collapse;width:100%;margin:10px 0;font-size:13px}
+  th,td{border:1px solid var(--line);padding:7px 9px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);font-weight:600}
+  .tag{display:inline-block;font-size:11px;font-weight:600;padding:1px 7px;border-radius:20px;border:1px solid var(--line)}
+  .t-good{color:var(--good);border-color:var(--good)}
+  .t-warn{color:var(--warn);border-color:var(--warn)}
+  .t-bad{color:var(--bad);border-color:var(--bad)}
+  .t-neu{color:var(--muted)}
+  .good{color:var(--good)} .warn{color:var(--warn)} .bad{color:var(--bad)} .muted{color:var(--muted)}
+  ul{margin:6px 0 6px 0;padding-left:22px} li{margin:4px 0}
+  .kicker{text-transform:uppercase;letter-spacing:.08em;font-size:11px;color:var(--muted);font-weight:700}
+  .phase{border-left:3px solid var(--accent);padding-left:14px;margin:14px 0}
+  .flow{font:12.5px/1.7 ui-monospace,Menlo,monospace;background:var(--code);border:1px solid var(--line);border-radius:8px;padding:12px 14px;white-space:pre;overflow:auto}
+  .note{font-size:13px;color:var(--muted)}
+  .pill-row{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="kicker">Implementation plan &middot; for sign-off before any code</div>
+<h1>Native non-Claude models in Claude Code</h1>
+<p class="sub">Add <b>gpt-5.5</b>, <b>gpt-5.3-codex</b>, <b>gemini-3.5-flash</b>, <b>gemini-3.1-pro-preview</b> as first-class, selectable models that Claude Code&rsquo;s <i>main agent loop</i> runs on (native tools included) &mdash; while opus / sonnet / haiku stay byte-for-byte unchanged. Research is complete; nothing is implemented yet.</p>
+
+<div class="card">
+<b>Headline verdict.</b> Feasible, and we <i>adapt</i> rather than invent. The hard half &mdash; synthesizing Anthropic streaming SSE and translating to the OpenAI <b>Responses</b> API &mdash; has two current OSS references (LiteLLM, direct + mature; <code>@musistudio/llms</code>, TypeScript + portable). Our own <code>stream-fn.ts</code> already decodes Copilot&rsquo;s <code>/responses</code> stream more correctly than either. So the shim is a <b>port-and-assemble</b> job, not a blind build. Estimated ~1,200&ndash;1,800 LOC + tests, phased.
+</div>
+
+<h2>1 &middot; Capability gaps (know-first, per your instruction)</h2>
+<p>These are <b>inherent Copilot upstream limits</b>, not deferrable scope. Verified against the live catalog.</p>
+<table>
+<tr><th>Item</th><th>Reality</th><th>Impact</th></tr>
+<tr><td>&ldquo;1M variant&rdquo;</td><td><span class="tag t-good">no variant needed</span> There are <b>zero <code>-1m</code> sibling slugs</b> in the catalog. 1M lives on the base slug via <code>max_context_window_tokens</code>: gpt-5.5 = 1,050,000; gemini-3.1-pro-preview &amp; gemini-3.5-flash = 1,000,000.</td><td>Nothing to add; register the base slug with its real context window.</td></tr>
+<tr><td>Gemini reasoning ceiling</td><td><span class="tag t-warn">no xhigh</span> gemini-3.1-pro-preview = <code>low/medium/high</code>; gemini-3.5-flash = <code>minimal/low/medium/high</code>. Neither supports <code>xhigh</code>.</td><td>&ldquo;All reasoning efforts&rdquo; for Gemini <b>cannot include xhigh</b>. Proxy already clamps a requested xhigh&rarr;high (silent, no 400).</td></tr>
+<tr><td>Gemini structured outputs</td><td><span class="tag t-bad">absent</span> Neither Gemini model advertises <code>structured_outputs</code> (both gpt models do).</td><td>JSON-schema / structured-output requests degrade on the Gemini route. Document + best-effort.</td></tr>
+<tr><td>gpt endpoints</td><td><span class="tag t-warn">/responses only</span> gpt-5.5 &amp; gpt-5.3-codex are <code>/responses</code>-only (no <code>/chat/completions</code>).</td><td>The OpenAI half of the shim <b>must</b> target the Responses API. This is the main engineering cost.</td></tr>
+<tr><td>Exact ids</td><td>gemini id is <code>gemini-3.1-pro-preview</code> (<code>preview:true</code>), not <code>gemini-3.1-pro</code>.</td><td>Exact-match resolution must use the full slug.</td></tr>
+<tr><td>License tiers</td><td>gpt-5.5 needs <code>pro_plus/business/enterprise/max</code>; gemini-3.5-flash absent on <code>edu/individual_trial</code>.</td><td>Fine on your enterprise tier. Shim must gate gracefully when a model is absent from the catalog.</td></tr>
+<tr><td>Fully met</td><td><span class="tag t-good">ok</span> Both gpt models get <code>low&rarr;xhigh</code>; gpt-5.5 is natively 1M; all four support tool_calls, vision, streaming.</td><td>&mdash;</td></tr>
+</table>
+
+<h2>2 &middot; The two gates</h2>
+<p>Making a model &ldquo;native&rdquo; means passing <b>both</b> gates. They live at different layers.</p>
+<div class="card tight"><b>Gate 1 &mdash; selectable in Claude Code (config-only, tiers retained).</b> Claude Code&rsquo;s picker is extensible. Two additive levers (neither overwrites opus/sonnet/haiku): <code>ANTHROPIC_CUSTOM_MODEL_OPTION</code> (adds a picker row) and/or <code>CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY</code> fetching the proxy&rsquo;s <code>/v1/models</code> (but it filters to ids starting <code>claude</code>/<code>anthropic</code>, so a non-Claude id needs a <code>claude-*</code> alias). <span class="note">Exact env-var names are Claude-Code-version-dependent &mdash; verify against the installed build during Phase 3.</span></div>
+<div class="card tight"><b>Gate 2 &mdash; the proxy actually serves the traffic (the real work).</b> Today <code>/v1/messages</code> (<code>create-messages.ts:73</code>) forwards <i>unconditionally</i> to Copilot&rsquo;s Anthropic endpoint, which serves Claude only; a selected gpt/gemini request 400s. We add a translation shim that fires <b>only for non-Claude target models</b>. That scoping is the non-regression guarantee.</div>
+
+<h2>3 &middot; Architecture &mdash; unified-Chat-as-hub</h2>
+<p>Adopt <code>@musistudio/llms</code>&rsquo;s proven design: one canonical intermediate (OpenAI Chat shape), an Anthropic ingress transformer on one side, a provider transformer on the other. This makes Gemini nearly free (Copilot serves it as chat-compat) and isolates the Responses complexity to a single provider transformer.</p>
+<div class="flow">/v1/messages handler (branch at handler.ts:310, BEFORE createMessages)
+  &#9500;&#9472; target is a Claude model  &rarr;  EXISTING passthrough  (opus/sonnet/haiku: byte-for-byte unchanged)
+  &#9492;&#9472; target is non-Claude       &rarr;  TRANSLATION SHIM
+        Anthropic Messages
+            &#8595;  anthropicToUnified()          [port: musistudio anthropic.transformer request map]
+        Unified Chat request
+            &#8595;
+        &#9500;&#9472; gpt-5.5 / gpt-5.3-codex  &rarr; unifiedToResponses()  [reuse OUR stream-fn.ts buildResponsesPayload] &rarr; Copilot /responses
+        &#9492;&#9472; gemini-*                  &rarr; unifiedToChat()       &rarr; Copilot /chat/completions
+            &#8595;  provider stream
+        providerStream &rarr; unifiedChatEvents
+            &#8595;  unifiedToAnthropicSSE()        [port: musistudio anthropic.transformer.ts:256-950]
+        Anthropic SSE  &rarr;  Claude Code</div>
+
+<h3>Three-way reference split (who we borrow what from)</h3>
+<table>
+<tr><th>Piece</th><th>Source</th><th>Why</th></tr>
+<tr><td><b>Anthropic-side SSE synthesis</b> (the half we lack)</td><td>Port <code>@musistudio/llms</code> <code>anthropic.transformer.ts:256-950</code> (TypeScript)</td><td>Drop-in-shaped: message_start, thinking + <code>thinking_delta</code>/<code>signature_delta</code>, text + <code>text_delta</code>, tool_use + <code>input_json_delta</code> with a tool-index&rarr;block map, finish&rarr;<code>stop_reason</code>, <code>message_delta</code>/<code>message_stop</code>/usage. Already carries the Bun &ldquo;Controller is already closed&rdquo; guard this repo tests for.</td></tr>
+<tr><td><b>Anthropic&harr;Responses field/event mapping</b> (the spec)</td><td>Follow LiteLLM <code>responses_adapters/{transformation,streaming_iterator}.py</code></td><td>Cleanest <i>direct</i> mapping: <code>item_id</code>&rarr;block-index correlation, tool_use/max_tokens stop-reason overrides, thinking-budget&rarr;reasoning-effort, cache-token usage, missing-<code>output_item.added</code> synth-start. Use as the authoritative correspondence table.</td></tr>
+<tr><td><b>OpenAI-Responses wire decode</b> (Copilot-specific)</td><td>Keep OUR <code>stream-fn.ts</code> / <code>create-responses.ts</code></td><td>More correct than both refs on Copilot quirks: stable <code>output_index</code> keying (vs re-encrypted <code>item_id</code>), <code>function_call_arguments.done</code> authoritative overwrite, per-item <code>output_item.done</code> close. Reuse <code>buildResponsesPayload</code>/<code>translate*ToResponses</code> + the SSE parser, re-targeting output to the new Anthropic emitter.</td></tr>
+<tr><td><b>Gemini</b></td><td>Straight chat passthrough + chat&rarr;Anthropic SSE</td><td>Copilot serves Gemini as OpenAI-compat <code>/chat/completions</code>, so the unified shape <i>is</i> the wire format. Reuse the chat&rarr;Anthropic SSE synth. <b>Ignore</b> both refs&rsquo; native GenAI Gemini transformers &mdash; wrong problem.</td></tr>
+</table>
+<p class="note">Currency: claude-code-router v3 (2026-07-03) is an opaque Electron gateway &mdash; not usable. Its transformer engine <code>@musistudio/llms</code> (v1.0.53, last commit 2026-01-07) is frozen but TypeScript and covers Responses &mdash; usable as a port reference. LiteLLM is Python (spec reference only). Temp clones live under <code>/tmp/llm-xlat-research/</code>.</p>
+
+<h2>4 &middot; Per-model handling</h2>
+<table>
+<tr><th>Model</th><th>Endpoint</th><th>Reasoning mapping</th><th>Context</th><th>Notes</th></tr>
+<tr><td><code>gpt-5.5</code></td><td>/responses</td><td>Anthropic <code>thinking.budget_tokens</code> &rarr; <code>reasoning.effort</code> (low&rarr;xhigh, full)</td><td>1,050,000 (native)</td><td>Register with real 1M window for context accounting.</td></tr>
+<tr><td><code>gpt-5.3-codex</code></td><td>/responses</td><td>&rarr; <code>reasoning.effort</code> (low&rarr;xhigh, full)</td><td>400,000</td><td>&mdash;</td></tr>
+<tr><td><code>gemini-3.5-flash</code></td><td>/chat/completions</td><td>&rarr; <code>reasoning_effort</code>; xhigh&rarr;<b>high</b> (clamped, no xhigh)</td><td>1,000,000</td><td>No structured_outputs.</td></tr>
+<tr><td><code>gemini-3.1-pro-preview</code></td><td>/chat/completions</td><td>&rarr; <code>reasoning_effort</code>; xhigh&rarr;<b>high</b> (clamped)</td><td>1,000,000</td><td>Exact <code>-preview</code> id; no structured_outputs.</td></tr>
+</table>
+<p class="note">None advertise <code>adaptive_thinking</code>, so the existing <code>translateThinking</code> adaptive path is a no-op for all four &mdash; the shim owns the thinking&rarr;effort mapping (reusing the budget&rarr;effort thresholds). The existing <code>clampOutputConfigEffortInPlace</code> already handles the Gemini xhigh&rarr;high clamp.</p>
+
+<h2>5 &middot; Non-regression guarantee (opus / sonnet / haiku)</h2>
+<ul>
+<li>The shim is reached only by an explicit <b>non-Claude branch</b> keyed off the resolved model&rsquo;s endpoint/family. The Claude path calls the same <code>createMessages</code> passthrough it does today &mdash; not one byte changes for opus/sonnet/haiku.</li>
+<li>Gate-1 selection uses <i>additive</i> levers (<code>ANTHROPIC_CUSTOM_MODEL_OPTION</code> adds rows; gateway discovery only appends). Tier defaults (<code>ANTHROPIC_DEFAULT_*</code>) are untouched.</li>
+<li>A regression guard test asserts a Claude-model request never enters the shim branch.</li>
+</ul>
+
+<h2>6 &middot; Phasing (each phase independently testable)</h2>
+<div class="phase"><b>Phase 0 &mdash; scaffolding &amp; branch.</b> Add the non-Claude branch point in <code>handler.ts</code>; a <code>translateAnthropicToProvider</code> module skeleton; endpoint/family classifier reusing <code>endpoint.ts</code>. Claude path untouched (guard test).</div>
+<div class="phase"><b>Phase 1 &mdash; OpenAI Responses path (gpt-5.5, then gpt-5.3-codex).</b> Anthropic&rarr;unified request map; unified&rarr;Responses via reused <code>buildResponsesPayload</code>; port the Anthropic SSE synthesizer; wire Responses-decode&rarr;Anthropic-emit. Non-streaming + streaming. This is the bulk of the work.</div>
+<div class="phase"><b>Phase 2 &mdash; Gemini chat path (gemini-3.5-flash, gemini-3.1-pro-preview).</b> Unified&rarr;chat passthrough + chat-SSE&rarr;Anthropic-SSE (largely the same synthesizer). Reasoning clamp + structured-output gap handling.</div>
+<div class="phase"><b>Phase 3 &mdash; selection/registration.</b> Inject <code>ANTHROPIC_CUSTOM_MODEL_OPTION</code> (verify env-var name against installed Claude Code); optionally normalize <code>/v1/models</code> for gateway discovery under <code>claude-*</code> aliases. Non-regression on tiers.</div>
+<div class="phase"><b>Phase 4 &mdash; verification, probes, docs.</b> Compat-matrix rows + probes per model/endpoint; live smoke per model; the streaming race tests below; update CLAUDE.md + design docs.</div>
+
+<h2>7 &middot; Testing &amp; verification strategy</h2>
+<ul>
+<li><b>Mapping unit tests</b> both directions: Anthropic&rarr;Responses/chat request (text, image, tool_use, tool_result, tool_choice, thinking, stop_sequences) and provider&rarr;Anthropic response (content blocks, tool_use, usage, stop_reason).</li>
+<li><b>Streaming SSE synthesis tests</b>: assert the exact Anthropic event sequence (message_start &rarr; content_block_start/delta/stop for text + input_json + thinking &rarr; message_delta w/ stop_reason+usage &rarr; message_stop), multi-tool id correlation, mid-stream tool-call arguments.</li>
+<li><b>Stream-lifecycle race tests</b> (repo mandate): this is a <i>new synthesized-SSE</i> surface (not a passthrough relay), so every <code>enqueue</code>/<code>close</code> must have an enqueue-after-cancel race test per the review checklist. The ported musistudio guard helps, but we must add the tests.</li>
+<li><b>Probes + compat matrix</b>: an end-to-end 200 probe per model on its real endpoint; matrix rows with accept/reject expectations.</li>
+<li><b>Live smoke</b> per model through Claude Code: text, tool use, thinking, long-context.</li>
+<li><b>Gap assertions</b>: gemini xhigh&rarr;high clamp; gemini structured-output degradation surfaced, not silent.</li>
+</ul>
+
+<h2>8 &middot; Risks</h2>
+<ul>
+<li><b>Streaming correctness is the hard part.</b> Synthesizing Anthropic SSE with correct tool-call/block-index correlation and stop-reason overrides is fiddly; mitigated by porting a battle-tested synthesizer + LiteLLM&rsquo;s mapping as the spec + our superior Responses decode.</li>
+<li><b>New stream-lifecycle surface</b> &rarr; the repo&rsquo;s enqueue-after-cancel race class applies; addressed by explicit race tests, not just the inherited guard.</li>
+<li><b>Claude Code selection env-var drift</b> (version-dependent) &rarr; verify against the installed build in Phase 3; fall back to <code>-m</code>/<code>ANTHROPIC_MODEL</code> if the custom-option name differs.</li>
+<li><b>Capability accounting</b> (context window, effort) assumes the current model unless overridden &rarr; register accurate windows via the custom-model-option.</li>
+<li><b>Surface size</b> (~1.2&ndash;1.8k LOC + tests) &rarr; phased, each phase shippable and independently tested.</li>
+</ul>
+
+<h2>9 &middot; What &ldquo;full support, no defer&rdquo; means here</h2>
+<p>All four models get full request/response/streaming translation, tool use, vision, thinking&rarr;effort, and native selection. The only things that can&rsquo;t be delivered are <b>inherent Copilot ceilings</b>, not deferred scope:</p>
+<div class="pill-row">
+<span class="tag t-warn">gemini: no xhigh (capped at high)</span>
+<span class="tag t-bad">gemini: no structured_outputs</span>
+<span class="tag t-neu">gpt-5.3-codex: 400k ctx (not 1M &mdash; not offered)</span>
+</div>
+<p class="note">Everything else the request named is achievable. If you want, I can also register the model context windows so Claude Code&rsquo;s context accounting reflects the true 1M on gpt-5.5 / gemini.</p>
+
+<h2>10 &middot; Decision requested</h2>
+<p>Approve this plan and I&rsquo;ll start at Phase 0&rarr;1 (OpenAI Responses path), or tell me what to adjust &mdash; e.g. model priority order, whether to include the gateway-discovery selection path in addition to the custom-model-option, or whether to also register accurate context windows. No shim code is written until you approve.</p>
+
+</div>
+</body>
+</html>

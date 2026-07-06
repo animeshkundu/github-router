@@ -90,6 +90,14 @@ export interface WorkerAgentOpts {
    * `buildBrowseTools`; ignored by the other modes.
    */
   sessionId?: string
+  /**
+   * Optional per-call wall-clock budget in ms. Overrides the 6h default (and
+   * any `GH_ROUTER_WORKER_MAX_WALLCLOCK_MS` env value). The MCP boundary
+   * (`runWorkerToolCall`) validates it as a positive integer and CLAMPS it to
+   * `workerWallClockCeilingMs()` before it reaches here, so a worker is never
+   * granted a wall-clock that would let the harness hard-kill it mid-run.
+   */
+  maxWallClockMs?: number
   /** Caller's AbortSignal — propagates through Pi via `agent.abort()`. */
   signal?: AbortSignal
 }
@@ -117,7 +125,8 @@ export interface WorkerAgentResult {
  *
  * Defaults (applied by `class Budget`):
  *   - maxTurns: 500
- *   - maxWallClockMs: 30 * 60_000 (30 min, sized under the 35-min MCP timeout)
+ *   - maxWallClockMs: 6 * 60 * 60_000 (6h, clamped just under the MCP
+ *     tool-call timeout — see `workerWallClockCeilingMs` in budget.ts)
  *   - maxToolBytes: 16 * 1024 * 1024 (16 MiB)
  *
  * Env overrides read at construction time:

@@ -103,7 +103,7 @@ describe("getClaudeCodeEnvVars", () => {
     expect(vars).not.toHaveProperty("ANTHROPIC_AUTH_TOKEN")
   })
 
-  test("sets MCP_TIMEOUT=2100000 (legacy belt-and-suspenders) and MCP_TOOL_TIMEOUT=2100000 (the load-bearing per-tool-call timeout on v2.1.141)", () => {
+  test("sets MCP_TIMEOUT / MCP_TOOL_TIMEOUT to the resolved default (22500000 = 6h15m) when the parent env is unset", () => {
     // Two distinct env vars at play (per binary inspection of v2.1.141
     // `y13()`, 2026-05-14):
     //
@@ -117,17 +117,54 @@ describe("getClaudeCodeEnvVars", () => {
     //     `parseInt(process.env.MCP_TOOL_TIMEOUT)` for the per-tool-call
     //     timeout passed to `client.callTool({...}, schema, {timeout:W})`.
     //     Default `1e8` ms (~27.7 hours) when the env is unset. Setting
-    //     a finite-but-large value (10 min) surfaces regressions where
-    //     the SDK silently caps lower AND prevents long-tail runaway
-    //     calls from holding resources indefinitely.
+    //     a finite-but-large value (6h15m, `resolveMcpToolTimeoutMs()`)
+    //     surfaces regressions where the SDK silently caps lower AND
+    //     prevents long-tail runaway calls from holding resources
+    //     indefinitely, while leaving the 6h worker wall-clock a full
+    //     15-min teardown headroom under it.
     //
     // SDK detail: the `resetTimeoutOnProgress` opt-in in MCP SDK v1.29.0
     // is required for SSE notifications/progress to reset the per-call
     // timer. Claude Code v2.1.141 does NOT pass it, so SSE heartbeats
     // alone don't help — MCP_TOOL_TIMEOUT is the actual lever.
-    const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
-    expect(vars.MCP_TIMEOUT).toBe("2100000")
-    expect(vars.MCP_TOOL_TIMEOUT).toBe("2100000")
+    const origTimeout = process.env.MCP_TIMEOUT
+    const origToolTimeout = process.env.MCP_TOOL_TIMEOUT
+    const origOverride = process.env.GH_ROUTER_MCP_TOOL_TIMEOUT_MS
+    delete process.env.MCP_TIMEOUT
+    delete process.env.MCP_TOOL_TIMEOUT
+    delete process.env.GH_ROUTER_MCP_TOOL_TIMEOUT_MS
+    try {
+      const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      expect(vars.MCP_TIMEOUT).toBe("22500000")
+      expect(vars.MCP_TOOL_TIMEOUT).toBe("22500000")
+    } finally {
+      if (origTimeout === undefined) delete process.env.MCP_TIMEOUT
+      else process.env.MCP_TIMEOUT = origTimeout
+      if (origToolTimeout === undefined) delete process.env.MCP_TOOL_TIMEOUT
+      else process.env.MCP_TOOL_TIMEOUT = origToolTimeout
+      if (origOverride === undefined) delete process.env.GH_ROUTER_MCP_TOOL_TIMEOUT_MS
+      else process.env.GH_ROUTER_MCP_TOOL_TIMEOUT_MS = origOverride
+    }
+  })
+
+  test("MCP_TIMEOUT / MCP_TOOL_TIMEOUT presence guard: a parent-set value is preserved (not overridden)", () => {
+    // Symmetric with the ANTHROPIC_SMALL_FAST_MODEL / tier-default guards:
+    // when the parent env already set the key we omit our override entirely
+    // so the parent value flows through naturally (neither key is stripped).
+    const origTimeout = process.env.MCP_TIMEOUT
+    const origToolTimeout = process.env.MCP_TOOL_TIMEOUT
+    process.env.MCP_TIMEOUT = "123"
+    process.env.MCP_TOOL_TIMEOUT = "456"
+    try {
+      const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      expect(vars).not.toHaveProperty("MCP_TIMEOUT")
+      expect(vars).not.toHaveProperty("MCP_TOOL_TIMEOUT")
+    } finally {
+      if (origTimeout === undefined) delete process.env.MCP_TIMEOUT
+      else process.env.MCP_TIMEOUT = origTimeout
+      if (origToolTimeout === undefined) delete process.env.MCP_TOOL_TIMEOUT
+      else process.env.MCP_TOOL_TIMEOUT = origToolTimeout
+    }
   })
 
   test("sets CLAUDE_CONFIG_DIR to the router-owned snapshot mirror (not ~/.claude)", () => {
@@ -163,12 +200,12 @@ describe("getClaudeCodeEnvVars", () => {
     expect(vars).not.toHaveProperty("ANTHROPIC_API_KEY")
   })
 
-  test("defaults ANTHROPIC_SMALL_FAST_MODEL to claude-sonnet-4-6 with presence-based guard", () => {
+  test("defaults ANTHROPIC_SMALL_FAST_MODEL to claude-sonnet-5 with presence-based guard", () => {
     const prior = process.env.ANTHROPIC_SMALL_FAST_MODEL
     delete process.env.ANTHROPIC_SMALL_FAST_MODEL
     try {
       const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
-      expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBe("claude-sonnet-4-6")
+      expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBe("claude-sonnet-5")
     } finally {
       if (prior === undefined) delete process.env.ANTHROPIC_SMALL_FAST_MODEL
       else process.env.ANTHROPIC_SMALL_FAST_MODEL = prior
@@ -179,7 +216,7 @@ describe("getClaudeCodeEnvVars", () => {
     // Symmetric with launch.ts's STRIPPED_PARENT_ENV_KEYS comment that
     // intentionally does NOT strip ANTHROPIC_SMALL_FAST_MODEL — users
     // with custom Copilot mappings legitimately set this to a value
-    // other than our claude-sonnet-4-6 default (gemini-2.0-flash,
+    // other than our claude-sonnet-5 default (gemini-2.0-flash,
     // gpt-5.5-mini, etc.).
     const prior = process.env.ANTHROPIC_SMALL_FAST_MODEL
     process.env.ANTHROPIC_SMALL_FAST_MODEL = "gemini-2.0-flash"
@@ -224,17 +261,16 @@ describe("getClaudeCodeEnvVars", () => {
     }
   })
 
-  test("defaults ANTHROPIC_DEFAULT_SONNET_MODEL to claude-sonnet-4-6 (NO [1m] — Copilot has no sonnet-1m backend)", () => {
-    // Sonnet 4.6 has no -1m variant in Copilot's catalog as of 2026-05-22,
-    // and Anthropic-side modelSupports1M (cc-backup context.ts:43-49) does
-    // list sonnet-4*, but the Copilot proxy can't route there. A bracketed
-    // default would either 400 upstream or silently over-account context
-    // locally. Bare slug — explicit, safe.
+  test("defaults ANTHROPIC_DEFAULT_SONNET_MODEL to claude-sonnet-5 (NO [1m] — tier rows stay bare)", () => {
+    // Sonnet 5 is the newer, cheaper cheap-tier pick (200/1000 vs 4.6's
+    // 300/1500) and is broadly available (pro..enterprise). The tier-row
+    // seed stays a BARE slug — the [1m] decoration is reserved for the
+    // active default via the cap-aware pickClaudeDefault, not the picker rows.
     const prior = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
     delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
     try {
       const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
-      expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("claude-sonnet-4-6")
+      expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("claude-sonnet-5")
       expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL).not.toContain("[1m]")
     } finally {
       if (prior === undefined) delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
@@ -254,15 +290,17 @@ describe("getClaudeCodeEnvVars", () => {
     }
   })
 
-  test("defaults ANTHROPIC_DEFAULT_HAIKU_MODEL to claude-haiku-4-5 (NO [1m] — Haiku has no 1M variant on either side)", () => {
-    // Anthropic-side modelSupports1M (cc-backup context.ts:43-49) does NOT
-    // list any haiku at all. There is no 1M haiku in existence; bracketing
-    // would be nonsense.
+  test("defaults ANTHROPIC_DEFAULT_HAIKU_MODEL to claude-sonnet-5 (cheap-tier pick lands on Sonnet 5, matching SMALL_FAST_MODEL; NO [1m] — tier rows are always bare, [1m] lives on the active default)", () => {
+    // The Haiku picker tier row is seeded to claude-sonnet-5 (not a haiku
+    // slug) so the cheap-tier pick lands on Sonnet 5 — newer and cheaper
+    // than the prior claude-haiku-4-5 default. Bare slug: the [1m]
+    // decoration lives only on the active default (ANTHROPIC_MODEL via
+    // pickClaudeDefault), never on picker tier rows.
     const prior = process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
     delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
     try {
       const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
-      expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("claude-haiku-4-5")
+      expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("claude-sonnet-5")
       expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).not.toContain("[1m]")
     } finally {
       if (prior === undefined) delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL

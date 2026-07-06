@@ -43,6 +43,20 @@ export const PATHS = {
     return path.join(appDir(), "error.log")
   },
   /**
+   * Durable, router-owned directory for OVERFLOW worker diffs. When a
+   * `worker_implement`/`worker_test` worktree run produces a unified diff
+   * larger than the inline cap (`DIFF_CAP_BYTES` in worker-agent/worktree.ts),
+   * the FULL `git diff --binary --full-index` patch is written here BEFORE the
+   * worktree is removed, and its absolute path is returned to the caller so
+   * the (possibly binary) change stays recoverable / `git apply`-able instead
+   * of being destroyed with the worktree. Cross-launch cache (like
+   * TOOLBELT_BIN_DIR) — deliberately OUTSIDE the per-launch CLAUDE_CONFIG_DIR
+   * mirror and OUTSIDE the user's repo.
+   */
+  get WORKER_DIFFS_DIR() {
+    return path.join(appDir(), "worker-diffs")
+  },
+  /**
    * Isolated CODEX_HOME for the spawned Codex CLI. Masks any cached
    * ChatGPT subscription login (openai/codex#2733 — cached login can
    * override OPENAI_API_KEY) so the proxy's dummy key is authoritative.
