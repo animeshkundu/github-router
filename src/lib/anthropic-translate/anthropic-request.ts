@@ -30,6 +30,7 @@ import {
 } from "~/services/copilot/responses-request"
 import type { Model } from "~/services/copilot/get-models"
 import { bucketEffort, clampEffort } from "~/lib/reasoning-effort"
+import { parseBoolEnv } from "~/lib/exec"
 
 type AnyRecord = Record<string, unknown>
 
@@ -55,6 +56,44 @@ export interface ParsedAnthropicRequest {
    */
   parallelToolCalls?: false
   stream: boolean
+}
+
+/**
+ * Steering appended to `instructions` for shim-routed (non-Claude) models when
+ * the request carries Claude Code's native file tools. gpt-5.5 and other
+ * OpenAI/Gemini-lineage models receive the Edit/Write tool definitions verbatim
+ * (the shim never mangles them), but their base prior is to script file ops in
+ * Python/Bash rather than call the dedicated tools. Claude models never reach
+ * this code path (they fall through to the /v1/messages passthrough), so this is
+ * automatically scoped to the models that need the nudge. Strong PREFERENCE, not
+ * a Bash ban — running builds/tests/git still belongs in Bash.
+ */
+const FILE_TOOL_GUIDANCE = `<file_tools>
+You have dedicated tools for files: use Read to read a file, Edit to modify an existing file, and Write to create one. Prefer them over shell for reading or editing. Do NOT shell out (cat, sed, awk, echo >, here-docs, or python/one-off scripts) to read, search, or rewrite file contents when a dedicated tool exists — the dedicated tools are safer and produce reviewable diffs. Use Grep/Glob to search rather than shell grep/find. Reserve Bash for commands that have no dedicated tool: builds, tests, git, package managers, and running programs.
+</file_tools>`
+
+/**
+ * Append `FILE_TOOL_GUIDANCE` to the flattened system `instructions` iff the
+ * request carries Claude Code's canonical `Edit` or `Write` tool. The exact
+ * capitalized-name match is deliberately precise: it fires for a Claude Code
+ * editing session but not for arbitrary MCP tools like `write_file`, and not for
+ * non-editing chats (so a plain gpt-5.5 conversation is not polluted). The block
+ * is appended AFTER the existing instructions (end-of-prompt recency) and the
+ * original system text is preserved, never replaced. Opt out with
+ * `GH_ROUTER_DISABLE_SHIM_TOOL_STEERING=1`.
+ */
+function appendFileToolGuidance(
+  instructions: string | undefined,
+  tools: Array<NeutralTool> | undefined,
+): string | undefined {
+  if (parseBoolEnv(process.env.GH_ROUTER_DISABLE_SHIM_TOOL_STEERING) === true) {
+    return instructions
+  }
+  const hasFileTool = tools?.some((t) => t.name === "Edit" || t.name === "Write")
+  if (!hasFileTool) return instructions
+  return instructions && instructions.length > 0
+    ? `${instructions}\n\n${FILE_TOOL_GUIDANCE}`
+    : FILE_TOOL_GUIDANCE
 }
 
 /** Flatten Anthropic `system` (string | array of text blocks) into a string. */
@@ -390,11 +429,13 @@ export function parseAnthropicRequest(
       ? body.stop_sequences.filter((s: unknown): s is string => typeof s === "string")
       : undefined
 
+  const tools = parseTools(body.tools)
+
   return {
     model: resolvedModel,
-    instructions: flattenSystem(body.system),
+    instructions: appendFileToolGuidance(flattenSystem(body.system), tools),
     messages,
-    tools: parseTools(body.tools),
+    tools,
     toolChoice: parseToolChoice(body.tool_choice),
     parallelToolCalls: parseDisableParallelToolUse(body.tool_choice),
     reasoningEffort:
