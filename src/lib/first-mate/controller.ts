@@ -1672,13 +1672,15 @@ async function answerPendingDecision(
   }
 }
 
-async function reconcileKnownPrState(
+async function reconcileObservedPrState(
   unit: UnitRow,
+  observed: Observed,
   deps: ControllerDeps,
   applied: string[],
 ): Promise<boolean> {
   if (unit.pr === null || unit.terminal === true) return false
-  const live = await deps.getPullRequestState(agentRepo(unit.repo), unit.pr)
+  const live = observed.prs.find((pr) => pr.number === unit.pr)
+  if (live === undefined) return false
   const state = live.state.toUpperCase()
   if (state === "MERGED") {
     unit.terminal = true
@@ -1704,6 +1706,41 @@ async function reconcileKnownPrState(
     return true
   }
   return false
+}
+
+const OPEN_UNCORRELATED_OBSERVATION_CAP = 3
+
+function sameRepo(a: RepoRef, b: RepoRef): boolean {
+  return a.owner.toLowerCase() === b.owner.toLowerCase() && a.name.toLowerCase() === b.name.toLowerCase()
+}
+
+function shouldEscalateOpenUncorrelated(
+  unit: UnitRow,
+  observed: Observed,
+  activeUnits: UnitRow[],
+): boolean {
+  if (observed.externalMutation !== "open_uncorrelated" || observed.externalPr === undefined) return false
+  const externalPr = observed.externalPr
+
+  const markerOwner = observed.externalPrUnitIdMarker === undefined
+    ? undefined
+    : activeUnits.find((entry) => entry.id === observed.externalPrUnitIdMarker)
+  if (markerOwner !== undefined && markerOwner.pr !== null && markerOwner.pr !== externalPr) {
+    return true
+  }
+
+  const sameRepoUnits = activeUnits.filter((entry) => sameRepo(entry.repo, unit.repo) && entry.terminal !== true)
+  const belongsToKnownUnit = sameRepoUnits.some((entry) => entry.pr === externalPr)
+  const anyUnitAwaitingPr = sameRepoUnits.some((entry) => entry.pr === null)
+  if (belongsToKnownUnit || anyUnitAwaitingPr) {
+    unit.openUncorrelatedObservations = undefined
+    return false
+  }
+
+  const previous = unit.openUncorrelatedObservations
+  const count = previous?.pr === externalPr ? previous.count + 1 : 1
+  unit.openUncorrelatedObservations = { pr: externalPr, count }
+  return count >= OPEN_UNCORRELATED_OBSERVATION_CAP
 }
 
 async function observeBlockedUnit(
@@ -2090,7 +2127,7 @@ export function artifactSlug(unit: UnitRow): string {
 
 function unitIdInstruction(unit: UnitRow): string {
   const marker = `unit-id: ${unit.id ?? unitHandle(unit)}`
-  return `Controller correlation marker: ${marker}. The Agent-Tasks API has no branch/label field, so this is cooperative: include this marker in the branch name if possible, in the PR body, and in the first commit message trailer.`
+  return `Controller correlation marker: ${marker}. The Agent-Tasks API has no branch/label field, so this is cooperative: include this exact marker in the branch name if possible, put it on its own line in the PR body, and include it in the first commit message trailer.`
 }
 
 export function planPrompt(unit: UnitRow, mission: Mission, dateStr: string): string {
@@ -2608,14 +2645,6 @@ export async function advance(
       const requestOrder = order
       order += 1
 
-      if (unit.pr !== null) {
-        try {
-          if (await reconcileKnownPrState(unit, deps, applied)) continue
-        } catch (err) {
-          consola.debug(`first-mate: live PR reconcile skipped for ${unit.missionId}:${unitHandle(unit)}:`, err)
-        }
-      }
-
       // A1: a BLOCKED unit is never dispatched/steered, but it IS observed so an
       // out-of-band merge/close is reconciled (decision-type aware) rather than
       // wedging the unit forever. It never runs classify/executeAction.
@@ -2660,13 +2689,16 @@ export async function advance(
         }
 
         const observed = await deps.observeUnit(unit)
-        if (observed.externalMutation === "open_uncorrelated") {
+        if (await reconcileObservedPrState(unit, observed, deps, applied)) {
+          continue
+        }
+        if (shouldEscalateOpenUncorrelated(unit, observed, scopedUnits)) {
           needsHuman.push({
             request: await createHumanRequest(
               unit,
               mission,
               observed,
-              `uncorrelated open same-bot PR #${observed.externalPr ?? "unknown"} observed — human reconciliation required before first mate can continue`,
+              `uncorrelated open same-bot PR #${observed.externalPr ?? "unknown"} appears to be orphaned — human reconciliation required before first mate can continue`,
               deps,
             ),
             sortKey: sortKey(unit),

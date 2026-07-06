@@ -123,6 +123,8 @@ export interface UnitRow {
   goalHash?: string
   /** Baseline test-count ratchet captured by the merge gate; later gates must not decrease it. */
   baselineTestCount?: number
+  /** Consecutive wakes that saw the same OPEN same-bot PR uncorrelated to any unit. */
+  openUncorrelatedObservations?: { pr: number; count: number }
   /** Total author_fix cycles applied over this unit's life (per-mission budget counter). */
   fixCycles?: number
   /**
@@ -261,6 +263,8 @@ export interface Observed {
   externalMutation?: "closed" | "merged" | "merged_uncorrelated" | "open_uncorrelated" | "head_changed" | null
   /** PR number for an uncorrelated external mutation; evidence only, never adopted as unit.pr. */
   externalPr?: number
+  /** Cooperative `unit-id:` marker carried by an uncorrelated PR body, if present. */
+  externalPrUnitIdMarker?: string
   /**
    * A3: the primary PR number ONLY when it was CORRELATED (unit.pr / branch /
    * task), never the bare author-match fallback. The controller adopts this as

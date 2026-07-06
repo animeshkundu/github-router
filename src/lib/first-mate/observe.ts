@@ -63,9 +63,8 @@ function taskPrNumber(task: TaskStatusResult | null): number | null {
   return parsePrNumberFromUrl(task.prUrl)
 }
 
-function firstSummaryNumber(prs: AgentPRSummary[]): number | null {
-  const summary = prs.find((pr) => Number.isInteger(pr.number) && pr.number > 0)
-  return summary?.number ?? null
+function firstSummary(prs: AgentPRSummary[]): AgentPRSummary | null {
+  return prs.find((pr) => Number.isInteger(pr.number) && pr.number > 0) ?? null
 }
 
 function branchMatchNumber(prs: AgentPRSummary[], branch: string | undefined): number | null {
@@ -84,7 +83,7 @@ export function primaryPrNumber(
   unit: UnitRow,
   task: TaskStatusResult | null,
   prs: AgentPRSummary[],
-): { number: number | null; correlated: boolean } {
+): { number: number | null; correlated: boolean; marker?: string } {
   if (unit.pr !== null && unit.pr > 0) return { number: unit.pr, correlated: true }
 
   const branch = unit.branch ?? task?.branch ?? undefined
@@ -107,7 +106,12 @@ export function primaryPrNumber(
   // is UNCORRELATED: the caller must not adopt it as unit.pr nor mark the unit
   // done from it — only surface a merge as `merged_uncorrelated` for a human.
   if (branch !== undefined) return { number: null, correlated: false }
-  return { number: firstSummaryNumber(prs), correlated: false }
+  const summary = firstSummary(prs)
+  return {
+    number: summary?.number ?? null,
+    correlated: false,
+    ...(summary?.unitIdMarker !== undefined ? { marker: summary.unitIdMarker } : {}),
+  }
 }
 
 async function getTaskSafe(
@@ -288,7 +292,7 @@ export async function observeUnit(unit: UnitRow): Promise<Observed> {
   if (task?.branch && task.branch.length > 0) unit.branch = task.branch
   const provider = providerState(task?.state, unit.provider)
   const prSummaries = await findPrsSafe(repo, unit)
-  const { number: primaryNumber, correlated } = primaryPrNumber(unit, task, prSummaries)
+  const { number: primaryNumber, correlated, marker: externalPrUnitIdMarker } = primaryPrNumber(unit, task, prSummaries)
   const primaryState = await getPullRequestStateSafe(repo, primaryNumber)
   // A3: only feed a CORRELATED primary state into the artifact list, so an
   // uncorrelated sibling's MERGED/CLOSED state never leaks in as the unit's own
@@ -336,6 +340,7 @@ export async function observeUnit(unit: UnitRow): Promise<Observed> {
     ...(diff ? { changedFiles: diff.changedFiles, diffTruncated: diff.truncated } : {}),
     ...(mutation ? { externalMutation: mutation } : {}),
     ...(mutation && primaryNumber !== null ? { externalPr: primaryNumber } : {}),
+    ...(mutation && externalPrUnitIdMarker !== undefined ? { externalPrUnitIdMarker } : {}),
     ...(logExcerpt ? { logExcerpt } : {}),
     ...(question ? { question } : {}),
     ...(review.reviewed ? { verifierReviewed: true } : {}),

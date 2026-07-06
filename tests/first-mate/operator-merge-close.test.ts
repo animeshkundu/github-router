@@ -319,6 +319,31 @@ describe("merge_pr", () => {
     expect(deps.mergePullRequest).not.toHaveBeenCalled()
   })
 
+
+  test("skips test-count ratchet comparison when diff file list is truncated", async () => {
+    const row = unit({ pr: 7, baselineTestCount: 2 })
+    const deps = makeDeps({
+      loadAllUnits: mock(async () => [row]),
+      readMissions: mock(async () => [activeMission()]),
+      getPullRequestDiffSummary: mock(async () => ({
+        files: [{ path: "src/only-visible.ts", additions: 1, deletions: 0, status: "modified" }],
+        totalAdditions: 10,
+        totalDeletions: 2,
+        fileCount: 51,
+        truncated: true,
+      })),
+    })
+    const res = await toolOf("merge_pr", deps).handler({
+      repo: "octo/repo",
+      pr: 7,
+      expected_head_sha: "reviewedsha",
+    })
+
+    expect(res.isError).toBeUndefined()
+    expect(parsed(res).merged).toBe(true)
+    expect(deps.mergePullRequest).toHaveBeenCalledTimes(1)
+  })
+
   test("refuses docs-only diff for a build unit requiring code and tests", async () => {
     const row = unit({ pr: 7, dispatchMode: "build", title: "change code and tests" })
     const deps = makeDeps({

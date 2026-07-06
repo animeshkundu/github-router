@@ -2746,9 +2746,36 @@ test("build reuses the plan's persisted artifact date across a day boundary", as
 })
 
 
-test("uncorrelated open same-bot PR escalates to human and is not auto-merged", async () => {
-  const row = unit({ id: "u-open", provider: "in_progress", pr: null, taskId: "task-open", dispatchMode: "build", phase: "build" })
+test("genuine orphan open same-bot PR escalates after the observation threshold", async () => {
+  const row = unit({
+    id: "u-open",
+    provider: "in_progress",
+    pr: 7,
+    taskId: "task-open",
+    dispatchMode: "build",
+    phase: "build",
+    openUncorrelatedObservations: { pr: 47, count: 2 },
+  })
   const h = harness([row])
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [openPr(7)],
+    externalMutation: "open_uncorrelated",
+    externalPr: 47,
+  })
+
+  const result = await advance({}, h.deps)
+
+  expect(result.needsHuman.some((request) => request.reason.includes("uncorrelated open same-bot PR #47"))).toBe(true)
+  expect(row.pr).toBe(7)
+  expect(row.terminal).not.toBe(true)
+  expect(h.deps.mergePullRequest).not.toHaveBeenCalled()
+})
+
+test("fresh dispatched unit with no PR does not stall on an unrelated open same-bot PR", async () => {
+  const fresh = unit({ id: "fresh", issue: 1, provider: "in_progress", pr: null, taskId: "task-fresh", dispatchMode: "build", phase: "build" })
+  const sibling = unit({ id: "sibling", issue: 2, provider: "in_progress", pr: 47, taskId: "task-sibling", dispatchMode: "build", phase: "build" })
+  const h = harness([fresh, sibling])
   h.observations.set("1", {
     provider: "in_progress",
     prs: [],
@@ -2758,26 +2785,38 @@ test("uncorrelated open same-bot PR escalates to human and is not auto-merged", 
 
   const result = await advance({}, h.deps)
 
+  expect(result.needsHuman.some((request) => request.reason.includes("uncorrelated open same-bot PR #47"))).toBe(false)
+  expect(fresh.blockingDecisionId).toBeUndefined()
+  expect(fresh.openUncorrelatedObservations).toBeUndefined()
+  expect(fresh.pr).toBeNull()
+  expect(fresh.terminal).not.toBe(true)
+})
+
+test("unit-id marker conflict on an open same-bot PR escalates immediately", async () => {
+  const owner = unit({ id: "owner", issue: 1, provider: "in_progress", pr: 7, taskId: "task-owner", dispatchMode: "build", phase: "build" })
+  const observer = unit({ id: "observer", issue: 2, provider: "in_progress", pr: 8, taskId: "task-observer", dispatchMode: "build", phase: "build" })
+  const h = harness([owner, observer])
+  h.observations.set("2", {
+    provider: "in_progress",
+    prs: [openPr(8)],
+    externalMutation: "open_uncorrelated",
+    externalPr: 47,
+    externalPrUnitIdMarker: "owner",
+  })
+
+  const result = await advance({}, h.deps)
+
   expect(result.needsHuman.some((request) => request.reason.includes("uncorrelated open same-bot PR #47"))).toBe(true)
-  expect(row.pr).toBeNull()
-  expect(row.terminal).not.toBe(true)
-  expect(h.deps.mergePullRequest).not.toHaveBeenCalled()
+  expect(observer.blockingDecisionId).toBeDefined()
 })
 
 test("live PR reconcile terminalizes a stale-open unit whose known PR is closed", async () => {
   const row = unit({ pr: 42, provider: "in_progress", artifact: "pr_open", dispatchMode: "build", phase: "build" })
   const h = harness([row])
-  h.deps.getPullRequestState = mock(async (_repo, pr) => ({
-    number: pr,
-    title: "PR",
-    isDraft: false,
-    state: "CLOSED",
-    mergeable: "UNKNOWN",
-    reviewDecision: null,
-    headSha: "head-42",
-    baseRef: "main",
-    baseSha: "base-42",
-  }))
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [openPr(42, "head-42", { state: "CLOSED", baseSha: "base-42" })],
+  })
 
   await advance({}, h.deps)
 
@@ -2789,23 +2828,26 @@ test("live PR reconcile terminalizes a stale-open unit whose known PR is closed"
 test("live PR reconcile terminalizes a stale-open unit whose known PR is merged", async () => {
   const row = unit({ pr: 44, provider: "in_progress", artifact: "pr_open", dispatchMode: "build", phase: "build" })
   const h = harness([row])
-  h.deps.getPullRequestState = mock(async (_repo, pr) => ({
-    number: pr,
-    title: "PR",
-    isDraft: false,
-    state: "MERGED",
-    mergeable: "MERGEABLE",
-    reviewDecision: null,
-    headSha: "head-44",
-    baseRef: "main",
-    baseSha: "base-44",
-  }))
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [openPr(44, "head-44", { state: "MERGED", merged: true, baseSha: "base-44" })],
+  })
 
   await advance({}, h.deps)
 
   expect(row.terminal).toBe(true)
   expect(row.artifact).toBe("pr_merged")
   expect(row.validation).toBe("external_merge_unverified")
+})
+
+test("open known PR is fetched once per wake through observe-driven reconcile", async () => {
+  const row = unit({ pr: 50, provider: "in_progress", artifact: "pr_open", dispatchMode: "build", phase: "build" })
+  const h = harness([row])
+  h.observations.set("1", { provider: "in_progress", prs: [openPr(50, "head-50")] })
+
+  await advance({}, h.deps)
+
+  expect(h.deps.getPullRequestState).not.toHaveBeenCalled()
 })
 
 test("addUnitsToMission skips duplicate goalHash units", async () => {

@@ -730,15 +730,17 @@ async function evaluateMergeSafety(
     return { ok: false, reason: "build unit requires code and tests but the PR diff is docs-only" }
   }
 
-  const estimatedTests = estimateTestCountFromDiff(diff)
-  if (unit !== undefined) {
-    const baseline = unit.baselineTestCount
-    if (baseline !== undefined && estimatedTests < baseline) {
-      return { ok: false, reason: `test-count ratchet decreased from ${baseline} to ${estimatedTests} (heuristic: changed *.test.*/*.spec.* files when CI output has no explicit count)` }
-    }
-    if (baseline === undefined || estimatedTests > baseline) {
-      unit.baselineTestCount = estimatedTests
-      await deps.upsertUnit(unit.repo, unit)
+  if (!diff.truncated) {
+    const estimatedTests = estimateTestCountFromDiff(diff)
+    if (unit !== undefined) {
+      const baseline = unit.baselineTestCount
+      if (baseline !== undefined && estimatedTests < baseline) {
+        return { ok: false, reason: `test-count ratchet decreased from ${baseline} to ${estimatedTests} (heuristic: changed *.test.*/*.spec.* files when CI output has no explicit count)` }
+      }
+      if (baseline === undefined || estimatedTests > baseline) {
+        unit.baselineTestCount = estimatedTests
+        await deps.upsertUnit(unit.repo, unit)
+      }
     }
   }
 

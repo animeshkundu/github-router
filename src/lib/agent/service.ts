@@ -354,7 +354,7 @@ export async function findAgentPRs(
 
 function unitIdMarkerFromBody(body: string | null | undefined): string | undefined {
   if (!body) return undefined
-  const match = /^\s*unit-id:\s*([^\s<]+)/im.exec(body)
+  const match = /\bunit-id:\s*([^\s<]+)/i.exec(body)
   return match?.[1]
 }
 
