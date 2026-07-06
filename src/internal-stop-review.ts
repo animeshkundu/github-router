@@ -69,9 +69,10 @@ interface ReviewPayload {
  *  window. The Stop hook already caps the captured diff at 2 MiB. */
 const MAX_EMBEDDED_DIFF_BYTES = 200 * 1024
 
-/** Wall-clock the reviewer may take. Sized at the worker engine's own 30-min cap
- *  plus headroom — this process is detached, so nothing waits on it; the bound
- *  only stops a hung request from lingering forever. */
+/** Wall-clock the stop-gate reviewer may take. This is INDEPENDENT of the
+ *  autonomous worker's wall-clock cap (`DEFAULT_MAX_WALLCLOCK_MS`, now 6h) —
+ *  it bounds this one detached review request. Nothing waits on this process,
+ *  so the bound only stops a hung request from lingering forever. */
 const REVIEW_TIMEOUT_MS = 35 * 60 * 1000
 
 function buildReviewBrief(payload: { prompt: string; diff: string; transcriptPath: string }): string {

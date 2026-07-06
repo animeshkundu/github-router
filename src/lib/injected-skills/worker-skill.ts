@@ -9,14 +9,14 @@ export const WORKER_SKILL = {
   name: "gh-worker",
   md: `---
 name: gh-worker
-description: How to run github-router workers without blocking your turn. Workers (explore/implement/review/plan/test) can run up to 30 minutes; dispatch the matching worker-* background subagent so you get a completion notification instead of waiting. Use whenever you would reach for a worker.
+description: How to run github-router workers without blocking your turn. Workers (explore/implement/review/plan/test) can run up to 6 hours; dispatch the matching worker-* background subagent so you get a completion notification instead of waiting. Use whenever you would reach for a worker.
 user-invocable: true
 ---
 
 # gh-worker: non-blocking workers
 
-Worker tasks (explore, implement, review, plan, test) can run for up to 30
-minutes. In this session they are NON-BLOCKING BY DESIGN: you dispatch a
+Worker tasks (explore, implement, review, plan, test) can run for up to 6 hours.
+In this session they are NON-BLOCKING BY DESIGN: you dispatch a
 background \`worker-*\` subagent, get control back immediately, and receive the
 worker's result as a completion notification when it finishes. Your turn is
 never blocked waiting on a worker, and the worker's tool output never fills your

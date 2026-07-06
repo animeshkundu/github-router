@@ -106,8 +106,7 @@ test("chat completions injects web search context and strips tools", async () =>
     }
     throw new Error(`Unexpected URL ${url}`)
   })
-  // @ts-expect-error - override fetch for this test
-  globalThis.fetch = fetchMock
+  globalThis.fetch = fetchMock as unknown as typeof fetch
 
   const response = await server.request("/v1/chat/completions", {
     method: "POST",
@@ -149,8 +148,7 @@ test("chat completions stream returns SSE output", async () => {
     }
     throw new Error(`Unexpected URL ${url}`)
   })
-  // @ts-expect-error - override fetch for this test
-  globalThis.fetch = fetchMock
+  globalThis.fetch = fetchMock as unknown as typeof fetch
 
   const response = await server.request("/v1/chat/completions", {
     method: "POST",
@@ -181,8 +179,7 @@ test("responses injects web search and strips tools", async () => {
     }
     throw new Error(`Unexpected URL ${url}`)
   })
-  // @ts-expect-error - override fetch for this test
-  globalThis.fetch = fetchMock
+  globalThis.fetch = fetchMock as unknown as typeof fetch
 
   const response = await server.request("/v1/responses", {
     method: "POST",
@@ -219,8 +216,7 @@ test("responses stream skips DONE chunks", async () => {
     }
     throw new Error(`Unexpected URL ${url}`)
   })
-  // @ts-expect-error - override fetch for this test
-  globalThis.fetch = fetchMock
+  globalThis.fetch = fetchMock as unknown as typeof fetch
 
   const response = await server.request("/v1/responses", {
     method: "POST",
@@ -260,11 +256,10 @@ test("messages passthrough forwards body to copilot /v1/messages", async () => {
     }
     throw new Error(`Unexpected URL ${url}`)
   })
-  // @ts-expect-error - override fetch for this test
-  globalThis.fetch = fetchMock
+  globalThis.fetch = fetchMock as unknown as typeof fetch
 
   const requestBody = JSON.stringify({
-    model: "gpt-4",
+    model: "claude-sonnet-4.5",
     max_tokens: 10,
     messages: [{ role: "user", content: "hello" }],
   })
@@ -301,14 +296,13 @@ test("messages stream passthrough pipes SSE events directly", async () => {
     }
     throw new Error(`Unexpected URL ${url}`)
   })
-  // @ts-expect-error - override fetch for this test
-  globalThis.fetch = fetchMock
+  globalThis.fetch = fetchMock as unknown as typeof fetch
 
   const response = await server.request("/v1/messages", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: "gpt-4",
+      model: "claude-sonnet-4.5",
       max_tokens: 10,
       stream: true,
       messages: [{ role: "user", content: "hello" }],
@@ -330,8 +324,7 @@ test("count_tokens passthrough forwards to copilot and returns result", async ()
     }
     throw new Error(`Unexpected URL ${url}`)
   })
-  // @ts-expect-error - override fetch for this test
-  globalThis.fetch = fetchMock
+  globalThis.fetch = fetchMock as unknown as typeof fetch
 
   const response = await server.request("/v1/messages/count_tokens", {
     method: "POST",
@@ -362,8 +355,7 @@ test("count_tokens forwards upstream errors", async () => {
     }
     throw new Error(`Unexpected URL ${url}`)
   })
-  // @ts-expect-error - override fetch for this test
-  globalThis.fetch = fetchMock
+  globalThis.fetch = fetchMock as unknown as typeof fetch
 
   const response = await server.request("/v1/messages/count_tokens", {
     method: "POST",
@@ -445,8 +437,7 @@ test("routes for models, search, embeddings, usage, and token", async () => {
     }
     throw new Error(`Unexpected URL ${url}`)
   })
-  // @ts-expect-error - override fetch for this test
-  globalThis.fetch = fetchMock
+  globalThis.fetch = fetchMock as unknown as typeof fetch
 
   const modelsResponse = await server.request("/v1/models")
   const modelsJson = (await modelsResponse.json()) as { data: Array<unknown> }
@@ -485,8 +476,7 @@ test("usage route forwards upstream errors", async () => {
     }
     throw new Error(`Unexpected URL ${url}`)
   })
-  // @ts-expect-error - override fetch for this test
-  globalThis.fetch = fetchMock
+  globalThis.fetch = fetchMock as unknown as typeof fetch
 
   const usageResponse = await server.request("/usage")
   expect(usageResponse.status).toBe(500)
@@ -516,8 +506,7 @@ test("telemetry stub returns 200 for malformed body without calling fetch", asyn
     fetchCalled = true
     throw new Error("fetch must not be called for telemetry stub")
   })
-  // @ts-expect-error - override fetch for this test
-  globalThis.fetch = fetchMock
+  globalThis.fetch = fetchMock as unknown as typeof fetch
 
   const response = await server.request("/api/event_logging/batch", {
     method: "POST",
@@ -547,8 +536,7 @@ test("messages passthrough forwards upstream error status and body", async () =>
     }
     throw new Error(`Unexpected URL ${url}`)
   })
-  // @ts-expect-error - override fetch for this test
-  globalThis.fetch = fetchMock
+  globalThis.fetch = fetchMock as unknown as typeof fetch
 
   const response = await server.request("/v1/messages", {
     method: "POST",
@@ -638,14 +626,13 @@ test("messages stream pre-byte upstream error emits event:error on a 200 stream"
     }
     throw new Error(`Unexpected URL ${url}`)
   })
-  // @ts-expect-error - override fetch for this test
-  globalThis.fetch = fetchMock
+  globalThis.fetch = fetchMock as unknown as typeof fetch
 
   const response = await server.request("/v1/messages", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: "gpt-4",
+      model: "claude-sonnet-4.5",
       max_tokens: 10,
       stream: true,
       messages: [{ role: "user", content: "hello" }],
@@ -692,14 +679,13 @@ test("messages stream mid-stream upstream error appends event:error to wire byte
     }
     throw new Error(`Unexpected URL ${url}`)
   })
-  // @ts-expect-error - override fetch for this test
-  globalThis.fetch = fetchMock
+  globalThis.fetch = fetchMock as unknown as typeof fetch
 
   const response = await server.request("/v1/messages", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: "gpt-4",
+      model: "claude-sonnet-4.5",
       max_tokens: 10,
       stream: true,
       messages: [{ role: "user", content: "hello" }],

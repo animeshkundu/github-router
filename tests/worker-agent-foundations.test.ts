@@ -32,8 +32,12 @@ import * as path from "node:path"
 
 import {
   Budget,
-  WorkerAbort,
+  DEFAULT_MAX_WALLCLOCK_MS,
+  MCP_TIMEOUT_HEADROOM_MS,
   resolveBudgetConfig,
+  resolveMcpToolTimeoutMs,
+  WorkerAbort,
+  workerWallClockCeilingMs,
 } from "../src/lib/worker-agent/budget"
 import {
   SENSITIVE_FILE_DENYLIST,
@@ -316,10 +320,10 @@ describe("Budget", () => {
     }
   })
 
-  test("defaults are 500 / 1_800_000 / 16_777_216", () => {
+  test("defaults are 500 / 21_600_000 / 16_777_216", () => {
     const b = new Budget()
     expect(b.config.maxTurns).toBe(500)
-    expect(b.config.maxWallClockMs).toBe(30 * 60_000)
+    expect(b.config.maxWallClockMs).toBe(6 * 60 * 60_000)
     expect(b.config.maxToolBytes).toBe(16 * 1024 * 1024)
   })
 
@@ -339,8 +343,18 @@ describe("Budget", () => {
     process.env.GH_ROUTER_WORKER_MAX_TOOL_BYTES = "0"
     const cfg = resolveBudgetConfig()
     expect(cfg.maxTurns).toBe(500)
-    expect(cfg.maxWallClockMs).toBe(30 * 60_000)
+    expect(cfg.maxWallClockMs).toBe(6 * 60 * 60_000)
     expect(cfg.maxToolBytes).toBe(16 * 1024 * 1024)
+  })
+
+  test("per-call maxWallClockMs override wins over env and default", () => {
+    process.env.GH_ROUTER_WORKER_MAX_WALLCLOCK_MS = "1234"
+    // Caller override beats the env value…
+    expect(resolveBudgetConfig({ maxWallClockMs: 99 }).maxWallClockMs).toBe(99)
+    // …and an omitted override falls through to env, then default.
+    delete process.env.GH_ROUTER_WORKER_MAX_WALLCLOCK_MS
+    expect(resolveBudgetConfig({ maxWallClockMs: 555 }).maxWallClockMs).toBe(555)
+    expect(resolveBudgetConfig().maxWallClockMs).toBe(DEFAULT_MAX_WALLCLOCK_MS)
   })
 
   test("turns cap fires via checkBeforeCall", () => {
@@ -404,6 +418,59 @@ describe("Budget", () => {
     } finally {
       Date.now = realNow
     }
+  })
+})
+
+// ============================================================
+// budget.ts — MCP tool-call timeout resolver + wall-clock ceiling
+// ============================================================
+
+describe("resolveMcpToolTimeoutMs / workerWallClockCeilingMs", () => {
+  let original: string | undefined
+
+  beforeEach(() => {
+    original = process.env.GH_ROUTER_MCP_TOOL_TIMEOUT_MS
+    delete process.env.GH_ROUTER_MCP_TOOL_TIMEOUT_MS
+  })
+
+  afterEach(() => {
+    if (original === undefined) delete process.env.GH_ROUTER_MCP_TOOL_TIMEOUT_MS
+    else process.env.GH_ROUTER_MCP_TOOL_TIMEOUT_MS = original
+  })
+
+  test("default is 22_500_000 (6h15m)", () => {
+    expect(resolveMcpToolTimeoutMs()).toBe(22_500_000)
+  })
+
+  test("honors a positive-integer GH_ROUTER_MCP_TOOL_TIMEOUT_MS override", () => {
+    process.env.GH_ROUTER_MCP_TOOL_TIMEOUT_MS = "3600000"
+    expect(resolveMcpToolTimeoutMs()).toBe(3_600_000)
+  })
+
+  test("garbage GH_ROUTER_MCP_TOOL_TIMEOUT_MS falls back to the default", () => {
+    for (const bad of ["not-a-number", "-1", "0", "1.5", ""]) {
+      process.env.GH_ROUTER_MCP_TOOL_TIMEOUT_MS = bad
+      expect(resolveMcpToolTimeoutMs()).toBe(22_500_000)
+    }
+  })
+
+  test("headroom is 15 min and the ceiling is timeout − headroom", () => {
+    expect(MCP_TIMEOUT_HEADROOM_MS).toBe(15 * 60_000)
+    expect(workerWallClockCeilingMs()).toBe(
+      resolveMcpToolTimeoutMs() - MCP_TIMEOUT_HEADROOM_MS,
+    )
+  })
+
+  test("INVARIANT: the default worker wall-clock never exceeds the MCP timeout, and clears it by a full teardown headroom", () => {
+    // A worker must abort gracefully (partial work + [halted: wallclock])
+    // before the harness hard-kills the MCP tool call. The default (and the
+    // per-call ceiling) must therefore sit at least MCP_TIMEOUT_HEADROOM_MS
+    // below the injected MCP tool-call timeout.
+    expect(DEFAULT_MAX_WALLCLOCK_MS).toBeLessThan(resolveMcpToolTimeoutMs())
+    expect(DEFAULT_MAX_WALLCLOCK_MS).toBeLessThanOrEqual(workerWallClockCeilingMs())
+    expect(resolveMcpToolTimeoutMs() - DEFAULT_MAX_WALLCLOCK_MS).toBeGreaterThanOrEqual(
+      MCP_TIMEOUT_HEADROOM_MS,
+    )
   })
 })
 

@@ -82,7 +82,7 @@ import type {
   ToolCall,
 } from "@earendil-works/pi-ai"
 
-import { Budget, WorkerAbort } from "./budget"
+import { Budget } from "./budget"
 import {
   WorktreeRegistry,
   getInstanceUuid,
@@ -122,31 +122,42 @@ import { type WorktreeHandle, createWorktree } from "./worktree"
 const WORKTREE_REGISTRY = new WorktreeRegistry()
 registerExitHandlers(WORKTREE_REGISTRY)
 
-/** Default model + thinking for the `explore` mode. `gpt-5.4-mini` at
- *  `xhigh` — fast, cheap, 400k-context, tool-call-capable, with tight
- *  function-calling-loop discipline.
- *
- *  HISTORY / CAVEAT: earlier iterations used `gemini-3.1-pro-preview` then
- *  `gemini-3.5-flash`; both flash defaults early-stopped with empty turns
- *  on the function-calling loop (read a file then end the turn with no
- *  summary), which the single no-output retry couldn't reliably recover.
- *  `gpt-5.4-mini` does not show that pathology and is the proven `browse`
- *  default. Routed through `/responses` by the stream-fn endpoint split.
- *
- *  Exported so the MCP handler + the gate (`workerToolsEnabled`) read the
- *  same constant — drift would ship a tool whose docs/gate disagree with
- *  its runtime default. Caller can override per call via the `model` arg. */
+/** Worker-availability GATE sentinel + final fallback. `gpt-5.4-mini` — cheap,
+ *  broadly-available, tool-call-capable, 400k-context, with tight
+ *  function-calling-loop discipline (earlier gemini-flash cheap defaults
+ *  early-stopped with empty turns on the function-calling loop; gpt-5.4-mini
+ *  does not). Exported and aliased as `WORKER_DEFAULT_MODEL`:
+ *  `workerToolsEnabled()` gates the ENTIRE worker surface on this id being
+ *  present with `tool_calls`. It is no longer `explore`'s default (see
+ *  `EXPLORE_DEFAULT_MODEL`) — it stays the gate sentinel because it's the
+ *  cheapest broadly-present tool-caller, and the fallback for any unmatched
+ *  mode. */
 export const DEFAULT_MODEL = "gpt-5.4-mini"
 const DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 
-/** Default model + thinking for the READ-ONLY `review` mode. `gpt-5.5` at
- *  `xhigh` — the strongest reasoning tier, 1M+ context, so the reviewer
- *  has full headroom to verify correctness against the actual code. Same
- *  model as `implement`; like it, this is NOT a `workerToolsEnabled` gate
- *  input — if absent (e.g. a non-enterprise tier) `review` errors helpfully
- *  at call time rather than vanishing the whole worker surface. Caller can
- *  override per call via the `model` arg. */
-export const REVIEW_DEFAULT_MODEL = "gpt-5.5"
+/** Default model for the READ-ONLY `explore` mode. `claude-sonnet-5` at `xhigh`
+ *  (via `DEFAULT_THINKING`) — a strong, NATIVE (no-shim) tool-caller for repo
+ *  research. Native Claude models run as workers over `/chat/completions`, the
+ *  same path proven by `PLAN_DEFAULT_MODEL` (claude-opus-4.8). Like `implement`'s
+ *  gpt-5.5 this is NOT a `workerToolsEnabled` gate input — if absent (e.g. a
+ *  non-enterprise tier) `explore` errors helpfully at call time rather than
+ *  vanishing the whole worker surface. The caller (the main model) overrides
+ *  BOTH the model and the reasoning per call via the `model` / `thinking` args. */
+export const EXPLORE_DEFAULT_MODEL = "claude-sonnet-5"
+
+/** Default model + thinking for the READ-ONLY `review` mode.
+ *  `gemini-3.1-pro-preview` at `xhigh` (clamped to `high` at call time — gemini
+ *  advertises no xhigh). DELIBERATELY DECORRELATED FROM THE IMPLEMENTER: bounded
+ *  implementation now defaults to gpt-5.5 (OpenAI) — both the `implement` worker
+ *  and the native `implementer` subagent — and the main orchestrator is Opus
+ *  (Anthropic), so review runs on a THIRD lab (Google) to maximize blind-spot
+ *  diversity. A reviewer sharing the implementer's lab catches a correlated slice
+ *  of defects; a cross-lab reviewer is the point of the review step. Like
+ *  `implement`, this is NOT a `workerToolsEnabled` gate input — if absent (e.g. a
+ *  non-enterprise tier) `review` errors helpfully at call time rather than
+ *  vanishing the whole worker surface. Caller can override per call via the
+ *  `model` arg (e.g. `claude-opus-4.8` for an Anthropic-lab reviewer). */
+export const REVIEW_DEFAULT_MODEL = "gemini-3.1-pro-preview"
 const REVIEW_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 
 /** Default model + thinking for the READ+WRITE `implement` mode. `gpt-5.5`
@@ -293,9 +304,10 @@ async function runWorkerAgentOnce(
     // on unknown-model errors, so the caller knows what to retry with).
     //
     // Per-mode defaults (an explicit `opts.model`/`opts.thinking` always
-    // wins): read-only `explore` → `DEFAULT_MODEL` (gpt-5.4-mini, xhigh);
-    // read-only `review` → `REVIEW_DEFAULT_MODEL` (gpt-5.5, xhigh — the
-    // reviewer wants max reasoning to verify correctness); read-only `plan`
+    // wins): read-only `explore` → `EXPLORE_DEFAULT_MODEL` (claude-sonnet-5, xhigh);
+    // read-only `review` → `REVIEW_DEFAULT_MODEL` (gemini-3.1-pro-preview,
+    // xhigh→high — a cross-lab reviewer deliberately decorrelated from the
+    // gpt-5.5 implementer); read-only `plan`
     // → `PLAN_DEFAULT_MODEL` (claude-opus-4.8, xhigh — planning is the
     // highest-leverage step, so it gets the strongest model);
     // read+write `implement`/`test` → `IMPLEMENT_DEFAULT_MODEL` (gpt-5.5, xhigh
@@ -306,6 +318,7 @@ async function runWorkerAgentOnce(
     const isPlan = opts.mode === "plan"
     const isReview = opts.mode === "review"
     const isWriteCapable = opts.mode === "implement" || opts.mode === "test"
+    const isExplore = opts.mode === "explore"
     const defaultModel = isBrowse
       ? BROWSE_DEFAULT_MODEL
       : isPlan
@@ -314,7 +327,9 @@ async function runWorkerAgentOnce(
           ? REVIEW_DEFAULT_MODEL
           : isWriteCapable
             ? IMPLEMENT_DEFAULT_MODEL
-            : DEFAULT_MODEL
+            : isExplore
+              ? EXPLORE_DEFAULT_MODEL
+              : DEFAULT_MODEL
     const defaultThinking = isBrowse
       ? BROWSE_DEFAULT_THINKING
       : isPlan
@@ -397,8 +412,10 @@ async function runWorkerAgentOnce(
     // Step 5: budget construction. Defaults from the constructor;
     // env-overrides are read by `resolveBudgetConfig` (called inside
     // the `Budget` constructor) so users can tighten the caps without
-    // a code change.
-    const budget = new Budget()
+    // a code change. A per-call `maxWallClockMs` (already validated and
+    // clamped to `workerWallClockCeilingMs()` at the MCP boundary) wins
+    // over both when present; `undefined` falls through to env/default.
+    const budget = new Budget({ maxWallClockMs: opts.maxWallClockMs })
 
     // Step 6: tools. `getMessages` exposes the LIVE Pi transcript to the
     // `advisor` tool so it can include the recent conversation as context;
@@ -598,7 +615,7 @@ async function runWorkerAgentOnce(
     // Step 10: wall-clock timer. `Budget.checkBeforeCall` already
     // enforces wallclock on each tool boundary, but a runaway bash
     // (whose own timeout is up to 10 minutes) could exceed the
-    // 30-minute cap mid-run. The timer fires `agent.abort()` which
+    // wall-clock cap mid-run. The timer fires `agent.abort()` which
     // cascades into the per-tool signal and tears the bash down.
     // `.unref()` so the timer doesn't keep the event loop alive past
     // the test/scope that owns this call.
@@ -660,13 +677,17 @@ async function runWorkerAgentOnce(
       // a raw upstream error body, and never report an error as success.
       if (lastStopReason === "error") {
         const diag = (terminalText ?? finalText).trim()
+        const diagnostic =
+          diag
+          || "Worker run failed before producing an answer — the model's input "
+            + "likely overflowed (a large tool result), or the upstream errored. "
+            + "Retry with a narrower task: target a specific section / file / "
+            + "element rather than reading everything at once."
+        // The worktree diff was already captured above (before ws.remove);
+        // a terminal stream error must NOT throw that partial work away.
+        // Append it when present so the caller can still inspect / apply it.
         return {
-          text:
-            diag
-            || "Worker run failed before producing an answer — the model's input "
-              + "likely overflowed (a large tool result), or the upstream errored. "
-              + "Retry with a narrower task: target a specific section / file / "
-              + "element rather than reading everything at once.",
+          text: [diagnostic, diff].filter(Boolean).join("\n\n"),
           isError: true,
         }
       }
@@ -683,17 +704,24 @@ async function runWorkerAgentOnce(
       return { text }
     } catch (err) {
       // Step 13b: error-path cleanup. Mirror the success path so the
-      // worktree can't strand on a Pi-throws-mid-loop path. For
-      // `WorkerAbort` (budget cap hit), capture the diff before tearing
-      // the worktree down — the partial work Pi did is still useful for
-      // the caller to inspect.
+      // worktree can't strand on a Pi-throws-mid-loop path. Capture the
+      // diff BEFORE tearing the worktree down for ANY caught error (not
+      // just a budget cap) — the partial work Pi did is still useful for
+      // the caller to inspect, and it's destroyed the moment `ws.remove()`
+      // deletes the worktree. Own try/catch so a finalize failure can't
+      // mask the original thrown error (which is always appended below);
+      // a failure records a `[diff capture failed: …]` marker instead of
+      // silently dropping the signal.
       let diff = ""
-      if (err instanceof WorkerAbort) {
-        try {
-          diff = await ws.finalize()
-        } catch {
-          /* ignore — best-effort, halt message stands alone */
-        }
+      try {
+        diff = await ws.finalize()
+      } catch (err) {
+        // Consistent with the success path: surface the finalize failure in
+        // the diff slot so the caller learns the worktree change could not be
+        // captured, rather than silently losing that signal (the worktree is
+        // about to be removed). The original thrown error is still pushed
+        // below, so this never masks it.
+        diff = `[diff capture failed: ${(err as Error).message}]`
       }
       try {
         await ws.remove()

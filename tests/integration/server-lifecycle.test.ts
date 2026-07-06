@@ -149,8 +149,7 @@ describe("route integration via app.request()", () => {
       }
       throw new Error(`Unexpected URL ${url}`)
     })
-    // @ts-expect-error - override fetch for this test
-    globalThis.fetch = fetchMock
+    globalThis.fetch = fetchMock as unknown as typeof fetch
 
     const response = await app.request("/v1/chat/completions", {
       method: "POST",
@@ -184,8 +183,7 @@ describe("route integration via app.request()", () => {
       }
       throw new Error(`Unexpected URL ${url}`)
     })
-    // @ts-expect-error - override fetch for this test
-    globalThis.fetch = fetchMock
+    globalThis.fetch = fetchMock as unknown as typeof fetch
 
     const response = await app.request("/v1/chat/completions", {
       method: "POST",
@@ -221,14 +219,13 @@ describe("route integration via app.request()", () => {
       }
       throw new Error(`Unexpected URL ${url}`)
     })
-    // @ts-expect-error - override fetch for this test
-    globalThis.fetch = fetchMock
+    globalThis.fetch = fetchMock as unknown as typeof fetch
 
     const response = await app.request("/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model: "gpt-4",
+        model: "claude-sonnet-4.5",
         max_tokens: 10,
         messages: [{ role: "user", content: "hello" }],
       }),
@@ -257,14 +254,13 @@ describe("route integration via app.request()", () => {
       }
       throw new Error(`Unexpected URL ${url}`)
     })
-    // @ts-expect-error - override fetch for this test
-    globalThis.fetch = fetchMock
+    globalThis.fetch = fetchMock as unknown as typeof fetch
 
     const response = await app.request("/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model: "gpt-4",
+        model: "claude-sonnet-4.5",
         max_tokens: 10,
         stream: true,
         messages: [{ role: "user", content: "hello" }],
@@ -297,8 +293,7 @@ describe("route integration via app.request()", () => {
       }
       throw new Error(`Unexpected URL ${url}`)
     })
-    // @ts-expect-error - override fetch for this test
-    globalThis.fetch = fetchMock
+    globalThis.fetch = fetchMock as unknown as typeof fetch
 
     const response = await app.request("/v1/responses", {
       method: "POST",
@@ -335,8 +330,7 @@ describe("route integration via app.request()", () => {
       }
       throw new Error(`Unexpected URL ${url}`)
     })
-    // @ts-expect-error - override fetch for this test
-    globalThis.fetch = fetchMock
+    globalThis.fetch = fetchMock as unknown as typeof fetch
 
     const response = await app.request("/v1/embeddings", {
       method: "POST",

@@ -143,7 +143,12 @@ beforeEach(() => {
         tool_calls: true,
         reasoning_effort: ["low", "medium", "high"],
       }),
-      // explore default
+      // explore default (native Claude worker via /chat/completions)
+      fakeModel("claude-sonnet-5", {
+        tool_calls: true,
+        reasoning_effort: ["low", "medium", "high", "xhigh"],
+      }),
+      // worker-availability gate sentinel + browse default
       fakeModel("gpt-5.4-mini", {
         tool_calls: true,
         reasoning_effort: ["minimal", "low", "medium", "high"],
@@ -415,6 +420,44 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
       expect(r.text).toBe("explore-mode-reply")
       // Slot released by outer finally.
       expect(__getInFlightForTests()).toBe(before)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("explore mode sends claude-sonnet-5 upstream by default", async () => {
+    let capturedModel: string | undefined
+    globalThis.fetch = mock((_input: unknown, init?: { body?: unknown }) => {
+      try {
+        capturedModel = (JSON.parse(String(init?.body ?? "{}")) as { model?: string }).model
+      } catch { /* body not JSON — ignore */ }
+      return sseFinalText("ok")
+    }) as unknown as typeof fetch
+    const dir = realpathSync.native(
+      mkdtempSync(path.join(os.tmpdir(), "wa-explore-model-")),
+    )
+    try {
+      await runWorkerAgent({ prompt: "summarize", mode: "explore", workspace: dir })
+      expect(capturedModel).toBe("claude-sonnet-5")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("implement mode sends gpt-5.5 upstream by default", async () => {
+    let capturedModel: string | undefined
+    globalThis.fetch = mock((_input: unknown, init?: { body?: unknown }) => {
+      try {
+        capturedModel = (JSON.parse(String(init?.body ?? "{}")) as { model?: string }).model
+      } catch { /* body not JSON — ignore */ }
+      return sseFinalText("ok")
+    }) as unknown as typeof fetch
+    const dir = realpathSync.native(
+      mkdtempSync(path.join(os.tmpdir(), "wa-implement-model-")),
+    )
+    try {
+      await runWorkerAgent({ prompt: "do a thing", mode: "implement", workspace: dir })
+      expect(capturedModel).toBe("gpt-5.5")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
