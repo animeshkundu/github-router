@@ -7,6 +7,7 @@ import {
   parseAnthropicRequest,
   parsedToResponsesPayload,
 } from "~/lib/anthropic-translate/anthropic-request"
+import { parsedToChatPayload } from "~/lib/anthropic-translate/chat-request"
 import type { AnthropicStreamEvent } from "~/lib/anthropic-translate/anthropic-sse"
 import { synthAnthropicFromResponses } from "~/lib/anthropic-translate/responses-egress"
 import type { Model } from "~/services/copilot/get-models"
@@ -931,5 +932,95 @@ describe("anthropic-translate request mapping (gpt-5.3-codex)", () => {
     expect(
       buildFor(CODEX_MODEL_ID, { messages: [], max_tokens: 256 }, codexModel()).payload.max_output_tokens,
     ).toBe(256)
+  })
+})
+
+describe("anthropic-translate file-tool steering", () => {
+  const MARKER = "<file_tools>"
+  const editTool = { name: "Edit", description: "edit a file", input_schema: { type: "object" } }
+  const writeTool = { name: "Write", description: "write a file", input_schema: { type: "object" } }
+  const bashTool = { name: "Bash", description: "run a command", input_schema: { type: "object" } }
+
+  test("Edit tool present → guidance appended to Responses instructions, original system preserved", () => {
+    const { parsed, payload } = build({
+      system: "You are Claude Code.",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [editTool, bashTool],
+    })
+    expect(parsed.instructions).toContain(MARKER)
+    // Original system text preserved and ORDERED before the guidance (recency).
+    expect(parsed.instructions).toContain("You are Claude Code.")
+    expect(parsed.instructions?.indexOf("You are Claude Code.")).toBeLessThan(
+      parsed.instructions?.indexOf(MARKER) ?? -1,
+    )
+    expect(payload.instructions).toContain(MARKER)
+  })
+
+  test("Write tool alone also triggers the guidance", () => {
+    const { parsed } = build({
+      system: "sys",
+      messages: [],
+      tools: [writeTool],
+    })
+    expect(parsed.instructions).toContain(MARKER)
+  })
+
+  test("no system + Edit tool → guidance becomes the whole instructions", () => {
+    const { parsed } = build({
+      messages: [],
+      tools: [editTool],
+    })
+    expect(parsed.instructions).toContain(MARKER)
+    // No prior system text ⇒ guidance is the entire string, no leading blank lines.
+    expect(parsed.instructions?.startsWith(MARKER)).toBe(true)
+  })
+
+  test("no Edit/Write tool → guidance absent (non-editing chat not polluted)", () => {
+    const withBashOnly = build({
+      system: "sys",
+      messages: [],
+      tools: [bashTool],
+    })
+    expect(withBashOnly.parsed.instructions).not.toContain(MARKER)
+    expect(withBashOnly.parsed.instructions).toBe("sys")
+
+    const noTools = build({ system: "sys", messages: [] })
+    expect(noTools.parsed.instructions).not.toContain(MARKER)
+  })
+
+  test("lowercase / MCP-style tool names do NOT trigger (precise capitalized match)", () => {
+    const { parsed } = build({
+      system: "sys",
+      messages: [],
+      tools: [
+        { name: "write_file", description: "x", input_schema: { type: "object" } },
+        { name: "edit", description: "x", input_schema: { type: "object" } },
+      ],
+    })
+    expect(parsed.instructions).not.toContain(MARKER)
+  })
+
+  test("guidance reaches the chat/completions system message too", () => {
+    const parsed = parseAnthropicRequest(
+      { system: "sys", messages: [{ role: "user", content: "hi" }], tools: [editTool] },
+      "gemini-3.1-pro-preview",
+    )
+    const chat = parsedToChatPayload(parsed)
+    expect(chat.messages[0]?.role).toBe("system")
+    expect(chat.messages[0]?.content).toContain(MARKER)
+    expect(chat.messages[0]?.content).toContain("sys")
+  })
+
+  test("GH_ROUTER_DISABLE_SHIM_TOOL_STEERING=1 opts out", () => {
+    const prev = process.env.GH_ROUTER_DISABLE_SHIM_TOOL_STEERING
+    process.env.GH_ROUTER_DISABLE_SHIM_TOOL_STEERING = "1"
+    try {
+      const { parsed } = build({ system: "sys", messages: [], tools: [editTool] })
+      expect(parsed.instructions).toBe("sys")
+      expect(parsed.instructions).not.toContain(MARKER)
+    } finally {
+      if (prev === undefined) delete process.env.GH_ROUTER_DISABLE_SHIM_TOOL_STEERING
+      else process.env.GH_ROUTER_DISABLE_SHIM_TOOL_STEERING = prev
+    }
   })
 })

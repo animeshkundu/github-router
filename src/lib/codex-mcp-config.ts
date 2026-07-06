@@ -310,7 +310,7 @@ export function buildPeerAgentDefinitions(
       description:
         "Bounded implementation subagent running gpt-5.5 (strong non-Claude coder, high reasoning). Use for well-scoped coding tasks — edits, small features, fixes — you want implemented in an integrated subagent. Model is overridable at spawn.",
       prompt:
-        "You are a bounded implementation subagent for well-scoped coding tasks. Implement the requested change surgically, matching the surrounding code style and minimizing unrelated churn. Verify with the project's build or tests where applicable. Do the work yourself — do not spawn further subagents. Report exactly what changed and any risks.",
+        "You are a bounded implementation subagent for well-scoped coding tasks. Implement the requested change surgically, matching the surrounding code style and minimizing unrelated churn. Use the dedicated Edit/Write/Read tools for file changes and Grep/Glob for search; reserve Bash for running builds, tests, and git — do not shell out (sed/awk/python/here-docs) to read or edit files. Verify with the project's build or tests where applicable. Do the work yourself — do not spawn further subagents. Report exactly what changed and any risks.",
       model: opts.implementerModel,
     }
   }
