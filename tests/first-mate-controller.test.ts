@@ -2,6 +2,7 @@ import { expect, mock, test } from "bun:test"
 
 import {
   advance,
+  addUnitsToMission,
   artifactDate,
   artifactSlug,
   buildPrompt,
@@ -761,10 +762,11 @@ test("board groups counts by mission and reports blocked units", async () => {
 
   const result = await advance({}, h.deps)
 
-  expect(result.board).toEqual([
+  expect(result.board).toMatchObject([
     {
       missionId: "m1",
       title: "Mission one",
+      status: "active",
       repos: ["octo/repo"],
       counts: { plan: 1, build: 1 },
       blocked: 1,
@@ -773,6 +775,7 @@ test("board groups counts by mission and reports blocked units", async () => {
     {
       missionId: "m2",
       title: "Mission two",
+      status: "active",
       repos: ["octo/repo"],
       counts: { fix: 1 },
       blocked: 0,
@@ -873,6 +876,74 @@ test("decompose: unit-less mission emits a decompose request, and a decompose an
   expect(h.units.find((u) => u.title === "part B")?.agent).toBe("anthropic")
   // dispatched in the same wake (each got a taskId or issue) — no duplicates.
   expect(h.units.every((u) => u.taskId !== null || u.issue !== null)).toBe(true)
+})
+
+test("board exposes non-terminal unit handles and active-only missions by default", async () => {
+  const activeUnit = unit({ id: "u-active", issue: 2, pr: 8, model: "gpt-5.5", blockingDecisionId: "decision-7" })
+  const doneUnit = unit({ id: "u-done", issue: 3, pr: 9, terminal: true, artifact: "pr_merged" })
+  const h = harness([activeUnit, doneUnit], [mission({ id: "m1" }), mission({ id: "m-old", status: "abandoned" })])
+
+  h.decisions.push({
+    decisionId: "decision-7",
+    decisionKey: "m1:2:human_decision:fp",
+    type: "human_decision",
+    status: "pending",
+    inputFingerprint: "fp",
+    createdMs: 1,
+  })
+
+  const result = await advance({}, h.deps)
+
+  expect(result.board.map((row) => row.missionId)).toEqual(["m1"])
+  expect(result.board[0]?.units).toEqual([
+    {
+      unitId: "u-active",
+      issue: 2,
+      pr: 8,
+      phase: "plan",
+      provider: "in_progress",
+      validation: "unknown",
+      model: "gpt-5.5",
+      blockedReason: "decision-7",
+    },
+  ])
+  expect(result.board[0]?.summary).toEqual({ done: 1, failed: 0 })
+})
+
+test("advance includeAll includes inactive missions", async () => {
+  const h = harness([], [mission({ id: "m1" }), mission({ id: "m-old", status: "abandoned" })])
+
+  const result = await advance({ includeAll: true }, h.deps)
+
+  expect(result.board.map((row) => row.missionId).sort()).toEqual(["m-old", "m1"])
+})
+
+test("addUnitsToMission appends units with local dependency indices", async () => {
+  const m = mission({ id: "m-add" })
+  const written: UnitRow[] = []
+  const created = await addUnitsToMission(
+    m,
+    [{ title: "first" }, { title: "second", dependsOn: [0], model: "gpt-5.5" }],
+    { upsertUnit: mock(async (_repo, row) => { written.push(row) }) },
+  )
+
+  expect(created).toBe(2)
+  expect(written[1]?.dependsOn).toEqual([written[0]!.id!])
+  expect(written[1]?.model).toBe("gpt-5.5")
+})
+
+test("addUnitsToMission keeps dependsOn aligned to raw-unit indices when invalid specs are skipped", async () => {
+  const m = mission({ id: "m-add" })
+  const written: UnitRow[] = []
+  const created = await addUnitsToMission(
+    m,
+    [{ title: "first" }, {}, { title: "third", dependsOn: [0] }],
+    { upsertUnit: mock(async (_repo, row) => { written.push(row) }) },
+  )
+
+  expect(created).toBe(2)
+  expect(written.map((row) => row.title)).toEqual(["first", "third"])
+  expect(written[1]?.dependsOn).toEqual([written[0]!.id!])
 })
 
 test("advance returns a clamped nextWakeSeconds for active work and null when idle", async () => {

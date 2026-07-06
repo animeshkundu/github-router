@@ -23,6 +23,8 @@ const REAL_MCP_TOOLS = new Set([
   "mcp__first-mate__advance",
   "mcp__first-mate__board",
   "mcp__first-mate__mission_status",
+  "mcp__first-mate__abandon_mission",
+  "mcp__first-mate__add_units",
   "mcp__first-mate__scaffold_repo",
 ])
 

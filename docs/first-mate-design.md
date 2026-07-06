@@ -33,9 +33,14 @@ preferred tool names are:
 - `mcp__first-mate__board` — read the active board without a wake.
 - `mcp__first-mate__mission_status` — read compact status for all missions, or
   one mission id.
+- `mcp__first-mate__abandon_mission` — mark a mission abandoned via the durable
+  registry CAS path and terminalize its live units so it drops from the active board.
+- `mcp__first-mate__add_units` — append dispatchable units to an active mission
+  using the same unit-creation path as decompose.
 
-So the operational surface is the start/advance/board triad plus the status read.
-All four entries are created in `src/lib/first-mate/tools.ts`, carry
+So the operational surface is the start/advance/board triad plus the status read,
+with abandon as the explicit cleanup lever. All entries are created in
+`src/lib/first-mate/tools.ts`, carry
 `capability: "agents"`, and are filtered at BOTH `tools/list` and `tools/call` by
 `agentToolsEnabled()` (`src/lib/mcp-capabilities.ts`, `src/routes/mcp/handler.ts`).
 That predicate requires:
@@ -48,6 +53,16 @@ passes, and only writes the `/gh-first-mate` skill when the surface is available
 On MCP-name collision, `resolveGroupKeysFromMirror()` in
 `src/lib/codex-mcp-config.ts` gives the group a `gh-router-first-mate`-style key
 rather than dropping or hijacking a user server.
+
+### Board shape and active filtering
+
+`advance`, `board`, and `mission_status` default to ACTIVE missions only. Inactive
+missions (`done` / `abandoned`) are collapsed into `inactiveSummary`; callers can
+pass `include_all:true` when they are explicitly inspecting history. Each active
+mission row includes compact non-terminal unit handles (`unitId`, issue, PR, phase,
+provider, validation, model, and `blockedReason` when present). Terminal units are
+summarized as counts only, so long-running portfolios do not dump old completed work
+every wake.
 
 ### Operator capability shaping
 
@@ -237,9 +252,12 @@ missions, then loading each repo ledger. Unit rows store handles and
 classification — issue, PR, task id, bot login, SHAs, phase, validation,
 dependencies, blocking decision id — not full diffs, logs, or transcripts.
 
-Accuracy note for v1: `start_mission` registers a mission only. It does not yet
-decompose the goal into `UnitRow`s. The controller dispatches undispatched units
-once they exist; exact plan→unit creation is a follow-up.
+Accuracy note for v1: `start_mission` registers a mission only. The controller
+emits a one-shot `decompose` request for a unit-less active mission; the answer
+creates `UnitRow`s, and the controller dispatches undispatched units once they
+exist. Operators can append more units later with `add_units`; dependency indices
+in that call are local to the submitted unit list and are resolved to stable unit
+ids before dispatch.
 
 ## Orthogonal state model and pure decision table
 

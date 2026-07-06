@@ -3,8 +3,9 @@ import { afterEach, describe, expect, mock, test } from "bun:test"
 import { AgentError } from "~/lib/agent/types"
 import type { PullRequestState, RequiredChecksSummary } from "~/lib/agent/types"
 import { createFirstMateTools, type MergeCloseDeps } from "~/lib/first-mate/tools"
+import { upsertUnit as realUpsertUnit } from "~/lib/first-mate/ledger"
 import type { Mission } from "~/lib/first-mate/registry"
-import type { UnitRow } from "~/lib/first-mate/types"
+import type { RepoRef, UnitRow } from "~/lib/first-mate/types"
 import { state } from "~/lib/state"
 
 /**
@@ -80,17 +81,20 @@ function makeDeps(overrides: Partial<MergeCloseDeps> = {}): MergeCloseDeps {
   return {
     getPullRequestState: mock(async () => prState()),
     getRequiredChecksForSha: mock(async () => checks()),
+    getPullRequestDiffSummary: mock(async () => ({ files: [{ path: "src/a.ts", additions: 1, deletions: 0, status: "modified" }], totalAdditions: 1, totalDeletions: 0, fileCount: 1, truncated: false })),
     mergePullRequest: mock(async () => ({ merged: true as const, sha: "mergedsha" })),
     closePullRequest: mock(async () => ({ closed: true as const, state: "CLOSED" })),
     repoHasWorkflows: mock(async () => false),
     getSelfLogin: mock(async () => "octo-bot"),
     readMissions: mock(async () => []),
     loadAllUnits: mock(async () => []),
+    upsertMission: mock(async () => undefined),
+    upsertUnit: mock(async () => undefined) as typeof realUpsertUnit,
     ...overrides,
   }
 }
 
-function toolOf(name: "merge_pr" | "close_pr", deps: MergeCloseDeps) {
+function toolOf(name: "merge_pr" | "close_pr" | "abandon_mission" | "add_units", deps: MergeCloseDeps) {
   state.githubAgentToken = "agent-token"
   const tool = createFirstMateTools(deps).find((t) => t.toolNameHttp === name)
   if (tool === undefined) throw new Error(`${name} tool not found`)
@@ -180,6 +184,20 @@ describe("merge_pr", () => {
     })
     expect(res.isError).toBe(true)
     expect((parsed(res).error as { message: string }).message).toContain("UNKNOWN")
+    expect(deps.mergePullRequest).not.toHaveBeenCalled()
+  })
+
+  test("refuses to merge an empty PR", async () => {
+    const deps = makeDeps({
+      getPullRequestDiffSummary: mock(async () => ({ files: [], totalAdditions: 0, totalDeletions: 0, fileCount: 0, truncated: false })),
+    })
+    const res = await toolOf("merge_pr", deps).handler({
+      repo: "octo/repo",
+      pr: 7,
+      expected_head_sha: "reviewedsha",
+    })
+    expect(res.isError).toBe(true)
+    expect((parsed(res).error as { message: string }).message).toContain("empty diff")
     expect(deps.mergePullRequest).not.toHaveBeenCalled()
   })
 
@@ -288,6 +306,39 @@ describe("merge_pr", () => {
   })
 })
 
+describe("mission unit tools", () => {
+  test("abandon_mission updates the mission and terminalizes live units", async () => {
+    const m = activeMission()
+    const row = unit({ terminal: false })
+    const deps = makeDeps({ readMissions: mock(async () => [m]), loadAllUnits: mock(async () => [row]) })
+    const res = await toolOf("abandon_mission", deps).handler({ mission_id: "m1", reason: "paused" })
+    expect(res.isError).toBeUndefined()
+    expect(parsed(res).abandoned).toBe(true)
+    expect(deps.upsertMission).toHaveBeenCalledWith(expect.objectContaining({ id: "m1", status: "abandoned" }))
+    expect(row.terminal).toBe(true)
+    expect(row.blockingDecisionId).toBeNull()
+    expect(deps.upsertUnit).toHaveBeenCalledWith({ owner: "octo", name: "repo" }, row)
+  })
+
+  test("add_units appends units to an active mission", async () => {
+    const m = activeMission()
+    const written: UnitRow[] = []
+    const deps = makeDeps({
+      readMissions: mock(async () => [m]),
+      upsertUnit: mock(async (_repo: RepoRef, row: UnitRow) => { written.push(row) }) as typeof realUpsertUnit,
+    })
+    const res = await toolOf("add_units", deps).handler({
+      mission_id: "m1",
+      units: [{ title: "A" }, { title: "B", dependsOn: [0], agent: "anthropic" }],
+    })
+    expect(res.isError).toBeUndefined()
+    expect(parsed(res).added).toBe(2)
+    expect(written.map((row) => row.title)).toEqual(["A", "B"])
+    expect(written[1]?.dependsOn).toEqual([written[0]!.id!])
+    expect(written[1]?.agent).toBe("anthropic")
+  })
+})
+
 describe("close_pr", () => {
   test("refuses an unowned PR without allow_unowned", async () => {
     const deps = makeDeps({
@@ -300,11 +351,16 @@ describe("close_pr", () => {
     expect(deps.closePullRequest).not.toHaveBeenCalled()
   })
 
-  test("closes a bot-authored PR", async () => {
-    const deps = makeDeps()
+  test("closes a bot-authored PR and marks correlated units terminal", async () => {
+    const row = unit({ pr: 7, terminal: false })
+    const deps = makeDeps({ loadAllUnits: mock(async () => [row]) })
     const res = await toolOf("close_pr", deps).handler({ repo: "octo/repo", pr: 7 })
     expect(res.isError).toBeUndefined()
     expect(parsed(res).closed).toBe(true)
+    expect(row.terminal).toBe(true)
+    expect(row.artifact).toBe("pr_closed")
+    expect(row.validation).toBe("cancelled_external_close")
+    expect(deps.upsertUnit).toHaveBeenCalledWith({ owner: "octo", name: "repo" }, row)
     expect(deps.closePullRequest).toHaveBeenCalledWith({ owner: "octo", repo: "repo" }, 7)
   })
 

@@ -7,13 +7,14 @@ import {
   closePullRequest as realClosePullRequest,
   commitFiles,
   getPullRequestState as realGetPullRequestState,
+  getPullRequestDiffSummary as realGetPullRequestDiffSummary,
   getRequiredChecksForSha as realGetRequiredChecksForSha,
   getSelfLogin as realGetSelfLogin,
   mergePullRequest as realMergePullRequest,
   repoHasWorkflows as realRepoHasWorkflows,
 } from "~/lib/agent/service"
 import type { RepoRef as AgentRepoRef } from "~/lib/agent/types"
-import { advance as advanceController, buildBoard, type HumanDecision, type ModelAnswer } from "~/lib/first-mate/controller"
+import { addUnitsToMission, advance as advanceController, buildBoard, summarizeInactiveMissions, type HumanDecision, type ModelAnswer } from "~/lib/first-mate/controller"
 import { buildScaffoldFiles } from "~/lib/first-mate/scaffold-spec"
 import {
   createScaffoldBranch,
@@ -24,6 +25,7 @@ import {
   parseRepoSlug,
 } from "~/lib/first-mate/scaffold-helpers"
 import { loadAllUnits, readMissions, upsertMission, type Mission } from "~/lib/first-mate/registry"
+import { upsertUnit as realUpsertUnit } from "~/lib/first-mate/ledger"
 import { AnswerInbox } from "~/lib/first-mate/scheduler/answer-inbox"
 import { SchedulerLease, makeDriveGate } from "~/lib/first-mate/scheduler/lease"
 import { Tier1Shadow, fromModelRequest, shadowEnabled } from "~/lib/first-mate/scheduler/shadow"
@@ -73,6 +75,17 @@ interface MissionStatusRow {
   status: Mission["status"]
   counts: Record<string, number>
   blocked: number
+  units: Array<{
+    unitId: string
+    issue: number | null
+    pr: number | null
+    phase: UnitRow["phase"]
+    provider: UnitRow["provider"]
+    validation: UnitRow["validation"]
+    model?: string
+    blockedReason?: string
+  }>
+  summary: { done: number; failed: number }
 }
 
 class FirstMateToolInputError extends Error {
@@ -96,24 +109,30 @@ type MergeMethod = "merge" | "squash" | "rebase"
 export interface MergeCloseDeps {
   getPullRequestState: typeof realGetPullRequestState
   getRequiredChecksForSha: typeof realGetRequiredChecksForSha
+  getPullRequestDiffSummary: typeof realGetPullRequestDiffSummary
   mergePullRequest: typeof realMergePullRequest
   closePullRequest: typeof realClosePullRequest
   repoHasWorkflows: typeof realRepoHasWorkflows
   getSelfLogin: typeof realGetSelfLogin
   readMissions: typeof readMissions
   loadAllUnits: typeof loadAllUnits
+  upsertMission: typeof upsertMission
+  upsertUnit: typeof realUpsertUnit
 }
 
 function defaultMergeCloseDeps(): MergeCloseDeps {
   return {
     getPullRequestState: realGetPullRequestState,
     getRequiredChecksForSha: realGetRequiredChecksForSha,
+    getPullRequestDiffSummary: realGetPullRequestDiffSummary,
     mergePullRequest: realMergePullRequest,
     closePullRequest: realClosePullRequest,
     repoHasWorkflows: realRepoHasWorkflows,
     getSelfLogin: realGetSelfLogin,
     readMissions,
     loadAllUnits,
+    upsertMission,
+    upsertUnit: realUpsertUnit,
   }
 }
 
@@ -276,6 +295,7 @@ export function createFirstMateTools(
         top_k: numberProp("Maximum model and human requests to return."),
         max_in_flight_per_provider: numberProp("Maximum active units per cloud-agent provider."),
         mission_id: stringProp("Optional mission id to scope the drive to a single mission. Absent → global sweep across all missions."),
+        include_all: boolProp("When true, include inactive missions in the board. Default returns active missions only and summarizes inactive counts."),
       }, []),
       async (args) => {
         const modelAnswers = optionalModelAnswers(args)
@@ -285,6 +305,7 @@ export function createFirstMateTools(
           topK: optionalNumber(args, "top_k"),
           maxInFlightPerProvider: optionalNumber(args, "max_in_flight_per_provider"),
           missionId: optionalString(args, "mission_id"),
+          includeAll: optionalBoolean(args, "include_all") ?? false,
           answerQueue: answerInbox,
           // When this MCP/heartbeat path is the drive holder it must apply the
           // SAME safety envelope as the daemon: fence every ledger write in the
@@ -310,6 +331,7 @@ export function createFirstMateTools(
         }
         return ok({
           board: result.board,
+          inactiveSummary: summarizeInactiveMissions(await deps.readMissions()),
           needsModel: result.needsModel,
           needsHuman: result.needsHuman,
           applied_count: result.applied.length,
@@ -323,11 +345,17 @@ export function createFirstMateTools(
     ),
     tool(
       "board",
-      "Read the first-mate board without waking the controller.",
-      objectSchema({}, []),
-      async () => {
+      "Read compact board status. Defaults to active missions only; pass include_all to include inactive missions.",
+      objectSchema({
+        include_all: boolProp("When true, include inactive missions in the board. Default returns active missions only and summarizes inactive counts."),
+      }, []),
+      async (args) => {
+        const includeAll = optionalBoolean(args, "include_all") ?? false
         const [missions, units] = await Promise.all([readMissions(), loadAllUnits()])
-        return ok({ board: buildBoard(units, missions) })
+        return ok({
+          board: buildBoard(units, missions, { includeAll }),
+          inactiveSummary: summarizeInactiveMissions(missions),
+        })
       },
     ),
     tool(
@@ -428,21 +456,100 @@ export function createFirstMateTools(
         }
 
         if (live.state.toUpperCase() === "CLOSED") {
-          return ok({ closed: true, state: "CLOSED", note: "already closed" })
+          const reconciled = await reconcileClosedPr(repo, pr, deps)
+          return ok({ closed: true, state: "CLOSED", note: "already closed", reconciled })
         }
         const result = await deps.closePullRequest(repo, pr)
-        return ok({ closed: result.closed, state: result.state })
+        const reconciled = await reconcileClosedPr(repo, pr, deps)
+        return ok({ closed: result.closed, state: result.state, reconciled })
+      },
+    ),
+    tool(
+      "add_units",
+      "Add dispatchable units to an existing active first-mate mission. DependsOn entries are 0-based indices within the submitted units list.",
+      objectSchema({
+        mission_id: stringProp("Mission id to add units to."),
+        units: arrayOfObjectsProp(
+          "Units to add to the mission.",
+          {
+            title: stringProp("Unit title."),
+            repo: stringProp("Optional owner/name repo. Defaults to the mission's first repo."),
+            agent: enumProp(["copilot", "anthropic", "openai"], "Optional cloud-agent provider. Defaults to copilot."),
+            dependsOn: { type: "array", items: { type: "number" }, description: "Optional 0-based dependency indices into this units list." },
+            model: stringProp("Optional model override for this unit."),
+          },
+          ["title"],
+        ),
+      }, ["mission_id", "units"]),
+      async (args) => {
+        const missionId = requiredString(args, "mission_id")
+        const missions = await deps.readMissions()
+        const mission = missions.find((entry) => entry.id === missionId)
+        if (mission === undefined) {
+          return errorResult(new FirstMateToolInputError("MISSION_NOT_FOUND", `mission ${missionId} was not found`))
+        }
+        if (mission.status !== "active") {
+          return errorResult(new FirstMateToolInputError("MISSION_NOT_ACTIVE", `mission ${missionId} is ${mission.status}; only active missions can receive units`))
+        }
+        const units = optionalRecordArray(args, "units")
+        if (units === undefined || units.length === 0) {
+          return errorResult(new FirstMateToolInputError("INVALID_ARGUMENT", "arguments.units must contain at least one unit"))
+        }
+        const created = await addUnitsToMission(mission, units, deps)
+        return ok({ missionId, added: created })
+      },
+    ),
+    tool(
+      "abandon_mission",
+      "Mark a first-mate mission abandoned so it drops from the active board. Existing units are marked terminal without merging.",
+      objectSchema({
+        mission_id: stringProp("Mission id to abandon."),
+        reason: stringProp("Optional short reason for the abandonment."),
+      }, ["mission_id"]),
+      async (args) => {
+        const missionId = requiredString(args, "mission_id")
+        const reason = optionalString(args, "reason")
+        const missions = await deps.readMissions()
+        const mission = missions.find((entry) => entry.id === missionId)
+        if (mission === undefined) {
+          return errorResult(new FirstMateToolInputError("MISSION_NOT_FOUND", `mission ${missionId} was not found`))
+        }
+        if (mission.status !== "abandoned") {
+          await deps.upsertMission({
+            ...mission,
+            status: "abandoned",
+            updatedMs: Date.now(),
+          })
+        }
+        const units = (await deps.loadAllUnits(missionId)).filter((unit) => unit.terminal !== true)
+        for (const unit of units) {
+          unit.terminal = true
+          unit.phase = "done"
+          unit.cancelledBy = "external"
+          unit.blockingDecisionId = null
+          await deps.upsertUnit(unit.repo, unit)
+        }
+        return ok({ abandoned: true, missionId, terminalUnits: units.length, ...(reason !== undefined ? { reason } : {}) })
       },
     ),
     tool(
       "mission_status",
-      "Read compact status for all first-mate missions, or for one mission id.",
+      "Read compact status for all first-mate missions, or for one mission id. Defaults to active missions only; pass include_all for inactive missions too.",
       objectSchema({
         mission_id: stringProp("Optional mission id to filter to."),
+        include_all: boolProp("When true, include inactive missions in the status list. Default returns active missions only and summarizes inactive counts."),
       }, []),
       async (args) => {
         const [missions, units] = await Promise.all([readMissions(), loadAllUnits()])
-        return ok({ missions: buildMissionStatus(missions, units, optionalString(args, "mission_id")) })
+        return ok({
+          missions: buildMissionStatus(
+            missions,
+            units,
+            optionalString(args, "mission_id"),
+            optionalBoolean(args, "include_all") ?? false,
+          ),
+          inactiveSummary: summarizeInactiveMissions(missions),
+        })
       },
     ),
   ])
@@ -554,6 +661,11 @@ async function evaluateMergeSafety(
     return { ok: false, reason: `PR is not cleanly mergeable (mergeable=${live.mergeable})` }
   }
 
+  const diff = await deps.getPullRequestDiffSummary(repo, pr)
+  if (!diff.truncated && diff.fileCount === 0 && diff.totalAdditions === 0 && diff.totalDeletions === 0) {
+    return { ok: false, reason: "PR has no changed files and no additions/deletions; refusing to merge an empty diff" }
+  }
+
   const checks = await deps.getRequiredChecksForSha(repo, live.headSha)
   if (checks.rollup === "failing") {
     const names = checks.failing.map((f) => f.name).filter((n) => n.length > 0).join(", ")
@@ -614,6 +726,27 @@ function loginMatches(a: string | undefined, b: string | undefined): boolean {
   return na.length > 0 && na === nb
 }
 
+async function reconcileClosedPr(
+  repo: AgentRepoRef,
+  pr: number,
+  deps: MergeCloseDeps,
+): Promise<{ terminalUnits: number }> {
+  const units = await deps.loadAllUnits()
+  const targets = units.filter(
+    (unit) => unit.pr === pr && repoMatchesTarget(unit.repo, repo) && unit.terminal !== true,
+  )
+  for (const unit of targets) {
+    unit.terminal = true
+    unit.phase = "done"
+    unit.artifact = "pr_closed"
+    unit.validation = "cancelled_external_close"
+    unit.cancelledBy = "external"
+    unit.blockingDecisionId = null
+    await deps.upsertUnit(unit.repo, unit)
+  }
+  return { terminalUnits: targets.length }
+}
+
 function repoMatchesTarget(missionRepo: RepoRef, target: AgentRepoRef): boolean {
   return (
     missionRepo.owner.toLowerCase() === target.owner.toLowerCase()
@@ -661,18 +794,23 @@ function buildMissionStatus(
   missions: Mission[],
   units: UnitRow[],
   missionId: string | undefined,
+  includeAll: boolean,
 ): MissionStatusRow[] {
   const unitsByMission = groupUnitsByMission(units)
   return missions
     .filter((mission) => missionId === undefined || mission.id === missionId)
+    .filter((mission) => includeAll || mission.status === "active")
     .map((mission) => {
       const missionUnits = unitsByMission.get(mission.id) ?? []
+      const board = buildBoard(missionUnits, [mission], { includeAll: true })[0]
       return {
         missionId: mission.id,
         title: mission.goal,
         status: mission.status,
-        counts: countsByPhase(missionUnits),
-        blocked: blockedCount(missionUnits),
+        counts: board?.counts ?? {},
+        blocked: board?.blocked ?? 0,
+        units: board?.units ?? [],
+        summary: board?.summary ?? { done: 0, failed: 0 },
       }
     })
 }
@@ -685,16 +823,6 @@ function groupUnitsByMission(units: UnitRow[]): Map<string, UnitRow[]> {
     result.set(unit.missionId, missionUnits)
   }
   return result
-}
-
-function countsByPhase(units: UnitRow[]): Record<string, number> {
-  const counts: Record<string, number> = {}
-  for (const unit of units) counts[unit.phase] = (counts[unit.phase] ?? 0) + 1
-  return counts
-}
-
-function blockedCount(units: UnitRow[]): number {
-  return units.filter((unit) => Boolean(unit.blockingDecisionId)).length
 }
 
 function parseRepoRef(value: string): RepoRef {

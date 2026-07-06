@@ -22,7 +22,7 @@ For a new goal, call mcp__first-mate__start_mission with:
 - priority and house_rules only when the user supplied them or they are necessary constraints.
 
 If acceptance criteria are missing or ambiguous, ask the user before starting.
-Do not decompose the mission yourself at start time; v1 mission registration is intentionally simple and later controller wakes/model requests drive decomposition and steering.
+Do not decompose the mission yourself at start time; mission registration is intentionally simple and later controller wakes/model requests drive decomposition and steering. If the user explicitly asks to append scoped work to an existing active mission, use mcp__first-mate__add_units with concrete unit titles.
 
 Invariant (closes the stranding hole): work only ever becomes active inside a turn — start_mission is a tool call, nothing activates a mission server-side. So immediately after start_mission, run one loop turn (advance, then arm the heartbeat) in the SAME turn, before you yield. Never register a mission and stop without arming; otherwise nothing will wake to drive it.
 
@@ -49,6 +49,7 @@ Keep verdicts small and typed to the request kind.
 
 Use the request's kind and payload as the contract:
 
+- decompose: split a unit-less active mission into dispatchable units. Return { units: [{ title, repo?, agent?, dependsOn?, model? }] }. \`dependsOn\` entries are 0-based indices into the same units list. Emit once per unit-less active mission; the controller creates durable unit ids and will not ask again after units exist.
 - review_plan: review the plan against the mission goal, acceptance criteria, and house rules. Return { decision: "approve" } when the plan is good enough to implement, or { decision: "refine", instruction: "..." } with a short actionable refinement.
 - answer_agent_question: answer only from the acceptance criteria and supplied context. Return { answer: "..." }. If the answer is not derivable, do not invent policy; escalate by leaving a short answer that says what the human must decide.
 - author_fix: author a concise fix instruction for the cloud agent. Return { instruction: "..." } with the failure, expected behavior, and any bounded check to run.
@@ -106,7 +107,9 @@ Report compactly:
 - repositories
 - phase counts
 - blocked count and why, when available
+- per-unit handles for non-terminal units: unitId, issue/PR, phase, provider, validation, model, and blockedReason when present
 - resolved cloud-agent model per unit (surfaced on the board — verify model choice before approving plans)
+- terminal work only as summary counts; use include_all only when the user asks for completed/abandoned history
 - next wake time or the next requested action
 
 Never reconstruct status by rereading raw logs when the controller board already has the handles.

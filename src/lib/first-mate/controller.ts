@@ -147,6 +147,8 @@ export interface AdvanceInput {
    * mission. Absent → global sweep (today's behavior, unchanged).
    */
   missionId?: string
+  /** Include terminal/inactive missions in the returned board. Default false keeps the board active-only. */
+  includeAll?: boolean
   /**
    * Phase 1.3 lease gate. Returns whether THIS caller currently holds the
    * drive lease. When it returns false, advance() observes-and-defers (no
@@ -228,19 +230,39 @@ export interface HumanRequest {
   packetHtmlPath?: string
 }
 
+export interface BoardUnitRow {
+  unitId: string
+  issue: number | null
+  pr: number | null
+  phase: UnitRow["phase"]
+  provider: UnitRow["provider"]
+  validation: UnitRow["validation"]
+  model?: string
+  blockedReason?: string
+}
+
 export interface BoardRow {
   missionId: string
   title: string
+  status: Mission["status"]
   repos: string[]
   /** Phase tallies for ACTIVE (non-terminal) units only — keeps the board about live work. */
   counts: Record<string, number>
   blocked: number
+  /** Compact handles for live units only; terminal units are counted in `summary`. */
+  units: BoardUnitRow[]
   /**
    * #4: compact terminal-unit tally so finished work stays visible without
    * inflating the per-phase counts. `done` = merged; `failed` = terminal without
    * a merge (abandoned / cancelled).
    */
   summary: { done: number; failed: number }
+}
+
+export interface InactiveMissionSummary {
+  done: number
+  abandoned: number
+  failed: number
 }
 
 export interface AdvanceResult {
@@ -258,6 +280,14 @@ export interface AdvanceResult {
   nextWakeSeconds: number | null
   /** Phase 1.3: whether this call actually drove (false when it deferred as a non-lease-holder). */
   drove?: boolean
+}
+
+export interface AddUnitSpec {
+  title: string
+  repo?: string
+  agent?: AgentKey
+  dependsOn?: number[]
+  model?: string
 }
 
 interface Evidence {
@@ -1237,24 +1267,17 @@ function asAgentKey(value: string | undefined): AgentKey | undefined {
  * `{ units: [{ title, repo?, agent?, dependsOn? }] }`. Each unit gets a stable
  * `id` so it survives the queued→dispatched transition without duplicating.
  */
-async function applyDecomposeAnswer(
-  answer: ModelAnswer,
-  missions: Mission[],
-  deps: ControllerDeps,
-  applied: string[],
-): Promise<void> {
-  const missionId = answer.requestId.slice("decompose:".length)
-  const mission = missions.find((m) => m.id === missionId)
-  if (mission === undefined) return
-  const verdict = asRecord(answer.verdict) ?? {}
-  const rawUnits = Array.isArray(verdict.units) ? verdict.units : []
-
+export async function addUnitsToMission(
+  mission: Mission,
+  rawUnits: unknown[],
+  deps: Pick<ControllerDeps, "upsertUnit">,
+): Promise<number> {
   // Collect the valid specs in order first, so a unit's `dependsOn` (0-based
-  // decompose-list indices) can be resolved to the created units' stable ids —
-  // plan-first units have no issue number to depend on.
-  const specs: Array<{ spec: Record<string, unknown>; title: string; repo: RepoRef }> = []
-  for (const raw of rawUnits) {
-    const spec = asRecord(raw) ?? {}
+  // list indices) can be resolved to the created units' stable ids — plan-first
+  // units have no issue number to depend on.
+  const specs: Array<{ rawIndex: number; id: string; spec: Record<string, unknown>; title: string; repo: RepoRef }> = []
+  for (let rawIndex = 0; rawIndex < rawUnits.length; rawIndex += 1) {
+    const spec = asRecord(rawUnits[rawIndex]) ?? {}
     const title = stringValue(spec.title)
     if (title === undefined || title.length === 0) continue
     const repo = parseRepoRef(stringValue(spec.repo)) ?? mission.repos[0]
@@ -1262,26 +1285,25 @@ async function applyDecomposeAnswer(
     // #2 — validate the explicit per-unit model at INPUT time (before any unit
     // is created), so a typo fails FAST with the actionable message here rather
     // than throwing every wake at dispatch (retries never bump for a bad model,
-    // so it would never converge). Runs inside applySubmittedAnswers' per-answer
-    // try/catch. Unspecified per-unit model → the mission default (already
-    // validated at start_mission) → resolves silently.
+    // so it would never converge). Unspecified per-unit model → the mission
+    // default (already validated at start_mission) → resolves silently.
     resolveCloudAgentModel(stringValue(spec.model) ?? mission.defaultModel)
-    specs.push({ spec, title, repo })
+    specs.push({ rawIndex, id: randomUUID(), spec, title, repo })
   }
-  const ids = specs.map(() => randomUUID())
+  const idByRawIndex = new Map(specs.map((entry) => [entry.rawIndex, entry.id]))
 
   let created = 0
-  for (let i = 0; i < specs.length; i += 1) {
-    const { spec, title, repo } = specs[i]!
+  for (const { rawIndex, id, spec, title, repo } of specs) {
     const dependsOn = (Array.isArray(spec.dependsOn) ? spec.dependsOn : [])
       .filter(
         (idx): idx is number =>
-          typeof idx === "number" && Number.isInteger(idx) && idx >= 0 && idx < ids.length && idx !== i,
+          typeof idx === "number" && Number.isInteger(idx) && idx >= 0 && idx < rawUnits.length && idx !== rawIndex,
       )
-      .map((idx) => ids[idx]!)
+      .map((idx) => idByRawIndex.get(idx))
+      .filter((id): id is string => id !== undefined)
     const unit: UnitRow = {
-      id: ids[i]!,
-      missionId,
+      id,
+      missionId: mission.id,
       repo,
       issue: null,
       pr: null,
@@ -1289,9 +1311,8 @@ async function applyDecomposeAnswer(
       agent: asAgentKey(stringValue(spec.agent)) ?? "copilot",
       botLogin: "",
       dispatchMode: "plan",
-      // Per-unit model override from the decompose spec, else the mission
-      // default. Absent → the controller resolves to DEFAULT_CODEX_MODEL at
-      // dispatch (see resolveCloudAgentModel).
+      // Per-unit model override from the spec, else the mission default. Absent →
+      // the controller resolves to DEFAULT_CODEX_MODEL at dispatch.
       model: stringValue(spec.model) ?? mission.defaultModel,
       provider: "none",
       phase: "plan",
@@ -1304,6 +1325,21 @@ async function applyDecomposeAnswer(
     await deps.upsertUnit(repo, unit)
     created += 1
   }
+  return created
+}
+
+async function applyDecomposeAnswer(
+  answer: ModelAnswer,
+  missions: Mission[],
+  deps: ControllerDeps,
+  applied: string[],
+): Promise<void> {
+  const missionId = answer.requestId.slice("decompose:".length)
+  const mission = missions.find((m) => m.id === missionId)
+  if (mission === undefined || mission.status !== "active") return
+  const verdict = asRecord(answer.verdict) ?? {}
+  const rawUnits = Array.isArray(verdict.units) ? verdict.units : []
+  const created = await addUnitsToMission(mission, rawUnits, deps)
   if (created > 0) applied.push(`decomposed ${missionId} into ${created} unit(s)`)
 }
 
@@ -2212,11 +2248,16 @@ async function dispatchWave(
   }
 }
 
-export function buildBoard(units: UnitRow[], missions: Mission[]): BoardRow[] {
+export function buildBoard(
+  units: UnitRow[],
+  missions: Mission[],
+  options: { includeAll?: boolean } = {},
+): BoardRow[] {
   const rows: BoardRow[] = []
-  for (const mission of missions.filter((entry) => entry.status === "active")) {
+  for (const mission of missions.filter((entry) => options.includeAll === true || entry.status === "active")) {
     const missionUnits = units.filter((unit) => unit.missionId === mission.id)
     const counts: Record<string, number> = {}
+    const unitRows: BoardUnitRow[] = []
     let done = 0
     let failed = 0
     for (const unit of missionUnits) {
@@ -2230,19 +2271,41 @@ export function buildBoard(units: UnitRow[], missions: Mission[]): BoardRow[] {
         continue
       }
       counts[unit.phase] = (counts[unit.phase] ?? 0) + 1
+      unitRows.push({
+        unitId: unit.id ?? unitHandle(unit),
+        issue: unit.issue,
+        pr: unit.pr,
+        phase: unit.phase,
+        provider: unit.provider,
+        validation: unit.validation,
+        ...(unit.model !== undefined ? { model: unit.model } : {}),
+        ...(unit.blockingDecisionId ? { blockedReason: unit.blockingDecisionId } : {}),
+      })
     }
     rows.push({
       missionId: mission.id,
       title: mission.goal,
+      status: mission.status,
       repos: mission.repos.map(repoLabel),
       counts,
-      blocked: missionUnits.filter(
-        (unit) => unit.terminal !== true && unit.blockingDecisionId,
-      ).length,
+      blocked: unitRows.filter((unit) => unit.blockedReason !== undefined).length,
+      units: unitRows,
       summary: { done, failed },
     })
   }
   return rows
+}
+
+export function summarizeInactiveMissions(missions: Mission[]): InactiveMissionSummary {
+  let done = 0
+  let abandoned = 0
+  let failed = 0
+  for (const mission of missions) {
+    if (mission.status === "done") done += 1
+    else if (mission.status === "abandoned") abandoned += 1
+    else if (mission.status !== "active") failed += 1
+  }
+  return { done, abandoned, failed }
 }
 
 function compareQueued<T>(a: QueuedRequest<T>, b: QueuedRequest<T>): number {
@@ -2350,7 +2413,7 @@ export async function advance(
         ? observedMissions.filter((m) => m.id === input.missionId)
         : observedMissions
       const observedById = missionMap(scopedMissions)
-      const observedBoard = buildBoard(scopedUnits, scopedMissions)
+      const observedBoard = buildBoard(scopedUnits, scopedMissions, { includeAll: input.includeAll })
       const observedWakeAt = nextWakeAt(scopedUnits, observedById)
       // Routing-gap (Chunk A step 2): a deferring non-holder still SURFACES the
       // work pending for the lead/human. The drive-holder (daemon) has escalated
@@ -2660,7 +2723,7 @@ export async function advance(
       units,
     )
 
-    const board = buildBoard(scopedUnits, scopedMissions)
+    const board = buildBoard(scopedUnits, scopedMissions, { includeAll: input.includeAll })
     const wakeAt = nextWakeAt(scopedUnits, missionsById)
     await pruneTerminalRepos(scopedUnits, deps)
 
