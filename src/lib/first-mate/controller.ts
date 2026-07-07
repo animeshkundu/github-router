@@ -1274,6 +1274,61 @@ function asAgentKey(value: string | undefined): AgentKey | undefined {
     : undefined
 }
 
+function validRawUnitIndices(rawUnits: unknown[]): Set<number> {
+  const indices = new Set<number>()
+  for (let index = 0; index < rawUnits.length; index += 1) {
+    const spec = asRecord(rawUnits[index])
+    const title = spec === undefined ? undefined : stringValue(spec.title)
+    if (title !== undefined && title.length > 0) indices.add(index)
+  }
+  return indices
+}
+
+function dependsOnIndices(
+  spec: Record<string, unknown>,
+  rawIndex: number,
+  validIndices: ReadonlySet<number>,
+): number[] {
+  if (!Array.isArray(spec.dependsOn)) return []
+  return spec.dependsOn.filter(
+    (idx): idx is number =>
+      typeof idx === "number" &&
+      Number.isInteger(idx) &&
+      idx !== rawIndex &&
+      validIndices.has(idx),
+  )
+}
+
+function hasDependsOnCycle(rawUnits: unknown[]): boolean {
+  const validIndices = validRawUnitIndices(rawUnits)
+  const graph = new Map<number, number[]>()
+  for (const index of validIndices) {
+    const spec = asRecord(rawUnits[index]) ?? {}
+    const rawDependsOn = Array.isArray(spec.dependsOn) ? spec.dependsOn : []
+    if (rawDependsOn.some((idx) => idx === index)) return true
+    graph.set(index, dependsOnIndices(spec, index, validIndices))
+  }
+
+  const visiting = new Set<number>()
+  const visited = new Set<number>()
+  const visit = (index: number): boolean => {
+    if (visiting.has(index)) return true
+    if (visited.has(index)) return false
+    visiting.add(index)
+    for (const dep of graph.get(index) ?? []) {
+      if (visit(dep)) return true
+    }
+    visiting.delete(index)
+    visited.add(index)
+    return false
+  }
+
+  for (const index of graph.keys()) {
+    if (visit(index)) return true
+  }
+  return false
+}
+
 /**
  * Turn a model `decompose` answer into queued units. This is the mission→units
  * step: `start_mission` only registers the mission; `advance` emits one
@@ -1288,8 +1343,20 @@ export async function addUnitsToMission(
   existingUnits: UnitRow[] = [],
 ): Promise<number> {
   // Collect the valid specs in order first, so a unit's `dependsOn` (0-based
-  // list indices) can be resolved to the created units' stable ids — plan-first
-  // units have no issue number to depend on.
+  // list indices) can be resolved to stable ids — including ids for duplicate
+  // specs that map to pre-existing units.
+  const idByGoalHash = new Map(
+    existingUnits
+      .filter((unit) => unit.missionId === mission.id && unit.terminal !== true)
+      .map((unit) => [unit.goalHash, unit.id] as const)
+      .filter(
+        (entry): entry is readonly [string, string] =>
+          entry[0] !== undefined &&
+          entry[0].length > 0 &&
+          entry[1] !== undefined &&
+          entry[1].length > 0,
+      ),
+  )
   const existingGoalHashes = new Set(
     existingUnits
       .filter((unit) => unit.missionId === mission.id && unit.terminal !== true)
@@ -1297,6 +1364,7 @@ export async function addUnitsToMission(
       .filter((hash): hash is string => hash !== undefined && hash.length > 0),
   )
   const seenGoalHashes = new Set<string>()
+  const idByRawIndex = new Map<number, string>()
   const specs: Array<{ rawIndex: number; id: string; spec: Record<string, unknown>; title: string; repo: RepoRef; goalHash: string }> = []
   for (let rawIndex = 0; rawIndex < rawUnits.length; rawIndex += 1) {
     const spec = asRecord(rawUnits[rawIndex]) ?? {}
@@ -1305,25 +1373,31 @@ export async function addUnitsToMission(
     const repo = parseRepoRef(stringValue(spec.repo)) ?? mission.repos[0]
     if (repo === undefined) continue
     const goalHash = unitGoalHash(mission, title, repo)
-    if (existingGoalHashes.has(goalHash) || seenGoalHashes.has(goalHash)) continue
+    const existingId = idByGoalHash.get(goalHash)
+    if (existingGoalHashes.has(goalHash) || seenGoalHashes.has(goalHash)) {
+      if (existingId !== undefined) idByRawIndex.set(rawIndex, existingId)
+      continue
+    }
     // #2 — validate the explicit per-unit model at INPUT time (before any unit
     // is created), so a typo fails FAST with the actionable message here rather
     // than throwing every wake at dispatch (retries never bump for a bad model,
     // so it would never converge). Unspecified per-unit model → the mission
     // default (already validated at start_mission) → resolves silently.
     resolveCloudAgentModel(stringValue(spec.model) ?? mission.defaultModel)
+    const id = randomUUID()
     seenGoalHashes.add(goalHash)
-    specs.push({ rawIndex, id: randomUUID(), spec, title, repo, goalHash })
+    idByGoalHash.set(goalHash, id)
+    idByRawIndex.set(rawIndex, id)
+    specs.push({ rawIndex, id, spec, title, repo, goalHash })
   }
-  const idByRawIndex = new Map(specs.map((entry) => [entry.rawIndex, entry.id]))
+  if (hasDependsOnCycle(rawUnits)) {
+    throw new Error("decompose units contain a cyclic dependsOn graph")
+  }
 
+  const validIndices = validRawUnitIndices(rawUnits)
   let created = 0
   for (const { rawIndex, id, spec, title, repo, goalHash } of specs) {
-    const dependsOn = (Array.isArray(spec.dependsOn) ? spec.dependsOn : [])
-      .filter(
-        (idx): idx is number =>
-          typeof idx === "number" && Number.isInteger(idx) && idx >= 0 && idx < rawUnits.length && idx !== rawIndex,
-      )
+    const dependsOn = dependsOnIndices(spec, rawIndex, validIndices)
       .map((idx) => idByRawIndex.get(idx))
       .filter((id): id is string => id !== undefined)
     const unit: UnitRow = {
@@ -1372,11 +1446,6 @@ async function applyDecomposeAnswer(
   const rawUnits = Array.isArray(verdict.units) ? verdict.units : []
   const existing = await deps.loadAllUnits(mission.id)
   const created = await addUnitsToMission(mission, rawUnits, deps, existing)
-  if (mission.everDecomposed !== true) {
-    mission.everDecomposed = true
-    mission.updatedMs = Date.now()
-    await upsertMissionDurable(mission, deps)
-  }
   if (created > 0) applied.push(`decomposed ${missionId} into ${created} unit(s)`)
 }
 

@@ -925,6 +925,20 @@ test("pruned-empty completed mission is marked done without a spurious decompose
   expect(result.needsModel).toHaveLength(0)
 })
 
+test("zero-unit decompose answer does not set everDecomposed or complete the mission", async () => {
+  const m = mission({ id: "m-zero" })
+  const h = harness([], [m])
+
+  const result = await advance({ modelAnswers: [{ requestId: "decompose:m-zero", verdict: { units: [] } }] }, h.deps)
+
+  expect(m.everDecomposed).toBeUndefined()
+  expect(m.status).toBe("active")
+  expect(result.needsModel).toContainEqual(expect.objectContaining({
+    requestId: "decompose:m-zero",
+    kind: "decompose",
+  }))
+})
+
 test("decomposed mission with a live unit stays active", async () => {
   const liveUnit = unit({ missionId: "m-live", provider: "in_progress", terminal: false })
   const m = mission({ id: "m-live", everDecomposed: true })
@@ -1008,6 +1022,52 @@ test("addUnitsToMission keeps dependsOn aligned to raw-unit indices when invalid
   expect(created).toBe(2)
   expect(written.map((row) => row.title)).toEqual(["first", "third"])
   expect(written[1]?.dependsOn).toEqual([written[0]!.id!])
+})
+
+test("addUnitsToMission rejects cyclic dependsOn graphs from lead-submitted decomposes", async () => {
+  const m = mission({ id: "m-add" })
+  const upsertMission = mock(async () => {})
+  const upsertUnit = mock(async () => {})
+
+  await expect(
+    addUnitsToMission(
+      m,
+      [{ title: "first", dependsOn: [1] }, { title: "second", dependsOn: [0] }],
+      { upsertMission, upsertUnit },
+    ),
+  ).rejects.toThrow("cyclic dependsOn")
+
+  expect(upsertUnit).not.toHaveBeenCalled()
+  expect(upsertMission).not.toHaveBeenCalled()
+})
+
+test("addUnitsToMission preserves dependency edges to duplicate-skipped existing units", async () => {
+  const m = mission({ id: "m-add" })
+  const existingUnits: UnitRow[] = []
+  await addUnitsToMission(
+    m,
+    [{ title: "A" }],
+    {
+      upsertMission: mock(async () => {}),
+      upsertUnit: mock(async (_repo, row) => { existingUnits.push(row) }),
+    },
+  )
+  const existingA = existingUnits[0]!
+  const written: UnitRow[] = []
+  const created = await addUnitsToMission(
+    m,
+    [{ title: "A" }, { title: "B", dependsOn: [0] }],
+    {
+      upsertMission: mock(async () => {}),
+      upsertUnit: mock(async (_repo, row) => { written.push(row) }),
+    },
+    existingUnits,
+  )
+
+  expect(created).toBe(1)
+  expect(written).toHaveLength(1)
+  expect(written[0]?.title).toBe("B")
+  expect(written[0]?.dependsOn).toEqual([existingA.id!])
 })
 
 test("addUnitsToMission does not persist everDecomposed before unit writes succeed", async () => {

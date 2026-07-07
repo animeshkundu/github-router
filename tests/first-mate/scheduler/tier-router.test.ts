@@ -31,6 +31,7 @@ describe("Phase 3 — decideRoute (escalate-by-default gate)", () => {
   test("decompose auto-answers only with a deterministic-verifier-accepted DAG", () => {
     expect(decideRoute("decompose", { ...good, wouldVerdict: { units: [{ title: "a" }] } }).autoAccept).toBe(true)
     expect(decideRoute("decompose", { ...good, wouldVerdict: { units: [{ title: "a", dependsOn: [0] }] } }).autoAccept).toBe(false)
+    expect(decideRoute("decompose", { ...good, wouldVerdict: { units: [{ title: "a", dependsOn: [1] }, { title: "b", dependsOn: [0] }] } }).autoAccept).toBe(false)
   })
 
   test("#6: a null/undefined verdict payload NEVER auto-accepts", () => {

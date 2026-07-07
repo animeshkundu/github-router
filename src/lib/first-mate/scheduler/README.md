@@ -1,10 +1,11 @@
 # first-mate scheduler (Phase 1)
 
-Server-side reliability layer for the first-mate controller. Phase 1 removes the
-Claude-side polling heartbeat as the wake source and adds the safety primitives
-the cross-lab design review required. **It does not change autonomy** — every
-judgment (`decompose` / `review_plan` / `judge_review` / `author_fix`) still
-escalates to the lead exactly as today.
+Server-side reliability layer for the first-mate controller. Phase 1 added the
+safety primitives the cross-lab design review required; Phase 2 adds default-on
+Tier1 shadow/live routing for a narrow non-merge offload envelope. `author_fix`,
+`answer_agent_question`, and `decompose` may auto-answer only when high-confidence,
+known, low-stakes, valid-shaped, and verifier/downstream-check safe; plan, judge,
+and merge-authorizing judgments still escalate.
 
 ## Modules
 
@@ -21,10 +22,13 @@ escalates to the lead exactly as today.
   (`stop()`) that never touches the proxy; a **stuck-unit watchdog** that
   escalates after N no-progress cycles. Driven via `tickOnce()` for hermetic,
   timer-free tests.
-- **`shadow.ts`** — Tier-1 **shadow mode** (Phase 2 scaffolding, log-only). It
-  records what a mid-tier model WOULD decide vs what the lead decided, building
-  the calibration record that later gates a narrow, verifiability-scoped live
-  rollout. Never influences control flow; disabled unless `GH_ROUTER_FM_SHADOW=1`.
+- **`shadow.ts`** — Tier-1 shadow/live router. It records what a mid-tier model
+  WOULD decide vs what the lead decided, and it can feed back auto-answers for
+  the safe allowlist (`author_fix`, `answer_agent_question`, `decompose`) only
+  under the confidence/known/low-stakes/verifier gates. Everything uncertain and
+  every plan/judge/merge-authorizing judgment escalates. Shadow logging and live
+  routing are default-on; opt out with `GH_ROUTER_FM_SHADOW=0` or
+  `GH_ROUTER_FM_TIER1_LIVE=0`.
 - **`index.ts`** — `createControllerDaemon()` wires the daemon to the real
   `advance()`; auto-spawned at boot (see below).
 
@@ -53,13 +57,12 @@ escalates to the lead exactly as today.
   write path (unit ledger + missions registry + decisions/approvals via
   `durable-store.commitJsonCas`); a token-verified atomic-claim stale-lock break
   in `withFileLock` (never unlink-to-steal). Always-on host is assumed.
-- **Before flipping default-on (remaining hardening):** a verifier-stall
-  wall-clock escalation (a unit awaiting a Copilot review that never lands
-  currently noops with no escalation — the `totalFixes` cap only advances on the
-  fix path); the AnswerInbox consumer must hard-reject `mode:"shadow"` records
-  independent of `GH_ROUTER_FM_TIER1_LIVE`; live Tier1 routing behind
-  verifiability gates + calibration; a Windows Job Object for the child.
-  `GH_ROUTER_FM_TIER1_LIVE` stays OFF and `DETERMINISTIC_VERIFIERS` stays empty.
+- **Remaining hardening:** a verifier-stall wall-clock escalation (a unit awaiting
+  a Copilot review that never lands currently noops with no escalation — the
+  `totalFixes` cap only advances on the fix path); the AnswerInbox consumer must
+  hard-reject `mode:"shadow"` records independent of `GH_ROUTER_FM_TIER1_LIVE`;
+  convergence accounting plus the full decision-table exposition (Phase 3); a
+  Windows Job Object for the child.
 
 ## Test
 

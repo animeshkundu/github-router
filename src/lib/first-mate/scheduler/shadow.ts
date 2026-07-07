@@ -5,24 +5,29 @@ import consola from "consola"
 
 import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
 import { resolveTierModel } from "~/lib/first-mate/model-tiers"
+import { resolveCloudAgentModel } from "~/lib/first-mate/task-model"
 import { PATHS } from "~/lib/paths"
 import { state } from "~/lib/state"
 
 /**
- * Phase 2 — Tier-1 SHADOW mode (log-only). For each `needsModel` judgment the
+ * Phase 2 — Tier-1 shadow/live router. For each `needsModel` judgment the
  * controller emits, the Tier Router packages the request WITH context + ledger
  * and asks a mid ("Tier1") model what verdict the lead WOULD give, recording
  * its would-be verdict + self-assessed confidence + novelty/stakes flags to a
  * durable calibration log alongside the lead's actual outcome.
  *
- * It NEVER auto-accepts and never feeds a decision back into the controller —
- * this is purely the evidence base that a later, verifiability-gated live
- * rollout will consult. All GitHub/agent-sourced text is treated as HOSTILE:
- * it is quarantined in an `untrusted` block, the code never parses stakes or
- * confidence out of it, and the model is instructed to treat it as data only.
+ * Tier1 can feed decisions back only for the narrow non-merge allowlist
+ * (`author_fix`, `answer_agent_question`, `decompose`) when confidence is high,
+ * novelty is known, stakes are low, the verdict shape is valid, and any
+ * kind-specific deterministic verifier passes. Every uncertain case and every
+ * plan/judge/merge-authorizing kind escalates. All GitHub/agent-sourced text is
+ * treated as HOSTILE: it is quarantined in an `untrusted` block, the code never
+ * parses stakes or confidence out of it, and the model is instructed to treat it
+ * as data only.
  *
- * Default-on unless `GH_ROUTER_FM_SHADOW=0`/`false`, so the heartbeat path gathers
- * calibration by default. The Tier1 judge is injectable so tests stay hermetic/offline.
+ * Shadow logging and live routing are default-on unless explicitly disabled with
+ * `GH_ROUTER_FM_SHADOW=0` or `GH_ROUTER_FM_TIER1_LIVE=0`. The Tier1 judge is
+ * injectable so tests stay hermetic/offline.
  */
 
 /** Trusted policy fields (set by us) vs quarantined untrusted repo/agent text. */
@@ -212,9 +217,9 @@ export class Tier1Shadow {
   }
 
   /**
-   * Run the Tier1 shadow judge for one request and log its would-be verdict.
-   * Returns the record (tests) or undefined when the judge declined. NEVER
-   * influences control flow.
+   * Run the Tier1 judge for one request and log its would-be verdict. Returns
+   * the record (tests) or undefined when the judge declined. This method only
+   * records; {@link route} is the method that can return an auto-answer decision.
    */
   async observe(req: ShadowJudgmentRequest): Promise<ShadowVerdictRecord | undefined> {
     const verdict = await this.judge(req)
@@ -257,13 +262,13 @@ export class Tier1Shadow {
 }
 
 /**
- * Phase 3 — narrow LIVE Tier1 gate. Auto-accept is OFF unless
- * GH_ROUTER_FM_TIER1_LIVE=1, and even then only for a conservative allowlist of
- * REVERSIBLE + deterministically-checkable judgment kinds, above a confidence
- * floor, and only when the model marks the case known + low-stakes. Everything
- * else — not-allowlisted, low-confidence, novel, high-stakes, review_plan,
- * judge_review — ESCALATES. Self-confidence alone is never sufficient: the
- * allowlist (reversibility/verifiability) is the real boundary.
+ * Phase 2 — narrow LIVE Tier1 gate. Auto-accept is default-on but only for a
+ * conservative allowlist of reversible/non-merge judgment kinds, above a
+ * confidence floor, and only when the model marks the case known + low-stakes.
+ * Everything else — not-allowlisted, low-confidence, novel, high-stakes,
+ * review_plan, judge_review, and merge-authorizing kinds — ESCALATES.
+ * Self-confidence alone is never sufficient: the allowlist plus deterministic
+ * verifiers/downstream checks are the real boundary.
  */
 export const TIER1_LIVE_ALLOWLIST: ReadonlySet<string> = new Set([
   "author_fix",
@@ -319,22 +324,63 @@ function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0
 }
 
-function validDependsOn(indices: unknown, rawIndex: number, total: number): boolean {
-  if (indices === undefined) return true
-  if (!Array.isArray(indices)) return false
-  return indices.every(
-    (idx) => isNonNegativeInteger(idx) && idx < total && idx !== rawIndex,
-  )
+function dependsOnIndices(indices: unknown, rawIndex: number, total: number): number[] | null {
+  if (indices === undefined) return []
+  if (!Array.isArray(indices)) return null
+  const result: number[] = []
+  for (const idx of indices) {
+    if (!isNonNegativeInteger(idx) || idx >= total || idx === rawIndex) return null
+    result.push(idx)
+  }
+  return result
+}
+
+function modelShapeValid(model: unknown): boolean {
+  if (model === undefined) return true
+  if (typeof model !== "string") return false
+  if (model.trim().length === 0) return true
+  try {
+    resolveCloudAgentModel(model)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function hasCycle(graph: Map<number, number[]>): boolean {
+  const visiting = new Set<number>()
+  const visited = new Set<number>()
+  const visit = (index: number): boolean => {
+    if (visiting.has(index)) return true
+    if (visited.has(index)) return false
+    visiting.add(index)
+    for (const dep of graph.get(index) ?? []) {
+      if (visit(dep)) return true
+    }
+    visiting.delete(index)
+    visited.add(index)
+    return false
+  }
+  for (const index of graph.keys()) {
+    if (visit(index)) return true
+  }
+  return false
 }
 
 function isValidDecomposeVerdict(verdict: unknown): boolean {
   if (!isValidVerdictShape("decompose", verdict)) return false
   const units = (verdict as { units: unknown[] }).units
-  return units.every((unit, rawIndex) => {
+  const graph = new Map<number, number[]>()
+  for (let rawIndex = 0; rawIndex < units.length; rawIndex += 1) {
+    const unit = units[rawIndex]
     if (typeof unit !== "object" || unit === null) return false
-    const dependsOn = (unit as Record<string, unknown>).dependsOn
-    return validDependsOn(dependsOn, rawIndex, units.length)
-  })
+    const record = unit as Record<string, unknown>
+    if (!modelShapeValid(record.model)) return false
+    const deps = dependsOnIndices(record.dependsOn, rawIndex, units.length)
+    if (deps === null) return false
+    graph.set(rawIndex, deps)
+  }
+  return !hasCycle(graph)
 }
 
 /**

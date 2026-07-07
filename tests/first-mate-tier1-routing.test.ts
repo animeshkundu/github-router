@@ -6,15 +6,18 @@ import {
   tier1LiveEnabled,
   type Tier1Verdict,
 } from "~/lib/first-mate/scheduler/shadow"
+import { state } from "~/lib/state"
 
 const originalShadow = process.env.GH_ROUTER_FM_SHADOW
 const originalTier1Live = process.env.GH_ROUTER_FM_TIER1_LIVE
+const originalModels = state.models
 
 afterEach(() => {
   if (originalShadow === undefined) delete process.env.GH_ROUTER_FM_SHADOW
   else process.env.GH_ROUTER_FM_SHADOW = originalShadow
   if (originalTier1Live === undefined) delete process.env.GH_ROUTER_FM_TIER1_LIVE
   else process.env.GH_ROUTER_FM_TIER1_LIVE = originalTier1Live
+  state.models = originalModels
 })
 
 function confident(verdict: unknown): Tier1Verdict {
@@ -64,9 +67,18 @@ test("decompose auto-answers only when the deterministic dependency verifier acc
   const valid = decideRoute("decompose", confident({ units: [{ title: "A" }, { title: "B", dependsOn: [0] }] }))
   expect(valid.autoAccept).toBe(true)
 
-  const cyclic = decideRoute("decompose", confident({ units: [{ title: "A", dependsOn: [0] }] }))
-  expect(cyclic.autoAccept).toBe(false)
-  expect(cyclic.reason).toContain("verifier")
+  const selfLoop = decideRoute("decompose", confident({ units: [{ title: "A", dependsOn: [0] }] }))
+  expect(selfLoop.autoAccept).toBe(false)
+  expect(selfLoop.reason).toContain("verifier")
+
+  const twoCycle = decideRoute("decompose", confident({ units: [{ title: "A", dependsOn: [1] }, { title: "B", dependsOn: [0] }] }))
+  expect(twoCycle.autoAccept).toBe(false)
+  expect(twoCycle.reason).toContain("verifier")
+
+  state.models = { data: [{ id: "gpt-5.5" }] } as typeof state.models
+  const badModel = decideRoute("decompose", confident({ units: [{ title: "A", model: "not-in-catalog" }] }))
+  expect(badModel.autoAccept).toBe(false)
+  expect(badModel.reason).toContain("verifier")
 })
 
 test("Tier1 live escalates on low confidence, novel, high stakes, unknown, or malformed verdicts", () => {
