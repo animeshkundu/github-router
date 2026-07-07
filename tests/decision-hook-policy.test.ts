@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from "bun:test"
 
 import {
+  buildDecisionPacketFromStdin,
   createDecisionHookHttp,
   runDecisionHookPolicy,
   type DecisionHookHttp,
@@ -271,6 +272,31 @@ describe("decision-hook policy", () => {
     // decision (here the mock auto-approves) rather than standing down.
     expect(result.verdict).toBe("allow-approved")
     expect(createDecision.mock.calls.length).toBe(1)
+  })
+})
+
+describe("PermissionRequest notifier packet builder (ignorePermissionMode)", () => {
+  test("bypassPermissions Write still builds an intercept packet when the mode gate is ignored", () => {
+    const stdin = payload({
+      tool_name: "Write",
+      tool_input: { file_path: "a.ts", content: "x" },
+      permission_mode: "bypassPermissions",
+    })
+    // Without the flag: bypass mode short-circuits to passthrough (PreToolUse model).
+    expect(buildDecisionPacketFromStdin(stdin, "/repo").action).toBe("allow-passthrough")
+    // With ignorePermissionMode (the PermissionRequest notifier): the event firing IS
+    // the "would prompt" signal, so we mirror the packet regardless of mode.
+    const built = buildDecisionPacketFromStdin(stdin, "/repo", { ignorePermissionMode: true })
+    expect(built.action).toBe("intercept")
+  })
+
+  test("a non-gated tool is still passthrough even with ignorePermissionMode", () => {
+    const built = buildDecisionPacketFromStdin(
+      payload({ tool_name: "Read", tool_input: { file_path: "a.ts" }, permission_mode: "default" }),
+      "/repo",
+      { ignorePermissionMode: true },
+    )
+    expect(built.action).toBe("allow-passthrough")
   })
 })
 

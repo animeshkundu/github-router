@@ -583,6 +583,15 @@ export function buildDecisionHookCommand(execPath: string, scriptPath: string | 
   return `${head} internal-decision-hook`
 }
 
+/** Command for the `internal-permission-notify` PermissionRequest hook — the
+ *  non-blocking mobile mirror that POSTs the decision packet and abstains so
+ *  Claude's own native prompt still renders (no args; creds via the mirror file). */
+export function buildPermissionNotifyHookCommand(execPath: string, scriptPath: string | undefined): string {
+  const q = (s: string): string => `"${s}"`
+  const head = scriptPath && scriptPath !== execPath ? `${q(execPath)} ${q(scriptPath)}` : q(execPath)
+  return `${head} internal-permission-notify`
+}
+
 /**
  * Read-merge-atomic-write the Stop hook into a Claude Code `settings.json` file
  * (the mirrored one). A MISSING file (ENOENT) starts from `{}`; any OTHER read or

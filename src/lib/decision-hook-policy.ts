@@ -161,7 +161,11 @@ export function isDecisionHookTool(toolName: string): toolName is DecisionHookTo
  * hook are fail-closed: the launcher matcher should only invoke us for tools we
  * gate, so an unreadable/missing tool name is not safe to pass through.
  */
-export function buildDecisionPacketFromStdin(stdin: string, fallbackCwd: string): PacketBuildResult {
+export function buildDecisionPacketFromStdin(
+  stdin: string,
+  fallbackCwd: string,
+  options?: { ignorePermissionMode?: boolean },
+): PacketBuildResult {
   let payload: PreToolUsePayload
   try {
     const parsed: unknown = JSON.parse(stdin)
@@ -184,8 +188,12 @@ export function buildDecisionPacketFromStdin(stdin: string, fallbackCwd: string)
   // Shift+Tab into/out of bypass is honored on the next tool. (Carve-outs that
   // still prompt under bypass, e.g. the rm -rf circuit-breaker, are surfaced by
   // Claude in the terminal regardless; a PreToolUse hook cannot see them.)
+  //
+  // The PermissionRequest notifier passes ignorePermissionMode: the event only
+  // fires when a dialog actually appears, so it IS the "would prompt" signal and
+  // the coarse mode check would wrongly drop e.g. ExitPlanMode approvals in bypass.
   const permissionMode = typeof payload.permission_mode === "string" ? payload.permission_mode : undefined
-  if (permissionMode && NON_PROMPTING_PERMISSION_MODES.has(permissionMode)) {
+  if (!options?.ignorePermissionMode && permissionMode && NON_PROMPTING_PERMISSION_MODES.has(permissionMode)) {
     return {
       action: "allow-passthrough",
       reason: `permission_mode ${permissionMode}: Claude does not prompt; mobile approval stands down`,

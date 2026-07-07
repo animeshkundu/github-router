@@ -21,7 +21,7 @@ import { listModelsForEndpoint } from "./lib/model-validation"
 import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror, writeArtifactCredsToMirror } from "./lib/paths"
 import {
   buildArtifactOpenHookCommand,
-  buildDecisionHookCommand,
+  buildPermissionNotifyHookCommand,
   buildSessionBindHookCommand,
   buildStopHookCommand,
   captureLaunchBaseline,
@@ -57,7 +57,7 @@ import {
 } from "./lib/worker-dispatch"
 import { ARTIFACT_REVIEW_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
 import { shouldUseInsecureTls } from "./lib/artifact/tools"
-import { DECISION_HOOK_CLAUDE_TIMEOUT_SEC, DECISION_HOOK_TOOL_MATCHER } from "./lib/decision-hook-policy"
+import { DECISION_HOOK_TOOL_MATCHER } from "./lib/decision-hook-policy"
 import { parseBoolEnv } from "./lib/exec"
 import nodePath from "node:path"
 import { tmpdir } from "node:os"
@@ -780,23 +780,26 @@ export const claude = defineCommand({
           } catch (err) {
             consola.warn(`Artifact-panel directive prepend failed: ${String(err)}`)
           }
-          // Hands-off auto-open + mobile decision approval: write the ai-or-die
+          // Hands-off auto-open + mobile decision mirror: write the ai-or-die
           // creds to a mode-600 mirror file (AIORDIE_TOKEN is stripped from the
           // child env, and argv leaks to ps), then register:
           //   - PostToolUse(ExitPlanMode) artifact auto-open, and
-          //   - PreToolUse(Bash|Write|Edit|ExitPlanMode) blocking mobile approval.
-          // Multiple PreToolUse hooks coexist; worker-guard's deny still wins.
+          //   - PermissionRequest(Bash|Write|Edit|ExitPlanMode) NON-BLOCKING mirror.
+          // PermissionRequest fires only when Claude itself would prompt (it honors
+          // bypass mode, allow rules, and safe-command classification), so the mirror
+          // hook POSTs the decision packet and ABSTAINS — Claude's native prompt
+          // still renders on the desktop, and the phone gets a structured mirror.
           try {
             await writeArtifactCredsToMirror(shouldUseInsecureTls(process.env.AIORDIE_BASE_URL ?? ""))
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const artifactCmd = buildArtifactOpenHookCommand(process.execPath, process.argv[1])
             await injectStopHookIntoSettingsFile(settingsPath, artifactCmd, "PostToolUse", undefined, "ExitPlanMode")
-            const decisionCmd = buildDecisionHookCommand(process.execPath, process.argv[1])
+            const notifyCmd = buildPermissionNotifyHookCommand(process.execPath, process.argv[1])
             await injectStopHookIntoSettingsFile(
               settingsPath,
-              decisionCmd,
-              "PreToolUse",
-              DECISION_HOOK_CLAUDE_TIMEOUT_SEC,
+              notifyCmd,
+              "PermissionRequest",
+              undefined,
               DECISION_HOOK_TOOL_MATCHER,
             )
           } catch (err) {
