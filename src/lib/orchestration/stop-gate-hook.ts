@@ -575,6 +575,14 @@ export function buildArtifactOpenHookCommand(execPath: string, scriptPath: strin
   return `${head} internal-artifact-open`
 }
 
+/** Command for the `internal-decision-hook` PreToolUse mobile approval hook (no
+ *  args — token/session come from the mirror creds file; nothing secret in argv). */
+export function buildDecisionHookCommand(execPath: string, scriptPath: string | undefined): string {
+  const q = (s: string): string => `"${s}"`
+  const head = scriptPath && scriptPath !== execPath ? `${q(execPath)} ${q(scriptPath)}` : q(execPath)
+  return `${head} internal-decision-hook`
+}
+
 /**
  * Read-merge-atomic-write the Stop hook into a Claude Code `settings.json` file
  * (the mirrored one). A MISSING file (ENOENT) starts from `{}`; any OTHER read or

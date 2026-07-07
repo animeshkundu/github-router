@@ -21,6 +21,7 @@ import { listModelsForEndpoint } from "./lib/model-validation"
 import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror, writeArtifactCredsToMirror } from "./lib/paths"
 import {
   buildArtifactOpenHookCommand,
+  buildDecisionHookCommand,
   buildSessionBindHookCommand,
   buildStopHookCommand,
   captureLaunchBaseline,
@@ -56,6 +57,7 @@ import {
 } from "./lib/worker-dispatch"
 import { ARTIFACT_REVIEW_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
 import { shouldUseInsecureTls } from "./lib/artifact/tools"
+import { DECISION_HOOK_CLAUDE_TIMEOUT_SEC, DECISION_HOOK_TOOL_MATCHER } from "./lib/decision-hook-policy"
 import { parseBoolEnv } from "./lib/exec"
 import nodePath from "node:path"
 import { tmpdir } from "node:os"
@@ -778,17 +780,27 @@ export const claude = defineCommand({
           } catch (err) {
             consola.warn(`Artifact-panel directive prepend failed: ${String(err)}`)
           }
-          // Hands-off auto-open: write the artifact creds to a mode-600 mirror
-          // file (AIORDIE_TOKEN is stripped from the child env, and argv leaks to
-          // ps), then register a PostToolUse(ExitPlanMode) hook so the finalized
-          // plan opens in the panel without the model calling artifact_open.
+          // Hands-off auto-open + mobile decision approval: write the ai-or-die
+          // creds to a mode-600 mirror file (AIORDIE_TOKEN is stripped from the
+          // child env, and argv leaks to ps), then register:
+          //   - PostToolUse(ExitPlanMode) artifact auto-open, and
+          //   - PreToolUse(Bash|Write|Edit|ExitPlanMode) blocking mobile approval.
+          // Multiple PreToolUse hooks coexist; worker-guard's deny still wins.
           try {
             await writeArtifactCredsToMirror(shouldUseInsecureTls(process.env.AIORDIE_BASE_URL ?? ""))
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
-            const cmd = buildArtifactOpenHookCommand(process.execPath, process.argv[1])
-            await injectStopHookIntoSettingsFile(settingsPath, cmd, "PostToolUse", undefined, "ExitPlanMode")
+            const artifactCmd = buildArtifactOpenHookCommand(process.execPath, process.argv[1])
+            await injectStopHookIntoSettingsFile(settingsPath, artifactCmd, "PostToolUse", undefined, "ExitPlanMode")
+            const decisionCmd = buildDecisionHookCommand(process.execPath, process.argv[1])
+            await injectStopHookIntoSettingsFile(
+              settingsPath,
+              decisionCmd,
+              "PreToolUse",
+              DECISION_HOOK_CLAUDE_TIMEOUT_SEC,
+              DECISION_HOOK_TOOL_MATCHER,
+            )
           } catch (err) {
-            consola.warn(`Could not register the artifact auto-open hook: ${String(err)}`)
+            consola.warn(`Could not register the ai-or-die hooks: ${String(err)}`)
           }
         }
 

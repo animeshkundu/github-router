@@ -14,6 +14,7 @@ import path from "node:path"
 import { type ExecFn } from "../src/lib/orchestration/gate-runner"
 import {
   type BlockBudget,
+  buildDecisionHookCommand,
   buildStopHookCommand,
   buildStopHookSettings,
   captureLaunchBaseline,
@@ -436,6 +437,17 @@ describe("buildStopHookCommand", () => {
   test("uses just the binary when the script is absent or equals it", () => {
     expect(buildStopHookCommand("/app/ghr", undefined)).toBe('"/app/ghr" internal-stop-hook')
     expect(buildStopHookCommand("/app/ghr", "/app/ghr")).toBe('"/app/ghr" internal-stop-hook')
+  })
+})
+
+describe("buildDecisionHookCommand", () => {
+  test("uses binary + script when both present and distinct", () => {
+    expect(buildDecisionHookCommand("/usr/bin/node", "/app/main.js")).toBe('"/usr/bin/node" "/app/main.js" internal-decision-hook')
+  })
+
+  test("uses just the binary when the script is absent or equals it", () => {
+    expect(buildDecisionHookCommand("/app/ghr", undefined)).toBe('"/app/ghr" internal-decision-hook')
+    expect(buildDecisionHookCommand("/app/ghr", "/app/ghr")).toBe('"/app/ghr" internal-decision-hook')
   })
 })
 
