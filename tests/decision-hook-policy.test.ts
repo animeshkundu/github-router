@@ -216,6 +216,62 @@ describe("decision-hook policy", () => {
     expect(createDecision.mock.calls.length).toBe(0)
     expect(awaitDecision.mock.calls.length).toBe(0)
   })
+
+  test("bypassPermissions mode -> allow passthrough for a gated tool, never calls HTTP", async () => {
+    const { http, createDecision, awaitDecision } = mockHttp()
+
+    const result = await runDecisionHookPolicy({
+      stdin: payload({
+        tool_name: "Bash",
+        tool_input: { command: "rm -rf build" },
+        permission_mode: "bypassPermissions",
+      }),
+      http,
+      fallbackCwd: "/repo",
+      now: () => 0,
+    })
+
+    // Claude does not prompt in bypass, so the mobile sheet must NOT pop and the
+    // tool must run under Claude's own flow — no decision is ever registered.
+    expect(result.verdict).toBe("allow-passthrough")
+    expect(result.output).toBeNull()
+    expect(createDecision.mock.calls.length).toBe(0)
+    expect(awaitDecision.mock.calls.length).toBe(0)
+  })
+
+  test("dontAsk and auto modes -> allow passthrough (no prompt, no HTTP)", async () => {
+    for (const mode of ["dontAsk", "auto"]) {
+      const { http, createDecision } = mockHttp()
+      const result = await runDecisionHookPolicy({
+        stdin: payload({ tool_name: "Write", tool_input: { file_path: "a.ts" }, permission_mode: mode }),
+        http,
+        fallbackCwd: "/repo",
+        now: () => 0,
+      })
+      expect(result.verdict).toBe("allow-passthrough")
+      expect(createDecision.mock.calls.length).toBe(0)
+    }
+  })
+
+  test("default mode -> still intercepts a gated tool (mobile approval applies)", async () => {
+    const { http, createDecision } = mockHttp()
+
+    const result = await runDecisionHookPolicy({
+      stdin: payload({
+        tool_name: "Bash",
+        tool_input: { command: "npm test" },
+        permission_mode: "default",
+      }),
+      http,
+      fallbackCwd: "/repo",
+      now: () => 0,
+    })
+
+    // default mode is a prompting mode → Claude would ask → the hook registers a
+    // decision (here the mock auto-approves) rather than standing down.
+    expect(result.verdict).toBe("allow-approved")
+    expect(createDecision.mock.calls.length).toBe(1)
+  })
 })
 
 describe("decision-hook HTTP client", () => {

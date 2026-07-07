@@ -127,7 +127,17 @@ interface PreToolUsePayload {
   tool_name?: unknown
   tool_input?: unknown
   cwd?: unknown
+  /** Claude's effective permission mode for this call (read fresh per invocation).
+   *  In "bypassPermissions" Claude prompts for nothing, so we stand down. */
+  permission_mode?: unknown
 }
+
+/** Permission modes in which Claude Code does NOT surface a permission prompt, so
+ *  the mobile approval must stand down — mirror "only pop a sheet if Claude itself
+ *  would prompt". bypassPermissions === --dangerously-skip-permissions (the
+ *  github-router launch default); dontAsk / auto likewise suppress the prompt.
+ *  Unknown/absent modes fall through to the normal gated behavior. */
+const NON_PROMPTING_PERMISSION_MODES = new Set(["bypassPermissions", "dontAsk", "auto"])
 
 /** The stdout JSON a PreToolUse hook prints to DENY a tool call. */
 export function decisionHookDenyOutput(reason: string): string {
@@ -165,6 +175,21 @@ export function buildDecisionPacketFromStdin(stdin: string, fallbackCwd: string)
   if (!toolName) return { action: "deny-malformed", reason: "missing PreToolUse tool_name" }
   if (!isDecisionHookTool(toolName)) {
     return { action: "allow-passthrough", reason: `tool ${toolName} is not gated by mobile approvals` }
+  }
+
+  // Only mirror a decision to the phone when Claude itself would prompt. When the
+  // session is in a non-prompting permission mode (bypassPermissions — the launch
+  // default — or dontAsk/auto), Claude runs the tool with no dialog, so we stand
+  // down and let Claude's own flow proceed. Read fresh per call, so a runtime
+  // Shift+Tab into/out of bypass is honored on the next tool. (Carve-outs that
+  // still prompt under bypass, e.g. the rm -rf circuit-breaker, are surfaced by
+  // Claude in the terminal regardless; a PreToolUse hook cannot see them.)
+  const permissionMode = typeof payload.permission_mode === "string" ? payload.permission_mode : undefined
+  if (permissionMode && NON_PROMPTING_PERMISSION_MODES.has(permissionMode)) {
+    return {
+      action: "allow-passthrough",
+      reason: `permission_mode ${permissionMode}: Claude does not prompt; mobile approval stands down`,
+    }
   }
 
   // TODO(askuserquestion): AskUserQuestion needs a separate answer-injection
