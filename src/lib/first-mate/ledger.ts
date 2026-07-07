@@ -1,10 +1,10 @@
-import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 
 import consola from "consola"
 
 import { PATHS } from "~/lib/paths"
+import { commitJsonCas, withFileLock } from "./durable-store"
 import type {
   AgentKey,
   Artifact,
@@ -67,19 +67,34 @@ const VALIDATIONS = membersOf<Validation>({
   floor_pending: true,
   floor_passed: true,
   floor_failed: true,
+  external_merge_unverified: true,
+  cancelled_external_close: true,
 })
 
 interface RepoLedgerFile {
   version: 1
+  /**
+   * OCC revision counter (Phase 1.1). Increments on every write. Absent in
+   * pre-1.1 files, read as 0 — additive and backward-compatible. A caller can
+   * pass `expectedRev` to {@link commitUnits} for compare-and-swap semantics;
+   * the shared write path only enforces it when OCC is enabled.
+   */
+  rev?: number
   units: UnitRow[]
 }
+
+export { runFenced, currentFenceToken, occEnabled } from "./durable-store"
+export {
+  DurableConflictError as LedgerConflictError,
+  DurableFencedError as LedgerFencedError,
+} from "./durable-store"
 
 function sanitizeSegment(value: string): string {
   const cleaned = value.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+$/, "_")
   return cleaned.length > 0 ? cleaned : "_"
 }
 
-function repoLedgerPath(repo: RepoRef): string {
+export function repoLedgerPath(repo: RepoRef): string {
   return path.join(
     PATHS.FIRST_MATE_DIR,
     `${sanitizeSegment(repo.owner)}__${sanitizeSegment(repo.name)}.json`,
@@ -171,6 +186,7 @@ function isUnitRow(value: unknown): value is UnitRow {
     isOneOf(row.agent, AGENTS) &&
     typeof row.botLogin === "string" &&
     isOneOf(row.dispatchMode, DISPATCH_MODES) &&
+    isOptionalString(row.model) &&
     isOneOf(row.provider, PROVIDER_STATES) &&
     isOneOf(row.phase, PHASES) &&
     isOneOf(row.artifact, ARTIFACTS) &&
@@ -194,32 +210,6 @@ function isUnitRow(value: unknown): value is UnitRow {
   )
 }
 
-async function writeJsonSecure(target: string, value: RepoLedgerFile): Promise<void> {
-  await fs.mkdir(path.dirname(target), { recursive: true })
-  const tmp = `${target}.tmp.${process.pid}.${randomBytes(4).toString("hex")}`
-  try {
-    await fs.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
-    await fs.chmod(tmp, 0o600).catch(() => {})
-    await fs.rename(tmp, target)
-    await fs.chmod(target, 0o600).catch(() => {})
-  } catch (err) {
-    await fs.unlink(tmp).catch(() => {})
-    throw err
-  }
-}
-
-async function writeRepoLedger(repo: RepoRef, units: UnitRow[]): Promise<void> {
-  await writeJsonSecure(repoLedgerPath(repo), { version: LEDGER_VERSION, units })
-}
-
-let _ledgerChain: Promise<void> = Promise.resolve()
-
-function serializeLedgerWrite(work: () => Promise<void>): Promise<void> {
-  const next = _ledgerChain.then(work)
-  _ledgerChain = next.catch(() => undefined)
-  return next
-}
-
 function sameUnitHandle(a: UnitRow, b: UnitRow): boolean {
   return (
     (b.id != null && a.id === b.id) ||
@@ -232,7 +222,30 @@ function terminalTimestamp(row: UnitRow): number {
   return row.lastCheckedMs ?? row.lastSteer?.atMs ?? 0
 }
 
-export async function readRepoLedger(repo: RepoRef): Promise<UnitRow[]> {
+function parseLedgerRaw(raw: string): { rev: number; units: UnitRow[] } {
+  try {
+    const parsed = asRecord(JSON.parse(raw))
+    if (!parsed || parsed.version !== LEDGER_VERSION || !Array.isArray(parsed.units)) {
+      return { rev: 0, units: [] }
+    }
+    const rev = isNonNegativeInteger(parsed.rev) ? parsed.rev : 0
+    const cleaned = parsed.units.filter(isUnitRow)
+    if (cleaned.length !== parsed.units.length) {
+      consola.debug(
+        `first-mate ledger dropped ${parsed.units.length - cleaned.length} corrupt unit(s)`,
+      )
+    }
+    return { rev, units: cleaned }
+  } catch (err) {
+    consola.debug("first-mate ledger corrupt, starting empty:", err)
+    return { rev: 0, units: [] }
+  }
+}
+
+/** Read units plus the OCC revision (0 when the file is absent or pre-1.1). */
+export async function readRepoLedgerWithRev(
+  repo: RepoRef,
+): Promise<{ rev: number; units: UnitRow[] }> {
   let raw: string
   try {
     raw = await fs.readFile(repoLedgerPath(repo), "utf8")
@@ -240,52 +253,90 @@ export async function readRepoLedger(repo: RepoRef): Promise<UnitRow[]> {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
       consola.debug("first-mate ledger read skipped:", err)
     }
-    return []
+    return { rev: 0, units: [] }
   }
+  return parseLedgerRaw(raw)
+}
 
-  try {
-    const parsed = asRecord(JSON.parse(raw))
-    if (!parsed || parsed.version !== LEDGER_VERSION || !Array.isArray(parsed.units)) {
-      return []
-    }
-    const cleaned = parsed.units.filter(isUnitRow)
-    if (cleaned.length !== parsed.units.length) {
-      consola.debug(
-        `first-mate ledger dropped ${parsed.units.length - cleaned.length} corrupt unit(s)`,
-      )
-    }
-    return cleaned
-  } catch (err) {
-    consola.debug("first-mate ledger corrupt, starting empty:", err)
-    return []
-  }
+export async function readRepoLedger(repo: RepoRef): Promise<UnitRow[]> {
+  return (await readRepoLedgerWithRev(repo)).units
+}
+
+export interface CommitOptions {
+  /**
+   * True compare-and-swap: reject if the on-disk rev differs. When set, a
+   * conflict SURFACES as {@link LedgerConflictError} (no transparent retry) so
+   * the caller's "world unchanged since rev N" assertion is honored. Only
+   * meaningful when OCC is enabled.
+   */
+  expectedRev?: number
+  /** Reject if this is no longer the current fencing token (OCC-enabled only). */
+  fencingToken?: number
+}
+
+export function withRepoLock<T>(
+  repo: RepoRef,
+  fn: (verifyOwner: () => Promise<boolean>) => Promise<T>,
+): Promise<T> {
+  return withFileLock(repoLedgerPath(repo), fn)
+}
+
+/**
+ * The single shared write path for unit mutations. Reads the current
+ * {rev, units}, applies `mutate`, writes with `rev + 1`.
+ *
+ * OCC off (`GH_ROUTER_FM_OCC=0`): legacy in-process-serialized write, no lock,
+ * never rejects for CAS/fencing — stamps the additive `rev` only.
+ *
+ * OCC on (default): each attempt reads the latest rev, applies `mutate`, and
+ * CAS-writes under a cross-process lock. On a version conflict a normal caller
+ * (no `expectedRev`) transparently RETRIES — reload, re-apply `mutate` to the
+ * fresh units, re-commit — up to the durable-store retry limit, so a single
+ * writer is a no-op and concurrent writers converge with no lost update. A
+ * caller that passed an explicit `expectedRev` gets the conflict SURFACED (true
+ * CAS). A stale `fencingToken` always fails hard.
+ */
+export async function commitUnits(
+  repo: RepoRef,
+  mutate: (units: UnitRow[]) => UnitRow[],
+  opts: CommitOptions = {},
+): Promise<{ rev: number }> {
+  const { rev } = await commitJsonCas<UnitRow[], void>({
+    path: repoLedgerPath(repo),
+    parse: (raw) => {
+      if (raw === undefined) return { rev: 0, value: [] }
+      const parsed = parseLedgerRaw(raw)
+      return { rev: parsed.rev, value: parsed.units }
+    },
+    mutate: (units) => ({ value: mutate(units), result: undefined }),
+    build: (units, rev): RepoLedgerFile => ({
+      version: LEDGER_VERSION,
+      rev,
+      units,
+    }),
+    expectedRev: opts.expectedRev,
+    fencingToken: opts.fencingToken,
+  })
+  return { rev }
 }
 
 export async function upsertUnit(repo: RepoRef, unit: UnitRow): Promise<void> {
-  await serializeLedgerWrite(async () => {
-    const current = await readRepoLedger(repo)
+  await commitUnits(repo, (current) => {
     const next = current.filter((row) => !sameUnitHandle(row, unit))
     next.push(unit)
-    await writeRepoLedger(repo, next)
+    return next
   })
 }
 
 export async function removeUnit(repo: RepoRef, issue: number): Promise<void> {
-  await serializeLedgerWrite(async () => {
-    const current = await readRepoLedger(repo)
-    await writeRepoLedger(
-      repo,
-      current.filter((row) => row.issue !== issue),
-    )
-  })
+  await commitUnits(repo, (current) => current.filter((row) => row.issue !== issue))
 }
 
 export async function pruneTerminal(
   repo: RepoRef,
   maxAgeMs = DEFAULT_TERMINAL_MAX_AGE_MS,
 ): Promise<void> {
-  await serializeLedgerWrite(async () => {
-    const current = await readRepoLedger(repo)
+  await commitUnits(repo, (current) => {
     const now = Date.now()
     const keptTerminals = new Set(
       current
@@ -294,9 +345,6 @@ export async function pruneTerminal(
         .sort((a, b) => terminalTimestamp(a) - terminalTimestamp(b))
         .slice(-TERMINAL_MAX_ENTRIES),
     )
-    const next = current.filter(
-      (row) => row.terminal !== true || keptTerminals.has(row),
-    )
-    await writeRepoLedger(repo, next)
+    return current.filter((row) => row.terminal !== true || keptTerminals.has(row))
   })
 }

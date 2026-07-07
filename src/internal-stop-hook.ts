@@ -31,6 +31,7 @@ import {
   fileBlockBudget,
   launchBaselineKey,
   stopGateId,
+  stopGatePlanMode,
   stopReviewEnabled,
   type StopReviewContext,
 } from "./lib/orchestration/stop-gate-hook"
@@ -247,6 +248,7 @@ export const internalStopHook = defineCommand({
         isEnabledForRepo: (cwd) => stopGateEnabledForRepo(cwd),
         resolveChecks: mode ? buildResolveChecks(mode) : undefined,
         timeoutMs: Number.isFinite(timeoutEnv) && timeoutEnv > 0 ? timeoutEnv : undefined,
+        planMode: stopGatePlanMode(),
         reviewDebounce: reviewEnabled ? fileReviewDebounce(stopReviewStateDir()) : undefined,
         spawnReview: reviewEnabled
           ? (ctx) => spawnStopReview(ctx, { prompt: userPrompt, transcriptPath })

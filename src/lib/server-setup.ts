@@ -5,6 +5,8 @@ import consola from "consola"
 import { serve, type ServerHandler } from "srvx"
 
 import { PATHS, ensurePaths } from "./paths"
+import { maybeSpawnDaemon, wireDaemonTeardown } from "./first-mate/scheduler/autospawn"
+import { agentToolsEnabled } from "./mcp-capabilities"
 import { generateRandomPort } from "./port"
 import { initProxyFromEnv } from "./proxy"
 import { state } from "./state"
@@ -169,6 +171,23 @@ export async function setupAndServe(
     throw new Error("Server started but URL is not available")
   }
   const serverUrl = url.replace(/\/$/, "")
+
+  // Opt-in (GH_ROUTER_FM_DAEMON=1; default OFF) auto-spawn of the first-mate
+  // scheduler daemon as a SEPARATE process. The [fm-heartbeat] cron is the
+  // default driver; this is experimental. Never throws. The returned handle is
+  // wired to shutdown so a drive-primary daemon can never orphan and keep
+  // merging PRs after the proxy exits (Windows has no process-group reaping).
+  // Teardown EOFs the child's stdin first (graceful lease/pidfile release — the
+  // only graceful path on Windows), then hard-kills as a non-blocking backstop.
+  try {
+    const handle = maybeSpawnDaemon({ agentsEnabled: agentToolsEnabled() })
+    if (handle) {
+      wireDaemonTeardown(handle)
+      consola.debug(`first-mate daemon spawn attempted (pid ${handle.pid ?? "?"}).`)
+    }
+  } catch (err) {
+    consola.debug("first-mate daemon auto-spawn skipped:", err)
+  }
 
   return { server: srvxServer, serverUrl }
 }

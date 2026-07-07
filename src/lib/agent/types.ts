@@ -73,6 +73,8 @@ export interface AgentPRSummary {
   headSha: string
   headRef: string
   isDraft: boolean
+  /** Cooperative controller-issued marker found in the PR body, if any. */
+  unitIdMarker?: string
 }
 
 export interface PullRequestState {
@@ -155,6 +157,11 @@ export interface WorkflowRunSummary {
 export interface MergeResult {
   merged: true
   sha: string
+}
+
+export interface ClosePullRequestResult {
+  closed: true
+  state: string
 }
 
 export interface ReadyForReviewResult {

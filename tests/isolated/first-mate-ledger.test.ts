@@ -102,6 +102,21 @@ describe("first-mate durable ledger", () => {
     expect(persisted?.dispatch).toEqual({ id: "corr-abc", requestedMs: 123, attempts: 1 })
   })
 
+  test("a unit's model field round-trips through the ledger", async () => {
+    await upsertUnit(repoA, unit({ issue: 300, taskId: "t-mdl", model: "gpt-5.4" }))
+    const [persisted] = await readRepoLedger(repoA)
+    expect(persisted?.model).toBe("gpt-5.4")
+  })
+
+  test("a legacy unit without a model still loads (back-compat)", async () => {
+    const legacy = unit({ issue: 301, taskId: "t-legacy" })
+    delete (legacy as { model?: string }).model
+    await upsertUnit(repoA, legacy)
+    const [persisted] = await readRepoLedger(repoA)
+    expect(persisted?.issue).toBe(301)
+    expect(persisted?.model).toBeUndefined()
+  })
+
   test("upsertUnit replaces by issue", async () => {
     await upsertUnit(repoA, unit({ issue: 7, taskId: "task-a", title: "first" }))
     await upsertUnit(repoA, unit({ issue: 7, taskId: "task-b", title: "second" }))

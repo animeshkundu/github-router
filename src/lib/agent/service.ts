@@ -10,6 +10,7 @@ import {
   type AssignmentInput,
   type AssignmentResult,
   type CheckSummary,
+  type ClosePullRequestResult,
   type CommentResult,
   type FailingCheckSummary,
   type IssueCreateInput,
@@ -313,6 +314,7 @@ export async function unassignAgent(
 interface PullRestResponse {
   number?: number
   draft?: boolean
+  body?: string | null
   user?: { login?: string | null } | null
   head?: { sha?: string | null; ref?: string | null } | null
 }
@@ -338,12 +340,22 @@ export async function findAgentPRs(
       }
       return authorMatchesBot(pull.user?.login ?? undefined, input.botLogin)
     })
-    .map((pull) => ({
-      number: pull.number ?? 0,
-      headSha: pull.head?.sha ?? "",
-      headRef: pull.head?.ref ?? "",
-      isDraft: pull.draft ?? false,
-    }))
+    .map((pull) => {
+      const unitIdMarker = unitIdMarkerFromBody(pull.body)
+      return {
+        number: pull.number ?? 0,
+        headSha: pull.head?.sha ?? "",
+        headRef: pull.head?.ref ?? "",
+        isDraft: pull.draft ?? false,
+        ...(unitIdMarker !== undefined ? { unitIdMarker } : {}),
+      }
+    })
+}
+
+function unitIdMarkerFromBody(body: string | null | undefined): string | undefined {
+  if (!body) return undefined
+  const match = /\bunit-id:\s*([A-Za-z0-9-]+?)(?=\s|<|-->|$)/i.exec(body)
+  return match?.[1]
 }
 
 // GitHub Copilot code review is requested via the standard review-request
@@ -379,6 +391,7 @@ export async function requestReview(
 }
 
 interface ReviewRestResponse {
+  node_id?: string | null
   user?: { login?: string | null } | null
   state?: string | null
   body?: string | null
@@ -394,6 +407,8 @@ export interface ReviewSummary {
   submittedAt?: string
   /** The commit the review was made against — used to reject stale reviews. */
   commitId?: string
+  /** GraphQL review node id — needed to dismiss a stale own review (A5). */
+  nodeId?: string
 }
 
 const REVIEW_BODY_LIMIT = 4000
@@ -413,7 +428,53 @@ export async function getPullRequestReviews(
     bodyExcerpt: (review.body ?? "").slice(0, REVIEW_BODY_LIMIT),
     ...(review.submitted_at ? { submittedAt: review.submitted_at } : {}),
     ...(review.commit_id ? { commitId: review.commit_id } : {}),
+    ...(review.node_id ? { nodeId: review.node_id } : {}),
   }))
+}
+
+/**
+ * A5 (5a) — dismiss a PR review by its GraphQL node id. Best-effort: any failure
+ * (already dismissed, insufficient scope, race) is swallowed and reported as
+ * `{dismissed:false}` — a failed dismiss must not abort the controller sweep.
+ */
+export async function dismissPullRequestReview(
+  reviewNodeId: string,
+  message?: string,
+): Promise<{ dismissed: boolean }> {
+  try {
+    await ghGraphQL<unknown>(
+      `mutation FirstMateDismissReview($pullRequestReviewId: ID!, $message: String!) {
+        dismissPullRequestReview(input: { pullRequestReviewId: $pullRequestReviewId, message: $message }) {
+          pullRequestReview {
+            id
+            state
+          }
+        }
+      }`,
+      {
+        pullRequestReviewId: reviewNodeId,
+        message: message ?? "Superseded by a newer commit.",
+      },
+    )
+    return { dismissed: true }
+  } catch (err) {
+    consola.debug(`first-mate: dismissPullRequestReview(${reviewNodeId}) skipped:`, err)
+    return { dismissed: false }
+  }
+}
+
+/**
+ * The authenticated actor's login (`viewer { login }`). Exposed for the
+ * controller dep surface; A5 ownership uses a body sentinel rather than author
+ * identity (the solo operator's account may BE the router PAT), so this is a
+ * diagnostic/roster helper, not the dismiss gate.
+ */
+export async function getSelfLogin(): Promise<string> {
+  const data = await ghGraphQL<{ viewer?: { login?: string | null } | null }>(
+    `query FirstMateViewer { viewer { login } }`,
+    {},
+  )
+  return data.viewer?.login ?? ""
 }
 
 
@@ -493,6 +554,7 @@ export async function getPullRequestState(
 }
 
 interface CheckRunRestResponse {
+  total_count?: number
   check_runs?: Array<{
     id?: number
     name?: string
@@ -500,6 +562,25 @@ interface CheckRunRestResponse {
     conclusion?: string | null
     html_url?: string | null
     details_url?: string | null
+  }>
+}
+
+// The check-runs API has NO authoritative aggregate state (unlike the legacy
+// /status API's top-level `state`), so a failing/pending run sitting on an
+// un-fetched page is invisible and would yield a spurious "passing" rollup —
+// a real bypass for a matrix CI with >30 runs (GitHub's default page size).
+// Enumerate ALL runs (per_page=100); if a repo has more than PER_PAGE*MAX_PAGES
+// runs we cannot confirm green and FAIL-CLOSED (treat as pending → refuse merge).
+const CHECK_RUNS_PER_PAGE = 100
+const CHECK_RUNS_MAX_PAGES = 20
+
+interface CombinedStatusRestResponse {
+  state?: string | null
+  total_count?: number
+  statuses?: Array<{
+    state?: string | null
+    context?: string | null
+    target_url?: string | null
   }>
 }
 
@@ -517,15 +598,35 @@ export async function getRequiredChecksForSha(
   repo: RepoRef,
   sha: string,
 ): Promise<RequiredChecksSummary> {
-  const response = await ghRest<CheckRunRestResponse>(
-    "GET",
-    `${repoPath(repo)}/commits/${segment(sha)}/check-runs`,
-  )
+  // Enumerate every check-run page — a single page (≤30 by default) can hide a
+  // failing run behind an all-green first page. `checkRunsIncomplete` is set only
+  // when the repo exceeds our page cap so we can never miss a red tail silently.
+  const allCheckRuns: NonNullable<CheckRunRestResponse["check_runs"]> = []
+  let checkRunsIncomplete = false
+  {
+    let page = 1
+    let total = 0
+    for (;;) {
+      const response = await ghRest<CheckRunRestResponse>(
+        "GET",
+        `${repoPath(repo)}/commits/${segment(sha)}/check-runs?per_page=${CHECK_RUNS_PER_PAGE}&page=${page}`,
+      )
+      const runs = response.check_runs ?? []
+      if (page === 1) total = response.total_count ?? runs.length
+      allCheckRuns.push(...runs)
+      if (allCheckRuns.length >= total || runs.length === 0) break
+      page += 1
+      if (page > CHECK_RUNS_MAX_PAGES) {
+        checkRunsIncomplete = true
+        break
+      }
+    }
+  }
   // The Copilot code-review bot registers its own check-run
   // ("copilot-pull-request-reviewer": success). That is a REVIEW marker, not a
   // test — counting it would report ci_rollup "passing" for a PR whose actual
   // lint/test suite never ran. Exclude review-bot check-runs from CI.
-  const checkRuns = (response.check_runs ?? []).filter(
+  const checkRuns = allCheckRuns.filter(
     (check) => !/pull-request-reviewer/i.test(check.name ?? ""),
   )
   const runningCount = checkRuns.filter(
@@ -533,10 +634,42 @@ export async function getRequiredChecksForSha(
   ).length
   const failingRuns = checkRuns.filter((check) => isFailingConclusion(check.conclusion))
 
+  // ALSO fold in the legacy Commit Status API (CircleCI/Travis/Jenkins and any
+  // required status context): a repo on the Status API can have a red/pending
+  // REQUIRED status while registering ZERO check-runs — reporting rollup "none"
+  // for that would let evaluateMergeSafety merge over failing/pending CI.
+  // GitHub returns state:"pending" with total_count:0 for a commit that has NO
+  // statuses at all, so the legacy signal is folded ONLY when at least one
+  // status context exists — otherwise a modern Actions-only repo (zero legacy
+  // statuses) would be spuriously reported pending and blocked from merge.
+  const statusResponse = await ghRest<CombinedStatusRestResponse>(
+    "GET",
+    `${repoPath(repo)}/commits/${segment(sha)}/status`,
+  )
+  const legacyStatuses = statusResponse.statuses ?? []
+  const hasLegacyStatuses =
+    (statusResponse.total_count ?? 0) > 0 || legacyStatuses.length > 0
+  const legacyState = (statusResponse.state ?? "").toLowerCase()
+  const legacyFailing = hasLegacyStatuses && (legacyState === "failure" || legacyState === "error")
+  const legacyPending = hasLegacyStatuses && legacyState === "pending"
+  const failingLegacy = hasLegacyStatuses
+    ? legacyStatuses.filter((s) => {
+        const st = (s.state ?? "").toLowerCase()
+        return st === "failure" || st === "error"
+      })
+    : []
+
+  const anyFailing = failingRuns.length > 0 || legacyFailing
+  // An un-enumerated check-run tail (repo exceeds the page cap) is treated as
+  // pending — we cannot prove those runs are green, so the rollup must not be
+  // "passing".
+  const anyPending = runningCount > 0 || legacyPending || checkRunsIncomplete
+  const anySignal = checkRuns.length > 0 || hasLegacyStatuses || checkRunsIncomplete
+
   let rollup: RequiredChecksSummary["rollup"] = "none"
-  if (checkRuns.length > 0) {
-    if (failingRuns.length > 0) rollup = "failing"
-    else if (runningCount > 0) rollup = "pending"
+  if (anySignal) {
+    if (anyFailing) rollup = "failing"
+    else if (anyPending) rollup = "pending"
     else rollup = "passing"
   }
 
@@ -545,12 +678,16 @@ export async function getRequiredChecksForSha(
     name: check.name ?? "",
     conclusion: check.conclusion,
   }))
-  const failing: FailingCheckSummary[] = failingRuns
-    .slice(0, FAILING_CHECK_LIMIT)
-    .map((check) => ({
+  const failing: FailingCheckSummary[] = [
+    ...failingRuns.map((check) => ({
       name: check.name ?? "",
       url: check.html_url ?? check.details_url ?? undefined,
-    }))
+    })),
+    ...failingLegacy.map((s) => ({
+      name: s.context ?? "",
+      url: s.target_url ?? undefined,
+    })),
+  ].slice(0, FAILING_CHECK_LIMIT)
 
   return { rollup, checks, failing, runningCount }
 }
@@ -567,6 +704,10 @@ interface ContentsEntry {
  * controller distinguish "genuinely no CI" (route to cross-lab verify) from
  * "CI configured but checks not registered yet" (keep waiting) when a commit's
  * check-run rollup is "none". Cached per repo+ref; a 404 (no dir) means no CI.
+ * FAIL-SAFE: a 404 resolves to `false` (genuinely no workflows dir), but ANY
+ * other probe error is INDETERMINATE and is RE-THROWN — resolving an
+ * indeterminate probe to "no workflows" would permit a merge on an unverifiable
+ * CI picture. The caller treats a throw as NOT-green (refuse).
  */
 export async function repoHasWorkflows(repo: RepoRef, ref: string): Promise<boolean> {
   const key = `${repoPath(repo)}@${ref}`
@@ -586,11 +727,15 @@ export async function repoHasWorkflows(repo: RepoRef, ref: string): Promise<bool
           entry.type === "file" && /\.ya?ml$/i.test(entry.name ?? ""),
       )
   } catch (err) {
-    // 404 → no workflows dir → no CI. Other errors: assume no CI (best-effort).
-    if (!(err instanceof AgentError && err.code === "NOT_FOUND")) {
-      consola.debug("first-mate: workflow probe failed, assuming no CI:", err)
+    // 404 → no workflows dir → genuinely no CI (cache + return false). ANY other
+    // error is INDETERMINATE: do NOT resolve it to "no workflows" (fail-open) —
+    // re-throw so the caller refuses to merge on an unverifiable CI picture.
+    if (err instanceof AgentError && err.code === "NOT_FOUND") {
+      value = false
+    } else {
+      consola.debug("first-mate: workflow probe failed (indeterminate CI):", err)
+      throw err
     }
-    value = false
   }
 
   workflowCache.set(key, { timestamp: Date.now(), value })
@@ -643,6 +788,21 @@ export async function postComment(
     { body: { body } },
   )
   return { url: comment.html_url ?? comment.url ?? "" }
+}
+
+/**
+ * Post a comment that @-mentions the GitHub Copilot cloud agent so it iterates
+ * on the SAME branch/PR. A bare `REQUEST_CHANGES` review does NOT wake the cloud
+ * agent — the `@copilot` mention in an issue/PR comment is what actually
+ * triggers it to push a follow-up commit. Thin wrapper over `postComment` that
+ * prepends the mention; the caller supplies the consolidated fix instructions.
+ */
+export async function mentionCopilot(
+  repo: RepoRef,
+  pr: number,
+  body: string,
+): Promise<CommentResult> {
+  return postComment(repo, pr, `@copilot ${body}`)
 }
 
 export async function submitReview(
@@ -747,6 +907,25 @@ export async function mergePullRequest(
   return { merged: true, sha: stringValue(result.sha) ?? "" }
 }
 
+/**
+ * Close a pull request WITHOUT merging it, via REST
+ * `PATCH /repos/{owner}/{repo}/pulls/{pr}` with `{ state: "closed" }`. A merged
+ * PR cannot be closed this way (GitHub rejects it), so callers that must not
+ * touch a merged PR should gate on `getPullRequestState` first. Idempotent for
+ * an already-closed PR (GitHub returns the closed PR object).
+ */
+export async function closePullRequest(
+  repo: RepoRef,
+  pr: number,
+): Promise<ClosePullRequestResult> {
+  const result = await ghRest<{ state?: string | null }>(
+    "PATCH",
+    `${repoPath(repo)}/pulls/${segment(pr)}`,
+    { body: { state: "closed" } },
+  )
+  return { closed: true, state: result.state ?? "closed" }
+}
+
 export async function markReadyForReview(
   prNodeId: string,
 ): Promise<ReadyForReviewResult> {
@@ -763,7 +942,249 @@ export async function markReadyForReview(
   return { ready: true }
 }
 
+export interface CommitFileEntry {
+  path: string
+  content: string
+}
+
+export type CommitMode = "add-missing-only" | "overwrite-approved"
+
+export interface CommitFilesResult {
+  committed: string[]
+  preserved: string[]
+}
+
+export class CommitFilesError extends Error {
+  readonly code: "branch-not-found" | "api-error"
+  readonly cause?: unknown
+
+  constructor(message: string, code: "branch-not-found" | "api-error", options?: { cause?: unknown }) {
+    super(message)
+    this.name = "CommitFilesError"
+    this.code = code
+    this.cause = options?.cause
+  }
+}
+
+interface CommitGitRefResponse {
+  object?: {
+    sha?: string | null
+  } | null
+}
+
+interface CommitGitCommitResponse {
+  tree?: {
+    sha?: string | null
+  } | null
+}
+
+interface CommitGitBlobResponse {
+  sha?: string | null
+}
+
+interface CommitGitTreeResponse {
+  sha?: string | null
+}
+
+interface CommitGitCreateCommitResponse {
+  sha?: string | null
+}
+
+interface CommitTreeEntry {
+  path: string
+  mode: "100644"
+  type: "blob"
+  sha: string
+}
+
+export async function commitFiles(
+  repo: string,
+  branch: string,
+  files: CommitFileEntry[],
+  opts: { mode?: CommitMode; message?: string } = {},
+): Promise<CommitFilesResult> {
+  const parsedRepo = parseCommitRepoSlug(repo)
+  const normalizedBranch = normalizeCommitBranch(branch)
+  const mode = opts.mode ?? "add-missing-only"
+  const message = opts.message ?? "scaffold: seed agentic-dev conventions"
+  const normalizedFiles = files.map((file) => ({
+    path: normalizeCommitFilePath(file.path),
+    content: file.content,
+  }))
+
+  let ref: CommitGitRefResponse
+  try {
+    ref = await ghRest<CommitGitRefResponse>(
+      "GET",
+      `${repoPath(parsedRepo)}/git/ref/heads/${gitRefBranchPath(normalizedBranch)}`,
+    )
+  } catch (err) {
+    if (err instanceof AgentError && err.code === "NOT_FOUND") {
+      throw new CommitFilesError(
+        `Branch ${normalizedBranch} was not found in ${repo}`,
+        "branch-not-found",
+        { cause: err },
+      )
+    }
+    throw new CommitFilesError("Failed to read branch ref", "api-error", { cause: err })
+  }
+
+  const parentSha = ref.object?.sha
+  if (!parentSha) {
+    throw new CommitFilesError("Branch ref did not include a commit sha", "api-error")
+  }
+
+  const committedCandidates: CommitFileEntry[] = []
+  const preserved: string[] = []
+  for (const file of normalizedFiles) {
+    const exists = await commitFileExists(parsedRepo, file.path, normalizedBranch)
+    if (exists && mode === "add-missing-only") {
+      preserved.push(file.path)
+    } else {
+      committedCandidates.push(file)
+    }
+  }
+
+  if (committedCandidates.length === 0) {
+    return { committed: [], preserved }
+  }
+
+  try {
+    const parentCommit = await ghRest<CommitGitCommitResponse>(
+      "GET",
+      `${repoPath(parsedRepo)}/git/commits/${segment(parentSha)}`,
+    )
+    const baseTree = parentCommit.tree?.sha
+    if (!baseTree) {
+      throw new CommitFilesError("Parent commit did not include a tree sha", "api-error")
+    }
+
+    const tree: CommitTreeEntry[] = []
+    for (const file of committedCandidates) {
+      const blob = await ghRest<CommitGitBlobResponse>("POST", `${repoPath(parsedRepo)}/git/blobs`, {
+        body: {
+          content: Buffer.from(file.content, "utf8").toString("base64"),
+          encoding: "base64",
+        },
+      })
+      const blobSha = blob.sha
+      if (!blobSha) {
+        throw new CommitFilesError(`Blob response for ${file.path} did not include a sha`, "api-error")
+      }
+      tree.push({ path: file.path, mode: "100644", type: "blob", sha: blobSha })
+    }
+
+    const nextTree = await ghRest<CommitGitTreeResponse>("POST", `${repoPath(parsedRepo)}/git/trees`, {
+      body: { base_tree: baseTree, tree },
+    })
+    const nextTreeSha = nextTree.sha
+    if (!nextTreeSha) {
+      throw new CommitFilesError("Tree response did not include a sha", "api-error")
+    }
+
+    const nextCommit = await ghRest<CommitGitCreateCommitResponse>(
+      "POST",
+      `${repoPath(parsedRepo)}/git/commits`,
+      { body: { message, tree: nextTreeSha, parents: [parentSha] } },
+    )
+    const nextCommitSha = nextCommit.sha
+    if (!nextCommitSha) {
+      throw new CommitFilesError("Commit response did not include a sha", "api-error")
+    }
+
+    await ghRest<unknown>("PATCH", `${repoPath(parsedRepo)}/git/refs/heads/${gitRefBranchPath(normalizedBranch)}`, {
+      body: { sha: nextCommitSha },
+    })
+
+    return {
+      committed: committedCandidates.map((file) => file.path),
+      preserved,
+    }
+  } catch (err) {
+    if (err instanceof CommitFilesError) throw err
+    throw new CommitFilesError("Failed to commit files", "api-error", { cause: err })
+  }
+}
+
+async function commitFileExists(repo: RepoRef, path: string, branch: string): Promise<boolean> {
+  try {
+    await ghRest<unknown>(
+      "GET",
+      `${repoPath(repo)}/contents/${repoContentPath(path)}?ref=${segment(branch)}`,
+    )
+    return true
+  } catch (err) {
+    if (err instanceof AgentError && err.code === "NOT_FOUND") return false
+    throw new CommitFilesError(`Failed to check whether ${path} exists`, "api-error", { cause: err })
+  }
+}
+
+function parseCommitRepoSlug(value: string): RepoRef {
+  const trimmed = value.trim()
+  const parts = trimmed.split("/")
+  if (
+    parts.length !== 2
+    || parts[0] === undefined
+    || parts[1] === undefined
+    || parts[0].trim() === ""
+    || parts[1].trim() === ""
+  ) {
+    throw new CommitFilesError(
+      `repo must be an owner/repo string; got ${JSON.stringify(value)}`,
+      "api-error",
+    )
+  }
+  return { owner: parts[0].trim(), repo: parts[1].trim() }
+}
+
+function normalizeCommitBranch(value: string): string {
+  const trimmed = value.trim()
+  const withoutRefsPrefix = trimmed.startsWith("refs/heads/")
+    ? trimmed.slice("refs/heads/".length)
+    : trimmed.startsWith("heads/")
+      ? trimmed.slice("heads/".length)
+      : trimmed
+  if (withoutRefsPrefix === "" || withoutRefsPrefix.includes("\\")) {
+    throw new CommitFilesError(
+      `branch must be a non-empty branch name; got ${JSON.stringify(value)}`,
+      "api-error",
+    )
+  }
+  return withoutRefsPrefix
+}
+
+function normalizeCommitFilePath(value: string): string {
+  const trimmed = value.trim()
+  if (trimmed === "" || trimmed.startsWith("/") || trimmed.includes("\\")) {
+    throw new CommitFilesError(
+      `file path must be a relative POSIX repository path; got ${JSON.stringify(value)}`,
+      "api-error",
+    )
+  }
+  const drivePrefix = /^[A-Za-z]:\//.test(trimmed)
+  const parts = trimmed.split("/")
+  if (
+    drivePrefix
+    || parts.some((part) => part === "" || part === "." || part === "..")
+  ) {
+    throw new CommitFilesError(
+      `file path must be a safe relative repository path; got ${JSON.stringify(value)}`,
+      "api-error",
+    )
+  }
+  return parts.join("/")
+}
+
+function repoContentPath(path: string): string {
+  return path.split("/").map(segment).join("/")
+}
+
+function gitRefBranchPath(branch: string): string {
+  return branch.split("/").map(segment).join("/")
+}
+
 export function __resetAgentServiceCachesForTests(): void {
   rosterCache.clear()
   repoNodeCache.clear()
+  workflowCache.clear()
 }

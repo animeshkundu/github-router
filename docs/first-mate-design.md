@@ -24,7 +24,8 @@ The scoped server is `first-mate` (`GROUP_META` / `MCP_GROUPS` in
 preferred tool names are:
 
 - `mcp__first-mate__start_mission` — persist a mission: goal, repos, acceptance
-  criteria, optional priority, optional house rules.
+  criteria, optional priority, optional house rules, optional `default_model`
+  (the cloud coding agent's model for this mission's tasks; defaults to gpt-5.5).
 - `mcp__first-mate__advance` — wake the deterministic controller once; apply
   submitted model/human answers; return compact `board`, `needsModel`,
   `needsHuman`, `applied_count`, `nextWakeAt`, and `nextWakeSeconds` (the
@@ -32,9 +33,19 @@ preferred tool names are:
 - `mcp__first-mate__board` — read the active board without a wake.
 - `mcp__first-mate__mission_status` — read compact status for all missions, or
   one mission id.
+- `mcp__first-mate__abandon_mission` — mark a mission abandoned via the durable
+  registry CAS path and terminalize its live units so it drops from the active board.
+- `mcp__first-mate__add_units` — append dispatchable units to an active mission
+  using the same unit-creation path as decompose.
+- `mcp__first-mate__scaffold_repo` — seed or enhance the target repo's
+  agentic-dev foundation on a scaffold branch + PR before build waves begin.
+- `mcp__first-mate__mark_ready` — mark a draft PR ready for review, with the
+  same fail-closed ownership scope as `merge_pr` / `close_pr` (bot-authored or
+  correlated to a first-mate unit, else explicit `allow_unowned`).
 
-So the operational surface is the start/advance/board triad plus the status read.
-All four entries are created in `src/lib/first-mate/tools.ts`, carry
+So the operational surface is the start/advance/board triad plus the status read,
+with abandon as the explicit cleanup lever. All entries are created in
+`src/lib/first-mate/tools.ts`, carry
 `capability: "agents"`, and are filtered at BOTH `tools/list` and `tools/call` by
 `agentToolsEnabled()` (`src/lib/mcp-capabilities.ts`, `src/routes/mcp/handler.ts`).
 That predicate requires:
@@ -47,6 +58,52 @@ passes, and only writes the `/gh-first-mate` skill when the surface is available
 On MCP-name collision, `resolveGroupKeysFromMirror()` in
 `src/lib/codex-mcp-config.ts` gives the group a `gh-router-first-mate`-style key
 rather than dropping or hijacking a user server.
+
+### Board shape and active filtering
+
+`advance`, `board`, and `mission_status` default to ACTIVE missions only. Inactive
+missions (`done` / `abandoned`) are collapsed into `inactiveSummary`; callers can
+pass `include_all:true` when they are explicitly inspecting history. Each active
+mission row includes compact non-terminal unit handles (`unitId`, issue, PR, phase,
+provider, validation, model, and `blockedReason` when present). Terminal units are
+summarized as counts only, so long-running portfolios do not dump old completed work
+every wake.
+
+### Operator capability shaping
+
+In `--agents` mode the lead is an operator, not the product implementer. The
+operator-mode banner and `/gh-first-mate` skill steer product implementation to
+GitHub cloud agents. Local file writes and Bash remain available as escape
+hatches, but the main operator cannot call local `mcp__workers__*` or
+`mcp__orchestrate__*` tools directly. Those backends are subagent-only: use the
+worker-* Agent subagents when local worker help is genuinely needed, or delegate
+implementation to GitHub cloud agents through first-mate.
+
+### Foundation scaffold
+
+`scaffold_repo` is the foundation-first step for owned repositories. It never
+pushes directly to the default branch: the tool reads the target repository,
+creates a `scaffold/agentic-dev-*` branch, commits the foundation there, and opens
+a PR. The generated content is repo-geared rather than generic: repository
+description/README, default branch, manifests, package manager, package scripts,
+test framework, existing workflow hints, primary-OS signals, and UI-test
+dependencies are used to fill confident values. Ambiguous facts stay visible as
+`<!-- TODO: ... -->` instead of being guessed.
+
+The seeded foundation includes identical guidance in `CLAUDE.md`, `AGENTS.md`,
+`GEMINI.md`, and `.github/copilot-instructions.md`; mirrored role agents in
+`.github/agents/` and `.claude/agents/`; ADR template + initial ADR, changelog,
+learnings, history template, plans/research readmes, PR template, test
+instructions, Copilot setup, and starter CI. It deliberately does **not** seed
+factory-protocol or `docs/factory/` files: first-mate remains the external
+orchestrator, while the product repo holds only what agents and CI need to read.
+
+Non-clobber policy is three-way. `add-missing-only` seeds absent files and skips
+present files. `overwrite-approved` replaces existing files only when explicitly
+requested. `enhance` preserves tuned prose and appends only missing `##` sections
+for guidance files, the ADR index, changelog, and learnings; other present files
+are skipped. The tool response and PR body report each path as
+`seeded`, `skipped(present)`, or `enhanced(appended: ...)`.
 
 ## Controller: model as oracle, `advance()` as mechanism
 
@@ -152,6 +209,32 @@ and maps bot logins to `copilot`, `anthropic`, or `openai` via
 bounded tail log excerpt) instead of full transcripts. If `startTask()` fails,
 the controller falls back to creating an issue and assigning the selected bot.
 
+### Cloud-agent model selection
+
+Which model the GitHub cloud coding agent runs a task with is selectable, with a
+`gpt-5.5` default (the same `DEFAULT_CODEX_MODEL` the codex launcher uses). The
+choice threads mission→unit→dispatch:
+
+1. `start_mission` accepts an optional `default_model` string, persisted as
+   `Mission.defaultModel`.
+2. At decomposition (`applyDecomposeAnswer`) each `UnitRow.model` is stamped from
+   the decompose spec's per-unit `model` (if the verdict provided one) else the
+   mission's `defaultModel`.
+3. All three dispatch call sites (initial plan dispatch, approve→build, and
+   refine→plan) resolve the effective model as `unit.model ?? mission.defaultModel`
+   through `resolveCloudAgentModel()` (`src/lib/first-mate/task-model.ts`) and pass
+   it as `StartTaskInput.model` (the transport already forwarded a `model` field).
+
+`resolveCloudAgentModel(chosen, catalog?)` is pure and catalog-injectable. An
+explicitly-chosen model is normalized via the proxy's `resolveModel()` slug
+cascade and, when a live catalog is present, REQUIRED to be in it — an
+explicit model Copilot can't serve THROWS rather than being silently swapped for
+a fallback (no silent model-class switch). An unspecified choice defaults to
+`gpt-5.5`, walking `DEFAULT_CODEX_MODEL_FALLBACKS` only when a catalog says the
+preferred default is absent for the tier. `Mission.defaultModel` and
+`UnitRow.model` are both optional → back-compat: pre-existing missions/units load
+and dispatch on the `gpt-5.5` default.
+
 ### Copilot-host session log (the agent's plan / progress / questions)
 
 The cloud agent's plan, reasoning, progress, and any question it asks are NOT
@@ -200,9 +283,15 @@ missions, then loading each repo ledger. Unit rows store handles and
 classification — issue, PR, task id, bot login, SHAs, phase, validation,
 dependencies, blocking decision id — not full diffs, logs, or transcripts.
 
-Accuracy note for v1: `start_mission` registers a mission only. It does not yet
-decompose the goal into `UnitRow`s. The controller dispatches undispatched units
-once they exist; exact plan→unit creation is a follow-up.
+Accuracy note for v1: `start_mission` registers a mission only. The controller
+emits a one-shot `decompose` request for a unit-less active mission; the answer
+creates `UnitRow`s, marks the mission `everDecomposed`, and the controller
+dispatches undispatched units once they exist. Operators can append more units
+later with `add_units`; dependency indices in that call are local to the submitted
+unit list and are resolved to stable unit ids before dispatch. A decomposed mission
+auto-completes once no live units and no pending decisions remain, which prevents
+terminal-ledger pruning from making completed missions look unit-less and re-emit
+spurious decomposition requests.
 
 ## Orthogonal state model and pure decision table
 
@@ -244,6 +333,20 @@ Copilot chat-completions backend (`copilotBaseUrl(state)`, `copilotHeaders(state
 with temperature 0, small token caps, JSON-object response format, schema
 validation, and confidence ≥ 0.6. Failure or low confidence returns `null`; the
 pure state machine never calls an LLM.
+
+Tier1 routing (`src/lib/first-mate/scheduler/shadow.ts`) is now default-on with a
+presence-guarded opt-out (`GH_ROUTER_FM_SHADOW=0` disables calibration logging;
+`GH_ROUTER_FM_TIER1_LIVE=0` disables live auto-answer). The live allowlist is
+intentionally narrow and reversible: `author_fix`, `answer_agent_question`, and
+`decompose`. Auto-answer requires a valid verdict shape, confidence ≥ 0.85,
+`known`, and `low` stakes; `decompose` additionally runs a deterministic dependency
+verifier over the unit-list DAG. `author_fix` remains downstream-checked by CI and
+the different-lab floor before any merge, and `answer_agent_question` is only
+informational to the cloud agent. Any uncertainty, unknown kind, malformed payload,
+novel/high-stakes classification, or low confidence escalates. Merge-authorizing
+kinds (`review_plan`, `judge_review`, `merge_approval`, `approve_merge`) are hard
+excluded from the Tier1 live path and always route to the best-model/human gate.
+Convergence accounting and the full decision-table exposition are Phase 3.
 
 ## Cross-model verification, not bake-off
 
@@ -329,6 +432,28 @@ repo that agents can read by handle.
 - **Verifier dispatch:** `assignVerifier()` records different-lab verifier intent;
   actual verifier task/review dispatch is stubbed TODO in the controller.
 
+### Opt-in scheduler daemon — cross-platform graceful shutdown
+
+The opt-in server-side scheduler daemon (`GH_ROUTER_FM_DAEMON=1` under `--agents`;
+default OFF, the `[fm-heartbeat]` cron drives) runs as a SEPARATE child process
+(`scripts/first-mate-daemon.ts`) so a hung tick can't starve the proxy event
+loop. On proxy teardown it must release its fencing lease + singleton pidfile
+IMMEDIATELY and cleanly — not by TTL expiry / takeover. The trigger is
+cross-platform: `installGracefulShutdown()` (in `src/lib/first-mate/scheduler/`)
+wires SIGINT/SIGTERM (POSIX) PLUS stdin `end`/`close` (EOF) behind one once-guard,
+and the parent (`autospawn.ts`) spawns the child with `stdio[0]==="pipe"` so it
+holds the write end. This matters because the primary deployment target is
+Windows, where an external SIGTERM is a hard `TerminateProcess` that never runs a
+`process.on('SIGTERM')` handler — libuv's pipe-close `'end'`/`'close'` is the only
+graceful trigger observable identically on Windows named pipes and POSIX pipes.
+On teardown (`wireDaemonTeardown()`) the proxy EOFs the child's stdin FIRST
+(graceful lease/pidfile release), then hard-kills as a NON-BLOCKING, unref'd
+grace-window backstop (on `'exit'`, where timers can't run, it EOFs then kills
+synchronously) so a wedged child is never orphaned — an orphaned drive-primary
+daemon would keep merging PRs after the proxy is gone. The E2E harness imports
+the same `installGracefulShutdown()`, so the kill-switch test exercises the real
+production wiring rather than a divergent copy.
+
 ### Cross-lab review — residual hardening (v1)
 
 An independent review hardened the merge gate: a forged `judge_review` is now
@@ -349,8 +474,21 @@ These items remain open:
   `multiple_prs` (escalate), never silently pick one.
 - **Cross-process single-use:** the approval-consume serializer is in-process
   (v1 assumes a single router process); a file-CAS / lock would make it
-  multi-process safe, and consume-after-merge-success avoids burning an approval
-  on a transient failure.
+  multi-process safe. Consume-after-merge is handled: the approval is consumed
+  before the merge (keeping the single-use no-double-merge backstop live) but
+  RESTORED on a merge throw so a transient failure does not burn it, and an
+  already-`MERGED` PR is reconciled as success without re-merging (so a restored
+  approval is never consumed into a second merge on an ambiguous 5xx).
+- **Lease token-uniqueness residual (FOLLOWUP):** `isCurrentFencingToken`
+  compares the token NUMBER only and is expiry-blind, and a fully race-free
+  cross-process lease is not achievable with POSIX file locks (no path-level
+  compare-and-swap). The hot path additionally requires a successful lease
+  `renew()` (live-lease proof) before an irreversible dispatch. Backstops:
+  deterministic dispatch idempotency key (no double-dispatch), single-use
+  approval consume (no double-merge), ledger rev-CAS (no lost update). The
+  residual is duplicate best-effort side effects (reviews / comments / reruns)
+  in a narrow break-a-fresh-lock window; the robust future fix is atomic token
+  minting or a per-(unit,attempt) atomic single-dispatch claim (`wx`-create).
 - **Repo-qualified request ids:** request/decision ids are
   `missionId:issue:kind`; adding the repo prevents collisions when one mission
   spans two repos that share an issue number.

@@ -65,6 +65,13 @@ function classifyArtifact(observed: Observed, events: string[]): Artifact {
 
 function classifyValidation(observed: Observed, artifact: Artifact, row: UnitRow): Validation {
   if (artifact !== "pr_open") return "unknown"
+  // A6 empty-PR guard: a PR the agent opened but never committed to (zero
+  // changed files) is non-advancing — do NOT let "no CI / passing" report it as
+  // ready-to-verify. Gate ONLY when we're certain it's empty (changedFiles===0
+  // AND the diff summary was NOT truncated); a truncated 0 means we couldn't
+  // tell, so fall through. The controller tracks emptyObservations off the same
+  // condition and escalates after the cap so this never noops forever.
+  if (observed.changedFiles === 0 && observed.diffTruncated !== true) return "unknown"
   // Preserve a floor verdict that was recorded for the CURRENT head. The floor
   // comes from an out-of-band different-lab verifier (a judge_review answer),
   // not from GitHub, so it lives in the ledger, not `observed`. Binding it to
@@ -176,6 +183,13 @@ export function nextAction(
   switch (state.validation) {
     case "ci_failed":
     case "changes_requested":
+      // A2 hard bound: total fix attempts exhausted regardless of signature
+      // churn. Checked BEFORE the per-failure retry cap and independent of
+      // pr!==null so a unit that "makes progress" on a new failure every wake
+      // still escalates.
+      if ((row.totalFixes ?? 0) >= policy.totalFixCap) {
+        return { kind: "escalate_human", reason: "total fix attempts exceeded the hard cap" }
+      }
       if (row.retries < policy.maxRetries) {
         return { kind: "ask_model", request: "author_fix" }
       }
@@ -205,6 +219,9 @@ export function nextAction(
       if (!row.verifierAssigned) return { kind: "assign_verifier" }
       return { kind: "noop" }
     case "floor_failed":
+      if ((row.totalFixes ?? 0) >= policy.totalFixCap) {
+        return { kind: "escalate_human", reason: "total fix attempts exceeded the hard cap" }
+      }
       if (row.retries < policy.maxRetries) {
         return { kind: "ask_model", request: "author_fix" }
       }

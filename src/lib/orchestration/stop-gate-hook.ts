@@ -131,6 +131,60 @@ export function stopGateId(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
+ * PLAN-MODE env fallback. When the session is in plan mode, plan/memory scratch
+ * edits should not trip the gate-WEAKENING scan (a plan/memory markdown file may
+ * legitimately quote `it.skip` / `as any` while describing work). The launcher
+ * sets `GH_ROUTER_STOP_GATE_PLAN_MODE` for a plan-mode session; the payload may
+ * ALSO carry a forward-compat `plan_mode` field (see `decideStopHook`). Either
+ * signal being present activates the scoping — the executable gate STILL runs
+ * and non-plan hunks are STILL scanned.
+ */
+export function stopGatePlanMode(env: NodeJS.ProcessEnv = process.env): boolean {
+  return parseBoolEnv(env.GH_ROUTER_STOP_GATE_PLAN_MODE) === true
+}
+
+/**
+ * Is a unified-diff file path confined to a `plans/` or `memory/` directory?
+ * Windows-safe (normalizes `\` → `/`). Matches only when a DIRECTORY segment of
+ * the path is exactly `plans` or `memory`, so `plans/x.md`, `memory/y.md`, and
+ * `a/plans/z` match while the filenames `docs/plans.md` / `myplans/x` do not.
+ */
+function isPlanMemoryDiffPath(p: string): boolean {
+  const segs = p.replace(/\\/g, "/").split("/")
+  // Only directory segments count — exclude the final (filename) segment.
+  for (let i = 0; i < segs.length - 1; i++) {
+    if (segs[i] === "plans" || segs[i] === "memory") return true
+  }
+  return false
+}
+
+/**
+ * Drop the file sections of a unified `git diff` whose NEW path (the `b/…` side)
+ * is confined to `plans/` or `memory/` — used for the gate-WEAKENING scan when
+ * plan mode is active. Sections for other files (e.g. `src/…`) are preserved
+ * verbatim, so a MIXED diff keeps its non-plan hunks and `src/` weakening is
+ * still caught. The executable gate does not read the diff, so filtering it here
+ * never affects which checks run. A diff with no `diff --git` sections (or an
+ * empty one) is returned unchanged.
+ */
+export function stripPlanMemoryDiffHunks(diff: string): string {
+  if (diff.length === 0) return diff
+  const out: string[] = []
+  let dropping = false
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      const m = /^diff --git a\/.+ b\/(.+)$/.exec(line)
+      const bPath = m?.[1]
+      dropping = bPath !== undefined && isPlanMemoryDiffPath(bPath)
+      if (!dropping) out.push(line)
+      continue
+    }
+    if (!dropping) out.push(line)
+  }
+  return out.join("\n")
+}
+
+/**
  * C3: whether the structural Stop-gate is disabled for THIS launch. True when the
  * `GH_ROUTER_DISABLE_STOP_GATE` env is set OR the `--no-stop-gate` launcher flag was
  * passed (`args["no-stop-gate"] === true`). A DRIVEN session sets the flag so a
@@ -277,6 +331,15 @@ export async function decideStopHook(input: {
   ) => Promise<{ checks: CheckSpec[]; workdir: string; descriptorKey: string; baselineKey?: string } | null>
   /** Max blocks per prompt before the gate always allows (default 2). */
   maxBlocks?: number
+  /**
+   * PLAN-MODE scoping (env-fallback signal). When true — OR when the stdin
+   * payload carries a truthy `plan_mode` field — diff hunks confined to
+   * `plans/` or `memory/` are EXCLUDED from the gate-weakening scan. The
+   * executable gate still runs and non-plan (`src/…`) hunks are still scanned;
+   * this only narrows the weakening heuristic so plan/memory scratch docs don't
+   * trip it. The live wrapper passes `stopGatePlanMode()`.
+   */
+  planMode?: boolean
   /** Absolute wall-clock cap on the diff+gate evaluation; on timeout the hook
    *  FAILS OPEN (exit 0) and never claims the gate passed. Default 300s. */
   timeoutMs?: number
@@ -295,7 +358,7 @@ export async function decideStopHook(input: {
   spawnReview?: (ctx: StopReviewContext) => void
 }): Promise<StopHookDecision> {
   const maxBlocks = input.maxBlocks ?? 2
-  let payload: { cwd?: unknown; session_id?: unknown; agent_id?: unknown; agent_type?: unknown } = {}
+  let payload: { cwd?: unknown; session_id?: unknown; agent_id?: unknown; agent_type?: unknown; plan_mode?: unknown } = {}
   let parsed = false
   try {
     const p: unknown = JSON.parse(input.stdin)
@@ -381,6 +444,13 @@ export async function decideStopHook(input: {
   // the LAUNCHER captured BEFORE the agent mutated the tree — so an
   // agent-introduced failure is a regression, not silently adopted as baseline.
   let dynamicBaselineKey: string | undefined
+  // PLAN-MODE: active via the env-fallback input OR a forward-compat truthy
+  // `plan_mode` payload field. When active, the gate-weakening scan runs over a
+  // diff with plans/ + memory/ file sections stripped; the FULL diff is still
+  // returned for the advisory review, and the executable gate (which ignores the
+  // diff) is unaffected.
+  const planMode = input.planMode === true || payload.plan_mode === true
+  const scanDiff = (diff: string): string => (planMode ? stripPlanMemoryDiffHunks(diff) : diff)
   const runGate = async (): Promise<{ failedChecks: string[]; weakeningPatterns: string[]; diff: string } | null> => {
     if (input.resolveChecks) {
       const resolved = await input.resolveChecks(cwd).catch(() => null)
@@ -390,7 +460,7 @@ export async function decideStopHook(input: {
       dynamicBaselineKey = resolved.baselineKey
       const workdir = resolved.workdir || cwd
       const diff = await input.captureDiff(workdir).catch(() => "")
-      const result = await evaluateStopGate({ checks: resolved.checks, cwd: workdir, exec: input.exec, diff })
+      const result = await evaluateStopGate({ checks: resolved.checks, cwd: workdir, exec: input.exec, diff: scanDiff(diff) })
       return {
         failedChecks: [...result.failedChecks],
         weakeningPatterns: [...new Set(result.weakening.map((w) => w.pattern))],
@@ -398,7 +468,7 @@ export async function decideStopHook(input: {
       }
     }
     const diff = await input.captureDiff(cwd).catch(() => "")
-    const result = await runStopGateForLaunch({ workspace: cwd, gateId: input.gateId, exec: input.exec, diff })
+    const result = await runStopGateForLaunch({ workspace: cwd, gateId: input.gateId, exec: input.exec, diff: scanDiff(diff) })
     return {
       failedChecks: [...result.failedChecks],
       weakeningPatterns: [...new Set(result.weakening.map((w) => w.pattern))],

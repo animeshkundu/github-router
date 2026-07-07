@@ -69,7 +69,7 @@ test("ci_failed under the cap → author_fix; at the cap → escalate_human", ()
   const under = nextAction(c, row({ pr: 7, retries: 1 }), DEFAULT_POLICY)
   expect(under).toEqual({ kind: "ask_model", request: "author_fix" })
 
-  const atCap = nextAction(c, row({ pr: 7, retries: 3 }), DEFAULT_POLICY)
+  const atCap = nextAction(c, row({ pr: 7, retries: 6 }), DEFAULT_POLICY)
   expect(atCap.kind).toBe("escalate_human")
   expect(isEscalation(atCap)).toBe(true)
 })
@@ -188,4 +188,52 @@ test("failed / timed_out cloud task → escalate", () => {
     const c = classify(obs({ provider }), row({ provider }))
     expect(nextAction(c, row({ provider }), DEFAULT_POLICY).kind).toBe("escalate_human")
   }
+})
+
+test("A2: raised per-failure cap is 6 (retries 5 → author_fix, 6 → escalate)", () => {
+  const o = obs({ prs: [openPr()], ci: { rollup: "failing" } })
+  const c = classify(o, row({ pr: 7 }))
+  expect(nextAction(c, row({ pr: 7, retries: 5 }), DEFAULT_POLICY)).toEqual({
+    kind: "ask_model",
+    request: "author_fix",
+  })
+  expect(nextAction(c, row({ pr: 7, retries: 6 }), DEFAULT_POLICY).kind).toBe("escalate_human")
+})
+
+test("A2: totalFixCap escalates regardless of retries or signature churn", () => {
+  const o = obs({ prs: [openPr()], ci: { rollup: "failing" } })
+  const c = classify(o, row({ pr: 7 }))
+  // retries well under the per-failure cap, but total fixes at the hard bound.
+  const atHardCap = nextAction(c, row({ pr: 7, retries: 0, totalFixes: 10 }), DEFAULT_POLICY)
+  expect(atHardCap.kind).toBe("escalate_human")
+  // one below the hard bound still self-heals.
+  const under = nextAction(c, row({ pr: 7, retries: 0, totalFixes: 9 }), DEFAULT_POLICY)
+  expect(under).toEqual({ kind: "ask_model", request: "author_fix" })
+})
+
+test("A2: totalFixCap also applies to floor_failed and does not depend on pr", () => {
+  const o = obs({ prs: [openPr("sha-x")], ci: { rollup: "none", noCi: true }, verifierReviewed: true })
+  const r = row({ pr: 7, verifierAssigned: true, validation: "floor_failed", floorSha: "sha-x", totalFixes: 10 })
+  const c = classify(o, r)
+  expect(nextAction(c, r, DEFAULT_POLICY).kind).toBe("escalate_human")
+})
+
+test("A6: an empty PR (0 files, not truncated) is gated to non-advancing unknown", () => {
+  const o = obs({ prs: [openPr()], ci: { rollup: "passing" }, changedFiles: 0, diffTruncated: false })
+  const c = classify(o, row({ pr: 7 }))
+  expect(c.validation).toBe("unknown")
+  expect(nextAction(c, row({ pr: 7 }), DEFAULT_POLICY).kind).toBe("noop")
+})
+
+test("A6: a truncated 0-file summary does NOT gate (we couldn't tell)", () => {
+  const o = obs({ prs: [openPr()], ci: { rollup: "passing" }, changedFiles: 0, diffTruncated: true })
+  const c = classify(o, row({ pr: 7 }))
+  // Falls through to the CI logic instead of the empty-PR gate.
+  expect(c.validation).toBe("ci_passed")
+})
+
+test("A6: a PR with changes is not gated", () => {
+  const o = obs({ prs: [openPr()], ci: { rollup: "passing" }, changedFiles: 5, diffTruncated: false })
+  const c = classify(o, row({ pr: 7 }))
+  expect(c.validation).toBe("ci_passed")
 })

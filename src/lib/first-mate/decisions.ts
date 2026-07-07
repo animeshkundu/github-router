@@ -1,10 +1,10 @@
-import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 
 import consola from "consola"
 
 import { PATHS } from "~/lib/paths"
+import { commitJsonCas } from "./durable-store"
 import type { ApprovalRecord } from "~/lib/first-mate/approval"
 import type { RepoRef } from "~/lib/first-mate/types"
 
@@ -33,6 +33,7 @@ export interface DecisionRecord {
 
 interface DecisionsFile {
   version: 1
+  rev?: number
   decisions: DecisionRecord[]
 }
 
@@ -66,6 +67,10 @@ function isFiniteNumber(value: unknown): value is number {
 
 function isPositiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
 }
 
 function isOptionalString(value: unknown): boolean {
@@ -157,16 +162,10 @@ function isDecisionRecord(value: unknown): value is DecisionRecord {
   )
 }
 
-async function readDecisionsFile(): Promise<DecisionsFile> {
-  let raw: string
-  try {
-    raw = await fs.readFile(decisionsPath(), "utf8")
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      consola.debug("first-mate decisions read skipped:", err)
-    }
-    return { version: DECISIONS_VERSION, decisions: [] }
-  }
+function parseDecisions(
+  raw: string | undefined,
+): { rev: number; decisions: DecisionRecord[] } {
+  if (raw === undefined) return { rev: 0, decisions: [] }
 
   try {
     const parsed = asRecord(JSON.parse(raw))
@@ -175,52 +174,61 @@ async function readDecisionsFile(): Promise<DecisionsFile> {
       parsed.version !== DECISIONS_VERSION ||
       !Array.isArray(parsed.decisions)
     ) {
-      return { version: DECISIONS_VERSION, decisions: [] }
+      return { rev: 0, decisions: [] }
     }
+    const rev = isNonNegativeInteger(parsed.rev) ? parsed.rev : 0
     const cleaned = parsed.decisions.filter(isDecisionRecord)
     if (cleaned.length !== parsed.decisions.length) {
       consola.debug(
         `first-mate decisions dropped ${parsed.decisions.length - cleaned.length} corrupt decision(s)`,
       )
     }
-    return { version: DECISIONS_VERSION, decisions: cleaned }
+    return { rev, decisions: cleaned }
   } catch (err) {
     consola.debug("first-mate decisions corrupt, starting empty:", err)
-    return { version: DECISIONS_VERSION, decisions: [] }
+    return { rev: 0, decisions: [] }
   }
 }
 
-async function writeDecisionsFile(value: DecisionsFile): Promise<void> {
-  await fs.mkdir(PATHS.FIRST_MATE_DIR, { recursive: true })
-  const target = decisionsPath()
-  const tmp = `${target}.tmp.${process.pid}.${randomBytes(4).toString("hex")}`
+async function readDecisionsFile(): Promise<DecisionsFile> {
+  let raw: string | undefined
   try {
-    await fs.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
-    await fs.chmod(tmp, 0o600).catch(() => {})
-    await fs.rename(tmp, target)
-    await fs.chmod(target, 0o600).catch(() => {})
+    raw = await fs.readFile(decisionsPath(), "utf8")
   } catch (err) {
-    await fs.unlink(tmp).catch(() => {})
-    throw err
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      consola.debug("first-mate decisions read skipped:", err)
+    }
+    raw = undefined
+  }
+
+  const parsed = parseDecisions(raw)
+  return {
+    version: DECISIONS_VERSION,
+    rev: parsed.rev,
+    decisions: parsed.decisions,
   }
 }
 
-let _decisionsChain: Promise<void> = Promise.resolve()
-
-export function withDecisionsMutation<T>(
+export async function withDecisionsMutation<T>(
   work: (decisions: DecisionRecord[]) => T | Promise<T>,
 ): Promise<T> {
-  const next = _decisionsChain.then(async () => {
-    const file = await readDecisionsFile()
-    const result = await work(file.decisions)
-    await writeDecisionsFile(file)
-    return result
+  const { result } = await commitJsonCas<DecisionRecord[], T>({
+    path: decisionsPath(),
+    parse: (raw) => {
+      const parsed = parseDecisions(raw)
+      return { rev: parsed.rev, value: parsed.decisions }
+    },
+    mutate: async (decisions) => {
+      const result = await work(decisions)
+      return { value: decisions, result }
+    },
+    build: (decisions, rev): DecisionsFile => ({
+      version: DECISIONS_VERSION,
+      rev,
+      decisions,
+    }),
   })
-  _decisionsChain = next.then(
-    () => undefined,
-    () => undefined,
-  )
-  return next
+  return result
 }
 
 export async function readDecisions(): Promise<DecisionRecord[]> {

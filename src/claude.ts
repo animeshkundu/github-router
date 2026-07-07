@@ -50,6 +50,11 @@ import {
 import { liveExec } from "./lib/orchestration/live-exec"
 import { buildPromptSubmitHookCommand } from "./lib/orchestration/prompt-submit-hook"
 import {
+  FIRST_MATE_GUARD_MATCHER,
+  buildFirstMateGuardHookCommand,
+} from "./internal-first-mate-guard"
+import { assertShapingInstalled } from "./lib/first-mate/operator-shaping"
+import {
   activeDispatchModes,
   buildWorkerGuardHookCommand,
   guardToolMatcher,
@@ -88,6 +93,10 @@ import {
 } from "./lib/server-setup"
 import { state } from "./lib/state"
 import { resolveModel } from "./lib/utils"
+
+function isFirstMateSkillName(name: string): boolean {
+  return name === "gh-first-mate" || name === "gh-first-mate-scaffold"
+}
 
 export const claudeArgs = {
   ...sharedServerArgs,
@@ -660,7 +669,7 @@ export const claude = defineCommand({
         const sessionCwd = process.cwd()
         if (workerToolsEnabled()) {
           const skillsToWrite = INJECTED_SKILLS.filter(
-            (s) => s.name !== "gh-first-mate" || agentToolsEnabled(),
+            (s) => !isFirstMateSkillName(s.name) || agentToolsEnabled(),
           )
           let skillsWritten = 0
           for (const s of skillsToWrite) {
@@ -735,6 +744,31 @@ export const claude = defineCommand({
               `Injected skills (${skillsWritten}/${skillsToWrite.length}): ${skillNames}.\n`,
             )
           }
+        }
+
+        // In operator/`--agents` mode, keep local worker/orchestrate MCP tools
+        // subagent-only for the MAIN operator. File-authoring tools and Bash stay
+        // available; steering to cloud-agent delegation lives in the banner and
+        // /gh-first-mate skill. Fail-closed only for this reduced PreToolUse guard.
+        if (agentToolsEnabled()) {
+          let shapingInstalled = false
+          try {
+            const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+            const guardCmd = buildFirstMateGuardHookCommand(process.execPath, process.argv[1])
+            await injectStopHookIntoSettingsFile(
+              settingsPath,
+              guardCmd,
+              "PreToolUse",
+              undefined,
+              FIRST_MATE_GUARD_MATCHER,
+            )
+            shapingInstalled = true
+          } catch (err) {
+            consola.error(
+              `Could not register the operator worker/orchestrate guard hook: ${String(err)}`,
+            )
+          }
+          assertShapingInstalled(true, shapingInstalled)
         }
 
         // ai-or-die session binding. When launched inside an ai-or-die Terminal

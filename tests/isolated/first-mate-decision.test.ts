@@ -123,6 +123,33 @@ describe("decision packet HTML", () => {
   test("esc escapes HTML-sensitive characters", () => {
     expect(esc(`&<>"'`)).toBe("&amp;&lt;&gt;&quot;&#39;")
   })
+
+  test("#3: renders the agent log excerpt as escaped evidence when present", () => {
+    const { html } = buildDecisionPacket({
+      type: "human_decision",
+      tldr: "Task timed out",
+      question: "How should first mate proceed?",
+      options: [{ id: "continue", label: "Continue", consequence: "manual" }],
+      evidence: {
+        floorVerdict: "failed",
+        logExcerpt: "Progress:\nran the tests <script>bad</script>",
+      },
+    })
+    expect(html).toContain("Agent log")
+    expect(html).toContain("&lt;script&gt;bad&lt;/script&gt;")
+    expect(html).not.toContain("<script>bad")
+  })
+
+  test("#3: omits the agent-log row when no log excerpt is attached", () => {
+    const { html } = buildDecisionPacket({
+      type: "human_decision",
+      tldr: "Ready to merge",
+      question: "Approve?",
+      options: [{ id: "approve", label: "Approve", consequence: "merge" }],
+      evidence: { floorVerdict: "passed" },
+    })
+    expect(html).not.toContain("Agent log")
+  })
 })
 
 describe("decisions ledger", () => {

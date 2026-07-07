@@ -12,6 +12,18 @@ Use this skill when the user wants first-mate to drive GitHub cloud coding agent
 The first-mate controller is the durable system of record: missions, units, decisions, handles, and controller state live in its registry and ledger.
 Your job is to run the thin protocol, not to hold the mission in context.
 
+## Foundation-first mandate
+
+Before the first build wave on an owned repository, run \`mcp__first-mate__scaffold_repo\` and verify the PR landed or is already present. The scaffold must seed a repo-geared foundation that GitHub agents and CI can read: guidance, role agents, ADRs, changelog, learnings, PR template, test instructions, Copilot setup, and CI. Do not seed factory-protocol files into product repos; first-mate is the external orchestrator.
+
+Use \`mode: "add-missing-only"\` for new repos, \`mode: "enhance"\` when a repo has existing guidance that should keep its prose while appending missing \`##\` sections, and \`mode: "overwrite-approved"\` only with explicit approval.
+
+## Scoped-work discipline
+
+Well-scoped, testable work items succeed; vague meta-work fails. Discovery/decompose must emit concrete units with acceptance criteria, expected evidence, and dependencies. Keep one active build unit per concern. Parallelism is for read-only producers (research, review, planning) and independent units only, not for racing broad implementation waves.
+
+Judgment and merge policy: merge remains human-gated, evidence-gated, and head/base-bound. Use the best available model tier for plan review, judgment, and merge decisions; never cheap out on plan/judge/merge calls.
+
 ## Start a mission
 
 For a new goal, call mcp__first-mate__start_mission with:
@@ -22,7 +34,7 @@ For a new goal, call mcp__first-mate__start_mission with:
 - priority and house_rules only when the user supplied them or they are necessary constraints.
 
 If acceptance criteria are missing or ambiguous, ask the user before starting.
-Do not decompose the mission yourself at start time; v1 mission registration is intentionally simple and later controller wakes/model requests drive decomposition and steering.
+Do not decompose the mission yourself at start time; mission registration is intentionally simple and later controller wakes/model requests drive decomposition and steering. If the user explicitly asks to append scoped work to an existing active mission, use mcp__first-mate__add_units with concrete unit titles.
 
 Invariant (closes the stranding hole): work only ever becomes active inside a turn — start_mission is a tool call, nothing activates a mission server-side. So immediately after start_mission, run one loop turn (advance, then arm the heartbeat) in the SAME turn, before you yield. Never register a mission and stop without arming; otherwise nothing will wake to drive it.
 
@@ -49,6 +61,7 @@ Keep verdicts small and typed to the request kind.
 
 Use the request's kind and payload as the contract:
 
+- decompose: split a unit-less active mission into dispatchable units. Return { units: [{ title, repo?, agent?, dependsOn?, model? }] }. \`dependsOn\` entries are 0-based indices into the same units list. Emit once per unit-less active mission; the controller creates durable unit ids and will not ask again after units exist.
 - review_plan: review the plan against the mission goal, acceptance criteria, and house rules. Return { decision: "approve" } when the plan is good enough to implement, or { decision: "refine", instruction: "..." } with a short actionable refinement.
 - answer_agent_question: answer only from the acceptance criteria and supplied context. Return { answer: "..." }. If the answer is not derivable, do not invent policy; escalate by leaving a short answer that says what the human must decide.
 - author_fix: author a concise fix instruction for the cloud agent. Return { instruction: "..." } with the failure, expected behavior, and any bounded check to run.
@@ -59,6 +72,8 @@ Delegate heavy reading to workers:
 - Use the worker-explore subagent (Agent tool) for focused source or history gathering.
 - Use the worker-review subagent (Agent tool) for compact review of a specific plan, PR summary, or suspicious change.
 - Use the worker-test subagent (Agent tool) when a missing executable check is the blocker.
+
+Operator / --agents mode constraint: delegate product implementation to GitHub cloud agents. Direct \`mcp__workers__*\` / \`mcp__orchestrate__*\` calls are subagent-only for the main operator; use the worker-* Agent subagents when local worker help is genuinely needed. Local tools (Edit/Write/Bash, \`gh\`, \`git\`) remain available, but prefer authoring fix instructions for the cloud agent rather than pulling large diffs or CI logs into the lead context.
 
 Do not read a full diff, full CI log, or full transcript in the lead context. Ask workers for narrow facts and compact excerpts. The ledger is durable memory; context is not.
 
@@ -93,6 +108,8 @@ Responsiveness (optional): the buckets above already tighten cadence to ~2 min f
 
 Guardrails: never leave more than one [fm-heartbeat] job; never busy-loop advance; if no scheduler tool is available, tell the user the next wake is in nextWakeSeconds seconds and stop.
 
+MCP unavailable: if the first-mate MCP server is not present (this is not a \`--agents\` session and \`mcp__first-mate__advance\` would return a tool-not-found error), do NOT attempt to advance. CronList then CronDelete every [fm-heartbeat] job (same as Disarm above), and report "first-mate paused — re-run under \`github-router claude --agents\` to resume." Stop without further action.
+
 ## Board reports
 
 Use mcp__first-mate__board or mcp__first-mate__mission_status for read-only status checks.
@@ -102,6 +119,9 @@ Report compactly:
 - repositories
 - phase counts
 - blocked count and why, when available
+- per-unit handles for non-terminal units: unitId, issue/PR, phase, provider, validation, model, and blockedReason when present
+- resolved cloud-agent model per unit (surfaced on the board — verify model choice before approving plans)
+- terminal work only as summary counts; use include_all only when the user asks for completed/abandoned history
 - next wake time or the next requested action
 
 Never reconstruct status by rereading raw logs when the controller board already has the handles.

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { ARTIFACT_REVIEW_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "../src/lib/injected-skills"
+import { ARTIFACT_REVIEW_SKILL, FIRST_MATE_SETUP_SKILL, FIRST_MATE_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "../src/lib/injected-skills"
 
 function frontmatterFor(md: string): string {
   const lines = md.split(/\r?\n/)
@@ -12,8 +12,9 @@ function frontmatterFor(md: string): string {
 
 describe("INJECTED_SKILLS", () => {
   test("contains the injected skills with non-empty names and markdown", () => {
-    expect(INJECTED_SKILLS.length).toBe(5)
+    expect(INJECTED_SKILLS.length).toBe(6)
     expect(INJECTED_SKILLS.some((s) => s.name === "gh-worker")).toBe(true)
+    expect(INJECTED_SKILLS.some((s) => s.name === "gh-first-mate-scaffold")).toBe(true)
     for (const skill of INJECTED_SKILLS) {
       expect(skill.name.length).toBeGreaterThan(0)
       expect(skill.md.length).toBeGreaterThan(0)
@@ -27,6 +28,25 @@ describe("INJECTED_SKILLS", () => {
       expect(lines).toContain(`name: ${skill.name}`)
       expect(lines.some((line) => /^description:\s*\S/.test(line))).toBe(true)
     }
+  })
+})
+
+describe("first-mate skills", () => {
+  test("codifies foundation-first, scoped work, and best-model merge discipline", () => {
+    expect(FIRST_MATE_SKILL.md).toContain("Foundation-first mandate")
+    expect(FIRST_MATE_SKILL.md).toContain("Before the first build wave")
+    expect(FIRST_MATE_SKILL.md).toContain("Well-scoped, testable work items succeed")
+    expect(FIRST_MATE_SKILL.md).toContain("never cheap out on plan/judge/merge")
+    expect(FIRST_MATE_SKILL.md).toContain("dependsOn` entries are 0-based indices")
+    expect(FIRST_MATE_SKILL.md).toContain("Direct `mcp__workers__*` / `mcp__orchestrate__*` calls are subagent-only")
+    expect(FIRST_MATE_SKILL.md).toContain("Local tools (Edit/Write/Bash")
+  })
+
+  test("scaffold skill documents geared foundation, enhance mode, and no factory files", () => {
+    expect(FIRST_MATE_SETUP_SKILL.md).toContain("world-class repo-geared")
+    expect(FIRST_MATE_SETUP_SKILL.md).toContain("mode: \"enhance\"")
+    expect(FIRST_MATE_SETUP_SKILL.md).toContain("does not seed factory-protocol")
+    expect(FIRST_MATE_SETUP_SKILL.md).toContain("detection_overrides")
   })
 })
 

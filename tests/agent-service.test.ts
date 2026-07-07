@@ -7,11 +7,13 @@ import {
   findAgentPRs,
   getPullRequestDiffSummary,
   getRequiredChecksForSha,
+  markReadyForReview,
   mergePullRequest,
+  repoHasWorkflows,
   resolveAgentRoster,
   __resetAgentServiceCachesForTests,
 } from "~/lib/agent/service"
-import { getTask } from "~/lib/agent/tasks"
+import { getTask, startTask } from "~/lib/agent/tasks"
 import { AgentError, type AgentErrorCode, type RepoRef } from "~/lib/agent/types"
 import { state } from "~/lib/state"
 
@@ -283,6 +285,32 @@ test("findAgentPRs matches a Copilot-authored PR to a copilot-swe-agent unit by 
   })).toEqual([{ number: 8, headSha: "h8", headRef: "copilot/x", isDraft: false }])
 })
 
+
+test("findAgentPRs extracts a constrained unit-id marker without HTML-comment over-capture", async () => {
+  const fetchMock = mock(() =>
+    jsonResponse([
+      {
+        number: 10,
+        user: { login: "Copilot" },
+        head: { sha: "h10", ref: "copilot/marker" },
+        body: "<!-- unit-id:abc-123--></p>",
+      },
+    ]),
+  )
+  setFetch(fetchMock)
+
+  expect(await findAgentPRs({ owner: "octo", repo: "r" }, {
+    issueNumber: 0,
+    botLogin: "copilot-swe-agent",
+  })).toEqual([{
+    number: 10,
+    headSha: "h10",
+    headRef: "copilot/marker",
+    isDraft: false,
+    unitIdMarker: "abc-123",
+  }])
+})
+
 test("getRequiredChecksForSha excludes the Copilot review-bot check-run from CI rollup", async () => {
   // The copilot-pull-request-reviewer check-run is a review marker, not a test —
   // counting it would report "passing" for a PR whose real CI never ran.
@@ -306,6 +334,136 @@ test("getRequiredChecksForSha excludes the Copilot review-bot check-run from CI 
   )
   setFetch(withRealCi)
   expect((await getRequiredChecksForSha(repo, "sha2")).rollup).toBe("passing")
+})
+
+// FIX 1 — legacy Commit Status API (CircleCI/Travis) must be folded into the CI
+// rollup so a red/pending REQUIRED status with ZERO check-runs can never merge.
+function routedFetch(route: (url: string) => Response): typeof fetch {
+  return ((input: Parameters<typeof fetch>[0]) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : (input as Request).url
+    return Promise.resolve(route(url))
+  }) as unknown as typeof fetch
+}
+
+test("getRequiredChecksForSha folds a RED legacy commit status into a failing rollup", async () => {
+  setFetch(
+    routedFetch((url) => {
+      if (url.includes("/check-runs")) return jsonResponse({ check_runs: [] })
+      if (url.includes("/status")) {
+        return jsonResponse({
+          state: "failure",
+          total_count: 1,
+          statuses: [{ state: "failure", context: "ci/circleci", target_url: "https://ci/x" }],
+        })
+      }
+      throw new Error(`unexpected fetch ${url}`)
+    }),
+  )
+  const summary = await getRequiredChecksForSha(repo, "sha-red")
+  expect(summary.rollup).toBe("failing")
+  expect(summary.failing.map((f) => f.name)).toContain("ci/circleci")
+})
+
+test("getRequiredChecksForSha folds a PENDING legacy commit status into a pending rollup", async () => {
+  setFetch(
+    routedFetch((url) => {
+      if (url.includes("/check-runs")) return jsonResponse({ check_runs: [] })
+      if (url.includes("/status")) {
+        return jsonResponse({
+          state: "pending",
+          total_count: 1,
+          statuses: [{ state: "pending", context: "ci/travis" }],
+        })
+      }
+      throw new Error(`unexpected fetch ${url}`)
+    }),
+  )
+  expect((await getRequiredChecksForSha(repo, "sha-pending")).rollup).toBe("pending")
+})
+
+test("getRequiredChecksForSha ignores an EMPTY combined status (total_count 0) so an Actions-only repo isn't spuriously pending", async () => {
+  // GitHub returns state:"pending" with total_count:0 for a commit with no
+  // legacy statuses — folding that would block every modern repo.
+  setFetch(
+    routedFetch((url) => {
+      if (url.includes("/check-runs")) return jsonResponse({ check_runs: [] })
+      if (url.includes("/status")) return jsonResponse({ state: "pending", total_count: 0, statuses: [] })
+      throw new Error(`unexpected fetch ${url}`)
+    }),
+  )
+  expect((await getRequiredChecksForSha(repo, "sha-empty")).rollup).toBe("none")
+})
+
+// FIX (pagination bypass) — the check-runs API has no aggregate state, so a
+// failing run on page 2+ must not be hidden by an all-green page 1.
+function pageOf(url: string): number {
+  return Number(new URL(url).searchParams.get("page") ?? "1")
+}
+function greenRun(i: number) {
+  return { id: i, name: `test-${i}`, status: "completed", conclusion: "success" }
+}
+
+test("getRequiredChecksForSha enumerates every check-run page — a failing run on page 2 is not hidden by an all-green page 1", async () => {
+  setFetch(
+    routedFetch((url) => {
+      if (url.includes("/check-runs")) {
+        const page = pageOf(url)
+        if (page === 1) {
+          return jsonResponse({
+            total_count: 150,
+            check_runs: Array.from({ length: 100 }, (_, i) => greenRun(i)),
+          })
+        }
+        // page 2: 49 green + one failing run at the tail
+        return jsonResponse({
+          total_count: 150,
+          check_runs: [
+            ...Array.from({ length: 49 }, (_, i) => greenRun(100 + i)),
+            { id: 999, name: "e2e (windows-latest)", status: "completed", conclusion: "failure" },
+          ],
+        })
+      }
+      if (url.includes("/status")) return jsonResponse({ state: "success", total_count: 0, statuses: [] })
+      throw new Error(`unexpected fetch ${url}`)
+    }),
+  )
+  const summary = await getRequiredChecksForSha(repo, "sha-paged")
+  expect(summary.rollup).toBe("failing")
+  expect(summary.failing.map((f) => f.name)).toContain("e2e (windows-latest)")
+})
+
+test("getRequiredChecksForSha FAILS CLOSED (pending) when a repo exceeds the check-run page cap", async () => {
+  // Every page is all-green, but total_count exceeds PER_PAGE * MAX_PAGES, so we
+  // can never confirm the un-enumerated tail — the rollup must be pending, never
+  // passing.
+  setFetch(
+    routedFetch((url) => {
+      if (url.includes("/check-runs")) {
+        return jsonResponse({
+          total_count: 100_000,
+          check_runs: Array.from({ length: 100 }, (_, i) => greenRun(i)),
+        })
+      }
+      if (url.includes("/status")) return jsonResponse({ state: "success", total_count: 0, statuses: [] })
+      throw new Error(`unexpected fetch ${url}`)
+    }),
+  )
+  expect((await getRequiredChecksForSha(repo, "sha-huge")).rollup).toBe("pending")
+})
+
+test("repoHasWorkflows returns false on 404 but RE-THROWS a non-404 probe error (indeterminate, fail-safe)", async () => {
+  setFetch(routedFetch(() => jsonResponse({ message: "not found" }, { status: 404 })))
+  expect(await repoHasWorkflows(repo, "main")).toBe(false)
+
+  __resetAgentServiceCachesForTests()
+  state.githubAgentToken = "test-token"
+  setFetch(routedFetch(() => jsonResponse({ message: "boom" }, { status: 500 })))
+  await expectAgentCode(repoHasWorkflows(repo, "other-branch"), "UPSTREAM")
 })
 
 test("getPullRequestDiffSummary is compact, omits patches, and caps files", async () => {
@@ -351,6 +509,27 @@ test("getTask hard-truncates logExcerpt and never returns the full session log",
   expect(task.logExcerpt).not.toContain("a".repeat(2000))
 })
 
+test("markReadyForReview calls the GitHub GraphQL ready-for-review mutation", async () => {
+  let capturedBody: Record<string, unknown> = {}
+  const fetchMock = mock((_url: string, init?: RequestInit) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+    return jsonResponse({
+      data: {
+        markPullRequestReadyForReview: {
+          pullRequest: { id: "PR_node_1" },
+        },
+      },
+    })
+  })
+  setFetch(fetchMock)
+
+  const result = await markReadyForReview("PR_node_1")
+
+  expect(result).toEqual({ ready: true })
+  expect(String(capturedBody.query)).toContain("markPullRequestReadyForReview")
+  expect(capturedBody.variables).toEqual({ pullRequestId: "PR_node_1" })
+})
+
 test("mergePullRequest sends expected head sha and maps head-moved status to HEAD_MOVED", async () => {
   const mergeFetch = mock((_url: string, _init?: RequestInit) =>
     jsonResponse({ merged: true, sha: "merge-sha" }),
@@ -373,4 +552,40 @@ test("mergePullRequest sends expected head sha and maps head-moved status to HEA
     mergePullRequest(repo, { pr: 31, expectedHeadSha: "old-head-sha" }),
     "HEAD_MOVED",
   )
+})
+
+test("startTask includes the model in the POST body when provided", async () => {
+  let capturedBody: unknown
+  const fetchMock = mock((_url: string, init?: RequestInit) => {
+    capturedBody = JSON.parse(String(init?.body))
+    return jsonResponse({ task_id: "task-42", state: "queued" })
+  })
+  setFetch(fetchMock)
+
+  const result = await startTask(repo, {
+    prompt: "do the work",
+    model: "gpt-5.5",
+    createPullRequest: true,
+  })
+
+  expect(result).toEqual({ taskId: "task-42", state: "queued" })
+  expect(capturedBody).toMatchObject({
+    prompt: "do the work",
+    model: "gpt-5.5",
+    create_pull_request: true,
+  })
+})
+
+test("startTask omits the model field when none is provided", async () => {
+  let capturedBody: Record<string, unknown> = {}
+  const fetchMock = mock((_url: string, init?: RequestInit) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+    return jsonResponse({ task_id: "task-43", state: "queued" })
+  })
+  setFetch(fetchMock)
+
+  await startTask(repo, { prompt: "no model here" })
+
+  expect(capturedBody.prompt).toBe("no model here")
+  expect("model" in capturedBody).toBe(false)
 })

@@ -3,6 +3,7 @@ import consola from "consola"
 import {
   COPILOT_REVIEWER_LOGIN,
   findAgentPRs,
+  getPullRequestDiffSummary,
   getPullRequestReviews,
   getPullRequestState,
   getRequiredChecksForSha,
@@ -62,9 +63,8 @@ function taskPrNumber(task: TaskStatusResult | null): number | null {
   return parsePrNumberFromUrl(task.prUrl)
 }
 
-function firstSummaryNumber(prs: AgentPRSummary[]): number | null {
-  const summary = prs.find((pr) => Number.isInteger(pr.number) && pr.number > 0)
-  return summary?.number ?? null
+function firstSummary(prs: AgentPRSummary[]): AgentPRSummary | null {
+  return prs.find((pr) => Number.isInteger(pr.number) && pr.number > 0) ?? null
 }
 
 function branchMatchNumber(prs: AgentPRSummary[], branch: string | undefined): number | null {
@@ -73,26 +73,45 @@ function branchMatchNumber(prs: AgentPRSummary[], branch: string | undefined): n
   return match?.number ?? null
 }
 
-function primaryPrNumber(
+function markerMatchNumber(prs: AgentPRSummary[], unitId: string | undefined): number | null {
+  if (!unitId) return null
+  const match = prs.find((pr) => pr.unitIdMarker === unitId && Number.isInteger(pr.number) && pr.number > 0)
+  return match?.number ?? null
+}
+
+export function primaryPrNumber(
   unit: UnitRow,
   task: TaskStatusResult | null,
   prs: AgentPRSummary[],
-): number | null {
-  if (unit.pr !== null && unit.pr > 0) return unit.pr
+): { number: number | null; correlated: boolean; marker?: string } {
+  if (unit.pr !== null && unit.pr > 0) return { number: unit.pr, correlated: true }
 
   const branch = unit.branch ?? task?.branch ?? undefined
   const byBranch = branchMatchNumber(prs, branch)
-  if (byBranch !== null) return byBranch
+  if (byBranch !== null) return { number: byBranch, correlated: true }
 
   const byTask = taskPrNumber(task)
-  if (byTask !== null) return byTask
+  if (byTask !== null) return { number: byTask, correlated: true }
+
+  // Cooperative marker: the Agent-Tasks API has no branch/label field, so the
+  // prompt asks the coding agent to put `unit-id: <id>` in the PR body. This is
+  // best-effort correlation only; uncorrelated PR escalation below is the safety net.
+  const byMarker = markerMatchNumber(prs, unit.id)
+  if (byMarker !== null) return { number: byMarker, correlated: true }
 
   // If the unit's branch is KNOWN but no PR matches it, the PR simply is not
   // open yet — do NOT grab an unrelated same-bot PR (author matching alone is
   // ambiguous). Only guess by first author-matched PR when the branch is
-  // unknown (e.g. legacy issue-based units with no branch signal).
-  if (branch !== undefined) return null
-  return firstSummaryNumber(prs)
+  // unknown (e.g. legacy issue-based units with no branch signal). This guess
+  // is UNCORRELATED: the caller must not adopt it as unit.pr nor mark the unit
+  // done from it — only surface a merge as `merged_uncorrelated` for a human.
+  if (branch !== undefined) return { number: null, correlated: false }
+  const summary = firstSummary(prs)
+  return {
+    number: summary?.number ?? null,
+    correlated: false,
+    ...(summary?.unitIdMarker !== undefined ? { marker: summary.unitIdMarker } : {}),
+  }
 }
 
 async function getTaskSafe(
@@ -160,6 +179,25 @@ async function getCiSafe(
   }
 }
 
+/**
+ * A6 — the primary open PR's changed-file count + truncation, mirroring the
+ * `getCiSafe` best-effort pattern (try/catch → undefined). Feeds the empty-PR
+ * gate so a PR the agent opened but never committed to isn't treated as ready.
+ */
+async function getDiffSafe(
+  repo: AgentRepoRef,
+  pr: number | null,
+): Promise<{ changedFiles: number; truncated: boolean } | undefined> {
+  if (pr === null) return undefined
+  try {
+    const summary = await getPullRequestDiffSummary(repo, pr)
+    return { changedFiles: summary.fileCount, truncated: summary.truncated }
+  } catch (err) {
+    consola.debug("first-mate observe: diff summary read skipped:", err)
+    return undefined
+  }
+}
+
 async function verifierReviewSafe(
   repo: AgentRepoRef,
   unit: UnitRow,
@@ -211,6 +249,10 @@ function observedPrs(
       isDraft: primaryState.isDraft,
       state,
       merged: state === "MERGED",
+      // A6/#12: carry the base identity so the controller can pin it at PR-open
+      // (resolved-base guard) and detect a retarget vs a base fast-forward.
+      ...(primaryState.baseRef ? { baseRef: primaryState.baseRef } : {}),
+      ...(primaryState.baseSha ? { baseSha: primaryState.baseSha } : {}),
     })
   }
 
@@ -220,12 +262,23 @@ function observedPrs(
 function externalMutation(
   unit: UnitRow,
   primaryState: PullRequestState | null,
+  correlated: boolean,
 ): Observed["externalMutation"] | undefined {
   if (!primaryState || unit.terminal || unit.cancelledBy === "controller") {
     return undefined
   }
 
   const state = normalizePrState(primaryState.state)
+  // A3: an UNCORRELATED primary (bare author-match fallback) must not drive a
+  // done/close transition — it may be a sibling's PR. A CLOSED sibling is
+  // silently ignored, but a MERGED one is surfaced as `merged_uncorrelated` so a
+  // real squash-merge with the branch deleted escalates for human reconciliation
+  // rather than becoming an immortal zombie.
+  if (!correlated) {
+    if (state === "MERGED") return "merged_uncorrelated"
+    if (state === "OPEN") return "open_uncorrelated"
+    return undefined
+  }
   if (state === "MERGED") return "merged"
   if (state === "CLOSED") return "closed"
   return undefined
@@ -239,14 +292,28 @@ export async function observeUnit(unit: UnitRow): Promise<Observed> {
   if (task?.branch && task.branch.length > 0) unit.branch = task.branch
   const provider = providerState(task?.state, unit.provider)
   const prSummaries = await findPrsSafe(repo, unit)
-  const primaryNumber = primaryPrNumber(unit, task, prSummaries)
+  const { number: primaryNumber, correlated, marker: externalPrUnitIdMarker } = primaryPrNumber(unit, task, prSummaries)
   const primaryState = await getPullRequestStateSafe(repo, primaryNumber)
-  const ci = primaryState
-    ? await getCiSafe(repo, primaryState.headSha, primaryState.baseRef)
+  // A3: only feed a CORRELATED primary state into the artifact list, so an
+  // uncorrelated sibling's MERGED/CLOSED state never leaks in as the unit's own
+  // artifact (which would spuriously mark it done). The uncorrelated signal is
+  // surfaced solely via `externalMutation` below.
+  const artifactPrimaryState = correlated ? primaryState : null
+  const openState = normalizePrState(primaryState?.state ?? "OPEN")
+  const ci = artifactPrimaryState
+    ? await getCiSafe(repo, artifactPrimaryState.headSha, artifactPrimaryState.baseRef)
     : undefined
-  const reviewDecision = primaryState ? primaryState.reviewDecision ?? null : undefined
+  const reviewDecision = artifactPrimaryState
+    ? artifactPrimaryState.reviewDecision ?? null
+    : undefined
+  // A6: fetch the changed-file count for a correlated OPEN PR only (a merged /
+  // closed PR needs no empty-diff gate; an uncorrelated one isn't ours).
+  const diff =
+    artifactPrimaryState && openState === "OPEN"
+      ? await getDiffSafe(repo, primaryNumber)
+      : undefined
 
-  const mutation = externalMutation(unit, primaryState)
+  const mutation = externalMutation(unit, primaryState, correlated)
 
   // The distilled session log carries the agent's plan/reasoning/progress and,
   // when it is blocked, the question it is asking. Feed both to the engine so
@@ -257,18 +324,27 @@ export async function observeUnit(unit: UnitRow): Promise<Observed> {
   // Once a verifier (Copilot code review) has been assigned, check whether its
   // review for the CURRENT head has landed; its findings become the judge_review
   // evidence.
-  const review = await verifierReviewSafe(repo, unit, primaryNumber, primaryState?.headSha)
+  const review = await verifierReviewSafe(repo, unit, primaryNumber, artifactPrimaryState?.headSha)
 
   return {
     provider,
-    prs: observedPrs(prSummaries, primaryState),
+    // A3: build the artifact PR list from CORRELATED sources ONLY. An
+    // uncorrelated author-fallback summary must never enter observed.prs — else
+    // updateUnitFromObservedPrs's singleton path would bind a sibling PR to the
+    // unit, which the NEXT wake reads back as `unit.pr` (now "correlated") and
+    // marks done. The uncorrelated signal is surfaced solely via externalMutation.
+    prs: observedPrs(correlated ? prSummaries : [], artifactPrimaryState),
+    ...(correlated && primaryNumber !== null ? { primaryPr: primaryNumber } : {}),
     ...(ci ? { ci } : {}),
     ...(reviewDecision !== undefined ? { reviewDecision } : {}),
+    ...(diff ? { changedFiles: diff.changedFiles, diffTruncated: diff.truncated } : {}),
     ...(mutation ? { externalMutation: mutation } : {}),
+    ...(mutation && primaryNumber !== null ? { externalPr: primaryNumber } : {}),
+    ...(mutation && externalPrUnitIdMarker !== undefined ? { externalPrUnitIdMarker } : {}),
     ...(logExcerpt ? { logExcerpt } : {}),
     ...(question ? { question } : {}),
     ...(review.reviewed ? { verifierReviewed: true } : {}),
     ...(review.findings ? { reviewExcerpt: review.findings } : {}),
-    ...(primaryState?.nodeId ? { prNodeId: primaryState.nodeId } : {}),
+    ...(artifactPrimaryState?.nodeId ? { prNodeId: artifactPrimaryState.nodeId } : {}),
   }
 }

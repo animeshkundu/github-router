@@ -16,6 +16,8 @@ export interface DecisionPacketInput {
     prSummary?: string
     ciExcerpt?: string
     floorVerdict?: string
+    /** The cloud-agent session-log tail (failure / progress evidence). */
+    logExcerpt?: string
     links?: Array<{ label: string; url: string }>
   }
   missionId?: string
@@ -57,6 +59,9 @@ function evidenceBody(input: DecisionPacketInput): string {
   }
   if (evidence?.floorVerdict !== undefined) {
     rows.push(`<dt>Floor verdict</dt><dd>${esc(evidence.floorVerdict)}</dd>`)
+  }
+  if (evidence?.logExcerpt !== undefined && evidence.logExcerpt.length > 0) {
+    rows.push(`<dt>Agent log</dt><dd><pre>${esc(evidence.logExcerpt)}</pre></dd>`)
   }
 
   const links = evidence?.links ?? []

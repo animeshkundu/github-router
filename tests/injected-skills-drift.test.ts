@@ -19,6 +19,13 @@ const REAL_MCP_TOOLS = new Set([
   "mcp__orchestrate__verify_workflow",
   "mcp__orchestrate__run_workflow",
   "mcp__orchestrate__attest_step",
+  "mcp__first-mate__start_mission",
+  "mcp__first-mate__advance",
+  "mcp__first-mate__board",
+  "mcp__first-mate__mission_status",
+  "mcp__first-mate__abandon_mission",
+  "mcp__first-mate__add_units",
+  "mcp__first-mate__scaffold_repo",
 ])
 
 describe("injected skills MCP tool drift guard", () => {
@@ -26,7 +33,7 @@ describe("injected skills MCP tool drift guard", () => {
     const offenders: string[] = []
 
     for (const skill of INJECTED_SKILLS) {
-      const tokens = skill.md.match(/mcp__[a-z]+__[a-z_]+/g) ?? []
+      const tokens = skill.md.match(/mcp__[a-z-]+__[a-z_]+/g) ?? []
       for (const token of tokens) {
         if (!REAL_MCP_TOOLS.has(token)) offenders.push(`${skill.name}: ${token}`)
       }
