@@ -9,11 +9,12 @@ import {
   getPullRequestDiffSummary as realGetPullRequestDiffSummary,
   getRequiredChecksForSha as realGetRequiredChecksForSha,
   getSelfLogin as realGetSelfLogin,
+  markReadyForReview as realMarkReadyForReview,
   mergePullRequest as realMergePullRequest,
   repoHasWorkflows as realRepoHasWorkflows,
 } from "~/lib/agent/service"
 import type { RepoRef as AgentRepoRef } from "~/lib/agent/types"
-import { addUnitsToMission, advance as advanceController, buildBoard, summarizeInactiveMissions, type HumanDecision, type ModelAnswer } from "~/lib/first-mate/controller"
+import { addUnitsToMission, advance as advanceController, buildBoard, summarizeInactiveMissions, type HumanDecision, type ModelAnswer, type ModelRequest } from "~/lib/first-mate/controller"
 import {
   buildScaffoldFiles,
   planScaffoldFiles,
@@ -39,7 +40,7 @@ import { upsertUnit as realUpsertUnit } from "~/lib/first-mate/ledger"
 import { markAnswered as realMarkAnswered, readDecisions as realReadDecisions } from "~/lib/first-mate/decisions"
 import { AnswerInbox } from "~/lib/first-mate/scheduler/answer-inbox"
 import { SchedulerLease, makeDriveGate } from "~/lib/first-mate/scheduler/lease"
-import { Tier1Shadow, fromModelRequest, shadowEnabled } from "~/lib/first-mate/scheduler/shadow"
+import { Tier1Shadow, fromModelRequest, isValidVerdictShape, shadowEnabled, tier1LiveEnabled } from "~/lib/first-mate/scheduler/shadow"
 import { resolveCloudAgentModel } from "~/lib/first-mate/task-model"
 import type { RepoRef, UnitRow } from "~/lib/first-mate/types"
 import type { McpGroup, NonPersonaMcpTool } from "~/lib/peer-mcp-personas"
@@ -65,7 +66,7 @@ export function leaseGateEnabled(): boolean {
   return process.env.GH_ROUTER_FM_LEASE_GATE !== "0"
 }
 
-/** Phase 2 Tier1 shadow (log-only; active only when GH_ROUTER_FM_SHADOW=1). */
+/** Phase 2 Tier1 shadow/live router (default-on; opt out with GH_ROUTER_FM_SHADOW=0). */
 const tier1Shadow = new Tier1Shadow()
 
 /**
@@ -125,6 +126,7 @@ export interface MergeCloseDeps {
   closePullRequest: typeof realClosePullRequest
   repoHasWorkflows: typeof realRepoHasWorkflows
   getSelfLogin: typeof realGetSelfLogin
+  markReadyForReview: typeof realMarkReadyForReview
   readMissions: typeof readMissions
   loadAllUnits: typeof loadAllUnits
   upsertMission: typeof upsertMission
@@ -142,6 +144,7 @@ function defaultMergeCloseDeps(): MergeCloseDeps {
     closePullRequest: realClosePullRequest,
     repoHasWorkflows: realRepoHasWorkflows,
     getSelfLogin: realGetSelfLogin,
+    markReadyForReview: realMarkReadyForReview,
     readMissions,
     loadAllUnits,
     upsertMission,
@@ -351,9 +354,10 @@ export function createFirstMateTools(
       }, []),
       async (args) => {
         const modelAnswers = optionalModelAnswers(args)
-        const result = await advanceController({
+        const humanDecisions = optionalHumanDecisions(args)
+        const advanceInput = {
           modelAnswers,
-          humanDecisions: optionalHumanDecisions(args),
+          humanDecisions,
           topK: optionalNumber(args, "top_k"),
           maxInFlightPerProvider: optionalNumber(args, "max_in_flight_per_provider"),
           missionId: optionalString(args, "mission_id"),
@@ -371,8 +375,17 @@ export function createFirstMateTools(
                 renewLease: async () => (await heartbeatLease.renew()) !== undefined,
               }
             : {}),
-        })
-        // Phase 2: Tier1 SHADOW (log-only, fire-and-forget, never blocks/decides).
+        }
+        let result = await advanceController(advanceInput)
+        const autoAnswers = await routeTier1AutoAnswers(result.needsModel)
+        if (autoAnswers.length > 0 && result.drove !== false) {
+          consola.info(`first-mate: Tier1 auto-applied ${autoAnswers.length} answer(s)`)
+          result = await advanceController({
+            ...advanceInput,
+            modelAnswers: autoAnswers,
+            humanDecisions: undefined,
+          })
+        }
         if (shadowEnabled()) {
           for (const a of modelAnswers ?? []) {
             void tier1Shadow.recordLeadOutcome(a.requestId, a.verdict).catch(() => {})
@@ -517,6 +530,46 @@ export function createFirstMateTools(
       },
     ),
     tool(
+      "mark_ready",
+      "Mark a draft GitHub pull request ready for review. Ownership-scoped identically to merge_pr/close_pr (agent-authored or active first-mate mission repo, else requires allow_unowned).",
+      objectSchema({
+        repo: stringProp("Repository as an owner/name string."),
+        pr: numberProp("Pull request number."),
+        allow_unowned: boolProp("Set true to mark a PR ready when it is neither agent-authored nor part of an active first-mate mission. Explicit opt-in; audit-logged."),
+      }, ["repo", "pr"]),
+      async (args) => {
+        const repoSlug = requiredString(args, "repo")
+        const repo = parseRepoSlug(repoSlug)
+        const pr = requiredPrNumber(args, "pr")
+        const allowUnowned = optionalBoolean(args, "allow_unowned") ?? false
+
+        const live = await deps.getPullRequestState(repo, pr)
+        const ownership = await resolveOwnership(repo, pr, live.authorLogin, deps)
+        if (!ownership.owned) {
+          if (!allowUnowned) {
+            return errorResult(
+              new FirstMateToolInputError(
+                "UNOWNED_PR",
+                `${repoSlug}#${pr} is ${ownership.reason}; pass allow_unowned:true to override`,
+              ),
+            )
+          }
+          consola.warn(
+            `first-mate: mark_ready OVERRIDE on unowned PR ${repoSlug}#${pr} (author=${live.authorLogin ?? "unknown"}, actor=${ownership.selfLogin || "unknown"}, reason=${ownership.reason}) via allow_unowned`,
+          )
+        }
+        if (live.state.toUpperCase() !== "OPEN") {
+          return errorResult(new FirstMateToolInputError("PR_NOT_OPEN", `${repoSlug}#${pr} is ${live.state}; only OPEN pull requests can be marked ready`))
+        }
+        if (!live.isDraft) return ok({ ready: true, alreadyReady: true })
+        if (live.nodeId === undefined || live.nodeId.length === 0) {
+          return errorResult(new FirstMateToolInputError("PR_NODE_ID_MISSING", `${repoSlug}#${pr} did not include a GraphQL node id; cannot mark ready`))
+        }
+        const result = await deps.markReadyForReview(live.nodeId)
+        return ok({ ready: result.ready, alreadyReady: false })
+      },
+    ),
+    tool(
       "add_units",
       "Add dispatchable units to an existing active first-mate mission. DependsOn entries are 0-based indices within the submitted units list.",
       objectSchema({
@@ -616,6 +669,19 @@ export function createFirstMateTools(
 }
 
 export const FIRST_MATE_TOOLS: ReadonlyArray<NonPersonaMcpTool> = createFirstMateTools()
+
+async function routeTier1AutoAnswers(requests: ModelRequest[]): Promise<ModelAnswer[]> {
+  if (!tier1LiveEnabled()) return []
+  const answers: ModelAnswer[] = []
+  for (const request of requests) {
+    const decision = await tier1Shadow.route(fromModelRequest(request))
+    if (!decision.autoAccept) continue
+    if (!isValidVerdictShape(request.kind, decision.verdict)) continue
+    consola.info(`first-mate: Tier1 auto-answer accepted for ${request.requestId} (${request.kind})`)
+    answers.push({ requestId: request.requestId, verdict: decision.verdict })
+  }
+  return answers
+}
 
 function hasAgentToken(): boolean {
   return typeof state.githubAgentToken === "string" && state.githubAgentToken.length > 0

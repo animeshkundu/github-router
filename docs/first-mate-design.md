@@ -39,6 +39,9 @@ preferred tool names are:
   using the same unit-creation path as decompose.
 - `mcp__first-mate__scaffold_repo` — seed or enhance the target repo's
   agentic-dev foundation on a scaffold branch + PR before build waves begin.
+- `mcp__first-mate__mark_ready` — mark a draft PR ready for review, with the
+  same fail-closed ownership scope as `merge_pr` / `close_pr` (bot-authored or
+  correlated to a first-mate unit, else explicit `allow_unowned`).
 
 So the operational surface is the start/advance/board triad plus the status read,
 with abandon as the explicit cleanup lever. All entries are created in
@@ -282,10 +285,13 @@ dependencies, blocking decision id — not full diffs, logs, or transcripts.
 
 Accuracy note for v1: `start_mission` registers a mission only. The controller
 emits a one-shot `decompose` request for a unit-less active mission; the answer
-creates `UnitRow`s, and the controller dispatches undispatched units once they
-exist. Operators can append more units later with `add_units`; dependency indices
-in that call are local to the submitted unit list and are resolved to stable unit
-ids before dispatch.
+creates `UnitRow`s, marks the mission `everDecomposed`, and the controller
+dispatches undispatched units once they exist. Operators can append more units
+later with `add_units`; dependency indices in that call are local to the submitted
+unit list and are resolved to stable unit ids before dispatch. A decomposed mission
+auto-completes once no live units and no pending decisions remain, which prevents
+terminal-ledger pruning from making completed missions look unit-less and re-emit
+spurious decomposition requests.
 
 ## Orthogonal state model and pure decision table
 
@@ -327,6 +333,20 @@ Copilot chat-completions backend (`copilotBaseUrl(state)`, `copilotHeaders(state
 with temperature 0, small token caps, JSON-object response format, schema
 validation, and confidence ≥ 0.6. Failure or low confidence returns `null`; the
 pure state machine never calls an LLM.
+
+Tier1 routing (`src/lib/first-mate/scheduler/shadow.ts`) is now default-on with a
+presence-guarded opt-out (`GH_ROUTER_FM_SHADOW=0` disables calibration logging;
+`GH_ROUTER_FM_TIER1_LIVE=0` disables live auto-answer). The live allowlist is
+intentionally narrow and reversible: `author_fix`, `answer_agent_question`, and
+`decompose`. Auto-answer requires a valid verdict shape, confidence ≥ 0.85,
+`known`, and `low` stakes; `decompose` additionally runs a deterministic dependency
+verifier over the unit-list DAG. `author_fix` remains downstream-checked by CI and
+the different-lab floor before any merge, and `answer_agent_question` is only
+informational to the cloud agent. Any uncertainty, unknown kind, malformed payload,
+novel/high-stakes classification, or low confidence escalates. Merge-authorizing
+kinds (`review_plan`, `judge_review`, `merge_approval`, `approve_merge`) are hard
+excluded from the Tier1 live path and always route to the best-model/human gate.
+Convergence accounting and the full decision-table exposition are Phase 3.
 
 ## Cross-model verification, not bake-off
 

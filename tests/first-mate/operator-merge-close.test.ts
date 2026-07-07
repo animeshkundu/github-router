@@ -86,6 +86,7 @@ function makeDeps(overrides: Partial<MergeCloseDeps> = {}): MergeCloseDeps {
     getPullRequestDiffSummary: mock(async () => ({ files: [{ path: "src/a.ts", additions: 1, deletions: 0, status: "modified" }], totalAdditions: 1, totalDeletions: 0, fileCount: 1, truncated: false })),
     mergePullRequest: mock(async () => ({ merged: true as const, sha: "mergedsha" })),
     closePullRequest: mock(async () => ({ closed: true as const, state: "CLOSED" })),
+    markReadyForReview: mock(async () => ({ ready: true as const })),
     repoHasWorkflows: mock(async () => false),
     getSelfLogin: mock(async () => "octo-bot"),
     readMissions: mock(async () => []),
@@ -98,7 +99,7 @@ function makeDeps(overrides: Partial<MergeCloseDeps> = {}): MergeCloseDeps {
   }
 }
 
-function toolOf(name: "merge_pr" | "close_pr" | "abandon_mission" | "add_units", deps: MergeCloseDeps) {
+function toolOf(name: "merge_pr" | "close_pr" | "mark_ready" | "abandon_mission" | "add_units", deps: MergeCloseDeps) {
   state.githubAgentToken = "agent-token"
   const tool = createFirstMateTools(deps).find((t) => t.toolNameHttp === name)
   if (tool === undefined) throw new Error(`${name} tool not found`)
@@ -469,6 +470,43 @@ describe("mission unit tools", () => {
     expect(written.map((row) => row.title)).toEqual(["A", "B"])
     expect(written[1]?.dependsOn).toEqual([written[0]!.id!])
     expect(written[1]?.agent).toBe("anthropic")
+  })
+})
+
+describe("mark_ready", () => {
+  test("marks an owned draft PR ready for review", async () => {
+    const deps = makeDeps({
+      getPullRequestState: mock(async () => prState({ isDraft: true, nodeId: "PR_node_7" })),
+    })
+    const res = await toolOf("mark_ready", deps).handler({ repo: "octo/repo", pr: 7 })
+
+    expect(res.isError).toBeUndefined()
+    expect(parsed(res)).toMatchObject({ ready: true, alreadyReady: false })
+    expect(deps.markReadyForReview).toHaveBeenCalledWith("PR_node_7")
+  })
+
+  test("refuses an unowned draft PR without allow_unowned", async () => {
+    const deps = makeDeps({
+      getPullRequestState: mock(async () => prState({ authorLogin: "random-human", isDraft: true })),
+      readMissions: mock(async () => []),
+    })
+    const res = await toolOf("mark_ready", deps).handler({ repo: "octo/repo", pr: 7 })
+
+    expect(res.isError).toBe(true)
+    expect((parsed(res).error as { code: string }).code).toBe("UNOWNED_PR")
+    expect(deps.markReadyForReview).not.toHaveBeenCalled()
+  })
+
+  test("marks an unowned draft PR ready only with allow_unowned", async () => {
+    const deps = makeDeps({
+      getPullRequestState: mock(async () => prState({ authorLogin: "random-human", isDraft: true, nodeId: "PR_node_7" })),
+      readMissions: mock(async () => []),
+    })
+    const res = await toolOf("mark_ready", deps).handler({ repo: "octo/repo", pr: 7, allow_unowned: true })
+
+    expect(res.isError).toBeUndefined()
+    expect(parsed(res)).toMatchObject({ ready: true, alreadyReady: false })
+    expect(deps.markReadyForReview).toHaveBeenCalledWith("PR_node_7")
   })
 })
 

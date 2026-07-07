@@ -23,15 +23,14 @@ afterEach(() => {
 })
 
 describe("Phase 3 — decideRoute (escalate-by-default gate)", () => {
-  test("#7: allowlisted + high-confidence still ESCALATES with no deterministic verifier", () => {
-    // Self-report is not a safety boundary; with no verifier registered, escalate.
+  test("author_fix auto-answers when high-confidence, known, low-stakes, and valid", () => {
     const d = decideRoute("author_fix", good)
-    expect(d.autoAccept).toBe(false)
-    expect(d.reason).toContain("verifier")
+    expect(d.autoAccept).toBe(true)
   })
 
-  test("decompose also escalates (no verifier registered)", () => {
-    expect(decideRoute("decompose", good).autoAccept).toBe(false)
+  test("decompose auto-answers only with a deterministic-verifier-accepted DAG", () => {
+    expect(decideRoute("decompose", { ...good, wouldVerdict: { units: [{ title: "a" }] } }).autoAccept).toBe(true)
+    expect(decideRoute("decompose", { ...good, wouldVerdict: { units: [{ title: "a", dependsOn: [0] }] } }).autoAccept).toBe(false)
   })
 
   test("#6: a null/undefined verdict payload NEVER auto-accepts", () => {
@@ -66,8 +65,8 @@ describe("Phase 3 — decideRoute (escalate-by-default gate)", () => {
     expect(decideRoute("author_fix", null).autoAccept).toBe(false)
   })
 
-  test("with the live flag OFF, NOTHING auto-accepts (default posture)", () => {
-    delete process.env.GH_ROUTER_FM_TIER1_LIVE
+  test("with the live flag OFF, NOTHING auto-accepts", () => {
+    process.env.GH_ROUTER_FM_TIER1_LIVE = "0"
     expect(decideRoute("author_fix", good).autoAccept).toBe(false)
     expect(decideRoute("decompose", good).reason).toContain("disabled")
   })

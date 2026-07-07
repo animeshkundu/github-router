@@ -52,6 +52,7 @@ import {
 import {
   loadAllUnits as realLoadAllUnits,
   readMissions as realReadMissions,
+  upsertMission as realUpsertMission,
   type Mission,
 } from "~/lib/first-mate/registry"
 import {
@@ -85,6 +86,7 @@ import {
 export interface ControllerDeps {
   loadAllUnits: typeof realLoadAllUnits
   readMissions: typeof realReadMissions
+  upsertMission?: typeof realUpsertMission
   upsertUnit: typeof realUpsertUnit
   pruneTerminal: typeof realPruneTerminal
   observeUnit: typeof realObserveUnit
@@ -331,6 +333,7 @@ const DEFAULT_TOP_K = 6
 export const defaultDeps: ControllerDeps = {
   loadAllUnits: realLoadAllUnits,
   readMissions: realReadMissions,
+  upsertMission: realUpsertMission,
   upsertUnit: realUpsertUnit,
   pruneTerminal: realPruneTerminal,
   observeUnit: realObserveUnit,
@@ -1281,7 +1284,7 @@ function asAgentKey(value: string | undefined): AgentKey | undefined {
 export async function addUnitsToMission(
   mission: Mission,
   rawUnits: unknown[],
-  deps: Pick<ControllerDeps, "upsertUnit">,
+  deps: Pick<ControllerDeps, "upsertMission" | "upsertUnit">,
   existingUnits: UnitRow[] = [],
 ): Promise<number> {
   // Collect the valid specs in order first, so a unit's `dependsOn` (0-based
@@ -1348,6 +1351,11 @@ export async function addUnitsToMission(
     await deps.upsertUnit(repo, unit)
     created += 1
   }
+  if (created > 0) {
+    mission.everDecomposed = true
+    mission.updatedMs = Date.now()
+    await upsertMissionDurable(mission, deps)
+  }
   return created
 }
 
@@ -1364,6 +1372,11 @@ async function applyDecomposeAnswer(
   const rawUnits = Array.isArray(verdict.units) ? verdict.units : []
   const existing = await deps.loadAllUnits(mission.id)
   const created = await addUnitsToMission(mission, rawUnits, deps, existing)
+  if (mission.everDecomposed !== true) {
+    mission.everDecomposed = true
+    mission.updatedMs = Date.now()
+    await upsertMissionDurable(mission, deps)
+  }
   if (created > 0) applied.push(`decomposed ${missionId} into ${created} unit(s)`)
 }
 
@@ -2024,6 +2037,13 @@ async function executeAction(
   }
 }
 
+async function upsertMissionDurable(
+  mission: Mission,
+  deps: Pick<ControllerDeps, "upsertMission">,
+): Promise<void> {
+  await (deps.upsertMission ?? realUpsertMission)(mission)
+}
+
 function isUndispatched(unit: UnitRow): boolean {
   // A unit with a pending dispatch-intent is NOT undispatched: a task may have
   // been created but the taskId not yet persisted (crash window). Re-dispatching
@@ -2468,6 +2488,17 @@ function capQueued<T>(entries: QueuedRequest<T>[], topK: number): T[] {
   return entries.sort(compareQueued).slice(0, topK).map((entry) => entry.request)
 }
 
+function hasQueuedRequestForMission(
+  missionId: string,
+  modelRequests: QueuedRequest<ModelRequest>[],
+  humanRequests: QueuedRequest<HumanRequest>[],
+): boolean {
+  return (
+    modelRequests.some((entry) => entry.request.missionId === missionId) ||
+    humanRequests.some((entry) => entry.request.missionId === missionId)
+  )
+}
+
 function nextWakeAt(units: UnitRow[], missions: Map<string, Mission>): number | null {  const active = units.filter((unit) => isActiveUnit(unit, missions))
   if (active.length === 0) return null
 
@@ -2852,12 +2883,30 @@ export async function advance(
       }
     }
 
+    // Back-compat completion pass: once a mission has actually decomposed, a later
+    // ledger that contains only terminal units (or has pruned them all) means the
+    // mission is complete. Never mark a never-decomposed empty mission done: those
+    // still need their first decompose request.
+    for (const mission of scopedMissions) {
+      if (mission.status !== "active") continue
+      if (mission.everDecomposed !== true) continue
+      if (scopedUnits.some((unit) => unit.missionId === mission.id && isActiveUnit(unit, missionsById))) continue
+      if (scopedUnits.some((unit) => unit.missionId === mission.id && Boolean(unit.blockingDecisionId))) continue
+      if (hasQueuedRequestForMission(mission.id, needsModel, needsHuman)) continue
+      mission.status = "done"
+      mission.updatedMs = Date.now()
+      await upsertMissionDurable(mission, deps)
+      applied.push(`completed mission ${mission.id}`)
+    }
+
     // Missions with no units yet need decomposition into dispatchable units.
     // `start_mission` only registers a mission; emit one decompose request per
     // unit-less active mission so the model returns the unit set (created on the
-    // next wake by applyDecomposeAnswer).
+    // next wake by applyDecomposeAnswer). Once a mission ever decomposed, terminal
+    // ledger pruning must not make it ask for a fresh decomposition.
     for (const mission of scopedMissions) {
       if (mission.status !== "active") continue
+      if (mission.everDecomposed === true) continue
       if (scopedUnits.some((unit) => unit.missionId === mission.id)) continue
       const repo = mission.repos[0]
       if (repo === undefined) continue

@@ -7,6 +7,7 @@ import {
   findAgentPRs,
   getPullRequestDiffSummary,
   getRequiredChecksForSha,
+  markReadyForReview,
   mergePullRequest,
   repoHasWorkflows,
   resolveAgentRoster,
@@ -506,6 +507,27 @@ test("getTask hard-truncates logExcerpt and never returns the full session log",
   expect(task.logExcerpt.startsWith("…[truncated]…")).toBe(true)
   expect(task.logExcerpt).not.toBe(log)
   expect(task.logExcerpt).not.toContain("a".repeat(2000))
+})
+
+test("markReadyForReview calls the GitHub GraphQL ready-for-review mutation", async () => {
+  let capturedBody: Record<string, unknown> = {}
+  const fetchMock = mock((_url: string, init?: RequestInit) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+    return jsonResponse({
+      data: {
+        markPullRequestReadyForReview: {
+          pullRequest: { id: "PR_node_1" },
+        },
+      },
+    })
+  })
+  setFetch(fetchMock)
+
+  const result = await markReadyForReview("PR_node_1")
+
+  expect(result).toEqual({ ready: true })
+  expect(String(capturedBody.query)).toContain("markPullRequestReadyForReview")
+  expect(capturedBody.variables).toEqual({ pullRequestId: "PR_node_1" })
 })
 
 test("mergePullRequest sends expected head sha and maps head-moved status to HEAD_MOVED", async () => {

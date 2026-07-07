@@ -21,8 +21,8 @@ import { state } from "~/lib/state"
  * it is quarantined in an `untrusted` block, the code never parses stakes or
  * confidence out of it, and the model is instructed to treat it as data only.
  *
- * Disabled unless `GH_ROUTER_FM_SHADOW=1`, so it adds nothing to the hot path
- * by default. The Tier1 judge is injectable so tests stay hermetic/offline.
+ * Default-on unless `GH_ROUTER_FM_SHADOW=0`/`false`, so the heartbeat path gathers
+ * calibration by default. The Tier1 judge is injectable so tests stay hermetic/offline.
  */
 
 /** Trusted policy fields (set by us) vs quarantined untrusted repo/agent text. */
@@ -68,8 +68,12 @@ type ShadowLogRecord = ShadowVerdictRecord | OutcomeRecord
 
 const TRUSTED_KEYS = new Set(["goal", "acceptance_criteria", "house_rules"])
 
+function envOptOut(value: string | undefined): boolean {
+  return value === "0" || value === "false" || value === "FALSE"
+}
+
 export function shadowEnabled(): boolean {
-  return process.env.GH_ROUTER_FM_SHADOW === "1"
+  return !envOptOut(process.env.GH_ROUTER_FM_SHADOW)
 }
 
 /**
@@ -261,7 +265,11 @@ export class Tier1Shadow {
  * judge_review — ESCALATES. Self-confidence alone is never sufficient: the
  * allowlist (reversibility/verifiability) is the real boundary.
  */
-export const TIER1_LIVE_ALLOWLIST: ReadonlySet<string> = new Set(["author_fix", "decompose"])
+export const TIER1_LIVE_ALLOWLIST: ReadonlySet<string> = new Set([
+  "author_fix",
+  "decompose",
+  "answer_agent_question",
+])
 export const MERGE_AUTHORIZING_REQUEST_KINDS: ReadonlySet<string> = new Set([
   "review_plan",
   "judge_review",
@@ -282,7 +290,7 @@ assertTier1LiveAllowlistSafe()
 export const TIER1_CONFIDENCE_FLOOR = 0.85
 
 export function tier1LiveEnabled(): boolean {
-  return process.env.GH_ROUTER_FM_TIER1_LIVE === "1"
+  return !envOptOut(process.env.GH_ROUTER_FM_TIER1_LIVE)
 }
 
 export interface RouteDecision {
@@ -292,18 +300,41 @@ export interface RouteDecision {
 }
 
 /**
- * Deterministic-verifier seam (finding #7). Live auto-accept must NEVER rest on
- * the model's self-reported confidence/novelty/stakes alone — those are
- * bypassable by indirect prompt injection from the model-visible untrusted
- * text. A judgment kind may be auto-accepted live ONLY if a deterministic,
- * non-LLM verifier exists for it. None exist yet, so this registry is empty and
- * every kind escalates; widening requires registering a real verifier here PLUS
- * calibration evidence.
+ * Deterministic-verifier seam. Merge-authorizing kinds remain absent from this
+ * registry, so they hard-escalate to the best model. `decompose` has a real
+ * verifier because its verdict contains a local DAG over unit-list indices. The
+ * other Tier1-live kinds (`author_fix`, `answer_agent_question`) are reversible
+ * and downstream-checked: author_fix is re-verified by CI plus the different-lab
+ * floor before merge; answer_agent_question is informational to the cloud agent.
  */
 export type DeterministicVerifier = (verdict: unknown) => boolean
-const DETERMINISTIC_VERIFIERS: Record<string, DeterministicVerifier> = {}
+const DETERMINISTIC_VERIFIERS: Record<string, DeterministicVerifier> = {
+  decompose: isValidDecomposeVerdict,
+}
 export function hasDeterministicVerifier(kind: string): boolean {
   return Object.prototype.hasOwnProperty.call(DETERMINISTIC_VERIFIERS, kind)
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
+}
+
+function validDependsOn(indices: unknown, rawIndex: number, total: number): boolean {
+  if (indices === undefined) return true
+  if (!Array.isArray(indices)) return false
+  return indices.every(
+    (idx) => isNonNegativeInteger(idx) && idx < total && idx !== rawIndex,
+  )
+}
+
+function isValidDecomposeVerdict(verdict: unknown): boolean {
+  if (!isValidVerdictShape("decompose", verdict)) return false
+  const units = (verdict as { units: unknown[] }).units
+  return units.every((unit, rawIndex) => {
+    if (typeof unit !== "object" || unit === null) return false
+    const dependsOn = (unit as Record<string, unknown>).dependsOn
+    return validDependsOn(dependsOn, rawIndex, units.length)
+  })
 }
 
 /**
@@ -359,21 +390,27 @@ export function decideRoute(kind: string, verdict: Tier1Verdict | null): RouteDe
   }
   if (verdict.novelty !== "known") return { autoAccept: false, reason: "novel" }
   if (verdict.stakes !== "low") return { autoAccept: false, reason: "high stakes" }
-  // #7 — self-report is not a safety boundary; require a deterministic verifier.
-  if (!hasDeterministicVerifier(kind)) {
-    return {
-      autoAccept: false,
-      reason: "no deterministic verifier — escalate (self-report is not a safety boundary)",
-    }
-  }
   // Shape gate: never auto-apply a verdict whose payload is malformed for its
   // kind (would be a silent no-op or a broken apply) — escalate instead.
   if (!isValidVerdictShape(kind, verdict.wouldVerdict)) {
     return { autoAccept: false, reason: "verdict payload shape invalid for kind" }
   }
+  const verifier = DETERMINISTIC_VERIFIERS[kind]
+  if (verifier !== undefined && !verifier(verdict.wouldVerdict)) {
+    return { autoAccept: false, reason: "deterministic verifier rejected verdict" }
+  }
+  if (verifier === undefined && MERGE_AUTHORIZING_REQUEST_KINDS.has(kind)) {
+    return {
+      autoAccept: false,
+      reason: "merge-authorizing kind requires best-model review",
+    }
+  }
   return {
     autoAccept: true,
     verdict: verdict.wouldVerdict,
-    reason: "allowlisted, high-confidence, known, low-stakes, verifier-backed",
+    reason:
+      verifier === undefined
+        ? "allowlisted reversible low-stakes kind, high-confidence, known"
+        : "allowlisted, high-confidence, known, low-stakes, verifier-backed",
   }
 }

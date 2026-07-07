@@ -90,6 +90,11 @@ function buildHarness() {
   const deps: ControllerDeps = {
     loadAllUnits: mock(async () => allUnits),
     readMissions: mock(async () => allMissions),
+    upsertMission: mock(async (next: Mission) => {
+      const index = allMissions.findIndex((entry) => entry.id === next.id)
+      if (index === -1) allMissions.push(next)
+      else allMissions[index] = next
+    }),
     upsertUnit: mock(async (_repo: RepoRef, row: UnitRow) => {
       const index = allUnits.findIndex(
         (u) =>

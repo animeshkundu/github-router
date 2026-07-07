@@ -928,7 +928,8 @@ export async function closePullRequest(
 
 export async function markReadyForReview(
   prNodeId: string,
-): Promise<ReadyForReviewResult> {  await ghGraphQL<unknown>(
+): Promise<ReadyForReviewResult> {
+  await ghGraphQL<unknown>(
     `mutation FirstMateReadyForReview($pullRequestId: ID!) {
       markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) {
         pullRequest {

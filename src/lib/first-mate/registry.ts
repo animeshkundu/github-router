@@ -45,6 +45,12 @@ export interface Mission {
   maxCopilotComments?: number
   /** When true, a repo with no reported CI is not mergeable through first-mate. */
   ciRequired?: boolean
+  /**
+   * Back-compat marker that this mission has already produced (or accepted) a
+   * decompose answer. Absent legacy rows read as false; once true, a pruned-empty
+   * mission must not re-emit decompose.
+   */
+  everDecomposed?: boolean
   repos: RepoRef[]
   status: "active" | "done" | "abandoned"
   createdMs: number
@@ -115,6 +121,7 @@ function isMission(value: unknown): value is Mission {
     isOptionalPositiveInteger(mission.maxFixCycles) &&
     isOptionalPositiveInteger(mission.maxCopilotComments) &&
     (mission.ciRequired === undefined || typeof mission.ciRequired === "boolean") &&
+    (mission.everDecomposed === undefined || typeof mission.everDecomposed === "boolean") &&
     Array.isArray(mission.repos) &&
     mission.repos.every(isRepoRef) &&
     (mission.status === "active" ||

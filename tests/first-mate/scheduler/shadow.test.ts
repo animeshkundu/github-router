@@ -32,10 +32,12 @@ async function logLines(d: string): Promise<Array<Record<string, unknown>>> {
 }
 
 describe("Tier1 shadow — Tier Router", () => {
-  test("shadowEnabled reflects the env flag", () => {
-    expect(shadowEnabled()).toBe(false)
-    process.env.GH_ROUTER_FM_SHADOW = "1"
+  test("shadowEnabled is default-on with presence-guarded opt-out", () => {
     expect(shadowEnabled()).toBe(true)
+    process.env.GH_ROUTER_FM_SHADOW = "0"
+    expect(shadowEnabled()).toBe(false)
+    process.env.GH_ROUTER_FM_SHADOW = "false"
+    expect(shadowEnabled()).toBe(false)
   })
 
   test("fromModelRequest quarantines all GitHub-sourced text as untrusted", () => {

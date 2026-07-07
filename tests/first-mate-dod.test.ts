@@ -124,6 +124,11 @@ function harness(units: UnitRow[], missions: Mission[] = [mission()]) {
   const deps = {
     loadAllUnits: mock(async () => units),
     readMissions: mock(async () => missions),
+    upsertMission: mock(async (next: Mission) => {
+      const index = missions.findIndex((entry) => entry.id === next.id)
+      if (index === -1) missions.push(next)
+      else missions[index] = next
+    }),
     upsertUnit: mock(async (_repo: RepoRef, row: UnitRow) => { upsertMemory(units, row) }),
     pruneTerminal: mock(async (_repo: RepoRef) => {}),
     observeUnit: mock(async (row: UnitRow) => ({ provider: row.provider, prs: [] })),

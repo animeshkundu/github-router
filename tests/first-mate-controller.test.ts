@@ -144,6 +144,11 @@ function harness(
   const deps = {
     loadAllUnits: mock(async () => units),
     readMissions: mock(async () => missions),
+    upsertMission: mock(async (next: Mission) => {
+      const index = missions.findIndex((entry) => entry.id === next.id)
+      if (index === -1) missions.push(next)
+      else missions[index] = next
+    }),
     upsertUnit: mock(async (_repo: RepoRef, row: UnitRow) => {
       upsertMemory(units, row)
     }),
@@ -878,6 +883,59 @@ test("decompose: unit-less mission emits a decompose request, and a decompose an
   expect(h.units.every((u) => u.taskId !== null || u.issue !== null)).toBe(true)
 })
 
+test("all-terminal decomposed mission auto-completes and stops re-emitting decompose", async () => {
+  const doneUnit = unit({
+    id: "done-id",
+    missionId: "m-done",
+    issue: 2,
+    taskId: "task-2",
+    terminal: true,
+    phase: "done",
+    artifact: "pr_merged",
+  })
+  const m = mission({ id: "m-done", everDecomposed: true })
+  const h = harness([doneUnit], [m])
+
+  const result = await advance({}, h.deps)
+
+  expect(m.status).toBe("done")
+  expect(result.needsModel.some((request) => request.kind === "decompose")).toBe(false)
+})
+
+test("never-decomposed empty mission stays active and emits decompose", async () => {
+  const m = mission({ id: "m-empty" })
+  const h = harness([], [m])
+
+  const result = await advance({}, h.deps)
+
+  expect(m.status).toBe("active")
+  expect(result.needsModel).toContainEqual(expect.objectContaining({
+    requestId: "decompose:m-empty",
+    kind: "decompose",
+  }))
+})
+
+test("pruned-empty completed mission is marked done without a spurious decompose", async () => {
+  const m = mission({ id: "m-pruned", everDecomposed: true })
+  const h = harness([], [m])
+
+  const result = await advance({}, h.deps)
+
+  expect(m.status).toBe("done")
+  expect(result.needsModel).toHaveLength(0)
+})
+
+test("decomposed mission with a live unit stays active", async () => {
+  const liveUnit = unit({ missionId: "m-live", provider: "in_progress", terminal: false })
+  const m = mission({ id: "m-live", everDecomposed: true })
+  const h = harness([liveUnit], [m])
+
+  const result = await advance({}, h.deps)
+
+  expect(m.status).toBe("active")
+  expect(result.board[0]?.missionId).toBe("m-live")
+})
+
 test("board exposes non-terminal unit handles and active-only missions by default", async () => {
   const activeUnit = unit({ id: "u-active", issue: 2, pr: 8, model: "gpt-5.5", blockingDecisionId: "decision-7" })
   const doneUnit = unit({ id: "u-done", issue: 3, pr: 9, terminal: true, artifact: "pr_merged" })
@@ -924,7 +982,10 @@ test("addUnitsToMission appends units with local dependency indices", async () =
   const created = await addUnitsToMission(
     m,
     [{ title: "first" }, { title: "second", dependsOn: [0], model: "gpt-5.5" }],
-    { upsertUnit: mock(async (_repo, row) => { written.push(row) }) },
+    {
+      upsertMission: mock(async () => {}),
+      upsertUnit: mock(async (_repo, row) => { written.push(row) }),
+    },
   )
 
   expect(created).toBe(2)
@@ -938,12 +999,34 @@ test("addUnitsToMission keeps dependsOn aligned to raw-unit indices when invalid
   const created = await addUnitsToMission(
     m,
     [{ title: "first" }, {}, { title: "third", dependsOn: [0] }],
-    { upsertUnit: mock(async (_repo, row) => { written.push(row) }) },
+    {
+      upsertMission: mock(async () => {}),
+      upsertUnit: mock(async (_repo, row) => { written.push(row) }),
+    },
   )
 
   expect(created).toBe(2)
   expect(written.map((row) => row.title)).toEqual(["first", "third"])
   expect(written[1]?.dependsOn).toEqual([written[0]!.id!])
+})
+
+test("addUnitsToMission does not persist everDecomposed before unit writes succeed", async () => {
+  const m = mission({ id: "m-add" })
+  const upsertMission = mock(async () => {})
+
+  await expect(
+    addUnitsToMission(
+      m,
+      [{ title: "first" }],
+      {
+        upsertMission,
+        upsertUnit: mock(async () => { throw new Error("ledger write failed") }),
+      },
+    ),
+  ).rejects.toThrow("ledger write failed")
+
+  expect(upsertMission).not.toHaveBeenCalled()
+  expect(m.everDecomposed).toBeUndefined()
 })
 
 test("advance returns a clamped nextWakeSeconds for active work and null when idle", async () => {
@@ -2898,7 +2981,10 @@ test("addUnitsToMission skips duplicate goalHash units", async () => {
   const created = await addUnitsToMission(
     m,
     [{ title: "Same title" }, { title: "Same title" }, { title: "Different title" }],
-    { upsertUnit: mock(async (_repo, row) => { written.push(row) }) },
+    {
+      upsertMission: mock(async () => {}),
+      upsertUnit: mock(async (_repo, row) => { written.push(row) }),
+    },
     [existing],
   )
 
