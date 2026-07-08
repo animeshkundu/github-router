@@ -73,6 +73,9 @@ export interface DecisionHookHttpCallOptions {
 export interface DecisionHookHttp {
   createDecision: (packet: DecisionPacket, options?: DecisionHookHttpCallOptions) => Promise<{ decisionId: string }>
   awaitDecision: (decisionId: string, timeoutMs: number, options?: DecisionHookHttpCallOptions) => Promise<unknown>
+  /** Signal that a gated tool actually ran (PostToolUse), so ai-or-die clears any
+   *  pending decision for the session (the human answered Claude's native prompt). */
+  resolveSession: (options?: DecisionHookHttpCallOptions) => Promise<unknown>
 }
 
 export interface DecisionHookHttpOptions {
@@ -411,6 +414,15 @@ export function createDecisionHookHttp(options: DecisionHookHttpOptions): Decisi
         pathname: `/api/control/decisions/${encodeURIComponent(decisionId)}/await`,
         query: { timeoutMs: String(Math.max(1, Math.floor(timeoutMs))) },
         timeoutMs: Math.max(1, Math.floor(timeoutMs)) + DECISION_AWAIT_ABORT_MARGIN_MS,
+        signal: callOptions?.signal,
+      })
+    },
+    async resolveSession(callOptions) {
+      return requestJson({
+        method: "POST",
+        pathname: `/api/control/sessions/${encodeURIComponent(options.sessionId)}/decision-resolved`,
+        body: {},
+        timeoutMs: postTimeoutMs,
         signal: callOptions?.signal,
       })
     },

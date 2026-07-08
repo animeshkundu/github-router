@@ -592,6 +592,14 @@ export function buildPermissionNotifyHookCommand(execPath: string, scriptPath: s
   return `${head} internal-permission-notify`
 }
 
+/** Command for the `internal-tool-ran-notify` PostToolUse hook — signals ai-or-die
+ *  that a gated tool ran (approved) so a mirrored mobile decision card dismisses. */
+export function buildToolRanNotifyHookCommand(execPath: string, scriptPath: string | undefined): string {
+  const q = (s: string): string => `"${s}"`
+  const head = scriptPath && scriptPath !== execPath ? `${q(execPath)} ${q(scriptPath)}` : q(execPath)
+  return `${head} internal-tool-ran-notify`
+}
+
 /**
  * Read-merge-atomic-write the Stop hook into a Claude Code `settings.json` file
  * (the mirrored one). A MISSING file (ENOENT) starts from `{}`; any OTHER read or

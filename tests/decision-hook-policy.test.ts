@@ -31,7 +31,8 @@ function mockHttp(args: {
 } {
   const createDecision = mock(args.create ?? (async (_packet: DecisionPacket) => ({ decisionId: "dec-1" })))
   const awaitDecision = mock(args.await ?? (async (_decisionId: string, _timeoutMs: number) => ({ answered: true, choice: "approve" })))
-  return { http: { createDecision, awaitDecision }, createDecision, awaitDecision }
+  const resolveSession = mock(async () => ({ resolved: 0 }))
+  return { http: { createDecision, awaitDecision, resolveSession }, createDecision, awaitDecision }
 }
 
 describe("decision-hook policy", () => {
@@ -341,6 +342,31 @@ describe("decision-hook HTTP client", () => {
         auth: "Bearer tok-mobile",
         contentType: undefined,
         body: undefined,
+      },
+    ])
+  })
+
+  test("resolveSession POSTs the session decision-resolved endpoint with Bearer auth", async () => {
+    const seen: Array<{ url: string; method?: string; auth?: string }> = []
+    const fetchFn = (async (url: string | URL | Request, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string> | undefined
+      seen.push({ url: url.toString(), method: init?.method, auth: headers?.Authorization })
+      return Response.json({ resolved: 1 })
+    }) as unknown as typeof fetch
+
+    const client = createDecisionHookHttp({
+      baseUrl: "https://ai.example/",
+      token: "tok-mobile",
+      sessionId: "sess 1",
+      fetchFn,
+    })
+
+    expect(await client.resolveSession()).toEqual({ resolved: 1 })
+    expect(seen).toEqual([
+      {
+        url: "https://ai.example/api/control/sessions/sess%201/decision-resolved",
+        method: "POST",
+        auth: "Bearer tok-mobile",
       },
     ])
   })

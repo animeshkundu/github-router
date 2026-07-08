@@ -22,6 +22,7 @@ import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror, writeArti
 import {
   buildArtifactOpenHookCommand,
   buildPermissionNotifyHookCommand,
+  buildToolRanNotifyHookCommand,
   buildSessionBindHookCommand,
   buildStopHookCommand,
   captureLaunchBaseline,
@@ -799,6 +800,15 @@ export const claude = defineCommand({
               settingsPath,
               notifyCmd,
               "PermissionRequest",
+              undefined,
+              DECISION_HOOK_TOOL_MATCHER,
+            )
+            // PostToolUse: a gated tool ran (approved) -> dismiss any mirrored card.
+            const toolRanCmd = buildToolRanNotifyHookCommand(process.execPath, process.argv[1])
+            await injectStopHookIntoSettingsFile(
+              settingsPath,
+              toolRanCmd,
+              "PostToolUse",
               undefined,
               DECISION_HOOK_TOOL_MATCHER,
             )

@@ -13,6 +13,7 @@ import { internalSessionBind } from "./internal-session-bind"
 import { internalArtifactOpen } from "./internal-artifact-open"
 import { internalDecisionHook } from "./internal-decision-hook"
 import { internalPermissionNotify } from "./internal-permission-notify"
+import { internalToolRanNotify } from "./internal-tool-ran-notify"
 import { internalStopHook } from "./internal-stop-hook"
 import { internalStopReview } from "./internal-stop-review"
 import { internalWorkerGuard } from "./internal-worker-guard"
@@ -51,6 +52,7 @@ const isInternalHook =
   || argv[0] === "internal-artifact-open"
   || argv[0] === "internal-decision-hook"
   || argv[0] === "internal-permission-notify"
+  || argv[0] === "internal-tool-ran-notify"
   || argv[0] === "internal-worker-guard"
 if (!isVersionFlag && !isInternalHook) {
   consola.info(`github-router v${version}`)
@@ -63,7 +65,7 @@ const main = defineCommand({
     description:
       "A reverse proxy that exposes GitHub Copilot as OpenAI and Anthropic compatible API endpoints.",
   },
-  subCommands: { auth, start, claude, codex, models, "check-usage": checkUsage, debug, "internal-stop-hook": internalStopHook, "internal-prompt-submit": internalPromptSubmit, "internal-stop-review": internalStopReview, "internal-session-bind": internalSessionBind, "internal-artifact-open": internalArtifactOpen, "internal-decision-hook": internalDecisionHook, "internal-permission-notify": internalPermissionNotify, "internal-worker-guard": internalWorkerGuard },
+  subCommands: { auth, start, claude, codex, models, "check-usage": checkUsage, debug, "internal-stop-hook": internalStopHook, "internal-prompt-submit": internalPromptSubmit, "internal-stop-review": internalStopReview, "internal-session-bind": internalSessionBind, "internal-artifact-open": internalArtifactOpen, "internal-decision-hook": internalDecisionHook, "internal-permission-notify": internalPermissionNotify, "internal-tool-ran-notify": internalToolRanNotify, "internal-worker-guard": internalWorkerGuard },
 })
 
 await runMain(main)
