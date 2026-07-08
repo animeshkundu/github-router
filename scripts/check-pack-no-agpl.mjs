@@ -34,13 +34,20 @@ try {
 } catch (e) {
   fail(`npm pack --dry-run failed: ${String(e).slice(0, 200)}`);
 }
+// npm can emit warnings/notices on stdout before the JSON — extract the array.
 let parsed;
 try {
-  parsed = JSON.parse(out);
+  const start = out.indexOf("[");
+  const end = out.lastIndexOf("]");
+  if (start === -1 || end === -1 || end < start) throw new Error("no JSON array");
+  parsed = JSON.parse(out.slice(start, end + 1));
 } catch {
-  fail("could not parse `npm pack --dry-run --json` output");
+  fail(`could not parse \`npm pack --dry-run --json\` output. Raw:\n${out.slice(0, 600)}`);
 }
 const files = (parsed?.[0]?.files ?? []).map((f) => f.path);
+if (files.length === 0) {
+  fail(`npm pack reported 0 files (unexpected). Raw:\n${out.slice(0, 600)}`);
+}
 const offenders = files.filter((p) => FORBIDDEN.some((re) => re.test(p)));
 if (offenders.length) {
   fail(`tarball would ship AGPL/CloudCLI content:\n  ${offenders.join("\n  ")}`);
