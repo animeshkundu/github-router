@@ -4,10 +4,15 @@
 // CloudCLI (AGPL-3.0) as a separate runtime-installed process and must NEVER
 // ship any of its source/binary inside the MIT-licensed package (see NOTICE).
 //
-// Runs `npm pack --dry-run --json` and inspects the file list. Exits non-zero
-// on any violation so the release workflow blocks before publish.
-import { execSync } from "node:child_process";
+// Deterministic + npm-independent: the tarball is governed by package.json
+// `files` (plus always-included package.json/README/LICENSE/NOTICE). We enumerate
+// those paths and reject any that match a forbidden pattern. This avoids parsing
+// `npm pack --json`, whose stdout framing varies across npm versions / CI.
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 const FORBIDDEN = [
   /(^|\/)vendor\/cloudcli(\/|$)/i,
@@ -21,36 +26,42 @@ function fail(msg) {
   process.exit(1);
 }
 
-// 1. license must stay MIT
-const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
 if (pkg.license !== "MIT") fail(`package.json license is "${pkg.license}", expected "MIT"`);
 
-// 2. the tarball file list must contain no AGPL/CloudCLI paths
-let out;
-try {
-  // Shell-resolved so Windows PATHEXT finds npm.cmd. No user input in the
-  // command string, so this is injection-safe.
-  out = execSync("npm pack --dry-run --json --ignore-scripts", { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-} catch (e) {
-  fail(`npm pack --dry-run failed: ${String(e).slice(0, 200)}`);
+// The set of top-level entries npm would consider for the tarball.
+const alwaysIncluded = ["package.json", "README.md", "LICENSE", "NOTICE", "CHANGELOG.md"];
+const entries = [...new Set([...(pkg.files ?? []), ...alwaysIncluded])];
+
+// Collect every file path (repo-relative, forward slashes) that would ship.
+const shipped = [];
+function walk(rel) {
+  const abs = path.join(ROOT, rel);
+  let stat;
+  try {
+    stat = fs.statSync(abs);
+  } catch {
+    return; // entry doesn't exist locally (e.g. README) — nothing to ship
+  }
+  if (stat.isDirectory()) {
+    for (const child of fs.readdirSync(abs)) walk(`${rel}/${child}`);
+  } else {
+    shipped.push(rel.split(path.sep).join("/"));
+  }
 }
-// npm can emit warnings/notices on stdout before the JSON — extract the array.
-let parsed;
-try {
-  const start = out.indexOf("[");
-  const end = out.lastIndexOf("]");
-  if (start === -1 || end === -1 || end < start) throw new Error("no JSON array");
-  parsed = JSON.parse(out.slice(start, end + 1));
-} catch {
-  fail(`could not parse \`npm pack --dry-run --json\` output. Raw:\n${out.slice(0, 600)}`);
+for (const entry of entries) {
+  // A forbidden entry NAME itself (e.g. someone adds "vendor/cloudcli" to files).
+  if (FORBIDDEN.some((re) => re.test(entry.split(path.sep).join("/")))) {
+    fail(`package.json "files" lists a forbidden path: ${entry}`);
+  }
+  walk(entry);
 }
-const files = (parsed?.[0]?.files ?? []).map((f) => f.path);
-if (files.length === 0) {
-  fail(`npm pack reported 0 files (unexpected). Raw:\n${out.slice(0, 600)}`);
-}
-const offenders = files.filter((p) => FORBIDDEN.some((re) => re.test(p)));
+
+const offenders = shipped.filter((p) => FORBIDDEN.some((re) => re.test(p)));
 if (offenders.length) {
   fail(`tarball would ship AGPL/CloudCLI content:\n  ${offenders.join("\n  ")}`);
 }
 
-console.log(`✅ pack-guard: ${files.length} files, license MIT, no AGPL/CloudCLI content.`);
+console.log(
+  `✅ pack-guard: ${shipped.length} files across [${entries.join(", ")}], license MIT, no AGPL/CloudCLI content.`,
+);
