@@ -17,6 +17,7 @@ import { internalStopReview } from "./internal-stop-review"
 import { internalWorkerGuard } from "./internal-worker-guard"
 import { getPackageVersion } from "./lib/version"
 import { models } from "./models"
+import { serve } from "./serve"
 import { start } from "./start"
 
 process.on("unhandledRejection", (error) => {
@@ -61,7 +62,7 @@ const main = defineCommand({
     description:
       "A reverse proxy that exposes GitHub Copilot as OpenAI and Anthropic compatible API endpoints.",
   },
-  subCommands: { auth, start, claude, codex, models, "check-usage": checkUsage, debug, "internal-stop-hook": internalStopHook, "internal-prompt-submit": internalPromptSubmit, "internal-stop-review": internalStopReview, "internal-session-bind": internalSessionBind, "internal-artifact-open": internalArtifactOpen, "internal-first-mate-guard": internalFirstMateGuard, "internal-worker-guard": internalWorkerGuard },
+  subCommands: { auth, start, claude, codex, serve, models, "check-usage": checkUsage, debug, "internal-stop-hook": internalStopHook, "internal-prompt-submit": internalPromptSubmit, "internal-stop-review": internalStopReview, "internal-session-bind": internalSessionBind, "internal-artifact-open": internalArtifactOpen, "internal-first-mate-guard": internalFirstMateGuard, "internal-worker-guard": internalWorkerGuard },
 })
 
 await runMain(main)

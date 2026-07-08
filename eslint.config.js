@@ -61,6 +61,21 @@ export default tseslint.config(
     },
   },
   {
+    // Standalone Node ESM scripts (release guards, generators) — run under
+    // `node`, not part of the TS build; need Node + web-standard globals.
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: {
+        process: "readonly",
+        console: "readonly",
+        URL: "readonly",
+        Buffer: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
+      },
+    },
+  },
+  {
     rules: {
       "@typescript-eslint/no-unused-vars": [
         "error",

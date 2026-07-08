@@ -1,0 +1,32 @@
+github-router
+Copyright (c) 2026 animeshkundu
+Licensed under the MIT License (see LICENSE).
+
+================================================================================
+Third-party software launched at the user's direction (NOT distributed with
+github-router)
+================================================================================
+
+CloudCLI (@cloudcli-ai/cloudcli)
+--------------------------------
+The `github-router serve` subcommand provides a browser control plane by
+launching CloudCLI as a SEPARATE process and reverse-proxying it. CloudCLI is an
+independent program, licensed under the GNU Affero General Public License v3.0
+or later (AGPL-3.0-or-later).
+
+  Source:  https://github.com/siteboon/claudecodeui
+  npm:     https://www.npmjs.com/package/@cloudcli-ai/cloudcli
+  License: https://www.gnu.org/licenses/agpl-3.0.html
+
+github-router does NOT include, bundle, vendor, or distribute any CloudCLI
+source or binary. CloudCLI is fetched from the public npm registry and installed
+onto the user's own machine, at the user's direction, only when `serve` is run.
+The two programs are separate works that communicate arm's-length over local
+process boundaries (environment variables at spawn time and localhost HTTP /
+WebSocket). This is "mere aggregation" under the GPL/AGPL FAQ, and github-router
+itself remains under the MIT License.
+
+github-router does not modify CloudCLI and does not suppress CloudCLI's own
+AGPL source-availability notices. Users who interact with a modified CloudCLI
+over a network are entitled to its Corresponding Source under AGPL-3.0 §13; that
+obligation, if any, is CloudCLI's and is discharged by CloudCLI itself.

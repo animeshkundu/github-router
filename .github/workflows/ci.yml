@@ -33,6 +33,10 @@ jobs:
       - name: Build
         run: bun run build
 
+      - name: License guard (no AGPL/CloudCLI in tarball)
+        if: matrix.os == 'ubuntu-latest'
+        run: node scripts/check-pack-no-agpl.mjs
+
       - name: Test
         run: bun test tests/ --timeout 15000 --path-ignore-patterns 'tests/isolated/**'
 
@@ -75,6 +79,12 @@ jobs:
 
       - name: Verify CLI help on Node.js
         run: node dist/main.js --help
+
+      - name: Serve WS relay smoke (Node)
+        shell: bash
+        run: |
+          bun build src/lib/serve/reverse-proxy.ts --target=node --format=esm --outfile "$RUNNER_TEMP/rp.mjs"
+          node scripts/serve-ws-smoke.mjs "$RUNNER_TEMP/rp.mjs"
 
       - name: Verify no unguarded Bun references
         shell: bash
