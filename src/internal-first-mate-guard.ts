@@ -30,19 +30,16 @@ export const internalFirstMateGuard = defineCommand({
   },
   run() {
     let toolName = ""
-    let toolInput: OperatorToolInput | undefined
+    let hookInput: OperatorToolInput | undefined
     let parsed = false
     try {
       const payload = JSON.parse(readStdinSync()) as {
         tool_name?: unknown
         tool_input?: unknown
+        agent_type?: unknown
       }
       if (typeof payload.tool_name === "string") toolName = payload.tool_name
-      if (typeof payload.tool_input === "object" && payload.tool_input !== null) {
-        // The whole tool_input object flows through for forwards compatibility;
-        // operatorPreToolUse currently gates only by tool name.
-        toolInput = payload.tool_input as OperatorToolInput
-      }
+      if (typeof payload.agent_type === "string") hookInput = { agent_type: payload.agent_type }
       parsed = true
     } catch {
       parsed = false // fail-closed below for a named-but-unparseable payload
@@ -59,7 +56,7 @@ export const internalFirstMateGuard = defineCommand({
       process.exit(0)
     }
     // This hook is only injected in operator mode, so operatorMode = true.
-    const decision = operatorPreToolUse(toolName, true, toolInput)
+    const decision = operatorPreToolUse(toolName, true, hookInput)
     if (decision.block) {
       process.stderr.write(decision.reason ?? `${toolName} is disabled in operator mode`)
       process.exit(2) // exit 2 blocks the tool call (Claude Code hook convention)

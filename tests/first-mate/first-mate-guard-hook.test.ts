@@ -66,6 +66,20 @@ describe("operator PreToolUse hook enforcement", () => {
     expect(await runGuard(JSON.stringify({ tool_name: "Write", tool_input: { file_path: "x" } }))).toBe(0)
   }, 20_000)
 
+  test("allows matching worker dispatcher agent types to call worker tools", async () => {
+    expect(await runGuard(JSON.stringify({ tool_name: "mcp__workers__review", agent_type: "worker-review", tool_input: {} }))).toBe(0)
+    expect(await runGuard(JSON.stringify({ tool_name: "mcp__workers__implement", agent_type: "worker-implement", tool_input: {} }))).toBe(0)
+    expect(await runGuard(JSON.stringify({ tool_name: "mcp__workers__plan", agent_type: "worker-plan", tool_input: {} }))).toBe(0)
+    expect(await runGuard(JSON.stringify({ tool_name: "mcp__workers__test", agent_type: "worker-test", tool_input: {} }))).toBe(0)
+    expect(await runGuard(JSON.stringify({ tool_name: "mcp__workers__explore", agent_type: "worker-explore", tool_input: {} }))).toBe(0)
+    expect(await runGuard(JSON.stringify({ tool_name: "mcp__workers__browse", agent_type: "worker-browse", tool_input: {} }))).toBe(0)
+  }, 20_000)
+
+  test("blocks non-dispatcher agent types from worker tools", async () => {
+    expect(await runGuard(JSON.stringify({ tool_name: "mcp__workers__review", agent_type: "worker-plan", tool_input: {} }))).toBe(2)
+    expect(await runGuard(JSON.stringify({ tool_name: "mcp__workers__review", agent_type: "general-purpose", tool_input: {} }))).toBe(2)
+  }, 20_000)
+
   test("fails closed on an unparseable payload routed to the guard", async () => {
     expect(await runGuard("not json{")).toBe(2)
   }, 20_000)

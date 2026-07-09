@@ -91,7 +91,7 @@ function decisionInput(overrides: Partial<StopHookInput> = {}): StopHookInput {
     stdin: JSON.stringify({ cwd: "/w", session_id: "s1" }),
     gateId: "typecheck-only",
     exec: async () => ({ exitCode: 0 }),
-    captureDiff: async () => "",
+    captureDiff: async () => "diff --git a/src/x.ts b/src/x.ts\n+++ b/src/x.ts\n+export const x = 1\n",
     fallbackCwd: "/fallback",
     budget,
     baseline,
@@ -331,6 +331,34 @@ describe("decideStopHook (subcommand decision)", () => {
     expect(record.mock.calls.length).toBe(0)
     expect(captureDiff.mock.calls.length).toBe(0)
     expect(exec.mock.calls.length).toBe(0)
+  })
+
+  test("empty working-tree diff allows without invoking the check runner", async () => {
+    const exec = mock(async () => ({ exitCode: 1 }))
+    const captureDiff = mock(async (_cwd: string) => "")
+    const { state, baseline } = memBaseline()
+    const d = await decideStopHook(decisionInput({ exec, captureDiff, baseline }))
+    expect(d.exitCode).toBe(0)
+    expect(captureDiff.mock.calls.length).toBe(1)
+    expect(exec.mock.calls.length).toBe(0)
+    expect(state.has(baselineKey("s1", "/w", "typecheck-only"))).toBe(false)
+  })
+
+  test("non-empty diff with a regressed failing gate still blocks", async () => {
+    const exec = mock(async () => ({ exitCode: 1 }))
+    const d = await decideStopHook(decisionInput({ exec, baseline: singleSlotBaseline([]) }))
+    expect(d.exitCode).toBe(2)
+    expect(d.stderr).toContain("regressed gates: typecheck")
+    expect(exec.mock.calls.length).toBe(1)
+  })
+
+  test("non-empty clean diff allows after running checks", async () => {
+    const exec = mock(async () => ({ exitCode: 0 }))
+    const { state, baseline } = memBaseline()
+    const d = await decideStopHook(decisionInput({ baseline, exec }))
+    expect(d.exitCode).toBe(0)
+    expect(exec.mock.calls.length).toBe(1)
+    expect(state.get(baselineKey("s1", "/w", "typecheck-only"))).toEqual([])
   })
 
   test("a clean gate allows the stop and records an empty first-eval baseline", async () => {

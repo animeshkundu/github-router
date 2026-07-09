@@ -20,6 +20,7 @@ import {
 
 const KEY = "workers"
 const CORE = [...CORE_WORKER_MODES]
+const ALL = [...ALL_WORKER_DISPATCH_MODES]
 
 function payload(obj: Record<string, unknown>): string {
   return JSON.stringify(obj)
@@ -27,11 +28,11 @@ function payload(obj: Record<string, unknown>): string {
 
 describe("decideWorkerGuard — the main-never-blocks invariant", () => {
   test("main agent (no agent_type) calling a worker tool is DENIED with a worker-<mode> redirect", () => {
-    for (const mode of CORE) {
+    for (const mode of ALL) {
       const r = decideWorkerGuard({
         stdin: payload({ tool_name: workerToolName(KEY, mode) }),
         workersKey: KEY,
-        modes: CORE,
+        modes: ALL,
       })
       expect(r.verdict).toBe("deny-main")
       expect(r.output).not.toBeNull()
@@ -54,12 +55,12 @@ describe("decideWorkerGuard — the main-never-blocks invariant", () => {
     }
   })
 
-  test("the matching worker-* dispatcher subagent is ALLOWED (its call is the sanctioned path)", () => {
-    for (const mode of CORE) {
+  test("the matching worker-* dispatcher subagent is ALLOWED for every mode (its call is the sanctioned path)", () => {
+    for (const mode of ALL) {
       const r = decideWorkerGuard({
         stdin: payload({ tool_name: workerToolName(KEY, mode), agent_type: dispatcherAgentName(mode) }),
         workersKey: KEY,
-        modes: CORE,
+        modes: ALL,
       })
       expect(r.verdict).toBe("allow-dispatcher")
       expect(r.output).toBeNull()

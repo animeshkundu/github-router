@@ -74,9 +74,9 @@ export function decidePromptSubmit(input: { stdin: string; steerEnabled: boolean
 // ─── UserPromptSubmit V2 (advisory: classify + grounded scope/goal) ──────────
 
 /**
- * Static encouragement injected for a TRIVIAL prompt (no model call, no latency
- * tax): nudge parallel lexical+semantic search before concluding. Mirrors the v1
- * advisory tone — additive, never blocking.
+ * Static encouragement injected only for a non-trivial prompt (no extra model
+ * call, no latency tax): nudge parallel lexical+semantic search before
+ * concluding. Mirrors the v1 advisory tone — additive, never blocking.
  */
 export const PROMPT_SEARCH_TIP =
   "TIP (advisory): when this task needs code context, search lexical + semantic in "
@@ -154,8 +154,8 @@ function joinSections(sections: Array<string>): string {
  *
  *   - subagent/teammate  -> empty (top-level only, like v1).
  *   - findings           -> always surfaced (+ cleared) regardless of triviality.
- *   - trivial prompt     -> static search tip only (no model call).
- *   - substantive prompt -> parallel lexical+semantic search -> ONE gpt-5.5 call
+ *   - trivial prompt     -> findings only (no search tip, no model call).
+ *   - substantive prompt -> static search tip + parallel lexical+semantic search -> ONE gpt-5.5 call
  *                           -> grounded scope/goal note. Fail-open to PROMPT_STEER_GOAL.
  *   - steerEnabled=false -> findings only (no goal/tip).
  */
@@ -198,13 +198,13 @@ export async function decidePromptSubmitV2(input: {
     return decision
   }
 
-  // Trivial prompt -> static tip only, no model call.
+  // Trivial prompt -> no search tip and no model call; surface findings only.
   if (!isNonTrivialPrompt(prompt)) {
-    decision.inject = joinSections([PROMPT_SEARCH_TIP, findingsBlock])
+    decision.inject = findingsBlock
     return decision
   }
 
-  // Substantive prompt -> grounded enrichment, timeout-bounded + fail-open.
+  // Substantive prompt -> static search tip + grounded enrichment, timeout-bounded + fail-open.
   const timeoutMs = input.io.timeoutMs ?? 22_000
   let goal = PROMPT_STEER_GOAL // fail-open default.
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -247,7 +247,7 @@ export async function decidePromptSubmitV2(input: {
     controller.abort()
   }
 
-  decision.inject = joinSections([goal, findingsBlock])
+  decision.inject = joinSections([PROMPT_SEARCH_TIP, goal, findingsBlock])
   return decision
 }
 

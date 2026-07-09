@@ -186,6 +186,9 @@ export function decideWorkerGuard(input: {
     // meant to run THIS worker. Require an exact mode match (not just "any
     // dispatcher"), so a read-only `worker-explore` can't invoke the
     // write-capable `implement` worker if it misroutes or is prompt-injected.
+    // If a matching dispatcher is still denied, the payload that reached this
+    // hook did not carry this exact top-level `agent_type`, or a different
+    // PreToolUse hook denied the call after this guard allowed it.
     return { output: null, verdict: "allow-dispatcher" }
   }
 
@@ -266,7 +269,7 @@ export function dispatcherPrompt(mode: WorkerDispatchMode, workersKey: string): 
  *  tool names, so this grants exactly the workers tools and NOTHING else — no
  *  Agent/Task (so it cannot spawn further agents → no recursion), no Read/Bash
  *  (so it cannot do extra work). The dispatcher's prompt narrows it to the one
- *  mode; the guard allows any dispatcher-named caller regardless. */
+ *  mode; the guard allows only the exact dispatcher for that worker mode. */
 export function dispatcherTools(_mode: WorkerDispatchMode, workersKey: string): Array<string> {
   return [`mcp__${workersKey}__*`]
 }
