@@ -665,6 +665,49 @@ export function buildPeerAwarenessSnippet(opts: {
   ].join("\n")
 }
 
+/**
+ * Compact, gated capability SUMMARY for the spawned session's system prompt
+ * (`--append-system-prompt`). The FULL per-tool inventory lives once in the
+ * mirrored CLAUDE.md (buildPeerAwarenessSnippet); this ~300-token summary gives
+ * the main agent high-salience awareness of what is available without
+ * duplicating the full snippet in the context window every turn. Gated
+ * identically to the full snippet so it never names a surface the live
+ * tools/list dropped. Factual present tense, no imperatives.
+ */
+export function buildPeerAwarenessSummary(opts: {
+  workerToolsAvailable: boolean
+  standInAvailable: boolean
+  browseAvailable: boolean
+  fleetAvailable?: boolean
+  agentToolsAvailable?: boolean
+  groupKeys?: Partial<Record<McpGroup, string>>
+}): string {
+  const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
+  const lines: Array<string> = [
+    "## Injected capabilities (summary)",
+    "",
+    `A layer of MCP tools, background workers, and skills is injected into this session. Cross-lab peer critics under \`mcp__${key("peers")}__*\` (plus the \`peer-review-coordinator\` subagent) review plans and diffs adversarially, and Claude Code's built-in \`advisor\` catches approach drift. \`mcp__${key("search")}__code\` is meaning-first code search and \`mcp__${key("search")}__web\` returns citable web sources.`,
+  ]
+  if (opts.workerToolsAvailable) {
+    lines.push(`Background \`worker-*\` agents (explore, review, plan, implement, test) run delegated work in their own context without blocking your turn, and \`mcp__${key("orchestrate")}__*\` composes, verifies, and runs floor-raising workflows.`)
+  }
+  if (opts.standInAvailable) {
+    lines.push(`\`mcp__${key("decide")}__stand_in\` returns a three-lab consensus for a decision when the user is unavailable.`)
+  }
+  if (opts.browseAvailable) {
+    lines.push(`\`mcp__${key("browser")}__*\` drives a real Chrome or Edge browser.`)
+  }
+  if (opts.fleetAvailable) {
+    lines.push(`\`mcp__${key("fleet")}__*\` drives remote ai-or-die coding sessions.`)
+  }
+  if (opts.agentToolsAvailable === true) {
+    lines.push("The `/gh-first-mate` skill drives a durable GitHub cloud-agent loop.")
+  }
+  lines.push("")
+  lines.push(`Each tool's own description carries when to use it and when not. The full per-tool inventory (models, gating, workers, skills) is in the "Peer review and advisor" section of your CLAUDE.md project instructions.`)
+  return lines.join("\n")
+}
+
 /** Convenience: every persona that should be registered for the given mode. */
 export function personasFor(opts: {
   codexCli: boolean
