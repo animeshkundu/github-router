@@ -596,15 +596,17 @@ test("artifact-panel directive steers HTML-by-default for review", () => {
   expect(d).toContain("html")
   expect(d).toContain("artifact panel")
   expect(d).toContain("mcp__peers__artifact_open")
-  // It explicitly prefers HTML and frames raw markdown as the fallback.
+  // It explicitly prefers HTML (self-contained artifact).
   expect(d).toMatch(/prefer html|self-contained `?\.?html/)
-  expect(d).toContain("fallback")
   // Broadened beyond plans: the trigger now names other review-worthy shapes.
   expect(d).toContain("comparison")
   expect(d).toContain("table")
-  // Carries the per-type playbook cheatsheet + a design-system steer.
   expect(d).toContain("diagram")
-  expect(d).toContain("design system")
+  // Trimmed-to-a-pointer contract: the full authoring/loop playbook (per-type
+  // cheatsheet, design-system, data-aod controls) now lives in the skill, so
+  // the directive names the skill + the data-aod controls entry point.
+  expect(d).toContain("gh-artifact-review")
+  expect(d).toContain("data-aod")
 })
 
 test("artifact-panel directive threads the resolved peers key into tool paths", async () => {
