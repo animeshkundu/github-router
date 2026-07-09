@@ -39,6 +39,7 @@ import {
   browserPowerToolsEnabled,
   browserToolsEnabled,
   fleetToolsEnabled,
+  geminiAvailable,
   standInToolEnabled,
   workerToolsEnabled,
 } from "~/lib/mcp-capabilities"
@@ -230,12 +231,6 @@ function checkAuth(c: Context): { ok: true } | { ok: false; status: 401 | 403; r
     return { ok: false, status: 401, reason: "missing or invalid Authorization bearer" }
   }
   return { ok: true }
-}
-
-function geminiAvailable(): boolean {
-  const models = state.models?.data
-  if (!models) return false
-  return models.some((m) => /^gemini-3\..*pro/i.test(m.id))
 }
 
 // `standInToolEnabled`, `workerToolsEnabled`, and `browserToolsEnabled`

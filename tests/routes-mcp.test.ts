@@ -770,7 +770,7 @@ describe("/mcp tools/call routing", () => {
       rawAskHash: "r", acceptanceCriteriaHash: "a", maxDepth: 1,
       nodes: [
         { id: "baseline", role: "baseline", inputs: [], gate: { kind: "none" }, onFail: "baseline" },
-        { id: "impl", role: "implement", producerLab: "openai", inputs: [], gate: { kind: "executable", gateId: "tests" }, onFail: "loop" },
+        { id: "impl", role: "implement", producerLab: "openai", inputs: [], gate: { kind: "executable", gateId: "typecheck-test" }, onFail: "loop" },
         { id: "select", role: "selector", inputs: ["baseline", "impl"], gate: { kind: "none" }, onFail: "baseline", judgesOnRawAsk: true },
       ],
     }

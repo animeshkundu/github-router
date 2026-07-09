@@ -157,7 +157,7 @@ describe("artifact MCP tools", () => {
     ])
   })
 
-  test("artifact_end posts the end request and returns ok", async () => {
+  test("artifact_end posts the end request and preserves terminal status", async () => {
     setArtifactEnv()
     const calls: Array<{ url: string; method: string; body?: unknown; auth?: string; redirect?: string }> = []
     globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
@@ -170,7 +170,7 @@ describe("artifact MCP tools", () => {
           : (init?.headers as Record<string, string> | undefined)?.Authorization,
         redirect: init?.redirect,
       })
-      return new Response(null, { status: 204 })
+      return Response.json({ ok: true, status: "ended", debugTrace: "drop-me" })
     }) as unknown as typeof fetch
 
     const { result, json } = await callTool("artifact_end", {})
@@ -178,6 +178,7 @@ describe("artifact MCP tools", () => {
     expect(result.isError).toBeUndefined()
     expect(json).toEqual({
       ok: true,
+      status: "ended",
       next_step: "Artifact review loop ended.",
     })
     expect(calls).toEqual([
@@ -210,7 +211,7 @@ describe("artifact MCP tools", () => {
 })
 
 describe("artifact_reply", () => {
-  test("posts /agent-reply with the text and returns ok + response + next_step", async () => {
+  test("posts /agent-reply with the text and returns ok + next_step", async () => {
     setArtifactEnv()
     const calls: Array<{ url: string; method: string; body?: unknown; auth?: string; redirect?: string }> = []
     globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
@@ -223,8 +224,15 @@ describe("artifact_reply", () => {
           : (init?.headers as Record<string, string> | undefined)?.Authorization,
         redirect: init?.redirect,
       })
-      // The consumer's /agent-reply returns { ok:true, reply }.
-      return Response.json({ ok: true, reply: { id: "r1", text: "applied the fix" } })
+      // The consumer's /agent-reply returns the rendered reply confirmation.
+      return Response.json({
+        ok: true,
+        reply: { id: "r1", text: "applied the fix" },
+        delivered: true,
+        confirmed: true,
+        status: "open",
+        debugTrace: "drop-me",
+      })
     }) as unknown as typeof fetch
 
     const { result, json } = await callTool("artifact_reply", { text: "applied the fix" })
@@ -233,6 +241,9 @@ describe("artifact_reply", () => {
     expect(json).toEqual({
       ok: true,
       reply: { id: "r1", text: "applied the fix" },
+      delivered: true,
+      confirmed: true,
+      status: "open",
       next_step: "Wait for further human review, or continue if the review loop is complete.",
     })
     expect(calls).toEqual([
@@ -409,14 +420,21 @@ describe("artifact_update", () => {
     return { fetchFn, calls }
   }
 
-  test("posts {file} to /update and returns ok + response + next_step", async () => {
+  test("posts {file} to /update and returns ok + next_step", async () => {
     setArtifactEnv()
-    const cap = captureFetch({ ok: true, viewUrl: "https://ai.example/artifact/sess-1/v" })
+    const cap = captureFetch({
+      ok: true,
+      viewUrl: "https://ai.example/artifact/sess-1/v",
+      debugTrace: "drop-me",
+    })
     globalThis.fetch = cap.fetchFn
     const { result, json } = await callTool("artifact_update", { file: "docs/plan.html" })
     expect(result.isError).toBeUndefined()
-    expect(json).toMatchObject({ ok: true, viewUrl: "https://ai.example/artifact/sess-1/v" })
-    expect((json as Record<string, unknown>).next_step).toBeDefined()
+    expect(json).toEqual({
+      ok: true,
+      viewUrl: "https://ai.example/artifact/sess-1/v",
+      next_step: "The panel now shows the updated content. Call artifact_await for further feedback.",
+    })
     expect(cap.calls[0]).toEqual({
       url: "https://ai.example/api/artifact/sess-1/update",
       method: "POST",
@@ -470,29 +488,57 @@ describe("artifact_update", () => {
 })
 
 describe("artifact_refresh / artifact_dismiss", () => {
-  test("artifact_refresh posts /refresh and returns ok", async () => {
+  test("artifact_refresh posts /refresh and preserves known panel state", async () => {
     setArtifactEnv()
     const calls: Array<{ url: string; method: string }> = []
     globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: url.toString(), method: init?.method ?? "GET" })
-      return Response.json({ ok: true })
+      return Response.json({
+        ok: true,
+        viewUrl: "https://ai.example/artifact/sess-1/v",
+        panelUrl: "https://ai.example/panel/sess-1",
+        status: "open",
+        visibility: "visible",
+        debugTrace: "drop-me",
+      })
     }) as unknown as typeof fetch
     const { result, json } = await callTool("artifact_refresh", {})
     expect(result.isError).toBeUndefined()
-    expect((json as Record<string, unknown>).ok).toBe(true)
+    expect(json).toEqual({
+      ok: true,
+      viewUrl: "https://ai.example/artifact/sess-1/v",
+      panelUrl: "https://ai.example/panel/sess-1",
+      status: "open",
+      visibility: "visible",
+      next_step: "The panel reloaded the artifact. Call artifact_await for feedback.",
+    })
     expect(calls[0]).toEqual({ url: "https://ai.example/api/artifact/sess-1/refresh", method: "POST" })
   })
 
-  test("artifact_dismiss posts /dismiss and returns ok (review stays alive)", async () => {
+  test("artifact_dismiss posts /dismiss and preserves alive hidden state", async () => {
     setArtifactEnv()
     const calls: Array<{ url: string; method: string }> = []
     globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: url.toString(), method: init?.method ?? "GET" })
-      return Response.json({ ok: true, status: "open", visibility: "dismissed" })
+      return Response.json({
+        ok: true,
+        viewUrl: "https://ai.example/artifact/sess-1/v",
+        panelUrl: "https://ai.example/panel/sess-1",
+        status: "open",
+        visibility: "dismissed",
+        debugTrace: "drop-me",
+      })
     }) as unknown as typeof fetch
     const { result, json } = await callTool("artifact_dismiss", {})
     expect(result.isError).toBeUndefined()
-    expect(json).toMatchObject({ ok: true, status: "open", visibility: "dismissed" })
+    expect(json).toEqual({
+      ok: true,
+      viewUrl: "https://ai.example/artifact/sess-1/v",
+      panelUrl: "https://ai.example/panel/sess-1",
+      status: "open",
+      visibility: "dismissed",
+      next_step: "The panel is hidden but the review is still live. Re-open the artifact or call artifact_await when ready.",
+    })
     expect(calls[0]).toEqual({ url: "https://ai.example/api/artifact/sess-1/dismiss", method: "POST" })
   })
 })

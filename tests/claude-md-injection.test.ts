@@ -20,6 +20,7 @@ mock.module("node:os", () => ({
 const { PATHS, isUnderClaudeConfigMirror } = await import("../src/lib/paths")
 const {
   appendPeerAwarenessToMirroredClaudeMd,
+  prependArtifactPanelDirectiveToMirroredClaudeMd,
   prependStyleDirectiveToMirroredClaudeMd,
   OPERATING_DEFAULTS_DIRECTIVE,
   findMarkerBlocks,
@@ -597,7 +598,7 @@ test("operating-defaults directive: orchestrator posture + hybrid excellence len
 test("artifact-panel directive steers HTML-by-default for review", () => {
   // The always-injected primary instruction must reflect the HTML-default
   // decision (the hook auto-renders plans to HTML; markdown is the fallback).
-  const d = ARTIFACT_PANEL_DIRECTIVE.toLowerCase()
+  const d = ARTIFACT_PANEL_DIRECTIVE().toLowerCase()
   expect(d).toContain("html")
   expect(d).toContain("artifact panel")
   expect(d).toContain("mcp__peers__artifact_open")
@@ -610,6 +611,18 @@ test("artifact-panel directive steers HTML-by-default for review", () => {
   // Carries the per-type playbook cheatsheet + a design-system steer.
   expect(d).toContain("diagram")
   expect(d).toContain("design system")
+})
+
+test("artifact-panel directive threads the resolved peers key into tool paths", async () => {
+  expect(ARTIFACT_PANEL_DIRECTIVE("gh-router-peers")).toContain("mcp__gh-router-peers__artifact_open")
+  expect(ARTIFACT_PANEL_DIRECTIVE("gh-router-peers")).not.toContain("mcp__peers__artifact_open")
+
+  await freshMirrorDir()
+  await prependArtifactPanelDirectiveToMirroredClaudeMd("gh-router-peers")
+
+  const result = await fs.readFile(TARGET, "utf8")
+  expect(result).toContain("mcp__gh-router-peers__artifact_open")
+  expect(result).not.toContain("mcp__peers__artifact_open")
 })
 test("style directive is prepended at the TOP of CLAUDE.md with user content preserved below", async () => {
   await freshMirrorDir()

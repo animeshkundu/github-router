@@ -558,7 +558,9 @@ export function buildPeerAwarenessSnippet(opts: {
   workerToolsAvailable: boolean
   standInAvailable: boolean
   browseAvailable: boolean
+  compoundBrowseAvailable: boolean
   powerBrowseAvailable?: boolean
+  fleetAvailable?: boolean
   agentToolsAvailable?: boolean
   /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
    *  collision). Missing key → use the preferred bare key. Keeps the
@@ -572,6 +574,12 @@ export function buildPeerAwarenessSnippet(opts: {
   const orchestrateKey = key("orchestrate")
   const browserKey = key("browser")
   const decideKey = key("decide")
+  const fleetKey = key("fleet")
+
+  // Keep the browse tiers monotonic when callers pass the source-of-truth gates.
+  // Compound and power browser tools can only list when the base browser server is available.
+  const compoundBrowseAvailable = opts.browseAvailable && opts.compoundBrowseAvailable
+  const powerBrowseAvailable = opts.browseAvailable && opts.powerBrowseAvailable === true
 
   const criticList: Array<string> = [
     "`codex_critic` (gpt-5.5)",
@@ -628,11 +636,23 @@ export function buildPeerAwarenessSnippet(opts: {
     )
   }
   if (opts.browseAvailable) {
-    const powerNote = opts.powerBrowseAvailable
-      ? ` Power mode adds the L0/L1 primitives (\`mcp__${browserKey}__mouse\`, \`__drag\`, \`__type\`, \`__keyboard\`, \`__scroll\`, \`__eval_js\`, \`__read_page\`, \`__diagnostics\`, \`__find\`) for direct DOM / coordinate control.`
-      : ""
     para2Parts.push(
-      `\`mcp__${browserKey}__*\` tools drive a real Chrome / Edge browser via a local extension. Lead surface: \`__act(intent, value?)\` for any click / fill / type / scroll-to (an inner fast model resolves intent), \`__observe(intent?)\` for a 2-4 sentence natural-language page description, \`__extract(schema, instruction)\` for typed extraction, \`__navigate\` / \`__open_tab\` / \`__screenshot\` for state and visuals. The lead never sees raw DOM: refs and bboxes stay internal.${powerNote}`,
+      `\`mcp__${browserKey}__*\` tools drive a real Chrome / Edge browser via a local extension. Lead browse surface includes \`__navigate\` / \`__open_tab\` / \`__screenshot\` for state, visuals, and navigation.`,
+    )
+  }
+  if (compoundBrowseAvailable) {
+    para2Parts.push(
+      `Compound browse surface includes \`mcp__${browserKey}__act(intent, value?)\` / \`__observe(intent?)\` / \`__extract(schema, instruction)\` / \`__find\`; an inner fast model resolves intent, find/observe yield element refs act consumes, and the lead never sees raw DOM.`,
+    )
+  }
+  if (powerBrowseAvailable) {
+    para2Parts.push(
+      `Power browse surface adds \`mcp__${browserKey}__mouse\`, \`__drag\`, \`__type\`, \`__keyboard\`, \`__scroll\`, \`__eval_js\`, \`__read_page\`, \`__diagnostics\`, \`__list_tabs\`, \`__close_tab\`, \`__wait\`, and \`__download\` for direct DOM and coordinate control.`,
+    )
+  }
+  if (opts.fleetAvailable) {
+    para2Parts.push(
+      `\`mcp__${fleetKey}__*\` tools drive remote ai-or-die coding sessions (list / read / create / stop / await / drive, plus remote read_file / list_dir / search / git_show); they act on a REMOTE fleet instance, not the local repo.`,
     )
   }
 

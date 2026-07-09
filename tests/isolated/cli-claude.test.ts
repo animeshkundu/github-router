@@ -159,21 +159,25 @@ mock.module("~/lib/codex-mcp-config", () => ({
 const workerToolsEnabledMock = mock(() => false)
 const standInToolEnabledMock = mock(() => false)
 const browserToolsEnabledMock = mock(() => false)
+const browserCompoundToolsEnabledMock = mock(() => false)
+const fleetToolsEnabledMock = mock(() => false)
 const agentToolsEnabledMock = mock(() => false)
+const artifactToolsEnabledMock = mock(() => false)
 mock.module("~/lib/mcp-capabilities", () => ({
   workerToolsEnabled: workerToolsEnabledMock,
   standInToolEnabled: standInToolEnabledMock,
   browserToolsEnabled: browserToolsEnabledMock,
+  browserCompoundToolsEnabled: browserCompoundToolsEnabledMock,
+  fleetToolsEnabled: fleetToolsEnabledMock,
   agentToolsEnabled: agentToolsEnabledMock,
+  artifactToolsEnabled: artifactToolsEnabledMock,
   // handler.ts (pulled in transitively via the static import graph)
   // also imports these; re-export stubs so the module mock doesn't
-  // break that import. claude.ts itself only uses the three above.
-  browserCompoundToolsEnabled: mock(() => false),
+  // break that import. claude.ts itself only uses the named mocks above.
   browserPowerToolsEnabled: mock(() => false),
   browseAgentEnabled: mock(() => false),
   semanticSearchEnabled: mock(() => false),
-  fleetToolsEnabled: mock(() => false),
-  artifactToolsEnabled: mock(() => false),
+  geminiAvailable: mock(() => false),
   implementerSubagentModel: mock(() => undefined),
 }))
 
@@ -370,8 +374,14 @@ beforeEach(() => {
   standInToolEnabledMock.mockReturnValue(false)
   browserToolsEnabledMock.mockReset()
   browserToolsEnabledMock.mockReturnValue(false)
+  browserCompoundToolsEnabledMock.mockReset()
+  browserCompoundToolsEnabledMock.mockReturnValue(false)
+  fleetToolsEnabledMock.mockReset()
+  fleetToolsEnabledMock.mockReturnValue(false)
   agentToolsEnabledMock.mockReset()
   agentToolsEnabledMock.mockReturnValue(false)
+  artifactToolsEnabledMock.mockReset()
+  artifactToolsEnabledMock.mockReturnValue(false)
   appendPeerAwarenessToMirroredClaudeMdMock.mockReset()
   appendPeerAwarenessToMirroredClaudeMdMock.mockResolvedValue(undefined)
   prependStyleDirectiveToMirroredClaudeMdMock.mockReset()

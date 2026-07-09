@@ -56,7 +56,7 @@ function toolEnvelope(
  * and (3) opens a WS to the bridge, sends the tool call, awaits the
  * response with a per-tool timeout.
  *
- * Each entry carries `capability: "browser"` so `browserToolsEnabled()`
+ * Each entry carries a browser capability tag so `browserToolsEnabled()`
  * in `src/routes/mcp/handler.ts` drops them at both list-time and
  * call-time when the operator hasn't opted in via `--browse` or
  * `GH_ROUTER_ENABLE_BROWSE=1`.
@@ -572,7 +572,8 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
         },
       },
     },
-    capability: "browser_power",
+    // Compound tier keeps the ref producer with browser_act's ref/intent consumer.
+    capability: "browser_compound",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       const tabId = typeof args.tabId === "number" ? args.tabId : undefined
       const intent = typeof args.intent === "string" ? args.intent : ""
@@ -619,7 +620,8 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
         },
       },
     },
-    capability: "browser",
+    // Compound tier keeps act with the compressor and ref-producing browser_find.
+    capability: "browser_compound",
     async handler(args: Record<string, unknown>, signal?: AbortSignal) {
       const tabId = typeof args.tabId === "number" ? args.tabId : undefined
       if (!tabId) return toolEnvelope({ error: "tabId required" }, true)

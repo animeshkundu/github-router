@@ -5,9 +5,13 @@ import consola from "consola"
 import {
   ArtifactClient,
   ArtifactError,
+  type ArtifactAgentReplyResponse,
   type ArtifactAwaitResponse,
+  type ArtifactEndResponse,
   type ArtifactEvent,
   type ArtifactPollResponse,
+  type ArtifactSimpleResponse,
+  type ArtifactUpdateResponse,
 } from "./client"
 
 const ARTIFACT_GROUP: McpGroup = "peers"
@@ -53,7 +57,7 @@ function tool(
 export const ARTIFACT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
   tool(
     "artifact_open",
-    "Open a workspace file in ai-or-die's Artifact review panel for human review. Pass mode:\"interactive\" when the HTML carries data-aod-* action controls. Only works inside an ai-or-die tab-backed Claude session.",
+    "Opens a workspace file in ai-or-die's Artifact review panel for human review, replacing the current review if one is already open. The caller provides a workspace-relative or absolute file path and can set mode:\"interactive\" when the HTML carries data-aod-* action controls. It returns the review URL/session identifiers plus next-step guidance for draining feedback. Use it when the user should review a durable artifact before work continues; it is not for one-line status updates or non-file content. Only works inside an ai-or-die tab-backed Claude session.",
     objectSchema({
       file: stringProp("Workspace-relative or absolute file path to show in the Artifact panel."),
       mode: enumProp(
@@ -77,7 +81,7 @@ export const ARTIFACT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
   ),
   tool(
     "artifact_update",
-    "Replace the current Artifact review's content in place. Provide EXACTLY ONE of file (a workspace file path) or html (raw HTML the server writes to the review's sandboxed file). html requires an already-open review. Only works inside an ai-or-die tab-backed Claude session.",
+    "Replaces the current Artifact review's content in place without opening a separate review. The caller provides exactly one of file, a workspace-relative or absolute file path, or html, raw HTML written into the existing review sandbox; html requires an already-open review, and idempotencyKey can make retries deduplicate on the server. It returns a minimal success signal plus next-step guidance for awaiting further feedback. Use it when revised content should replace what the human is already reviewing; use artifact_refresh instead when the existing on-disk artifact only needs to be reloaded. Only works inside an ai-or-die tab-backed Claude session.",
     objectSchema({
       file: stringProp("Workspace-relative or absolute file path to become the review's new content."),
       html: stringProp("Raw HTML to write into the review's existing sandboxed file, then reload."),
@@ -96,31 +100,23 @@ export const ARTIFACT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
       }
       const idempotencyKey = optionalString(args, "idempotencyKey")
       const response = await clientFromEnv(env).update({ file, html, idempotencyKey, signal })
-      return ok({
-        ...response,
-        ok: true,
-        next_step: "The panel now shows the updated content. Call artifact_await for further feedback.",
-      })
+      return ok(formatUpdateSuccess(response))
     },
   ),
   tool(
     "artifact_refresh",
-    "Force the ai-or-die Artifact panel to reload the current artifact from disk (no content change). Only works inside an ai-or-die tab-backed Claude session.",
+    "Reloads the currently-open Artifact review from its existing on-disk file without changing the content source. The tool takes no inputs and returns a minimal success signal plus next-step guidance for awaiting feedback. Use it after an out-of-band edit changes the reviewed file on disk and the panel needs to pick up that version. Do not use it to replace the artifact with a new file or raw HTML; use artifact_update for that. Only works inside an ai-or-die tab-backed Claude session.",
     objectSchema({}, []),
     async (_args, signal) => {
       const env = readArtifactEnv()
       if (!env) return missingEnvResult()
       const response = await clientFromEnv(env).refresh(signal)
-      return ok({
-        ...response,
-        ok: true,
-        next_step: "The panel reloaded the artifact. Call artifact_await for feedback.",
-      })
+      return ok(formatRefreshSuccess(response))
     },
   ),
   tool(
     "artifact_await",
-    "Wait for the human's next Artifact review events (typed drain: comments AND structured action-button/checkbox events) and return them with a cursor. Pass the returned cursor on the next call to receive only newer events. Supersedes artifact_poll. Only works inside an ai-or-die tab-backed Claude session.",
+    "Waits for the human's next Artifact review events and returns a typed drain containing comments, structured action-button or checkbox events, status, cursor, and next-step guidance. The caller can pass the cursor from a previous response to receive only newer events and can provide timeoutMs as the server long-hold budget. It may return an empty events list on a quiet long-hold; callers should pass the returned cursor on the next artifact_await call. Use it as the primary review-feedback drain after artifact_open or artifact_update; it supersedes artifact_poll, which is legacy comments-only. Only works inside an ai-or-die tab-backed Claude session.",
     objectSchema({
       cursor: stringProp("High-water cursor from the previous artifact_await response. Omit on the first call."),
       timeoutMs: numberProp("Optional server long-hold budget in ms (default ~25000)."),
@@ -136,22 +132,18 @@ export const ARTIFACT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
   ),
   tool(
     "artifact_dismiss",
-    "Hide the ai-or-die Artifact panel UI while keeping the review alive (queued feedback preserved, channel open, re-openable). Only works inside an ai-or-die tab-backed Claude session.",
+    "Hides the ai-or-die Artifact panel UI while keeping the current review alive. The tool takes no inputs and returns a minimal success signal plus next-step guidance for reopening or awaiting later feedback. Use it when the panel should get out of the way but queued feedback should remain preserved, the channel should stay open, and the review should be re-openable. Do not use it when the review loop is finished; use artifact_end to close the review instead. Only works inside an ai-or-die tab-backed Claude session.",
     objectSchema({}, []),
     async (_args, signal) => {
       const env = readArtifactEnv()
       if (!env) return missingEnvResult()
       const response = await clientFromEnv(env).dismiss(signal)
-      return ok({
-        ...response,
-        ok: true,
-        next_step: "The panel is hidden but the review is still live. Re-open the artifact or call artifact_await when ready.",
-      })
+      return ok(formatDismissSuccess(response))
     },
   ),
   tool(
     "artifact_reply",
-    "Send the agent's reply back to the ai-or-die Artifact review panel after applying or responding to human feedback. Only works inside an ai-or-die tab-backed Claude session.",
+    "Sends the agent's reply back to the ai-or-die Artifact review panel after applying or responding to human feedback. The caller provides the reply text, and the tool returns a minimal success signal plus next-step guidance for either continuing the review loop or moving on. Use it to acknowledge what changed, answer a reviewer question, or summarize how feedback was handled after artifact_await returns events. Do not use it to replace panel content, wait for more feedback, hide the UI, or close the review. Only works inside an ai-or-die tab-backed Claude session.",
     objectSchema({
       text: stringProp("Agent reply text to deliver to the human Artifact review panel."),
     }, ["text"]),
@@ -160,31 +152,23 @@ export const ARTIFACT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
       if (!env) return missingEnvResult()
       const text = requiredString(args, "text")
       const response = await clientFromEnv(env).agentReply(text, signal)
-      return ok({
-        ...response,
-        ok: true,
-        next_step: "Wait for further human review, or continue if the review loop is complete.",
-      })
+      return ok(formatReplySuccess(response))
     },
   ),
   tool(
     "artifact_end",
-    "End/close the ai-or-die Artifact review panel when the review loop is complete. Only works inside an ai-or-die tab-backed Claude session.",
+    "Ends and closes the ai-or-die Artifact review panel when the review loop is complete. The tool takes no inputs and returns a minimal success signal plus terminal next-step guidance. Use it after the human review is finished and no further feedback should arrive. Do not use it for a temporary hide or pause; use artifact_dismiss when the review should stay live. Only works inside an ai-or-die tab-backed Claude session.",
     objectSchema({}, []),
     async (_args, signal) => {
       const env = readArtifactEnv()
       if (!env) return missingEnvResult()
       const response = await clientFromEnv(env).end(signal)
-      return ok({
-        ...response,
-        ok: true,
-        next_step: "Artifact review loop ended.",
-      })
+      return ok(formatEndSuccess(response))
     },
   ),
   tool(
     "artifact_poll",
-    "FROZEN legacy alias for artifact_await (old payload, human comments only, no structured actions). New agents should call artifact_await instead. Only works inside an ai-or-die tab-backed Claude session.",
+    "Provides the frozen legacy polling path for Artifact review feedback. The caller may provide timeoutMs as an advisory per-call budget, and the tool returns the old comments-only payload with status, prompts, and next-step guidance rather than typed action events or a cursor. Use it only for compatibility with older clients or flows that still require the old payload shape. New callers should use artifact_await instead because it returns typed comments and structured action-button or checkbox events. Only works inside an ai-or-die tab-backed Claude session.",
     objectSchema({
       timeoutMs: numberProp("Optional per-call budget hint in ms (advisory)."),
     }, []),
@@ -292,6 +276,55 @@ function formatPollResponse(response: ArtifactPollResponse): Record<string, unkn
     layout_warnings: response.layout_warnings,
     dom_snapshot: response.dom_snapshot,
     next_step: response.next_step ?? defaultPollNextStep(response.status),
+  })
+}
+
+function formatUpdateSuccess(response: ArtifactUpdateResponse): Record<string, unknown> {
+  return definedObject({
+    ok: true,
+    viewUrl: stringField(response, "viewUrl"),
+    next_step: "The panel now shows the updated content. Call artifact_await for further feedback.",
+  })
+}
+
+function formatRefreshSuccess(response: ArtifactSimpleResponse): Record<string, unknown> {
+  return definedObject({
+    ok: true,
+    viewUrl: stringField(response, "viewUrl"),
+    panelUrl: stringField(response, "panelUrl"),
+    status: stringField(response, "status"),
+    visibility: stringField(response, "visibility"),
+    next_step: "The panel reloaded the artifact. Call artifact_await for feedback.",
+  })
+}
+
+function formatDismissSuccess(response: ArtifactSimpleResponse): Record<string, unknown> {
+  return definedObject({
+    ok: true,
+    viewUrl: stringField(response, "viewUrl"),
+    panelUrl: stringField(response, "panelUrl"),
+    status: stringField(response, "status"),
+    visibility: stringField(response, "visibility"),
+    next_step: "The panel is hidden but the review is still live. Re-open the artifact or call artifact_await when ready.",
+  })
+}
+
+function formatReplySuccess(response: ArtifactAgentReplyResponse): Record<string, unknown> {
+  return definedObject({
+    ok: true,
+    reply: response.reply,
+    delivered: booleanField(response, "delivered"),
+    confirmed: booleanField(response, "confirmed"),
+    status: stringField(response, "status"),
+    next_step: "Wait for further human review, or continue if the review loop is complete.",
+  })
+}
+
+function formatEndSuccess(response: ArtifactEndResponse): Record<string, unknown> {
+  return definedObject({
+    ok: true,
+    status: response.status,
+    next_step: "Artifact review loop ended.",
   })
 }
 
@@ -459,6 +492,16 @@ function definedObject(input: Record<string, unknown>): Record<string, unknown> 
     if (value !== undefined) result[key] = value
   }
   return result
+}
+
+function stringField(input: Record<string, unknown>, key: string): string | undefined {
+  const value = input[key]
+  return typeof value === "string" ? value : undefined
+}
+
+function booleanField(input: Record<string, unknown>, key: string): boolean | undefined {
+  const value = input[key]
+  return typeof value === "boolean" ? value : undefined
 }
 
 function objectSchema(properties: Record<string, unknown>, required: Array<string>): Record<string, unknown> {

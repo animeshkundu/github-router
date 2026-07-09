@@ -268,6 +268,18 @@ describe("dispatcher bodies", () => {
     expect(p).toContain("worktree") // implement/test pass worktree through
     expect(dispatcherPrompt("explore", KEY)).not.toContain("worktree")
   })
+  test("prompt names the correct required brief field for each worker tool", () => {
+    const browse = dispatcherPrompt("browse", KEY)
+    expect(browse).toContain("`task`: the lead's browse task, copied verbatim")
+    expect(browse).not.toContain("`prompt`:")
+    expect(browse).toContain("`sessionId`")
+
+    for (const mode of ALL_WORKER_DISPATCH_MODES.filter((m) => m !== "browse")) {
+      const p = dispatcherPrompt(mode, KEY)
+      expect(p).toContain("`prompt`: the lead's worker brief, copied verbatim")
+      expect(p).not.toContain("`task`:")
+    }
+  })
   test("description uses the auto-delegation idiom and states non-blocking", () => {
     const d = dispatcherDescription("review")
     expect(d).toContain("Use proactively")

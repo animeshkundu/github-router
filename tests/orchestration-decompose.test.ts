@@ -17,14 +17,14 @@ const validIR = (rawAskHash = "r"): WorkflowIR => ({
   maxDepth: 1,
   nodes: [
     { id: "baseline", role: "baseline", inputs: [], gate: { kind: "none" }, onFail: "baseline" },
-    { id: "impl", role: "implement", producerLab: "openai", inputs: [], gate: { kind: "executable", gateId: "tests" }, onFail: "loop" },
+    { id: "impl", role: "implement", producerLab: "openai", inputs: [], gate: { kind: "executable", gateId: "typecheck-test" }, onFail: "loop" },
     { id: "select", role: "selector", inputs: ["baseline", "impl"], gate: { kind: "none" }, onFail: "baseline", judgesOnRawAsk: true },
   ],
 })
 const invalidIR = (): unknown => ({ ...validIR(), nodes: validIR().nodes.filter((n) => n.role !== "baseline") })
 
 function mkDeps(drafts: unknown[], concerns?: string[][]) {
-  const draftCalls: Array<{ ask: string; feedback?: string[] }> = []
+  const draftCalls: Array<{ ask: string; context?: string; feedback?: string[] }> = []
   let critiqueCount = 0
   const deps: DecomposeDeps = {
     async draftIR(input) {
@@ -57,6 +57,14 @@ describe("decomposeWorkflow", () => {
     if (r.ok) expect(r.rounds).toBe(2)
     // The second draft call must have received the prior violations as feedback.
     expect(draftCalls[1]?.feedback?.some((f) => f.includes("NO_BASELINE"))).toBe(true)
+  })
+
+  test("context is threaded into initial and feedback draft calls", async () => {
+    const { deps, draftCalls } = mkDeps([invalidIR(), validIR()])
+    const r = await decomposeWorkflow("build X", deps, { context: "repo uses Bun" })
+    expect(r.ok).toBe(true)
+    expect(draftCalls[0]?.context).toBe("repo uses Bun")
+    expect(draftCalls[1]?.context).toBe("repo uses Bun")
   })
 
   test("never converges → not ok, returns the last violations", async () => {

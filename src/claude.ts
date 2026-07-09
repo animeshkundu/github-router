@@ -78,9 +78,12 @@ import {
 } from "./lib/port"
 import {
   agentToolsEnabled,
+  artifactToolsEnabled,
   browseAgentEnabled,
+  browserCompoundToolsEnabled,
   browserToolsEnabled,
   fleetToolsEnabled,
+  geminiAvailable,
   implementerSubagentModel,
   standInToolEnabled,
   workerToolsEnabled,
@@ -543,9 +546,8 @@ export const claude = defineCommand({
           requested: requestedCli,
           codexInfo: requestedCli ? getCodexVersion() : null,
         })
-        const geminiAvailable =
-          state.models?.data.some((m) => /^gemini-3\..*pro/i.test(m.id)) ?? false
-        if (!geminiAvailable) {
+        const geminiModelsAvailable = geminiAvailable()
+        if (!geminiModelsAvailable) {
           consola.info(
             "gemini-3.1-pro-preview not found in your Copilot model catalog; gemini-critic persona will not be registered.",
           )
@@ -571,7 +573,7 @@ export const claude = defineCommand({
 
         const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
           codexCli: backend === "cli",
-          geminiAvailable,
+          geminiAvailable: geminiModelsAvailable,
           groupKeys,
           workerToolsAvailable: workerToolsEnabled(),
           browseAvailable: browseAgentEnabled(),
@@ -607,7 +609,7 @@ export const claude = defineCommand({
         // silent precedence).
         const injected = await injectPeerMcpIntoMirror(serverUrl, {
           codexCli: backend === "cli",
-          geminiAvailable,
+          geminiAvailable: geminiModelsAvailable,
           groupKeys,
           nonce: runtime.nonce,
         })
@@ -804,11 +806,11 @@ export const claude = defineCommand({
         // to open plans there by default. Skill is written here (not in
         // INJECTED_SKILLS) so it only appears inside a tab; the CLAUDE.md
         // directive reaches descendants. Both best-effort.
-        if ((process.env.AIORDIE_SESSION_ID ?? "").trim().length > 0) {
+        if (artifactToolsEnabled()) {
           await writeInjectedSkill(ARTIFACT_REVIEW_SKILL.name, ARTIFACT_REVIEW_SKILL.md)
             .catch(() => ({ written: false }))
           try {
-            await prependArtifactPanelDirectiveToMirroredClaudeMd()
+            await prependArtifactPanelDirectiveToMirroredClaudeMd(groupKeys.peers)
           } catch (err) {
             consola.warn(`Artifact-panel directive prepend failed: ${String(err)}`)
           }
@@ -1018,11 +1020,13 @@ export const claude = defineCommand({
         // `GH_ROUTER_PEER_AWARENESS=0` shell exports are silent no-ops.
         const peerSnippet = buildPeerAwarenessSnippet({
           codexCli: backend === "cli",
-          geminiAvailable,
+          geminiAvailable: geminiModelsAvailable,
           workerToolsAvailable: workerToolsEnabled(),
           standInAvailable: standInToolEnabled(),
-          browseAvailable: state.browseEnabled,
+          browseAvailable: browserToolsEnabled(),
+          compoundBrowseAvailable: browserCompoundToolsEnabled(),
           powerBrowseAvailable: state.powerBrowseEnabled,
+          fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
           groupKeys,
         })

@@ -225,6 +225,13 @@ export function dispatcherDescription(mode: WorkerDispatchMode): string {
  *  relay verbatim, do nothing else. */
 export function dispatcherPrompt(mode: WorkerDispatchMode, workersKey: string): string {
   const tool = workerToolName(workersKey, mode)
+  const briefField = mode === "browse" ? "task" : "prompt"
+  const briefDescription = mode === "browse" ? "the lead's browse task, copied verbatim" : "the lead's worker brief, copied verbatim"
+  const modeSpecificPassThrough = mode === "implement" || mode === "test"
+    ? "\n  - `worktree` (optional): pass `true` if the lead asked for isolated-worktree execution"
+    : mode === "browse"
+      ? "\n  - `sessionId` (optional): pass through if the lead specified one"
+      : ""
   return [
     `# Subagent: ${dispatcherAgentName(mode)}`,
     "",
@@ -234,11 +241,11 @@ export function dispatcherPrompt(mode: WorkerDispatchMode, workersKey: string): 
     "## Your only job",
     "",
     `Call the \`${tool}\` tool EXACTLY ONCE, passing through the fields from the lead's brief:`,
-    "  - `prompt`: the lead's worker brief, copied verbatim",
+    `  - \`${briefField}\`: ${briefDescription}`,
     "  - `workspace` (optional): absolute path, if the lead specified one",
     "  - `model` / `thinking` (optional): only if the lead specified them",
     "  - `maxWallClockMs` (optional): per-call wall-clock budget in ms, if the lead specified one"
-      + (mode === "implement" || mode === "test" ? "\n  - `worktree` (optional): pass `true` if the lead asked for isolated-worktree execution" : ""),
+      + modeSpecificPassThrough,
     "",
     "When the tool returns, output its result VERBATIM as your final message. That final",
     "message is what the lead receives in the completion notification — it IS the result.",

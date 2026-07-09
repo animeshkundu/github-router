@@ -19,6 +19,7 @@
  * selector must fail-to-baseline, and an optional sealed-gate allowlist.
  */
 
+import { sealedGateIds } from "./gate-registry"
 import { MAX_RECURSION_DEPTH, type WorkflowIR, type WorkflowNode } from "./ir"
 
 export interface IRViolation {
@@ -36,10 +37,11 @@ export interface IRVerifyResult {
 
 export interface VerifyOpts {
   /**
-   * The kernel's allowlist of sealed executable gate ids. When provided, every
-   * `executable` gate's `gateId` MUST be in it (gate-immutability, invariant 5 —
-   * a non-empty string alone could smuggle an unsealed id). Omit only before the
-   * registry is available; the non-empty-string check still applies either way.
+   * The kernel's allowlist of sealed executable gate ids. Every `executable`
+   * gate's `gateId` MUST be in it (gate-immutability, invariant 5 — a non-empty
+   * string alone could smuggle an unsealed id). Omitted values default to the
+   * kernel's sealed registry; pass a set only to narrow/override in tests or when
+   * `run_workflow` constrains an IR to the selected gate.
    */
   knownGateIds?: ReadonlySet<string>
 }
@@ -52,6 +54,7 @@ const VALID_GATE_KINDS: ReadonlySet<string> = new Set(["executable", "cross_lab"
 const VALID_ON_FAIL: ReadonlySet<string> = new Set(["loop", "baseline", "escalate"])
 
 export function verifyWorkflowIR(ir: WorkflowIR, opts: VerifyOpts = {}): IRVerifyResult {
+  const knownGateIds = opts.knownGateIds ?? sealedGateIds()
   const v: IRViolation[] = []
   const push = (code: string, message: string, nodeId?: string): void => {
     v.push(nodeId === undefined ? { code, message } : { code, message, nodeId })
@@ -140,7 +143,7 @@ export function verifyWorkflowIR(ir: WorkflowIR, opts: VerifyOpts = {}): IRVerif
     if (g.kind === "executable") {
       if (typeof g.gateId !== "string" || g.gateId.length === 0) {
         push("BAD_GATE", `executable gate on node "${n.id}" must reference a sealed gateId (gate-immutability)`, n.id)
-      } else if (opts.knownGateIds && !opts.knownGateIds.has(g.gateId)) {
+      } else if (!knownGateIds.has(g.gateId)) {
         push("UNKNOWN_GATE_ID", `executable gate on node "${n.id}" references gateId "${g.gateId}" not in the kernel's sealed-gate registry`, n.id)
       }
     }

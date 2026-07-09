@@ -45,17 +45,19 @@ const ARTIFACT_MARKER_CLOSE = "<!-- /gh-router artifact-panel directive -->"
 // (buildArtifactOpenHookCommand in claude.ts) that auto-opens a finalized plan.
 // A Stop / UserPromptSubmit hook is deliberately NOT added: it would either
 // mis-fire on ordinary turns or merely duplicate this soft steer.
-const ARTIFACT_PANEL_DIRECTIVE =
-  "## Review in the artifact panel (HTML by default)\n\n"
-  + "You are running inside an ai-or-die tab, so the `mcp__peers__artifact_*` tools drive a live human-review panel. "
-  + "Default to an HTML artifact for anything the user should review before you proceed, not just plans but also design proposals, comparisons / trade-offs, decisions that need their input, diagrams, tables, code diffs, and reports. "
-  + "Author a self-contained `.html` (inline CSS, no external deps, readable typography) and open it with `mcp__peers__artifact_open` (pass `mode:\"interactive\"` if it carries `data-aod-*` action controls); tell the user to review, then drain their feedback with `mcp__peers__artifact_await` (pass back the returned `cursor` each call), revise, `mcp__peers__artifact_reply`, and `mcp__peers__artifact_end` when done. "
-  + "`artifact_await` returns typed events: `comment` (free-text anchored by selector/text/sourceLine) and `action` (the human clicked a control you emitted). Use `mcp__peers__artifact_update`/`artifact_refresh` to change the shown content and `mcp__peers__artifact_dismiss` to hide the panel while keeping the review alive. `mcp__peers__artifact_poll` is a frozen legacy alias (comments only). "
-  + "Plan-mode plans are auto-rendered to HTML and auto-opened for you; raw markdown is only a fallback. Skip the panel only for trivial one-line answers.\n\n"
-  + "Make the HTML good: match the subject project's design system (its Tailwind / theme / tokens) when the artifact represents a specific app, otherwise clean readable defaults. "
-  + "Per-type cheatsheet. plan: goal, current state, proposed approach, risks / open questions. comparison: options as columns with trade-off rows and a recommendation. table: scannable rows with a sticky header. diagram: boxes + arrows (SVG/CSS or Mermaid). code / diff: `<pre>` with before/after. "
-  + "To let the user act (not just comment), emit declarative controls (no JS): `data-aod-action` (verb) + `data-aod-id` (stable) [+ `data-aod-value`] — a choose-one option fires on click, a multi-select is checkboxes sharing `data-aod-group` plus a submit button with that group. "
-  + "The `gh-artifact-review` skill carries the fuller playbook."
+function ARTIFACT_PANEL_DIRECTIVE(peersKey = "peers"): string {
+  const toolPrefix = `mcp__${peersKey}__artifact_`
+  return "## Review in the artifact panel (HTML by default)\n\n"
+    + `You are running inside an ai-or-die tab, so the \`${toolPrefix}*\` tools drive a live human-review panel. `
+    + "Default to an HTML artifact for anything the user should review before you proceed, not just plans but also design proposals, comparisons / trade-offs, decisions that need their input, diagrams, tables, code diffs, and reports. "
+    + `Author a self-contained \`.html\` (inline CSS, no external deps, readable typography) and open it with \`${toolPrefix}open\` (pass \`mode:"interactive"\` if it carries \`data-aod-*\` action controls); tell the user to review, then drain their feedback with \`${toolPrefix}await\` (pass back the returned \`cursor\` each call), revise, \`${toolPrefix}reply\`, and \`${toolPrefix}end\` when done. `
+    + `\`artifact_await\` returns typed events: \`comment\` (free-text anchored by selector/text/sourceLine) and \`action\` (the human clicked a control you emitted). Use \`${toolPrefix}update\`/\`${toolPrefix}refresh\` to change the shown content and \`${toolPrefix}dismiss\` to hide the panel while keeping the review alive. \`${toolPrefix}poll\` is a frozen legacy alias (comments only). `
+    + "Plan-mode plans are auto-rendered to HTML and auto-opened for you; raw markdown is only a fallback. Skip the panel only for trivial one-line answers.\n\n"
+    + "Make the HTML good: match the subject project's design system (its Tailwind / theme / tokens) when the artifact represents a specific app, otherwise clean readable defaults. "
+    + "Per-type cheatsheet. plan: goal, current state, proposed approach, risks / open questions. comparison: options as columns with trade-off rows and a recommendation. table: scannable rows with a sticky header. diagram: boxes + arrows (SVG/CSS or Mermaid). code / diff: `<pre>` with before/after. "
+    + "To let the user act (not just comment), emit declarative controls (no JS): `data-aod-action` (verb) + `data-aod-id` (stable) [+ `data-aod-value`] — a choose-one option fires on click, a multi-select is checkboxes sharing `data-aod-group` plus a submit button with that group. "
+    + "The `gh-artifact-review` skill carries the fuller playbook."
+}
 
 // Back-compat aliases used by existing tests. The peer block's
 // markers remain the "default" pair surfaced through __testExports.
@@ -729,10 +731,10 @@ export async function appendToolbeltAwarenessToMirroredClaudeMd(
  * marker fence; best-effort like the style/peer blocks.
  */
 export async function prependArtifactPanelDirectiveToMirroredClaudeMd(
-  directive: string = ARTIFACT_PANEL_DIRECTIVE,
+  peersKey = "peers",
 ): Promise<void> {
   await injectMarkerBlock({
-    snippet: directive,
+    snippet: ARTIFACT_PANEL_DIRECTIVE(peersKey),
     markerOpen: ARTIFACT_MARKER_OPEN,
     markerClose: ARTIFACT_MARKER_CLOSE,
     position: "top",

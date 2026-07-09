@@ -301,6 +301,7 @@ describe("buildPeerAwarenessSnippet", () => {
     workerToolsAvailable: false,
     standInAvailable: false,
     browseAvailable: false,
+    compoundBrowseAvailable: false,
   } as const
   // Maximal: all capabilities on — produces the largest snippet.
   const MAXIMAL = {
@@ -309,7 +310,9 @@ describe("buildPeerAwarenessSnippet", () => {
     workerToolsAvailable: true,
     standInAvailable: true,
     browseAvailable: true,
+    compoundBrowseAvailable: true,
     powerBrowseAvailable: true,
+    fleetAvailable: true,
     agentToolsAvailable: true,
   } as const
 
@@ -433,54 +436,84 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(on).toContain("worktree: true")
   })
 
-  test("conditionally mentions the browser tools when browseAvailable is on", () => {
+  test("gates browser lead and compound surfaces independently", () => {
     const off = buildPeerAwarenessSnippet({
       ...MINIMAL,
       browseAvailable: false,
+      compoundBrowseAvailable: false,
     })
+    expect(off).not.toContain("__navigate")
     expect(off).not.toContain("__act")
     expect(off).not.toContain("__observe")
     expect(off).not.toContain("__extract")
+    expect(off).not.toContain("__find")
     expect(off).not.toContain("mcp__browser__")
 
-    const on = buildPeerAwarenessSnippet({
+    const leadOnly = buildPeerAwarenessSnippet({
       ...MINIMAL,
       browseAvailable: true,
+      compoundBrowseAvailable: false,
     })
-    // Browser tools are namespaced under the `browser` server; the lead
-    // surface is described via the bare action suffixes (act / observe /
-    // extract / navigate / open_tab / screenshot) under the
-    // `mcp__browser__*` prefix. Power-tier tools (mouse / eval_js / find)
-    // are NOT mentioned in default --browse mode.
-    expect(on).toContain("mcp__browser__*")
-    expect(on).toContain("__act")
-    expect(on).toContain("__observe")
-    expect(on).toContain("__extract")
-    // Power tools NOT mentioned in default --browse mode.
-    expect(on).not.toContain("__find")
-    expect(on).not.toContain("__mouse")
-    expect(on).not.toContain("__eval_js")
+    expect(leadOnly).toContain("mcp__browser__*")
+    expect(leadOnly).toContain("__navigate")
+    expect(leadOnly).toContain("__open_tab")
+    expect(leadOnly).toContain("__screenshot")
+    expect(leadOnly).not.toContain("__act")
+    expect(leadOnly).not.toContain("__observe")
+    expect(leadOnly).not.toContain("__extract")
+    expect(leadOnly).not.toContain("__find")
+
+    const compound = buildPeerAwarenessSnippet({
+      ...MINIMAL,
+      browseAvailable: true,
+      compoundBrowseAvailable: true,
+    })
+    expect(compound).toContain("mcp__browser__act")
+    expect(compound).toContain("__observe")
+    expect(compound).toContain("__extract")
+    expect(compound).toContain("__find")
   })
 
-  test("mentions power tools when powerBrowseAvailable is on", () => {
+  test("mentions all power tools when powerBrowseAvailable is on", () => {
     const off = buildPeerAwarenessSnippet({
       ...MINIMAL,
       browseAvailable: true,
+      compoundBrowseAvailable: false,
       powerBrowseAvailable: false,
     })
-    expect(off).not.toContain("Power mode")
+    expect(off).not.toContain("Power browse surface")
     expect(off).not.toContain("__mouse")
     expect(off).not.toContain("__eval_js")
 
     const on = buildPeerAwarenessSnippet({
       ...MINIMAL,
       browseAvailable: true,
+      compoundBrowseAvailable: true,
       powerBrowseAvailable: true,
     })
-    expect(on).toContain("Power mode")
+    expect(on).toContain("Power browse surface")
     expect(on).toContain("mcp__browser__mouse")
-    expect(on).toContain("__eval_js")
-    expect(on).toContain("__find")
+    for (const tool of ["mouse", "drag", "type", "keyboard", "scroll", "eval_js", "read_page", "diagnostics", "list_tabs", "close_tab", "wait", "download"]) {
+      expect(on).toContain(`__${tool}`)
+    }
+  })
+
+  test("mentions fleet tools only when fleetAvailable is on", () => {
+    const off = buildPeerAwarenessSnippet({
+      ...MINIMAL,
+      fleetAvailable: false,
+    })
+    expect(off).not.toContain("mcp__fleet__")
+    expect(off).not.toContain("REMOTE fleet instance")
+
+    const on = buildPeerAwarenessSnippet({
+      ...MINIMAL,
+      fleetAvailable: true,
+    })
+    expect(on).toContain("mcp__fleet__*")
+    expect(on).toContain("REMOTE fleet instance")
+    expect(on).toContain("read_file")
+    expect(on).toContain("git_show")
   })
 
   test("omits gemini_critic when gemini is not in the catalog", () => {
@@ -515,7 +548,7 @@ describe("buildPeerAwarenessSnippet", () => {
 
   test("snippet is non-prescriptive (describes, doesn't dictate or hedge)", () => {
     const snippet = buildPeerAwarenessSnippet(MAXIMAL)
-    // Per Anthropic's Opus 4.8 guidance: tool descriptions carry the
+    // Per the Opus 4.8 guidance: tool descriptions carry the
     // routing signal; the awareness snippet should describe
     // capabilities and let the model decide. Pin "at your discretion"
     // as the non-prescriptive phrasing.
