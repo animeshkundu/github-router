@@ -5,7 +5,6 @@ import {
   OPERATOR_DENIED_MCP_PREFIXES,
   OPERATOR_DENIED_TOOLS,
   OPERATOR_KEPT_TOOLS,
-  OPERATOR_MODE_BANNER,
   assertShapingInstalled,
   operatorPreToolUse,
   shouldDenyOperatorTool,
@@ -16,12 +15,27 @@ describe("operator shaping — worker/orchestrate subagent-only boundary", () =>
     expect([...OPERATOR_DENIED_TOOLS]).toEqual([])
   })
 
-  test("the denied prefixes keep worker/orchestrate MCP tools subagent-only", () => {
+  test("the denied prefixes keep main-operator worker/orchestrate MCP calls subagent-only", () => {
     expect([...OPERATOR_DENIED_MCP_PREFIXES]).toEqual(["mcp__workers__", "mcp__orchestrate__"])
     expect(shouldDenyOperatorTool("mcp__workers__implement", true)).toBe(true)
     expect(shouldDenyOperatorTool("mcp__workers__review", true)).toBe(true)
     expect(shouldDenyOperatorTool("mcp__orchestrate__run_workflow", true)).toBe(true)
     expect(shouldDenyOperatorTool("mcp__orchestrate__decompose", true)).toBe(true)
+  })
+
+  test("matching worker dispatcher subagents may call their own worker tools", () => {
+    expect(operatorPreToolUse("mcp__workers__explore", true, { agent_type: "worker-explore" }).block).toBe(false)
+    expect(operatorPreToolUse("mcp__workers__implement", true, { agent_type: "worker-implement" }).block).toBe(false)
+    expect(operatorPreToolUse("mcp__workers__review", true, { agent_type: "worker-review" }).block).toBe(false)
+    expect(operatorPreToolUse("mcp__workers__plan", true, { agent_type: "worker-plan" }).block).toBe(false)
+    expect(operatorPreToolUse("mcp__workers__test", true, { agent_type: "worker-test" }).block).toBe(false)
+    expect(operatorPreToolUse("mcp__workers__browse", true, { agent_type: "worker-browse" }).block).toBe(false)
+  })
+
+  test("non-dispatcher callers remain blocked from worker MCP tools", () => {
+    expect(operatorPreToolUse("mcp__workers__review", true).block).toBe(true)
+    expect(operatorPreToolUse("mcp__workers__review", true, { agent_type: "worker-plan" }).block).toBe(true)
+    expect(operatorPreToolUse("mcp__workers__review", true, { agent_type: "general-purpose" }).block).toBe(true)
   })
 
   test("non-operator sessions are unaffected", () => {
@@ -57,16 +71,6 @@ describe("operator shaping — worker/orchestrate subagent-only boundary", () =>
     expect(OPERATOR_KEPT_TOOLS).toContain("NotebookEdit")
     expect(OPERATOR_KEPT_TOOLS).toContain("Bash")
     expect(OPERATOR_KEPT_TOOLS.some((tool) => tool.startsWith("mcp__first-mate__"))).toBe(true)
-  })
-
-  test("mode banner steers without over-claiming broad tool blocks", () => {
-    expect(OPERATOR_MODE_BANNER).toContain("cloud-agent operator")
-    expect(OPERATOR_MODE_BANNER).toContain("Delegate product implementation")
-    expect(OPERATOR_MODE_BANNER).toContain("Local tools, including file writes and Bash, remain available")
-    expect(OPERATOR_MODE_BANNER).toContain("worker/orchestrate MCP calls are subagent-only")
-    expect(OPERATOR_MODE_BANNER).not.toMatch(/Bash.*disabled|disabled.*Bash/i)
-    expect(OPERATOR_MODE_BANNER).not.toMatch(/file writes.*blocked|blocked.*file writes/i)
-    expect(OPERATOR_MODE_BANNER).not.toContain("non-read-only")
   })
 
   test("cloud-agent scope note documents repo and merge boundaries", () => {

@@ -448,10 +448,24 @@ export async function decideStopHook(input: {
   // `plan_mode` payload field. When active, the gate-weakening scan runs over a
   // diff with plans/ + memory/ file sections stripped; the FULL diff is still
   // returned for the advisory review, and the executable gate (which ignores the
-  // diff) is unaffected.
+  // diff) is unaffected. A truly empty full diff short-circuits before checks,
+  // which subsumes plan-only turns with no code changes; the env remains an
+  // explicit override for non-empty plan/memory scratch diffs.
   const planMode = input.planMode === true || payload.plan_mode === true
   const scanDiff = (diff: string): string => (planMode ? stripPlanMemoryDiffHunks(diff) : diff)
-  const runGate = async (): Promise<{ failedChecks: string[]; weakeningPatterns: string[]; diff: string } | null> => {
+  type GateRunResult =
+    | { kind: "evaluated"; failedChecks: string[]; weakeningPatterns: string[]; diff: string }
+    | { kind: "no-diff"; diff: string }
+  const capturedDiff = async (workdir: string): Promise<{ diff: string; captured: boolean }> => {
+    try {
+      return { diff: await input.captureDiff(workdir), captured: true }
+    } catch {
+      // A failed diff capture is NOT an empty diff. Preserve the old safe behavior:
+      // run the executable checks with an empty weakening scan rather than skipping.
+      return { diff: "", captured: false }
+    }
+  }
+  const runGate = async (): Promise<GateRunResult | null> => {
     if (input.resolveChecks) {
       const resolved = await input.resolveChecks(cwd).catch(() => null)
       // No gate resolvable now (markers/tools vanished, empty set) → fail OPEN.
@@ -459,17 +473,21 @@ export async function decideStopHook(input: {
       resolvedKey = resolved.descriptorKey
       dynamicBaselineKey = resolved.baselineKey
       const workdir = resolved.workdir || cwd
-      const diff = await input.captureDiff(workdir).catch(() => "")
-      const result = await evaluateStopGate({ checks: resolved.checks, cwd: workdir, exec: input.exec, diff: scanDiff(diff) })
+      const { diff, captured } = await capturedDiff(workdir)
+      if (captured && diff.length === 0) return { kind: "no-diff", diff }
+      const result = await evaluateStopGate({ checks: resolved.checks, cwd: workdir, exec: input.exec, diff: captured ? scanDiff(diff) : "" })
       return {
+        kind: "evaluated",
         failedChecks: [...result.failedChecks],
         weakeningPatterns: [...new Set(result.weakening.map((w) => w.pattern))],
         diff,
       }
     }
-    const diff = await input.captureDiff(cwd).catch(() => "")
-    const result = await runStopGateForLaunch({ workspace: cwd, gateId: input.gateId, exec: input.exec, diff: scanDiff(diff) })
+    const { diff, captured } = await capturedDiff(cwd)
+    if (captured && diff.length === 0) return { kind: "no-diff", diff }
+    const result = await runStopGateForLaunch({ workspace: cwd, gateId: input.gateId, exec: input.exec, diff: captured ? scanDiff(diff) : "" })
     return {
+      kind: "evaluated",
       failedChecks: [...result.failedChecks],
       weakeningPatterns: [...new Set(result.weakening.map((w) => w.pattern))],
       diff,
@@ -477,9 +495,7 @@ export async function decideStopHook(input: {
   }
   const timeoutMs = input.timeoutMs ?? 300_000
   let timer: ReturnType<typeof setTimeout> | undefined
-  const raced = await Promise.race<
-    { failedChecks: string[]; weakeningPatterns: string[]; diff: string } | null | "timeout"
-  >([
+  const raced = await Promise.race<GateRunResult | null | "timeout">([
     runGate(),
     new Promise<"timeout">((resolve) => {
       timer = setTimeout(() => resolve("timeout"), timeoutMs)
@@ -488,6 +504,7 @@ export async function decideStopHook(input: {
   if (timer) clearTimeout(timer)
   if (raced === "timeout") return { exitCode: 0 } // gate did not complete -> allow; never a claimed pass.
   if (raced === null) return { exitCode: 0 } // no gate resolvable now -> allow (fail open).
+  if (raced.kind === "no-diff") return { exitCode: 0 } // no working-tree diff -> no checks to run.
 
   // Baseline isolation, keyed by (session, workdir, descriptor) so a mid-session
   // repo/gate change can't mask or invent regressions (codex review #7). The

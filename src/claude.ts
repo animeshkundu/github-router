@@ -28,6 +28,7 @@ import {
   stopGateId,
   stopGateDisabled,
 } from "./lib/orchestration/stop-gate-hook"
+import { buildPlanReviewHookCommand, planReviewEnabled } from "./lib/orchestration/plan-review-hook"
 import {
   fileBaselineStore,
   repoFingerprint,
@@ -48,6 +49,7 @@ import {
   writeDiscoveredGate,
 } from "./lib/orchestration/gate-discovery"
 import { liveExec } from "./lib/orchestration/live-exec"
+import { hookMcpRuntimeFromEnv } from "./lib/orchestration/hook-mcp-client"
 import { buildPromptSubmitHookCommand } from "./lib/orchestration/prompt-submit-hook"
 import {
   FIRST_MATE_GUARD_MATCHER,
@@ -65,8 +67,9 @@ import { parseBoolEnv } from "./lib/exec"
 import nodePath from "node:path"
 import { tmpdir } from "node:os"
 import { randomBytes } from "node:crypto"
-import { buildPeerAwarenessSnippet, type McpGroup } from "./lib/peer-mcp-personas"
-import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, OPERATING_DEFAULTS_DIRECTIVE, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
+import { buildPeerAwarenessSnippet, buildPeerAwarenessSummary, type McpGroup } from "./lib/peer-mcp-personas"
+import { injectAttributionSuppressionIntoSettingsFile } from "./lib/attribution-settings"
+import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, OPERATING_DEFAULTS_DIGEST, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { provisionAndIndexColbert } from "./lib/colbert"
@@ -78,9 +81,12 @@ import {
 } from "./lib/port"
 import {
   agentToolsEnabled,
+  artifactToolsEnabled,
   browseAgentEnabled,
+  browserCompoundToolsEnabled,
   browserToolsEnabled,
   fleetToolsEnabled,
+  geminiAvailable,
   implementerSubagentModel,
   standInToolEnabled,
   workerToolsEnabled,
@@ -534,6 +540,7 @@ export const claude = defineCommand({
     // along in the SAME --append-system-prompt arg. Undefined when codex-mcp is
     // off (then only the operating-defaults directive is injected).
     let peerAwarenessSnippet: string | undefined
+    let peerAwarenessSummary: string | undefined
     const codexMcpEnabled = (args as Record<string, unknown>)["codex-mcp"] !== false
     if (codexMcpEnabled) {
       try {
@@ -543,9 +550,8 @@ export const claude = defineCommand({
           requested: requestedCli,
           codexInfo: requestedCli ? getCodexVersion() : null,
         })
-        const geminiAvailable =
-          state.models?.data.some((m) => /^gemini-3\..*pro/i.test(m.id)) ?? false
-        if (!geminiAvailable) {
+        const geminiModelsAvailable = geminiAvailable()
+        if (!geminiModelsAvailable) {
           consola.info(
             "gemini-3.1-pro-preview not found in your Copilot model catalog; gemini-critic persona will not be registered.",
           )
@@ -571,7 +577,7 @@ export const claude = defineCommand({
 
         const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
           codexCli: backend === "cli",
-          geminiAvailable,
+          geminiAvailable: geminiModelsAvailable,
           groupKeys,
           workerToolsAvailable: workerToolsEnabled(),
           browseAvailable: browseAgentEnabled(),
@@ -607,7 +613,7 @@ export const claude = defineCommand({
         // silent precedence).
         const injected = await injectPeerMcpIntoMirror(serverUrl, {
           codexCli: backend === "cli",
-          geminiAvailable,
+          geminiAvailable: geminiModelsAvailable,
           groupKeys,
           nonce: runtime.nonce,
         })
@@ -804,11 +810,11 @@ export const claude = defineCommand({
         // to open plans there by default. Skill is written here (not in
         // INJECTED_SKILLS) so it only appears inside a tab; the CLAUDE.md
         // directive reaches descendants. Both best-effort.
-        if ((process.env.AIORDIE_SESSION_ID ?? "").trim().length > 0) {
+        if (artifactToolsEnabled()) {
           await writeInjectedSkill(ARTIFACT_REVIEW_SKILL.name, ARTIFACT_REVIEW_SKILL.md)
             .catch(() => ({ written: false }))
           try {
-            await prependArtifactPanelDirectiveToMirroredClaudeMd()
+            await prependArtifactPanelDirectiveToMirroredClaudeMd(groupKeys.peers)
           } catch (err) {
             consola.warn(`Artifact-panel directive prepend failed: ${String(err)}`)
           }
@@ -823,6 +829,20 @@ export const claude = defineCommand({
             await injectStopHookIntoSettingsFile(settingsPath, cmd, "PostToolUse", undefined, "ExitPlanMode")
           } catch (err) {
             consola.warn(`Could not register the artifact auto-open hook: ${String(err)}`)
+          }
+        }
+
+        // Advisory plan review: a SECOND PostToolUse(ExitPlanMode) hook, separate
+        // from artifact auto-open. It is default-on when the hook MCP runtime is
+        // wired, top-level-only at runtime, and never blocks ExitPlanMode; material
+        // findings are written to the shared findings store for the next prompt.
+        if (hookMcpRuntimeFromEnv(envVars) && planReviewEnabled()) {
+          try {
+            const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+            const command = buildPlanReviewHookCommand(process.execPath, process.argv[1])
+            await injectStopHookIntoSettingsFile(settingsPath, command, "PostToolUse", undefined, "ExitPlanMode")
+          } catch (err) {
+            consola.warn(`Could not register the advisory plan-review hook: ${String(err)}`)
           }
         }
 
@@ -1018,31 +1038,43 @@ export const claude = defineCommand({
         // `GH_ROUTER_PEER_AWARENESS=0` shell exports are silent no-ops.
         const peerSnippet = buildPeerAwarenessSnippet({
           codexCli: backend === "cli",
-          geminiAvailable,
+          geminiAvailable: geminiModelsAvailable,
           workerToolsAvailable: workerToolsEnabled(),
           standInAvailable: standInToolEnabled(),
-          browseAvailable: state.browseEnabled,
+          browseAvailable: browserToolsEnabled(),
+          compoundBrowseAvailable: browserCompoundToolsEnabled(),
           powerBrowseAvailable: state.powerBrowseEnabled,
+          fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
+          implementerAvailable: implementerSubagentModel() != null,
           groupKeys,
         })
         // Capture the peer-awareness snippet; the always-on operating-defaults
         // injection after this block composes the single --append-system-prompt
-        // (operating-defaults first, then this snippet).
+        // (operating-defaults first, then this summary).
         peerAwarenessSnippet = peerSnippet
+        peerAwarenessSummary = buildPeerAwarenessSummary({
+          workerToolsAvailable: workerToolsEnabled(),
+          standInAvailable: standInToolEnabled(),
+          browseAvailable: browserToolsEnabled(),
+          fleetAvailable: fleetToolsEnabled(),
+          agentToolsAvailable: agentToolsEnabled(),
+          groupKeys,
+        })
         // Ordering invariant: this MUST run AFTER ensureClaudeConfigMirror()
         // has resolved (above in this same handler), so the snapshot of
         // the user's ~/.claude/CLAUDE.md is already in place before we
         // append our marker block. The helper's own mirror-only safety
         // guard rejects writes outside CLAUDE_CONFIG_DIR as defence in
-        // depth. Failures warn-and-continue — the main agent already has
-        // the awareness via --append-system-prompt, so this surface is
-        // descendant-reach enhancement, not a launch-blocker.
+        // depth. Failures warn-and-continue: this CLAUDE.md copy is now the
+        // primary full-inventory surface (the system prompt carries only a
+        // summary of it), so on the rare write failure the agent falls back to
+        // the tool descriptions in tools/list, not a launch-blocker.
         try {
           await appendPeerAwarenessToMirroredClaudeMd(peerSnippet)
         } catch (err) {
           consola.warn(
-            `Peer-awareness CLAUDE.md append failed (main agent still covered via --append-system-prompt): ${
+            `Peer-awareness CLAUDE.md append failed (agent keeps tool descriptions via tools/list, loses the inventory overview): ${
               err instanceof Error ? err.message : String(err)
             }`,
           )
@@ -1074,18 +1106,27 @@ export const claude = defineCommand({
     // Operating-defaults directive (orchestrator posture + hybrid excellence
     // lens): injected by DEFAULT, NOT gated on codex-mcp, so the posture always
     // reaches the agent even under --no-codex-mcp. Two surfaces:
-    //   1. --append-system-prompt (main agent, highest salience) — the single
-    //      such arg for the session; the peer-awareness snippet (MCP-dependent)
-    //      rides along after it only when it was built.
-    //   2. the mirrored CLAUDE.md TOP (descendant agents) — prepended AFTER the
-    //      style directive (when that ran) so it lands at the very top.
+    //   1. --append-system-prompt (main agent, highest salience): the single
+    //      such arg for the session carries a condensed digest, with a compact
+    //      summary of the peer-awareness inventory riding along after it.
+    //   2. the mirrored CLAUDE.md TOP (main agent and descendant agents): the
+    //      full directive is prepended after the style directive when that ran.
     // ensureClaudeConfigMirror() ran unconditionally above, so the mirror exists
     // regardless of codex-mcp; the prepend is best-effort (warn-and-continue).
+    // Peer-awareness inventory lives ONCE, in the mirrored CLAUDE.md (appended
+    // above), which the main agent and descendants both read. The system prompt
+    // carries only a compact summary, not the full ~1.1k-token snippet, so
+    // the inventory is not duplicated in the context window on every turn. The
+    // full operating-defaults directive lives in CLAUDE.md, while a condensed
+    // digest keeps those defaults at top salience in --append-system-prompt.
+    // If the CLAUDE.md append happened to fail, the agent still has every tool's
+    // own description in tools/list (the real routing signal); it just loses this
+    // higher-level overview.
     extraArgs.push(
       "--append-system-prompt",
-      peerAwarenessSnippet
-        ? `${OPERATING_DEFAULTS_DIRECTIVE}\n\n${peerAwarenessSnippet}`
-        : OPERATING_DEFAULTS_DIRECTIVE,
+      peerAwarenessSnippet && peerAwarenessSummary
+        ? `${OPERATING_DEFAULTS_DIGEST}\n\n${peerAwarenessSummary}`
+        : OPERATING_DEFAULTS_DIGEST,
     )
     try {
       await prependOperatingDefaultsToMirroredClaudeMd()
@@ -1095,6 +1136,25 @@ export const claude = defineCommand({
           err instanceof Error ? err.message : String(err)
         }`,
       )
+    }
+
+    // Deterministic backstop for the injected no-attribution style directive:
+    // write `attribution: {commit:"", pr:""}` into the mirrored settings.json so
+    // Claude Code's harness suppresses the commit/PR bylines at the source, not
+    // just via the advisory CLAUDE.md prose. Presence-guarded (an existing
+    // user `attribution`/`includeCoAuthoredBy` wins) and best-effort. Opt out
+    // with GH_ROUTER_DISABLE_NO_ATTRIBUTION=1.
+    if (process.env.GH_ROUTER_DISABLE_NO_ATTRIBUTION !== "1") {
+      try {
+        const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+        await injectAttributionSuppressionIntoSettingsFile(settingsPath)
+      } catch (err) {
+        consola.warn(
+          `No-attribution settings backstop skipped: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
     }
 
     launchChild(

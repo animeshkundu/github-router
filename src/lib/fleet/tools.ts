@@ -305,7 +305,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
   return Object.freeze([
     tool(
       "list_instances",
-      "List registered remote ai-or-die instances in the fleet registry. Tokens are never returned.",
+      "Lists registered remote ai-or-die fleet instances and probes whether each instance is currently reachable. It takes no input; the registry decides which instances exist, and credentials or tunnel tokens are not returned. It returns instances with id, label, reachable status, sessionCount and lastSeen for reachable hosts, or error and hint for unreachable hosts. It is useful as the discovery entry point before list_sessions, create_session, or other fleet tools that need an instance id. It is not for local repository search or for reading sessions; use local tools for this machine and list_sessions after choosing an instance.",
       objectSchema({}, []),
       async () => {
         const instances = await getRegistry().listInstances()
@@ -319,7 +319,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     ),
     tool(
       "list_sessions",
-      "List sessions on one fleet instance, returning globally-addressable session ids.",
+      "Lists sessions on one remote ai-or-die fleet instance and returns session ids that can be used by the other fleet session tools. The optional instance input is an id or label; when it is omitted, the registry default or sole instance is used. It returns resolvedInstance and sessions, with each sessionId globalized as instanceId:localSessionId. It is useful after list_instances to choose a remote session to inspect, message, drive, or stop. It is not a fleet-wide listing and does not read transcript output; call it per instance, and use read_session for a session's text tail.",
       objectSchema({ instance: stringProp("Instance id or label. Defaults to the registry default, or the sole instance.") }, []),
       async (args, signal) => {
         const instance = await resolve(optionalString(args, "instance"))
@@ -332,12 +332,11 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     ),
     tool(
       "read_session",
-      "Read recent text output from an addressed fleet session.",
+      "Reads recent text output from an addressed remote ai-or-die fleet session. The required sessionId must be a global id in instanceId:localSessionId form; the optional instance input is only a cross-check and must resolve to the same instance. It returns resolvedInstance, sessionId, text, truncated, source, and the session status snapshot. It is useful for inspecting the transcript tail after send_message, await_turn, or drive_task. It is not for lifecycle-only checks or live waiting; use session_status for point-in-time state and await_turn to wait for new events.",
       objectSchema({
         sessionId: stringProp("Global session id in the form instanceId:localSessionId."),
         instance: stringProp("Optional instance id/label; when supplied it must agree with sessionId."),
         lines: numberProp("Number of recent lines to read."),
-        format: stringProp("Reserved for future formatting; results are JSON text today."),
       }, ["sessionId"]),
       async (args, signal) => {
         const { instance, localId, globalId } = await resolveSession(args)
@@ -348,7 +347,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     ),
     tool(
       "session_status",
-      "Fetch lifecycle and interaction status for an addressed fleet session.",
+      "Fetches the lifecycle and interaction status for an addressed remote ai-or-die fleet session. The required sessionId must be a global id in instanceId:localSessionId form; the optional instance input is only a cross-check and must resolve to the same instance. It returns resolvedInstance, sessionId, and a status object that can include lifecycle, interactionState, canAcceptInput, blockReason, and awaiting details. It is useful before deciding whether a session can accept a message or is awaiting a prompt. It is not a transcript reader or event watcher; use read_session for output text and await_turn for turn-completion events.",
       objectSchema({
         sessionId: stringProp("Global session id in the form instanceId:localSessionId."),
         instance: stringProp("Optional instance id/label; when supplied it must agree with sessionId."),
@@ -361,7 +360,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     ),
     tool(
       "send_message",
-      "Send a message to a fleet session. By DEFAULT it first checks the session is idle / awaiting the next message and REFUSES (structured notReady, isError) rather than blind-type into a busy composer or a pending prompt — set requireIdle:false to force the legacy unconditional send, or waitForIdleMs to wait briefly for idle first. isError reflects DELIVERY: true when the message was not delivered (transport/precondition failure) OR refused as notReady. A delivered message whose confirmation did not arrive within awaitMs is NOT an error — it returns delivered:true with confirmationPending/confirmationTimedOut, because a long turn legitimately outruns awaitMs. The additive `submitted` field is true only when ai-or-die's submission sub-status proves the message reached the composer. Recommended pattern: send with awaitMs:0 for a fast delivery ack, then call await_turn (filtered to this sessionId) to observe the session's actual turn completion. The idempotencyKey makes a retried send safe (a retry never re-types the message).",
+      "Sends a free-text message to an existing remote ai-or-die fleet session. The required sessionId must be global, message is the text to deliver, requireIdle defaults to true, waitForIdleMs can wait briefly for readiness, awaitMs waits only for best-effort delivery confirmation, and idempotencyKey is usually auto-generated unless retrying the same send. It returns resolvedInstance, sessionId, delivered, confirmed, submitted when the remote proves the composer accepted the message, and confirmationPending/confirmationTimedOut when delivery succeeded but the turn outran the await window; delivered:false or notReady is reported as an error result. It is useful for sending the next free-text instruction to an idle session, especially with awaitMs:0 followed by await_turn for the actual turn boundary. It is not for answering an awaited choice prompt or sending control keys; use respond for prompts and send_keys for submit, interrupt, or literal key sequences.",
       objectSchema({
         sessionId: stringProp("Global session id in the form instanceId:localSessionId."),
         instance: stringProp("Optional instance id/label; when supplied it must agree with sessionId."),
@@ -457,7 +456,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     ),
     tool(
       "send_keys",
-      "Send key input to a fleet session. Prefer the higher-level `op`: 'submit' presses Enter and 'interrupt' sends Ctrl-C, each mapped to ai-or-die's NAMED key (never a literal control byte like \"\\r\"). Use `keys` only for literal input; `raw` is strictly for literal bytes. Provide exactly one of `op` or `keys`.",
+      "Sends key input to an existing remote ai-or-die fleet session. The required sessionId must be global; provide exactly one of op or keys, where op is a named operation (`submit` for Enter or `interrupt` for Ctrl-C) and keys is a literal key sequence; raw only applies to literal keys. It returns resolvedInstance, sessionId, delivered, duplicated when an idempotency retry was deduped, and the mapped key name when op was used. It is useful for control-key actions such as submitting a typed prompt or interrupting a busy turn without stopping the session. It is not the normal free-text path and not the prompt-answer path; use send_message for free text and respond for awaited prompts.",
       objectSchema({
         sessionId: stringProp("Global session id in the form instanceId:localSessionId."),
         instance: stringProp("Optional instance id/label; when supplied it must agree with sessionId."),
@@ -502,13 +501,14 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
           resolvedInstance: publicInstance(instance),
           sessionId: globalId,
           ...(op === undefined ? {} : { op, mappedKeys: keys }),
-          ...response,
+          delivered: response.delivered,
+          ...(response.duplicated === undefined ? {} : { duplicated: response.duplicated }),
         })
       },
     ),
     tool(
       "respond",
-      "Answer an awaited prompt in a fleet session by choice, option value, or explicit key override.",
+      "Answers an awaited prompt in an existing remote ai-or-die fleet session by selecting a choice, selecting an exact option value, or sending explicit keys. The required sessionId must be global; choose the answer mode that matches the prompt, and idempotencyKey is usually auto-generated unless retrying the same response. It returns resolvedInstance, sessionId, delivered, duplicated when an idempotency retry was deduped, and any awaitingKind or mappedKeys supplied by the remote; delivered:false is reported as an error result. It is useful only when session_status or await_turn shows the session is waiting for a prompt or choice. It is not for ordinary free-text instructions or control keys; use send_message for free text and send_keys for submit or interrupt.",
       objectSchema({
         sessionId: stringProp("Global session id in the form instanceId:localSessionId."),
         instance: stringProp("Optional instance id/label; when supplied it must agree with sessionId."),
@@ -526,23 +526,30 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
           idempotencyKey: optionalString(args, "idempotencyKey") ?? randomUUID(),
         }) as { choice?: string; optionValue?: string; keys?: string; idempotencyKey: string }
         const response = await clientFor(instance).respond(localId, input, signal)
-        return ok({ resolvedInstance: publicInstance(instance), sessionId: globalId, ...response })
+        const delivered = response.delivered !== false
+        return jsonResult({
+          resolvedInstance: publicInstance(instance),
+          sessionId: globalId,
+          ...response,
+          delivered,
+          ...(delivered ? {} : { message: "response was not delivered to the session by the upstream instance" }),
+        }, !delivered)
       },
     ),
     tool(
       "create_session",
-      "Create a new session on a specific fleet instance. The instance argument is required; no default is used.",
+      "Creates a new session on a specific remote ai-or-die fleet instance. The instance input is required and never defaults; agent is required and must be one of claude, codex, copilot, gemini, or terminal; start:true is required for the session to actually run and be driveable. It returns resolvedInstance plus the remote create response, with sessionId converted to the global instanceId:localSessionId form when creation succeeds. It is useful when the user wants a new remote session to run on a named fleet host before using drive_task, send_message, or await_turn. It is not for selecting or inspecting an existing session; use list_instances and list_sessions first when the target is unknown.",
       objectSchema({
         instance: stringProp("Required instance id or label. Create never uses the registry default."),
-        agent: stringProp("Agent/runtime to create on the instance."),
+        agent: { ...stringProp("Required agent/runtime to create on the instance. Valid values: claude, codex, copilot, gemini, terminal."), enum: ["claude", "codex", "copilot", "gemini", "terminal"] },
         name: stringProp("Optional display name for the session."),
         workingDir: stringProp("Optional working directory on the remote instance."),
         idempotencyKey: stringProp("Optional caller idempotency key; auto-generated when omitted."),
-        start: booleanProp("Whether the remote instance should start the session immediately."),
-        readyTimeoutMs: numberProp("F17: bounded ms to wait for the agent to become driveable before returning. The response carries ready/bound/blocker."),
-        permissionMode: stringProp("F10 (claude only): permission mode the launched agent starts in — one of plan | acceptEdits | default | bypassPermissions. Rejected with BAD_REQUEST if unknown or if agentArgs also sets it."),
-        agentArgs: arrayProp("F10 (claude only): extra launcher args appended after the github-router prefix. Must NOT include --permission-mode or --dangerously-skip-permissions (use permissionMode) — rejected with BAD_REQUEST."),
-        disableStopGate: booleanProp("C3 (claude only): disable the structural Stop-gate on the launched session by injecting --no-stop-gate into agentArgs, so a driven session's turn-end never hangs on a blocking Stop hook. Requires a remote github-router that understands the flag (uses the agent_args capability)."),
+        start: booleanProp("Set true to start the remote session immediately; without start:true the created session is not running or driveable."),
+        readyTimeoutMs: numberProp("Bounded milliseconds to wait for the agent to become driveable before returning. The response carries ready, bound, and blocker."),
+        permissionMode: stringProp("Claude-only permission mode for the launched agent: plan, acceptEdits, default, or bypassPermissions. Rejected with BAD_REQUEST if unknown or if agentArgs also sets it."),
+        agentArgs: arrayProp("Claude-only extra launcher args appended after the github-router prefix. Do not include --permission-mode or --dangerously-skip-permissions; use permissionMode instead."),
+        disableStopGate: booleanProp("Claude-only option to disable the structural Stop-gate on the launched session by injecting --no-stop-gate into agentArgs, so a driven session's turn-end does not hang on a blocking Stop hook. Requires a remote github-router that understands the flag."),
       }, ["instance", "agent"]),
       async (args, signal) => {
         const instance = await resolve(requiredString(args, "instance"))
@@ -586,7 +593,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     ),
     tool(
       "stop_session",
-      "Stop a fleet session.",
+      "Terminates an existing remote ai-or-die fleet session. The required sessionId must be global; instance is only a cross-check, mode is an optional remote-understood stop mode, and idempotencyKey is usually auto-generated unless retrying the same stop. It returns resolvedInstance, sessionId, stopped, and lifecycle. It is useful when the remote session should be ended and its in-flight turn should be killed. It is destructive and irreversible, with no resume companion; to merely unstick or interrupt a busy session without terminating it, use send_keys with op `interrupt`.",
       objectSchema({
         sessionId: stringProp("Global session id in the form instanceId:localSessionId."),
         instance: stringProp("Optional instance id/label; when supplied it must agree with sessionId."),
@@ -607,11 +614,11 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     ),
     tool(
       "await_turn",
-      "Long-poll session events across fleet instances. The server owns per-target opaque cursors, so callers do not pass cursor tokens. Distinct concurrent watchers over the same instance set should pass a distinct watcherId so they do not share a cursor.",
+      "Long-polls session events across remote ai-or-die fleet instances. The caller selects targets with instances, sessionIds, or neither for every registered instance; timeoutMs bounds each per-instance long poll, kinds filters event kinds, and watcherId isolates cursor state for concurrent watchers. It returns resolvedInstances, time-sorted stamped events, gaps, cursors, more, optional per-session settled classifications, and optional per-instance errors. It is useful after send_message with awaitMs:0 to observe the real turn boundary; a settled status such as turn_ended or waiting_input is the reliable completion signal, while idle flickers are not completion. It is not a transcript reader or a one-shot task driver; use read_session for text output and drive_task when sending one prompt and waiting for its report should be a single composite operation.",
       objectSchema({
         instances: arrayProp("Instance ids or labels to poll. Omit with sessionIds to target those session instances; omit both to poll every registered instance."),
         sessionIds: arrayProp("Global session ids to filter to."),
-        timeoutMs: numberProp("Long-poll timeout per instance in milliseconds."),
+        timeoutMs: numberProp(`Long-poll timeout per instance in milliseconds (default ${AWAIT_TURN_DEFAULT_TIMEOUT_MS}).`),
         kinds: arrayProp("Optional event kinds to filter to."),
         watcherId: stringProp("Optional stable id for this watcher. Use a distinct value for concurrent watchers over the same target set to keep cursors isolated."),
       }, []),
@@ -691,7 +698,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     ),
     tool(
       "drive_task",
-      "Drive one prompt on a session to completion and return the parsed operator report. Composes the reliable path: ensure the composer is idle (else return a structured busy/not-ready result), send and surface whether the message reached the composer (submitted; a delivered-but-unconfirmed send still proceeds), wait for the RELIABLE turn boundary (turn_ended / waiting_input — never the became_idle flicker), read the transcript tail, and parse the OPERATOR REPORT trailer into {state, summary, ask, artifact, raw}. A per-call REPORT_ID nonce is embedded in the trailer instruction and the parsed report is trusted ONLY when it echoes that nonce, so a stale prior-turn trailer left in the tail can never be returned as this turn's result. A reliable waiting_input outranks the model's self-reported STATE (a still-blocked session is never reported as done). If the turn does not end within timeoutMs (e.g. a blocking Stop hook that would otherwise hang ~10 min), it AUTO-RECOVERS with a Ctrl-C interrupt rather than blocking, then re-waits briefly and re-reads; a caller ABORT is distinct (settled:'aborted', state:'aborted') and never injects a Ctrl-C. Read `state` TOGETHER with `settled`/`interrupted`/`recovered`: state:'done' with settled:'timeout' + interrupted:true means the model reported done but the turn had to be interrupted to recover, so treat it as needs-verification rather than a clean completion; `submitted` is a best-effort positive signal that CAN be false even on a successful turn. Robust to a busy session (state:'busy'), a missing/stale/placeholder trailer (state falls back to the settle-derived value, reportFound:false), and a hung hook (interrupted:true, recovered:true/false). By default it appends the trailer instruction so the driven session emits a parseable report; set expectReport:false to send the prompt verbatim (a trailer left in the tail is then never trusted).",
+      "Drives one prompt on an existing remote ai-or-die fleet session to completion and returns a parsed operator report. The required sessionId must be global, prompt is the single instruction to send, timeoutMs controls when a hung turn is interrupted for recovery, and expectReport defaults to true so a nonce-guarded OPERATOR REPORT trailer is appended and parsed. It returns resolvedInstance, sessionId, state, summary, ask, artifact, raw, settled, submitted, reportFound, and recovery fields such as interrupted or recovered; state must be read together with settled and interrupted because a timeout recovery can leave work needing verification. It is useful as the composite path that performs the safe send_message plus await_turn plus read_session sequence for one already-created session. It is not a session creator, a multi-turn conversation loop, or a simple transcript read; use create_session first when needed, send_message and await_turn when controlling each step manually, and read_session when only the transcript tail is needed.",
       objectSchema({
         sessionId: stringProp("Global session id in the form instanceId:localSessionId."),
         instance: stringProp("Optional instance id/label; when supplied it must agree with sessionId."),
@@ -720,7 +727,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     ),
     tool(
       "read_file",
-      "Read a file from one fleet instance via its existing /api/files/content endpoint.",
+      "Reads a file from one remote ai-or-die fleet instance's filesystem. The required path is passed to the remote host as an unsanitized read request; this router does not confine it to a local workspace, and path policy is delegated to the remote instance. It returns resolvedInstance plus the remote file-content response. It is useful for reading a known file on a remote fleet host after choosing an instance. It is not for local files, directory browsing, text search, git revisions, or session transcripts; use local Read for this machine, list_dir to browse remote directories, search to find remote files, git_show for revision content, and read_session for terminal output.",
       objectSchema({
         instance: stringProp("Instance id or label. Defaults to the registry default, or the sole instance."),
         path: stringProp("Remote file path to read."),
@@ -733,7 +740,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     ),
     tool(
       "list_dir",
-      "List a directory on one fleet instance via its existing /api/files endpoint.",
+      "Lists a directory on one remote ai-or-die fleet instance. The required path is the remote directory path, and instance can select a registered host or default to the registry default or sole instance. It returns resolvedInstance plus the remote directory-listing response. It is useful for browsing a remote workspace before choosing a file to read or search. It is not for local directories, file contents, git revisions, or session transcripts; use local filesystem tools for this machine, read_file for remote file contents, git_show for revision content, and read_session for terminal output.",
       objectSchema({
         instance: stringProp("Instance id or label. Defaults to the registry default, or the sole instance."),
         path: stringProp("Remote directory path to list."),
@@ -746,7 +753,7 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     ),
     tool(
       "search",
-      "Search files on one fleet instance via its existing /api/search endpoint.",
+      "Searches files on one remote ai-or-die fleet instance's workspace, where a fleet instance is a registered remote host exposed through the fleet MCP server. The required query is sent to that remote instance, and path can narrow the remote search scope; this does not search the local repository or the web. It returns resolvedInstance plus the remote search response. It is useful when the target content lives on a remote fleet host. It is not for this checkout, semantic code discovery, or internet research; use mcp__search__code for the local workspace and mcp__search__web for web search.",
       objectSchema({
         instance: stringProp("Instance id or label. Defaults to the registry default, or the sole instance."),
         query: stringProp("Search query."),
@@ -764,17 +771,18 @@ export function createFleetTools(options: CreateFleetToolsOptions = {}): Readonl
     ),
     tool(
       "git_show",
-      "Read a file/revision through one fleet instance's existing /api/files/git-show endpoint.",
+      "Shows git content on one remote ai-or-die fleet instance, such as a file at a specific revision or a commit object. The required path identifies the remote repository path or file path, and the optional ref is a git commit-ish such as HEAD, a branch, a tag, or a commit SHA. It returns resolvedInstance plus the remote git-show response. It is useful when the caller needs repository content as it existed at a revision on the remote host. It is not for current working-tree reads, directory listings, local git commands, or web search; use read_file for current remote file content and local tools for this checkout.",
       objectSchema({
         instance: stringProp("Instance id or label. Defaults to the registry default, or the sole instance."),
         path: stringProp("Remote repository path or file path for git-show."),
-        ref: stringProp("Optional git ref/revision."),
-        rev: stringProp("Optional git revision alias."),
-        commit: stringProp("Optional commit id."),
+        ref: stringProp("Optional git ref, revision, or commit-ish, such as HEAD, a branch, a tag, or a commit SHA."),
       }, ["path"]),
       async (args, signal) => {
         const instance = await resolve(optionalString(args, "instance"))
-        const response = await clientFor(instance).gitShow({ ...args, instance: undefined }, signal)
+        const response = await clientFor(instance).gitShow(definedObject({
+          path: requiredString(args, "path"),
+          ref: optionalString(args, "ref"),
+        }), signal)
         return ok({ resolvedInstance: publicInstance(instance), ...response })
       },
     ),

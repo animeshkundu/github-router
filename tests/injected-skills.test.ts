@@ -10,6 +10,13 @@ function frontmatterFor(md: string): string {
   return lines.slice(1, end).join("\n")
 }
 
+function descriptionFor(md: string): string {
+  const frontmatter = frontmatterFor(md)
+  const description = frontmatter.match(/^description:\s*(.+)$/m)?.[1]
+  expect(description).toBeDefined()
+  return description ?? ""
+}
+
 describe("INJECTED_SKILLS", () => {
   test("contains the injected skills with non-empty names and markdown", () => {
     expect(INJECTED_SKILLS.length).toBe(6)
@@ -29,6 +36,15 @@ describe("INJECTED_SKILLS", () => {
       expect(lines.some((line) => /^description:\s*\S/.test(line))).toBe(true)
     }
   })
+
+  test("each injected skill description stays concise, third-person, and triggerable", () => {
+    for (const skill of [...INJECTED_SKILLS, ARTIFACT_REVIEW_SKILL]) {
+      const description = descriptionFor(skill.md)
+      expect(description.length).toBeLessThanOrEqual(1024)
+      expect(description).not.toMatch(/^(?:I|You)\s/)
+      expect(description).toMatch(/use when|use whenever|when the user|before/i)
+    }
+  })
 })
 
 describe("first-mate skills", () => {
@@ -43,7 +59,7 @@ describe("first-mate skills", () => {
   })
 
   test("scaffold skill documents geared foundation, enhance mode, and no factory files", () => {
-    expect(FIRST_MATE_SETUP_SKILL.md).toContain("world-class repo-geared")
+    expect(FIRST_MATE_SETUP_SKILL.md).toContain("repo-geared foundation")
     expect(FIRST_MATE_SETUP_SKILL.md).toContain("mode: \"enhance\"")
     expect(FIRST_MATE_SETUP_SKILL.md).toContain("does not seed factory-protocol")
     expect(FIRST_MATE_SETUP_SKILL.md).toContain("detection_overrides")

@@ -3,7 +3,7 @@
  *
  * In first-mate/operator mode the spawned Claude is the cloud-agent operator, not
  * the product implementer. Product implementation is steered to GitHub cloud
- * agents by the operator-mode banner and the gh-first-mate skill. This module no
+ * agents by first-mate guidance and the gh-first-mate skill. This module no
  * longer hard-blocks local file writes or shell commands: Edit/Write/NotebookEdit
  * and Bash remain available as escape hatches when needed.
  *
@@ -12,6 +12,12 @@
  * subagents or delegate to GitHub cloud agents rather than calling
  * `mcp__workers__*` / `mcp__orchestrate__*` directly.
  */
+
+import {
+  ALL_WORKER_DISPATCH_MODES,
+  dispatcherAgentName,
+  type WorkerDispatchMode,
+} from "../worker-dispatch"
 
 /** Tools denied to the main operator by exact name. */
 export const OPERATOR_DENIED_TOOLS = [] as const
@@ -33,15 +39,6 @@ export const OPERATOR_KEPT_TOOLS = [
   "mcp__first-mate__",
 ] as const
 
-export const OPERATOR_MODE_BANNER =
-  "MODE: cloud-agent operator. Delegate product implementation to GitHub " +
-  "cloud agents via the first-mate MCP (use subagents to orchestrate/protect " +
-  "context) — that's the intended workflow, not a hard rule. Local tools, " +
-  "including file writes and Bash, remain available if you need them to get over " +
-  "a hump; prefer delegation and keep the lead context small. Main-operator " +
-  "worker/orchestrate MCP calls are subagent-only; use the worker-* Agent " +
-  "subagents instead of calling mcp__workers__* or mcp__orchestrate__* directly."
-
 /**
  * Least-privilege note for what the cloud agents themselves may touch — the
  * operator scopes missions to specific repos and forbids irreversible actions
@@ -53,8 +50,9 @@ export const CLOUD_AGENT_SCOPE_NOTE =
   "Cloud agents operate only within mission-listed repos; merges, releases, " +
   "Pages, and deletes require explicit human approval (first-mate merge gate)."
 
-/** The hook payload is untrusted JSON; operator mode no longer inspects fields. */
-export type OperatorToolInput = Record<string, unknown>
+export interface OperatorToolInput extends Record<string, unknown> {
+  agent_type?: unknown
+}
 
 export interface PreToolUseDecision {
   block: boolean
@@ -66,8 +64,26 @@ export interface PreToolUseDecision {
  * both by the PreToolUse hook handler and by config-assertion tests. When
  * operator mode is off, nothing is blocked (normal sessions unaffected).
  */
-export function shouldDenyOperatorTool(toolName: string, operatorMode: boolean): boolean {
+function parseWorkerMode(toolName: string): WorkerDispatchMode | null {
+  const workersPrefix = "mcp__workers__"
+  if (!toolName.startsWith(workersPrefix)) return null
+  const mode = toolName.slice(workersPrefix.length)
+  return (ALL_WORKER_DISPATCH_MODES as ReadonlyArray<string>).includes(mode) ? (mode as WorkerDispatchMode) : null
+}
+
+function isMatchingWorkerDispatcher(toolName: string, input?: OperatorToolInput): boolean {
+  const mode = parseWorkerMode(toolName)
+  if (mode === null) return false
+  return input?.agent_type === dispatcherAgentName(mode)
+}
+
+export function shouldDenyOperatorTool(
+  toolName: string,
+  operatorMode: boolean,
+  input?: OperatorToolInput,
+): boolean {
   if (!operatorMode) return false
+  if (isMatchingWorkerDispatcher(toolName, input)) return false
   return OPERATOR_DENIED_MCP_PREFIXES.some((prefix) => toolName.startsWith(prefix))
 }
 
@@ -96,10 +112,10 @@ export function assertShapingInstalled(agentsMode: boolean, injectionSucceeded: 
 export function operatorPreToolUse(
   toolName: string,
   operatorMode: boolean,
-  _input?: OperatorToolInput,
+  input?: OperatorToolInput,
 ): PreToolUseDecision {
   if (!operatorMode) return { block: false }
-  if (shouldDenyOperatorTool(toolName, operatorMode)) {
+  if (shouldDenyOperatorTool(toolName, operatorMode, input)) {
     return {
       block: true,
       reason: `${toolName} is subagent-only in cloud-agent operator mode — use the worker-* Agent subagents or delegate implementation to a GitHub cloud agent via the first-mate MCP instead of calling local worker/orchestrate MCP tools from the main operator.`,

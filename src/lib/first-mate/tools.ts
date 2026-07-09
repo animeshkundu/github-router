@@ -219,7 +219,7 @@ export function createFirstMateTools(
   return Object.freeze([
     tool(
       "start_mission",
-      "Register a first-mate mission for one or more GitHub repositories. Unit decomposition is handled by later controller/model wakes.",
+      "Registers a first-mate mission in the local durable controller for one or more GitHub repositories; it does not dispatch work or touch GitHub on this call. Inputs provide the mission goal, owner/name repos, user-blessed acceptance criteria, and optional priority, house rules, default cloud-agent model, plan gate, and CI requirement. Returns the new mission id and normalized repo list so later wakes can decompose and dispatch units. Use when the operator has accepted mission scope and wants the first-mate loop to own tracking. It is not for one-off status reads, adding units to an existing mission, or missions whose acceptance criteria are still unsettled.",
       objectSchema({
         goal: stringProp("Mission goal."),
         repos: stringArrayProp("Repositories as owner/name strings."),
@@ -265,7 +265,7 @@ export function createFirstMateTools(
     ),
     tool(
       "scaffold_repo",
-      "Seed deterministic agentic-dev convention files into a GitHub repository on a pull-request branch.",
+      "Seeds first-mate and agentic-dev convention files into a GitHub repository by creating a scaffold branch, committing deterministic files, and opening a pull request; it does not write directly to the default branch. Inputs name the owner/name repo, optional base ref, handling mode, and optional detection overrides for stack, OS, package manager, commands, and UI evidence. Returns the pull request plus committed, preserved, and per-file report data, or a no-op note when nothing needs seeding. Use when preparing an owned repository for the first-mate cloud-agent workflow. It is not for arbitrary third-party repositories, normal feature work, or repeated runs unless the operator intentionally wants missing or enhanced convention files.",
       objectSchema({
         repo: stringProp("Repository as an owner/name string."),
         mode: enumProp(
@@ -329,7 +329,7 @@ export function createFirstMateTools(
     ),
     tool(
       "advance",
-      "Wake the first-mate controller once, applying model answers or human decisions, then return the compact board and pending requests.",
+      "Wakes the first-mate controller once, optionally applying model answers and human decisions before driving eligible missions. Inputs can supply prior request answers, bound returned request count, provider concurrency, scope the wake to one mission, or include inactive missions in the returned view. Returns the compact board, inactive summary, pending model and human requests, applied answer count, next wake timing, and whether this caller actually drove or deferred to another driver. Use when the operator is advancing the durable loop, responding to needsModel/needsHuman, or scheduling the next wake from nextWakeSeconds. It is not for read-only status checks; board reads the whole portfolio without a wake, and mission_status reads a mission-id-scoped status view.",
       objectSchema({
         model_answers: arrayOfObjectsProp(
           "Optional model judgments to apply before the wake.",
@@ -410,7 +410,7 @@ export function createFirstMateTools(
     ),
     tool(
       "board",
-      "Read compact board status. Defaults to active missions only; pass include_all to include inactive missions.",
+      "Reads the compact first-mate portfolio board without waking the controller, dispatching work, or applying answers. Inputs only choose whether inactive missions are included; active missions are returned by default with inactive counts summarized separately. Returns the same board shape that advance returns as a side effect, including mission phase counts, blocked counts, unit rows, and inactive summary. Use when the operator needs a whole-portfolio snapshot. It is not for driving progress or applying pending requests; advance does that, and mission_status is the read path scoped to a single mission id.",
       objectSchema({
         include_all: boolProp("When true, include inactive missions in the board. Default returns active missions only and summarizes inactive counts."),
       }, []),
@@ -425,14 +425,14 @@ export function createFirstMateTools(
     ),
     tool(
       "merge_pr",
-      "Merge a GitHub pull request the operator has reviewed. Head-guarded (rejects a moved head), ownership-scoped (agent-authored or an active first-mate mission repo, else requires allow_unowned), and gated on a pre-merge safety check (OPEN, not draft, MERGEABLE, CI green).",
+      "Merges a live GitHub pull request immediately, which is irreversible through this tool once GitHub accepts the merge. Inputs identify the repo and PR, bind the action to the exact reviewed head SHA, optionally bind the reviewed base branch, select the merge method, and can explicitly override ownership with allow_unowned. Returns GitHub's merge result and merge SHA after the live PR passes head-SHA and optional base concurrency checks, ownership checks, OPEN/not-draft/mergeable checks, and available CI or workflow checks. Use only after out-of-band human authorization for this exact head; this tool does not consult the first-mate approval ledger. It is not for PRs that are not agent-authored or correlated to a first-mate unit (unit.pr === pr) unless allow_unowned is intentionally set; a repo with no configured CI can merge on operator review plus the non-CI guards.",
       objectSchema({
         repo: stringProp("Repository as an owner/name string."),
         pr: numberProp("Pull request number."),
         expected_head_sha: stringProp("The exact head commit SHA the operator reviewed. The merge is REJECTED if the live head has moved from this value; re-review the new head before merging."),
         expected_base: stringProp("Optional base branch name the operator reviewed against. When set, the merge is rejected if the live base ref differs."),
         method: enumProp(["merge", "squash", "rebase"], "Merge method. Defaults to squash."),
-        allow_unowned: boolProp("Set true to merge a PR that is neither agent-authored nor part of an active first-mate mission. Dangerous, explicit opt-in; the override is audit-logged."),
+        allow_unowned: boolProp("Set true to merge a PR that is neither agent-authored nor correlated to a first-mate unit (unit.pr === pr). Dangerous, explicit opt-in; the override is audit-logged."),
       }, ["repo", "pr", "expected_head_sha"]),
       async (args) => {
         const repoSlug = requiredString(args, "repo")
@@ -486,11 +486,11 @@ export function createFirstMateTools(
     ),
     tool(
       "close_pr",
-      "Close a GitHub pull request WITHOUT merging it. Ownership-scoped identically to merge_pr (agent-authored or active first-mate mission repo, else requires allow_unowned).",
+      "Closes a live GitHub pull request without merging it and reconciles any correlated first-mate units as terminal in the local ledger. Inputs identify the owner/name repo and PR, with allow_unowned as an explicit override for PRs outside first-mate ownership. Returns the closed state plus reconciliation counts, or an already-closed note when the PR was previously closed. Use when the operator wants to stop an open PR rather than merge it. It is not for merged PRs, or for PRs that are not agent-authored or correlated to a first-mate unit (unit.pr === pr), unless allow_unowned is intentionally set.",
       objectSchema({
         repo: stringProp("Repository as an owner/name string."),
         pr: numberProp("Pull request number."),
-        allow_unowned: boolProp("Set true to close a PR that is neither agent-authored nor part of an active first-mate mission. Explicit opt-in; audit-logged."),
+        allow_unowned: boolProp("Set true to close a PR that is neither agent-authored nor correlated to a first-mate unit (unit.pr === pr). Explicit opt-in; audit-logged."),
       }, ["repo", "pr"]),
       async (args) => {
         const repoSlug = requiredString(args, "repo")
@@ -531,11 +531,11 @@ export function createFirstMateTools(
     ),
     tool(
       "mark_ready",
-      "Mark a draft GitHub pull request ready for review. Ownership-scoped identically to merge_pr/close_pr (agent-authored or active first-mate mission repo, else requires allow_unowned).",
+      "Marks an open draft GitHub pull request ready for review through GitHub's ready-for-review mutation. Inputs identify the owner/name repo and PR, with allow_unowned as an explicit override for PRs outside first-mate ownership. Returns whether the PR is ready and whether it was already non-draft. Use when a first-mate or operator-owned draft PR should enter human or CI review. It is not for closed or merged PRs, or for PRs that are not agent-authored or correlated to a first-mate unit (unit.pr === pr), unless allow_unowned is intentionally set.",
       objectSchema({
         repo: stringProp("Repository as an owner/name string."),
         pr: numberProp("Pull request number."),
-        allow_unowned: boolProp("Set true to mark a PR ready when it is neither agent-authored nor part of an active first-mate mission. Explicit opt-in; audit-logged."),
+        allow_unowned: boolProp("Set true to mark a PR ready when it is neither agent-authored nor correlated to a first-mate unit (unit.pr === pr). Explicit opt-in; audit-logged."),
       }, ["repo", "pr"]),
       async (args) => {
         const repoSlug = requiredString(args, "repo")
@@ -571,7 +571,7 @@ export function createFirstMateTools(
     ),
     tool(
       "add_units",
-      "Add dispatchable units to an existing active first-mate mission. DependsOn entries are 0-based indices within the submitted units list.",
+      "Adds dispatchable units to an existing active first-mate mission without dispatching them immediately. Inputs name the mission and unit list; each unit supplies a title plus optional repo, provider, same-call dependency indices, and model override. Returns the mission id and the units actually added after validation and deduplication. Use when the operator has decomposed additional work for a mission that is already active. It is not for creating a new mission, adding work to inactive missions, or expressing dependencies on units from earlier calls; dependsOn indices are 0-based within this submitted list, invalid or self indices are ignored, and cycles are rejected.",
       objectSchema({
         mission_id: stringProp("Mission id to add units to."),
         units: arrayOfObjectsProp(
@@ -607,7 +607,7 @@ export function createFirstMateTools(
     ),
     tool(
       "abandon_mission",
-      "Mark a first-mate mission abandoned so it drops from the active board. Existing units are marked terminal without merging.",
+      "Marks a first-mate mission abandoned in the local durable ledgers so it drops from the active board, and terminalizes live units without merging. Inputs name the mission and can include a short operator reason returned in the tool result. Returns the abandoned mission id and the number of units marked terminal. Use when the operator is permanently retiring a mission from first-mate tracking. It is local-ledger-only and terminal, not a remote cancellation tool: open PRs stay open and GitHub cloud agents keep running unless the operator closes or stops that work separately.",
       objectSchema({
         mission_id: stringProp("Mission id to abandon."),
         reason: stringProp("Optional short reason for the abandonment."),
@@ -647,7 +647,7 @@ export function createFirstMateTools(
     ),
     tool(
       "mission_status",
-      "Read compact status for all first-mate missions, or for one mission id. Defaults to active missions only; pass include_all for inactive missions too.",
+      "Reads compact first-mate mission status without waking the controller or dispatching work. Inputs can filter by mission_id and can include inactive missions; active missions are returned by default with inactive counts summarized separately. Returns mission status rows built from the same board data, including counts, blocked count, unit rows, and done/failed summary. Use when the operator needs a mission-id-scoped read or a compact status list. It is not for the whole portfolio board without a mission filter, which is board, and it is not for driving progress, which is advance.",
       objectSchema({
         mission_id: stringProp("Optional mission id to filter to."),
         include_all: boolProp("When true, include inactive missions in the status list. Default returns active missions only and summarizes inactive counts."),

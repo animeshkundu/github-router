@@ -186,6 +186,9 @@ export function decideWorkerGuard(input: {
     // meant to run THIS worker. Require an exact mode match (not just "any
     // dispatcher"), so a read-only `worker-explore` can't invoke the
     // write-capable `implement` worker if it misroutes or is prompt-injected.
+    // If a matching dispatcher is still denied, the payload that reached this
+    // hook did not carry this exact top-level `agent_type`, or a different
+    // PreToolUse hook denied the call after this guard allowed it.
     return { output: null, verdict: "allow-dispatcher" }
   }
 
@@ -225,6 +228,13 @@ export function dispatcherDescription(mode: WorkerDispatchMode): string {
  *  relay verbatim, do nothing else. */
 export function dispatcherPrompt(mode: WorkerDispatchMode, workersKey: string): string {
   const tool = workerToolName(workersKey, mode)
+  const briefField = mode === "browse" ? "task" : "prompt"
+  const briefDescription = mode === "browse" ? "the lead's browse task, copied verbatim" : "the lead's worker brief, copied verbatim"
+  const modeSpecificPassThrough = mode === "implement" || mode === "test"
+    ? "\n  - `worktree` (optional): pass `true` if the lead asked for isolated-worktree execution"
+    : mode === "browse"
+      ? "\n  - `sessionId` (optional): pass through if the lead specified one"
+      : ""
   return [
     `# Subagent: ${dispatcherAgentName(mode)}`,
     "",
@@ -234,11 +244,11 @@ export function dispatcherPrompt(mode: WorkerDispatchMode, workersKey: string): 
     "## Your only job",
     "",
     `Call the \`${tool}\` tool EXACTLY ONCE, passing through the fields from the lead's brief:`,
-    "  - `prompt`: the lead's worker brief, copied verbatim",
+    `  - \`${briefField}\`: ${briefDescription}`,
     "  - `workspace` (optional): absolute path, if the lead specified one",
     "  - `model` / `thinking` (optional): only if the lead specified them",
     "  - `maxWallClockMs` (optional): per-call wall-clock budget in ms, if the lead specified one"
-      + (mode === "implement" || mode === "test" ? "\n  - `worktree` (optional): pass `true` if the lead asked for isolated-worktree execution" : ""),
+      + modeSpecificPassThrough,
     "",
     "When the tool returns, output its result VERBATIM as your final message. That final",
     "message is what the lead receives in the completion notification — it IS the result.",
@@ -259,7 +269,7 @@ export function dispatcherPrompt(mode: WorkerDispatchMode, workersKey: string): 
  *  tool names, so this grants exactly the workers tools and NOTHING else — no
  *  Agent/Task (so it cannot spawn further agents → no recursion), no Read/Bash
  *  (so it cannot do extra work). The dispatcher's prompt narrows it to the one
- *  mode; the guard allows any dispatcher-named caller regardless. */
+ *  mode; the guard allows only the exact dispatcher for that worker mode. */
 export function dispatcherTools(_mode: WorkerDispatchMode, workersKey: string): Array<string> {
   return [`mcp__${workersKey}__*`]
 }

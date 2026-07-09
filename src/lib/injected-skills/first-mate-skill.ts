@@ -2,7 +2,7 @@ export const FIRST_MATE_SKILL = {
   name: "gh-first-mate",
   md: `---
 name: gh-first-mate
-description: Thin operating protocol for the first-mate GitHub cloud-agent controller: start missions, wake the durable controller loop, answer model and human requests, keep context compact, and report from the board/ledger rather than rereading full diffs or logs.
+description: Thin operating protocol for the first-mate GitHub cloud-agent controller: starts missions, wakes the durable loop, answers model and human requests, keeps context compact, and reports from the board/ledger. Use when the user wants first-mate to drive GitHub cloud coding agents across one or more repositories with foundation-first scaffolding and scoped, testable work.
 user-invocable: true
 ---
 

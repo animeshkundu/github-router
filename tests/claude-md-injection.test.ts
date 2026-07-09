@@ -20,6 +20,7 @@ mock.module("node:os", () => ({
 const { PATHS, isUnderClaudeConfigMirror } = await import("../src/lib/paths")
 const {
   appendPeerAwarenessToMirroredClaudeMd,
+  prependArtifactPanelDirectiveToMirroredClaudeMd,
   prependStyleDirectiveToMirroredClaudeMd,
   OPERATING_DEFAULTS_DIRECTIVE,
   findMarkerBlocks,
@@ -565,7 +566,7 @@ test("style directive content is self-compliant — no em dashes, no Claude/AI/A
   expect(STYLE_DIRECTIVE.toLowerCase()).toContain("anthropic")
 })
 
-test("operating-defaults directive: orchestrator posture + hybrid excellence lens + guardrails, self-compliant", () => {
+test("operating-defaults directive: orchestrator posture + concrete excellence principles, self-compliant", () => {
   const d = OPERATING_DEFAULTS_DIRECTIVE
   const low = d.toLowerCase()
   // Orchestrator posture (strong default): delegate heavy work, keep last-mile.
@@ -574,17 +575,11 @@ test("operating-defaults directive: orchestrator posture + hybrid excellence len
   expect(d).toContain("worker-*")
   expect(low).toContain("parallel")
   expect(low).toContain("directly") // "do trivial/surgical/last-mile work directly"
-  // Hybrid excellence lens: principle-led, names as "bar" calibration (the
-  // user's three seeds), with an explicit no-impersonation guardrail.
+  // Excellence principles remain specific without named-persona anchors.
   expect(low).toContain("radical simplicity")
-  expect(low).toContain("first-principles")
-  expect(low).toContain("works backwards")
-  expect(d).toContain("Jobs")
-  expect(d).toContain("Ive")
-  expect(d).toContain("Gates")
-  expect(d).toContain("Bezos")
-  expect(low).toContain("not a persona")
-  expect(low).toContain("no impersonation")
+  expect(low).toContain("first principles")
+  expect(low).toMatch(/works backwards|work backwards/)
+  expect(low).toContain("derive, reproduce, or test")
   // Overridable default.
   expect(low).toContain("override")
   // Self-compliant with the style directive: no em dash; no Claude/AI/Anthropic
@@ -597,19 +592,33 @@ test("operating-defaults directive: orchestrator posture + hybrid excellence len
 test("artifact-panel directive steers HTML-by-default for review", () => {
   // The always-injected primary instruction must reflect the HTML-default
   // decision (the hook auto-renders plans to HTML; markdown is the fallback).
-  const d = ARTIFACT_PANEL_DIRECTIVE.toLowerCase()
+  const d = ARTIFACT_PANEL_DIRECTIVE().toLowerCase()
   expect(d).toContain("html")
   expect(d).toContain("artifact panel")
   expect(d).toContain("mcp__peers__artifact_open")
-  // It explicitly prefers HTML and frames raw markdown as the fallback.
+  // It explicitly prefers HTML (self-contained artifact).
   expect(d).toMatch(/prefer html|self-contained `?\.?html/)
-  expect(d).toContain("fallback")
   // Broadened beyond plans: the trigger now names other review-worthy shapes.
   expect(d).toContain("comparison")
   expect(d).toContain("table")
-  // Carries the per-type playbook cheatsheet + a design-system steer.
   expect(d).toContain("diagram")
-  expect(d).toContain("design system")
+  // Trimmed-to-a-pointer contract: the full authoring/loop playbook (per-type
+  // cheatsheet, design-system, data-aod controls) now lives in the skill, so
+  // the directive names the skill + the data-aod controls entry point.
+  expect(d).toContain("gh-artifact-review")
+  expect(d).toContain("data-aod")
+})
+
+test("artifact-panel directive threads the resolved peers key into tool paths", async () => {
+  expect(ARTIFACT_PANEL_DIRECTIVE("gh-router-peers")).toContain("mcp__gh-router-peers__artifact_open")
+  expect(ARTIFACT_PANEL_DIRECTIVE("gh-router-peers")).not.toContain("mcp__peers__artifact_open")
+
+  await freshMirrorDir()
+  await prependArtifactPanelDirectiveToMirroredClaudeMd("gh-router-peers")
+
+  const result = await fs.readFile(TARGET, "utf8")
+  expect(result).toContain("mcp__gh-router-peers__artifact_open")
+  expect(result).not.toContain("mcp__peers__artifact_open")
 })
 test("style directive is prepended at the TOP of CLAUDE.md with user content preserved below", async () => {
   await freshMirrorDir()

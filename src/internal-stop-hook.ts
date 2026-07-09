@@ -66,11 +66,13 @@ const MAX_DIFF_BYTES = 2 * 1024 * 1024
 
 /** Capture the working-tree diff WITHOUT mutating the user's index (no
  *  `git add -N`): `git diff HEAD` covers modified tracked files, which is where
- *  gate-weakening edits live. Best-effort: any git failure yields an empty diff
- *  (the weakening scan is then a no-op; the executable gate still runs). Capped. */
+ *  gate-weakening edits live. A git failure rejects, so the decision layer can run
+ *  checks with an empty weakening scan instead of treating an unknown diff as a
+ *  genuine no-diff turn. Capped. */
 async function captureDiff(cwd: string): Promise<string> {
-  const r = await runCommandCapture(["git", "diff", "HEAD"], { cwd, timeoutMs: 5_000 }).catch(() => undefined)
-  const out = r?.stdout ?? ""
+  const r = await runCommandCapture(["git", "diff", "HEAD"], { cwd, timeoutMs: 5_000 })
+  if (r.code !== 0) throw new Error(`git diff failed with exit ${r.code}`)
+  const out = r.stdout
   return out.length > MAX_DIFF_BYTES ? out.slice(0, MAX_DIFF_BYTES) : out
 }
 
