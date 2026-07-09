@@ -1823,7 +1823,7 @@ describe("/mcp web_search tool", () => {
     expect(result.content[0].text).toMatch(/query is required/i)
   })
 
-  test("web_search upstream failure surfaces as tool isError with `web_search failed:` prefix", async () => {
+  test("web_search upstream failure surfaces as tool isError with `web failed:` prefix", async () => {
     mockUpstreamMcp({ forceCallError: true })
     const { status, json } = await rpc({
       jsonrpc: "2.0",
@@ -1837,7 +1837,7 @@ describe("/mcp web_search tool", () => {
       isError?: boolean
     }
     expect(result.isError).toBe(true)
-    expect(result.content[0].text).toMatch(/^web_search failed:/i)
+    expect(result.content[0].text).toMatch(/^web failed:/i)
   })
 
   test("web_search counts against MAX_INFLIGHT_TOOLS_CALL (slot accounting symmetric with personas)", async () => {

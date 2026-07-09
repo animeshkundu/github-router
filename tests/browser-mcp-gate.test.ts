@@ -314,7 +314,7 @@ describe("browser-mcp capability gate (--browse)", () => {
     expect(names).toContain("diagnostics")
   })
 
-  test("default --browse exposes the lead surface only (act, observe, extract, navigate, screenshot, open_tab)", async () => {
+  test("default --browse exposes the always-present browser tier (navigate, screenshot, open_tab)", async () => {
     if (!hasSupportedBrowserInstalled()) return
     state.browseEnabled = true
     state.powerBrowseEnabled = false
@@ -337,16 +337,15 @@ describe("browser-mcp capability gate (--browse)", () => {
     const names = (json.result as { tools: Array<{ name: string }> }).tools
       .map((t) => t.name)
       .filter((n) => LEAD_TOOLS.has(n))
-    // open_tab / navigate / screenshot / act are always present under
-    // --browse (capability "browser"). observe / extract require the
-    // compressor backend (capability "browser_compound") — on a CI box
-    // where gemini-3.5-flash IS in the catalog they show. The assertion
-    // pins the always-present "browser" tier; compound tiers are covered
-    // by the dedicated compound test.
+    // open_tab / navigate / screenshot are always present under --browse
+    // (capability "browser"). act / observe / extract / find are the
+    // browser_compound tier: they need a compressor backend in the catalog,
+    // so they are catalog-dependent and NOT asserted here. This test pins
+    // the always-present "browser" tier; the compound gating is covered by
+    // the snippet gating tests in tests/peer-mcp-personas.test.ts.
     expect(names).toContain("open_tab")
     expect(names).toContain("navigate")
     expect(names).toContain("screenshot")
-    expect(names).toContain("act")
     // Power-tier tools must NOT appear.
     for (const power of [
       "mouse",

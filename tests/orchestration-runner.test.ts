@@ -35,7 +35,7 @@ function mkDeps(overrides: Partial<{
   return { deps, calls }
 }
 
-const ctx = { rawAsk: "build X", baseWorkspace: "/base", canonicalGate: { id: "fullsuite", checks: new Set(["a", "b"]) } }
+const ctx = { rawAsk: "build X", baseWorkspace: "/base", canonicalGate: { id: "typecheck-test", checks: new Set(["a", "b"]) } }
 const node = (p: Partial<WorkflowNode> & { id: string; role: WorkflowNode["role"] }): WorkflowNode =>
   ({ inputs: [], gate: { kind: "none" }, onFail: "escalate", ...p })
 
@@ -47,19 +47,19 @@ describe("makeRunner.runNode", () => {
     expect(r.gate?.passed.has("a")).toBe(true)
     expect(calls.worker[0]?.role).toBe("implement")
     expect(calls.worker[0]?.prompt).toBe("build X")
-    expect(calls.gate[0]?.gateId).toBe("fullsuite")
+    expect(calls.gate[0]?.gateId).toBe("typecheck-test")
   })
 
   test("a failing worker → infra failure (fall-to-baseline upstream)", async () => {
     const { deps } = mkDeps({ worker: () => ({ text: "", isError: true }) })
-    const r = await makeRunner(deps, ctx).runNode(node({ id: "impl", role: "implement", gate: { kind: "executable", gateId: "fullsuite" }, onFail: "loop" }), new Map())
+    const r = await makeRunner(deps, ctx).runNode(node({ id: "impl", role: "implement", gate: { kind: "executable", gateId: "typecheck-test" }, onFail: "loop" }), new Map())
     expect(r.ok).toBe(false)
     expect(r.infraFailure).toBe(true)
   })
 
   test("producer that fails the canonical gate → ok:false (not infra)", async () => {
     const { deps } = mkDeps({ gate: () => gate(["a"], ["a", "b"]) }) // fails b
-    const r = await makeRunner(deps, ctx).runNode(node({ id: "impl", role: "implement", gate: { kind: "executable", gateId: "fullsuite" }, onFail: "loop" }), new Map())
+    const r = await makeRunner(deps, ctx).runNode(node({ id: "impl", role: "implement", gate: { kind: "executable", gateId: "typecheck-test" }, onFail: "loop" }), new Map())
     expect(r.ok).toBe(false)
     expect(r.infraFailure).toBeUndefined()
   })
@@ -93,7 +93,7 @@ describe("kernel + runner end-to-end", () => {
     rawAskHash: "r", acceptanceCriteriaHash: "a", maxDepth: 1,
     nodes: [
       node({ id: "baseline", role: "baseline", onFail: "baseline" }),
-      node({ id: "impl", role: "implement", producerLab: "openai", gate: { kind: "executable", gateId: "fullsuite" }, onFail: "loop" }),
+      node({ id: "impl", role: "implement", producerLab: "openai", gate: { kind: "executable", gateId: "typecheck-test" }, onFail: "loop" }),
       node({ id: "review", role: "review", producerLab: "google", inputs: ["impl"], gate: { kind: "cross_lab", checkerLab: "anthropic" } }),
       node({ id: "select", role: "selector", inputs: ["baseline", "review"], onFail: "baseline", judgesOnRawAsk: true }),
     ],
