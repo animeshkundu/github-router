@@ -101,10 +101,11 @@ const STYLE_DIRECTIVE =
  *   3. Engineering excellence: quality / robustness / maintainability over
  *      development cost; reproduce a bug end-to-end (as a real user hits it)
  *      before fixing so the fix targets the real cause; a pixel-perfect UI bar;
- *      and fix any lint error / test failure / flake on sight, whoever caused it
- *      and whether or not it touches the current task. The digest carries a
- *      one-line form; the full statement lives here so it does not cost the
- *      context window every turn.
+ *      and fix any lint error / test failure / flake on sight, whoever caused it,
+ *      folded into the current work rather than derailing the user's task (the
+ *      scope guardrail keeps proactive quality from becoming yak-shaving). The
+ *      digest carries a one-line form; the full statement lives here so it does
+ *      not cost the context window every turn.
  *
  * Self-referentially compliant with the style directive: no em dashes, no
  * Claude / Anthropic attribution.
@@ -133,8 +134,8 @@ export const OPERATING_DEFAULTS_DIRECTIVE =
   + "obsessed with pixel perfection: if something clearly looks off, even when it is "
   + "unrelated to your task, get it fixed along the way. Hold that same bar for the "
   + "codebase itself: a lint error, a failing test, or a flaky test is worth fixing "
-  + "the moment you see it, whoever introduced it and whether or not it touches your "
-  + "current work."
+  + "the moment you see it, whoever introduced it. Fold it into your current work "
+  + "rather than letting it derail the task the user actually asked for."
 
 /**
  * Condensed digest of OPERATING_DEFAULTS_DIRECTIVE for the spawned session's
@@ -153,7 +154,8 @@ export const OPERATING_DEFAULTS_DIGEST =
   + "outcome the user actually needs; question every assumption and prefer what you can derive, "
   + "reproduce, or test. Engineering excellence: prefer quality and long-term "
   + "maintainability over dev cost; reproduce bugs end to end before fixing; keep a "
-  + "pixel-perfect UI bar; fix any lint, test failure, or flake on sight. The full "
+  + "pixel-perfect UI bar; fix any lint, test failure, or flake on sight without "
+  + "letting it derail the task at hand. The full "
   + "statement of these defaults is in your CLAUDE.md project instructions."
 
 /**
