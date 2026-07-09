@@ -47,6 +47,36 @@ Startup sequence (`src/serve.ts`):
 6. Fail-closed conformance probe (a request must demonstrably reach the github-router proxy).
 7. Open the browser at the reverse-proxy origin.
 
+## github-router tools inside Claude sessions
+
+`serve` gives the CloudCLI-spawned Claude the same enhancement layer `github-router claude` provides,
+by writing into the router-owned `CLAUDE_CONFIG_DIR` mirror (which the SDK-spawned claude reads via
+`settingSources: ['user']`) plus best-effort background provisions. Implemented in
+`src/lib/serve/enhancements.ts` + the provision block in `src/serve.ts`, reusing the exact functions
+`claude.ts`/`start.ts` use:
+
+- **MCP servers** — `peers` / `search` / `orchestrate`, plus `workers` / `decide` / `browser` when
+  their gate passes (`injectPeerMcpIntoMirror`; the per-launch nonce is set on `state.peerMcpNonce`).
+- **Subagents** — the peer critics, worker dispatchers, and `implementer` (`.md` files in the
+  mirror's `agents/`).
+- **Skills** — `gh-research` / `gh-orchestrate` / `gh-floor-keeper` / `gh-worker` (operator +
+  ai-or-die-tab-specific skills are intentionally excluded).
+- **System-prompt-level guidance** — operating-defaults, style (no-attribution/voice), peer-tool and
+  toolbelt awareness are injected into the mirrored `CLAUDE.md` (the right substitute for
+  `--append-system-prompt`, which CloudCLI doesn't expose).
+- **Hooks** — the `UserPromptSubmit` orchestration hook and the `PreToolUse` worker-guard (steers
+  `mcp__workers__*` to the non-blocking `worker-*` subagents; opt out with
+  `GH_ROUTER_DISABLE_WORKER_GUARD=1`). They reach the proxy via `GH_ROUTER_HOOK_MCP_URL` +
+  `GH_ROUTER_HOOK_NONCE` forwarded into the child env.
+- **Background provisions** — semantic search (colbert), the LLM toolbelt (`rg`/`fd`/`jq`/…),
+  keep-awake, and self-update, all fire-and-forget.
+
+**Connected badge.** CloudCLI's Claude provider marks "connected" only if it finds an `ANTHROPIC_*`
+env var or `~/.claude/.credentials.json` — it doesn't know about our proxy auth. `serve` sets a
+**placeholder** `ANTHROPIC_API_KEY` in the child env so the badge reads connected; it is not a real
+key (the proxy ignores inbound auth and authenticates to Copilot itself; verified that Claude still
+works with it set).
+
 ## Security model
 
 CloudCLI's OSS server binds `0.0.0.0` by default and performs **no WebSocket `Origin` check** on

@@ -5,7 +5,11 @@ import type { AddressInfo } from "node:net"
 import { defineCommand } from "citty"
 import consola from "consola"
 
+import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
+import { provisionAndIndexColbert } from "./lib/colbert"
 import { killChildProcessTree } from "./lib/exec"
+import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
+import { browserToolsEnabled } from "./lib/mcp-capabilities"
 import { ensureClaudeConfigMirror, removeOwnClaudeConfigMirror } from "./lib/paths"
 import { pickClaudeDefault } from "./lib/port"
 import {
@@ -24,6 +28,8 @@ import {
 import { DevtunnelError, startDevtunnel } from "./lib/serve/devtunnel"
 import { provisionServeEnhancements } from "./lib/serve/enhancements"
 import { startReverseProxy } from "./lib/serve/reverse-proxy"
+import { runSelfUpdate } from "./lib/self-update"
+import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { getGitHubUser } from "./services/github/get-user"
 
 async function getFreePort(): Promise<number> {
@@ -153,6 +159,33 @@ export const serve = defineCommand({
       process.exit(1)
     }
 
+    // Best-effort self-update (detached, applies next launch). Runs after the
+    // server is listening so the bounded probe can't delay it.
+    void runSelfUpdate({ selfUpdate: args["self-update"] !== false })
+
+    // Best-effort ColBERT semantic-search provision + background index of the
+    // launch cwd (if a git repo). ON by default; never blocks launch.
+    void provisionAndIndexColbert()
+
+    // Best-effort LLM toolbelt materialization. The mirror awareness line is
+    // written by provisionServeEnhancements below, matching `github-router claude`.
+    void provisionToolbelt().catch((err) =>
+      consola.debug("Toolbelt provisioning failed:", err),
+    )
+
+    // Best-effort: keep the machine awake while the proxy/CloudCLI session runs.
+    // Released via stopKeepAwake() in the shutdown chain below and by the module's
+    // own self-registered signal/exit reaper.
+    startKeepAwake()
+
+    // Best-effort: materialize the browser extension + bridge into the stable
+    // app-dir when browser tools are enabled.
+    if (browserToolsEnabled()) {
+      void provisionBrowserAssets().catch((err) =>
+        consola.debug("Browser extension provisioning failed:", err),
+      )
+    }
+
     // 2b. wire the github-router enhancement layer (MCP servers + peer/worker
     //     subagents + gh-* skills) into the mirror so CloudCLI-spawned Claude
     //     sessions get the same tools `github-router claude` provides. Must run
@@ -163,9 +196,18 @@ export const serve = defineCommand({
     //    drops GITHUB_TOKEN/GH_ROUTER_*/ANTHROPIC_AUTH_TOKEN/OPENAI_API_KEY/
     //    COPILOT_TOKEN) plus the non-secret ANTHROPIC_BASE_URL/CLAUDE_CONFIG_DIR
     //    /model vars. Auth rides the synthetic .credentials.json FILE, not env.
-    const childEnv: NodeJS.ProcessEnv = composeCloudCliChildEnv(
-      getClaudeCodeEnvVars(serverUrl, chosenSlug),
-    )
+    const anthropicVars = getClaudeCodeEnvVars(serverUrl, chosenSlug)
+    if (enhancements.nonce) {
+      anthropicVars.GH_ROUTER_HOOK_MCP_URL = serverUrl
+      anthropicVars.GH_ROUTER_HOOK_NONCE = enhancements.nonce
+    }
+    const childEnv: NodeJS.ProcessEnv = composeCloudCliChildEnv(anthropicVars)
+    // Placeholder only: CloudCLI's Claude provider checks this env var to mark
+    // Claude as connected. Claude still authenticates through the proxy mirror.
+    childEnv.ANTHROPIC_API_KEY = "sk-ant-github-router-proxy-placeholder"
+    // CloudCLI's cloned server defines CLAUDE_FALLBACK_MODELS as an in-code object,
+    // and the searched server tree has no process.env.CLAUDE_FALLBACK_MODELS reader.
+    // Do not set an env var here unless CloudCLI adds a documented string format.
 
     // 4. resolve/install + spawn CloudCLI on a loopback port.
     let cloudcli
@@ -214,6 +256,7 @@ export const serve = defineCommand({
       } catch {
         /* best-effort */
       }
+      await stopKeepAwake().catch(() => {})
       await enhancements.cleanup().catch(() => {})
       await removeOwnClaudeConfigMirror().catch(() => {})
     }

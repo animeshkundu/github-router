@@ -6,23 +6,41 @@ import { injectAttributionSuppressionIntoSettingsFile } from "../attribution-set
 import {
   injectPeerMcpIntoMirror,
   resolveGroupKeysFromMirror,
+  workersKeyOf,
   writePeerMcpRuntimeFiles,
 } from "../codex-mcp-config"
+import {
+  appendPeerAwarenessToMirroredClaudeMd,
+  appendToolbeltAwarenessToMirroredClaudeMd,
+  OPERATING_DEFAULTS_DIRECTIVE,
+  prependOperatingDefaultsToMirroredClaudeMd,
+  prependStyleDirectiveToMirroredClaudeMd,
+} from "../claude-md-injection"
 import { INJECTED_SKILLS, writeInjectedSkill } from "../injected-skills"
 import {
   browseAgentEnabled,
+  browserCompoundToolsEnabled,
   browserToolsEnabled,
   geminiAvailable,
   implementerSubagentModel,
   standInToolEnabled,
   workerToolsEnabled,
 } from "../mcp-capabilities"
+import { buildPromptSubmitHookCommand } from "../orchestration/prompt-submit-hook"
+import { injectStopHookIntoSettingsFile } from "../orchestration/stop-gate-hook"
 import { PATHS } from "../paths"
-import type { McpGroup } from "../peer-mcp-personas"
+import { buildPeerAwarenessSnippet, type McpGroup } from "../peer-mcp-personas"
 import { state } from "../state"
+import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "../toolbelt"
+import {
+  activeDispatchModes,
+  buildWorkerGuardHookCommand,
+  guardToolMatcher,
+} from "../worker-dispatch"
 
 export interface ServeEnhancementsHandle {
   cleanup: () => Promise<void>
+  nonce?: string
 }
 
 const NOOP: ServeEnhancementsHandle = { cleanup: async () => {} }
@@ -74,6 +92,37 @@ export async function provisionServeEnhancements(
       nonce: runtime.nonce,
     })
 
+    const peerSnippet = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: gem,
+      workerToolsAvailable: workerToolsEnabled(),
+      standInAvailable: standInToolEnabled(),
+      browseAvailable: browserToolsEnabled(),
+      compoundBrowseAvailable: browserCompoundToolsEnabled(),
+      powerBrowseAvailable: state.powerBrowseEnabled,
+      agentToolsAvailable: false,
+      implementerAvailable: implementerSubagentModel() != null,
+      groupKeys,
+    })
+
+    await appendPeerAwarenessToMirroredClaudeMd(peerSnippet).catch((err) =>
+      consola.warn(`Peer-awareness CLAUDE.md append failed: ${String(err)}`),
+    )
+    await prependStyleDirectiveToMirroredClaudeMd().catch((err) =>
+      consola.warn(`Style-directive CLAUDE.md prepend failed: ${String(err)}`),
+    )
+    await prependOperatingDefaultsToMirroredClaudeMd(OPERATING_DEFAULTS_DIRECTIVE).catch((err) =>
+      consola.warn(`Operating-defaults CLAUDE.md prepend failed: ${String(err)}`),
+    )
+    if (toolbeltEnabled()) {
+      const toolbeltLine = buildToolbeltAwareness(availableToolCommands())
+      if (toolbeltLine) {
+        await appendToolbeltAwarenessToMirroredClaudeMd(toolbeltLine).catch((err) =>
+          consola.warn(`Toolbelt CLAUDE.md append failed: ${String(err)}`),
+        )
+      }
+    }
+
     // gh-* skills, minus the operator/tab-specific ones (first-mate, artifact).
     let skillsWritten = 0
     for (const s of INJECTED_SKILLS) {
@@ -86,11 +135,41 @@ export async function provisionServeEnhancements(
       if (r.written) skillsWritten++
     }
 
+    const settingsPath = path.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+
     // Suppress AI attribution in the mirror's settings.json (no-op if the user
     // already configured it).
-    await injectAttributionSuppressionIntoSettingsFile(
-      path.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json"),
-    ).catch(() => {})
+    await injectAttributionSuppressionIntoSettingsFile(settingsPath).catch(() => {})
+
+    if (workerToolsEnabled()) {
+      const promptCmd = buildPromptSubmitHookCommand(process.execPath, process.argv[1])
+      await injectStopHookIntoSettingsFile(settingsPath, promptCmd, "UserPromptSubmit", 45).catch(
+        (err) => consola.warn(`Could not register the UserPromptSubmit hook: ${String(err)}`),
+      )
+
+      if (!injected.ok) {
+        consola.warn(
+          "Workers non-blocking guard NOT registered: subagent MCP injection fell back to parent-only, so worker-* dispatchers cannot reach the workers server. Raw worker tools remain usable on the main thread.",
+        )
+      } else if (process.env.GH_ROUTER_DISABLE_WORKER_GUARD !== "1") {
+        const workersKey = workersKeyOf(groupKeys)
+        const modes = activeDispatchModes({ browse: browseAgentEnabled() })
+        const cmd = buildWorkerGuardHookCommand(
+          process.execPath,
+          process.argv[1],
+          workersKey,
+          modes,
+        )
+        const matcher = guardToolMatcher(workersKey, modes)
+        await injectStopHookIntoSettingsFile(settingsPath, cmd, "PreToolUse", 10, matcher).catch(
+          (err) => consola.warn(`Could not register the workers PreToolUse guard hook: ${String(err)}`),
+        )
+      } else {
+        consola.info(
+          "Workers non-blocking guard disabled via GH_ROUTER_DISABLE_WORKER_GUARD=1; raw worker tools remain callable on the main thread.",
+        )
+      }
+    }
 
     const servers = injected.ok
       ? injected.serversAdded.join(", ")
@@ -98,7 +177,7 @@ export async function provisionServeEnhancements(
     consola.info(
       `github-router tools wired into Claude sessions: MCP [${servers}], ${runtime.personas.length} subagents, ${skillsWritten} skills.`,
     )
-    return { cleanup: runtime.cleanup }
+    return { cleanup: runtime.cleanup, nonce: runtime.nonce }
   } catch (err) {
     consola.warn(
       `Could not wire the github-router MCP/skills layer: ${
