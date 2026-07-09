@@ -7,7 +7,7 @@ import consola from "consola"
 
 import { killChildProcessTree } from "./lib/exec"
 import { ensureClaudeConfigMirror, removeOwnClaudeConfigMirror } from "./lib/paths"
-import { DEFAULT_PORT, pickClaudeDefault } from "./lib/port"
+import { pickClaudeDefault } from "./lib/port"
 import {
   getClaudeCodeEnvVars,
   parseSharedArgs,
@@ -33,6 +33,29 @@ async function getFreePort(): Promise<number> {
       s.close(() => resolve(port))
     })
   })
+}
+
+/** Default user-facing control-plane port when `--port` is not given. */
+const DEFAULT_SERVE_PORT = 5454
+
+function isPortFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = http.createServer()
+    s.once("error", () => resolve(false))
+    s.listen(port, "127.0.0.1", () => s.close(() => resolve(true)))
+  })
+}
+
+/**
+ * Resolve the user-facing port: honor an explicit `--port`; otherwise use 5454
+ * when free, else fall back to a random free port.
+ */
+async function resolveServePort(requested?: number): Promise<number> {
+  if (requested != null) return requested
+  if (await isPortFree(DEFAULT_SERVE_PORT)) return DEFAULT_SERVE_PORT
+  const fallback = await getFreePort()
+  consola.info(`Port ${DEFAULT_SERVE_PORT} is in use; using ${fallback} instead.`)
+  return fallback
 }
 
 function openBrowser(url: string): void {
@@ -83,6 +106,17 @@ export const serve = defineCommand({
       type: "boolean",
       default: false,
       description: "Do not open the browser automatically",
+    },
+    "public-url": {
+      type: "string",
+      description:
+        "Public URL(s) this is reachable at (e.g. a dev-tunnel https URL), comma-separated — allowlists their host+origin for remote access",
+    },
+    devtunnel: {
+      type: "boolean",
+      default: false,
+      description:
+        "Accept any *.devtunnels.ms host/origin (Microsoft dev tunnels) without pinning the exact --public-url",
     },
   },
   async run({ args }) {
@@ -209,8 +243,30 @@ export const serve = defineCommand({
       process.exit(1)
     }
 
-    // 7. reverse proxy on the user-facing port with zero-login token injection.
-    const servePort = parsed.port ?? DEFAULT_PORT
+    // 7. resolve remote-access allowlist (dev tunnels) + the user-facing port.
+    const publicUrls = String(args["public-url"] ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+    const extraAllowedHosts: string[] = []
+    const extraAllowedOrigins: string[] = []
+    for (const u of publicUrls) {
+      try {
+        const url = new URL(u)
+        extraAllowedHosts.push(url.host)
+        extraAllowedOrigins.push(url.origin)
+      } catch {
+        consola.warn(`Ignoring invalid --public-url "${u}"`)
+      }
+    }
+    const allowDevtunnelHosts = args.devtunnel === true
+    if (extraAllowedHosts.length || allowDevtunnelHosts) {
+      consola.warn(
+        "Remote access enabled: anyone who reaches this through your tunnel AND passes the tunnel's authentication gets FULL control-plane access — including a shell on this machine. Use an authenticated (non-anonymous) tunnel and only grant access to people you fully trust.",
+      )
+    }
+
+    const servePort = await resolveServePort(parsed.port)
     let reverse
     try {
       reverse = await startReverseProxy({
@@ -219,6 +275,9 @@ export const serve = defineCommand({
         bindHost: "127.0.0.1",
         bindPort: servePort,
         authToken: token,
+        extraAllowedHosts,
+        extraAllowedOrigins,
+        allowDevtunnelHosts,
       })
     } catch (err) {
       consola.error(
@@ -232,8 +291,13 @@ export const serve = defineCommand({
     reverseClose = reverse.close
 
     // 8. ready.
+    const publicLine = publicUrls.length
+      ? `\npublic: ${publicUrls.join(", ")}`
+      : allowDevtunnelHosts
+        ? `\npublic: any *.devtunnels.ms tunnel`
+        : ""
     consola.box(
-      `🖥️  github-router control plane\n\n${reverse.url}\n\nsigned in as ${username} · model ${chosenSlug}\nCtrl+C to stop`,
+      `🖥️  github-router control plane\n\n${reverse.url}${publicLine}\n\nsigned in as ${username} · model ${chosenSlug}\nCtrl+C to stop`,
     )
     if (args["no-open"] !== true) openBrowser(reverse.url)
   },

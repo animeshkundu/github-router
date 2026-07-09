@@ -23,6 +23,20 @@ export interface ReverseProxyOptions {
   bindPort: number
   /** JWT injected into the SPA so it boots authenticated. */
   authToken: string
+  /**
+   * Extra exact `host:port` values to accept beyond loopback (e.g. a specific
+   * dev-tunnel host `abc-5454.usw2.devtunnels.ms`). Used for remote access.
+   */
+  extraAllowedHosts?: string[]
+  /** Extra exact origins to accept (e.g. `https://abc-5454.usw2.devtunnels.ms`). */
+  extraAllowedOrigins?: string[]
+  /**
+   * Accept ANY `*.devtunnels.ms` host + `https://*.devtunnels.ms` origin. A
+   * convenience for Microsoft dev tunnels when the exact URL isn't pinned. Only
+   * the user's own authenticated tunnel actually forwards to this loopback port,
+   * so this does not weaken the same-user loopback trust boundary.
+   */
+  allowDevtunnelHosts?: boolean
 }
 
 export interface ReverseProxyHandle {
@@ -60,19 +74,38 @@ export async function startReverseProxy(
     `127.0.0.1:${bindPort}`,
     `localhost:${bindPort}`,
     `[::1]:${bindPort}`,
+    ...(opts.extraAllowedHosts ?? []).map((h) => h.toLowerCase()),
   ])
   const allowedOrigins = new Set([
     `http://127.0.0.1:${bindPort}`,
     `http://localhost:${bindPort}`,
     `http://[::1]:${bindPort}`,
+    ...(opts.extraAllowedOrigins ?? []).map((o) => o.toLowerCase()),
   ])
+  // `(^|\.)devtunnels.ms$` matches `x.devtunnels.ms` but not `evildevtunnels.ms`
+  // / `evil-devtunnels.ms` (the char before must be start-of-string or a dot).
+  const DEVTUNNEL_RE = /(^|\.)devtunnels\.ms$/i
+  const isDevtunnelHost = (host: string): boolean =>
+    !!opts.allowDevtunnelHosts && DEVTUNNEL_RE.test(host.replace(/:\d+$/, ""))
+  const isDevtunnelOrigin = (origin: string): boolean => {
+    if (!opts.allowDevtunnelHosts) return false
+    try {
+      const u = new URL(origin)
+      return u.protocol === "https:" && DEVTUNNEL_RE.test(u.hostname)
+    } catch {
+      return false
+    }
+  }
   // Host defends against DNS-rebinding; Origin defends against cross-origin
   // browser access. A missing Origin (plain navigation / non-browser) is only
-  // allowed once the Host has already been confirmed loopback.
+  // allowed once the Host has already been confirmed allowed.
   const hostAllowed = (host?: string): boolean =>
-    !!host && allowedHosts.has(host.toLowerCase())
+    !!host
+    && (allowedHosts.has(host.toLowerCase()) || isDevtunnelHost(host.toLowerCase()))
   const originAllowed = (origin?: string): boolean =>
-    !origin || allowedOrigins.has(origin.toLowerCase())
+    !origin
+    || allowedOrigins.has(origin.toLowerCase())
+    || isDevtunnelOrigin(origin)
 
   // Track hijacked upgrade sockets so close() can destroy them — http.Server
   // .close() otherwise waits for them forever (shutdown hang).

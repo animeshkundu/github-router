@@ -67,7 +67,11 @@ async function startUpstream(
   return { port }
 }
 
-async function startProxyTo(targetPort: number, token = "jwt-abc.def.ghi") {
+async function startProxyTo(
+  targetPort: number,
+  token = "jwt-abc.def.ghi",
+  extra: Partial<Parameters<typeof startReverseProxy>[0]> = {},
+) {
   const bindPort = await getFreePort()
   const handle = await startReverseProxy({
     targetHost: "127.0.0.1",
@@ -75,6 +79,7 @@ async function startProxyTo(targetPort: number, token = "jwt-abc.def.ghi") {
     bindHost: "127.0.0.1",
     bindPort,
     authToken: token,
+    ...extra,
   })
   cleanups.push(() => handle.close())
   return handle
@@ -156,6 +161,65 @@ describe("reverse-proxy Origin enforcement", () => {
     const res = await httpGet(proxy.port, "/", { host: "evil.example:4444" })
     expect(res.status).toBe(403)
     expect(res.body).not.toContain("stolen-jwt")
+  })
+})
+
+describe("reverse-proxy remote-access allowlist (dev tunnels)", () => {
+  const okHtml: http.RequestListener = (_req, res) => {
+    res.writeHead(200, { "content-type": "text/html" })
+    res.end("<html><head></head><body>hi</body></html>")
+  }
+
+  it("allows an explicitly allowlisted host+origin (--public-url)", async () => {
+    const up = await startUpstream(okHtml)
+    const proxy = await startProxyTo(up.port, "t", {
+      extraAllowedHosts: ["abc-5454.usw2.devtunnels.ms"],
+      extraAllowedOrigins: ["https://abc-5454.usw2.devtunnels.ms"],
+    })
+    const ok = await httpGet(proxy.port, "/", {
+      host: "abc-5454.usw2.devtunnels.ms",
+      origin: "https://abc-5454.usw2.devtunnels.ms",
+    })
+    expect(ok.status).toBe(200)
+    // a DIFFERENT foreign host is still rejected
+    const bad = await httpGet(proxy.port, "/", { host: "evil.example:1" })
+    expect(bad.status).toBe(403)
+  })
+
+  it("allows any *.devtunnels.ms host+origin when devtunnel mode is on", async () => {
+    const up = await startUpstream(okHtml)
+    const proxy = await startProxyTo(up.port, "t", { allowDevtunnelHosts: true })
+    const ok = await httpGet(proxy.port, "/", {
+      host: "xyz-9.euw.devtunnels.ms",
+      origin: "https://xyz-9.euw.devtunnels.ms",
+    })
+    expect(ok.status).toBe(200)
+  })
+
+  it("rejects devtunnel lookalikes and http (not https) origins", async () => {
+    const up = await startUpstream(okHtml)
+    const proxy = await startProxyTo(up.port, "t", { allowDevtunnelHosts: true })
+    // lookalike host (no dot before devtunnels.ms)
+    const look = await httpGet(proxy.port, "/", { host: "evil-devtunnels.ms" })
+    expect(look.status).toBe(403)
+    // suffix-append attack
+    const suffix = await httpGet(proxy.port, "/", {
+      host: "abc.devtunnels.ms.attacker.com",
+    })
+    expect(suffix.status).toBe(403)
+    // http (non-tls) origin claiming a devtunnel host
+    const insecure = await httpGet(proxy.port, "/", {
+      host: "abc.devtunnels.ms",
+      origin: "http://abc.devtunnels.ms",
+    })
+    expect(insecure.status).toBe(403)
+  })
+
+  it("does NOT allow devtunnel hosts when the mode is off (default)", async () => {
+    const up = await startUpstream(okHtml)
+    const proxy = await startProxyTo(up.port, "t")
+    const res = await httpGet(proxy.port, "/", { host: "abc.devtunnels.ms" })
+    expect(res.status).toBe(403)
   })
 })
 
