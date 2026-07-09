@@ -22,6 +22,7 @@ import {
   waitForCloudCliReady,
 } from "./lib/serve/cloudcli"
 import { DevtunnelError, startDevtunnel } from "./lib/serve/devtunnel"
+import { provisionServeEnhancements } from "./lib/serve/enhancements"
 import { startReverseProxy } from "./lib/serve/reverse-proxy"
 import { getGitHubUser } from "./services/github/get-user"
 
@@ -152,6 +153,12 @@ export const serve = defineCommand({
       process.exit(1)
     }
 
+    // 2b. wire the github-router enhancement layer (MCP servers + peer/worker
+    //     subagents + gh-* skills) into the mirror so CloudCLI-spawned Claude
+    //     sessions get the same tools `github-router claude` provides. Must run
+    //     after the mirror exists and before CloudCLI spawns claude.
+    const enhancements = await provisionServeEnhancements(serverUrl)
+
     // 3. filtered child env: the vetted secret-stripping allowlist (buildEnv,
     //    drops GITHUB_TOKEN/GH_ROUTER_*/ANTHROPIC_AUTH_TOKEN/OPENAI_API_KEY/
     //    COPILOT_TOKEN) plus the non-secret ANTHROPIC_BASE_URL/CLAUDE_CONFIG_DIR
@@ -207,6 +214,7 @@ export const serve = defineCommand({
       } catch {
         /* best-effort */
       }
+      await enhancements.cleanup().catch(() => {})
       await removeOwnClaudeConfigMirror().catch(() => {})
     }
     process.once("SIGINT", () => void shutdown().then(() => process.exit(0)))
