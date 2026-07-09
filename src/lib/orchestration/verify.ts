@@ -38,7 +38,7 @@ export interface IRVerifyResult {
 export interface VerifyOpts {
   /**
    * The kernel's allowlist of sealed executable gate ids. Every `executable`
-   * gate's `gateId` MUST be in it (gate-immutability, invariant 5 — a non-empty
+   * gate's `gateId` MUST be in it (gate-immutability, invariant 5; a non-empty
    * string alone could smuggle an unsealed id). Omitted values default to the
    * kernel's sealed registry; pass a set only to narrow/override in tests or when
    * `run_workflow` constrains an IR to the selected gate.

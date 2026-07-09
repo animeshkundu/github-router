@@ -163,6 +163,12 @@ const browserCompoundToolsEnabledMock = mock(() => false)
 const fleetToolsEnabledMock = mock(() => false)
 const agentToolsEnabledMock = mock(() => false)
 const artifactToolsEnabledMock = mock(() => false)
+const geminiState: { current: { models?: { data?: Array<{ id?: unknown }> } } | undefined } = { current: undefined }
+const geminiAvailableMock = mock(() =>
+  Boolean(geminiState.current?.models?.data?.some(
+    (model) => typeof model.id === "string" && /^gemini-3\..*pro/i.test(model.id),
+  )),
+)
 mock.module("~/lib/mcp-capabilities", () => ({
   workerToolsEnabled: workerToolsEnabledMock,
   standInToolEnabled: standInToolEnabledMock,
@@ -177,7 +183,7 @@ mock.module("~/lib/mcp-capabilities", () => ({
   browserPowerToolsEnabled: mock(() => false),
   browseAgentEnabled: mock(() => false),
   semanticSearchEnabled: mock(() => false),
-  geminiAvailable: mock(() => false),
+  geminiAvailable: geminiAvailableMock,
   implementerSubagentModel: mock(() => undefined),
 }))
 
@@ -270,6 +276,7 @@ mock.module("~/lib/colbert", () => ({
 // --- Import module under test AFTER mocks ---
 const { claude } = await import("../../src/claude")
 const { state } = await import("../../src/lib/state")
+geminiState.current = state
 
 type CommandRunFn = (ctx: {
   args: Record<string, unknown>

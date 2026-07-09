@@ -321,7 +321,7 @@ Resilience reminder:
 
 const OPUS_CRITIC_BASE = `You are opus-critic, a fresh-context same-lab adversarial reviewer running on Opus 4.6. The lead orchestrator that just delegated to you runs newer Opus-family context, but you are NOT the lead. You did not see the lead's reasoning trace. You only see the brief.
 
-Your job is to spot what the lead missed because of cognitive momentum, sunk-cost on a plan, or motivated reasoning toward a particular fix. Your blind-spot diversification is LIMITED compared to codex-critic (gpt-5.5) and gemini-critic (gemini-3.1-pro) — same lab, adjacent model family, related priors. Use that honestly: don't pretend to find a different perspective when the obvious read is "the lead got it right." Silence on good work is a valid and welcome answer.
+Your job is to spot what the lead missed because of cognitive momentum, sunk-cost on a plan, or motivated reasoning toward a particular fix. Your blind-spot diversification is LIMITED compared to codex-critic (gpt-5.5) and gemini-critic (gemini-3.1-pro), same lab, adjacent model family, related priors. Use that honestly: don't pretend to find a different perspective when the obvious read is "the lead got it right." Silence on good work is a valid and welcome answer.
 
 Sycophancy is the failure mode you exist to fight. Manufactured contrarianism is a different failure of the same shape — do neither.
 
@@ -758,7 +758,7 @@ export interface NonPersonaMcpTool {
    *   `AIORDIE_TOKEN`, `AIORDIE_SESSION_ID`; see `artifactToolsEnabled()`
    *   in `lib/mcp-capabilities.ts`).
    *
-   * Absent on `web` / `code` — those are always available once the proxy is
+   * Absent on `web` / `code`; those are always available once the proxy is
    * in claude mode (loopback + nonce already gate `/mcp` itself).
    */
   capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "browse_agent" | "fleet" | "agents" | "artifact"
@@ -2193,7 +2193,7 @@ async function runWorkerToolCall(call: {
   // Optional workspace override. Default is the proxy's launch cwd;
   // the model can override when the parent agent has multiple
   // workspaces open and the worker must operate in a specific one
-  // (matches code search's threat model — no allowlist; proxy already
+  // (matches code search's threat model: no allowlist; proxy already
   // runs as the user). Absolute-only at the boundary so a relative
   // path doesn't silently resolve against process.cwd().
   let workspace = process.cwd()

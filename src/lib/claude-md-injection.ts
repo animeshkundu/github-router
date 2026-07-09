@@ -55,7 +55,7 @@ function ARTIFACT_PANEL_DIRECTIVE(peersKey = "peers"): string {
     + "Plan-mode plans are auto-rendered to HTML and auto-opened for you; raw markdown is only a fallback. Skip the panel only for trivial one-line answers.\n\n"
     + "Make the HTML good: match the subject project's design system (its Tailwind / theme / tokens) when the artifact represents a specific app, otherwise clean readable defaults. "
     + "Per-type cheatsheet. plan: goal, current state, proposed approach, risks / open questions. comparison: options as columns with trade-off rows and a recommendation. table: scannable rows with a sticky header. diagram: boxes + arrows (SVG/CSS or Mermaid). code / diff: `<pre>` with before/after. "
-    + "To let the user act (not just comment), emit declarative controls (no JS): `data-aod-action` (verb) + `data-aod-id` (stable) [+ `data-aod-value`] — a choose-one option fires on click, a multi-select is checkboxes sharing `data-aod-group` plus a submit button with that group. "
+    + "To let the user act (not just comment), emit declarative controls (no JS): `data-aod-action` (verb) + `data-aod-id` (stable) [+ `data-aod-value`]; a choose-one option fires on click, and a multi-select is checkboxes sharing `data-aod-group` plus a submit button with that group. "
     + "The `gh-artifact-review` skill carries the fuller playbook."
 }
 

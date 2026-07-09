@@ -344,6 +344,17 @@ describe("decideStopHook (subcommand decision)", () => {
     expect(state.has(baselineKey("s1", "/w", "typecheck-only"))).toBe(false)
   })
 
+  test("failed diff capture still invokes the check runner", async () => {
+    const exec = mock(async () => ({ exitCode: 0 }))
+    const captureDiff = mock(async (_cwd: string) => { throw new Error("git diff failed") })
+    const { state, baseline } = memBaseline()
+    const d = await decideStopHook(decisionInput({ exec, captureDiff, baseline }))
+    expect(d.exitCode).toBe(0)
+    expect(captureDiff.mock.calls.length).toBe(1)
+    expect(exec.mock.calls.length).toBe(1)
+    expect(state.get(baselineKey("s1", "/w", "typecheck-only"))).toEqual([])
+  })
+
   test("non-empty diff with a regressed failing gate still blocks", async () => {
     const exec = mock(async () => ({ exitCode: 1 }))
     const d = await decideStopHook(decisionInput({ exec, baseline: singleSlotBaseline([]) }))

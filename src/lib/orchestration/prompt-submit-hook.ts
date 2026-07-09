@@ -76,7 +76,7 @@ export function decidePromptSubmit(input: { stdin: string; steerEnabled: boolean
 /**
  * Static encouragement injected only for a non-trivial prompt (no extra model
  * call, no latency tax): nudge parallel lexical+semantic search before
- * concluding. Mirrors the v1 advisory tone — additive, never blocking.
+ * concluding. Mirrors the v1 advisory tone: additive, never blocking.
  */
 export const PROMPT_SEARCH_TIP =
   "TIP (advisory): when this task needs code context, search lexical + semantic in "

@@ -16,8 +16,8 @@
  *     The proxy runs as the user; code_search reads what the proxy
  *     process can read, the same way Claude Code's built-in Read /
  *     Bash tools do. The earlier allow-set + secret-shape denylist
- *     was dropped: the threat model is symmetric (the model already
- *     has Bash and Read), so an extra gate on this one tool was just
+ *     was dropped: the threat model is symmetric; the model already
+ *     has Bash and Read, so an extra gate on this one tool was just
  *     inconsistency, not defense.
  *
  *   - rg is spawned with `cwd: canonicalWorkspace` and target `.`,
