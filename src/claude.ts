@@ -68,6 +68,7 @@ import nodePath from "node:path"
 import { tmpdir } from "node:os"
 import { randomBytes } from "node:crypto"
 import { buildPeerAwarenessSnippet, buildPeerAwarenessSummary, type McpGroup } from "./lib/peer-mcp-personas"
+import { injectAttributionSuppressionIntoSettingsFile } from "./lib/attribution-settings"
 import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, OPERATING_DEFAULTS_DIGEST, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
@@ -1135,6 +1136,25 @@ export const claude = defineCommand({
           err instanceof Error ? err.message : String(err)
         }`,
       )
+    }
+
+    // Deterministic backstop for the injected no-attribution style directive:
+    // write `attribution: {commit:"", pr:""}` into the mirrored settings.json so
+    // Claude Code's harness suppresses the commit/PR bylines at the source, not
+    // just via the advisory CLAUDE.md prose. Presence-guarded (an existing
+    // user `attribution`/`includeCoAuthoredBy` wins) and best-effort. Opt out
+    // with GH_ROUTER_DISABLE_NO_ATTRIBUTION=1.
+    if (process.env.GH_ROUTER_DISABLE_NO_ATTRIBUTION !== "1") {
+      try {
+        const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+        await injectAttributionSuppressionIntoSettingsFile(settingsPath)
+      } catch (err) {
+        consola.warn(
+          `No-attribution settings backstop skipped: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
     }
 
     launchChild(
