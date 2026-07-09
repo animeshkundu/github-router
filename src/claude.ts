@@ -28,6 +28,7 @@ import {
   stopGateId,
   stopGateDisabled,
 } from "./lib/orchestration/stop-gate-hook"
+import { buildPlanReviewHookCommand, planReviewEnabled } from "./lib/orchestration/plan-review-hook"
 import {
   fileBaselineStore,
   repoFingerprint,
@@ -48,6 +49,7 @@ import {
   writeDiscoveredGate,
 } from "./lib/orchestration/gate-discovery"
 import { liveExec } from "./lib/orchestration/live-exec"
+import { hookMcpRuntimeFromEnv } from "./lib/orchestration/hook-mcp-client"
 import { buildPromptSubmitHookCommand } from "./lib/orchestration/prompt-submit-hook"
 import {
   FIRST_MATE_GUARD_MATCHER,
@@ -825,6 +827,20 @@ export const claude = defineCommand({
             await injectStopHookIntoSettingsFile(settingsPath, cmd, "PostToolUse", undefined, "ExitPlanMode")
           } catch (err) {
             consola.warn(`Could not register the artifact auto-open hook: ${String(err)}`)
+          }
+        }
+
+        // Advisory plan review: a SECOND PostToolUse(ExitPlanMode) hook, separate
+        // from artifact auto-open. It is default-on when the hook MCP runtime is
+        // wired, top-level-only at runtime, and never blocks ExitPlanMode; material
+        // findings are written to the shared findings store for the next prompt.
+        if (hookMcpRuntimeFromEnv(envVars) && planReviewEnabled()) {
+          try {
+            const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+            const command = buildPlanReviewHookCommand(process.execPath, process.argv[1])
+            await injectStopHookIntoSettingsFile(settingsPath, command, "PostToolUse", undefined, "ExitPlanMode")
+          } catch (err) {
+            consola.warn(`Could not register the advisory plan-review hook: ${String(err)}`)
           }
         }
 
