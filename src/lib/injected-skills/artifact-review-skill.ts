@@ -2,7 +2,7 @@ export const ARTIFACT_REVIEW_SKILL = {
   name: "gh-artifact-review",
   md: `---
 name: gh-artifact-review
-description: Review plans and artifacts in the ai-or-die panel. Default to authoring a self-contained HTML artifact (rich, annotatable, optionally interactive) and opening THAT for the human, then drain feedback with artifact_await, revise, and end the loop. Use when running inside an ai-or-die tab and you have a plan, comparison, diagram, table, diff, or report the user should see before proceeding.
+description: Reviews plans and artifacts in the ai-or-die panel. Defaults to authoring a self-contained HTML artifact (rich, annotatable, optionally interactive) and opening THAT for the human, then drains feedback with artifact_await, revises, and ends the loop. Use when running inside an ai-or-die tab and there is a plan, comparison, diagram, table, diff, or report the user should see before proceeding.
 user-invocable: true
 ---
 

@@ -2,7 +2,7 @@ export const FIRST_MATE_SETUP_SKILL = {
   name: "gh-first-mate-scaffold",
   md: `---
 name: gh-first-mate-scaffold
-description: Seed a world-class repo-geared agentic-dev foundation through first-mate.
+description: Scaffolds a repo-geared agentic-dev foundation through first-mate: seeds guidance files, role agents, ADRs, changelog, learnings, PR template, test instructions, Copilot setup, and CI through a scaffold branch and PR. Use before the first build wave on an owned repository.
 user-invocable: true
 ---
 

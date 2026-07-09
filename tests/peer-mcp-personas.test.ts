@@ -104,9 +104,9 @@ describe("PERSONAS_READ", () => {
       expect(p.description.toLowerCase()).toContain("verbatim")
       // Per Anthropic's tool-use guidance: descriptions should be 3-4+
       // sentences for complex tools, explaining scope, when-to-use, and
-      // when-not-to-use. Cap at 400 chars to prevent bloat while allowing
-      // the routing signal Opus 4.8 needs to pick the right tool.
-      expect(p.description.length).toBeLessThan(400)
+      // when-not-to-use. Keep these substantive but bounded enough for
+      // frontmatter and tool-selection prompts.
+      expect(p.description.length).toBeLessThan(900)
     }
   })
 

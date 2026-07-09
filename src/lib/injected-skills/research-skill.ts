@@ -2,7 +2,7 @@ export const RESEARCH_SKILL = {
   name: "gh-research",
   md: `---
 name: gh-research
-description: Bounded saturation research for non-trivial GitHub Router asks: enumerate unknowns, gather in parallel through code search, web search, and explore workers, adversarially verify load-bearing claims, persist a freshness-stamped brief, and return a compact confidence-tagged root-cause summary when you need grounded context before planning or changing code.
+description: Bounded saturation research for non-trivial GitHub Router asks: enumerates unknowns, gathers in parallel through code search, web search, and explore workers, adversarially verifies load-bearing claims, persists a freshness-stamped brief, and returns a compact confidence-tagged root-cause summary. Use when grounded context is needed before planning or changing code.
 user-invocable: true
 ---
 

@@ -75,7 +75,7 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_list_tabs",
     description:
-      "List all open tabs across all browser windows. Returns each tab's id (used by other browser_* tools), URL, title, active flag, and window id.",
+      "Lists open tabs across all browser windows. It takes no input and returns each tab's id, URL, title, active flag, and window id. The returned tab ids are the inputs used by tab-scoped browser tools, especially for pre-existing tabs that were not opened by browser_open_tab. It is a power-tier discovery tool for tab selection and inventory, not a page-content reader or navigation tool.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -89,7 +89,7 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_open_tab",
     description:
-      "Open a URL in a new browser tab and wait for the page to finish loading. Returns the new tab's id, final URL after redirects, and HTTP status. Refuses to navigate to browser-internal settings / preferences / extensions / flags pages (returns {blocked: true, reason}); devtools://* is allowed.",
+      "Opens a URL in a new browser tab, or navigates the currently active tab when reuseActive is true, then waits briefly for the tab load state to reach complete. It takes a URL and optional reuseActive flag, and returns the tab id, final URL, and a synthetic statusCode load flag where 200 means the tab reported complete and 0 means it did not. The statusCode is not the page's HTTP response code, so a loaded 404 page can still return 200. Use this to establish a tab before other browser tools; blocked URLs return {blocked, reason}, including browser settings/preferences/extensions/flags pages, file:// by default, and extension options/popup pages, while devtools:// is allowed.",
     inputSchema: {
       type: "object",
       required: ["url"],
@@ -98,12 +98,12 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
         url: {
           type: "string",
           description:
-            "The URL to load. Maximum 8 KB. Settings / preferences / extensions / flags pages are blocked.",
+            "URL to load. Browser-internal settings, preferences, extensions, flags, password/management pages, extension options/popup pages, and file:// URLs by default are blocked before dispatch.",
         },
         reuseActive: {
           type: "boolean",
           description:
-            "When true, navigate the currently active tab instead of opening a new one. Default false.",
+            "When true, navigates the currently active tab instead of opening a new tab. Default false. Use browser_navigate when you already know the target tab id.",
         },
       },
     },
@@ -114,7 +114,8 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   },
   {
     toolNameHttp: "browser_close_tab",
-    description: "Close one or more tabs by tab id.",
+    description:
+      "Closes one or more browser tabs by id. It takes a non-empty tabIds array, usually obtained from browser_list_tabs, and returns {closed: N} after requesting Chrome to remove those tabs. This is a power-tier tab lifecycle tool for cleanup or closing known throwaway tabs. Avoid using it when the user may still need a tab, and prefer leaving the tab open if the id was not freshly discovered or created for the current task.",
     inputSchema: {
       type: "object",
       required: ["tabIds"],
@@ -123,7 +124,7 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
         tabIds: {
           type: "array",
           items: { type: "number" },
-          description: "Array of tab ids to close (from browser_list_tabs).",
+          description: "Non-empty array of tab ids to close, usually from browser_list_tabs or browser_open_tab.",
         },
       },
     },
@@ -135,22 +136,22 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_navigate",
     description:
-      "Navigate an existing tab: goto a URL, go back, go forward, or reload. Same URL-blocking policy as browser_open_tab.",
+      "Navigates an existing tab by going to a URL, moving back or forward in history, or reloading. It takes a tab id plus an action, with url required only for action='goto', and returns {finalUrl, statusCode} for completed navigation or {blocked, reason} for a policy-blocked URL. The statusCode is a synthetic load-complete flag, not the page's HTTP response code. Use this when the target tab already exists; use browser_open_tab to create a new tab, and expect the same URL policy blocks as open_tab, including browser-internal pages, file:// by default, and extension options/popup pages.",
     inputSchema: {
       type: "object",
       required: ["tabId", "action"],
       additionalProperties: false,
       properties: {
-        tabId: { type: "number", description: "Tab id from browser_list_tabs / browser_open_tab." },
+        tabId: { type: "number", description: "Tab id from browser_list_tabs or browser_open_tab." },
         action: {
           type: "string",
           enum: ["goto", "back", "forward", "reload"],
-          description: "The navigation action.",
+          description: "Navigation action: goto a URL, go back, go forward, or reload the current page.",
         },
-        url: { type: "string", description: "Required when action=goto. Max 8 KB." },
+        url: { type: "string", description: "URL to load when action='goto'. Ignored for back, forward, and reload." },
         hard: {
           type: "boolean",
-          description: "Reload only: bypass cache (Ctrl+Shift+R behavior). Default false.",
+          description: "Reload only: when true, bypasses cache like Ctrl+Shift+R. Default false.",
         },
       },
     },
@@ -162,17 +163,17 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_screenshot",
     description:
-      "Capture a PNG screenshot of the visible area of a tab. Returns base64-encoded image bytes plus contentType. The tab must be active in its window; this tool auto-activates if needed.",
+      "Captures a screenshot of the visible area of a tab, as PNG by default or JPEG when requested. It takes a tab id and optional format, then returns base64-encoded image bytes plus contentType. The tab must be active in its window, so this tool auto-activates the tab if needed and that changes which tab is focused. Use screenshot for visual layout, canvas, SVG, maps, or image-only regions; prefer browser_observe when page text and actionable state are enough.",
     inputSchema: {
       type: "object",
       required: ["tabId"],
       additionalProperties: false,
       properties: {
-        tabId: { type: "number", description: "Tab id from browser_list_tabs / browser_open_tab." },
+        tabId: { type: "number", description: "Tab id from browser_list_tabs or browser_open_tab." },
         format: {
           type: "string",
           enum: ["png", "jpeg"],
-          description: "Image format. Default 'png'.",
+          description: "Image format for the returned screenshot. Default 'png'; use 'jpeg' when smaller image bytes are preferable.",
         },
       },
     },
@@ -184,17 +185,17 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_read_page",
     description:
-      "Compressed page snapshot for the model: visible text, interactive elements with stable refs, viewport metadata, and (when present) `visualSurfaces` listing canvas / svg regions that need vision. Each element entry carries `bbox: [x, y, w, h]` in CSS viewport pixels (same coord space as browser_mouse / drag / scroll-at-pointer). Refs (e.g. `e42`) are stable for the lifetime of one read_page snapshot and are the preferred input to follow-up actions over brittle CSS selectors. The `viewport` block (`width`, `height`, `devicePixelRatio`, `scrollX`, `scrollY`) lets you map CSS-px bbox to device-px pixels for browser_screenshot. Mode controls what ships back: `summary` (default, ~5-15 KB) returns only viewport-visible elements/text and drops nameless non-interactive nodes; `full` returns up to 200 elements + 256 KiB of innerText (the legacy behavior — use only when you need off-screen content unscrolled). PREFER browser_act / browser_find for intent-driven interaction; read_page is the lower-level snapshot when you need to enumerate.",
+      "Returns a compressed page snapshot for a tab: visible text, interactive elements with refs, viewport metadata, and visualSurfaces for canvas or SVG regions that need vision. It takes a tab id and optional mode, and each element includes a ref plus bbox in CSS viewport pixels, the same coordinate space used by browser_mouse, browser_drag, and scroll at-pointer. Refs persist across snapshots of the same document until navigation or DOM replacement, and are a better input to follow-up actions than brittle CSS selectors. Use read_page when enumeration, coordinates, refs, or raw snapshot structure are needed; prefer browser_act or browser_find for intent-driven interaction, browser_observe for a short natural-language page summary, and browser_screenshot for visual pixels.",
     inputSchema: {
       type: "object",
       required: ["tabId"],
       additionalProperties: false,
       properties: {
-        tabId: { type: "number", description: "Tab id from browser_list_tabs / browser_open_tab." },
+        tabId: { type: "number", description: "Tab id from browser_list_tabs or browser_open_tab." },
         mode: {
           type: "string",
           enum: ["summary", "full"],
-          description: "Snapshot scope. Default 'summary' returns viewport-visible elements + text capped at 20 KiB. 'full' returns up to 200 interactive elements page-wide + 256 KiB of innerText.",
+          description: "Snapshot scope. Default 'summary' focuses on viewport-visible text and elements; 'full' asks for a broader page-wide snapshot. The default CDP extractor caps around 500 elements and 32 KiB text, with legacy fallback caps possibly lower or higher by mode.",
         },
       },
     },
@@ -206,49 +207,49 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_scroll",
     description:
-      "Scroll a tab. Five modes: top / bottom of the page, by an absolute pixel delta, to a specific element (by ref), or wheel-scroll a sub-region at a pointer location ('at-pointer' — the path that works for chat windows / infinite-scroll lists / modal bodies that don't respond to window.scrollTo because they have their own scroll container).",
+      "Scrolls a tab or a scrollable region inside a tab. It takes a tab id, target mode, and mode-specific fields for page top/bottom, pixel deltas, element centering, or wheel scrolling at a pointer. The at-pointer path dispatches a real wheel event at a ref, selector, or CSS viewport coordinate, which is the path for chat panes, infinite lists, and modal bodies with their own scroll containers. Use browser_act with action='scroll_into_view' or intent mode for simple element reveal; use browser_scroll when page-level movement, precise deltas, or sub-container wheel scrolling are needed.",
     inputSchema: {
       type: "object",
       required: ["tabId", "target"],
       additionalProperties: false,
       properties: {
-        tabId: { type: "number" },
+        tabId: { type: "number", description: "Tab id from browser_list_tabs or browser_open_tab." },
         target: {
           type: "string",
           enum: ["top", "bottom", "pixels", "element", "at-pointer"],
-          description: "Scroll target type.",
+          description: "Scroll target mode: page top, page bottom, pixel delta, element centering, or wheel event at a pointer.",
         },
         pixels: {
           type: "number",
-          description: "Pixel delta when target=pixels. Positive scrolls down, negative scrolls up.",
+          description: "Pixel delta when target='pixels'. Positive scrolls down and negative scrolls up.",
         },
         ref: {
           type: "string",
-          description: "Element ref. For target=element, scrolls so the element is centered. For target=at-pointer, resolves to the bbox center as the wheel position.",
+          description: "Element ref. For target='element', the element is centered; for target='at-pointer', the element bbox center becomes the wheel position.",
         },
         selector: {
           type: "string",
-          description: "CSS selector. For target=at-pointer, fallback when no ref. Resolves to bbox center.",
+          description: "CSS selector fallback when no ref is available. For target='at-pointer', resolves to the element bbox center.",
         },
         x: {
           type: "number",
-          description: "Pointer x (CSS viewport px) for target=at-pointer. Pair with y. Exactly one of (ref, selector, or x+y) is required for at-pointer.",
+          description: "Pointer x in CSS viewport pixels for target='at-pointer'. Pair with y. Exactly one of ref, selector, or x+y is required for at-pointer.",
         },
         y: {
           type: "number",
-          description: "Pointer y (CSS viewport px) for target=at-pointer. Pair with x.",
+          description: "Pointer y in CSS viewport pixels for target='at-pointer'. Pair with x.",
         },
         deltaX: {
           type: "number",
-          description: "Wheel delta x (CSS px) for target=at-pointer. Default 0. Clamped to |10000|.",
+          description: "Wheel delta x in CSS pixels for target='at-pointer'. Default 0. Clamped to absolute value 10000.",
         },
         deltaY: {
           type: "number",
-          description: "Wheel delta y (CSS px) for target=at-pointer. Positive scrolls down. Default 0. Clamped to |10000|. At least one of deltaX/deltaY must be non-zero.",
+          description: "Wheel delta y in CSS pixels for target='at-pointer'. Positive scrolls down. Default 0. Clamped to absolute value 10000; at least one of deltaX or deltaY must be non-zero.",
         },
         force: {
           type: "boolean",
-          description: "Skip the pre-wheel elementFromPoint hit-test for target=at-pointer. Default false. Set true when an overlay covers the target but forwards wheel events.",
+          description: "For target='at-pointer', skips the pre-wheel elementFromPoint hit-test. Default false. Set true only when an overlay covers the target but forwards wheel events.",
         },
       },
     },
@@ -260,16 +261,16 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_keyboard",
     description:
-      "Send a keystroke or chord to the focused element. Use 'Control+L' / 'Command+L' for browser shortcuts, single characters for typing. Uses chrome.debugger so browser-level shortcuts (Ctrl+T, Ctrl+W, etc) actually fire.",
+      "Sends a discrete key or chord to the focused element or browser via CDP Input.dispatchKeyEvent. It takes a tab id and a keys string such as 'Control+L', 'Command+L', 'Enter', 'Escape', or 'ArrowDown', and returns the extension dispatch result. Browser-level shortcuts such as Ctrl+T and Ctrl+W actually fire because this uses chrome.debugger input rather than synthetic DOM events. Use keyboard for shortcuts and non-printable control keys; prefer browser_type for literal text entry into a focused field and browser_act with action='fill' for plain form values.",
     inputSchema: {
       type: "object",
       required: ["tabId", "keys"],
       additionalProperties: false,
       properties: {
-        tabId: { type: "number" },
+        tabId: { type: "number", description: "Tab id from browser_list_tabs or browser_open_tab." },
         keys: {
           type: "string",
-          description: "Key or chord. Modifiers (Control, Alt, Shift, Meta / Command) joined with '+'. Example: 'Control+L'.",
+          description: "Key or chord. Join modifiers with '+', using Control, Ctrl, Alt, Shift, Meta, Command, or Cmd. A single named key such as Enter or Escape is also valid.",
         },
       },
     },
@@ -281,23 +282,23 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_wait",
     description:
-      "Wait for an element to appear (until='selector'), the tab URL to match a regex (until='url'), or the network to go idle (until='networkIdle' - heuristic: tab status complete + 500ms quiet). Returns {ok: true, elapsedMs} on success, {ok: false, reason: 'timeout'} on miss.",
+      "Waits for a tab condition without mutating the page. It takes a tab id, an until mode, and the matching operand: a CSS selector for element appearance, a JavaScript regex string for URL matching, or networkIdle for the heuristic of tab status complete plus 500 ms quiet. It returns {ok: true, elapsedMs} on success and {ok: false, reason: 'timeout'} when the condition is not reached before the timeout. Use wait after navigation or actions that trigger asynchronous rendering; do not use it as a page reader, and prefer browser_observe or browser_read_page when the task is to inspect current content.",
     inputSchema: {
       type: "object",
       required: ["tabId", "until"],
       additionalProperties: false,
       properties: {
-        tabId: { type: "number" },
+        tabId: { type: "number", description: "Tab id from browser_list_tabs or browser_open_tab." },
         until: {
           type: "string",
           enum: ["selector", "url", "networkIdle"],
-          description: "What to wait for.",
+          description: "Condition to wait for: selector, URL regex match, or network-idle heuristic.",
         },
-        selector: { type: "string", description: "CSS selector when until=selector." },
-        urlPattern: { type: "string", description: "JS regex (string form) when until=url." },
+        selector: { type: "string", description: "CSS selector required when until='selector'." },
+        urlPattern: { type: "string", description: "JavaScript regex source string required when until='url'." },
         timeoutMs: {
           type: "number",
-          description: "Max wait. Default 10000, hard cap 60000.",
+          description: "Maximum wait in milliseconds. Default 10000, hard cap 60000.",
         },
       },
     },
@@ -309,20 +310,20 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_eval_js",
     description:
-      "Evaluate a JavaScript expression in the tab's main world (equivalent to typing in the DevTools console). Returns {result} or {error}. Awaits promises returned by the expression. Single narrowly-named escape hatch for behaviors the other tools don't cover.",
+      "Evaluates a JavaScript expression in the tab's main world, equivalent to typing in the DevTools console. It takes a tab id, expression, and optional timeout, awaits promises returned by the expression, and returns {result} or {error}. The expression can read or mutate the page, storage, cookies, or location, so this is the power-tier escape hatch for behaviors the structured browser tools do not cover. Prefer dedicated tools for navigation, clicking, filling, extraction, diagnostics, and screenshots; note that URL policy checks only apply directly to browser_open_tab and browser_navigate, while extension-side navigation blocking still applies to many browser-internal pages.",
     inputSchema: {
       type: "object",
       required: ["tabId", "expression"],
       additionalProperties: false,
       properties: {
-        tabId: { type: "number" },
+        tabId: { type: "number", description: "Tab id from browser_list_tabs or browser_open_tab." },
         expression: {
           type: "string",
-          description: "JS expression. Max 100 KB. Top-level await NOT supported - wrap in (async () => ...)().",
+          description: "JavaScript expression to evaluate. Size should stay small for reliability, but no schema length cap is enforced. Top-level await is not supported; wrap async work in (async () => ...)().",
         },
         timeoutMs: {
           type: "number",
-          description: "Max evaluation time. Default 5000, hard cap 30000.",
+          description: "Maximum evaluation time in milliseconds. Default 5000, hard cap 30000.",
         },
       },
     },
@@ -334,22 +335,22 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_download",
     description:
-      "Trigger a download by URL and wait for it to complete. Returns {downloadId, path, bytes, mimeType}. The file lands in Chrome's default Downloads dir unless saveAs is given.",
+      "Triggers a browser download from a direct URL and waits for the extension's completion signal. It takes a tab id for association, source='url', the URL, and optional saveAs path, then returns {downloadId, path, bytes, mimeType} when Chrome reports the download complete. The file lands in Chrome's default Downloads directory unless saveAs provides a relative filename or subdirectory, and conflicts are auto-uniquified by the browser. Use this for known direct download URLs; it does not click page links, and the extension currently waits up to 60 seconds internally, so downloads that finish after 60 seconds can report timeout even though the outer wire budget is larger.",
     inputSchema: {
       type: "object",
       required: ["tabId", "url"],
       additionalProperties: false,
       properties: {
-        tabId: { type: "number", description: "Tab id is logged but the download itself is window-scoped, not tab-scoped." },
+        tabId: { type: "number", description: "Tab id for association and logging; the download itself is window-scoped, not tab-scoped." },
         source: {
           type: "string",
           enum: ["url"],
-          description: "Download source. Only 'url' supported in v1; click-then-wait awaits Phase 5.",
+          description: "Download source. Only 'url' is supported in v1; click-then-wait is not on this surface.",
         },
-        url: { type: "string", description: "Direct URL to download. Max 8 KB." },
+        url: { type: "string", description: "Direct URL to download. No schema length cap is enforced." },
         saveAs: {
           type: "string",
-          description: "Optional filename / relative subdir under Downloads. Conflicts auto-uniquify.",
+          description: "Optional relative filename or subdirectory under Downloads. Chrome enforces download-path restrictions and auto-uniquifies conflicts.",
         },
       },
     },
@@ -361,29 +362,29 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_mouse",
     description:
-      "Move / click / hover / press / release the mouse via real CDP input events (Input.dispatchMouseEvent). Use this when you need behavior that synthetic .click() can't trigger: hover-to-reveal menus, canvas / map / image-map clicks, sites that check event.isTrusted, or precise coordinate targeting. Target with ref (from browser_read_page), CSS selector, or (x, y) in CSS viewport pixels — exactly one. action='move' is the hover (single mouseMoved fires :hover and pointerover reliably). action='dblclick' sends two press/release cycles with incrementing clickCount (a real double-click, not one cycle with clickCount=2). By default the target is hit-tested with elementFromPoint and the call fails with `target_obscured` if the topmost element isn't the target or a descendant — pass force:true to bypass when you know an overlay forwards events.",
+      "Moves, clicks, double-clicks, presses, or releases the mouse through real CDP Input.dispatchMouseEvent calls. It takes a tab id, action, exactly one target form (ref, selector, or x+y CSS viewport coordinates), and optional button, trajectory, and force settings. Use mouse for hover-to-reveal menus, canvas/map/image-map clicks, event.isTrusted checks, precise coordinate targeting, or low-level press/release sequences that browser_act cannot express. Prefer browser_act for ordinary element clicks and fills; by default ref/selector targets are hit-tested with elementFromPoint and fail with target_obscured unless force is true.",
     inputSchema: {
       type: "object",
       required: ["tabId", "action"],
       additionalProperties: false,
       properties: {
-        tabId: { type: "number" },
+        tabId: { type: "number", description: "Tab id from browser_list_tabs or browser_open_tab." },
         action: {
           type: "string",
           enum: ["move", "click", "dblclick", "down", "up"],
-          description: "What to do. move=position cursor (hover). click=press+release. dblclick=two press+release with clickCount 1 then 2. down=press only. up=release only.",
+          description: "Mouse action. move positions the cursor for hover; click sends press+release; dblclick sends two press/release cycles; down presses only; up releases only.",
         },
         ref: {
           type: "string",
-          description: "Element ref from browser_read_page (preferred). Resolves to bbox center. Exactly one of ref / selector / (x+y) required.",
+          description: "Element ref from browser_read_page or browser_find. Resolves to bbox center. Exactly one of ref, selector, or x+y is required.",
         },
         selector: {
           type: "string",
-          description: "CSS selector (fallback). Resolves to bbox center.",
+          description: "CSS selector fallback. Resolves to bbox center. Exactly one of ref, selector, or x+y is required.",
         },
         x: {
           type: "number",
-          description: "Target x in CSS viewport pixels. Pair with y. Use when working from a screenshot or eval_js output.",
+          description: "Target x in CSS viewport pixels. Pair with y. Use when working from a screenshot, canvas coordinate, or eval_js output.",
         },
         y: {
           type: "number",
@@ -392,19 +393,19 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
         button: {
           type: "string",
           enum: ["left", "right", "middle"],
-          description: "Mouse button for click / dblclick / down / up. Default 'left'. Ignored for action=move.",
+          description: "Mouse button for click, dblclick, down, or up. Default 'left'. Ignored for action='move'.",
         },
         steps: {
           type: "number",
-          description: "Humanlike trajectory. >1 interpolates the cursor approach over N mouseMoved events. Default 1 (teleport). Clamped to [1, 100].",
+          description: "Trajectory step count. Values greater than 1 interpolate the cursor approach over multiple mouseMoved events. Default 1. Clamped to [1, 100].",
         },
         stepDelayMs: {
           type: "number",
-          description: "Pause between interpolated mouseMoved events when steps > 1. Default 8. Clamped to [0, 50].",
+          description: "Pause between interpolated mouseMoved events when steps is greater than 1. Default 8. Clamped to [0, 50].",
         },
         force: {
           type: "boolean",
-          description: "Skip the pre-click elementFromPoint hit-test (ref/selector mode only). Default false.",
+          description: "For ref or selector targets, skips the elementFromPoint hit-test. Default false. Use only when an overlay covers the target but forwards pointer events.",
         },
       },
     },
@@ -416,42 +417,42 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_drag",
     description:
-      "Drag from a source to a destination. Auto-detects whether to use HTML5 native DnD (for elements with draggable='true', via CDP Input.setInterceptDrags + Input.dispatchDragEvent — the only path that triggers Chromium's native dragstart pipeline) or pointer-based DnD (for react-dnd / Sortable.js / mouse-event-based drag handlers — via CDP mouse events with buttons:1 held throughout). Each of from/to can be a ref (preferred), a CSS selector, or x+y coordinates. Returns { ok: true, mode_used: 'pointer'|'html5' } so you can verify which path ran.",
+      "Drags from a source target to a destination target through CDP input events. It takes a tab id, one source target, one destination target, and optional button, trajectory, mode, and force settings; targets can be refs, selectors, or CSS viewport coordinates. Auto mode chooses HTML5 native drag-and-drop for draggable='true' sources, using Input.setInterceptDrags plus Input.dispatchDragEvent, and otherwise uses pointer drag events for libraries such as react-dnd, Sortable.js, and mouse-event-based handlers. Use drag for actual drag-and-drop interactions; use browser_mouse for simple clicks, hover, or isolated press/release gestures. Returns {ok: true, mode_used, from, to} so the caller can verify whether pointer or html5 ran and which coordinates were used.",
     inputSchema: {
       type: "object",
       required: ["tabId"],
       additionalProperties: false,
       properties: {
-        tabId: { type: "number" },
-        fromRef: { type: "string", description: "Source ref from browser_read_page (preferred)." },
-        fromSelector: { type: "string", description: "Source CSS selector (fallback)." },
+        tabId: { type: "number", description: "Tab id from browser_list_tabs or browser_open_tab." },
+        fromRef: { type: "string", description: "Source element ref from browser_read_page or browser_find. Preferred when available." },
+        fromSelector: { type: "string", description: "Source CSS selector fallback when no source ref is available." },
         fromX: { type: "number", description: "Source x in CSS viewport pixels. Pair with fromY." },
         fromY: { type: "number", description: "Source y in CSS viewport pixels. Pair with fromX." },
-        toRef: { type: "string", description: "Destination ref from browser_read_page (preferred)." },
-        toSelector: { type: "string", description: "Destination CSS selector (fallback)." },
+        toRef: { type: "string", description: "Destination element ref from browser_read_page or browser_find. Preferred when available." },
+        toSelector: { type: "string", description: "Destination CSS selector fallback when no destination ref is available." },
         toX: { type: "number", description: "Destination x in CSS viewport pixels. Pair with toY." },
         toY: { type: "number", description: "Destination y in CSS viewport pixels. Pair with toX." },
         button: {
           type: "string",
           enum: ["left", "middle"],
-          description: "Mouse button held during drag. Default 'left'.",
+          description: "Mouse button held during the drag. Default 'left'.",
         },
         steps: {
           type: "number",
-          description: "Intermediate mouseMoved events from→to with the button held. Drag-detect libraries need a trajectory to fire. Default 15. Clamped to [1, 100].",
+          description: "Intermediate mouseMoved events from source to destination with the button held. Drag-detect libraries often need a trajectory. Default 15. Clamped to [1, 100].",
         },
         stepDelayMs: {
           type: "number",
-          description: "Pause between intermediate moves. Default 12. Clamped to [0, 50].",
+          description: "Pause between intermediate moves in milliseconds. Default 12. Clamped to [0, 50].",
         },
         mode: {
           type: "string",
           enum: ["auto", "pointer", "html5"],
-          description: "Drag mode. 'auto' (default) picks html5 if the source has draggable='true', else pointer. Override only when auto detection misses.",
+          description: "Drag mode. 'auto' is the default and picks html5 if the source has draggable='true', else pointer. Override only when auto detection chooses the wrong path.",
         },
         force: {
           type: "boolean",
-          description: "Skip the pre-press elementFromPoint hit-test on the source. Default false.",
+          description: "Skips the pre-press elementFromPoint hit-test on the source only. Default false. The destination is used as-is.",
         },
       },
     },
@@ -463,20 +464,20 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_type",
     description:
-      "Type a string into the currently-focused element per-keystroke via CDP Input.dispatchKeyEvent. Each character fires keydown + keypress + input — this is the tool for keystroke-driven autocomplete, chips, search-as-you-type, and any site whose handlers listen on keydown rather than just reading element.value. For plain form-value entry use browser_fill (faster, sets value directly). For chord shortcuts (Control+L, etc) use browser_keyboard. Special characters in text: \\n→Enter, \\t→Tab, \\b→Backspace (dispatched as the named key, not as a literal control char). Other control chars (< 0x20) are rejected with an actionable error. Uppercase letters come from the natural code point — event.shiftKey is false but the typed value is correct.",
+      "Types text into the currently focused element one character at a time via CDP Input.dispatchKeyEvent. It takes a tab id, text, and optional per-character delay; each character fires keyboard/input events, which supports autocomplete, chips, search-as-you-type fields, and handlers that listen on keydown rather than only reading element.value. Special text characters map to named keys: \\n sends Enter, \\t sends Tab, and \\b sends Backspace; other control characters below 0x20 are rejected with an actionable error. Use browser_type when real keystrokes matter, use browser_act with action='fill' for plain form-value entry, and use browser_keyboard for shortcuts or named control keys such as Control+L or Escape.",
     inputSchema: {
       type: "object",
       required: ["tabId", "text"],
       additionalProperties: false,
       properties: {
-        tabId: { type: "number" },
+        tabId: { type: "number", description: "Tab id from browser_list_tabs or browser_open_tab. The text goes to whatever element is currently focused in that tab." },
         text: {
           type: "string",
-          description: "The text to type. Max 4096 chars. Iterates as Unicode code points (surrogate pairs handled correctly).",
+          description: "Text to type, up to 4096 Unicode code points. Newline, tab, and backspace are dispatched as Enter, Tab, and Backspace.",
         },
         delayMs: {
           type: "number",
-          description: "Pause between characters. Default 0. Clamped to [0, 50]. Set > 0 when typing into search-as-you-type inputs that debounce.",
+          description: "Pause between characters in milliseconds. Default 0. Clamped to [0, 50]. Set above 0 for debounced search-as-you-type inputs.",
         },
       },
     },
@@ -488,30 +489,30 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_diagnostics",
     description:
-      "Drain console messages or network responses for a tab, with filtering. Replaces the prior browser_console_logs / browser_network_log primitives. `kind` selects the stream; remaining params filter the result before it ships to the model so the response carries only what the caller asked for instead of a raw 1000-entry array dump. Lazy-attach behavior: first call for a tab attaches chrome.debugger; very-early-load events from before the first call are missed.",
+      "Drains buffered console messages or network responses for a tab, with filtering before the result is returned. It takes a tab id, kind='console' or 'network', and optional level, regex, and limit filters, then returns {kind, total, returned, entries}; total is the pre-filter count and returned is the post-filter limited count. The first call for a tab lazily attaches chrome.debugger, so very-early load events from before that call are missed. Use diagnostics to investigate console errors, warnings, and request URLs; do not use it as a page-content reader, and raise limit or loosen regex when returned equals the requested limit.",
     inputSchema: {
       type: "object",
       required: ["tabId", "kind"],
       additionalProperties: false,
       properties: {
-        tabId: { type: "number" },
+        tabId: { type: "number", description: "Tab id from browser_list_tabs or browser_open_tab." },
         kind: {
           type: "string",
           enum: ["console", "network"],
-          description: "Which stream to drain.",
+          description: "Diagnostic stream to drain: console messages or network responses.",
         },
         level: {
           type: "string",
           enum: ["log", "info", "warn", "error", "debug", "all"],
-          description: "Console only. Default 'all'. Ignored when kind=network.",
+          description: "Console only. Default 'all'. Ignored when kind='network'.",
         },
         regex: {
           type: "string",
-          description: "Optional JS-regex string. Console: matches the message body. Network: matches the request URL.",
+          description: "Optional JavaScript regex source string. For console, matches message text; for network, matches request URL.",
         },
         limit: {
           type: "number",
-          description: "Max entries to return after filtering. Default 100. Hard cap 1000.",
+          description: "Maximum entries to return after filtering. Default 100. Hard cap 1000.",
         },
       },
     },
@@ -559,16 +560,16 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_find",
     description:
-      "Find up to 5 elements matching a natural-language intent ('the search box at the top', 'the Submit button at the bottom of the login form'). Returns ranked candidates with stable refs the model can pass to browser_act (ref mode) or browser_mouse. Cheaper than browser_read_page when you know what you're looking for — the inner compressor (a small fast model) filters the snapshot for you instead of sending the full element list to the lead model.",
+      "Finds up to 5 page elements that match a natural-language intent. It takes a tab id and intent, reads a fresh snapshot internally, and returns ranked candidates with refs, roles, names, bboxes, and match reasons when available. The returned refs can be passed to browser_act in REF mode or to low-level power tools such as browser_mouse. Use find when a specific element is needed and a short candidate list is better than the full browser_read_page snapshot; use read_page when broad enumeration or raw text/context is needed.",
     inputSchema: {
       type: "object",
       required: ["tabId", "intent"],
       additionalProperties: false,
       properties: {
-        tabId: { type: "number" },
+        tabId: { type: "number", description: "Tab id from browser_list_tabs or browser_open_tab." },
         intent: {
           type: "string",
-          description: "Natural-language description of what to find.",
+          description: "Natural-language description of the element to find, such as 'the search box at the top' or 'the Submit button'.",
         },
       },
     },
@@ -594,29 +595,29 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_act",
     description:
-      "Preferred for any click / fill / type / scroll-to action against a tab. Two modes: (1) INTENT mode — pass `intent` as natural language ('click the submit button'); the inner compressor (a small fast model) maps it to an element + action. Auto-escalates to visual fallback (screenshot + multimodal model + pixel-coord click) when the intent points into a canvas / svg region the a11y tree can't see. (2) REF mode — pass `ref` (from a prior browser_find or browser_read_page) and optionally `value`; dispatches directly with zero compressor latency. This is the fold-in path for the now-removed browser_click and browser_fill. Returns {ok, action_taken, target_ref, navigated}.",
+      "Performs a high-level click, fill, type, select, or scroll-into-view action against a tab. It has two modes: INTENT mode takes a natural-language intent and resolves the element/action internally, while REF mode takes a ref from browser_find or browser_read_page plus optional action and value for direct dispatch without a compressor round trip. Visual fallback can click canvas or SVG regions by combining screenshot analysis with a coordinate click when text-based matching fails. Use act for ordinary page interaction before reaching for browser_mouse, browser_type, browser_keyboard, or browser_scroll; single-action results include {ok, action_taken, target_ref, navigated}, multi-step intents return summary/steps fields, and visual fallback returns click_visual with x/y coordinates.",
     inputSchema: {
       type: "object",
       required: ["tabId"],
       additionalProperties: false,
       properties: {
-        tabId: { type: "number" },
+        tabId: { type: "number", description: "Tab id from browser_list_tabs or browser_open_tab." },
         intent: {
           type: "string",
-          description: "Natural-language description of the action. Triggers INTENT mode. Mutually exclusive with `ref`.",
+          description: "Natural-language description of the action for INTENT mode. If both intent and ref are provided, ref mode wins and intent is ignored.",
         },
         ref: {
           type: "string",
-          description: "Element ref from browser_find / browser_read_page. Triggers REF mode (no compressor round-trip).",
+          description: "Element ref from browser_find or browser_read_page for REF mode, which dispatches directly without a compressor round trip.",
         },
         action: {
           type: "string",
           enum: ["click", "fill", "type", "select", "scroll_into_view"],
-          description: "REF mode only. Defaults to 'click'. In INTENT mode, the compressor picks the action.",
+          description: "REF mode action. Defaults to 'click'. Ignored in INTENT mode, where the resolved action comes from the intent and matched element.",
         },
         value: {
           type: "string",
-          description: "For fill / type / select: the string value to set. In INTENT mode the compressor uses this when an action requires a value.",
+          description: "String value for fill, type, or select actions. In INTENT mode, this is available to the resolver when the action requires a value.",
         },
       },
     },
@@ -759,16 +760,16 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_observe",
     description:
-      "Get a natural-language description of the current page's user-actionable state — what forms, buttons, links, and content sections are visible — in 2-4 sentences. Optional `intent` focuses the description on a region ('describe the login form', 'what's in the comments section'). Use this BEFORE browser_act when you don't know what's on the page, or AFTER navigation to confirm the page loaded. Cheaper than screenshots when text is enough. Does not include canvas/SVG content — those surface as a `hasVisualSurfaces` flag; switch to browser_screenshot for visuals.",
+      "Produces a short natural-language description of the current page's user-actionable state, including visible forms, buttons, links, and content sections. It takes a tab id and optional intent focus, then returns a 2-4 sentence summary plus whether visualSurfaces such as canvas or SVG are present. Use observe before browser_act when the page state is unknown, or after navigation to confirm what loaded. Prefer observe over screenshot when text and controls are enough; switch to browser_screenshot for visual layout or canvas/SVG details, and use browser_read_page when raw refs, bboxes, or element lists are needed.",
     inputSchema: {
       type: "object",
       required: ["tabId"],
       additionalProperties: false,
       properties: {
-        tabId: { type: "number" },
+        tabId: { type: "number", description: "Tab id from browser_list_tabs or browser_open_tab." },
         intent: {
           type: "string",
-          description: "Optional natural-language focus ('describe the form', 'what's in the sidebar').",
+          description: "Optional natural-language focus for the summary, such as 'describe the form' or 'what is in the sidebar'.",
         },
       },
     },
@@ -785,19 +786,19 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_extract",
     description:
-      "Structured extraction from the current page into a JSON object matching the provided schema. The inner compressor reads the page snapshot (text + elements) and synthesizes the typed object. Use this instead of browser_read_page + lead-model parsing when you know the shape you want (e.g. a list of {title, author, url} rows from a PR list).",
+      "Extracts structured data from the current page into a JSON object matching the provided schema. It takes a tab id, a schema or schema-shaped descriptor, and a plain-language instruction; the inner compressor reads the page snapshot and returns only the typed object rather than the raw element list. Use extract when the desired output shape is known, such as rows of {title, author, url}; use browser_observe for a prose overview and browser_read_page when the lead model needs raw refs, bboxes, or page text. Bad schemas or wrong-shape compressor results are returned as fixable error envelopes so the caller can simplify the schema or clarify the instruction.",
     inputSchema: {
       type: "object",
       required: ["tabId", "schema", "instruction"],
       additionalProperties: false,
       properties: {
-        tabId: { type: "number" },
+        tabId: { type: "number", description: "Tab id from browser_list_tabs or browser_open_tab." },
         schema: {
-          description: "JSON schema (or schema-shaped descriptor) for the desired output shape.",
+          description: "JSON schema, or a schema-shaped descriptor, for the desired output shape.",
         },
         instruction: {
           type: "string",
-          description: "What to extract, in plain language ('the visible PR list').",
+          description: "Plain-language extraction instruction, such as 'the visible PR list' or 'all product cards with price and URL'.",
         },
       },
     },

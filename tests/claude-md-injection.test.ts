@@ -566,7 +566,7 @@ test("style directive content is self-compliant — no em dashes, no Claude/AI/A
   expect(STYLE_DIRECTIVE.toLowerCase()).toContain("anthropic")
 })
 
-test("operating-defaults directive: orchestrator posture + hybrid excellence lens + guardrails, self-compliant", () => {
+test("operating-defaults directive: orchestrator posture + concrete excellence principles, self-compliant", () => {
   const d = OPERATING_DEFAULTS_DIRECTIVE
   const low = d.toLowerCase()
   // Orchestrator posture (strong default): delegate heavy work, keep last-mile.
@@ -575,17 +575,11 @@ test("operating-defaults directive: orchestrator posture + hybrid excellence len
   expect(d).toContain("worker-*")
   expect(low).toContain("parallel")
   expect(low).toContain("directly") // "do trivial/surgical/last-mile work directly"
-  // Hybrid excellence lens: principle-led, names as "bar" calibration (the
-  // user's three seeds), with an explicit no-impersonation guardrail.
+  // Excellence principles remain specific without named-persona anchors.
   expect(low).toContain("radical simplicity")
-  expect(low).toContain("first-principles")
-  expect(low).toContain("works backwards")
-  expect(d).toContain("Jobs")
-  expect(d).toContain("Ive")
-  expect(d).toContain("Gates")
-  expect(d).toContain("Bezos")
-  expect(low).toContain("not a persona")
-  expect(low).toContain("no impersonation")
+  expect(low).toContain("first principles")
+  expect(low).toMatch(/works backwards|work backwards/)
+  expect(low).toContain("derive, reproduce, or test")
   // Overridable default.
   expect(low).toContain("override")
   // Self-compliant with the style directive: no em dash; no Claude/AI/Anthropic
