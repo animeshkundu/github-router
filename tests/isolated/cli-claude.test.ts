@@ -968,15 +968,20 @@ describe("claude command", () => {
       expect(snippet).toContain("Peer review and advisor")
       // The operating-defaults directive leads the --append-system-prompt.
       expect(snippet).toContain("Operating defaults")
+      // The system prompt carries only a POINTER to the inventory, not the full
+      // snippet, so the ~1.1k-token inventory is not duplicated in context.
+      expect(snippet).toContain("CLAUDE.md")
+      expect(snippet).not.toContain("one-stop code search")
 
-      // The peer-MCP awareness append at the bottom of CLAUDE.md gets the peer
-      // snippet, which is contained in (not equal to) the --append-system-prompt
-      // value now that the operating-defaults directive leads it.
+      // The full peer-MCP awareness snippet is appended to CLAUDE.md (the single
+      // full copy the main agent and descendants both read); it is NOT copied
+      // into the --append-system-prompt value.
       expect(appendPeerAwarenessToMirroredClaudeMdMock).toHaveBeenCalledTimes(1)
       const [appendedSnippet] = appendPeerAwarenessToMirroredClaudeMdMock
         .mock.calls[0]
-      expect(snippet).toContain(appendedSnippet as string)
       expect(appendedSnippet).toContain("Peer review and advisor")
+      expect(appendedSnippet).toContain("one-stop code search")
+      expect(snippet).not.toContain(appendedSnippet as string)
 
       // The style-directive + operating-defaults prepends at the top of CLAUDE.md.
       expect(prependStyleDirectiveToMirroredClaudeMdMock).toHaveBeenCalledTimes(1)

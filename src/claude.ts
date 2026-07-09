@@ -1055,14 +1055,15 @@ export const claude = defineCommand({
         // the user's ~/.claude/CLAUDE.md is already in place before we
         // append our marker block. The helper's own mirror-only safety
         // guard rejects writes outside CLAUDE_CONFIG_DIR as defence in
-        // depth. Failures warn-and-continue — the main agent already has
-        // the awareness via --append-system-prompt, so this surface is
-        // descendant-reach enhancement, not a launch-blocker.
+        // depth. Failures warn-and-continue: this CLAUDE.md copy is now the
+        // primary full-inventory surface (the system prompt carries only a
+        // pointer to it), so on the rare write failure the agent falls back to
+        // the tool descriptions in tools/list, not a launch-blocker.
         try {
           await appendPeerAwarenessToMirroredClaudeMd(peerSnippet)
         } catch (err) {
           consola.warn(
-            `Peer-awareness CLAUDE.md append failed (main agent still covered via --append-system-prompt): ${
+            `Peer-awareness CLAUDE.md append failed (agent keeps tool descriptions via tools/list, loses the inventory overview): ${
               err instanceof Error ? err.message : String(err)
             }`,
           )
@@ -1094,17 +1095,28 @@ export const claude = defineCommand({
     // Operating-defaults directive (orchestrator posture + hybrid excellence
     // lens): injected by DEFAULT, NOT gated on codex-mcp, so the posture always
     // reaches the agent even under --no-codex-mcp. Two surfaces:
-    //   1. --append-system-prompt (main agent, highest salience) — the single
-    //      such arg for the session; the peer-awareness snippet (MCP-dependent)
-    //      rides along after it only when it was built.
+    //   1. --append-system-prompt (main agent, highest salience): the single
+    //      such arg for the session; a short POINTER to the peer-awareness
+    //      inventory rides along after it (the full snippet lives in CLAUDE.md
+    //      to avoid duplicating ~1.1k tokens in context every turn).
     //   2. the mirrored CLAUDE.md TOP (descendant agents) — prepended AFTER the
     //      style directive (when that ran) so it lands at the very top.
     // ensureClaudeConfigMirror() ran unconditionally above, so the mirror exists
     // regardless of codex-mcp; the prepend is best-effort (warn-and-continue).
+    // Peer-awareness inventory lives ONCE, in the mirrored CLAUDE.md (appended
+    // above), which the main agent and descendants both read. The system prompt
+    // carries only a short pointer to it, not the full ~1.1k-token snippet, so
+    // the inventory is not duplicated in the context window on every turn. The
+    // operating-defaults directive (behavioral, wants top salience) still leads
+    // the system prompt in full. If the CLAUDE.md append happened to fail, the
+    // agent still has every tool's own description in tools/list (the real
+    // routing signal); it just loses this higher-level overview.
+    const peerAwarenessPointer =
+      `A full inventory of the MCP tools, background workers, and cross-lab critics injected into this session is in the "Peer review and advisor" section of your CLAUDE.md project instructions; consult it when choosing a tool or deciding how to delegate. Each tool's own description carries the when-to-use detail.`
     extraArgs.push(
       "--append-system-prompt",
       peerAwarenessSnippet
-        ? `${OPERATING_DEFAULTS_DIRECTIVE}\n\n${peerAwarenessSnippet}`
+        ? `${OPERATING_DEFAULTS_DIRECTIVE}\n\n${peerAwarenessPointer}`
         : OPERATING_DEFAULTS_DIRECTIVE,
     )
     try {
