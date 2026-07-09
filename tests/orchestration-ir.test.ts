@@ -34,7 +34,7 @@ function validIR(): WorkflowIR {
         role: "implement",
         producerLab: "openai",
         inputs: [],
-        gate: { kind: "executable", gateId: "tests" },
+        gate: { kind: "executable", gateId: "typecheck-test" },
         onFail: "loop",
       },
       {
@@ -148,8 +148,8 @@ describe("verifyWorkflowIR", () => {
     expect(r.violations.map((x) => x.code)).toContain("UNKNOWN_GATE_ID")
   })
 
-  test("executable gateId in the allowlist → passes", () => {
-    const r = verifyWorkflowIR(validIR(), { knownGateIds: new Set(["tests"]) })
+  test("executable gateId in the default sealed registry → passes", () => {
+    const r = verifyWorkflowIR(validIR())
     expect(r.ok).toBe(true)
   })
 
@@ -247,8 +247,8 @@ describe("verifyWorkflowIR", () => {
       rawAskHash: "r", acceptanceCriteriaHash: "a", maxDepth: 1,
       nodes: [
         { id: "baseline", role: "baseline", inputs: [], gate: { kind: "none" }, onFail: "baseline" },
-        { id: "i1", role: "implement", producerLab: "openai", inputs: [], gate: { kind: "executable", gateId: "tests" }, onFail: "loop" },
-        { id: "i2", role: "implement", producerLab: "google", inputs: [], gate: { kind: "executable", gateId: "tests" }, onFail: "loop" },
+        { id: "i1", role: "implement", producerLab: "openai", inputs: [], gate: { kind: "executable", gateId: "typecheck-test" }, onFail: "loop" },
+        { id: "i2", role: "implement", producerLab: "google", inputs: [], gate: { kind: "executable", gateId: "typecheck-test" }, onFail: "loop" },
         { id: "sel", role: "selector", inputs: ["baseline", "i1", "i2"], gate: { kind: "none" }, onFail: "baseline", judgesOnRawAsk: true },
       ],
     }
@@ -260,9 +260,9 @@ describe("verifyWorkflowIR", () => {
       rawAskHash: "r", acceptanceCriteriaHash: "a", maxDepth: 1,
       nodes: [
         { id: "baseline", role: "baseline", inputs: [], gate: { kind: "none" }, onFail: "baseline" },
-        { id: "i1", role: "implement", producerLab: "openai", inputs: [], gate: { kind: "executable", gateId: "tests" }, onFail: "loop" },
-        { id: "i2", role: "implement", producerLab: "google", inputs: [], gate: { kind: "executable", gateId: "tests" }, onFail: "loop" },
-        { id: "integ", role: "integration", inputs: ["i1"], gate: { kind: "executable", gateId: "integration" }, onFail: "baseline" },
+        { id: "i1", role: "implement", producerLab: "openai", inputs: [], gate: { kind: "executable", gateId: "typecheck-test" }, onFail: "loop" },
+        { id: "i2", role: "implement", producerLab: "google", inputs: [], gate: { kind: "executable", gateId: "typecheck-test" }, onFail: "loop" },
+        { id: "integ", role: "integration", inputs: ["i1"], gate: { kind: "executable", gateId: "typecheck-test" }, onFail: "baseline" },
         { id: "sel", role: "selector", inputs: ["baseline", "integ", "i2"], gate: { kind: "none" }, onFail: "baseline", judgesOnRawAsk: true },
       ],
     }
@@ -274,9 +274,9 @@ describe("verifyWorkflowIR", () => {
       rawAskHash: "r", acceptanceCriteriaHash: "a", maxDepth: 1,
       nodes: [
         { id: "baseline", role: "baseline", inputs: [], gate: { kind: "none" }, onFail: "baseline" },
-        { id: "i1", role: "implement", producerLab: "openai", inputs: [], gate: { kind: "executable", gateId: "tests" }, onFail: "loop" },
-        { id: "i2", role: "implement", producerLab: "google", inputs: [], gate: { kind: "executable", gateId: "tests" }, onFail: "loop" },
-        { id: "integ", role: "integration", inputs: ["i1", "i2"], gate: { kind: "executable", gateId: "integration" }, onFail: "baseline" },
+        { id: "i1", role: "implement", producerLab: "openai", inputs: [], gate: { kind: "executable", gateId: "typecheck-test" }, onFail: "loop" },
+        { id: "i2", role: "implement", producerLab: "google", inputs: [], gate: { kind: "executable", gateId: "typecheck-test" }, onFail: "loop" },
+        { id: "integ", role: "integration", inputs: ["i1", "i2"], gate: { kind: "executable", gateId: "typecheck-test" }, onFail: "baseline" },
         { id: "sel", role: "selector", inputs: ["baseline", "integ"], gate: { kind: "none" }, onFail: "baseline", judgesOnRawAsk: true },
       ],
     }

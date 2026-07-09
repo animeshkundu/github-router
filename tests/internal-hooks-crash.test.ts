@@ -65,6 +65,10 @@ const CASES: ReadonlyArray<{ cmd: string; label: string; stdin: string }> = [
   { cmd: "internal-stop-review", label: "no-runtime", stdin: JSON.stringify({ session_id: "s", cwd: "/x", diff: "+a" }) },
   { cmd: "internal-stop-review", label: "empty-stdin", stdin: "" },
   { cmd: "internal-stop-review", label: "malformed", stdin: "x{" },
+  // internal-plan-review (no hook env -> stands down before any payload read)
+  { cmd: "internal-plan-review", label: "no-runtime", stdin: JSON.stringify({ session_id: "s", cwd: "/x", tool_input: { plan: "long enough to matter" } }) },
+  { cmd: "internal-plan-review", label: "empty-stdin", stdin: "" },
+  { cmd: "internal-plan-review", label: "malformed", stdin: "x{" },
 ]
 
 describe("internal hook subcommands: Windows libuv teardown regression", () => {

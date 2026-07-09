@@ -2,7 +2,7 @@ export const ORCHESTRATE_SKILL = {
   name: "gh-orchestrate",
   md: `---
 name: gh-orchestrate
-description: Right-sized blind-spot-elimination for non-trivial implementation asks: capture user-blessed acceptance criteria, delegate bounded research, decompose and plan, compose a native Workflow with explicit deterministic/advisory annotations, verify the workflow, checkpoint residual risks and cost, then run only when the pipeline actually raises the floor.
+description: Right-sized blind-spot-elimination for non-trivial implementation asks: captures user-blessed acceptance criteria, delegates bounded research, decomposes and plans, composes a native Workflow with explicit deterministic/advisory annotations, verifies the workflow, checkpoints residual risks and cost, then runs only when the pipeline actually raises the floor. Use when a non-trivial implementation ask benefits from workflow-level blind-spot reduction.
 user-invocable: true
 ---
 

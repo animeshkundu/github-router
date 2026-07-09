@@ -56,7 +56,7 @@ describe("decidePromptSubmitV2", () => {
     expect(storePrompt.mock.calls.length).toBe(0)
   })
 
-  test("trivial prompt injects the static search tip, stores the prompt, and makes no search or model call", async () => {
+  test("trivial prompt stores the prompt and makes no injection, search, or model call", async () => {
     const { io, searchCode, infer, storePrompt } = makeIo()
 
     const result = await decidePromptSubmitV2({
@@ -66,7 +66,8 @@ describe("decidePromptSubmitV2", () => {
     })
 
     expect(result.resetSession).toBe("s1")
-    expect(result.inject).toContain(PROMPT_SEARCH_TIP)
+    expect(result.inject).toBe("")
+    expect(result.inject).not.toContain(PROMPT_SEARCH_TIP)
     expect(searchCode.mock.calls.length).toBe(0)
     expect(infer.mock.calls.length).toBe(0)
     expect(storePrompt.mock.calls.length).toBe(1)
@@ -86,6 +87,7 @@ describe("decidePromptSubmitV2", () => {
       io,
     })
 
+    expect(result.inject).toContain(PROMPT_SEARCH_TIP)
     expect(result.inject).toContain(groundedGoal)
     expect(searchCode.mock.calls.length).toBe(2)
     expect(searchCode.mock.calls.map((call) => call[1]).sort()).toEqual(["lexical", "semantic"])
@@ -132,7 +134,8 @@ describe("decidePromptSubmitV2", () => {
     })
 
     expect(infer.mock.calls.length).toBe(1)
-    expect(result.inject).toBe(PROMPT_STEER_GOAL)
+    expect(result.inject).toContain(PROMPT_SEARCH_TIP)
+    expect(result.inject).toContain(PROMPT_STEER_GOAL)
     expect(result.inject.length).toBeGreaterThan(0)
   })
 
@@ -161,7 +164,8 @@ describe("decidePromptSubmitV2", () => {
       io,
     })
 
-    expect(result.inject).toContain(PROMPT_SEARCH_TIP)
+    expect(result.inject).toBe("")
+    expect(result.inject).not.toContain(PROMPT_SEARCH_TIP)
     expect(clearFindings.mock.calls.length).toBe(0)
   })
 
@@ -181,7 +185,8 @@ describe("decidePromptSubmitV2", () => {
       io,
     })
 
-    expect(result.inject).toContain(PROMPT_SEARCH_TIP)
+    expect(result.inject).toBe("")
+    expect(result.inject).not.toContain(PROMPT_SEARCH_TIP)
     expect(storePrompt.mock.calls.length).toBe(1)
   })
 
@@ -204,7 +209,8 @@ describe("decidePromptSubmitV2", () => {
       io,
     })
 
-    expect(result.inject).toBe(PROMPT_STEER_GOAL)
+    expect(result.inject).toContain(PROMPT_SEARCH_TIP)
+    expect(result.inject).toContain(PROMPT_STEER_GOAL)
     expect(performance.now() - start).toBeLessThan(1_000)
   })
 })

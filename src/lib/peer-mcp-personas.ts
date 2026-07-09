@@ -319,9 +319,9 @@ Reply format (markdown):
 Resilience reminder:
   If your session terminates abnormally before "Status: complete", the lead will retry once. On recovery, ask the lead to confirm what's already been done before re-applying changes — duplicate edits are worse than a slow restart.`
 
-const OPUS_CRITIC_BASE = `You are opus-critic, a fresh-context Anthropic-side adversarial reviewer running on Claude Opus 4.7 — the same model and lab as the lead orchestrator that just delegated to you. You are NOT the lead. You did not see the lead's reasoning trace. You only see the brief.
+const OPUS_CRITIC_BASE = `You are opus-critic, a fresh-context same-lab adversarial reviewer running on Opus 4.6. The lead orchestrator that just delegated to you runs newer Opus-family context, but you are NOT the lead. You did not see the lead's reasoning trace. You only see the brief.
 
-Your job is to spot what the lead missed because of cognitive momentum, sunk-cost on a plan, or motivated reasoning toward a particular fix. Your blind-spot diversification is LIMITED compared to codex-critic (gpt-5.5) and gemini-critic (gemini-3.1-pro) — same training, same lab, same RLHF priors. Use that honestly: don't pretend to find a different perspective when the obvious read is "the lead got it right." Silence on good work is a valid and welcome answer.
+Your job is to spot what the lead missed because of cognitive momentum, sunk-cost on a plan, or motivated reasoning toward a particular fix. Your blind-spot diversification is LIMITED compared to codex-critic (gpt-5.5) and gemini-critic (gemini-3.1-pro), same lab, adjacent model family, related priors. Use that honestly: don't pretend to find a different perspective when the obvious read is "the lead got it right." Silence on good work is a valid and welcome answer.
 
 Sycophancy is the failure mode you exist to fight. Manufactured contrarianism is a different failure of the same shape — do neither.
 
@@ -336,7 +336,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.5",
     endpoint: "/v1/responses",
     description:
-      "Adversarial second opinion on plans, designs, or code tradeoffs. Backed by gpt-5.5 (OpenAI, ≈922K-token input window) — strongest reasoning model in the critic lineup, different lab than Opus. Best for architecture decisions, design reviews, and tradeoff analysis where cross-lab diversity matters. Not for line-level code review (use codex_reviewer). Pass artifact verbatim.",
+      "Adversarial architecture and design critic backed by gpt-5.5 (OpenAI, ≈922K-token input window), the strongest cross-lab reasoning critic in this surface. It reviews plans, designs, tradeoffs, and large code-change proposals for unsound assumptions, missing failure modes, and overlooked alternatives, then returns a calibrated objection or `no material objection`. Use when a decision or design needs a different-lab strategic challenge before implementation or merge. Not for line-level bug finding in a concrete diff or file, use codex_reviewer or gemini_reviewer; pass the artifact and constraints verbatim.",
     baseInstructions: CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -350,7 +350,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gemini-3.1-pro-preview",
     endpoint: "/v1/chat/completions",
     description:
-      "Adversarial second opinion. Backed by gemini-3.1-pro (Google) — third-lab triangulation, strong on formal reasoning, proofs, and invariants. Useful for cross-checking findings from codex_critic or codex_reviewer when you want a third perspective. Pass artifact verbatim.",
+      "Adversarial third-lab critic backed by gemini-3.1-pro-preview (Google), strong on formal reasoning, invariants, proofs, and cross-checking another critic's conclusion. It reviews plans, designs, mathematical arguments, and large artifacts for assumption gaps or invariant failures, then returns a focused critique or no-material-objection style verdict. Use when codex_critic's result needs an independent lab check or when the artifact hinges on formal correctness. Not for line-level diff review, use gemini_reviewer or codex_reviewer; pass the artifact and constraints verbatim.",
     baseInstructions: GEMINI_CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -365,7 +365,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.3-codex",
     endpoint: "/v1/responses",
     description:
-      "Line-level review of a concrete diff or single file. Backed by gpt-5.3-codex (OpenAI, ≈272K-token input window) — code-specialist, fastest critic (~16s). Surfaces bugs, edge cases, security issues, and idiom violations at specific line numbers. Not suited for architecture or design review (use codex_critic for plans). Pass artifact verbatim.",
+      "Line-level code reviewer backed by gpt-5.3-codex (OpenAI, ≈272K-token input window), a code-specialist reviewer that is fastest around high effort (~16s at high effort). It reviews concrete diffs, files, or function bodies and returns findings with severity, file:line locations, issue impact, and a minimal suggested fix. Use when the artifact is actual code and the goal is bug, edge-case, security, concurrency, resource, or idiom review. Not for architecture or tradeoff review, use codex_critic or gemini_critic; pass the diff or file content verbatim.",
     baseInstructions: REVIEWER_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -379,7 +379,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gemini-3.1-pro-preview",
     endpoint: "/v1/chat/completions",
     description:
-      "Line-level review of a concrete diff or single file on gemini-3.1-pro (Google, high reasoning): a second-lab code reviewer that catches a different slice of defects than codex_reviewer (OpenAI). Use alongside codex_reviewer for cross-lab coverage of a diff. Not for architecture (use codex_critic / gemini_critic for plans). Pass artifact verbatim.",
+      "Line-level code reviewer backed by gemini-3.1-pro-preview (Google), providing second-lab coverage that catches a different slice of concrete-code defects than codex_reviewer. It reviews diffs, files, or function bodies and returns severity-ranked findings with file:line citations and suggested fixes. Use alongside codex_reviewer when a non-trivial diff benefits from cross-lab code-review coverage, especially around invariants or edge cases. Not for architecture or product-design review, use codex_critic or gemini_critic; pass the code artifact verbatim.",
     baseInstructions: GEMINI_REVIEWER_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -401,7 +401,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "claude-opus-4-6",
     endpoint: "/v1/messages",
     description:
-      "Adversarial second opinion from a fresh-context Opus 4.6 — same lab as the lead, limited blind-spot diversity vs cross-lab critics. On enterprise catalogs that carry Opus-4.6-1M it runs with a ≈936K-token input window; otherwise ≈168K. Pinned one minor behind the default Opus so the panel spans more of the version curve. Catches confabulation. Pass artifact verbatim.",
+      "Adversarial same-lab critic backed by fresh-context Opus 4.6, with limited blind-spot diversity compared with cross-lab critics. It reviews plans, designs, or code tradeoffs for cognitive momentum, sunk-cost reasoning, and confabulated assumptions, then returns a calibrated objection or no material objection. Use when a same-family sanity check can catch lead-context drift or when comparing against codex_critic / gemini_critic findings. Not a substitute for cross-lab review on security-sensitive or high-risk changes; use codex_critic or gemini_critic for stronger diversity. On enterprise catalogs that carry Opus-4.6-1M it runs with ≈936K input tokens; otherwise ≈168K. Pinned two minors behind the default Opus so the panel spans more of the version curve. Pass artifact verbatim.",
     baseInstructions: OPUS_CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -427,7 +427,7 @@ export const PERSONAS_WRITE: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.3-codex",
     endpoint: "/v1/responses",
     description:
-      "Targeted implementation of a self-contained coding task. Backed by gpt-5.3-codex with workspace-write access. Pass spec + files verbatim.",
+      "Targeted implementation persona backed by gpt-5.3-codex with workspace-write access. It executes self-contained coding tasks from a pasted spec, reads the relevant files, edits the workspace, verifies the result, and returns changed files plus verification output. Use when the task is bounded enough for direct implementation and the caller can provide acceptance criteria and file context up front. Not for open-ended planning or broad repo exploration, use plan or explore first; not for read-only review, use codex_reviewer or gemini_reviewer. Because it can mutate the workspace, scope files and allowed changes explicitly and pass the spec verbatim.",
     baseInstructions: IMPLEMENTER_BASE,
     agentPrompt: "",
     writeCapable: true,
@@ -535,8 +535,8 @@ export function buildAgentPrompt(
  *   - Conditionally lists gemini_critic only when `geminiAvailable`.
  *   - Conditionally lists the `worker-*` background dispatcher subagents
  *     (worker-explore / worker-review / worker-plan / worker-implement /
- *     worker-test), the non-blocking-guard fact, and "Workers themselves
- *     have code_search" only when `workerToolsAvailable` (mirrors
+ *     worker-test), the non-blocking-guard fact, and the worker code-search
+ *     affordance only when `workerToolsAvailable` (mirrors
  *     `workerToolsEnabled()` so the snippet never names a surface gated out
  *     of the live catalog). The raw `mcp__<workers>__*` tools are named only
  *     as the guarded plumbing the dispatchers call, never as a main-agent
@@ -558,8 +558,13 @@ export function buildPeerAwarenessSnippet(opts: {
   workerToolsAvailable: boolean
   standInAvailable: boolean
   browseAvailable: boolean
+  compoundBrowseAvailable: boolean
   powerBrowseAvailable?: boolean
+  fleetAvailable?: boolean
   agentToolsAvailable?: boolean
+  /** True when the `implementer` subagent (gpt-5.5) is registered, so the
+   *  snippet may steer bounded implementation to it over `worker-implement`. */
+  implementerAvailable?: boolean
   /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
    *  collision). Missing key → use the preferred bare key. Keeps the
    *  `mcp__<server>__<tool>` paths in this snippet pointing at OUR servers. */
@@ -572,6 +577,12 @@ export function buildPeerAwarenessSnippet(opts: {
   const orchestrateKey = key("orchestrate")
   const browserKey = key("browser")
   const decideKey = key("decide")
+  const fleetKey = key("fleet")
+
+  // Keep the browse tiers monotonic when callers pass the source-of-truth gates.
+  // Compound and power browser tools can only list when the base browser server is available.
+  const compoundBrowseAvailable = opts.browseAvailable && opts.compoundBrowseAvailable
+  const powerBrowseAvailable = opts.browseAvailable && opts.powerBrowseAvailable === true
 
   const criticList: Array<string> = [
     "`codex_critic` (gpt-5.5)",
@@ -582,7 +593,7 @@ export function buildPeerAwarenessSnippet(opts: {
     criticList.push("`gemini_reviewer` (gemini-3.1-pro, line-level code review)")
     criticList.push("`gemini_critic` (gemini-3.1-pro)")
   }
-  criticList.push("`opus_critic` (Opus 4.7)")
+  criticList.push("`opus_critic` (Opus 4.6)")
 
   const codexCliClause = opts.codexCli
     ? " `mcp__codex-cli__codex` dispatches to `codex-implementer` (gpt-5.3-codex with workspace-write) for end-to-end coding tasks."
@@ -598,6 +609,11 @@ export function buildPeerAwarenessSnippet(opts: {
   if (opts.workerToolsAvailable) {
     para2Parts.push(
       `\`worker-*\` are background Agent subagents (subagent_type) that run the matching worker in its own context and deliver the result as a completion notification, so a long run never blocks the turn: \`worker-explore\` (read-only research), \`worker-review\` (reads the code to verify a change or claim), \`worker-plan\` (ordered implementation plan), \`worker-implement\` (edit/write/bash; \`worktree: true\` isolates in a git worktree and returns the diff), \`worker-test\` (independent test author). The raw \`mcp__${workersKey}__*\` tools they call are guarded (a direct main-thread call is redirected to the matching agent); Workers themselves have \`code_search\`.`,
+    )
+  }
+  if (opts.workerToolsAvailable && opts.implementerAvailable) {
+    para2Parts.push(
+      `For a bounded, well-scoped implementation, prefer the \`implementer\` subagent (Task, runs on gpt-5.5) over \`worker-implement\`; reach for \`worker-implement\` only when you specifically need git-worktree isolation, parallel variants, or a throwaway experiment.`,
     )
   }
   // Orchestration group. `decompose`/`run_workflow` share the worker backend gate
@@ -628,11 +644,23 @@ export function buildPeerAwarenessSnippet(opts: {
     )
   }
   if (opts.browseAvailable) {
-    const powerNote = opts.powerBrowseAvailable
-      ? ` Power mode adds the L0/L1 primitives (\`mcp__${browserKey}__mouse\`, \`__drag\`, \`__type\`, \`__keyboard\`, \`__scroll\`, \`__eval_js\`, \`__read_page\`, \`__diagnostics\`, \`__find\`) for direct DOM / coordinate control.`
-      : ""
     para2Parts.push(
-      `\`mcp__${browserKey}__*\` tools drive a real Chrome / Edge browser via a local extension. Lead surface: \`__act(intent, value?)\` for any click / fill / type / scroll-to (an inner fast model resolves intent), \`__observe(intent?)\` for a 2-4 sentence natural-language page description, \`__extract(schema, instruction)\` for typed extraction, \`__navigate\` / \`__open_tab\` / \`__screenshot\` for state and visuals. The lead never sees raw DOM: refs and bboxes stay internal.${powerNote}`,
+      `\`mcp__${browserKey}__*\` tools drive a real Chrome / Edge browser via a local extension. Lead browse surface includes \`__navigate\` / \`__open_tab\` / \`__screenshot\` for state, visuals, and navigation.`,
+    )
+  }
+  if (compoundBrowseAvailable) {
+    para2Parts.push(
+      `Compound browse surface includes \`mcp__${browserKey}__act(intent, value?)\` / \`__observe(intent?)\` / \`__extract(schema, instruction)\` / \`__find\`; an inner fast model resolves intent, find/observe yield element refs act consumes, and the lead never sees raw DOM.`,
+    )
+  }
+  if (powerBrowseAvailable) {
+    para2Parts.push(
+      `Power browse surface adds \`mcp__${browserKey}__mouse\`, \`__drag\`, \`__type\`, \`__keyboard\`, \`__scroll\`, \`__eval_js\`, \`__read_page\`, \`__diagnostics\`, \`__list_tabs\`, \`__close_tab\`, \`__wait\`, and \`__download\` for direct DOM and coordinate control.`,
+    )
+  }
+  if (opts.fleetAvailable) {
+    para2Parts.push(
+      `\`mcp__${fleetKey}__*\` tools drive remote ai-or-die coding sessions (list / read / create / stop / await / drive, plus remote read_file / list_dir / search / git_show); they act on a REMOTE fleet instance, not the local repo.`,
     )
   }
 
@@ -643,6 +671,49 @@ export function buildPeerAwarenessSnippet(opts: {
     "",
     para2Parts.join(" "),
   ].join("\n")
+}
+
+/**
+ * Compact, gated capability SUMMARY for the spawned session's system prompt
+ * (`--append-system-prompt`). The FULL per-tool inventory lives once in the
+ * mirrored CLAUDE.md (buildPeerAwarenessSnippet); this ~300-token summary gives
+ * the main agent high-salience awareness of what is available without
+ * duplicating the full snippet in the context window every turn. Gated
+ * identically to the full snippet so it never names a surface the live
+ * tools/list dropped. Factual present tense, no imperatives.
+ */
+export function buildPeerAwarenessSummary(opts: {
+  workerToolsAvailable: boolean
+  standInAvailable: boolean
+  browseAvailable: boolean
+  fleetAvailable?: boolean
+  agentToolsAvailable?: boolean
+  groupKeys?: Partial<Record<McpGroup, string>>
+}): string {
+  const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
+  const lines: Array<string> = [
+    "## Injected capabilities (summary)",
+    "",
+    `A layer of MCP tools, background workers, and skills is injected into this session. Cross-lab peer critics under \`mcp__${key("peers")}__*\` (plus the \`peer-review-coordinator\` subagent) review plans and diffs adversarially, and Claude Code's built-in \`advisor\` catches approach drift. \`mcp__${key("search")}__code\` is meaning-first code search and \`mcp__${key("search")}__web\` returns citable web sources.`,
+  ]
+  if (opts.workerToolsAvailable) {
+    lines.push(`Background \`worker-*\` agents (explore, review, plan, implement, test) run delegated work in their own context without blocking your turn, and \`mcp__${key("orchestrate")}__*\` composes, verifies, and runs floor-raising workflows.`)
+  }
+  if (opts.standInAvailable) {
+    lines.push(`\`mcp__${key("decide")}__stand_in\` returns a three-lab consensus for a decision when the user is unavailable.`)
+  }
+  if (opts.browseAvailable) {
+    lines.push(`\`mcp__${key("browser")}__*\` drives a real Chrome or Edge browser.`)
+  }
+  if (opts.fleetAvailable) {
+    lines.push(`\`mcp__${key("fleet")}__*\` drives remote ai-or-die coding sessions.`)
+  }
+  if (opts.agentToolsAvailable === true) {
+    lines.push("The `/gh-first-mate` skill drives a durable GitHub cloud-agent loop.")
+  }
+  lines.push("")
+  lines.push(`Each tool's own description carries when to use it and when not. The full per-tool inventory (models, gating, workers, skills) is in the "Peer review and advisor" section of your CLAUDE.md project instructions.`)
+  return lines.join("\n")
 }
 
 /** Convenience: every persona that should be registered for the given mode. */
@@ -738,9 +809,8 @@ export interface NonPersonaMcpTool {
    *   `AIORDIE_TOKEN`, `AIORDIE_SESSION_ID`; see `artifactToolsEnabled()`
    *   in `lib/mcp-capabilities.ts`).
    *
-   * Absent on `web_search` / `code_search` — those are always available
-   * once the proxy is in claude mode (loopback + nonce already gate
-   * `/mcp` itself).
+   * Absent on `web` / `code`; those are always available once the proxy is
+   * in claude mode (loopback + nonce already gate `/mcp` itself).
    */
   capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "browse_agent" | "fleet" | "agents" | "artifact"
   /**
@@ -759,7 +829,7 @@ export interface NonPersonaMcpTool {
 }
 
 const WEB_SEARCH_DESCRIPTION =
-  "Web search via GitHub Copilot's MCP. Prefer over Claude Code's built-in WebSearch — surfaces source URLs you can cite. Use for API documentation lookups, error message diagnosis, upstream issue searches, and verifying claims against current sources. Returns content with reference links."
+  "Web search via GitHub Copilot's MCP that returns answer text plus source URLs the caller can cite. It accepts a natural-language `query`; the upstream provider rewrites for the search index and the handler formats any references as markdown links. Use for current external information such as API documentation, error-message diagnosis, upstream issue searches, and claims that need web sources. Not for local repository discovery or code navigation, use code, Read, Grep, or Glob for workspace content. Prefer it over the built-in WebSearch when source URLs are needed or the built-in surface is geographically constrained."
 
 /**
  * Format a `searchWeb()` result as an MCP-friendly text block. Mirrors
@@ -821,7 +891,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             content: [
               {
                 type: "text",
-                text: "web_search: arguments.query is required (must be a non-empty string)",
+                text: "web: arguments.query is required (must be a non-empty string)",
               },
             ],
             isError: true,
@@ -837,7 +907,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           return {
-            content: [{ type: "text", text: `web_search failed: ${msg}` }],
+            content: [{ type: "text", text: `web failed: ${msg}` }],
             isError: true,
           }
         }
@@ -1160,57 +1230,51 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         }
       },
     },
-    // worker_explore / worker_implement — autonomous worker tools backed
-    // by the Pi agent loop (`src/lib/worker-agent/engine.ts`), routed
-    // through per-mode default models: explore → `gpt-5.4-mini`, review → `gemini-3.1-pro-preview`
-    // (cross-lab, decorrelated from the gpt-5.5 implementer); implement → `gpt-5.5` (xhigh). An explicit `model` arg wins.
+    // explore / implement / review / plan / test are autonomous worker tools
+    // backed by the Pi agent loop (`src/lib/worker-agent/engine.ts`) and routed
+    // through per-mode defaults: explore -> `claude-sonnet-5` (xhigh), review ->
+    // `gemini-3.1-pro-preview` (xhigh clamped to high by the default model), plan
+    // -> `claude-opus-4.8` (xhigh), and implement/test -> `gpt-5.5` (xhigh). An
+    // explicit `model` arg wins.
     //
-    // GATING (`capability: "worker"`): the MCP handler drops both entries
-    // from `tools/list` and `tools/call` when `workerToolsEnabled()` is
-    // false. The gate fires when (a) the worker default model
-    // (`gpt-5.4-mini`) is missing from the live Copilot catalog (or
-    // present but lacks `tool_calls` support), OR (b) the operator opted
-    // out via `GH_ROUTER_DISABLE_WORKER_TOOLS=1`. Defense-in-depth: the
-    // gate is checked at BOTH list-time and call-time so a client that
-    // hard-codes the tool name can't bypass the list-side filter. (If the
-    // implement default `gpt-5.5` is absent, implement calls return a
-    // helpful resolve error listing the catalog's tool_call models.)
+    // GATING (`capability: "worker"`): the MCP handler drops these entries from
+    // `tools/list` and `tools/call` when `workerToolsEnabled()` is false. The gate
+    // fires when (a) the worker sentinel (`gpt-5.4-mini`) is missing from the live
+    // Copilot catalog or lacks `tool_calls`, OR (b) the operator opted out via
+    // `GH_ROUTER_DISABLE_WORKER_TOOLS=1`. Defense-in-depth: the gate is checked at
+    // BOTH list-time and call-time so a client that hard-codes the tool name can't
+    // bypass the list-side filter. If a per-mode default such as `gpt-5.5` or
+    // `claude-sonnet-5` is absent, that mode returns a helpful resolve error.
     //
-    // SCHEMA SHAPE: `prompt` is required; `model` / `thinking` are
-    // optional fine-tunes the worker engine validates against the live
-    // catalog (unknown model → isError envelope with the candidate
-    // list; unsupported thinking-tier → silent clamp to the model's
-    // max). `worker_implement` adds `worktree: boolean` to opt the
-    // worker into an isolated git worktree when atomic isolation
-    // matters more than in-place speed.
+    // SCHEMA SHAPE: `prompt` is required; `model` / `thinking` are optional
+    // fine-tunes the worker engine validates against the live catalog (unknown
+    // model -> isError envelope with the candidate list; unsupported thinking-tier
+    // -> silent clamp to the model's max). `implement` and `test` add
+    // `worktree: boolean` to opt the worker into an isolated git worktree when
+    // atomic isolation matters more than in-place speed.
     //
-    // HANDLER: thin closure over `runWorkerAgent` — every safety check
-    // (semaphore, model resolution, workspace canonicalization,
-    // worktree provisioning, budget, audit log, cleanup) lives inside
-    // the engine. The MCP layer only translates the JSON-RPC arguments
-    // into a typed `WorkerAgentOpts` and forwards the resulting
-    // `{text, isError?}` envelope verbatim.
+    // HANDLER: thin closure over `runWorkerAgent`; every safety check (semaphore,
+    // model resolution, workspace canonicalization, worktree provisioning, budget,
+    // audit log, cleanup) lives inside the engine. The MCP layer only translates
+    // the JSON-RPC arguments into a typed `WorkerAgentOpts` and forwards the
+    // resulting `{text, isError?}` envelope verbatim.
     {
       toolNameHttp: "explore",
       group: "workers",
       capability: "worker",
       description:
-        "Runs as the background `worker-explore` agent. Dispatch via the Agent tool (subagent_type: worker-explore) so your turn is never blocked; the result arrives as a completion notification. "
+        "Runs as the background `worker-explore` agent. Dispatch via the Agent tool (subagent_type: worker-explore) so the turn is never blocked; the result arrives as a completion notification. "
         + "Read-only investigation by an autonomous worker (Pi runtime; "
-        + "default model `gpt-5.4-mini` at xhigh reasoning, override via "
+        + "default model `claude-sonnet-5` at xhigh reasoning, override via "
         + "the `model` arg with any Copilot-catalog model that advertises "
-        + "`tool_calls`). Tools: read, glob, grep, code_search "
-        + "(semantic-first), web_search, fetch_url, advisor (consult a "
-        + "stronger cross-lab model), update_plan (planning checklist), and "
-        + "toolbelt (run a read-only analysis CLI: rg/fd/jq/yq/sg/gron/tokei/"
-        + "difft/git). The worker's system prompt sandboxes "
-        + "it and gives one-line descriptions of each tool, so brief "
-        + "it on the investigation, not on tool semantics. Offloads "
-        + "bounded research that would otherwise eat your context "
-        + "window — the worker plans its own tool calls and returns a "
-        + "single text answer. Examples: \"find files matching X then "
-        + "summarize\", \"how does library Y handle Z\", \"survey this "
-        + "codebase for usages of deprecated API\".",
+        + "`tool_calls`). It has read, glob, grep, semantic-first code search, "
+        + "web search, fetch_url, advisor, update_plan, and read-only toolbelt "
+        + "tools, and it returns a single text answer. Use for bounded research, "
+        + "repo discovery, dependency investigation, or multi-file reading that "
+        + "would otherwise consume the lead context window. Not for implementation, "
+        + "test authoring, or verification of a concrete diff; use implement, test, "
+        + "or review for those scopes. Brief the investigation goal and constraints, "
+        + "not step-by-step tool semantics.",
       inputSchema: {
         type: "object",
         required: ["prompt"],
@@ -1227,7 +1291,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "gpt-5.4-mini). Must advertise tool_calls "
+              + "claude-sonnet-5). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
               + "the eligible catalog models on mismatch.",
           },
@@ -1235,7 +1299,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
             description:
-              "Optional reasoning depth (default high). Silently "
+              "Optional reasoning depth (default xhigh). Silently "
               + "clamped to the model's allowed range; \"off\" drops "
               + "the parameter entirely.",
           },
@@ -1277,21 +1341,19 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       group: "workers",
       capability: "worker",
       description:
-        "Runs as the background `worker-implement` agent. Dispatch via the Agent tool (subagent_type: worker-implement) so your turn is never blocked; the result arrives as a completion notification. "
-        + "Delegates a scoped coding task to an autonomous worker (Pi "
-        + "runtime; default model `gpt-5.5` at xhigh reasoning, override via "
-        + "the `model` arg with any Copilot-catalog model that advertises "
-        + "`tool_calls`). Tools: the explore read-only set (read, glob, "
-        + "grep, code_search, web_search, fetch_url, advisor, update_plan, "
-        + "toolbelt) plus edit, write, bash, and codex_review (code review "
-        + "by codex-reviewer / gpt-5.3-codex). The worker's system prompt "
-        + "sandboxes it and gives one-line descriptions of each tool, "
-        + "so brief it on the task, not on tool semantics. With "
-        + "`worktree: false` (default) edits in place — concurrent "
-        + "worker_implement calls and Claude's own edits to the same "
-        + "files will race. With `worktree: true` runs in an isolated "
-        + "git worktree and returns the diff for review. HARD ERROR if "
-        + "true and the workspace is not a git repository.",
+        "Runs as the background `worker-implement` agent. Dispatch via the Agent tool (subagent_type: worker-implement) so the turn is never blocked; the result arrives as a completion notification. "
+        + "Delegates a scoped coding task to an autonomous worker (Pi runtime; "
+        + "default model `gpt-5.5` at xhigh reasoning, override via `model` "
+        + "with any Copilot-catalog model that advertises `tool_calls`). It has "
+        + "the explore read-only tools plus edit, write, bash, and codex_review, "
+        + "and it returns its final text with any changed files or worktree diff. "
+        + "Use for bounded implementation work that may take a while or benefits "
+        + "from isolated worker context. Not for pure research, planning, review, "
+        + "or independent test authoring; use explore, plan, review, or test for "
+        + "those scopes. With `worktree: false` (default) edits happen in place, "
+        + "so concurrent implement calls and lead edits to the same files can race. "
+        + "With `worktree: true` it runs in an isolated git worktree and returns "
+        + "the diff; this errors if the workspace is not a git repository.",
       inputSchema: {
         type: "object",
         required: ["prompt"],
@@ -1309,9 +1371,9 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               "When true, run inside a fresh git worktree and return "
               + "Pi's final text followed by the unified diff (so the "
               + "lead can review before merging). When false/omitted, "
-              + "edits the workspace in place — concurrent worker "
-              + "calls and Claude's own edits will race. HARD ERROR "
-              + "if true and the workspace is not a git repository.",
+              + "edits the workspace in place, so concurrent worker "
+              + "calls and lead edits can race. Errors if true and "
+              + "the workspace is not a git repository.",
           },
           model: {
             type: "string",
@@ -1368,23 +1430,18 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       group: "workers",
       capability: "worker",
       description:
-        "Runs as the background `worker-review` agent. Dispatch via the Agent tool (subagent_type: worker-review) so your turn is never blocked; the result arrives as a completion notification. "
-        + "Read-only code review by an autonomous worker (Pi runtime; "
-        + "default model `gpt-5.5` at xhigh reasoning, override via `model` with any "
-        + "Copilot-catalog model that advertises `tool_calls`). Same "
-        + "read-only toolset as `explore` (read, glob, grep, code_search, "
-        + "web_search, fetch_url, advisor, update_plan, toolbelt) — it CANNOT "
-        + "edit — but the worker is framed "
-        + "as a reviewer: it verifies correctness against the actual code "
-        + "itself rather than trusting a claim, and reports findings (bugs, "
-        + "edge cases, security / concurrency / resource risks, missing "
-        + "handling) with a severity and `file:line`. Brief it with the "
-        + "change / diff / claim to verify (paste it, or name the files) — it "
-        + "reads the code to confirm, so you get a self-verifying second "
-        + "opinion that doesn't depend on you having pre-extracted the "
-        + "relevant code. Unlike the `peers` critics (single stateless model "
-        + "calls on the artifact you paste), this worker can navigate the "
-        + "repo to check surrounding context for itself.",
+        "Runs as the background `worker-review` agent. Dispatch via the Agent tool (subagent_type: worker-review) so the turn is never blocked; the result arrives as a completion notification. "
+        + "Read-only code review by an autonomous worker (Pi runtime; default "
+        + "model `gemini-3.1-pro-preview`, default thinking xhigh clamped to high "
+        + "for that model, override via `model` with any Copilot-catalog model "
+        + "that advertises `tool_calls`). It has the same read-only toolset as "
+        + "explore and verifies claims against surrounding repository context before "
+        + "returning severity-ranked findings with `file:line` citations. Use for "
+        + "reviewing a change, diff, or correctness claim when the reviewer should "
+        + "read the code itself rather than trusting a pasted artifact. Not for "
+        + "architecture critique, implementation, or test authoring; use codex_critic "
+        + "or gemini_critic for design review, implement for edits, and test for "
+        + "independent test creation.",
       inputSchema: {
         type: "object",
         required: ["prompt"],
@@ -1402,7 +1459,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "gpt-5.5). Must advertise tool_calls "
+              + "gemini-3.1-pro-preview). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
               + "the eligible catalog models on mismatch.",
           },
@@ -1410,9 +1467,9 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
             description:
-              "Optional reasoning depth (default high). Silently "
-              + "clamped to the model's allowed range; \"off\" drops "
-              + "the parameter entirely.",
+              "Optional reasoning depth (defaults to xhigh, clamped to high "
+              + "for the default review model). Silently clamped to the model's "
+              + "allowed range; \"off\" drops the parameter entirely.",
           },
           workspace: {
             type: "string",
@@ -1452,18 +1509,17 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       group: "workers",
       capability: "worker",
       description:
-        "Runs as the background `worker-plan` agent. Dispatch via the Agent tool (subagent_type: worker-plan) so your turn is never blocked; the result arrives as a completion notification. "
-        + "Read-only implementation planning by an autonomous worker (Pi "
-        + "runtime; default model `claude-opus-4.8`, override via `model` "
-        + "with any Copilot-catalog model that advertises `tool_calls`). Same "
-        + "read-only toolset as `explore` (read, glob, grep, code_search, "
-        + "web_search, fetch_url, advisor, update_plan, toolbelt) — it CANNOT "
-        + "edit — but the worker is framed as a planner: from the task and "
-        + "acceptance criteria it produces a concrete, ordered implementation "
-        + "plan (the files to change, the approach, the key risks, and how "
-        + "each acceptance criterion will be verified), grounded by reading "
-        + "the actual code. Brief it with the task and any acceptance "
-        + "criteria; it returns a single plan, not code.",
+        "Runs as the background `worker-plan` agent. Dispatch via the Agent tool (subagent_type: worker-plan) so the turn is never blocked; the result arrives as a completion notification. "
+        + "Read-only implementation planning by an autonomous worker (Pi runtime; "
+        + "default model `claude-opus-4.8` at xhigh reasoning, override via "
+        + "`model` with any Copilot-catalog model that advertises `tool_calls`). "
+        + "It has the same read-only toolset as explore and returns a concrete, "
+        + "ordered implementation plan covering files, approach, risks, and how "
+        + "acceptance criteria will be verified. Use before coding when the task "
+        + "needs repo-grounded sequencing or acceptance criteria translated into "
+        + "implementation steps. Not for editing files, running an implementation, "
+        + "writing tests, or adversarial review; use implement, test, or review for "
+        + "those scopes.",
       inputSchema: {
         type: "object",
         required: ["prompt"],
@@ -1488,7 +1544,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
             description:
-              "Optional reasoning depth (default high). Silently "
+              "Optional reasoning depth (default xhigh). Silently "
               + "clamped to the model's allowed range; \"off\" drops "
               + "the parameter entirely.",
           },
@@ -1530,20 +1586,18 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       group: "workers",
       capability: "worker",
       description:
-        "Runs as the background `worker-test` agent. Dispatch via the Agent tool (subagent_type: worker-test) so your turn is never blocked; the result arrives as a completion notification. "
+        "Runs as the background `worker-test` agent. Dispatch via the Agent tool (subagent_type: worker-test) so the turn is never blocked; the result arrives as a completion notification. "
         + "Independent adversarial test authoring by an autonomous worker (Pi "
         + "runtime; default model `gpt-5.5` at xhigh reasoning, override via "
-        + "`model` with any Copilot-catalog model that advertises "
-        + "`tool_calls`). Same read+write toolset as `implement` (the explore "
-        + "set plus edit, write, bash, codex_review). The worker is framed as "
-        + "an INDEPENDENT test author that did NOT write the code under test: "
-        + "from the task and acceptance criteria it writes tests that try to "
-        + "BREAK the implementation (edge cases, error paths, the acceptance "
-        + "criteria as executable checks), runs them, and reports which pass "
-        + "and fail — it does NOT modify the implementation to make tests "
-        + "pass. With `worktree: true` runs in an isolated git worktree and "
-        + "returns the diff; HARD ERROR if true and the workspace is not a "
-        + "git repository.",
+        + "`model` with any Copilot-catalog model that advertises `tool_calls`). "
+        + "It has the same read/write toolset as implement and writes tests that "
+        + "try to break the implementation through edge cases, error paths, and "
+        + "acceptance criteria, then runs them and reports pass/fail. Use when a "
+        + "separate test author should challenge an implementation without modifying "
+        + "the production code to make tests pass. Not for implementing fixes, broad "
+        + "research, or code review; use implement, explore, or review for those scopes. "
+        + "With `worktree: true` it runs in an isolated git worktree and returns the "
+        + "test diff; this errors if the workspace is not a git repository.",
       inputSchema: {
         type: "object",
         required: ["prompt"],
@@ -1562,9 +1616,9 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               "When true, run inside a fresh git worktree and return "
               + "Pi's final text followed by the unified diff (so the "
               + "lead can review the authored tests before merging). When "
-              + "false/omitted, writes tests in place — concurrent worker "
-              + "calls and Claude's own edits will race. HARD ERROR if "
-              + "true and the workspace is not a git repository.",
+              + "false/omitted, writes tests in place, so concurrent worker "
+              + "calls and lead edits can race. Errors if true and "
+              + "the workspace is not a git repository.",
           },
           model: {
             type: "string",
@@ -1625,19 +1679,16 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       toolNameHttp: "verify_workflow",
       group: "orchestrate",
       description:
-        "Statically verify a workflow IR against the orchestration floor "
-        + "invariants BEFORE running it. Input `ir`: the typed WorkflowIR "
-        + "(rawAskHash, acceptanceCriteriaHash, nodes[] with role/inputs/gate/"
-        + "onFail, maxDepth). Returns {ok, violations:[{code, message, nodeId?}]}. "
-        + "Each violation carries a stable code (e.g. NO_BASELINE, "
-        + "SELECTOR_NOT_RAW_ASK, SAME_LAB_CHECK, ORPHAN_NODE, "
-        + "MISSING_INTEGRATION_GATE) — fix every one until `ok` is true. "
-        + "WHY: a workflow's floor guarantee (deliver max(orchestrated, baseline), "
-        + "producer != checker, cross-lab checks, sealed gates) is only as good as "
-        + "the IR's structure; a probabilistically-composed IR can silently violate "
-        + "it. This is the cheap, pure, side-effect-free pre-flight that catches "
-        + "those violations with actionable codes so you self-correct BEFORE paying "
-        + "for execution. Call it right after composing/decomposing a workflow.",
+        "Statically verifies a workflow IR against the orchestration floor "
+        + "invariants before the kernel runs it. It accepts the typed WorkflowIR "
+        + "as `ir` and an optional `knownGateIds` allowlist, then returns "
+        + "{ok, violations:[{code, message, nodeId?}]} with stable violation codes "
+        + "such as NO_BASELINE, SELECTOR_NOT_RAW_ASK, SAME_LAB_CHECK, ORPHAN_NODE, "
+        + "or MISSING_INTEGRATION_GATE. Use immediately after composing or receiving "
+        + "a workflow IR, especially before paying for run_workflow, so structural "
+        + "floor failures can be fixed while still in data form. Not a runner, model "
+        + "reviewer, or proof that the user's spec is correct; use run_workflow to "
+        + "execute sealed gates and use critic/review tools for advisory review.",
       inputSchema: {
         type: "object",
         required: ["ir"],
@@ -1682,24 +1733,21 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       // violation the driver re-drafts with the violations as feedback; a
       // cross-lab critic reviews a clean draft (bounded). Gated `capability:
       // "worker"` (it dispatches models; the gpt-5.5 driver errors at call time
-      // if absent, like worker_implement).
+      // if absent, like implement).
       toolNameHttp: "decompose",
       group: "orchestrate",
       capability: "worker",
       description:
-        "Compose a VERIFIED, tool-routed workflow IR from an open-ended software "
-        + "ask. A single strong driver model drafts a typed WorkflowIR; a static "
-        + "verifier checks it against the floor invariants and the driver "
-        + "re-drafts on any violation; a cross-lab critic reviews a clean draft. "
-        + "Returns {ok, ir, rounds, concerns?} on success, or {ok:false, "
-        + "violations, rounds} if it never converged. "
-        + "WHY: a single model anchors on its own framing of a task (the decompose "
-        + "step is itself a single point of failure), so the driver is decorrelated "
-        + "by a cross-lab critic, and the output is a typed IR a verifier/kernel "
-        + "enforce in CODE rather than prose the model could quietly violate. The "
-        + "IR is DATA you then pass to run_workflow (or re-check with "
-        + "verify_workflow). Reach for it on non-trivial, role-separated asks where "
-        + "blind-spot reduction pays off; a trivial ask does not need it.",
+        "Composes a verified, tool-routed WorkflowIR from an open-ended software "
+        + "ask. A strong driver model drafts the IR, the static verifier checks floor "
+        + "invariants, the driver re-drafts on violations, and a cross-lab critic "
+        + "reviews a clean draft; optional `context` supplies repo facts, constraints, "
+        + "or research findings to the driver. It returns {ok, ir, rounds, concerns?} "
+        + "on success, or {ok:false, violations, rounds} when it cannot converge. "
+        + "Use for non-trivial, role-separated asks where blind-spot reduction and "
+        + "sealed-gate structure justify orchestration. Not for trivial edits, direct "
+        + "implementation, or execution; use implement for a scoped code change and "
+        + "run_workflow only after the IR is verified.",
       inputSchema: {
         type: "object",
         required: ["ask"],
@@ -1739,7 +1787,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           critic: { model: "gemini-3.1-pro-preview", endpoint: "/v1/chat/completions", effort: "high" },
           signal,
         })
-        const result = await decomposeWorkflow(ask, deps, { maxRounds: 3 })
+        const context = typeof args.context === "string" ? args.context : undefined
+        const result = await decomposeWorkflow(ask, deps, { maxRounds: 3, context })
         return { content: [{ type: "text", text: JSON.stringify(result) }], isError: !result.ok }
       },
     },
@@ -1754,22 +1803,17 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       group: "orchestrate",
       capability: "worker",
       description:
-        "Execute a VERIFIED workflow IR (from decompose / verify_workflow) through "
-        + "the frozen orchestration kernel. The kernel runs the single-model "
-        + "BASELINE plus the orchestrated DAG, gates every producer over a SEALED "
-        + "executable gate you name by `gateId` (the kernel owns the command; the "
-        + "IR cannot author it), and delivers max(orchestrated, baseline) by "
-        + "champion-retention: the orchestrated result ships only if it verifiably "
-        + "does not regress the baseline's executable checks, else the baseline "
-        + "ships. Returns {ok, outcome:{status, winner?, artifact?, reason, "
-        + "gatesPassed?}}. "
-        + "WHY: orchestration is a conditional bet (it helps on blind-spot/ambiguous "
-        + "asks, backfires on others), so the kernel NEVER ships something worse "
-        + "than a plain single-model run on the same ask. It enforces the floor in "
-        + "code (the model can't be trusted to honor it): a parallel baseline, a "
-        + "sealed executable gate as the selector, fail-to-baseline on any infra "
-        + "failure. Use after decompose for non-trivial asks on a harness-bearing "
-        + "repo.",
+        "Executes a verified WorkflowIR through the frozen orchestration kernel. "
+        + "The kernel runs a single-model baseline beside the orchestrated DAG, "
+        + "gates producers over the sealed executable `gateId` selected by the "
+        + "caller, and returns {ok, outcome:{status, winner?, artifact?, reason, "
+        + "gatesPassed?}}. It uses champion retention: the orchestrated candidate "
+        + "wins only when it does not regress the baseline's executable checks; "
+        + "otherwise the baseline ships. Use after decompose and verify_workflow "
+        + "for non-trivial asks in a git workspace with a meaningful sealed gate. "
+        + "Not for composing an IR, performing advisory review, or running arbitrary "
+        + "model-authored shell commands; use decompose or verify_workflow before "
+        + "this tool, and use ordinary tests or review tools outside the workflow kernel.",
       inputSchema: {
         type: "object",
         required: ["ir", "ask", "workspace", "gateId"],
@@ -1819,23 +1863,16 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       toolNameHttp: "attest_step",
       group: "orchestrate",
       description:
-        "Attest (audit) that an orchestrated run actually honored bias isolation: "
-        + "every producer node was checked by a DIFFERENT lab, and that check "
-        + "covered the producer's FINAL artifact (matched by content hash, so a "
-        + "check of a stale earlier version does not count). Input `nodes`: "
-        + "[{id, producerLab, artifactHash, checks:[{checkerLab, "
-        + "verifiedArtifactHash}]}]. Returns {attested, recommendation: "
-        + "'accept'|'ship_baseline', nodes:[{id, attested, reason}]}. "
-        + "WHY: run_workflow's frozen kernel is the TAMPER-PROOF path (it controls "
-        + "the artifacts and computes the hashes). attest_step is for workflows you "
-        + "compose OUTSIDE the kernel: it deterministically checks your "
-        + "SELF-REPORTED lineage is structurally sound (a different-lab check whose "
-        + "hash equals each producer's final-artifact hash), catching the "
-        + "non-malicious failures (a missing / same-lab / stale check). It verifies "
-        + "consistency, NOT that the hashes are real — a completeness gate, not a "
-        + "security boundary. Fail-closed: anything short of a valid different-lab "
-        + "check on EVERY node recommends shipping the baseline. It RECOMMENDS; it "
-        + "never executes.",
+        "Audits self-reported producer lineage for bias-isolation structure. It "
+        + "accepts `nodes` with each producer lab, final artifact hash, and checker "
+        + "hashes, then returns {attested, recommendation:'accept'|'ship_baseline', "
+        + "nodes:[{id, attested, reason}]}. The check passes only when every producer "
+        + "has a different-lab check over the same final artifact hash, so missing, "
+        + "same-lab, or stale checks fail closed to a baseline recommendation. Use "
+        + "for workflows composed outside run_workflow, where lineage is self-reported "
+        + "and needs a deterministic completeness gate. Not a security boundary, hash "
+        + "authenticator, or executor; run_workflow is the kernel-owned path when the "
+        + "router must control artifacts, gates, and hashes.",
       inputSchema: {
         type: "object",
         required: ["nodes"],
@@ -1906,17 +1943,17 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       group: "workers",
       capability: "browse_agent",
       description:
-        "Runs as the background `worker-browse` agent. Dispatch via the Agent tool (subagent_type: worker-browse) so your turn is never blocked; the result arrives as a completion notification. "
-        + "A Pi-driven autonomous browser agent (gpt-5.4-mini) that drives a "
-        + "real browser to accomplish `task` and returns the result. Runs in "
-        + "its own context to preserve the lead's window (raw DOM / page "
-        + "snapshots stay inside the agent). Pass `sessionId` to continue a "
-        + "prior session (its id is returned appended to the result as "
-        + "`[browse session: <id>]`); omit it for a fresh isolated session. "
-        + "Multiple concurrent calls run as parallel sessions on the one "
-        + "shared browser. Examples: \"find the cheapest flight LHR-JFK next "
-        + "Tuesday\", \"log into the dashboard and read the current MRR\", "
-        + "\"summarize the top 3 HN front-page stories\".",
+        "Runs as the background `worker-browse` agent. Dispatch via the Agent tool (subagent_type: worker-browse) so the turn is never blocked; the result arrives as a completion notification. "
+        + "A Pi-driven autonomous browser worker (default model `gpt-5.4-mini`) "
+        + "drives a real browser to accomplish `task`, keeps raw DOM and page "
+        + "snapshots inside its own context, and returns a single text result. "
+        + "Use for delegated multi-step web tasks such as comparing prices, logging "
+        + "into a dashboard, or summarizing pages when the lead does not need to "
+        + "steer each click. Not for direct in-context browser control, screenshots, "
+        + "or precise element interactions; use the `browser` MCP tools for those. "
+        + "Pass `sessionId` to continue a prior browse session, or omit it for a "
+        + "fresh isolated session; multiple calls run as parallel sessions on the "
+        + "shared browser.",
       inputSchema: {
         type: "object",
         required: ["task"],
@@ -1983,19 +2020,16 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       group: "decide",
       capability: "stand_in",
       description:
-        "**Away-mode decision tiebreak.** Three-lab advisor "
-        + "(gpt-5.5 xhigh, opus-4.7 xhigh, gemini-3.1-pro high) for "
-        + "**when the user is unavailable and you are stuck between two "
-        + "or more concrete options**. Polls all three across two "
-        + "structured rounds (blind vote → informed re-vote with peer "
-        + "reasoning visible) and returns a ranked-choice verdict. Use "
-        + "when: you would otherwise halt and wait for the user. Do "
-        + "NOT use for: code review (use `peer-review-coordinator`), "
-        + "open-ended exploration, single-model second opinions (use "
-        + "`codex_critic` / `gemini_critic` / `opus_critic` directly), "
-        + "or as a substitute for user confirmation on irreversible "
-        + "actions (push, delete, drop, deploy — those still require "
-        + "the user even with three-lab consensus).",
+        "Three-lab away-mode decision tiebreak advisor for moments when the "
+        + "user is unavailable and the agent is stuck between two or more concrete "
+        + "options. It polls gpt-5.5, Opus 4.7, and gemini-3.1-pro-preview across "
+        + "blind and informed voting rounds, then returns a ranked-choice verdict "
+        + "such as consensus, majority, no_consensus, or need_more_info. Use when "
+        + "work would otherwise halt on a bounded choice the user would normally "
+        + "make. Not for code review, open-ended exploration, single-model second "
+        + "opinions, or bypassing confirmation on irreversible actions such as push, "
+        + "delete, drop, or deploy; use peer-review-coordinator or the individual "
+        + "critics for review and still ask the user for destructive actions.",
       inputSchema: {
         type: "object",
         required: ["decision", "options"],
@@ -2125,7 +2159,7 @@ export function assertMcpToolSurfaceConsistent(): void {
  * accessibility) and never throws — its `{text, isError?}` envelope
  * is forwarded verbatim into the MCP `tool result` shape.
  *
- * Arg-validation policy mirrors `web_search`'s pattern: shape errors
+ * Arg-validation policy mirrors `web`'s pattern: shape errors
  * surface as `isError: true` tool-result envelopes (NOT JSON-RPC -32602
  * errors). The MCP `tools/list` JSON schema already documents the
  * required/optional fields; this runtime check is defense against a
@@ -2210,7 +2244,7 @@ async function runWorkerToolCall(call: {
   // Optional workspace override. Default is the proxy's launch cwd;
   // the model can override when the parent agent has multiple
   // workspaces open and the worker must operate in a specific one
-  // (matches code_search's threat model — no allowlist; proxy already
+  // (matches code search's threat model: no allowlist; proxy already
   // runs as the user). Absolute-only at the boundary so a relative
   // path doesn't silently resolve against process.cwd().
   let workspace = process.cwd()
@@ -2439,7 +2473,7 @@ async function runBrowseToolCall(
  * failures, abstains) all surface inside the structured `StandInResult`
  * envelope, which we JSON-stringify into the single MCP text block.
  *
- * Arg-validation policy mirrors `runWorkerToolCall` and `web_search`:
+ * Arg-validation policy mirrors `runWorkerToolCall` and `web`:
  * shape errors surface as `isError: true` tool-result envelopes (NOT
  * JSON-RPC -32602). The `tools/list` JSON schema documents required
  * fields; this runtime check is defense against a schema-ignoring

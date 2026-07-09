@@ -2,7 +2,7 @@ export const FLOOR_KEEPER_SKILL = {
   name: "gh-floor-keeper",
   md: `---
 name: gh-floor-keeper
-description: Done-checkpoint verification for non-trivial changes: run the executable gate, send the diff to OpenAI and Google reviewers, consult the advisor, reconcile findings by severity, author missing tests through a different lab when bounded and appropriate, and return an honest go/no-go before declaring work complete.
+description: Done-checkpoint verification for non-trivial changes: runs the executable gate, sends the diff to OpenAI and Google reviewers, consults the advisor, reconciles findings by severity, authors missing tests through a different lab when bounded and appropriate, and returns an honest go/no-go. Use before declaring non-trivial work complete.
 user-invocable: true
 ---
 

@@ -42,6 +42,8 @@ export interface DecomposeDeps {
 export interface DecomposeOpts {
   /** Total draft attempts before giving up (default 3). */
   maxRounds?: number
+  /** Extra repo facts, constraints, or research findings for the driver. */
+  context?: string
   /** Threaded into verification (e.g. the kernel's sealed-gate allowlist). */
   verify?: VerifyOpts
 }
@@ -90,12 +92,13 @@ export async function decomposeWorkflow(
 ): Promise<DecomposeResult> {
   const maxRounds = Math.max(1, opts.maxRounds ?? DEFAULT_MAX_ROUNDS)
   const verifyOpts = opts.verify ?? {}
+  const context = typeof opts.context === "string" && opts.context.trim().length > 0 ? opts.context.trim() : undefined
   let feedback: string[] | undefined
   let lastViolations: IRViolation[] = [{ code: "NO_DRAFT", message: "decompose produced no draft" }]
   let attempts = 0
 
   for (let round = 1; round <= maxRounds; round += 1) {
-    const drafted = await safeDraft(deps, { ask, feedback })
+    const drafted = await safeDraft(deps, { ask, context, feedback })
     attempts += 1
     if (!drafted.ok) {
       lastViolations = drafted.violations
@@ -117,7 +120,7 @@ export async function decomposeWorkflow(
 
     if (round < maxRounds) {
       // A round remains — re-draft incorporating the concerns.
-      const next = await safeDraft(deps, { ask, feedback: concerns })
+      const next = await safeDraft(deps, { ask, context, feedback: concerns })
       attempts += 1
       if (next.ok) {
         const reVerdict = verifyWorkflowIR(next.value as WorkflowIR, verifyOpts)

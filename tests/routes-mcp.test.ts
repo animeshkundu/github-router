@@ -770,7 +770,7 @@ describe("/mcp tools/call routing", () => {
       rawAskHash: "r", acceptanceCriteriaHash: "a", maxDepth: 1,
       nodes: [
         { id: "baseline", role: "baseline", inputs: [], gate: { kind: "none" }, onFail: "baseline" },
-        { id: "impl", role: "implement", producerLab: "openai", inputs: [], gate: { kind: "executable", gateId: "tests" }, onFail: "loop" },
+        { id: "impl", role: "implement", producerLab: "openai", inputs: [], gate: { kind: "executable", gateId: "typecheck-test" }, onFail: "loop" },
         { id: "select", role: "selector", inputs: ["baseline", "impl"], gate: { kind: "none" }, onFail: "baseline", judgesOnRawAsk: true },
       ],
     }
@@ -1823,7 +1823,7 @@ describe("/mcp web_search tool", () => {
     expect(result.content[0].text).toMatch(/query is required/i)
   })
 
-  test("web_search upstream failure surfaces as tool isError with `web_search failed:` prefix", async () => {
+  test("web_search upstream failure surfaces as tool isError with `web failed:` prefix", async () => {
     mockUpstreamMcp({ forceCallError: true })
     const { status, json } = await rpc({
       jsonrpc: "2.0",
@@ -1837,7 +1837,7 @@ describe("/mcp web_search tool", () => {
       isError?: boolean
     }
     expect(result.isError).toBe(true)
-    expect(result.content[0].text).toMatch(/^web_search failed:/i)
+    expect(result.content[0].text).toMatch(/^web failed:/i)
   })
 
   test("web_search counts against MAX_INFLIGHT_TOOLS_CALL (slot accounting symmetric with personas)", async () => {

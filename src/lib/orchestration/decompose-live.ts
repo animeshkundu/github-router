@@ -105,9 +105,10 @@ export interface LiveDecomposeOpts {
 export function buildLiveDecomposeDeps(opts: LiveDecomposeOpts): DecomposeDeps {
   const driver = opts.driver ?? { model: "claude-opus-4-8", endpoint: "/v1/messages" as Endpoint, effort: "xhigh" as Effort }
   const deps: DecomposeDeps = {
-    async draftIR({ ask, feedback }) {
+    async draftIR({ ask, context, feedback }) {
       const userText =
         `Ask:\n${ask}`
+        + (context && context.trim().length > 0 ? `\n\nContext:\n${context.trim()}` : "")
         + (feedback && feedback.length > 0 ? `\n\nFix these issues from the previous draft:\n- ${feedback.join("\n- ")}` : "")
       const text = await dispatchModelCall({
         model: driver.model,

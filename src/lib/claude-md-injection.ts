@@ -45,17 +45,21 @@ const ARTIFACT_MARKER_CLOSE = "<!-- /gh-router artifact-panel directive -->"
 // (buildArtifactOpenHookCommand in claude.ts) that auto-opens a finalized plan.
 // A Stop / UserPromptSubmit hook is deliberately NOT added: it would either
 // mis-fire on ordinary turns or merely duplicate this soft steer.
-const ARTIFACT_PANEL_DIRECTIVE =
-  "## Review in the artifact panel (HTML by default)\n\n"
-  + "You are running inside an ai-or-die tab, so the `mcp__peers__artifact_*` tools drive a live human-review panel. "
-  + "Default to an HTML artifact for anything the user should review before you proceed, not just plans but also design proposals, comparisons / trade-offs, decisions that need their input, diagrams, tables, code diffs, and reports. "
-  + "Author a self-contained `.html` (inline CSS, no external deps, readable typography) and open it with `mcp__peers__artifact_open` (pass `mode:\"interactive\"` if it carries `data-aod-*` action controls); tell the user to review, then drain their feedback with `mcp__peers__artifact_await` (pass back the returned `cursor` each call), revise, `mcp__peers__artifact_reply`, and `mcp__peers__artifact_end` when done. "
-  + "`artifact_await` returns typed events: `comment` (free-text anchored by selector/text/sourceLine) and `action` (the human clicked a control you emitted). Use `mcp__peers__artifact_update`/`artifact_refresh` to change the shown content and `mcp__peers__artifact_dismiss` to hide the panel while keeping the review alive. `mcp__peers__artifact_poll` is a frozen legacy alias (comments only). "
-  + "Plan-mode plans are auto-rendered to HTML and auto-opened for you; raw markdown is only a fallback. Skip the panel only for trivial one-line answers.\n\n"
-  + "Make the HTML good: match the subject project's design system (its Tailwind / theme / tokens) when the artifact represents a specific app, otherwise clean readable defaults. "
-  + "Per-type cheatsheet. plan: goal, current state, proposed approach, risks / open questions. comparison: options as columns with trade-off rows and a recommendation. table: scannable rows with a sticky header. diagram: boxes + arrows (SVG/CSS or Mermaid). code / diff: `<pre>` with before/after. "
-  + "To let the user act (not just comment), emit declarative controls (no JS): `data-aod-action` (verb) + `data-aod-id` (stable) [+ `data-aod-value`] — a choose-one option fires on click, a multi-select is checkboxes sharing `data-aod-group` plus a submit button with that group. "
-  + "The `gh-artifact-review` skill carries the fuller playbook."
+//
+// Scope: this block carries ONLY the trigger + the HTML-by-default steer + the
+// tool entry points + a pointer. The full authoring/review-loop playbook (HTML
+// conventions, design-system choice, per-type cheatsheet, the data-aod-*
+// controls, honest limits) lives in the materialized `gh-artifact-review`
+// skill, so it is not restated here every turn (per the injected-surface
+// review: CLAUDE.md holds the steer, the skill holds the procedure).
+function ARTIFACT_PANEL_DIRECTIVE(peersKey = "peers"): string {
+  const toolPrefix = `mcp__${peersKey}__artifact_`
+  return "## Review in the artifact panel (HTML by default)\n\n"
+    + `You are running inside an ai-or-die tab, so the \`${toolPrefix}*\` tools drive a live human-review panel. `
+    + "Default to opening a self-contained HTML artifact for anything the user should review before you proceed: plans, design proposals, comparisons / trade-offs, decisions that need their input, diagrams, tables, code diffs, and reports. "
+    + "Plan-mode plans are auto-rendered to HTML and opened for you; skip the panel only for trivial one-line answers. "
+    + `Run the \`gh-artifact-review\` skill for the full playbook: HTML + design conventions, the \`${toolPrefix}open\` / \`${toolPrefix}await\` (pass back the \`cursor\`) / \`${toolPrefix}reply\` / \`${toolPrefix}end\` loop, and the \`data-aod-*\` interactive controls.`
+}
 
 // Back-compat aliases used by existing tests. The peer block's
 // markers remain the "default" pair surfaced through __testExports.
@@ -78,22 +82,32 @@ const STYLE_DIRECTIVE =
   + "(commits, PRs, issues, code, comments, docs)."
 
 /**
- * Operating-defaults directive injected at the TOP of the mirrored CLAUDE.md
- * AND into the main agent's system prompt (`--append-system-prompt`), so it is
- * the highest-salience behavioral default. Two defaults, both explicitly
- * overridden by the user's own direction and the domain's standards:
+ * Operating-defaults directive injected at the TOP of the mirrored CLAUDE.md.
+ * The main agent's system prompt (`--append-system-prompt`) gets
+ * OPERATING_DEFAULTS_DIGEST instead, with this full statement available through
+ * CLAUDE.md. Three defaults, each explicitly overridden by the user's own
+ * direction and the domain's standards:
  *
  *   1. Orchestrate (strong default): delegate the heavy / parallel /
  *      context-heavy work to the right subagent / worker / model, keeping the
  *      main context free to reason and collaborate with the user, while still
  *      doing trivial / surgical / last-mile work directly (delegating that
  *      would only add relay-fidelity loss + latency).
- *   2. Excellence lens (HYBRID per the peer review): the reliable control
- *      signal is the PRINCIPLE stated plainly; the well-known names appear only
- *      as a "bar to clear" calibration, NOT as "channel X", with an explicit
- *      no-impersonation / no-theatrics guardrail (cross-lab critics: a named
- *      entity is a dense, high-variance vector that pulls in noise + persona
- *      mannerisms at top salience, so the principle leads and the name calibrates).
+ *   2. Excellence lens: the principles stated plainly and concretely (radical
+ *      simplicity + real-user focus; whole-system first-principles thinking that
+ *      anticipates scale; work back from the customer outcome). Named exemplars
+ *      were dropped per the injected-surface review: a named entity is a dense,
+ *      high-variance vector that pulls in persona mannerisms at top salience, and
+ *      the guidance favors specific functional framing over comparison, so
+ *      specificity carries the vividness instead.
+ *   3. Engineering excellence: quality / robustness / maintainability over
+ *      development cost; reproduce a bug end-to-end (as a real user hits it)
+ *      before fixing so the fix targets the real cause; a pixel-perfect UI bar;
+ *      and fix any lint error / test failure / flake on sight, whoever caused it,
+ *      folded into the current work rather than derailing the user's task (the
+ *      scope guardrail keeps proactive quality from becoming yak-shaving). The
+ *      digest carries a one-line form; the full statement lives here so it does
+ *      not cost the context window every turn.
  *
  * Self-referentially compliant with the style directive: no em dashes, no
  * Claude / Anthropic attribution.
@@ -108,13 +122,43 @@ export const OPERATING_DEFAULTS_DIRECTIVE =
   + "delegation for independent work. Do trivial, surgical, and last-mile work "
   + "directly; delegate the rest rather than doing it yourself and filling your own "
   + "context.\n\n"
-  + "Aim high. Default to radical simplicity and relentless focus on the user's real "
-  + "experience (the Jobs and Ive bar for design), whole-systems first-principles "
-  + "thinking that anticipates scale and the long arc (the Gates bar for architecture "
-  + "and tech), and customer obsession that works backwards from the outcome (the "
-  + "Bezos bar for product and business). Question every assumption and prefer what "
-  + "you can derive, reproduce, or test. Adopt the principles, not a persona: no "
-  + "impersonation, name-dropping, or theatrics."
+  + "Aim high. Default to radical simplicity and a relentless focus on the user's "
+  + "real experience: design for the person and the job to be done, not the demo. "
+  + "Reason about the whole system from first principles, anticipating scale and the "
+  + "long arc rather than patching the surface. Work backwards from the outcome the "
+  + "user actually needs. Question every assumption and prefer what you can derive, "
+  + "reproduce, or test.\n\n"
+  + "Engineering excellence. When making technical decisions, give little weight to "
+  + "development cost; prefer quality, simplicity, robustness, scalability, and "
+  + "long-term maintainability. Fix a bug by first reproducing it end to end, as "
+  + "close to how a real user hits it as you can, so you solve the real problem and "
+  + "not a symptom. When testing a product end to end, be picky about the UI and "
+  + "obsessed with pixel perfection: if something clearly looks off, even when it is "
+  + "unrelated to your task, get it fixed along the way. Hold that same bar for the "
+  + "codebase itself: a lint error, a failing test, or a flaky test is worth fixing "
+  + "the moment you see it, whoever introduced it. Fold it into your current work "
+  + "rather than letting it derail the task the user actually asked for."
+
+/**
+ * Condensed digest of OPERATING_DEFAULTS_DIRECTIVE for the spawned session's
+ * system prompt (--append-system-prompt). The FULL directive is prepended to
+ * the mirrored CLAUDE.md (read by the main agent and descendants); this digest
+ * keeps both behavioral directives at top salience without duplicating the full
+ * ~310-token block in the context window every turn. Points to the full copy.
+ */
+export const OPERATING_DEFAULTS_DIGEST =
+  "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
+  + "Orchestrate: delegate research, implementation, review, and large reads to the right subagent, "
+  + "worker, or model, preferring parallel delegation for independent work, so your own context stays "
+  + "free to reason and collaborate with the user; do trivial, surgical, and last-mile work directly. "
+  + "Aim high: default to radical simplicity and the user's real experience, whole-system "
+  + "first-principles thinking that anticipates scale and the long arc, and working backwards from the "
+  + "outcome the user actually needs; question every assumption and prefer what you can derive, "
+  + "reproduce, or test. Engineering excellence: prefer quality and long-term "
+  + "maintainability over dev cost; reproduce bugs end to end before fixing; keep a "
+  + "pixel-perfect UI bar; fix any lint, test failure, or flake on sight without "
+  + "letting it derail the task at hand. The full "
+  + "statement of these defaults is in your CLAUDE.md project instructions."
 
 /**
  * Skip the helper if the user's `~/.claude/CLAUDE.md` (or, equivalently,
@@ -686,10 +730,11 @@ export async function prependStyleDirectiveToMirroredClaudeMd(
 /**
  * Prepend the operating-defaults directive (orchestrator posture + hybrid
  * excellence lens; `OPERATING_DEFAULTS_DIRECTIVE` above) to the TOP of the
- * mirrored CLAUDE.md so descendant agents (Agent subagents, agent-teams
- * teammates) inherit it. The main agent gets the same text at higher salience
- * via `--append-system-prompt`. Separate marker fence from the style / peer
- * blocks so all coexist; best-effort (warn-and-continue) like its siblings.
+ * mirrored CLAUDE.md so the main agent and descendant agents (Agent subagents,
+ * agent-teams teammates) inherit the full statement. The main agent also gets
+ * OPERATING_DEFAULTS_DIGEST at higher salience via `--append-system-prompt`.
+ * Separate marker fence from the style / peer blocks so all coexist;
+ * best-effort (warn-and-continue) like its siblings.
  */
 export async function prependOperatingDefaultsToMirroredClaudeMd(
   directive: string = OPERATING_DEFAULTS_DIRECTIVE,
@@ -706,8 +751,9 @@ export async function prependOperatingDefaultsToMirroredClaudeMd(
 /**
  * Append the toolbelt awareness one-liner (which CLI tools are on PATH)
  * to the bottom of the mirrored CLAUDE.md so descendant agents (Agent
- * subagents, agent-teams teammates) learn about the provisioned tools.
- * The main agent gets the same line via `--append-system-prompt`.
+ * subagents, agent-teams teammates) and the main agent learn about the
+ * provisioned tools via the mirrored CLAUDE.md. This line is not sent via
+ * `--append-system-prompt`.
  * Separate marker fence from the peer-awareness / style blocks.
  */
 export async function appendToolbeltAwarenessToMirroredClaudeMd(
@@ -729,10 +775,10 @@ export async function appendToolbeltAwarenessToMirroredClaudeMd(
  * marker fence; best-effort like the style/peer blocks.
  */
 export async function prependArtifactPanelDirectiveToMirroredClaudeMd(
-  directive: string = ARTIFACT_PANEL_DIRECTIVE,
+  peersKey = "peers",
 ): Promise<void> {
   await injectMarkerBlock({
-    snippet: directive,
+    snippet: ARTIFACT_PANEL_DIRECTIVE(peersKey),
     markerOpen: ARTIFACT_MARKER_OPEN,
     markerClose: ARTIFACT_MARKER_CLOSE,
     position: "top",

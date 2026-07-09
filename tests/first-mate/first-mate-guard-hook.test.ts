@@ -7,6 +7,7 @@ import {
   FIRST_MATE_GUARD_MATCHER,
   buildFirstMateGuardHookCommand,
 } from "~/internal-first-mate-guard"
+import { operatorPreToolUse } from "~/lib/first-mate/operator-shaping"
 import { injectStopHookIntoSettingsFile } from "~/lib/orchestration/stop-gate-hook"
 
 let dir: string
@@ -65,6 +66,21 @@ describe("operator PreToolUse hook enforcement", () => {
     expect(await runGuard(JSON.stringify({ tool_name: "Bash", tool_input: { command: "echo x > f" } }))).toBe(0)
     expect(await runGuard(JSON.stringify({ tool_name: "Write", tool_input: { file_path: "x" } }))).toBe(0)
   }, 20_000)
+
+  test("allows matching worker dispatcher agent types to call worker tools", () => {
+    expect(operatorPreToolUse("mcp__workers__review", true, { agent_type: "worker-review" }).block).toBe(false)
+    expect(operatorPreToolUse("mcp__workers__implement", true, { agent_type: "worker-implement" }).block).toBe(false)
+    expect(operatorPreToolUse("mcp__workers__plan", true, { agent_type: "worker-plan" }).block).toBe(false)
+    expect(operatorPreToolUse("mcp__workers__test", true, { agent_type: "worker-test" }).block).toBe(false)
+    expect(operatorPreToolUse("mcp__workers__explore", true, { agent_type: "worker-explore" }).block).toBe(false)
+    expect(operatorPreToolUse("mcp__workers__browse", true, { agent_type: "worker-browse" }).block).toBe(false)
+  })
+
+  test("blocks non-dispatcher agent types from worker tools", () => {
+    expect(operatorPreToolUse("mcp__workers__review", true, { agent_type: "worker-plan" }).block).toBe(true)
+    expect(operatorPreToolUse("mcp__workers__review", true, { agent_type: "general-purpose" }).block).toBe(true)
+    expect(operatorPreToolUse("mcp__workers__review", true, {}).block).toBe(true)
+  })
 
   test("fails closed on an unparseable payload routed to the guard", async () => {
     expect(await runGuard("not json{")).toBe(2)

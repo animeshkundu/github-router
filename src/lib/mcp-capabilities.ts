@@ -19,7 +19,7 @@ import { compressorAvailable } from "./browser-mcp/compressor"
 import {
   colbertSearchEnabled,
 } from "./colbert"
-import { state } from "./state"
+import { state, type State } from "./state"
 import {
   BROWSE_DEFAULT_MODEL,
   DEFAULT_MODEL as WORKER_DEFAULT_MODEL,
@@ -47,6 +47,12 @@ import { pickEndpoint } from "../services/copilot/endpoint"
  * slug too — `state.models?.data` mirrors Copilot's catalog where these
  * land under the dotted slug, so we match by Copilot's actual id shape.
  */
+export function geminiAvailable(source: Pick<State, "models"> = state): boolean {
+  const models = source.models?.data
+  if (!models) return false
+  return models.some((m) => /^gemini-3\..*pro/i.test(m.id))
+}
+
 export function standInToolEnabled(): boolean {
   const models = state.models?.data
   if (!models) return false
@@ -54,7 +60,7 @@ export function standInToolEnabled(): boolean {
   const hasOpus = models.some(
     (m) => m.id === "claude-opus-4-7" || m.id === "claude-opus-4.7",
   )
-  const hasGeminiPro = models.some((m) => /^gemini-3\..*pro/i.test(m.id))
+  const hasGeminiPro = geminiAvailable()
   return hasGpt55 && hasOpus && hasGeminiPro
 }
 
@@ -106,8 +112,8 @@ export function workerToolsEnabled(): boolean {
 }
 
 /**
- * Gate for the compound L2 browser tools (`browser_find`, `browser_act`
- * in intent mode, `browser_extract`).
+ * Gate for the compound L2 browser tools (`browser_act`, `browser_observe`,
+ * `browser_extract`, `browser_find`).
  *
  * Returns true iff `compressorAvailable()` — i.e. at least one model in
  * the compressor fallback chain (`gpt-5.4-mini` → `claude-sonnet-4.6` →
@@ -131,19 +137,19 @@ export function browserCompoundToolsEnabled(): boolean {
  * Gate for the L0/L1 power browser tools (`browser_read_page`,
  * `browser_mouse`, `browser_drag`, `browser_type`, `browser_keyboard`,
  * `browser_scroll`, `browser_eval_js`, `browser_diagnostics`,
- * `browser_find`, `browser_close_tab`, `browser_list_tabs`,
- * `browser_wait`, `browser_download`).
+ * `browser_close_tab`, `browser_list_tabs`, `browser_wait`,
+ * `browser_download`).
  *
  * Returns true iff `state.powerBrowseEnabled` (set by `--power-browse`
  * or `GH_ROUTER_ENABLE_POWER_BROWSE=1`). When off, the default
- * `--browse` surface exposes only the 6 lead-model tools (`act`,
- * `observe`, `extract`, `navigate`, `screenshot`, `open_tab`) that
- * hide DOM details behind intent. Power mode adds the raw primitives
- * for users who want direct coord/keystroke control.
+ * `--browse` surface exposes the base lead tools (`navigate`, `screenshot`,
+ * `open_tab`) and, when the compound gate passes, `act`, `observe`,
+ * `extract`, and `find`. Power mode adds the raw primitives for users who
+ * want direct coord/keystroke control.
  *
  * `handler.ts` filter chain ANDs this with `browserToolsEnabled()`
- * (defense-in-depth — power without basic is meaningless and the
- * setup path already forces basic on when power is on).
+ * (defense-in-depth: power without the base browser server is meaningless and
+ * the setup path already forces basic on when power is on).
  */
 export function browserPowerToolsEnabled(): boolean {
   return state.powerBrowseEnabled === true

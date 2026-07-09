@@ -159,21 +159,31 @@ mock.module("~/lib/codex-mcp-config", () => ({
 const workerToolsEnabledMock = mock(() => false)
 const standInToolEnabledMock = mock(() => false)
 const browserToolsEnabledMock = mock(() => false)
+const browserCompoundToolsEnabledMock = mock(() => false)
+const fleetToolsEnabledMock = mock(() => false)
 const agentToolsEnabledMock = mock(() => false)
+const artifactToolsEnabledMock = mock(() => false)
+const geminiState: { current: { models?: { data?: Array<{ id?: unknown }> } } | undefined } = { current: undefined }
+const geminiAvailableMock = mock(() =>
+  Boolean(geminiState.current?.models?.data?.some(
+    (model) => typeof model.id === "string" && /^gemini-3\..*pro/i.test(model.id),
+  )),
+)
 mock.module("~/lib/mcp-capabilities", () => ({
   workerToolsEnabled: workerToolsEnabledMock,
   standInToolEnabled: standInToolEnabledMock,
   browserToolsEnabled: browserToolsEnabledMock,
+  browserCompoundToolsEnabled: browserCompoundToolsEnabledMock,
+  fleetToolsEnabled: fleetToolsEnabledMock,
   agentToolsEnabled: agentToolsEnabledMock,
+  artifactToolsEnabled: artifactToolsEnabledMock,
   // handler.ts (pulled in transitively via the static import graph)
   // also imports these; re-export stubs so the module mock doesn't
-  // break that import. claude.ts itself only uses the three above.
-  browserCompoundToolsEnabled: mock(() => false),
+  // break that import. claude.ts itself only uses the named mocks above.
   browserPowerToolsEnabled: mock(() => false),
   browseAgentEnabled: mock(() => false),
   semanticSearchEnabled: mock(() => false),
-  fleetToolsEnabled: mock(() => false),
-  artifactToolsEnabled: mock(() => false),
+  geminiAvailable: geminiAvailableMock,
   implementerSubagentModel: mock(() => undefined),
 }))
 
@@ -193,9 +203,10 @@ mock.module("~/lib/claude-md-injection", () => ({
     prependStyleDirectiveToMirroredClaudeMdMock,
   prependOperatingDefaultsToMirroredClaudeMd:
     prependOperatingDefaultsToMirroredClaudeMdMock,
-  // claude.ts leads the --append-system-prompt with this directive; a stub with
+  // claude.ts leads the --append-system-prompt with this digest; a stub with
   // a recognizable marker keeps the value assertion meaningful.
-  OPERATING_DEFAULTS_DIRECTIVE: "## Operating defaults (test stub)",
+  OPERATING_DEFAULTS_DIGEST: "## Operating defaults (test digest; see CLAUDE.md)",
+  OPERATING_DEFAULTS_DIRECTIVE: "## Operating defaults (test full directive)",
   appendToolbeltAwarenessToMirroredClaudeMd:
     appendToolbeltAwarenessToMirroredClaudeMdMock,
   prependArtifactPanelDirectiveToMirroredClaudeMd:
@@ -266,6 +277,7 @@ mock.module("~/lib/colbert", () => ({
 // --- Import module under test AFTER mocks ---
 const { claude } = await import("../../src/claude")
 const { state } = await import("../../src/lib/state")
+geminiState.current = state
 
 type CommandRunFn = (ctx: {
   args: Record<string, unknown>
@@ -370,8 +382,14 @@ beforeEach(() => {
   standInToolEnabledMock.mockReturnValue(false)
   browserToolsEnabledMock.mockReset()
   browserToolsEnabledMock.mockReturnValue(false)
+  browserCompoundToolsEnabledMock.mockReset()
+  browserCompoundToolsEnabledMock.mockReturnValue(false)
+  fleetToolsEnabledMock.mockReset()
+  fleetToolsEnabledMock.mockReturnValue(false)
   agentToolsEnabledMock.mockReset()
   agentToolsEnabledMock.mockReturnValue(false)
+  artifactToolsEnabledMock.mockReset()
+  artifactToolsEnabledMock.mockReturnValue(false)
   appendPeerAwarenessToMirroredClaudeMdMock.mockReset()
   appendPeerAwarenessToMirroredClaudeMdMock.mockResolvedValue(undefined)
   prependStyleDirectiveToMirroredClaudeMdMock.mockReset()
@@ -948,18 +966,24 @@ describe("claude command", () => {
       const idx = args.indexOf("--append-system-prompt")
       expect(idx).toBeGreaterThanOrEqual(0)
       const snippet = args[idx + 1] as string
-      expect(snippet).toContain("Peer review and advisor")
       // The operating-defaults directive leads the --append-system-prompt.
       expect(snippet).toContain("Operating defaults")
+      // The system prompt carries only a compact SUMMARY to the inventory, not
+      // the full snippet, so the ~1.1k-token inventory is not duplicated in context.
+      expect(snippet).toContain("Peer review and advisor")
+      expect(snippet).toContain("CLAUDE.md")
+      expect(snippet).toContain("Injected capabilities")
+      expect(snippet).not.toContain("ColBERT")
 
-      // The peer-MCP awareness append at the bottom of CLAUDE.md gets the peer
-      // snippet, which is contained in (not equal to) the --append-system-prompt
-      // value now that the operating-defaults directive leads it.
+      // The full peer-MCP awareness snippet is appended to CLAUDE.md (the single
+      // full copy the main agent and descendants both read); it is NOT copied
+      // into the --append-system-prompt value.
       expect(appendPeerAwarenessToMirroredClaudeMdMock).toHaveBeenCalledTimes(1)
       const [appendedSnippet] = appendPeerAwarenessToMirroredClaudeMdMock
         .mock.calls[0]
-      expect(snippet).toContain(appendedSnippet as string)
       expect(appendedSnippet).toContain("Peer review and advisor")
+      expect(appendedSnippet).toContain("ColBERT")
+      expect(snippet).not.toContain(appendedSnippet as string)
 
       // The style-directive + operating-defaults prepends at the top of CLAUDE.md.
       expect(prependStyleDirectiveToMirroredClaudeMdMock).toHaveBeenCalledTimes(1)
