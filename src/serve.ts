@@ -21,6 +21,7 @@ import {
   spawnCloudCli,
   waitForCloudCliReady,
 } from "./lib/serve/cloudcli"
+import { DevtunnelError, startDevtunnel } from "./lib/serve/devtunnel"
 import { startReverseProxy } from "./lib/serve/reverse-proxy"
 import { getGitHubUser } from "./services/github/get-user"
 
@@ -112,11 +113,11 @@ export const serve = defineCommand({
       description:
         "Public URL(s) this is reachable at (e.g. a dev-tunnel https URL), comma-separated — allowlists their host+origin for remote access",
     },
-    devtunnel: {
+    tunnel: {
       type: "boolean",
       default: false,
       description:
-        "Accept any *.devtunnels.ms host/origin (Microsoft dev tunnels) without pinning the exact --public-url",
+        "Auto-create + host an AUTHENTICATED (never anonymous) Microsoft dev tunnel for the serve port and print its public URL, so you can reach the control plane from anywhere. Requires the `devtunnel` CLI + `devtunnel user login`.",
     },
   },
   async run({ args }) {
@@ -182,9 +183,17 @@ export const serve = defineCommand({
     // 5. shutdown wiring (we don't use launchChild — its kind union is closed).
     let shuttingDown = false
     let reverseClose: (() => Promise<void>) | null = null
+    let tunnelStop: (() => void) | null = null
     const shutdown = async (): Promise<void> => {
       if (shuttingDown) return
       shuttingDown = true
+      if (tunnelStop) {
+        try {
+          tunnelStop()
+        } catch {
+          /* best-effort */
+        }
+      }
       try {
         killChildProcessTree(cc.child, {
           detachedGroup: process.platform !== "win32",
@@ -259,10 +268,10 @@ export const serve = defineCommand({
         consola.warn(`Ignoring invalid --public-url "${u}"`)
       }
     }
-    const allowDevtunnelHosts = args.devtunnel === true
-    if (extraAllowedHosts.length || allowDevtunnelHosts) {
+    const tunnelMode = args.tunnel === true
+    if (extraAllowedHosts.length || tunnelMode) {
       consola.warn(
-        "Remote access enabled: anyone who reaches this through your tunnel AND passes the tunnel's authentication gets FULL control-plane access — including a shell on this machine. Use an authenticated (non-anonymous) tunnel and only grant access to people you fully trust.",
+        "Remote access enabled: anyone who reaches this through the tunnel AND passes its authentication gets FULL control-plane access — including a shell on this machine. The tunnel is authenticated (never anonymous); only grant access to people you fully trust.",
       )
     }
 
@@ -277,7 +286,7 @@ export const serve = defineCommand({
         authToken: token,
         extraAllowedHosts,
         extraAllowedOrigins,
-        allowDevtunnelHosts,
+        allowDevtunnelHosts: tunnelMode,
       })
     } catch (err) {
       consola.error(
@@ -290,14 +299,32 @@ export const serve = defineCommand({
     }
     reverseClose = reverse.close
 
-    // 8. ready.
-    const publicLine = publicUrls.length
-      ? `\npublic: ${publicUrls.join(", ")}`
-      : allowDevtunnelHosts
-        ? `\npublic: any *.devtunnels.ms tunnel`
-        : ""
+    // 8. optionally auto-create + host an AUTHENTICATED dev tunnel for remote
+    //    access. Non-fatal: on any failure keep serving locally (and the
+    //    *.devtunnels.ms allowlist stays, so a manual `devtunnel host` works).
+    let tunnelUrl: string | null = null
+    if (tunnelMode) {
+      consola.info("Creating an authenticated dev tunnel…")
+      try {
+        const tunnel = await startDevtunnel(servePort)
+        tunnelUrl = tunnel.url
+        tunnelStop = tunnel.stop
+      } catch (err) {
+        const msg = err instanceof DevtunnelError ? err.message : String(err)
+        consola.warn(
+          `Could not auto-host a dev tunnel: ${msg}\nServing locally only. To host manually once fixed: devtunnel host -p ${servePort}`,
+        )
+      }
+    }
+
+    // 9. ready.
+    const publicLines = [
+      ...publicUrls.map((u) => `remote: ${u}`),
+      ...(tunnelUrl ? [`remote (tunnel): ${tunnelUrl}`] : []),
+    ]
+    const publicBlock = publicLines.length ? `\n${publicLines.join("\n")}` : ""
     consola.box(
-      `🖥️  github-router control plane\n\n${reverse.url}${publicLine}\n\nsigned in as ${username} · model ${chosenSlug}\nCtrl+C to stop`,
+      `🖥️  github-router control plane\n\nlocal:  ${reverse.url}${publicBlock}\n\nsigned in as ${username} · model ${chosenSlug}\nCtrl+C to stop`,
     )
     if (args["no-open"] !== true) openBrowser(reverse.url)
   },

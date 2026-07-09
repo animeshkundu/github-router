@@ -87,37 +87,42 @@ command rather than half-starting.
 
 ## Flags
 `--port <n>` (default **5454** when free, else a random free port), `--cloudcli-path <p>`,
-`--no-install`, `--cloudcli-version <v>`, `-m/--model <slug>`, `--no-open`, `--public-url <url>`,
-`--devtunnel`, plus the shared server args.
+`--no-install`, `--cloudcli-version <v>`, `-m/--model <slug>`, `--no-open`, `--tunnel`,
+`--public-url <url>`, plus the shared server args.
 
 ## Remote access via an authenticated dev tunnel
 
 `serve` binds loopback and enforces a `Host` + `Origin` allowlist (DNS-rebinding + cross-origin
-defense), so remote traffic is rejected by default. To reach it from anywhere, front it with a
-**Microsoft dev tunnel** (the tunnel client runs locally and connects to the loopback port, so the
-bind stays loopback) and allowlist the tunnel's public host/origin:
+defense), so remote traffic is rejected by default. `--tunnel` makes it reachable from anywhere by
+**automatically creating, hosting, and displaying an authenticated Microsoft dev tunnel** for the
+serve port:
 
 ```bash
-# one-time: install the CLI + sign in, create a persistent tunnel with a stable URL
+# one-time
 winget install Microsoft.devtunnel      # or: brew install --cask devtunnel
-devtunnel user login
-devtunnel create gh-serve --allow-anonymous false     # AUTHENTICATED (non-anonymous)
-devtunnel port create gh-serve -p 5454
-devtunnel access create gh-serve -p 5454 --tenant <you>   # grant only trusted identities
+devtunnel user login                    # or: devtunnel user login -g   (GitHub)
 
-# each session:
-github-router serve --port 5454 --devtunnel        # accept any *.devtunnels.ms host/origin
-devtunnel host gh-serve                             # prints https://<id>-5454.<region>.devtunnels.ms
+# each session — auto-creates + hosts the tunnel and prints its URL
+github-router serve --port 5454 --tunnel
 ```
 
-- `--devtunnel` accepts any `*.devtunnels.ms` host + `https://*.devtunnels.ms` origin. For strict
-  pinning use `--public-url https://<id>-5454.<region>.devtunnels.ms` instead (exact host+origin).
-- **Security:** the tunnel's authentication is the OUTER gate (only Microsoft-authenticated,
-  authorized identities reach the port); the injected token is the inner gate. **Anyone you grant
-  tunnel access to gets FULL control-plane access, including a shell on this machine** — so use an
-  authenticated (non-anonymous) tunnel and only grant yourself or fully-trusted parties. `serve`
-  prints this warning when remote access is enabled. A different dev tunnel can never forward to your
-  loopback port, so allowlisting `*.devtunnels.ms` does not widen the same-user trust boundary.
+`serve` runs `devtunnel host -p <port>` for you (the tunnel client connects to the loopback port, so
+the bind stays loopback), captures the public URL, allowlists it, and prints it as
+`remote (tunnel): https://<id>-<port>.<region>.devtunnels.ms`. The tunnel is torn down when `serve`
+exits. If the `devtunnel` CLI is missing or you're not logged in, `serve` says so and keeps serving
+locally (you can then host manually with `devtunnel host -p <port>`).
+
+- **Authenticated, never anonymous.** `serve` never passes `--allow-anonymous`, so Microsoft's
+  default applies: the tunnel is reachable only by the signed-in owner (an unauthenticated visitor is
+  redirected to a Microsoft/GitHub login). To grant specific other identities, use
+  `devtunnel access create ... --tenant`/`--org` out of band.
+- **`--public-url <url>`** is the alternative for a manually-run or persistent tunnel: it allowlists
+  an exact `host`+`origin` without auto-hosting (e.g. `--public-url https://id-5454.region.devtunnels.ms`).
+- **Security:** the tunnel's authentication is the OUTER gate; the injected token is the inner gate.
+  **Anyone you grant tunnel access to gets FULL control-plane access, including a shell on this
+  machine** — only grant yourself or fully-trusted parties. `serve` prints this warning when remote
+  access is enabled. A different dev tunnel can never forward to your loopback port, so accepting
+  `*.devtunnels.ms` does not widen the same-user trust boundary.
 
 ## Known limitations
 - CloudCLI's model picker is a hardcoded list (not the live Copilot catalog); common Anthropic slugs
