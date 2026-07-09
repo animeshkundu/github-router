@@ -1045,6 +1045,7 @@ export const claude = defineCommand({
           powerBrowseAvailable: state.powerBrowseEnabled,
           fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
+          implementerAvailable: implementerSubagentModel() != null,
           groupKeys,
         })
         // Capture the peer-awareness snippet; the always-on operating-defaults

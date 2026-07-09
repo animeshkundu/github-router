@@ -562,6 +562,9 @@ export function buildPeerAwarenessSnippet(opts: {
   powerBrowseAvailable?: boolean
   fleetAvailable?: boolean
   agentToolsAvailable?: boolean
+  /** True when the `implementer` subagent (gpt-5.5) is registered, so the
+   *  snippet may steer bounded implementation to it over `worker-implement`. */
+  implementerAvailable?: boolean
   /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
    *  collision). Missing key → use the preferred bare key. Keeps the
    *  `mcp__<server>__<tool>` paths in this snippet pointing at OUR servers. */
@@ -606,6 +609,11 @@ export function buildPeerAwarenessSnippet(opts: {
   if (opts.workerToolsAvailable) {
     para2Parts.push(
       `\`worker-*\` are background Agent subagents (subagent_type) that run the matching worker in its own context and deliver the result as a completion notification, so a long run never blocks the turn: \`worker-explore\` (read-only research), \`worker-review\` (reads the code to verify a change or claim), \`worker-plan\` (ordered implementation plan), \`worker-implement\` (edit/write/bash; \`worktree: true\` isolates in a git worktree and returns the diff), \`worker-test\` (independent test author). The raw \`mcp__${workersKey}__*\` tools they call are guarded (a direct main-thread call is redirected to the matching agent); Workers themselves have \`code_search\`.`,
+    )
+  }
+  if (opts.workerToolsAvailable && opts.implementerAvailable) {
+    para2Parts.push(
+      `For a bounded, well-scoped implementation, prefer the \`implementer\` subagent (Task, runs on gpt-5.5) over \`worker-implement\`; reach for \`worker-implement\` only when you specifically need git-worktree isolation, parallel variants, or a throwaway experiment.`,
     )
   }
   // Orchestration group. `decompose`/`run_workflow` share the worker backend gate

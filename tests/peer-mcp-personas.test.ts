@@ -436,6 +436,37 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(on).toContain("worktree: true")
   })
 
+  test("implementer-over-worker-implement steer is gated on implementerAvailable AND workers", () => {
+    const STEER = "prefer the `implementer` subagent"
+    // Both gates on: the steer appears.
+    const both = buildPeerAwarenessSnippet({
+      ...MINIMAL,
+      workerToolsAvailable: true,
+      implementerAvailable: true,
+    })
+    expect(both).toContain(STEER)
+    // It reserves worker-implement for the isolation cases.
+    expect(both).toContain("git-worktree isolation")
+    // Implementer subagent absent (e.g. gpt-5.5 not in catalog): never named,
+    // so the snippet honors advertised-iff-available.
+    expect(
+      buildPeerAwarenessSnippet({
+        ...MINIMAL,
+        workerToolsAvailable: true,
+        implementerAvailable: false,
+      }),
+    ).not.toContain(STEER)
+    // Workers off: no worker-implement to contrast against, so no steer even if
+    // the implementer subagent is available.
+    expect(
+      buildPeerAwarenessSnippet({
+        ...MINIMAL,
+        workerToolsAvailable: false,
+        implementerAvailable: true,
+      }),
+    ).not.toContain(STEER)
+  })
+
   test("gates browser lead and compound surfaces independently", () => {
     const off = buildPeerAwarenessSnippet({
       ...MINIMAL,
