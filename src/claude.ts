@@ -68,7 +68,7 @@ import nodePath from "node:path"
 import { tmpdir } from "node:os"
 import { randomBytes } from "node:crypto"
 import { buildPeerAwarenessSnippet, buildPeerAwarenessSummary, type McpGroup } from "./lib/peer-mcp-personas"
-import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, OPERATING_DEFAULTS_DIRECTIVE, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
+import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, OPERATING_DEFAULTS_DIGEST, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { provisionAndIndexColbert } from "./lib/colbert"
@@ -1105,26 +1105,26 @@ export const claude = defineCommand({
     // lens): injected by DEFAULT, NOT gated on codex-mcp, so the posture always
     // reaches the agent even under --no-codex-mcp. Two surfaces:
     //   1. --append-system-prompt (main agent, highest salience): the single
-    //      such arg for the session; a compact summary of the peer-awareness
-    //      inventory rides along after it (the full snippet lives in CLAUDE.md
-    //      to avoid duplicating ~1.1k tokens in context every turn).
-    //   2. the mirrored CLAUDE.md TOP (descendant agents) — prepended AFTER the
-    //      style directive (when that ran) so it lands at the very top.
+    //      such arg for the session carries a condensed digest, with a compact
+    //      summary of the peer-awareness inventory riding along after it.
+    //   2. the mirrored CLAUDE.md TOP (main agent and descendant agents): the
+    //      full directive is prepended after the style directive when that ran.
     // ensureClaudeConfigMirror() ran unconditionally above, so the mirror exists
     // regardless of codex-mcp; the prepend is best-effort (warn-and-continue).
     // Peer-awareness inventory lives ONCE, in the mirrored CLAUDE.md (appended
     // above), which the main agent and descendants both read. The system prompt
     // carries only a compact summary, not the full ~1.1k-token snippet, so
     // the inventory is not duplicated in the context window on every turn. The
-    // operating-defaults directive (behavioral, wants top salience) still leads
-    // the system prompt in full. If the CLAUDE.md append happened to fail, the
-    // agent still has every tool's own description in tools/list (the real
-    // routing signal); it just loses this higher-level overview.
+    // full operating-defaults directive lives in CLAUDE.md, while a condensed
+    // digest keeps those defaults at top salience in --append-system-prompt.
+    // If the CLAUDE.md append happened to fail, the agent still has every tool's
+    // own description in tools/list (the real routing signal); it just loses this
+    // higher-level overview.
     extraArgs.push(
       "--append-system-prompt",
       peerAwarenessSnippet && peerAwarenessSummary
-        ? `${OPERATING_DEFAULTS_DIRECTIVE}\n\n${peerAwarenessSummary}`
-        : OPERATING_DEFAULTS_DIRECTIVE,
+        ? `${OPERATING_DEFAULTS_DIGEST}\n\n${peerAwarenessSummary}`
+        : OPERATING_DEFAULTS_DIGEST,
     )
     try {
       await prependOperatingDefaultsToMirroredClaudeMd()

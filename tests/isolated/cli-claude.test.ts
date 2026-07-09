@@ -203,9 +203,10 @@ mock.module("~/lib/claude-md-injection", () => ({
     prependStyleDirectiveToMirroredClaudeMdMock,
   prependOperatingDefaultsToMirroredClaudeMd:
     prependOperatingDefaultsToMirroredClaudeMdMock,
-  // claude.ts leads the --append-system-prompt with this directive; a stub with
+  // claude.ts leads the --append-system-prompt with this digest; a stub with
   // a recognizable marker keeps the value assertion meaningful.
-  OPERATING_DEFAULTS_DIRECTIVE: "## Operating defaults (test stub)",
+  OPERATING_DEFAULTS_DIGEST: "## Operating defaults (test digest; see CLAUDE.md)",
+  OPERATING_DEFAULTS_DIRECTIVE: "## Operating defaults (test full directive)",
   appendToolbeltAwarenessToMirroredClaudeMd:
     appendToolbeltAwarenessToMirroredClaudeMdMock,
   prependArtifactPanelDirectiveToMirroredClaudeMd:

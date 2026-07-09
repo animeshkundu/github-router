@@ -80,10 +80,11 @@ const STYLE_DIRECTIVE =
   + "(commits, PRs, issues, code, comments, docs)."
 
 /**
- * Operating-defaults directive injected at the TOP of the mirrored CLAUDE.md
- * AND into the main agent's system prompt (`--append-system-prompt`), so it is
- * the highest-salience behavioral default. Two defaults, both explicitly
- * overridden by the user's own direction and the domain's standards:
+ * Operating-defaults directive injected at the TOP of the mirrored CLAUDE.md.
+ * The main agent's system prompt (`--append-system-prompt`) gets
+ * OPERATING_DEFAULTS_DIGEST instead, with this full statement available through
+ * CLAUDE.md. Three defaults, each explicitly overridden by the user's own
+ * direction and the domain's standards:
  *
  *   1. Orchestrate (strong default): delegate the heavy / parallel /
  *      context-heavy work to the right subagent / worker / model, keeping the
@@ -97,6 +98,13 @@ const STYLE_DIRECTIVE =
  *      high-variance vector that pulls in persona mannerisms at top salience, and
  *      the guidance favors specific functional framing over comparison, so
  *      specificity carries the vividness instead.
+ *   3. Engineering excellence: quality / robustness / maintainability over
+ *      development cost; reproduce a bug end-to-end (as a real user hits it)
+ *      before fixing so the fix targets the real cause; a pixel-perfect UI bar;
+ *      and fix any lint error / test failure / flake on sight, whoever caused it
+ *      and whether or not it touches the current task. The digest carries a
+ *      one-line form; the full statement lives here so it does not cost the
+ *      context window every turn.
  *
  * Self-referentially compliant with the style directive: no em dashes, no
  * Claude / Anthropic attribution.
@@ -116,7 +124,37 @@ export const OPERATING_DEFAULTS_DIRECTIVE =
   + "Reason about the whole system from first principles, anticipating scale and the "
   + "long arc rather than patching the surface. Work backwards from the outcome the "
   + "user actually needs. Question every assumption and prefer what you can derive, "
-  + "reproduce, or test."
+  + "reproduce, or test.\n\n"
+  + "Engineering excellence. When making technical decisions, give little weight to "
+  + "development cost; prefer quality, simplicity, robustness, scalability, and "
+  + "long-term maintainability. Fix a bug by first reproducing it end to end, as "
+  + "close to how a real user hits it as you can, so you solve the real problem and "
+  + "not a symptom. When testing a product end to end, be picky about the UI and "
+  + "obsessed with pixel perfection: if something clearly looks off, even when it is "
+  + "unrelated to your task, get it fixed along the way. Hold that same bar for the "
+  + "codebase itself: a lint error, a failing test, or a flaky test is worth fixing "
+  + "the moment you see it, whoever introduced it and whether or not it touches your "
+  + "current work."
+
+/**
+ * Condensed digest of OPERATING_DEFAULTS_DIRECTIVE for the spawned session's
+ * system prompt (--append-system-prompt). The FULL directive is prepended to
+ * the mirrored CLAUDE.md (read by the main agent and descendants); this digest
+ * keeps both behavioral directives at top salience without duplicating the full
+ * ~310-token block in the context window every turn. Points to the full copy.
+ */
+export const OPERATING_DEFAULTS_DIGEST =
+  "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
+  + "Orchestrate: delegate research, implementation, review, and large reads to the right subagent, "
+  + "worker, or model, preferring parallel delegation for independent work, so your own context stays "
+  + "free to reason and collaborate with the user; do trivial, surgical, and last-mile work directly. "
+  + "Aim high: default to radical simplicity and the user's real experience, whole-system "
+  + "first-principles thinking that anticipates scale and the long arc, and working backwards from the "
+  + "outcome the user actually needs; question every assumption and prefer what you can derive, "
+  + "reproduce, or test. Engineering excellence: prefer quality and long-term "
+  + "maintainability over dev cost; reproduce bugs end to end before fixing; keep a "
+  + "pixel-perfect UI bar; fix any lint, test failure, or flake on sight. The full "
+  + "statement of these defaults is in your CLAUDE.md project instructions."
 
 /**
  * Skip the helper if the user's `~/.claude/CLAUDE.md` (or, equivalently,
@@ -688,10 +726,11 @@ export async function prependStyleDirectiveToMirroredClaudeMd(
 /**
  * Prepend the operating-defaults directive (orchestrator posture + hybrid
  * excellence lens; `OPERATING_DEFAULTS_DIRECTIVE` above) to the TOP of the
- * mirrored CLAUDE.md so descendant agents (Agent subagents, agent-teams
- * teammates) inherit it. The main agent gets the same text at higher salience
- * via `--append-system-prompt`. Separate marker fence from the style / peer
- * blocks so all coexist; best-effort (warn-and-continue) like its siblings.
+ * mirrored CLAUDE.md so the main agent and descendant agents (Agent subagents,
+ * agent-teams teammates) inherit the full statement. The main agent also gets
+ * OPERATING_DEFAULTS_DIGEST at higher salience via `--append-system-prompt`.
+ * Separate marker fence from the style / peer blocks so all coexist;
+ * best-effort (warn-and-continue) like its siblings.
  */
 export async function prependOperatingDefaultsToMirroredClaudeMd(
   directive: string = OPERATING_DEFAULTS_DIRECTIVE,
