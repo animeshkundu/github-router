@@ -18,7 +18,7 @@ import { resolveModel } from "~/lib/utils"
  *   present — an explicitly-chosen model that Copilot can't serve THROWS rather
  *   than being silently swapped for a fallback (a silent class-switch could send
  *   the task to a weaker/wrong model the operator never asked for).
- * - `chosen` unset: default to {@link DEFAULT_CODEX_MODEL} (gpt-5.5), walking
+ * - `chosen` unset: default to {@link DEFAULT_CODEX_MODEL} (gpt-5.6-sol), walking
  *   {@link DEFAULT_CODEX_MODEL_FALLBACKS} only when a catalog says the preferred
  *   default is absent (older Copilot tiers).
  *

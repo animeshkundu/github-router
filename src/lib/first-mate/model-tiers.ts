@@ -14,11 +14,13 @@ export const T0_MODEL_CHAIN = [
 export const T1_MODEL_CHAIN = [
   "gpt-5.4-mini",
   "gpt-5-mini",
+  "gpt-5.6-sol",
   "gpt-5.5",
   "gemini-3.1-pro-preview",
 ] as const
 
 export const T2_MODEL_CHAIN = [
+  "gpt-5.6-sol",
   "gpt-5.5",
   "claude-opus-4.8",
   "gemini-3.1-pro-preview",

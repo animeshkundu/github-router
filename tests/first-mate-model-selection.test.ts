@@ -42,23 +42,23 @@ afterEach(() => {
 // 1. resolveCloudAgentModel contract
 // ===========================================================================
 
-test("(a) unset → defaults to gpt-5.5 when no catalog is available", () => {
+test("(a) unset → defaults to gpt-5.6-sol when no catalog is available", () => {
   expect(resolveCloudAgentModel(undefined, null)).toBe(DEFAULT_CODEX_MODEL)
-  expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.5")
+  expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.6-sol")
 })
 
-test("(a) unset → defaults to gpt-5.5 when the catalog is an empty array", () => {
+test("(a) unset → defaults to gpt-5.6-sol when the catalog is an empty array", () => {
   // Empty array counts as "no catalog" (ids set is empty → ids === undefined branch).
   expect(resolveCloudAgentModel(undefined, [])).toBe(DEFAULT_CODEX_MODEL)
 })
 
 test("(a) unset + populated catalog containing the preferred default → returns the preferred default", () => {
-  const catalog = [{ id: "gpt-5.5" }, { id: "gpt-5.4" }]
-  expect(resolveCloudAgentModel(undefined, catalog)).toBe("gpt-5.5")
+  const catalog = [{ id: "gpt-5.6-sol" }, { id: "gpt-5.4" }]
+  expect(resolveCloudAgentModel(undefined, catalog)).toBe("gpt-5.6-sol")
 })
 
 test("(a) unset + populated catalog MISSING the preferred default → walks fallback chain", () => {
-  // gpt-5.5 not in catalog; first available fallback wins.
+  // gpt-5.6-sol not in catalog; first available fallback wins.
   expect(resolveCloudAgentModel(undefined, [{ id: "gpt-5.4" }])).toBe("gpt-5.4")
   expect(resolveCloudAgentModel(undefined, [{ id: "gpt-5.3-codex" }])).toBe("gpt-5.3-codex")
 })

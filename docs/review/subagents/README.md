@@ -19,22 +19,22 @@ The peer-critic descriptions are the SAME strings used as the corresponding `mcp
 
 | Subagent | Own model | Routes to / does | Gate | Doc | Verdict |
 |---|---|---|---|---|---|
-| `codex-critic` | inherited (Claude) | relays to gpt-5.5 critic (MCP) | always | [codex-critic.md](codex-critic.md) | Y (soft trigger) |
+| `codex-critic` | inherited (Claude) | relays to gpt-5.6-sol critic (MCP) | always | [codex-critic.md](codex-critic.md) | Y (soft trigger) |
 | `codex-reviewer` | inherited | relays to gpt-5.3-codex reviewer (MCP) | always | [codex-reviewer.md](codex-reviewer.md) | Y (soft trigger) |
 | `gemini-critic` | inherited | relays to gemini-3.1-pro critic (MCP) | `requiresGeminiCatalog` | [gemini-critic.md](gemini-critic.md) | Y |
 | `gemini-reviewer` | inherited | relays to gemini-3.1-pro reviewer (MCP) | `requiresGeminiCatalog` | [gemini-reviewer.md](gemini-reviewer.md) | Y |
 | `opus-critic` | inherited | relays to claude-opus-4-6 critic (MCP) | always | [opus-critic.md](opus-critic.md) | N (F1 model-label drift) |
 | `codex-implementer` | inherited | relays to gpt-5.3-codex writer (stdio) | `--codex-cli` | [codex-implementer.md](codex-implementer.md) | N (S3 overlap) |
-| `implementer` (native) | **gpt-5.5** | edits files itself (full toolset) | catalog has gpt-5.5+tool_calls | [implementer.md](implementer.md) | Y (S3 caveat) |
+| `implementer` (native) | **gpt-5.6-sol** (gpt-5.5 fallback) | edits files itself (full toolset) | catalog has gpt-5.6-sol or gpt-5.5+tool_calls | [implementer.md](implementer.md) | Y (S3 caveat) |
 | `peer-review-coordinator` | inherited | fans out to critics, aggregates | always | [peer-review-coordinator.md](peer-review-coordinator.md) | N (F1 unbacked trigger) |
 | `worker-explore` | inherited (worker: claude-sonnet-5) | bg dispatch read-only research | `workerToolsAvailable` | [worker-explore.md](worker-explore.md) | Y |
-| `worker-implement` | inherited (worker: gpt-5.5) | bg dispatch read/write coding | `workerToolsAvailable` | [worker-implement.md](worker-implement.md) | Y |
+| `worker-implement` | inherited (worker: gpt-5.6-sol) | bg dispatch read/write coding | `workerToolsAvailable` | [worker-implement.md](worker-implement.md) | Y |
 | `worker-review` | inherited (worker: gemini-3.1-pro) | bg dispatch self-navigating review | `workerToolsAvailable` | [worker-review.md](worker-review.md) | Y |
 | `worker-plan` | inherited (worker: claude-opus-4.8) | bg dispatch ordered plan | `workerToolsAvailable` | [worker-plan.md](worker-plan.md) | Y (minor gap) |
-| `worker-test` | inherited (worker: gpt-5.5) | bg dispatch adversarial tests | `workerToolsAvailable` | [worker-test.md](worker-test.md) | Y |
+| `worker-test` | inherited (worker: gpt-5.6-sol) | bg dispatch adversarial tests | `workerToolsAvailable` | [worker-test.md](worker-test.md) | Y |
 | `worker-browse` | inherited (worker: gpt-5.4-mini) | bg dispatch browser agent | `browseAvailable` | [worker-browse.md](worker-browse.md) | N (A3 field bug) |
 
-Two shapes of subagent: RELAY shims (the five critics, codex-implementer, and the six worker dispatchers — they run on the inherited Claude model and forward to a peer model / worker via MCP, then relay verbatim) and the NATIVE `implementer` (carries `model: gpt-5.5` frontmatter, runs its own loop through the translation shim, does real edits with the full inherited toolset). The `worker-*` dispatchers additionally carry a `tools:` allowlist pinning them to `mcp__<workersKey>__*` only (no Agent/Read/Bash → cannot recurse), while the critics and native implementer deliberately omit `tools:` to inherit the full toolset (pinned by `tests/codex-mcp-config.test.ts:882-920`).
+Two shapes of subagent: RELAY shims (the five critics, codex-implementer, and the six worker dispatchers — they run on the inherited Claude model and forward to a peer model / worker via MCP, then relay verbatim) and the NATIVE `implementer` (carries `model: gpt-5.6-sol` frontmatter, falling back to `model: gpt-5.5`, runs its own loop through the translation shim, does real edits with the full inherited toolset). The `worker-*` dispatchers additionally carry a `tools:` allowlist pinning them to `mcp__<workersKey>__*` only (no Agent/Read/Bash → cannot recurse), while the critics and native implementer deliberately omit `tools:` to inherit the full toolset (pinned by `tests/codex-mcp-config.test.ts:882-920`).
 
 ## Systemic findings
 
@@ -59,11 +59,11 @@ Three write-capable implementation subagents coexist, with descriptions that do 
 
 | Subagent | Model | Nature | Description scope phrase |
 |---|---|---|---|
-| `implementer` (native) | gpt-5.5 | foreground, integrated, edits itself | "well-scoped coding tasks — edits, small features, fixes… integrated subagent" |
+| `implementer` (native) | gpt-5.6-sol (gpt-5.5 fallback) | foreground, integrated, edits itself | "well-scoped coding tasks — edits, small features, fixes… integrated subagent" |
 | `codex-implementer` | gpt-5.3-codex | foreground, integrated, `--codex-cli` only | "Targeted implementation of a self-contained coding task" |
-| `worker-implement` | gpt-5.5 (worker) | **background**, autonomous, optional worktree | "autonomous coding worker… non-blocking… completion notification" |
+| `worker-implement` | gpt-5.6-sol (worker) | **background**, autonomous, optional worktree | "autonomous coding worker… non-blocking… completion notification" |
 
-`worker-implement` differentiates cleanly (background/autonomous/worktree vs foreground/integrated). The unresolved overlap is between the two FOREGROUND writers: under `--codex-cli` a lead sees both `implementer` (gpt-5.5) and `codex-implementer` (gpt-5.3-codex) with near-identical "well-scoped / self-contained coding task" framing and no signal for which to pick. codex-implementer's description is also the thinnest in the set (3 sentences, no anti-trigger). Recommendation: have one description name the other (e.g. native implementer "prefer over codex-implementer unless you need Codex-CLI sandboxing"), or document the intended split. Detail in [implementer.md](implementer.md) §6 and [codex-implementer.md](codex-implementer.md) §6.
+`worker-implement` differentiates cleanly (background/autonomous/worktree vs foreground/integrated). The unresolved overlap is between the two FOREGROUND writers: under `--codex-cli` a lead sees both `implementer` (gpt-5.6-sol, gpt-5.5 fallback) and `codex-implementer` (gpt-5.3-codex) with near-identical "well-scoped / self-contained coding task" framing and no signal for which to pick. codex-implementer's description is also the thinnest in the set (3 sentences, no anti-trigger). Recommendation: have one description name the other (e.g. native implementer "prefer over codex-implementer unless you need Codex-CLI sandboxing"), or document the intended split. Detail in [implementer.md](implementer.md) §6 and [codex-implementer.md](codex-implementer.md) §6.
 
 ### S4 — "Use proactively" overtrigger risk on Opus 4.5+ (measured, not acute)
 

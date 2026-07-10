@@ -77,7 +77,7 @@ A `UserPromptSubmit` hook (additive-context, **fail-open, never blocking**, top-
 
 ## Cross-cutting note — test authorship is advisory, not an enforced invariant (review correction)
 
-Earlier this was called an "invariant." The Stop-gate cannot verify *who* authored a test (the implementer can write it via Bash before the floor-keeper runs), so calling it an invariant was a confabulation. It is an **advisory practice** the skills steer (`mcp__workers__test` defaults to gpt-5.5 xhigh, a different lab than an Anthropic implementer). True enforcement would need file-provenance tracking, which is out of scope and noted as such. The plan does not claim the separation is guaranteed.
+Earlier this was called an "invariant." The Stop-gate cannot verify *who* authored a test (the implementer can write it via Bash before the floor-keeper runs), so calling it an invariant was a confabulation. It is an **advisory practice** the skills steer (`mcp__workers__test` defaults to gpt-5.6-sol xhigh, a different lab than an Anthropic implementer). True enforcement would need file-provenance tracking, which is out of scope and noted as such. The plan does not claim the separation is guaranteed.
 
 ## Shared injection infrastructure (reuse, don't reinvent)
 

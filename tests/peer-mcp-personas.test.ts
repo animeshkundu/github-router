@@ -39,7 +39,7 @@ describe("PERSONAS_READ", () => {
 
   test("each persona has the correct model + endpoint binding", () => {
     const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
-    expect(byName["codex-critic"]?.model).toBe("gpt-5.5")
+    expect(byName["codex-critic"]?.model).toBe("gpt-5.6-sol")
     expect(byName["codex-critic"]?.endpoint).toBe("/v1/responses")
     expect(byName["codex-critic"]?.requiresHttp).toBe(false)
     expect(byName["codex-critic"]?.writeCapable).toBe(false)
@@ -85,7 +85,7 @@ describe("PERSONAS_READ", () => {
 
   test("descriptions surface load-bearing routing signal (model identity)", () => {
     const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
-    expect(byName["codex-critic"]?.description).toContain("gpt-5.5")
+    expect(byName["codex-critic"]?.description).toContain("gpt-5.6-sol")
     expect(byName["gemini-critic"]?.description).toContain("gemini-3.1-pro")
     expect(byName["codex-reviewer"]?.description).toContain("gpt-5.3-codex")
     expect(byName["gemini-reviewer"]?.description).toContain("gemini-3.1-pro")
@@ -259,7 +259,7 @@ describe("buildAgentPrompt — codex-cli mode", () => {
     const persona = PERSONAS_READ.find((p) => p.agentName === "codex-critic")!
     const prompt = buildAgentPrompt(persona, { codexCli: true, peersKey: "peers" })
     expect(prompt).toContain("mcp__codex-cli__codex")
-    expect(prompt).toContain('"gpt-5.5"')
+    expect(prompt).toContain('"gpt-5.6-sol"')
     expect(prompt).toContain("base-instructions")
     expect(prompt).toContain('"read-only"')
   })

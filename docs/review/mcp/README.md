@@ -33,7 +33,7 @@ Description source unless noted: `src/lib/peer-mcp-personas.ts`.
 ### peers — `src/lib/peer-mcp-personas.ts` (personas)  ·  gate: catalog + `--codex-cli` for implementer
 | Tool | Line | Model / endpoint | Gate |
 |---|---|---|---|
-| codex_critic | 335 | gpt-5.5 `/responses` | always |
+| codex_critic | 335 | gpt-5.6-sol `/responses` | always |
 | gemini_critic | 349 | gemini-3.1-pro-preview `/chat` | `requiresGeminiCatalog` |
 | codex_reviewer | 364 | gpt-5.3-codex `/responses` | always |
 | gemini_reviewer | 378 | gemini-3.1-pro-preview `/chat` | `requiresGeminiCatalog` |
@@ -50,10 +50,10 @@ Description source unless noted: `src/lib/peer-mcp-personas.ts`.
 | Tool | Line | Default model | Gate |
 |---|---|---|---|
 | explore | 1194 | claude-sonnet-5 xhigh | worker |
-| implement | 1276 | gpt-5.5 xhigh | worker |
+| implement | 1276 | gpt-5.6-sol xhigh | worker |
 | review | 1367 | gemini-3.1-pro-preview | worker |
 | plan | 1451 | claude-opus-4.8 xhigh | worker |
-| test | 1529 | gpt-5.5 xhigh | worker |
+| test | 1529 | gpt-5.6-sol xhigh | worker |
 | browse | 1905 | gpt-5.4-mini | browse_agent |
 
 ### orchestrate — `NON_PERSONA_MCP_TOOLS`  ·  verify/attest always-on; decompose/run gated `worker`
@@ -139,8 +139,8 @@ Description source unless noted: `src/lib/peer-mcp-personas.ts`.
 
 ## Related auto-injected surfaces (not standalone MCP tools; out of the per-tool scope)
 
-- **`__anthropic_advisor`** — server-injected Anthropic tool on `/v1/messages` (Claude models only), dispatched to gpt-5.5 xhigh. Named in the awareness snippet.
-- **Injected subagents** — `implementer` (gpt-5.5), `peer-review-coordinator`, and the `worker-*` background dispatchers. Agent definitions, not MCP tools.
+- **`__anthropic_advisor`** — server-injected Anthropic tool on `/v1/messages` (Claude models only), dispatched to gpt-5.6-sol xhigh. Named in the awareness snippet.
+- **Injected subagents** — `implementer` (gpt-5.6-sol, gpt-5.5 fallback), `peer-review-coordinator`, and the `worker-*` background dispatchers. Agent definitions, not MCP tools.
 - **Injected skills** — `/gh-research`, `/gh-orchestrate`, `/gh-floor-keeper`, `/gh-first-mate` (`src/lib/injected-skills/`).
 
 ## Review methodology

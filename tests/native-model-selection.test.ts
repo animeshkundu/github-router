@@ -1,6 +1,6 @@
-// Phase 3 — native selection of the four non-Claude models
-// (gpt-5.5, gpt-5.3-codex, gemini-3.5-flash, gemini-3.1-pro-preview) in
-// Claude Code's model picker.
+// Phase 3 — native selection of the five non-Claude models
+// (gpt-5.6-sol, gpt-5.5, gpt-5.3-codex, gemini-3.5-flash,
+// gemini-3.1-pro-preview) in Claude Code's model picker.
 //
 // The mechanism (verified against installed Claude Code 2.1.201): enable
 // gateway model discovery AND pre-seed its on-disk cache
@@ -26,7 +26,8 @@ import {
 } from "../src/lib/server-setup"
 import { state } from "../src/lib/state"
 
-const FOUR_TARGET_IDS = [
+const SEED_TARGET_IDS = [
+  "gpt-5.6-sol",
   "gpt-5.5",
   "gpt-5.3-codex",
   "gemini-3.5-flash",
@@ -117,10 +118,10 @@ describe("nativeSelectableModelsInCatalog", () => {
     expect(got[0].display_name).toBe("GPT-5.5")
   })
 
-  test("returns all four (with the exact -preview gemini id) when all are catalogued", () => {
-    setCatalog([...FOUR_TARGET_IDS, "claude-opus-4.8"])
+  test("returns all five (with the exact -preview gemini id) when all are catalogued", () => {
+    setCatalog([...SEED_TARGET_IDS, "claude-opus-4.8"])
     const ids = nativeSelectableModelsInCatalog().map((m) => m.id)
-    expect(ids).toEqual([...FOUR_TARGET_IDS])
+    expect(ids).toEqual([...SEED_TARGET_IDS])
     // The exact gemini slug is the preview id — never the bare one.
     expect(ids).toContain("gemini-3.1-pro-preview")
     expect(ids).not.toContain("gemini-3.1-pro")
@@ -213,7 +214,7 @@ describe("clearGatewayModelCache", () => {
 
 describe("getClaudeCodeEnvVars — native model selection injection", () => {
   test("enables gateway discovery when >=1 target is in the catalog", () => {
-    setCatalog([...FOUR_TARGET_IDS])
+    setCatalog([...SEED_TARGET_IDS])
     const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
     expect(vars.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBe("1")
   })
@@ -244,7 +245,7 @@ describe("getClaudeCodeEnvVars — native model selection injection", () => {
   })
 
   test("presence guard: a user-set CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY value is preserved (not overwritten)", () => {
-    setCatalog([...FOUR_TARGET_IDS])
+    setCatalog([...SEED_TARGET_IDS])
     // User opted out explicitly. The proxy must NOT inject its own value —
     // it leaves the key off `vars` so the parent's value flows through.
     process.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "0"
@@ -253,7 +254,7 @@ describe("getClaudeCodeEnvVars — native model selection injection", () => {
   })
 
   test("ADDITIVE: the injection never overwrites the opus/sonnet/haiku tier defaults, ANTHROPIC_MODEL, or ANTHROPIC_SMALL_FAST_MODEL", () => {
-    setCatalog([...FOUR_TARGET_IDS])
+    setCatalog([...SEED_TARGET_IDS])
     const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787", "claude-opus-4-8[1m]")
     // Enabling native selection must not disturb the tier rows.
     expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-4-8")

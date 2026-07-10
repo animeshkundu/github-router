@@ -552,7 +552,7 @@ export async function decideStopHook(input: {
  * `markReviewed` runs BEFORE the spawn so a crashing spawn still records the
  * debounce (an identical tree won't re-trigger on the next stop). The review is
  * gated on the diff CHANGING since the last review — without it, every stop of
- * an unchanged tree would re-spend a background gpt-5.5 review.
+ * an unchanged tree would re-spend a background gpt-5.6-sol review.
  *
  * The whole body is bounded by a short timeout (the stores are local temp files
  * that complete in well under a millisecond in practice, so the timeout never

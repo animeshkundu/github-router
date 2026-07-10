@@ -686,7 +686,7 @@ export const claude = defineCommand({
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const cmd = buildPromptSubmitHookCommand(process.execPath, process.argv[1])
             // Raise the host hook timeout to 45s (default 30s): the V2 path may
-            // make one gpt-5.5 scope call + a parallel code search. The hook's
+            // make one gpt-5.6-sol scope call + a parallel code search. The hook's
             // own enrichment is bounded well under this (≈22s) and fails open,
             // so 45s is headroom, not a tax the user routinely pays.
             await injectStopHookIntoSettingsFile(settingsPath, cmd, "UserPromptSubmit", 45)

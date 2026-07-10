@@ -244,7 +244,7 @@ function checkAuth(c: Context): { ok: true } | { ok: false; status: 401 | 403; r
 /**
  * The 1M-context Opus 4.6 variant (`claude-opus-4.6-1m`, `max_prompt_tokens`
  * 936K). opus_critic prefers it so it can take large artifacts in one shot
- * (the whole point of pairing it with gpt-5.5 as the big-window peers);
+ * (the whole point of pairing it with gpt-5.6-sol as the big-window peers);
  * falls back to the 200K `claude-opus-4-6` when the catalog doesn't carry
  * a 1M 4.6 slug. The regex is version-anchored to 4.6 AND requires a
  * `-1m` suffix boundary (not a permissive `.*1m`), so it does NOT
@@ -579,7 +579,7 @@ async function predictedWindowOverflow(
     + `${budget}-token budget for ${persona.model} (its ${maxPromptTokens}-token prompt window `
     + `minus a ${PEER_PROMPT_TOKEN_RESERVE}-token framing reserve). Do NOT summarize or truncate `
     + `the artifact to fit. Route the full artifact to a larger-window peer — `
-    + `\`codex_critic\` (gpt-5.5 ≈ 922K tokens)${opusHint} — or split it into focused `
+    + `\`codex_critic\` (gpt-5.6-sol ≈ 1M tokens)${opusHint} — or split it into focused `
     + `sub-calls BY CONCERN and call them in parallel, then aggregate.`
   )
 }
@@ -694,7 +694,7 @@ function jsonPathPreflightCap(body: JsonRpcRequest, scope: McpScope):
  * the `stand_in` orchestrator in `src/lib/stand-in.ts` — can reuse the
  * same per-endpoint request shaping without re-implementing it. The
  * stand_in tool needs to drive its own per-round system prompts across
- * three concrete models (gpt-5.5, claude-opus-4-7, gemini-3.1-pro-preview),
+ * three concrete models (gpt-5.6-sol, claude-opus-4-7, gemini-3.1-pro-preview),
  * each on a different endpoint; doing that with a `PersonaSpec` would
  * require either inventing throwaway personas per round or duplicating
  * the dispatch switch.

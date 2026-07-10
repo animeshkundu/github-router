@@ -226,7 +226,7 @@ export function createFirstMateTools(
         acceptance_criteria: stringProp("User-blessed acceptance criteria for the mission."),
         priority: numberProp("Optional numeric priority; higher values are handled by controller policy."),
         house_rules: stringProp("Optional repository or operator constraints."),
-        default_model: stringProp("Model the GitHub cloud coding agent uses for this mission's tasks; defaults to gpt-5.5."),
+        default_model: stringProp("Model the GitHub cloud coding agent uses for this mission's tasks; defaults to gpt-5.6-sol."),
         plan_gate: enumProp(
           ["hard", "soft"],
           "Plan-review gate. hard (default) requires the flow's review before build and re-plans on a rejecting review; soft auto-advances a passing plan review to build without human approval but escalates a rejecting review to a human.",
@@ -240,7 +240,7 @@ export function createFirstMateTools(
         // #2 — validate an explicit default_model at INPUT time (inside the tool
         // wrapper's try/catch), so a typo fails FAST with the actionable message
         // where the operator supplied it rather than throwing every controller
-        // wake at dispatch. Unspecified → gpt-5.5 default → resolves silently.
+        // wake at dispatch. Unspecified → gpt-5.6-sol default → resolves silently.
         const defaultModel = optionalString(args, "default_model")
         resolveCloudAgentModel(defaultModel)
         const planGate = optionalPlanGate(args, "plan_gate")

@@ -64,8 +64,8 @@ mock.module("~/lib/server-setup", () => ({
 }))
 
 mock.module("~/lib/port", () => ({
-  DEFAULT_CODEX_MODEL: "gpt-5.5",
-  DEFAULT_CODEX_MODEL_FALLBACKS: ["gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex"],
+  DEFAULT_CODEX_MODEL: "gpt-5.6-sol",
+  DEFAULT_CODEX_MODEL_FALLBACKS: ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex"],
 }))
 
 mock.module("consola", () => ({
@@ -176,15 +176,16 @@ describe("codex command", () => {
 
     const [, args] = spawnMock.mock.calls[0]
     expect(args).toContain("-m")
-    expect(args).toContain("gpt-5.5")
+    expect(args).toContain("gpt-5.6-sol")
   })
 
-  test("falls back gracefully when gpt-5.5 missing — picks best /responses model in cache", async () => {
-    // Pre-rollout tier where gpt-5.5 hasn't appeared yet. resolveCodexModel's
-    // "best /responses model" safety net catches this even before the named
-    // fallback chain runs. With both 5.4 and 5.3-codex present, the -codex
-    // suffix is preferred by resolveCodexModel — we still get a working model
-    // without --model.
+  test("falls back to gpt-5.5-first named chain when gpt-5.6-sol missing (honors the declared fallback order)", async () => {
+    // Pre-rollout tier where gpt-5.6-sol hasn't appeared yet. The implicit
+    // default path walks [gpt-5.6-sol, gpt-5.5, gpt-5.4, gpt-5.3-codex, ...]
+    // by cache presence BEFORE resolveCodexModel's codex-slug preference, so
+    // the declared order wins: with both gpt-5.4 and gpt-5.3-codex present but
+    // no gpt-5.5, gpt-5.4 (earlier in the chain) is selected — NOT the
+    // codex-suffixed gpt-5.3-codex.
     state.models = {
       data: [
         { id: "gpt-5.4", supported_endpoints: ["/responses"] },
@@ -197,7 +198,29 @@ describe("codex command", () => {
       await run({ args: {} })
       const [, args] = spawnMock.mock.calls[0]
       expect(args).toContain("-m")
-      expect(args).toContain("gpt-5.3-codex")
+      expect(args).toContain("gpt-5.4")
+    } finally {
+      state.models = undefined
+    }
+  })
+
+  test("gpt-5.5 wins as the top fallback when present and gpt-5.6-sol is absent (Q2 order)", async () => {
+    // Rollout-lag catalog: gpt-5.6-sol absent, but gpt-5.5 present alongside a
+    // codex-suffixed model. gpt-5.5 is the declared top fallback, so it must be
+    // selected over gpt-5.3-codex (the codex-slug preference must NOT shadow it).
+    state.models = {
+      data: [
+        { id: "gpt-5.5", supported_endpoints: ["/responses"] },
+        { id: "gpt-5.3-codex", supported_endpoints: ["/responses"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    try {
+      const run = getRunFn()
+      await run({ args: {} })
+      const [, args] = spawnMock.mock.calls[0]
+      expect(args).toContain("-m")
+      expect(args).toContain("gpt-5.5")
     } finally {
       state.models = undefined
     }
