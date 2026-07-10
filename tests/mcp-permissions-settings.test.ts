@@ -72,4 +72,27 @@ describe("injectMcpPermissionsIntoSettingsFile", () => {
     await fs.writeFile(p, "[1,2,3]", "utf8")
     await expect(injectMcpPermissionsIntoSettingsFile(p, ["peers"])).rejects.toThrow(/not a JSON object/)
   })
+
+  it("bypass:true sets defaultMode=bypassPermissions and overrides a mirrored 'plan'", async () => {
+    const p = await settingsFile({ permissions: { allow: ["Read(*)"], defaultMode: "plan" } })
+    const r = await injectMcpPermissionsIntoSettingsFile(p, ["peers", "workers"], { bypass: true })
+    expect(r.written).toBe(true)
+    expect(r.bypass).toBe(true)
+    const perms = (await read(p)).permissions as { allow: string[]; defaultMode: string }
+    expect(perms.defaultMode).toBe("bypassPermissions")
+    expect(perms.allow).toEqual(["Read(*)", "mcp__peers", "mcp__workers"])
+  })
+
+  it("bypass:true writes even with no server keys (just the mode)", async () => {
+    const p = await settingsFile()
+    const r = await injectMcpPermissionsIntoSettingsFile(p, [], { bypass: true })
+    expect(r.written).toBe(true)
+    expect((await read(p)).permissions).toEqual({ defaultMode: "bypassPermissions" })
+  })
+
+  it("bypass:true is a no-op when already bypass with all keys present", async () => {
+    const p = await settingsFile({ permissions: { allow: ["mcp__peers"], defaultMode: "bypassPermissions" } })
+    const r = await injectMcpPermissionsIntoSettingsFile(p, ["peers"], { bypass: true })
+    expect(r.written).toBe(false)
+  })
 })

@@ -1,40 +1,49 @@
 import fs from "node:fs/promises"
 
 /**
- * Pre-approve github-router's OWN injected MCP servers in the mirror
- * `settings.json` so the SDK-spawned Claude doesn't block on a permission prompt
- * for each `mcp__*` call.
+ * Configure the serve mirror's `settings.json` permission posture so the
+ * CloudCLI-spawned Claude runs without permission friction — the web-control-
+ * plane equivalent of `github-router claude`'s default `--dangerously-skip-
+ * permissions`.
  *
  * Why this matters for `serve`: CloudCLI spawns Claude via the Agent SDK with
- * `settingSources: ['project','user','local']` and a `canUseTool` callback. Any
- * tool that isn't already allowed by permission-mode or a settings rule reaches
- * `canUseTool`, which posts a `permission_request` to the browser and AWAITS the
- * user's approval — so every injected `mcp__peers__*` / `mcp__workers__*` / …
- * call stalls the chat until the user clicks approve. In a terminal `claude` the
- * user approves interactively; the web control plane needs these trusted, we-
- * injected tools to just work.
+ * `settingSources: ['project','user','local']` and a `canUseTool` callback. Two
+ * things bite:
+ *   1. Any tool not already allowed reaches `canUseTool`, which posts a
+ *      `permission_request` to the browser and AWAITS approval — so every
+ *      injected `mcp__peers__*` / `mcp__workers__*` / … call stalls the chat.
+ *   2. The operator's real `~/.claude/settings.json` (snapshotted into the
+ *      mirror) may set `permissions.defaultMode: "plan"`, which the SDK honors —
+ *      putting the session in plan mode so native write tools (Edit/Write/Bash)
+ *      are refused.
+ * In a terminal `claude` the launcher forces `--dangerously-skip-permissions`
+ * (see `buildLaunchCommand`), so neither bites. The control plane needs the same.
  *
- * The SDK resolves settings.json `permissions.allow` BEFORE invoking
- * `canUseTool`, so allow-listing our server keys (`mcp__<key>` matches every
- * tool of that server) short-circuits the prompt. We only ever allow OUR OWN
- * servers (the resolved group keys) — never a blanket bypass — so the user's
- * other tools still prompt normally.
+ * `bypass: true` (the serve default) sets `permissions.defaultMode` to
+ * `"bypassPermissions"` — the SDK resolves this from settings before invoking
+ * `canUseTool`, so all tools auto-approve and plan mode is lifted. We also
+ * allow-list our OWN resolved server keys (`mcp__<key>`) as a conservative
+ * fallback for the case where CloudCLI's UI sends an explicit non-default
+ * permissionMode that overrides the settings default — our injected tools then
+ * still work while everything else prompts.
  *
  * PRESERVE-AND-MERGE: an existing `permissions` object (allow/deny/ask) is kept;
- * we union our entries into `allow` and never touch `deny`/`ask`. A user's
- * explicit `deny` of one of our servers still wins (the SDK applies deny over
- * allow). Atomic temp+rename, mode 0o600 — matches the sibling settings writers.
- * A non-object settings.json throws (never clobber a file we don't understand);
- * the caller wraps this in warn-and-continue so a hiccup never blocks launch.
+ * we union our entries into `allow` and never touch `deny`/`ask` (a user deny of
+ * one of our servers still wins). Atomic temp+rename, mode 0o600. A non-object
+ * settings.json throws (never clobber a file we don't understand); the caller
+ * wraps this in warn-and-continue so a hiccup never blocks launch.
  *
- * Opt out with `GH_ROUTER_SERVE_NO_AUTO_APPROVE=1` (the caller checks this).
+ * Opt out with `GH_ROUTER_SERVE_NO_AUTO_APPROVE=1` (the caller checks this) — the
+ * mirrored `defaultMode` and the interactive prompts are then left untouched.
  */
 export async function injectMcpPermissionsIntoSettingsFile(
   settingsPath: string,
   serverKeys: ReadonlyArray<string>,
-): Promise<{ written: boolean; added: string[] }> {
+  opts: { bypass?: boolean } = {},
+): Promise<{ written: boolean; added: string[]; bypass: boolean }> {
+  const bypass = opts.bypass === true
   const desired = serverKeys.filter((k) => k.length > 0).map((k) => `mcp__${k}`)
-  if (desired.length === 0) return { written: false, added: [] }
+  if (desired.length === 0 && !bypass) return { written: false, added: [], bypass: false }
 
   let existing: Record<string, unknown> = {}
   let raw: string | undefined
@@ -72,12 +81,17 @@ export async function injectMcpPermissionsIntoSettingsFile(
       added.push(entry)
     }
   }
-  if (added.length === 0) return { written: false, added: [] }
 
-  perms.allow = [...currentAllow, ...added]
+  const modeChanges = bypass && perms.defaultMode !== "bypassPermissions"
+  if (added.length === 0 && !modeChanges) return { written: false, added: [], bypass }
+
+  if (added.length > 0) perms.allow = [...currentAllow, ...added]
+  if (bypass) perms.defaultMode = "bypassPermissions"
+
   const merged = { ...existing, permissions: perms }
   const tmp = `${settingsPath}.${process.pid}.mcpperm.tmp`
   await fs.writeFile(tmp, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 })
   await fs.rename(tmp, settingsPath)
-  return { written: true, added }
+  return { written: true, added, bypass }
 }
+

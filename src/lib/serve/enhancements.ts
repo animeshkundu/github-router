@@ -168,17 +168,18 @@ export async function provisionServeEnhancements(
     // already configured it).
     await injectAttributionSuppressionIntoSettingsFile(settingsPath).catch(() => {})
 
-    // Pre-approve OUR injected MCP servers so the CloudCLI-spawned Claude doesn't
-    // block on a per-tool permission prompt (its `canUseTool` awaits browser
-    // approval for anything not already allowed). Only our own resolved server
-    // keys are allowed — never a blanket bypass. Opt out with
-    // GH_ROUTER_SERVE_NO_AUTO_APPROVE=1.
+    // Match `github-router claude`'s default `--dangerously-skip-permissions`:
+    // set the mirror's permission default to bypass so the CloudCLI-spawned
+    // Claude doesn't block on per-tool prompts (its `canUseTool` awaits browser
+    // approval) and isn't stuck in the operator's mirrored `defaultMode: "plan"`
+    // (which refuses native writes). Also allow-list OUR resolved server keys as
+    // a fallback. Opt out with GH_ROUTER_SERVE_NO_AUTO_APPROVE=1.
     if (process.env.GH_ROUTER_SERVE_NO_AUTO_APPROVE !== "1") {
       const serverKeys = enabledGroups
         .map((g) => groupKeys[g])
         .filter((k): k is string => typeof k === "string" && k.length > 0)
-      await injectMcpPermissionsIntoSettingsFile(settingsPath, serverKeys).catch((err) =>
-        consola.warn(`Could not pre-approve github-router MCP tools: ${String(err)}`),
+      await injectMcpPermissionsIntoSettingsFile(settingsPath, serverKeys, { bypass: true }).catch(
+        (err) => consola.warn(`Could not set serve permission defaults: ${String(err)}`),
       )
     }
 

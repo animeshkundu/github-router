@@ -76,6 +76,12 @@ by writing into the router-owned `CLAUDE_CONFIG_DIR` mirror (which the SDK-spawn
   `GH_ROUTER_HOOK_NONCE` forwarded into the child env.
 - **Background provisions** — semantic search (colbert), the LLM toolbelt (`rg`/`fd`/`jq`/…),
   keep-awake, and self-update, all fire-and-forget.
+- **Permissions** — matches `github-router claude`'s default `--dangerously-skip-permissions`: serve
+  sets `permissions.defaultMode: "bypassPermissions"` in the mirror `settings.json` (and allow-lists its
+  own `mcp__*` servers as a fallback). Without this, CloudCLI's Agent-SDK `canUseTool` stalls the chat on
+  a browser approval prompt for every injected tool, and an operator's mirrored `defaultMode: "plan"`
+  refuses native writes. Opt out with `GH_ROUTER_SERVE_NO_AUTO_APPROVE=1` (prompts + the mirrored mode
+  are then left untouched). Existing `allow`/`deny`/`ask` entries are preserved; a user `deny` still wins.
 
 **Connected badge + UI display parity.** CloudCLI's client renders its MCP manager, skills panel /
 slash menu, model picker, and "connected" badge verbatim from its server's `/api/providers/*` (and
