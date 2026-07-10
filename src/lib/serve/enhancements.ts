@@ -18,14 +18,17 @@ import {
 } from "../claude-md-injection"
 import { INJECTED_SKILLS, writeInjectedSkill } from "../injected-skills"
 import {
+  agentToolsEnabled,
   browseAgentEnabled,
   browserCompoundToolsEnabled,
   browserToolsEnabled,
+  fleetToolsEnabled,
   geminiAvailable,
   implementerSubagentModel,
   standInToolEnabled,
   workerToolsEnabled,
 } from "../mcp-capabilities"
+import { buildPlanReviewHookCommand, planReviewEnabled } from "../orchestration/plan-review-hook"
 import { buildPromptSubmitHookCommand } from "../orchestration/prompt-submit-hook"
 import { injectStopHookIntoSettingsFile } from "../orchestration/stop-gate-hook"
 import { PATHS } from "../paths"
@@ -43,6 +46,21 @@ export interface ServeEnhancementsHandle {
   nonce?: string
 }
 
+export interface ServeEnhancementOpts {
+  /** Route Codex personas through a local `codex mcp-server` (stdio) when the backend resolved to "cli". */
+  codexCli?: boolean
+  /** True when the control plane is reachable beyond loopback (a --tunnel or --public-url is active). Gates the highest-blast-radius capabilities OFF by default: the server-side browser MCP (a session-hijack / SSRF / cloud-metadata primitive when reachable remotely) and first-mate (mints a repo+workflow GitHub write token). */
+  tunnelExposed?: boolean
+  /** Operator opt-in to expose the browser MCP over the tunnel despite the risk. */
+  browseOverTunnel?: boolean
+  /** Operator opt-in to expose first-mate over the tunnel despite the risk. */
+  agentsOverTunnel?: boolean
+  /** Operator opt-in to expose the fleet MCP over the tunnel despite the risk
+   *  (fleet drives remote coding sessions with the operator's stored fleet
+   *  credentials — an equal-or-higher blast radius than the browser MCP). */
+  fleetOverTunnel?: boolean
+}
+
 const NOOP: ServeEnhancementsHandle = { cleanup: async () => {} }
 
 /**
@@ -50,35 +68,43 @@ const NOOP: ServeEnhancementsHandle = { cleanup: async () => {} }
  * CLAUDE_CONFIG_DIR mirror so a CloudCLI-spawned Claude session gets the same
  * tools `github-router claude` provides:
  *   - the scoped MCP servers (peers / search / orchestrate, plus workers /
- *     decide / browser when their gate passes) — the SDK-spawned claude reads
- *     them from the mirror's `.claude.json`,
+ *     decide / browser / fleet / first-mate when their gate passes) — the
+ *     SDK-spawned claude reads them from the mirror's `.claude.json`,
  *   - the peer-critic / worker / implementer subagents (`.md` files written into
  *     the mirror's `agents/`),
  *   - the gh-* skills (research / orchestrate / floor-keeper / worker).
  *
  * Best-effort: on any failure Claude still works, just without the extras.
  * Must run AFTER `ensureClaudeConfigMirror()` and BEFORE CloudCLI is spawned.
- * The operator/tab-specific bits (first-mate, ai-or-die hooks, artifact review)
- * are intentionally left out — they don't apply to the serve control plane.
+ * Tab-specific bits (ai-or-die hooks, artifact review) are intentionally left
+ * out — they don't apply to the serve control plane.
  */
 export async function provisionServeEnhancements(
   serverUrl: string,
+  opts: ServeEnhancementOpts = {},
 ): Promise<ServeEnhancementsHandle> {
   try {
+    const tunnelExposed = opts.tunnelExposed === true
+    const browseAllowed = browserToolsEnabled() && (!tunnelExposed || opts.browseOverTunnel === true)
+    const firstMateAllowed = agentToolsEnabled() && (!tunnelExposed || opts.agentsOverTunnel === true)
+    const fleetAllowed = fleetToolsEnabled() && (!tunnelExposed || opts.fleetOverTunnel === true)
+
     const enabledGroups: McpGroup[] = ["peers", "search", "orchestrate"]
     if (workerToolsEnabled()) enabledGroups.push("workers")
     if (standInToolEnabled()) enabledGroups.push("decide")
-    if (browserToolsEnabled()) enabledGroups.push("browser")
+    if (browseAllowed) enabledGroups.push("browser")
+    if (fleetAllowed) enabledGroups.push("fleet")
+    if (firstMateAllowed) enabledGroups.push("first-mate")
 
     const gem = geminiAvailable()
     const { keys: groupKeys } = await resolveGroupKeysFromMirror(enabledGroups)
 
     const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
-      codexCli: false,
+      codexCli: opts.codexCli === true,
       geminiAvailable: gem,
       groupKeys,
       workerToolsAvailable: workerToolsEnabled(),
-      browseAvailable: browseAgentEnabled(),
+      browseAvailable: browseAllowed && browseAgentEnabled(),
       implementerModel: implementerSubagentModel(),
     })
     // The proxy's /mcp handler authorizes tool calls against this per-launch
@@ -86,21 +112,21 @@ export async function provisionServeEnhancements(
     state.peerMcpNonce = runtime.nonce
 
     const injected = await injectPeerMcpIntoMirror(serverUrl, {
-      codexCli: false,
+      codexCli: opts.codexCli === true,
       geminiAvailable: gem,
       groupKeys,
       nonce: runtime.nonce,
     })
 
     const peerSnippet = buildPeerAwarenessSnippet({
-      codexCli: false,
+      codexCli: opts.codexCli === true,
       geminiAvailable: gem,
       workerToolsAvailable: workerToolsEnabled(),
       standInAvailable: standInToolEnabled(),
-      browseAvailable: browserToolsEnabled(),
-      compoundBrowseAvailable: browserCompoundToolsEnabled(),
-      powerBrowseAvailable: state.powerBrowseEnabled,
-      agentToolsAvailable: false,
+      browseAvailable: browseAllowed,
+      compoundBrowseAvailable: browseAllowed && browserCompoundToolsEnabled(),
+      powerBrowseAvailable: browseAllowed && state.powerBrowseEnabled,
+      agentToolsAvailable: firstMateAllowed,
       implementerAvailable: implementerSubagentModel() != null,
       groupKeys,
     })
@@ -153,7 +179,7 @@ export async function provisionServeEnhancements(
         )
       } else if (process.env.GH_ROUTER_DISABLE_WORKER_GUARD !== "1") {
         const workersKey = workersKeyOf(groupKeys)
-        const modes = activeDispatchModes({ browse: browseAgentEnabled() })
+        const modes = activeDispatchModes({ browse: browseAllowed && browseAgentEnabled() })
         const cmd = buildWorkerGuardHookCommand(
           process.execPath,
           process.argv[1],
@@ -168,6 +194,18 @@ export async function provisionServeEnhancements(
         consola.info(
           "Workers non-blocking guard disabled via GH_ROUTER_DISABLE_WORKER_GUARD=1; raw worker tools remain callable on the main thread.",
         )
+      }
+    }
+
+    if (planReviewEnabled()) {
+      try {
+        const command = buildPlanReviewHookCommand(process.execPath, process.argv[1])
+        // Advisory PostToolUse(ExitPlanMode) hook: non-blocking; findings surface on the next prompt.
+        // NOTE (unverified): confirm CloudCLI's Agent-SDK chat actually fires the ExitPlanMode lifecycle;
+        // if it never triggers this is a harmless no-op.
+        await injectStopHookIntoSettingsFile(settingsPath, command, "PostToolUse", undefined, "ExitPlanMode")
+      } catch (err) {
+        consola.warn(`Could not register the advisory plan-review hook: ${String(err)}`)
       }
     }
 

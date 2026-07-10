@@ -5,6 +5,7 @@ import path from "node:path"
 import consola from "consola"
 
 import { buildCodexProviderConfigFlags } from "./launch"
+import { buildWorkspaceHeaderHelperCommand } from "./mcp-workspace-header"
 import { PATHS, writeRuntimeFileSecure } from "./paths"
 import {
   buildAgentPrompt,
@@ -94,6 +95,8 @@ interface BuildOpts {
   nonce: string
   /** Isolated CODEX_HOME for the stdio child (only used when codexCli). */
   codexHome: string
+  /** headersHelper command emitted on each HTTP entry for per-session workspace routing. */
+  workspaceHeaderCmd?: string
   /** Whether the core worker tools are served (`workerToolsEnabled()`). When
    *  true, the `worker-explore/implement/review/plan/test` dispatcher subagents
    *  are generated. Optional (defaults false) so `buildPeerMcpConfig` callers
@@ -110,6 +113,7 @@ interface HttpMcpEntry {
   type: "http"
   url: string
   headers: Record<string, string>
+  headersHelper?: string
 }
 
 interface StdioMcpEntry {
@@ -140,16 +144,19 @@ export function buildPeerMcpConfig(
 ): PeerMcpConfig {
   const mcpServers: Record<string, HttpMcpEntry | StdioMcpEntry> = {}
 
+  const workspaceHeaderCmd = opts.workspaceHeaderCmd?.trim()
   for (const group of MCP_GROUPS) {
     const key = opts.groupKeys[group]
     if (!key) continue // group disabled at launch, or both keys collided
-    mcpServers[key] = {
+    const entry: HttpMcpEntry = {
       type: "http",
       url: `${serverUrl}/mcp/${GROUP_META[group].urlSuffix}`,
       headers: {
         Authorization: `Bearer ${opts.nonce}`,
       },
     }
+    if (workspaceHeaderCmd) entry.headersHelper = workspaceHeaderCmd
+    mcpServers[key] = entry
   }
 
   if (opts.codexCli) {
@@ -733,6 +740,7 @@ export async function injectPeerMcpIntoMirror(
     groupKeys: opts.groupKeys,
     nonce: opts.nonce,
     codexHome: opts.codexHome ?? PATHS.CODEX_HOME,
+    workspaceHeaderCmd: buildWorkspaceHeaderHelperCommand(process.execPath, process.argv[1]),
   })
 
   // 4. Defensive: the resolved keys are collision-free by construction, so
@@ -821,6 +829,7 @@ export async function writePeerMcpRuntimeFiles(
     groupKeys: opts.groupKeys,
     nonce,
     codexHome,
+    workspaceHeaderCmd: buildWorkspaceHeaderHelperCommand(process.execPath, process.argv[1]),
   })
   const agents = buildPeerAgentDefinitions({
     codexCli: opts.codexCli,

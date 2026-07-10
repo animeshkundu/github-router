@@ -7,11 +7,13 @@ import consola from "consola"
 
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
 import { provisionAndIndexColbert } from "./lib/colbert"
+import { resolveCodexCliBackend } from "./lib/codex-mcp-config"
 import { killChildProcessTree } from "./lib/exec"
 import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
+import { getCodexVersion } from "./lib/launch"
 import { browserToolsEnabled } from "./lib/mcp-capabilities"
-import { ensureClaudeConfigMirror, removeOwnClaudeConfigMirror } from "./lib/paths"
-import { pickClaudeDefault } from "./lib/port"
+import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror } from "./lib/paths"
+import { DEFAULT_CLAUDE_MODEL_FALLBACKS, pickClaudeDefault } from "./lib/port"
 import {
   getClaudeCodeEnvVars,
   parseSharedArgs,
@@ -27,9 +29,16 @@ import {
 } from "./lib/serve/cloudcli"
 import { DevtunnelError, startDevtunnel } from "./lib/serve/devtunnel"
 import { provisionServeEnhancements } from "./lib/serve/enhancements"
-import { startReverseProxy } from "./lib/serve/reverse-proxy"
+import { facadeInterceptKind, rewriteProviderResponse } from "./lib/serve/provider-facade"
+import {
+  SERVE_IDENTITY_PATH,
+  SERVE_IDENTITY_SERVICE,
+  startReverseProxy,
+} from "./lib/serve/reverse-proxy"
 import { runSelfUpdate } from "./lib/self-update"
+import { state } from "./lib/state"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
+import { resolveModel } from "./lib/utils"
 import { getGitHubUser } from "./services/github/get-user"
 
 async function getFreePort(): Promise<number> {
@@ -55,8 +64,56 @@ function isPortFree(port: number): Promise<boolean> {
 }
 
 /**
+ * Probe a loopback port for an already-running `github-router serve` (its
+ * identity endpoint). Returns true when the port hosts OUR serve, else false
+ * (free, or a foreign process). `serve` is designed to run ONCE per machine
+ * (a single machine-wide control plane for all repos), so a second launch
+ * attaches to the running one instead of spawning a duplicate CloudCLI +
+ * contending on the shared auth DB. We intentionally do NOT trust any URL the
+ * probed service reports — a local squatter could forge the identity marker, so
+ * the caller only ever opens a locally-constructed loopback origin.
+ */
+function probeExistingServe(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = http.get(
+      {
+        host: "127.0.0.1",
+        port,
+        path: SERVE_IDENTITY_PATH,
+        headers: { host: `127.0.0.1:${port}` },
+        timeout: 1500,
+      },
+      (res) => {
+        if (res.statusCode !== 200) {
+          res.resume()
+          resolve(false)
+          return
+        }
+        const chunks: Buffer[] = []
+        res.on("data", (d) => chunks.push(Buffer.from(d)))
+        res.on("end", () => {
+          try {
+            const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+              service?: string
+            }
+            resolve(body.service === SERVE_IDENTITY_SERVICE)
+          } catch {
+            resolve(false)
+          }
+        })
+        res.on("error", () => resolve(false))
+      },
+    )
+    req.on("timeout", () => req.destroy())
+    req.on("error", () => resolve(false))
+  })
+}
+
+/**
  * Resolve the user-facing port: honor an explicit `--port`; otherwise use 5454
- * when free, else fall back to a random free port.
+ * when free, else fall back to a random free port. (Single-instance detection —
+ * an already-running github-router serve on the intended port — is handled by
+ * the earlier `probeExistingServe` attach/refuse in `run`.)
  */
 async function resolveServePort(requested?: number): Promise<number> {
   if (requested != null) return requested
@@ -105,6 +162,26 @@ export const serve = defineCommand({
       type: "string",
       description: "Override the pinned CloudCLI version to install",
     },
+    "codex-cli": {
+      type: "boolean",
+      default: false,
+      description: "Route Codex personas through a local `codex mcp-server` (requires codex 0.129+; falls back to HTTP if missing)",
+    },
+    "browse-over-tunnel": {
+      type: "boolean",
+      default: false,
+      description: "Expose the server-side browser MCP even when tunnel-exposed (session-hijack / SSRF risk — only with fully-trusted tunnel access)",
+    },
+    "agents-over-tunnel": {
+      type: "boolean",
+      default: false,
+      description: "Expose first-mate (mints a repo+workflow GitHub write token) even when tunnel-exposed (only with fully-trusted tunnel access)",
+    },
+    "fleet-over-tunnel": {
+      type: "boolean",
+      default: false,
+      description: "Expose the fleet MCP (drives remote coding sessions with your fleet credentials) even when tunnel-exposed (only with fully-trusted tunnel access)",
+    },
     "no-install": {
       type: "boolean",
       default: false,
@@ -128,6 +205,8 @@ export const serve = defineCommand({
     },
   },
   async run({ args }) {
+    state.serveMode = true
+
     if (process.versions.bun) {
       consola.warn(
         "`serve` should run under Node.js. Bun's node:http upgrade sockets cannot relay the CloudCLI terminal/chat WebSockets; run the installed `github-router` binary (Node).",
@@ -135,7 +214,24 @@ export const serve = defineCommand({
     }
 
     const parsed = parseSharedArgs(args as unknown as Record<string, unknown>)
-    const chosenSlug = (args.model as string | undefined) ?? pickClaudeDefault()
+
+    // Single-instance guard: `serve` is a machine-wide control plane meant to run
+    // ONCE per machine (work on any repo through its file explorer / sessions). If
+    // one is already running on the intended port, attach to it (open + exit)
+    // instead of spawning a second CloudCLI that would contend on the shared auth
+    // DB. Only triggers for OUR serve; a foreign process on the port falls through
+    // to the random-port fallback in resolveServePort.
+    const intendedPort = parsed.port ?? DEFAULT_SERVE_PORT
+    if (await probeExistingServe(intendedPort)) {
+      // Construct the URL locally — never trust a URL the probed service reports
+      // (a local squatter could forge the identity marker into an open-browser).
+      const existingUrl = `http://127.0.0.1:${intendedPort}`
+      consola.box(
+        `github-router control plane already running\n\n${existingUrl}\n\nOpening it — stop that instance first if you want a fresh one.`,
+      )
+      if (args["no-open"] !== true) openBrowser(existingUrl)
+      return
+    }
 
     // 1. github-router proxy — internal (random port). The USER-facing port is
     //    the reverse proxy below, so force this one random regardless of --port.
@@ -163,9 +259,11 @@ export const serve = defineCommand({
     // server is listening so the bounded probe can't delay it.
     void runSelfUpdate({ selfUpdate: args["self-update"] !== false })
 
-    // Best-effort ColBERT semantic-search provision + background index of the
-    // launch cwd (if a git repo). ON by default; never blocks launch.
-    void provisionAndIndexColbert()
+    // Best-effort ColBERT semantic-search provision. ON by default; never blocks
+    // launch. `skipCwdIndex`: serve is machine-wide, so the launch cwd is usually
+    // NOT a repo the user works on — per-workspace on-demand indexing (kicked by
+    // the first search for a given repo) covers real queries instead.
+    void provisionAndIndexColbert({ skipCwdIndex: true })
 
     // Best-effort LLM toolbelt materialization. The mirror awareness line is
     // written by provisionServeEnhancements below, matching `github-router claude`.
@@ -186,11 +284,64 @@ export const serve = defineCommand({
       )
     }
 
+    const opusFamilyShorthand = (args.model as string | undefined)?.match(/^(\d+\.\d+)$/)?.[1]
+    let chosenSlug = opusFamilyShorthand
+      ? pickClaudeDefault(opusFamilyShorthand)
+      : ((args.model as string | undefined) ?? pickClaudeDefault())
+    if (!args.model && state.models) {
+      const inCache = (slug: string): boolean =>
+        state.models?.data.some((m) => m.id === resolveModel(slug)) ?? false
+      if (!inCache(chosenSlug)) {
+        for (const fb of DEFAULT_CLAUDE_MODEL_FALLBACKS) {
+          if (inCache(fb)) {
+            consola.info(
+              `Default model "${chosenSlug}" not in your Copilot model list; falling back to "${fb}".`,
+            )
+            chosenSlug = fb
+            break
+          }
+        }
+      }
+    }
+
+    const requestedCli = args["codex-cli"] === true
+    const backend = resolveCodexCliBackend({
+      requested: requestedCli,
+      codexInfo: requestedCli ? getCodexVersion() : null,
+    })
+    const tunnelExposed =
+      args.tunnel === true
+      || String(args["public-url"] ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean).length > 0
+    if (tunnelExposed && browserToolsEnabled() && args["browse-over-tunnel"] !== true) {
+      consola.info(
+        "Browser MCP is disabled over the tunnel (session-hijack/SSRF risk). Pass --browse-over-tunnel to enable it for fully-trusted access.",
+      )
+    }
+    if (tunnelExposed && state.agentsEnabled && args["agents-over-tunnel"] !== true) {
+      consola.info(
+        "first-mate is disabled over the tunnel (it mints a GitHub write token). Pass --agents-over-tunnel to enable it for fully-trusted access.",
+      )
+    }
+    if (tunnelExposed && state.fleetEnabled && args["fleet-over-tunnel"] !== true) {
+      consola.info(
+        "Fleet MCP is disabled over the tunnel (it drives remote coding sessions with your fleet credentials). Pass --fleet-over-tunnel to enable it for fully-trusted access.",
+      )
+    }
+
     // 2b. wire the github-router enhancement layer (MCP servers + peer/worker
     //     subagents + gh-* skills) into the mirror so CloudCLI-spawned Claude
     //     sessions get the same tools `github-router claude` provides. Must run
     //     after the mirror exists and before CloudCLI spawns claude.
-    const enhancements = await provisionServeEnhancements(serverUrl)
+    const enhancements = await provisionServeEnhancements(serverUrl, {
+      codexCli: backend === "cli",
+      tunnelExposed,
+      browseOverTunnel: args["browse-over-tunnel"] === true,
+      agentsOverTunnel: args["agents-over-tunnel"] === true,
+      fleetOverTunnel: args["fleet-over-tunnel"] === true,
+    })
 
     // 3. filtered child env: the vetted secret-stripping allowlist (buildEnv,
     //    drops GITHUB_TOKEN/GH_ROUTER_*/ANTHROPIC_AUTH_TOKEN/OPENAI_API_KEY/
@@ -327,6 +478,24 @@ export const serve = defineCommand({
     }
 
     const servePort = await resolveServePort(parsed.port)
+    const providerFacade = {
+      kindFor: facadeInterceptKind,
+      rewrite: (kind: string, json: unknown, query: URLSearchParams) =>
+        rewriteProviderResponse(
+          kind as Parameters<typeof rewriteProviderResponse>[0],
+          json,
+          {
+            getModels: () => state.models,
+            // Resolve to the Copilot catalog slug so it matches the picker
+            // OPTIONS values (chosenSlug may be a dashed/`[1m]`-bracketed Anthropic
+            // slug; the OPTIONS values are catalog ids). Otherwise DEFAULT misses
+            // and falls back to the first option.
+            defaultModel: resolveModel(chosenSlug),
+            claudeConfigDir: PATHS.CLAUDE_CONFIG_DIR,
+          },
+          query,
+        ),
+    }
     let reverse
     try {
       reverse = await startReverseProxy({
@@ -338,6 +507,7 @@ export const serve = defineCommand({
         extraAllowedHosts,
         extraAllowedOrigins,
         allowDevtunnelHosts: tunnelMode,
+        providerFacade,
       })
     } catch (err) {
       consola.error(

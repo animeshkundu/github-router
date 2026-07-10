@@ -3,7 +3,7 @@ import http from "node:http"
 import type { AddressInfo } from "node:net"
 import { WebSocket, WebSocketServer } from "ws"
 
-import { startReverseProxy, __test } from "~/lib/serve/reverse-proxy"
+import { startReverseProxy, __test, SERVE_IDENTITY_PATH, SERVE_IDENTITY_SERVICE } from "~/lib/serve/reverse-proxy"
 
 // ---- helpers -------------------------------------------------------------
 
@@ -17,23 +17,34 @@ async function getFreePort(): Promise<number> {
   })
 }
 
+function httpRequest(
+  port: number,
+  method: string,
+  path: string,
+  headers: Record<string, string> = {},
+  body?: string,
+): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: "127.0.0.1", port, path, method, headers },
+      (res) => {
+        let b = ""
+        res.on("data", (d) => (b += d))
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, body: b, headers: res.headers }))
+      },
+    )
+    req.on("error", reject)
+    if (body !== undefined) req.write(body)
+    req.end()
+  })
+}
+
 function httpGet(
   port: number,
   path: string,
   headers: Record<string, string> = {},
-): Promise<{ status: number; body: string }> {
-  return new Promise((resolve, reject) => {
-    const req = http.request(
-      { host: "127.0.0.1", port, path, method: "GET", headers },
-      (res) => {
-        let b = ""
-        res.on("data", (d) => (b += d))
-        res.on("end", () => resolve({ status: res.statusCode ?? 0, body: b }))
-      },
-    )
-    req.on("error", reject)
-    req.end()
-  })
+): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
+  return httpRequest(port, "GET", path, headers)
 }
 
 const cleanups: Array<() => Promise<void> | void> = []
@@ -87,6 +98,31 @@ async function startProxyTo(
 
 // ---- tests ---------------------------------------------------------------
 
+describe("reverse-proxy single-instance identity endpoint", () => {
+  it("answers a loopback probe with the service marker and NO attacker-usable url", async () => {
+    const up = await startUpstream((_req, res) => res.end("upstream should not be reached"))
+    const handle = await startProxyTo(up.port)
+    const port = handle.port
+    const res = await httpGet(port, SERVE_IDENTITY_PATH, { host: `127.0.0.1:${port}` })
+    expect(res.status).toBe(200)
+    const body = JSON.parse(res.body) as Record<string, unknown>
+    expect(body.service).toBe(SERVE_IDENTITY_SERVICE)
+    // The probe must never surface a URL the launcher would open — a squatter
+    // could forge the marker, so the caller constructs the loopback origin itself.
+    expect(body.url).toBeUndefined()
+  })
+
+  it("does NOT serve the identity endpoint to a non-loopback (dev-tunnel) Host", async () => {
+    const up = await startUpstream((_req, res) => res.end("upstream"))
+    const handle = await startProxyTo(up.port, "jwt", { allowDevtunnelHosts: true })
+    const port = handle.port
+    // A dev-tunnel Host passes the proxy's Host allowlist, but the identity
+    // endpoint is loopback-only — so it 404s rather than leaking the version.
+    const res = await httpGet(port, SERVE_IDENTITY_PATH, { host: "abc-5454.usw2.devtunnels.ms" })
+    expect(res.status).toBe(404)
+  })
+})
+
 describe("reverse-proxy injection", () => {
   it("injects the auth-token before </head> in HTML documents", async () => {
     const up = await startUpstream((_req, res) => {
@@ -127,6 +163,86 @@ describe("reverse-proxy injection", () => {
   it("buildInjection embeds the token as a safe JS string literal", () => {
     const s = __test.buildInjection('a"b')
     expect(s).toContain('localStorage.setItem(\'auth-token\',"a\\"b")')
+  })
+})
+
+describe("reverse-proxy provider façade", () => {
+  it("rewrites intercepted 200 JSON responses and reframes headers", async () => {
+    const up = await startUpstream((_req, res) => {
+      const body = JSON.stringify({ ok: true })
+      res.writeHead(200, {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body),
+      })
+      res.end(body)
+    })
+    const proxy = await startProxyTo(up.port, "t", {
+      providerFacade: {
+        kindFor: (method, pathname) => method === "GET" && pathname === "/api/providers/claude/auth/status" ? "auth" : null,
+        rewrite: async (_kind, json, query) => ({ json, scope: query.get("scope"), rewritten: true }),
+      },
+    })
+
+    const res = await httpGet(proxy.port, "/api/providers/claude/auth/status?scope=user")
+    expect(res.status).toBe(200)
+    expect(JSON.parse(res.body)).toEqual({ json: { ok: true }, scope: "user", rewritten: true })
+    expect(res.headers["content-type"]).toBe("application/json")
+    expect(res.headers["content-encoding"]).toBeUndefined()
+  })
+
+  it("passes original intercepted bytes through on non-200, non-JSON, or null rewrites", async () => {
+    const up = await startUpstream((req, res) => {
+      if (req.url === "/bad-status") {
+        res.writeHead(500, { "content-type": "application/json" })
+        res.end(JSON.stringify({ error: true }))
+        return
+      }
+      if (req.url === "/not-json") {
+        res.writeHead(200, { "content-type": "text/plain" })
+        res.end("plain")
+        return
+      }
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ unchanged: true }))
+    })
+    const proxy = await startProxyTo(up.port, "t", {
+      providerFacade: {
+        kindFor: () => "auth",
+        rewrite: async () => null,
+      },
+    })
+
+    expect(await httpGet(proxy.port, "/bad-status")).toMatchObject({ status: 500, body: '{"error":true}' })
+    expect(await httpGet(proxy.port, "/not-json")).toMatchObject({ status: 200, body: "plain" })
+    expect(await httpGet(proxy.port, "/null-rewrite")).toMatchObject({ status: 200, body: '{"unchanged":true}' })
+  })
+
+  it("pipes POST bodies through for intercepted command routes", async () => {
+    let seen = ""
+    const up = await startUpstream((req, res) => {
+      req.on("data", (d) => (seen += d))
+      req.on("end", () => {
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ ok: true }))
+      })
+    })
+    const proxy = await startProxyTo(up.port, "t", {
+      providerFacade: {
+        kindFor: (method, pathname) => method === "POST" && pathname === "/api/commands/list" ? "commands" : null,
+        rewrite: async () => ({ ok: true, rewritten: true }),
+      },
+    })
+
+    const res = await httpRequest(
+      proxy.port,
+      "POST",
+      "/api/commands/list",
+      { "content-type": "application/json" },
+      JSON.stringify({ q: 1 }),
+    )
+    expect(res.status).toBe(200)
+    expect(JSON.parse(res.body)).toEqual({ ok: true, rewritten: true })
+    expect(seen).toBe('{"q":1}')
   })
 })
 

@@ -68,6 +68,15 @@ let _started = false
  */
 export async function provisionAndIndexColbert(opts: {
   cwd?: string
+  /**
+   * Skip the startup background-index of the launch cwd. `github-router serve`
+   * is a machine-wide control plane whose launch dir is usually NOT a repo the
+   * user works on (e.g. `$HOME`), so warming it is wasted work; per-workspace
+   * on-demand indexing (kicked by the first query for a given repo) covers real
+   * searches. Provisioning (binary/model/ORT + smoke) still runs so on-demand
+   * indexing works later.
+   */
+  skipCwdIndex?: boolean
 } = {}): Promise<void> {
   if (!semanticSearchOptedIn()) return
   if (_started) return
@@ -96,7 +105,9 @@ export async function provisionAndIndexColbert(opts: {
   // Background-index the launch cwd if it's a git repo. Non-blocking.
   // Skip when the index is already in a capped/persistent failure state so a
   // restart loop doesn't re-burn a known-bad build (the per-query self-heal
-  // still gives it its bounded retries).
+  // still gives it its bounded retries). Also skipped entirely under `serve`
+  // (see `skipCwdIndex`).
+  if (opts.skipCwdIndex) return
   const cwd = opts.cwd ?? process.cwd()
   try {
     const g = await gitState(cwd)

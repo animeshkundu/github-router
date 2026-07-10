@@ -55,8 +55,14 @@ by writing into the router-owned `CLAUDE_CONFIG_DIR` mirror (which the SDK-spawn
 `src/lib/serve/enhancements.ts` + the provision block in `src/serve.ts`, reusing the exact functions
 `claude.ts`/`start.ts` use:
 
-- **MCP servers** — `peers` / `search` / `orchestrate`, plus `workers` / `decide` / `browser` when
-  their gate passes (`injectPeerMcpIntoMirror`; the per-launch nonce is set on `state.peerMcpNonce`).
+- **MCP servers** — `peers` / `search` / `orchestrate`, plus `workers` / `decide` / `browser` /
+  `fleet` / `first-mate` when their gate passes (`injectPeerMcpIntoMirror`; the per-launch nonce is set
+  on `state.peerMcpNonce`). `--codex-cli` routes Codex personas through a local `codex mcp-server`
+  (requires codex 0.129+; HTTP fallback otherwise). **Tunnel gating:** when the control plane is
+  tunnel-exposed (`--tunnel` / `--public-url`), the server-side **browser** MCP, **first-mate** (which
+  mints a `repo+workflow` GitHub write token), and **fleet** (which drives remote coding sessions) are
+  withheld unless the operator opts in with `--browse-over-tunnel` / `--agents-over-tunnel` /
+  `--fleet-over-tunnel` — see Security model.
 - **Subagents** — the peer critics, worker dispatchers, and `implementer` (`.md` files in the
   mirror's `agents/`).
 - **Skills** — `gh-research` / `gh-orchestrate` / `gh-floor-keeper` / `gh-worker` (operator +
@@ -71,11 +77,44 @@ by writing into the router-owned `CLAUDE_CONFIG_DIR` mirror (which the SDK-spawn
 - **Background provisions** — semantic search (colbert), the LLM toolbelt (`rg`/`fd`/`jq`/…),
   keep-awake, and self-update, all fire-and-forget.
 
-**Connected badge.** CloudCLI's Claude provider marks "connected" only if it finds an `ANTHROPIC_*`
-env var or `~/.claude/.credentials.json` — it doesn't know about our proxy auth. `serve` sets a
-**placeholder** `ANTHROPIC_API_KEY` in the child env so the badge reads connected; it is not a real
-key (the proxy ignores inbound auth and authenticates to Copilot itself; verified that Claude still
-works with it set).
+**Connected badge + UI display parity.** CloudCLI's client renders its MCP manager, skills panel /
+slash menu, model picker, and "connected" badge verbatim from its server's `/api/providers/*` (and
+`/api/commands/list`) REST responses. The reverse proxy **rewrites those responses on the way through**
+(`src/lib/serve/provider-facade.ts`) so the UI reflects the github-router layer with **no CloudCLI file
+change and no client rebuild**:
+
+- `GET /api/providers/claude/mcp/servers?scope=user` — the injected github-router MCP servers are
+  appended to `data.servers` (display-only: **name / scope / transport / url only — the `/mcp` bearer
+  nonce and all `headers`/`env`/`headersHelper` are stripped**, never reaching the browser).
+- `GET /api/providers/claude/skills` + `POST /api/commands/list` — the gh-* skills / custom commands
+  are appended.
+- `GET /api/providers/claude/models` — `data.models.OPTIONS` is replaced with the **live Copilot
+  catalog** (picker-enabled models; each `value` is a real slug that round-trips through the proxy's
+  `resolveModel`); `data.cache` is preserved (the client drops a provider whose `cache` is missing).
+- `GET /api/providers/claude/auth/status` — `data.authenticated` is forced true, so the badge reads
+  connected off the proxy's synthetic credential rather than a real key.
+
+Each rewrite is defensive: a non-200, non-JSON, unexpected-shape, or error response passes through
+**unchanged** (byte-for-byte), so a CloudCLI version bump can only lose the display enhancement, never
+corrupt the UI. The child env still carries a **placeholder** `ANTHROPIC_API_KEY` as a belt-and-suspenders
+fallback for the badge when the façade degrades to passthrough; it is not a real key (the proxy ignores
+inbound auth and authenticates to Copilot itself; auth rides the synthetic `.credentials.json`).
+
+**Single instance (once per machine).** `serve` is a single, long-lived, machine-wide control plane:
+you start ONE and use its file explorer / sessions to work on any repo. On launch it probes the
+intended port for an already-running github-router serve (a loopback `/__github-router-serve__` identity
+endpoint served directly by the reverse proxy, carrying no secret); if one is found it **attaches**
+(opens that URL and exits) instead of spawning a second CloudCLI that would contend on the shared auth
+DB. A foreign process on the port still falls through to the random-port fallback.
+
+**Per-session workspace routing.** Because one machine-wide proxy serves many sessions (each a different
+repo), the injected worker / `code` / `run_workflow` MCP tools must target the ACTIVE session's project,
+not the proxy's launch cwd. Each injected HTTP MCP server entry carries a `headersHelper` that Claude
+re-runs per connection in the session's working directory (`github-router internal-workspace-header`),
+emitting an `X-GH-Workspace: <session cwd>` header. The `/mcp` handler uses it as the default
+`workspace`; an explicit `workspace` arg still overrides it. Under serve, an omitted-and-un-headered
+workspace **fails loud** (never silently defaults to the launch dir) so a worker can't mutate the wrong
+repo.
 
 ## Security model
 
@@ -104,7 +143,27 @@ closes this:
 The browser terminal runs as the same OS user, so it can read the synthetic `.credentials.json` in
 the router-owned `CLAUDE_CONFIG_DIR`. That synthetic OAuth token grants proxy / Copilot-quota access
 (the same access the control plane already gives) but **not** the raw GitHub PAT, which is stripped
-from the env and never placed in the mirror. This is inherent to a zero-login local control plane.
+from the env and never placed in the mirror. The browser terminal can likewise read
+`GH_ROUTER_HOOK_NONCE` from its own env — so the orchestration hooks' reach-back nonce is a **routing
+tag, not an authorization secret**; the worker-guard / plan-review hooks are UX steering, never a
+security boundary. This is inherent to a zero-login local control plane.
+
+### Per-capability gating for remote (tunnel) access
+Remote exposure (`--tunnel` / `--public-url`) is authenticated but **not necessarily single-user**, and
+the control plane's capabilities span a wide privilege range (a shell, the filesystem, the operator's
+browser identity, GitHub writes). So the two highest-blast-radius capabilities are **withheld by default
+whenever the control plane is tunnel-exposed** (`tunnelExposed = --tunnel || --public-url`), gated in
+`provisionServeEnhancements`:
+
+- **browser MCP** — a server-side browser is a session-hijack / SSRF / cloud-metadata primitive when
+  driven remotely. Enable over a tunnel only with `--browse-over-tunnel`.
+- **first-mate** — mints a `repo+workflow` GitHub write token reachable from the web UI. Enable over a
+  tunnel only with `--agents-over-tunnel`.
+- **fleet** — drives remote coding sessions with the operator's stored fleet credentials
+  (code-execution-by-proxy on remote instances). Enable over a tunnel only with `--fleet-over-tunnel`.
+
+Local (loopback-only) serve is unaffected — both are gated purely on the tunnel-exposed condition, and
+`serve` prints a one-line hint when it withholds a capability.
 
 ## CloudCLI resolution & install
 
@@ -117,8 +176,12 @@ command rather than half-starting.
 
 ## Flags
 `--port <n>` (default **5454** when free, else a random free port), `--cloudcli-path <p>`,
-`--no-install`, `--cloudcli-version <v>`, `-m/--model <slug>`, `--no-open`, `--tunnel`,
-`--public-url <url>`, plus the shared server args.
+`--no-install`, `--cloudcli-version <v>`, `-m/--model <slug>` (accepts the `4.7`/`4.8` Opus-family
+shorthand + default fallback-cache walk, like `github-router claude`), `--no-open`, `--tunnel`,
+`--public-url <url>`, `--codex-cli`, `--browse-over-tunnel`, `--agents-over-tunnel`,
+`--fleet-over-tunnel`, plus the shared
+server args (including `--browse` / `--fleet` / `--agents`). `--browse` enables the **server-side**
+browser MCP (it drives the machine running `serve`).
 
 ## Remote access via an authenticated dev tunnel
 
@@ -155,10 +218,12 @@ locally (you can then host manually with `devtunnel host -p <port>`).
   `*.devtunnels.ms` does not widen the same-user trust boundary.
 
 ## Known limitations
-- CloudCLI's model picker is a hardcoded list (not the live Copilot catalog); common Anthropic slugs
-  map through the proxy's `resolveModel`. Refreshed occasionally with the pinned version.
-- `serve` depends on CloudCLI's HTTP shapes (`/api/auth/*`, `SERVER_PORT`/`HOST` env, env-forward);
-  the version is pinned so upstream changes can't silently break it.
+- The model picker is populated from the **live Copilot catalog** via the provider façade (picker-enabled
+  models; each selection round-trips through the proxy's `resolveModel`). If the façade degrades to
+  passthrough (a CloudCLI shape change), CloudCLI's own hardcoded list is shown instead.
+- `serve` depends on CloudCLI's HTTP shapes (`/api/auth/*`, `/api/providers/*`, `/api/commands/list`,
+  `SERVER_PORT`/`HOST` env, env-forward); the version is pinned so upstream changes can't silently break
+  it, and every provider-façade rewrite fails closed to passthrough on an unexpected shape.
 
 ## Verification
 See `scripts/verify-serve.mjs` (or the manual steps in the plan): browser opens already-logged-in;

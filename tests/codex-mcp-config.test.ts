@@ -96,11 +96,31 @@ describe("buildPeerMcpConfig", () => {
         type: "http"
         url: string
         headers: Record<string, string>
+        headersHelper?: string
       }
       expect(entry.type).toBe("http")
       expect(entry.url).toBe(`${URL}/mcp/${group}`)
       expect(entry.headers.Authorization).toBe(`Bearer ${NONCE}`)
+      expect(entry.headersHelper).toBeUndefined()
     }
+  })
+
+  test("workspaceHeaderCmd is emitted on each HTTP entry but not the codex-cli stdio entry", () => {
+    const cfg = buildPeerMcpConfig(URL, {
+      codexCli: true,
+      geminiAvailable: true,
+      groupKeys: { peers: "peers", search: "search" },
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+      workspaceHeaderCmd: "workspace-header-cmd",
+    })
+    const peers = cfg.mcpServers.peers as { type: "http"; headersHelper?: string }
+    const search = cfg.mcpServers.search as { type: "http"; headersHelper?: string }
+    const cli = cfg.mcpServers["codex-cli"] as { command: string; headersHelper?: string }
+    expect(peers.headersHelper).toBe("workspace-header-cmd")
+    expect(search.headersHelper).toBe("workspace-header-cmd")
+    expect(cli.command).toBe("codex")
+    expect(cli.headersHelper).toBeUndefined()
   })
 
   test("collision fallback key still maps to the canonical scoped URL", () => {

@@ -1,8 +1,10 @@
 import { timingSafeEqual } from "node:crypto"
+import path from "node:path"
 
 import consola from "consola"
 import type { Context } from "hono"
 
+import { MCP_WORKSPACE_HEADER } from "~/lib/mcp-workspace-header"
 import { state } from "~/lib/state"
 import { getTextTokenCount, getTokenizerFromModel } from "~/lib/tokenizer"
 import { resolveModel } from "~/lib/utils"
@@ -859,9 +861,32 @@ function logTelemetry(t: PersonaTelemetry): void {
   process.stderr.write(parts.join(" ") + "\n")
 }
 
+function toolAcceptsWorkspace(tool: NonPersonaMcpTool): boolean {
+  return tool.capability === "worker"
+    || tool.toolNameHttp === "code"
+    || tool.toolNameHttp === "run_workflow"
+}
+
+export function applySessionWorkspace(
+  args: Record<string, unknown>,
+  sessionWorkspace: string | undefined,
+  tool?: NonPersonaMcpTool,
+): void {
+  if (
+    (!tool || toolAcceptsWorkspace(tool))
+    && typeof sessionWorkspace === "string"
+    && sessionWorkspace.length > 0
+    && path.isAbsolute(sessionWorkspace)
+    && (args.workspace === undefined || args.workspace === "")
+  ) {
+    args.workspace = sessionWorkspace
+  }
+}
+
 async function handleToolsCall(
   body: JsonRpcRequest,
   scope: McpScope,
+  sessionWorkspace?: string,
 ): Promise<object> {
   const params = body.params ?? {}
   const name = typeof params.name === "string" ? params.name : ""
@@ -1157,6 +1182,8 @@ async function handleToolsCall(
   const telemetryName = persona ? persona.agentName : nonPersonaTool!.toolNameHttp
   const telemetryModel = persona ? persona.model : "(non-persona)"
   try {
+    if (nonPersonaTool) applySessionWorkspace(args, sessionWorkspace, nonPersonaTool)
+
     const result = persona
       ? await callPersona(
           persona,
@@ -1241,6 +1268,7 @@ async function handleRpc(
   _c: Context,
   body: JsonRpcRequest,
   scope: McpScope,
+  sessionWorkspace?: string,
 ): Promise<{ status: number; body: object | null }> {
   // Reject non-object envelopes (null, arrays, primitives) BEFORE we
   // dereference body.jsonrpc / body.method — without this guard a `null`
@@ -1310,7 +1338,7 @@ async function handleRpc(
       if (isNotification) return { status: 202, body: null }
       return {
         status: 200,
-        body: await handleToolsCall(body, scope),
+        body: await handleToolsCall(body, scope, sessionWorkspace),
       }
 
     // --- Phase D: MCP method stubs with full handshake coherence ---
@@ -1435,6 +1463,8 @@ export async function handleMcpPost(
     )
   }
 
+  const sessionWorkspace = c.req.header(MCP_WORKSPACE_HEADER)
+
   // Diagnostic (opt-in, GH_ROUTER_LOG_PEER_MCP=1): log the ARRIVAL of each
   // tools/call with a wall-clock stamp + the current in-flight count. The proxy
   // handles requests concurrently, so this isolates CLIENT dispatch behavior: a
@@ -1473,7 +1503,7 @@ export async function handleMcpPost(
     && body.method === "tools/call"
     && acceptsEventStream(c.req.header("accept"))
   ) {
-    return handleToolsCallSSE(body, scope)
+    return handleToolsCallSSE(body, scope, sessionWorkspace)
   }
 
   // JSON-path pre-flight predictedTooLong cap. SSE clients (above)
@@ -1498,7 +1528,7 @@ export async function handleMcpPost(
   }
 
   try {
-    const { status, body: respBody } = await handleRpc(c, body, scope)
+    const { status, body: respBody } = await handleRpc(c, body, scope, sessionWorkspace)
     if (respBody === null) return c.body(null, status as 202)
     return c.json(respBody, status as 200)
   } catch (err) {
@@ -1570,12 +1600,16 @@ function acceptsEventStream(accept: string | undefined): boolean {
  */
 const SSE_HEARTBEAT_INTERVAL_MS = 5000
 
-async function handleToolsCallSSE(body: JsonRpcRequest, scope: McpScope): Promise<Response> {
+async function handleToolsCallSSE(
+  body: JsonRpcRequest,
+  scope: McpScope,
+  sessionWorkspace?: string,
+): Promise<Response> {
   const encoder = new TextEncoder()
   // Kick off the actual tool call as a Promise. handleToolsCall handles
   // all gates, slot accounting, abort registration, telemetry — we just
   // wrap its eventual result in an SSE envelope.
-  const callPromise = handleToolsCall(body, scope)
+  const callPromise = handleToolsCall(body, scope, sessionWorkspace)
   // Heartbeat interval is hoisted out of `start()` so `cancel()` can
   // clear it synchronously on consumer disconnect — otherwise a 5-second
   // tick fires into a closed controller after every cancel, and the

@@ -1,6 +1,18 @@
 import http from "node:http"
 import type { AddressInfo, Socket } from "node:net"
 
+import { getPackageVersion } from "../version"
+
+/**
+ * Loopback-only identity endpoint served directly by the reverse proxy (never
+ * forwarded to CloudCLI). A second `github-router serve` probes this on the
+ * intended port to detect an already-running instance (single-instance guard),
+ * so it can attach/refuse instead of starting a duplicate CloudCLI. Carries no
+ * secret — just a service marker + version + origin.
+ */
+export const SERVE_IDENTITY_PATH = "/__github-router-serve__"
+export const SERVE_IDENTITY_SERVICE = "github-router-serve"
+
 /**
  * Standalone HTTP + WebSocket reverse proxy that fronts a locally-running
  * CloudCLI instance under github-router's own origin. It is deliberately NOT
@@ -23,6 +35,14 @@ export interface ReverseProxyOptions {
   bindPort: number
   /** JWT injected into the SPA so it boots authenticated. */
   authToken: string
+  providerFacade?: {
+    kindFor: (method: string, pathname: string) => string | null
+    rewrite: (
+      kind: string,
+      upstreamJson: unknown,
+      query: URLSearchParams,
+    ) => Promise<unknown | null>
+  }
   /**
    * Extra exact `host:port` values to accept beyond loopback (e.g. a specific
    * dev-tunnel host `abc-5454.usw2.devtunnels.ms`). Used for remote access.
@@ -76,6 +96,14 @@ export async function startReverseProxy(
     `[::1]:${bindPort}`,
     ...(opts.extraAllowedHosts ?? []).map((h) => h.toLowerCase()),
   ])
+  // Loopback-only subset — the single-instance identity probe always comes from
+  // 127.0.0.1, so the identity endpoint is answered only for a loopback Host
+  // (never a dev-tunnel host), keeping the version off the remote surface.
+  const loopbackHosts = new Set([
+    `127.0.0.1:${bindPort}`,
+    `localhost:${bindPort}`,
+    `[::1]:${bindPort}`,
+  ])
   const allowedOrigins = new Set([
     `http://127.0.0.1:${bindPort}`,
     `http://localhost:${bindPort}`,
@@ -121,8 +149,33 @@ export async function startReverseProxy(
       return
     }
 
+    // Single-instance identity probe — answered directly, never proxied to
+    // CloudCLI. Loopback Host only (the probe is always local); carries no
+    // secret and no attacker-usable URL.
+    if ((clientReq.url ?? "").split("?")[0] === SERVE_IDENTITY_PATH) {
+      if (!loopbackHosts.has(String(clientReq.headers.host ?? "").toLowerCase())) {
+        clientRes.writeHead(404, { "content-type": "text/plain" })
+        clientRes.end("Not found")
+        return
+      }
+      clientRes.writeHead(200, { "content-type": "application/json" })
+      clientRes.end(
+        JSON.stringify({
+          service: SERVE_IDENTITY_SERVICE,
+          version: getPackageVersion(),
+        }),
+      )
+      return
+    }
+
+    const requestUrl = new URL(clientReq.url ?? "/", ownOrigin)
+    const facadeKind = opts.providerFacade?.kindFor(
+      clientReq.method ?? "GET",
+      requestUrl.pathname,
+    ) ?? null
+
     // Drop accept-encoding so HTML comes back uncompressed and stays
-    // injectable (localhost, so the compression loss is negligible).
+    // injectable; façade JSON rewrites also need original bytes, not gzip/br.
     const headers = { ...clientReq.headers }
     delete headers["accept-encoding"]
 
@@ -137,7 +190,52 @@ export async function startReverseProxy(
       (proxyRes) => {
         proxyRes.on("error", () => clientRes.destroy())
         const contentType = String(proxyRes.headers["content-type"] ?? "")
-        if (contentType.includes("text/html")) {
+        if (facadeKind) {
+          const chunks: Buffer[] = []
+          proxyRes.on("data", (d) => chunks.push(Buffer.from(d)))
+          proxyRes.on("end", () => {
+            const original = Buffer.concat(chunks)
+            const sendOriginal = () => {
+              // We buffered the whole body, so send it as a fixed buffer and let
+              // Node re-frame — any upstream chunked/encoded framing is now wrong.
+              const outHeaders = { ...proxyRes.headers }
+              delete outHeaders["content-length"]
+              delete outHeaders["content-encoding"]
+              delete outHeaders["transfer-encoding"]
+              clientRes.writeHead(proxyRes.statusCode ?? 502, outHeaders)
+              clientRes.end(original)
+            }
+            if (proxyRes.statusCode !== 200) {
+              sendOriginal()
+              return
+            }
+            void (async () => {
+              try {
+                const parsed = JSON.parse(original.toString("utf8"))
+                const rewritten = await opts.providerFacade?.rewrite(
+                  facadeKind,
+                  parsed,
+                  requestUrl.searchParams,
+                )
+                if (rewritten == null) {
+                  sendOriginal()
+                  return
+                }
+                const outHeaders = { ...proxyRes.headers }
+                // We send a fresh JSON body, so any upstream length/encoding
+                // framing is now wrong — drop it and let Node re-frame.
+                delete outHeaders["content-length"]
+                delete outHeaders["content-encoding"]
+                delete outHeaders["transfer-encoding"]
+                outHeaders["content-type"] = "application/json"
+                clientRes.writeHead(200, outHeaders)
+                clientRes.end(JSON.stringify(rewritten))
+              } catch {
+                sendOriginal()
+              }
+            })()
+          })
+        } else if (contentType.includes("text/html")) {
           const chunks: Buffer[] = []
           proxyRes.on("data", (d) => chunks.push(Buffer.from(d)))
           proxyRes.on("end", () => {
