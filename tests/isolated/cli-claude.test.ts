@@ -185,6 +185,9 @@ mock.module("~/lib/mcp-capabilities", () => ({
   semanticSearchEnabled: mock(() => false),
   geminiAvailable: geminiAvailableMock,
   implementerSubagentModel: mock(() => undefined),
+  // stand-in.ts (pulled in transitively via handler.ts) imports this;
+  // stub it so the module mock doesn't break that import.
+  resolveOpenAiFrontier: mock(() => "gpt-5.6-sol"),
 }))
 
 // The CLAUDE.md append + prepend helpers are the new descendant-reach
