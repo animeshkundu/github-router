@@ -17,6 +17,7 @@ import {
   prependStyleDirectiveToMirroredClaudeMd,
 } from "../claude-md-injection"
 import { INJECTED_SKILLS, writeInjectedSkill } from "../injected-skills"
+import { injectMcpPermissionsIntoSettingsFile } from "../mcp-permissions-settings"
 import {
   agentToolsEnabled,
   browseAgentEnabled,
@@ -166,6 +167,20 @@ export async function provisionServeEnhancements(
     // Suppress AI attribution in the mirror's settings.json (no-op if the user
     // already configured it).
     await injectAttributionSuppressionIntoSettingsFile(settingsPath).catch(() => {})
+
+    // Pre-approve OUR injected MCP servers so the CloudCLI-spawned Claude doesn't
+    // block on a per-tool permission prompt (its `canUseTool` awaits browser
+    // approval for anything not already allowed). Only our own resolved server
+    // keys are allowed — never a blanket bypass. Opt out with
+    // GH_ROUTER_SERVE_NO_AUTO_APPROVE=1.
+    if (process.env.GH_ROUTER_SERVE_NO_AUTO_APPROVE !== "1") {
+      const serverKeys = enabledGroups
+        .map((g) => groupKeys[g])
+        .filter((k): k is string => typeof k === "string" && k.length > 0)
+      await injectMcpPermissionsIntoSettingsFile(settingsPath, serverKeys).catch((err) =>
+        consola.warn(`Could not pre-approve github-router MCP tools: ${String(err)}`),
+      )
+    }
 
     if (workerToolsEnabled()) {
       const promptCmd = buildPromptSubmitHookCommand(process.execPath, process.argv[1])
