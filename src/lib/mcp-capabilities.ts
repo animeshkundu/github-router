@@ -19,6 +19,7 @@ import { compressorAvailable } from "./browser-mcp/compressor"
 import {
   colbertSearchEnabled,
 } from "./colbert"
+import { OPENAI_FRONTIER_MODELS } from "./openai-frontier"
 import { state, type State } from "./state"
 import {
   BROWSE_DEFAULT_MODEL,
@@ -61,7 +62,7 @@ export function geminiAvailable(source: Pick<State, "models"> = state): boolean 
  * matters during a rollout-lag window where the newer slug hasn't yet appeared
  * in the account's catalog.
  */
-export const OPENAI_FRONTIER_MODELS = ["gpt-5.6-sol", "gpt-5.5"] as const
+export { OPENAI_FRONTIER_MODELS } from "./openai-frontier"
 
 /**
  * First available OpenAI frontier model in the live catalog (prefer
@@ -96,9 +97,11 @@ export function standInToolEnabled(): boolean {
   return hasOpenAi && hasOpus && hasGeminiPro
 }
 
-/** Return the native implementer subagent model iff it is live with tool calls.
- *  Prefers `gpt-5.6-sol`, falls back to `gpt-5.5`. */
-export function implementerSubagentModel(): string | undefined {
+/** Return the model for the native OpenAI subagents (implementer, debugger,
+ *  qa-engineer) iff it is live with tool calls. Prefers `gpt-5.6-sol`, falls
+ *  back to `gpt-5.5`. One gate governs all three — they need the same frontier
+ *  model. */
+export function nativeSubagentModel(): string | undefined {
   return resolveOpenAiFrontier({ requireToolCalls: true })
 }
 

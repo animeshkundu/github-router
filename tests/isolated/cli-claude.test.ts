@@ -184,7 +184,7 @@ mock.module("~/lib/mcp-capabilities", () => ({
   browseAgentEnabled: mock(() => false),
   semanticSearchEnabled: mock(() => false),
   geminiAvailable: geminiAvailableMock,
-  implementerSubagentModel: mock(() => undefined),
+  nativeSubagentModel: mock(() => undefined),
   // stand-in.ts (pulled in transitively via handler.ts) imports this;
   // stub it so the module mock doesn't break that import.
   resolveOpenAiFrontier: mock(() => "gpt-5.6-sol"),

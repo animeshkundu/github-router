@@ -686,8 +686,8 @@ describe("anthropic-translate request mapping", () => {
     expect(mk(5000)).toBe("medium")
     expect(mk(10000)).toBe("high")
     expect(mk(30000)).toBe("xhigh")
-    // no thinking → default high reasoning effort
-    expect(build({ messages: [] }, model).payload.reasoning?.effort).toBe("high")
+    // no thinking → frontier model (gpt-5.5) defaults to xhigh reasoning effort
+    expect(build({ messages: [] }, model).payload.reasoning?.effort).toBe("xhigh")
   })
 
   test("thinking budget bucket boundaries are exact", () => {
@@ -721,10 +721,39 @@ describe("anthropic-translate request mapping", () => {
     expect(effort).toBe("high")
   })
 
-  test("absent thinking defaults to high reasoning effort", () => {
+  test("absent thinking defaults a frontier model (gpt-5.5) to xhigh reasoning effort", () => {
     const model = gptModel(["low", "medium", "high", "xhigh"])
     const { payload } = build({ messages: [] }, model)
+    expect(payload.reasoning?.effort).toBe("xhigh")
+  })
+
+  test("absent thinking on a non-frontier model stays high even when xhigh is offered", () => {
+    // gpt-5.3-codex is NOT in the xhigh effort-policy set, so the shim's
+    // model-aware default leaves it at high even though the catalog advertises
+    // xhigh — the frontier-only policy split, pinned at the request layer.
+    const model = codexModel(["low", "medium", "high", "xhigh"])
+    const { payload } = build({ messages: [] }, model)
     expect(payload.reasoning?.effort).toBe("high")
+  })
+
+  test("absent thinking on a frontier model WITHOUT xhigh in its allowlist falls back to high (explicit guard, no silent surprise)", () => {
+    const model = gptModel(["low", "medium", "high"]) // gpt-5.5 but no xhigh tier
+    const { payload } = build({ messages: [] }, model)
+    expect(payload.reasoning?.effort).toBe("high")
+  })
+
+  test("GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT opt-out restores high (accepts 1/true/yes/on)", () => {
+    const model = gptModel(["low", "medium", "high", "xhigh"])
+    const saved = process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT
+    try {
+      for (const val of ["1", "true", "yes", "on"]) {
+        process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT = val
+        expect(build({ messages: [] }, model).payload.reasoning?.effort).toBe("high")
+      }
+    } finally {
+      if (saved === undefined) delete process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT
+      else process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT = saved
+    }
   })
 
   test("absent thinking on a model with NO reasoning_effort allowlist → no reasoning field (not forced high)", () => {

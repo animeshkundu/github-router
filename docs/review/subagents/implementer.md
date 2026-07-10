@@ -8,7 +8,7 @@
 |---|---|
 | Subagent name | `implementer` |
 | Subagent's OWN model | `gpt-5.6-sol` preferred (`model:` frontmatter emitted), with `gpt-5.5` fallback (`src/lib/codex-mcp-config.ts:314`) |
-| Gate | injected iff `implementerModel` is present, which is set by `implementerSubagentModel()` only when the live catalog has `gpt-5.6-sol` or `gpt-5.5` with `tool_calls` (`codex-mcp-config.ts:308-316`; repo CLAUDE.md "Native implementation subagent") |
+| Gate | ALWAYS injected (no catalog gate — `implementer`, `debugger`, `qa-engineer` are available by default). `nativeSubagentModel()` selects the MODEL: `gpt-5.6-sol`/`gpt-5.5` with `tool_calls` when present (set as `model:` frontmatter, runs at xhigh), else `model:` is omitted so it inherits the lead's model (`codex-mcp-config.ts`; repo CLAUDE.md "Native implementation subagent") |
 | Registered via | `buildPeerAgentDefinitions` (`codex-mcp-config.ts:308-316`) |
 | Description source | inline literal (`codex-mcp-config.ts:310-311`) — NOT a `PersonaSpec`, NOT shared with any tool |
 | System prompt | inline literal (`codex-mcp-config.ts:312-313`) |

@@ -102,8 +102,9 @@ interface BuildOpts {
   /** Whether the browse worker tool is served (`browseAgentEnabled()`). Gates
    *  the extra `worker-browse` dispatcher. Optional (defaults false). */
   browseAvailable?: boolean
-  /** Native implementation subagent model when present in the live catalog. */
-  implementerModel?: string
+  /** Model for the native OpenAI subagents (implementer/debugger/qa-engineer)
+   *  when present in the live catalog. */
+  nativeSubagentModel?: string
 }
 
 interface HttpMcpEntry {
@@ -305,14 +306,39 @@ export function buildPeerAgentDefinitions(
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
   })
-  if (opts.implementerModel && opts.implementerModel.length > 0) {
-    out.implementer = {
-      description:
-        `Bounded implementation subagent running ${opts.implementerModel} (strong non-Claude coder, high reasoning). Use for well-scoped coding tasks — edits, small features, fixes — you want implemented in an integrated subagent. Model is overridable at spawn.`,
-      prompt:
-        "You are a bounded implementation subagent for well-scoped coding tasks. Implement the requested change surgically, matching the surrounding code style and minimizing unrelated churn. Use the dedicated Edit/Write/Read tools for file changes and Grep/Glob for search; reserve Bash for running builds, tests, and git — do not shell out (sed/awk/python/here-docs) to read or edit files. Verify with the project's build or tests where applicable. Do the work yourself — do not spawn further subagents. Report exactly what changed and any risks.",
-      model: opts.implementerModel,
-    }
+  // The native subagents (implementer/debugger/qa-engineer) are ALWAYS injected
+  // — no catalog gate. When `nativeSubagentModel` (gpt-5.6-sol/gpt-5.5) is in the
+  // live catalog they run on it at maximum reasoning (via the shim's model-aware
+  // default); otherwise the `model` frontmatter is OMITTED so they inherit the
+  // lead's model. Each omits `tools:` to inherit the full native + MCP toolset.
+  const nativeModel =
+    opts.nativeSubagentModel && opts.nativeSubagentModel.length > 0
+      ? opts.nativeSubagentModel
+      : undefined
+  const modelField: { model?: string } = nativeModel ? { model: nativeModel } : {}
+  out.implementer = {
+    description: nativeModel
+      ? `Bounded implementation subagent running ${nativeModel} (strong non-Claude coder, maximum reasoning). Use proactively for well-scoped coding tasks — edits, small features, fixes — to keep the lead's context focused; runs in its own context. Model is overridable at spawn.`
+      : `Bounded implementation subagent (native tools, runs on the lead's model in its own context). Use proactively for well-scoped coding tasks — edits, small features, fixes — to keep the lead's context focused. Model is overridable at spawn.`,
+    prompt:
+      "You are a bounded implementation subagent for well-scoped coding tasks. Implement the requested change surgically, matching the surrounding code style and minimizing unrelated churn. Use the dedicated Edit/Write/Read tools for file changes and Grep/Glob for search; reserve Bash for running builds, tests, and git — do not shell out (sed/awk/python/here-docs) to read or edit files. Verify with the project's build or tests where applicable. Do the work yourself — do not spawn further subagents. Report exactly what changed and any risks.",
+    ...modelField,
+  }
+  out.debugger = {
+    description: nativeModel
+      ? `Root-cause & debugging subagent running ${nativeModel} at maximum reasoning. Use proactively for reproducing a bug end to end, isolating the true root cause, and proposing a minimal fix — investigation-heavy work best kept off the lead's context; runs in its own context. Model is overridable at spawn.`
+      : `Root-cause & debugging subagent (native tools, runs on the lead's model in its own context). Use proactively for reproducing a bug end to end, isolating the true root cause, and proposing a minimal fix — kept off the lead's context. Model is overridable at spawn.`,
+    prompt:
+      "You are a root-cause debugging subagent. Reproduce the failure end to end first — as close to how a real user hits it as you can — before theorizing. Form hypotheses and test them against the actual code and runtime: read the code, run the repro with Bash, and add temporary instrumentation only if needed (remove it after). Identify the true root cause, not a symptom; if a fix is in scope, make it minimal and verify the repro now passes. Use the dedicated Edit/Write/Read tools for file changes and Grep/Glob for search; reserve Bash for running repros, tests, and git — do not shell out (sed/awk/python/here-docs) to read or edit files. Do the work yourself — do not spawn further subagents. Report the root cause with evidence, the fix (if any), and any residual risks.",
+    ...modelField,
+  }
+  out["qa-engineer"] = {
+    description: nativeModel
+      ? `Review, testing & QA subagent running ${nativeModel} at maximum reasoning. Use proactively to review a change for correctness, author and run tests that try to break it, and give a severity-ranked go/no-go while keeping the lead's context focused; runs in its own context. Model is overridable at spawn.`
+      : `Review, testing & QA subagent (native tools, runs on the lead's model in its own context). Use proactively to review a change for correctness, author and run tests that try to break it, and give a severity-ranked go/no-go. Model is overridable at spawn.`,
+    prompt:
+      "You are a review, testing, and QA subagent. Verify correctness against the ACTUAL code by reading it — never assume. Where the change warrants it, author tests that try to BREAK the implementation (edge cases, error paths, and the acceptance criteria as executable checks), then run them and report which pass and which fail; do NOT modify production code just to make tests pass. Use the dedicated Edit/Write/Read tools for file changes and Grep/Glob for search; reserve Bash for running builds, tests, and git — do not shell out (sed/awk/python/here-docs) to read or edit files. Do the work yourself — do not spawn further subagents. Report severity-ranked findings with `file:line` citations and end with a clear go/no-go.",
+    ...modelField,
   }
   // Non-blocking workers surface: one `worker-<mode>` DISPATCHER subagent per
   // active worker tool. Each is pinned by a `tools:` allowlist to the workers
@@ -365,8 +391,9 @@ interface WriteOpts {
   /** Whether the browse worker tool is served — adds the `worker-browse`
    *  dispatcher. */
   browseAvailable?: boolean
-  /** Native implementation subagent model when present in the live catalog. */
-  implementerModel?: string
+  /** Model for the native OpenAI subagents (implementer/debugger/qa-engineer)
+   *  when present in the live catalog. */
+  nativeSubagentModel?: string
   /** Override for tests. Defaults to PATHS.CODEX_HOME. */
   codexHome?: string
   /** Override for tests. Defaults to PATHS.CLAUDE_RUNTIME_DIR. */
@@ -828,7 +855,7 @@ export async function writePeerMcpRuntimeFiles(
     groupKeys: opts.groupKeys,
     workerToolsAvailable: opts.workerToolsAvailable,
     browseAvailable: opts.browseAvailable,
-    implementerModel: opts.implementerModel,
+    nativeSubagentModel: opts.nativeSubagentModel,
     nonce,
     codexHome,
   })
