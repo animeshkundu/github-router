@@ -29,6 +29,7 @@ import {
   type NeutralTool,
 } from "~/services/copilot/responses-request"
 import type { Model } from "~/services/copilot/get-models"
+import { shimDefaultsToXhigh } from "~/lib/openai-frontier"
 import { bucketEffort, clampEffort } from "~/lib/reasoning-effort"
 import { parseBoolEnv } from "~/lib/exec"
 
@@ -370,15 +371,26 @@ function parseDisableParallelToolUse(toolChoice: unknown): false | undefined {
     : undefined
 }
 
-/** Default absent Anthropic `thinking` to high effort, clamped by the model.
- *  Returns undefined for a model that advertises NO `reasoning_effort` allowlist
- *  — such a model may not support reasoning at all, so forcing an effort could
- *  400; leaving it unset preserves the pre-default safe behavior for that case. */
+/** Default absent Anthropic `thinking` to an effort, clamped by the model.
+ *  OpenAI-frontier shim models (gpt-5.6-sol/gpt-5.5) default to xhigh so the
+ *  native gpt-5.6-sol subagents (implementer/debugger/qa-engineer) and any
+ *  `-m gpt-5.6-sol` main-loop session reason at max when the client sends no
+ *  `thinking` block; every other shim model stays high. The
+ *  `supported.includes("xhigh")` guard makes the intent explicit rather than
+ *  trusting clampEffort to silently degrade. Opt out with
+ *  `GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT=1`. Returns undefined for a model
+ *  that advertises NO `reasoning_effort` allowlist (may not support reasoning;
+ *  forcing an effort could 400). Note: an explicit client `thinking` budget is
+ *  handled by parseReasoningEffort and is NOT affected by this default. */
 function defaultReasoningEffort(model?: Model): string | undefined {
   const supported = model?.capabilities?.supports?.reasoning_effort
-  return Array.isArray(supported) && supported.length > 0
-    ? clampEffort("high", supported)
-    : undefined
+  if (!(Array.isArray(supported) && supported.length > 0)) return undefined
+  const wantXhigh =
+    parseBoolEnv(process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT) !== true
+    && model?.id != null
+    && shimDefaultsToXhigh(model.id)
+    && supported.includes("xhigh")
+  return clampEffort(wantXhigh ? "xhigh" : "high", supported)
 }
 
 /**

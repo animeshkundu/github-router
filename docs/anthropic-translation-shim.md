@@ -146,6 +146,11 @@ allowlist, ties resolving to the lower tier. The clamp is why a Gemini request
 asking for `xhigh` lands on `high` — Gemini's allowlist has no `xhigh`. `off` /
 absent drops the reasoning field entirely.
 
+When the request carries no `thinking` block, the shim defaults OpenAI-frontier
+models (`gpt-5.6-sol` and `gpt-5.5`) to `xhigh`; other translated models retain
+the `high` default. Set `GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT=1` to restore
+`high` for the frontier models. Any explicit client `thinking` value still wins.
+
 ### Egress: Responses vs Chat
 
 The two egress modules translate the upstream response back to Anthropic. Each

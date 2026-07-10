@@ -87,7 +87,7 @@ import {
   browserToolsEnabled,
   fleetToolsEnabled,
   geminiAvailable,
-  implementerSubagentModel,
+  nativeSubagentModel,
   standInToolEnabled,
   workerToolsEnabled,
 } from "./lib/mcp-capabilities"
@@ -581,7 +581,7 @@ export const claude = defineCommand({
           groupKeys,
           workerToolsAvailable: workerToolsEnabled(),
           browseAvailable: browseAgentEnabled(),
-          implementerModel: implementerSubagentModel(),
+          nativeSubagentModel: nativeSubagentModel(),
         })
         state.peerMcpNonce = runtime.nonce
         // Reach-back channel for the advisory-review hooks (hook V2): the
@@ -1046,7 +1046,6 @@ export const claude = defineCommand({
           powerBrowseAvailable: state.powerBrowseEnabled,
           fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
-          implementerAvailable: implementerSubagentModel() != null,
           groupKeys,
         })
         // Capture the peer-awareness snippet; the always-on operating-defaults

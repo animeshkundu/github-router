@@ -1,6 +1,6 @@
 // Unit tests for the OpenAI-frontier resolver introduced with the
 // gpt-5.6-sol swap: `resolveOpenAiFrontier` (prefer gpt-5.6-sol, fall back to
-// gpt-5.5) and its two consumers `standInToolEnabled` / `implementerSubagentModel`.
+// gpt-5.5) and its two consumers `standInToolEnabled` / `nativeSubagentModel`.
 //
 // The load-bearing property: no capability that works on a gpt-5.5-only
 // (rollout-lag) catalog regresses — the gate must still pass and the
@@ -10,7 +10,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test"
 
 import {
   OPENAI_FRONTIER_MODELS,
-  implementerSubagentModel,
+  nativeSubagentModel,
   resolveOpenAiFrontier,
   standInToolEnabled,
 } from "~/lib/mcp-capabilities"
@@ -86,18 +86,18 @@ test("requireToolCalls returns undefined when no frontier model has tool_calls",
   expect(resolveOpenAiFrontier({ requireToolCalls: true })).toBeUndefined()
 })
 
-test("implementerSubagentModel prefers gpt-5.6-sol, falls back to gpt-5.5, requires tool_calls", () => {
+test("nativeSubagentModel prefers gpt-5.6-sol, falls back to gpt-5.5, requires tool_calls", () => {
   setCatalog([entry("gpt-5.6-sol", true)])
-  expect(implementerSubagentModel()).toBe("gpt-5.6-sol")
+  expect(nativeSubagentModel()).toBe("gpt-5.6-sol")
 
   setCatalog([entry("gpt-5.5", true)]) // rollout lag
-  expect(implementerSubagentModel()).toBe("gpt-5.5")
+  expect(nativeSubagentModel()).toBe("gpt-5.5")
 
   setCatalog([entry("gpt-5.6-sol", false)]) // present but no tool_calls
-  expect(implementerSubagentModel()).toBeUndefined()
+  expect(nativeSubagentModel()).toBeUndefined()
 
   setCatalog([entry("gpt-5.4", true)]) // neither frontier model
-  expect(implementerSubagentModel()).toBeUndefined()
+  expect(nativeSubagentModel()).toBeUndefined()
 })
 
 test("standInToolEnabled passes on a gpt-5.5-only (rollout-lag) catalog when opus + gemini are present", () => {

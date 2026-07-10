@@ -541,6 +541,9 @@ export function buildAgentPrompt(
  *     of the live catalog). The raw `mcp__<workers>__*` tools are named only
  *     as the guarded plumbing the dispatchers call, never as a main-agent
  *     interface.
+ *   - Always names the implementer/debugger/qa-engineer native subagents
+ *     (they are injected unconditionally); the implementer-vs-`worker-implement`
+ *     contrast is added only when worker tools are available.
  *   - Conditionally lists stand_in only when `standInAvailable`
  *     (mirrors `standInToolEnabled()`).
  *   - Conditionally lists gh-first-mate only when `agentToolsAvailable`
@@ -562,9 +565,6 @@ export function buildPeerAwarenessSnippet(opts: {
   powerBrowseAvailable?: boolean
   fleetAvailable?: boolean
   agentToolsAvailable?: boolean
-  /** True when the `implementer` subagent (gpt-5.6-sol) is registered, so the
-   *  snippet may steer bounded implementation to it over `worker-implement`. */
-  implementerAvailable?: boolean
   /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
    *  collision). Missing key → use the preferred bare key. Keeps the
    *  `mcp__<server>__<tool>` paths in this snippet pointing at OUR servers. */
@@ -611,9 +611,12 @@ export function buildPeerAwarenessSnippet(opts: {
       `\`worker-*\` are background Agent subagents (subagent_type) that run the matching worker in its own context and deliver the result as a completion notification, so a long run never blocks the turn: \`worker-explore\` (read-only research), \`worker-review\` (reads the code to verify a change or claim), \`worker-plan\` (ordered implementation plan), \`worker-implement\` (edit/write/bash; \`worktree: true\` isolates in a git worktree and returns the diff), \`worker-test\` (independent test author). The raw \`mcp__${workersKey}__*\` tools they call are guarded (a direct main-thread call is redirected to the matching agent); Workers themselves have \`code_search\`.`,
     )
   }
-  if (opts.workerToolsAvailable && opts.implementerAvailable) {
+  para2Parts.push(
+    `Three native subagents are always available (Task): \`implementer\` (bounded implementation), \`debugger\` (reproduce + isolate a failure's root cause), and \`qa-engineer\` (review + author/run tests), each in its own context so the lead's context stays free; on gpt-5.6-sol when in the catalog, else the lead's model.`,
+  )
+  if (opts.workerToolsAvailable) {
     para2Parts.push(
-      `For a bounded, well-scoped implementation, prefer the \`implementer\` subagent (Task, runs on gpt-5.6-sol) over \`worker-implement\`; reach for \`worker-implement\` only when you specifically need git-worktree isolation, parallel variants, or a throwaway experiment.`,
+      `For a bounded, well-scoped implementation, prefer the \`implementer\` subagent over \`worker-implement\`; reach for \`worker-implement\` only when you specifically need git-worktree isolation, parallel variants, or a throwaway experiment.`,
     )
   }
   // Orchestration group. `decompose`/`run_workflow` share the worker backend gate

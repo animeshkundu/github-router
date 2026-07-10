@@ -48,6 +48,16 @@ const gptModel = {
   supported_endpoints: ["/responses"],
 }
 
+const gptSolModel = {
+  ...gptModel,
+  id: "gpt-5.6-sol",
+  name: "GPT 5.6 SOL",
+  capabilities: {
+    ...gptModel.capabilities,
+    supports: { tool_calls: true, reasoning_effort: ["high", "xhigh"] },
+  },
+}
+
 function anthropicPassthroughResponse() {
   return new Response(
     JSON.stringify({
@@ -683,6 +693,95 @@ describe("/v1/messages branch routing", () => {
     expect(images).toHaveLength(1)
     const image = recordFrom(images[0])
     expect(image.image_url).toBe(`data:image/png;base64,${imageData}`)
+  })
+
+  test("gpt-5.6-sol without thinking defaults Responses reasoning effort to xhigh", async () => {
+    state.models = { object: "list", data: [claudeModel, gptModel, gptSolModel] as never }
+    let responsesBody: Record<string, unknown> | undefined
+    globalThis.fetch =((url: string, opts?: { body?: string }) => {
+      if (url.includes("/responses")) {
+        responsesBody = parseRequestBody(opts)
+        return responsesObjectResponse()
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    }) as unknown as typeof fetch
+
+    const res = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.6-sol",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "reason deeply" }],
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    const reasoning = recordFrom(recordFrom(responsesBody).reasoning)
+    expect(reasoning.effort).toBe("xhigh")
+  })
+
+  test("frontier xhigh default opt-out restores high effort", async () => {
+    state.models = { object: "list", data: [claudeModel, gptModel, gptSolModel] as never }
+    let responsesBody: Record<string, unknown> | undefined
+    globalThis.fetch =((url: string, opts?: { body?: string }) => {
+      if (url.includes("/responses")) {
+        responsesBody = parseRequestBody(opts)
+        return responsesObjectResponse()
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    }) as unknown as typeof fetch
+
+    const saved = process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT
+    process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT = "1"
+    try {
+      const res = await server.request("/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-5.6-sol",
+          max_tokens: 64,
+          messages: [{ role: "user", content: "reason normally" }],
+        }),
+      })
+
+      expect(res.status).toBe(200)
+      const reasoning = recordFrom(recordFrom(responsesBody).reasoning)
+      expect(reasoning.effort).toBe("high")
+    } finally {
+      if (saved === undefined) {
+        delete process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT
+      } else {
+        process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT = saved
+      }
+    }
+  })
+
+  test("gpt-5.6-sol explicit thinking budget is not overridden by xhigh default", async () => {
+    state.models = { object: "list", data: [claudeModel, gptModel, gptSolModel] as never }
+    let responsesBody: Record<string, unknown> | undefined
+    globalThis.fetch =((url: string, opts?: { body?: string }) => {
+      if (url.includes("/responses")) {
+        responsesBody = parseRequestBody(opts)
+        return responsesObjectResponse()
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    }) as unknown as typeof fetch
+
+    const res = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.6-sol",
+        max_tokens: 64,
+        thinking: { type: "enabled", budget_tokens: 1000 },
+        messages: [{ role: "user", content: "think briefly" }],
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    const reasoning = recordFrom(recordFrom(responsesBody).reasoning)
+    expect(reasoning.effort).toBe("high")
   })
 
   test("gpt-5.5 thinking budget maps to Responses reasoning effort", async () => {
