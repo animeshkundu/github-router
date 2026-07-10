@@ -83,7 +83,7 @@ export const PROMPT_SEARCH_TIP =
   + "parallel — one `mcp__search__code` call with mode:\"lexical\" and one with "
   + "mode:\"semantic\", issued in the same turn — before concluding."
 
-/** System prompt for the single gpt-5.5 scope/goal inference. Steers a SHORT,
+/** System prompt for the single gpt-5.6-sol scope/goal inference. Steers a SHORT,
  *  user-derived (not invented) advisory note grounded in the search results. */
 export const PROMPT_SCOPE_SYSTEM =
   "You are a scoping assistant for a coding agent about to act on a user's request. "
@@ -113,7 +113,7 @@ export interface PromptSubmitV2IO {
    *  Receives the orchestrator's AbortSignal so a timed-out enrichment cancels
    *  the in-flight request (live callers thread it into the HTTP fetch). */
   searchCode: (query: string, mode: "lexical" | "semantic", signal?: AbortSignal) => Promise<string>
-  /** One gpt-5.5 `/v1/responses` inference; returns assistant text ("" on failure).
+  /** One gpt-5.6-sol `/v1/responses` inference; returns assistant text ("" on failure).
    *  Receives the orchestrator's AbortSignal (see `searchCode`). */
   infer: (system: string, user: string, signal?: AbortSignal) => Promise<string>
   /** Pending advisory findings from the prior turn's background review. */
@@ -133,7 +133,7 @@ const SEARCH_CONTEXT_CAP = 6 * 1024
 function framePendingFindings(findings: string): string {
   return (
     "ADVISORY — independent review of your PREVIOUS change (NON-AUTHORITATIVE): an independent "
-    + "gpt-5.5 reviewer flagged the following. Evaluate each on its merits — fix the real ones, and "
+    + "gpt-5.6-sol reviewer flagged the following. Evaluate each on its merits — fix the real ones, and "
     + "ignore any wrong one with a one-line reason. You are NOT obligated to act on these.\n"
     + findings.trim()
   )
@@ -155,7 +155,7 @@ function joinSections(sections: Array<string>): string {
  *   - subagent/teammate  -> empty (top-level only, like v1).
  *   - findings           -> always surfaced (+ cleared) regardless of triviality.
  *   - trivial prompt     -> findings only (no search tip, no model call).
- *   - substantive prompt -> static search tip + parallel lexical+semantic search -> ONE gpt-5.5 call
+ *   - substantive prompt -> static search tip + parallel lexical+semantic search -> ONE gpt-5.6-sol call
  *                           -> grounded scope/goal note. Fail-open to PROMPT_STEER_GOAL.
  *   - steerEnabled=false -> findings only (no goal/tip).
  */

@@ -30,7 +30,7 @@
  *       SSE connection (no new message_start; the original one is
  *       still open). Loop up to ADVISOR_MAX_TURNS times.
  * 4. Cross-lab default: route the advisor call to a different model
- *    family than the main loop (gpt-5.5 by default) so the user gets
+ *    family than the main loop (gpt-5.6-sol by default) so the user gets
  *    a true "second set of eyes" instead of Opus reviewing Opus
  *    (gemini-critic finding).
  *
@@ -75,13 +75,13 @@ export const ADVISOR_CLIENT_TOOL_NAME = "advisor"
 export const ADVISOR_MAX_TURNS = 16
 
 /** Default advisor model + reasoning effort. Per gemini-critic + user
- *  direction: hardcode to a cross-lab model (gpt-5.5 — Copilot's
+ *  direction: hardcode to a cross-lab model (gpt-5.6-sol — Copilot's
  *  /responses-only flagship) at xhigh effort. The cross-lab choice
  *  gives a true "second set of eyes" instead of the main model
  *  reviewing itself; xhigh effort buys the deep-dive reasoning that
  *  matches Anthropic's own ADVISOR (which uses a stronger reviewer
  *  model — Opus 4.6/Sonnet 4.6 typically). */
-export const ADVISOR_DEFAULT_MODEL = "gpt-5.5"
+export const ADVISOR_DEFAULT_MODEL = "gpt-5.6-sol"
 export const ADVISOR_DEFAULT_EFFORT = "xhigh"
 
 type Effort = "low" | "medium" | "high" | "xhigh"
@@ -200,7 +200,7 @@ export const ADVISOR_FALLBACK_MAX_TOKENS = 240_000
  *  budget is `max_prompt_tokens - reserve`. Generous on purpose: a 400
  *  `model_max_prompt_tokens_exceeded` degrades to a silent advisor
  *  fallback, and the marginal window we give up is irrelevant next to
- *  gpt-5.5's 922K. */
+ *  gpt-5.6-sol's ~1M. */
 const ADVISOR_PROMPT_TOKEN_RESERVE = 8_000
 
 /**
@@ -228,7 +228,7 @@ export function resolveAdvisorMaxTokens(advisorModel: string): number {
 /**
  * Render an Anthropic-shape conversation (messages array with
  * role/content blocks) as a single human-readable text blob. Used
- * as the input to the advisor model (gpt-5.5 via /v1/responses
+ * as the input to the advisor model (gpt-5.6-sol via /v1/responses
  * doesn't have a 1:1 mapping for Anthropic's tool_use/tool_result
  * blocks; serializing to text preserves the semantics — the advisor
  * just needs to READ the conversation, not produce more of it).
@@ -351,7 +351,7 @@ function truncateTailToUnits(
  * Routes by model family:
  *   - gpt-5.x / codex / o-series (have `/responses` in supported_endpoints):
  *     use createResponses with `reasoning.effort` set. This is the
- *     default path — gpt-5.5 at xhigh effort.
+ *     default path — gpt-5.6-sol at xhigh effort.
  *   - claude-* (no `/responses`): fall back to createMessages.
  *
  * The conversation is serialized to text via renderConversationAsText

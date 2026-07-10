@@ -53,10 +53,10 @@ beforeEach(() => {
     data: [
       makeClaudeModel("claude-opus-4.7"),
       makeClaudeModel("claude-haiku-4.5"),
-      // gpt-5.5 is the cross-lab advisor default
+      // gpt-5.6-sol is the cross-lab advisor default
       {
-        id: "gpt-5.5",
-        name: "gpt-5.5",
+        id: "gpt-5.6-sol",
+        name: "gpt-5.6-sol",
         object: "model",
         preview: false,
         vendor: "openai",
@@ -83,8 +83,8 @@ afterEach(() => {
 })
 
 describe("ADVISOR defaults (Phase I)", () => {
-  test("default model is gpt-5.5 (cross-lab)", () => {
-    expect(ADVISOR_DEFAULT_MODEL).toBe("gpt-5.5")
+  test("default model is gpt-5.6-sol (cross-lab)", () => {
+    expect(ADVISOR_DEFAULT_MODEL).toBe("gpt-5.6-sol")
   })
   test("default effort is xhigh (deepest reasoning bucket)", () => {
     expect(ADVISOR_DEFAULT_EFFORT).toBe("xhigh")
@@ -386,20 +386,20 @@ describe("ADVISOR streaming integration (Phase I)", () => {
   test("when model calls __anthropic_advisor: translates to server_tool_use{advisor}, runs advisor, emits advisor_tool_result, continues", async () => {
     // First Copilot call (/v1/messages stream): returns text + tool_use{__anthropic_advisor}.
     // Second Copilot call (continuation, /v1/messages stream): returns more text + message_stop.
-    // Advisor call (gpt-5.5 via /responses, non-stream): returns advisor's text.
+    // Advisor call (gpt-5.6-sol via /responses, non-stream): returns advisor's text.
     let copilotMessagesCallCount = 0
     let advisorResponsesCallCount = 0
     let continuationRequestBody: string | undefined
     const fetchMock = mock((url: string, init?: { body?: string }) => {
-      // ADVISOR call: gpt-5.5 → /responses with reasoning.effort=xhigh
+      // ADVISOR call: gpt-5.6-sol → /responses with reasoning.effort=xhigh
       if (url.includes("/responses")) {
         const parsedBody = JSON.parse((init?.body ?? "{}") as string) as {
           model?: string
           reasoning?: { effort?: string }
           stream?: boolean
         }
-        // Verify the advisor call uses gpt-5.5 + xhigh + non-streaming
-        expect(parsedBody.model).toBe("gpt-5.5")
+        // Verify the advisor call uses gpt-5.6-sol + xhigh + non-streaming
+        expect(parsedBody.model).toBe("gpt-5.6-sol")
         expect(parsedBody.reasoning?.effort).toBe("xhigh")
         expect(parsedBody.stream).toBe(false)
         advisorResponsesCallCount++

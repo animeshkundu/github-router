@@ -7,20 +7,20 @@
 | Field | Value |
 |---|---|
 | Subagent name | `codex-critic` |
-| Backing model (of the peer it routes to) | `gpt-5.5` `/v1/responses` (`src/lib/peer-mcp-personas.ts:336-337`) |
+| Backing model (of the peer it routes to) | `gpt-5.6-sol` `/v1/responses` (`src/lib/peer-mcp-personas.ts:336-337`) |
 | Subagent's OWN model | inherited (Claude — no `model:` frontmatter emitted; `agentPrompt: ""`, model server-baked into the MCP tool) |
 | Gate | always registered (no `requiresGeminiCatalog`) — `personasFor` includes it unconditionally (`peer-mcp-personas.ts:653-666`) |
 | Registered via | `buildPeerAgentDefinitions` (`src/lib/codex-mcp-config.ts:289-303`), one `.md` per persona written by `writePeerAgentMdFiles` (`codex-mcp-config.ts:492-544`) |
 | Description source | `PersonaSpec.description` (`peer-mcp-personas.ts:338-339`) — SHARED verbatim with the `mcp__peers__codex_critic` tool description |
 | System prompt source | `buildAgentPrompt(persona, {codexCli, peersKey})` (`peer-mcp-personas.ts:458-500`) |
 
-The registered subagent is a THIN routing shim: its system prompt tells it to invoke `mcp__<peersKey>__codex_critic` with `{prompt (verbatim), context (optional)}` and surface the reply verbatim. The subagent itself runs on the inherited Claude model; the gpt-5.5 reasoning happens server-side inside the MCP tool call.
+The registered subagent is a THIN routing shim: its system prompt tells it to invoke `mcp__<peersKey>__codex_critic` with `{prompt (verbatim), context (optional)}` and surface the reply verbatim. The subagent itself runs on the inherited Claude model; the gpt-5.6-sol reasoning happens server-side inside the MCP tool call.
 
 ## 2. Description (verbatim)
 
 `peer-mcp-personas.ts:338-339`:
 
-> Adversarial second opinion on plans, designs, or code tradeoffs. Backed by gpt-5.5 (OpenAI, ≈922K-token input window) — strongest reasoning model in the critic lineup, different lab than Opus. Best for architecture decisions, design reviews, and tradeoff analysis where cross-lab diversity matters. Not for line-level code review (use codex_reviewer). Pass artifact verbatim.
+> Adversarial second opinion on plans, designs, or code tradeoffs. Backed by gpt-5.6-sol (OpenAI, ~1M-token input window) — strongest reasoning model in the critic lineup, different lab than Opus. Best for architecture decisions, design reviews, and tradeoff analysis where cross-lab diversity matters. Not for line-level code review (use codex_reviewer). Pass artifact verbatim.
 
 This SAME string is the `mcp__peers__codex_critic` tool description. There is exactly one source of truth (`PersonaSpec.description`); it is emitted into both the `.md` frontmatter (this subagent) and the `tools/list` payload (the tool).
 
@@ -29,19 +29,19 @@ This SAME string is the `mcp__peers__codex_critic` tool description. There is ex
 `buildAgentPrompt` returns (`peer-mcp-personas.ts:487-499`):
 
 - `# Subagent: codex-critic` header.
-- `CRITIC_BASE` verbatim (`peer-mcp-personas.ts:229-235`): identity ("adversarial reviewer running on gpt-5.5"), the anti-sycophancy framing ("You are NOT a helpful assistant… Sycophancy is the failure mode you exist to fight. Manufactured contrarianism is a different failure of the same shape"), the `COLD_START_CONTRACT` (paste a self-contained brief; the persona has no scrollback), and the `CRITIC_RUBRIC` (1-5 scores on assumption-soundness / failure-mode coverage / alternative-considered; "no material objection" when all axes >=4).
+- `CRITIC_BASE` verbatim (`peer-mcp-personas.ts:229-235`): identity ("adversarial reviewer running on gpt-5.6-sol"), the anti-sycophancy framing ("You are NOT a helpful assistant… Sycophancy is the failure mode you exist to fight. Manufactured contrarianism is a different failure of the same shape"), the `COLD_START_CONTRACT` (paste a self-contained brief; the persona has no scrollback), and the `CRITIC_RUBRIC` (1-5 scores on assumption-soundness / failure-mode coverage / alternative-considered; "no material objection" when all axes >=4).
 - A routing block: "Always invoke the `mcp__peers__codex_critic` tool… `prompt`: the lead's brief, copied verbatim; `context` (optional)… Do NOT pass model or instructions — they are server-baked."
 - Closing: "surface its output to the lead verbatim. Do not summarize, paraphrase, or add your own commentary."
 
-The subagent is a relay; the graded critique is produced by the server-baked `CRITIC_BASE` running on gpt-5.5.
+The subagent is a relay; the graded critique is produced by the server-baked `CRITIC_BASE` running on gpt-5.6-sol.
 
 ## 4. Routing-trigger assessment (Anthropic subagent rubric)
 
 Rubric: third person, states the delegation TRIGGER, specific not vague, accurately previews the body, no overtrigger imperatives.
 
 - **Third person / states trigger — partial.** The description is written as a capability blurb ("Adversarial second opinion on plans, designs, or code tradeoffs"), not as an explicit trigger sentence ("Use when weighing an architecture decision"). It DOES carry a strong implicit trigger via the "Best for architecture decisions, design reviews, and tradeoff analysis where cross-lab diversity matters" clause and an explicit anti-trigger ("Not for line-level code review (use codex_reviewer)"). For Opus this reads as a routing signal, but it lacks the literal "Use when…" / "Use proactively" idiom that Claude Code's auto-delegation loop keys on most reliably. This is a deliberate design tradeoff: the string doubles as a tool description, and the tool-description register ("Adversarial second opinion on X") is the correct register for a tool but a weaker register for a subagent trigger. See systemic finding S1 in the README.
-- **Specific not vague — strong.** Names the model (gpt-5.5), the lab-diversity value, the artifact types it fits (plans/designs/tradeoffs) and the one it does not (line-level diffs), with a redirect. A reader can route confidently.
-- **Accurately previews the body — yes.** "Adversarial second opinion", "cross-lab", "Pass artifact verbatim" all map directly to `CRITIC_BASE` (adversarial critic, gpt-5.5, cold-start-contract "paste a self-contained brief").
+- **Specific not vague — strong.** Names the model (gpt-5.6-sol), the lab-diversity value, the artifact types it fits (plans/designs/tradeoffs) and the one it does not (line-level diffs), with a redirect. A reader can route confidently.
+- **Accurately previews the body — yes.** "Adversarial second opinion", "cross-lab", "Pass artifact verbatim" all map directly to `CRITIC_BASE` (adversarial critic, gpt-5.6-sol, cold-start-contract "paste a self-contained brief").
 - **No overtrigger imperatives — yes.** No "always", no "before every". The "Best for…" framing is scoped, not blanket. Low overtrigger risk.
 
 ## 5. Don't-nerf / right-balance

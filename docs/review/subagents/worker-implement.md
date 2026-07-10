@@ -7,7 +7,7 @@
 | Field | Value |
 |---|---|
 | Subagent name | `worker-implement` (`worker-dispatch.ts:58-60`) |
-| Subagent's OWN model | inherited (Claude); the WORKER runs `IMPLEMENT_DEFAULT_MODEL` = `gpt-5.5` at xhigh (repo CLAUDE.md) |
+| Subagent's OWN model | inherited (Claude); the WORKER runs `IMPLEMENT_DEFAULT_MODEL` = `gpt-5.6-sol` at xhigh (repo CLAUDE.md) |
 | Gate | `workerToolsAvailable` (`codex-mcp-config.ts:326-335`) |
 | Description | `dispatcherDescription("implement")` (`worker-dispatch.ts:207-208` + suffix `218-221`) |
 | System prompt | `dispatcherPrompt("implement", workersKey)` (`worker-dispatch.ts:226-254`) |

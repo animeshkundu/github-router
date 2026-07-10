@@ -7,7 +7,7 @@
  *
  * It reads a JSON payload from stdin (`{session_id, cwd, diff, prompt,
  * transcript_path}`), calls the read-only `workers/review` MCP tool over loopback
- * HTTP (gpt-5.5, the live working tree, an accountability brief: judge the diff
+ * HTTP (gpt-5.6-sol, the live working tree, an accountability brief: judge the diff
  * against the user's actual ask for wrong-spec / vacuous-tests / incompleteness),
  * and writes the findings to the per-session findings file. The next
  * `UserPromptSubmit` surfaces them to Claude NON-authoritatively, and the user
@@ -112,7 +112,7 @@ export const internalStopReview = defineCommand({
     name: "internal-stop-review",
     description:
       "Internal: the detached, advisory background reviewer. Reads a JSON payload on stdin, runs a read-only "
-      + "gpt-5.5 review of the working tree against the user's ask, and writes advisory findings for the next "
+      + "gpt-5.6-sol review of the working tree against the user's ask, and writes advisory findings for the next "
       + "prompt to surface. Never blocks anything.",
   },
   async run() {
@@ -143,11 +143,11 @@ export const internalStopReview = defineCommand({
         runtime,
         group: "workers",
         tool: "review",
-        args: { prompt: brief, workspace: cwd, model: "gpt-5.5", thinking: "high" },
+        args: { prompt: brief, workspace: cwd, model: "gpt-5.6-sol", thinking: "high" },
         timeoutMs: REVIEW_TIMEOUT_MS,
       })
 
-      // Only persist a usable, non-error review. An error envelope (e.g. gpt-5.5
+      // Only persist a usable, non-error review. An error envelope (e.g. gpt-5.6-sol
       // absent) or an empty body leaves no findings — the next prompt simply has
       // nothing to surface.
       const text = result.text.trim()

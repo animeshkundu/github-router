@@ -1,7 +1,7 @@
 /**
  * stand_in: 3-lab away-mode advisor.
  *
- * Polls gpt-5.5 xhigh (OpenAI) + claude-opus-4-7 xhigh (Anthropic) +
+ * Polls gpt-5.6-sol xhigh (OpenAI) + claude-opus-4-7 xhigh (Anthropic) +
  * gemini-3.1-pro-preview high (Google) across two structured voting
  * rounds and returns a ranked-choice verdict. Bounded to advisor:
  * recommends, never decides — irreversible actions (push, delete, drop,
@@ -21,6 +21,7 @@
  */
 
 import type { Effort } from "~/lib/peer-mcp-personas"
+import { resolveOpenAiFrontier } from "~/lib/mcp-capabilities"
 import { dispatchModelCall } from "~/routes/mcp/handler"
 
 // ─── Public types ───────────────────────────────────────────────────
@@ -44,7 +45,7 @@ export interface StandInInput {
 }
 
 export type ModelKey =
-  | "gpt-5.5"
+  | "gpt-5.6-sol"
   | "claude-opus-4-7"
   | "gemini-3.1-pro-preview"
 
@@ -107,7 +108,7 @@ interface ModelConfig {
  * `xhigh` at the wire with a Copilot 400. `high` is the realistic ceiling.
  */
 export const STAND_IN_MODELS: ReadonlyArray<ModelConfig> = Object.freeze([
-  { key: "gpt-5.5",                model: "gpt-5.5",                endpoint: "/v1/responses",        effort: "xhigh" },
+  { key: "gpt-5.6-sol",            model: "gpt-5.6-sol",            endpoint: "/v1/responses",        effort: "xhigh" },
   { key: "claude-opus-4-7",        model: "claude-opus-4-7",        endpoint: "/v1/messages",         effort: "xhigh" },
   { key: "gemini-3.1-pro-preview", model: "gemini-3.1-pro-preview", endpoint: "/v1/chat/completions", effort: "high"  },
 ])
@@ -285,10 +286,16 @@ async function callAndParse(
   userText: string,
   signal: AbortSignal | undefined,
 ): Promise<CallResult> {
+  // The OpenAI slot's `key` is the canonical `gpt-5.6-sol`, but the actual
+  // dispatched model falls back to `gpt-5.5` when sol isn't in the catalog
+  // (rollout lag). Other slots dispatch their fixed model. The `key` stays
+  // stable regardless so the `votes` record shape is deterministic.
+  const model =
+    cfg.key === "gpt-5.6-sol" ? resolveOpenAiFrontier() ?? cfg.model : cfg.model
   let raw: string
   try {
     raw = await dispatchModelCall({
-      model: cfg.model,
+      model,
       endpoint: cfg.endpoint,
       instructions,
       userText,
@@ -309,7 +316,7 @@ async function callAndParse(
   let retryRaw: string
   try {
     retryRaw = await dispatchModelCall({
-      model: cfg.model,
+      model,
       endpoint: cfg.endpoint,
       instructions,
       userText: userText + RETRY_PROMPT_SUFFIX,

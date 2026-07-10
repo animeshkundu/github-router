@@ -147,13 +147,15 @@ export function pickClaudeDefault(opusFamily: string = DEFAULT_OPUS_FAMILY): str
 }
 
 /**
- * Default model for `github-router codex`. `gpt-5.5` is the new flagship
- * `/responses` model; the fallback chain handles older Copilot tiers where
- * 5.5 hasn't rolled out yet. `resolveCodexModel` provides a final
- * "best available `/responses` model" safety net beyond this list.
+ * Default model for `github-router codex`. `gpt-5.6-sol` is the flagship
+ * `/responses` model; the fallback chain (led by `gpt-5.5`) handles older
+ * Copilot tiers or a rollout-lag window where sol hasn't appeared yet.
+ * `resolveCodexModel` provides a final "best available `/responses` model"
+ * safety net beyond this list.
  */
-export const DEFAULT_CODEX_MODEL = "gpt-5.5"
+export const DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 export const DEFAULT_CODEX_MODEL_FALLBACKS = [
+  "gpt-5.5",
   "gpt-5.4",
   "gpt-5.3-codex",
   "gpt-5.2-codex",

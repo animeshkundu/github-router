@@ -45,7 +45,7 @@ Passthrough to Copilot's `/responses`. OpenAI Responses API format used by Codex
 - `response.function_call_arguments.delta` -function call argument chunk
 - `response.completed` -final complete response
 
-**Models**: gpt-5.5, gpt-5.4, gpt-5.3-codex, gpt-5.2-codex, gpt-4.1, etc. The `codex` subcommand defaults to `gpt-5.5` (with fallback chain — see `src/lib/port.ts`).
+**Models**: gpt-5.6-sol, gpt-5.5, gpt-5.4, gpt-5.3-codex, gpt-5.2-codex, gpt-4.1, etc. The `codex` subcommand defaults to `gpt-5.6-sol` (fallback chain starts with `gpt-5.5` — see `src/lib/port.ts`).
 
 ### GET `/v1/models` (also `/models`)
 Returns list of available Copilot models in OpenAI format.

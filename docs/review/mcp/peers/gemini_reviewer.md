@@ -35,7 +35,7 @@ Named in `buildPeerAwarenessSnippet` (`src/lib/peer-mcp-personas.ts:582`). When 
 
 > `gemini_reviewer` (gemini-3.1-pro, line-level code review)
 
-Surrounding sentence (`peer-mcp-personas.ts:642`): "Cross-lab peer critics under `mcp__peers__*` (`codex_critic` (gpt-5.5), `codex_reviewer` (gpt-5.3-codex), `gemini_reviewer` (gemini-3.1-pro, line-level code review), `gemini_critic` (gemini-3.1-pro), `opus_critic` (Opus 4.7)) are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies."
+Surrounding sentence (`peer-mcp-personas.ts:642`): "Cross-lab peer critics under `mcp__peers__*` (`codex_critic` (gpt-5.6-sol), `codex_reviewer` (gpt-5.3-codex), `gemini_reviewer` (gemini-3.1-pro, line-level code review), `gemini_critic` (gemini-3.1-pro), `opus_critic` (Opus 4.7)) are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies."
 
 So the snippet names the tool + a 4-word scope tag and explicitly defers the when/when-not to the tool `description`. This matches the documented framing constraint (`peer-mcp-personas.ts:516-521`): capability inventory only, routing signal lives in the description.
 
@@ -48,7 +48,7 @@ The peer-awareness marker block covers this tool: the mirrored CLAUDE.md receive
 Checked-in repo `CLAUDE.md` (project root) documents the tool in two places, both accurate to code:
 - `CLAUDE.md:127` — "and `gemini-reviewer` gemini-3.1-pro-preview at highest reasoning — a second-lab line-level reviewer, registered alongside `gemini-critic` whenever a `gemini-3.x-pro` model is in the catalog". Agrees with `requiresGeminiCatalog` gate and `defaultEffort: high` (highest tier gemini exposes).
 - `CLAUDE.md:129` — the server-split paragraph lists `peers` as "(the critics + `gemini_reviewer` when a `gemini-3.x-pro` model is served + `codex_implementer` in `--codex-cli`)". Agrees.
-- `CLAUDE.md:123` — the `REVIEW_DEFAULT_MODEL` decorrelation note (the `review` WORKER default moved to gemini-3.1-pro-preview so the reviewer's lab is decorrelated from the gpt-5.5 implementer). This is the WORKER `review` mode, a sibling surface, not this tool; consistent framing (cross-lab reviewer decorrelated from OpenAI implementer) but a distinct code path.
+- `CLAUDE.md:123` — the `REVIEW_DEFAULT_MODEL` decorrelation note (the `review` WORKER default moved to gemini-3.1-pro-preview so the reviewer's lab is decorrelated from the gpt-5.6-sol implementer). This is the WORKER `review` mode, a sibling surface, not this tool; consistent framing (cross-lab reviewer decorrelated from OpenAI implementer) but a distinct code path.
 
 ## 3. Assessment
 

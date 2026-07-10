@@ -53,7 +53,7 @@ turn N:
         │        exit 2 blocks the stop (max 2/prompt); exit 0 allows
         │        on GREEN + substantive diff → spawns #7 (detached)
         ▼
-  #7 detached gpt-5.5 review of the live tree vs the user's ask → findings file
+  #7 detached gpt-5.6-sol review of the live tree vs the user's ask → findings file
         │
         ▼
 turn N+1:

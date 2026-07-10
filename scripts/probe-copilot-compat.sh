@@ -159,7 +159,8 @@ declare -a PROBE_REGISTRY=(
   # case where the model IS present and tool-capable but the body shape is
   # rejected. See docs/peer-mcp-design.md "Worker tools".
   "worker_gemini_tools_reasoning|exploratory|gemini-3.5-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'high' (load-bearing contract for worker_explore/worker_review MCP tools + the worker-tools dual gate)"
-  "worker_gpt5_responses_tools_reasoning|exploratory|gpt-5.5 on /v1/responses accepts function tools[] + reasoning:{effort:'xhigh'} (load-bearing contract for the worker_implement MCP tool)"
+  "worker_gpt5_responses_tools_reasoning|exploratory|gpt-5.5 on /v1/responses accepts function tools[] + reasoning:{effort:'xhigh'} (retained fallback for the worker_implement MCP tool)"
+  "worker_gpt56sol_responses_tools_reasoning|exploratory|gpt-5.6-sol on /v1/responses accepts function tools[] + reasoning:{effort:'xhigh'} (load-bearing contract for the worker_implement/implement DEFAULT model)"
 
   # ===== Non-Claude /v1/messages translation shim (src/lib/anthropic-translate/) =====
   # These probes exercise the shim END-TO-END through the proxy: an Anthropic
@@ -693,13 +694,32 @@ probe_worker_gemini_tools_reasoning() {
 # shape the worker-agent stream-fn emits for implement — gpt-5.5 with a
 # function-shaped tools[] array (flat {type:"function",name,description,
 # parameters}, NOT chat's nested {function:{...}}) + reasoning:{effort:"xhigh"}.
-# This is the load-bearing contract for the worker_implement MCP tool. gpt-5.5
-# is NOT a dual-gate input (only the gemini gate model is), so if this shape
-# regresses, implement breaks while explore/review keep working — only this
-# probe surfaces it.
+# gpt-5.5 is now the RETAINED FALLBACK for the worker_implement MCP tool (the
+# default moved to gpt-5.6-sol — see probe_worker_gpt56sol_responses_tools_reasoning).
+# gpt-5.5 is NOT a dual-gate input (only the gemini gate model is), so if this
+# shape regresses, implement's fallback breaks while explore/review keep working
+# — only this probe surfaces it.
 probe_worker_gpt5_responses_tools_reasoning() {
   do_request POST /v1/responses '{
     "model": "gpt-5.5",
+    "input": "reply with the literal string ok",
+    "tools": [{"type":"function","name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
+    "tool_choice": "auto",
+    "reasoning": {"effort":"xhigh"},
+    "max_output_tokens": 50
+  }'
+  assert_status 200
+}
+
+# End-to-end live probe: the SAME load-bearing worker-implement contract shape,
+# but against gpt-5.6-sol — the CURRENT default model for the implement/test
+# worker tools + the native implementer subagent + advisor + codex_critic. Same
+# flat function tools[] + reasoning:{effort:"xhigh"} on /v1/responses. If this
+# regresses, the default implement path breaks (the gpt-5.5 fallback still
+# works). gpt-5.6-sol is 1050k context, /responses-only, same restriction tier.
+probe_worker_gpt56sol_responses_tools_reasoning() {
+  do_request POST /v1/responses '{
+    "model": "gpt-5.6-sol",
     "input": "reply with the literal string ok",
     "tools": [{"type":"function","name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
     "tool_choice": "auto",

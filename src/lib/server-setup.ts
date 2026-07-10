@@ -379,6 +379,7 @@ const NATIVE_NON_CLAUDE_MODELS: ReadonlyArray<{
   id: string
   displayName: string
 }> = [
+  { id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol" },
   { id: "gpt-5.5", displayName: "GPT-5.5" },
   { id: "gpt-5.3-codex", displayName: "GPT-5.3 Codex" },
   { id: "gemini-3.5-flash", displayName: "Gemini 3.5 Flash" },

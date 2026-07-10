@@ -139,7 +139,7 @@ const DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
  *  (via `DEFAULT_THINKING`) — a strong, NATIVE (no-shim) tool-caller for repo
  *  research. Native Claude models run as workers over `/chat/completions`, the
  *  same path proven by `PLAN_DEFAULT_MODEL` (claude-opus-4.8). Like `implement`'s
- *  gpt-5.5 this is NOT a `workerToolsEnabled` gate input — if absent (e.g. a
+ *  gpt-5.6-sol this is NOT a `workerToolsEnabled` gate input — if absent (e.g. a
  *  non-enterprise tier) `explore` errors helpfully at call time rather than
  *  vanishing the whole worker surface. The caller (the main model) overrides
  *  BOTH the model and the reasoning per call via the `model` / `thinking` args. */
@@ -148,7 +148,7 @@ export const EXPLORE_DEFAULT_MODEL = "claude-sonnet-5"
 /** Default model + thinking for the READ-ONLY `review` mode.
  *  `gemini-3.1-pro-preview` at `xhigh` (clamped to `high` at call time — gemini
  *  advertises no xhigh). DELIBERATELY DECORRELATED FROM THE IMPLEMENTER: bounded
- *  implementation now defaults to gpt-5.5 (OpenAI) — both the `implement` worker
+ *  implementation now defaults to gpt-5.6-sol (OpenAI) — both the `implement` worker
  *  and the native `implementer` subagent — and the main orchestrator is Opus
  *  (Anthropic), so review runs on a THIRD lab (Google) to maximize blind-spot
  *  diversity. A reviewer sharing the implementer's lab catches a correlated slice
@@ -160,12 +160,12 @@ export const EXPLORE_DEFAULT_MODEL = "claude-sonnet-5"
 export const REVIEW_DEFAULT_MODEL = "gemini-3.1-pro-preview"
 const REVIEW_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 
-/** Default model + thinking for the READ+WRITE `implement` mode. `gpt-5.5`
+/** Default model + thinking for the READ+WRITE `implement` mode. `gpt-5.6-sol`
  *  at `xhigh` — the strongest reasoning tier in the catalog, 1M+ context,
  *  routed through `/responses` by the stream-fn endpoint split. Coding edits
  *  benefit from maximum reasoning; the higher per-call cost is justified for
  *  autonomous implementation. An explicit `opts.model` still wins. */
-export const IMPLEMENT_DEFAULT_MODEL = "gpt-5.5"
+export const IMPLEMENT_DEFAULT_MODEL = "gpt-5.6-sol"
 const IMPLEMENT_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 
 /** Default model for `browse` mode. `gpt-5.4-mini` — the Gate-B-winning
@@ -192,7 +192,7 @@ const BROWSE_DEFAULT_THINKING: WorkerThinkingLevel = "high"
  *  Copilot catalog id (the worker resolver exact-matches `catalog.id`, it does
  *  NOT translate the Anthropic dashed slug). Falls back to a helpful
  *  unknown-model error at call time if opus-4.8 isn't in the catalog (e.g. a
- *  non-enterprise tier), exactly like `implement`'s `gpt-5.5`. Caller's `model`
+ *  non-enterprise tier), exactly like `implement`'s `gpt-5.6-sol`. Caller's `model`
  *  arg still wins. */
 export const PLAN_DEFAULT_MODEL = "claude-opus-4.8"
 const PLAN_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
@@ -307,10 +307,10 @@ async function runWorkerAgentOnce(
     // wins): read-only `explore` → `EXPLORE_DEFAULT_MODEL` (claude-sonnet-5, xhigh);
     // read-only `review` → `REVIEW_DEFAULT_MODEL` (gemini-3.1-pro-preview,
     // xhigh→high — a cross-lab reviewer deliberately decorrelated from the
-    // gpt-5.5 implementer); read-only `plan`
+    // gpt-5.6-sol implementer); read-only `plan`
     // → `PLAN_DEFAULT_MODEL` (claude-opus-4.8, xhigh — planning is the
     // highest-leverage step, so it gets the strongest model);
-    // read+write `implement`/`test` → `IMPLEMENT_DEFAULT_MODEL` (gpt-5.5, xhigh
+    // read+write `implement`/`test` → `IMPLEMENT_DEFAULT_MODEL` (gpt-5.6-sol, xhigh
     // — coding/test-authoring wants max reasoning); `browse` →
     // `BROWSE_DEFAULT_MODEL` (gpt-5.4-mini). Distinct workloads, distinct
     // defaults.
