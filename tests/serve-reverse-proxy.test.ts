@@ -164,6 +164,16 @@ describe("reverse-proxy injection", () => {
     const s = __test.buildInjection('a"b')
     expect(s).toContain('localStorage.setItem(\'auth-token\',"a\\"b")')
   })
+
+  it("seeds claude-settings (empty allow-lists + skipPermissions) only when enabled", () => {
+    const off = __test.buildInjection("tok", false)
+    expect(off).not.toContain("claude-settings")
+    const on = __test.buildInjection("tok", true)
+    expect(on).toContain("claude-settings")
+    // the stored value is a JSON string forcing the full toolset + no prompts
+    expect(on).toContain('\\"allowedTools\\":[]')
+    expect(on).toContain('\\"skipPermissions\\":true')
+  })
 })
 
 describe("reverse-proxy provider façade", () => {

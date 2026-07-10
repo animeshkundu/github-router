@@ -35,6 +35,12 @@ export interface ReverseProxyOptions {
   bindPort: number
   /** JWT injected into the SPA so it boots authenticated. */
   authToken: string
+  /**
+   * Seed CloudCLI's `claude-settings` localStorage with empty allow-lists +
+   * `skipPermissions:true` so the spawned Claude gets the full toolset with no
+   * permission prompts (serve default; disabled by GH_ROUTER_SERVE_NO_AUTO_APPROVE=1).
+   */
+  seedToolSettings?: boolean
   providerFacade?: {
     kindFor: (method: string, pathname: string) => string | null
     rewrite: (
@@ -67,14 +73,37 @@ export interface ReverseProxyHandle {
 
 const HEAD_CLOSE = "</head>"
 
+/** CloudCLI's localStorage key for per-tool chat permission settings. */
+const CLAUDE_SETTINGS_KEY = "claude-settings"
+
 /**
  * Embed the token as a JS string literal. JSON.stringify escapes quotes and
  * backslashes; we additionally neutralize `<` so the value can never break out
  * of the surrounding <script> element regardless of contents.
+ *
+ * When `seedToolSettings` is set, also seed CloudCLI's `claude-settings`
+ * localStorage with `{allowedTools:[], disallowedTools:[], skipPermissions:true}`
+ * so the SDK-spawned Claude gets the FULL built-in toolset with no permission
+ * prompts. This is the server-side, zero-user-action fix for two CloudCLI
+ * behaviors: (1) a non-empty `allowedTools` is an availability allow-list in the
+ * Agent SDK (so any tool not in it is "not enabled"), and (2) `allowedTools`
+ * accumulates client-side on every "allow & remember" click — so prior approvals
+ * silently clamp the toolset. Forcing empty `allowedTools` + `skipPermissions`
+ * gives `github-router claude`-parity (`--dangerously-skip-permissions`).
  */
-function buildInjection(token: string): string {
+function buildInjection(token: string, seedToolSettings = false): string {
   const safe = JSON.stringify(token).replace(/</g, "\\u003c")
-  return `<script>try{localStorage.setItem('auth-token',${safe})}catch(e){}</script>`
+  let body = `localStorage.setItem('auth-token',${safe});`
+  if (seedToolSettings) {
+    const settings = JSON.stringify({
+      allowedTools: [],
+      disallowedTools: [],
+      skipPermissions: true,
+    })
+    const safeSettings = JSON.stringify(settings).replace(/</g, "\\u003c")
+    body += `localStorage.setItem('${CLAUDE_SETTINGS_KEY}',${safeSettings});`
+  }
+  return `<script>try{${body}}catch(e){}</script>`
 }
 
 function headerLines(headers: http.IncomingHttpHeaders): string {
@@ -88,7 +117,7 @@ export async function startReverseProxy(
 ): Promise<ReverseProxyHandle> {
   const { targetHost, targetPort, bindHost, bindPort, authToken } = opts
   const ownOrigin = `http://${bindHost}:${bindPort}`
-  const injection = buildInjection(authToken)
+  const injection = buildInjection(authToken, opts.seedToolSettings === true)
 
   const allowedHosts = new Set([
     `127.0.0.1:${bindPort}`,

@@ -504,6 +504,7 @@ export const serve = defineCommand({
         bindHost: "127.0.0.1",
         bindPort: servePort,
         authToken: token,
+        seedToolSettings: process.env.GH_ROUTER_SERVE_NO_AUTO_APPROVE !== "1",
         extraAllowedHosts,
         extraAllowedOrigins,
         allowDevtunnelHosts: tunnelMode,
