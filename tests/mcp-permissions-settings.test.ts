@@ -29,14 +29,14 @@ async function read(p: string): Promise<Record<string, unknown>> {
 }
 
 describe("configureServePermissionsBypass", () => {
-  it("sets defaultMode=bypassPermissions and clears allow on a fresh file", async () => {
+  it("sets defaultMode=bypassPermissions on a fresh file, leaving allow absent", async () => {
     const p = await settingsFile()
     const r = await configureServePermissionsBypass(p)
     expect(r.written).toBe(true)
-    expect((await read(p)).permissions).toEqual({ defaultMode: "bypassPermissions", allow: [] })
+    expect((await read(p)).permissions).toEqual({ defaultMode: "bypassPermissions" })
   })
 
-  it("clears a mirrored restrictive allow-list (so CloudCLI gets an empty allowedTools) and overrides 'plan'", async () => {
+  it("PRESERVES the user's allow/deny/ask posture and only overrides defaultMode", async () => {
     const p = await settingsFile({
       permissions: {
         allow: ["Read(*)", "Glob(*)", "Bash(ls *)", "mcp__peers"],
@@ -48,21 +48,27 @@ describe("configureServePermissionsBypass", () => {
     })
     const r = await configureServePermissionsBypass(p)
     expect(r.written).toBe(true)
-    expect(r.clearedAllow).toBe(4)
     const j = await read(p)
     const perms = j.permissions as Record<string, unknown>
     expect(perms.defaultMode).toBe("bypassPermissions")
-    expect(perms.allow).toEqual([])
-    // deny/ask and unrelated keys preserved
+    // the user's curated allow list is carried through UNCHANGED (no clearing)
+    expect(perms.allow).toEqual(["Read(*)", "Glob(*)", "Bash(ls *)", "mcp__peers"])
     expect(perms.deny).toEqual(["Bash(rm *)"])
     expect(perms.ask).toEqual(["WebFetch"])
     expect(j.other).toBe(1)
   })
 
-  it("is a no-op when already bypass with an empty allow", async () => {
-    const p = await settingsFile({ permissions: { defaultMode: "bypassPermissions", allow: [] } })
+  it("is a no-op when already bypass (regardless of allow contents)", async () => {
+    const p = await settingsFile({
+      permissions: { defaultMode: "bypassPermissions", allow: ["Read", "Bash(git *)"] },
+    })
     const r = await configureServePermissionsBypass(p)
     expect(r.written).toBe(false)
+    // allow untouched
+    expect((await read(p)).permissions).toEqual({
+      defaultMode: "bypassPermissions",
+      allow: ["Read", "Bash(git *)"],
+    })
   })
 
   it("refuses to overwrite a non-object settings.json", async () => {

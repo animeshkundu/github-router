@@ -148,84 +148,46 @@ export function planModeAllowRules(serverKeys: readonly string[]): string[] {
 }
 
 /**
- * CloudCLI-spawned Claude has the FULL toolset with no permission friction — the
- * web-control-plane equivalent of `github-router claude`'s default
- * `--dangerously-skip-permissions`.
+ * Set the serve mirror's `settings.json` `permissions.defaultMode` to
+ * `bypassPermissions` — the web-control-plane equivalent of `github-router
+ * claude`'s default `--dangerously-skip-permissions`. Without it, CloudCLI's
+ * Agent-SDK `canUseTool` callback posts a browser `permission_request` and AWAITS
+ * approval for every not-yet-allowed tool, stalling the chat on each injected
+ * `mcp__*` and native call.
  *
- * Two CloudCLI behaviors bite, and both are fixed here:
+ * PRESERVES the user's `allow`/`deny`/`ask` posture verbatim — their curated
+ * permission rules carry into serve unchanged, so a session switched off bypass
+ * (plan / default mode via the composer) behaves exactly as their own Claude Code
+ * would. We used to CLEAR `allow` on a since-debunked theory that a non-empty
+ * allow narrows the toolset; empirically it does NOT (a 13-rule allow yields the
+ * full 27-tool set incl Glob/Bash/Edit), and CloudCLI's `allowedTools` comes only
+ * from the client `localStorage['claude-settings']` seed (`[]`), never from
+ * `permissions.allow`. The real toolset-narrowing was `CLAUDE_CODE_COORDINATOR_MODE`,
+ * stripped separately by {@link sanitizeServeSettingsEnv}. Not clearing `allow`
+ * is what keeps serve at parity with the user's own Claude Code permission posture.
  *
- *   1. **Prompt stalls.** CloudCLI spawns Claude via the Agent SDK with a
- *      `canUseTool` callback that posts a `permission_request` to the browser and
- *      AWAITS approval for any tool not already allowed — so every injected
- *      `mcp__*` call (and every native tool) stalls the chat. Setting
- *      `permissions.defaultMode: "bypassPermissions"` (the SDK reads it via
- *      `settingSources` before `canUseTool` fires) auto-approves everything.
- *
- *   2. **Prompt stalls, redundant allow-list.** CloudCLI passes
- *      `sdkOptions.allowedTools = settings.allowedTools`; the client seeds that
- *      from `localStorage['claude-settings']` (serve injects `allowedTools: []`).
- *      An EMPTY `allowedTools` is a no-op (the SDK only emits `--allowedTools`
- *      when the array is non-empty, so `[] ≡ undefined`), so it neither breaks
- *      nor restores anything — we still clear the mirrored `permissions.allow`
- *      defensively so CloudCLI can never derive a non-empty (restrictive)
- *      allow-list from a user's `Read(*)`/`Glob(*)` grants. NOTE: the actual
- *      toolset-narrowing seen in serve was NOT this — it was
- *      `CLAUDE_CODE_COORDINATOR_MODE` in the mirrored `env` block, stripped
- *      separately by {@link sanitizeServeSettingsEnv} (unconditional).
- *
- * `deny`/`ask` are preserved (a user's deliberate block still applies; the SDK
- * honors `disallowedTools` even under bypass). This only ever rewrites the
- * per-launch serve mirror, never the operator's real `~/.claude/settings.json`.
- * Atomic temp+rename, mode 0o600. A non-object settings.json throws (never
- * clobber a file we don't understand); the caller wraps this in warn-and-continue
- * so a hiccup never blocks launch.
+ * Only ever rewrites the per-launch serve mirror, never the operator's real
+ * `~/.claude/settings.json`. Atomic temp+rename, mode 0o600. A non-object
+ * settings.json throws (never clobber a file we don't understand); the caller
+ * wraps this in warn-and-continue so a hiccup never blocks launch.
  *
  * Opt out with `GH_ROUTER_SERVE_NO_AUTO_APPROVE=1` (the caller skips this) — the
- * mirrored mode + allow-list are then left exactly as snapshotted.
+ * mirrored `defaultMode` is then left exactly as snapshotted.
  */
 export async function configureServePermissionsBypass(
   settingsPath: string,
-): Promise<{ written: boolean; clearedAllow: number }> {
-  let existing: Record<string, unknown> = {}
-  let raw: string | undefined
-  try {
-    raw = await fs.readFile(settingsPath, "utf8")
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err
-    raw = undefined
-  }
-  if (raw !== undefined) {
-    const parsed: unknown = JSON.parse(raw)
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      existing = parsed as Record<string, unknown>
-    } else {
-      throw new Error(
-        `settings.json at ${settingsPath} is not a JSON object; refusing to overwrite`,
-      )
-    }
-  }
-
+): Promise<{ written: boolean }> {
+  const existing = (await readSettingsObject(settingsPath)) ?? {}
   const permsRaw = existing.permissions
   const perms: Record<string, unknown> =
     permsRaw && typeof permsRaw === "object" && !Array.isArray(permsRaw)
       ? { ...(permsRaw as Record<string, unknown>) }
       : {}
 
-  const priorAllow = Array.isArray(perms.allow) ? (perms.allow as unknown[]).length : 0
-  const alreadyBypass = perms.defaultMode === "bypassPermissions"
-  if (alreadyBypass && priorAllow === 0) {
-    return { written: false, clearedAllow: 0 }
-  }
-
+  if (perms.defaultMode === "bypassPermissions") return { written: false }
   perms.defaultMode = "bypassPermissions"
-  // Clear the allow-list: CloudCLI turns it into a restrictive availability
-  // allow-list; under bypass it is redundant, so an empty list restores the full
-  // built-in toolset. deny/ask are left intact.
-  perms.allow = []
-
-  const merged = { ...existing, permissions: perms }
-  const tmp = `${settingsPath}.${process.pid}.mcpperm.tmp`
-  await fs.writeFile(tmp, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 })
-  await fs.rename(tmp, settingsPath)
-  return { written: true, clearedAllow: priorAllow }
+  // allow / deny / ask are left UNTOUCHED — the user's curated posture carries
+  // into serve. (Clearing allow was a no-op fix for a misdiagnosed toolset bug.)
+  await writeSettingsObject(settingsPath, { ...existing, permissions: perms }, "servebypass")
+  return { written: true }
 }
