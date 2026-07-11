@@ -45,13 +45,11 @@ const parsers = new Map<string, Parser>()
 let cancelled = false
 
 function handleJob(job: ParseJobRequest): ParseJobReply {
-  // Test-only crash injection: when GH_ROUTER_TS_WORKER_CRASH=1, throw an
-  // UNCAUGHT error on the first job so the pool's worker-crash degradation path
-  // (retire + respawn, file → miss, search survives) can be exercised
-  // deterministically. Throwing here escapes the message handler → the
-  // worker's 'error'/'exit' events fire on the main thread. Never set in
-  // production.
-  if (process.env.GH_ROUTER_TS_WORKER_CRASH === "1") {
+  // Test-only crash injection. The persistent env knob exercises crash-storm
+  // degradation; `job.testCrash` is assigned once at dispatch by the pool to
+  // exercise recovery with healthy replacement workers. Throwing here escapes
+  // the message handler so the main thread observes worker error/exit events.
+  if (process.env.GH_ROUTER_TS_WORKER_CRASH === "1" || job.testCrash) {
     throw new Error("injected worker crash (test)")
   }
   // Honor a pending cancel: reply with an empty (valid) result rather than

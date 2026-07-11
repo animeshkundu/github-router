@@ -158,6 +158,17 @@ const WALL_TIME_MS = 30_000
  * comfortable headroom for ~5-10 files even on cold cache.
  */
 const STRUCTURAL_BUDGET_MS = 200
+let _structuralBudgetTestOverride: number | null = null
+
+/** Test-only: override the structural-pass budget; null restores 200ms. */
+export function __setStructuralBudgetForTest(ms: number | null): void {
+  _structuralBudgetTestOverride = ms
+}
+
+function structuralBudgetMs(): number {
+  return _structuralBudgetTestOverride ?? STRUCTURAL_BUDGET_MS
+}
+
 const STRUCTURAL_TOPN_FULL = 50
 const STRUCTURAL_TOPN_FAST = 10
 
@@ -2365,7 +2376,7 @@ export async function searchCode(
       hitsRanked,
       workspaceRoot: ws.canonical,
       topN,
-      budgetMs: STRUCTURAL_BUDGET_MS,
+      budgetMs: structuralBudgetMs(),
       signal: ac.signal,
     })
     structuralOutlines = structural.outlinesByFile
