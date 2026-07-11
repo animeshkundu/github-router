@@ -48,6 +48,15 @@ export interface ReverseProxyOptions {
       upstreamJson: unknown,
       query: URLSearchParams,
     ) => Promise<unknown | null>
+    /**
+     * Requests answered DIRECTLY with a canned JSON body, never forwarded to
+     * CloudCLI (e.g. `POST /api/system/update`, which would run a global npm
+     * install). Returns null to forward normally.
+     */
+    blockedRequest?: (
+      method: string,
+      pathname: string,
+    ) => { status: number; json: unknown } | null
   }
   /**
    * Extra exact `host:port` values to accept beyond loopback (e.g. a specific
@@ -198,6 +207,20 @@ export async function startReverseProxy(
     }
 
     const requestUrl = new URL(clientReq.url ?? "/", ownOrigin)
+
+    // Requests serve answers directly (never forwarded) — e.g. CloudCLI's
+    // system-update button, which would run a global `npm i -g` mutation.
+    const blocked = opts.providerFacade?.blockedRequest?.(
+      clientReq.method ?? "GET",
+      requestUrl.pathname,
+    )
+    if (blocked) {
+      clientReq.resume() // drain the request body so the socket can be reused
+      clientRes.writeHead(blocked.status, { "content-type": "application/json" })
+      clientRes.end(JSON.stringify(blocked.json))
+      return
+    }
+
     const facadeKind = opts.providerFacade?.kindFor(
       clientReq.method ?? "GET",
       requestUrl.pathname,

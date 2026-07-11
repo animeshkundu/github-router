@@ -4,6 +4,7 @@ import os from "node:os"
 import path from "node:path"
 
 import {
+  facadeBlockedRequest,
   facadeInterceptKind,
   rewriteProviderResponse,
   type ProviderFacadeContext,
@@ -109,6 +110,59 @@ describe("provider façade models rewriter", () => {
       { value: "gpt-5.5", label: "GPT 5.5", description: "openai · gpt" },
       { value: "claude-opus-4.8", label: "Claude Opus 4.8", description: "anthropic · claude" },
     ])
+  })
+
+  it("emits per-model effort.values from the catalog reasoning_effort allowlist", async () => {
+    const withEffort: ModelsResponse = {
+      object: "list",
+      data: [
+        {
+          id: "gpt-5.5",
+          name: "GPT 5.5",
+          vendor: "openai",
+          object: "model",
+          version: "1",
+          preview: false,
+          model_picker_enabled: true,
+          capabilities: {
+            family: "gpt", object: "capabilities", tokenizer: "o200k", type: "chat",
+            supports: { reasoning_effort: ["low", "medium", "high", "xhigh"] },
+          },
+        },
+        {
+          id: "no-reasoning",
+          name: "Plain",
+          vendor: "test",
+          object: "model",
+          version: "1",
+          preview: false,
+          model_picker_enabled: true,
+          capabilities: { family: "x", object: "capabilities", tokenizer: "x", type: "chat" },
+        },
+      ],
+    } as unknown as ModelsResponse
+
+    const rewritten = await rewriteProviderResponse(
+      "models",
+      { success: true, data: { models: { OPTIONS: [], DEFAULT: "x" }, cache: {} } },
+      ctx({ getModels: () => withEffort, defaultModel: "gpt-5.5" }),
+      query(),
+    ) as { data: { models: { OPTIONS: Array<Record<string, unknown>> } } }
+
+    const opts = rewritten.data.models.OPTIONS
+    // model with reasoning_effort gets the effort selector (default high)
+    expect(opts[0]).toEqual({
+      value: "gpt-5.5",
+      label: "GPT 5.5",
+      description: "openai · gpt",
+      effort: {
+        default: "high",
+        values: [{ value: "low" }, { value: "medium" }, { value: "high" }, { value: "xhigh" }],
+      },
+    })
+    // model without reasoning_effort gets NO effort field (no selector)
+    expect(opts[1]).toEqual({ value: "no-reasoning", label: "Plain", description: "test · x" })
+    expect(opts[1]).not.toHaveProperty("effort")
   })
 
   it("falls back to the first option when the default is absent", async () => {
@@ -274,5 +328,23 @@ describe("provider façade auth rewriter", () => {
     ) as { data: Record<string, unknown> }
 
     expect(rewritten.data).toEqual({ authenticated: true, installed: true, foo: "bar" })
+  })
+})
+
+describe("facadeBlockedRequest", () => {
+  it("blocks POST /api/system/update with a managed-by-github-router message (no forward)", () => {
+    const blocked = facadeBlockedRequest("POST", "/api/system/update")
+    expect(blocked?.status).toBe(200)
+    const json = blocked?.json as Record<string, unknown>
+    expect(json.success).toBe(false)
+    expect(json.managed).toBe(true)
+    expect(String(json.message)).toMatch(/github-router/i)
+  })
+
+  it("is case-insensitive on method but path-exact", () => {
+    expect(facadeBlockedRequest("post", "/api/system/update")).not.toBeNull()
+    expect(facadeBlockedRequest("GET", "/api/system/update")).toBeNull()
+    expect(facadeBlockedRequest("POST", "/api/system/update/extra")).toBeNull()
+    expect(facadeBlockedRequest("POST", "/api/providers/claude/models")).toBeNull()
   })
 })

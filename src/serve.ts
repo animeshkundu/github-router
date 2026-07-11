@@ -29,7 +29,7 @@ import {
 } from "./lib/serve/cloudcli"
 import { DevtunnelError, startDevtunnel } from "./lib/serve/devtunnel"
 import { provisionServeEnhancements } from "./lib/serve/enhancements"
-import { facadeInterceptKind, rewriteProviderResponse } from "./lib/serve/provider-facade"
+import { facadeBlockedRequest, facadeInterceptKind, rewriteProviderResponse } from "./lib/serve/provider-facade"
 import {
   SERVE_IDENTITY_PATH,
   SERVE_IDENTITY_SERVICE,
@@ -480,6 +480,7 @@ export const serve = defineCommand({
     const servePort = await resolveServePort(parsed.port)
     const providerFacade = {
       kindFor: facadeInterceptKind,
+      blockedRequest: facadeBlockedRequest,
       rewrite: (kind: string, json: unknown, query: URLSearchParams) =>
         rewriteProviderResponse(
           kind as Parameters<typeof rewriteProviderResponse>[0],

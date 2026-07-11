@@ -26,6 +26,35 @@ function cloneObject<T extends JsonObject>(value: T): JsonObject {
   return { ...value }
 }
 
+/**
+ * Requests serve answers DIRECTLY (never forwarded to CloudCLI) with a canned
+ * JSON body. `POST /api/system/update` is CloudCLI's "update available" button,
+ * which runs a GLOBAL `npm install -g @cloudcli-ai/cloudcli@latest` in the user's
+ * home dir (`server/index.js`) — mutating their global npm and never applying to
+ * serve's pinned, router-owned install. Blocking it prevents that surprise
+ * mutation and tells the user how updates actually work. HTTP 200 + `success:
+ * false` so the UI neither runs the update nor throws an error toast. Returns
+ * null for anything not blocked.
+ */
+export function facadeBlockedRequest(
+  method: string,
+  pathname: string,
+): { status: number; json: JsonObject } | null {
+  if (method.toUpperCase() === "POST" && pathname === "/api/system/update") {
+    return {
+      status: 200,
+      json: {
+        success: false,
+        managed: true,
+        message:
+          "CloudCLI is managed by github-router (a pinned, router-owned install). "
+          + "To update, run `npm i -g github-router@latest`, then restart `github-router serve`.",
+      },
+    }
+  }
+  return null
+}
+
 export function facadeInterceptKind(
   method: string,
   pathname: string,
@@ -85,11 +114,28 @@ function rewriteModels(upstreamJson: unknown, ctx: ProviderFacadeContext): unkno
 
   const options = models
     .filter(isPickerModel)
-    .map((m) => ({
-      value: m.id,
-      label: m.name || m.id,
-      description: `${m.vendor} · ${m.capabilities.family}`,
-    }))
+    .map((m) => {
+      const option: { value: string; label: string; description: string; effort?: JsonObject } = {
+        value: m.id,
+        label: m.name || m.id,
+        description: `${m.vendor} · ${m.capabilities.family}`,
+      }
+      // Emit the effort selector the CloudCLI UI + `resolveClaudeEffort` need:
+      // `effort.values` is `[{value}]` and the server maps it back with
+      // `.map(v => v.value)` to validate a client-picked effort before passing
+      // it to the binary. Derived from the Copilot catalog's per-model
+      // `reasoning_effort` allowlist; omitted for non-reasoning models (no
+      // selector shown). Default to `high` when supported (matches the shim's
+      // default), else the model's top tier.
+      const efforts = m.capabilities.supports?.reasoning_effort
+      if (Array.isArray(efforts) && efforts.length > 0) {
+        option.effort = {
+          default: efforts.includes("high") ? "high" : efforts[efforts.length - 1],
+          values: efforts.map((e) => ({ value: e })),
+        }
+      }
+      return option
+    })
   if (options.length === 0) return null
 
   const values = new Set(options.map((o) => o.value))
