@@ -206,11 +206,18 @@ export async function provisionServeEnhancements(
     // load-bearing the moment a serve user switches the composer to PLAN mode:
     // plan mode re-gates tools, and MCP tools (search / peers / workers / …) are
     // exactly the research surface wanted while planning. Runs AFTER the bypass
-    // config so the entries survive its allow-list clear.
-    await injectMcpServerAllowRules(
-      settingsPath,
-      Object.values(groupKeys).filter((k): k is string => Boolean(k)),
-    ).catch((err) => consola.warn(`Could not auto-approve injected MCP servers: ${String(err)}`))
+    // config so the entries survive its allow-list clear. Uses the authoritative
+    // injected-server list (`injected.serversAdded` — includes the `codex-cli`
+    // stdio server), falling back to the resolved keys + codex-cli on collision.
+    const injectedServerKeys = injected.ok
+      ? injected.serversAdded
+      : [
+          ...Object.values(groupKeys).filter((k): k is string => Boolean(k)),
+          ...(opts.codexCli === true ? ["codex-cli"] : []),
+        ]
+    await injectMcpServerAllowRules(settingsPath, injectedServerKeys).catch((err) =>
+      consola.warn(`Could not auto-approve injected MCP servers: ${String(err)}`),
+    )
 
     if (workerToolsEnabled()) {
       const promptCmd = buildPromptSubmitHookCommand(process.execPath, process.argv[1])

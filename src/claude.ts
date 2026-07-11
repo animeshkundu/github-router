@@ -703,10 +703,17 @@ export const claude = defineCommand({
           // too. deny/ask and the user's own allow entries are preserved.
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
-            const res = await injectMcpServerAllowRules(
-              settingsPath,
-              Object.values(groupKeys).filter((k): k is string => Boolean(k)),
-            )
+            // Authoritative list of the servers we actually injected — on the
+            // mirror path that's `injected.serversAdded` (includes the `codex-cli`
+            // stdio server, not just the HTTP groups); on the collision fallback,
+            // reconstruct it from the resolved group keys + codex-cli.
+            const injectedServerKeys = injected.ok
+              ? injected.serversAdded
+              : [
+                  ...Object.values(groupKeys).filter((k): k is string => Boolean(k)),
+                  ...(backend === "cli" ? ["codex-cli"] : []),
+                ]
+            const res = await injectMcpServerAllowRules(settingsPath, injectedServerKeys)
             if (res.added.length) {
               consola.debug(`Auto-approved injected MCP servers: ${res.added.join(", ")}`)
             }
