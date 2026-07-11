@@ -98,6 +98,40 @@ describe("sanitizeServeSettingsEnv", () => {
     expect((j.permissions as Record<string, unknown>).defaultMode).toBe("bypassPermissions")
   })
 
+  it("strips auth/routing/remote/model keys that would re-route the serve agent off the proxy", async () => {
+    const p = await settingsFile({
+      env: {
+        ANTHROPIC_BASE_URL: "https://my-gateway.example",
+        ANTHROPIC_API_KEY: "sk-real",
+        ANTHROPIC_AUTH_TOKEN: "tok",
+        CLAUDE_CODE_USE_BEDROCK: "1",
+        CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+        ANTHROPIC_MODEL: "some-non-copilot-slug",
+        CLAUDE_CODE_SUBAGENT_MODEL: "override-all-subagents",
+        CLAUDE_CODE_REMOTE: "1",
+        SESSION_INGRESS_URL: "https://ingress",
+        CLAUDE_CONFIG_DIR: "/somewhere/else",
+        // kept: additive experimental flag + an unrelated app var
+        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
+        MY_APP_FLAG: "keep",
+      },
+    })
+    const r = await sanitizeServeSettingsEnv(p)
+    expect(r.removed).toEqual(
+      expect.arrayContaining([
+        "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_REMOTE", "SESSION_INGRESS_URL",
+        "CLAUDE_CONFIG_DIR",
+      ]),
+    )
+    // additive + unrelated keys survive
+    expect((await read(p)).env).toEqual({
+      CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
+      MY_APP_FLAG: "keep",
+    })
+  })
+
   it("is a no-op (no write) when coordinator mode is absent", async () => {
     const p = await settingsFile({ env: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" } })
     const before = await fs.stat(p)

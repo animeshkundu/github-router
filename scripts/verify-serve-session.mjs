@@ -92,17 +92,34 @@ function cleanup() {
 }
 
 async function main() {
-  // Wait for the enhancement layer to write the mirror agents/.claude.json.
+  // Wait for the enhancement layer to FULLY provision the mirror before probing.
+  // The `agents/` dir is created early (before its .md files and before
+  // settings.json is finalized to bypass), so waiting only for the dir to exist
+  // races the probe against a half-written mirror. Require the complete surface:
+  // mcpServers injected, settings.defaultMode==bypassPermissions, and a peer
+  // agent .md actually on disk.
+  const mirrorComplete = (m) => {
+    try {
+      if (!m || !fs.existsSync(path.join(m, "agents"))) return false;
+      const cj = JSON.parse(fs.readFileSync(path.join(m, ".claude.json"), "utf8"));
+      if (!cj.mcpServers || Object.keys(cj.mcpServers).length === 0) return false;
+      const sj = JSON.parse(fs.readFileSync(path.join(m, "settings.json"), "utf8"));
+      if (!sj.permissions || sj.permissions.defaultMode !== "bypassPermissions") return false;
+      return fs.readdirSync(path.join(m, "agents")).some((f) => /-codex-critic\.md$/.test(f));
+    } catch {
+      return false;
+    }
+  };
   let mirror = null;
   for (let i = 0; i < 40; i++) {
     await new Promise((r) => setTimeout(r, 1000));
     const m = latestMirror();
-    if (m && fs.existsSync(path.join(m, ".claude.json")) && fs.existsSync(path.join(m, "agents"))) {
+    if (mirrorComplete(m)) {
       mirror = m;
       break;
     }
   }
-  if (!mirror) throw new Error("serve mirror was not created in time");
+  if (!mirror) throw new Error("serve mirror was not fully provisioned in time");
   console.log(`mirror: ${mirror}`);
 
   // Probe the real claude in headless stream-json mode against the mirror.

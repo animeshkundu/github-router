@@ -1,21 +1,36 @@
 import fs from "node:fs/promises"
 
+import { STRIPPED_AUTH_ROUTING_ENV_KEYS } from "./stripped-env-keys"
+
 /**
- * CLAUDE_CODE_* env vars that must NOT reach the CloudCLI-spawned serve agent.
- * CloudCLI applies the mirror `settings.json` `env` block via the Agent SDK's
- * `settingSources`, so anything here that a user set in their real
- * `~/.claude/settings.json` (for their own FleetView/coordinator workflow) is
- * mirrored in and mis-shapes the single serve chat agent.
+ * CLAUDE_CODE_* / auth / routing env keys that must NOT reach the CloudCLI-spawned
+ * serve agent through the mirror `settings.json` `env` block. CloudCLI applies
+ * that block via the Agent SDK's `settingSources`, so anything a user set in their
+ * real `~/.claude/settings.json` (for their own workflow) is mirrored in and
+ * mis-shapes the single serve chat agent — the exact mechanism behind the
+ * coordinator-mode bug.
  *
- * `CLAUDE_CODE_COORDINATOR_MODE`: puts the agent into orchestrator-only mode,
- * stripping every direct tool (Glob/Read/Bash/Grep/Edit/Write) down to
- * delegation-only (Task/SendMessage/Workflow) — so a direct `Glob` call fails
- * with "Glob exists but is not enabled in this context". Serve is a
- * single-agent chat surface, never a coordinator, so this is always wrong here.
- * (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` is intentionally NOT stripped — it is
- * purely additive, matching `github-router claude` parity.)
+ *   - {@link STRIPPED_AUTH_ROUTING_ENV_KEYS} (shared with the process-env strip in
+ *     `launch.ts`): auth/routing/remote keys that would re-route the agent OFF the
+ *     github-router proxy (`ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK/VERTEX/
+ *     FOUNDRY`, a personal gateway), inject real auth over the synthetic
+ *     credential (`ANTHROPIC_API_KEY`/`AUTH_TOKEN`/`OAUTH_TOKEN`), pin a
+ *     non-Copilot `ANTHROPIC_MODEL`, or activate the unimplemented Bridge/remote
+ *     path. The settings.json `env` block is a SECOND vector for the same keys the
+ *     process-env strip already blocks.
+ *   - `CLAUDE_CODE_COORDINATOR_MODE`: strips the single agent to delegation-only
+ *     (Glob/Read/Bash fail "not enabled in this context").
+ *   - `CLAUDE_CODE_SUBAGENT_MODEL`: a rank-#1 hard override that would retarget
+ *     the injected implementer/peer-critic subagents off their frontmatter models.
+ *
+ * `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` is intentionally NOT stripped — purely
+ * additive, matching `github-router claude` parity.
  */
-const SERVE_STRIP_ENV_KEYS = ["CLAUDE_CODE_COORDINATOR_MODE"] as const
+const SERVE_STRIP_ENV_KEYS = [
+  ...STRIPPED_AUTH_ROUTING_ENV_KEYS,
+  "CLAUDE_CODE_COORDINATOR_MODE",
+  "CLAUDE_CODE_SUBAGENT_MODEL",
+] as const
 
 async function readSettingsObject(
   settingsPath: string,
