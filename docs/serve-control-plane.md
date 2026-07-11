@@ -87,6 +87,17 @@ by writing into the router-owned `CLAUDE_CONFIG_DIR` mirror (which the SDK-spawn
   a browser approval prompt for every injected tool, and an operator's mirrored `defaultMode: "plan"`
   refuses native writes. Opt out with `GH_ROUTER_SERVE_NO_AUTO_APPROVE=1` (prompts + the mirrored mode
   are then left untouched). Existing `allow`/`deny`/`ask` entries are preserved; a user `deny` still wins.
+- **Coordinator-mode strip (single-agent toolset)** — serve removes `CLAUDE_CODE_COORDINATOR_MODE` from
+  the mirror `settings.json` `env` block (unconditional, NOT gated by `GH_ROUTER_SERVE_NO_AUTO_APPROVE`).
+  A user who runs FleetView/coordinator sessions sets that var in their real `~/.claude/settings.json`; it
+  mirrors in, and because CloudCLI applies the mirror `env` via the Agent SDK's `settingSources`, it puts
+  the SINGLE serve chat agent into orchestrator-only mode — stripping every direct tool
+  (Glob/Read/Bash/Grep/Edit/Write) down to delegation-only (Task/SendMessage/Workflow), so a direct
+  `Glob` call fails "Glob exists but is not enabled in this context". Serve is a single-agent surface, so
+  coordinator mode is never appropriate there. (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` is left intact —
+  purely additive.) `verify:serve` now asserts `init.tools ⊇ {Read, Glob, Grep, Bash, Edit, Write}` (and
+  scrubs an ambient `CLAUDE_CODE_COORDINATOR_MODE` from its probe env so it tests the mirror, not the
+  runner's shell) — the assertion that would have caught this.
 
 **Connected badge + UI display parity.** CloudCLI's client renders its MCP manager, skills panel /
 slash menu, model picker, and "connected" badge verbatim from its server's `/api/providers/*` (and

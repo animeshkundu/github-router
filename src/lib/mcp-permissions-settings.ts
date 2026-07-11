@@ -1,6 +1,82 @@
 import fs from "node:fs/promises"
 
 /**
+ * CLAUDE_CODE_* env vars that must NOT reach the CloudCLI-spawned serve agent.
+ * CloudCLI applies the mirror `settings.json` `env` block via the Agent SDK's
+ * `settingSources`, so anything here that a user set in their real
+ * `~/.claude/settings.json` (for their own FleetView/coordinator workflow) is
+ * mirrored in and mis-shapes the single serve chat agent.
+ *
+ * `CLAUDE_CODE_COORDINATOR_MODE`: puts the agent into orchestrator-only mode,
+ * stripping every direct tool (Glob/Read/Bash/Grep/Edit/Write) down to
+ * delegation-only (Task/SendMessage/Workflow) — so a direct `Glob` call fails
+ * with "Glob exists but is not enabled in this context". Serve is a
+ * single-agent chat surface, never a coordinator, so this is always wrong here.
+ * (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` is intentionally NOT stripped — it is
+ * purely additive, matching `github-router claude` parity.)
+ */
+const SERVE_STRIP_ENV_KEYS = ["CLAUDE_CODE_COORDINATOR_MODE"] as const
+
+async function readSettingsObject(
+  settingsPath: string,
+): Promise<Record<string, unknown> | null> {
+  let raw: string
+  try {
+    raw = await fs.readFile(settingsPath, "utf8")
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null
+    throw err
+  }
+  const parsed: unknown = JSON.parse(raw)
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    return parsed as Record<string, unknown>
+  }
+  throw new Error(`settings.json at ${settingsPath} is not a JSON object; refusing to overwrite`)
+}
+
+async function writeSettingsObject(
+  settingsPath: string,
+  obj: Record<string, unknown>,
+  suffix: string,
+): Promise<void> {
+  const tmp = `${settingsPath}.${process.pid}.${suffix}.tmp`
+  await fs.writeFile(tmp, `${JSON.stringify(obj, null, 2)}\n`, { mode: 0o600 })
+  await fs.rename(tmp, settingsPath)
+}
+
+/**
+ * Remove serve-inappropriate CLAUDE_CODE_* keys (see {@link SERVE_STRIP_ENV_KEYS})
+ * from the serve mirror `settings.json` `env` block. UNCONDITIONAL — unlike the
+ * permission bypass this is NOT gated by `GH_ROUTER_SERVE_NO_AUTO_APPROVE`,
+ * because a user who only wants permission prompts still needs a working toolset.
+ * Serve mirror only; never the operator's real `~/.claude/settings.json`. Atomic
+ * temp+rename, mode 0o600. Returns the keys it removed (empty if none present).
+ */
+export async function sanitizeServeSettingsEnv(
+  settingsPath: string,
+): Promise<{ removed: string[] }> {
+  const existing = await readSettingsObject(settingsPath)
+  if (!existing) return { removed: [] }
+
+  const envRaw = existing.env
+  if (!envRaw || typeof envRaw !== "object" || Array.isArray(envRaw)) {
+    return { removed: [] }
+  }
+  const env = { ...(envRaw as Record<string, unknown>) }
+  const removed: string[] = []
+  for (const key of SERVE_STRIP_ENV_KEYS) {
+    if (key in env) {
+      delete env[key]
+      removed.push(key)
+    }
+  }
+  if (removed.length === 0) return { removed: [] }
+
+  await writeSettingsObject(settingsPath, { ...existing, env }, "serveenv")
+  return { removed }
+}
+
+/**
  * Configure the serve mirror's `settings.json` permission posture so the
  * CloudCLI-spawned Claude has the FULL toolset with no permission friction — the
  * web-control-plane equivalent of `github-router claude`'s default
@@ -15,16 +91,17 @@ import fs from "node:fs/promises"
  *      `permissions.defaultMode: "bypassPermissions"` (the SDK reads it via
  *      `settingSources` before `canUseTool` fires) auto-approves everything.
  *
- *   2. **Toolset narrowing (the subtle one).** CloudCLI passes
- *      `sdkOptions.allowedTools = settings.allowedTools`, and a NON-EMPTY
- *      `allowedTools` is an availability allow-list in the SDK: tools not in it
- *      (Bash / Glob / Grep / …) become "not enabled in this context". CloudCLI's
- *      client derives that list from Claude's permissions, so the operator's
- *      mirrored `permissions.allow` (e.g. `Read(*)`, `Glob(*)`, `Bash(ls *)`)
- *      silently restricts the session to a broken subset. Under
- *      `bypassPermissions` the allow-list is redundant (everything is approved),
- *      so we CLEAR `permissions.allow` in the serve mirror — leaving CloudCLI an
- *      empty `allowedTools` and thus the full built-in toolset.
+ *   2. **Prompt stalls, redundant allow-list.** CloudCLI passes
+ *      `sdkOptions.allowedTools = settings.allowedTools`; the client seeds that
+ *      from `localStorage['claude-settings']` (serve injects `allowedTools: []`).
+ *      An EMPTY `allowedTools` is a no-op (the SDK only emits `--allowedTools`
+ *      when the array is non-empty, so `[] ≡ undefined`), so it neither breaks
+ *      nor restores anything — we still clear the mirrored `permissions.allow`
+ *      defensively so CloudCLI can never derive a non-empty (restrictive)
+ *      allow-list from a user's `Read(*)`/`Glob(*)` grants. NOTE: the actual
+ *      toolset-narrowing seen in serve was NOT this — it was
+ *      `CLAUDE_CODE_COORDINATOR_MODE` in the mirrored `env` block, stripped
+ *      separately by {@link sanitizeServeSettingsEnv} (unconditional).
  *
  * `deny`/`ask` are preserved (a user's deliberate block still applies; the SDK
  * honors `disallowedTools` even under bypass). This only ever rewrites the

@@ -18,7 +18,7 @@ import {
   prependStyleDirectiveToMirroredClaudeMd,
 } from "../claude-md-injection"
 import { INJECTED_SKILLS, writeInjectedSkill } from "../injected-skills"
-import { configureServePermissionsBypass } from "../mcp-permissions-settings"
+import { configureServePermissionsBypass, sanitizeServeSettingsEnv } from "../mcp-permissions-settings"
 import {
   agentToolsEnabled,
   browseAgentEnabled,
@@ -174,11 +174,23 @@ export async function provisionServeEnhancements(
     // already configured it).
     await injectAttributionSuppressionIntoSettingsFile(settingsPath).catch(() => {})
 
+    // Strip serve-inappropriate CLAUDE_CODE_* env keys the user may have set in
+    // their real settings.json — notably CLAUDE_CODE_COORDINATOR_MODE, which
+    // CloudCLI applies via settingSources and which strips the single serve chat
+    // agent down to delegation-only tools (a direct Glob/Read/Bash then fails
+    // "not enabled in this context"). UNCONDITIONAL: a working toolset is needed
+    // even when GH_ROUTER_SERVE_NO_AUTO_APPROVE=1 keeps permission prompts on.
+    const strip = await sanitizeServeSettingsEnv(settingsPath).catch((err) => {
+      consola.warn(`Could not sanitize serve settings env: ${String(err)}`)
+      return { removed: [] as string[] }
+    })
+    if (strip.removed.length) {
+      consola.info(`Serve: removed ${strip.removed.join(", ")} from the mirror settings (single-agent surface).`)
+    }
+
     // Match `github-router claude`'s default `--dangerously-skip-permissions`:
     // set the mirror's permission default to bypass (no per-tool prompts) AND
-    // clear the mirrored allow-list, which CloudCLI otherwise turns into a
-    // restrictive `allowedTools` that disables Bash/Glob/Grep. Opt out with
-    // GH_ROUTER_SERVE_NO_AUTO_APPROVE=1.
+    // clear the mirrored allow-list. Opt out with GH_ROUTER_SERVE_NO_AUTO_APPROVE=1.
     if (process.env.GH_ROUTER_SERVE_NO_AUTO_APPROVE !== "1") {
       await configureServePermissionsBypass(settingsPath).catch((err) =>
         consola.warn(`Could not set serve permission defaults: ${String(err)}`),

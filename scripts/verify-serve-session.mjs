@@ -106,11 +106,19 @@ async function main() {
   console.log(`mirror: ${mirror}`);
 
   // Probe the real claude in headless stream-json mode against the mirror.
+  // Scrub CLAUDE_CODE_COORDINATOR_MODE from the PROBE env: the serve mirror's
+  // settings.json is the surface under test (serve strips coordinator mode from
+  // it), but the SDK also honors an ambient CLAUDE_CODE_COORDINATOR_MODE, and a
+  // runner invoked from a FleetView/coordinator shell would inherit it and see a
+  // truncated toolset regardless of the mirror. Scrubbing it makes this assert
+  // the mirror, not the runner's shell.
+  const probeEnv = { ...process.env, CLAUDE_CONFIG_DIR: mirror };
+  delete probeEnv.CLAUDE_CODE_COORDINATOR_MODE;
   const out = await new Promise((resolve) => {
     const c = spawn(
       claude,
       ["--print", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose"],
-      { cwd: REPO, env: { ...process.env, CLAUDE_CONFIG_DIR: mirror } },
+      { cwd: REPO, env: probeEnv },
     );
     let buf = "";
     c.stdout.on("data", (d) => (buf += d));
@@ -133,23 +141,34 @@ async function main() {
 
   const agents = init.agents || [];
   const mcp = (init.mcp_servers || []).map((m) => m.name || m);
-  const expectAgents = ["Explore", "Plan", "general-purpose", "worker", "peer-review-coordinator"];
+  const tools = init.tools || [];
+  // NOTE: the bare native `worker` agent is a COORDINATOR-mode construct; in the
+  // correct single-agent serve state (coordinator mode stripped) it's absent —
+  // our injected worker-* agents replace it. Assert the injected built-ins, the
+  // review coordinator, a peer critic, and a worker to cover each injected class.
+  const expectAgents = ["Explore", "Plan", "general-purpose", "peer-review-coordinator", "codex-critic", "worker-explore"];
   const expectMcp = ["peers", "search", "workers", "orchestrate", "decide"];
+  // The built-in tools coordinator mode strips — the exact gap that let the
+  // "Glob is not enabled in this context" bug ship. A serve session MUST expose
+  // the direct toolset, not just delegation tools (Task/SendMessage/Workflow).
+  const expectTools = ["Read", "Glob", "Grep", "Bash", "Edit", "Write"];
 
   const fails = [];
   for (const a of expectAgents) if (!agents.includes(a)) fails.push(`missing agent: ${a}`);
   for (const m of expectMcp) if (!mcp.includes(m)) fails.push(`missing mcp server: ${m}`);
+  for (const t of expectTools) if (!tools.includes(t)) fails.push(`missing built-in tool: ${t} (coordinator-mode toolset strip?)`);
   if (init.permissionMode !== "bypassPermissions") fails.push(`permissionMode=${init.permissionMode} (want bypassPermissions)`);
 
   console.log(`agents:         ${JSON.stringify(agents)}`);
   console.log(`mcp_servers:    ${JSON.stringify(mcp)}`);
+  console.log(`tools:          ${JSON.stringify(tools)}`);
   console.log(`permissionMode: ${init.permissionMode}`);
 
   if (fails.length) {
     console.error("❌ serve session verification FAILED:\n  - " + fails.join("\n  - "));
     process.exitCode = 1;
   } else {
-    console.log("✅ serve session verified: built-in + injected agents, MCP servers, and bypass mode all present.");
+    console.log("✅ serve session verified: built-in tools + injected agents, MCP servers, and bypass mode all present.");
   }
 }
 

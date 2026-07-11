@@ -3,7 +3,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
-import { configureServePermissionsBypass } from "~/lib/mcp-permissions-settings"
+import { configureServePermissionsBypass, sanitizeServeSettingsEnv } from "~/lib/mcp-permissions-settings"
 
 const tmps: string[] = []
 afterEach(async () => {
@@ -65,5 +65,52 @@ describe("configureServePermissionsBypass", () => {
     const p = path.join(dir, "settings.json")
     await fs.writeFile(p, "[1,2,3]", "utf8")
     await expect(configureServePermissionsBypass(p)).rejects.toThrow(/not a JSON object/)
+  })
+})
+
+describe("sanitizeServeSettingsEnv", () => {
+  it("strips CLAUDE_CODE_COORDINATOR_MODE from the env block, preserving the rest", async () => {
+    const p = await settingsFile({
+      env: {
+        CLAUDE_CODE_COORDINATOR_MODE: "1",
+        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
+        SOME_OTHER: "x",
+      },
+      permissions: { defaultMode: "bypassPermissions" },
+    })
+    const r = await sanitizeServeSettingsEnv(p)
+    expect(r.removed).toEqual(["CLAUDE_CODE_COORDINATOR_MODE"])
+    const j = await read(p)
+    // coordinator removed; agent-teams (additive) + unrelated keys preserved
+    expect(j.env).toEqual({ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1", SOME_OTHER: "x" })
+    expect((j.permissions as Record<string, unknown>).defaultMode).toBe("bypassPermissions")
+  })
+
+  it("is a no-op (no write) when coordinator mode is absent", async () => {
+    const p = await settingsFile({ env: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" } })
+    const before = await fs.stat(p)
+    const r = await sanitizeServeSettingsEnv(p)
+    expect(r.removed).toEqual([])
+    // file untouched (mtime unchanged — no rewrite)
+    expect((await fs.stat(p)).mtimeMs).toBe(before.mtimeMs)
+  })
+
+  it("is a no-op when there is no env block", async () => {
+    const p = await settingsFile({ permissions: { defaultMode: "bypassPermissions" } })
+    expect((await sanitizeServeSettingsEnv(p)).removed).toEqual([])
+  })
+
+  it("returns nothing for a missing (ENOENT) settings.json", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ghr-mcpperm-"))
+    tmps.push(dir)
+    expect((await sanitizeServeSettingsEnv(path.join(dir, "nope.json"))).removed).toEqual([])
+  })
+
+  it("refuses to overwrite a non-object settings.json", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ghr-mcpperm-"))
+    tmps.push(dir)
+    const p = path.join(dir, "settings.json")
+    await fs.writeFile(p, '"a string"', "utf8")
+    await expect(sanitizeServeSettingsEnv(p)).rejects.toThrow(/not a JSON object/)
   })
 })
