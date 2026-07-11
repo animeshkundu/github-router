@@ -77,7 +77,50 @@ export async function sanitizeServeSettingsEnv(
 }
 
 /**
- * Configure the serve mirror's `settings.json` permission posture so the
+ * Add `mcp__<server>` allow rules to a mirror `settings.json` for each injected
+ * MCP server key, so github-router's own MCP tools auto-run WITHOUT a permission
+ * prompt — in plan mode and every other mode.
+ *
+ * Why this is the correct (and only) mechanism: Claude Code's plan mode only
+ * intercepts file-edit (Edit/Write/NotebookEdit) and shell-write (Bash) built-in
+ * tool TYPES — MCP tools are never on that restricted list, so an MCP call falls
+ * through the permission-mode step to the allow-rules step exactly as in default
+ * mode. A bare `mcp__<server>` rule allows every tool from that server (per the
+ * Claude Code permissions doc); `mcp__*` (glob server segment) is rejected for
+ * allow rules, so each server is named explicitly. `readOnlyHint`/MCP annotations
+ * are NOT consulted by Claude Code's permission engine, so there is nothing else
+ * to set. Rules are global across modes (no per-mode allow block exists).
+ *
+ * `serverKeys` are the RESOLVED mcpServers config keys (collision-aware —
+ * `peers` or `gh-router-peers`, etc.), so the rule matches the server name the
+ * model actually sees. Existing `allow` entries and `deny`/`ask` are preserved;
+ * merge is idempotent (no write when every rule is already present). Mirror only;
+ * never the operator's real settings. Atomic temp+rename, mode 0o600.
+ */
+export async function injectMcpServerAllowRules(
+  settingsPath: string,
+  serverKeys: readonly string[],
+): Promise<{ added: string[] }> {
+  const want = [...new Set(serverKeys.filter(Boolean))].map((k) => `mcp__${k}`)
+  if (want.length === 0) return { added: [] }
+
+  const existing = (await readSettingsObject(settingsPath)) ?? {}
+  const permsRaw = existing.permissions
+  const perms: Record<string, unknown> =
+    permsRaw && typeof permsRaw === "object" && !Array.isArray(permsRaw)
+      ? { ...(permsRaw as Record<string, unknown>) }
+      : {}
+  const allow = Array.isArray(perms.allow) ? [...(perms.allow as unknown[])] : []
+  const present = new Set(allow.filter((x): x is string => typeof x === "string"))
+  const added = want.filter((rule) => !present.has(rule))
+  if (added.length === 0) return { added: [] }
+
+  perms.allow = [...allow, ...added]
+  await writeSettingsObject(settingsPath, { ...existing, permissions: perms }, "mcpallow")
+  return { added }
+}
+
+/**
  * CloudCLI-spawned Claude has the FULL toolset with no permission friction — the
  * web-control-plane equivalent of `github-router claude`'s default
  * `--dangerously-skip-permissions`.

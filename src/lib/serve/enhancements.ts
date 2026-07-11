@@ -18,7 +18,11 @@ import {
   prependStyleDirectiveToMirroredClaudeMd,
 } from "../claude-md-injection"
 import { INJECTED_SKILLS, writeInjectedSkill } from "../injected-skills"
-import { configureServePermissionsBypass, sanitizeServeSettingsEnv } from "../mcp-permissions-settings"
+import {
+  configureServePermissionsBypass,
+  injectMcpServerAllowRules,
+  sanitizeServeSettingsEnv,
+} from "../mcp-permissions-settings"
 import {
   agentToolsEnabled,
   browseAgentEnabled,
@@ -196,6 +200,17 @@ export async function provisionServeEnhancements(
         consola.warn(`Could not set serve permission defaults: ${String(err)}`),
       )
     }
+
+    // Auto-approve github-router's injected MCP servers via `mcp__<server>` allow
+    // rules (on the resolved keys). Redundant under the bypass default above, but
+    // load-bearing the moment a serve user switches the composer to PLAN mode:
+    // plan mode re-gates tools, and MCP tools (search / peers / workers / …) are
+    // exactly the research surface wanted while planning. Runs AFTER the bypass
+    // config so the entries survive its allow-list clear.
+    await injectMcpServerAllowRules(
+      settingsPath,
+      Object.values(groupKeys).filter((k): k is string => Boolean(k)),
+    ).catch((err) => consola.warn(`Could not auto-approve injected MCP servers: ${String(err)}`))
 
     if (workerToolsEnabled()) {
       const promptCmd = buildPromptSubmitHookCommand(process.execPath, process.argv[1])

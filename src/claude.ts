@@ -17,6 +17,7 @@ import {
 } from "./lib/codex-mcp-config"
 import { enableFileLogging } from "./lib/file-log-reporter"
 import { getCodexVersion, launchChild } from "./lib/launch"
+import { injectMcpServerAllowRules } from "./lib/mcp-permissions-settings"
 import { listModelsForEndpoint } from "./lib/model-validation"
 import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror, writeArtifactCredsToMirror } from "./lib/paths"
 import {
@@ -692,6 +693,25 @@ export const claude = defineCommand({
             await injectStopHookIntoSettingsFile(settingsPath, cmd, "UserPromptSubmit", 45)
           } catch (err) {
             consola.warn(`Could not register the UserPromptSubmit hook: ${String(err)}`)
+          }
+          // Auto-approve github-router's own injected MCP servers so their tools
+          // run WITHOUT a permission prompt in every mode — including plan mode,
+          // where the research tools (search / peers / workers-explore / stand_in /
+          // orchestrate) are exactly what the model reaches for. MCP tools aren't
+          // subject to plan mode's file-edit/shell-write restriction, so a bare
+          // `mcp__<server>` allow rule (on the RESOLVED keys) auto-runs them there
+          // too. deny/ask and the user's own allow entries are preserved.
+          try {
+            const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+            const res = await injectMcpServerAllowRules(
+              settingsPath,
+              Object.values(groupKeys).filter((k): k is string => Boolean(k)),
+            )
+            if (res.added.length) {
+              consola.debug(`Auto-approved injected MCP servers: ${res.added.join(", ")}`)
+            }
+          } catch (err) {
+            consola.warn(`Could not auto-approve injected MCP servers: ${String(err)}`)
           }
           // Workers non-blocking guard: a PreToolUse hook scoped (matcher) to the
           // active worker tools that DENIES a raw `mcp__<workersKey>__<mode>` call

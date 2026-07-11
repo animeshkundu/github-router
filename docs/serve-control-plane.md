@@ -87,6 +87,17 @@ by writing into the router-owned `CLAUDE_CONFIG_DIR` mirror (which the SDK-spawn
   a browser approval prompt for every injected tool, and an operator's mirrored `defaultMode: "plan"`
   refuses native writes. Opt out with `GH_ROUTER_SERVE_NO_AUTO_APPROVE=1` (prompts + the mirrored mode
   are then left untouched). Existing `allow`/`deny`/`ask` entries are preserved; a user `deny` still wins.
+- **Injected MCP servers auto-approved (plan mode too)** — serve (and `github-router claude`) add bare
+  `mcp__<server>` allow rules for every injected MCP server (`mcp__peers`, `mcp__search`,
+  `mcp__workers`, `mcp__orchestrate`, `mcp__decide`, plus `mcp__browser`/`mcp__fleet`/`mcp__first-mate`
+  when enabled) to the mirror `settings.json` `permissions.allow`, using the collision-resolved keys.
+  Redundant under the bypass default, but load-bearing the moment a session switches to **plan mode**:
+  plan mode re-gates tools, but its restriction only covers file-edit/shell-write built-ins — MCP tools
+  fall through to the allow-rules step, so an `mcp__<server>` match auto-runs them un-prompted while
+  planning (exactly the research surface — search / peers / workers-explore / stand_in / orchestrate —
+  the model reaches for there). `readOnlyHint`/MCP annotations are not consulted by Claude Code's
+  permission engine, so allow rules are the only lever. A user who wants a specific mutating tool to
+  still prompt in plan mode can add an `ask`/`deny` rule (e.g. `mcp__workers__implement`).
 - **Coordinator-mode strip (single-agent toolset)** — serve removes `CLAUDE_CODE_COORDINATOR_MODE` from
   the mirror `settings.json` `env` block (unconditional, NOT gated by `GH_ROUTER_SERVE_NO_AUTO_APPROVE`).
   A user who runs FleetView/coordinator sessions sets that var in their real `~/.claude/settings.json`; it

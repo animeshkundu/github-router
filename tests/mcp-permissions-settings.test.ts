@@ -3,7 +3,11 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
-import { configureServePermissionsBypass, sanitizeServeSettingsEnv } from "~/lib/mcp-permissions-settings"
+import {
+  configureServePermissionsBypass,
+  injectMcpServerAllowRules,
+  sanitizeServeSettingsEnv,
+} from "~/lib/mcp-permissions-settings"
 
 const tmps: string[] = []
 afterEach(async () => {
@@ -112,5 +116,51 @@ describe("sanitizeServeSettingsEnv", () => {
     const p = path.join(dir, "settings.json")
     await fs.writeFile(p, '"a string"', "utf8")
     await expect(sanitizeServeSettingsEnv(p)).rejects.toThrow(/not a JSON object/)
+  })
+})
+
+describe("injectMcpServerAllowRules", () => {
+  it("adds bare mcp__<server> allow rules for each resolved key on a fresh file", async () => {
+    const p = await settingsFile()
+    const r = await injectMcpServerAllowRules(p, ["peers", "search", "workers", "orchestrate", "decide"])
+    expect(r.added).toEqual([
+      "mcp__peers", "mcp__search", "mcp__workers", "mcp__orchestrate", "mcp__decide",
+    ])
+    expect((await read(p)).permissions).toEqual({
+      allow: ["mcp__peers", "mcp__search", "mcp__workers", "mcp__orchestrate", "mcp__decide"],
+    })
+  })
+
+  it("uses collision-resolved keys (gh-router-*) and preserves existing allow/deny/ask", async () => {
+    const p = await settingsFile({
+      permissions: { allow: ["Read", "WebSearch"], deny: ["Bash(rm *)"], defaultMode: "plan" },
+    })
+    const r = await injectMcpServerAllowRules(p, ["gh-router-peers", "search"])
+    expect(r.added).toEqual(["mcp__gh-router-peers", "mcp__search"])
+    const perms = (await read(p)).permissions as Record<string, unknown>
+    expect(perms.allow).toEqual(["Read", "WebSearch", "mcp__gh-router-peers", "mcp__search"])
+    expect(perms.deny).toEqual(["Bash(rm *)"])
+    expect(perms.defaultMode).toBe("plan")
+  })
+
+  it("is idempotent (no write, no duplicates) when rules already present", async () => {
+    const p = await settingsFile({ permissions: { allow: ["mcp__peers", "mcp__search"] } })
+    const before = await fs.stat(p)
+    const r = await injectMcpServerAllowRules(p, ["peers", "search"])
+    expect(r.added).toEqual([])
+    expect((await fs.stat(p)).mtimeMs).toBe(before.mtimeMs)
+  })
+
+  it("dedupes and skips falsy keys", async () => {
+    const p = await settingsFile()
+    const r = await injectMcpServerAllowRules(p, ["peers", "peers", "", "search"])
+    expect(r.added).toEqual(["mcp__peers", "mcp__search"])
+  })
+
+  it("is a no-op for an empty key list", async () => {
+    const p = await settingsFile({ permissions: { allow: ["Read"] } })
+    const before = await fs.stat(p)
+    expect((await injectMcpServerAllowRules(p, [])).added).toEqual([])
+    expect((await fs.stat(p)).mtimeMs).toBe(before.mtimeMs)
   })
 })
