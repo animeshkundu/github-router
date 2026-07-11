@@ -216,17 +216,20 @@ the bind stays loopback), captures the public URL, allowlists it, and prints it 
 you're not logged in, `serve` says so and keeps serving locally (you can then host manually with
 `devtunnel host -p <port>`).
 
-- **One reused tunnel per machine (no leak).** A dev tunnel implicitly created by `host` is a
-  PERSISTENT server-side object — killing the host process stops hosting but does not delete it, and
-  Microsoft caps you at `TunnelsPerUserPerCluster` (10). So `serve` does NOT mint a fresh tunnel each
-  launch (which stranded objects until new tunnels were denied). It stamps every tunnel with a
-  `github-router-serve` label plus a per-machine `ghr-machine-<hash>` label, and on each launch lists
-  its own idle labeled tunnels, **reuses** the first (so the public URL is also stable across launches),
-  and deletes any duplicates — bounding github-router to a single idle tunnel per machine regardless of
-  how teardown ends (a `taskkill`/crash can't leak, since there's nothing new to leak). If listing or
-  reuse fails it falls back to hosting a fresh labeled tunnel, so `--tunnel` always works. To prune
-  pre-existing unlabeled leaks from before this change, `devtunnel list` then
-  `devtunnel delete <id>` the random-named entries with 0 connections and no labels.
+- **One tunnel per machine (no leak).** A dev tunnel implicitly created by `host` is a PERSISTENT
+  server-side object — killing the host process stops hosting but does not delete it, and Microsoft
+  caps you at `TunnelsPerUserPerCluster` (10). So `serve` does NOT mint a fresh tunnel each launch
+  (which stranded objects until new tunnels were denied). It stamps every tunnel with a
+  `github-router-serve` label plus a per-machine `ghr-machine-<hash>` label, and on each launch
+  **sweeps** (deletes) its own idle labeled tunnels from prior launches before hosting a fresh one —
+  bounding github-router to a single tunnel per machine. Because the next launch's sweep also reclaims
+  a tunnel orphaned by a `taskkill`/crash, teardown reliability is irrelevant. (Reusing one tunnel by id
+  would keep the URL stable but can't stay correct across `--port` changes: `devtunnel host <id>
+  -p <newport>` fails with "Batch update of ports is not supported" when the baked-in port differs — so
+  sweep-then-create is the correct design.) A live tunnel (>0 host connections, e.g. a concurrent serve
+  instance) is never swept. If listing or sweeping fails it still hosts a fresh labeled tunnel, so
+  `--tunnel` always works. To prune pre-existing unlabeled leaks from before this change, `devtunnel
+  list` then `devtunnel delete <id>` the random-named entries with 0 connections and no labels.
 
 - **Authenticated, never anonymous.** `serve` never passes `--allow-anonymous`, so Microsoft's
   default applies: the tunnel is reachable only by the signed-in owner (an unauthenticated visitor is

@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test"
 
 import {
   parseDevtunnelUrl,
-  selectServeTunnel,
+  serveTunnelIdsToSweep,
   serveTunnelMachineLabel,
 } from "~/lib/serve/devtunnel"
 
@@ -43,41 +43,34 @@ describe("serveTunnelMachineLabel", () => {
   })
 })
 
-describe("selectServeTunnel", () => {
+describe("serveTunnelIdsToSweep", () => {
   const M = "ghr-machine-abc123def456"
 
-  it("reuses the first idle tunnel for this machine and deletes the rest", () => {
+  it("sweeps every idle tunnel for this machine (deleted before a fresh host)", () => {
     const tunnels = [
-      { tunnelId: "keep-1.inc1", labels: [M], hostConnections: 0 },
-      { tunnelId: "dup-2.inc1", labels: [M], hostConnections: 0 },
-      { tunnelId: "dup-3.usw2", labels: [M] }, // undefined hostConnections === idle
+      { tunnelId: "a-1.inc1", labels: [M], hostConnections: 0 },
+      { tunnelId: "a-2.inc1", labels: [M], hostConnections: 0 },
+      { tunnelId: "a-3.usw2", labels: [M] }, // undefined hostConnections === idle
     ]
-    expect(selectServeTunnel(tunnels, M)).toEqual({
-      reuseId: "keep-1.inc1",
-      deleteIds: ["dup-2.inc1", "dup-3.usw2"],
-    })
+    expect(serveTunnelIdsToSweep(tunnels, M)).toEqual(["a-1.inc1", "a-2.inc1", "a-3.usw2"])
   })
 
   it("ignores tunnels owned by other machines (different machine label)", () => {
     const tunnels = [
       { tunnelId: "other-host.inc1", labels: ["ghr-machine-999"], hostConnections: 0 },
     ]
-    expect(selectServeTunnel(tunnels, M)).toEqual({ reuseId: null, deleteIds: [] })
+    expect(serveTunnelIdsToSweep(tunnels, M)).toEqual([])
   })
 
-  it("never reuses or deletes a tunnel that is actively hosted (>0 connections)", () => {
+  it("never sweeps a tunnel that is actively hosted (>0 connections)", () => {
     const tunnels = [
       { tunnelId: "live.inc1", labels: [M], hostConnections: 1 },
       { tunnelId: "idle.inc1", labels: [M], hostConnections: 0 },
     ]
-    // the live one is skipped for both reuse AND deletion; only the idle one reused
-    expect(selectServeTunnel(tunnels, M)).toEqual({
-      reuseId: "idle.inc1",
-      deleteIds: [],
-    })
+    expect(serveTunnelIdsToSweep(tunnels, M)).toEqual(["idle.inc1"])
   })
 
-  it("returns null reuse when there are no idle owned tunnels (host will create one)", () => {
-    expect(selectServeTunnel([], M)).toEqual({ reuseId: null, deleteIds: [] })
+  it("returns nothing when there are no idle owned tunnels", () => {
+    expect(serveTunnelIdsToSweep([], M)).toEqual([])
   })
 })
