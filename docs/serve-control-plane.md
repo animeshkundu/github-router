@@ -64,7 +64,12 @@ by writing into the router-owned `CLAUDE_CONFIG_DIR` mirror (which the SDK-spawn
   withheld unless the operator opts in with `--browse-over-tunnel` / `--agents-over-tunnel` /
   `--fleet-over-tunnel` — see Security model.
 - **Subagents** — the peer critics, worker dispatchers, and `implementer` (`.md` files in the
-  mirror's `agents/`).
+  mirror's `agents/`), PLUS Claude Code's **built-in subagents** (`Explore`, `Plan`, `general-purpose`)
+  which the Agent SDK does NOT register on its own. Without these a serve session shows
+  `Agent type 'Explore' not found` when the model habitually calls them; we re-register them
+  (`BUILTIN_SUBAGENT_DEFINITIONS` in `src/lib/codex-mcp-config.ts`) **serve-only** — never for
+  `github-router claude`, where the CLI provides the native, tuned built-ins and a same-name custom
+  agent would shadow them.
 - **Skills** — `gh-research` / `gh-orchestrate` / `gh-floor-keeper` / `gh-worker` (operator +
   ai-or-die-tab-specific skills are intentionally excluded).
 - **System-prompt-level guidance** — operating-defaults, style (no-attribution/voice), peer-tool and
@@ -232,7 +237,30 @@ locally (you can then host manually with `devtunnel host -p <port>`).
   it, and every provider-façade rewrite fails closed to passthrough on an unexpected shape.
 
 ## Verification
-See `scripts/verify-serve.mjs` (or the manual steps in the plan): browser opens already-logged-in;
-cross-origin WS to the terminal is rejected; the CloudCLI terminal env has no `GITHUB_TOKEN`/
-`ANTHROPIC_*`; a session's traffic appears in the proxy's `/usage`; teardown kills the child + proxy
-and removes the per-launch mirror. `windows-latest` CI must be green.
+
+**`bun run verify:serve`** (`scripts/verify-serve-session.mjs`) is the ground-truth check of what a serve
+session's Claude actually sees. It boots serve to generate the mirror, then runs the real `claude` binary
+in the SAME headless stream-json mode CloudCLI uses (`--print --output-format stream-json`) against that
+mirror and inspects the `init` control message — asserting the registered **agents** (built-in
+`Explore`/`Plan`/`general-purpose` + the injected peer/worker set), **MCP servers**
+(`peers`/`search`/`workers`/`orchestrate`/`decide`), and `permissionMode: bypassPermissions`. This
+verifies the mirror-injection layer directly, without depending on CloudCLI's Agent-SDK spawn (which is
+sensitive to the launching shell's environment on Windows). Requires the `claude` binary
+(`CLAUDE_CLI_PATH` or `~/.local/bin/claude`); skips cleanly otherwise.
+
+Other checks (manual / `scripts/serve-ws-smoke.mjs`): browser opens already-logged-in; cross-origin WS to
+the terminal is rejected; the CloudCLI terminal env has no `GITHUB_TOKEN`/`ANTHROPIC_*`; a session's
+traffic appears in the proxy's `/usage`; teardown kills the child + proxy and removes the per-launch
+mirror. `windows-latest` CI must be green.
+
+### Known CloudCLI-inherent behaviors (not reachable by our injection)
+`serve` runs Claude through CloudCLI's **Agent SDK** (headless), not the interactive `claude` CLI, and
+github-router only writes the mirror + injects HTML — it does not modify CloudCLI. So a few interaction
+behaviors are CloudCLI's own and unchanged by us:
+- **Escape / Stop abort** is wired end-to-end (Escape → `chat.abort` → SDK signal; our proxy passes it
+  through untouched) but armed only for the **currently-viewed** session while its run is `running` with
+  a captured provider session id — an abort sent too early returns `NO_ACTIVE_RUN`, and viewing a
+  different session disarms it.
+- **Plan mode under the permission bypass**: `ExitPlanMode` auto-approves, so the inline plan
+  Approve/Reject buttons have no pending request; interactive plan approval requires cycling the
+  composer's permission mode off bypass (Tab), which re-enables prompts for that session.

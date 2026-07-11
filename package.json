@@ -1,6 +1,6 @@
 {
   "name": "@animeshkundu/github-router",
-  "version": "0.3.185",
+  "version": "0.3.186",
   "license": "MIT",
   "description": "A reverse proxy that exposes GitHub Copilot as OpenAI and Anthropic compatible API endpoints.",
   "keywords": [
@@ -43,7 +43,8 @@
     "release": "./publish/release.sh",
     "start": "NODE_ENV=production bun run ./src/main.ts",
     "test": "bun test",
-    "typecheck": "tsc"
+    "typecheck": "tsc",
+    "verify:serve": "node scripts/verify-serve-session.mjs"
   },
   "simple-git-hooks": {
     "pre-commit": "bunx lint-staged"

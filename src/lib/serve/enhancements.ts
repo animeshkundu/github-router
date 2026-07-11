@@ -4,6 +4,7 @@ import consola from "consola"
 
 import { injectAttributionSuppressionIntoSettingsFile } from "../attribution-settings"
 import {
+  BUILTIN_SUBAGENT_DEFINITIONS,
   injectPeerMcpIntoMirror,
   resolveGroupKeysFromMirror,
   workersKeyOf,
@@ -107,6 +108,11 @@ export async function provisionServeEnhancements(
       workerToolsAvailable: workerToolsEnabled(),
       browseAvailable: browseAllowed && browseAgentEnabled(),
       implementerModel: implementerSubagentModel(),
+      // Serve-only: register Claude Code's built-in Explore/Plan/general-purpose
+      // subagents (the Agent SDK doesn't) so the model's habitual Agent() calls
+      // resolve. Never passed by `github-router claude` (would shadow the CLI's
+      // native built-ins).
+      builtinSubagents: BUILTIN_SUBAGENT_DEFINITIONS,
     })
     // The proxy's /mcp handler authorizes tool calls against this per-launch
     // nonce (the same value baked into the mirrored mcpServers Authorization).
