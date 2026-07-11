@@ -221,6 +221,9 @@ describe("/mcp protocol methods", () => {
       expect(t.description.length).toBeGreaterThan(20)
       expect(t.inputSchema).toBeDefined()
     }
+    const standIn = result.tools.find((t) => t.name === "stand_in")
+    const standInSchema = standIn!.inputSchema as { required: Array<string> }
+    expect(standInSchema.required).toEqual(["decision", "options", "context"])
   })
 
   test("tools/list omits gemini_critic AND stand_in when no gemini-3.x-pro in catalog (web + code still present)", async () => {
@@ -1283,6 +1286,7 @@ describe("/mcp stand_in tool", () => {
       { id: "A", summary: "date-fns" },
       { id: "B", summary: "luxon" },
     ],
+    context: "The frontend bundle targets modern browsers and prioritizes tree-shaking.",
   }
 
   test("tools/call stand_in dispatches to all three peers and returns a consensus envelope", async () => {
@@ -1374,6 +1378,44 @@ describe("/mcp stand_in tool", () => {
     expect(__getInFlightForTests()).toBe(0)
   })
 
+  test("JSON-path tools/call accepts stand_in context between the old 6KB and new 32KB caps", async () => {
+    mockThreePeers({
+      "gpt-5.5":                [VOTE_A_HIGH],
+      "claude-opus-4-7":        [VOTE_A_HIGH],
+      "gemini-3.1-pro-preview": [VOTE_A_HIGH],
+    })
+
+    const midSizeContext = "x".repeat(20 * 1024)
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+          accept: "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 4004,
+          method: "tools/call",
+          params: {
+            name: "stand_in",
+            arguments: { ...TINY_INPUT, context: midSizeContext },
+          },
+        }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as {
+      result?: { content: Array<{ text: string }>; isError?: boolean }
+    }
+    expect(json.result?.isError).toBeFalsy()
+    expect(json.result?.content[0].text).not.toMatch(/pre-flight rejected/i)
+    expect(JSON.parse(json.result?.content[0].text ?? "{}").verdict).toBe("consensus")
+    expect(__getInFlightForTests()).toBe(0)
+  })
+
   test("JSON-path tools/call with oversized stand_in input hits predictedTooLong cap (slot NOT acquired)", async () => {
     // Same pattern as the codex_critic predictedTooLong test above. The
     // cap fires in handleMcpPost BEFORE handleToolsCall, so no upstream
@@ -1384,7 +1426,7 @@ describe("/mcp stand_in tool", () => {
     })
     globalThis.fetch = sentinel as unknown as typeof globalThis.fetch
 
-    const oversizedContext = "x".repeat(7 * 1024)
+    const oversizedContext = "x".repeat(33 * 1024)
     const res = await mcpRoutes.request(
       new Request(`http://${PROXY_HOST}/`, {
         method: "POST",
@@ -1435,6 +1477,46 @@ describe("/mcp stand_in tool", () => {
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain("options")
     expect(sentinel).not.toHaveBeenCalled()
+  })
+
+  test("tools/call stand_in returns isError when context is omitted", async () => {
+    const withoutContext = { decision: TINY_INPUT.decision, options: TINY_INPUT.options }
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 4006,
+      method: "tools/call",
+      params: { name: "stand_in", arguments: withoutContext },
+    })
+    expect(status).toBe(200)
+    const result = json.result as { content: Array<{ text: string }>; isError?: boolean }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain("context")
+  })
+
+  test("tools/call stand_in returns isError when context is whitespace-only", async () => {
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 4007,
+      method: "tools/call",
+      params: { name: "stand_in", arguments: { ...TINY_INPUT, context: "   " } },
+    })
+    expect(status).toBe(200)
+    const result = json.result as { content: Array<{ text: string }>; isError?: boolean }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain("context")
+  })
+
+  test("tools/call stand_in returns isError when context is non-string", async () => {
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 4008,
+      method: "tools/call",
+      params: { name: "stand_in", arguments: { ...TINY_INPUT, context: 123 } },
+    })
+    expect(status).toBe(200)
+    const result = json.result as { content: Array<{ text: string }>; isError?: boolean }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain("context")
   })
 
   test("tools/list omits stand_in when gpt-5.5 is missing from catalog (other personas + tools still present)", async () => {

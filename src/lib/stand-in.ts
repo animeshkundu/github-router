@@ -40,8 +40,10 @@ export interface StandInInput {
   decision: string
   /** 2-6 options, caller-provided (not model-generated). */
   options: ReadonlyArray<StandInOption>
-  /** Task / code background that informs the decision. */
-  context?: string
+  /** Task / code background that informs the decision. REQUIRED: the panel
+   *  is cold-start (no repo, no transcript) and sees only decision + options
+   *  + context, so this must carry every constraint needed to decide well. */
+  context: string
 }
 
 export type ModelKey =
@@ -64,6 +66,11 @@ export interface Vote {
   reasoning: string
   /** Present when the model couldn't decide due to missing context. */
   needMoreInfo?: string
+  /** Present when the model judged every provided option inadequate and
+   *  proposed a concrete unlisted option instead. Never enters the tally —
+   *  surfaced in `notes` only, so it can neither form nor suppress a
+   *  provided-option majority. */
+  alternative?: string
 }
 
 export interface VoteFailure {
@@ -123,12 +130,15 @@ Respond with ONLY a single JSON object — no prose, no markdown fences, no prea
   "choice": "<option.id>" | null,
   "confidence": <number between 0.0 and 1.0>,
   "reasoning": "<one short sentence>",
-  "need_more_info": "<what context is missing, if you cannot decide>"
+  "need_more_info": "<what context is missing, if you cannot decide>",
+  "alternative": "<a concrete unlisted option — ONLY if every provided option is inadequate>"
 }
 
 Calibration rules:
 - "confidence" reflects how sure you are this is the better option (not how confident you are in your prose). 0.5 = coin flip. 0.9 = clear winner. Be honestly calibrated; the orchestrator weighs your number directly.
 - If the question is genuinely under-specified — you'd need information you don't have to choose well — set "choice": null AND populate "need_more_info" with the specific gap. Do NOT guess.
+- The caller curated these options; default to choosing among them. Only if a provided option is actively harmful, or clearly dominated by an obvious unlisted option, set "choice": null AND put that concrete option in "alternative" (one sentence). This is distinct from "need_more_info" (which is about missing context, not a better option). Prefer choosing over proposing — do not invent an alternative to avoid committing.
+- On an abstention, populate at most ONE escape channel: "need_more_info" OR "alternative", never both. If both seem to apply, use "need_more_info" — missing context takes precedence, because you can't reliably judge the options inadequate without it.
 - One sentence of reasoning. Not a paragraph.
 - The other two models will vote independently and you will see their votes in round 2. There is no benefit to anticipating what they'll pick; vote on the merits.
 
@@ -142,17 +152,20 @@ Same JSON schema as round 1:
   "choice": "<option.id>" | null,
   "confidence": <number between 0.0 and 1.0>,
   "reasoning": "<one short sentence>",
-  "need_more_info": "<gap, if any>"
+  "need_more_info": "<gap, if any>",
+  "alternative": "<a concrete unlisted option, if every provided option is inadequate>"
 }
 
 Calibration rules:
 - You may keep your round-1 vote OR change it. Do NOT change just to agree — agreement is not the goal, the right answer is. Capitulating to peer pressure when you still believe your original choice is better is a failure mode, not a success.
 - If a peer's reasoning identifies a consideration you missed or weighed wrong, update freely. The blind round was the anti-anchor mechanism; this round is where genuine evidence can move you.
 - If round 1 left you genuinely uncertain and peer reasoning hasn't resolved it, "choice": null is still the honest answer.
+- Keep using "alternative" only when every provided option is inadequate (choice null); it is not a way to dodge a decision the options already support.
+- On an abstention, populate at most ONE escape channel: "need_more_info" OR "alternative", never both. If both seem to apply, use "need_more_info" (missing context takes precedence).
 
 Output ONLY the JSON object.`
 
-const RETRY_PROMPT_SUFFIX = `\n\nYour previous response was not valid JSON matching the schema. Respond with ONLY the JSON object — no preamble, no markdown fences, no closing remarks. Schema reminder: {"choice": "<id>" | null, "confidence": 0.0-1.0, "reasoning": "<one sentence>", "need_more_info": "<gap, if any>"}`
+const RETRY_PROMPT_SUFFIX = `\n\nYour previous response was not valid JSON matching the schema. Respond with ONLY the JSON object — no preamble, no markdown fences, no closing remarks. Schema reminder: {"choice": "<id>" | null, "confidence": 0.0-1.0, "reasoning": "<one sentence>", "need_more_info": "<gap, if any>", "alternative": "<unlisted option, if any>"}`
 
 // ─── Orchestrator ───────────────────────────────────────────────────
 
@@ -166,30 +179,27 @@ export async function runStandIn(
   input: StandInInput,
   signal?: AbortSignal,
 ): Promise<StandInResult> {
+  const validIds = new Set(input.options.map((o) => o.id))
+
   // ── Round 1: blind parallel fan-out ──────────────────────────────
   const r1UserText = buildRound1UserText(input)
   const r1 = await Promise.all(
     STAND_IN_MODELS.map((cfg) =>
-      callAndParse(cfg, SYSTEM_PROMPT_R1, r1UserText, signal),
+      callAndParse(cfg, SYSTEM_PROMPT_R1, r1UserText, validIds, signal),
     ),
   )
 
-  // need_more_info short-circuit: every model that successfully parsed
-  // R1 flagged a missing-context gap. Aggregate the gaps and return.
   const successfulR1 = r1.filter((r): r is { key: ModelKey; vote: Vote } => isVote(r.vote))
-  const allFlaggedGap =
-    successfulR1.length === STAND_IN_MODELS.length
-    && successfulR1.every((r) => r.vote.needMoreInfo && r.vote.choice === null)
-  if (allFlaggedGap) {
-    const gaps = successfulR1.map((r) => `- ${r.key}: ${r.vote.needMoreInfo}`).join("\n")
-    return {
-      verdict: "need_more_info",
-      recommendation: null,
-      confidence: 0,
-      votes: voteRecord(r1, null),
-      notes: `All three models reported they need more context to decide:\n${gaps}`,
-    }
-  }
+
+  // need_more_info: ≥2 of the parsed R1 votes abstained citing a missing-
+  // context gap. At ≥2 gap-abstains at most one model chose an option, so no
+  // provided-option majority is reachable — the run would end in no_consensus
+  // regardless; surfacing the specific gaps as need_more_info is strictly
+  // more actionable. Deterministic + code-driven; isError stays false. Only
+  // genuine abstain-on-gap votes count (an `alternative` abstain is not a
+  // context gap).
+  const nmiR1 = gapAbstainVerdict(successfulR1, r1, null)
+  if (nmiR1) return nmiR1
 
   // Short-circuit consensus: 3/3 same non-null choice with mean confidence ≥ 0.8.
   const r1Decision = aggregateVotes(successfulR1)
@@ -197,25 +207,33 @@ export async function runStandIn(
     r1Decision.verdict === "consensus"
     && r1Decision.meanConfidence >= 0.8
   ) {
-    return {
-      verdict: "consensus",
-      recommendation: r1Decision.winner,
-      confidence: round2(r1Decision.meanConfidence),
-      votes: voteRecord(r1, null),
-      notes: `All three models picked ${r1Decision.winner} in round 1 with high confidence (skipped round 2).`,
-    }
+    return withDerivedNotes(
+      {
+        verdict: "consensus",
+        recommendation: r1Decision.winner,
+        confidence: round2(r1Decision.meanConfidence),
+        votes: voteRecord(r1, null),
+        notes: `All three models picked ${r1Decision.winner} in round 1 with high confidence (skipped round 2).`,
+      },
+      r1,
+      null,
+    )
   }
 
   // Insufficient signal: fewer than 2 successful R1 votes. Can't run R2
   // meaningfully — abstain.
   if (successfulR1.length < 2) {
-    return {
-      verdict: "no_consensus",
-      recommendation: null,
-      confidence: 0,
-      votes: voteRecord(r1, null),
-      notes: `Only ${successfulR1.length} of 3 models returned a parseable round-1 vote; insufficient signal to run round 2.`,
-    }
+    return withDerivedNotes(
+      {
+        verdict: "no_consensus",
+        recommendation: null,
+        confidence: 0,
+        votes: voteRecord(r1, null),
+        notes: `Only ${successfulR1.length} of 3 models returned a parseable round-1 vote; insufficient signal to run round 2.`,
+      },
+      r1,
+      null,
+    )
   }
 
   // ── Round 2: informed parallel fan-out ───────────────────────────
@@ -226,6 +244,7 @@ export async function runStandIn(
         cfg,
         SYSTEM_PROMPT_R2,
         r2UserTextBase + `\n\nYou are ${cfg.key}. Reconsider and vote.`,
+        validIds,
         signal,
       ),
     ),
@@ -233,47 +252,66 @@ export async function runStandIn(
 
   const successfulR2 = r2.filter((r): r is { key: ModelKey; vote: Vote } => isVote(r.vote))
   if (successfulR2.length < 2) {
-    return {
-      verdict: "no_consensus",
-      recommendation: null,
-      confidence: 0,
-      votes: voteRecord(r1, r2),
-      notes: `Only ${successfulR2.length} of 3 models returned a parseable round-2 vote; deferring to user.`,
-    }
+    return withDerivedNotes(
+      {
+        verdict: "no_consensus",
+        recommendation: null,
+        confidence: 0,
+        votes: voteRecord(r1, r2),
+        notes: `Only ${successfulR2.length} of 3 models returned a parseable round-2 vote; deferring to user.`,
+      },
+      r1,
+      r2,
+    )
   }
+
+  const nmiR2 = gapAbstainVerdict(successfulR2, r1, r2)
+  if (nmiR2) return nmiR2
 
   const r2Decision = aggregateVotes(successfulR2)
   if (r2Decision.verdict === "consensus") {
-    return {
-      verdict: "consensus",
-      recommendation: r2Decision.winner,
-      confidence: round2(r2Decision.meanConfidence),
-      votes: voteRecord(r1, r2),
-      notes: `All three models picked ${r2Decision.winner} in round 2.`,
-    }
+    return withDerivedNotes(
+      {
+        verdict: "consensus",
+        recommendation: r2Decision.winner,
+        confidence: round2(r2Decision.meanConfidence),
+        votes: voteRecord(r1, r2),
+        notes: `All three models picked ${r2Decision.winner} in round 2.`,
+      },
+      r1,
+      r2,
+    )
   }
   if (r2Decision.verdict === "majority") {
     const dissenters = successfulR2
       .filter((r) => r.vote.choice !== r2Decision.winner)
       .map((r) => `${r.key} picked ${r.vote.choice ?? "abstain"} (${r.vote.reasoning})`)
       .join("; ")
-    return {
-      verdict: "majority",
-      recommendation: r2Decision.winner,
-      confidence: round2(r2Decision.meanConfidence),
-      votes: voteRecord(r1, r2),
-      notes: `Majority (2 of 3) picked ${r2Decision.winner}. Dissent: ${dissenters}.`,
-    }
+    return withDerivedNotes(
+      {
+        verdict: "majority",
+        recommendation: r2Decision.winner,
+        confidence: round2(r2Decision.meanConfidence),
+        votes: voteRecord(r1, r2),
+        notes: `Majority (2 of 3) picked ${r2Decision.winner}. Dissent: ${dissenters}.`,
+      },
+      r1,
+      r2,
+    )
   }
 
   // 1/1/1 split or all abstained — defer.
-  return {
-    verdict: "no_consensus",
-    recommendation: null,
-    confidence: 0,
-    votes: voteRecord(r1, r2),
-    notes: `Models did not converge in round 2 (votes split). Defer to user.`,
-  }
+  return withDerivedNotes(
+    {
+      verdict: "no_consensus",
+      recommendation: null,
+      confidence: 0,
+      votes: voteRecord(r1, r2),
+      notes: `Models did not converge in round 2 (votes split). Defer to user.`,
+    },
+    r1,
+    r2,
+  )
 }
 
 // ─── Internals ──────────────────────────────────────────────────────
@@ -284,6 +322,7 @@ async function callAndParse(
   cfg: ModelConfig,
   instructions: string,
   userText: string,
+  validIds: ReadonlySet<string>,
   signal: AbortSignal | undefined,
 ): Promise<CallResult> {
   // The OpenAI slot's `key` is the canonical `gpt-5.6-sol`, but the actual
@@ -309,7 +348,7 @@ async function callAndParse(
     }
   }
 
-  const first = tryParseVote(raw)
+  const first = tryParseVote(raw, validIds)
   if (first.ok) return { key: cfg.key, vote: first.vote }
 
   // Retry once with a stricter "please return only JSON" suffix.
@@ -329,7 +368,7 @@ async function callAndParse(
       vote: { error: "upstream_error", message: `retry after parse failure: ${String(err)}` },
     }
   }
-  const second = tryParseVote(retryRaw)
+  const second = tryParseVote(retryRaw, validIds)
   if (second.ok) return { key: cfg.key, vote: second.vote }
 
   return {
@@ -342,7 +381,7 @@ async function callAndParse(
   }
 }
 
-function tryParseVote(raw: string):
+function tryParseVote(raw: string, validIds: ReadonlySet<string>):
   | { ok: true; vote: Vote }
   | { ok: false; error: string } {
   if (!raw || !raw.trim()) {
@@ -368,13 +407,22 @@ function tryParseVote(raw: string):
   }
   const obj = parsed as Record<string, unknown>
 
-  const choice =
+  const rawChoice =
     obj.choice === null ? null
     : typeof obj.choice === "string" && obj.choice.length > 0 ? obj.choice
     : undefined
-  if (choice === undefined) {
+  if (rawChoice === undefined) {
     return { ok: false, error: "missing or invalid 'choice' field (string or null required)" }
   }
+  // A non-null choice must name one of the caller's option ids. An unlisted id
+  // is a malformed response (a hallucinated option), not a valid abstention —
+  // fail the parse so callAndParse retries once, and a persistent bad id becomes
+  // a VoteFailure (filtered out of successfulR1, never tallied). This preserves
+  // the no-phantom-majority invariant AND keeps successful-vote accounting honest.
+  if (rawChoice !== null && !validIds.has(rawChoice)) {
+    return { ok: false, error: "'choice' must be one of the provided option ids or null" }
+  }
+  const choice = rawChoice
 
   const confidenceRaw = obj.confidence
   const confidence =
@@ -390,12 +438,34 @@ function tryParseVote(raw: string):
     return { ok: false, error: "missing or empty 'reasoning' field" }
   }
 
+  // A context gap is an abstention signal — a decided vote (valid `choice`)
+  // carries none, matching the `alternative` rule below. So `need_more_info`
+  // survives only when the model abstained (`choice === null`); a gap alongside
+  // a real pick is contradictory and dropped, keeping vote states canonical.
   const needMoreInfo =
-    typeof obj.need_more_info === "string" && obj.need_more_info.length > 0
-      ? obj.need_more_info
+    choice === null
+    && typeof obj.need_more_info === "string"
+    && obj.need_more_info.trim().length > 0
+      ? obj.need_more_info.trim()
       : undefined
 
-  return { ok: true, vote: { choice, confidence, reasoning, needMoreInfo } }
+  // Panel-proposed unlisted option. Never enters the tally; surfaced in
+  // notes only. Null-vote states are kept mutually exclusive: a decided vote
+  // (valid `choice`) carries no `alternative` (an alternative means every
+  // provided option is inadequate — coherent only with an abstain); and among
+  // abstentions a context gap (`need_more_info`) takes precedence over an
+  // `alternative`, because a model that lacks context can't reliably judge the
+  // options inadequate, so we keep the conservative "gather context" signal
+  // and drop the alternative.
+  const alternative =
+    choice === null
+    && !needMoreInfo
+    && typeof obj.alternative === "string"
+    && obj.alternative.trim().length > 0
+      ? obj.alternative.trim()
+      : undefined
+
+  return { ok: true, vote: { choice, confidence, reasoning, needMoreInfo, alternative } }
 }
 
 interface VoteAggregation {
@@ -475,8 +545,11 @@ function buildRound2UserTextBase(
     if (isVote(r.vote)) {
       const choiceText = r.vote.choice === null ? "abstain" : r.vote.choice
       const gapText = r.vote.needMoreInfo ? ` (needs: ${r.vote.needMoreInfo})` : ""
+      const altText = r.vote.alternative
+        ? ` [proposed unlisted alternative: ${r.vote.alternative}]`
+        : ""
       summaries.push(
-        `- ${r.key} picked ${choiceText}, confidence ${r.vote.confidence.toFixed(2)}, reasoning: ${r.vote.reasoning}${gapText}`,
+        `- ${r.key} picked ${choiceText}, confidence ${r.vote.confidence.toFixed(2)}, reasoning: ${r.vote.reasoning}${gapText}${altText}`,
       )
     } else {
       summaries.push(`- ${r.key} did not return a valid round-1 vote (${r.vote.error}).`)
@@ -487,6 +560,96 @@ function buildRound2UserTextBase(
 
 function isVote(v: VoteResult): v is Vote {
   return !("error" in v)
+}
+
+function gapAbstainVerdict(
+  successful: ReadonlyArray<{ key: ModelKey; vote: Vote }>,
+  r1: ReadonlyArray<CallResult>,
+  r2: ReadonlyArray<CallResult> | null,
+): StandInResult | null {
+  const gapVotes = successful.filter(
+    (r) => r.vote.choice === null && r.vote.needMoreInfo,
+  )
+  if (gapVotes.length < 2) return null
+
+  const gaps = gapVotes.map((r) => `- ${r.key}: ${r.vote.needMoreInfo}`).join("\n")
+  const header =
+    gapVotes.length === STAND_IN_MODELS.length
+      ? "All three models reported they need more context to decide:"
+      : `${gapVotes.length} of 3 models reported they need more context to decide:`
+  return withDerivedNotes(
+    {
+      verdict: "need_more_info",
+      recommendation: null,
+      confidence: 0,
+      votes: voteRecord(r1, r2),
+      notes: `${header}\n${gaps}`,
+    },
+    r1,
+    r2,
+  )
+}
+
+/**
+ * Freshest parsed vote per model (round 2 if it parsed, else round 1) — the
+ * basis for deriving alternative / gap notes without double-counting a model
+ * across rounds.
+ */
+function freshestVotes(
+  r1: ReadonlyArray<CallResult>,
+  r2: ReadonlyArray<CallResult> | null,
+): Array<{ key: ModelKey; vote: Vote }> {
+  const out: Array<{ key: ModelKey; vote: Vote }> = []
+  for (const cfg of STAND_IN_MODELS) {
+    const r2Entry = r2?.find((r) => r.key === cfg.key)
+    const r1Entry = r1.find((r) => r.key === cfg.key)
+    const vote =
+      r2Entry && isVote(r2Entry.vote) ? r2Entry.vote
+      : r1Entry && isVote(r1Entry.vote) ? r1Entry.vote
+      : null
+    if (vote) out.push({ key: cfg.key, vote })
+  }
+  return out
+}
+
+/**
+ * Append derived notes to a verdict WITHOUT touching the verdict / tally:
+ *  - panel-proposed unlisted `alternative`s (surfaced on every verdict);
+ *  - partial missing-context gaps (surfaced only on no_consensus — the
+ *    dedicated need_more_info path already lists its own gaps).
+ * Purely additive to `notes`; never changes verdict / recommendation / isError.
+ * This is what lets the alternative + partial-gap signals ride along while the
+ * abstain and blind-R1 invariants stay untouched.
+ */
+function withDerivedNotes(
+  result: StandInResult,
+  r1: ReadonlyArray<CallResult>,
+  r2: ReadonlyArray<CallResult> | null,
+): StandInResult {
+  const fresh = freshestVotes(r1, r2)
+  const extras: Array<string> = []
+
+  const alts = fresh.filter((v) => v.vote.alternative)
+  if (alts.length > 0) {
+    extras.push(
+      "The panel also flagged unlisted option(s):\n"
+      + alts.map((v) => `- ${v.key}: ${v.vote.alternative}`).join("\n"),
+    )
+  }
+
+  if (result.verdict === "no_consensus") {
+    const gaps = fresh.filter((v) => v.vote.choice === null && v.vote.needMoreInfo)
+    if (gaps.length > 0) {
+      extras.push(
+        "Some models cited missing context:\n"
+        + gaps.map((v) => `- ${v.key}: ${v.vote.needMoreInfo}`).join("\n"),
+      )
+    }
+  }
+
+  if (extras.length === 0) return result
+  const notes = [result.notes, ...extras].filter(Boolean).join("\n\n")
+  return { ...result, notes }
 }
 
 function voteRecord(
