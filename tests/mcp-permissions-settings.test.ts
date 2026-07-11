@@ -5,7 +5,9 @@ import path from "node:path"
 
 import {
   configureServePermissionsBypass,
-  injectMcpServerAllowRules,
+  injectAllowRules,
+  NATIVE_RESEARCH_ALLOW_RULES,
+  planModeAllowRules,
   sanitizeServeSettingsEnv,
 } from "~/lib/mcp-permissions-settings"
 
@@ -119,48 +121,63 @@ describe("sanitizeServeSettingsEnv", () => {
   })
 })
 
-describe("injectMcpServerAllowRules", () => {
-  it("adds bare mcp__<server> allow rules for each resolved key on a fresh file", async () => {
-    const p = await settingsFile()
-    const r = await injectMcpServerAllowRules(p, ["peers", "search", "workers", "orchestrate", "decide"])
-    expect(r.added).toEqual([
-      "mcp__peers", "mcp__search", "mcp__workers", "mcp__orchestrate", "mcp__decide",
+describe("planModeAllowRules", () => {
+  it("builds bare mcp__<server> rules for each key plus the native research tools", () => {
+    expect(planModeAllowRules(["peers", "search", "codex-cli"])).toEqual([
+      "mcp__peers", "mcp__search", "mcp__codex-cli", "WebSearch", "WebFetch",
     ])
+  })
+
+  it("dedupes/skips falsy server keys; native tools always included", () => {
+    expect(planModeAllowRules(["peers", "peers", ""])).toEqual([
+      "mcp__peers", "WebSearch", "WebFetch",
+    ])
+    expect(planModeAllowRules([])).toEqual([...NATIVE_RESEARCH_ALLOW_RULES])
+  })
+
+  it("does NOT include mutating/delegation natives (Bash/Task/Edit/Write)", () => {
+    const rules = planModeAllowRules(["peers"])
+    for (const forbidden of ["Bash", "Task", "Skill", "Workflow", "Edit", "Write", "SendMessage"]) {
+      expect(rules).not.toContain(forbidden)
+    }
+  })
+})
+
+describe("injectAllowRules", () => {
+  it("adds the given rules to permissions.allow on a fresh file", async () => {
+    const p = await settingsFile()
+    const r = await injectAllowRules(p, ["mcp__peers", "mcp__search", "WebSearch", "WebFetch"])
+    expect(r.added).toEqual(["mcp__peers", "mcp__search", "WebSearch", "WebFetch"])
     expect((await read(p)).permissions).toEqual({
-      allow: ["mcp__peers", "mcp__search", "mcp__workers", "mcp__orchestrate", "mcp__decide"],
+      allow: ["mcp__peers", "mcp__search", "WebSearch", "WebFetch"],
     })
   })
 
-  it("uses collision-resolved keys (gh-router-*) and preserves existing allow/deny/ask", async () => {
+  it("preserves existing allow/deny/ask and dedupes against what's present", async () => {
     const p = await settingsFile({
       permissions: { allow: ["Read", "WebSearch"], deny: ["Bash(rm *)"], defaultMode: "plan" },
     })
-    const r = await injectMcpServerAllowRules(p, ["gh-router-peers", "search"])
-    expect(r.added).toEqual(["mcp__gh-router-peers", "mcp__search"])
+    const r = await injectAllowRules(p, planModeAllowRules(["gh-router-peers"]))
+    // WebSearch already present → not re-added; WebFetch + mcp added
+    expect(r.added).toEqual(["mcp__gh-router-peers", "WebFetch"])
     const perms = (await read(p)).permissions as Record<string, unknown>
-    expect(perms.allow).toEqual(["Read", "WebSearch", "mcp__gh-router-peers", "mcp__search"])
+    expect(perms.allow).toEqual(["Read", "WebSearch", "mcp__gh-router-peers", "WebFetch"])
     expect(perms.deny).toEqual(["Bash(rm *)"])
     expect(perms.defaultMode).toBe("plan")
   })
 
   it("is idempotent (no write, no duplicates) when rules already present", async () => {
-    const p = await settingsFile({ permissions: { allow: ["mcp__peers", "mcp__search"] } })
+    const p = await settingsFile({ permissions: { allow: ["mcp__peers", "WebSearch", "WebFetch"] } })
     const before = await fs.stat(p)
-    const r = await injectMcpServerAllowRules(p, ["peers", "search"])
+    const r = await injectAllowRules(p, ["mcp__peers", "WebSearch", "WebFetch"])
     expect(r.added).toEqual([])
     expect((await fs.stat(p)).mtimeMs).toBe(before.mtimeMs)
   })
 
-  it("dedupes and skips falsy keys", async () => {
-    const p = await settingsFile()
-    const r = await injectMcpServerAllowRules(p, ["peers", "peers", "", "search"])
-    expect(r.added).toEqual(["mcp__peers", "mcp__search"])
-  })
-
-  it("is a no-op for an empty key list", async () => {
+  it("is a no-op for an empty rule list", async () => {
     const p = await settingsFile({ permissions: { allow: ["Read"] } })
     const before = await fs.stat(p)
-    expect((await injectMcpServerAllowRules(p, [])).added).toEqual([])
+    expect((await injectAllowRules(p, [])).added).toEqual([])
     expect((await fs.stat(p)).mtimeMs).toBe(before.mtimeMs)
   })
 })

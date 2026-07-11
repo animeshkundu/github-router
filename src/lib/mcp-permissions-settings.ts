@@ -77,31 +77,44 @@ export async function sanitizeServeSettingsEnv(
 }
 
 /**
- * Add `mcp__<server>` allow rules to a mirror `settings.json` for each injected
- * MCP server key, so github-router's own MCP tools auto-run WITHOUT a permission
- * prompt — in plan mode and every other mode.
+ * Native Claude Code tools worth auto-approving alongside our injected MCP
+ * servers so PLAN mode is frictionless for research. These are read-only
+ * discovery tools that plan mode would otherwise prompt for.
  *
- * Why this is the correct (and only) mechanism: Claude Code's plan mode only
- * intercepts file-edit (Edit/Write/NotebookEdit) and shell-write (Bash) built-in
- * tool TYPES — MCP tools are never on that restricted list, so an MCP call falls
- * through the permission-mode step to the allow-rules step exactly as in default
- * mode. A bare `mcp__<server>` rule allows every tool from that server (per the
- * Claude Code permissions doc); `mcp__*` (glob server segment) is rejected for
- * allow rules, so each server is named explicitly. `readOnlyHint`/MCP annotations
- * are NOT consulted by Claude Code's permission engine, so there is nothing else
- * to set. Rules are global across modes (no per-mode allow block exists).
- *
- * `serverKeys` are the RESOLVED mcpServers config keys (collision-aware —
- * `peers` or `gh-router-peers`, etc.), so the rule matches the server name the
- * model actually sees. Existing `allow` entries and `deny`/`ask` are preserved;
- * merge is idempotent (no write when every rule is already present). Mirror only;
- * never the operator's real settings. Atomic temp+rename, mode 0o600.
+ * Deliberately MINIMAL and safe:
+ *   - `WebSearch` / `WebFetch` — network reads; exactly the research surface a
+ *     planner reaches for, and they prompt by default in plan mode.
+ *   - EXCLUDES `Read`/`Glob`/`Grep` — Claude Code already runs them in plan mode
+ *     without a rule (its built-in safe list), so a rule would be redundant.
+ *   - EXCLUDES `Bash` — can mutate (`rm`, redirects); blanket-allow is unsafe.
+ *     Curated `Bash(<readonly cmd> *)` rules are the user's own call.
+ *   - EXCLUDES `Task`/`Skill`/`Workflow`/`SendMessage` — spawn/delegate; a
+ *     subagent launched in plan mode isn't guaranteed to inherit plan's
+ *     read-only restriction, so auto-approving them is a plan-mode-bypass vector.
+ *   - EXCLUDES `Edit`/`Write`/`NotebookEdit` etc. — plan mode gates them by
+ *     design and we must not override that.
  */
-export async function injectMcpServerAllowRules(
+export const NATIVE_RESEARCH_ALLOW_RULES = ["WebSearch", "WebFetch"] as const
+
+/**
+ * Merge arbitrary allow rules into a mirror `settings.json` `permissions.allow`
+ * so the listed tools auto-run WITHOUT a permission prompt in every mode —
+ * including plan mode, where a matched allow rule bypasses the prompt for any
+ * tool NOT on plan mode's file-edit/shell-write restricted list (MCP tools and
+ * read-only natives like WebSearch/WebFetch). See {@link NATIVE_RESEARCH_ALLOW_RULES}
+ * for the native additions and the "Configure permissions" Claude Code doc for
+ * the plan-mode semantics.
+ *
+ * Rules are literal allow strings (`mcp__peers`, `WebSearch`, …). Existing
+ * `allow` entries and `deny`/`ask` are preserved; merge is idempotent (no write
+ * when every rule is already present). Mirror only; never the operator's real
+ * settings. Atomic temp+rename, mode 0o600.
+ */
+export async function injectAllowRules(
   settingsPath: string,
-  serverKeys: readonly string[],
+  rules: readonly string[],
 ): Promise<{ added: string[] }> {
-  const want = [...new Set(serverKeys.filter(Boolean))].map((k) => `mcp__${k}`)
+  const want = [...new Set(rules.filter(Boolean))]
   if (want.length === 0) return { added: [] }
 
   const existing = (await readSettingsObject(settingsPath)) ?? {}
@@ -116,8 +129,22 @@ export async function injectMcpServerAllowRules(
   if (added.length === 0) return { added: [] }
 
   perms.allow = [...allow, ...added]
-  await writeSettingsObject(settingsPath, { ...existing, permissions: perms }, "mcpallow")
+  await writeSettingsObject(settingsPath, { ...existing, permissions: perms }, "allowrules")
   return { added }
+}
+
+/**
+ * Build the full plan-mode allow-rule set: a bare `mcp__<server>` rule per
+ * injected MCP server (whole-server allow) plus the native research tools. The
+ * server keys are the RESOLVED mcpServers config keys (collision-aware —
+ * `peers` or `gh-router-peers`, `codex-cli`, …) so each rule matches the server
+ * name the model actually sees.
+ */
+export function planModeAllowRules(serverKeys: readonly string[]): string[] {
+  return [
+    ...[...new Set(serverKeys.filter(Boolean))].map((k) => `mcp__${k}`),
+    ...NATIVE_RESEARCH_ALLOW_RULES,
+  ]
 }
 
 /**
