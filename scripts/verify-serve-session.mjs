@@ -25,6 +25,18 @@ function resolveClaude() {
     return process.env.CLAUDE_CLI_PATH;
   }
   const win = process.platform === "win32";
+  // Prefer the claude binary the Agent SDK actually bundles — that is the exact
+  // runtime CloudCLI's `query()` spawns (its `@anthropic-ai/claude-agent-sdk`
+  // ships its own platform `claude` under a `-<platform>-<arch>` package), so
+  // probing it verifies serve's true runtime rather than a system stand-in.
+  const arch = process.arch; // "x64" | "arm64" | …
+  const plat = win ? "win32" : process.platform === "darwin" ? "darwin" : "linux";
+  const bundled = path.join(
+    os.homedir(), ".local", "share", "github-router", "cloudcli",
+    "node_modules", "@anthropic-ai", `claude-agent-sdk-${plat}-${arch}`,
+    win ? "claude.exe" : "claude",
+  );
+  if (fs.existsSync(bundled)) return bundled;
   const native = path.join(os.homedir(), ".local", "bin", win ? "claude.exe" : "claude");
   if (fs.existsSync(native)) return native;
   const probe = spawnSync(win ? "where" : "which", ["claude"], { encoding: "utf8" });
