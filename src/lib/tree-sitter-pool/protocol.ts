@@ -24,6 +24,8 @@ export interface ParseJobRequest {
   /** mtimeMs the main thread observed; echoed back so the pool can detect a
    *  between-dispatch edit and treat the result as stale (skip it). */
   mtimeMs: number
+  /** Test-only one-shot fault injection, assigned by the pool at dispatch. */
+  testCrash?: boolean
   want: {
     /** Hits to AST-confirm. Indexes in the reply's `confirmedHitIndexes` are
      *  positions INTO this array. Omit/empty → no confirm work. */

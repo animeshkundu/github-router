@@ -23,6 +23,7 @@ const {
   prependArtifactPanelDirectiveToMirroredClaudeMd,
   prependStyleDirectiveToMirroredClaudeMd,
   OPERATING_DEFAULTS_DIRECTIVE,
+  OPERATING_DEFAULTS_DIGEST,
   findMarkerBlocks,
   __testExports,
 } = await import("../src/lib/claude-md-injection")
@@ -575,6 +576,11 @@ test("operating-defaults directive: orchestrator posture + concrete excellence p
   expect(d).toContain("worker-*")
   expect(low).toContain("parallel")
   expect(low).toContain("directly") // "do trivial/surgical/last-mile work directly"
+  expect(d).toContain("implementer")
+  expect(d).toContain("debugger")
+  expect(d).toContain("qa-engineer")
+  expect(d).toContain("the main thread is where you think with and respond to the user")
+  expect(d).toContain("protect it by pushing heavy or exploratory work outward")
   // Excellence principles remain specific without named-persona anchors.
   expect(low).toContain("radical simplicity")
   expect(low).toContain("first principles")
@@ -587,6 +593,12 @@ test("operating-defaults directive: orchestrator posture + concrete excellence p
   expect(d).not.toContain("—")
   expect(low).not.toContain("claude")
   expect(low).not.toContain("anthropic")
+})
+
+test("operating-defaults digest protects main-thread context for the user", () => {
+  expect(OPERATING_DEFAULTS_DIGEST).toContain(
+    "protect the main thread's finite context and keep it free for reasoning and interacting with the user",
+  )
 })
 
 test("artifact-panel directive steers HTML-by-default for review", () => {

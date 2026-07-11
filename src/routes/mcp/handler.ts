@@ -615,10 +615,12 @@ function jsonPathPreflightCap(body: JsonRpcRequest, scope: McpScope):
   // The cap exists because stand_in fundamentally cannot fit in the
   // JSON-path 60s tools/call ceiling on any non-trivial input: two
   // sequential voting rounds × ~60-90s per round across three frontier
-  // models = 2-3 minutes typical wall-clock. The size threshold (~6KB)
-  // is conservative — bursting it means the JSON-path caller will
-  // definitely time out, so we surface the actionable "use SSE" error
-  // up front instead of leaking an inFlight slot for the duration.
+  // models = 2-3 minutes typical wall-clock. `context` is now required and
+  // sufficiency-oriented (the panel is cold-start), so the size threshold
+  // (~32KB) is set high enough to admit a real, code-bearing brief while
+  // still catching a pathological payload — bursting it means the JSON-path
+  // caller will definitely time out, so we surface the actionable "use SSE"
+  // error up front instead of leaking an inFlight slot for the duration.
   if (name === "stand_in") {
     // Out-of-scope JSON call (e.g. stand_in on /mcp/peers): let
     // handleToolsCall return the -32601 scope reject instead of a
@@ -626,13 +628,22 @@ function jsonPathPreflightCap(body: JsonRpcRequest, scope: McpScope):
     if (scope !== "all" && scope !== "decide") return undefined
     const decision = typeof args.decision === "string" ? args.decision : ""
     const optionsRaw = Array.isArray(args.options) ? args.options : []
+    // This preflight is a SIZE cap only. Presence / shape validation (missing
+    // decision or options, and the missing / non-string / empty required
+    // `context`) is the tool boundary's job: every such invalid input returns
+    // undefined here and is rejected downstream with `isError`, fast-failing
+    // (microsecond slot hold) before the 2-3 min voting path. We deliberately do
+    // NOT size a non-string context via JSON.stringify (that would misreport a
+    // type error as a size error) NOR reject it here with a tool-content error
+    // (that would bifurcate the shape-error contract — decision/options take the
+    // -32602 path). So the cap sizes only a valid, non-empty string context.
     const standInContext = typeof args.context === "string" ? args.context : ""
-    if (!decision || optionsRaw.length === 0) return undefined // shape error → -32602 path
+    if (!decision || optionsRaw.length === 0 || !standInContext.trim()) return undefined
     const briefBytes = Buffer.byteLength(
       decision + JSON.stringify(optionsRaw) + standInContext,
       "utf8",
     )
-    const STAND_IN_CAP_BYTES = 6 * 1024
+    const STAND_IN_CAP_BYTES = 32 * 1024
     if (briefBytes > STAND_IN_CAP_BYTES) {
       return rpcResult(
         body.id,

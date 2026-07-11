@@ -2029,13 +2029,18 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         + "blind and informed voting rounds, then returns a ranked-choice verdict "
         + "such as consensus, majority, no_consensus, or need_more_info. Use when "
         + "work would otherwise halt on a bounded choice the user would normally "
-        + "make. Not for code review, open-ended exploration, single-model second "
+        + "make. If every provided option is inadequate, the panel may flag a concrete "
+        + "better unlisted option in `notes` so you can re-invoke with a revised set. "
+        + "The three panel models are cold-start — no repo, transcript, "
+        + "or memory access — and see only your decision, options, and context, "
+        + "so the `context` argument must carry all the background they need to "
+        + "judge. Not for code review, open-ended exploration, single-model second "
         + "opinions, or bypassing confirmation on irreversible actions such as push, "
         + "delete, drop, or deploy; use peer-review-coordinator or the individual "
         + "critics for review and still ask the user for destructive actions.",
       inputSchema: {
         type: "object",
-        required: ["decision", "options"],
+        required: ["decision", "options", "context"],
         additionalProperties: false,
         properties: {
           decision: {
@@ -2049,9 +2054,10 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             minItems: 2,
             maxItems: 6,
             description:
-              "2-6 concrete options for the panel to vote on. Caller-provided — "
-              + "do NOT ask the panel to generate options. The verdict cites "
-              + "the chosen option by `id`.",
+              "2-6 concrete options curated by the caller for the panel to vote on. "
+              + "The panel may surface a gated unlisted alternative in `notes`, but "
+              + "does not replace the caller's option set. The verdict cites the "
+              + "chosen option by `id`.",
             items: {
               type: "object",
               required: ["id", "summary"],
@@ -2077,8 +2083,13 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           context: {
             type: "string",
             description:
-              "Task / code background that informs the decision. Keep tight — "
-              + "the input is capped at ~6KB total across decision + options + context.",
+              "REQUIRED. The three panel models are cold-start: no access to your "
+              + "repository, prior transcript, or memory — they see ONLY this "
+              + "decision + options + context. Include everything needed to decide "
+              + "well: the constraints that matter, the relevant code or excerpts, "
+              + "prior decisions not to relitigate, and what a good outcome looks "
+              + "like. Thin context yields a weak verdict. (On the JSON transport a "
+              + "~32KB size guard applies; the SSE transport has no such limit.)",
           },
         },
       },
@@ -2487,7 +2498,7 @@ async function runBrowseToolCall(
  * `isError` is TRUE only for input-shape failures (bad arg types,
  * missing required fields).
  */
-async function runStandInToolCall(
+export async function runStandInToolCall(
   args: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<{
@@ -2568,14 +2579,17 @@ async function runStandInToolCall(
     options.push({ id, summary, detail })
   }
 
-  const context =
-    args.context === undefined ? undefined
-    : typeof args.context === "string" ? args.context
-    : null
-  if (context === null) {
+  const context = typeof args.context === "string" ? args.context : ""
+  if (!context.trim()) {
     return {
       content: [
-        { type: "text", text: "stand_in: arguments.context must be a string when provided" },
+        {
+          type: "text",
+          text:
+            "stand_in: arguments.context is required (non-empty string). The panel "
+            + "is cold-start and sees only decision + options + context; include the "
+            + "constraints, relevant code, and success criteria needed to decide.",
+        },
       ],
       isError: true,
     }

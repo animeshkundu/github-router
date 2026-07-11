@@ -462,7 +462,13 @@ Three reasons this specific shape is load-bearing:
 2. **Informed round 2** - each model sees the other two models' R1 votes and reasoning, then votes again. They may keep or change their R1 vote. The system prompt explicitly forbids changing-just-to-agree.
 3. **Abstain on disagreement** - if R2 doesn't produce a 2/3-or-better majority, the verdict is `no_consensus` and the main agent must defer to the user. The tool refuses to manufacture false agreement.
 
-R1 short-circuits to `consensus` if all three models pick the same non-null option AND mean confidence ≥ 0.8. Otherwise R2 runs.
+R1 short-circuits early in two cases: to `consensus` if all three models pick the same non-null option AND mean confidence ≥ 0.8; to `need_more_info` if **≥2 of 3** parsed R1 votes abstained citing a missing-context gap (at ≥2 gap-abstains no provided-option majority is reachable, so surfacing the specific gaps is strictly more actionable than running a doomed R2). Otherwise R2 runs. The same ≥2/3 gap-abstain → `need_more_info` check is applied **in both rounds** (a shared `gapAbstainVerdict` helper runs after R1 and again after R2, before the R2 tally) — so models that only switch to a context-gap abstention in the informed round still yield `need_more_info` rather than a bare `no_consensus`. A null-vote carries at most one escape channel: `need_more_info` takes precedence over `alternative` (a model lacking context can't reliably judge the options inadequate), enforced both in the prompt and by the parser (`alternative` survives only when `choice === null && !needMoreInfo`).
+
+**Holistic alternative channel.** Each model may set `choice: null` and populate an `alternative` field to propose a concrete *unlisted* option — but only when a provided option is actively harmful or clearly dominated (the prompt hard-gates this so RLHF-helpful models don't dodge the tiebreak by inventing escape hatches). An `alternative` is null-equivalent in the tally: it never forms or suppresses a provided-option majority (`aggregateVotes` counts only non-null `choice`s). Any proposed alternatives are surfaced in `notes` on every verdict so the caller can re-invoke with a revised option set. This is deliberately distinct from `need_more_info` (missing context, not a better option).
+
+**Hallucination guard.** `tryParseVote` validates each non-null `choice` against the caller's option ids; an unlisted id (a model inventing an option that wasn't offered) is treated as a malformed response — it fails the parse, so `callAndParse` retries once and a persistent bad id becomes a `VoteFailure` (excluded from the successful-vote set, never tallied). This both prevents a phantom-id majority and keeps the successful-vote accounting honest — a malformed vote is never miscounted as a deliberate abstention (which would inflate `successfulR1` and skew the `<2 → no_consensus` early-exit).
+
+**Partial missing-context signals.** On any `no_consensus` verdict, individual `needMoreInfo` gaps from the freshest-round votes are aggregated into `notes` — so a 1-of-3 "I'm blocked on context" signal that falls below the ≥2/3 `need_more_info` threshold is still surfaced rather than buried.
 
 ### Verdicts
 
@@ -471,7 +477,7 @@ R1 short-circuits to `consensus` if all three models pick the same non-null opti
 | `consensus`       | 3/3 same option                                          | option.id        | Proceed with the recommendation |
 | `majority`        | 2/3 same option (dissenter reasoning in `notes`)         | option.id        | Proceed, surface the dissent    |
 | `no_consensus`    | 1/1/1 split, or insufficient successful votes            | `null`           | Defer to the user               |
-| `need_more_info`  | All 3 R1 votes flagged a specific missing-context gap    | `null`           | Gather context, call again      |
+| `need_more_info`  | ≥2 of 3 R1 votes flagged a specific missing-context gap  | `null`           | Gather context, call again      |
 
 `isError` stays `false` for all four verdicts - `no_consensus` and `need_more_info` are valid protocol outcomes, not errors. `isError: true` is reserved for input-shape failures (bad arg types, missing required fields).
 
@@ -481,10 +487,10 @@ A small-model orchestrator (haiku / gemini-flash deciding when to escalate, when
 
 ### Input / output surface (ruthlessly minimal)
 
-**Input** (`{decision, options[], context?}`):
+**Input** (`{decision, options[], context}`):
 - `decision: string` - one-sentence framing of the choice.
 - `options: Array<{id, summary, detail?}>` - 2-6 concrete options; caller-provided (NOT model-generated). The verdict cites the chosen option by `id`.
-- `context?: string` - task/code background.
+- `context: string` - **required**. The panel is cold-start (no repo, transcript, or memory), so context must carry every constraint, relevant code excerpt, prior decision not to relitigate, and success criterion the models need to judge. A missing/empty context is rejected at the tool boundary with `isError: true` (input-shape failure).
 
 **Output** (JSON-stringified into a single MCP text block):
 ```typescript
@@ -497,7 +503,7 @@ A small-model orchestrator (haiku / gemini-flash deciding when to escalate, when
 }
 ```
 
-Every field is either (a) required for the caller to act, (b) directly actionable (per-model vote reasoning = "here's why, here's what to look for next"), or (c) the load-bearing verdict signal. No echoed inputs, no diagnostic-only fields, no per-vote latency, no token counts. Per-model effort is **fixed** (not caller-tunable) - exposing knobs would invite callers to cheap out and muddy the consensus signal.
+Every field is either (a) required for the caller to act, (b) directly actionable (per-model vote reasoning = "here's why, here's what to look for next"), or (c) the load-bearing verdict signal. No echoed inputs, no diagnostic-only fields, no per-vote latency, no token counts. `notes` additionally carries any panel-proposed unlisted `alternative`s (on every verdict) and, on `no_consensus`, any partial missing-context gaps. Per-model effort is **fixed** (not caller-tunable) - exposing knobs would invite callers to cheap out and muddy the consensus signal.
 
 ### Distinction from sibling tools
 
@@ -514,7 +520,7 @@ The MCP handler drops `stand_in` from `tools/list` AND fails-fast on `tools/call
 ### Slot accounting & pre-flight cap
 
 - **One slot per `stand_in` invocation**, NOT one per internal model call. The MCP boundary in `handleToolsCall` acquires the slot; `dispatchModelCall` (the shared per-endpoint wire helper extracted from `callPersona`) does NOT re-acquire. A single `stand_in` call making 6 internal upstream fetches (3 models × 2 rounds) consumes exactly 1 slot from the cap=32 budget. Regression test: `tests/routes-mcp.test.ts` "stand_in holds exactly ONE in-flight slot…".
-- **`predictedTooLong` cap = 6KB** on `decision + options + context` byte-size, JSON-path only. Fires BEFORE `acquireInFlightSlot` per the load-bearing invariant. Rationale: `stand_in` runs two sequential rounds across three frontier models, typical wall-clock 2-3 minutes; on the JSON path this always busts the 60s tools/call ceiling on non-trivial inputs. The cap surfaces "use SSE" as a fast actionable error instead of leaking a slot for the duration.
+- **`predictedTooLong` cap = 32KB** on `decision + options + context` byte-size, JSON-path only (raised from 6KB now that `context` is required and sufficiency-oriented — a real, code-bearing brief must fit). Fires BEFORE `acquireInFlightSlot` per the load-bearing invariant. Rationale: `stand_in` runs two sequential rounds across three frontier models, typical wall-clock 2-3 minutes; on the JSON path this always busts the 60s tools/call ceiling on non-trivial inputs. The cap surfaces "use SSE" as a fast actionable error instead of leaking a slot for the duration.
 
 ### Future: idle-trigger auto-invocation (out of scope for this PR)
 
