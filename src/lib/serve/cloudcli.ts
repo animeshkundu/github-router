@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process"
 import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
+import fsSync from "node:fs"
 import http from "node:http"
 import path from "node:path"
 
@@ -169,6 +170,19 @@ export function spawnCloudCli(opts: {
 }): CloudCliProcess {
   const databasePath = path.join(PATHS.CLOUDCLI_HOME, "auth.db")
   const node = resolveExecutable("node") ?? process.execPath
+  // Diagnostic opt-in: route CloudCLI's stdout+stderr to a log file so its
+  // internal errors (SDK/DB/session-create) are inspectable. Default stays
+  // "ignore" (CloudCLI is noisy and its logs aren't user-facing).
+  const logPath = process.env.GH_ROUTER_CLOUDCLI_LOG
+  let stdio: "ignore" | ["ignore", number, number] = "ignore"
+  if (logPath) {
+    try {
+      const fd = fsSync.openSync(logPath, "a")
+      stdio = ["ignore", fd, fd]
+    } catch {
+      /* unwritable log path — fall back to ignore */
+    }
+  }
   const child = spawn(node, [opts.serverEntry], {
     env: {
       ...opts.env,
@@ -180,7 +194,7 @@ export function spawnCloudCli(opts: {
       // the reverse proxy injecting the token.
       VITE_IS_PLATFORM: "",
     },
-    stdio: "ignore",
+    stdio,
     windowsHide: true,
   })
   return { child, port: opts.port, databasePath }

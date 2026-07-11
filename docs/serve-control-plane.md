@@ -235,6 +235,25 @@ locally (you can then host manually with `devtunnel host -p <port>`).
 - `serve` depends on CloudCLI's HTTP shapes (`/api/auth/*`, `/api/providers/*`, `/api/commands/list`,
   `SERVER_PORT`/`HOST` env, env-forward); the version is pinned so upstream changes can't silently break
   it, and every provider-façade rewrite fails closed to passthrough on an unexpected shape.
+- `serve --agents` performs a **one-time** GitHub device-code login (a second, write-capable token —
+  `repo workflow read:org`) on first launch, printing the code + verification URL to the terminal; the
+  token is cached at `PATHS.GITHUB_AGENT_TOKEN_PATH` so subsequent launches read it and return immediately.
+  Plain `serve` (no `--agents`) never triggers this. Complete the prompt in the launching terminal; if
+  `serve` is started fully detached the poll will wait for authorization.
+
+## Debugging CloudCLI internals
+
+CloudCLI's stdout/stderr are `ignore`d by default (it is noisy and its logs aren't user-facing). To
+inspect its internal errors (Agent-SDK, DB, session/project create), set `GH_ROUTER_CLOUDCLI_LOG=<path>`
+before launching `serve`; the child's stdout+stderr are appended there. This is how the session-create
+path was validated: CloudCLI's Express `body-parser` **correctly** rejects a malformed request body
+(e.g. a Windows `projectPath` sent with un-escaped single backslashes — `"Q:\hobby"` is an illegal JSON
+escape) with `entity.parse.failed`, surfaced as HTTP 500. A real browser always sends `JSON.stringify`-ed
+bodies (backslashes escaped to `\\`), so session-create returns **HTTP 201** end-to-end; the reverse proxy
+streams request bodies through **raw** (`clientReq.pipe(proxyReq)`, no parse/re-serialize), so it never
+mangles escaping. When reproducing over `curl`, build the JSON body with a tool that escapes correctly
+(e.g. `--data-binary @file` where the file was written by `JSON.stringify`) — a shell-quoted single-backslash
+path is invalid JSON and will 500, which is CloudCLI behaving correctly, not a serve bug.
 
 ## Verification
 
