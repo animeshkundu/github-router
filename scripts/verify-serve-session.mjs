@@ -25,10 +25,19 @@ function resolveClaude() {
     return process.env.CLAUDE_CLI_PATH;
   }
   const win = process.platform === "win32";
-  // Prefer the claude binary the Agent SDK actually bundles — that is the exact
-  // runtime CloudCLI's `query()` spawns (its `@anthropic-ai/claude-agent-sdk`
-  // ships its own platform `claude` under a `-<platform>-<arch>` package), so
-  // probing it verifies serve's true runtime rather than a system stand-in.
+  // Mirror CloudCLI's own resolution so this probe runs the SAME binary a serve
+  // session does. CloudCLI (`server/shared/claude-cli-path.js`) sets the SDK's
+  // `pathToClaudeCodeExecutable` to `resolveClaudeCodeExecutablePath()`, which
+  // with CLAUDE_CLI_PATH unset resolves `where.exe claude` — the first
+  // `claude.exe` on PATH (the system install) — and only falls back to the
+  // SDK-bundled binary when that lookup fails. So: PATH first, bundled last.
+  const probe = spawnSync(win ? "where" : "which", ["claude"], { encoding: "utf8" });
+  const found = (probe.stdout || "").split(/\r?\n/).find((l) => l.trim() && fs.existsSync(l.trim()));
+  if (found) return found.trim();
+  const native = path.join(os.homedir(), ".local", "bin", win ? "claude.exe" : "claude");
+  if (fs.existsSync(native)) return native;
+  // CloudCLI's fallback when `where.exe claude` finds nothing: the claude the
+  // Agent SDK bundles under `claude-agent-sdk-<platform>-<arch>/`.
   const arch = process.arch; // "x64" | "arm64" | …
   const plat = win ? "win32" : process.platform === "darwin" ? "darwin" : "linux";
   const bundled = path.join(
@@ -37,11 +46,7 @@ function resolveClaude() {
     win ? "claude.exe" : "claude",
   );
   if (fs.existsSync(bundled)) return bundled;
-  const native = path.join(os.homedir(), ".local", "bin", win ? "claude.exe" : "claude");
-  if (fs.existsSync(native)) return native;
-  const probe = spawnSync(win ? "where" : "which", ["claude"], { encoding: "utf8" });
-  const found = (probe.stdout || "").split(/\r?\n/).find(Boolean);
-  return found && fs.existsSync(found) ? found : null;
+  return null;
 }
 
 function latestMirror() {
