@@ -1,6 +1,71 @@
 import { spawn } from "node:child_process"
+import { createHash } from "node:crypto"
+import os from "node:os"
 
 import { killChildProcessTree, resolveExecutable, runCommandCapture } from "../exec"
+
+// Label stamped on every tunnel `serve --tunnel` creates, so our tunnels are
+// identifiable and sweepable (`devtunnel list -l github-router-serve`). Before
+// this, serve minted an anonymous, unlabeled tunnel per launch that was never
+// deleted — they accumulated server-side against the hard
+// `TunnelsPerUserPerCluster` (10) cap until new tunnels were denied.
+export const SERVE_TUNNEL_LABEL = "github-router-serve"
+
+// A per-machine label so reuse/sweep scopes to THIS host and never touches a
+// tunnel another machine (sharing the same dev-tunnels account) owns. Hashed so
+// an arbitrary hostname maps to a label-charset-safe token.
+export function serveTunnelMachineLabel(hostname: string = os.hostname()): string {
+  return `ghr-machine-${createHash("sha256").update(hostname).digest("hex").slice(0, 12)}`
+}
+
+export interface TunnelInfo {
+  tunnelId: string
+  labels?: string[]
+  hostConnections?: number
+}
+
+/**
+ * Decide which of our existing tunnels to REUSE and which duplicates to delete,
+ * scoped to this machine. Pure (unit-tested). Only IDLE tunnels (0 host
+ * connections) are eligible, so a concurrently-live serve instance is never
+ * disturbed. Bounds github-router to a single idle tunnel per machine: reuse
+ * the first, delete the rest.
+ */
+export function selectServeTunnel(
+  tunnels: TunnelInfo[],
+  machineLabel: string,
+): { reuseId: string | null; deleteIds: string[] } {
+  const idle = tunnels.filter(
+    (t) => (t.labels ?? []).includes(machineLabel) && !t.hostConnections,
+  )
+  if (idle.length === 0) return { reuseId: null, deleteIds: [] }
+  const [keep, ...extra] = idle
+  return { reuseId: keep.tunnelId, deleteIds: extra.map((t) => t.tunnelId) }
+}
+
+/** List the tunnels serve owns (label-filtered). Best-effort: [] on any error. */
+async function listServeTunnels(cli: string): Promise<TunnelInfo[]> {
+  try {
+    const { stdout, code } = await runCommandCapture(
+      [cli, "list", "-l", SERVE_TUNNEL_LABEL, "-j"],
+      { timeoutMs: 15_000 },
+    )
+    if (code !== 0) return []
+    const parsed = JSON.parse(stdout) as { tunnels?: TunnelInfo[] }
+    return Array.isArray(parsed?.tunnels) ? parsed.tunnels : []
+  } catch {
+    return []
+  }
+}
+
+/** Best-effort delete of a single tunnel by full id (e.g. `fancy-fog-x.inc1`). */
+async function deleteTunnel(cli: string, tunnelId: string): Promise<void> {
+  try {
+    await runCommandCapture([cli, "delete", tunnelId, "-f"], { timeoutMs: 15_000 })
+  } catch {
+    /* best-effort — a stale delete failing must not block hosting */
+  }
+}
 
 // Matches the browser URL devtunnel prints, e.g.
 //   Hosting port 5454 at https://l3rs99qw-5454.usw2.devtunnels.ms/
@@ -56,12 +121,22 @@ export function parseDevtunnelUrl(text: string): string | null {
 }
 
 /**
- * Host an AUTHENTICATED (never anonymous) temporary dev tunnel forwarding the
- * given local port, and resolve once its public URL is printed.
+ * Host an AUTHENTICATED (never anonymous) dev tunnel forwarding the given local
+ * port, and resolve once its public URL is printed.
  *
  * We NEVER pass `--allow-anonymous`, so the tunnel is reachable only by the
  * signed-in owner (or identities explicitly granted access) — Microsoft's
- * default. The temporary tunnel is deleted when the child exits (on shutdown).
+ * default.
+ *
+ * Tunnel lifecycle: a tunnel implicitly created by `host` is a PERSISTENT
+ * server-side object — killing the host process stops hosting but does NOT
+ * delete it. So instead of minting a fresh anonymous tunnel per launch (which
+ * strands objects against the `TunnelsPerUserPerCluster` cap), we reuse a single
+ * labeled per-machine tunnel: list our own idle tunnels, reuse the first, delete
+ * any duplicates, and host by id. When none exists we host a NEW tunnel stamped
+ * with our labels so the next launch reuses it. Worst case is one idle labeled
+ * tunnel per machine — not one per launch — which makes teardown reliability
+ * (unreachable on SIGKILL/taskkill/crash) irrelevant.
  */
 export async function startDevtunnel(
   port: number,
@@ -82,8 +157,33 @@ export async function startDevtunnel(
   }
 
   const timeoutMs = opts.timeoutMs ?? 40_000
+
+  // Reuse a stable per-machine tunnel instead of leaking a new one each launch.
+  // Best-effort: any failure leaves reuseId null → we host a fresh labeled
+  // tunnel, so `serve --tunnel` still works on the first run or if listing fails.
+  const machineLabel = serveTunnelMachineLabel()
+  let reuseId: string | null = null
+  try {
+    const sel = selectServeTunnel(await listServeTunnels(cli), machineLabel)
+    reuseId = sel.reuseId
+    for (const id of sel.deleteIds) await deleteTunnel(cli, id)
+  } catch {
+    reuseId = null
+  }
+
   // Intentionally NO `--allow-anonymous`: authenticated (owner-only) access.
-  const child = spawn(cli, ["host", "-p", String(port)], {
+  const hostArgs = reuseId
+    ? ["host", reuseId, "-p", String(port)]
+    : [
+        "host",
+        "-p",
+        String(port),
+        "-l",
+        `${SERVE_TUNNEL_LABEL} ${machineLabel}`,
+        "-d",
+        "github-router serve control plane",
+      ]
+  const child = spawn(cli, hostArgs, {
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   })

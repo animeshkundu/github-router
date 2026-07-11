@@ -212,9 +212,21 @@ github-router serve --port 5454 --tunnel
 
 `serve` runs `devtunnel host -p <port>` for you (the tunnel client connects to the loopback port, so
 the bind stays loopback), captures the public URL, allowlists it, and prints it as
-`remote (tunnel): https://<id>-<port>.<region>.devtunnels.ms`. The tunnel is torn down when `serve`
-exits. If the `devtunnel` CLI is missing or you're not logged in, `serve` says so and keeps serving
-locally (you can then host manually with `devtunnel host -p <port>`).
+`remote (tunnel): https://<id>-<port>.<region>.devtunnels.ms`. If the `devtunnel` CLI is missing or
+you're not logged in, `serve` says so and keeps serving locally (you can then host manually with
+`devtunnel host -p <port>`).
+
+- **One reused tunnel per machine (no leak).** A dev tunnel implicitly created by `host` is a
+  PERSISTENT server-side object — killing the host process stops hosting but does not delete it, and
+  Microsoft caps you at `TunnelsPerUserPerCluster` (10). So `serve` does NOT mint a fresh tunnel each
+  launch (which stranded objects until new tunnels were denied). It stamps every tunnel with a
+  `github-router-serve` label plus a per-machine `ghr-machine-<hash>` label, and on each launch lists
+  its own idle labeled tunnels, **reuses** the first (so the public URL is also stable across launches),
+  and deletes any duplicates — bounding github-router to a single idle tunnel per machine regardless of
+  how teardown ends (a `taskkill`/crash can't leak, since there's nothing new to leak). If listing or
+  reuse fails it falls back to hosting a fresh labeled tunnel, so `--tunnel` always works. To prune
+  pre-existing unlabeled leaks from before this change, `devtunnel list` then
+  `devtunnel delete <id>` the random-named entries with 0 connections and no labels.
 
 - **Authenticated, never anonymous.** `serve` never passes `--allow-anonymous`, so Microsoft's
   default applies: the tunnel is reachable only by the signed-in owner (an unauthenticated visitor is
