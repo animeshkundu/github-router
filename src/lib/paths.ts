@@ -65,6 +65,15 @@ export const PATHS = {
     return path.join(appDir(), "codex-isolated")
   },
   /**
+   * Router-owned install + data dir for CloudCLI (the `serve` browser control
+   * plane). Holds the pinned local `npm install` (node_modules/), an isolated
+   * `auth.db` (so we never collide with a user's standalone CloudCLI DB), and
+   * the persisted `.serve-secret.json` login. See docs/serve-control-plane.md.
+   */
+  get CLOUDCLI_HOME() {
+    return path.join(appDir(), "cloudcli")
+  },
+  /**
    * Runtime tempfiles for the per-launch peer-MCP wiring (the
    * `--mcp-config` JSON and `--agents` JSON written before spawning
    * Claude Code). Mode 0o700 to match the security review's mandate;

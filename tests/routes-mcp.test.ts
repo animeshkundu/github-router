@@ -7,6 +7,7 @@ import { mcpRoutes } from "../src/routes/mcp/route"
 import {
   __getInFlightForTests,
   __resetInFlightForTests,
+  applySessionWorkspace,
 } from "../src/routes/mcp/handler"
 import { MAX_INFLIGHT_TOOLS_CALL } from "../src/lib/mcp-inflight"
 import { state } from "../src/lib/state"
@@ -68,6 +69,7 @@ beforeEach(() => {
   savedDisableSemantic = process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH
   process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH = "1"
   state.peerMcpNonce = NONCE
+  state.serveMode = false
   state.copilotToken = "test-copilot-token"
   state.githubToken = "test-gh-token"
   state.vsCodeVersion = "1.99.0"
@@ -78,6 +80,7 @@ beforeEach(() => {
 
 afterEach(() => {
   state.peerMcpNonce = undefined
+  state.serveMode = undefined
   state.models = undefined
   if (savedDisableSemantic === undefined) {
     delete process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH
@@ -87,19 +90,20 @@ afterEach(() => {
   globalThis.fetch = originalFetch
 })
 
-function buildReq(body: unknown, opts: { auth?: string; host?: string } = {}) {
+function buildReq(body: unknown, opts: { auth?: string; host?: string; workspace?: string } = {}) {
   return new Request(`http://${PROXY_HOST}/`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       authorization: opts.auth ?? AUTH_HEADER,
       host: opts.host ?? PROXY_HOST,
+      ...(opts.workspace ? { "X-GH-Workspace": opts.workspace } : {}),
     },
     body: JSON.stringify(body),
   })
 }
 
-async function rpc(body: unknown, opts: { auth?: string; host?: string } = {}) {
+async function rpc(body: unknown, opts: { auth?: string; host?: string; workspace?: string } = {}) {
   const res = await mcpRoutes.request(buildReq(body, opts))
   return { status: res.status, json: await res.json() as Record<string, unknown> }
 }
@@ -167,6 +171,54 @@ describe("/mcp auth + host", () => {
       buildReq({ jsonrpc: "2.0", id: 1, method: "initialize" }),
     )
     expect(res.status).toBe(401)
+  })
+})
+
+describe("/mcp session workspace header", () => {
+  test("applySessionWorkspace injects an absolute header only when workspace is absent or empty", () => {
+    const args: Record<string, unknown> = { prompt: "inspect" }
+    applySessionWorkspace(args, process.cwd())
+    expect(args.workspace).toBe(process.cwd())
+
+    const explicit: Record<string, unknown> = { workspace: "/explicit" }
+    applySessionWorkspace(explicit, process.cwd())
+    expect(explicit.workspace).toBe("/explicit")
+
+    const empty: Record<string, unknown> = { workspace: "" }
+    applySessionWorkspace(empty, process.cwd())
+    expect(empty.workspace).toBe(process.cwd())
+
+    const relative: Record<string, unknown> = {}
+    applySessionWorkspace(relative, "relative/path")
+    expect(relative.workspace).toBeUndefined()
+  })
+
+  test("persona calls do not receive a workspace from the session header", async () => {
+    let captured: Record<string, unknown> | undefined
+    globalThis.fetch = mock(async (_url: unknown, init?: { body?: string }) => {
+      if (init?.body) captured = JSON.parse(init.body) as Record<string, unknown>
+      return new Response(JSON.stringify({
+        id: "resp_1",
+        object: "response",
+        created_at: Date.now(),
+        model: "gpt-5.5",
+        output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }) as unknown as typeof globalThis.fetch
+
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 90,
+      method: "tools/call",
+      params: { name: "codex_critic", arguments: { prompt: "review this tiny plan" } },
+    }, { workspace: process.cwd() })
+
+    expect(status).toBe(200)
+    expect((json.result as { isError?: boolean }).isError).toBeFalsy()
+    expect(JSON.stringify(captured)).not.toContain("workspace")
   })
 })
 
@@ -2350,6 +2402,81 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
     }
     expect(result.isError).toBeFalsy()
     expect(result.content[0].text).toBe("explore-with-workspace-override")
+  })
+
+  test("worker_explore uses the session workspace header when no workspace arg is provided", async () => {
+    state.serveMode = true
+    let captured: Record<string, unknown> | undefined
+    globalThis.fetch = workerSseResponse("explore-with-header-workspace", {
+      capturePayload: (payload) => {
+        captured = payload
+      },
+    })
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 723,
+      method: "tools/call",
+      params: {
+        name: "explore",
+        arguments: { prompt: "investigate something" },
+      },
+    }, { workspace: process.cwd() })
+    expect(status).toBe(200)
+    const result = json.result as {
+      isError?: boolean
+      content: Array<{ text: string }>
+    }
+    expect(result.isError).toBeFalsy()
+    expect(result.content[0].text).toBe("explore-with-header-workspace")
+    expect(captured).toBeDefined()
+  })
+
+  test("explicit worker workspace overrides the session workspace header", async () => {
+    state.serveMode = true
+    const explicitWorkspace = process.cwd()
+    let captured: Record<string, unknown> | undefined
+    globalThis.fetch = workerSseResponse("explore-explicit-beats-header", {
+      capturePayload: (payload) => {
+        captured = payload
+      },
+    })
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 724,
+      method: "tools/call",
+      params: {
+        name: "explore",
+        arguments: { prompt: "investigate something", workspace: explicitWorkspace },
+      },
+    }, { workspace: "/header/workspace" })
+    const result = json.result as {
+      isError?: boolean
+      content: Array<{ text: string }>
+    }
+    expect(result.isError).toBeFalsy()
+    expect(result.content[0].text).toBe("explore-explicit-beats-header")
+    expect(captured).toBeDefined()
+  })
+
+  test("worker_explore in serve mode requires workspace when no header or arg is present", async () => {
+    state.serveMode = true
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 725,
+      method: "tools/call",
+      params: {
+        name: "explore",
+        arguments: { prompt: "investigate something" },
+      },
+    })
+    expect(status).toBe(200)
+    const result = json.result as {
+      isError?: boolean
+      content: Array<{ text: string }>
+    }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain("a workspace is required")
+    expect(result.content[0].text).toContain("machine-wide github-router serve")
   })
 
   test("worker_explore rejects a relative workspace path with isError + actionable message", async () => {

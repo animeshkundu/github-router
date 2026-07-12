@@ -53,6 +53,7 @@ import {
 } from "~/lib/worker-agent/budget"
 import { searchWeb } from "~/services/copilot/web-search"
 import { runStandIn, type StandInInput } from "~/lib/stand-in"
+import { state } from "~/lib/state"
 import { verifyWorkflowIR, decomposeWorkflow, attestRun, type AttestNode, type WorkflowIR } from "~/lib/orchestration"
 import { buildLiveDecomposeDeps } from "~/lib/orchestration/decompose-live"
 import { runWorkflowLive } from "~/lib/orchestration/run-workflow-live"
@@ -2165,8 +2166,9 @@ export function assertMcpToolSurfaceConsistent(): void {
 /**
  * Shared closure body for the two worker MCP tools. Validates the
  * minimal arg shape (prompt required + optional knobs typed), then
- * forwards to `runWorkerAgent`. `workspace` defaults to the proxy's
- * launch cwd; callers can override via the optional `workspace` arg
+ * forwards to `runWorkerAgent`. Outside serve mode, `workspace` defaults
+ * to the proxy's launch cwd; serve mode requires an explicit/header-derived
+ * workspace. Callers can override via the optional `workspace` arg
  * (absolute paths only — enforced here). The engine performs every
  * deeper validation (model existence, thinking clamp, worktree
  * provisioning, semaphore acquisition, workspace realpath +
@@ -2255,13 +2257,12 @@ async function runWorkerToolCall(call: {
     worktree = args.worktree
   }
 
-  // Optional workspace override. Default is the proxy's launch cwd;
-  // the model can override when the parent agent has multiple
-  // workspaces open and the worker must operate in a specific one
-  // (matches code search's threat model: no allowlist; proxy already
-  // runs as the user). Absolute-only at the boundary so a relative
-  // path doesn't silently resolve against process.cwd().
-  let workspace = process.cwd()
+  // Optional workspace override. Outside serve mode, default is the proxy's
+  // launch cwd; in serve mode this proxy is machine-wide, so the workspace
+  // must come from the per-session header (injected by handler.ts as
+  // args.workspace) or from an explicit tool argument. Absolute-only at the
+  // boundary so a relative path doesn't silently resolve against process.cwd().
+  let workspace: string
   if (args.workspace !== undefined) {
     if (typeof args.workspace !== "string" || args.workspace.length === 0) {
       return {
@@ -2280,6 +2281,18 @@ async function runWorkerToolCall(call: {
       }
     }
     workspace = args.workspace
+  } else if (state.serveMode) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: `worker_${mode}: a workspace is required. This is a machine-wide github-router serve; pass the absolute path of the project you are working in as \`workspace\`.`,
+        },
+      ],
+      isError: true,
+    }
+  } else {
+    workspace = process.cwd()
   }
 
   // Optional per-call wall-clock override (ms). Validate as a positive
@@ -2600,4 +2613,39 @@ export async function runStandInToolCall(
   return {
     content: [{ type: "text", text: JSON.stringify(result) }],
   }
+}
+
+/**
+ * Every exact `mcp__<key>__<tool>` name github-router injects, for the given
+ * resolved group keys (`peers`/`search`/… → their collision-resolved mcpServers
+ * key). A SUPERSET — it ignores per-tool capability gates because an allow-list
+ * entry for a tool that isn't actually served is inert, which keeps it correct
+ * as gates change and as tools are added.
+ *
+ * Used to seed CloudCLI's `localStorage['claude-settings'].allowedTools` so its
+ * Agent-SDK `canUseTool` auto-approves our MCP tools in PLAN mode. `canUseTool`
+ * does EXACT tool-name matching (no `mcp__<server>` wildcard — see
+ * `matchesToolPermission` in CloudCLI's `claude-sdk.js`), so bare `mcp__peers`
+ * would NOT cover `mcp__peers__gemini_critic`; the exact names are required.
+ * This is the ONLY lever for plan mode: bypass mode skips `canUseTool`, and the
+ * mirror `settings.json permissions.allow` is NOT consulted by `canUseTool`
+ * (which reads `sdkOptions.allowedTools`, seeded from this localStorage key).
+ */
+export function enumerateInjectedMcpToolNames(
+  groupKeys: Partial<Record<McpGroup, string>>,
+  opts: { codexCli?: boolean } = {},
+): string[] {
+  const names: string[] = []
+  const peersKey = groupKeys.peers
+  if (peersKey) {
+    for (const p of [...PERSONAS_READ, ...PERSONAS_WRITE]) {
+      names.push(`mcp__${peersKey}__${p.toolNameHttp}`)
+    }
+  }
+  for (const t of NON_PERSONA_MCP_TOOLS) {
+    const key = groupKeys[t.group]
+    if (key) names.push(`mcp__${key}__${t.toolNameHttp}`)
+  }
+  if (opts.codexCli) names.push("mcp__codex-cli__codex")
+  return [...new Set(names)]
 }

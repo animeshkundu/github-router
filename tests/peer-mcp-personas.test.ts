@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import {
   buildAgentPrompt,
   buildPeerAwarenessSnippet,
+  enumerateInjectedMcpToolNames,
   NON_PERSONA_MCP_TOOLS,
   PERSONAS_READ,
   PERSONAS_WRITE,
@@ -639,5 +640,38 @@ describe("buildPeerAwarenessSnippet", () => {
     })
     expect(snippet).toMatch(/subagents/i)
     expect(snippet).toMatch(/inherit/i)
+  })
+})
+
+describe("enumerateInjectedMcpToolNames (plan-mode allowedTools seed)", () => {
+  test("builds exact mcp__<key>__<tool> names using the RESOLVED group keys", () => {
+    const names = enumerateInjectedMcpToolNames({ peers: "peers", search: "search" })
+    // every peer critic + reviewer is present under the resolved peers key
+    for (const p of PERSONAS_READ) expect(names).toContain(`mcp__peers__${p.toolNameHttp}`)
+    // search-group tools present
+    expect(names).toContain("mcp__search__code")
+    expect(names).toContain("mcp__search__web")
+    // exact names (canUseTool needs exact match — no bare-server wildcard)
+    expect(names.every((n) => /^mcp__[^_]/.test(n) && n.split("__").length >= 3)).toBe(true)
+    // groups NOT in groupKeys are absent
+    expect(names.some((n) => n.startsWith("mcp__workers__"))).toBe(false)
+    expect(names.some((n) => n.startsWith("mcp__browser__"))).toBe(false)
+  })
+
+  test("honors collision-resolved keys (gh-router-*) and adds codex-cli under --codex-cli", () => {
+    const names = enumerateInjectedMcpToolNames({ peers: "gh-router-peers" }, { codexCli: true })
+    expect(names).toContain("mcp__gh-router-peers__codex_critic")
+    expect(names).toContain("mcp__codex-cli__codex")
+    // no bare `peers` names when the resolved key is gh-router-peers
+    expect(names.some((n) => n.startsWith("mcp__peers__"))).toBe(false)
+  })
+
+  test("dedupes and omits groups whose key is absent", () => {
+    const names = enumerateInjectedMcpToolNames({ decide: "decide" })
+    expect(names).toEqual([...new Set(names)])
+    expect(names).toContain("mcp__decide__stand_in")
+    expect(names.some((n) => n.startsWith("mcp__peers__"))).toBe(false)
+    // no codex-cli entry without the flag
+    expect(names).not.toContain("mcp__codex-cli__codex")
   })
 })

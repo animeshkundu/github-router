@@ -5,6 +5,7 @@ import path from "node:path"
 import consola from "consola"
 
 import { buildCodexProviderConfigFlags } from "./launch"
+import { buildWorkspaceHeaderHelperCommand } from "./mcp-workspace-header"
 import { PATHS, writeRuntimeFileSecure } from "./paths"
 import {
   buildAgentPrompt,
@@ -94,6 +95,8 @@ interface BuildOpts {
   nonce: string
   /** Isolated CODEX_HOME for the stdio child (only used when codexCli). */
   codexHome: string
+  /** headersHelper command emitted on each HTTP entry for per-session workspace routing. */
+  workspaceHeaderCmd?: string
   /** Whether the core worker tools are served (`workerToolsEnabled()`). When
    *  true, the `worker-explore/implement/review/plan/test` dispatcher subagents
    *  are generated. Optional (defaults false) so `buildPeerMcpConfig` callers
@@ -111,6 +114,7 @@ interface HttpMcpEntry {
   type: "http"
   url: string
   headers: Record<string, string>
+  headersHelper?: string
 }
 
 interface StdioMcpEntry {
@@ -141,16 +145,19 @@ export function buildPeerMcpConfig(
 ): PeerMcpConfig {
   const mcpServers: Record<string, HttpMcpEntry | StdioMcpEntry> = {}
 
+  const workspaceHeaderCmd = opts.workspaceHeaderCmd?.trim()
   for (const group of MCP_GROUPS) {
     const key = opts.groupKeys[group]
     if (!key) continue // group disabled at launch, or both keys collided
-    mcpServers[key] = {
+    const entry: HttpMcpEntry = {
       type: "http",
       url: `${serverUrl}/mcp/${GROUP_META[group].urlSuffix}`,
       headers: {
         Authorization: `Bearer ${opts.nonce}`,
       },
     }
+    if (workspaceHeaderCmd) entry.headersHelper = workspaceHeaderCmd
+    mcpServers[key] = entry
   }
 
   if (opts.codexCli) {
@@ -279,6 +286,40 @@ function buildCoordinatorAgent(opts: {
 }
 
 /**
+ * Claude Code's built-in subagents, which the interactive CLI provides natively
+ * but the Agent SDK (used by CloudCLI under `serve`) does NOT register — so a
+ * serve session shows `Agent type 'Explore' not found`. We re-register them as
+ * custom subagents so the model's habitual `Agent(subagent_type:"…")` calls
+ * resolve. SERVE-ONLY: never inject these for `github-router claude` (the CLI's
+ * native, tuned built-ins would be shadowed by a same-name custom agent).
+ *
+ * No `tools:` restriction — each inherits the session's full toolset; the role
+ * is steered by the prompt (matching the built-ins' behavior without the risk of
+ * an over-narrow allowlist). `statusline-setup`/`output-style-setup` are omitted
+ * (niche, rarely invoked).
+ */
+export const BUILTIN_SUBAGENT_DEFINITIONS: PeerAgentDefinitions = {
+  "general-purpose": {
+    description:
+      "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. Use when searching for a keyword or file and you are not confident you will find the right match in the first few tries.",
+    prompt:
+      "You are a general-purpose agent. Research the question or carry out the multi-step task you are given, using the full toolset (read, search, edit, run commands as needed). Work autonomously and return a single, complete final answer — your final message is the whole result, so include the findings, file paths, and any code the caller needs.",
+  },
+  Explore: {
+    description:
+      "Read-only search agent for broad fan-out searches — when answering means sweeping many files or directories and you only need the conclusion, not the file dumps. It locates code; it does not modify it.",
+    prompt:
+      "You are a read-only exploration agent. Investigate the codebase to answer the question by reading and searching (Read/Glob/Grep and semantic code search); do NOT modify any files, run mutating commands, or make commits. Cast a wide net, then return a concise conclusion with the relevant file paths and line references — your final message is the whole answer.",
+  },
+  Plan: {
+    description:
+      "Software architect agent for designing implementation plans. Use when you need to plan the implementation strategy for a task. Returns a step-by-step plan, identifies critical files, and considers architectural trade-offs.",
+    prompt:
+      "You are a planning agent. Read the codebase (read-only — do not modify files) to design a concrete, ordered implementation plan for the task: the approach, the specific files to change, reuse of existing utilities, risks, and how the result will be verified. Return the plan as your final message.",
+  },
+}
+
+/**
  * Build the JSON payload for `claude --agents <path>`.
  *
  * Always includes the read-only personas applicable to the mode (gemini
@@ -394,6 +435,13 @@ interface WriteOpts {
   /** Model for the native OpenAI subagents (implementer/debugger/qa-engineer)
    *  when present in the live catalog. */
   nativeSubagentModel?: string
+  /** Extra subagent definitions to register alongside the peer/worker agents
+   *  (written as `.md` files so they appear in the Task `subagent_type` enum).
+   *  Used by `serve` to inject Claude Code's built-in subagents (Explore/Plan/
+   *  general-purpose) that the Agent SDK does NOT register — see
+   *  BUILTIN_SUBAGENT_DEFINITIONS. Must NOT be passed for `github-router claude`,
+   *  where the CLI provides those built-ins natively (same-name would shadow). */
+  builtinSubagents?: PeerAgentDefinitions
   /** Override for tests. Defaults to PATHS.CODEX_HOME. */
   codexHome?: string
   /** Override for tests. Defaults to PATHS.CLAUDE_RUNTIME_DIR. */
@@ -463,7 +511,7 @@ function escapeYamlString(s: string): string {
  * anything that wouldn't be a safe bare YAML scalar AND a safe path
  * component.
  */
-const VALID_AGENT_NAME = /^[a-z][a-z0-9-]*$/
+const VALID_AGENT_NAME = /^[A-Za-z][A-Za-z0-9-]*$/
 
 /** Build a single subagent .md file body (frontmatter + system prompt).
  *
@@ -760,6 +808,7 @@ export async function injectPeerMcpIntoMirror(
     groupKeys: opts.groupKeys,
     nonce: opts.nonce,
     codexHome: opts.codexHome ?? PATHS.CODEX_HOME,
+    workspaceHeaderCmd: buildWorkspaceHeaderHelperCommand(process.execPath, process.argv[1]),
   })
 
   // 4. Defensive: the resolved keys are collision-free by construction, so
@@ -848,6 +897,7 @@ export async function writePeerMcpRuntimeFiles(
     groupKeys: opts.groupKeys,
     nonce,
     codexHome,
+    workspaceHeaderCmd: buildWorkspaceHeaderHelperCommand(process.execPath, process.argv[1]),
   })
   const agents = buildPeerAgentDefinitions({
     codexCli: opts.codexCli,
@@ -877,7 +927,14 @@ export async function writePeerMcpRuntimeFiles(
   // JSON path above is kept for inspection / future-proofing but the
   // .md files are what makes the subagents actually invokable from
   // Opus's tool surface.
-  const mdResult = await writePeerAgentMdFiles(agents, {
+  //
+  // `builtinSubagents` (serve only) adds Claude Code's built-in Explore/Plan/
+  // general-purpose, which the Agent SDK does NOT register — so the model's
+  // habitual `Agent(subagent_type:"Explore")` calls resolve instead of 404ing.
+  const agentsToWrite = opts.builtinSubagents
+    ? { ...agents, ...opts.builtinSubagents }
+    : agents
+  const mdResult = await writePeerAgentMdFiles(agentsToWrite, {
     agentsDir: opts.agentsDir,
     fileSuffix,
   })

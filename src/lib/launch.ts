@@ -10,91 +10,23 @@ import type { Server } from "srvx"
 import { resolveExecutable, killChildProcessTree } from "./exec"
 import { DEFAULT_CODEX_MODEL } from "./port"
 import { startProcessGuard } from "./process-guard"
+import { STRIPPED_AUTH_ROUTING_ENV_KEYS } from "./stripped-env-keys"
 import { collapsePathKeys } from "./toolbelt/path-inject"
 import { sweepRegistry } from "./worker-agent/lifecycle"
 
 /**
- * Auth-related env keys we strip from the parent before spawning the
- * child CLI. The proxy provides its own values for everything we care
- * about (ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, OPENAI_BASE_URL,
- * OPENAI_API_KEY, CODEX_HOME, ANTHROPIC_MODEL); for the rest, we want
- * the child to behave as if the user had no parent-env auth at all.
+ * Auth-related env keys we strip from the parent before spawning the child CLI.
+ * The proxy provides its own values for everything we care about, so the child
+ * behaves as if the user had no parent-env auth at all. The canonical list lives
+ * in `./stripped-env-keys` (shared with serve's settings.json `env` strip).
  *
- * Why strip rather than override-with-empty-string:
- *   - Claude Code emits "Auth conflict" warnings whenever both
- *     ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are present (regardless
- *     of value, even when both are "dummy"). Stripping API_KEY entirely
- *     suppresses the warning AND prevents an inherited real shell key
- *     from leaking via x-api-key.
- *   - Cloud-provider toggles (CLAUDE_CODE_USE_*) and OAUTH_TOKEN, etc.
- *     are simpler dropped than overridden — a missing env var is
- *     unambiguously falsy/absent in every code path that reads it.
+ * Why strip rather than override-with-empty-string: Claude Code emits "Auth
+ * conflict" warnings whenever both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY
+ * are present (any value); stripping suppresses it AND prevents an inherited
+ * real key from leaking. Cloud-provider toggles + OAuth tokens are simpler
+ * dropped than overridden — a missing var is unambiguously absent everywhere.
  */
-const STRIPPED_PARENT_ENV_KEYS = [
-  // Claude Code auth surface
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_BASE_URL",
-  "ANTHROPIC_CUSTOM_HEADERS",
-  "ANTHROPIC_MODEL",
-  "CLAUDE_CODE_OAUTH_TOKEN",
-  // Per binary-grep of v2.1.140 (function QuH): Claude Code recognizes
-  // CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR as an alternate auth source
-  // (loads OAuth from an open file descriptor). Stripping this prevents
-  // a user-exported FD reference from leaking into the proxy session
-  // and creating a third auth source alongside the synthetic
-  // .credentials.json (potential auth-conflict warning).
-  "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
-  "CLAUDE_CODE_USE_BEDROCK",
-  "CLAUDE_CODE_USE_VERTEX",
-  "CLAUDE_CODE_USE_FOUNDRY",
-  // Defense-in-depth: prevent a parent-set CLAUDE_CONFIG_DIR (e.g. an
-  // alternate test profile) from silently leaking into the proxy session.
-  // The proxy sets its own value to activate per-config-dir keychain
-  // isolation (see `getClaudeCodeEnvVars` doc comment).
-  "CLAUDE_CONFIG_DIR",
-  // Claude Code Bridge / IDE remote-session surface. Any of these set in
-  // the parent shell would activate Claude Code's remote-session code path
-  // — which makes many additional API calls (POST /v1/code/sessions,
-  // POST /v1/environments/bridge, etc.) that this proxy does not implement
-  // (Copilot has no equivalent). Stripping forces the spawned child to
-  // run as a local-only session, which is what the proxy supports.
-  // (Verified surface in cc-backup src/bridge/*, src/utils/managedEnv.ts;
-  // empirical check 2026-05-11.)
-  "CLAUDE_BRIDGE_OAUTH_TOKEN",
-  "CLAUDE_BRIDGE_BASE_URL",
-  "CLAUDE_BRIDGE_SESSION_INGRESS_URL",
-  "SESSION_INGRESS_URL",
-  "CLAUDE_CODE_REMOTE",
-  "CLAUDE_CODE_CONTAINER_ID",
-  "CLAUDE_CODE_REMOTE_SESSION_ID",
-  "CLAUDE_CODE_SESSION_ID",
-  // CLAUDE_CODE_ADDITIONAL_PROTECTION makes Claude Code emit
-  // `x-anthropic-additional-protection: true` on every /v1/messages request.
-  // Copilot ignores it today (verified 2026-05-11) but the header is pure
-  // wire-fingerprint noise that breaks the VS Code stealth posture.
-  "CLAUDE_CODE_ADDITIONAL_PROTECTION",
-  // NOT stripped: ANTHROPIC_SMALL_FAST_MODEL. Users with custom Copilot
-  // mappings legitimately rely on this to route the haiku-tier "small fast"
-  // model. Stripping would be an unforced error (gemini-critic finding) —
-  // we trust resolveModel's dated-slug-retry / family-fallback to translate
-  // unrecognized values, and surface unsupported-model failures via consola.
-  // Codex CLI auth surface
-  "OPENAI_API_KEY",
-  "OPENAI_BASE_URL",
-  "CODEX_HOME",
-  // ai-or-die session-bind / artifact-review surface. ai-or-die sets
-  // AIORDIE_CLAUDE_BIND (a per-tab sidecar path) on the Terminal shell so THIS
-  // github-router registers the SessionStart/SessionEnd bind hook. The hook
-  // receives the path baked into its command, so it does NOT need the env — and
-  // stripping it here means a nested `github-router claude` (a teammate/tool
-  // re-invocation) can't inherit it and hijack the parent tab's sidecar.
-  // AIORDIE_TOKEN is similarly tab-scoped for Artifact review; nested launches
-  // must not inherit the parent tab's bearer token.
-  "AIORDIE_CLAUDE_BIND",
-  "AIORDIE_TOKEN",
-  "AIORDIE_INSECURE_TLS",
-] as const
+const STRIPPED_PARENT_ENV_KEYS = STRIPPED_AUTH_ROUTING_ENV_KEYS
 
 /**
  * Strip auth-related keys from a parent-process env object. The result

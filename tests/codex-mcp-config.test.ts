@@ -9,6 +9,7 @@ import {
   buildAgentMd,
   buildPeerAgentDefinitions,
   buildPeerMcpConfig,
+  BUILTIN_SUBAGENT_DEFINITIONS,
   injectPeerMcpIntoMirror,
   resolveCodexCliBackend,
   resolveGroupKeysFromMirror,
@@ -97,11 +98,31 @@ describe("buildPeerMcpConfig", () => {
         type: "http"
         url: string
         headers: Record<string, string>
+        headersHelper?: string
       }
       expect(entry.type).toBe("http")
       expect(entry.url).toBe(`${URL}/mcp/${group}`)
       expect(entry.headers.Authorization).toBe(`Bearer ${NONCE}`)
+      expect(entry.headersHelper).toBeUndefined()
     }
+  })
+
+  test("workspaceHeaderCmd is emitted on each HTTP entry but not the codex-cli stdio entry", () => {
+    const cfg = buildPeerMcpConfig(URL, {
+      codexCli: true,
+      geminiAvailable: true,
+      groupKeys: { peers: "peers", search: "search" },
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+      workspaceHeaderCmd: "workspace-header-cmd",
+    })
+    const peers = cfg.mcpServers.peers as { type: "http"; headersHelper?: string }
+    const search = cfg.mcpServers.search as { type: "http"; headersHelper?: string }
+    const cli = cfg.mcpServers["codex-cli"] as { command: string; headersHelper?: string }
+    expect(peers.headersHelper).toBe("workspace-header-cmd")
+    expect(search.headersHelper).toBe("workspace-header-cmd")
+    expect(cli.command).toBe("codex")
+    expect(cli.headersHelper).toBeUndefined()
   })
 
   test("collision fallback key still maps to the canonical scoped URL", () => {
@@ -511,6 +532,48 @@ describe("writePeerMcpRuntimeFiles", () => {
       await runtime.cleanup()
       await expect(fs.stat(runtime.mcpConfigPath)).rejects.toThrow()
       await expect(fs.stat(runtime.agentsPath)).rejects.toThrow()
+      for (const p of runtime.agentMdPaths) {
+        await expect(fs.stat(p)).rejects.toThrow()
+      }
+    })
+  })
+
+  test("builtinSubagents (serve) registers Explore/Plan/general-purpose .md files with capitalized names", async () => {
+    await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
+      // Base run WITHOUT builtinSubagents — the peer/coordinator/native-subagent
+      // set (its size grows as master adds native subagents, so compute it).
+      const base = await writePeerMcpRuntimeFiles(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search" },
+        runtimeDir,
+        codexHome,
+        agentsDir,
+      })
+      const baseCount = base.agentMdPaths.length
+      await base.cleanup()
+
+      const runtime = await writePeerMcpRuntimeFiles(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search" },
+        runtimeDir,
+        codexHome,
+        agentsDir,
+        builtinSubagents: BUILTIN_SUBAGENT_DEFINITIONS,
+      })
+      const names = runtime.agentMdPaths.map((p) => path.basename(p))
+      // builtinSubagents adds EXACTLY the 3 built-ins on top of the base set.
+      expect(runtime.agentMdPaths.length).toBe(baseCount + 3)
+      expect(names.some((n) => n.endsWith("-Explore.md"))).toBe(true)
+      expect(names.some((n) => n.endsWith("-Plan.md"))).toBe(true)
+      expect(names.some((n) => n.endsWith("-general-purpose.md"))).toBe(true)
+      // The frontmatter `name:` must equal the exact `subagent_type` the model
+      // calls (capitalized) — otherwise the Task enum wouldn't resolve it.
+      const explore = runtime.agentMdPaths.find((p) => p.endsWith("-Explore.md"))!
+      const body = await fs.readFile(explore, "utf8")
+      expect(body).toMatch(/^---\nname: Explore\n/)
+      await runtime.cleanup()
       for (const p of runtime.agentMdPaths) {
         await expect(fs.stat(p)).rejects.toThrow()
       }

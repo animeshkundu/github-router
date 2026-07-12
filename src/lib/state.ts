@@ -107,6 +107,13 @@ export interface State {
    * native messaging, sibling-process probe).
    */
   peerMcpNonce?: string
+
+  /**
+   * Set by `github-router serve` (a single machine-wide control plane serving
+   * many repos). When true, repo-scoped worker tools require an explicit/So-derived
+   * `workspace` and must NOT silently default to the proxy launch cwd.
+   */
+  serveMode?: boolean
 }
 
 export const state: State = {

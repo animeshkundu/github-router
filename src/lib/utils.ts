@@ -147,6 +147,19 @@ export function normalizeModelId(id: string): string {
  *    version pinning (a dated catalog id matched at Step 1) always wins.
  * 6. Return as-is with a warning
  */
+/**
+ * `[1m]`-downgrade warnings we've already emitted this process. `resolveModel`
+ * is called many times per launch (env setup, model validation, the banner,
+ * and — under `serve` — on every model-picker `/models` poll), so the downgrade
+ * notice is deduped to once per model id to avoid log spam.
+ */
+const warnedOneMDowngrade = new Set<string>()
+
+/** Test-only: clear the once-per-process `[1m]`-downgrade warning cache. */
+export function __resetOneMDowngradeWarnings(): void {
+  warnedOneMDowngrade.clear()
+}
+
 export function resolveModel(modelId: string): string {
   const models = state.models?.data
   if (!models) return modelId
@@ -175,7 +188,8 @@ export function resolveModel(modelId: string): string {
   if (oneMMatch) {
     const stripped = oneMMatch[1]
     const resolved = resolveModel(stripped)
-    if (!/-1m(?:$|-)/.test(resolved)) {
+    if (!/-1m(?:$|-)/.test(resolved) && !warnedOneMDowngrade.has(modelId)) {
+      warnedOneMDowngrade.add(modelId)
       consola.warn(
         `Model "${modelId}" requested 1M context but no -1m backend is in Copilot's catalog for this tier/family; downgrading upstream to "${resolved}" (200K). Claude Code's local context accounting will still assume 1M — expect premature auto-compact. Drop the [1m] suffix (or unset CLAUDE_CODE_DISABLE_1M_CONTEXT if you set it) to silence.`,
       )
