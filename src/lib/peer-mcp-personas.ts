@@ -2614,3 +2614,38 @@ export async function runStandInToolCall(
     content: [{ type: "text", text: JSON.stringify(result) }],
   }
 }
+
+/**
+ * Every exact `mcp__<key>__<tool>` name github-router injects, for the given
+ * resolved group keys (`peers`/`search`/… → their collision-resolved mcpServers
+ * key). A SUPERSET — it ignores per-tool capability gates because an allow-list
+ * entry for a tool that isn't actually served is inert, which keeps it correct
+ * as gates change and as tools are added.
+ *
+ * Used to seed CloudCLI's `localStorage['claude-settings'].allowedTools` so its
+ * Agent-SDK `canUseTool` auto-approves our MCP tools in PLAN mode. `canUseTool`
+ * does EXACT tool-name matching (no `mcp__<server>` wildcard — see
+ * `matchesToolPermission` in CloudCLI's `claude-sdk.js`), so bare `mcp__peers`
+ * would NOT cover `mcp__peers__gemini_critic`; the exact names are required.
+ * This is the ONLY lever for plan mode: bypass mode skips `canUseTool`, and the
+ * mirror `settings.json permissions.allow` is NOT consulted by `canUseTool`
+ * (which reads `sdkOptions.allowedTools`, seeded from this localStorage key).
+ */
+export function enumerateInjectedMcpToolNames(
+  groupKeys: Partial<Record<McpGroup, string>>,
+  opts: { codexCli?: boolean } = {},
+): string[] {
+  const names: string[] = []
+  const peersKey = groupKeys.peers
+  if (peersKey) {
+    for (const p of [...PERSONAS_READ, ...PERSONAS_WRITE]) {
+      names.push(`mcp__${peersKey}__${p.toolNameHttp}`)
+    }
+  }
+  for (const t of NON_PERSONA_MCP_TOOLS) {
+    const key = groupKeys[t.group]
+    if (key) names.push(`mcp__${key}__${t.toolNameHttp}`)
+  }
+  if (opts.codexCli) names.push("mcp__codex-cli__codex")
+  return [...new Set(names)]
+}

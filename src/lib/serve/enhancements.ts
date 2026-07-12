@@ -39,7 +39,7 @@ import { buildPlanReviewHookCommand, planReviewEnabled } from "../orchestration/
 import { buildPromptSubmitHookCommand } from "../orchestration/prompt-submit-hook"
 import { injectStopHookIntoSettingsFile } from "../orchestration/stop-gate-hook"
 import { PATHS } from "../paths"
-import { buildPeerAwarenessSnippet, type McpGroup } from "../peer-mcp-personas"
+import { buildPeerAwarenessSnippet, enumerateInjectedMcpToolNames, type McpGroup } from "../peer-mcp-personas"
 import { state } from "../state"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "../toolbelt"
 import {
@@ -51,6 +51,10 @@ import {
 export interface ServeEnhancementsHandle {
   cleanup: () => Promise<void>
   nonce?: string
+  /** Exact `mcp__<key>__<tool>` names of every injected MCP tool — seeded into
+   *  the reverse-proxy's `localStorage['claude-settings'].allowedTools` so
+   *  CloudCLI's `canUseTool` auto-approves them in PLAN mode. */
+  mcpToolNames?: string[]
 }
 
 export interface ServeEnhancementOpts {
@@ -268,7 +272,11 @@ export async function provisionServeEnhancements(
     consola.info(
       `github-router tools wired into Claude sessions: MCP [${servers}], ${runtime.personas.length} subagents, ${skillsWritten} skills.`,
     )
-    return { cleanup: runtime.cleanup, nonce: runtime.nonce }
+    return {
+      cleanup: runtime.cleanup,
+      nonce: runtime.nonce,
+      mcpToolNames: enumerateInjectedMcpToolNames(groupKeys, { codexCli: opts.codexCli === true }),
+    }
   } catch (err) {
     consola.warn(
       `Could not wire the github-router MCP/skills layer: ${

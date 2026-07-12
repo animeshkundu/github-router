@@ -41,6 +41,10 @@ export interface ReverseProxyOptions {
    * permission prompts (serve default; disabled by GH_ROUTER_SERVE_NO_AUTO_APPROVE=1).
    */
   seedToolSettings?: boolean
+  /** Exact `mcp__<key>__<tool>` names to seed into the `claude-settings`
+   *  `allowedTools` auto-approve list (only used when `seedToolSettings`). Makes
+   *  the injected MCP tools auto-approve in CloudCLI plan mode. */
+  seedAllowedTools?: string[]
   providerFacade?: {
     kindFor: (method: string, pathname: string) => string | null
     rewrite: (
@@ -100,12 +104,27 @@ const CLAUDE_SETTINGS_KEY = "claude-settings"
  * silently clamp the toolset. Forcing empty `allowedTools` + `skipPermissions`
  * gives `github-router claude`-parity (`--dangerously-skip-permissions`).
  */
-function buildInjection(token: string, seedToolSettings = false): string {
+function buildInjection(
+  token: string,
+  seedToolSettings = false,
+  seedAllowedTools: string[] = [],
+): string {
   const safe = JSON.stringify(token).replace(/</g, "\\u003c")
   let body = `localStorage.setItem('auth-token',${safe});`
   if (seedToolSettings) {
     const settings = JSON.stringify({
-      allowedTools: [],
+      // `allowedTools` here is CloudCLI's per-tool AUTO-APPROVE list (feeds the
+      // Agent-SDK `canUseTool` callback). Verified against a live CloudCLI plan-
+      // mode session (scripts/verify-plan-mode-cloudcli.mjs): under the SDK's
+      // `claude_code` preset it is ADDITIVE — an MCP-only list still leaves the
+      // full native toolset available (unlike a bare `claude --allowedTools`,
+      // which restricts). So we seed ONLY the exact `mcp__<key>__<tool>` names
+      // github-router injects, which makes those tools auto-approve in PLAN mode
+      // (the only mode where canUseTool runs — bypass skips it), fixing the "Tool
+      // permission request failed: Stream closed" a plan-mode MCP call otherwise
+      // hits. `canUseTool` does EXACT-name matching (no `mcp__<server>` wildcard),
+      // so the full explicit list is required.
+      allowedTools: seedAllowedTools,
       disallowedTools: [],
       skipPermissions: true,
     })
@@ -126,7 +145,7 @@ export async function startReverseProxy(
 ): Promise<ReverseProxyHandle> {
   const { targetHost, targetPort, bindHost, bindPort, authToken } = opts
   const ownOrigin = `http://${bindHost}:${bindPort}`
-  const injection = buildInjection(authToken, opts.seedToolSettings === true)
+  const injection = buildInjection(authToken, opts.seedToolSettings === true, opts.seedAllowedTools ?? [])
 
   const allowedHosts = new Set([
     `127.0.0.1:${bindPort}`,

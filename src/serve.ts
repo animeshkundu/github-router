@@ -506,6 +506,7 @@ export const serve = defineCommand({
         bindPort: servePort,
         authToken: token,
         seedToolSettings: process.env.GH_ROUTER_SERVE_NO_AUTO_APPROVE !== "1",
+        seedAllowedTools: enhancements.mcpToolNames ?? [],
         extraAllowedHosts,
         extraAllowedOrigins,
         allowDevtunnelHosts: tunnelMode,

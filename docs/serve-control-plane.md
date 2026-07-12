@@ -87,17 +87,23 @@ by writing into the router-owned `CLAUDE_CONFIG_DIR` mirror (which the SDK-spawn
   a browser approval prompt for every injected tool, and an operator's mirrored `defaultMode: "plan"`
   refuses native writes. Opt out with `GH_ROUTER_SERVE_NO_AUTO_APPROVE=1` (prompts + the mirrored mode
   are then left untouched). Existing `allow`/`deny`/`ask` entries are preserved; a user `deny` still wins.
-- **Injected MCP servers auto-approved (plan mode too)** — serve (and `github-router claude`) add bare
-  `mcp__<server>` allow rules for every injected MCP server (`mcp__peers`, `mcp__search`,
-  `mcp__workers`, `mcp__orchestrate`, `mcp__decide`, plus `mcp__browser`/`mcp__fleet`/`mcp__first-mate`
-  when enabled) to the mirror `settings.json` `permissions.allow`, using the collision-resolved keys.
-  Redundant under the bypass default, but load-bearing the moment a session switches to **plan mode**:
-  plan mode re-gates tools, but its restriction only covers file-edit/shell-write built-ins — MCP tools
-  fall through to the allow-rules step, so an `mcp__<server>` match auto-runs them un-prompted while
-  planning (exactly the research surface — search / peers / workers-explore / stand_in / orchestrate —
-  the model reaches for there). `readOnlyHint`/MCP annotations are not consulted by Claude Code's
-  permission engine, so allow rules are the only lever. A user who wants a specific mutating tool to
-  still prompt in plan mode can add an `ask`/`deny` rule (e.g. `mcp__workers__implement`).
+- **Injected MCP servers auto-approved in PLAN mode (the real serve mechanism)** — CloudCLI drives
+  Claude via the Agent SDK, whose `canUseTool` callback is what gates tools once a session is switched
+  off bypass into **plan mode**. That callback reads `sdkOptions.allowedTools` (seeded from the browser
+  `localStorage['claude-settings'].allowedTools`), NOT the mirror `settings.json permissions.allow`, and
+  it does EXACT tool-name matching (no `mcp__<server>` wildcard). So the reverse proxy seeds
+  `claude-settings.allowedTools` with the **exact** `mcp__<key>__<tool>` names of every injected server
+  (`enumerateInjectedMcpToolNames`), which makes those tools auto-approve in plan mode — no
+  `permission_request`, fixing the `Tool permission request failed: Error: Stream closed` a plan-mode
+  MCP call otherwise hits. **Verified end-to-end** (`bun run verify:plan-mode` /
+  `scripts/verify-plan-mode-cloudcli.mjs`): a live CloudCLI plan-mode session calls `mcp__search__code`
+  and it executes (isError:false, no prompt). The seed is auto-approve-only under the SDK's `claude_code`
+  preset — empirically ADDITIVE, so an MCP-only list does NOT restrict the native toolset (unlike a bare
+  `claude --allowedTools`, which does). Bypass mode skips `canUseTool` entirely, so this only bites in
+  plan mode. NOTE: the mirror `settings.json permissions.allow` `mcp__<server>` rules (also injected) are
+  a belt for the interactive-CLI path but are NOT consulted by CloudCLI's `canUseTool` — the localStorage
+  seed is the load-bearing lever for serve. (Plain `github-router claude` in plan mode hard-blocks MCP
+  tools at the binary level — a Claude Code limitation with no `canUseTool` override, not serve-fixable.)
 - **Coordinator-mode strip (single-agent toolset)** — serve removes `CLAUDE_CODE_COORDINATOR_MODE` from
   the mirror `settings.json` `env` block (unconditional, NOT gated by `GH_ROUTER_SERVE_NO_AUTO_APPROVE`).
   A user who runs FleetView/coordinator sessions sets that var in their real `~/.claude/settings.json`; it
