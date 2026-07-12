@@ -115,6 +115,30 @@ describe("AnswerInbox", () => {
     expect((await fs.readdir(dir)).filter((n) => n.includes(".draining."))).toEqual([])
   })
 
+  test("a transient Windows sharing violation on the claim-rename is retried, not fatal (R3 #3 win32)", async () => {
+    // On Windows two concurrent drainers renaming the SAME source can transiently
+    // get EPERM/EACCES/EBUSY (a sharing violation) instead of a clean ENOENT. The
+    // old code threw on any non-ENOENT rename error, failing the whole drain. The
+    // claim-rename must retry the transient error and still claim the orphan.
+    await fs.writeFile(
+      path.join(dir, "answers.jsonl.draining.9999.dead"),
+      `${JSON.stringify({ t: "h", requestId: "orphan-1", choice: "merge" })}\n`,
+    )
+    const inbox = new AnswerInbox({ dir })
+    // First rename (the orphan claim) throws EPERM once; the retry calls through.
+    const spy = spyOn(fs, "rename").mockImplementationOnce(async () => {
+      const e = new Error("simulated win32 sharing violation") as NodeJS.ErrnoException
+      e.code = "EPERM"
+      throw e
+    })
+    const drained = await inbox.drain()
+    spy.mockRestore()
+    // The orphan was claimed despite the transient error (not thrown away, not lost).
+    expect(drained.humanDecisions).toEqual([{ requestId: "orphan-1", choice: "merge" }])
+    await drained.ack()
+    expect((await fs.readdir(dir)).filter((n) => n.includes(".draining."))).toEqual([])
+  })
+
   test("a transient read error PRESERVES the orphan (never deletes an unread answer) (R3 #4)", async () => {
     await fs.writeFile(
       path.join(dir, "answers.jsonl.draining.9999.dead"),

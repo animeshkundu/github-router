@@ -53,6 +53,41 @@ export interface AnswerInboxOptions {
   dir?: string
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * Windows sharing-violation codes. When two processes rename the SAME source
+ * concurrently, POSIX gives the loser a clean `ENOENT` (source already gone),
+ * but Windows can transiently surface `EPERM`/`EACCES`/`EBUSY` (the source is
+ * momentarily locked by the peer's in-flight rename) before it resolves to
+ * ENOENT. Treat these as retryable, not fatal.
+ */
+const WIN_RENAME_TRANSIENT = new Set(["EPERM", "EACCES", "EBUSY"])
+
+/**
+ * Atomically claim `from` by renaming it to the process-unique `to`.
+ * Returns `true` if THIS caller won the claim, `false` if a peer already took it
+ * (source gone). Retries transient Windows sharing violations so two concurrent
+ * drainers converge to exactly one winner instead of one throwing. Non-transient
+ * errors propagate.
+ */
+async function claimByRename(from: string, to: string): Promise<boolean> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fs.rename(from, to)
+      return true
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code === "ENOENT") return false // a peer claimed it first
+      if (WIN_RENAME_TRANSIENT.has(code ?? "") && attempt < 25) {
+        await sleep(4 + attempt) // peer's rename is finishing; back off briefly
+        continue
+      }
+      throw err
+    }
+  }
+}
+
 export class AnswerInbox {
   private readonly file: string
   private chain: Promise<void> = Promise.resolve()
@@ -157,14 +192,11 @@ export class AnswerInbox {
       // double-apply. A single-source rename to a process-unique name means only
       // ONE drainer can claim a given orphan; the rest get ENOENT and skip. The
       // claim keeps the `.draining.` prefix so a crash before ack still leaves it
-      // discoverable for a later replay.
+      // discoverable for a later replay. claimByRename retries transient Windows
+      // sharing violations so the loser converges to ENOENT (skip) rather than
+      // throwing and failing the whole drain.
       const claim = `${orphan}.claim.${process.pid}.${randomBytes(4).toString("hex")}`
-      try {
-        await fs.rename(orphan, claim)
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue // a peer claimed it
-        throw err
-      }
+      if (!(await claimByRename(orphan, claim))) continue // a peer claimed it
       try {
         this.mergeLines(await fs.readFile(claim, "utf8"), out)
         claimed.push(claim)
@@ -179,14 +211,17 @@ export class AnswerInbox {
         }
       }
     }
-    // Claim the current inbox atomically.
+    // Claim the current inbox atomically (same Windows-transient resilience).
     const target = `${this.file}.draining.${process.pid}.${randomBytes(4).toString("hex")}`
-    try {
-      await fs.rename(this.file, target)
-      this.mergeLines(await fs.readFile(target, "utf8"), out)
-      claimed.push(target)
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err
+    if (await claimByRename(this.file, target)) {
+      try {
+        this.mergeLines(await fs.readFile(target, "utf8"), out)
+        claimed.push(target)
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+          consola.warn(`first-mate: deferring unreadable inbox claim ${target} for retry:`, err)
+        }
+      }
     }
     for (const p of claimed) this.inflight.add(p)
     const ack = async (): Promise<void> => {
