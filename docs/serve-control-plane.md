@@ -244,20 +244,24 @@ the bind stays loopback), captures the public URL, allowlists it, and prints it 
 you're not logged in, `serve` says so and keeps serving locally (you can then host manually with
 `devtunnel host -p <port>`).
 
-- **One tunnel per machine (no leak).** A dev tunnel implicitly created by `host` is a PERSISTENT
-  server-side object — killing the host process stops hosting but does not delete it, and Microsoft
-  caps you at `TunnelsPerUserPerCluster` (10). So `serve` does NOT mint a fresh tunnel each launch
-  (which stranded objects until new tunnels were denied). It stamps every tunnel with a
-  `github-router-serve` label plus a per-machine `ghr-machine-<hash>` label, and on each launch
-  **sweeps** (deletes) its own idle labeled tunnels from prior launches before hosting a fresh one —
-  bounding github-router to a single tunnel per machine. Because the next launch's sweep also reclaims
-  a tunnel orphaned by a `taskkill`/crash, teardown reliability is irrelevant. (Reusing one tunnel by id
-  would keep the URL stable but can't stay correct across `--port` changes: `devtunnel host <id>
-  -p <newport>` fails with "Batch update of ports is not supported" when the baked-in port differs — so
-  sweep-then-create is the correct design.) A live tunnel (>0 host connections, e.g. a concurrent serve
-  instance) is never swept. If listing or sweeping fails it still hosts a fresh labeled tunnel, so
-  `--tunnel` always works. To prune pre-existing unlabeled leaks from before this change, `devtunnel
-  list` then `devtunnel delete <id>` the random-named entries with 0 connections and no labels.
+- **One STABLE tunnel per machine (bookmarkable URL, no leak).** A dev tunnel implicitly created by
+  `host` is a PERSISTENT server-side object — killing the host process stops hosting but does not delete
+  it, and Microsoft caps you at `TunnelsPerUserPerCluster` (10). So `serve` REUSES a single stable
+  per-machine tunnel across launches, giving a **stable public URL you can bookmark** (same URL every
+  launch). Mechanism: a deterministic tunnel id `serveTunnelId()` = `ghr-serve-<hash-of-hostname>` +
+  the `github-router-serve` / `ghr-machine-<hash>` labels. Each launch it (1) ensures the stable tunnel
+  exists (creates it labeled if absent), (2) **reconciles its ports** to exactly the current `--port`
+  via per-port `devtunnel port delete`/`port create` — NOT `host <id> -p <newport>`, which 400s "Batch
+  update of ports is not supported" (this per-port reconcile is what makes reuse correct across `--port`
+  changes, the reason the old design couldn't reuse), (3) sweeps its OTHER idle labeled tunnels
+  (pre-migration random-named ones / crash orphans) while keeping the stable one, then (4) `host <id>`.
+  A live tunnel (>0 host connections, e.g. a concurrent serve instance) is never swept. NOTE: the URL's
+  subdomain is a devtunnels-assigned token (e.g. `dh4vhtc2-<port>`), not the tunnel id — so the URL is
+  stable/bookmarkable but not human-readable/named (devtunnel controls the subdomain). If any
+  stable-path step fails (id taken by another owner sharing the account, CLI hiccup), it **falls back**
+  to hosting a fresh anonymous-labeled tunnel, so `--tunnel` always works — just without a stable URL
+  that launch. To prune pre-existing unlabeled leaks from before this change, `devtunnel list` then
+  `devtunnel delete <id>` the random-named entries with 0 connections and no labels.
 
 - **Authenticated, never anonymous.** `serve` never passes `--allow-anonymous`, so Microsoft's
   default applies: the tunnel is reachable only by the signed-in owner (an unauthenticated visitor is

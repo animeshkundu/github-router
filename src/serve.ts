@@ -544,7 +544,7 @@ export const serve = defineCommand({
     // 9. ready.
     const publicLines = [
       ...publicUrls.map((u) => `remote: ${u}`),
-      ...(tunnelUrl ? [`remote (tunnel): ${tunnelUrl}`] : []),
+      ...(tunnelUrl ? [`remote (tunnel): ${tunnelUrl}  (stable — bookmark it; same URL every launch)`] : []),
     ]
     const publicBlock = publicLines.length ? `\n${publicLines.join("\n")}` : ""
     consola.box(

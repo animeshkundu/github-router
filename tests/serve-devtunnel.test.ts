@@ -2,6 +2,8 @@ import { describe, expect, it } from "bun:test"
 
 import {
   parseDevtunnelUrl,
+  portsToReconcile,
+  serveTunnelId,
   serveTunnelIdsToSweep,
   serveTunnelMachineLabel,
 } from "~/lib/serve/devtunnel"
@@ -72,5 +74,44 @@ describe("serveTunnelIdsToSweep", () => {
 
   it("returns nothing when there are no idle owned tunnels", () => {
     expect(serveTunnelIdsToSweep([], M)).toEqual([])
+  })
+
+  it("keeps the stable reused tunnel (exceptId) — sweeps only the OTHER idle ones", () => {
+    const tunnels = [
+      { tunnelId: "ghr-serve-abc.inc1", labels: [M], hostConnections: 0 }, // the stable one
+      { tunnelId: "random-old.inc1", labels: [M], hostConnections: 0 },    // a pre-migration leftover
+    ]
+    expect(serveTunnelIdsToSweep(tunnels, M, "ghr-serve-abc")).toEqual(["random-old.inc1"])
+  })
+})
+
+describe("serveTunnelId", () => {
+  it("is deterministic per hostname and a valid tunnel-id (lowercase alnum + hyphens)", () => {
+    const a = serveTunnelId("my-host")
+    expect(a).toBe(serveTunnelId("my-host"))
+    expect(a).toMatch(/^ghr-serve-[0-9a-f]{12}$/)
+    expect(a.length).toBeLessThan(60)
+  })
+
+  it("differs across hostnames", () => {
+    expect(serveTunnelId("host-a")).not.toBe(serveTunnelId("host-b"))
+  })
+})
+
+describe("portsToReconcile", () => {
+  it("no change when the tunnel already has exactly the desired port", () => {
+    expect(portsToReconcile([5454], 5454)).toEqual({ toDelete: [], toCreate: null })
+  })
+
+  it("adds the desired port when the tunnel has none", () => {
+    expect(portsToReconcile([], 5454)).toEqual({ toDelete: [], toCreate: 5454 })
+  })
+
+  it("deletes stale ports and adds the desired one on a --port change", () => {
+    expect(portsToReconcile([5454], 8080)).toEqual({ toDelete: [5454], toCreate: 8080 })
+  })
+
+  it("deletes extra ports but keeps the desired one (no re-create)", () => {
+    expect(portsToReconcile([5454, 8080, 9090], 8080)).toEqual({ toDelete: [5454, 9090], toCreate: null })
   })
 })
