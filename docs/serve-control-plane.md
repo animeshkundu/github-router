@@ -81,29 +81,35 @@ by writing into the router-owned `CLAUDE_CONFIG_DIR` mirror (which the SDK-spawn
   `GH_ROUTER_HOOK_NONCE` forwarded into the child env.
 - **Background provisions** — semantic search (colbert), the LLM toolbelt (`rg`/`fd`/`jq`/…),
   keep-awake, and self-update, all fire-and-forget.
-- **Permissions** — matches `github-router claude`'s default `--dangerously-skip-permissions`: serve
-  sets `permissions.defaultMode: "bypassPermissions"` in the mirror `settings.json` (and allow-lists its
-  own `mcp__*` servers as a fallback). Without this, CloudCLI's Agent-SDK `canUseTool` stalls the chat on
-  a browser approval prompt for every injected tool, and an operator's mirrored `defaultMode: "plan"`
-  refuses native writes. Opt out with `GH_ROUTER_SERVE_NO_AUTO_APPROVE=1` (prompts + the mirrored mode
-  are then left untouched). Existing `allow`/`deny`/`ask` entries are preserved; a user `deny` still wins.
-- **Injected MCP servers auto-approved in PLAN mode (the real serve mechanism)** — CloudCLI drives
-  Claude via the Agent SDK, whose `canUseTool` callback is what gates tools once a session is switched
-  off bypass into **plan mode**. That callback reads `sdkOptions.allowedTools` (seeded from the browser
-  `localStorage['claude-settings'].allowedTools`), NOT the mirror `settings.json permissions.allow`, and
-  it does EXACT tool-name matching (no `mcp__<server>` wildcard). So the reverse proxy seeds
-  `claude-settings.allowedTools` with the **exact** `mcp__<key>__<tool>` names of every injected server
-  (`enumerateInjectedMcpToolNames`), which makes those tools auto-approve in plan mode — no
-  `permission_request`, fixing the `Tool permission request failed: Error: Stream closed` a plan-mode
-  MCP call otherwise hits. **Verified end-to-end** (`bun run verify:plan-mode` /
-  `scripts/verify-plan-mode-cloudcli.mjs`): a live CloudCLI plan-mode session calls `mcp__search__code`
-  and it executes (isError:false, no prompt). The seed is auto-approve-only under the SDK's `claude_code`
-  preset — empirically ADDITIVE, so an MCP-only list does NOT restrict the native toolset (unlike a bare
-  `claude --allowedTools`, which does). Bypass mode skips `canUseTool` entirely, so this only bites in
-  plan mode. NOTE: the mirror `settings.json permissions.allow` `mcp__<server>` rules (also injected) are
-  a belt for the interactive-CLI path but are NOT consulted by CloudCLI's `canUseTool` — the localStorage
-  seed is the load-bearing lever for serve. (Plain `github-router claude` in plan mode hard-blocks MCP
-  tools at the binary level — a Claude Code limitation with no `canUseTool` override, not serve-fixable.)
+- **Permissions — "seamless routine + decisions to the user" (NON-bypass).** serve does NOT blanket-bypass
+  permissions. It sets `permissions.defaultMode: "default"` in the mirror `settings.json` (via
+  `configureServeDefaultPermissionMode`) and seeds the browser `localStorage['claude-settings']` with
+  `skipPermissions: false` plus an `allowedTools` allow-list of the routine built-ins
+  (`SEAMLESS_BUILTIN_TOOLS`: Read/Glob/Grep/Bash/Edit/Write/NotebookEdit/WebSearch/WebFetch/Task/… ) **plus
+  every exact injected `mcp__<key>__<tool>` name**. Result: routine + MCP tools auto-run with no prompt,
+  while `AskUserQuestion` and `ExitPlanMode` — which CloudCLI hard-codes into `TOOLS_REQUIRING_INTERACTION`
+  and never allow-lists — reach the operator as real widgets (a multiple-choice question; a plan
+  Approve/Reject card). This is the exact line the interactive Claude CLI draws. **Why not bypass:** under
+  `bypassPermissions`/`skipPermissions:true` the Agent SDK resolves approval at the permission-mode step and
+  SKIPS the `canUseTool` callback entirely (`claude-sdk.js`), which is the only channel those widgets ride
+  on — so bypass silently auto-answers the model's own questions and auto-approves its plans. BOTH vectors
+  must be non-bypass: CloudCLI leaves `sdkOptions.permissionMode` unset in default composer mode, so the
+  binary falls back to the mirror `settings.json defaultMode` — a stale `bypassPermissions` there would
+  re-defeat the fix. Existing user `allow`/`deny`/`ask` entries are preserved (a user `deny` still wins).
+  Opt out with `GH_ROUTER_SERVE_NO_AUTO_APPROVE=1` — serve then seeds nothing and leaves the mirrored mode
+  untouched, so CloudCLI prompts on every not-yet-approved tool (fully manual gate).
+- **How the seamless allow-list is consumed.** CloudCLI's `canUseTool` reads `sdkOptions.allowedTools`
+  (seeded from `localStorage['claude-settings'].allowedTools`) and does EXACT tool-name matching (no
+  `mcp__<server>` wildcard), so the seed lists the **exact** `mcp__<key>__<tool>` names
+  (`enumerateInjectedMcpToolNames`) alongside the built-ins. The mirror `settings.json permissions.allow`
+  also carries `mcp__<server>` rules (via `planModeAllowRules`) as a belt for the binary's own pre-callback
+  allow resolution, but the localStorage seed is the load-bearing lever for CloudCLI. **Verified end-to-end**
+  (`bun run verify:plan-mode` / `scripts/verify-plan-mode-cloudcli.mjs`): against a live CloudCLI session the
+  seed is non-bypass with the interaction tools excluded; a routine `mcp__search__code` + `Read` run with no
+  `permission_request`; and forcing `AskUserQuestion` (default mode) and `ExitPlanMode` (plan mode) each
+  raises a `permission_request` for that tool — proof the decisions reach the operator instead of
+  auto-resolving. (Plain `github-router claude` in plan mode hard-blocks MCP tools at the binary level — a
+  Claude Code limitation with no `canUseTool` override, not serve-fixable.)
 - **Coordinator-mode strip (single-agent toolset)** — serve removes `CLAUDE_CODE_COORDINATOR_MODE` from
   the mirror `settings.json` `env` block (unconditional, NOT gated by `GH_ROUTER_SERVE_NO_AUTO_APPROVE`).
   A user who runs FleetView/coordinator sessions sets that var in their real `~/.claude/settings.json`; it
@@ -292,10 +298,16 @@ you're not logged in, `serve` says so and keeps serving locally (you can then ho
 
 CloudCLI drives Claude **headlessly via the Agent SDK** (`query()` → the resolved `claude` binary), but its UI was built for full Claude Code, so surfaces that assume interactive-CLI behavior need interception. The complete audit (four parallel surface sweeps) and the status of each surface:
 
-**Addressed + intercepted/patched** (the core loop — frictionless): model picker (incl. the per-model **reasoning-effort selector** — the façade emits `effort.values` from each model's catalog `reasoning_effort`, so the UI effort picker drives `resolveClaudeEffort` end-to-end), MCP manager list, skills/slash menu, connected badge (all via the provider façade); the **`POST /api/system/update` block** (answered directly with a "managed by github-router" message so CloudCLI's update button can't run a global `npm i -g @cloudcli-ai/cloudcli@latest`); permission bypass + injected-MCP/native-research allow rules; built-in subagents (`Explore`/`Plan`/`general-purpose`); per-session workspace routing; the mirror settings/agents/skills/CLAUDE.md injection; the reverse-proxy HTML seed (`auth-token` + `claude-settings`) + Host/Origin enforcement; the filtered child env; and the mirror `settings.json` `env` **auth/routing/remote strip** (`sanitizeServeSettingsEnv` + `stripped-env-keys.ts` — coordinator-mode, `ANTHROPIC_BASE_URL`, `USE_BEDROCK/VERTEX/FOUNDRY`, real-auth tokens, Bridge/remote, model pins).
+**Addressed + intercepted/patched** (the core loop — frictionless): model picker (incl. the per-model **reasoning-effort selector** — the façade emits `effort.values` from each model's catalog `reasoning_effort`, so the UI effort picker drives `resolveClaudeEffort` end-to-end), MCP manager list, skills/slash menu, connected badge (all via the provider façade); the **`POST /api/system/update` block** (answered directly with a "managed by github-router" message so CloudCLI's update button can't run a global `npm i -g @cloudcli-ai/cloudcli@latest`); the non-bypass
+seamless-permission model (routine+MCP allow-list, interaction tools reach the user); built-in subagents (`Explore`/`Plan`/`general-purpose`); per-session workspace routing; the mirror settings/agents/skills/CLAUDE.md injection; the reverse-proxy HTML seed (`auth-token` + `claude-settings`) + Host/Origin enforcement; the filtered child env; and the mirror `settings.json` `env` **auth/routing/remote strip** (`sanitizeServeSettingsEnv` + `stripped-env-keys.ts` — coordinator-mode, `ANTHROPIC_BASE_URL`, `USE_BEDROCK/VERTEX/FOUNDRY`, real-auth tokens, Bridge/remote, model pins).
 
 **Accept-and-document** (CloudCLI-inherent or external-dep, can't be made to work through the SDK-headless path):
-- **`ExitPlanMode` / `AskUserQuestion` auto-resolve under bypass.** Both are `TOOLS_REQUIRING_INTERACTION` in the SDK; under serve's bypass default the SDK skips `canUseTool`, so ExitPlanMode auto-approves (inline plan buttons inert) and AskUserQuestion never reaches the operator (the model fabricates an answer and proceeds). To get interactive plan/questions, cycle the composer's permission mode off bypass (Tab → plan/default).
+- **`ExitPlanMode` / `AskUserQuestion` now reach the operator (FIXED — no longer a caveat).** Both are
+  `TOOLS_REQUIRING_INTERACTION` in the SDK. serve used to blanket-bypass permissions, which skipped
+  `canUseTool` and made the model auto-answer its own questions / auto-approve its plans. serve now runs
+  NON-bypass (`skipPermissions:false`, `defaultMode:"default"`) with a routine+MCP allow-list, so
+  `canUseTool` stays live: routine work is seamless while these two raise a real question widget / plan
+  Approve-Reject card. See the Permissions bullet above; verified by `scripts/verify-plan-mode-cloudcli.mjs`.
 - **Voice** (`/api/voice`) needs `VOICE_API_KEY`/`VOICE_API_BASE_URL`, which the filtered env drops — the mic button reports `configured:false` and is unavailable.
 - **Taskmaster** (`/api/taskmaster`) spawns `npx task-master` needing its own per-provider model keys (absent) — broken under serve.
 - **CloudCLI's own browser-use** (`/api/browser-use`, distinct from github-router's `--browse`) is a separate Playwright feature; it is **inert until the user enables it**, but if enabled it self-registers a loopback browser MCP into the provider config the SDK reads (`nServerToAllProviders`), giving the model a **second, ungated** browser surface that bypasses our tunnel gating. Do not enable it under a tunnel.
@@ -324,7 +336,8 @@ session's Claude actually sees. It boots serve to generate the mirror, then runs
 in the SAME headless stream-json mode CloudCLI uses (`--print --output-format stream-json`) against that
 mirror and inspects the `init` control message — asserting the registered **agents** (built-in
 `Explore`/`Plan`/`general-purpose` + the injected peer/worker set), **MCP servers**
-(`peers`/`search`/`workers`/`orchestrate`/`decide`), and `permissionMode: bypassPermissions`. This
+(`peers`/`search`/`workers`/`orchestrate`/`decide`), and `permissionMode: default` (NON-bypass, so
+`canUseTool` stays live and `AskUserQuestion`/`ExitPlanMode` reach the operator). This
 verifies the mirror-injection layer directly, without depending on CloudCLI's Agent-SDK spawn (which is
 sensitive to the launching shell's environment on Windows). Requires the `claude` binary
 (`CLAUDE_CLI_PATH` or `~/.local/bin/claude`); skips cleanly otherwise.
@@ -342,6 +355,7 @@ behaviors are CloudCLI's own and unchanged by us:
   through untouched) but armed only for the **currently-viewed** session while its run is `running` with
   a captured provider session id — an abort sent too early returns `NO_ACTIVE_RUN`, and viewing a
   different session disarms it.
-- **Plan mode under the permission bypass**: `ExitPlanMode` auto-approves, so the inline plan
-  Approve/Reject buttons have no pending request; interactive plan approval requires cycling the
-  composer's permission mode off bypass (Tab), which re-enables prompts for that session.
+- **Plan mode / questions now reach the operator** (serve runs NON-bypass by default): `ExitPlanMode`
+  raises the plan Approve/Reject card and `AskUserQuestion` raises the question widget, since `canUseTool`
+  stays live and neither tool is allow-listed. Routine + MCP tools remain seamless via the allow-list. See
+  the Permissions bullet up top. (`GH_ROUTER_SERVE_NO_AUTO_APPROVE=1` makes every tool prompt.)

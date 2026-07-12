@@ -94,17 +94,23 @@ function cleanup() {
 async function main() {
   // Wait for the enhancement layer to FULLY provision the mirror before probing.
   // The `agents/` dir is created early (before its .md files and before
-  // settings.json is finalized to bypass), so waiting only for the dir to exist
+  // settings.json is finalized), so waiting only for the dir to exist
   // races the probe against a half-written mirror. Require the complete surface:
-  // mcpServers injected, settings.defaultMode==bypassPermissions, and a peer
-  // agent .md actually on disk.
+  // mcpServers injected, the injected allow-rules present (a `mcp__` rule in
+  // permissions.allow — written AFTER the permission-mode config, so it proves the
+  // settings.json is finalized), permissions.defaultMode NON-bypass (canUseTool
+  // stays live so AskUserQuestion/ExitPlanMode reach the user), and a peer agent
+  // .md on disk.
   const mirrorComplete = (m) => {
     try {
       if (!m || !fs.existsSync(path.join(m, "agents"))) return false;
       const cj = JSON.parse(fs.readFileSync(path.join(m, ".claude.json"), "utf8"));
       if (!cj.mcpServers || Object.keys(cj.mcpServers).length === 0) return false;
       const sj = JSON.parse(fs.readFileSync(path.join(m, "settings.json"), "utf8"));
-      if (!sj.permissions || sj.permissions.defaultMode !== "bypassPermissions") return false;
+      if (!sj.permissions) return false;
+      if (sj.permissions.defaultMode === "bypassPermissions") return false; // must be NON-bypass
+      const allow = Array.isArray(sj.permissions.allow) ? sj.permissions.allow : [];
+      if (!allow.some((r) => typeof r === "string" && r.startsWith("mcp__"))) return false;
       return fs.readdirSync(path.join(m, "agents")).some((f) => /-codex-critic\.md$/.test(f));
     } catch {
       return false;
@@ -174,7 +180,7 @@ async function main() {
   for (const a of expectAgents) if (!agents.includes(a)) fails.push(`missing agent: ${a}`);
   for (const m of expectMcp) if (!mcp.includes(m)) fails.push(`missing mcp server: ${m}`);
   for (const t of expectTools) if (!tools.includes(t)) fails.push(`missing built-in tool: ${t} (coordinator-mode toolset strip?)`);
-  if (init.permissionMode !== "bypassPermissions") fails.push(`permissionMode=${init.permissionMode} (want bypassPermissions)`);
+  if (init.permissionMode === "bypassPermissions") fails.push(`permissionMode=${init.permissionMode} (want NON-bypass so AskUserQuestion/ExitPlanMode reach the user)`);
 
   console.log(`agents:         ${JSON.stringify(agents)}`);
   console.log(`mcp_servers:    ${JSON.stringify(mcp)}`);
@@ -185,7 +191,7 @@ async function main() {
     console.error("❌ serve session verification FAILED:\n  - " + fails.join("\n  - "));
     process.exitCode = 1;
   } else {
-    console.log("✅ serve session verified: built-in tools + injected agents, MCP servers, and bypass mode all present.");
+    console.log("✅ serve session verified: built-in tools + injected agents, MCP servers, and default (non-bypass) mode all present.");
   }
 }
 

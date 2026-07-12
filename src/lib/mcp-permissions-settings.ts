@@ -112,6 +112,45 @@ export async function sanitizeServeSettingsEnv(
 export const NATIVE_RESEARCH_ALLOW_RULES = ["WebSearch", "WebFetch"] as const
 
 /**
+ * The routine native Claude Code tools serve auto-approves so ordinary agent
+ * work stays seamless (no per-call prompt) — the exact surface a coding agent
+ * uses turn to turn. Seeded into CloudCLI's `localStorage['claude-settings']`
+ * `allowedTools` (feeds the Agent SDK `canUseTool` fast-path + `sdkOptions.allowedTools`).
+ *
+ * DELIBERATELY EXCLUDES the two interaction tools `AskUserQuestion` and
+ * `ExitPlanMode`. CloudCLI hard-codes both into its `TOOLS_REQUIRING_INTERACTION`
+ * set (claude-sdk.js) and renders a real question widget / plan Approve-Reject
+ * card for them — but ONLY when `canUseTool` runs (non-bypass) AND they are NOT
+ * pre-approved. Leaving them off this list is what routes them to the human
+ * instead of letting the model auto-answer its own question. This is the same
+ * line the interactive Claude CLI draws: routine tools seamless, decisions to
+ * the user. Never add either name here.
+ *
+ * A tool omitted from this list degrades to a one-off Allow/Deny prompt in
+ * CloudCLI — safe, not broken — so the list is a superset of the common surface
+ * rather than an exact registry match (extra names for tools this Claude build
+ * lacks are harmless no-ops).
+ */
+export const SEAMLESS_BUILTIN_TOOLS = [
+  "Task",
+  "Bash",
+  "BashOutput",
+  "KillShell",
+  "Glob",
+  "Grep",
+  "Read",
+  "Edit",
+  "Write",
+  "NotebookEdit",
+  "WebFetch",
+  "WebSearch",
+  "TodoWrite",
+  "Skill",
+  "SlashCommand",
+  "EnterPlanMode",
+] as const
+
+/**
  * Merge arbitrary allow rules into a mirror `settings.json` `permissions.allow`
  * so the listed tools auto-run WITHOUT a permission prompt in every mode —
  * including plan mode, where a matched allow rule bypasses the prompt for any
@@ -163,33 +202,33 @@ export function planModeAllowRules(serverKeys: readonly string[]): string[] {
 }
 
 /**
- * Set the serve mirror's `settings.json` `permissions.defaultMode` to
- * `bypassPermissions` — the web-control-plane equivalent of `github-router
- * claude`'s default `--dangerously-skip-permissions`. Without it, CloudCLI's
- * Agent-SDK `canUseTool` callback posts a browser `permission_request` and AWAITS
- * approval for every not-yet-allowed tool, stalling the chat on each injected
- * `mcp__*` and native call.
+ * Ensure the serve mirror's `settings.json` `permissions.defaultMode` is NOT
+ * `bypassPermissions` — the load-bearing half of serve's "seamless routine +
+ * decisions to the user" model.
  *
- * PRESERVES the user's `allow`/`deny`/`ask` posture verbatim — their curated
- * permission rules carry into serve unchanged, so a session switched off bypass
- * (plan / default mode via the composer) behaves exactly as their own Claude Code
- * would. We used to CLEAR `allow` on a since-debunked theory that a non-empty
- * allow narrows the toolset; empirically it does NOT (a 13-rule allow yields the
- * full 27-tool set incl Glob/Bash/Edit), and CloudCLI's `allowedTools` comes only
- * from the client `localStorage['claude-settings']` seed (`[]`), never from
- * `permissions.allow`. The real toolset-narrowing was `CLAUDE_CODE_COORDINATOR_MODE`,
- * stripped separately by {@link sanitizeServeSettingsEnv}. Not clearing `allow`
- * is what keeps serve at parity with the user's own Claude Code permission posture.
+ * Under `bypassPermissions` the Agent SDK resolves approval at the permission-mode
+ * step and SKIPS the `canUseTool` callback entirely (claude-sdk.js) — the only
+ * channel CloudCLI's interactive widgets ride on, so `AskUserQuestion` and
+ * `ExitPlanMode` auto-resolve on a model-generated answer and never reach the human.
+ * CloudCLI leaves `sdkOptions.permissionMode` unset when the composer is in default
+ * mode, so the binary falls back to THIS `defaultMode` — a stale `bypassPermissions`
+ * here would silently re-defeat the fix through the settings vector.
+ *
+ * MINIMAL override: only rewrite when the mode is absent or an explicit
+ * `bypassPermissions` (→ `"default"`, keeping `canUseTool` live). A user's
+ * deliberate NON-bypass posture (`plan` / `acceptEdits` / `default`) is preserved
+ * verbatim — all three already keep `canUseTool` live, so there is nothing to fix
+ * and no reason to override their choice. `allow`/`deny`/`ask` are always untouched.
  *
  * Only ever rewrites the per-launch serve mirror, never the operator's real
  * `~/.claude/settings.json`. Atomic temp+rename, mode 0o600. A non-object
- * settings.json throws (never clobber a file we don't understand); the caller
- * wraps this in warn-and-continue so a hiccup never blocks launch.
+ * settings.json throws; the caller wraps this in warn-and-continue.
  *
- * Opt out with `GH_ROUTER_SERVE_NO_AUTO_APPROVE=1` (the caller skips this) — the
- * mirrored `defaultMode` is then left exactly as snapshotted.
+ * Opt out with `GH_ROUTER_SERVE_NO_AUTO_APPROVE=1` (the caller skips this AND the
+ * allow-list/localStorage seed) — the mirrored `defaultMode` is then left exactly
+ * as snapshotted and CloudCLI prompts on every not-yet-approved tool.
  */
-export async function configureServePermissionsBypass(
+export async function configureServeDefaultPermissionMode(
   settingsPath: string,
 ): Promise<{ written: boolean }> {
   const existing = (await readSettingsObject(settingsPath)) ?? {}
@@ -199,10 +238,13 @@ export async function configureServePermissionsBypass(
       ? { ...(permsRaw as Record<string, unknown>) }
       : {}
 
-  if (perms.defaultMode === "bypassPermissions") return { written: false }
-  perms.defaultMode = "bypassPermissions"
-  // allow / deny / ask are left UNTOUCHED — the user's curated posture carries
-  // into serve. (Clearing allow was a no-op fix for a misdiagnosed toolset bug.)
-  await writeSettingsObject(settingsPath, { ...existing, permissions: perms }, "servebypass")
+  // Preserve any explicit NON-bypass mode the user set — it already keeps
+  // canUseTool live, so overriding it would silently discard their posture.
+  if (perms.defaultMode !== undefined && perms.defaultMode !== "bypassPermissions") {
+    return { written: false }
+  }
+  // Absent or an explicit bypass → pin to "default" so canUseTool stays live.
+  perms.defaultMode = "default"
+  await writeSettingsObject(settingsPath, { ...existing, permissions: perms }, "servemode")
   return { written: true }
 }

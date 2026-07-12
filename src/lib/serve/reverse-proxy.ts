@@ -36,14 +36,17 @@ export interface ReverseProxyOptions {
   /** JWT injected into the SPA so it boots authenticated. */
   authToken: string
   /**
-   * Seed CloudCLI's `claude-settings` localStorage with empty allow-lists +
-   * `skipPermissions:true` so the spawned Claude gets the full toolset with no
-   * permission prompts (serve default; disabled by GH_ROUTER_SERVE_NO_AUTO_APPROVE=1).
+   * Seed CloudCLI's `claude-settings` localStorage with `skipPermissions:false`
+   * and an `allowedTools` allow-list (routine built-ins + injected `mcp__*`) so
+   * routine tools auto-run with no prompt while `AskUserQuestion`/`ExitPlanMode`
+   * still reach the user (serve default; disabled by GH_ROUTER_SERVE_NO_AUTO_APPROVE=1).
    */
   seedToolSettings?: boolean
-  /** Exact `mcp__<key>__<tool>` names to seed into the `claude-settings`
-   *  `allowedTools` auto-approve list (only used when `seedToolSettings`). Makes
-   *  the injected MCP tools auto-approve in CloudCLI plan mode. */
+  /** Exact tool names to seed into the `claude-settings` `allowedTools`
+   *  auto-approve list (only used when `seedToolSettings`) — the routine
+   *  built-ins plus every exact `mcp__<key>__<tool>` name. MUST NOT include
+   *  `AskUserQuestion`/`ExitPlanMode`, or they would auto-resolve instead of
+   *  reaching the user. */
   seedAllowedTools?: string[]
   providerFacade?: {
     kindFor: (method: string, pathname: string) => string | null
@@ -90,19 +93,28 @@ const HEAD_CLOSE = "</head>"
 const CLAUDE_SETTINGS_KEY = "claude-settings"
 
 /**
+ * The two interaction tools CloudCLI routes to the human (its
+ * `TOOLS_REQUIRING_INTERACTION`). They must NEVER appear in the seeded
+ * `allowedTools` — an exact-name match there would auto-approve them and defeat
+ * the question widget / plan card. Stripped defensively at the seed chokepoint
+ * so no upstream list (mcp names, a future caller) can reintroduce them.
+ */
+const NEVER_AUTO_APPROVE = new Set(["AskUserQuestion", "ExitPlanMode"])
+
+/**
  * Embed the token as a JS string literal. JSON.stringify escapes quotes and
  * backslashes; we additionally neutralize `<` so the value can never break out
  * of the surrounding <script> element regardless of contents.
  *
  * When `seedToolSettings` is set, also seed CloudCLI's `claude-settings`
- * localStorage with `{allowedTools:[], disallowedTools:[], skipPermissions:true}`
- * so the SDK-spawned Claude gets the FULL built-in toolset with no permission
- * prompts. This is the server-side, zero-user-action fix for two CloudCLI
- * behaviors: (1) a non-empty `allowedTools` is an availability allow-list in the
- * Agent SDK (so any tool not in it is "not enabled"), and (2) `allowedTools`
- * accumulates client-side on every "allow & remember" click — so prior approvals
- * silently clamp the toolset. Forcing empty `allowedTools` + `skipPermissions`
- * gives `github-router claude`-parity (`--dangerously-skip-permissions`).
+ * localStorage with `{allowedTools:<routine+mcp>, disallowedTools:[], skipPermissions:false}`.
+ * This is serve's "seamless routine + decisions to the user" model: `canUseTool`
+ * stays LIVE (skipPermissions:false, NOT bypass), routine tools in `allowedTools`
+ * auto-run with no prompt, and `AskUserQuestion`/`ExitPlanMode` — deliberately
+ * NOT in the list and hard-cased by CloudCLI into `TOOLS_REQUIRING_INTERACTION` —
+ * always reach the human as a real question widget / plan Approve-Reject card.
+ * `skipPermissions:true` (bypass) would skip `canUseTool` entirely and silently
+ * auto-answer those two, which is exactly what we are fixing.
  */
 function buildInjection(
   token: string,
@@ -113,20 +125,17 @@ function buildInjection(
   let body = `localStorage.setItem('auth-token',${safe});`
   if (seedToolSettings) {
     const settings = JSON.stringify({
-      // `allowedTools` here is CloudCLI's per-tool AUTO-APPROVE list (feeds the
-      // Agent-SDK `canUseTool` callback). Verified against a live CloudCLI plan-
-      // mode session (scripts/verify-plan-mode-cloudcli.mjs): under the SDK's
-      // `claude_code` preset it is ADDITIVE — an MCP-only list still leaves the
-      // full native toolset available (unlike a bare `claude --allowedTools`,
-      // which restricts). So we seed ONLY the exact `mcp__<key>__<tool>` names
-      // github-router injects, which makes those tools auto-approve in PLAN mode
-      // (the only mode where canUseTool runs — bypass skips it), fixing the "Tool
-      // permission request failed: Stream closed" a plan-mode MCP call otherwise
-      // hits. `canUseTool` does EXACT-name matching (no `mcp__<server>` wildcard),
-      // so the full explicit list is required.
-      allowedTools: seedAllowedTools,
+      // CloudCLI's per-tool AUTO-APPROVE list — feeds the Agent-SDK `canUseTool`
+      // fast-path (EXACT-name match, no `mcp__<server>` wildcard) AND
+      // `sdkOptions.allowedTools`. We seed the routine built-ins + every exact
+      // `mcp__<key>__<tool>` name so ordinary work never prompts. The two
+      // interaction tools are filtered out unconditionally (NEVER_AUTO_APPROVE)
+      // so they always reach the user, no matter what the caller passed.
+      allowedTools: seedAllowedTools.filter((t) => !NEVER_AUTO_APPROVE.has(t)),
       disallowedTools: [],
-      skipPermissions: true,
+      // NON-bypass: keep canUseTool live so AskUserQuestion/ExitPlanMode reach
+      // the user. Bypass would auto-resolve them on a generated answer.
+      skipPermissions: false,
     })
     const safeSettings = JSON.stringify(settings).replace(/</g, "\\u003c")
     body += `localStorage.setItem('${CLAUDE_SETTINGS_KEY}',${safeSettings});`

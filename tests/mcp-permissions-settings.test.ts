@@ -4,11 +4,12 @@ import os from "node:os"
 import path from "node:path"
 
 import {
-  configureServePermissionsBypass,
+  configureServeDefaultPermissionMode,
   injectAllowRules,
   NATIVE_RESEARCH_ALLOW_RULES,
   planModeAllowRules,
   sanitizeServeSettingsEnv,
+  SEAMLESS_BUILTIN_TOOLS,
 } from "~/lib/mcp-permissions-settings"
 
 const tmps: string[] = []
@@ -28,12 +29,12 @@ async function read(p: string): Promise<Record<string, unknown>> {
   return JSON.parse(await fs.readFile(p, "utf8"))
 }
 
-describe("configureServePermissionsBypass", () => {
-  it("sets defaultMode=bypassPermissions on a fresh file, leaving allow absent", async () => {
+describe("configureServeDefaultPermissionMode", () => {
+  it("sets defaultMode=default (NON-bypass) on a fresh file, leaving allow absent", async () => {
     const p = await settingsFile()
-    const r = await configureServePermissionsBypass(p)
+    const r = await configureServeDefaultPermissionMode(p)
     expect(r.written).toBe(true)
-    expect((await read(p)).permissions).toEqual({ defaultMode: "bypassPermissions" })
+    expect((await read(p)).permissions).toEqual({ defaultMode: "default" })
   })
 
   it("PRESERVES the user's allow/deny/ask posture and only overrides defaultMode", async () => {
@@ -42,15 +43,16 @@ describe("configureServePermissionsBypass", () => {
         allow: ["Read(*)", "Glob(*)", "Bash(ls *)", "mcp__peers"],
         deny: ["Bash(rm *)"],
         ask: ["WebFetch"],
-        defaultMode: "plan",
+        defaultMode: "bypassPermissions",
       },
       other: 1,
     })
-    const r = await configureServePermissionsBypass(p)
+    const r = await configureServeDefaultPermissionMode(p)
     expect(r.written).toBe(true)
     const j = await read(p)
     const perms = j.permissions as Record<string, unknown>
-    expect(perms.defaultMode).toBe("bypassPermissions")
+    // a stale bypass is overridden to default so canUseTool stays live
+    expect(perms.defaultMode).toBe("default")
     // the user's curated allow list is carried through UNCHANGED (no clearing)
     expect(perms.allow).toEqual(["Read(*)", "Glob(*)", "Bash(ls *)", "mcp__peers"])
     expect(perms.deny).toEqual(["Bash(rm *)"])
@@ -58,17 +60,26 @@ describe("configureServePermissionsBypass", () => {
     expect(j.other).toBe(1)
   })
 
-  it("is a no-op when already bypass (regardless of allow contents)", async () => {
+  it("is a no-op when already default (regardless of allow contents)", async () => {
     const p = await settingsFile({
-      permissions: { defaultMode: "bypassPermissions", allow: ["Read", "Bash(git *)"] },
+      permissions: { defaultMode: "default", allow: ["Read", "Bash(git *)"] },
     })
-    const r = await configureServePermissionsBypass(p)
+    const r = await configureServeDefaultPermissionMode(p)
     expect(r.written).toBe(false)
     // allow untouched
     expect((await read(p)).permissions).toEqual({
-      defaultMode: "bypassPermissions",
+      defaultMode: "default",
       allow: ["Read", "Bash(git *)"],
     })
+  })
+
+  it("PRESERVES an explicit non-bypass mode (plan / acceptEdits) — they keep canUseTool live", async () => {
+    for (const mode of ["plan", "acceptEdits"]) {
+      const p = await settingsFile({ permissions: { defaultMode: mode, allow: ["Read"] } })
+      const r = await configureServeDefaultPermissionMode(p)
+      expect(r.written).toBe(false)
+      expect((await read(p)).permissions).toEqual({ defaultMode: mode, allow: ["Read"] })
+    }
   })
 
   it("refuses to overwrite a non-object settings.json", async () => {
@@ -76,7 +87,21 @@ describe("configureServePermissionsBypass", () => {
     tmps.push(dir)
     const p = path.join(dir, "settings.json")
     await fs.writeFile(p, "[1,2,3]", "utf8")
-    await expect(configureServePermissionsBypass(p)).rejects.toThrow(/not a JSON object/)
+    await expect(configureServeDefaultPermissionMode(p)).rejects.toThrow(/not a JSON object/)
+  })
+})
+
+describe("SEAMLESS_BUILTIN_TOOLS", () => {
+  const tools: string[] = [...SEAMLESS_BUILTIN_TOOLS]
+  it("NEVER lists the two interaction tools (they must reach the user)", () => {
+    expect(tools).not.toContain("AskUserQuestion")
+    expect(tools).not.toContain("ExitPlanMode")
+  })
+
+  it("covers the routine coding surface", () => {
+    for (const t of ["Read", "Bash", "Edit", "Write", "Task", "WebSearch"]) {
+      expect(tools).toContain(t)
+    }
   })
 })
 

@@ -19,7 +19,7 @@ import {
 } from "../claude-md-injection"
 import { INJECTED_SKILLS, writeInjectedSkill } from "../injected-skills"
 import {
-  configureServePermissionsBypass,
+  configureServeDefaultPermissionMode,
   injectAllowRules,
   planModeAllowRules,
   sanitizeServeSettingsEnv,
@@ -196,11 +196,15 @@ export async function provisionServeEnhancements(
       consola.info(`Serve: removed ${strip.removed.join(", ")} from the mirror settings (single-agent surface).`)
     }
 
-    // Match `github-router claude`'s default `--dangerously-skip-permissions`:
-    // set the mirror's permission default to bypass (no per-tool prompts) AND
-    // clear the mirrored allow-list. Opt out with GH_ROUTER_SERVE_NO_AUTO_APPROVE=1.
+    // Serve's permission model: "seamless routine + decisions to the user".
+    // Set the mirror's default permission mode to "default" (NON-bypass) so
+    // CloudCLI's canUseTool callback stays live — routine tools pre-approved via
+    // the seeded allow-list run with no prompt, while AskUserQuestion/ExitPlanMode
+    // (never allow-listed) reach the human as real widgets. Bypass would skip
+    // canUseTool and auto-answer those two. Opt out with GH_ROUTER_SERVE_NO_AUTO_APPROVE=1
+    // (then CloudCLI prompts on every not-yet-approved tool).
     if (process.env.GH_ROUTER_SERVE_NO_AUTO_APPROVE !== "1") {
-      await configureServePermissionsBypass(settingsPath).catch((err) =>
+      await configureServeDefaultPermissionMode(settingsPath).catch((err) =>
         consola.warn(`Could not set serve permission defaults: ${String(err)}`),
       )
     }
@@ -258,8 +262,9 @@ export async function provisionServeEnhancements(
       try {
         const command = buildPlanReviewHookCommand(process.execPath, process.argv[1])
         // Advisory PostToolUse(ExitPlanMode) hook: non-blocking; findings surface on the next prompt.
-        // NOTE (unverified): confirm CloudCLI's Agent-SDK chat actually fires the ExitPlanMode lifecycle;
-        // if it never triggers this is a harmless no-op.
+        // Verified (scripts/verify-plan-mode-cloudcli.mjs): ExitPlanMode runs as a real tool under
+        // CloudCLI's SDK path, and settingSources=['project','user','local'] loads this mirror
+        // settings.json hook, so PostToolUse(ExitPlanMode) fires on approval+execution.
         await injectStopHookIntoSettingsFile(settingsPath, command, "PostToolUse", undefined, "ExitPlanMode")
       } catch (err) {
         consola.warn(`Could not register the advisory plan-review hook: ${String(err)}`)

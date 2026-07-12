@@ -165,14 +165,28 @@ describe("reverse-proxy injection", () => {
     expect(s).toContain('localStorage.setItem(\'auth-token\',"a\\"b")')
   })
 
-  it("seeds claude-settings (empty allow-lists + skipPermissions) only when enabled", () => {
+  it("seeds claude-settings (non-bypass + allow-list) only when enabled", () => {
     const off = __test.buildInjection("tok", false)
     expect(off).not.toContain("claude-settings")
-    const on = __test.buildInjection("tok", true)
+    const on = __test.buildInjection("tok", true, ["Bash", "mcp__peers__codex_critic"])
     expect(on).toContain("claude-settings")
-    // the stored value is a JSON string forcing the full toolset + no prompts
+    // canUseTool stays LIVE (non-bypass) so AskUserQuestion/ExitPlanMode reach the user
+    expect(on).toContain('\\"skipPermissions\\":false')
+    // the seeded tools are the auto-approve allow-list
+    expect(on).toContain('\\"allowedTools\\":[\\"Bash\\",\\"mcp__peers__codex_critic\\"]')
+  })
+
+  it("seeds an empty allow-list when no tools are passed (still non-bypass)", () => {
+    const on = __test.buildInjection("tok", true)
     expect(on).toContain('\\"allowedTools\\":[]')
-    expect(on).toContain('\\"skipPermissions\\":true')
+    expect(on).toContain('\\"skipPermissions\\":false')
+  })
+
+  it("filters AskUserQuestion/ExitPlanMode out of the seed so they always reach the user", () => {
+    const on = __test.buildInjection("tok", true, ["Read", "AskUserQuestion", "Bash", "ExitPlanMode"])
+    expect(on).toContain('\\"allowedTools\\":[\\"Read\\",\\"Bash\\"]')
+    expect(on).not.toContain("AskUserQuestion")
+    expect(on).not.toContain("ExitPlanMode")
   })
 })
 

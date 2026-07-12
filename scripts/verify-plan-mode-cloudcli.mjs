@@ -1,14 +1,22 @@
-// FAITHFUL plan-mode MCP e2e — drives CloudCLI's ACTUAL chat (WS → Agent SDK →
-// claude), the same path the buffet session uses, instead of a bare `claude`.
+// FAITHFUL serve-permission e2e — drives CloudCLI's ACTUAL chat (WS → Agent SDK →
+// claude), the same path the browser session uses, and proves serve's
+// "seamless routine + decisions to the user" model end to end.
 //
-// SELF-PROVING two-phase test (each phase drives a real plan-mode model turn):
-//   Phase A (negative control): allowedTools=[] (the pre-fix / buffet state) —
-//     asserts the MCP call does NOT auto-approve (permission_request fires). This
-//     proves the seed is load-bearing: if this phase ever PASSES, the seed became
-//     a no-op and the guard is worthless.
-//   Phase B (positive): serve's real seeded allowedTools — asserts the MCP tool
-//     auto-approves + executes (isError:false, no permission_request / "Stream
-//     closed"), and that the native toolset is intact (WaitForMcpServers runs).
+// What it proves (each phase drives a real model turn against live CloudCLI):
+//   SEED (static):  the injected localStorage['claude-settings'] is NON-bypass
+//     (skipPermissions:false) and its allowedTools lists routine built-ins + the
+//     injected mcp tools but NEVER AskUserQuestion / ExitPlanMode.
+//   Phase 1 (seamless): a routine mcp + Read call auto-executes with NO
+//     permission_request — ordinary work (routine AND mcp tools) never prompts.
+//   Phase 2 (AskUserQuestion reaches the user): forcing AskUserQuestion raises a
+//     permission_request for it (the human is asked) instead of the model
+//     auto-answering its own question. Auto-answer => FAIL (the bug).
+//   Phase 3 (ExitPlanMode reaches the user): in plan mode, ExitPlanMode raises a
+//     permission_request (the plan Approve/Reject card) instead of auto-approving.
+//
+// The seed replay is faithful: the harness reads the exact settings the reverse
+// proxy injects into the SPA and sends them as chat.send toolsSettings — the same
+// bytes the browser would send from localStorage.
 //
 // Uses the LOCAL dist build. Exit 0 pass, 1 failed assertion, 2 setup error.
 // Skips (0) if CloudCLI isn't provisioned. Needs network + a Copilot token.
@@ -29,7 +37,7 @@ const HOST = `127.0.0.1:${PORT}`;
 
 const secretPath = path.join(os.homedir(), ".local", "share", "github-router", "cloudcli", ".serve-secret.json");
 if (!fs.existsSync(secretPath)) {
-  console.log("⏭  cloudcli plan-mode e2e skipped: CloudCLI not provisioned (no .serve-secret.json).");
+  console.log("⏭  serve-permission e2e skipped: CloudCLI not provisioned (no .serve-secret.json).");
   process.exit(0);
 }
 
@@ -59,9 +67,11 @@ async function jpost(pathName, body, token) {
   return { status: r.status, json: await r.json().catch(() => null) };
 }
 
-// Drive ONE plan-mode turn (fresh session) that forces WaitForMcpServers +
-// mcp__search__code, with the given `allowedTools`. Returns parsed signals.
-async function drive(token, allowedTools) {
+// Drive ONE turn (fresh session) with the given permission mode + tool settings,
+// short-circuiting as soon as a permission_request for `awaitPermTool` appears
+// (interaction tools wait indefinitely, so we must not block on completion).
+// Returns parsed signals.
+async function drive(token, { mode, content, toolsSettings, awaitPermTool }) {
   const sc = await jpost("/api/providers/sessions", { provider: "claude", projectPath: REPO }, token);
   const sessionId = sc.json?.data?.sessionId;
   if (!sessionId) throw new Error("session-create failed: " + sc.status + " " + JSON.stringify(sc.json));
@@ -72,50 +82,56 @@ async function drive(token, allowedTools) {
       headers: { origin: ORIGIN, host: HOST },
     });
     const t = setTimeout(() => { try { ws.close(); } catch { /* noop */ } resolve(); }, 120000);
+    const finish = () => { clearTimeout(t); try { ws.close(); } catch { /* noop */ } resolve(); };
     ws.on("open", () => {
       ws.send(JSON.stringify({
         type: "chat.send",
         sessionId,
-        content:
-          "You are in PLAN mode. Do exactly this: (1) call the WaitForMcpServers tool "
-          + 'with {"servers":["search"]} and wait for it to report ready; (2) then call '
-          + `the mcp__search__code tool exactly once with {"query":"reverseProxy","mode":"lexical","workspace":${JSON.stringify(REPO)}}; `
-          + "(3) then reply with the single word DONE. Do not call ExitPlanMode.",
-        options: { permissionMode: "plan", toolsSettings: { allowedTools, disallowedTools: [], skipPermissions: true } },
+        content,
+        options: { permissionMode: mode, toolsSettings },
       }));
     });
     ws.on("message", (buf) => {
       let ev; try { ev = JSON.parse(buf.toString()); } catch { return; }
       events.push(ev);
+      // Short-circuit the moment the awaited interaction tool asks the human —
+      // its permission_request waits forever, so completion never arrives.
+      if (awaitPermTool && ev.kind === "permission_request"
+          && String(ev.toolName || "") === awaitPermTool) {
+        setTimeout(finish, 250);
+        return;
+      }
       if (/"kind":"(complete|error)"/.test(JSON.stringify(ev))) {
-        setTimeout(() => { clearTimeout(t); try { ws.close(); } catch { /* noop */ } resolve(); }, 1500);
+        setTimeout(finish, 1200);
       }
     });
     ws.on("error", (e) => { clearTimeout(t); reject(e); });
   });
 
-  const r = { mcpToolUse: null, mcpResultOk: false, nativeRan: false, permissionReq: false, streamClosed: false, planBlock: false };
-  const mcpIds = new Map();
+  const r = {
+    toolUses: [], resultOkById: new Map(), permReqTools: [],
+    streamClosed: false, planBlock: false,
+  };
   for (const ev of events) {
-    if (ev.kind === "tool_use") {
-      if (String(ev.toolName || "").startsWith("mcp__")) { r.mcpToolUse = ev.toolName; mcpIds.set(ev.toolId, 1); }
-      if (ev.toolName === "WaitForMcpServers") r.nativeRanId = ev.toolId;
-    }
+    if (ev.kind === "tool_use") r.toolUses.push({ name: String(ev.toolName || ""), id: ev.toolId });
     if (ev.kind === "tool_result") {
       const tx = JSON.stringify(ev.content ?? "").toLowerCase();
       if (/cannot call .* while in plan mode/.test(tx)) r.planBlock = true;
-      if (mcpIds.has(ev.toolId) && ev.isError !== true) r.mcpResultOk = true;
-      if (ev.toolId === r.nativeRanId && ev.isError !== true) r.nativeRan = true;
+      if (ev.isError !== true) r.resultOkById.set(ev.toolId, true);
     }
-    if (ev.kind === "permission_request") r.permissionReq = true;
-    if (ev.kind === "error" && /stream closed|permission request failed/.test(JSON.stringify(ev).toLowerCase())) r.streamClosed = true;
+    if (ev.kind === "permission_request") r.permReqTools.push(String(ev.toolName || ""));
+    if (ev.kind === "error" && /stream closed|permission request failed/.test(JSON.stringify(ev).toLowerCase())) {
+      r.streamClosed = true;
+    }
   }
+  r.ranOk = (name) => r.toolUses.some((u) => u.name === name && r.resultOkById.get(u.id));
+  r.used = (name) => r.toolUses.some((u) => u.name === name);
   return r;
 }
 
 async function main() {
   const secret = JSON.parse(fs.readFileSync(secretPath, "utf8"));
-  // Wait for CloudCLI + the serve seed to be ready.
+  // Wait for CloudCLI + the serve seed to be ready; capture the exact injected seed.
   let seeded = null;
   for (let i = 0; i < 45; i++) {
     await sleep(1000);
@@ -129,42 +145,102 @@ async function main() {
     } catch { /* not ready */ }
   }
   if (!seeded) throw new Error("serve did not serve a seeded claude-settings in time");
-  console.log(`seeded allowedTools: ${seeded.allowedTools.length} MCP tool names`);
+  const toolsSettings = {
+    allowedTools: seeded.allowedTools,
+    disallowedTools: seeded.disallowedTools ?? [],
+    skipPermissions: seeded.skipPermissions === true,
+  };
+
+  const fails = [];
+
+  // ── SEED (static) ────────────────────────────────────────────────────────
+  console.log(`\n[Seed] skipPermissions=${seeded.skipPermissions}, allowedTools=${seeded.allowedTools.length}`);
+  if (seeded.skipPermissions !== false) {
+    fails.push("Seed: skipPermissions must be false (non-bypass) so canUseTool stays live; got " + seeded.skipPermissions);
+  }
+  for (const forbidden of ["AskUserQuestion", "ExitPlanMode"]) {
+    if (seeded.allowedTools.includes(forbidden)) {
+      fails.push(`Seed: ${forbidden} must NOT be pre-approved (it must reach the user), but it is in allowedTools`);
+    }
+  }
+  for (const routine of ["Read", "Bash", "Edit", "Write"]) {
+    if (!seeded.allowedTools.includes(routine)) {
+      fails.push(`Seed: routine tool ${routine} missing from allowedTools (would prompt — not seamless)`);
+    }
+  }
+  const hasMcp = seeded.allowedTools.some((t) => t.startsWith("mcp__"));
+  if (!hasMcp) fails.push("Seed: no mcp__ tools in allowedTools (injected MCP would prompt)");
+  console.log(fails.length ? "  ✗ seed problems (see summary)" : "  ✓ seed is non-bypass, routine+mcp allow-listed, interaction tools excluded");
 
   const lg = await jpost("/api/auth/login", { username: secret.username, password: secret.password });
   const token = lg.json?.token;
   if (!token) throw new Error("login failed: " + lg.status);
 
-  const fails = [];
-
-  // Phase A — negative control: empty allowedTools must FAIL to auto-approve.
-  console.log("\n[Phase A] negative control (allowedTools=[]) — expect the MCP call to be gated …");
-  const a = await drive(token, []);
-  console.log(`  mcp tool_use=${a.mcpToolUse} ok=${a.mcpResultOk} permission_request=${a.permissionReq} stream_closed=${a.streamClosed}`);
-  if (!a.mcpToolUse) {
-    console.log("  (model didn't call the MCP tool — can't assert the negative control this run; not fatal)");
-  } else if (a.mcpResultOk && !a.permissionReq && !a.streamClosed) {
-    fails.push("Phase A: MCP tool auto-approved in plan mode WITHOUT the seed — the seed is a no-op / the guard is worthless");
+  // ── Phase 1 — seamless routine (default mode) ────────────────────────────
+  console.log("\n[Phase 1] seamless routine — expect mcp + Read to run with NO permission_request …");
+  const p1 = await drive(token, {
+    mode: "default",
+    toolsSettings,
+    content:
+      'Do exactly this, no more: (1) call WaitForMcpServers with {"servers":["search"]}; '
+      + `(2) call mcp__search__code once with {"query":"reverseProxy","mode":"lexical","workspace":${JSON.stringify(REPO)}}; `
+      + `(3) call Read on ${JSON.stringify(path.join(REPO, "package.json"))}; (4) reply DONE. Do not ask any question.`,
+  });
+  const routinePrompted = p1.permReqTools.filter((t) => t !== "AskUserQuestion" && t !== "ExitPlanMode");
+  console.log(`  mcp_ran=${p1.ranOk("mcp__search__code") || p1.used("mcp__search__code")} read_ran=${p1.ranOk("Read")} permission_requests=[${p1.permReqTools.join(",")}] stream_closed=${p1.streamClosed}`);
+  if (p1.streamClosed) fails.push('Phase 1: "Stream closed" on a routine call');
+  if (routinePrompted.length) fails.push(`Phase 1: routine tools prompted (not seamless): ${routinePrompted.join(", ")}`);
+  if (!p1.used("mcp__search__code") && !p1.used("Read")) {
+    console.log("  (model called neither mcp nor Read — inconclusive for seamlessness this run)");
   } else {
-    console.log("  ✓ gated without the seed (permission_request/stream-closed or not-ok) — seed is load-bearing");
+    console.log("  ✓ routine + mcp ran without prompting");
   }
 
-  // Phase B — positive: serve's real seed must auto-approve + execute.
-  console.log("\n[Phase B] positive (serve's seeded allowedTools) — expect the MCP call to execute …");
-  const b = await drive(token, seeded.allowedTools);
-  console.log(`  mcp tool_use=${b.mcpToolUse} ok=${b.mcpResultOk} native_ran=${b.nativeRan} permission_request=${b.permissionReq} stream_closed=${b.streamClosed} plan_block=${b.planBlock}`);
-  if (b.streamClosed) fails.push('Phase B: the buffet regression reproduced with the seed ("Stream closed")');
-  if (b.permissionReq) fails.push("Phase B: MCP tool triggered permission_request even WITH the seed (not auto-approved)");
-  if (b.planBlock) fails.push('Phase B: MCP tool hard-blocked ("Cannot call ... while in plan mode")');
-  if (!b.mcpToolUse) fails.push("Phase B: model never issued an mcp__ tool_use (inconclusive)");
-  else if (!b.mcpResultOk) fails.push(`Phase B: mcp tool ${b.mcpToolUse} returned no successful result`);
-  if (b.mcpResultOk && !b.nativeRan) fails.push("Phase B: native WaitForMcpServers did not run (seed may be restricting the native toolset)");
+  // ── Phase 2 — AskUserQuestion reaches the user (default mode) ─────────────
+  console.log("\n[Phase 2] AskUserQuestion — expect a permission_request (the user is asked), NOT an auto-answer …");
+  const p2 = await drive(token, {
+    mode: "default",
+    toolsSettings,
+    awaitPermTool: "AskUserQuestion",
+    content:
+      "Call the AskUserQuestion tool exactly once to ask me: question \"Pick a color\" with two options "
+      + "labelled \"Red\" and \"Blue\". Do NOT answer it yourself and do NOT call any other tool first.",
+  });
+  const askSurfaced = p2.permReqTools.includes("AskUserQuestion");
+  console.log(`  asked_user=${askSurfaced} used_askuserquestion=${p2.used("AskUserQuestion")} permission_requests=[${p2.permReqTools.join(",")}]`);
+  if (askSurfaced) {
+    console.log("  ✓ AskUserQuestion reached the user (not auto-answered)");
+  } else if (p2.used("AskUserQuestion")) {
+    fails.push("Phase 2: AskUserQuestion executed WITHOUT a permission_request — the model auto-answered its own question (the bug)");
+  } else {
+    console.log("  (model never called AskUserQuestion — inconclusive this run; not fatal)");
+  }
+
+  // ── Phase 3 — ExitPlanMode reaches the user (plan mode) ───────────────────
+  console.log("\n[Phase 3] ExitPlanMode (plan mode) — expect a permission_request (the plan card), NOT auto-approve …");
+  const p3 = await drive(token, {
+    mode: "plan",
+    toolsSettings,
+    awaitPermTool: "ExitPlanMode",
+    content:
+      "You are in plan mode. Write a one-line plan ('Plan: do nothing') then call the ExitPlanMode tool "
+      + "with that plan. Do not call any other tool.",
+  });
+  const planSurfaced = p3.permReqTools.includes("ExitPlanMode");
+  console.log(`  plan_approval_asked=${planSurfaced} used_exitplanmode=${p3.used("ExitPlanMode")} permission_requests=[${p3.permReqTools.join(",")}]`);
+  if (planSurfaced) {
+    console.log("  ✓ ExitPlanMode reached the user (plan Approve/Reject, not auto-approved) — and it runs as a tool, so PostToolUse(ExitPlanMode) fires");
+  } else if (p3.used("ExitPlanMode")) {
+    fails.push("Phase 3: ExitPlanMode executed WITHOUT a permission_request — the plan was auto-approved (the bug)");
+  } else {
+    console.log("  (model never called ExitPlanMode — inconclusive this run; not fatal)");
+  }
 
   if (fails.length) {
-    console.error("\n❌ cloudcli plan-mode MCP e2e FAILED:\n  - " + fails.join("\n  - "));
+    console.error("\n❌ serve-permission e2e FAILED:\n  - " + fails.join("\n  - "));
     process.exitCode = 1;
   } else {
-    console.log("\n✅ cloudcli plan-mode MCP e2e: gated WITHOUT the seed, auto-approved + executed WITH it (native toolset intact).");
+    console.log("\n✅ serve-permission e2e: routine + mcp seamless, AskUserQuestion + ExitPlanMode reach the user (non-bypass model working).");
   }
 }
 

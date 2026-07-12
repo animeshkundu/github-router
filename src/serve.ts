@@ -12,6 +12,7 @@ import { killChildProcessTree } from "./lib/exec"
 import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
 import { getCodexVersion } from "./lib/launch"
 import { browserToolsEnabled } from "./lib/mcp-capabilities"
+import { SEAMLESS_BUILTIN_TOOLS } from "./lib/mcp-permissions-settings"
 import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror } from "./lib/paths"
 import { DEFAULT_CLAUDE_MODEL_FALLBACKS, pickClaudeDefault } from "./lib/port"
 import {
@@ -348,6 +349,13 @@ export const serve = defineCommand({
     //    COPILOT_TOKEN) plus the non-secret ANTHROPIC_BASE_URL/CLAUDE_CONFIG_DIR
     //    /model vars. Auth rides the synthetic .credentials.json FILE, not env.
     const anthropicVars = getClaudeCodeEnvVars(serverUrl, chosenSlug)
+    // CLAUDE_CODE_FORK_SUBAGENT silently no-ops under CloudCLI's headless
+    // `claude --print` path (the binary's Z8() precondition disables forking
+    // without an interactive session), so setting it here is dead weight that
+    // would mislead the model into assuming forked subagents inherit full
+    // context. Drop it for serve. (getClaudeCodeEnvVars sets it for the
+    // interactive `claude` path, where forking works.)
+    delete anthropicVars.CLAUDE_CODE_FORK_SUBAGENT
     if (enhancements.nonce) {
       anthropicVars.GH_ROUTER_HOOK_MCP_URL = serverUrl
       anthropicVars.GH_ROUTER_HOOK_NONCE = enhancements.nonce
@@ -506,7 +514,10 @@ export const serve = defineCommand({
         bindPort: servePort,
         authToken: token,
         seedToolSettings: process.env.GH_ROUTER_SERVE_NO_AUTO_APPROVE !== "1",
-        seedAllowedTools: enhancements.mcpToolNames ?? [],
+        // Routine built-ins + every injected mcp tool name → auto-approve; the
+        // two interaction tools (AskUserQuestion/ExitPlanMode) are excluded so
+        // they reach the user (SEAMLESS_BUILTIN_TOOLS never lists them).
+        seedAllowedTools: [...SEAMLESS_BUILTIN_TOOLS, ...(enhancements.mcpToolNames ?? [])],
         extraAllowedHosts,
         extraAllowedOrigins,
         allowDevtunnelHosts: tunnelMode,
