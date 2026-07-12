@@ -45,7 +45,7 @@ Subagent system prompt (`OPUS_CRITIC_BASE`, `personas.ts:322-330`):
 
 > You are opus-critic, a fresh-context Anthropic-side adversarial reviewer running on Claude Opus 4.7 — the same model and lab as the lead orchestrator that just delegated to you. You are NOT the lead. You did not see the lead's reasoning trace. You only see the brief.
 >
-> Your job is to spot what the lead missed because of cognitive momentum, sunk-cost on a plan, or motivated reasoning toward a particular fix. Your blind-spot diversification is LIMITED compared to codex-critic (gpt-5.5) and gemini-critic (gemini-3.1-pro) — same training, same lab, same RLHF priors. …
+> Your job is to spot what the lead missed because of cognitive momentum, sunk-cost on a plan, or motivated reasoning toward a particular fix. Your blind-spot diversification is LIMITED compared to codex-critic (gpt-5.6-sol) and gemini-critic (gemini-3.1-pro) — same training, same lab, same RLHF priors. …
 
 Followed by `COLD_START_CONTRACT` (`personas.ts:220-227`) and `CRITIC_RUBRIC` (`personas.ts:193-218`).
 
@@ -112,7 +112,7 @@ Why it matters: same root cause as Finding 1 (default drift from 4.7 to 4.8). Th
 
 ### [Suggestion] — `OPUS_CRITIC_BASE` names `gemini-critic` unconditionally, but that persona is catalog-gated
 
-- `src/lib/peer-mcp-personas.ts:324` — "Your blind-spot diversification is LIMITED compared to codex-critic (gpt-5.5) and gemini-critic (gemini-3.1-pro)".
+- `src/lib/peer-mcp-personas.ts:324` — "Your blind-spot diversification is LIMITED compared to codex-critic (gpt-5.6-sol) and gemini-critic (gemini-3.1-pro)".
 - `gemini-critic` is dropped from the live surface when the gemini-3.x-pro family is absent from the catalog (`personasFor`/`activePersonas` gate on `requiresGeminiCatalog`, `personas.ts:660` / `handler.ts:278-279`).
 
 Why it's only a Suggestion: this is a subagent-internal system prompt, not the model-facing tool card, and the reference is illustrative ("compared to X and Y") rather than a routing instruction — naming a possibly-absent sibling as a diversity contrast does not break anything. The snippet surface already correctly gates the gemini mention (`personas.ts:580`). No change required unless tightening for lesser-tier accuracy; if changed, phrase as "the cross-lab critics" rather than naming gemini specifically.

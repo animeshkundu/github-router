@@ -19,7 +19,7 @@ Grouped by surface type. Each row: item · one-line function · gate/condition �
 
 | Group | Tools | What the group does | Gate | Doc |
 |---|---|---|---|---|
-| peers | codex_critic, gemini_critic, codex_reviewer, gemini_reviewer, opus_critic, codex_implementer | Cross-lab adversarial critics + reviewers (gpt-5.5 / gemini-3.1-pro / gpt-5.3-codex / opus-4.6) | catalog per-model; gemini pair needs gemini catalog; codex_implementer needs `--codex-cli` | [mcp/README.md](./mcp/README.md) |
+| peers | codex_critic, gemini_critic, codex_reviewer, gemini_reviewer, opus_critic, codex_implementer | Cross-lab adversarial critics + reviewers (gpt-5.6-sol / gemini-3.1-pro / gpt-5.3-codex / opus-4.6) | catalog per-model; gemini pair needs gemini catalog; codex_implementer needs `--codex-cli` | [mcp/README.md](./mcp/README.md) |
 | search | web, code | Copilot web search; semantic-first (ColBERT + lexical fallback) code search | always-on | [mcp/search/code.md](./mcp/search/code.md) |
 | workers | explore, implement, review, plan, test, browse | Autonomous Pi-runtime worker subagents (read-only / read-write / planner / test-author / browser) | `capability:"worker"` (browse: `browse_agent`) | [mcp/workers/](./mcp/workers/) |
 | orchestrate | verify_workflow, decompose, run_workflow, attest_step | Compose / verify / run / audit a typed workflow IR through the frozen kernel | verify+attest always-on; decompose+run gated `worker` | [mcp/orchestrate/](./mcp/orchestrate/) |
@@ -41,7 +41,7 @@ Full per-tool manifest with `file:line` and per-tool models in [`mcp/README.md`]
 | 4 | `SessionStart` + `SessionEnd` | Bind the session to the ai-or-die tab (side-effect); one hook registered on both events | `AIORDIE_CLAUDE_BIND` set | [session-bind](./hooks/session-bind.md) |
 | 5 | `PostToolUse` · `ExitPlanMode` | Open the finalized plan in the ai-or-die panel | `AIORDIE_SESSION_ID` set | [posttooluse-artifact-open](./hooks/posttooluse-artifact-open.md) |
 | 6 | `Stop` | Structural gate: typecheck/test/lint + gate-weakening scan; blocks stop (max 2/prompt) | per-repo consent | [stop-structural-gate](./hooks/stop-structural-gate.md) |
-| 7 | (detached, spawned by #6) | gpt-5.5 review of the live tree vs the user ask on a green gate → findings for next turn | `stopReviewEnabled()` + green gate + diff | [stop-review-detached](./hooks/stop-review-detached.md) |
+| 7 | (detached, spawned by #6) | gpt-5.6-sol review of the live tree vs the user ask on a green gate → findings for next turn | `stopReviewEnabled()` + green gate + diff | [stop-review-detached](./hooks/stop-review-detached.md) |
 
 All four non-guard hooks stand down inside any subagent/teammate context; the two PreToolUse guards are the deliberate inverse. Firing analysis in [`hooks/README.md`](./hooks/README.md).
 
@@ -63,11 +63,11 @@ Description-line (routing) review in [`skills/README.md`](./skills/README.md).
 
 | Subagent | Own model | Nature | Gate | Doc |
 |---|---|---|---|---|
-| codex-critic / codex-reviewer | inherited (Claude) | relay to gpt-5.5 / gpt-5.3-codex via MCP | always | [subagents/](./subagents/) |
+| codex-critic / codex-reviewer | inherited (Claude) | relay to gpt-5.6-sol / gpt-5.3-codex via MCP | always | [subagents/](./subagents/) |
 | gemini-critic / gemini-reviewer | inherited | relay to gemini-3.1-pro via MCP | `requiresGeminiCatalog` | [subagents/](./subagents/) |
 | opus-critic | inherited | relay to claude-opus-4-6 via MCP | always | [opus-critic](./subagents/opus-critic.md) |
 | codex-implementer | inherited | relay to gpt-5.3-codex writer (stdio) | `--codex-cli` | [codex-implementer](./subagents/codex-implementer.md) |
-| implementer (native) | **gpt-5.5** | edits files itself, full toolset, via translation shim | catalog has gpt-5.5 + tool_calls | [implementer](./subagents/implementer.md) |
+| implementer (native) | **gpt-5.6-sol** (gpt-5.5 fallback) | edits files itself, full toolset, via translation shim | catalog has gpt-5.6-sol or gpt-5.5 + tool_calls | [implementer](./subagents/implementer.md) |
 | peer-review-coordinator | inherited | fans out to critics, aggregates | always | [peer-review-coordinator](./subagents/peer-review-coordinator.md) |
 | worker-explore/implement/review/plan/test/browse | inherited (dispatchers) | background non-blocking dispatch to the matching worker | worker / browse gate | [subagents/](./subagents/) |
 
@@ -113,7 +113,7 @@ What each launch flag / condition turns ON, so a reader can see exactly what a g
 
 | Condition | Turns ON |
 |---|---|
-| **default** (`github-router claude`) | peers critics (codex_critic, codex_reviewer, opus_critic; gemini pair if catalog), `search` (web, code), `orchestrate` verify+attest, all 5 non-blocking `worker-*` dispatchers + skill, `implementer` subagent (if gpt-5.5), `peer-review-coordinator`, hooks #1/#2/#6/#7, skills gh-research/gh-orchestrate/gh-floor-keeper/gh-worker, all 5 prompt/CLAUDE.md text blocks (toolbelt/style/artifact conditional), all env/settings above |
+| **default** (`github-router claude`) | peers critics (codex_critic, codex_reviewer, opus_critic; gemini pair if catalog), `search` (web, code), `orchestrate` verify+attest, all 5 non-blocking `worker-*` dispatchers + skill, `implementer` subagent (if gpt-5.6-sol or gpt-5.5 fallback is available), `peer-review-coordinator`, hooks #1/#2/#6/#7, skills gh-research/gh-orchestrate/gh-floor-keeper/gh-worker, all 5 prompt/CLAUDE.md text blocks (toolbelt/style/artifact conditional), all env/settings above |
 | **worker-gate present** (`gpt-5.4-mini` w/ tool_calls in catalog) | workers group (explore/implement/review/plan/test), orchestrate decompose+run, prompt-submit steer #1, worker guard #2, worker skills, worker-* dispatchers. If ABSENT: the entire worker surface + the four worker-gated skills + hook #1 drop |
 | **gemini catalog** (`gemini-3.x-pro`) | gemini_critic, gemini_reviewer tools + subagents |
 | **stand_in catalog** (all 3 consensus models) | decide group (`stand_in`) |

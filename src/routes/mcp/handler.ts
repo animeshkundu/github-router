@@ -246,7 +246,7 @@ function checkAuth(c: Context): { ok: true } | { ok: false; status: 401 | 403; r
 /**
  * The 1M-context Opus 4.6 variant (`claude-opus-4.6-1m`, `max_prompt_tokens`
  * 936K). opus_critic prefers it so it can take large artifacts in one shot
- * (the whole point of pairing it with gpt-5.5 as the big-window peers);
+ * (the whole point of pairing it with gpt-5.6-sol as the big-window peers);
  * falls back to the 200K `claude-opus-4-6` when the catalog doesn't carry
  * a 1M 4.6 slug. The regex is version-anchored to 4.6 AND requires a
  * `-1m` suffix boundary (not a permissive `.*1m`), so it does NOT
@@ -581,7 +581,7 @@ async function predictedWindowOverflow(
     + `${budget}-token budget for ${persona.model} (its ${maxPromptTokens}-token prompt window `
     + `minus a ${PEER_PROMPT_TOKEN_RESERVE}-token framing reserve). Do NOT summarize or truncate `
     + `the artifact to fit. Route the full artifact to a larger-window peer — `
-    + `\`codex_critic\` (gpt-5.5 ≈ 922K tokens)${opusHint} — or split it into focused `
+    + `\`codex_critic\` (gpt-5.6-sol ≈ 1M tokens)${opusHint} — or split it into focused `
     + `sub-calls BY CONCERN and call them in parallel, then aggregate.`
   )
 }
@@ -617,10 +617,12 @@ function jsonPathPreflightCap(body: JsonRpcRequest, scope: McpScope):
   // The cap exists because stand_in fundamentally cannot fit in the
   // JSON-path 60s tools/call ceiling on any non-trivial input: two
   // sequential voting rounds × ~60-90s per round across three frontier
-  // models = 2-3 minutes typical wall-clock. The size threshold (~6KB)
-  // is conservative — bursting it means the JSON-path caller will
-  // definitely time out, so we surface the actionable "use SSE" error
-  // up front instead of leaking an inFlight slot for the duration.
+  // models = 2-3 minutes typical wall-clock. `context` is now required and
+  // sufficiency-oriented (the panel is cold-start), so the size threshold
+  // (~32KB) is set high enough to admit a real, code-bearing brief while
+  // still catching a pathological payload — bursting it means the JSON-path
+  // caller will definitely time out, so we surface the actionable "use SSE"
+  // error up front instead of leaking an inFlight slot for the duration.
   if (name === "stand_in") {
     // Out-of-scope JSON call (e.g. stand_in on /mcp/peers): let
     // handleToolsCall return the -32601 scope reject instead of a
@@ -628,13 +630,22 @@ function jsonPathPreflightCap(body: JsonRpcRequest, scope: McpScope):
     if (scope !== "all" && scope !== "decide") return undefined
     const decision = typeof args.decision === "string" ? args.decision : ""
     const optionsRaw = Array.isArray(args.options) ? args.options : []
+    // This preflight is a SIZE cap only. Presence / shape validation (missing
+    // decision or options, and the missing / non-string / empty required
+    // `context`) is the tool boundary's job: every such invalid input returns
+    // undefined here and is rejected downstream with `isError`, fast-failing
+    // (microsecond slot hold) before the 2-3 min voting path. We deliberately do
+    // NOT size a non-string context via JSON.stringify (that would misreport a
+    // type error as a size error) NOR reject it here with a tool-content error
+    // (that would bifurcate the shape-error contract — decision/options take the
+    // -32602 path). So the cap sizes only a valid, non-empty string context.
     const standInContext = typeof args.context === "string" ? args.context : ""
-    if (!decision || optionsRaw.length === 0) return undefined // shape error → -32602 path
+    if (!decision || optionsRaw.length === 0 || !standInContext.trim()) return undefined
     const briefBytes = Buffer.byteLength(
       decision + JSON.stringify(optionsRaw) + standInContext,
       "utf8",
     )
-    const STAND_IN_CAP_BYTES = 6 * 1024
+    const STAND_IN_CAP_BYTES = 32 * 1024
     if (briefBytes > STAND_IN_CAP_BYTES) {
       return rpcResult(
         body.id,
@@ -696,7 +707,7 @@ function jsonPathPreflightCap(body: JsonRpcRequest, scope: McpScope):
  * the `stand_in` orchestrator in `src/lib/stand-in.ts` — can reuse the
  * same per-endpoint request shaping without re-implementing it. The
  * stand_in tool needs to drive its own per-round system prompts across
- * three concrete models (gpt-5.5, claude-opus-4-7, gemini-3.1-pro-preview),
+ * three concrete models (gpt-5.6-sol, claude-opus-4-7, gemini-3.1-pro-preview),
  * each on a different endpoint; doing that with a `PersonaSpec` would
  * require either inventing throwaway personas per round or duplicating
  * the dispatch switch.

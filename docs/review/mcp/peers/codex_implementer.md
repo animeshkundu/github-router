@@ -113,10 +113,10 @@ Checked-in root `CLAUDE.md` reference (`CLAUDE.md:129`, "Six intent-named MCP se
 There are three overlapping "implement" surfaces the lead can reach, and their boundaries are not stated anywhere in the injected guidance:
 
 1. `codex-implementer` subagent (this tool) — gpt-5.3-codex via codex-cli stdio sandbox, `--codex-cli` only.
-2. `implementer` native subagent — gpt-5.5, always injected when the catalog has gpt-5.5 with tool_calls (`codex-mcp-config.ts:308-316`), uses Claude Code's own Edit/Write/Bash.
-3. `implement` / `worker-implement` worker — gpt-5.5, gated by `workerToolsEnabled()`.
+2. `implementer` native subagent — gpt-5.6-sol, with gpt-5.5 fallback, injected when the catalog has gpt-5.6-sol or gpt-5.5 with tool_calls (`codex-mcp-config.ts:308-316`), uses Claude Code's own Edit/Write/Bash.
+3. `implement` / `worker-implement` worker — gpt-5.6-sol, gated by `workerToolsEnabled()`.
 
-All three are write-capable coders; two run gpt-5.5, one runs gpt-5.3-codex; one needs an external CLI, one is integrated, one is a background worker. The `codexCliClause` says only "for end-to-end coding tasks" with no discriminator against surfaces 2/3. This is a real misroute risk: in a `--codex-cli` session the lead sees `codex-implementer`, `implementer`, and `worker-implement` all advertising bounded implementation and has no stated basis to choose. Not a defect in this tool alone, but the `codex_implementer` description/clause is the natural place to add the one-line discriminator (e.g. "prefer this only when you specifically want the codex sandbox / on-request approvals; otherwise the `implementer` subagent or `worker-implement` are the default coding surfaces").
+All three are write-capable coders; two run gpt-5.6-sol, one runs gpt-5.3-codex; one needs an external CLI, one is integrated, one is a background worker. The `codexCliClause` says only "for end-to-end coding tasks" with no discriminator against surfaces 2/3. This is a real misroute risk: in a `--codex-cli` session the lead sees `codex-implementer`, `implementer`, and `worker-implement` all advertising bounded implementation and has no stated basis to choose. Not a defect in this tool alone, but the `codex_implementer` description/clause is the natural place to add the one-line discriminator (e.g. "prefer this only when you specifically want the codex sandbox / on-request approvals; otherwise the `implementer` subagent or `worker-implement` are the default coding surfaces").
 
 ## 5. Verdict
 

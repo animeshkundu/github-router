@@ -1554,16 +1554,16 @@ export async function sweepStalePeerAgentMdFiles(): Promise<void> {
 
 /**
  * Strict regex matching only files this proxy writes:
- *   peer-<pid>-<8 hex>-<exact persona/coordinator/dispatcher name>.md
+ *   peer-<pid>-<8 hex>-<exact persona/coordinator/native/dispatcher name>.md
  * The name allowlist is the load-bearing protection against deleting user
  * files. Update this list whenever a new persona is added to `PERSONAS_READ` /
- * `PERSONAS_WRITE` in `peer-mcp-personas.ts`, a new coordinator-style agent is
- * added in `codex-mcp-config.ts`, or a new `worker-*` dispatcher mode is added
- * in `worker-dispatch.ts` (a drift test in tests/worker-dispatch pins that the
- * `ALL_DISPATCHER_AGENT_NAMES` are all covered here).
+ * `PERSONAS_WRITE` in `peer-mcp-personas.ts`, a new coordinator-style or native
+ * subagent is added in `codex-mcp-config.ts`, or a new `worker-*` dispatcher mode
+ * is added in `worker-dispatch.ts` (a drift test in tests/worker-dispatch pins
+ * that the `ALL_DISPATCHER_AGENT_NAMES` are all covered here).
  */
-const PEER_AGENT_MD_FILENAME =
-  /^peer-(\d+)-[0-9a-f]{8}-(?:codex-critic|codex-reviewer|gemini-critic|gemini-reviewer|opus-critic|codex-implementer|peer-review-coordinator|worker-explore|worker-implement|worker-review|worker-plan|worker-test|worker-browse)\.md$/
+export const PEER_AGENT_MD_FILENAME =
+  /^peer-(\d+)-[0-9a-f]{8}-(?:codex-critic|codex-reviewer|gemini-critic|gemini-reviewer|opus-critic|codex-implementer|peer-review-coordinator|implementer|debugger|qa-engineer|worker-explore|worker-implement|worker-review|worker-plan|worker-test|worker-browse)\.md$/
 
 /**
  * Strict regex matching only per-launch claude-config mirror dirs this

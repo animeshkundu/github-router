@@ -24,7 +24,7 @@ import { provisionAndIndexColbert } from "./lib/colbert"
 import { startKeepAwake } from "./lib/keep-awake"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
 import { hasSupportedBrowserInstalled } from "./lib/browser-mcp/browser-detect"
-import { resolveCodexModel } from "./lib/utils"
+import { resolveCodexModel, resolveModel } from "./lib/utils"
 
 export const codex = defineCommand({
   meta: {
@@ -105,24 +105,27 @@ export const codex = defineCommand({
       consola.info(`Model "${requestedModel}" resolved to "${codexModel}"`)
     }
 
-    // For the implicit-default path only, walk DEFAULT_CODEX_MODEL_FALLBACKS
-    // when the default isn't in the resolved Copilot model list. Layered on
-    // top of resolveCodexModel's "best /responses model" fallback — that
-    // remains the final safety net when every named fallback misses.
+    // For the implicit-default path only: honor the explicit fallback order
+    // (DEFAULT_CODEX_MODEL, then DEFAULT_CODEX_MODEL_FALLBACKS led by gpt-5.5)
+    // by cache presence BEFORE resolveCodexModel's codex-slug-preferring
+    // "best /responses model" safety net. `resolveModel` (NOT resolveCodexModel)
+    // walks the chain, so the codex-slug preference can't shadow an
+    // earlier-in-chain named fallback (e.g. gpt-5.5) that IS present. The
+    // resolveCodexModel result above stays as the FINAL safety net, used only
+    // when none of the named chain entries is in the catalog.
     if (usingDefault && state.models) {
       const inCache = (id: string) =>
         state.models?.data.some((m) => m.id === id) ?? false
-      if (!inCache(codexModel)) {
-        for (const fallback of DEFAULT_CODEX_MODEL_FALLBACKS) {
-          const resolved = resolveCodexModel(fallback)
-          if (inCache(resolved)) {
-            consola.info(
-              `Default model "${codexModel}" not in your Copilot model list; falling back to "${resolved}".`,
-            )
-            codexModel = resolved
-            break
-          }
+      const firstPresent = [DEFAULT_CODEX_MODEL, ...DEFAULT_CODEX_MODEL_FALLBACKS]
+        .map((id) => resolveModel(id))
+        .find((id) => inCache(id))
+      if (firstPresent) {
+        if (firstPresent !== codexModel) {
+          consola.info(
+            `Default model "${DEFAULT_CODEX_MODEL}" not in your Copilot model list; falling back to "${firstPresent}".`,
+          )
         }
+        codexModel = firstPresent
       }
     }
 

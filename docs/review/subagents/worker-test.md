@@ -7,7 +7,7 @@
 | Field | Value |
 |---|---|
 | Subagent name | `worker-test` (`worker-dispatch.ts:58-60`) |
-| Subagent's OWN model | inherited (Claude); the WORKER runs `IMPLEMENT_DEFAULT_MODEL` = `gpt-5.5` at xhigh (test shares the implement default — repo CLAUDE.md) |
+| Subagent's OWN model | inherited (Claude); the WORKER runs `IMPLEMENT_DEFAULT_MODEL` = `gpt-5.6-sol` at xhigh (test shares the implement default — repo CLAUDE.md) |
 | Gate | `workerToolsAvailable` (`codex-mcp-config.ts:326-335`) |
 | Description | `dispatcherDescription("test")` (`worker-dispatch.ts:213-214` + suffix) |
 | System prompt | `dispatcherPrompt("test", workersKey)` |
@@ -32,7 +32,7 @@ Standard thin-dispatcher body with the `worktree` passthrough (`worker-dispatch.
 
 ## 5. Don't-nerf / right-balance
 
-The "independent, tries to break, does not touch the implementation" framing is exactly the floor-raiser: it keeps test authorship decorrelated from implementation (which trends gpt-5.5) — an honest adversarial test pass. The `worktree` option isolates the test run. Right balance.
+The "independent, tries to break, does not touch the implementation" framing is exactly the floor-raiser: it keeps test authorship decorrelated from implementation (which trends gpt-5.6-sol) — an honest adversarial test pass. The `worktree` option isolates the test run. Right balance.
 
 ## 6. Findings + verdict
 

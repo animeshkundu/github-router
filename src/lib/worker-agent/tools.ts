@@ -1716,7 +1716,7 @@ function advisorTool(
     name: "advisor",
     label: "Advisor",
     description:
-      "Consult a stronger reviewer model (cross-lab: gpt-5.5 xhigh by " +
+      "Consult a stronger reviewer model (cross-lab: gpt-5.6-sol xhigh by " +
       "default) on a specific concern. Use BEFORE substantive work, " +
       "WHEN stuck, or WHEN considering a change of approach. The " +
       "advisor automatically receives the recent conversation " +

@@ -19,6 +19,7 @@ import { compressorAvailable } from "./browser-mcp/compressor"
 import {
   colbertSearchEnabled,
 } from "./colbert"
+import { OPENAI_FRONTIER_MODELS } from "./openai-frontier"
 import { state, type State } from "./state"
 import {
   BROWSE_DEFAULT_MODEL,
@@ -31,7 +32,8 @@ import { pickEndpoint } from "../services/copilot/endpoint"
  *
  * Returns true iff Copilot's live catalog (`state.models?.data`) contains
  * ALL THREE peer models the consensus protocol needs:
- *   - `gpt-5.5`             (codex_critic's model)
+ *   - an OpenAI frontier model (`gpt-5.6-sol`, else `gpt-5.5` — see
+ *     `resolveOpenAiFrontier`)
  *   - `claude-opus-4-7`     (opus_critic's model)
  *   - any `gemini-3.X.*pro` (gemini_critic's model family — matches the
  *     same regex `geminiAvailable()` uses, so the gate stays in sync if
@@ -53,28 +55,54 @@ export function geminiAvailable(source: Pick<State, "models"> = state): boolean 
   return models.some((m) => /^gemini-3\..*pro/i.test(m.id))
 }
 
+/**
+ * OpenAI frontier reasoning models in preference order. `gpt-5.6-sol` is the
+ * current default; `gpt-5.5` is retained as a fallback. Both share the same
+ * `pro_plus/business/enterprise/max` restriction tier, so the fallback only
+ * matters during a rollout-lag window where the newer slug hasn't yet appeared
+ * in the account's catalog.
+ */
+export { OPENAI_FRONTIER_MODELS } from "./openai-frontier"
+
+/**
+ * First available OpenAI frontier model in the live catalog (prefer
+ * `gpt-5.6-sol`, fall back to `gpt-5.5`). Returns undefined when neither is
+ * present. With `requireToolCalls`, only returns a model whose catalog entry
+ * advertises `tool_calls`.
+ */
+export function resolveOpenAiFrontier(opts?: {
+  requireToolCalls?: boolean
+}): string | undefined {
+  const models = state.models?.data
+  if (!models) return undefined
+  for (const id of OPENAI_FRONTIER_MODELS) {
+    const found = models.find((m) => m.id === id)
+    if (!found) continue
+    if (opts?.requireToolCalls && found.capabilities?.supports?.tool_calls !== true) {
+      continue
+    }
+    return id
+  }
+  return undefined
+}
+
 export function standInToolEnabled(): boolean {
   const models = state.models?.data
   if (!models) return false
-  const hasGpt55 = models.some((m) => m.id === "gpt-5.5")
+  const hasOpenAi = resolveOpenAiFrontier() != null
   const hasOpus = models.some(
     (m) => m.id === "claude-opus-4-7" || m.id === "claude-opus-4.7",
   )
   const hasGeminiPro = geminiAvailable()
-  return hasGpt55 && hasOpus && hasGeminiPro
+  return hasOpenAi && hasOpus && hasGeminiPro
 }
 
-export const IMPLEMENTER_SUBAGENT_MODEL = "gpt-5.5"
-
-/** Return the native implementer subagent model iff it is live with tool calls. */
-export function implementerSubagentModel(): string | undefined {
-  const models = state.models?.data
-  if (!models) return undefined
-  const found = models.find((m) => m.id === IMPLEMENTER_SUBAGENT_MODEL)
-  if (!found) return undefined
-  return found.capabilities?.supports?.tool_calls === true
-    ? IMPLEMENTER_SUBAGENT_MODEL
-    : undefined
+/** Return the model for the native OpenAI subagents (implementer, debugger,
+ *  qa-engineer) iff it is live with tool calls. Prefers `gpt-5.6-sol`, falls
+ *  back to `gpt-5.5`. One gate governs all three — they need the same frontier
+ *  model. */
+export function nativeSubagentModel(): string | undefined {
+  return resolveOpenAiFrontier({ requireToolCalls: true })
 }
 
 /**
@@ -87,7 +115,7 @@ export function implementerSubagentModel(): string | undefined {
  *      true`. The worker loop is function-calling; a model that can't
  *      emit tool_calls is unusable, so dormant-register (omit from
  *      `tools/list`) keeps the surface honest. (The implement default
- *      `gpt-5.5` is NOT gated here — if it's absent, implement calls
+ *      `gpt-5.6-sol` is NOT gated here — if it's absent, implement calls
  *      surface a clean resolve error rather than disabling all worker
  *      tools, since explore/review still work.)
  *   2. The operator hasn't set `GH_ROUTER_DISABLE_WORKER_TOOLS=1`

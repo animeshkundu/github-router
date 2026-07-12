@@ -17,19 +17,19 @@ afterEach(() => {
   state.models = originalModels
 })
 
-test("defaults to gpt-5.5 when no model is chosen and no catalog is available", () => {
+test("defaults to gpt-5.6-sol when no model is chosen and no catalog is available", () => {
   expect(resolveCloudAgentModel(undefined, null)).toBe(DEFAULT_CODEX_MODEL)
-  expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.5")
+  expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.6-sol")
 })
 
 test("returns the default when it IS present in the catalog", () => {
   expect(
-    resolveCloudAgentModel(undefined, [{ id: "gpt-5.5" }, { id: "gpt-5.4" }]),
-  ).toBe("gpt-5.5")
+    resolveCloudAgentModel(undefined, [{ id: "gpt-5.6-sol" }, { id: "gpt-5.4" }]),
+  ).toBe("gpt-5.6-sol")
 })
 
 test("walks the fallback chain when the preferred default is absent for the tier", () => {
-  // gpt-5.5 not served on this catalog; the first available fallback wins.
+  // gpt-5.6-sol not served on this catalog; the first available fallback wins.
   expect(resolveCloudAgentModel(undefined, [{ id: "gpt-5.4" }])).toBe("gpt-5.4")
   expect(resolveCloudAgentModel(undefined, [{ id: "gpt-5.3-codex" }])).toBe(
     "gpt-5.3-codex",

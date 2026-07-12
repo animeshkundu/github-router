@@ -54,7 +54,7 @@ The injected marker block covering this tool is **peer-awareness** — the SAME 
 
 Checked-in repo root `CLAUDE.md` documents the plan default in the "worker tools" paragraph:
 
-> read-only `plan` → `PLAN_DEFAULT_MODEL` = `claude-opus-4.8` (DOTTED catalog id — the worker resolver exact-matches `catalog.id`) at `xhigh` (planning is the highest-leverage step, so it gets the strongest model, not a cheaper default; errors helpfully at call time if opus-4.8 is absent, like `implement`'s `gpt-5.5`)
+> read-only `plan` → `PLAN_DEFAULT_MODEL` = `claude-opus-4.8` (DOTTED catalog id — the worker resolver exact-matches `catalog.id`) at `xhigh` (planning is the highest-leverage step, so it gets the strongest model, not a cheaper default; errors helpfully at call time if opus-4.8 is absent, like `implement`'s `gpt-5.6-sol`)
 
 This matches the code exactly: `PLAN_DEFAULT_MODEL = "claude-opus-4.8"` (`engine.ts:197`), `PLAN_DEFAULT_THINKING = "xhigh"` (`engine.ts:198`), and the resolver exact-matches `catalog.id` (`model-resolve.ts:99`: `catalog.find((m) => m.id === opts.model)`).
 

@@ -31,7 +31,7 @@ import {
   browserToolsEnabled,
   fleetToolsEnabled,
   geminiAvailable,
-  implementerSubagentModel,
+  nativeSubagentModel,
   standInToolEnabled,
   workerToolsEnabled,
 } from "../mcp-capabilities"
@@ -112,7 +112,7 @@ export async function provisionServeEnhancements(
       groupKeys,
       workerToolsAvailable: workerToolsEnabled(),
       browseAvailable: browseAllowed && browseAgentEnabled(),
-      implementerModel: implementerSubagentModel(),
+      nativeSubagentModel: nativeSubagentModel(),
       // Serve-only: register Claude Code's built-in Explore/Plan/general-purpose
       // subagents (the Agent SDK doesn't) so the model's habitual Agent() calls
       // resolve. Never passed by `github-router claude` (would shadow the CLI's
@@ -139,7 +139,6 @@ export async function provisionServeEnhancements(
       compoundBrowseAvailable: browseAllowed && browserCompoundToolsEnabled(),
       powerBrowseAvailable: browseAllowed && state.powerBrowseEnabled,
       agentToolsAvailable: firstMateAllowed,
-      implementerAvailable: implementerSubagentModel() != null,
       groupKeys,
     })
 

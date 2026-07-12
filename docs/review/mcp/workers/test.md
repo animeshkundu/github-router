@@ -12,8 +12,8 @@
 | Wire tool name | `test` |
 | Definition | `src/lib/peer-mcp-personas.ts:1528` (tool entry), `:1533` (description); handler routes to `runWorkerToolCall({ mode: "test" })` at `:1616` |
 | Always-on? | gated by `capability: "worker"` (`:1531`) |
-| Capability gate | `worker` → `workerToolsEnabled()` (`src/lib/mcp-capabilities.ts:99`): `GH_ROUTER_DISABLE_WORKER_TOOLS` unset AND catalog has `WORKER_DEFAULT_MODEL` (`gpt-5.4-mini`) with `tool_calls`. Note: the RESOLVED test model is `gpt-5.5` (`IMPLEMENT_DEFAULT_MODEL`), which is NOT a gate input — if absent, the mode errors at call time. |
-| Backing model / endpoint | `gpt-5.5` at `xhigh` (`IMPLEMENT_DEFAULT_MODEL`, `engine.ts:168` / `:329`); Pi runtime over `/responses` (gpt-5.5) |
+| Capability gate | `worker` → `workerToolsEnabled()` (`src/lib/mcp-capabilities.ts:99`): `GH_ROUTER_DISABLE_WORKER_TOOLS` unset AND catalog has `WORKER_DEFAULT_MODEL` (`gpt-5.4-mini`) with `tool_calls`. Note: the RESOLVED test model is `gpt-5.6-sol` (`IMPLEMENT_DEFAULT_MODEL`), which is NOT a gate input — if absent, the mode errors at call time. |
+| Backing model / endpoint | `gpt-5.6-sol` at `xhigh` (`IMPLEMENT_DEFAULT_MODEL`, `engine.ts:168` / `:329`); Pi runtime over `/responses` (gpt-5.6-sol) |
 | Write-capable | yes — same 13-tool read+write surface as `implement` (`types.ts:52-54`, `tools.ts:1908`) |
 | Dual dispatcher surface | `worker-test` background subagent (`src/lib/worker-dispatch.ts:214`), invoked `Agent(subagent_type: "worker-test")` |
 
@@ -23,13 +23,13 @@
 
 `src/lib/peer-mcp-personas.ts:1533-1546`:
 
-> Runs as the background `worker-test` agent. Dispatch via the Agent tool (subagent_type: worker-test) so your turn is never blocked; the result arrives as a completion notification. Independent adversarial test authoring by an autonomous worker (Pi runtime; default model `gpt-5.5` at xhigh reasoning, override via `model` with any Copilot-catalog model that advertises `tool_calls`). Same read+write toolset as `implement` (the explore set plus edit, write, bash, codex_review). The worker is framed as an INDEPENDENT test author that did NOT write the code under test: from the task and acceptance criteria it writes tests that try to BREAK the implementation (edge cases, error paths, the acceptance criteria as executable checks), runs them, and reports which pass and fail — it does NOT modify the implementation to make tests pass. With `worktree: true` runs in an isolated git worktree and returns the diff; HARD ERROR if true and the workspace is not a git repository.
+> Runs as the background `worker-test` agent. Dispatch via the Agent tool (subagent_type: worker-test) so your turn is never blocked; the result arrives as a completion notification. Independent adversarial test authoring by an autonomous worker (Pi runtime; default model `gpt-5.6-sol` at xhigh reasoning, override via `model` with any Copilot-catalog model that advertises `tool_calls`). Same read+write toolset as `implement` (the explore set plus edit, write, bash, codex_review). The worker is framed as an INDEPENDENT test author that did NOT write the code under test: from the task and acceptance criteria it writes tests that try to BREAK the implementation (edge cases, error paths, the acceptance criteria as executable checks), runs them, and reports which pass and fail — it does NOT modify the implementation to make tests pass. With `worktree: true` runs in an isolated git worktree and returns the diff; HARD ERROR if true and the workspace is not a git repository.
 
 Input-schema fields:
 
 - **`prompt`** (required, string) — "What to test — the feature or change and its acceptance criteria. The worker authors and runs tests that try to break it and reports which pass and fail."
 - **`worktree`** (boolean) — "When true, run inside a fresh git worktree and return Pi's final text followed by the unified diff (so the lead can review the authored tests before merging). When false/omitted, writes tests in place — concurrent worker calls and Claude's own edits will race. HARD ERROR if true and the workspace is not a git repository."
-- **`model`** (string) — "Optional Copilot catalog model id (defaults to gpt-5.5). Must advertise tool_calls support; the engine emits an isError envelope listing the eligible catalog models on mismatch."
+- **`model`** (string) — "Optional Copilot catalog model id (defaults to gpt-5.6-sol). Must advertise tool_calls support; the engine emits an isError envelope listing the eligible catalog models on mismatch."
 - **`thinking`** (string enum `off|minimal|low|medium|high|xhigh`) — "Optional reasoning depth (default xhigh). Silently clamped to the model's allowed range; \"off\" drops the parameter entirely."
 - **`workspace`** (string) — "Optional absolute path to the workspace the worker operates in. Defaults to the proxy's launch cwd. Use this when the parent agent has multiple workspaces open and the worker must operate in a specific one. Must be absolute (relative paths rejected). For worktree:true, must be inside a git repo."
 - **`maxWallClockMs`** (integer) — "Optional per-call wall-clock budget in ms; default 6h (21600000). Clamped just under the MCP tool-call ceiling (the injected MCP tool-call timeout minus a 15-min teardown headroom) so the worker aborts gracefully with its partial work rather than being hard-killed; the effective value is reported in the result when a larger value is clamped down."
@@ -56,7 +56,7 @@ Covered by the **peer-awareness block** (same text as 2b, mirrored via `src/lib/
 
 Checked-in root `CLAUDE.md` (worker-tools paragraph, `CLAUDE.md:133`):
 
-- Correct: `read+write implement/test → IMPLEMENT_DEFAULT_MODEL = gpt-5.5 at xhigh`; "the SAME read+write tool surface" (via `types.ts`); "coding wants max reasoning."
+- Correct: `read+write implement/test → IMPLEMENT_DEFAULT_MODEL = gpt-5.6-sol at xhigh`; "the SAME read+write tool surface" (via `types.ts`); "coding wants max reasoning."
 - **Drift**: the paragraph opens `/mcp also exposes **three** worker tools (group workers: explore read-only, review read-only, implement read+write ...)` — but the group exposes **five** (`explore`, `review`, `plan`, `implement`, `test`); `plan` and `test` are omitted from both the count and the enumeration. `docs/peer-mcp-design.md:380` correctly lists all five dispatcher subagents including `worker-test`. See Finding 1.
 - **Drift**: `implement accepts worktree: boolean for git-worktree isolation` names only `implement`, though `test` also accepts `worktree` (`engine.ts:393`, `types.ts:53-54`). See Finding 2.
 
@@ -66,7 +66,7 @@ Checked-in root `CLAUDE.md` (worker-tools paragraph, `CLAUDE.md:133`):
 
 - **Clarity & routing**: strong. The description leads with the non-blocking dispatch idiom, states the independence contract in two forms ("did NOT write the code under test" + "does NOT modify the implementation to make tests pass"), lists the concrete test targets (edge cases, error paths, acceptance criteria as executable checks), and documents the worktree/diff path plus the no-git HARD ERROR. A model can tell when to reach for it (independent adversarial test authoring) vs `implement` (produce the impl).
 - **Accuracy vs implementation**: verified accurate on every load-bearing claim.
-  - Default model `gpt-5.5` at xhigh — matches `IMPLEMENT_DEFAULT_MODEL` (`engine.ts:168`) selected via `isWriteCapable` (`engine.ts:320,329`) and default thinking (`engine.ts:339-340`).
+  - Default model `gpt-5.6-sol` at xhigh — matches `IMPLEMENT_DEFAULT_MODEL` (`engine.ts:168`) selected via `isWriteCapable` (`engine.ts:320,329`) and default thinking (`engine.ts:339-340`).
   - "Same read+write toolset as `implement` (the explore set plus edit, write, bash, codex_review)" — matches `buildWorkerTools` (test = implement's 13 tools, `tools.ts:1908`, `types.ts:52-54`) and the write-set assembly (`TEST_MODE_NOTE` reuses `READ_TOOL_NOTES + WRITE_TOOL_NOTES`, `prompts.ts:87`).
   - Independence frame — matches `TEST_ROLE` (`prompts.ts:81`) verbatim in intent.
   - `worktree: true` diff + HARD-ERROR-if-no-git — matches `engine.ts:392-407` (`useWorktree` requires `mode === "test"` and `worktree === true`; `createWorktree` throws → `isError` envelope).
@@ -92,7 +92,7 @@ Checked-in root `CLAUDE.md` (worker-tools paragraph, `CLAUDE.md:133`):
 
 ### 3d. Cross-surface consistency
 
-- Tool description ↔ system prompt ↔ dispatcher blurb ↔ `TEST_ROLE` ↔ code: **consistent**. All four model-facing strings agree that test is an independent author that writes breaking tests and does not touch the impl, on the gpt-5.5/xhigh write surface, with worktree isolation.
+- Tool description ↔ system prompt ↔ dispatcher blurb ↔ `TEST_ROLE` ↔ code: **consistent**. All four model-facing strings agree that test is an independent author that writes breaking tests and does not touch the impl, on the gpt-5.6-sol xhigh write surface, with worktree isolation.
 - The only inconsistency is the checked-in root `CLAUDE.md:133` narrative (three-vs-five; worktree-implement-only) vs the code + `docs/peer-mcp-design.md:380`. This is a maintainer-doc drift, not a model-facing defect (the mirrored peer-awareness block the model actually sees is correct).
 
 ## 4. Findings

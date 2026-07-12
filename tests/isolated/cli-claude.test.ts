@@ -104,8 +104,8 @@ mock.module("~/lib/port", () => ({
   },
   // launch.ts imports DEFAULT_CODEX_MODEL transitively via claude.ts → launchChild;
   // re-export it so the module mock doesn't break sibling imports.
-  DEFAULT_CODEX_MODEL: "gpt-5.5",
-  DEFAULT_CODEX_MODEL_FALLBACKS: ["gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex"],
+  DEFAULT_CODEX_MODEL: "gpt-5.6-sol",
+  DEFAULT_CODEX_MODEL_FALLBACKS: ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex"],
   DEFAULT_PORT: 8787,
   // The worker-agent surface (registered via peer-mcp-personas → tools.ts →
   // create-responses.ts) statically imports these from ~/lib/port. The
@@ -184,7 +184,10 @@ mock.module("~/lib/mcp-capabilities", () => ({
   browseAgentEnabled: mock(() => false),
   semanticSearchEnabled: mock(() => false),
   geminiAvailable: geminiAvailableMock,
-  implementerSubagentModel: mock(() => undefined),
+  nativeSubagentModel: mock(() => undefined),
+  // stand-in.ts (pulled in transitively via handler.ts) imports this;
+  // stub it so the module mock doesn't break that import.
+  resolveOpenAiFrontier: mock(() => "gpt-5.6-sol"),
 }))
 
 // The CLAUDE.md append + prepend helpers are the new descendant-reach

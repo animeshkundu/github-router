@@ -13,7 +13,7 @@
 | Definition | `src/lib/peer-mcp-personas.ts:1753` (NON_PERSONA_MCP_TOOLS) |
 | Always-on? | gated by `capability: "worker"` |
 | Capability gate | `worker` → `workerToolsEnabled()` (`src/routes/mcp/handler.ts:337` list-time, `:919-920` call-time) |
-| Backing model / endpoint | server-side fn `runWorkflowLive` (`src/lib/orchestration/run-workflow-live.ts:85`); internally spins the worker engine + cross-lab critics (gpt-5.5 `/responses`, gemini-3.1-pro-preview `/chat/completions`, claude-opus-4-6 `/chat/completions`) + real gate subprocesses via `liveExec` |
+| Backing model / endpoint | server-side fn `runWorkflowLive` (`src/lib/orchestration/run-workflow-live.ts:85`); internally spins the worker engine + cross-lab critics (gpt-5.6-sol `/responses`; gemini-3.1-pro-preview `/chat/completions`, claude-opus-4-6 `/chat/completions`) + real gate subprocesses via `liveExec` |
 | Write-capable | yes — runs a worker DAG in git worktrees + executes real gate commands (`bun run typecheck` / `bun test` / `bun run lint`) |
 
 ## 2. Injected surfaces (verbatim)

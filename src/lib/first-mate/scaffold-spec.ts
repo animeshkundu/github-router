@@ -358,7 +358,7 @@ function buildRoleAgent(role: (typeof ROLE_AGENT_NAMES)[number]): string {
       method: ["Read the relevant plan, ADRs, guidance, and existing tests before editing.", "Write or update tests first when practical; otherwise add the regression or feature test in the same change.", "Make the smallest correct change; avoid opportunistic rewrites.", "Run the narrow checks first, then the repo-level DoD commands when available."],
       quality: ["No stub or skipped implementation.", "No disabled tests or hidden failures.", "Every changed behavior has executable coverage or a documented reason it cannot."],
       output: ["Status: complete | needs-clarification | blocked", "Files changed with one-line rationale", "Verification commands and outcomes", "Risks and follow-ups"],
-      model: "gpt-5.5",
+      model: "gpt-5.6-sol",
     },
     reviewer: {
       description: "Adversarial code reviewer for concrete diffs; reports real findings with severity and file:line.",
@@ -384,7 +384,7 @@ function buildRoleAgent(role: (typeof ROLE_AGENT_NAMES)[number]): string {
       method: ["Read the spec, acceptance criteria, and changed code.", "Write focused tests for happy path, failure path, boundary conditions, and platform-sensitive behavior.", "Run the relevant test command and report pass/fail honestly.", "Do not edit production implementation merely to make tests pass."],
       quality: ["Tests fail for the original bug or missing behavior when possible.", "No broad snapshots where focused assertions are better.", "No skipped tests unless the skip is the behavior under test and clearly justified."],
       output: ["Tests added/changed", "Scenarios covered", "Commands run and outcomes", "Failures that require implementation work"],
-      model: "gpt-5.5",
+      model: "gpt-5.6-sol",
     },
   }
   const spec = specs[role]

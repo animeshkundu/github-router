@@ -890,8 +890,8 @@ describe("peer_review", () => {
       object: "list",
       data: [
         {
-          id: "gpt-5.5",
-          name: "gpt-5.5",
+          id: "gpt-5.6-sol",
+          name: "gpt-5.6-sol",
           object: "model",
           preview: false,
           vendor: "openai",
@@ -978,8 +978,8 @@ describe("peer_review", () => {
       object: "list",
       data: [
         {
-          id: "gpt-5.5",
-          name: "gpt-5.5",
+          id: "gpt-5.6-sol",
+          name: "gpt-5.6-sol",
           object: "model",
           preview: false,
           vendor: "openai",
@@ -1043,14 +1043,14 @@ describe("advisor", () => {
     ).rejects.toThrow(/network disabled/i)
   })
 
-  test("synthesizes a gpt-5.5 /responses call and extracts text", async () => {
+  test("synthesizes a gpt-5.6-sol /responses call and extracts text", async () => {
     state.copilotToken = "test-token"
     state.models = {
       object: "list",
       data: [
         {
-          id: "gpt-5.5",
-          name: "gpt-5.5",
+          id: "gpt-5.6-sol",
+          name: "gpt-5.6-sol",
           object: "model",
           preview: false,
           vendor: "openai",
@@ -1103,8 +1103,8 @@ describe("advisor", () => {
       "Consider X",
     )
     expect(observedUrl).toContain("/responses")
-    // gpt-5.5 is the advisor default + xhigh effort
-    expect(observedBody).toContain("gpt-5.5")
+    // gpt-5.6-sol is the advisor default + xhigh effort
+    expect(observedBody).toContain("gpt-5.6-sol")
     expect(observedBody).toContain("xhigh")
   })
 
@@ -1114,8 +1114,8 @@ describe("advisor", () => {
       object: "list",
       data: [
         {
-          id: "gpt-5.5",
-          name: "gpt-5.5",
+          id: "gpt-5.6-sol",
+          name: "gpt-5.6-sol",
           object: "model",
           preview: false,
           vendor: "openai",
@@ -1159,8 +1159,8 @@ describe("advisor", () => {
       object: "list",
       data: [
         {
-          id: "gpt-5.5",
-          name: "gpt-5.5",
+          id: "gpt-5.6-sol",
+          name: "gpt-5.6-sol",
           object: "model",
           preview: false,
           vendor: "openai",

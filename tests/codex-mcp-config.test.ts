@@ -15,6 +15,7 @@ import {
   resolveGroupKeysFromMirror,
   writePeerMcpRuntimeFiles,
 } from "../src/lib/codex-mcp-config"
+import { PEER_AGENT_MD_FILENAME } from "../src/lib/paths"
 import { MCP_GROUPS } from "../src/lib/peer-mcp-personas"
 
 const NONCE = "0".repeat(64)
@@ -182,7 +183,7 @@ describe("buildPeerMcpConfig", () => {
 })
 
 describe("buildPeerAgentDefinitions", () => {
-  test("HTTP backend with gemini = 5 personas + peer-review-coordinator (6 agents total)", () => {
+  test("HTTP backend with gemini = 5 personas + coordinator + 3 always-on native subagents (9 total)", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: false,
       geminiAvailable: true,
@@ -193,10 +194,13 @@ describe("buildPeerAgentDefinitions", () => {
     expect(Object.keys(agents).sort()).toEqual([
       "codex-critic",
       "codex-reviewer",
+      "debugger",
       "gemini-critic",
       "gemini-reviewer",
+      "implementer",
       "opus-critic",
       "peer-review-coordinator",
+      "qa-engineer",
     ])
     // Each persona prompt routes to the HTTP MCP server name; the
     // coordinator prompt does NOT route to mcp tools directly (it
@@ -228,8 +232,11 @@ describe("buildPeerAgentDefinitions", () => {
     expect(Object.keys(agents).sort()).toEqual([
       "codex-critic",
       "codex-reviewer",
+      "debugger",
+      "implementer",
       "opus-critic",
       "peer-review-coordinator",
+      "qa-engineer",
     ])
     expect(agents["gemini-critic"]).toBeUndefined()
     // Coordinator prompt should NOT reference gemini-critic when not registered.
@@ -240,7 +247,7 @@ describe("buildPeerAgentDefinitions", () => {
     expect(agents["peer-review-coordinator"]!.prompt).toContain("opus-critic")
   })
 
-  test("CLI backend with gemini = 6 personas + coordinator (7 agents total)", () => {
+  test("CLI backend with gemini = 6 personas + coordinator + 3 native subagents (10 total)", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: true,
       geminiAvailable: true,
@@ -252,10 +259,13 @@ describe("buildPeerAgentDefinitions", () => {
       "codex-critic",
       "codex-implementer",
       "codex-reviewer",
+      "debugger",
       "gemini-critic",
       "gemini-reviewer",
+      "implementer",
       "opus-critic",
       "peer-review-coordinator",
+      "qa-engineer",
     ])
     // codex-* personas point at the stdio server; gemini-critic stays HTTP.
     expect(agents["codex-critic"]!.prompt).toContain("mcp__codex-cli__codex")
@@ -326,29 +336,62 @@ describe("buildPeerAgentDefinitions", () => {
     expect(Object.keys(agents).some((k) => k.startsWith("worker-"))).toBe(false)
   })
 
-  test("implementerModel adds native implementer with model and no tools", () => {
-    const withImplementer = buildPeerAgentDefinitions({
+  test("native subagents (implementer, debugger, qa-engineer) are always injected; model set only when nativeSubagentModel present", () => {
+    const withNative = buildPeerAgentDefinitions({
       codexCli: false,
       geminiAvailable: false,
       groupKeys: { peers: "peers" },
-      implementerModel: "gpt-5.5",
+      nativeSubagentModel: "gpt-5.5",
       nonce: NONCE,
       codexHome: "/tmp/codex",
     })
-    const implementer = withImplementer.implementer
-    expect(implementer).toBeDefined()
-    expect(implementer.model).toBe("gpt-5.5")
-    expect("tools" in implementer).toBe(false)
-    expect(implementer.description).toContain("Model is overridable at spawn")
+    const expectedDescriptions = {
+      implementer: "Bounded implementation",
+      debugger: "Root-cause",
+      "qa-engineer": "Review, testing",
+    }
+    for (const [name, description] of Object.entries(expectedDescriptions)) {
+      const def = withNative[name]!
+      expect(def).toBeDefined()
+      expect(def.model).toBe("gpt-5.5")
+      expect("tools" in def).toBe(false)
+      expect(def.description).toContain(description)
+      expect(def.description).toContain("Model is overridable at spawn")
+    }
 
-    const withoutImplementer = buildPeerAgentDefinitions({
+    // No frontier model in the catalog → the three subagents are STILL injected
+    // (no gating), but omit the `model` frontmatter so they inherit the lead's
+    // model.
+    const withoutModel = buildPeerAgentDefinitions({
       codexCli: false,
       geminiAvailable: false,
       groupKeys: { peers: "peers" },
       nonce: NONCE,
       codexHome: "/tmp/codex",
     })
-    expect(Object.keys(withoutImplementer)).not.toContain("implementer")
+    for (const name of ["implementer", "debugger", "qa-engineer"]) {
+      const def = withoutModel[name]!
+      expect(def).toBeDefined()
+      expect("model" in def).toBe(false)
+      expect("tools" in def).toBe(false)
+      expect(def.description).toContain("Model is overridable at spawn")
+    }
+  })
+
+  test("sweep allowlist covers every emitted subagent definition", () => {
+    const agents = buildPeerAgentDefinitions({
+      codexCli: true,
+      geminiAvailable: true,
+      groupKeys: { peers: "peers", workers: "workers" },
+      workerToolsAvailable: true,
+      browseAvailable: true,
+      nativeSubagentModel: "gpt-5.5",
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    for (const name of Object.keys(agents)) {
+      expect(PEER_AGENT_MD_FILENAME.test(`peer-123-${"a".repeat(8)}-${name}.md`)).toBe(true)
+    }
   })
 
   test("browseAvailable adds worker-browse", () => {
@@ -439,8 +482,9 @@ describe("writePeerMcpRuntimeFiles", () => {
       expect(path.dirname(runtime.agentsPath)).toBe(runtimeDir)
 
       // Phase 2.5: .md subagent files written into agentsDir, one per
-      // registered agent (5 personas + peer-review-coordinator = 6).
-      expect(runtime.agentMdPaths.length).toBe(6)
+      // registered agent (5 personas + peer-review-coordinator + 3 always-on
+      // native subagents implementer/debugger/qa-engineer = 9).
+      expect(runtime.agentMdPaths.length).toBe(9)
       for (const p of runtime.agentMdPaths) {
         expect(path.dirname(p)).toBe(agentsDir)
         expect(p).toMatch(
@@ -496,6 +540,19 @@ describe("writePeerMcpRuntimeFiles", () => {
 
   test("builtinSubagents (serve) registers Explore/Plan/general-purpose .md files with capitalized names", async () => {
     await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
+      // Base run WITHOUT builtinSubagents — the peer/coordinator/native-subagent
+      // set (its size grows as master adds native subagents, so compute it).
+      const base = await writePeerMcpRuntimeFiles(URL, {
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search" },
+        runtimeDir,
+        codexHome,
+        agentsDir,
+      })
+      const baseCount = base.agentMdPaths.length
+      await base.cleanup()
+
       const runtime = await writePeerMcpRuntimeFiles(URL, {
         codexCli: false,
         geminiAvailable: true,
@@ -506,8 +563,8 @@ describe("writePeerMcpRuntimeFiles", () => {
         builtinSubagents: BUILTIN_SUBAGENT_DEFINITIONS,
       })
       const names = runtime.agentMdPaths.map((p) => path.basename(p))
-      // 6 peer/coordinator agents + 3 built-ins.
-      expect(runtime.agentMdPaths.length).toBe(9)
+      // builtinSubagents adds EXACTLY the 3 built-ins on top of the base set.
+      expect(runtime.agentMdPaths.length).toBe(baseCount + 3)
       expect(names.some((n) => n.endsWith("-Explore.md"))).toBe(true)
       expect(names.some((n) => n.endsWith("-Plan.md"))).toBe(true)
       expect(names.some((n) => n.endsWith("-general-purpose.md"))).toBe(true)

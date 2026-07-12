@@ -2,7 +2,7 @@
 
 ## Goal
 
-Expose three peer models - `gpt-5.5` (codex_critic), `gpt-5.3-codex` (codex_reviewer), `gemini-3.1-pro-preview` (gemini_critic) - as cross-lab adversarial reviewers inside Claude Code, used per their strengths to improve quality and reduce blindspots/hallucinations. Capability injection must be auto-injected on `github-router claude` startup with no per-session user action. Reasoning effort must be configurable via the MCP tool args, defaulting to `high` (with `xhigh` available for explicit deep dives).
+Expose three peer models - `gpt-5.6-sol` (codex_critic), `gpt-5.3-codex` (codex_reviewer), `gemini-3.1-pro-preview` (gemini_critic) - as cross-lab adversarial reviewers inside Claude Code, used per their strengths to improve quality and reduce blindspots/hallucinations. Capability injection must be auto-injected on `github-router claude` startup with no per-session user action. Reasoning effort must be configurable via the MCP tool args, defaulting to `high` (with `xhigh` available for explicit deep dives).
 
 ### Five-Server Split
 
@@ -25,7 +25,7 @@ Config keys are bare by default (`peers`, `search`, etc.). To prevent a user's o
 
 The proxy at `src/routes/mcp/` exposes five scoped MCP servers on loopback ports:
 
-- `mcp__peers__codex_critic` (gpt-5.5) - adversarial design review
+- `mcp__peers__codex_critic` (gpt-5.6-sol) - adversarial design review
 - `mcp__peers__codex_reviewer` (gpt-5.3-codex) - line-level code review
 - `mcp__peers__gemini_critic` (gemini-3.1-pro-preview) - long-context cross-lab triangulation
 
@@ -65,7 +65,7 @@ No new code debt - pure prompt and tool-description work, plus a one-line cap ra
 Currently the persona tool descriptions say *what* the persona is. They need to say *when* to call. Three layered mechanisms, weakest to strongest:
 
 1. **MCP tool descriptions** (passive, low-friction, ~85% confidence per claude-code-guide expert). Edit `src/lib/peer-mcp-personas.ts` so each persona's `description` includes prescriptive triggers:
-   > "Adversarial second opinion from gpt-5.5. **CALL BEFORE: ExitPlanMode for any plan involving >2 files or new architecture; finalizing a major design choice; TeamCreate when the team's task is non-trivial.** **CALL AFTER: any commit touching concurrency, security, or streaming code paths.** Backed by a different model with different blind spots than Claude. Cost: minutes; use freely on important checkpoints."
+   > "Adversarial second opinion from gpt-5.6-sol. **CALL BEFORE: ExitPlanMode for any plan involving >2 files or new architecture; finalizing a major design choice; TeamCreate when the team's task is non-trivial.** **CALL AFTER: any commit touching concurrency, security, or streaming code paths.** Backed by a different model with different blind spots than Claude. Cost: minutes; use freely on important checkpoints."
 
 2. **`--agents` JSON descriptions** (medium strength). Update each subagent's `description` field with the same trigger language.
 
@@ -152,7 +152,7 @@ The full multi-stage adversarial review process - including the 4-perspective te
 This section documents what is actually shipped in the proxy today - the runtime
 behavior `github-router claude` exposes - as distinct from the phased plan above.
 
-The `claude` subcommand auto-injects three peer-model review tools as Claude Code subagents (`codex-critic` gpt-5.5, `codex-reviewer` gpt-5.3-codex, `gemini-critic` gemini-3.1-pro-preview) plus a `peer-review-coordinator` meta-subagent that fans out to them in parallel.
+The `claude` subcommand auto-injects three peer-model review tools as Claude Code subagents (`codex-critic` gpt-5.6-sol; `codex-reviewer` gpt-5.3-codex; `gemini-critic` gemini-3.1-pro-preview) plus a `peer-review-coordinator` meta-subagent that fans out to them in parallel.
 
 **Auto-invocation triggers** (Phase 2A): each persona's MCP-tool description includes prescriptive **CALL BEFORE / CALL AFTER** wording so Opus naturally delegates at the right checkpoints (before `ExitPlanMode` for non-trivial plans, after commits touching concurrency/security/streaming, before `TeamCreate` for non-trivial team tasks). The `peer-review-coordinator` subagent's description uses the documented Claude Code "use proactively" idiom - Opus delegates to it without an explicit user request at the matching checkpoints. Empirical reliability is ~60% per claude-code-guide (the plan calls for an acceptance test ≥7/10; if <7/10 we flip an opt-in `PreToolUse(ExitPlanMode)` hook to default-on, env-disable-able via `GH_ROUTER_AUTO_PEER_REVIEW=0`).
 
@@ -168,13 +168,13 @@ The `claude` subcommand auto-injects three peer-model review tools as Claude Cod
 
 | Persona | Model | Endpoint | Effort | Latency on ~600B prompt |
 |---|---|---|---|---|
-| codex_critic | gpt-5.5 | /v1/responses | xhigh (default) | 56.3s - fits inside SSE-streamed `/mcp/peers` (no MCP per-tool-call timeout) |
-| codex_critic | gpt-5.5 | /v1/responses | high | 23.8s |
-| codex_critic | gpt-5.5 | /v1/responses | medium | 26.3s |
+| codex_critic | gpt-5.6-sol | /v1/responses | xhigh (default) | gpt-5.5 probe (historical): 56.3s - fits inside SSE-streamed `/mcp/peers` (no MCP per-tool-call timeout) |
+| codex_critic | gpt-5.6-sol | /v1/responses | high | gpt-5.5 probe (historical): 23.8s |
+| codex_critic | gpt-5.6-sol | /v1/responses | medium | gpt-5.5 probe (historical): 26.3s |
 | codex_reviewer | gpt-5.3-codex | /v1/responses | high | 16.0s |
 | opus_critic | claude-opus-4.6-1m (else claude-opus-4-6) | /v1/messages | high (default; xhigh not supported on 4.6) | 30-90s on real reviews - fits inside SSE-streamed `/mcp/peers` |
 
-**opus_critic model selection**: `activePersonas()` (`src/routes/mcp/handler.ts`) resolves opus_critic's model at call time - it prefers the 1M-context Opus 4.6 variant (`claude-opus-4.6-1m`, ≈936K-token prompt window) when the live catalog carries it (matched by `/opus-4\.6.*1m/i`), and falls back to the 200K `claude-opus-4-6` otherwise. opus_critic is pinned one minor behind the spawned-Claude-Code default (`claude-opus-4-8`) so the panel spans a wider slice of the Opus version curve - codex_critic (gpt-5.5, ≈922K) and opus_critic (4.6-1m, ≈936K) remain the two big-window peers that can take a large artifact whole. Note that 4.6 doesn't advertise `xhigh` in its `reasoning_effort` allowlist (only `low|medium|high|max`), so opus_critic's `defaultEffort` is `"high"` and `xhigh` is rejected at the handler with -32602.
+**opus_critic model selection**: `activePersonas()` (`src/routes/mcp/handler.ts`) resolves opus_critic's model at call time - it prefers the 1M-context Opus 4.6 variant (`claude-opus-4.6-1m`, ≈936K-token prompt window) when the live catalog carries it (matched by `/opus-4\.6.*1m/i`), and falls back to the 200K `claude-opus-4-6` otherwise. opus_critic is pinned one minor behind the spawned-Claude-Code default (`claude-opus-4-8`) so the panel spans a wider slice of the Opus version curve - codex_critic (gpt-5.6-sol, ~1M) and opus_critic (4.6-1m, ≈936K) remain the two big-window peers that can take a large artifact whole. Note that 4.6 doesn't advertise `xhigh` in its `reasoning_effort` allowlist (only `low|medium|high|max`), so opus_critic's `defaultEffort` is `"high"` and `xhigh` is rejected at the handler with -32602.
 
 `xhigh` is the default on codex_critic, codex_reviewer, and opus_critic because commit `d3491d6` shipped SSE-streamed `/mcp` responses (`handler.ts:handleToolsCallSSE`). Claude Code's MCP HTTP client honors `text/event-stream` and does NOT apply the ~60s per-tool-call timer to streamed responses, so the previous `xhigh` 60s-ceiling concern no longer applies on long-running personas. Probe coverage in `scripts/probe-copilot-compat.sh`: `opus_critic_low`, `opus_critic_medium`, `opus_critic_high_allowed`, `opus_critic_xhigh_allowed`, `codex_critic_xhigh_allowed`, `codex_reviewer_xhigh_allowed`, `gemini_critic_xhigh_rejected`. Matrix rows mirrored into [`copilot-compat-matrix.md`](copilot-compat-matrix.md).
 
@@ -200,7 +200,7 @@ The `claude` subcommand auto-injects three peer-model review tools as Claude Cod
 
 **The cap fires BEFORE the AbortController + `inFlightToolsCall` increment**, so a rejected pre-flight is free of concurrency-slot cost and free of upstream call cost (no Copilot fetch issued). Don't reorder this - moving the cap after the increment leaks concurrency slots on every rejected pre-flight. Thresholds are constants in `src/routes/mcp/handler.ts` - easy to update as more empirical data arrives via the probe suite.
 
-**Prompt-window guard** (distinct from `predictedTooLong` - that's a JSON-path *timeout* predictor in bytes; this is a *context-window* guard in exact tokens). `predictedWindowOverflow()` in `src/routes/mcp/handler.ts` runs inside `handleToolsCall` (so it covers BOTH the SSE and JSON paths), BEFORE `acquireInFlightSlot()`. It counts the EXACT o200k token count of the text actually sent to the peer (`baseInstructions` + `buildUserText(prompt, context)`) and compares against the persona model's live `max_prompt_tokens` (minus a 2K framing reserve). On overflow it returns `isError: true` with an actionable message telling the caller to route the full artifact to a larger-window peer (`codex_critic` gpt-5.5 ≈922K, `opus_critic` Opus-4.7-1M ≈936K) or split BY CONCERN - it does NOT truncate, because silently dropping lines from a review artifact is worse than a clear error. No-op when the model's `max_prompt_tokens` isn't in the catalog (lets the upstream call decide). This is the load-bearing enforcement behind the coordinator's window-aware routing guidance in `src/lib/codex-mcp-config.ts`: skip (don't downsize) a small-window peer like `gemini_critic` (≈136K) when the artifact won't fit. The token count uses the repo's existing exact o200k tokenizer (`gpt-tokenizer` via `src/lib/tokenizer.ts` - every adaptive Copilot model declares `o200k_base`), NOT a chars-per-token or word-count approximation; the same tokenizer backs the advisor transcript budget (`resolveAdvisorMaxTokens` in `src/services/advisor/advisor.ts`).
+**Prompt-window guard** (distinct from `predictedTooLong` - that's a JSON-path *timeout* predictor in bytes; this is a *context-window* guard in exact tokens). `predictedWindowOverflow()` in `src/routes/mcp/handler.ts` runs inside `handleToolsCall` (so it covers BOTH the SSE and JSON paths), BEFORE `acquireInFlightSlot()`. It counts the EXACT o200k token count of the text actually sent to the peer (`baseInstructions` + `buildUserText(prompt, context)`) and compares against the persona model's live `max_prompt_tokens` (minus a 2K framing reserve). On overflow it returns `isError: true` with an actionable message telling the caller to route the full artifact to a larger-window peer (`codex_critic` gpt-5.6-sol ~1M, `opus_critic` Opus-4.7-1M ≈936K) or split BY CONCERN - it does NOT truncate, because silently dropping lines from a review artifact is worse than a clear error. No-op when the model's `max_prompt_tokens` isn't in the catalog (lets the upstream call decide). This is the load-bearing enforcement behind the coordinator's window-aware routing guidance in `src/lib/codex-mcp-config.ts`: skip (don't downsize) a small-window peer like `gemini_critic` (≈136K) when the artifact won't fit. The token count uses the repo's existing exact o200k tokenizer (`gpt-tokenizer` via `src/lib/tokenizer.ts` - every adaptive Copilot model declares `o200k_base`), NOT a chars-per-token or word-count approximation; the same tokenizer backs the advisor transcript budget (`resolveAdvisorMaxTokens` in `src/services/advisor/advisor.ts`).
 
 **`opus_critic` persona** (Phase B): adversarial second opinion from a fresh-context Opus 4.7 routed via `/v1/messages` with translated `thinking.budget_tokens` (low=1024, medium=3000) and `max_tokens = budget + 1500`. Cheapest and fastest of the peer critics (~10-25s on small artifacts). Use it as a quick same-lab sanity check before committing to a controversial decision when the artifact fits comfortably in one shot. **Limited blind-spot diversification** - same training data, same lab, same RLHF priors as the lead, so it does NOT substitute for cross-lab triangulation; reach for `codex_critic` (`high`) or `gemini_critic` for genuine adversarial coverage. Routing reflected in `peer-review-coordinator` (`src/lib/codex-mcp-config.ts`).
 
@@ -348,7 +348,7 @@ For each proposed input or output field, answer in one sentence: **"What would t
 
 ## Worker tools (`explore`, `implement`)
 
-Three non-persona MCP tools - `mcp__workers__explore`, `mcp__workers__review`, and `mcp__workers__implement` - delegate scoped work to an **autonomous worker subagent** backed by the **Pi agent runtime** (vendored at `src/vendor/pi/`). **Per-mode model defaults** (caller `model` arg always wins): read-only `explore`/`review` → `gpt-5.5` at `xhigh`; read+write `implement` → `gpt-5.5` at `xhigh` (coding wants max reasoning). The worker plans its own tool calls, decides when it's done, and returns a single text answer (plus a unified diff when `worktree: true`). Implementation: `src/lib/worker-agent/engine.ts` (`runWorkerAgent`, which holds the `DEFAULT_MODEL`/`IMPLEMENT_DEFAULT_MODEL`/`BROWSE_DEFAULT_MODEL` constants) and `src/lib/worker-agent/tools.ts` (the worker-side `AgentTool` definitions).
+Three non-persona MCP tools - `mcp__workers__explore`, `mcp__workers__review`, and `mcp__workers__implement` - delegate scoped work to an **autonomous worker subagent** backed by the **Pi agent runtime** (vendored at `src/vendor/pi/`). **Per-mode model defaults** (caller `model` arg always wins): read-only `explore`/`review` → `gpt-5.5` at `xhigh`; read+write `implement`/`test` → `gpt-5.6-sol` at `xhigh` (coding wants max reasoning). The worker plans its own tool calls, decides when it's done, and returns a single text answer (plus a unified diff when `worktree: true`). Implementation: `src/lib/worker-agent/engine.ts` (`runWorkerAgent`, which holds the `DEFAULT_MODEL`/`IMPLEMENT_DEFAULT_MODEL`/`BROWSE_DEFAULT_MODEL` constants) and `src/lib/worker-agent/tools.ts` (the worker-side `AgentTool` definitions).
 
 These tools are exposed under the `workers` MCP server at `/mcp/workers` (or the `/mcp` union path).
 
@@ -362,7 +362,7 @@ These tools are exposed under the `workers` MCP server at `/mcp/workers` (or the
 
 Workers stay strictly TERMINAL (no recursive sub-worker spawning is allowed). Implement mode is no longer forced agent-wide sequential; pure read/search batches (incl. `toolbelt`, which runs read-only CLIs with `shell:false` and carries no `executionMode`) run in parallel, while `edit`, `write`, `bash`, `codex_review`, and `update_plan` execute sequentially via per-tool `executionMode`.
 
-The `model` arg accepts any Copilot catalog model with `tool_calls` support; defaults are per-mode (explore `gpt-5.4-mini`, review `gpt-5.5`, implement `gpt-5.5` — see above). `thinking` (one of `off`/`minimal`/`low`/`medium`/`high`/`xhigh`) defaults to the mode's tier (`xhigh` for explore/review/implement) and is silently clamped to the resolved model's `reasoning_effort` allowlist.
+The `model` arg accepts any Copilot catalog model with `tool_calls` support; defaults are per-mode (explore `gpt-5.4-mini`, review `gpt-5.5`, implement/test `gpt-5.6-sol` — see above). `thinking` (one of `off`/`minimal`/`low`/`medium`/`high`/`xhigh`) defaults to the mode's tier (`xhigh` for explore/review/implement) and is silently clamped to the resolved model's `reasoning_effort` allowlist.
 
 Both also accept an optional `workspace` (absolute path) - the working directory the worker operates in. **Default is the proxy's launch cwd** (the directory `github-router start` / `github-router claude` was invoked from); the model can override when the parent agent has multiple workspaces open and needs the worker pointed at a specific one. The override is absolute-only - relative paths are rejected at the MCP boundary with an actionable error so a typo doesn't silently resolve against `process.cwd()` and land somewhere surprising. For `implement` with `worktree: true`, the workspace must be inside a git repository (the engine's existing `createWorktree` hard-errors otherwise). Threat model matches code search: the proxy already runs as the user; no allowlist (the same operator could `Read` / `Bash` the same paths through Claude Code directly). See `runWorkerToolCall` in `src/lib/peer-mcp-personas.ts` for the validation.
 
@@ -373,7 +373,7 @@ Both also accept an optional `workspace` (absolute path) - the working directory
 1. The operator set `GH_ROUTER_DISABLE_WORKER_TOOLS=1`, OR
 2. `gpt-5.4-mini` (the explore default) is missing from the live Copilot catalog, or present but lacks `tool_calls` support.
 
-This is defense-in-depth - a client that hard-codes the tool name still fails at call-time rather than seeing a useless dormant registration. The gate model lives at `src/lib/worker-agent/engine.ts:DEFAULT_MODEL` and is re-imported by the handler (`import { DEFAULT_MODEL as WORKER_DEFAULT_MODEL } from "~/lib/worker-agent"`) so there is no parallel constant to drift. Implement's `gpt-5.5` is deliberately NOT a gate input: if it's absent the worker surface stays live and `implement` errors helpfully at call time (only `gpt-5.5`-backed implement breaks, not explore/review).
+This is defense-in-depth - a client that hard-codes the tool name still fails at call-time rather than seeing a useless dormant registration. The gate model lives at `src/lib/worker-agent/engine.ts:DEFAULT_MODEL` and is re-imported by the handler (`import { DEFAULT_MODEL as WORKER_DEFAULT_MODEL } from "~/lib/worker-agent"`) so there is no parallel constant to drift. Implement/test's `gpt-5.6-sol` default is deliberately NOT a gate input: if it is absent the worker surface stays live and `implement`/`test` error helpfully at call time (only the OpenAI-backed implement/test default path breaks, not explore/review).
 
 ### Non-blocking dispatch (`worker-*` subagents + PreToolUse guard)
 
@@ -442,13 +442,13 @@ The Pi agent runtime (`@earendil-works/pi-agent-core` + a minimal `pi-ai` slice)
 Two probes assert that Copilot accepts the exact body shapes the worker-agent stream-fn emits:
 
 - `worker_gemini_tools_reasoning` — `gemini-3.5-flash` on `/v1/chat/completions` with a `tools[]` array + `reasoning_effort:"high"` (a valid worker tool+reasoning shape; explore moved to `gpt-5.4-mini`). The dual gate's catalog arm only checks "model present + `tool_calls` advertised"; it does NOT exercise the request shape. If Copilot tightens the `gemini-3.5-flash` validator, the gate would leave the tools advertised but every explore/review call would 400 — this probe surfaces that regression upstream.
-- `worker_gpt5_responses_tools_reasoning` — `gpt-5.5` on `/v1/responses` with function-shaped `tools[]` (flat `{type:"function",name,description,parameters}`) + `reasoning:{effort:"xhigh"}` (the implement contract). `gpt-5.5` is NOT a dual-gate input, so a shape regression here breaks `implement` while explore/review keep working — only this probe catches it.
+- `worker_gpt5_responses_tools_reasoning` — `gpt-5.5` on `/v1/responses` with function-shaped `tools[]` (flat `{type:"function",name,description,parameters}`) + `reasoning:{effort:"xhigh"}` (the retained-fallback `/responses` contract — `gpt-5.5` is the fallback for the codex CLI and the native implementer subagent; the primary `implement`/`test` worker default `gpt-5.6-sol` is probed by `worker_gpt56sol_responses_tools_reasoning`). `gpt-5.5` is NOT a dual-gate input, so a body-shape regression here breaks the OpenAI fallback path while explore/review keep working — only this probe catches it.
 
 Probe ids in `scripts/probe-copilot-compat.sh`; matrix rows in `docs/copilot-compat-matrix.md` (see also [`docs/pi-vendor-sync.md`](pi-vendor-sync.md)).
 
 ## `stand_in` tool (away-mode advisor)
 
-`stand_in` is a server-side, code-driven consensus advisor for **decision tiebreak when the user is unavailable**. Polls all three frontier peers - gpt-5.5 xhigh (OpenAI), claude-opus-4-7 xhigh (Anthropic), gemini-3.1-pro-preview high (Google) - across two structured voting rounds and returns a ranked-choice verdict with per-model reasoning. Implementation lives at `src/lib/stand-in.ts`; the MCP tool entry and gate are in `src/lib/peer-mcp-personas.ts` / `src/routes/mcp/handler.ts` (`standInToolEnabled`).
+`stand_in` is a server-side, code-driven consensus advisor for **decision tiebreak when the user is unavailable**. Polls all three frontier peers - gpt-5.6-sol xhigh (OpenAI, with gpt-5.5 fallback), claude-opus-4-7 xhigh (Anthropic), gemini-3.1-pro-preview high (Google) - across two structured voting rounds and returns a ranked-choice verdict with per-model reasoning. Implementation lives at `src/lib/stand-in.ts`; the MCP tool entry and gate are in `src/lib/peer-mcp-personas.ts` / `src/routes/mcp/handler.ts` (`standInToolEnabled`).
 
 ### Scope: advisor, not decider
 
@@ -462,7 +462,13 @@ Three reasons this specific shape is load-bearing:
 2. **Informed round 2** - each model sees the other two models' R1 votes and reasoning, then votes again. They may keep or change their R1 vote. The system prompt explicitly forbids changing-just-to-agree.
 3. **Abstain on disagreement** - if R2 doesn't produce a 2/3-or-better majority, the verdict is `no_consensus` and the main agent must defer to the user. The tool refuses to manufacture false agreement.
 
-R1 short-circuits to `consensus` if all three models pick the same non-null option AND mean confidence ≥ 0.8. Otherwise R2 runs.
+R1 short-circuits early in two cases: to `consensus` if all three models pick the same non-null option AND mean confidence ≥ 0.8; to `need_more_info` if **≥2 of 3** parsed R1 votes abstained citing a missing-context gap (at ≥2 gap-abstains no provided-option majority is reachable, so surfacing the specific gaps is strictly more actionable than running a doomed R2). Otherwise R2 runs. The same ≥2/3 gap-abstain → `need_more_info` check is applied **in both rounds** (a shared `gapAbstainVerdict` helper runs after R1 and again after R2, before the R2 tally) — so models that only switch to a context-gap abstention in the informed round still yield `need_more_info` rather than a bare `no_consensus`. A null-vote carries at most one escape channel: `need_more_info` takes precedence over `alternative` (a model lacking context can't reliably judge the options inadequate), enforced both in the prompt and by the parser (`alternative` survives only when `choice === null && !needMoreInfo`).
+
+**Holistic alternative channel.** Each model may set `choice: null` and populate an `alternative` field to propose a concrete *unlisted* option — but only when a provided option is actively harmful or clearly dominated (the prompt hard-gates this so RLHF-helpful models don't dodge the tiebreak by inventing escape hatches). An `alternative` is null-equivalent in the tally: it never forms or suppresses a provided-option majority (`aggregateVotes` counts only non-null `choice`s). Any proposed alternatives are surfaced in `notes` on every verdict so the caller can re-invoke with a revised option set. This is deliberately distinct from `need_more_info` (missing context, not a better option).
+
+**Hallucination guard.** `tryParseVote` validates each non-null `choice` against the caller's option ids; an unlisted id (a model inventing an option that wasn't offered) is treated as a malformed response — it fails the parse, so `callAndParse` retries once and a persistent bad id becomes a `VoteFailure` (excluded from the successful-vote set, never tallied). This both prevents a phantom-id majority and keeps the successful-vote accounting honest — a malformed vote is never miscounted as a deliberate abstention (which would inflate `successfulR1` and skew the `<2 → no_consensus` early-exit).
+
+**Partial missing-context signals.** On any `no_consensus` verdict, individual `needMoreInfo` gaps from the freshest-round votes are aggregated into `notes` — so a 1-of-3 "I'm blocked on context" signal that falls below the ≥2/3 `need_more_info` threshold is still surfaced rather than buried.
 
 ### Verdicts
 
@@ -471,7 +477,7 @@ R1 short-circuits to `consensus` if all three models pick the same non-null opti
 | `consensus`       | 3/3 same option                                          | option.id        | Proceed with the recommendation |
 | `majority`        | 2/3 same option (dissenter reasoning in `notes`)         | option.id        | Proceed, surface the dissent    |
 | `no_consensus`    | 1/1/1 split, or insufficient successful votes            | `null`           | Defer to the user               |
-| `need_more_info`  | All 3 R1 votes flagged a specific missing-context gap    | `null`           | Gather context, call again      |
+| `need_more_info`  | ≥2 of 3 R1 votes flagged a specific missing-context gap  | `null`           | Gather context, call again      |
 
 `isError` stays `false` for all four verdicts - `no_consensus` and `need_more_info` are valid protocol outcomes, not errors. `isError: true` is reserved for input-shape failures (bad arg types, missing required fields).
 
@@ -481,10 +487,10 @@ A small-model orchestrator (haiku / gemini-flash deciding when to escalate, when
 
 ### Input / output surface (ruthlessly minimal)
 
-**Input** (`{decision, options[], context?}`):
+**Input** (`{decision, options[], context}`):
 - `decision: string` - one-sentence framing of the choice.
 - `options: Array<{id, summary, detail?}>` - 2-6 concrete options; caller-provided (NOT model-generated). The verdict cites the chosen option by `id`.
-- `context?: string` - task/code background.
+- `context: string` - **required**. The panel is cold-start (no repo, transcript, or memory), so context must carry every constraint, relevant code excerpt, prior decision not to relitigate, and success criterion the models need to judge. A missing/empty context is rejected at the tool boundary with `isError: true` (input-shape failure).
 
 **Output** (JSON-stringified into a single MCP text block):
 ```typescript
@@ -497,7 +503,7 @@ A small-model orchestrator (haiku / gemini-flash deciding when to escalate, when
 }
 ```
 
-Every field is either (a) required for the caller to act, (b) directly actionable (per-model vote reasoning = "here's why, here's what to look for next"), or (c) the load-bearing verdict signal. No echoed inputs, no diagnostic-only fields, no per-vote latency, no token counts. Per-model effort is **fixed** (not caller-tunable) - exposing knobs would invite callers to cheap out and muddy the consensus signal.
+Every field is either (a) required for the caller to act, (b) directly actionable (per-model vote reasoning = "here's why, here's what to look for next"), or (c) the load-bearing verdict signal. No echoed inputs, no diagnostic-only fields, no per-vote latency, no token counts. `notes` additionally carries any panel-proposed unlisted `alternative`s (on every verdict) and, on `no_consensus`, any partial missing-context gaps. Per-model effort is **fixed** (not caller-tunable) - exposing knobs would invite callers to cheap out and muddy the consensus signal.
 
 ### Distinction from sibling tools
 
@@ -514,7 +520,7 @@ The MCP handler drops `stand_in` from `tools/list` AND fails-fast on `tools/call
 ### Slot accounting & pre-flight cap
 
 - **One slot per `stand_in` invocation**, NOT one per internal model call. The MCP boundary in `handleToolsCall` acquires the slot; `dispatchModelCall` (the shared per-endpoint wire helper extracted from `callPersona`) does NOT re-acquire. A single `stand_in` call making 6 internal upstream fetches (3 models × 2 rounds) consumes exactly 1 slot from the cap=32 budget. Regression test: `tests/routes-mcp.test.ts` "stand_in holds exactly ONE in-flight slot…".
-- **`predictedTooLong` cap = 6KB** on `decision + options + context` byte-size, JSON-path only. Fires BEFORE `acquireInFlightSlot` per the load-bearing invariant. Rationale: `stand_in` runs two sequential rounds across three frontier models, typical wall-clock 2-3 minutes; on the JSON path this always busts the 60s tools/call ceiling on non-trivial inputs. The cap surfaces "use SSE" as a fast actionable error instead of leaking a slot for the duration.
+- **`predictedTooLong` cap = 32KB** on `decision + options + context` byte-size, JSON-path only (raised from 6KB now that `context` is required and sufficiency-oriented — a real, code-bearing brief must fit). Fires BEFORE `acquireInFlightSlot` per the load-bearing invariant. Rationale: `stand_in` runs two sequential rounds across three frontier models, typical wall-clock 2-3 minutes; on the JSON path this always busts the 60s tools/call ceiling on non-trivial inputs. The cap surfaces "use SSE" as a fast actionable error instead of leaking a slot for the duration.
 
 ### Future: idle-trigger auto-invocation (out of scope for this PR)
 

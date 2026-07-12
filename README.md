@@ -83,7 +83,7 @@ Each persona is exposed both as a Claude Code subagent (callable via the `Task` 
 
 | Subagent | Model | Endpoint | Effort tiers (default) |
 |---|---|---|---|
-| `codex-critic` | gpt-5.5 | `/v1/responses` | low \| medium \| high \| xhigh (xhigh) |
+| `codex-critic` | gpt-5.6-sol | `/v1/responses` | low \| medium \| high \| xhigh (xhigh) |
 | `codex-reviewer` | gpt-5.3-codex | `/v1/responses` | low \| medium \| high \| xhigh (xhigh) |
 | `gemini-reviewer` | gemini-3.1-pro-preview | `/v1/chat/completions` | low \| medium \| high (high) |
 | `opus-critic` | claude-opus-4-6 | `/v1/messages` | low \| medium \| high (high) |
@@ -116,7 +116,7 @@ The fastest path is the `codex` subcommand — it boots the proxy on a random po
 npx github-router@latest codex
 ```
 
-Defaults to `gpt-5.5`; falls back to `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex` if your Copilot tier doesn't expose 5.5 yet. Override with `-m`:
+Defaults to `gpt-5.6-sol`; falls back to `gpt-5.5` → `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex` if your Copilot tier doesn't expose 5.6-sol yet. Override with `-m`:
 
 ```sh
 npx github-router@latest codex -m gpt-5.3-codex
@@ -129,7 +129,7 @@ npx github-router@latest start --codex   # interactive launch-command generator
 # — or set env vars yourself —
 export OPENAI_BASE_URL="http://localhost:8787/v1"
 export OPENAI_API_KEY="dummy"
-codex --full-auto -m gpt-5.5
+codex --full-auto -m gpt-5.6-sol
 ```
 
 ---
@@ -168,7 +168,7 @@ Anthropic endpoints are only available under `/v1/messages`.
 | Model | /chat/completions | /responses | /v1/messages |
 |---|---|---|---|
 | gpt-4.1, gpt-4o | Yes | Yes | No |
-| gpt-5.5, gpt-5.4 | No | Yes | No |
+| gpt-5.6-sol, gpt-5.5, gpt-5.4 | No | Yes | No |
 | gpt-5.3-codex, gpt-5.2-codex | No | Yes | No |
 | claude-opus-4.8 (1M context as the single base slug) | Yes | No | Yes |
 | claude-opus-4.7-1m-internal (enterprise), claude-opus-4.7 | Yes | No | Yes |
@@ -237,7 +237,7 @@ github-router debug              Print diagnostic info
 The `claude` and `codex` subcommands accept all the shared flags below plus `-m`/`--model` to override the default model. Default models live in `src/lib/port.ts`:
 
 - `claude` → `claude-opus-4-8` (Anthropic dashed slug for UI compatibility; the proxy translates to Copilot's `claude-opus-4.8` — the single base slug already advertises 1M context via `max_context_window_tokens`, so no `-1m` sibling exists). Major.minor fallback chain: `claude-opus-4-7` → `claude-opus-4-6` → `claude-opus-4-5`.
-- `codex` → `gpt-5.5` → `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex`
+- `codex` → `gpt-5.6-sol` → `gpt-5.5` → `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex`
 
 Fallback chains fire only on the implicit-default path; explicit `-m`/`--model` is always respected as-is.
 

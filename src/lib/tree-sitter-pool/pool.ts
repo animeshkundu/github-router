@@ -155,6 +155,12 @@ class TreeSitterPool {
    *  entirely and force the in-process path, rather than churning spawn→crash
    *  forever. */
   private crashCount = 0
+  private workersSpawned = 0
+
+  /** Test-only observability for crash/respawn assertions. */
+  __workerLifecycleForTest(): { crashes: number; spawned: number } {
+    return { crashes: this.crashCount, spawned: this.workersSpawned }
+  }
 
   // ---- Central scheduler state (shared across ALL concurrent parseFiles
   // calls). A worker is leased to exactly one job at a time; replies route by
@@ -218,6 +224,7 @@ class TreeSitterPool {
       let worker: Worker
       try {
         worker = new Worker(this.workerPath!)
+        this.workersSpawned += 1
       } catch (err) {
         consola.debug(
           `[code_search] tree-sitter worker spawn failed: ${(err as Error).message}`,
@@ -342,8 +349,15 @@ class TreeSitterPool {
       if (!job) break
       pw.busyJobId = job.id
       this.inflight.set(job.id, job)
+      const injectCrash = _testCrashOnceArmed
+      // Send an EPHEMERAL crash-flagged copy — never mutate `job.req` in place,
+      // or a post-crash retry of the SAME job would still carry `testCrash` and
+      // crash again (a crash loop, not a one-shot). The retry re-posts the
+      // original unflagged `job.req` and succeeds, so recovery is genuine.
+      const reqToPost = injectCrash ? { ...job.req, testCrash: true } : job.req
       try {
-        pw.worker.postMessage(job.req)
+        pw.worker.postMessage(reqToPost)
+        if (injectCrash) _testCrashOnceArmed = false
       } catch (err) {
         // postMessage failed → treat as a worker death for this job.
         consola.debug(
@@ -586,6 +600,17 @@ function resolveWorkerPath(): string | null {
 
 let _pool: TreeSitterPool | null = null
 let _shutdownRegistered = false
+let _testCrashOnceArmed = false
+
+/** Test-only: crash exactly the next dispatched worker job. */
+export function __armWorkerCrashOnceForTest(): void {
+  _testCrashOnceArmed = true
+}
+
+/** Test-only: disarm the one-shot worker crash fault. */
+export function __disarmWorkerCrashOnceForTest(): void {
+  _testCrashOnceArmed = false
+}
 /**
  * The pool is ON by default for real (non-CI) runs and OFF under CI.
  *
@@ -646,6 +671,7 @@ export function getTreeSitterPool(): TreeSitterPool | null {
 export function __resetTreeSitterPoolForTests(): void {
   _pool?.shutdown()
   _pool = null
+  __disarmWorkerCrashOnceForTest()
 }
 
 export type { TreeSitterPool }

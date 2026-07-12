@@ -273,6 +273,9 @@ describe("/mcp protocol methods", () => {
       expect(t.description.length).toBeGreaterThan(20)
       expect(t.inputSchema).toBeDefined()
     }
+    const standIn = result.tools.find((t) => t.name === "stand_in")
+    const standInSchema = standIn!.inputSchema as { required: Array<string> }
+    expect(standInSchema.required).toEqual(["decision", "options", "context"])
   })
 
   test("tools/list omits gemini_critic AND stand_in when no gemini-3.x-pro in catalog (web + code still present)", async () => {
@@ -777,7 +780,7 @@ describe("/mcp tools/call routing", () => {
     return captured
   }
 
-  test("codex_critic call hits /responses with model=gpt-5.5 and persona instructions", async () => {
+  test("codex_critic call hits /responses with model=gpt-5.6-sol and persona instructions", async () => {
     const captured = mockResponsesUpstream("no material objection")
     const { status, json } = await rpc({
       jsonrpc: "2.0",
@@ -796,7 +799,7 @@ describe("/mcp tools/call routing", () => {
       stream?: boolean
       reasoning?: { effort?: string }
     }
-    expect(upstream.model).toBe("gpt-5.5")
+    expect(upstream.model).toBe("gpt-5.6-sol")
     expect(upstream.instructions).toContain("codex-critic")
     expect(upstream.instructions).toContain("1–5") // grading rubric
     expect(upstream.stream).toBe(false)
@@ -1335,6 +1338,7 @@ describe("/mcp stand_in tool", () => {
       { id: "A", summary: "date-fns" },
       { id: "B", summary: "luxon" },
     ],
+    context: "The frontend bundle targets modern browsers and prioritizes tree-shaking.",
   }
 
   test("tools/call stand_in dispatches to all three peers and returns a consensus envelope", async () => {
@@ -1426,6 +1430,44 @@ describe("/mcp stand_in tool", () => {
     expect(__getInFlightForTests()).toBe(0)
   })
 
+  test("JSON-path tools/call accepts stand_in context between the old 6KB and new 32KB caps", async () => {
+    mockThreePeers({
+      "gpt-5.5":                [VOTE_A_HIGH],
+      "claude-opus-4-7":        [VOTE_A_HIGH],
+      "gemini-3.1-pro-preview": [VOTE_A_HIGH],
+    })
+
+    const midSizeContext = "x".repeat(20 * 1024)
+    const res = await mcpRoutes.request(
+      new Request(`http://${PROXY_HOST}/`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: AUTH_HEADER,
+          host: PROXY_HOST,
+          accept: "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 4004,
+          method: "tools/call",
+          params: {
+            name: "stand_in",
+            arguments: { ...TINY_INPUT, context: midSizeContext },
+          },
+        }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as {
+      result?: { content: Array<{ text: string }>; isError?: boolean }
+    }
+    expect(json.result?.isError).toBeFalsy()
+    expect(json.result?.content[0].text).not.toMatch(/pre-flight rejected/i)
+    expect(JSON.parse(json.result?.content[0].text ?? "{}").verdict).toBe("consensus")
+    expect(__getInFlightForTests()).toBe(0)
+  })
+
   test("JSON-path tools/call with oversized stand_in input hits predictedTooLong cap (slot NOT acquired)", async () => {
     // Same pattern as the codex_critic predictedTooLong test above. The
     // cap fires in handleMcpPost BEFORE handleToolsCall, so no upstream
@@ -1436,7 +1478,7 @@ describe("/mcp stand_in tool", () => {
     })
     globalThis.fetch = sentinel as unknown as typeof globalThis.fetch
 
-    const oversizedContext = "x".repeat(7 * 1024)
+    const oversizedContext = "x".repeat(33 * 1024)
     const res = await mcpRoutes.request(
       new Request(`http://${PROXY_HOST}/`, {
         method: "POST",
@@ -1489,6 +1531,46 @@ describe("/mcp stand_in tool", () => {
     expect(sentinel).not.toHaveBeenCalled()
   })
 
+  test("tools/call stand_in returns isError when context is omitted", async () => {
+    const withoutContext = { decision: TINY_INPUT.decision, options: TINY_INPUT.options }
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 4006,
+      method: "tools/call",
+      params: { name: "stand_in", arguments: withoutContext },
+    })
+    expect(status).toBe(200)
+    const result = json.result as { content: Array<{ text: string }>; isError?: boolean }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain("context")
+  })
+
+  test("tools/call stand_in returns isError when context is whitespace-only", async () => {
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 4007,
+      method: "tools/call",
+      params: { name: "stand_in", arguments: { ...TINY_INPUT, context: "   " } },
+    })
+    expect(status).toBe(200)
+    const result = json.result as { content: Array<{ text: string }>; isError?: boolean }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain("context")
+  })
+
+  test("tools/call stand_in returns isError when context is non-string", async () => {
+    const { status, json } = await rpc({
+      jsonrpc: "2.0",
+      id: 4008,
+      method: "tools/call",
+      params: { name: "stand_in", arguments: { ...TINY_INPUT, context: 123 } },
+    })
+    expect(status).toBe(200)
+    const result = json.result as { content: Array<{ text: string }>; isError?: boolean }
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain("context")
+  })
+
   test("tools/list omits stand_in when gpt-5.5 is missing from catalog (other personas + tools still present)", async () => {
     state.models = {
       object: "list",
@@ -1502,7 +1584,7 @@ describe("/mcp stand_in tool", () => {
     const result = json.result as { tools: Array<{ name: string }> }
     const names = result.tools.map((t) => t.name)
     expect(names).not.toContain("stand_in")
-    // codex_critic remains (it uses gpt-5.5 too, but its gating is at
+    // codex_critic remains (its model is not catalog-gated; gating is at
     // request time via resolveModel; the registration gate is only on
     // requiresGeminiCatalog). Verify by presence:
     expect(names).toContain("codex_critic")
@@ -2194,6 +2276,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
             ![
               "gpt-5.4-mini",
               "gpt-5.5",
+              "gpt-5.6-sol",
               "gemini-3.1-pro-preview",
               "claude-sonnet-5",
             ].includes(m.id),
@@ -2207,6 +2290,10 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
           reasoning_effort: ["minimal", "low", "medium", "high"],
         }),
         // implement default (routes to /responses)
+        fakeWorkerModel("gpt-5.6-sol", {
+          reasoning_effort: ["none", "low", "medium", "high", "xhigh"],
+        }),
+        // retained OpenAI fallback + explicit-model fixture
         fakeWorkerModel("gpt-5.5", {
           reasoning_effort: ["none", "low", "medium", "high", "xhigh"],
         }),
@@ -2250,7 +2337,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
           prompt: "add a comment to README",
           // Pin a chat-endpoint model so the chat-SSE mock applies — this
           // test covers the in-place implement path, not the implement
-          // default (gpt-5.5, which routes to /responses).
+          // default (gpt-5.6-sol, which routes to /responses).
           model: "gemini-3.1-pro-preview",
         },
       },
@@ -2277,7 +2364,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
         arguments: {
           prompt: "fix the typo",
           worktree: true,
-          // Chat-endpoint pin (see above) — gpt-5.5 default routes to
+          // Chat-endpoint pin (see above) — gpt-5.6-sol default routes to
           // /responses, which the chat-SSE mock doesn't serve.
           model: "gemini-3.1-pro-preview",
         },
@@ -2601,11 +2688,11 @@ describe("/mcp peer prompt-window guard", () => {
   }
 
   test("rejects a brief that exceeds the persona model's prompt window (no upstream call)", async () => {
-    // gpt-5.5 with a deliberately tiny 200-token window; send a brief far
+    // gpt-5.6-sol with a deliberately tiny 200-token window; send a brief far
     // larger so the exact o200k count busts it.
     state.models = {
       object: "list",
-      data: [modelWith("gpt-5.5", 200, ["/v1/responses"])],
+      data: [modelWith("gpt-5.6-sol", 200, ["/v1/responses"])],
     }
     const captured = mockResponses("should-not-be-called")
     const { status, json } = await rpc({
@@ -2629,7 +2716,7 @@ describe("/mcp peer prompt-window guard", () => {
   test("allows a brief that fits the window (reaches upstream)", async () => {
     state.models = {
       object: "list",
-      data: [modelWith("gpt-5.5", 900_000, ["/v1/responses"])],
+      data: [modelWith("gpt-5.6-sol", 900_000, ["/v1/responses"])],
     }
     const captured = mockResponses("ok")
     const { json } = await rpc({

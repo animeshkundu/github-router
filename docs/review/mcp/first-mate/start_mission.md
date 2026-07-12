@@ -31,7 +31,7 @@ Input-schema fields (`tools.ts:223-235`), required set = `["goal","repos","accep
 - `acceptance_criteria` (string, **required**): "User-blessed acceptance criteria for the mission."
 - `priority` (number, optional): "Optional numeric priority; higher values are handled by controller policy."
 - `house_rules` (string, optional): "Optional repository or operator constraints."
-- `default_model` (string, optional): "Model the GitHub cloud coding agent uses for this mission's tasks; defaults to gpt-5.5."
+- `default_model` (string, optional): "Model the GitHub cloud coding agent uses for this mission's tasks; defaults to gpt-5.6-sol, with gpt-5.5 as fallback."
 - `plan_gate` (enum `["hard","soft"]`, optional): "Plan-review gate. hard (default) requires the flow's review before build and re-plans on a rejecting review; soft auto-advances a passing plan review to build without human approval but escalates a rejecting review to a human."
 - `ci_required` (boolean, optional): "When true, refuse merge approval if the repository reports no CI for the PR head."
 
@@ -49,7 +49,7 @@ So the model learns first-mate exists (the `/gh-first-mate` clause) and the acce
 
 Covering block: **peer-awareness** — the mirrored CLAUDE.md carries the same `buildPeerAwarenessSnippet` text as 2b, so the only first-mate mention in the injected CLAUDE.md is the `/gh-first-mate` skill sentence. `start_mission` and its schema are not re-documented there.
 
-Checked-in repo CLAUDE.md: the root `CLAUDE.md` "First-mate cloud-agent controller (`--agents`)" section documents the loop ("Claude starts missions, wakes `advance()`, answers compact `needsModel` requests"), the gate ("`agentToolsEnabled()` also sees the second GitHub write token"), durable state, and the human-gated merge. It agrees with the code: the `agents` capability, the `--agents`/`GH_ROUTER_ENABLE_AGENTS=1` opt-in plus agent-token requirement, and mission registration are all consistent. `docs/first-mate-design.md:26-28` describes `start_mission` field-for-field (goal, repos, acceptance criteria, optional priority/house rules/default_model, gpt-5.5 default) and `:286` / `:414` confirm "registration only; unit decomposition happens on later wakes" — matching `tools.ts:236-264`. The design doc does **not** mention `plan_gate` or `ci_required` anywhere (`grep` for both returns no matches) — a doc gap, not a code contradiction (see 3c/findings).
+Checked-in repo CLAUDE.md: the root `CLAUDE.md` "First-mate cloud-agent controller (`--agents`)" section documents the loop ("Claude starts missions, wakes `advance()`, answers compact `needsModel` requests"), the gate ("`agentToolsEnabled()` also sees the second GitHub write token"), durable state, and the human-gated merge. It agrees with the code: the `agents` capability, the `--agents`/`GH_ROUTER_ENABLE_AGENTS=1` opt-in plus agent-token requirement, and mission registration are all consistent. `docs/first-mate-design.md:26-28` describes `start_mission` field-for-field (goal, repos, acceptance criteria, optional priority/house rules/default_model, gpt-5.6-sol default (gpt-5.5 fallback)) and `:286` / `:414` confirm "registration only; unit decomposition happens on later wakes" — matching `tools.ts:236-264`. The design doc does **not** mention `plan_gate` or `ci_required` anywhere (`grep` for both returns no matches) — a doc gap, not a code contradiction (see 3c/findings).
 
 ## 3. Assessment
 
@@ -57,7 +57,7 @@ Checked-in repo CLAUDE.md: the root `CLAUDE.md` "First-mate cloud-agent controll
 
 - **Clarity & routing signal.** The description tells the model WHAT the tool does ("Register a first-mate mission") and sets expectation on decomposition timing ("handled by later controller/model wakes"), which correctly steers the model away from expecting immediate GitHub work. There is no explicit "when to use / when NOT to use" clause, but the group-level skill (`/gh-first-mate`) carries the routing, so the per-tool description carrying only the registration semantics is acceptable. The one-liner is honest that this is a registration primitive, not the whole flow.
 - **Accuracy vs implementation.** Verified accurate:
-  - `default_model` "defaults to gpt-5.5" matches `DEFAULT_CODEX_MODEL = "gpt-5.5"` (`src/lib/port.ts:155`), resolved via `resolveCloudAgentModel` (`tools.ts:245`, `task-model.ts:32-59`). An explicit invalid model throws FAST at input time inside the tool try/catch (`tools.ts:240-245`), so the "defaults to gpt-5.5" wording plus fail-fast behavior are consistent.
+  - `default_model` "defaults to gpt-5.6-sol (gpt-5.5 fallback)" matches `DEFAULT_CODEX_MODEL = "gpt-5.6-sol"` (first fallback `gpt-5.5`) (`src/lib/port.ts:155`), resolved via `resolveCloudAgentModel` (`tools.ts:245`, `task-model.ts:32-59`). An explicit invalid model throws FAST at input time inside the tool try/catch (`tools.ts:240-245`), so the "defaults to gpt-5.6-sol" wording (with gpt-5.5 fallback) plus fail-fast behavior are consistent.
   - `plan_gate` semantics match the controller: `planGateOf` treats absent/`"hard"` as hard and `"soft"` as soft (`controller.ts:2184-2185`); on a rejecting (`refine`) review, `soft` escalates to a human decision (`controller.ts:936-941`) while `hard` re-plans autonomously; an `approve` verdict re-dispatches build in both modes (`controller.ts:894-929`). The description's "hard (default)" and "soft escalates a rejecting review to a human" are correct.
   - `ci_required` matches `evaluateMergeSafety`: when `mission.ciRequired === true` and the head reports no check runs, merge is refused (`controller.ts:861-866`). The description's "refuse merge approval if the repository reports no CI for the PR head" is accurate.
   - `acceptance_criteria` is genuinely consumed downstream (definition-of-done and the agent-question classifier: `controller.ts:2240/2247/2255/2278`, `classifier.ts:130-135`, `dod.ts:11-14`), so requiring it is justified, not decorative.
@@ -79,7 +79,7 @@ Checked-in repo CLAUDE.md: the root `CLAUDE.md` "First-mate cloud-agent controll
 
 ### 3d. Cross-surface consistency
 
-No contradictions between description ↔ system prompt ↔ CLAUDE.md ↔ code. All four agree that `start_mission` is registration-only, gated by `agents`, defaults model to gpt-5.5, and defers decomposition. The only cross-surface asymmetry is completeness: `plan_gate`/`ci_required` live only in the tool description + code, absent from the design doc.
+No contradictions between description ↔ system prompt ↔ CLAUDE.md ↔ code. All four agree that `start_mission` is registration-only, gated by `agents`, defaults model to gpt-5.6-sol (gpt-5.5 fallback), and defers decomposition. The only cross-surface asymmetry is completeness: `plan_gate`/`ci_required` live only in the tool description + code, absent from the design doc.
 
 ## 4. Findings
 
@@ -91,4 +91,4 @@ No Critical or Important findings: the description is accurate against the code,
 
 ## 5. Verdict
 
-Y — `start_mission`'s injected surface is correct, minimal, and consistent; the description accurately conveys registration semantics, the gpt-5.5 default, and the plan-gate/CI-required semantics, all verified against the controller. Single most important fix: document `plan_gate` and `ci_required` in `docs/first-mate-design.md:26-28` so the design doc stops trailing the shipped schema.
+Y — `start_mission`'s injected surface is correct, minimal, and consistent; the description accurately conveys registration semantics, the gpt-5.6-sol default (gpt-5.5 fallback), and the plan-gate/CI-required semantics, all verified against the controller. Single most important fix: document `plan_gate` and `ci_required` in `docs/first-mate-design.md:26-28` so the design doc stops trailing the shipped schema.

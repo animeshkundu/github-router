@@ -2519,7 +2519,7 @@ function startTaskModels(h: Harness): Array<string | undefined> {
   )
 }
 
-test("initial dispatch sends the default gpt-5.5 model when neither unit nor mission specifies one", async () => {
+test("initial dispatch sends the default gpt-5.6-sol model when neither unit nor mission specifies one", async () => {
   state.models = undefined // no catalog → deterministic default
   const eligible = unit({ issue: 22, taskId: null, provider: "none", title: "eligible" })
   const h = harness([eligible])
@@ -2527,7 +2527,7 @@ test("initial dispatch sends the default gpt-5.5 model when neither unit nor mis
   await advance({ maxInFlightPerProvider: 1 }, h.deps)
 
   expect(eligible.taskId).toBe("started-1")
-  expect(startTaskModels(h)).toEqual(["gpt-5.5"])
+  expect(startTaskModels(h)).toEqual(["gpt-5.6-sol"])
 })
 
 test("initial dispatch uses the mission defaultModel when the unit has no override", async () => {

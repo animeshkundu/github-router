@@ -89,7 +89,7 @@ greenfield with no suite) where no executable oracle exists.
 
 ## The `decompose` tool (multi-model designer, emits typed IR)
 
-- Input: the user ask (+ context, workspace). A strong **driver model** (gpt-5.5 / opus xhigh)
+- Input: the user ask (+ context, workspace). A strong **driver model** (gpt-5.6-sol / opus xhigh)
   receives the ask + the **full tool catalog** (github-router MCP tools resolved against the live
   catalog + a maintained description of the Claude-native tools) + the floor-guarantee constraints.
 - It drafts the workflow (phases, nodes, per-node tool assignment, gates, data-flow, recursion,

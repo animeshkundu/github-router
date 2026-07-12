@@ -39,7 +39,7 @@ Subagent system prompt = `GEMINI_CRITIC_BASE` (`src/lib/peer-mcp-personas.ts:237
 
 The tool is named inside the critic-list clause, not given its own sentence. When gemini is available the list is:
 
-"Cross-lab peer critics under `mcp__peers__*` (`codex_critic` (gpt-5.5), `codex_reviewer` (gpt-5.3-codex), `gemini_reviewer` (gemini-3.1-pro, line-level code review), `gemini_critic` (gemini-3.1-pro), `opus_critic` (Opus 4.7)) are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies."
+"Cross-lab peer critics under `mcp__peers__*` (`codex_critic` (gpt-5.6-sol), `codex_reviewer` (gpt-5.3-codex), `gemini_reviewer` (gemini-3.1-pro, line-level code review), `gemini_critic` (gemini-3.1-pro), `opus_critic` (Opus 4.7)) are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies."
 
 So the snippet names `gemini_critic` + its model `(gemini-3.1-pro)` and defers all scope/when-to-use to the description (`:642`, "Each tool's description explains its scope and when it applies"). No effort tier, no proofs/invariants framing here — by design (the snippet is a capability inventory; routing lives in the description).
 

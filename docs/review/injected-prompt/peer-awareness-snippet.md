@@ -17,7 +17,7 @@
 The snippet is assembled dynamically. Paragraph 1 template (`peer-mcp-personas.ts:642`):
 
 ```
-Cross-lab peer critics under `mcp__peers__*` (`codex_critic` (gpt-5.5), `codex_reviewer` (gpt-5.3-codex), `gemini_reviewer` (gemini-3.1-pro, line-level code review), `gemini_critic` (gemini-3.1-pro), `opus_critic` (Opus 4.7)) are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies. The `peer-review-coordinator` subagent fans out to the appropriate critics in parallel and aggregates findings by severity. Claude Code's built-in `advisor` tool catches approach drift and confabulation. Subagents you spawn inherit all of these.
+Cross-lab peer critics under `mcp__peers__*` (`codex_critic` (gpt-5.6-sol), `codex_reviewer` (gpt-5.3-codex), `gemini_reviewer` (gemini-3.1-pro, line-level code review), `gemini_critic` (gemini-3.1-pro), `opus_critic` (Opus 4.7)) are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies. The `peer-review-coordinator` subagent fans out to the appropriate critics in parallel and aggregates findings by severity. Claude Code's built-in `advisor` tool catches approach drift and confabulation. Subagents you spawn inherit all of these.
 ```
 
 Paragraph 2 is the capability inventory joined from `para2Parts` (`peer-mcp-personas.ts:595-637`): the `mcp__search__code` semantic-first description, the `worker-*` dispatcher list, the `orchestrate` tools, the injected-skills sentence, `mcp__search__web`, `stand_in`, and `browser`, each sentence gated as above. See the source for the full conditional assembly.

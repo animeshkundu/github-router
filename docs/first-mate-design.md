@@ -25,7 +25,7 @@ preferred tool names are:
 
 - `mcp__first-mate__start_mission` — persist a mission: goal, repos, acceptance
   criteria, optional priority, optional house rules, optional `default_model`
-  (the cloud coding agent's model for this mission's tasks; defaults to gpt-5.5).
+  (the cloud coding agent's model for this mission's tasks; defaults to gpt-5.6-sol, with gpt-5.5 as the first fallback).
 - `mcp__first-mate__advance` — wake the deterministic controller once; apply
   submitted model/human answers; return compact `board`, `needsModel`,
   `needsHuman`, `applied_count`, `nextWakeAt`, and `nextWakeSeconds` (the
@@ -212,7 +212,7 @@ the controller falls back to creating an issue and assigning the selected bot.
 ### Cloud-agent model selection
 
 Which model the GitHub cloud coding agent runs a task with is selectable, with a
-`gpt-5.5` default (the same `DEFAULT_CODEX_MODEL` the codex launcher uses). The
+`gpt-5.6-sol` default (the same `DEFAULT_CODEX_MODEL` the codex launcher uses, with `gpt-5.5` as first fallback). The
 choice threads mission→unit→dispatch:
 
 1. `start_mission` accepts an optional `default_model` string, persisted as
@@ -230,10 +230,10 @@ explicitly-chosen model is normalized via the proxy's `resolveModel()` slug
 cascade and, when a live catalog is present, REQUIRED to be in it — an
 explicit model Copilot can't serve THROWS rather than being silently swapped for
 a fallback (no silent model-class switch). An unspecified choice defaults to
-`gpt-5.5`, walking `DEFAULT_CODEX_MODEL_FALLBACKS` only when a catalog says the
+`gpt-5.6-sol`, walking `DEFAULT_CODEX_MODEL_FALLBACKS` (starting with `gpt-5.5`) only when a catalog says the
 preferred default is absent for the tier. `Mission.defaultModel` and
 `UnitRow.model` are both optional → back-compat: pre-existing missions/units load
-and dispatch on the `gpt-5.5` default.
+and dispatch on the `gpt-5.6-sol` default, or the `gpt-5.5` fallback when needed.
 
 ### Copilot-host session log (the agent's plan / progress / questions)
 

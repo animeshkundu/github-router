@@ -55,7 +55,7 @@ Covering block: peer-awareness (same `buildPeerAwarenessSnippet` text as 2b, mir
 
 Checked-in root `CLAUDE.md:133` ("worker tools" paragraph) documents explore accurately:
 
-> "read-only `explore` → `EXPLORE_DEFAULT_MODEL` = `claude-sonnet-5` at `xhigh` (a strong NATIVE, no-shim tool-caller for repo research; Claude models run as workers over `/chat/completions`, the path proven by `plan`; NOT a gate input — errors at call time if absent, like `implement`'s gpt-5.5)"
+> "read-only `explore` → `EXPLORE_DEFAULT_MODEL` = `claude-sonnet-5` at `xhigh` (a strong NATIVE, no-shim tool-caller for repo research; Claude models run as workers over `/chat/completions`, the path proven by `plan`; NOT a gate input — errors at call time if absent, like `implement`'s gpt-5.6-sol)"
 
 and the 9-tool read-only surface: "explore/review expose 9 read-only tools — `read`/`glob`/`grep`/`code_search` … `web_search`/`fetch_url` plus a read-only `toolbelt` tool …, `advisor` … and `update_plan`". This agrees with `engine.ts:146` and `tools.ts:1925-1938`.
 

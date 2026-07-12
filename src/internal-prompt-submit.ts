@@ -7,7 +7,7 @@
  *      per-prompt);
  *   2. stashes the prompt + surfaces the prior turn's advisory review findings;
  *   3. for a non-trivial prompt, injects a GROUNDED, user-derived scope/goal
- *      note (one gpt-5.5 call over the prompt + a parallel lexical+semantic code
+ *      note (one gpt-5.6-sol call over the prompt + a parallel lexical+semantic code
  *      search) — or, when the proxy URL/nonce isn't wired or anything errors,
  *      falls open to the v1 regex goal.
  *
@@ -108,7 +108,7 @@ export const internalPromptSubmit = defineCommand({
             infer: (system, user, signal) =>
               callInference({
                 serverUrl: runtime.serverUrl,
-                model: "gpt-5.5",
+                model: "gpt-5.6-sol",
                 instructions: system,
                 input: user,
                 effort: "low",

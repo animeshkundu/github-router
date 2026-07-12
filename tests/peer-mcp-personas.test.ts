@@ -39,7 +39,7 @@ describe("PERSONAS_READ", () => {
 
   test("each persona has the correct model + endpoint binding", () => {
     const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
-    expect(byName["codex-critic"]?.model).toBe("gpt-5.5")
+    expect(byName["codex-critic"]?.model).toBe("gpt-5.6-sol")
     expect(byName["codex-critic"]?.endpoint).toBe("/v1/responses")
     expect(byName["codex-critic"]?.requiresHttp).toBe(false)
     expect(byName["codex-critic"]?.writeCapable).toBe(false)
@@ -85,7 +85,7 @@ describe("PERSONAS_READ", () => {
 
   test("descriptions surface load-bearing routing signal (model identity)", () => {
     const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
-    expect(byName["codex-critic"]?.description).toContain("gpt-5.5")
+    expect(byName["codex-critic"]?.description).toContain("gpt-5.6-sol")
     expect(byName["gemini-critic"]?.description).toContain("gemini-3.1-pro")
     expect(byName["codex-reviewer"]?.description).toContain("gpt-5.3-codex")
     expect(byName["gemini-reviewer"]?.description).toContain("gemini-3.1-pro")
@@ -259,7 +259,7 @@ describe("buildAgentPrompt — codex-cli mode", () => {
     const persona = PERSONAS_READ.find((p) => p.agentName === "codex-critic")!
     const prompt = buildAgentPrompt(persona, { codexCli: true, peersKey: "peers" })
     expect(prompt).toContain("mcp__codex-cli__codex")
-    expect(prompt).toContain('"gpt-5.5"')
+    expect(prompt).toContain('"gpt-5.6-sol"')
     expect(prompt).toContain("base-instructions")
     expect(prompt).toContain('"read-only"')
   })
@@ -326,27 +326,29 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(snippet).toContain("## Peer review and advisor")
   })
 
-  test("snippet stays under ~330 tokens (~2000 bytes) in the minimal case", () => {
+  test("snippet stays under ~350 tokens (~2100 bytes) in the minimal case", () => {
     // Re-derived per peer-review I5 after the descriptive-only rewrite, then
     // bumped when the always-on orchestration tools (verify_workflow /
-    // attest_step) were added to the minimal snippet. The cap is the smallest
+    // attest_step) were added to the minimal snippet, and again (2000 -> 2100)
+    // when the three always-on native subagents (implementer/debugger/
+    // qa-engineer) got their one-line inventory. The cap is the smallest
     // envelope the actual implementation fits inside, not a target driving copy
     // growth. If a future tightening shaves bytes, lower this cap too.
     const minimal = buildPeerAwarenessSnippet(MINIMAL)
-    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(2000)
+    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(2100)
   })
 
-  test("snippet stays under ~800 tokens (~4800 bytes) in the maximal case", () => {
+  test("snippet stays under ~880 tokens (~5300 bytes) in the maximal case", () => {
     // Maximal = EVERY gate on (gemini_reviewer, the `review`/`plan`/`test`
     // workers, the decompose/run_workflow orchestration pipeline, the three
     // floor-raising skills, browse + power). The cap tracks the smallest envelope
     // the implementation fits inside: it was bumped from 4600 when the
-    // orchestration pipeline + skills + browser-power tools were added (each is a
-    // distinct tool getting one descriptive sentence — not bloat), after the copy
-    // was de-duplicated and stripped of arrows/em-dashes. If a future tightening
-    // shaves bytes, lower it again.
+    // orchestration pipeline + skills + browser-power tools were added, and again
+    // (4900 -> 5300) for the always-on native-subagent inventory. Each is a
+    // distinct capability getting one descriptive sentence — not bloat. If a
+    // future tightening shaves bytes, lower it again.
     const full = buildPeerAwarenessSnippet(MAXIMAL)
-    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(4900)
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(5300)
   })
 
   test("mentions Claude Code's advisor built-in tool", () => {
@@ -436,35 +438,28 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(on).toContain("worktree: true")
   })
 
-  test("implementer-over-worker-implement steer is gated on implementerAvailable AND workers", () => {
+  test("native subagents are always named; the worker-implement contrast is gated on workers", () => {
     const STEER = "prefer the `implementer` subagent"
-    // Both gates on: the steer appears.
-    const both = buildPeerAwarenessSnippet({
+    // Workers on: the native inventory AND the worker-implement contrast appear.
+    const withWorkers = buildPeerAwarenessSnippet({
       ...MINIMAL,
       workerToolsAvailable: true,
-      implementerAvailable: true,
     })
-    expect(both).toContain(STEER)
-    // It reserves worker-implement for the isolation cases.
-    expect(both).toContain("git-worktree isolation")
-    // Implementer subagent absent (e.g. gpt-5.5 not in catalog): never named,
-    // so the snippet honors advertised-iff-available.
-    expect(
-      buildPeerAwarenessSnippet({
-        ...MINIMAL,
-        workerToolsAvailable: true,
-        implementerAvailable: false,
-      }),
-    ).not.toContain(STEER)
-    // Workers off: no worker-implement to contrast against, so no steer even if
-    // the implementer subagent is available.
-    expect(
-      buildPeerAwarenessSnippet({
-        ...MINIMAL,
-        workerToolsAvailable: false,
-        implementerAvailable: true,
-      }),
-    ).not.toContain(STEER)
+    expect(withWorkers).toContain("`implementer`")
+    expect(withWorkers).toContain("`debugger`")
+    expect(withWorkers).toContain("`qa-engineer`")
+    expect(withWorkers).toContain(STEER)
+    expect(withWorkers).toContain("git-worktree isolation")
+    // Workers off: the native subagents are STILL named (always injected, no
+    // gating), but the worker-implement contrast is absent (nothing to contrast).
+    const withoutWorkers = buildPeerAwarenessSnippet({
+      ...MINIMAL,
+      workerToolsAvailable: false,
+    })
+    expect(withoutWorkers).toContain("`implementer`")
+    expect(withoutWorkers).toContain("`debugger`")
+    expect(withoutWorkers).toContain("`qa-engineer`")
+    expect(withoutWorkers).not.toContain(STEER)
   })
 
   test("gates browser lead and compound surfaces independently", () => {

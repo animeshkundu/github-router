@@ -7,7 +7,7 @@
 | Field | Value |
 |---|---|
 | Subagent name | `worker-review` (`worker-dispatch.ts:58-60`) |
-| Subagent's OWN model | inherited (Claude); the WORKER runs `REVIEW_DEFAULT_MODEL` = `gemini-3.1-pro-preview` at high (cross-lab, decorrelated from the gpt-5.5 implementers — repo CLAUDE.md) |
+| Subagent's OWN model | inherited (Claude); the WORKER runs `REVIEW_DEFAULT_MODEL` = `gemini-3.1-pro-preview` at high (cross-lab, decorrelated from the gpt-5.6-sol implementers — repo CLAUDE.md) |
 | Gate | `workerToolsAvailable` (`codex-mcp-config.ts:326-335`) |
 | Description | `dispatcherDescription("review")` (`worker-dispatch.ts:209-210` + suffix) |
 | System prompt | `dispatcherPrompt("review", workersKey)` |
@@ -32,7 +32,7 @@ Standard thin-dispatcher body (`worker-dispatch.ts:229-253`): call `mcp__<worker
 
 ## 5. Don't-nerf / right-balance
 
-Correctly positions worker-review as the "reviewer that reads the code itself" — complementary to the paste-only peer critics and the coordinator, not a replacement. The cross-lab default model (gemini) is a deliberate decorrelation from the gpt-5.5 implementers. Raises the floor without nerfing the critic path. Right balance.
+Correctly positions worker-review as the "reviewer that reads the code itself" — complementary to the paste-only peer critics and the coordinator, not a replacement. The cross-lab default model (gemini) is a deliberate decorrelation from the gpt-5.6-sol implementers. Raises the floor without nerfing the critic path. Right balance.
 
 ## 6. Findings + verdict
 

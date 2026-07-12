@@ -154,6 +154,11 @@ beforeEach(() => {
         reasoning_effort: ["minimal", "low", "medium", "high"],
       }),
       // implement default (routes to /responses via the stream-fn split)
+      fakeModel("gpt-5.6-sol", {
+        tool_calls: true,
+        reasoning_effort: ["none", "low", "medium", "high", "xhigh"],
+      }),
+      // retained OpenAI fallback + explicit-model fixture
       fakeModel("gpt-5.5", {
         tool_calls: true,
         reasoning_effort: ["none", "low", "medium", "high", "xhigh"],
@@ -444,7 +449,7 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
     }
   })
 
-  test("implement mode sends gpt-5.5 upstream by default", async () => {
+  test("implement mode sends gpt-5.6-sol upstream by default", async () => {
     let capturedModel: string | undefined
     globalThis.fetch = mock((_input: unknown, init?: { body?: unknown }) => {
       try {
@@ -457,7 +462,7 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
     )
     try {
       await runWorkerAgent({ prompt: "do a thing", mode: "implement", workspace: dir })
-      expect(capturedModel).toBe("gpt-5.5")
+      expect(capturedModel).toBe("gpt-5.6-sol")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -499,7 +504,7 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
         mode: "implement",
         // Pin a chat-endpoint model so the chat-SSE mock applies — this
         // test exercises the worktree diff-suffix mechanic, not the
-        // implement default (gpt-5.5, which routes to /responses).
+        // implement default (gpt-5.6-sol, which routes to /responses).
         model: "gemini-3.1-pro-preview",
         workspace: repo,
         worktree: true,

@@ -105,8 +105,9 @@ interface BuildOpts {
   /** Whether the browse worker tool is served (`browseAgentEnabled()`). Gates
    *  the extra `worker-browse` dispatcher. Optional (defaults false). */
   browseAvailable?: boolean
-  /** Native implementation subagent model when present in the live catalog. */
-  implementerModel?: string
+  /** Model for the native OpenAI subagents (implementer/debugger/qa-engineer)
+   *  when present in the live catalog. */
+  nativeSubagentModel?: string
 }
 
 interface HttpMcpEntry {
@@ -232,14 +233,14 @@ function buildCoordinatorAgent(opts: {
     "",
     "The lead's brief will include an artifact (plan, design, diff, or code) and a goal (e.g. 'review before exit-plan', 'review the commit I just made', 'cross-check codex-critic's verdict'). Pick the right peers for the artifact type:",
     "",
-    "- **Plan / design / architecture choice** → fan out to `codex-critic` (gpt-5.5, strongest reasoning, cross-lab)"
+    "- **Plan / design / architecture choice** → fan out to `codex-critic` (gpt-5.6-sol, strongest reasoning, cross-lab)"
       + (opts.geminiAvailable ? " AND `gemini-critic` (third-lab triangulation, strong on formal reasoning) in parallel" : "")
       + ". codex-reviewer is the wrong tool for plans (it's a code-specialist, not an architecture critic).",
     "- **Concrete diff or single file** → fan out to `codex-reviewer` (gpt-5.3-codex, line-level code specialist, fastest at ~16s)"
       + (opts.geminiAvailable ? " AND `gemini-reviewer` (gemini-3.1-pro, second-lab line-level review)" : "")
       + (opts.geminiAvailable ? " AND `gemini-critic` for cross-lab triangulation" : "")
       + ". For very small changes (<20 lines), one `codex-reviewer` call is enough.",
-    "- **Large artifact** → the only peers that take a large artifact WHOLE are `codex-critic` (gpt-5.5, ≈922K-token input window) and `opus-critic` (Opus-4.7-1M, ≈936K-token input on enterprise catalogs; ≈168K otherwise). Route the full artifact to those for cross-lab coverage. `codex-reviewer` (≈272K) and `gemini-critic` (≈136K) have small windows — see Decomposition below: never summarize or downsize the request to squeeze a large artifact into a small-window peer.",
+    "- **Large artifact** → the only peers that take a large artifact WHOLE are `codex-critic` (gpt-5.6-sol, ≈1M-token input window) and `opus-critic` (Opus-4.7-1M, ≈936K-token input on enterprise catalogs; ≈168K otherwise). Route the full artifact to those for cross-lab coverage. `codex-reviewer` (≈272K) and `gemini-critic` (≈136K) have small windows — see Decomposition below: never summarize or downsize the request to squeeze a large artifact into a small-window peer.",
     "- **Formal reasoning, proofs, or invariants** → prefer `gemini-critic`"
       + (opts.geminiAvailable ? " (gemini-3.1-pro, strong on math and formally-stated properties)" : " (NOT REGISTERED in this session — gemini-3.x not in catalog)")
       + ".",
@@ -250,7 +251,7 @@ function buildCoordinatorAgent(opts: {
     "",
     "## Decomposition for large artifacts",
     "",
-    "Route by the peer's real PROMPT WINDOW (input tokens): `codex-critic` gpt-5.5 ≈922K · `opus-critic` Opus-4.7-1M ≈936K (enterprise catalogs; ≈168K otherwise) · `codex-reviewer` gpt-5.3-codex ≈272K · `gemini-critic` gemini-3.1-pro ≈136K. The proxy REJECTS (with an actionable message) any single call whose brief exceeds the target peer's window — it will NOT silently truncate, because dropping lines from a review artifact is worse than a clear error. So: send the full artifact only to peers whose window fits it (large artifacts → `codex-critic` and/or `opus-critic`). When a peer's window is too small (commonly `gemini-critic` at ≈136K, or `codex-reviewer` at ≈272K), do NOT summarize or downsize the request to include it — either skip that peer, or split the artifact into 2-4 logical batches BY CONCERN (not by raw size — semantic batches give better per-batch reviews) that each fit, and call in parallel. Use the big-window peers for the whole and reserve a small-window peer like gemini for the concerns it can actually hold. The proxy's MCP cap allows up to 8 in-flight calls. Aggregate findings yourself before reporting back. (Separately, on the JSON transport a per-effort `predictedTooLong` byte cap still guards the ~60s tools/call timeout for non-SSE clients; Claude Code uses SSE, which streams with heartbeats and isn't subject to that cap.)",
+    "Route by the peer's real PROMPT WINDOW (input tokens): `codex-critic` gpt-5.6-sol ≈1M · `opus-critic` Opus-4.7-1M ≈936K (enterprise catalogs; ≈168K otherwise) · `codex-reviewer` gpt-5.3-codex ≈272K · `gemini-critic` gemini-3.1-pro ≈136K. The proxy REJECTS (with an actionable message) any single call whose brief exceeds the target peer's window — it will NOT silently truncate, because dropping lines from a review artifact is worse than a clear error. So: send the full artifact only to peers whose window fits it (large artifacts → `codex-critic` and/or `opus-critic`). When a peer's window is too small (commonly `gemini-critic` at ≈136K, or `codex-reviewer` at ≈272K), do NOT summarize or downsize the request to include it — either skip that peer, or split the artifact into 2-4 logical batches BY CONCERN (not by raw size — semantic batches give better per-batch reviews) that each fit, and call in parallel. Use the big-window peers for the whole and reserve a small-window peer like gemini for the concerns it can actually hold. The proxy's MCP cap allows up to 8 in-flight calls. Aggregate findings yourself before reporting back. (Separately, on the JSON transport a per-effort `predictedTooLong` byte cap still guards the ~60s tools/call timeout for non-SSE clients; Claude Code uses SSE, which streams with heartbeats and isn't subject to that cap.)",
     "",
     "## Aggregation contract",
     "",
@@ -346,14 +347,39 @@ export function buildPeerAgentDefinitions(
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
   })
-  if (opts.implementerModel && opts.implementerModel.length > 0) {
-    out.implementer = {
-      description:
-        "Bounded implementation subagent running gpt-5.5 (strong non-Claude coder, high reasoning). Use for well-scoped coding tasks — edits, small features, fixes — you want implemented in an integrated subagent. Model is overridable at spawn.",
-      prompt:
-        "You are a bounded implementation subagent for well-scoped coding tasks. Implement the requested change surgically, matching the surrounding code style and minimizing unrelated churn. Use the dedicated Edit/Write/Read tools for file changes and Grep/Glob for search; reserve Bash for running builds, tests, and git — do not shell out (sed/awk/python/here-docs) to read or edit files. Verify with the project's build or tests where applicable. Do the work yourself — do not spawn further subagents. Report exactly what changed and any risks.",
-      model: opts.implementerModel,
-    }
+  // The native subagents (implementer/debugger/qa-engineer) are ALWAYS injected
+  // — no catalog gate. When `nativeSubagentModel` (gpt-5.6-sol/gpt-5.5) is in the
+  // live catalog they run on it at maximum reasoning (via the shim's model-aware
+  // default); otherwise the `model` frontmatter is OMITTED so they inherit the
+  // lead's model. Each omits `tools:` to inherit the full native + MCP toolset.
+  const nativeModel =
+    opts.nativeSubagentModel && opts.nativeSubagentModel.length > 0
+      ? opts.nativeSubagentModel
+      : undefined
+  const modelField: { model?: string } = nativeModel ? { model: nativeModel } : {}
+  out.implementer = {
+    description: nativeModel
+      ? `Bounded implementation subagent running ${nativeModel} (strong non-Claude coder, maximum reasoning). Use proactively for well-scoped coding tasks — edits, small features, fixes — to keep the lead's context focused; runs in its own context. Model is overridable at spawn.`
+      : `Bounded implementation subagent (native tools, runs on the lead's model in its own context). Use proactively for well-scoped coding tasks — edits, small features, fixes — to keep the lead's context focused. Model is overridable at spawn.`,
+    prompt:
+      "You are a bounded implementation subagent for well-scoped coding tasks. Implement the requested change surgically, matching the surrounding code style and minimizing unrelated churn. Use the dedicated Edit/Write/Read tools for file changes and Grep/Glob for search; reserve Bash for running builds, tests, and git — do not shell out (sed/awk/python/here-docs) to read or edit files. Verify with the project's build or tests where applicable. Do the work yourself — do not spawn further subagents. Report exactly what changed and any risks.",
+    ...modelField,
+  }
+  out.debugger = {
+    description: nativeModel
+      ? `Root-cause & debugging subagent running ${nativeModel} at maximum reasoning. Use proactively for reproducing a bug end to end, isolating the true root cause, and proposing a minimal fix — investigation-heavy work best kept off the lead's context; runs in its own context. Model is overridable at spawn.`
+      : `Root-cause & debugging subagent (native tools, runs on the lead's model in its own context). Use proactively for reproducing a bug end to end, isolating the true root cause, and proposing a minimal fix — kept off the lead's context. Model is overridable at spawn.`,
+    prompt:
+      "You are a root-cause debugging subagent. Reproduce the failure end to end first — as close to how a real user hits it as you can — before theorizing. Form hypotheses and test them against the actual code and runtime: read the code, run the repro with Bash, and add temporary instrumentation only if needed (remove it after). Identify the true root cause, not a symptom; if a fix is in scope, make it minimal and verify the repro now passes. Use the dedicated Edit/Write/Read tools for file changes and Grep/Glob for search; reserve Bash for running repros, tests, and git — do not shell out (sed/awk/python/here-docs) to read or edit files. Do the work yourself — do not spawn further subagents. Report the root cause with evidence, the fix (if any), and any residual risks.",
+    ...modelField,
+  }
+  out["qa-engineer"] = {
+    description: nativeModel
+      ? `Review, testing & QA subagent running ${nativeModel} at maximum reasoning. Use proactively to review a change for correctness, author and run tests that try to break it, and give a severity-ranked go/no-go while keeping the lead's context focused; runs in its own context. Model is overridable at spawn.`
+      : `Review, testing & QA subagent (native tools, runs on the lead's model in its own context). Use proactively to review a change for correctness, author and run tests that try to break it, and give a severity-ranked go/no-go. Model is overridable at spawn.`,
+    prompt:
+      "You are a review, testing, and QA subagent. Verify correctness against the ACTUAL code by reading it — never assume. Where the change warrants it, author tests that try to BREAK the implementation (edge cases, error paths, and the acceptance criteria as executable checks), then run them and report which pass and which fail; do NOT modify production code just to make tests pass. Use the dedicated Edit/Write/Read tools for file changes and Grep/Glob for search; reserve Bash for running builds, tests, and git — do not shell out (sed/awk/python/here-docs) to read or edit files. Do the work yourself — do not spawn further subagents. Report severity-ranked findings with `file:line` citations and end with a clear go/no-go.",
+    ...modelField,
   }
   // Non-blocking workers surface: one `worker-<mode>` DISPATCHER subagent per
   // active worker tool. Each is pinned by a `tools:` allowlist to the workers
@@ -406,8 +432,9 @@ interface WriteOpts {
   /** Whether the browse worker tool is served — adds the `worker-browse`
    *  dispatcher. */
   browseAvailable?: boolean
-  /** Native implementation subagent model when present in the live catalog. */
-  implementerModel?: string
+  /** Model for the native OpenAI subagents (implementer/debugger/qa-engineer)
+   *  when present in the live catalog. */
+  nativeSubagentModel?: string
   /** Extra subagent definitions to register alongside the peer/worker agents
    *  (written as `.md` files so they appear in the Task `subagent_type` enum).
    *  Used by `serve` to inject Claude Code's built-in subagents (Explore/Plan/
@@ -878,7 +905,7 @@ export async function writePeerMcpRuntimeFiles(
     groupKeys: opts.groupKeys,
     workerToolsAvailable: opts.workerToolsAvailable,
     browseAvailable: opts.browseAvailable,
-    implementerModel: opts.implementerModel,
+    nativeSubagentModel: opts.nativeSubagentModel,
     nonce,
     codexHome,
   })

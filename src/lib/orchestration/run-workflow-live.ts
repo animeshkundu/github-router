@@ -72,7 +72,7 @@ const CRITIC_INSTRUCTIONS =
 function labPersona(lab: string): { model: string; endpoint: Endpoint; effort: Effort } | undefined {
   switch (lab.toLowerCase()) {
     case "openai":
-      return { model: "gpt-5.5", endpoint: "/v1/responses", effort: "high" }
+      return { model: "gpt-5.6-sol", endpoint: "/v1/responses", effort: "high" }
     case "google":
       return { model: "gemini-3.1-pro-preview", endpoint: "/v1/chat/completions", effort: "high" }
     case "anthropic":

@@ -4,7 +4,7 @@
  * The github-router proxy hosts a `/mcp` endpoint that exposes these
  * personas as MCP tools, and the `claude` subcommand wires them as
  * Claude Code subagents via `--agents` so Opus 4.7 can delegate
- * blind-spot-busting work to gpt-5.5, gpt-5.3-codex, and
+ * blind-spot-busting work to gpt-5.6-sol, gpt-5.3-codex, and
  * gemini-3.1-pro-preview without leaving the session.
  *
  * Design contract (from the approved plan):
@@ -227,7 +227,7 @@ Cold-start contract for the lead orchestrator (Opus):
   If your brief lacks (a), I will reply with a one-line request for the artifact instead of speculating.
 `.trim()
 
-const CRITIC_BASE = `You are codex-critic, an adversarial reviewer running on gpt-5.5. Your single job is to overcome the lead orchestrator's blind spots — assumptions it didn't notice it was making, failure modes it didn't enumerate, alternatives it didn't consider.
+const CRITIC_BASE = `You are codex-critic, an adversarial reviewer running on gpt-5.6-sol. Your single job is to overcome the lead orchestrator's blind spots — assumptions it didn't notice it was making, failure modes it didn't enumerate, alternatives it didn't consider.
 
 You are NOT a helpful assistant. You are NOT a coach. Sycophancy is the failure mode you exist to fight. Manufactured contrarianism is a different failure of the same shape — silence on good work is a valid and welcome answer.
 
@@ -322,7 +322,7 @@ Resilience reminder:
 
 const OPUS_CRITIC_BASE = `You are opus-critic, a fresh-context same-lab adversarial reviewer running on Opus 4.6. The lead orchestrator that just delegated to you runs newer Opus-family context, but you are NOT the lead. You did not see the lead's reasoning trace. You only see the brief.
 
-Your job is to spot what the lead missed because of cognitive momentum, sunk-cost on a plan, or motivated reasoning toward a particular fix. Your blind-spot diversification is LIMITED compared to codex-critic (gpt-5.5) and gemini-critic (gemini-3.1-pro), same lab, adjacent model family, related priors. Use that honestly: don't pretend to find a different perspective when the obvious read is "the lead got it right." Silence on good work is a valid and welcome answer.
+Your job is to spot what the lead missed because of cognitive momentum, sunk-cost on a plan, or motivated reasoning toward a particular fix. Your blind-spot diversification is LIMITED compared to codex-critic (gpt-5.6-sol) and gemini-critic (gemini-3.1-pro), same lab, adjacent model family, related priors. Use that honestly: don't pretend to find a different perspective when the obvious read is "the lead got it right." Silence on good work is a valid and welcome answer.
 
 Sycophancy is the failure mode you exist to fight. Manufactured contrarianism is a different failure of the same shape — do neither.
 
@@ -334,10 +334,10 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
   {
     agentName: "codex-critic",
     toolNameHttp: "codex_critic",
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     endpoint: "/v1/responses",
     description:
-      "Adversarial architecture and design critic backed by gpt-5.5 (OpenAI, ≈922K-token input window), the strongest cross-lab reasoning critic in this surface. It reviews plans, designs, tradeoffs, and large code-change proposals for unsound assumptions, missing failure modes, and overlooked alternatives, then returns a calibrated objection or `no material objection`. Use when a decision or design needs a different-lab strategic challenge before implementation or merge. Not for line-level bug finding in a concrete diff or file, use codex_reviewer or gemini_reviewer; pass the artifact and constraints verbatim.",
+      "Adversarial architecture and design critic backed by gpt-5.6-sol (OpenAI, ~1M-token input window), the strongest cross-lab reasoning critic in this surface. It reviews plans, designs, tradeoffs, and large code-change proposals for unsound assumptions, missing failure modes, and overlooked alternatives, then returns a calibrated objection or `no material objection`. Use when a decision or design needs a different-lab strategic challenge before implementation or merge. Not for line-level bug finding in a concrete diff or file, use codex_reviewer or gemini_reviewer; pass the artifact and constraints verbatim.",
     baseInstructions: CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -542,6 +542,9 @@ export function buildAgentPrompt(
  *     of the live catalog). The raw `mcp__<workers>__*` tools are named only
  *     as the guarded plumbing the dispatchers call, never as a main-agent
  *     interface.
+ *   - Always names the implementer/debugger/qa-engineer native subagents
+ *     (they are injected unconditionally); the implementer-vs-`worker-implement`
+ *     contrast is added only when worker tools are available.
  *   - Conditionally lists stand_in only when `standInAvailable`
  *     (mirrors `standInToolEnabled()`).
  *   - Conditionally lists gh-first-mate only when `agentToolsAvailable`
@@ -563,9 +566,6 @@ export function buildPeerAwarenessSnippet(opts: {
   powerBrowseAvailable?: boolean
   fleetAvailable?: boolean
   agentToolsAvailable?: boolean
-  /** True when the `implementer` subagent (gpt-5.5) is registered, so the
-   *  snippet may steer bounded implementation to it over `worker-implement`. */
-  implementerAvailable?: boolean
   /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
    *  collision). Missing key → use the preferred bare key. Keeps the
    *  `mcp__<server>__<tool>` paths in this snippet pointing at OUR servers. */
@@ -586,7 +586,7 @@ export function buildPeerAwarenessSnippet(opts: {
   const powerBrowseAvailable = opts.browseAvailable && opts.powerBrowseAvailable === true
 
   const criticList: Array<string> = [
-    "`codex_critic` (gpt-5.5)",
+    "`codex_critic` (gpt-5.6-sol)",
     "`codex_reviewer` (gpt-5.3-codex)",
   ]
   if (opts.geminiAvailable) {
@@ -612,9 +612,12 @@ export function buildPeerAwarenessSnippet(opts: {
       `\`worker-*\` are background Agent subagents (subagent_type) that run the matching worker in its own context and deliver the result as a completion notification, so a long run never blocks the turn: \`worker-explore\` (read-only research), \`worker-review\` (reads the code to verify a change or claim), \`worker-plan\` (ordered implementation plan), \`worker-implement\` (edit/write/bash; \`worktree: true\` isolates in a git worktree and returns the diff), \`worker-test\` (independent test author). The raw \`mcp__${workersKey}__*\` tools they call are guarded (a direct main-thread call is redirected to the matching agent); Workers themselves have \`code_search\`.`,
     )
   }
-  if (opts.workerToolsAvailable && opts.implementerAvailable) {
+  para2Parts.push(
+    `Three native subagents are always available (Task): \`implementer\` (bounded implementation), \`debugger\` (reproduce + isolate a failure's root cause), and \`qa-engineer\` (review + author/run tests), each in its own context so the lead's context stays free; on gpt-5.6-sol when in the catalog, else the lead's model.`,
+  )
+  if (opts.workerToolsAvailable) {
     para2Parts.push(
-      `For a bounded, well-scoped implementation, prefer the \`implementer\` subagent (Task, runs on gpt-5.5) over \`worker-implement\`; reach for \`worker-implement\` only when you specifically need git-worktree isolation, parallel variants, or a throwaway experiment.`,
+      `For a bounded, well-scoped implementation, prefer the \`implementer\` subagent over \`worker-implement\`; reach for \`worker-implement\` only when you specifically need git-worktree isolation, parallel variants, or a throwaway experiment.`,
     )
   }
   // Orchestration group. `decompose`/`run_workflow` share the worker backend gate
@@ -771,10 +774,10 @@ export interface NonPersonaMcpTool {
    * - `"worker"` (explore / review / implement) requires Copilot's
    *   `gpt-5.4-mini` (the worker default) to be in the live catalog
    *   with `tool_calls` support AND `GH_ROUTER_DISABLE_WORKER_TOOLS=1` to
-   *   be unset (see `workerToolsEnabled()`). implement's `gpt-5.5` default
+   *   be unset (see `workerToolsEnabled()`). implement's `gpt-5.6-sol` default
    *   is not gated here — if absent, implement calls return a helpful
    *   resolve error.
-   * - `"stand_in"` requires all three of `gpt-5.5`, `claude-opus-4-7`,
+   * - `"stand_in"` requires all three of `gpt-5.6-sol`, `claude-opus-4-7`,
    *   and a `gemini-3.X.*pro` model to be in the live catalog (see
    *   `standInToolEnabled()` in `routes/mcp/handler.ts`).
    * - `"browser"` (browser_open_tab, browser_screenshot, browser_mouse,
@@ -1235,7 +1238,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     // backed by the Pi agent loop (`src/lib/worker-agent/engine.ts`) and routed
     // through per-mode defaults: explore -> `claude-sonnet-5` (xhigh), review ->
     // `gemini-3.1-pro-preview` (xhigh clamped to high by the default model), plan
-    // -> `claude-opus-4.8` (xhigh), and implement/test -> `gpt-5.5` (xhigh). An
+    // -> `claude-opus-4.8` (xhigh), and implement/test -> `gpt-5.6-sol` (xhigh). An
     // explicit `model` arg wins.
     //
     // GATING (`capability: "worker"`): the MCP handler drops these entries from
@@ -1244,7 +1247,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     // Copilot catalog or lacks `tool_calls`, OR (b) the operator opted out via
     // `GH_ROUTER_DISABLE_WORKER_TOOLS=1`. Defense-in-depth: the gate is checked at
     // BOTH list-time and call-time so a client that hard-codes the tool name can't
-    // bypass the list-side filter. If a per-mode default such as `gpt-5.5` or
+    // bypass the list-side filter. If a per-mode default such as `gpt-5.6-sol` or
     // `claude-sonnet-5` is absent, that mode returns a helpful resolve error.
     //
     // SCHEMA SHAPE: `prompt` is required; `model` / `thinking` are optional
@@ -1344,7 +1347,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       description:
         "Runs as the background `worker-implement` agent. Dispatch via the Agent tool (subagent_type: worker-implement) so the turn is never blocked; the result arrives as a completion notification. "
         + "Delegates a scoped coding task to an autonomous worker (Pi runtime; "
-        + "default model `gpt-5.5` at xhigh reasoning, override via `model` "
+        + "default model `gpt-5.6-sol` at xhigh reasoning, override via `model` "
         + "with any Copilot-catalog model that advertises `tool_calls`). It has "
         + "the explore read-only tools plus edit, write, bash, and codex_review, "
         + "and it returns its final text with any changed files or worktree diff. "
@@ -1380,7 +1383,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "gpt-5.5). Must advertise tool_calls "
+              + "gpt-5.6-sol). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
               + "the eligible catalog models on mismatch.",
           },
@@ -1589,7 +1592,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       description:
         "Runs as the background `worker-test` agent. Dispatch via the Agent tool (subagent_type: worker-test) so the turn is never blocked; the result arrives as a completion notification. "
         + "Independent adversarial test authoring by an autonomous worker (Pi "
-        + "runtime; default model `gpt-5.5` at xhigh reasoning, override via "
+        + "runtime; default model `gpt-5.6-sol` at xhigh reasoning, override via "
         + "`model` with any Copilot-catalog model that advertises `tool_calls`). "
         + "It has the same read/write toolset as implement and writes tests that "
         + "try to break the implementation through edge cases, error paths, and "
@@ -1625,7 +1628,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "gpt-5.5). Must advertise tool_calls "
+              + "gpt-5.6-sol). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
               + "the eligible catalog models on mismatch.",
           },
@@ -1733,7 +1736,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       // single driver model drafts the IR; the static verifier checks it; on a
       // violation the driver re-drafts with the violations as feedback; a
       // cross-lab critic reviews a clean draft (bounded). Gated `capability:
-      // "worker"` (it dispatches models; the gpt-5.5 driver errors at call time
+      // "worker"` (it dispatches models; the gpt-5.6-sol driver errors at call time
       // if absent, like implement).
       toolNameHttp: "decompose",
       group: "orchestrate",
@@ -1995,7 +1998,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       },
     },
     {
-      // stand_in — three-lab away-mode advisor. Polls gpt-5.5 xhigh +
+      // stand_in — three-lab away-mode advisor. Polls gpt-5.6-sol xhigh +
       // claude-opus-4-7 xhigh + gemini-3.1-pro-preview high in two
       // structured voting rounds (blind R1 → informed R2) and returns
       // a ranked-choice verdict. Implementation: src/lib/stand-in.ts.
@@ -2023,17 +2026,22 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       description:
         "Three-lab away-mode decision tiebreak advisor for moments when the "
         + "user is unavailable and the agent is stuck between two or more concrete "
-        + "options. It polls gpt-5.5, Opus 4.7, and gemini-3.1-pro-preview across "
+        + "options. It polls gpt-5.6-sol, Opus 4.7, and gemini-3.1-pro-preview across "
         + "blind and informed voting rounds, then returns a ranked-choice verdict "
         + "such as consensus, majority, no_consensus, or need_more_info. Use when "
         + "work would otherwise halt on a bounded choice the user would normally "
-        + "make. Not for code review, open-ended exploration, single-model second "
+        + "make. If every provided option is inadequate, the panel may flag a concrete "
+        + "better unlisted option in `notes` so you can re-invoke with a revised set. "
+        + "The three panel models are cold-start — no repo, transcript, "
+        + "or memory access — and see only your decision, options, and context, "
+        + "so the `context` argument must carry all the background they need to "
+        + "judge. Not for code review, open-ended exploration, single-model second "
         + "opinions, or bypassing confirmation on irreversible actions such as push, "
         + "delete, drop, or deploy; use peer-review-coordinator or the individual "
         + "critics for review and still ask the user for destructive actions.",
       inputSchema: {
         type: "object",
-        required: ["decision", "options"],
+        required: ["decision", "options", "context"],
         additionalProperties: false,
         properties: {
           decision: {
@@ -2047,9 +2055,10 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             minItems: 2,
             maxItems: 6,
             description:
-              "2-6 concrete options for the panel to vote on. Caller-provided — "
-              + "do NOT ask the panel to generate options. The verdict cites "
-              + "the chosen option by `id`.",
+              "2-6 concrete options curated by the caller for the panel to vote on. "
+              + "The panel may surface a gated unlisted alternative in `notes`, but "
+              + "does not replace the caller's option set. The verdict cites the "
+              + "chosen option by `id`.",
             items: {
               type: "object",
               required: ["id", "summary"],
@@ -2075,8 +2084,13 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           context: {
             type: "string",
             description:
-              "Task / code background that informs the decision. Keep tight — "
-              + "the input is capped at ~6KB total across decision + options + context.",
+              "REQUIRED. The three panel models are cold-start: no access to your "
+              + "repository, prior transcript, or memory — they see ONLY this "
+              + "decision + options + context. Include everything needed to decide "
+              + "well: the constraints that matter, the relevant code or excerpts, "
+              + "prior decisions not to relitigate, and what a good outcome looks "
+              + "like. Thin context yields a weak verdict. (On the JSON transport a "
+              + "~32KB size guard applies; the SSE transport has no such limit.)",
           },
         },
       },
@@ -2497,7 +2511,7 @@ async function runBrowseToolCall(
  * `isError` is TRUE only for input-shape failures (bad arg types,
  * missing required fields).
  */
-async function runStandInToolCall(
+export async function runStandInToolCall(
   args: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<{
@@ -2578,14 +2592,17 @@ async function runStandInToolCall(
     options.push({ id, summary, detail })
   }
 
-  const context =
-    args.context === undefined ? undefined
-    : typeof args.context === "string" ? args.context
-    : null
-  if (context === null) {
+  const context = typeof args.context === "string" ? args.context : ""
+  if (!context.trim()) {
     return {
       content: [
-        { type: "text", text: "stand_in: arguments.context must be a string when provided" },
+        {
+          type: "text",
+          text:
+            "stand_in: arguments.context is required (non-empty string). The panel "
+            + "is cold-start and sees only decision + options + context; include the "
+            + "constraints, relevant code, and success criteria needed to decide.",
+        },
       ],
       isError: true,
     }

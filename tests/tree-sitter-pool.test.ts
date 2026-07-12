@@ -30,10 +30,15 @@ import * as path from "node:path"
 
 import { statSync } from "node:fs"
 
-import { searchCode } from "../src/lib/code-search"
+import {
+  searchCode,
+  __setStructuralBudgetForTest,
+} from "../src/lib/code-search"
 import {
   getTreeSitterPool,
   type PoolJob,
+  __armWorkerCrashOnceForTest,
+  __disarmWorkerCrashOnceForTest,
   __resetTreeSitterPoolForTests,
 } from "../src/lib/tree-sitter-pool/pool"
 
@@ -78,13 +83,14 @@ function spreadFixture(nFiles: number): (root: string) => void {
   }
 }
 
-// Reset the singleton (and any env knobs) between tests so each test gets a
-// fresh pool with its own env.
+// Reset the singleton and test-only seams between tests.
 beforeEach(() => {
   __resetTreeSitterPoolForTests()
 })
 afterEach(() => {
   __resetTreeSitterPoolForTests()
+  __disarmWorkerCrashOnceForTest()
+  __setStructuralBudgetForTest(null)
   delete process.env.GH_ROUTER_ENABLE_TS_POOL
   delete process.env.GH_ROUTER_DISABLE_TS_POOL
   delete process.env.GH_ROUTER_TS_WORKER_CRASH
@@ -142,8 +148,10 @@ poolDescribe("tree-sitter pool — determinism (pooled ≡ in-process)", () => {
   test("pooled output is byte-identical to the in-process path", async () => {
     const fx = makeFixture(spreadFixture(30))
     try {
-      // Pool ON.
+      // Pool ON. Equivalence is a completeness contract, not a latency-budget
+      // test, so allow cold workers to initialize under full-suite contention.
       process.env.GH_ROUTER_ENABLE_TS_POOL = "1"
+      __setStructuralBudgetForTest(3_600_000)
       __resetTreeSitterPoolForTests()
       const pooled = stable(await runRanked(fx.root))
 
@@ -173,6 +181,7 @@ poolDescribe("tree-sitter pool — determinism (pooled ≡ in-process)", () => {
     const fx = makeFixture(spreadFixture(25))
     try {
       process.env.GH_ROUTER_ENABLE_TS_POOL = "1"
+      __setStructuralBudgetForTest(3_600_000)
       const runs = new Set<string>()
       for (let i = 0; i < 5; i++) {
         runs.add(stable(await runRanked(fx.root)))
@@ -187,6 +196,7 @@ poolDescribe("tree-sitter pool — determinism (pooled ≡ in-process)", () => {
     const fx = makeFixture(spreadFixture(20))
     try {
       process.env.GH_ROUTER_ENABLE_TS_POOL = "1"
+      __setStructuralBudgetForTest(3_600_000)
       const r = await runRanked(fx.root)
       // Every file's `handlerForN` definition should be role-tagged.
       const defs = r.results.filter((h) => h.role === "definition")
@@ -247,15 +257,22 @@ poolDescribe("tree-sitter pool — worker-crash degradation", () => {
   test("after a crash, a subsequent search recovers (workers respawn)", async () => {
     const fx = makeFixture(spreadFixture(20))
     try {
-      // First search: workers crash.
-      process.env.GH_ROUTER_TS_WORKER_CRASH = "1"
+      // Arm exactly one dispatched job to crash. The same pool retries that job
+      // on a healthy replacement and remains alive for the second search.
+      __setStructuralBudgetForTest(3_600_000)
+      process.env.GH_ROUTER_TS_POOL_SIZE = "1"
       __resetTreeSitterPoolForTests()
+      __armWorkerCrashOnceForTest()
+      const pool = getTreeSitterPool()
+      expect(pool).not.toBeNull()
       const crashed = await runRanked(fx.root)
       expect(crashed.results.length).toBeGreaterThan(0)
+      const lifecycle = pool!.__workerLifecycleForTest()
+      expect(lifecycle.crashes).toBeGreaterThan(0)
+      expect(lifecycle.spawned).toBeGreaterThan(1)
 
-      // Second search WITHOUT the crash env: the pool respawns healthy workers
-      // and confirms definitions again.
-      delete process.env.GH_ROUTER_TS_WORKER_CRASH
+      // Keep the SAME singleton: this verifies respawn recovery, not clean startup.
+      expect(getTreeSitterPool()).toBe(pool)
       const fx2 = makeFixture(spreadFixture(20))
       try {
         const recovered = await runRanked(fx2.root)

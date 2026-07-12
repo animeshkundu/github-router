@@ -26,13 +26,13 @@ Four distinct strings can be injected, depending on the branch.
 
 > TIP (advisory): when this task needs code context, search lexical + semantic in parallel — one `mcp__search__code` call with mode:"lexical" and one with mode:"semantic", issued in the same turn — before concluding.
 
-### 2c. `PROMPT_SCOPE_SYSTEM`: the gpt-5.5 scope-inference system prompt (non-trivial, v2): `prompt-submit-hook.ts:88-99`
+### 2c. `PROMPT_SCOPE_SYSTEM`: the gpt-5.6-sol scope-inference system prompt (non-trivial, v2): `prompt-submit-hook.ts:88-99`
 
-Not injected into the model directly; it steers a single gpt-5.5 call whose OUTPUT (a <=120-word grounded scope/goal note) is injected. It instructs the scoping model to restate the user's own ask as one measurable objective, reference the most relevant files by name, and NOT invent new requirements. It adds the `/gh-research` + `/gh-orchestrate` line only when the task is large/cross-cutting.
+Not injected into the model directly; it steers a single gpt-5.6-sol call whose OUTPUT (a <=120-word grounded scope/goal note) is injected. It instructs the scoping model to restate the user's own ask as one measurable objective, reference the most relevant files by name, and NOT invent new requirements. It adds the `/gh-research` + `/gh-orchestrate` line only when the task is large/cross-cutting.
 
 ### 2d. `framePendingFindings`: prior-turn review findings wrapper (v2): `prompt-submit-hook.ts:133-140`
 
-> ADVISORY — independent review of your PREVIOUS change (NON-AUTHORITATIVE): an independent gpt-5.5 reviewer flagged the following. Evaluate each on its merits — fix the real ones, and ignore any wrong one with a one-line reason. You are NOT obligated to act on these.
+> ADVISORY — independent review of your PREVIOUS change (NON-AUTHORITATIVE): an independent gpt-5.6-sol reviewer flagged the following. Evaluate each on its merits — fix the real ones, and ignore any wrong one with a one-line reason. You are NOT obligated to act on these.
 
 ## 3. Firing logic
 
@@ -41,7 +41,7 @@ Not injected into the model directly; it steers a single gpt-5.5 call whose OUTP
 - Prior-turn findings are read + cleared and surfaced regardless of triviality (`:186-193`).
 - Triviality split via `isNonTrivialPrompt` (`:38-47`): true if the prompt is >=280 chars, matches a build/change verb regex (`implement|build|refactor|migrate|fix|debug|…`), or a multi-file scope phrase.
   - **Trivial** → static `PROMPT_SEARCH_TIP` only, no model call (`:202-205`).
-  - **Non-trivial** → parallel lexical+semantic `mcp__search__code` (limit 10) → one gpt-5.5 `/v1/responses` call at effort `low` → grounded scope note; the whole enrichment is timeout-bounded (22s default, per-call 8s search / 18s infer) with a fail-open to `PROMPT_STEER_GOAL` (`:207-248`).
+  - **Non-trivial** → parallel lexical+semantic `mcp__search__code` (limit 10) → one gpt-5.6-sol `/v1/responses` call at effort `low` → grounded scope note; the whole enrichment is timeout-bounded (22s default, per-call 8s search / 18s infer) with a fail-open to `PROMPT_STEER_GOAL` (`:207-248`).
 - `steerEnabled=false` (opt-out) → findings only, no goal/tip (`:196-199`).
 
 ## 4. Firing-appropriateness verdict
@@ -49,7 +49,7 @@ Not injected into the model directly; it steers a single gpt-5.5 call whose OUTP
 **Mixed: correct on the enrichment axis, over-fires on the static tip.**
 
 - The BUDGET RESET firing on every prompt is correct: it is the mechanism that makes the Stop gate's block budget per-prompt, and it is cheap (a local file unlink).
-- The MODEL-CALL enrichment is correctly gated to non-trivial prompts (`isNonTrivialPrompt`), so a `git commit -m fix` pays no gpt-5.5 latency. Good.
+- The MODEL-CALL enrichment is correctly gated to non-trivial prompts (`isNonTrivialPrompt`), so a `git commit -m fix` pays no gpt-5.6-sol latency. Good.
 - The STATIC `PROMPT_SEARCH_TIP` OVER-FIRES: it is injected on every trivial prompt (`:203`), including purely conversational ones ("yes", "thanks", "what did that do?") that will never touch code. It costs no network latency, but it spends the model's context window and attention on a non-sequitur nudge for a turn where searching code is irrelevant.
 - **What should fire instead:** the trivial branch should suppress the tip on prompts that plausibly need no code context. A one-line bounded classifier (fail-open: on any doubt, keep the tip) or even a cheap heuristic (skip the tip for prompts under ~15 chars or matching a pure-acknowledgement pattern) would remove the noise without a network call.
 
@@ -62,7 +62,7 @@ Not injected into the model directly; it steers a single gpt-5.5 call whose OUTP
 
 ## 6. Intelligent-hook analysis
 
-This hook is ALREADY the closest thing in the suite to the intelligent-hook pattern: a deterministic trigger (every prompt) + a bounded-inference gate (the 22s-bounded gpt-5.5 scope call) that decides how much context to add, with a fail-open to the regex goal. It honors all four non-negotiables: fail-open on timeout/error, advisory phrasing, bounded latency, widen-not-narrow (it only adds context).
+This hook is ALREADY the closest thing in the suite to the intelligent-hook pattern: a deterministic trigger (every prompt) + a bounded-inference gate (the 22s-bounded gpt-5.6-sol scope call) that decides how much context to add, with a fail-open to the regex goal. It honors all four non-negotiables: fail-open on timeout/error, advisory phrasing, bounded latency, widen-not-narrow (it only adds context).
 
 The one gap the pattern would close: extend the bounded gate to the TRIVIAL branch. Today triviality is a pure regex heuristic and the trivial path emits a fixed tip. A cheap classify ("does this prompt need code grounding at all"): or simply not emitting the tip when the enrichment is skipped for a genuinely conversational prompt: would make the "right amount" hold on the low end too. This must stay fail-open (default to keeping the tip) so a misclassification never suppresses genuinely useful context.
 
