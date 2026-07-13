@@ -34,7 +34,7 @@ const deps: any = {
   resolveAgentActor: async () => ({ login: "copilot-swe-agent", botId: "BOT_x" }),
   resolveAgentRoster: async () => new Map([["copilot", { login: "copilot-swe-agent", botId: "BOT_x" }]]),
   startTask: async () => ({ taskId: `task-${Math.floor(Math.random() * 1e6)}`, state: "queued" }),
-  followUpTask: async () => ({ ok: true as const }),
+  continueTaskOnBranch: async () => ({ taskId: "continue-task", state: "in_progress" as const }),
   createIssue: async () => ({ number: 101, nodeId: "I_x", url: "u" }),
   assignAgent: async () => ({ assigned: true as const, via: "graphql" as const }),
 }

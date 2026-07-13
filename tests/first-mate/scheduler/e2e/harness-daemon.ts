@@ -219,7 +219,7 @@ async function runRealDrive(): Promise<void> {
     verifyAndConsumeApproval: fail("verifyAndConsumeApproval"),
     recordApproval: fail("recordApproval"),
     markAnswered: fail("markAnswered"),
-    followUpTask: fail("followUpTask"),
+    continueTaskOnBranch: fail("continueTaskOnBranch"),
     cancelTask: fail("cancelTask"),
     createIssue: fail("createIssue"),
     resolveAgentRoster: fail("resolveAgentRoster"),

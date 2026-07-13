@@ -102,7 +102,11 @@ import { state } from "./lib/state"
 import { resolveModel } from "./lib/utils"
 
 function isFirstMateSkillName(name: string): boolean {
-  return name === "gh-first-mate" || name === "gh-first-mate-scaffold"
+  return (
+    name === "gh-first-mate" ||
+    name === "gh-first-mate-scaffold" ||
+    name === "gh-first-mate-operate"
+  )
 }
 
 export const claudeArgs = {

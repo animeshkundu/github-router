@@ -119,6 +119,16 @@ export interface UnitRow {
   copilotMentionSha?: string | null
   /** Total `@copilot` fix mentions posted over this unit's life (per-mission budget counter). */
   copilotComments?: number
+  /**
+   * One-outstanding-answer-per-head guard for `answer_agent_question`: the PR head
+   * SHA the most recent @copilot ANSWER mention was posted against. `waiting_for_user`
+   * re-emits answer_agent_question every wake, so this suppresses a duplicate answer
+   * mention while the head is unchanged (the agent hasn't acted on the prior answer
+   * yet); a fresh head (the agent pushed or asked a new question) allows a new
+   * answer. Distinct from `copilotMentionSha` (fix mentions) so the two never
+   * interfere. Optional → back-compat.
+   */
+  answerMentionSha?: string | null
   /** Stable digest of mission goal + repo + unit title used to skip duplicate queued/build units. */
   goalHash?: string
   /** Baseline test-count ratchet captured by the merge gate; later gates must not decrease it. */

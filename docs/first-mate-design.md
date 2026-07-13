@@ -91,12 +91,19 @@ dependencies are used to fill confident values. Ambiguous facts stay visible as
 `<!-- TODO: ... -->` instead of being guessed.
 
 The seeded foundation includes identical guidance in `CLAUDE.md`, `AGENTS.md`,
-`GEMINI.md`, and `.github/copilot-instructions.md`; mirrored role agents in
-`.github/agents/` and `.claude/agents/`; ADR template + initial ADR, changelog,
-learnings, history template, plans/research readmes, PR template, test
-instructions, Copilot setup, and starter CI. It deliberately does **not** seed
-factory-protocol or `docs/factory/` files: first-mate remains the external
-orchestrator, while the product repo holds only what agents and CI need to read.
+`GEMINI.md`, and `.github/copilot-instructions.md` (including an "Operating
+autonomously" directive so agents proceed on best judgment and record assumptions
+rather than pausing to ask); mirrored role agents in `.github/agents/` and
+`.claude/agents/` — the execution roles `planner`, `implementer`, `reviewer`,
+`researcher`, `tester`, plus the operator hats `ceo`, `cto`, `cpo` that carry the
+autonomous product operating protocol; the phased product playbook at
+`docs/playbook/README.md` (discover → niche → position → scope → build → launch →
+measure → iterate → grow, each gated on an externally verifiable checkpoint); ADR
+template + initial ADR, changelog, learnings, history template, plans/research
+readmes, PR template, test instructions, Copilot setup, and starter CI. It
+deliberately does **not** seed factory-protocol or `docs/factory/` files:
+first-mate remains the external orchestrator, while the product repo holds only
+what agents and CI need to read.
 
 Non-clobber policy is three-way. `add-missing-only` seeds absent files and skips
 present files. `overwrite-approved` replaces existing files only when explicitly
@@ -341,8 +348,10 @@ intentionally narrow and reversible: `author_fix`, `answer_agent_question`, and
 `decompose`. Auto-answer requires a valid verdict shape, confidence ≥ 0.85,
 `known`, and `low` stakes; `decompose` additionally runs a deterministic dependency
 verifier over the unit-list DAG. `author_fix` remains downstream-checked by CI and
-the different-lab floor before any merge, and `answer_agent_question` is only
-informational to the cloud agent. Any uncertainty, unknown kind, malformed payload,
+the different-lab floor before any merge, and `answer_agent_question` only relays a
+text answer to the cloud agent through the same steering channels a human uses (an
+`@copilot` PR mention, or a branch task-continue when there is no PR yet — never a
+merge-authorizing action). Any uncertainty, unknown kind, malformed payload,
 novel/high-stakes classification, or low confidence escalates. Merge-authorizing
 kinds (`review_plan`, `judge_review`, `merge_approval`, `approve_merge`) are hard
 excluded from the Tier1 live path and always route to the best-model/human gate.
@@ -421,10 +430,18 @@ repo that agents can read by handle.
   `/tasks/{id}` → 405, one-shot), so the two-task flow sidesteps the steerability
   problem. If `startTask` is unavailable, dispatch falls back to issue-assignment,
   which implements directly (no plan phase) — a degraded path.
-- **Agent-Tasks preview details:** `followUpTask()` and `cancelTask()` still have
-  TODOs for endpoint suffix shape in `src/lib/agent/tasks.ts`. `followUpTask()` is
-  no longer on any hot path (steering is via fresh tasks / PR reviews) because the
-  task is one-shot.
+- **Answering a blocked agent (`waiting_for_user`):** the Agent-Tasks task is
+  one-shot (`POST /tasks/{id}` → 405) with no follow-up/steer endpoint, so
+  `answer_agent_question` delivers its text answer through the documented steering
+  channels — an `@copilot` mention on the PR (the trigger that actually wakes the
+  agent; a bare comment does not) when a PR exists, else `continueTaskOnBranch()`, a
+  re-POST to the tasks endpoint with `head_ref` set to the agent's branch that
+  starts a fresh session on that branch (`src/lib/agent/tasks.ts`). Prevention is
+  layered on top: every dispatch prompt and the scaffolded repo guidance instruct
+  the agent to proceed on best judgment and record assumptions rather than pausing
+  to ask, which keeps most agents out of `waiting_for_user` entirely. The dead
+  `/tasks/{id}` follow-up stub is retired; `cancelTask()` still has a TODO for its
+  endpoint suffix shape.
 - **Non-Copilot Tasks parity:** Anthropic/OpenAI cloud-agent task behavior is
   represented in the roster model but still needs live parity verification.
 - **Server-side panel-read hardening:** merge approval is head/base-bound and

@@ -244,7 +244,7 @@ function harness(units: UnitRow[], missions: Mission[] = [mission()]): Harness {
       taskCounter += 1
       return { taskId: `started-${taskCounter}`, state: "queued" }
     }),
-    followUpTask: mock(async () => ({ ok: true as const })),
+    continueTaskOnBranch: mock(async () => ({ taskId: "continue-task", state: "in_progress" as const })),
     cancelTask: mock(async () => ({ cancelled: true as const })),
     createIssue: mock(async () => {
       issueCounter += 1

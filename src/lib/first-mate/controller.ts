@@ -26,7 +26,7 @@ import {
 } from "~/lib/agent/service"
 import {
   cancelTask as realCancelTask,
-  followUpTask as realFollowUpTask,
+  continueTaskOnBranch as realContinueTaskOnBranch,
   startTask as realStartTask,
 } from "~/lib/agent/tasks"
 import type { RepoRef as AgentRepoRef } from "~/lib/agent/types"
@@ -102,7 +102,7 @@ export interface ControllerDeps {
   readDecisions: typeof realReadDecisions
   markAnswered: typeof realMarkAnswered
   startTask: typeof realStartTask
-  followUpTask: typeof realFollowUpTask
+  continueTaskOnBranch: typeof realContinueTaskOnBranch
   cancelTask: typeof realCancelTask
   createIssue: typeof realCreateIssue
   resolveAgentActor: typeof realResolveAgentActor
@@ -349,7 +349,7 @@ export const defaultDeps: ControllerDeps = {
   readDecisions: realReadDecisions,
   markAnswered: realMarkAnswered,
   startTask: realStartTask,
-  followUpTask: realFollowUpTask,
+  continueTaskOnBranch: realContinueTaskOnBranch,
   cancelTask: realCancelTask,
   createIssue: realCreateIssue,
   resolveAgentActor: realResolveAgentActor,
@@ -1052,12 +1052,59 @@ async function applyModelAnswer(
     applied.push(`sent fix instruction for ${unit.missionId}:${unitHandle(unit)}`)
   } else if (kind === "answer_agent_question") {
     const answerText = stringValue(verdict.answer)
-    // The agent surfaces questions in its PR thread; answer there via a comment.
-    if (answerText !== undefined && unit.pr !== null) {
-      await assertFenceHeld("agent-question comment")
-      await deps.postComment(repo, unit.pr, answerText)
-      unit.lastSteer = { sha: unit.headSha ?? undefined, atMs: Date.now() }
-      applied.push(`answered agent question for ${unit.missionId}:${unitHandle(unit)}`)
+    if (answerText !== undefined) {
+      if (unit.pr !== null) {
+        // A PR exists → answer with an @copilot MENTION, the documented trigger
+        // that actually wakes the cloud agent (a bare comment does not reliably
+        // re-trigger it). `waiting_for_user` re-emits answer_agent_question every
+        // wake, so guard one-outstanding-answer-per-head (mirrors author_fix's
+        // copilotMentionSha guard, dedicated field): suppress a duplicate mention
+        // while the head is unchanged; a fresh head (agent acted / asked anew)
+        // allows a new answer.
+        const currentHead = unit.headSha ?? undefined
+        const answerOutstanding =
+          unit.answerMentionSha != null &&
+          currentHead != null &&
+          unit.answerMentionSha === currentHead
+        if (!answerOutstanding) {
+          await assertFenceHeld("agent-question mention")
+          await deps.mentionCopilot(repo, unit.pr, answerText)
+          unit.answerMentionSha = currentHead ?? null
+          unit.lastSteer = { sha: currentHead, atMs: Date.now() }
+          applied.push(`answered agent question via @copilot for ${unit.missionId}:${unitHandle(unit)}`)
+        }
+      } else if (unit.branch != null && unit.branch.length > 0) {
+        // No PR yet (a plan-mode / pre-PR block — the common case the user hit).
+        // The Agent-Tasks task is one-shot with no follow-up endpoint; the
+        // documented way to give it new input is a re-POST bound to the agent's
+        // existing branch (head_ref), which starts a fresh session on that branch.
+        // Resolve the model best-effort: an invalid PINNED model must not wedge
+        // this unit in an infinite re-enqueue loop (delivery is best-effort), so
+        // fall back to the provider default rather than throwing. Setting the new
+        // taskId + provider breaks the waiting_for_user re-emit; the Idempotency-Key
+        // dedupes a retry of the SAME continue (e.g. if the taskId persist fails).
+        const mission = missions.find((entry) => entry.id === unit.missionId)
+        let model: string | undefined
+        try {
+          model = resolveCloudAgentModel(unit.model ?? mission?.defaultModel)
+        } catch {
+          model = undefined
+        }
+        await assertFenceHeld("agent-question task-continue")
+        const task = await deps.continueTaskOnBranch(repo, {
+          headRef: unit.branch,
+          baseRef: unit.baseRef ?? undefined,
+          prompt: answerText,
+          model,
+          idempotencyKey: `continue:${unit.id ?? unitHandle(unit)}:${unit.taskId ?? "none"}`,
+        })
+        unit.taskId = task.taskId
+        unit.provider = providerState(task.state, "in_progress")
+        unit.lastSteer = { atMs: Date.now() }
+        applied.push(`answered agent question via task-continue for ${unit.missionId}:${unitHandle(unit)}`)
+      }
+      // else: no PR and no branch yet (pure early research phase) — leave for the
+      // next wake's re-emit, or the task timeout to terminalize.
     }
   } else if (kind === "judge_review") {
     // Only a unit the engine actually placed into verification can receive a
@@ -2233,6 +2280,15 @@ function unitIdInstruction(unit: UnitRow): string {
   return `Controller correlation marker: ${marker}. The Agent-Tasks API has no branch/label field, so this is cooperative: include this exact marker in the branch name if possible, put it on its own line in the PR body, and include it in the first commit message trailer.`
 }
 
+/**
+ * Prevention layer for plan-mode stalls: the documented lever to keep a Copilot
+ * cloud agent from parking in `waiting_for_user` is to instruct it to proceed on
+ * best judgment and record assumptions instead of pausing to ask. Included in
+ * every dispatch prompt; mirrored in scaffolded repo guidance.
+ */
+const AUTONOMY_DIRECTIVE =
+  "Work autonomously: do not stop to ask clarifying questions. If a requirement is ambiguous, choose the most reasonable interpretation, state the assumption explicitly (in the plan and the pull request description), and continue. Surface open questions as notes rather than blocking on them."
+
 export function planPrompt(unit: UnitRow, mission: Mission, dateStr: string): string {
   const slug = artifactSlug(unit)
   const parts = [
@@ -2244,6 +2300,7 @@ export function planPrompt(unit: UnitRow, mission: Mission, dateStr: string): st
     `Persist your work as durable artifacts committed on the branch: write your research and findings to \`docs/research/${dateStr}-${slug}.md\` and your step-by-step implementation plan to \`docs/plans/${dateStr}-${slug}.md\`. Create the \`docs/research\` and \`docs/plans\` directories if they do not exist, and commit both files on the branch so the implementation task can read them.`,
   ]
   if (mission.houseRules !== undefined) parts.splice(2, 0, `House rules:\n${mission.houseRules}`)
+  parts.push(AUTONOMY_DIRECTIVE)
   parts.push(renderDod([mission.acceptanceCriteria]))
   return parts.join("\n\n")
 }
@@ -2275,6 +2332,7 @@ export function buildPrompt(unit: UnitRow, mission: Mission, dateStr: string): s
       ? `If a committed implementation plan for this unit is present (\`docs/plans/${dateStr}-${slug}.md\`, or a file under \`docs/plans/\` whose name ends with \`-${slug}.md\`) and the research at \`docs/research/${dateStr}-${slug}.md\`, read them for extra detail — but the approved plan above is authoritative and does not depend on those files existing. Keep any such artifacts up to date with deviations you make, and if a \`LEARNINGS.md\` exists at the repository root, append a dated entry summarizing what you learned.`
       : `Read the committed implementation plan at \`docs/plans/${dateStr}-${slug}.md\` and the research at \`docs/research/${dateStr}-${slug}.md\` (if the exact dated filename is absent, locate the plan committed for this unit under \`docs/plans/\` whose name ends with \`-${slug}.md\`) and implement it. Keep those artifacts up to date with any deviations you make, and if a \`LEARNINGS.md\` exists at the repository root, append a dated entry summarizing what you learned.`,
   )
+  parts.push(AUTONOMY_DIRECTIVE)
   parts.push(renderDod([mission.acceptanceCriteria]))
   return parts.join("\n\n")
 }

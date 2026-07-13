@@ -153,7 +153,7 @@ function harness(units: UnitRow[], missions: Mission[] = [mission()]) {
       r.resolvedMs = Date.now()
     }),
     startTask: mock(async () => { taskCounter += 1; return { taskId: `t-${taskCounter}`, state: "queued" } }),
-    followUpTask: mock(async () => ({ ok: true as const })),
+    continueTaskOnBranch: mock(async () => ({ taskId: "continue-task", state: "in_progress" as const })),
     cancelTask: mock(async () => ({ cancelled: true as const })),
     createIssue: mock(async () => ({ number: 200, nodeId: "I200", url: "https://gh/200" })),
     resolveAgentActor: mock(async (_r: unknown, key: AgentKey) => actor(key)),

@@ -1,10 +1,10 @@
 import { getSessionLog } from "./capi"
 import { ghRest } from "./rest"
 import type {
+  ContinueTaskInput,
   RepoRef,
   StartTaskInput,
   TaskCancelResult,
-  TaskFollowUpResult,
   TaskStartResult,
   TaskStatusResult,
 } from "./types"
@@ -13,7 +13,6 @@ export const AGENT_TASKS_API_VERSION = "2026-03-10"
 
 const LOG_EXCERPT_LIMIT = 4000
 const TRUNCATED_MARKER = "…[truncated]…"
-const FOLLOW_UP_TASK_PATH_SUFFIX = "" // TODO verify preview endpoint shape.
 const CANCEL_TASK_PATH_SUFFIX = "/cancel" // TODO verify preview endpoint shape.
 
 function segment(value: string | number): string {
@@ -179,16 +178,37 @@ export async function getTask(repo: RepoRef, taskId: string): Promise<TaskStatus
   }
 }
 
-export async function followUpTask(
+/**
+ * Continue an existing cloud-agent task by re-POSTing to the tasks endpoint with
+ * `head_ref` set to the agent's existing branch. There is NO follow-up/steer
+ * endpoint on the Agent-Tasks preview API; the documented way to give a running
+ * or blocked task new input (e.g. the answer to its plan-mode question) is to
+ * start a fresh session bound to the same branch — GitHub commits to `head_ref`
+ * instead of creating a new branch. Returns the NEW task/session id so the
+ * caller can re-point observation at it. Best-effort: the API is public preview
+ * and pre-PR (branch-only) continue is inferred, not documented-guaranteed.
+ */
+export async function continueTaskOnBranch(
   repo: RepoRef,
-  taskId: string,
-  prompt: string,
-): Promise<TaskFollowUpResult> {
-  await ghRest<unknown>("POST", `${taskPath(repo, taskId)}${FOLLOW_UP_TASK_PATH_SUFFIX}`, {
+  input: ContinueTaskInput,
+): Promise<TaskStartResult> {
+  const body: Record<string, unknown> = { prompt: input.prompt, head_ref: input.headRef }
+  if (input.baseRef !== undefined) body.base_ref = input.baseRef
+  if (input.model !== undefined) body.model = input.model
+
+  const response = await ghRest<Record<string, unknown>>("POST", repoTasksPath(repo), {
     apiVersion: AGENT_TASKS_API_VERSION,
-    body: { prompt },
+    body,
+    // A continue starts a new session; never auto-retry (an unconfirmed success
+    // must not double-dispatch). The Idempotency-Key dedupes a same-attempt re-POST.
+    retry: false,
+    ...(input.idempotencyKey
+      ? { headers: { "Idempotency-Key": input.idempotencyKey } }
+      : {}),
   })
-  return { ok: true }
+  const taskId = stringField(response, ["task_id", "taskId", "id"]) ?? ""
+  const state = stringField(response, ["state", "status"]) ?? "unknown"
+  return { taskId, state }
 }
 
 export async function cancelTask(

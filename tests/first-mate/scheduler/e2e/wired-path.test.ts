@@ -148,7 +148,7 @@ function makeDeps(observe: Map<string, Observed>): {
         "classifyStuck",
         "verifyAndConsumeApproval",
         "recordApproval",
-        "followUpTask",
+        "continueTaskOnBranch",
         "cancelTask",
         "createIssue",
         "resolveAgentRoster",

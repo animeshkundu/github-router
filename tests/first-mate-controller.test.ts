@@ -205,11 +205,7 @@ function harness(
       taskCounter += 1
       return { taskId: `started-${taskCounter}`, state: "queued" }
     }),
-    followUpTask: mock(
-      async (_repo: { owner: string; repo: string }, _taskId: string, _prompt: string) => ({
-        ok: true as const,
-      }),
-    ),
+    continueTaskOnBranch: mock(async () => ({ taskId: "continue-task", state: "in_progress" as const })),
     cancelTask: mock(async () => ({ cancelled: true as const })),
     createIssue: mock(async () => {
       issueCounter += 1
@@ -471,8 +467,8 @@ test("review_plan approve re-dispatches a fresh build task carrying the approved
   )
 
   // A fresh build task was dispatched (createPullRequest:true) carrying the plan —
-  // NOT a followUpTask (the one-shot plan task 405s on follow-up).
-  expect(h.deps.followUpTask).not.toHaveBeenCalled()
+  // NOT a continueTaskOnBranch (the one-shot plan task 405s on follow-up).
+  expect(h.deps.continueTaskOnBranch).not.toHaveBeenCalled()
   const buildCall = (
     h.deps.startTask as unknown as { mock: { calls: unknown[][] } }
   ).mock.calls.find((c) => (c[1] as { createPullRequest?: boolean }).createPullRequest === true)
@@ -503,7 +499,7 @@ test("review_plan refine re-dispatches a fresh plan task with the feedback and s
     h.deps,
   )
 
-  expect(h.deps.followUpTask).not.toHaveBeenCalled()
+  expect(h.deps.continueTaskOnBranch).not.toHaveBeenCalled()
   const planCall = (
     h.deps.startTask as unknown as { mock: { calls: unknown[][] } }
   ).mock.calls.find((c) => {
@@ -3112,4 +3108,107 @@ test("plan units still dispatch in parallel while a build is active", async () =
 
   expect(plan.taskId).toBe("started-1")
   expect(h.deps.startTask).toHaveBeenCalledTimes(1)
+})
+
+test("answer_agent_question with an open PR wakes the agent via an @copilot mention (not a bare comment)", async () => {
+  const row = unit({
+    provider: "waiting_for_user",
+    phase: "build",
+    dispatchMode: "build",
+    pr: 7,
+    headSha: "head-7",
+    artifact: "pr_open",
+  })
+  const h = harness([row])
+  h.observations.set("1", { provider: "waiting_for_user", prs: [openPr(7, "head-7")] })
+
+  await advance(
+    {
+      modelAnswers: [
+        { requestId: "m1:1:answer_agent_question", verdict: { answer: "Use Postgres, not SQLite." } },
+      ],
+    },
+    h.deps,
+  )
+
+  expect(h.deps.mentionCopilot).toHaveBeenCalled()
+  const call = (h.deps.mentionCopilot as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]
+  expect(call[1]).toBe(7)
+  expect(call[2]).toContain("Use Postgres")
+  // The documented wake trigger is the @copilot mention — never a bare comment.
+  expect(h.deps.postComment).not.toHaveBeenCalled()
+  expect(h.deps.continueTaskOnBranch).not.toHaveBeenCalled()
+})
+
+test("answer_agent_question with no PR but a branch continues the task on that branch", async () => {
+  const row = unit({
+    provider: "waiting_for_user",
+    phase: "plan",
+    dispatchMode: "plan",
+    pr: null,
+    branch: "copilot/feature-x",
+    baseRef: "main",
+  })
+  const h = harness([row])
+  h.observations.set("1", { provider: "in_progress", prs: [] })
+
+  await advance(
+    {
+      modelAnswers: [
+        { requestId: "m1:1:answer_agent_question", verdict: { answer: "Target Python 3.12." } },
+      ],
+    },
+    h.deps,
+  )
+
+  expect(h.deps.continueTaskOnBranch).toHaveBeenCalled()
+  const call = (h.deps.continueTaskOnBranch as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]
+  expect((call[1] as { headRef: string }).headRef).toBe("copilot/feature-x")
+  expect((call[1] as { baseRef?: string }).baseRef).toBe("main")
+  expect((call[1] as { prompt: string }).prompt).toContain("Python 3.12")
+  // Re-points observation at the new session and doesn't fall back to a mention.
+  expect(row.taskId).toBe("continue-task")
+  expect(h.deps.mentionCopilot).not.toHaveBeenCalled()
+})
+
+test("answer_agent_question with neither PR nor branch delivers nothing (re-emit / timeout backstop)", async () => {
+  const row = unit({ provider: "waiting_for_user", pr: null, branch: null })
+  const h = harness([row])
+  h.observations.set("1", { provider: "waiting_for_user", prs: [] })
+
+  await advance(
+    {
+      modelAnswers: [{ requestId: "m1:1:answer_agent_question", verdict: { answer: "anything" } }],
+    },
+    h.deps,
+  )
+
+  expect(h.deps.mentionCopilot).not.toHaveBeenCalled()
+  expect(h.deps.continueTaskOnBranch).not.toHaveBeenCalled()
+  expect(h.deps.postComment).not.toHaveBeenCalled()
+})
+
+test("answer_agent_question does not re-mention @copilot while the PR head is unchanged", async () => {
+  const row = unit({
+    provider: "waiting_for_user",
+    phase: "build",
+    dispatchMode: "build",
+    pr: 7,
+    headSha: "head-7",
+    artifact: "pr_open",
+  })
+  const h = harness([row])
+  h.observations.set("1", { provider: "waiting_for_user", prs: [openPr(7, "head-7")] })
+
+  const answer = {
+    modelAnswers: [{ requestId: "m1:1:answer_agent_question", verdict: { answer: "Use Postgres." } }],
+  }
+  await advance(answer, h.deps)
+  await advance(answer, h.deps)
+
+  // One outstanding answer per head: the second wake (still waiting_for_user on the
+  // same head) must not spam a duplicate mention.
+  expect(
+    (h.deps.mentionCopilot as unknown as { mock: { calls: unknown[][] } }).mock.calls.length,
+  ).toBe(1)
 })

@@ -75,7 +75,7 @@ function fakeDeps(units: UnitRow[]): { deps: ControllerDeps; calls: Record<strin
     findByKey: mutating("findByKey"),
     markAnswered: mutating("markAnswered"),
     startTask: mutating("startTask"),
-    followUpTask: mutating("followUpTask"),
+    continueTaskOnBranch: mutating("continueTaskOnBranch"),
     cancelTask: mutating("cancelTask"),
     createIssue: mutating("createIssue"),
     resolveAgentActor: mutating("resolveAgentActor"),

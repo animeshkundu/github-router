@@ -15,11 +15,17 @@ describe("buildScaffoldFiles", () => {
     const files = buildScaffoldFiles({ repoName: "test-repo" })
     const paths = files.map((f) => f.path).sort()
     expect(paths).toEqual([
+      ".claude/agents/ceo.md",
+      ".claude/agents/cpo.md",
+      ".claude/agents/cto.md",
       ".claude/agents/implementer.md",
       ".claude/agents/planner.md",
       ".claude/agents/researcher.md",
       ".claude/agents/reviewer.md",
       ".claude/agents/tester.md",
+      ".github/agents/ceo.md",
+      ".github/agents/cpo.md",
+      ".github/agents/cto.md",
       ".github/agents/implementer.md",
       ".github/agents/planner.md",
       ".github/agents/researcher.md",
@@ -39,6 +45,7 @@ describe("buildScaffoldFiles", () => {
       "docs/adrs/0000-template.md",
       "docs/history/0000-template.md",
       "docs/plans/README.md",
+      "docs/playbook/README.md",
       "docs/research/README.md",
     ].sort())
   })
@@ -93,6 +100,50 @@ describe("buildScaffoldFiles", () => {
     for (const section of ["## Purpose", "## When to use", "## Inputs (cold-start contract)", "## Method", "## Quality bar", "## Output contract", "## Self-reminder"]) {
       expect(githubPlanner.content).toContain(section)
     }
+  })
+
+  it("emits and mirrors the C-suite operator agents", () => {
+    const files = buildScaffoldFiles({ repoName: "test-repo" })
+    for (const role of ["ceo", "cto", "cpo"]) {
+      const github = files.find((f) => f.path === `.github/agents/${role}.md`)!
+      const claude = files.find((f) => f.path === `.claude/agents/${role}.md`)!
+      expect(github).toBeDefined()
+      expect(github.content).toBe(claude.content)
+      expect(github.content).toContain(`name: ${role}`)
+      expect(github.content).toContain("model: claude-opus-4.8")
+      expect(github.content).toContain("externally verifiable")
+    }
+  })
+
+  it("seeds an enhanceable product operating playbook", () => {
+    const desired = buildScaffoldFiles({ repoName: "test-repo" })
+    const playbook = desired.find((f) => f.path === "docs/playbook/README.md")!
+    expect(playbook).toBeDefined()
+    expect(playbook.content).toContain("## Phase 0 — Discover")
+    expect(playbook.content).toContain("## Phase 8 — Grow")
+    expect(playbook.content).toContain("## Governance")
+    expect(playbook.content).toContain("## Anti-patterns")
+
+    const plan = planScaffoldFiles({
+      mode: "enhance",
+      desired: [playbook],
+      existing: [{ path: playbook.path, content: "# Custom playbook\n\n## Phase 0 — Discover\n\nkeep this\n" }],
+    })
+    expect(plan.filesToCommit).toHaveLength(1)
+    expect(plan.filesToCommit[0]!.content).toContain("keep this")
+    expect(plan.filesToCommit[0]!.content).toContain("## Phase 1 — Niche")
+    expect(plan.reports[0]?.status).toBe("enhanced")
+    expect(plan.reports[0]?.appendedSections).toContain("## Phase 1 — Niche")
+  })
+
+  it("guidance tells autonomous operators to proceed and record assumptions", () => {
+    const files = buildScaffoldFiles({ repoName: "test-repo" })
+    const guidance = files.find((f) => f.path === "AGENTS.md")!
+    expect(guidance.content).toContain("## Operating autonomously")
+    expect(guidance.content).toContain("do not pause for clarification")
+    expect(guidance.content).toContain("State assumptions explicitly in the plan and PR body")
+    expect(guidance.content).toContain("docs/playbook/README.md")
+    expect(guidance.content).toContain("`ceo`, `cto`, or `cpo`")
   })
 
   it("gears guidance and CI from detected options", () => {
