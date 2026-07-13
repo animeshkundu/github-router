@@ -3212,3 +3212,122 @@ test("answer_agent_question does not re-mention @copilot while the PR head is un
     (h.deps.mentionCopilot as unknown as { mock: { calls: unknown[][] } }).mock.calls.length,
   ).toBe(1)
 })
+
+function buildDispatchCount(h: { deps: { startTask: unknown } }): number {
+  return (h.deps.startTask as unknown as { mock: { calls: unknown[][] } }).mock.calls.filter(
+    (c) => (c[1] as { createPullRequest?: boolean }).createPullRequest === true,
+  ).length
+}
+
+test("concurrent builds: disjoint fileScopes dispatch two build tasks at once", async () => {
+  const a = unit({ id: "u-a", issue: 1, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "plan A", fileScopes: ["src/a", "docs/a"] })
+  const b = unit({ id: "u-b", issue: 2, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "plan B", fileScopes: ["src/b", "docs/b"] })
+  const h = harness([a, b])
+  h.observations.set("1", { provider: "in_progress", prs: [] })
+  h.observations.set("2", { provider: "in_progress", prs: [] })
+
+  await advance(
+    {
+      modelAnswers: [
+        { requestId: "m1:1:review_plan", verdict: { decision: "approve" } },
+        { requestId: "m1:2:review_plan", verdict: { decision: "approve" } },
+      ],
+    },
+    h.deps,
+  )
+
+  // Provably independent → both build concurrently.
+  expect(buildDispatchCount(h)).toBe(2)
+  expect(a.dispatchMode).toBe("build")
+  expect(b.dispatchMode).toBe("build")
+})
+
+test("overlapping fileScopes serialize: only one build dispatches, the other defers", async () => {
+  const a = unit({ id: "u-a", issue: 1, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "plan A", fileScopes: ["src/shared"] })
+  const b = unit({ id: "u-b", issue: 2, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "plan B", fileScopes: ["src/shared/sub.ts"] })
+  const h = harness([a, b])
+  h.observations.set("1", { provider: "in_progress", prs: [] })
+  h.observations.set("2", { provider: "completed", prs: [] })
+
+  await advance(
+    {
+      modelAnswers: [
+        { requestId: "m1:1:review_plan", verdict: { decision: "approve" } },
+        { requestId: "m1:2:review_plan", verdict: { decision: "approve" } },
+      ],
+    },
+    h.deps,
+  )
+
+  // `src/shared` contains `src/shared/sub.ts` → overlap → the second build defers.
+  expect(buildDispatchCount(h)).toBe(1)
+  expect(b.dispatchMode).toBe("plan")
+})
+
+test("no declared fileScopes serialize builds (back-compat one-at-a-time)", async () => {
+  const a = unit({ id: "u-a", issue: 1, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "plan A" })
+  const b = unit({ id: "u-b", issue: 2, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "plan B" })
+  const h = harness([a, b])
+  h.observations.set("1", { provider: "in_progress", prs: [] })
+  h.observations.set("2", { provider: "completed", prs: [] })
+
+  await advance(
+    {
+      modelAnswers: [
+        { requestId: "m1:1:review_plan", verdict: { decision: "approve" } },
+        { requestId: "m1:2:review_plan", verdict: { decision: "approve" } },
+      ],
+    },
+    h.deps,
+  )
+
+  // Unknown scope can't prove independence → the safe pre-existing serial behavior.
+  expect(buildDispatchCount(h)).toBe(1)
+  expect(b.dispatchMode).toBe("plan")
+})
+
+test("globby fileScopes cannot prove disjointness against files they match (no false parallelism)", async () => {
+  const a = unit({ id: "u-a", issue: 1, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "plan A", fileScopes: ["src/*.ts"] })
+  const b = unit({ id: "u-b", issue: 2, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "plan B", fileScopes: ["src/main.ts"] })
+  const h = harness([a, b])
+  h.observations.set("1", { provider: "in_progress", prs: [] })
+  h.observations.set("2", { provider: "completed", prs: [] })
+
+  await advance(
+    {
+      modelAnswers: [
+        { requestId: "m1:1:review_plan", verdict: { decision: "approve" } },
+        { requestId: "m1:2:review_plan", verdict: { decision: "approve" } },
+      ],
+    },
+    h.deps,
+  )
+
+  // `src/*.ts` collapses to its parent dir `src`, which contains `src/main.ts` →
+  // overlap → the second build serializes (a single `*` must not read as disjoint).
+  expect(buildDispatchCount(h)).toBe(1)
+  expect(b.dispatchMode).toBe("plan")
+})
+
+test("addUnitsToMission threads fileScopes from the decompose spec", async () => {
+  const m = mission({ id: "mX" })
+  const upserted: UnitRow[] = []
+  const deps = {
+    upsertMission: mock(async () => {}),
+    upsertUnit: mock(async (_repo: RepoRef, u: UnitRow) => {
+      upserted.push(u)
+    }),
+  }
+  await addUnitsToMission(
+    m,
+    [
+      { title: "A", fileScopes: ["src/a", " docs/a "] },
+      { title: "B", fileScopes: "src/b" }, // not an array → dropped
+      { title: "C" }, // no scopes
+    ],
+    deps,
+  )
+  expect(upserted.find((u) => u.title === "A")?.fileScopes).toEqual(["src/a", "docs/a"])
+  expect(upserted.find((u) => u.title === "B")?.fileScopes).toBeUndefined()
+  expect(upserted.find((u) => u.title === "C")?.fileScopes).toBeUndefined()
+})

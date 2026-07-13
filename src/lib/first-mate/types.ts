@@ -157,6 +157,16 @@ export interface UnitRow {
   dependsOn: string[]
   /** Set iff this unit is waiting on a human decision (its decisionId). */
   blockingDecisionId?: string | null
+  /**
+   * Declared file-scope allowlist for this unit (paths / directory prefixes /
+   * `dir/**` globs it is permitted to touch, from the decompose spec). Load-bearing
+   * ONLY for the concurrent-build gate: two build units in the same mission may
+   * build CONCURRENTLY only when BOTH declare non-empty, provably DISJOINT scopes.
+   * Absent/empty → the unit is treated as potentially-overlapping and its build
+   * serializes (the safe, pre-existing one-build-per-mission behavior). Optional →
+   * back-compat.
+   */
+  fileScopes?: string[]
   /** True once an independent (different-lab) verifier has been assigned. */
   verifierAssigned?: boolean
   /**

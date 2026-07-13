@@ -129,6 +129,19 @@ wake does the mechanism in code:
    capacity cap.
 8. The wake returns compact queues and the next suggested wake time.
 
+### Concurrent builds for provably-independent units
+
+Builds serialize per mission by default (one active build at a time — avoids
+racing PRs on overlapping files). A decompose unit may declare a `fileScopes`
+allowlist (paths / `dir/**` prefixes it may touch); `canDispatchBuild()` then lets
+build units run CONCURRENTLY when independence is PROVEN — under the mission's
+`maxConcurrentBuilds` cap (default 4) AND with non-empty, disjoint declared scopes
+(`fileScopesDisjoint`, directory-prefix overlap check). Any unit with absent or
+overlapping scope serializes (the safe, pre-existing behavior), so a mission with
+no declared scopes is byte-for-byte unchanged. Dependency ordering (`depsSatisfied`)
+is orthogonal and still enforced. Fully independent workstreams can also run as
+separate missions (the gate is per-mission).
+
 Claude does not own the state machine. It answers only bounded `needsModel`
 requests: `review_plan`, `answer_agent_question`, `author_fix`, and
 `judge_review`. The `/gh-first-mate` skill (`src/lib/injected-skills/first-mate-skill.ts`)

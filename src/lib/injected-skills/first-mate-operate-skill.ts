@@ -37,7 +37,7 @@ When you call \`mcp__first-mate__start_mission\` (or \`mcp__first-mate__add_unit
 - **goal**: the phase objective, grounded in a real struggling moment — not a feature wish.
 - **acceptance_criteria**: the phase's externally verifiable exit checkpoint, stated as evidence a reviewer can reproduce (e.g. "cold-start quickstart under five minutes, timed from a fresh checkout, recorded in the PR"; "Sean Ellis survey with N≥40 responses and ≥40% 'very disappointed'").
 - **house_rules**: any hard constraint (privacy, license, brand, spend limit).
-- Keep one active build unit per concern; parallelism is for read-only producers (research, review) and independent units, never racing broad implementation waves.
+- Unlock real parallelism the right way: give each independent unit a DISJOINT \`fileScopes\` allowlist so their builds run CONCURRENTLY (the controller proves non-overlap and dispatches in parallel up to the mission's \`maxConcurrentBuilds\`), and/or split fully independent workstreams into SEPARATE missions (the build gate is per-mission, so N missions build N units at once). \`max_in_flight_per_provider\` is a global provider cap, NOT the build-concurrency lever — disjoint \`fileScopes\` and separate missions are. Never race overlapping work on the same files.
 
 Let the controller drive decomposition and steering (see \`gh-first-mate\`); this skill decides the PHASE and the checkpoint, not the controller mechanics.
 

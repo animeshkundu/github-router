@@ -903,8 +903,8 @@ async function applyModelAnswer(
         // so it leaves NO durable residue: a stale `unit.dispatch` with a
         // non-null taskId here would wedge the replay guard forever and silently
         // lose the drained review_plan approval. The per-answer catch handles it.
-        if (hasActiveBuildUnit(unit.missionId, units)) {
-          applied.push(`deferred build dispatch for ${unit.missionId}:${unitHandle(unit)}: another build is active`)
+        if (!canDispatchBuild(unit, mission, units)) {
+          applied.push(`deferred build dispatch for ${unit.missionId}:${unitHandle(unit)}: concurrency cap or overlapping file scope with an active build`)
           return
         }
         const model = resolveCloudAgentModel(unit.model ?? mission.defaultModel)
@@ -1376,6 +1376,14 @@ function hasDependsOnCycle(rawUnits: unknown[]): boolean {
   return false
 }
 
+/** Parse a unit spec's `fileScopes` into a clean string[] (non-string/blank dropped). */
+function parseFileScopes(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+    .map((s) => s.trim())
+}
+
 /**
  * Turn a model `decompose` answer into queued units. This is the mission→units
  * step: `start_mission` only registers the mission; `advance` emits one
@@ -1447,6 +1455,7 @@ export async function addUnitsToMission(
     const dependsOn = dependsOnIndices(spec, rawIndex, validIndices)
       .map((idx) => idByRawIndex.get(idx))
       .filter((id): id is string => id !== undefined)
+    const fileScopes = parseFileScopes(spec.fileScopes)
     const unit: UnitRow = {
       id,
       missionId: mission.id,
@@ -1468,6 +1477,7 @@ export async function addUnitsToMission(
       goalHash,
       dependsOn,
       title,
+      ...(fileScopes.length > 0 ? { fileScopes } : {}),
     }
     await deps.upsertUnit(repo, unit)
     created += 1
@@ -2217,14 +2227,69 @@ function activeCountsByAgent(units: UnitRow[]): Map<AgentKey, number> {
   return counts
 }
 
-function hasActiveBuildUnit(missionId: string, units: UnitRow[]): boolean {
-  return units.some(
+function activeBuildUnits(missionId: string, units: UnitRow[]): UnitRow[] {
+  return units.filter(
     (unit) =>
       unit.missionId === missionId &&
       unit.dispatchMode === "build" &&
       unit.terminal !== true &&
       (unit.provider !== "none" || unit.taskId !== null || unit.dispatch !== undefined),
   )
+}
+
+/**
+ * Normalize a declared file-scope entry to a comparable path prefix: collapse
+ * backslashes, strip a leading `./`, and — because ANY glob metacharacter (`*`,
+ * `?`, `[`, `{`) makes the matched set unbounded — collapse the scope to the
+ * PARENT DIRECTORY of its first glob segment (`src/*.ts` → `src`, `src/f?.ts` →
+ * `src`, `*.ts`/`{a,b}/**` → `` = whole repo). This over-approximates (it can
+ * over-serialize) but NEVER declares two globby scopes falsely disjoint. A
+ * whole-repo scope (`""`, `.`, `/`, or a root-level glob) overlaps everything.
+ * Case is preserved — paths are case-sensitive on the primary Linux CI.
+ */
+function normalizeScope(raw: string): string {
+  let s = raw.trim().replace(/\\/g, "/").replace(/^\.\//, "")
+  const glob = s.search(/[*?{[]/)
+  if (glob !== -1) {
+    const lastSlash = s.lastIndexOf("/", glob)
+    s = lastSlash === -1 ? "" : s.slice(0, lastSlash)
+  }
+  s = s.replace(/^\.$/, "").replace(/\/+$/, "")
+  return s
+}
+
+/** Two single scopes overlap when equal, or one is a directory-prefix of the other. */
+function scopesOverlap(a: string, b: string): boolean {
+  if (a === "" || b === "") return true // whole-repo scope overlaps everything
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)
+}
+
+/**
+ * Two file-scope LISTS are PROVABLY disjoint only when BOTH are non-empty and no
+ * pair of entries overlaps. Absent/empty → NOT disjoint (unknown scope → caller
+ * must serialize; the safe, pre-existing behavior).
+ */
+function fileScopesDisjoint(a: string[] | undefined, b: string[] | undefined): boolean {
+  if (a === undefined || b === undefined || a.length === 0 || b.length === 0) return false
+  const na = a.map(normalizeScope)
+  const nb = b.map(normalizeScope)
+  return na.every((x) => nb.every((y) => !scopesOverlap(x, y)))
+}
+
+/**
+ * Concurrent-build gate. A mission serializes builds by default (one active build
+ * per mission — avoids racing PRs on overlapping files). A candidate build may run
+ * CONCURRENTLY with the mission's other active builds only when independence is
+ * PROVEN: under the per-mission `maxConcurrentBuilds` cap AND its declared
+ * `fileScopes` are non-empty and disjoint from EVERY other active build's scopes.
+ * Unknown or overlapping scope → serialize. Dependency ordering is gated
+ * separately by `depsSatisfied`, so this only governs concurrency among ready units.
+ */
+function canDispatchBuild(candidate: UnitRow, mission: Mission, units: UnitRow[]): boolean {
+  const active = activeBuildUnits(mission.id, units).filter((u) => u !== candidate)
+  if (active.length === 0) return true // first active build in the mission
+  if (active.length >= maxConcurrentBuildsOf(mission)) return false
+  return active.every((other) => fileScopesDisjoint(candidate.fileScopes, other.fileScopes))
 }
 
 /** Default plan-review gate for a mission (absent → the hard, current flow). */
@@ -2239,6 +2304,13 @@ function planGateOf(mission: Mission | undefined): "hard" | "soft" {
  */
 const DEFAULT_MAX_FIX_CYCLES = 12
 const DEFAULT_MAX_COPILOT_COMMENTS = 8
+/**
+ * Default per-mission concurrent-build cap. Builds still serialize unless the
+ * units prove disjoint `fileScopes`, so this only bounds parallelism among
+ * provably-independent units; a mission without declared scopes behaves exactly
+ * as before (one active build at a time).
+ */
+const DEFAULT_MAX_CONCURRENT_BUILDS = 4
 
 function maxFixCyclesOf(mission: Mission): number {
   const value = mission.maxFixCycles
@@ -2252,6 +2324,13 @@ function maxCopilotCommentsOf(mission: Mission): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1
     ? value
     : DEFAULT_MAX_COPILOT_COMMENTS
+}
+
+function maxConcurrentBuildsOf(mission: Mission): number {
+  const value = mission.maxConcurrentBuilds
+  return typeof value === "number" && Number.isInteger(value) && value >= 1
+    ? value
+    : DEFAULT_MAX_CONCURRENT_BUILDS
 }
 
 /** Format an epoch-ms timestamp as a UTC `YYYY-MM-DD` date for artifact paths. */
@@ -2519,7 +2598,7 @@ async function dispatchWave(
     if (current >= maxInFlightPerProvider) continue
     const mission = missions.get(unit.missionId)
     if (mission === undefined) continue
-    if (unit.dispatchMode === "build" && hasActiveBuildUnit(unit.missionId, allCountUnits)) {
+    if (unit.dispatchMode === "build" && !canDispatchBuild(unit, mission, allCountUnits)) {
       continue
     }
 

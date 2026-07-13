@@ -46,6 +46,14 @@ export interface Mission {
   /** When true, a repo with no reported CI is not mergeable through first-mate. */
   ciRequired?: boolean
   /**
+   * Per-mission cap on how many BUILD units may be dispatched CONCURRENTLY, for
+   * units the controller can prove independent (no unmet deps AND declared
+   * disjoint `fileScopes`). Serialization is still the default for any unit that
+   * cannot prove disjoint scopes. Optional → back-compat; absent uses the
+   * controller default.
+   */
+  maxConcurrentBuilds?: number
+  /**
    * Back-compat marker that this mission has already produced (or accepted) a
    * decompose answer. Absent legacy rows read as false; once true, a pruned-empty
    * mission must not re-emit decompose.
@@ -120,6 +128,7 @@ function isMission(value: unknown): value is Mission {
       mission.planGate === "soft") &&
     isOptionalPositiveInteger(mission.maxFixCycles) &&
     isOptionalPositiveInteger(mission.maxCopilotComments) &&
+    isOptionalPositiveInteger(mission.maxConcurrentBuilds) &&
     (mission.ciRequired === undefined || typeof mission.ciRequired === "boolean") &&
     (mission.everDecomposed === undefined || typeof mission.everDecomposed === "boolean") &&
     Array.isArray(mission.repos) &&
