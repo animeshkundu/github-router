@@ -101,6 +101,14 @@ The first CEO run (on `animeshkundu/sanger-viewer`) exposed a real ceiling: the 
 2. **Skills:** `gh-first-mate` decompose verdict now takes `fileScopes?`; both `gh-first-mate` and `gh-first-mate-operate` teach the two real parallelism levers — declare disjoint `fileScopes` for concurrent builds within a mission, and/or separate missions for independent streams — and correct the misconception that `max_in_flight_per_provider` is the build-concurrency lever (it is a global provider cap).
 Tests: 4 new controller tests (disjoint→2 concurrent, overlap→serialize, no-scope→serialize, decompose threading) + design-doc note. Version 0.3.206.
 
+## Follow-up 3 — CEO run 2 eval + failed-session fix (2026-07-13)
+
+CEO run 2 (on `sanger-viewer`, full GitHub authority) was scored via `docs/first-mate-ceo-eval-framework.md` with the mandatory verify-against-real-state pass: EVERY load-bearing claim held (PR #62 merged @ `1fc3ef21`, PR #63 merged @ `e0c19460`, real non-draft **v1.0.0** release @ `e0c19460`, issue #56 closed, live site 200, README comparison table + CHANGELOG `[1.0.0]` present). No hard gate fired; truthfulness ~perfect; honest about the serial gate + no-scheduler limit. A clear step up from run 1 (which overstated "4 building") — run 2 drove to a verified SHIPPED outcome (first-ever release).
+
+Issue surfaced + FIXED: a `failed`/`timed_out` cloud-agent SESSION hard-escalated even when it left a usable open PR (green CI + complete diff) — a session-status artifact, not a deliverable failure — forcing the CEO to merge manually. Fix (`state-machine.ts` `nextAction`): only escalate on `failed`/`timed_out` when `artifact !== "pr_open"`; a real open PR falls through to the normal validation path (CI/review/floor → the still-human-gated merge). Backward-compatible (no-PR failure still escalates; existing test unchanged) + a new test for the pr_open path. Version 0.3.207.
+
+Other issues: parallelization ceiling (fixed, Follow-up 2, pending rebuild); empty-PR-judged-done (A6 guard exists — future auto-steer improvement); no-scheduler-in-subagent (harness-level cron-to-subagent limitation, not a source fix).
+
 ## Refinement — the local Claude IS the CEO (2026-07-13)
 
 Clarified role layering: the LOCAL Claude that drives first-mate is the CEO; the GitHub cloud agents are its team (they carry the cto/cpo/execution role guides in-repo). The CEO's job is to get verified work OUT of the team, not shape missions passively. Delivered as framing/mindset (no new mechanism), in the behavior shapers:

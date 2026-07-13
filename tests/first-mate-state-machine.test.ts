@@ -190,6 +190,17 @@ test("failed / timed_out cloud task → escalate", () => {
   }
 })
 
+test("failed / timed_out task that left an OPEN green PR is verified, not hard-escalated", () => {
+  for (const provider of ["failed", "timed_out"] as const) {
+    const o = obs({ provider, prs: [openPr()], ci: { rollup: "passing" } })
+    const c = classify(o, row({ provider, pr: 7 }))
+    // A usable open PR (session-status "failed" ≠ failed deliverable) faces the
+    // normal validation path (→ assign a verifier → judge → the merge gate), not a
+    // dead task-failure escalation.
+    expect(nextAction(c, row({ provider, pr: 7 }), DEFAULT_POLICY).kind).toBe("assign_verifier")
+  }
+})
+
 test("A2: raised per-failure cap is 6 (retries 5 → author_fix, 6 → escalate)", () => {
   const o = obs({ prs: [openPr()], ci: { rollup: "failing" } })
   const c = classify(o, row({ pr: 7 }))
