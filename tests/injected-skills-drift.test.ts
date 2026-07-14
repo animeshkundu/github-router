@@ -28,6 +28,26 @@ const REAL_MCP_TOOLS = new Set([
   "mcp__first-mate__scaffold_repo",
   "mcp__first-mate__read_strategy",
   "mcp__first-mate__write_strategy",
+  // browser group (registered under --browse); referenced by the greatness definition (Pillar D)
+  "mcp__browser__list_tabs",
+  "mcp__browser__open_tab",
+  "mcp__browser__close_tab",
+  "mcp__browser__navigate",
+  "mcp__browser__read_page",
+  "mcp__browser__scroll",
+  "mcp__browser__screenshot",
+  "mcp__browser__keyboard",
+  "mcp__browser__wait",
+  "mcp__browser__eval_js",
+  "mcp__browser__download",
+  "mcp__browser__mouse",
+  "mcp__browser__drag",
+  "mcp__browser__type",
+  "mcp__browser__diagnostics",
+  "mcp__browser__find",
+  "mcp__browser__act",
+  "mcp__browser__observe",
+  "mcp__browser__extract",
 ])
 
 describe("injected skills MCP tool drift guard", () => {

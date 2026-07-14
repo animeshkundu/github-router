@@ -261,8 +261,8 @@ function buildGuidance(opts: Required<ScaffoldOpts>): string {
   const primaryOs = opts.ci.primaryOs || "<!-- TODO: choose the primary supported OS. -->"
   const ciMatrix = opts.ci.matrix.length > 0 ? opts.ci.matrix.join(", ") : "<!-- TODO: define CI OS matrix. -->"
   const uiEvidence = opts.uiEvidenceRequired
-    ? "- UI-impacting changes include before/after screenshots or recorded browser evidence in the PR."
-    : "- If a change affects user-visible UI or CLI output, include before/after evidence in the PR."
+    ? "- UI-impacting changes include before/after screenshots of the RENDERED result (product UI, and the README / Pages / docs as they render) at real viewports (mobile + desktop), light + dark — driven in a browser, never guessed from code."
+    : "- If a change affects user-visible UI or CLI output, include before/after evidence in the PR — for UI, a screenshot of the rendered result at real viewports, not a code diff."
   const notes = opts.detectedNotes.length > 0
     ? opts.detectedNotes.map((note) => `- ${note}`).join("\n")
     : "- <!-- TODO: add repo-specific hazards, flaky areas, rate limits, and platform traps as they are discovered. -->"
@@ -446,7 +446,7 @@ function buildRoleAgent(role: (typeof ROLE_AGENT_NAMES)[number]): string {
       description: "Set engineering direction and quality bars for a simple, reliable, accessible product that ships continuously.",
       purpose: "Make engineering accelerate learning without mortgaging reliability. Define the architecture and delivery system, record non-trivial decisions, and delegate implementation, testing, and review to execution roles.",
       when: ["A product bet needs an architecture, delivery plan, API or developer-experience contract, or technical risk decision.", "Quality, reliability, accessibility, performance, security, or operability needs an explicit bar.", "The team must trade scope against learning speed without creating avoidable complexity."],
-      method: ["Write an ADR for every non-trivial technical or process decision; prefer radical simplicity and delete accidental complexity.", "Design Stripe-grade APIs and developer experience: coherent naming, actionable errors, stable contracts, safe defaults, copy-paste quickstarts, and Diataxis tutorials/how-to/reference/explanation docs.", "Use trunk-based development with short-lived branches and feature flags, a test pyramid, continuous delivery, and CI/CD. Track all DORA four keys; speed and stability reinforce each other rather than trade off.", "Define and enforce product budgets: a timed cold-start quickstart under five minutes, WCAG 2.1 AA, Core Web Vitals thresholds in CI, and defaults that just work.", "Delegate scoped delivery to planner/implementer/tester and require adversarial reviewer evidence before calling the system ready."],
+      method: ["Write an ADR for every non-trivial technical or process decision; prefer radical simplicity and delete accidental complexity.", "Design Stripe-grade APIs and developer experience: coherent naming, actionable errors, stable contracts, safe defaults, copy-paste quickstarts, and Diataxis tutorials/how-to/reference/explanation docs.", "Use trunk-based development with short-lived branches and feature flags, a test pyramid, continuous delivery, and CI/CD. Track all DORA four keys; speed and stability reinforce each other rather than trade off.", "Define and enforce product budgets: a timed cold-start quickstart under five minutes, WCAG 2.2 AA, Core Web Vitals thresholds in CI, and defaults that just work.", "Delegate scoped delivery to planner/implementer/tester and require adversarial reviewer evidence before calling the system ready."],
       quality: ["Every claimed checkpoint is externally verifiable: a real HTTP 200, a reproducible cold-start timer, green CI, measured Web Vitals, or an accessibility audit, never a self-reported 'done'.", "Do not over-build infrastructure without a distribution or learning test; viral attention is not product-market fit.", "Keep external side effects and economic authority bounded. Never incur spend, change pricing, purchase services, or expand privileges beyond explicit human-set hard limits."],
       output: ["Architecture and ADR decisions", "Delivery slices, feature-flag and rollback plan", "Quality budgets and measured evidence", "Delegations and residual technical risks"],
       model: "claude-opus-4.8",
@@ -841,24 +841,53 @@ function buildPublishWorkflow(opts: Required<ScaffoldOpts>): string {
 }
 
 function buildMediaWorkflow(opts: Required<ScaffoldOpts>): string {
-  return `name: Media evidence
+  const install = opts.commands.install ?? "echo \"TODO: record the install command\""
+  const HAS_PW = "${{ hashFiles('**/playwright.config.*') != '' }}"
+  const NO_PW = "${{ hashFiles('**/playwright.config.*') == '' }}"
+  const HAS_LHCI = "${{ hashFiles('**/lighthouserc.*', '**/.lighthouserc.*') != '' }}"
+  return `name: Media evidence & UI verification
 
 on:
   workflow_dispatch:
+  # Enable on PRs once your UI/site paths are known, so visual-regression + a11y actually PROTECT
+  # every user-viewable surface on each change (until then the steps below no-op green):
+  # pull_request:
+  #   paths: ["<!-- TODO: your UI/site source globs -->"]
 
 permissions:
   contents: read
 
+# Pillar D — UI/UX and every user-viewable surface are VERIFIED BY BROWSING: drive the running
+# artifact in a real browser and judge the RENDERED pixels. Never infer UI quality from source,
+# a passing build, or an HTTP 200. See docs/playbook/README.md Phase 4 (iterate-to-polish loop).
 jobs:
-  capture:
+  verify-ui:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@${CHECKOUT_SHA} # v4
-      - name: Capture screenshots and Open Graph image
+      - name: State-matrix screenshots + visual regression (Playwright)
+        if: ${HAS_PW}
         run: |
-          echo "TODO: wire the project's Playwright command and capture desktop/mobile screenshots plus og-image.png"
-          echo "Optional: install VHS from a checksum-pinned release and record the terminal demo"
+          ${install}
+          npx --no-install playwright install --with-deps chromium
+          # Your spec MUST drive each key screen through ALL states — empty / loading / error / success /
+          # first-run / edge — at 375 / 768 / 1280 x light+dark (page.emulateMedia), and assert
+          # expect(page).toHaveScreenshot() against committed baselines so any unintended pixel change fails.
+          npx --no-install playwright test
+      - name: Accessibility gate (axe-core, zero serious/critical)
+        if: ${HAS_PW}
+        run: echo "TODO: assert @axe-core/playwright inside the spec above; fail on ANY serious/critical violation on each key screen AND state; keyboard-reach + visible focus + >=24px targets (WCAG 2.2)."
+      - name: Core Web Vitals + Lighthouse budgets (web surfaces)
+        if: ${HAS_LHCI}
+        run: npx --no-install @lhci/cli autorun
+      - name: Capture launch media (screenshots, 1200x630 og-image, demo)
+        run: |
+          echo "TODO: capture desktop + mobile launch screenshots and a 1200x630 og-image.png from the RENDERED site."
+          echo "Optional: install VHS from a checksum-pinned release and record artifacts/demo.gif."
           ${opts.commands.build ?? "true"}
+      - name: Wire-up reminder (no browser verification configured yet)
+        if: ${NO_PW}
+        run: echo "TODO: add a Playwright config + a state-matrix spec (toHaveScreenshot + @axe-core/playwright) so UI is VERIFIED BY BROWSING, not guessed. See docs/playbook/README.md Phase 4."
       - uses: actions/upload-artifact@${UPLOAD_ARTIFACT_SHA} # v4
         with:
           name: launch-media
@@ -866,6 +895,8 @@ jobs:
             artifacts/screenshots/**
             artifacts/og-image.png
             artifacts/demo.gif
+            playwright-report/**
+            test-results/**
           if-no-files-found: warn
 `
 }
@@ -1065,7 +1096,7 @@ List the realistic failure modes you considered, how you tested each one, and an
 
 ## UI evidence
 
-${opts.uiEvidenceRequired ? "Attach before/after screenshots or recordings for every user-visible surface changed." : "If user-visible behavior changed, attach before/after screenshots, recordings, or CLI output."}
+${opts.uiEvidenceRequired ? "Attach screenshots of the RENDERED result for every user-viewable surface changed — the product UI, and any changed README / Pages / docs as they render — at mobile + desktop, light + dark, driven in a real browser. Never infer UI quality from source or a passing build." : "If user-visible behavior changed, attach before/after evidence — for UI, a screenshot of the rendered result at real viewports; for a CLI, the real output."}
 
 ## Notes / follow-ups
 
@@ -1280,11 +1311,12 @@ Exit checkpoint: the repository contains the dated experiment, raw result, thres
 - Ship through CI/CD and track all DORA four keys. Speed and stability improve together; do not trade one away by weakening checks.
 - Make APIs and developer experience Stripe-grade: coherent names, actionable errors, stable contracts, safe defaults, copy-paste examples.
 - Write Diataxis tutorials, how-to guides, reference, and explanation. Time the quickstart from a cold machine and keep it under five minutes.
-- Enforce WCAG 2.1 AA and Core Web Vitals budgets in CI. Defaults must just work.
+- Enforce WCAG 2.2 AA and Core Web Vitals budgets in CI. Defaults must just work.
+- Verify every user-viewable surface BY BROWSING, never by guessing from code. Drive the running artifact through each state (empty / loading / error / success / first-run / edge) at 375 / 768 / 1280 x light+dark, screenshot the actual pixels, critique them against a professional bar (visual hierarchy, spacing rhythm, type/readability, restrained palette, alignment, motion-with-purpose, and whether each state genuinely helps), fix the top defects at the design-system level, then re-drive and re-capture until the vision rubric is clean and the deterministic gates are green (visual-regression \`toHaveScreenshot\`, \`@axe-core/playwright\` zero serious/critical, contrast, CWV). Commit the baselines so polish cannot silently regress.
 
 Decision criteria: the frozen cut list works as one coherent journey and every quality budget has executable or observed evidence.
 
-Exit checkpoint: required CI is green; a cold-start recording/log reaches first value in under five minutes; a real deployment returns HTTP 200; accessibility and Web Vitals reports meet their budgets.
+Exit checkpoint: required CI is green; a cold-start recording/log reaches first value in under five minutes; a real deployment returns HTTP 200; accessibility and Web Vitals reports meet their budgets; the state-matrix Playwright screenshots + visual-regression baselines are committed and green, axe reports zero serious/critical, and the UI was judged from the rendered pixels, not the source.
 
 ## Phase 5 — Launch
 
@@ -1292,10 +1324,11 @@ Exit checkpoint: required CI is green; a cold-start recording/log reaches first 
 - Publish the GitHub Pages site and complete the Diataxis documentation. Treat docs as marketing because they let prospects experience competence before adoption.
 - Launch first where the beachhead persona already lives. Sequence, do not spray: Show HN for Hacker News builders, dev.to for developer education, Product Hunt for its discovery audience, and build-in-public for communities already following the problem.
 - Give each channel a channel-native artifact and measurable activation link. Respond to questions and capture objections as discovery input.
+- Verify every launch surface as it actually RENDERS, never from markdown or a 200: browse the repo page and screenshot the rendered README in light AND dark (every image/badge loads, the theme-adaptive hero swaps, relative links resolve, no raw-markdown artifacts), the live Pages site and docs (nav works, no overflow), the latest Release page (notes render, links resolve), and the og / social share-card (1200x630, legible when shared). Fix whatever looks off, re-capture, and only then call it launched.
 
 Decision criteria: launch traffic reaches the instrumented aha path and produces conversations or usage from the selected beachhead, not merely impressions.
 
-Exit checkpoint: public URLs return HTTP 200; channel posts are live; analytics record real visitors reaching or failing the aha event; support responses and objections are linked.
+Exit checkpoint: public URLs return HTTP 200; channel posts are live; analytics record real visitors reaching or failing the aha event; support responses and objections are linked; the rendered README, Pages, docs, Release page, and og-card were driven + screenshotted and read well, not merely reachable.
 
 ## Phase 6 — Measure
 
