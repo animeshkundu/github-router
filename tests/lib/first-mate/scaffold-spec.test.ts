@@ -4,7 +4,9 @@ import {
   buildScaffoldFiles,
   COPILOT_SETUP_ALLOWED_KEYS,
   COPILOT_SETUP_JOB_NAME,
+  COPILOT_SETUP_PATH,
   COPILOT_SETUP_TIMEOUT_MAX,
+  copilotSetupIsInert,
   planScaffoldFiles,
 } from "~/lib/first-mate/scaffold-spec"
 import { DEFINITION_OF_GREATNESS } from "~/lib/first-mate/operating-protocol"
@@ -88,6 +90,38 @@ describe("buildScaffoldFiles", () => {
 
   it("COPILOT_SETUP_TIMEOUT_MAX is ≤ 59", () => {
     expect(COPILOT_SETUP_TIMEOUT_MAX).toBeLessThanOrEqual(59)
+  })
+
+  it("copilot-setup-steps.yml ALWAYS installs dependencies — never an inert echo stub", () => {
+    // The #1 cause of empty cloud-agent draft PRs: an environment file with no
+    // real install. Cover the dedicated ecosystems AND the fallback (unknown pm).
+    const cases = [
+      { packageManager: "npm", techStack: "TypeScript" },
+      { packageManager: "bun", techStack: "TypeScript" },
+      { packageManager: "pnpm", techStack: "TypeScript" },
+      { techStack: "Go" },
+      { techStack: "Rust" },
+      { techStack: "Python" },
+      // Fallback: stack our static detection does NOT match (sanger-viewer shape).
+      { techStack: "TypeScript, React, Vite" },
+      { techStack: "Elixir Phoenix" },
+      {},
+    ]
+    for (const extra of cases) {
+      const files = buildScaffoldFiles({ repoName: "o/r", ...extra })
+      const setup = files.find((f) => f.path === COPILOT_SETUP_PATH)!.content
+      expect(copilotSetupIsInert(setup)).toBe(false)
+      expect(setup).not.toContain('echo "TODO: add language/runtime setup"')
+    }
+  })
+
+  it("the fallback setup detects the dependency manifest at runtime", () => {
+    const setup = buildScaffoldFiles({ repoName: "o/r", techStack: "TypeScript, Vite" }).find(
+      (f) => f.path === COPILOT_SETUP_PATH,
+    )!.content
+    expect(setup).toContain("Detect toolchain and install")
+    expect(setup).toContain("npm ci")
+    expect(setup).toContain("package-lock.json")
   })
 
   it("AGENTS.md CLAUDE.md GEMINI.md and copilot-instructions.md have same content", () => {
@@ -342,5 +376,45 @@ describe("scaffold_repo no-op (all files already present)", () => {
     expect(payload.note).toContain("nothing to scaffold")
     expect(pullsPosted).toBe(false)
     expect(branchDeleted).toBe(false)
+  })
+})
+
+describe("copilotSetupIsInert", () => {
+  it("flags our inert stubs and spares real installs", () => {
+    expect(copilotSetupIsInert('- name: Set up environment\n  run: echo "TODO: add language/runtime setup"')).toBe(true)
+    expect(copilotSetupIsInert('- name: Set up environment\n  run: echo "Environment ready"')).toBe(true)
+    expect(copilotSetupIsInert("- name: Install dependencies\n  run: npm ci")).toBe(false)
+    expect(copilotSetupIsInert("- run: bun install --frozen-lockfile")).toBe(false)
+    expect(copilotSetupIsInert("- run: go mod download")).toBe(false)
+    // A user's real custom setup (no recognized install token, no echo stub) is NOT clobbered.
+    expect(copilotSetupIsInert("- name: Bootstrap\n  run: ./scripts/bootstrap")).toBe(false)
+    // Empty/unreadable → never treated as inert (conservative).
+    expect(copilotSetupIsInert("")).toBe(false)
+  })
+})
+
+describe("planScaffoldFiles self-heals an inert copilot-setup-steps", () => {
+  const good = buildScaffoldFiles({ repoName: "o/r", packageManager: "npm", techStack: "TypeScript" }).find(
+    (f) => f.path === COPILOT_SETUP_PATH,
+  )!
+
+  it("regenerates a known-inert stub even in add-missing-only mode", () => {
+    const plan = planScaffoldFiles({
+      mode: "add-missing-only",
+      desired: [good],
+      existing: [{ path: COPILOT_SETUP_PATH, content: 'jobs:\n  copilot-setup-steps:\n    steps:\n      - name: Set up environment\n        run: echo "Environment ready"' }],
+    })
+    expect(plan.filesToCommit.map((f) => f.path)).toContain(COPILOT_SETUP_PATH)
+    expect(plan.reports.find((r) => r.path === COPILOT_SETUP_PATH)?.status).toBe("overwritten")
+  })
+
+  it("preserves an existing setup that already installs (add-missing-only)", () => {
+    const plan = planScaffoldFiles({
+      mode: "add-missing-only",
+      desired: [good],
+      existing: [{ path: COPILOT_SETUP_PATH, content: "steps:\n  - name: Install\n    run: pnpm install --frozen-lockfile" }],
+    })
+    expect(plan.filesToCommit).toHaveLength(0)
+    expect(plan.reports.find((r) => r.path === COPILOT_SETUP_PATH)?.status).toBe("skipped")
   })
 })

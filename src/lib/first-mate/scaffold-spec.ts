@@ -1,6 +1,7 @@
 import { CONDENSED_OPERATING_SEQUENCE, DEFINITION_OF_GREATNESS } from "./operating-protocol"
 
 export const COPILOT_SETUP_JOB_NAME = "copilot-setup-steps" as const
+export const COPILOT_SETUP_PATH = ".github/workflows/copilot-setup-steps.yml" as const
 export const COPILOT_SETUP_TIMEOUT_MAX = 59 as const
 export const COPILOT_SETUP_ALLOWED_KEYS = ["steps", "permissions", "runs-on", "services", "snapshot", "timeout-minutes"] as const
 
@@ -113,7 +114,7 @@ export function buildScaffoldFiles(opts: ScaffoldOpts): ScaffoldFile[] {
     ...GUIDANCE_PATHS.map((path) => ({ path, content: guidance })),
     ...roleAgents,
     { path: ".github/instructions/tests.instructions.md", content: buildTestInstructions(normalized) },
-    { path: ".github/workflows/copilot-setup-steps.yml", content: buildCopilotSetupWorkflow(normalized) },
+    { path: COPILOT_SETUP_PATH, content: buildCopilotSetupWorkflow(normalized) },
     { path: ".github/workflows/ci.yml", content: buildCiWorkflow(normalized) },
     ...(normalized.hasSite ? [
       { path: ".github/workflows/pages.yml", content: buildPagesWorkflow(normalized) },
@@ -166,6 +167,18 @@ export function planScaffoldFiles(opts: {
       continue
     }
 
+    // Self-heal a known-inert copilot-setup-steps.yml even in add-missing-only /
+    // enhance mode. An environment file with no real dependency install leaves the
+    // cloud agent's container without deps, so it can't build/lint/test and returns
+    // an EMPTY draft PR — the #1 cause of unproductive coding-agent runs. Such a
+    // stub must never be preserved. Narrow by design (see copilotSetupIsInert): a
+    // user's real custom setup is not matched.
+    if (file.path === COPILOT_SETUP_PATH && copilotSetupIsInert(existingByPath.get(file.path) ?? "")) {
+      filesToCommit.push(file)
+      reports.push({ path: file.path, status: "overwritten" })
+      continue
+    }
+
     if (opts.mode === "overwrite-approved") {
       filesToCommit.push(file)
       reports.push({ path: file.path, status: "overwritten" })
@@ -192,6 +205,32 @@ export function planScaffoldFiles(opts: {
   }
 
   return { filesToCommit, reports }
+}
+
+/**
+ * True when an existing `copilot-setup-steps.yml` is one of OUR inert stubs — a
+ * bare "echo" environment step with NO dependency install. Such a file leaves the
+ * Copilot cloud agent's container without dependencies, so it cannot build / lint /
+ * test and returns an empty draft PR (the #1 real-world cause of empty coding-agent
+ * PRs). Narrow by design: a real custom setup (any recognized install command) is
+ * NOT matched, so a user's hand-tuned environment is never clobbered.
+ */
+export function copilotSetupIsInert(content: string): boolean {
+  if (content.trim().length === 0) return false
+  const INSTALL_TOKENS = [
+    "npm ci",
+    "npm install",
+    "pnpm install",
+    "yarn install",
+    "bun install",
+    "go mod download",
+    "cargo fetch",
+    "pip install",
+    "Detect toolchain and install",
+  ]
+  if (INSTALL_TOKENS.some((token) => content.includes(token))) return false
+  // No recognized install AND the shape is our echo-only "Set up environment" stub.
+  return /run:\s*echo\b/.test(content) || content.includes("Set up environment")
 }
 
 function appendMissingSections(current: string, desired: string): { content: string; appendedSections: string[] } {
@@ -614,11 +653,15 @@ function setupStepsFor(opts: Required<ScaffoldOpts>): string {
   if (opts.techStack.toLowerCase().includes("go")) {
     return `      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5
         with:
-          go-version-file: go.mod`
+          go-version-file: go.mod
+      - name: Download modules
+        run: go mod download`
   }
   if (opts.techStack.toLowerCase().includes("rust")) {
     return `      - name: Set up Rust
-        run: rustup show`
+        run: rustup show
+      - name: Fetch dependencies
+        run: cargo fetch`
   }
   if (opts.techStack.toLowerCase().includes("python")) {
     return `      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5
@@ -627,10 +670,43 @@ function setupStepsFor(opts: Required<ScaffoldOpts>): string {
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi`
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f pyproject.toml ]; then pip install -e . || pip install .; fi`
   }
-  return `      - name: Set up environment
-        run: echo "TODO: add language/runtime setup"`
+  // Fallback: our static stack detection did not match a known ecosystem. NEVER
+  // emit an inert no-op here — a Copilot cloud agent whose environment has no
+  // installed dependencies cannot build/lint/test, so it commits nothing and the
+  // task returns an EMPTY draft (the #1 real-world cause of empty coding-agent
+  // PRs). Instead, detect the dependency manifest at runtime and install for real,
+  // failing LOUDLY (never silently) when nothing is recognized.
+  return `      - uses: actions/setup-node@1e60f620b9541d5f5f3af2d1f2b0b9839c4e53c0 # v4
+        with:
+          node-version: 22
+      - name: Detect toolchain and install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f bun.lockb ] || [ -f bun.lock ]; then
+            npm install -g bun && bun install --frozen-lockfile
+          elif [ -f pnpm-lock.yaml ]; then
+            corepack enable && pnpm install --frozen-lockfile
+          elif [ -f yarn.lock ]; then
+            corepack enable && yarn install --immutable
+          elif [ -f package-lock.json ]; then
+            npm ci
+          elif [ -f package.json ]; then
+            npm install
+          elif [ -f go.mod ]; then
+            go mod download
+          elif [ -f Cargo.toml ]; then
+            cargo fetch
+          elif [ -f requirements.txt ]; then
+            python -m pip install --upgrade pip && pip install -r requirements.txt
+          elif [ -f pyproject.toml ]; then
+            python -m pip install --upgrade pip && { pip install -e . || pip install .; }
+          else
+            echo "::warning::copilot-setup-steps found no recognized dependency manifest; the agent environment may be missing dependencies. Add a real install step for this repo's stack."
+          fi`
 }
 
 const CHECKOUT_SHA = "11bd71901bbe5b1630ceea73d27597364c9af683"
