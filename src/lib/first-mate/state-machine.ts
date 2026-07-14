@@ -31,6 +31,8 @@ import type {
   Validation,
 } from "./types"
 
+export const PLAN_RETRY_CAP = 2
+
 export function classify(observed: Observed, row: UnitRow): Classified {
   const events: string[] = []
   const provider = observed.provider
@@ -164,13 +166,21 @@ export function nextAction(
   // session-status artifact, not a deliverable failure). When a real open PR
   // exists, verify it through the normal validation path below (CI / review /
   // floor → the human-gated merge) rather than hard-escalating the task; the
-  // artifact still faces the full merge gate. Only escalate when there is NO PR to
-  // judge — and re-dispatch semantics on the preview API are unverified, so we
-  // never guess a destructive retry.
+  // artifact still faces the full merge gate. A plan task that produced no PR is
+  // safely re-dispatched as a fresh plan session, but only under its dedicated
+  // small bound; all other terminal failures retain the human escalation.
   if (
     (state.provider === "failed" || state.provider === "timed_out") &&
     state.artifact !== "pr_open"
   ) {
+    if (
+      state.phase === "plan" &&
+      state.artifact === "no_pr" &&
+      row.dispatchMode === "plan" &&
+      (row.planRetries ?? 0) < PLAN_RETRY_CAP
+    ) {
+      return { kind: "retry_plan" }
+    }
     return { kind: "escalate_human", reason: `cloud agent task ${state.provider}` }
   }
 

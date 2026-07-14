@@ -510,6 +510,110 @@ test("review_plan refine re-dispatches a fresh plan task with the feedback and s
   expect(row.dispatchMode).toBe("plan")
 })
 
+test("failed plan/no-PR starts a clean-slate plan task with a fresh id and @2 key", async () => {
+  const row = unit({
+    id: "unit-plan-retry",
+    provider: "failed",
+    phase: "plan",
+    dispatchMode: "plan",
+    branch: "copilot/stale-plan-branch",
+    taskId: "task-1",
+  })
+  const h = harness([row])
+  let captured: { createPullRequest?: boolean; idempotencyKey?: string; prompt: string } | undefined
+  h.deps.startTask = mock(async (
+    _repo: unknown,
+    input: { createPullRequest?: boolean; idempotencyKey?: string; prompt: string },
+  ) => {
+    captured = input
+    return { taskId: "task-2", state: "queued" }
+  })
+
+  const result = await advance({}, h.deps)
+
+  expect(h.deps.continueTaskOnBranch).not.toHaveBeenCalled()
+  expect(captured?.createPullRequest).toBe(false)
+  expect(captured?.idempotencyKey).toBe("dispatch:octo/repo#unit-plan-retry@2")
+  expect(captured?.prompt).toContain("produce a concrete, step-by-step implementation plan")
+  expect(row.taskId).toBe("task-2")
+  expect(row.dispatchAttempts).toBe(2)
+  expect(row.planRetries).toBe(1)
+  expect(row.provider).toBe("queued")
+  expect(row.phase).toBe("plan")
+  expect(row.dispatchMode).toBe("plan")
+  expect(result.needsHuman).toHaveLength(0)
+})
+
+test("plan retry budget is persisted with the intent before a failed dispatch side effect", async () => {
+  const row = unit({
+    id: "unit-plan-retry-crash",
+    provider: "failed",
+    phase: "plan",
+    dispatchMode: "plan",
+    taskId: "task-1",
+    planRetries: 1,
+  })
+  const h = harness([row])
+  h.deps.startTask = mock(async () => {
+    throw new Error("dispatch connection lost")
+  })
+
+  await advance({}, h.deps)
+
+  expect(row.planRetries).toBe(2)
+  expect(row.dispatchAttempts).toBe(2)
+  expect(row.dispatch?.id).toBe("dispatch:octo/repo#unit-plan-retry-crash@2")
+  expect(h.deps.startTask).toHaveBeenCalledTimes(1)
+
+  const recovered = await advance({}, h.deps)
+  expect(h.deps.startTask).toHaveBeenCalledTimes(1)
+  expect(recovered.needsHuman.some((request) => request.reason.includes("dispatch interrupted"))).toBe(true)
+})
+
+test("completed plan retry follows normal review_plan then build dispatch", async () => {
+  const row = unit({
+    id: "unit-plan-retry-flow",
+    provider: "timed_out",
+    phase: "plan",
+    dispatchMode: "plan",
+    taskId: "task-1",
+  })
+  const h = harness([row])
+
+  await advance({}, h.deps)
+  expect(row.taskId).toBe("started-1")
+  expect(row.planRetries).toBe(1)
+  expect(row.dispatchAttempts).toBe(2)
+
+  h.observations.set("1", {
+    provider: "completed",
+    prs: [],
+    planReady: true,
+    logExcerpt: "1. Update controller. 2. Add retry tests.",
+  })
+  h.deps.classifyPlanReady = mock(async () => ({
+    planReady: true,
+    planExcerpt: "1. Update controller. 2. Add retry tests.",
+  }))
+  const reviewed = await advance({}, h.deps)
+  expect(reviewed.needsModel.some((request) => request.kind === "review_plan")).toBe(true)
+
+  h.observations.set("1", { provider: "queued", prs: [] })
+  await advance(
+    { modelAnswers: [{ requestId: "m1:1:review_plan", verdict: { decision: "approve" } }] },
+    h.deps,
+  )
+  const buildCall = (
+    h.deps.startTask as unknown as { mock: { calls: unknown[][] } }
+  ).mock.calls.find((call) => (call[1] as { createPullRequest?: boolean }).createPullRequest === true)
+  expect(buildCall).toBeDefined()
+  expect((buildCall![1] as { idempotencyKey?: string }).idempotencyKey).toBe(
+    "dispatch:octo/repo#unit-plan-retry-flow@3",
+  )
+  expect(row.dispatchMode).toBe("build")
+  expect(row.phase).toBe("build")
+})
+
 test("ci_failed asks the model under retry cap and escalates to human at cap", async () => {
   const underCap = unit({
     issue: 2,
@@ -1169,7 +1273,7 @@ test("dispatch goes through the outbox: intent persisted before startTask, idemp
 
   await advance({}, h.deps)
 
-  expect(captured?.idempotencyKey).toBeTruthy()
+  expect(captured?.idempotencyKey).toBe("dispatch:octo/repo#issue-1@1")
   expect(captured?.prompt).toContain(`fm-dispatch:${captured?.idempotencyKey}`)
   // The intent was persisted BEFORE the result (outbox ordering).
   expect(upsertOrder[0]).toBe("intent")

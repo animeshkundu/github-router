@@ -128,6 +128,13 @@ export interface UnitRow {
   validation: Validation
   /** Bounded CI/review self-heal counter → blocked_on_human at the cap. */
   retries: number
+  /** Bounded retries for failed/timed-out plan tasks that produced no PR. */
+  planRetries?: number
+  /**
+   * Monotonic count of genuine task dispatches for provider idempotency keys.
+   * Pending-intent replay reuses the current attempt instead of incrementing it.
+   */
+  dispatchAttempts?: number
   /**
    * A2 signature-reset (progress) fingerprint. A stable digest of the current
    * blocking failure (validation kind + CI/review/floor identity). `retries`
@@ -375,6 +382,7 @@ export type ModelRequestKind =
 export type Action =
   | { kind: "noop" }
   | { kind: "dispatch" }
+  | { kind: "retry_plan" }
   | { kind: "steer"; instruction: string; expect: "log_cursor_advance" | "head_sha_change" | "ci_rerun" }
   | { kind: "cancel"; reason: string }
   | { kind: "rerun_ci" }

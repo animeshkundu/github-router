@@ -183,10 +183,17 @@ test("CI running → noop (wait, no model, no human)", () => {
   expect(nextAction(c, row({ pr: 7 }), DEFAULT_POLICY)).toEqual({ kind: "noop" })
 })
 
-test("failed / timed_out cloud task → escalate", () => {
+test("failed / timed_out plan task with no PR retries below cap and escalates at cap", () => {
   for (const provider of ["failed", "timed_out"] as const) {
-    const c = classify(obs({ provider }), row({ provider }))
-    expect(nextAction(c, row({ provider }), DEFAULT_POLICY).kind).toBe("escalate_human")
+    const belowCap = row({ provider, planRetries: 1 })
+    expect(nextAction(classify(obs({ provider }), belowCap), belowCap, DEFAULT_POLICY)).toEqual({
+      kind: "retry_plan",
+    })
+
+    const atCap = row({ provider, planRetries: 2 })
+    expect(nextAction(classify(obs({ provider }), atCap), atCap, DEFAULT_POLICY).kind).toBe(
+      "escalate_human",
+    )
   }
 })
 

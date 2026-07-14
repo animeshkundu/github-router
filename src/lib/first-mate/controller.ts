@@ -2080,11 +2080,45 @@ async function executeAction(
   needsHuman: QueuedRequest<HumanRequest>[],
   applied: string[],
   order: number,
+  renewLease?: () => Promise<boolean>,
 ): Promise<void> {
   void policy
   switch (action.kind) {
     case "dispatch":
       return
+    case "retry_plan": {
+      const repo = agentRepo(unit.repo)
+      const model = resolveCloudAgentModel(unit.model ?? mission.defaultModel)
+      const dateStr = unit.artifactDateStr ?? artifactDate(Date.now())
+      unit.artifactDateStr = dateStr
+      // Consume the bounded retry BEFORE dispatchWithOutbox persists its intent,
+      // so a crash after the side effect cannot grant an extra retry on recovery.
+      unit.planRetries = (unit.planRetries ?? 0) + 1
+      const task = await dispatchWithOutbox(
+        unit,
+        deps,
+        ({ idempotencyKey, promptTag }) =>
+          deps.startTask(repo, {
+            prompt: planPrompt(unit, mission, dateStr) + promptTag,
+            model,
+            createPullRequest: false,
+            idempotencyKey,
+          }),
+        renewLease,
+        (started) => {
+          unit.provider = providerState(started.state, "queued")
+          unit.phase = "plan"
+          unit.dispatchMode = "plan"
+          unit.blockingDecisionId = null
+          unit.implementerLab = unit.agent
+          unit.lastSteer = { atMs: Date.now() }
+        },
+      )
+      if (task) {
+        applied.push(`retried plan task for ${unit.missionId}:${unitHandle(unit)}`)
+      }
+      return
+    }
     case "steer":
       consola.debug("first-mate controller received direct steer action; v1 skips it")
       return
@@ -2177,9 +2211,12 @@ function isUndispatched(unit: UnitRow): boolean {
   return unit.provider === "none" && unit.taskId === null && unit.dispatch === undefined
 }
 
-/** A dispatch that was interrupted mid-flight (intent persisted, no taskId yet). */
+/**
+ * A dispatch interrupted mid-flight. Successor dispatches retain the prior taskId
+ * until the new task is confirmed, so the durable intent itself is the signal.
+ */
 function isDispatchInterrupted(unit: UnitRow): boolean {
-  return unit.dispatch !== undefined && unit.taskId === null
+  return unit.dispatch !== undefined
 }
 
 function isActiveMissionUnit(unit: UnitRow, missions: Map<string, Mission>): boolean {
@@ -2444,6 +2481,7 @@ async function dispatchWithOutbox(
   deps: ControllerDeps,
   start: (c: { idempotencyKey: string; promptTag: string }) => Promise<{ taskId: string; state: string }>,
   renewLease?: () => Promise<boolean>,
+  applySuccess?: (task: { taskId: string; state: string }) => void,
 ): Promise<{ taskId: string; state: string } | null> {
   // #3 (replay guard) — a dispatch intent already persisted means a startTask
   // may already be in flight (or a prior wake was interrupted mid-dispatch).
@@ -2475,13 +2513,15 @@ async function dispatchWithOutbox(
       `first-mate: drive lease renewal failed before dispatch side effect for ${unit.missionId}:${unitHandle(unit)} — aborting`,
     )
   }
-  // A fresh dispatch is always attempt 1: the guard above returns early when a
-  // prior intent exists (recovery, not a re-dispatch, resolves that), so we never
-  // bump the counter here.
-  const attempt = 1
+  // A genuine successor/retry gets the next durable attempt number. Back-compat:
+  // an existing task with no counter is attempt 1, while an undispatched unit is 0.
+  // Pending-intent replay returned above, so it never increments this counter and
+  // keeps the same key.
+  const attempt = (unit.dispatchAttempts ?? (unit.taskId ? 1 : 0)) + 1
   const key = dispatchIdempotencyKey(unit, attempt)
+  unit.dispatchAttempts = attempt
   unit.dispatch = { id: key, requestedMs: Date.now(), attempts: attempt }
-  await deps.upsertUnit(unit.repo, unit) // persist intent BEFORE the side effect (hard stop if this throws)
+  await deps.upsertUnit(unit.repo, unit) // persist attempt + intent BEFORE the side effect
   // Durable outbox: record the intent before the irreversible startTask. If a
   // crash lands between startTask and clearing the intent, RECOVERY is the
   // isDispatchInterrupted escalation (persisted intent + no taskId → surfaced to
@@ -2516,6 +2556,7 @@ async function dispatchWithOutbox(
   // unit back to isUndispatched and risk a double dispatch.
   unit.taskId = task.taskId
   unit.dispatch = undefined
+  applySuccess?.(task)
   await deps.upsertUnit(unit.repo, unit)
   await deps.dispatchOutbox?.markDone(key)
   return task
@@ -3078,6 +3119,7 @@ export async function advance(
           needsHuman,
           applied,
           requestOrder,
+          input.renewLease,
         )
         await deps.upsertUnit(unit.repo, unit)
       } catch (err) {
