@@ -7,6 +7,7 @@ import {
   COPILOT_SETUP_TIMEOUT_MAX,
   planScaffoldFiles,
 } from "~/lib/first-mate/scaffold-spec"
+import { DEFINITION_OF_GREATNESS } from "~/lib/first-mate/operating-protocol"
 import { createFirstMateTools } from "~/lib/first-mate/tools"
 import { state } from "~/lib/state"
 
@@ -31,16 +32,31 @@ describe("buildScaffoldFiles", () => {
       ".github/agents/researcher.md",
       ".github/agents/reviewer.md",
       ".github/agents/tester.md",
+      ".github/CODEOWNERS",
+      ".github/CONTRIBUTING.md",
+      ".github/FUNDING.yml",
+      ".github/ISSUE_TEMPLATE/config.yml",
       ".github/copilot-instructions.md",
+      ".github/dependabot.yml",
       ".github/instructions/tests.instructions.md",
       ".github/pull_request_template.md",
       ".github/workflows/ci.yml",
+      ".github/workflows/codeql.yml",
       ".github/workflows/copilot-setup-steps.yml",
+      ".github/workflows/maintainability.yml",
+      ".github/workflows/media.yml",
+      ".github/workflows/publish.yml",
+      ".github/workflows/release.yml",
+      "ADOPTERS.md",
       "AGENTS.md",
       "CHANGELOG.md",
       "CLAUDE.md",
+      "CODE_OF_CONDUCT.md",
       "GEMINI.md",
+      "GOVERNANCE.md",
       "LEARNINGS.md",
+      "SECURITY.md",
+      "SUPPORT.md",
       "docs/adr/0001-record-architecture-decisions.md",
       "docs/adrs/0000-template.md",
       "docs/history/0000-template.md",
@@ -165,6 +181,73 @@ describe("buildScaffoldFiles", () => {
     expect(guidance.content).toContain("UI-impacting changes include before/after screenshots")
     expect(ci.content).toContain("windows-latest")
     expect(ci.content).toContain("bun run build")
+  })
+
+  it("seeds secure greatness workflows and destination-specific npm publishing", () => {
+    const files = buildScaffoldFiles({ repoName: "owner/pkg", defaultBranch: "main", techStack: "TypeScript", packageManager: "npm", finalDestination: "npm", hasSite: true })
+    for (const path of [".github/workflows/pages.yml", ".github/workflows/codeql.yml", ".github/dependabot.yml", ".github/workflows/release.yml", ".github/workflows/publish.yml", ".github/workflows/media.yml"]) {
+      expect(files.some((file) => file.path === path)).toBe(true)
+    }
+    const publish = files.find((file) => file.path === ".github/workflows/publish.yml")!.content
+    expect(publish).toContain("npm publish --provenance")
+    expect(publish).toContain("id-token: write")
+    expect(publish).not.toContain("NPM_TOKEN")
+    for (const workflow of files.filter((file) => file.path.endsWith(".yml") && file.path.includes("workflows/"))) {
+      expect(workflow.content).toContain("permissions:")
+      expect(workflow.content).toContain("contents: read")
+      expect(workflow.content).not.toContain("pull_request_target")
+      for (const match of workflow.content.matchAll(/uses:\s*[^\s@]+@([^\s#]+)/g)) {
+        expect(match[1]).toMatch(/^[0-9a-f]{40}$/)
+      }
+    }
+  })
+
+  it("seeds PyPI trusted publishing for a detected Python destination", () => {
+    const files = buildScaffoldFiles({ repoName: "owner/python", techStack: "Python", packageManager: "python", finalDestination: "pypi" })
+    const publish = files.find((file) => file.path === ".github/workflows/publish.yml")!.content
+    expect(publish).toContain("pypa/gh-action-pypi-publish@")
+    expect(publish).toContain("environment: pypi")
+    expect(publish).toContain("id-token: write")
+    expect(publish).not.toMatch(/api[_-]?token|PYPI_TOKEN/i)
+  })
+
+  it("seeds community, sustainability, and trust artifacts", () => {
+    const files = buildScaffoldFiles({ repoName: "owner/community" })
+    for (const path of ["SECURITY.md", ".github/CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SUPPORT.md", ".github/CODEOWNERS", "GOVERNANCE.md", ".github/FUNDING.yml", "ADOPTERS.md", ".github/ISSUE_TEMPLATE/config.yml"]) {
+      expect(files.some((file) => file.path === path)).toBe(true)
+    }
+    expect(files.find((file) => file.path === "SECURITY.md")!.content).toContain("2 business days")
+    expect(files.find((file) => file.path === "GOVERNANCE.md")!.content).toContain("lagging signals")
+    const maintainability = files.find((file) => file.path === ".github/workflows/maintainability.yml")!.content
+    expect(maintainability).toContain("reuse lint")
+    expect(maintainability).toContain("Dependency license policy")
+    expect(maintainability).toContain("Execute documented examples")
+  })
+
+  it("attests and keyless-signs the pushed GHCR image digest", () => {
+    const publish = buildScaffoldFiles({ repoName: "owner/service", finalDestination: "ghcr" }).find((file) => file.path === ".github/workflows/publish.yml")!.content
+    expect(publish).toContain("id: build")
+    expect(publish).toContain("cosign sign --yes")
+    expect(publish).toContain("subject-digest: ${{ steps.build.outputs.digest }}")
+    expect(publish).not.toContain("subject-path: Dockerfile")
+  })
+
+  it("gates Pages and SEO files on site detection", () => {
+    const absent = buildScaffoldFiles({ repoName: "owner/lib", finalDestination: "npm", hasSite: false })
+    expect(absent.some((file) => file.path === ".github/workflows/pages.yml")).toBe(false)
+    expect(absent.some((file) => file.path === "public/robots.txt")).toBe(false)
+
+    const present = buildScaffoldFiles({ repoName: "owner/site", finalDestination: "github-pages", hasSite: true })
+    for (const path of [".github/workflows/pages.yml", "public/robots.txt", "public/sitemap.xml", "public/seo-head.html", "public/404.html", "public/.well-known/security.txt"]) {
+      expect(present.some((file) => file.path === path)).toBe(true)
+    }
+    expect(present.find((file) => file.path === "public/404.html")!.content).toContain('name="robots" content="noindex"')
+  })
+
+  it("embeds the shared verifiable definition of greatness", () => {
+    const playbook = buildScaffoldFiles({ repoName: "test-repo" }).find((file) => file.path === "docs/playbook/README.md")!
+    expect(playbook.content).toContain("## Definition of greatness (verifiable)")
+    expect(playbook.content).toContain(DEFINITION_OF_GREATNESS)
   })
 
   it("enhance mode appends only missing ## sections for guidance files", () => {

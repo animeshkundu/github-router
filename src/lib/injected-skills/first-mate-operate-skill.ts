@@ -1,4 +1,4 @@
-import { CONDENSED_OPERATING_SEQUENCE } from "~/lib/first-mate/operating-protocol"
+import { CONDENSED_OPERATING_SEQUENCE, DEFINITION_OF_GREATNESS } from "~/lib/first-mate/operating-protocol"
 
 export const FIRST_MATE_OPERATE_SKILL = {
   name: "gh-first-mate-operate",
@@ -44,6 +44,12 @@ Let the controller drive decomposition and steering (see \`gh-first-mate\`); thi
 ## Phased sequence (shared with the scaffolded playbook)
 
 ${CONDENSED_OPERATING_SEQUENCE}
+
+## Definition of greatness (the shipping bar every repo must clear)
+
+Driving a product to greatness is not just shipping features — the repo itself must clear a verifiable shipping-infrastructure bar. Drive each repo toward it and gate each item on real, third-party-checkable evidence (a green check, a \`gh api\`, a \`curl\`, a \`cosign verify\`), never a self-report. This is the SAME bar the scaffolded playbook and the eval use.
+
+${DEFINITION_OF_GREATNESS}
 
 ## Anti-patterns (hard stops)
 

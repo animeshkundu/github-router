@@ -21,6 +21,7 @@ import {
   type ExistingScaffoldFile,
   type ScaffoldCommandSet,
   type ScaffoldFileReport,
+  type ScaffoldFinalDestination,
   type ScaffoldMode,
   type ScaffoldOpts,
   type ScaffoldTestContext,
@@ -1087,6 +1088,16 @@ async function detectScaffoldOptions(input: ScaffoldDetectionInput): Promise<Sca
   const workflowSignal = [...workflowNames, ...workflowTexts]
   const primaryOs = input.overrides?.primary_os ?? detectPrimaryOs(readme, workflowSignal)
   const matrix = detectCiMatrix(primaryOs, workflowSignal)
+  const hasSite = detectHasSite(rootNames, frameworkNames)
+  const finalDestination = detectFinalDestination({
+    packageJsonRaw: packageJsonText,
+    hasPackageJson: packageJson !== undefined,
+    goMod,
+    pyproject,
+    cargoToml,
+    rootNames,
+    hasSite,
+  })
   return {
     repoName: input.repoSlug,
     repoDescription: input.repoDescription ?? summarizeReadme(readme),
@@ -1099,7 +1110,61 @@ async function detectScaffoldOptions(input: ScaffoldDetectionInput): Promise<Sca
     uiEvidenceRequired,
     projectStructure: detectProjectStructure(rootNames),
     detectedNotes: detectNotes({ packageJson, goMod, pyproject, cargoToml, workflows: workflowNames, primaryOs }),
+    finalDestination,
+    hasSite,
   }
+}
+
+/**
+ * True when the repo builds a web site worth an SEO/Pages scaffold: a root
+ * `index.html`, or a static-site / web framework in its dependencies. Kept
+ * conservative (a UI *library* is not a site) — over-seeding SEO templates with
+ * TODOs is low-harm, but a false site would seed an irrelevant Pages workflow.
+ */
+function detectHasSite(rootNames: ReadonlyArray<string>, frameworkNames: ReadonlyArray<string>): boolean {
+  const root = new Set(rootNames.map((n) => n.toLowerCase()))
+  if (root.has("index.html")) return true
+  const siteFrameworks = new Set([
+    "vite", "next", "nuxt", "astro", "@docusaurus/core", "gatsby", "vitepress",
+    "@11ty/eleventy", "@sveltejs/kit", "remix", "solid-start",
+  ])
+  return frameworkNames.some((n) => siteFrameworks.has(n.toLowerCase()))
+}
+
+/**
+ * Detect the repo's PUBLIC final destination from root signals. Only assigns a
+ * specific destination on a CLEAR signal; genuinely ambiguous → "unknown" (the
+ * scaffold then seeds CI + Pages-if-site but NO publish workflow — a safe
+ * false-negative, never a wrong publish pipeline).
+ */
+function detectFinalDestination(args: {
+  packageJsonRaw: string | undefined
+  hasPackageJson: boolean
+  goMod: string | undefined
+  pyproject: string | undefined
+  cargoToml: string | undefined
+  rootNames: ReadonlyArray<string>
+  hasSite: boolean
+}): ScaffoldFinalDestination {
+  const root = new Set(args.rootNames.map((n) => n.toLowerCase()))
+  const has = (n: string): boolean => root.has(n.toLowerCase())
+  const raw = args.packageJsonRaw ?? ""
+  if (has("action.yml") || has("action.yaml")) return "actions-marketplace"
+  if (/"engines"\s*:\s*\{[^}]*"vscode"/.test(raw)) return "vscode-marketplace"
+  if (args.cargoToml !== undefined) return "crates"
+  if (args.pyproject !== undefined || has("setup.py")) return "pypi"
+  if (args.goMod !== undefined) return "go-proxy"
+  if (args.hasPackageJson) {
+    const isPrivate = /"private"\s*:\s*true/.test(raw)
+    const isPublishableLib = !isPrivate && /"(bin|exports|main|module)"\s*:/.test(raw)
+    if (args.hasSite) return "github-pages" // a site wins over a lib entry
+    if (isPublishableLib) return "npm"
+    if (has("dockerfile")) return "ghcr"
+    return "unknown"
+  }
+  if (has("dockerfile")) return "ghcr"
+  if (args.hasSite) return "github-pages"
+  return "unknown"
 }
 
 async function readFirstAvailableText(

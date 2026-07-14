@@ -1,4 +1,4 @@
-import { CONDENSED_OPERATING_SEQUENCE } from "./operating-protocol"
+import { CONDENSED_OPERATING_SEQUENCE, DEFINITION_OF_GREATNESS } from "./operating-protocol"
 
 export const COPILOT_SETUP_JOB_NAME = "copilot-setup-steps" as const
 export const COPILOT_SETUP_TIMEOUT_MAX = 59 as const
@@ -32,12 +32,16 @@ export interface ScaffoldCiContext {
   matrix: string[]
 }
 
+export type ScaffoldFinalDestination = "github-pages" | "npm" | "pypi" | "crates" | "ghcr" | "go-proxy" | "actions-marketplace" | "vscode-marketplace" | "unknown"
+
 export interface ScaffoldOpts {
   repoName: string
   repoDescription?: string
   defaultBranch?: string
   techStack?: string
   packageManager?: string
+  finalDestination?: ScaffoldFinalDestination
+  hasSite?: boolean
   commands?: ScaffoldCommandSet
   tests?: ScaffoldTestContext
   ci?: ScaffoldCiContext
@@ -80,6 +84,12 @@ const ENHANCEABLE_PATHS = new Set<string>([
   "LEARNINGS.md",
   "CHANGELOG.md",
   "docs/playbook/README.md",
+  "SECURITY.md",
+  ".github/CONTRIBUTING.md",
+  "CODE_OF_CONDUCT.md",
+  "SUPPORT.md",
+  "GOVERNANCE.md",
+  "ADOPTERS.md",
 ])
 
 const COPILOT_SETUP_TIMEOUT_MINUTES = 15 as const
@@ -105,7 +115,30 @@ export function buildScaffoldFiles(opts: ScaffoldOpts): ScaffoldFile[] {
     { path: ".github/instructions/tests.instructions.md", content: buildTestInstructions(normalized) },
     { path: ".github/workflows/copilot-setup-steps.yml", content: buildCopilotSetupWorkflow(normalized) },
     { path: ".github/workflows/ci.yml", content: buildCiWorkflow(normalized) },
+    ...(normalized.hasSite ? [
+      { path: ".github/workflows/pages.yml", content: buildPagesWorkflow(normalized) },
+      { path: "public/robots.txt", content: buildRobotsTxt() },
+      { path: "public/sitemap.xml", content: buildSitemap() },
+      { path: "public/seo-head.html", content: buildSeoHead() },
+      { path: "public/404.html", content: buildNotFoundPage() },
+      { path: "public/.well-known/security.txt", content: buildSecurityTxt() },
+    ] : []),
+    { path: ".github/workflows/codeql.yml", content: buildCodeqlWorkflow(normalized) },
+    { path: ".github/dependabot.yml", content: buildDependabot(normalized) },
+    { path: ".github/workflows/release.yml", content: buildReleaseWorkflow(normalized) },
+    { path: ".github/workflows/publish.yml", content: buildPublishWorkflow(normalized) },
+    { path: ".github/workflows/media.yml", content: buildMediaWorkflow(normalized) },
+    { path: ".github/workflows/maintainability.yml", content: buildMaintainabilityWorkflow(normalized) },
     { path: ".github/pull_request_template.md", content: buildPullRequestTemplate(normalized) },
+    { path: ".github/ISSUE_TEMPLATE/config.yml", content: buildIssueTemplateConfig() },
+    { path: "SECURITY.md", content: buildSecurityPolicy(normalized) },
+    { path: ".github/CONTRIBUTING.md", content: buildContributing(normalized) },
+    { path: "CODE_OF_CONDUCT.md", content: buildCodeOfConduct() },
+    { path: "SUPPORT.md", content: buildSupport() },
+    { path: ".github/CODEOWNERS", content: buildCodeowners() },
+    { path: "GOVERNANCE.md", content: buildGovernance() },
+    { path: ".github/FUNDING.yml", content: buildFunding() },
+    { path: "ADOPTERS.md", content: buildAdopters() },
     { path: "docs/adrs/0000-template.md", content: buildAdrTemplate() },
     { path: "docs/adr/0001-record-architecture-decisions.md", content: buildAdrIndex(normalized) },
     { path: "docs/history/0000-template.md", content: buildHistoryTemplate() },
@@ -212,6 +245,8 @@ function normalizeScaffoldOpts(opts: ScaffoldOpts): Required<ScaffoldOpts> {
     defaultBranch: opts.defaultBranch?.trim() || "<!-- TODO: confirm the default branch. -->",
     techStack: opts.techStack?.trim() || "<!-- TODO: fill in languages, frameworks, package managers, services, and runtime versions. -->",
     packageManager: opts.packageManager?.trim() || "<!-- TODO: confirm the package manager or build tool. -->",
+    finalDestination: opts.finalDestination ?? "unknown",
+    hasSite: opts.hasSite ?? false,
     commands: opts.commands ?? {},
     tests: opts.tests ?? {},
     ci: opts.ci ?? { primaryOs: "<!-- TODO: choose the primary supported OS. -->", matrix: [...DEFAULT_CI_MATRIX] },
@@ -520,7 +555,10 @@ function buildCiWorkflow(opts: Required<ScaffoldOpts>): string {
 on:
   pull_request:
   push:
-    branches: [${opts.defaultBranch.startsWith("<!--") ? "main" : opts.defaultBranch}]
+    branches: [${opts.defaultBranch.startsWith("<!--") ? "main # TODO: confirm the default branch" : opts.defaultBranch}]
+
+permissions:
+  contents: read
 
 jobs:
   quality-gate:
@@ -531,7 +569,7 @@ jobs:
       matrix:
         os: [${osList.join(", ")}]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@${CHECKOUT_SHA} # v4
 ${setupStepsFor(opts)}
       - name: Run repository quality gate
         run: |
@@ -542,23 +580,23 @@ ${runLines}
 function setupStepsFor(opts: Required<ScaffoldOpts>): string {
   const pm = opts.packageManager
   if (pm === "bun") {
-    return `      - uses: oven-sh/setup-bun@v2
+    return `      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
       - name: Install dependencies
         run: bun install --frozen-lockfile`
   }
   if (pm === "pnpm") {
-    return `      - uses: actions/setup-node@v4
+    return `      - uses: actions/setup-node@1e60f620b9541d5f5f3af2d1f2b0b9839c4e53c0 # v4
         with:
           node-version: 22
           cache: pnpm
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@7d2c2a2c7a1fb2f07e4646f7b4602195e3d0c57e # v4
         with:
           run_install: false
       - name: Install dependencies
         run: pnpm install --frozen-lockfile`
   }
   if (pm === "yarn") {
-    return `      - uses: actions/setup-node@v4
+    return `      - uses: actions/setup-node@1e60f620b9541d5f5f3af2d1f2b0b9839c4e53c0 # v4
         with:
           node-version: 22
           cache: yarn
@@ -566,7 +604,7 @@ function setupStepsFor(opts: Required<ScaffoldOpts>): string {
         run: yarn install --immutable`
   }
   if (pm === "npm") {
-    return `      - uses: actions/setup-node@v4
+    return `      - uses: actions/setup-node@1e60f620b9541d5f5f3af2d1f2b0b9839c4e53c0 # v4
         with:
           node-version: 22
           cache: npm
@@ -574,7 +612,7 @@ function setupStepsFor(opts: Required<ScaffoldOpts>): string {
         run: npm ci`
   }
   if (opts.techStack.toLowerCase().includes("go")) {
-    return `      - uses: actions/setup-go@v5
+    return `      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5
         with:
           go-version-file: go.mod`
   }
@@ -583,7 +621,7 @@ function setupStepsFor(opts: Required<ScaffoldOpts>): string {
         run: rustup show`
   }
   if (opts.techStack.toLowerCase().includes("python")) {
-    return `      - uses: actions/setup-python@v5
+    return `      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5
         with:
           python-version: "3.x"
       - name: Install dependencies
@@ -593,6 +631,391 @@ function setupStepsFor(opts: Required<ScaffoldOpts>): string {
   }
   return `      - name: Set up environment
         run: echo "TODO: add language/runtime setup"`
+}
+
+const CHECKOUT_SHA = "11bd71901bbe5b1630ceea73d27597364c9af683"
+const CONFIGURE_PAGES_SHA = "983d7736d9b0ae728b81ab479565c72886d7745b"
+const UPLOAD_PAGES_SHA = "56afc609e74202658d3ffba0e8f6dda462b719fa"
+const DEPLOY_PAGES_SHA = "decdde0ac072f6f71b3a7fa0b3c73a7a62cc8a28"
+const UPLOAD_ARTIFACT_SHA = "65462800fd760344b1a7b4382951275a0abb4808"
+
+function buildPagesWorkflow(opts: Required<ScaffoldOpts>): string {
+  const branch = opts.defaultBranch.startsWith("<!--") ? "main # TODO: confirm the default branch" : opts.defaultBranch
+  return `name: Pages
+
+on:
+  push:
+    branches: [${branch}]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@${CHECKOUT_SHA} # v4
+      - uses: actions/configure-pages@${CONFIGURE_PAGES_SHA} # v5
+      - name: Build site and stamp deployed revision
+        run: |
+          ${opts.commands.build ?? "echo \"TODO: build the site into _site\""}
+          mkdir -p _site
+          printf '%s\\n' "\${{ github.sha }}" > _site/BUILD_SHA.txt
+      - uses: actions/upload-pages-artifact@${UPLOAD_PAGES_SHA} # v3
+        with:
+          path: _site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: \${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@${DEPLOY_PAGES_SHA} # v4
+`
+}
+
+function codeqlLanguages(opts: Required<ScaffoldOpts>): string {
+  const stack = opts.techStack.toLowerCase()
+  const languages: string[] = []
+  if (/javascript|typescript|node|react|vue|svelte/.test(stack)) languages.push("javascript-typescript")
+  if (stack.includes("python")) languages.push("python")
+  if (stack.includes("go")) languages.push("go")
+  if (/rust|cargo/.test(stack)) languages.push("rust")
+  return languages.length > 0 ? languages.join(", ") : "javascript-typescript # TODO: confirm CodeQL language"
+}
+
+function buildCodeqlWorkflow(opts: Required<ScaffoldOpts>): string {
+  return `name: CodeQL
+
+on:
+  push:
+    branches: [${opts.defaultBranch.startsWith("<!--") ? "main # TODO: confirm the default branch" : opts.defaultBranch}]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      matrix:
+        language: [${codeqlLanguages(opts)}]
+    steps:
+      - uses: actions/checkout@${CHECKOUT_SHA} # v4
+      - uses: github/codeql-action/init@b374143c1149a9115d881581d29b8390bbcbb59c # v3
+        with:
+          languages: \${{ matrix.language }}
+      - uses: github/codeql-action/autobuild@b374143c1149a9115d881581d29b8390bbcbb59c # v3
+      - uses: github/codeql-action/analyze@b374143c1149a9115d881581d29b8390bbcbb59c # v3
+`
+}
+
+function dependabotEcosystem(opts: Required<ScaffoldOpts>): string {
+  if (["npm", "bun", "pnpm", "yarn"].includes(opts.packageManager)) return "npm"
+  if (opts.finalDestination === "pypi") return "pip"
+  if (opts.finalDestination === "crates") return "cargo"
+  if (opts.finalDestination === "go-proxy") return "gomod"
+  if (opts.finalDestination === "ghcr") return "docker"
+  return "<!-- TODO: choose a supported package ecosystem -->"
+}
+
+function buildDependabot(opts: Required<ScaffoldOpts>): string {
+  return `version: 2
+updates:
+  - package-ecosystem: "${dependabotEcosystem(opts)}"
+    directory: "/"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+`
+}
+
+function releaseType(opts: Required<ScaffoldOpts>): string {
+  if (opts.finalDestination === "pypi") return "python"
+  if (opts.finalDestination === "crates") return "rust"
+  if (opts.finalDestination === "go-proxy") return "go"
+  if (opts.finalDestination === "npm" || opts.finalDestination === "vscode-marketplace" || opts.finalDestination === "actions-marketplace") return "node"
+  return "simple"
+}
+
+function buildReleaseWorkflow(opts: Required<ScaffoldOpts>): string {
+  return `name: Release
+
+on:
+  push:
+    branches: [${opts.defaultBranch.startsWith("<!--") ? "main # TODO: confirm the default branch" : opts.defaultBranch}]
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: googleapis/release-please-action@a02a34c4d625f9be7cb89156071d8567266a2445 # v4
+        with:
+          release-type: ${releaseType(opts)}
+# This workflow creates the tag, changelog, and GitHub Release. Publishing is
+# deliberately separate in publish.yml and starts only on release: published.
+`
+}
+
+function apiCompatibilitySteps(opts: Required<ScaffoldOpts>): string {
+  if (opts.finalDestination === "crates") {
+    return `      - name: Check Rust API compatibility
+        run: |
+          cargo install cargo-semver-checks --locked
+          cargo semver-checks check-release`
+  }
+  if (opts.finalDestination === "npm" || opts.finalDestination === "vscode-marketplace" || opts.finalDestination === "actions-marketplace") {
+    return `      - name: Check TypeScript API compatibility
+        if: \${{ hashFiles('api-extractor.json') != '' }}
+        run: npx --no-install api-extractor run --local
+      - name: API compatibility wiring reminder
+        if: \${{ hashFiles('api-extractor.json') == '' }}
+        run: echo "TODO: configure @microsoft/api-extractor and commit its API report"`
+  }
+  return `      - name: Declare API compatibility policy
+        run: echo "TODO: wire the ecosystem's breaking-change checker when this repository exposes a stable public API"`
+}
+
+function buildMaintainabilityWorkflow(opts: Required<ScaffoldOpts>): string {
+  const exampleCommand = opts.commands.test ?? "echo \"TODO: execute every documented example or doctest in CI\""
+  return `name: Maintainability
+
+on:
+  pull_request:
+  push:
+    branches: [${opts.defaultBranch.startsWith("<!--") ? "main # TODO: confirm the default branch" : opts.defaultBranch}]
+
+permissions:
+  contents: read
+
+jobs:
+  policy-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@${CHECKOUT_SHA} # v4
+      - name: REUSE and SPDX compliance
+        run: |
+          python -m pip install reuse
+          reuse lint
+      - name: Dependency license policy
+        run: echo "TODO: wire the ecosystem-specific dependency-license scanner and approved-license policy"
+${apiCompatibilitySteps(opts)}
+      - name: Execute documented examples
+        run: ${exampleCommand}
+`
+}
+
+function buildPublishWorkflow(opts: Required<ScaffoldOpts>): string {
+  const common = `name: Publish\n\non:\n  release:\n    types: [published]\n\npermissions:\n  contents: read\n\n`
+  if (opts.finalDestination === "npm") return `${common}jobs:\n  npm:\n    runs-on: ubuntu-latest\n    environment: npm\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - uses: actions/checkout@${CHECKOUT_SHA} # v4\n      - name: Set up Node for OIDC trusted publishing\n        uses: actions/setup-node@1e60f620b9541d5f5f3af2d1f2b0b9839c4e53c0 # v4\n        with:\n          node-version: 22\n          registry-url: https://registry.npmjs.org\n      - run: npm ci\n      - run: npm pack\n      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2\n        with:\n          subject-path: '*.tgz'\n      - run: npm publish --provenance --access public *.tgz\n`
+  if (opts.finalDestination === "pypi") return `${common}jobs:\n  pypi:\n    runs-on: ubuntu-latest\n    environment: pypi\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - uses: actions/checkout@${CHECKOUT_SHA} # v4\n      - run: python -m pip install --upgrade build\n      - run: python -m build\n      - uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0\n      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2\n        with:\n          subject-path: dist/*\n`
+  if (opts.finalDestination === "crates") return `${common}jobs:\n  crates:\n    runs-on: ubuntu-latest\n    environment: crates-io\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - uses: actions/checkout@${CHECKOUT_SHA} # v4\n      - id: auth\n        uses: rust-lang/crates-io-auth-action@e919bc7605cde86df457cf5b93c5e103838bd879 # v1\n      - run: cargo publish\n        env:\n          CARGO_REGISTRY_TOKEN: \${{ steps.auth.outputs.token }}\n      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2\n        with:\n          subject-path: target/package/*.crate\n`
+  if (opts.finalDestination === "ghcr") return `${common}jobs:\n  ghcr:\n    runs-on: ubuntu-latest\n    environment: ghcr\n    permissions:\n      contents: read\n      packages: write\n      id-token: write\n      attestations: write\n    steps:\n      - uses: actions/checkout@${CHECKOUT_SHA} # v4\n      - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3\n        with:\n          registry: ghcr.io\n          username: \${{ github.actor }}\n          password: \${{ github.token }}\n      - name: Build and push image\n        id: build\n        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5\n        with:\n          push: true\n          tags: ghcr.io/\${{ github.repository }}:\${{ github.event.release.tag_name }}\n          provenance: true\n          sbom: true\n      - uses: sigstore/cosign-installer@4959ce089c160fddf62f7b42464195ba1a56d382 # v3\n      - name: Keyless-sign image digest\n        run: cosign sign --yes "ghcr.io/\${{ github.repository }}@\${{ steps.build.outputs.digest }}"\n      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2\n        with:\n          subject-name: ghcr.io/\${{ github.repository }}\n          subject-digest: \${{ steps.build.outputs.digest }}\n          push-to-registry: true\n`
+  return `${common}jobs:\n  destination-note:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo "TODO: ${opts.finalDestination === "go-proxy" ? "Go modules publish through signed SemVer tags and proxy.golang.org; no registry upload is required" : opts.finalDestination === "github-pages" ? "Pages deployment is handled by pages.yml; no package registry applies" : opts.finalDestination === "actions-marketplace" ? "complete Marketplace listing and maintain the floating major tag; no OIDC registry exists" : opts.finalDestination === "vscode-marketplace" ? "VS Code Marketplace does not support OIDC; require explicit human approval before configuring its PAT-based publish exception" : "resolve the final destination before enabling publication"}."\n`
+}
+
+function buildMediaWorkflow(opts: Required<ScaffoldOpts>): string {
+  return `name: Media evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@${CHECKOUT_SHA} # v4
+      - name: Capture screenshots and Open Graph image
+        run: |
+          echo "TODO: wire the project's Playwright command and capture desktop/mobile screenshots plus og-image.png"
+          echo "Optional: install VHS from a checksum-pinned release and record the terminal demo"
+          ${opts.commands.build ?? "true"}
+      - uses: actions/upload-artifact@${UPLOAD_ARTIFACT_SHA} # v4
+        with:
+          name: launch-media
+          path: |
+            artifacts/screenshots/**
+            artifacts/og-image.png
+            artifacts/demo.gif
+          if-no-files-found: warn
+`
+}
+
+function buildRobotsTxt(): string {
+  return `User-agent: *\nAllow: /\nSitemap: <!-- TODO: insert the canonical absolute sitemap URL -->\n`
+}
+
+function buildSitemap(): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n  <!-- TODO: generate canonical absolute <url><loc> entries during the site build. -->\n</urlset>\n`
+}
+
+function buildSeoHead(): string {
+  return `<!-- Merge these tags into the site's real <head>; replace every TODO with canonical absolute URLs. -->\n<link rel="canonical" href="<!-- TODO: canonical page URL -->">\n<meta property="og:type" content="website">\n<meta property="og:title" content="<!-- TODO: product name -->">\n<meta property="og:description" content="<!-- TODO: concise value proposition -->">\n<meta property="og:image" content="<!-- TODO: absolute 1200x630 og-image URL -->">\n<meta name="twitter:card" content="summary_large_image">\n<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"<!-- TODO: product name -->","url":"<!-- TODO: canonical site URL -->"}</script>\n`
+}
+
+function buildNotFoundPage(): string {
+  return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="robots" content="noindex"><title>Not found</title></head><body><main><h1>Page not found</h1><p><a href="/">Return home</a></p></main></body></html>\n`
+}
+
+function buildSecurityTxt(): string {
+  return `Contact: <!-- TODO: security disclosure email or HTTPS form -->\nExpires: <!-- TODO: RFC 3339 date less than one year from publication -->\nCanonical: <!-- TODO: absolute /.well-known/security.txt URL -->\nPolicy: <!-- TODO: absolute SECURITY.md or security-policy URL -->\nPreferred-Languages: en\n`
+}
+
+function buildSecurityPolicy(opts: Required<ScaffoldOpts>): string {
+  return `# Security policy
+
+## Supported versions
+
+<!-- TODO: list supported release lines and their security-support windows. -->
+
+## Reporting a vulnerability
+
+Please do not open a public issue. Use GitHub Private Vulnerability Reporting for ${opts.repoName}, or contact <!-- TODO: monitored security disclosure address -->.
+
+## Response targets
+
+- Acknowledge a report within **2 business days**.
+- Provide an initial assessment or request for more information within **7 calendar days**.
+- Share remediation status at least every **14 calendar days** until closure.
+
+These are response targets, not a promise that every report can be fixed within a fixed period. Coordinated disclosure timing will be agreed with the reporter.
+`
+}
+
+function buildContributing(opts: Required<ScaffoldOpts>): string {
+  return `# Contributing
+
+## Set up
+
+1. Read the repository guidance and relevant ADRs.
+2. Install dependencies: ${commandOrTodo(opts.commands.install, "confirm install command")}
+3. Run tests: ${commandOrTodo(opts.commands.test, "record test command")}
+
+## Find a first contribution
+
+Look for issues labeled 'good first issue' or 'help wanted'. Before starting larger work, comment with the behavior you intend to change and the verification you will add.
+
+## Pull requests
+
+Keep one concern per PR. Include acceptance criteria, tests, failure modes considered, documentation updates, and exact verification output. Follow the repository's code of conduct and do not weaken CI to land a change.
+`
+}
+
+function buildCodeOfConduct(): string {
+  return `# Contributor Covenant Code of Conduct
+
+## Our pledge
+
+We pledge to make participation in this community a harassment-free experience for everyone, regardless of age, body size, disability, ethnicity, sex characteristics, gender identity and expression, experience, education, socioeconomic status, nationality, appearance, race, caste, color, religion, or sexual identity and orientation.
+
+## Our standards
+
+Use welcoming and inclusive language, respect differing viewpoints, accept constructive feedback, focus on what is best for the community, and show empathy. Harassment, insults, public or private intimidation, and publishing others' private information are unacceptable.
+
+## Enforcement
+
+Report unacceptable behavior to <!-- TODO: private conduct-reporting channel -->. Maintainers will investigate promptly, protect reporter privacy where possible, and apply proportionate corrective action.
+
+This policy adopts the Contributor Covenant, version 2.1. See https://www.contributor-covenant.org/version/2/1/code_of_conduct.html for the full enforcement guidelines and attribution required by that license.
+`
+}
+
+function buildSupport(): string {
+  return `# Support
+
+## Questions and help
+
+<!-- TODO: name the supported discussion forum, issue category, or community channel. -->
+
+## Bugs
+
+Search existing issues, then open a bug report with reproduction steps, expected and actual behavior, environment details, and relevant logs with secrets removed.
+
+## Security
+
+Do not report vulnerabilities publicly. Follow [SECURITY.md](SECURITY.md).
+
+## Scope and response
+
+Support is provided on a best-effort basis. <!-- TODO: state maintained versions, normal response expectations, and commercial support if any. -->
+`
+}
+
+function buildCodeowners(): string {
+  return `# TODO: replace placeholder owners with real maintainers or teams.\n* @OWNER/MAINTAINERS\n.github/ @OWNER/MAINTAINERS\nSECURITY.md @OWNER/SECURITY\n`
+}
+
+function buildGovernance(): string {
+  return `# Governance
+
+## Roles
+
+- Contributors propose changes and participate in review.
+- Maintainers review, release, triage, and steward project health.
+- Security responders handle private vulnerability reports.
+
+<!-- TODO: list current maintainers, affiliations, and contact paths. -->
+
+## Decisions
+
+Routine reversible decisions use lazy consensus in issues or PRs. Architecture and durable process changes require an ADR. Conflicts of interest must be disclosed. Security-sensitive and irreversible decisions require explicit maintainer approval.
+
+## Becoming or leaving a maintainer
+
+Maintainer nominations should be based on sustained, constructive contributions and community trust, not employer or funding status. Record nominations and decisions publicly. Departing maintainers should transfer ownership and access promptly.
+
+## Sustainability
+
+Review contributor response time, repeat-contributor rate, contributor absence factor, organizational diversity, release cadence, and adopter evidence at least quarterly. These lagging signals, not this file's presence, show whether governance works.
+`
+}
+
+function buildFunding(): string {
+  return `# TODO: uncomment and fill only funding platforms the project actually owns.\n# github: [maintainer]\n# open_collective: project\n# custom: [https://example.invalid/sponsor]\n`
+}
+
+function buildAdopters(): string {
+  return `# Adopters
+
+Real users may add themselves through a pull request. Do not add organizations without their consent.
+
+| Organization / project | Public evidence | How it is used | Contact or PR |
+| --- | --- | --- | --- |
+| <!-- TODO: verified adopter --> | <!-- public URL --> | <!-- production, evaluation, integration --> | <!-- consent evidence --> |
+`
+}
+
+function buildIssueTemplateConfig(): string {
+  return `blank_issues_enabled: false\ncontact_links:\n  - name: Security vulnerability\n    url: <!-- TODO: GitHub private vulnerability reporting URL -->\n    about: Report security issues privately; do not open a public issue.\n  - name: Support\n    url: <!-- TODO: discussions or support URL -->\n    about: Ask usage questions and get help.\n`
 }
 
 function preferredRunner(opts: Required<ScaffoldOpts>): string {
@@ -778,6 +1201,10 @@ Each ${lower} entry should include:
 
 function buildPlaybook(): string {
   return `# Autonomous product operating playbook
+
+## Definition of greatness (verifiable)
+
+${DEFINITION_OF_GREATNESS}
 
 Run the phases in order. A phase exits only on its externally verifiable checkpoint. Store source links, raw counts, command output, analytics queries, and decisions in issues, plans, research, ADRs, or PRs so another operator can audit the claim.
 
