@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
-import { ARTIFACT_REVIEW_SKILL, FIRST_MATE_OPERATE_SKILL, FIRST_MATE_SETUP_SKILL, FIRST_MATE_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "../src/lib/injected-skills"
-import { CONDENSED_OPERATING_SEQUENCE } from "../src/lib/first-mate/operating-protocol"
+import { ARTIFACT_REVIEW_SKILL, FIRST_MATE_CONDUCT_SKILL, FIRST_MATE_OPERATE_SKILL, FIRST_MATE_SETUP_SKILL, FIRST_MATE_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "../src/lib/injected-skills"
+import { CONDENSED_OPERATING_SEQUENCE, DEFINITION_OF_GREATNESS } from "../src/lib/first-mate/operating-protocol"
 
 function frontmatterFor(md: string): string {
   const lines = md.split(/\r?\n/)
@@ -20,10 +20,11 @@ function descriptionFor(md: string): string {
 
 describe("INJECTED_SKILLS", () => {
   test("contains the injected skills with non-empty names and markdown", () => {
-    expect(INJECTED_SKILLS.length).toBe(7)
+    expect(INJECTED_SKILLS.length).toBe(8)
     expect(INJECTED_SKILLS.some((s) => s.name === "gh-worker")).toBe(true)
     expect(INJECTED_SKILLS.some((s) => s.name === "gh-first-mate-scaffold")).toBe(true)
     expect(INJECTED_SKILLS.some((s) => s.name === "gh-first-mate-operate")).toBe(true)
+    expect(INJECTED_SKILLS.some((s) => s.name === "gh-first-mate-conduct")).toBe(true)
     for (const skill of INJECTED_SKILLS) {
       expect(skill.name.length).toBeGreaterThan(0)
       expect(skill.md.length).toBeGreaterThan(0)
@@ -83,6 +84,19 @@ describe("first-mate skills", () => {
     // Single source of truth: the operator skill embeds the SAME condensed sequence
     // the scaffolded playbook (buildPlaybook) emits, so the two surfaces can't drift.
     expect(FIRST_MATE_OPERATE_SKILL.md).toContain(CONDENSED_OPERATING_SEQUENCE)
+    // And the greatness bar, shared with the conductor + scaffold.
+    expect(FIRST_MATE_OPERATE_SKILL.md).toContain(DEFINITION_OF_GREATNESS)
+  })
+
+  test("conduct skill is the fleet conductor, owns the heartbeat, and shares the SSOT greatness bar", () => {
+    expect(FIRST_MATE_CONDUCT_SKILL.name).toBe("gh-first-mate-conduct")
+    expect(FIRST_MATE_CONDUCT_SKILL.md).toContain("fleet conductor")
+    expect(FIRST_MATE_CONDUCT_SKILL.md).toContain("[fm-heartbeat]") // the single shared heartbeat marker
+    // Re-hydrates each fresh per-repo CEO from the durable strategy store.
+    expect(FIRST_MATE_CONDUCT_SKILL.md).toContain("mcp__first-mate__read_strategy")
+    expect(FIRST_MATE_CONDUCT_SKILL.md).toContain("mcp__first-mate__write_strategy")
+    // SSOT: the greatness bar is embedded from operating-protocol, shared across surfaces.
+    expect(FIRST_MATE_CONDUCT_SKILL.md).toContain(DEFINITION_OF_GREATNESS)
   })
 })
 

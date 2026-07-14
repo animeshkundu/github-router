@@ -26,6 +26,8 @@ const REAL_MCP_TOOLS = new Set([
   "mcp__first-mate__abandon_mission",
   "mcp__first-mate__add_units",
   "mcp__first-mate__scaffold_repo",
+  "mcp__first-mate__read_strategy",
+  "mcp__first-mate__write_strategy",
 ])
 
 describe("injected skills MCP tool drift guard", () => {

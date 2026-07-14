@@ -105,7 +105,8 @@ function isFirstMateSkillName(name: string): boolean {
   return (
     name === "gh-first-mate" ||
     name === "gh-first-mate-scaffold" ||
-    name === "gh-first-mate-operate"
+    name === "gh-first-mate-operate" ||
+    name === "gh-first-mate-conduct"
   )
 }
 

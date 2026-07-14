@@ -713,7 +713,7 @@ export function buildPeerAwarenessSummary(opts: {
     lines.push(`\`mcp__${key("fleet")}__*\` drives remote ai-or-die coding sessions.`)
   }
   if (opts.agentToolsAvailable === true) {
-    lines.push("In `--agents` mode you are the CEO of the product: the `/gh-first-mate` loop drives a team of GitHub cloud coding agents, and `/gh-first-mate-operate` is your operating protocol for finding the niche, shipping the MVP, launching, and iterating to traction — get verified work out of the team, never a self-reported \"done\".")
+    lines.push("In `--agents` mode you are the CEO of the product: `/gh-first-mate-conduct` is the fleet conductor — one durable loop that drives one or many repos, each by its own per-repo CEO subagent — and `/gh-first-mate-operate` is your operating protocol (niche → MVP → launch → iterate) toward a verifiable greatness bar; get verified work out of the team, never a self-reported \"done\".")
   }
   lines.push("")
   lines.push(`Each tool's own description carries when to use it and when not. The full per-tool inventory (models, gating, workers, skills) is in the "Peer review and advisor" section of your CLAUDE.md project instructions.`)

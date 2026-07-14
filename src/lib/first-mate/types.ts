@@ -62,6 +62,39 @@ export interface RepoRef {
   name: string
 }
 
+export interface StrategyBet {
+  hypothesis: string
+  metric: string
+  threshold: string
+  decisionRule: "kill" | "pivot" | "continue"
+}
+
+export interface StrategyGreatnessItem {
+  item: string
+  status: "done" | "pending"
+  evidence?: string
+}
+
+export interface StrategyDecisionEntry {
+  atMs: number
+  decision: string
+  rationale: string
+  evidenceRef?: string
+}
+
+export interface StrategyRecord {
+  missionId: string
+  repos?: string[]
+  currentPhase?: string
+  activeBet?: StrategyBet
+  greatnessChecklist?: StrategyGreatnessItem[]
+  decisionLog?: StrategyDecisionEntry[]
+  openAssumptions?: string[]
+  nextStrategicAction?: { action: string; trigger?: string }
+  updatedMs: number
+  updatedByWake?: string
+}
+
 /**
  * One unit's durable ledger row. Holds only HANDLES + classification +
  * bookkeeping — never diffs, logs, or PR bodies (those are re-fetchable).
