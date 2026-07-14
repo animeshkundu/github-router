@@ -72,6 +72,17 @@ UI/UX quality (and every user-viewable surface) is DRIVEN, SEEN, and ITERATED, n
 
 The no-guessing rule: never mark a user-viewable surface — including the README as GitHub renders it — "done" from code/markdown review alone; back every claim with a screenshot of the actual running/rendered artifact.
 
+## Every iteration must move the end-user experience forward — and regress nothing
+
+This is the objective the whole loop is tuned to, and the operating expression of the CEO eval (\`docs/first-mate-ceo-eval-framework.md\`, the End-User Experience Delta lens): after each iteration (or a bounded set), measure what VERIFIABLY improved for the END USER, and confirm nothing regressed.
+
+- **Drive the pinned user journeys before AND after.** Keep a pinned set of golden journeys per repo (the aha path + key flows) plus user-facing facets — journey completion, time-to-first-value, capability, performance, accessibility, user-facing correctness, the rendered README/Pages/docs/Release, state robustness. Capture them on the inherited state, then again after the iteration, by DRIVING the real artifact — never inferred from code or a 200.
+- **Ship only a net improvement.** An iteration is done only when it shows at least one MATERIAL, verified user-facing improvement (past a pre-set threshold, tied to a real user job) AND zero detected unintended regression under the coverage you actually ran. Report coverage honestly: "no regression detected in the pinned journeys," never an absolute "zero."
+- **A detected regression is stop-the-line.** A journey that worked now failing, a metric crossing its budget the wrong way, a removed/broken capability, a new user-hitting bug, a broken rendered surface, or a slower quickstart CAPS the iteration: fix the regression before the improvement counts. Recovering a regression you caused only retires the debt; it is not new progress.
+- **Intended user-facing changes are approved tradeoffs, not free.** A deliberate deprecation / redesign / pivot is recorded as an approved tradeoff (old baseline preserved, migration path, human approval) — never silently relabeled "not a regression."
+- **Necessary invisible work is legitimate but bounded.** Security hardening, migrations, and refactors that de-risk future UX are enabling-investment, not churn — but bounded: after ~2 consecutive iterations with no user-facing delta (or ~a third of a milestone's budget), the next iteration must show a material user improvement or you flag the strand.
+- **The agent must not own the ruler.** The journey manifest + measurement harness are yours (or human-blessed), not authored by the cloud agent being measured; a change to them is reviewed and logged, like a merge approval.
+
 ## Anti-patterns (hard stops)
 
 - **Over-building without distribution:** run a reachability/channel test before extending product scope. "Build it and they will come" is not a plan.
