@@ -105,6 +105,13 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined
 }
 
+function truncateUtf8(value: string, maxBytes: number): { value: string; truncated: boolean } {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return { value, truncated: false }
+  let truncated = Buffer.from(value, "utf8").subarray(0, Math.max(0, maxBytes)).toString("utf8")
+  while (Buffer.byteLength(truncated, "utf8") > maxBytes) truncated = truncated.slice(0, -1)
+  return { value: truncated, truncated: true }
+}
+
 async function readJsonObject(response: Response): Promise<Record<string, unknown>> {
   const text = await response.text()
   if (!text.trim()) return {}
@@ -940,6 +947,812 @@ export async function markReadyForReview(
     { pullRequestId: prNodeId },
   )
   return { ready: true }
+}
+
+export interface UpdateBranchResult {
+  updated: boolean
+  message?: string
+}
+
+/** Update a PR branch only while its head still matches the caller's observation. */
+export async function updateBranch(
+  repo: RepoRef,
+  pr: number,
+  expectedHeadSha: string,
+): Promise<UpdateBranchResult> {
+  const response = await ghRestRaw(
+    "PUT",
+    `${repoPath(repo)}/pulls/${segment(pr)}/update-branch`,
+    { body: { expected_head_sha: expectedHeadSha } },
+  )
+  const result = await readJsonObject(response)
+  if (response.status === 422) {
+    return {
+      updated: false,
+      ...(stringValue(result.message) ? { message: stringValue(result.message) } : {}),
+    }
+  }
+  if (!response.ok) throw agentErrorFromResponse(response, "Pull request branch update failed")
+  return {
+    updated: true,
+    ...(stringValue(result.message) ? { message: stringValue(result.message) } : {}),
+  }
+}
+
+export interface InboundIssueSummary {
+  number: number
+  title: string
+  authorLogin: string
+  isBot: boolean
+  labels: string[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface InboundPullRequestSummary extends InboundIssueSummary {
+  isDraft: boolean
+  headSha: string
+}
+
+interface InboundIssueRestResponse {
+  number?: number
+  title?: string | null
+  user?: { login?: string | null; type?: string | null } | null
+  labels?: Array<string | { name?: string | null }>
+  pull_request?: unknown
+  draft?: boolean | null
+  head?: { sha?: string | null } | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+const INBOUND_PER_PAGE = 100
+const INBOUND_MAX_PAGES = 2
+
+async function listInboundPages(
+  repo: RepoRef,
+  resource: "issues" | "pulls",
+): Promise<InboundIssueRestResponse[]> {
+  const items: InboundIssueRestResponse[] = []
+  for (let page = 1; page <= INBOUND_MAX_PAGES; page += 1) {
+    const batch = await ghRest<InboundIssueRestResponse[]>(
+      "GET",
+      `${repoPath(repo)}/${resource}?state=open&per_page=${INBOUND_PER_PAGE}&page=${page}`,
+    )
+    items.push(...batch)
+    if (batch.length < INBOUND_PER_PAGE) break
+  }
+  return items.slice(0, INBOUND_PER_PAGE * INBOUND_MAX_PAGES)
+}
+
+function inboundAuthor(item: InboundIssueRestResponse): {
+  authorLogin: string
+  isBot: boolean
+} {
+  const authorLogin = item.user?.login ?? ""
+  return {
+    authorLogin,
+    isBot: item.user?.type === "Bot" || /\[bot\]$/i.test(authorLogin),
+  }
+}
+
+function inboundLabels(item: InboundIssueRestResponse): string[] {
+  return (item.labels ?? []).flatMap((label) => {
+    if (typeof label === "string") return [label]
+    return label.name ? [label.name] : []
+  })
+}
+
+export async function listInboundIssues(repo: RepoRef): Promise<InboundIssueSummary[]> {
+  const issues = await listInboundPages(repo, "issues")
+  return issues
+    .filter((issue) => issue.pull_request === undefined)
+    .map((issue) => ({
+      number: issue.number ?? 0,
+      title: issue.title ?? "",
+      ...inboundAuthor(issue),
+      labels: inboundLabels(issue),
+      createdAt: issue.created_at ?? "",
+      updatedAt: issue.updated_at ?? "",
+    }))
+}
+
+export async function listInboundPRs(
+  repo: RepoRef,
+): Promise<InboundPullRequestSummary[]> {
+  const pulls = await listInboundPages(repo, "pulls")
+  return pulls.map((pull) => ({
+    number: pull.number ?? 0,
+    title: pull.title ?? "",
+    ...inboundAuthor(pull),
+    labels: inboundLabels(pull),
+    isDraft: pull.draft ?? false,
+    createdAt: pull.created_at ?? "",
+    updatedAt: pull.updated_at ?? "",
+    headSha: pull.head?.sha ?? "",
+  }))
+}
+
+export interface BranchProtectionSpec {
+  requiredStatusCheckContexts: string[]
+  strict: boolean
+  requiredApprovingReviewCount: number
+  requireLinearHistory: boolean
+  requireConversationResolution: boolean
+}
+
+export interface BranchProtectionResult {
+  rulesetId: number
+  action: "created" | "updated"
+}
+
+interface RulesetRestResponse {
+  id?: number
+  name?: string | null
+  target?: string | null
+}
+
+/** Create or replace the first-mate-managed branch ruleset for one branch. */
+export async function configureBranchProtection(
+  repo: RepoRef,
+  branch: string,
+  spec: BranchProtectionSpec,
+): Promise<BranchProtectionResult> {
+  const name = `first-mate:${branch}`
+  const existing = await ghRest<RulesetRestResponse[]>(
+    "GET",
+    `${repoPath(repo)}/rulesets?per_page=100`,
+  )
+  const current = existing.find((ruleset) => ruleset.name === name && ruleset.target === "branch")
+  const body = {
+    name,
+    target: "branch",
+    enforcement: "active",
+    conditions: {
+      ref_name: { include: [`refs/heads/${branch}`], exclude: [] },
+    },
+    rules: [
+      {
+        type: "required_status_checks",
+        parameters: {
+          required_status_checks: spec.requiredStatusCheckContexts.map((context) => ({ context })),
+          strict_required_status_checks_policy: spec.strict,
+        },
+      },
+      {
+        type: "pull_request",
+        parameters: {
+          dismiss_stale_reviews_on_push: false,
+          require_code_owner_review: false,
+          require_last_push_approval: false,
+          required_approving_review_count: spec.requiredApprovingReviewCount,
+          required_review_thread_resolution: spec.requireConversationResolution,
+        },
+      },
+      ...(spec.requireLinearHistory ? [{ type: "required_linear_history" }] : []),
+    ],
+  }
+  const action = current?.id === undefined ? "created" : "updated"
+  const result = await ghRest<RulesetRestResponse>(
+    current?.id === undefined ? "POST" : "PUT",
+    current?.id === undefined
+      ? `${repoPath(repo)}/rulesets`
+      : `${repoPath(repo)}/rulesets/${segment(current.id)}`,
+    { body },
+  )
+  return { rulesetId: result.id ?? current?.id ?? 0, action }
+}
+
+export interface EnvironmentReviewer {
+  type: "User" | "Team"
+  id: number
+}
+
+export interface EnsureEnvironmentOptions {
+  waitTimer?: number
+  reviewers?: EnvironmentReviewer[]
+  preventSelfReview?: boolean
+}
+
+export async function ensureEnvironment(
+  repo: RepoRef,
+  name: string,
+  opts: EnsureEnvironmentOptions = {},
+): Promise<{ name: string; created: boolean }> {
+  const body: Record<string, unknown> = {}
+  if (opts.waitTimer !== undefined) body.wait_timer = opts.waitTimer
+  if (opts.reviewers !== undefined) body.reviewers = opts.reviewers
+  if (opts.preventSelfReview !== undefined) body.prevent_self_review = opts.preventSelfReview
+
+  const response = await ghRestRaw(
+    "PUT",
+    `${repoPath(repo)}/environments/${segment(name)}`,
+    { body },
+  )
+  if (!response.ok) throw agentErrorFromResponse(response, "Environment update failed")
+  const result = await readJsonObject(response)
+  return { name: stringValue(result.name) ?? name, created: response.status === 201 }
+}
+
+export interface CreateReleaseInput {
+  tagName: string
+  targetCommitish?: string
+  name?: string
+  body?: string
+  draft?: boolean
+  prerelease?: boolean
+  generateReleaseNotes?: boolean
+}
+
+export interface ReleaseSummary {
+  id: number
+  tagName: string
+  url: string
+  isLatest?: boolean
+}
+
+interface ReleaseRestResponse {
+  id?: number
+  tag_name?: string | null
+  html_url?: string | null
+  url?: string | null
+}
+
+function releaseSummary(release: ReleaseRestResponse, isLatest?: boolean): ReleaseSummary {
+  return {
+    id: release.id ?? 0,
+    tagName: release.tag_name ?? "",
+    url: release.html_url ?? release.url ?? "",
+    ...(isLatest !== undefined ? { isLatest } : {}),
+  }
+}
+
+export async function createRelease(
+  repo: RepoRef,
+  input: CreateReleaseInput,
+): Promise<ReleaseSummary> {
+  const body: Record<string, unknown> = { tag_name: input.tagName }
+  if (input.targetCommitish !== undefined) body.target_commitish = input.targetCommitish
+  if (input.name !== undefined) body.name = input.name
+  if (input.body !== undefined) body.body = input.body
+  if (input.draft !== undefined) body.draft = input.draft
+  if (input.prerelease !== undefined) body.prerelease = input.prerelease
+  if (input.generateReleaseNotes !== undefined) {
+    body.generate_release_notes = input.generateReleaseNotes
+  }
+  const release = await ghRest<ReleaseRestResponse>(
+    "POST",
+    `${repoPath(repo)}/releases`,
+    { body, retry: false },
+  )
+  return releaseSummary(release)
+}
+
+export async function getLatestRelease(repo: RepoRef): Promise<ReleaseSummary | null> {
+  const response = await ghRestRaw("GET", `${repoPath(repo)}/releases/latest`)
+  if (response.status === 404) return null
+  if (!response.ok) throw agentErrorFromResponse(response, "Latest release lookup failed")
+  const release = await readJsonObject(response) as ReleaseRestResponse
+  return releaseSummary(release, true)
+}
+
+export type SecurityFeatureStatus = "enabled" | "disabled"
+
+export interface RepoSettings {
+  description?: string
+  homepage?: string
+  hasIssues?: boolean
+  hasProjects?: boolean
+  hasWiki?: boolean
+  hasDiscussions?: boolean
+  securityAndAnalysis?: {
+    advancedSecurity?: SecurityFeatureStatus
+    secretScanning?: SecurityFeatureStatus
+    secretScanningPushProtection?: SecurityFeatureStatus
+  }
+  enablePrivateVulnerabilityReporting?: true
+}
+
+export async function updateRepoSettings(
+  repo: RepoRef,
+  settings: RepoSettings,
+): Promise<{ appliedFields: string[] }> {
+  const body: Record<string, unknown> = {}
+  const appliedFields: string[] = []
+  const fields = [
+    ["description", settings.description],
+    ["homepage", settings.homepage],
+    ["has_issues", settings.hasIssues],
+    ["has_projects", settings.hasProjects],
+    ["has_wiki", settings.hasWiki],
+    ["has_discussions", settings.hasDiscussions],
+  ] as const
+  for (const [field, value] of fields) {
+    if (value === undefined) continue
+    body[field] = value
+    appliedFields.push(field)
+  }
+  if (settings.securityAndAnalysis !== undefined) {
+    const securityAndAnalysis: Record<string, { status: SecurityFeatureStatus }> = {}
+    const securityFields = [
+      ["advanced_security", settings.securityAndAnalysis.advancedSecurity],
+      ["secret_scanning", settings.securityAndAnalysis.secretScanning],
+      ["secret_scanning_push_protection", settings.securityAndAnalysis.secretScanningPushProtection],
+    ] as const
+    for (const [field, value] of securityFields) {
+      if (value === undefined) continue
+      securityAndAnalysis[field] = { status: value }
+      appliedFields.push(`security_and_analysis.${field}`)
+    }
+    if (Object.keys(securityAndAnalysis).length > 0) body.security_and_analysis = securityAndAnalysis
+  }
+
+  if (Object.keys(body).length > 0) {
+    await ghRest<unknown>("PATCH", repoPath(repo), { body })
+  }
+  if (settings.enablePrivateVulnerabilityReporting === true) {
+    await ghRest<unknown>("PUT", `${repoPath(repo)}/private-vulnerability-reporting`)
+    appliedFields.push("private_vulnerability_reporting")
+  }
+  return { appliedFields }
+}
+
+export type PagesSourceOptions =
+  | { buildType: "workflow" }
+  | { buildType: "legacy"; branch: string; path?: "/" | "/docs" }
+
+export async function setPagesSource(
+  repo: RepoRef,
+  opts: PagesSourceOptions,
+): Promise<{ configured: boolean; url?: string }> {
+  const body = opts.buildType === "workflow"
+    ? { build_type: "workflow" }
+    : {
+        build_type: "legacy",
+        source: { branch: opts.branch, path: opts.path ?? "/" },
+      }
+  const result = await ghRest<{ html_url?: string | null }>(
+    "POST",
+    `${repoPath(repo)}/pages`,
+    { body, retry: false },
+  )
+  return {
+    configured: true,
+    ...(result.html_url ? { url: result.html_url } : {}),
+  }
+}
+
+export interface CreateRepoInput {
+  name: string
+  org?: string
+  private?: boolean
+  description?: string
+  autoInit?: boolean
+  gitignoreTemplate?: string
+  licenseTemplate?: string
+}
+
+export interface CreateRepoResult {
+  owner: string
+  name: string
+  url: string
+  defaultBranch: string
+}
+
+export class RepoAlreadyExistsError extends Error {
+  readonly code = "already-exists"
+
+  constructor(name: string, org?: string) {
+    super(`Repository ${org ? `${org}/` : ""}${name} already exists or is unavailable`)
+    this.name = "RepoAlreadyExistsError"
+  }
+}
+
+/** Create a personal or organization repository without retrying the non-idempotent POST. */
+export async function createRepo(input: CreateRepoInput): Promise<CreateRepoResult> {
+  const body: Record<string, unknown> = { name: input.name }
+  if (input.private !== undefined) body.private = input.private
+  if (input.description !== undefined) body.description = input.description
+  if (input.autoInit !== undefined) body.auto_init = input.autoInit
+  if (input.gitignoreTemplate !== undefined) body.gitignore_template = input.gitignoreTemplate
+  if (input.licenseTemplate !== undefined) body.license_template = input.licenseTemplate
+  const path = input.org ? `/orgs/${segment(input.org)}/repos` : "/user/repos"
+  const response = await ghRestRaw("POST", path, { body, retry: false })
+  if (response.status === 422) throw new RepoAlreadyExistsError(input.name, input.org)
+  if (!response.ok) throw agentErrorFromResponse(response, "Repository creation failed")
+  const result = await readJsonObject(response)
+  const owner = asRecord(result.owner)
+  return {
+    owner: stringValue(owner?.login) ?? input.org ?? "",
+    name: stringValue(result.name) ?? input.name,
+    url: stringValue(result.html_url) ?? stringValue(result.url) ?? "",
+    defaultBranch: stringValue(result.default_branch) ?? "",
+  }
+}
+
+export interface WorkflowFailureDetail {
+  failingJobs: Array<{ name: string; url: string; failedSteps: string[] }>
+  annotations: Array<{ path: string; line: number; level: string; message: string }>
+  truncated: boolean
+}
+
+interface WorkflowFailureJob {
+  id?: number
+  check_run_id?: number
+  check_run_url?: string | null
+  name?: string | null
+  html_url?: string | null
+  conclusion?: string | null
+  steps?: Array<{ name?: string | null; conclusion?: string | null }>
+}
+
+function checkRunIdForJob(job: WorkflowFailureJob): number | undefined {
+  if (job.check_run_id !== undefined) return job.check_run_id
+  const match = /\/check-runs\/(\d+)(?:\?|$)/.exec(job.check_run_url ?? "")
+  return match ? Number(match[1]) : undefined
+}
+
+export async function getWorkflowRunFailedLogs(
+  repo: RepoRef,
+  runId: number,
+  opts: { maxBytes?: number; maxJobs?: number; maxAnnotations?: number } = {},
+): Promise<WorkflowFailureDetail> {
+  const maxBytes = Math.max(1024, opts.maxBytes ?? 16 * 1024)
+  const maxJobs = Math.min(20, Math.max(1, opts.maxJobs ?? 10))
+  const maxAnnotations = Math.min(100, Math.max(1, opts.maxAnnotations ?? 50))
+  const response = await ghRest<{ jobs?: WorkflowFailureJob[] }>(
+    "GET",
+    `${repoPath(repo)}/actions/runs/${segment(runId)}/jobs?per_page=100`,
+  )
+  const failed = (response.jobs ?? []).filter((job) => job.conclusion === "failure")
+  let truncated = failed.length > maxJobs
+  const failingJobs = failed.slice(0, maxJobs).map((job) => {
+    const failedSteps = (job.steps ?? [])
+      .filter((step) => step.conclusion === "failure")
+      .map((step) => step.name ?? "")
+    if (failedSteps.length > 20) truncated = true
+    return {
+      name: job.name ?? "",
+      url: job.html_url ?? "",
+      failedSteps: failedSteps.slice(0, 20),
+    }
+  })
+  const annotations: WorkflowFailureDetail["annotations"] = []
+  for (const job of failed.slice(0, maxJobs)) {
+    const checkRunId = checkRunIdForJob(job)
+    if (checkRunId === undefined || annotations.length >= maxAnnotations) continue
+    try {
+      const items = await ghRest<Array<{
+        path?: string | null
+        start_line?: number | null
+        annotation_level?: string | null
+        message?: string | null
+      }>>(
+        "GET",
+        `${repoPath(repo)}/check-runs/${segment(checkRunId)}/annotations?per_page=100`,
+      )
+      for (const item of items) {
+        if (annotations.length >= maxAnnotations) {
+          truncated = true
+          break
+        }
+        const candidate = {
+          path: item.path ?? "",
+          line: item.start_line ?? 0,
+          level: item.annotation_level ?? "",
+          message: item.message ?? "",
+        }
+        if (Buffer.byteLength(JSON.stringify({ failingJobs, annotations: [...annotations, candidate] })) > maxBytes) {
+          truncated = true
+          break
+        }
+        annotations.push(candidate)
+      }
+    } catch (err) {
+      consola.debug(`first-mate: annotations for check-run ${checkRunId} unavailable:`, err)
+    }
+  }
+  while (Buffer.byteLength(JSON.stringify({ failingJobs, annotations })) > maxBytes) {
+    if (annotations.length > 0) {
+      annotations.pop()
+      truncated = true
+      continue
+    }
+    const lastJob = failingJobs.at(-1)
+    if (!lastJob) break
+    const lastStep = lastJob.failedSteps.at(-1)
+    if (lastStep !== undefined) {
+      lastJob.failedSteps.pop()
+      truncated = true
+      continue
+    }
+    const name = truncateUtf8(lastJob.name, Math.max(64, Math.floor(maxBytes / 4)))
+    const url = truncateUtf8(lastJob.url, Math.max(64, Math.floor(maxBytes / 4)))
+    if (name.truncated || url.truncated) {
+      lastJob.name = name.value
+      lastJob.url = url.value
+      truncated = true
+      continue
+    }
+    failingJobs.pop()
+    truncated = true
+  }
+  return { failingJobs, annotations, truncated }
+}
+
+export interface PullRequestDiffContent {
+  files: Array<{
+    filename: string
+    status: string
+    additions: number
+    deletions: number
+    patch?: string
+  }>
+  truncated: boolean
+}
+
+export async function getPullRequestDiffContent(
+  repo: RepoRef,
+  pr: number,
+  opts: { maxBytes?: number; maxPatchBytes?: number } = {},
+): Promise<PullRequestDiffContent> {
+  const maxBytes = Math.max(1024, opts.maxBytes ?? 24 * 1024)
+  const maxPatchBytes = Math.min(maxBytes, Math.max(256, opts.maxPatchBytes ?? 12 * 1024))
+  const files: PullRequestDiffContent["files"] = []
+  let truncated = false
+  for (let page = 1; page <= 2; page += 1) {
+    const batch = await ghRest<Array<PullFileRestResponse & { patch?: string | null }>>(
+      "GET",
+      `${repoPath(repo)}/pulls/${segment(pr)}/files?per_page=100&page=${page}`,
+    )
+    for (const file of batch) {
+      const candidate: PullRequestDiffContent["files"][number] = {
+        filename: file.filename ?? "",
+        status: file.status ?? "",
+        additions: file.additions ?? 0,
+        deletions: file.deletions ?? 0,
+      }
+      if (file.patch !== undefined && file.patch !== null) {
+        const patch = truncateUtf8(file.patch, maxPatchBytes)
+        candidate.patch = patch.value
+        truncated ||= patch.truncated
+      }
+      if (Buffer.byteLength(JSON.stringify({ files: [...files, candidate] })) > maxBytes) {
+        truncated = true
+        return { files, truncated }
+      }
+      files.push(candidate)
+    }
+    if (batch.length < 100) return { files, truncated }
+  }
+  return { files, truncated: true }
+}
+
+export interface ReviewCommentSummary {
+  path: string
+  line: number
+  author: string
+  bodyExcerpt: string
+}
+
+export async function getReviewComments(repo: RepoRef, pr: number): Promise<ReviewCommentSummary[]> {
+  const comments = await ghRest<Array<{
+    path?: string | null
+    line?: number | null
+    original_line?: number | null
+    user?: { login?: string | null } | null
+    body?: string | null
+  }>>("GET", `${repoPath(repo)}/pulls/${segment(pr)}/comments?per_page=100`)
+  return comments.slice(0, 100).map((comment) => ({
+    path: comment.path ?? "",
+    line: comment.line ?? comment.original_line ?? 0,
+    author: comment.user?.login ?? "",
+    bodyExcerpt: (comment.body ?? "").slice(0, REVIEW_BODY_LIMIT),
+  }))
+}
+
+export interface BranchRulesetSummary {
+  ruleTypes: string[]
+  requiredChecks: string[]
+  strict: boolean
+  requiredApprovingReviewCount: number
+}
+
+export async function getBranchRuleset(
+  repo: RepoRef,
+  branch: string,
+): Promise<BranchRulesetSummary> {
+  const rules = await ghRest<Array<{
+    type?: string | null
+    parameters?: {
+      required_status_checks?: Array<{ context?: string | null }>
+      strict_required_status_checks_policy?: boolean
+      required_approving_review_count?: number
+    } | null
+  }>>("GET", `${repoPath(repo)}/rules/branches/${segment(branch)}`)
+  const requiredChecks = rules.flatMap((rule) =>
+    (rule.parameters?.required_status_checks ?? []).flatMap((check) =>
+      check.context ? [check.context] : [],
+    ),
+  ).slice(0, 100)
+  return {
+    ruleTypes: [...new Set(rules.flatMap((rule) => rule.type ? [rule.type] : []))].slice(0, 50),
+    requiredChecks,
+    strict: rules.some((rule) => rule.parameters?.strict_required_status_checks_policy === true),
+    requiredApprovingReviewCount: Math.max(
+      0,
+      ...rules.map((rule) => rule.parameters?.required_approving_review_count ?? 0),
+    ),
+  }
+}
+
+export interface AlertCountResult {
+  enabled: boolean
+  count?: number
+  truncated?: boolean
+}
+
+function countFromLink(response: Response): number | undefined {
+  const link = response.headers.get("link") ?? ""
+  const last = link.split(",").find((part) => /rel="last"/.test(part))
+  const match = last ? /[?&]page=(\d+)/.exec(last) : undefined
+  return match ? Number(match[1]) : undefined
+}
+
+async function getAlertCount(
+  repo: RepoRef,
+  resource: "code-scanning" | "dependabot",
+  stateName: string,
+): Promise<AlertCountResult> {
+  const response = await ghRestRaw(
+    "GET",
+    `${repoPath(repo)}/${resource}/alerts?state=${segment(stateName)}&per_page=1`,
+  )
+  if (response.status === 403 || response.status === 404) return { enabled: false }
+  if (!response.ok) throw agentErrorFromResponse(response, `${resource} alert lookup failed`)
+  const count = countFromLink(response)
+  const body = await response.json().catch(() => [])
+  const fallbackCount = Array.isArray(body) ? body.length : 0
+  return { enabled: true, count: count ?? fallbackCount }
+}
+
+export function getCodeScanningAlertCount(
+  repo: RepoRef,
+  stateName = "open",
+): Promise<AlertCountResult> {
+  return getAlertCount(repo, "code-scanning", stateName)
+}
+
+export function getDependabotAlertCount(
+  repo: RepoRef,
+  stateName = "open",
+): Promise<AlertCountResult> {
+  return getAlertCount(repo, "dependabot", stateName)
+}
+
+export interface CommunityProfileSummary {
+  healthPercentage: number
+  files: Record<string, boolean>
+}
+
+export async function getCommunityProfile(repo: RepoRef): Promise<CommunityProfileSummary> {
+  const result = await ghRest<{
+    health_percentage?: number
+    files?: Record<string, unknown>
+  }>("GET", `${repoPath(repo)}/community/profile`)
+  const files: Record<string, boolean> = {}
+  for (const [name, value] of Object.entries(result.files ?? {}).slice(0, 50)) {
+    files[name] = value !== null && value !== false
+  }
+  return { healthPercentage: result.health_percentage ?? 0, files }
+}
+
+export interface PagesStatus {
+  enabled: boolean
+  status?: string
+  cname?: string
+  htmlUrl?: string
+  buildType?: string
+}
+
+export async function getPagesStatus(repo: RepoRef): Promise<PagesStatus> {
+  const response = await ghRestRaw("GET", `${repoPath(repo)}/pages`)
+  if (response.status === 404) return { enabled: false }
+  if (!response.ok) throw agentErrorFromResponse(response, "Pages status lookup failed")
+  const result = await readJsonObject(response)
+  return {
+    enabled: true,
+    ...(stringValue(result.status) ? { status: stringValue(result.status) } : {}),
+    ...(stringValue(result.cname) ? { cname: stringValue(result.cname) } : {}),
+    ...(stringValue(result.html_url) ? { htmlUrl: stringValue(result.html_url) } : {}),
+    ...(stringValue(result.build_type) ? { buildType: stringValue(result.build_type) } : {}),
+  }
+}
+
+export interface LatestDeploymentStatus {
+  environment: string
+  state: string
+  targetUrl?: string
+  createdAt: string
+}
+
+export async function getLatestDeploymentStatus(
+  repo: RepoRef,
+  opts: { environment?: string } = {},
+): Promise<LatestDeploymentStatus | null> {
+  const environment = opts.environment
+    ? `&environment=${segment(opts.environment)}`
+    : ""
+  const deployments = await ghRest<Array<{
+    id?: number
+    environment?: string | null
+  }>>("GET", `${repoPath(repo)}/deployments?per_page=1${environment}`)
+  const deployment = deployments[0]
+  if (!deployment?.id) return null
+  const statuses = await ghRest<Array<{
+    state?: string | null
+    target_url?: string | null
+    environment_url?: string | null
+    created_at?: string | null
+  }>>(
+    "GET",
+    `${repoPath(repo)}/deployments/${segment(deployment.id)}/statuses?per_page=1`,
+  )
+  const status = statuses[0]
+  if (!status) return null
+  return {
+    environment: deployment.environment ?? opts.environment ?? "",
+    state: status.state ?? "",
+    ...(status.environment_url ?? status.target_url
+      ? { targetUrl: status.environment_url ?? status.target_url ?? undefined }
+      : {}),
+    createdAt: status.created_at ?? "",
+  }
+}
+
+export interface LiveTextResult {
+  ok: boolean
+  status: number
+  text: string
+  finalUrl: string
+}
+
+export async function fetchLiveText(
+  url: string,
+  opts: { maxBytes?: number; timeoutMs?: number } = {},
+): Promise<LiveTextResult> {
+  const maxBytes = Math.min(1024 * 1024, Math.max(1024, opts.maxBytes ?? 64 * 1024))
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), Math.max(100, opts.timeoutMs ?? 10_000))
+  try {
+    const response = await fetch(url, { method: "GET", redirect: "follow", signal: controller.signal })
+    const reader = response.body?.getReader()
+    if (!reader) return { ok: response.ok, status: response.status, text: "", finalUrl: response.url }
+    const chunks: Uint8Array[] = []
+    let size = 0
+    while (size < maxBytes) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+      const remaining = maxBytes - size
+      chunks.push(value.subarray(0, remaining))
+      size += Math.min(value.byteLength, remaining)
+      if (value.byteLength > remaining || size >= maxBytes) {
+        await reader.cancel().catch(() => undefined)
+        break
+      }
+    }
+    return {
+      ok: response.ok,
+      status: response.status,
+      text: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8"),
+      finalUrl: response.url,
+    }
+  } catch {
+    return { ok: false, status: 0, text: "", finalUrl: url }
+  } finally {
+    clearTimeout(timeout)
+  }
 }
 
 export interface CommitFileEntry {
