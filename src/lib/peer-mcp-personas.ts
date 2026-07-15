@@ -51,6 +51,9 @@ import {
   resolveMcpToolTimeoutMs,
   workerWallClockCeilingMs,
 } from "~/lib/worker-agent/budget"
+// Leaf sub-path import (like `budget` above) — pulls in only `relay-cap.ts`
+// and avoids the worker-agent index cycle.
+import { relaySafeText } from "~/lib/worker-agent/relay-cap"
 import { searchWeb } from "~/services/copilot/web-search"
 import { runStandIn, type StandInInput } from "~/lib/stand-in"
 import { state } from "~/lib/state"
@@ -609,7 +612,7 @@ export function buildPeerAwarenessSnippet(opts: {
   ]
   if (opts.workerToolsAvailable) {
     para2Parts.push(
-      `\`worker-*\` are background Agent subagents (subagent_type) that run the matching worker in its own context and deliver the result as a completion notification, so a long run never blocks the turn: \`worker-explore\` (read-only research), \`worker-review\` (reads the code to verify a change or claim), \`worker-plan\` (ordered implementation plan), \`worker-implement\` (edit/write/bash; \`worktree: true\` isolates in a git worktree and returns the diff), \`worker-test\` (independent test author). The raw \`mcp__${workersKey}__*\` tools they call are guarded (a direct main-thread call is redirected to the matching agent); Workers themselves have \`code_search\`.`,
+      `\`worker-*\` are background Agent subagents (subagent_type) that run the matching worker in its own context and deliver the result as a completion notification, so a long run never blocks the turn: \`worker-explore\` (read-only research), \`worker-review\` (reads the code to verify a change or claim), \`worker-plan\` (ordered implementation plan), \`worker-implement\` (edit/write/bash; ALWAYS runs in an isolated git worktree and returns the diff via a saved patch file; for in-place edits use the \`implementer\` subagent), \`worker-test\` (independent test author; also always worktree-isolated). The raw \`mcp__${workersKey}__*\` tools they call are guarded (a direct main-thread call is redirected to the matching agent); Workers themselves have \`code_search\`.`,
     )
   }
   para2Parts.push(
@@ -1354,10 +1357,11 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         + "Use for bounded implementation work that may take a while or benefits "
         + "from isolated worker context. Not for pure research, planning, review, "
         + "or independent test authoring; use explore, plan, review, or test for "
-        + "those scopes. With `worktree: false` (default) edits happen in place, "
-        + "so concurrent implement calls and lead edits to the same files can race. "
-        + "With `worktree: true` it runs in an isolated git worktree and returns "
-        + "the diff; this errors if the workspace is not a git repository.",
+        + "those scopes. ALWAYS runs in an isolated git worktree and returns the "
+        + "diff via a saved patch file (a `--stat` summary + a bounded preview + "
+        + "the patch path; a small diff is inlined in full) — it never edits your "
+        + "working tree, and it HARD-ERRORS if the workspace is not a git "
+        + "repository. For in-place edits, use the native `implementer` subagent.",
       inputSchema: {
         type: "object",
         required: ["prompt"],
@@ -1372,12 +1376,11 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           worktree: {
             type: "boolean",
             description:
-              "When true, run inside a fresh git worktree and return "
-              + "Pi's final text followed by the unified diff (so the "
-              + "lead can review before merging). When false/omitted, "
-              + "edits the workspace in place, so concurrent worker "
-              + "calls and lead edits can race. Errors if true and "
-              + "the workspace is not a git repository.",
+              "Ignored — worker_implement ALWAYS runs in an isolated "
+              + "git worktree and returns the diff (retained for "
+              + "compatibility; worktree:false is overridden with a "
+              + "note). For in-place edits, use the `implementer` "
+              + "subagent.",
           },
           model: {
             type: "string",
@@ -1403,8 +1406,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               + "Use this when the parent agent has multiple "
               + "workspaces open and the worker must operate in a "
               + "specific one. Must be absolute (relative paths "
-              + "rejected). For worktree:true, must be inside a "
-              + "git repo.",
+              + "rejected). Must be inside a git repo (implement always "
+              + "runs in a worktree).",
           },
           maxWallClockMs: {
             type: "integer",
@@ -1600,8 +1603,11 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         + "separate test author should challenge an implementation without modifying "
         + "the production code to make tests pass. Not for implementing fixes, broad "
         + "research, or code review; use implement, explore, or review for those scopes. "
-        + "With `worktree: true` it runs in an isolated git worktree and returns the "
-        + "test diff; this errors if the workspace is not a git repository.",
+        + "ALWAYS runs in an isolated git worktree and returns the test diff via a "
+        + "saved patch file (a `--stat` summary + a bounded preview + the patch path; "
+        + "a small diff is inlined in full) — it never edits your working tree, and it "
+        + "HARD-ERRORS if the workspace is not a git repository. For in-place test "
+        + "authoring, use the native `implementer` subagent.",
       inputSchema: {
         type: "object",
         required: ["prompt"],
@@ -1617,12 +1623,11 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           worktree: {
             type: "boolean",
             description:
-              "When true, run inside a fresh git worktree and return "
-              + "Pi's final text followed by the unified diff (so the "
-              + "lead can review the authored tests before merging). When "
-              + "false/omitted, writes tests in place, so concurrent worker "
-              + "calls and lead edits can race. Errors if true and "
-              + "the workspace is not a git repository.",
+              "Ignored — worker_test ALWAYS runs in an isolated git "
+              + "worktree and returns the diff (retained for "
+              + "compatibility; worktree:false is overridden with a "
+              + "note). For in-place test authoring, use the "
+              + "`implementer` subagent.",
           },
           model: {
             type: "string",
@@ -1648,8 +1653,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               + "Use this when the parent agent has multiple "
               + "workspaces open and the worker must operate in a "
               + "specific one. Must be absolute (relative paths "
-              + "rejected). For worktree:true, must be inside a "
-              + "git repo.",
+              + "rejected). Must be inside a git repo (test always "
+              + "runs in a worktree).",
           },
           maxWallClockMs: {
             type: "integer",
@@ -2244,9 +2249,16 @@ async function runWorkerToolCall(call: {
     thinking = thinkingRaw as WorkerThinkingLevel
   }
 
+  // `implement`/`test` ALWAYS run in an isolated git worktree — isolation is
+  // mandatory, not caller-tunable (a flag that had to survive a free-text
+  // Agent-tool round-trip silently dropped in prod, editing the real repo).
+  // A caller passing `worktree: false` is overridden with a note; for in-place
+  // edits the native `implementer` subagent is the right tool. We still reject
+  // a non-boolean so a schema-ignoring client gets a clean error.
   let worktree: boolean | undefined
-  if ((mode === "implement" || mode === "test") && args.worktree !== undefined) {
-    if (typeof args.worktree !== "boolean") {
+  let worktreeNote = ""
+  if (mode === "implement" || mode === "test") {
+    if (args.worktree !== undefined && typeof args.worktree !== "boolean") {
       return {
         content: [
           { type: "text", text: `worker_${mode}: arguments.worktree must be a boolean when provided` },
@@ -2254,7 +2266,12 @@ async function runWorkerToolCall(call: {
         isError: true,
       }
     }
-    worktree = args.worktree
+    worktree = true
+    if (args.worktree === false) {
+      worktreeNote =
+        `[note: worker_${mode} always runs in an isolated git worktree; the requested `
+        + "worktree:false was overridden. For in-place edits, use the `implementer` subagent.]\n\n"
+    }
   }
 
   // Optional workspace override. Outside serve mode, default is the proxy's
@@ -2342,8 +2359,13 @@ async function runWorkerToolCall(call: {
     maxWallClockMs,
     signal,
   })
+  // Notes are prefixes that MUST survive — reserve their bytes so the FINAL
+  // composed string (`clampNote + worktreeNote + body`) honors the relay cap,
+  // and truncate only the worker body (the last transform before returning).
+  const notePrefix = `${clampNote}${worktreeNote}`
+  const body = await relaySafeText(result.text, Buffer.byteLength(notePrefix, "utf8"))
   return {
-    content: [{ type: "text", text: `${clampNote}${result.text}` }],
+    content: [{ type: "text", text: `${notePrefix}${body}` }],
     isError: result.isError,
   }
 }
@@ -2481,12 +2503,15 @@ async function runBrowseToolCall(
   // Echo the session id so the caller can continue (or inspect) this
   // session on a later call via the `sessionId` arg. Appended regardless of
   // isError — the session exists either way, so a failed run can be retried
-  // on the same session.
+  // on the same session. The suffix MUST survive, so reserve its bytes and cap
+  // the worker body, then append the suffix — the final string honors the cap.
+  const sessionSuffix = `\n\n[browse session: ${sessionId}]`
+  const body = await relaySafeText(result.text, Buffer.byteLength(sessionSuffix, "utf8"))
   return {
     content: [
       {
         type: "text",
-        text: `${result.text}\n\n[browse session: ${sessionId}]`,
+        text: `${body}${sessionSuffix}`,
       },
     ],
     isError: result.isError,

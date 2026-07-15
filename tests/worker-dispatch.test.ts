@@ -266,7 +266,10 @@ describe("dispatcher bodies", () => {
     expect(p).toContain("EXACTLY ONCE")
     expect(p).toContain("VERBATIM")
     expect(p).toMatch(/do NOT spawn/i)
-    expect(p).toContain("worktree") // implement/test pass worktree through
+    // Worktree is no longer a relayed flag — implement/test ALWAYS run in a
+    // worktree (enforced at the MCP boundary), so the dispatcher prompt must
+    // NOT mention it (nothing for the dispatcher to pass through).
+    expect(p).not.toContain("worktree")
     expect(dispatcherPrompt("explore", KEY)).not.toContain("worktree")
   })
   test("prompt names the correct required brief field for each worker tool", () => {
