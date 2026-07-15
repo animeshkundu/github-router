@@ -7,8 +7,10 @@ import type { StrategyRecord } from "~/lib/first-mate/types"
 
 const firstMateDir = await fs.mkdtemp(path.join(tmpdir(), "fm-strategy-"))
 
+const realPaths = await import("~/lib/paths")
 mock.module("~/lib/paths", () => ({
-  PATHS: { FIRST_MATE_DIR: firstMateDir },
+  ...realPaths,
+  PATHS: { ...realPaths.PATHS, FIRST_MATE_DIR: firstMateDir },
 }))
 
 const { pruneStrategy, readStrategies, readStrategy, upsertStrategy } = await import(
