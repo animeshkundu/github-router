@@ -624,7 +624,7 @@ function setupStepsFor(opts: Required<ScaffoldOpts>): string {
         run: bun install --frozen-lockfile`
   }
   if (pm === "pnpm") {
-    return `      - uses: actions/setup-node@1e60f620b9541d5f5f3af2d1f2b0b9839c4e53c0 # v4
+    return `      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: pnpm
@@ -635,7 +635,7 @@ function setupStepsFor(opts: Required<ScaffoldOpts>): string {
         run: pnpm install --frozen-lockfile`
   }
   if (pm === "yarn") {
-    return `      - uses: actions/setup-node@1e60f620b9541d5f5f3af2d1f2b0b9839c4e53c0 # v4
+    return `      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: yarn
@@ -643,7 +643,7 @@ function setupStepsFor(opts: Required<ScaffoldOpts>): string {
         run: yarn install --immutable`
   }
   if (pm === "npm") {
-    return `      - uses: actions/setup-node@1e60f620b9541d5f5f3af2d1f2b0b9839c4e53c0 # v4
+    return `      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -679,7 +679,7 @@ function setupStepsFor(opts: Required<ScaffoldOpts>): string {
   // task returns an EMPTY draft (the #1 real-world cause of empty coding-agent
   // PRs). Instead, detect the dependency manifest at runtime and install for real,
   // failing LOUDLY (never silently) when nothing is recognized.
-  return `      - uses: actions/setup-node@1e60f620b9541d5f5f3af2d1f2b0b9839c4e53c0 # v4
+  return `      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
       - name: Detect toolchain and install dependencies
@@ -909,7 +909,7 @@ ${apiCompatibilitySteps(opts)}
 
 function buildPublishWorkflow(opts: Required<ScaffoldOpts>): string {
   const common = `name: Publish\n\non:\n  release:\n    types: [published]\n\npermissions:\n  contents: read\n\n`
-  if (opts.finalDestination === "npm") return `${common}jobs:\n  npm:\n    runs-on: ubuntu-latest\n    environment: npm\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - uses: actions/checkout@${CHECKOUT_SHA} # v4\n      - name: Set up Node for OIDC trusted publishing\n        uses: actions/setup-node@1e60f620b9541d5f5f3af2d1f2b0b9839c4e53c0 # v4\n        with:\n          node-version: 22\n          registry-url: https://registry.npmjs.org\n      - run: npm ci\n      - run: npm pack\n      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2\n        with:\n          subject-path: '*.tgz'\n      - run: npm publish --provenance --access public *.tgz\n`
+  if (opts.finalDestination === "npm") return `${common}jobs:\n  npm:\n    runs-on: ubuntu-latest\n    environment: npm\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - uses: actions/checkout@${CHECKOUT_SHA} # v4\n      - name: Set up Node for OIDC trusted publishing\n        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4\n        with:\n          node-version: 22\n          registry-url: https://registry.npmjs.org\n      - run: npm ci\n      - run: npm pack\n      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2\n        with:\n          subject-path: '*.tgz'\n      - run: npm publish --provenance --access public *.tgz\n`
   if (opts.finalDestination === "pypi") return `${common}jobs:\n  pypi:\n    runs-on: ubuntu-latest\n    environment: pypi\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - uses: actions/checkout@${CHECKOUT_SHA} # v4\n      - run: python -m pip install --upgrade build\n      - run: python -m build\n      - uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0\n      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2\n        with:\n          subject-path: dist/*\n`
   if (opts.finalDestination === "crates") return `${common}jobs:\n  crates:\n    runs-on: ubuntu-latest\n    environment: crates-io\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - uses: actions/checkout@${CHECKOUT_SHA} # v4\n      - id: auth\n        uses: rust-lang/crates-io-auth-action@e919bc7605cde86df457cf5b93c5e103838bd879 # v1\n      - run: cargo publish\n        env:\n          CARGO_REGISTRY_TOKEN: \${{ steps.auth.outputs.token }}\n      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2\n        with:\n          subject-path: target/package/*.crate\n`
   if (opts.finalDestination === "ghcr") return `${common}jobs:\n  ghcr:\n    runs-on: ubuntu-latest\n    environment: ghcr\n    permissions:\n      contents: read\n      packages: write\n      id-token: write\n      attestations: write\n    steps:\n      - uses: actions/checkout@${CHECKOUT_SHA} # v4\n      - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3\n        with:\n          registry: ghcr.io\n          username: \${{ github.actor }}\n          password: \${{ github.token }}\n      - name: Build and push image\n        id: build\n        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5\n        with:\n          push: true\n          tags: ghcr.io/\${{ github.repository }}:\${{ github.event.release.tag_name }}\n          provenance: true\n          sbom: true\n      - uses: sigstore/cosign-installer@4959ce089c160fddf62f7b42464195ba1a56d382 # v3\n      - name: Keyless-sign image digest\n        run: cosign sign --yes "ghcr.io/\${{ github.repository }}@\${{ steps.build.outputs.digest }}"\n      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2\n        with:\n          subject-name: ghcr.io/\${{ github.repository }}\n          subject-digest: \${{ steps.build.outputs.digest }}\n          push-to-registry: true\n`
