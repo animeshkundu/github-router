@@ -74,6 +74,44 @@ describe("buildAgentMd", () => {
     )
     expect(withoutModel).not.toContain("\nmodel:")
   })
+
+  test("mcpServers emits a parseable inline-map YAML list (claude-code#30280 workaround)", () => {
+    const md = buildAgentMd({
+      name: "worker-implement",
+      description: "Dispatch worker",
+      prompt: "Call the tool.",
+      tools: ["mcp__workers__*"],
+      mcpServers: {
+        "gh-router-workers": {
+          type: "http",
+          url: "http://127.0.0.1:18787/mcp/workers",
+          headers: { Authorization: `Bearer ${NONCE}` },
+          headersHelper: `"C:${String.fromCharCode(92)}node.exe" internal-workspace-header`,
+        },
+      },
+    })
+    const yamlSrc = md.split("---")[1]!
+    const fm = parseYaml(yamlSrc) as {
+      tools: Array<string>
+      mcpServers: Array<Record<string, {
+        type: string
+        url: string
+        headers: { Authorization: string }
+        headersHelper: string
+      }>>
+    }
+    // Inline-map SEQUENCE form (a bare-name reference would re-trigger #30280).
+    expect(Array.isArray(fm.mcpServers)).toBe(true)
+    expect(Object.keys(fm.mcpServers[0]!)).toEqual(["gh-router-workers"])
+    const entry = fm.mcpServers[0]!["gh-router-workers"]!
+    expect(entry.type).toBe("http")
+    expect(entry.url).toBe("http://127.0.0.1:18787/mcp/workers")
+    expect(entry.headers.Authorization).toBe(`Bearer ${NONCE}`)
+    // Windows-path headersHelper survives the round-trip intact.
+    expect(entry.headersHelper).toContain("internal-workspace-header")
+    // tools + mcpServers compose (connect-then-restrict).
+    expect(fm.tools).toEqual(["mcp__workers__*"])
+  })
 })
 
 describe("buildPeerMcpConfig", () => {
@@ -323,6 +361,62 @@ describe("buildPeerAgentDefinitions", () => {
     }
     // No browse dispatcher unless browseAvailable.
     expect(agents["worker-browse"]).toBeUndefined()
+  })
+
+  test("with serverUrl, dispatchers inline the workers server and personas inline peers (claude-code#30280)", () => {
+    const agents = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: false,
+      groupKeys: { peers: "peers", workers: "workers" },
+      workerToolsAvailable: true,
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+      serverUrl: URL,
+    })
+    // Worker dispatcher: inline `workers` HTTP server + restrictive tools.
+    const wImpl = agents["worker-implement"]!
+    expect(wImpl.tools).toEqual(["mcp__workers__*"])
+    expect(wImpl.mcpServers).toBeDefined()
+    const wEntry = wImpl.mcpServers!["workers"]!
+    expect(wEntry.type).toBe("http")
+    expect(wEntry.url).toBe(`${URL}/mcp/workers`)
+    expect(wEntry.headers.Authorization).toBe(`Bearer ${NONCE}`)
+    // Peer persona: inline `peers` HTTP server, no restrictive tools allowlist.
+    const critic = agents["codex-critic"]!
+    expect(critic.tools).toBeUndefined()
+    expect(critic.mcpServers!["peers"]!.url).toBe(`${URL}/mcp/peers`)
+    expect(critic.mcpServers!["peers"]!.headers.Authorization).toBe(`Bearer ${NONCE}`)
+    // Coordinator also gets peers.
+    expect(agents["peer-review-coordinator"]!.mcpServers!["peers"]!.url).toBe(`${URL}/mcp/peers`)
+  })
+
+  test("without serverUrl, no mcpServers frontmatter is emitted (backward-compatible)", () => {
+    const agents = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: false,
+      groupKeys: { peers: "peers", workers: "workers" },
+      workerToolsAvailable: true,
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    expect(agents["worker-implement"]!.mcpServers).toBeUndefined()
+    expect(agents["codex-critic"]!.mcpServers).toBeUndefined()
+  })
+
+  test("collision-fallback workers key is the inline mcpServers key too", () => {
+    const agents = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: false,
+      groupKeys: { peers: "gh-router-peers", workers: "gh-router-workers" },
+      workerToolsAvailable: true,
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+      serverUrl: URL,
+    })
+    const wImpl = agents["worker-implement"]!
+    // Map key is the RESOLVED fallback key; the URL still targets /mcp/workers.
+    expect(Object.keys(wImpl.mcpServers!)).toEqual(["gh-router-workers"])
+    expect(wImpl.mcpServers!["gh-router-workers"]!.url).toBe(`${URL}/mcp/workers`)
   })
 
   test("no worker-* dispatchers when workerToolsAvailable is falsy (default)", () => {
