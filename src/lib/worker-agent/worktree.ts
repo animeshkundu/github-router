@@ -19,9 +19,11 @@
  *     written untracked files appear in the diff (without intent-to-add,
  *     `diff HEAD` ignores them).
  *
- *   - On overrun, the diff is replaced with a file-list + `git diff
- *     --stat` summary, never a half-hunk — a truncated mid-hunk diff
- *     is unappliable and silently corrupts the caller's review.
+ *   - The full diff is ALWAYS returned via a saved patch file (with a
+ *     `git diff --stat` summary + a bounded preview), never inlined at
+ *     full size — a large diff inlined into the MCP result would overflow
+ *     Claude Code's 25k-token relay cap and be silently truncated. Only a
+ *     small diff (<= PREVIEW_CAP) is inlined in full for convenience.
  *
  *   - `remove()` is idempotent: a `finally`-block in the engine plus
  *     the lifecycle signal-handler sweep plus the boot-time safety
@@ -41,10 +43,15 @@ import process from "node:process"
 import { PATHS } from "../paths"
 import { recordWorkerRepo } from "./lifecycle"
 import type { WorktreeRegistry, WorktreeRegistryEntry } from "./lifecycle"
+import { sweepAgedWorkerDiffs, utf8HeadPreview } from "./relay-cap"
 
-/** Hard cap on the `finalize()` diff text. Above this we return a
- *  summary instead of a half-hunk. */
-const DIFF_CAP_BYTES = 256 * 1024
+/**
+ * A diff at or below this size is inlined in full. Above it, `finalize()`
+ * saves the complete patch to a file and returns a `git diff --stat`
+ * summary + a bounded UTF-8-safe preview + the file path, so the full
+ * change never rides (and overflows) Claude Code's 25k-token result relay.
+ */
+const PREVIEW_CAP = 8 * 1024
 
 /** Max entries allowed under `<repoRoot>/.git/worker-worktrees/`. */
 const QUOTA_PER_REPO = 20
@@ -81,8 +88,9 @@ export interface WorktreeHandle {
   branch: string
   /**
    * Produce the unified diff (with intent-to-add for untracked files).
-   * If > 256 KiB, returns a `[diff truncated …]` line + `git diff --stat`
-   * summary instead of a half-hunk.
+   * A diff <= PREVIEW_CAP is returned inline in full; a larger one is
+   * saved to a `.patch` file and this returns a `git diff --stat`
+   * summary + a bounded preview + the patch's absolute path.
    */
   finalize: () => Promise<string>
   /**
@@ -191,7 +199,9 @@ async function findRepoRoot(
     const e = err as Error & { stderr?: string; code?: string }
     const detail = e.stderr ? e.stderr.trim() : e.message
     throw new Error(
-      `worker-agent worktree: git unavailable or workspace is not a repository: ${detail}`,
+      `worker-agent worktree: git unavailable or workspace is not a repository: ${detail}. ` +
+        `worker_implement/worker_test always run in an isolated git worktree and require a git repo; ` +
+        `for in-place edits (or a non-git workspace), use the native \`implementer\` subagent instead.`,
     )
   }
   const lines = result.stdout.split(/\r?\n/).filter((s) => s.length > 0)
@@ -401,11 +411,16 @@ export async function createWorktree(
       ["-C", dir, "diff", "HEAD"],
       { maxBuffer: 256 * 1024 * 1024 },
     )
-    if (diff.stdout.length <= DIFF_CAP_BYTES) {
+    if (Buffer.byteLength(diff.stdout, "utf8") <= PREVIEW_CAP) {
+      // Small enough to inline in full — a 3-line change shouldn't
+      // require the caller to read a file.
       return diff.stdout
     }
-    // Truncated: never return a mid-hunk diff (unappliable, silently
-    // misleading). Replace with file-list + `git diff --stat` summary.
+    // Larger diff: NEVER inline it in full (it would overflow the relay's
+    // 25k-token cap and be silently truncated). Save the complete patch to
+    // a durable file and return a `--stat` summary + a bounded preview +
+    // the patch path, so the full (possibly binary) change is recoverable /
+    // `git apply`-able rather than destroyed with the worktree.
     let stat = ""
     try {
       const r = await execFileP("git", ["-C", dir, "diff", "--stat", "HEAD"])
@@ -413,17 +428,10 @@ export async function createWorktree(
     } catch {
       // proceed with empty stat
     }
-    // Heuristic count: each non-trailing-summary line of `diff --stat`
-    // describes one file. The trailing line is "N files changed, …";
-    // we just count lines and let the reader sanity-check.
-    const lineCount = stat.split(/\r?\n/).filter((l) => l.length > 0).length
-    const fileEstimate = Math.max(0, lineCount - 1)
-    const summary = `[diff truncated at 256KB; ${fileEstimate} files changed]\n${stat}`
-    // The inline diff is truncated, but the worktree is about to be
-    // removed — so persist the FULL patch to a durable router-owned file
-    // OUTSIDE the worktree (and outside the user's repo) and hand the
-    // caller its absolute path, so the change is recoverable / appliable
-    // rather than destroyed.
+    const preview = utf8HeadPreview(diff.stdout, PREVIEW_CAP)
+    const previewBlock =
+      `\n\n--- diff preview (first ${PREVIEW_CAP >> 10} KiB of ${Buffer.byteLength(diff.stdout, "utf8")} bytes) ---\n` +
+      preview
     let savedPath: string | null = null
     let saveError: string | null = null
     try {
@@ -433,17 +441,18 @@ export async function createWorktree(
     }
     if (savedPath !== null) {
       return (
-        `${summary}\n` +
+        `[large diff — full patch saved to a file]\n${stat}` +
+        `${previewBlock}\n\n` +
         `Full patch (git apply-able; includes binary blobs) saved to: ${savedPath}`
       )
     }
     // Durable persistence failed (e.g. the full patch exceeded the exec
     // buffer, or the app dir was unwritable). Don't hide it — the worktree
-    // is about to be removed, so signal explicitly that only the summary
-    // survives rather than returning a summary that silently looks complete.
+    // is about to be removed, so signal explicitly that only the summary +
+    // preview survive rather than returning something that looks complete.
     return (
-      `${summary}\n` +
-      `[full patch save failed: ${saveError ?? "unknown"}; only the summary above is available]`
+      `[large diff — full patch save FAILED: ${saveError ?? "unknown"}; ` +
+      `only the summary + preview below survive]\n${stat}${previewBlock}`
     )
   }
 
@@ -455,11 +464,11 @@ export async function createWorktree(
  * durable, router-owned file under `PATHS.WORKER_DIFFS_DIR` and return its
  * absolute path.
  *
- * Called by `finalize()` ONLY when the inline diff overflows
- * `DIFF_CAP_BYTES`: the worktree is removed immediately after finalize, so a
- * truncated inline diff would otherwise lose the actual patch forever. The
- * durable dir lives under the app dir — never inside the worktree (deleted)
- * nor the user's repo (don't pollute it).
+ * Called by `finalize()` whenever the inline diff exceeds `PREVIEW_CAP`:
+ * the worktree is removed immediately after finalize, so the full patch
+ * must be persisted or the actual change is lost forever. The durable dir
+ * lives under the app dir — never inside the worktree (deleted) nor the
+ * user's repo (don't pollute it).
  *
  * `--binary` keeps binary blobs recoverable (git base85-encodes them into
  * the patch) and `--full-index` writes exact 40-char object indexes, so the
@@ -475,14 +484,28 @@ async function saveOverflowPatch(dir: string): Promise<string> {
     ["-C", dir, "diff", "--binary", "--full-index", "HEAD"],
     { maxBuffer: 256 * 1024 * 1024 },
   )
+  // Best-effort age sweep so the durable dir (shared with relay-cap's
+  // `.txt` spills) doesn't grow unbounded. Throttled — concurrent worktree
+  // finalizes don't each re-scan the directory.
+  await sweepAgedWorkerDiffs({ throttle: true })
   await fs.mkdir(PATHS.WORKER_DIFFS_DIR, { recursive: true })
-  const name = `${process.pid}-${randomBytes(4).toString("hex")}.patch`
-  const patchPath = path.join(PATHS.WORKER_DIFFS_DIR, name)
   // `flag: "wx"` (exclusive create) matches the repo's secure-write
   // convention and refuses to clobber a pre-existing file/symlink at the
-  // path; on the (astronomically rare) name collision the throw is caught by
-  // finalize()'s save-error handler, which signals the failure rather than
-  // silently overwriting.
-  await fs.writeFile(patchPath, patch.stdout, { mode: 0o600, flag: "wx" })
-  return patchPath
+  // path. Retry on the (astronomically rare) name collision with a fresh
+  // suffix before surfacing the error to finalize()'s save-error handler.
+  let lastErr: unknown
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const name = `${process.pid}-${randomBytes(4).toString("hex")}.patch`
+    const patchPath = path.join(PATHS.WORKER_DIFFS_DIR, name)
+    try {
+      await fs.writeFile(patchPath, patch.stdout, { mode: 0o600, flag: "wx" })
+      return patchPath
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
+      lastErr = err
+    }
+  }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error("saveOverflowPatch: exhausted unique-name retries")
 }

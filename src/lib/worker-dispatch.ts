@@ -208,13 +208,13 @@ export function dispatcherDescription(mode: WorkerDispatchMode): string {
     explore:
       "Non-blocking `explore` worker: dispatches a read-only autonomous worker (its own context) in the background and delivers its summary as a completion notification.",
     implement:
-      "Non-blocking `implement` worker: dispatches an autonomous coding worker (read/write/bash, optional git worktree) in the background and delivers its result as a completion notification.",
+      "Non-blocking `implement` worker: dispatches an autonomous coding worker (read/write/bash) that ALWAYS runs in an isolated git worktree and returns the diff (for in-place edits use the `implementer` subagent), in the background, and delivers its result as a completion notification.",
     review:
       "Non-blocking `review` worker: dispatches a read-only reviewer that reads the code itself to verify a change or claim, in the background, and delivers findings as a completion notification.",
     plan:
       "Non-blocking `plan` worker: dispatches a read-only planner that returns an ordered implementation plan, in the background, and delivers it as a completion notification.",
     test:
-      "Non-blocking `test` worker: dispatches an independent test author that writes tests trying to break the implementation, in the background, and delivers pass/fail as a completion notification.",
+      "Non-blocking `test` worker: dispatches an independent test author (in an isolated git worktree) that writes tests trying to break the implementation, in the background, and delivers pass/fail as a completion notification.",
     browse:
       "Non-blocking `browse` worker: dispatches an autonomous browser agent in the background and delivers its result as a completion notification.",
   }
@@ -230,11 +230,9 @@ export function dispatcherPrompt(mode: WorkerDispatchMode, workersKey: string): 
   const tool = workerToolName(workersKey, mode)
   const briefField = mode === "browse" ? "task" : "prompt"
   const briefDescription = mode === "browse" ? "the lead's browse task, copied verbatim" : "the lead's worker brief, copied verbatim"
-  const modeSpecificPassThrough = mode === "implement" || mode === "test"
-    ? "\n  - `worktree` (optional): pass `true` if the lead asked for isolated-worktree execution"
-    : mode === "browse"
-      ? "\n  - `sessionId` (optional): pass through if the lead specified one"
-      : ""
+  const modeSpecificPassThrough = mode === "browse"
+    ? "\n  - `sessionId` (optional): pass through if the lead specified one"
+    : ""
   return [
     `# Subagent: ${dispatcherAgentName(mode)}`,
     "",
