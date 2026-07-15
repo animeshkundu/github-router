@@ -983,6 +983,23 @@ test("decompose: unit-less mission emits a decompose request, and a decompose an
   expect(h.units.every((u) => u.taskId !== null || u.issue !== null)).toBe(true)
 })
 
+test("terminal unmerged fleet does not auto-complete a decomposed mission", async () => {
+  const failedUnit = unit({
+    missionId: "m-failed",
+    terminal: true,
+    phase: "failed",
+    artifact: "no_pr",
+  })
+  const m = mission({ id: "m-failed", everDecomposed: true })
+  const h = harness([failedUnit], [m])
+
+  const result = await advance({}, h.deps)
+
+  expect(m.status).toBe("active")
+  expect(result.applied.some((entry) => entry.includes("completed mission m-failed"))).toBe(false)
+  expect(result.applied.some((entry) => entry.includes("mission m-failed NOT completed: 1 unit(s)"))).toBe(true)
+})
+
 test("all-terminal decomposed mission auto-completes and stops re-emitting decompose", async () => {
   const doneUnit = unit({
     id: "done-id",
@@ -999,6 +1016,7 @@ test("all-terminal decomposed mission auto-completes and stops re-emitting decom
   const result = await advance({}, h.deps)
 
   expect(m.status).toBe("done")
+  expect(result.applied).toContain("completed mission m-done")
   expect(result.needsModel.some((request) => request.kind === "decompose")).toBe(false)
 })
 

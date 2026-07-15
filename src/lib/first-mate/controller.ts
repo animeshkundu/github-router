@@ -3141,6 +3141,23 @@ export async function advance(
       if (scopedUnits.some((unit) => unit.missionId === mission.id && isActiveUnit(unit, missionsById))) continue
       if (scopedUnits.some((unit) => unit.missionId === mission.id && Boolean(unit.blockingDecisionId))) continue
       if (hasQueuedRequestForMission(mission.id, needsModel, needsHuman)) continue
+      // Complete == MERGED. A mission is done ONLY when every task reached a merged
+      // PR. A terminal unit that never merged (failed / abandoned / closed) means the
+      // mission did NOT complete — never silently flip it to `done` (the false-success
+      // trap where a 0%-productive fleet reads as "shipped"). Leave it honestly active
+      // and not-done; the stall watchdog surfaces it as needing a decision.
+      const unmergedTerminal = scopedUnits.filter(
+        (unit) =>
+          unit.missionId === mission.id &&
+          unit.terminal === true &&
+          unit.artifact !== "pr_merged",
+      )
+      if (unmergedTerminal.length > 0) {
+        applied.push(
+          `mission ${mission.id} NOT completed: ${unmergedTerminal.length} unit(s) ended without a merge — done requires every unit merged`,
+        )
+        continue
+      }
       mission.status = "done"
       mission.updatedMs = Date.now()
       await upsertMissionDurable(mission, deps)

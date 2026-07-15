@@ -24,6 +24,27 @@ export type ProviderState =
 /** Where in the dev cycle a unit is (controller lifecycle, not GitHub's). */
 export type Phase = "plan" | "build" | "fix" | "review" | "merge" | "done"
 
+/** Honest end-to-end stage toward the only normal completion outcome: MERGE. */
+export type LifecycleStage =
+  | "planning"
+  | "plan-review"
+  | "implementing"
+  | "code-review"
+  | "pr-open"
+  | "ready-to-merge"
+  | "blocked"
+  | "merged"
+
+/** Verified artifact progress is separate from provider/phase activity. */
+export type ProgressState = "verified" | "unverified_active" | "stalled" | "blocked"
+
+export type VerifiedProgressKind =
+  | "content_head"
+  | "ci_passed"
+  | "verifier_review"
+  | "floor_passed"
+  | "merged"
+
 /** The unit's pull-request artifact state. */
 export type Artifact =
   | "no_pr"
@@ -130,6 +151,18 @@ export interface UnitRow {
   retries: number
   /** Bounded retries for failed/timed-out plan tasks that produced no PR. */
   planRetries?: number
+  /** Last portal-proven artifact delta; provider activity never writes this. */
+  verifiedProgress?: {
+    fingerprint: string
+    kind: VerifiedProgressKind
+    atMs: number
+  }
+  /** Consecutive controller observations with no new verified artifact delta. */
+  noProgressWakes?: number
+  /** Concrete diagnosis recorded on the latest unchanged observation. */
+  lastNoProgressReason?: string
+  /** Durable dedup key for mechanism failures so heartbeats do not recount one outcome. */
+  lastMechanismFailureOutcome?: { signature: string; outcomeId: string }
   /**
    * Monotonic count of genuine task dispatches for provider idempotency keys.
    * Pending-intent replay reuses the current attempt instead of incrementing it.
