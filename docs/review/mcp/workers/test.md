@@ -10,99 +10,98 @@
 | MCP path | `mcp__workers__test` |
 | Group / server | `workers` (serverInfo `github-router-workers`) |
 | Wire tool name | `test` |
-| Definition | `src/lib/peer-mcp-personas.ts:1528` (tool entry), `:1533` (description); handler routes to `runWorkerToolCall({ mode: "test" })` at `:1616` |
-| Always-on? | gated by `capability: "worker"` (`:1531`) |
-| Capability gate | `worker` → `workerToolsEnabled()` (`src/lib/mcp-capabilities.ts:99`): `GH_ROUTER_DISABLE_WORKER_TOOLS` unset AND catalog has `WORKER_DEFAULT_MODEL` (`gpt-5.4-mini`) with `tool_calls`. Note: the RESOLVED test model is `gpt-5.6-sol` (`IMPLEMENT_DEFAULT_MODEL`), which is NOT a gate input — if absent, the mode errors at call time. |
-| Backing model / endpoint | `gpt-5.6-sol` at `xhigh` (`IMPLEMENT_DEFAULT_MODEL`, `engine.ts:168` / `:329`); Pi runtime over `/responses` (gpt-5.6-sol) |
-| Write-capable | yes — same 13-tool read+write surface as `implement` (`types.ts:52-54`, `tools.ts:1908`) |
-| Dual dispatcher surface | `worker-test` background subagent (`src/lib/worker-dispatch.ts:214`), invoked `Agent(subagent_type: "worker-test")` |
+| Definition | `src/lib/peer-mcp-personas.ts:1592` (tool entry); handler routes to `runWorkerToolCall({ mode: "test" })` at `:1679` |
+| Always-on? | gated by `capability: "worker"` (`src/lib/peer-mcp-personas.ts:1594`) |
+| Capability gate | `worker` → `workerToolsEnabled()` (`src/lib/mcp-capabilities.ts:99`): `GH_ROUTER_DISABLE_WORKER_TOOLS` unset and catalog has `WORKER_DEFAULT_MODEL` (`gpt-5.4-mini`) with `tool_calls`. The resolved test model is `gpt-5.6-sol` (`IMPLEMENT_DEFAULT_MODEL`), which is not a gate input; if absent, the mode errors at call time. |
+| Backing model / endpoint | `gpt-5.6-sol` at `xhigh` (`IMPLEMENT_DEFAULT_MODEL`, `src/lib/worker-agent/engine.ts:168,329`); Pi runtime over the model-resolved Copilot endpoint |
+| Write-capable | yes: same 13-tool read+write surface as `implement` (`src/lib/worker-agent/types.ts`, `src/lib/worker-agent/tools.ts`, `buildWorkerTools`) |
+| Dual dispatcher surface | `worker-test` background subagent (`dispatcherDescription`, `src/lib/worker-dispatch.ts:206-224`), invoked as `Agent(subagent_type: "worker-test")` |
 
 ## 2. Injected surfaces (verbatim)
 
 ### 2a. Tool `description` (shown in `tools/list`)
 
-`src/lib/peer-mcp-personas.ts:1533-1546`:
+`src/lib/peer-mcp-personas.ts:1595-1610`:
 
-> Runs as the background `worker-test` agent. Dispatch via the Agent tool (subagent_type: worker-test) so your turn is never blocked; the result arrives as a completion notification. Independent adversarial test authoring by an autonomous worker (Pi runtime; default model `gpt-5.6-sol` at xhigh reasoning, override via `model` with any Copilot-catalog model that advertises `tool_calls`). Same read+write toolset as `implement` (the explore set plus edit, write, bash, codex_review). The worker is framed as an INDEPENDENT test author that did NOT write the code under test: from the task and acceptance criteria it writes tests that try to BREAK the implementation (edge cases, error paths, the acceptance criteria as executable checks), runs them, and reports which pass and fail — it does NOT modify the implementation to make tests pass. With `worktree: true` runs in an isolated git worktree and returns the diff; HARD ERROR if true and the workspace is not a git repository.
+> Runs as the background `worker-test` agent. Dispatch via the Agent tool (subagent_type: worker-test) so the turn is never blocked; the result arrives as a completion notification. Independent adversarial test authoring by an autonomous worker (Pi runtime; default model `gpt-5.6-sol` at xhigh reasoning, override via `model` with any Copilot-catalog model that advertises `tool_calls`). It has the same read/write toolset as implement and writes tests that try to break the implementation through edge cases, error paths, and acceptance criteria, then runs them and reports pass/fail. Use when a separate test author should challenge an implementation without modifying the production code to make tests pass. Not for implementing fixes, broad research, or code review; use implement, explore, or review for those scopes. ALWAYS runs in an isolated git worktree and returns the test diff via a saved patch file (a `--stat` summary + a bounded preview + the patch path; a small diff is inlined in full) — it never edits your working tree, and it HARD-ERRORS if the workspace is not a git repository. For in-place test authoring, use the native `implementer` subagent.
 
-Input-schema fields:
+Input-schema fields (`src/lib/peer-mcp-personas.ts:1611-1670`):
 
-- **`prompt`** (required, string) — "What to test — the feature or change and its acceptance criteria. The worker authors and runs tests that try to break it and reports which pass and fail."
-- **`worktree`** (boolean) — "When true, run inside a fresh git worktree and return Pi's final text followed by the unified diff (so the lead can review the authored tests before merging). When false/omitted, writes tests in place — concurrent worker calls and Claude's own edits will race. HARD ERROR if true and the workspace is not a git repository."
-- **`model`** (string) — "Optional Copilot catalog model id (defaults to gpt-5.6-sol). Must advertise tool_calls support; the engine emits an isError envelope listing the eligible catalog models on mismatch."
-- **`thinking`** (string enum `off|minimal|low|medium|high|xhigh`) — "Optional reasoning depth (default xhigh). Silently clamped to the model's allowed range; \"off\" drops the parameter entirely."
-- **`workspace`** (string) — "Optional absolute path to the workspace the worker operates in. Defaults to the proxy's launch cwd. Use this when the parent agent has multiple workspaces open and the worker must operate in a specific one. Must be absolute (relative paths rejected). For worktree:true, must be inside a git repo."
-- **`maxWallClockMs`** (integer) — "Optional per-call wall-clock budget in ms; default 6h (21600000). Clamped just under the MCP tool-call ceiling (the injected MCP tool-call timeout minus a 15-min teardown headroom) so the worker aborts gracefully with its partial work rather than being hard-killed; the effective value is reported in the result when a larger value is clamped down."
+- **`prompt`** (required, string): "What to test — the feature or change and its acceptance criteria. The worker authors and runs tests that try to break it and reports which pass and fail."
+- **`worktree`** (boolean): "Ignored — worker_test ALWAYS runs in an isolated git worktree and returns the diff (retained for compatibility; worktree:false is overridden with a note). For in-place test authoring, use the `implementer` subagent."
+- **`model`** (string): "Optional Copilot catalog model id (defaults to gpt-5.6-sol). Must advertise tool_calls support; the engine emits an isError envelope listing the eligible catalog models on mismatch."
+- **`thinking`** (string enum `off|minimal|low|medium|high|xhigh`): "Optional reasoning depth (default xhigh). Silently clamped to the model's allowed range; \"off\" drops the parameter entirely."
+- **`workspace`** (string): "Optional absolute path to the workspace the worker operates in. Defaults to the proxy's launch cwd. Use this when the parent agent has multiple workspaces open and the worker must operate in a specific one. Must be absolute (relative paths rejected). Must be inside a git repo (test always runs in a worktree)."
+- **`maxWallClockMs`** (integer): "Optional per-call wall-clock budget in ms; default 6h (21600000). Clamped just under the MCP tool-call ceiling (the injected MCP tool-call timeout minus a 15-min teardown headroom) so the worker aborts gracefully with its partial work rather than being hard-killed; the effective value is reported in the result when a larger value is clamped down."
+
+`required: ["prompt"]`, `additionalProperties: false` (`src/lib/peer-mcp-personas.ts:1612-1614`). The `worktree` field remains accepted for cached-client compatibility. It is not an execution choice: `runWorkerToolCall` validates its type, forces `worktree = true`, and prepends this note only when the caller supplied `false`: "worker_test always runs in an isolated git worktree; the requested worktree:false was overridden. For in-place edits, use the `implementer` subagent." (`src/lib/peer-mcp-personas.ts:2252-2274`).
+
+### 2a-bis. Dispatcher subagent (`worker-test`)
+
+Dispatcher subagent blurb (`dispatcherDescription`, `src/lib/worker-dispatch.ts:206-224`), verbatim:
+
+> Non-blocking `test` worker: dispatches an independent test author (in an isolated git worktree) that writes tests trying to break the implementation, in the background, and delivers pass/fail as a completion notification.
+
+This is followed by the shared suffix at `src/lib/worker-dispatch.ts:221-223`: "Use proactively for any test-mode worker task so a long run never blocks your turn: it returns immediately and notifies you when done."
+
+The dispatcher system prompt (`dispatcherPrompt`, `src/lib/worker-dispatch.ts:227-261`) calls `mcp__workers__test` exactly once and passes through `prompt`/`workspace`/`model`/`thinking`/`maxWallClockMs`. It no longer accepts or forwards a `worktree` field; isolation is enforced at the MCP boundary. Hard rules prohibit doing the task itself, reading or editing files, spawning agents, or paraphrasing the result. Its `tools:` allowlist is `mcp__workers__*` only (`dispatcherTools`, `src/lib/worker-dispatch.ts:264-272`).
 
 ### 2b. System prompt (`--append-system-prompt`)
 
-`buildPeerAwarenessSnippet`, `src/lib/peer-mcp-personas.ts:600` — the `worker-*` sentence names this tool inside a list, verbatim clause:
+`buildPeerAwarenessSnippet`, `src/lib/peer-mcp-personas.ts:613-624`, includes this verbatim worker sentence:
 
-> `worker-*` are background Agent subagents (subagent_type) that run the matching worker in its own context and deliver the result as a completion notification, so a long run never blocks the turn: `worker-explore` (read-only research), `worker-review` (reads the code to verify a change or claim), `worker-plan` (ordered implementation plan), `worker-implement` (edit/write/bash; `worktree: true` isolates in a git worktree and returns the diff), `worker-test` (independent test author). The raw `mcp__workers__*` tools they call are guarded (a direct main-thread call is redirected to the matching agent); Workers themselves have `code_search`.
+> `worker-*` are background Agent subagents (subagent_type) that run the matching worker in its own context and deliver the result as a completion notification, so a long run never blocks the turn: `worker-explore` (read-only research), `worker-review` (reads the code to verify a change or claim), `worker-plan` (ordered implementation plan), `worker-implement` (edit/write/bash; ALWAYS runs in an isolated git worktree and returns the diff via a saved patch file; for in-place edits use the `implementer` subagent), `worker-test` (independent test author; also always worktree-isolated). The raw `mcp__workers__*` tools they call are guarded (a direct main-thread call is redirected to the matching agent); Workers themselves have `code_search`.
 
-The tool is named as **`worker-test` (independent test author)**. Gated behind `opts.workerToolsAvailable` (`:598`), so the snippet never names it when the gate is off.
+The tool is named as `worker-test` with both distinguishing properties: independent test authoring and mandatory worktree isolation. The clause is gated behind `opts.workerToolsAvailable`.
 
-Worker-side ROLE frame (`systemPromptFor("test")` → `TEST_ROLE`, `src/lib/worker-agent/prompts.ts:81`), verbatim:
+Worker-side role frame (`systemPromptFor("test")` → `TEST_ROLE`, `src/lib/worker-agent/prompts.ts:81`), verbatim:
 
 > You are an INDEPENDENT test author; you did NOT write the code under test. From the task and acceptance criteria, write tests that try to BREAK the implementation (edge cases, error paths, and the acceptance criteria as executable checks), then run them and report which pass and which fail. Do NOT modify the implementation to make tests pass.
 
-Dispatcher subagent blurb (`src/lib/worker-dispatch.ts:214`):
-
-> Non-blocking `test` worker: dispatches an independent test author that writes tests trying to break the implementation, in the background, and delivers pass/fail as a completion notification.
-
 ### 2c. CLAUDE.md (mirrored `<CLAUDE_CONFIG_DIR>/CLAUDE.md`)
 
-Covered by the **peer-awareness block** (same text as 2b, mirrored via `src/lib/claude-md-injection.ts`). No artifact-panel / toolbelt block touches this tool.
+Covered by the peer-awareness block, which is the same text as 2b and is mirrored through `src/lib/claude-md-injection.ts`.
 
-Checked-in root `CLAUDE.md` (worker-tools paragraph, `CLAUDE.md:133`):
+The checked-in root `CLAUDE.md:134` still opens by saying the MCP surface exposes "three" worker tools and omits `plan`/`test` from that opening enumeration, as recorded in Finding 1. Later in the same paragraph it now accurately documents `implement`/`test` mandatory worktree isolation, compatibility-only ignored `worktree`, saved-patch delivery, in-place routing to `implementer`, and universal relay-safe result spill. `docs/peer-mcp-design.md:406-412` records the mandatory worktree and cleanup contract.
 
-- Correct: `read+write implement/test → IMPLEMENT_DEFAULT_MODEL = gpt-5.6-sol at xhigh`; "the SAME read+write tool surface" (via `types.ts`); "coding wants max reasoning."
-- **Drift**: the paragraph opens `/mcp also exposes **three** worker tools (group workers: explore read-only, review read-only, implement read+write ...)` — but the group exposes **five** (`explore`, `review`, `plan`, `implement`, `test`); `plan` and `test` are omitted from both the count and the enumeration. `docs/peer-mcp-design.md:380` correctly lists all five dispatcher subagents including `worker-test`. See Finding 1.
-- **Drift**: `implement accepts worktree: boolean for git-worktree isolation` names only `implement`, though `test` also accepts `worktree` (`engine.ts:393`, `types.ts:53-54`). See Finding 2.
+### 2d. Result delivery and relay cap
+
+`WorktreeHandle.finalize()` (`src/lib/worker-agent/worktree.ts:400-498`) inlines a test diff at or below `PREVIEW_CAP` (8 KiB). Above that threshold it saves the full `git diff --binary --full-index HEAD` patch under `PATHS.WORKER_DIFFS_DIR/<pid>-<8hex>.patch` and returns a `--stat` summary, a UTF-8-safe bounded preview, and the absolute patch path.
+
+The result body then passes through `relaySafeText` as the final worker-body transform at the MCP boundary (`runWorkerToolCall`, `src/lib/peer-mcp-personas.ts:2362-2369`). A body over `GH_ROUTER_WORKER_MAX_RESULT_BYTES`, default 16 KiB and clamped to 8 through 20 KiB, is saved in full as `PATHS.WORKER_DIFFS_DIR/<pid>-<8hex>.txt`; the inline result becomes a bounded preview plus the path (`src/lib/worker-agent/relay-cap.ts:32-65,119-155`). This protects model prose and patch metadata as well as the diff itself.
 
 ## 3. Assessment
 
 ### 3a. Description quality
 
-- **Clarity & routing**: strong. The description leads with the non-blocking dispatch idiom, states the independence contract in two forms ("did NOT write the code under test" + "does NOT modify the implementation to make tests pass"), lists the concrete test targets (edge cases, error paths, acceptance criteria as executable checks), and documents the worktree/diff path plus the no-git HARD ERROR. A model can tell when to reach for it (independent adversarial test authoring) vs `implement` (produce the impl).
-- **Accuracy vs implementation**: verified accurate on every load-bearing claim.
-  - Default model `gpt-5.6-sol` at xhigh — matches `IMPLEMENT_DEFAULT_MODEL` (`engine.ts:168`) selected via `isWriteCapable` (`engine.ts:320,329`) and default thinking (`engine.ts:339-340`).
-  - "Same read+write toolset as `implement` (the explore set plus edit, write, bash, codex_review)" — matches `buildWorkerTools` (test = implement's 13 tools, `tools.ts:1908`, `types.ts:52-54`) and the write-set assembly (`TEST_MODE_NOTE` reuses `READ_TOOL_NOTES + WRITE_TOOL_NOTES`, `prompts.ts:87`).
-  - Independence frame — matches `TEST_ROLE` (`prompts.ts:81`) verbatim in intent.
-  - `worktree: true` diff + HARD-ERROR-if-no-git — matches `engine.ts:392-407` (`useWorktree` requires `mode === "test"` and `worktree === true`; `createWorktree` throws → `isError` envelope).
-- **Schema minimality** (per "ruthlessly minimal MCP tool surface", `docs/peer-mcp-design.md`):
-  - `prompt` — required, load-bearing. Keep.
-  - `worktree` — actionable, changes execution + return shape. Keep.
-  - `model` — model-tunable override. Keep.
-  - `thinking` — model-tunable. Keep.
-  - `workspace` — actionable for multi-workspace parents; absolute-only enforced at the MCP boundary. Keep.
-  - `maxWallClockMs` — model-tunable budget; effective value echoed back only when clamped, which is actionable. Keep.
-  - No echoed-input or diagnostic-only fields. Surface is minimal.
+- **Clarity and routing**: Strong. The description leads with non-blocking dispatch, preserves the independent-adversarial-author contract, names edge cases and error paths, makes worktree isolation unconditional, explains saved-patch versus inline diff delivery, states the no-git hard error, and routes in-place test authoring to `implementer`.
+- **Accuracy vs implementation**: Verified accurate. `runWorkerToolCall` always passes `worktree:true` for test and reports a requested `false` override (`src/lib/peer-mcp-personas.ts:2252-2274`); the engine provisions the isolated worktree (`src/lib/worker-agent/engine.ts:387-410`); `finalize()` persists large binary-capable patches (`src/lib/worker-agent/worktree.ts:400-498`); `relaySafeText` spills any oversized result body (`src/lib/worker-agent/relay-cap.ts:128-155`). The model, write surface, independence role, workspace validation, and wall-clock behavior remain accurate.
+- **Schema minimality**: `prompt`, `model`, `thinking`, `workspace`, and `maxWallClockMs` are actionable. `worktree` is no longer actionable and would ordinarily be removed, but `additionalProperties:false` makes removal breaking for cached clients. Its explicit "Ignored" description and deterministic override note make it a documented compatibility exception rather than a misleading choice.
 
 ### 3b. System-prompt coverage
 
-- **Named**, not omitted — `worker-test (independent test author)` in the `worker-*` list (`:600`).
-- **Accurate & non-redundant**: the snippet's four-word gloss complements, not duplicates, the fuller tool description. It correctly conveys the distinguishing property (independence) in the smallest space.
-- **Framing-constraint compliance**: the clause is descriptive, no imperatives, no "Lead with", no hedges, no anchors disguised as description. Consistent with the framing discipline the snippet tests enforce (`tests/peer-mcp-personas.test.ts:295+`). Compliant.
+- **Named**: Yes. The snippet identifies `worker-test` as an independent test author and states that it is always worktree-isolated.
+- **Accurate and non-redundant**: The compact snippet carries routing and isolation; the tool description carries output-file and no-git details; `TEST_ROLE` carries the adversarial authoring contract.
+- **Framing-constraint compliance**: The awareness clause is factual and compact. The worker-side role frame is appropriately imperative because it defines execution behavior rather than cross-tool routing.
 
 ### 3c. CLAUDE.md coverage
 
-- Peer-awareness block (mirrored) is accurate for this tool.
-- Root checked-in `CLAUDE.md:133` has the two drifts noted in 2c (three-vs-five count + enumeration omits `plan`/`test`; worktree sentence names only `implement`). The per-mode-defaults clause and tool-surface claims themselves are correct.
+- The mirrored peer-awareness block is accurate for this tool.
+- The checked-in root `CLAUDE.md:134` now accurately documents test's mandatory worktree behavior, patch output, relay spill, and in-place route. Its opening "three worker tools" count still omits `plan` and `test`; that pre-existing maintainer-doc drift remains.
 
 ### 3d. Cross-surface consistency
 
-- Tool description ↔ system prompt ↔ dispatcher blurb ↔ `TEST_ROLE` ↔ code: **consistent**. All four model-facing strings agree that test is an independent author that writes breaking tests and does not touch the impl, on the gpt-5.6-sol xhigh write surface, with worktree isolation.
-- The only inconsistency is the checked-in root `CLAUDE.md:133` narrative (three-vs-five; worktree-implement-only) vs the code + `docs/peer-mcp-design.md:380`. This is a maintainer-doc drift, not a model-facing defect (the mirrored peer-awareness block the model actually sees is correct).
+The tool description, schema, dispatcher blurb and prompt, awareness snippet, `TEST_ROLE`, checked-in worktree documentation, and code agree that test is an independent author running in mandatory isolation. The compatibility-only `worktree` input is accepted but ignored; the dispatcher no longer forwards it and the MCP boundary forces true. Large test diffs persist as `.patch` files, while any still-oversized worker body can spill as a relay-safe `.txt` file. In-place test authoring is routed to `implementer`.
 
 ## 4. Findings
 
-- **[Important]** `CLAUDE.md:133` — the worker-tools paragraph says "`/mcp` also exposes **three** worker tools (group `workers`: `explore` read-only, `review` read-only, `implement` read+write ...)", omitting `plan` and `test` from both the count and the parenthetical. The `workers` group exposes five (confirmed: `peer-mcp-personas.ts` tool entries + `worker-dispatch.ts:205-216` + `peer-mcp-design.md:380`). Fix: change "three" → "five" and add `plan` (read-only) and `test` (read+write, independent author) to the enumeration so the checked-in doc matches the code and the design doc.
-- **[Suggestion]** `CLAUDE.md:133` — "`implement` accepts `worktree: boolean` for git-worktree isolation ..." names only `implement`, but `test` also honors `worktree` (`engine.ts:392-394`, `types.ts:53-54`, and the tool schema). Fix: "`implement`/`test` accept `worktree: boolean` ..." to match the write-capable pair.
-- **[Suggestion]** Tool description (`peer-mcp-personas.ts:1533`) — the independence contract is stated well, but it does not name the natural pairing (run `test` after `implement` on the same change so a different author writes the checks). `docs/peer-mcp-design.md` and the floor-keeper/orchestrate skills already treat "different lab than the implementer" as the intended usage. A one-clause when-to-use hint ("pair with `implement` to get breaking tests authored by a worker that did not write the code") would sharpen routing without adding an imperative. Non-blocking; the current text is already correct and the independence property is clear.
+- **[Important]** `CLAUDE.md:134`: the worker-tools paragraph still says the MCP surface exposes "three" worker tools and opens with only `explore`, `review`, and `implement`, omitting `plan` and `test` from the count and enumeration. The same paragraph later documents both omitted modes correctly. Fix: change the count to five and include `plan` (read-only) and `test` (read+write independent author) in the opening list.
+- **[Suggestion]** Tool description at `src/lib/peer-mcp-personas.ts:1595-1610`: the independence contract and mandatory isolation now give a clear routing signal, including an explicit in-place alternative. It still does not name the natural pairing of running `test` after an independently authored implementation, but the current text already says to use it when a separate test author should challenge an implementation. No change is required for correctness.
 
-No Critical findings: no surface tells the model to do something the code rejects; the git-repo HARD ERROR, model gate, and independence frame all match the implementation.
+The former worktree Finding is resolved. Test no longer merely honors an optional `worktree` argument: the MCP boundary always forces isolation, retains the field only for compatibility, and reports any `worktree:false` override.
+
+No Critical findings. No surface promises in-place operation or exposes a race with the caller's working tree.
 
 ## 5. Verdict
 
-**Y** — the model-facing surface (tool description, schema, awareness snippet, dispatcher blurb) is correct, minimal, consistent, and well-routed; the independence contract and worktree behavior are conveyed accurately across all four strings. Single most important fix: correct the checked-in `CLAUDE.md:133` "three worker tools" count and enumeration to five (add `plan` and `test`) so the maintainer doc stops drifting from the code and the design doc.
+**Y**. The model-facing surface accurately conveys independent test authorship, mandatory git-worktree isolation, saved-patch diff delivery, relay-safe result spill, no-git failure, and the `implementer` route for in-place test authoring. The remaining Important finding is the checked-in root CLAUDE.md's pre-existing three-versus-five worker count, not a defect in this tool's execution contract.

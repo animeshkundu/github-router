@@ -436,7 +436,7 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(on).not.toContain("mcp__workers__explore")
     expect(on).not.toContain("mcp__workers__implement")
     expect(on).toContain("Workers themselves")
-    expect(on).toContain("worktree: true")
+    expect(on).toContain("isolated git worktree")
   })
 
   test("native subagents are always named; the worker-implement contrast is gated on workers", () => {

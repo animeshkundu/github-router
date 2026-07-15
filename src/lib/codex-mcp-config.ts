@@ -97,6 +97,11 @@ interface BuildOpts {
   codexHome: string
   /** headersHelper command emitted on each HTTP entry for per-session workspace routing. */
   workspaceHeaderCmd?: string
+  /** Base proxy URL (e.g. `http://127.0.0.1:PORT`). Needed by
+   *  `buildPeerAgentDefinitions` to inline each subagent's scoped HTTP MCP
+   *  server config into its `.md` frontmatter (claude-code#30280 workaround).
+   *  `buildPeerMcpConfig` takes it positionally, so it's optional here. */
+  serverUrl?: string
   /** Whether the core worker tools are served (`workerToolsEnabled()`). When
    *  true, the `worker-explore/implement/review/plan/test` dispatcher subagents
    *  are generated. Optional (defaults false) so `buildPeerMcpConfig` callers
@@ -110,7 +115,7 @@ interface BuildOpts {
   nativeSubagentModel?: string
 }
 
-interface HttpMcpEntry {
+export interface HttpMcpEntry {
   type: "http"
   url: string
   headers: Record<string, string>
@@ -125,6 +130,35 @@ interface StdioMcpEntry {
 
 export interface PeerMcpConfig {
   mcpServers: Record<string, HttpMcpEntry | StdioMcpEntry>
+}
+
+/**
+ * Build one scoped HTTP `mcpServers` entry for a group: `type: http`, the
+ * `/mcp/<urlSuffix>` URL, the Bearer-nonce Authorization header, and the
+ * per-session workspace `headersHelper` when supplied. Shared by
+ * `buildPeerMcpConfig` (the session `.claude.json` entries) AND
+ * `buildPeerAgentDefinitions` (the per-subagent inline `mcpServers` frontmatter
+ * that sidesteps Claude Code's Agent-tool MCP-inheritance bug, anthropics/
+ * claude-code#30280 — a bare name-reference "shares the parent connection" and
+ * re-triggers it, so subagents MUST inline the full HTTP config to connect
+ * independently). One source of truth so the two can't drift.
+ */
+function httpEntryFor(
+  serverUrl: string,
+  group: McpGroup,
+  nonce: string,
+  workspaceHeaderCmd?: string,
+): HttpMcpEntry {
+  const entry: HttpMcpEntry = {
+    type: "http",
+    url: `${serverUrl}/mcp/${GROUP_META[group].urlSuffix}`,
+    headers: {
+      Authorization: `Bearer ${nonce}`,
+    },
+  }
+  const ws = workspaceHeaderCmd?.trim()
+  if (ws) entry.headersHelper = ws
+  return entry
 }
 
 /**
@@ -149,15 +183,7 @@ export function buildPeerMcpConfig(
   for (const group of MCP_GROUPS) {
     const key = opts.groupKeys[group]
     if (!key) continue // group disabled at launch, or both keys collided
-    const entry: HttpMcpEntry = {
-      type: "http",
-      url: `${serverUrl}/mcp/${GROUP_META[group].urlSuffix}`,
-      headers: {
-        Authorization: `Bearer ${opts.nonce}`,
-      },
-    }
-    if (workspaceHeaderCmd) entry.headersHelper = workspaceHeaderCmd
-    mcpServers[key] = entry
+    mcpServers[key] = httpEntryFor(serverUrl, group, opts.nonce, workspaceHeaderCmd)
   }
 
   if (opts.codexCli) {
@@ -180,6 +206,12 @@ export interface PeerAgentDefinition {
   prompt: string
   model?: string
   tools?: ReadonlyArray<string>
+  /** Inline MCP servers scoped to this subagent, emitted into its `.md`
+   *  frontmatter as the connect-independently `mcpServers` list. Required
+   *  because Agent-tool-spawned subagents don't reliably inherit the session's
+   *  HTTP MCP servers (anthropics/claude-code#30280); an inline entry connects
+   *  when the subagent starts. Keyed by resolved server key → HTTP config. */
+  mcpServers?: Record<string, HttpMcpEntry>
 }
 
 export type PeerAgentDefinitions = Record<string, PeerAgentDefinition>
@@ -337,16 +369,29 @@ export function buildPeerAgentDefinitions(
     geminiAvailable: opts.geminiAvailable,
   })
   const peersKey = peersKeyOf(opts.groupKeys)
+  // Inline the `peers` HTTP server into each peer subagent's frontmatter so it
+  // connects directly on spawn — Agent-tool subagents don't reliably inherit
+  // the session's HTTP MCP servers (claude-code#30280). Only when `serverUrl`
+  // is supplied (the real launch path); omitted in bare unit tests that don't
+  // exercise the .md wiring.
+  const peersMcp: { mcpServers?: Record<string, HttpMcpEntry> } =
+    opts.serverUrl
+      ? { mcpServers: { [peersKey]: httpEntryFor(opts.serverUrl, "peers", opts.nonce, opts.workspaceHeaderCmd) } }
+      : {}
   for (const persona of personas) {
     out[persona.agentName] = {
       description: persona.description,
       prompt: buildAgentPrompt(persona, { codexCli: opts.codexCli, peersKey }),
+      ...peersMcp,
     }
   }
-  out["peer-review-coordinator"] = buildCoordinatorAgent({
-    codexCli: opts.codexCli,
-    geminiAvailable: opts.geminiAvailable,
-  })
+  out["peer-review-coordinator"] = {
+    ...buildCoordinatorAgent({
+      codexCli: opts.codexCli,
+      geminiAvailable: opts.geminiAvailable,
+    }),
+    ...peersMcp,
+  }
   // The native subagents (implementer/debugger/qa-engineer) are ALWAYS injected
   // — no catalog gate. When `nativeSubagentModel` (gpt-5.6-sol/gpt-5.5) is in the
   // live catalog they run on it at maximum reasoning (via the shim's model-aware
@@ -392,11 +437,20 @@ export function buildPeerAgentDefinitions(
   // (core modes) and `browseAvailable` (the extra `worker-browse`).
   if (opts.workerToolsAvailable) {
     const workersKey = workersKeyOf(opts.groupKeys)
+    // Inline the `workers` HTTP server so the dispatcher connects on spawn
+    // (claude-code#30280 — inherited HTTP MCP servers don't reach Agent-tool
+    // subagents, which is why the raw worker tool showed "No such tool
+    // available"). The `tools:` allowlist still restricts it to that one server.
+    const workersMcp: { mcpServers?: Record<string, HttpMcpEntry> } =
+      opts.serverUrl
+        ? { mcpServers: { [workersKey]: httpEntryFor(opts.serverUrl, "workers", opts.nonce, opts.workspaceHeaderCmd) } }
+        : {}
     for (const mode of activeDispatchModes({ browse: opts.browseAvailable === true })) {
       out[dispatcherAgentName(mode)] = {
         description: dispatcherDescription(mode),
         prompt: dispatcherPrompt(mode, workersKey),
         tools: dispatcherTools(mode, workersKey),
+        ...workersMcp,
       }
     }
   }
@@ -513,21 +567,60 @@ function escapeYamlString(s: string): string {
  */
 const VALID_AGENT_NAME = /^[A-Za-z][A-Za-z0-9-]*$/
 
+/**
+ * Emit the subagent-frontmatter `mcpServers` block as a YAML sequence of
+ * single-key maps (the INLINE form that connects on subagent start — a bare
+ * name-reference would re-trigger claude-code#30280). Scalars are
+ * JSON.stringify-quoted, which is valid YAML double-quoted syntax (handles the
+ * Windows-path/backslash headersHelper command safely).
+ *
+ * ```yaml
+ * mcpServers:
+ *   - workers:
+ *       type: http
+ *       url: "http://127.0.0.1:PORT/mcp/workers"
+ *       headers:
+ *         Authorization: "Bearer <nonce>"
+ *       headersHelper: "<cmd>"
+ * ```
+ */
+function emitMcpServersYaml(mcpServers: Record<string, HttpMcpEntry>): Array<string> {
+  const lines: Array<string> = ["mcpServers:"]
+  for (const [key, entry] of Object.entries(mcpServers)) {
+    lines.push(`  - ${JSON.stringify(key)}:`)
+    lines.push(`      type: ${JSON.stringify(entry.type)}`)
+    lines.push(`      url: ${JSON.stringify(entry.url)}`)
+    lines.push(`      headers:`)
+    for (const [hk, hv] of Object.entries(entry.headers)) {
+      lines.push(`        ${JSON.stringify(hk)}: ${JSON.stringify(hv)}`)
+    }
+    if (entry.headersHelper !== undefined) {
+      lines.push(`      headersHelper: ${JSON.stringify(entry.headersHelper)}`)
+    }
+  }
+  return lines
+}
+
 /** Build a single subagent .md file body (frontmatter + system prompt).
  *
  * `tools` (optional) becomes a `tools:` frontmatter allowlist RESTRICTING the
  * subagent to exactly those tools (omission inherits the parent's full toolset,
  * per Claude Code semantics). Used by the `worker-*` dispatchers to pin each to
  * its single `mcp__<workersKey>__<mode>` tool — which physically prevents them
- * from spawning other agents or doing extra work. Names are validated by the
- * caller (`writePeerAgentMdFiles`) / are proxy-generated, so no escaping needed
- * beyond the comma-join Claude Code's frontmatter parser expects. */
+ * from spawning other agents or doing extra work. `mcpServers` (optional) is
+ * emitted as an inline `mcpServers` frontmatter list so the subagent connects
+ * directly to its scoped MCP server(s) — a workaround for claude-code#30280
+ * (Agent-tool subagents don't reliably inherit the session's HTTP MCP servers).
+ * Names are validated by the caller (`writePeerAgentMdFiles`) / are
+ * proxy-generated, so no escaping needed beyond the comma-join Claude Code's
+ * frontmatter parser expects. */
 export function buildAgentMd(spec: {
   name: string
   description: string
   prompt: string
   model?: string
   tools?: ReadonlyArray<string>
+  mcpServers?: Record<string, HttpMcpEntry>
 }): string {
   const lines = [
     "---",
@@ -542,6 +635,9 @@ export function buildAgentMd(spec: {
     // parses `tools:` (an array), and quoting keeps the `mcp__…__*` wildcard
     // a plain string (the `*` is never mistaken for a YAML alias).
     lines.push(`tools: [${spec.tools.map((t) => JSON.stringify(t)).join(", ")}]`)
+  }
+  if (spec.mcpServers && Object.keys(spec.mcpServers).length > 0) {
+    lines.push(...emitMcpServersYaml(spec.mcpServers))
   }
   lines.push("---", "", spec.prompt, "")
   return lines.join("\n")
@@ -600,6 +696,7 @@ export async function writePeerAgentMdFiles(
           prompt: def.prompt,
           model: def.model,
           tools: def.tools,
+          mcpServers: def.mcpServers,
         }),
       )
       paths.push(filePath)
@@ -908,6 +1005,8 @@ export async function writePeerMcpRuntimeFiles(
     nativeSubagentModel: opts.nativeSubagentModel,
     nonce,
     codexHome,
+    serverUrl,
+    workspaceHeaderCmd: buildWorkspaceHeaderHelperCommand(process.execPath, process.argv[1]),
   })
 
   // If a prior same-PID file survived (boot sweep didn't run, or this

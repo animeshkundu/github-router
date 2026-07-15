@@ -43,15 +43,19 @@ export const PATHS = {
     return path.join(appDir(), "error.log")
   },
   /**
-   * Durable, router-owned directory for OVERFLOW worker diffs. When a
-   * `worker_implement`/`worker_test` worktree run produces a unified diff
-   * larger than the inline cap (`DIFF_CAP_BYTES` in worker-agent/worktree.ts),
-   * the FULL `git diff --binary --full-index` patch is written here BEFORE the
-   * worktree is removed, and its absolute path is returned to the caller so
-   * the (possibly binary) change stays recoverable / `git apply`-able instead
-   * of being destroyed with the worktree. Cross-launch cache (like
-   * TOOLBELT_BIN_DIR) — deliberately OUTSIDE the per-launch CLAUDE_CONFIG_DIR
-   * mirror and OUTSIDE the user's repo.
+   * Durable, router-owned directory for worker OVERFLOW artifacts. Two
+   * kinds land here, both kept OUT of the MCP result relay so they don't
+   * overflow Claude Code's 25k-token cap:
+   *   - `<pid>-<8hex>.patch` — a `worker_implement`/`worker_test` worktree
+   *     diff larger than `PREVIEW_CAP` (worker-agent/worktree.ts): the FULL
+   *     `git diff --binary --full-index` patch, written BEFORE the worktree
+   *     is removed so the (possibly binary) change stays `git apply`-able.
+   *   - `<pid>-<8hex>.txt` — any worker result over the relay byte cap
+   *     (worker-agent/relay-cap.ts `relaySafeText`): the full result text,
+   *     with a bounded preview + this path returned in its place.
+   * `sweepAgedWorkerDiffs()` reaps entries older than 7 days on each write.
+   * Cross-launch cache (like TOOLBELT_BIN_DIR) — deliberately OUTSIDE the
+   * per-launch CLAUDE_CONFIG_DIR mirror and OUTSIDE the user's repo.
    */
   get WORKER_DIFFS_DIR() {
     return path.join(appDir(), "worker-diffs")

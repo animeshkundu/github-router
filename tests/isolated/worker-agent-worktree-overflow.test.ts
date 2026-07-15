@@ -2,12 +2,13 @@
  * Regression test for Fix 3 of the worktree diff-loss work:
  * `finalize()` in `src/lib/worker-agent/worktree.ts`.
  *
- * When a worktree diff exceeds the inline `DIFF_CAP_BYTES` (256 KiB) cap,
- * the inline return is a `--stat` summary (never a half-hunk). Previously
- * the actual patch was lost the moment the worktree was removed. The fix
- * writes the FULL `git diff --binary --full-index HEAD` patch to a durable,
- * router-owned file under `PATHS.WORKER_DIFFS_DIR` BEFORE removal and returns
- * its absolute path, so the (possibly binary) change stays recoverable.
+ * When a worktree diff exceeds the inline `PREVIEW_CAP` (8 KiB), `finalize()`
+ * ALWAYS saves the FULL `git diff --binary --full-index HEAD` patch to a
+ * durable, router-owned file under `PATHS.WORKER_DIFFS_DIR` BEFORE removal and
+ * returns a `--stat` summary + a bounded preview + the patch's absolute path,
+ * so the (possibly binary) change stays recoverable rather than lost the
+ * moment the worktree is removed. A small diff (<= PREVIEW_CAP) is inlined in
+ * full with no file.
  *
  * Isolation: this file mocks `os.homedir()` to a per-file temp dir BEFORE
  * importing anything that reads `PATHS` (same pattern as
@@ -124,10 +125,12 @@ describe("finalize() over-cap: durable full --binary patch", () => {
 
       const summary = await handle.finalize()
 
-      // Inline return is still the truncation summary (never a half-hunk).
-      expect(summary.startsWith("[diff truncated at 256KB")).toBe(true)
+      // Inline return is the summary (never the full diff): a header +
+      // `--stat` + a bounded preview + the saved patch path.
+      expect(summary.startsWith("[large diff — full patch saved to a file]")).toBe(true)
       expect(summary).toContain("changed")
       expect(summary).toContain("big.txt")
+      expect(summary).toContain("diff preview (first")
       // ...and it now carries an absolute path to the saved patch.
       savedPath = extractPatchPath(summary)
       expect(path.isAbsolute(savedPath)).toBe(true)
@@ -154,6 +157,33 @@ describe("finalize() over-cap: durable full --binary patch", () => {
       await handle.remove()
     } finally {
       if (savedPath) rmSync(savedPath, { force: true })
+      repo.cleanup()
+    }
+  }, 30_000)
+
+  test("a small diff (<= PREVIEW_CAP) is inlined in full with no saved file", async () => {
+    __resetInstanceUuidForTests()
+    const repo = makeRepo()
+    const registry = new WorktreeRegistry()
+    try {
+      const handle = await createWorktree(repo.root, {
+        instanceUuid: randomUUID(),
+        registry,
+      })
+      // A tiny change — well under the 8 KiB preview cap.
+      writeFileSync(path.join(handle.dir, "small.txt"), "one\ntwo\nthree\n")
+
+      const out = await handle.finalize()
+
+      // Full inline diff, no summary header, no saved-patch pointer.
+      expect(out).toContain("small.txt")
+      expect(out).toContain("+one")
+      expect(out).not.toContain("full patch")
+      expect(out).not.toContain("saved to:")
+      expect(out).not.toContain("diff preview")
+
+      await handle.remove()
+    } finally {
       repo.cleanup()
     }
   }, 30_000)

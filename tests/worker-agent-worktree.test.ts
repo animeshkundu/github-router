@@ -8,7 +8,8 @@
  *     loop (mandatory: Windows CI has no `xargs cp --parents`).
  *   - `finalize()` runs `git add -N .` so freshly created files
  *     appear in the diff.
- *   - 256 KiB cap with summary fallback (never half-hunk).
+ *   - PREVIEW_CAP: small diffs inline in full, larger ones return a
+ *     `--stat` summary + preview + saved patch path (never half-hunk).
  *   - `remove()` idempotent.
  *   - No-git workspace → hard throw.
  *   - 20-entry quota.
@@ -253,32 +254,43 @@ describe("createWorktree replay semantics", () => {
 })
 
 describe("createWorktree finalize truncation", () => {
-  test("returns summary (never half-hunk) when diff exceeds 256 KiB", async () => {
+  test("returns summary + saved patch path (never the full diff) when diff exceeds PREVIEW_CAP", async () => {
     const repo = makeRepo((root) => {
       writeFileSync(path.join(root, "README.md"), "hello\n")
     })
     const { registry, instanceUuid } = makeRegistry()
+    let savedPath: string | null = null
     try {
       const handle = await createWorktree(repo.root, {
         instanceUuid,
         registry,
       })
-      // Synthesize a giant new file inside the worktree (> 256 KiB
-      // so the diff blows past the cap).
+      // Synthesize a giant new file inside the worktree (> 8 KiB preview
+      // cap so the diff is saved to a file rather than inlined).
       const giant = "x".repeat(400 * 1024)
       writeFileSync(path.join(handle.dir, "big.txt"), giant)
       const diff = await handle.finalize()
-      expect(diff.startsWith("[diff truncated at 256KB")).toBe(true)
-      // Must include a `--stat`-style summary line for big.txt rather
-      // than a half-hunk of `+xxxxx…`. The summary should contain
-      // the filename + a "files changed" trailer.
+      expect(diff.startsWith("[large diff — full patch saved to a file]")).toBe(true)
+      // Must include a `--stat`-style summary line for big.txt.
       expect(diff).toContain("big.txt")
       expect(diff).toContain("file")
       expect(diff).toContain("changed")
-      // Defensive: the giant body itself must NOT be inlined.
-      expect(diff.includes(giant.slice(0, 1000))).toBe(false)
+      // ...and a pointer to the saved full patch.
+      expect(diff).toContain("saved to:")
+      // Defensive: the full giant body must NOT be inlined — the returned
+      // text is a bounded summary + preview, far smaller than the real diff.
+      expect(diff.length).toBeLessThan(giant.length)
+      const marker = "saved to: "
+      savedPath = diff.slice(diff.lastIndexOf(marker) + marker.length).trim()
       await handle.remove()
     } finally {
+      if (savedPath) {
+        try {
+          rmSync(savedPath, { force: true })
+        } catch {
+          /* best-effort */
+        }
+      }
       repo.cleanup()
     }
   })
