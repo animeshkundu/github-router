@@ -987,7 +987,7 @@ test("terminal unmerged fleet does not auto-complete a decomposed mission", asyn
   const failedUnit = unit({
     missionId: "m-failed",
     terminal: true,
-    phase: "failed",
+    phase: "done",
     artifact: "no_pr",
   })
   const m = mission({ id: "m-failed", everDecomposed: true })
@@ -3452,4 +3452,82 @@ test("addUnitsToMission threads fileScopes from the decompose spec", async () =>
   expect(upserted.find((u) => u.title === "A")?.fileScopes).toEqual(["src/a", "docs/a"])
   expect(upserted.find((u) => u.title === "B")?.fileScopes).toBeUndefined()
   expect(upserted.find((u) => u.title === "C")?.fileScopes).toBeUndefined()
+})
+
+test("verified progress accrues on an unchanged head and resets on a new content head", async () => {
+  const row = unit({ pr: 7, headSha: "head-1", dispatchMode: "build", phase: "build" })
+  const h = harness([row], [mission({ everDecomposed: true })])
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [openPr(7, "head-1")],
+    changedFiles: 1,
+    ci: { rollup: "pending" },
+  })
+
+  await advance({}, h.deps)
+  expect(row.verifiedProgress?.kind).toBe("content_head")
+  expect(row.noProgressWakes).toBe(0)
+
+  await advance({}, h.deps)
+  expect(row.noProgressWakes).toBe(1)
+  expect(row.lastNoProgressReason).toContain("head unchanged")
+
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [openPr(7, "head-2")],
+    changedFiles: 1,
+    ci: { rollup: "pending" },
+  })
+  await advance({}, h.deps)
+  expect(row.verifiedProgress?.fingerprint).toContain("head-2")
+  expect(row.noProgressWakes).toBe(0)
+  expect(row.lastNoProgressReason).toBeUndefined()
+})
+
+test("mission stall watchdog emits exactly one human request after six impossible wakes", async () => {
+  const row = unit({ dispatchMode: "build", phase: "build" })
+  const m = mission({ everDecomposed: true })
+  const h = harness([row], [m])
+
+  let result = await advance({}, h.deps)
+  for (let wake = 2; wake <= 6; wake += 1) result = await advance({}, h.deps)
+
+  expect(row.noProgressWakes).toBe(6)
+  expect(m.noProgressWakes).toBe(6)
+  expect(result.needsHuman).toHaveLength(1)
+  expect(result.needsHuman[0]?.reason).toContain("not progressing toward merge")
+  expect(result.needsHuman[0]?.reason).toContain("provider=in_progress")
+
+  const next = await advance({}, h.deps)
+  expect(next.needsHuman).toHaveLength(0)
+})
+
+test("mission verified progress suppresses the stall watchdog and merged units do not stall", async () => {
+  const live = unit({ pr: 7, headSha: "head-1", dispatchMode: "build", phase: "build" })
+  const merged = unit({
+    id: "merged",
+    issue: 2,
+    pr: 8,
+    taskId: "task-2",
+    provider: "completed",
+    phase: "done",
+    artifact: "pr_merged",
+    validation: "floor_passed",
+    terminal: true,
+  })
+  const m = mission({ everDecomposed: true, noProgressWakes: 5, stallSinceMs: 1 })
+  const h = harness([live, merged], [m])
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [openPr(7, "head-2")],
+    changedFiles: 2,
+    ci: { rollup: "pending" },
+  })
+
+  const result = await advance({}, h.deps)
+
+  expect(result.needsHuman).toHaveLength(0)
+  expect(m.noProgressWakes).toBe(0)
+  expect(merged.noProgressWakes).toBeUndefined()
+  expect(m.status).toBe("active")
 })

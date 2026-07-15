@@ -59,6 +59,12 @@ export interface Mission {
    * mission must not re-emit decompose.
    */
   everDecomposed?: boolean
+  /** Consecutive heartbeat wakes with no portal-verified unit progress. */
+  noProgressWakes?: number
+  /** Wall-clock start of the current no-progress streak. */
+  stallSinceMs?: number
+  /** Dedup fingerprint for the mission-level stall escalation already emitted. */
+  stallEscalatedFingerprint?: string
   repos: RepoRef[]
   status: "active" | "done" | "abandoned"
   createdMs: number
@@ -131,6 +137,9 @@ function isMission(value: unknown): value is Mission {
     isOptionalPositiveInteger(mission.maxConcurrentBuilds) &&
     (mission.ciRequired === undefined || typeof mission.ciRequired === "boolean") &&
     (mission.everDecomposed === undefined || typeof mission.everDecomposed === "boolean") &&
+    (mission.noProgressWakes === undefined || isNonNegativeInteger(mission.noProgressWakes)) &&
+    isOptionalFiniteNumber(mission.stallSinceMs) &&
+    isOptionalString(mission.stallEscalatedFingerprint) &&
     Array.isArray(mission.repos) &&
     mission.repos.every(isRepoRef) &&
     (mission.status === "active" ||

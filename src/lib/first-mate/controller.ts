@@ -81,6 +81,7 @@ import {
   type ProviderState,
   type RepoRef,
   type UnitRow,
+  type VerifiedProgressKind,
 } from "~/lib/first-mate/types"
 
 export interface ControllerDeps {
@@ -403,6 +404,8 @@ function unitHandle(unit: UnitRow): string {
  * identity (the solo operator's account may BE the router PAT).
  */
 const FM_REVIEW_SENTINEL = "first-mate-review:"
+const STALL_WAKES = 6
+const STALL_MS = 30 * 60_000
 
 function stampReviewSentinel(unit: UnitRow, body: string): string {
   const id = unit.id ?? unitHandle(unit)
@@ -615,6 +618,64 @@ function isTerminalProvider(provider: ProviderState): boolean {
     provider === "timed_out" ||
     provider === "cancelled"
   )
+}
+
+interface VerifiedProgressFact {
+  fingerprint: string
+  kind: VerifiedProgressKind
+}
+
+/** Portal-only progress identity. Provider state, phase, logs, and comments are excluded. */
+function verifiedProgressFact(unit: UnitRow, observed: Observed): VerifiedProgressFact | null {
+  const primary = primaryObservedPr(observed)
+  const merged = observed.prs.some((pr) => pr.state.toUpperCase() === "MERGED" || pr.merged === true)
+  const contentHead =
+    observed.changedFiles !== undefined && observed.changedFiles > 0 && primary?.headSha
+      ? `${primary.number}@${primary.headSha}`
+      : null
+  const ci = observed.ci?.rollup ?? "none"
+  const verifier = observed.verifierReviewed === true ? primary?.headSha ?? unit.headSha ?? "present" : null
+  const floor = observed.floor ?? (unit.validation === "floor_passed" ? "passed" : null)
+  const artifact = merged || unit.artifact === "pr_merged" ? "pr_merged" : null
+  const fingerprint = [
+    `content=${contentHead ?? "none"}`,
+    `ci=${ci}`,
+    `verifier=${verifier ?? "none"}`,
+    `floor=${floor ?? "none"}`,
+    `artifact=${artifact ?? "none"}`,
+  ].join("|")
+
+  if (artifact) return { fingerprint, kind: "merged" }
+  if (floor === "passed") return { fingerprint, kind: "floor_passed" }
+  if (verifier) return { fingerprint, kind: "verifier_review" }
+  if (ci === "passing") return { fingerprint, kind: "ci_passed" }
+  if (contentHead) return { fingerprint, kind: "content_head" }
+  return null
+}
+
+function noProgressReason(unit: UnitRow, observed: Observed): string {
+  if (unit.blockingDecisionId) return "waiting_for_user unanswered"
+  const primary = primaryObservedPr(observed)
+  if (primary) {
+    const ci = observed.ci?.rollup ?? "none"
+    return `PR #${primary.number} open, CI ${ci}, head unchanged`
+  }
+  const since = unit.verifiedProgress?.atMs ?? unit.lastSteer?.atMs
+  return `provider=${observed.provider}, no content-bearing head${since ? ` since ${new Date(since).toISOString()}` : " observed"}`
+}
+
+function recordVerifiedProgress(unit: UnitRow, observed: Observed, now = Date.now()): boolean {
+  const fact = verifiedProgressFact(unit, observed)
+  if (fact !== null && fact.fingerprint !== unit.verifiedProgress?.fingerprint) {
+    unit.verifiedProgress = { ...fact, atMs: now }
+    unit.noProgressWakes = 0
+    delete unit.lastNoProgressReason
+    return true
+  }
+  if (fact?.kind === "merged" || unit.artifact === "pr_merged") return false
+  unit.noProgressWakes = (unit.noProgressWakes ?? 0) + 1
+  unit.lastNoProgressReason = noProgressReason(unit, observed)
+  return false
 }
 
 function updateUnitFromObservedPrs(unit: UnitRow, observed: Observed): void {
@@ -1605,6 +1666,48 @@ async function maybeMergeWithApproval(
   return true
 }
 
+async function createMissionStallRequest(
+  mission: Mission,
+  liveUnits: UnitRow[],
+  reason: string,
+  fingerprint: string,
+  deps: ControllerDeps,
+): Promise<HumanRequest> {
+  const representative = liveUnits[0]!
+  const decisionKey = `mission:${mission.id}:stall:${fingerprint}`
+  const existing = await deps.findByKey(decisionKey)
+  let record = existing?.status === "pending" ? existing : undefined
+  let packetHtmlPath: string | undefined
+  if (record === undefined) {
+    const observed: Observed = { provider: representative.provider, prs: [] }
+    const packet = deps.buildDecisionPacket(
+      packetInput(representative, mission, observed, reason, "human_decision"),
+    )
+    packetHtmlPath = await deps.writeDecisionPacketHtml(packet.packetId, packet.html)
+    record = {
+      decisionId: packet.decisionId,
+      decisionKey,
+      type: "human_decision",
+      status: "pending",
+      packetId: packet.packetId,
+      inputFingerprint: fingerprint,
+      options: decisionOptions("human_decision").map((option) => ({ id: option.id })),
+      createdMs: Date.now(),
+    }
+    await deps.upsertDecision(record)
+  }
+  return {
+    requestId: decisionKey,
+    decisionId: record.decisionId,
+    missionId: mission.id,
+    repo: representative.repo,
+    issue: null,
+    pr: null,
+    reason,
+    ...(packetHtmlPath !== undefined ? { packetHtmlPath } : {}),
+  }
+}
+
 async function createHumanRequest(
   unit: UnitRow,
   mission: Mission,
@@ -1900,12 +2003,13 @@ async function observeBlockedUnit(
   unit: UnitRow,
   deps: ControllerDeps,
   applied: string[],
-): Promise<void> {
+): Promise<boolean> {
   const decisionId = unit.blockingDecisionId
-  if (!decisionId) return
+  if (!decisionId) return false
 
   const observed = await deps.observeUnit(unit)
   updateUnitFromObservedPrs(unit, observed)
+  const progressed = recordVerifiedProgress(unit, observed)
   unit.lastCheckedMs = Date.now()
 
   const mutation = observed.externalMutation
@@ -1986,6 +2090,7 @@ async function observeBlockedUnit(
   }
 
   await deps.upsertUnit(unit.repo, unit)
+  return progressed
 }
 
 /**
@@ -2923,6 +3028,8 @@ export async function advance(
     // (soft plan-gate rejections push needsHuman before the sweep) so ordering
     // stays monotonic and answer-phase requests never collide with sweep ones.
     let order = needsHuman.length
+    const progressedMissionIds = new Set<string>()
+    const observedUnits = new Set<UnitRow>()
 
     // Start-of-drive reconciliation: clear stale blocks, answer pending
     // decisions on terminal units, warn on orphaned consumed approvals. Best
@@ -2942,7 +3049,10 @@ export async function advance(
       // wedging the unit forever. It never runs classify/executeAction.
       if (unit.blockingDecisionId) {
         try {
-          await observeBlockedUnit(unit, deps, applied)
+          observedUnits.add(unit)
+          if (await observeBlockedUnit(unit, deps, applied)) {
+            progressedMissionIds.add(unit.missionId)
+          }
         } catch (err) {
           consola.warn(
             `first-mate: blocked unit ${unit.missionId}:${unitHandle(unit)} observe failed:`,
@@ -2981,7 +3091,20 @@ export async function advance(
         }
 
         const observed = await deps.observeUnit(unit)
+        observedUnits.add(unit)
+        // Preserve the pre-observation PR identity for the existing empty-PR guard,
+        // then record portal-verified progress before any provider/phase classify.
+        const prevEmptyState = {
+          headSha: unit.headSha ?? null,
+          baseRef: unit.baseRef ?? null,
+          isDraft: unit.prIsDraft,
+        }
+        updateUnitFromObservedPrs(unit, observed)
+        if (recordVerifiedProgress(unit, observed)) progressedMissionIds.add(unit.missionId)
+        unit.lastCheckedMs = Date.now()
         if (await reconcileObservedPrState(unit, observed, deps, applied)) {
+          if (recordVerifiedProgress(unit, observed)) progressedMissionIds.add(unit.missionId)
+          await deps.upsertUnit(unit.repo, unit)
           continue
         }
         if (shouldEscalateOpenUncorrelated(unit, observed, scopedUnits)) {
@@ -3000,16 +3123,6 @@ export async function advance(
           continue
         }
         const evidence = await fillFuzzyFields(unit, mission, observed, deps)
-        // #12: snapshot the progress-signal state BEFORE updateUnitFromObservedPrs
-        // overwrites it (and BEFORE classify reassigns unit.provider), so the
-        // empty-PR guard can reset its counter on any progress since last wake.
-        const prevEmptyState = {
-          headSha: unit.headSha ?? null,
-          baseRef: unit.baseRef ?? null,
-          isDraft: unit.prIsDraft,
-        }
-        updateUnitFromObservedPrs(unit, observed)
-        unit.lastCheckedMs = Date.now()
 
         // A2 signature-reset: reset the per-failure retry counter only when the
         // blocking failure fingerprint CHANGES (genuine progress on a new
@@ -3032,6 +3145,8 @@ export async function advance(
         }
 
         if (await maybeMergeWithApproval(unit, observed, evidence, deps, applied)) {
+          if (recordVerifiedProgress(unit, observed)) progressedMissionIds.add(unit.missionId)
+          await deps.upsertUnit(unit.repo, unit)
           continue
         }
 
@@ -3129,6 +3244,67 @@ export async function advance(
         )
         applied.push(`error advancing ${unit.missionId}:${unitHandle(unit)}: ${errText(err)}`)
       }
+    }
+
+    // Mission watchdog: aggregate unit-level portal progress into one loud,
+    // deduplicated human escalation. Provider activity alone never resets it.
+    for (const mission of scopedMissions) {
+      if (mission.status !== "active") continue
+      const liveUnits = scopedUnits.filter(
+        (unit) => unit.missionId === mission.id && unit.terminal !== true,
+      )
+      if (liveUnits.length === 0 || liveUnits.some((unit) => !observedUnits.has(unit))) continue
+
+      const now = Date.now()
+      if (progressedMissionIds.has(mission.id)) {
+        mission.noProgressWakes = 0
+        delete mission.stallSinceMs
+        delete mission.stallEscalatedFingerprint
+        mission.updatedMs = now
+        await upsertMissionDurable(mission, deps)
+        continue
+      }
+
+      mission.noProgressWakes = (mission.noProgressWakes ?? 0) + 1
+      mission.stallSinceMs ??= now
+      mission.updatedMs = now
+      const stalledSet = liveUnits
+        .map((unit) => `${unitHandle(unit)}:${unit.provider}:${unit.lastNoProgressReason ?? "no verified progress"}`)
+        .sort()
+      const stallFingerprint = digest(stalledSet.join("|"))
+      const oldEnough = now - mission.stallSinceMs >= STALL_MS
+      const impossible =
+        mission.noProgressWakes >= STALL_WAKES &&
+        liveUnits.every((unit) => unit.provider === "in_progress" && unit.pr === null)
+      if (
+        mission.noProgressWakes >= STALL_WAKES &&
+        (oldEnough || impossible) &&
+        mission.stallEscalatedFingerprint !== stallFingerprint
+      ) {
+        const ageMinutes = Math.max(0, Math.floor((now - mission.stallSinceMs) / 60_000))
+        const diagnosis = liveUnits
+          .map(
+            (unit) =>
+              `${unitHandle(unit)} [provider=${unit.provider}]: ${unit.lastNoProgressReason ?? "no verified progress"}`,
+          )
+          .join("; ")
+        const reason =
+          `mission is not progressing toward merge after ${mission.noProgressWakes} wakes ` +
+          `(${ageMinutes}m): ${diagnosis}`
+        needsHuman.push({
+          request: await createMissionStallRequest(
+            mission,
+            liveUnits,
+            reason,
+            stallFingerprint,
+            deps,
+          ),
+          sortKey: Math.min(...liveUnits.map(sortKey)),
+          order: order++,
+        })
+        mission.stallEscalatedFingerprint = stallFingerprint
+      }
+      await upsertMissionDurable(mission, deps)
     }
 
     // Back-compat completion pass: once a mission has actually decomposed, a later
