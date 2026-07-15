@@ -24,6 +24,27 @@ export type ProviderState =
 /** Where in the dev cycle a unit is (controller lifecycle, not GitHub's). */
 export type Phase = "plan" | "build" | "fix" | "review" | "merge" | "done"
 
+/** Honest end-to-end stage toward the only normal completion outcome: MERGE. */
+export type LifecycleStage =
+  | "planning"
+  | "plan-review"
+  | "implementing"
+  | "code-review"
+  | "pr-open"
+  | "ready-to-merge"
+  | "blocked"
+  | "merged"
+
+/** Verified artifact progress is separate from provider/phase activity. */
+export type ProgressState = "verified" | "unverified_active" | "stalled" | "blocked"
+
+export type VerifiedProgressKind =
+  | "content_head"
+  | "ci_passed"
+  | "verifier_review"
+  | "floor_passed"
+  | "merged"
+
 /** The unit's pull-request artifact state. */
 export type Artifact =
   | "no_pr"
@@ -62,6 +83,39 @@ export interface RepoRef {
   name: string
 }
 
+export interface StrategyBet {
+  hypothesis: string
+  metric: string
+  threshold: string
+  decisionRule: "kill" | "pivot" | "continue"
+}
+
+export interface StrategyGreatnessItem {
+  item: string
+  status: "done" | "pending"
+  evidence?: string
+}
+
+export interface StrategyDecisionEntry {
+  atMs: number
+  decision: string
+  rationale: string
+  evidenceRef?: string
+}
+
+export interface StrategyRecord {
+  missionId: string
+  repos?: string[]
+  currentPhase?: string
+  activeBet?: StrategyBet
+  greatnessChecklist?: StrategyGreatnessItem[]
+  decisionLog?: StrategyDecisionEntry[]
+  openAssumptions?: string[]
+  nextStrategicAction?: { action: string; trigger?: string }
+  updatedMs: number
+  updatedByWake?: string
+}
+
 /**
  * One unit's durable ledger row. Holds only HANDLES + classification +
  * bookkeeping — never diffs, logs, or PR bodies (those are re-fetchable).
@@ -95,6 +149,25 @@ export interface UnitRow {
   validation: Validation
   /** Bounded CI/review self-heal counter → blocked_on_human at the cap. */
   retries: number
+  /** Bounded retries for failed/timed-out plan tasks that produced no PR. */
+  planRetries?: number
+  /** Last portal-proven artifact delta; provider activity never writes this. */
+  verifiedProgress?: {
+    fingerprint: string
+    kind: VerifiedProgressKind
+    atMs: number
+  }
+  /** Consecutive controller observations with no new verified artifact delta. */
+  noProgressWakes?: number
+  /** Concrete diagnosis recorded on the latest unchanged observation. */
+  lastNoProgressReason?: string
+  /** Durable dedup key for mechanism failures so heartbeats do not recount one outcome. */
+  lastMechanismFailureOutcome?: { signature: string; outcomeId: string }
+  /**
+   * Monotonic count of genuine task dispatches for provider idempotency keys.
+   * Pending-intent replay reuses the current attempt instead of incrementing it.
+   */
+  dispatchAttempts?: number
   /**
    * A2 signature-reset (progress) fingerprint. A stable digest of the current
    * blocking failure (validation kind + CI/review/floor identity). `retries`
@@ -119,6 +192,16 @@ export interface UnitRow {
   copilotMentionSha?: string | null
   /** Total `@copilot` fix mentions posted over this unit's life (per-mission budget counter). */
   copilotComments?: number
+  /**
+   * One-outstanding-answer-per-head guard for `answer_agent_question`: the PR head
+   * SHA the most recent @copilot ANSWER mention was posted against. `waiting_for_user`
+   * re-emits answer_agent_question every wake, so this suppresses a duplicate answer
+   * mention while the head is unchanged (the agent hasn't acted on the prior answer
+   * yet); a fresh head (the agent pushed or asked a new question) allows a new
+   * answer. Distinct from `copilotMentionSha` (fix mentions) so the two never
+   * interfere. Optional → back-compat.
+   */
+  answerMentionSha?: string | null
   /** Stable digest of mission goal + repo + unit title used to skip duplicate queued/build units. */
   goalHash?: string
   /** Baseline test-count ratchet captured by the merge gate; later gates must not decrease it. */
@@ -147,6 +230,16 @@ export interface UnitRow {
   dependsOn: string[]
   /** Set iff this unit is waiting on a human decision (its decisionId). */
   blockingDecisionId?: string | null
+  /**
+   * Declared file-scope allowlist for this unit (paths / directory prefixes /
+   * `dir/**` globs it is permitted to touch, from the decompose spec). Load-bearing
+   * ONLY for the concurrent-build gate: two build units in the same mission may
+   * build CONCURRENTLY only when BOTH declare non-empty, provably DISJOINT scopes.
+   * Absent/empty → the unit is treated as potentially-overlapping and its build
+   * serializes (the safe, pre-existing one-build-per-mission behavior). Optional →
+   * back-compat.
+   */
+  fileScopes?: string[]
   /** True once an independent (different-lab) verifier has been assigned. */
   verifierAssigned?: boolean
   /**
@@ -322,6 +415,7 @@ export type ModelRequestKind =
 export type Action =
   | { kind: "noop" }
   | { kind: "dispatch" }
+  | { kind: "retry_plan" }
   | { kind: "steer"; instruction: string; expect: "log_cursor_advance" | "head_sha_change" | "ci_rerun" }
   | { kind: "cancel"; reason: string }
   | { kind: "rerun_ci" }

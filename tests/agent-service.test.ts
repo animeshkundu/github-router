@@ -4,13 +4,33 @@ import { ghGraphQL } from "~/lib/agent/graphql"
 import { ghRest } from "~/lib/agent/rest"
 import {
   assignAgent,
+  configureBranchProtection,
+  createRelease,
+  createRepo,
+  ensureEnvironment,
+  fetchLiveText,
   findAgentPRs,
+  getBranchRuleset,
+  getCodeScanningAlertCount,
+  getCommunityProfile,
+  getDependabotAlertCount,
+  getLatestDeploymentStatus,
+  getLatestRelease,
+  getPagesStatus,
+  getPullRequestDiffContent,
   getPullRequestDiffSummary,
   getRequiredChecksForSha,
+  getReviewComments,
+  getWorkflowRunFailedLogs,
+  listInboundIssues,
+  listInboundPRs,
   markReadyForReview,
   mergePullRequest,
   repoHasWorkflows,
   resolveAgentRoster,
+  setPagesSource,
+  updateBranch,
+  updateRepoSettings,
   __resetAgentServiceCachesForTests,
 } from "~/lib/agent/service"
 import { getTask, startTask } from "~/lib/agent/tasks"
@@ -588,4 +608,426 @@ test("startTask omits the model field when none is provided", async () => {
 
   expect(capturedBody.prompt).toBe("no model here")
   expect("model" in capturedBody).toBe(false)
+})
+
+test("updateBranch binds the expected head and treats 422 as non-fatal", async () => {
+  const successFetch = mock((_url: string, _init?: RequestInit) =>
+    jsonResponse({ message: "Updating pull request branch." }, { status: 202 }),
+  )
+  setFetch(successFetch)
+  expect(await updateBranch(repo, 12, "head-12")).toEqual({
+    updated: true,
+    message: "Updating pull request branch.",
+  })
+  expect(String(successFetch.mock.calls[0][0])).toEndWith("/repos/octo/hello/pulls/12/update-branch")
+  expect((successFetch.mock.calls[0][1] as RequestInit).method).toBe("PUT")
+  expect(JSON.parse(String((successFetch.mock.calls[0][1] as RequestInit).body))).toEqual({
+    expected_head_sha: "head-12",
+  })
+
+  const movedFetch = mock(() => jsonResponse({ message: "Head branch was modified" }, { status: 422 }))
+  setFetch(movedFetch)
+  expect(await updateBranch(repo, 12, "old-head")).toEqual({
+    updated: false,
+    message: "Head branch was modified",
+  })
+})
+
+test("listInboundIssues paginates, excludes PR-shaped issues, and fails closed", async () => {
+  const fetchMock = mock((url: string) => {
+    if (pageOf(url) === 1) {
+      return jsonResponse([
+        ...Array.from({ length: 99 }, (_, number) => ({
+          number,
+          title: `Issue ${number}`,
+          user: { login: "octocat", type: "User" },
+          labels: [{ name: "bug" }],
+          created_at: "2026-01-01",
+          updated_at: "2026-01-02",
+        })),
+        { number: 100, title: "PR", pull_request: {}, user: { login: "bot[bot]", type: "Bot" } },
+      ])
+    }
+    return jsonResponse([{
+      number: 101,
+      title: "Second page",
+      user: { login: "dependabot[bot]", type: "Bot" },
+      labels: ["dependencies"],
+      created_at: "2026-01-03",
+      updated_at: "2026-01-04",
+    }])
+  })
+  setFetch(fetchMock)
+  const result = await listInboundIssues(repo)
+  expect(result).toHaveLength(100)
+  expect(result.at(-1)).toEqual({
+    number: 101,
+    title: "Second page",
+    authorLogin: "dependabot[bot]",
+    isBot: true,
+    labels: ["dependencies"],
+    createdAt: "2026-01-03",
+    updatedAt: "2026-01-04",
+  })
+  expect(String(fetchMock.mock.calls[1][0])).toContain("issues?state=open&per_page=100&page=2")
+
+  setFetch(mock(() => jsonResponse({ message: "boom" }, { status: 500 })))
+  await expectAgentCode(listInboundIssues(repo), "UPSTREAM")
+})
+
+test("listInboundPRs maps draft, bot, labels, and head sha and propagates errors", async () => {
+  const fetchMock = mock((_url: string, _init?: RequestInit) => jsonResponse([{
+    number: 7,
+    title: "Bump dependency",
+    user: { login: "dependabot[bot]", type: "Bot" },
+    labels: [{ name: "dependencies" }],
+    draft: true,
+    head: { sha: "pr-sha" },
+    created_at: "2026-02-01",
+    updated_at: "2026-02-02",
+  }]))
+  setFetch(fetchMock)
+  expect(await listInboundPRs(repo)).toEqual([{
+    number: 7,
+    title: "Bump dependency",
+    authorLogin: "dependabot[bot]",
+    isBot: true,
+    labels: ["dependencies"],
+    isDraft: true,
+    createdAt: "2026-02-01",
+    updatedAt: "2026-02-02",
+    headSha: "pr-sha",
+  }])
+  expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("GET")
+  expect(String(fetchMock.mock.calls[0][0])).toContain("pulls?state=open&per_page=100&page=1")
+
+  setFetch(mock(() => jsonResponse({ message: "forbidden" }, { status: 403 })))
+  await expectAgentCode(listInboundPRs(repo), "NO_WRITE_ACCESS")
+})
+
+test("configureBranchProtection creates or updates a named repository ruleset", async () => {
+  let call = 0
+  const createFetch = mock((_url: string, _init?: RequestInit) => {
+    call += 1
+    return call === 1 ? jsonResponse([]) : jsonResponse({ id: 44 })
+  })
+  setFetch(createFetch)
+  expect(await configureBranchProtection(repo, "main", {
+    requiredStatusCheckContexts: ["ci/windows", "ci/linux"],
+    strict: true,
+    requiredApprovingReviewCount: 2,
+    requireLinearHistory: true,
+    requireConversationResolution: true,
+  })).toEqual({ rulesetId: 44, action: "created" })
+  expect((createFetch.mock.calls[1][1] as RequestInit).method).toBe("POST")
+  const createBody = JSON.parse(String((createFetch.mock.calls[1][1] as RequestInit).body))
+  expect(createBody).toMatchObject({
+    name: "first-mate:main",
+    target: "branch",
+    conditions: { ref_name: { include: ["refs/heads/main"], exclude: [] } },
+  })
+  expect(createBody.rules[0].parameters).toEqual({
+    required_status_checks: [{ context: "ci/windows" }, { context: "ci/linux" }],
+    strict_required_status_checks_policy: true,
+  })
+
+  call = 0
+  const updateFetch = mock((_url: string, _init?: RequestInit) => {
+    call += 1
+    return call === 1
+      ? jsonResponse([{ id: 45, name: "first-mate:main", target: "branch" }])
+      : jsonResponse({ id: 45 })
+  })
+  setFetch(updateFetch)
+  expect((await configureBranchProtection(repo, "main", {
+    requiredStatusCheckContexts: [],
+    strict: false,
+    requiredApprovingReviewCount: 0,
+    requireLinearHistory: false,
+    requireConversationResolution: false,
+  })).action).toBe("updated")
+  expect((updateFetch.mock.calls[1][1] as RequestInit).method).toBe("PUT")
+  expect(String(updateFetch.mock.calls[1][0])).toEndWith("/rulesets/45")
+
+  setFetch(mock(() => jsonResponse({ message: "denied" }, { status: 403 })))
+  await expectAgentCode(configureBranchProtection(repo, "main", {
+    requiredStatusCheckContexts: [],
+    strict: false,
+    requiredApprovingReviewCount: 0,
+    requireLinearHistory: false,
+    requireConversationResolution: false,
+  }), "NO_WRITE_ACCESS")
+})
+
+test("ensureEnvironment PUTs optional protection fields and propagates errors", async () => {
+  const fetchMock = mock((_url: string, _init?: RequestInit) =>
+    jsonResponse({ name: "production" }, { status: 201 }),
+  )
+  setFetch(fetchMock)
+  expect(await ensureEnvironment(repo, "production", {
+    waitTimer: 10,
+    reviewers: [{ type: "Team", id: 17 }],
+    preventSelfReview: true,
+  })).toEqual({ name: "production", created: true })
+  expect(String(fetchMock.mock.calls[0][0])).toEndWith("/environments/production")
+  expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("PUT")
+  expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toEqual({
+    wait_timer: 10,
+    reviewers: [{ type: "Team", id: 17 }],
+    prevent_self_review: true,
+  })
+
+  setFetch(mock(() => jsonResponse({ message: "invalid" }, { status: 422 })))
+  await expectAgentCode(ensureEnvironment(repo, "production"), "UPSTREAM")
+})
+
+test("createRelease maps input fields and getLatestRelease returns null on 404", async () => {
+  const createFetch = mock((_url: string, _init?: RequestInit) => jsonResponse({
+    id: 8,
+    tag_name: "v1.2.3",
+    html_url: "https://github.test/release/8",
+  }, { status: 201 }))
+  setFetch(createFetch)
+  expect(await createRelease(repo, {
+    tagName: "v1.2.3",
+    targetCommitish: "main",
+    name: "Release 1.2.3",
+    body: "Notes",
+    draft: false,
+    prerelease: true,
+    generateReleaseNotes: true,
+  })).toEqual({ id: 8, tagName: "v1.2.3", url: "https://github.test/release/8" })
+  expect((createFetch.mock.calls[0][1] as RequestInit).method).toBe("POST")
+  expect(JSON.parse(String((createFetch.mock.calls[0][1] as RequestInit).body))).toEqual({
+    tag_name: "v1.2.3",
+    target_commitish: "main",
+    name: "Release 1.2.3",
+    body: "Notes",
+    draft: false,
+    prerelease: true,
+    generate_release_notes: true,
+  })
+
+  setFetch(mock(() => jsonResponse({ message: "invalid tag" }, { status: 422 })))
+  await expectAgentCode(createRelease(repo, { tagName: "invalid" }), "UPSTREAM")
+
+  setFetch(mock(() => jsonResponse({ message: "not found" }, { status: 404 })))
+  expect(await getLatestRelease(repo)).toBeNull()
+})
+
+test("getLatestRelease maps the latest release and propagates non-404 errors", async () => {
+  const fetchMock = mock((_url: string, _init?: RequestInit) => jsonResponse({
+    id: 9,
+    tag_name: "v2",
+    html_url: "https://github.test/release/9",
+  }))
+  setFetch(fetchMock)
+  expect(await getLatestRelease(repo)).toEqual({
+    id: 9,
+    tagName: "v2",
+    url: "https://github.test/release/9",
+    isLatest: true,
+  })
+  expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("GET")
+  expect(String(fetchMock.mock.calls[0][0])).toEndWith("/releases/latest")
+
+  setFetch(mock(() => jsonResponse({ message: "boom" }, { status: 500 })))
+  await expectAgentCode(getLatestRelease(repo), "UPSTREAM")
+})
+
+test("updateRepoSettings PATCHes provided fields and enables private reporting", async () => {
+  const fetchMock = mock((_url: string, _init?: RequestInit) => new Response(null, { status: 204 }))
+  setFetch(fetchMock)
+  expect(await updateRepoSettings(repo, {
+    description: "Description",
+    hasIssues: false,
+    securityAndAnalysis: {
+      secretScanning: "enabled",
+      secretScanningPushProtection: "enabled",
+    },
+    enablePrivateVulnerabilityReporting: true,
+  })).toEqual({
+    appliedFields: [
+      "description",
+      "has_issues",
+      "security_and_analysis.secret_scanning",
+      "security_and_analysis.secret_scanning_push_protection",
+      "private_vulnerability_reporting",
+    ],
+  })
+  expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("PATCH")
+  expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toEqual({
+    description: "Description",
+    has_issues: false,
+    security_and_analysis: {
+      secret_scanning: { status: "enabled" },
+      secret_scanning_push_protection: { status: "enabled" },
+    },
+  })
+  expect((fetchMock.mock.calls[1][1] as RequestInit).method).toBe("PUT")
+  expect(String(fetchMock.mock.calls[1][0])).toEndWith("/private-vulnerability-reporting")
+
+  setFetch(mock(() => jsonResponse({ message: "denied" }, { status: 403 })))
+  await expectAgentCode(updateRepoSettings(repo, { homepage: "https://example.test" }), "NO_WRITE_ACCESS")
+})
+
+test("setPagesSource posts workflow or legacy source and propagates errors", async () => {
+  const workflowFetch = mock((_url: string, _init?: RequestInit) =>
+    jsonResponse({ html_url: "https://octo.test/hello" }, { status: 201 }),
+  )
+  setFetch(workflowFetch)
+  expect(await setPagesSource(repo, { buildType: "workflow" })).toEqual({
+    configured: true,
+    url: "https://octo.test/hello",
+  })
+  expect((workflowFetch.mock.calls[0][1] as RequestInit).method).toBe("POST")
+  expect(JSON.parse(String((workflowFetch.mock.calls[0][1] as RequestInit).body))).toEqual({
+    build_type: "workflow",
+  })
+
+  const legacyFetch = mock((_url: string, _init?: RequestInit) => jsonResponse({}))
+  setFetch(legacyFetch)
+  await setPagesSource(repo, { buildType: "legacy", branch: "main", path: "/docs" })
+  expect(JSON.parse(String((legacyFetch.mock.calls[0][1] as RequestInit).body))).toEqual({
+    build_type: "legacy",
+    source: { branch: "main", path: "/docs" },
+  })
+
+  setFetch(mock(() => jsonResponse({ message: "exists" }, { status: 409 })))
+  await expectAgentCode(setPagesSource(repo, { buildType: "workflow" }), "UPSTREAM")
+})
+
+test("createRepo selects personal or org endpoint, maps fields, and types 422", async () => {
+  const fetchMock = mock((_url: string, _init?: RequestInit) => jsonResponse({
+    owner: { login: "acme" }, name: "new-repo", html_url: "https://github.test/acme/new-repo",
+    default_branch: "main",
+  }, { status: 201 }))
+  setFetch(fetchMock)
+  expect(await createRepo({
+    org: "acme", name: "new-repo", private: true, description: "D", autoInit: true,
+    gitignoreTemplate: "Node", licenseTemplate: "mit",
+  })).toEqual({
+    owner: "acme", name: "new-repo", url: "https://github.test/acme/new-repo", defaultBranch: "main",
+  })
+  expect(String(fetchMock.mock.calls[0][0])).toEndWith("/orgs/acme/repos")
+  expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("POST")
+  expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toEqual({
+    name: "new-repo", private: true, description: "D", auto_init: true,
+    gitignore_template: "Node", license_template: "mit",
+  })
+  setFetch(mock(() => jsonResponse({ message: "exists" }, { status: 422 })))
+  await expect(createRepo({ name: "new-repo" })).rejects.toMatchObject({ code: "already-exists" })
+})
+
+test("getWorkflowRunFailedLogs maps failed steps and annotations and truncates", async () => {
+  setFetch(routedFetch((url) => {
+    if (url.includes("/jobs")) return jsonResponse({ jobs: [
+      { id: 10, check_run_id: 88, name: "windows", html_url: "https://ci/job", conclusion: "failure",
+        steps: [{ name: "Checkout", conclusion: "success" }, { name: "Test", conclusion: "failure" }] },
+      { id: 11, name: "linux", conclusion: "success" },
+    ] })
+    if (url.includes("/check-runs/88/annotations")) return jsonResponse([
+      { path: "src/a.ts", start_line: 7, annotation_level: "failure", message: "x".repeat(400) },
+      { path: "src/b.ts", start_line: 8, annotation_level: "warning", message: "second" },
+    ])
+    throw new Error(`unexpected fetch ${url}`)
+  }))
+  const detail = await getWorkflowRunFailedLogs(repo, 9, { maxBytes: 1100, maxAnnotations: 1 })
+  expect(detail.failingJobs).toEqual([{ name: "windows", url: "https://ci/job", failedSteps: ["Test"] }])
+  expect(detail.annotations).toHaveLength(1)
+  expect(detail.annotations[0]).toMatchObject({ path: "src/a.ts", line: 7, level: "failure" })
+  expect(detail.truncated).toBe(true)
+})
+
+test("getPullRequestDiffContent includes patches, paginates defensively, and truncates", async () => {
+  const fetchMock = mock((_url: string, _init?: RequestInit) => jsonResponse([
+    { filename: "src/a.ts", status: "modified", additions: 2, deletions: 1, patch: "+".repeat(2000) },
+    { filename: "src/b.ts", status: "added", additions: 1, deletions: 0, patch: "+b" },
+  ]))
+  setFetch(fetchMock)
+  const result = await getPullRequestDiffContent(repo, 5, { maxBytes: 1500, maxPatchBytes: 700 })
+  expect(result.files[0]).toMatchObject({ filename: "src/a.ts", status: "modified", additions: 2, deletions: 1 })
+  expect(result.files[0]?.patch).toBeDefined()
+  expect(Buffer.byteLength(result.files[0]?.patch ?? "")).toBeLessThanOrEqual(700)
+  expect(result.truncated).toBe(true)
+  expect(String(fetchMock.mock.calls[0][0])).toContain("pulls/5/files?per_page=100&page=1")
+})
+
+test("getReviewComments maps inline location, author, and bounded body", async () => {
+  const fetchMock = mock((_url: string, _init?: RequestInit) => jsonResponse([{ path: "src/a.ts", line: null, original_line: 4,
+    user: { login: "reviewer" }, body: "x".repeat(5000) }]))
+  setFetch(fetchMock)
+  const comments = await getReviewComments(repo, 3)
+  expect(comments).toHaveLength(1)
+  expect(comments[0]).toMatchObject({ path: "src/a.ts", line: 4, author: "reviewer" })
+  expect(comments[0]?.bodyExcerpt).toHaveLength(4000)
+  expect(String(fetchMock.mock.calls[0][0])).toContain("/pulls/3/comments?per_page=100")
+})
+
+test("getBranchRuleset summarizes rule types, checks, strictness, and reviews", async () => {
+  const fetchMock = mock((_url: string, _init?: RequestInit) => jsonResponse([
+    { type: "required_status_checks", parameters: { required_status_checks: [{ context: "ci/windows" }], strict_required_status_checks_policy: true } },
+    { type: "pull_request", parameters: { required_approving_review_count: 2 } },
+  ]))
+  setFetch(fetchMock)
+  expect(await getBranchRuleset(repo, "main")).toEqual({
+    ruleTypes: ["required_status_checks", "pull_request"], requiredChecks: ["ci/windows"],
+    strict: true, requiredApprovingReviewCount: 2,
+  })
+  expect(String(fetchMock.mock.calls[0][0])).toEndWith("/rules/branches/main")
+})
+
+test("security alert counts read Link totals and degrade disabled APIs non-fatally", async () => {
+  const fetchMock = mock((url: string) => url.includes("code-scanning")
+    ? jsonResponse([{}], { headers: { link: '<https://api.github.test/x?page=42>; rel="last"' } })
+    : jsonResponse({ message: "disabled" }, { status: 403 }))
+  setFetch(fetchMock)
+  expect(await getCodeScanningAlertCount(repo)).toEqual({ enabled: true, count: 42 })
+  expect(await getDependabotAlertCount(repo)).toEqual({ enabled: false })
+  expect(String(fetchMock.mock.calls[0][0])).toContain("code-scanning/alerts?state=open&per_page=1")
+})
+
+test("getCommunityProfile maps health and file presence", async () => {
+  const fetchMock = mock((_url: string, _init?: RequestInit) => jsonResponse({ health_percentage: 80, files: { readme: { url: "x" }, code_of_conduct: null } }))
+  setFetch(fetchMock)
+  expect(await getCommunityProfile(repo)).toEqual({
+    healthPercentage: 80, files: { readme: true, code_of_conduct: false },
+  })
+  expect(String(fetchMock.mock.calls[0][0])).toEndWith("/community/profile")
+})
+
+test("getPagesStatus maps enabled status and treats 404 as disabled", async () => {
+  const fetchMock = mock(() => jsonResponse({ status: "built", cname: "docs.test", html_url: "https://docs.test", build_type: "workflow" }))
+  setFetch(fetchMock)
+  expect(await getPagesStatus(repo)).toEqual({ enabled: true, status: "built", cname: "docs.test", htmlUrl: "https://docs.test", buildType: "workflow" })
+  setFetch(mock(() => jsonResponse({ message: "none" }, { status: 404 })))
+  expect(await getPagesStatus(repo)).toEqual({ enabled: false })
+})
+
+test("getLatestDeploymentStatus reads latest deployment then latest status", async () => {
+  setFetch(routedFetch((url) => {
+    if (url.includes("/deployments?")) return jsonResponse([{ id: 77, environment: "production" }])
+    if (url.includes("/deployments/77/statuses")) return jsonResponse([{ state: "success", environment_url: "https://live.test", created_at: "2026-07-14" }])
+    throw new Error(`unexpected fetch ${url}`)
+  }))
+  expect(await getLatestDeploymentStatus(repo, { environment: "production" })).toEqual({
+    environment: "production", state: "success", targetUrl: "https://live.test", createdAt: "2026-07-14",
+  })
+  setFetch(mock(() => jsonResponse([])))
+  expect(await getLatestDeploymentStatus(repo)).toBeNull()
+})
+
+test("fetchLiveText follows redirects, bounds text, and never throws on network error", async () => {
+  const fetchMock = mock((_url: string, init?: RequestInit) => {
+    expect(init?.redirect).toBe("follow")
+    return new Response("x".repeat(3000), { status: 200 })
+  })
+  setFetch(fetchMock)
+  const result = await fetchLiveText("https://live.test", { maxBytes: 1024 })
+  expect(result.ok).toBe(true)
+  expect(Buffer.byteLength(result.text)).toBe(1024)
+  setFetch(mock(() => Promise.reject(new Error("offline"))))
+  expect(await fetchLiveText("https://offline.test", { timeoutMs: 100 })).toEqual({
+    ok: false, status: 0, text: "", finalUrl: "https://offline.test",
+  })
 })

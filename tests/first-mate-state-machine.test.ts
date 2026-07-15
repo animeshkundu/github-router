@@ -183,10 +183,28 @@ test("CI running → noop (wait, no model, no human)", () => {
   expect(nextAction(c, row({ pr: 7 }), DEFAULT_POLICY)).toEqual({ kind: "noop" })
 })
 
-test("failed / timed_out cloud task → escalate", () => {
+test("failed / timed_out plan task with no PR retries below cap and escalates at cap", () => {
   for (const provider of ["failed", "timed_out"] as const) {
-    const c = classify(obs({ provider }), row({ provider }))
-    expect(nextAction(c, row({ provider }), DEFAULT_POLICY).kind).toBe("escalate_human")
+    const belowCap = row({ provider, planRetries: 1 })
+    expect(nextAction(classify(obs({ provider }), belowCap), belowCap, DEFAULT_POLICY)).toEqual({
+      kind: "retry_plan",
+    })
+
+    const atCap = row({ provider, planRetries: 2 })
+    expect(nextAction(classify(obs({ provider }), atCap), atCap, DEFAULT_POLICY).kind).toBe(
+      "escalate_human",
+    )
+  }
+})
+
+test("failed / timed_out task that left an OPEN green PR is verified, not hard-escalated", () => {
+  for (const provider of ["failed", "timed_out"] as const) {
+    const o = obs({ provider, prs: [openPr()], ci: { rollup: "passing" } })
+    const c = classify(o, row({ provider, pr: 7 }))
+    // A usable open PR (session-status "failed" ≠ failed deliverable) faces the
+    // normal validation path (→ assign a verifier → judge → the merge gate), not a
+    // dead task-failure escalation.
+    expect(nextAction(c, row({ provider, pr: 7 }), DEFAULT_POLICY).kind).toBe("assign_verifier")
   }
 })
 

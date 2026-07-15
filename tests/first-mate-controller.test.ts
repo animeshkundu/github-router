@@ -205,11 +205,7 @@ function harness(
       taskCounter += 1
       return { taskId: `started-${taskCounter}`, state: "queued" }
     }),
-    followUpTask: mock(
-      async (_repo: { owner: string; repo: string }, _taskId: string, _prompt: string) => ({
-        ok: true as const,
-      }),
-    ),
+    continueTaskOnBranch: mock(async () => ({ taskId: "continue-task", state: "in_progress" as const })),
     cancelTask: mock(async () => ({ cancelled: true as const })),
     createIssue: mock(async () => {
       issueCounter += 1
@@ -471,8 +467,8 @@ test("review_plan approve re-dispatches a fresh build task carrying the approved
   )
 
   // A fresh build task was dispatched (createPullRequest:true) carrying the plan —
-  // NOT a followUpTask (the one-shot plan task 405s on follow-up).
-  expect(h.deps.followUpTask).not.toHaveBeenCalled()
+  // NOT a continueTaskOnBranch (the one-shot plan task 405s on follow-up).
+  expect(h.deps.continueTaskOnBranch).not.toHaveBeenCalled()
   const buildCall = (
     h.deps.startTask as unknown as { mock: { calls: unknown[][] } }
   ).mock.calls.find((c) => (c[1] as { createPullRequest?: boolean }).createPullRequest === true)
@@ -503,7 +499,7 @@ test("review_plan refine re-dispatches a fresh plan task with the feedback and s
     h.deps,
   )
 
-  expect(h.deps.followUpTask).not.toHaveBeenCalled()
+  expect(h.deps.continueTaskOnBranch).not.toHaveBeenCalled()
   const planCall = (
     h.deps.startTask as unknown as { mock: { calls: unknown[][] } }
   ).mock.calls.find((c) => {
@@ -512,6 +508,110 @@ test("review_plan refine re-dispatches a fresh plan task with the feedback and s
   })
   expect(planCall).toBeDefined()
   expect(row.dispatchMode).toBe("plan")
+})
+
+test("failed plan/no-PR starts a clean-slate plan task with a fresh id and @2 key", async () => {
+  const row = unit({
+    id: "unit-plan-retry",
+    provider: "failed",
+    phase: "plan",
+    dispatchMode: "plan",
+    branch: "copilot/stale-plan-branch",
+    taskId: "task-1",
+  })
+  const h = harness([row])
+  let captured: { createPullRequest?: boolean; idempotencyKey?: string; prompt: string } | undefined
+  h.deps.startTask = mock(async (
+    _repo: unknown,
+    input: { createPullRequest?: boolean; idempotencyKey?: string; prompt: string },
+  ) => {
+    captured = input
+    return { taskId: "task-2", state: "queued" }
+  })
+
+  const result = await advance({}, h.deps)
+
+  expect(h.deps.continueTaskOnBranch).not.toHaveBeenCalled()
+  expect(captured?.createPullRequest).toBe(false)
+  expect(captured?.idempotencyKey).toBe("dispatch:octo/repo#unit-plan-retry@2")
+  expect(captured?.prompt).toContain("produce a concrete, step-by-step implementation plan")
+  expect(row.taskId).toBe("task-2")
+  expect(row.dispatchAttempts).toBe(2)
+  expect(row.planRetries).toBe(1)
+  expect(row.provider).toBe("queued")
+  expect(row.phase).toBe("plan")
+  expect(row.dispatchMode).toBe("plan")
+  expect(result.needsHuman).toHaveLength(0)
+})
+
+test("plan retry budget is persisted with the intent before a failed dispatch side effect", async () => {
+  const row = unit({
+    id: "unit-plan-retry-crash",
+    provider: "failed",
+    phase: "plan",
+    dispatchMode: "plan",
+    taskId: "task-1",
+    planRetries: 1,
+  })
+  const h = harness([row])
+  h.deps.startTask = mock(async () => {
+    throw new Error("dispatch connection lost")
+  })
+
+  await advance({}, h.deps)
+
+  expect(row.planRetries).toBe(2)
+  expect(row.dispatchAttempts).toBe(2)
+  expect(row.dispatch?.id).toBe("dispatch:octo/repo#unit-plan-retry-crash@2")
+  expect(h.deps.startTask).toHaveBeenCalledTimes(1)
+
+  const recovered = await advance({}, h.deps)
+  expect(h.deps.startTask).toHaveBeenCalledTimes(1)
+  expect(recovered.needsHuman.some((request) => request.reason.includes("dispatch interrupted"))).toBe(true)
+})
+
+test("completed plan retry follows normal review_plan then build dispatch", async () => {
+  const row = unit({
+    id: "unit-plan-retry-flow",
+    provider: "timed_out",
+    phase: "plan",
+    dispatchMode: "plan",
+    taskId: "task-1",
+  })
+  const h = harness([row])
+
+  await advance({}, h.deps)
+  expect(row.taskId).toBe("started-1")
+  expect(row.planRetries).toBe(1)
+  expect(row.dispatchAttempts).toBe(2)
+
+  h.observations.set("1", {
+    provider: "completed",
+    prs: [],
+    planReady: true,
+    logExcerpt: "1. Update controller. 2. Add retry tests.",
+  })
+  h.deps.classifyPlanReady = mock(async () => ({
+    planReady: true,
+    planExcerpt: "1. Update controller. 2. Add retry tests.",
+  }))
+  const reviewed = await advance({}, h.deps)
+  expect(reviewed.needsModel.some((request) => request.kind === "review_plan")).toBe(true)
+
+  h.observations.set("1", { provider: "queued", prs: [] })
+  await advance(
+    { modelAnswers: [{ requestId: "m1:1:review_plan", verdict: { decision: "approve" } }] },
+    h.deps,
+  )
+  const buildCall = (
+    h.deps.startTask as unknown as { mock: { calls: unknown[][] } }
+  ).mock.calls.find((call) => (call[1] as { createPullRequest?: boolean }).createPullRequest === true)
+  expect(buildCall).toBeDefined()
+  expect((buildCall![1] as { idempotencyKey?: string }).idempotencyKey).toBe(
+    "dispatch:octo/repo#unit-plan-retry-flow@3",
+  )
+  expect(row.dispatchMode).toBe("build")
+  expect(row.phase).toBe("build")
 })
 
 test("ci_failed asks the model under retry cap and escalates to human at cap", async () => {
@@ -883,6 +983,23 @@ test("decompose: unit-less mission emits a decompose request, and a decompose an
   expect(h.units.every((u) => u.taskId !== null || u.issue !== null)).toBe(true)
 })
 
+test("terminal unmerged fleet does not auto-complete a decomposed mission", async () => {
+  const failedUnit = unit({
+    missionId: "m-failed",
+    terminal: true,
+    phase: "done",
+    artifact: "no_pr",
+  })
+  const m = mission({ id: "m-failed", everDecomposed: true })
+  const h = harness([failedUnit], [m])
+
+  const result = await advance({}, h.deps)
+
+  expect(m.status).toBe("active")
+  expect(result.applied.some((entry) => entry.includes("completed mission m-failed"))).toBe(false)
+  expect(result.applied.some((entry) => entry.includes("mission m-failed NOT completed: 1 unit(s)"))).toBe(true)
+})
+
 test("all-terminal decomposed mission auto-completes and stops re-emitting decompose", async () => {
   const doneUnit = unit({
     id: "done-id",
@@ -899,6 +1016,7 @@ test("all-terminal decomposed mission auto-completes and stops re-emitting decom
   const result = await advance({}, h.deps)
 
   expect(m.status).toBe("done")
+  expect(result.applied).toContain("completed mission m-done")
   expect(result.needsModel.some((request) => request.kind === "decompose")).toBe(false)
 })
 
@@ -1173,7 +1291,7 @@ test("dispatch goes through the outbox: intent persisted before startTask, idemp
 
   await advance({}, h.deps)
 
-  expect(captured?.idempotencyKey).toBeTruthy()
+  expect(captured?.idempotencyKey).toBe("dispatch:octo/repo#issue-1@1")
   expect(captured?.prompt).toContain(`fm-dispatch:${captured?.idempotencyKey}`)
   // The intent was persisted BEFORE the result (outbox ordering).
   expect(upsertOrder[0]).toBe("intent")
@@ -3112,4 +3230,304 @@ test("plan units still dispatch in parallel while a build is active", async () =
 
   expect(plan.taskId).toBe("started-1")
   expect(h.deps.startTask).toHaveBeenCalledTimes(1)
+})
+
+test("answer_agent_question with an open PR wakes the agent via an @copilot mention (not a bare comment)", async () => {
+  const row = unit({
+    provider: "waiting_for_user",
+    phase: "build",
+    dispatchMode: "build",
+    pr: 7,
+    headSha: "head-7",
+    artifact: "pr_open",
+  })
+  const h = harness([row])
+  h.observations.set("1", { provider: "waiting_for_user", prs: [openPr(7, "head-7")] })
+
+  await advance(
+    {
+      modelAnswers: [
+        { requestId: "m1:1:answer_agent_question", verdict: { answer: "Use Postgres, not SQLite." } },
+      ],
+    },
+    h.deps,
+  )
+
+  expect(h.deps.mentionCopilot).toHaveBeenCalled()
+  const call = (h.deps.mentionCopilot as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]
+  expect(call[1]).toBe(7)
+  expect(call[2]).toContain("Use Postgres")
+  // The documented wake trigger is the @copilot mention — never a bare comment.
+  expect(h.deps.postComment).not.toHaveBeenCalled()
+  expect(h.deps.continueTaskOnBranch).not.toHaveBeenCalled()
+})
+
+test("answer_agent_question with no PR but a branch continues the task on that branch", async () => {
+  const row = unit({
+    provider: "waiting_for_user",
+    phase: "plan",
+    dispatchMode: "plan",
+    pr: null,
+    branch: "copilot/feature-x",
+    baseRef: "main",
+  })
+  const h = harness([row])
+  h.observations.set("1", { provider: "in_progress", prs: [] })
+
+  await advance(
+    {
+      modelAnswers: [
+        { requestId: "m1:1:answer_agent_question", verdict: { answer: "Target Python 3.12." } },
+      ],
+    },
+    h.deps,
+  )
+
+  expect(h.deps.continueTaskOnBranch).toHaveBeenCalled()
+  const call = (h.deps.continueTaskOnBranch as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]
+  expect((call[1] as { headRef: string }).headRef).toBe("copilot/feature-x")
+  expect((call[1] as { baseRef?: string }).baseRef).toBe("main")
+  expect((call[1] as { prompt: string }).prompt).toContain("Python 3.12")
+  // Re-points observation at the new session and doesn't fall back to a mention.
+  expect(row.taskId).toBe("continue-task")
+  expect(h.deps.mentionCopilot).not.toHaveBeenCalled()
+})
+
+test("answer_agent_question with neither PR nor branch delivers nothing (re-emit / timeout backstop)", async () => {
+  const row = unit({ provider: "waiting_for_user", pr: null, branch: null })
+  const h = harness([row])
+  h.observations.set("1", { provider: "waiting_for_user", prs: [] })
+
+  await advance(
+    {
+      modelAnswers: [{ requestId: "m1:1:answer_agent_question", verdict: { answer: "anything" } }],
+    },
+    h.deps,
+  )
+
+  expect(h.deps.mentionCopilot).not.toHaveBeenCalled()
+  expect(h.deps.continueTaskOnBranch).not.toHaveBeenCalled()
+  expect(h.deps.postComment).not.toHaveBeenCalled()
+})
+
+test("answer_agent_question does not re-mention @copilot while the PR head is unchanged", async () => {
+  const row = unit({
+    provider: "waiting_for_user",
+    phase: "build",
+    dispatchMode: "build",
+    pr: 7,
+    headSha: "head-7",
+    artifact: "pr_open",
+  })
+  const h = harness([row])
+  h.observations.set("1", { provider: "waiting_for_user", prs: [openPr(7, "head-7")] })
+
+  const answer = {
+    modelAnswers: [{ requestId: "m1:1:answer_agent_question", verdict: { answer: "Use Postgres." } }],
+  }
+  await advance(answer, h.deps)
+  await advance(answer, h.deps)
+
+  // One outstanding answer per head: the second wake (still waiting_for_user on the
+  // same head) must not spam a duplicate mention.
+  expect(
+    (h.deps.mentionCopilot as unknown as { mock: { calls: unknown[][] } }).mock.calls.length,
+  ).toBe(1)
+})
+
+function buildDispatchCount(h: { deps: { startTask: unknown } }): number {
+  return (h.deps.startTask as unknown as { mock: { calls: unknown[][] } }).mock.calls.filter(
+    (c) => (c[1] as { createPullRequest?: boolean }).createPullRequest === true,
+  ).length
+}
+
+test("concurrent builds: disjoint fileScopes dispatch two build tasks at once", async () => {
+  const a = unit({ id: "u-a", issue: 1, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "plan A", fileScopes: ["src/a", "docs/a"] })
+  const b = unit({ id: "u-b", issue: 2, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "plan B", fileScopes: ["src/b", "docs/b"] })
+  const h = harness([a, b])
+  h.observations.set("1", { provider: "in_progress", prs: [] })
+  h.observations.set("2", { provider: "in_progress", prs: [] })
+
+  await advance(
+    {
+      modelAnswers: [
+        { requestId: "m1:1:review_plan", verdict: { decision: "approve" } },
+        { requestId: "m1:2:review_plan", verdict: { decision: "approve" } },
+      ],
+    },
+    h.deps,
+  )
+
+  // Provably independent → both build concurrently.
+  expect(buildDispatchCount(h)).toBe(2)
+  expect(a.dispatchMode).toBe("build")
+  expect(b.dispatchMode).toBe("build")
+})
+
+test("overlapping fileScopes serialize: only one build dispatches, the other defers", async () => {
+  const a = unit({ id: "u-a", issue: 1, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "plan A", fileScopes: ["src/shared"] })
+  const b = unit({ id: "u-b", issue: 2, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "plan B", fileScopes: ["src/shared/sub.ts"] })
+  const h = harness([a, b])
+  h.observations.set("1", { provider: "in_progress", prs: [] })
+  h.observations.set("2", { provider: "completed", prs: [] })
+
+  await advance(
+    {
+      modelAnswers: [
+        { requestId: "m1:1:review_plan", verdict: { decision: "approve" } },
+        { requestId: "m1:2:review_plan", verdict: { decision: "approve" } },
+      ],
+    },
+    h.deps,
+  )
+
+  // `src/shared` contains `src/shared/sub.ts` → overlap → the second build defers.
+  expect(buildDispatchCount(h)).toBe(1)
+  expect(b.dispatchMode).toBe("plan")
+})
+
+test("no declared fileScopes serialize builds (back-compat one-at-a-time)", async () => {
+  const a = unit({ id: "u-a", issue: 1, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "plan A" })
+  const b = unit({ id: "u-b", issue: 2, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "plan B" })
+  const h = harness([a, b])
+  h.observations.set("1", { provider: "in_progress", prs: [] })
+  h.observations.set("2", { provider: "completed", prs: [] })
+
+  await advance(
+    {
+      modelAnswers: [
+        { requestId: "m1:1:review_plan", verdict: { decision: "approve" } },
+        { requestId: "m1:2:review_plan", verdict: { decision: "approve" } },
+      ],
+    },
+    h.deps,
+  )
+
+  // Unknown scope can't prove independence → the safe pre-existing serial behavior.
+  expect(buildDispatchCount(h)).toBe(1)
+  expect(b.dispatchMode).toBe("plan")
+})
+
+test("globby fileScopes cannot prove disjointness against files they match (no false parallelism)", async () => {
+  const a = unit({ id: "u-a", issue: 1, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "plan A", fileScopes: ["src/*.ts"] })
+  const b = unit({ id: "u-b", issue: 2, provider: "completed", phase: "plan", dispatchMode: "plan", planExcerpt: "plan B", fileScopes: ["src/main.ts"] })
+  const h = harness([a, b])
+  h.observations.set("1", { provider: "in_progress", prs: [] })
+  h.observations.set("2", { provider: "completed", prs: [] })
+
+  await advance(
+    {
+      modelAnswers: [
+        { requestId: "m1:1:review_plan", verdict: { decision: "approve" } },
+        { requestId: "m1:2:review_plan", verdict: { decision: "approve" } },
+      ],
+    },
+    h.deps,
+  )
+
+  // `src/*.ts` collapses to its parent dir `src`, which contains `src/main.ts` →
+  // overlap → the second build serializes (a single `*` must not read as disjoint).
+  expect(buildDispatchCount(h)).toBe(1)
+  expect(b.dispatchMode).toBe("plan")
+})
+
+test("addUnitsToMission threads fileScopes from the decompose spec", async () => {
+  const m = mission({ id: "mX" })
+  const upserted: UnitRow[] = []
+  const deps = {
+    upsertMission: mock(async () => {}),
+    upsertUnit: mock(async (_repo: RepoRef, u: UnitRow) => {
+      upserted.push(u)
+    }),
+  }
+  await addUnitsToMission(
+    m,
+    [
+      { title: "A", fileScopes: ["src/a", " docs/a "] },
+      { title: "B", fileScopes: "src/b" }, // not an array → dropped
+      { title: "C" }, // no scopes
+    ],
+    deps,
+  )
+  expect(upserted.find((u) => u.title === "A")?.fileScopes).toEqual(["src/a", "docs/a"])
+  expect(upserted.find((u) => u.title === "B")?.fileScopes).toBeUndefined()
+  expect(upserted.find((u) => u.title === "C")?.fileScopes).toBeUndefined()
+})
+
+test("verified progress accrues on an unchanged head and resets on a new content head", async () => {
+  const row = unit({ pr: 7, headSha: "head-1", dispatchMode: "build", phase: "build" })
+  const h = harness([row], [mission({ everDecomposed: true })])
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [openPr(7, "head-1")],
+    changedFiles: 1,
+    ci: { rollup: "pending" },
+  })
+
+  await advance({}, h.deps)
+  expect(row.verifiedProgress?.kind).toBe("content_head")
+  expect(row.noProgressWakes).toBe(0)
+
+  await advance({}, h.deps)
+  expect(row.noProgressWakes).toBe(1)
+  expect(row.lastNoProgressReason).toContain("head unchanged")
+
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [openPr(7, "head-2")],
+    changedFiles: 1,
+    ci: { rollup: "pending" },
+  })
+  await advance({}, h.deps)
+  expect(row.verifiedProgress?.fingerprint).toContain("head-2")
+  expect(row.noProgressWakes).toBe(0)
+  expect(row.lastNoProgressReason).toBeUndefined()
+})
+
+test("mission stall watchdog emits exactly one human request after six impossible wakes", async () => {
+  const row = unit({ dispatchMode: "build", phase: "build" })
+  const m = mission({ everDecomposed: true })
+  const h = harness([row], [m])
+
+  let result = await advance({}, h.deps)
+  for (let wake = 2; wake <= 6; wake += 1) result = await advance({}, h.deps)
+
+  expect(row.noProgressWakes).toBe(6)
+  expect(m.noProgressWakes).toBe(6)
+  expect(result.needsHuman).toHaveLength(1)
+  expect(result.needsHuman[0]?.reason).toContain("not progressing toward merge")
+  expect(result.needsHuman[0]?.reason).toContain("provider=in_progress")
+
+  const next = await advance({}, h.deps)
+  expect(next.needsHuman).toHaveLength(0)
+})
+
+test("mission verified progress suppresses the stall watchdog and merged units do not stall", async () => {
+  const live = unit({ pr: 7, headSha: "head-1", dispatchMode: "build", phase: "build" })
+  const merged = unit({
+    id: "merged",
+    issue: 2,
+    pr: 8,
+    taskId: "task-2",
+    provider: "completed",
+    phase: "done",
+    artifact: "pr_merged",
+    validation: "floor_passed",
+    terminal: true,
+  })
+  const m = mission({ everDecomposed: true, noProgressWakes: 5, stallSinceMs: 1 })
+  const h = harness([live, merged], [m])
+  h.observations.set("1", {
+    provider: "in_progress",
+    prs: [openPr(7, "head-2")],
+    changedFiles: 2,
+    ci: { rollup: "pending" },
+  })
+
+  const result = await advance({}, h.deps)
+
+  expect(result.needsHuman).toHaveLength(0)
+  expect(m.noProgressWakes).toBe(0)
+  expect(merged.noProgressWakes).toBeUndefined()
+  expect(m.status).toBe("active")
 })

@@ -198,8 +198,19 @@ export interface TaskStatusResult {
   branch?: string
 }
 
-export interface TaskFollowUpResult {
-  ok: true
+export interface ContinueTaskInput {
+  /** The agent's existing branch (e.g. `copilot/…`) to continue work on. */
+  headRef: string
+  /**
+   * Base branch the agent's PR targets. Paired with headRef, GitHub looks up the
+   * open-PR context for that branch and commits to it instead of branching.
+   */
+  baseRef?: string
+  /** The follow-up input for the agent (e.g. the answer to its blocking question). */
+  prompt: string
+  model?: string
+  /** Sent as `Idempotency-Key` so a re-POST of the same continue dedupes at the provider. */
+  idempotencyKey?: string
 }
 
 export interface TaskCancelResult {

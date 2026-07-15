@@ -31,6 +31,8 @@ import type {
   Validation,
 } from "./types"
 
+export const PLAN_RETRY_CAP = 2
+
 export function classify(observed: Observed, row: UnitRow): Classified {
   const events: string[] = []
   const provider = observed.provider
@@ -158,9 +160,27 @@ export function nextAction(
     return { kind: "escalate_human", reason: "the agent opened multiple pull requests for one unit" }
   }
 
-  // Provider terminal-failure states. Re-dispatch semantics on the preview
-  // API are unverified, so escalate rather than guess a destructive retry.
-  if (state.provider === "failed" || state.provider === "timed_out") {
+  // Provider terminal-failure states. A failed/timed-out cloud-agent SESSION does
+  // NOT necessarily mean a failed deliverable — the agent may have left a usable
+  // open PR (green CI + a complete diff) before its session was marked failed (a
+  // session-status artifact, not a deliverable failure). When a real open PR
+  // exists, verify it through the normal validation path below (CI / review /
+  // floor → the human-gated merge) rather than hard-escalating the task; the
+  // artifact still faces the full merge gate. A plan task that produced no PR is
+  // safely re-dispatched as a fresh plan session, but only under its dedicated
+  // small bound; all other terminal failures retain the human escalation.
+  if (
+    (state.provider === "failed" || state.provider === "timed_out") &&
+    state.artifact !== "pr_open"
+  ) {
+    if (
+      state.phase === "plan" &&
+      state.artifact === "no_pr" &&
+      row.dispatchMode === "plan" &&
+      (row.planRetries ?? 0) < PLAN_RETRY_CAP
+    ) {
+      return { kind: "retry_plan" }
+    }
     return { kind: "escalate_human", reason: `cloud agent task ${state.provider}` }
   }
 

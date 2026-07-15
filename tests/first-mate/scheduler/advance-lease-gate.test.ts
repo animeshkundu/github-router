@@ -40,7 +40,7 @@ function emptyDeps(): ControllerDeps {
     findByKey: boom("findByKey"),
     markAnswered: boom("markAnswered"),
     startTask: boom("startTask"),
-    followUpTask: boom("followUpTask"),
+    continueTaskOnBranch: boom("continueTaskOnBranch"),
     cancelTask: boom("cancelTask"),
     createIssue: boom("createIssue"),
     resolveAgentActor: boom("resolveAgentActor"),

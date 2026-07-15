@@ -13,7 +13,8 @@ Invoke the ` + "`scaffold_repo`" + ` MCP tool (` + "`mcp__first-mate__scaffold_r
 ## What it seeds
 
 - ` + "`AGENTS.md`" + ` / ` + "`CLAUDE.md`" + ` / ` + "`GEMINI.md`" + ` / ` + "`.github/copilot-instructions.md`" + ` — identical guidance with overview, detected stack, commands, hard DoD gate, primary OS, conventions, structure, decisions/memory, handoff, testing, and gotchas.
-- ` + "`.github/agents/{planner,implementer,reviewer,researcher,tester}.md`" + ` mirrored into ` + "`.claude/agents/`" + ` — role agents with frontmatter, cold-start contract, method, quality bar, output contract, and self-reminder.
+- ` + "`.github/agents/{ceo,cto,cpo,planner,implementer,reviewer,researcher,tester}.md`" + ` mirrored into ` + "`.claude/agents/`" + ` — C-suite operator hats plus execution roles, each with frontmatter, cold-start contract, method, quality bar, output contract, and self-reminder.
+- ` + "`docs/playbook/README.md`" + ` — the autonomous DISCOVER → NICHE → POSITION → SCOPE → BUILD → LAUNCH → MEASURE → ITERATE → GROW protocol, externally verifiable phase gates, OODA / Build-Measure-Learn governance, and authority limits.
 - ` + "`docs/adrs/0000-template.md`" + ` plus ` + "`docs/adr/0001-record-architecture-decisions.md`" + ` — Nygard-style decision record foundation.
 - ` + "`LEARNINGS.md`" + `, ` + "`CHANGELOG.md`" + `, ` + "`docs/history/0000-template.md`" + `, ` + "`docs/plans/README.md`" + `, and ` + "`docs/research/README.md`" + ` — durable memory, history, plans, and research conventions.
 - ` + "`.github/pull_request_template.md`" + ` — summary, type, failure-modes-considered-and-tested, and DoD checklist.
@@ -37,7 +38,7 @@ mcp__first-mate__scaffold_repo({
 Modes:
 
 - ` + "`add-missing-only`" + ` (default): seed absent files and skip present files.
-- ` + "`enhance`" + `: for guidance files, ADR index, changelog, and learnings, append only missing ` + "`##`" + ` sections; never rewrite existing prose. Other present files are skipped.
+- ` + "`enhance`" + `: for guidance files, product playbook, ADR index, changelog, and learnings, append only missing ` + "`##`" + ` sections; never rewrite existing prose. Other present files are skipped.
 - ` + "`overwrite-approved`" + `: replace existing files only when explicitly approved.
 
 Always inspect the returned per-file report and PR. A no-op result means the repo already has the foundation or has no missing enhanceable sections.

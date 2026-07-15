@@ -21,6 +21,7 @@ import {
   type ExistingScaffoldFile,
   type ScaffoldCommandSet,
   type ScaffoldFileReport,
+  type ScaffoldFinalDestination,
   type ScaffoldMode,
   type ScaffoldOpts,
   type ScaffoldTestContext,
@@ -42,7 +43,8 @@ import { AnswerInbox } from "~/lib/first-mate/scheduler/answer-inbox"
 import { SchedulerLease, makeDriveGate } from "~/lib/first-mate/scheduler/lease"
 import { Tier1Shadow, fromModelRequest, isValidVerdictShape, shadowEnabled, tier1LiveEnabled } from "~/lib/first-mate/scheduler/shadow"
 import { resolveCloudAgentModel } from "~/lib/first-mate/task-model"
-import type { RepoRef, UnitRow } from "~/lib/first-mate/types"
+import { readStrategy, upsertStrategy } from "~/lib/first-mate/strategy-store"
+import type { RepoRef, StrategyRecord, UnitRow } from "~/lib/first-mate/types"
 import type { McpGroup, NonPersonaMcpTool } from "~/lib/peer-mcp-personas"
 import { state } from "~/lib/state"
 
@@ -180,7 +182,44 @@ const ScaffoldRepoArgsSchema = z.object({
   detection_overrides: ScaffoldDetectionOverridesSchema.optional(),
 }).strict()
 
+const StrategyBetSchema = z.object({
+  hypothesis: z.string(),
+  metric: z.string(),
+  threshold: z.string(),
+  decisionRule: z.enum(["kill", "pivot", "continue"]),
+}).strict()
+
+const StrategyGreatnessItemSchema = z.object({
+  item: z.string(),
+  status: z.enum(["done", "pending"]),
+  evidence: z.string().optional(),
+}).strict()
+
+const StrategyDecisionEntrySchema = z.object({
+  atMs: z.number().finite(),
+  decision: z.string(),
+  rationale: z.string(),
+  evidenceRef: z.string().optional(),
+}).strict()
+
+const NextStrategicActionSchema = z.object({
+  action: z.string(),
+  trigger: z.string().optional(),
+}).strict()
+
+const WriteStrategyArgsSchema = z.object({
+  mission_id: z.string().trim().min(1),
+  repos: z.array(z.string()).optional(),
+  currentPhase: z.string().optional(),
+  activeBet: StrategyBetSchema.optional(),
+  greatnessChecklist: z.array(StrategyGreatnessItemSchema).optional(),
+  decisionLog: z.array(StrategyDecisionEntrySchema).optional(),
+  openAssumptions: z.array(z.string()).optional(),
+  nextStrategicAction: NextStrategicActionSchema.optional(),
+}).strip()
+
 type ScaffoldRepoArgs = z.infer<typeof ScaffoldRepoArgsSchema>
+type WriteStrategyArgs = z.infer<typeof WriteStrategyArgsSchema>
 
 export function createFirstMateTools(
   depsOverride: Partial<MergeCloseDeps> = {},
@@ -421,6 +460,86 @@ export function createFirstMateTools(
           board: buildBoard(units, missions, { includeAll }),
           inactiveSummary: summarizeInactiveMissions(missions),
         })
+      },
+    ),
+    tool(
+      "read_strategy",
+      "Reads the durable strategic record for one first-mate mission so a fresh CEO can rehydrate its current phase, active bet, greatness evidence, decisions, assumptions, and next action. Returns a minimal empty record when no strategy has been written yet. Use at the start of each strategic wake before making portfolio decisions.",
+      objectSchema({
+        mission_id: stringProp("Mission id whose strategy should be read."),
+      }, ["mission_id"]),
+      async (args) => {
+        const missionId = requiredString(args, "mission_id")
+        return ok(
+          (await readStrategy(missionId)) ?? {
+            missionId,
+            currentPhase: null,
+            activeBet: null,
+            greatnessChecklist: [],
+            decisionLog: [],
+            openAssumptions: [],
+            nextStrategicAction: null,
+            repos: [],
+            updatedMs: 0,
+          },
+        )
+      },
+    ),
+    tool(
+      "write_strategy",
+      "Persists the strategic continuity record for one first-mate mission after a CEO wake. Inputs contain only the state a fresh CEO needs to rehydrate: phase, bet, greatness evidence, append-only decisions, assumptions, next action, and repo handles. Decision-log entries append to existing history while the other supplied fields replace their prior values. Returns the durable update timestamp.",
+      {
+        ...objectSchema({
+          mission_id: stringProp("Mission id whose strategy should be updated."),
+          repos: stringArrayProp("Repository handles relevant to the mission."),
+        currentPhase: stringProp("Current condensed operating-sequence phase."),
+        activeBet: objectProp("Current falsifiable strategic bet.", {
+          hypothesis: stringProp("Hypothesis being tested."),
+          metric: stringProp("Metric used to evaluate the bet."),
+          threshold: stringProp("Threshold that triggers the decision rule."),
+          decisionRule: enumProp(["kill", "pivot", "continue"], "Action when the threshold is evaluated."),
+        }, ["hypothesis", "metric", "threshold", "decisionRule"]),
+        greatnessChecklist: arrayOfObjectsProp("Definition-of-greatness items and evidence handles.", {
+          item: stringProp("Greatness criterion."),
+          status: enumProp(["done", "pending"], "Current criterion status."),
+          evidence: stringProp("Optional evidence handle."),
+        }, ["item", "status"]),
+        decisionLog: arrayOfObjectsProp("Strategic decision entries to append.", {
+          atMs: numberProp("Decision timestamp in milliseconds."),
+          decision: stringProp("Decision made."),
+          rationale: stringProp("Why the decision was made."),
+          evidenceRef: stringProp("Optional evidence handle."),
+        }, ["atMs", "decision", "rationale"]),
+        openAssumptions: stringArrayProp("Strategic assumptions still requiring evidence."),
+          nextStrategicAction: objectProp("Next strategic action and optional trigger.", {
+            action: stringProp("Action to take next."),
+            trigger: stringProp("Optional condition that triggers the action."),
+          }, ["action"]),
+        }, ["mission_id"]),
+        additionalProperties: true,
+      },
+      async (args) => {
+        const input = parseWriteStrategyArgs(args)
+        const rec: StrategyRecord = {
+          missionId: input.mission_id,
+          ...(input.repos !== undefined ? { repos: input.repos } : {}),
+          ...(input.currentPhase !== undefined ? { currentPhase: input.currentPhase } : {}),
+          ...(input.activeBet !== undefined ? { activeBet: input.activeBet } : {}),
+          ...(input.greatnessChecklist !== undefined
+            ? { greatnessChecklist: input.greatnessChecklist }
+            : {}),
+          ...(input.decisionLog !== undefined ? { decisionLog: input.decisionLog } : {}),
+          ...(input.openAssumptions !== undefined
+            ? { openAssumptions: input.openAssumptions }
+            : {}),
+          ...(input.nextStrategicAction !== undefined
+            ? { nextStrategicAction: input.nextStrategicAction }
+            : {}),
+          updatedMs: 0,
+        }
+        await upsertStrategy(rec)
+        const updated = await readStrategy(input.mission_id)
+        return ok({ ok: true, updatedMs: updated?.updatedMs ?? 0 })
       },
     ),
     tool(
@@ -1087,6 +1206,16 @@ async function detectScaffoldOptions(input: ScaffoldDetectionInput): Promise<Sca
   const workflowSignal = [...workflowNames, ...workflowTexts]
   const primaryOs = input.overrides?.primary_os ?? detectPrimaryOs(readme, workflowSignal)
   const matrix = detectCiMatrix(primaryOs, workflowSignal)
+  const hasSite = detectHasSite(rootNames, frameworkNames)
+  const finalDestination = detectFinalDestination({
+    packageJsonRaw: packageJsonText,
+    hasPackageJson: packageJson !== undefined,
+    goMod,
+    pyproject,
+    cargoToml,
+    rootNames,
+    hasSite,
+  })
   return {
     repoName: input.repoSlug,
     repoDescription: input.repoDescription ?? summarizeReadme(readme),
@@ -1099,7 +1228,61 @@ async function detectScaffoldOptions(input: ScaffoldDetectionInput): Promise<Sca
     uiEvidenceRequired,
     projectStructure: detectProjectStructure(rootNames),
     detectedNotes: detectNotes({ packageJson, goMod, pyproject, cargoToml, workflows: workflowNames, primaryOs }),
+    finalDestination,
+    hasSite,
   }
+}
+
+/**
+ * True when the repo builds a web site worth an SEO/Pages scaffold: a root
+ * `index.html`, or a static-site / web framework in its dependencies. Kept
+ * conservative (a UI *library* is not a site) — over-seeding SEO templates with
+ * TODOs is low-harm, but a false site would seed an irrelevant Pages workflow.
+ */
+function detectHasSite(rootNames: ReadonlyArray<string>, frameworkNames: ReadonlyArray<string>): boolean {
+  const root = new Set(rootNames.map((n) => n.toLowerCase()))
+  if (root.has("index.html")) return true
+  const siteFrameworks = new Set([
+    "vite", "next", "nuxt", "astro", "@docusaurus/core", "gatsby", "vitepress",
+    "@11ty/eleventy", "@sveltejs/kit", "remix", "solid-start",
+  ])
+  return frameworkNames.some((n) => siteFrameworks.has(n.toLowerCase()))
+}
+
+/**
+ * Detect the repo's PUBLIC final destination from root signals. Only assigns a
+ * specific destination on a CLEAR signal; genuinely ambiguous → "unknown" (the
+ * scaffold then seeds CI + Pages-if-site but NO publish workflow — a safe
+ * false-negative, never a wrong publish pipeline).
+ */
+function detectFinalDestination(args: {
+  packageJsonRaw: string | undefined
+  hasPackageJson: boolean
+  goMod: string | undefined
+  pyproject: string | undefined
+  cargoToml: string | undefined
+  rootNames: ReadonlyArray<string>
+  hasSite: boolean
+}): ScaffoldFinalDestination {
+  const root = new Set(args.rootNames.map((n) => n.toLowerCase()))
+  const has = (n: string): boolean => root.has(n.toLowerCase())
+  const raw = args.packageJsonRaw ?? ""
+  if (has("action.yml") || has("action.yaml")) return "actions-marketplace"
+  if (/"engines"\s*:\s*\{[^}]*"vscode"/.test(raw)) return "vscode-marketplace"
+  if (args.cargoToml !== undefined) return "crates"
+  if (args.pyproject !== undefined || has("setup.py")) return "pypi"
+  if (args.goMod !== undefined) return "go-proxy"
+  if (args.hasPackageJson) {
+    const isPrivate = /"private"\s*:\s*true/.test(raw)
+    const isPublishableLib = !isPrivate && /"(bin|exports|main|module)"\s*:/.test(raw)
+    if (args.hasSite) return "github-pages" // a site wins over a lib entry
+    if (isPublishableLib) return "npm"
+    if (has("dockerfile")) return "ghcr"
+    return "unknown"
+  }
+  if (has("dockerfile")) return "ghcr"
+  if (args.hasSite) return "github-pages"
+  return "unknown"
 }
 
 async function readFirstAvailableText(
@@ -1340,8 +1523,17 @@ function stringRecord(value: unknown): Record<string, string> {
 function parseScaffoldRepoArgs(args: Record<string, unknown>): ScaffoldRepoArgs {
   const parsed = ScaffoldRepoArgsSchema.safeParse(args)
   if (parsed.success) return parsed.data
+  throwSchemaError(parsed.error, "scaffold_repo")
+}
 
-  const issueSummary = parsed.error.issues
+function parseWriteStrategyArgs(args: Record<string, unknown>): WriteStrategyArgs {
+  const parsed = WriteStrategyArgsSchema.safeParse(args)
+  if (parsed.success) return parsed.data
+  throwSchemaError(parsed.error, "write_strategy")
+}
+
+function throwSchemaError(error: z.ZodError, toolName: string): never {
+  const issueSummary = error.issues
     .map((issue) => {
       const key = issue.path.length === 0 ? "arguments" : `arguments.${issue.path.join(".")}`
       return `${key}: ${issue.message}`
@@ -1349,7 +1541,7 @@ function parseScaffoldRepoArgs(args: Record<string, unknown>): ScaffoldRepoArgs 
     .join("; ")
   throw new FirstMateToolInputError(
     "INVALID_ARGUMENT",
-    issueSummary || "arguments must match the scaffold_repo schema",
+    issueSummary || `arguments must match the ${toolName} schema`,
   )
 }
 
@@ -1494,6 +1686,14 @@ function arrayOfObjectsProp(
     description,
     items: objectSchema(properties, required),
   }
+}
+
+function objectProp(
+  description: string,
+  properties: Record<string, unknown>,
+  required: Array<string>,
+): Record<string, unknown> {
+  return { ...objectSchema(properties, required), description }
 }
 
 function anyProp(description: string): Record<string, unknown> {

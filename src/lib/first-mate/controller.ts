@@ -26,7 +26,7 @@ import {
 } from "~/lib/agent/service"
 import {
   cancelTask as realCancelTask,
-  followUpTask as realFollowUpTask,
+  continueTaskOnBranch as realContinueTaskOnBranch,
   startTask as realStartTask,
 } from "~/lib/agent/tasks"
 import type { RepoRef as AgentRepoRef } from "~/lib/agent/types"
@@ -81,6 +81,7 @@ import {
   type ProviderState,
   type RepoRef,
   type UnitRow,
+  type VerifiedProgressKind,
 } from "~/lib/first-mate/types"
 
 export interface ControllerDeps {
@@ -102,7 +103,7 @@ export interface ControllerDeps {
   readDecisions: typeof realReadDecisions
   markAnswered: typeof realMarkAnswered
   startTask: typeof realStartTask
-  followUpTask: typeof realFollowUpTask
+  continueTaskOnBranch: typeof realContinueTaskOnBranch
   cancelTask: typeof realCancelTask
   createIssue: typeof realCreateIssue
   resolveAgentActor: typeof realResolveAgentActor
@@ -349,7 +350,7 @@ export const defaultDeps: ControllerDeps = {
   readDecisions: realReadDecisions,
   markAnswered: realMarkAnswered,
   startTask: realStartTask,
-  followUpTask: realFollowUpTask,
+  continueTaskOnBranch: realContinueTaskOnBranch,
   cancelTask: realCancelTask,
   createIssue: realCreateIssue,
   resolveAgentActor: realResolveAgentActor,
@@ -403,6 +404,8 @@ function unitHandle(unit: UnitRow): string {
  * identity (the solo operator's account may BE the router PAT).
  */
 const FM_REVIEW_SENTINEL = "first-mate-review:"
+const STALL_WAKES = 6
+const STALL_MS = 30 * 60_000
 
 function stampReviewSentinel(unit: UnitRow, body: string): string {
   const id = unit.id ?? unitHandle(unit)
@@ -615,6 +618,64 @@ function isTerminalProvider(provider: ProviderState): boolean {
     provider === "timed_out" ||
     provider === "cancelled"
   )
+}
+
+interface VerifiedProgressFact {
+  fingerprint: string
+  kind: VerifiedProgressKind
+}
+
+/** Portal-only progress identity. Provider state, phase, logs, and comments are excluded. */
+function verifiedProgressFact(unit: UnitRow, observed: Observed): VerifiedProgressFact | null {
+  const primary = primaryObservedPr(observed)
+  const merged = observed.prs.some((pr) => pr.state.toUpperCase() === "MERGED" || pr.merged === true)
+  const contentHead =
+    observed.changedFiles !== undefined && observed.changedFiles > 0 && primary?.headSha
+      ? `${primary.number}@${primary.headSha}`
+      : null
+  const ci = observed.ci?.rollup ?? "none"
+  const verifier = observed.verifierReviewed === true ? primary?.headSha ?? unit.headSha ?? "present" : null
+  const floor = observed.floor ?? (unit.validation === "floor_passed" ? "passed" : null)
+  const artifact = merged || unit.artifact === "pr_merged" ? "pr_merged" : null
+  const fingerprint = [
+    `content=${contentHead ?? "none"}`,
+    `ci=${ci}`,
+    `verifier=${verifier ?? "none"}`,
+    `floor=${floor ?? "none"}`,
+    `artifact=${artifact ?? "none"}`,
+  ].join("|")
+
+  if (artifact) return { fingerprint, kind: "merged" }
+  if (floor === "passed") return { fingerprint, kind: "floor_passed" }
+  if (verifier) return { fingerprint, kind: "verifier_review" }
+  if (ci === "passing") return { fingerprint, kind: "ci_passed" }
+  if (contentHead) return { fingerprint, kind: "content_head" }
+  return null
+}
+
+function noProgressReason(unit: UnitRow, observed: Observed): string {
+  if (unit.blockingDecisionId) return "waiting_for_user unanswered"
+  const primary = primaryObservedPr(observed)
+  if (primary) {
+    const ci = observed.ci?.rollup ?? "none"
+    return `PR #${primary.number} open, CI ${ci}, head unchanged`
+  }
+  const since = unit.verifiedProgress?.atMs ?? unit.lastSteer?.atMs
+  return `provider=${observed.provider}, no content-bearing head${since ? ` since ${new Date(since).toISOString()}` : " observed"}`
+}
+
+function recordVerifiedProgress(unit: UnitRow, observed: Observed, now = Date.now()): boolean {
+  const fact = verifiedProgressFact(unit, observed)
+  if (fact !== null && fact.fingerprint !== unit.verifiedProgress?.fingerprint) {
+    unit.verifiedProgress = { ...fact, atMs: now }
+    unit.noProgressWakes = 0
+    delete unit.lastNoProgressReason
+    return true
+  }
+  if (fact?.kind === "merged" || unit.artifact === "pr_merged") return false
+  unit.noProgressWakes = (unit.noProgressWakes ?? 0) + 1
+  unit.lastNoProgressReason = noProgressReason(unit, observed)
+  return false
 }
 
 function updateUnitFromObservedPrs(unit: UnitRow, observed: Observed): void {
@@ -903,8 +964,8 @@ async function applyModelAnswer(
         // so it leaves NO durable residue: a stale `unit.dispatch` with a
         // non-null taskId here would wedge the replay guard forever and silently
         // lose the drained review_plan approval. The per-answer catch handles it.
-        if (hasActiveBuildUnit(unit.missionId, units)) {
-          applied.push(`deferred build dispatch for ${unit.missionId}:${unitHandle(unit)}: another build is active`)
+        if (!canDispatchBuild(unit, mission, units)) {
+          applied.push(`deferred build dispatch for ${unit.missionId}:${unitHandle(unit)}: concurrency cap or overlapping file scope with an active build`)
           return
         }
         const model = resolveCloudAgentModel(unit.model ?? mission.defaultModel)
@@ -1052,12 +1113,59 @@ async function applyModelAnswer(
     applied.push(`sent fix instruction for ${unit.missionId}:${unitHandle(unit)}`)
   } else if (kind === "answer_agent_question") {
     const answerText = stringValue(verdict.answer)
-    // The agent surfaces questions in its PR thread; answer there via a comment.
-    if (answerText !== undefined && unit.pr !== null) {
-      await assertFenceHeld("agent-question comment")
-      await deps.postComment(repo, unit.pr, answerText)
-      unit.lastSteer = { sha: unit.headSha ?? undefined, atMs: Date.now() }
-      applied.push(`answered agent question for ${unit.missionId}:${unitHandle(unit)}`)
+    if (answerText !== undefined) {
+      if (unit.pr !== null) {
+        // A PR exists → answer with an @copilot MENTION, the documented trigger
+        // that actually wakes the cloud agent (a bare comment does not reliably
+        // re-trigger it). `waiting_for_user` re-emits answer_agent_question every
+        // wake, so guard one-outstanding-answer-per-head (mirrors author_fix's
+        // copilotMentionSha guard, dedicated field): suppress a duplicate mention
+        // while the head is unchanged; a fresh head (agent acted / asked anew)
+        // allows a new answer.
+        const currentHead = unit.headSha ?? undefined
+        const answerOutstanding =
+          unit.answerMentionSha != null &&
+          currentHead != null &&
+          unit.answerMentionSha === currentHead
+        if (!answerOutstanding) {
+          await assertFenceHeld("agent-question mention")
+          await deps.mentionCopilot(repo, unit.pr, answerText)
+          unit.answerMentionSha = currentHead ?? null
+          unit.lastSteer = { sha: currentHead, atMs: Date.now() }
+          applied.push(`answered agent question via @copilot for ${unit.missionId}:${unitHandle(unit)}`)
+        }
+      } else if (unit.branch != null && unit.branch.length > 0) {
+        // No PR yet (a plan-mode / pre-PR block — the common case the user hit).
+        // The Agent-Tasks task is one-shot with no follow-up endpoint; the
+        // documented way to give it new input is a re-POST bound to the agent's
+        // existing branch (head_ref), which starts a fresh session on that branch.
+        // Resolve the model best-effort: an invalid PINNED model must not wedge
+        // this unit in an infinite re-enqueue loop (delivery is best-effort), so
+        // fall back to the provider default rather than throwing. Setting the new
+        // taskId + provider breaks the waiting_for_user re-emit; the Idempotency-Key
+        // dedupes a retry of the SAME continue (e.g. if the taskId persist fails).
+        const mission = missions.find((entry) => entry.id === unit.missionId)
+        let model: string | undefined
+        try {
+          model = resolveCloudAgentModel(unit.model ?? mission?.defaultModel)
+        } catch {
+          model = undefined
+        }
+        await assertFenceHeld("agent-question task-continue")
+        const task = await deps.continueTaskOnBranch(repo, {
+          headRef: unit.branch,
+          baseRef: unit.baseRef ?? undefined,
+          prompt: answerText,
+          model,
+          idempotencyKey: `continue:${unit.id ?? unitHandle(unit)}:${unit.taskId ?? "none"}`,
+        })
+        unit.taskId = task.taskId
+        unit.provider = providerState(task.state, "in_progress")
+        unit.lastSteer = { atMs: Date.now() }
+        applied.push(`answered agent question via task-continue for ${unit.missionId}:${unitHandle(unit)}`)
+      }
+      // else: no PR and no branch yet (pure early research phase) — leave for the
+      // next wake's re-emit, or the task timeout to terminalize.
     }
   } else if (kind === "judge_review") {
     // Only a unit the engine actually placed into verification can receive a
@@ -1329,6 +1437,14 @@ function hasDependsOnCycle(rawUnits: unknown[]): boolean {
   return false
 }
 
+/** Parse a unit spec's `fileScopes` into a clean string[] (non-string/blank dropped). */
+function parseFileScopes(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+    .map((s) => s.trim())
+}
+
 /**
  * Turn a model `decompose` answer into queued units. This is the mission→units
  * step: `start_mission` only registers the mission; `advance` emits one
@@ -1400,6 +1516,7 @@ export async function addUnitsToMission(
     const dependsOn = dependsOnIndices(spec, rawIndex, validIndices)
       .map((idx) => idByRawIndex.get(idx))
       .filter((id): id is string => id !== undefined)
+    const fileScopes = parseFileScopes(spec.fileScopes)
     const unit: UnitRow = {
       id,
       missionId: mission.id,
@@ -1421,6 +1538,7 @@ export async function addUnitsToMission(
       goalHash,
       dependsOn,
       title,
+      ...(fileScopes.length > 0 ? { fileScopes } : {}),
     }
     await deps.upsertUnit(repo, unit)
     created += 1
@@ -1546,6 +1664,48 @@ async function maybeMergeWithApproval(
   applied.push(`merged ${repoLabel(unit.repo)}#${live.number}`)
   await deps.upsertUnit(unit.repo, unit)
   return true
+}
+
+async function createMissionStallRequest(
+  mission: Mission,
+  liveUnits: UnitRow[],
+  reason: string,
+  fingerprint: string,
+  deps: ControllerDeps,
+): Promise<HumanRequest> {
+  const representative = liveUnits[0]!
+  const decisionKey = `mission:${mission.id}:stall:${fingerprint}`
+  const existing = await deps.findByKey(decisionKey)
+  let record = existing?.status === "pending" ? existing : undefined
+  let packetHtmlPath: string | undefined
+  if (record === undefined) {
+    const observed: Observed = { provider: representative.provider, prs: [] }
+    const packet = deps.buildDecisionPacket(
+      packetInput(representative, mission, observed, reason, "human_decision"),
+    )
+    packetHtmlPath = await deps.writeDecisionPacketHtml(packet.packetId, packet.html)
+    record = {
+      decisionId: packet.decisionId,
+      decisionKey,
+      type: "human_decision",
+      status: "pending",
+      packetId: packet.packetId,
+      inputFingerprint: fingerprint,
+      options: decisionOptions("human_decision").map((option) => ({ id: option.id })),
+      createdMs: Date.now(),
+    }
+    await deps.upsertDecision(record)
+  }
+  return {
+    requestId: decisionKey,
+    decisionId: record.decisionId,
+    missionId: mission.id,
+    repo: representative.repo,
+    issue: null,
+    pr: null,
+    reason,
+    ...(packetHtmlPath !== undefined ? { packetHtmlPath } : {}),
+  }
 }
 
 async function createHumanRequest(
@@ -1843,12 +2003,13 @@ async function observeBlockedUnit(
   unit: UnitRow,
   deps: ControllerDeps,
   applied: string[],
-): Promise<void> {
+): Promise<boolean> {
   const decisionId = unit.blockingDecisionId
-  if (!decisionId) return
+  if (!decisionId) return false
 
   const observed = await deps.observeUnit(unit)
   updateUnitFromObservedPrs(unit, observed)
+  const progressed = recordVerifiedProgress(unit, observed)
   unit.lastCheckedMs = Date.now()
 
   const mutation = observed.externalMutation
@@ -1929,6 +2090,7 @@ async function observeBlockedUnit(
   }
 
   await deps.upsertUnit(unit.repo, unit)
+  return progressed
 }
 
 /**
@@ -2023,11 +2185,45 @@ async function executeAction(
   needsHuman: QueuedRequest<HumanRequest>[],
   applied: string[],
   order: number,
+  renewLease?: () => Promise<boolean>,
 ): Promise<void> {
   void policy
   switch (action.kind) {
     case "dispatch":
       return
+    case "retry_plan": {
+      const repo = agentRepo(unit.repo)
+      const model = resolveCloudAgentModel(unit.model ?? mission.defaultModel)
+      const dateStr = unit.artifactDateStr ?? artifactDate(Date.now())
+      unit.artifactDateStr = dateStr
+      // Consume the bounded retry BEFORE dispatchWithOutbox persists its intent,
+      // so a crash after the side effect cannot grant an extra retry on recovery.
+      unit.planRetries = (unit.planRetries ?? 0) + 1
+      const task = await dispatchWithOutbox(
+        unit,
+        deps,
+        ({ idempotencyKey, promptTag }) =>
+          deps.startTask(repo, {
+            prompt: planPrompt(unit, mission, dateStr) + promptTag,
+            model,
+            createPullRequest: false,
+            idempotencyKey,
+          }),
+        renewLease,
+        (started) => {
+          unit.provider = providerState(started.state, "queued")
+          unit.phase = "plan"
+          unit.dispatchMode = "plan"
+          unit.blockingDecisionId = null
+          unit.implementerLab = unit.agent
+          unit.lastSteer = { atMs: Date.now() }
+        },
+      )
+      if (task) {
+        applied.push(`retried plan task for ${unit.missionId}:${unitHandle(unit)}`)
+      }
+      return
+    }
     case "steer":
       consola.debug("first-mate controller received direct steer action; v1 skips it")
       return
@@ -2120,9 +2316,12 @@ function isUndispatched(unit: UnitRow): boolean {
   return unit.provider === "none" && unit.taskId === null && unit.dispatch === undefined
 }
 
-/** A dispatch that was interrupted mid-flight (intent persisted, no taskId yet). */
+/**
+ * A dispatch interrupted mid-flight. Successor dispatches retain the prior taskId
+ * until the new task is confirmed, so the durable intent itself is the signal.
+ */
 function isDispatchInterrupted(unit: UnitRow): boolean {
-  return unit.dispatch !== undefined && unit.taskId === null
+  return unit.dispatch !== undefined
 }
 
 function isActiveMissionUnit(unit: UnitRow, missions: Map<string, Mission>): boolean {
@@ -2170,14 +2369,69 @@ function activeCountsByAgent(units: UnitRow[]): Map<AgentKey, number> {
   return counts
 }
 
-function hasActiveBuildUnit(missionId: string, units: UnitRow[]): boolean {
-  return units.some(
+function activeBuildUnits(missionId: string, units: UnitRow[]): UnitRow[] {
+  return units.filter(
     (unit) =>
       unit.missionId === missionId &&
       unit.dispatchMode === "build" &&
       unit.terminal !== true &&
       (unit.provider !== "none" || unit.taskId !== null || unit.dispatch !== undefined),
   )
+}
+
+/**
+ * Normalize a declared file-scope entry to a comparable path prefix: collapse
+ * backslashes, strip a leading `./`, and — because ANY glob metacharacter (`*`,
+ * `?`, `[`, `{`) makes the matched set unbounded — collapse the scope to the
+ * PARENT DIRECTORY of its first glob segment (`src/*.ts` → `src`, `src/f?.ts` →
+ * `src`, `*.ts`/`{a,b}/**` → `` = whole repo). This over-approximates (it can
+ * over-serialize) but NEVER declares two globby scopes falsely disjoint. A
+ * whole-repo scope (`""`, `.`, `/`, or a root-level glob) overlaps everything.
+ * Case is preserved — paths are case-sensitive on the primary Linux CI.
+ */
+function normalizeScope(raw: string): string {
+  let s = raw.trim().replace(/\\/g, "/").replace(/^\.\//, "")
+  const glob = s.search(/[*?{[]/)
+  if (glob !== -1) {
+    const lastSlash = s.lastIndexOf("/", glob)
+    s = lastSlash === -1 ? "" : s.slice(0, lastSlash)
+  }
+  s = s.replace(/^\.$/, "").replace(/\/+$/, "")
+  return s
+}
+
+/** Two single scopes overlap when equal, or one is a directory-prefix of the other. */
+function scopesOverlap(a: string, b: string): boolean {
+  if (a === "" || b === "") return true // whole-repo scope overlaps everything
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)
+}
+
+/**
+ * Two file-scope LISTS are PROVABLY disjoint only when BOTH are non-empty and no
+ * pair of entries overlaps. Absent/empty → NOT disjoint (unknown scope → caller
+ * must serialize; the safe, pre-existing behavior).
+ */
+function fileScopesDisjoint(a: string[] | undefined, b: string[] | undefined): boolean {
+  if (a === undefined || b === undefined || a.length === 0 || b.length === 0) return false
+  const na = a.map(normalizeScope)
+  const nb = b.map(normalizeScope)
+  return na.every((x) => nb.every((y) => !scopesOverlap(x, y)))
+}
+
+/**
+ * Concurrent-build gate. A mission serializes builds by default (one active build
+ * per mission — avoids racing PRs on overlapping files). A candidate build may run
+ * CONCURRENTLY with the mission's other active builds only when independence is
+ * PROVEN: under the per-mission `maxConcurrentBuilds` cap AND its declared
+ * `fileScopes` are non-empty and disjoint from EVERY other active build's scopes.
+ * Unknown or overlapping scope → serialize. Dependency ordering is gated
+ * separately by `depsSatisfied`, so this only governs concurrency among ready units.
+ */
+function canDispatchBuild(candidate: UnitRow, mission: Mission, units: UnitRow[]): boolean {
+  const active = activeBuildUnits(mission.id, units).filter((u) => u !== candidate)
+  if (active.length === 0) return true // first active build in the mission
+  if (active.length >= maxConcurrentBuildsOf(mission)) return false
+  return active.every((other) => fileScopesDisjoint(candidate.fileScopes, other.fileScopes))
 }
 
 /** Default plan-review gate for a mission (absent → the hard, current flow). */
@@ -2192,6 +2446,13 @@ function planGateOf(mission: Mission | undefined): "hard" | "soft" {
  */
 const DEFAULT_MAX_FIX_CYCLES = 12
 const DEFAULT_MAX_COPILOT_COMMENTS = 8
+/**
+ * Default per-mission concurrent-build cap. Builds still serialize unless the
+ * units prove disjoint `fileScopes`, so this only bounds parallelism among
+ * provably-independent units; a mission without declared scopes behaves exactly
+ * as before (one active build at a time).
+ */
+const DEFAULT_MAX_CONCURRENT_BUILDS = 4
 
 function maxFixCyclesOf(mission: Mission): number {
   const value = mission.maxFixCycles
@@ -2205,6 +2466,13 @@ function maxCopilotCommentsOf(mission: Mission): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1
     ? value
     : DEFAULT_MAX_COPILOT_COMMENTS
+}
+
+function maxConcurrentBuildsOf(mission: Mission): number {
+  const value = mission.maxConcurrentBuilds
+  return typeof value === "number" && Number.isInteger(value) && value >= 1
+    ? value
+    : DEFAULT_MAX_CONCURRENT_BUILDS
 }
 
 /** Format an epoch-ms timestamp as a UTC `YYYY-MM-DD` date for artifact paths. */
@@ -2233,6 +2501,15 @@ function unitIdInstruction(unit: UnitRow): string {
   return `Controller correlation marker: ${marker}. The Agent-Tasks API has no branch/label field, so this is cooperative: include this exact marker in the branch name if possible, put it on its own line in the PR body, and include it in the first commit message trailer.`
 }
 
+/**
+ * Prevention layer for plan-mode stalls: the documented lever to keep a Copilot
+ * cloud agent from parking in `waiting_for_user` is to instruct it to proceed on
+ * best judgment and record assumptions instead of pausing to ask. Included in
+ * every dispatch prompt; mirrored in scaffolded repo guidance.
+ */
+const AUTONOMY_DIRECTIVE =
+  "Work autonomously: do not stop to ask clarifying questions. If a requirement is ambiguous, choose the most reasonable interpretation, state the assumption explicitly (in the plan and the pull request description), and continue. Surface open questions as notes rather than blocking on them."
+
 export function planPrompt(unit: UnitRow, mission: Mission, dateStr: string): string {
   const slug = artifactSlug(unit)
   const parts = [
@@ -2244,6 +2521,7 @@ export function planPrompt(unit: UnitRow, mission: Mission, dateStr: string): st
     `Persist your work as durable artifacts committed on the branch: write your research and findings to \`docs/research/${dateStr}-${slug}.md\` and your step-by-step implementation plan to \`docs/plans/${dateStr}-${slug}.md\`. Create the \`docs/research\` and \`docs/plans\` directories if they do not exist, and commit both files on the branch so the implementation task can read them.`,
   ]
   if (mission.houseRules !== undefined) parts.splice(2, 0, `House rules:\n${mission.houseRules}`)
+  parts.push(AUTONOMY_DIRECTIVE)
   parts.push(renderDod([mission.acceptanceCriteria]))
   return parts.join("\n\n")
 }
@@ -2275,6 +2553,7 @@ export function buildPrompt(unit: UnitRow, mission: Mission, dateStr: string): s
       ? `If a committed implementation plan for this unit is present (\`docs/plans/${dateStr}-${slug}.md\`, or a file under \`docs/plans/\` whose name ends with \`-${slug}.md\`) and the research at \`docs/research/${dateStr}-${slug}.md\`, read them for extra detail — but the approved plan above is authoritative and does not depend on those files existing. Keep any such artifacts up to date with deviations you make, and if a \`LEARNINGS.md\` exists at the repository root, append a dated entry summarizing what you learned.`
       : `Read the committed implementation plan at \`docs/plans/${dateStr}-${slug}.md\` and the research at \`docs/research/${dateStr}-${slug}.md\` (if the exact dated filename is absent, locate the plan committed for this unit under \`docs/plans/\` whose name ends with \`-${slug}.md\`) and implement it. Keep those artifacts up to date with any deviations you make, and if a \`LEARNINGS.md\` exists at the repository root, append a dated entry summarizing what you learned.`,
   )
+  parts.push(AUTONOMY_DIRECTIVE)
   parts.push(renderDod([mission.acceptanceCriteria]))
   return parts.join("\n\n")
 }
@@ -2307,6 +2586,7 @@ async function dispatchWithOutbox(
   deps: ControllerDeps,
   start: (c: { idempotencyKey: string; promptTag: string }) => Promise<{ taskId: string; state: string }>,
   renewLease?: () => Promise<boolean>,
+  applySuccess?: (task: { taskId: string; state: string }) => void,
 ): Promise<{ taskId: string; state: string } | null> {
   // #3 (replay guard) — a dispatch intent already persisted means a startTask
   // may already be in flight (or a prior wake was interrupted mid-dispatch).
@@ -2338,13 +2618,15 @@ async function dispatchWithOutbox(
       `first-mate: drive lease renewal failed before dispatch side effect for ${unit.missionId}:${unitHandle(unit)} — aborting`,
     )
   }
-  // A fresh dispatch is always attempt 1: the guard above returns early when a
-  // prior intent exists (recovery, not a re-dispatch, resolves that), so we never
-  // bump the counter here.
-  const attempt = 1
+  // A genuine successor/retry gets the next durable attempt number. Back-compat:
+  // an existing task with no counter is attempt 1, while an undispatched unit is 0.
+  // Pending-intent replay returned above, so it never increments this counter and
+  // keeps the same key.
+  const attempt = (unit.dispatchAttempts ?? (unit.taskId ? 1 : 0)) + 1
   const key = dispatchIdempotencyKey(unit, attempt)
+  unit.dispatchAttempts = attempt
   unit.dispatch = { id: key, requestedMs: Date.now(), attempts: attempt }
-  await deps.upsertUnit(unit.repo, unit) // persist intent BEFORE the side effect (hard stop if this throws)
+  await deps.upsertUnit(unit.repo, unit) // persist attempt + intent BEFORE the side effect
   // Durable outbox: record the intent before the irreversible startTask. If a
   // crash lands between startTask and clearing the intent, RECOVERY is the
   // isDispatchInterrupted escalation (persisted intent + no taskId → surfaced to
@@ -2379,6 +2661,7 @@ async function dispatchWithOutbox(
   // unit back to isUndispatched and risk a double dispatch.
   unit.taskId = task.taskId
   unit.dispatch = undefined
+  applySuccess?.(task)
   await deps.upsertUnit(unit.repo, unit)
   await deps.dispatchOutbox?.markDone(key)
   return task
@@ -2461,7 +2744,7 @@ async function dispatchWave(
     if (current >= maxInFlightPerProvider) continue
     const mission = missions.get(unit.missionId)
     if (mission === undefined) continue
-    if (unit.dispatchMode === "build" && hasActiveBuildUnit(unit.missionId, allCountUnits)) {
+    if (unit.dispatchMode === "build" && !canDispatchBuild(unit, mission, allCountUnits)) {
       continue
     }
 
@@ -2745,6 +3028,8 @@ export async function advance(
     // (soft plan-gate rejections push needsHuman before the sweep) so ordering
     // stays monotonic and answer-phase requests never collide with sweep ones.
     let order = needsHuman.length
+    const progressedMissionIds = new Set<string>()
+    const observedUnits = new Set<UnitRow>()
 
     // Start-of-drive reconciliation: clear stale blocks, answer pending
     // decisions on terminal units, warn on orphaned consumed approvals. Best
@@ -2764,7 +3049,10 @@ export async function advance(
       // wedging the unit forever. It never runs classify/executeAction.
       if (unit.blockingDecisionId) {
         try {
-          await observeBlockedUnit(unit, deps, applied)
+          observedUnits.add(unit)
+          if (await observeBlockedUnit(unit, deps, applied)) {
+            progressedMissionIds.add(unit.missionId)
+          }
         } catch (err) {
           consola.warn(
             `first-mate: blocked unit ${unit.missionId}:${unitHandle(unit)} observe failed:`,
@@ -2803,7 +3091,20 @@ export async function advance(
         }
 
         const observed = await deps.observeUnit(unit)
+        observedUnits.add(unit)
+        // Preserve the pre-observation PR identity for the existing empty-PR guard,
+        // then record portal-verified progress before any provider/phase classify.
+        const prevEmptyState = {
+          headSha: unit.headSha ?? null,
+          baseRef: unit.baseRef ?? null,
+          isDraft: unit.prIsDraft,
+        }
+        updateUnitFromObservedPrs(unit, observed)
+        if (recordVerifiedProgress(unit, observed)) progressedMissionIds.add(unit.missionId)
+        unit.lastCheckedMs = Date.now()
         if (await reconcileObservedPrState(unit, observed, deps, applied)) {
+          if (recordVerifiedProgress(unit, observed)) progressedMissionIds.add(unit.missionId)
+          await deps.upsertUnit(unit.repo, unit)
           continue
         }
         if (shouldEscalateOpenUncorrelated(unit, observed, scopedUnits)) {
@@ -2822,16 +3123,6 @@ export async function advance(
           continue
         }
         const evidence = await fillFuzzyFields(unit, mission, observed, deps)
-        // #12: snapshot the progress-signal state BEFORE updateUnitFromObservedPrs
-        // overwrites it (and BEFORE classify reassigns unit.provider), so the
-        // empty-PR guard can reset its counter on any progress since last wake.
-        const prevEmptyState = {
-          headSha: unit.headSha ?? null,
-          baseRef: unit.baseRef ?? null,
-          isDraft: unit.prIsDraft,
-        }
-        updateUnitFromObservedPrs(unit, observed)
-        unit.lastCheckedMs = Date.now()
 
         // A2 signature-reset: reset the per-failure retry counter only when the
         // blocking failure fingerprint CHANGES (genuine progress on a new
@@ -2854,6 +3145,8 @@ export async function advance(
         }
 
         if (await maybeMergeWithApproval(unit, observed, evidence, deps, applied)) {
+          if (recordVerifiedProgress(unit, observed)) progressedMissionIds.add(unit.missionId)
+          await deps.upsertUnit(unit.repo, unit)
           continue
         }
 
@@ -2941,6 +3234,7 @@ export async function advance(
           needsHuman,
           applied,
           requestOrder,
+          input.renewLease,
         )
         await deps.upsertUnit(unit.repo, unit)
       } catch (err) {
@@ -2950,6 +3244,67 @@ export async function advance(
         )
         applied.push(`error advancing ${unit.missionId}:${unitHandle(unit)}: ${errText(err)}`)
       }
+    }
+
+    // Mission watchdog: aggregate unit-level portal progress into one loud,
+    // deduplicated human escalation. Provider activity alone never resets it.
+    for (const mission of scopedMissions) {
+      if (mission.status !== "active") continue
+      const liveUnits = scopedUnits.filter(
+        (unit) => unit.missionId === mission.id && unit.terminal !== true,
+      )
+      if (liveUnits.length === 0 || liveUnits.some((unit) => !observedUnits.has(unit))) continue
+
+      const now = Date.now()
+      if (progressedMissionIds.has(mission.id)) {
+        mission.noProgressWakes = 0
+        delete mission.stallSinceMs
+        delete mission.stallEscalatedFingerprint
+        mission.updatedMs = now
+        await upsertMissionDurable(mission, deps)
+        continue
+      }
+
+      mission.noProgressWakes = (mission.noProgressWakes ?? 0) + 1
+      mission.stallSinceMs ??= now
+      mission.updatedMs = now
+      const stalledSet = liveUnits
+        .map((unit) => `${unitHandle(unit)}:${unit.provider}:${unit.lastNoProgressReason ?? "no verified progress"}`)
+        .sort()
+      const stallFingerprint = digest(stalledSet.join("|"))
+      const oldEnough = now - mission.stallSinceMs >= STALL_MS
+      const impossible =
+        mission.noProgressWakes >= STALL_WAKES &&
+        liveUnits.every((unit) => unit.provider === "in_progress" && unit.pr === null)
+      if (
+        mission.noProgressWakes >= STALL_WAKES &&
+        (oldEnough || impossible) &&
+        mission.stallEscalatedFingerprint !== stallFingerprint
+      ) {
+        const ageMinutes = Math.max(0, Math.floor((now - mission.stallSinceMs) / 60_000))
+        const diagnosis = liveUnits
+          .map(
+            (unit) =>
+              `${unitHandle(unit)} [provider=${unit.provider}]: ${unit.lastNoProgressReason ?? "no verified progress"}`,
+          )
+          .join("; ")
+        const reason =
+          `mission is not progressing toward merge after ${mission.noProgressWakes} wakes ` +
+          `(${ageMinutes}m): ${diagnosis}`
+        needsHuman.push({
+          request: await createMissionStallRequest(
+            mission,
+            liveUnits,
+            reason,
+            stallFingerprint,
+            deps,
+          ),
+          sortKey: Math.min(...liveUnits.map(sortKey)),
+          order: order++,
+        })
+        mission.stallEscalatedFingerprint = stallFingerprint
+      }
+      await upsertMissionDurable(mission, deps)
     }
 
     // Back-compat completion pass: once a mission has actually decomposed, a later
@@ -2962,6 +3317,23 @@ export async function advance(
       if (scopedUnits.some((unit) => unit.missionId === mission.id && isActiveUnit(unit, missionsById))) continue
       if (scopedUnits.some((unit) => unit.missionId === mission.id && Boolean(unit.blockingDecisionId))) continue
       if (hasQueuedRequestForMission(mission.id, needsModel, needsHuman)) continue
+      // Complete == MERGED. A mission is done ONLY when every task reached a merged
+      // PR. A terminal unit that never merged (failed / abandoned / closed) means the
+      // mission did NOT complete — never silently flip it to `done` (the false-success
+      // trap where a 0%-productive fleet reads as "shipped"). Leave it honestly active
+      // and not-done; the stall watchdog surfaces it as needing a decision.
+      const unmergedTerminal = scopedUnits.filter(
+        (unit) =>
+          unit.missionId === mission.id &&
+          unit.terminal === true &&
+          unit.artifact !== "pr_merged",
+      )
+      if (unmergedTerminal.length > 0) {
+        applied.push(
+          `mission ${mission.id} NOT completed: ${unmergedTerminal.length} unit(s) ended without a merge — done requires every unit merged`,
+        )
+        continue
+      }
       mission.status = "done"
       mission.updatedMs = Date.now()
       await upsertMissionDurable(mission, deps)

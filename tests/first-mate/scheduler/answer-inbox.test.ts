@@ -195,7 +195,7 @@ function fakeDeps(
     recordApproval: boom("recordApproval"),
     upsertDecision: boom("upsertDecision"),
     startTask: boom("startTask"),
-    followUpTask: boom("followUpTask"),
+    continueTaskOnBranch: boom("continueTaskOnBranch"),
     cancelTask: boom("cancelTask"),
     createIssue: boom("createIssue"),
     resolveAgentActor: boom("resolveAgentActor"),

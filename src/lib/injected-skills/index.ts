@@ -6,6 +6,8 @@
  * `docs/floor-raising-agent-surface.md`.
  */
 
+import { FIRST_MATE_CONDUCT_SKILL } from "./first-mate-conduct-skill"
+import { FIRST_MATE_OPERATE_SKILL } from "./first-mate-operate-skill"
 import { FIRST_MATE_SETUP_SKILL } from "~/lib/injected-skills/first-mate-setup-skill"
 import { FIRST_MATE_SKILL } from "./first-mate-skill"
 import { FLOOR_KEEPER_SKILL } from "./floor-keeper-skill"
@@ -14,6 +16,8 @@ import { RESEARCH_SKILL } from "./research-skill"
 import { WORKER_SKILL } from "./worker-skill"
 
 export { ARTIFACT_REVIEW_SKILL } from "./artifact-review-skill"
+export { FIRST_MATE_CONDUCT_SKILL } from "./first-mate-conduct-skill"
+export { FIRST_MATE_OPERATE_SKILL } from "./first-mate-operate-skill"
 export { FIRST_MATE_SETUP_SKILL } from "~/lib/injected-skills/first-mate-setup-skill"
 export { FIRST_MATE_SKILL } from "./first-mate-skill"
 export { writeInjectedSkill, type WriteInjectedSkillResult } from "./write"
@@ -33,4 +37,6 @@ export const INJECTED_SKILLS: ReadonlyArray<InjectedSkill> = [
   WORKER_SKILL,
   FIRST_MATE_SKILL,
   FIRST_MATE_SETUP_SKILL,
+  FIRST_MATE_OPERATE_SKILL,
+  FIRST_MATE_CONDUCT_SKILL,
 ]
