@@ -38,6 +38,7 @@ import {
   writeColbertMeta,
   type ColbertMeta,
 } from "./index-store"
+import { ensureIgnoreMirror } from "./ignore-mirror"
 import { getColbertInstanceUuid, trackChild } from "./lifecycle"
 import { MODEL_ID, MODEL_REVISION } from "./manifest"
 import {
@@ -661,8 +662,10 @@ async function runInit(workspace: string): Promise<void> {
   }
   // Capture git state at index start so the freshness verdict has a
   // baseline (best-effort; non-git workspaces leave these undefined).
+  let startIsRepo = false
   try {
     const g = await gitState(workspace)
+    startIsRepo = g.isRepo
     if (g.isRepo) {
       baseMeta.lastIndexedHead = g.head
       baseMeta.lastIndexedDirty = g.dirty
@@ -671,6 +674,15 @@ async function runInit(workspace: string): Promise<void> {
     // ignore
   }
   await writeColbertMeta(baseMeta).catch(() => {})
+
+  // colgrep reads `.gitignore` ONLY inside a git repo. For a NON-git
+  // workspace (e.g. an extracted tarball / SVN|hg checkout), mirror its
+  // `.gitignore` into `.ignore` — which colgrep honors unconditionally —
+  // so build output / deps stay out of the index here too, language-
+  // agnostically. Git repos are untouched. Best-effort; never blocks.
+  if (!startIsRepo) {
+    await ensureIgnoreMirror(workspace)
+  }
 
   const args = [
     "init",
