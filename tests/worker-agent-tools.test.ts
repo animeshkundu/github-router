@@ -1684,6 +1684,23 @@ describe("buildWorkerTools", () => {
     }
   })
 
+  test("bash description steers to dedicated tools; fetch_url drops stale peer_review ref", () => {
+    const tools = buildWorkerTools({
+      mode: "implement",
+      workspace: realpathSync.native(os.tmpdir()),
+    })
+    const bash = tools.find((t) => t.name === "bash")!
+    expect(bash.description).toContain("dedicated tools")
+    expect(bash.description).toContain("one-off script")
+    // The positive carve-out is load-bearing: without it a worker could
+    // refuse to run builds/tests in bash.
+    expect(bash.description.toLowerCase()).toContain("reserve bash")
+    const fetchUrl = tools.find((t) => t.name === "fetch_url")!
+    // peer_review is not in the worker surface — the description must not
+    // point the model at a tool it doesn't have.
+    expect(fetchUrl.description).not.toContain("peer_review")
+  })
+
   test("workspace is captured by closure (per-call independence)", () => {
     const w1 = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "w1-")))
     const w2 = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "w2-")))

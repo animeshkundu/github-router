@@ -285,12 +285,12 @@ describe("systemPromptFor", () => {
   test("plan/test prompts stay short — no prescriptive task advice", () => {
     // Sanity bound (see the explore/implement test above). `plan` is a
     // read-only block + a one-line role frame, so it stays under 2000 like
-    // `review`. `test` is the only mode carrying BOTH the write-tool
-    // inventory AND a role frame, so it runs a little longer — still just a
-    // security boundary + brief capability inventory + one role line, not a
-    // style guide.
+    // `review`. `test` carries the write-tool inventory AND a role frame AND
+    // the `bash` prefer-native steer, so it runs the longest — still just a
+    // security boundary + capability inventory + one role line + a tool-choice
+    // steer, not a style guide.
     expect(systemPromptFor("plan").length).toBeLessThan(2000)
-    expect(systemPromptFor("test").length).toBeLessThan(2300)
+    expect(systemPromptFor("test").length).toBeLessThan(2600)
   })
 })
 

@@ -107,18 +107,38 @@ describe("systemPromptFor", () => {
     expect(systemPromptFor("review")).toBe(systemPromptFor("review"))
   })
 
-  test("byte cap holds — no mode exceeds ~2000 bytes", () => {
-    // Re-derived after the descriptive rewrite. The prompt is sent
-    // on every worker invocation, so the cap is real budget pressure.
-    // If a future tightening shaves bytes, lower this cap too. `review`
-    // is the LARGEST mode (reviewer role frame + the full read-only tool
-    // list), so it's the one closest to the cap — assert it explicitly.
+  test("byte cap holds — read-only < 2000B, implement < 2300B, test < 2700B", () => {
+    // The prompt is sent on every worker invocation, so the cap is real
+    // budget pressure. If a future tightening shaves bytes, lower these caps
+    // too. Read-only modes (explore/review/plan) carry only the read-tool
+    // list; `review` is the largest of those (reviewer role frame + full read
+    // list), so it's closest to the 2000B cap — assert it explicitly. Write
+    // modes (implement/test) additionally carry the write-tool list plus the
+    // `bash` tool-choice steer; `test` also carries a role frame, making it the
+    // largest prompt, so it gets the highest cap — and a BYTE cap (not only the
+    // char cap in worker-agent-foundations.test.ts) so a future multibyte
+    // addition to WRITE_TOOL_NOTES is caught on the dimension that costs wire.
     const exploreBytes = Buffer.byteLength(systemPromptFor("explore"), "utf8")
     const reviewBytes = Buffer.byteLength(systemPromptFor("review"), "utf8")
+    const planBytes = Buffer.byteLength(systemPromptFor("plan"), "utf8")
     const implBytes = Buffer.byteLength(systemPromptFor("implement"), "utf8")
+    const testBytes = Buffer.byteLength(systemPromptFor("test"), "utf8")
     expect(exploreBytes).toBeLessThan(2000)
     expect(reviewBytes).toBeLessThan(2000)
-    expect(implBytes).toBeLessThan(2000)
+    expect(planBytes).toBeLessThan(2000)
+    expect(implBytes).toBeLessThan(2300)
+    expect(testBytes).toBeLessThan(2700)
+  })
+
+  test("implement/test carry the prefer-native bash steer; read-only modes don't", () => {
+    // The steer lives on the `bash` bullet (WRITE_TOOL_NOTES), so only the
+    // write-capable modes get it; read-only modes have no shell to steer.
+    for (const mode of ["implement", "test"] as const) {
+      expect(systemPromptFor(mode)).toContain("one-off script")
+    }
+    for (const mode of ["explore", "review", "plan"] as const) {
+      expect(systemPromptFor(mode)).not.toContain("one-off script")
+    }
   })
 
   test("framing constraint — no imperatives, no hedges, no anchors", () => {
