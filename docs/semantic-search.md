@@ -145,6 +145,18 @@ tracking + cancellation + boot/exit sweep, not keep-alive:
 | "auth middleware", "retry/backoff around the upstream fetch" | `mode: "semantic"` (default) |
 | "async fns ranked by error handling" (regex-narrow then rank) | `mode: "semantic"` `pattern` pre-filter |
 
+## Index scope (what gets indexed)
+
+Indexing is **source + config only, language-agnostically**, and this is driven by colgrep's own behavior plus the repo's own ignore files — not a curated per-language list. Empirically verified against the colgrep binary (probe: index a repo, read colgrep's `state.json` manifest):
+
+- colgrep indexes only **recognized source + text/config types** (tree-sitter code grammars + md/yaml/json/toml/txt/Dockerfile/Makefile/…); unknown-extension data blobs and binaries are skipped.
+- It skips **hidden dot-dirs** and its built-in defaults (`node_modules`, `.git`, `target`, `vendor`, `build`).
+- **Inside a git repo it honors the repo's own `.gitignore` and `.ignore`** — so build output (`dist/`, `coverage/`, generated dirs) is skipped for *every* language, driven by the repo's ignore file. This is the "all languages" mechanism; no hardcoded list is maintained. (Verified: a `build-out/` dir named only in `.gitignore` — not a colgrep default, not hidden — is skipped.)
+
+**Non-git workspaces** (an extracted tarball, an SVN/hg checkout, any dir with no `.git`): colgrep does **not** read `.gitignore` there (verified). To keep the same all-language filtering, `runInit` mirrors the workspace's `.gitignore` into a `.ignore` file (which colgrep honors unconditionally) via `ensureIgnoreMirror` in `src/lib/colbert/ignore-mirror.ts` — best-effort, idempotent, and additive-safe (a user-authored `.ignore` is never overwritten; only a file carrying our header marker is refreshed). Git repos are untouched (no file written). **Opt out:** `GH_ROUTER_COLBERT_NO_IGNORE_MIRROR=1`.
+
+Known limitations: only the workspace-root `.gitignore` is mirrored (nested per-dir gitignores in a non-git tree are not); committed generated files that a repo does *not* gitignore (e.g. a checked-in lockfile) are still indexed as config; and colgrep's hidden-dir skip means `.github/workflows` / `.vscode` config is not indexed. The gated canary in `tests/colbert-ignore-mirror.test.ts` (`GH_ROUTER_RUN_COLBERT_E2E=1`) pins colgrep's `.gitignore`/`.ignore` behavior so an upstream upgrade that regresses it fails a test.
+
 ## Storage
 
 ```
