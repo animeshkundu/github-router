@@ -48,9 +48,11 @@ bun run build        # Build for distribution (tsdown → dist/)
 bun run dev          # Dev server with hot reload
 bun run lint:all     # Lint entire project
 bun run typecheck    # TypeScript type checking
-bun test             # Run all tests
+bun run test         # Run all tests (main suite + isolated tests one-per-process)
 bun run start        # Production server (port 8787)
 ```
+
+> **Do not run bare `bun test`** — it HANGS. bun runs every file in one process, and `tests/isolated/**` use process-global `mock.module` (node:child_process, …) that leaks across files, so a later real-`spawn` test wedges forever. `bun run test` (→ `scripts/run-tests.mjs`, the same runner CI uses) excludes `tests/isolated/**` from the main pass and runs each isolated file in its own process. Targeted runs — `bun test tests/foo.test.ts` — are fine; just never the bare directory-wide `bun test`.
 
 ## Subcommands
 

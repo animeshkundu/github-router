@@ -42,7 +42,9 @@
     "probe:copilot": "bash scripts/probe-copilot-compat.sh --strict",
     "release": "./publish/release.sh",
     "start": "NODE_ENV=production bun run ./src/main.ts",
-    "test": "bun test",
+    "test": "bun run scripts/run-tests.mjs",
+  "test:main": "bun run scripts/run-tests.mjs main",
+  "test:isolated": "bun run scripts/run-tests.mjs isolated",
     "typecheck": "tsc",
     "verify:serve": "node scripts/verify-serve-session.mjs",
     "verify:plan-mode": "node scripts/verify-plan-mode-cloudcli.mjs"
