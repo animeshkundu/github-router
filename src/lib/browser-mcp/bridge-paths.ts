@@ -13,7 +13,7 @@ import path from "node:path"
  * `src/lib/paths.ts`, which has no win32 branch). On Windows the
  * writer and reader never met, so the install-check returned
  * `bridge_not_running` even with a healthy bridge. Centralized here so
- * the regression test in `tests/browser-bridge-discovery-path.test.ts`
+ * the regression test in `tests/isolated/browser-bridge-discovery-path.test.ts`
  * can pin the round-trip.
  *
  * Mirrors `PATHS.APP_DIR` from `src/lib/paths.ts` (XDG-style on every

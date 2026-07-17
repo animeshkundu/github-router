@@ -702,7 +702,11 @@ function bashTool(workspace: string): AgentTool<typeof BASH_PARAMS> {
       "Run a shell command in the worker's workspace under a strict " +
       "env allowlist (credentials stripped) with a bounded timeout. " +
       "Non-zero exit returns `<stdout>\\n<stderr>\\nexit=N` as text, " +
-      "not an error.",
+      "not an error. Prefer the dedicated tools (read/glob/grep/" +
+      "code_search/edit/write/toolbelt) for reading, searching, and " +
+      "editing; reserve bash for builds, tests, git, package managers, " +
+      "and running programs — don't reimplement a file read/search/edit " +
+      "as a python/node/powershell one-off script.",
     parameters: BASH_PARAMS,
     executionMode: "sequential",
     async execute(
@@ -799,8 +803,7 @@ function fetchUrlTool(): AgentTool<typeof FETCH_URL_PARAMS> {
     label: "Fetch URL",
     description:
       "Fetch a URL (HTTP/HTTPS only) and return the response body as " +
-      "text. Bounded to 1 MiB and 30 s. No HTML→markdown conversion " +
-      "— callers that need it should ask `peer_review` to parse.",
+      "text. Bounded to 1 MiB and 30 s. No HTML→markdown conversion.",
     parameters: FETCH_URL_PARAMS,
     async execute(
       _toolCallId,

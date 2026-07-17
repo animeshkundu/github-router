@@ -58,7 +58,7 @@ const READ_TOOL_NOTES = [
 const WRITE_TOOL_NOTES = [
   "`edit` — exact-string replacement in a file.",
   "`write` — overwrite or create a file.",
-  "`bash` — run a shell command in the workspace.",
+  "`bash` — run builds, tests, git, package managers, and programs; reading, searching, and editing have dedicated tools (`read`/`glob`/`grep`/`code_search`/`edit`/`write`/`toolbelt`), so a `python`/`node`/`powershell` one-off script for those jobs is unnecessary.",
   "`codex_review` — code review by `codex-reviewer` (gpt-5.3-codex, code-specialist critic). Returns line-level findings on a diff or single file.",
 ] as const
 

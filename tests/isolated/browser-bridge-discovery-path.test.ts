@@ -13,13 +13,22 @@
 // IMPORTANT: do not mock `os.homedir()`. Mocking masks the original bug
 // because it aligns both sides accidentally. Use the real homedir and
 // just assert the computed string matches the canonical formula.
+//
+// Lives under `tests/isolated/` so CI runs it in its own `bun test`
+// process ("Test (isolated - mock.module process isolation)" step). Many
+// sibling suites call `mock.module("node:os", …)`, which Bun applies
+// process-globally and does not reliably restore; under the single-process
+// `bun test tests/` run that global homedir stub leaks in and, depending on
+// file ordering, breaks these real-homedir assertions (a nondeterministic
+// flake that surfaced on ubuntu but not windows). A fresh process per file
+// gives a pristine `node:os`.
 
 import { test, expect } from "bun:test"
 import os from "node:os"
 import path from "node:path"
 
-import { discoveryPath } from "../src/lib/browser-mcp/bridge-paths"
-import { PATHS } from "../src/lib/paths"
+import { discoveryPath } from "../../src/lib/browser-mcp/bridge-paths"
+import { PATHS } from "../../src/lib/paths"
 
 test("discoveryPath() resolves under ~/.local/share/github-router on every platform", () => {
   const expected = path.join(
