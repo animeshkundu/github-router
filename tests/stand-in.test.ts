@@ -11,6 +11,35 @@ import { state } from "~/lib/state"
 
 const originalFetch = globalThis.fetch
 
+// Hermetic 3-peer catalog. Without this, these tests inherit whatever
+// `state.models` a prior test file left behind (bun discovers files in a
+// filesystem order that differs between dev machines and CI). A polluted
+// catalog missing the OpenAI frontier models makes `resolveOpenAiFrontier()`
+// return undefined → the OpenAI peer dispatch fails → the ≥2/3 abstain
+// short-circuit and vote tallies break (observed as `no_consensus` /
+// double-consumed queues only on CI). Pin the canonical panel so every
+// stand_in test resolves all three peers deterministically.
+const STAND_IN_CATALOG = {
+  object: "list" as const,
+  data: [
+    {
+      id: "gpt-5.6-sol",
+      capabilities: { limits: { max_prompt_tokens: 1_000_000 } },
+      supported_endpoints: ["/responses"],
+    },
+    {
+      id: "claude-opus-5",
+      capabilities: { limits: { max_prompt_tokens: 1_000_000 } },
+      supported_endpoints: ["/v1/messages"],
+    },
+    {
+      id: "gemini-3.1-pro-preview",
+      capabilities: { limits: { max_prompt_tokens: 1_000_000 } },
+      supported_endpoints: ["/chat/completions"],
+    },
+  ],
+} as unknown as NonNullable<typeof state.models>
+
 beforeEach(() => {
   // The wire helpers read state.copilotToken / state.vsCodeVersion etc.
   // for headers; without these, header-build code paths can throw before
@@ -20,10 +49,12 @@ beforeEach(() => {
   state.vsCodeVersion = "1.99.0"
   state.copilotVersion = "0.43.0"
   state.accountType = "individual"
+  state.models = STAND_IN_CATALOG
 })
 
 afterEach(() => {
   globalThis.fetch = originalFetch
+  state.models = undefined
 })
 
 // Per-model vote payload helper. Returns the JSON string the model
@@ -453,7 +484,7 @@ describe("runStandIn — alternative channel (holistic option)", () => {
     mockThreePeers({
       "gpt-5.6-sol":            [voteJson({ choice: "A", confidence: 0.8, reasoning: "A" }),
                                  voteJson({ choice: "A", confidence: 0.8, reasoning: "still A" })],
-      "claude-opus-4-7":        [voteJson({ choice: "A", confidence: 0.75, reasoning: "A too" }),
+      "claude-opus-5":        [voteJson({ choice: "A", confidence: 0.75, reasoning: "A too" }),
                                  voteJson({ choice: "A", confidence: 0.8, reasoning: "still A" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: null, confidence: 0, reasoning: "both weak", alternative: "use the native Temporal API instead" }),
                                  voteJson({ choice: null, confidence: 0, reasoning: "both weak", alternative: "use the native Temporal API instead" })],
@@ -471,7 +502,7 @@ describe("runStandIn — alternative channel (holistic option)", () => {
     // canonicalized away rather than surfaced in notes.
     mockThreePeers({
       "gpt-5.6-sol":            [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
-      "claude-opus-4-7":        [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
+      "claude-opus-5":        [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "A", confidence: 0.9, reasoning: "A", alternative: "a hosted service would sidestep both" })],
     })
     const result = await runStandIn(TINY_INPUT)
@@ -486,7 +517,7 @@ describe("runStandIn — alternative channel (holistic option)", () => {
     // now-subordinate alternatives are NOT surfaced.
     mockThreePeers({
       "gpt-5.6-sol":            [voteJson({ choice: null, confidence: 0, reasoning: "blocked", needMoreInfo: "what's the deploy target?", alternative: "roll our own" })],
-      "claude-opus-4-7":        [voteJson({ choice: null, confidence: 0, reasoning: "blocked", needMoreInfo: "what's the SLA?", alternative: "roll our own" })],
+      "claude-opus-5":        [voteJson({ choice: null, confidence: 0, reasoning: "blocked", needMoreInfo: "what's the SLA?", alternative: "roll our own" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: null, confidence: 0, reasoning: "blocked", needMoreInfo: "what timezones?", alternative: "roll our own" })],
     })
     const result = await runStandIn(TINY_INPUT)
@@ -505,7 +536,7 @@ describe("runStandIn — hallucination guard", () => {
     mockThreePeers({
       "gpt-5.6-sol":            [voteJson({ choice: "Z", confidence: 0.9, reasoning: "phantom" }),
                                  voteJson({ choice: "Z", confidence: 0.9, reasoning: "still phantom" })],
-      "claude-opus-4-7":        [voteJson({ choice: "Z", confidence: 0.9, reasoning: "phantom" }),
+      "claude-opus-5":        [voteJson({ choice: "Z", confidence: 0.9, reasoning: "phantom" }),
                                  voteJson({ choice: "Z", confidence: 0.9, reasoning: "still phantom" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "A", confidence: 0.8, reasoning: "real A" })],
     })
@@ -520,7 +551,7 @@ describe("runStandIn — hallucination guard", () => {
     mockThreePeers({
       "gpt-5.6-sol":            [voteJson({ choice: "Z", confidence: 0.8, reasoning: "oops" }),
                                  voteJson({ choice: "A", confidence: 0.8, reasoning: "fixed" })],
-      "claude-opus-4-7":        [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
+      "claude-opus-5":        [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
     })
     const result = await runStandIn(TINY_INPUT)
@@ -536,7 +567,7 @@ describe("runStandIn — partial missing-context signals", () => {
     // exhaust and the mock would throw — so consumed===1 proves R2 was skipped.
     const { consumed } = mockThreePeers({
       "gpt-5.6-sol":            [voteJson({ choice: null, confidence: 0, reasoning: "need info", needMoreInfo: "what's the deploy target?" })],
-      "claude-opus-4-7":        [voteJson({ choice: null, confidence: 0, reasoning: "need info", needMoreInfo: "what's the SLA?" })],
+      "claude-opus-5":        [voteJson({ choice: null, confidence: 0, reasoning: "need info", needMoreInfo: "what's the SLA?" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "A", confidence: 0.7, reasoning: "A anyway" })],
     })
     const result = await runStandIn(TINY_INPUT)
@@ -555,7 +586,7 @@ describe("runStandIn — partial missing-context signals", () => {
         voteJson({ choice: "A", confidence: 0.6, reasoning: "leaning A" }),
         voteJson({ choice: null, confidence: 0, reasoning: "blocked", needMoreInfo: "what is the production bundle-size ceiling?" }),
       ],
-      "claude-opus-4-7": [
+      "claude-opus-5": [
         voteJson({ choice: "B", confidence: 0.6, reasoning: "leaning B" }),
         voteJson({ choice: null, confidence: 0, reasoning: "blocked", needMoreInfo: "which runtime versions must be supported?" }),
       ],
@@ -580,7 +611,7 @@ describe("runStandIn — partial missing-context signals", () => {
     const { consumed } = mockThreePeers({
       "gpt-5.6-sol":            [voteJson({ choice: null, confidence: 0, reasoning: "x", needMoreInfo: "   " }),
                                  voteJson({ choice: null, confidence: 0, reasoning: "still abstaining" })],
-      "claude-opus-4-7":        [voteJson({ choice: null, confidence: 0, reasoning: "x", needMoreInfo: "   " }),
+      "claude-opus-5":        [voteJson({ choice: null, confidence: 0, reasoning: "x", needMoreInfo: "   " }),
                                  voteJson({ choice: null, confidence: 0, reasoning: "still abstaining" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "A", confidence: 0.7, reasoning: "A" }),
                                  voteJson({ choice: "A", confidence: 0.7, reasoning: "still A" })],
@@ -591,7 +622,7 @@ describe("runStandIn — partial missing-context signals", () => {
     expect(result.notes ?? "").not.toContain("   ")
     expect(asVote(result.votes["gpt-5.6-sol"].round1).needMoreInfo).toBeUndefined()
     expect(consumed["gpt-5.6-sol"]).toBe(2)
-    expect(consumed["claude-opus-4-7"]).toBe(2)
+    expect(consumed["claude-opus-5"]).toBe(2)
     expect(consumed["gemini-3.1-pro-preview"]).toBe(2)
   })
 
@@ -601,7 +632,7 @@ describe("runStandIn — partial missing-context signals", () => {
     mockThreePeers({
       "gpt-5.6-sol":            [voteJson({ choice: "A", confidence: 0.6, reasoning: "A" }),
                                  voteJson({ choice: "A", confidence: 0.6, reasoning: "A" })],
-      "claude-opus-4-7":        [voteJson({ choice: "B", confidence: 0.6, reasoning: "B" }),
+      "claude-opus-5":        [voteJson({ choice: "B", confidence: 0.6, reasoning: "B" }),
                                  voteJson({ choice: "B", confidence: 0.6, reasoning: "B" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: null, confidence: 0, reasoning: "unsure", needMoreInfo: "what's the team's tz expertise?" }),
                                  voteJson({ choice: null, confidence: 0, reasoning: "unsure", needMoreInfo: "what's the team's tz expertise?" })],
@@ -620,7 +651,7 @@ describe("runStandIn — blind round 1 invariant", () => {
     // peer-vote marker.
     const { bodies } = mockThreePeers({
       "gpt-5.6-sol":            [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
-      "claude-opus-4-7":        [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
+      "claude-opus-5":        [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
     })
     await runStandIn(TINY_INPUT)
@@ -659,7 +690,7 @@ describe("stand_in tool boundary — context required", () => {
     // the documented >=2/3 short-circuit before round 2.
     const { consumed } = mockThreePeers({
       "gpt-5.6-sol":            [voteJson({ choice: null, confidence: 0, reasoning: "blocked", needMoreInfo: "which operating system is primary?" })],
-      "claude-opus-4-7":        [voteJson({ choice: null, confidence: 0, reasoning: "blocked", needMoreInfo: "what latency budget applies?" })],
+      "claude-opus-5":        [voteJson({ choice: null, confidence: 0, reasoning: "blocked", needMoreInfo: "what latency budget applies?" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "A", confidence: 0.7, reasoning: "A with current context" })],
     })
     const res = await runStandInToolCall(TINY_INPUT)
@@ -667,7 +698,7 @@ describe("stand_in tool boundary — context required", () => {
     const result = JSON.parse(res.content[0]?.text ?? "{}") as StandInResult
     expect(result.verdict).toBe("need_more_info")
     expect(consumed["gpt-5.6-sol"]).toBe(1)
-    expect(consumed["claude-opus-4-7"]).toBe(1)
+    expect(consumed["claude-opus-5"]).toBe(1)
     expect(consumed["gemini-3.1-pro-preview"]).toBe(1)
   })
 })

@@ -1433,7 +1433,7 @@ describe("/mcp stand_in tool", () => {
   test("JSON-path tools/call accepts stand_in context between the old 6KB and new 32KB caps", async () => {
     mockThreePeers({
       "gpt-5.5":                [VOTE_A_HIGH],
-      "claude-opus-4-7":        [VOTE_A_HIGH],
+      "claude-opus-5":        [VOTE_A_HIGH],
       "gemini-3.1-pro-preview": [VOTE_A_HIGH],
     })
 
