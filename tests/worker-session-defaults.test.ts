@@ -4,7 +4,6 @@ import {
   DEFAULT_MODEL,
   resolveModeDefaults,
   resolveWorkerRunOpts,
-  withNoOutputRetry,
 } from "../src/lib/worker-agent/engine"
 import {
   getWorkerSessionDefault,
@@ -50,7 +49,7 @@ describe("worker session defaults", () => {
     expect(resolveModeDefaults("implement").model).not.toBe("test-only")
   })
 
-  test("per-call values beat session values and retries retain one snapshot", async () => {
+  test("per-call values beat session values and resolve to one run snapshot", () => {
     setWorkerSessionDefault("explore", { model: "session-model", thinking: "low" })
     const concrete = resolveWorkerRunOpts({
       prompt: "x",
@@ -61,15 +60,9 @@ describe("worker session defaults", () => {
     expect(concrete.model).toBe("per-call-model")
     expect(concrete.thinking).toBe("low")
 
-    const seen: string[] = []
-    await withNoOutputRetry(async (opts) => {
-      seen.push(opts.model!)
-      setWorkerSessionDefault("explore", { model: "changed-mid-run" })
-      return seen.length === 1
-        ? { text: "[worker exited with no output: clean stop]" }
-        : { text: "done" }
-    }, concrete)
-    expect(seen).toEqual(["per-call-model", "per-call-model"])
+    setWorkerSessionDefault("explore", { model: "changed-after-resolution" })
+    expect(concrete.model).toBe("per-call-model")
+    expect(concrete.thinking).toBe("low")
   })
 
   test("workflow opt-out ignores session overrides while ordinary runs honor them", () => {

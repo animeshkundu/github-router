@@ -21,7 +21,12 @@ import {
 } from "./helpers/worker-sse"
 
 const MODEL = "nudge-chat-model"
-const { EMPTY_OUTPUT_NUDGE, shouldNudgeForEmptyOutput } = __testExports
+const {
+  EMPTY_OUTPUT_NUDGES,
+  MAX_EMPTY_OUTPUT_NUDGES,
+  resolveMaxEmptyOutputNudges,
+  shouldNudgeForEmptyOutput,
+} = __testExports
 
 function fakeModel(id: string) {
   return {
@@ -53,7 +58,9 @@ function bodyText(body: CapturedWorkerBody): string {
 }
 
 function nudgeBodyCount(bodies: Array<CapturedWorkerBody>): number {
-  return bodies.filter((body) => bodyText(body).includes(EMPTY_OUTPUT_NUDGE)).length
+  return bodies.filter((body) =>
+    EMPTY_OUTPUT_NUDGES.some((nudge) => bodyText(body).includes(nudge))
+  ).length
 }
 
 const originalModels = state.models
@@ -80,6 +87,7 @@ afterEach(() => {
   state.copilotToken = originalToken
   state.vsCodeVersion = originalVsCodeVersion
   globalThis.fetch = originalFetch
+  delete process.env.GH_ROUTER_WORKER_MAX_NUDGES
   resetWorkerSemaphore()
 })
 
@@ -107,7 +115,7 @@ test("the in-run nudge preserves the earlier tool result and includes it with th
     expect(result.text).not.toContain("[worker exited with no output")
 
     const thirdRequest = bodyText(bodies[2]!)
-    expect(thirdRequest).toContain(EMPTY_OUTPUT_NUDGE)
+    expect(thirdRequest).toContain(EMPTY_OUTPUT_NUDGES[0]!)
     // `noop` is intentionally absent from the real worker toolset. Its durable
     // tool-result error is an unmistakable marker that the original transcript,
     // rather than a fresh retry, reached the nudge request.
@@ -118,16 +126,14 @@ test("the in-run nudge preserves the earlier tool result and includes it with th
   }
 })
 
-test("empty forever nudges exactly once per run, then the retained fallback re-runs once (3 + 3 requests)", async () => {
-  let callInRun = 0
-  const { fetchMock, bodies } = recordingFetch(() => {
-    const response = callInRun % 3 === 0 ? sseToolCall("noop") : sseEmptyFinal()
-    callInRun += 1
-    return response
-  })
+test("empty forever stays in one run, sends three distinct nudges, then fails actionably", async () => {
+  let call = 0
+  const { fetchMock, bodies } = recordingFetch(() =>
+    call++ === 0 ? sseToolCall("noop") : sseEmptyFinal()
+  )
   globalThis.fetch = fetchMock
 
-  const dir = tmpDir("two-tier")
+  const dir = tmpDir("empty-forever")
   try {
     const result = await runWorkerAgent({
       prompt: "never summarize",
@@ -136,12 +142,73 @@ test("empty forever nudges exactly once per run, then the retained fallback re-r
       workspace: dir,
     })
 
-    // Tier 1 is the transcript-preserving nudge. Tier 2 is one complete fresh
-    // run from withNoOutputRetry, so empty forever is 3 + 3 provider requests.
-    expect(bodies).toHaveLength(6)
+    // Initial tool-call request + post-tool empty turn + three nudge turns.
+    expect(bodies).toHaveLength(5)
     expect(result.text).toStartWith("[worker exited with no output")
     expect(result.isError).toBe(true)
-    expect(nudgeBodyCount(bodies)).toBe(2)
+    expect(result.text).toContain("after 3 nudges")
+    expect(result.text).toContain("stopReason=stop")
+    expect(result.text).toContain("turns=")
+    expect(result.text).toContain("elapsed=")
+    expect(result.text).toContain("different model via worker_defaults")
+    expect(result.text).toContain("narrow/split the task")
+    expect(nudgeBodyCount(bodies)).toBe(3)
+    expect(new Set(EMPTY_OUTPUT_NUDGES).size).toBe(3)
+    const finalRequest = bodyText(bodies.at(-1)!)
+    for (const nudge of EMPTY_OUTPUT_NUDGES) {
+      expect(finalRequest.split(nudge)).toHaveLength(2)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test.each([
+  { recoveredOn: 2, responses: [sseEmptyFinal(), sseEmptyFinal(), sseFinalText("second nudge answer")] },
+  { recoveredOn: 3, responses: [sseEmptyFinal(), sseEmptyFinal(), sseEmptyFinal(), sseFinalText("third nudge answer")] },
+])("recovers on nudge $recoveredOn", async ({ recoveredOn, responses }) => {
+  let call = 0
+  const { fetchMock, bodies } = recordingFetch(() => responses[call++]!)
+  globalThis.fetch = fetchMock
+
+  const dir = tmpDir(`recovery-${recoveredOn}`)
+  try {
+    const result = await runWorkerAgent({
+      prompt: "answer eventually",
+      mode: "explore",
+      model: MODEL,
+      workspace: dir,
+    })
+
+    expect(result.text).toBe(`${recoveredOn === 2 ? "second" : "third"} nudge answer`)
+    expect(result.isError).toBeUndefined()
+    expect(bodies).toHaveLength(recoveredOn + 1)
+    expect(nudgeBodyCount(bodies)).toBe(recoveredOn)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("zero disables nudging and non-numeric falls back to three", async () => {
+  process.env.GH_ROUTER_WORKER_MAX_NUDGES = "0"
+  expect(resolveMaxEmptyOutputNudges()).toBe(0)
+  process.env.GH_ROUTER_WORKER_MAX_NUDGES = "not-a-number"
+  expect(resolveMaxEmptyOutputNudges()).toBe(MAX_EMPTY_OUTPUT_NUDGES)
+
+  process.env.GH_ROUTER_WORKER_MAX_NUDGES = "0"
+  const { fetchMock, bodies } = recordingFetch(() => sseEmptyFinal())
+  globalThis.fetch = fetchMock
+  const dir = tmpDir("disabled")
+  try {
+    const result = await runWorkerAgent({
+      prompt: "stay empty",
+      mode: "explore",
+      model: MODEL,
+      workspace: dir,
+    })
+    expect(bodies).toHaveLength(1)
+    expect(nudgeBodyCount(bodies)).toBe(0)
+    expect(result.text).toContain("after 0 nudges")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -207,7 +274,7 @@ describe("nudge eligibility excludes non-clean terminal reasons", () => {
     }
   })
 
-  test("length stop never nudges; only the retained full-run fallback repeats it", async () => {
+  test("length stop never nudges or re-runs", async () => {
     const { fetchMock, bodies } = recordingFetch(() =>
       sseResponse([{ choices: [{ delta: {}, finish_reason: "length" }] }]),
     )
@@ -222,9 +289,7 @@ describe("nudge eligibility excludes non-clean terminal reasons", () => {
         workspace: dir,
       })
 
-      // Empty length output still qualifies for the existing whole-run fallback,
-      // but never for the new clean-stop nudge.
-      expect(bodies).toHaveLength(2)
+      expect(bodies).toHaveLength(1)
       expect(nudgeBodyCount(bodies)).toBe(0)
       expect(result.text).toStartWith("[worker exited with no output")
     } finally {

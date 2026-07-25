@@ -38,7 +38,7 @@
  *      `afterToolCall`;
  *   8. wire `opts.signal` → `agent.abort()` so outer cancellation
  *      propagates cleanly into Pi's tool-level signals;
- *   9. subscribe to `turn_end` to enqueue one in-run no-output nudge,
+ *   9. subscribe to `turn_end` to enqueue bounded in-run no-output nudges,
  *      and to `message_end` so we can extract the assistant's final text
  *      from the content-part array (Pi does NOT hand us a string here —
  *      `extractAssistantText` is mandatory, see the plan's peer-review
@@ -303,8 +303,30 @@ function extractAssistantText(
   return out
 }
 
-const EMPTY_OUTPUT_NUDGE =
-  "You ended your turn without a final answer. Summarize your findings now from what you already gathered."
+const MAX_EMPTY_OUTPUT_NUDGES = 3
+const EMPTY_OUTPUT_NUDGES = [
+  "Summarize your findings so far.",
+  "Your previous reply was empty. Provide the answer now in plain text.",
+  "Reply with plain text only. Do not call any tool.",
+] as const
+
+/**
+ * Resolve the per-run nudge cap. Zero explicitly disables nudging; malformed,
+ * negative, and fractional values fall back to the default.
+ */
+function resolveMaxEmptyOutputNudges(): number {
+  const raw = process.env.GH_ROUTER_WORKER_MAX_NUDGES
+  if (raw === undefined || raw === "") return MAX_EMPTY_OUTPUT_NUDGES
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
+    return MAX_EMPTY_OUTPUT_NUDGES
+  }
+  return parsed
+}
+
+function emptyOutputNudge(attempt: number): string {
+  return EMPTY_OUTPUT_NUDGES[Math.min(attempt, EMPTY_OUTPUT_NUDGES.length) - 1]!
+}
 
 /** True only for a clean, empty assistant stop with no pending tool calls. */
 function shouldNudgeForEmptyOutput(message: AgentMessage): boolean {
@@ -367,9 +389,9 @@ async function runWorkerAgentOnce(
   }
 
   try {
-    // Step 2 is resolved by the public entry before the retry wrapper. Both
-    // attempts therefore use the same concrete pair even if a process-wide
-    // session override changes while the first attempt is running.
+    // Step 2 is resolved by the public entry before starting the run. The
+    // complete run, including any in-run nudges, therefore uses one concrete
+    // pair even if a process-wide session override changes while it runs.
     const resolved = resolveModelAndThinking({
       model: opts.model!,
       thinking: opts.thinking!,
@@ -628,7 +650,8 @@ async function runWorkerAgentOnce(
     // just `.toString()`.
     let finalText = ""
     let lastStopReason: string | null = null
-    let nudged = false
+    let nudgeCount = 0
+    const maxEmptyOutputNudges = resolveMaxEmptyOutputNudges()
     // Browse-only: the answer captured from a terminal tool's args (see
     // the `beforeToolCall` capture). Preferred over `finalText` for browse
     // because the agent's authoritative answer is the terminal payload,
@@ -636,17 +659,20 @@ async function runWorkerAgentOnce(
     let terminalText: string | null = null
     const unsubscribe = agent.subscribe((event) => {
       if (event.type === "turn_end") {
-        if (!nudged && shouldNudgeForEmptyOutput(event.message)) {
-          // Set at enqueue time: the follow-up may itself use tools, and must
-          // never earn another nudge after that later turn completes.
-          nudged = true
+        if (
+          nudgeCount < maxEmptyOutputNudges
+          && shouldNudgeForEmptyOutput(event.message)
+        ) {
+          // Increment at enqueue time: a follow-up may itself use tools, and
+          // must not earn a free extra nudge after that later turn completes.
+          nudgeCount += 1
           // This is a REAL user message persisted in Pi's transcript, unlike
           // the send-time-only appendPlanReminder. It intentionally forms a
           // compaction turn boundary; appendPlanReminder also skips its turn
           // because the last canonical role is user.
           agent.followUp({
             role: "user",
-            content: [{ type: "text", text: EMPTY_OUTPUT_NUDGE }],
+            content: [{ type: "text", text: emptyOutputNudge(nudgeCount) }],
             timestamp: Date.now(),
           })
         }
@@ -746,9 +772,10 @@ async function runWorkerAgentOnce(
       if (!text.trim()) {
         return {
           text:
-            `${NO_OUTPUT_PREFIX} `
+            `${NO_OUTPUT_PREFIX} after ${nudgeCount} nudges `
             + `(stopReason=${lastStopReason ?? "unknown"}, `
-            + `turns=${budget.turns}, elapsed=${budget.elapsedMs}ms)]`,
+            + `turns=${budget.turns}, elapsed=${budget.elapsedMs}ms)]; `
+            + "retry with a different model via worker_defaults, or narrow/split the task.",
           isError: true,
         }
       }
@@ -809,50 +836,12 @@ async function runWorkerAgentOnce(
 
 /**
  * Prefix of the sentinel `runWorkerAgentOnce` returns when a worker stops
- * CLEANLY but emits no usable text — the model occasionally ends a turn right
- * after a tool call without summarizing. Stable so the retry wrapper can detect
- * exactly this case. Distinct from a budget cap (`WorkerAbort` → halt message),
- * a stream error (`stopReason="error"` → overflow/upstream diagnostic), and a
- * real failure — none of which carry this prefix, so none are retried.
+ * cleanly but emits no usable text even after its bounded in-run nudges. Kept
+ * stable for callers that recognize the existing sentinel shape.
  */
 const NO_OUTPUT_PREFIX = "[worker exited with no output"
 
-/** True iff `r` is the transient no-output sentinel (a clean stop with empty
- *  text), the one case worth a fresh retry. Keyed on the specific sentinel
- *  PREFIX, not on `isError` — so the retry can't be silently decoupled if the
- *  sentinel's error flag ever changes, and a real worker answer never begins
- *  with this string. */
-function isTransientNoOutput(r: WorkerAgentResult): boolean {
-  return typeof r.text === "string" && r.text.startsWith(NO_OUTPUT_PREFIX)
-}
-
-/**
- * Second line of the two-tier no-output recovery: the cheap first line is an
- * in-run follow-up nudge, which preserves the transcript and consumes the same
- * Budget. If that nudge also produces the transient sentinel, retry EXACTLY ONCE
- * with a fresh run before surfacing it. The fallback run allocates a fresh Budget;
- * that known cost is reserved for the rare case where the in-run recovery failed.
- * Real errors, budget caps, and stream errors are returned as-is (they have
- * distinct, actionable messages and a retry would not help). A consumed abort
- * signal short-circuits the retry. If the retry also produces no output, the
- * ORIGINAL is returned (one is enough signal; the failure isn't hidden).
- * Extracted + injected for unit-testability.
- */
-export async function withNoOutputRetry(
-  runOnce: (opts: WorkerAgentOpts) => Promise<WorkerAgentResult>,
-  opts: WorkerAgentOpts,
-): Promise<WorkerAgentResult> {
-  const first = await runOnce(opts)
-  if (!isTransientNoOutput(first) || opts.signal?.aborted) return first
-  const second = await runOnce(opts)
-  return isTransientNoOutput(second) ? first : second
-}
-
-/**
- * Public entry: a worker run with a single transient-no-output retry. Wraps the
- * implementation (`runWorkerAgentOnce`); the signature is unchanged so every
- * caller (MCP dispatch, the orchestration runner) gets the retry for free.
- */
+/** Public entry. Resolve model/thinking once, then run under one transcript and Budget. */
 export function resolveWorkerRunOpts(opts: WorkerAgentOpts): WorkerAgentOpts {
   const defaults = resolveModeDefaults(opts.mode, opts.ignoreSessionDefaults === true)
   return {
@@ -863,7 +852,7 @@ export function resolveWorkerRunOpts(opts: WorkerAgentOpts): WorkerAgentOpts {
 }
 
 export async function runWorkerAgent(opts: WorkerAgentOpts): Promise<WorkerAgentResult> {
-  return withNoOutputRetry(runWorkerAgentOnce, resolveWorkerRunOpts(opts))
+  return runWorkerAgentOnce(resolveWorkerRunOpts(opts))
 }
 
 // ============================================================
@@ -908,7 +897,9 @@ export function appendPlanReminder(
 
 export const __testExports = {
   appendPlanReminder,
-  EMPTY_OUTPUT_NUDGE,
+  EMPTY_OUTPUT_NUDGES,
+  MAX_EMPTY_OUTPUT_NUDGES,
+  resolveMaxEmptyOutputNudges,
   setAgentOptionsObserver(observer?: (options: ConstructorParameters<typeof Agent>[0]) => void): void {
     agentOptionsObserverForTests = observer
   },
