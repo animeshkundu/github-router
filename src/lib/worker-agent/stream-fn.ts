@@ -24,7 +24,7 @@ import type {
   Context,
   Message as PiMessage,
   Model,
-  Provider,
+  ProviderId,
   SimpleStreamOptions,
   StopReason,
   TextContent,
@@ -85,7 +85,7 @@ export interface ResolvedModel {
   /** Effective (post-clamp) thinking level. "off" drops reasoning_effort. */
   thinking: ResolvedThinking
   /** Pi Provider tag stamped on synthetic AssistantMessages. */
-  provider?: Provider
+  provider?: ProviderId
   /** Pi Api tag stamped on synthetic AssistantMessages. */
   api?: Api
 }

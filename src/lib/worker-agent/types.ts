@@ -30,13 +30,13 @@ import type {
  * MCP handler / engine code can reference it without importing the
  * vendor path alias directly.
  */
-export type ThinkingLevel = PiThinkingLevel
+export type ThinkingLevel = Exclude<PiThinkingLevel, "max">
 
 /**
  * Worker-side reasoning-effort, which includes `"off"` for the "drop
  * the param entirely" case (model has no `reasoning_effort` capability).
  */
-export type WorkerThinkingLevel = ModelThinkingLevel
+export type WorkerThinkingLevel = Exclude<ModelThinkingLevel, "max">
 
 export interface WorkerAgentOpts {
   /** The user/tool prompt handed to Pi as the first user message. */

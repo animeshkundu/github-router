@@ -1,94 +1,79 @@
 # Pi vendor provenance
 
-This tree is a verbatim copy (with the minimal trims documented below) of the
-[`pi-mono`](https://github.com/earendil-works/pi-mono) monorepo, lifted into
-github-router so the worker-tools surface can drive a Pi agent without pulling
-the upstream npm packages (which would bring `@anthropic-ai/sdk`,
-`@google/genai`, `openai`, `@aws-sdk/client-bedrock-runtime`, and friends as
-runtime dependencies). All worker LLM traffic flows through this proxy's
-existing Copilot route via a custom `streamFn`.
+This tree vendors the Pi agent runtime and the minimal Pi AI dependency closure needed by github-router's Copilot-backed worker agents. Concrete provider implementations and their SDK dependencies remain excluded.
 
 ## Upstream
 
 - Repository: <https://github.com/earendil-works/pi-mono>
-- Commit pinned: `fc51a40d02256e892053f7edd0810bd1f0325b0b`
-  (`Merge pull request #4922 from earendil-works/horrifying-terminal-hack`,
-  2026-05-23)
-- Subtrees imported:
-  - `packages/agent/src/` → `src/vendor/pi/agent/` (verbatim, no edits)
-  - selected files from `packages/ai/src/` → `src/vendor/pi/ai/` (see "Slice"
-    below)
-- License: MIT — see `./LICENSE` (copied verbatim from upstream, copyright
-  preserved).
+- Tag: `v0.82.0`
+- Commit pinned: `083e61621276bff9f6faefab87ce07fcd98734e2` (`Release v0.82.0`, 2026-07-24)
+- Imported:
+  - `packages/agent/src/` → `src/vendor/pi/agent/`, with the `proxy.ts` patches below
+  - selected transitive closure from `packages/ai/src/` → `src/vendor/pi/ai/`
+- License: MIT, preserved in `./LICENSE`.
 
 ## Slice
 
-`@earendil-works/pi-agent-core` (`packages/agent/src/`) is vendored verbatim,
-files unchanged. Path aliases in `tsconfig.json` route the
-`@earendil-works/pi-agent-core` and `@earendil-works/pi-agent-core/*` specifiers
-into this copy so upstream-shaped imports keep working.
+Path aliases in `tsconfig.json` route `@earendil-works/pi-agent-core` and `@earendil-works/pi-ai` imports into this tree.
 
-`@earendil-works/pi-ai` (`packages/ai/src/`) is vendored as a **minimal slice**.
-We only keep the pieces pi-agent-core touches at runtime plus the public
-typings:
+The AI closure is:
 
-| File                                | Status   | Notes |
-| ----------------------------------- | -------- | ----- |
-| `api-registry.ts`                   | verbatim | Registry surface only; nothing pre-registers. |
-| `env-api-keys.ts`                   | verbatim | Lightweight env-var helpers. |
-| `models.ts`                         | verbatim | Pure helpers (`clampThinkingLevel`, etc.). |
-| `models.generated.ts`               | **stub** | Replaced with `export const MODELS = {} as Record<string, Record<string, Model<Api>>>`. The upstream file is the 16k-line auto-generated catalog; the worker resolves models against `state.models?.data` from Copilot's live catalog instead, so the static registry stays empty. To restore, copy `packages/ai/src/models.generated.ts` from the pinned commit verbatim. |
-| `stream.ts`                         | **trimmed** | Identical to upstream **except** the top-of-file side-effect import `import "./providers/register-builtins.ts";` is removed. That import eagerly instantiates every provider (Anthropic, Google, OpenAI, Bedrock, Mistral, …) and would re-introduce the SDK deps we vendored to avoid. We always supply a custom `streamFn` to `Agent`, so the registry path is dead code. |
-| `types.ts`                          | verbatim | Public surface (`Message`, `Tool`, `Model`, `Usage`, …). |
-| `utils/event-stream.ts`             | verbatim | `EventStream` + `AssistantMessageEventStream`. |
-| `utils/json-parse.ts`               | verbatim | `parseStreamingJson` (consumed by `proxy.ts`). |
-| `utils/validation.ts`               | verbatim | `validateToolArguments` (consumed by `agent-loop.ts`). |
-| `index.ts`                          | **rewritten** | Re-exports only the slice above plus typebox primitives. See file-top comment for the per-section rationale. |
+| File | Status | Purpose |
+| --- | --- | --- |
+| `types.ts` | patched | Public types; ten concrete provider option imports are local `Record<string, unknown>` aliases to avoid provider SDK dependencies. |
+| `models.ts` | verbatim | Model resolution and thinking helpers. |
+| `models-store.ts` | verbatim | In-memory model-store interfaces and implementation. |
+| `env-api-keys.ts` | verbatim | Provider environment helpers. |
+| `api/lazy.ts` | verbatim | Lazy stream adapter used by `models.ts`. |
+| `auth/types.ts` | verbatim | Auth contracts. |
+| `auth/context.ts` | verbatim | Default auth context. |
+| `auth/credential-store.ts` | verbatim | In-memory credentials. |
+| `auth/resolve.ts` | verbatim | Provider auth resolution used by `models.ts`. |
+| `utils/event-stream.ts` | verbatim | Agent event stream. |
+| `utils/json-parse.ts` | verbatim | Streaming JSON parser used by `proxy.ts`. |
+| `utils/validation.ts` | verbatim | Tool argument validation. |
+| `utils/retry.ts` | verbatim | Retry contracts/helpers used by the harness. |
+| `utils/text.ts` | verbatim | Content text helpers used by compaction. |
+| `utils/uuid.ts` | verbatim | UUIDv7 used by agent/session code. |
+| `utils/provider-env.ts` | verbatim | Provider environment lookup. |
+| `utils/diagnostics.ts` | patched stub | Preserves the diagnostic type boundary without provider-side diagnostic helpers; the custom stream never emits diagnostics. |
+| `index.ts` | rewritten | Re-exports exactly this closure plus TypeBox primitives. |
 
-What we explicitly **drop**:
+`stream.ts`, `api-registry.ts`, and `models.generated.ts` no longer exist in upstream v0.82.0's required closure and are not vendored. Provider APIs, images, CLI, OAuth, and concrete provider implementations remain excluded.
 
-- `providers/*` — anthropic, google, google-vertex, openai-completions,
-  openai-responses, openai-codex-responses, azure-openai-responses,
-  amazon-bedrock, mistral, cloudflare, faux, register-builtins, transform-messages,
-  google-shared, openai-prompt-cache, openai-responses-shared, simple-options,
-  github-copilot-headers, and the `images/*` subtree. Each pulls a vendor SDK
-  the proxy doesn't need.
-- `bedrock-provider.ts`, `cli.ts`, `images.ts`, `image-models.ts`,
-  `image-models.generated.ts`, `images-api-registry.ts`, `session-resources.ts`,
-  `oauth.ts`, and the `utils/oauth/*` tree.
-- `utils/diagnostics.ts`, `utils/headers.ts`, `utils/hash.ts`,
-  `utils/node-http-proxy.ts`, `utils/overflow.ts`, `utils/sanitize-unicode.ts`,
-  `utils/typebox-helpers.ts` — provider-coupled diagnostics or CLI helpers.
+## Intentional divergences
+
+### `agent/proxy.ts`
+
+Three recovered local patches must be re-applied after every full agent-directory replacement:
+
+1. Widen `reader` from `ReadableStreamDefaultReader<Uint8Array>` to `ReadableStreamDefaultReader<unknown>` because Bun's reader typing requires `readMany` while the DOM `getReader()` type does not expose it.
+2. Cast `response.body!.getReader()` through `unknown`, then narrow to `ReadableStreamDefaultReader<Uint8Array>` at `read()`. This is type-only and leaves runtime behavior unchanged.
+3. Replace the unused `const _exhaustiveCheck: never = proxyEvent` binding with `proxyEvent satisfies never` for this repo's `noUnusedLocals` setting.
+
+### `ai/types.ts`
+
+The ten concrete option types (`AnthropicOptions`, `AzureOpenAIResponsesOptions`, `BedrockOptions`, `GoogleOptions`, `GoogleVertexOptions`, `MistralOptions`, `OpenAICodexResponsesOptions`, `OpenAICompletionsOptions`, `OpenAIResponsesOptions`, and `PiMessagesOptions`) are type-only `Record<string, unknown>` aliases. Copying their upstream modules would pull concrete provider SDKs into the vendor closure.
+
+### `ai/utils/diagnostics.ts`
+
+A type-only diagnostic stub is retained instead of upstream's provider-side helper implementation. github-router's custom stream function does not populate diagnostics.
+
+### `ai/index.ts`
+
+The index is rewritten to export only the retained closure and TypeBox primitives.
 
 ## Sync protocol
 
-When bumping Pi:
+1. Clone upstream into a temporary directory outside this repository and check out the exact target tag or commit.
+2. Record the target SHA and diff the currently vendored `agent/proxy.ts` and `ai/utils/diagnostics.ts` against the previously pinned upstream commit before overwriting anything.
+3. Replace `src/vendor/pi/agent/` completely from `packages/agent/src/`, then re-apply all three documented `proxy.ts` patches.
+4. Rebuild `src/vendor/pi/ai/` from the transitive import closure required by the new agent tree and `src/lib/worker-agent/`. Re-apply the option-type aliases in `types.ts`, retain the diagnostics stub, and rewrite `index.ts` for the resulting closure. Do not assume the previous file list still closes.
+5. Update this provenance record and `docs/pi-vendor-sync.md` with the tag, full SHA, date, closure, and divergences.
+6. Run `bun run typecheck`, `bun run lint:all`, the focused worker suite, and `bun run build`.
+7. Run the wider `bun test` suite and investigate any delta. Never weaken Pi contract tests to accommodate an upgrade.
+8. Review the vendor diff against the exact upstream tag, confirm no temporary clone or generated artifact entered the repository, and include the upstream comparison range in the PR.
 
-1. Re-clone (or `git pull`) `pi-mono` into a scratch dir, e.g.
-   `/tmp/pi-mono-bump`.
-2. Capture the new SHA: `git -C /tmp/pi-mono-bump rev-parse HEAD`.
-3. Regenerate `src/vendor/pi/agent/` by copying
-   `packages/agent/src/` verbatim (e.g. via `cp -R`).
-4. Regenerate `src/vendor/pi/ai/` by re-copying each row in the "Slice" table
-   above. Re-apply the `stream.ts` provider-import trim and re-stub
-   `models.generated.ts` (keep the comment header pointing back here).
-5. Update `Commit pinned` above to the new SHA and bump any commit-context
-   notes.
-6. Run the project gate: `bun run typecheck && bun test`. The worker-agent
-   test suite (`tests/worker-agent/**`) exercises pi-agent-core's surface
-   end-to-end, so any upstream breaking change will surface here.
-7. Commit with `vendor: bump pi-mono to <short-sha>` and link the upstream
-   diff in the body.
+## Why vendor
 
-## Why vendor (not depend on npm)?
-
-The user-facing reason: `@earendil-works/pi-ai` is a unified-LLM-API library;
-installing it pulls in five vendor SDKs (~80MB unpacked) the proxy never uses
-because we route every request through Copilot. Vendoring the small slice we
-actually need keeps the proxy's install footprint and bundle clean.
-
-The architectural reason: github-router's worker tools want pi-agent-core's
-loop semantics (events, hooks, tool execution modes, abort plumbing) without
-inheriting the provider registry's failure modes (SDK initialization warnings,
-unfamiliar telemetry, surprise environment-variable lookups). The vendored copy
-ships only what the loop actually executes.
+Installing the full unified-provider Pi AI package pulls large provider SDKs that github-router never invokes. The worker loop always routes model traffic through the proxy's custom Copilot stream function, so retaining only the closed dependency slice preserves Pi's agent semantics without provider initialization, auth, telemetry, or dependency footprint.

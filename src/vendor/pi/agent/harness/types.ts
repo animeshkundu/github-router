@@ -1,5 +1,23 @@
-import type { ImageContent, Model, SimpleStreamOptions, TextContent, Transport } from "@earendil-works/pi-ai";
-import type { AgentEvent, AgentMessage, AgentTool, QueueMode, ThinkingLevel } from "../index.ts";
+import type {
+	ImageContent,
+	Model,
+	Models,
+	RetryPolicy,
+	SimpleStreamOptions,
+	TextContent,
+	Transport,
+	Usage,
+} from "@earendil-works/pi-ai";
+import type { Static, TSchema } from "typebox";
+import type {
+	AgentEvent,
+	AgentMessage,
+	AgentTool,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	QueueMode,
+	ThinkingLevel,
+} from "../index.ts";
 import type { Session } from "./session/session.ts";
 
 /** Result of a fallible operation. Expected failures are returned as `ok: false` instead of thrown. */
@@ -76,6 +94,27 @@ export interface AgentHarnessResources<
 	/** Skills available to the model and explicit skill invocation. */
 	skills?: TSkill[];
 }
+
+/** Tool definition executed by an {@link AgentHarness} with an application-defined context. */
+export type AgentHarnessTool<
+	TContext extends object | undefined,
+	TParameters extends TSchema = TSchema,
+	TDetails = unknown,
+> = Omit<AgentTool<TParameters, TDetails>, "execute"> & {
+	/** Execute the tool call with the context resolved for the current turn snapshot. */
+	execute(
+		toolCallId: string,
+		params: Static<TParameters>,
+		signal: AbortSignal | undefined,
+		onUpdate: AgentToolUpdateCallback<TDetails> | undefined,
+		context: TContext,
+	): Promise<AgentToolResult<TDetails>>;
+};
+
+/** Static tool context or zero-argument provider resolved for each turn snapshot. */
+export type AgentHarnessToolContextSource<TContext extends object | undefined> =
+	| TContext
+	| (() => TContext | Promise<TContext>);
 
 /** Curated provider request options owned by the harness and snapshotted per turn. */
 export interface AgentHarnessStreamOptions {
@@ -240,22 +279,6 @@ export interface FileInfo {
 	mtimeMs: number;
 }
 
-/** Options for {@link Shell.exec}. */
-export interface ExecutionEnvExecOptions {
-	/** Working directory for the command. Relative paths are resolved against {@link ExecutionEnv.cwd}. Defaults to {@link ExecutionEnv.cwd}. */
-	cwd?: string;
-	/** Additional environment variables for the command. Values override the environment defaults. Defaults to no overrides. */
-	env?: Record<string, string>;
-	/** Timeout in seconds. Implementations should return a timeout error when the command exceeds this duration. Defaults to no timeout. */
-	timeout?: number;
-	/** Abort signal used to terminate the command. Defaults to no abort signal. */
-	abortSignal?: AbortSignal;
-	/** Called with stdout chunks as they are produced. */
-	onStdout?: (chunk: string) => void;
-	/** Called with stderr chunks as they are produced. */
-	onStderr?: (chunk: string) => void;
-}
-
 /**
  * Filesystem capability used by the harness.
  *
@@ -317,12 +340,30 @@ export interface FileSystem {
 	cleanup(): Promise<void>;
 }
 
+/** Options for {@link Shell.exec}. */
+export interface ShellExecOptions {
+	/** Working directory for the command. Relative paths are resolved against {@link ExecutionEnv.cwd}. Defaults to {@link ExecutionEnv.cwd}. */
+	cwd?: string;
+	/** Environment variables for the command. Values override inherited defaults when `inheritEnv` is true. */
+	env?: Record<string, string>;
+	/** Whether to inherit the execution environment's default variables. Defaults to true. */
+	inheritEnv?: boolean;
+	/** Timeout in seconds. Implementations should return a timeout error when the command exceeds this duration. Defaults to no timeout. */
+	timeout?: number;
+	/** Abort signal used to terminate the command. Defaults to no abort signal. */
+	abortSignal?: AbortSignal;
+	/** Called with stdout chunks as they are produced. */
+	onStdout?: (chunk: string) => void;
+	/** Called with stderr chunks as they are produced. */
+	onStderr?: (chunk: string) => void;
+}
+
 /** Shell execution capability used by the harness. */
 export interface Shell {
 	/** Execute a shell command in {@link FileSystem.cwd} unless `options.cwd` is provided. */
 	exec(
 		command: string,
-		options?: ExecutionEnvExecOptions,
+		options?: ShellExecOptions,
 	): Promise<Result<{ stdout: string; stderr: string; exitCode: number }, ExecutionError>>;
 	/** Release shell resources. Must be best-effort and must not throw or reject. */
 	cleanup(): Promise<void>;
@@ -354,12 +395,19 @@ export interface ModelChangeEntry extends SessionTreeEntryBase {
 	modelId: string;
 }
 
+export interface ActiveToolsChangeEntry extends SessionTreeEntryBase {
+	type: "active_tools_change";
+	activeToolNames: string[];
+}
+
 export interface CompactionEntry<T = unknown> extends SessionTreeEntryBase {
 	type: "compaction";
 	summary: string;
-	firstKeptEntryId: string;
+	firstKeptEntryId?: string;
 	tokensBefore: number;
+	retainedTail?: AgentMessage[];
 	details?: T;
+	usage?: Usage;
 	fromHook?: boolean;
 }
 
@@ -368,6 +416,7 @@ export interface BranchSummaryEntry<T = unknown> extends SessionTreeEntryBase {
 	fromId: string;
 	summary: string;
 	details?: T;
+	usage?: Usage;
 	fromHook?: boolean;
 }
 
@@ -405,6 +454,7 @@ export type SessionTreeEntry =
 	| MessageEntry
 	| ThinkingLevelChangeEntry
 	| ModelChangeEntry
+	| ActiveToolsChangeEntry
 	| CompactionEntry
 	| BranchSummaryEntry
 	| CustomEntry
@@ -417,6 +467,15 @@ export interface SessionContext {
 	messages: AgentMessage[];
 	thinkingLevel: string;
 	model: { provider: string; modelId: string } | null;
+	activeToolNames: string[] | null;
+}
+
+export interface SessionStats {
+	messageCount: number;
+	cachedTokens: number;
+	uncachedTokens: number;
+	totalTokens: number;
+	costTotal: number;
 }
 
 export interface SessionMetadata {
@@ -428,6 +487,12 @@ export interface JsonlSessionMetadata extends SessionMetadata {
 	cwd: string;
 	path: string;
 	parentSessionPath?: string;
+	metadata?: Record<string, unknown>;
+}
+
+export interface SessionEntryCursorOptions {
+	afterEntrySeq?: number;
+	limit?: number;
 }
 
 export interface SessionStorage<TMetadata extends SessionMetadata = SessionMetadata> {
@@ -442,8 +507,10 @@ export interface SessionStorage<TMetadata extends SessionMetadata = SessionMetad
 		type: TType,
 	): Promise<Array<Extract<SessionTreeEntry, { type: TType }>>>;
 	getLabel(id: string): Promise<string | undefined>;
-	getPathToRoot(leafId: string | null): Promise<SessionTreeEntry[]>;
-	getEntries(): Promise<SessionTreeEntry[]>;
+	getSessionName(): Promise<string | undefined>;
+	getSessionStats(): Promise<SessionStats>;
+	getPathToRootOrCompaction(leafId: string | null): Promise<SessionTreeEntry[]>;
+	getEntries(options?: SessionEntryCursorOptions): Promise<SessionTreeEntry[]>;
 }
 
 export type { Session } from "./session/session.ts";
@@ -473,6 +540,7 @@ export interface SessionRepo<
 export interface JsonlSessionCreateOptions extends SessionCreateOptions {
 	cwd: string;
 	parentSessionPath?: string;
+	metadata?: Record<string, unknown>;
 }
 
 export interface JsonlSessionListOptions {
@@ -563,6 +631,7 @@ export interface ToolResultEvent {
 	content: Array<TextContent | ImageContent>;
 	details: unknown;
 	isError: boolean;
+	usage?: Usage;
 }
 
 export interface SessionBeforeCompactEvent {
@@ -593,17 +662,45 @@ export interface SessionTreeEvent {
 	fromHook?: boolean;
 }
 
-export interface ModelSelectEvent {
-	type: "model_select";
+export interface RetryScheduledEvent {
+	type: "retry_scheduled";
+	operation: "compaction" | "branch_summary";
+	attempt: number;
+	maxAttempts: number;
+	delayMs: number;
+	errorMessage: string;
+}
+
+export interface RetryAttemptStartEvent {
+	type: "retry_attempt_start";
+	operation: "compaction" | "branch_summary";
+}
+
+export interface RetryFinishedEvent {
+	type: "retry_finished";
+	operation: "compaction" | "branch_summary";
+}
+
+export interface ModelUpdateEvent {
+	type: "model_update";
 	model: Model<any>;
 	previousModel: Model<any> | undefined;
 	source: "set" | "restore";
 }
 
-export interface ThinkingLevelSelectEvent {
-	type: "thinking_level_select";
+export interface ThinkingLevelUpdateEvent {
+	type: "thinking_level_update";
 	level: ThinkingLevel;
 	previousLevel: ThinkingLevel;
+}
+
+export interface ToolsUpdateEvent {
+	type: "tools_update";
+	toolNames: string[];
+	previousToolNames: string[];
+	activeToolNames: string[];
+	previousActiveToolNames: string[];
+	source: "set" | "restore";
 }
 
 export interface ResourcesUpdateEvent<
@@ -634,9 +731,13 @@ export type AgentHarnessOwnEvent<
 	| SessionCompactEvent
 	| SessionBeforeTreeEvent
 	| SessionTreeEvent
-	| ModelSelectEvent
-	| ThinkingLevelSelectEvent
-	| ResourcesUpdateEvent<TSkill, TPromptTemplate>;
+	| RetryScheduledEvent
+	| RetryAttemptStartEvent
+	| RetryFinishedEvent
+	| ModelUpdateEvent
+	| ThinkingLevelUpdateEvent
+	| ResourcesUpdateEvent<TSkill, TPromptTemplate>
+	| ToolsUpdateEvent;
 
 export type AgentHarnessEvent<TSkill extends Skill = Skill, TPromptTemplate extends PromptTemplate = PromptTemplate> =
 	| AgentEvent
@@ -668,6 +769,7 @@ export interface ToolResultPatch {
 	content?: Array<TextContent | ImageContent>;
 	details?: unknown;
 	isError?: boolean;
+	usage?: Usage;
 	terminate?: boolean;
 }
 
@@ -678,7 +780,12 @@ export interface SessionBeforeCompactResult {
 
 export interface SessionBeforeTreeResult {
 	cancel?: boolean;
-	summary?: { summary: string; details?: unknown };
+	summary?: {
+		summary: string;
+		details?: unknown;
+		/** Usage from the LLM call that generated this summary, if available. */
+		usage?: Usage;
+	};
 	customInstructions?: string;
 	replaceInstructions?: boolean;
 	label?: string;
@@ -696,9 +803,13 @@ export type AgentHarnessEventResultMap = {
 	session_compact: undefined;
 	session_before_tree: SessionBeforeTreeResult | undefined;
 	session_tree: undefined;
-	model_select: undefined;
-	thinking_level_select: undefined;
+	retry_scheduled: undefined;
+	retry_attempt_start: undefined;
+	retry_finished: undefined;
+	model_update: undefined;
+	thinking_level_update: undefined;
 	resources_update: undefined;
+	tools_update: undefined;
 	queue_update: undefined;
 	save_point: undefined;
 	abort: undefined;
@@ -716,8 +827,11 @@ export interface AbortResult {
 
 export interface CompactResult {
 	summary: string;
-	firstKeptEntryId: string;
+	firstKeptEntryId?: string;
 	tokensBefore: number;
+	/** Usage from the LLM call(s) that generated this summary, if available. */
+	usage?: Usage;
+	retainedTail?: AgentMessage[];
 	details?: unknown;
 }
 
@@ -737,6 +851,7 @@ export interface CompactionPreparation {
 	firstKeptEntryId: string;
 	messagesToSummarize: AgentMessage[];
 	turnPrefixMessages: AgentMessage[];
+	retainedTail: AgentMessage[];
 	isSplitTurn: boolean;
 	tokensBefore: number;
 	previousSummary?: string;
@@ -773,43 +888,71 @@ export interface GenerateBranchSummaryOptions {
 
 export interface BranchSummaryResult {
 	summary: string;
+	usage?: Usage;
 	readFiles: string[];
 	modifiedFiles: string[];
 }
 
-export interface AgentHarnessOptions<
+export type AgentHarnessSystemPrompt<
+	TContext extends object | undefined = undefined,
 	TSkill extends Skill = Skill,
 	TPromptTemplate extends PromptTemplate = PromptTemplate,
-	TTool extends AgentTool = AgentTool,
+	TTool extends AgentHarnessTool<TContext> = AgentHarnessTool<TContext>,
+> =
+	| string
+	| ((context: {
+			session: Session;
+			model: Model<any>;
+			thinkingLevel: ThinkingLevel;
+			activeTools: TTool[];
+			resources: AgentHarnessResources<TSkill, TPromptTemplate>;
+	  }) => string | Promise<string>);
+
+interface AgentHarnessOptionsBase<
+	TContext extends object | undefined,
+	TSkill extends Skill,
+	TPromptTemplate extends PromptTemplate,
+	TTool extends AgentHarnessTool<TContext>,
 > {
-	env: ExecutionEnv;
 	session: Session;
+	/**
+	 * Provider collection used for all model requests (turn streaming,
+	 * compaction, branch summarization). Auth resolves through the providers'
+	 * auth.
+	 */
+	models: Models;
 	tools?: TTool[];
 	/**
 	 * Concrete resources available to explicit invocation methods and system-prompt callbacks.
 	 * Applications own loading/reloading resources and should call `setResources()` with new values.
 	 */
 	resources?: AgentHarnessResources<TSkill, TPromptTemplate>;
-	systemPrompt?:
-		| string
-		| ((context: {
-				env: ExecutionEnv;
-				session: Session;
-				model: Model<any>;
-				thinkingLevel: ThinkingLevel;
-				activeTools: TTool[];
-				resources: AgentHarnessResources<TSkill, TPromptTemplate>;
-		  }) => string | Promise<string>);
-	getApiKeyAndHeaders?: (
-		model: Model<any>,
-	) => Promise<{ apiKey: string; headers?: Record<string, string> } | undefined>;
+	systemPrompt?: AgentHarnessSystemPrompt<TContext, TSkill, TPromptTemplate, TTool>;
 	/** Curated stream/provider request options. Snapshotted at turn start. */
 	streamOptions?: AgentHarnessStreamOptions;
+	/** Optional retry policy for generated compaction and branch-summary requests. */
+	retry?: RetryPolicy;
 	model: Model<any>;
 	thinkingLevel?: ThinkingLevel;
 	activeToolNames?: string[];
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 }
+
+export type AgentHarnessOptions<
+	TContext extends object | undefined = undefined,
+	TSkill extends Skill = Skill,
+	TPromptTemplate extends PromptTemplate = PromptTemplate,
+	TTool extends AgentHarnessTool<TContext> = AgentHarnessTool<TContext>,
+> = AgentHarnessOptionsBase<TContext, TSkill, TPromptTemplate, TTool> &
+	([TContext] extends [undefined]
+		? {
+				/** Context-free harnesses do not need a tool context. */
+				toolContext?: undefined;
+			}
+		: {
+				/** Static context or zero-argument context provider resolved for each turn snapshot. */
+				toolContext: AgentHarnessToolContextSource<TContext>;
+			});
 
 export type { AgentHarness } from "./agent-harness.ts";
