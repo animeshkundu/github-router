@@ -112,6 +112,19 @@ describe("engine to Pi constructor contract", () => {
       })
       expect(result.isError).not.toBe(true)
       expect(captured).toBeDefined()
+      expect(
+        Object.keys(captured ?? {}).sort(),
+        "Engine AgentOptions changed; update the wiring decision table in docs/pi-vendor-sync.md before accepting or rejecting the surface change",
+      ).toEqual([
+        "afterToolCall",
+        "beforeToolCall",
+        "initialState",
+        "prepareNextTurn",
+        "shouldStopAfterTurn",
+        "streamFn",
+        "toolExecution",
+        "transformContext",
+      ])
       expect(captured?.toolExecution).toBe("parallel")
       expect(captured?.initialState).toMatchObject({
         systemPrompt: expect.any(String),
@@ -175,6 +188,31 @@ describe("vendored Pi runtime contracts", () => {
     const { providerCalls } = await runAgent([terminal], batch([{ name: "submit_answer" }]))
     expect(executions).toBe(1)
     expect(providerCalls).toBe(1)
+  })
+
+  test("shouldStopAfterTurn reaches the Agent loop and prevents another provider request", async () => {
+    let hookCalls = 0
+    const tool: AgentTool<TSchema, Record<string, never>> = {
+      name: "bounded",
+      label: "bounded",
+      description: "bounded",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      execute: async () => result("bounded result"),
+    }
+    const { providerCalls } = await runAgent([tool], batch([{ name: "bounded" }]), {
+      shouldStopAfterTurn: () => {
+        hookCalls += 1
+        return true
+      },
+    })
+    expect(
+      hookCalls,
+      "Vendored Agent did not receive shouldStopAfterTurn; restore the local patch documented in docs/pi-vendor-sync.md",
+    ).toBe(1)
+    expect(
+      providerCalls,
+      "shouldStopAfterTurn was not applied by the Agent loop; see the wiring decision table in docs/pi-vendor-sync.md",
+    ).toBe(1)
   })
 
   test("beforeToolCall {block, reason} prevents execution and emits an error tool result", async () => {
