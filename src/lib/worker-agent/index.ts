@@ -10,7 +10,13 @@
  * stable.
  */
 
-export { BROWSE_DEFAULT_MODEL, DEFAULT_MODEL, runWorkerAgent } from "./engine"
+export {
+  BROWSE_DEFAULT_MODEL,
+  DEFAULT_MODEL,
+  resolveModeDefaults,
+  runWorkerAgent,
+} from "./engine"
+export { WORKER_THINKING_LEVELS } from "./model-resolve"
 export type {
   BudgetConfig,
   ThinkingLevel,

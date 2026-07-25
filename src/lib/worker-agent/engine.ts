@@ -89,6 +89,8 @@ import {
   registerExitHandlers,
 } from "./lifecycle"
 import { resolveModelAndThinking } from "./model-resolve"
+import { getWorkerSessionDefault } from "./session-defaults"
+import type { WorkerMode } from "./session-defaults"
 import { systemPromptFor } from "./prompts"
 import { type AuditCtx, logAudit } from "./redact"
 import { acquireWorkerSlot } from "./semaphore"
@@ -174,6 +176,11 @@ const REVIEW_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 export const IMPLEMENT_DEFAULT_MODEL = "gpt-5.6-sol"
 const IMPLEMENT_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 
+/** `test` starts with the same built-in pair as `implement`, but remains an
+ * independent mode so either can be overridden without affecting the other. */
+export const TEST_DEFAULT_MODEL = "gpt-5.6-sol"
+const TEST_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
+
 /** Default model for `browse` mode. `gpt-5.4-mini` — the Gate-B-winning
  *  browse model (small + fast enough to drive a tab at human pace, with
  *  enough tool-calling discipline to terminate). This is DISTINCT from the
@@ -202,6 +209,40 @@ const BROWSE_DEFAULT_THINKING: WorkerThinkingLevel = "high"
  *  `implement`'s `gpt-5.6-sol`. Caller's `model` arg still wins. */
 export const PLAN_DEFAULT_MODEL = "claude-opus-5"
 const PLAN_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
+
+export interface EffectiveModeDefaults {
+  model: string
+  thinking: WorkerThinkingLevel
+  modelSource: "override" | "built-in"
+  thinkingSource: "override" | "built-in"
+}
+
+const BUILT_IN_MODE_DEFAULTS: Readonly<Record<WorkerMode, {
+  model: string
+  thinking: WorkerThinkingLevel
+}>> = Object.freeze({
+  explore: { model: EXPLORE_DEFAULT_MODEL, thinking: EXPLORE_DEFAULT_THINKING },
+  review: { model: REVIEW_DEFAULT_MODEL, thinking: REVIEW_DEFAULT_THINKING },
+  plan: { model: PLAN_DEFAULT_MODEL, thinking: PLAN_DEFAULT_THINKING },
+  implement: { model: IMPLEMENT_DEFAULT_MODEL, thinking: IMPLEMENT_DEFAULT_THINKING },
+  test: { model: TEST_DEFAULT_MODEL, thinking: TEST_DEFAULT_THINKING },
+  browse: { model: BROWSE_DEFAULT_MODEL, thinking: BROWSE_DEFAULT_THINKING },
+})
+
+/** Resolve the effective mode ladder without changing the gate sentinel. */
+export function resolveModeDefaults(mode: WorkerMode): EffectiveModeDefaults {
+  const builtIn = BUILT_IN_MODE_DEFAULTS[mode] ?? {
+    model: DEFAULT_MODEL,
+    thinking: DEFAULT_THINKING,
+  }
+  const override = getWorkerSessionDefault(mode)
+  return {
+    model: override.model ?? builtIn.model,
+    thinking: override.thinking ?? builtIn.thinking,
+    modelSource: override.model === undefined ? "built-in" : "override",
+    thinkingSource: override.thinking === undefined ? "built-in" : "override",
+  }
+}
 
 /**
  * `Model<any>` shim used to satisfy `Agent.initialState.model` typing.
@@ -304,56 +345,16 @@ async function runWorkerAgentOnce(
   }
 
   try {
-    // Step 2: model + thinking validation. `resolveModelAndThinking`
-    // returns a Result; on `ok:false` we emit the diagnostic verbatim
-    // (it already enumerates the catalog's tool_call-capable models
-    // on unknown-model errors, so the caller knows what to retry with).
-    //
-    // Per-mode defaults (an explicit `opts.model`/`opts.thinking` always
-    // wins): read-only `explore` → `EXPLORE_DEFAULT_MODEL` (gemini-3.6-flash, high);
-    // read-only `review` → `REVIEW_DEFAULT_MODEL` (gemini-3.1-pro-preview,
-    // xhigh→high — a cross-lab reviewer deliberately decorrelated from the
-    // gpt-5.6-sol implementer); read-only `plan`
-    // → `PLAN_DEFAULT_MODEL` (claude-opus-5, xhigh — planning is the
-    // highest-leverage step, so it gets the strongest model);
-    // read+write `implement`/`test` → `IMPLEMENT_DEFAULT_MODEL` (gpt-5.6-sol, xhigh
-    // — coding/test-authoring wants max reasoning); `browse` →
-    // `BROWSE_DEFAULT_MODEL` (gpt-5.4-mini). Distinct workloads, distinct
-    // defaults.
-    const isBrowse = opts.mode === "browse"
-    const isPlan = opts.mode === "plan"
-    const isReview = opts.mode === "review"
-    const isWriteCapable = opts.mode === "implement" || opts.mode === "test"
-    const isExplore = opts.mode === "explore"
-    const defaultModel = isBrowse
-      ? BROWSE_DEFAULT_MODEL
-      : isPlan
-        ? PLAN_DEFAULT_MODEL
-        : isReview
-          ? REVIEW_DEFAULT_MODEL
-          : isWriteCapable
-            ? IMPLEMENT_DEFAULT_MODEL
-            : isExplore
-              ? EXPLORE_DEFAULT_MODEL
-              : DEFAULT_MODEL
-    const defaultThinking = isBrowse
-      ? BROWSE_DEFAULT_THINKING
-      : isPlan
-        ? PLAN_DEFAULT_THINKING
-        : isReview
-          ? REVIEW_DEFAULT_THINKING
-          : isWriteCapable
-            ? IMPLEMENT_DEFAULT_THINKING
-            : isExplore
-              ? EXPLORE_DEFAULT_THINKING
-              : DEFAULT_THINKING
+    // Step 2 is resolved by the public entry before the retry wrapper. Both
+    // attempts therefore use the same concrete pair even if a process-wide
+    // session override changes while the first attempt is running.
     const resolved = resolveModelAndThinking({
-      model: opts.model ?? defaultModel,
-      thinking: opts.thinking ?? defaultThinking,
+      model: opts.model!,
+      thinking: opts.thinking!,
     })
-    if (!resolved.ok) {
-      return { text: resolved.error, isError: true }
-    }
+    if (!resolved.ok) return { text: resolved.error, isError: true }
+
+    const isBrowse = opts.mode === "browse"
 
     // Per-run context budget from the resolved model's catalog window.
     // Undefined when the window is unknown → compaction + the per-result cap
@@ -806,8 +807,17 @@ export async function withNoOutputRetry(
  * implementation (`runWorkerAgentOnce`); the signature is unchanged so every
  * caller (MCP dispatch, the orchestration runner) gets the retry for free.
  */
+export function resolveWorkerRunOpts(opts: WorkerAgentOpts): WorkerAgentOpts {
+  const defaults = resolveModeDefaults(opts.mode)
+  return {
+    ...opts,
+    model: opts.model ?? defaults.model,
+    thinking: opts.thinking ?? defaults.thinking,
+  }
+}
+
 export async function runWorkerAgent(opts: WorkerAgentOpts): Promise<WorkerAgentResult> {
-  return withNoOutputRetry(runWorkerAgentOnce, opts)
+  return withNoOutputRetry(runWorkerAgentOnce, resolveWorkerRunOpts(opts))
 }
 
 // ============================================================

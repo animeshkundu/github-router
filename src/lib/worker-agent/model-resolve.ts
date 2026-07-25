@@ -39,14 +39,16 @@ import type { ThinkingLevel, WorkerThinkingLevel } from "./types"
  * the clamp logic. Lower index = less thinking. `"off"` is below
  * everything; `"xhigh"` is the cap.
  */
-const THINKING_ORDER: ReadonlyArray<WorkerThinkingLevel> = [
+export const WORKER_THINKING_LEVELS: ReadonlyArray<WorkerThinkingLevel> = Object.freeze([
   "off",
   "minimal",
   "low",
   "medium",
   "high",
   "xhigh",
-]
+])
+
+const THINKING_ORDER = WORKER_THINKING_LEVELS
 
 function tier(level: WorkerThinkingLevel): number {
   const i = THINKING_ORDER.indexOf(level)
@@ -137,9 +139,8 @@ export function resolveModelAndThinking(opts: ResolveOpts): ResolveResult {
   // Narrow the allowlist to known levels and rank them by tier.
   const allowed = allowedRaw
     .filter((l): l is ThinkingLevel =>
-      (["minimal", "low", "medium", "high", "xhigh"] as const).includes(
-        l as ThinkingLevel,
-      ),
+      WORKER_THINKING_LEVELS.includes(l as WorkerThinkingLevel)
+      && l !== "off",
     )
     .sort((a, b) => tier(a) - tier(b))
 

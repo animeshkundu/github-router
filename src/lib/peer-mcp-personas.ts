@@ -41,7 +41,20 @@ import {
   hasBrowseSession,
   releaseBrowseSession,
 } from "~/lib/browser-mcp/session-registry"
-import { runWorkerAgent, type WorkerThinkingLevel } from "~/lib/worker-agent"
+import {
+  resolveModeDefaults,
+  runWorkerAgent,
+  WORKER_THINKING_LEVELS,
+  type WorkerThinkingLevel,
+} from "~/lib/worker-agent"
+import { resolveModelAndThinking } from "~/lib/worker-agent/model-resolve"
+import {
+  resetAllWorkerSessionDefaults,
+  resetWorkerSessionDefault,
+  setWorkerSessionDefault,
+  WORKER_MODES,
+  type WorkerMode,
+} from "~/lib/worker-agent/session-defaults"
 // Budget helpers use a SUB-PATH import (`~/lib/worker-agent/budget`, not the
 // `~/lib/worker-agent` index above) so they pull in only the leaf `budget.ts`
 // (+ its type-only import) and do not reintroduce the
@@ -1286,6 +1299,97 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     // the JSON-RPC arguments into a typed `WorkerAgentOpts` and forwards the
     // resulting `{text, isError?}` envelope verbatim.
     {
+      toolNameHttp: "worker_defaults",
+      group: "workers",
+      capability: "worker",
+      description:
+        "Sets or clears process-wide worker model/reasoning defaults and returns "
+        + "the full effective table. Omit arguments to inspect current values. "
+        + "Per-call worker arguments still take precedence; values are in-memory "
+        + "and apply to every client served by this process.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          mode: {
+            type: "string",
+            enum: WORKER_MODES,
+            description: "Worker mode to set or clear.",
+          },
+          model: {
+            type: "string",
+            description: "Copilot catalog model id to use by default for the mode.",
+          },
+          thinking: {
+            type: "string",
+            enum: WORKER_THINKING_LEVELS,
+            description: "Requested default reasoning level; clamped per run for the selected model.",
+          },
+          clear: {
+            type: "boolean",
+            description: "When true, clears both overrides for the selected mode.",
+          },
+          clearAll: {
+            type: "boolean",
+            description: "When true, clears overrides for every worker mode.",
+          },
+        },
+      },
+      async handler(args: Record<string, unknown>): Promise<{
+        content: Array<{ type: "text"; text: string }>
+        isError?: boolean
+      }> {
+        const mode = typeof args.mode === "string"
+          && (WORKER_MODES as ReadonlyArray<string>).includes(args.mode)
+          ? args.mode as WorkerMode
+          : undefined
+        const model = typeof args.model === "string" ? args.model : undefined
+        const thinking = typeof args.thinking === "string"
+          && (WORKER_THINKING_LEVELS as ReadonlyArray<string>).includes(args.thinking)
+          ? args.thinking as WorkerThinkingLevel
+          : undefined
+        const clear = args.clear === true
+        const clearAll = args.clearAll === true
+        const invalid =
+          (args.mode !== undefined && mode === undefined)
+          || (args.model !== undefined && model === undefined)
+          || (args.thinking !== undefined && thinking === undefined)
+          || (args.clear !== undefined && typeof args.clear !== "boolean")
+          || (args.clearAll !== undefined && typeof args.clearAll !== "boolean")
+          || (clearAll && (mode !== undefined || model !== undefined || thinking !== undefined || clear))
+          || (clear && (mode === undefined || model !== undefined || thinking !== undefined))
+          || (!clearAll && !clear && (model !== undefined || thinking !== undefined) && mode === undefined)
+        if (invalid) {
+          return {
+            content: [{ type: "text", text: "worker_defaults: use mode with model/thinking or clear:true; clearAll:true must stand alone" }],
+            isError: true,
+          }
+        }
+
+        if (clearAll) resetAllWorkerSessionDefaults()
+        else if (clear && mode) resetWorkerSessionDefault(mode)
+        else if (mode && (model !== undefined || thinking !== undefined)) {
+          const current = resolveModeDefaults(mode)
+          const validation = resolveModelAndThinking({
+            model: model ?? current.model,
+            thinking: thinking ?? current.thinking,
+          })
+          if (!validation.ok) {
+            return {
+              content: [{ type: "text", text: validation.error }],
+              isError: true,
+            }
+          }
+          setWorkerSessionDefault(mode, { model, thinking })
+        }
+
+        const table = Object.fromEntries(
+          WORKER_MODES.map((workerMode) => [workerMode, resolveModeDefaults(workerMode)]),
+        )
+        return { content: [{ type: "text", text: JSON.stringify(table) }] }
+      },
+    },
+    {
       toolNameHttp: "explore",
       group: "workers",
       capability: "worker",
@@ -1325,10 +1429,10 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           },
           thinking: {
             type: "string",
-            enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
+            enum: WORKER_THINKING_LEVELS,
             description:
-              "Optional reasoning depth (default xhigh). Silently "
-              + "clamped to the model's allowed range; \"off\" drops "
+              "Optional reasoning depth. Use worker_defaults to inspect the "
+              + "effective value. Silently clamped to the model's allowed range; \"off\" drops "
               + "the parameter entirely.",
           },
           workspace: {
@@ -1414,10 +1518,10 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           },
           thinking: {
             type: "string",
-            enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
+            enum: WORKER_THINKING_LEVELS,
             description:
-              "Optional reasoning depth (default xhigh). Silently "
-              + "clamped to the model's allowed range; \"off\" drops "
+              "Optional reasoning depth. Use worker_defaults to inspect the "
+              + "effective value. Silently clamped to the model's allowed range; \"off\" drops "
               + "the parameter entirely.",
           },
           workspace: {
@@ -1495,7 +1599,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           },
           thinking: {
             type: "string",
-            enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
+            enum: WORKER_THINKING_LEVELS,
             description:
               "Optional reasoning depth (defaults to xhigh, clamped to high "
               + "for the default review model). Silently clamped to the model's "
@@ -1572,10 +1676,10 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           },
           thinking: {
             type: "string",
-            enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
+            enum: WORKER_THINKING_LEVELS,
             description:
-              "Optional reasoning depth (default xhigh). Silently "
-              + "clamped to the model's allowed range; \"off\" drops "
+              "Optional reasoning depth. Use worker_defaults to inspect the "
+              + "effective value. Silently clamped to the model's allowed range; \"off\" drops "
               + "the parameter entirely.",
           },
           workspace: {
@@ -1662,10 +1766,10 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           },
           thinking: {
             type: "string",
-            enum: ["off", "minimal", "low", "medium", "high", "xhigh"],
+            enum: WORKER_THINKING_LEVELS,
             description:
-              "Optional reasoning depth (default xhigh). Silently "
-              + "clamped to the model's allowed range; \"off\" drops "
+              "Optional reasoning depth. Use worker_defaults to inspect the "
+              + "effective value. Silently clamped to the model's allowed range; \"off\" drops "
               + "the parameter entirely.",
           },
           workspace: {
@@ -2245,14 +2349,7 @@ async function runWorkerToolCall(call: {
     }
   }
   const thinkingRaw = args.thinking
-  const ALLOWED_THINKING: ReadonlyArray<WorkerThinkingLevel> = [
-    "off",
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-  ]
+  const ALLOWED_THINKING = WORKER_THINKING_LEVELS
   let thinking: WorkerThinkingLevel | undefined
   if (thinkingRaw !== undefined) {
     if (
