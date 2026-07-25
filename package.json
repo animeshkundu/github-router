@@ -40,6 +40,7 @@
     "prepack": "bun run build",
     "prepare": "(simple-git-hooks || true)",
     "probe:copilot": "bash scripts/probe-copilot-compat.sh --strict",
+    "smoke:workers": "bun scripts/smoke-workers.ts",
     "release": "./publish/release.sh",
     "start": "NODE_ENV=production bun run ./src/main.ts",
     "test": "bun test",

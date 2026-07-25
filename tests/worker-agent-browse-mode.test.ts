@@ -29,6 +29,7 @@ import os from "node:os"
 import path from "node:path"
 
 import { state } from "~/lib/state"
+import { recordingFetch, sseFinalText, sseToolCall } from "./helpers/worker-sse"
 import {
   BROWSE_DEFAULT_MODEL,
   DEFAULT_MODEL,
@@ -94,85 +95,7 @@ function fakeModel(
   }
 }
 
-/** "Model emits one text turn then stops" — chat-completions SSE shape. */
-function sseFinalText(text: string): Response {
-  const body =
-    `data: ${JSON.stringify({
-      choices: [{ delta: { content: text }, finish_reason: null }],
-    })}\n\n` +
-    `data: ${JSON.stringify({
-      choices: [{ delta: {}, finish_reason: "stop" }],
-    })}\n\n` +
-    "data: [DONE]\n\n"
-  return new Response(body, {
-    headers: { "content-type": "text/event-stream" },
-  })
-}
-
-/**
- * "Model calls one tool then finishes (finish_reason=tool_calls)" — the shape
- * Pi's chat stream-fn parses into a tool call. The browse terminal tools
- * (`submit_answer` / `report_insufficient`) set `terminate:true`, so the loop
- * stops after this single turn with the answer living in the tool ARGS.
- */
-function sseToolCall(name: string, args: Record<string, unknown>): Response {
-  const body =
-    `data: ${JSON.stringify({
-      choices: [
-        {
-          delta: {
-            tool_calls: [
-              {
-                index: 0,
-                id: "call_1",
-                type: "function",
-                function: { name, arguments: JSON.stringify(args) },
-              },
-            ],
-          },
-          finish_reason: null,
-        },
-      ],
-    })}\n\n` +
-    `data: ${JSON.stringify({
-      choices: [{ delta: {}, finish_reason: "tool_calls" }],
-    })}\n\n` +
-    "data: [DONE]\n\n"
-  return new Response(body, {
-    headers: { "content-type": "text/event-stream" },
-  })
-}
-
-interface CapturedBody {
-  model?: string
-  tools?: Array<{ type: string; function: { name: string } }>
-  reasoning_effort?: string
-}
-
-/**
- * A `globalThis.fetch` mock that (1) records the JSON request body of every
- * upstream call so the test can assert model + tools, and (2) returns
- * `response()` each time.
- */
-function recordingFetch(response: () => Response): {
-  fetchMock: typeof fetch
-  bodies: Array<CapturedBody>
-} {
-  const bodies: Array<CapturedBody> = []
-  const fetchMock = mock((_url: string, init?: RequestInit) => {
-    if (init?.body && typeof init.body === "string") {
-      try {
-        bodies.push(JSON.parse(init.body) as CapturedBody)
-      } catch {
-        /* non-JSON body — ignore for this assertion surface */
-      }
-    }
-    return Promise.resolve(response())
-  }) as unknown as typeof fetch
-  return { fetchMock, bodies }
-}
-
-function toolNamesOf(body: CapturedBody | undefined): Array<string> {
+function toolNamesOf(body: { tools?: Array<{ function: { name: string } }> } | undefined): Array<string> {
   return (body?.tools ?? []).map((t) => t.function.name)
 }
 

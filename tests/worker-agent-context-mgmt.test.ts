@@ -11,6 +11,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core"
 
 import {
   type ContextBudget,
+  FALLBACK_WINDOW_TOKENS,
   makeContextBudget,
   tokensFromBytes,
 } from "../src/lib/worker-agent/context-budget"
@@ -73,16 +74,53 @@ function assistantText(text: string, usageTotal?: number): AgentMessage {
   } as unknown as AgentMessage
 }
 
+const MODEL_WINDOW_FIXTURES = [
+  { id: "claude-opus-5", windowTokens: 1_000_000 },
+  { id: "gemini-3.6-flash", windowTokens: 1_000_000 },
+  { id: "gpt-5.6-sol", windowTokens: 1_050_000 },
+  { id: "gpt-5.4-mini", windowTokens: 400_000 },
+  { id: "gpt-5.3-codex", windowTokens: 272_000 },
+  { id: "small-window-canary", windowTokens: 128_000 },
+] as const
+
+function overTriggerTranscript(budget: ContextBudget): AgentMessage[] {
+  // bytes/3 is the structural floor. Add a fixed margin so this cannot sit on
+  // a rounding boundary, and put the bulk in a tool result that can be stubbed.
+  const bulkyBytes = budget.compactTriggerTokens * 3 + 1024
+  return [
+    user("audit context defenses"),
+    assistantToolCall("old-read", "read", { path: "fixture.ts" }),
+    toolResult("old-read", "read", "Z".repeat(bulkyBytes)),
+    user("continue"),
+    assistantToolCall("recent-read", "read", { path: "recent.ts" }),
+    toolResult("recent-read", "read", "recent result"),
+    assistantText("done"),
+  ]
+}
+
+function assertToolPairing(messages: AgentMessage[]): void {
+  const callIds = messages
+    .filter((m) => (m as { role?: string }).role === "assistant")
+    .flatMap((m) =>
+      ((m as { content?: Array<{ type?: string; id?: string }> }).content ?? [])
+        .filter((b) => b.type === "toolCall")
+        .map((b) => b.id),
+    )
+  const resultIds = messages
+    .filter((m) => (m as { role?: string }).role === "toolResult")
+    .map((m) => (m as { toolCallId?: string }).toolCallId)
+  expect(callIds).toEqual(resultIds)
+}
+
 // ============================================================
 // makeContextBudget
 // ============================================================
 
 describe("makeContextBudget", () => {
-  test("undefined / non-positive window → undefined (no blind pruning)", () => {
-    expect(makeContextBudget(undefined)).toBeUndefined()
-    expect(makeContextBudget(0)).toBeUndefined()
-    expect(makeContextBudget(-5)).toBeUndefined()
-    expect(makeContextBudget(NaN)).toBeUndefined()
+  test("unknown / invalid windows use the conservative defense floor", () => {
+    for (const window of [undefined, 0, -5, NaN, Number.POSITIVE_INFINITY]) {
+      expect(makeContextBudget(window).windowTokens).toBe(FALLBACK_WINDOW_TOKENS)
+    }
   })
 
   test("gpt-5.4-mini-class window yields ordered thresholds + a large read cap", () => {
@@ -108,6 +146,84 @@ describe("makeContextBudget", () => {
   test("tokensFromBytes over-counts (bytes/3, conservative)", () => {
     expect(tokensFromBytes(300)).toBe(100)
     expect(tokensFromBytes(0)).toBe(0)
+  })
+})
+
+describe("cross-model structural compaction", () => {
+  for (const { id, windowTokens } of MODEL_WINDOW_FIXTURES) {
+    test(`${id}: ordered budget, bounded pairing-safe compaction, deterministic output`, () => {
+      const budget = makeContextBudget(windowTokens)
+      expect(budget.windowTokens).toBe(windowTokens)
+      expect(budget.pruneTargetTokens).toBeLessThan(budget.compactTriggerTokens)
+      expect(budget.compactTriggerTokens).toBeLessThan(budget.hardLimitTokens)
+      expect(budget.hardLimitTokens).toBeLessThanOrEqual(budget.promptBudgetTokens)
+      expect(budget.keepRecentTokens).toBeGreaterThan(0)
+      expect(budget.keepRecentTokens).toBeLessThanOrEqual(budget.maxProtectedTokens)
+      expect(budget.maxProtectedTokens).toBeLessThan(budget.promptBudgetTokens)
+
+      const transcript = overTriggerTranscript(budget)
+      expect(compaction.structuralTokens(transcript)).toBeGreaterThan(
+        budget.compactTriggerTokens,
+      )
+
+      const out = compactWorkerContext(transcript, budget)
+      expect(JSON.stringify(out)).toContain("elided")
+      expect(compaction.structuralTokens(out)).toBeLessThanOrEqual(budget.hardLimitTokens)
+      expect(out).toHaveLength(transcript.length)
+      assertToolPairing(out)
+
+      const repeated = compactWorkerContext(overTriggerTranscript(budget), budget)
+      expect(repeated).toEqual(out)
+    })
+  }
+
+  test("a resolved tool model with no catalog window uses the floor and compacts", () => {
+    const resolvedModel = {
+      id: "future-tool-model",
+      capabilities: { supports: { tool_calls: true }, limits: {} },
+    }
+    const budget = makeContextBudget(
+      (resolvedModel.capabilities.limits as { max_context_window_tokens?: number })
+        .max_context_window_tokens,
+    )
+    expect(budget.windowTokens).toBe(FALLBACK_WINDOW_TOKENS)
+
+    const transcript = overTriggerTranscript(budget)
+    const out = compactWorkerContext(transcript, budget)
+    expect(JSON.stringify(out)).toContain("elided")
+    expect(compaction.structuralTokens(out)).toBeLessThanOrEqual(budget.hardLimitTokens)
+    expect(out).toHaveLength(transcript.length)
+    assertToolPairing(out)
+  })
+})
+
+describe("worker catalog context-window canary", () => {
+  test("every fixture model that supports tools reports a context window", () => {
+    const catalog = [
+      ...MODEL_WINDOW_FIXTURES.map(({ id, windowTokens }) => ({
+        id,
+        capabilities: {
+          supports: { tool_calls: true },
+          limits: { max_context_window_tokens: windowTokens },
+        },
+      })),
+      {
+        id: "non-tool-model-without-window",
+        capabilities: { supports: { tool_calls: false }, limits: {} },
+      },
+    ]
+
+    const missingWindows = catalog
+      .filter((model) => model.capabilities.supports.tool_calls === true)
+      .filter((model) => {
+        const window = (
+          model.capabilities.limits as { max_context_window_tokens?: number }
+        ).max_context_window_tokens
+        return window === undefined || !Number.isFinite(window) || window <= 0
+      })
+      .map((model) => model.id)
+
+    expect(missingWindows).toEqual([])
   })
 })
 

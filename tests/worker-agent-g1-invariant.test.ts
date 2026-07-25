@@ -22,45 +22,12 @@ import { Agent } from "@earendil-works/pi-agent-core"
 import { state } from "~/lib/state"
 import { __testExports as engineInternals } from "~/lib/worker-agent/engine"
 import { createCopilotStreamFn } from "~/lib/worker-agent/stream-fn"
+import { sseText, sseToolCall } from "./helpers/worker-sse"
 
 const MODEL = "g1-chat-model"
 const originalModels = state.models
 const originalToken = state.copilotToken
 const originalFetch = globalThis.fetch
-
-function sse(body: string): Response {
-  return new Response(body, { headers: { "content-type": "text/event-stream" } })
-}
-function sseToolCall(name: string): Response {
-  return sse(
-    `data: ${JSON.stringify({
-      choices: [
-        {
-          delta: {
-            tool_calls: [
-              {
-                index: 0,
-                id: "call_1",
-                type: "function",
-                function: { name, arguments: "{}" },
-              },
-            ],
-          },
-          finish_reason: null,
-        },
-      ],
-    })}\n\n`
-    + `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] })}\n\n`
-    + "data: [DONE]\n\n",
-  )
-}
-function sseText(text: string): Response {
-  return sse(
-    `data: ${JSON.stringify({ choices: [{ delta: { content: text }, finish_reason: null }] })}\n\n`
-    + `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`
-    + "data: [DONE]\n\n",
-  )
-}
 
 beforeEach(() => {
   state.models = {

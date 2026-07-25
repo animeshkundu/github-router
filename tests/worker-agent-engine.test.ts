@@ -40,6 +40,7 @@ import path from "node:path"
 
 import { state } from "~/lib/state"
 import { runWorkerAgent, __testExports } from "~/lib/worker-agent/engine"
+import { sseFinalText } from "./helpers/worker-sse"
 import {
   MAX_INFLIGHT_WORKER_CALLS,
   __getInFlightForTests,
@@ -105,24 +106,6 @@ function fakeModel(
     },
     supported_endpoints: ["/v1/chat/completions"],
   }
-}
-
-/** Build a minimal SSE Response that satisfies Copilot's wire shape. */
-function sseResponse(chunks: Array<object>): Response {
-  const body =
-    chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") +
-    "data: [DONE]\n\n"
-  return new Response(body, {
-    headers: { "content-type": "text/event-stream" },
-  })
-}
-
-/** Simple "model emits one text turn then stops" SSE. */
-function sseFinalText(text: string): Response {
-  return sseResponse([
-    { choices: [{ delta: { content: text }, finish_reason: null }] },
-    { choices: [{ delta: {}, finish_reason: "stop" }] },
-  ])
 }
 
 // ---------------------------------------------------------------------
