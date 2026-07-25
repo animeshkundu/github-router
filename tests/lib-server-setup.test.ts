@@ -320,7 +320,7 @@ describe("getClaudeCodeEnvVars", () => {
     }
   })
 
-  test("defaults ANTHROPIC_DEFAULT_OPUS_MODEL to bare claude-opus-4-8 (NO [1m] — the active default's [1m] decoration lives on ANTHROPIC_MODEL via pickClaudeDefault, which is cap-aware)", () => {
+  test("defaults ANTHROPIC_DEFAULT_OPUS_MODEL to bare claude-opus-5 (NO [1m] — the active default's [1m] decoration lives on ANTHROPIC_MODEL via pickClaudeDefault, which is cap-aware)", () => {
     // The picker-row tier default is the bare slug; the *active* default
     // (ANTHROPIC_MODEL) is cap-aware (pickClaudeDefault adds [1m] only
     // when the catalog actually signals 1M capability — either via a
@@ -332,7 +332,7 @@ describe("getClaudeCodeEnvVars", () => {
     delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
     try {
       const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
-      expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-4-8")
+      expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-5")
       expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).not.toContain("[1m]")
     } finally {
       if (prior === undefined) delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL

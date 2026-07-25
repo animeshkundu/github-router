@@ -39,7 +39,7 @@ Positions gemini as the triangulation/second-opinion layer rather than a first-c
 
 ## 6. Findings + verdict
 
-- **[Suggestion, cross-surface]** The awareness snippet labels the panel as three labs and gemini as third-lab; the description says "third-lab triangulation" while codex is "cross-lab". Consistent. No gemini-scoped inconsistency found. (The opus "(Opus 4.7)" vs `claude-opus-4-6` label drift is an opus-critic finding, not this one.)
+- **[Suggestion, cross-surface]** The awareness snippet labels the panel as three labs and gemini as third-lab; the description says "third-lab triangulation" while codex is "cross-lab". Consistent. The adjacent opus label now correctly says Opus 5.
 - No Critical/Important findings.
 
 **Verdict: Y.** The best subagent trigger of the critic trio — an explicit "cross-checking… when you want a third perspective" when-clause plus a formal-reasoning specialization, correctly gated on catalog presence, no overtrigger.

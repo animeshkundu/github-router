@@ -85,15 +85,15 @@ mock.module("~/lib/server-setup", () => ({
 // module via require / import at factory-eval time). The optional
 // `family` arg mirrors the real `pickClaudeDefault(opusFamily?)` so
 // the `-m 4.7` / `-m 4.8` shorthand path is exercisable.
-let pickClaudeDefaultImpl: (family?: string) => string = () => "claude-opus-4-8"
+let pickClaudeDefaultImpl: (family?: string) => string = () => "claude-opus-5"
 let pickClaudeDefaultCalls: Array<string | undefined> = []
 
 mock.module("~/lib/port", () => ({
   // Anthropic-published dashed slug (per plan §14) — Claude Code's `/model`
-  // UI registry expects this, and the proxy's resolver translates back to
-  // Copilot's `claude-opus-4.8` at request time.
-  DEFAULT_CLAUDE_MODEL: "claude-opus-4-8",
-  DEFAULT_CLAUDE_MODEL_FALLBACKS: ["claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5"],
+  // UI registry expects this, and the proxy's resolver preserves the
+  // single-segment `claude-opus-5` catalog id at request time.
+  DEFAULT_CLAUDE_MODEL: "claude-opus-5",
+  DEFAULT_CLAUDE_MODEL_FALLBACKS: ["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"],
   // Delegates to the closure-captured impl so tests can swap behavior
   // per-case (cap-aware-default tests set this to return "...[1m]").
   // Records every call's `family` arg so shorthand-routing tests can
@@ -407,9 +407,9 @@ beforeEach(() => {
   getCodexVersionMock.mockReturnValue({ ok: false })
 
   // Default pickClaudeDefault to the bare slug; tests that exercise the
-  // 1M-detection path rebind this to return "claude-opus-4-8[1m]". Reset
+  // 1M-detection path rebind this to return "claude-opus-5[1m]". Reset
   // the call recorder so per-test assertions see a clean slate.
-  pickClaudeDefaultImpl = () => "claude-opus-4-8"
+  pickClaudeDefaultImpl = () => "claude-opus-5"
   pickClaudeDefaultCalls = []
 })
 
@@ -456,11 +456,11 @@ describe("claude command", () => {
     await run({ args: {} })
 
     // No --model and no model cache → claude.ts uses DEFAULT_CLAUDE_MODEL
-    // ("claude-opus-4-8"); resolver is a no-op without a cache, so the
+    // ("claude-opus-5"); resolver is a no-op without a cache, so the
     // Anthropic slug flows through unchanged.
     expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
       "http://127.0.0.1:12345",
-      "claude-opus-4-8",
+      "claude-opus-5",
     )
     const [, , options] = spawnMock.mock.calls[0]
     expect(options.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:12345")
@@ -483,27 +483,15 @@ describe("claude command", () => {
   })
 
   test("default works on enterprise (cap-aware default adds [1m] suffix so Claude Code accounts for 1M context locally)", async () => {
-    // Enterprise tier: catalog signals 4.8 is 1M-capable (base slug's
-    // max_context_window_tokens is 1_000_000 — 4.8 has no -1m sibling).
-    // pickClaudeDefault (src/lib/port.ts) detects via the dual-signal
-    // checker and returns the bracketed slug "claude-opus-4-8[1m]".
-    // Claude Code's has1mContext (cc-backup context.ts:35-40) matches
-    // /\[1m\]/i and flips its context window to 1_000_000 — driving
-    // compaction triggers and the status-line context %. The proxy's
-    // resolveModel strips the bracket before talking to Copilot (which
-    // would 400 on it), so the upstream call still routes to
-    // claude-opus-4.8.
-    //
-    // Here we simulate the enterprise outcome by overriding the mocked
-    // pickClaudeDefault to return the bracketed slug (the catalog-detection
-    // logic itself is covered by tests/lib-utils.test.ts). state.models is
-    // still set so the fallback-chain probe (inCache) finds the resolved
-    // 4.8 slug and doesn't trigger a fallback.
-    pickClaudeDefaultImpl = () => "claude-opus-4-8[1m]"
+    // Enterprise tier: catalog signals claude-opus-5 is natively 1M-capable.
+    // pickClaudeDefault returns the bracketed slug so Claude Code accounts
+    // for the full context locally, while resolveModel strips the bracket
+    // before forwarding the exact single-segment catalog id upstream.
+    pickClaudeDefaultImpl = () => "claude-opus-5[1m]"
     state.models = {
       data: [
+        { id: "claude-opus-5" },
         { id: "claude-opus-4.8" },
-        { id: "claude-opus-4.7-1m-internal" },
       ] as unknown as NonNullable<typeof state.models>["data"],
       object: "list",
     }
@@ -512,7 +500,7 @@ describe("claude command", () => {
       await run({ args: {} })
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
-        "claude-opus-4-8[1m]",
+        "claude-opus-5[1m]",
       )
     } finally {
       state.models = undefined
@@ -523,11 +511,33 @@ describe("claude command", () => {
     // Pro tier: only the 200K variant is available. pickClaudeDefault
     // returns the bare DEFAULT_CLAUDE_MODEL (no [1m] suffix), so Claude Code's
     // local context accounting matches the upstream behavior. The fallback
-    // chain doesn't fire because claude-opus-4.8 IS in cache.
+    // chain doesn't fire because claude-opus-5 IS in cache.
+    state.models = {
+      data: [
+        { id: "claude-opus-5" },
+        { id: "claude-opus-4.8" },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    try {
+      const run = getRunFn()
+      await run({ args: {} })
+      expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:12345",
+        "claude-opus-5",
+      )
+    } finally {
+      state.models = undefined
+    }
+  })
+
+  test("opus-5 absent → fallback chain picks claude-opus-4-8 (load-bearing test)", async () => {
+    // Discriminator for the fallback chain firing. Cache has 4.8 but no 5.
+    // Walking the chain, claude-opus-4-8 resolves to claude-opus-4.8,
+    // which IS in cache, so the first fallback fires.
     state.models = {
       data: [
         { id: "claude-opus-4.8" },
-        { id: "claude-opus-4.7" },
       ] as unknown as NonNullable<typeof state.models>["data"],
       object: "list",
     }
@@ -537,30 +547,6 @@ describe("claude command", () => {
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
         "claude-opus-4-8",
-      )
-    } finally {
-      state.models = undefined
-    }
-  })
-
-  test("opus 4.8 absent → fallback chain picks claude-opus-4-7 (load-bearing test)", async () => {
-    // Discriminator for the fallback chain firing. Cache has 4.7 but no 4.8
-    // of any kind. claude-opus-4-8 doesn't resolve to anything in cache;
-    // walking the chain, claude-opus-4-7 resolves to claude-opus-4.7 (step 4
-    // normalized match), which IS in cache → fallback fires on the first
-    // older Opus that exists.
-    state.models = {
-      data: [
-        { id: "claude-opus-4.7" },
-      ] as unknown as NonNullable<typeof state.models>["data"],
-      object: "list",
-    }
-    try {
-      const run = getRunFn()
-      await run({ args: {} })
-      expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
-        "http://127.0.0.1:12345",
-        "claude-opus-4-7",
       )
     } finally {
       state.models = undefined
@@ -585,7 +571,7 @@ describe("claude command", () => {
       await run({ args: {} })
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
-        "claude-opus-4-8",
+        "claude-opus-5",
       )
     } finally {
       state.models = undefined

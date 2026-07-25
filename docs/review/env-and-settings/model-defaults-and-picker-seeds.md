@@ -9,27 +9,26 @@ live catalog?
 
 | Setting | Value injected | Where set | Opt-out |
 |---|---|---|---|
-| `ANTHROPIC_MODEL` | `chosenSlug` — `claude-opus-4-8` or `claude-opus-4-8[1m]` (enterprise, cap-aware) | `src/claude.ts:447` (threaded from `pickClaudeDefault`, `src/lib/port.ts:83`) | `-m <model>` explicit pin; stripped from parent by `STRIPPED_PARENT_ENV_KEYS` so a shell export can't leak |
+| `ANTHROPIC_MODEL` | `chosenSlug` — `claude-opus-5` or `claude-opus-5[1m]` (enterprise, cap-aware) | `src/claude.ts:447` (threaded from `pickClaudeDefault`, `src/lib/port.ts:83`) | `-m <model>` explicit pin; stripped from parent by `STRIPPED_PARENT_ENV_KEYS` so a shell export can't leak |
 | `ANTHROPIC_SMALL_FAST_MODEL` | `claude-sonnet-5` | `src/lib/server-setup.ts:633-635` | set in parent shell (presence-guarded); NOT stripped from parent (`src/lib/launch.ts:77-81`) |
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | `claude-sonnet-5` | `src/lib/server-setup.ts:660-662` | set in parent shell (presence-guarded) |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `claude-sonnet-5` (NOT a Haiku slug) | `src/lib/server-setup.ts:663-665` | set in parent shell (presence-guarded) |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `claude-opus-4-8` (bare, no `[1m]`) | `src/lib/server-setup.ts:666-668` | set in parent shell (presence-guarded) |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `claude-opus-5` (bare, no `[1m]`) | `src/lib/server-setup.ts:666-668` | set in parent shell (presence-guarded) |
 | Design doc | `docs/default-models.md` | | |
 
 ## 2. What they do + behavior effect
 
 - **`ANTHROPIC_MODEL`** is the active default. It carries the Anthropic-published DASHED
-  slug (`claude-opus-4-8`), not Copilot's dotted `claude-opus-4.8`, because Claude Code's
-  `/model` UI is backed by a hardcoded registry of Anthropic slugs; the dotted form
-  falls back to "Opus 4 / Newer version available" instead of selecting "Opus 4.8 (1M)".
-  The proxy's `resolveModel` (`src/lib/utils.ts`) translates the dashed slug (and strips
-  any `[1m]` bracket) to Copilot's dotted slug at request time (`docs/default-models.md:12-16`).
+  slug `claude-opus-5`, which is also an exact Copilot catalog-id match because Opus 5
+  uses a single-segment slug. Claude Code's `/model` UI recognizes the Anthropic slug,
+  while the proxy's `resolveModel` (`src/lib/utils.ts`) strips any `[1m]` bracket before
+  the exact catalog lookup (`docs/default-models.md:12-16`).
 - **`[1m]` decoration** (`src/lib/port.ts:pickClaudeDefault`) is a LOCAL context-accounting
   unlock — cc-backup `src/utils/context.ts:35-40` matches `/\[1m\]/i` to flip the local
   context window from 200K to 1M (compaction triggers, status-line %, token budgets). It
   is added by **dual-signal detection** against the live catalog: a sibling `opus-<family>-1m`
   slug (how 4.6/4.7 ship) OR the base slug advertising
-  `max_context_window_tokens >= 1_000_000` (how 4.8 ships, no sibling) — `src/lib/port.ts:96-111`.
+  `max_context_window_tokens >= 1_000_000` (how Opus 5 ships, no sibling) — `src/lib/port.ts:96-111`.
   The bracket never reaches Copilot (`resolveModel` Step 0 strips it, `docs/default-models.md:57`).
 - **`ANTHROPIC_SMALL_FAST_MODEL`** = the tier Claude Code uses for status text,
   auto-compact summaries, session titles, and background ops. Seeded to `claude-sonnet-5`
@@ -46,7 +45,7 @@ live catalog?
 
 ## 3. Raise-the-floor assessment
 
-**Expands / picks the strongest.** `claude-opus-4-8` is the flagship; `[1m]` is added
+**Expands / picks the strongest.** `claude-opus-5` is the flagship; `[1m]` is added
 only when the backend can actually serve 1M, so the local accounting matches the wire —
 this is "the right amount," not over-claiming. `claude-sonnet-5` for the small/fast and
 Sonnet/Haiku tier rows strictly dominates the prior Sonnet-4.6 / Haiku-4.5 defaults on
@@ -54,7 +53,7 @@ both recency and price. Every default is the floor-raising choice.
 
 **Is the default the best choice?**
 
-- Opus 4.8 active default: yes, flagship.
+- Opus 5 active default: yes, flagship and natively 1M.
 - 1M opt-in: yes, and cap-aware — on a non-enterprise tier with no 1M opus backend the
   detector returns the bare slug, so it never over-accounts. `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`
   is the HIPAA opt-out (`docs/default-models.md:59`).
@@ -62,13 +61,13 @@ both recency and price. Every default is the floor-raising choice.
   substitution is a deliberate, justified floor-raise (cheap tier lands on a better model).
 
 **Drift risk.** This is the one surface where the defaults are HARDCODED string constants
-(`DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"` in `src/lib/port.ts:23`, the Sonnet-5 literals
+(`DEFAULT_CLAUDE_MODEL = "claude-opus-5"` in `src/lib/port.ts:23`, the Sonnet-5 literals
 in `server-setup.ts`). When Copilot ships Opus 4.9 or Sonnet 6, these do NOT auto-advance:
 
 - `ANTHROPIC_MODEL` has a safety net — the implicit-default path walks
-  `DEFAULT_CLAUDE_MODEL_FALLBACKS` (`claude-opus-4-7` → `4-6` → `4-5`) if 4.8 is absent
+  `DEFAULT_CLAUDE_MODEL_FALLBACKS` (`claude-opus-4-8` → `4-7` → `4-6`) if Opus 5 is absent
   from the catalog (`src/claude.ts:410-425`), but there is NO forward walk to a NEWER
-  Opus. If 4.8 is absent AND 4.9 present, the session silently drops to 4.7, not up to 4.9.
+  Opus. If Opus 5 is absent and a later family is present, the session drops to 4.8 rather than advancing.
 - The Sonnet-5 literals have no fallback chain at all — if `claude-sonnet-5` leaves the
   catalog, the small/fast + tier rows point at a dead id and `resolveModel`'s dated-slug
   retry / family fallback is the only recovery.

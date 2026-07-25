@@ -61,21 +61,13 @@ The generic `thinking` field text "Optional reasoning depth (default high)" was 
 - Root cause: one shared string, per-mode defaults.
 - Batched fix: correct each mode's `thinking` description against its own `*_DEFAULT_THINKING` constant -- do NOT blanket-edit, since the correct value differs (explore/plan/implement/test -> `xhigh`; review -> defaults to xhigh, clamped, default review model clamps to high). Verify each against `engine.ts` when editing.
 
-### S4. opus_critic model-version drift: five surfaces say "Opus 4.7", ground truth is 4.6
+### S4. opus_critic model selection refreshed
 
-opus_critic dispatches to `claude-opus-4-6` (`personas.ts:401`) and its own description says 4.6 (`personas.ts:404`), but five surfaces say 4.7: the awareness snippet (`personas.ts:585`), `OPUS_CRITIC_BASE` twice (the subagent's own self-identity, `personas.ts:322,324`), the window-guard hint (`handler.ts:575`), and the design doc (`peer-mcp-design.md:203,205`). Separately, the description's "pinned one minor behind the default Opus" is now two minors behind (default is 4.8).
+opus_critic now prefers `claude-opus-5`, whose single base slug is natively 1M. On catalogs without Opus 5 it falls back to `claude-opus-4.6-1m`, then `claude-opus-4-6`. Its allowed efforts include `xhigh`; `defaultEffort` remains `high` to preserve the prior latency profile.
 
-- Root cause: a default bump (spawned-Claude default moved 4.7 -> 4.8) that was not swept through the opus_critic labels; opus_critic stayed on 4.6.
-- Batched fix: sweep "Opus 4.7" -> "Opus 4.6" at `personas.ts:322,324,585`, `handler.ts:575`, `docs/peer-mcp-design.md:203,205`, and the peer-review sentence in root CLAUDE.md; change "one minor" -> "two minors" (or drop the count) at `personas.ts:404` and `peer-mcp-design.md:177`. Cosmetic to routing (the dispatch is 4.6 regardless), but the surface is self-contradictory.
+### S5. Worker model defaults refreshed
 
-### S5. Worker model defaults name the wrong model in description + `model` schema field
-
-Two worker modes advertise a default model that contradicts `engine.ts`:
-- review (`peer-mcp-personas.ts:1373,1404`) says `gpt-5.5`; actual `REVIEW_DEFAULT_MODEL = "gemini-3.1-pro-preview"` (`engine.ts:160`). This corrupts the model's cross-lab mental model -- it assumes review shares the gpt-5.5 implementer's lab, defeating the deliberate Google decorrelation.
-- explore (`peer-mcp-personas.ts:1200,1229-1230`) says `gpt-5.4-mini`; actual `EXPLORE_DEFAULT_MODEL = "claude-sonnet-5"` (`engine.ts:146`).
-
-- Root cause: worker default-model changes not propagated to the persona descriptions or the design-doc table (`peer-mcp-design.md:359-365` also stale). A code comment (`peer-mcp-personas.ts:1163-1166`) also still says explore -> gpt-5.4-mini.
-- Batched fix: correct review -> `gemini-3.1-pro-preview` and explore -> `claude-sonnet-5` in the descriptions, `model` fields, the block comment, and the design-doc table; consider a shared constant referenced by both `engine.ts` and the description (or a test pinning the description model string) so it cannot silently drift again. Root CLAUDE.md already has these right.
+Worker defaults now match `engine.ts`: review uses `gemini-3.1-pro-preview`, explore uses `gemini-3.6-flash` at `high`, plan uses `claude-opus-5` at `xhigh`, and implement/test use `gpt-5.6-sol` at `xhigh`. Explore/implement/review keep a free-string `model` override and document the recommended 1M sol/terra/flash ladder.
 
 ### S6. Descriptions naming removed/non-surfaced tools produce `-32601`
 
@@ -197,11 +189,11 @@ The shared `dispatcherPrompt` tells the `worker-browse` dispatcher to pass `prom
 | peers | codex_reviewer | Y | "~16s" is a `high` latency but the tool defaults to `xhigh` |
 | peers | gemini_critic | Y | Only critic missing a when-NOT redirect to line-level review |
 | peers | gemini_reviewer | Y | Absent from `docs/peer-mcp-design.md` entirely (S11) |
-| peers | opus_critic | N | Five surfaces say Opus 4.7; ground truth 4.6; "one minor" is now two (S4) |
+| peers | opus_critic | Y | Prefers Opus 5 native 1M; 4.6-1m → 4.6 fallback; high default, xhigh allowed (S4) |
 | search | code | Y | Clean; record that `context_lines` is an intentional omission |
 | search | web | Y | Error strings still say `web_search`, not the renamed `web` (S6) |
 | workers | browse | Y | Dispatcher passes `prompt`; tool requires `task` -> hard error (S13) |
-| workers | explore | N | Description says `gpt-5.4-mini`/high; actual `claude-sonnet-5`/xhigh (S5/S3) |
+| workers | explore | Y | `gemini-3.6-flash`/high; free-string 1M override ladder documented (S5) |
 | workers | implement | Y | No when-to-prefer clause vs `implementer` subagent + `codex_implementer` (S6) |
 | workers | plan | Y | `thinking` says "default high"; plan defaults to `xhigh` (S3) |
 | workers | review | N | Description says `gpt-5.5`; actual `gemini-3.1-pro-preview` (S5) |
@@ -216,9 +208,9 @@ Ordered by leverage. Model-facing behavior fixes first (misroutes, `-32601`, wro
 - [ ] A1 -- Critical, conditional (S1/sec 2). `src/lib/claude-md-injection.ts:48-53` + `src/claude.ts:807-811`: thread the resolved `peersKey` into `ARTIFACT_PANEL_DIRECTIVE`; build `mcp__<peersKey>__artifact_*` dynamically. Update `tests/claude-md-injection.test.ts:603` to assert the resolved-key path.
 - [ ] A2 (S6). `src/lib/browser-mcp/index.ts:466`: repoint `browser type`'s description from `browser_fill` to `browser_act` with `action:"fill"` (removes a `-32601`).
 - [ ] A3 (S13). `src/lib/worker-dispatch.ts:236-237`: make `dispatcherPrompt` name `task` (not `prompt`) for `mode === "browse"`; add a test. Removes a hard `isError` on a literal-following `worker-browse` dispatch.
-- [ ] A4 (S5). `src/lib/peer-mcp-personas.ts:1373,1404`: review default -> `gemini-3.1-pro-preview`. `:1200,1229-1230` + comment `:1163-1166`: explore default -> `claude-sonnet-5`. Consider a shared constant or a test pinning the description model string.
-- [ ] A5 (S3). Correct each worker `thinking` field against its own `*_DEFAULT_THINKING`: plan `:1490-1493` -> xhigh; explore `:1238` -> xhigh; review `:1413` -> defaults to xhigh, clamped (default model clamps to high). Do not blanket-edit.
-- [ ] A6 (S4). Sweep "Opus 4.7" -> "Opus 4.6" at `personas.ts:322,324,585`, `handler.ts:575`; "one minor" -> "two minors" at `personas.ts:404`.
+- [x] A4 (S5). Worker model descriptions now match the live defaults: review `gemini-3.1-pro-preview`, explore `gemini-3.6-flash`/high, plan `claude-opus-5`/xhigh.
+- [x] A5 (S3). Worker thinking descriptions reflect each mode's effective default and clamp behavior.
+- [x] A6 (S4). opus_critic now prefers Opus 5, exposes xhigh, and documents the 4.6 fallback chain.
 - [ ] A7 (S2). Thread `compoundBrowseAvailable` (= `browserCompoundToolsEnabled()`) into `buildPeerAwarenessSnippet` (`src/claude.ts:1024`); gate the `__act` INTENT / `__observe` / `__extract` clauses on it. Also gate `act` INTENT behind `browserCompoundToolsEnabled()` (or return a clean isError) in `src/lib/browser-mcp/index.ts:622` so it cannot raw-throw.
 - [ ] A8 (S12). `verify_workflow` handler: default `knownGateIds` to `sealedGateIds()` when omitted (keep the arg as override). `decompose`: thread `context` end to end into the driver `userText` (`decompose-live.ts:108`, `decompose.ts:98,120`) -- or remove it from the schema and the `/gh-orchestrate` skill.
 - [ ] A9 (S8). `merge_pr` description (`tools.ts:428`): state the merge is immediate/irreversible and relies on head+ownership+CI plus out-of-band human authorization (the tool does not call `verifyAndConsumeApproval`); reword "CI green" for CI-less repos. `abandon_mission` (`tools.ts:610`): add the local-ledger-only boundary. Replace "active first-mate mission repo" -> "correlated to a first-mate unit, else requires allow_unowned" on `tools.ts:428,489,534`.
@@ -236,7 +228,7 @@ Ordered by leverage. Model-facing behavior fixes first (misroutes, `-32601`, wro
 
 - [ ] C1 (S1). Root `CLAUDE.md:147`: rewrite the browser paragraph to the two-tier split (6 lead `--browse` tools; 13 `browser_power` primitives behind `--power-browse`), mirroring `docs/browser-mcp-design.md:371-373`. Closes about ten browser findings.
 - [ ] C2 (S6/S11). Root `CLAUDE.md:129` + `docs/peer-mcp-design.md:12`: reword `codex_implementer` to a stdio-routed `codex-implementer` subagent (not a peers HTTP tool).
-- [ ] C3 (S11). `docs/peer-mcp-design.md`: add gemini_reviewer (persona list `:12,29-30`, cap table `:197-199`, minimal-surface enum `:322`); fix "three -> four" (`:155`); correct worker-default table (`:359-365`) to `engine.ts`; sweep opus 4.7 -> 4.6 (`:203,205`). `docs/agent-orchestration-design.md:173-175`: rename the three orchestration rows `mcp__workers__*` -> `mcp__orchestrate__*`.
+- [ ] C3 (S11). `docs/peer-mcp-design.md`: add gemini_reviewer where still missing (persona list, cap table, minimal-surface enum) and fix any stale persona counts. The worker-default and Opus model rows are now current. `docs/agent-orchestration-design.md`: rename stale orchestration rows `mcp__workers__*` -> `mcp__orchestrate__*`.
 - [ ] C4 (S7/S8). Root CLAUDE.md: add `abandon_mission` + `add_units` to the first-mate inventory (`:139`); add a "Fleet session-control MCP (`--fleet`)" section + a Design-docs index entry for `docs/aiordie-fleet.md`. `CLAUDE.md:133`: "three worker tools" -> "five" (add `plan`, `test`); note `implement`/`test` both accept `worktree`.
 - [ ] C5. `docs/first-mate-design.md`: add `plan_gate`/`ci_required` to the `start_mission` bullet (`:26-28`), and explicit `merge_pr`/`close_pr` entries (`:26-44`); scope the `verifyAndConsumeApproval` claim (`:388-396`) to the controller path. `docs/aiordie-fleet.md:64`: fix the stale "LOUD isError on unconfirmed delivery" line; add `drive_task` to the inventory (`:62-67`).
 - [ ] C6. Low-priority description polish (each a Suggestion in its doc): add when-NOT redirects (`gemini_critic` line-level review; `board`/`advance`; `implement` vs `implementer` subagent; `screenshot` vs `observe`); qualify `codex_reviewer` "~16s" as a `high` latency; align `web` error strings (`personas.ts:824,840`) to the renamed `web`; refresh the `artifact_await` capability comment (`personas.ts:736`).

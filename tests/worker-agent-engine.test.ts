@@ -143,10 +143,10 @@ beforeEach(() => {
         tool_calls: true,
         reasoning_effort: ["low", "medium", "high"],
       }),
-      // explore default (native Claude worker via /chat/completions)
-      fakeModel("claude-sonnet-5", {
+      // explore default (gemini via /chat/completions translation shim)
+      fakeModel("gemini-3.6-flash", {
         tool_calls: true,
-        reasoning_effort: ["low", "medium", "high", "xhigh"],
+        reasoning_effort: ["minimal", "low", "medium", "high"],
       }),
       // worker-availability gate sentinel + browse default
       fakeModel("gpt-5.4-mini", {
@@ -430,7 +430,7 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
     }
   })
 
-  test("explore mode sends claude-sonnet-5 upstream by default", async () => {
+  test("explore mode sends gemini-3.6-flash upstream by default", async () => {
     let capturedModel: string | undefined
     globalThis.fetch = mock((_input: unknown, init?: { body?: unknown }) => {
       try {
@@ -443,7 +443,7 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
     )
     try {
       await runWorkerAgent({ prompt: "summarize", mode: "explore", workspace: dir })
-      expect(capturedModel).toBe("claude-sonnet-5")
+      expect(capturedModel).toBe("gemini-3.6-flash")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

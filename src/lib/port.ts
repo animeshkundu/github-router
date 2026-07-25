@@ -6,32 +6,32 @@ export const DEFAULT_PORT = 8787
 
 /**
  * Default model for `github-router claude`. The Anthropic-published dashed
- * slug (`claude-opus-4-8`) — NOT the Copilot-internal slug — because
+ * slug (`claude-opus-5`) — NOT the Copilot-internal slug — because
  * Claude Code's `/model` UI is backed by a hardcoded registry of Anthropic
  * slugs, and an unrecognized slug causes the menu to highlight "Opus 4"
  * with a "Newer version available" hint instead of selecting the newest
  * Opus entry.
  *
- * The proxy's `resolveModel` (`src/lib/utils.ts`) translates this to
- * Copilot's `claude-opus-4.8` at request time via the family-preference
- * + version-match branch.
+ * The proxy's `resolveModel` (`src/lib/utils.ts`) resolves this to
+ * Copilot's `claude-opus-5` at request time (an exact catalog-id match —
+ * opus-5 is a single-segment slug, so no dotted/dashed translation is needed).
  *
  * `DEFAULT_CLAUDE_MODEL_FALLBACKS` covers major.minor regressions only;
  * 1M↔200K downgrade is handled inside the resolver, so we don't need
  * separate `-1m` entries here.
  */
-export const DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
+export const DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
+  "claude-opus-4-8",
   "claude-opus-4-7",
   "claude-opus-4-6",
-  "claude-opus-4-5",
 ] as const
 
 /**
  * Cap-aware default picker for `ANTHROPIC_MODEL` on the implicit-default
  * path. Returns `claude-opus-${family}[1m]` when the live Copilot catalog
  * shows the family is 1M-capable, else the bare `claude-opus-${family}`
- * slug. `family` defaults to `"4.8"` so the no-arg call selects the
+ * slug. `family` defaults to `"5"` so the no-arg call selects the
  * current default; explicit values like `"4.7"` or `"4.6"` are used to
  * honor the `github-router claude -m <version>` family shorthand.
  *
@@ -45,8 +45,8 @@ export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
  *   2. **Base-slug capability signal** — the catalog entry whose id IS
  *      the base `opus-${family}` slug advertises
  *      `capabilities.limits.max_context_window_tokens >= 1_000_000`. This
- *      is how 4.8 ships — there is no `-1m` sibling; the single
- *      `claude-opus-4.8` id is the 1M variant.
+ *      is how 4.8 and 5 ship — there is no `-1m` sibling; the single
+ *      `claude-opus-4.8` / `claude-opus-5` id is itself the 1M variant.
  * Either signal flips on the `[1m]` decoration. Both signals together
  * also flip it on (no double-counting). The breadcrumb log names which
  * signal fired so users can spot catalog shape changes.
@@ -76,7 +76,7 @@ export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
  * can't tell the difference between "no catalog yet" and "no 1M
  * variant" — defaulting safe-side preserves the pre-change behavior).
  */
-const DEFAULT_OPUS_FAMILY = "4.8"
+const DEFAULT_OPUS_FAMILY = "5"
 
 const ONE_M_TOKENS = 1_000_000
 

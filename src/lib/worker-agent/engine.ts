@@ -135,15 +135,21 @@ registerExitHandlers(WORKTREE_REGISTRY)
 export const DEFAULT_MODEL = "gpt-5.4-mini"
 const DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 
-/** Default model for the READ-ONLY `explore` mode. `claude-sonnet-5` at `xhigh`
- *  (via `DEFAULT_THINKING`) — a strong, NATIVE (no-shim) tool-caller for repo
- *  research. Native Claude models run as workers over `/chat/completions`, the
- *  same path proven by `PLAN_DEFAULT_MODEL` (claude-opus-4.8). Like `implement`'s
- *  gpt-5.6-sol this is NOT a `workerToolsEnabled` gate input — if absent (e.g. a
- *  non-enterprise tier) `explore` errors helpfully at call time rather than
- *  vanishing the whole worker surface. The caller (the main model) overrides
- *  BOTH the model and the reasoning per call via the `model` / `thinking` args. */
-export const EXPLORE_DEFAULT_MODEL = "claude-sonnet-5"
+/** Default model for the READ-ONLY `explore` mode. `gemini-3.6-flash` at `high`
+ *  (via `EXPLORE_DEFAULT_THINKING`; flash advertises no xhigh) — a fast, cheap,
+ *  1M-context tool-caller for read-only repo research. Routes over
+ *  `/chat/completions` via the translation shim (the same proven path the
+ *  `review` worker uses for gemini). Like `implement`'s gpt-5.6-sol this is NOT a
+ *  `workerToolsEnabled` gate input — if absent (e.g. a non-enterprise tier)
+ *  `explore` errors helpfully at call time rather than vanishing the whole worker
+ *  surface. The caller (the main model) overrides BOTH the model and the reasoning
+ *  per call via the `model` / `thinking` args — see the tier ladder (gpt-5.6-sol
+ *  heavy / gpt-5.6-terra moderate / gemini-3.6-flash light) in the MCP tool desc. */
+export const EXPLORE_DEFAULT_MODEL = "gemini-3.6-flash"
+/** Default thinking for `explore`. `high` (flash has no xhigh); explicit rather
+ *  than inherited from `DEFAULT_THINKING` so the explore effort can't drift if the
+ *  shared fallback changes. */
+export const EXPLORE_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 
 /** Default model + thinking for the READ-ONLY `review` mode.
  *  `gemini-3.1-pro-preview` at `xhigh` (clamped to `high` at call time — gemini
@@ -188,13 +194,13 @@ const BROWSE_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 /** Default model + thinking for the read-only `plan` mode. `claude-opus-4.8`
  *  at `xhigh` — planning is the highest-leverage read-only step (the plan
  *  shapes everything downstream), so it gets the strongest reasoning model
- *  rather than the cheap `gemini-3.5-flash` explore default. Uses the DOTTED
+ *  rather than the lightweight `gemini-3.6-flash` explore default. Uses the DOTTED
  *  Copilot catalog id (the worker resolver exact-matches `catalog.id`, it does
- *  NOT translate the Anthropic dashed slug). Falls back to a helpful
- *  unknown-model error at call time if opus-4.8 isn't in the catalog (e.g. a
- *  non-enterprise tier), exactly like `implement`'s `gpt-5.6-sol`. Caller's `model`
- *  arg still wins. */
-export const PLAN_DEFAULT_MODEL = "claude-opus-4.8"
+ *  NOT translate the Anthropic dashed slug; `claude-opus-5` is a single-segment
+ *  slug so dotted == dashed). Falls back to a helpful unknown-model error at call
+ *  time if opus-5 isn't in the catalog (e.g. a non-enterprise tier), exactly like
+ *  `implement`'s `gpt-5.6-sol`. Caller's `model` arg still wins. */
+export const PLAN_DEFAULT_MODEL = "claude-opus-5"
 const PLAN_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 
 /**
@@ -304,11 +310,11 @@ async function runWorkerAgentOnce(
     // on unknown-model errors, so the caller knows what to retry with).
     //
     // Per-mode defaults (an explicit `opts.model`/`opts.thinking` always
-    // wins): read-only `explore` → `EXPLORE_DEFAULT_MODEL` (claude-sonnet-5, xhigh);
+    // wins): read-only `explore` → `EXPLORE_DEFAULT_MODEL` (gemini-3.6-flash, high);
     // read-only `review` → `REVIEW_DEFAULT_MODEL` (gemini-3.1-pro-preview,
     // xhigh→high — a cross-lab reviewer deliberately decorrelated from the
     // gpt-5.6-sol implementer); read-only `plan`
-    // → `PLAN_DEFAULT_MODEL` (claude-opus-4.8, xhigh — planning is the
+    // → `PLAN_DEFAULT_MODEL` (claude-opus-5, xhigh — planning is the
     // highest-leverage step, so it gets the strongest model);
     // read+write `implement`/`test` → `IMPLEMENT_DEFAULT_MODEL` (gpt-5.6-sol, xhigh
     // — coding/test-authoring wants max reasoning); `browse` →
@@ -338,7 +344,9 @@ async function runWorkerAgentOnce(
           ? REVIEW_DEFAULT_THINKING
           : isWriteCapable
             ? IMPLEMENT_DEFAULT_THINKING
-            : DEFAULT_THINKING
+            : isExplore
+              ? EXPLORE_DEFAULT_THINKING
+              : DEFAULT_THINKING
     const resolved = resolveModelAndThinking({
       model: opts.model ?? defaultModel,
       thinking: opts.thinking ?? defaultThinking,

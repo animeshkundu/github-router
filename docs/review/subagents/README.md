@@ -23,14 +23,14 @@ The peer-critic descriptions are the SAME strings used as the corresponding `mcp
 | `codex-reviewer` | inherited | relays to gpt-5.3-codex reviewer (MCP) | always | [codex-reviewer.md](codex-reviewer.md) | Y (soft trigger) |
 | `gemini-critic` | inherited | relays to gemini-3.1-pro critic (MCP) | `requiresGeminiCatalog` | [gemini-critic.md](gemini-critic.md) | Y |
 | `gemini-reviewer` | inherited | relays to gemini-3.1-pro reviewer (MCP) | `requiresGeminiCatalog` | [gemini-reviewer.md](gemini-reviewer.md) | Y |
-| `opus-critic` | inherited | relays to claude-opus-4-6 critic (MCP) | always | [opus-critic.md](opus-critic.md) | N (F1 model-label drift) |
+| `opus-critic` | inherited | relays to claude-opus-5 critic (MCP; 4.6 fallback) | always | [opus-critic.md](opus-critic.md) | Y |
 | `codex-implementer` | inherited | relays to gpt-5.3-codex writer (stdio) | `--codex-cli` | [codex-implementer.md](codex-implementer.md) | N (S3 overlap) |
 | `implementer` (native) | **gpt-5.6-sol** (gpt-5.5 fallback) | edits files itself (full toolset) | catalog has gpt-5.6-sol or gpt-5.5+tool_calls | [implementer.md](implementer.md) | Y (S3 caveat) |
 | `peer-review-coordinator` | inherited | fans out to critics, aggregates | always | [peer-review-coordinator.md](peer-review-coordinator.md) | N (F1 unbacked trigger) |
-| `worker-explore` | inherited (worker: claude-sonnet-5) | bg dispatch read-only research | `workerToolsAvailable` | [worker-explore.md](worker-explore.md) | Y |
+| `worker-explore` | inherited (worker: gemini-3.6-flash high) | bg dispatch read-only research | `workerToolsAvailable` | [worker-explore.md](worker-explore.md) | Y |
 | `worker-implement` | inherited (worker: gpt-5.6-sol) | bg dispatch read/write coding | `workerToolsAvailable` | [worker-implement.md](worker-implement.md) | Y |
 | `worker-review` | inherited (worker: gemini-3.1-pro) | bg dispatch self-navigating review | `workerToolsAvailable` | [worker-review.md](worker-review.md) | Y |
-| `worker-plan` | inherited (worker: claude-opus-4.8) | bg dispatch ordered plan | `workerToolsAvailable` | [worker-plan.md](worker-plan.md) | Y (minor gap) |
+| `worker-plan` | inherited (worker: claude-opus-5) | bg dispatch ordered plan | `workerToolsAvailable` | [worker-plan.md](worker-plan.md) | Y (minor gap) |
 | `worker-test` | inherited (worker: gpt-5.6-sol) | bg dispatch adversarial tests | `workerToolsAvailable` | [worker-test.md](worker-test.md) | Y |
 | `worker-browse` | inherited (worker: gpt-5.4-mini) | bg dispatch browser agent | `browseAvailable` | [worker-browse.md](worker-browse.md) | N (A3 field bug) |
 
@@ -73,7 +73,7 @@ The framing split is by design and documented: `buildPeerAwarenessSnippet` (`pee
 
 ## Recommendations (priority order)
 
-1. **Resolve F1 in [opus-critic.md](opus-critic.md):** the model label drifts across surfaces — description + `model:` say `claude-opus-4-6`/"Opus 4.6", but `OPUS_CRITIC_BASE` (`peer-mcp-personas.ts:322`) and the awareness snippet (`:585`) say "Opus 4.7". The invoked model is 4.6, so fix the two stale "4.7" labels (Important — the persona is told it runs on the wrong version). Also drop the now-stale relative "one minor behind the default Opus" (default is 4.8, so 4.6 is two minors behind).
+1. **Keep opus-critic labels aligned:** the current surface prefers Opus 5 with the old 4.6-1m → 4.6 chain as fallback; its default effort stays high and xhigh is available on Opus 5.
 2. **Fix A3 in [worker-browse.md](worker-browse.md):** `dispatcherPrompt` (`worker-dispatch.ts:236`) tells the browse dispatcher to pass `prompt`, but the browse tool requires `task` with `additionalProperties: false` (`peer-mcp-personas.ts:1922-1923`). Branch `dispatcherPrompt` on `mode === "browse"` to pass `task`, and add a regression test (Important — confirmed field-name mismatch unique to browse).
 3. **Reconcile S2 (coordinator):** wire the deterministic ExitPlanMode fallback the code comment specifies, or soften the description to match soft-steer reality.
 4. **Address S3 (implement overlap):** differentiate the native `implementer` from `codex-implementer` at the description level, or document the intended split.

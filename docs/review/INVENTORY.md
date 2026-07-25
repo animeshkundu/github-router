@@ -19,7 +19,7 @@ Grouped by surface type. Each row: item · one-line function · gate/condition �
 
 | Group | Tools | What the group does | Gate | Doc |
 |---|---|---|---|---|
-| peers | codex_critic, gemini_critic, codex_reviewer, gemini_reviewer, opus_critic, codex_implementer | Cross-lab adversarial critics + reviewers (gpt-5.6-sol / gemini-3.1-pro / gpt-5.3-codex / opus-4.6) | catalog per-model; gemini pair needs gemini catalog; codex_implementer needs `--codex-cli` | [mcp/README.md](./mcp/README.md) |
+| peers | codex_critic, gemini_critic, codex_reviewer, gemini_reviewer, opus_critic, codex_implementer | Cross-lab adversarial critics + reviewers (gpt-5.6-sol / gemini-3.1-pro / gpt-5.3-codex / Opus 5 with 4.6 fallback) | catalog per-model; gemini pair needs gemini catalog; codex_implementer needs `--codex-cli` | [mcp/README.md](./mcp/README.md) |
 | search | web, code | Copilot web search; semantic-first (ColBERT + lexical fallback) code search | always-on | [mcp/search/code.md](./mcp/search/code.md) |
 | workers | explore, implement, review, plan, test, browse | Autonomous Pi-runtime worker subagents (read-only / read-write / planner / test-author / browser) | `capability:"worker"` (browse: `browse_agent`) | [mcp/workers/](./mcp/workers/) |
 | orchestrate | verify_workflow, decompose, run_workflow, attest_step | Compose / verify / run / audit a typed workflow IR through the frozen kernel | verify+attest always-on; decompose+run gated `worker` | [mcp/orchestrate/](./mcp/orchestrate/) |
@@ -94,9 +94,9 @@ Assembly and order map in [`injected-prompt/README.md`](./injected-prompt/README
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `1` | presence-guard | [feature-gates](./env-and-settings/claude-code-feature-gates.md) |
 | `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING` | `1` | presence-guard | [feature-gates](./env-and-settings/claude-code-feature-gates.md) |
 | `CLAUDE_CODE_ENABLE_TASKS` | `1` | presence-guard | [feature-gates](./env-and-settings/claude-code-feature-gates.md) |
-| `ANTHROPIC_MODEL` | `claude-opus-4-8[1m]` (enterprise, cap-aware) | `-m <model>` | [model-defaults](./env-and-settings/model-defaults-and-picker-seeds.md) |
+| `ANTHROPIC_MODEL` | `claude-opus-5[1m]` (enterprise, cap-aware) | `-m <model>` | [model-defaults](./env-and-settings/model-defaults-and-picker-seeds.md) |
 | `ANTHROPIC_SMALL_FAST_MODEL` | `claude-sonnet-5` | presence-guard | [model-defaults](./env-and-settings/model-defaults-and-picker-seeds.md) |
-| `ANTHROPIC_DEFAULT_{SONNET,HAIKU,OPUS}_MODEL` | sonnet-5 / sonnet-5 / opus-4-8 | presence-guard | [model-defaults](./env-and-settings/model-defaults-and-picker-seeds.md) |
+| `ANTHROPIC_DEFAULT_{SONNET,HAIKU,OPUS}_MODEL` | sonnet-5 / sonnet-5 / opus-5 | presence-guard | [model-defaults](./env-and-settings/model-defaults-and-picker-seeds.md) |
 | `MCP_TIMEOUT` / `MCP_TOOL_TIMEOUT` | `22_500_000` ms (6h15m) | `GH_ROUTER_MCP_TOOL_TIMEOUT_MS` | [mcp-timeout](./env-and-settings/mcp-tool-timeout.md) |
 | `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` | `1` (conditional, when seed lands) | presence-guard | [gateway-seed](./env-and-settings/gateway-model-cache-seed.md) |
 | `CLAUDE_CODE_PLAN_V2_AGENT_COUNT` | `7` | presence-guard | [plan-agent-count](./env-and-settings/plan-mode-agent-count.md) |
@@ -155,9 +155,9 @@ These share one root class: a text surface (awareness snippet, root CLAUDE.md, o
 
 ### Important — description / doc drift (the model's mental model is wrong)
 
-- **Worker + peer model-version drift** — spans MCP and subagents. `opus_critic` dispatches to opus-4.6 but five surfaces say "Opus 4.7" (and "one minor behind" is now two); worker `review` says gpt-5.5 but is gemini-3.1-pro (defeating the deliberate cross-lab decorrelation); worker `explore` says gpt-5.4-mini but is claude-sonnet-5; the `thinking` field says "default high" where several modes default to xhigh. These corrupt the model's routing and cross-lab reasoning. Detail: [FINDINGS S3/S4/S5](./mcp/FINDINGS.md), [subagents opus-critic](./subagents/opus-critic.md).
+- **Worker + peer model defaults updated** — opus_critic now prefers Opus 5 (4.6 fallback), review stays gemini-3.1-pro-preview, explore defaults to gemini-3.6-flash/high, and plan defaults to Opus 5/xhigh. The worker model override remains a free string, with the documented sol/terra/flash 1M ladder.
 - **Descriptions naming removed / non-surfaced tools produce `-32601`** — MCP. browser `type` routes to removed `browser_fill`; `codex_implementer` is documented as a peers HTTP tool but is stdio-only (404); `web`/`implement` error strings still say the old names. Detail: [FINDINGS S6](./mcp/FINDINGS.md).
-- **`peer-mcp-design.md` staleness cascades** — the design doc is the scope reference every peers/worker description points to, and it never mentions gemini_reviewer, says "three peer tools", and has stale worker-default and opus-4.7 rows. Fixing the doc once corrects the anchor for many surfaces. Detail: [FINDINGS S11](./mcp/FINDINGS.md).
+- **`peer-mcp-design.md` model rows refreshed** — the design anchor now records Opus 5 for opus_critic and stand_in, gemini-3.6-flash/high for explore, Opus 5/xhigh for plan, and the worker override ladder.
 - **worker-browse dispatcher/schema field mismatch (hard error)** — spans hooks/subagents and MCP. `dispatcherPrompt` passes `prompt`; the browse tool requires `task` and rejects unknown keys → hard `isError`. Detail: [FINDINGS S13](./mcp/FINDINGS.md), [subagents A3](./subagents/README.md).
 
 ### Suggestion — minimality / schema-honesty

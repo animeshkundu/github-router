@@ -37,7 +37,7 @@ Description source unless noted: `src/lib/peer-mcp-personas.ts`.
 | gemini_critic | 349 | gemini-3.1-pro-preview `/chat` | `requiresGeminiCatalog` |
 | codex_reviewer | 364 | gpt-5.3-codex `/responses` | always |
 | gemini_reviewer | 378 | gemini-3.1-pro-preview `/chat` | `requiresGeminiCatalog` |
-| opus_critic | 400 | claude-opus-4-6 `/messages` | always |
+| opus_critic | 400 | claude-opus-5 `/messages` (4.6 fallback) | always |
 | codex_implementer | 426 | gpt-5.3-codex `/responses` (write) | `--codex-cli` |
 
 ### search — `NON_PERSONA_MCP_TOOLS`  ·  always-on
@@ -49,10 +49,10 @@ Description source unless noted: `src/lib/peer-mcp-personas.ts`.
 ### workers — `NON_PERSONA_MCP_TOOLS`  ·  gate: `capability:"worker"` / `browse_agent`
 | Tool | Line | Default model | Gate |
 |---|---|---|---|
-| explore | 1194 | claude-sonnet-5 xhigh | worker |
+| explore | 1194 | gemini-3.6-flash high | worker |
 | implement | 1276 | gpt-5.6-sol xhigh | worker |
 | review | 1367 | gemini-3.1-pro-preview | worker |
-| plan | 1451 | claude-opus-4.8 xhigh | worker |
+| plan | 1451 | claude-opus-5 xhigh | worker |
 | test | 1529 | gpt-5.6-sol xhigh | worker |
 | browse | 1905 | gpt-5.4-mini | browse_agent |
 

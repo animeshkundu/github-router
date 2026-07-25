@@ -59,7 +59,7 @@ function voteJson(opts: {
 function mockThreePeers(queues: Record<ModelKey, Array<string | null>>) {
   const consumed: Record<ModelKey, number> = {
     "gpt-5.6-sol": 0,
-    "claude-opus-4-7": 0,
+    "claude-opus-5": 0,
     "gemini-3.1-pro-preview": 0,
   }
   // Records each outgoing request's serialized body, in call order, so a
@@ -71,7 +71,7 @@ function mockThreePeers(queues: Record<ModelKey, Array<string | null>>) {
     const u = typeof url === "string" ? url : (url as URL).toString()
     const key: ModelKey =
       u.includes("/responses") ? "gpt-5.6-sol"
-      : u.includes("/v1/messages") ? "claude-opus-4-7"
+      : u.includes("/v1/messages") ? "claude-opus-5"
       : u.includes("/chat/completions") ? "gemini-3.1-pro-preview"
       : (() => { throw new Error(`unexpected upstream URL: ${u}`) })()
 
@@ -99,12 +99,12 @@ function mockThreePeers(queues: Record<ModelKey, Array<string | null>>) {
         }],
       }), { status: 200, headers: { "content-type": "application/json" } })
     }
-    if (key === "claude-opus-4-7") {
+    if (key === "claude-opus-5") {
       return new Response(JSON.stringify({
         id: "msg_test",
         type: "message",
         role: "assistant",
-        model: "claude-opus-4-7",
+        model: "claude-opus-5",
         content: [{ type: "text", text: entry }],
         stop_reason: "end_turn",
       }), { status: 200, headers: { "content-type": "application/json" } })
@@ -153,7 +153,7 @@ describe("runStandIn — verdict paths", () => {
   test("3/3 round-1 consensus with high confidence short-circuits (no round 2)", async () => {
     const { consumed } = mockThreePeers({
       "gpt-5.6-sol":                [voteJson({ choice: "A", confidence: 0.9, reasoning: "tree-shakeable wins" })],
-      "claude-opus-4-7":        [voteJson({ choice: "A", confidence: 0.85, reasoning: "modular + bundle size" })],
+      "claude-opus-5":        [voteJson({ choice: "A", confidence: 0.85, reasoning: "modular + bundle size" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "A", confidence: 0.9, reasoning: "ecosystem maturity" })],
     })
     const result = await runStandIn(TINY_INPUT)
@@ -161,10 +161,10 @@ describe("runStandIn — verdict paths", () => {
     expect(result.recommendation).toBe("A")
     expect(result.confidence).toBeGreaterThanOrEqual(0.8)
     expect(result.votes["gpt-5.6-sol"].round2).toBeNull()
-    expect(result.votes["claude-opus-4-7"].round2).toBeNull()
+    expect(result.votes["claude-opus-5"].round2).toBeNull()
     expect(result.votes["gemini-3.1-pro-preview"].round2).toBeNull()
     expect(consumed["gpt-5.6-sol"]).toBe(1)
-    expect(consumed["claude-opus-4-7"]).toBe(1)
+    expect(consumed["claude-opus-5"]).toBe(1)
     expect(consumed["gemini-3.1-pro-preview"]).toBe(1)
   })
 
@@ -172,7 +172,7 @@ describe("runStandIn — verdict paths", () => {
     mockThreePeers({
       "gpt-5.6-sol":                [voteJson({ choice: "A", confidence: 0.55, reasoning: "leaning A" }),
                                  voteJson({ choice: "A", confidence: 0.7,  reasoning: "still A" })],
-      "claude-opus-4-7":        [voteJson({ choice: "A", confidence: 0.6,  reasoning: "weak A" }),
+      "claude-opus-5":        [voteJson({ choice: "A", confidence: 0.6,  reasoning: "weak A" }),
                                  voteJson({ choice: "A", confidence: 0.75, reasoning: "still A" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "A", confidence: 0.5,  reasoning: "coin flip A" }),
                                  voteJson({ choice: "A", confidence: 0.7,  reasoning: "still A" })],
@@ -187,7 +187,7 @@ describe("runStandIn — verdict paths", () => {
     mockThreePeers({
       "gpt-5.6-sol":                [voteJson({ choice: "A", confidence: 0.7, reasoning: "A" }),
                                  voteJson({ choice: "B", confidence: 0.6, reasoning: "B after peer reasoning" })],
-      "claude-opus-4-7":        [voteJson({ choice: "B", confidence: 0.8, reasoning: "B" }),
+      "claude-opus-5":        [voteJson({ choice: "B", confidence: 0.8, reasoning: "B" }),
                                  voteJson({ choice: "B", confidence: 0.85, reasoning: "still B" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "B", confidence: 0.7, reasoning: "B" }),
                                  voteJson({ choice: "B", confidence: 0.75, reasoning: "still B" })],
@@ -201,7 +201,7 @@ describe("runStandIn — verdict paths", () => {
     mockThreePeers({
       "gpt-5.6-sol":                [voteJson({ choice: "A", confidence: 0.7, reasoning: "A" }),
                                  voteJson({ choice: "A", confidence: 0.7, reasoning: "sticking A" })],
-      "claude-opus-4-7":        [voteJson({ choice: "B", confidence: 0.8, reasoning: "B" }),
+      "claude-opus-5":        [voteJson({ choice: "B", confidence: 0.8, reasoning: "B" }),
                                  voteJson({ choice: "B", confidence: 0.85, reasoning: "B" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "B", confidence: 0.7, reasoning: "B" }),
                                  voteJson({ choice: "B", confidence: 0.75, reasoning: "B" })],
@@ -217,7 +217,7 @@ describe("runStandIn — verdict paths", () => {
     mockThreePeers({
       "gpt-5.6-sol":                [voteJson({ choice: "A", confidence: 0.6, reasoning: "A" }),
                                  voteJson({ choice: "A", confidence: 0.6, reasoning: "sticking A" })],
-      "claude-opus-4-7":        [voteJson({ choice: "B", confidence: 0.7, reasoning: "B" }),
+      "claude-opus-5":        [voteJson({ choice: "B", confidence: 0.7, reasoning: "B" }),
                                  voteJson({ choice: "B", confidence: 0.7, reasoning: "sticking B" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "C", confidence: 0.6, reasoning: "C" }),
                                  voteJson({ choice: "C", confidence: 0.6, reasoning: "sticking C" })],
@@ -240,7 +240,7 @@ describe("runStandIn — verdict paths", () => {
   test("all three round-1 models flag need_more_info returns need_more_info verdict", async () => {
     mockThreePeers({
       "gpt-5.6-sol":                [voteJson({ choice: null, confidence: 0, reasoning: "underspecified", needMoreInfo: "what's the deployment target?" })],
-      "claude-opus-4-7":        [voteJson({ choice: null, confidence: 0, reasoning: "underspecified", needMoreInfo: "what's the bundle-size budget?" })],
+      "claude-opus-5":        [voteJson({ choice: null, confidence: 0, reasoning: "underspecified", needMoreInfo: "what's the bundle-size budget?" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: null, confidence: 0, reasoning: "underspecified", needMoreInfo: "are time zones required?" })],
     })
     const result = await runStandIn(TINY_INPUT)
@@ -259,7 +259,7 @@ describe("runStandIn — resilience", () => {
     mockThreePeers({
       "gpt-5.6-sol":                [null /* R1 fails */,
                                  voteJson({ choice: "A", confidence: 0.7, reasoning: "A R2" })],
-      "claude-opus-4-7":        [voteJson({ choice: "A", confidence: 0.7, reasoning: "A" }),
+      "claude-opus-5":        [voteJson({ choice: "A", confidence: 0.7, reasoning: "A" }),
                                  voteJson({ choice: "A", confidence: 0.8, reasoning: "still A" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "A", confidence: 0.7, reasoning: "A" }),
                                  voteJson({ choice: "A", confidence: 0.8, reasoning: "still A" })],
@@ -277,7 +277,7 @@ describe("runStandIn — resilience", () => {
   test("only 1 of 3 successful R1 votes returns no_consensus without running round 2", async () => {
     mockThreePeers({
       "gpt-5.6-sol":                [null /* fail */],
-      "claude-opus-4-7":        [null /* fail */],
+      "claude-opus-5":        [null /* fail */],
       "gemini-3.1-pro-preview": [voteJson({ choice: "A", confidence: 0.7, reasoning: "A" })],
     })
     const result = await runStandIn(TINY_INPUT)
@@ -285,7 +285,7 @@ describe("runStandIn — resilience", () => {
     expect(result.notes ?? "").toContain("1 of 3")
     // None should have R2 results — we bailed.
     expect(result.votes["gpt-5.6-sol"].round2).toBeNull()
-    expect(result.votes["claude-opus-4-7"].round2).toBeNull()
+    expect(result.votes["claude-opus-5"].round2).toBeNull()
     expect(result.votes["gemini-3.1-pro-preview"].round2).toBeNull()
   })
 
@@ -293,7 +293,7 @@ describe("runStandIn — resilience", () => {
     mockThreePeers({
       "gpt-5.6-sol":                ["this is prose, not JSON",
                                  voteJson({ choice: "A", confidence: 0.85, reasoning: "A after retry" })],
-      "claude-opus-4-7":        [voteJson({ choice: "A", confidence: 0.85, reasoning: "A" })],
+      "claude-opus-5":        [voteJson({ choice: "A", confidence: 0.85, reasoning: "A" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "A", confidence: 0.85, reasoning: "A" })],
     })
     const result = await runStandIn(TINY_INPUT)
@@ -307,7 +307,7 @@ describe("runStandIn — resilience", () => {
       "gpt-5.6-sol":                ["nope",
                                  "still nope",
                                  voteJson({ choice: "A", confidence: 0.7, reasoning: "A R2" })],
-      "claude-opus-4-7":        [voteJson({ choice: "A", confidence: 0.7, reasoning: "A" }),
+      "claude-opus-5":        [voteJson({ choice: "A", confidence: 0.7, reasoning: "A" }),
                                  voteJson({ choice: "A", confidence: 0.8, reasoning: "A R2" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "A", confidence: 0.7, reasoning: "A" }),
                                  voteJson({ choice: "A", confidence: 0.8, reasoning: "A R2" })],
@@ -326,7 +326,7 @@ describe("runStandIn — resilience", () => {
     const fenced = "```json\n" + voteJson({ choice: "B", confidence: 0.85, reasoning: "B" }) + "\n```"
     mockThreePeers({
       "gpt-5.6-sol":                [fenced],
-      "claude-opus-4-7":        [voteJson({ choice: "B", confidence: 0.85, reasoning: "B" })],
+      "claude-opus-5":        [voteJson({ choice: "B", confidence: 0.85, reasoning: "B" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "B", confidence: 0.85, reasoning: "B" })],
     })
     const result = await runStandIn(TINY_INPUT)
@@ -359,7 +359,7 @@ describe("runStandIn — resilience", () => {
     // With all 3 R1 votes failing, the orchestrator returns no_consensus
     // without attempting R2.
     expect(result.verdict).toBe("no_consensus")
-    for (const key of ["gpt-5.6-sol", "claude-opus-4-7", "gemini-3.1-pro-preview"] as const) {
+    for (const key of ["gpt-5.6-sol", "claude-opus-5", "gemini-3.1-pro-preview"] as const) {
       const v = result.votes[key].round1
       expect("error" in v).toBe(true)
     }
@@ -370,7 +370,7 @@ describe("runStandIn — output shape invariants", () => {
   test("the result envelope is JSON-stringifiable (no circular refs, no functions)", async () => {
     mockThreePeers({
       "gpt-5.6-sol":                [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
-      "claude-opus-4-7":        [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
+      "claude-opus-5":        [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
     })
     const result = await runStandIn(TINY_INPUT)
@@ -383,7 +383,7 @@ describe("runStandIn — output shape invariants", () => {
   test("confidence above 1.0 from a model is clamped to [0, 1]", async () => {
     mockThreePeers({
       "gpt-5.6-sol":                [voteJson({ choice: "A", confidence: 1.5 /* nope */, reasoning: "overconfident" })],
-      "claude-opus-4-7":        [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
+      "claude-opus-5":        [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
       "gemini-3.1-pro-preview": [voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })],
     })
     const result = await runStandIn(TINY_INPUT)
@@ -404,7 +404,7 @@ describe("runStandIn — rollout-lag OpenAI fallback", () => {
       object: "list",
       data: [
         { id: "gpt-5.5" },
-        { id: "claude-opus-4-7" },
+        { id: "claude-opus-5" },
         { id: "gemini-3.1-pro-preview" },
       ] as never,
     }
@@ -423,7 +423,7 @@ describe("runStandIn — rollout-lag OpenAI fallback", () => {
       }
       if (u.includes("/v1/messages")) {
         return new Response(JSON.stringify({
-          id: "msg_test", type: "message", role: "assistant", model: "claude-opus-4-7",
+          id: "msg_test", type: "message", role: "assistant", model: "claude-opus-5",
           content: [{ type: "text", text: vote }], stop_reason: "end_turn",
         }), { status: 200, headers: { "content-type": "application/json" } })
       }

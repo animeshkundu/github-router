@@ -39,7 +39,7 @@ Subagent system prompt = `GEMINI_CRITIC_BASE` (`src/lib/peer-mcp-personas.ts:237
 
 The tool is named inside the critic-list clause, not given its own sentence. When gemini is available the list is:
 
-"Cross-lab peer critics under `mcp__peers__*` (`codex_critic` (gpt-5.6-sol), `codex_reviewer` (gpt-5.3-codex), `gemini_reviewer` (gemini-3.1-pro, line-level code review), `gemini_critic` (gemini-3.1-pro), `opus_critic` (Opus 4.7)) are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies."
+"Cross-lab peer critics under `mcp__peers__*` (`codex_critic` (gpt-5.6-sol), `codex_reviewer` (gpt-5.3-codex), `gemini_reviewer` (gemini-3.1-pro, line-level code review), `gemini_critic` (gemini-3.1-pro), `opus_critic` (Opus 5)) are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies."
 
 So the snippet names `gemini_critic` + its model `(gemini-3.1-pro)` and defers all scope/when-to-use to the description (`:642`, "Each tool's description explains its scope and when it applies"). No effort tier, no proofs/invariants framing here — by design (the snippet is a capability inventory; routing lives in the description).
 
@@ -72,7 +72,7 @@ Checked-in root `CLAUDE.md` documents the tool in two places, both consistent wi
 
 ### 3d. Cross-surface consistency
 
-One cross-surface mismatch, and it is NOT gemini_critic's: the same awareness snippet lists `opus_critic (Opus 4.7)` (`src/lib/peer-mcp-personas.ts:585`) while opus_critic's own tool description and code say Opus 4.6 (`:401,404`). That belongs to the opus_critic audit; flagged here only because it lives in the shared snippet gemini_critic is embedded in. For gemini_critic itself: model, gate, effort tiers, and endpoint are consistent across description ↔ snippet ↔ CLAUDE.md ↔ code.
+The shared awareness snippet now lists `opus_critic (Opus 5)`, matching that persona's preferred runtime model. For gemini_critic itself, model, gate, effort tiers, and endpoint remain consistent across description ↔ snippet ↔ CLAUDE.md ↔ code.
 
 ## 4. Findings
 
@@ -80,7 +80,7 @@ One cross-surface mismatch, and it is NOT gemini_critic's: the same awareness sn
 
 - **[Suggestion]** `src/lib/peer-mcp-personas.ts:352` — the opener "Adversarial second opinion." is byte-identical to `codex_critic`'s "Adversarial second opinion on plans, designs, or code tradeoffs" prefix and gives no first-line differentiation; the distinguishing content ("third-lab triangulation", proofs/invariants, cross-check) only arrives in sentence two. Optional: lead with the differentiator (e.g. "Third-lab adversarial second opinion…") so the routing signal is front-loaded. Non-blocking.
 
-- **[Suggestion]** `src/lib/peer-mcp-personas.ts:585` (shared snippet, opus_critic's concern) — `opus_critic (Opus 4.7)` in the awareness snippet contradicts opus_critic's description/code (Opus 4.6). Not this tool's surface; recorded for the opus_critic audit so it is not lost.
+- No adjacent opus_critic model-label finding remains: the shared snippet and preferred runtime model both say Opus 5.
 
 ## 5. Verdict
 

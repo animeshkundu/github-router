@@ -33,14 +33,14 @@ const INACTIVITY_TIMEOUT_MS = 200
 
 mock.module("~/lib/port", () => ({
   DEFAULT_PORT: 8787,
-  DEFAULT_CLAUDE_MODEL: "claude-opus-4-8",
-  DEFAULT_CLAUDE_MODEL_FALLBACKS: ["claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5"],
+  DEFAULT_CLAUDE_MODEL: "claude-opus-5",
+  DEFAULT_CLAUDE_MODEL_FALLBACKS: ["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"],
   DEFAULT_CODEX_MODEL: "gpt-5.6-sol",
   DEFAULT_CODEX_MODEL_FALLBACKS: ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex"],
   UPSTREAM_FETCH_TIMEOUT_MS: 0,
   UPSTREAM_INACTIVITY_TIMEOUT_MS: INACTIVITY_TIMEOUT_MS,
   generateRandomPort: () => Math.floor(Math.random() * (65535 - 11000 + 1)) + 11000,
-  pickClaudeDefault: (family?: string) => `claude-opus-${family ?? "4-7"}`,
+  pickClaudeDefault: (family?: string) => `claude-opus-${family ?? "5"}`,
 }))
 
 // Now import server after the mock is in place.

@@ -142,10 +142,11 @@ export function isMcpGroup(s: unknown): s is McpGroup {
  * (handler.ts:handleToolsCallSSE). Claude Code's MCP HTTP client honors
  * `text/event-stream` responses without applying the ~60s per-tool-call
  * timer that previously broke xhigh on gpt-5.5 (~56s wall) and on
- * Anthropic Opus families (high+ thinking budgets). opus-critic itself
- * now runs on claude-opus-4-6 which doesn't advertise xhigh, so the
- * SSE long-tail concern there is moot; the SSE machinery still applies
- * to the other personas that do expose xhigh.
+ * Anthropic Opus families (high+ thinking budgets). opus-critic caps its
+ * exposed effort at `high` (its effective model can fall back to
+ * claude-opus-4-6, which doesn't advertise xhigh), so the SSE long-tail
+ * concern there is moot; the SSE machinery still applies to the other
+ * personas that do expose xhigh.
  */
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh"] as const
 export type Effort = (typeof EFFORT_LEVELS)[number]
@@ -172,8 +173,8 @@ export interface PersonaSpec {
   /** True when the persona can mutate the workspace (only `codex-implementer`). */
   writeCapable: boolean
   /** True when the persona MUST use the HTTP backend (the codex-cli stdio
-   *  bridge can't run this model). gemini-3.x and claude-opus-4-6 both
-   *  set this — codex-cli only knows gpt-5/codex models. */
+   *  bridge can't run this model). gemini-3.x and the Anthropic Opus critic
+   *  both set this — codex-cli only knows gpt-5/codex models. */
   requiresHttp: boolean
   /** True when the persona's model belongs to a model family that may not
    *  be present in Copilot's live `/v1/models` catalog (gemini-critic
@@ -323,7 +324,7 @@ Reply format (markdown):
 Resilience reminder:
   If your session terminates abnormally before "Status: complete", the lead will retry once. On recovery, ask the lead to confirm what's already been done before re-applying changes — duplicate edits are worse than a slow restart.`
 
-const OPUS_CRITIC_BASE = `You are opus-critic, a fresh-context same-lab adversarial reviewer running on Opus 4.6. The lead orchestrator that just delegated to you runs newer Opus-family context, but you are NOT the lead. You did not see the lead's reasoning trace. You only see the brief.
+const OPUS_CRITIC_BASE = `You are opus-critic, a fresh-context same-lab adversarial reviewer running on Opus 5. The lead orchestrator that just delegated to you runs Opus-family context too, but you are NOT the lead. You did not see the lead's reasoning trace. You only see the brief.
 
 Your job is to spot what the lead missed because of cognitive momentum, sunk-cost on a plan, or motivated reasoning toward a particular fix. Your blind-spot diversification is LIMITED compared to codex-critic (gpt-5.6-sol) and gemini-critic (gemini-3.1-pro), same lab, adjacent model family, related priors. Use that honestly: don't pretend to find a different perspective when the obvious read is "the lead got it right." Silence on good work is a valid and welcome answer.
 
@@ -402,23 +403,29 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
   {
     agentName: "opus-critic",
     toolNameHttp: "opus_critic",
-    model: "claude-opus-4-6",
+    model: "claude-opus-5",
     endpoint: "/v1/messages",
     description:
-      "Adversarial same-lab critic backed by fresh-context Opus 4.6, with limited blind-spot diversity compared with cross-lab critics. It reviews plans, designs, or code tradeoffs for cognitive momentum, sunk-cost reasoning, and confabulated assumptions, then returns a calibrated objection or no material objection. Use when a same-family sanity check can catch lead-context drift or when comparing against codex_critic / gemini_critic findings. Not a substitute for cross-lab review on security-sensitive or high-risk changes; use codex_critic or gemini_critic for stronger diversity. On enterprise catalogs that carry Opus-4.6-1M it runs with ≈936K input tokens; otherwise ≈168K. Pinned two minors behind the default Opus so the panel spans more of the version curve. Pass artifact verbatim.",
+      "Adversarial same-lab critic backed by fresh-context Opus 5, with limited blind-spot diversity compared with cross-lab critics. It reviews plans, designs, or code tradeoffs for cognitive momentum, sunk-cost reasoning, and confabulated assumptions, then returns a calibrated objection or no material objection. Use when a same-family sanity check can catch lead-context drift or when comparing against codex_critic / gemini_critic findings. Not a substitute for cross-lab review on security-sensitive or high-risk changes; use codex_critic or gemini_critic for stronger diversity. Runs with the full 1M-context Opus 5 window (native, no -1m sibling needed). Pass artifact verbatim.",
     baseInstructions: OPUS_CRITIC_BASE,
     agentPrompt: "",
     writeCapable: false,
-    // requiresHttp: true — codex-cli stdio bridge can't run claude-opus-4-6
+    // requiresHttp: true — codex-cli stdio bridge can't run claude-opus-5
     // (it speaks gpt-5/codex only), so opus-critic must always route via
     // HTTP. Distinct from requiresGeminiCatalog (which is false here —
-    // claude-opus-4-6 is always in Copilot's catalog for our supported
+    // an Opus slug is always in Copilot's catalog for our supported
     // tiers; we don't need a catalog probe to register the persona).
     requiresHttp: true,
-    // claude-opus-4.6 / claude-opus-4.6-1m only advertise reasoning_effort
-    // ["low", "medium", "high", "max"] — no xhigh. We omit xhigh from the
-    // allowlist so a caller-supplied "xhigh" rejects with a clean
-    // RPC_INVALID_PARAMS instead of bouncing off Copilot at request time.
+    // opus_critic's EFFECTIVE model is resolved dynamically at call time
+    // (`resolveOpusCriticModel` in handler.ts): `claude-opus-5` (which
+    // advertises xhigh) when the catalog carries it, else a fallback to
+    // `claude-opus-4.6-1m` / `claude-opus-4-6`, which advertise only
+    // ["low","medium","high","max"] — no xhigh. This STATIC base is the
+    // conservative floor: `activePersonas()` widens it to include xhigh ONLY
+    // when the resolved model is opus-5, so on a fallback tier a caller-supplied
+    // "xhigh" rejects with a clean RPC_INVALID_PARAMS instead of bouncing off
+    // Copilot (the `/v1/messages` dispatch does not clamp effort). Default stays
+    // "high" on every tier.
     allowedEfforts: ["low", "medium", "high"] as const,
     defaultEffort: "high",
   },
@@ -597,7 +604,7 @@ export function buildPeerAwarenessSnippet(opts: {
     criticList.push("`gemini_reviewer` (gemini-3.1-pro, line-level code review)")
     criticList.push("`gemini_critic` (gemini-3.1-pro)")
   }
-  criticList.push("`opus_critic` (Opus 4.6)")
+  criticList.push("`opus_critic` (Opus 5)")
 
   const codexCliClause = opts.codexCli
     ? " `mcp__codex-cli__codex` dispatches to `codex-implementer` (gpt-5.3-codex with workspace-write) for end-to-end coding tasks."
@@ -858,6 +865,19 @@ function formatWebSearchResult(results: {
     .join("\n")
   return `${results.content}\n\n## References\n${refsLine}`
 }
+
+/**
+ * Model-override tier ladder surfaced on the read-heavy workers
+ * (explore / implement / review). The caller picks a model by task weight;
+ * all three tiers are 1M-context, and `high` is the recommended reasoning
+ * depth for the ladder (flash tops out at high; sol/terra go higher if the
+ * caller wants). Appended to those tools' `model` param description so the
+ * lead has actionable override guidance instead of a bare free string.
+ */
+const WORKER_TIER_GUIDANCE =
+  " Override by task weight: `gpt-5.6-sol` (heavy/deep), "
+  + "`gpt-5.6-terra` (moderate), `gemini-3.6-flash` (light/cheap) — all "
+  + "1M context; pair with thinking:'high'."
 
 export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
   Object.freeze([
@@ -1239,9 +1259,9 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     },
     // explore / implement / review / plan / test are autonomous worker tools
     // backed by the Pi agent loop (`src/lib/worker-agent/engine.ts`) and routed
-    // through per-mode defaults: explore -> `claude-sonnet-5` (xhigh), review ->
+    // through per-mode defaults: explore -> `gemini-3.6-flash` (high), review ->
     // `gemini-3.1-pro-preview` (xhigh clamped to high by the default model), plan
-    // -> `claude-opus-4.8` (xhigh), and implement/test -> `gpt-5.6-sol` (xhigh). An
+    // -> `claude-opus-5` (xhigh), and implement/test -> `gpt-5.6-sol` (xhigh). An
     // explicit `model` arg wins.
     //
     // GATING (`capability: "worker"`): the MCP handler drops these entries from
@@ -1251,7 +1271,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     // `GH_ROUTER_DISABLE_WORKER_TOOLS=1`. Defense-in-depth: the gate is checked at
     // BOTH list-time and call-time so a client that hard-codes the tool name can't
     // bypass the list-side filter. If a per-mode default such as `gpt-5.6-sol` or
-    // `claude-sonnet-5` is absent, that mode returns a helpful resolve error.
+    // `gemini-3.6-flash` is absent, that mode returns a helpful resolve error.
     //
     // SCHEMA SHAPE: `prompt` is required; `model` / `thinking` are optional
     // fine-tunes the worker engine validates against the live catalog (unknown
@@ -1272,7 +1292,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       description:
         "Runs as the background `worker-explore` agent. Dispatch via the Agent tool (subagent_type: worker-explore) so the turn is never blocked; the result arrives as a completion notification. "
         + "Read-only investigation by an autonomous worker (Pi runtime; "
-        + "default model `claude-sonnet-5` at xhigh reasoning, override via "
+        + "default model `gemini-3.6-flash` at high reasoning, override via "
         + "the `model` arg with any Copilot-catalog model that advertises "
         + "`tool_calls`). It has read, glob, grep, semantic-first code search, "
         + "web search, fetch_url, advisor, update_plan, and read-only toolbelt "
@@ -1298,9 +1318,10 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "claude-sonnet-5). Must advertise tool_calls "
+              + "gemini-3.6-flash). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
-              + "the eligible catalog models on mismatch.",
+              + "the eligible catalog models on mismatch."
+              + WORKER_TIER_GUIDANCE,
           },
           thinking: {
             type: "string",
@@ -1388,7 +1409,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               "Optional Copilot catalog model id (defaults to "
               + "gpt-5.6-sol). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
-              + "the eligible catalog models on mismatch.",
+              + "the eligible catalog models on mismatch."
+              + WORKER_TIER_GUIDANCE,
           },
           thinking: {
             type: "string",
@@ -1468,7 +1490,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               "Optional Copilot catalog model id (defaults to "
               + "gemini-3.1-pro-preview). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
-              + "the eligible catalog models on mismatch.",
+              + "the eligible catalog models on mismatch."
+              + WORKER_TIER_GUIDANCE,
           },
           thinking: {
             type: "string",
@@ -1518,7 +1541,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       description:
         "Runs as the background `worker-plan` agent. Dispatch via the Agent tool (subagent_type: worker-plan) so the turn is never blocked; the result arrives as a completion notification. "
         + "Read-only implementation planning by an autonomous worker (Pi runtime; "
-        + "default model `claude-opus-4.8` at xhigh reasoning, override via "
+        + "default model `claude-opus-5` at xhigh reasoning, override via "
         + "`model` with any Copilot-catalog model that advertises `tool_calls`). "
         + "It has the same read-only toolset as explore and returns a concrete, "
         + "ordered implementation plan covering files, approach, risks, and how "
@@ -1543,7 +1566,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "claude-opus-4.8). Must advertise tool_calls "
+              + "claude-opus-5). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
               + "the eligible catalog models on mismatch.",
           },

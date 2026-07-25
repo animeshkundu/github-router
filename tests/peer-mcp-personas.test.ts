@@ -61,10 +61,10 @@ describe("PERSONAS_READ", () => {
     // gemini-3.1-pro-preview; reviewer prompt vs. critic prompt).
     expect(byName["gemini-reviewer"]?.requiresGeminiCatalog).toBe(true)
 
-    expect(byName["opus-critic"]?.model).toBe("claude-opus-4-6")
+    expect(byName["opus-critic"]?.model).toBe("claude-opus-5")
     expect(byName["opus-critic"]?.endpoint).toBe("/v1/messages")
     // opus-critic must route via HTTP (codex-cli stdio bridge can't run
-    // claude-opus-4-6 — it speaks gpt-5/codex only)
+    // claude-opus-5 — it speaks gpt-5/codex only)
     expect(byName["opus-critic"]?.requiresHttp).toBe(true)
     expect(byName["opus-critic"]?.requiresGeminiCatalog).toBeUndefined()
     expect(byName["opus-critic"]?.writeCapable).toBe(false)
@@ -90,7 +90,7 @@ describe("PERSONAS_READ", () => {
     expect(byName["gemini-critic"]?.description).toContain("gemini-3.1-pro")
     expect(byName["codex-reviewer"]?.description).toContain("gpt-5.3-codex")
     expect(byName["gemini-reviewer"]?.description).toContain("gemini-3.1-pro")
-    expect(byName["opus-critic"]?.description).toContain("Opus 4.6")
+    expect(byName["opus-critic"]?.description).toContain("Opus 5")
     for (const p of PERSONAS_READ) {
       // codex-reviewer AND gemini-reviewer are framed as code-specialists /
       // "magnifying glass" line-level reviewers, not adversarial critics —
@@ -118,26 +118,26 @@ describe("PERSONAS_READ", () => {
     }
   })
 
-  test("codex-critic / codex-reviewer accept all four effort tiers (SSE handles long calls); opus-critic caps at high (4.6 model doesn't advertise xhigh)", () => {
+  test("codex-critic / codex-reviewer accept all four effort tiers", () => {
     // SSE-streamed /mcp responses (handler.ts:handleToolsCallSSE) bypass
-    // Claude Code's ~60s tools/call ceiling, so the previous xhigh
-    // constraints on these critics are lifted. Two exceptions:
-    //   - gemini-critic — see the next test (Copilot's gemini route 400s
-    //     on xhigh)
-    //   - opus-critic — its model (claude-opus-4-6 / -1m) only advertises
-    //     reasoning_effort ["low","medium","high","max"]; xhigh is absent.
-    //     We omit xhigh from the allowlist so a caller-supplied xhigh
-    //     rejects with RPC_INVALID_PARAMS rather than bouncing off Copilot
-    //     at request time.
+    // Claude Code's ~60s tools/call ceiling, so the codex personas expose xhigh.
     const allFour = ["low", "medium", "high", "xhigh"] as const
-    const threeNoXhigh = ["low", "medium", "high"] as const
     const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
     expect(byName["codex-critic"]?.allowedEfforts).toEqual(allFour)
     expect(byName["codex-reviewer"]?.allowedEfforts).toEqual(allFour)
-    expect(byName["opus-critic"]?.allowedEfforts).toEqual(threeNoXhigh)
   })
 
-  test("codex-critic / codex-reviewer default to xhigh; opus-critic defaults to high (deepest tier 4.6 advertises)", () => {
+  test("opus-critic caps allowedEfforts at high (dynamic fallback to opus-4.6 lacks xhigh)", () => {
+    // opus_critic's EFFECTIVE model is resolved at call time to claude-opus-5
+    // (which advertises xhigh) OR a claude-opus-4.6 fallback (which does not).
+    // The /v1/messages dispatch does not clamp effort, so the static allowlist
+    // stays capped at high — a caller-supplied xhigh rejects cleanly instead of
+    // 400ing off Copilot on a non-opus-5 tier.
+    const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
+    expect(byName["opus-critic"]?.allowedEfforts).toEqual(["low", "medium", "high"])
+  })
+
+  test("codex-critic / codex-reviewer default to xhigh; opus-critic defaults to high", () => {
     const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
     expect(byName["codex-critic"]?.defaultEffort).toBe("xhigh")
     expect(byName["codex-reviewer"]?.defaultEffort).toBe("xhigh")

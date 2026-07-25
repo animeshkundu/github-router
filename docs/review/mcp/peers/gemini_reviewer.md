@@ -35,7 +35,7 @@ Named in `buildPeerAwarenessSnippet` (`src/lib/peer-mcp-personas.ts:582`). When 
 
 > `gemini_reviewer` (gemini-3.1-pro, line-level code review)
 
-Surrounding sentence (`peer-mcp-personas.ts:642`): "Cross-lab peer critics under `mcp__peers__*` (`codex_critic` (gpt-5.6-sol), `codex_reviewer` (gpt-5.3-codex), `gemini_reviewer` (gemini-3.1-pro, line-level code review), `gemini_critic` (gemini-3.1-pro), `opus_critic` (Opus 4.7)) are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies."
+Surrounding sentence (`peer-mcp-personas.ts:642`): "Cross-lab peer critics under `mcp__peers__*` (`codex_critic` (gpt-5.6-sol), `codex_reviewer` (gpt-5.3-codex), `gemini_reviewer` (gemini-3.1-pro, line-level code review), `gemini_critic` (gemini-3.1-pro), `opus_critic` (Opus 5)) are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies."
 
 So the snippet names the tool + a 4-word scope tag and explicitly defers the when/when-not to the tool `description`. This matches the documented framing constraint (`peer-mcp-personas.ts:516-521`): capability inventory only, routing signal lives in the description.
 
