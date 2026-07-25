@@ -414,7 +414,9 @@ export async function handleResponsesCompact(c: Context) {
     method: "POST",
     headers: copilotHeaders(state),
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS || 300_000),
+    ...(UPSTREAM_FETCH_TIMEOUT_MS > 0
+      ? { signal: AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS) }
+      : {}),
   })
   // Non-streaming native compact — retry the transient class (429/5xx/
   // network) around the 401-refresh path. A 404 (Copilot doesn't support

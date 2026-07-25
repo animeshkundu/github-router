@@ -8,7 +8,7 @@ The Pi runtime backs github-router's worker agents. Two upstream slices are reta
 
 | Subtree | Upstream source | Rule |
 | --- | --- | --- |
-| `src/vendor/pi/agent/` | `packages/agent/src/` | Full directory replacement, followed by the three documented `proxy.ts` type-check patches. It is not verbatim. |
+| `src/vendor/pi/agent/` | `packages/agent/src/` | Full directory replacement, followed by the three documented `proxy.ts` type-check patches and the minimal `agent.ts` `shouldStopAfterTurn` exposure. It is not verbatim. |
 | `src/vendor/pi/ai/` | `packages/ai/src/` | Minimal transitive closure required by the agent tree and `src/lib/worker-agent/`, with documented type-only stubs and a rewritten index. |
 
 The current pin is upstream tag `v0.82.0`, commit `083e61621276bff9f6faefab87ce07fcd98734e2` (2026-07-24).
@@ -38,6 +38,7 @@ These must survive every refresh:
 | File | Divergence |
 | --- | --- |
 | `agent/proxy.ts` | Bun reader typing: widen the reader element to `unknown`, cast `getReader()` through `unknown`, and narrow at `read()`. Also use `proxyEvent satisfies never` instead of an unused exhaustiveness binding. |
+| `agent/agent.ts` | Add `shouldStopAfterTurn` to `AgentOptions`, store it, and pass it into `AgentLoopConfig`. This makes Pi's existing graceful post-turn stop reachable by worker hard-budget wiring. |
 | `ai/types.ts` | Replace the ten concrete provider-option imports with type-only `Record<string, unknown>` aliases so their SDK-bearing modules are not copied. Keep the rest of the file verbatim. |
 | `ai/utils/diagnostics.ts` | Keep the shallow type stub used at the `AssistantMessage.diagnostics` boundary; the custom stream never emits provider diagnostics. |
 | `ai/index.ts` | Re-export only the closed slice plus TypeBox primitives. |
@@ -49,7 +50,7 @@ The `proxy.ts` patches are especially easy to lose because `agent/` otherwise ar
 1. **Clone outside the repository.** Clone `pi-mono` into a system temporary directory and check out the exact requested tag or commit. Never copy `.git`, build output, or scratch patches into this working tree.
 2. **Record and compare pins.** Capture `git rev-parse HEAD`, verify it matches the intended tag, and inspect the upstream range from the currently pinned SHA.
 3. **Recover local patches before overwrite.** Diff the current `src/vendor/pi/agent/proxy.ts` against that file at the old upstream pin. Do the same for `src/vendor/pi/ai/utils/diagnostics.ts`. Save the resulting divergences outside the repository.
-4. **Replace agent and rebuild AI closure.** Replace `agent/` from `packages/agent/src/`, then re-apply the three `proxy.ts` patches. Recreate `ai/` by following imports from the new agent tree and `src/lib/worker-agent/` until closed. Re-apply the provider-option aliases, diagnostics stub, and rewritten index. Do not carry obsolete files forward merely because they existed at the prior pin.
+4. **Replace agent and rebuild AI closure.** Replace `agent/` from `packages/agent/src/`, then re-apply the three `proxy.ts` patches and the `agent.ts` `shouldStopAfterTurn` exposure. Recreate `ai/` by following imports from the new agent tree and `src/lib/worker-agent/` until closed. Re-apply the provider-option aliases, diagnostics stub, and rewritten index. Do not carry obsolete files forward merely because they existed at the prior pin.
 5. **Audit upstream runtime dependencies.** Diff upstream's `packages/agent/package.json` and `packages/ai/package.json` `dependencies` against ours. Every bare specifier imported by the new closure MUST be an explicit entry in our own `dependencies` — a package that resolves only transitively (through a devDependency, say) works locally and breaks a production install. Pin Pi's dependencies EXACTLY at upstream's version, matching the existing `ignore` / `partial-json` / `typebox` / `yaml` entries; carets are for this repo's own dependencies, not vendored ones. This step exists because the v0.82.0 sync initially missed `diff`, which `harness/tools/edit-diff.ts` imports at runtime and which was resolving only via `tsdown`.
 6. **Update documentation.** Update PROVENANCE.md and this document with the exact tag, full SHA, date, final closure, files added/dropped, and every divergence. Never call `agent/` verbatim while `proxy.ts` differs.
 7. **Run the focused gate.** Run typecheck, lint, the complete focused worker/Pi contract suite, and build. A failing constructor-option or runtime execution-mode assertion is an upgrade finding; diagnose it rather than weakening or skipping the test.

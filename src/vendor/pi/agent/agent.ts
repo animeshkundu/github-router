@@ -104,6 +104,8 @@ export interface AgentOptions {
 	onResponse?: SimpleStreamOptions["onResponse"];
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
+	/** Local harness patch: expose the low-level graceful post-turn stop hook. */
+	shouldStopAfterTurn?: AgentLoopConfig["shouldStopAfterTurn"];
 	prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -188,6 +190,7 @@ export class Agent {
 		context: AfterToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
+	public shouldStopAfterTurn?: AgentLoopConfig["shouldStopAfterTurn"];
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -219,6 +222,7 @@ export class Agent {
 		this.onResponse = runtimeOptions.onResponse;
 		this.beforeToolCall = runtimeOptions.beforeToolCall;
 		this.afterToolCall = runtimeOptions.afterToolCall;
+		this.shouldStopAfterTurn = runtimeOptions.shouldStopAfterTurn;
 		this.prepareNextTurn = runtimeOptions.prepareNextTurn;
 		this.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext;
 		this.steeringQueue = new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time");
@@ -445,6 +449,7 @@ export class Agent {
 			toolExecution: this.toolExecution,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
+			shouldStopAfterTurn: this.shouldStopAfterTurn,
 			prepareNextTurn:
 				this.prepareNextTurnWithContext || this.prepareNextTurn
 					? async (context) => {

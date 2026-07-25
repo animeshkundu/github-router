@@ -916,8 +916,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       // tools/call SSE iterator) and the upstream sockets tear down
       // immediately. Without this, the upstream Bing-backed call kept
       // running until natural completion, leaking the inflight slot
-      // for the full UPSTREAM_FETCH_TIMEOUT_MS window (~5 min) — eight
-      // consumer disconnects in 5 minutes fully stalled /mcp.
+      // for the full UPSTREAM_FETCH_TIMEOUT_MS window (0 disables the timeout) —
+      // enough concurrent disconnects could fully stall /mcp.
       async handler(
         args: Record<string, unknown>,
         signal?: AbortSignal,

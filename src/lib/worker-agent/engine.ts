@@ -587,6 +587,10 @@ async function runWorkerAgentOnce(
         }
         return undefined
       },
+      // Hard caps block the triggering tool so the model receives the terse
+      // halt result, then stop the loop after that turn before another provider
+      // request. The repeated-call guard does not latch a hard stop.
+      shouldStopAfterTurn: () => budget.hardStopReason !== null,
       afterToolCall: async (ctx: AfterToolCallContext) => {
         // Byte accounting on the realized tool result. `recordToolBytes`
         // walks `result.content[].text` parts and sums UTF-8 byte
@@ -631,17 +635,12 @@ async function runWorkerAgentOnce(
     // explicitly removeEventListener in the inner finally so a
     // long-lived `opts.signal` (test fixtures, repeated calls) can't
     // accumulate dead listeners.
-    const abortHandler = (): void => agent?.abort()
+    const abortHandler = (): void => agent.abort()
+    // Register unconditionally once an outer signal exists. A signal can abort
+    // after this check but before prompt() creates Pi's active run; the listener
+    // must remain installed to catch that race.
     if (opts.signal) {
-      if (opts.signal.aborted) {
-        // Late check — semaphore step 1 already gated pre-aborted, but
-        // the signal might have aborted between then and here. Fire
-        // the abort BEFORE we start the loop so the prompt doesn't
-        // even get a chance to spin.
-        agent.abort()
-      } else {
-        opts.signal.addEventListener("abort", abortHandler, { once: true })
-      }
+      opts.signal.addEventListener("abort", abortHandler, { once: true })
     }
 
     // Step 9: subscribe to turn/message end. The assistant's final text is
@@ -700,8 +699,10 @@ async function runWorkerAgentOnce(
     // cascades into the per-tool signal and tears the bash down.
     // `.unref()` so the timer doesn't keep the event loop alive past
     // the test/scope that owns this call.
+    let wallClockExpired = false
     const wallClockTimer = setTimeout(() => {
-      agent?.abort()
+      wallClockExpired = true
+      agent.abort()
     }, budget.config.maxWallClockMs)
     wallClockTimer.unref?.()
 
@@ -710,6 +711,12 @@ async function runWorkerAgentOnce(
       // entire run via `runWithLifecycle`; `waitForIdle()` is a
       // belt-and-suspenders await that survives any future change to
       // `prompt()`'s return semantics.
+      // `Agent.abort()` is a no-op until prompt() creates an active run. Refuse
+      // to start when cancellation won the setup race (notably while awaiting
+      // worktree creation), while keeping the listener installed for later aborts.
+      if (opts.signal?.aborted) {
+        throw new Error("[halted: cancelled]")
+      }
       await agent.prompt(opts.prompt)
       await agent.waitForIdle()
 
@@ -756,19 +763,35 @@ async function runWorkerAgentOnce(
       // overflow; a raw upstream error arrives with empty text. Surface the
       // diagnostic when present, else a generic sanitized message — never echo
       // a raw upstream error body, and never report an error as success.
-      if (lastStopReason === "error") {
+      if (lastStopReason === "error" || lastStopReason === "aborted") {
         const diag = (terminalText ?? finalText).trim()
-        const diagnostic =
-          diag
-          || "Worker run failed before producing an answer — the model's input "
-            + "likely overflowed (a large tool result), or the upstream errored. "
-            + "Retry with a narrower task: target a specific section / file / "
-            + "element rather than reading everything at once."
-        // The worktree diff was already captured above (before ws.remove);
-        // a terminal stream error must NOT throw that partial work away.
-        // Append it when present so the caller can still inspect / apply it.
+        let diagnostic: string
+        if (lastStopReason === "aborted") {
+          diagnostic = wallClockExpired
+            ? "[halted: wallclock]"
+            : "[halted: cancelled]"
+        } else {
+          diagnostic =
+            diag
+            || "Worker run failed before producing an answer — the model's input "
+              + "likely overflowed (a large tool result), or the upstream errored. "
+              + "Retry with a narrower task: target a specific section / file / "
+              + "element rather than reading everything at once."
+        }
+        // Preserve partial assistant text and the worktree diff for both stream
+        // errors and aborts; neither is a successful completed run.
         return {
-          text: [diagnostic, diff].filter(Boolean).join("\n\n"),
+          text: lastStopReason === "aborted"
+            ? [diag, diff, diagnostic].filter(Boolean).join("\n\n")
+            : [diagnostic, diff].filter(Boolean).join("\n\n"),
+          isError: true,
+        }
+      }
+      if (budget.hardStopReason) {
+        return {
+          text: [text, `[halted: ${budget.hardStopReason}]`]
+            .filter(Boolean)
+            .join("\n\n"),
           isError: true,
         }
       }

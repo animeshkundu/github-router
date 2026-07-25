@@ -40,7 +40,7 @@ import path from "node:path"
 
 import { state } from "~/lib/state"
 import { runWorkerAgent, __testExports } from "~/lib/worker-agent/engine"
-import { sseFinalText } from "./helpers/worker-sse"
+import { sseFinalText, sseToolCall } from "./helpers/worker-sse"
 import {
   MAX_INFLIGHT_WORKER_CALLS,
   __getInFlightForTests,
@@ -503,6 +503,56 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
     }
   })
 
+  test("signal aborted during setup prevents prompt from starting", async () => {
+    const ac = new AbortController()
+    let fetchCalls = 0
+    globalThis.fetch = mock(() => {
+      fetchCalls += 1
+      return sseFinalText("must not run")
+    }) as unknown as typeof fetch
+    __testExports.setAgentOptionsObserver(() => ac.abort())
+    const dir = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "wa-setup-abort-")))
+    try {
+      const r = await runWorkerAgent({
+        prompt: "must not start",
+        mode: "explore",
+        workspace: dir,
+        signal: ac.signal,
+      })
+      expect(fetchCalls).toBe(0)
+      expect(r.isError).toBe(true)
+      expect(r.text).toContain("[halted: cancelled]")
+    } finally {
+      __testExports.setAgentOptionsObserver()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("hard tool-call cap stops before another model request", async () => {
+    const oldCap = process.env.GH_ROUTER_WORKER_MAX_TOOL_CALLS
+    process.env.GH_ROUTER_WORKER_MAX_TOOL_CALLS = "1"
+    let modelCalls = 0
+    globalThis.fetch = mock(() => {
+      modelCalls += 1
+      return sseToolCall("read", { path: "missing.txt" })
+    }) as unknown as typeof fetch
+    const dir = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "wa-hard-cap-")))
+    try {
+      const r = await runWorkerAgent({
+        prompt: "keep reading",
+        mode: "explore",
+        workspace: dir,
+      })
+      expect(modelCalls).toBe(2)
+      expect(r.isError).toBe(true)
+      expect(r.text).toContain("[halted: tool-calls]")
+    } finally {
+      if (oldCap === undefined) delete process.env.GH_ROUTER_WORKER_MAX_TOOL_CALLS
+      else process.env.GH_ROUTER_WORKER_MAX_TOOL_CALLS = oldCap
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test("outer AbortSignal cancels the run; result reflects the cancellation", async () => {
     // Mock fetch as a never-resolving promise so the only way out is
     // the AbortController cascading into agent.abort().
@@ -548,7 +598,8 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
       // assistant message has empty `content`, so `extractAssistantText`
       // returns `""`. Either way the engine MUST return without
       // hanging — that's the load-bearing assertion.
-      expect(typeof r.text).toBe("string")
+      expect(r.isError).toBe(true)
+      expect(r.text).toContain("[halted: cancelled]")
       // The fetch must have observed the abort (proves the bridge
       // from `opts.signal` → `agent.abort()` → tool-level signal
       // actually fired).

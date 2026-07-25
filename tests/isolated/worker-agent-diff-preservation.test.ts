@@ -7,10 +7,9 @@
  *           diff captured before `ws.remove()` (previously the error
  *           early-return threw the captured diff away).
  *
- *   Fix 2 — a NON-budget-cap throw from the Pi loop must capture the diff
- *           BEFORE `ws.remove()` deletes the worktree (previously only a
- *           budget-cap `WorkerAbort` triggered finalize, so any other throw
- *           destroyed the partial work).
+ *   Fix 2 — a throw from the Pi loop must capture the diff BEFORE
+ *           `ws.remove()` deletes the worktree; otherwise partial work is
+ *           destroyed before the caller can inspect it.
  *
  * Both branches live deep inside `runWorkerAgentOnce`, so we mock the Pi
  * `Agent` (to drive the two terminal shapes deterministically) and
@@ -34,7 +33,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 // ---------------------------------------------------------------------
 
 /** Drives the mocked Agent's `prompt()` terminal shape. */
-let promptBehavior: "error-stop" | "throw" = "error-stop"
+let promptBehavior: "error-stop" | "aborted-stop" | "throw" = "error-stop"
 /** The sentinel diff `finalize()` returns — asserted in the result text. */
 let finalizeResult = "SENTINEL_DIFF"
 /** When true the mocked `finalize()` throws, to prove its failure is
@@ -65,7 +64,7 @@ class FakeAgent {
         message: {
           role: "assistant",
           content: [{ type: "text", text: "partial-answer" }],
-          stopReason: "error",
+          stopReason: promptBehavior === "aborted-stop" ? "aborted" : "error",
         },
       })
     }
@@ -150,8 +149,27 @@ afterEach(() => {
 // Fix 1: stopReason "error" still returns the captured diff.
 // ---------------------------------------------------------------------
 
-describe("engine: stopReason 'error' preserves the captured worktree diff", () => {
-  test("appends the captured diff to the error diagnostic instead of discarding it", async () => {
+describe("engine: terminal failures preserve the captured worktree diff", () => {
+  test("aborted stop is an error with partial text, diff, and cancellation marker", async () => {
+    promptBehavior = "aborted-stop"
+    finalizeResult = "diff --git a/x b/x\n@@ ABORTED_DIFF @@"
+
+    const r = await runWorkerAgent({
+      prompt: "do partial work then cancel",
+      mode: "implement",
+      workspace: process.cwd(),
+      worktree: true,
+      model: "gpt-5.5",
+    })
+
+    expect(r.isError).toBe(true)
+    expect(r.text).toContain("partial-answer")
+    expect(r.text).toContain("ABORTED_DIFF")
+    expect(r.text).toContain("[halted: cancelled]")
+    expect(worktreeCalls).toEqual(["finalize", "remove"])
+  })
+
+  test("stopReason error appends the captured diff instead of discarding it", async () => {
     promptBehavior = "error-stop"
     finalizeResult = "diff --git a/x b/x\n@@ FIX1_SENTINEL @@"
 

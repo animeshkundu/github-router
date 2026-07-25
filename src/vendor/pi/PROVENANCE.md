@@ -8,7 +8,7 @@ This tree vendors the Pi agent runtime and the minimal Pi AI dependency closure 
 - Tag: `v0.82.0`
 - Commit pinned: `083e61621276bff9f6faefab87ce07fcd98734e2` (`Release v0.82.0`, 2026-07-24)
 - Imported:
-  - `packages/agent/src/` → `src/vendor/pi/agent/`, with the `proxy.ts` patches below
+  - `packages/agent/src/` → `src/vendor/pi/agent/`, with the `proxy.ts` patches and `agent.ts` hook exposure below
   - selected transitive closure from `packages/ai/src/` → `src/vendor/pi/ai/`
 - License: MIT, preserved in `./LICENSE`.
 
@@ -51,6 +51,10 @@ Three recovered local patches must be re-applied after every full agent-director
 2. Cast `response.body!.getReader()` through `unknown`, then narrow to `ReadableStreamDefaultReader<Uint8Array>` at `read()`. This is type-only and leaves runtime behavior unchanged.
 3. Replace the unused `const _exhaustiveCheck: never = proxyEvent` binding with `proxyEvent satisfies never` for this repo's `noUnusedLocals` setting.
 
+### `agent/agent.ts`
+
+Expose the low-level `shouldStopAfterTurn` hook through `AgentOptions` and pass it through `Agent.createLoopConfig`. github-router uses this graceful post-turn stop to make hard worker budget caps terminal before another provider call. Upstream v0.82.0 exposes the hook only on `AgentLoopConfig`, so this minimal local patch must be re-applied after every agent-directory replacement.
+
 ### `ai/types.ts`
 
 The ten concrete option types (`AnthropicOptions`, `AzureOpenAIResponsesOptions`, `BedrockOptions`, `GoogleOptions`, `GoogleVertexOptions`, `MistralOptions`, `OpenAICodexResponsesOptions`, `OpenAICompletionsOptions`, `OpenAIResponsesOptions`, and `PiMessagesOptions`) are type-only `Record<string, unknown>` aliases. Copying their upstream modules would pull concrete provider SDKs into the vendor closure.
@@ -67,7 +71,7 @@ The index is rewritten to export only the retained closure and TypeBox primitive
 
 1. Clone upstream into a temporary directory outside this repository and check out the exact target tag or commit.
 2. Record the target SHA and diff the currently vendored `agent/proxy.ts` and `ai/utils/diagnostics.ts` against the previously pinned upstream commit before overwriting anything.
-3. Replace `src/vendor/pi/agent/` completely from `packages/agent/src/`, then re-apply all three documented `proxy.ts` patches.
+3. Replace `src/vendor/pi/agent/` completely from `packages/agent/src/`, then re-apply all three documented `proxy.ts` patches and the minimal `agent.ts` `shouldStopAfterTurn` exposure.
 4. Rebuild `src/vendor/pi/ai/` from the transitive import closure required by the new agent tree and `src/lib/worker-agent/`. Re-apply the option-type aliases in `types.ts`, retain the diagnostics stub, and rewrite `index.ts` for the resulting closure. Do not assume the previous file list still closes.
 5. Update this provenance record and `docs/pi-vendor-sync.md` with the tag, full SHA, date, closure, and divergences.
 6. Run `bun run typecheck`, `bun run lint:all`, the focused worker suite, and `bun run build`.
