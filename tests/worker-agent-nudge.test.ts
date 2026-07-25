@@ -263,9 +263,9 @@ describe("nudge eligibility excludes non-clean terminal reasons", () => {
         workspace: dir,
       })
 
-      // The Copilot service layer naturally retries this HTTP failure three
-      // times. The nudge layer must add no fourth request.
-      expect(bodies).toHaveLength(3)
+      // The worker model-call runner retries exactly once before any model
+      // output. The nudge layer must add no third request.
+      expect(bodies).toHaveLength(2)
       expect(nudgeBodyCount(bodies)).toBe(0)
       expect(result.isError).toBe(true)
       expect(result.text).not.toContain("[worker exited with no output")

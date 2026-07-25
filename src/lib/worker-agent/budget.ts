@@ -44,6 +44,7 @@ const DEFAULT_MAX_TURNS = 500
 // are clamped to `workerWallClockCeilingMs()` at the MCP boundary, so neither
 // can push a worker past the point where the harness would hard-kill it).
 export const DEFAULT_MAX_WALLCLOCK_MS = 6 * 60 * 60_000
+const DEFAULT_MODEL_CALL_TIMEOUT_MS = 15 * 60_000
 const DEFAULT_MAX_TOOL_BYTES = 16 * 1024 * 1024
 const DEFAULT_MAX_TOOL_CALLS = 250
 const DEFAULT_MAX_REPEATED_CALLS = 3
@@ -110,6 +111,12 @@ export const MCP_TIMEOUT_HEADROOM_MS = 15 * 60_000
  */
 export function resolveMcpToolTimeoutMs(): number {
   return envInt("GH_ROUTER_MCP_TOOL_TIMEOUT_MS") ?? DEFAULT_MCP_TOOL_TIMEOUT_MS
+}
+
+/** Whole-call deadline for one worker model turn, including SSE consumption. */
+export function resolveWorkerModelCallTimeoutMs(): number {
+  return envInt("GH_ROUTER_WORKER_MODEL_CALL_TIMEOUT_MS")
+    ?? DEFAULT_MODEL_CALL_TIMEOUT_MS
 }
 
 /**

@@ -329,21 +329,22 @@ test("HTTPError from createChatCompletions is encoded as stopReason='error' (NOT
 })
 
 test("mid-stream iteration error is encoded as stopReason='error' (NOT thrown)", async () => {
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(
-        new TextEncoder().encode(
-          'data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n',
-        ),
-      )
-      controller.error(new Error("network broke mid-stream"))
-    },
-  })
   globalThis.fetch = mock(
-    () =>
-      new Response(body, {
+    () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              'data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n',
+            ),
+          )
+          controller.error(new Error("network broke mid-stream"))
+        },
+      })
+      return new Response(body, {
         headers: { "content-type": "text/event-stream" },
-      }),
+      })
+    },
   ) as unknown as typeof fetch
 
   let threw = false
@@ -706,4 +707,101 @@ test("buildPartial: 1000 deltas finish well under 100ms (team-lead acceptance ba
   const { ms, finalLen } = await timedRun(1000)
   expect(finalLen).toBe(1000 * 5)
   expect(ms).toBeLessThan(100)
+})
+
+function hangingResponse(signal: AbortSignal, prefix?: string): Response {
+  const encoder = new TextEncoder()
+  return new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (prefix) controller.enqueue(encoder.encode(prefix))
+      signal.addEventListener("abort", () => controller.error(signal.reason), { once: true })
+    },
+  }), { headers: { "content-type": "text/event-stream" } })
+}
+
+test("model-call timeout retries once before output and second attempt succeeds", async () => {
+  let calls = 0
+  globalThis.fetch = mock((_input, init) => {
+    calls += 1
+    return calls === 1
+      ? hangingResponse(init?.signal as AbortSignal)
+      : sseResponse([{ choices: [{ delta: { content: "recovered" }, finish_reason: "stop" }] }])
+  }) as unknown as typeof fetch
+
+  const { events, final } = await drain(
+    createCopilotStreamFn({ resolved: RESOLVED, modelCallTimeoutMs: 20 }),
+    USER_CTX,
+  )
+
+  expect(calls).toBe(2)
+  expect(final.content).toEqual([{ type: "text", text: "recovered" }])
+  expect(final.stopReason).toBe("stop")
+  expect(events.at(-1)?.type).toBe("done")
+})
+
+test("model-call timeout fails as error after exactly two silent attempts", async () => {
+  globalThis.fetch = mock((_input, init) => hangingResponse(init?.signal as AbortSignal)) as unknown as typeof fetch
+
+  const { events, final } = await drain(
+    createCopilotStreamFn({ resolved: RESOLVED, modelCallTimeoutMs: 20 }),
+    USER_CTX,
+  )
+
+  expect((globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(2)
+  expect(final.stopReason).toBe("error")
+  expect((final.content[0] as { text: string }).text).toContain("timed out")
+  expect((final.content[0] as { text: string }).text).not.toContain("no output after")
+  expect(events.at(-1)?.type).toBe("error")
+})
+
+test("partial text then timeout does not retry or push after terminal error", async () => {
+  globalThis.fetch = mock((_input, init) => hangingResponse(
+    init?.signal as AbortSignal,
+    `data: ${JSON.stringify({ choices: [{ delta: { content: "partial" }, finish_reason: null }] })}\n\n`,
+  )) as unknown as typeof fetch
+
+  const { events, final } = await drain(
+    createCopilotStreamFn({ resolved: RESOLVED, modelCallTimeoutMs: 20 }),
+    USER_CTX,
+  )
+
+  expect((globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(1)
+  expect(final.stopReason).toBe("error")
+  expect(events.at(-1)?.type).toBe("error")
+  expect(events.filter(e => e.type === "error")).toHaveLength(1)
+})
+
+test("partial tool arguments then timeout does not retry", async () => {
+  const chunk = {
+    choices: [{ delta: { tool_calls: [{ index: 0, id: "call", function: { name: "read", arguments: '{"pa' } }] } }],
+  }
+  globalThis.fetch = mock((_input, init) => hangingResponse(
+    init?.signal as AbortSignal,
+    `data: ${JSON.stringify(chunk)}\n\n`,
+  )) as unknown as typeof fetch
+
+  const { events, final } = await drain(
+    createCopilotStreamFn({ resolved: RESOLVED, modelCallTimeoutMs: 20 }),
+    USER_CTX,
+  )
+
+  expect((globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(1)
+  expect(final.stopReason).toBe("error")
+  expect(events.at(-1)?.type).toBe("error")
+})
+
+test("outer abort returns promptly as aborted without retry", async () => {
+  globalThis.fetch = mock((_input, init) => hangingResponse(init?.signal as AbortSignal)) as unknown as typeof fetch
+  const controller = new AbortController()
+  setTimeout(() => controller.abort(), 20)
+
+  const { events, final } = await drain(
+    createCopilotStreamFn({ resolved: RESOLVED, modelCallTimeoutMs: 2_000 }),
+    USER_CTX,
+    controller.signal,
+  )
+
+  expect((globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(1)
+  expect(final.stopReason).toBe("aborted")
+  expect(events.at(-1)?.type).toBe("error")
 })

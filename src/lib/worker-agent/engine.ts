@@ -83,7 +83,7 @@ import type {
   ToolCall,
 } from "@earendil-works/pi-ai"
 
-import { Budget } from "./budget"
+import { Budget, resolveWorkerModelCallTimeoutMs } from "./budget"
 import {
   WorktreeRegistry,
   getInstanceUuid,
@@ -517,7 +517,11 @@ async function runWorkerAgentOnce(
         thinkingLevel: resolved.thinking,
         tools,
       },
-      streamFn: createCopilotStreamFn({ resolved, contextBudget: ctxBudget }),
+      streamFn: createCopilotStreamFn({
+        resolved,
+        contextBudget: ctxBudget,
+        modelCallTimeoutMs: resolveWorkerModelCallTimeoutMs(),
+      }),
       toolExecution: "parallel",
       // transformContext is installed UNCONDITIONALLY — it is the seam for
       // BOTH structural compaction AND the per-turn plan reminder. Two

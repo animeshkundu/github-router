@@ -395,6 +395,7 @@ Every worker run gets a `Budget` (`src/lib/worker-agent/budget.ts`) wired throug
 | Cap | Default | Env override | Where it fires |
 | --- | --- | --- | --- |
 | Max turns | 500 | `GH_ROUTER_WORKER_MAX_TURNS` | `beforeToolCall` → `block: true, reason: "[halted: turns]"` |
+| Model call | 15 minutes | `GH_ROUTER_WORKER_MODEL_CALL_TIMEOUT_MS` | Whole `streamFunction` invocation: fetch plus SSE consumption; exactly one retry only when no model output was emitted |
 | Max wall-clock | 6 hours (per-call `maxWallClockMs` override, clamped to `workerWallClockCeilingMs()` = the injected MCP tool-call timeout − 15 min headroom) | `GH_ROUTER_WORKER_MAX_WALLCLOCK_MS` | `beforeToolCall` + a `setTimeout(agent.abort)` belt-and-suspenders that tears down mid-bash |
 | Max cumulative tool-output bytes | 16 MiB | `GH_ROUTER_WORKER_MAX_TOOL_BYTES` | `afterToolCall` records, `beforeToolCall` blocks |
 | Advisor transcript chars | 720 000 | `GH_ROUTER_WORKER_ADVISOR_MAX_CHARS` | `advisor` tool truncation (matches `ADVISOR_MAX_CONVERSATION_CHARS` in `src/services/advisor/advisor.ts`) |

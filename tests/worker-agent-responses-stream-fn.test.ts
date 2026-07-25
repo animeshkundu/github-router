@@ -95,9 +95,11 @@ function sseResponse(events: Array<object>): Response {
 
 async function drain(
   ctx: Context,
+  modelCallTimeoutMs?: number,
+  signal?: AbortSignal,
 ): Promise<{ events: Array<AssistantMessageEvent>; final: AssistantMessage }> {
-  const streamFn = createCopilotStreamFn({ resolved: RESOLVED })
-  const stream = await streamFn(NOOP_MODEL, ctx, undefined)
+  const streamFn = createCopilotStreamFn({ resolved: RESOLVED, modelCallTimeoutMs })
+  const stream = await streamFn(NOOP_MODEL, ctx, signal ? { signal } : undefined)
   const events: Array<AssistantMessageEvent> = []
   for await (const ev of stream) events.push(ev)
   const final = await stream.result()
@@ -452,4 +454,53 @@ test("/responses upstream HTTP error becomes a terminal Pi error event", async (
   expect(events.at(-1)?.type).toBe("error")
   expect(final.stopReason).toBe("error")
   expect(typeof final.errorMessage).toBe("string")
+})
+
+function hangingResponsesResponse(signal: AbortSignal, prefix?: object): Response {
+  const encoder = new TextEncoder()
+  return new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (prefix) controller.enqueue(encoder.encode(`data: ${JSON.stringify(prefix)}\n\n`))
+      signal.addEventListener("abort", () => controller.error(signal.reason), { once: true })
+    },
+  }), { headers: { "content-type": "text/event-stream" } })
+}
+
+test("/responses model-call timeout retries one silent attempt and succeeds", async () => {
+  let calls = 0
+  globalThis.fetch = mock((_input, init) => {
+    calls += 1
+    return calls === 1
+      ? hangingResponsesResponse(init?.signal as AbortSignal)
+      : sseResponse([
+          { type: "response.output_text.delta", delta: "recovered" },
+          { type: "response.output_text.done", text: "recovered" },
+          { type: "response.completed", response: { status: "completed" } },
+        ])
+  }) as unknown as typeof fetch
+
+  const { events, final } = await drain(USER_CTX, 20)
+
+  expect(calls).toBe(2)
+  expect(final.content).toEqual([{ type: "text", text: "recovered" }])
+  expect(events.at(-1)?.type).toBe("done")
+})
+
+test("/responses partial tool args then timeout does not retry", async () => {
+  let calls = 0
+  const prefix = {
+    type: "response.output_item.added",
+    output_index: 1,
+    item: { type: "function_call", call_id: "call_1", name: "read" },
+  }
+  globalThis.fetch = mock((_input, init) => {
+    calls += 1
+    return hangingResponsesResponse(init?.signal as AbortSignal, prefix)
+  }) as unknown as typeof fetch
+
+  const { events, final } = await drain(USER_CTX, 20)
+
+  expect(calls).toBe(1)
+  expect(final.stopReason).toBe("error")
+  expect(events.at(-1)?.type).toBe("error")
 })

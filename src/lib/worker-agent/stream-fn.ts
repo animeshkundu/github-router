@@ -107,6 +107,8 @@ export interface CreateCopilotStreamFnOptions {
    * proceeds because upstream remains authoritative for the unknown window.
    */
   contextBudget?: ContextBudget
+  /** Whole model-call deadline, including fetch and SSE consumption. */
+  modelCallTimeoutMs?: number
 }
 
 export function createCopilotStreamFn(
@@ -176,6 +178,64 @@ interface ToolAccum {
   argumentChunks: Array<string>
 }
 
+interface ModelCallAttemptState {
+  emitted: boolean
+  active: boolean
+}
+
+async function runModelCallAttempts(
+  stream: AssistantMessageEventStream,
+  resolved: ResolvedModel,
+  options: SimpleStreamOptions | undefined,
+  timeoutMs: number,
+  runAttempt: (
+    signal: AbortSignal,
+    state: ModelCallAttemptState,
+  ) => Promise<void>,
+): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const deadline = new AbortController()
+    let localDeadlineFired = false
+    let rejectDeadline: (reason: unknown) => void = () => {}
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      rejectDeadline = reject
+    })
+    timeoutPromise.catch(() => {})
+    const timer = setTimeout(() => {
+      localDeadlineFired = true
+      const error = new DOMException("Worker model call timed out", "TimeoutError")
+      deadline.abort(error)
+      rejectDeadline(error)
+    }, timeoutMs)
+    const signal = options?.signal
+      ? AbortSignal.any([options.signal, deadline.signal])
+      : deadline.signal
+    const state: ModelCallAttemptState = { emitted: false, active: true }
+    const attemptPromise = runAttempt(signal, state)
+    attemptPromise.catch(() => {})
+    try {
+      await Promise.race([attemptPromise, timeoutPromise])
+      return
+    } catch (err) {
+      // Outer cancellation always wins classification and is never retried.
+      if (options?.signal?.aborted) {
+        pushTerminalError(stream, resolved, options.signal.reason ?? err)
+        return
+      }
+      if (!state.emitted && attempt === 0) continue
+      if (localDeadlineFired) {
+        pushModelCallTimeoutDiagnostic(stream, resolved, timeoutMs, state.emitted)
+      } else {
+        pushTerminalError(stream, resolved, err)
+      }
+      return
+    } finally {
+      state.active = false
+      clearTimeout(timer)
+    }
+  }
+}
+
 async function runStreamLoop(
   stream: AssistantMessageEventStream,
   context: Context,
@@ -229,35 +289,34 @@ async function runStreamLoop(
     return
   }
 
-  // createChatCompletions throws an HTTPError on non-2xx, AND can synchronously
-  // raise an AbortError if `options.signal` is already aborted at the fetch
-  // boundary. Encode either as a terminal error.
-  let sseStream: AsyncIterable<{ data?: string }>
-  try {
-    // retryTransient: true: pre-first-byte retry on a transient network/5xx
-    // blip. The SSE body is iterated below, not inside createChatCompletions, so
-    // a re-issue at the fetch boundary cannot duplicate already-streamed output;
-    // mid-stream body errors still surface via pushTerminalError (not retried).
-    const result = await createChatCompletions(
-      payload,
-      undefined,
-      options?.signal,
-      true,
+  await runModelCallAttempts(
+    stream,
+    resolved,
+    options,
+    opts.modelCallTimeoutMs ?? 15 * 60_000,
+    (signal, state) => runChatAttempt(stream, payload, opts, signal, state),
+  )
+}
+
+async function runChatAttempt(
+  stream: AssistantMessageEventStream,
+  payload: ChatCompletionsPayload,
+  opts: CreateCopilotStreamFnOptions,
+  signal: AbortSignal,
+  state: ModelCallAttemptState,
+): Promise<void> {
+  const { resolved } = opts
+  const result = await createChatCompletions(payload, undefined, signal, false)
+  if (
+    result == null
+    || typeof (result as AsyncIterable<unknown>)[Symbol.asyncIterator]
+      !== "function"
+  ) {
+    throw new Error(
+      "Upstream did not return an SSE stream (stream: true expected)",
     )
-    if (
-      result == null
-      || typeof (result as AsyncIterable<unknown>)[Symbol.asyncIterator]
-        !== "function"
-    ) {
-      throw new Error(
-        "Upstream did not return an SSE stream (stream: true expected)",
-      )
-    }
-    sseStream = result as AsyncIterable<{ data?: string }>
-  } catch (err) {
-    pushTerminalError(stream, resolved, err)
-    return
   }
+  const sseStream = result as AsyncIterable<{ data?: string }>
 
   const accum: Accumulator = {
     blocks: [],
@@ -268,8 +327,7 @@ async function runStreamLoop(
   let activeTextIndex: number | null = null
   const toolPiIndexByOAI = new Map<number, number>()
 
-  try {
-    for await (const evt of sseStream) {
+  for await (const evt of sseStream) {
       const data = evt?.data
       if (data == null) continue
       if (data === "[DONE]") break
@@ -299,9 +357,11 @@ async function runStreamLoop(
 
       if (typeof delta.content === "string" && delta.content.length > 0) {
         if (activeTextIndex == null) {
+          state.emitted = true
           activeTextIndex = nextContentIndex++
           accum.blocks.push({ kind: "text", contentIndex: activeTextIndex })
           accum.textChunksByIndex.set(activeTextIndex, [])
+          if (!state.active) return
           stream.push({
             type: "text_start",
             contentIndex: activeTextIndex,
@@ -324,6 +384,7 @@ async function runStreamLoop(
       if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
         // Close the active text block before opening any tool calls.
         if (activeTextIndex != null) {
+          if (!state.active) return
           stream.push({
             type: "text_end",
             contentIndex: activeTextIndex,
@@ -337,6 +398,7 @@ async function runStreamLoop(
           if (tcd == null || tcd.index == null) continue
           let piIdx = toolPiIndexByOAI.get(tcd.index)
           if (piIdx == null) {
+            state.emitted = true
             piIdx = nextContentIndex++
             toolPiIndexByOAI.set(tcd.index, piIdx)
             accum.blocks.push({
@@ -349,7 +411,8 @@ async function runStreamLoop(
               name: "",
               argumentChunks: [],
             })
-            stream.push({
+            if (!state.active) return
+          stream.push({
               type: "toolcall_start",
               contentIndex: piIdx,
               partial: buildPartial(resolved, accum),
@@ -364,7 +427,8 @@ async function runStreamLoop(
             // O(1) push; one-shot join + parse happens in `makePiToolCall`
             // on `toolcall_end` / final-message assembly.
             entry.argumentChunks.push(argDelta)
-            stream.push({
+            if (!state.active) return
+          stream.push({
               type: "toolcall_delta",
               contentIndex: piIdx,
               delta: argDelta,
@@ -377,11 +441,10 @@ async function runStreamLoop(
       if (choice.finish_reason) {
         accum.finishReason = choice.finish_reason
       }
-    }
-  } catch (err) {
-    pushTerminalError(stream, resolved, err)
-    return
   }
+
+  // A timed-out attempt may ignore abort briefly; never emit after its terminal.
+  if (!state.active) return
 
   // Close any still-open text block.
   if (activeTextIndex != null) {
@@ -655,26 +718,34 @@ async function runResponsesStreamLoop(
     return
   }
 
-  let sseStream: AsyncIterable<{ data?: string }>
-  try {
-    // retryTransient: true: pre-first-byte retry; SSE body is iterated below
-    // (not inside createResponses), so a fetch-boundary re-issue can't duplicate
-    // streamed output. Mid-stream errors still surface via pushTerminalError.
-    const result = await createResponses(payload, undefined, options?.signal, true)
-    if (
-      result == null
-      || typeof (result as AsyncIterable<unknown>)[Symbol.asyncIterator]
-        !== "function"
-    ) {
-      throw new Error(
-        "Upstream did not return an SSE stream (stream: true expected)",
-      )
-    }
-    sseStream = result as AsyncIterable<{ data?: string }>
-  } catch (err) {
-    pushTerminalError(stream, resolved, err)
-    return
+  await runModelCallAttempts(
+    stream,
+    resolved,
+    options,
+    opts.modelCallTimeoutMs ?? 15 * 60_000,
+    (signal, state) => runResponsesAttempt(stream, payload, opts, signal, state),
+  )
+}
+
+async function runResponsesAttempt(
+  stream: AssistantMessageEventStream,
+  payload: ResponsesPayload,
+  opts: CreateCopilotStreamFnOptions,
+  signal: AbortSignal,
+  state: ModelCallAttemptState,
+): Promise<void> {
+  const { resolved } = opts
+  const result = await createResponses(payload, undefined, signal, false)
+  if (
+    result == null
+    || typeof (result as AsyncIterable<unknown>)[Symbol.asyncIterator]
+      !== "function"
+  ) {
+    throw new Error(
+      "Upstream did not return an SSE stream (stream: true expected)",
+    )
   }
+  const sseStream = result as AsyncIterable<{ data?: string }>
 
   const accum: Accumulator = {
     blocks: [],
@@ -703,8 +774,7 @@ async function runResponsesStreamLoop(
     activeTextIndex = null
   }
 
-  try {
-    for await (const evt of sseStream) {
+  for await (const evt of sseStream) {
       const data = evt?.data
       if (data == null) continue
       if (data === "[DONE]") break // not emitted by /responses, but harmless
@@ -721,16 +791,19 @@ async function runResponsesStreamLoop(
           const delta = ev.delta
           if (typeof delta !== "string" || delta.length === 0) break
           if (activeTextIndex == null) {
+            state.emitted = true
             activeTextIndex = nextContentIndex++
             accum.blocks.push({ kind: "text", contentIndex: activeTextIndex })
             accum.textChunksByIndex.set(activeTextIndex, [])
-            stream.push({
+            if (!state.active) return
+          stream.push({
               type: "text_start",
               contentIndex: activeTextIndex,
               partial: buildPartial(resolved, accum),
             })
           }
           accum.textChunksByIndex.get(activeTextIndex)!.push(delta)
+          if (!state.active) return
           stream.push({
             type: "text_delta",
             contentIndex: activeTextIndex,
@@ -749,16 +822,19 @@ async function runResponsesStreamLoop(
             && typeof ev.text === "string"
             && ev.text.length > 0
           ) {
+            state.emitted = true
             activeTextIndex = nextContentIndex++
             accum.blocks.push({ kind: "text", contentIndex: activeTextIndex })
             accum.textChunksByIndex.set(activeTextIndex, [])
-            stream.push({
+            if (!state.active) return
+          stream.push({
               type: "text_start",
               contentIndex: activeTextIndex,
               partial: buildPartial(resolved, accum),
             })
             accum.textChunksByIndex.get(activeTextIndex)!.push(ev.text)
-            stream.push({
+            if (!state.active) return
+          stream.push({
               type: "text_delta",
               contentIndex: activeTextIndex,
               delta: ev.text,
@@ -781,6 +857,7 @@ async function runResponsesStreamLoop(
           if (toolPiIndexByKey.has(key)) break
           // A tool call supersedes any open text block.
           closeActiveText()
+          state.emitted = true
           const piIdx = nextContentIndex++
           toolPiIndexByKey.set(key, piIdx)
           accum.blocks.push({
@@ -793,6 +870,7 @@ async function runResponsesStreamLoop(
             name: item.name ?? "",
             argumentChunks: [],
           })
+          if (!state.active) return
           stream.push({
             type: "toolcall_start",
             contentIndex: piIdx,
@@ -813,6 +891,7 @@ async function runResponsesStreamLoop(
           const delta = ev.delta
           if (typeof delta !== "string" || delta.length === 0) break
           entry.argumentChunks.push(delta)
+          if (!state.active) return
           stream.push({
             type: "toolcall_delta",
             contentIndex: piIdx,
@@ -861,6 +940,7 @@ async function runResponsesStreamLoop(
             // (same rationale as function_call_arguments.done above).
             entry.argumentChunks = [item.arguments]
           }
+          if (!state.active) return
           stream.push({
             type: "toolcall_end",
             contentIndex: piIdx,
@@ -898,6 +978,7 @@ async function runResponsesStreamLoop(
         }
 
         case "response.failed": {
+          if (!state.active) return
           closeActiveText()
           pushTerminalError(
             stream,
@@ -912,11 +993,10 @@ async function runResponsesStreamLoop(
           // items / unknown events: nothing to emit.
           break
       }
-    }
-  } catch (err) {
-    pushTerminalError(stream, resolved, err)
-    return
   }
+
+  // A timed-out attempt may ignore abort briefly; never emit after its terminal.
+  if (!state.active) return
 
   // Close any still-open text block (defensive — output_text.done should
   // have fired).
@@ -1313,6 +1393,24 @@ function fieldBytes(v: unknown): number {
  * the engine marks the result isError). No upstream call is made — this
  * replaces an opaque upstream 4xx with an actionable, sanitized message.
  */
+function pushModelCallTimeoutDiagnostic(
+  stream: AssistantMessageEventStream,
+  resolved: ResolvedModel,
+  timeoutMs: number,
+  emitted: boolean,
+): void {
+  const text =
+    `Worker model call timed out after ${timeoutMs}ms${emitted ? " after emitting partial output" : " after two attempts with no output"}. `
+    + "The upstream stream stopped making progress. Retry the worker call; if it repeats, choose a different model."
+  const final: AssistantMessage = {
+    ...makeBaseMessage(resolved),
+    content: [{ type: "text", text }],
+    stopReason: "error",
+    errorMessage: "worker model-call deadline exceeded",
+  }
+  stream.push({ type: "error", reason: "error", error: final })
+}
+
 function pushBackstopDiagnostic(
   stream: AssistantMessageEventStream,
   resolved: ResolvedModel,
