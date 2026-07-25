@@ -38,10 +38,11 @@
  *      `afterToolCall`;
  *   8. wire `opts.signal` → `agent.abort()` so outer cancellation
  *      propagates cleanly into Pi's tool-level signals;
- *   9. subscribe to `message_end` so we can extract the assistant's
- *      final text from the content-part array (Pi does NOT hand us
- *      a string here — `extractAssistantText` is mandatory, see
- *      plan's peer-review HIGH finding);
+ *   9. subscribe to `turn_end` to enqueue one in-run no-output nudge,
+ *      and to `message_end` so we can extract the assistant's final text
+ *      from the content-part array (Pi does NOT hand us a string here —
+ *      `extractAssistantText` is mandatory, see the plan's peer-review
+ *      HIGH finding);
  *  10. set a wall-clock timer that fires `agent.abort()` on expiry
  *      (the budget's `checkBeforeCall` is per-call; a runaway
  *      bash could exceed the cap mid-run);
@@ -300,6 +301,20 @@ function extractAssistantText(
     if (part.type === "text") out += part.text
   }
   return out
+}
+
+const EMPTY_OUTPUT_NUDGE =
+  "You ended your turn without a final answer. Summarize your findings now from what you already gathered."
+
+/** True only for a clean, empty assistant stop with no pending tool calls. */
+function shouldNudgeForEmptyOutput(message: AgentMessage): boolean {
+  if (message.role !== "assistant") return false
+  const assistant = message as AssistantMessage
+  if (assistant.stopReason !== "stop" || !Array.isArray(assistant.content)) {
+    return false
+  }
+  if (assistant.content.some((part) => part.type === "toolCall")) return false
+  return extractAssistantText(assistant.content).trim() === ""
 }
 
 /**
@@ -603,7 +618,7 @@ async function runWorkerAgentOnce(
       }
     }
 
-    // Step 9: subscribe to message_end. The assistant's final text is
+    // Step 9: subscribe to turn/message end. The assistant's final text is
     // the LAST `message_end` event whose message role is "assistant".
     // (Multi-turn runs emit one `message_end` per assistant turn; we
     // overwrite as we go so the final state captures the last reply.)
@@ -613,12 +628,30 @@ async function runWorkerAgentOnce(
     // just `.toString()`.
     let finalText = ""
     let lastStopReason: string | null = null
+    let nudged = false
     // Browse-only: the answer captured from a terminal tool's args (see
     // the `beforeToolCall` capture). Preferred over `finalText` for browse
     // because the agent's authoritative answer is the terminal payload,
     // not any preamble text it may have emitted alongside the tool call.
     let terminalText: string | null = null
     const unsubscribe = agent.subscribe((event) => {
+      if (event.type === "turn_end") {
+        if (!nudged && shouldNudgeForEmptyOutput(event.message)) {
+          // Set at enqueue time: the follow-up may itself use tools, and must
+          // never earn another nudge after that later turn completes.
+          nudged = true
+          // This is a REAL user message persisted in Pi's transcript, unlike
+          // the send-time-only appendPlanReminder. It intentionally forms a
+          // compaction turn boundary; appendPlanReminder also skips its turn
+          // because the last canonical role is user.
+          agent.followUp({
+            role: "user",
+            content: [{ type: "text", text: EMPTY_OUTPUT_NUDGE }],
+            timestamp: Date.now(),
+          })
+        }
+        return
+      }
       if (event.type !== "message_end") return
       const msg = event.message
       if (typeof msg !== "object" || msg === null) return
@@ -794,12 +827,16 @@ function isTransientNoOutput(r: WorkerAgentResult): boolean {
 }
 
 /**
- * Run `runOnce`, and on the transient no-output sentinel retry EXACTLY ONCE with
- * a fresh run before surfacing it. Real errors, budget caps, and stream errors
- * are returned as-is (they have distinct, actionable messages and a retry would
- * not help). A consumed abort signal short-circuits the retry. If the retry also
- * produces no output, the ORIGINAL is returned (one is enough signal; the
- * failure isn't hidden). Extracted + injected for unit-testability.
+ * Second line of the two-tier no-output recovery: the cheap first line is an
+ * in-run follow-up nudge, which preserves the transcript and consumes the same
+ * Budget. If that nudge also produces the transient sentinel, retry EXACTLY ONCE
+ * with a fresh run before surfacing it. The fallback run allocates a fresh Budget;
+ * that known cost is reserved for the rare case where the in-run recovery failed.
+ * Real errors, budget caps, and stream errors are returned as-is (they have
+ * distinct, actionable messages and a retry would not help). A consumed abort
+ * signal short-circuits the retry. If the retry also produces no output, the
+ * ORIGINAL is returned (one is enough signal; the failure isn't hidden).
+ * Extracted + injected for unit-testability.
  */
 export async function withNoOutputRetry(
   runOnce: (opts: WorkerAgentOpts) => Promise<WorkerAgentResult>,
@@ -871,11 +908,13 @@ export function appendPlanReminder(
 
 export const __testExports = {
   appendPlanReminder,
+  EMPTY_OUTPUT_NUDGE,
   setAgentOptionsObserver(observer?: (options: ConstructorParameters<typeof Agent>[0]) => void): void {
     agentOptionsObserverForTests = observer
   },
   extractAssistantText,
   makeModelShim,
   makeNoWorktreeHandle,
+  shouldNudgeForEmptyOutput,
   WORKTREE_REGISTRY,
 }

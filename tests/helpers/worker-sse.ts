@@ -18,6 +18,11 @@ export function sseResponse(chunks: Array<object>): Response {
   })
 }
 
+/** Model stops cleanly without emitting any content delta. */
+export function sseEmptyFinal(): Response {
+  return sseResponse([{ choices: [{ delta: {}, finish_reason: "stop" }] }])
+}
+
 /** Model emits one text turn and stops. */
 export function sseFinalText(text: string): Response {
   return sseResponse([
