@@ -1356,7 +1356,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           || (args.thinking !== undefined && thinking === undefined)
           || (args.clear !== undefined && typeof args.clear !== "boolean")
           || (args.clearAll !== undefined && typeof args.clearAll !== "boolean")
-          || (clearAll && (mode !== undefined || model !== undefined || thinking !== undefined || clear))
+          || (clearAll && (mode !== undefined || model !== undefined || thinking !== undefined || args.clear !== undefined))
           || (clear && (mode === undefined || model !== undefined || thinking !== undefined))
           || (!clearAll && !clear && (model !== undefined || thinking !== undefined) && mode === undefined)
         if (invalid) {

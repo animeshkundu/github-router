@@ -2,9 +2,12 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 
 import { Agent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core"
 import type { TSchema } from "@earendil-works/pi-ai"
+import { mkdtempSync, realpathSync, rmSync } from "node:fs"
+import os from "node:os"
+import path from "node:path"
 
 import { state } from "~/lib/state"
-import { __testExports as engineInternals } from "~/lib/worker-agent/engine"
+import { __testExports as engineInternals, runWorkerAgent } from "~/lib/worker-agent/engine"
 import { createCopilotStreamFn } from "~/lib/worker-agent/stream-fn"
 import { sseFinalText, sseResponse } from "./helpers/worker-sse"
 
@@ -89,32 +92,44 @@ afterEach(() => {
   state.models = originalModels
   state.copilotToken = originalToken
   globalThis.fetch = originalFetch
+  engineInternals.setAgentOptionsObserver()
 })
 
 describe("engine to Pi constructor contract", () => {
-  test("the engine call site passes the complete option bag", async () => {
-    const source = await Bun.file(
-      new URL("../src/lib/worker-agent/engine.ts", import.meta.url),
-    ).text()
-    const start = source.indexOf("const agent = new Agent({")
-    const end = source.indexOf("// Publish the agent", start)
-    expect(start).toBeGreaterThanOrEqual(0)
-    expect(end).toBeGreaterThan(start)
-    const callSite = source.slice(start, end)
-    for (const key of [
-      "initialState:",
-      "systemPrompt:",
-      "model:",
-      "thinkingLevel:",
-      "tools,",
-      "streamFn:",
-      'toolExecution: "parallel"',
-      "transformContext:",
-      "beforeToolCall:",
-      "afterToolCall:",
-      "prepareNextTurn:",
-    ]) {
-      expect(callSite, `Agent option disappeared or was renamed: ${key}`).toContain(key)
+  test("the runtime Agent receives the complete option bag", async () => {
+    const workspace = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "pi-options-")))
+    let captured: Record<string, unknown> | undefined
+    engineInternals.setAgentOptionsObserver((options) => {
+      captured = options as unknown as Record<string, unknown>
+    })
+    globalThis.fetch = mock(async () => sseFinalText("done")) as unknown as typeof fetch
+    try {
+      const result = await runWorkerAgent({
+        prompt: "capture options",
+        mode: "explore",
+        model: MODEL,
+        workspace,
+      })
+      expect(result.isError).not.toBe(true)
+      expect(captured).toBeDefined()
+      expect(captured?.toolExecution).toBe("parallel")
+      expect(captured?.initialState).toMatchObject({
+        systemPrompt: expect.any(String),
+        model: expect.any(Object),
+        thinkingLevel: expect.any(String),
+        tools: expect.any(Array),
+      })
+      for (const key of [
+        "streamFn",
+        "transformContext",
+        "beforeToolCall",
+        "afterToolCall",
+        "prepareNextTurn",
+      ]) {
+        expect(typeof captured?.[key], `Agent option missing or wrong type: ${key}`).toBe("function")
+      }
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
     }
   })
 })

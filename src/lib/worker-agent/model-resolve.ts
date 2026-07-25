@@ -65,9 +65,9 @@ export interface ResolveOk {
   thinking: WorkerThinkingLevel
   /**
    * Catalog context window (tokens) for the resolved model, or undefined
-   * when the catalog doesn't report one. The engine sizes its per-run
-   * `ContextBudget` from this; undefined ⇒ the budget no-ops (no blind
-   * compaction/capping).
+   * when the catalog doesn't report one. The engine uses a conservative
+   * fallback budget for compaction/capping when undefined, while leaving the
+   * request-boundary backstop advisory because the real window is unknown.
    */
   contextWindow?: number
 }
@@ -119,8 +119,8 @@ export function resolveModelAndThinking(opts: ResolveOpts): ResolveResult {
   }
 
   // Surface the catalog context window so the engine can size its per-run
-  // context budget (compaction + per-result caps + request backstop). Absent
-  // ⇒ undefined ⇒ the budget no-ops rather than prune against a guessed window.
+  // context budget. When absent, the engine uses a fallback floor for
+  // compaction/per-result caps but does not hard-reject at the request boundary.
   const contextWindow = found.capabilities?.limits?.max_context_window_tokens
   const mkOk = (thinking: WorkerThinkingLevel): ResolveOk => ({
     ok: true,

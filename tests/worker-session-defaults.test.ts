@@ -72,6 +72,21 @@ describe("worker session defaults", () => {
     expect(seen).toEqual(["per-call-model", "per-call-model"])
   })
 
+  test("workflow opt-out ignores session overrides while ordinary runs honor them", () => {
+    setWorkerSessionDefault("implement", { model: "same-lab-override", thinking: "low" })
+    const ordinary = resolveWorkerRunOpts({ prompt: "x", mode: "implement" })
+    const workflow = resolveWorkerRunOpts({
+      prompt: "x",
+      mode: "implement",
+      ignoreSessionDefaults: true,
+    })
+
+    expect(ordinary.model).toBe("same-lab-override")
+    expect(ordinary.thinking).toBe("low")
+    expect(workflow.model).toBe("gpt-5.6-sol")
+    expect(workflow.thinking).toBe("xhigh")
+  })
+
   test("reset restores built-ins and never mutates the gate sentinel", () => {
     const builtIn = resolveModeDefaults("explore")
     setWorkerSessionDefault("explore", { model: "override" })
@@ -93,6 +108,10 @@ describe("worker session defaults", () => {
       const rejected = await tool.handler({ mode: "review", model: "missing" })
       expect(rejected.isError).toBe(true)
       expect(rejected.content[0]?.text).toContain("Available models with tool_calls: gpt-5.4-mini, valid")
+
+      const invalidClearAll = await tool.handler({ clearAll: true, clear: false })
+      expect(invalidClearAll.isError).toBe(true)
+      expect(invalidClearAll.content[0]?.text).toContain("clearAll:true must stand alone")
 
       const set = await tool.handler({ mode: "review", model: "valid", thinking: "xhigh", workspace: "ignored" })
       expect(set.isError).toBeUndefined()

@@ -230,12 +230,15 @@ const BUILT_IN_MODE_DEFAULTS: Readonly<Record<WorkerMode, {
 })
 
 /** Resolve the effective mode ladder without changing the gate sentinel. */
-export function resolveModeDefaults(mode: WorkerMode): EffectiveModeDefaults {
+export function resolveModeDefaults(
+  mode: WorkerMode,
+  ignoreSessionDefaults = false,
+): EffectiveModeDefaults {
   const builtIn = BUILT_IN_MODE_DEFAULTS[mode] ?? {
     model: DEFAULT_MODEL,
     thinking: DEFAULT_THINKING,
   }
-  const override = getWorkerSessionDefault(mode)
+  const override = ignoreSessionDefaults ? {} : getWorkerSessionDefault(mode)
   return {
     model: override.model ?? builtIn.model,
     thinking: override.thinking ?? builtIn.thinking,
@@ -257,6 +260,10 @@ export function resolveModeDefaults(mode: WorkerMode): EffectiveModeDefaults {
  * diagnostics (e.g. error-message AssistantMessage's `model` field
  * if Pi ever inspects it) faithful to what the caller asked for.
  */
+let agentOptionsObserverForTests:
+  | ((options: ConstructorParameters<typeof Agent>[0]) => void)
+  | undefined
+
 function makeModelShim(modelId: string): Model<"openai-completions"> {
   return {
     id: modelId,
@@ -356,11 +363,11 @@ async function runWorkerAgentOnce(
 
     const isBrowse = opts.mode === "browse"
 
-    // Per-run context budget from the resolved model's catalog window.
-    // Undefined when the window is unknown → compaction + the per-result cap
-    // no-op (the request backstop still guards). Sized ONCE and threaded into
-    // `transformContext` (compaction) + `afterToolCall` (the per-result cap)
-    // so the two defenses derive from one window and never drift. Per-run
+    // Per-run context budget from the resolved model's catalog window. Missing
+    // metadata uses a conservative floor so compaction + the per-result cap
+    // remain active, but marks the window unknown so the request backstop warns
+    // and proceeds rather than rejecting against a guess. Sized ONCE and
+    // threaded through all three defenses so they never drift. Per-run
     // (parallel runs resolve different windows) — never module state.
     const ctxBudget = makeContextBudget(resolved.contextWindow)
 
@@ -466,7 +473,7 @@ async function runWorkerAgentOnce(
     // stateful tool never runs concurrently with anything. (peer-review
     // HIGH, 2-lab confirmed; the per-tool flags are now the sole
     // serialization source.)
-    const agent = new Agent({
+    const agentOptions: ConstructorParameters<typeof Agent>[0] = {
       initialState: {
         systemPrompt: systemPromptFor(opts.mode),
         model: makeModelShim(resolved.modelId),
@@ -478,9 +485,9 @@ async function runWorkerAgentOnce(
       // transformContext is installed UNCONDITIONALLY — it is the seam for
       // BOTH structural compaction AND the per-turn plan reminder. Two
       // independent jobs under a single no-throw try/catch:
-      //   (1) compaction — only when the model window is known
-      //       (`ctxBudget`); skipped otherwise (no blind pruning). The
-      //       compactor `structuredClone`s before mutating the live ref.
+      //   (1) compaction — always active, using a conservative floor when the
+      //       catalog window is unknown. The compactor `structuredClone`s
+      //       before mutating the live ref.
       //   (2) plan reminder — when `planState` is non-empty, append ONE
       //       synthetic `user`-role message with the current plan, but only
       //       when the last message isn't already a `user` message (avoid
@@ -571,7 +578,9 @@ async function runWorkerAgentOnce(
         budget.addTurn()
         return undefined
       },
-    })
+    }
+    agentOptionsObserverForTests?.(agentOptions)
+    const agent = new Agent(agentOptions)
     // Publish the agent to the `getMessages` closure (used by the advisor
     // tool) now that it exists.
     agentHolder.agent = agent
@@ -808,7 +817,7 @@ export async function withNoOutputRetry(
  * caller (MCP dispatch, the orchestration runner) gets the retry for free.
  */
 export function resolveWorkerRunOpts(opts: WorkerAgentOpts): WorkerAgentOpts {
-  const defaults = resolveModeDefaults(opts.mode)
+  const defaults = resolveModeDefaults(opts.mode, opts.ignoreSessionDefaults === true)
   return {
     ...opts,
     model: opts.model ?? defaults.model,
@@ -862,6 +871,9 @@ export function appendPlanReminder(
 
 export const __testExports = {
   appendPlanReminder,
+  setAgentOptionsObserver(observer?: (options: ConstructorParameters<typeof Agent>[0]) => void): void {
+    agentOptionsObserverForTests = observer
+  },
   extractAssistantText,
   makeModelShim,
   makeNoWorktreeHandle,

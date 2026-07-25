@@ -18,6 +18,8 @@
  * stream protocol.
  */
 
+import consola from "consola"
+
 import type {
   Api,
   AssistantMessage,
@@ -99,11 +101,10 @@ export interface CreateCopilotStreamFnOptions {
    */
   onChunk?: (chunk: ChatCompletionChunk) => void
   /**
-   * Per-run context budget. When set, a request-boundary backstop estimates
-   * the assembled payload BEFORE the endpoint split and, on predicted
-   * overflow, stops the run with an actionable diagnostic instead of letting
-   * the upstream return an opaque 413/400. The structural compactor is
-   * best-effort; this is the hard correctness boundary.
+   * Per-run context budget. The request-boundary backstop estimates the
+   * assembled payload BEFORE the endpoint split. A known catalog window makes
+   * overflow a hard local stop; a fallback window only emits a warning and
+   * proceeds because upstream remains authoritative for the unknown window.
    */
   contextBudget?: ContextBudget
 }
@@ -194,13 +195,19 @@ async function runStreamLoop(
   if (opts.contextBudget) {
     const assembledTokens = tokensFromBytes(estimateContextBytes(context))
     if (assembledTokens > opts.contextBudget.inputHardLimitTokens) {
-      pushBackstopDiagnostic(
-        stream,
-        resolved,
-        assembledTokens,
-        opts.contextBudget.inputHardLimitTokens,
-      )
-      return
+      if (!opts.contextBudget.windowKnown) {
+        consola.warn(
+          `[worker] assembled request estimate ${assembledTokens} tokens exceeds fallback input limit ${opts.contextBudget.inputHardLimitTokens}; proceeding because the catalog window is unknown`,
+        )
+      } else {
+        pushBackstopDiagnostic(
+          stream,
+          resolved,
+          assembledTokens,
+          opts.contextBudget.inputHardLimitTokens,
+        )
+        return
+      }
     }
   }
 

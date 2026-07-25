@@ -27,6 +27,7 @@ import {
 // Small budget so modest fixtures cross the thresholds. tokensFromBytes is
 // bytes/3, so compactTrigger=100 ⇒ a ~300+ byte message triggers.
 const TEST_BUDGET: ContextBudget = {
+  windowKnown: true,
   windowTokens: 10_000,
   inputHardLimitTokens: 900,
   promptBudgetTokens: 800,
@@ -119,13 +120,16 @@ function assertToolPairing(messages: AgentMessage[]): void {
 describe("makeContextBudget", () => {
   test("unknown / invalid windows use the conservative defense floor", () => {
     for (const window of [undefined, 0, -5, NaN, Number.POSITIVE_INFINITY]) {
-      expect(makeContextBudget(window).windowTokens).toBe(FALLBACK_WINDOW_TOKENS)
+      const budget = makeContextBudget(window)
+      expect(budget.windowTokens).toBe(FALLBACK_WINDOW_TOKENS)
+      expect(budget.windowKnown).toBe(false)
     }
   })
 
   test("gpt-5.4-mini-class window yields ordered thresholds + a large read cap", () => {
     const b = makeContextBudget(264_000)!
     expect(b.windowTokens).toBe(264_000)
+    expect(b.windowKnown).toBe(true)
     // input bound < window; prompt budget < input bound; thresholds ordered.
     expect(b.inputHardLimitTokens).toBeLessThan(b.windowTokens)
     expect(b.promptBudgetTokens).toBeLessThan(b.inputHardLimitTokens)
@@ -187,6 +191,7 @@ describe("cross-model structural compaction", () => {
         .max_context_window_tokens,
     )
     expect(budget.windowTokens).toBe(FALLBACK_WINDOW_TOKENS)
+    expect(budget.windowKnown).toBe(false)
 
     const transcript = overTriggerTranscript(budget)
     const out = compactWorkerContext(transcript, budget)
@@ -197,8 +202,24 @@ describe("cross-model structural compaction", () => {
   })
 })
 
-describe("worker catalog context-window canary", () => {
-  test("every fixture model that supports tools reports a context window", () => {
+describe("worker catalog context-window fixture audit", () => {
+  function missingToolModelWindows(catalog: Array<{
+    id: string
+    capabilities: {
+      supports: { tool_calls: boolean }
+      limits: { max_context_window_tokens?: number }
+    }
+  }>): Array<string> {
+    return catalog
+      .filter((model) => model.capabilities.supports.tool_calls === true)
+      .filter((model) => {
+        const window = model.capabilities.limits.max_context_window_tokens
+        return window === undefined || !Number.isFinite(window) || window <= 0
+      })
+      .map((model) => model.id)
+  }
+
+  test("detects a tool-capable catalog entry with missing window metadata", () => {
     const catalog = [
       ...MODEL_WINDOW_FIXTURES.map(({ id, windowTokens }) => ({
         id,
@@ -208,22 +229,18 @@ describe("worker catalog context-window canary", () => {
         },
       })),
       {
+        id: "future-tool-model-without-window",
+        capabilities: { supports: { tool_calls: true }, limits: {} },
+      },
+      {
         id: "non-tool-model-without-window",
         capabilities: { supports: { tool_calls: false }, limits: {} },
       },
     ]
 
-    const missingWindows = catalog
-      .filter((model) => model.capabilities.supports.tool_calls === true)
-      .filter((model) => {
-        const window = (
-          model.capabilities.limits as { max_context_window_tokens?: number }
-        ).max_context_window_tokens
-        return window === undefined || !Number.isFinite(window) || window <= 0
-      })
-      .map((model) => model.id)
-
-    expect(missingWindows).toEqual([])
+    expect(missingToolModelWindows(catalog)).toEqual([
+      "future-tool-model-without-window",
+    ])
   })
 })
 

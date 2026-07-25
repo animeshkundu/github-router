@@ -69,7 +69,9 @@ const PER_RESULT_CAP_MIN_BYTES = 64 * 1024
 const PER_RESULT_CAP_MAX_BYTES = 256 * 1024
 
 export interface ContextBudget {
-  /** Catalog context window, tokens. */
+  /** Whether `windowTokens` came from valid catalog metadata rather than the fallback floor. */
+  readonly windowKnown: boolean
+  /** Effective context window, tokens (catalog value or fallback floor). */
   readonly windowTokens: number
   /** Hard input bound for the assembled payload (window − output reserve). */
   readonly inputHardLimitTokens: number
@@ -102,14 +104,14 @@ export function tokensFromBytes(bytes: number): number {
  * Build a per-run budget from the model's catalog context window (tokens).
  *
  * Unknown, non-finite, and non-positive windows use the conservative fallback
- * floor so compaction, the dynamic result cap, and the request backstop remain
- * engaged even when catalog metadata is incomplete.
+ * floor so compaction and the dynamic result cap remain engaged. The returned
+ * `windowKnown` flag keeps the request backstop advisory in that case: upstream
+ * remains authoritative when the model's real window is unknown.
  */
 export function makeContextBudget(windowTokens: number | undefined): ContextBudget {
-  const effectiveWindowTokens =
+  const windowKnown =
     windowTokens !== undefined && Number.isFinite(windowTokens) && windowTokens > 0
-      ? windowTokens
-      : FALLBACK_WINDOW_TOKENS
+  const effectiveWindowTokens = windowKnown ? windowTokens : FALLBACK_WINDOW_TOKENS
   const inputHardLimitTokens = Math.max(
     0,
     Math.floor(effectiveWindowTokens * (1 - ASSEMBLY_MARGIN_FRACTION)) - OUTPUT_RESERVE_TOKENS,
@@ -119,6 +121,7 @@ export function makeContextBudget(windowTokens: number | undefined): ContextBudg
     inputHardLimitTokens - TOOL_SCHEMA_RESERVE_TOKENS - SYSTEM_RESERVE_TOKENS,
   )
   return {
+    windowKnown,
     windowTokens: effectiveWindowTokens,
     inputHardLimitTokens,
     promptBudgetTokens,

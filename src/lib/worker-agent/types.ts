@@ -78,6 +78,12 @@ export interface WorkerAgentOpts {
    */
   thinking?: WorkerThinkingLevel
   /**
+   * Ignore process-global `worker_defaults` and resolve omitted model/thinking
+   * only from built-ins. Workflow execution sets this so session-global
+   * settings cannot defeat its verified cross-lab isolation.
+   */
+  ignoreSessionDefaults?: boolean
+  /**
    * Implement-only. When `true`, run the worker inside a fresh git
    * worktree and return the diff alongside the final text. When
    * `false`/omitted, edit the workspace in place. Ignored for `browse`

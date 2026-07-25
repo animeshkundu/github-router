@@ -276,6 +276,8 @@ export async function discoverGateCommands(
     // imports this module), so the mock.module-isolated CLI tests don't deadlock
     // pulling the Pi runtime at load time.
     const { runWorkerAgent } = await import("~/lib/worker-agent/engine")
+    // Discovery is advisory setup, not a verified workflow producer/checker,
+    // so honoring the operator's explore default here is intentional.
     result = await runWorkerAgent({
       mode: "explore",
       workspace: root,

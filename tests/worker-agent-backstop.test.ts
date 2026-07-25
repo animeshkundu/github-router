@@ -18,9 +18,10 @@ import os from "node:os"
 import path from "node:path"
 
 import { state } from "~/lib/state"
+import { makeContextBudget } from "~/lib/worker-agent/context-budget"
 import { runWorkerAgent } from "~/lib/worker-agent/engine"
 import { __resetForTests as resetWorkerSemaphore } from "~/lib/worker-agent/semaphore"
-import { __testExports as streamFnInternals } from "~/lib/worker-agent/stream-fn"
+import { createCopilotStreamFn, __testExports as streamFnInternals } from "~/lib/worker-agent/stream-fn"
 
 // Tiny window → inputHardLimit ≈ floor(12500·0.98) − 12000 = 250 tokens, which
 // any real system-prompt + tool-schema payload exceeds → the backstop fires.
@@ -105,6 +106,36 @@ for (const [label, model, mode] of [
     }
   })
 }
+
+test("fallback window overflow warns but proceeds to upstream", async () => {
+  let fetchCalls = 0
+  globalThis.fetch = mock(async () => {
+    fetchCalls += 1
+    return new Response(
+      'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      { headers: { "content-type": "text/event-stream" } },
+    )
+  }) as unknown as typeof fetch
+
+  const streamFn = createCopilotStreamFn({
+    resolved: { modelId: CHAT_MODEL, thinking: "off" },
+    contextBudget: makeContextBudget(undefined),
+  })
+  const stream = await streamFn(
+    {} as never,
+    {
+      systemPrompt: "X".repeat(400_000),
+      tools: [],
+      messages: [],
+    },
+  )
+  await Array.fromAsync(stream)
+  const final = await stream.result()
+
+  expect(fetchCalls).toBe(1)
+  expect(final.stopReason).toBe("stop")
+  expect(final.content).toContainEqual(expect.objectContaining({ type: "text", text: "ok" }))
+})
 
 describe("estimateContextBytes — image cost is the token-equivalent, not base64", () => {
   const { estimateContextBytes } = streamFnInternals

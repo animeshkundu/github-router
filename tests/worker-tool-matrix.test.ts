@@ -58,7 +58,7 @@ function tempWorkspace(): string {
 interface ToolCase {
   name: string
   args: Record<string, unknown>
-  assertSideEffect?: (workspace: string) => void
+  assertSideEffect?: (workspace: string) => Promise<void>
 }
 
 const TOOL_CASES: Array<ToolCase> = [
@@ -77,13 +77,16 @@ const TOOL_CASES: Array<ToolCase> = [
   {
     name: "edit",
     args: { path: "seed.txt", old_string: "needle", new_string: "edited" },
-    assertSideEffect: (workspace) =>
-      expect(Bun.file(path.join(workspace, "seed.txt")).text()).resolves.toContain("edited"),
+    assertSideEffect: async (workspace) => {
+      await expect(Bun.file(path.join(workspace, "seed.txt")).text()).resolves.toContain("edited")
+    },
   },
   {
     name: "write",
     args: { path: "written.txt", contents: "written by matrix\n" },
-    assertSideEffect: (workspace) => expect(Bun.file(path.join(workspace, "written.txt")).exists()).resolves.toBe(true),
+    assertSideEffect: async (workspace) => {
+      await expect(Bun.file(path.join(workspace, "written.txt")).exists()).resolves.toBe(true)
+    },
   },
   { name: "bash", args: { cmd: "git --version" } },
   { name: "codex_review", args: { prompt: "review this smoke fixture" } },
@@ -217,7 +220,7 @@ describe("worker tool smoke matrix", () => {
       expect(result, `${tc.name} never produced a Pi toolResult`).toBeDefined()
       expect(result?.isError, `${tc.name} toolResult was an error`).toBe(false)
       expect(result?.content?.some((part) => part.type === "text" && typeof part.text === "string")).toBe(true)
-      tc.assertSideEffect?.(workspace)
+      await tc.assertSideEffect?.(workspace)
     }, 30_000)
   }
 
