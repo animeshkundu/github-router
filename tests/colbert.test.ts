@@ -244,7 +244,7 @@ describe("index-store: PLAID shard integrity", () => {
     expect(validateIndexIntegrity(dir)).toEqual({ verdict: "not-built" })
   })
 
-  test("rejects gaps, overlaps, non-zero covered range, and malformed JSON", async () => {
+  test("condemns overlaps and malformed JSON, but only flags gaps as suspect", async () => {
     const { validateIndexIntegrity } = await import("../src/lib/colbert/index-store")
     const gap = await shardDir([
       { embedding_offset: 0, num_embeddings: 2 },
@@ -254,14 +254,33 @@ describe("index-store: PLAID shard integrity", () => {
       { embedding_offset: 0, num_embeddings: 3 },
       { embedding_offset: 2, num_embeddings: 1 },
     ])
-    const coveredMismatch = await shardDir([
+    const offsetStart = await shardDir([
       { embedding_offset: 1, num_embeddings: 2 },
     ])
+    const fractional = await shardDir([
+      { embedding_offset: 0, num_embeddings: 1.5 },
+    ])
     const malformed = await shardDir(["{"])
-    expect(validateIndexIntegrity(gap).verdict).toBe("corrupt")
+    // A gap is NOT proven illegal, and condemning deletes the index — so it
+    // must never reach the destructive path.
+    expect(validateIndexIntegrity(gap).verdict).toBe("suspect")
+    expect(validateIndexIntegrity(offsetStart).verdict).toBe("suspect")
     expect(validateIndexIntegrity(overlap).verdict).toBe("corrupt")
-    expect(validateIndexIntegrity(coveredMismatch).verdict).toBe("corrupt")
+    expect(validateIndexIntegrity(fractional).verdict).toBe("corrupt")
     expect(validateIndexIntegrity(malformed).verdict).toBe("corrupt")
+  })
+
+  test("a suspect layout falls back without deleting the index", async () => {
+    const { freshnessVerdict } = await import("../src/lib/colbert/index-store")
+    expect(typeof freshnessVerdict).toBe("function")
+    // Gaps map to `stale`, which rebuilds in the background and leaves the
+    // bytes on disk — never `corrupt`, which quarantines and deletes.
+    const gap = await shardDir([
+      { embedding_offset: 0, num_embeddings: 2 },
+      { embedding_offset: 5, num_embeddings: 1 },
+    ])
+    const { validateIndexIntegrity } = await import("../src/lib/colbert/index-store")
+    expect(validateIndexIntegrity(gap).verdict).not.toBe("corrupt")
   })
 })
 
@@ -326,9 +345,15 @@ describe("index-store: meta keying + freshness verdict", () => {
       path.join(projectDir, "project.json"),
       JSON.stringify({ project_path: ws, model: prov.canonicalColbertModelDir() }),
     )
+    // Overlapping intervals — unambiguous corruption. A gap would only be
+    // `suspect` and must NOT reach the destructive path.
     await fs.writeFile(
       path.join(projectDir, "index", "0.metadata.json"),
-      JSON.stringify({ embedding_offset: 1, num_embeddings: 2 }),
+      JSON.stringify({ embedding_offset: 0, num_embeddings: 3 }),
+    )
+    await fs.writeFile(
+      path.join(projectDir, "index", "1.metadata.json"),
+      JSON.stringify({ embedding_offset: 2, num_embeddings: 1 }),
     )
     await store.writeColbertMeta({
       workspace: ws,
@@ -551,8 +576,14 @@ describe("runSemanticSearch: no-fallback contract", () => {
       path.join(projectDir, "project.json"),
       JSON.stringify({ project_path: ws, model: prov.canonicalColbertModelDir() }),
     )
+    // Overlapping intervals — unambiguous corruption, so this legitimately
+    // reaches quarantine. A gap alone would only be `suspect`.
     await fs.writeFile(
       path.join(projectDir, "index", "0.metadata.json"),
+      JSON.stringify({ embedding_offset: 0, num_embeddings: 3 }),
+    )
+    await fs.writeFile(
+      path.join(projectDir, "index", "1.metadata.json"),
       JSON.stringify({ embedding_offset: 2, num_embeddings: 1 }),
     )
     await store.writeColbertMeta({
