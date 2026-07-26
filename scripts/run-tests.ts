@@ -47,9 +47,24 @@ if (
   failures.push("lane 1 (tests/)")
 }
 
-const isolatedFiles = readdirSync(isolatedDir)
-  .filter((f) => f.endsWith(".test.ts"))
-  .sort()
+// Recursive on purpose. bunfig hides tests/isolated/** from lane 1, so any
+// file this scan misses is run by NEITHER lane — it disappears silently and
+// the suite still reports green. A top-level-only scan makes that the fate
+// of the first nested isolated test anyone adds.
+function findIsolatedTests(dir: string, prefix = ""): Array<string> {
+  const out: Array<string> = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name
+    if (entry.isDirectory()) {
+      out.push(...findIsolatedTests(path.join(dir, entry.name), rel))
+    } else if (entry.name.endsWith(".test.ts")) {
+      out.push(rel)
+    }
+  }
+  return out
+}
+
+const isolatedFiles = findIsolatedTests(isolatedDir).sort()
 
 if (isolatedFiles.length === 0) {
   console.error("ERROR: No isolated test files found")
