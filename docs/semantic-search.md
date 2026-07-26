@@ -57,13 +57,18 @@ metadata sidecar (`indices/.gh-router-meta/<hash>.json`) and computes a
 freshness verdict on each query from `git rev-parse HEAD` +
 `git status --porcelain`:
 
-- **fresh** - `ready` AND HEAD matches the last index AND the tree is not
-  newly dirty → serve semantic.
+- **fresh** - `ready`, physical shard intervals are contiguous and non-overlapping,
+  the recorded binary/ORT SHAs match the provisioned generation, HEAD matches
+  the last index, and the tree is not newly dirty → serve semantic.
 - **stale** - HEAD moved or the tree is dirty since indexing → honest
   `stale` notice, **no** possibly-deleted-content hits labeled `ready`.
+- **corrupt** - numbered PLAID shard metadata is unreadable, malformed, gapped,
+  overlapping, or belongs to an older binary/ORT generation → quarantine the
+  project directory by atomic rename, remove it out of band, and start one
+  bounded clean rebuild. A failed rename never falls back to in-place deletion.
 
 A non-git workspace falls back to colgrep's own mtime-based incremental
-signal.
+signal, but still passes the physical-integrity and engine-generation gates.
 
 ## Definitive index state (not a blunt timeout)
 
@@ -89,14 +94,16 @@ runs as long as it needs; a hung one dies fast. A generous absolute
 `GH_ROUTER_COLBERT_INIT_TIMEOUT_MS` (default 6h) is only a runaway backstop.
 
 **Failure-class-aware self-heal.** A failed build records a `failureClass`
-(`crashed` | `stuck` | `error` | `launch`) and increments a `failedAttempts`
+(`crashed` | `stuck` | `corrupt` | `error` | `launch`) and increments a `failedAttempts`
 counter (reset to 0 on success). On a later query the runner re-kicks a
 debounced background re-index when the attempt is under the per-class cap
-(`stuck` retries once, transient classes up to 3) AND a 5-min backoff has
-elapsed; past the cap it returns an operator-actionable notice instead of
-looping. The startup auto-kick (`provisionAndIndexColbert`) skips a workspace
-that is already capped or `stuck`, so a restart loop can't re-burn a
-known-bad build. `failed` is no longer a terminal dead-end within a session.
+(`stuck` and `corrupt` retry once, transient classes up to 3) AND a 5-min
+backoff has elapsed; past the cap it returns an operator-actionable notice
+instead of looping. The startup auto-kick (`provisionAndIndexColbert`) skips a
+workspace that is already capped or `stuck`; an under-cap `corrupt` workspace
+gets its bounded clean retry after restart, but a capped one stays
+operator-actionable so a restart loop cannot re-burn a known-bad build.
+`failed` is no longer a terminal dead-end within a session.
 
 ## Model guidance during the unavailable window
 

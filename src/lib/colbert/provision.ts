@@ -93,6 +93,15 @@ export function colbertModelDir(): string {
   return path.join(PATHS.COLBERT_MODELS_DIR, "LateOn-Code-edge", modelDirName())
 }
 
+/**
+ * Canonical model argument for every colgrep invocation and project lookup.
+ * colgrep hashes the raw model string, so slash variants fork one physical
+ * index into distinct project keys on Windows.
+ */
+export function canonicalColbertModelDir(): string {
+  return path.resolve(colbertModelDir())
+}
+
 /** Absolute path the provisioned ORT dylib lives at. */
 export function colbertOrtDylibPath(): string {
   const asset = ortLibAsset()
@@ -241,11 +250,7 @@ export async function provisionColbert(): Promise<ColbertProvisionResult> {
   // All three present? Run the smoke test (outside the download lock —
   // it spawns colgrep, which we don't want to hold the download lock for).
   if (result.binaryPath && result.ortDylibPath && result.modelDir) {
-    const smoke = await runSmokeTest(
-      result.binaryPath,
-      result.ortDylibPath,
-      result.modelDir,
-    )
+    const smoke = await runSmokeTest(result.binaryPath, result.ortDylibPath)
     if (smoke.ok) {
       await writeFile(smokeMarkerPath(), expectedSmokeMarker()).catch(() => {})
       result.status = "ready"
@@ -430,7 +435,6 @@ async function sidecarMatches(sidecar: string, sha256: string): Promise<boolean>
 async function runSmokeTest(
   binaryPath: string,
   ortDylibPath: string,
-  modelDir: string,
 ): Promise<{ ok: boolean; reason?: string }> {
   const tmp = path.join(
     PATHS.COLBERT_DIR,
@@ -467,7 +471,7 @@ async function runSmokeTest(
         "never",
         "--force-cpu",
         "--model",
-        modelDir,
+        canonicalColbertModelDir(),
         "-y",
         "-k",
         "1",

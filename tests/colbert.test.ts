@@ -32,6 +32,7 @@ const appDir = path.join(TEST_HOME, ".local", "share", "github-router")
 const colbertDir = path.join(appDir, "colbert")
 
 afterEach(async () => {
+  await (await import("../src/lib/colbert/runner")).__waitForAllInitsForTests()
   await fs.rm(colbertDir, { recursive: true, force: true }).catch(() => {})
   delete process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH
 })
@@ -208,6 +209,63 @@ describe("semanticSearchEnabled (internal colgrep-availability predicate)", () =
 })
 
 // ---------------------------------------------------------------------
+// Physical index integrity
+// ---------------------------------------------------------------------
+
+describe("index-store: PLAID shard integrity", () => {
+  async function shardDir(rows: Array<unknown>): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(TEST_HOME, "shards-"))
+    for (let i = 0; i < rows.length; i++) {
+      const value = rows[i]
+      await fs.writeFile(
+        path.join(dir, `${i}.metadata.json`),
+        typeof value === "string" ? value : JSON.stringify(value),
+      )
+    }
+    return dir
+  }
+
+  test("coherent contiguous shards", async () => {
+    const { validateIndexIntegrity } = await import("../src/lib/colbert/index-store")
+    const dir = await shardDir([
+      { embedding_offset: 0, num_embeddings: 4 },
+      { embedding_offset: 4, num_embeddings: 3 },
+    ])
+    expect(validateIndexIntegrity(dir)).toEqual({
+      verdict: "coherent",
+      shardCount: 2,
+      embeddingCount: 7,
+    })
+  })
+
+  test("zero shards is not-built", async () => {
+    const { validateIndexIntegrity } = await import("../src/lib/colbert/index-store")
+    const dir = await shardDir([])
+    expect(validateIndexIntegrity(dir)).toEqual({ verdict: "not-built" })
+  })
+
+  test("rejects gaps, overlaps, non-zero covered range, and malformed JSON", async () => {
+    const { validateIndexIntegrity } = await import("../src/lib/colbert/index-store")
+    const gap = await shardDir([
+      { embedding_offset: 0, num_embeddings: 2 },
+      { embedding_offset: 3, num_embeddings: 1 },
+    ])
+    const overlap = await shardDir([
+      { embedding_offset: 0, num_embeddings: 3 },
+      { embedding_offset: 2, num_embeddings: 1 },
+    ])
+    const coveredMismatch = await shardDir([
+      { embedding_offset: 1, num_embeddings: 2 },
+    ])
+    const malformed = await shardDir(["{"])
+    expect(validateIndexIntegrity(gap).verdict).toBe("corrupt")
+    expect(validateIndexIntegrity(overlap).verdict).toBe("corrupt")
+    expect(validateIndexIntegrity(coveredMismatch).verdict).toBe("corrupt")
+    expect(validateIndexIntegrity(malformed).verdict).toBe("corrupt")
+  })
+})
+
+// ---------------------------------------------------------------------
 // Staleness keying + freshness verdict
 // ---------------------------------------------------------------------
 
@@ -253,6 +311,34 @@ describe("index-store: meta keying + freshness verdict", () => {
     })
     const v = await store.freshnessVerdict(ws)
     expect(v.verdict).toBe("failed")
+  })
+
+  test("status:ready with corrupt physical shards → corrupt (never fake-ready)", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    const prov = await import("../src/lib/colbert/provision")
+    const manifest = await import("../src/lib/colbert/manifest")
+    const { PATHS } = await import("../src/lib/paths")
+    const ws = path.join(TEST_HOME, "ws-ready-corrupt")
+    await fs.mkdir(ws, { recursive: true })
+    const projectDir = path.join(PATHS.COLBERT_INDICES_DIR, "corrupt-project")
+    await fs.mkdir(path.join(projectDir, "index"), { recursive: true })
+    await fs.writeFile(
+      path.join(projectDir, "project.json"),
+      JSON.stringify({ project_path: ws, model: prov.canonicalColbertModelDir() }),
+    )
+    await fs.writeFile(
+      path.join(projectDir, "index", "0.metadata.json"),
+      JSON.stringify({ embedding_offset: 1, num_embeddings: 2 }),
+    )
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      binarySha: manifest.colgrepBinAsset()?.sha256,
+      ortSha: manifest.ortLibAsset()?.sha256,
+      status: "ready",
+    })
+    expect((await store.freshnessVerdict(ws)).verdict).toBe("corrupt")
   })
 
   test("status:ready but no completed index on disk → building (never fake-ready)", async () => {
@@ -383,6 +469,36 @@ describe("index progress probe (shared init/search stall signal)", () => {
   })
 })
 
+describe("runner result normalization", () => {
+  test("relativize handles extended-length drive and UNC paths", async () => {
+    const { relativize } = await import("../src/lib/colbert/runner")
+    expect(
+      relativize(
+        "\\\\?\\C:\\repo\\src\\file.ts",
+        "C:\\repo",
+        "\\\\?\\C:\\repo",
+      ),
+    ).toBe("src\\file.ts")
+    expect(
+      relativize(
+        "\\\\?\\UNC\\server\\share\\repo\\src\\file.ts",
+        "\\\\server\\share\\repo",
+        "\\\\?\\UNC\\server\\share\\repo",
+      ),
+    ).toBe("src\\file.ts")
+  })
+
+  test("buildSnippet does not duplicate an indented signature", async () => {
+    const { buildSnippet } = await import("../src/lib/colbert/runner")
+    expect(
+      buildSnippet({
+        signature: 'const auth = req.headers.authorization ?? ""',
+        code: '  const auth = req.headers.authorization ?? ""\n  return auth',
+      }),
+    ).toBe('  const auth = req.headers.authorization ?? ""\n  return auth')
+  })
+})
+
 describe("runSemanticSearch: no-fallback contract", () => {
   test("absent workspace → unavailable isError (no other search run)", async () => {
     const store = await import("../src/lib/colbert/index-store")
@@ -414,6 +530,118 @@ describe("runSemanticSearch: no-fallback contract", () => {
     expect(r.isError).not.toBe(true)
     expect(r.results).toBeUndefined()
     expect(r.notice).toBeTruthy()
+  })
+
+  test("corrupt index is quarantined and rebuilt into a working index", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    const prov = await import("../src/lib/colbert/provision")
+    const manifest = await import("../src/lib/colbert/manifest")
+    const { PATHS } = await import("../src/lib/paths")
+    const runner = await import("../src/lib/colbert/runner")
+    store.__resetInitDebounceForTests()
+    const ws = path.join(TEST_HOME, "ws-runner-corrupt")
+    await fs.mkdir(ws, { recursive: true })
+    await fs.mkdir(path.dirname(prov.colgrepBinaryPath()), { recursive: true })
+    await fs.mkdir(path.dirname(prov.colbertOrtDylibPath()), { recursive: true })
+    await fs.writeFile(prov.colgrepBinaryPath(), "binary")
+    await fs.writeFile(prov.colbertOrtDylibPath(), "runtime")
+    const projectDir = path.join(PATHS.COLBERT_INDICES_DIR, "runner-corrupt")
+    await fs.mkdir(path.join(projectDir, "index"), { recursive: true })
+    await fs.writeFile(
+      path.join(projectDir, "project.json"),
+      JSON.stringify({ project_path: ws, model: prov.canonicalColbertModelDir() }),
+    )
+    await fs.writeFile(
+      path.join(projectDir, "index", "0.metadata.json"),
+      JSON.stringify({ embedding_offset: 2, num_embeddings: 1 }),
+    )
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      binarySha: manifest.colgrepBinAsset()?.sha256,
+      ortSha: manifest.ortLibAsset()?.sha256,
+      status: "ready",
+    })
+
+    runner.__setInitRunnerForTests((async () => {
+      await fs.mkdir(path.join(projectDir, "index"), { recursive: true })
+      await fs.writeFile(
+        path.join(projectDir, "project.json"),
+        JSON.stringify({ project_path: ws, model: prov.canonicalColbertModelDir() }),
+      )
+      await fs.writeFile(
+        path.join(projectDir, "index", "0.metadata.json"),
+        JSON.stringify({ embedding_offset: 0, num_embeddings: 3 }),
+      )
+      return {
+        stdout: "",
+        stderr: "",
+        code: 0,
+        timedOut: false,
+        stdoutTruncated: false,
+        stalled: false,
+      }
+    }) as never)
+    try {
+      const first = await runner.runSemanticSearch({ query: "auth", workspace: ws })
+      expect(first.notice).toMatch(/corrupt.*rebuild/i)
+      await runner.__waitForInitForTests(ws)
+
+      const meta = await store.readColbertMeta(ws)
+      expect(meta?.status).toBe("ready")
+      expect(meta?.failedAttempts).toBe(0)
+      expect(store.validateIndexIntegrity(path.join(projectDir, "index")).verdict).toBe("coherent")
+      expect(await store.freshnessVerdict(ws)).toMatchObject({ verdict: "fresh" })
+    } finally {
+      runner.__setInitRunnerForTests(undefined)
+    }
+  })
+
+  test("corrupt rebuild cap is operator-actionable and restart allows an under-cap retry", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    const { startupKickAllowed } = await import("../src/lib/colbert/runner")
+    const ws = path.join(TEST_HOME, "ws-corrupt-cap")
+    const base = {
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "failed" as const,
+      failureClass: "corrupt" as const,
+    }
+    await store.writeColbertMeta({ ...base, failedAttempts: 1 })
+    expect(await startupKickAllowed(ws)).toBe(true)
+    await store.writeColbertMeta({ ...base, failedAttempts: 2 })
+    expect(await startupKickAllowed(ws)).toBe(false)
+    const result = await (await import("../src/lib/colbert/runner")).runSemanticSearch({ query: "auth", workspace: ws })
+    expect(result.notice).toMatch(/keeps failing.*corrupt/i)
+    expect(result.notice).not.toMatch(/re-index was started/i)
+  })
+
+  test("missing rebuild runtime is persisted and logged visibly", async () => {
+    const store = await import("../src/lib/colbert/index-store")
+    const runner = await import("../src/lib/colbert/runner")
+    store.__resetInitDebounceForTests()
+    const ws = path.join(TEST_HOME, "ws-init-launch-failure")
+    await fs.mkdir(ws, { recursive: true })
+    const errorSpy = mock(() => undefined)
+    const consola = (await import("consola")).default
+    const originalError = consola.error
+    consola.error = errorSpy as unknown as typeof consola.error
+    try {
+      runner.kickBackgroundInit(ws)
+      await runner.__waitForInitForTests(ws)
+      const meta = await store.readColbertMeta(ws)
+      expect(meta).toMatchObject({
+        status: "failed",
+        failureClass: "launch",
+        failedAttempts: 1,
+      })
+      expect(errorSpy).toHaveBeenCalled()
+      expect(store.isInitInFlight(ws)).toBe(false)
+    } finally {
+      consola.error = originalError
+    }
   })
 
   test("failed index → failed isError, NO results", async () => {

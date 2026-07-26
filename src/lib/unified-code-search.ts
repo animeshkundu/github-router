@@ -101,9 +101,12 @@ function lexicalSearchCodeMode(mode: UnifiedMode): "ranked" | "literal" | "regex
  * it both levers: retry `mode:"semantic"` shortly (the index is self-healing
  * in the background) OR re-query now with specific symbol/keyword terms.
  */
+const FALLBACK_GUIDANCE_MARKER = 'retry mode:"semantic"'
+const FALLBACK_GUIDANCE =
+  `${FALLBACK_GUIDANCE_MARKER} shortly, or re-query now with specific symbol/keyword terms`
+
 function fallbackNoticeFor(status: SemanticStatus): string {
-  const tail =
-    'retry mode:"semantic" shortly, or re-query now with specific symbol/keyword terms'
+  const tail = FALLBACK_GUIDANCE
   switch (status) {
     case "building":
       return `semantic index is building; returned lexical keyword matches — ${tail}`
@@ -131,6 +134,13 @@ function joinNotice(
   if (primary && secondary) return `${primary} (${secondary})`
   // `||` (not `??`) so an empty-string primary still yields the secondary.
   return primary || secondary || undefined
+}
+
+/** Preserve runner-specific context while guaranteeing actionable guidance once. */
+function semanticFallbackNotice(sem: SemanticSearchResult): string {
+  if (!sem.notice) return fallbackNoticeFor(sem.status)
+  if (sem.notice.includes(FALLBACK_GUIDANCE_MARKER)) return sem.notice
+  return `${sem.notice} — ${FALLBACK_GUIDANCE}`
 }
 
 async function runLexical(
@@ -244,6 +254,6 @@ export async function runUnifiedCodeSearch(
   const r = await runLexical(input, "lexical", "lexical-fallback", signal)
   return {
     ...r,
-    notice: joinNotice(r.notice, fallbackNoticeFor(sem.status)),
+    notice: joinNotice(r.notice, semanticFallbackNotice(sem)),
   }
 }
