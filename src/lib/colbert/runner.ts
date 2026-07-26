@@ -22,6 +22,7 @@
 import { randomBytes } from "node:crypto"
 import { existsSync, realpathSync } from "node:fs"
 import fs from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
 import process from "node:process"
 
@@ -771,6 +772,53 @@ export async function startupKickAllowed(workspace: string): Promise<boolean> {
   return true
 }
 
+/**
+ * Encoding sessions colgrep may run in parallel: 25% of the machine's
+ * threads, never fewer than 2.
+ *
+ * colgrep defaults this to the FULL CPU count, so a background index build
+ * saturates the machine — the exact opposite of what a background build
+ * should do during an interactive agent session (the proxy even holds a
+ * keep-awake assertion so those sessions run long and unattended). The floor
+ * of 2 keeps a 1- to 7-thread box from dropping to a single session and
+ * taking proportionally forever.
+ *
+ * Override with `GH_ROUTER_COLBERT_PARALLEL` (a positive integer).
+ */
+export function colbertParallelSessions(): number {
+  const raw = Number(process.env.GH_ROUTER_COLBERT_PARALLEL)
+  if (Number.isSafeInteger(raw) && raw > 0) return raw
+  const threads = os.availableParallelism?.() ?? os.cpus?.().length ?? 4
+  return Math.max(2, Math.floor(threads * 0.25))
+}
+
+/**
+ * Persist the parallelism cap into the router-owned colgrep config.
+ *
+ * `--parallel` exists only on the `settings` subcommand — there is no
+ * per-run flag and no env var. It writes `parallel_sessions` to
+ * `<COLGREP_DATA_DIR>/../config.json`, which for us is
+ * `<APP_DIR>/colbert/config.json`: router-owned, and NOT the user's own
+ * colgrep config (verified — after we write ours, a plain `colgrep
+ * settings` with no COLGREP_DATA_DIR still reports `auto`).
+ *
+ * Best-effort: failing here means colgrep encodes at its default (all
+ * threads), which is greedy but not incorrect, so it must never block a
+ * build.
+ */
+async function applyParallelismCap(binary: string): Promise<void> {
+  const sessions = colbertParallelSessions()
+  try {
+    await _runManagedExeCapture(
+      binary,
+      ["settings", "--parallel", String(sessions)],
+      { env: colgrepEnv(), timeoutMs: 30_000, maxStdoutBytes: MAX_STDOUT_BYTES },
+    )
+  } catch (err) {
+    consola.debug("colbert: could not cap colgrep parallelism:", err)
+  }
+}
+
 async function runInit(workspace: string): Promise<void> {
   const binary = colgrepBinaryPath()
   if (!existsSync(binary)) {
@@ -782,6 +830,9 @@ async function runInit(workspace: string): Promise<void> {
   if (!existsSync(colbertOrtDylibPath())) {
     throw new Error("ColBERT ONNX runtime is missing")
   }
+  // Cap parallelism before the encode starts. The setting persists in our
+  // data dir, so it also governs the reconcile a later `search` may run.
+  await applyParallelismCap(binary)
   // Carry the failure streak across the building→done transition so the
   // attempt cap accrues (reset to 0 only on a successful build).
   const prior = await readColbertMeta(workspace)

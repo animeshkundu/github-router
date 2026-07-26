@@ -93,6 +93,24 @@ so the watchdog re-arms while the index dir keeps **growing on disk**
 runs as long as it needs; a hung one dies fast. A generous absolute
 `GH_ROUTER_COLBERT_INIT_TIMEOUT_MS` (default 6h) is only a runaway backstop.
 
+**CPU share.** colgrep defaults its encoding parallelism to the machine's
+FULL thread count, so a background index build saturates the box — the
+opposite of what a background build should do during a long interactive
+session (the proxy even holds a keep-awake assertion so those sessions run
+unattended). Before each `init` the runner caps it at **25% of threads with
+a floor of 2** (16 threads → 4 sessions; a 4-thread box → 2, not 1).
+
+`--parallel` exists only on colgrep's `settings` subcommand — there is no
+per-run flag and no env var — and it writes `parallel_sessions` into
+`<COLGREP_DATA_DIR>/../config.json`, which for us is
+`<APP_DIR>/colbert/config.json`. That is router-owned: after we write ours,
+a plain `colgrep settings` with no `COLGREP_DATA_DIR` still reports `auto`,
+so a user's own colgrep install keeps its own settings. Because the value
+persists there, it also governs the reconcile a later `search` may run.
+Applying it is best-effort — a failure means colgrep encodes at its default,
+which is greedy but not incorrect, so it never blocks a build. Override the
+share with `GH_ROUTER_COLBERT_PARALLEL` (a positive integer).
+
 **Failure-class-aware self-heal.** A failed build records a `failureClass`
 (`crashed` | `stuck` | `corrupt` | `error` | `launch`) and increments a `failedAttempts`
 counter (reset to 0 on success). On a later query the runner re-kicks a
