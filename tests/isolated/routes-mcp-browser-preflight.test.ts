@@ -186,9 +186,19 @@ describe("browser readiness pre-flight runs before slot acquisition", () => {
     const payload = JSON.parse(callJson.result?.content?.[0]?.text ?? "") as {
       install_required: boolean
       reason: string
+      manual_steps?: { load_unpacked_dir?: string; expected_extension_id?: string }
     }
     expect(payload.install_required).toBe(true)
     expect(payload.reason).toBe("bridge_not_running")
+    // `manual_steps` is the actionable half of the envelope — it is what the
+    // user or model follows to recover, so assert production still WIRES it
+    // through. Only the keys are checked here: this file mocks `extensionDir`
+    // and `computeExtensionIdFromKey`, so asserting their values would just
+    // be asserting the fakes. Real derivation is pinned in
+    // tests/browser-mcp-gate.test.ts, where those functions are genuine.
+    expect(payload.manual_steps).toBeDefined()
+    expect(payload.manual_steps?.load_unpacked_dir).toBeTruthy()
+    expect(payload.manual_steps?.expected_extension_id).toBeTruthy()
   })
 
   test("a not-ready browser call returns install_required WITHOUT consuming an inflight slot, even when the pool is saturated", async () => {

@@ -51,6 +51,7 @@ let savedPowerBrowseEnabled: boolean
 let savedEnvBrowseFlag: string | undefined
 let savedEnvDisableWorker: string | undefined
 let savedEnvDisableProvision: string | undefined
+let savedEnvExtDir: string | undefined
 
 function buildReq(body: unknown, opts: { auth?: string; host?: string } = {}) {
   return new Request(`http://${PROXY_HOST}/`, {
@@ -85,6 +86,11 @@ beforeEach(() => {
   // here must not materialize/stamp assets or install an NMH in the user's home.
   process.env.GH_ROUTER_DISABLE_BROWSER_PROVISION = "1"
   delete process.env.GH_ROUTER_ENABLE_BROWSE
+  // `extensionDir()` honours this override, so a dev box that sets it (the
+  // documented workflow) would fail the derivation assertion on a path that
+  // has nothing to do with the code under test. Clear it for hermeticity.
+  savedEnvExtDir = process.env.GH_ROUTER_BROWSER_EXT_DIR
+  delete process.env.GH_ROUTER_BROWSER_EXT_DIR
   state.peerMcpNonce = NONCE
   state.copilotToken = "test-copilot-token"
   state.githubToken = "test-gh-token"
@@ -105,6 +111,8 @@ afterEach(() => {
   else process.env.GH_ROUTER_DISABLE_WORKER_TOOLS = savedEnvDisableWorker
   if (savedEnvDisableProvision === undefined) delete process.env.GH_ROUTER_DISABLE_BROWSER_PROVISION
   else process.env.GH_ROUTER_DISABLE_BROWSER_PROVISION = savedEnvDisableProvision
+  if (savedEnvExtDir === undefined) delete process.env.GH_ROUTER_BROWSER_EXT_DIR
+  else process.env.GH_ROUTER_BROWSER_EXT_DIR = savedEnvExtDir
   _resetSupportedBrowserCache()
   mock.restore()
 })
@@ -186,7 +194,15 @@ describe("browser-mcp capability gate (--browse)", () => {
     const manifest = JSON.parse(
       readFileSync(new URL("../src/browser-ext/manifest.json", import.meta.url), "utf8"),
     ) as { key: string }
-    expect(computeExtensionIdFromKey(manifest.key)).toMatch(/^[a-p]{32}$/)
+    // Pin the EXACT id, not a `/^[a-p]{32}$/` shape. The mapping emits 32
+    // [a-p] chars for any input at all — "garbage" and "" both satisfy that
+    // pattern — so a shape assertion would still pass if the manifest key
+    // were rotated, truncated, or replaced. The id is load-bearing: the
+    // native-messaging host manifest allowlists this exact origin, so a
+    // silent change breaks every install.
+    expect(computeExtensionIdFromKey(manifest.key)).toBe(
+      "hgdljejkcbejmokomhcaenchdhjdjlfg",
+    )
     expect(extensionDir()).toMatch(/browser-ext/)
   })
 

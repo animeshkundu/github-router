@@ -15,5 +15,9 @@
 # and always hung. This makes the bare command safe by default.
 #
 # Running the isolated lane requires an explicit CLI `--path-ignore-patterns`,
-# which OVERRIDES this value — see `bun run test:isolated`.
+# which OVERRIDES this value — that is how `bun run test` (scripts/run-tests.ts)
+# opts the directory back in, one process per file. To run a single isolated
+# file by hand you must add the override yourself:
+#   bun test tests/isolated/foo.test.ts --path-ignore-patterns 'node_modules/**'
+# Without it the file matches zero tests and bun exits 1.
 pathIgnorePatterns = ["tests/isolated/**"]
