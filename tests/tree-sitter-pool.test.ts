@@ -348,6 +348,25 @@ function buildJobs(root: string, n: number): Array<PoolJob> {
 }
 
 poolDescribe("tree-sitter pool — budget / abort / shutdown never hang", () => {
+  test("cold worker startup is excluded from the parse budget", async () => {
+    const fx = makeFixture(spreadFixture(1))
+    try {
+      process.env.GH_ROUTER_ENABLE_TS_POOL = "1"
+      __resetTreeSitterPoolForTests()
+      const pool = getTreeSitterPool()
+      expect(pool).not.toBeNull()
+      const run = await pool!.parseFiles(buildJobs(fx.root, 1), {
+        budgetMs: 200,
+        signal: new AbortController().signal,
+      })
+      expect(run).not.toBeNull()
+      expect(run!.budgetHit).toBe(false)
+      expect(run!.byFile.size).toBe(1)
+    } finally {
+      fx.cleanup()
+    }
+  }, 10_000)
+
   test("budgetMs=0 over many files returns promptly (queued jobs resolved, no hang)", async () => {
     const fx = makeFixture(spreadFixture(40))
     try {

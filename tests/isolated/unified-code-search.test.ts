@@ -135,7 +135,56 @@ describe("semantic / default mode", () => {
     expect(r.results.length).toBe(1)
     expect(r.results[0]!.score).toBe(0.91)
     expect(r.results[0]!.name).toBe("refreshAuthToken")
+    expect(r.outlines).toHaveLength(1)
+    expect(r.outlines?.[0]?.file).toBe("src/auth.ts")
+    expect(r.outlines?.[0]?.outline.map((entry) => entry.name)).toContain(
+      "refreshAuthToken",
+    )
     expect(r.notice).toBeUndefined()
+  })
+
+  test("status 'ready' skips an out-of-workspace semantic result outline", async () => {
+    semanticEnabled = true
+    semanticResult = {
+      status: "ready",
+      source: "semantic",
+      results: [
+        {
+          file: "../outside.ts",
+          line: 1,
+          score: 0.5,
+          snippet: "export const outside = true",
+        },
+      ],
+    }
+    const r = await runUnifiedCodeSearch({
+      query: "outside",
+      workspace: root,
+    })
+    expect(r.results).toHaveLength(1)
+    expect(r.outlines).toEqual([])
+  })
+
+  test("status 'ready' honors summary:false", async () => {
+    semanticEnabled = true
+    semanticResult = {
+      status: "ready",
+      source: "semantic",
+      results: [
+        {
+          file: "src/auth.ts",
+          line: 1,
+          score: 0.91,
+          snippet: "export function refreshAuthToken()",
+        },
+      ],
+    }
+    const r = await runUnifiedCodeSearch({
+      query: "where do we refresh auth tokens",
+      workspace: root,
+      summary: false,
+    })
+    expect(r.outlines).toBeUndefined()
   })
 
   test.each(["building", "stale", "unavailable", "failed"] as const)(

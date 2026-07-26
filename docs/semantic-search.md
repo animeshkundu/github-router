@@ -45,7 +45,7 @@ The tool response carries a 3-valued top-level `source` field to tell the model 
 - `"lexical"` (caller forced a lexical mode)
 - `"lexical-fallback"` (a semantic/default query degraded to lexical because the index wasn't ready)
 
-Semantic-ready result rows carry a `score` field (ColBERT relevance, interpretable). Lexical rows omit it.
+Semantic-ready result rows carry a `score` field (ColBERT relevance, interpretable). Lexical rows omit it. With `summary` enabled (the default), both semantic and lexical responses include compact outlines for up to the first 10 distinct result files, limited to top-level declarations and class members; `summary:false` omits them.
 
 ## Freshness verdict (the staleness correctness guard)
 

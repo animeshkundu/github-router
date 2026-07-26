@@ -455,12 +455,10 @@ class TreeSitterPool {
     const myJobIds = new Set<number>()
 
     // Register abort handling BEFORE awaiting ensureWorkers so an abort during
-    // worker spawn is observed promptly for QUEUED work. NOTE: if the abort
-    // lands while we're still inside `ensureWorkers()` (worker spawn/ready
-    // handshake), the await itself is not interrupted — cancellation of the
-    // *spawn* is bounded by READY_TIMEOUT_MS. The structural pass's 200ms budget
-    // makes this a non-issue in practice (workers are warm after the first
-    // call); a hard spawn-abort race isn't worth the added complexity.
+    // worker spawn is observed before any jobs are queued. The await itself is
+    // bounded by READY_TIMEOUT_MS. Worker and grammar initialization deliberately
+    // happen before the parse timer starts, so a cold pool cannot consume a
+    // user's structural-analysis budget without parsing a file.
     const stop = (): void => {
       stopped = true
       // Drop our still-queued jobs so their enqueue() promises resolve (else
@@ -487,15 +485,23 @@ class TreeSitterPool {
     }
     opts.signal.addEventListener("abort", onAbort, { once: true })
 
-    const budgetTimer = setTimeout(() => {
-      budgetHit = true
-      stop()
-    }, opts.budgetMs)
-    budgetTimer.unref?.()
+    let budgetTimer: ReturnType<typeof setTimeout> | undefined
 
     try {
       const liveCount = await this.ensureWorkers()
       if (liveCount === 0) return null
+      if (opts.signal.aborted) return { byFile, budgetHit: false }
+
+      if (opts.budgetMs <= 0) {
+        budgetHit = true
+        stop()
+      } else {
+        budgetTimer = setTimeout(() => {
+          budgetHit = true
+          stop()
+        }, opts.budgetMs)
+        budgetTimer.unref?.()
+      }
 
       // Per-file dispatch with a single retry on worker death. The `stopped`
       // flag (budget/abort) makes pending dispatches resolve as misses.
@@ -531,7 +537,7 @@ class TreeSitterPool {
 
       await Promise.all(jobs.map((job) => dispatchFile(job, false)))
     } finally {
-      clearTimeout(budgetTimer)
+      if (budgetTimer) clearTimeout(budgetTimer)
       opts.signal.removeEventListener("abort", onAbort)
     }
 

@@ -153,9 +153,9 @@ const WALL_TIME_MS = 30_000
  * Structural-pass settings. The wall-clock budget is checked between
  * files (NOT mid-parse — tree-sitter doesn't surface a usable cancel
  * hook in the web-tree-sitter binding we're on), so a single
- * pathological file can overrun by one file's parse-time. In practice
- * a single source file parses in well under 50ms; 200ms gives us
- * comfortable headroom for ~5-10 files even on cold cache.
+ * pathological file can overrun by one file's parse-time. Worker/grammar
+ * initialization is completed before this timer starts; the 200ms budget
+ * therefore measures parsing only, on cold and warm queries alike.
  */
 const STRUCTURAL_BUDGET_MS = 200
 let _structuralBudgetTestOverride: number | null = null
@@ -1267,7 +1267,7 @@ async function runStructuralPassPooled(opts: {
   return {
     confirmedHitIndexes,
     fallback: run.budgetHit
-      ? `structural budget exceeded after parsing ${run.byFile.size}/${opts.cap} hits; ` +
+      ? `structural budget exceeded after parsing ${run.byFile.size}/${jobs.length} files; ` +
         `retry with structural: "topN" or narrow your query`
       : null,
     outlinesByFile,
@@ -1729,34 +1729,26 @@ function dropAstGrepSecrets(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 /**
- * Resolve the ast-grep binary. Checks the toolbelt bin dir (where the
- * proxy materializes `sg` + `ast-grep`) AND the system PATH, trying `sg`
- * first then `ast-grep`. Returns an ABSOLUTE path or `null` when neither
- * is found. `resolveExecutable` honors PATHEXT on Windows and excludes
- * the cwd (no planted-`sg.exe` vector). The toolbelt dir is searched by
- * prepending it to a PATH copy so the same resolver handles both sources.
+ * Resolve the ast-grep binary. Checks the known router-owned toolbelt paths
+ * directly before consulting PATH for the unambiguous `ast-grep` name.
+ * Returns an ABSOLUTE path or `null` when neither source has it.
  */
 export function resolveAstGrep(): string | null {
   const toolbeltDir = PATHS.TOOLBELT_BIN_DIR
-  // `sg` is the toolbelt's alias for ast-grep, but it is ONLY trusted from
-  // OUR toolbelt dir — on Linux a bare `sg` on the system PATH is
-  // `/usr/bin/sg` (the shadow-utils setgid command), NOT ast-grep. Resolving
-  // that ran the wrong binary in CI (the ast_pattern tests failed because
-  // setgid produced no matches). So search `sg` in the toolbelt dir ONLY.
-  const sgInToolbelt = resolveExecutable("sg", {
-    env: { ...process.env, PATH: toolbeltDir },
-  })
-  if (sgInToolbelt) return sgInToolbelt
-  // `ast-grep` is the unambiguous name — safe from the toolbelt OR the system
-  // PATH (no system command collides with it).
-  const astGrep = resolveExecutable("ast-grep", {
-    env: {
-      ...process.env,
-      PATH: `${toolbeltDir}${path.delimiter}${pathEnvValue()}`,
-    },
-  })
-  if (astGrep) return astGrep
-  return null
+  // Direct lookup is the authoritative toolbelt path. It avoids PATH/PATHEXT
+  // runtime differences while keeping bare `sg` confined to OUR directory:
+  // on Linux `/usr/bin/sg` is shadow-utils' setgid command, not ast-grep.
+  const toolbeltNames =
+    process.platform === "win32"
+      ? ["sg.exe", "ast-grep.exe", "sg", "ast-grep"]
+      : ["sg", "ast-grep"]
+  for (const name of toolbeltNames) {
+    const candidate = path.resolve(toolbeltDir, name)
+    if (existsSync(candidate)) return candidate
+  }
+
+  // `ast-grep` is unambiguous and safe to resolve from the system PATH.
+  return resolveExecutable("ast-grep", { env: process.env })
 }
 
 /**
@@ -1777,14 +1769,6 @@ export function __setAstGrepResolverForTest(
 /** Resolve ast-grep, honoring the test override when set. */
 function resolveAstGrepForRun(): string | null {
   return (_astGrepResolverOverride ?? resolveAstGrep)()
-}
-
-/** Read PATH case-insensitively from the live env. */
-function pathEnvValue(): string {
-  for (const key of Object.keys(process.env)) {
-    if (key.toLowerCase() === "path") return process.env[key] ?? ""
-  }
-  return ""
 }
 
 /** One `sg run --json=stream` JSON-line shape (only the fields we read). */
@@ -1835,8 +1819,9 @@ async function runAstGrep(opts: {
     return {
       hits: [],
       notice:
-        "ast_pattern requires ast-grep (sg), which isn't available here; " +
-        "the model can run ast-grep directly or omit ast_pattern",
+        "ast_pattern requires ast-grep, but no executable was found at " +
+        `${PATHS.TOOLBELT_BIN_DIR} (sg/ast-grep) or on PATH (ast-grep); ` +
+        "install ast-grep or omit ast_pattern",
     }
   }
   // `--lang` is REQUIRED for correct matching. Without it ast-grep parses
