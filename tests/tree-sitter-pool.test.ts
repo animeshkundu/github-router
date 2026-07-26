@@ -40,6 +40,8 @@ import {
   __armWorkerCrashOnceForTest,
   __disarmWorkerCrashOnceForTest,
   __resetTreeSitterPoolForTests,
+  __setWarmTreeSitterPoolForTest,
+  warmTreeSitterPool,
 } from "../src/lib/tree-sitter-pool/pool"
 
 // ---------------------------------------------------------------------------
@@ -93,6 +95,7 @@ afterEach(() => {
   __setStructuralBudgetForTest(null)
   delete process.env.GH_ROUTER_ENABLE_TS_POOL
   delete process.env.GH_ROUTER_DISABLE_TS_POOL
+  delete process.env.GH_ROUTER_DISABLE_TS_POOL_WARMUP
   delete process.env.GH_ROUTER_TS_WORKER_CRASH
   delete process.env.GH_ROUTER_TS_POOL_SIZE
 })
@@ -346,6 +349,73 @@ function buildJobs(root: string, n: number): Array<PoolJob> {
   }
   return jobs
 }
+
+poolDescribe("tree-sitter pool — launch warm-up", () => {
+  test("returns before worker initialization completes", async () => {
+    process.env.GH_ROUTER_ENABLE_TS_POOL = "1"
+    let release!: (value: boolean) => void
+    __setWarmTreeSitterPoolForTest(
+      () => new Promise<boolean>((resolve) => {
+        release = resolve
+      }),
+    )
+    const started = warmTreeSitterPool()
+    let settled = false
+    void started.then(() => {
+      settled = true
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    release(true)
+    await started
+  })
+
+  test("warms only one worker and lets the first query use it while the pool expands", async () => {
+    const fx = makeFixture(spreadFixture(1))
+    try {
+      process.env.GH_ROUTER_ENABLE_TS_POOL = "1"
+      process.env.GH_ROUTER_TS_POOL_SIZE = "4"
+      await warmTreeSitterPool()
+      const pool = getTreeSitterPool()!
+      expect(pool.__workerLifecycleForTest().spawned).toBe(1)
+
+      const result = await runRanked(fx.root)
+      expect(result.results.find((hit) => hit.line === 1)?.role).toBe("definition")
+      expect(result.notice ?? "").not.toMatch(/structural budget/)
+    } finally {
+      fx.cleanup()
+    }
+  }, 10_000)
+
+  test("skips when warm-up is disabled", async () => {
+    process.env.GH_ROUTER_ENABLE_TS_POOL = "1"
+    process.env.GH_ROUTER_DISABLE_TS_POOL_WARMUP = "1"
+    let called = false
+    __setWarmTreeSitterPoolForTest(async () => {
+      called = true
+      return true
+    })
+    await warmTreeSitterPool()
+    expect(called).toBe(false)
+    expect(getTreeSitterPool()?.__workerLifecycleForTest().spawned).toBe(0)
+  })
+
+  test("warm-up failure leaves query-time lazy initialization working", async () => {
+    const fx = makeFixture(spreadFixture(1))
+    try {
+      process.env.GH_ROUTER_ENABLE_TS_POOL = "1"
+      __setWarmTreeSitterPoolForTest(async () => {
+        throw new Error("injected warm-up failure")
+      })
+      await expect(warmTreeSitterPool()).resolves.toBeUndefined()
+
+      const result = await runRanked(fx.root)
+      expect(result.results.find((hit) => hit.line === 1)?.role).toBe("definition")
+    } finally {
+      fx.cleanup()
+    }
+  }, 10_000)
+})
 
 poolDescribe("tree-sitter pool — budget / abort / shutdown never hang", () => {
   test("cold worker startup is excluded from the parse budget", async () => {

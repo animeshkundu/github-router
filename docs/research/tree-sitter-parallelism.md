@@ -246,7 +246,9 @@ verbatim.
 
 **Budget mapping (200ms → a pool).** The structural budget today is wall-clock
 across serial parses. With a pool, dispatch all top-N file jobs at once and race a
-single 200ms `setTimeout` against the aggregate. When the timer fires, stop
+single 200ms `setTimeout` against the aggregate. Worker spawn, `Parser.init()`,
+and grammar loading complete **before** this timer starts, so one-time
+initialization cannot consume a query's precision budget. When the timer fires, stop
 *consuming* further results and mark the unfinished files as the regex-heuristic
 fallback (`StructuralPassResult.fallback`, today's notice string). The budget
 becomes **wall-clock across parallel workers**, so 50 files across 4 workers fit
@@ -254,6 +256,13 @@ the same 200ms far more often than serially — i.e. the budget more often
 *completes* instead of truncating, which is a precision win, not just a latency
 one. Per-file parse time is unchanged; only the wall-clock to chew through N files
 shrinks ~Nx-bounded-by-pool-width.
+
+At proxy launch, `warmTreeSitterPool()` asynchronously readies **one** worker and
+its grammar bundle. One worker is deliberate: it removes the first-query cold
+start while bounding competition with ColBERT's simultaneous background index
+build; demand expands the remaining workers lazily. Disable only this launch
+optimization with `GH_ROUTER_DISABLE_TS_POOL_WARMUP=1`; query-time lazy loading
+and the init-excluded budget accounting remain active.
 
 **Determinism (hard requirement — there is a 5-run identical-output test,
 `code-search.test.ts:428`).** Results must be identical regardless of which worker
