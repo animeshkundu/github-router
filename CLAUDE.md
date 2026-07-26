@@ -48,9 +48,37 @@ bun run build        # Build for distribution (tsdown → dist/)
 bun run dev          # Dev server with hot reload
 bun run lint:all     # Lint entire project
 bun run typecheck    # TypeScript type checking
-bun test             # Run all tests
+bun run test         # Run the FULL suite exactly as CI does (build + both lanes)
+bun test             # Quick lane-1 sweep only; excludes tests/isolated/** (see below)
 bun run start        # Production server (port 8787)
 ```
+
+### Test lanes (why `bun run test` is not `bun test`)
+
+The suite runs in two lanes, driven by `scripts/run-tests.ts` (the single source of
+truth — CI invokes the same script, so local and CI can never drift):
+
+1. every test except `tests/isolated/**`, in one process;
+2. each `tests/isolated/*.test.ts` file in its OWN process.
+
+The split is load-bearing. Files under `tests/isolated/` use `mock.module()`, which
+bun applies process-globally and which `mock.restore()` cannot undo, so sharing a
+process lets one file's mock corrupt another's. The worst case is a deadlock, not a
+bad assertion: the `node:child_process` spawn mock in
+`tests/isolated/lib-launch-child.test.ts` returns a fake child that never emits
+`close`, and the spawn in `src/lib/code-search.ts` then awaits it forever — which is
+exactly why a bare `bun test` used to hang with no summary.
+
+`bunfig.toml` therefore excludes `tests/isolated/**` from discovery so a bare
+`bun test` stays safe (it becomes lane 1 only). A CLI `--path-ignore-patterns`
+OVERRIDES that bunfig value; that is how lane 2 opts the directory back in per file.
+Consequence to know: running an isolated file directly with `bun test
+tests/isolated/foo.test.ts` matches zero tests and exits 1 — pass
+`--path-ignore-patterns node_modules/**` to override, or just use `bun run test`.
+
+`bun test` does not build, so the two `dist/main.js` precondition tests
+(`tests/internal-hooks-crash.test.ts`, `tests/node-compat.test.ts`) fail until you
+run `bun run build`. `bun run test` builds first, so it is green from a fresh clone.
 
 ## Subcommands
 
