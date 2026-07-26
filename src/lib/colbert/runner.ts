@@ -134,6 +134,8 @@ export function makeIndexProgressProbe(workspace: string): () => boolean {
  * detached search completes. */
 const _searchIndexInFlight = new Set<string>()
 const _initPromises = new Map<string, Promise<void>>()
+/** In-flight quarantine deletions, drained by teardown (Windows EBUSY). */
+const _quarantineRemovals = new Set<Promise<void>>()
 let _runManagedExeCapture = runManagedExeCapture
 
 /** Test-only: clear the detached-search in-flight set. */
@@ -156,6 +158,7 @@ export async function __waitForInitForTests(workspace: string): Promise<void> {
 /** Test-only: drain all background init work before removing fixtures. */
 export async function __waitForAllInitsForTests(): Promise<void> {
   await Promise.all(_initPromises.values())
+  await Promise.all(_quarantineRemovals)
 }
 
 export type SemanticStatus =
@@ -303,9 +306,19 @@ async function quarantineProjectDir(projectDir: string): Promise<boolean> {
     consola.debug("colbert: corrupt index quarantine rename failed:", err)
     return false
   }
-  void fs.rm(quarantine, { recursive: true, force: true }).catch((err) => {
-    consola.debug("colbert: corrupt index quarantine cleanup failed:", err)
-  })
+  // The delete runs in the background — the rename already made the corrupt
+  // index invisible, so the caller must not wait on a large recursive rm.
+  // Track it so teardown can drain it: an in-flight rm walking this tree
+  // while something removes an ancestor raises EBUSY/EPERM on Windows.
+  const removal = fs
+    .rm(quarantine, { recursive: true, force: true })
+    .catch((err) => {
+      consola.debug("colbert: corrupt index quarantine cleanup failed:", err)
+    })
+    .finally(() => {
+      _quarantineRemovals.delete(removal)
+    })
+  _quarantineRemovals.add(removal)
   return true
 }
 
@@ -356,7 +369,7 @@ async function repairCorruptIndex(
     notice:
       attempts < 2
         ? 'semantic index was found corrupt and quarantined; a clean rebuild was started — retry mode:"semantic" shortly'
-        : "semantic index repeatedly failed integrity checks; automatic rebuild is capped — use lexical search and see proxy logs",
+        : 'semantic index repeatedly failed integrity checks; automatic rebuild is capped — do NOT retry mode:"semantic", use lexical search with specific symbol/keyword terms and see proxy logs',
   }
 }
 

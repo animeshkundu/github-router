@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 
+import { readFileSync } from "node:fs"
+
 import {
   __resetInFlightForTests,
 } from "../src/routes/mcp/handler"
@@ -8,6 +10,10 @@ import {
   _resetSupportedBrowserCache,
   hasSupportedBrowserInstalled,
 } from "../src/lib/browser-mcp/browser-detect"
+import {
+  computeExtensionIdFromKey,
+  extensionDir,
+} from "../src/lib/browser-mcp/native-host-installer"
 import { state } from "../src/lib/state"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
@@ -75,9 +81,8 @@ beforeEach(() => {
   // hosts (some dev boxes have gemini-3.5-flash in their catalog, which
   // would inflate the tool count in ways unrelated to this test).
   process.env.GH_ROUTER_DISABLE_WORKER_TOOLS = "1"
-  // Keep the stable-dir provisioning that ensureBridgeReady() now awaits
-  // hermetic: skip the materialize/stamp/NMH writes so this test asserts
-  // the bundled load_unpacked_dir without copying into the user's home.
+  // Keep this non-isolated gate suite hermetic: any browser dispatch added
+  // here must not materialize/stamp assets or install an NMH in the user's home.
   process.env.GH_ROUTER_DISABLE_BROWSER_PROVISION = "1"
   delete process.env.GH_ROUTER_ENABLE_BROWSE
   state.peerMcpNonce = NONCE
@@ -175,52 +180,14 @@ describe("browser-mcp capability gate (--browse)", () => {
     expect(err?.message).toMatch(/unknown tool/i)
   })
 
-  test("open_tab returns install_required JSON with isError when gate is on but bridge isn't running", async () => {
-    if (!hasSupportedBrowserInstalled()) return
-    state.browseEnabled = true
-    const { status, json } = await rpc({
-      jsonrpc: "2.0",
-      id: 5,
-      method: "tools/call",
-      params: { name: "open_tab", arguments: { url: "https://example.com" } },
-    })
-    expect(status).toBe(200)
-    const result = json.result as {
-      content: Array<{ type: string; text: string }>
-      isError: boolean
-    }
-    // The gate is on (browser detected), so the call dispatches. It MUST
-    // return an error envelope: either the install-check pre-flight's
-    // install_required JSON (the expected outcome on CI / any host where
-    // the native-messaging bridge isn't running), OR — on a developer box
-    // that happens to have the bridge live — a downstream dispatch error
-    // (e.g. "No current window"). Both are isError:true; we assert the
-    // install_required structure only when the pre-flight actually fired.
-    expect(result.isError).toBe(true)
-    let payload: {
-      install_required?: boolean
-      reason?: string
-      manual_steps?: { load_unpacked_dir: string; expected_extension_id: string }
-    } = {}
-    try {
-      payload = JSON.parse(result.content[0].text)
-    } catch {
-      // Non-JSON text means the bridge was reachable and the dispatch
-      // failed downstream — a valid host-dependent outcome, not the
-      // install_required path. Skip the structural assertions.
-      return
-    }
-    if (payload.install_required !== true) return
-    // Reason depends on host state: bridge bundle absent → bridge_bundle_missing,
-    // bundle present but no bridge.json → bridge_not_running, bridge running but
-    // extension not loaded → extension_not_loaded, extension loaded but stale →
-    // extension_outdated. Any of those is a valid pre-flight failure (the
-    // browser-detected gate already excluded no_supported_browser).
-    expect(payload.reason).toMatch(
-      /^(bridge_bundle_missing|bridge_not_running|extension_not_loaded|extension_outdated)$/,
-    )
-    expect(payload.manual_steps!.load_unpacked_dir).toMatch(/browser-ext/)
-    expect(payload.manual_steps!.expected_extension_id).toMatch(/^[a-p]{32}$/)
+  test("real manifest derives a stable extension ID and unpacked directory", () => {
+    // Deterministic successor to the ambient bridge test: exercise the real
+    // pure derivation directly without depending on browser or bridge state.
+    const manifest = JSON.parse(
+      readFileSync(new URL("../src/browser-ext/manifest.json", import.meta.url), "utf8"),
+    ) as { key: string }
+    expect(computeExtensionIdFromKey(manifest.key)).toMatch(/^[a-p]{32}$/)
+    expect(extensionDir()).toMatch(/browser-ext/)
   })
 
   test("tools/list includes the humanlike-input v2 tools (mouse / drag / type) under --power-browse", async () => {
