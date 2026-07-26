@@ -34,7 +34,7 @@ import { pickEndpoint } from "../services/copilot/endpoint"
  * ALL THREE peer models the consensus protocol needs:
  *   - an OpenAI frontier model (`gpt-5.6-sol`, else `gpt-5.5` — see
  *     `resolveOpenAiFrontier`)
- *   - `claude-opus-4-7`     (opus_critic's model)
+ *   - `claude-opus-5`       (stand_in's Anthropic slot)
  *   - any `gemini-3.X.*pro` (gemini_critic's model family — matches the
  *     same regex `geminiAvailable()` uses, so the gate stays in sync if
  *     the GA slug renames `gemini-3.1-pro-preview` → `gemini-3.1-pro`)
@@ -43,11 +43,8 @@ import { pickEndpoint } from "../services/copilot/endpoint"
  * fails `tools/call` with -32601 (mirroring the `worker` capability's
  * defense-in-depth pattern — the gated tool is functionally invisible).
  *
- * Tier-mismatch on `claude-opus-4-7`: the proxy's `resolveModel` will
- * fuzzy-match `claude-opus-4-7` to `claude-opus-4.7` (Copilot's dotted
- * slug). For the catalog probe we use the Anthropic-published dashed
- * slug too — `state.models?.data` mirrors Copilot's catalog where these
- * land under the dotted slug, so we match by Copilot's actual id shape.
+ * `claude-opus-5` is a single-segment slug (dotted == dashed), so the
+ * catalog probe matches Copilot's actual id shape directly.
  */
 export function geminiAvailable(source: Pick<State, "models"> = state): boolean {
   const models = source.models?.data
@@ -90,9 +87,7 @@ export function standInToolEnabled(): boolean {
   const models = state.models?.data
   if (!models) return false
   const hasOpenAi = resolveOpenAiFrontier() != null
-  const hasOpus = models.some(
-    (m) => m.id === "claude-opus-4-7" || m.id === "claude-opus-4.7",
-  )
+  const hasOpus = models.some((m) => m.id === "claude-opus-5")
   const hasGeminiPro = geminiAvailable()
   return hasOpenAi && hasOpus && hasGeminiPro
 }

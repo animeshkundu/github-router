@@ -188,10 +188,18 @@ export function resolveModel(modelId: string): string {
   if (oneMMatch) {
     const stripped = oneMMatch[1]
     const resolved = resolveModel(stripped)
-    if (!/-1m(?:$|-)/.test(resolved) && !warnedOneMDowngrade.has(modelId)) {
+    // The resolved slug delivers 1M context either as a `-1m` variant OR
+    // as a base slug that natively advertises a >=1M window (how opus-4.8
+    // and opus-5 ship — a single slug, no `-1m` sibling). Only warn about a
+    // real downgrade: a resolved model whose catalog window is under 1M.
+    const resolvedIs1M =
+      /-1m(?:$|-)/.test(resolved)
+      || (models.find((m) => m.id === resolved)?.capabilities?.limits
+        ?.max_context_window_tokens ?? 0) >= 1_000_000
+    if (!resolvedIs1M && !warnedOneMDowngrade.has(modelId)) {
       warnedOneMDowngrade.add(modelId)
       consola.warn(
-        `Model "${modelId}" requested 1M context but no -1m backend is in Copilot's catalog for this tier/family; downgrading upstream to "${resolved}" (200K). Claude Code's local context accounting will still assume 1M — expect premature auto-compact. Drop the [1m] suffix (or unset CLAUDE_CODE_DISABLE_1M_CONTEXT if you set it) to silence.`,
+        `Model "${modelId}" requested 1M context but no 1M backend is in Copilot's catalog for this tier/family; downgrading upstream to "${resolved}" (200K). Claude Code's local context accounting will still assume 1M — expect premature auto-compact. Drop the [1m] suffix (or unset CLAUDE_CODE_DISABLE_1M_CONTEXT if you set it) to silence.`,
       )
     }
     return resolved
@@ -217,9 +225,17 @@ export function resolveModel(modelId: string): string {
     const oneMs = models.filter(
       (m) => m.id.includes("opus") && /-1m(?:$|-)/.test(m.id),
     )
-    const versionMatch = lower.match(/opus-(\d+)[.-](\d+)/)
-    const requestedVersion =
-      versionMatch ? `${versionMatch[1]}.${versionMatch[2]}` : undefined
+    // Capture the requested version. The minor segment is OPTIONAL so a
+    // single-segment slug like `claude-opus-5` registers as a specific
+    // version ("5") rather than falling through to the `oneMs[0]` wildcard
+    // below — which would silently downgrade a catalog-absent `claude-opus-5`
+    // to the first unrelated opus `-1m` sibling (e.g. claude-opus-4.6-1m).
+    const versionMatch = lower.match(/opus-(\d+)(?:[.-](\d+))?/)
+    const requestedVersion = versionMatch
+      ? versionMatch[2]
+        ? `${versionMatch[1]}.${versionMatch[2]}`
+        : versionMatch[1]
+      : undefined
     const preferred = requestedVersion
       ? oneMs.find((m) => m.id.includes(`opus-${requestedVersion}-`))
       : undefined

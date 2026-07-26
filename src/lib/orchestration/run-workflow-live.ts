@@ -125,7 +125,15 @@ export async function runWorkflowLive(opts: RunWorkflowOpts): Promise<RunWorkflo
       return { dir: h.dir, finalize: () => h.finalize(), remove: () => h.remove() }
     },
     async runWorker({ mode, prompt, workspace }) {
-      const r = await runWorkerAgent({ mode, prompt, workspace, signal: opts.signal })
+      const r = await runWorkerAgent({
+        mode,
+        prompt,
+        workspace,
+        signal: opts.signal,
+        // Workflow verification relies on declared producer/checker labs. A
+        // mutable process-global worker default must not change that routing.
+        ignoreSessionDefaults: true,
+      })
       return { text: r.text, isError: r.isError }
     },
     async runCritic({ checkerLab, prompt, artifact }) {

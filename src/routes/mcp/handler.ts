@@ -244,20 +244,24 @@ function checkAuth(c: Context): { ok: true } | { ok: false; status: 401 | 403; r
 // `handleToolsCall` (-32601 for hard-coded tool-name bypasses).
 
 /**
- * The 1M-context Opus 4.6 variant (`claude-opus-4.6-1m`, `max_prompt_tokens`
- * 936K). opus_critic prefers it so it can take large artifacts in one shot
- * (the whole point of pairing it with gpt-5.6-sol as the big-window peers);
- * falls back to the 200K `claude-opus-4-6` when the catalog doesn't carry
- * a 1M 4.6 slug. The regex is version-anchored to 4.6 AND requires a
- * `-1m` suffix boundary (not a permissive `.*1m`), so it does NOT
- * false-positive on `claude-opus-4.7-1m-internal` (stand_in's pinned
- * 4.7 row), `claude-opus-4.6-1max` (hypothetical), or `claude-opus-4.8`
- * (1M-without-sibling). Tolerates dotted (`opus-4.6-1m`) and dashed
- * (`opus-4-6-1m`) catalog separators.
+ * opus_critic's effective model, resolved against the live catalog.
+ *
+ * Prefers `claude-opus-5` — a single-segment slug that is natively 1M
+ * (no `-1m` sibling), so it takes large artifacts in one shot (the whole
+ * point of pairing it with gpt-5.6-sol as the big-window peers). When opus-5
+ * isn't in the catalog (e.g. a lesser tier), falls back to the older
+ * 1M-context Opus 4.6 variant (`claude-opus-4.6-1m`, `max_prompt_tokens`
+ * 936K), then to the 200K `claude-opus-4-6`. The 4.6 regex is
+ * version-anchored AND requires a `-1m` suffix boundary (not a permissive
+ * `.*1m`), so it does NOT false-positive on `claude-opus-4.7-1m-internal`,
+ * `claude-opus-4.6-1max`, or a 1M-without-sibling base slug. Tolerates
+ * dotted (`opus-4.6-1m`) and dashed (`opus-4-6-1m`) catalog separators.
  */
 const OPUS_1M_RE = /opus-4[.-]6-1m(?:$|-)/i
 function resolveOpusCriticModel(): string {
-  const oneM = state.models?.data?.find((m) => OPUS_1M_RE.test(m.id))
+  const models = state.models?.data
+  if (models?.some((m) => m.id === "claude-opus-5")) return "claude-opus-5"
+  const oneM = models?.find((m) => OPUS_1M_RE.test(m.id))
   return oneM ? oneM.id : "claude-opus-4-6"
 }
 
@@ -271,14 +275,23 @@ function activePersonas(): Array<PersonaSpec> {
   // (enterprise) catalog carries it, else the 200K fallback. Resolving here
   // — rather than baking a static slug into PERSONAS_READ — means the
   // downstream dispatch, telemetry, and the prompt-window guard all see the
-  // SAME effective model with no extra threading.
+  // SAME effective model with no extra threading. We ALSO widen its
+  // allowedEfforts to include `xhigh` iff the resolved model is opus-5 (which
+  // advertises xhigh); the static base stays capped at `high` so the older
+  // opus-4.6 fallback (no xhigh) rejects a caller `xhigh` cleanly instead of
+  // 400ing off Copilot. Both the tools/list schema and call-time validation
+  // read from this same resolved persona, so list and call stay consistent.
   return PERSONAS_READ.filter(
     (p) => !p.requiresGeminiCatalog || geminiAvailable(),
-  ).map((p) =>
-    p.toolNameHttp === "opus_critic"
-      ? { ...p, model: resolveOpusCriticModel() }
-      : p,
-  )
+  ).map((p) => {
+    if (p.toolNameHttp !== "opus_critic") return p
+    const model = resolveOpusCriticModel()
+    const allowedEfforts: ReadonlyArray<Effort> =
+      model === "claude-opus-5"
+        ? ["low", "medium", "high", "xhigh"]
+        : p.allowedEfforts
+    return { ...p, model, allowedEfforts }
+  })
 }
 
 function toolEntries(scope: McpScope): Array<ToolEntry> {
@@ -567,9 +580,16 @@ async function predictedWindowOverflow(
     return undefined
   }
   if (tokens <= budget) return undefined
-  const opusHint = OPUS_1M_RE.test(id)
-    ? ""
-    : " / `opus_critic` (Opus-4.7 1M ≈ 936K tokens, when the enterprise catalog carries it)"
+  // Suggest opus_critic as a bigger-window alternative only when (a) the
+  // overflowing call isn't already opus_critic's model, AND (b) opus_critic's
+  // EFFECTIVE model is actually 1M (it falls back to 200K opus-4-6 on lesser
+  // tiers — hinting it there would just overflow again).
+  const criticModel = resolveOpusCriticModel()
+  const criticIs1M = criticModel === "claude-opus-5" || OPUS_1M_RE.test(criticModel)
+  const opusHint =
+    id === "claude-opus-5" || OPUS_1M_RE.test(id) || !criticIs1M
+      ? ""
+      : " / `opus_critic` (Opus 5, 1M context ≈ 1M tokens)"
   // Report against `budget` (window minus the framing reserve), not the
   // raw window, so the message can't read paradoxically (e.g. "127900
   // exceeds 128000") when tokens land in the reserve band. Peer calls
@@ -707,7 +727,7 @@ function jsonPathPreflightCap(body: JsonRpcRequest, scope: McpScope):
  * the `stand_in` orchestrator in `src/lib/stand-in.ts` — can reuse the
  * same per-endpoint request shaping without re-implementing it. The
  * stand_in tool needs to drive its own per-round system prompts across
- * three concrete models (gpt-5.6-sol, claude-opus-4-7, gemini-3.1-pro-preview),
+ * three concrete models (gpt-5.6-sol, claude-opus-5, gemini-3.1-pro-preview),
  * each on a different endpoint; doing that with a `PersonaSpec` would
  * require either inventing throwaway personas per round or duplicating
  * the dispatch switch.
@@ -757,8 +777,9 @@ export async function dispatchModelCall(args: {
   }
 
   if (args.endpoint === "/v1/messages") {
-    // claude-opus-4-* path (4.6 for opus_critic, 4.7 for stand_in,
-    // 4.8 for ad-hoc). Copilot's adaptive-thinking models reject
+    // claude-opus-* path (opus-5 for opus_critic and stand_in, with an
+    // opus-4.6 fallback for opus_critic on lesser tiers). Copilot's
+    // adaptive-thinking models reject
     // Anthropic's standard `thinking: {type:"enabled", budget_tokens:N}`
     // shape with HTTP 400: "thinking.type.enabled is not supported for
     // this model. Use thinking.type.adaptive and output_config.effort".

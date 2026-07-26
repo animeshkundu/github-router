@@ -21,9 +21,9 @@ The dominant mechanism is a **presence-based guard**: inject the default only wh
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `1` | yes (`=0`) | yes — teams + SendMessage (needs config mirror) | [feature gates](claude-code-feature-gates.md) |
 | `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING` | `1` | yes (`=0`) | yes — vendor-recommended for proxies | [feature gates](claude-code-feature-gates.md) |
 | `CLAUDE_CODE_ENABLE_TASKS` | `1` | yes (`=0`) | yes — task tracking in `-p` | [feature gates](claude-code-feature-gates.md) |
-| `ANTHROPIC_MODEL` | `claude-opus-4-8[1m]` (enterprise, cap-aware) | `-m <model>` pin | yes — flagship + cap-aware 1M | [model defaults](model-defaults-and-picker-seeds.md) |
+| `ANTHROPIC_MODEL` | `claude-opus-5[1m]` (enterprise, cap-aware) | `-m <model>` pin | yes — flagship + cap-aware 1M | [model defaults](model-defaults-and-picker-seeds.md) |
 | `ANTHROPIC_SMALL_FAST_MODEL` | `claude-sonnet-5` | yes | yes — newer + cheaper than Sonnet 4.6 | [model defaults](model-defaults-and-picker-seeds.md) |
-| `ANTHROPIC_DEFAULT_{SONNET,HAIKU,OPUS}_MODEL` | `claude-sonnet-5` / `claude-sonnet-5` / `claude-opus-4-8` | yes | yes — cheap tier lands on Sonnet 5 | [model defaults](model-defaults-and-picker-seeds.md) |
+| `ANTHROPIC_DEFAULT_{SONNET,HAIKU,OPUS}_MODEL` | `claude-sonnet-5` / `claude-sonnet-5` / `claude-opus-5` | yes | yes — cheap tier lands on Sonnet 5 | [model defaults](model-defaults-and-picker-seeds.md) |
 | `MCP_TIMEOUT` / `MCP_TOOL_TIMEOUT` | `22_500_000` ms (6h15m) | yes (`GH_ROUTER_MCP_TOOL_TIMEOUT_MS`) | yes — unblocks long MCP/worker calls past #50289 | [mcp timeout](mcp-tool-timeout.md) |
 | `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` | `1` (conditional, only when seed lands) | yes | yes — adds non-Claude picker rows, no tier nerf | [gateway seed](gateway-model-cache-seed.md) |
 | `CLAUDE_CODE_PLAN_V2_AGENT_COUNT` | `7` | yes | yes — 7 planning agents vs tier-natural 3 | [plan agent count](plan-mode-agent-count.md) |
@@ -58,12 +58,12 @@ vars.
 
 ### 2. The base model slugs are hardcoded and only fall BACKWARD — slow floor-erosion vs the live catalog
 
-`ANTHROPIC_MODEL`'s base slug (`DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"`), the Sonnet-5
+`ANTHROPIC_MODEL`'s base slug (`DEFAULT_CLAUDE_MODEL = "claude-opus-5"`), the Sonnet-5
 small/fast + tier literals, and the `NATIVE_NON_CLAUDE_MODELS` picker list are all hardcoded
 constants. The `[1m]` DECORATION is live-catalog-driven (dual-signal detection, self-heals), but
 the base slug CHOICE is not. The implicit-default path walks `DEFAULT_CLAUDE_MODEL_FALLBACKS`
-(4.7 → 4.6 → 4.5) only BACKWARD if 4.8 is absent — there is no forward walk to a NEWER Opus, and
-the Sonnet-5 literals have no fallback chain at all. So when Copilot ships Opus 4.9 / Sonnet 6,
+(4.8 → 4.7 → 4.6) only BACKWARD if Opus 5 is absent — there is no forward walk to a NEWER Opus, and
+the Sonnet-5 literals have no fallback chain at all. So when Copilot ships a later Opus / Sonnet 6,
 the "strongest available" property degrades silently until someone bumps the constant.
 **Recommendation**: a "best available in family" forward-walk (mirroring `resolveCodexModel`'s
 "best available `/responses` model" net) would keep the Opus/Sonnet defaults honest against the

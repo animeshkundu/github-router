@@ -103,7 +103,7 @@ test("nativeSubagentModel prefers gpt-5.6-sol, falls back to gpt-5.5, requires t
 test("standInToolEnabled passes on a gpt-5.5-only (rollout-lag) catalog when opus + gemini are present", () => {
   setCatalog([
     entry("gpt-5.5", true), // sol absent — the OpenAI slot resolves to gpt-5.5
-    entry("claude-opus-4-7", true),
+    entry("claude-opus-5", true),
     entry("gemini-3.1-pro-preview", true),
   ])
   expect(standInToolEnabled()).toBe(true)
@@ -112,7 +112,7 @@ test("standInToolEnabled passes on a gpt-5.5-only (rollout-lag) catalog when opu
 test("standInToolEnabled fails closed when neither gpt-5.6-sol nor gpt-5.5 is present", () => {
   setCatalog([
     entry("gpt-5.4", true), // no OpenAI frontier model
-    entry("claude-opus-4-7", true),
+    entry("claude-opus-5", true),
     entry("gemini-3.1-pro-preview", true),
   ])
   expect(standInToolEnabled()).toBe(false)

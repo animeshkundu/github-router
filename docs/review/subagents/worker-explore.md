@@ -7,7 +7,7 @@
 | Field | Value |
 |---|---|
 | Subagent name | `worker-explore` (`dispatcherAgentName("explore")`, `src/lib/worker-dispatch.ts:58-60`) |
-| Subagent's OWN model | inherited (Claude — no `model:` frontmatter); the WORKER it dispatches runs `EXPLORE_DEFAULT_MODEL` = `claude-sonnet-5` at xhigh (repo CLAUDE.md "worker tools") |
+| Subagent's OWN model | inherited (Claude — no `model:` frontmatter); the WORKER it dispatches runs `EXPLORE_DEFAULT_MODEL` = `gemini-3.6-flash` at high (repo CLAUDE.md "worker tools") |
 | Gate | `workerToolsAvailable` — the five core dispatchers are generated iff `workerToolsEnabled()` (worker default `gpt-5.4-mini` present with `tool_calls`, and `GH_ROUTER_DISABLE_WORKER_TOOLS` unset). See `buildPeerAgentDefinitions` (`codex-mcp-config.ts:326-335`) |
 | Description source | `dispatcherDescription("explore")` (`worker-dispatch.ts:203-222`) |
 | System prompt | `dispatcherPrompt("explore", workersKey)` (`worker-dispatch.ts:226-254`) |

@@ -411,7 +411,7 @@ export async function handleCompletion(c: Context) {
   // initial createMessages call so consumer-cancel propagates to the
   // initial response body (not just continuation/runAdvisor calls). Pre-
   // fix the initial createMessages had no callerSignal, so the response
-  // body survived cancellation for up to UPSTREAM_FETCH_TIMEOUT_MS (5 min),
+  // body survived cancellation for up to UPSTREAM_FETCH_TIMEOUT_MS (0 disables),
   // burning tokens and holding a socket.
   // NOTE: do NOT use c.req.raw.signal here — Bun aborts it after request-
   // body consumption (see CLAUDE.md "Bun request-signal quirk").

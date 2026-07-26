@@ -36,7 +36,7 @@ import {
   MCP_TIMEOUT_HEADROOM_MS,
   resolveBudgetConfig,
   resolveMcpToolTimeoutMs,
-  WorkerAbort,
+  MIN_WORKER_WALLCLOCK_MS,
   workerWallClockCeilingMs,
 } from "../src/lib/worker-agent/budget"
 import {
@@ -367,6 +367,7 @@ describe("Budget", () => {
       block: true,
       reason: "[halted: turns]",
     })
+    expect(b.hardStopReason).toBe("turns")
   })
 
   test("tool-bytes cap fires after recordToolBytes", () => {
@@ -381,27 +382,27 @@ describe("Budget", () => {
     expect(b.bytes).toBe(13)
   })
 
+  test("tool-call cap latches a hard stop while repeated-call block does not", () => {
+    const hard = new Budget({ maxToolCalls: 1 })
+    expect(hard.checkBeforeCall("read", { path: "a" }).block).toBe(false)
+    expect(hard.checkBeforeCall("read", { path: "b" })).toEqual({
+      block: true,
+      reason: "[halted: tool-calls]",
+    })
+    expect(hard.hardStopReason).toBe("tool-calls")
+
+    const throttle = new Budget({ maxRepeatedCalls: 1 })
+    expect(throttle.checkBeforeCall("read", { path: "a" }).block).toBe(false)
+    expect(throttle.checkBeforeCall("read", { path: "a" }).block).toBe(true)
+    expect(throttle.hardStopReason).toBeNull()
+  })
+
   test("recordToolBytes ignores non-text content shapes", () => {
     const b = new Budget({ maxToolBytes: 10 })
     b.recordToolBytes({ content: [{ type: "image", data: "x" }] })
     b.recordToolBytes(null)
     b.recordToolBytes("not an object")
     expect(b.bytes).toBe(0)
-  })
-
-  test("wallclock cap throws WorkerAbort via checkWallClock", () => {
-    const realNow = Date.now
-    let now = 1_000_000
-    Date.now = () => now
-    try {
-      const b = new Budget({ maxWallClockMs: 100 })
-      now += 50
-      expect(() => b.checkWallClock()).not.toThrow()
-      now += 200
-      expect(() => b.checkWallClock()).toThrow(WorkerAbort)
-    } finally {
-      Date.now = realNow
-    }
   })
 
   test("wallclock cap fires via checkBeforeCall", () => {
@@ -459,6 +460,23 @@ describe("resolveMcpToolTimeoutMs / workerWallClockCeilingMs", () => {
     expect(workerWallClockCeilingMs()).toBe(
       resolveMcpToolTimeoutMs() - MCP_TIMEOUT_HEADROOM_MS,
     )
+  })
+
+  test("sub-headroom MCP timeout floors the worker ceiling above zero", () => {
+    process.env.GH_ROUTER_MCP_TOOL_TIMEOUT_MS = "500"
+    expect(workerWallClockCeilingMs()).toBe(MIN_WORKER_WALLCLOCK_MS)
+    expect(resolveBudgetConfig().maxWallClockMs).toBe(MIN_WORKER_WALLCLOCK_MS)
+  })
+
+  test("env wall-clock override is clamped at the MCP-safe ceiling", () => {
+    const old = process.env.GH_ROUTER_WORKER_MAX_WALLCLOCK_MS
+    process.env.GH_ROUTER_WORKER_MAX_WALLCLOCK_MS = "28800000"
+    try {
+      expect(resolveBudgetConfig().maxWallClockMs).toBe(workerWallClockCeilingMs())
+    } finally {
+      if (old === undefined) delete process.env.GH_ROUTER_WORKER_MAX_WALLCLOCK_MS
+      else process.env.GH_ROUTER_WORKER_MAX_WALLCLOCK_MS = old
+    }
   })
 
   test("INVARIANT: the default worker wall-clock never exceeds the MCP timeout, and clears it by a full teardown headroom", () => {

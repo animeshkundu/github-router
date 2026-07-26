@@ -33,6 +33,14 @@
 /** Conservative bytes/token for dense DOM-JSON; over-counts tokens by design. */
 const BYTES_PER_TOKEN = 3
 
+/**
+ * Conservative context floor when the live catalog omits or reports an invalid window.
+ * This is deliberately not a hardcoded per-model window table: duplicating the
+ * live catalog would go stale on every model launch and violate the rule to
+ * gate on catalog capabilities rather than model slugs.
+ */
+export const FALLBACK_WINDOW_TOKENS = 128_000
+
 const OUTPUT_RESERVE_TOKENS = 12_000
 const TOOL_SCHEMA_RESERVE_TOKENS = 6_000
 const SYSTEM_RESERVE_TOKENS = 2_000
@@ -61,7 +69,9 @@ const PER_RESULT_CAP_MIN_BYTES = 64 * 1024
 const PER_RESULT_CAP_MAX_BYTES = 256 * 1024
 
 export interface ContextBudget {
-  /** Catalog context window, tokens. */
+  /** Whether `windowTokens` came from valid catalog metadata rather than the fallback floor. */
+  readonly windowKnown: boolean
+  /** Effective context window, tokens (catalog value or fallback floor). */
   readonly windowTokens: number
   /** Hard input bound for the assembled payload (window − output reserve). */
   readonly inputHardLimitTokens: number
@@ -93,27 +103,26 @@ export function tokensFromBytes(bytes: number): number {
 /**
  * Build a per-run budget from the model's catalog context window (tokens).
  *
- * Returns `undefined` when the window is unknown / non-positive — callers
- * MUST no-op (no compaction, no dynamic cap) rather than prune blindly
- * against a guessed window. This is the safe degradation on a catalog that
- * doesn't report `max_context_window_tokens`.
+ * Unknown, non-finite, and non-positive windows use the conservative fallback
+ * floor so compaction and the dynamic result cap remain engaged. The returned
+ * `windowKnown` flag keeps the request backstop advisory in that case: upstream
+ * remains authoritative when the model's real window is unknown.
  */
-export function makeContextBudget(
-  windowTokens: number | undefined,
-): ContextBudget | undefined {
-  if (windowTokens === undefined || !Number.isFinite(windowTokens) || windowTokens <= 0) {
-    return undefined
-  }
+export function makeContextBudget(windowTokens: number | undefined): ContextBudget {
+  const windowKnown =
+    windowTokens !== undefined && Number.isFinite(windowTokens) && windowTokens > 0
+  const effectiveWindowTokens = windowKnown ? windowTokens : FALLBACK_WINDOW_TOKENS
   const inputHardLimitTokens = Math.max(
     0,
-    Math.floor(windowTokens * (1 - ASSEMBLY_MARGIN_FRACTION)) - OUTPUT_RESERVE_TOKENS,
+    Math.floor(effectiveWindowTokens * (1 - ASSEMBLY_MARGIN_FRACTION)) - OUTPUT_RESERVE_TOKENS,
   )
   const promptBudgetTokens = Math.max(
     0,
     inputHardLimitTokens - TOOL_SCHEMA_RESERVE_TOKENS - SYSTEM_RESERVE_TOKENS,
   )
   return {
-    windowTokens,
+    windowKnown,
+    windowTokens: effectiveWindowTokens,
     inputHardLimitTokens,
     promptBudgetTokens,
     compactTriggerTokens: Math.floor(promptBudgetTokens * COMPACT_TRIGGER_FRACTION),
@@ -135,7 +144,7 @@ export function makeContextBudget(
       Math.floor(promptBudgetTokens * MAX_PROTECTED_FRACTION),
     ),
     perResultCapBytes: clamp(
-      Math.round(windowTokens * PER_RESULT_CAP_FRACTION * BYTES_PER_TOKEN),
+      Math.round(effectiveWindowTokens * PER_RESULT_CAP_FRACTION * BYTES_PER_TOKEN),
       PER_RESULT_CAP_MIN_BYTES,
       PER_RESULT_CAP_MAX_BYTES,
     ),

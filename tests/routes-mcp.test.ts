@@ -51,7 +51,7 @@ const baseModels: ModelsResponse = {
     fakeModel("gpt-5.5", ["/v1/responses"]),
     fakeModel("gpt-5.3-codex", ["/v1/responses"]),
     fakeModel("gemini-3.1-pro-preview", ["/v1/chat/completions"]),
-    fakeModel("claude-opus-4.7", ["/v1/messages", "/v1/chat/completions"]),
+    fakeModel("claude-opus-5", ["/v1/messages", "/v1/chat/completions"]),
   ],
 }
 
@@ -768,7 +768,7 @@ describe("/mcp tools/call routing", () => {
         id: "msg_test",
         type: "message",
         role: "assistant",
-        model: "claude-opus-4-6",
+        model: "claude-opus-5",
         content: [{ type: "text", text }],
         stop_reason: "end_turn",
       }
@@ -1097,12 +1097,11 @@ describe("/mcp tools/call routing", () => {
     expect(upstream.max_tokens).toBe(16384)
   })
 
-  test("opus_critic rejects effort:'xhigh' (4.6 model doesn't advertise xhigh)", async () => {
-    // opus_critic now runs on claude-opus-4-6 whose catalog entry only
-    // advertises reasoning_effort ["low","medium","high","max"]. xhigh
-    // is omitted from the persona's allowedEfforts so a caller-supplied
-    // xhigh rejects with -32602 at the handler layer rather than bouncing
-    // off Copilot at request time.
+  test("opus_critic accepts effort:'xhigh' when resolved to Opus 5 (dynamic widening)", async () => {
+    // opus_critic's effective model resolves to claude-opus-5 on this catalog,
+    // which advertises xhigh; activePersonas() widens allowedEfforts to include
+    // xhigh accordingly, so the call passes validation and dispatches xhigh.
+    const captured = mockMessagesUpstream("ok")
     const { status, json } = await rpc({
       jsonrpc: "2.0",
       id: 303,
@@ -1113,8 +1112,9 @@ describe("/mcp tools/call routing", () => {
       },
     })
     expect(status).toBe(200)
-    const error = json.error as { code?: number; message?: string }
-    expect(error?.code).toBe(-32602)
+    expect(json.error).toBeUndefined()
+    const upstream = captured.lastBody as { output_config?: { effort?: string } }
+    expect(upstream.output_config?.effort).toBe("xhigh")
   })
 
   test("tools/call with Accept: text/event-stream returns SSE-streamed response with heartbeat + final result", async () => {
@@ -1297,10 +1297,10 @@ describe("/mcp stand_in tool", () => {
   // ──────────────────────────────────────────────────────────────────
   function mockThreePeers(queues: {
     "gpt-5.5": Array<string>
-    "claude-opus-4-7": Array<string>
+    "claude-opus-5": Array<string>
     "gemini-3.1-pro-preview": Array<string>
   }) {
-    const consumed = { "gpt-5.5": 0, "claude-opus-4-7": 0, "gemini-3.1-pro-preview": 0 }
+    const consumed = { "gpt-5.5": 0, "claude-opus-5": 0, "gemini-3.1-pro-preview": 0 }
     globalThis.fetch = mock(async (url) => {
       const u = typeof url === "string" ? url : (url as URL).toString()
       let text: string
@@ -1314,9 +1314,9 @@ describe("/mcp stand_in tool", () => {
         }), { status: 200, headers: { "content-type": "application/json" } })
       }
       if (u.includes("/v1/messages")) {
-        text = queues["claude-opus-4-7"][consumed["claude-opus-4-7"]++]
+        text = queues["claude-opus-5"][consumed["claude-opus-5"]++]
         return new Response(JSON.stringify({
-          id: "msg_test", type: "message", role: "assistant", model: "claude-opus-4-7",
+          id: "msg_test", type: "message", role: "assistant", model: "claude-opus-5",
           content: [{ type: "text", text }], stop_reason: "end_turn",
         }), { status: 200, headers: { "content-type": "application/json" } })
       }
@@ -1344,7 +1344,7 @@ describe("/mcp stand_in tool", () => {
   test("tools/call stand_in dispatches to all three peers and returns a consensus envelope", async () => {
     mockThreePeers({
       "gpt-5.5":                [VOTE_A_HIGH],
-      "claude-opus-4-7":        [VOTE_A_HIGH],
+      "claude-opus-5":          [VOTE_A_HIGH],
       "gemini-3.1-pro-preview": [VOTE_A_HIGH],
     })
     const { status, json } = await rpc({
@@ -1368,7 +1368,7 @@ describe("/mcp stand_in tool", () => {
   test("tools/call stand_in releases its in-flight slot after completion (slot count returns to 0)", async () => {
     mockThreePeers({
       "gpt-5.5":                [VOTE_A_HIGH],
-      "claude-opus-4-7":        [VOTE_A_HIGH],
+      "claude-opus-5":          [VOTE_A_HIGH],
       "gemini-3.1-pro-preview": [VOTE_A_HIGH],
     })
     expect(__getInFlightForTests()).toBe(0)
@@ -1400,7 +1400,7 @@ describe("/mcp stand_in tool", () => {
       }
       if (u.includes("/v1/messages")) {
         return new Response(JSON.stringify({
-          id: "m", type: "message", role: "assistant", model: "claude-opus-4-7",
+          id: "m", type: "message", role: "assistant", model: "claude-opus-5",
           content: [{ type: "text", text: VOTE_A_HIGH }], stop_reason: "end_turn",
         }), { status: 200, headers: { "content-type": "application/json" } })
       }
@@ -1433,7 +1433,7 @@ describe("/mcp stand_in tool", () => {
   test("JSON-path tools/call accepts stand_in context between the old 6KB and new 32KB caps", async () => {
     mockThreePeers({
       "gpt-5.5":                [VOTE_A_HIGH],
-      "claude-opus-4-7":        [VOTE_A_HIGH],
+      "claude-opus-5":        [VOTE_A_HIGH],
       "gemini-3.1-pro-preview": [VOTE_A_HIGH],
     })
 
@@ -2278,12 +2278,12 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
               "gpt-5.5",
               "gpt-5.6-sol",
               "gemini-3.1-pro-preview",
-              "claude-sonnet-5",
+              "gemini-3.6-flash",
             ].includes(m.id),
         ),
-        // explore default (native Claude worker via /chat/completions)
-        fakeWorkerModel("claude-sonnet-5", {
-          reasoning_effort: ["low", "medium", "high", "xhigh"],
+        // explore default (Gemini worker via /chat/completions)
+        fakeWorkerModel("gemini-3.6-flash", {
+          reasoning_effort: ["minimal", "low", "medium", "high"],
         }),
         // worker gate sentinel + browse default
         fakeWorkerModel("gpt-5.4-mini", {
@@ -2652,11 +2652,11 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────
-// Prompt-window guard + opus_critic 1M-variant selection
+// Prompt-window guard + opus_critic model selection
 // Window guard: reject (don't truncate) a brief that exceeds the persona
 // model's real max_prompt_tokens, counted with the exact o200k tokenizer.
-// opus_critic: prefer the 1M opus-4.6 slug when the live catalog carries
-// it, else fall back to the 200K claude-opus-4-6.
+// opus_critic: prefer claude-opus-5, then a 1M opus-4.6 slug when present,
+// else fall back to the 200K claude-opus-4-6.
 // ─────────────────────────────────────────────────────────────────────
 describe("/mcp peer prompt-window guard", () => {
   function mockResponses(text: string, captured: { lastBody?: unknown; called?: boolean } = {}) {
@@ -2744,10 +2744,11 @@ describe("/mcp peer prompt-window guard", () => {
     expect(captured.called).toBe(true)
   })
 
-  test("opus_critic uses the 4.6-1m variant when the catalog carries it", async () => {
+  test("opus_critic prefers claude-opus-5 over the 4.6-1m fallback", async () => {
     state.models = {
       object: "list",
       data: [
+        modelWith("claude-opus-5", 1_000_000, ["/v1/messages"]),
         modelWith("claude-opus-4.6", 168_000, ["/v1/messages"]),
         modelWith("claude-opus-4.6-1m", 936_000, ["/v1/messages"]),
       ],
@@ -2761,7 +2762,7 @@ describe("/mcp peer prompt-window guard", () => {
           id: "msg_test",
           type: "message",
           role: "assistant",
-          model: "claude-opus-4.6-1m",
+          model: "claude-opus-5",
           content: [{ type: "text", text: "ok" }],
           stop_reason: "end_turn",
         }),
@@ -2775,9 +2776,7 @@ describe("/mcp peer prompt-window guard", () => {
       method: "tools/call",
       params: { name: "opus_critic", arguments: { prompt: "review this" } },
     })
-    expect((captured.lastBody as { model: string }).model).toBe(
-      "claude-opus-4.6-1m",
-    )
+    expect((captured.lastBody as { model: string }).model).toBe("claude-opus-5")
   })
 
   test("opus_critic regex does NOT false-positive on 4.7-1m or 4.8 (version-anchored to 4.6)", async () => {
@@ -2816,6 +2815,34 @@ describe("/mcp peer prompt-window guard", () => {
     })
     // resolveModel maps dashed claude-opus-4-6 → dotted claude-opus-4.6.
     expect((captured.lastBody as { model: string }).model).toBe("claude-opus-4.6")
+  })
+
+  test("opus_critic rejects effort:'xhigh' when it falls back to opus-4.6 (no opus-5 in catalog)", async () => {
+    // On a catalog without claude-opus-5, opus_critic's effective model falls
+    // back to opus-4.6 (which lacks xhigh). activePersonas() does NOT widen
+    // allowedEfforts past high there, so a caller-supplied xhigh rejects at
+    // validation with no upstream call — instead of 400ing off Copilot.
+    state.models = {
+      object: "list",
+      data: [modelWith("claude-opus-4.6", 168_000, ["/v1/messages"])],
+    }
+    const captured: { lastBody?: unknown } = {}
+    globalThis.fetch = mock(async (_url, init) => {
+      captured.lastBody = JSON.parse((init as RequestInit).body as string)
+      return new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }) as unknown as typeof globalThis.fetch
+
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 706,
+      method: "tools/call",
+      params: { name: "opus_critic", arguments: { prompt: "x", effort: "xhigh" } },
+    })
+    expect(json.error).toBeDefined()
+    expect(captured.lastBody).toBeUndefined()
   })
 
   test("opus_critic regex matches dashed form opus-4-6-1m (forward-compat for catalog slug-shape changes)", async () => {

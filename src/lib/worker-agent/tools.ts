@@ -1540,7 +1540,9 @@ function codexReviewTool(): AgentTool<typeof CODEX_REVIEW_PARAMS> {
       if (networkDisabled()) {
         throw new Error("rejected: network disabled")
       }
-      const persona = lookupPersona("codex-reviewer")
+      // lookupPersona matches toolNameHttp (underscore form), not the
+      // hyphenated agentName used by the injected subagent definition.
+      const persona = lookupPersona("codex_reviewer")
       const requested = params.effort
       const effort =
         requested && persona.allowedEfforts.includes(requested)
@@ -1962,6 +1964,7 @@ export const __testExports = {
   atomicWriteSync,
   bashTool,
   codeSearchTool,
+  codexReviewTool,
   createPlanState,
   editTool,
   fetchUrlTool,

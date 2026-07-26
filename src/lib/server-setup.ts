@@ -665,7 +665,7 @@ export function getClaudeCodeEnvVars(
     vars.ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-sonnet-5"
   }
   if (process.env.ANTHROPIC_DEFAULT_OPUS_MODEL === undefined) {
-    vars.ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-4-8"
+    vars.ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-5"
   }
 
   // Plan-mode (v2) Phase-2 "Plan" agent parallelism. Claude Code's

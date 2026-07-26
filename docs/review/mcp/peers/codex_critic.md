@@ -38,7 +38,7 @@ Input schema (`handler.ts:295-324`), fields + their `description`:
 
 `buildPeerAwarenessSnippet` (`peer-mcp-personas.ts:555-646`) names codex_critic exactly once, inside the `criticList` join emitted in the paragraph-1 sentence (`peer-mcp-personas.ts:577,642`):
 
-> Cross-lab peer critics under `mcp__peers__*` (`codex_critic` (gpt-5.6-sol), `codex_reviewer` (gpt-5.3-codex), … `opus_critic` (Opus 4.7)) are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies. The `peer-review-coordinator` subagent fans out to the appropriate critics in parallel and aggregates findings by severity. …
+> Cross-lab peer critics under `mcp__peers__*` (`codex_critic` (gpt-5.6-sol), `codex_reviewer` (gpt-5.3-codex), … `opus_critic` (Opus 5)) are available at your discretion for adversarial review. Each tool's description explains its scope and when it applies. The `peer-review-coordinator` subagent fans out to the appropriate critics in parallel and aggregates findings by severity. …
 
 So the snippet gives codex_critic a bare capability tag `` `codex_critic` (gpt-5.6-sol) `` and defers routing ("Each tool's description explains its scope and when it applies") to surface 2a. No scope, when-to-use, or when-not clause here — by design (`peer-mcp-personas.ts:508-514`).
 
@@ -82,7 +82,7 @@ Checked-in repo root `CLAUDE.md`: the "Peer-model MCP integration" section (`CLA
 
 For codex_critic specifically, the three surfaces agree: description (gpt-5.6-sol, architecture critic, cross-lab), awareness snippet (`codex_critic` (gpt-5.6-sol)), and CLAUDE.md (both the mirrored block and the root doc) all name model gpt-5.6-sol and the adversarial-critic role. The subagent prompt routes to `mcp__peers__codex_critic` and the wire name matches. No codex_critic-scoped contradiction found.
 
-One adjacent, non-blocking observation: the awareness snippet's critic list labels `opus_critic` as "(Opus 4.7)" (`peer-mcp-personas.ts:585`) while the code pins opus to `claude-opus-4-6` and that tool's own description says "Opus 4.6". That inconsistency lives on the opus_critic surface, not codex_critic's, and belongs in the opus_critic doc; codex_critic's own "(gpt-5.6-sol)" tag is correct.
+One adjacent observation: the awareness snippet now labels `opus_critic` as Opus 5, matching its preferred runtime model; codex_critic's own gpt-5.6-sol tag remains correct.
 
 ## 4. Findings
 

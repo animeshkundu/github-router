@@ -1,7 +1,7 @@
 /**
  * stand_in: 3-lab away-mode advisor.
  *
- * Polls gpt-5.6-sol xhigh (OpenAI) + claude-opus-4-7 xhigh (Anthropic) +
+ * Polls gpt-5.6-sol xhigh (OpenAI) + claude-opus-5 xhigh (Anthropic) +
  * gemini-3.1-pro-preview high (Google) across two structured voting
  * rounds and returns a ranked-choice verdict. Bounded to advisor:
  * recommends, never decides — irreversible actions (push, delete, drop,
@@ -48,7 +48,7 @@ export interface StandInInput {
 
 export type ModelKey =
   | "gpt-5.6-sol"
-  | "claude-opus-4-7"
+  | "claude-opus-5"
   | "gemini-3.1-pro-preview"
 
 export type Verdict =
@@ -116,7 +116,7 @@ interface ModelConfig {
  */
 export const STAND_IN_MODELS: ReadonlyArray<ModelConfig> = Object.freeze([
   { key: "gpt-5.6-sol",            model: "gpt-5.6-sol",            endpoint: "/v1/responses",        effort: "xhigh" },
-  { key: "claude-opus-4-7",        model: "claude-opus-4-7",        endpoint: "/v1/messages",         effort: "xhigh" },
+  { key: "claude-opus-5",          model: "claude-opus-5",          endpoint: "/v1/messages",         effort: "xhigh" },
   { key: "gemini-3.1-pro-preview", model: "gemini-3.1-pro-preview", endpoint: "/v1/chat/completions", effort: "high"  },
 ])
 

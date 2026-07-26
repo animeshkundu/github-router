@@ -255,14 +255,14 @@ describe("getClaudeCodeEnvVars — native model selection injection", () => {
 
   test("ADDITIVE: the injection never overwrites the opus/sonnet/haiku tier defaults, ANTHROPIC_MODEL, or ANTHROPIC_SMALL_FAST_MODEL", () => {
     setCatalog([...SEED_TARGET_IDS])
-    const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787", "claude-opus-4-8[1m]")
+    const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787", "claude-opus-5[1m]")
     // Enabling native selection must not disturb the tier rows.
-    expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-4-8")
+    expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-5")
     expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("claude-sonnet-5")
     expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("claude-sonnet-5")
     expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBe("claude-sonnet-5")
     // The active model (from the model arg) is untouched by the injection.
-    expect(vars.ANTHROPIC_MODEL).toBe("claude-opus-4-8[1m]")
+    expect(vars.ANTHROPIC_MODEL).toBe("claude-opus-5[1m]")
     // And the injection did add its own additive lever.
     expect(vars.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBe("1")
   })

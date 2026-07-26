@@ -38,10 +38,11 @@
  *      `afterToolCall`;
  *   8. wire `opts.signal` → `agent.abort()` so outer cancellation
  *      propagates cleanly into Pi's tool-level signals;
- *   9. subscribe to `message_end` so we can extract the assistant's
- *      final text from the content-part array (Pi does NOT hand us
- *      a string here — `extractAssistantText` is mandatory, see
- *      plan's peer-review HIGH finding);
+ *   9. subscribe to `turn_end` to enqueue bounded in-run no-output nudges,
+ *      and to `message_end` so we can extract the assistant's final text
+ *      from the content-part array (Pi does NOT hand us a string here —
+ *      `extractAssistantText` is mandatory, see the plan's peer-review
+ *      HIGH finding);
  *  10. set a wall-clock timer that fires `agent.abort()` on expiry
  *      (the budget's `checkBeforeCall` is per-call; a runaway
  *      bash could exceed the cap mid-run);
@@ -82,13 +83,15 @@ import type {
   ToolCall,
 } from "@earendil-works/pi-ai"
 
-import { Budget } from "./budget"
+import { Budget, resolveWorkerModelCallTimeoutMs } from "./budget"
 import {
   WorktreeRegistry,
   getInstanceUuid,
   registerExitHandlers,
 } from "./lifecycle"
 import { resolveModelAndThinking } from "./model-resolve"
+import { getWorkerSessionDefault } from "./session-defaults"
+import type { WorkerMode } from "./session-defaults"
 import { systemPromptFor } from "./prompts"
 import { type AuditCtx, logAudit } from "./redact"
 import { acquireWorkerSlot } from "./semaphore"
@@ -135,15 +138,21 @@ registerExitHandlers(WORKTREE_REGISTRY)
 export const DEFAULT_MODEL = "gpt-5.4-mini"
 const DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 
-/** Default model for the READ-ONLY `explore` mode. `claude-sonnet-5` at `xhigh`
- *  (via `DEFAULT_THINKING`) — a strong, NATIVE (no-shim) tool-caller for repo
- *  research. Native Claude models run as workers over `/chat/completions`, the
- *  same path proven by `PLAN_DEFAULT_MODEL` (claude-opus-4.8). Like `implement`'s
- *  gpt-5.6-sol this is NOT a `workerToolsEnabled` gate input — if absent (e.g. a
- *  non-enterprise tier) `explore` errors helpfully at call time rather than
- *  vanishing the whole worker surface. The caller (the main model) overrides
- *  BOTH the model and the reasoning per call via the `model` / `thinking` args. */
-export const EXPLORE_DEFAULT_MODEL = "claude-sonnet-5"
+/** Default model for the READ-ONLY `explore` mode. `gemini-3.6-flash` at `high`
+ *  (via `EXPLORE_DEFAULT_THINKING`; flash advertises no xhigh) — a fast, cheap,
+ *  1M-context tool-caller for read-only repo research. Routes over
+ *  `/chat/completions` via the translation shim (the same proven path the
+ *  `review` worker uses for gemini). Like `implement`'s gpt-5.6-sol this is NOT a
+ *  `workerToolsEnabled` gate input — if absent (e.g. a non-enterprise tier)
+ *  `explore` errors helpfully at call time rather than vanishing the whole worker
+ *  surface. The caller (the main model) overrides BOTH the model and the reasoning
+ *  per call via the `model` / `thinking` args — see the tier ladder (gpt-5.6-sol
+ *  heavy / gpt-5.6-terra moderate / gemini-3.6-flash light) in the MCP tool desc. */
+export const EXPLORE_DEFAULT_MODEL = "gemini-3.6-flash"
+/** Default thinking for `explore`. `high` (flash has no xhigh); explicit rather
+ *  than inherited from `DEFAULT_THINKING` so the explore effort can't drift if the
+ *  shared fallback changes. */
+export const EXPLORE_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 
 /** Default model + thinking for the READ-ONLY `review` mode.
  *  `gemini-3.1-pro-preview` at `xhigh` (clamped to `high` at call time — gemini
@@ -168,6 +177,11 @@ const REVIEW_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 export const IMPLEMENT_DEFAULT_MODEL = "gpt-5.6-sol"
 const IMPLEMENT_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 
+/** `test` starts with the same built-in pair as `implement`, but remains an
+ * independent mode so either can be overridden without affecting the other. */
+export const TEST_DEFAULT_MODEL = "gpt-5.6-sol"
+const TEST_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
+
 /** Default model for `browse` mode. `gpt-5.4-mini` — the Gate-B-winning
  *  browse model (small + fast enough to drive a tab at human pace, with
  *  enough tool-calling discipline to terminate). This is DISTINCT from the
@@ -188,14 +202,51 @@ const BROWSE_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 /** Default model + thinking for the read-only `plan` mode. `claude-opus-4.8`
  *  at `xhigh` — planning is the highest-leverage read-only step (the plan
  *  shapes everything downstream), so it gets the strongest reasoning model
- *  rather than the cheap `gemini-3.5-flash` explore default. Uses the DOTTED
+ *  rather than the lightweight `gemini-3.6-flash` explore default. Uses the DOTTED
  *  Copilot catalog id (the worker resolver exact-matches `catalog.id`, it does
- *  NOT translate the Anthropic dashed slug). Falls back to a helpful
- *  unknown-model error at call time if opus-4.8 isn't in the catalog (e.g. a
- *  non-enterprise tier), exactly like `implement`'s `gpt-5.6-sol`. Caller's `model`
- *  arg still wins. */
-export const PLAN_DEFAULT_MODEL = "claude-opus-4.8"
+ *  NOT translate the Anthropic dashed slug; `claude-opus-5` is a single-segment
+ *  slug so dotted == dashed). Falls back to a helpful unknown-model error at call
+ *  time if opus-5 isn't in the catalog (e.g. a non-enterprise tier), exactly like
+ *  `implement`'s `gpt-5.6-sol`. Caller's `model` arg still wins. */
+export const PLAN_DEFAULT_MODEL = "claude-opus-5"
 const PLAN_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
+
+export interface EffectiveModeDefaults {
+  model: string
+  thinking: WorkerThinkingLevel
+  modelSource: "override" | "built-in"
+  thinkingSource: "override" | "built-in"
+}
+
+const BUILT_IN_MODE_DEFAULTS: Readonly<Record<WorkerMode, {
+  model: string
+  thinking: WorkerThinkingLevel
+}>> = Object.freeze({
+  explore: { model: EXPLORE_DEFAULT_MODEL, thinking: EXPLORE_DEFAULT_THINKING },
+  review: { model: REVIEW_DEFAULT_MODEL, thinking: REVIEW_DEFAULT_THINKING },
+  plan: { model: PLAN_DEFAULT_MODEL, thinking: PLAN_DEFAULT_THINKING },
+  implement: { model: IMPLEMENT_DEFAULT_MODEL, thinking: IMPLEMENT_DEFAULT_THINKING },
+  test: { model: TEST_DEFAULT_MODEL, thinking: TEST_DEFAULT_THINKING },
+  browse: { model: BROWSE_DEFAULT_MODEL, thinking: BROWSE_DEFAULT_THINKING },
+})
+
+/** Resolve the effective mode ladder without changing the gate sentinel. */
+export function resolveModeDefaults(
+  mode: WorkerMode,
+  ignoreSessionDefaults = false,
+): EffectiveModeDefaults {
+  const builtIn = BUILT_IN_MODE_DEFAULTS[mode] ?? {
+    model: DEFAULT_MODEL,
+    thinking: DEFAULT_THINKING,
+  }
+  const override = ignoreSessionDefaults ? {} : getWorkerSessionDefault(mode)
+  return {
+    model: override.model ?? builtIn.model,
+    thinking: override.thinking ?? builtIn.thinking,
+    modelSource: override.model === undefined ? "built-in" : "override",
+    thinkingSource: override.thinking === undefined ? "built-in" : "override",
+  }
+}
 
 /**
  * `Model<any>` shim used to satisfy `Agent.initialState.model` typing.
@@ -210,6 +261,10 @@ const PLAN_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
  * diagnostics (e.g. error-message AssistantMessage's `model` field
  * if Pi ever inspects it) faithful to what the caller asked for.
  */
+let agentOptionsObserverForTests:
+  | ((options: ConstructorParameters<typeof Agent>[0]) => void)
+  | undefined
+
 function makeModelShim(modelId: string): Model<"openai-completions"> {
   return {
     id: modelId,
@@ -246,6 +301,42 @@ function extractAssistantText(
     if (part.type === "text") out += part.text
   }
   return out
+}
+
+const MAX_EMPTY_OUTPUT_NUDGES = 3
+const EMPTY_OUTPUT_NUDGES = [
+  "Summarize your findings so far.",
+  "Your previous reply was empty. Provide the answer now in plain text.",
+  "Reply with plain text only. Do not call any tool.",
+] as const
+
+/**
+ * Resolve the per-run nudge cap. Zero explicitly disables nudging; malformed,
+ * negative, and fractional values fall back to the default.
+ */
+function resolveMaxEmptyOutputNudges(): number {
+  const raw = process.env.GH_ROUTER_WORKER_MAX_NUDGES
+  if (raw === undefined || raw === "") return MAX_EMPTY_OUTPUT_NUDGES
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
+    return MAX_EMPTY_OUTPUT_NUDGES
+  }
+  return parsed
+}
+
+function emptyOutputNudge(attempt: number): string {
+  return EMPTY_OUTPUT_NUDGES[Math.min(attempt, EMPTY_OUTPUT_NUDGES.length) - 1]!
+}
+
+/** True only for a clean, empty assistant stop with no pending tool calls. */
+function shouldNudgeForEmptyOutput(message: AgentMessage): boolean {
+  if (message.role !== "assistant") return false
+  const assistant = message as AssistantMessage
+  if (assistant.stopReason !== "stop" || !Array.isArray(assistant.content)) {
+    return false
+  }
+  if (assistant.content.some((part) => part.type === "toolCall")) return false
+  return extractAssistantText(assistant.content).trim() === ""
 }
 
 /**
@@ -298,60 +389,22 @@ async function runWorkerAgentOnce(
   }
 
   try {
-    // Step 2: model + thinking validation. `resolveModelAndThinking`
-    // returns a Result; on `ok:false` we emit the diagnostic verbatim
-    // (it already enumerates the catalog's tool_call-capable models
-    // on unknown-model errors, so the caller knows what to retry with).
-    //
-    // Per-mode defaults (an explicit `opts.model`/`opts.thinking` always
-    // wins): read-only `explore` → `EXPLORE_DEFAULT_MODEL` (claude-sonnet-5, xhigh);
-    // read-only `review` → `REVIEW_DEFAULT_MODEL` (gemini-3.1-pro-preview,
-    // xhigh→high — a cross-lab reviewer deliberately decorrelated from the
-    // gpt-5.6-sol implementer); read-only `plan`
-    // → `PLAN_DEFAULT_MODEL` (claude-opus-4.8, xhigh — planning is the
-    // highest-leverage step, so it gets the strongest model);
-    // read+write `implement`/`test` → `IMPLEMENT_DEFAULT_MODEL` (gpt-5.6-sol, xhigh
-    // — coding/test-authoring wants max reasoning); `browse` →
-    // `BROWSE_DEFAULT_MODEL` (gpt-5.4-mini). Distinct workloads, distinct
-    // defaults.
-    const isBrowse = opts.mode === "browse"
-    const isPlan = opts.mode === "plan"
-    const isReview = opts.mode === "review"
-    const isWriteCapable = opts.mode === "implement" || opts.mode === "test"
-    const isExplore = opts.mode === "explore"
-    const defaultModel = isBrowse
-      ? BROWSE_DEFAULT_MODEL
-      : isPlan
-        ? PLAN_DEFAULT_MODEL
-        : isReview
-          ? REVIEW_DEFAULT_MODEL
-          : isWriteCapable
-            ? IMPLEMENT_DEFAULT_MODEL
-            : isExplore
-              ? EXPLORE_DEFAULT_MODEL
-              : DEFAULT_MODEL
-    const defaultThinking = isBrowse
-      ? BROWSE_DEFAULT_THINKING
-      : isPlan
-        ? PLAN_DEFAULT_THINKING
-        : isReview
-          ? REVIEW_DEFAULT_THINKING
-          : isWriteCapable
-            ? IMPLEMENT_DEFAULT_THINKING
-            : DEFAULT_THINKING
+    // Step 2 is resolved by the public entry before starting the run. The
+    // complete run, including any in-run nudges, therefore uses one concrete
+    // pair even if a process-wide session override changes while it runs.
     const resolved = resolveModelAndThinking({
-      model: opts.model ?? defaultModel,
-      thinking: opts.thinking ?? defaultThinking,
+      model: opts.model!,
+      thinking: opts.thinking!,
     })
-    if (!resolved.ok) {
-      return { text: resolved.error, isError: true }
-    }
+    if (!resolved.ok) return { text: resolved.error, isError: true }
 
-    // Per-run context budget from the resolved model's catalog window.
-    // Undefined when the window is unknown → compaction + the per-result cap
-    // no-op (the request backstop still guards). Sized ONCE and threaded into
-    // `transformContext` (compaction) + `afterToolCall` (the per-result cap)
-    // so the two defenses derive from one window and never drift. Per-run
+    const isBrowse = opts.mode === "browse"
+
+    // Per-run context budget from the resolved model's catalog window. Missing
+    // metadata uses a conservative floor so compaction + the per-result cap
+    // remain active, but marks the window unknown so the request backstop warns
+    // and proceeds rather than rejecting against a guess. Sized ONCE and
+    // threaded through all three defenses so they never drift. Per-run
     // (parallel runs resolve different windows) — never module state.
     const ctxBudget = makeContextBudget(resolved.contextWindow)
 
@@ -457,21 +510,25 @@ async function runWorkerAgentOnce(
     // stateful tool never runs concurrently with anything. (peer-review
     // HIGH, 2-lab confirmed; the per-tool flags are now the sole
     // serialization source.)
-    const agent = new Agent({
+    const agentOptions: ConstructorParameters<typeof Agent>[0] = {
       initialState: {
         systemPrompt: systemPromptFor(opts.mode),
         model: makeModelShim(resolved.modelId),
         thinkingLevel: resolved.thinking,
         tools,
       },
-      streamFn: createCopilotStreamFn({ resolved, contextBudget: ctxBudget }),
+      streamFn: createCopilotStreamFn({
+        resolved,
+        contextBudget: ctxBudget,
+        modelCallTimeoutMs: resolveWorkerModelCallTimeoutMs(),
+      }),
       toolExecution: "parallel",
       // transformContext is installed UNCONDITIONALLY — it is the seam for
       // BOTH structural compaction AND the per-turn plan reminder. Two
       // independent jobs under a single no-throw try/catch:
-      //   (1) compaction — only when the model window is known
-      //       (`ctxBudget`); skipped otherwise (no blind pruning). The
-      //       compactor `structuredClone`s before mutating the live ref.
+      //   (1) compaction — always active, using a conservative floor when the
+      //       catalog window is unknown. The compactor `structuredClone`s
+      //       before mutating the live ref.
       //   (2) plan reminder — when `planState` is non-empty, append ONE
       //       synthetic `user`-role message with the current plan, but only
       //       when the last message isn't already a `user` message (avoid
@@ -530,6 +587,10 @@ async function runWorkerAgentOnce(
         }
         return undefined
       },
+      // Hard caps block the triggering tool so the model receives the terse
+      // halt result, then stop the loop after that turn before another provider
+      // request. The repeated-call guard does not latch a hard stop.
+      shouldStopAfterTurn: () => budget.hardStopReason !== null,
       afterToolCall: async (ctx: AfterToolCallContext) => {
         // Byte accounting on the realized tool result. `recordToolBytes`
         // walks `result.content[].text` parts and sums UTF-8 byte
@@ -562,7 +623,9 @@ async function runWorkerAgentOnce(
         budget.addTurn()
         return undefined
       },
-    })
+    }
+    agentOptionsObserverForTests?.(agentOptions)
+    const agent = new Agent(agentOptions)
     // Publish the agent to the `getMessages` closure (used by the advisor
     // tool) now that it exists.
     agentHolder.agent = agent
@@ -572,20 +635,15 @@ async function runWorkerAgentOnce(
     // explicitly removeEventListener in the inner finally so a
     // long-lived `opts.signal` (test fixtures, repeated calls) can't
     // accumulate dead listeners.
-    const abortHandler = (): void => agent?.abort()
+    const abortHandler = (): void => agent.abort()
+    // Register unconditionally once an outer signal exists. A signal can abort
+    // after this check but before prompt() creates Pi's active run; the listener
+    // must remain installed to catch that race.
     if (opts.signal) {
-      if (opts.signal.aborted) {
-        // Late check — semaphore step 1 already gated pre-aborted, but
-        // the signal might have aborted between then and here. Fire
-        // the abort BEFORE we start the loop so the prompt doesn't
-        // even get a chance to spin.
-        agent.abort()
-      } else {
-        opts.signal.addEventListener("abort", abortHandler, { once: true })
-      }
+      opts.signal.addEventListener("abort", abortHandler, { once: true })
     }
 
-    // Step 9: subscribe to message_end. The assistant's final text is
+    // Step 9: subscribe to turn/message end. The assistant's final text is
     // the LAST `message_end` event whose message role is "assistant".
     // (Multi-turn runs emit one `message_end` per assistant turn; we
     // overwrite as we go so the final state captures the last reply.)
@@ -595,12 +653,34 @@ async function runWorkerAgentOnce(
     // just `.toString()`.
     let finalText = ""
     let lastStopReason: string | null = null
+    let nudgeCount = 0
+    const maxEmptyOutputNudges = resolveMaxEmptyOutputNudges()
     // Browse-only: the answer captured from a terminal tool's args (see
     // the `beforeToolCall` capture). Preferred over `finalText` for browse
     // because the agent's authoritative answer is the terminal payload,
     // not any preamble text it may have emitted alongside the tool call.
     let terminalText: string | null = null
     const unsubscribe = agent.subscribe((event) => {
+      if (event.type === "turn_end") {
+        if (
+          nudgeCount < maxEmptyOutputNudges
+          && shouldNudgeForEmptyOutput(event.message)
+        ) {
+          // Increment at enqueue time: a follow-up may itself use tools, and
+          // must not earn a free extra nudge after that later turn completes.
+          nudgeCount += 1
+          // This is a REAL user message persisted in Pi's transcript, unlike
+          // the send-time-only appendPlanReminder. It intentionally forms a
+          // compaction turn boundary; appendPlanReminder also skips its turn
+          // because the last canonical role is user.
+          agent.followUp({
+            role: "user",
+            content: [{ type: "text", text: emptyOutputNudge(nudgeCount) }],
+            timestamp: Date.now(),
+          })
+        }
+        return
+      }
       if (event.type !== "message_end") return
       const msg = event.message
       if (typeof msg !== "object" || msg === null) return
@@ -619,8 +699,10 @@ async function runWorkerAgentOnce(
     // cascades into the per-tool signal and tears the bash down.
     // `.unref()` so the timer doesn't keep the event loop alive past
     // the test/scope that owns this call.
+    let wallClockExpired = false
     const wallClockTimer = setTimeout(() => {
-      agent?.abort()
+      wallClockExpired = true
+      agent.abort()
     }, budget.config.maxWallClockMs)
     wallClockTimer.unref?.()
 
@@ -629,6 +711,12 @@ async function runWorkerAgentOnce(
       // entire run via `runWithLifecycle`; `waitForIdle()` is a
       // belt-and-suspenders await that survives any future change to
       // `prompt()`'s return semantics.
+      // `Agent.abort()` is a no-op until prompt() creates an active run. Refuse
+      // to start when cancellation won the setup race (notably while awaiting
+      // worktree creation), while keeping the listener installed for later aborts.
+      if (opts.signal?.aborted) {
+        throw new Error("[halted: cancelled]")
+      }
       await agent.prompt(opts.prompt)
       await agent.waitForIdle()
 
@@ -675,19 +763,35 @@ async function runWorkerAgentOnce(
       // overflow; a raw upstream error arrives with empty text. Surface the
       // diagnostic when present, else a generic sanitized message — never echo
       // a raw upstream error body, and never report an error as success.
-      if (lastStopReason === "error") {
+      if (lastStopReason === "error" || lastStopReason === "aborted") {
         const diag = (terminalText ?? finalText).trim()
-        const diagnostic =
-          diag
-          || "Worker run failed before producing an answer — the model's input "
-            + "likely overflowed (a large tool result), or the upstream errored. "
-            + "Retry with a narrower task: target a specific section / file / "
-            + "element rather than reading everything at once."
-        // The worktree diff was already captured above (before ws.remove);
-        // a terminal stream error must NOT throw that partial work away.
-        // Append it when present so the caller can still inspect / apply it.
+        let diagnostic: string
+        if (lastStopReason === "aborted") {
+          diagnostic = wallClockExpired
+            ? "[halted: wallclock]"
+            : "[halted: cancelled]"
+        } else {
+          diagnostic =
+            diag
+            || "Worker run failed before producing an answer — the model's input "
+              + "likely overflowed (a large tool result), or the upstream errored. "
+              + "Retry with a narrower task: target a specific section / file / "
+              + "element rather than reading everything at once."
+        }
+        // Preserve partial assistant text and the worktree diff for both stream
+        // errors and aborts; neither is a successful completed run.
         return {
-          text: [diagnostic, diff].filter(Boolean).join("\n\n"),
+          text: lastStopReason === "aborted"
+            ? [diag, diff, diagnostic].filter(Boolean).join("\n\n")
+            : [diagnostic, diff].filter(Boolean).join("\n\n"),
+          isError: true,
+        }
+      }
+      if (budget.hardStopReason) {
+        return {
+          text: [text, `[halted: ${budget.hardStopReason}]`]
+            .filter(Boolean)
+            .join("\n\n"),
           isError: true,
         }
       }
@@ -695,9 +799,10 @@ async function runWorkerAgentOnce(
       if (!text.trim()) {
         return {
           text:
-            `${NO_OUTPUT_PREFIX} `
+            `${NO_OUTPUT_PREFIX} after ${nudgeCount} nudges `
             + `(stopReason=${lastStopReason ?? "unknown"}, `
-            + `turns=${budget.turns}, elapsed=${budget.elapsedMs}ms)]`,
+            + `turns=${budget.turns}, elapsed=${budget.elapsedMs}ms)]; `
+            + "retry with a different model via worker_defaults, or narrow/split the task.",
           isError: true,
         }
       }
@@ -758,48 +863,23 @@ async function runWorkerAgentOnce(
 
 /**
  * Prefix of the sentinel `runWorkerAgentOnce` returns when a worker stops
- * CLEANLY but emits no usable text — the model occasionally ends a turn right
- * after a tool call without summarizing. Stable so the retry wrapper can detect
- * exactly this case. Distinct from a budget cap (`WorkerAbort` → halt message),
- * a stream error (`stopReason="error"` → overflow/upstream diagnostic), and a
- * real failure — none of which carry this prefix, so none are retried.
+ * cleanly but emits no usable text even after its bounded in-run nudges. Kept
+ * stable for callers that recognize the existing sentinel shape.
  */
 const NO_OUTPUT_PREFIX = "[worker exited with no output"
 
-/** True iff `r` is the transient no-output sentinel (a clean stop with empty
- *  text), the one case worth a fresh retry. Keyed on the specific sentinel
- *  PREFIX, not on `isError` — so the retry can't be silently decoupled if the
- *  sentinel's error flag ever changes, and a real worker answer never begins
- *  with this string. */
-function isTransientNoOutput(r: WorkerAgentResult): boolean {
-  return typeof r.text === "string" && r.text.startsWith(NO_OUTPUT_PREFIX)
+/** Public entry. Resolve model/thinking once, then run under one transcript and Budget. */
+export function resolveWorkerRunOpts(opts: WorkerAgentOpts): WorkerAgentOpts {
+  const defaults = resolveModeDefaults(opts.mode, opts.ignoreSessionDefaults === true)
+  return {
+    ...opts,
+    model: opts.model ?? defaults.model,
+    thinking: opts.thinking ?? defaults.thinking,
+  }
 }
 
-/**
- * Run `runOnce`, and on the transient no-output sentinel retry EXACTLY ONCE with
- * a fresh run before surfacing it. Real errors, budget caps, and stream errors
- * are returned as-is (they have distinct, actionable messages and a retry would
- * not help). A consumed abort signal short-circuits the retry. If the retry also
- * produces no output, the ORIGINAL is returned (one is enough signal; the
- * failure isn't hidden). Extracted + injected for unit-testability.
- */
-export async function withNoOutputRetry(
-  runOnce: (opts: WorkerAgentOpts) => Promise<WorkerAgentResult>,
-  opts: WorkerAgentOpts,
-): Promise<WorkerAgentResult> {
-  const first = await runOnce(opts)
-  if (!isTransientNoOutput(first) || opts.signal?.aborted) return first
-  const second = await runOnce(opts)
-  return isTransientNoOutput(second) ? first : second
-}
-
-/**
- * Public entry: a worker run with a single transient-no-output retry. Wraps the
- * implementation (`runWorkerAgentOnce`); the signature is unchanged so every
- * caller (MCP dispatch, the orchestration runner) gets the retry for free.
- */
 export async function runWorkerAgent(opts: WorkerAgentOpts): Promise<WorkerAgentResult> {
-  return withNoOutputRetry(runWorkerAgentOnce, opts)
+  return runWorkerAgentOnce(resolveWorkerRunOpts(opts))
 }
 
 // ============================================================
@@ -844,8 +924,15 @@ export function appendPlanReminder(
 
 export const __testExports = {
   appendPlanReminder,
+  EMPTY_OUTPUT_NUDGES,
+  MAX_EMPTY_OUTPUT_NUDGES,
+  resolveMaxEmptyOutputNudges,
+  setAgentOptionsObserver(observer?: (options: ConstructorParameters<typeof Agent>[0]) => void): void {
+    agentOptionsObserverForTests = observer
+  },
   extractAssistantText,
   makeModelShim,
   makeNoWorktreeHandle,
+  shouldNudgeForEmptyOutput,
   WORKTREE_REGISTRY,
 }

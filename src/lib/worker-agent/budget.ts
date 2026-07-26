@@ -1,5 +1,5 @@
 /**
- * Worker budget caps + WorkerAbort sentinel.
+ * Worker budget caps + terminal hard-stop latch.
  *
  * Plan: see `plans/we-have-added-a-dreamy-tide.md` ("Safety +
  * observability" section, "Budget env-overrides" + "Halt messages"
@@ -23,8 +23,8 @@
  *
  * Halt messages are deliberately terse — the plan calls them out as
  * `[halted: turns]`, `[halted: wallclock]`, `[halted: tool-bytes]`
- * with no per-failure advice. Pi receives them as tool-result text
- * and decides what to surface to the caller.
+ * with no per-failure advice. Pi receives them as tool-result text, then the
+ * engine's `shouldStopAfterTurn` hook ends the run before another model call.
  */
 
 import type { BudgetConfig } from "./types"
@@ -35,33 +35,25 @@ const DEFAULT_MAX_TURNS = 500
 // server-setup.ts) by exactly `MCP_TIMEOUT_HEADROOM_MS` (15 min). Every worker
 // runs behind an MCP tool, so the harness hard-kills the call at the MCP cap
 // regardless of this value. Keeping the worker wall-clock at least a headroom
-// below that cap means a non-converging worker hits ITS OWN wallclock first,
-// raising WorkerAbort -> the engine returns the PARTIAL work + a
-// "[halted: wallclock]" message that IS delivered before the harness gives up
+// below that cap means a non-converging worker hits ITS OWN wallclock first;
+// the engine aborts it and returns the PARTIAL work + a "[halted: wallclock]"
+// message that IS delivered before the harness gives up
 // (vs returning NOTHING). 6h of real autonomous work, with ~15 min of headroom
 // under the 6h15m MCP cap for graceful teardown + delivery. Override with
 // GH_ROUTER_WORKER_MAX_WALLCLOCK_MS or the per-call `maxWallClockMs` arg (both
 // are clamped to `workerWallClockCeilingMs()` at the MCP boundary, so neither
 // can push a worker past the point where the harness would hard-kill it).
 export const DEFAULT_MAX_WALLCLOCK_MS = 6 * 60 * 60_000
+const DEFAULT_MODEL_CALL_TIMEOUT_MS = 15 * 60_000
 const DEFAULT_MAX_TOOL_BYTES = 16 * 1024 * 1024
 const DEFAULT_MAX_TOOL_CALLS = 250
 const DEFAULT_MAX_REPEATED_CALLS = 3
 
-/**
- * Thrown when the wall-clock budget is exceeded. Engine catches this
- * around `agent.prompt()` / `agent.continue()` and converts it to a
- * terse `[halted: wallclock]` reply. Carries no extra metadata — by
- * design (no advice).
- */
-export class WorkerAbort extends Error {
-  readonly reason: "turns" | "wallclock" | "tool-bytes"
-  constructor(reason: "turns" | "wallclock" | "tool-bytes") {
-    super(`[halted: ${reason}]`)
-    this.reason = reason
-    this.name = "WorkerAbort"
-  }
-}
+export type HardBudgetReason =
+  | "turns"
+  | "wallclock"
+  | "tool-bytes"
+  | "tool-calls"
 
 export interface BlockResult {
   block: boolean
@@ -99,6 +91,8 @@ const DEFAULT_MCP_TOOL_TIMEOUT_MS = 22_500_000
  * hard-killed by the harness.
  */
 export const MCP_TIMEOUT_HEADROOM_MS = 15 * 60_000
+/** Smallest useful worker deadline when the MCP timeout is misconfigured below headroom. */
+export const MIN_WORKER_WALLCLOCK_MS = 1_000
 
 /**
  * The MCP per-tool-call timeout the proxy injects into the spawned CLI, in ms.
@@ -112,6 +106,12 @@ export function resolveMcpToolTimeoutMs(): number {
   return envInt("GH_ROUTER_MCP_TOOL_TIMEOUT_MS") ?? DEFAULT_MCP_TOOL_TIMEOUT_MS
 }
 
+/** Whole-call deadline for one worker model turn, including SSE consumption. */
+export function resolveWorkerModelCallTimeoutMs(): number {
+  return envInt("GH_ROUTER_WORKER_MODEL_CALL_TIMEOUT_MS")
+    ?? DEFAULT_MODEL_CALL_TIMEOUT_MS
+}
+
 /**
  * The maximum wall-clock a single worker call may be granted: the MCP
  * tool-call timeout minus the teardown headroom. A per-call `maxWallClockMs`
@@ -121,7 +121,10 @@ export function resolveMcpToolTimeoutMs(): number {
  * the default MCP timeout (22_500_000 − 900_000 === 21_600_000).
  */
 export function workerWallClockCeilingMs(): number {
-  return resolveMcpToolTimeoutMs() - MCP_TIMEOUT_HEADROOM_MS
+  return Math.max(
+    MIN_WORKER_WALLCLOCK_MS,
+    resolveMcpToolTimeoutMs() - MCP_TIMEOUT_HEADROOM_MS,
+  )
 }
 
 /**
@@ -135,15 +138,16 @@ export function workerWallClockCeilingMs(): number {
 export function resolveBudgetConfig(
   overrides?: Partial<BudgetConfig>,
 ): BudgetConfig {
+  const requestedWallClockMs =
+    overrides?.maxWallClockMs
+    ?? envInt("GH_ROUTER_WORKER_MAX_WALLCLOCK_MS")
+    ?? DEFAULT_MAX_WALLCLOCK_MS
   return {
     maxTurns:
       overrides?.maxTurns ??
       envInt("GH_ROUTER_WORKER_MAX_TURNS") ??
       DEFAULT_MAX_TURNS,
-    maxWallClockMs:
-      overrides?.maxWallClockMs ??
-      envInt("GH_ROUTER_WORKER_MAX_WALLCLOCK_MS") ??
-      DEFAULT_MAX_WALLCLOCK_MS,
+    maxWallClockMs: Math.min(requestedWallClockMs, workerWallClockCeilingMs()),
     maxToolBytes:
       overrides?.maxToolBytes ??
       envInt("GH_ROUTER_WORKER_MAX_TOOL_BYTES") ??
@@ -168,11 +172,10 @@ export function resolveBudgetConfig(
  *   - `checkBeforeCall(name, args)` is called from Pi's
  *     `beforeToolCall` hook. Returns `{block: true, reason: "[halted:
  *     turns]"}` etc. when a cap fires.
- *   - `recordToolBytes(result)` is called from Pi's `afterToolCall`
- *     hook.
- *   - `checkWallClock()` is called by the engine around blocking
- *     awaits and from `beforeToolCall` — throws `WorkerAbort` when
- *     `Date.now() - startMs > maxWallClockMs`.
+ *   - `recordToolBytes(result)` is called from Pi's `afterToolCall` hook.
+ *   - A hard cap latches `hardStopReason`; the engine's
+ *     `shouldStopAfterTurn` hook reads it and ends the loop before another
+ *     provider request. The repeated-call guard remains a non-terminal block.
  */
 export class Budget {
   readonly config: BudgetConfig
@@ -180,6 +183,7 @@ export class Budget {
   private turnCount = 0
   private toolBytes = 0
   private toolCallCount = 0
+  private hardStopReasonValue: HardBudgetReason | null = null
   private lastCallKey: string | null = null
   private consecutiveRepeats = 0
 
@@ -208,18 +212,14 @@ export class Budget {
     return Date.now() - this.startMs
   }
 
-  /**
-   * Throw `WorkerAbort("wallclock")` if elapsed time exceeds
-   * `maxWallClockMs`. Engine wraps long awaits in `await
-   * Promise.race([..., wallClockTimer])` for prompt cancellation; this
-   * is the fallback for cases where the timer hasn't fired yet but a
-   * call site wants to be sure (e.g. before sending the next LLM
-   * request).
-   */
-  checkWallClock(): void {
-    if (this.elapsedMs > this.config.maxWallClockMs) {
-      throw new WorkerAbort("wallclock")
-    }
+  /** First hard cap reached during this run, or null while work may continue. */
+  get hardStopReason(): HardBudgetReason | null {
+    return this.hardStopReasonValue
+  }
+
+  private halt(reason: HardBudgetReason): BlockResult {
+    this.hardStopReasonValue ??= reason
+    return { block: true, reason: `[halted: ${reason}]` }
   }
 
   /**
@@ -239,19 +239,12 @@ export class Budget {
    * signature in Pi without forcing the engine into a wrapper.
    */
   checkBeforeCall(toolName: string, args: unknown): BlockResult {
-    if (this.turnCount > this.config.maxTurns) {
-      return { block: true, reason: "[halted: turns]" }
-    }
-    if (this.elapsedMs > this.config.maxWallClockMs) {
-      return { block: true, reason: "[halted: wallclock]" }
-    }
-    if (this.toolBytes > this.config.maxToolBytes) {
-      return { block: true, reason: "[halted: tool-bytes]" }
-    }
+    if (this.hardStopReasonValue) return this.halt(this.hardStopReasonValue)
+    if (this.turnCount > this.config.maxTurns) return this.halt("turns")
+    if (this.elapsedMs > this.config.maxWallClockMs) return this.halt("wallclock")
+    if (this.toolBytes > this.config.maxToolBytes) return this.halt("tool-bytes")
     this.toolCallCount += 1
-    if (this.toolCallCount > this.config.maxToolCalls) {
-      return { block: true, reason: "[halted: tool-calls]" }
-    }
+    if (this.toolCallCount > this.config.maxToolCalls) return this.halt("tool-calls")
     // Duplicate-read / anti-loop guard. Block (NOT halt) the next identical
     // call after `maxRepeatedCalls` CONSECUTIVE repeats — the model sees the
     // block as a tool result and must vary the call or finish. A different

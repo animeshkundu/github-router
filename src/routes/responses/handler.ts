@@ -410,6 +410,15 @@ export async function handleResponsesCompact(c: Context) {
 
   // Try Copilot's native compact endpoint first (future-proofs for when they add support)
   const compactUrl = `${copilotBaseUrl(state)}/responses/compact`
+  // DELIBERATELY DIFFERENT from the streaming services, which honor
+  // `UPSTREAM_FETCH_TIMEOUT_MS === 0` as "no fetch-phase timeout". That opt-out
+  // exists so a legitimately long STREAMING completion is never truncated
+  // mid-flight. Compact is a short, NON-streaming request/response, so that
+  // rationale doesn't apply — and a hung compact with no signal was a real bug
+  // (regression E1; `tests/isolated/responses-compact-timeout.test.ts` asserts a
+  // signal is ALWAYS passed). Hence the `|| 300_000` floor: the env var can
+  // raise or lower the bound but never remove it. Do NOT "unify" this with the
+  // streaming services for consistency — that reintroduces E1.
   const doFetch = (): Promise<Response> => fetch(compactUrl, {
     method: "POST",
     headers: copilotHeaders(state),
