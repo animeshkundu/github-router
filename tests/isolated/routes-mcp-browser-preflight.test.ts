@@ -139,6 +139,68 @@ describe("browser readiness pre-flight runs before slot acquisition", () => {
     state.powerBrowseEnabled = false
   })
 
+  test("browser gate lists and dispatches open_tab to deterministic install_required pre-flight", async () => {
+    const { mcpRoutes } = await import("../../src/routes/mcp/route")
+    const { __resetInFlightForTests } = await import(
+      "../../src/routes/mcp/handler"
+    )
+    const { __resetEnsureBridgeReadyForTests } = await import(
+      "../../src/lib/browser-mcp/install-check"
+    )
+
+    __resetInFlightForTests()
+    __resetEnsureBridgeReadyForTests()
+
+    const listRes = await mcpRoutes.request(
+      browserReq({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/list",
+      }),
+    )
+    const listJson = (await listRes.json()) as {
+      result: { tools: Array<{ name: string }> }
+    }
+    expect(listJson.result.tools.map((tool) => tool.name)).toContain("open_tab")
+
+    // The forced-positive browser gate must dispatch the call rather than
+    // filtering it as an unknown tool, while the missing discovery file pins
+    // the readiness outcome independently of ambient host state.
+    const callRes = await mcpRoutes.request(
+      browserReq({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "open_tab",
+          arguments: { url: "https://example.com" },
+        },
+      }),
+    )
+    const callJson = (await callRes.json()) as {
+      error?: { code: number }
+      result?: { isError?: boolean; content?: Array<{ text: string }> }
+    }
+    expect(callJson.error?.code).not.toBe(-32601)
+    expect(callJson.result?.isError).toBe(true)
+    const payload = JSON.parse(callJson.result?.content?.[0]?.text ?? "") as {
+      install_required: boolean
+      reason: string
+      manual_steps?: { load_unpacked_dir?: string; expected_extension_id?: string }
+    }
+    expect(payload.install_required).toBe(true)
+    expect(payload.reason).toBe("bridge_not_running")
+    // `manual_steps` is the actionable half of the envelope — it is what the
+    // user or model follows to recover, so assert production still WIRES it
+    // through. Only the keys are checked here: this file mocks `extensionDir`
+    // and `computeExtensionIdFromKey`, so asserting their values would just
+    // be asserting the fakes. Real derivation is pinned in
+    // tests/browser-mcp-gate.test.ts, where those functions are genuine.
+    expect(payload.manual_steps).toBeDefined()
+    expect(payload.manual_steps?.load_unpacked_dir).toBeTruthy()
+    expect(payload.manual_steps?.expected_extension_id).toBeTruthy()
+  })
+
   test("a not-ready browser call returns install_required WITHOUT consuming an inflight slot, even when the pool is saturated", async () => {
     const { mcpRoutes } = await import("../../src/routes/mcp/route")
     const { __getInFlightForTests, __resetInFlightForTests } = await import(

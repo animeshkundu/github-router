@@ -22,7 +22,7 @@
  *     so a clean ready index is treated as fresh.
  */
 
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs"
+import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import process from "node:process"
@@ -31,8 +31,9 @@ import { runManagedExeCapture } from "../exec"
 import { resolveExecutable } from "../exec"
 import { PATHS } from "../paths"
 
-import { MODEL_ID } from "./manifest"
+import { colgrepBinAsset, MODEL_ID, ortLibAsset } from "./manifest"
 import { isPidAlive } from "./lifecycle"
+import { canonicalColbertModelDir } from "./provision"
 
 /** Sidecar metadata per workspace. Router-owned; colgrep never reads it. */
 export interface ColbertMeta {
@@ -49,8 +50,9 @@ export interface ColbertMeta {
   /** Why the last build failed (drives the self-heal vs operator-actionable
    * decision). `crashed` = the build PID died without writing a result
    * (proxy kill / OOM); `stuck` = the inactivity watchdog killed a hung
-   * build; `error` = colgrep non-zero exit; `launch` = spawn threw. */
-  failureClass?: "crashed" | "stuck" | "error" | "launch"
+   * build; `corrupt` = physical PLAID shards are incoherent;
+   * `error` = colgrep non-zero exit; `launch` = spawn threw. */
+  failureClass?: "crashed" | "stuck" | "corrupt" | "error" | "launch"
   /** Consecutive failed build attempts; reset to 0 on a successful build.
    * Caps the self-heal so a persistently-failing workspace stops retrying. */
   failedAttempts?: number
@@ -66,6 +68,7 @@ export type Freshness =
   | "absent"
   | "building"
   | "crashed"
+  | "corrupt"
   | "failed"
 
 const GIT_TIMEOUT_MS = 4000
@@ -168,44 +171,111 @@ async function writeColbertMetaUnchained(meta: ColbertMeta): Promise<void> {
  * `project.json` whose canonical path matches this workspace AND an
  * `index/metadata.json` marker.
  */
-export async function completedIndexOnDisk(workspace: string): Promise<boolean> {
+export async function colbertProjectDir(workspace: string): Promise<string | null> {
   const indicesDir = PATHS.COLBERT_INDICES_DIR
   let names: Array<string>
   try {
     names = await fs.readdir(indicesDir)
   } catch {
-    return false
+    return null
   }
   const wantCanonical = await realpathForCompare(workspace)
   for (const name of names) {
-    if (name === ".gh-router-meta") continue
-    const projJson = path.join(indicesDir, name, "project.json")
-    let proj: { path?: string; project_path?: string }
+    if (name === ".gh-router-meta" || name.includes(".corrupt-")) continue
+    const dir = path.join(indicesDir, name)
+    let proj: { path?: string; project_path?: string; model?: string }
     try {
-      proj = JSON.parse(await fs.readFile(projJson, "utf8"))
+      proj = JSON.parse(await fs.readFile(path.join(dir, "project.json"), "utf8"))
     } catch {
       continue
     }
     const projPath = proj.path ?? proj.project_path
-    if (!projPath) continue
-    if ((await realpathForCompare(projPath)) !== wantCanonical) continue
-    // Found the dir for this workspace — does it carry a completed index?
-    // colgrep's PLAID index dir contains numbered `*.metadata.json` +
-    // `centroids.npy` shards (NOT a single `index/metadata.json`), so a
-    // non-empty `index/` dir is the completed signal.
-    if (existsSync(path.join(indicesDir, name, "index", "metadata.json"))) {
-      return true
+    if (!projPath || (await realpathForCompare(projPath)) !== wantCanonical) continue
+    // The raw model spelling is part of colgrep's project key. Require the
+    // exact proxy spelling so a slash-variant legacy key is never selected.
+    if (proj.model !== canonicalColbertModelDir()) {
+      continue
     }
-    if (existsSync(path.join(indicesDir, name, "index"))) {
-      try {
-        const inner = await fs.readdir(path.join(indicesDir, name, "index"))
-        if (inner.length > 0) return true
-      } catch {
-        // fall through
+    return dir
+  }
+  return null
+}
+
+export type IndexIntegrity =
+  | { verdict: "not-built" }
+  | { verdict: "coherent"; shardCount: number; embeddingCount: number }
+  | { verdict: "suspect"; reason: string }
+  | { verdict: "corrupt"; reason: string }
+
+/** Validate the contiguous embedding interval encoded by PLAID shard metadata. */
+export function validateIndexIntegrity(projectIndexDir: string): IndexIntegrity {
+  let names: Array<string>
+  try {
+    names = readdirSync(projectIndexDir).filter((name) => /^\d+\.metadata\.json$/.test(name))
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT"
+      ? { verdict: "not-built" }
+      : { verdict: "corrupt", reason: "index directory unreadable" }
+  }
+  if (names.length === 0) return { verdict: "not-built" }
+
+  const intervals: Array<{ start: number; count: number }> = []
+  for (const name of names) {
+    try {
+      const parsed = JSON.parse(readFileSync(path.join(projectIndexDir, name), "utf8")) as {
+        embedding_offset?: unknown
+        num_embeddings?: unknown
       }
+      const start = parsed.embedding_offset
+      const count = parsed.num_embeddings
+      if (
+        typeof start !== "number" ||
+        typeof count !== "number" ||
+        !Number.isSafeInteger(start) ||
+        !Number.isSafeInteger(count) ||
+        start < 0 ||
+        count < 0
+      ) {
+        return { verdict: "corrupt", reason: `invalid shard metadata: ${name}` }
+      }
+      intervals.push({ start, count })
+    } catch {
+      return { verdict: "corrupt", reason: `unreadable shard metadata: ${name}` }
     }
   }
-  return false
+
+  // Tie-break by count so a legal zero-count shard sharing a start offset
+  // with a populated one is visited FIRST. Visited second, its `start` would
+  // sit behind the advanced cursor and read as an overlap, condemning a
+  // healthy index.
+  intervals.sort((a, b) => a.start - b.start || a.count - b.count)
+  // Overlap is unambiguous corruption: two shards claiming the same embedding
+  // address cannot both be right. A GAP is only SUSPECT. We never established
+  // that a valid colgrep generation must tile [0, N) — a deleted range could
+  // legally be retained as a hole, and the one corrupt sample we have shows
+  // overlaps too, so it is no evidence that gap-only is corrupt. Condemning a
+  // gap would DELETE the index, so a wrong guess destroys good user data.
+  // Suspect therefore stops us serving semantic results without touching the
+  // bytes. (Note a `coveredEnd !== sum` test would not be an independent
+  // safeguard: with no overlaps, coveredEnd === firstOffset + sum + gapTotal,
+  // so it is just another spelling of the gap check.)
+  let cursorEnd = 0
+  let sum = 0
+  let gapped = false
+  for (const interval of intervals) {
+    if (interval.start < cursorEnd) return { verdict: "corrupt", reason: "overlapping shard intervals" }
+    if (interval.start > cursorEnd) gapped = true
+    cursorEnd = interval.start + interval.count
+    sum += interval.count
+  }
+  if (gapped) return { verdict: "suspect", reason: "gap between shard intervals" }
+  return { verdict: "coherent", shardCount: intervals.length, embeddingCount: sum }
+}
+
+export async function completedIndexOnDisk(workspace: string): Promise<boolean> {
+  const projectDir = await colbertProjectDir(workspace)
+  if (!projectDir) return false
+  return validateIndexIntegrity(path.join(projectDir, "index")).verdict !== "not-built"
 }
 
 function canonicalForCompare(p: string): string {
@@ -274,6 +344,14 @@ export function indexDirSignature(workspace: string): string | null {
   const want = canonicalRealpathSync(workspace)
   for (const name of names) {
     if (name === ".gh-router-meta") continue
+    // Skip quarantined husks. A `.corrupt-*` dir keeps the original
+    // `project.json`, so it still matches this workspace — and its size is
+    // frozen. If this probe returned the husk's signature instead of the
+    // live build's, the inactivity watchdog would see no growth, judge a
+    // healthy rebuild stalled, and kill it — turning a one-off repair into
+    // a rebuild death loop. `colbertProjectDir` already skips these; this
+    // probe must agree.
+    if (name.includes(".corrupt-")) continue
     const dir = path.join(indicesDir, name)
     let proj: { path?: string; project_path?: string }
     try {
@@ -366,8 +444,32 @@ export async function freshnessVerdict(workspace: string): Promise<{
   // status === "ready". Confirm a completed index is actually on disk;
   // a meta marker without an index (crash between mark-ready and write)
   // must NOT be served as fresh.
-  if (!(await completedIndexOnDisk(workspace))) {
-    return { verdict: "building", meta }
+  const projectDir = await colbertProjectDir(workspace)
+  if (!projectDir) return { verdict: "building", meta }
+  const integrity = validateIndexIntegrity(path.join(projectDir, "index"))
+  if (integrity.verdict === "not-built") return { verdict: "building", meta }
+  if (integrity.verdict === "corrupt") return { verdict: "corrupt", meta }
+  // Suspect: structurally odd but not provably corrupt. Refuse to serve
+  // semantic results, but take the NON-destructive route — `stale` keeps the
+  // bytes on disk and rebuilds in the background, so if the layout turns out
+  // to be legal we have lost nothing but a rebuild.
+  if (integrity.verdict === "suspect") return { verdict: "stale", meta }
+
+  // Engine changes require a clean rebuild; an index generated by different
+  // binary/runtime bits is not safe to label semantic-ready. This is STALE,
+  // not corrupt: the shards are structurally coherent, just built by other
+  // bits. `corrupt` would quarantine and DELETE them, which on the first
+  // query after any upgrade would destroy a perfectly good index — and a
+  // legacy meta predating these fields has `undefined` here, so every
+  // existing user would hit it exactly once, at upgrade. `stale` keeps the
+  // old index searchable while a background rebuild runs.
+  const binarySha = colgrepBinAsset()?.sha256
+  const ortSha = ortLibAsset()?.sha256
+  if (
+    (binarySha && meta.binarySha !== binarySha) ||
+    (ortSha && meta.ortSha !== ortSha)
+  ) {
+    return { verdict: "stale", meta }
   }
   // Git freshness. Non-git workspace → no head; treat ready as fresh
   // (mtime is colgrep's own incremental signal).

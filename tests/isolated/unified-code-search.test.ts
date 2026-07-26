@@ -135,42 +135,106 @@ describe("semantic / default mode", () => {
     expect(r.results.length).toBe(1)
     expect(r.results[0]!.score).toBe(0.91)
     expect(r.results[0]!.name).toBe("refreshAuthToken")
+    expect(r.outlines).toHaveLength(1)
+    expect(r.outlines?.[0]?.file).toBe("src/auth.ts")
+    expect(r.outlines?.[0]?.outline.map((entry) => entry.name)).toContain(
+      "refreshAuthToken",
+    )
     expect(r.notice).toBeUndefined()
   })
 
-  test("status 'building' → lexical-fallback with a retry notice", async () => {
+  test("status 'ready' skips an out-of-workspace semantic result outline", async () => {
     semanticEnabled = true
-    semanticResult = { status: "building", notice: "building" }
+    semanticResult = {
+      status: "ready",
+      source: "semantic",
+      results: [
+        {
+          file: "../outside.ts",
+          line: 1,
+          score: 0.5,
+          snippet: "export const outside = true",
+        },
+      ],
+    }
     const r = await runUnifiedCodeSearch({
-      query: "refreshAuthToken",
+      query: "outside",
       workspace: root,
     })
-    expect(r.source).toBe("lexical-fallback")
-    expect(r.results.length).toBeGreaterThan(0)
-    expect(r.notice).toMatch(/building|retry/i)
+    expect(r.results).toHaveLength(1)
+    expect(r.outlines).toEqual([])
   })
 
-  test("status 'stale' → lexical-fallback", async () => {
+  test("status 'ready' honors summary:false", async () => {
     semanticEnabled = true
-    semanticResult = { status: "stale", notice: "stale" }
+    semanticResult = {
+      status: "ready",
+      source: "semantic",
+      results: [
+        {
+          file: "src/auth.ts",
+          line: 1,
+          score: 0.91,
+          snippet: "export function refreshAuthToken()",
+        },
+      ],
+    }
     const r = await runUnifiedCodeSearch({
-      query: "refreshAuthToken",
+      query: "where do we refresh auth tokens",
       workspace: root,
+      summary: false,
     })
-    expect(r.source).toBe("lexical-fallback")
-    expect(r.notice).toMatch(/stale|re-index|retry/i)
+    expect(r.outlines).toBeUndefined()
   })
 
-  test("status 'failed' → lexical-fallback with actionable guidance", async () => {
+  test.each(["building", "stale", "unavailable", "failed"] as const)(
+    "status '%s' with a terse runner notice keeps actionable guidance",
+    async (status) => {
+      semanticEnabled = true
+      semanticResult = {
+        status,
+        ...(status === "failed" ? { isError: true } : {}),
+        notice: status,
+      }
+      const r = await runUnifiedCodeSearch({
+        query: "refreshAuthToken",
+        workspace: root,
+      })
+      expect(r.source).toBe("lexical-fallback")
+      expect(r.results.length).toBeGreaterThan(0)
+      expect(r.notice).toContain(status)
+      expect(r.notice).toContain('retry mode:"semantic"')
+      expect(r.notice).toMatch(/symbol/i)
+    },
+  )
+
+  test("corrupt quarantine wording survives with actionable guidance", async () => {
     semanticEnabled = true
-    semanticResult = { status: "failed", isError: true, notice: "failed" }
+    semanticResult = {
+      status: "failed",
+      isError: true,
+      notice: "semantic index was found corrupt and quarantined; a clean rebuild was started",
+    }
     const r = await runUnifiedCodeSearch({
       query: "refreshAuthToken",
       workspace: root,
     })
-    expect(r.source).toBe("lexical-fallback")
-    // The model-facing notice guides it: retry semantic OR use symbols.
-    expect(r.notice).toMatch(/retry mode:"semantic"|symbol/i)
+    expect(r.notice).toMatch(/corrupt and quarantined/i)
+    expect(r.notice).toContain('retry mode:"semantic"')
+  })
+
+  test("runner notice that already has guidance does not duplicate it", async () => {
+    semanticEnabled = true
+    semanticResult = {
+      status: "failed",
+      isError: true,
+      notice: 'corrupt index rebuilding — retry mode:"semantic" shortly',
+    }
+    const r = await runUnifiedCodeSearch({
+      query: "refreshAuthToken",
+      workspace: root,
+    })
+    expect(r.notice?.match(/retry mode:"semantic"/g)).toHaveLength(1)
   })
 
   test("runSemanticSearch THROWS → transparent lexical-fallback (never rejects)", async () => {

@@ -19,7 +19,10 @@
  * telemetry-leak vector).
  */
 
+import { randomBytes } from "node:crypto"
 import { existsSync, realpathSync } from "node:fs"
+import fs from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
 import process from "node:process"
 
@@ -28,6 +31,7 @@ import consola from "consola"
 import { runManagedExeCapture } from "../exec"
 
 import {
+  colbertProjectDir,
   freshnessVerdict,
   gitState,
   indexDirSignature,
@@ -35,13 +39,19 @@ import {
   readColbertMeta,
   releaseInit,
   tryClaimInit,
+  validateIndexIntegrity,
   writeColbertMeta,
   type ColbertMeta,
 } from "./index-store"
 import { getColbertInstanceUuid, trackChild } from "./lifecycle"
-import { MODEL_ID, MODEL_REVISION } from "./manifest"
 import {
-  colbertModelDir,
+  colgrepBinAsset,
+  MODEL_ID,
+  MODEL_REVISION,
+  ortLibAsset,
+} from "./manifest"
+import {
+  canonicalColbertModelDir,
   colbertOrtDylibPath,
   colgrepBinaryPath,
   dropColgrepSecrets,
@@ -124,10 +134,32 @@ export function makeIndexProgressProbe(workspace: string): () => boolean {
  * colgrep writer per workspace" goal as the init debounce. Cleared when the
  * detached search completes. */
 const _searchIndexInFlight = new Set<string>()
+const _initPromises = new Map<string, Promise<void>>()
+/** In-flight quarantine deletions, drained by teardown (Windows EBUSY). */
+const _quarantineRemovals = new Set<Promise<void>>()
+let _runManagedExeCapture = runManagedExeCapture
 
 /** Test-only: clear the detached-search in-flight set. */
 export function __resetSearchInFlightForTests(): void {
   _searchIndexInFlight.clear()
+}
+
+/** Test-only: replace the managed executable runner and observe background init. */
+export function __setInitRunnerForTests(
+  runner: typeof runManagedExeCapture | undefined,
+): void {
+  _runManagedExeCapture = runner ?? runManagedExeCapture
+}
+
+/** Test-only: await the currently tracked background init, if any. */
+export async function __waitForInitForTests(workspace: string): Promise<void> {
+  await _initPromises.get(path.resolve(workspace))
+}
+
+/** Test-only: drain all background init work before removing fixtures. */
+export async function __waitForAllInitsForTests(): Promise<void> {
+  await Promise.all(_initPromises.values())
+  await Promise.all(_quarantineRemovals)
 }
 
 export type SemanticStatus =
@@ -225,6 +257,8 @@ export async function runSemanticSearch(opts: {
       // A build whose PID died without recording a result (proxy kill / OOM)
       // — detected per-query by the freshness verdict, not yet persisted.
       return handleFailure(workspace, fresh.meta, true)
+    case "corrupt":
+      return repairCorruptIndex(workspace, fresh.meta)
     case "building": {
       return {
         status: "building",
@@ -265,6 +299,81 @@ export async function runSemanticSearch(opts: {
  * by the inactivity watchdog) retries at most once — re-running a hung build
  * usually hangs again; transient classes retry up to `MAX_FAILED_ATTEMPTS`.
  */
+async function quarantineProjectDir(projectDir: string): Promise<boolean> {
+  const quarantine = `${projectDir}.corrupt-${process.pid}-${randomBytes(4).toString("hex")}`
+  try {
+    await fs.rename(projectDir, quarantine)
+  } catch (err) {
+    consola.debug("colbert: corrupt index quarantine rename failed:", err)
+    return false
+  }
+  // The delete runs in the background — the rename already made the corrupt
+  // index invisible, so the caller must not wait on a large recursive rm.
+  // Track it so teardown can drain it: an in-flight rm walking this tree
+  // while something removes an ancestor raises EBUSY/EPERM on Windows.
+  const removal = fs
+    .rm(quarantine, { recursive: true, force: true })
+    .catch((err) => {
+      consola.debug("colbert: corrupt index quarantine cleanup failed:", err)
+    })
+    .finally(() => {
+      _quarantineRemovals.delete(removal)
+    })
+  _quarantineRemovals.add(removal)
+  return true
+}
+
+async function repairCorruptIndex(
+  workspace: string,
+  meta: ColbertMeta | null,
+): Promise<SemanticSearchResult> {
+  const wsKey = path.resolve(workspace)
+  const attempts = (meta?.failureClass === "corrupt" ? meta.failedAttempts ?? 0 : 0) + 1
+  const failedMeta: ColbertMeta = {
+    workspace,
+    model: meta?.model ?? MODEL_ID,
+    modelRev: meta?.modelRev ?? MODEL_REVISION,
+    binarySha: colgrepBinAsset()?.sha256,
+    ortSha: ortLibAsset()?.sha256,
+    status: "failed",
+    failureClass: "corrupt",
+    failedAttempts: attempts,
+    lastIndexedAt: new Date().toISOString(),
+    lastIndexedHead: meta?.lastIndexedHead,
+    lastIndexedDirty: meta?.lastIndexedDirty,
+    ownerInstanceId: getColbertInstanceUuid(),
+  }
+
+  if (_searchIndexInFlight.has(wsKey) || isInitInFlight(workspace)) {
+    return {
+      status: "building",
+      notice: "semantic index was found corrupt but a writer is still active; returned results are disabled until it exits",
+    }
+  }
+
+  const projectDir = await colbertProjectDir(workspace)
+  if (!projectDir) return handleFailure(workspace, failedMeta, false)
+  if (!(await quarantineProjectDir(projectDir))) {
+    await writeColbertMeta(failedMeta).catch(() => {})
+    return {
+      status: "failed",
+      isError: true,
+      notice: "semantic index is corrupt but could not be quarantined; returned lexical results — close active colgrep processes and retry",
+    }
+  }
+  await writeColbertMeta(failedMeta).catch(() => {})
+
+  if (attempts < 2) kickBackgroundInit(workspace)
+  return {
+    status: "failed",
+    isError: true,
+    notice:
+      attempts < 2
+        ? 'semantic index was found corrupt and quarantined; a clean rebuild was started — retry mode:"semantic" shortly'
+        : 'semantic index repeatedly failed integrity checks; automatic rebuild is capped — do NOT retry mode:"semantic", use lexical search with specific symbol/keyword terms and see proxy logs',
+  }
+}
+
 async function handleFailure(
   workspace: string,
   meta: ColbertMeta | null,
@@ -296,7 +405,7 @@ async function handleFailure(
     }).catch(() => {})
   }
 
-  const cap = cls === "stuck" ? 2 : MAX_FAILED_ATTEMPTS
+  const cap = cls === "stuck" || cls === "corrupt" ? 2 : MAX_FAILED_ATTEMPTS
   // NaN-safe: a missing/corrupt timestamp counts as "elapsed" (allow retry)
   // rather than NaN-comparing to false and blocking retries forever.
   const lastMs = lastAt ? Date.parse(lastAt) : NaN
@@ -367,7 +476,7 @@ async function spawnSearch(opts: {
     "never",
     "--force-cpu",
     "--model",
-    colbertModelDir(),
+    canonicalColbertModelDir(),
     "-y",
     "-k",
     String(opts.limit),
@@ -401,7 +510,7 @@ async function spawnSearch(opts: {
   // long — see the responsiveness race below.
   let searchPromise: ReturnType<typeof runManagedExeCapture>
   try {
-    searchPromise = runManagedExeCapture(binary, args, {
+    searchPromise = _runManagedExeCapture(binary, args, {
       env: colgrepEnv(),
       inactivityTimeoutMs: INIT_STALL_MS,
       onInactivityCheck: makeIndexProgressProbe(opts.workspace),
@@ -549,7 +658,7 @@ function parseAndTrim(
 }
 
 /** snippet = signature + first few representative lines (NOT full code). */
-function buildSnippet(unit: NonNullable<ColgrepHit["unit"]>): string {
+export function buildSnippet(unit: NonNullable<ColgrepHit["unit"]>): string {
   const sig = typeof unit.signature === "string" ? unit.signature.trim() : ""
   const code = typeof unit.code === "string" ? unit.code : ""
   if (!code) return sig
@@ -557,15 +666,27 @@ function buildSnippet(unit: NonNullable<ColgrepHit["unit"]>): string {
   // Up to 5 representative lines after the signature line. Cap total
   // length so a single oversized unit can't blow the response.
   const body = lines.slice(0, 6).join("\n")
-  const snippet = sig && !body.startsWith(sig) ? `${sig}\n${body}` : body
+  const firstBodyLine = lines[0]?.trim() ?? ""
+  const snippet = sig && firstBodyLine !== sig ? `${sig}\n${body}` : body
   return snippet.length > 600 ? snippet.slice(0, 600) + "…" : snippet
 }
 
-function relativize(file: string, workspace: string, workspaceReal: string): string {
-  for (const base of [workspace, workspaceReal]) {
+function stripExtendedPathPrefix(value: string): string {
+  if (/^\\\\\?\\UNC\\/i.test(value)) return `\\\\${value.slice(8)}`
+  if (/^\\\\\?\\[a-z]:\\/i.test(value)) return value.slice(4)
+  return value
+}
+
+export function relativize(file: string, workspace: string, workspaceReal: string): string {
+  const normalizedFile = stripExtendedPathPrefix(file)
+  for (const rawBase of [workspace, workspaceReal]) {
     try {
-      const rel = path.relative(base, file)
-      if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) return rel
+      const base = stripExtendedPathPrefix(rawBase)
+      const flavor = /^[a-z]:[\\/]/i.test(base) || base.startsWith("\\\\")
+        ? path.win32
+        : path
+      const rel = flavor.relative(base, normalizedFile)
+      if (rel && !rel.startsWith("..") && !flavor.isAbsolute(rel)) return rel
     } catch {
       // try next base
     }
@@ -603,9 +724,33 @@ function clampLimit(limit: number | undefined): number {
 export function kickBackgroundInit(workspace: string): void {
   if (isInitInFlight(workspace)) return
   if (!tryClaimInit(workspace)) return
-  void runInit(workspace).catch((err) => {
-    consola.debug("colbert: background init failed:", err)
-  })
+  const key = path.resolve(workspace)
+  const promise = runInit(workspace)
+    .catch(async (err) => {
+      releaseInit(workspace)
+      consola.error("colbert: background init failed:", err)
+      const prior = await readColbertMeta(workspace)
+      await writeColbertMeta({
+        workspace,
+        model: prior?.model ?? MODEL_ID,
+        modelRev: prior?.modelRev ?? MODEL_REVISION,
+        binarySha: colgrepBinAsset()?.sha256,
+        ortSha: ortLibAsset()?.sha256,
+        status: "failed",
+        failureClass: "launch",
+        failedAttempts: (prior?.failedAttempts ?? 0) + 1,
+        lastIndexedAt: new Date().toISOString(),
+        lastIndexedHead: prior?.lastIndexedHead,
+        lastIndexedDirty: prior?.lastIndexedDirty,
+        ownerInstanceId: getColbertInstanceUuid(),
+      }).catch((writeErr) => {
+        consola.error("colbert: failed to record background init failure:", writeErr)
+      })
+    })
+    .finally(() => {
+      _initPromises.delete(key)
+    })
+  _initPromises.set(key, promise)
 }
 
 /**
@@ -619,24 +764,75 @@ export function kickBackgroundInit(workspace: string): void {
 export async function startupKickAllowed(workspace: string): Promise<boolean> {
   const meta = await readColbertMeta(workspace)
   if (!meta || meta.status !== "failed") return true
-  if ((meta.failedAttempts ?? 0) >= MAX_FAILED_ATTEMPTS) return false
+  const cap = meta.failureClass === "stuck" || meta.failureClass === "corrupt"
+    ? 2
+    : MAX_FAILED_ATTEMPTS
+  if ((meta.failedAttempts ?? 0) >= cap) return false
   if (meta.failureClass === "stuck") return false
   return true
+}
+
+/**
+ * Encoding sessions colgrep may run in parallel: 25% of the machine's
+ * threads, never fewer than 2.
+ *
+ * colgrep defaults this to the FULL CPU count, so a background index build
+ * saturates the machine — the exact opposite of what a background build
+ * should do during an interactive agent session (the proxy even holds a
+ * keep-awake assertion so those sessions run long and unattended). The floor
+ * of 2 keeps a 1- to 7-thread box from dropping to a single session and
+ * taking proportionally forever.
+ *
+ * Override with `GH_ROUTER_COLBERT_PARALLEL` (a positive integer).
+ */
+export function colbertParallelSessions(): number {
+  const raw = Number(process.env.GH_ROUTER_COLBERT_PARALLEL)
+  if (Number.isSafeInteger(raw) && raw > 0) return raw
+  const threads = os.availableParallelism?.() ?? os.cpus?.().length ?? 4
+  return Math.max(2, Math.floor(threads * 0.25))
+}
+
+/**
+ * Persist the parallelism cap into the router-owned colgrep config.
+ *
+ * `--parallel` exists only on the `settings` subcommand — there is no
+ * per-run flag and no env var. It writes `parallel_sessions` to
+ * `<COLGREP_DATA_DIR>/../config.json`, which for us is
+ * `<APP_DIR>/colbert/config.json`: router-owned, and NOT the user's own
+ * colgrep config (verified — after we write ours, a plain `colgrep
+ * settings` with no COLGREP_DATA_DIR still reports `auto`).
+ *
+ * Best-effort: failing here means colgrep encodes at its default (all
+ * threads), which is greedy but not incorrect, so it must never block a
+ * build.
+ */
+async function applyParallelismCap(binary: string): Promise<void> {
+  const sessions = colbertParallelSessions()
+  try {
+    await _runManagedExeCapture(
+      binary,
+      ["settings", "--parallel", String(sessions)],
+      { env: colgrepEnv(), timeoutMs: 30_000, maxStdoutBytes: MAX_STDOUT_BYTES },
+    )
+  } catch (err) {
+    consola.debug("colbert: could not cap colgrep parallelism:", err)
+  }
 }
 
 async function runInit(workspace: string): Promise<void> {
   const binary = colgrepBinaryPath()
   if (!existsSync(binary)) {
-    releaseInit(workspace)
-    return
+    throw new Error("colgrep binary is missing")
   }
   // Fail closed if the ORT dylib is missing — otherwise the background
   // init would spawn colgrep, which silently downloads an UNVERIFIED ONNX
   // runtime when ORT_DYLIB_PATH can't be loaded.
   if (!existsSync(colbertOrtDylibPath())) {
-    releaseInit(workspace)
-    return
+    throw new Error("ColBERT ONNX runtime is missing")
   }
+  // Cap parallelism before the encode starts. The setting persists in our
+  // data dir, so it also governs the reconcile a later `search` may run.
+  await applyParallelismCap(binary)
   // Carry the failure streak across the building→done transition so the
   // attempt cap accrues (reset to 0 only on a successful build).
   const prior = await readColbertMeta(workspace)
@@ -644,6 +840,8 @@ async function runInit(workspace: string): Promise<void> {
     workspace,
     model: MODEL_ID,
     modelRev: MODEL_REVISION,
+    binarySha: colgrepBinAsset()?.sha256,
+    ortSha: ortLibAsset()?.sha256,
     status: "building",
     // Placeholder until the colgrep child PID is known (set in onSpawn).
     // The boot sweep reclassifies a `building` entry whose buildPid is
@@ -679,7 +877,7 @@ async function runInit(workspace: string): Promise<void> {
     "never",
     "--force-cpu",
     "--model",
-    colbertModelDir(),
+    canonicalColbertModelDir(),
     workspace,
   ]
 
@@ -701,7 +899,7 @@ async function runInit(workspace: string): Promise<void> {
   let ok = false
   let failureClass: NonNullable<ColbertMeta["failureClass"]> | undefined
   try {
-    const res = await runManagedExeCapture(binary, args, {
+    const res = await _runManagedExeCapture(binary, args, {
       env: colgrepEnv(),
       timeoutMs: INIT_TIMEOUT_MS,
       inactivityTimeoutMs: INIT_STALL_MS,
@@ -720,15 +918,25 @@ async function runInit(workspace: string): Promise<void> {
       },
     })
     ok = !res.stalled && !res.timedOut && res.code === 0
-    if (!ok) {
+    if (ok) {
+      const projectDir = await colbertProjectDir(workspace)
+      ok =
+        projectDir !== null &&
+        validateIndexIntegrity(path.join(projectDir, "index")).verdict === "coherent"
+      if (!ok) {
+        failureClass = "corrupt"
+        if (projectDir) await quarantineProjectDir(projectDir)
+      }
+    } else {
       // stalled (inactivity watchdog) or timedOut (absolute backstop) both
       // mean "didn't finish, killed" → `stuck`; a clean non-zero exit is a
       // colgrep `error`. NEVER inspect res.stderr (embeds source).
       failureClass = res.stalled || res.timedOut ? "stuck" : "error"
     }
-  } catch {
+  } catch (err) {
     ok = false
     failureClass = "launch"
+    consola.error("colbert: init failed to launch:", err)
   } finally {
     releaseInit(workspace)
   }

@@ -45,7 +45,7 @@ The tool response carries a 3-valued top-level `source` field to tell the model 
 - `"lexical"` (caller forced a lexical mode)
 - `"lexical-fallback"` (a semantic/default query degraded to lexical because the index wasn't ready)
 
-Semantic-ready result rows carry a `score` field (ColBERT relevance, interpretable). Lexical rows omit it.
+Semantic-ready result rows carry a `score` field (ColBERT relevance, interpretable). Lexical rows omit it. With `summary` enabled (the default), both semantic and lexical responses include compact outlines for up to the first 10 distinct result files, limited to top-level declarations and class members; `summary:false` omits them.
 
 ## Freshness verdict (the staleness correctness guard)
 
@@ -57,13 +57,18 @@ metadata sidecar (`indices/.gh-router-meta/<hash>.json`) and computes a
 freshness verdict on each query from `git rev-parse HEAD` +
 `git status --porcelain`:
 
-- **fresh** - `ready` AND HEAD matches the last index AND the tree is not
-  newly dirty → serve semantic.
+- **fresh** - `ready`, physical shard intervals are contiguous and non-overlapping,
+  the recorded binary/ORT SHAs match the provisioned generation, HEAD matches
+  the last index, and the tree is not newly dirty → serve semantic.
 - **stale** - HEAD moved or the tree is dirty since indexing → honest
   `stale` notice, **no** possibly-deleted-content hits labeled `ready`.
+- **corrupt** - numbered PLAID shard metadata is unreadable, malformed, gapped,
+  overlapping, or belongs to an older binary/ORT generation → quarantine the
+  project directory by atomic rename, remove it out of band, and start one
+  bounded clean rebuild. A failed rename never falls back to in-place deletion.
 
 A non-git workspace falls back to colgrep's own mtime-based incremental
-signal.
+signal, but still passes the physical-integrity and engine-generation gates.
 
 ## Definitive index state (not a blunt timeout)
 
@@ -88,15 +93,35 @@ so the watchdog re-arms while the index dir keeps **growing on disk**
 runs as long as it needs; a hung one dies fast. A generous absolute
 `GH_ROUTER_COLBERT_INIT_TIMEOUT_MS` (default 6h) is only a runaway backstop.
 
+**CPU share.** colgrep defaults its encoding parallelism to the machine's
+FULL thread count, so a background index build saturates the box — the
+opposite of what a background build should do during a long interactive
+session (the proxy even holds a keep-awake assertion so those sessions run
+unattended). Before each `init` the runner caps it at **25% of threads with
+a floor of 2** (16 threads → 4 sessions; a 4-thread box → 2, not 1).
+
+`--parallel` exists only on colgrep's `settings` subcommand — there is no
+per-run flag and no env var — and it writes `parallel_sessions` into
+`<COLGREP_DATA_DIR>/../config.json`, which for us is
+`<APP_DIR>/colbert/config.json`. That is router-owned: after we write ours,
+a plain `colgrep settings` with no `COLGREP_DATA_DIR` still reports `auto`,
+so a user's own colgrep install keeps its own settings. Because the value
+persists there, it also governs the reconcile a later `search` may run.
+Applying it is best-effort — a failure means colgrep encodes at its default,
+which is greedy but not incorrect, so it never blocks a build. Override the
+share with `GH_ROUTER_COLBERT_PARALLEL` (a positive integer).
+
 **Failure-class-aware self-heal.** A failed build records a `failureClass`
-(`crashed` | `stuck` | `error` | `launch`) and increments a `failedAttempts`
+(`crashed` | `stuck` | `corrupt` | `error` | `launch`) and increments a `failedAttempts`
 counter (reset to 0 on success). On a later query the runner re-kicks a
 debounced background re-index when the attempt is under the per-class cap
-(`stuck` retries once, transient classes up to 3) AND a 5-min backoff has
-elapsed; past the cap it returns an operator-actionable notice instead of
-looping. The startup auto-kick (`provisionAndIndexColbert`) skips a workspace
-that is already capped or `stuck`, so a restart loop can't re-burn a
-known-bad build. `failed` is no longer a terminal dead-end within a session.
+(`stuck` and `corrupt` retry once, transient classes up to 3) AND a 5-min
+backoff has elapsed; past the cap it returns an operator-actionable notice
+instead of looping. The startup auto-kick (`provisionAndIndexColbert`) skips a
+workspace that is already capped or `stuck`; an under-cap `corrupt` workspace
+gets its bounded clean retry after restart, but a capped one stays
+operator-actionable so a restart loop cannot re-burn a known-bad build.
+`failed` is no longer a terminal dead-end within a session.
 
 ## Model guidance during the unavailable window
 

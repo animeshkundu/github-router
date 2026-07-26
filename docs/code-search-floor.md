@@ -89,11 +89,12 @@ Let `M(cmd)` be a command's match set on text files. For `complete: true`:
   `ast-grep` matches multi-line AST constructs ripgrep cannot. The honest relationship: for a
   single-token symbol occurrence ripgrep finds the line, and `code_search` *adds* AST
   confirmation via `role: "definition"` - it does not subsume `ast-grep`'s structural patterns.
-- **vs `tree-sitter` alone: a bounded subset, not a superset.** `outlines` is a tree-sitter
-  outline of only the (≤ `CODE_SUMMARY_MAX_FILES`) distinct *result* files, capped at
-  `MAX_OUTLINE_ENTRIES` and budget-fitted into 256 KB. A full-workspace tree-sitter scan would
-  see definitions in files `code_search` never matched. The outline *enriches* results; it does
-  not replace an AST search.
+- **vs `tree-sitter` alone: a bounded navigational summary, not a superset.** `outlines` covers
+  only the (≤ `CODE_SUMMARY_MAX_FILES`) distinct *result* files and includes top-level symbols
+  plus class members, omitting function-local declarations and nested implementation detail.
+  It is capped at `MAX_OUTLINE_ENTRIES` and budget-fitted into 256 KB. A full-workspace
+  tree-sitter scan sees definitions this summary intentionally excludes. The outline *enriches*
+  results; it is not part of the match set and does not replace an AST search.
 
 The empirically-proven prior violation it fixes: `"ab"` in old ranked mode returned 4 hits
 while `M(C)` had 5 - the shoulder cut silently dropped `fabric`. Under `complete: true` that
@@ -121,11 +122,12 @@ covers that engine when its mode is used:
   line-oriented ripgrep and is NOT a superset of ast-grep's structural patterns. We never
   assert `⊇ ast-grep` for the DEFAULT (regex) mode - only when `ast_pattern` is used does the
   output equal ast-grep's, because ast-grep is the engine that produced it.
-- `ast_pattern` requires **ast-grep (`sg`) to be present** (toolbelt bin dir or system PATH).
-  When it is absent, `code_search` returns `{results: [], notice: "ast_pattern requires
-  ast-grep (sg), which isn't available here; the model can run ast-grep directly or omit
-  ast_pattern"}` with `isError: false` - a graceful disclosure, NOT a silent fall-back to
-  regex (which would quietly violate the `= ast-grep` claim). `ast_pattern` takes precedence
+- `ast_pattern` requires **ast-grep to be present** (router toolbelt `sg`/`ast-grep`, or the
+  unambiguous `ast-grep` name on system PATH; bare system `sg` is never trusted because Linux
+  uses it for shadow-utils). When absent, `code_search` returns no results and a notice listing
+  the exact toolbelt directory and PATH name checked. This is a graceful disclosure, NOT a
+  silent fall-back to regex (which would quietly violate the `= ast-grep` claim).
+  `ast_pattern` takes precedence
   over `query` for match generation; AST hits are document-order (no BM25F - there is no
   text-token relevance signal for a structural match).
 - `ast_pattern` **requires `ast_lang`** (the grammar id: `ts` / `tsx` / `js` / `py` / `rust` /
@@ -196,8 +198,8 @@ Within the realms of reality, the guarantees are:
    heuristic. Raise `limit` for more; `truncated` tells you when you've hit it.
 2. **default** ⇒ precision-pruned, but the prune is always disclosed via `notice` + reversible
    via `complete: true`.
-3. **structure** ⇒ a full nested outline of the result files by default; the model can decide
-   what to actually open without missing a symbol.
+3. **structure** ⇒ a compact navigational outline of top-level declarations and class members
+   in result files by default; local implementation details remain available through hits/read.
 4. **accuracy** ⇒ `role: "definition"` is emitted only when proven.
 
 The one thing outside our control is the user's `limit` - and that loss is always reported.

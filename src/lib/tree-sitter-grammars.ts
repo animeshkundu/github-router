@@ -9,7 +9,7 @@
  *     identifier-node-type set,
  *   - the lazy `web-tree-sitter` `Parser.init()` + grammar-load cache
  *     (`getGrammarBundle`), pre-warmed at module import time, and
- *   - `outlineFile`, a full structural outline of a single file.
+ *   - `outlineFile`, a compact navigational outline of a single file.
  *
  * The BM25F scoring, the structural-confirmation pass, and the parsed-
  * tree LRU stay in `code-search.ts` — they are tightly coupled to the
@@ -375,19 +375,25 @@ function deriveDefinitionName(node: Parser.SyntaxNode): string | null {
 }
 
 /**
- * Collect EVERY definition node from the parse tree — top-level AND
- * nested (class methods, methods' inner functions, nested classes, …) —
- * so the outline is a COMPLETE structural map the model can rely on to
- * decide what to read. Recurses through non-definition wrappers (TS
- * `export_statement`, Python `decorated_definition`, C++
- * `template_declaration`, …) at the same depth, and INTO each definition
- * at depth+1 to surface its members.
- *
- * `defTypes` is the language's definition-node-type set. Each node yields
- * one entry; the `name` is derived per `deriveDefinitionName` (a node
- * with no recoverable name is skipped, but the walk still descends into
- * it so its named members aren't lost). Bounded at `MAX_OUTLINE_ENTRIES`.
+ * Collect declarations that help a model navigate a file: top-level symbols
+ * and members of class-like containers. Function-local variables and nested
+ * helpers are deliberately omitted because they inflate the summary without
+ * identifying useful read targets. Non-definition wrappers (exports,
+ * decorators, templates) preserve the surrounding depth.
  */
+const OUTLINE_MEMBER_CONTAINERS = new Set([
+  "class_declaration",
+  "class_definition",
+  "class_specifier",
+  "interface_declaration",
+  "annotation_type_declaration",
+  "impl_item",
+  "trait_item",
+  "struct_item",
+  "namespace_definition",
+  "module",
+])
+
 function collectDefinitions(
   root: Parser.SyntaxNode,
   defTypes: ReadonlySet<string>,
@@ -395,33 +401,38 @@ function collectDefinitions(
 ): Array<FileOutlineEntry> {
   const out: Array<FileOutlineEntry> = []
 
-  const visit = (node: Parser.SyntaxNode, depth: number): void => {
+  const visit = (
+    node: Parser.SyntaxNode,
+    depth: number,
+    includeDefinitions: boolean,
+  ): void => {
     if (signal?.aborted || out.length >= MAX_OUTLINE_ENTRIES) return
     for (const child of node.namedChildren) {
       if (signal?.aborted || out.length >= MAX_OUTLINE_ENTRIES) return
       if (defTypes.has(child.type)) {
-        const name = deriveDefinitionName(child)
-        if (name !== null) {
-          out.push({
-            kind: child.type,
-            name,
-            line: child.startPosition.row + 1,
-            depth,
-          })
+        if (includeDefinitions) {
+          const name = deriveDefinitionName(child)
+          if (name !== null) {
+            out.push({
+              kind: child.type,
+              name,
+              line: child.startPosition.row + 1,
+              depth,
+            })
+          }
         }
-        // Recurse INTO the definition to surface nested members — this
-        // is the "don't miss" fix. A name-less definition is still
-        // descended (at depth+1) so its members aren't dropped.
-        visit(child, depth + 1)
+        // Only class-like definitions expose navigable members. Do not walk a
+        // function body and accidentally publish every local declarator.
+        if (includeDefinitions && OUTLINE_MEMBER_CONTAINERS.has(child.type)) {
+          visit(child, depth + 1, true)
+        }
         continue
       }
-      // Non-definition wrapper (export/decorator/template/…) — recurse at
-      // the SAME depth so the wrapped definition keeps its real level.
-      visit(child, depth)
+      visit(child, depth, includeDefinitions)
     }
   }
 
-  visit(root, 0)
+  visit(root, 0, true)
   return out
 }
 
@@ -607,10 +618,10 @@ export function confirmDefinitionSites(
 }
 
 /**
- * Full structural outline of a single file — EVERY definition, top-level
- * AND nested (functions, classes, methods, nested functions, interfaces,
- * type aliases, enums, including exported / decorated / templated
- * wrappers). Each entry carries a `depth` (0 = top-level). Reuses the
+ * Navigational structural outline of a single file: top-level declarations
+ * plus class-like members (methods, fields, interface members), excluding
+ * function-local variables and nested implementation helpers. Each entry
+ * carries a `depth` (0 = top-level). Reuses the
  * shared grammar bundle and the same `Parser` the structural pass uses
  * — no second `Parser.init()`.
  *

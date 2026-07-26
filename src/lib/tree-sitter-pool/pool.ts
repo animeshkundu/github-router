@@ -162,6 +162,15 @@ class TreeSitterPool {
     return { crashes: this.crashCount, spawned: this.workersSpawned }
   }
 
+  /**
+   * Launch-time latency optimization: ready ONE worker and its grammar bundle.
+   * A single worker keeps startup CPU/memory bounded while removing the first
+   * query's initialization wait; normal demand still grows the pool lazily.
+   */
+  async warm(): Promise<boolean> {
+    return (await this.ensureWorkers(1)) > 0
+  }
+
   // ---- Central scheduler state (shared across ALL concurrent parseFiles
   // calls). A worker is leased to exactly one job at a time; replies route by
   // job id. This is what makes concurrent `code` searches safe: without a
@@ -185,19 +194,26 @@ class TreeSitterPool {
    *  callers onto one in-flight ensure so 8 simultaneous searches don't each
    *  spawn a fresh batch. Returns the live worker count (0 → caller must fall
    *  back to the in-process path). */
-  private ensureWorkers(): Promise<number> {
+  private ensureWorkers(target = this.size): Promise<number> {
     if (this.unavailable || this.shuttingDown) return Promise.resolve(0)
+    const desired = Math.max(1, Math.min(target, this.size))
     const liveNow = this.workers.filter((w) => w.ready && w.loaded.size > 0).length
-    if (liveNow >= this.size) return Promise.resolve(liveNow)
-    if (this.ensuring) return this.ensuring
-    this.ensuring = this.doEnsureWorkers().finally(() => {
+    if (liveNow >= desired) return Promise.resolve(liveNow)
+    if (this.ensuring) {
+      // An already-ready worker can serve this query while the pool expands.
+      // A truly cold caller still waits for the coalesced ready handshake.
+      return liveNow > 0 ? Promise.resolve(liveNow) : this.ensuring
+    }
+    this.ensuring = this.doEnsureWorkers(desired).finally(() => {
       this.ensuring = null
     })
-    return this.ensuring
+    // Launch warm-up readies one worker. Do not make the first query wait while
+    // the remaining width fills; doEnsureWorkers pumps queued work when ready.
+    return liveNow > 0 ? Promise.resolve(liveNow) : this.ensuring
   }
 
-  private async doEnsureWorkers(): Promise<number> {
-    const need = this.size - this.workers.length
+  private async doEnsureWorkers(target: number): Promise<number> {
+    const need = target - this.workers.length
     const spawns: Array<Promise<PooledWorker | null>> = []
     for (let i = 0; i < need; i++) spawns.push(this.spawnWorker())
     const spawned = await Promise.all(spawns)
@@ -455,12 +471,10 @@ class TreeSitterPool {
     const myJobIds = new Set<number>()
 
     // Register abort handling BEFORE awaiting ensureWorkers so an abort during
-    // worker spawn is observed promptly for QUEUED work. NOTE: if the abort
-    // lands while we're still inside `ensureWorkers()` (worker spawn/ready
-    // handshake), the await itself is not interrupted — cancellation of the
-    // *spawn* is bounded by READY_TIMEOUT_MS. The structural pass's 200ms budget
-    // makes this a non-issue in practice (workers are warm after the first
-    // call); a hard spawn-abort race isn't worth the added complexity.
+    // worker spawn is observed before any jobs are queued. The await itself is
+    // bounded by READY_TIMEOUT_MS. Worker and grammar initialization deliberately
+    // happen before the parse timer starts, so a cold pool cannot consume a
+    // user's structural-analysis budget without parsing a file.
     const stop = (): void => {
       stopped = true
       // Drop our still-queued jobs so their enqueue() promises resolve (else
@@ -487,15 +501,23 @@ class TreeSitterPool {
     }
     opts.signal.addEventListener("abort", onAbort, { once: true })
 
-    const budgetTimer = setTimeout(() => {
-      budgetHit = true
-      stop()
-    }, opts.budgetMs)
-    budgetTimer.unref?.()
+    let budgetTimer: ReturnType<typeof setTimeout> | undefined
 
     try {
       const liveCount = await this.ensureWorkers()
       if (liveCount === 0) return null
+      if (opts.signal.aborted) return { byFile, budgetHit: false }
+
+      if (opts.budgetMs <= 0) {
+        budgetHit = true
+        stop()
+      } else {
+        budgetTimer = setTimeout(() => {
+          budgetHit = true
+          stop()
+        }, opts.budgetMs)
+        budgetTimer.unref?.()
+      }
 
       // Per-file dispatch with a single retry on worker death. The `stopped`
       // flag (budget/abort) makes pending dispatches resolve as misses.
@@ -531,7 +553,7 @@ class TreeSitterPool {
 
       await Promise.all(jobs.map((job) => dispatchFile(job, false)))
     } finally {
-      clearTimeout(budgetTimer)
+      if (budgetTimer) clearTimeout(budgetTimer)
       opts.signal.removeEventListener("abort", onAbort)
     }
 
@@ -601,6 +623,14 @@ function resolveWorkerPath(): string | null {
 let _pool: TreeSitterPool | null = null
 let _shutdownRegistered = false
 let _testCrashOnceArmed = false
+let _warmOverride: ((pool: TreeSitterPool) => Promise<boolean>) | undefined
+
+/** Test-only: override launch warm-up without changing query-time lazy init. */
+export function __setWarmTreeSitterPoolForTest(
+  fn: ((pool: TreeSitterPool) => Promise<boolean>) | undefined,
+): void {
+  _warmOverride = fn
+}
 
 /** Test-only: crash exactly the next dispatched worker job. */
 export function __armWorkerCrashOnceForTest(): void {
@@ -667,10 +697,34 @@ export function getTreeSitterPool(): TreeSitterPool | null {
   return _pool
 }
 
+/**
+ * Best-effort launch warm-up. Returns immediately when disabled/unavailable and
+ * never rejects; lazy initialization remains the fallback after any failure.
+ */
+export async function warmTreeSitterPool(): Promise<void> {
+  if (process.env.GH_ROUTER_DISABLE_TS_POOL_WARMUP === "1") return
+  const pool = getTreeSitterPool()
+  if (!pool) return
+  try {
+    if (await (_warmOverride?.(pool) ?? pool.warm())) return
+  } catch (err) {
+    consola.debug(
+      `[code_search] tree-sitter pool warm-up failed; using lazy initialization: ${(err as Error).message}`,
+    )
+  }
+  // Do not let a launch-only failure poison the singleton. The next query gets
+  // a fresh pool and follows the established lazy-init/fallback path.
+  if (_pool === pool) {
+    pool.shutdown()
+    _pool = null
+  }
+}
+
 /** Test-only: tear down and reset the singleton. */
 export function __resetTreeSitterPoolForTests(): void {
   _pool?.shutdown()
   _pool = null
+  _warmOverride = undefined
   __disarmWorkerCrashOnceForTest()
 }
 

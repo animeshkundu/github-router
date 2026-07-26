@@ -22,6 +22,7 @@ import { toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { provisionAndIndexColbert } from "./lib/colbert"
 import { startKeepAwake } from "./lib/keep-awake"
+import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
 import { hasSupportedBrowserInstalled } from "./lib/browser-mcp/browser-detect"
 import { resolveCodexModel, resolveModel } from "./lib/utils"
@@ -74,6 +75,10 @@ export const codex = defineCommand({
     // Best-effort ColBERT semantic-search provision + background index of
     // the launch cwd. ON by default; never blocks launch, never throws.
     void provisionAndIndexColbert()
+
+    // Best-effort, bounded launch warm-up: ready one tree-sitter worker.
+    // Opt out with GH_ROUTER_DISABLE_TS_POOL_WARMUP=1.
+    void warmTreeSitterPool()
 
     // Best-effort: keep the machine awake while the proxy/Codex session
     // runs (win32 default-on; opt out GH_ROUTER_DISABLE_KEEP_AWAKE=1).

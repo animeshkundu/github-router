@@ -75,6 +75,7 @@ import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { provisionAndIndexColbert } from "./lib/colbert"
 import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
+import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
 import {
   DEFAULT_CLAUDE_MODEL_FALLBACKS,
@@ -494,6 +495,10 @@ export const claude = defineCommand({
     // the launch cwd (if a git repo). ON by default; never blocks launch,
     // never throws. Opt out with GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1.
     void provisionAndIndexColbert()
+
+    // Best-effort, bounded launch warm-up: ready one tree-sitter worker.
+    // Opt out with GH_ROUTER_DISABLE_TS_POOL_WARMUP=1.
+    void warmTreeSitterPool()
 
     // Best-effort: keep the machine awake while the proxy/Claude Code
     // session runs (win32 default-on; opt out GH_ROUTER_DISABLE_KEEP_AWAKE=1).

@@ -31,9 +31,12 @@
  * `colbertSearchEnabled()`.
  */
 
+import path from "node:path"
+
 import { searchCode, type CodeSearchResponse } from "./code-search"
 import { colbertSearchEnabled, runSemanticSearch } from "./colbert"
 import type { SemanticSearchResult, SemanticStatus } from "./colbert/runner"
+import { outlineFile } from "./tree-sitter-grammars"
 
 export type UnifiedMode = "semantic" | "lexical" | "exact" | "regex" | "ast"
 
@@ -76,7 +79,7 @@ export interface UnifiedCodeSearchResult {
   source: UnifiedSource
   results: Array<UnifiedResultRow>
   notice?: string
-  /** Only ever present on the lexical path (semantic rows carry none). */
+  /** Navigable declarations for up to the first 10 distinct result files. */
   outlines?: CodeSearchResponse["outlines"]
   truncated?: boolean
 }
@@ -101,9 +104,12 @@ function lexicalSearchCodeMode(mode: UnifiedMode): "ranked" | "literal" | "regex
  * it both levers: retry `mode:"semantic"` shortly (the index is self-healing
  * in the background) OR re-query now with specific symbol/keyword terms.
  */
+const FALLBACK_GUIDANCE_MARKER = 'retry mode:"semantic"'
+const FALLBACK_GUIDANCE =
+  `${FALLBACK_GUIDANCE_MARKER} shortly, or re-query now with specific symbol/keyword terms`
+
 function fallbackNoticeFor(status: SemanticStatus): string {
-  const tail =
-    'retry mode:"semantic" shortly, or re-query now with specific symbol/keyword terms'
+  const tail = FALLBACK_GUIDANCE
   switch (status) {
     case "building":
       return `semantic index is building; returned lexical keyword matches — ${tail}`
@@ -131,6 +137,45 @@ function joinNotice(
   if (primary && secondary) return `${primary} (${secondary})`
   // `||` (not `??`) so an empty-string primary still yields the secondary.
   return primary || secondary || undefined
+}
+
+/** Preserve runner-specific context while guaranteeing actionable guidance once. */
+function semanticFallbackNotice(sem: SemanticSearchResult): string {
+  if (!sem.notice) return fallbackNoticeFor(sem.status)
+  if (sem.notice.includes(FALLBACK_GUIDANCE_MARKER)) return sem.notice
+  return `${sem.notice} — ${FALLBACK_GUIDANCE}`
+}
+
+async function outlinesForSemanticResults(
+  input: UnifiedCodeSearchInput,
+  results: Array<UnifiedResultRow>,
+  signal?: AbortSignal,
+): Promise<CodeSearchResponse["outlines"]> {
+  if (input.summary === false) return undefined
+  const seen = new Set<string>()
+  const files: Array<string> = []
+  for (const result of results) {
+    if (seen.has(result.file)) continue
+    seen.add(result.file)
+    files.push(result.file)
+    if (files.length >= 10) break
+  }
+
+  const outlines: NonNullable<CodeSearchResponse["outlines"]> = []
+  const deadline = Date.now() + 2000
+  const workspace = path.resolve(input.workspace)
+  for (const file of files) {
+    if (signal?.aborted || Date.now() > deadline) break
+    const abs = path.resolve(workspace, file)
+    const rel = path.relative(workspace, abs)
+    // Semantic rows should already be workspace-relative. Fail closed if a
+    // malformed/upstream row is absolute or escapes rather than outlining an
+    // unrelated file outside the caller's workspace.
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) continue
+    const outlined = await outlineFile(abs, signal)
+    outlines.push({ file, outline: outlined.outline })
+  }
+  return outlines
 }
 
 async function runLexical(
@@ -226,16 +271,18 @@ export async function runUnifiedCodeSearch(
   }
 
   if (sem.status === "ready") {
+    const results = (sem.results ?? []).map((r) => ({
+      file: r.file,
+      line: r.line,
+      snippet: r.snippet,
+      ...(r.endLine !== undefined ? { endLine: r.endLine } : {}),
+      ...(r.name !== undefined ? { name: r.name } : {}),
+      ...(r.score !== undefined ? { score: r.score } : {}),
+    }))
     return {
       source: "semantic",
-      results: (sem.results ?? []).map((r) => ({
-        file: r.file,
-        line: r.line,
-        snippet: r.snippet,
-        ...(r.endLine !== undefined ? { endLine: r.endLine } : {}),
-        ...(r.name !== undefined ? { name: r.name } : {}),
-        ...(r.score !== undefined ? { score: r.score } : {}),
-      })),
+      results,
+      outlines: await outlinesForSemanticResults(input, results, signal),
       ...(sem.notice ? { notice: sem.notice } : {}),
     }
   }
@@ -244,6 +291,6 @@ export async function runUnifiedCodeSearch(
   const r = await runLexical(input, "lexical", "lexical-fallback", signal)
   return {
     ...r,
-    notice: joinNotice(r.notice, fallbackNoticeFor(sem.status)),
+    notice: joinNotice(r.notice, semanticFallbackNotice(sem)),
   }
 }

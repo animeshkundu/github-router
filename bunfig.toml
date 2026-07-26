@@ -1,0 +1,23 @@
+[test]
+# `tests/isolated/**` is excluded from DISCOVERY so a bare `bun test` cannot
+# sweep those files into the same process as the rest of the suite.
+#
+# Every file under tests/isolated/ uses `mock.module()`, which bun applies
+# process-globally and which `mock.restore()` cannot undo. Sharing one process
+# is therefore not merely untidy, it deadlocks: the `node:child_process` spawn
+# mock in tests/isolated/lib-launch-child.test.ts returns a fake child that
+# never emits `close`, and once it leaks, the spawn in src/lib/code-search.ts
+# awaits that `close` forever — `bun test` prints part of the suite and then
+# hangs indefinitely with no summary.
+#
+# CI already ran the two lanes correctly (one sweep excluding this directory,
+# then one process per isolated file), but a bare `bun test` matched neither
+# and always hung. This makes the bare command safe by default.
+#
+# Running the isolated lane requires an explicit CLI `--path-ignore-patterns`,
+# which OVERRIDES this value — that is how `bun run test` (scripts/run-tests.ts)
+# opts the directory back in, one process per file. To run a single isolated
+# file by hand you must add the override yourself:
+#   bun test tests/isolated/foo.test.ts --path-ignore-patterns 'node_modules/**'
+# Without it the file matches zero tests and bun exits 1.
+pathIgnorePatterns = ["tests/isolated/**"]

@@ -10,6 +10,7 @@ import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
 import { browserToolsEnabled } from "./lib/mcp-capabilities"
 import { provisionAndIndexColbert } from "./lib/colbert"
 import { startKeepAwake } from "./lib/keep-awake"
+import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import {
   getClaudeCodeEnvVars,
   getCodexEnvVars,
@@ -84,6 +85,11 @@ export const start = defineCommand({
     // the launch cwd (if a git repo). ON by default; never blocks launch,
     // never throws. Opt out with GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1.
     void provisionAndIndexColbert()
+
+    // Ready one tree-sitter worker in the background so the first code search
+    // avoids WASM/grammar initialization. One worker keeps launch CPU bounded;
+    // demand grows the pool lazily. Opt out with GH_ROUTER_DISABLE_TS_POOL_WARMUP=1.
+    void warmTreeSitterPool()
 
     // Best-effort: keep the machine awake while the proxy serves (win32
     // default-on; opt out with GH_ROUTER_DISABLE_KEEP_AWAKE=1). Holds a

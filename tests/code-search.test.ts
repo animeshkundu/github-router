@@ -32,6 +32,7 @@ import {
   resolveAstGrep,
   __setAstGrepResolverForTest,
 } from "../src/lib/code-search"
+import { PATHS } from "../src/lib/paths"
 
 // ============================================================
 // Test fixture management
@@ -1041,9 +1042,9 @@ describe("searchCode — structural summary (summary: true)", () => {
         path.join(root, "svc.ts"),
         [
           "export class UserService {",
-          "  getUser() { return MARKER }",
+          "  getUser() { const localOnly = MARKER; return localOnly }",
           "}",
-          "export function makeUser() { return new UserService() }",
+          "export function makeUser() { const tmp = MARKER; return new UserService() }",
           "export const MARKER = 1",
         ].join("\n") + "\n",
       )
@@ -1062,8 +1063,10 @@ describe("searchCode — structural summary (summary: true)", () => {
       // Top-level symbols present...
       expect(names).toContain("UserService")
       expect(names).toContain("makeUser")
-      // ...and nested members too (robust, full-tree outline).
+      // ...and navigable class members, but not function-local declarations.
       expect(names).toContain("getUser")
+      expect(names).not.toContain("localOnly")
+      expect(names).not.toContain("tmp")
       // The method is marked deeper than its enclosing class.
       const cls = (svc?.outline ?? []).find((e) => e.name === "UserService")
       const method = (svc?.outline ?? []).find((e) => e.name === "getUser")
@@ -1523,7 +1526,8 @@ describe("multi-engine: ast_pattern", () => {
         ast_pattern: "function $F() { $$$ }",
       })
       expect(r.results.length).toBe(0)
-      expect(r.notice ?? "").toMatch(/ast-grep \(sg\), which isn't available/)
+      expect(r.notice ?? "").toContain(PATHS.TOOLBELT_BIN_DIR)
+      expect(r.notice ?? "").toMatch(/on PATH \(ast-grep\)/)
     } finally {
       __setAstGrepResolverForTest(undefined)
       fx.cleanup()
