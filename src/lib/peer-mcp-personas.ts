@@ -565,9 +565,12 @@ export function buildAgentPrompt(
  *     of the live catalog). The raw `mcp__<workers>__*` tools are named only
  *     as the guarded plumbing the dispatchers call, never as a main-agent
  *     interface.
- *   - Always names the implementer/debugger/qa-engineer native subagents
- *     (they are injected unconditionally); the implementer-vs-`worker-implement`
- *     contrast is added only when worker tools are available.
+ *   - Always names the implementer/reviewer/brainstorm/scribe native subagents
+ *     (they are injected unconditionally, degrading to the lead's model rather
+ *     than disappearing); `scout` is named only when `scoutAvailable` is not
+ *     false, because it is dropped outright when no cheap-tier model resolves.
+ *     The implementer-vs-`worker-implement` contrast is added only when worker
+ *     tools are available.
  *   - Conditionally lists stand_in only when `standInAvailable`
  *     (mirrors `standInToolEnabled()`).
  *   - Conditionally lists gh-first-mate only when `agentToolsAvailable`
@@ -589,6 +592,11 @@ export function buildPeerAwarenessSnippet(opts: {
   powerBrowseAvailable?: boolean
   fleetAvailable?: boolean
   agentToolsAvailable?: boolean
+  /** Whether `scout` resolved a cheap-tier model and was therefore emitted.
+   *  Unlike the other natives it is dropped rather than downgraded to the lead's
+   *  model, so naming it unconditionally here would advertise an agent that is
+   *  not in the Task enum. */
+  scoutAvailable?: boolean
   /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
    *  collision). Missing key → use the preferred bare key. Keeps the
    *  `mcp__<server>__<tool>` paths in this snippet pointing at OUR servers. */
@@ -636,7 +644,7 @@ export function buildPeerAwarenessSnippet(opts: {
     )
   }
   para2Parts.push(
-    `Three native subagents are always available (Task): \`implementer\` (bounded implementation), \`debugger\` (reproduce + isolate a failure's root cause), and \`qa-engineer\` (review + author/run tests), each in its own context so the lead's context stays free; on gpt-5.6-sol when in the catalog, else the lead's model.`,
+    `Native subagents (Task), each in its own context so heavy work never fills yours: \`implementer\` (you know what to build), \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).`,
   )
   if (opts.workerToolsAvailable) {
     para2Parts.push(

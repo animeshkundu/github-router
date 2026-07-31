@@ -25,6 +25,7 @@ const { ensurePaths, PATHS, sweepStaleRuntimeFiles, sweepStalePeerAgentMdFiles, 
   await import("../src/lib/paths")
 const { injectPeerMcpIntoMirror } = await import("../src/lib/codex-mcp-config")
 const { ALL_DISPATCHER_AGENT_NAMES } = await import("../src/lib/worker-dispatch")
+const { ALL_NATIVE_AGENT_NAMES } = await import("../src/lib/codex-mcp-config")
 
 // Round-4 #4: verify that monkey-patching `fs.<name>` / `consola.<name>`
 // is actually intercepted by the library-side imports of those
@@ -289,6 +290,34 @@ test("sweepStalePeerAgentMdFiles reaps a dead-PID .md for EVERY worker-* dispatc
     path.join(agentsDir, `peer-${deadPid}-deadbeef-${name}.md`),
   )
   expect(targets.length).toBeGreaterThanOrEqual(6)
+  for (const p of targets) {
+    await fs.writeFile(p, "---\nname: x\n---\n", { mode: 0o600 })
+  }
+
+  await sweepStalePeerAgentMdFiles()
+
+  for (const p of targets) {
+    await expect(fs.stat(p)).rejects.toThrow()
+  }
+})
+
+test("sweepStalePeerAgentMdFiles reaps a dead-PID .md for EVERY native subagent name, current AND retired (regex drift guard)", async () => {
+  // Same drift guard as the dispatchers, for the natives — they had none, which
+  // is how the rename could have stranded files.
+  //
+  // The retired names are the load-bearing half. `debugger` and `qa-engineer`
+  // no longer exist, but a session that crashed before the rename left files
+  // carrying them; drop those names from the allowlist and the sweep stops
+  // matching, so the files survive every future launch and register as ghost
+  // subagents with a stale prompt and a stale model. The allowlist is a
+  // permanent superset: names are added, never removed.
+  const RETIRED_NATIVE_NAMES = ["debugger", "qa-engineer"]
+  const agentsDir = path.join(PATHS.CLAUDE_CONFIG_DIR, "agents")
+  await fs.mkdir(agentsDir, { recursive: true })
+  const deadPid = 2_147_483_641
+  const targets = [...ALL_NATIVE_AGENT_NAMES, ...RETIRED_NATIVE_NAMES].map((name) =>
+    path.join(agentsDir, `peer-${deadPid}-deadbeef-${name}.md`),
+  )
   for (const p of targets) {
     await fs.writeFile(p, "---\nname: x\n---\n", { mode: 0o600 })
   }

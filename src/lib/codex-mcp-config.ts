@@ -110,9 +110,17 @@ interface BuildOpts {
   /** Whether the browse worker tool is served (`browseAgentEnabled()`). Gates
    *  the extra `worker-browse` dispatcher. Optional (defaults false). */
   browseAvailable?: boolean
-  /** Model for the native OpenAI subagents (implementer/debugger/qa-engineer)
-   *  when present in the live catalog. */
+  /** Model for the native subagents that want the OpenAI frontier coder
+   *  (`implementer`, `reviewer`) when present in the live catalog. */
   nativeSubagentModel?: string
+  /** Model for `brainstorm` (a third lab, for options the lead would not
+   *  generate). Absent → the agent inherits the lead's model. */
+  brainstormModel?: string
+  /** Model for `scout`. Absent → the agent is OMITTED rather than inheriting the
+   *  lead's model, because being cheaper than the lead is its whole purpose. */
+  scoutModel?: string
+  /** Model for `scribe`. Absent → the agent inherits the lead's model. */
+  scribeModel?: string
 }
 
 export interface HttpMcpEntry {
@@ -352,6 +360,98 @@ export const BUILTIN_SUBAGENT_DEFINITIONS: PeerAgentDefinitions = {
 }
 
 /**
+ * The always-injected native subagents, in roster order. Exported so the sweep
+ * allowlist in `paths.ts` and its drift test can iterate them the same way
+ * `ALL_DISPATCHER_AGENT_NAMES` covers the `worker-*` dispatchers — without it, a
+ * renamed or newly added native silently escapes the sweep and its stale `.md`
+ * files load forever as ghost subagents.
+ *
+ * `scout` is listed here even though it is conditionally emitted (see
+ * `buildPeerAgentDefinitions`): the sweep must still recognize its filename so a
+ * file written by a launch that DID resolve a cheap model is reaped by a later
+ * launch that did not.
+ */
+export const ALL_NATIVE_AGENT_NAMES = [
+  "implementer",
+  "reviewer",
+  "brainstorm",
+  "scout",
+  "scribe",
+] as const
+
+/** Empty-string-safe read of an optional model id. */
+function nonEmptyModel(id: string | undefined): string | undefined {
+  return id && id.length > 0 ? id : undefined
+}
+
+/**
+ * The shared "prefer the dedicated tools over shell" steer, appended to every
+ * native subagent prompt. `bashUses` names the work that legitimately belongs in
+ * Bash for that agent (`builds` for a coder, `repros` for an investigator), the
+ * only token that ever differed across the three hand-copied variants this
+ * replaces.
+ *
+ * Deliberately NOT merged with `FILE_TOOL_GUIDANCE` in
+ * `anthropic-translate/anthropic-request.ts`: that one is injected at the shim
+ * boundary and therefore only reaches shim-routed (non-Claude) models. When a
+ * native falls back to the lead's Claude model the shim is bypassed entirely, so
+ * this prompt-level copy is the only coverage that survives. Two layers, two
+ * different reasons to exist.
+ */
+function fileToolSteer(bashUses: string): string {
+  return (
+    "Use the dedicated Edit/Write/Read tools for file changes and Grep/Glob for search; "
+    + `reserve Bash for running ${bashUses}, tests, and git. `
+    + "Do not shell out (sed/awk/python/here-docs) to read or edit files."
+  )
+}
+
+/** The read-only half of `fileToolSteer`, for agents that never write. */
+function readOnlyToolSteer(): string {
+  return (
+    "Use Read to read files and Grep/Glob plus the semantic code search tool to find them; "
+    + "Bash is for read-only inspection such as git log, git blame, and git show. "
+    + "Do not modify any file, and do not run mutating commands."
+  )
+}
+
+/**
+ * `tools:` allowlist for the read-only natives (`scout`, `brainstorm`), modelled
+ * on Claude Code's own `Explore`/`Plan` built-ins, which run with every tool
+ * EXCEPT Agent / Artifact / ExitPlanMode / Edit / Write / NotebookEdit — note
+ * that Anthropic's own read-only agent keeps Bash, which is what makes `git log`
+ * and `git blame` reachable.
+ *
+ * Two deliberate deviations, both forced by the frontmatter format:
+ *
+ *  1. `tools:` is a POSITIVE allowlist with no "all except" form, so the
+ *     complement has to be spelled out. Rather than enumerate every harness tool
+ *     (which varies by Claude Code version, and would silently drop anything
+ *     added later), this lists the read / search / shell core that a read-only
+ *     agent actually uses. Tools added by a future release are NOT inherited by
+ *     these two agents; that is the price of real enforcement over a prompt that
+ *     merely asks nicely.
+ *  2. The workers and orchestrate MCP groups are excluded on the same reasoning
+ *     that makes `Explore` drop `Agent`: both spawn further agents, so leaving
+ *     them in would reintroduce exactly the recursion that exclusion prevents.
+ *
+ * `searchKey` is the RESOLVED group key, not the bare literal: a user-side
+ * `mcpServers` collision renames the group (`gh-router-search`, …), and a
+ * hardcoded `mcp__search__*` would then grant nothing at all.
+ */
+function readOnlyToolAllowlist(searchKey: string): Array<string> {
+  return [
+    "Read",
+    "Grep",
+    "Glob",
+    "Bash",
+    "WebFetch",
+    "WebSearch",
+    `mcp__${searchKey}__*`,
+  ]
+}
+
+/**
  * Build the JSON payload for `claude --agents <path>`.
  *
  * Always includes the read-only personas applicable to the mode (gemini
@@ -392,39 +492,92 @@ export function buildPeerAgentDefinitions(
     }),
     ...peersMcp,
   }
-  // The native subagents (implementer/debugger/qa-engineer) are ALWAYS injected
-  // — no catalog gate. When `nativeSubagentModel` (gpt-5.6-sol/gpt-5.5) is in the
-  // live catalog they run on it at maximum reasoning (via the shim's model-aware
-  // default); otherwise the `model` frontmatter is OMITTED so they inherit the
-  // lead's model. Each omits `tools:` to inherit the full native + MCP toolset.
-  const nativeModel =
-    opts.nativeSubagentModel && opts.nativeSubagentModel.length > 0
-      ? opts.nativeSubagentModel
-      : undefined
+  // The native subagents are ALWAYS injected — no catalog gate. Each runs on the
+  // model chosen for its job when that model is live; otherwise its `model`
+  // frontmatter is OMITTED and it inherits the lead's model, so a thin catalog
+  // degrades the model, never the roster.
+  //
+  // `scout` is the one exception. Its entire reason to exist is being cheaper
+  // than the lead's model, so silently inheriting Opus would burn exactly the
+  // cost it was added to avoid — `scoutModel()` returns undefined when no
+  // cheap-tier model resolves and the agent is then omitted outright.
+  //
+  // `implementer`, `reviewer`, `scribe` inherit the full toolset (no `tools:`).
+  // `scout` and `brainstorm` carry the read-only allowlist.
+  const nativeModel = nonEmptyModel(opts.nativeSubagentModel)
+  const brainstormModel = nonEmptyModel(opts.brainstormModel)
+  const scoutModel = nonEmptyModel(opts.scoutModel)
+  const scribeModel = nonEmptyModel(opts.scribeModel)
   const modelField: { model?: string } = nativeModel ? { model: nativeModel } : {}
+  const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
+  // Inline the `search` server for the read-only natives, same claude-code#30280
+  // workaround the peers/workers subagents use: without it the allowlisted
+  // `mcp__<searchKey>__*` names resolve to nothing on spawn.
+  const searchMcp: { mcpServers?: Record<string, HttpMcpEntry> } =
+    opts.serverUrl
+      ? { mcpServers: { [searchKey]: httpEntryFor(opts.serverUrl, "search", opts.nonce, opts.workspaceHeaderCmd) } }
+      : {}
   out.implementer = {
     description: nativeModel
       ? `Bounded implementation subagent running ${nativeModel} (strong non-Claude coder, maximum reasoning). Use proactively for well-scoped coding tasks — edits, small features, fixes — to keep the lead's context focused; runs in its own context. Model is overridable at spawn.`
       : `Bounded implementation subagent (native tools, runs on the lead's model in its own context). Use proactively for well-scoped coding tasks — edits, small features, fixes — to keep the lead's context focused. Model is overridable at spawn.`,
     prompt:
-      "You are a bounded implementation subagent for well-scoped coding tasks. Implement the requested change surgically, matching the surrounding code style and minimizing unrelated churn. Use the dedicated Edit/Write/Read tools for file changes and Grep/Glob for search; reserve Bash for running builds, tests, and git — do not shell out (sed/awk/python/here-docs) to read or edit files. Verify with the project's build or tests where applicable. Do the work yourself — do not spawn further subagents. Report exactly what changed and any risks.",
+      "You are a bounded implementation subagent for well-scoped coding tasks. Implement the requested change surgically, matching the surrounding code style and minimizing unrelated churn. "
+      + fileToolSteer("builds")
+      + " Verify with the project's build or tests where applicable. Do the work yourself — do not spawn further subagents. Report exactly what changed and any risks.",
     ...modelField,
   }
-  out.debugger = {
+  out.reviewer = {
     description: nativeModel
-      ? `Root-cause & debugging subagent running ${nativeModel} at maximum reasoning. Use proactively for reproducing a bug end to end, isolating the true root cause, and proposing a minimal fix — investigation-heavy work best kept off the lead's context; runs in its own context. Model is overridable at spawn.`
-      : `Root-cause & debugging subagent (native tools, runs on the lead's model in its own context). Use proactively for reproducing a bug end to end, isolating the true root cause, and proposing a minimal fix — kept off the lead's context. Model is overridable at spawn.`,
+      ? `Feedback subagent running ${nativeModel} at maximum reasoning. Use proactively when something already exists and you want it assessed: a diff, a plan, a document, a failing test. It does whatever the assessment needs, including reproducing a failure and isolating its root cause, and keeps that work off the lead's context. Model is overridable at spawn.`
+      : `Feedback subagent (native tools, runs on the lead's model in its own context). Use proactively when something already exists and you want it assessed: a diff, a plan, a document, a failing test. It does whatever the assessment needs, including reproducing a failure and isolating its root cause. Model is overridable at spawn.`,
     prompt:
-      "You are a root-cause debugging subagent. Reproduce the failure end to end first — as close to how a real user hits it as you can — before theorizing. Form hypotheses and test them against the actual code and runtime: read the code, run the repro with Bash, and add temporary instrumentation only if needed (remove it after). Identify the true root cause, not a symptom; if a fix is in scope, make it minimal and verify the repro now passes. Use the dedicated Edit/Write/Read tools for file changes and Grep/Glob for search; reserve Bash for running repros, tests, and git — do not shell out (sed/awk/python/here-docs) to read or edit files. Do the work yourself — do not spawn further subagents. Report the root cause with evidence, the fix (if any), and any residual risks.",
+      "You are a feedback subagent. Your job is to tell the caller what is actually true about the artifact you are given — code, a plan, a document, a failure report — and what is wrong with it. "
+      + "Verify against the ACTUAL code by reading it; never assume. Do whatever the assessment requires: reproduce a failure end to end as close to how a real user hits it as you can, form hypotheses and test them against the code and runtime, and isolate the true root cause rather than a symptom. "
+      + "Where the change warrants it, author tests that try to BREAK the implementation (edge cases, error paths, and the acceptance criteria as executable checks), run them, and report which pass and which fail; do NOT modify production code just to make tests pass. "
+      + fileToolSteer("builds")
+      + " Do the work yourself — do not spawn further subagents. Report severity-ranked findings with `file:line` citations, the evidence behind each, and end with a clear go/no-go.",
     ...modelField,
   }
-  out["qa-engineer"] = {
-    description: nativeModel
-      ? `Review, testing & QA subagent running ${nativeModel} at maximum reasoning. Use proactively to review a change for correctness, author and run tests that try to break it, and give a severity-ranked go/no-go while keeping the lead's context focused; runs in its own context. Model is overridable at spawn.`
-      : `Review, testing & QA subagent (native tools, runs on the lead's model in its own context). Use proactively to review a change for correctness, author and run tests that try to break it, and give a severity-ranked go/no-go. Model is overridable at spawn.`,
+  out.brainstorm = {
+    description: brainstormModel
+      ? `Divergent-options subagent running ${brainstormModel} (third lab, for approaches the lead would not generate). Use proactively BEFORE an approach is chosen: it returns several materially different options with trade-offs and a recommendation. Read-only; it proposes, then hands off to implementer. Model is overridable at spawn.`
+      : `Divergent-options subagent (runs on the lead's model in its own context). Use proactively BEFORE an approach is chosen: it returns several materially different options with trade-offs and a recommendation. Read-only; it proposes, then hands off to implementer. Model is overridable at spawn.`,
     prompt:
-      "You are a review, testing, and QA subagent. Verify correctness against the ACTUAL code by reading it — never assume. Where the change warrants it, author tests that try to BREAK the implementation (edge cases, error paths, and the acceptance criteria as executable checks), then run them and report which pass and which fail; do NOT modify production code just to make tests pass. Use the dedicated Edit/Write/Read tools for file changes and Grep/Glob for search; reserve Bash for running builds, tests, and git — do not shell out (sed/awk/python/here-docs) to read or edit files. Do the work yourself — do not spawn further subagents. Report severity-ranked findings with `file:line` citations and end with a clear go/no-go.",
-    ...modelField,
+      "You are a divergent-options subagent. Given a problem and its constraints, return 3 to 5 approaches that differ in MECHANISM, not in phrasing. "
+      + "For each: how it works, what it costs, the failure mode that would kill it, and the condition under which it becomes the right answer. Close with a recommendation and the reason it wins. "
+      + "Near-duplicate options are the failure mode to avoid — if only one real approach exists, say so plainly and explain why the alternatives are dead, because one honest option beats four padded ones. "
+      + "Ground every option in what the repository actually contains: read the relevant code first, and prefer reusing what is already there over inventing something new. "
+      + readOnlyToolSteer()
+      + " Do the work yourself — do not spawn further subagents.",
+    tools: readOnlyToolAllowlist(searchKey),
+    ...(brainstormModel ? { model: brainstormModel } : {}),
+    ...searchMcp,
+  }
+  if (scoutModel) {
+    out.scout = {
+      description: `Read-only exploration subagent running ${scoutModel} (fast and cheap, so repository lookups do not run at the lead's model rates). Use proactively to find or understand something in the codebase: it sweeps widely and returns conclusions with file:line references rather than file dumps. Model is overridable at spawn.`,
+      prompt:
+        "You are a read-only exploration subagent. Answer the question by investigating the repository: cast a wide net, then narrow. "
+        + "Return the conclusion, not the raw material — cite `file:line` for anything load-bearing and quote only the lines that matter. If the answer is that something does not exist, say so explicitly and describe where you looked. "
+        + readOnlyToolSteer()
+        + " Do the work yourself — do not spawn further subagents.",
+      tools: readOnlyToolAllowlist(searchKey),
+      model: scoutModel,
+      ...searchMcp,
+    }
+  }
+  out.scribe = {
+    description: scribeModel
+      ? `Documentation subagent running ${scribeModel}. Use proactively for prose that trails the code: docs, ADRs, CLAUDE.md sections, changelog entries, and README updates that have gone stale. Keeps low-glamour upkeep off the lead's context. Model is overridable at spawn.`
+      : `Documentation subagent (runs on the lead's model in its own context). Use proactively for prose that trails the code: docs, ADRs, CLAUDE.md sections, changelog entries, and README updates that have gone stale. Model is overridable at spawn.`,
+    prompt:
+      "You are a documentation subagent. Write and maintain the prose that trails the code: docs, ADRs, CLAUDE.md sections, changelog entries, README rows. "
+      + "Read the code before describing it — every claim you write must be checkable against the repository as it is now, not as a summary said it was. Match the surrounding document's voice, structure, and level of detail. "
+      + "Prefer updating an existing document over adding a new one, and delete what has become false rather than layering a correction on top of it. "
+      + fileToolSteer("builds")
+      + " Do the work yourself — do not spawn further subagents. Report which documents changed and any claim you could not verify.",
+    ...(scribeModel ? { model: scribeModel } : {}),
   }
   // Non-blocking workers surface: one `worker-<mode>` DISPATCHER subagent per
   // active worker tool. Each is pinned by a `tools:` allowlist to the workers
@@ -486,9 +639,15 @@ interface WriteOpts {
   /** Whether the browse worker tool is served — adds the `worker-browse`
    *  dispatcher. */
   browseAvailable?: boolean
-  /** Model for the native OpenAI subagents (implementer/debugger/qa-engineer)
-   *  when present in the live catalog. */
+  /** Model for the native subagents that want the OpenAI frontier coder
+   *  (`implementer`, `reviewer`) when present in the live catalog. */
   nativeSubagentModel?: string
+  /** Model for `brainstorm`. Absent → inherits the lead's model. */
+  brainstormModel?: string
+  /** Model for `scout`. Absent → the agent is omitted entirely. */
+  scoutModel?: string
+  /** Model for `scribe`. Absent → inherits the lead's model. */
+  scribeModel?: string
   /** Extra subagent definitions to register alongside the peer/worker agents
    *  (written as `.md` files so they appear in the Task `subagent_type` enum).
    *  Used by `serve` to inject Claude Code's built-in subagents (Explore/Plan/
@@ -1003,6 +1162,9 @@ export async function writePeerMcpRuntimeFiles(
     workerToolsAvailable: opts.workerToolsAvailable,
     browseAvailable: opts.browseAvailable,
     nativeSubagentModel: opts.nativeSubagentModel,
+    brainstormModel: opts.brainstormModel,
+    scoutModel: opts.scoutModel,
+    scribeModel: opts.scribeModel,
     nonce,
     codexHome,
     serverUrl,

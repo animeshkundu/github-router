@@ -185,6 +185,11 @@ mock.module("~/lib/mcp-capabilities", () => ({
   semanticSearchEnabled: mock(() => false),
   geminiAvailable: geminiAvailableMock,
   nativeSubagentModel: mock(() => undefined),
+  brainstormModel: mock(() => undefined),
+  scribeModel: mock(() => undefined),
+  // `scout` is emitted only when a cheap-tier model resolves; undefined here
+  // keeps the default agent set deterministic, matching the other gates.
+  scoutModel: mock(() => undefined),
   // stand-in.ts (pulled in transitively via handler.ts) imports this;
   // stub it so the module mock doesn't break that import.
   resolveOpenAiFrontier: mock(() => "gpt-5.6-sol"),

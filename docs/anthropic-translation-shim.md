@@ -146,10 +146,22 @@ allowlist, ties resolving to the lower tier. The clamp is why a Gemini request
 asking for `xhigh` lands on `high` — Gemini's allowlist has no `xhigh`. `off` /
 absent drops the reasoning field entirely.
 
-When the request carries no `thinking` block, the shim defaults OpenAI-frontier
-models (`gpt-5.6-sol` and `gpt-5.5`) to `xhigh`; other translated models retain
-the `high` default. Set `GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT=1` to restore
-`high` for the frontier models. Any explicit client `thinking` value still wins.
+The shim maps a client's reasoning level to the identical provider level: an
+Anthropic `thinking` budget buckets to `low`/`medium`/`high`/`xhigh` and that
+value is what goes upstream, with no floor raising a level the client did not
+ask for. When the request carries no `thinking` block at all there is no client
+level to mirror, so the shim injects `high` for every translated model. Set
+`GH_ROUTER_FRONTIER_XHIGH_DEFAULT=1` to restore the previous behavior, where the
+OpenAI-frontier models (`gpt-5.6-sol`, `gpt-5.5`) defaulted to `xhigh` instead.
+Any explicit client `thinking` value still wins.
+
+Two limits worth stating plainly rather than calling this a pure identity map.
+The level is bucketed from a token budget (`<2k` low, `<8k` medium, `<24k` high,
+else xhigh), so it is lossy at the boundaries. And `clampEffort` still moves a
+level the target model does not advertise, which is why an `xhigh` request lands
+on `high` for gemini. A model that advertises no `reasoning_effort` allowlist
+gets no `reasoning` field at all, leaving the provider's own default rather than
+`high` — forcing an effort there could 400.
 
 ### Egress: Responses vs Chat
 

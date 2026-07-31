@@ -24,6 +24,8 @@ import { state, type State } from "./state"
 import {
   BROWSE_DEFAULT_MODEL,
   DEFAULT_MODEL as WORKER_DEFAULT_MODEL,
+  EXPLORE_DEFAULT_MODEL,
+  REVIEW_DEFAULT_MODEL,
 } from "./worker-agent"
 import { pickEndpoint } from "../services/copilot/endpoint"
 
@@ -62,17 +64,23 @@ export function geminiAvailable(source: Pick<State, "models"> = state): boolean 
 export { OPENAI_FRONTIER_MODELS } from "./openai-frontier"
 
 /**
- * First available OpenAI frontier model in the live catalog (prefer
- * `gpt-5.6-sol`, fall back to `gpt-5.5`). Returns undefined when neither is
- * present. With `requireToolCalls`, only returns a model whose catalog entry
- * advertises `tool_calls`.
+ * First id in `chain` that is present in the live catalog. With
+ * `requireToolCalls`, skips an entry whose catalog record does not advertise
+ * `tool_calls` (strict `!== true`, so absent metadata fails closed). Returns
+ * undefined when the catalog is unavailable or nothing in the chain matches, so
+ * every caller degrades gracefully rather than throwing on a thin catalog.
+ *
+ * Extracted from `resolveOpenAiFrontier` so the per-agent resolvers below share
+ * one walk instead of hand-copying it. Ids are matched EXACTLY against
+ * `catalog.id` — no slug translation, matching the pre-existing behavior.
  */
-export function resolveOpenAiFrontier(opts?: {
-  requireToolCalls?: boolean
-}): string | undefined {
+function firstPresentInCatalog(
+  chain: ReadonlyArray<string>,
+  opts?: { requireToolCalls?: boolean },
+): string | undefined {
   const models = state.models?.data
   if (!models) return undefined
-  for (const id of OPENAI_FRONTIER_MODELS) {
+  for (const id of chain) {
     const found = models.find((m) => m.id === id)
     if (!found) continue
     if (opts?.requireToolCalls && found.capabilities?.supports?.tool_calls !== true) {
@@ -81,6 +89,18 @@ export function resolveOpenAiFrontier(opts?: {
     return id
   }
   return undefined
+}
+
+/**
+ * First available OpenAI frontier model in the live catalog (prefer
+ * `gpt-5.6-sol`, fall back to `gpt-5.5`). Returns undefined when neither is
+ * present. With `requireToolCalls`, only returns a model whose catalog entry
+ * advertises `tool_calls`.
+ */
+export function resolveOpenAiFrontier(opts?: {
+  requireToolCalls?: boolean
+}): string | undefined {
+  return firstPresentInCatalog(OPENAI_FRONTIER_MODELS, opts)
 }
 
 export function standInToolEnabled(): boolean {
@@ -92,12 +112,66 @@ export function standInToolEnabled(): boolean {
   return hasOpenAi && hasOpus && hasGeminiPro
 }
 
-/** Return the model for the native OpenAI subagents (implementer, debugger,
- *  qa-engineer) iff it is live with tool calls. Prefers `gpt-5.6-sol`, falls
- *  back to `gpt-5.5`. One gate governs all three — they need the same frontier
- *  model. */
+/** Model for the native subagents that want the OpenAI frontier coder
+ *  (`implementer`, `reviewer`) iff it is live with tool calls. Prefers
+ *  `gpt-5.6-sol`, falls back to `gpt-5.5`. Absent → those agents omit their
+ *  `model:` line and inherit the lead's model. */
 export function nativeSubagentModel(): string | undefined {
   return resolveOpenAiFrontier({ requireToolCalls: true })
+}
+
+/*
+ * The per-agent preference chains are built INSIDE their resolvers, not as
+ * module-level consts. `./worker-agent` participates in an import cycle with
+ * this module, so its exported bindings are still in the temporal dead zone
+ * while this module's top level runs — a `const CHAIN = [REVIEW_DEFAULT_MODEL]`
+ * throws `Cannot access ... before initialization` at load. Referencing them
+ * lazily inside a function body defers the read until after both modules have
+ * initialized, which is why the pre-existing `WORKER_DEFAULT_MODEL` usage below
+ * has always been function-local too.
+ */
+
+/** Model for `brainstorm`. Absent → inherits the lead's model.
+ *
+ *  Leads with Google so the options it generates come from a third lab: the
+ *  Anthropic lead is the producer and the OpenAI frontier already backs
+ *  `implementer`/`reviewer`, so a same-lab brainstormer would mostly restate
+ *  what the lead already thought of. */
+export function brainstormModel(): string | undefined {
+  return firstPresentInCatalog(
+    [REVIEW_DEFAULT_MODEL, ...OPENAI_FRONTIER_MODELS],
+    { requireToolCalls: true },
+  )
+}
+
+/** Model for `scribe`. Absent → inherits the lead's model.
+ *
+ *  Leads with the mid tier: documentation is verifiable prose, not frontier
+ *  reasoning. */
+export function scribeModel(): string | undefined {
+  return firstPresentInCatalog(
+    ["gpt-5.6-terra", ...OPENAI_FRONTIER_MODELS],
+    { requireToolCalls: true },
+  )
+}
+
+/**
+ * Model for `scout` — CHEAP TIER ONLY, with no frontier fallback on purpose.
+ *
+ * `scout` exists so a foreground repository lookup does not run at the lead's
+ * model rates. The usual "absent → omit `model:` and inherit the lead" fallback
+ * would therefore defeat the agent: on a thin or briefly-unavailable catalog it
+ * would silently start answering grep-and-summarize questions on Opus, which is
+ * the exact cost it was added to avoid. Returning undefined here makes the
+ * caller drop the agent instead, so the lead falls back to the CLI's `Explore`
+ * (same behavior as before `scout` existed) rather than to an expensive
+ * impostor wearing the cheap agent's name.
+ */
+export function scoutModel(): string | undefined {
+  return firstPresentInCatalog(
+    [EXPLORE_DEFAULT_MODEL, WORKER_DEFAULT_MODEL],
+    { requireToolCalls: true },
+  )
 }
 
 /**

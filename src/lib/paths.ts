@@ -1535,9 +1535,30 @@ function isPidAlive(pid: number): boolean {
  * likely). Tightened to require BOTH the 8-hex-char random suffix AND
  * an exact-match persona name suffix, eliminating the risk for any
  * realistic user filename.
+ *
+ * Legacy directory: a pre-mirror release wrote these files into the user's real
+ * `~/.claude/agents/` (the docstring on `writePeerAgentMdFiles` still describes
+ * that location). Orphans left there are invisible to a sweep scoped to the
+ * config dir, AND `ensureClaudeConfigMirror` copies them back into every new
+ * mirror — so a dead session's `codex-critic` keeps getting re-registered
+ * alongside the current one, with the same frontmatter `name:`, and Claude Code
+ * resolves between them nondeterministically. Sweeping both directories makes
+ * that self-heal. The legacy dir is skipped when it IS the config dir (the
+ * default-config case) so nothing is walked twice.
  */
 export async function sweepStalePeerAgentMdFiles(): Promise<void> {
-  const dir = path.join(PATHS.CLAUDE_CONFIG_DIR, "agents")
+  const configDir = path.join(PATHS.CLAUDE_CONFIG_DIR, "agents")
+  await sweepAgentMdDir(configDir)
+  const legacyDir = path.join(os.homedir(), ".claude", "agents")
+  if (path.resolve(legacyDir) === path.resolve(configDir)) return
+  // Best-effort: the legacy dir is a historical artifact we do not own, so an
+  // EACCES there must not abort the launch. The config-dir sweep above keeps
+  // its original throw-on-unexpected-error contract.
+  await sweepAgentMdDir(legacyDir).catch(() => {})
+}
+
+/** Reap dead-PID proxy-written agent `.md` files from one directory. */
+async function sweepAgentMdDir(dir: string): Promise<void> {
   let entries: Array<string>
   try {
     entries = await fs.readdir(dir)
@@ -1565,9 +1586,23 @@ export async function sweepStalePeerAgentMdFiles(): Promise<void> {
  * subagent is added in `codex-mcp-config.ts`, or a new `worker-*` dispatcher mode
  * is added in `worker-dispatch.ts` (a drift test in tests/worker-dispatch pins
  * that the `ALL_DISPATCHER_AGENT_NAMES` are all covered here).
+ *
+ * NAMES ARE ADDED HERE, NEVER REMOVED — this alternation is a permanent superset
+ * of every agent name the proxy has ever shipped. A name dropped on a rename
+ * stops matching, so `.md` files left behind by a crashed session bearing the old
+ * name are never swept: they survive every later launch and load as ghost
+ * subagents with a stale prompt and a stale model. That outlives any release
+ * window, so "keep the old name for one version" is not sufficient. `debugger`
+ * and `qa-engineer` are retained for exactly this reason after being renamed to
+ * `brainstorm` and `reviewer`.
+ *
+ * `general-purpose|Explore|Plan` are the serve-only `BUILTIN_SUBAGENT_DEFINITIONS`,
+ * which are written through the same `peer-<suffix>-<name>.md` path and were
+ * previously absent here, so their stale files never got reaped. Note the capitals:
+ * the alternation is case-sensitive and those two are capitalized at the source.
  */
 export const PEER_AGENT_MD_FILENAME =
-  /^peer-(\d+)-[0-9a-f]{8}-(?:codex-critic|codex-reviewer|gemini-critic|gemini-reviewer|opus-critic|codex-implementer|peer-review-coordinator|implementer|debugger|qa-engineer|worker-explore|worker-implement|worker-review|worker-plan|worker-test|worker-browse)\.md$/
+  /^peer-(\d+)-[0-9a-f]{8}-(?:codex-critic|codex-reviewer|gemini-critic|gemini-reviewer|opus-critic|codex-implementer|peer-review-coordinator|implementer|reviewer|brainstorm|scout|scribe|debugger|qa-engineer|general-purpose|Explore|Plan|worker-explore|worker-implement|worker-review|worker-plan|worker-test|worker-browse)\.md$/
 
 /**
  * Strict regex matching only per-launch claude-config mirror dirs this

@@ -221,7 +221,7 @@ describe("buildPeerMcpConfig", () => {
 })
 
 describe("buildPeerAgentDefinitions", () => {
-  test("HTTP backend with gemini = 5 personas + coordinator + 3 always-on native subagents (9 total)", () => {
+  test("HTTP backend with gemini = 5 personas + coordinator + 4 always-on native subagents (10 total)", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: false,
       geminiAvailable: true,
@@ -230,15 +230,16 @@ describe("buildPeerAgentDefinitions", () => {
       codexHome: "/tmp/codex",
     })
     expect(Object.keys(agents).sort()).toEqual([
+      "brainstorm",
       "codex-critic",
       "codex-reviewer",
-      "debugger",
       "gemini-critic",
       "gemini-reviewer",
       "implementer",
       "opus-critic",
       "peer-review-coordinator",
-      "qa-engineer",
+      "reviewer",
+      "scribe",
     ])
     // Each persona prompt routes to the HTTP MCP server name; the
     // coordinator prompt does NOT route to mcp tools directly (it
@@ -268,13 +269,14 @@ describe("buildPeerAgentDefinitions", () => {
       codexHome: "/tmp/codex",
     })
     expect(Object.keys(agents).sort()).toEqual([
+      "brainstorm",
       "codex-critic",
       "codex-reviewer",
-      "debugger",
       "implementer",
       "opus-critic",
       "peer-review-coordinator",
-      "qa-engineer",
+      "reviewer",
+      "scribe",
     ])
     expect(agents["gemini-critic"]).toBeUndefined()
     // Coordinator prompt should NOT reference gemini-critic when not registered.
@@ -285,7 +287,7 @@ describe("buildPeerAgentDefinitions", () => {
     expect(agents["peer-review-coordinator"]!.prompt).toContain("opus-critic")
   })
 
-  test("CLI backend with gemini = 6 personas + coordinator + 3 native subagents (10 total)", () => {
+  test("CLI backend with gemini = 6 personas + coordinator + 4 native subagents (11 total)", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: true,
       geminiAvailable: true,
@@ -294,16 +296,17 @@ describe("buildPeerAgentDefinitions", () => {
       codexHome: "/tmp/codex",
     })
     expect(Object.keys(agents).sort()).toEqual([
+      "brainstorm",
       "codex-critic",
       "codex-implementer",
       "codex-reviewer",
-      "debugger",
       "gemini-critic",
       "gemini-reviewer",
       "implementer",
       "opus-critic",
       "peer-review-coordinator",
-      "qa-engineer",
+      "reviewer",
+      "scribe",
     ])
     // codex-* personas point at the stdio server; gemini-critic stays HTTP.
     expect(agents["codex-critic"]!.prompt).toContain("mcp__codex-cli__codex")
@@ -430,32 +433,46 @@ describe("buildPeerAgentDefinitions", () => {
     expect(Object.keys(agents).some((k) => k.startsWith("worker-"))).toBe(false)
   })
 
-  test("native subagents (implementer, debugger, qa-engineer) are always injected; model set only when nativeSubagentModel present", () => {
+  test("native subagents are always injected (except scout); models set per agent", () => {
     const withNative = buildPeerAgentDefinitions({
       codexCli: false,
       geminiAvailable: false,
       groupKeys: { peers: "peers" },
       nativeSubagentModel: "gpt-5.5",
+      brainstormModel: "gemini-3.1-pro-preview",
+      scoutModel: "gemini-3.6-flash",
+      scribeModel: "gpt-5.6-terra",
       nonce: NONCE,
       codexHome: "/tmp/codex",
     })
-    const expectedDescriptions = {
-      implementer: "Bounded implementation",
-      debugger: "Root-cause",
-      "qa-engineer": "Review, testing",
+    const expected = {
+      implementer: { description: "Bounded implementation", model: "gpt-5.5", readOnly: false },
+      reviewer: { description: "Feedback subagent", model: "gpt-5.5", readOnly: false },
+      brainstorm: { description: "Divergent-options", model: "gemini-3.1-pro-preview", readOnly: true },
+      scout: { description: "Read-only exploration", model: "gemini-3.6-flash", readOnly: true },
+      scribe: { description: "Documentation subagent", model: "gpt-5.6-terra", readOnly: false },
     }
-    for (const [name, description] of Object.entries(expectedDescriptions)) {
+    for (const [name, want] of Object.entries(expected)) {
       const def = withNative[name]!
       expect(def).toBeDefined()
-      expect(def.model).toBe("gpt-5.5")
-      expect("tools" in def).toBe(false)
-      expect(def.description).toContain(description)
+      expect(def.model).toBe(want.model)
+      expect(def.description).toContain(want.description)
       expect(def.description).toContain("Model is overridable at spawn")
+      // Only the read-only pair carries a `tools:` allowlist; the rest inherit
+      // the parent's full toolset (see the cc-backup schema-parity test below).
+      expect("tools" in def).toBe(want.readOnly)
+      if (want.readOnly) {
+        expect(def.tools).toContain("Read")
+        expect(def.tools).toContain("Bash")
+        expect(def.tools).not.toContain("Edit")
+        expect(def.tools).not.toContain("Write")
+      }
     }
 
-    // No frontier model in the catalog → the three subagents are STILL injected
-    // (no gating), but omit the `model` frontmatter so they inherit the lead's
-    // model.
+    // No model in the catalog → the natives are STILL injected (no gating) but
+    // omit the `model` frontmatter so they inherit the lead's model. `scout` is
+    // the deliberate exception: it is dropped entirely rather than silently
+    // answering cheap-tier questions on the lead's expensive model.
     const withoutModel = buildPeerAgentDefinitions({
       codexCli: false,
       geminiAvailable: false,
@@ -463,13 +480,13 @@ describe("buildPeerAgentDefinitions", () => {
       nonce: NONCE,
       codexHome: "/tmp/codex",
     })
-    for (const name of ["implementer", "debugger", "qa-engineer"]) {
+    for (const name of ["implementer", "reviewer", "brainstorm", "scribe"]) {
       const def = withoutModel[name]!
       expect(def).toBeDefined()
       expect("model" in def).toBe(false)
-      expect("tools" in def).toBe(false)
       expect(def.description).toContain("Model is overridable at spawn")
     }
+    expect(withoutModel.scout).toBeUndefined()
   })
 
   test("sweep allowlist covers every emitted subagent definition", () => {
@@ -576,9 +593,10 @@ describe("writePeerMcpRuntimeFiles", () => {
       expect(path.dirname(runtime.agentsPath)).toBe(runtimeDir)
 
       // Phase 2.5: .md subagent files written into agentsDir, one per
-      // registered agent (5 personas + peer-review-coordinator + 3 always-on
-      // native subagents implementer/debugger/qa-engineer = 9).
-      expect(runtime.agentMdPaths.length).toBe(9)
+      // registered agent (5 personas + peer-review-coordinator + 4 always-on
+      // native subagents implementer/reviewer/brainstorm/scribe = 10; `scout`
+      // needs a cheap-tier model, which this call does not supply).
+      expect(runtime.agentMdPaths.length).toBe(10)
       for (const p of runtime.agentMdPaths) {
         expect(path.dirname(p)).toBe(agentsDir)
         expect(p).toMatch(
@@ -1080,7 +1098,7 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
     })
   })
 
-  test("frontmatter MUST NOT include a `tools:` field (subagent inherits parent's full toolset incl. MCPs)", async () => {
+  test("frontmatter MUST NOT include a `tools:` field, except the read-only natives (subagents otherwise inherit the parent's full toolset incl. MCPs)", async () => {
     // Load-bearing pin for the holistic subagent MCP/tool-inheritance
     // fix (plans/in-this-code-base-cryptic-dove.md, Part 3). Claude Code
     // subagent semantics: omitting `tools:` from the frontmatter inherits
@@ -1091,29 +1109,53 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
     // would silently regress the "all abilities" goal — every user-side
     // MCP would vanish from subagents the moment we forgot to enumerate it.
     //
+    // `scout` and `brainstorm` are the two DELIBERATE exceptions: they are
+    // read-only by contract, and a prompt asking an agent not to write is not
+    // enforcement while Edit/Write/Bash are inherited. They accept the cost this
+    // comment describes (no user-scope MCPs, no tools added by future Claude
+    // Code releases) in exchange for the restriction actually holding. That
+    // trade is only worth making for an agent whose read-only-ness is the point;
+    // every other emitted agent must still omit the field.
+    //
     // If a future contributor genuinely needs to restrict subagent tools,
     // do so on a per-persona basis at the Claude-Code config layer, NOT
     // by adding `tools:` to the proxy-emitted frontmatter.
+    const READ_ONLY_NATIVES = ["scout", "brainstorm"]
     await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
       const runtime = await writePeerMcpRuntimeFiles(URL, {
         codexCli: true,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
+        scoutModel: "gemini-3.6-flash",
         runtimeDir,
         codexHome,
         agentsDir,
       })
       try {
+        let sawReadOnly = 0
         for (const filePath of runtime.agentMdPaths) {
           const body = await fs.readFile(filePath, "utf8")
           const { frontmatter } = parseAgentMd(body)
           const fm = frontmatter as Record<string, unknown>
+          const isReadOnlyNative = READ_ONLY_NATIVES.some((n) =>
+            filePath.endsWith(`-${n}.md`),
+          )
+          if (isReadOnlyNative) {
+            sawReadOnly++
+            expect(Array.isArray(fm.tools)).toBe(true)
+            expect(fm.tools as Array<string>).not.toContain("Edit")
+            expect(fm.tools as Array<string>).not.toContain("Write")
+            continue
+          }
           expect(fm.tools).toBeUndefined()
           // Defense-in-depth at the raw-bytes layer too (in case a future
           // change emits `tools:` outside the parsed YAML somehow):
           const fmText = body.split("---")[1] ?? ""
           expect(fmText).not.toMatch(/^tools\s*:/m)
         }
+        // Guard the guard: if a rename made the suffix match stop firing, the
+        // loop above would vacuously pass by checking nothing.
+        expect(sawReadOnly).toBe(READ_ONLY_NATIVES.length)
       } finally {
         await runtime.cleanup()
       }

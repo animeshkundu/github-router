@@ -331,25 +331,32 @@ describe("buildPeerAwarenessSnippet", () => {
     // Re-derived per peer-review I5 after the descriptive-only rewrite, then
     // bumped when the always-on orchestration tools (verify_workflow /
     // attest_step) were added to the minimal snippet, and again (2000 -> 2100)
-    // when the three always-on native subagents (implementer/debugger/
-    // qa-engineer) got their one-line inventory. The cap is the smallest
-    // envelope the actual implementation fits inside, not a target driving copy
-    // growth. If a future tightening shaves bytes, lower this cap too.
+    // when the always-on native subagents got their one-line inventory. The
+    // roster later grew from three to five (implementer/reviewer/brainstorm/
+    // scout/scribe) and the inventory sentence was TIGHTENED to absorb it, so
+    // this cap did not move. The cap is the smallest envelope the actual
+    // implementation fits inside, not a target driving copy growth. If a future
+    // tightening shaves bytes, lower this cap too.
     const minimal = buildPeerAwarenessSnippet(MINIMAL)
     expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(2100)
   })
 
-  test("snippet stays under ~880 tokens (~5300 bytes) in the maximal case", () => {
+  test("snippet stays under ~900 tokens (~5400 bytes) in the maximal case", () => {
     // Maximal = EVERY gate on (gemini_reviewer, the `review`/`plan`/`test`
     // workers, the decompose/run_workflow orchestration pipeline, the three
     // floor-raising skills, browse + power). The cap tracks the smallest envelope
     // the implementation fits inside: it was bumped from 4600 when the
-    // orchestration pipeline + skills + browser-power tools were added, and again
-    // (4900 -> 5300) for the always-on native-subagent inventory. Each is a
-    // distinct capability getting one descriptive sentence — not bloat. If a
-    // future tightening shaves bytes, lower it again.
+    // orchestration pipeline + skills + browser-power tools were added, again
+    // (4900 -> 5300) for the always-on native-subagent inventory, and again
+    // (5300 -> 5400) when that roster went from three agents to five. Measured
+    // 5370 at the time of writing. Two of the five are wholly new capabilities
+    // (divergent options, cheap read-only lookups), each earning one clause; the
+    // inventory sentence was also rewritten to state only WHEN to reach for each
+    // agent, dropping the model-fallback mechanics the lead does not need in
+    // order to choose. Each entry is a distinct capability getting one clause,
+    // not bloat. If a future tightening shaves bytes, lower it again.
     const full = buildPeerAwarenessSnippet(MAXIMAL)
-    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(5300)
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(5400)
   })
 
   test("mentions Claude Code's advisor built-in tool", () => {
@@ -439,16 +446,15 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(on).toContain("isolated git worktree")
   })
 
-  test("native subagents are always named; the worker-implement contrast is gated on workers", () => {
+  test("native subagents are always named; scout is gated on its model and the worker-implement contrast on workers", () => {
     const STEER = "prefer the `implementer` subagent"
+    const ALWAYS_ON = ["`implementer`", "`reviewer`", "`brainstorm`", "`scribe`"]
     // Workers on: the native inventory AND the worker-implement contrast appear.
     const withWorkers = buildPeerAwarenessSnippet({
       ...MINIMAL,
       workerToolsAvailable: true,
     })
-    expect(withWorkers).toContain("`implementer`")
-    expect(withWorkers).toContain("`debugger`")
-    expect(withWorkers).toContain("`qa-engineer`")
+    for (const name of ALWAYS_ON) expect(withWorkers).toContain(name)
     expect(withWorkers).toContain(STEER)
     expect(withWorkers).toContain("git-worktree isolation")
     // Workers off: the native subagents are STILL named (always injected, no
@@ -457,10 +463,13 @@ describe("buildPeerAwarenessSnippet", () => {
       ...MINIMAL,
       workerToolsAvailable: false,
     })
-    expect(withoutWorkers).toContain("`implementer`")
-    expect(withoutWorkers).toContain("`debugger`")
-    expect(withoutWorkers).toContain("`qa-engineer`")
+    for (const name of ALWAYS_ON) expect(withoutWorkers).toContain(name)
     expect(withoutWorkers).not.toContain(STEER)
+    // `scout` is the one native that can be absent: it is dropped rather than
+    // downgraded when no cheap-tier model resolves, so naming it then would
+    // advertise an agent that is not in the Task enum.
+    expect(buildPeerAwarenessSnippet({ ...MINIMAL, scoutAvailable: true })).toContain("`scout`")
+    expect(buildPeerAwarenessSnippet({ ...MINIMAL, scoutAvailable: false })).not.toContain("`scout`")
   })
 
   test("gates browser lead and compound surfaces independently", () => {

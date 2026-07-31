@@ -577,8 +577,10 @@ test("operating-defaults directive: orchestrator posture + concrete excellence p
   expect(low).toContain("parallel")
   expect(low).toContain("directly") // "do trivial/surgical/last-mile work directly"
   expect(d).toContain("implementer")
-  expect(d).toContain("debugger")
-  expect(d).toContain("qa-engineer")
+  expect(d).toContain("reviewer")
+  expect(d).toContain("brainstorm")
+  expect(d).toContain("scout")
+  expect(d).toContain("scribe")
   expect(d).toContain("the main thread is where you think with and respond to the user")
   expect(d).toContain("protect it by pushing heavy or exploratory work outward")
   // Excellence principles remain specific without named-persona anchors.
