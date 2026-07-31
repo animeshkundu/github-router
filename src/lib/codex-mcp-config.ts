@@ -360,16 +360,21 @@ export const BUILTIN_SUBAGENT_DEFINITIONS: PeerAgentDefinitions = {
 }
 
 /**
- * The always-injected native subagents, in roster order. Exported so the sweep
- * allowlist in `paths.ts` and its drift test can iterate them the same way
- * `ALL_DISPATCHER_AGENT_NAMES` covers the `worker-*` dispatchers — without it, a
+ * The names of every native subagent this module can emit, current AND retired.
+ *
+ * This is a NAME REGISTRY for the sweep allowlist in `paths.ts` and its drift
+ * test, NOT a list of agents that are guaranteed to exist in a given launch.
+ * `scout` is conditionally emitted (see `buildPeerAgentDefinitions`) yet is
+ * listed here on purpose: the sweep must recognize its filename so a file
+ * written by a launch that DID resolve a cheap model gets reaped by a later
+ * launch that did not. Do not iterate this expecting a definition back from
+ * `buildPeerAgentDefinitions` for every entry; iterate `Object.keys(agents)`
+ * for that.
+ *
+ * Exported so the natives get the same drift protection
+ * `ALL_DISPATCHER_AGENT_NAMES` gives the `worker-*` dispatchers — without it, a
  * renamed or newly added native silently escapes the sweep and its stale `.md`
  * files load forever as ghost subagents.
- *
- * `scout` is listed here even though it is conditionally emitted (see
- * `buildPeerAgentDefinitions`): the sweep must still recognize its filename so a
- * file written by a launch that DID resolve a cheap model is reaped by a later
- * launch that did not.
  */
 export const ALL_NATIVE_AGENT_NAMES = [
   "implementer",
@@ -434,6 +439,15 @@ function readOnlyToolSteer(): string {
  *  2. The workers and orchestrate MCP groups are excluded on the same reasoning
  *     that makes `Explore` drop `Agent`: both spawn further agents, so leaving
  *     them in would reintroduce exactly the recursion that exclusion prevents.
+ *
+ * NOT A SANDBOX. `Bash` is retained because Anthropic's own read-only built-in
+ * retains it, and without it an explorer cannot run `git log` / `git blame` /
+ * `git show`, which is most of what repository archaeology needs. A shell is a
+ * general write primitive, so "read-only" here means the agent has no dedicated
+ * mutation tool and is instructed not to mutate, NOT that mutation is
+ * impossible. Dropping Edit/Write still removes the path a model reaches for by
+ * default. If a future change needs a hard guarantee, this allowlist is not
+ * where it can be made.
  *
  * `searchKey` is the RESOLVED group key, not the bare literal: a user-side
  * `mcpServers` collision renames the group (`gh-router-search`, …), and a

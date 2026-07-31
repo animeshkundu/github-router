@@ -1545,6 +1545,13 @@ function isPidAlive(pid: number): boolean {
  * resolves between them nondeterministically. Sweeping both directories makes
  * that self-heal. The legacy dir is skipped when it IS the config dir (the
  * default-config case) so nothing is walked twice.
+ *
+ * PID liveness is the only reap criterion, which is exact on a single host but
+ * not across PID namespaces: if two containers shared one HOME, a PID live in
+ * one could read as dead in the other. That hazard predates this change (it
+ * applies to the config-mirror sweep too) and its blast radius is bounded, since
+ * the regex only ever matches proxy-written files and the worst case is a
+ * subagent unregistering mid-session, not user data loss.
  */
 export async function sweepStalePeerAgentMdFiles(): Promise<void> {
   const configDir = path.join(PATHS.CLAUDE_CONFIG_DIR, "agents")
