@@ -1121,6 +1121,20 @@ async function mirrorDirRecursive(
       if (policy === "ISOLATED" || policy === "SHARED") continue
     }
     const childRel = relPath === "" ? name : path.join(relPath, name)
+    // Never mirror a proxy-authored agent `.md` out of the user's real
+    // `~/.claude/agents/`. A pre-mirror release wrote `peer-<pid>-<hex>-<name>.md`
+    // files there; left alone they get copied into every new mirror and register
+    // alongside the current launch's files under the SAME frontmatter `name:`,
+    // so Claude Code resolves between a live definition and a dead one
+    // nondeterministically. Filtering at the COPY step fixes that without
+    // deleting anything we do not own: the user's directory is left exactly as
+    // it is, and the current launch writes its own files into the mirror after
+    // this walk. Deleting them instead would be unsound, because the filename
+    // shape is evidence of provenance, not proof of it, and a user who copied a
+    // generated file to customize it would lose it.
+    if (relPath === "agents" && PEER_AGENT_MD_FILENAME.test(name)) {
+      continue
+    }
     const childSource = path.join(sourceDir, childRel)
     const childTarget = path.join(targetDir, childRel)
     let stats: Awaited<ReturnType<typeof fs.lstat>>
@@ -1536,36 +1550,19 @@ function isPidAlive(pid: number): boolean {
  * an exact-match persona name suffix, eliminating the risk for any
  * realistic user filename.
  *
- * Legacy directory: a pre-mirror release wrote these files into the user's real
- * `~/.claude/agents/` (the docstring on `writePeerAgentMdFiles` still describes
- * that location). Orphans left there are invisible to a sweep scoped to the
- * config dir, AND `ensureClaudeConfigMirror` copies them back into every new
- * mirror — so a dead session's `codex-critic` keeps getting re-registered
- * alongside the current one, with the same frontmatter `name:`, and Claude Code
- * resolves between them nondeterministically. Sweeping both directories makes
- * that self-heal. The legacy dir is skipped when it IS the config dir (the
- * default-config case) so nothing is walked twice.
- *
- * PID liveness is the only reap criterion, which is exact on a single host but
- * not across PID namespaces: if two containers shared one HOME, a PID live in
- * one could read as dead in the other. That hazard predates this change (it
- * applies to the config-mirror sweep too) and its blast radius is bounded, since
- * the regex only ever matches proxy-written files and the worst case is a
- * subagent unregistering mid-session, not user data loss.
+ * SCOPE IS THE MIRROR ONLY, deliberately. This deletes on filename shape plus
+ * PID liveness, and neither establishes ownership: a user who copied a generated
+ * file to customize it would have a file this cannot distinguish from ours. That
+ * ambiguity is acceptable inside the router-owned mirror, where the worst case
+ * is dropping a snapshot that the next launch regenerates. It would NOT be
+ * acceptable in the user's real `~/.claude/agents/`, where the same false
+ * positive is permanent data loss, which is exactly why `agents` is MIRRORED
+ * rather than SHARED (see `policyFor`). Orphans a pre-mirror release left in the
+ * user's directory are handled non-destructively at the copy step in
+ * `mirrorDirRecursive`, which skips them so they never register.
  */
 export async function sweepStalePeerAgentMdFiles(): Promise<void> {
-  const configDir = path.join(PATHS.CLAUDE_CONFIG_DIR, "agents")
-  await sweepAgentMdDir(configDir)
-  const legacyDir = path.join(os.homedir(), ".claude", "agents")
-  if (path.resolve(legacyDir) === path.resolve(configDir)) return
-  // Best-effort: the legacy dir is a historical artifact we do not own, so an
-  // EACCES there must not abort the launch. The config-dir sweep above keeps
-  // its original throw-on-unexpected-error contract.
-  await sweepAgentMdDir(legacyDir).catch(() => {})
-}
-
-/** Reap dead-PID proxy-written agent `.md` files from one directory. */
-async function sweepAgentMdDir(dir: string): Promise<void> {
+  const dir = path.join(PATHS.CLAUDE_CONFIG_DIR, "agents")
   let entries: Array<string>
   try {
     entries = await fs.readdir(dir)

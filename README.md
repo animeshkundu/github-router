@@ -96,6 +96,18 @@ Each persona is exposed both as a Claude Code subagent (callable via the `Task` 
 
 `gemini-critic` and `gemini-reviewer` both register only when `gemini-3.1-pro-preview` (or another `gemini-3.x-pro` model) is present in your Copilot model catalog — `gemini-critic` is the architecture-level critic, `gemini-reviewer` the line-level second-lab code reviewer on the same model at its highest reasoning tier. If absent, both personas are silently dropped from the MCP `tools/list` and the subagent set, and `peer-review-coordinator` skips them in routing decisions.
 
+### Native subagents
+
+The launcher also registers focused native subagents that run in their own contexts. `implementer`, `reviewer`, `brainstorm`, and `scribe` are always present. Each uses its preferred model when the live catalog provides one with tool calls, otherwise it inherits the lead model; `scout` is present only when its cheap-tier model chain resolves, so repository lookup does not silently run at the lead's model rate.
+
+| Subagent | Use for | Preferred model chain | Tools |
+|---|---|---|---|
+| `implementer` | Well-scoped coding changes | gpt-5.6-sol → gpt-5.5 | Full inherited toolset |
+| `reviewer` | Assessing an existing diff, plan, document, or failure | gpt-5.6-sol → gpt-5.5 | Full inherited toolset |
+| `brainstorm` | Divergent approaches before selecting one | gemini-3.1-pro-preview → OpenAI frontier | Read-only allowlist |
+| `scout` | Low-cost repository exploration | gemini-3.6-flash → gpt-5.4-mini | Read-only allowlist |
+| `scribe` | Documentation that trails the code | gpt-5.6-terra → OpenAI frontier | Full inherited toolset |
+
 For codex-side write capability (a `codex-implementer` persona that can mutate files via Codex's tool-use sandbox), pass `--codex-cli`. Requires `codex` CLI 0.129+ on `PATH`; falls back to HTTP-only with a warning if codex is missing or older. Pass `--codex-mcp-only` to also pass `--strict-mcp-config` to Claude Code so only the proxy's MCP servers are loaded (hides any MCP servers in your existing `~/.claude/mcp.json`).
 
 ### Code search (`mcp__search__code`)

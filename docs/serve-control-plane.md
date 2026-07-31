@@ -63,8 +63,11 @@ by writing into the router-owned `CLAUDE_CONFIG_DIR` mirror (which the SDK-spawn
   mints a `repo+workflow` GitHub write token), and **fleet** (which drives remote coding sessions) are
   withheld unless the operator opts in with `--browse-over-tunnel` / `--agents-over-tunnel` /
   `--fleet-over-tunnel` — see Security model.
-- **Subagents** — the peer critics, worker dispatchers, and `implementer` (`.md` files in the
-  mirror's `agents/`), PLUS Claude Code's **built-in subagents** (`Explore`, `Plan`, `general-purpose`)
+- **Subagents** — the peer critics, worker dispatchers, and native `implementer`, `reviewer`,
+  `brainstorm`, `scout`, and `scribe` (`.md` files in the mirror's `agents/`). `implementer`,
+  `reviewer`, `brainstorm`, and `scribe` are emitted even when their preferred model chain misses,
+  then inherit the lead; `scout` is omitted when no cheap-tier model resolves. PLUS Claude Code's
+  **built-in subagents** (`Explore`, `Plan`, `general-purpose`)
   which the Agent SDK does NOT register on its own. Without these a serve session shows
   `Agent type 'Explore' not found` when the model habitually calls them; we re-register them
   (`BUILTIN_SUBAGENT_DEFINITIONS` in `src/lib/codex-mcp-config.ts`) **serve-only** — never for

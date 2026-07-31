@@ -1,47 +1,47 @@
-# Subagent: `implementer` (native, gpt-5.6-sol)
+# Subagent: `implementer` (native)
 
-> The native implementation subagent. Unlike the peer critics (thin routers to a verdict model via MCP, themselves running on the inherited Claude model), this subagent prefers gpt-5.6-sol and falls back to gpt-5.5 via the `/v1/messages` translation shim.
+> The native implementation subagent. It runs in its own context, preferring the available OpenAI frontier coder and otherwise inheriting the lead's model.
 
 ## 1. Identity
 
 | Field | Value |
 |---|---|
 | Subagent name | `implementer` |
-| Subagent's OWN model | `gpt-5.6-sol` preferred (`model:` frontmatter emitted), with `gpt-5.5` fallback (`src/lib/codex-mcp-config.ts:314`) |
-| Gate | ALWAYS injected (no catalog gate — `implementer`, `debugger`, `qa-engineer` are available by default). `nativeSubagentModel()` selects the MODEL: `gpt-5.6-sol`/`gpt-5.5` with `tool_calls` when present (set as `model:` frontmatter, runs at xhigh), else `model:` is omitted so it inherits the lead's model (`codex-mcp-config.ts`; repo CLAUDE.md "Native implementation subagent") |
-| Registered via | `buildPeerAgentDefinitions` (`codex-mcp-config.ts:308-316`) |
-| Description source | inline literal (`codex-mcp-config.ts:310-311`) — NOT a `PersonaSpec`, NOT shared with any tool |
-| System prompt | inline literal (`codex-mcp-config.ts:312-313`) |
-| Tools | none declared → inherits the parent's full toolset (Edit/Write/Bash/Read/Grep/Glob…); pinned by `tests/codex-mcp-config.test.ts:320` (`"tools" in implementer` is false) |
+| Subagent's OWN model | `gpt-5.6-sol` preferred, then `gpt-5.5`, when a catalog entry advertises `tool_calls`; otherwise the `model:` frontmatter is omitted and it inherits the lead's model |
+| Gate | Always emitted. Model resolution affects only its optional `model:` frontmatter, not whether the agent exists. |
+| Registered via | `buildPeerAgentDefinitions` in `src/lib/codex-mcp-config.ts` |
+| Description source | Inline native-agent definition in `buildPeerAgentDefinitions` |
+| System prompt | Inline native-agent definition in `buildPeerAgentDefinitions` |
+| Tools | No `tools:` declaration, so it inherits the parent's full toolset |
 
-Distinct from every other injected subagent: it carries a `model:` frontmatter line so its main loop prefers gpt-5.6-sol and falls back to gpt-5.5 (through the shim), and it inherits the full toolset (it does real file edits itself, not via an MCP relay).
+It is one of five native agents: `implementer`, `reviewer`, `brainstorm`, `scout`, and `scribe`. Unlike peer critics, it does the work in its own agent loop rather than relaying a request through an MCP persona.
 
 ## 2. Description (verbatim)
 
-`codex-mcp-config.ts:310-311`:
+The emitted wording depends on whether `nativeSubagentModel()` resolves a catalog model:
 
-> Bounded implementation subagent running gpt-5.6-sol (strong non-Claude coder, high reasoning; gpt-5.5 fallback). Use for well-scoped coding tasks — edits, small features, fixes — you want implemented in an integrated subagent. Model is overridable at spawn.
+> Bounded implementation subagent running `<resolved model>` (strong non-Claude coder, maximum reasoning). Use proactively for well-scoped coding tasks: edits, small features, fixes, to keep the lead's context focused; runs in its own context. Model is overridable at spawn.
+
+Without a resolved frontier coder, the description instead says it uses native tools and runs on the lead's model in its own context.
 
 ## 3. System-prompt summary
 
-`codex-mcp-config.ts:312-313`: "You are a bounded implementation subagent for well-scoped coding tasks. Implement the requested change surgically, matching the surrounding code style and minimizing unrelated churn. Use the dedicated Edit/Write/Read tools for file changes and Grep/Glob for search; reserve Bash for running builds, tests, and git — do not shell out (sed/awk/python/here-docs) to read or edit files. Verify with the project's build or tests where applicable. Do the work yourself — do not spawn further subagents. Report exactly what changed and any risks."
-
-Terminal (no sub-agent spawning), tool-hygiene guidance (prefer Edit/Write over shelling out), and a verify-then-report contract.
+The prompt asks the agent to implement a well-scoped change surgically, match surrounding code style, minimize unrelated churn, use dedicated file and search tools, verify with relevant builds or tests, avoid spawning further subagents, and report changes and risks.
 
 ## 4. Routing-trigger assessment
 
-- **States trigger — good.** "Use for well-scoped coding tasks — edits, small features, fixes — you want implemented in an integrated subagent" is an explicit "Use for…" trigger that names the artifact class (edits/features/fixes) and the scope boundary (well-scoped, bounded, integrated). Clearer than codex-implementer's thin line.
-- **Specific not vague — good.** Names the model (gpt-5.6-sol, with gpt-5.5 fallback), the reasoning tier, the task class, and "integrated subagent" (contrasting the non-blocking worker path). "Model is overridable at spawn" is a genuine capability note (frontmatter `model:` is resolution rank #3, so a per-invocation `model` param wins — repo CLAUDE.md "Native implementation subagent"), pinned by `tests/codex-mcp-config.test.ts:321`.
-- **Accurately previews the body — yes.** "bounded", "well-scoped", "integrated subagent", surgical implementation all map to the system prompt.
-- **Overtrigger risk — LOW.** "Use for well-scoped coding tasks" is scoped by "bounded" and "integrated"; it does not say "always implement via this subagent". On Opus 4.5+ the "Use for X" phrasing is measured, not blanket.
+- **States trigger.** The description directs well-scoped coding work, including edits, features, and fixes, to this agent.
+- **Specific not vague.** It distinguishes bounded implementation from background workers by saying it runs in its own context, and it records that callers may override its model at spawn.
+- **Accurately previews the body.** Surgical implementation, tool hygiene, verification, and self-contained execution all match the prompt.
+- **Overtrigger risk.** The trigger is bounded by the task type and scope. It does not claim that every coding request requires delegation.
 
 ## 5. Don't-nerf / right-balance
 
-This is the intended common-case implementation surface (repo CLAUDE.md: "reducing reliance on `worker_implement` for the common case; workers stay for long / autonomous / worktree-isolated runs"). The description correctly carves that niche: integrated + bounded here, autonomous/long/worktree for the worker. Raises the floor (a strong non-Claude coder as a first-class subagent) without nerfing the worker path. The "integrated subagent" phrase is the load-bearing differentiator from `worker-implement`.
+This is the foreground implementation path for bounded work. The separate `worker-implement` path remains for autonomous, non-blocking, worktree-isolated work. The `codex-implementer` path appears only with `--codex-cli`; its Codex sandbox is the material reason to select it instead.
 
 ## 6. Findings + verdict
 
-- **[Important] Part of S3 (three-way implement overlap).** This is the middle of three write-capable implementation surfaces. It differentiates from `worker-implement` reasonably well ("integrated subagent" vs "non-blocking… background"), but it does NOT differentiate from `codex-implementer` (both gpt-family, both integrated, both foreground). Under `--codex-cli` a lead sees both `implementer` (gpt-5.6-sol, gpt-5.5 fallback) and `codex-implementer` (gpt-5.3-codex) with near-identical scope framing and no cross-reference. Recommend one description name the other (e.g. native implementer: "prefer over codex-implementer unless you need Codex-CLI sandboxing"). See README S3.
-- **[Suggestion]** The description does not state the subagent runs its OWN loop on gpt-5.6-sol (with gpt-5.5 fallback) (vs the critics which relay to a peer model). "running gpt-5.6-sol" implies it but a reader could conflate it with the relay pattern. Minor; the "integrated subagent" phrase already signals it does the work itself.
+- **No material routing defect found.** The previous catalog gate claim was incorrect: a missing preferred model omits `model:` and preserves the agent by inheriting the lead's model.
+- **Documentation constraint.** The agent's definition is emitted for every launch, while the `scout` agent alone is omitted when its cheap-tier model chain cannot resolve.
 
-**Verdict: Y (with the S3 overlap caveat).** The strongest "Use for…" trigger among the implementation subagents, correctly scoped, accurate body preview, low overtrigger. The only real issue is shared with S3: no differentiation from codex-implementer under `--codex-cli`.
+**Verdict: Y.** The native implementation agent has a clear bounded-work trigger and a graceful model fallback without disappearing from the roster.
