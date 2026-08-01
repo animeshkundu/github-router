@@ -7,12 +7,18 @@
 // "should" is not "verified", and rewriting 333 URLs on that assumption is
 // exactly the kind of unchecked step that ships a broken lockfile.
 //
-// So: ask npmjs directly for each name@version, compare its published
-// integrity against what the lockfile recorded, and emit the canonical
-// dist.tarball URL. A rewrite driven by this output is provably equivalent to
-// what a clean-network `bun install` would have produced.
+// So: ask npmjs directly for each name@version and compare its published
+// integrity against what the lockfile recorded. That is the check no offline
+// test can make — tests/lockfile-provenance.test.ts asserts the URLs and hash
+// algorithms are shaped right, but only the registry can confirm the bytes
+// those hashes describe are the bytes npmjs actually publishes.
 //
-// Usage: node scripts/verify-lockfile-provenance.mjs [--json <out>]
+// The fix for a mirror-contaminated lockfile is to regenerate it where the
+// public registry is reachable (`bun install`), which writes an empty URL
+// field per entry because the default registry is implicit. This script works
+// against either shape, since it keys off name@version rather than the URL.
+//
+// Usage: bun run verify:lockfile  [--json <out>]
 
 import { readFileSync, writeFileSync } from "node:fs"
 
