@@ -112,12 +112,41 @@ export function standInToolEnabled(): boolean {
   return hasOpenAi && hasOpus && hasGeminiPro
 }
 
-/** Model for the native subagents that want the OpenAI frontier coder
- *  (`implementer`, `reviewer`) iff it is live with tool calls. Prefers
- *  `gpt-5.6-sol`, falls back to `gpt-5.5`. Absent → those agents omit their
- *  `model:` line and inherit the lead's model. */
+/** Model for the native subagent that wants the OpenAI frontier coder
+ *  (`implementer`) iff it is live with tool calls. Prefers `gpt-5.6-sol`, falls
+ *  back to `gpt-5.5`. Absent → the agent omits its `model:` line and inherits
+ *  the lead's model.
+ *
+ *  Public web benchmarks put `gpt-5.6-sol` ahead of both `gpt-5.6-terra` and
+ *  `gpt-5.3-codex` on coding (Terminal-Bench 2.1 88.8 vs 87.1; SWE-bench
+ *  Verified 96.2 vs ~80 for 5.3-codex, which also trails gpt-5.5 on SWE-bench
+ *  Pro). Terra is the cheaper tier at ~98% of the capability, so it is the right
+ *  call only if cost dominates, which this project's operating rules say it does
+ *  not. Left on sol deliberately. */
 export function nativeSubagentModel(): string | undefined {
   return resolveOpenAiFrontier({ requireToolCalls: true })
+}
+
+/**
+ * Model for `reviewer` — Google-first, deliberately NOT the implementer's model.
+ *
+ * `reviewer` used to share `nativeSubagentModel()` with `implementer`, which
+ * meant that whenever `implementer` produced the artifact the default review path
+ * was one model checking its own output. Not merely the same lab: the same
+ * model. Two independent blind audits flagged it, and the repo already applies
+ * the opposite rule one layer down, where `worker-review` runs
+ * `REVIEW_DEFAULT_MODEL` precisely so the reviewer's lab is decorrelated from the
+ * producer's.
+ *
+ * The Anthropic lead and the OpenAI-frontier `implementer` are the two producers
+ * that matter here, so a Google reviewer is cross-lab against both. The OpenAI
+ * frontier remains the fallback: a same-lab reviewer still beats no reviewer.
+ */
+export function reviewerModel(): string | undefined {
+  return firstPresentInCatalog(
+    [REVIEW_DEFAULT_MODEL, ...OPENAI_FRONTIER_MODELS],
+    { requireToolCalls: true },
+  )
 }
 
 /*

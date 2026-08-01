@@ -185,6 +185,7 @@ mock.module("~/lib/mcp-capabilities", () => ({
   semanticSearchEnabled: mock(() => false),
   geminiAvailable: geminiAvailableMock,
   nativeSubagentModel: mock(() => undefined),
+  reviewerModel: mock(() => undefined),
   brainstormModel: mock(() => undefined),
   scribeModel: mock(() => undefined),
   // `scout` is emitted only when a cheap-tier model resolves; undefined here
