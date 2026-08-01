@@ -16,16 +16,15 @@
 import { runCommandCapture } from "~/lib/exec"
 
 import { type ExecFn } from "./gate-runner"
+import { parseIntEnv } from "../exec"
 
 /** Per-command wall-clock cap so a hung gate command (watch-mode test, a process
  *  waiting on stdin, a stale lockfile) is tree-killed instead of hanging the
  *  caller forever. Generous (a real typecheck/test/lint can take minutes) but
  *  bounded; override with GH_ROUTER_GATE_CMD_TIMEOUT_MS. A timeout kills the
  *  command (code null) which the gate runner treats as not-passed. */
-const CMD_TIMEOUT_MS = ((): number => {
-  const n = Number.parseInt(process.env.GH_ROUTER_GATE_CMD_TIMEOUT_MS ?? "", 10)
-  return Number.isFinite(n) && n > 0 ? n : 600_000
-})()
+const CMD_TIMEOUT_MS =
+  parseIntEnv(process.env.GH_ROUTER_GATE_CMD_TIMEOUT_MS) ?? 600_000
 
 export const liveExec: ExecFn = async ({ command, cwd }) => {
   const argv = command.trim().split(/\s+/).filter(Boolean)

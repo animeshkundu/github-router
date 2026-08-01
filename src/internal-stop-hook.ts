@@ -43,6 +43,7 @@ import {
   stopGateEnabledForRepo,
   stopReviewStateDir,
 } from "./lib/orchestration/stop-gate-policy"
+import { parseIntEnv } from "./lib/exec"
 
 /**
  * Read the hook payload from stdin SYNCHRONOUSLY (`readFileSync(0)`). An async
@@ -237,7 +238,7 @@ export const internalStopHook = defineCommand({
 
     let decision: { exitCode: 0 | 2; stderr?: string }
     try {
-      const timeoutEnv = Number.parseInt(process.env.GH_ROUTER_STOP_GATE_TIMEOUT_MS ?? "", 10)
+      const timeoutEnv = parseIntEnv(process.env.GH_ROUTER_STOP_GATE_TIMEOUT_MS)
       const mode = dynamicMode()
       decision = await decideStopHook({
         stdin,
@@ -249,7 +250,9 @@ export const internalStopHook = defineCommand({
         baseline: fileBaselineStore(path.join(tmpdir(), "gh-router-stopgate-baseline")),
         isEnabledForRepo: (cwd) => stopGateEnabledForRepo(cwd),
         resolveChecks: mode ? buildResolveChecks(mode) : undefined,
-        timeoutMs: Number.isFinite(timeoutEnv) && timeoutEnv > 0 ? timeoutEnv : undefined,
+        // parseIntEnv already rejects non-positive / non-integer / truncating
+        // values, so undefined here means "use the built-in default".
+        timeoutMs: timeoutEnv,
         planMode: stopGatePlanMode(),
         reviewDebounce: reviewEnabled ? fileReviewDebounce(stopReviewStateDir()) : undefined,
         spawnReview: reviewEnabled

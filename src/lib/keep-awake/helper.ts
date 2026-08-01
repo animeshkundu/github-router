@@ -48,11 +48,18 @@ const ES_DISPLAY_REQUIRED = 0x00000002
  *  cold machine (a fresh CI runner, a laptop that just booted, a host with
  *  aggressive on-access AV scanning) it routinely takes well over five seconds.
  *
- *  Giving up early does not fail loudly, which is what makes a tight value
- *  costly here: `ready` resolves false, the caller logs a debug no-op, and the
- *  user silently loses keep-awake on exactly the slow machines most likely to be
- *  left running unattended. Waiting longer costs nothing, because the readiness
- *  promise is awaited in the background and never blocks launch. */
+ *  CORRECTION to the rationale this constant shipped with. An earlier version of
+ *  this comment (and the commit that raised the value) claimed a short timeout
+ *  made the user "silently lose keep-awake". That is wrong, and a cross-lab
+ *  reviewer caught it: `startKeepAwake` does nothing with `ready` but
+ *  `consola.debug` it (`index.ts:128`). The handle is retained and the child
+ *  keeps running, so the assertion is still set, just later than we observed it.
+ *
+ *  The real cost of a tight value is therefore a LYING LOG, not a lost feature:
+ *  we report "inactive" for a helper that is about to work. That is still worth
+ *  fixing, because a false negative in a diagnostic is how you lose an afternoon
+ *  chasing a working feature. Waiting longer costs nothing either way, since the
+ *  readiness promise is awaited in the background and never blocks launch. */
 const DEFAULT_READY_TIMEOUT_MS = 20_000
 
 /**

@@ -46,6 +46,34 @@ export function parseBoolEnv(value: string | undefined): boolean | undefined {
   return undefined
 }
 
+/**
+ * Parse a positive-integer env value. Returns `undefined` when unset, empty, or
+ * not a clean positive integer, so callers apply their own default.
+ *
+ * The single shared parser for numeric `GH_ROUTER_*` knobs, and it deliberately
+ * uses `Number()` rather than `parseInt()`. `parseInt` stops at the first
+ * character it cannot consume, so it silently truncates instead of rejecting:
+ * `"3e5"` becomes 3, `"300_000"` becomes 300, `"60000ms"` becomes 60000. For a
+ * timeout or a concurrency cap that is the worst possible failure — a user who
+ * writes `GH_ROUTER_STOP_GATE_TIMEOUT_MS=3e5` intending five minutes gets three
+ * MILLISECONDS, and the resulting instant failure looks like a product bug
+ * rather than a typo. Falling back to the documented default is strictly safer
+ * than honouring a number the user never meant.
+ *
+ * Found by a cross-lab reviewer during a capability audit, at three shipped call
+ * sites, while three separate local helpers in this repo already parsed the same
+ * shape correctly and one of them documented this exact hazard. That is the
+ * argument for one shared parser rather than a fourth copy.
+ */
+export function parseIntEnv(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined
+  const raw = value.trim()
+  if (raw === "") return undefined
+  const n = Number(raw)
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return undefined
+  return n
+}
+
 /** Read the PATH value from an env object, case-insensitively. */
 function pathValueOf(env: NodeJS.ProcessEnv): string {
   for (const key of Object.keys(env)) {

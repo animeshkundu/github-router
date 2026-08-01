@@ -175,7 +175,11 @@ describe("keep-awake helper spawn (win32)", () => {
       displayRequired: false,
       readyTimeoutMs: 30000,
     })
-    await ready
+    // Assert, do not merely await. Two sibling tests used to `await ready`
+    // without checking it, so a fired readiness deadline was invisible here and
+    // the suite under-reported readiness misses roughly threefold: in the CI run
+    // that exposed this, two deadlines fired and only one was visible.
+    expect(await ready).toBe(true)
     const exited = new Promise<void>((r) => handle!.child.once("exit", () => r()))
     killHelper(handle!)
     await exited // resolves => the child terminated

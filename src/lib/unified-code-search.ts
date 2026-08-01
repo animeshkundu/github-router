@@ -211,10 +211,61 @@ async function runLexical(
       snippet: h.snippet,
       ...(h.role ? { role: h.role } : {}),
     })),
-    notice: resp.notice ?? undefined,
+    notice: joinNotice(resp.notice ?? undefined, emptyPhraseHint(input, resp.results.length)),
     outlines: resp.outlines,
     truncated: resp.truncated,
   }
+}
+
+/**
+ * Hint emitted when a multi-word lexical query matches nothing.
+ *
+ * Observed, and only this much is verified: a natural-language multi-word query
+ * can return `results: []` on this backend even when the individual words all
+ * appear in the repository, and the same question answered instantly via a
+ * single identifier or a plain `Grep`. A blind capability audit hit exactly that
+ * on a real lookup and concluded the code did not exist.
+ *
+ * The mechanism is NOT fully characterised. The audit proposed contiguous-phrase
+ * matching; that explanation does not survive testing, because other multi-word
+ * queries whose words are spread across lines do return hits. So this hint
+ * deliberately describes the SYMPTOM and the recovery, and claims nothing about
+ * the cause.
+ *
+ * It is worth emitting regardless of mechanism: a bare empty result reads as
+ * "not in this repository" rather than "that query shape did not work", and this
+ * project's own guidance steers callers here before `Grep`. A silently empty
+ * result is worse than a missing tool, because a missing tool routes you
+ * elsewhere and an empty one convinces you. The advice it gives (retry a single
+ * identifier, or use regex) is correct for a genuine no-match too, so the hint
+ * costs nothing when the repository really lacks the term.
+ */
+function emptyPhraseHint(
+  input: UnifiedCodeSearchInput,
+  hitCount: number,
+): string | undefined {
+  if (hitCount > 0) return undefined
+  if (input.mode === "regex" || input.mode === "ast") return undefined
+  const terms = input.query.trim().split(/\s+/).filter(Boolean)
+  if (terms.length < 2) return undefined
+  // Suggest a term that is actually retryable. Naively taking the last token
+  // recommends `sized?` for "where is the timeout sized?", which is punctuation
+  // noise and would produce a second false negative — the exact failure this
+  // hint exists to prevent. Strip non-identifier characters, keep only tokens
+  // that survive as identifiers, and prefer the longest (the most specific
+  // symbol-like word). If nothing qualifies, give the advice without an example
+  // rather than a bad one.
+  const candidate = terms
+    .map((t) => t.replace(/[^A-Za-z0-9_]/g, ""))
+    .filter((t) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(t))
+    .sort((a, b) => b.length - a.length)[0]
+  const retry = candidate ? ` (e.g. \`${candidate}\`)` : ""
+  return (
+    `no hits for a multi-word query. This can happen even when the words all `
+    + `appear in the repository, so do NOT read this as "not present". Retry with a `
+    + `single identifier${retry}, or use \`mode: "regex"\` or grep, before `
+    + `concluding the code is absent.`
+  )
 }
 
 /**
