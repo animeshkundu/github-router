@@ -391,7 +391,7 @@ export async function decideStopHook(input: {
   }
   // (4) CONSENT: only run the repo's scripts if the user trusted it (or forced).
   //     Any failure -> allow (never wedge, never run untrusted code).
-  let enabled = false
+  let enabled: boolean
   try {
     enabled = await input.isEnabledForRepo(cwd)
   } catch {
@@ -401,7 +401,7 @@ export async function decideStopHook(input: {
   // (5) hard per-prompt budget: never block more than maxBlocks times per
   //     prompt. This — NOT the (now-absent) stop_hook_active flag — is the
   //     termination guard; relying on stop_hook_active would defeat block-twice.
-  let priorBlocks = 0
+  let priorBlocks: number
   try {
     priorBlocks = await input.budget.count(sessionId)
   } catch {

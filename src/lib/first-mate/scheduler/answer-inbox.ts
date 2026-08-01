@@ -176,7 +176,7 @@ export class AnswerInbox {
     // instance still holds in-flight (claimed, not yet acked) so a re-drain
     // before ack does not double-read its own claim. Orphans are returned but
     // NOT unlinked here — ack does that once the caller has applied them.
-    let siblings: string[] = []
+    let siblings: string[]
     try {
       siblings = await fs.readdir(dir)
     } catch {

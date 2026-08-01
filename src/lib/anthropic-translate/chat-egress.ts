@@ -305,7 +305,6 @@ export async function* synthAnthropicFromChat(
   // client can't JSON.parse at content_block_stop.
   if (activeTextIndex != null) {
     yield makeContentBlockStop(activeTextIndex)
-    activeTextIndex = null
   }
   let sawTool = false
   const orderedTools = [...toolByIndex.entries()].sort((a, b) => a[0] - b[0])

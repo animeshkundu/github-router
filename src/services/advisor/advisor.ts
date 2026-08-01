@@ -631,7 +631,7 @@ export function buildAdvisorStream(opts: {
     async start(controller) {
       let messageStartForwarded = false
       let nextSyntheticIndex = 0
-      let turnsRun = 0
+      let turnsRun: number
 
       const safeEnqueue = (bytes: Uint8Array): boolean => {
         try {

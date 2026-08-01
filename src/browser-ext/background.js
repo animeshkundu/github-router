@@ -488,7 +488,7 @@ async function extractSnapshotLegacy(tabId, opts) {
       // at 20 KB. The model sees what a user could read without
       // scrolling. Off-screen content remains reachable via mode:"full".
       // full: walk all rendered text nodes; cap at 256 KiB.
-      let text = ""
+      let text
       if (mode === "full") {
         // Mirror of collectVisibleText(root, cap, "rendered") in
         // src/browser-ext/visible-text.js — executeScript serializes only
@@ -1575,7 +1575,7 @@ async function toolWait(args) {
           return { ok: true, elapsedMs: Date.now() - start }
         }
       } catch (e) {
-        throw new Error(`browser_wait: invalid urlPattern regex: ${e.message}`)
+        throw new Error(`browser_wait: invalid urlPattern regex: ${e.message}`, { cause: e })
       }
     } else {
       // networkIdle — heuristic: status === "complete" + a 500ms quiet window.

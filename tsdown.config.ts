@@ -7,6 +7,11 @@ export default defineConfig([
     format: ["esm"],
     target: "es2022",
     platform: "node",
+    // tsdown 0.22 defaults `fixedExtension` to true when platform is "node",
+    // which emits .mjs. package.json is `"type": "module"` and `bin` points at
+    // dist/main.js, so the default would rename the published entrypoint out
+    // from under it and break `npx github-router` while the build still passes.
+    fixedExtension: false,
 
     sourcemap: true,
     clean: true,
@@ -29,6 +34,7 @@ export default defineConfig([
     format: ["esm"],
     target: "es2022",
     platform: "node",
+    fixedExtension: false, // keep .js — see the note on the first entry
 
     sourcemap: false,
     clean: false,
@@ -57,6 +63,7 @@ export default defineConfig([
     format: ["esm"],
     target: "es2022",
     platform: "node",
+    fixedExtension: false, // keep .js — see the note on the first entry
 
     sourcemap: false,
     clean: false,

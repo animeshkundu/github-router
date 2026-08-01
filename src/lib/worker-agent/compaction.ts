@@ -254,7 +254,7 @@ export function compactWorkerContext(
     // unshrinkable content) still exceeds the hard limit — in production the
     // afterToolCall per-result cap keeps it below, so this is the pathological
     // tail. A stubbed in-flight result + a re-read cue beats an aborted run.
-    sum = prunePass(out, out.length, firstUserIdx, budget.hardLimitTokens, sum)
+    prunePass(out, out.length, firstUserIdx, budget.hardLimitTokens, sum)
   }
   return out
 }

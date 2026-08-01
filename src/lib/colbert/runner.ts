@@ -896,7 +896,7 @@ async function runInit(workspace: string): Promise<void> {
   const onInactivityCheck = makeIndexProgressProbe(workspace)
 
   const startMs = Date.now()
-  let ok = false
+  let ok: boolean
   let failureClass: NonNullable<ColbertMeta["failureClass"]> | undefined
   try {
     const res = await _runManagedExeCapture(binary, args, {

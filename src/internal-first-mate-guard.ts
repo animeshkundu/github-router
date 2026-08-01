@@ -31,7 +31,7 @@ export const internalFirstMateGuard = defineCommand({
   run() {
     let toolName = ""
     let hookInput: OperatorToolInput | undefined
-    let parsed = false
+    let parsed: boolean
     try {
       const payload = JSON.parse(readStdinSync()) as {
         tool_name?: unknown

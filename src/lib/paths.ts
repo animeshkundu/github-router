@@ -1038,6 +1038,7 @@ async function assertOnboardingGateInjected(targetDir: string): Promise<void> {
   } catch (err) {
     throw new Error(
       `ensureClaudeConfigMirror: postcondition failed — cannot lstat ${claudeJsonPath} after injection (synthetic onboarding-skip fields are required to prevent Claude Code's first-launch wizard, which would defeat the synthetic credential): ${(err as Error).message}`,
+      { cause: err },
     )
   }
   if (!lst.isFile()) {
@@ -1052,6 +1053,7 @@ async function assertOnboardingGateInjected(targetDir: string): Promise<void> {
   } catch (err) {
     throw new Error(
       `ensureClaudeConfigMirror: postcondition failed — cannot read ${claudeJsonPath} after injection: ${(err as Error).message}`,
+      { cause: err },
     )
   }
   let parsed: Record<string, unknown>
@@ -1064,6 +1066,7 @@ async function assertOnboardingGateInjected(targetDir: string): Promise<void> {
   } catch (err) {
     throw new Error(
       `ensureClaudeConfigMirror: postcondition failed — ${claudeJsonPath} is not a valid JSON object after injection: ${(err as Error).message}`,
+      { cause: err },
     )
   }
   if (

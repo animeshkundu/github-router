@@ -121,7 +121,7 @@ export async function withFileLock<T>(
         // Lock vanished between open and stat — retry immediately.
       }
       if (Date.now() - start > LOCK_MAX_WAIT_MS) {
-        throw new Error(`first-mate durable-store lock timeout for ${target}`)
+        throw new Error(`first-mate durable-store lock timeout for ${target}`, { cause: err })
       }
       await sleep(LOCK_RETRY_MS)
     }

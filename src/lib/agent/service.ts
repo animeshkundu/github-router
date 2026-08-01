@@ -721,7 +721,7 @@ export async function repoHasWorkflows(repo: RepoRef, ref: string): Promise<bool
   const hit = cached(workflowCache.get(key))
   if (hit !== undefined) return hit
 
-  let value = false
+  let value: boolean
   try {
     const entries = await ghRest<ContentsEntry[]>(
       "GET",

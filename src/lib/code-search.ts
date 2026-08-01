@@ -53,7 +53,7 @@ import { createInterface } from "node:readline"
 import * as path from "node:path"
 
 import consola from "consola"
-import Parser from "web-tree-sitter"
+import { Language, Parser, Tree } from "web-tree-sitter"
 
 import {
   confirmDefinitionSites,
@@ -980,7 +980,7 @@ function normalizeRelFile(file: string): string {
 interface CachedTree {
   mtimeMs: number
   /** null = tried, parse failed (or unsupported language). */
-  tree: Parser.Tree | null
+  tree: Tree | null
   /** Source bytes — we need them at structural-walk time to compute
    *  byte offsets from line numbers. Kept alongside the tree so the
    *  next call on the same (file, mtime) doesn't re-read. */
@@ -1089,7 +1089,11 @@ export function __resetBenchStructuralStats(): void {
 /**
  * Run the structural-confirmation pass over the top-N already-ranked
  * BM25F hits. Wall-clock-bounded — checked between files, not mid-
- * parse (web-tree-sitter@0.22 doesn't expose a usable cancel hook).
+ * parse. web-tree-sitter 0.26 DOES expose a cancel hook
+ * (`ParseOptions.progressCallback`, cancels when it returns true), so
+ * mid-parse cancellation is now possible; it is deliberately not wired
+ * in here, because the budget only overruns on a single pathological
+ * file and tightening that is a behavior change, not part of an upgrade.
  *
  * Per-file failure modes (file too big, language unsupported, parse
  * error, I/O error) are silent: the file's hits keep the regex
@@ -1190,7 +1194,7 @@ async function runStructuralPass(opts: {
 async function runStructuralPassPooled(opts: {
   pool: TreeSitterPool
   byFile: Map<string, Array<{ hit: RawHit; index: number }>>
-  grammars: Map<string, Parser.Language>
+  grammars: Map<string, Language>
   workspaceRoot: string
   cap: number
   budgetMs: number
@@ -1279,7 +1283,8 @@ async function runStructuralPassPooled(opts: {
  * pre-Lever-2 behavior). Parses each file synchronously on the main thread,
  * caches the tree in `_treeCache` for the outline loop to reuse (Lever 1), and
  * walks each hit. Wall-clock-bounded — checked between files, not mid-parse
- * (web-tree-sitter@0.22 doesn't expose a usable cancel hook).
+ * (see the note on the top-N pass above: 0.26 has a cancel hook, intentionally
+ * unused).
  *
  * Per-file failure modes (file too big, language unsupported, parse error, I/O
  * error) are silent: the file's hits keep the regex `symbol_context` heuristic.
@@ -1287,7 +1292,7 @@ async function runStructuralPassPooled(opts: {
  */
 function runStructuralPassInProcess(opts: {
   byFile: Map<string, Array<{ hit: RawHit; index: number }>>
-  grammars: Map<string, Parser.Language>
+  grammars: Map<string, Language>
   workspaceRoot: string
   cap: number
   budgetMs: number
@@ -1298,7 +1303,7 @@ function runStructuralPassInProcess(opts: {
   const { byFile, grammars, cap, benchOn, result } = opts
   const t0 = Date.now()
   let filesParsed = 0
-  let parsersUsed = new Map<string, Parser>()
+  const parsersUsed = new Map<string, Parser>()
 
   try {
     for (const [relFile, entries] of byFile) {
@@ -1355,7 +1360,7 @@ function runStructuralPassInProcess(opts: {
           parser.setLanguage(lang)
           parsersUsed.set(langKey, parser)
         }
-        let tree: Parser.Tree | null = null
+        let tree: Tree | null = null
         try {
           const pt0 = benchOn ? performance.now() : 0
           tree = parser.parse(source)
@@ -1404,7 +1409,6 @@ function runStructuralPassInProcess(opts: {
         // Best effort
       }
     }
-    parsersUsed = new Map()
   }
 
   return result
@@ -2226,7 +2230,7 @@ export async function searchCode(
       if (externalSignal) {
         externalSignal.removeEventListener("abort", onExternal)
       }
-      throw new Error(`failed to spawn ripgrep: ${(err as Error).message}`)
+      throw new Error(`failed to spawn ripgrep: ${(err as Error).message}`, { cause: err })
     }
 
     // Capture stderr as text (bounded to 64KB — rg errors are short,
