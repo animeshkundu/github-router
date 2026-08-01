@@ -148,10 +148,16 @@ const waitForExit = (pid: number, timeoutMs: number): Promise<boolean> =>
   })
 
 describe("keep-awake helper spawn (win32)", () => {
+  // Timeouts here are sized for a COLD Windows runner, not a warm dev box. The
+  // helper's `Add-Type -MemberDefinition` compiles a C# P/Invoke shim through
+  // csc.exe before it can print `OK`, and that compile has been observed taking
+  // over 8s on a fresh CI runner, which is what made this suite flaky. The
+  // assertions are unchanged; only the patience is. A tight bound here does not
+  // catch a regression faster, it just converts a slow machine into a red run.
   test.skipIf(!isWin)("readies, then exits 0 on stdin EOF (no taskkill)", async () => {
     const { handle, ready } = spawnHelper({
       displayRequired: false,
-      readyTimeoutMs: 8000,
+      readyTimeoutMs: 30000,
     })
     expect(handle).not.toBeNull()
     expect(await ready).toBe(true)
@@ -162,19 +168,19 @@ describe("keep-awake helper spawn (win32)", () => {
       handle!.child.stdin?.end()
     })
     expect(code).toBe(0)
-  }, 15000)
+  }, 60000)
 
   test.skipIf(!isWin)("killHelper reaps the helper", async () => {
     const { handle, ready } = spawnHelper({
       displayRequired: false,
-      readyTimeoutMs: 8000,
+      readyTimeoutMs: 30000,
     })
     await ready
     const exited = new Promise<void>((r) => handle!.child.once("exit", () => r()))
     killHelper(handle!)
     await exited // resolves => the child terminated
     expect(isPidAlive(handle!.child.pid as number)).toBe(false)
-  }, 15000)
+  }, 60000)
 
   test.skipIf(!isWin)("startKeepAwake spawns once; stop releases the handle", async () => {
     startKeepAwake()
@@ -185,7 +191,7 @@ describe("keep-awake helper spawn (win32)", () => {
     await stopKeepAwake()
     expect(__keepAwakeChildPidForTests()).toBeUndefined() // handle released
     await stopKeepAwake() // idempotent no-op
-  }, 15000)
+  }, 60000)
 
   test.skipIf(!isWin)(
     "helper dies when its parent process exits WITHOUT cleanup (crash safety)",
@@ -196,7 +202,7 @@ describe("keep-awake helper spawn (win32)", () => {
       // SIGKILL/OOM/hard-exit invariant the design relies on.
       const code = [
         `import { spawnHelper } from "./src/lib/keep-awake/helper.ts";`,
-        `const { handle, ready } = spawnHelper({ displayRequired: false, readyTimeoutMs: 8000 });`,
+        `const { handle, ready } = spawnHelper({ displayRequired: false, readyTimeoutMs: 30000 });`,
         `await ready;`,
         `console.log("HELPER_PID=" + handle.child.pid);`,
         `setTimeout(() => process.exit(0), 150);`,
@@ -221,6 +227,6 @@ describe("keep-awake helper spawn (win32)", () => {
       // After the parent exited, the orphaned helper must die on pipe EOF.
       expect(await waitForExit(helperPid, 10000)).toBe(true)
     },
-    25000,
+    60000,
   )
 })
