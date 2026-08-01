@@ -729,6 +729,15 @@ export function buildPeerAwarenessSummary(opts: {
   const lines: Array<string> = [
     "## Injected capabilities (summary)",
     "",
+    // The native subagents come FIRST and are named here, not only in CLAUDE.md.
+    // This block is the always-in-context surface; it previously named every
+    // competing surface (peer critics, workers, stand_in) and none of the
+    // natives, so the only agents the lead was reminded of every turn were the
+    // ones the natives overlap with. The `reviewer` clause carries the explicit
+    // tiebreak because that is the one pair observed to route wrong: a live
+    // session picked `codex_reviewer` for an assess-this-code task, which is
+    // exactly the case `reviewer` exists for.
+    `Native subagents (Task), each in its own context: \`implementer\` (you know what to build), \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take), \`scout\` (find or understand something in the repo, cheap), \`scribe\` (docs and ADRs that trail the code). They read the repo and can run things; the peer critics below cannot, so reach for \`reviewer\` when an assessment needs execution or repo context and for a critic when you already hold the artifact.`,
     `A layer of MCP tools, background workers, and skills is injected into this session. Cross-lab peer critics under \`mcp__${key("peers")}__*\` (plus the \`peer-review-coordinator\` subagent) review plans and diffs adversarially, and Claude Code's built-in \`advisor\` catches approach drift. \`mcp__${key("search")}__code\` is meaning-first code search and \`mcp__${key("search")}__web\` returns citable web sources.`,
   ]
   if (opts.workerToolsAvailable) {

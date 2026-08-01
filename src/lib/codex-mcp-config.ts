@@ -543,12 +543,19 @@ export function buildPeerAgentDefinitions(
   }
   out.reviewer = {
     description: nativeModel
-      ? `Feedback subagent running ${nativeModel} at maximum reasoning. Use proactively when something already exists and you want it assessed: a diff, a plan, a document, a failing test. It does whatever the assessment needs, including reproducing a failure and isolating its root cause, and keeps that work off the lead's context. Model is overridable at spawn.`
-      : `Feedback subagent (native tools, runs on the lead's model in its own context). Use proactively when something already exists and you want it assessed: a diff, a plan, a document, a failing test. It does whatever the assessment needs, including reproducing a failure and isolating its root cause. Model is overridable at spawn.`,
+      ? `Feedback subagent running ${nativeModel} at maximum reasoning. Use proactively when something already exists and you want it assessed: a diff, a plan, a document, a failing test. Unlike the stateless peer critics, it reads the repo and can RUN things, so prefer it whenever the assessment needs execution or repo context (reproduce a failure, run the suite, bisect); prefer a peer critic when you already hold the artifact and want a fresh-context opinion on it. Model is overridable at spawn.`
+      : `Feedback subagent (native tools, runs on the lead's model in its own context). Use proactively when something already exists and you want it assessed: a diff, a plan, a document, a failing test. Unlike the stateless peer critics, it reads the repo and can RUN things, so prefer it whenever the assessment needs execution or repo context; prefer a peer critic when you already hold the artifact and want a fresh-context opinion on it. Model is overridable at spawn.`,
     prompt:
       "You are a feedback subagent. Your job is to tell the caller what is actually true about the artifact you are given — code, a plan, a document, a failure report — and what is wrong with it. "
       + "Verify against the ACTUAL code by reading it; never assume. Do whatever the assessment requires: reproduce a failure end to end as close to how a real user hits it as you can, form hypotheses and test them against the code and runtime, and isolate the true root cause rather than a symptom. "
       + "Where the change warrants it, author tests that try to BREAK the implementation (edge cases, error paths, and the acceptance criteria as executable checks), run them, and report which pass and which fail; do NOT modify production code just to make tests pass. "
+      // Same-model self-review guard. `implementer` and `reviewer` deliberately
+      // share one resolver, so whenever the artifact came from `implementer` (or
+      // a worker on that model) this is a model reviewing its own output, not an
+      // independent check. The lead cannot see that from the verdict, so the
+      // agent has to declare it. Cross-lab escalation is a recommendation rather
+      // than an automatic hand-off because the lead owns the routing budget.
+      + "One thing you must disclose: you run on the same model as the `implementer` subagent. If the artifact you are assessing was produced by `implementer`, or by a worker running that model, then your review is same-model rather than independent. Say so plainly in your report, and for anything load-bearing recommend a cross-lab second opinion via `gemini_reviewer`. "
       + fileToolSteer("builds")
       + " Do the work yourself — do not spawn further subagents. Report severity-ranked findings with `file:line` citations, the evidence behind each, and end with a clear go/no-go.",
     ...modelField,
