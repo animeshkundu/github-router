@@ -135,7 +135,7 @@ function detectCapabilityMismatch(
  * that should get a probe row added.
  *
  * Format (single line, deterministic-ish key order):
- *   [fields] path=<P> body_keys=<csv> tool_field_keys=<csv> beta_values=<csv>
+ *   [fields] path=<P> body_keys=<csv> tool_field_keys=<csv> beta_values=<csv> agent=<id|->
  *
  * Where:
  *   - `body_keys` is the alphabetical union of top-level keys in the
@@ -145,11 +145,18 @@ function detectCapabilityMismatch(
  *   - `beta_values` is the comma-split anthropic-beta header value as
  *     received (NOT filtered) — captures what the client sends, not
  *     what we forward
+ *   - `agent` is Claude Code's `x-claude-code-agent-id` header, or `-` for
+ *     main-loop traffic. Without it a capture cannot tell a subagent request
+ *     from a main-loop one, which is exactly the question you need answered
+ *     when reasoning about per-agent request shape (does a subagent send a
+ *     `thinking` block?). The header value is opaque to us and is logged
+ *     verbatim.
  */
 export function logRequestFields(opts: {
   path: string
   body: unknown
   betaHeader?: string
+  agentId?: string
 }): void {
   if (process.env.GH_ROUTER_LOG_FIELDS !== "1") return
   const bodyKeys = collectTopLevelKeys(opts.body)
@@ -162,7 +169,8 @@ export function logRequestFields(opts: {
     `[fields] path=${opts.path}`
     + ` body_keys=${bodyKeys.join(",")}`
     + ` tool_field_keys=${toolFieldKeys.join(",")}`
-    + ` beta_values=${betaValues.join(",")}`,
+    + ` beta_values=${betaValues.join(",")}`
+    + ` agent=${opts.agentId && opts.agentId.length > 0 ? opts.agentId : "-"}`,
   )
 }
 

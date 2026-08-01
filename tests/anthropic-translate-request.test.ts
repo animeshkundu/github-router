@@ -686,8 +686,9 @@ describe("anthropic-translate request mapping", () => {
     expect(mk(5000)).toBe("medium")
     expect(mk(10000)).toBe("high")
     expect(mk(30000)).toBe("xhigh")
-    // no thinking → frontier model (gpt-5.5) defaults to xhigh reasoning effort
-    expect(build({ messages: [] }, model).payload.reasoning?.effort).toBe("xhigh")
+    // no thinking → `high`, the only effort the router injects on its own. The
+    // client's level otherwise maps 1:1, with no floor raising a lower level.
+    expect(build({ messages: [] }, model).payload.reasoning?.effort).toBe("high")
   })
 
   test("thinking budget bucket boundaries are exact", () => {
@@ -721,16 +722,19 @@ describe("anthropic-translate request mapping", () => {
     expect(effort).toBe("high")
   })
 
-  test("absent thinking defaults a frontier model (gpt-5.5) to xhigh reasoning effort", () => {
+  test("absent thinking defaults a frontier model (gpt-5.5) to high, not xhigh (1:1 mapping)", () => {
+    // The router injects `high` and nothing else when the client sends no
+    // thinking block. Forcing xhigh here would make the frontier models the one
+    // place where the provider level does not match the client's, and there is
+    // no client level to match when the field is absent.
     const model = gptModel(["low", "medium", "high", "xhigh"])
     const { payload } = build({ messages: [] }, model)
-    expect(payload.reasoning?.effort).toBe("xhigh")
+    expect(payload.reasoning?.effort).toBe("high")
   })
 
-  test("absent thinking on a non-frontier model stays high even when xhigh is offered", () => {
-    // gpt-5.3-codex is NOT in the xhigh effort-policy set, so the shim's
-    // model-aware default leaves it at high even though the catalog advertises
-    // xhigh — the frontier-only policy split, pinned at the request layer.
+  test("absent thinking on a non-frontier model is high too (no per-model split in the default)", () => {
+    // gpt-5.3-codex was never in the xhigh effort-policy set; now neither is any
+    // model by default, so this and the frontier case agree.
     const model = codexModel(["low", "medium", "high", "xhigh"])
     const { payload } = build({ messages: [] }, model)
     expect(payload.reasoning?.effort).toBe("high")
@@ -742,14 +746,34 @@ describe("anthropic-translate request mapping", () => {
     expect(payload.reasoning?.effort).toBe("high")
   })
 
-  test("GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT opt-out restores high (accepts 1/true/yes/on)", () => {
+  test("GH_ROUTER_FRONTIER_XHIGH_DEFAULT opt-IN restores xhigh for frontier models (accepts 1/true/yes/on)", () => {
+    // Inverted from the old opt-OUT: under a 1:1 default the old flag's name
+    // would have meant its opposite, so it was replaced rather than reused.
+    const model = gptModel(["low", "medium", "high", "xhigh"])
+    const saved = process.env.GH_ROUTER_FRONTIER_XHIGH_DEFAULT
+    try {
+      for (const val of ["1", "true", "yes", "on"]) {
+        process.env.GH_ROUTER_FRONTIER_XHIGH_DEFAULT = val
+        expect(build({ messages: [] }, model).payload.reasoning?.effort).toBe("xhigh")
+      }
+      // Opt-in is frontier-scoped: a non-frontier model stays high.
+      process.env.GH_ROUTER_FRONTIER_XHIGH_DEFAULT = "1"
+      const nonFrontier = codexModel(["low", "medium", "high", "xhigh"])
+      expect(build({ messages: [] }, nonFrontier).payload.reasoning?.effort).toBe("high")
+    } finally {
+      if (saved === undefined) delete process.env.GH_ROUTER_FRONTIER_XHIGH_DEFAULT
+      else process.env.GH_ROUTER_FRONTIER_XHIGH_DEFAULT = saved
+    }
+  })
+
+  test("the old opt-OUT env var no longer has any effect (renamed, not silently honored)", () => {
+    // A stale `GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT=1` in someone's shell
+    // must not read as "disable the high default" and produce something else.
     const model = gptModel(["low", "medium", "high", "xhigh"])
     const saved = process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT
     try {
-      for (const val of ["1", "true", "yes", "on"]) {
-        process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT = val
-        expect(build({ messages: [] }, model).payload.reasoning?.effort).toBe("high")
-      }
+      process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT = "1"
+      expect(build({ messages: [] }, model).payload.reasoning?.effort).toBe("high")
     } finally {
       if (saved === undefined) delete process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT
       else process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT = saved

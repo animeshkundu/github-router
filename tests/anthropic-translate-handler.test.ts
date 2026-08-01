@@ -695,7 +695,7 @@ describe("/v1/messages branch routing", () => {
     expect(image.image_url).toBe(`data:image/png;base64,${imageData}`)
   })
 
-  test("gpt-5.6-sol without thinking defaults Responses reasoning effort to xhigh", async () => {
+  test("gpt-5.6-sol without thinking defaults Responses reasoning effort to high", async () => {
     state.models = { object: "list", data: [claudeModel, gptModel, gptSolModel] as never }
     let responsesBody: Record<string, unknown> | undefined
     globalThis.fetch =((url: string, opts?: { body?: string }) => {
@@ -718,10 +718,10 @@ describe("/v1/messages branch routing", () => {
 
     expect(res.status).toBe(200)
     const reasoning = recordFrom(recordFrom(responsesBody).reasoning)
-    expect(reasoning.effort).toBe("xhigh")
+    expect(reasoning.effort).toBe("high")
   })
 
-  test("frontier xhigh default opt-out restores high effort", async () => {
+  test("frontier xhigh opt-IN restores xhigh effort", async () => {
     state.models = { object: "list", data: [claudeModel, gptModel, gptSolModel] as never }
     let responsesBody: Record<string, unknown> | undefined
     globalThis.fetch =((url: string, opts?: { body?: string }) => {
@@ -732,8 +732,8 @@ describe("/v1/messages branch routing", () => {
       throw new Error(`Unexpected URL ${url}`)
     }) as unknown as typeof fetch
 
-    const saved = process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT
-    process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT = "1"
+    const saved = process.env.GH_ROUTER_FRONTIER_XHIGH_DEFAULT
+    process.env.GH_ROUTER_FRONTIER_XHIGH_DEFAULT = "1"
     try {
       const res = await server.request("/v1/messages", {
         method: "POST",
@@ -747,17 +747,17 @@ describe("/v1/messages branch routing", () => {
 
       expect(res.status).toBe(200)
       const reasoning = recordFrom(recordFrom(responsesBody).reasoning)
-      expect(reasoning.effort).toBe("high")
+      expect(reasoning.effort).toBe("xhigh")
     } finally {
       if (saved === undefined) {
-        delete process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT
+        delete process.env.GH_ROUTER_FRONTIER_XHIGH_DEFAULT
       } else {
-        process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT = saved
+        process.env.GH_ROUTER_FRONTIER_XHIGH_DEFAULT = saved
       }
     }
   })
 
-  test("gpt-5.6-sol explicit thinking budget is not overridden by xhigh default", async () => {
+  test("gpt-5.6-sol explicit thinking budget is not overridden by the injected default", async () => {
     state.models = { object: "list", data: [claudeModel, gptModel, gptSolModel] as never }
     let responsesBody: Record<string, unknown> | undefined
     globalThis.fetch =((url: string, opts?: { body?: string }) => {

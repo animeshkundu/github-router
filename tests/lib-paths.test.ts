@@ -25,6 +25,7 @@ const { ensurePaths, PATHS, sweepStaleRuntimeFiles, sweepStalePeerAgentMdFiles, 
   await import("../src/lib/paths")
 const { injectPeerMcpIntoMirror } = await import("../src/lib/codex-mcp-config")
 const { ALL_DISPATCHER_AGENT_NAMES } = await import("../src/lib/worker-dispatch")
+const { ALL_NATIVE_AGENT_NAMES } = await import("../src/lib/codex-mcp-config")
 
 // Round-4 #4: verify that monkey-patching `fs.<name>` / `consola.<name>`
 // is actually intercepted by the library-side imports of those
@@ -300,6 +301,34 @@ test("sweepStalePeerAgentMdFiles reaps a dead-PID .md for EVERY worker-* dispatc
   }
 })
 
+test("sweepStalePeerAgentMdFiles reaps a dead-PID .md for EVERY native subagent name, current AND retired (regex drift guard)", async () => {
+  // Same drift guard as the dispatchers, for the natives — they had none, which
+  // is how the rename could have stranded files.
+  //
+  // The retired names are the load-bearing half. `debugger` and `qa-engineer`
+  // no longer exist, but a session that crashed before the rename left files
+  // carrying them; drop those names from the allowlist and the sweep stops
+  // matching, so the files survive every future launch and register as ghost
+  // subagents with a stale prompt and a stale model. The allowlist is a
+  // permanent superset: names are added, never removed.
+  const RETIRED_NATIVE_NAMES = ["debugger", "qa-engineer"]
+  const agentsDir = path.join(PATHS.CLAUDE_CONFIG_DIR, "agents")
+  await fs.mkdir(agentsDir, { recursive: true })
+  const deadPid = 2_147_483_641
+  const targets = [...ALL_NATIVE_AGENT_NAMES, ...RETIRED_NATIVE_NAMES].map((name) =>
+    path.join(agentsDir, `peer-${deadPid}-deadbeef-${name}.md`),
+  )
+  for (const p of targets) {
+    await fs.writeFile(p, "---\nname: x\n---\n", { mode: 0o600 })
+  }
+
+  await sweepStalePeerAgentMdFiles()
+
+  for (const p of targets) {
+    await expect(fs.stat(p)).rejects.toThrow()
+  }
+})
+
 test("sweepStalePeerAgentMdFiles tolerates missing CLAUDE_CONFIG_DIR/agents dir", async () => {
   await fs.rm(path.join(PATHS.CLAUDE_CONFIG_DIR, "agents"), { recursive: true, force: true })
   await expect(sweepStalePeerAgentMdFiles()).resolves.toBeUndefined()
@@ -417,9 +446,60 @@ test("removeOwnClaudeConfigMirror deletes this launch's mirror dir and does NOT 
   await ensureClaudeConfigMirror()
 })
 
+test("mirror copy SKIPS proxy-authored peer-*.md in the user's agents dir, and never deletes them", async () => {
+  // A pre-mirror release wrote `peer-<pid>-<hex>-<name>.md` into the user's real
+  // `~/.claude/agents/`. Copying those into every new mirror re-registers a dead
+  // session's definition alongside the live one under the SAME frontmatter
+  // `name:`, and Claude Code then resolves between them nondeterministically.
+  //
+  // The fix is a COPY-TIME filter, not a delete: filename shape is evidence of
+  // provenance, not proof, so a user who copied a generated file to customize it
+  // must not lose it. Assert both halves — not mirrored, and still on disk.
+  const claudeHome = path.join(tempDir, ".claude")
+  const userAgents = path.join(claudeHome, "agents")
+  await fs.mkdir(userAgents, { recursive: true })
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+
+  const deadPid = 2_147_483_641
+  const orphan = `peer-${deadPid}-deadbeef-codex-critic.md`
+  const orphanPath = path.join(userAgents, orphan)
+  await fs.writeFile(orphanPath, "---\nname: codex-critic\n---\nstale\n")
+  // A genuine user-authored agent must still be mirrored as before.
+  await fs.writeFile(path.join(userAgents, "my-agent.md"), "---\nname: Mine\n---\nok\n")
+
+  await ensureClaudeConfigMirror()
+
+  const mirrored = await fs.readdir(path.join(PATHS.CLAUDE_CONFIG_DIR, "agents"))
+  expect(mirrored).not.toContain(orphan)
+  expect(mirrored).toContain("my-agent.md")
+  // Non-destructive: the user's copy is untouched in their own directory.
+  await expect(fs.stat(orphanPath)).resolves.toBeDefined()
+})
+
+test("sweepStalePeerAgentMdFiles NEVER touches the user's real ~/.claude/agents/", async () => {
+  // Hard regression pin on the trust boundary. The sweep deletes on filename
+  // shape plus PID liveness, and neither proves ownership; that ambiguity is
+  // only tolerable inside the router-owned mirror, where a false positive costs
+  // a snapshot the next launch regenerates. In the user's own directory the same
+  // false positive is permanent data loss. Pairs with the
+  // `policyFor("agents") === "MIRRORED"` guard, which keeps the mirror a copy
+  // rather than a symlink that would route deletes back to the real directory.
+  const claudeHome = path.join(tempDir, ".claude")
+  const userAgents = path.join(claudeHome, "agents")
+  await fs.mkdir(userAgents, { recursive: true })
+
+  const deadPid = 2_147_483_641
+  // Worst case: a user file wearing our exact generated shape with a dead PID.
+  const lookalike = path.join(userAgents, `peer-${deadPid}-deadbeef-reviewer.md`)
+  await fs.writeFile(lookalike, "---\nname: reviewer\n---\nuser copy\n")
+
+  await sweepStalePeerAgentMdFiles()
+
+  await expect(fs.stat(lookalike)).resolves.toBeDefined()
+})
+
 // ============================================================
-// ensureClaudeConfigMirror tests
-// ============================================================
+// ensureClaudeConfigMirror tests// ============================================================
 
 test("ensureClaudeConfigMirror creates CLAUDE_CONFIG_DIR with mode 0o700 even when ~/.claude does not exist", async () => {
   // Wipe both source and target before the test

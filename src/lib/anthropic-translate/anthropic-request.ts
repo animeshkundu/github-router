@@ -372,21 +372,30 @@ function parseDisableParallelToolUse(toolChoice: unknown): false | undefined {
 }
 
 /** Default absent Anthropic `thinking` to an effort, clamped by the model.
- *  OpenAI-frontier shim models (gpt-5.6-sol/gpt-5.5) default to xhigh so the
- *  native gpt-5.6-sol subagents (implementer/debugger/qa-engineer) and any
- *  `-m gpt-5.6-sol` main-loop session reason at max when the client sends no
- *  `thinking` block; every other shim model stays high. The
- *  `supported.includes("xhigh")` guard makes the intent explicit rather than
- *  trusting clampEffort to silently degrade. Opt out with
- *  `GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT=1`. Returns undefined for a model
- *  that advertises NO `reasoning_effort` allowlist (may not support reasoning;
- *  forcing an effort could 400). Note: an explicit client `thinking` budget is
- *  handled by parseReasoningEffort and is NOT affected by this default. */
+ *  Every shim model defaults to `high`, so a client level maps to the identical
+ *  provider level (low→low, medium→medium, high→high, xhigh→xhigh) and `high` is
+ *  the only value the router injects on its own. There is deliberately NO floor:
+ *  an explicit client budget that buckets to `medium` yields `medium`, because a
+ *  one-directional max() would mean the router silently overriding the level the
+ *  user chose.
+ *
+ *  Opt in to the previous behavior (xhigh for the OpenAI frontier models when no
+ *  thinking is sent) with `GH_ROUTER_FRONTIER_XHIGH_DEFAULT=1`. This replaces the
+ *  old opt-OUT `GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT`, whose meaning would
+ *  have inverted under the new default.
+ *
+ *  Two honest limits, both pre-existing: the level is bucketed from a token
+ *  budget so the mapping is lossy at the boundaries, and `clampEffort` moves a
+ *  level the model does not advertise (gemini has no `xhigh`). Returns undefined
+ *  for a model that advertises NO `reasoning_effort` allowlist, which leaves the
+ *  provider's own default rather than `high` — forcing an effort there could 400.
+ *  An explicit client `thinking` budget is handled by parseReasoningEffort and is
+ *  NOT affected by this default. */
 function defaultReasoningEffort(model?: Model): string | undefined {
   const supported = model?.capabilities?.supports?.reasoning_effort
   if (!(Array.isArray(supported) && supported.length > 0)) return undefined
   const wantXhigh =
-    parseBoolEnv(process.env.GH_ROUTER_DISABLE_FRONTIER_XHIGH_DEFAULT) !== true
+    parseBoolEnv(process.env.GH_ROUTER_FRONTIER_XHIGH_DEFAULT) === true
     && model?.id != null
     && shimDefaultsToXhigh(model.id)
     && supported.includes("xhigh")

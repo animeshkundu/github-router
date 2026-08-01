@@ -270,6 +270,7 @@ export async function handleCompletion(c: Context) {
       path: c.req.path,
       body: parsedForLog,
       betaHeader: c.req.header("anthropic-beta"),
+      agentId: c.req.header("x-claude-code-agent-id"),
     })
   }
 

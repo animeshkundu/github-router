@@ -13,7 +13,9 @@
 export {
   BROWSE_DEFAULT_MODEL,
   DEFAULT_MODEL,
+  EXPLORE_DEFAULT_MODEL,
   resolveModeDefaults,
+  REVIEW_DEFAULT_MODEL,
   runWorkerAgent,
 } from "./engine"
 export { WORKER_THINKING_LEVELS } from "./model-resolve"

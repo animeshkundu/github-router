@@ -8,7 +8,7 @@ The peer-critic descriptions are the SAME strings used as the corresponding `mcp
 
 | Producer | Emits | File:line |
 |---|---|---|
-| `buildPeerAgentDefinitions` | the whole `--agents` set; writes one `.md` per agent into `<CLAUDE_CONFIG_DIR>/agents/` | `src/lib/codex-mcp-config.ts:289-337` |
+| `buildPeerAgentDefinitions` | the whole `--agents` set; writes one `.md` per agent into `<CLAUDE_CONFIG_DIR>/agents/` | `src/lib/codex-mcp-config.ts` |
 | `personasFor` | which peer critics are active (gemini gated on catalog; codex-implementer on `--codex-cli`) | `src/lib/peer-mcp-personas.ts:648-667` |
 | `buildAgentPrompt` | each critic's system prompt (identity + base instructions + routing block) | `peer-mcp-personas.ts:458-500` |
 | `buildCoordinatorAgent` | the coordinator description + fan-out prompt | `codex-mcp-config.ts:196-278` |
@@ -25,7 +25,11 @@ The peer-critic descriptions are the SAME strings used as the corresponding `mcp
 | `gemini-reviewer` | inherited | relays to gemini-3.1-pro reviewer (MCP) | `requiresGeminiCatalog` | [gemini-reviewer.md](gemini-reviewer.md) | Y |
 | `opus-critic` | inherited | relays to claude-opus-5 critic (MCP; 4.6 fallback) | always | [opus-critic.md](opus-critic.md) | Y |
 | `codex-implementer` | inherited | relays to gpt-5.3-codex writer (stdio) | `--codex-cli` | [codex-implementer.md](codex-implementer.md) | N (S3 overlap) |
-| `implementer` (native) | **gpt-5.6-sol** (gpt-5.5 fallback) | edits files itself (full toolset) | catalog has gpt-5.6-sol or gpt-5.5+tool_calls | [implementer.md](implementer.md) | Y (S3 caveat) |
+| `implementer` (native) | gpt-5.6-sol → gpt-5.5, else lead | edits files itself (full toolset) | always emitted; preferred model needs `tool_calls` | [implementer.md](implementer.md) | Y |
+| `reviewer` (native) | gpt-5.6-sol → gpt-5.5, else lead | assesses artifacts and isolates failures (full toolset) | always emitted; preferred model needs `tool_calls` | [reviewer.md](reviewer.md) | Y |
+| `brainstorm` (native) | gemini-3.1-pro-preview → frontier, else lead | read-only divergent options | always emitted; preferred model needs `tool_calls` | [brainstorm.md](brainstorm.md) | Y |
+| `scout` (native) | gemini-3.6-flash → gpt-5.4-mini | read-only low-cost repository exploration | cheap-tier model with `tool_calls` required; otherwise omitted | [scout.md](scout.md) | Y |
+| `scribe` (native) | gpt-5.6-terra → frontier, else lead | repository-grounded documentation maintenance (full toolset) | always emitted; preferred model needs `tool_calls` | [scribe.md](scribe.md) | Y |
 | `peer-review-coordinator` | inherited | fans out to critics, aggregates | always | [peer-review-coordinator.md](peer-review-coordinator.md) | N (F1 unbacked trigger) |
 | `worker-explore` | inherited (worker: gemini-3.6-flash high) | bg dispatch read-only research | `workerToolsAvailable` | [worker-explore.md](worker-explore.md) | Y |
 | `worker-implement` | inherited (worker: gpt-5.6-sol) | bg dispatch read/write coding | `workerToolsAvailable` | [worker-implement.md](worker-implement.md) | Y |
@@ -34,7 +38,7 @@ The peer-critic descriptions are the SAME strings used as the corresponding `mcp
 | `worker-test` | inherited (worker: gpt-5.6-sol) | bg dispatch adversarial tests | `workerToolsAvailable` | [worker-test.md](worker-test.md) | Y |
 | `worker-browse` | inherited (worker: gpt-5.4-mini) | bg dispatch browser agent | `browseAvailable` | [worker-browse.md](worker-browse.md) | N (A3 field bug) |
 
-Two shapes of subagent: RELAY shims (the five critics, codex-implementer, and the six worker dispatchers — they run on the inherited Claude model and forward to a peer model / worker via MCP, then relay verbatim) and the NATIVE `implementer` (carries `model: gpt-5.6-sol` frontmatter, falling back to `model: gpt-5.5`, runs its own loop through the translation shim, does real edits with the full inherited toolset). The `worker-*` dispatchers additionally carry a `tools:` allowlist pinning them to `mcp__<workersKey>__*` only (no Agent/Read/Bash → cannot recurse), while the critics and native implementer deliberately omit `tools:` to inherit the full toolset (pinned by `tests/codex-mcp-config.test.ts:882-920`).
+Two shapes of subagent: RELAY shims (the five critics, codex-implementer, and the six worker dispatchers, which run on the inherited lead model and forward through MCP) and the five NATIVE agents. `implementer` and `reviewer` prefer the OpenAI frontier chain; `brainstorm` prefers Gemini then that frontier chain; `scribe` prefers gpt-5.6-terra then the frontier chain. When a preferred chain misses, those four omit `model:` and inherit the lead. `scout` alone is omitted when its cheap-tier chain misses, because inheriting the lead would defeat its cost purpose. `scout` and `brainstorm` carry a read-only `tools:` allowlist, while `implementer`, `reviewer`, and `scribe` omit `tools:` and inherit the full toolset. The `worker-*` dispatchers are separately pinned to `mcp__<workersKey>__*` only, so they cannot recurse.
 
 ## Systemic findings
 
@@ -53,17 +57,17 @@ The coordinator description promises "Use proactively before non-trivial plans a
 
 The description over-promises against what the harness reliably delivers. Recommendation: either wire the deterministic ExitPlanMode PreToolUse hook the comment specifies (env-disable-able), or soften the description to stop promising proactive review the harness does not deliver. Detail in [peer-review-coordinator.md](peer-review-coordinator.md) §5.
 
-### S3 — Three-way implementation-surface overlap (routing clarity)
+### S3 — Foreground implementation-surface overlap (routing clarity)
 
-Three write-capable implementation subagents coexist, with descriptions that do not cross-reference or differentiate:
+Two foreground write-capable implementation subagents coexist, with descriptions that do not cross-reference or differentiate:
 
 | Subagent | Model | Nature | Description scope phrase |
 |---|---|---|---|
 | `implementer` (native) | gpt-5.6-sol (gpt-5.5 fallback) | foreground, integrated, edits itself | "well-scoped coding tasks — edits, small features, fixes… integrated subagent" |
 | `codex-implementer` | gpt-5.3-codex | foreground, integrated, `--codex-cli` only | "Targeted implementation of a self-contained coding task" |
-| `worker-implement` | gpt-5.6-sol (worker) | **background**, autonomous, optional worktree | "autonomous coding worker… non-blocking… completion notification" |
+| `worker-implement` | gpt-5.6-sol (worker) | **background**, autonomous, worktree-isolated | "autonomous coding worker… non-blocking… completion notification" |
 
-`worker-implement` differentiates cleanly (background/autonomous/worktree vs foreground/integrated). The unresolved overlap is between the two FOREGROUND writers: under `--codex-cli` a lead sees both `implementer` (gpt-5.6-sol, gpt-5.5 fallback) and `codex-implementer` (gpt-5.3-codex) with near-identical "well-scoped / self-contained coding task" framing and no signal for which to pick. codex-implementer's description is also the thinnest in the set (3 sentences, no anti-trigger). Recommendation: have one description name the other (e.g. native implementer "prefer over codex-implementer unless you need Codex-CLI sandboxing"), or document the intended split. Detail in [implementer.md](implementer.md) §6 and [codex-implementer.md](codex-implementer.md) §6.
+`worker-implement` differentiates cleanly (background/autonomous/worktree vs foreground/integrated). The unresolved overlap is between the two FOREGROUND writers: under `--codex-cli` a lead sees both `implementer` and `codex-implementer` with similar bounded-task framing and no signal for which to pick. The intended material distinction is Codex CLI sandboxing for `codex-implementer`. Recommendation: document that split in a routing description. Detail in [implementer.md](implementer.md) §5 and [codex-implementer.md](codex-implementer.md) §6.
 
 ### S4 — "Use proactively" overtrigger risk on Opus 4.5+ (measured, not acute)
 
@@ -76,7 +80,7 @@ The framing split is by design and documented: `buildPeerAwarenessSnippet` (`pee
 1. **Keep opus-critic labels aligned:** the current surface prefers Opus 5 with the old 4.6-1m → 4.6 chain as fallback; its default effort stays high and xhigh is available on Opus 5.
 2. **Fix A3 in [worker-browse.md](worker-browse.md):** `dispatcherPrompt` (`worker-dispatch.ts:236`) tells the browse dispatcher to pass `prompt`, but the browse tool requires `task` with `additionalProperties: false` (`peer-mcp-personas.ts:1922-1923`). Branch `dispatcherPrompt` on `mode === "browse"` to pass `task`, and add a regression test (Important — confirmed field-name mismatch unique to browse).
 3. **Reconcile S2 (coordinator):** wire the deterministic ExitPlanMode fallback the code comment specifies, or soften the description to match soft-steer reality.
-4. **Address S3 (implement overlap):** differentiate the native `implementer` from `codex-implementer` at the description level, or document the intended split.
+4. **Address S3 (implement overlap):** differentiate `implementer` from `codex-implementer` at the description level, or document the Codex-CLI sandboxing split.
 5. **S1 (soft critic triggers):** leave the shared strings; document the coordinator as the critic entry point.
 
 ## Method note

@@ -1121,6 +1121,20 @@ async function mirrorDirRecursive(
       if (policy === "ISOLATED" || policy === "SHARED") continue
     }
     const childRel = relPath === "" ? name : path.join(relPath, name)
+    // Never mirror a proxy-authored agent `.md` out of the user's real
+    // `~/.claude/agents/`. A pre-mirror release wrote `peer-<pid>-<hex>-<name>.md`
+    // files there; left alone they get copied into every new mirror and register
+    // alongside the current launch's files under the SAME frontmatter `name:`,
+    // so Claude Code resolves between a live definition and a dead one
+    // nondeterministically. Filtering at the COPY step fixes that without
+    // deleting anything we do not own: the user's directory is left exactly as
+    // it is, and the current launch writes its own files into the mirror after
+    // this walk. Deleting them instead would be unsound, because the filename
+    // shape is evidence of provenance, not proof of it, and a user who copied a
+    // generated file to customize it would lose it.
+    if (relPath === "agents" && PEER_AGENT_MD_FILENAME.test(name)) {
+      continue
+    }
     const childSource = path.join(sourceDir, childRel)
     const childTarget = path.join(targetDir, childRel)
     let stats: Awaited<ReturnType<typeof fs.lstat>>
@@ -1535,6 +1549,17 @@ function isPidAlive(pid: number): boolean {
  * likely). Tightened to require BOTH the 8-hex-char random suffix AND
  * an exact-match persona name suffix, eliminating the risk for any
  * realistic user filename.
+ *
+ * SCOPE IS THE MIRROR ONLY, deliberately. This deletes on filename shape plus
+ * PID liveness, and neither establishes ownership: a user who copied a generated
+ * file to customize it would have a file this cannot distinguish from ours. That
+ * ambiguity is acceptable inside the router-owned mirror, where the worst case
+ * is dropping a snapshot that the next launch regenerates. It would NOT be
+ * acceptable in the user's real `~/.claude/agents/`, where the same false
+ * positive is permanent data loss, which is exactly why `agents` is MIRRORED
+ * rather than SHARED (see `policyFor`). Orphans a pre-mirror release left in the
+ * user's directory are handled non-destructively at the copy step in
+ * `mirrorDirRecursive`, which skips them so they never register.
  */
 export async function sweepStalePeerAgentMdFiles(): Promise<void> {
   const dir = path.join(PATHS.CLAUDE_CONFIG_DIR, "agents")
@@ -1565,9 +1590,23 @@ export async function sweepStalePeerAgentMdFiles(): Promise<void> {
  * subagent is added in `codex-mcp-config.ts`, or a new `worker-*` dispatcher mode
  * is added in `worker-dispatch.ts` (a drift test in tests/worker-dispatch pins
  * that the `ALL_DISPATCHER_AGENT_NAMES` are all covered here).
+ *
+ * NAMES ARE ADDED HERE, NEVER REMOVED — this alternation is a permanent superset
+ * of every agent name the proxy has ever shipped. A name dropped on a rename
+ * stops matching, so `.md` files left behind by a crashed session bearing the old
+ * name are never swept: they survive every later launch and load as ghost
+ * subagents with a stale prompt and a stale model. That outlives any release
+ * window, so "keep the old name for one version" is not sufficient. `debugger`
+ * and `qa-engineer` are retained for exactly this reason after being renamed to
+ * `brainstorm` and `reviewer`.
+ *
+ * `general-purpose|Explore|Plan` are the serve-only `BUILTIN_SUBAGENT_DEFINITIONS`,
+ * which are written through the same `peer-<suffix>-<name>.md` path and were
+ * previously absent here, so their stale files never got reaped. Note the capitals:
+ * the alternation is case-sensitive and those two are capitalized at the source.
  */
 export const PEER_AGENT_MD_FILENAME =
-  /^peer-(\d+)-[0-9a-f]{8}-(?:codex-critic|codex-reviewer|gemini-critic|gemini-reviewer|opus-critic|codex-implementer|peer-review-coordinator|implementer|debugger|qa-engineer|worker-explore|worker-implement|worker-review|worker-plan|worker-test|worker-browse)\.md$/
+  /^peer-(\d+)-[0-9a-f]{8}-(?:codex-critic|codex-reviewer|gemini-critic|gemini-reviewer|opus-critic|codex-implementer|peer-review-coordinator|implementer|reviewer|brainstorm|scout|scribe|debugger|qa-engineer|general-purpose|Explore|Plan|worker-explore|worker-implement|worker-review|worker-plan|worker-test|worker-browse)\.md$/
 
 /**
  * Strict regex matching only per-launch claude-config mirror dirs this

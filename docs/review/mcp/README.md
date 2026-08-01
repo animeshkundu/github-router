@@ -140,7 +140,7 @@ Description source unless noted: `src/lib/peer-mcp-personas.ts`.
 ## Related auto-injected surfaces (not standalone MCP tools; out of the per-tool scope)
 
 - **`__anthropic_advisor`** — server-injected Anthropic tool on `/v1/messages` (Claude models only), dispatched to gpt-5.6-sol xhigh. Named in the awareness snippet.
-- **Injected subagents** — `implementer` (gpt-5.6-sol, gpt-5.5 fallback), `peer-review-coordinator`, and the `worker-*` background dispatchers. Agent definitions, not MCP tools.
+- **Injected subagents** — the native `implementer`, `reviewer`, `brainstorm`, `scout`, and `scribe`; `peer-review-coordinator`; and the `worker-*` background dispatchers. `implementer`, `reviewer`, `brainstorm`, and `scribe` are always emitted, omitting `model:` to inherit the lead if their preferred chain misses. `scout` is omitted when its cheap-tier chain misses. These are agent definitions, not MCP tools.
 - **Injected skills** — `/gh-research`, `/gh-orchestrate`, `/gh-floor-keeper`, `/gh-first-mate` (`src/lib/injected-skills/`).
 
 ## Review methodology

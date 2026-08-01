@@ -7,7 +7,7 @@ The per-surface reviews:
 - MCP tools: [`mcp/README.md`](./mcp/README.md) + [`mcp/FINDINGS.md`](./mcp/FINDINGS.md) (71 tools, 9 groups)
 - Hooks: [`hooks/README.md`](./hooks/README.md) (7 lifecycle hooks)
 - Skills: [`skills/README.md`](./skills/README.md) (7 injected skills)
-- Subagents: [`subagents/README.md`](./subagents/README.md) (peer critics, coordinator, native implementer, worker dispatchers)
+- Subagents: [`subagents/README.md`](./subagents/README.md) (peer critics, coordinator, five native agents, worker dispatchers)
 - Injected prompt blocks: [`injected-prompt/README.md`](./injected-prompt/README.md) (operating-defaults, style, peer-awareness, toolbelt, artifact directive)
 - Env and settings: [`env-and-settings/README.md`](./env-and-settings/README.md) (feature gates, model defaults, MCP timeouts, gateway seed, config mirror)
 
@@ -67,7 +67,10 @@ Description-line (routing) review in [`skills/README.md`](./skills/README.md).
 | gemini-critic / gemini-reviewer | inherited | relay to gemini-3.1-pro via MCP | `requiresGeminiCatalog` | [subagents/](./subagents/) |
 | opus-critic | inherited | relay to claude-opus-4-6 via MCP | always | [opus-critic](./subagents/opus-critic.md) |
 | codex-implementer | inherited | relay to gpt-5.3-codex writer (stdio) | `--codex-cli` | [codex-implementer](./subagents/codex-implementer.md) |
-| implementer (native) | **gpt-5.6-sol** (gpt-5.5 fallback) | edits files itself, full toolset, via translation shim | catalog has gpt-5.6-sol or gpt-5.5 + tool_calls | [implementer](./subagents/implementer.md) |
+| implementer / reviewer (native) | gpt-5.6-sol → gpt-5.5, else lead | implementation / artifact assessment, full toolset | always emitted; frontier model only when it has `tool_calls` | [implementer](./subagents/implementer.md) / [reviewer](./subagents/reviewer.md) |
+| brainstorm (native) | gemini-3.1-pro-preview → frontier, else lead | read-only divergent options | always emitted; preferred model only when it has `tool_calls` | [brainstorm](./subagents/brainstorm.md) |
+| scout (native) | gemini-3.6-flash → gpt-5.4-mini | read-only low-cost repository exploration | omitted unless cheap-tier model has `tool_calls` | [scout](./subagents/scout.md) |
+| scribe (native) | gpt-5.6-terra → frontier, else lead | repository-grounded documentation, full toolset | always emitted; preferred model only when it has `tool_calls` | [scribe](./subagents/scribe.md) |
 | peer-review-coordinator | inherited | fans out to critics, aggregates | always | [peer-review-coordinator](./subagents/peer-review-coordinator.md) |
 | worker-explore/implement/review/plan/test/browse | inherited (dispatchers) | background non-blocking dispatch to the matching worker | worker / browse gate | [subagents/](./subagents/) |
 
@@ -113,7 +116,7 @@ What each launch flag / condition turns ON, so a reader can see exactly what a g
 
 | Condition | Turns ON |
 |---|---|
-| **default** (`github-router claude`) | peers critics (codex_critic, codex_reviewer, opus_critic; gemini pair if catalog), `search` (web, code), `orchestrate` verify+attest, all 5 non-blocking `worker-*` dispatchers + skill, `implementer` subagent (if gpt-5.6-sol or gpt-5.5 fallback is available), `peer-review-coordinator`, hooks #1/#2/#6/#7, skills gh-research/gh-orchestrate/gh-floor-keeper/gh-worker, all 5 prompt/CLAUDE.md text blocks (toolbelt/style/artifact conditional), all env/settings above |
+| **default** (`github-router claude`) | peers critics (codex_critic, codex_reviewer, opus_critic; gemini pair if catalog), `search` (web, code), `orchestrate` verify+attest, five non-blocking `worker-*` dispatchers when the worker gate passes, native `implementer` / `reviewer` / `brainstorm` / `scribe` (always emitted, inheriting the lead when their preferred model chain misses), `scout` only when its cheap-tier chain resolves, `peer-review-coordinator`, hooks #1/#2/#6/#7, skills gh-research/gh-orchestrate/gh-floor-keeper/gh-worker, all 5 prompt/CLAUDE.md text blocks (toolbelt/style/artifact conditional), all env/settings above |
 | **worker-gate present** (`gpt-5.4-mini` w/ tool_calls in catalog) | workers group (explore/implement/review/plan/test), orchestrate decompose+run, prompt-submit steer #1, worker guard #2, worker skills, worker-* dispatchers. If ABSENT: the entire worker surface + the four worker-gated skills + hook #1 drop |
 | **gemini catalog** (`gemini-3.x-pro`) | gemini_critic, gemini_reviewer tools + subagents |
 | **stand_in catalog** (all 3 consensus models) | decide group (`stand_in`) |
