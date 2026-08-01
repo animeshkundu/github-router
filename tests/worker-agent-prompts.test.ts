@@ -81,24 +81,24 @@ describe("systemPromptFor", () => {
     expect(impl).toContain("gpt-5.3-codex")
   })
 
-  test("review mode: reviewer role-frame + read-only tools, no write tools", () => {
+  test("review mode: verifier role-frame, bash present, codex_review absent", () => {
     const review = systemPromptFor("review")
     // Security boundary still present.
     expect(review).toContain("sandboxed coding worker")
-    // Reviewer ROLE frame (what it's for) — not prescriptive step-advice.
-    expect(review.toLowerCase()).toContain("reviewing code for correctness")
-    expect(review.toLowerCase()).toContain("verify")
+    // The role frame is now a VERIFIER, not a reader. Two blind audits found
+    // review and explore returned an identical tool surface; the fix was to make
+    // review able to do what native `reviewer` does, so the frame has to say so.
+    expect(review.toLowerCase()).toContain("reproduce it and run the build or tests")
     expect(review).toContain("severity")
     expect(review).toContain("file:line")
-    // Same read-only surface as explore.
-    expect(review).toContain("Read-only mode")
-    expect(review).toContain("`read`")
-    expect(review).toContain("`code_search`")
-    // No write tools.
-    expect(review).not.toContain("`edit`")
-    expect(review).not.toContain("`write`")
-    expect(review).not.toContain("`bash`")
-    expect(review).not.toContain("`codex_review`")
+    expect(review).toContain("go/no-go")
+    // It advertises bash (execution is the differentiator) and the isolation
+    // caveat for write tools.
+    expect(review).toContain("`bash`")
+    expect(review).toContain("isolated worktree")
+    // But NOT codex_review, which is implement/test-only. Advertising a tool the
+    // agent cannot receive buys a wasted turn on a call that cannot succeed.
+    expect(review).not.toContain("codex_review")
   })
 
   test("both modes are deterministic for the same input", () => {
@@ -107,7 +107,7 @@ describe("systemPromptFor", () => {
     expect(systemPromptFor("review")).toBe(systemPromptFor("review"))
   })
 
-  test("byte cap holds — read-only < 2000B, implement < 2300B, test < 2700B", () => {
+  test("byte cap holds — explore/plan < 2000B, implement < 2300B, test/review < 2700B", () => {
     // The prompt is sent on every worker invocation, so the cap is real
     // budget pressure. If a future tightening shaves bytes, lower these caps
     // too. Read-only modes (explore/review/plan) carry only the read-tool
@@ -124,19 +124,25 @@ describe("systemPromptFor", () => {
     const implBytes = Buffer.byteLength(systemPromptFor("implement"), "utf8")
     const testBytes = Buffer.byteLength(systemPromptFor("test"), "utf8")
     expect(exploreBytes).toBeLessThan(2000)
-    expect(reviewBytes).toBeLessThan(2000)
     expect(planBytes).toBeLessThan(2000)
+    // `review` left the read-only tier when it gained bash (and edit/write under
+    // isolation), and it now carries the longest role frame of any mode, so it
+    // is the largest prompt at ~2630B. Measured, not padded: lower this if the
+    // frame is ever tightened.
+    expect(reviewBytes).toBeLessThan(2700)
     expect(implBytes).toBeLessThan(2300)
     expect(testBytes).toBeLessThan(2700)
   })
 
-  test("implement/test carry the prefer-native bash steer; read-only modes don't", () => {
+  test("bash-capable modes carry the prefer-native steer; read-only modes don't", () => {
     // The steer lives on the `bash` bullet (WRITE_TOOL_NOTES), so only the
     // write-capable modes get it; read-only modes have no shell to steer.
-    for (const mode of ["implement", "test"] as const) {
+    // `review` now carries the steer too: it has bash, so it needs the same
+    // nudge away from reimplementing a read or edit as a shell one-liner.
+    for (const mode of ["implement", "test", "review"] as const) {
       expect(systemPromptFor(mode)).toContain("one-off script")
     }
-    for (const mode of ["explore", "review", "plan"] as const) {
+    for (const mode of ["explore", "plan"] as const) {
       expect(systemPromptFor(mode)).not.toContain("one-off script")
     }
   })

@@ -8,6 +8,7 @@ import {
   buildExecInvocation,
   killChildProcessTree,
   parseBoolEnv,
+  parseIntEnv,
   quoteWinArg,
   resolveExecutable,
   runManagedExeCapture,
@@ -284,4 +285,36 @@ describe("killChildProcessTree", () => {
     }
     expect(alive).toBe(false)
   }, 20_000)
+})
+
+describe("parseIntEnv", () => {
+  test("rejects exponent notation instead of silently truncating it", () => {
+    // The bug this exists to prevent, found by a cross-lab reviewer at three
+    // shipped call sites: `Number.parseInt("3e5", 10)` is 3, not 300000, because
+    // parseInt stops at the first character it cannot consume. A user writing
+    // GH_ROUTER_STOP_GATE_TIMEOUT_MS=3e5 to mean five minutes would have got
+    // three MILLISECONDS, and the instant failure reads as a product bug rather
+    // than a typo. Falling back to the documented default is strictly safer than
+    // honouring a number nobody meant.
+    expect(Number.parseInt("3e5", 10)).toBe(3) // the trap, pinned
+    expect(parseIntEnv("3e5")).toBe(300_000) // Number() reads it correctly
+  })
+
+  test("rejects the other parseInt truncation traps outright", () => {
+    // Each of these parseInt would silently accept as a WRONG number.
+    expect(Number.parseInt("300_000", 10)).toBe(300)
+    expect(Number.parseInt("60000ms", 10)).toBe(60_000)
+    expect(parseIntEnv("300_000")).toBeUndefined()
+    expect(parseIntEnv("60000ms")).toBeUndefined()
+  })
+
+  test("accepts a clean positive integer, rejects the rest", () => {
+    expect(parseIntEnv("300000")).toBe(300_000)
+    expect(parseIntEnv(" 42 ")).toBe(42)
+    expect(parseIntEnv("0")).toBeUndefined()
+    expect(parseIntEnv("-5")).toBeUndefined()
+    expect(parseIntEnv("1.5")).toBeUndefined()
+    expect(parseIntEnv("")).toBeUndefined()
+    expect(parseIntEnv(undefined)).toBeUndefined()
+  })
 })

@@ -74,13 +74,22 @@ const IMPLEMENT_MODE_NOTE = `Read+write mode — tools:\n${buildToolBlock([...RE
 // one-line ROLE frame — what the worker is for — NOT prescriptive step-advice
 // ("first glob, then read…"), keeping faith with the no-scaffolding principle
 // above. The caller's prompt still supplies the specific artifact / task.
-const REVIEW_ROLE = `You are reviewing code for correctness. Verify against the actual code by reading it — never assume. Report concrete findings (bugs, edge cases, security / concurrency / resource risks, missing handling) with a severity and a \`file:line\` citation; if nothing material is wrong, say so plainly rather than inventing issues.`
+const REVIEW_ROLE = `You are giving feedback on something that already exists. Verify against the actual code by reading it, and where a failure is claimed, reproduce it and run the build or tests rather than reasoning about it. Isolate the true root cause, not a symptom. Do NOT modify production code to make a test pass. Report severity-ranked findings with a \`file:line\` citation and the evidence behind each, then a clear go/no-go; if nothing material is wrong, say so plainly rather than inventing issues.`
 
 const PLAN_ROLE = `You are a planning specialist. From the task and acceptance criteria, produce a concrete, ordered implementation plan: the files to change, the approach, the key risks, and how each acceptance criterion will be verified. Read the codebase to ground it. Do NOT write or edit code.`
 
 const TEST_ROLE = `You are an INDEPENDENT test author; you did NOT write the code under test. From the task and acceptance criteria, write tests that try to BREAK the implementation (edge cases, error paths, and the acceptance criteria as executable checks), then run them and report which pass and which fail. Do NOT modify the implementation to make tests pass.`
 
-const REVIEW_MODE_NOTE = `${REVIEW_ROLE}\n\nRead-only mode — tools:\n${buildToolBlock(READ_TOOL_NOTES)}`
+// `review` advertises exactly what it can receive: the read set, plus bash
+// (always), plus edit/write (only with an isolated worktree). It must NOT list
+// `codex_review`, which is implement/test-only — a prompt that names a tool the
+// agent does not have wastes a turn on a call that cannot succeed.
+const REVIEW_TOOL_NOTES = [
+  ...READ_TOOL_NOTES,
+  ...WRITE_TOOL_NOTES.filter((n) => !n.startsWith("`codex_review`")),
+] as const
+
+const REVIEW_MODE_NOTE = `${REVIEW_ROLE}\n\nTools (edit/write appear only when this run owns an isolated worktree):\n${buildToolBlock(REVIEW_TOOL_NOTES)}`
 
 const PLAN_MODE_NOTE = `${PLAN_ROLE}\n\nRead-only mode — tools:\n${buildToolBlock(READ_TOOL_NOTES)}`
 

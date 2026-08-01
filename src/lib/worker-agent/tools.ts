@@ -162,10 +162,17 @@ const NETWORK_BIN_RE =
 // ============================================================
 
 export interface BuildWorkerToolsOpts {
-  /** Worker mode — picks which tools are returned. `review` and `plan` are
-   *  read-only and return the same tool surface as `explore`; `test` mirrors
-   *  `implement`'s write-capable surface. */
+  /** Worker mode — picks which tools are returned. `plan` is read-only and
+   *  returns the same surface as `explore`; `test` mirrors `implement`'s
+   *  write-capable surface. `review` scales with `isolated` (see below). */
   mode: "explore" | "review" | "plan" | "implement" | "test"
+  /** True when this run owns an isolated git worktree. Only consulted for
+   *  `review`, which always gets `bash` but gains `edit`/`write` only here.
+   *
+   *  Scaling rather than forcing is deliberate. Requiring a worktree would make
+   *  `review` hard-error in any non-git workspace where it works today, trading
+   *  reach for capability — a net loss for the caller. */
+  isolated?: boolean
   /**
    * Absolute path to the worker's workspace. MUST be pre-realpath-
    * canonicalized by the engine; `confineToWorkspace` re-asserts on
@@ -1938,8 +1945,29 @@ export function buildWorkerTools(
     advisorTool(getMessages),
     updatePlanTool(planState),
   ]
-  if (mode === "explore" || mode === "review" || mode === "plan") {
+  // `review` is deliberately NOT here. A worker is the backgrounded reflection
+  // of its native counterpart, and native `reviewer` reproduces failures, runs
+  // the suite, and authors breaking tests. A read-only `review` could do none
+  // of that, which is why its tool surface used to be byte-identical to
+  // `explore` and two independent audits called them one capability wearing two
+  // names. It gets the write set below, made safe by forced worktree isolation.
+  if (mode === "explore" || mode === "plan") {
     return explore
+  }
+  // `review` gets bash UNCONDITIONALLY: running the build or suite is what makes
+  // a review a verification rather than a reading, and that must not depend on
+  // the workspace being a git repo. Write tools are added only with isolation,
+  // so an unattended background reviewer never dirties the tree it is judging.
+  //
+  // Isolation is safe to review IN because `createWorktree` bases the worktree on
+  // the WORKING tree, not just HEAD: it replays `git diff HEAD` and copies
+  // untracked-not-ignored files. Without that a reviewer would silently assess
+  // the last commit instead of the uncommitted change you actually asked about.
+  if (mode === "review") {
+    const withBash = [...explore, bashTool(workspace)]
+    return opts.isolated === true
+      ? [...withBash, editTool(workspace), writeTool(workspace)]
+      : withBash
   }
   return [
     ...explore,

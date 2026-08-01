@@ -1,3 +1,4 @@
+import { parseIntEnv } from "./exec"
 /**
  * Shared concurrency cap for MCP `tools/call` dispatches.
  *
@@ -27,10 +28,8 @@
  * investigation".
  */
 
-export const MAX_INFLIGHT_TOOLS_CALL = ((): number => {
-  const raw = Number.parseInt(process.env.GH_ROUTER_MAX_INFLIGHT_TOOLS_CALL ?? "", 10)
-  return Number.isFinite(raw) && raw > 0 ? raw : 128
-})()
+export const MAX_INFLIGHT_TOOLS_CALL =
+  parseIntEnv(process.env.GH_ROUTER_MAX_INFLIGHT_TOOLS_CALL) ?? 128
 
 let inFlight = 0
 

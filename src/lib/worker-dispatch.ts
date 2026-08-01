@@ -210,7 +210,7 @@ export function dispatcherDescription(mode: WorkerDispatchMode): string {
     implement:
       "Non-blocking `implement` worker: dispatches an autonomous coding worker (read/write/bash) that ALWAYS runs in an isolated git worktree and returns the diff (for in-place edits use the `implementer` subagent), in the background, and delivers its result as a completion notification.",
     review:
-      "Non-blocking `review` worker: dispatches a read-only reviewer that reads the code itself to verify a change or claim, in the background, and delivers findings as a completion notification.",
+      "Non-blocking `review` worker: the backgrounded counterpart of the `reviewer` subagent, running a cross-lab model. In a git workspace it takes an isolated worktree and can therefore VERIFY rather than only read: reproduce a failure, run the build or suite to check a claim, and author a throwaway probe test. Outside git it degrades to read-only rather than failing. Returns severity-ranked findings with file:line and a go/no-go, as a completion notification. Use `explore` instead when you just need to find or understand something.",
     plan:
       "Non-blocking `plan` worker: dispatches a read-only planner that returns an ordered implementation plan, in the background, and delivers it as a completion notification.",
     test:

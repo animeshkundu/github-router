@@ -1555,31 +1555,38 @@ describe("buildWorkerTools", () => {
     expect(names).toContain("toolbelt")
   })
 
-  test("review mode returns the SAME 9 read-only tools as explore (no write tools)", () => {
-    const tools = buildWorkerTools({
-      mode: "review",
-      workspace: realpathSync.native(os.tmpdir()),
-    })
-    expect(tools.length).toBe(9)
-    const names = tools.map((t) => t.name).sort()
-    expect(names).toEqual(
-      [
-        "advisor",
-        "code_search",
-        "fetch_url",
-        "glob",
-        "grep",
-        "read",
-        "toolbelt",
-        "update_plan",
-        "web_search",
-      ].sort(),
-    )
-    // review is read-only — the reviewer framing lives in the system prompt,
-    // not the toolset, so the write tools must be absent.
-    for (const w of ["edit", "write", "bash", "codex_review"]) {
-      expect(names).not.toContain(w)
-    }
+  test("review gets bash unconditionally, and edit/write only with isolation", () => {
+    // The differentiation that makes `review` a distinct capability rather than
+    // `explore` under another name. Two independent blind audits observed that
+    // the two modes returned a byte-identical tool surface and called them one
+    // capability wearing two names; a worker is meant to be the backgrounded
+    // reflection of its native counterpart, and native `reviewer` VERIFIES —
+    // it reproduces a failure and runs the suite — which read-only tools cannot.
+    //
+    // bash is unconditional because execution is what makes a review a
+    // verification, and that must not depend on the workspace being a git repo.
+    // edit/write are gated on isolation so an unattended background reviewer can
+    // author a throwaway probe test without ever dirtying the tree it is judging.
+    const ws = realpathSync.native(os.tmpdir())
+    const plain = buildWorkerTools({ mode: "review", workspace: ws })
+    const plainNames = plain.map((t) => t.name).sort()
+    expect(plainNames).toContain("bash")
+    expect(plainNames).not.toContain("edit")
+    expect(plainNames).not.toContain("write")
+    // Never `codex_review`: that is implement/test-only, and the prompt must not
+    // advertise a tool the agent cannot receive.
+    expect(plainNames).not.toContain("codex_review")
+
+    const isolated = buildWorkerTools({ mode: "review", workspace: ws, isolated: true })
+    const isoNames = isolated.map((t) => t.name).sort()
+    expect(isoNames).toContain("bash")
+    expect(isoNames).toContain("edit")
+    expect(isoNames).toContain("write")
+    expect(isoNames).not.toContain("codex_review")
+
+    // And it must no longer be identical to explore, which is the whole point.
+    const explore = buildWorkerTools({ mode: "explore", workspace: ws })
+    expect(plainNames).not.toEqual(explore.map((t) => t.name).sort())
   })
 
   test("implement mode returns 13 tools (explore + edit/write/bash + codex_review)", () => {

@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import {
   buildAgentPrompt,
   buildPeerAwarenessSnippet,
+  buildPeerAwarenessSummary,
   enumerateInjectedMcpToolNames,
   NON_PERSONA_MCP_TOOLS,
   PERSONAS_READ,
@@ -357,6 +358,30 @@ describe("buildPeerAwarenessSnippet", () => {
     // not bloat. If a future tightening shaves bytes, lower it again.
     const full = buildPeerAwarenessSnippet(MAXIMAL)
     expect(Buffer.byteLength(full, "utf8")).toBeLessThan(5400)
+  })
+
+  test("the system-prompt summary names every native and carries the reviewer-vs-critic tiebreak", () => {
+    // Regression pin for a measured routing failure. This summary is the
+    // always-in-context surface; it previously named the peer critics, the
+    // workers and stand_in, and NOT one native subagent. The only agents the
+    // lead was reminded of every turn were the ones the natives overlap with.
+    //
+    // The tiebreak sentence is pinned specifically because a live `claude -p`
+    // session, asked to assess whether a function was safe, delegated to
+    // `codex_reviewer` rather than the native `reviewer` that exists for exactly
+    // that job. The differentiator is that natives can execute and read the
+    // repo while the critics are stateless, so that has to be stated where the
+    // routing decision is actually made, not only in CLAUDE.md.
+    const summary = buildPeerAwarenessSummary({
+      workerToolsAvailable: true,
+      standInAvailable: true,
+      browseAvailable: false,
+    })
+    for (const n of ["implementer", "reviewer", "brainstorm", "scout", "scribe"]) {
+      expect(summary).toContain(`\`${n}\``)
+    }
+    expect(summary).toContain("can run things")
+    expect(summary).toContain("already hold the artifact")
   })
 
   test("mentions Claude Code's advisor built-in tool", () => {

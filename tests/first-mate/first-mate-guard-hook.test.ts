@@ -58,14 +58,29 @@ async function runGuard(payload: string): Promise<number> {
 }
 
 describe("operator PreToolUse hook enforcement", () => {
+  // Spawns SIX subprocesses. Run them concurrently, not in sequence: each guard
+  // invocation is independent (its own process, no shared state), and six
+  // sequential Windows process spawns under full-suite load is what pushed this
+  // past a 20s budget twice. Concurrency turns six spawn latencies into roughly
+  // one, which is a real fix rather than a larger number; the budget is raised
+  // as well because the bound is an observation limit, not a correctness
+  // assertion, and a tight one converts a busy machine into a red run.
   test("blocks direct worker/orchestrate MCP calls and allows Bash/Write", async () => {
-    expect(await runGuard(JSON.stringify({ tool_name: "mcp__workers__implement", tool_input: {} }))).toBe(2)
-    expect(await runGuard(JSON.stringify({ tool_name: "mcp__workers__review", tool_input: {} }))).toBe(2)
-    expect(await runGuard(JSON.stringify({ tool_name: "mcp__orchestrate__run_workflow", tool_input: {} }))).toBe(2)
-    expect(await runGuard(JSON.stringify({ tool_name: "mcp__orchestrate__decompose", tool_input: {} }))).toBe(2)
-    expect(await runGuard(JSON.stringify({ tool_name: "Bash", tool_input: { command: "echo x > f" } }))).toBe(0)
-    expect(await runGuard(JSON.stringify({ tool_name: "Write", tool_input: { file_path: "x" } }))).toBe(0)
-  }, 20_000)
+    const [implement, review, runWorkflow, decompose, bash, write] = await Promise.all([
+      runGuard(JSON.stringify({ tool_name: "mcp__workers__implement", tool_input: {} })),
+      runGuard(JSON.stringify({ tool_name: "mcp__workers__review", tool_input: {} })),
+      runGuard(JSON.stringify({ tool_name: "mcp__orchestrate__run_workflow", tool_input: {} })),
+      runGuard(JSON.stringify({ tool_name: "mcp__orchestrate__decompose", tool_input: {} })),
+      runGuard(JSON.stringify({ tool_name: "Bash", tool_input: { command: "echo x > f" } })),
+      runGuard(JSON.stringify({ tool_name: "Write", tool_input: { file_path: "x" } })),
+    ])
+    expect(implement).toBe(2)
+    expect(review).toBe(2)
+    expect(runWorkflow).toBe(2)
+    expect(decompose).toBe(2)
+    expect(bash).toBe(0)
+    expect(write).toBe(0)
+  }, 60_000)
 
   test("allows matching worker dispatcher agent types to call worker tools", () => {
     expect(operatorPreToolUse("mcp__workers__review", true, { agent_type: "worker-review" }).block).toBe(false)
@@ -84,5 +99,5 @@ describe("operator PreToolUse hook enforcement", () => {
 
   test("fails closed on an unparseable payload routed to the guard", async () => {
     expect(await runGuard("not json{")).toBe(2)
-  }, 20_000)
+  }, 60_000)
 })

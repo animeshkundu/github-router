@@ -439,6 +439,7 @@ describe("buildPeerAgentDefinitions", () => {
       geminiAvailable: false,
       groupKeys: { peers: "peers" },
       nativeSubagentModel: "gpt-5.5",
+      reviewerModel: "gemini-3.1-pro-preview",
       brainstormModel: "gemini-3.1-pro-preview",
       scoutModel: "gemini-3.6-flash",
       scribeModel: "gpt-5.6-terra",
@@ -447,7 +448,9 @@ describe("buildPeerAgentDefinitions", () => {
     })
     const expected = {
       implementer: { description: "Bounded implementation", model: "gpt-5.5", readOnly: false },
-      reviewer: { description: "Feedback subagent", model: "gpt-5.5", readOnly: false },
+      // Cross-lab by design: reviewer must NOT resolve to implementer's model,
+      // or a review of implementer-produced work is one model checking itself.
+      reviewer: { description: "Feedback subagent", model: "gemini-3.1-pro-preview", readOnly: false },
       brainstorm: { description: "Divergent-options", model: "gemini-3.1-pro-preview", readOnly: true },
       scout: { description: "Read-only exploration", model: "gemini-3.6-flash", readOnly: true },
       scribe: { description: "Documentation subagent", model: "gpt-5.6-terra", readOnly: false },
@@ -522,6 +525,36 @@ describe("buildPeerAgentDefinitions", () => {
     // The caller has to know what to pass, or the agent cannot target the
     // lead's blind spot; that contract lives in the description.
     expect(agents.brainstorm!.description).toContain("leading approach")
+  })
+
+  test("reviewer never resolves to implementer's model (cross-lab invariant)", () => {
+    // The defect this pins: `reviewer` used to share `nativeSubagentModel()` with
+    // `implementer`, so whenever `implementer` produced the artifact the default
+    // review path was one model checking its own output. Not same lab, the same
+    // model. Two independent blind audits flagged it, and the repo already
+    // applies the opposite rule to `worker-review`.
+    //
+    // The guard is deliberately about the RESOLVER wiring, not a hardcoded slug:
+    // a future model refresh may move both, and this still fails if they are ever
+    // pointed at one resolver again.
+    const agents = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: true,
+      groupKeys: { peers: "peers" },
+      nativeSubagentModel: "gpt-5.6-sol",
+      reviewerModel: "gemini-3.1-pro-preview",
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    expect(agents.implementer!.model).toBe("gpt-5.6-sol")
+    expect(agents.reviewer!.model).toBe("gemini-3.1-pro-preview")
+    expect(agents.reviewer!.model).not.toBe(agents.implementer!.model)
+    // The description has to say WHY it is the right pick over a peer critic,
+    // because a live session picked `codex_reviewer` for an assess-this task.
+    expect(agents.reviewer!.description).toContain("DIFFERENT lab")
+    expect(agents.reviewer!.description).toContain("can RUN things")
+    // And the stale same-model disclosure must be gone: it would now be false.
+    expect(agents.reviewer!.prompt).not.toContain("same model as the `implementer`")
   })
 
   test("sweep allowlist covers every emitted subagent definition", () => {

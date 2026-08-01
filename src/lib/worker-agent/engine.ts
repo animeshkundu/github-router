@@ -437,13 +437,13 @@ async function runWorkerAgentOnce(
       }
     }
 
-    // Step 4: worktree provisioning (write-capable `implement`/`test` +
+    // Step 4: worktree provisioning (write-capable `implement`/`test`/`review` +
     // worktree only). HARD ERROR if no git — `createWorktree` throws for us.
     // We do NOT silently fall back to the no-worktree path: the caller asked
     // for isolation, and an undetected fallback would race with their other
     // edits (plan: peer-review HIGH, explicit policy).
     const useWorktree =
-      (opts.mode === "implement" || opts.mode === "test") &&
+      (opts.mode === "implement" || opts.mode === "test" || opts.mode === "review") &&
       opts.worktree === true
     let ws: WorktreeHandle
     if (useWorktree) {
@@ -498,6 +498,7 @@ async function runWorkerAgentOnce(
             workspace: ws.dir,
             getMessages,
             planState,
+            isolated: useWorktree,
           })
 
     // Step 7: Agent. `streamFn` is the routing override (per Pi docs

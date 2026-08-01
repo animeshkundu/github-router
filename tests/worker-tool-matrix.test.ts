@@ -228,10 +228,22 @@ describe("worker tool smoke matrix", () => {
     const workspace = tempWorkspace()
     const readOnly = TOOL_CASES.slice(0, 9).map((entry) => entry.name).sort()
     const writable = TOOL_CASES.map((entry) => entry.name).sort()
-    for (const mode of ["explore", "review", "plan"] as const) {
+    for (const mode of ["explore", "plan"] as const) {
       const names = buildWorkerTools({ mode, workspace }).map((tool) => tool.name).sort()
       expect(names).toEqual(readOnly)
       expect(names).not.toContain("peer_review")
+    }
+    // `review` sits between the two tiers by design: it always gets bash, so it
+    // can VERIFY a claim by running the build or suite rather than only reading
+    // it, and it gains edit/write only when the run owns an isolated worktree.
+    // It never gets codex_review (implement/test-only) or peer_review.
+    const reviewPlain = buildWorkerTools({ mode: "review", workspace }).map((t) => t.name).sort()
+    expect(reviewPlain).toEqual([...readOnly, "bash"].sort())
+    const reviewIso = buildWorkerTools({ mode: "review", workspace, isolated: true }).map((t) => t.name).sort()
+    expect(reviewIso).toEqual([...readOnly, "bash", "edit", "write"].sort())
+    for (const names of [reviewPlain, reviewIso]) {
+      expect(names).not.toContain("peer_review")
+      expect(names).not.toContain("codex_review")
     }
     for (const mode of ["implement", "test"] as const) {
       const names = buildWorkerTools({ mode, workspace }).map((tool) => tool.name).sort()

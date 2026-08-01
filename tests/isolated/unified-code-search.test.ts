@@ -77,6 +77,61 @@ describe("forced lexical family (never touches colgrep)", () => {
     expect(r.results.length).toBeGreaterThan(0)
   })
 
+  test("zero-hit multi-word lexical query returns a recovery notice, not a bare empty", async () => {
+    // The behaviour this pins was found by a blind capability audit: a
+    // natural-language lookup returned `results: []` with no notice while a plain
+    // Grep answered the same question instantly. An empty result reads as "not in
+    // this repository" rather than "that query shape did not work", and this
+    // project's guidance steers callers here before Grep, so the empty case has
+    // to say something.
+    const r = await runUnifiedCodeSearch({
+      query: "no such phrase anywhere in this fixture",
+      workspace: root,
+      mode: "lexical",
+    })
+    expect(r.results.length).toBe(0)
+    expect(r.notice).toBeDefined()
+    expect(r.notice).toContain("do NOT read this as")
+  })
+
+  test("the suggested retry term is identifier-like, never punctuation noise", async () => {
+    // Naively suggesting the last token recommends `sized?` for
+    // "where is the timeout sized?" — punctuation that would produce a SECOND
+    // false negative, which is the failure this hint exists to prevent.
+    const r = await runUnifiedCodeSearch({
+      query: "where is the refreshAuthToken sized?",
+      workspace: root,
+      mode: "lexical",
+    })
+    if (r.results.length === 0) {
+      expect(r.notice).toBeDefined()
+      expect(r.notice).not.toContain("sized?")
+      // Prefers the longest identifier-like token in the query.
+      expect(r.notice).toContain("refreshAuthToken")
+    }
+  })
+
+  test("a query with no identifier-like token omits the example rather than inventing one", async () => {
+    const r = await runUnifiedCodeSearch({
+      query: "?? !! ..",
+      workspace: root,
+      mode: "lexical",
+    })
+    expect(r.results.length).toBe(0)
+    expect(r.notice).toBeDefined()
+    expect(r.notice).not.toContain("e.g.")
+  })
+
+  test("a single-word miss gets NO hint (a lone symbol not found is a real absence)", async () => {
+    const r = await runUnifiedCodeSearch({
+      query: "zzzNotARealSymbolAnywhere",
+      workspace: root,
+      mode: "lexical",
+    })
+    expect(r.results.length).toBe(0)
+    expect(r.notice ?? "").not.toContain("do NOT read this as")
+  })
+
   test("mode:'exact' → source 'lexical' (fixed-string)", async () => {
     const r = await runUnifiedCodeSearch({
       query: "refreshAuthToken",
