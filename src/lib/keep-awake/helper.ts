@@ -40,8 +40,20 @@ const ES_CONTINUOUS = 0x80000000
 const ES_SYSTEM_REQUIRED = 0x00000001
 const ES_DISPLAY_REQUIRED = 0x00000002
 
-/** Default time to wait for the helper's `OK` readiness line. */
-const DEFAULT_READY_TIMEOUT_MS = 5000
+/** Default time to wait for the helper's `OK` readiness line.
+ *
+ *  Sized for the slowest LEGITIMATE path, not the typical one. The script's
+ *  `Add-Type -MemberDefinition` compiles a C# P/Invoke shim through csc.exe on
+ *  first use, and that compile happens BEFORE the `OK` line is printed. On a
+ *  cold machine (a fresh CI runner, a laptop that just booted, a host with
+ *  aggressive on-access AV scanning) it routinely takes well over five seconds.
+ *
+ *  Giving up early does not fail loudly, which is what makes a tight value
+ *  costly here: `ready` resolves false, the caller logs a debug no-op, and the
+ *  user silently loses keep-awake on exactly the slow machines most likely to be
+ *  left running unattended. Waiting longer costs nothing, because the readiness
+ *  promise is awaited in the background and never blocks launch. */
+const DEFAULT_READY_TIMEOUT_MS = 20_000
 
 /**
  * The execution-state flags to assert. Always `ES_CONTINUOUS |

@@ -489,6 +489,41 @@ describe("buildPeerAgentDefinitions", () => {
     expect(withoutModel.scout).toBeUndefined()
   })
 
+  test("brainstorm's prompt carries the sounding-board contract (verdicts + feasibility screen)", () => {
+    // These three properties are the whole reason brainstorm differs from a
+    // generic ideation prompt, and each is load-bearing for a measured reason.
+    //
+    // Verdict vocabulary: the caller may pass its leading approach, and the
+    // agent must return a neutral verdict rather than reflexive dissent.
+    // Explicit devil's-advocate framing reliably produces >99% disagreement,
+    // which measures instruction compliance, not judgment, so `retain` has to
+    // be a first-class answer. This mirrors CRITIC_RUBRIC's existing stance.
+    //
+    // Feasibility screen: across four observed runs, two recommendations had a
+    // sound mechanism but an unexecutable concrete path (a TTY guard that
+    // refuses the proposed command; an npm package that does not exist on this
+    // machine). Screening every candidate, not just the winner, is what catches
+    // that and avoids selection bias in the ranking.
+    const agents = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: false,
+      groupKeys: { peers: "peers" },
+      brainstormModel: "gemini-3.1-pro-preview",
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    const prompt = agents.brainstorm!.prompt
+    for (const verdict of ["`replace`", "`retain`", "`insufficient evidence`"]) {
+      expect(prompt).toContain(verdict)
+    }
+    expect(prompt).toContain("Manufactured disagreement")
+    expect(prompt).toContain("EVERY candidate")
+    expect(prompt).toContain("cannot execute is worse than no recommendation")
+    // The caller has to know what to pass, or the agent cannot target the
+    // lead's blind spot; that contract lives in the description.
+    expect(agents.brainstorm!.description).toContain("leading approach")
+  })
+
   test("sweep allowlist covers every emitted subagent definition", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: true,

@@ -555,13 +555,29 @@ export function buildPeerAgentDefinitions(
   }
   out.brainstorm = {
     description: brainstormModel
-      ? `Divergent-options subagent running ${brainstormModel} (third lab, for approaches the lead would not generate). Use proactively BEFORE an approach is chosen: it returns several materially different options with trade-offs and a recommendation. Read-only; it proposes, then hands off to implementer. Model is overridable at spawn.`
-      : `Divergent-options subagent (runs on the lead's model in its own context). Use proactively BEFORE an approach is chosen: it returns several materially different options with trade-offs and a recommendation. Read-only; it proposes, then hands off to implementer. Model is overridable at spawn.`,
+      ? `Divergent-options subagent running ${brainstormModel} (third lab, for approaches the lead would not generate). Use proactively BEFORE an approach is chosen. Pass the decision, the constraints, what you have already ruled out, and the cost of being wrong; pass your current leading approach too if you have one, and it will try to beat it rather than restate it. Read-only; it proposes, then hands off to implementer. Model is overridable at spawn.`
+      : `Divergent-options subagent (runs on the lead's model in its own context). Use proactively BEFORE an approach is chosen. Pass the decision, the constraints, what you have already ruled out, and the cost of being wrong; pass your current leading approach too if you have one, and it will try to beat it rather than restate it. Read-only; it proposes, then hands off to implementer. Model is overridable at spawn.`,
     prompt:
-      "You are a divergent-options subagent. Given a problem and its constraints, return 3 to 5 approaches that differ in MECHANISM, not in phrasing. "
-      + "For each: how it works, what it costs, the failure mode that would kill it, and the condition under which it becomes the right answer. Close with a recommendation and the reason it wins. "
+      "You are a divergent-options subagent: the lead's sounding board while an approach is still open. Your job is to surface the option the lead would not have reached on its own. "
+      // Two modes, chosen by what the caller passes. A single pass cannot be
+      // both independent of an incumbent and comparative against one, since the
+      // model attends to the whole brief either way; so the modes are staged
+      // ACROSS calls, the same shape `stand_in` uses for its blind round 1 then
+      // informed round 2.
+      + "If the caller states its current leading approach, your job is to try to beat it, and you close with one verdict: `replace`, `retain`, or `insufficient evidence`. "
+      + "`replace` requires naming a concrete alternative that dominates it and the evidence that decides between them. `retain` is a real answer and a useful one: say it plainly when the approach survives a genuine attempt to beat it. "
+      // Calibration, matching CRITIC_RUBRIC's existing stance. Reflexive dissent
+      // is not skepticism; published work gets >99% disagreement from explicit
+      // devil's-advocate framing, which measures compliance, not judgment.
+      + "Manufactured disagreement is as useless as agreement; do neither. If the caller states no leading approach, generate independently and let the lead compare. "
+      + "Return 3 to 5 approaches that differ in MECHANISM, not in phrasing. For each: how it works, what it costs, what would have to be true for it to be the right answer, and the failure mode that would kill it. "
       + "Near-duplicate options are the failure mode to avoid — if only one real approach exists, say so plainly and explain why the alternatives are dead, because one honest option beats four padded ones. "
-      + "Ground every option in what the repository actually contains: read the relevant code first, and prefer reusing what is already there over inventing something new. "
+      // The one defect that reproduced across observed runs: sound mechanism,
+      // unexecutable concrete path. Screening only the winner is also
+      // selection-biased, hiding candidates that should have ranked higher.
+      + "Screen EVERY candidate against this repository and this environment before you rank them, then verify the one you are about to recommend can actually run here: read the code path it depends on, the guard that would refuse it, the artifact it assumes exists. "
+      + "A recommendation that cannot execute is worse than no recommendation. If checking kills your front-runner, rerank and say so. "
+      + "Ground every option in what the repository actually contains, and prefer reusing what is already there over inventing something new. "
       + readOnlyToolSteer()
       + " Do the work yourself — do not spawn further subagents.",
     tools: readOnlyToolAllowlist(searchKey),
