@@ -63,11 +63,18 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        # Both supported node lines. 22 is the older LTS most users are on and
-        # is what gives real compatibility coverage; 24 is what release.yml
-        # actually builds and publishes with, so shipping without testing it
-        # would leave the published artifact's own runtime unexercised.
-        node-version: ["22", "24"]
+        # Every supported node line, because node — not our code — is what
+        # changed underneath us: `--help` aborted on the Windows + node 24 lane
+        # while the identical build passed on node 22, and that lane only
+        # existed because this matrix was widened. 22 is the older LTS most
+        # users are on, 24 is what release.yml builds and publishes with, and
+        # 26 is current — shipping without it means the next teardown change
+        # lands on users first.
+        #
+        # These lanes run the E2E surface (CLI usage paths, the mock-API smoke,
+        # the serve WS relay). The UNIT suite cannot join them: it is written
+        # against `bun:test`, which does not run under node at all.
+        node-version: ["22", "24", "26"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
