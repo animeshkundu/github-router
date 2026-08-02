@@ -66,7 +66,7 @@ test("outlineFile finds real symbols in a real source file", async () => {
   // checked-in file whose exports are stable. This is the assertion that fails
   // when grammars silently stop loading: `outline` goes empty instead of
   // throwing, so an emptiness check is the only thing that catches it.
-  const target = path.join(import.meta.dir, "..", "src", "lib", "port.ts")
+  const target = path.join(import.meta.dirname, "..", "src", "lib", "port.ts")
   const outlined = await outlineFile(target)
 
   expect(outlined.outline.length).toBeGreaterThan(0)

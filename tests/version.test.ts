@@ -6,7 +6,7 @@ import { getPackageVersion } from "../src/lib/version"
 
 test("getPackageVersion returns the package.json version (matches repo source of truth)", () => {
   const pkg = JSON.parse(
-    readFileSync(join(import.meta.dir, "..", "package.json"), "utf8"),
+    readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8"),
   ) as { version: string }
   expect(getPackageVersion()).toBe(pkg.version)
 })

@@ -24,7 +24,7 @@ import { runUnifiedCodeSearch } from "~/lib/unified-code-search"
 // Both paths are asserted here for that reason. Capping one and trusting the
 // other to match is precisely what already went wrong.
 
-const REPO_ROOT = path.join(import.meta.dir, "..")
+const REPO_ROOT = path.join(import.meta.dirname, "..")
 
 // A deliberately symbol-dense file: >100 top-level declarations, so an
 // uncapped outline is unmistakably over the limit rather than borderline.

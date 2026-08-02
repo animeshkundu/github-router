@@ -2,7 +2,7 @@ import { test, expect, describe, beforeAll } from "bun:test"
 import fs from "node:fs"
 import path from "node:path"
 
-const DIST_PATH = path.resolve(import.meta.dir, "../dist/main.js")
+const DIST_PATH = path.resolve(import.meta.dirname, "../dist/main.js")
 
 let bundleContent: string
 let bundleLines: string[]

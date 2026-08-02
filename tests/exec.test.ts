@@ -173,11 +173,20 @@ describe("runManagedExeCapture — inactivity watchdog", () => {
   }, 15_000)
 
   test("a chatty child resets the watchdog and runs to completion", async () => {
-    // 4 ticks 100ms apart (< the 400ms window each), then exit cleanly.
+    // 4 ticks 100ms apart, then exit cleanly. The window must clear
+    // CHILD BOOT, not just the tick gap: the first tick lands at
+    // boot + 100ms, and spawn→first-output on a loaded Windows runner was
+    // measured at p50 369ms / max 496ms (24-way concurrency). A 400ms window
+    // therefore had NEGATIVE headroom — the first window could expire before
+    // the child ever printed, and the watchdog would kill it correctly while
+    // the test called it a bug. That is a latent flake in both runtimes; it
+    // only stayed green because bun's lane 1 is single-process. 1500ms clears
+    // the measured worst case with room, and still asserts the same property
+    // (100ms ticks each reset a window they are well inside).
     const res = await runManagedExeCapture(
       node,
       ["-e", emitScript(4, 100, 50)],
-      { inactivityTimeoutMs: 400 },
+      { inactivityTimeoutMs: 1500 },
     )
     expect(res.stalled).toBe(false)
     expect(res.code).toBe(0)

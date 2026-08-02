@@ -385,7 +385,12 @@ describe("runBash (Windows cmd.exe)", () => {
     } finally {
       cleanup()
     }
-  })
+    // Explicit timeout, unlike the rest of this file's Windows cases: driving
+    // 20500 cmd.exe loop iterations is the slowest test here — 1315ms solo but
+    // 8971ms measured at 12-way spawn concurrency. With no declaration it
+    // inherits bun's 5s default and would fail on a loaded runner while the
+    // code under test is fine. 30s matches the sibling at :265.
+  }, 30_000)
 
   test("abort signal kills the child and reports killed: true", async () => {
     if (!IS_WINDOWS) return

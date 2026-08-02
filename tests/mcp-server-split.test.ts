@@ -114,7 +114,7 @@ describe("browser MCP-name vs wire-name decoupling", () => {
     // Directly proves the rename did NOT touch the strings dispatched to the
     // installed extension — so no extension reload is required.
     const src = readFileSync(
-      path.join(import.meta.dir, "..", "src", "lib", "browser-mcp", "index.ts"),
+      path.join(import.meta.dirname, "..", "src", "lib", "browser-mcp", "index.ts"),
       "utf8",
     )
     expect(src).toContain('dispatchBrowserTool("browser_navigate"')
