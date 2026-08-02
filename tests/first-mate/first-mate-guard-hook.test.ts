@@ -44,7 +44,7 @@ describe("operator PreToolUse hook wiring", () => {
   })
 })
 
-const REPO_ROOT = path.resolve(import.meta.dir, "../..")
+const REPO_ROOT = path.resolve(import.meta.dirname, "../..")
 const MAIN = path.join(REPO_ROOT, "src/main.ts")
 
 async function runGuard(payload: string): Promise<number> {

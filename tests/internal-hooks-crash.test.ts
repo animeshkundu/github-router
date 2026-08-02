@@ -30,7 +30,7 @@ import { spawnSync } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
 
-const DIST_PATH = path.resolve(import.meta.dir, "../dist/main.js")
+const DIST_PATH = path.resolve(import.meta.dirname, "../dist/main.js")
 
 let bundleExists = false
 let nodeOk = false

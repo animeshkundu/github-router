@@ -20,7 +20,7 @@
 
 import path from "node:path"
 
-const FIXTURE_DIR = import.meta.dir
+const FIXTURE_DIR = import.meta.dirname
 const HOST = "127.0.0.1"
 const PLACEHOLDER = "__CROSS_ORIGIN_BASE__"
 

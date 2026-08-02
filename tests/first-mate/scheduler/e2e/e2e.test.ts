@@ -12,8 +12,8 @@ import path from "node:path"
  * separately by drive-gate.test.ts (real advance()) + the unit suites.
  */
 
-const HARNESS = path.join(import.meta.dir, "harness-daemon.ts")
-const REPO_ROOT = path.resolve(import.meta.dir, "../../../..")
+const HARNESS = path.join(import.meta.dirname, "harness-daemon.ts")
+const REPO_ROOT = path.resolve(import.meta.dirname, "../../../..")
 
 interface Proc {
   kill: (sig?: number | NodeJS.Signals) => void

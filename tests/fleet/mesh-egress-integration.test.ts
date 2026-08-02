@@ -18,7 +18,7 @@ const AUTH_HEADER = `Bearer ${EGRESS_TOKEN}`
 // EXECUTABLE in the Bun-only CI while testing the actual production code path.
 describe("mesh egress: real undici ProxyAgent CONNECT (prod Node runtime)", () => {
   test("sends Proxy-Authorization: Bearer <token> on the CONNECT", () => {
-    const script = path.join(import.meta.dir, "fixtures", "mesh-egress-node-proof.cjs")
+    const script = path.join(import.meta.dirname, "fixtures", "mesh-egress-node-proof.cjs")
     const proc = spawnSync("node", [script, AUTH_HEADER], { encoding: "utf8", timeout: 20_000 })
     // If node isn't on PATH in this environment, don't fail the suite — the Node
     // branch is also asserted by the unit test below. But when node IS present, the

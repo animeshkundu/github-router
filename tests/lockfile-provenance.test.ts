@@ -35,7 +35,7 @@ import path from "node:path"
 // `bun run verify:lockfile` and is run by hand, because it needs 333 network
 // round-trips.
 
-const lockPath = path.join(import.meta.dir, "..", "bun.lock")
+const lockPath = path.join(import.meta.dirname, "..", "bun.lock")
 const lockText = await fs.readFile(lockPath, "utf8")
 
 /** `  "key": ["name@version", "<url or empty>", {...}, "<integrity>"],` */

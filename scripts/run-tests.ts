@@ -26,7 +26,7 @@ const TIMEOUT_MS = "15000"
  * matching zero tests. */
 const OVERRIDE_IGNORE = "node_modules/**"
 
-const repoRoot = path.resolve(import.meta.dir, "..")
+const repoRoot = path.resolve(import.meta.dirname, "..")
 const isolatedDir = path.join(repoRoot, "tests", "isolated")
 
 function run(args: Array<string>): number {
