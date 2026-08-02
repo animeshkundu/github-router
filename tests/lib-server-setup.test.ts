@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test"
 
 import { PATHS } from "../src/lib/paths"
 import {
+  buildServeOptions,
   parseSharedArgs,
   getClaudeCodeEnvVars,
   getCodexEnvVars,
@@ -454,5 +455,35 @@ describe("getCodexEnvVars", () => {
     // Path lives under the github-router app dir, not the user's ~/.codex.
     expect(vars.CODEX_HOME).toContain("github-router")
     expect(vars.CODEX_HOME).not.toBe(`${process.env.HOME}/.codex`)
+  })
+})
+
+describe("buildServeOptions", () => {
+  const noopFetch = (() => new Response("")) as never
+
+  // Regression guard for a bug that reads as a network fault, not a config
+  // one. `Bun.serve` defaults `idleTimeout` to 10s and applies it to a
+  // STREAMING response, so a >10s gap with a ReadableStream body open makes
+  // Bun kill the socket. Node's srvx adapter has no equivalent default, which
+  // is why this only ever hit users running the proxy under bun.
+  //
+  // Upstream Copilot goes quiet for longer than 10s routinely — extended
+  // thinking and prompt processing on a large accumulated context both do it.
+  // The client surfaces the kill as `UND_ERR_SOCKET other side closed` and
+  // Claude Code reports `Unable to connect to API (ECONNRESET)`. Every retry
+  // replays the same context, hits the same gap, and burns the whole backoff.
+  //
+  // Nothing fails loudly if this option is dropped: the proxy still starts,
+  // still serves, and short responses still work. It only misbehaves on slow
+  // streams, which is exactly when it is hardest to attribute. Hence a test.
+  test("disables Bun's idle reaper so slow streams are not killed", () => {
+    const opts = buildServeOptions(noopFetch, true)
+    expect(opts.bun.idleTimeout).toBe(0)
+  })
+
+  test("binds loopback only and forwards the silent flag", () => {
+    expect(buildServeOptions(noopFetch, true).hostname).toBe("127.0.0.1")
+    expect(buildServeOptions(noopFetch, true).silent).toBe(true)
+    expect(buildServeOptions(noopFetch, false).silent).toBe(false)
   })
 })

@@ -38,6 +38,61 @@ export interface ServerSetupOptions {
   silent: boolean
 }
 
+/**
+ * Build the srvx `serve()` options shared by the explicit-port and
+ * random-port paths.
+ *
+ * Extracted and exported so the Bun idle-reaper override below is
+ * assertable. `setupAndServe` itself performs auth and network I/O, so the
+ * only way to pin this behaviour in a test is to make the options object
+ * reachable on its own — and it needs pinning, because deleting the override
+ * reintroduces a failure that looks like an upstream/network problem rather
+ * than a config one.
+ */
+export function buildServeOptions(
+  fetchHandler: ServerHandler,
+  silent: boolean,
+): {
+  fetch: ServerHandler
+  hostname: string
+  silent: boolean
+  bun: { idleTimeout: number }
+} {
+  return {
+    fetch: fetchHandler,
+    hostname: "127.0.0.1",
+    silent,
+    // Bun-only: disable `Bun.serve`'s per-connection idle reaper.
+    //
+    // Bun defaults `idleTimeout` to 10 seconds and applies it to a
+    // STREAMING response: if no bytes reach the socket for ~10s while a
+    // ReadableStream body is open, Bun kills the connection. Node's
+    // `node:http` (the srvx node adapter) has no equivalent default
+    // (`server.timeout === 0`), which is why this only ever bit users
+    // running the proxy under bun.
+    //
+    // Upstream Copilot routinely goes quiet for longer than that
+    // mid-stream — extended thinking and prompt processing on a large
+    // accumulated context both produce >10s SSE gaps. The client (undici)
+    // surfaces the kill as `UND_ERR_SOCKET other side closed`, which
+    // Claude Code reports as `Unable to connect to API (ECONNRESET)`.
+    // Because the retry replays the same large context, every retry
+    // reproduces the same gap and the whole 10-attempt backoff burns down.
+    // Reproduced end-to-end: headers + first byte at +12.7s, socket killed
+    // at +24.0s (an 11.3s mid-stream gap); the identical request through
+    // the node adapter completes.
+    //
+    // Disabled rather than raised to Bun's 255s maximum: the proxy already
+    // owns upstream-stall detection via UPSTREAM_INACTIVITY_TIMEOUT_MS
+    // (`relayAnthropicStream`, default 5 min), and a 255s socket reaper
+    // would fire BEFORE that guard and reintroduce this same bug at a
+    // longer horizon. One authority for stream liveness, and it is ours.
+    //
+    // Namespaced under `bun`, so the node adapter ignores it.
+    bun: { idleTimeout: 0 },
+  }
+}
+
 export async function setupAndServe(
   options: ServerSetupOptions,
 ): Promise<{ server: ReturnType<typeof serve>; serverUrl: string }> {
@@ -124,11 +179,10 @@ export async function setupAndServe(
     `Available models: \n${state.models?.data.map((model) => `- ${model.id}`).join("\n")}`,
   )
 
-  const serveOptions = {
-    fetch: app.fetch as ServerHandler,
-    hostname: "127.0.0.1",
-    silent: options.silent,
-  }
+  const serveOptions = buildServeOptions(
+    app.fetch as ServerHandler,
+    options.silent,
+  )
 
   let srvxServer: ReturnType<typeof serve> | undefined
 
