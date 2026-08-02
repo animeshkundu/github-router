@@ -47,7 +47,10 @@ import {
   WORKER_THINKING_LEVELS,
   type WorkerThinkingLevel,
 } from "~/lib/worker-agent"
-import { resolveModelAndThinking } from "~/lib/worker-agent/model-resolve"
+import {
+  buildCatalogView,
+  resolveModelAndThinking,
+} from "~/lib/worker-agent/model-resolve"
 import {
   resetAllWorkerSessionDefaults,
   resetWorkerSessionDefault,
@@ -1406,7 +1409,16 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         const table = Object.fromEntries(
           WORKER_MODES.map((workerMode) => [workerMode, resolveModeDefaults(workerMode)]),
         )
-        return { content: [{ type: "text", text: JSON.stringify(table) }] }
+        // The catalog rides along ONLY on a pure inspect (no mutation args),
+        // which is the call the tool's own description invites: "Omit
+        // arguments to inspect current values". A mutation response does not
+        // need it, and paying ~2KB on every set/clear would be exactly the
+        // always-on cost the minimal-surface rule exists to prevent.
+        const body: Record<string, unknown> = { ...table }
+        if (!clearAll && !clear && mode === undefined) {
+          body.catalog = buildCatalogView()
+        }
+        return { content: [{ type: "text", text: JSON.stringify(body) }] }
       },
     },
     {

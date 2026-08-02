@@ -88,9 +88,25 @@ export interface Model {
     is_premium: boolean
     multiplier: number
     restricted_to?: string[]
+    /**
+     * Per-token prices, scaled by 1e9. Present on the live catalog even
+     * where `is_premium` / `multiplier` are absent (usage-based-billing
+     * accounts populate this instead), which is why both shapes are
+     * modelled: reading only the premium pair silently yields nothing
+     * on those accounts.
+     */
+    token_prices?: {
+      input_price?: number
+      output_price?: number
+      cache_price?: number
+      batch_size?: number
+    }
   }
   is_chat_default?: boolean
   is_chat_fallback?: boolean
   model_picker_category?: string
+  /** Vendor-authored cost tier (`low` | `medium` | `high` | `very_high`). */
+  model_picker_price_category?: string
   info_messages?: Array<{ code: string; message: string }>
+  warning_messages?: Array<{ code: string; message: string }>
 }
