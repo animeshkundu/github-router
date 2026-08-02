@@ -582,7 +582,18 @@ test("operating-defaults directive: orchestrator posture + concrete excellence p
   expect(d).toContain("scout")
   expect(d).toContain("scribe")
   expect(d).toContain("the main thread is where you think with and respond to the user")
-  expect(d).toContain("protect it by pushing heavy or exploratory work outward")
+  // The posture must carry a DISCRIMINATOR, not just an exhortation to
+  // delegate. "delegate by default whenever one can do the work without loss
+  // of quality" (the previous wording) is unfalsifiable in advance: a model
+  // cannot know it will lose quality until after it has delegated. Two
+  // independent unprimed Opus agents, asked how they actually decided,
+  // converged on the same rule instead — delegation pays when reading is WIDE,
+  // not merely when a sub-question is separable — and one of them delegated a
+  // narrow question, answered it itself while waiting, and called its own call
+  // wrong. Assert both halves so the rule cannot decay back into "delegate
+  // more".
+  expect(d).toContain("WIDE")
+  expect(d).toContain("does NOT pay merely because a sub-question is separable")
   // Excellence principles remain specific without named-persona anchors.
   expect(low).toContain("radical simplicity")
   expect(low).toContain("first principles")
