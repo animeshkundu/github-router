@@ -62,9 +62,14 @@ export interface InstallRequiredPayload {
    * version of the extension manifest.
    */
   proxy_version: string
+  // No Web Store / Edge Add-ons fields here on purpose. The extension is not
+  // published to either store, so "Load unpacked" is the ONLY install path.
+  // Declaring optional store-URL fields that nothing ever populates read as a
+  // fallback that exists — the `--browse` help text promised exactly that,
+  // which sent users looking for a store listing on a managed device where
+  // unpacked loading is blocked and there is in fact no way forward. Re-add
+  // both, populated, if the extension is ever published.
   manual_steps: {
-    chrome_web_store_url?: string
-    edge_addons_url?: string
     load_unpacked_dir: string
     expected_extension_id: string
     instructions: string

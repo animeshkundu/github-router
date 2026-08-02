@@ -1015,9 +1015,12 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         "\"find code that does Z\"). Use Grep for " +
         "exact-pattern enumeration when you need every hit unranked, " +
         "and Glob for file-name patterns (no content match). " +
-        "`workspace` is any absolute path the proxy process can " +
-        "read — typically the project root or a sub-tree you're " +
-        "working in. Each response also carries a tree-sitter structural " +
+        "`workspace` is any absolute path to a DIRECTORY the proxy " +
+        "process can read — typically the project root or a sub-tree " +
+        "you're working in. It must be a directory, not a file; to " +
+        "narrow to one file or a set of them, keep `workspace` at the " +
+        "root and pass `file_glob`. Each response also carries a " +
+        "tree-sitter structural " +
         "outline of the matched files (`summary` on by default; set it " +
         "false to omit).",
       inputSchema: {

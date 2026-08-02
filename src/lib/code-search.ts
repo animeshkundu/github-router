@@ -515,7 +515,15 @@ export function validateWorkspace(workspace: string): ValidationResult {
 
   try {
     if (!statSync(canonical).isDirectory()) {
-      return { ok: false, error: "workspace must be a directory" }
+      // Point at the fix, not just the violation. Passing a file path here is
+      // the natural reading of "any absolute path", and a bare "must be a
+      // directory" leaves the caller to guess how to scope to one file.
+      return {
+        ok: false,
+        error:
+          "workspace must be a directory, not a file — pass the containing " +
+          "directory as `workspace` and use `file_glob` to scope to this file",
+      }
     }
   } catch {
     return { ok: false, error: "workspace path is not accessible" }

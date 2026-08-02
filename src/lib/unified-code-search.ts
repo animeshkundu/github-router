@@ -104,6 +104,23 @@ function lexicalSearchCodeMode(mode: UnifiedMode): "ranked" | "literal" | "regex
  * it both levers: retry `mode:"semantic"` shortly (the index is self-healing
  * in the background) OR re-query now with specific symbol/keyword terms.
  */
+/**
+ * Per-file cap on outline entries in a SEARCH response.
+ *
+ * `outlineFile`'s own cap is 1000 symbols, which is right for a deliberate
+ * outline of one file the caller asked for. It is far too high here: outlines
+ * are attached to up to 10 files the caller did NOT ask for, as orientation
+ * alongside the hits. A single large test file can contribute hundreds of
+ * entries and dominate the response, which is the opposite of the compact map
+ * this field is supposed to be — the caller pays that context whether or not
+ * they ever open the file.
+ *
+ * Capped rather than removed because the map itself is useful; only its tail
+ * is. The parser-level cap is deliberately left alone so other consumers of
+ * `outlineFile` keep full fidelity.
+ */
+const MAX_OUTLINE_ENTRIES_PER_FILE = 60
+
 const FALLBACK_GUIDANCE_MARKER = 'retry mode:"semantic"'
 const FALLBACK_GUIDANCE =
   `${FALLBACK_GUIDANCE_MARKER} shortly, or re-query now with specific symbol/keyword terms`
@@ -173,7 +190,10 @@ async function outlinesForSemanticResults(
     // unrelated file outside the caller's workspace.
     if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) continue
     const outlined = await outlineFile(abs, signal)
-    outlines.push({ file, outline: outlined.outline })
+    outlines.push({
+      file,
+      outline: outlined.outline.slice(0, MAX_OUTLINE_ENTRIES_PER_FILE),
+    })
   }
   return outlines
 }
