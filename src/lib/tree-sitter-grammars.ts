@@ -27,7 +27,7 @@ import { statSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 
 import consola from "consola"
-import Parser from "web-tree-sitter"
+import { Language, Node, Parser, Tree } from "web-tree-sitter"
 
 // ============================================================
 // Constants
@@ -231,7 +231,7 @@ export function getLanguageKeyForPath(filePath: string): string | null {
 export interface GrammarBundle {
   /** Lazy promise of the language registry. Awaited per-call so the
    *  init cost overlaps with any other module-load work. */
-  ready: Promise<Map<string, Parser.Language>>
+  ready: Promise<Map<string, Language>>
 }
 
 let _grammarBundle: GrammarBundle | undefined
@@ -259,8 +259,8 @@ export function resolveGrammarRoot(): string | null {
  */
 export function getGrammarBundle(): GrammarBundle {
   if (_grammarBundle) return _grammarBundle
-  const ready = (async (): Promise<Map<string, Parser.Language>> => {
-    const out = new Map<string, Parser.Language>()
+  const ready = (async (): Promise<Map<string, Language>> => {
+    const out = new Map<string, Language>()
     try {
       await Parser.init()
     } catch (err) {
@@ -279,7 +279,7 @@ export function getGrammarBundle(): GrammarBundle {
     for (const [key, filename] of Object.entries(GRAMMAR_FILES)) {
       const wasmPath = path.join(root, filename)
       try {
-        const lang = await Parser.Language.load(wasmPath)
+        const lang = await Language.load(wasmPath)
         out.set(key, lang)
       } catch (err) {
         consola.warn(
@@ -332,10 +332,12 @@ export interface FileOutlineResult {
  * the grammar module has no dependency back on the ranking layer).
  */
 function firstIdentifierLeaf(
-  node: Parser.SyntaxNode,
-): Parser.SyntaxNode | null {
+  node: Node,
+): Node | null {
   if (IDENTIFIER_NODE_TYPES.has(node.type)) return node
   for (const child of node.namedChildren) {
+    // web-tree-sitter 0.25 types `namedChildren` as `(Node | null)[]`.
+    if (child === null) continue
     const r = firstIdentifierLeaf(child)
     if (r) return r
   }
@@ -349,7 +351,7 @@ function firstIdentifierLeaf(
  * identifier-typed named child as a last resort. Returns `null` when no
  * name can be recovered — the caller skips such nodes.
  */
-function deriveDefinitionName(node: Parser.SyntaxNode): string | null {
+function deriveDefinitionName(node: Node): string | null {
   const nameField = node.childForFieldName("name")
   if (nameField && nameField.text.length > 0) return nameField.text
 
@@ -395,20 +397,22 @@ const OUTLINE_MEMBER_CONTAINERS = new Set([
 ])
 
 function collectDefinitions(
-  root: Parser.SyntaxNode,
+  root: Node,
   defTypes: ReadonlySet<string>,
   signal?: AbortSignal,
 ): Array<FileOutlineEntry> {
   const out: Array<FileOutlineEntry> = []
 
   const visit = (
-    node: Parser.SyntaxNode,
+    node: Node,
     depth: number,
     includeDefinitions: boolean,
   ): void => {
     if (signal?.aborted || out.length >= MAX_OUTLINE_ENTRIES) return
     for (const child of node.namedChildren) {
       if (signal?.aborted || out.length >= MAX_OUTLINE_ENTRIES) return
+      // web-tree-sitter 0.25 types `namedChildren` as `(Node | null)[]`.
+      if (child === null) continue
       if (defTypes.has(child.type)) {
         if (includeDefinitions) {
           const name = deriveDefinitionName(child)
@@ -444,7 +448,7 @@ function collectDefinitions(
  * re-reading + re-parsing the file. Never throws.
  */
 export function outlineFromTree(
-  tree: Parser.Tree,
+  tree: Tree,
   language: string,
   signal?: AbortSignal,
 ): FileOutlineResult {
@@ -512,8 +516,8 @@ function lineStartByte(source: string, lineNumber1: number): number {
 }
 
 function containsByteRange(
-  outer: Parser.SyntaxNode,
-  inner: Parser.SyntaxNode,
+  outer: Node,
+  inner: Node,
 ): boolean {
   return outer.startIndex <= inner.startIndex && outer.endIndex >= inner.endIndex
 }
@@ -528,12 +532,12 @@ function containsByteRange(
  * supported grammar; deeper walks risk false positives.
  */
 function isDefiningSite(
-  matchedNode: Parser.SyntaxNode,
+  matchedNode: Node,
   langKey: string,
 ): boolean {
   const defTypes = DEFINITION_NODE_TYPES[langKey]
   if (!defTypes) return false
-  let cur: Parser.SyntaxNode | null = matchedNode.parent
+  let cur: Node | null = matchedNode.parent
   let depth = 0
   while (cur && depth < 6) {
     if (defTypes.has(cur.type)) {
@@ -573,7 +577,7 @@ function isDefiningSite(
  * in-process pass's per-hit try/catch). `signal` short-circuits between hits.
  */
 export function confirmDefinitionSites(
-  tree: Parser.Tree,
+  tree: Tree,
   source: string,
   language: string,
   hits: ReadonlyArray<StructuralHit>,
@@ -588,7 +592,7 @@ export function confirmDefinitionSites(
     if (lineStart < 0) continue
     const matchByteStart = lineStart + hit.matchStart
     const matchByteEnd = lineStart + hit.matchEnd
-    let node: Parser.SyntaxNode | null
+    let node: Node | null
     try {
       node = tree.rootNode.descendantForIndex(matchByteStart, matchByteEnd)
     } catch {
@@ -598,7 +602,7 @@ export function confirmDefinitionSites(
     // Climb to the nearest identifier-typed node, since descendantForIndex may
     // land on a parent for off-by-one byte ranges in CRLF files.
     if (!IDENTIFIER_NODE_TYPES.has(node.type)) {
-      let cur: Parser.SyntaxNode | null = node
+      let cur: Node | null = node
       let depth = 0
       while (cur && !IDENTIFIER_NODE_TYPES.has(cur.type) && depth < 3) {
         const leaf = firstIdentifierLeaf(cur)
@@ -699,7 +703,7 @@ export async function outlineFile(
   if (signal?.aborted) return { outline: [], language }
 
   let parser: Parser | null = null
-  let tree: Parser.Tree | null = null
+  let tree: Tree | null = null
   try {
     parser = new Parser()
     parser.setLanguage(lang)

@@ -97,7 +97,7 @@ export async function createMessages(
     : await withRefresh()
 
   if (!response.ok) {
-    let errorBody = ""
+    let errorBody: string
     try {
       errorBody = await response.text()
     } catch {
@@ -160,7 +160,7 @@ export async function countTokens(
     : await withRefresh()
 
   if (!response.ok) {
-    let errorBody = ""
+    let errorBody: string
     try {
       errorBody = await response.text()
     } catch {

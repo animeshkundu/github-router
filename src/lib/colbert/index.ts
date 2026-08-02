@@ -87,7 +87,7 @@ export async function provisionAndIndexColbert(opts: {
   registerColbertExitHandlers()
 
   // Provision (binary/model/ORT + smoke). Best-effort.
-  let provisioned = false
+  let provisioned: boolean
   try {
     const result = await provisionColbert()
     provisioned = result.status === "ready"

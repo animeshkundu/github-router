@@ -18,7 +18,7 @@
 import { readFileSync, statSync } from "node:fs"
 import { parentPort } from "node:worker_threads"
 
-import Parser from "web-tree-sitter"
+import { Language, Parser, Tree } from "web-tree-sitter"
 
 import {
   confirmDefinitionSites,
@@ -40,7 +40,7 @@ const port = parentPort
 
 // Per-worker grammar registry + reusable parsers (one per language). Parsers
 // are reusable across parses; we keep them warm for the worker's lifetime.
-let grammars: Map<string, Parser.Language> = new Map()
+let grammars: Map<string, Language> = new Map()
 const parsers = new Map<string, Parser>()
 let cancelled = false
 
@@ -90,7 +90,7 @@ function handleJob(job: ParseJobRequest): ParseJobReply {
     parsers.set(job.language, parser)
   }
 
-  let tree: Parser.Tree | null = null
+  let tree: Tree | null
   try {
     tree = parser.parse(source)
   } catch (err) {

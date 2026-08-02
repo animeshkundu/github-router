@@ -862,7 +862,6 @@ function fetchUrlTool(): AgentTool<typeof FETCH_URL_PARAMS> {
           bytes += chunk.byteLength
         } else {
           if (room > 0) buf += decoder.decode(chunk.subarray(0, room), { stream: true })
-          bytes += room
           truncated = true
           try {
             await reader.cancel("size_cap")

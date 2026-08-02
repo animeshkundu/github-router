@@ -187,7 +187,7 @@ export class SchedulerDaemon {
     this.running = true
     const loop = async (): Promise<void> => {
       if (!this.running) return
-      let delay = this.opts.minBackoffMs
+      let delay: number
       try {
         const res = await this.tickOnce()
         delay = res.nextDelayMs

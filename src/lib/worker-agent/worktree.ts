@@ -202,6 +202,7 @@ async function findRepoRoot(
       `worker-agent worktree: git unavailable or workspace is not a repository: ${detail}. ` +
         `worker_implement/worker_test always run in an isolated git worktree and require a git repo; ` +
         `for in-place edits (or a non-git workspace), use the native \`implementer\` subagent instead.`,
+      { cause: err },
     )
   }
   const lines = result.stdout.split(/\r?\n/).filter((s) => s.length > 0)

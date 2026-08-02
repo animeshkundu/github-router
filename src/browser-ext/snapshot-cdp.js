@@ -401,7 +401,7 @@ async function extractVisibleText(tabId, frames, sendCommand, diag, isTimedOut) 
     // Ask each frame only for the budget still remaining so a later frame
     // can't serialize text we'd immediately discard.
     const expr = buildVisibleTextExpr("viewport", TEXT_CAP - total)
-    let frameText = ""
+    let frameText
     try {
       frameText = await evaluateTextInFrame(tabId, frame, isTopFrame, expr, sendCommand)
     } catch {

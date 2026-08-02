@@ -36,7 +36,7 @@ export async function withInstallLock(
   let handle = await tryCreateLock(p)
   if (!handle) {
     // Existing lock — steal it if stale, else skip.
-    let stale = false
+    let stale: boolean
     try {
       const s = await stat(p)
       stale = Date.now() - s.mtimeMs > STALE_LOCK_MS

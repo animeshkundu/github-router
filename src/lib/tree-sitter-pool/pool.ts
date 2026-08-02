@@ -113,7 +113,7 @@ function computePoolSize(): number {
     const n = Number(env)
     if (Number.isInteger(n) && n >= 1 && n <= 16) return n
   }
-  let cpus = 1
+  let cpus: number
   try {
     cpus = os.cpus().length
   } catch {

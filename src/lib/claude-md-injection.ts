@@ -508,8 +508,8 @@ async function injectMarkerBlock(opts: InjectMarkerBlockOpts): Promise<void> {
 
   // Invariant 2: refuse to follow symlinks on the leaf. lstat tells
   // us about the link itself; fs.readFile would silently follow.
-  let existingContent = ""
-  let targetExists = false
+  let existingContent: string
+  let targetExists: boolean
   try {
     const linkStat = await fs.lstat(target)
     if (linkStat.isSymbolicLink()) {

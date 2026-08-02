@@ -70,7 +70,7 @@ export const createChatCompletions = async (
     : await withRefresh()
 
   if (!response.ok) {
-    let errorBody = ""
+    let errorBody: string
     try {
       errorBody = await response.text()
     } catch {

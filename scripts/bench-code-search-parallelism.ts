@@ -126,7 +126,7 @@ function makeWorkspace(): string {
 // ---------------------------------------------------------------------------
 
 async function measureRawParse(sources: Array<string>): Promise<number> {
-  const { default: Parser } = await import("web-tree-sitter")
+  const { Parser } = await import("web-tree-sitter")
   const grammars = await getGrammarBundle().ready
   const ts = grammars.get("typescript")
   if (!ts) throw new Error("typescript grammar failed to load")
@@ -152,7 +152,7 @@ async function measureEventLoopBlock(sources: Array<string>): Promise<{
   parseMs: number
   parsedFiles: number
 }> {
-  const { default: Parser } = await import("web-tree-sitter")
+  const { Parser } = await import("web-tree-sitter")
   const grammars = await getGrammarBundle().ready
   const ts = grammars.get("typescript")!
   const parser = new Parser()
@@ -262,7 +262,7 @@ async function measureStreamJitter(): Promise<{
   // Under load: 8 concurrent ranked searches over distinct cold workspaces.
   const ws: Array<string> = []
   for (let i = 0; i < 8; i++) ws.push(makeWorkspace())
-  let loadedMaxGapMs = 0
+  let loadedMaxGapMs: number
   try {
     const bg = Promise.all(
       ws.map((w) =>

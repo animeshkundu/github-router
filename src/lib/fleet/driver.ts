@@ -177,7 +177,7 @@ export async function waitForMessageReady(
   const waitMs = Math.max(0, options.waitMs ?? 0)
   const pollMs = Math.max(1, options.pollMs ?? DEFAULT_READY_POLL_MS)
   const deadline = now() + waitMs
-  let last: MessageReadiness = { ready: false, reason: "unknown" }
+  let last: MessageReadiness
 
   for (;;) {
     let status: FleetSessionStatus | undefined

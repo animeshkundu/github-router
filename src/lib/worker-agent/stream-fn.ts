@@ -454,7 +454,6 @@ async function runChatAttempt(
       content: joinTextChunks(accum, activeTextIndex),
       partial: buildPartial(resolved, accum),
     })
-    activeTextIndex = null
   }
 
   // Emit `toolcall_end` for each accumulated tool call in wire order.

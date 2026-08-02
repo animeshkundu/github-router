@@ -118,7 +118,7 @@ export function renderMarkdownBody(source: string): string {
   let line = 1
   let out = ""
   for (const tok of tokens) {
-    let html = ""
+    let html: string
     try {
       html = m.parser([tok] as Parameters<typeof m.parser>[0])
     } catch {

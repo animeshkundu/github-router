@@ -18,7 +18,6 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
-    "baseUrl": ".",
     "paths": {
       "~/*": ["./src/*"],
       "@earendil-works/pi-agent-core": ["./src/vendor/pi/agent/index.ts"],

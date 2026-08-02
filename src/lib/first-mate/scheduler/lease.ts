@@ -191,7 +191,7 @@ export async function withLeaseLock<T>(
           // vanished/unreadable between ops — re-contend immediately
         }
         if (Date.now() - start > LEASE_LOCK_MAX_WAIT_MS) {
-          throw new Error(`first-mate lease lock timeout for ${file}`)
+          throw new Error(`first-mate lease lock timeout for ${file}`, { cause: err })
         }
         await new Promise((r) => setTimeout(r, 15))
       }
