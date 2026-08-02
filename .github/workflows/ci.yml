@@ -11,30 +11,47 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        # Two bun lines, because a single pinned version cannot see the class
+        # of bug that actually reaches users. `1.3.14` is current stable and is
+        # the GATE. `canary` is the Rust rewrite (1.4.x) that users who ran
+        # `bun upgrade --canary` are already on — CI pinning only stable meant
+        # CI was validating a runtime nobody was running.
+        #
+        # It surfaced immediately: a streaming test passed on canary/Windows
+        # and failed on 1.3.14/ubuntu, because when bun's socket reaper fires
+        # is a platform- and version-specific internal detail.
+        bun-version: ["1.3.14", "canary"]
     runs-on: ${{ matrix.os }}
+    # Canary is pre-release and moves under us. It must give signal without
+    # taking merges hostage to upstream churn we do not control — a red tick
+    # for someone else's unreleased bug would erode the zero-red-CI rule that
+    # makes a red tick mean something. Stable stays blocking on both OSes.
+    continue-on-error: ${{ matrix.bun-version == 'canary' }}
     steps:
       - uses: actions/checkout@v7
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3.14"
+          bun-version: ${{ matrix.bun-version }}
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # Lint/typecheck/license are runtime-independent, so run them once
+      # (ubuntu + stable) rather than four times.
       - name: Lint
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && matrix.bun-version == '1.3.14'
         run: bun run lint:all
 
       - name: Type check
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && matrix.bun-version == '1.3.14'
         run: bun run typecheck
 
       - name: Build
         run: bun run build
 
       - name: License guard (no AGPL/CloudCLI in tarball)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && matrix.bun-version == '1.3.14'
         run: node scripts/check-pack-no-agpl.mjs
 
       - name: Test
@@ -46,6 +63,18 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        # Every supported node line, because node — not our code — is what
+        # changed underneath us: `--help` aborted on the Windows + node 24 lane
+        # while the identical build passed on node 22, and that lane only
+        # existed because this matrix was widened. 22 is the older LTS most
+        # users are on, 24 is what release.yml builds and publishes with, and
+        # 26 is current — shipping without it means the next teardown change
+        # lands on users first.
+        #
+        # These lanes run the E2E surface (CLI usage paths, the mock-API smoke,
+        # the serve WS relay). The UNIT suite cannot join them: it is written
+        # against `bun:test`, which does not run under node at all.
+        node-version: ["22", "24", "26"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -56,7 +85,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: ${{ matrix.node-version }}
 
       - name: Install and build
         run: |

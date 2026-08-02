@@ -144,6 +144,27 @@ const SCAN_MAX_FILES = 400
  * the shoulder cut) to return the full grep set — the floor guarantee.
  */
 const RANKED_MAX_PER_FILE = 50
+
+/**
+ * Per-file cap on outline entries in a SEARCH response.
+ *
+ * `outlineFile`'s own cap is 1000 symbols, which is right when a caller asks
+ * to outline one specific file. It is far too high here: outlines are attached
+ * to up to 10 files the caller did NOT ask for, as orientation alongside the
+ * hits. One large test file can contribute hundreds of entries and dominate
+ * the response — the opposite of the compact map this field is meant to be,
+ * and the caller pays that context whether or not they ever open the file.
+ *
+ * Exported because BOTH response paths must apply it: this lexical builder and
+ * `buildOutlines` in unified-code-search.ts (the semantic one). Capping only
+ * one leaves the other unbounded, which is exactly the bug this replaced —
+ * the semantic path was capped while lexical, which is also the fallback every
+ * cold-index query lands on, kept emitting the full 1000-symbol outline.
+ *
+ * The parser-level cap in tree-sitter-grammars.ts is deliberately untouched so
+ * other consumers of `outlineFile` keep full fidelity.
+ */
+export const MAX_OUTLINE_ENTRIES_PER_FILE = 60
 const DEFAULT_CONTEXT_LINES = 2
 const MAX_SNIPPET_BYTES = 2048
 const MAX_STDOUT_BYTES = 10 * 1024 * 1024
@@ -2569,7 +2590,10 @@ export async function searchCode(
       // Skip files with no recoverable symbols in scan mode so the map
       // stays a list of real symbol-bearing files, not empty noise.
       if (wantScan && o.outline.length === 0) continue
-      outlines.push({ file, outline: o.outline })
+      outlines.push({
+        file,
+        outline: o.outline.slice(0, MAX_OUTLINE_ENTRIES_PER_FILE),
+      })
     }
   }
 

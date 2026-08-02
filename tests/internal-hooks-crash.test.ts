@@ -96,3 +96,43 @@ describe("internal hook subcommands: Windows libuv teardown regression", () => {
     })
   }
 })
+
+// The SAME libuv teardown defect, reached through a completely different door:
+// citty's own `runMain` calls `process.exit(0)` immediately after `showUsage`
+// resolves (citty dist/index.mjs:389 — 0.1.6 does it too, so not an upgrade
+// regression). On Windows a pipe-backed stdout is async, so the usage text is
+// still queued when the hard exit tears the loop down and node aborts with
+// exit 127 AFTER printing the help the user asked for.
+//
+// It hid for a long time because `--version` is clean: citty's version branch
+// has no `process.exit()` and drains naturally. So the cheapest smoke test
+// passes while every `--help` path aborts. Node 22 on Windows tolerated it and
+// node 24 does not — and release.yml publishes with node 24, so this reached
+// users on the published runtime. It was found by adding a node-24 Windows
+// lane to CI, not by anyone reading the code.
+//
+// Asserting the EXIT CODE is the whole point. The help text still prints on a
+// crashing build, so any assertion on output would have passed throughout.
+describe("citty usage paths: Windows libuv teardown regression", () => {
+  const USAGE_ARGS: ReadonlyArray<{ args: Array<string>; label: string }> = [
+    { args: ["--help"], label: "root --help" },
+    { args: ["claude", "--help"], label: "subcommand --help" },
+    { args: ["start", "--help"], label: "start --help" },
+  ]
+
+  for (const { args, label } of USAGE_ARGS) {
+    test(`${label} exits 0 with no libuv assertion`, () => {
+      if (!bundleExists || !nodeOk) return
+      const r = spawnSync("node", [DIST_PATH, ...args], {
+        encoding: "utf8",
+        // A pipe (not a TTY) is what makes stdout async on Windows, which is
+        // precisely the condition that triggers the abort. Inheriting a TTY
+        // here would make the test silently unable to fail.
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+      const combined = `${r.stdout ?? ""}${r.stderr ?? ""}`
+      expect(combined).not.toContain("UV_HANDLE_CLOSING")
+      expect(r.status).toBe(0)
+    })
+  }
+})
