@@ -99,15 +99,18 @@ describe("Bun.serve idleTimeout (streaming ECONNRESET regression)", () => {
     GAP_MS + 15_000,
   )
 
-  test.skipIf(!isBun)(
-    "positive control: a 1s idleTimeout does reap the same stream",
-    async () => {
-      const result = await readStreamWithGap(1)
-      // Bun either resets the socket (fetch rejects) or closes it early,
-      // delivering none of the payload. Both prove the reaper is live, and
-      // which one surfaces is a bun-version detail we must not pin.
-      expect(result.body).not.toBe("data: late\n\n")
-    },
-    GAP_MS + 15_000,
-  )
+  // A positive control (assert `idleTimeout: 1` DOES reap the same stream)
+  // was written here and removed. It is not our invariant to guard, and it is
+  // not portable: it passed on Windows under bun 1.4.0-canary and failed on
+  // ubuntu under the pinned bun 1.3.14, because exactly when bun's reaper
+  // fires at a low timeout is a platform- and version-specific internal
+  // detail. Tuning the gap until both platforms agreed would have bought a
+  // green tick by making the assertion vaguer, not truer.
+  //
+  // What we actually depend on is the assertion above — that OUR setting
+  // survives a long gap — and that one is robust in the right direction: it
+  // asserts the ABSENCE of a reap, so scheduler noise can only make it
+  // stricter, never flakier. Removal of the override is caught separately and
+  // deterministically by the `buildServeOptions` test in
+  // tests/lib-server-setup.test.ts.
 })
