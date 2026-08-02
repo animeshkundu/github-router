@@ -32,8 +32,8 @@ const {
   resolveMaxResultBytes,
   sweepAgedWorkerDiffs,
   WORKER_DIFF_NAME_RE,
-} = await import("../src/lib/worker-agent/relay-cap")
-const { PATHS } = await import("../src/lib/paths")
+} = await import("../../src/lib/worker-agent/relay-cap")
+const { PATHS } = await import("../../src/lib/paths")
 
 const ENV_KEY = "GH_ROUTER_WORKER_MAX_RESULT_BYTES"
 

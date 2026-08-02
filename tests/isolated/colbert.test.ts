@@ -31,8 +31,48 @@ mock.module("node:os", () => ({
 const appDir = path.join(TEST_HOME, ".local", "share", "github-router")
 const colbertDir = path.join(appDir, "colbert")
 
+/**
+ * Write ONLY inside the mocked test home, and abort loudly otherwise.
+ *
+ * This file installs a process-global `mock.module("node:os")` to point
+ * `homedir()` at TEST_HOME, and then writes real files to paths derived from
+ * it. Bun applies `mock.module` process-globally and `mock.restore()` cannot
+ * undo it, so when this file shared lane 1 with the other ~200 test files —
+ * ten of which also mock `node:os` — whichever mock installed last won for
+ * everyone. When another file's mock (or the real `os`) was live here, these
+ * writes landed on the USER'S REAL `~/.local/share/github-router/colbert/`.
+ *
+ * That is not hypothetical. It replaced the real `colgrep.exe` with a 6-byte
+ * file containing the word "binary", which failed the provisioning smoke test,
+ * removed the `.smoke-ok` marker, and silently disabled semantic search on the
+ * developer's machine — surfacing only as "semantic search unavailable on this
+ * host" with the artifacts apparently present.
+ *
+ * The file now lives in tests/isolated/ so it gets its own process. This guard
+ * is the backstop for the day that isolation is broken again: a test that
+ * cannot write where it thinks it is writing must FAIL, not quietly corrupt
+ * the machine it is running on.
+ */
+async function writeInsideTestHome(target: string, content: string): Promise<void> {
+  // path.relative, not startsWith: a prefix test accepts a SIBLING such as
+  // `<TEST_HOME>-other`, which is outside the sandbox despite sharing a prefix.
+  const rel = path.relative(path.resolve(TEST_HOME), path.resolve(target))
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(
+      `refusing to write outside the test home — the node:os mock is not active.
+`
+        + `  target:    ${target}
+`
+        + `  TEST_HOME: ${TEST_HOME}
+`
+        + `This means a process-global mock.module collision routed a test write at real user state.`,
+    )
+  }
+  await fs.writeFile(target, content)
+}
+
 afterEach(async () => {
-  await (await import("../src/lib/colbert/runner")).__waitForAllInitsForTests()
+  await (await import("../../src/lib/colbert/runner")).__waitForAllInitsForTests()
   await fs.rm(colbertDir, { recursive: true, force: true }).catch(() => {})
   delete process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH
 })
@@ -43,7 +83,7 @@ afterEach(async () => {
 
 describe("colbert manifest", () => {
   test("every platform asset carries a 64-hex sha256", async () => {
-    const m = await import("../src/lib/colbert/manifest")
+    const m = await import("../../src/lib/colbert/manifest")
     const hex = /^[0-9a-f]{64}$/
     for (const [pa, asset] of Object.entries(m.COLGREP_BIN)) {
       expect(hex.test(asset.sha256), `colgrep ${pa}`).toBe(true)
@@ -57,19 +97,19 @@ describe("colbert manifest", () => {
   })
 
   test("model revision is a 40-hex commit sha (version-pinned)", async () => {
-    const m = await import("../src/lib/colbert/manifest")
+    const m = await import("../../src/lib/colbert/manifest")
     expect(/^[0-9a-f]{40}$/.test(m.MODEL_REVISION)).toBe(true)
   })
 
   test("ships INT8 model only (no FP32 model.onnx)", async () => {
-    const m = await import("../src/lib/colbert/manifest")
+    const m = await import("../../src/lib/colbert/manifest")
     const names = m.MODEL_FILES.map((f) => f.name)
     expect(names).toContain("model_int8.onnx")
     expect(names).not.toContain("model.onnx")
   })
 
   test("colbertPlatformSupported true for win/darwin/linux x64, false for unknown", async () => {
-    const m = await import("../src/lib/colbert/manifest")
+    const m = await import("../../src/lib/colbert/manifest")
     expect(m.colbertPlatformSupported("win32", "x64")).toBe(true)
     expect(m.colbertPlatformSupported("darwin", "arm64")).toBe(true)
     expect(m.colbertPlatformSupported("linux", "x64")).toBe(true)
@@ -77,7 +117,7 @@ describe("colbert manifest", () => {
   })
 
   test("colgrep darwin/linux assets are tar.xz; windows is zip", async () => {
-    const m = await import("../src/lib/colbert/manifest")
+    const m = await import("../../src/lib/colbert/manifest")
     expect(m.COLGREP_BIN["darwin-arm64"].archive).toBe("tar.xz")
     expect(m.COLGREP_BIN["linux-x64"].archive).toBe("tar.xz")
     expect(m.COLGREP_BIN["win32-x64"].archive).toBe("zip")
@@ -90,7 +130,7 @@ describe("colbert manifest", () => {
 
 describe("dropColgrepSecrets (child-env credential strip)", () => {
   test("drops router credentials + GH_ROUTER_* but keeps benign env", async () => {
-    const { dropColgrepSecrets } = await import("../src/lib/colbert/provision")
+    const { dropColgrepSecrets } = await import("../../src/lib/colbert/provision")
     const env = dropColgrepSecrets({
       PATH: "/usr/bin",
       HOME: "/home/x",
@@ -122,7 +162,7 @@ describe("dropColgrepSecrets (child-env credential strip)", () => {
   })
 
   test("operates on the caller's copy, never the live process.env", async () => {
-    const { dropColgrepSecrets } = await import("../src/lib/colbert/provision")
+    const { dropColgrepSecrets } = await import("../../src/lib/colbert/provision")
     process.env.GH_ROUTER_TEST_SENTINEL = "present"
     try {
       dropColgrepSecrets({ ...process.env })
@@ -139,7 +179,7 @@ describe("dropColgrepSecrets (child-env credential strip)", () => {
 
 describe("semanticSearchEnabled (internal colgrep-availability predicate)", () => {
   test("false when artifacts are absent (CI / sandbox / pre-provision)", async () => {
-    const cap = await import("../src/lib/mcp-capabilities")
+    const cap = await import("../../src/lib/mcp-capabilities")
     // No artifacts on disk in the temp home → gate must be false so the
     // tool is invisible and the {code, web} surface is unchanged.
     expect(cap.semanticSearchEnabled()).toBe(false)
@@ -147,26 +187,26 @@ describe("semanticSearchEnabled (internal colgrep-availability predicate)", () =
 
   test("false when opted out even if (hypothetically) present", async () => {
     process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH = "1"
-    const cap = await import("../src/lib/mcp-capabilities")
+    const cap = await import("../../src/lib/mcp-capabilities")
     expect(cap.semanticSearchEnabled()).toBe(false)
   })
 
   test("true only when artifacts present AND smoke ok AND not opted out", async () => {
     // Synthesize the on-disk presence the gate checks.
-    const prov = await import("../src/lib/colbert/provision")
+    const prov = await import("../../src/lib/colbert/provision")
     const binDir = path.dirname(prov.colgrepBinaryPath())
     const modelDir = prov.colbertModelDir()
     const ortPath = prov.colbertOrtDylibPath()
     await fs.mkdir(binDir, { recursive: true })
     await fs.mkdir(modelDir, { recursive: true })
     await fs.mkdir(path.dirname(ortPath), { recursive: true })
-    await fs.writeFile(prov.colgrepBinaryPath(), "binary")
+    await writeInsideTestHome(prov.colgrepBinaryPath(), "binary")
     await fs.writeFile(path.join(modelDir, "model_int8.onnx"), "model")
     await fs.writeFile(ortPath, "dylib")
     // smoke marker — must match the version-keyed content colbertSmokeOk
     // validates (binary + ORT SHAs + model revision from the manifest).
     await fs.mkdir(colbertDir, { recursive: true })
-    const man = await import("../src/lib/colbert/manifest")
+    const man = await import("../../src/lib/colbert/manifest")
     const validMarker =
       `colbert-smoke-ok\n` +
       `binary=${man.colgrepBinAsset()!.sha256}\n` +
@@ -174,7 +214,7 @@ describe("semanticSearchEnabled (internal colgrep-availability predicate)", () =
       `model=${man.MODEL_REVISION}\n`
     await fs.writeFile(path.join(colbertDir, ".smoke-ok"), validMarker)
 
-    const cap = await import("../src/lib/mcp-capabilities")
+    const cap = await import("../../src/lib/mcp-capabilities")
     expect(prov.colbertArtifactsPresent()).toBe(true)
     expect(prov.colbertSmokeOk()).toBe(true)
     expect(cap.semanticSearchEnabled()).toBe(true)
@@ -185,14 +225,14 @@ describe("semanticSearchEnabled (internal colgrep-availability predicate)", () =
   })
 
   test("a stale (wrong-version) smoke marker is rejected (re-pin invalidates)", async () => {
-    const prov = await import("../src/lib/colbert/provision")
+    const prov = await import("../../src/lib/colbert/provision")
     const binDir = path.dirname(prov.colgrepBinaryPath())
     const modelDir = prov.colbertModelDir()
     const ortPath = prov.colbertOrtDylibPath()
     await fs.mkdir(binDir, { recursive: true })
     await fs.mkdir(modelDir, { recursive: true })
     await fs.mkdir(path.dirname(ortPath), { recursive: true })
-    await fs.writeFile(prov.colgrepBinaryPath(), "binary")
+    await writeInsideTestHome(prov.colgrepBinaryPath(), "binary")
     await fs.writeFile(path.join(modelDir, "model_int8.onnx"), "model")
     await fs.writeFile(ortPath, "dylib")
     await fs.mkdir(colbertDir, { recursive: true })
@@ -226,7 +266,7 @@ describe("index-store: PLAID shard integrity", () => {
   }
 
   test("coherent contiguous shards", async () => {
-    const { validateIndexIntegrity } = await import("../src/lib/colbert/index-store")
+    const { validateIndexIntegrity } = await import("../../src/lib/colbert/index-store")
     const dir = await shardDir([
       { embedding_offset: 0, num_embeddings: 4 },
       { embedding_offset: 4, num_embeddings: 3 },
@@ -239,13 +279,13 @@ describe("index-store: PLAID shard integrity", () => {
   })
 
   test("zero shards is not-built", async () => {
-    const { validateIndexIntegrity } = await import("../src/lib/colbert/index-store")
+    const { validateIndexIntegrity } = await import("../../src/lib/colbert/index-store")
     const dir = await shardDir([])
     expect(validateIndexIntegrity(dir)).toEqual({ verdict: "not-built" })
   })
 
   test("condemns overlaps and malformed JSON, but only flags gaps as suspect", async () => {
-    const { validateIndexIntegrity } = await import("../src/lib/colbert/index-store")
+    const { validateIndexIntegrity } = await import("../../src/lib/colbert/index-store")
     const gap = await shardDir([
       { embedding_offset: 0, num_embeddings: 2 },
       { embedding_offset: 3, num_embeddings: 1 },
@@ -271,7 +311,7 @@ describe("index-store: PLAID shard integrity", () => {
   })
 
   test("a suspect layout falls back without deleting the index", async () => {
-    const { freshnessVerdict } = await import("../src/lib/colbert/index-store")
+    const { freshnessVerdict } = await import("../../src/lib/colbert/index-store")
     expect(typeof freshnessVerdict).toBe("function")
     // Gaps map to `stale`, which rebuilds in the background and leaves the
     // bytes on disk — never `corrupt`, which quarantines and deletes.
@@ -279,7 +319,7 @@ describe("index-store: PLAID shard integrity", () => {
       { embedding_offset: 0, num_embeddings: 2 },
       { embedding_offset: 5, num_embeddings: 1 },
     ])
-    const { validateIndexIntegrity } = await import("../src/lib/colbert/index-store")
+    const { validateIndexIntegrity } = await import("../../src/lib/colbert/index-store")
     expect(validateIndexIntegrity(gap).verdict).not.toBe("corrupt")
   })
 })
@@ -290,7 +330,7 @@ describe("index-store: PLAID shard integrity", () => {
 
 describe("index-store: meta keying + freshness verdict", () => {
   test("metaHashForWorkspace is stable + path-keyed", async () => {
-    const store = await import("../src/lib/colbert/index-store")
+    const store = await import("../../src/lib/colbert/index-store")
     const a = store.metaHashForWorkspace("/tmp/repo-a")
     const a2 = store.metaHashForWorkspace("/tmp/repo-a")
     const b = store.metaHashForWorkspace("/tmp/repo-b")
@@ -300,13 +340,13 @@ describe("index-store: meta keying + freshness verdict", () => {
   })
 
   test("absent meta → verdict absent", async () => {
-    const store = await import("../src/lib/colbert/index-store")
+    const store = await import("../../src/lib/colbert/index-store")
     const v = await store.freshnessVerdict("/tmp/never-indexed-xyz")
     expect(v.verdict).toBe("absent")
   })
 
   test("status:building → verdict building (no spawn)", async () => {
-    const store = await import("../src/lib/colbert/index-store")
+    const store = await import("../../src/lib/colbert/index-store")
     const ws = path.join(TEST_HOME, "ws-building")
     await store.writeColbertMeta({
       workspace: ws,
@@ -320,7 +360,7 @@ describe("index-store: meta keying + freshness verdict", () => {
   })
 
   test("status:failed → verdict failed", async () => {
-    const store = await import("../src/lib/colbert/index-store")
+    const store = await import("../../src/lib/colbert/index-store")
     const ws = path.join(TEST_HOME, "ws-failed")
     await store.writeColbertMeta({
       workspace: ws,
@@ -333,10 +373,10 @@ describe("index-store: meta keying + freshness verdict", () => {
   })
 
   test("status:ready with corrupt physical shards → corrupt (never fake-ready)", async () => {
-    const store = await import("../src/lib/colbert/index-store")
-    const prov = await import("../src/lib/colbert/provision")
-    const manifest = await import("../src/lib/colbert/manifest")
-    const { PATHS } = await import("../src/lib/paths")
+    const store = await import("../../src/lib/colbert/index-store")
+    const prov = await import("../../src/lib/colbert/provision")
+    const manifest = await import("../../src/lib/colbert/manifest")
+    const { PATHS } = await import("../../src/lib/paths")
     const ws = path.join(TEST_HOME, "ws-ready-corrupt")
     await fs.mkdir(ws, { recursive: true })
     const projectDir = path.join(PATHS.COLBERT_INDICES_DIR, "corrupt-project")
@@ -367,7 +407,7 @@ describe("index-store: meta keying + freshness verdict", () => {
   })
 
   test("status:ready but no completed index on disk → building (never fake-ready)", async () => {
-    const store = await import("../src/lib/colbert/index-store")
+    const store = await import("../../src/lib/colbert/index-store")
     const ws = path.join(TEST_HOME, "ws-ready-no-index")
     await store.writeColbertMeta({
       workspace: ws,
@@ -382,7 +422,7 @@ describe("index-store: meta keying + freshness verdict", () => {
   })
 
   test("building with a DEAD/absent build PID + no index → verdict crashed", async () => {
-    const store = await import("../src/lib/colbert/index-store")
+    const store = await import("../../src/lib/colbert/index-store")
     store.__resetInitDebounceForTests() // ensure no in-flight init for ws
     const ws = path.join(TEST_HOME, "ws-crashed")
     await store.writeColbertMeta({
@@ -398,7 +438,7 @@ describe("index-store: meta keying + freshness verdict", () => {
   })
 
   test("building with a LIVE build PID → still building (never reclassified)", async () => {
-    const store = await import("../src/lib/colbert/index-store")
+    const store = await import("../../src/lib/colbert/index-store")
     const ws = path.join(TEST_HOME, "ws-building-live")
     await store.writeColbertMeta({
       workspace: ws,
@@ -412,7 +452,7 @@ describe("index-store: meta keying + freshness verdict", () => {
   })
 
   test("building, no PID, RECENT start → grace (building); OLD start → crashed", async () => {
-    const store = await import("../src/lib/colbert/index-store")
+    const store = await import("../../src/lib/colbert/index-store")
     store.__resetInitDebounceForTests()
     const mk = async (name: string, ageMs: number) => {
       const ws = path.join(TEST_HOME, name)
@@ -436,7 +476,7 @@ describe("index-store: meta keying + freshness verdict", () => {
   })
 
   test("init debounce: second claim returns false until released", async () => {
-    const store = await import("../src/lib/colbert/index-store")
+    const store = await import("../../src/lib/colbert/index-store")
     store.__resetInitDebounceForTests()
     const ws = "/tmp/debounce-ws"
     expect(store.tryClaimInit(ws)).toBe(true)
@@ -455,9 +495,9 @@ describe("index-store: meta keying + freshness verdict", () => {
 
 describe("index progress probe (shared init/search stall signal)", () => {
   test("indexDirSignature + makeIndexProgressProbe: progress vs frozen vs null grace", async () => {
-    const store = await import("../src/lib/colbert/index-store")
-    const { makeIndexProgressProbe } = await import("../src/lib/colbert/runner")
-    const { PATHS } = await import("../src/lib/paths")
+    const store = await import("../../src/lib/colbert/index-store")
+    const { makeIndexProgressProbe } = await import("../../src/lib/colbert/runner")
+    const { PATHS } = await import("../../src/lib/paths")
 
     // Unknown workspace → no project dir → null signature → one window of
     // grace (true), then no-progress (false).
@@ -496,7 +536,7 @@ describe("index progress probe (shared init/search stall signal)", () => {
 
 describe("runner result normalization", () => {
   test("relativize handles extended-length drive and UNC paths", async () => {
-    const { relativize } = await import("../src/lib/colbert/runner")
+    const { relativize } = await import("../../src/lib/colbert/runner")
     expect(
       relativize(
         "\\\\?\\C:\\repo\\src\\file.ts",
@@ -514,7 +554,7 @@ describe("runner result normalization", () => {
   })
 
   test("buildSnippet does not duplicate an indented signature", async () => {
-    const { buildSnippet } = await import("../src/lib/colbert/runner")
+    const { buildSnippet } = await import("../../src/lib/colbert/runner")
     expect(
       buildSnippet({
         signature: 'const auth = req.headers.authorization ?? ""',
@@ -526,9 +566,9 @@ describe("runner result normalization", () => {
 
 describe("runSemanticSearch: no-fallback contract", () => {
   test("absent workspace → unavailable isError (no other search run)", async () => {
-    const store = await import("../src/lib/colbert/index-store")
+    const store = await import("../../src/lib/colbert/index-store")
     store.__resetInitDebounceForTests()
-    const { runSemanticSearch } = await import("../src/lib/colbert/runner")
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
     const r = await runSemanticSearch({
       query: "auth",
       workspace: path.join(TEST_HOME, "absent-ws"),
@@ -540,7 +580,7 @@ describe("runSemanticSearch: no-fallback contract", () => {
   })
 
   test("building index → building notice, NOT isError, NO results", async () => {
-    const store = await import("../src/lib/colbert/index-store")
+    const store = await import("../../src/lib/colbert/index-store")
     const ws = path.join(TEST_HOME, "ws-runner-building")
     await store.writeColbertMeta({
       workspace: ws,
@@ -549,7 +589,7 @@ describe("runSemanticSearch: no-fallback contract", () => {
       status: "building",
       buildPid: process.pid,
     })
-    const { runSemanticSearch } = await import("../src/lib/colbert/runner")
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
     const r = await runSemanticSearch({ query: "auth", workspace: ws })
     expect(r.status).toBe("building")
     expect(r.isError).not.toBe(true)
@@ -558,17 +598,17 @@ describe("runSemanticSearch: no-fallback contract", () => {
   })
 
   test("corrupt index is quarantined and rebuilt into a working index", async () => {
-    const store = await import("../src/lib/colbert/index-store")
-    const prov = await import("../src/lib/colbert/provision")
-    const manifest = await import("../src/lib/colbert/manifest")
-    const { PATHS } = await import("../src/lib/paths")
-    const runner = await import("../src/lib/colbert/runner")
+    const store = await import("../../src/lib/colbert/index-store")
+    const prov = await import("../../src/lib/colbert/provision")
+    const manifest = await import("../../src/lib/colbert/manifest")
+    const { PATHS } = await import("../../src/lib/paths")
+    const runner = await import("../../src/lib/colbert/runner")
     store.__resetInitDebounceForTests()
     const ws = path.join(TEST_HOME, "ws-runner-corrupt")
     await fs.mkdir(ws, { recursive: true })
     await fs.mkdir(path.dirname(prov.colgrepBinaryPath()), { recursive: true })
     await fs.mkdir(path.dirname(prov.colbertOrtDylibPath()), { recursive: true })
-    await fs.writeFile(prov.colgrepBinaryPath(), "binary")
+    await writeInsideTestHome(prov.colgrepBinaryPath(), "binary")
     await fs.writeFile(prov.colbertOrtDylibPath(), "runtime")
     const projectDir = path.join(PATHS.COLBERT_INDICES_DIR, "runner-corrupt")
     await fs.mkdir(path.join(projectDir, "index"), { recursive: true })
@@ -630,8 +670,8 @@ describe("runSemanticSearch: no-fallback contract", () => {
   })
 
   test("corrupt rebuild cap is operator-actionable and restart allows an under-cap retry", async () => {
-    const store = await import("../src/lib/colbert/index-store")
-    const { startupKickAllowed } = await import("../src/lib/colbert/runner")
+    const store = await import("../../src/lib/colbert/index-store")
+    const { startupKickAllowed } = await import("../../src/lib/colbert/runner")
     const ws = path.join(TEST_HOME, "ws-corrupt-cap")
     const base = {
       workspace: ws,
@@ -644,14 +684,14 @@ describe("runSemanticSearch: no-fallback contract", () => {
     expect(await startupKickAllowed(ws)).toBe(true)
     await store.writeColbertMeta({ ...base, failedAttempts: 2 })
     expect(await startupKickAllowed(ws)).toBe(false)
-    const result = await (await import("../src/lib/colbert/runner")).runSemanticSearch({ query: "auth", workspace: ws })
+    const result = await (await import("../../src/lib/colbert/runner")).runSemanticSearch({ query: "auth", workspace: ws })
     expect(result.notice).toMatch(/keeps failing.*corrupt/i)
     expect(result.notice).not.toMatch(/re-index was started/i)
   })
 
   test("missing rebuild runtime is persisted and logged visibly", async () => {
-    const store = await import("../src/lib/colbert/index-store")
-    const runner = await import("../src/lib/colbert/runner")
+    const store = await import("../../src/lib/colbert/index-store")
+    const runner = await import("../../src/lib/colbert/runner")
     store.__resetInitDebounceForTests()
     const ws = path.join(TEST_HOME, "ws-init-launch-failure")
     await fs.mkdir(ws, { recursive: true })
@@ -676,7 +716,7 @@ describe("runSemanticSearch: no-fallback contract", () => {
   })
 
   test("failed index → failed isError, NO results", async () => {
-    const store = await import("../src/lib/colbert/index-store")
+    const store = await import("../../src/lib/colbert/index-store")
     const ws = path.join(TEST_HOME, "ws-runner-failed")
     await store.writeColbertMeta({
       workspace: ws,
@@ -684,7 +724,7 @@ describe("runSemanticSearch: no-fallback contract", () => {
       modelRev: "rev",
       status: "failed",
     })
-    const { runSemanticSearch } = await import("../src/lib/colbert/runner")
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
     const r = await runSemanticSearch({ query: "auth", workspace: ws })
     expect(r.status).toBe("failed")
     expect(r.isError).toBe(true)
@@ -692,7 +732,7 @@ describe("runSemanticSearch: no-fallback contract", () => {
   })
 
   test("failed (transient, under cap, backoff elapsed) → self-heal kicks + retry notice", async () => {
-    const store = await import("../src/lib/colbert/index-store")
+    const store = await import("../../src/lib/colbert/index-store")
     store.__resetInitDebounceForTests()
     const ws = path.join(TEST_HOME, "ws-failed-retry")
     await store.writeColbertMeta({
@@ -704,7 +744,7 @@ describe("runSemanticSearch: no-fallback contract", () => {
       failedAttempts: 1,
       lastIndexedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(), // 1h ago
     })
-    const { runSemanticSearch } = await import("../src/lib/colbert/runner")
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
     const r = await runSemanticSearch({ query: "auth", workspace: ws })
     expect(r.status).toBe("failed")
     expect(r.isError).toBe(true)
@@ -712,7 +752,7 @@ describe("runSemanticSearch: no-fallback contract", () => {
   })
 
   test("failed (capped: failedAttempts >= MAX) → operator-actionable, no retry promise", async () => {
-    const store = await import("../src/lib/colbert/index-store")
+    const store = await import("../../src/lib/colbert/index-store")
     store.__resetInitDebounceForTests()
     const ws = path.join(TEST_HOME, "ws-failed-capped")
     await store.writeColbertMeta({
@@ -724,7 +764,7 @@ describe("runSemanticSearch: no-fallback contract", () => {
       failedAttempts: 3,
       lastIndexedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
     })
-    const { runSemanticSearch } = await import("../src/lib/colbert/runner")
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
     const r = await runSemanticSearch({ query: "auth", workspace: ws })
     expect(r.status).toBe("failed")
     expect(r.isError).toBe(true)
@@ -732,7 +772,7 @@ describe("runSemanticSearch: no-fallback contract", () => {
   })
 
   test("crashed (building + dead PID + no index) → persists failed+crashed, retry notice", async () => {
-    const store = await import("../src/lib/colbert/index-store")
+    const store = await import("../../src/lib/colbert/index-store")
     store.__resetInitDebounceForTests()
     const ws = path.join(TEST_HOME, "ws-runner-crashed")
     await store.writeColbertMeta({
@@ -741,7 +781,7 @@ describe("runSemanticSearch: no-fallback contract", () => {
       modelRev: "rev",
       status: "building", // stranded, no buildPid → crashed verdict
     })
-    const { runSemanticSearch } = await import("../src/lib/colbert/runner")
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
     const r = await runSemanticSearch({ query: "auth", workspace: ws })
     expect(r.status).toBe("failed")
     expect(r.isError).toBe(true)
@@ -753,7 +793,7 @@ describe("runSemanticSearch: no-fallback contract", () => {
   })
 
   test("crashed streak survives the building write → cap still trips", async () => {
-    const store = await import("../src/lib/colbert/index-store")
+    const store = await import("../../src/lib/colbert/index-store")
     store.__resetInitDebounceForTests()
     const ws = path.join(TEST_HOME, "ws-crash-streak")
     // A re-kicked build that carried the streak into its `building` write,
@@ -766,7 +806,7 @@ describe("runSemanticSearch: no-fallback contract", () => {
       failedAttempts: 2,
       lastIndexedAt: new Date(Date.now() - 120_000).toISOString(), // past grace
     })
-    const { runSemanticSearch } = await import("../src/lib/colbert/runner")
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
     const r = await runSemanticSearch({ query: "auth", workspace: ws })
     // crashed verdict reads the carried streak (2) + 1 = 3 → at the cap →
     // operator-actionable, NOT another retry (this is the storm guard).
@@ -778,8 +818,8 @@ describe("runSemanticSearch: no-fallback contract", () => {
 
 describe("startupKickAllowed (restart anti-burn guard)", () => {
   test("absent / ready / under-cap-error → allowed; capped / stuck → blocked", async () => {
-    const store = await import("../src/lib/colbert/index-store")
-    const { startupKickAllowed } = await import("../src/lib/colbert/runner")
+    const store = await import("../../src/lib/colbert/index-store")
+    const { startupKickAllowed } = await import("../../src/lib/colbert/runner")
 
     const wsAbsent = path.join(TEST_HOME, "sk-absent")
     expect(await startupKickAllowed(wsAbsent)).toBe(true) // no meta
@@ -808,8 +848,8 @@ describe("startupKickAllowed (restart anti-burn guard)", () => {
 
 describe("provisionColbert: download + SHA verification", () => {
   test("unsupported platform → status unsupported, no download attempted", async () => {
-    const prov = await import("../src/lib/colbert/provision")
-    const m = await import("../src/lib/colbert/manifest")
+    const prov = await import("../../src/lib/colbert/provision")
+    const m = await import("../../src/lib/colbert/manifest")
     // Force an unsupported platform-arch by emptying the asset maps for
     // the running platform via a fetch that should never be called.
     let fetchCalled = false
@@ -832,9 +872,9 @@ describe("provisionColbert: download + SHA verification", () => {
   })
 
   test("SHA mismatch on the colgrep binary aborts provisioning (incomplete, no install)", async () => {
-    const m = await import("../src/lib/colbert/manifest")
+    const m = await import("../../src/lib/colbert/manifest")
     if (!m.colbertPlatformSupported()) return // can't exercise on unsupported host
-    const prov = await import("../src/lib/colbert/provision")
+    const prov = await import("../../src/lib/colbert/provision")
     // Mock fetch to return bytes whose SHA will NOT match the pinned
     // digest, for every artifact URL.
     const origFetch = globalThis.fetch
@@ -860,7 +900,7 @@ describe("provisionColbert: download + SHA verification", () => {
 
 describe("colbert lifecycle", () => {
   test("trackChild / untrackChild / sweepLiveChildren bookkeeping", async () => {
-    const lc = await import("../src/lib/colbert/lifecycle")
+    const lc = await import("../../src/lib/colbert/lifecycle")
     lc.__unregisterColbertExitHandlersForTests()
     // A fake child object that captures kill() calls.
     let killed = false
@@ -883,8 +923,8 @@ describe("colbert lifecycle", () => {
   })
 
   test("boot sweep reclassifies building+dead-PID → failed", async () => {
-    const { PATHS } = await import("../src/lib/paths")
-    const lc = await import("../src/lib/colbert/lifecycle")
+    const { PATHS } = await import("../../src/lib/paths")
+    const lc = await import("../../src/lib/colbert/lifecycle")
     const metaDir = PATHS.COLBERT_META_DIR
     await fs.mkdir(metaDir, { recursive: true })
     // A dead PID (very high, almost certainly not alive).
@@ -907,8 +947,8 @@ describe("colbert lifecycle", () => {
   })
 
   test("boot sweep leaves a live-PID building entry untouched (never kills reused PID)", async () => {
-    const { PATHS } = await import("../src/lib/paths")
-    const lc = await import("../src/lib/colbert/lifecycle")
+    const { PATHS } = await import("../../src/lib/paths")
+    const lc = await import("../../src/lib/colbert/lifecycle")
     const metaDir = PATHS.COLBERT_META_DIR
     await fs.mkdir(metaDir, { recursive: true })
     const metaFile = path.join(metaDir, "live1234.json")
@@ -951,7 +991,7 @@ describe("runManagedExeCapture lifecycle (real child)", () => {
 
   test("timeout tree-kills a long-running child + its subprocess; promise resolves timedOut", async () => {
     if (isWin) return // taskkill /T path needs a Windows host
-    const { runManagedExeCapture } = await import("../src/lib/exec")
+    const { runManagedExeCapture } = await import("../../src/lib/exec")
     const sh = "/bin/sh"
     // Parent shell spawns a child `sleep 60` and prints its PID, then
     // waits — so we can assert BOTH die when the group is killed.
@@ -987,7 +1027,7 @@ describe("runManagedExeCapture lifecycle (real child)", () => {
 
   test("maxStdoutBytes cap tree-kills + sets stdoutTruncated", async () => {
     if (isWin) return
-    const { runManagedExeCapture } = await import("../src/lib/exec")
+    const { runManagedExeCapture } = await import("../../src/lib/exec")
     // `yes` floods stdout forever; the byte cap must kill it.
     const res = await runManagedExeCapture(
       "/bin/sh",
@@ -1011,8 +1051,8 @@ describe("MCP tools/list surface (regression guard)", () => {
   const PROXY_HOST = "127.0.0.1:18790"
 
   async function listToolNames(): Promise<Array<string>> {
-    const { mcpRoutes } = await import("../src/routes/mcp/route")
-    const { __resetInFlightForTests } = await import("../src/routes/mcp/handler")
+    const { mcpRoutes } = await import("../../src/routes/mcp/route")
+    const { __resetInFlightForTests } = await import("../../src/routes/mcp/handler")
     __resetInFlightForTests()
     const req = new Request(`http://${PROXY_HOST}/`, {
       method: "POST",
@@ -1035,7 +1075,7 @@ describe("MCP tools/list surface (regression guard)", () => {
     // mode runs ColBERT and transparently falls back to lexical), so the
     // search surface is stable at {code, web} regardless of colgrep
     // availability — `code` is always listed (it always returns results).
-    const { state } = await import("../src/lib/state")
+    const { state } = await import("../../src/lib/state")
     state.peerMcpNonce = NONCE
     state.models = { object: "list", data: [] } as never
     try {
@@ -1050,3 +1090,72 @@ describe("MCP tools/list surface (regression guard)", () => {
   })
 })
 
+
+describe("provisioning self-repair (corrupt install, valid sidecar)", () => {
+  // The exact state that kept semantic search dead. Provisioning used to
+  // short-circuit on `existsSync(dest) && sidecar === archiveSha`, which says
+  // nothing about the bytes on disk. A lane-1 test with a leaked `node:os`
+  // mock overwrote the real colgrep.exe with a 6-byte stub; the sidecar was
+  // untouched and still valid, so every subsequent launch skipped the
+  // re-download, failed the smoke test, removed `.smoke-ok`, and reported
+  // "unavailable on this host" — permanently, until the binary was deleted by
+  // hand. Preventing the corruption is not enough; the installer has to
+  // notice and heal it.
+  const ARCHIVE_SHA = "a".repeat(64)
+  test("intact install with a full sidecar is reused (no needless re-download)", async () => {
+    const prov = await import("../../src/lib/colbert/provision")
+    const { createHash } = await import("node:crypto")
+    const dir = await fs.mkdtemp(path.join(TEST_HOME, "intact-"))
+    const dest = path.join(dir, "colgrep.exe")
+    await fs.writeFile(dest, "GOOD-BINARY-BYTES")
+    const installed = createHash("sha256").update("GOOD-BINARY-BYTES").digest("hex")
+    await fs.writeFile(`${dest}.sha256`, `${ARCHIVE_SHA}\n${installed}`)
+
+    expect(
+      await prov.installedArtifactIsIntact(`${dest}.sha256`, dest, ARCHIVE_SHA),
+    ).toBe(true)
+  })
+
+  test("CORRUPT install with a still-valid sidecar is rejected, forcing re-provision", async () => {
+    const prov = await import("../../src/lib/colbert/provision")
+    const { createHash } = await import("node:crypto")
+    const dir = await fs.mkdtemp(path.join(TEST_HOME, "corrupt-"))
+    const dest = path.join(dir, "colgrep.exe")
+    await fs.writeFile(dest, "GOOD-BINARY-BYTES")
+    const installed = createHash("sha256").update("GOOD-BINARY-BYTES").digest("hex")
+    await fs.writeFile(`${dest}.sha256`, `${ARCHIVE_SHA}\n${installed}`)
+
+    // Exactly what the leaked-mock test wrote over the real binary.
+    await fs.writeFile(dest, "binary")
+
+    expect(
+      await prov.installedArtifactIsIntact(`${dest}.sha256`, dest, ARCHIVE_SHA),
+    ).toBe(false)
+  })
+
+  test("legacy archive-only sidecar is treated as unverifiable, so installs self-heal", async () => {
+    const prov = await import("../../src/lib/colbert/provision")
+    const dir = await fs.mkdtemp(path.join(TEST_HOME, "legacy-"))
+    const dest = path.join(dir, "colgrep.exe")
+    await fs.writeFile(dest, "binary") // already-corrupted install in the wild
+    await fs.writeFile(`${dest}.sha256`, ARCHIVE_SHA) // pre-fix sidecar format
+
+    expect(
+      await prov.installedArtifactIsIntact(`${dest}.sha256`, dest, ARCHIVE_SHA),
+    ).toBe(false)
+  })
+
+  test("a re-pinned manifest still forces re-download", async () => {
+    const prov = await import("../../src/lib/colbert/provision")
+    const { createHash } = await import("node:crypto")
+    const dir = await fs.mkdtemp(path.join(TEST_HOME, "repin-"))
+    const dest = path.join(dir, "colgrep.exe")
+    await fs.writeFile(dest, "GOOD-BINARY-BYTES")
+    const installed = createHash("sha256").update("GOOD-BINARY-BYTES").digest("hex")
+    await fs.writeFile(`${dest}.sha256`, `${ARCHIVE_SHA}\n${installed}`)
+
+    expect(
+      await prov.installedArtifactIsIntact(`${dest}.sha256`, dest, "b".repeat(64)),
+    ).toBe(false)
+  })
+})

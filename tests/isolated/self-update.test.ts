@@ -26,14 +26,14 @@ afterEach(async () => {
 
 describe("runSelfUpdate gating", () => {
   test("selfUpdate:false → no-op (no cache written, no probe)", async () => {
-    const { runSelfUpdate } = await import("../src/lib/self-update")
+    const { runSelfUpdate } = await import("../../src/lib/self-update")
     await runSelfUpdate({ selfUpdate: false })
     await expect(fs.stat(cacheFile)).rejects.toThrow()
   })
 
   test("GH_ROUTER_NO_SELF_UPDATE=1 → no-op", async () => {
     process.env.GH_ROUTER_NO_SELF_UPDATE = "1"
-    const { runSelfUpdate } = await import("../src/lib/self-update")
+    const { runSelfUpdate } = await import("../../src/lib/self-update")
     await runSelfUpdate({ selfUpdate: true })
     await expect(fs.stat(cacheFile)).rejects.toThrow()
   })
@@ -45,7 +45,7 @@ describe("runSelfUpdate gating", () => {
       latestVersion: "9.9.9",
     })
     await fs.writeFile(cacheFile, sentinel)
-    const { runSelfUpdate } = await import("../src/lib/self-update")
+    const { runSelfUpdate } = await import("../../src/lib/self-update")
     await runSelfUpdate({ selfUpdate: true })
     // Cache must be untouched (it returned before re-probing/writing).
     expect(await fs.readFile(cacheFile, "utf8")).toBe(sentinel)
@@ -54,7 +54,7 @@ describe("runSelfUpdate gating", () => {
 
 describe("isNewer reuse (shared with claude-version-check)", () => {
   test("multi-patch skew (release loop) is newer", async () => {
-    const { isNewer } = await import("../src/lib/claude-version-check")
+    const { isNewer } = await import("../../src/lib/claude-version-check")
     expect(isNewer("0.3.68", "0.3.74")).toBe(true)
     expect(isNewer("1.0.0", "1.0.0")).toBe(false)
     expect(isNewer("2.0.0", "1.9.9")).toBe(false) // never downgrade

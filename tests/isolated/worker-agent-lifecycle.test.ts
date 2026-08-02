@@ -50,9 +50,9 @@ const {
   registerExitHandlers,
   sweepRegistry,
   sweepStaleWorktreesAtBoot,
-} = await import("../src/lib/worker-agent/lifecycle")
+} = await import("../../src/lib/worker-agent/lifecycle")
 
-const { PATHS } = await import("../src/lib/paths")
+const { PATHS } = await import("../../src/lib/paths")
 
 beforeAll(async () => {
   await fs.mkdir(PATHS.APP_DIR, { recursive: true })

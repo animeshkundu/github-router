@@ -269,7 +269,7 @@ async function provisionBinary(
   dest: string,
 ): Promise<void> {
   const sidecar = `${dest}.sha256`
-  if (existsSync(dest) && (await sidecarMatches(sidecar, asset.sha256))) {
+  if (await installedArtifactIsIntact(sidecar, dest, asset.sha256)) {
     return // idempotent
   }
   await mkdir(path.dirname(dest), { recursive: true })
@@ -278,7 +278,7 @@ async function provisionBinary(
   const member = await extractMember(asset, archive, "colgrep")
   if (!member) throw new Error("colgrep binary not found in archive")
   await atomicWrite(dest, member, /*executable*/ true)
-  await writeFile(sidecar, asset.sha256).catch(() => {})
+  await writeFile(sidecar, sidecarContent(asset.sha256, member)).catch(() => {})
 }
 
 async function provisionOrt(
@@ -286,7 +286,7 @@ async function provisionOrt(
   dest: string,
 ): Promise<void> {
   const sidecar = `${dest}.sha256`
-  if (existsSync(dest) && (await sidecarMatches(sidecar, asset.sha256))) {
+  if (await installedArtifactIsIntact(sidecar, dest, asset.sha256)) {
     return // idempotent
   }
   await mkdir(path.dirname(dest), { recursive: true })
@@ -295,7 +295,7 @@ async function provisionOrt(
   const member = await extractMember(asset, archive, asset.member ?? "")
   if (!member) throw new Error("ORT dylib not found in archive")
   await atomicWrite(dest, member, /*executable*/ true)
-  await writeFile(sidecar, asset.sha256).catch(() => {})
+  await writeFile(sidecar, sidecarContent(asset.sha256, member)).catch(() => {})
   // POSIX: create the unversioned soname symlink colgrep's ORT_LIB_NAME
   // expects (e.g. libonnxruntime.so → libonnxruntime.so.1.23.0). Some
   // loaders dlopen the versioned name directly (we point ORT_DYLIB_PATH
@@ -409,12 +409,55 @@ async function atomicWrite(
   }
 }
 
-async function sidecarMatches(sidecar: string, sha256: string): Promise<boolean> {
+/**
+ * Is the artifact already installed AND still the bytes we installed?
+ *
+ * Sidecar format is two whitespace-separated hashes: the ARCHIVE sha (which
+ * manifest revision this came from) and the INSTALLED-FILE sha (what we wrote
+ * to disk). Both are required.
+ *
+ * The archive hash alone is not enough, and trusting it caused a real outage.
+ * `existsSync(dest) && sidecarMatches(archiveSha)` treats any file at the path
+ * as good, so when a lane-1 test with a leaked `node:os` mock overwrote the
+ * real `colgrep.exe` with a 6-byte stub, provisioning kept short-circuiting on
+ * the still-valid sidecar and never re-downloaded. The smoke test then failed
+ * every launch, removed `.smoke-ok`, and semantic search reported "unavailable
+ * on this host" forever. Only manually deleting the binary could recover it.
+ *
+ * A legacy single-hash sidecar means the installed bytes were never recorded,
+ * so their provenance is unknown. That returns false deliberately: one extra
+ * download self-heals every install already corrupted by the above, which is
+ * the whole point of checking.
+ *
+ * This matches what the model files already do (they hash installed content
+ * before reuse); the binary and ORT were the two that skipped it.
+ */
+export async function installedArtifactIsIntact(
+  sidecar: string,
+  dest: string,
+  archiveSha: string,
+): Promise<boolean> {
   try {
-    return (await readFile(sidecar, "utf8")).trim() === sha256
+    if (!existsSync(dest)) return false
+    const [recordedArchive, recordedInstalled] = (await readFile(sidecar, "utf8"))
+      .trim()
+      .split(/\s+/)
+    // Wrong manifest revision: a re-pin must re-download.
+    if (recordedArchive !== archiveSha) return false
+    // Legacy sidecar: installed bytes unverifiable, so re-provision.
+    if (!recordedInstalled) return false
+    const actual = createHash("sha256")
+      .update(await readFile(dest))
+      .digest("hex")
+    return actual === recordedInstalled
   } catch {
     return false
   }
+}
+
+/** Sidecar content pairing the archive revision with the installed bytes. */
+function sidecarContent(archiveSha: string, installed: Buffer): string {
+  return `${archiveSha}\n${createHash("sha256").update(installed).digest("hex")}`
 }
 
 /**

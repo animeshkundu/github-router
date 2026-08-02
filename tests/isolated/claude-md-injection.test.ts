@@ -17,7 +17,7 @@ mock.module("node:os", () => ({
   homedir: () => tempDir,
 }))
 
-const { PATHS, isUnderClaudeConfigMirror } = await import("../src/lib/paths")
+const { PATHS, isUnderClaudeConfigMirror } = await import("../../src/lib/paths")
 const {
   appendPeerAwarenessToMirroredClaudeMd,
   prependArtifactPanelDirectiveToMirroredClaudeMd,
@@ -26,7 +26,7 @@ const {
   OPERATING_DEFAULTS_DIGEST,
   findMarkerBlocks,
   __testExports,
-} = await import("../src/lib/claude-md-injection")
+} = await import("../../src/lib/claude-md-injection")
 
 const {
   MARKER_OPEN,
@@ -733,3 +733,42 @@ test("style directive accepts a custom override (forward-compat for env-driven c
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
+
+test("digest and directive complement rather than duplicate each other", () => {
+  // Two injection surfaces with different economics, which should carry
+  // different KINDS of content:
+  //
+  //   DIGEST    -> --append-system-prompt. Resident in context EVERY turn.
+  //                Must hold only what has to fire without a lookup: the
+  //                decision rules.
+  //   DIRECTIVE -> prepended to the mirrored CLAUDE.md. Read when relevant.
+  //                Holds what you consult while deciding HOW to work: the
+  //                agent roster and the reasoning behind the rules.
+  //
+  // Before this split the digest was a condensation of the directive: the same
+  // content, shorter. That is duplication, and it charged the always-resident
+  // surface for orientation prose that only matters when a choice is actually
+  // being made.
+  const digest = OPERATING_DEFAULTS_DIGEST
+  const directive = OPERATING_DEFAULTS_DIRECTIVE
+
+  // The decision rules belong in the always-on surface.
+  expect(digest).toContain("WIDE")
+  expect(digest).toContain("Verify, do not assert")
+
+  // The roster is lookup material: named in CLAUDE.md, not paid for per turn.
+  for (const agent of ["implementer", "reviewer", "brainstorm", "scout", "scribe"]) {
+    expect(directive).toContain(agent)
+    expect(digest).not.toContain(agent)
+  }
+
+  // Orientation prose is directive-only. These are the phrases that were
+  // duplicated verbatim-in-spirit across both surfaces.
+  for (const posture of ["radical simplicity", "first principles", "pixel perfection"]) {
+    expect(directive.toLowerCase()).toContain(posture)
+    expect(digest.toLowerCase()).not.toContain(posture)
+  }
+
+  // The digest must say where the rest lives, or the split silently drops it.
+  expect(digest).toContain("CLAUDE.md")
+})

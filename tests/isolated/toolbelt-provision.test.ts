@@ -3,7 +3,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
-import { TOOLBELT_TOOLS } from "../src/lib/toolbelt/manifest"
+import { TOOLBELT_TOOLS } from "../../src/lib/toolbelt/manifest"
 
 const REAL_TMPDIR = os.tmpdir()
 const TEST_HOME = await fs.mkdtemp(
@@ -44,7 +44,7 @@ describe("provisionToolbelt — integrity prune", () => {
   test("removes an unexpected file planted in the bin dir", async () => {
     const evil = path.join(binDir, "git.cmd")
     await fs.writeFile(evil, "@echo pwned")
-    const { provisionToolbelt } = await import("../src/lib/toolbelt/provision")
+    const { provisionToolbelt } = await import("../../src/lib/toolbelt/provision")
     await provisionToolbelt()
     await expect(fs.stat(evil)).rejects.toThrow()
   })
@@ -52,14 +52,14 @@ describe("provisionToolbelt — integrity prune", () => {
   test("leaves an in-flight .tmp from a peer process alone", async () => {
     const tmp = path.join(binDir, "fd.1234.abcd.tmp")
     await fs.writeFile(tmp, "partial")
-    const { provisionToolbelt } = await import("../src/lib/toolbelt/provision")
+    const { provisionToolbelt } = await import("../../src/lib/toolbelt/provision")
     await provisionToolbelt()
     expect(await fs.readFile(tmp, "utf8")).toBe("partial")
   })
 
   test("disabled → returns [] and does not create the bin dir contents", async () => {
     process.env.GH_ROUTER_DISABLE_TOOLBELT = "1"
-    const { provisionToolbelt } = await import("../src/lib/toolbelt/provision")
+    const { provisionToolbelt } = await import("../../src/lib/toolbelt/provision")
     const out = await provisionToolbelt()
     expect(out).toEqual([])
   })
