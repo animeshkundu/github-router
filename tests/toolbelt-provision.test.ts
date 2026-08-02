@@ -3,6 +3,8 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
+import { TOOLBELT_TOOLS } from "../src/lib/toolbelt/manifest"
+
 const REAL_TMPDIR = os.tmpdir()
 const TEST_HOME = await fs.mkdtemp(
   path.join(REAL_TMPDIR, "gh-router-toolbelt-test-"),
@@ -17,7 +19,18 @@ beforeEach(async () => {
   await fs.mkdir(binDir, { recursive: true })
   // Skip every tool so provisioning performs no network downloads — we
   // only exercise the deterministic prune/return logic here.
-  process.env.GH_ROUTER_TOOLBELT_SKIP = "rg,fd,jq,sd,yq,ast-grep"
+  //
+  // DERIVED from the manifest, not hand-listed. The hand-written list said
+  // "rg,fd,jq,sd,yq,ast-grep" and had drifted behind it: `scc`, `difft` and
+  // `gron` were NOT skipped, so despite the comment this test really did hit
+  // GitHub releases for three binaries. That is why it timed out at 15308ms on
+  // a loaded windows runner — a network-bound test wearing a deterministic
+  // test's clothing. Deriving the list means adding a tool to the manifest
+  // cannot silently reintroduce the download.
+  process.env.GH_ROUTER_TOOLBELT_SKIP = [
+    "rg", // materialized from @vscode/ripgrep, matched by literal name
+    ...TOOLBELT_TOOLS.map((spec) => spec.command),
+  ].join(",")
 })
 afterEach(async () => {
   await fs.rm(path.join(TEST_HOME, ".local"), { recursive: true, force: true }).catch(
