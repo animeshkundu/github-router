@@ -84,8 +84,13 @@ mock.module("~/lib/server-setup", () => ({
 // (Bun deadlocks if a mock.module factory dynamically resolves another
 // module via require / import at factory-eval time). The optional
 // `family` arg mirrors the real `pickClaudeDefault(opusFamily?)` so
-// the `-m 4.7` / `-m 4.8` shorthand path is exercisable.
-let pickClaudeDefaultImpl: (family?: string) => string = () => "claude-opus-5"
+// the `-m 4.7` / `-m 4.8` shorthand path is exercisable. It MUST honor
+// that arg: the fallback chain re-derives each candidate through
+// pickClaudeDefault so 1M detection runs for the fallback's own family,
+// so a family-ignoring stub reports the default slug for every fallback
+// and silently inverts what these tests appear to prove.
+let pickClaudeDefaultImpl: (family?: string) => string = (family) =>
+  `claude-opus-${family ?? "5"}`
 let pickClaudeDefaultCalls: Array<string | undefined> = []
 
 mock.module("~/lib/port", () => ({
@@ -412,10 +417,11 @@ beforeEach(() => {
   getCodexVersionMock.mockReset()
   getCodexVersionMock.mockReturnValue({ ok: false })
 
-  // Default pickClaudeDefault to the bare slug; tests that exercise the
-  // 1M-detection path rebind this to return "claude-opus-5[1m]". Reset
-  // the call recorder so per-test assertions see a clean slate.
-  pickClaudeDefaultImpl = () => "claude-opus-5"
+  // Default pickClaudeDefault to the bare slug for whichever family is
+  // asked for; tests that exercise the 1M-detection path rebind this to
+  // return a "[1m]"-suffixed slug. Reset the call recorder so per-test
+  // assertions see a clean slate.
+  pickClaudeDefaultImpl = (family) => `claude-opus-${family ?? "5"}`
   pickClaudeDefaultCalls = []
 })
 
@@ -554,6 +560,35 @@ describe("claude command", () => {
         "http://127.0.0.1:12345",
         "claude-opus-4-8",
       )
+    } finally {
+      state.models = undefined
+    }
+  })
+
+  test("a 1M-capable fallback keeps its [1m] accounting (regression)", async () => {
+    // The fallback constant holds BARE slugs. Assigning one directly would
+    // drop [1m] on a fallback family that is 1M-capable, silently handing the
+    // user a 200K context budget on a model that supports 1M — a quiet
+    // downgrade, since the model still works. The chain must re-derive each
+    // candidate through pickClaudeDefault so detection runs for ITS family.
+    state.models = {
+      data: [
+        { id: "claude-opus-4.8" },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    pickClaudeDefaultImpl = (family) =>
+      family === "4-8" ? "claude-opus-4-8[1m]" : `claude-opus-${family ?? "5"}`
+    try {
+      const run = getRunFn()
+      await run({ args: {} })
+      expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:12345",
+        "claude-opus-4-8[1m]",
+      )
+      // The re-derivation must ask for the FALLBACK's family, not re-ask for
+      // the default one — that is the whole mechanism under test.
+      expect(pickClaudeDefaultCalls).toContain("4-8")
     } finally {
       state.models = undefined
     }

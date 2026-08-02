@@ -254,7 +254,7 @@ export const sharedServerArgs = {
     type: "boolean" as const,
     default: false,
     description:
-      "Enable the browser-control MCP tools (browser_open_tab, browser_screenshot, browser_click, etc.) on /mcp. Requires Chrome or Edge installed; the bundled extension must be loaded on first tool call (the proxy returns install_required with Web Store URLs + a Load Unpacked fallback path). Off by default; can also be enabled with GH_ROUTER_ENABLE_BROWSE=1.",
+      "Enable the browser-control MCP tools (browser_open_tab, browser_screenshot, browser_click, etc.) on /mcp. Requires Chrome or Edge installed; the bundled extension must be loaded on first tool call (the proxy returns install_required with a Load Unpacked path and the expected extension ID). Off by default; can also be enabled with GH_ROUTER_ENABLE_BROWSE=1.",
   },
   fleet: {
     type: "boolean" as const,

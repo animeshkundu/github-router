@@ -430,11 +430,21 @@ export const claude = defineCommand({
       if (!inCache(chosenSlug)) {
         for (const fallback of DEFAULT_CLAUDE_MODEL_FALLBACKS) {
           if (inCache(fallback)) {
-            consola.info(
-              `Default model "${chosenSlug}" not in your Copilot model list; falling back to "${fallback}".`,
+            // Re-derive through pickClaudeDefault so 1M detection runs against
+            // the FALLBACK's own family. The constant holds bare slugs, so
+            // assigning one directly silently drops [1m] accounting on a
+            // family that is 1M-capable — the user lands on a working model
+            // with a 200k context budget it did not need to accept.
+            // `inCache` already proved the family is present, so this cannot
+            // trigger pickClaudeDefault's family-absent warning.
+            const fallbackSlug = pickClaudeDefault(
+              fallback.replace(/^claude-opus-/, ""),
             )
-            chosenSlug = fallback
-            resolvedSlug = resolveModel(fallback)
+            consola.info(
+              `Default model "${chosenSlug}" not in your Copilot model list; falling back to "${fallbackSlug}".`,
+            )
+            chosenSlug = fallbackSlug
+            resolvedSlug = resolveModel(fallbackSlug)
             break
           }
         }
