@@ -179,3 +179,71 @@ export function resolveModelAndThinking(opts: ResolveOpts): ResolveResult {
 
   return mkOk(clamp as ThinkingLevel)
 }
+
+/** One catalog row as surfaced to the model. Derived only — no editorial prose. */
+export interface CatalogRow {
+  id: string
+  vendor: string
+  /** Context window in tokens. */
+  ctx: number
+  /** Max output tokens, omitted when the catalog doesn't advertise it. */
+  maxOut?: number
+  /** Reasoning efforts this worker layer can actually request. */
+  efforts: Array<string>
+  /** Vendor-authored cost tier, omitted when absent. */
+  cost?: string
+}
+
+/** Worker-usable models need a big enough window to be worth delegating to. */
+const CATALOG_MIN_CONTEXT = 200_000
+
+/**
+ * Derived view of the live catalog: every model a worker could actually be
+ * pointed at, with the metadata needed to choose between them.
+ *
+ * DERIVED ONLY, and that is the whole design. A one-liner like "strong
+ * reasoning, weak long-context recall" cannot be computed from catalog
+ * metadata — it is editorial, it goes stale silently as vendors ship, and the
+ * asymmetry is brutal: a MISSING characterization costs one suboptimal pick
+ * the model recovers from, while a WRONG one misroutes invisibly at the call
+ * site. So this ships facts and lets the caller judge.
+ *
+ * It exists because the hardcoded chains cannot discover anything. Models are
+ * live in the catalog that appear nowhere in `src/` — nobody evaluated them
+ * because nothing surfaced them. That is a DISCOVERABILITY gap, not a
+ * capability gap, which is also why the per-mode and per-agent defaults are
+ * deliberately left alone: they encode cross-lab DECORRELATION policy, not
+ * just quality. `reviewerModel()` must differ from the implementer's lab so a
+ * model never reviews its own output, and no capability table can express
+ * "must differ from whoever produced this". `vendor` is included precisely so
+ * a caller can reason about lab diversity without being handed a ranking.
+ *
+ * Efforts are clamped to WORKER_THINKING_LEVELS: nine live models advertise a
+ * `max` tier above `xhigh` that the worker layer filters out, so showing the
+ * raw array would advertise an effort no worker can request.
+ */
+export function buildCatalogView(): Array<CatalogRow> {
+  const rows: Array<CatalogRow> = []
+  for (const model of state.models?.data ?? []) {
+    const supports = model.capabilities?.supports
+    const limits = model.capabilities?.limits
+    if (supports?.tool_calls !== true) continue
+    const ctx = limits?.max_context_window_tokens ?? 0
+    if (ctx < CATALOG_MIN_CONTEXT) continue
+    const efforts = (supports.reasoning_effort ?? []).filter((effort) =>
+      (WORKER_THINKING_LEVELS as ReadonlyArray<string>).includes(effort),
+    )
+    if (efforts.length === 0) continue
+    rows.push({
+      id: model.id,
+      vendor: model.vendor,
+      ctx,
+      ...(limits?.max_output_tokens ? { maxOut: limits.max_output_tokens } : {}),
+      efforts,
+      ...(model.model_picker_price_category
+        ? { cost: model.model_picker_price_category }
+        : {}),
+    })
+  }
+  return rows.sort((a, b) => a.id.localeCompare(b.id))
+}

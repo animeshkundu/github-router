@@ -126,3 +126,37 @@ describe("worker session defaults", () => {
     }
   })
 })
+
+test("catalog rides along on inspect, not on mutation", async () => {
+  const original = state.models
+  state.models = {
+    object: "list",
+    data: [
+      model(DEFAULT_MODEL, ["low", "high"]),
+      model("valid", ["low"]),
+    ] as NonNullable<typeof state.models>["data"],
+  }
+  try {
+    // The catalog is ~2.4KB against the live catalog. It belongs on the call the
+    // tool's own description invites — "Omit arguments to inspect current
+    // values" — and NOT on a set/clear, where the caller already knows what it
+    // asked for. Paying it on every mutation is exactly the always-on context
+    // cost the minimal-surface rule exists to prevent.
+    const inspect = JSON.parse(
+    (await tool.handler({})).content[0]!.text as string,
+    ) as Record<string, unknown>
+    expect(inspect).toHaveProperty("catalog")
+    // Still carries the per-mode defaults it always did — the catalog is
+    // additive, so an existing caller reading `explore` is unaffected.
+    expect(inspect).toHaveProperty("explore")
+
+    const mutated = JSON.parse(
+    (await tool.handler({ mode: "review", model: "valid" })).content[0]!
+      .text as string,
+    ) as Record<string, unknown>
+    expect(mutated).not.toHaveProperty("catalog")
+    expect(mutated).toHaveProperty("review")
+  } finally {
+    state.models = original
+  }
+})
