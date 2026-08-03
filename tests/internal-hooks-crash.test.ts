@@ -32,6 +32,29 @@ import path from "node:path"
 
 const DIST_PATH = path.resolve(import.meta.dirname, "../dist/main.js")
 
+/**
+ * Per-test budget for every spawn-based case in this file.
+ *
+ * bun's DEFAULT per-test timeout is 5000ms, and one `node dist/main.js` spawn
+ * measures ~3.2-5s on Windows because node has to load the 6.3 MB bundle. That
+ * leaves essentially no margin, so these failed intermittently: 2 of 3
+ * consecutive local runs, and the windows + bun-1.3.14 CI lane while the other
+ * three lanes passed.
+ *
+ * The symptom actively misleads. bun kills the child when the budget expires,
+ * so `spawnSync` returns `status: null` and the assertion reports "expected 0,
+ * received null" as if the process had exited badly, when it was never allowed
+ * to finish. The real message is one line further down: "this test timed out
+ * after 5000ms".
+ *
+ * These assert TEARDOWN CORRECTNESS (no libuv assertion, exit 0), not startup
+ * latency. A budget tight enough to fire under load turns a correctness test
+ * into a performance test that fails for reasons unrelated to the bug it
+ * guards, so this is deliberately ~12x the measured baseline: a failure now
+ * means the process genuinely did not exit.
+ */
+const SPAWN_TEST_TIMEOUT_MS = 60_000
+
 let bundleExists = false
 let nodeOk = false
 
@@ -85,7 +108,9 @@ describe("internal hook subcommands: Windows libuv teardown regression", () => {
         // Strip the hook reach-back env so these fast-return paths never attempt
         // a proxy call — this isolates the process-teardown behavior under test.
         env: { ...process.env, GH_ROUTER_HOOK_MCP_URL: "", GH_ROUTER_HOOK_NONCE: "" },
-        timeout: 20_000,
+        // Kills the child before SPAWN_TEST_TIMEOUT_MS so a genuine hang is
+        // reported as a spawn timeout rather than as bun killing the test.
+        timeout: 30_000,
       })
       const stderr = res.stderr ?? ""
       // The crash signature (exit 127 + this assertion) must be gone.
@@ -93,7 +118,7 @@ describe("internal hook subcommands: Windows libuv teardown regression", () => {
       // A fast-return hook path must exit 0 (UserPromptSubmit/Stop never block
       // on these inputs; a non-zero here is the regression).
       expect(res.status).toBe(0)
-    })
+    }, SPAWN_TEST_TIMEOUT_MS)
   }
 })
 
@@ -133,6 +158,6 @@ describe("citty usage paths: Windows libuv teardown regression", () => {
       const combined = `${r.stdout ?? ""}${r.stderr ?? ""}`
       expect(combined).not.toContain("UV_HANDLE_CLOSING")
       expect(r.status).toBe(0)
-    })
+    }, SPAWN_TEST_TIMEOUT_MS)
   }
 })

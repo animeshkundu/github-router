@@ -14,9 +14,9 @@ import {
   resolveCodexCliBackend,
   resolveGroupKeysFromMirror,
   writePeerMcpRuntimeFiles,
-} from "../src/lib/codex-mcp-config"
-import { PEER_AGENT_MD_FILENAME } from "../src/lib/paths"
-import { MCP_GROUPS } from "../src/lib/peer-mcp-personas"
+} from "../../src/lib/codex-mcp-config"
+import { PEER_AGENT_MD_FILENAME } from "../../src/lib/paths"
+import { MCP_GROUPS } from "../../src/lib/peer-mcp-personas"
 
 const NONCE = "0".repeat(64)
 const URL = "http://127.0.0.1:18787"
@@ -826,7 +826,7 @@ describe("writePeerMcpRuntimeFiles", () => {
     // pins the contract.
     await withTempRuntimeDir(async (_runtimeDir, _codexHome, agentsDir) => {
       const { writePeerAgentMdFiles } = await import(
-        "../src/lib/codex-mcp-config"
+        "../../src/lib/codex-mcp-config"
       )
       // First valid agent succeeds and writes; second has an invalid
       // name (contains "/" — would be a path-traversal vector). The
@@ -856,7 +856,7 @@ describe("writePeerMcpRuntimeFiles", () => {
     // most parsers tolerate it but we shouldn't depend on tolerance.
     // Same for \t and other C0 controls.
     const { writePeerAgentMdFiles } = await import(
-      "../src/lib/codex-mcp-config"
+      "../../src/lib/codex-mcp-config"
     )
     await withTempRuntimeDir(async (_runtimeDir, _codexHome, agentsDir) => {
       const result = await writePeerAgentMdFiles(
@@ -901,7 +901,7 @@ describe("writePeerMcpRuntimeFiles", () => {
     // the directory. So A's cleanup is physically incapable of touching
     // B's files. This test pins that contract.
     const { writePeerAgentMdFiles } = await import(
-      "../src/lib/codex-mcp-config"
+      "../../src/lib/codex-mcp-config"
     )
     await withTempRuntimeDir(async (_runtimeDir, _codexHome, agentsDir) => {
       // Two distinct fileSuffix values simulate two concurrent proxies

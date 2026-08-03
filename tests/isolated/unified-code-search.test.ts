@@ -263,6 +263,50 @@ describe("semantic / default mode", () => {
     },
   )
 
+  // "retry shortly" was too vague and cost a real recovery. An index build
+  // takes MINUTES on a large repo (observed: ~5 on this one), so a caller who
+  // retried seconds later saw a second fallback and concluded the tool was
+  // dead rather than mid-repair. The notice has to name the timescale, or the
+  // self-healing it describes is invisible.
+  test.each(["building", "stale", "unavailable", "failed"] as const)(
+    "status '%s' names the timescale so a retry is not attempted too early",
+    async (status) => {
+      semanticEnabled = true
+      semanticResult = {
+        status,
+        ...(status === "failed" ? { isError: true } : {}),
+        notice: status,
+      }
+      const r = await runUnifiedCodeSearch({
+        query: "refreshAuthToken",
+        workspace: root,
+      })
+      expect(r.notice).toMatch(/minute/i)
+      // "shortly" invites an immediate retry, which is the failure mode.
+      expect(r.notice).not.toMatch(/shortly/i)
+    },
+  )
+
+  test("a failed index says THIS query started the rebuild", async () => {
+    // The recovery path most likely to be misread as a dead tool: after a
+    // failed build, the first query is consumed scheduling the re-kick and
+    // therefore cannot return semantic results itself. Unless the notice says
+    // so, the fallback it returns reads as "no progress" rather than "repair
+    // has begun" — which is exactly how this went unnoticed for a whole
+    // session.
+    // No runner notice: this is the path where OUR wording is what the caller
+    // reads. When the runner supplies its own notice it already says a
+    // re-index was started, and `semanticFallbackNotice` preserves that text
+    // rather than replacing it.
+    semanticEnabled = true
+    semanticResult = { status: "failed", isError: true }
+    const r = await runUnifiedCodeSearch({
+      query: "refreshAuthToken",
+      workspace: root,
+    })
+    expect(r.notice).toMatch(/started a background rebuild/i)
+  })
+
   test("corrupt quarantine wording survives with actionable guidance", async () => {
     semanticEnabled = true
     semanticResult = {

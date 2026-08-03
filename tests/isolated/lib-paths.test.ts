@@ -22,10 +22,10 @@ mock.module("node:os", () => ({
 }))
 
 const { ensurePaths, PATHS, sweepStaleRuntimeFiles, sweepStalePeerAgentMdFiles, sweepStaleClaudeConfigMirrors, removeOwnClaudeConfigMirror, writeRuntimeFileSecure, ensureClaudeConfigMirror, __testing } =
-  await import("../src/lib/paths")
-const { injectPeerMcpIntoMirror } = await import("../src/lib/codex-mcp-config")
-const { ALL_DISPATCHER_AGENT_NAMES } = await import("../src/lib/worker-dispatch")
-const { ALL_NATIVE_AGENT_NAMES } = await import("../src/lib/codex-mcp-config")
+  await import("../../src/lib/paths")
+const { injectPeerMcpIntoMirror } = await import("../../src/lib/codex-mcp-config")
+const { ALL_DISPATCHER_AGENT_NAMES } = await import("../../src/lib/worker-dispatch")
+const { ALL_NATIVE_AGENT_NAMES } = await import("../../src/lib/codex-mcp-config")
 
 // Round-4 #4: verify that monkey-patching `fs.<name>` / `consola.<name>`
 // is actually intercepted by the library-side imports of those

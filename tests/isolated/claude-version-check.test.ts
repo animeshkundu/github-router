@@ -38,7 +38,7 @@ afterEach(async () => {
 describe("claude-version-check (Phase H)", () => {
   test("checkClaudeVersion with noCheck:true returns skipped/disabled without probing", async () => {
     const { checkClaudeVersion } = await import(
-      "../src/lib/claude-version-check"
+      "../../src/lib/claude-version-check"
     )
     const result = await checkClaudeVersion({ noCheck: true })
     expect(result.skipped).toBe(true)
@@ -55,7 +55,7 @@ describe("claude-version-check (Phase H)", () => {
     // skipped:no-npm — both still write the throttle cache so we don't
     // hammer the registry.
     const { checkClaudeVersion } = await import(
-      "../src/lib/claude-version-check"
+      "../../src/lib/claude-version-check"
     )
     const result = await checkClaudeVersion()
     // Either path writes a cache file (so subsequent calls throttle).
@@ -86,7 +86,7 @@ describe("claude-version-check (Phase H)", () => {
       }),
     )
     const { checkClaudeVersion } = await import(
-      "../src/lib/claude-version-check"
+      "../../src/lib/claude-version-check"
     )
     const result = await checkClaudeVersion()
     expect(result.skipped).toBe(true)
@@ -110,7 +110,7 @@ describe("claude-version-check (Phase H)", () => {
       }),
     )
     const { checkClaudeVersion } = await import(
-      "../src/lib/claude-version-check"
+      "../../src/lib/claude-version-check"
     )
     const result = await checkClaudeVersion()
     // Either fresh check happened (real version probed) OR claude
@@ -121,7 +121,7 @@ describe("claude-version-check (Phase H)", () => {
   test("throttle: corrupt cache file triggers a fresh check (graceful degradation)", async () => {
     await fs.writeFile(cacheFile, "{not-json")
     const { checkClaudeVersion } = await import(
-      "../src/lib/claude-version-check"
+      "../../src/lib/claude-version-check"
     )
     const result = await checkClaudeVersion()
     expect(result.skipReason).not.toBe("throttled")
@@ -130,7 +130,7 @@ describe("claude-version-check (Phase H)", () => {
   test("throttle: missing cache file triggers a fresh check", async () => {
     // No cache exists (cleared in beforeEach).
     const { checkClaudeVersion } = await import(
-      "../src/lib/claude-version-check"
+      "../../src/lib/claude-version-check"
     )
     const result = await checkClaudeVersion()
     expect(result.skipReason).not.toBe("throttled")
@@ -147,7 +147,7 @@ describe("claude-version-check (Phase H)", () => {
       }),
     )
     const { checkClaudeVersion } = await import(
-      "../src/lib/claude-version-check"
+      "../../src/lib/claude-version-check"
     )
     const result = await checkClaudeVersion({ force: true })
     expect(result.skipReason).not.toBe("throttled")
@@ -163,7 +163,7 @@ describe("claude-version-check (Phase H)", () => {
       }),
     )
     const { checkClaudeVersion } = await import(
-      "../src/lib/claude-version-check"
+      "../../src/lib/claude-version-check"
     )
     const result = await checkClaudeVersion()
     expect(result.needsUpdate).toBe(true)
@@ -179,7 +179,7 @@ describe("claude-version-check (Phase H)", () => {
       }),
     )
     const { checkClaudeVersion } = await import(
-      "../src/lib/claude-version-check"
+      "../../src/lib/claude-version-check"
     )
     const result = await checkClaudeVersion()
     expect(result.needsUpdate).toBe(false)
@@ -197,7 +197,7 @@ describe("claude-version-check (Phase H)", () => {
       }),
     )
     const { checkClaudeVersion } = await import(
-      "../src/lib/claude-version-check"
+      "../../src/lib/claude-version-check"
     )
     const result = await checkClaudeVersion()
     expect(result.needsUpdate).toBe(false)
@@ -213,7 +213,7 @@ describe("claude-version-check (Phase H)", () => {
       }),
     )
     const { checkClaudeVersion } = await import(
-      "../src/lib/claude-version-check"
+      "../../src/lib/claude-version-check"
     )
     const result = await checkClaudeVersion()
     expect(result.needsUpdate).toBe(true)
@@ -222,7 +222,7 @@ describe("claude-version-check (Phase H)", () => {
   test("cache file is written with mode 0o600 (no secrets but still private)", async () => {
     // Force a fresh check by clearing throttle (no cache).
     const { checkClaudeVersion } = await import(
-      "../src/lib/claude-version-check"
+      "../../src/lib/claude-version-check"
     )
     await checkClaudeVersion()
     // If the check actually ran (claude+npm available), the cache file
