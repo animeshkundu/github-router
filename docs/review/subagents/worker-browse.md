@@ -8,7 +8,7 @@
 |---|---|
 | Subagent name | `worker-browse` (`worker-dispatch.ts:58-60`; `BROWSE_WORKER_MODE`, `worker-dispatch.ts:45`) |
 | Subagent's OWN model | inherited (Claude); the WORKER runs `BROWSE_DEFAULT_MODEL` = `gpt-5.4-mini` (repo CLAUDE.md) |
-| Gate | `browseAvailable` (separate from the core five) — added only when `browseAgentEnabled()` (`--browse` + browser detected + browse default model in catalog). `activeDispatchModes({browse})` (`worker-dispatch.ts:73-75`), consumed by `buildPeerAgentDefinitions` (`codex-mcp-config.ts:326-335`); pinned by `tests/codex-mcp-config.test.ts:333-345` |
+| Gate | `browseAvailable` (separate from the core five) — added only when `browseAgentEnabled()` (`--browse` + browser detected + browse default model in catalog). `activeDispatchModes({browse})` (`worker-dispatch.ts:73-75`), consumed by `buildPeerAgentDefinitions` (`codex-mcp-config.ts:326-335`); pinned by `tests/isolated/codex-mcp-config.test.ts:578-590` |
 | Description | `dispatcherDescription("browse")` (`worker-dispatch.ts:215-216` + suffix) |
 | System prompt | `dispatcherPrompt("browse", workersKey)` (`worker-dispatch.ts:226-254`) |
 | Tools | `["mcp__<workersKey>__*"]` (`worker-dispatch.ts:263-265`) |

@@ -12,7 +12,7 @@ import path from "node:path"
 // `node:os` AND writes files to a homedir-derived path is therefore writing to
 // wherever some other file's mock happens to point — including the real home.
 //
-// This already happened. `tests/colbert.test.ts` wrote a 6-byte stub over the
+// This already happened. `tests/isolated/colbert.test.ts` wrote a 6-byte stub over the
 // user's real `~/.local/share/github-router/colbert/bin/colgrep.exe`. That
 // failed the provisioning smoke test, which removed the `.smoke-ok` marker,
 // which flipped the capability gate off — so semantic search reported

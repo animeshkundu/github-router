@@ -2,7 +2,7 @@
  * colgrep encoding-parallelism cap.
  *
  * Lives in the ISOLATED lane because it needs the REAL `node:os`.
- * tests/colbert.test.ts calls `mock.module("node:os", ...)` with a
+ * tests/isolated/colbert.test.ts calls `mock.module("node:os", ...)` with a
  * homedir/tmpdir-only stub; bun applies that process-globally and
  * permanently, so in the shared lane-1 process `os.cpus` is already
  * undefined by the time this file loads — and the thread count this logic

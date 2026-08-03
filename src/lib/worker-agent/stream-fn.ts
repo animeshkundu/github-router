@@ -57,7 +57,7 @@ import {
 import type {
   ResponsesPayload,
 } from "~/services/copilot/create-responses"
-import { endpointForModelId } from "~/services/copilot/endpoint"
+import { resolveEndpointForModelId } from "~/services/copilot/endpoint"
 import {
   assembleResponsesPayload,
   type NeutralContentPart,
@@ -274,9 +274,25 @@ async function runStreamLoop(
   // Endpoint split: the gpt-5.x family (gpt-5.4-mini, gpt-5.5, *-codex) is
   // `/responses`-only and 400s on `/chat/completions`. Route those through
   // the parallel Responses parser; everything else keeps the chat path
-  // below byte-for-byte. `endpointForModelId` consults the live catalog's
-  // `supported_endpoints` (shared with the rest of the proxy).
-  if (endpointForModelId(resolved.modelId) === "responses") {
+  // below byte-for-byte. `resolveEndpointForModelId` consults the live
+  // catalog's `supported_endpoints` (shared with the rest of the proxy).
+  //
+  // This worker has exactly TWO clients — it cannot drive Copilot's native
+  // `/v1/messages`. So a catalog model advertising NEITHER of our two is
+  // refused HERE, locally, with a diagnostic naming what it actually serves.
+  // Coercing it to the chat client (the old `?? "chat"` default) bought an
+  // opaque upstream `unsupported_api_for_model` 400 that hid the real cause.
+  // Concrete exposure: `PLAN_DEFAULT_MODEL` is `claude-opus-5`, and Claude
+  // entries advertising `["/v1/messages"]`-only is a shape this repo's own
+  // translate fixtures already model. An id ABSENT from the catalog is a
+  // different answer and keeps the historical chat default — the catalog may
+  // not be populated yet, and chat is the right shape for an unknown id.
+  const resolution = resolveEndpointForModelId(resolved.modelId)
+  if (resolution.kind === "unreachable") {
+    pushUndrivableModelDiagnostic(stream, resolved, resolution.endpoints)
+    return
+  }
+  if (resolution.kind === "endpoint" && resolution.endpoint === "responses") {
     await runResponsesStreamLoop(stream, context, opts, options)
     return
   }
@@ -1426,6 +1442,37 @@ function pushBackstopDiagnostic(
     content: [{ type: "text", text }],
     stopReason: "error",
     errorMessage: "context budget exceeded (request-boundary backstop)",
+  }
+  stream.push({ type: "error", reason: "error", error: final })
+}
+
+/**
+ * Terminal diagnostic for a model the worker cannot drive AT ALL: it is in the
+ * live catalog, but its `supported_endpoints` name neither `/chat/completions`
+ * nor `/responses` — our only two clients. Fails here, locally, naming the
+ * model and what it actually serves, instead of coercing it onto the chat
+ * client and surfacing an opaque upstream `unsupported_api_for_model` 400.
+ * Carried as assistant TEXT so the engine surfaces it as an `isError` result
+ * (same shape as the request-boundary backstop).
+ */
+function pushUndrivableModelDiagnostic(
+  stream: AssistantMessageEventStream,
+  resolved: ResolvedModel,
+  endpoints: ReadonlyArray<string>,
+): void {
+  const served = endpoints.length > 0 ? endpoints.join(", ") : "(none advertised)"
+  const text =
+    `Cannot run: ${resolved.modelId} is in the Copilot catalog but serves `
+    + `neither /chat/completions nor /responses — the only two APIs a worker `
+    + `can drive. Its catalog supported_endpoints are: ${served}. `
+    + "Pick a different model for this call, or change the mode default via "
+    + "worker_defaults (a zero-arg worker_defaults call lists the models a "
+    + "worker can be pointed at)."
+  const final: AssistantMessage = {
+    ...makeBaseMessage(resolved),
+    content: [{ type: "text", text }],
+    stopReason: "error",
+    errorMessage: `model ${resolved.modelId} serves no worker-drivable endpoint (${served})`,
   }
   stream.push({ type: "error", reason: "error", error: final })
 }

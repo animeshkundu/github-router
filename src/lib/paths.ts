@@ -305,7 +305,7 @@ export async function ensurePaths(): Promise<void> {
  *     those writes/deletes into the user's real `~/.claude/agents/` and
  *     destroy the user's own subagent files. **Hard regression test**:
  *     `policyFor("agents") === "MIRRORED"` is asserted in
- *     `tests/lib-paths.test.ts` to prevent accidental reclassification.
+ *     `tests/isolated/lib-paths.test.ts` to prevent accidental reclassification.
  *
  * Sub-paths within MIRRORED dirs cascade recursively (existing behavior).
  */

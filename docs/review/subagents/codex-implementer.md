@@ -15,7 +15,7 @@
 | System prompt | `buildAgentPrompt` → `IMPLEMENTER_BASE` (`peer-mcp-personas.ts:296-320`) |
 | Write-capable | **yes** (`writeCapable: true`, `peer-mcp-personas.ts:433`) — the only write-capable persona |
 
-Verified present only under `--codex-cli`: `tests/codex-mcp-config.test.ts:222-238` (CLI backend → 6 personas incl. codex-implementer) vs `164-197` (HTTP backend → 5 personas, no implementer).
+Verified present only under `--codex-cli`: `tests/isolated/codex-mcp-config.test.ts:290-326` (CLI backend → 6 personas incl. codex-implementer) vs `224-261` (HTTP backend → 5 personas, no implementer).
 
 ## 2. Description (verbatim)
 
@@ -30,7 +30,7 @@ Verified present only under `--codex-cli`: `tests/codex-mcp-config.test.ts:222-2
 ## 4. Routing-trigger assessment
 
 - **States trigger — thin.** "Targeted implementation of a self-contained coding task" is a scoped trigger, but at 3 sentences this description is by far the shortest of all injected subagents. It names WHAT (targeted implementation, workspace-write) but gives no anti-trigger (when NOT to use), no differentiation from the native `implementer` or `worker-implement`, and no scope boundary beyond "self-contained".
-- **Specific not vague — weak.** "self-contained coding task" is the only scoping. Compared to the critics (which name artifact types + anti-scope) this is under-specified. It passes the >20-char test (`tests/codex-mcp-config.test.ts:976` applies to persona .md files) but is the least differentiated write surface.
+- **Specific not vague — weak.** "self-contained coding task" is the only scoping. Compared to the critics (which name artifact types + anti-scope) this is under-specified. It passes the >20-char test (`tests/isolated/codex-mcp-config.test.ts:1287` applies to persona .md files) but is the least differentiated write surface.
 - **Accurately previews the body — partially.** The body (`IMPLEMENTER_BASE`) is much richer than the description: it carries the "not a planner / ask before editing" gate and the done-contract, none of which the description hints at. A reader routing purely off the description would not know the implementer refuses vague briefs.
 - **Overtrigger risk — LOW but for a different reason.** It is gated behind `--codex-cli`, so most sessions never see it. Within a `--codex-cli` session it competes directly with the native `implementer` (also injected when its model is present) and `worker-implement` — see README S3 (three-way implement overlap). The thin description makes the overlap worse: nothing tells the lead which of the three to pick.
 

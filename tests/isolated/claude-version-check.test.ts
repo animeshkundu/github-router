@@ -14,7 +14,7 @@ const TEST_HOME = await fs.mkdtemp(
 )
 
 // Provide BOTH homedir and tmpdir so we don't break later tests that
-// depend on os.tmpdir() at module-load time (e.g. tests/lib-paths.test.ts:7).
+// depend on os.tmpdir() at module-load time (e.g. tests/isolated/lib-paths.test.ts:9).
 mock.module("node:os", () => ({
   default: {
     homedir: () => TEST_HOME,

@@ -24,7 +24,7 @@ Write concisely without losing detail. Use a natural human voice. Avoid em dashe
 - **Overtrigger risk**: Low. No MUST/ALWAYS/CRITICAL/all-caps. "Do not attribute ... anywhere" is firm but its scope is explicitly enumerated ("commits, PRs, issues, code, comments, docs"), so a literal model applies it to exactly those surfaces rather than over-generalizing into refusing to ever say the word "Claude." The enumerated scope is what keeps it from overtriggering.
 - **Literalness / scope**: Good, precisely because scope is stated. Opus 4.8 follows instructions precisely (["Claude's latest models are trained for precise instruction following"](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-4-best-practices), "Tool usage") and does not generalize scope on its own, so the explicit parenthetical list is exactly the right technique, it tells the precise-following model the boundary instead of leaving it to infer one.
 - **Enforcement claims**: None. The directive states preferences; it does not claim they are enforced. This is correct, no hook validates prose for em dashes or attribution, so claiming enforcement would be an unbacked guarantee. (See the systemic note in the README: injected CLAUDE.md is context, not enforcement.)
-- **Structure**: Four short sentences, no header. Fine for a compact rule. It is self-referentially compliant: the directive itself uses no em dashes and makes no attribution (pinned by `tests/claude-md-injection.test.ts:557-566`).
+- **Structure**: Four short sentences, no header. Fine for a compact rule. It is self-referentially compliant: the directive itself uses no em dashes and makes no attribution (pinned by `tests/isolated/claude-md-injection.test.ts:559-568`).
 
 ## Don't-nerf / right-balance
 

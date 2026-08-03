@@ -126,7 +126,7 @@ Build the async pattern peers and researchers converged on, with the bug fixes b
 - `src/lib/codex-mcp-config.ts` - `buildAgentPrompt` for new auto-invoke language; new `peer-review-coordinator` agent
 - `src/routes/mcp/handler.ts` - effort plumbing; `peer-review-coordinator` agent registration; raise `MAX_INFLIGHT_TOOLS_CALL` from 2 to 8 (line 32)
 - `src/services/copilot/create-responses.ts` and `create-chat-completions.ts` - accept caller signal; pass `output_config.effort`
-- Test files: `tests/peer-mcp-personas.test.ts`, `tests/routes-mcp.test.ts`, `tests/codex-mcp-config.test.ts`
+- Test files: `tests/peer-mcp-personas.test.ts`, `tests/routes-mcp.test.ts`, `tests/isolated/codex-mcp-config.test.ts`
 - `CLAUDE.md` - document the auto-invocation triggers, effort default, and concurrency cap
 
 **Phase 3 (only if reached):**

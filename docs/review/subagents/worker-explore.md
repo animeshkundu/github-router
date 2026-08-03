@@ -11,7 +11,7 @@
 | Gate | `workerToolsAvailable` — the five core dispatchers are generated iff `workerToolsEnabled()` (worker default `gpt-5.4-mini` present with `tool_calls`, and `GH_ROUTER_DISABLE_WORKER_TOOLS` unset). See `buildPeerAgentDefinitions` (`codex-mcp-config.ts:326-335`) |
 | Description source | `dispatcherDescription("explore")` (`worker-dispatch.ts:203-222`) |
 | System prompt | `dispatcherPrompt("explore", workersKey)` (`worker-dispatch.ts:226-254`) |
-| Tools | `["mcp__<workersKey>__*"]` (`dispatcherTools`, `worker-dispatch.ts:263-265`) — the workers server wildcard ONLY. No Agent/Read/Bash → cannot recurse or do extra work. Pinned by `tests/codex-mcp-config.test.ts:289` |
+| Tools | `["mcp__<workersKey>__*"]` (`dispatcherTools`, `worker-dispatch.ts:263-265`) — the workers server wildcard ONLY. No Agent/Read/Bash → cannot recurse or do extra work. Pinned by `tests/isolated/codex-mcp-config.test.ts:361` |
 
 The dispatcher is a thin shim: Claude Code runs it in the BACKGROUND so the lead's turn never blocks while the (up-to-6h) worker runs; on completion the worker's output is delivered as a notification. This is the ONLY sanctioned way to run a worker — a raw `mcp__<workersKey>__explore` call from the main agent is denied by the PreToolUse guard and redirected here (`decideWorkerGuard`, `worker-dispatch.ts:154-197`).
 

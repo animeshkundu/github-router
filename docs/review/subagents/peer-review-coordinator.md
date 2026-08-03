@@ -21,11 +21,11 @@ It is not a peer-MCP tool; it is a regular Claude Code subagent that runs in the
 
 > Coordinates cross-lab adversarial review across codex-critic, opus-critic, gemini-critic, codex-reviewer. Use proactively before non-trivial plans and after non-trivial commits. Always pass artifacts verbatim — peers are fresh-context.
 
-Pinned by `tests/codex-mcp-config.test.ts:187,193,194` (must contain "Use proactively", "verbatim", "fresh-context").
+Pinned by `tests/isolated/codex-mcp-config.test.ts:251,257,258` (must contain "Use proactively", "verbatim", "fresh-context").
 
 ## 3. System-prompt summary
 
-`buildCoordinatorAgent` prompt (`codex-mcp-config.ts:217-275`): lists the available peer subagents (order: codex-critic, opus-critic, then gemini-critic / gemini-reviewer if `geminiAvailable`, then codex-reviewer); a routing table by artifact type (plan/design → codex-critic [+ gemini-critic]; concrete diff → codex-reviewer [+ gemini-reviewer + gemini-critic]; large artifact → only codex-critic ~1M / opus-critic ≈936K windows; formal reasoning → gemini-critic; tie-breaker → gemini/opus; fast sanity → opus-critic); a decomposition section (route by real prompt window, split large artifacts BY CONCERN, never summarize to fit a small-window peer, up to 8 in-flight); a severity-grouped/deduplicated aggregation contract with cross-lab-confirmation callouts; and a "what NOT to do" list (do not paraphrase before aggregating, do not fan out serially, do not consult yourself). When gemini is absent the gemini routing lines become "(NOT REGISTERED in this session)" (`codex-mcp-config.ts:237,240`; pinned by `tests/codex-mcp-config.test.ts:215`).
+`buildCoordinatorAgent` prompt (`codex-mcp-config.ts:217-275`): lists the available peer subagents (order: codex-critic, opus-critic, then gemini-critic / gemini-reviewer if `geminiAvailable`, then codex-reviewer); a routing table by artifact type (plan/design → codex-critic [+ gemini-critic]; concrete diff → codex-reviewer [+ gemini-reviewer + gemini-critic]; large artifact → only codex-critic ~1M / opus-critic ≈936K windows; formal reasoning → gemini-critic; tie-breaker → gemini/opus; fast sanity → opus-critic); a decomposition section (route by real prompt window, split large artifacts BY CONCERN, never summarize to fit a small-window peer, up to 8 in-flight); a severity-grouped/deduplicated aggregation contract with cross-lab-confirmation callouts; and a "what NOT to do" list (do not paraphrase before aggregating, do not fan out serially, do not consult yourself). When gemini is absent the gemini routing lines become "(NOT REGISTERED in this session)" (`codex-mcp-config.ts:237,240`; pinned by `tests/isolated/codex-mcp-config.test.ts:283`).
 
 ## 4. Routing-trigger assessment
 

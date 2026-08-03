@@ -14,7 +14,7 @@
 | Description source | `PersonaSpec.description` (`peer-mcp-personas.ts:352-353`) — shared verbatim with `mcp__peers__gemini_critic` |
 | System prompt | `buildAgentPrompt` → `GEMINI_CRITIC_BASE` (`peer-mcp-personas.ts:237-248`) |
 
-When gemini is absent, this subagent is not written at all (`personasFor` filters it), and the coordinator's prompt substitutes "(NOT REGISTERED in this session)" for its routing lines (`codex-mcp-config.ts:237,240`; pinned by `tests/codex-mcp-config.test.ts:215`).
+When gemini is absent, this subagent is not written at all (`personasFor` filters it), and the coordinator's prompt substitutes "(NOT REGISTERED in this session)" for its routing lines (`codex-mcp-config.ts:237,240`; pinned by `tests/isolated/codex-mcp-config.test.ts:283`).
 
 ## 2. Description (verbatim)
 
