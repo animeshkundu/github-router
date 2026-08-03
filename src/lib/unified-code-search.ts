@@ -105,25 +105,41 @@ function lexicalSearchCodeMode(mode: UnifiedMode): "ranked" | "literal" | "regex
  * Status-specific, actionable fallback hint. The semantic index isn't ready,
  * so the model got LEXICAL results (great for exact symbols, sparse for a
  * natural-language phrase since the lexical backend matches literally). Tell
- * it both levers: retry `mode:"semantic"` shortly (the index is self-healing
- * in the background) OR re-query now with specific symbol/keyword terms.
+ * it both levers: retry `mode:"semantic"` (the index is self-healing in the
+ * background) OR re-query now with specific symbol/keyword terms.
+ *
+ * "shortly" was too vague and cost a real recovery. A build takes MINUTES on a
+ * large repo, and after a failed build the FIRST query is consumed triggering
+ * the re-kick and still returns a fallback. So a caller who retried once,
+ * seconds later, saw a second fallback and concluded the tool was broken
+ * rather than mid-repair. Observed end to end on this repo: query, then
+ * ~5 minutes of `building`, then `ready`. Naming the timescale and the
+ * one-query-to-trigger behaviour is what turns "it's still broken" into
+ * "it's coming back".
+ *
+ * The wording stays a range rather than a number: build time scales with
+ * repository size, so a hard figure would be wrong for most callers.
  */
 
 const FALLBACK_GUIDANCE_MARKER = 'retry mode:"semantic"'
 const FALLBACK_GUIDANCE =
-  `${FALLBACK_GUIDANCE_MARKER} shortly, or re-query now with specific symbol/keyword terms`
+  `${FALLBACK_GUIDANCE_MARKER} in a few minutes (a build takes minutes on a large repo), `
+  + "or re-query now with specific symbol/keyword terms"
 
 function fallbackNoticeFor(status: SemanticStatus): string {
   const tail = FALLBACK_GUIDANCE
   switch (status) {
     case "building":
-      return `semantic index is building; returned lexical keyword matches — ${tail}`
+      return `semantic index is building; returned lexical keyword matches. ${tail}`
     case "stale":
-      return `semantic index predates the current HEAD/tree (a background re-index was started); returned lexical keyword matches — ${tail}`
+      return `semantic index predates the current HEAD/tree (a background re-index was started); returned lexical keyword matches. ${tail}`
     case "unavailable":
-      return `no semantic index for this workspace yet (a background build was started); returned lexical keyword matches — ${tail}`
+      return `no semantic index for this workspace yet (a background build was started); returned lexical keyword matches. ${tail}`
     case "failed":
-      return `semantic index unavailable (build failing — see proxy logs); returned lexical keyword matches — ${tail}`
+      // The recovery path most likely to be misread as a dead tool: this very
+      // query is what schedules the rebuild, so it CANNOT return semantic
+      // results itself. Say so, or the next fallback reads as no progress.
+      return `semantic index unavailable; this query started a background rebuild, so it returned lexical keyword matches. ${tail}`
     default:
       return "returned lexical results"
   }
