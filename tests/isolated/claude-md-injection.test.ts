@@ -8,7 +8,7 @@ const tempDir = await fs.mkdtemp(
   path.join(os.tmpdir(), "github-router-claude-md-inject-"),
 )
 
-// Same homedir-override pattern as tests/lib-paths.test.ts — preserve
+// Same homedir-override pattern as tests/isolated/lib-paths.test.ts — preserve
 // every other os export so os.tmpdir() etc. keep working in later test
 // files.
 mock.module("node:os", () => ({
@@ -264,7 +264,7 @@ test("symlinked target is refused", async () => {
   // require admin/Developer Mode (file-type symlinks). If symlink
   // creation fails on this platform (typical Windows CI without
   // elevated perms), skip with an inline note — matches the
-  // documented exception pattern at tests/lib-paths.test.ts:67.
+  // documented exception pattern at tests/isolated/lib-paths.test.ts:108-115.
   try {
     await fs.symlink(sourceFile, TARGET, "file")
   } catch {
@@ -314,7 +314,7 @@ test("symlinked mirror ROOT is refused (peer-review C3 advisor follow-up: fail-c
   }
   // On Windows, dir-typed symlinks may require admin/Developer Mode.
   // If creation fails on this platform, log and skip — matches the
-  // documented exception pattern at tests/lib-paths.test.ts:67.
+  // documented exception pattern at tests/isolated/lib-paths.test.ts:108-115.
   try {
     await fs.symlink(realDir, MIRROR_DIR, "dir")
   } catch {
@@ -614,6 +614,77 @@ test("operating-defaults digest protects main-thread context for the user", () =
   )
 })
 
+test("peer-critic guidance carries a two-sided discriminator, not an exhortation to consult more", () => {
+  // Same failure shape the delegation default had, and the same fix. Four of
+  // four unprimed agents, asked afterwards, had never reached for a peer
+  // critic. On read-only tracing work their reasons were CORRECT ("no diff to
+  // review", "the critics would re-derive what grep already proved"), so
+  // guidance that pushes toward consulting more often would make those four
+  // worse. The one real miss was a design recommendation, where the agent said
+  // it would normally have consulted the advisor and skipped only because
+  // delivery was wanted now.
+  //
+  // So the rule must name BOTH sides: when a critic earns its keep, and when
+  // reaching for one is ritual. Assert both halves on both surfaces so this
+  // cannot decay into "consult a critic for anything non-trivial", which is
+  // unfalsifiable in advance and collapses to always-or-never.
+  const digest = OPERATING_DEFAULTS_DIGEST
+  const directive = OPERATING_DEFAULTS_DIRECTIVE
+
+  // Half one: the trigger is a claim that still turns on JUDGMENT once the
+  // direct evidence is in, and it is scoped by consequence. "Non-trivial" and
+  // a bare "no command can settle" both over-trigger: the latter would fire on
+  // every subjective micro-choice down to a variable name.
+  expect(digest).toContain("consequential")
+  expect(digest).toContain("hard-to-reverse decision")
+  expect(digest).toContain("turns on judgment among plausible alternatives once the direct evidence is in")
+  expect(digest).toContain("confabulation")
+  // Time pressure was the thing that crowded the check out, so it is named.
+  expect(digest).toContain("budget the wait even under delivery pressure")
+
+  // Half two: the exclusion. Without this the guidance is just "consult more".
+  expect(digest).toContain(
+    "When a test, a run, a reproduction, or a search would settle the claim, settle it that way instead",
+  )
+  expect(digest).toContain("ritual, not review")
+
+  // The directive carries the same two halves with the reasoning attached.
+  expect(directive).toContain("hard-to-reverse decisions")
+  expect(directive).toContain("rests on judgment rather than on something you can verify directly")
+  expect(directive).toContain("do NOT pay for read-only tracing")
+  expect(directive).toContain("ritual skepticism rather than review")
+  // Skipping on a settled question must be affirmed as correct, or the
+  // exclusion reads as a grudging concession and gets ignored under pressure.
+  expect(directive).toContain("skipping them there is the right call")
+
+  // The advisor must NOT be sold as a cheaper substitute for a critic. It sees
+  // the transcript, so it inherits the framing that a fresh-context critic is
+  // there to break, and a time-pressured agent offered "same check, cheaper"
+  // takes the weaker option, which recreates the miss this rule exists to fix.
+  expect(directive).toContain("complement and not a substitute")
+  expect(directive).toContain("inherits your framing")
+
+  // Lab diversity is stated relative to the PRODUCER, not to the reader. The
+  // lead itself can be running on a non-Claude model through the translation
+  // shim, and the producer is often an implementer subagent on another lab's
+  // model, so "a different lab than yours" would be false in both cases.
+  expect(directive).toContain("different lab than the producer")
+  expect(directive).not.toContain("different lab than yours")
+
+  // The unconditional cases stay unconditional.
+  for (const risky of ["auth", "user input", "database queries", "crypto", "serialization"]) {
+    expect(directive).toContain(risky)
+  }
+
+  // How to brief a critic, not just whether to call one.
+  expect(directive).toContain("not your rationale")
+
+  // Self-compliant with the style directive, like the rest of the directive.
+  expect(directive).not.toContain("—")
+  expect(directive.toLowerCase()).not.toContain("claude")
+  expect(directive.toLowerCase()).not.toContain("anthropic")
+})
+
 test("artifact-panel directive steers HTML-by-default for review", () => {
   // The always-injected primary instruction must reflect the HTML-default
   // decision (the hook auto-renders plans to HTML; markdown is the fallback).
@@ -760,6 +831,22 @@ test("digest and directive complement rather than duplicate each other", () => {
   for (const agent of ["implementer", "reviewer", "brainstorm", "scout", "scribe"]) {
     expect(directive).toContain(agent)
     expect(digest).not.toContain(agent)
+  }
+
+  // Same split for the critics. The digest says WHEN an unverifiable claim
+  // needs a challenge, which has to fire without a lookup; WHICH critic to
+  // send it to is a choice you are already making deliberately, so the roster
+  // and the lens-to-artifact match stay in the directive.
+  for (const critic of [
+    "codex_critic",
+    "codex_reviewer",
+    "gemini_critic",
+    "gemini_reviewer",
+    "opus_critic",
+    "peer-review-coordinator",
+  ]) {
+    expect(directive).toContain(critic)
+    expect(digest).not.toContain(critic)
   }
 
   // Orientation prose is directive-only. These are the phrases that were

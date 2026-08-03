@@ -6,7 +6,7 @@ import os from "node:os"
 import path from "node:path"
 
 // Per-file tempDir + os.homedir() override. Same pattern as
-// tests/lib-paths.test.ts: spread the real `os` namespace so that other
+// tests/isolated/lib-paths.test.ts: spread the real `os` namespace so that other
 // callers of os.tmpdir() / os.platform() inside paths.ts still work, then
 // override only `homedir()` so that PATHS.CLAUDE_CONFIG_DIR resolves
 // under tempDir instead of the user's real ~/. This file lives in

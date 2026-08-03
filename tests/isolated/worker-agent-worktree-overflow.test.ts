@@ -12,7 +12,7 @@
  *
  * Isolation: this file mocks `os.homedir()` to a per-file temp dir BEFORE
  * importing anything that reads `PATHS` (same pattern as
- * `tests/worker-agent-boot-sweep.test.ts`), so the durable patch lands under
+ * `tests/isolated/worker-agent-boot-sweep.test.ts`), so the durable patch lands under
  * a temp `PATHS.WORKER_DIFFS_DIR` and never pollutes the real app dir. The
  * git repos live under the OS temp dir (unaffected by the homedir mock).
  *

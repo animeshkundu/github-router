@@ -14,7 +14,7 @@
 | Description source | `PersonaSpec.description` (`peer-mcp-personas.ts:403-404`) — shared verbatim with `mcp__peers__opus_critic` |
 | System prompt | `buildAgentPrompt` → `OPUS_CRITIC_BASE` (`peer-mcp-personas.ts:322-330`) |
 
-`requiresHttp: true` means opus-critic always routes via the HTTP backend even under `--codex-cli` (the stdio bridge speaks gpt-5/codex only); pinned by `tests/codex-mcp-config.test.ts:249-253`.
+`requiresHttp: true` means opus-critic always routes via the HTTP backend even under `--codex-cli` (the stdio bridge speaks gpt-5/codex only); pinned by `tests/isolated/codex-mcp-config.test.ts:317-325`.
 
 ## 2. Description (verbatim)
 

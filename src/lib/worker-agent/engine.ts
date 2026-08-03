@@ -303,6 +303,41 @@ function extractAssistantText(
   return out
 }
 
+/**
+ * Banner that prefixes text salvaged from an EARLIER assistant turn when the
+ * run ends without a usable final answer.
+ *
+ * It is deliberately loud. Recovered text is partial work — the model was
+ * mid-investigation when it went quiet — and returning it bare would let the
+ * caller read an interim note as a conclusion. That is a different bug from
+ * the one this recovery fixes, and a worse one: silently wrong beats loudly
+ * missing only for the model that produced it.
+ */
+const RECOVERED_TEXT_BANNER =
+  "[recovered from an earlier turn — this run ended without a final answer, "
+  + "so the text below is partial work in progress, NOT a conclusion. Treat it "
+  + "as leads to verify, not as the worker's answer.]"
+
+/**
+ * Compose the recovered-text block for a run that is ending with nothing
+ * usable in its final turn.
+ *
+ * Returns `""` in the two cases where recovery would be noise: the run DID
+ * produce live text (nothing was lost), or no turn ever produced any.
+ *
+ * Scope note: `highWater` is the LAST non-empty assistant text, not a
+ * concatenation of every non-empty turn. Accumulating them would turn a
+ * recovered result into a transcript dump — mostly interim narration — where
+ * the last turn is both the most complete and the one the model was building
+ * toward when it stalled.
+ */
+function recoveredBlock(liveText: string, highWater: string): string {
+  if (liveText.trim()) return ""
+  const recovered = highWater.trim()
+  if (!recovered) return ""
+  return `${RECOVERED_TEXT_BANNER}\n\n${recovered}`
+}
+
 const MAX_EMPTY_OUTPUT_NUDGES = 3
 const EMPTY_OUTPUT_NUDGES = [
   "Summarize your findings so far.",
@@ -653,6 +688,19 @@ async function runWorkerAgentOnce(
     // ToolCall)[]` — see `extractAssistantText` above for why we don't
     // just `.toString()`.
     let finalText = ""
+    // High-water mark: the last assistant turn that produced NON-EMPTY text.
+    // `finalText` alone is destructive — it is overwritten by every assistant
+    // turn including empty ones, so a model that reports substantive findings
+    // alongside a tool call and then ends the run with an empty turn loses
+    // that work entirely. For the read-only modes (explore/review/plan) the Pi
+    // transcript is never persisted, so "lost" means unrecoverable: a 40-minute
+    // 60-file investigation returned as a ~150-byte sentinel. Kept separate
+    // from `finalText` rather than replacing it, because the two answer
+    // different questions — `finalText` is "what did the run END with"
+    // (authoritative when non-empty) and this is "what is the best text the run
+    // ever produced" (a fallback that must be LABELLED as recovered, never
+    // passed off as a final answer).
+    let lastNonEmptyText = ""
     let lastStopReason: string | null = null
     let nudgeCount = 0
     const maxEmptyOutputNudges = resolveMaxEmptyOutputNudges()
@@ -689,6 +737,9 @@ async function runWorkerAgentOnce(
       const content = (msg as AssistantMessage).content
       if (!Array.isArray(content)) return
       finalText = extractAssistantText(content)
+      // Latch before the next turn can overwrite it. Guarded on `.trim()` so a
+      // whitespace-only turn never displaces real text.
+      if (finalText.trim()) lastNonEmptyText = finalText
       const sr = (msg as { stopReason?: unknown }).stopReason
       if (typeof sr === "string") lastStopReason = sr
     })
@@ -753,8 +804,19 @@ async function runWorkerAgentOnce(
       // `terminalText` (captured from the tool args), NOT assistant text or
       // a worktree diff (browse has neither). Fall back to `finalText` for
       // the rare case the model emitted text but no terminal payload.
+      //
+      // `liveAnswer` is the model's own prose for THIS run's final turn — the
+      // slot the recovery fallback substitutes for. It is deliberately NOT the
+      // composed `text`: a worktree diff is a different artifact (what the
+      // model DID, not what it said), so an implement run whose last turn went
+      // empty still has an unexplained diff and a lost explanation.
+      const liveAnswer = isBrowse ? (terminalText ?? finalText) : finalText
+      // Computed once for every exit path below. Empty (and therefore dropped
+      // by every `.filter(Boolean)`) whenever this run's final turn spoke for
+      // itself — so a healthy run's output is byte-identical to before.
+      const recovered = recoveredBlock(liveAnswer, lastNonEmptyText)
       const text = isBrowse
-        ? (terminalText ?? finalText)
+        ? liveAnswer
         : diff
           ? `${finalText}\n\n${diff}`
           : finalText
@@ -765,7 +827,10 @@ async function runWorkerAgentOnce(
       // diagnostic when present, else a generic sanitized message — never echo
       // a raw upstream error body, and never report an error as success.
       if (lastStopReason === "error" || lastStopReason === "aborted") {
-        const diag = (terminalText ?? finalText).trim()
+        // A halt landing on an empty turn is the most expensive way to lose
+        // work: the run was cut off mid-investigation, so everything it learned
+        // lives in an EARLIER turn.
+        const diag = liveAnswer.trim()
         let diagnostic: string
         if (lastStopReason === "aborted") {
           diagnostic = wallClockExpired
@@ -783,14 +848,14 @@ async function runWorkerAgentOnce(
         // errors and aborts; neither is a successful completed run.
         return {
           text: lastStopReason === "aborted"
-            ? [diag, diff, diagnostic].filter(Boolean).join("\n\n")
-            : [diagnostic, diff].filter(Boolean).join("\n\n"),
+            ? [diag, recovered, diff, diagnostic].filter(Boolean).join("\n\n")
+            : [diagnostic, recovered, diff].filter(Boolean).join("\n\n"),
           isError: true,
         }
       }
       if (budget.hardStopReason) {
         return {
-          text: [text, `[halted: ${budget.hardStopReason}]`]
+          text: [text, recovered, `[halted: ${budget.hardStopReason}]`]
             .filter(Boolean)
             .join("\n\n"),
           isError: true,
@@ -798,16 +863,25 @@ async function runWorkerAgentOnce(
       }
       // Never return empty text — the harness has no signal to act on.
       if (!text.trim()) {
+        // The sentinel STAYS FIRST and byte-identical: it is the honest status
+        // of this run, callers match on its stable prefix, and recovered text
+        // is explicitly not an answer. It leads; the salvage follows.
+        const sentinel =
+          `${NO_OUTPUT_PREFIX} after ${nudgeCount} nudges `
+          + `(stopReason=${lastStopReason ?? "unknown"}, `
+          + `turns=${budget.turns}, elapsed=${budget.elapsedMs}ms)]; `
+          + "retry with a different model via worker_defaults, or narrow/split the task."
         return {
-          text:
-            `${NO_OUTPUT_PREFIX} after ${nudgeCount} nudges `
-            + `(stopReason=${lastStopReason ?? "unknown"}, `
-            + `turns=${budget.turns}, elapsed=${budget.elapsedMs}ms)]; `
-            + "retry with a different model via worker_defaults, or narrow/split the task.",
+          text: [sentinel, recovered].filter(Boolean).join("\n\n"),
           isError: true,
         }
       }
-      return { text }
+      // `recovered` is non-empty here only when the run produced a worktree
+      // diff but its final turn emitted no prose. The diff is real work and the
+      // run really did complete, so this stays a SUCCESS — but the explanation
+      // is salvaged from an earlier turn and labelled as such, rather than
+      // handing back an unexplained diff.
+      return { text: [text, recovered].filter(Boolean).join("\n\n") }
     } catch (err) {
       // Step 13b: error-path cleanup. Mirror the success path so the
       // worktree can't strand on a Pi-throws-mid-loop path. Capture the
@@ -836,7 +910,22 @@ async function runWorkerAgentOnce(
       }
       const haltOrErr = err instanceof Error ? err.message : String(err)
       const parts: Array<string> = []
-      if (finalText) parts.push(finalText)
+      // Mirror the success path's answer source exactly: in browse mode the
+      // authoritative answer is the terminal tool's payload, so keying off
+      // `finalText` alone would let an earlier chatty turn be recovered over a
+      // clean terminal answer that this run actually produced.
+      const liveAnswer = isBrowse ? (terminalText ?? finalText) : finalText
+      // `.trim()` rather than truthiness: a whitespace-only turn is not an
+      // answer, and treating it as one would skip recovery and re-lose the work
+      // this fix exists to preserve.
+      if (liveAnswer.trim()) parts.push(liveAnswer)
+      else {
+        // Same salvage as the success path: a throw mid-loop (budget halt, Pi
+        // internal error) most often lands on a turn that produced no prose,
+        // and the run's findings are in an earlier one.
+        const recovered = recoveredBlock(liveAnswer, lastNonEmptyText)
+        if (recovered) parts.push(recovered)
+      }
       if (diff) parts.push(diff)
       parts.push(haltOrErr)
       return {
@@ -934,6 +1023,8 @@ export const __testExports = {
   extractAssistantText,
   makeModelShim,
   makeNoWorktreeHandle,
+  recoveredBlock,
+  RECOVERED_TEXT_BANNER,
   shouldNudgeForEmptyOutput,
   WORKTREE_REGISTRY,
 }

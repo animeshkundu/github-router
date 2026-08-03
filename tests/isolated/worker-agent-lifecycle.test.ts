@@ -13,7 +13,7 @@
  *
  * Plan: `plans/we-have-added-a-dreamy-tide.md` ("Cleanup paths").
  *
- * Mocking strategy: same as `tests/lib-paths.test.ts` — override
+ * Mocking strategy: same as `tests/isolated/lib-paths.test.ts` — override
  * `os.homedir()` to return a per-test-file temp dir BEFORE importing
  * any module that touches `PATHS.APP_DIR`. The os mock is global for
  * the rest of the test run; we preserve all other os exports.
@@ -31,7 +31,7 @@ const tempHome = await fs.mkdtemp(
 
 // Override `os.homedir()` BEFORE importing the module under test so
 // `PATHS.APP_DIR` resolves under our temp dir. Preserve every other
-// os export — see `tests/lib-paths.test.ts` for the same pattern's
+// os export — see `tests/isolated/lib-paths.test.ts` for the same pattern's
 // rationale (later tests may import node:os and expect tmpdir/platform).
 mock.module("node:os", () => ({
   default: { ...os, homedir: () => tempHome },

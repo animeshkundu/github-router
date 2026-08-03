@@ -136,7 +136,7 @@ mock.module("consola", () => ({
 
 // MCP wiring mocks — keep tests hermetic. Real fs operations (and the
 // real per-launch nonce generation) are exercised in
-// tests/codex-mcp-config.test.ts; here we just verify that claude.ts
+// tests/isolated/codex-mcp-config.test.ts; here we just verify that claude.ts
 // invokes the wiring with the expected args and threads the resulting
 // flags into spawnMock.
 const writePeerMcpRuntimeFilesMock = mock()
@@ -204,7 +204,7 @@ mock.module("~/lib/mcp-capabilities", () => ({
 // The CLAUDE.md append + prepend helpers are the new descendant-reach
 // surface; mock both here so the cli-claude test focuses on call/no-call
 // assertions and the real filesystem write logic is exercised by
-// tests/claude-md-injection.test.ts in isolation.
+// tests/isolated/claude-md-injection.test.ts in isolation.
 const appendPeerAwarenessToMirroredClaudeMdMock = mock()
 const prependStyleDirectiveToMirroredClaudeMdMock = mock()
 const prependOperatingDefaultsToMirroredClaudeMdMock = mock()

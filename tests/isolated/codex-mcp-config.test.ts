@@ -21,9 +21,11 @@ import { MCP_GROUPS } from "../../src/lib/peer-mcp-personas"
 const NONCE = "0".repeat(64)
 const URL = "http://127.0.0.1:18787"
 
-// Use a fixed `/tmp` prefix instead of `os.tmpdir()` — `tests/lib-paths.test.ts`
-// uses `mock.module("node:os", ...)` to stub homedir(), which globally
-// replaces the os module and removes tmpdir(). Avoid that landmine.
+// Use a fixed `/tmp` prefix instead of `os.tmpdir()`. This file and
+// `tests/isolated/lib-paths.test.ts` (which mocks `node:os` to stub
+// `homedir()`) each run in their own process under `tests/isolated/`, so
+// that mock can no longer leak here — the fixed root is just for a
+// predictable, TMPDIR-overridable path, not a cross-file workaround.
 const TEST_TMP_ROOT = process.env.TMPDIR?.replace(/\/$/, "") ?? "/tmp"
 
 async function makeTempDir(prefix: string): Promise<string> {

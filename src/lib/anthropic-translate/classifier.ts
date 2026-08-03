@@ -73,6 +73,29 @@ export function isClaudeModel(
  *   any chat-default model) → "chat-shim".
  * - A non-Claude model absent from the catalog (so we can't confirm an endpoint)
  *   → "claude-passthrough" (unchanged; we don't divert what we can't classify).
+ * - A non-Claude model that IS in the catalog and serves NEITHER of the two shim
+ *   endpoints (`pickEndpoint` → undefined) → "claude-passthrough" as well.
+ *
+ * Those last two land on the same route but are NOT the same answer, and the
+ * coincidence is deliberate rather than a collapsed default (contrast
+ * `resolveEndpointForModelId`, whose callers must tell them apart because
+ * guessing there produces an opaque upstream 400). Here neither shim is even a
+ * candidate: a shim can only speak `/responses` or `/chat/completions`, so
+ * diverting a model that serves neither would 400 just as surely. Passthrough
+ * is the better default because it is sometimes RIGHT — a non-Claude catalog
+ * model advertising `/v1/messages` is served by exactly the endpoint
+ * passthrough uses. It also preserves this module's fail-CLOSED-toward-Claude
+ * invariant: an unclassifiable model is never diverted.
+ *
+ * KNOWN GAP (audited, deliberately not fixed here): a non-Claude model serving
+ * only something we cannot speak at all (say `/embeddings`) also lands on
+ * passthrough and will still 400 upstream — `logEndpointMismatch(modelId,
+ * "/v1/messages")` logs it at the passthrough seam, but no local error is
+ * raised. Closing that needs a change in `src/routes/messages/handler.ts`,
+ * which this seam does not own. It is strictly narrower than the defect fixed
+ * in `resolveEndpointForModelId`: no such model is reachable as a Claude Code
+ * `/v1/messages` target today, whereas the plan worker's `claude-opus-5`
+ * default is.
  *
  * `originalModelId` is the optional pre-resolution request id; when supplied it
  * is checked for Claude-likeness alongside the resolved id so an alias that

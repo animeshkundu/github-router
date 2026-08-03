@@ -6,7 +6,7 @@
  * the current PID + current instance UUID.
  *
  * Why this is separate from the synthetic-dir unit test in
- * `tests/worker-agent-lifecycle.test.ts`: that test uses `fs.mkdir` +
+ * `tests/isolated/worker-agent-lifecycle.test.ts`: that test uses `fs.mkdir` +
  * marker files to fake the worktree dirs, which exercises the
  * loop / PID-UUID parsing / fs.rm fallback, but does NOT exercise
  * the load-bearing `git worktree remove --force` integration. Codex
@@ -15,8 +15,8 @@
  * bypasses the session-end deterministic sweep, so the git-removal
  * path must have a regression test that actually invokes git.
  *
- * Mocking strategy: same as `tests/worker-agent-lifecycle.test.ts`
- * and `tests/lib-paths.test.ts` — override `os.homedir()` BEFORE
+ * Mocking strategy: same as `tests/isolated/worker-agent-lifecycle.test.ts`
+ * and `tests/isolated/lib-paths.test.ts` — override `os.homedir()` BEFORE
  * importing any module that touches `PATHS.APP_DIR`, so the ledger
  * lands under a per-test-file temp dir. Bun runs each test file in
  * its own process by default, so the mock doesn't bleed across files.

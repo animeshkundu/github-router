@@ -93,14 +93,27 @@ const STYLE_DIRECTIVE =
  *      main context free to reason and collaborate with the user, while still
  *      doing trivial / surgical / last-mile work directly (delegating that
  *      would only add relay-fidelity loss + latency).
- *   2. Excellence lens: the principles stated plainly and concretely (radical
+ *   2. Adversarial review: WHEN a peer critic earns its keep and, equally
+ *      important, when reaching for one is ritual rather than review. Same
+ *      failure shape the delegation default had: "consult a critic for
+ *      non-trivial changes" is unfalsifiable in advance, so it collapses into
+ *      either never (four of four unprimed agents) or always (worse than
+ *      never). The discriminator is whether the conclusion still turns on
+ *      judgment once the direct evidence is in: a consequential recommendation
+ *      cannot be run, which is exactly where confabulation hides, while a
+ *      tracing question a search already proved gains nothing from a second
+ *      model re-deriving it. The roster, the lens-to-artifact match, the
+ *      advisor-complements-rather-than-substitutes distinction, and the
+ *      do-not-anchor-the-critic rule live here; the digest carries only the
+ *      trigger and the ritual exclusion.
+ *   3. Excellence lens: the principles stated plainly and concretely (radical
  *      simplicity + real-user focus; whole-system first-principles thinking that
  *      anticipates scale; work back from the customer outcome). Named exemplars
  *      were dropped per the injected-surface review: a named entity is a dense,
  *      high-variance vector that pulls in persona mannerisms at top salience, and
  *      the guidance favors specific functional framing over comparison, so
  *      specificity carries the vividness instead.
- *   3. Engineering excellence: quality / robustness / maintainability over
+ *   4. Engineering excellence: quality / robustness / maintainability over
  *      development cost; reproduce a bug end-to-end (as a real user hits it)
  *      before fixing so the fix targets the real cause; a pixel-perfect UI bar;
  *      and fix any lint error / test failure / flake on sight, whoever caused it,
@@ -133,6 +146,31 @@ export const OPERATING_DEFAULTS_DIRECTIVE =
   + "summarization layer, and a sub-question you could answer in one command is "
   + "cheaper done directly than paying a subagent's startup. Do trivial, "
   + "surgical, and last-mile work yourself.\n\n"
+  + "Adversarial review. The peer critics (`codex_critic` and `codex_reviewer`, "
+  + "`gemini_critic` and `gemini_reviewer`, `opus_critic`, and the "
+  + "`peer-review-coordinator` that fans out to several of them) are "
+  + "fresh-context models, so what they add is a blind spot that whoever "
+  + "produced the work cannot reach by thinking harder about it; prefer a "
+  + "critic from a different lab than the producer, since blind spots "
+  + "correlate within a lab. The `advisor` is a complement and not a "
+  + "substitute: it sees your transcript, so it catches your own drift and "
+  + "momentum, but it inherits your framing, which is exactly what a "
+  + "fresh-context critic does not. They earn their keep on consequential design "
+  + "choices, recommendations, and hard-to-reverse decisions: the cases where "
+  + "plausible alternatives remain and the conclusion rests on judgment rather "
+  + "than on something you can verify directly. That is where confabulation "
+  + "hides, so budget the wait even under delivery pressure. Always consult one "
+  + "when the change touches auth, user input, database queries, crypto, or "
+  + "serialization. They do NOT pay for read-only tracing, ordinary repository "
+  + "lookup, or a conclusion that a focused test, a direct reproduction, or "
+  + "unambiguous code evidence already settles. Asking a critic to re-derive a "
+  + "proven fact returns a confident answer either way, which is ritual "
+  + "skepticism rather than review, and skipping them there is the right call "
+  + "and not a shortcut. Match the lens to the artifact: a strategic critic for "
+  + "plans and trade-offs, a code reviewer for a concrete diff, the coordinator "
+  + "only when the risk warrants several independent lenses. Give whichever you "
+  + "pick the artifact and the constraints and not your rationale, since "
+  + "justification anchors the review and dulls it.\n\n"
   + "Aim high. Default to radical simplicity and a relentless focus on the user's "
   + "real experience: design for the person and the job to be done, not the demo. "
   + "Reason about the whole system from first principles, anticipating scale and the "
@@ -156,6 +194,15 @@ export const OPERATING_DEFAULTS_DIRECTIVE =
  * the mirrored CLAUDE.md (read by the main agent and descendants); this digest
  * keeps both behavioral directives at top salience without duplicating the full
  * ~310-token block in the context window every turn. Points to the full copy.
+ *
+ * The unverifiable-claim rule is here rather than in CLAUDE.md alone because it
+ * fires at a moment that suppresses lookups: an agent racing to deliver a
+ * recommendation is precisely the one that will not stop to consult its project
+ * instructions, which is how the check got crowded out in the first place. It
+ * also closes a hole in the rule above it, which only covers claims that direct
+ * evidence CAN settle. The roster of critics, the lens-to-artifact match, and
+ * the reasoning stay in the directive; the always-resident copy carries only
+ * the trigger and the ritual exclusion.
  */
 export const OPERATING_DEFAULTS_DIGEST =
   "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
@@ -170,6 +217,12 @@ export const OPERATING_DEFAULTS_DIGEST =
   + "Reproduce a bug end to end, the way a real user hits it, before fixing it. Fix a lint error, "
   + "failing test, or flake the moment you see it, whoever introduced it, without letting it "
   + "derail the task at hand. Prefer quality and long-term maintainability over development cost.\n\n"
+  + "Verification has a blind spot: a consequential recommendation, a design or trade-off call, or "
+  + "a hard-to-reverse decision that still turns on judgment among plausible alternatives once the "
+  + "direct evidence is in. That is where confabulation hides, so put it past a peer critic before "
+  + "you ship it and budget the wait even under delivery pressure. When a test, a run, a "
+  + "reproduction, or a search would settle the claim, settle it that way instead; a critic asked "
+  + "to re-derive what you can already prove is ritual, not review.\n\n"
   + "The agent roster, the tool surface, and the reasoning behind these defaults are in your "
   + "CLAUDE.md project instructions. Read them when choosing HOW to work; the rules above apply "
   + "without a lookup."

@@ -3,6 +3,7 @@ import * as nodePath from "node:path"
 
 import consola from "consola"
 import { serve, type ServerHandler } from "srvx"
+import { createBodyTooLargeError, limitRequestBody } from "srvx/body-limit"
 
 import { PATHS, ensurePaths } from "./paths"
 import { maybeSpawnDaemon, wireDaemonTeardown } from "./first-mate/scheduler/autospawn"
@@ -18,6 +19,195 @@ import { resolveMcpToolTimeoutMs } from "./worker-agent/budget"
 import { server as app } from "../server"
 
 const MAX_PORT_RETRIES = 10
+
+/**
+ * Maximum request body the proxy will accept, in bytes.
+ *
+ * Pinned EXPLICITLY because the runtimes disagree by default: bun's `serve`
+ * defaults `maxRequestBodySize` to 128 MB and rejects past it, while
+ * `node:http` (the srvx node adapter) has no body limit at all. Left
+ * unset, the same request succeeds under node and 413s under bun, with
+ * nothing in the response explaining that the runtime is the variable.
+ * Same class of defect as the `idleTimeout` divergence below.
+ *
+ * Note which side that leaves exposed: `dist/main.js` ships
+ * `#!/usr/bin/env node`, so npm-installed users are on the runtime with NO
+ * limit, and bun is mostly the dev/`bun run start` path. The uncapped case
+ * was the shipped one.
+ *
+ * 128 MB — i.e. bun's default, adopted as the intended value on BOTH
+ * runtimes rather than inherited on one:
+ *
+ * - It sits above the traffic this proxy is built for, with margin. A
+ *   full 1M-token Claude Code context is on the order of 4-5 MB of JSON
+ *   text; base64 inline images inflate 4/3 and are re-sent every turn, so
+ *   an image-heavy session runs to tens of MB. That is an estimate, not a
+ *   measurement, which is part of why the cap is set well clear of it
+ *   rather than snugly above it.
+ * - Removing the limit to "match node" is not free even on loopback. The
+ *   app mounts permissive `cors()`, so any web page the user visits can
+ *   POST to 127.0.0.1:<port> (CORS gates reading the response, not sending
+ *   the request); so can any local process. An unbounded body lets either
+ *   stream the proxy to death.
+ * - Raising it above 128 MB buys nothing and costs safety: the proxy
+ *   BUFFERS the whole body (`c.req.json()`), parses it into a JS object
+ *   (multiples of the text size in heap), then re-serializes it upstream.
+ *   Past ~512 MB V8's max string length makes `JSON.stringify` fail
+ *   opaquely — a cap well under that keeps the failure explainable.
+ *
+ * A body over this ceiling means something is wrong (runaway loop,
+ * corrupted context), not a workload that needs a bigger buffer, so
+ * there is deliberately no env override to raise it.
+ */
+export const MAX_REQUEST_BODY_BYTES = 128 * 1024 * 1024
+
+/**
+ * Where the RUNTIME's own body check sits. Not the policy.
+ *
+ * The policy is `MAX_REQUEST_BODY_BYTES`, enforced by `withBodyLimit` in
+ * this process, identically on every runtime. This value exists only to
+ * displace the 128 MB default bun's `serve` applies, which would otherwise pre-empt
+ * that gate — bun enforces its limit at header-parse time by replying and
+ * closing while the client is still uploading, so a client that has not
+ * finished writing never reads the reply. Measured with a real client
+ * posting 64 MB over a limit: `The socket connection was closed
+ * unexpectedly`, i.e. exactly the opaque failure this change removes, and
+ * exactly what bun does TODAY at its default. An early response from our
+ * own handler, by contrast, is delivered cleanly (413 with the JSON body,
+ * ~50ms, no memory growth; draining the body first was strictly worse at
+ * 155ms and +50 MB, so we do not drain).
+ *
+ * Set as ONE top-level srvx option, so bun and node get the same number.
+ * A bun-only override would put the two runtimes back on different
+ * thresholds, which is the defect being fixed, not a fix for it.
+ *
+ * Deliberately far above the policy so the policy always decides first:
+ * everything a client can realistically send is answered by the explained
+ * 413, and this is reached only by a body that is both undeclared and
+ * absurd. It stays finite so "no limit at all" is never the state. It
+ * bounds nothing the gate does not already bound — an unread body is
+ * discarded by both runtimes rather than buffered — so a high value costs
+ * no memory, and buys message quality across the whole realistic range.
+ */
+const TRANSPORT_BODY_CEILING_BYTES = 1024 * 1024 * 1024
+
+/**
+ * The 413 the user sees when a request body is over the ceiling.
+ *
+ * Anthropic error envelope (`request_too_large` is Anthropic's own 413
+ * category), so a client that parses our error shape on every other path
+ * parses this one too, and the message says what to actually do about it.
+ *
+ * `declaredBytes` is present only when the request declared a length. A
+ * body caught mid-stream has no known size, and saying so beats inventing
+ * one. Byte counts are exact, with the MB figure only as a gloss:
+ * rounding alone reads as a contradiction at the boundary, where a body
+ * one byte over renders as "128.0 MB, over the 128.0 MB limit".
+ */
+function bodyTooLargeResponse(declaredBytes?: number): Response {
+  const mb = (n: number) => `${(n / (1024 * 1024)).toFixed(1)} MB`
+  const actual =
+    declaredBytes === undefined ?
+      `Request body exceeds the size github-router accepts`
+    : `Request body is ${declaredBytes} bytes (${mb(declaredBytes)}), over `
+      + `the size github-router accepts`
+  return new Response(
+    JSON.stringify({
+      type: "error",
+      error: {
+        type: "request_too_large",
+        message:
+          `${actual}: at most ${MAX_REQUEST_BODY_BYTES} bytes `
+          + `(${mb(MAX_REQUEST_BODY_BYTES)}), the same limit under bun and node. `
+          + `This is usually an accumulated conversation or inline images `
+          + `(base64 attachments are re-sent every turn) rather than one large `
+          + `message — start a new session or drop the attachments.`,
+      },
+    }),
+    { status: 413, headers: { "content-type": "application/json" } },
+  )
+}
+
+/** srvx's canonical over-limit error, however it reaches us. */
+function isBodyTooLarge(error: unknown): boolean {
+  return (
+    typeof error === "object"
+    && error !== null
+    && (error as { code?: unknown }).code === "ERR_BODY_TOO_LARGE"
+  )
+}
+
+/**
+ * Enforce `MAX_REQUEST_BODY_BYTES` in-process, so the limit and the
+ * rejection are the same on every runtime.
+ *
+ * Leaving it to the runtimes is what produced the divergence in the first
+ * place, and their rejections are not interchangeable:
+ *
+ * - bun rejects at header-parse time and closes the connection while the
+ *   client is still uploading, so the client sees a dead socket rather
+ *   than the 413 (measured; see `TRANSPORT_BODY_CEILING_BYTES`).
+ * - node lets the handler run and rejects the body READ with an
+ *   `ERR_BODY_TOO_LARGE` error. The app installs no Hono `onError`, so
+ *   that becomes `500 Internal Server Error` — indistinguishable from a
+ *   real proxy fault.
+ *
+ * Two layers, one threshold, applied uniformly:
+ *
+ * 1. A declared `Content-Length` over the limit is answered before the
+ *    body is read at all. This is the path every real client takes
+ *    (Claude Code / undici / curl all declare a length on a JSON body).
+ * 2. Anything else — chunked, or a length that understates the body — is
+ *    caught mid-stream by srvx's own `limitRequestBody`, the same helper
+ *    its node and deno adapters use. Overflow is surfaced as the SAME
+ *    explained 413 rather than leaking out as a 500.
+ *
+ * So a body that declares no length is no longer a hole in the message
+ * quality OR in the bound, and neither depends on which runtime is
+ * serving. Verified end to end against both adapters with a real client:
+ * declared-over and chunked-over each return an identical 413.
+ */
+export function withBodyLimit(fetchHandler: ServerHandler): ServerHandler {
+  return async (request) => {
+    const declared = request.headers.get("content-length")
+    // Only a plain integer is trusted as a declared length. Anything else
+    // (absent, chunked, a comma-joined duplicate) is not guessed at — it
+    // just falls through to layer 2, which enforces the same threshold.
+    if (declared !== null && /^\d+$/.test(declared)) {
+      const bytes = Number(declared)
+      if (bytes > MAX_REQUEST_BODY_BYTES) return bodyTooLargeResponse(bytes)
+    }
+
+    // `overflowed` is per-request state closed over by this one call, so
+    // concurrent requests cannot see each other's flag.
+    let overflowed = false
+    const limited = limitRequestBody(request, MAX_REQUEST_BODY_BYTES, {
+      createError: (max) => {
+        overflowed = true
+        return createBodyTooLargeError(max)
+      },
+    })
+
+    try {
+      const response = await fetchHandler(limited)
+      // The flag is only ever set by a body read that failed, so the
+      // handler cannot have produced a meaningful response; replacing it
+      // is what stops the overflow surfacing as Hono's generic 500. A
+      // route that never reads the body never trips this. Cancel what we
+      // discard so a handler that did return a stream can't dangle.
+      if (overflowed) {
+        void response.body?.cancel().catch(() => {})
+        return bodyTooLargeResponse()
+      }
+      return response
+    } catch (error) {
+      // Belt and braces for an overflow that propagates instead of being
+      // caught by the framework.
+      if (overflowed || isBodyTooLarge(error)) return bodyTooLargeResponse()
+      throw error
+    }
+  }
+}
 
 export interface ServerSetupOptions {
   port?: number
@@ -42,12 +232,12 @@ export interface ServerSetupOptions {
  * Build the srvx `serve()` options shared by the explicit-port and
  * random-port paths.
  *
- * Extracted and exported so the Bun idle-reaper override below is
+ * Extracted and exported so the per-runtime overrides below are
  * assertable. `setupAndServe` itself performs auth and network I/O, so the
  * only way to pin this behaviour in a test is to make the options object
- * reachable on its own — and it needs pinning, because deleting the override
- * reintroduces a failure that looks like an upstream/network problem rather
- * than a config one.
+ * reachable on its own — and it needs pinning, because deleting either
+ * override reintroduces a failure that looks like an upstream/network
+ * problem rather than a config one.
  */
 export function buildServeOptions(
   fetchHandler: ServerHandler,
@@ -56,12 +246,30 @@ export function buildServeOptions(
   fetch: ServerHandler
   hostname: string
   silent: boolean
+  maxRequestBodySize: number
   bun: { idleTimeout: number }
 } {
   return {
-    fetch: fetchHandler,
+    fetch: withBodyLimit(fetchHandler),
     hostname: "127.0.0.1",
     silent,
+    // Pin the transport ceiling instead of inheriting one runtime's
+    // default. Unset, srvx forwards nothing: bun applies its own 128 MB
+    // default and node applies none, so the identical request 413s or
+    // succeeds purely on which runtime is serving, with no signal to the
+    // user that the runtime was the variable.
+    //
+    // TOP-LEVEL on purpose, not in the `bun` namespace: srvx's top-level
+    // option reaches every adapter, so both runtimes get the same number.
+    // A bun-only override would leave the two on different thresholds,
+    // which is the defect, not a fix for it.
+    //
+    // This is the outer bound, NOT the policy — `withBodyLimit` above
+    // enforces MAX_REQUEST_BODY_BYTES in-process, identically everywhere,
+    // and answers first. See TRANSPORT_BODY_CEILING_BYTES for why it sits
+    // so far above, and MAX_REQUEST_BODY_BYTES for why the proxy caps at
+    // all rather than matching node's absence of a limit.
+    maxRequestBodySize: TRANSPORT_BODY_CEILING_BYTES,
     // Bun-only: disable `Bun.serve`'s per-connection idle reaper.
     //
     // Bun defaults `idleTimeout` to 10 seconds and applies it to a
@@ -88,7 +296,9 @@ export function buildServeOptions(
     // would fire BEFORE that guard and reintroduce this same bug at a
     // longer horizon. One authority for stream liveness, and it is ours.
     //
-    // Namespaced under `bun`, so the node adapter ignores it.
+    // Namespaced under `bun`, so the node adapter ignores it. Note that
+    // the body ceiling above is deliberately NOT namespaced here — a
+    // per-runtime body limit is the bug, not the fix.
     bun: { idleTimeout: 0 },
   }
 }

@@ -1,11 +1,14 @@
 import { test, expect, describe } from "bun:test"
+import type { ServerHandler } from "srvx"
 
 import { PATHS } from "../src/lib/paths"
 import {
+  MAX_REQUEST_BODY_BYTES,
   buildServeOptions,
   parseSharedArgs,
   getClaudeCodeEnvVars,
   getCodexEnvVars,
+  withBodyLimit,
 } from "../src/lib/server-setup"
 
 describe("parseSharedArgs", () => {
@@ -485,5 +488,165 @@ describe("buildServeOptions", () => {
     expect(buildServeOptions(noopFetch, true).hostname).toBe("127.0.0.1")
     expect(buildServeOptions(noopFetch, true).silent).toBe(true)
     expect(buildServeOptions(noopFetch, false).silent).toBe(false)
+  })
+
+  // Same class of defect as the idleTimeout guard above, and equally silent.
+  // `Bun.serve` defaults `maxRequestBodySize` to 128 MB; `node:http` (the srvx
+  // node adapter) has no body limit at all. Left unset, the identical request
+  // 413s under bun and succeeds under node, and nothing in either response
+  // tells the user the runtime was the variable.
+  //
+  // Asserting the literal (rather than just "is defined") is the point: this
+  // is the value that decides which requests the proxy accepts, it is a
+  // deliberate choice documented on MAX_REQUEST_BODY_BYTES, and drifting it
+  // silently changes behaviour for every client on every runtime.
+  test("pins the accepted-body limit to a deliberate, explicit value", () => {
+    expect(MAX_REQUEST_BODY_BYTES).toBe(128 * 1024 * 1024)
+  })
+
+  // The ceiling must be TOP-LEVEL, so it reaches every adapter. srvx's
+  // `bun` namespace is bun-only; a body limit set there would put the two
+  // runtimes back on different thresholds, which is the defect this closes
+  // rather than a fix for it. Bun's 128 MB default has to be displaced by
+  // SOMETHING, though: bun enforces at header-parse time by replying and
+  // closing while the client is still uploading, so the client never reads
+  // the reply (measured on a real 64 MB post: "The socket connection was
+  // closed unexpectedly"). Hence a transport ceiling well above the policy,
+  // leaving withBodyLimit to answer first with an explained 413.
+  test("pins one transport ceiling for both runtimes, above the policy", () => {
+    const opts = buildServeOptions(noopFetch, true)
+    expect(opts.maxRequestBodySize).toBeGreaterThan(MAX_REQUEST_BODY_BYTES)
+    // Finite: "no limit at all" is never the state on either runtime.
+    expect(Number.isFinite(opts.maxRequestBodySize)).toBe(true)
+    // Not a per-runtime body limit, which is the bug being fixed.
+    expect(
+      (opts.bun as Record<string, unknown>).maxRequestBodySize,
+    ).toBeUndefined()
+  })
+})
+
+describe("withBodyLimit", () => {
+  const ok = (() => new Response("ok")) as ServerHandler
+  const post = (headers: Record<string, string>) =>
+    new Request("http://127.0.0.1/v1/messages", {
+      method: "POST",
+      headers,
+    }) as never
+
+  // Without this wrapper the node adapter rejects the body READ, not the
+  // request: `c.req.json()` throws ERR_BODY_TOO_LARGE, the app installs no
+  // Hono `onError`, and the user gets `500 Internal Server Error` —
+  // indistinguishable from a real proxy fault. That opaque failure is the
+  // whole reason this layer exists, so it is worth a test.
+  test("rejects an over-limit declared body with an explained 413", async () => {
+    const res = await withBodyLimit(ok)(
+      post({ "content-length": String(MAX_REQUEST_BODY_BYTES + 1) }),
+    )
+    expect(res.status).toBe(413)
+    const body = (await res.json()) as {
+      type: string
+      error: { type: string; message: string }
+    }
+    // Anthropic error envelope, same shape as every other error path, so a
+    // client that parses ours elsewhere parses this too.
+    expect(body.type).toBe("error")
+    expect(body.error.type).toBe("request_too_large")
+    // Comprehensible, not an opaque socket error: it must name both the
+    // actual size and the ceiling, or the user cannot tell how far over
+    // they are or whether trimming would help.
+    //
+    // Asserted in EXACT BYTES, at exactly one byte over, because that is
+    // where a rounded-MB-only message self-contradicts: an end-to-end run
+    // of this case produced "128.0 MB, over the 128.0 MB limit", which
+    // tells the user nothing. The MB gloss may stay; the precise figure
+    // must be there too.
+    expect(body.error.message).toContain(String(MAX_REQUEST_BODY_BYTES + 1))
+    expect(body.error.message).toContain(String(MAX_REQUEST_BODY_BYTES))
+    expect(body.error.message.length).toBeGreaterThan(40)
+  })
+
+  test("passes through a body at exactly the limit", async () => {
+    const res = await withBodyLimit(ok)(
+      post({ "content-length": String(MAX_REQUEST_BODY_BYTES) }),
+    )
+    expect(res.status).toBe(200)
+  })
+
+  // Absent or non-numeric Content-Length (chunked transfer encoding) must
+  // NOT be treated as over-limit — that would reject every streamed request.
+  // Enforcement in that case is srvx's streaming limit, which still bounds
+  // memory; this wrapper only improves the message on the common path.
+  test("passes through when Content-Length is absent or unparseable", async () => {
+    expect((await withBodyLimit(ok)(post({}))).status).toBe(200)
+    expect(
+      (await withBodyLimit(ok)(post({ "content-length": "not-a-number" })))
+        .status,
+    ).toBe(200)
+  })
+
+  test("does not consume the request body", async () => {
+    const req = new Request("http://127.0.0.1/v1/messages", {
+      method: "POST",
+      body: "hello",
+    })
+    const res = await withBodyLimit(
+      (async (r) => new Response(await r.text())) as ServerHandler,
+    )(req as never)
+    expect(await res.text()).toBe("hello")
+  })
+
+  // Layer 2: a body that declares no length still has to be bounded, and
+  // still has to fail legibly. Left to the runtimes this is where they
+  // diverge worst — bun kills the socket, node turns the failed body read
+  // into Hono's generic 500 (the app installs no onError). Enforcing it
+  // here makes the chunked case return the same 413 as the declared one.
+  test("rejects an over-limit chunked body with the same 413", async () => {
+    const chunk = new Uint8Array(64 * 1024)
+    let sent = 0
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent > MAX_REQUEST_BODY_BYTES) return controller.close()
+        sent += chunk.byteLength
+        controller.enqueue(chunk)
+      },
+    })
+    const req = new Request("http://127.0.0.1/v1/messages", {
+      method: "POST",
+      body,
+      // Required by undici for a streamed request body.
+      duplex: "half",
+    } as RequestInit)
+    // No declared length, so layer 1 cannot see it.
+    expect(req.headers.get("content-length")).toBeNull()
+
+    const res = await withBodyLimit(
+      (async (r) => new Response(await r.text())) as ServerHandler,
+    )(req as never)
+    expect(res.status).toBe(413)
+    const body2 = (await res.json()) as { error: { type: string } }
+    expect(body2.error.type).toBe("request_too_large")
+  })
+
+  // The overflow must not reach the app as a 500, and must not escape as
+  // a raw ERR_BODY_TOO_LARGE either. This pins the catch arm: a handler
+  // that lets the error propagate (rather than converting it to a 500 the
+  // way Hono does) still yields the explained 413.
+  test("maps a propagating ERR_BODY_TOO_LARGE to the same 413", async () => {
+    const throwing = (() => {
+      throw Object.assign(new Error("body too large"), {
+        code: "ERR_BODY_TOO_LARGE",
+      })
+    }) as ServerHandler
+    const res = await withBodyLimit(throwing)(post({}))
+    expect(res.status).toBe(413)
+  })
+
+  // ...but an unrelated handler error must still propagate untouched,
+  // rather than being laundered into a misleading 413.
+  test("does not swallow unrelated handler errors", async () => {
+    const boom = (() => {
+      throw new Error("kaboom")
+    }) as ServerHandler
+    expect(withBodyLimit(boom)(post({}))).rejects.toThrow("kaboom")
   })
 })

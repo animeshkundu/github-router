@@ -10,6 +10,27 @@ import type { Model } from "./get-models"
 export type CopilotEndpoint = "chat" | "responses"
 
 /**
+ * Catalog spellings that mean each of our two clients. Copilot is not
+ * self-consistent about the `/v1` prefix — the live catalog advertises
+ * `/v1/messages` prefixed but `/chat/completions` bare, and this repo's own
+ * fixtures carry both forms — so an exact-match on the bare spelling alone
+ * silently misses a real shape. `src/lib/model-validation.ts` already
+ * normalizes the same way (`ENDPOINT_ALIASES`); this keeps the two agreeing.
+ *
+ * Matching is EXACT against this set, never a suffix/`includes` test: a
+ * `ws:/responses` (websocket transport) entry is NOT the `/responses` HTTP
+ * client and must keep resolving to "serves neither".
+ */
+const CHAT_ENDPOINTS: ReadonlySet<string> = new Set([
+  "/chat/completions",
+  "/v1/chat/completions",
+])
+const RESPONSES_ENDPOINTS: ReadonlySet<string> = new Set([
+  "/responses",
+  "/v1/responses",
+])
+
+/**
  * Decide which endpoint to call for a model from its catalog
  * `supported_endpoints`. Prefers `/chat/completions` when available (the
  * simpler, more widely-supported shape) and falls back to `/responses` for
@@ -25,19 +46,51 @@ export type CopilotEndpoint = "chat" | "responses"
 export function pickEndpoint(model: Model): CopilotEndpoint | undefined {
   const eps = model.supported_endpoints
   if (!eps || eps.length === 0) return "chat"
-  if (eps.includes("/chat/completions")) return "chat"
-  if (eps.includes("/responses")) return "responses"
+  if (eps.some((e) => CHAT_ENDPOINTS.has(e))) return "chat"
+  if (eps.some((e) => RESPONSES_ENDPOINTS.has(e))) return "responses"
   return undefined
 }
 
 /**
- * `pickEndpoint` by model id against the live catalog. Returns "chat" when
- * the id isn't in the catalog (unknown models default to the chat shape,
- * matching the field-absent rule above) — callers that need a hard
- * presence check should look the model up themselves.
+ * The three genuinely different answers to "which client drives this model id".
+ *
+ * - `endpoint` — the model resolves to one of our two clients.
+ * - `unknown-model` — the id isn't in the live catalog. NOT an error: the
+ *   catalog may not be populated yet, and an id we've never seen is chat-shaped
+ *   by convention (same rule as a model that omits `supported_endpoints`). A
+ *   caller that just needs something to call should default to "chat" here.
+ * - `unreachable` — the model IS in the catalog and serves NEITHER
+ *   `/chat/completions` nor `/responses`. There is no correct default: any
+ *   client we pick will 400 upstream with `unsupported_api_for_model`. The
+ *   `endpoints` field carries what the catalog actually advertises (e.g.
+ *   `["/v1/messages"]` for a Claude entry that only serves Copilot's native
+ *   Anthropic endpoint) so the caller can say so out loud instead of guessing.
  */
-export function endpointForModelId(id: string): CopilotEndpoint {
+export type EndpointResolution =
+  | { kind: "endpoint"; endpoint: CopilotEndpoint }
+  | { kind: "unknown-model" }
+  | { kind: "unreachable"; endpoints: ReadonlyArray<string> }
+
+/**
+ * `pickEndpoint` by model id against the live catalog, WITHOUT collapsing
+ * "absent from the catalog" into "serves neither of our endpoints".
+ *
+ * This function deliberately has no default. The predecessor
+ * (`endpointForModelId`) returned `pickEndpoint(found) ?? "chat"`, which
+ * coerced both cases to "chat" — defensible for an unknown id, silently wrong
+ * for a catalog model serving only, say, `/v1/messages`: the caller would drive
+ * it through the chat client and get an opaque upstream 400 with no local
+ * signal about the real cause. `src/lib/browser-mcp/compressor.ts` already
+ * treats that case correctly (`if (!endpoint) continue`); this makes the same
+ * distinction available to callers that resolve by id.
+ *
+ * Callers that legitimately want the chat default for an unknown id can still
+ * have it — they just have to write it, per case, on purpose.
+ */
+export function resolveEndpointForModelId(id: string): EndpointResolution {
   const found = state.models?.data?.find((m: Model) => m.id === id)
-  if (!found) return "chat"
-  return pickEndpoint(found) ?? "chat"
+  if (!found) return { kind: "unknown-model" }
+  const endpoint = pickEndpoint(found)
+  if (endpoint) return { kind: "endpoint", endpoint }
+  return { kind: "unreachable", endpoints: found.supported_endpoints ?? [] }
 }
