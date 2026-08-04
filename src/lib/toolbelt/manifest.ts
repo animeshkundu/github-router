@@ -32,8 +32,50 @@ export interface ToolSpec {
   binBasename: string
   /** Extra bin filenames to also materialize as copies (e.g. `sg`). */
   aliases?: string[]
+  /**
+   * Lowest version this project's own code paths are known to work with.
+   *
+   * Gap-fill normally yields to whatever copy is already on the user's
+   * PATH, so we never shadow a pinned or wrapper install. That rule is
+   * right for a tool we merely *offer*, and wrong for one we *depend on*:
+   * a user with an older build silently gets degraded behavior from code
+   * that was verified against a newer one. The observed case was ast-grep
+   * — `sg run --json=stream` emits nothing at all on 0.41.1 while working
+   * on 0.43.0, so `code_search`'s `ast_pattern` mode returned zero results
+   * with no error and no notice.
+   *
+   * When set, gap-fill yields only if the PATH copy is *provably* at least
+   * this version. Unset means "any copy will do" (the default).
+   */
+  minVersion?: string
   /** Keyed `"<platform>-<arch>"`, e.g. `win32-x64`, `darwin-arm64`. */
   assets: Record<string, ToolAsset>
+}
+
+/**
+ * Parse the first `X.Y.Z` out of a `--version` line into comparable parts.
+ * Tools print wildly different shapes (`ast-grep 0.43.0`, `jq-1.7.1`,
+ * `fd 10.4.2`), so anchor on the first semver-looking triple rather than
+ * trying to model each format.
+ */
+export function parseVersionTriple(output: string): [number, number, number] | undefined {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(output)
+  if (!m) return undefined
+  return [Number(m[1]), Number(m[2]), Number(m[3])]
+}
+
+/** True when `have` is at least `want`. Either side unparseable → undefined (unknown). */
+export function satisfiesMinVersion(
+  have: string,
+  want: string,
+): boolean | undefined {
+  const a = parseVersionTriple(have)
+  const b = parseVersionTriple(want)
+  if (!a || !b) return undefined
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] > b[i]
+  }
+  return true
 }
 
 export function platformArchKey(
@@ -185,6 +227,12 @@ export const TOOLBELT_TOOLS: ToolSpec[] = [
     command: "ast-grep",
     binBasename: "ast-grep",
     aliases: ["sg"],
+    // `code_search`'s ast_pattern mode runs `sg run --json=stream`, which
+    // is documented in code-search.ts as verified on 0.43.0. On 0.41.1 that
+    // flag form produces NO output and exits 0, so the search silently
+    // returns zero results — the failure mode is indistinguishable from
+    // "no matches". Keep this in step with the pinned asset version below.
+    minVersion: "0.43.0",
     assets: {
       "win32-x64": {
         url: "https://github.com/ast-grep/ast-grep/releases/download/0.43.0/app-x86_64-pc-windows-msvc.zip",

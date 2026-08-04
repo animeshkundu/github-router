@@ -37,13 +37,13 @@ import process from "node:process"
 
 import consola from "consola"
 
-import { resolveExecutable } from "../exec"
+import { resolveExecutable, runCommandCapture } from "../exec"
 import { PATHS } from "../paths"
 import { withInstallLock } from "../update-lock"
 
 import { extractTarGzMember, extractZipMember } from "./extract"
 import { toolbeltEnabled, toolbeltSkipSet, vscodeRipgrepPath } from "./index"
-import { assetFor, TOOLBELT_TOOLS, type ToolAsset, type ToolSpec } from "./manifest"
+import { assetFor, satisfiesMinVersion, TOOLBELT_TOOLS, type ToolAsset, type ToolSpec } from "./manifest"
 
 /** Per-download cap (bytes) — these binaries are a few MB at most. */
 const MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
@@ -140,6 +140,44 @@ async function provisionRg(binDir: string, skip: Set<string>): Promise<void> {
   await commit(tmp, dest)
 }
 
+/**
+ * Does the user's own copy on PATH satisfy `spec.minVersion`?
+ *
+ * Returns true when there is nothing to check (no minVersion), and — this
+ * is the load-bearing part — ALSO returns true when the probe fails or the
+ * output cannot be parsed. Gap-fill exists so we never shadow a user's
+ * pinned or wrapper install, and an unreadable `--version` is not evidence
+ * that their tool is inadequate. We only step in front of it on positive
+ * proof that it is too old.
+ */
+async function pathCopyIsAdequate(spec: ToolSpec, resolved: string): Promise<boolean> {
+  if (!spec.minVersion) return true
+  try {
+    // `runCommandCapture`, NOT `runManagedExeCapture`: on Windows a tool
+    // installed via npm resolves to a `.cmd` shim, which cannot be spawned
+    // with `shell:false` (it throws EINVAL). That is exactly how the
+    // ast-grep case presented — the probe threw, we treated the version as
+    // unknown, and yielded to the outdated copy anyway. runCommandCapture
+    // goes through buildExecInvocation, which routes shims via cmd.exe.
+    const res = await runCommandCapture([resolved, "--version"], {
+      timeoutMs: VERSION_PROBE_TIMEOUT_MS,
+    })
+    const verdict = satisfiesMinVersion(`${res.stdout} ${res.stderr}`, spec.minVersion)
+    if (verdict === undefined) return true
+    if (!verdict) {
+      consola.debug(
+        `[toolbelt] ${spec.command} on PATH is older than ${spec.minVersion}; using the router-pinned build instead`,
+      )
+    }
+    return verdict
+  } catch {
+    return true
+  }
+}
+
+/** A `--version` call should be instant; this only bounds a hung binary. */
+const VERSION_PROBE_TIMEOUT_MS = 5_000
+
 async function provisionTool(
   spec: ToolSpec,
   binDir: string,
@@ -154,7 +192,14 @@ async function provisionTool(
     return
   }
   // Gap-fill: user already has it on PATH → remove ours, don't shadow.
-  if (resolveExecutable(spec.command)) {
+  // Exception: a tool carrying `minVersion` is one this project's own code
+  // depends on, so an older PATH copy is not "good enough" — it degrades
+  // us silently. In that case we materialize ours anyway; the toolbelt bin
+  // is prepended to the spawned agent's PATH and code_search checks the
+  // router-owned paths first, so ours wins where it matters while the
+  // user's shell keeps theirs.
+  const onPath = resolveExecutable(spec.command)
+  if (onPath && (await pathCopyIsAdequate(spec, onPath))) {
     await removeTool(spec, binDir)
     return
   }
