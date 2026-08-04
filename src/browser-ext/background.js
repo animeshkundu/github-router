@@ -178,7 +178,23 @@ const SHOT_ERR = {
   CAPTURE_STALLED: "CAPTURE_STALLED",
   TARGET_CHANGED: "TARGET_CHANGED",
   QUEUE_BUSY: "QUEUE_BUSY",
+  RATE_LIMITED: "RATE_LIMITED",
 }
+
+/**
+ * Chrome's own per-second cap on captureVisibleTab. Matched on the message
+ * because the API surfaces it as a plain Error with no code of its own.
+ */
+function isCaptureQuotaError(err) {
+  return Boolean(
+    err
+    && typeof err.message === "string"
+    && /MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND|exceeds the .*quota/i.test(err.message),
+  )
+}
+
+/** Chrome's quota window is one second; back off just past it before retrying. */
+const CAPTURE_QUOTA_BACKOFF_MS = 1_100
 
 function shotError(code, message) {
   const err = new Error(message)
@@ -465,48 +481,82 @@ async function toolScreenshot(args) {
     }
     const budget = Math.min(SHOT_WATCHDOG_MS, remaining)
 
-    // Refuse to stack captures on a window that already has one stuck.
-    // The lock does not cover this: a stalled capture stays pending
-    // after we release, so without this guard each retry would add
-    // another unkillable in-flight call.
-    if ((windowPendingCaptures.get(windowId) || 0) > 0) {
-      throw shotError(
-        SHOT_ERR.CAPTURE_STALLED,
-        `browser_screenshot: an earlier capture on window ${windowId} never completed and cannot be cancelled, so a new one is not being started. `
-          + "Make the browser window visible; if that lets the earlier capture finish, captures resume automatically.",
-      )
+    // One capture attempt. Kept as a closure so the rate-limit path below
+    // can run it a second time WITHOUT ever having two in flight: it is
+    // only re-invoked after the first attempt has REJECTED, i.e. settled.
+    const attemptCapture = async (budgetMs) => {
+      // Refuse to stack captures on a window that already has one stuck.
+      // The lock does not cover this: a stalled capture stays pending
+      // after we release, so without this guard each retry would add
+      // another unkillable in-flight call.
+      if ((windowPendingCaptures.get(windowId) || 0) > 0) {
+        throw shotError(
+          SHOT_ERR.CAPTURE_STALLED,
+          `browser_screenshot: an earlier capture on window ${windowId} never completed and cannot be cancelled, so a new one is not being started. `
+            + "Make the browser window visible; if that lets the earlier capture finish, captures resume automatically.",
+        )
+      }
+
+      windowPendingCaptures.set(windowId, (windowPendingCaptures.get(windowId) || 0) + 1)
+      const capture = chrome.tabs.captureVisibleTab(windowId, captureOpts)
+      // Doubles as the unhandled-rejection guard: the losing promise is
+      // unobservable but must not surface as an unhandled rejection.
+      // Promise.race still sees the original settlement either way.
+      const settled = () => {
+        const next = (windowPendingCaptures.get(windowId) || 1) - 1
+        if (next <= 0) windowPendingCaptures.delete(windowId)
+        else windowPendingCaptures.set(windowId, next)
+      }
+      capture.then(settled, settled)
+
+      // Sentinel rather than a mutable flag: the raced value itself tells us
+      // who won, so there is no ordering assumption between the timer's
+      // continuation and this one.
+      const STALLED = Symbol("stalled")
+      const raced = await Promise.race([capture, sleep(budgetMs).then(() => STALLED)])
+      if (raced === STALLED) {
+        throw shotError(
+          SHOT_ERR.CAPTURE_STALLED,
+          `browser_screenshot: the browser accepted the capture but produced no frame within ${budgetMs}ms. `
+            + "This means the target has no rendering surface — typically the window is minimized, fully covered, "
+            + "on another virtual desktop, or the session is locked. Make the browser window visible and retry.",
+        )
+      }
+      return raced
     }
 
-    // Exactly ONE capture. A JS timeout does not cancel captureVisibleTab,
-    // so racing it and then firing a second would leave two in flight and
-    // can trip Chrome's capture rate limit. If this one stalls we fail
-    // fast; the caller retries with a fresh call.
-    windowPendingCaptures.set(windowId, (windowPendingCaptures.get(windowId) || 0) + 1)
-    const capture = chrome.tabs.captureVisibleTab(windowId, captureOpts)
-    // Doubles as the unhandled-rejection guard: the losing promise is
-    // unobservable but must not surface as an unhandled rejection.
-    // Promise.race still sees the original settlement either way.
-    const settled = () => {
-      const next = (windowPendingCaptures.get(windowId) || 1) - 1
-      if (next <= 0) windowPendingCaptures.delete(windowId)
-      else windowPendingCaptures.set(windowId, next)
+    // Chrome rate-limits captureVisibleTab to a couple of calls per second
+    // per window and REJECTS past that with a raw quota message. An agent
+    // loop (screenshot -> act -> screenshot) hits this routinely, and the
+    // bare message tells it nothing — it reads like a hard failure when the
+    // only thing wrong is that it asked too fast. The per-window lock
+    // serializes captures but does not PACE them, so serialization alone
+    // does not avoid it.
+    //
+    // Retrying here is safe specifically because the first attempt
+    // REJECTED: there is no in-flight capture to overlap with, which is the
+    // condition that makes retrying a stalled capture unsafe.
+    let dataUrl
+    try {
+      dataUrl = await attemptCapture(budget)
+    } catch (err) {
+      const left = deadline - Date.now()
+      if (!isCaptureQuotaError(err) || left <= CAPTURE_QUOTA_BACKOFF_MS) throw err
+      await sleep(CAPTURE_QUOTA_BACKOFF_MS)
+      try {
+        dataUrl = await attemptCapture(Math.min(SHOT_WATCHDOG_MS, deadline - Date.now()))
+      } catch (retryErr) {
+        if (!isCaptureQuotaError(retryErr)) throw retryErr
+        throw shotError(
+          SHOT_ERR.RATE_LIMITED,
+          "browser_screenshot: the browser is rate-limiting screen captures (it allows only a couple per second per window) "
+            + "and still refused after a backoff. Nothing is broken — space captures out, or take one screenshot and work "
+            + "from it rather than re-capturing after every action.",
+        )
+      }
     }
-    capture.then(settled, settled)
 
-    // Sentinel rather than a mutable flag: the raced value itself tells us
-    // who won, so there is no ordering assumption between the timer's
-    // continuation and this one.
-    const STALLED = Symbol("stalled")
-    const raced = await Promise.race([capture, sleep(budget).then(() => STALLED)])
-    if (raced === STALLED) {
-      throw shotError(
-        SHOT_ERR.CAPTURE_STALLED,
-        `browser_screenshot: the browser accepted the capture but produced no frame within ${budget}ms. `
-          + "This means the target has no rendering surface — typically the window is minimized, fully covered, "
-          + "on another virtual desktop, or the session is locked. Make the browser window visible and retry.",
-      )
-    }
-    const m = /^data:([^;]+);base64,(.*)$/.exec(raced || "")
+    const m = /^data:([^;]+);base64,(.*)$/.exec(dataUrl || "")
     if (!m) throw new Error("browser_screenshot: captureVisibleTab returned unexpected shape")
     return { contentType: m[1], dataBase64: m[2] }
   })
