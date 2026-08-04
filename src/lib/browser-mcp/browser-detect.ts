@@ -23,57 +23,70 @@ export type SupportedBrowser = "chrome" | "edge"
 
 let cached: ReadonlyArray<SupportedBrowser> | undefined
 
-function probeWindows(): Array<SupportedBrowser> {
-  const found: Array<SupportedBrowser> = []
-  // App Paths registry key — the canonical "is this binary installed" probe
-  // on Windows. `reg query` is in System32 and needs no admin. We squelch
-  // stderr; a missing key produces a non-zero exit which we treat as absent.
-  const probe = (subkey: string): boolean => {
+// App Paths registry key — the canonical "is this binary installed" probe
+// on Windows. `reg query` is in System32 and needs no admin. We squelch
+// stderr; a missing key produces a non-zero exit which we treat as absent.
+function probeWindowsRegistry(subkey: string): boolean {
+  try {
+    execFileSync(
+      "reg.exe",
+      ["query", `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${subkey}`, "/ve"],
+      { windowsHide: true, timeout: 3000, stdio: ["ignore", "pipe", "ignore"] },
+    )
+    return true
+  } catch {
     try {
       execFileSync(
         "reg.exe",
-        ["query", `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${subkey}`, "/ve"],
+        ["query", `HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${subkey}`, "/ve"],
         { windowsHide: true, timeout: 3000, stdio: ["ignore", "pipe", "ignore"] },
       )
       return true
     } catch {
-      try {
-        execFileSync(
-          "reg.exe",
-          ["query", `HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${subkey}`, "/ve"],
-          { windowsHide: true, timeout: 3000, stdio: ["ignore", "pipe", "ignore"] },
-        )
-        return true
-      } catch {
-        return false
-      }
+      return false
     }
   }
-  if (probe("chrome.exe")) found.push("chrome")
-  if (probe("msedge.exe")) found.push("edge")
-  // Final fallback: literal paths under Program Files / LocalAppData. Per-user
-  // installs land in LocalAppData; system installs in Program Files. Edge ships
-  // pre-installed on Windows 11 so the literal-path fallback usually catches it.
-  if (!found.includes("chrome")) {
-    const localApp = process.env.LOCALAPPDATA
-    const pf = process.env["PROGRAMFILES"]
-    const pf86 = process.env["PROGRAMFILES(X86)"]
-    const candidates = [
-      localApp ? path.join(localApp, "Google", "Chrome", "Application", "chrome.exe") : undefined,
-      pf ? path.join(pf, "Google", "Chrome", "Application", "chrome.exe") : undefined,
-      pf86 ? path.join(pf86, "Google", "Chrome", "Application", "chrome.exe") : undefined,
-    ].filter((p): p is string => typeof p === "string")
-    if (candidates.some(existsSync)) found.push("chrome")
-  }
-  if (!found.includes("edge")) {
-    const pf86 = process.env["PROGRAMFILES(X86)"]
-    const pf = process.env["PROGRAMFILES"]
-    const candidates = [
-      pf86 ? path.join(pf86, "Microsoft", "Edge", "Application", "msedge.exe") : undefined,
-      pf ? path.join(pf, "Microsoft", "Edge", "Application", "msedge.exe") : undefined,
-    ].filter((p): p is string => typeof p === "string")
-    if (candidates.some(existsSync)) found.push("edge")
-  }
+}
+
+/** Well-known install locations. Per-user installs land in LocalAppData; system installs in Program Files. */
+function windowsLiteralPaths(browser: SupportedBrowser): string[] {
+  const localApp = process.env.LOCALAPPDATA
+  const pf = process.env["PROGRAMFILES"]
+  const pf86 = process.env["PROGRAMFILES(X86)"]
+  const parts: Array<string | undefined> =
+    browser === "chrome"
+      ? [
+          localApp ? path.join(localApp, "Google", "Chrome", "Application", "chrome.exe") : undefined,
+          pf ? path.join(pf, "Google", "Chrome", "Application", "chrome.exe") : undefined,
+          pf86 ? path.join(pf86, "Google", "Chrome", "Application", "chrome.exe") : undefined,
+        ]
+      : [
+          pf86 ? path.join(pf86, "Microsoft", "Edge", "Application", "msedge.exe") : undefined,
+          pf ? path.join(pf, "Microsoft", "Edge", "Application", "msedge.exe") : undefined,
+        ]
+  return parts.filter((p): p is string => typeof p === "string")
+}
+
+function probeWindows(): Array<SupportedBrowser> {
+  const found: Array<SupportedBrowser> = []
+  // Cheap literal-path check FIRST, registry only for what it misses.
+  //
+  // A hit here is conclusive — the binary is on disk, so the browser is
+  // installed — and it costs a couple of stat() calls. The registry probe is
+  // the more general check (it also finds non-standard install locations), so
+  // it is still consulted, but only for a browser the literal paths did not
+  // find. That is the only case where it can change the answer.
+  //
+  // Order matters because `reg.exe` is spawned SYNCHRONOUSLY: probing both
+  // browsers registry-first costs up to four blocking spawns (HKCU then HKLM,
+  // per browser) on a single-threaded proxy that is typically streaming a
+  // model response at the same time. Edge ships pre-installed on Windows 11
+  // and Chrome installs to a standard location, so on a typical machine this
+  // ordering spawns nothing at all.
+  if (windowsLiteralPaths("chrome").some(existsSync)) found.push("chrome")
+  if (windowsLiteralPaths("edge").some(existsSync)) found.push("edge")
+  if (!found.includes("chrome") && probeWindowsRegistry("chrome.exe")) found.push("chrome")
+  if (!found.includes("edge") && probeWindowsRegistry("msedge.exe")) found.push("edge")
   return found
 }
 

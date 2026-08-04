@@ -214,6 +214,16 @@ const UNKNOWN_LOADED_VERSION = "unknown (extension reported no version)"
 const attemptedReloads = new Set<string>()
 
 /**
+ * `auto_installed` for the `extension_outdated` payloads below.
+ *
+ * Reaching those branches means the bridge is running and the extension is
+ * connected, so the native-messaging manifest is provably already correct —
+ * nothing was installed, and claiming otherwise would point the reader at a
+ * step that is not the remedy. The remedy is reloading the extension.
+ */
+const NOTHING_AUTO_INSTALLED: ReadonlyArray<string> = Object.freeze([])
+
+/**
  * Send POST /reload to the bridge — triggers __reload__ control frame
  * over native messaging, which the extension's handler dispatches into
  * chrome.runtime.reload(). After this returns, the OLD bridge process
@@ -443,25 +453,38 @@ async function _ensureBridgeReadyImpl(): Promise<
     return buildInstallRequired("bridge_bundle_missing", [])
   }
 
-  // Pre-emptively install the NMH manifest for every detected browser
-  // BEFORE we probe — that way the very first probe-failure response
-  // already reports the manifests as auto-installed and the user only
-  // needs to do the unpacked-load step.
-  const installed = installNativeHostForAll(browsers)
-  const autoInstalled = installed.flatMap((r) => [
-    `nmh_manifest_${r.browser}`,
-  ])
+  // Installing the NMH manifest is only meaningful when the bridge is NOT
+  // already running. A live bridge is itself proof the manifest is correct
+  // and discoverable — Chrome used it to spawn that very process — so
+  // re-writing it on a healthy path repairs nothing.
+  //
+  // It used to run unconditionally, before the probe. That cost a
+  // SYNCHRONOUS reg.exe spawn per browser on every uncached preflight:
+  // measured at ~45ms of fully-blocked event loop every 5s of active
+  // browsing, and ~481ms on the first call of a process (which also pays
+  // browser detection). This proxy is single-threaded and is typically
+  // streaming a model response at the same time, so that stall is paid by
+  // every other in-flight request.
+  //
+  // Installing lazily preserves the property the eager call existed for —
+  // any install_required payload still reports the manifests as
+  // auto-installed, because every branch that returns one installs first.
+  // Drift repair is preserved too, just deferred to the moment it can
+  // actually matter: a manifest deleted while the bridge runs only affects
+  // the NEXT browser launch, and by then the bridge is down and we install.
+  const installNow = (): string[] =>
+    installNativeHostForAll(browsers).map((r) => `nmh_manifest_${r.browser}`)
 
   const discovery = readBridgeDiscovery()
   if (!discovery) {
-    return buildInstallRequired("bridge_not_running", autoInstalled)
+    return buildInstallRequired("bridge_not_running", installNow())
   }
   const health = await probeHealth(discovery.port, discovery.token)
   if (!health || !health.ok) {
-    return buildInstallRequired("bridge_not_running", autoInstalled)
+    return buildInstallRequired("bridge_not_running", installNow())
   }
   if (!health.extension_connected) {
-    return buildInstallRequired("extension_not_loaded", autoInstalled)
+    return buildInstallRequired("extension_not_loaded", installNow())
   }
 
   // Version-mismatch detection + auto-reload. The staleness rule itself
@@ -478,7 +501,7 @@ async function _ensureBridgeReadyImpl(): Promise<
     const loadedLabel = loadedUnknown ? UNKNOWN_LOADED_VERSION : (loadedVersion as string)
     const reloadKey = `${loadStableExtensionId()}::${expectedVersion}`
     if (attemptedReloads.has(reloadKey)) {
-      return buildInstallRequired("extension_outdated", autoInstalled, {
+      return buildInstallRequired("extension_outdated", NOTHING_AUTO_INSTALLED, {
         loaded: loadedLabel,
         expected: expectedVersion,
       })
@@ -486,7 +509,7 @@ async function _ensureBridgeReadyImpl(): Promise<
     attemptedReloads.add(reloadKey)
     const reloadOk = await postReload(discovery.port, discovery.token)
     if (!reloadOk) {
-      return buildInstallRequired("extension_outdated", autoInstalled, {
+      return buildInstallRequired("extension_outdated", NOTHING_AUTO_INSTALLED, {
         loaded: loadedLabel,
         expected: expectedVersion,
       })
@@ -503,7 +526,7 @@ async function _ensureBridgeReadyImpl(): Promise<
       150,
     )
     if (!newDiscovery) {
-      return buildInstallRequired("extension_outdated", autoInstalled, {
+      return buildInstallRequired("extension_outdated", NOTHING_AUTO_INSTALLED, {
         loaded: loadedLabel,
         expected: expectedVersion,
       })
