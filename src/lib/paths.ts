@@ -358,7 +358,19 @@ function policyFor(name: string): MirrorPolicy {
  * reclassification that would let `sweepStalePeerAgentMdFiles` delete
  * files in the user's real `~/.claude/agents/`).
  */
-export const __testing = { policyFor, ensureSharedSymlink }
+export const __testing = {
+  policyFor,
+  ensureSharedSymlink,
+  // The mirror walk runs concurrently under a bounded semaphore; both are
+  // exposed so tests can prove the copy stays byte-identical to the serial
+  // version and that the bound actually bounds.
+  mirrorDirRecursive: (sourceDir: string, targetDir: string, relPath: string) =>
+    mirrorDirRecursive(sourceDir, targetDir, relPath),
+  createSemaphore,
+  get MIRROR_COPY_CONCURRENCY() {
+    return MIRROR_COPY_CONCURRENCY
+  },
+}
 
 /**
  * Names with `SHARED` policy, materialized once for iteration in
@@ -1102,10 +1114,57 @@ async function assertOnboardingGateInjected(targetDir: string): Promise<void> {
  *   of `sourceDir` and we don't reintroduce a confused-deputy vector.
  * - Files copy only if source mtime > target mtime (idempotent).
  */
+/**
+ * Max file operations in flight across the WHOLE mirror walk.
+ *
+ * The walk is I/O-bound over hundreds of independent small files, so it
+ * parallelizes well: measured 1021ms serial vs 311ms at this limit for a real
+ * 394-file / 4.7MB `~/.claude` (Windows 11, 16 cores). It must be BOUNDED
+ * rather than a bare `Promise.all` over every entry — the mirror is re-copied
+ * on every launch (the target is a fresh per-launch dir, so the mtime skip
+ * below never fires across launches), and firing hundreds of simultaneous
+ * `copyFile`s just trades one bottleneck for file-handle exhaustion.
+ *
+ * The limit is shared across the recursion via a semaphore rather than applied
+ * per-directory: a per-directory bound would multiply with nesting depth and
+ * stop being a bound at all.
+ */
+const MIRROR_COPY_CONCURRENCY = 16
+
+/** Counting semaphore. FIFO, so a deep subtree cannot starve a shallow one. */
+function createSemaphore(limit: number) {
+  let active = 0
+  const waiters: Array<() => void> = []
+  return async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
+    if (active >= limit) {
+      await new Promise<void>((resolve) => waiters.push(resolve))
+      // Woken by a HAND-OFF: the releaser kept the slot counted on our behalf
+      // rather than decrementing, so `active` is already correct here. Doing
+      // `active++` would double-count — and worse, decrementing first would
+      // open a window where a fresh caller sees a free slot and takes it too,
+      // letting the pool exceed `limit`.
+    } else {
+      active++
+    }
+    try {
+      return await fn()
+    } finally {
+      const next = waiters.shift()
+      // Hand the slot straight to the next waiter (keeping `active` as-is), or
+      // give it back to the pool when nobody is queued.
+      if (next) next()
+      else active--
+    }
+  }
+}
+
 async function mirrorDirRecursive(
   sourceDir: string,
   targetDir: string,
   relPath: string,
+  withSlot: <T>(fn: () => Promise<T>) => Promise<T> = createSemaphore(
+    MIRROR_COPY_CONCURRENCY,
+  ),
 ): Promise<void> {
   const sourcePath = path.join(sourceDir, relPath)
   let entries: Array<string>
@@ -1116,83 +1175,90 @@ async function mirrorDirRecursive(
     consola.debug(`mirrorDirRecursive: cannot readdir ${sourcePath}:`, err)
     return
   }
-  for (const name of entries) {
-    // Policy dispatch at top-level only. Sub-paths within MIRRORED
-    // dirs always cascade as MIRRORED.
-    if (relPath === "") {
-      const policy = policyFor(name)
-      if (policy === "ISOLATED" || policy === "SHARED") continue
-    }
-    const childRel = relPath === "" ? name : path.join(relPath, name)
-    // Never mirror a proxy-authored agent `.md` out of the user's real
-    // `~/.claude/agents/`. A pre-mirror release wrote `peer-<pid>-<hex>-<name>.md`
-    // files there; left alone they get copied into every new mirror and register
-    // alongside the current launch's files under the SAME frontmatter `name:`,
-    // so Claude Code resolves between a live definition and a dead one
-    // nondeterministically. Filtering at the COPY step fixes that without
-    // deleting anything we do not own: the user's directory is left exactly as
-    // it is, and the current launch writes its own files into the mirror after
-    // this walk. Deleting them instead would be unsound, because the filename
-    // shape is evidence of provenance, not proof of it, and a user who copied a
-    // generated file to customize it would lose it.
-    if (relPath === "agents" && PEER_AGENT_MD_FILENAME.test(name)) {
-      continue
-    }
-    const childSource = path.join(sourceDir, childRel)
-    const childTarget = path.join(targetDir, childRel)
-    let stats: Awaited<ReturnType<typeof fs.lstat>>
-    try {
-      stats = await fs.lstat(childSource)
-    } catch (err) {
-      consola.debug(`mirrorDirRecursive: cannot lstat ${childSource}:`, err)
-      continue
-    }
-    if (stats.isSymbolicLink()) {
-      // Skip symlinks during mirror copy. gemini-critic security finding:
-      // recreating user symlinks in our mirror creates a confused-deputy
-      // vector — a previously prompt-injected process could place
-      // `~/.claude/<X>` → `/some/sensitive/file`, our walker would mirror
-      // it, and any subsequent write to `<mirror>/<X>` (by us or by
-      // Claude Code) would follow the symlink and overwrite the target.
-      // Snapshot-copy semantics make symlink preservation moot anyway:
-      // a snapshot is a point-in-time content copy, and a symlink
-      // recreated in the mirror points at exactly the same target as
-      // the original would have — the user-side symlink is sufficient.
-      // If a user has a legitimate need for a symlink to be visible
-      // through the proxy session, they can create the equivalent
-      // symlink in their `~/.claude/` directly and it'll be reachable
-      // — they just won't see it in our mirror dir.
-      consola.debug(`mirrorDirRecursive: skipping symlink ${childSource} (security policy)`)
-      continue
-    }
-    if (stats.isDirectory()) {
-      await fs.mkdir(childTarget, { recursive: true })
-      await mirrorDirRecursive(sourceDir, targetDir, childRel)
-      continue
-    }
-    if (stats.isFile()) {
-      // mtime-based skip — only copy if source is newer than target.
-      let needsCopy = true
-      try {
-        const targetStat = await fs.lstat(childTarget)
-        if (targetStat.isFile() && targetStat.mtimeMs >= stats.mtimeMs) {
-          needsCopy = false
-        }
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-          consola.debug(`mirrorDirRecursive: lstat target ${childTarget}:`, err)
-        }
+  // Entries within a directory are independent, so they run concurrently under
+  // the shared slot budget. Semantics per entry are unchanged from the serial
+  // version; only the scheduling differs.
+  await Promise.all(
+    entries.map(async (name) => {
+      // Policy dispatch at top-level only. Sub-paths within MIRRORED
+      // dirs always cascade as MIRRORED.
+      if (relPath === "") {
+        const policy = policyFor(name)
+        if (policy === "ISOLATED" || policy === "SHARED") return
       }
-      if (!needsCopy) continue
-      try {
-        await fs.copyFile(childSource, childTarget, fs.constants.COPYFILE_FICLONE)
-      } catch (err) {
-        consola.debug(`mirrorDirRecursive: copy ${childSource} → ${childTarget}:`, err)
+      const childRel = relPath === "" ? name : path.join(relPath, name)
+      // Never mirror a proxy-authored agent `.md` out of the user's real
+      // `~/.claude/agents/`. A pre-mirror release wrote `peer-<pid>-<hex>-<name>.md`
+      // files there; left alone they get copied into every new mirror and register
+      // alongside the current launch's files under the SAME frontmatter `name:`,
+      // so Claude Code resolves between a live definition and a dead one
+      // nondeterministically. Filtering at the COPY step fixes that without
+      // deleting anything we do not own: the user's directory is left exactly as
+      // it is, and the current launch writes its own files into the mirror after
+      // this walk. Deleting them instead would be unsound, because the filename
+      // shape is evidence of provenance, not proof of it, and a user who copied a
+      // generated file to customize it would lose it.
+      if (relPath === "agents" && PEER_AGENT_MD_FILENAME.test(name)) {
+        return
       }
-      continue
-    }
-    // Skip other inode types (sockets, devices, fifos) silently.
-  }
+      const childSource = path.join(sourceDir, childRel)
+      const childTarget = path.join(targetDir, childRel)
+      let stats: Awaited<ReturnType<typeof fs.lstat>>
+      try {
+        stats = await withSlot(() => fs.lstat(childSource))
+      } catch (err) {
+        consola.debug(`mirrorDirRecursive: cannot lstat ${childSource}:`, err)
+        return
+      }
+      if (stats.isSymbolicLink()) {
+        // Skip symlinks during mirror copy. gemini-critic security finding:
+        // recreating user symlinks in our mirror creates a confused-deputy
+        // vector — a previously prompt-injected process could place
+        // `~/.claude/<X>` → `/some/sensitive/file`, our walker would mirror
+        // it, and any subsequent write to `<mirror>/<X>` (by us or by
+        // Claude Code) would follow the symlink and overwrite the target.
+        // Snapshot-copy semantics make symlink preservation moot anyway:
+        // a snapshot is a point-in-time content copy, and a symlink
+        // recreated in the mirror points at exactly the same target as
+        // the original would have — the user-side symlink is sufficient.
+        // If a user has a legitimate need for a symlink to be visible
+        // through the proxy session, they can create the equivalent
+        // symlink in their `~/.claude/` directly and it'll be reachable
+        // — they just won't see it in our mirror dir.
+        consola.debug(`mirrorDirRecursive: skipping symlink ${childSource} (security policy)`)
+        return
+      }
+      if (stats.isDirectory()) {
+        await withSlot(() => fs.mkdir(childTarget, { recursive: true }))
+        await mirrorDirRecursive(sourceDir, targetDir, childRel, withSlot)
+        return
+      }
+      if (stats.isFile()) {
+        // mtime-based skip — only copy if source is newer than target.
+        let needsCopy = true
+        try {
+          const targetStat = await withSlot(() => fs.lstat(childTarget))
+          if (targetStat.isFile() && targetStat.mtimeMs >= stats.mtimeMs) {
+            needsCopy = false
+          }
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+            consola.debug(`mirrorDirRecursive: lstat target ${childTarget}:`, err)
+          }
+        }
+        if (!needsCopy) return
+        try {
+          await withSlot(() =>
+            fs.copyFile(childSource, childTarget, fs.constants.COPYFILE_FICLONE),
+          )
+        } catch (err) {
+          consola.debug(`mirrorDirRecursive: copy ${childSource} → ${childTarget}:`, err)
+        }
+        return
+      }
+      // Skip other inode types (sockets, devices, fifos) silently.
+    }),
+  )
 }
 
 /**
