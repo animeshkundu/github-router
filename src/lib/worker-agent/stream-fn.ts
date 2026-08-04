@@ -342,11 +342,22 @@ async function runChatAttempt(
   let nextContentIndex = 0
   let activeTextIndex: number | null = null
   const toolPiIndexByOAI = new Map<number, number>()
+  // Truncation guard. `fetch-event-stream`'s `events()` returns cleanly on a
+  // premature EOF rather than throwing, so a connection cut mid-response is
+  // indistinguishable from a finished one unless the terminal sentinel is
+  // tracked explicitly. Without this the loop simply fell through and the
+  // worker synthesized `{type:"done", reason:"stop"}` — reporting truncated
+  // output as a successful completion. The Anthropic egress has guarded this
+  // since it shipped (`chat-egress.ts`); the worker path never did.
+  let sawDone = false
 
   for await (const evt of sseStream) {
       const data = evt?.data
       if (data == null) continue
-      if (data === "[DONE]") break
+      if (data === "[DONE]") {
+        sawDone = true
+        break
+      }
 
       let chunk: ChatCompletionChunk
       try {
@@ -462,6 +473,32 @@ async function runChatAttempt(
   // A timed-out attempt may ignore abort briefly; never emit after its terminal.
   if (!state.active) return
 
+  // Gate on `finishReason == null`: a chat stream's LOGICAL terminal is
+  // `choice.finish_reason`, and `[DONE]` is only a sentinel after it. Upstreams
+  // are known to drop the connection without the sentinel when they terminate a
+  // stream for `content_filter`, so keying truncation off the sentinel alone
+  // reported those as generic truncation and masked the specific cause. If a
+  // finish reason arrived, the message is complete and the checks below apply.
+  if (!sawDone && accum.finishReason == null) {
+    // Close the open text block first so whatever DID arrive is preserved on the
+    // partial, then terminate as an error. Reporting the truncation is the whole
+    // point: the caller must not receive half an answer labelled complete.
+    if (activeTextIndex != null) {
+      stream.push({
+        type: "text_end",
+        contentIndex: activeTextIndex,
+        content: joinTextChunks(accum, activeTextIndex),
+        partial: buildPartial(resolved, accum),
+      })
+    }
+    pushTerminalError(
+      stream,
+      resolved,
+      new Error("chat stream ended without a [DONE] sentinel (truncated)"),
+    )
+    return
+  }
+
   // Close any still-open text block.
   if (activeTextIndex != null) {
     stream.push({
@@ -470,6 +507,21 @@ async function runChatAttempt(
       content: joinTextChunks(accum, activeTextIndex),
       partial: buildPartial(resolved, accum),
     })
+  }
+
+  // An upstream safety block is not a normal stop. `mapFinishReason` folds every
+  // unrecognized reason into "stop", which made a filtered response — typically
+  // empty — look exactly like a model that finished with nothing to say. Pi's
+  // StopReason vocabulary has no "refusal" member (the Anthropic egress uses
+  // that name; see `chatStopReason`), so the honest representation here is a
+  // terminal error naming the cause.
+  if (accum.finishReason === "content_filter") {
+    pushTerminalError(
+      stream,
+      resolved,
+      new Error("upstream content filter blocked the response"),
+    )
+    return
   }
 
   // Emit `toolcall_end` for each accumulated tool call in wire order.
@@ -500,10 +552,7 @@ function buildPayload(
   if (context.systemPrompt) {
     messages.push({ role: "system", content: context.systemPrompt })
   }
-  for (const m of context.messages) {
-    const oai = translateMessage(m)
-    if (oai) messages.push(oai)
-  }
+  messages.push(...translateMessages(context.messages))
 
   const tools = translateTools(context.tools)
   const payload: ChatCompletionsPayload = {
@@ -521,11 +570,61 @@ function buildPayload(
   return payload
 }
 
-function translateMessage(m: PiMessage): OAIMessage | null {
-  if (m.role === "user") return translateUser(m)
-  if (m.role === "assistant") return translateAssistant(m)
-  if (m.role === "toolResult") return translateToolResult(m)
-  return null
+/**
+ * Pi messages → wire messages, with tool-result images hoisted to the END of
+ * each contiguous run of tool results.
+ *
+ * A tool-output wire item cannot carry an image, so images have to ride in a
+ * separate user message. The obvious implementation — fan each `toolResult` out
+ * to `[tool, user]` independently — is WRONG for parallel tool calls: it yields
+ * `tool A, user A, tool B, user B`, and every provider requires the tool
+ * messages answering one assistant turn to be CONTIGUOUS. The interjected user
+ * message orphans the following tool message and the request is rejected.
+ *
+ * So images accumulate across the run and flush once, after the last tool
+ * message of that run: `tool A, tool B, user(imgA, imgB)`.
+ *
+ * This runs at REQUEST-ASSEMBLY time over `context.messages` and never writes
+ * back to worker state, so the synthetic message is ephemeral — an image is not
+ * appended to the transcript and re-sent on every later turn.
+ */
+function translateMessages(
+  messages: ReadonlyArray<PiMessage>,
+): Array<OAIMessage> {
+  const out: Array<OAIMessage> = []
+  let pending: Array<{ data: string; mimeType: string }> = []
+
+  const flushImages = (): void => {
+    if (pending.length === 0) return
+    out.push({
+      role: "user",
+      content: pending.map((img) => ({
+        type: "image_url" as const,
+        image_url: { url: `data:${img.mimeType};base64,${img.data}` },
+      })),
+    })
+    pending = []
+  }
+
+  for (const m of messages) {
+    if (m.role === "toolResult") {
+      const images = imagePartsOf(m.content)
+      out.push({
+        role: "tool",
+        tool_call_id: m.toolCallId,
+        content: toolResultText(m, images.length > 0),
+      })
+      pending.push(...images)
+      continue
+    }
+    // Any non-tool message ends the run: flush before it so the images land
+    // after the last tool message rather than in the middle of the run.
+    flushImages()
+    if (m.role === "user") out.push(translateUser(m))
+    else if (m.role === "assistant") out.push(translateAssistant(m))
+  }
+  flushImages()
+  return out
 }
 
 function translateUser(
@@ -575,16 +674,6 @@ function translateAssistant(
   return out
 }
 
-function translateToolResult(
-  m: Extract<PiMessage, { role: "toolResult" }>,
-): OAIMessage {
-  return {
-    role: "tool",
-    tool_call_id: m.toolCallId,
-    content: joinTextParts(m.content),
-  }
-}
-
 function translateTools(
   tools: ReadonlyArray<PiTool> | undefined,
 ): Array<OAITool> | undefined {
@@ -597,6 +686,42 @@ function translateTools(
       parameters: t.parameters as unknown as Record<string, unknown>,
     },
   }))
+}
+
+/** The image parts of a Pi tool result, in wire order. */
+function imagePartsOf(
+  parts: ReadonlyArray<{ type: string; data?: string; mimeType?: string }>,
+): Array<{ data: string; mimeType: string }> {
+  const out: Array<{ data: string; mimeType: string }> = []
+  for (const p of parts) {
+    if (p.type !== "image") continue
+    if (typeof p.data !== "string" || p.data.length === 0) continue
+    out.push({ data: p.data, mimeType: p.mimeType ?? "image/png" })
+  }
+  return out
+}
+
+/**
+ * The text of a tool result, with two pieces of information restored that were
+ * previously thrown away:
+ *
+ *  - `isError`. Pi records it on the message, but the wire tool-output item has
+ *    no error flag, so without a marker the model could not tell a failed call
+ *    from a successful one. The Anthropic shim has always prefixed
+ *    `[tool error]`; this matches it.
+ *  - a pointer to the follow-up image message, when the tool returned only
+ *    images. An empty tool output is confusing on its own; naming what follows
+ *    is not.
+ */
+function toolResultText(
+  m: Extract<PiMessage, { role: "toolResult" }>,
+  hasImages: boolean,
+): string {
+  let text = joinTextParts(m.content)
+  if (hasImages && text.length === 0) text = "[image result below]"
+  const isError = (m as { isError?: boolean }).isError === true
+  if (isError) text = text.length > 0 ? `[tool error] ${text}` : "[tool error]"
+  return text
 }
 
 function joinTextParts(
@@ -789,6 +914,12 @@ async function runResponsesAttempt(
     activeTextIndex = null
   }
 
+  // Truncation guard — twin of `sawDone` on the chat path. `/responses` has no
+  // `[DONE]`; its terminal is `response.completed` / `.incomplete` / `.failed`.
+  // Absent one, the stream was cut and the result must not be reported as a
+  // clean completion.
+  let sawTerminal = false
+
   for await (const evt of sseStream) {
       const data = evt?.data
       if (data == null) continue
@@ -968,6 +1099,7 @@ async function runResponsesAttempt(
 
         case "response.completed":
         case "response.incomplete": {
+          sawTerminal = true
           accum.usage = mapResponsesUsage(ev.response?.usage)
           if (
             ev.type === "response.incomplete"
@@ -993,6 +1125,8 @@ async function runResponsesAttempt(
         }
 
         case "response.failed": {
+          // No `sawTerminal` bookkeeping here: this branch returns, so the
+          // post-loop truncation guard is unreachable from it.
           if (!state.active) return
           closeActiveText()
           pushTerminalError(
@@ -1012,6 +1146,16 @@ async function runResponsesAttempt(
 
   // A timed-out attempt may ignore abort briefly; never emit after its terminal.
   if (!state.active) return
+
+  if (!sawTerminal) {
+    closeActiveText()
+    pushTerminalError(
+      stream,
+      resolved,
+      new Error("responses stream ended without a terminal event (truncated)"),
+    )
+    return
+  }
 
   // Close any still-open text block (defensive — output_text.done should
   // have fired).
@@ -1058,11 +1202,7 @@ function buildResponsesPayload(
   context: Context,
   resolved: ResolvedModel,
 ): ResponsesPayload {
-  const messages: Array<NeutralMessage> = []
-  for (const m of context.messages) {
-    const neutral = piMessageToNeutral(m)
-    if (neutral) messages.push(neutral)
-  }
+  const messages: Array<NeutralMessage> = piMessagesToNeutral(context.messages)
   return assembleResponsesPayload({
     model: resolved.modelId,
     instructions: context.systemPrompt || undefined,
@@ -1073,40 +1213,74 @@ function buildResponsesPayload(
   })
 }
 
-function piMessageToNeutral(m: PiMessage): NeutralMessage | null {
-  if (m.role === "user") {
-    if (typeof m.content === "string") return { role: "user", content: m.content }
-    const parts: Array<NeutralContentPart> = []
-    for (const c of m.content) {
-      if (c.type === "text") {
-        parts.push({ type: "text", text: c.text })
-      } else if (c.type === "image") {
-        parts.push({ type: "image", mimeType: c.mimeType, data: c.data })
+/**
+ * Pi messages → neutral messages, with tool-result images hoisted to the end of
+ * each contiguous run of tool results.
+ *
+ * Exact twin of `translateMessages` on the chat path — see that doc comment for
+ * why the grouping is load-bearing rather than cosmetic. A per-message fan-out
+ * interleaves a user message between parallel `function_call_output` items,
+ * which at best is a shape no client emits and at worst is rejected outright.
+ */
+function piMessagesToNeutral(
+  messages: ReadonlyArray<PiMessage>,
+): Array<NeutralMessage> {
+  const out: Array<NeutralMessage> = []
+  let pending: Array<{ data: string; mimeType: string }> = []
+
+  const flushImages = (): void => {
+    if (pending.length === 0) return
+    out.push({
+      role: "user",
+      content: pending.map((img) => ({
+        type: "image" as const,
+        mimeType: img.mimeType,
+        data: img.data,
+      })),
+    })
+    pending = []
+  }
+
+  for (const m of messages) {
+    if (m.role === "toolResult") {
+      const images = imagePartsOf(m.content)
+      out.push({
+        role: "toolResult",
+        toolCallId: m.toolCallId,
+        output: toolResultText(m, images.length > 0),
+      })
+      pending.push(...images)
+      continue
+    }
+    flushImages()
+    if (m.role === "user") {
+      if (typeof m.content === "string") {
+        out.push({ role: "user", content: m.content })
+      } else {
+        const parts: Array<NeutralContentPart> = []
+        for (const c of m.content) {
+          if (c.type === "text") parts.push({ type: "text", text: c.text })
+          else if (c.type === "image") {
+            parts.push({ type: "image", mimeType: c.mimeType, data: c.data })
+          }
+        }
+        out.push({ role: "user", content: parts })
       }
-    }
-    return { role: "user", content: parts }
-  }
-  if (m.role === "assistant") {
-    const parts: Array<NeutralContentPart> = []
-    for (const c of m.content) {
-      if (c.type === "text") {
-        parts.push({ type: "text", text: c.text })
-      } else if (c.type === "toolCall") {
-        parts.push({ type: "toolCall", id: c.id, name: c.name, arguments: c.arguments })
+    } else if (m.role === "assistant") {
+      const parts: Array<NeutralContentPart> = []
+      for (const c of m.content) {
+        if (c.type === "text") parts.push({ type: "text", text: c.text })
+        else if (c.type === "toolCall") {
+          parts.push({ type: "toolCall", id: c.id, name: c.name, arguments: c.arguments })
+        }
+        // thinking parts are dropped — the Responses API doesn't accept them
+        // as replayed input.
       }
-      // thinking parts are dropped — the Responses API doesn't accept them
-      // as replayed input.
-    }
-    return { role: "assistant", content: parts }
-  }
-  if (m.role === "toolResult") {
-    return {
-      role: "toolResult",
-      toolCallId: m.toolCallId,
-      output: joinTextParts(m.content),
+      out.push({ role: "assistant", content: parts })
     }
   }
-  return null
+  flushImages()
+  return out
 }
 
 function piToolsToNeutral(

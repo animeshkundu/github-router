@@ -128,6 +128,18 @@ function rejectWindowsHostilePath(raw: string): string | null {
   if (/^[\\/]{2}/.test(raw)) {
     return "rejected: UNC or device path"
   }
+  // NTFS alternate data streams: `file.png:secret`. A stream lives inside the
+  // file yet is invisible to every name-based rule here — `isSensitivePath`
+  // matches path SEGMENTS, and `notes.png:secret` reads as an innocuous .png.
+  // Nothing a worker tool legitimately does needs one, so reject any colon that
+  // is not the drive separator at index 1. POSIX allows `:` in filenames, hence
+  // the platform gate.
+  if (IS_WINDOWS) {
+    const afterDrive = /^[A-Za-z]:/.test(raw) ? raw.slice(2) : raw
+    if (afterDrive.includes(":")) {
+      return "rejected: alternate data stream"
+    }
+  }
   // Drive-relative: `C:foo` but NOT `C:\foo`, `C:/foo`, or bare `C:`.
   // Bare `C:` is treated as drive-current-dir too, so reject it.
   if (/^[A-Za-z]:(?![\\/])/.test(raw)) {

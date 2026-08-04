@@ -449,3 +449,50 @@ describe("Pi validates the tool schemas", () => {
     ).toThrow()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Screenshots must reach the model as pixels, not as base64 text
+// ---------------------------------------------------------------------------
+
+describe("screenshot returns an image block", () => {
+  /** 1x1 red PNG, colour type 2. */
+  const PNG_B64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
+  test("the browse worker gets an image part, and the text no longer duplicates it", async () => {
+    // The bridge envelope for a screenshot. Previously this whole object was
+    // JSON.stringify'd into a text block: the worker received base64 characters
+    // it could not interpret, at roughly 130x the tokens of a native image.
+    const dispatch: BrowserDispatch = () =>
+      Promise.resolve({
+        content: [
+          { type: "text", text: JSON.stringify({ contentType: "image/png", bytes: 70 }) },
+          { type: "image", data: PNG_B64, mimeType: "image/png" },
+        ],
+      } as BrowserToolEnvelope)
+
+    const tools = buildBrowseTools({ dispatch })
+    const shot = tools.find((t: AgentTool) => t.name === "screenshot")
+    expect(shot).toBeDefined()
+    const res = await shot!.execute("id", {} as never)
+    const blocks = res.content as Array<{ type: string; data?: string; mimeType?: string; text?: string }>
+
+    const image = blocks.find((b) => b.type === "image")
+    expect(image?.data).toBe(PNG_B64)
+    expect(image?.mimeType).toBe("image/png")
+
+    // Text block first so `content[0].text` consumers keep working, and it must
+    // not carry the payload a second time.
+    expect(blocks[0]?.type).toBe("text")
+    expect(blocks[0]?.text).not.toContain(PNG_B64)
+  })
+
+  test("a text-only envelope is unchanged", async () => {
+    const dispatch: BrowserDispatch = () =>
+      Promise.resolve({ content: [{ type: "text", text: "plain" }] } as BrowserToolEnvelope)
+    const tools = buildBrowseTools({ dispatch })
+    const nav = tools.find((t: AgentTool) => t.name === "read_page")
+    const res = await nav!.execute("id", { tabId: 1 } as never)
+    expect(res.content).toEqual([{ type: "text", text: "plain" }])
+  })
+})

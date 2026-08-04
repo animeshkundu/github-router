@@ -10,8 +10,10 @@
 //   3. Open a per-call WS to the bridge with the bearer token from
 //      bridge.json. Send {id, tool, args}.
 //   4. Race the response against a per-tool timeout (table below).
-//   5. Translate {ok: true, data} → text envelope (JSON.stringify(data));
-//      {ok: false, error} → tool-error envelope.
+//   5. Translate {ok: true, data} → a text envelope (JSON.stringify(data)),
+//      or — when the data carries captured pixels — a text envelope PLUS a
+//      real MCP image block (see `imageEnvelope`); {ok: false, error} →
+//      tool-error envelope.
 //
 // Per-call WS open is simpler than holding a session-long connection
 // and adds maybe 10 ms of overhead — fine for browser tools which run
@@ -28,6 +30,12 @@ import {
 } from "./install-check"
 import { interActionDelay } from "./humanlike"
 import { preflightUrlPolicy } from "./policy"
+import {
+  decodeBase64Strict,
+  detectImageMimeType,
+  mcpTextAndImage,
+  type McpToolResult,
+} from "~/lib/attachments"
 import { state } from "~/lib/state"
 
 /**
@@ -295,9 +303,49 @@ export interface DispatchOpts {
   timeoutMs?: number
 }
 
-type ToolEnvelope = {
-  content: Array<{ type: "text"; text: string }>
-  isError?: boolean
+type ToolEnvelope = McpToolResult
+
+/**
+ * Turn a bridge envelope that carries captured pixels into a real MCP image
+ * block, or return `null` when it doesn't (the overwhelmingly common case —
+ * every non-screenshot tool).
+ *
+ * The extension returns `{contentType, dataBase64}` for `browser_screenshot`.
+ * That used to be `JSON.stringify`'d into a text block, which meant the calling
+ * model received base64 characters it could not interpret, at roughly 130x the
+ * token cost of the same image sent natively (base64 tokenizes at ~1.46
+ * chars/token under o200k, so a 200 KB PNG is ~187k tokens — enough to be
+ * rejected outright by a 200k-context model).
+ *
+ * Two deliberate choices:
+ *
+ *  - The media type is SNIFFED from the bytes, not taken from the envelope's
+ *    `contentType`. A declared type is an assertion; the payload is what
+ *    upstream will actually try to decode. The declared value is preserved in
+ *    the text block so a mismatch stays debuggable.
+ *  - The text block keeps every envelope field EXCEPT `dataBase64`, and gains
+ *    a decoded `bytes` count. Callers that parsed the JSON metadata keep
+ *    working; the payload simply stops being duplicated in a form nothing
+ *    could read.
+ *
+ * Bytes that don't decode strictly, or that aren't a supported image, fall
+ * through to `null` and take the plain-text path — a malformed capture must
+ * not become an image block that upstream then rejects.
+ */
+export function imageEnvelope(data: unknown): McpToolResult | null {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return null
+  const record = data as Record<string, unknown>
+  const encoded = record.dataBase64
+  if (typeof encoded !== "string" || encoded.length === 0) return null
+  const bytes = decodeBase64Strict(encoded)
+  if (!bytes) return null
+  const mimeType = detectImageMimeType(bytes)
+  if (!mimeType) return null
+  const meta: Record<string, unknown> = { bytes: bytes.length, mimeType }
+  for (const [key, value] of Object.entries(record)) {
+    if (key !== "dataBase64") meta[key] = value
+  }
+  return mcpTextAndImage(JSON.stringify(meta, null, 2), { data: encoded, mimeType })
 }
 
 function blockedUrlEnvelope(reason: string | undefined): ToolEnvelope {
@@ -377,10 +425,7 @@ export async function dispatchBrowserTool(
   args: Record<string, unknown>,
   signal?: AbortSignal,
   opts: DispatchOpts = {},
-): Promise<{
-  content: Array<{ type: "text"; text: string }>
-  isError?: boolean
-}> {
+): Promise<McpToolResult> {
   // Defense-in-depth: bridge-layer URL block runs BEFORE the install
   // check + WS round-trip. An extension regression that silently
   // re-enables a blocked URL still fails closed here. (Also runs in
@@ -420,10 +465,6 @@ export async function dispatchBrowserTool(
       signal,
     )
     if (resp.ok) {
-      const text =
-        typeof resp.data === "string"
-          ? resp.data
-          : JSON.stringify(resp.data, null, 2)
       logAudit({
         tool,
         argsBytes: argsByteSize(args),
@@ -431,7 +472,17 @@ export async function dispatchBrowserTool(
         profile: typeof args.profile === "string" ? args.profile : "isolated",
         result: "ok",
       })
-      return { content: [{ type: "text", text }] }
+      return imageEnvelope(resp.data) ?? {
+        content: [
+          {
+            type: "text",
+            text:
+              typeof resp.data === "string"
+                ? resp.data
+                : JSON.stringify(resp.data, null, 2),
+          },
+        ],
+      }
     }
     logAudit({
       tool,

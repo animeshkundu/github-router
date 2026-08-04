@@ -5,6 +5,7 @@ import consola from "consola"
 import type { Context } from "hono"
 
 import { MCP_WORKSPACE_HEADER } from "~/lib/mcp-workspace-header"
+import { loadPeerImages } from "~/lib/peer-attachments"
 import { state } from "~/lib/state"
 import { getTextTokenCount, getTokenizerFromModel } from "~/lib/tokenizer"
 import { resolveModel } from "~/lib/utils"
@@ -315,6 +316,18 @@ function toolEntries(scope: McpScope): Array<ToolEntry> {
                 type: "string",
                 description:
                   "Optional additional context (extra file content, prior decisions). Concatenated to the brief before sending.",
+              },
+              imagePaths: {
+                type: "array",
+                items: { type: "string" },
+                description:
+                  "Optional paths to image files (screenshots, diagrams, charts) INSIDE the workspace "
+                  + "for the persona to LOOK AT. The proxy reads and encodes them, so no "
+                  + "image data passes through your context. Content is identified by "
+                  + "bytes, not extension; jpeg/png/webp/gif/heic/heif, 3 MiB each. Note "
+                  + "paths are confined to the proxy's working directory. Note "
+                  + "the per-model ceiling: the gemini-backed personas accept 10 images, "
+                  + "the gpt- and opus-backed ones accept 1.",
               },
               effort: {
                 type: "string",
@@ -746,6 +759,12 @@ export async function dispatchModelCall(args: {
   instructions: string
   userText: string
   effort: Effort
+  /**
+   * Images to show the persona, already read and base64-encoded by
+   * `loadPeerImages`. Each endpoint spells an image differently, which is
+   * precisely why this is assembled here rather than by every caller.
+   */
+  images?: ReadonlyArray<{ data: string; mimeType: string }>
   signal?: AbortSignal
 }): Promise<string> {
   // Resolve the model id against the live catalog so a slug rename
@@ -760,7 +779,13 @@ export async function dispatchModelCall(args: {
       input: [
         {
           role: "user",
-          content: [{ type: "input_text", text: args.userText }],
+          content: [
+            { type: "input_text", text: args.userText },
+            ...(args.images ?? []).map((img) => ({
+              type: "input_image",
+              image_url: `data:${img.mimeType};base64,${img.data}`,
+            })),
+          ],
         },
       ],
       stream: false,
@@ -802,7 +827,23 @@ export async function dispatchModelCall(args: {
       system: args.instructions,
       thinking: { type: "adaptive" },
       output_config: { effort: args.effort },
-      messages: [{ role: "user", content: args.userText }],
+      // Plain string when there are no images. Anthropic accepts both shapes,
+      // but switching every call to the block array would change the wire for
+      // the overwhelmingly common image-less case to no purpose.
+      messages: [
+        args.images && args.images.length > 0
+          ? {
+              role: "user",
+              content: [
+                { type: "text", text: args.userText },
+                ...args.images.map((img) => ({
+                  type: "image",
+                  source: { type: "base64", media_type: img.mimeType, data: img.data },
+                })),
+              ],
+            }
+          : { role: "user", content: args.userText },
+      ],
     })
     const response = await withTransientRetry(
       () => createMessages(body, undefined, args.signal),
@@ -817,7 +858,18 @@ export async function dispatchModelCall(args: {
     model: resolvedModel,
     messages: [
       { role: "system", content: args.instructions },
-      { role: "user", content: args.userText },
+      (args.images && args.images.length > 0)
+        ? {
+            role: "user",
+            content: [
+              { type: "text", text: args.userText },
+              ...args.images.map((img) => ({
+                type: "image_url" as const,
+                image_url: { url: `data:${img.mimeType};base64,${img.data}` },
+              })),
+            ],
+          }
+        : { role: "user", content: args.userText },
     ],
     stream: false,
     // Forwarded as-is. Per gemini_critic's review (see
@@ -846,6 +898,7 @@ export async function callPersona(
   context: string | undefined,
   effort: Effort,
   signal?: AbortSignal,
+  images?: ReadonlyArray<{ data: string; mimeType: string }>,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
   // NOTE: predictedTooLong pre-flight cap fires in handleMcpPost
   // BEFORE handleRpc → handleToolsCall → inFlightToolsCall++ — see
@@ -858,6 +911,7 @@ export async function callPersona(
     instructions: persona.baseInstructions,
     userText,
     effort,
+    images,
     signal,
   })
   if (!text) {
@@ -1072,6 +1126,7 @@ async function handleToolsCall(
   let personaPrompt: string | undefined
   let personaContext: string | undefined
   let personaEffort: Effort | undefined
+  let personaImages: Array<{ data: string; mimeType: string }> | undefined
   if (persona) {
     // Validate effort shape against the global EFFORT_LEVELS allowlist
     // (rejects garbage like `effort: "extreme"`); the per-persona
@@ -1096,6 +1151,28 @@ async function handleToolsCall(
     }
     personaPrompt = prompt
     personaContext = typeof args.context === "string" ? args.context : undefined
+
+    // `imagePaths` are read and encoded HERE, server-side, so no image bytes
+    // ever cross the MCP boundary or enter the caller's context. A bad path
+    // fails the whole call rather than being skipped: a reviewer that silently
+    // saw three of four attachments has misled the caller about what it read.
+    if (args.imagePaths !== undefined) {
+      if (
+        !Array.isArray(args.imagePaths)
+        || args.imagePaths.some((v) => typeof v !== "string")
+      ) {
+        return rpcError(
+          body.id,
+          RPC_INVALID_PARAMS,
+          "tools/call: arguments.imagePaths must be an array of strings",
+        )
+      }
+      const loaded = await loadPeerImages(args.imagePaths as Array<string>, process.cwd())
+      if (!loaded.ok) {
+        return rpcError(body.id, RPC_INVALID_PARAMS, `tools/call: ${loaded.error}`)
+      }
+      personaImages = loaded.images
+    }
 
     // Per-persona effort gate. All four personas now allow all four
     // effort tiers (low|medium|high|xhigh). The gate remains in place so
@@ -1223,6 +1300,7 @@ async function handleToolsCall(
           personaContext,
           personaEffort!,
           aborter?.signal,
+          personaImages,
         )
       : await nonPersonaTool!.handler(args, aborter?.signal)
     logTelemetry({

@@ -24,6 +24,7 @@
 import path from "node:path"
 
 import { ARTIFACT_TOOLS } from "./artifact/tools"
+import type { McpToolResult } from "./attachments"
 import { FLEET_TOOLS } from "./fleet/tools"
 import { FIRST_MATE_TOOLS } from "./first-mate/tools"
 import { runUnifiedCodeSearch } from "./unified-code-search"
@@ -865,14 +866,18 @@ export interface NonPersonaMcpTool {
    * `tools/call` request and an optional AbortSignal that is signalled
    * when a `notifications/cancelled` arrives for this call. Returns an
    * MCP `tool result` envelope (content blocks + optional `isError`).
+   *
+   * Content blocks are `text` OR `image` (see `~/lib/attachments`). The image
+   * variant exists because a tool that captures pixels — `browser_screenshot`
+   * above all — previously had no way to hand them back, and stringified the
+   * base64 into a text block instead: the caller never saw the image and paid
+   * ~130x the tokens of a native image block for the privilege. A tool that
+   * returns an image MUST put a text block first; see `mcpTextAndImage`.
    */
   handler: (
     args: Record<string, unknown>,
     signal?: AbortSignal,
-  ) => Promise<{
-    content: Array<{ type: "text"; text: string }>
-    isError?: boolean
-  }>
+  ) => Promise<McpToolResult>
 }
 
 const WEB_SEARCH_DESCRIPTION =

@@ -43,7 +43,14 @@ const gptModel = {
     object: "model",
     tokenizer: "o200k_base",
     type: "chat",
-    supports: { tool_calls: true, reasoning_effort: ["low", "medium", "high", "xhigh"] },
+    supports: { tool_calls: true, vision: true, reasoning_effort: ["low", "medium", "high", "xhigh"] },
+    limits: {
+      vision: {
+        max_prompt_images: 1,
+        max_prompt_image_size: 3145728,
+        supported_media_types: ["image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf"],
+      },
+    },
   },
   supported_endpoints: ["/responses"],
 }
@@ -54,7 +61,7 @@ const gptSolModel = {
   name: "GPT 5.6 SOL",
   capabilities: {
     ...gptModel.capabilities,
-    supports: { tool_calls: true, reasoning_effort: ["high", "xhigh"] },
+    supports: { tool_calls: true, vision: true, reasoning_effort: ["high", "xhigh"] },
   },
 }
 

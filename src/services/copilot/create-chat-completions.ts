@@ -3,6 +3,7 @@ import { events } from "fetch-event-stream"
 
 import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
+import { assertOutboundImagesOk, imagesInChatPayload } from "~/lib/vision-preflight"
 import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { MAX_RESPONSE_BODY_BYTES, readResponseBodyCapped } from "~/lib/response-cap"
 import { state } from "~/lib/state"
@@ -30,6 +31,14 @@ export const createChatCompletions = async (
       typeof x.content !== "string"
       && x.content?.some((x) => x.type === "image_url"),
   )
+  // Single outbound chokepoint for image validation: this runs on the fully
+  // assembled payload, so every path that can introduce an image (top-level
+  // block, nested tool_result, the shim's synthetic follow-up user message,
+  // replayed history, peer attachments) is covered without each of them
+  // re-deriving the rules. Throws a 400 before any upstream call.
+  if (enableVision) {
+    assertOutboundImagesOk(payload.model, imagesInChatPayload(payload.messages))
+  }
 
   // Agent/user check for X-Initiator header
   // Determine if any message is from an agent ("assistant" or "tool")
@@ -138,6 +147,8 @@ export interface ChatCompletionChunk {
 
 interface Delta {
   content?: string | null
+  /** Streaming counterpart of `ResponseMessage.refusal`. */
+  refusal?: string | null
   role?: "user" | "assistant" | "system" | "tool"
   tool_calls?: Array<{
     index: number
@@ -179,6 +190,11 @@ export interface ChatCompletionResponse {
 interface ResponseMessage {
   role: "assistant"
   content: string | null
+  /**
+   * Model refusal text. Distinct from `content` and populated instead of it, so
+   * a consumer that reads only `content` renders a refusal as an empty message.
+   */
+  refusal?: string | null
   tool_calls?: Array<ToolCall>
 }
 

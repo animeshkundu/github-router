@@ -12,6 +12,7 @@ import {
 import { DEFINITION_OF_GREATNESS } from "~/lib/first-mate/operating-protocol"
 import { createFirstMateTools } from "~/lib/first-mate/tools"
 import { state } from "~/lib/state"
+import { firstText } from "~/lib/attachments"
 
 describe("buildScaffoldFiles", () => {
   it("emits the exact expected file set", () => {
@@ -366,7 +367,7 @@ describe("scaffold_repo no-op (all files already present)", () => {
     const res = await tool.handler({ repo: "octo/repo", base_ref: "main", mode: "add-missing-only" })
 
     expect(res.isError).toBeUndefined()
-    const payload = JSON.parse(res.content[0]!.text) as {
+    const payload = JSON.parse(firstText(res)) as {
       committed: string[]
       pr: string | null
       note?: string

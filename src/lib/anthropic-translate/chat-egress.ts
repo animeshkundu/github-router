@@ -49,6 +49,8 @@ interface ChatSseChunk {
   choices?: Array<{
     delta?: {
       content?: string | null
+      /** Model refusal text. Arrives outside `content`; see `chatStopReason`. */
+      refusal?: string | null
       tool_calls?: Array<{
         /** OpenAI array index — the load-bearing correlation key. */
         index?: number
@@ -99,12 +101,18 @@ function anthropicUsageFromChat(u: ChatUsage | undefined): AnthropicUsage {
  * Map a chat/completions `finish_reason` to an Anthropic stop_reason. A
  * truncated (`length`) response is `max_tokens` even when a partial tool call
  * is present — the response was cut — mirroring the Responses egress precedence.
- * `tool_calls` (or any buffered tool) → `tool_use`; everything else (`stop`,
- * `content_filter`, null) → `end_turn`.
+ * `tool_calls` (or any buffered tool) → `tool_use`.
+ *
+ * `content_filter` maps to Anthropic's `refusal`, NOT `end_turn`. It used to
+ * collapse into `end_turn`, which made an upstream safety block indistinguishable
+ * from a normal completion: the client saw a successful, usually empty, message
+ * and had no way to tell that content had been withheld. `refusal` is the
+ * documented Anthropic stop_reason for exactly this case.
  */
 function chatStopReason(finishReason: string | null, sawTool: boolean): string {
   if (finishReason === "length") return "max_tokens"
   if (finishReason === "tool_calls" || sawTool) return "tool_use"
+  if (finishReason === "content_filter") return "refusal"
   return "end_turn"
 }
 
@@ -145,6 +153,14 @@ export function chatResponseToAnthropicMessage(
   if (message) {
     if (typeof message.content === "string" && message.content.length > 0) {
       content.push({ type: "text", text: message.content })
+    }
+    // A refusal is the model declining to answer. It arrives in its own field,
+    // NOT in `content`, so ignoring it (as this did) produced an empty but
+    // apparently-successful message — the client could not tell a refusal from
+    // a model that simply said nothing. Anthropic represents a refusal as text
+    // plus `stop_reason: "refusal"`, so surface it the same way.
+    if (typeof message.refusal === "string" && message.refusal.length > 0) {
+      content.push({ type: "text", text: message.refusal })
     }
     if (Array.isArray(message.tool_calls)) {
       for (const tc of message.tool_calls) {
@@ -264,6 +280,18 @@ export async function* synthAnthropicFromChat(
         yield makeContentBlockStart(activeTextIndex, { type: "text", text: "" })
       }
       yield makeTextDelta(activeTextIndex, delta.content)
+    }
+
+    // Refusal deltas stream in their own field. Dropping them (as this used to)
+    // meant a refused request streamed as literally nothing and terminated as a
+    // clean `end_turn` — the client saw an empty successful message. Emit them
+    // as text so the user reads why, with `stop_reason: "refusal"` on the tail.
+    if (delta && typeof delta.refusal === "string" && delta.refusal.length > 0) {
+      if (activeTextIndex == null) {
+        activeTextIndex = nextIndex++
+        yield makeContentBlockStart(activeTextIndex, { type: "text", text: "" })
+      }
+      yield makeTextDelta(activeTextIndex, delta.refusal)
     }
 
     if (delta && Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {

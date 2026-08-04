@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 
 import { createFleetTools } from "../../src/lib/fleet/tools"
 import { FleetRegistry, type FleetInstanceConfig } from "../../src/lib/fleet/registry"
+import { firstText } from "~/lib/attachments"
 
 interface MockSession {
   sessionId: string
@@ -231,7 +232,7 @@ async function callTool(
   const tool = tools.get(name)
   expect(tool).toBeDefined()
   const result = await tool!.handler(args)
-  return { result, json: JSON.parse(result.content[0]!.text) as unknown }
+  return { result, json: JSON.parse(firstText(result)) as unknown }
 }
 
 afterAll(() => {

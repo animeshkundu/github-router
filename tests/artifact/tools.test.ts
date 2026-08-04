@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 
 import { artifactToolsEnabled } from "../../src/lib/mcp-capabilities"
 import { ARTIFACT_TOOLS } from "../../src/lib/artifact/tools"
+import { firstText } from "~/lib/attachments"
 
 type ArtifactTool = (typeof ARTIFACT_TOOLS)[number]
 
@@ -47,7 +48,7 @@ async function callTool(
   args: Record<string, unknown>,
 ): Promise<{ result: Awaited<ReturnType<ArtifactTool["handler"]>>; json: unknown }> {
   const result = await toolByName(name).handler(args)
-  return { result, json: JSON.parse(result.content[0]!.text) as unknown }
+  return { result, json: JSON.parse(firstText(result)) as unknown }
 }
 
 beforeEach(() => {

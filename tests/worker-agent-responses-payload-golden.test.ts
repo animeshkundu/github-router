@@ -142,7 +142,7 @@ describe("assembleResponsesPayload golden (shared /responses builder)", () => {
           role: "user",
           content: [
             { type: "text", text: "look" },
-            { type: "image", mimeType: "image/png", data: "QUJD" },
+            { type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" },
             { type: "image", url: "https://ex.com/y.png" },
           ],
         },
@@ -154,7 +154,7 @@ describe("assembleResponsesPayload golden (shared /responses builder)", () => {
         role: "user",
         content: [
           { type: "input_text", text: "look" },
-          { type: "input_image", image_url: "data:image/png;base64,QUJD" },
+          { type: "input_image", image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" },
           { type: "input_image", image_url: "https://ex.com/y.png" },
         ],
       },
@@ -217,7 +217,17 @@ function responsesOnlyModel(id: string): Model {
       object: "model_capabilities",
       tokenizer: "o200k_base",
       type: "chat",
-      supports: { tool_calls: true },
+      // Mirrors the live catalog: gpt-5.4-mini really does advertise vision
+      // with a 1-image / 3 MiB ceiling. Keeping the fixture faithful matters —
+      // the outbound preflight reads exactly these fields.
+      supports: { tool_calls: true, vision: true },
+      limits: {
+        vision: {
+          max_prompt_images: 1,
+          max_prompt_image_size: 3145728,
+          supported_media_types: ["image/jpeg", "image/png", "image/webp", "image/gif"],
+        },
+      },
     },
     supported_endpoints: ["/responses"],
   }
@@ -345,7 +355,7 @@ describe("worker buildResponsesPayload golden (Pi Context → /responses body)",
           role: "user",
           content: [
             { type: "text", text: "look" },
-            { type: "image", mimeType: "image/png", data: "QUJD" },
+            { type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" },
           ],
           timestamp: 0,
         },
@@ -356,7 +366,7 @@ describe("worker buildResponsesPayload golden (Pi Context → /responses body)",
         role: "user",
         content: [
           { type: "input_text", text: "look" },
-          { type: "input_image", image_url: "data:image/png;base64,QUJD" },
+          { type: "input_image", image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" },
         ],
       },
     ])

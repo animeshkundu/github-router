@@ -39,6 +39,30 @@ async function collect(events: Array<object>): Promise<Array<AnthropicStreamEven
 
 const types = (evs: Array<AnthropicStreamEvent>) => evs.map((e) => e.type)
 
+describe("refusal streaming", () => {
+  test("a streamed refusal reaches the client as text with stop_reason refusal", async () => {
+    // `delta.refusal` is a sibling of `delta.content`, so a synthesizer that
+    // reads only `content` streams literally nothing and then terminates with a
+    // clean `end_turn` — the user sees an empty successful response and never
+    // learns the model declined.
+    const evs = await collect([
+      { choices: [{ delta: { refusal: "I can't help " } }] },
+      { choices: [{ delta: { refusal: "with that." } }] },
+      { choices: [{ delta: {}, finish_reason: "content_filter" }] },
+    ])
+    const text = evs
+      .filter((e) => e.type === "content_block_delta")
+      .map((e) => (e as unknown as { delta?: { text?: string } }).delta?.text ?? "")
+      .join("")
+    expect(text).toBe("I can't help with that.")
+
+    const delta = evs.find((e) => e.type === "message_delta") as unknown as {
+      delta?: { stop_reason?: string }
+    }
+    expect(delta?.delta?.stop_reason).toBe("refusal")
+  })
+})
+
 function toolStarts(evs: Array<AnthropicStreamEvent>): Array<{ index: number; id: string; name: string }> {
   return evs
     .filter(

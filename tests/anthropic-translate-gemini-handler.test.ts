@@ -42,7 +42,14 @@ const geminiModel = {
     object: "model",
     tokenizer: "o200k_base",
     type: "chat",
-    supports: { tool_calls: true, reasoning_effort: ["low", "medium", "high"] },
+    supports: { tool_calls: true, vision: true, reasoning_effort: ["low", "medium", "high"] },
+    limits: {
+      vision: {
+        max_prompt_images: 10,
+        max_prompt_image_size: 3145728,
+        supported_media_types: ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "application/pdf"],
+      },
+    },
   },
   supported_endpoints: ["/chat/completions"],
 }
@@ -311,7 +318,7 @@ describe("/v1/messages gemini chat-shim routing", () => {
               { type: "text", text: "describe" },
               {
                 type: "image",
-                source: { type: "base64", media_type: "image/png", data: "aW1hZ2U=" },
+                source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" },
               },
             ],
           },
@@ -327,7 +334,7 @@ describe("/v1/messages gemini chat-shim routing", () => {
         role: "user",
         content: [
           { type: "text", text: "describe" },
-          { type: "image_url", image_url: { url: "data:image/png;base64,aW1hZ2U=" } },
+          { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" } },
         ],
       },
     ])

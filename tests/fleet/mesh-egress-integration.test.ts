@@ -6,6 +6,7 @@ import { FleetClient } from "~/lib/fleet/client"
 import { applyMeshEgressProxy, MeshEgressUnsupportedRuntimeError } from "~/lib/fleet/mesh-egress-agent"
 import { createFleetTools } from "~/lib/fleet/tools"
 import type { FleetInstanceInfo, FleetMeshProxy, FleetResolvedInstance } from "~/lib/fleet/registry"
+import { firstText } from "~/lib/attachments"
 
 const EGRESS_TOKEN = "supersecret-egress-token-abc123"
 const AUTH_HEADER = `Bearer ${EGRESS_TOKEN}`
@@ -119,7 +120,7 @@ describe("mesh egress NO-LEAK", () => {
     )
 
     const result = await tools.get("list_instances")!.handler({})
-    const text = result.content[0]!.text
+    const text = firstText(result)
     expect(text).not.toContain(EGRESS_TOKEN)
     expect(text).not.toContain(AUTH_HEADER)
     expect(text).not.toContain("Proxy-Authorization")
@@ -149,7 +150,7 @@ describe("mesh egress NO-LEAK", () => {
     )
 
     const result = await tools.get("list_sessions")!.handler({ instance: "induced.tail.ts.net" })
-    const text = result.content[0]!.text
+    const text = firstText(result)
     expect(result.isError).toBe(true)
     expect(text).not.toContain(EGRESS_TOKEN)
     expect(text).not.toContain(AUTH_HEADER)
@@ -183,7 +184,7 @@ describe("mesh egress NO-LEAK", () => {
     )
 
     const result = await tools.get("list_sessions")!.handler({ instance: "happy.tail.ts.net" })
-    const text = result.content[0]!.text
+    const text = firstText(result)
     expect(result.isError).toBeFalsy()
     expect(text).not.toContain(EGRESS_TOKEN)
     expect(text).not.toContain(AUTH_HEADER)
@@ -208,7 +209,7 @@ describe("mesh egress NO-LEAK", () => {
     )
 
     const result = await tools.get("list_instances")!.handler({})
-    const text = result.content[0]!.text
+    const text = firstText(result)
     const json = JSON.parse(text) as { instances: Array<{ id: string; reachable: boolean; error?: string; hint?: string }> }
     const peer = json.instances.find((i) => i.id === "noegress.tail.ts.net")!
     expect(peer.reachable).toBe(false)

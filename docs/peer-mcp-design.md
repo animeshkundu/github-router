@@ -317,6 +317,39 @@ Every field in an MCP tool's **input** and **output** schema must be one of:
   (b) **Tunable by the model in a way that improves outcomes** (e.g. `mode`, `structural`, `limit` - the model can reasonably decide "I need every hit, switch to literal" or "this is a large repo, drop to topN").
   (c) **Directly actionable feedback that helps the model self-correct on the next call** (e.g. `truncated: true` tells the model "raise `limit` or narrow the query"; `notice: "structural budget exceeded after 23/50 hits; retry with structural: \"topN\""` or `notice: "response size limit reached at 420 hits (~256KB); narrow your query or lower 'limit'"` tells it exactly what to do differently; a ripgrep regex-compile error surfaced as `isError: true` content tells it "your pattern is malformed").
 
+### Worked example: `imagePaths` on the persona schema
+
+The persona input schema is deliberately tiny — `prompt`, `context`, `effort` —
+so a fourth field needs to earn its place against the three tests above.
+
+`imagePaths?: string[]` passes **(b)**. Every persona's backing model reports
+`vision: true`, and until this field existed there was no way to reach that
+capability: the schema was string-only and `dispatchModelCall` built a single
+text part, so a screenshot could only be described in prose. The field unlocks an
+outcome — visual review of a UI, a chart, a diagram, a rendering bug — that is
+otherwise unreachable, and the model decides per call whether it applies.
+
+Two design points worth recording, because the obvious alternatives are worse:
+
+- **Paths, not base64.** A base64 field would push megabytes across the MCP
+  boundary and into the caller's context, which is the exact cost the
+  browser-screenshot fix exists to remove, and it would trip the
+  `predictedTooLong` pre-flight that sizes the brief before a slot is acquired.
+  The proxy reads and encodes server-side; caller and proxy are the same host in
+  this product.
+- **No `imageDetail` / `imageCount` / echo fields.** Anything the caller already
+  knows fails test (a) and (c). The per-model ceiling (10 images on the gemini
+  lanes, 1 on the gpt and opus lanes) is stated in the field description rather
+  than returned in the response, because the model needs it BEFORE the call, not
+  after.
+
+Failure feedback satisfies **(c)**: a rejected path names the position
+(`imagePaths[1]`), what was wrong, and the fix — and identification is by magic
+bytes, so "not a supported image" is a statement about the file's contents, not
+its extension. One bad path fails the whole call rather than being skipped: a
+reviewer that silently saw three of four attachments has misled the caller about
+what it read.
+
 If a proposed field fails all three tests, **cut it**. The model's context is finite and precious; echoing the model's own inputs back, exposing internal diagnostics for human eyeballs, and surfacing failures the model has no lever to fix all cost tokens for negative value. Negative value because every additional token in the tool response (i) reduces the budget left for the model's actual reasoning, and (ii) introduces noise the model has to filter through before reaching the actionable bits.
 
 This rule applies to **all** MCP tools registered under `NON_PERSONA_MCP_TOOLS` (`code`, `web`, anything added later) and to the peer-critic persona tools (`codex_critic`, `codex_reviewer`, `opus_critic`, `gemini_critic`).

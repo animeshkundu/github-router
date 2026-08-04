@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import * as os from "node:os"
+import * as path from "node:path"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -1285,6 +1287,111 @@ describe("/mcp tools/call routing", () => {
     const result = json.result as { content: Array<{ text: string }>; isError: boolean }
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain("codex-critic")
+  })
+
+  // ---------------------------------------------------------------------------
+  // Peer-critic image attachments (`imagePaths`)
+  // ---------------------------------------------------------------------------
+
+  describe("persona imagePaths", () => {
+    /** 1x1 red PNG, colour type 2. */
+    const PNG_B64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
+    test("the schema advertises it, with the per-model ceiling stated up front", async () => {
+      const { json } = await rpc({ jsonrpc: "2.0", id: 900, method: "tools/list", params: {} })
+      const tools = (json as { result?: { tools?: Array<Record<string, unknown>> } }).result?.tools ?? []
+      const critic = tools.find((t) => t.name === "codex_critic")
+      const props = (critic?.inputSchema as { properties?: Record<string, { description?: string }> })
+        ?.properties
+      expect(props?.imagePaths).toBeDefined()
+      // The ceiling has to be known BEFORE the call, so it lives in the
+      // description rather than in a response field.
+      expect(props?.imagePaths?.description).toMatch(/10 images/)
+    })
+
+    test("a non-image file is refused without any upstream call", async () => {
+      const captured = mockResponsesUpstream("should not be called")
+      const file = path.join(process.cwd(), "package.json")
+      const { json } = await rpc({
+        jsonrpc: "2.0",
+        id: 901,
+        method: "tools/call",
+        params: {
+          name: "codex_critic",
+          arguments: { prompt: "look", imagePaths: [file] },
+        },
+      })
+      const err = (json as { error?: { message?: string } }).error
+      expect(err?.message).toMatch(/not a supported image/i)
+      expect(captured.lastBody).toBeUndefined()
+    })
+
+    test("a path outside the workspace is refused", async () => {
+      // Second file-reading path, same confinement as the first. Content
+      // identification is the backstop, but the boundary is still enforced.
+      const outside = mkdtempSync(path.join(os.tmpdir(), "gh-router-outside-"))
+      const file = path.join(outside, "shot.png")
+      writeFileSync(file, Buffer.from(PNG_B64, "base64"))
+      try {
+        const { json } = await rpc({
+          jsonrpc: "2.0",
+          id: 904,
+          method: "tools/call",
+          params: { name: "codex_critic", arguments: { prompt: "look", imagePaths: [file] } },
+        })
+        expect((json as { error?: { message?: string } }).error?.message).toMatch(/imagePaths\[0\]/)
+      } finally {
+        rmSync(outside, { recursive: true, force: true })
+      }
+    })
+
+    test("a non-array argument is rejected at the boundary", async () => {
+      const { json } = await rpc({
+        jsonrpc: "2.0",
+        id: 902,
+        method: "tools/call",
+        params: {
+          name: "codex_critic",
+          arguments: { prompt: "look", imagePaths: "not-an-array" },
+        },
+      })
+      expect((json as { error?: { message?: string } }).error?.message).toMatch(
+        /must be an array of strings/i,
+      )
+    })
+
+    test("a real image is read server-side and reaches /responses as input_image", async () => {
+      const captured = mockResponsesUpstream("looks fine")
+      // INSIDE the workspace: `imagePaths` is confined to the proxy's cwd by
+      // the same chokepoint the worker file tools use, so an os.tmpdir() path
+      // is refused (asserted separately below).
+      const dir = mkdtempSync(path.join(process.cwd(), ".gh-router-mcpimg-"))
+      const file = path.join(dir, "shot.png")
+      writeFileSync(file, Buffer.from(PNG_B64, "base64"))
+      try {
+        const { json } = await rpc({
+          jsonrpc: "2.0",
+          id: 903,
+          method: "tools/call",
+          params: {
+            name: "codex_critic",
+            arguments: { prompt: "what is in this image?", imagePaths: [file] },
+          },
+        })
+        expect((json as { result?: { isError?: boolean } }).result?.isError).toBeUndefined()
+        const body = captured.lastBody as { input?: Array<{ content?: Array<Record<string, unknown>> }> }
+        const parts = body?.input?.[0]?.content ?? []
+        const image = parts.find((p) => p.type === "input_image")
+        expect(image).toBeDefined()
+        // Encoded by the proxy — no base64 ever crossed the MCP boundary.
+        expect(image?.image_url).toBe(`data:image/png;base64,${PNG_B64}`)
+        // The brief still rides alongside it.
+        expect(parts.some((p) => p.type === "input_text")).toBe(true)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
   })
 })
 

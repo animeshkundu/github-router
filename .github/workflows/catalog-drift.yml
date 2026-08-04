@@ -1,0 +1,34 @@
+# Scheduled alert for new Copilot catalog capabilities.
+#
+# Deliberately NOT part of the merge gate. It needs the network and a valid
+# Copilot token, and a network-dependent blocking check fails for reasons that
+# have nothing to do with the diff under review — which is how blocking checks
+# end up disabled. The merge path stays deterministic; this opens an issue.
+#
+# The offline half of the guard (register exhaustiveness, the ratchet, and the
+# fixture/register consistency check) runs in the normal suite on every PR.
+name: catalog-drift
+
+on:
+  schedule:
+    # 06:17 UTC on Mondays. Off the hour on purpose — scheduled jobs that all
+    # ask for :00 pile onto the same minute across every repo on the runner fleet.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    # A missing token makes this exit 2, which is "could not check", not
+    # "capability drifted". Never fail the job on that.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - name: Compare live catalog capability keys against the fixture
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bun run scripts/check-catalog-drift.ts

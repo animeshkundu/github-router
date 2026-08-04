@@ -1,0 +1,22 @@
+{
+  "keys": [
+    "limits.max_context_window_tokens",
+    "limits.max_inputs",
+    "limits.max_non_streaming_output_tokens",
+    "limits.max_output_tokens",
+    "limits.max_prompt_tokens",
+    "limits.vision.max_prompt_image_size",
+    "limits.vision.max_prompt_images",
+    "limits.vision.supported_media_types",
+    "supports.adaptive_thinking",
+    "supports.dimensions",
+    "supports.max_thinking_budget",
+    "supports.min_thinking_budget",
+    "supports.parallel_tool_calls",
+    "supports.reasoning_effort",
+    "supports.streaming",
+    "supports.structured_outputs",
+    "supports.tool_calls",
+    "supports.vision"
+  ]
+}

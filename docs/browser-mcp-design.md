@@ -86,7 +86,7 @@ The model sees these tools with the `mcp__browser__` prefix (e.g. `mcp__browser_
 | `navigate` | `browser_navigate` | Goto / back / forward / reload an existing tab. |
 | `read_page` | `browser_read_page` | Extract rendered text, interactive-element refs + CSS-px bboxes, and viewport metadata `{width, height, devicePixelRatio, scrollX, scrollY}`. |
 | `scroll` | `browser_scroll` | Scroll to top / bottom / by pixels / to a referenced element / wheel at a pointer location (`at-pointer` mode for sub-region scroll). |
-| `screenshot` | `browser_screenshot` | Capture a base64 PNG of the visible tab area. |
+| `screenshot` | `browser_screenshot` | Capture the visible tab area and return it as a real MCP **image block** the model can look at, plus a small text envelope of capture metadata. Takes `format` (png/jpeg) and, for jpeg, `quality` (1-100) so an over-large capture can be retaken smaller. It previously returned the base64 inside a JSON *text* block, which the caller could not interpret and which cost ~130x the tokens of a native image block — see [`multimodal.md`](multimodal.md). |
 | `keyboard` | `browser_keyboard` | Send a chord (Control+L, etc) via CDP `Input.dispatchKeyEvent`. |
 | `wait` | `browser_wait` | Wait for selector / URL regex match / network-idle heuristic. |
 | `eval_js` | `browser_eval_js` | Evaluate a JS expression in the page's main world (CDP `Runtime.evaluate`). |

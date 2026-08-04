@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import { FleetError, type WaitEventsResponse } from "../../src/lib/fleet/client"
 import { createFleetTools, type CreateFleetToolsOptions } from "../../src/lib/fleet/tools"
 import { FleetRegistry, type FleetInstanceConfig } from "../../src/lib/fleet/registry"
+import { firstText, type McpToolResult } from "~/lib/attachments"
 
 const INSTANCE_COUNT = 100
 const WATCHER_COUNT = 50
@@ -87,11 +88,11 @@ async function callTool(
   tools: FleetToolMap,
   name: string,
   args: Record<string, unknown>,
-): Promise<{ result: { content: Array<{ type: "text"; text: string }>; isError?: boolean }; json: unknown }> {
+): Promise<{ result: McpToolResult; json: unknown }> {
   const tool = tools.get(name)
   expect(tool).toBeDefined()
   const result = await tool!.handler(args)
-  return { result, json: JSON.parse(result.content[0]!.text) as unknown }
+  return { result, json: JSON.parse(firstText(result)) as unknown }
 }
 
 function concurrencyProbe() {

@@ -154,11 +154,44 @@ describe("chatResponseToAnthropicMessage", () => {
     expect(block.input).toEqual({ a: 1 })
   })
 
-  test("content_filter finish_reason (no tools) → end_turn", () => {
+  // Previously asserted `end_turn`, which pinned a real defect in place: an
+  // upstream safety block was indistinguishable from a normal completion, so a
+  // client had no way to know content had been withheld. `refusal` is
+  // Anthropic's documented stop_reason for this case.
+  test("content_filter finish_reason (no tools) → refusal, not end_turn", () => {
     const msg = chatResponseToAnthropicMessage(
       resp({ role: "assistant", content: "blocked" }, { finish_reason: "content_filter" }),
       MODEL_ID,
     )
-    expect(msg.stop_reason).toBe("end_turn")
+    expect(msg.stop_reason).toBe("refusal")
+  })
+
+  test("a refusal arrives outside `content` and must still reach the client", () => {
+    // The model declines: `content` is null and the text lives in `refusal`.
+    // Reading only `content` produced an empty, apparently-successful message.
+    const msg = chatResponseToAnthropicMessage(
+      resp(
+        { role: "assistant", content: null, refusal: "I can't help with that." },
+        { finish_reason: "content_filter" },
+      ),
+      MODEL_ID,
+    )
+    expect(msg.content).toEqual([{ type: "text", text: "I can't help with that." }])
+    expect(msg.stop_reason).toBe("refusal")
+  })
+
+  test("tool_use still wins over content_filter when a tool call is present", () => {
+    const msg = chatResponseToAnthropicMessage(
+      resp(
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "call_1", function: { name: "f", arguments: "{}" } }],
+        },
+        { finish_reason: "content_filter" },
+      ),
+      MODEL_ID,
+    )
+    expect(msg.stop_reason).toBe("tool_use")
   })
 })

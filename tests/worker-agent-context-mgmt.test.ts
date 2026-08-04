@@ -442,3 +442,79 @@ describe("compactWorkerContext", () => {
     )
   })
 })
+
+// ---------------------------------------------------------------------------
+// Image budget — images used to bypass every cap in the system
+// ---------------------------------------------------------------------------
+
+describe("capToolResultText image budget", () => {
+  const img = (bytes: number) => ({
+    type: "image" as const,
+    mimeType: "image/png",
+    // base64 expands 3 bytes to 4 chars; close enough for a budget assertion.
+    data: "A".repeat(Math.ceil((bytes * 4) / 3)),
+  })
+
+  test("an all-image result is now inspected at all", () => {
+    // Previously `textBytes <= capBytes` short-circuited with textBytes === 0,
+    // so a result carrying only images was never examined and no budget applied.
+    const content = Array.from({ length: 12 }, () => img(1024))
+    const out = capToolResultText(content, 64_000)
+    expect(out).toBeDefined()
+    expect(out!.filter((b) => (b as { type: string }).type === "image")).toHaveLength(10)
+  })
+
+  test("dropping images is reported, never silent", () => {
+    const content = Array.from({ length: 12 }, () => img(1024))
+    const out = capToolResultText(content, 64_000)!
+    const text = out.find((b) => b.type === "text")?.text ?? ""
+    expect(text).toMatch(/2 of 12 image\(s\) dropped/)
+    expect(text).toMatch(/lower quality/i)
+  })
+
+  test("a total-bytes runaway is bounded even under the count limit", () => {
+    // 5 images x 4 MiB = 20 MiB, under the 10-image count cap but over the
+    // 12 MiB byte cap.
+    const content = Array.from({ length: 5 }, () => img(4 * 1024 * 1024))
+    const out = capToolResultText(content, 64_000)!
+    expect(out.filter((b) => (b as { type: string }).type === "image").length).toBeLessThan(5)
+  })
+
+  test("a normal result with a couple of images is left completely alone", () => {
+    const content = [{ type: "text", text: "small" }, img(1024), img(1024)]
+    expect(capToolResultText(content, 64_000)).toBeUndefined()
+  })
+
+  test("text is still capped independently of images", () => {
+    const content = [{ type: "text", text: "x".repeat(200_000) }, img(1024)]
+    const out = capToolResultText(content, 1_000)!
+    expect(out.filter((b) => (b as { type: string }).type === "image")).toHaveLength(1)
+    expect(out.find((b) => b.type === "text")?.text).toMatch(/truncated/i)
+  })
+})
+
+describe("image budget does not punish unrelated blocks", () => {
+  const img = (bytes: number) => ({
+    type: "image" as const,
+    mimeType: "image/png",
+    data: "A".repeat(Math.ceil((bytes * 4) / 3)),
+  })
+
+  test("a non-image, non-text block is preserved and never counted", () => {
+    // `images` used to collect EVERY non-text block, so an audio or resource
+    // block consumed the image budget and could be dropped by a cap that was
+    // never about it.
+    const other = { type: "resource", uri: "file:///x" }
+    const content = [{ type: "text", text: "t" }, other, ...Array.from({ length: 12 }, () => img(1024))]
+    const out = capToolResultText(content, 64_000)!
+    expect(out.some((b) => (b as { type: string }).type === "resource")).toBe(true)
+  })
+
+  test("one oversized image does not discard the smaller ones behind it", () => {
+    // `break` stopped the loop entirely; `continue` skips only the offender.
+    const content = [img(20 * 1024 * 1024), img(1024), img(1024)]
+    const out = capToolResultText(content, 64_000)!
+    expect(out.filter((b) => (b as { type: string }).type === "image")).toHaveLength(2)
+    expect(out.find((b) => b.type === "text")?.text).toMatch(/1 of 3 image\(s\) dropped/)
+  })
+})

@@ -29,6 +29,8 @@
 import { randomUUID } from "node:crypto"
 import process from "node:process"
 
+import type { McpToolResult } from "~/lib/attachments"
+
 import { dispatchBrowserTool } from "./dispatch"
 
 // ============================================================
@@ -45,7 +47,7 @@ export type CloseTabDispatch = (
   tool: string,
   args: Record<string, unknown>,
   signal?: AbortSignal,
-) => Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>
+) => Promise<McpToolResult>
 
 const DEFAULT_MAX_SESSIONS = 6
 
