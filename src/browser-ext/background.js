@@ -159,42 +159,407 @@ async function toolNavigate(args) {
   return { finalUrl: t.url, statusCode: t.status === "complete" ? 200 : 0 }
 }
 
-async function toolScreenshot(args) {
-  const tabId = typeof args.tabId === "number" ? args.tabId : undefined
-  const format = args.format === "jpeg" ? "jpeg" : "png"
-  // captureVisibleTab needs the tab's windowId, not the tab id.
-  let windowId
-  if (tabId) {
-    const tab = await chrome.tabs.get(tabId)
-    windowId = tab.windowId
-    if (!tab.active) {
-      // Must activate the tab to capture it (captureVisibleTab is
-      // window-scoped, snapshots the active tab of the named window).
-      await chrome.tabs.update(tabId, { active: true })
-      // Tiny pause so the renderer has a chance to paint after activation.
-      await sleep(150)
+// Window-remediation policy for pixel capture. Resolved proxy-side from
+// GH_ROUTER_BROWSER_WINDOW_POLICY and passed down per call, because the
+// extension has no access to the proxy's environment. Kept permissive by
+// default so a capture against a minimized window succeeds rather than
+// erroring; set the env var to "deny" to keep the proxy's hands off
+// window state entirely.
+const WINDOW_POLICIES = new Set(["deny", "restore", "foreground"])
+const DEFAULT_WINDOW_POLICY = "foreground"
+
+// Screenshot failure codes. These travel back to the caller so a model
+// gets a stated cause and remedy instead of the dispatcher's blunt
+// "timeout after 15000ms", and so it can tell a retryable failure from
+// one that needs a state change and will never succeed on retry.
+const SHOT_ERR = {
+  BAD_TAB_ID: "BAD_TAB_ID",
+  WINDOW_MINIMIZED: "WINDOW_MINIMIZED",
+  CAPTURE_STALLED: "CAPTURE_STALLED",
+  TARGET_CHANGED: "TARGET_CHANGED",
+  QUEUE_BUSY: "QUEUE_BUSY",
+  RATE_LIMITED: "RATE_LIMITED",
+}
+
+/**
+ * Chrome's own per-second cap on captureVisibleTab. Matched on the message
+ * because the API surfaces it as a plain Error with no code of its own.
+ */
+function isCaptureQuotaError(err) {
+  return Boolean(
+    err
+    && typeof err.message === "string"
+    && /MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND|exceeds the .*quota/i.test(err.message),
+  )
+}
+
+/** Chrome's quota window is one second; back off just past it before retrying. */
+const CAPTURE_QUOTA_BACKOFF_MS = 1_100
+
+function shotError(code, message) {
+  const err = new Error(message)
+  err.code = code
+  return err
+}
+
+/**
+ * Internal deadline for the whole screenshot operation. The dispatcher
+ * gives us 15 s (PER_TOOL_TIMEOUTS.browser_screenshot); we must return a
+ * typed diagnostic comfortably before that, or the caller gets the bare
+ * timeout string and learns nothing.
+ */
+const SHOT_DEADLINE_MS = 12_000
+/**
+ * How long to wait on a capture that has already passed the paintability
+ * pre-check before declaring it stalled.
+ *
+ * Deliberately generous. A healthy capture returns in tens of
+ * milliseconds, but a 4K viewport encoding a heavy page to PNG can take
+ * a second or two on a loaded machine, and calling that "stalled" would
+ * turn a slow success into a hard failure. The point of this watchdog is
+ * to return a *typed, explanatory* error instead of the dispatcher's
+ * anonymous timeout — not to shave seconds — so it is set well above any
+ * realistic capture time while still leaving room under the 12 s
+ * internal deadline.
+ */
+const SHOT_WATCHDOG_MS = 6_000
+/** Paint settle after restoring or activating. Not a paint barrier — see note in toolScreenshot. */
+const SHOT_PAINT_SETTLE_MS = 250
+
+/**
+ * Make `windowId` paintable if policy allows; throw if policy forbids it.
+ *
+ * `captureVisibleTab` reads from the compositor. A minimized window has
+ * no compositing surface, and a tab that has NEVER been composited in
+ * one has no frame to hand back — so the call does not reject, it simply
+ * never settles. That much is measured. What is NOT established is
+ * whether a capture already in flight recovers once the window becomes
+ * paintable again, so we do not rely on either answer: we check BEFORE
+ * starting a capture, which is correct regardless, and it is also the
+ * only point at which we can still choose not to start one.
+ *
+ * `policy` is resolved proxy-side (the extension cannot read env) and is
+ * one of "deny" | "restore" | "foreground".
+ */
+async function ensureWindowPaintable(windowId, policy) {
+  if (typeof windowId !== "number") return
+  let win
+  try {
+    win = await chrome.windows.get(windowId)
+  } catch {
+    win = undefined
+  }
+  if (!win) {
+    // State is unknown. Under `deny` the whole contract is "never touch
+    // the window, and don't start a capture that can't work", so an
+    // unknown state must fail closed rather than fall through to a
+    // capture that may hang. Under the permissive policies, proceed and
+    // let the capture path surface the real error.
+    if (policy === "deny") {
+      throw shotError(
+        SHOT_ERR.WINDOW_MINIMIZED,
+        "browser_screenshot: could not determine the target window's state, and window policy is 'deny' so it was left untouched. "
+          + "Make sure the browser window is open and visible, then retry.",
+      )
+    }
+    return
+  }
+  if (win.state !== "minimized") return
+
+  if (policy === "deny") {
+    throw shotError(
+      SHOT_ERR.WINDOW_MINIMIZED,
+      "browser_screenshot: the target window is minimized, so the browser is not painting it and a capture cannot succeed. "
+        + "Window policy is 'deny', so the window was left untouched. Restore the browser window and retry, "
+        + "or set GH_ROUTER_BROWSER_WINDOW_POLICY=restore to let the proxy un-minimize it automatically.",
+    )
+  }
+
+  // Prefer `{focused: true}` alone for the foreground policy: on Windows
+  // that un-minimizes to the window's PREVIOUS state, so a maximized
+  // window stays maximized. Forcing `state: "normal"` would silently
+  // demote it to a floating window and corrupt the user's layout.
+  if (policy === "foreground") {
+    try {
+      await chrome.windows.update(windowId, { focused: true })
+      await sleep(SHOT_PAINT_SETTLE_MS)
+      const after = await chrome.windows.get(windowId)
+      if (after && after.state !== "minimized") return
+    } catch {
+      // fall through to the explicit state set
     }
   }
-  // Both this API and CDP Page.captureScreenshot require the browser
-  // to have a real OS-level rendering surface. On Chrome-for-Testing
-  // launched in plain headed mode without --headless=new, no such
-  // surface exists and either path hangs indefinitely — the Playwright
-  // E2E harness passes --headless=new in its args list for exactly this
-  // reason. Real Chrome with a visible window has a surface and works
-  // fine. If you're driving Chrome-for-Testing programmatically and
-  // need screenshots, launch with `--headless=new`.
-  // `quality` (1-100) applies to JPEG only; Chrome ignores it for PNG. It is the
-  // model's lever for shrinking a capture when a full-size one is refused for
-  // exceeding a model's image-size limit — without it, "retake it smaller" is
-  // advice the caller cannot act on. An older extension build that predates this
-  // simply ignores the extra key and captures at default quality.
-  const captureOpts = { format }
-  if (typeof args.quality === "number") captureOpts.quality = args.quality
-  const dataUrl = await chrome.tabs.captureVisibleTab(windowId, captureOpts)
-  // dataUrl: "data:image/png;base64,...."
-  const m = /^data:([^;]+);base64,(.*)$/.exec(dataUrl)
-  if (!m) throw new Error("browser_screenshot: captureVisibleTab returned unexpected shape")
-  return { contentType: m[1], dataBase64: m[2] }
+
+  // `restore` (and the foreground fallback): there is no API to
+  // un-minimize to the prior state without focusing, so this is the only
+  // lever available, at the cost of demoting a maximized window.
+  // Deliberately omit `focused` rather than passing `focused: false` —
+  // the explicit false has its own focus/z-order semantics, whereas
+  // omission genuinely leaves focus alone.
+  await chrome.windows.update(windowId, { state: "normal" })
+  await sleep(SHOT_PAINT_SETTLE_MS)
+}
+
+/**
+ * Serialize pixel capture per WINDOW.
+ *
+ * `captureVisibleTab` snapshots whichever tab is active in the window at
+ * capture time, not the tab we asked for. Two concurrent screenshots of
+ * different tabs in the same window would each activate their own tab
+ * and then race, so one could return the other's pixels — handing a
+ * model page content it never asked for. Note this is per-WINDOW and so
+ * cannot reuse `withTabInputLock`, which is keyed by tab: two different
+ * tabs of one window take different tab locks and would not exclude each
+ * other at all, which is exactly the race we need to prevent.
+ *
+ * The hold cap matters more here than for input: a capture with no
+ * rendering surface never settles, so without a cap one stuck call would
+ * wedge every future capture on that window for the life of the service
+ * worker.
+ */
+/**
+ * Captures that were started but have not settled, per window.
+ *
+ * The per-window lock alone does NOT bound these. When the watchdog
+ * fires we throw and release the lock, but the underlying
+ * `captureVisibleTab` is not cancellable and stays pending — so without
+ * this, every retry would start another one and they would pile up.
+ *
+ * A pending entry clears itself if the capture ever settles, so this
+ * self-heals: if making the window visible lets a stuck capture finally
+ * complete, the count drops and captures resume. (Whether a stalled
+ * capture recovers once the window becomes paintable is not something
+ * we have measured, so this deliberately does not assume either way.)
+ */
+const windowPendingCaptures = new Map()
+
+const windowCaptureLockTails = new Map()
+// Backstop only. `fn()` bounds itself with SHOT_DEADLINE_MS, so this cap
+// should never fire in normal operation; it sits just above that
+// deadline so a genuinely wedged capture releases the window shortly
+// after its own call has died, rather than holding it for the life of
+// the service worker.
+const WINDOW_CAPTURE_LOCK_HOLD_CAP_MS = 14_000
+
+async function withWindowCaptureLock(windowId, fn) {
+  const key = typeof windowId === "number" ? windowId : "current"
+  const previousTail = windowCaptureLockTails.get(key) || Promise.resolve()
+  let release
+  const myTurn = new Promise((r) => { release = r })
+  const newTail = previousTail.then(() => myTurn)
+  windowCaptureLockTails.set(key, newTail)
+  await previousTail
+  let timer
+  try {
+    return await Promise.race([
+      fn(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject(shotError(
+            SHOT_ERR.CAPTURE_STALLED,
+            `browser_screenshot: capture lock held > ${WINDOW_CAPTURE_LOCK_HOLD_CAP_MS}ms on windowId=${key}. `
+              + "A previous capture never completed, which means the window has no rendering surface. "
+              + "Make the browser window visible and retry.",
+          ))
+        }, WINDOW_CAPTURE_LOCK_HOLD_CAP_MS)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    release()
+    // Drop the entry when nobody queued behind us, so a browser session
+    // that opens and closes many windows doesn't accumulate dead keys
+    // for the life of the service worker.
+    if (windowCaptureLockTails.get(key) === newTail) windowCaptureLockTails.delete(key)
+  }
+}
+
+async function toolScreenshot(args) {
+  const deadline = Date.now() + SHOT_DEADLINE_MS
+  const format = args.format === "jpeg" ? "jpeg" : "png"
+  const policy = WINDOW_POLICIES.has(args.windowPolicy) ? args.windowPolicy : DEFAULT_WINDOW_POLICY
+
+  // `if (tabId)` was wrong: chrome.tabs.TAB_ID_NONE is -1, which is
+  // truthy, so a "no tab" sentinel sailed through and we captured
+  // whatever window happened to be current.
+  let tabId
+  if (args.tabId !== undefined && args.tabId !== null) {
+    if (!Number.isInteger(args.tabId) || args.tabId === chrome.tabs.TAB_ID_NONE || args.tabId < 0) {
+      throw shotError(
+        SHOT_ERR.BAD_TAB_ID,
+        `browser_screenshot: tabId must be a valid tab id; got ${JSON.stringify(args.tabId)}. Use browser_list_tabs or browser_open_tab to get one.`,
+      )
+    }
+    tabId = args.tabId
+  }
+
+  // Resolve the target window BEFORE taking the lock, since the lock is
+  // keyed by window.
+  let windowId
+  if (tabId === undefined) {
+    // Resolve "current" deterministically instead of letting
+    // captureVisibleTab pick for us — "the current window" from a
+    // service worker is whatever Chrome last considered focused, which
+    // is not stable across SW dormancy.
+    const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+    if (!activeTab) {
+      throw shotError(SHOT_ERR.BAD_TAB_ID, "browser_screenshot: no tabId given and no active tab could be resolved.")
+    }
+    tabId = activeTab.id
+    windowId = activeTab.windowId
+  } else {
+    windowId = (await chrome.tabs.get(tabId)).windowId
+  }
+
+  // Everything from activation through capture must be atomic per
+  // window: captureVisibleTab grabs whichever tab is active at capture
+  // time, so an interleaved second screenshot could activate its own tab
+  // and make this one return the wrong page's pixels.
+  return withWindowCaptureLock(windowId, async () => {
+    // Waiting for the lock spends the same budget the capture needs, so
+    // report contention AS contention. Reusing CAPTURE_STALLED here
+    // would blame the browser for what is actually our own queue.
+    if (Date.now() >= deadline) {
+      throw shotError(
+        SHOT_ERR.QUEUE_BUSY,
+        `browser_screenshot: another capture on window ${windowId} held the queue for the whole time budget. Retry.`,
+      )
+    }
+
+    const tab = await chrome.tabs.get(tabId)
+    // Do NOT re-key onto the new window: the lock is held on the window
+    // resolved before acquisition, so proceeding against a different one
+    // would mutate and capture a window we hold no lock for — exactly
+    // the interleaving this lock exists to prevent.
+    if (tab.windowId !== windowId) {
+      throw shotError(
+        SHOT_ERR.TARGET_CHANGED,
+        `browser_screenshot: tab ${tabId} moved to another window while the capture was being set up. Retry.`,
+      )
+    }
+
+    // Make the window paintable BEFORE selecting the tab. Restoring a
+    // window yields the event loop, and any yield AFTER confirming the
+    // active tab reopens the window for the user or another caller to
+    // switch tabs — which captureVisibleTab would silently honour.
+    await ensureWindowPaintable(windowId, policy)
+
+    if (!tab.active) {
+      await chrome.tabs.update(tabId, { active: true })
+      await sleep(SHOT_PAINT_SETTLE_MS)
+    }
+
+    // Last check before the capture, with no awaits in between.
+    const confirmed = await chrome.tabs.get(tabId)
+    if (!confirmed.active || confirmed.windowId !== windowId) {
+      throw shotError(
+        SHOT_ERR.TARGET_CHANGED,
+        `browser_screenshot: tab ${tabId} is not the active tab of window ${windowId} at capture time, so a capture would return a different page. Retry, or activate the tab first.`,
+      )
+    }
+
+    // `quality` (1-100) applies to JPEG only; Chrome ignores it for PNG. It is the
+    // model's lever for shrinking a capture when a full-size one is refused for
+    // exceeding a model's image-size limit — without it, "retake it smaller" is
+    // advice the caller cannot act on.
+    const captureOpts = { format }
+    if (Number.isFinite(args.quality)) {
+      captureOpts.quality = Math.max(1, Math.min(100, Math.round(args.quality)))
+    }
+
+    // The deadline is a hard contract: overrunning it hands the caller
+    // back the dispatcher's anonymous timeout, which is the failure this
+    // whole path exists to eliminate. So no minimum-budget floor — if
+    // there is no time left, say so in terms the caller can act on.
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
+      throw shotError(
+        SHOT_ERR.CAPTURE_STALLED,
+        "browser_screenshot: preparing the window used the entire time budget before a capture could start. "
+          + "The window is most likely not visible. Make it visible and retry.",
+      )
+    }
+    const budget = Math.min(SHOT_WATCHDOG_MS, remaining)
+
+    // One capture attempt. Kept as a closure so the rate-limit path below
+    // can run it a second time WITHOUT ever having two in flight: it is
+    // only re-invoked after the first attempt has REJECTED, i.e. settled.
+    const attemptCapture = async (budgetMs) => {
+      // Refuse to stack captures on a window that already has one stuck.
+      // The lock does not cover this: a stalled capture stays pending
+      // after we release, so without this guard each retry would add
+      // another unkillable in-flight call.
+      if ((windowPendingCaptures.get(windowId) || 0) > 0) {
+        throw shotError(
+          SHOT_ERR.CAPTURE_STALLED,
+          `browser_screenshot: an earlier capture on window ${windowId} never completed and cannot be cancelled, so a new one is not being started. `
+            + "Make the browser window visible; if that lets the earlier capture finish, captures resume automatically.",
+        )
+      }
+
+      windowPendingCaptures.set(windowId, (windowPendingCaptures.get(windowId) || 0) + 1)
+      const capture = chrome.tabs.captureVisibleTab(windowId, captureOpts)
+      // Doubles as the unhandled-rejection guard: the losing promise is
+      // unobservable but must not surface as an unhandled rejection.
+      // Promise.race still sees the original settlement either way.
+      const settled = () => {
+        const next = (windowPendingCaptures.get(windowId) || 1) - 1
+        if (next <= 0) windowPendingCaptures.delete(windowId)
+        else windowPendingCaptures.set(windowId, next)
+      }
+      capture.then(settled, settled)
+
+      // Sentinel rather than a mutable flag: the raced value itself tells us
+      // who won, so there is no ordering assumption between the timer's
+      // continuation and this one.
+      const STALLED = Symbol("stalled")
+      const raced = await Promise.race([capture, sleep(budgetMs).then(() => STALLED)])
+      if (raced === STALLED) {
+        throw shotError(
+          SHOT_ERR.CAPTURE_STALLED,
+          `browser_screenshot: the browser accepted the capture but produced no frame within ${budgetMs}ms. `
+            + "This means the target has no rendering surface — typically the window is minimized, fully covered, "
+            + "on another virtual desktop, or the session is locked. Make the browser window visible and retry.",
+        )
+      }
+      return raced
+    }
+
+    // Chrome rate-limits captureVisibleTab to a couple of calls per second
+    // per window and REJECTS past that with a raw quota message. An agent
+    // loop (screenshot -> act -> screenshot) hits this routinely, and the
+    // bare message tells it nothing — it reads like a hard failure when the
+    // only thing wrong is that it asked too fast. The per-window lock
+    // serializes captures but does not PACE them, so serialization alone
+    // does not avoid it.
+    //
+    // Retrying here is safe specifically because the first attempt
+    // REJECTED: there is no in-flight capture to overlap with, which is the
+    // condition that makes retrying a stalled capture unsafe.
+    let dataUrl
+    try {
+      dataUrl = await attemptCapture(budget)
+    } catch (err) {
+      const left = deadline - Date.now()
+      if (!isCaptureQuotaError(err) || left <= CAPTURE_QUOTA_BACKOFF_MS) throw err
+      await sleep(CAPTURE_QUOTA_BACKOFF_MS)
+      try {
+        dataUrl = await attemptCapture(Math.min(SHOT_WATCHDOG_MS, deadline - Date.now()))
+      } catch (retryErr) {
+        if (!isCaptureQuotaError(retryErr)) throw retryErr
+        throw shotError(
+          SHOT_ERR.RATE_LIMITED,
+          "browser_screenshot: the browser is rate-limiting screen captures (it allows only a couple per second per window) "
+            + "and still refused after a backoff. Nothing is broken — space captures out, or take one screenshot and work "
+            + "from it rather than re-capturing after every action.",
+        )
+      }
+    }
+
+    const m = /^data:([^;]+);base64,(.*)$/.exec(dataUrl || "")
+    if (!m) throw new Error("browser_screenshot: captureVisibleTab returned unexpected shape")
+    return { contentType: m[1], dataBase64: m[2] }
+  })
 }
 
 async function toolReadPage(args) {
@@ -2102,7 +2467,18 @@ async function handleBridgeRequest(req, port) {
       }
     }
   } catch (err) {
-    port.postMessage({ id: req.id, ok: false, error: err && err.message ? err.message : String(err) })
+    // Forward the typed `code` when a handler set one. Without this a
+    // caller sees only prose and cannot distinguish a failure that a
+    // retry might fix from one that needs a state change first — which
+    // is how a stuck capture read as an anonymous timeout.
+    const code = err && typeof err.code === "string" ? err.code : undefined
+    if (code) console.warn(`[browser-bridge] ${req.tool} failed (${code}):`, err.message)
+    port.postMessage({
+      id: req.id,
+      ok: false,
+      error: err && err.message ? err.message : String(err),
+      ...(code ? { code } : {}),
+    })
   }
 }
 
