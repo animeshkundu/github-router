@@ -835,16 +835,40 @@ describe("runSemanticSearch: no-fallback contract", () => {
     failedAt: Record<string, unknown>,
   ): Promise<string> => {
     const store = await import("../../src/lib/colbert/index-store")
+    const manifest = await import("../../src/lib/colbert/manifest")
     store.__resetInitDebounceForTests()
     const ws = path.join(TEST_HOME, name)
+    // A REAL git repo: the corpus-identity comparisons require a known head on
+    // BOTH sides, so a bare temp dir (no git => head undefined) could never
+    // exercise them. Real workspaces are repos.
+    await fs.mkdir(ws, { recursive: true })
+    const { execFileSync } = await import("node:child_process")
+    const git = (args: Array<string>) =>
+      execFileSync("git", args, { cwd: ws, stdio: "pipe" })
+    git(["init", "-q"])
+    git(["config", "user.email", "t@example.invalid"])
+    git(["config", "user.name", "t"])
+    await fs.writeFile(path.join(ws, "a.txt"), "a")
+    git(["add", "-A"])
+    git(["commit", "-qm", "a"])
     await store.writeColbertMeta({
+      // Default the engine identity to the CURRENT values so a caller varying
+      // one axis (say HEAD) isn't also implicitly varying the shas.
+      binarySha: manifest.colgrepBinAsset()?.sha256,
+      ortSha: manifest.ortLibAsset()?.sha256,
       workspace: ws,
       model: "LateOn-Code-edge",
       modelRev: "rev",
       status: "failed",
       failureClass: "error",
       failedAttempts: 3,
-      failedAt,
+      failedAt: {
+        binarySha: manifest.colgrepBinAsset()?.sha256,
+        ortSha: manifest.ortLibAsset()?.sha256,
+        modelRev: manifest.MODEL_REVISION,
+        dirty: false,
+        ...failedAt,
+      },
       // Well outside FAILED_RETRY_BACKOFF_MS, so the backoff never masks the
       // behavior under test.
       lastIndexedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
@@ -912,6 +936,31 @@ describe("runSemanticSearch: no-fallback contract", () => {
     expect(r.notice).toMatch(/unavailable/i)
     expect(r.notice).not.toMatch(/inputs changed|started|shortly/i)
     expect((await store.readColbertMeta(ws))?.failedAttempts).toBe(3)
+  })
+
+  test("the reset fires ONCE, then the streak re-accumulates normally", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const ws = await cappedAt("ws-reset-once", { head: "old-head-sha" })
+    const { runSemanticSearch, __waitForAllInitsForTests } = await import(
+      "../../src/lib/colbert/runner"
+    )
+
+    // First query resets and kicks.
+    const first = await runSemanticSearch({ query: "auth", workspace: ws })
+    await __waitForAllInitsForTests()
+    expect(first.notice).toMatch(/inputs changed/i)
+
+    // The rebuild fails (no colgrep binary in this env) and must stamp a FRESH
+    // baseline. If any failure path forgot to, the next query would see a
+    // missing-or-stale baseline and reset again — an unbounded rebuild loop.
+    const after = await store.readColbertMeta(ws)
+    expect(after?.failedAt).toBeTruthy()
+
+    for (let i = 0; i < 3; i++) {
+      const again = await runSemanticSearch({ query: "auth", workspace: ws })
+      await __waitForAllInitsForTests()
+      expect(again.notice).not.toMatch(/inputs changed/i)
+    }
   })
 
   test("a legacy entry with no failedAt baseline does NOT reset", async () => {

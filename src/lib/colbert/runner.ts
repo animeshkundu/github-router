@@ -338,6 +338,19 @@ async function repairCorruptIndex(
     status: "failed",
     failureClass: "corrupt",
     failedAttempts: attempts,
+    // Same reason as the other failure writes: a streak with no baseline is
+    // never resettable, so a corrupt-index streak would cap permanently even
+    // after an engine upgrade or a fresh corpus.
+    failedAt: {
+      head: meta?.lastIndexedHead,
+      dirty: meta?.lastIndexedDirty,
+      binarySha: colgrepBinAsset()?.sha256,
+      ortSha: ortLibAsset()?.sha256,
+      // CURRENT revision, not a copied one — see the note on the launch-path
+      // stamp: a stale value never equals MODEL_REVISION and would reset the
+      // streak on every query.
+      modelRev: MODEL_REVISION,
+    },
     lastIndexedAt: new Date().toISOString(),
     lastIndexedHead: meta?.lastIndexedHead,
     lastIndexedDirty: meta?.lastIndexedDirty,
@@ -400,10 +413,23 @@ function failureInputsChanged(
 ): boolean {
   const at = meta?.failedAt
   if (!at) return false
+  // Every comparison requires BOTH sides to be known. An `undefined` on either
+  // side means "we cannot tell", and unknown must never read as "changed" —
+  // otherwise a partially-populated baseline (or a git probe that timed out)
+  // would reset the streak on every query, which is the unbounded rebuild loop
+  // this whole mechanism has to avoid.
   const binarySha = colgrepBinAsset()?.sha256
   const ortSha = ortLibAsset()?.sha256
-  if (binarySha !== undefined && at.binarySha !== binarySha) return true
-  if (ortSha !== undefined && at.ortSha !== ortSha) return true
+  if (
+    at.binarySha !== undefined
+    && binarySha !== undefined
+    && at.binarySha !== binarySha
+  ) {
+    return true
+  }
+  if (at.ortSha !== undefined && ortSha !== undefined && at.ortSha !== ortSha) {
+    return true
+  }
   if (at.modelRev !== undefined && at.modelRev !== MODEL_REVISION) return true
   if (at.head !== undefined && git.head !== undefined && at.head !== git.head) {
     return true
@@ -491,7 +517,8 @@ async function handleFailure(
         dirty: meta?.lastIndexedDirty,
         binarySha: meta?.binarySha ?? colgrepBinAsset()?.sha256,
         ortSha: meta?.ortSha ?? ortLibAsset()?.sha256,
-        modelRev: meta?.modelRev ?? MODEL_REVISION,
+        // CURRENT revision, not a copied one (see the launch-path note).
+        modelRev: MODEL_REVISION,
       },
       lastIndexedAt: lastAt ?? new Date().toISOString(),
       lastIndexedHead: meta?.lastIndexedHead,
@@ -832,6 +859,15 @@ export function kickBackgroundInit(workspace: string): void {
       releaseInit(workspace)
       consola.error("colbert: background init failed:", err)
       const prior = await readColbertMeta(workspace)
+      // Read LIVE git state for the baseline rather than copying
+      // `prior.lastIndexedHead`. That field records the last SUCCESSFUL index
+      // and is empty on a workspace that has never built, so copying it would
+      // stamp a headless baseline — and a baseline with no head can never
+      // detect a later commit, leaving this failure class unresettable.
+      const g = await gitState(workspace).catch(() => ({
+        head: undefined,
+        dirty: undefined,
+      }))
       await writeColbertMeta({
         workspace,
         model: prior?.model ?? MODEL_ID,
@@ -841,6 +877,22 @@ export function kickBackgroundInit(workspace: string): void {
         status: "failed",
         failureClass: "launch",
         failedAttempts: (prior?.failedAttempts ?? 0) + 1,
+        // Stamp the baseline here too. Without it a spawn failure — a missing
+        // or unrunnable binary, the most likely thing an upgrade FIXES — would
+        // accumulate a streak with no `failedAt`, and `failureInputsChanged`
+        // treats a missing baseline as "unknown, do not reset". That would
+        // leave exactly this class of failure permanently capped.
+        failedAt: {
+          head: g.head,
+          dirty: g.dirty,
+          binarySha: colgrepBinAsset()?.sha256,
+          ortSha: ortLibAsset()?.sha256,
+          // The CURRENT revision, not `prior.modelRev`. The baseline records
+          // what was in effect for THIS attempt; copying a stale value would
+          // make the comparison against MODEL_REVISION permanently unequal and
+          // reset the streak on every query — an unbounded rebuild loop.
+          modelRev: MODEL_REVISION,
+        },
         lastIndexedAt: new Date().toISOString(),
         lastIndexedHead: prior?.lastIndexedHead,
         lastIndexedDirty: prior?.lastIndexedDirty,
@@ -958,6 +1010,13 @@ async function runInit(workspace: string): Promise<void> {
     // the per-query `crashed` reclassification would read a missing counter,
     // reset the streak to 1 every time, and never hit the cap (retry storm).
     failedAttempts: prior?.failedAttempts ?? 0,
+    // Carry the BASELINE for the same reason. A meta write replaces the whole
+    // record, so dropping `failedAt` here would strip the streak's baseline on
+    // every build attempt — and `failureInputsChanged` would then see a
+    // partially-populated (or absent) baseline and could clear the streak on
+    // the next query, re-kicking forever. The counter and the baseline that
+    // scopes it have to survive together or neither is meaningful.
+    failedAt: prior?.failedAt,
   }
   // Capture git state at index start so the freshness verdict has a
   // baseline (best-effort; non-git workspaces leave these undefined).
