@@ -38,7 +38,7 @@
  * are the primary controls; this is defence in depth.
  */
 
-import { constants as fsConstants } from "node:fs"
+import { constants as fsConstants, realpathSync } from "node:fs"
 import { open } from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
 
@@ -108,6 +108,24 @@ export async function loadPeerImages(
         + "ceiling (the most any Copilot model accepts). Send fewer.",
     }
   }
+  // `confineToWorkspaceResult` canonicalizes the FILE with
+  // `realpathSync.native()` and then prefix-checks it against the workspace, so
+  // the workspace must be canonical too or the comparison is between two
+  // different spellings of the same directory. Its doc says the caller
+  // pre-resolves (the worker engine does, at start); this entry point is reached
+  // straight from an MCP call with `process.cwd()`, so it resolves here.
+  //
+  // This is not theoretical: on a Windows CI runner `os.tmpdir()` yields a
+  // short-name path (`C:/Users/RUNNER~1/...`) while the realpath of a file
+  // inside it is the long form (`C:/Users/runneradmin/...`). Without this, every
+  // attachment was rejected on that machine and only on that machine.
+  let workspaceAbs: string
+  try {
+    workspaceAbs = realpathSync.native(workspace)
+  } catch {
+    workspaceAbs = workspace
+  }
+
   const images: Array<LoadedImage> = []
   let totalBytes = 0
   for (const [index, raw] of paths.entries()) {
@@ -116,11 +134,11 @@ export async function loadPeerImages(
       return { ok: false, error: `${position}: must be a non-empty string.` }
     }
 
-    const confined = confineToWorkspaceResult(raw, workspace)
+    const confined = confineToWorkspaceResult(raw, workspaceAbs)
     if (!confined.ok) {
       return { ok: false, error: `${position}: ${confined.error}` }
     }
-    if (isSensitivePath(confined.abs, workspace)) {
+    if (isSensitivePath(confined.abs, workspaceAbs)) {
       return { ok: false, error: `${position}: rejected: sensitive path` }
     }
 

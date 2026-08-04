@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 
@@ -24,7 +24,11 @@ const PNG_B64_B =
 
 let dir: string
 beforeEach(() => {
-  dir = mkdtempSync(path.join(os.tmpdir(), "gh-router-img-"))
+  // realpath the fixture root: on a Windows CI runner `os.tmpdir()` is a
+  // short-name path (`C:/Users/RUNNER~1/...`) whose realpath is the long form,
+  // and the confinement helper compares a realpathed FILE against this root.
+  // Same reason `makeFixture` in code-search.test.ts realpaths.
+  dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "gh-router-img-")))
 })
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
@@ -101,6 +105,25 @@ describe("loadPeerImages", () => {
     expect(res.ok).toBe(false)
     if (res.ok) throw new Error("unreachable")
     expect(res.error).toContain("imagePaths[1]")
+  })
+
+  test("an UNRESOLVED workspace still works (Windows short-name regression)", async () => {
+    // The confinement helper realpaths the FILE and prefix-checks it against the
+    // workspace, so an unresolved workspace compares two different spellings of
+    // the same directory and rejects everything. This only reproduces where the
+    // temp path has a short name — a Windows CI runner does, a typical dev box
+    // does not — so it shipped green locally and failed only on the primary
+    // deployment target. `loadPeerImages` now canonicalizes the root itself.
+    const unresolved = mkdtempSync(path.join(os.tmpdir(), "gh-router-raw-"))
+    try {
+      const file = path.join(unresolved, "shot.png")
+      writeFileSync(file, PNG_BYTES)
+      // Deliberately pass the RAW mkdtemp path, not a realpathed one.
+      const res = await loadPeerImages([file], unresolved)
+      expect(res.ok).toBe(true)
+    } finally {
+      rmSync(unresolved, { recursive: true, force: true })
+    }
   })
 
   test("a missing file is reported, not thrown", async () => {
