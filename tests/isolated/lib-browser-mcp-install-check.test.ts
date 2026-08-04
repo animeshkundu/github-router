@@ -113,3 +113,51 @@ describe("Bug #6 — ensureBridgeReady thundering herd", () => {
     expect(installCallCount).toBe(afterFirst + 1)
   })
 })
+
+// Regression test: version-mismatch detection used to fail OPEN.
+//
+// The check only ran when the loaded extension reported a version via the
+// `__hello__` handshake. An extension predating that handshake reports
+// nothing, so `typeof loaded === "string"` was false, the check was
+// treated as "not applicable", and it silently skipped — forever, for
+// exactly the most stale extensions it exists to catch.
+//
+// Observed consequence on a real machine: an extension months out of date
+// kept serving every browser tool call while silently ignoring arguments
+// added since (`quality` on browser_screenshot was the one that surfaced
+// it — quality:1 and quality:95 returned byte-identical output). Nothing
+// warned, because the mechanism designed to warn could not see it.
+//
+// This predicate had zero coverage, which is how the regression survived.
+describe("extension staleness — absence of a version is a staleness signal", () => {
+  test("no reported version means stale (the fail-open regression)", async () => {
+    const { isExtensionStale } = await import("../../src/lib/browser-mcp/install-check")
+    expect(isExtensionStale("0.3.250", undefined)).toBe(true)
+  })
+
+  test("differing versions are stale", async () => {
+    const { isExtensionStale } = await import("../../src/lib/browser-mcp/install-check")
+    expect(isExtensionStale("0.3.250", "0.3.249")).toBe(true)
+  })
+
+  test("matching versions are not stale", async () => {
+    const { isExtensionStale } = await import("../../src/lib/browser-mcp/install-check")
+    expect(isExtensionStale("0.3.250", "0.3.250")).toBe(false)
+  })
+
+  test("dev sentinel on either side is exempt — a source checkout is expected to diverge", async () => {
+    const { isExtensionStale } = await import("../../src/lib/browser-mcp/install-check")
+    // Loaded from a source checkout.
+    expect(isExtensionStale("0.3.250", "0.0.0")).toBe(false)
+    // Shipped manifest is itself the dev sentinel.
+    expect(isExtensionStale("0.0.0", "0.3.249")).toBe(false)
+    // Sentinel must win over the undefined-means-stale rule.
+    expect(isExtensionStale("0.0.0", undefined)).toBe(false)
+  })
+
+  test("an unreadable shipped manifest never reports staleness", async () => {
+    const { isExtensionStale } = await import("../../src/lib/browser-mcp/install-check")
+    expect(isExtensionStale(undefined, "0.3.249")).toBe(false)
+    expect(isExtensionStale(undefined, undefined)).toBe(false)
+  })
+})
