@@ -196,6 +196,10 @@ declare -a PROBE_REGISTRY=(
   "shim_max_tokens_clamp_gpt55|exploratory|max_tokens:1 on /v1/messages → gpt-5.5 /responses shim: 200 + well-formed Anthropic message (proves min-output clamp)"
   "shim_image_gpt55|exploratory|base64 RGB PNG image block on /v1/messages → gpt-5.5 /responses shim: 200 + well-formed Anthropic message"
   "shim_image_gemini35flash|exploratory|base64 RGB PNG image block on /v1/messages → gemini-3.5-flash /chat shim: 200 + well-formed Anthropic message"
+  "passthrough_image_claude|exploratory|base64 RGB PNG image block on /v1/messages → claude-opus-5 NATIVE passthrough (no copilot-vision-request header): 200 + well-formed Anthropic message"
+  "shim_image_tool_result_gpt55|exploratory|image inside a tool_result on /v1/messages → gpt-5.5 /responses shim: 200 (the shape a subagent reading a screenshot actually produces)"
+  "shim_image_tool_result_gemini35flash|exploratory|image inside a tool_result on /v1/messages → gemini-3.5-flash /chat shim: 200 (same shape, chat egress)"
+  "vision_over_limit_local_reject|exploratory|2 images to a max_prompt_images:1 model → LOCAL 400 naming the model and both counts, not an opaque upstream error"
   "shim_advisor_degrade_gpt55|exploratory|advisor beta header + advisor tool on /v1/messages → gpt-5.5 /responses shim: 200 graceful degrade (advisor tool stripped, no 400)"
   "shim_advisor_degrade_gemini35flash|exploratory|advisor beta header + advisor tool on /v1/messages → gemini-3.5-flash /chat shim: 200 graceful degrade (advisor tool stripped, no 400)"
   "shim_count_tokens_gpt53codex|exploratory|/v1/messages/count_tokens with gpt-5.3-codex model id: 200 + input_tokens count"
@@ -377,14 +381,24 @@ probe_tooltype_bash_20241022_legacy() {
 }
 
 probe_tooltype_code_execution_20250825() {
+  # UPSTREAM DRIFT, 2026-08-03: this asserted 400 (not in Copilot's tool-type
+  # allowlist) since the matrix was written. Copilot now ACCEPTS the type —
+  # verified with three consecutive runs returning 200 and a normal assistant
+  # message. Flipping the expectation is the point of a symmetric probe suite:
+  # a quietly-added upstream capability is exactly as interesting as a quietly
+  # removed one, and this is how we learn about it rather than guessing.
+  #
+  # NOTE: acceptance is not execution. The 200 proves the request validator no
+  # longer rejects the tool type; whether Copilot actually runs code for it is
+  # unverified and deliberately not asserted here.
   do_request POST /v1/messages '{
     "model": "claude-opus-4-7",
     "max_tokens": 50,
     "tools": [{"type":"code_execution_20250825","name":"code_execution"}],
     "messages": [{"role":"user","content":"hi"}]
   }'
-  assert_status 400 \
-    && assert_body_contains "code_execution_20250825"
+  assert_status 200 \
+    && assert_anthropic_message
 }
 
 probe_tooltype_web_search_20250305() {
@@ -1042,6 +1056,77 @@ probe_shim_image_gemini35flash() {
   }'
   assert_status 200 \
     && assert_anthropic_message
+}
+
+probe_passthrough_image_claude() {
+  # G9: the Claude passthrough deliberately omits `copilot-vision-request`.
+  # That was an unverified code comment for a long time; this probe is what
+  # keeps it true. A 200 here plus a well-formed message means the native
+  # endpoint accepted an image without the header.
+  do_request POST /v1/messages '{
+    "model": "claude-opus-5",
+    "max_tokens": 128,
+    "messages": [{"role":"user","content":[
+      {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}},
+      {"type":"text","text":"Describe this image in one short sentence."}
+    ]}]
+  }'
+  assert_status 200     && assert_anthropic_message
+}
+
+probe_shim_image_tool_result_gpt55() {
+  # The shape every "subagent reads a screenshot" session produces, and the one
+  # with no live coverage before now: the image is nested inside a tool_result,
+  # not at the top level. A function_call_output cannot carry an image, so the
+  # shim re-emits it as a follow-up user message.
+  do_request POST /v1/messages '{
+    "model": "gpt-5.5",
+    "max_tokens": 128,
+    "messages": [
+      {"role":"user","content":[{"type":"text","text":"Take a screenshot."}]},
+      {"role":"assistant","content":[{"type":"tool_use","id":"toolu_probe1","name":"screenshot","input":{}}]},
+      {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_probe1","content":[
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}}
+      ]}]}
+    ],
+    "tools":[{"name":"screenshot","description":"Capture the screen.","input_schema":{"type":"object","properties":{}}}]
+  }'
+  assert_status 200     && assert_anthropic_message
+}
+
+probe_shim_image_tool_result_gemini35flash() {
+  # Same nested shape through the chat egress, where the follow-up rides as an
+  # image_url content part.
+  do_request POST /v1/messages '{
+    "model": "gemini-3.5-flash",
+    "max_tokens": 128,
+    "messages": [
+      {"role":"user","content":[{"type":"text","text":"Take a screenshot."}]},
+      {"role":"assistant","content":[{"type":"tool_use","id":"toolu_probe2","name":"screenshot","input":{}}]},
+      {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_probe2","content":[
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}}
+      ]}]}
+    ],
+    "tools":[{"name":"screenshot","description":"Capture the screen.","input_schema":{"type":"object","properties":{}}}]
+  }'
+  assert_status 200     && assert_anthropic_message
+}
+
+probe_vision_over_limit_local_reject() {
+  # The whole point of the outbound preflight: an over-count request must fail
+  # LOCALLY with an actionable message, not as an opaque upstream error. gpt-5.5
+  # publishes max_prompt_images: 1, so two images must be refused before any
+  # upstream call is made.
+  do_request POST /v1/messages '{
+    "model": "gpt-5.5",
+    "max_tokens": 128,
+    "messages": [{"role":"user","content":[
+      {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}},
+      {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}},
+      {"type":"text","text":"Compare these."}
+    ]}]
+  }'
+  assert_status 400     && assert_body_contains "at most 1 image"
 }
 
 probe_shim_advisor_degrade_gpt55() {

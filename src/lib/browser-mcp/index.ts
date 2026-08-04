@@ -13,6 +13,7 @@ import { observePage } from "./observe"
 import { planCompoundReplan } from "./planner"
 
 import type { NonPersonaMcpTool } from "~/lib/peer-mcp-personas"
+import type { McpImageBlock, McpToolResult } from "~/lib/attachments"
 
 /**
  * Helper for compound tools (`browser_find` / `browser_act` /
@@ -43,7 +44,7 @@ async function fetchSnapshot(
 function toolEnvelope(
   data: unknown,
   isError?: boolean,
-): { content: Array<{ type: "text"; text: string }>; isError?: boolean } {
+): McpToolResult {
   const text = typeof data === "string" ? data : JSON.stringify(data, null, 2)
   return isError ? { content: [{ type: "text", text }], isError: true } : { content: [{ type: "text", text }] }
 }
@@ -163,7 +164,7 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_screenshot",
     description:
-      "Captures a screenshot of the visible area of a tab, as PNG by default or JPEG when requested. It takes a tab id and optional format, then returns base64-encoded image bytes plus contentType. The tab must be active in its window, so this tool auto-activates the tab if needed and that changes which tab is focused. Use screenshot for visual layout, canvas, SVG, maps, or image-only regions; prefer browser_observe when page text and actionable state are enough.",
+      "Captures a screenshot of the visible area of a tab and returns it as an image you can actually look at, plus a small text envelope of capture metadata. It takes a tab id, an optional format (PNG default, JPEG for smaller bytes), and an optional JPEG quality. The tab must be active in its window, so this tool auto-activates the tab if needed and that changes which tab is focused. If a capture is rejected for exceeding a model's image-size limit, retake it with format 'jpeg' and a lower quality. Use screenshot for visual layout, canvas, SVG, maps, or image-only regions; prefer browser_observe when page text and actionable state are enough.",
     inputSchema: {
       type: "object",
       required: ["tabId"],
@@ -174,6 +175,13 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
           type: "string",
           enum: ["png", "jpeg"],
           description: "Image format for the returned screenshot. Default 'png'; use 'jpeg' when smaller image bytes are preferable.",
+        },
+        quality: {
+          type: "number",
+          minimum: 1,
+          maximum: 100,
+          description:
+            "JPEG quality 1-100 (ignored for PNG). The lever for shrinking a capture that was rejected for exceeding a model's image-size limit; 60 is usually still legible.",
         },
       },
     },
@@ -849,7 +857,7 @@ async function runAtomicIntentStep(
   intent: string,
   value: string | undefined,
   signal?: AbortSignal,
-): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+): Promise<McpToolResult> {
   const snapshot = await fetchSnapshot(tabId, signal)
   const picked = await pickElement(snapshot, intent, signal, value)
   if (!picked.ref || picked.confidence < 0.5) {
@@ -860,17 +868,15 @@ async function runAtomicIntentStep(
       if (shotEnv.isError) {
         return toolEnvelope({ ok: false, error: "no text match; screenshot for visual fallback failed", picked }, true)
       }
-      const shotText = shotEnv.content?.[0]?.text
-      let shot: { contentType?: string; dataBase64?: string } = {}
-      try {
-        shot = shotText ? (JSON.parse(shotText) as typeof shot) : {}
-      } catch {
-        return toolEnvelope({ ok: false, error: "no text match; screenshot envelope unparseable" }, true)
+      // The dispatcher hands back a real image block, so the pixels are read
+      // straight off it. This used to JSON.parse the text envelope to recover
+      // `dataBase64` — a round-trip that existed only because the envelope was
+      // text-only, and which is now impossible to get wrong.
+      const shot = shotEnv.content.find((b): b is McpImageBlock => b.type === "image")
+      if (!shot) {
+        return toolEnvelope({ ok: false, error: "no text match; screenshot returned no image" }, true)
       }
-      if (!shot.contentType || !shot.dataBase64) {
-        return toolEnvelope({ ok: false, error: "no text match; screenshot envelope missing fields" }, true)
-      }
-      const visual = await pickElementVisual(shot.dataBase64, shot.contentType, intent, surfaces, signal)
+      const visual = await pickElementVisual(shot.data, shot.mimeType, intent, surfaces, signal)
       if (visual.confidence < 0.5) {
         return toolEnvelope({ ok: false, error: "no element matched intent (text + visual)", picked, visual }, true)
       }
@@ -907,8 +913,8 @@ async function dispatchActionByRef(
   action: string,
   value: string | undefined,
   signal?: AbortSignal,
-): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
-  let env: { content?: Array<{ type: "text"; text: string }>; isError?: boolean }
+): Promise<McpToolResult> {
+  let env: McpToolResult
   switch (action) {
     case "click":
       env = await dispatchBrowserTool("browser_click", { tabId, ref }, signal)
@@ -930,7 +936,7 @@ async function dispatchActionByRef(
     default:
       return toolEnvelope({ ok: false, error: `unknown action: ${action}` }, true)
   }
-  if (env.isError) return env as { content: Array<{ type: "text"; text: string }>; isError: true }
+  if (env.isError) return env
   const innerText = env.content?.[0]?.text
   let parsed: Record<string, unknown> = {}
   if (typeof innerText === "string") {

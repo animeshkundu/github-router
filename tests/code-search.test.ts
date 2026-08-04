@@ -33,6 +33,7 @@ import {
   __setAstGrepResolverForTest,
 } from "../src/lib/code-search"
 import { PATHS } from "../src/lib/paths"
+import { firstText } from "~/lib/attachments"
 
 // ============================================================
 // Test fixture management
@@ -745,7 +746,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
       limit: 5,
     })
     expect(result.isError).toBeUndefined()
-    const body = JSON.parse(result.content[0].text) as Record<string, unknown>
+    const body = JSON.parse(firstText(result)) as Record<string, unknown>
 
     // Top-level shape — only these keys allowed (`source` is the unified
     // tool's provenance field; semantic | lexical | lexical-fallback):
@@ -793,7 +794,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
       mode: "exact",
       limit: 5,
     })
-    const body = JSON.parse(result.content[0].text) as Record<string, unknown>
+    const body = JSON.parse(firstText(result)) as Record<string, unknown>
     expect("notice" in body).toBe(false)
   })
 
@@ -813,7 +814,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
         limit: 5,
       })
       expect(result.isError).toBeUndefined()
-      const body = JSON.parse(result.content[0].text) as Record<string, unknown>
+      const body = JSON.parse(firstText(result)) as Record<string, unknown>
       expect((body.results as Array<unknown>).length).toBeGreaterThan(0)
     }
   })
@@ -831,7 +832,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
       mode: "exact",
       limit: 5,
     })
-    const onBody = JSON.parse(onByDefault.content[0].text) as Record<
+    const onBody = JSON.parse(firstText(onByDefault)) as Record<
       string,
       unknown
     >
@@ -845,7 +846,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
       limit: 5,
       summary: false,
     })
-    const offBody = JSON.parse(optedOut.content[0].text) as Record<
+    const offBody = JSON.parse(firstText(optedOut)) as Record<
       string,
       unknown
     >
@@ -897,13 +898,13 @@ describe("MCP handler trims the response per the minimality principle", () => {
         limit: 5000,
       })
       expect(result.isError).toBeUndefined()
-      const body = JSON.parse(result.content[0].text) as {
+      const body = JSON.parse(firstText(result)) as {
         results: Array<unknown>
         truncated: boolean
         notice?: string
       }
       // Cap fired: response stays under ~300KB (256KB cap + slack).
-      expect(Buffer.byteLength(result.content[0].text, "utf8")).toBeLessThan(
+      expect(Buffer.byteLength(firstText(result), "utf8")).toBeLessThan(
         300 * 1024,
       )
       // Truncated and notice both set.
@@ -933,7 +934,7 @@ describe("MCP handler trims the response per the minimality principle", () => {
       mode: "lexical",
       limit: 5,
     })
-    const body = JSON.parse(result.content[0].text) as Record<string, unknown>
+    const body = JSON.parse(firstText(result)) as Record<string, unknown>
     // No legacy field names leaked:
     expect(body).not.toHaveProperty("ranking_fallback")
     expect(body).not.toHaveProperty("structuralFallback")

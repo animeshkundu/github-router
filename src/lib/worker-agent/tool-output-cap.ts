@@ -55,6 +55,72 @@ type TextBlock = { type: "text"; text: string }
 type ContentBlock = TextBlock | { type: string; [k: string]: unknown }
 
 /**
+ * Per-result image budget.
+ *
+ * Images are cheap in TOKENS (a vision image costs ~1.5k regardless of byte
+ * size) but not in BYTES: three 3 MiB captures is ~12 MiB of base64 on the wire
+ * and in memory, and they accumulate across turns. The text cap does not bound
+ * them — and should not, since counting base64 against a text budget would
+ * evict real text to make room for an image the model reads for free.
+ *
+ * `MAX_IMAGES_PER_RESULT` is the ceiling of the most permissive model in the
+ * live catalog (gemini's 10). `MAX_IMAGE_BYTES_PER_RESULT` is the published
+ * 3 MiB per-image ceiling times a small factor, so a legitimate multi-image
+ * result passes and a runaway one does not.
+ */
+const MAX_IMAGES_PER_RESULT = 10
+const MAX_IMAGE_BYTES_PER_RESULT = 12 * 1024 * 1024
+
+/** Decoded byte size of a base64 payload, without allocating the buffer. */
+function base64Bytes(data: unknown): number {
+  if (typeof data !== "string" || data.length === 0) return 0
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0
+  return Math.floor((data.length * 3) / 4) - padding
+}
+
+/**
+ * Trim an image list to the budget, returning the survivors plus a note naming
+ * what was dropped. Dropping silently is not an option: a model told to compare
+ * five screenshots, shown three, and given no indication, will reason
+ * confidently about a set it never saw.
+ */
+function capImages(images: Array<ContentBlock>): {
+  kept: Array<ContentBlock>
+  note: string | undefined
+} {
+  const kept: Array<ContentBlock> = []
+  let bytes = 0
+  let dropped = 0
+  for (const img of images) {
+    if (kept.length >= MAX_IMAGES_PER_RESULT) {
+      dropped++
+      continue
+    }
+    const size = base64Bytes((img as { data?: unknown }).data)
+    // `continue`, not `break`: one oversized image must not also discard the
+    // smaller ones behind it. Skipping the offender keeps as much of the result
+    // as the budget allows.
+    if (bytes + size > MAX_IMAGE_BYTES_PER_RESULT) {
+      dropped++
+      continue
+    }
+    bytes += size
+    kept.push(img)
+  }
+  if (dropped === 0) return { kept, note: undefined }
+  const note =
+    NEWLINE + NEWLINE
+    + `[...${dropped} of ${images.length} image(s) dropped: over the per-result budget `
+    + `of ${MAX_IMAGES_PER_RESULT} images / `
+    + `${Math.round(MAX_IMAGE_BYTES_PER_RESULT / (1024 * 1024))} MiB. Request fewer `
+    + "images at a time, or capture at a lower quality....]"
+  return { kept, note }
+}
+
+/** Literal newline, kept out of the template above for readability. */
+const NEWLINE = "\n"
+
+/**
  * Cap a tool result's TEXT content to `capBytes`, preserving any non-text
  * (image) blocks. Returns the replacement content array, or `undefined` when
  * the result is already under the cap (caller leaves it untouched).
@@ -77,17 +143,31 @@ export function capToolResultText(
   let textBytes = 0
   const texts: string[] = []
   const images: ContentBlock[] = []
+  // Anything that is neither text nor an image (audio, resource links, a future
+  // block type) passes through untouched. Lumping those in with images meant
+  // they consumed the image budget and could be dropped by a cap that was never
+  // about them.
+  const other: ContentBlock[] = []
   for (const block of content) {
     if (!block || typeof block !== "object") continue
     const b = block as { type?: unknown; text?: unknown }
     if (b.type === "text" && typeof b.text === "string") {
       texts.push(b.text)
       textBytes += Buffer.byteLength(b.text, "utf8")
-    } else {
+    } else if (b.type === "image") {
       images.push(block as ContentBlock)
+    } else {
+      other.push(block as ContentBlock)
     }
   }
-  if (textBytes <= capBytes) return undefined
-  const capped = truncateModelText(texts.join("\n"), capBytes)
-  return [...images, { type: "text", text: capped }] as Array<TextBlock>
+  const { kept, note } = capImages(images)
+  // The early return used to test `textBytes <= capBytes` alone, so an
+  // ALL-IMAGE result (textBytes === 0) was never inspected and images bypassed
+  // every budget in the system. Now the result is also rewritten when the
+  // image budget bites.
+  if (textBytes <= capBytes && note === undefined) return undefined
+  const joined = texts.join(NEWLINE)
+  const capped =
+    textBytes > capBytes ? truncateModelText(joined, capBytes) : joined
+  return [...kept, ...other, { type: "text", text: capped + (note ?? "") }] as Array<TextBlock>
 }

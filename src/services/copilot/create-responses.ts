@@ -3,6 +3,7 @@ import { events } from "fetch-event-stream"
 
 import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
+import { assertOutboundImagesOk, imagesInResponsesPayload } from "~/lib/vision-preflight"
 import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { MAX_RESPONSE_BODY_BYTES, readResponseBodyCapped } from "~/lib/response-cap"
 import { state } from "~/lib/state"
@@ -28,6 +29,12 @@ export const createResponses = async (
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
   const enableVision = detectVision(payload.input)
+  // See the twin call in `create-chat-completions.ts`: validation happens once,
+  // here, on the assembled payload, rather than in each adapter that can add an
+  // image. Throws a 400 before any upstream call.
+  if (enableVision) {
+    assertOutboundImagesOk(payload.model, imagesInResponsesPayload(payload.input))
+  }
 
   const isAgentCall = detectAgentCall(payload.input)
 

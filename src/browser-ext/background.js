@@ -183,7 +183,14 @@ async function toolScreenshot(args) {
   // reason. Real Chrome with a visible window has a surface and works
   // fine. If you're driving Chrome-for-Testing programmatically and
   // need screenshots, launch with `--headless=new`.
-  const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format })
+  // `quality` (1-100) applies to JPEG only; Chrome ignores it for PNG. It is the
+  // model's lever for shrinking a capture when a full-size one is refused for
+  // exceeding a model's image-size limit — without it, "retake it smaller" is
+  // advice the caller cannot act on. An older extension build that predates this
+  // simply ignores the extra key and captures at default quality.
+  const captureOpts = { format }
+  if (typeof args.quality === "number") captureOpts.quality = args.quality
+  const dataUrl = await chrome.tabs.captureVisibleTab(windowId, captureOpts)
   // dataUrl: "data:image/png;base64,...."
   const m = /^data:([^;]+);base64,(.*)$/.exec(dataUrl)
   if (!m) throw new Error("browser_screenshot: captureVisibleTab returned unexpected shape")

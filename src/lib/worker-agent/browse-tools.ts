@@ -60,6 +60,7 @@ import type {
 import type { TSchema } from "@earendil-works/pi-ai"
 
 import { BROWSER_TOOLS } from "~/lib/browser-mcp"
+import type { McpContentBlock, McpImageBlock } from "~/lib/attachments"
 import { dispatchBrowserTool } from "~/lib/browser-mcp/dispatch"
 import {
   assertSessionOwnsTab,
@@ -73,7 +74,7 @@ import {
 
 /** The MCP tool-result envelope `dispatchBrowserTool` returns. */
 export interface BrowserToolEnvelope {
-  content: Array<{ type: "text"; text: string }>
+  content: Array<McpContentBlock>
   isError?: boolean
 }
 
@@ -155,8 +156,43 @@ function argsRecord(params: unknown): Record<string, unknown> {
  * `tools.ts` uses for `peer_review`.
  */
 function joinEnvelopeText(env: BrowserToolEnvelope): string {
-  return (env.content ?? []).map((c) => c.text).join("\n")
+  return (env.content ?? [])
+    .filter((c) => c.type === "text")
+    .map((c) => c.text)
+    .join("\n")
 }
+
+/**
+ * Wrap a text payload PLUS a captured image in Pi's tool-result shape.
+ *
+ * The browse worker's own system prompt tells it to "use screenshot to SEE the
+ * page", but every result was flattened to text — so the pixels never reached
+ * it and it received base64 characters instead. Pi's tool-result content
+ * supports image blocks natively, and the engine's `afterToolCall` cap
+ * (`tool-output-cap.ts`) already preserves them and exempts them from the text
+ * byte cap. Nothing was ever producing one.
+ *
+ * Text first, image second — same ordering rule as the MCP surface
+ * (`mcpTextAndImage`), so a consumer reading the first block still finds text.
+ */
+function imageResult(
+  text: string,
+  image: { data: string; mimeType: string },
+): AgentToolResult<Record<string, never>> {
+  return {
+    content: [
+      { type: "text", text },
+      { type: "image", data: image.data, mimeType: image.mimeType },
+    ],
+    details: {},
+  } as AgentToolResult<Record<string, never>>
+}
+
+/** The first image block on a dispatch envelope, if the tool captured one. */
+function envelopeImage(env: BrowserToolEnvelope): McpImageBlock | undefined {
+  return (env.content ?? []).find((c): c is McpImageBlock => c.type === "image")
+}
+
 
 // NOTE: the per-result text cap used to live here (fixed 48KB/16KB). It moved
 // to the engine's `afterToolCall` hook (`tool-output-cap.ts`), which caps
@@ -568,7 +604,8 @@ function makeBrowserTool(
           }
         }
       }
-      return textResult(text)
+      const image = envelopeImage(env)
+      return image ? imageResult(text, image) : textResult(text)
     },
   }
   // Only declare executionMode when set, mirroring `tools.ts` (which marks

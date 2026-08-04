@@ -79,6 +79,7 @@ import type {
 } from "@earendil-works/pi-agent-core"
 import { type TSchema, Type } from "@earendil-works/pi-ai"
 
+import { detectImageMimeType } from "~/lib/attachments"
 import { resolveRipgrep } from "~/lib/code-search"
 import { resolveExecutable, runManagedExeCapture } from "~/lib/exec"
 import { runUnifiedCodeSearch } from "~/lib/unified-code-search"
@@ -447,13 +448,45 @@ const READ_PARAMS = Type.Object({
   ),
 })
 
+/**
+ * A file is an image if its BYTES say so. Extensions are a caller assertion and
+ * are not consulted: a `.png` holding HTML must not be shipped as an image, and
+ * a screenshot saved without a suffix should still work.
+ */
+function imageResult(
+  data: string,
+  mimeType: string,
+): AgentToolResult<Record<string, never>> {
+  return {
+    content: [
+      { type: "text", text: `[${mimeType} image, ${data.length} base64 chars]` },
+      { type: "image", data, mimeType },
+    ],
+    details: {},
+  } as AgentToolResult<Record<string, never>>
+}
+
+/**
+ * Non-image binary detection. A NUL byte in the first few KiB is the classic
+ * heuristic (it is what `grep`, `git`, and `file` all effectively use) and it is
+ * enough here: the goal is not to classify the file, only to avoid handing the
+ * model a wall of U+FFFD replacement characters and calling it text.
+ */
+function looksBinary(buf: Buffer): boolean {
+  const window = buf.subarray(0, Math.min(buf.length, 8192))
+  return window.includes(0)
+}
+
 function readTool(workspace: string): AgentTool<typeof READ_PARAMS> {
   return {
     name: "read",
     label: "Read file",
     description:
-      "Read a file from the worker's workspace. Returns UTF-8 text. " +
-      "Files larger than 10 MiB are refused; use offset/limit to page.",
+      "Read a file from the worker's workspace. Returns UTF-8 text, or the image "
+      + "itself for a jpeg/png/webp/gif/heic/heif file (detected by content, not "
+      + "extension) so you can actually SEE it. Other binary files are refused "
+      + "rather than returned as mojibake. Files larger than 10 MiB are refused; "
+      + "use offset/limit to page.",
     parameters: READ_PARAMS,
     async execute(
       _toolCallId,
@@ -471,6 +504,24 @@ function readTool(workspace: string): AgentTool<typeof READ_PARAMS> {
         )
       }
       const buf = await readFile(abs, { signal })
+
+      // Images short-circuit before any UTF-8 decode. This used to fall
+      // straight through to `buf.toString("utf8")`, which turned every PNG into
+      // replacement characters — the model could not see the image AND could not
+      // tell that it had been handed garbage.
+      const imageMime = detectImageMimeType(buf)
+      if (imageMime) {
+        return imageResult(buf.toString("base64"), imageMime)
+      }
+      if (looksBinary(buf)) {
+        // Actionable on purpose: name a next move the model can actually make.
+        throw new Error(
+          `rejected: binary file (${st.size} bytes), not a supported image. `
+            + "Supported image types are jpeg, png, webp, gif, heic, heif. "
+            + "Use `bash` with a suitable CLI to inspect or convert it.",
+        )
+      }
+
       const text = buf.toString("utf8")
       if (params.offset === undefined && params.limit === undefined) {
         return textResult(text)

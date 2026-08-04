@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 
 import type { StrategyRecord } from "~/lib/first-mate/types"
+import { firstText, type McpToolResult } from "~/lib/attachments"
 
 const firstMateDir = await fs.mkdtemp(path.join(tmpdir(), "fm-strategy-"))
 
@@ -40,8 +41,8 @@ function strategyTool(name: "read_strategy" | "write_strategy") {
   return tool
 }
 
-function parsed(res: { content: Array<{ text: string }> }): Record<string, unknown> {
-  return JSON.parse(res.content[0]!.text) as Record<string, unknown>
+function parsed(res: McpToolResult): Record<string, unknown> {
+  return JSON.parse(firstText(res)) as Record<string, unknown>
 }
 
 beforeEach(async () => {

@@ -8,6 +8,7 @@ import type { DecisionRecord } from "~/lib/first-mate/decisions"
 import type { Mission } from "~/lib/first-mate/registry"
 import type { RepoRef, UnitRow } from "~/lib/first-mate/types"
 import { state } from "~/lib/state"
+import { firstText, type McpToolResult } from "~/lib/attachments"
 
 /**
  * Workstream D — operator merge_pr/close_pr tools. These verify the SAFE-merge
@@ -106,8 +107,8 @@ function toolOf(name: "merge_pr" | "close_pr" | "mark_ready" | "abandon_mission"
   return tool
 }
 
-function parsed(res: { content: Array<{ text: string }> }): Record<string, unknown> {
-  return JSON.parse(res.content[0]!.text) as Record<string, unknown>
+function parsed(res: McpToolResult): Record<string, unknown> {
+  return JSON.parse(firstText(res)) as Record<string, unknown>
 }
 
 describe("merge_pr", () => {

@@ -21,9 +21,15 @@ import { fetchWithTransientRetry } from "~/lib/upstream-retry"
  * - anthropic-version (VS Code's Anthropic SDK sends this)
  * - X-Interaction-Id (VS Code sends a session-scoped UUID)
  *
- * We intentionally omit copilot-vision-request — VS Code only sends it when
+ * We intentionally omit copilot-vision-request. VS Code only sends it when
  * images are present, and the native /v1/messages endpoint handles vision
- * without requiring the header.
+ * without it — VERIFIED live (2026-08-03) rather than assumed: the same
+ * base64 image sent to claude-opus-5 with the header omitted and with it set
+ * both returned 200 AND the model named the image's colour in each case, so
+ * the pixels genuinely reach it either way. Probe `passthrough_image_claude`
+ * in scripts/probe-copilot-compat.sh keeps that verified; if Copilot ever
+ * starts gating vision on the header, that probe fails rather than images
+ * silently degrading on the lead model's own path.
  *
  * extraHeaders allows callers to forward client-supplied beta headers
  * (anthropic-beta) so Copilot enables extended features.

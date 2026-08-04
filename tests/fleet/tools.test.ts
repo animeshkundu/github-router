@@ -4,6 +4,7 @@ import { FleetError, encodeSessionId, type SendMessageResponse } from "../../src
 import { createFleetTools, type CreateFleetToolsOptions } from "../../src/lib/fleet/tools"
 import { FleetRegistry, type FleetInstanceConfig } from "../../src/lib/fleet/registry"
 import { TunnelAuthError, type TunnelTokenProvider } from "../../src/lib/fleet/tunnel-auth"
+import { firstText, type McpToolResult } from "~/lib/attachments"
 
 type FleetToolClient = ReturnType<NonNullable<CreateFleetToolsOptions["createClient"]>>
 
@@ -135,11 +136,11 @@ async function callTool(
   tools: Map<string, ReturnType<typeof createFleetTools>[number]>,
   name: string,
   args: Record<string, unknown>,
-): Promise<{ result: { content: Array<{ type: "text"; text: string }>; isError?: boolean }; json: unknown }> {
+): Promise<{ result: McpToolResult; json: unknown }> {
   const tool = tools.get(name)
   expect(tool).toBeDefined()
   const result = await tool!.handler(args)
-  return { result, json: JSON.parse(result.content[0]!.text) as unknown }
+  return { result, json: JSON.parse(firstText(result)) as unknown }
 }
 
 function createSessionCapabilityToolMap(capabilityResponse: {

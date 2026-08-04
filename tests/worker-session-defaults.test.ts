@@ -15,6 +15,7 @@ import {
 import { NON_PERSONA_MCP_TOOLS } from "../src/lib/peer-mcp-personas"
 import { state } from "../src/lib/state"
 import { workerToolsEnabled } from "../src/lib/mcp-capabilities"
+import { firstText } from "~/lib/attachments"
 
 afterEach(() => resetAllWorkerSessionDefaults())
 
@@ -109,7 +110,7 @@ describe("worker session defaults", () => {
       const set = await tool.handler({ mode: "review", model: "valid", thinking: "xhigh", workspace: "ignored" })
       expect(set.isError).toBeUndefined()
       expect(getWorkerSessionDefault("review").thinking).toBe("xhigh")
-      const table = JSON.parse(set.content[0]!.text)
+      const table = JSON.parse(firstText(set))
       expect(table.review).toMatchObject({
         model: "valid",
         thinking: "xhigh",
