@@ -374,6 +374,50 @@ async function repairCorruptIndex(
   }
 }
 
+/**
+ * True when the inputs that produced the recorded failure streak differ from
+ * the inputs in effect now — i.e. the streak is stale evidence and must not
+ * veto a fresh attempt.
+ *
+ * Each signal answers "could this plausibly have fixed the cause?":
+ *   - engine/runtime sha: a colgrep or ONNX-runtime upgrade may fix the exact
+ *     bug that failed. Precedent: `freshnessVerdict` already forces a rebuild
+ *     on an engine-sha change for the same reason.
+ *   - model revision: a different embedding model is a different build.
+ *   - corpus identity: HEAD moved OR the working tree's dirty-state changed.
+ *     BOTH are needed — HEAD-only misses the most common local recovery
+ *     (fixing a malformed file without committing), and dirty-only misses a
+ *     branch switch.
+ *
+ * A legacy entry with no `failedAt` (written before this field existed) has no
+ * baseline to compare, so it does NOT reset — it keeps today's behavior until
+ * its next failure stamps one. That is the conservative direction: a missing
+ * baseline must not read as "everything changed".
+ */
+function failureInputsChanged(
+  meta: ColbertMeta | null,
+  git: { head?: string; dirty?: boolean },
+): boolean {
+  const at = meta?.failedAt
+  if (!at) return false
+  const binarySha = colgrepBinAsset()?.sha256
+  const ortSha = ortLibAsset()?.sha256
+  if (binarySha !== undefined && at.binarySha !== binarySha) return true
+  if (ortSha !== undefined && at.ortSha !== ortSha) return true
+  if (at.modelRev !== undefined && at.modelRev !== MODEL_REVISION) return true
+  if (at.head !== undefined && git.head !== undefined && at.head !== git.head) {
+    return true
+  }
+  if (
+    at.dirty !== undefined &&
+    git.dirty !== undefined &&
+    at.dirty !== git.dirty
+  ) {
+    return true
+  }
+  return false
+}
+
 async function handleFailure(
   workspace: string,
   meta: ColbertMeta | null,
@@ -382,6 +426,47 @@ async function handleFailure(
   const cls: NonNullable<ColbertMeta["failureClass"]> = crashedVerdict
     ? "crashed"
     : (meta?.failureClass ?? "error")
+
+  // Before consulting the cap, check whether the streak still describes the
+  // current situation. A cap that only ever counts up is a permanent dead end
+  // by construction — which is exactly the bug this fixes. Recovery still goes
+  // through a REAL rebuild under the unchanged cap and backoff, so nothing is
+  // served that the normal guards wouldn't already serve.
+  const gitNow: { head?: string; dirty?: boolean } = await gitState(
+    workspace,
+  ).catch(() => ({}))
+  if (failureInputsChanged(meta, gitNow)) {
+    consola.warn(
+      `colbert: index inputs changed since the last failure (class=${cls}); ` +
+        `clearing the failure streak and retrying for ${workspace}`,
+    )
+    await writeColbertMeta({
+      workspace,
+      model: meta?.model ?? MODEL_ID,
+      modelRev: meta?.modelRev ?? MODEL_REVISION,
+      binarySha: meta?.binarySha,
+      ortSha: meta?.ortSha,
+      status: "failed",
+      failureClass: meta?.failureClass,
+      // Persist the reset BEFORE kicking, so concurrent/back-to-back queries
+      // see a cleared streak instead of each re-deciding to reset. The kick
+      // itself is deduped by the per-workspace in-flight claim.
+      failedAttempts: 0,
+      failedAt: undefined,
+      lastIndexedAt: meta?.lastIndexedAt,
+      lastIndexedHead: meta?.lastIndexedHead,
+      lastIndexedDirty: meta?.lastIndexedDirty,
+      ownerInstanceId: getColbertInstanceUuid(),
+    }).catch(() => {})
+    kickBackgroundInit(workspace)
+    return {
+      status: "failed",
+      isError: true,
+      notice:
+        'semantic index unavailable; inputs changed since the last failure so a rebuild was started — retry mode:"semantic" shortly, or use code_search with specific symbol/keyword terms now',
+    }
+  }
+
   const attempts = crashedVerdict
     ? (meta?.failedAttempts ?? 0) + 1
     : (meta?.failedAttempts ?? 1)
@@ -398,6 +483,16 @@ async function handleFailure(
       status: "failed",
       failureClass: "crashed",
       failedAttempts: attempts,
+      // Stamp the baseline so a later input change can clear this streak too
+      // — otherwise a 3-crash workspace stays terminal exactly like the bug
+      // this fixes.
+      failedAt: {
+        head: meta?.lastIndexedHead,
+        dirty: meta?.lastIndexedDirty,
+        binarySha: meta?.binarySha ?? colgrepBinAsset()?.sha256,
+        ortSha: meta?.ortSha ?? ortLibAsset()?.sha256,
+        modelRev: meta?.modelRev ?? MODEL_REVISION,
+      },
       lastIndexedAt: lastAt ?? new Date().toISOString(),
       lastIndexedHead: meta?.lastIndexedHead,
       lastIndexedDirty: meta?.lastIndexedDirty,
@@ -435,12 +530,19 @@ async function handleFailure(
     }
   }
 
-  // Capped → stop retrying; operator-actionable.
-  consola.debug(`colbert: index ${cls}, giving up (attempts=${attempts})`)
+  // Capped → stop retrying. The env-var tuning advice that used to live in
+  // this notice was addressed to the wrong audience: a spawned agent cannot
+  // set env vars on the running proxy, so it burned context and could invite
+  // a pointless `export`. Operator-facing guidance now lives in the launch
+  // banner and the failure line in ERROR_LOG_PATH; the model just needs to
+  // know semantic is unavailable and what to use instead.
+  consola.warn(
+    `colbert: index ${cls}, giving up (attempts=${attempts}) for ${workspace}`,
+  )
   return {
     status: "failed",
     isError: true,
-    notice: `semantic index keeps failing (${cls}); use code_search. See logs; for a very large repo raise GH_ROUTER_COLBERT_INIT_STALL_MS / GH_ROUTER_COLBERT_INIT_TIMEOUT_MS`,
+    notice: `semantic index unavailable (${cls}); use code_search with specific symbol/keyword terms`,
   }
 }
 
@@ -959,10 +1061,31 @@ async function runInit(workspace: string): Promise<void> {
   if (ok) {
     finalMeta.failedAttempts = 0
     finalMeta.failureClass = undefined
+    finalMeta.failedAt = undefined
   } else {
     finalMeta.failureClass = failureClass
     finalMeta.failedAttempts = (prior?.failedAttempts ?? 0) + 1
-    consola.debug(
+    // Stamp WHAT was being indexed when this failure happened, so a later
+    // query can tell "the same inputs failed again" from "the inputs changed,
+    // so the old streak is stale evidence". Kept apart from `lastIndexedHead`,
+    // which on the success path means "what we successfully indexed" and is
+    // read by the git-freshness comparison — overloading it would couple
+    // failure-reset to freshness semantics.
+    finalMeta.failedAt = {
+      head: finalMeta.lastIndexedHead,
+      dirty: finalMeta.lastIndexedDirty,
+      binarySha: finalMeta.binarySha,
+      ortSha: finalMeta.ortSha,
+      modelRev: finalMeta.modelRev,
+    }
+    // WARN, not debug: `enableFileLogging()` installs a reporter that drops
+    // everything below `warn` (`file-log-reporter.ts` ALLOWED_TYPES), which is
+    // exactly why this diagnostic was invisible — a semantic-search outage ran
+    // for weeks with zero colbert lines in a 120KB error.log. At `warn` it
+    // reaches PATHS.ERROR_LOG_PATH, already credential-sanitized and capped.
+    // Still no raw stderr: colgrep output can embed source, so only the class,
+    // the duration and the attempt count are recorded.
+    consola.warn(
       `colbert: init ${failureClass} after ${Math.round(elapsedMs / 1000)}s ` +
         `(attempt ${finalMeta.failedAttempts}) for ${workspace}`,
     )

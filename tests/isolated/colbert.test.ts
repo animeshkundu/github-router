@@ -685,7 +685,7 @@ describe("runSemanticSearch: no-fallback contract", () => {
     await store.writeColbertMeta({ ...base, failedAttempts: 2 })
     expect(await startupKickAllowed(ws)).toBe(false)
     const result = await (await import("../../src/lib/colbert/runner")).runSemanticSearch({ query: "auth", workspace: ws })
-    expect(result.notice).toMatch(/keeps failing.*corrupt/i)
+    expect(result.notice).toMatch(/unavailable.*corrupt/i)
     expect(result.notice).not.toMatch(/re-index was started/i)
   })
 
@@ -768,7 +768,11 @@ describe("runSemanticSearch: no-fallback contract", () => {
     const r = await runSemanticSearch({ query: "auth", workspace: ws })
     expect(r.status).toBe("failed")
     expect(r.isError).toBe(true)
-    expect(r.notice).toMatch(/keeps failing/i)
+    expect(r.notice).toMatch(/unavailable/i)
+    // The capped notice must NOT promise a retry, and must NOT hand the model
+    // env-var tuning advice it cannot act on.
+    expect(r.notice).not.toMatch(/started|shortly/i)
+    expect(r.notice).not.toMatch(/GH_ROUTER_/)
   })
 
   test("crashed (building + dead PID + no index) → persists failed+crashed, retry notice", async () => {
@@ -810,9 +814,127 @@ describe("runSemanticSearch: no-fallback contract", () => {
     const r = await runSemanticSearch({ query: "auth", workspace: ws })
     // crashed verdict reads the carried streak (2) + 1 = 3 → at the cap →
     // operator-actionable, NOT another retry (this is the storm guard).
-    expect(r.notice).toMatch(/keeps failing/i)
+    expect(r.notice).toMatch(/unavailable/i)
+    expect(r.notice).not.toMatch(/started|shortly/i)
     const meta = await store.readColbertMeta(ws)
     expect(meta?.failedAttempts).toBe(3)
+  })
+
+  // --- inputs-changed reset -------------------------------------------------
+  //
+  // `failedAttempts` is evidence about a SPECIFIC set of inputs, not a
+  // permanent verdict. Without a reset condition the cap is a terminal dead
+  // end: a workspace that failed 3 times stays unavailable for the life of
+  // the process even after the cause is gone. That is the bug these pin —
+  // observed live, with a complete healthy index on disk and the router
+  // refusing to look at it ever again.
+
+  /** A capped `failed` entry whose `failedAt` baseline the caller can vary. */
+  const cappedAt = async (
+    name: string,
+    failedAt: Record<string, unknown>,
+  ): Promise<string> => {
+    const store = await import("../../src/lib/colbert/index-store")
+    store.__resetInitDebounceForTests()
+    const ws = path.join(TEST_HOME, name)
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "failed",
+      failureClass: "error",
+      failedAttempts: 3,
+      failedAt,
+      // Well outside FAILED_RETRY_BACKOFF_MS, so the backoff never masks the
+      // behavior under test.
+      lastIndexedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    } as never)
+    return ws
+  }
+
+  test("capped failed + HEAD moved → streak cleared, rebuild kicked", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const ws = await cappedAt("ws-reset-head", { head: "old-head-sha" })
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+
+    // Still no results (nothing is served without a real rebuild), but the
+    // dead end is gone: the streak is cleared and a retry is promised.
+    expect(r.status).toBe("failed")
+    expect(r.notice).toMatch(/inputs changed|rebuild was started/i)
+    const meta = await store.readColbertMeta(ws)
+    expect(meta?.failedAttempts).toBe(0)
+  })
+
+  test("capped failed + working tree dirty-state changed → streak cleared", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    // HEAD is unchanged (undefined on both sides for a non-git temp dir); only
+    // the dirty flag differs. This is the common local recovery — fixing a
+    // malformed file WITHOUT committing — which a HEAD-only check would miss.
+    const ws = await cappedAt("ws-reset-dirty", { dirty: true })
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+
+    expect(r.notice).toMatch(/inputs changed|rebuild was started/i)
+    expect((await store.readColbertMeta(ws))?.failedAttempts).toBe(0)
+  })
+
+  test("capped failed + engine sha changed → streak cleared", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    // A colgrep / ONNX-runtime upgrade may fix the very bug that failed, so a
+    // streak earned by the old bits must not veto the new ones.
+    const ws = await cappedAt("ws-reset-sha", {
+      binarySha: "stale-binary-sha",
+      ortSha: "stale-ort-sha",
+    })
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+
+    expect(r.notice).toMatch(/inputs changed|rebuild was started/i)
+    expect((await store.readColbertMeta(ws))?.failedAttempts).toBe(0)
+  })
+
+  test("capped failed + IDENTICAL inputs → stays capped, no reset, no kick", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const manifest = await import("../../src/lib/colbert/manifest")
+    // Baseline that matches the current state exactly — nothing has changed,
+    // so the cap must still bind. This is the guard against turning the fix
+    // into a cap bypass / rebuild thrash.
+    const ws = await cappedAt("ws-reset-none", {
+      binarySha: manifest.colgrepBinAsset()?.sha256,
+      ortSha: manifest.ortLibAsset()?.sha256,
+      modelRev: manifest.MODEL_REVISION,
+    })
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+
+    expect(r.status).toBe("failed")
+    expect(r.notice).toMatch(/unavailable/i)
+    expect(r.notice).not.toMatch(/inputs changed|started|shortly/i)
+    expect((await store.readColbertMeta(ws))?.failedAttempts).toBe(3)
+  })
+
+  test("a legacy entry with no failedAt baseline does NOT reset", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    store.__resetInitDebounceForTests()
+    const ws = path.join(TEST_HOME, "ws-reset-legacy")
+    // Written before `failedAt` existed. A missing baseline means "unknown",
+    // which must not read as "everything changed" — that would reset every
+    // pre-upgrade entry on the first query after an upgrade.
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "failed",
+      failureClass: "error",
+      failedAttempts: 3,
+      lastIndexedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    })
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+
+    expect(r.notice).not.toMatch(/inputs changed/i)
+    expect((await store.readColbertMeta(ws))?.failedAttempts).toBe(3)
   })
 })
 
@@ -1157,5 +1279,55 @@ describe("provisioning self-repair (corrupt install, valid sidecar)", () => {
     expect(
       await prov.installedArtifactIsIntact(`${dest}.sha256`, dest, "b".repeat(64)),
     ).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------
+// Operator visibility — the degraded-index launch banner
+// ---------------------------------------------------------------------
+//
+// The failure that motivated this was SILENCE: semantic search degraded to
+// lexical on a real repo for an unknown period and nobody noticed, because
+// the only signals were a `notice` string the model reads and a debug log
+// the file reporter drops. This banner is the one signal a human sees.
+
+describe("colbertDegradedWarning (launch banner)", () => {
+  test("warns for a terminally-failed index, silent otherwise", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const { colbertDegradedWarning } = await import("../../src/lib/colbert")
+
+    const base = {
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+    }
+
+    // No meta at all → nothing to report.
+    const wsNone = path.join(TEST_HOME, "warn-absent")
+    expect(await colbertDegradedWarning(wsNone)).toBeNull()
+
+    // A healthy index → silent. The banner must not cry wolf on every launch.
+    const wsReady = path.join(TEST_HOME, "warn-ready")
+    await store.writeColbertMeta({
+      workspace: wsReady,
+      ...base,
+      status: "ready",
+    })
+    expect(await colbertDegradedWarning(wsReady)).toBeNull()
+
+    // Failed → one actionable line naming the class and pointing at the log
+    // that (as of this change) actually contains the failure.
+    const wsFailed = path.join(TEST_HOME, "warn-failed")
+    await store.writeColbertMeta({
+      workspace: wsFailed,
+      ...base,
+      status: "failed",
+      failureClass: "error",
+    })
+    const warning = await colbertDegradedWarning(wsFailed)
+    expect(warning).toBeTruthy()
+    expect(warning).toMatch(/DEGRADED/)
+    expect(warning).toMatch(/error/)
+    // Says lexical still works, so the user knows the blast radius.
+    expect(warning).toMatch(/lexical/i)
   })
 })

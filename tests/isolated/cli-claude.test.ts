@@ -278,6 +278,10 @@ mock.module("~/lib/toolbelt/provision", () => ({
 }))
 mock.module("~/lib/colbert", () => ({
   provisionAndIndexColbert: mock(async () => {}),
+  // Launch writes a one-line stderr warning when this workspace's semantic
+  // index is terminally failed. null = healthy, so the banner stays silent
+  // and these launcher assertions see unchanged output.
+  colbertDegradedWarning: mock(async () => null),
   semanticSearchOptedIn: mock(() => false),
   colbertSearchEnabled: mock(() => false),
   runSemanticSearch: mock(async () => ({

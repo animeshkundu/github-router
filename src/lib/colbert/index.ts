@@ -21,8 +21,9 @@ import process from "node:process"
 import consola from "consola"
 
 import { parseBoolEnv } from "../exec"
+import { PATHS } from "../paths"
 
-import { gitState } from "./index-store"
+import { gitState, readColbertMeta } from "./index-store"
 import { registerColbertExitHandlers } from "./lifecycle"
 import {
   colbertArtifactsPresent,
@@ -122,6 +123,48 @@ export async function provisionAndIndexColbert(opts: {
 /** Test-only: reset the once-guard. */
 export function __resetColbertStartedForTests(): void {
   _started = false
+}
+
+/**
+ * One-line operator warning when this workspace's semantic index is sitting in
+ * a terminal `failed` state, or `null` when there is nothing to say.
+ *
+ * This exists because the failure mode that motivated it was SILENCE: semantic
+ * search degraded to lexical on a real repo for an unknown period — possibly
+ * weeks — and nobody noticed, because the only signals were a `notice` string
+ * the model reads and a `consola.debug` the file logger drops. Neither reaches
+ * a human. The launcher writes this to stderr next to the readiness line so a
+ * degraded capability is visible at the moment the user starts a session.
+ *
+ * Deliberately advisory and best-effort: lexical search still works, so this
+ * must never block or fail a launch.
+ */
+export async function colbertDegradedWarning(
+  cwd?: string,
+): Promise<string | null> {
+  // Only the explicit opt-OUT suppresses this. Deliberately NOT gated on
+  // `colbertSearchEnabled()`: that predicate is false whenever the artifacts
+  // are missing or the smoke test failed, which is itself a degraded state
+  // worth reporting. Gating on it would silence the warning in some of the
+  // very cases it exists for. A workspace with no `failed` meta stays silent
+  // regardless, so an un-provisioned machine is not spammed.
+  if (!semanticSearchOptedIn()) return null
+  try {
+    // Resolve the cwd HERE rather than at the call sites: the launchers are
+    // unit-tested against a mocked `node:process` that supplies only the
+    // fields they use, and reading `process.cwd()` in three launchers would
+    // make an advisory banner able to break a launch path.
+    const target = cwd ?? process.cwd()
+    const meta = await readColbertMeta(target)
+    if (!meta || meta.status !== "failed") return null
+    const cls = meta.failureClass ?? "error"
+    return (
+      `Semantic search DEGRADED for this workspace (colbert: ${cls}) — `
+      + `lexical code search still works. See ${PATHS.ERROR_LOG_PATH}`
+    )
+  } catch {
+    return null
+  }
 }
 
 export { runSemanticSearch } from "./runner"

@@ -73,7 +73,7 @@ import { injectAttributionSuppressionIntoSettingsFile } from "./lib/attribution-
 import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, OPERATING_DEFAULTS_DIGEST, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
-import { provisionAndIndexColbert } from "./lib/colbert"
+import { colbertDegradedWarning, provisionAndIndexColbert } from "./lib/colbert"
 import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
@@ -509,6 +509,16 @@ export const claude = defineCommand({
     // the launch cwd (if a git repo). ON by default; never blocks launch,
     // never throws. Opt out with GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1.
     void provisionAndIndexColbert()
+
+    // Surface a terminally-failed semantic index to the HUMAN. Without this
+    // the only signals are a `notice` the model reads and a log line, so a
+    // degraded index can (and did) go unnoticed for weeks. Fire-and-forget:
+    // lexical search still works, so this must never delay or fail a launch.
+    void colbertDegradedWarning()
+      .then((warning) => {
+        if (warning) process.stderr.write(`${warning}\n`)
+      })
+      .catch(() => {})
 
     // Best-effort, bounded launch warm-up: ready one tree-sitter worker.
     // Opt out with GH_ROUTER_DISABLE_TS_POOL_WARMUP=1.

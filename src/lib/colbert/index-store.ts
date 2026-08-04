@@ -56,6 +56,29 @@ export interface ColbertMeta {
   /** Consecutive failed build attempts; reset to 0 on a successful build.
    * Caps the self-heal so a persistently-failing workspace stops retrying. */
   failedAttempts?: number
+  /**
+   * The inputs in effect when the current failure streak was recorded.
+   *
+   * `failedAttempts` is evidence about a SPECIFIC set of inputs, not a
+   * permanent verdict on the workspace. Without this, a streak that reaches
+   * the cap is terminal for the life of the process — a build that failed on
+   * one bad commit, or under an old colgrep binary, would keep vetoing
+   * retries long after the cause was gone. Comparing these against the
+   * current state lets `handleFailure` tell "the same inputs failed again"
+   * from "the inputs changed, so the streak is stale".
+   *
+   * Deliberately separate from `lastIndexedHead` / `lastIndexedDirty`: those
+   * mean "what we successfully indexed" on the ready path and feed the
+   * git-freshness comparison, so reusing them would entangle failure-reset
+   * with freshness.
+   */
+  failedAt?: {
+    head?: string
+    dirty?: boolean
+    binarySha?: string
+    ortSha?: string
+    modelRev?: string
+  }
   /** Owning `init` PID (boot-sweep reclassification). */
   buildPid?: number
   /** Per-proxy-run UUID (ownership disambiguation for the boot sweep). */
