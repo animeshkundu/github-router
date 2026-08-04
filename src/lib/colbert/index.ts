@@ -136,11 +136,17 @@ export function __resetColbertStartedForTests(): void {
  * a human. The launcher writes this to stderr next to the readiness line so a
  * degraded capability is visible at the moment the user starts a session.
  *
+ * `logsToFile` says where the failure detail actually went. `claude` and
+ * `codex` call `enableFileLogging()`, which redirects warnings to
+ * ERROR_LOG_PATH; `start` does not, so its warnings stay on the terminal and
+ * pointing at the file would send the operator to a stale or absent one.
+ *
  * Deliberately advisory and best-effort: lexical search still works, so this
  * must never block or fail a launch.
  */
 export async function colbertDegradedWarning(
   cwd?: string,
+  opts: { logsToFile?: boolean } = {},
 ): Promise<string | null> {
   // Only the explicit opt-OUT suppresses this. Deliberately NOT gated on
   // `colbertSearchEnabled()`: that predicate is false whenever the artifacts
@@ -158,9 +164,17 @@ export async function colbertDegradedWarning(
     const meta = await readColbertMeta(target)
     if (!meta || meta.status !== "failed") return null
     const cls = meta.failureClass ?? "error"
+    const where =
+      opts.logsToFile ? `See ${PATHS.ERROR_LOG_PATH}` : "See the proxy log output"
+    // `stuck` is the one class with an operator-actionable knob: a genuinely
+    // huge repo can trip the stall watchdog, and raising it is the remedy.
+    const hint =
+      cls === "stuck" ?
+        " For a very large repo, raise GH_ROUTER_COLBERT_INIT_STALL_MS / GH_ROUTER_COLBERT_INIT_TIMEOUT_MS."
+      : ""
     return (
       `Semantic search DEGRADED for this workspace (colbert: ${cls}) — `
-      + `lexical code search still works. See ${PATHS.ERROR_LOG_PATH}`
+      + `lexical code search still works. ${where}.${hint}`
     )
   } catch {
     return null

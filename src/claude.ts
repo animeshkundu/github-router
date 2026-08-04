@@ -514,7 +514,7 @@ export const claude = defineCommand({
     // the only signals are a `notice` the model reads and a log line, so a
     // degraded index can (and did) go unnoticed for weeks. Fire-and-forget:
     // lexical search still works, so this must never delay or fail a launch.
-    void colbertDegradedWarning()
+    void colbertDegradedWarning(undefined, { logsToFile: true })
       .then((warning) => {
         if (warning) process.stderr.write(`${warning}\n`)
       })

@@ -963,6 +963,28 @@ describe("runSemanticSearch: no-fallback contract", () => {
     }
   })
 
+  test("the reset still honors the backoff (no rebuild storm)", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const ws = await cappedAt("ws-reset-backoff", { head: "old-head-sha" })
+    // Move the failure to JUST NOW, inside FAILED_RETRY_BACKOFF_MS. Clearing
+    // a streak is right; rebuilding without a throttle is not — on an actively
+    // developed repo whose build genuinely fails, every commit and every
+    // clean/dirty toggle would otherwise buy an immediate full re-index.
+    const meta = await store.readColbertMeta(ws)
+    await store.writeColbertMeta({
+      ...meta!,
+      lastIndexedAt: new Date().toISOString(),
+    })
+
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+
+    // Streak cleared (the dead end is still gone) but NO rebuild promised.
+    expect(r.notice).toMatch(/pending/i)
+    expect(r.notice).not.toMatch(/was started/i)
+    expect((await store.readColbertMeta(ws))?.failedAttempts).toBe(0)
+  })
+
   test("a legacy entry with no failedAt baseline does NOT reset", async () => {
     const store = await import("../../src/lib/colbert/index-store")
     store.__resetInitDebounceForTests()
@@ -1378,5 +1400,26 @@ describe("colbertDegradedWarning (launch banner)", () => {
     expect(warning).toMatch(/error/)
     // Says lexical still works, so the user knows the blast radius.
     expect(warning).toMatch(/lexical/i)
+
+    // The log pointer must match where the detail actually went. `claude` and
+    // `codex` redirect warnings to ERROR_LOG_PATH via enableFileLogging();
+    // `start` does not, so pointing it at the file would send the operator to
+    // a stale or absent one.
+    const toFile = await colbertDegradedWarning(wsFailed, { logsToFile: true })
+    expect(toFile).toMatch(/error\.log/)
+    expect(warning).not.toMatch(/error\.log/)
+
+    // `stuck` is the one class with an actionable knob, so it keeps the
+    // tuning hint that was removed from the model-facing notice.
+    const wsStuck = path.join(TEST_HOME, "warn-stuck")
+    await store.writeColbertMeta({
+      workspace: wsStuck,
+      ...base,
+      status: "failed",
+      failureClass: "stuck",
+    })
+    expect(await colbertDegradedWarning(wsStuck)).toMatch(
+      /GH_ROUTER_COLBERT_INIT_STALL_MS/,
+    )
   })
 })

@@ -458,13 +458,33 @@ async function handleFailure(
   // by construction — which is exactly the bug this fixes. Recovery still goes
   // through a REAL rebuild under the unchanged cap and backoff, so nothing is
   // served that the normal guards wouldn't already serve.
-  const gitNow: { head?: string; dirty?: boolean } = await gitState(
-    workspace,
-  ).catch(() => ({}))
+  //
+  // The backoff is computed FIRST and applies to the reset kick too. Without
+  // it the reset would remove the ceiling along with the dead end: on an
+  // actively-developed repo whose build genuinely fails, every commit (head
+  // moves) and every clean/dirty toggle would re-zero the counter and kick a
+  // fresh full index immediately, forever. Clearing the streak is right;
+  // rebuilding without a throttle is not.
+  const lastAt = meta?.lastIndexedAt
+  // NaN-safe: a missing/corrupt timestamp counts as "elapsed" (allow retry)
+  // rather than NaN-comparing to false and blocking retries forever.
+  const lastMs = lastAt ? Date.parse(lastAt) : NaN
+  const backoffElapsed =
+    !Number.isFinite(lastMs) || Date.now() - lastMs >= FAILED_RETRY_BACKOFF_MS
+
+  // Only probe git when a git-derived baseline field could actually decide the
+  // outcome. `gitState` runs up to three git subprocesses with 4s timeouts, and
+  // this path is awaited inline before the lexical fallback — so a degraded
+  // workspace would pay that on EVERY query. The engine/model comparisons need
+  // no subprocess at all.
+  const at = meta?.failedAt
+  const needsGit = at?.head !== undefined || at?.dirty !== undefined
+  const gitNow: { head?: string; dirty?: boolean } =
+    needsGit ? await gitState(workspace).catch(() => ({})) : {}
   if (failureInputsChanged(meta, gitNow)) {
     consola.warn(
       `colbert: index inputs changed since the last failure (class=${cls}); ` +
-        `clearing the failure streak and retrying for ${workspace}`,
+        `clearing the failure streak${backoffElapsed ? " and retrying" : ""} for ${workspace}`,
     )
     await writeColbertMeta({
       workspace,
@@ -484,19 +504,20 @@ async function handleFailure(
       lastIndexedDirty: meta?.lastIndexedDirty,
       ownerInstanceId: getColbertInstanceUuid(),
     }).catch(() => {})
-    kickBackgroundInit(workspace)
+    if (backoffElapsed) kickBackgroundInit(workspace)
     return {
       status: "failed",
       isError: true,
       notice:
-        'semantic index unavailable; inputs changed since the last failure so a rebuild was started — retry mode:"semantic" shortly, or use code_search with specific symbol/keyword terms now',
+        backoffElapsed ?
+          'semantic index unavailable; inputs changed since the last failure so a rebuild was started — retry mode:"semantic" shortly, or use code_search with specific symbol/keyword terms now'
+        : 'semantic index unavailable (recent build failure); a rebuild is pending — retry mode:"semantic" shortly, or use code_search with specific symbol/keyword terms now',
     }
   }
 
   const attempts = crashedVerdict
     ? (meta?.failedAttempts ?? 0) + 1
     : (meta?.failedAttempts ?? 1)
-  const lastAt = meta?.lastIndexedAt
 
   if (crashedVerdict) {
     // Persist the crash (was a stranded `building` entry). Keep the existing
@@ -528,11 +549,6 @@ async function handleFailure(
   }
 
   const cap = cls === "stuck" || cls === "corrupt" ? 2 : MAX_FAILED_ATTEMPTS
-  // NaN-safe: a missing/corrupt timestamp counts as "elapsed" (allow retry)
-  // rather than NaN-comparing to false and blocking retries forever.
-  const lastMs = lastAt ? Date.parse(lastAt) : NaN
-  const backoffElapsed =
-    !Number.isFinite(lastMs) || Date.now() - lastMs >= FAILED_RETRY_BACKOFF_MS
 
   if (attempts < cap && backoffElapsed) {
     kickBackgroundInit(workspace)

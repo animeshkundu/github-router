@@ -157,14 +157,29 @@ because the only signals were an MCP `notice` string the model reads and a
   source.
 - `colbertDegradedWarning()` writes one line to stderr at `claude` / `codex` /
   `start` launch when the current workspace's index is in a terminal `failed`
-  state, naming the class and pointing at that log. It is gated only on the
+  state, naming the class. It is gated only on the
   `GH_ROUTER_DISABLE_SEMANTIC_SEARCH` opt-out — deliberately NOT on
   `colbertSearchEnabled()`, since missing artifacts or a failed smoke test are
-  themselves degraded states worth reporting.
+  themselves degraded states worth reporting. The log pointer tracks where the
+  detail actually went: `claude`/`codex` call `enableFileLogging()` so it names
+  `ERROR_LOG_PATH`, while `start` keeps consola's terminal reporter and the
+  banner says so instead of naming a file nothing wrote to.
 
 The capped MCP `notice` carries no env-var tuning advice: a spawned agent
-cannot set env vars on the running proxy, so that guidance lives in the banner
-and the log where an operator can act on it.
+cannot set env vars on the running proxy. For the one class where that knob is
+the actual remedy (`stuck` — a very large repo tripping the stall watchdog),
+the banner carries the `GH_ROUTER_COLBERT_INIT_STALL_MS` /
+`GH_ROUTER_COLBERT_INIT_TIMEOUT_MS` hint, where an operator can act on it.
+
+**The reset does not bypass the backoff.** Clearing a stale streak is right;
+rebuilding without a throttle is not. On an actively-developed repo whose build
+genuinely fails, every commit (HEAD moves) and every clean/dirty toggle would
+otherwise buy an immediate full re-index at 25% of machine threads, forever. So
+the reset clears `failedAttempts` unconditionally but only kicks a rebuild once
+`FAILED_RETRY_BACKOFF_MS` has elapsed, reporting a pending rebuild otherwise.
+The git probe is also skipped entirely unless a git-derived baseline field
+could decide the outcome — `gitState` spawns up to three git subprocesses, and
+this path is awaited inline before the lexical fallback.
 
 ## Model guidance during the unavailable window
 

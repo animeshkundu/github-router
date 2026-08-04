@@ -78,7 +78,7 @@ export const codex = defineCommand({
 
     // Surface a terminally-failed semantic index to the HUMAN (see the note
     // in claude.ts). Fire-and-forget; lexical search still works.
-    void colbertDegradedWarning()
+    void colbertDegradedWarning(undefined, { logsToFile: true })
       .then((warning) => {
         if (warning) process.stderr.write(`${warning}\n`)
       })
