@@ -61,14 +61,53 @@ function trustDir(): string {
   return nodePath.join(PATHS.APP_DIR, "stop-gate", "trust")
 }
 
+/**
+ * Per-process memo for the two git identity probes below.
+ *
+ * `repoRoot` and `repoFingerprint` are pure queries about the repo the launch
+ * is running in, but they were re-spawning `git` on every call: a single
+ * `github-router claude` launch ran `rev-parse --show-toplevel` three times
+ * and `rev-list --max-parents=0` up to twice (via `repoRoot`, `trustRepo`, and
+ * `stopGateEnabledForRepo`), ~35ms and ~42ms per spawn on Windows.
+ *
+ * The memo stores the PROMISE, not the resolved value, so concurrent callers
+ * share one spawn instead of racing to start their own. It is per-process and
+ * per-cwd, and the answers cannot meaningfully change inside a launch: the
+ * repo root of a fixed cwd is fixed, and the fingerprint is the ROOT commit,
+ * which by construction never changes for a given repository.
+ *
+ * A rejection is not cached — `runCommandCapture` is already `.catch`ed to
+ * `undefined` at both call sites, so these never reject, but deleting on
+ * rejection keeps the memo from pinning a transient failure if that changes.
+ */
+const repoRootMemo = new Map<string, Promise<string>>()
+const repoFingerprintMemo = new Map<string, Promise<string>>()
+
+function memoized(
+  memo: Map<string, Promise<string>>,
+  key: string,
+  compute: () => Promise<string>,
+): Promise<string> {
+  const hit = memo.get(key)
+  if (hit) return hit
+  const p = compute().catch((err: unknown) => {
+    memo.delete(key)
+    throw err
+  })
+  memo.set(key, p)
+  return p
+}
+
 /** Resolve the git repo root for `cwd`, falling back to `cwd` when not a repo. */
 export async function repoRoot(cwd: string): Promise<string> {
-  const r = await runCommandCapture(["git", "rev-parse", "--show-toplevel"], {
-    cwd,
-    timeoutMs: 5_000,
-  }).catch(() => undefined)
-  const top = r?.stdout?.trim()
-  return top && top.length > 0 ? top : cwd
+  return memoized(repoRootMemo, nodePath.resolve(cwd), async () => {
+    const r = await runCommandCapture(["git", "rev-parse", "--show-toplevel"], {
+      cwd,
+      timeoutMs: 5_000,
+    }).catch(() => undefined)
+    const top = r?.stdout?.trim()
+    return top && top.length > 0 ? top : cwd
+  })
 }
 
 function trustFileFor(root: string): string {
@@ -84,16 +123,18 @@ function trustFileFor(root: string): string {
  * — trust then falls back to path-only, the best we can do.
  */
 export async function repoFingerprint(root: string): Promise<string> {
-  const r = await runCommandCapture(["git", "rev-list", "--max-parents=0", "HEAD"], {
-    cwd: root,
-    timeoutMs: 5_000,
-  }).catch(() => undefined)
-  return (
-    r?.stdout
-      ?.split(/\r?\n/)
-      .map((s) => s.trim())
-      .filter(Boolean)[0] ?? ""
-  )
+  return memoized(repoFingerprintMemo, nodePath.resolve(root), async () => {
+    const r = await runCommandCapture(
+      ["git", "rev-list", "--max-parents=0", "HEAD"],
+      { cwd: root, timeoutMs: 5_000 },
+    ).catch(() => undefined)
+    return (
+      r?.stdout
+        ?.split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean)[0] ?? ""
+    )
+  })
 }
 
 /**
