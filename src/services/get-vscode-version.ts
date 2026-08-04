@@ -1,4 +1,11 @@
-const FALLBACK = "1.104.3"
+/**
+ * Last-resort floor when the lookup fails. Exported so the version cache can
+ * recognize it and refuse to PERSIST it — a fallback must never become the
+ * cached steady state, or a transient outage would freeze the version we
+ * impersonate for the whole TTL. See `src/lib/editor-version-cache.ts`.
+ */
+export const VSCODE_VERSION_FALLBACK = "1.104.3"
+const FALLBACK = VSCODE_VERSION_FALLBACK
 
 export async function getVSCodeVersion() {
   const controller = new AbortController()
@@ -30,4 +37,3 @@ export async function getVSCodeVersion() {
   }
 }
 
-await getVSCodeVersion()

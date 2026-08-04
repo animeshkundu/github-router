@@ -1,4 +1,10 @@
-const FALLBACK = "0.43.2026033101"
+/**
+ * Last-resort floor when the lookup fails. Exported so the version cache can
+ * recognize it and refuse to PERSIST it — see the note on
+ * `VSCODE_VERSION_FALLBACK` in `./get-vscode-version`.
+ */
+export const COPILOT_CHAT_VERSION_FALLBACK = "0.43.2026033101"
+const FALLBACK = COPILOT_CHAT_VERSION_FALLBACK
 
 interface MarketplaceResult {
   results: Array<{
