@@ -151,9 +151,15 @@ It now also applies a per-result image budget (10 images / 12 MiB) and **says
 what it dropped**: a model shown three of five screenshots with no indication
 will reason confidently about a set it never saw.
 
-When a capture is too large, `browser_screenshot` takes `format: "jpeg"` plus a
-`quality` (1–100), so "retake it smaller" is an instruction the model can act
-on rather than advice it cannot follow.
+`browser_screenshot` takes `format: "jpeg"` plus a `quality` (1–100). Be careful
+what you promise about it: measured back-to-back at the same viewport on a plain
+documentation page, **PNG was 35,553 bytes and JPEG q30 was 40,599** — JPEG was
+14% LARGER. PNG's run-length compression wins on the flat colour that dominates
+UI screenshots, and JPEG adds noise to exactly those regions. The knob is real
+and useful for photographic or dense-colour content, but it is NOT a dependable
+way to shrink a UI capture, and the tool description says so rather than sending
+the model the wrong way. The dependable lever for an oversized capture is a
+smaller browser window.
 
 ## The capability register
 

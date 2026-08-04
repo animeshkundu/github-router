@@ -164,7 +164,7 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
   {
     toolNameHttp: "browser_screenshot",
     description:
-      "Captures a screenshot of the visible area of a tab and returns it as an image you can actually look at, plus a small text envelope of capture metadata. It takes a tab id, an optional format (PNG default, JPEG for smaller bytes), and an optional JPEG quality. The tab must be active in its window, so this tool auto-activates the tab if needed and that changes which tab is focused. If a capture is rejected for exceeding a model's image-size limit, retake it with format 'jpeg' and a lower quality. Use screenshot for visual layout, canvas, SVG, maps, or image-only regions; prefer browser_observe when page text and actionable state are enough.",
+      "Captures a screenshot of the visible area of a tab and returns it as an image you can actually look at, plus a small text envelope of capture metadata. It takes a tab id, an optional format (PNG default, JPEG for smaller bytes), and an optional JPEG quality. The tab must be active in its window, so this tool auto-activates the tab if needed and that changes which tab is focused. If a capture is rejected for exceeding a model's image-size limit, the most reliable lever is a smaller browser window; PNG is usually SMALLER than JPEG for ordinary UI and text pages, so switching format is not a dependable way to shrink one. JPEG plus a low quality helps mainly for photographic or dense-colour content. Use screenshot for visual layout, canvas, SVG, maps, or image-only regions; prefer browser_observe when page text and actionable state are enough.",
     inputSchema: {
       type: "object",
       required: ["tabId"],
@@ -181,7 +181,7 @@ export const BROWSER_TOOLS: ReadonlyArray<Omit<NonPersonaMcpTool, "group">> = Ob
           minimum: 1,
           maximum: 100,
           description:
-            "JPEG quality 1-100 (ignored for PNG). The lever for shrinking a capture that was rejected for exceeding a model's image-size limit; 60 is usually still legible.",
+            "JPEG quality 1-100 (ignored for PNG). Only meaningful with format='jpeg'. Note JPEG is often LARGER than PNG for flat UI screenshots — measured on a plain documentation page, PNG 35553 bytes vs JPEG q30 40599 bytes at the same viewport — so reach for it for photographic content, not as a general size lever.",
         },
       },
     },
