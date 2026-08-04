@@ -19,7 +19,7 @@
 // manifest + (Windows) registry entries so the next time the user
 // loads the extension, Chrome can find and spawn the bridge.
 
-import { readFileSync } from "node:fs"
+import { readFileSync, statSync } from "node:fs"
 import path from "node:path"
 
 import { getPackageVersion } from "../version"
@@ -142,11 +142,12 @@ async function probeHealth(
 
 function bridgeBundleExists(): boolean {
   try {
-    // statSync is more efficient than readFileSync for an existence
-    // check, but we already use readFileSync elsewhere for JSON parses
-    // — keep the call shape uniform.
-    readFileSync(bridgeBundlePath())
-    return true
+    // `statSync`, not `readFileSync`: this is an existence check, and the
+    // bundle is ~124KB. Reading it whole ran on every browser tool call (twice
+    // per call, before the preflight was deduplicated) purely to throw the
+    // bytes away. `isFile()` keeps the check honest — a directory at that path
+    // is not a usable bundle.
+    return statSync(bridgeBundlePath()).isFile()
   } catch {
     return false
   }
@@ -319,19 +320,59 @@ let _inFlightReady: Promise<BridgeReady | InstallRequiredPayload> | undefined
  */
 export let __implInvocationsForTests = 0
 
+/**
+ * Short-lived cache of a READY result.
+ *
+ * The single-flight above only collapses CONCURRENT callers — it clears in
+ * `.finally()`, so sequential calls each re-run the full impl. Every browser
+ * tool call runs the check twice (once in `browserPreflight` before slot
+ * acquisition, once in `dispatchBrowserTool`, which is deliberate so internal
+ * compound dispatches stay fail-closed), and each run re-probes health and
+ * re-installs the native-messaging host — spawning `where`/`which` (~196ms on
+ * Windows) and `reg.exe` (~26ms) per detected browser, synchronously.
+ *
+ * Only a READY result is cached, and only briefly:
+ *
+ *   - Caching `install_required` would freeze a recoverable state — the user
+ *     loading the extension, or installing a browser, would not take effect
+ *     until restart. Those paths must stay self-healing.
+ *   - The TTL is deliberately short. These checks also REPAIR drift (a deleted
+ *     manifest, a cleared registry key), so the window in which that repair is
+ *     skipped has to stay small. A few seconds collapses the double-check and
+ *     a burst of calls without turning a self-healing probe into a one-shot.
+ */
+const READY_CACHE_TTL_MS = 5_000
+let _readyCache: { at: number; value: BridgeReady } | undefined
+
 export async function ensureBridgeReady(): Promise<
   BridgeReady | InstallRequiredPayload
 > {
+  const cached = _readyCache
+  if (cached && Date.now() - cached.at < READY_CACHE_TTL_MS) {
+    return cached.value
+  }
   if (_inFlightReady) return _inFlightReady
-  _inFlightReady = _ensureBridgeReadyImpl().finally(() => {
-    _inFlightReady = undefined
-  })
+  _inFlightReady = _ensureBridgeReadyImpl()
+    .then((result) => {
+      // Success only. An install_required result stays uncached so the next
+      // call re-checks and can observe the user's fix.
+      if (!result.install_required) {
+        _readyCache = { at: Date.now(), value: result }
+      } else {
+        _readyCache = undefined
+      }
+      return result
+    })
+    .finally(() => {
+      _inFlightReady = undefined
+    })
   return _inFlightReady
 }
 
 /** @internal — exported only for tests. Resets single-flight state between test cases. */
 export function __resetEnsureBridgeReadyForTests(): void {
   _inFlightReady = undefined
+  _readyCache = undefined
   __implInvocationsForTests = 0
   attemptedReloads.clear()
 }

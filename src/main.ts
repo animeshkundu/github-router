@@ -3,24 +3,7 @@
 import { defineCommand, runMain, showUsage } from "citty"
 import consola from "consola"
 
-import { auth } from "./auth"
-import { checkUsage } from "./check-usage"
-import { claude } from "./claude"
-import { codex } from "./codex"
-import { debug } from "./debug"
-import { internalPromptSubmit } from "./internal-prompt-submit"
-import { internalPlanReview } from "./internal-plan-review"
-import { internalSessionBind } from "./internal-session-bind"
-import { internalWorkspaceHeader } from "./internal-workspace-header"
-import { internalArtifactOpen } from "./internal-artifact-open"
-import { internalFirstMateGuard } from "./internal-first-mate-guard"
-import { internalStopHook } from "./internal-stop-hook"
-import { internalStopReview } from "./internal-stop-review"
-import { internalWorkerGuard } from "./internal-worker-guard"
 import { getPackageVersion } from "./lib/version"
-import { models } from "./models"
-import { serve } from "./serve"
-import { start } from "./start"
 
 process.on("unhandledRejection", (error) => {
   consola.error("Unhandled rejection:", error)
@@ -60,6 +43,30 @@ if (!isVersionFlag && !isInternalHook) {
   consola.info(`github-router v${version}`)
 }
 
+/**
+ * Subcommands are LAZY THUNKS, not static imports.
+ *
+ * citty resolves only the named entry (`_findSubCommand` → `resolveValue`), so
+ * running one subcommand no longer evaluates the other 17 module graphs. That
+ * matters because several of these are per-turn Claude Code hooks — the
+ * `UserPromptSubmit`, `Stop` and `PreToolUse` handlers registered by
+ * `src/claude.ts` each spawn a FRESH `node dist/main.js <sub>` process, so any
+ * import-time cost lands in the user's interactive loop on every prompt.
+ * `internal-worker-guard`, for instance, needs three modules but was loading
+ * the entire claude/serve/MCP graph plus the Pi vendor runtime.
+ *
+ * Safe because the import-time side effects in this codebase
+ * (`assertMcpToolSurfaceConsistent` in `server.ts`, the tree-sitter grammar
+ * preload, the worktree/session exit-handler registrations, the first-mate
+ * allowlist assertion) are reachable ONLY from claude/codex/serve/start, and
+ * all four reach all of them independently — no subcommand relies on another's
+ * module being loaded. Verified by an AST walk of the runtime import graph.
+ *
+ * `--help` is the one path that still resolves everything: citty's
+ * `renderUsage` reads each subcommand's meta to print descriptions. That is
+ * not latency-critical, and `resolveHelpTarget` below resolves only the single
+ * subcommand when help is scoped to one.
+ */
 const main = defineCommand({
   meta: {
     name: "github-router",
@@ -67,7 +74,38 @@ const main = defineCommand({
     description:
       "A reverse proxy that exposes GitHub Copilot as OpenAI and Anthropic compatible API endpoints.",
   },
-  subCommands: { auth, start, claude, codex, serve, models, "check-usage": checkUsage, debug, "internal-stop-hook": internalStopHook, "internal-prompt-submit": internalPromptSubmit, "internal-stop-review": internalStopReview, "internal-plan-review": internalPlanReview, "internal-session-bind": internalSessionBind, "internal-workspace-header": internalWorkspaceHeader, "internal-artifact-open": internalArtifactOpen, "internal-first-mate-guard": internalFirstMateGuard, "internal-worker-guard": internalWorkerGuard },
+  subCommands: {
+    auth: () => import("./auth").then((m) => m.auth),
+    start: () => import("./start").then((m) => m.start),
+    claude: () => import("./claude").then((m) => m.claude),
+    codex: () => import("./codex").then((m) => m.codex),
+    serve: () => import("./serve").then((m) => m.serve),
+    models: () => import("./models").then((m) => m.models),
+    "check-usage": () => import("./check-usage").then((m) => m.checkUsage),
+    debug: () => import("./debug").then((m) => m.debug),
+    "internal-stop-hook": () =>
+      import("./internal-stop-hook").then((m) => m.internalStopHook),
+    "internal-prompt-submit": () =>
+      import("./internal-prompt-submit").then((m) => m.internalPromptSubmit),
+    "internal-stop-review": () =>
+      import("./internal-stop-review").then((m) => m.internalStopReview),
+    "internal-plan-review": () =>
+      import("./internal-plan-review").then((m) => m.internalPlanReview),
+    "internal-session-bind": () =>
+      import("./internal-session-bind").then((m) => m.internalSessionBind),
+    "internal-workspace-header": () =>
+      import("./internal-workspace-header").then(
+        (m) => m.internalWorkspaceHeader,
+      ),
+    "internal-artifact-open": () =>
+      import("./internal-artifact-open").then((m) => m.internalArtifactOpen),
+    "internal-first-mate-guard": () =>
+      import("./internal-first-mate-guard").then(
+        (m) => m.internalFirstMateGuard,
+      ),
+    "internal-worker-guard": () =>
+      import("./internal-worker-guard").then((m) => m.internalWorkerGuard),
+  },
 })
 
 /**

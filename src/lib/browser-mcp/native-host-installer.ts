@@ -254,6 +254,19 @@ function appBrowserMcpDir(): string {
 }
 
 /**
+ * Memo for the interpreter probe below. The probe shells out to
+ * `where`/`which`, which measured ~196ms per spawn on Windows, and it ran on
+ * every browser tool call (twice, before the preflight was deduplicated).
+ *
+ * Only a SUCCESSFUL resolution is cached. `process.execPath` is the
+ * fall-through when the probe fails, and caching that would pin a degraded
+ * interpreter for the life of the process — including across a `node` install
+ * that happens while the proxy is running. The path of an existing `node` on
+ * PATH, by contrast, does not change mid-process in any way that matters here.
+ */
+let cachedBridgeInterpreter: string | undefined
+
+/**
  * Pick a runtime interpreter for the bridge. The bridge uses Node's
  * binary-stdin framing for native messaging which Bun handles
  * differently (Bun closes the bridge prematurely as soon as anything
@@ -262,6 +275,7 @@ function appBrowserMcpDir(): string {
  * binary) only if node isn't on PATH.
  */
 function resolveBridgeInterpreter(): string {
+  if (cachedBridgeInterpreter !== undefined) return cachedBridgeInterpreter
   const probeCmd = platform() === "win32" ? "where" : "which"
   try {
     const out = execFileSync(probeCmd, ["node"], {
@@ -271,11 +285,17 @@ function resolveBridgeInterpreter(): string {
     })
       .toString()
       .trim()
+      // `where` can report several matches (a version-manager shim, then the
+      // global binary); take the first, which is what PATH resolution wins.
       .split(/\r?\n/)[0]
-    if (out) return out
+    if (out) {
+      cachedBridgeInterpreter = out
+      return out
+    }
   } catch {
     // Fall through.
   }
+  // Deliberately NOT cached — see the note on `cachedBridgeInterpreter`.
   return process.execPath
 }
 

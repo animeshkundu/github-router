@@ -1,9 +1,16 @@
 import consola from "consola"
 
 import { getModels } from "~/services/copilot/get-models"
-import { getCopilotChatVersion } from "~/services/get-copilot-version"
-import { getVSCodeVersion } from "~/services/get-vscode-version"
+import {
+  COPILOT_CHAT_VERSION_FALLBACK,
+  getCopilotChatVersionOrUndefined,
+} from "~/services/get-copilot-version"
+import {
+  getVSCodeVersionOrUndefined,
+  VSCODE_VERSION_FALLBACK,
+} from "~/services/get-vscode-version"
 
+import { resolveEditorVersion } from "./editor-version-cache"
 import { state } from "./state"
 
 export const sleep = (ms: number) =>
@@ -379,14 +386,22 @@ export async function cacheModels(): Promise<void> {
 }
 
 export const cacheVSCodeVersion = async () => {
-  const response = await getVSCodeVersion()
+  const response = await resolveEditorVersion(
+    "vscode",
+    getVSCodeVersionOrUndefined,
+    VSCODE_VERSION_FALLBACK,
+  )
   state.vsCodeVersion = response
 
   consola.info(`Using VSCode version: ${response}`)
 }
 
 export const cacheCopilotVersion = async () => {
-  const version = await getCopilotChatVersion()
+  const version = await resolveEditorVersion(
+    "copilotChat",
+    getCopilotChatVersionOrUndefined,
+    COPILOT_CHAT_VERSION_FALLBACK,
+  )
   state.copilotVersion = version
 
   consola.info(`Using Copilot Chat version: ${version}`)
