@@ -39,6 +39,7 @@
 
 import fs from "node:fs/promises"
 import path from "node:path"
+import process from "node:process"
 
 import consola from "consola"
 
@@ -62,6 +63,38 @@ export type EditorVersionKey = "vscode" | "copilotChat"
 
 function cacheFilePath(): string {
   return path.join(PATHS.APP_DIR, "last-editor-versions")
+}
+
+/**
+ * True when running under a test runner.
+ *
+ * Detected from the entry file, not an env var: `bun test` sets no marker of
+ * its own and this repo builds with `NODE_ENV=production`, so `argv[1]` (the
+ * spec file being executed) is the reliable signal. `BUN_TEST` / `NODE_ENV`
+ * are still honored for other runners.
+ *
+ * The cache's own tests sandbox `homedir()` and opt back in via
+ * `__allowEditorVersionWritesForTests`, so they still cover the write path.
+ */
+function isTestRunner(): boolean {
+  if (_allowWriteInTests) return false
+  if (process.env.BUN_TEST === "1" || process.env.NODE_ENV === "test") {
+    return true
+  }
+  const entry = process.argv[1] ?? ""
+  return /\.(test|spec)\.[cm]?[jt]sx?$/.test(entry)
+}
+
+/** Set by the cache's own (sandboxed) tests so they can cover the write path. */
+let _allowWriteInTests = false
+
+/**
+ * Test-only: re-enable persistence. ONLY safe from a test that has redirected
+ * `homedir()` to a temp dir — otherwise it writes the caller's fixture into the
+ * developer's real cache and the proxy advertises it upstream.
+ */
+export function __allowEditorVersionWritesForTests(on: boolean): void {
+  _allowWriteInTests = on
 }
 
 async function readCache(): Promise<EditorVersionCache> {
@@ -136,6 +169,18 @@ export async function resolveEditorVersion(
   const fetched = await fetchFresh()
 
   if (fetched !== undefined && fetched.length > 0) {
+    // Never persist from a test process. The cached value is sent upstream as
+    // the `editor-version` header, so a test that stubs the fetcher would
+    // otherwise write its fixture into the DEVELOPER'S real cache and the
+    // proxy would advertise it to Copilot for the full 12h TTL. That is not
+    // hypothetical — a smoke test caught `editor-version: vscode/1.2.3` live
+    // on this machine, sourced from a unit-test stub.
+    //
+    // Belt-and-braces with sandboxing the cache's own tests: any FUTURE test
+    // that reaches this function through some other caller is covered too,
+    // without every such test having to remember to mock homedir(). Reads stay
+    // enabled, so warm-cache behavior is still exercisable.
+    if (isTestRunner()) return fetched
     await serializeWrite(async () => {
       // Re-read INSIDE the chain: another key's write may have landed while
       // this one was in its fetch, and that entry must survive.

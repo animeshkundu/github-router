@@ -94,10 +94,21 @@ test("cacheVSCodeVersion updates state", async () => {
 
   state.vsCodeVersion = undefined
   await cacheVSCodeVersion()
+
+  // Assert only what this test is about: `state.vsCodeVersion` gets populated
+  // with a real-looking version. NOT the specific value — `cacheVSCodeVersion`
+  // now resolves through a 12h disk cache keyed off homedir(), so a warm cache
+  // legitimately short-circuits the stubbed fetch and returns the machine's
+  // real version. Pinning "1.2.3" made this test depend on the developer's
+  // ~/.local/share/github-router state and, worse, its stubbed value was
+  // PERSISTED there — the proxy then advertised `editor-version: vscode/1.2.3`
+  // upstream for the full TTL, corrupting the VS Code impersonation. The
+  // cache's own behavior is covered in tests/isolated/editor-version-cache.test.ts,
+  // which sandboxes homedir() so it cannot touch real user state.
   if (!state.vsCodeVersion) {
     throw new Error("Expected VSCode version to be cached")
   }
-  expect(state.vsCodeVersion as string).toBe("1.2.3")
+  expect(state.vsCodeVersion as string).toMatch(/^\d+\.\d+/)
 })
 
 test("sleep resolves after timeout", async () => {
