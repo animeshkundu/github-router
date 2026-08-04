@@ -24,11 +24,14 @@ const PNG_B64_B =
 
 let dir: string
 beforeEach(() => {
-  // realpath the fixture root: on a Windows CI runner `os.tmpdir()` is a
-  // short-name path (`C:/Users/RUNNER~1/...`) whose realpath is the long form,
-  // and the confinement helper compares a realpathed FILE against this root.
-  // Same reason `makeFixture` in code-search.test.ts realpaths.
-  dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "gh-router-img-")))
+  // realpath the fixture root with `.native()`, NOT the JS-emulated
+  // `realpathSync`. On Windows only the native call expands 8.3 short names, and
+  // a CI runner's `os.tmpdir()` is short-form (`C:/Users/RUNNER~1/...`) while
+  // the realpath of a file inside it is long-form. The confinement helper
+  // compares a `.native()`-resolved FILE against this root, and the worker
+  // engine resolves its workspace the same way (`engine.ts`), so anything less
+  // compares two spellings of the same directory and rejects everything.
+  dir = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "gh-router-img-")))
 })
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
