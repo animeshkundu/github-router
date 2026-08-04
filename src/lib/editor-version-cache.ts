@@ -90,45 +90,78 @@ function isFresh(entry: CacheEntry | undefined): entry is CacheEntry {
 }
 
 /**
+ * Serializes the read-modify-write below.
+ *
+ * `setupAndServe` resolves both keys concurrently (`Promise.all`). Without
+ * this, both callers would `readCache()` into their OWN object, spend ~1.5s in
+ * their network fetch, and then write that stale object back — so whichever
+ * finished last would clobber the other's entry, and one of the two versions
+ * would re-fetch on every launch forever.
+ *
+ * The chain also re-reads immediately before mutating, so the write is against
+ * current disk state rather than the snapshot taken before the fetch.
+ */
+let writeChain: Promise<void> = Promise.resolve()
+
+function serializeWrite(fn: () => Promise<void>): Promise<void> {
+  const next = writeChain.then(fn, fn)
+  // Never let a rejection poison the chain for later writers.
+  writeChain = next.catch(() => {})
+  return next
+}
+
+/**
  * Resolve `key` through the cache, calling `fetchFresh` only on a miss.
  *
- * `fallback` is the constant `fetchFresh` returns when the network fails. It
- * is compared against, never persisted (invariant 1 above) — so a failed
- * fetch yields the fallback for THIS process and leaves the cache untouched,
- * and the next launch tries again.
+ * `fetchFresh` signals failure by returning `undefined` — NOT by returning the
+ * fallback constant. Inferring failure from `value === fallback` would break
+ * exactly when the live version happens to equal the hardcoded constant, which
+ * is the normal state right after someone bumps that constant to the
+ * then-current version: the entry would never be written and every launch
+ * would pay the ~1.5s fetch forever, silently defeating the cache.
+ *
+ * `fallback` is returned when the lookup fails and no usable cached value
+ * exists. It is never persisted (invariant 1 above), so a transient outage
+ * cannot freeze the version we impersonate.
  */
 export async function resolveEditorVersion(
   key: EditorVersionKey,
-  fetchFresh: () => Promise<string>,
+  fetchFresh: () => Promise<string | undefined>,
   fallback: string,
 ): Promise<string> {
-  const cache = await readCache()
-  const entry = cache[key]
+  const entry = (await readCache())[key]
   const cachedValue = isFresh(entry) ? entry.value : undefined
   if (cachedValue !== undefined) return cachedValue
 
-  const value = await fetchFresh()
+  const fetched = await fetchFresh()
 
-  if (value !== fallback) {
-    cache[key] = { value, checkedAt: new Date().toISOString() }
-    try {
-      await fs.mkdir(path.dirname(cacheFilePath()), { recursive: true })
-      await fs.writeFile(cacheFilePath(), JSON.stringify(cache), {
-        mode: 0o600,
-      })
-    } catch (err) {
-      // A write failure only costs a refetch next launch.
-      consola.debug("Failed to write editor-version cache:", err)
-    }
-  } else if (typeof entry?.value === "string" && entry.value.length > 0) {
-    // The fetch failed AND we hold a stale-but-real value. Prefer it over the
-    // hardcoded fallback: a version that was genuinely current when it was
-    // cached is a closer impersonation than a constant frozen at release
-    // time. The entry is left un-restamped so the next launch still retries.
-    return entry.value
+  if (fetched !== undefined && fetched.length > 0) {
+    await serializeWrite(async () => {
+      // Re-read INSIDE the chain: another key's write may have landed while
+      // this one was in its fetch, and that entry must survive.
+      const cache = await readCache()
+      cache[key] = { value: fetched, checkedAt: new Date().toISOString() }
+      try {
+        await fs.mkdir(path.dirname(cacheFilePath()), { recursive: true })
+        await fs.writeFile(cacheFilePath(), JSON.stringify(cache), {
+          mode: 0o600,
+        })
+      } catch (err) {
+        // A write failure only costs a refetch next launch.
+        consola.debug("Failed to write editor-version cache:", err)
+      }
+    })
+    return fetched
   }
 
-  return value
+  // The lookup failed. A stale-but-real cached value beats the hardcoded
+  // constant: a version that was genuinely current when it was cached is a
+  // closer impersonation than one frozen at release time. Left un-restamped,
+  // so the next launch still retries.
+  if (typeof entry?.value === "string" && entry.value.length > 0) {
+    return entry.value
+  }
+  return fallback
 }
 
 /** Test seam: the on-disk path, so tests can point HOME at a temp dir. */

@@ -3,10 +3,10 @@ import consola from "consola"
 import { getModels } from "~/services/copilot/get-models"
 import {
   COPILOT_CHAT_VERSION_FALLBACK,
-  getCopilotChatVersion,
+  getCopilotChatVersionOrUndefined,
 } from "~/services/get-copilot-version"
 import {
-  getVSCodeVersion,
+  getVSCodeVersionOrUndefined,
   VSCODE_VERSION_FALLBACK,
 } from "~/services/get-vscode-version"
 
@@ -388,7 +388,7 @@ export async function cacheModels(): Promise<void> {
 export const cacheVSCodeVersion = async () => {
   const response = await resolveEditorVersion(
     "vscode",
-    getVSCodeVersion,
+    getVSCodeVersionOrUndefined,
     VSCODE_VERSION_FALLBACK,
   )
   state.vsCodeVersion = response
@@ -399,7 +399,7 @@ export const cacheVSCodeVersion = async () => {
 export const cacheCopilotVersion = async () => {
   const version = await resolveEditorVersion(
     "copilotChat",
-    getCopilotChatVersion,
+    getCopilotChatVersionOrUndefined,
     COPILOT_CHAT_VERSION_FALLBACK,
   )
   state.copilotVersion = version

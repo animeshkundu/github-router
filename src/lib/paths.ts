@@ -1169,7 +1169,11 @@ async function mirrorDirRecursive(
   const sourcePath = path.join(sourceDir, relPath)
   let entries: Array<string>
   try {
-    entries = await fs.readdir(sourcePath)
+    // Through the semaphore like every other syscall here. Subdirectories are
+    // traversed concurrently, so an unslotted readdir would let a wide or deep
+    // tree dispatch hundreds at once — defeating the file-handle bound the
+    // semaphore exists to enforce.
+    entries = await withSlot(() => fs.readdir(sourcePath))
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return
     consola.debug(`mirrorDirRecursive: cannot readdir ${sourcePath}:`, err)

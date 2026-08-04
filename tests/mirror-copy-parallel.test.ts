@@ -119,3 +119,56 @@ test("the concurrency limit is a sane bound", () => {
   expect(MIRROR_COPY_CONCURRENCY).toBeGreaterThan(1)
   expect(MIRROR_COPY_CONCURRENCY).toBeLessThanOrEqual(64)
 })
+
+/**
+ * Two security-motivated branches of the walk. Both were exercised only
+ * incidentally before the concurrent rewrite touched their control flow, so
+ * they get explicit coverage under concurrency.
+ */
+test("the symlink skip and peer-md filter hold under concurrency", async () => {
+  const base = await fsp.mkdtemp(path.join(os.tmpdir(), "ghr-mirror-sec-"))
+  const src = path.join(base, "src")
+  const dst = path.join(base, "dst")
+  await fsp.mkdir(path.join(src, "agents"), { recursive: true })
+  await fsp.mkdir(dst, { recursive: true })
+
+  // Enough sibling load that these entries are processed concurrently.
+  await makeTree(src)
+
+  // Proxy-authored agent files must NOT be mirrored: copying them registers a
+  // dead definition alongside the live one under the same frontmatter name.
+  // The name must match PEER_AGENT_MD_FILENAME exactly — digit PID, 8 hex, and
+  // a known agent name.
+  await fsp.writeFile(
+    path.join(src, "agents", "peer-1234-abcdef01-codex-critic.md"),
+    "dead",
+  )
+  await fsp.writeFile(path.join(src, "agents", "my-custom.md"), "keep")
+
+  // A symlink must be skipped, not recreated: a recreated link is a
+  // confused-deputy vector, since a later write through the mirror would
+  // follow it to the user's real target.
+  const secret = path.join(base, "secret.txt")
+  await fsp.writeFile(secret, "SENSITIVE")
+  let symlinked = true
+  try {
+    await fsp.symlink(secret, path.join(src, "link.txt"))
+  } catch {
+    // Windows without Developer Mode / admin cannot create file symlinks.
+    symlinked = false
+  }
+
+  await mirrorDirRecursive(src, dst, "")
+
+  expect(
+    fs.existsSync(
+      path.join(dst, "agents", "peer-1234-abcdef01-codex-critic.md"),
+    ),
+  ).toBe(false)
+  expect(fs.existsSync(path.join(dst, "agents", "my-custom.md"))).toBe(true)
+  if (symlinked) {
+    expect(fs.existsSync(path.join(dst, "link.txt"))).toBe(false)
+  }
+
+  await fsp.rm(base, { recursive: true, force: true })
+})
