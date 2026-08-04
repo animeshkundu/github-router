@@ -191,11 +191,15 @@ describe("NMH install does not run on the healthy path", () => {
       "utf8",
     )
     const realFetch = globalThis.fetch
+    // Cast through `unknown`: a bare arrow is not assignable to `typeof fetch`,
+    // which also carries `preconnect`. Whether that property is present varies
+    // by @types surface, so the direct cast typechecks on some runners and not
+    // others — going through `unknown` is stable everywhere.
     globalThis.fetch = (async () =>
       new Response(
         JSON.stringify({ ok: true, extension_connected: true, extension_loaded_version: "9.9.9" }),
         { status: 200, headers: { "content-type": "application/json" } },
-      )) as typeof globalThis.fetch
+      )) as unknown as typeof globalThis.fetch
 
     discoveryFile = liveDiscovery
     __resetEnsureBridgeReadyForTests()
