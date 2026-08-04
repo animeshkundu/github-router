@@ -363,8 +363,15 @@ export async function setupAndServe(
   }
 
   await ensurePaths()
-  await cacheVSCodeVersion()
-  await cacheCopilotVersion()
+  // The two editor-identity lookups are independent of each other and of the
+  // token chain below, so they overlap. Both are cached with a 12h TTL
+  // (`editor-version-cache.ts`), so on the common path neither touches the
+  // network at all and this only bounds the cold case.
+  //
+  // `ensurePaths()` deliberately stays a prerequisite rather than joining the
+  // batch: it is the FS init these writes land in, and folding it in would
+  // let network work proceed past a filesystem failure.
+  await Promise.all([cacheVSCodeVersion(), cacheCopilotVersion()])
 
   if (options.githubToken) {
     state.githubToken = options.githubToken

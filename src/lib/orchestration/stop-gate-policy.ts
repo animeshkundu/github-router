@@ -61,14 +61,52 @@ function trustDir(): string {
   return nodePath.join(PATHS.APP_DIR, "stop-gate", "trust")
 }
 
+/**
+ * Per-process memo for `repoRoot` ONLY.
+ *
+ * `repoRoot` re-spawned `git rev-parse --show-toplevel` on every call — three
+ * times per `github-router claude` launch (via `repoRoot`, `trustRepo` and
+ * `stopGateEnabledForRepo`), ~35ms per spawn on Windows. The repo root of a
+ * fixed cwd does not change inside a launch, so memoizing a SUCCESSFUL lookup
+ * is sound.
+ *
+ * A FALLBACK result is never memoized. `runCommandCapture` is `.catch`ed to
+ * `undefined`, so a git failure or 5s timeout RESOLVES with `cwd` rather than
+ * rejecting — which a naive memo would then pin for the life of the process.
+ * That matters because the fallback feeds a trust decision: `trustFileFor`
+ * keys on the returned root, so a pinned `cwd` would key trust on a
+ * subdirectory instead of the repo root. Timeouts are routine on the Windows
+ * target (cold disk, AV scanning git.exe, OneDrive-synced repos), so this is
+ * not a hypothetical.
+ *
+ * `repoFingerprint` is not memoized at all — see the note on it below.
+ *
+ * The memo stores the PROMISE, so concurrent callers share one spawn.
+ */
+const repoRootMemo = new Map<string, Promise<string>>()
+
 /** Resolve the git repo root for `cwd`, falling back to `cwd` when not a repo. */
 export async function repoRoot(cwd: string): Promise<string> {
-  const r = await runCommandCapture(["git", "rev-parse", "--show-toplevel"], {
-    cwd,
-    timeoutMs: 5_000,
-  }).catch(() => undefined)
-  const top = r?.stdout?.trim()
-  return top && top.length > 0 ? top : cwd
+  const key = nodePath.resolve(cwd)
+  const hit = repoRootMemo.get(key)
+  if (hit) return hit
+  const pending = (async () => {
+    const r = await runCommandCapture(["git", "rev-parse", "--show-toplevel"], {
+      cwd,
+      timeoutMs: 5_000,
+    }).catch(() => undefined)
+    const top = r?.stdout?.trim()
+    if (top && top.length > 0) return top
+    // Fallback: evict so the next call re-probes instead of inheriting a
+    // transient failure for the rest of the session.
+    repoRootMemo.delete(key)
+    return cwd
+  })().catch((err: unknown) => {
+    repoRootMemo.delete(key)
+    throw err
+  })
+  repoRootMemo.set(key, pending)
+  return pending
 }
 
 function trustFileFor(root: string): string {
@@ -82,12 +120,22 @@ function trustFileFor(root: string): string {
  * DIFFERENT repo later appearing at the same filesystem path is not silently
  * trusted (codex review #2). Empty string when unavailable (no git / no commits)
  * — trust then falls back to path-only, the best we can do.
+ *
+ * NOT memoized, deliberately. This is the freshness half of a SECURITY control:
+ * `isRepoTrusted` compares the stored fingerprint against the LIVE one to
+ * detect a repo swap at a trusted path. A per-process memo defeats exactly
+ * that — verified by reproduction: init a repo, fingerprint it, then
+ * `rm -rf .git && git init` with a new commit at the same path, and a memoized
+ * lookup keeps returning the OLD root commit, so the comparison matches and
+ * the swapped-in repo is auto-trusted. The proxy is long-lived, so that window
+ * is a whole session. The ~42ms per spawn this would save is not worth
+ * widening trust.
  */
 export async function repoFingerprint(root: string): Promise<string> {
-  const r = await runCommandCapture(["git", "rev-list", "--max-parents=0", "HEAD"], {
-    cwd: root,
-    timeoutMs: 5_000,
-  }).catch(() => undefined)
+  const r = await runCommandCapture(
+    ["git", "rev-list", "--max-parents=0", "HEAD"],
+    { cwd: root, timeoutMs: 5_000 },
+  ).catch(() => undefined)
   return (
     r?.stdout
       ?.split(/\r?\n/)
