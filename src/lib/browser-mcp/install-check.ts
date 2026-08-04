@@ -197,6 +197,14 @@ function loadExpectedExtensionVersion(): string | undefined {
 const DEV_VERSION_SENTINEL = "0.0.0"
 
 /**
+ * Stand-in for `version_mismatch.loaded` when the loaded extension is
+ * too old to report a version at all (it predates the `__hello__`
+ * handshake). Kept human-readable because it is rendered verbatim into
+ * the model-facing instructions.
+ */
+const UNKNOWN_LOADED_VERSION = "unknown (extension reported no version)"
+
+/**
  * Track which `(extensionId, expectedVersion)` pairs we've already
  * tried to auto-reload in this process. Prevents an infinite reload
  * loop if the on-disk version somehow stays ahead of what the browser
@@ -204,6 +212,16 @@ const DEV_VERSION_SENTINEL = "0.0.0"
  * a new permission was added — the loaded version stays stale).
  */
 const attemptedReloads = new Set<string>()
+
+/**
+ * `auto_installed` for the `extension_outdated` payloads below.
+ *
+ * Reaching those branches means the bridge is running and the extension is
+ * connected, so the native-messaging manifest is provably already correct —
+ * nothing was installed, and claiming otherwise would point the reader at a
+ * step that is not the remedy. The remedy is reloading the extension.
+ */
+const NOTHING_AUTO_INSTALLED: ReadonlyArray<string> = Object.freeze([])
 
 /**
  * Send POST /reload to the bridge — triggers __reload__ control frame
@@ -278,6 +296,15 @@ function buildInstallRequired(
       return "The bridge bundle is missing. Run `bun run build` from the github-router checkout to produce dist/browser-bridge/index.js, then retry."
     }
     if (reason === "extension_outdated" && versionMismatch) {
+      if (versionMismatch.loaded === UNKNOWN_LOADED_VERSION) {
+        // State the observable, not a guess at which side is old. A
+        // missing version most often means the loaded extension predates
+        // the __hello__ handshake (and so also predates the __reload__
+        // control frame, which is why auto-reload was a no-op rather
+        // than a failure) — but a stale long-running bridge process
+        // produces the same silence, so the remedy covers both.
+        return `Your loaded github-router browser extension did not report a version, so the proxy cannot confirm it is up to date and auto-reload could not fix it (the github-router package shipped version ${versionMismatch.expected}). This usually means the loaded extension predates the auto-reload support and has been silently running stale. Open chrome://extensions (or edge://extensions), find the github-router extension card, and click the reload arrow; if the card is missing, click "Load unpacked" and select the load_unpacked_dir above. If it still reports no version afterwards, restart the github-router proxy so the native bridge is refreshed too.`
+      }
       return `Your loaded github-router browser extension is version ${versionMismatch.loaded} but the github-router package shipped version ${versionMismatch.expected}. Auto-reload was attempted and did not converge — Chrome likely disabled the extension because the new manifest declares new permissions. Open chrome://extensions (or edge://extensions), find the github-router extension card, click "Enable" if it's disabled, then click the reload arrow. Retry this tool call afterwards.`
     }
     return "Open chrome://extensions (or edge://extensions), enable Developer Mode, click 'Load unpacked', and select the load_unpacked_dir above. Then retry this tool call. If you just updated the github-router package, an extension already loaded may need to be reloaded — click the reload arrow on its card."
@@ -294,6 +321,35 @@ function buildInstallRequired(
     },
     ...(versionMismatch ? { version_mismatch: versionMismatch } : {}),
   }
+}
+
+/**
+ * Is the loaded extension out of date with respect to the shipped one?
+ *
+ * `loaded === undefined` means the extension reported no version. The
+ * bridge has echoed `extension_loaded_version` since the very release
+ * that added the `__hello__` handshake, so on any bridge new enough to
+ * run this code, a CONNECTED extension that reports no version is one
+ * that predates the handshake — the most stale state there is. Treating
+ * that absence as "not checkable" failed open permanently for exactly
+ * the extensions this check exists to catch: one months out of date kept
+ * serving requests while silently ignoring newer arguments, and nothing
+ * ever said so. Absence is a staleness signal.
+ *
+ * The dev sentinel is exempt on both sides: a source checkout loads at
+ * "0.0.0" and is expected to diverge.
+ *
+ * Exported for tests — this predicate is the whole invariant, and it had
+ * no coverage when it silently regressed.
+ */
+export function isExtensionStale(
+  expected: string | undefined,
+  loaded: string | undefined,
+): boolean {
+  if (typeof expected !== "string" || expected === DEV_VERSION_SENTINEL) return false
+  if (typeof loaded !== "string") return true
+  if (loaded === DEV_VERSION_SENTINEL) return false
+  return loaded !== expected
 }
 
 /**
@@ -397,53 +453,64 @@ async function _ensureBridgeReadyImpl(): Promise<
     return buildInstallRequired("bridge_bundle_missing", [])
   }
 
-  // Pre-emptively install the NMH manifest for every detected browser
-  // BEFORE we probe — that way the very first probe-failure response
-  // already reports the manifests as auto-installed and the user only
-  // needs to do the unpacked-load step.
-  const installed = installNativeHostForAll(browsers)
-  const autoInstalled = installed.flatMap((r) => [
-    `nmh_manifest_${r.browser}`,
-  ])
+  // Installing the NMH manifest is only meaningful when the bridge is NOT
+  // already running. A live bridge is itself proof the manifest is correct
+  // and discoverable — Chrome used it to spawn that very process — so
+  // re-writing it on a healthy path repairs nothing.
+  //
+  // It used to run unconditionally, before the probe. That cost a
+  // SYNCHRONOUS reg.exe spawn per browser on every uncached preflight:
+  // measured at ~45ms of fully-blocked event loop every 5s of active
+  // browsing, and ~481ms on the first call of a process (which also pays
+  // browser detection). This proxy is single-threaded and is typically
+  // streaming a model response at the same time, so that stall is paid by
+  // every other in-flight request.
+  //
+  // Installing lazily preserves the property the eager call existed for —
+  // any install_required payload still reports the manifests as
+  // auto-installed, because every branch that returns one installs first.
+  // Drift repair is preserved too, just deferred to the moment it can
+  // actually matter: a manifest deleted while the bridge runs only affects
+  // the NEXT browser launch, and by then the bridge is down and we install.
+  const installNow = (): string[] =>
+    installNativeHostForAll(browsers).map((r) => `nmh_manifest_${r.browser}`)
 
   const discovery = readBridgeDiscovery()
   if (!discovery) {
-    return buildInstallRequired("bridge_not_running", autoInstalled)
+    return buildInstallRequired("bridge_not_running", installNow())
   }
   const health = await probeHealth(discovery.port, discovery.token)
   if (!health || !health.ok) {
-    return buildInstallRequired("bridge_not_running", autoInstalled)
+    return buildInstallRequired("bridge_not_running", installNow())
   }
   if (!health.extension_connected) {
-    return buildInstallRequired("extension_not_loaded", autoInstalled)
+    return buildInstallRequired("extension_not_loaded", installNow())
   }
 
-  // Version-mismatch detection + auto-reload. Only fires when:
-  //   - the loaded extension reported a version via __hello__ (older
-  //     bridge versions don't echo this field — treat as opt-in),
-  //   - the on-disk manifest carries a string version,
-  //   - neither side is the dev sentinel "0.0.0" (source-checkout
-  //     loads are intentionally skipped).
+  // Version-mismatch detection + auto-reload. The staleness rule itself
+  // lives in `isExtensionStale` — including the load-bearing case where
+  // the extension reports no version at all. See that function.
   const expectedVersion = loadExpectedExtensionVersion()
   const loadedVersion = health.extension_loaded_version
-  const versionCheckable =
-    typeof expectedVersion === "string"
-    && typeof loadedVersion === "string"
-    && expectedVersion !== DEV_VERSION_SENTINEL
-    && loadedVersion !== DEV_VERSION_SENTINEL
-  if (versionCheckable && expectedVersion !== loadedVersion) {
+  const loadedUnknown = typeof loadedVersion !== "string"
+  // The `typeof expectedVersion === "string"` guard is redundant with
+  // isExtensionStale's own check (it returns false for a non-string
+  // expected); it is here purely so the compiler can narrow the value
+  // for the payloads below.
+  if (typeof expectedVersion === "string" && isExtensionStale(expectedVersion, loadedVersion)) {
+    const loadedLabel = loadedUnknown ? UNKNOWN_LOADED_VERSION : (loadedVersion as string)
     const reloadKey = `${loadStableExtensionId()}::${expectedVersion}`
     if (attemptedReloads.has(reloadKey)) {
-      return buildInstallRequired("extension_outdated", autoInstalled, {
-        loaded: loadedVersion,
+      return buildInstallRequired("extension_outdated", NOTHING_AUTO_INSTALLED, {
+        loaded: loadedLabel,
         expected: expectedVersion,
       })
     }
     attemptedReloads.add(reloadKey)
     const reloadOk = await postReload(discovery.port, discovery.token)
     if (!reloadOk) {
-      return buildInstallRequired("extension_outdated", autoInstalled, {
-        loaded: loadedVersion,
+      return buildInstallRequired("extension_outdated", NOTHING_AUTO_INSTALLED, {
+        loaded: loadedLabel,
         expected: expectedVersion,
       })
     }
@@ -459,8 +526,8 @@ async function _ensureBridgeReadyImpl(): Promise<
       150,
     )
     if (!newDiscovery) {
-      return buildInstallRequired("extension_outdated", autoInstalled, {
-        loaded: loadedVersion,
+      return buildInstallRequired("extension_outdated", NOTHING_AUTO_INSTALLED, {
+        loaded: loadedLabel,
         expected: expectedVersion,
       })
     }

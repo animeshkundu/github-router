@@ -53,8 +53,12 @@ mock.module("~/lib/browser-mcp/native-host-installer", () => ({
   __NMH_HOST_ID_FOR_TESTS: "com.githubrouter.browser",
 }))
 
+// Mutable so a test can point the pre-flight at a REAL discovery file and
+// exercise the healthy path, not just the bridge-not-running one.
+let discoveryFile = nonExistentDiscovery
+
 mock.module("~/lib/browser-mcp/bridge-paths", () => ({
-  discoveryPath: () => nonExistentDiscovery,
+  discoveryPath: () => discoveryFile,
 }))
 
 // Stub the stable-dir provisioning that ensureBridgeReady() now awaits, so
@@ -111,5 +115,123 @@ describe("Bug #6 — ensureBridgeReady thundering herd", () => {
     // should run a new impl invocation (not return a stale cached value).
     await ensureBridgeReady()
     expect(installCallCount).toBe(afterFirst + 1)
+  })
+})
+
+// Regression test: version-mismatch detection used to fail OPEN.
+//
+// The check only ran when the loaded extension reported a version via the
+// `__hello__` handshake. An extension predating that handshake reports
+// nothing, so `typeof loaded === "string"` was false, the check was
+// treated as "not applicable", and it silently skipped — forever, for
+// exactly the most stale extensions it exists to catch.
+//
+// Observed consequence on a real machine: an extension months out of date
+// kept serving every browser tool call while silently ignoring arguments
+// added since (`quality` on browser_screenshot was the one that surfaced
+// it — quality:1 and quality:95 returned byte-identical output). Nothing
+// warned, because the mechanism designed to warn could not see it.
+//
+// This predicate had zero coverage, which is how the regression survived.
+describe("extension staleness — absence of a version is a staleness signal", () => {
+  test("no reported version means stale (the fail-open regression)", async () => {
+    const { isExtensionStale } = await import("../../src/lib/browser-mcp/install-check")
+    expect(isExtensionStale("0.3.250", undefined)).toBe(true)
+  })
+
+  test("differing versions are stale", async () => {
+    const { isExtensionStale } = await import("../../src/lib/browser-mcp/install-check")
+    expect(isExtensionStale("0.3.250", "0.3.249")).toBe(true)
+  })
+
+  test("matching versions are not stale", async () => {
+    const { isExtensionStale } = await import("../../src/lib/browser-mcp/install-check")
+    expect(isExtensionStale("0.3.250", "0.3.250")).toBe(false)
+  })
+
+  test("dev sentinel on either side is exempt — a source checkout is expected to diverge", async () => {
+    const { isExtensionStale } = await import("../../src/lib/browser-mcp/install-check")
+    // Loaded from a source checkout.
+    expect(isExtensionStale("0.3.250", "0.0.0")).toBe(false)
+    // Shipped manifest is itself the dev sentinel.
+    expect(isExtensionStale("0.0.0", "0.3.249")).toBe(false)
+    // Sentinel must win over the undefined-means-stale rule.
+    expect(isExtensionStale("0.0.0", undefined)).toBe(false)
+  })
+
+  test("an unreadable shipped manifest never reports staleness", async () => {
+    const { isExtensionStale } = await import("../../src/lib/browser-mcp/install-check")
+    expect(isExtensionStale(undefined, "0.3.249")).toBe(false)
+    expect(isExtensionStale(undefined, undefined)).toBe(false)
+  })
+})
+
+// Perf regression guard: the native-messaging-host install must NOT run when
+// the bridge is already healthy.
+//
+// It used to run unconditionally, before the health probe. `installNativeHostForAll`
+// spawns `reg.exe` per browser SYNCHRONOUSLY, so every uncached pre-flight blocked
+// the proxy's single event loop — measured at ~45ms per call, recurring every
+// READY_CACHE_TTL_MS while browsing, on a process that is concurrently streaming a
+// model response. A live bridge is itself proof the manifest is correct, since
+// Chrome used it to spawn that process, so on the healthy path the install repairs
+// nothing and only costs the stall.
+//
+// This is exactly the kind of property that regresses silently: moving the call
+// back above the probe would still pass every functional test.
+describe("NMH install does not run on the healthy path", () => {
+  test("a healthy bridge + connected extension installs nothing", async () => {
+    const { ensureBridgeReady, __resetEnsureBridgeReadyForTests } =
+      await import("../../src/lib/browser-mcp/install-check")
+
+    const liveDiscovery = path.join(tmpdir(), "gh-router-test-live-bridge.json")
+    writeFileSync(
+      liveDiscovery,
+      JSON.stringify({ pid: 1234, port: 65123, token: "t", startedAt: Date.now() }),
+      "utf8",
+    )
+    const realFetch = globalThis.fetch
+    // Cast through `unknown`: a bare arrow is not assignable to `typeof fetch`,
+    // which also carries `preconnect`. Whether that property is present varies
+    // by @types surface, so the direct cast typechecks on some runners and not
+    // others — going through `unknown` is stable everywhere.
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ ok: true, extension_connected: true, extension_loaded_version: "9.9.9" }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as unknown as typeof globalThis.fetch
+
+    discoveryFile = liveDiscovery
+    __resetEnsureBridgeReadyForTests()
+    installCallCount = 0
+    try {
+      const result = await ensureBridgeReady()
+      expect(result.install_required).toBe(false)
+      // The whole point: zero synchronous reg.exe spawns on the hot path.
+      expect(installCallCount).toBe(0)
+    } finally {
+      globalThis.fetch = realFetch
+      discoveryFile = nonExistentDiscovery
+      __resetEnsureBridgeReadyForTests()
+    }
+  })
+
+  test("a missing bridge still installs, so a failure payload reports it", async () => {
+    const { ensureBridgeReady, __resetEnsureBridgeReadyForTests } =
+      await import("../../src/lib/browser-mcp/install-check")
+
+    discoveryFile = nonExistentDiscovery
+    __resetEnsureBridgeReadyForTests()
+    installCallCount = 0
+
+    const result = await ensureBridgeReady()
+    expect(result.install_required).toBe(true)
+    // Deferring the install must not lose it: every branch that returns an
+    // install_required payload installs first, so auto_installed stays truthful.
+    expect(installCallCount).toBe(1)
+    if (result.install_required) {
+      expect(result.auto_installed).toContain("nmh_manifest_chrome")
+    }
+    __resetEnsureBridgeReadyForTests()
   })
 })

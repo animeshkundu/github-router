@@ -415,6 +415,31 @@ export async function browserPreflight(
   return { envelope: undefined }
 }
 
+const WINDOW_POLICIES = ["deny", "restore", "foreground"] as const
+type WindowPolicy = (typeof WINDOW_POLICIES)[number]
+const DEFAULT_WINDOW_POLICY: WindowPolicy = "foreground"
+
+/**
+ * Resolve the window-remediation policy for pixel capture.
+ *
+ * `captureVisibleTab` cannot produce a frame for a window the browser
+ * is not painting, so capturing against a minimized window requires
+ * making it paintable first. Whether the proxy is allowed to touch the
+ * user's window state is the user's call, not the model's — so it comes
+ * from the environment and is injected here, rather than being an
+ * argument the model chooses. Note this is a usability control, not a
+ * security boundary: the default is the permissive setting, so a model
+ * that simply omits the argument already gets the most intrusive
+ * behavior. The lever that actually restrains the proxy is setting this
+ * env var to `deny`.
+ */
+function resolveWindowPolicy(): WindowPolicy {
+  const raw = process.env.GH_ROUTER_BROWSER_WINDOW_POLICY?.trim().toLowerCase()
+  return (WINDOW_POLICIES as readonly string[]).includes(raw ?? "")
+    ? (raw as WindowPolicy)
+    : DEFAULT_WINDOW_POLICY
+}
+
 /**
  * Real dispatcher for any browser_* tool. Used by the entries in
  * src/lib/browser-mcp/index.ts. Returns the standard MCP tool-result
@@ -457,10 +482,17 @@ export async function dispatchBrowserTool(
       ? Math.min(opts.timeoutMs, maxMs)
       : defaultMs
   try {
+    // Injected here rather than at the tool handler so every caller is
+    // covered — including browser_act's internal visual fallback, which
+    // dispatches a screenshot without going through the tool surface.
+    const callArgs =
+      tool === "browser_screenshot"
+        ? { ...args, windowPolicy: resolveWindowPolicy() }
+        : args
     const resp = await bridgeCall(
       { port: ready.port, token: ready.token },
       tool,
-      args,
+      callArgs,
       callerTimeout,
       signal,
     )
