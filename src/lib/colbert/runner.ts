@@ -32,6 +32,7 @@ import { runManagedExeCapture } from "../exec"
 
 import {
   colbertProjectDir,
+  completedIndexOnDisk,
   freshnessVerdict,
   gitState,
   indexDirSignature,
@@ -271,6 +272,24 @@ export async function runSemanticSearch(opts: {
     case "corrupt":
       return repairCorruptIndex(workspace, fresh.meta)
     case "building": {
+      // A `building` verdict with no live owner and nothing on disk is an
+      // INTERRUPTED build, not a running one — and it used to be a silent,
+      // permanent dead end: this branch returned a notice and never rebuilt,
+      // nothing incremented a failure counter, and the degraded banner only
+      // fires on `status:"failed"`. A workspace could sit here forever.
+      //
+      // Schedule ONE debounced recovery rather than kicking unconditionally:
+      // `kickBackgroundInit` is single-flight per workspace, and a build that
+      // keeps failing lands back in `failed` (capped + backed off), not here,
+      // so this cannot become a rebuild storm.
+      if (!isInitInFlight(workspace) && !(await completedIndexOnDisk(workspace))) {
+        kickBackgroundInit(workspace)
+        return {
+          status: "building",
+          notice:
+            "semantic index build was interrupted; a rebuild was started — retry shortly (or use code_search now)",
+        }
+      }
       return {
         status: "building",
         notice:
@@ -376,7 +395,21 @@ async function repairCorruptIndex(
   }
 
   const projectDir = await colbertProjectDir(workspace)
-  if (!projectDir) return handleFailure(workspace, failedMeta, false)
+  if (!projectDir) {
+    // No project dir means there is nothing to REPAIR — this workspace has no
+    // index, which is `absent`, not corruption. Recording it as `corrupt`
+    // burned that class's 2-attempt cap (stricter than the normal 3) on a
+    // state that a rebuild fixes, and a stable-HEAD workspace then never
+    // reset. That is exactly what a forked or unmatched project key looks
+    // like, so this branch was reachable from the identity bug above.
+    kickBackgroundInit(workspace)
+    return {
+      status: "unavailable",
+      isError: true,
+      notice:
+        "no semantic index for this workspace yet — a background index was started; retry shortly or use code_search",
+    }
+  }
   if (!(await quarantineProjectDir(projectDir))) {
     await writeColbertMeta(failedMeta).catch(() => {})
     return {

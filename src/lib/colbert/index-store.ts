@@ -85,6 +85,13 @@ export interface ColbertMeta {
     ortSha?: string
     modelRev?: string
   }
+  /**
+   * Which router-bug epoch this entry was last reconciled against. A sidecar
+   * behind `WATCHDOG_EPOCH` has its watchdog-attributed failure streak
+   * cleared once — see `applyWatchdogEpoch`. Absent on entries written before
+   * this field existed, which is exactly the population that needs the reset.
+   */
+  watchdogEpoch?: number
   /** Owning `init` PID (boot-sweep reclassification). */
   buildPid?: number
   /** Per-proxy-run UUID (ownership disambiguation for the boot sweep). */
@@ -138,6 +145,47 @@ function metaPath(workspace: string): string {
 }
 
 /** Read the sidecar metadata for a workspace (null if none yet). */
+/**
+ * Bump this when a router-side bug could have written a failure verdict that
+ * was never the workspace's fault. A sidecar stamped with an older epoch gets
+ * its watchdog-attributed streak cleared ONCE, then is stamped forward.
+ *
+ * Epoch 1: the fail-safe-probe fix. Before it, `indexDirSignature` could not
+ * match colgrep's Windows extended-length `project_path`, so the inactivity
+ * watchdog killed healthy builds and recorded `stuck` — which is refused
+ * forever at a cap of 2. Those users are still capped after upgrading,
+ * because the existing reset triggers on git/model/engine inputs and none of
+ * those changed. This is the only thing that un-sticks them.
+ */
+const WATCHDOG_EPOCH = 1
+
+/** Failure classes attributable to the watchdog bug, and only those. A real
+ * `corrupt` or `launch` verdict is evidence about the workspace, not about
+ * us, so it is left alone. */
+const EPOCH_CLEARABLE = new Set(["stuck", "crashed"])
+
+/**
+ * Clear a stale failure streak that a router-side bug produced.
+ *
+ * Bounded by construction: it fires only while the stored epoch is behind,
+ * and the caller stamps the current epoch on the next write, so it is one
+ * reset per epoch bump rather than a reset loop.
+ */
+function applyWatchdogEpoch(meta: ColbertMeta): ColbertMeta {
+  if ((meta.watchdogEpoch ?? 0) >= WATCHDOG_EPOCH) return meta
+  const clearable =
+    meta.status === "failed"
+    && meta.failureClass !== undefined
+    && EPOCH_CLEARABLE.has(meta.failureClass)
+  if (!clearable) return { ...meta, watchdogEpoch: WATCHDOG_EPOCH }
+  return {
+    ...meta,
+    watchdogEpoch: WATCHDOG_EPOCH,
+    failedAttempts: 0,
+    failedAt: undefined,
+  }
+}
+
 export async function readColbertMeta(
   workspace: string,
 ): Promise<ColbertMeta | null> {
@@ -145,7 +193,7 @@ export async function readColbertMeta(
     const raw = await fs.readFile(metaPath(workspace), "utf8")
     const parsed = JSON.parse(raw) as ColbertMeta
     if (parsed && typeof parsed === "object" && typeof parsed.status === "string") {
-      return parsed
+      return applyWatchdogEpoch(parsed)
     }
     return null
   } catch {
@@ -183,9 +231,13 @@ export async function writeColbertMeta(meta: ColbertMeta): Promise<void> {
 async function writeColbertMetaUnchained(meta: ColbertMeta): Promise<void> {
   await fs.mkdir(PATHS.COLBERT_META_DIR, { recursive: true })
   const dest = metaPath(meta.workspace)
+  // Stamp the current epoch on every write. Without this the read-side reset
+  // would re-fire on each read (it would keep seeing a behind-epoch entry),
+  // turning a one-shot recovery into an unbounded loop.
+  const stamped: ColbertMeta = { ...meta, watchdogEpoch: WATCHDOG_EPOCH }
   const tmp = `${dest}.${process.pid}.${Math.random().toString(16).slice(2, 10)}.tmp`
   try {
-    await fs.writeFile(tmp, JSON.stringify(meta, null, 2))
+    await fs.writeFile(tmp, JSON.stringify(stamped, null, 2))
     await fs.rename(tmp, dest)
   } catch (err) {
     await fs.rm(tmp, { force: true }).catch(() => {})
