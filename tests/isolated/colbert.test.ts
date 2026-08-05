@@ -1564,3 +1564,181 @@ describe("sweepColbertStore (safe reclamation)", () => {
     expect(await store.readColbertMeta(ws)).not.toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------
+// Workspace identity — one key per workspace, on every OS
+// ---------------------------------------------------------------------
+//
+// These need no colgrep artifacts, so they run on every CI OS rather than
+// being skipped like the E2E colbert tests. That is the point: the bug they
+// pin is a path-semantics bug, and path semantics differ per platform.
+
+describe("canonicalWorkspace (cross-platform identity)", () => {
+  test("every spelling of one workspace collapses to one key", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const ws = path.join(TEST_HOME, "identity-ws")
+    await fs.mkdir(ws, { recursive: true })
+
+    const spellings =
+      process.platform === "win32"
+        ? [
+            ws,
+            ws.replaceAll("\\", "/"),
+            ws + path.sep,
+            ws.toLowerCase(),
+            // colgrep's stored form: the Windows extended-length prefix.
+            "\\\\?\\" + path.resolve(ws),
+          ]
+        : [ws, `${ws}/`, path.join(ws, "."), path.join(ws, "sub", "..")]
+
+    const keys = new Set(spellings.map((s) => store.canonicalWorkspace(s)))
+    expect(keys.size).toBe(1)
+    // The sidecar key must agree — it previously used a DIFFERENT
+    // normalization, which is how one workspace got two meta files.
+    expect(new Set(spellings.map((s) => store.metaHashForWorkspace(s))).size).toBe(1)
+  })
+
+  test("a symlinked workspace has the same identity as its real path", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const real = path.join(TEST_HOME, "identity-real")
+    const link = path.join(TEST_HOME, "identity-link")
+    await fs.mkdir(real, { recursive: true })
+    try {
+      await fs.symlink(real, link, "junction")
+    } catch {
+      return // no symlink privilege (Windows without Developer Mode)
+    }
+
+    // This is the macOS shape: /var -> /private/var and /tmp -> /private/tmp
+    // mean EVERY temp workspace there is reached through a symlink. The meta
+    // key used to skip realpath while the project-dir lookup applied it, so
+    // one physical index got two identities and one of them always reported
+    // `absent`.
+    expect(store.canonicalWorkspace(link)).toBe(store.canonicalWorkspace(real))
+    expect(store.metaHashForWorkspace(link)).toBe(store.metaHashForWorkspace(real))
+  })
+
+  test("case sensitivity follows the volume, not the platform", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const dir = path.join(TEST_HOME, "IdentityCase")
+    await fs.mkdir(dir, { recursive: true })
+
+    // Ask the filesystem itself rather than assuming from process.platform:
+    // APFS can be formatted case-SENSITIVE and Linux routinely mounts
+    // case-INSENSITIVE volumes, so the platform is wrong in both directions.
+    const flipped = path.join(TEST_HOME, "identitycase")
+    const volumeFolds = fsSync.existsSync(flipped)
+
+    const same = store.canonicalWorkspace(dir) === store.canonicalWorkspace(flipped)
+    expect(same).toBe(volumeFolds)
+  })
+
+  test("a not-yet-created workspace still gets a stable key", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    // realpath throws here; the fallback must still be deterministic, or a
+    // workspace would change identity the moment it is created.
+    const ghost = path.join(TEST_HOME, "identity-ghost")
+    expect(store.canonicalWorkspace(ghost)).toBe(store.canonicalWorkspace(ghost))
+    expect(store.metaHashForWorkspace(ghost)).toBe(store.metaHashForWorkspace(ghost))
+  })
+})
+
+// ---------------------------------------------------------------------
+// Watchdog epoch — recovery for entries the router's own bugs poisoned
+// ---------------------------------------------------------------------
+
+describe("watchdogEpoch recovery", () => {
+  test("a pre-fix failure marker stops short-circuiting the verdict", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const ws = path.join(TEST_HOME, "epoch-ws")
+    await fs.mkdir(ws, { recursive: true })
+
+    // Exactly the shapes the router's own bugs produced: `stuck` from the
+    // blind watchdog, `corrupt` from a null project-dir lookup. Written with
+    // NO epoch stamp, which is what every pre-upgrade sidecar looks like.
+    for (const cls of ["stuck", "corrupt", "crashed"] as const) {
+      const file = path.join(
+        await PATHS_COLBERT_META(),
+        `${store.metaHashForWorkspace(ws)}.json`,
+      )
+      await fs.mkdir(path.dirname(file), { recursive: true })
+      await fs.writeFile(
+        file,
+        JSON.stringify({
+          workspace: ws,
+          model: "LateOn-Code-edge",
+          modelRev: "rev",
+          status: "failed",
+          failureClass: cls,
+          failedAttempts: 3,
+        }),
+      )
+
+      const recovered = await store.readColbertMeta(ws)
+      // Clearing the streak alone is NOT enough: `freshnessVerdict` returns
+      // `failed` straight off `meta.status` before it looks at the disk, so a
+      // zeroed counter would leave the workspace just as dead. The status has
+      // to drop too, which makes the next verdict re-derive from the shards —
+      // a genuinely corrupt index is then re-detected and re-quarantined.
+      expect(recovered?.status).toBe("ready")
+      expect(recovered?.failedAttempts).toBe(0)
+      expect(recovered?.failureClass).toBeUndefined()
+    }
+  })
+
+  test("a genuine `launch` failure is NOT cleared, and the reset is one-shot", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const ws = path.join(TEST_HOME, "epoch-launch-ws")
+    await fs.mkdir(ws, { recursive: true })
+    const file = path.join(
+      await PATHS_COLBERT_META(),
+      `${store.metaHashForWorkspace(ws)}.json`,
+    )
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        workspace: ws,
+        model: "LateOn-Code-edge",
+        modelRev: "rev",
+        status: "failed",
+        failureClass: "launch", // a missing binary is about the environment
+        failedAttempts: 3,
+      }),
+    )
+    const kept = await store.readColbertMeta(ws)
+    expect(kept?.status).toBe("failed")
+    expect(kept?.failedAttempts).toBe(3)
+
+    // And the reset cannot loop: a write stamps the current epoch, so a
+    // recovered entry is not re-recovered on every subsequent read.
+    const ws2 = path.join(TEST_HOME, "epoch-once-ws")
+    await fs.mkdir(ws2, { recursive: true })
+    const f2 = path.join(
+      await PATHS_COLBERT_META(),
+      `${store.metaHashForWorkspace(ws2)}.json`,
+    )
+    await fs.writeFile(
+      f2,
+      JSON.stringify({
+        workspace: ws2,
+        model: "LateOn-Code-edge",
+        modelRev: "rev",
+        status: "failed",
+        failureClass: "stuck",
+        failedAttempts: 2,
+      }),
+    )
+    const first = await store.readColbertMeta(ws2)
+    expect(first?.status).toBe("ready")
+    await store.writeColbertMeta({ ...first!, status: "failed", failureClass: "stuck", failedAttempts: 2 })
+    const second = await store.readColbertMeta(ws2)
+    expect(second?.status).toBe("failed") // stamped → no second reset
+  })
+})
+
+async function PATHS_COLBERT_META(): Promise<string> {
+  // Resolved lazily so the node:os mock above is in effect.
+  const { PATHS } = await import("../../src/lib/paths")
+  return PATHS.COLBERT_META_DIR
+}

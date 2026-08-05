@@ -111,6 +111,59 @@ Applying it is best-effort — a failure means colgrep encodes at its default,
 which is greedy but not incorrect, so it never blocks a build. Override the
 share with `GH_ROUTER_COLBERT_PARALLEL` (a positive integer).
 
+**One workspace identity, on every OS.** Every surface that answers "is this
+the same workspace?" — the meta sidecar key, colgrep's project-dir lookup, the
+watchdog signature, the init/search locks, and the argument handed to colgrep —
+goes through `canonicalWorkspace()` and nothing else. They previously disagreed
+four different ways, and the disagreement is what made a healthy index
+invisible: colgrep stores `project_path` in Windows extended-length form
+(`\?\Q:\...`), the old comparison normalized that to `//?/q:/...`, and it never
+matched anything.
+
+The order is load-bearing: native realpath FIRST (it resolves symlinks — the
+macOS `/var`→`/private/var` and `/tmp`→`/private/tmp` shapes — expands 8.3 short
+names, and returns true on-disk casing), THEN strip any extended-length prefix
+from the result (`\?\UNC\server\share` → `\server\share`, not a relative
+path), then resolve, then case-fold **only when a runtime probe says the volume
+is case-insensitive**. The platform is the wrong signal in both directions:
+APFS can be formatted case-SENSITIVE (folding there merges two real workspaces)
+and Linux routinely mounts case-INSENSITIVE volumes such as exfat or NTFS (not
+folding there splits one). The probe runs once per filesystem root, memoized.
+
+The `--model` comparison stays EXACT string equality on purpose. colgrep hashes
+the raw `--model` argument into its project key, so a slash variant forks one
+workspace into two physical index dirs — verified: same workspace, two runs
+differing only in slash style, two dirs. Relaxing that compare would make the
+router adopt a different index than its own `init` writes to. Forks are
+prevented by canonicalizing the argument, not tolerated after the fact.
+
+**The progress probe is fail-safe.** `indexDirSignature` returns
+`observed(signature) | not-created | unknown`, and only an *observed* signature
+that stops changing counts as a stall. Absence of evidence is never evidence of
+a hang. It previously returned `string | null` and read the second consecutive
+null as no-progress; because the path comparison above could never match on
+Windows, the probe returned null on every tick, so the inactivity watchdog
+killed healthy actively-writing builds, classified them `stuck`, and `stuck` is
+refused forever at a cap of 2. The absolute `GH_ROUTER_COLBERT_INIT_TIMEOUT_MS`
+backstop remains the runaway guard.
+
+**Recovery for entries the bug already poisoned.** `ColbertMeta.watchdogEpoch`
+records which router-bug epoch an entry was reconciled against. A sidecar behind
+the current epoch has its watchdog-attributed streak (`stuck`/`crashed`, never
+`corrupt` or `launch`) cleared once, then is stamped forward on the next write
+so it cannot re-fire. Without this, users carrying a pre-fix `stuck` sidecar
+stay capped forever after upgrading, because the existing reset triggers on
+git/model/engine inputs and none of those change when the router is fixed.
+
+**Store sweep.** The boot sweep reclaims two kinds of garbage and nothing else:
+an orphan stub (no `project.json` AND an empty-or-absent `index/` AND older than
+an hour — all three required) and a metadata sidecar whose workspace no longer
+exists. A dir holding a `project.json` is real index data and is never deleted,
+however unreachable it looks; reclaiming those would mean acting on our own
+inference about which dir colgrep would choose, and this incident is the proof
+that such inference can be wrong. If it is ever added it must quarantine by
+rename first so the retention window stays reversible.
+
 **Failure-class-aware self-heal.** A failed build records a `failureClass`
 (`crashed` | `stuck` | `corrupt` | `error` | `launch`) and increments a `failedAttempts`
 counter (reset to 0 on success). On a later query the runner re-kicks a

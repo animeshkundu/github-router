@@ -156,13 +156,38 @@ function metaPath(workspace: string): string {
  * forever at a cap of 2. Those users are still capped after upgrading,
  * because the existing reset triggers on git/model/engine inputs and none of
  * those changed. This is the only thing that un-sticks them.
+ * Epoch 2: widened to include `corrupt`, once it became clear the identity
+ * bug MANUFACTURED corrupt verdicts (a null project-dir lookup was recorded
+ * as corruption).
+ *
+ * Epoch 3: clearing the streak was not enough — `freshnessVerdict` returns
+ * `failed` straight off `meta.status`, before it looks at the disk, so a
+ * zeroed counter still short-circuited every query. The reset now drops the
+ * status as well.
  */
-const WATCHDOG_EPOCH = 1
+const WATCHDOG_EPOCH = 3
 
-/** Failure classes attributable to the watchdog bug, and only those. A real
- * `corrupt` or `launch` verdict is evidence about the workspace, not about
- * us, so it is left alone. */
-const EPOCH_CLEARABLE = new Set(["stuck", "crashed"])
+/**
+ * Failure classes the router-side bugs could have manufactured.
+ *
+ * `stuck`/`crashed` came from the blind watchdog. `corrupt` belongs here too,
+ * which is not obvious: `repairCorruptIndex` recorded `failureClass:"corrupt"`
+ * whenever `colbertProjectDir` returned null, and a null lookup is exactly
+ * what the identity bug produced for a perfectly healthy index. So a stored
+ * `corrupt` is not reliable evidence about the workspace — it may be evidence
+ * about us. Observed on the machine where this was diagnosed: a `corrupt`
+ * marker sitting next to an index that validates as coherent with 15 shards
+ * and 1.24M embeddings.
+ *
+ * Clearing it is safe because it only resets the STREAK. The next query still
+ * re-derives the verdict from the shards on disk, so an index that really is
+ * corrupt is re-detected immediately and quarantined as before.
+ *
+ * `launch` stays excluded: a spawn failure (missing binary, unrunnable ORT)
+ * is genuinely about the environment, and the existing engine-sha reset
+ * already covers the case where an upgrade fixes it.
+ */
+const EPOCH_CLEARABLE = new Set(["stuck", "crashed", "corrupt"])
 
 /**
  * Clear a stale failure streak that a router-side bug produced.
@@ -178,9 +203,18 @@ function applyWatchdogEpoch(meta: ColbertMeta): ColbertMeta {
     && meta.failureClass !== undefined
     && EPOCH_CLEARABLE.has(meta.failureClass)
   if (!clearable) return { ...meta, watchdogEpoch: WATCHDOG_EPOCH }
+  // Clear the STATUS too, not just the streak. `freshnessVerdict` returns
+  // `failed` straight off `meta.status` before it ever looks at the disk, so
+  // zeroing the counter alone leaves the workspace exactly as dead — the
+  // marker still short-circuits every query. Dropping to `ready` makes the
+  // next verdict re-derive from the shards on disk: a genuinely corrupt or
+  // missing index is re-detected immediately and re-quarantined, and a
+  // healthy one finally becomes visible again.
   return {
     ...meta,
     watchdogEpoch: WATCHDOG_EPOCH,
+    status: "ready",
+    failureClass: undefined,
     failedAttempts: 0,
     failedAt: undefined,
   }
