@@ -19,6 +19,7 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
+import { UPSTREAM_INACTIVITY_TIMEOUT_MS } from "~/lib/port"
 import { logRequest } from "~/lib/request-log"
 import { createChatCompletions } from "~/services/copilot/create-chat-completions"
 import type { ChatCompletionResponse } from "~/services/copilot/create-chat-completions"
@@ -147,6 +148,7 @@ export async function handleNonClaudeResponses(
     const stream = anthropicSseStreamFromEvents(events, {
       routePath,
       onCancel: () => aborter.abort(),
+      inactivityTimeoutMs: UPSTREAM_INACTIVITY_TIMEOUT_MS,
     })
     return new Response(stream, { status: 200, headers: STREAM_HEADERS })
   }
@@ -259,6 +261,7 @@ export async function handleNonClaudeChat(
     const stream = anthropicSseStreamFromEvents(events, {
       routePath,
       onCancel: () => aborter.abort(),
+      inactivityTimeoutMs: UPSTREAM_INACTIVITY_TIMEOUT_MS,
     })
     return new Response(stream, { status: 200, headers: STREAM_HEADERS })
   }

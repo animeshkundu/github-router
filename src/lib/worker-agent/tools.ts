@@ -902,25 +902,39 @@ function fetchUrlTool(): AgentTool<typeof FETCH_URL_PARAMS> {
       let buf = ""
       let bytes = 0
       let truncated = false
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        if (!value) continue
-        const chunk = value as Uint8Array
-        const room = FETCH_URL_MAX_BYTES - bytes
-        if (chunk.byteLength <= room) {
-          buf += decoder.decode(chunk, { stream: true })
-          bytes += chunk.byteLength
-        } else {
-          if (room > 0) buf += decoder.decode(chunk.subarray(0, room), { stream: true })
-          truncated = true
-          try {
-            await reader.cancel("size_cap")
-          } catch {
-            /* fine */
+      // The read loop is wrapped so a mid-read throw (socket reset, abort via
+      // `signal`, decode failure) still releases the reader. Without this the
+      // error propagates straight out of the tool and the response body stays
+      // locked and undrained — a leaked connection for the life of the worker,
+      // which can run for hours.
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (!value) continue
+          const chunk = value as Uint8Array
+          const room = FETCH_URL_MAX_BYTES - bytes
+          if (chunk.byteLength <= room) {
+            buf += decoder.decode(chunk, { stream: true })
+            bytes += chunk.byteLength
+          } else {
+            if (room > 0) buf += decoder.decode(chunk.subarray(0, room), { stream: true })
+            truncated = true
+            try {
+              await reader.cancel("size_cap")
+            } catch {
+              /* fine */
+            }
+            break
           }
-          break
         }
+      } catch (err) {
+        try {
+          await reader.cancel("read_error")
+        } catch {
+          /* already released — fine */
+        }
+        throw err
       }
       buf += decoder.decode()
       if (truncated) buf += `\n[fetch_url: truncated at ${FETCH_URL_MAX_BYTES} bytes]`

@@ -419,12 +419,24 @@ export const serve = defineCommand({
       await enhancements.cleanup().catch(() => {})
       await removeOwnClaudeConfigMirror().catch(() => {})
     }
-    process.once("SIGINT", () => void shutdown().then(() => process.exit(0)))
-    process.once("SIGTERM", () => void shutdown().then(() => process.exit(0)))
+    // `shutdown()` must never strand the process. `.then(exit)` alone skips the
+    // exit on a REJECTION, so a teardown failure leaves a process that was
+    // explicitly trying to die running forever — the worst possible outcome on
+    // a shutdown path. `.finally` guarantees the exit either way, and the code
+    // is preserved because an operator's script reads it.
+    const exitAfterShutdown = (code: number) => {
+      void shutdown()
+        .catch((err: unknown) => {
+          consola.error("Shutdown failed; exiting anyway:", err)
+        })
+        .finally(() => process.exit(code))
+    }
+    process.once("SIGINT", () => exitAfterShutdown(0))
+    process.once("SIGTERM", () => exitAfterShutdown(0))
     cc.child.once("exit", (code) => {
       if (!shuttingDown) {
         consola.error(`CloudCLI exited unexpectedly (code ${code}).`)
-        void shutdown().then(() => process.exit(1))
+        exitAfterShutdown(1)
       }
     })
     cc.child.once("error", (err) => {
@@ -432,7 +444,7 @@ export const serve = defineCommand({
       // 'error' crashes the process and bypasses shutdown, orphaning the mirror.
       if (!shuttingDown) {
         consola.error(`CloudCLI failed to start: ${err.message}`)
-        void shutdown().then(() => process.exit(1))
+        exitAfterShutdown(1)
       }
     })
 

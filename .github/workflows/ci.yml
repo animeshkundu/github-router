@@ -5,6 +5,18 @@ on:
     types: [opened, synchronize, reopened]
   workflow_call:
 
+# Cancel superseded runs on the same PR. Without this, every push to an open PR
+# left the previous run burning all 15 jobs to completion, delaying the run that
+# actually matters and occupying runners for a result nobody would read.
+#
+# Keyed on the ref, and NOT applied to workflow_call: release.yml invokes this
+# workflow, and a shared group there could cancel a release's gate mid-flight.
+# `github.workflow` scopes the group so PR runs cannot collide with other
+# workflows on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   ci:
     strategy:
@@ -29,6 +41,11 @@ jobs:
         # is a platform- and version-specific internal detail.
         bun-version: ["1.3.14", "canary"]
     runs-on: ${{ matrix.os }}
+    # A hung job would otherwise sit on a runner for GitHub's 360-minute
+    # default. The full suite is minutes, not hours, so this is a runaway
+    # backstop set far above any legitimate run — it turns an infinite hang
+    # into a visible failure without ever truncating real work.
+    timeout-minutes: 45
     # Canary is pre-release and moves under us. It must give signal without
     # taking merges hostage to upstream churn we do not control — a red tick
     # for someone else's unreleased bug would erode the zero-red-CI rule that
@@ -83,6 +100,9 @@ jobs:
         # against `bun:test`, which does not run under node at all.
         node-version: ["22", "24", "26"]
     runs-on: ${{ matrix.os }}
+    # Runaway backstop; see the note on the `ci` job. The mock-API smoke here
+    # already hard-fails at 30s, so this only catches a wedge outside it.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 

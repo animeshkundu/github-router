@@ -6,7 +6,7 @@ import { awaitApproval } from "~/lib/approval"
 import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
-import { logRequest } from "~/lib/request-log"
+import { logRequest, requestLogVisible } from "~/lib/request-log"
 import { UPSTREAM_INACTIVITY_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
 import { buildOpenAIErrorEvent, isControllerClosedError, logStreamError, readIteratorWithTimeout } from "~/lib/stream-relay"
@@ -68,10 +68,27 @@ export async function handleCompletion(c: Context) {
 
   logEndpointMismatch(payload.model, "/chat/completions")
 
-  // Calculate token count
+  // Calculate token count — ONLY when a consumer will actually see it.
+  //
+  // `getTokenCount` BPE-tokenizes every message and recursively walks every
+  // tool schema. It is synchronous CPU work on Bun's single event-loop thread,
+  // it scales with prompt size (so it is worst exactly when the user is
+  // already waiting longest), and it sits BEFORE the upstream call — so it
+  // delays time-to-first-token AND head-of-line blocks every concurrent
+  // request for its duration.
+  //
+  // Its sole consumer is the `in:` field of the request log line below.
+  // Detaching the promise would not help: the tokenizer blocks before its
+  // first suspension point, so the loop stalls either way. The only real fix
+  // is to not do the work when nothing reads it — which is the common case
+  // under `github-router claude`, where `enableFileLogging` restricts output
+  // to fatal/error/warn and drops the `info` request line entirely.
+  //
+  // It does NOT feed billing, rate limiting, or context-window enforcement —
+  // verified: `inputTokens` reaches only `logRequest`.
   let inputTokens: number | undefined
   try {
-    if (selectedModel) {
+    if (selectedModel && requestLogVisible()) {
       const tokenCount = await getTokenCount(payload, selectedModel)
       inputTokens = tokenCount.input
     }

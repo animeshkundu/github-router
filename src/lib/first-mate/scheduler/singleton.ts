@@ -1,4 +1,4 @@
-import { link, readFile, stat, unlink, writeFile } from "node:fs/promises"
+import { link, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
 import type { Stats } from "node:fs"
 import { randomBytes } from "node:crypto"
 import path from "node:path"
@@ -239,7 +239,22 @@ export async function acquireDaemonSingleton(
     }
     if (existing.pid === selfPid) {
       // Re-entrant acquisition by the same process: refresh our record and own it.
-      await writeFile(pidPath, serialized, { mode: 0o600 })
+      //
+      // Atomic temp+rename, for the same reason `tryCreate` uses temp+link: a
+      // direct `writeFile` TRUNCATES the live pidfile first, so a concurrent
+      // starter reading in that window sees an empty file, classifies the
+      // incumbent as stale/corrupt, and deletes it — the exact both-acquire
+      // hazard the create path was written to avoid. `rename` publishes the
+      // fully-formed record in one step, so a reader sees the old record or the
+      // new one, never nothing. (`rename` replaces on both NTFS and POSIX,
+      // whereas `link` would fail EEXIST here.)
+      try {
+        await writeFile(tmpPath, serialized, { mode: 0o600 })
+        await rename(tmpPath, pidPath)
+      } catch (err) {
+        await unlink(tmpPath).catch(() => {})
+        throw err
+      }
       return acquired()
     }
     if (isAlive(existing.pid)) {

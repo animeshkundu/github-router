@@ -1,4 +1,5 @@
 import consola from "consola"
+import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 
 import { PATHS } from "~/lib/paths"
@@ -18,14 +19,49 @@ import { state } from "./state"
 
 const readGithubToken = () => fs.readFile(PATHS.GITHUB_TOKEN_PATH, "utf8")
 
+/**
+ * Replace a credential file atomically: temp + rename.
+ *
+ * A plain `fs.writeFile` truncates the destination before it writes, so a
+ * crash, a full disk, or a kill mid-write leaves a truncated token on disk and
+ * forces the user through a re-auth. `rename` within the same directory is
+ * atomic on both NTFS and POSIX, so a reader sees either the old token or the
+ * new one, never a partial.
+ *
+ * The temp name uses `randomBytes`, not `Math.random()`: this names a file that
+ * briefly holds a credential, and a predictable name in a shared directory
+ * invites a pre-creation race. Combined with `flag: "wx"` (fail if it exists)
+ * the write refuses to follow anything an attacker pre-placed, rather than
+ * silently writing the token through a planted symlink.
+ *
+ * Permissions: the temp file is created 0o600, and `rename` carries that mode
+ * with it on POSIX — so the destination's mode is preserved, not weakened.
+ * (On Windows `chmod` is a no-op anyway; see `chmodIfPossible` in `~/lib/paths`.
+ * Both token files live under `CLAUDE_RUNTIME_DIR`, which is chmod'd 0o700, so
+ * directory ACLs are what actually protect them there.)
+ */
+async function writeTokenFileAtomic(
+  filePath: string,
+  token: string,
+): Promise<void> {
+  const tmp = `${filePath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`
+  try {
+    await fs.writeFile(tmp, token, { mode: 0o600, flag: "wx" })
+    await fs.rename(tmp, filePath)
+  } catch (err) {
+    await fs.unlink(tmp).catch(() => {})
+    throw err
+  }
+}
+
 const writeGithubToken = (token: string) =>
-  fs.writeFile(PATHS.GITHUB_TOKEN_PATH, token)
+  writeTokenFileAtomic(PATHS.GITHUB_TOKEN_PATH, token)
 
 const readGithubAgentToken = () =>
   fs.readFile(PATHS.GITHUB_AGENT_TOKEN_PATH, "utf8")
 
 const writeGithubAgentToken = (token: string) =>
-  fs.writeFile(PATHS.GITHUB_AGENT_TOKEN_PATH, token, { mode: 0o600 })
+  writeTokenFileAtomic(PATHS.GITHUB_AGENT_TOKEN_PATH, token)
 
 export const setupCopilotToken = async () => {
   const { token, refresh_in } = await getCopilotToken()

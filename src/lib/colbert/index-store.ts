@@ -252,13 +252,20 @@ export async function writeColbertMeta(meta: ColbertMeta): Promise<void> {
   const next = prev.then(() => writeColbertMetaUnchained(meta))
   // Swallow chain-internal errors so one failed write doesn't poison the
   // chain for subsequent callers; each call still sees its own rejection.
-  _metaWriteChains.set(
-    key,
-    next.then(
-      () => undefined,
-      () => undefined,
-    ),
+  const settled = next.then(
+    () => undefined,
+    () => undefined,
   )
+  _metaWriteChains.set(key, settled)
+  // Drop the entry once this write settles AND nothing newer took its place.
+  // Without this the map grows one permanent entry per distinct workspace for
+  // the life of the process — unbounded under `serve`, which handles many.
+  // The identity check is what makes it safe: a newer chain for the same key
+  // must not be evicted, or two writers would stop being serialized.
+  // (Same pattern as `serializeWrite` in `~/lib/first-mate/durable-store`.)
+  void settled.then(() => {
+    if (_metaWriteChains.get(key) === settled) _metaWriteChains.delete(key)
+  })
   return next
 }
 

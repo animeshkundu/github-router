@@ -1,5 +1,6 @@
 import consola from "consola"
 
+import { isFileLoggingEnabled } from "~/lib/file-log-reporter"
 import type { Model } from "~/services/copilot/get-models"
 
 export interface RequestLogInfo {
@@ -12,6 +13,76 @@ export interface RequestLogInfo {
   status?: number
   streaming?: boolean
   errorBody?: string
+  /** Request body size in bytes, when known (see `recordBodySize`). */
+  bodyBytes?: number
+  /**
+   * Milliseconds to the FIRST upstream byte. Only meaningful for a stream:
+   * `elapsed` on a streaming request is dominated by generation time, so TTFB
+   * is the number that actually reflects proxy overhead.
+   */
+  ttfbMs?: number
+  /**
+   * Total stream duration, supplied by the caller when the stream ENDS.
+   *
+   * Without this, a streaming request reports `Date.now() - startTime` measured
+   * at response-object construction — i.e. time-to-headers, not stream
+   * duration. That made the single latency number an operator sees wrong for
+   * the dominant traffic shape (every Claude Code turn streams).
+   */
+  streamMs?: number
+}
+
+/**
+ * Rolling request-body size distribution.
+ *
+ * Motivation: the cost of the `/v1/messages` prologue (substring guards, JSON
+ * parses, re-serialization) scales with body size, but the proxy read
+ * `content-length` and never recorded it — so there was no way to tell whether
+ * a prologue optimization was worth anything. Benchmarks at 4.5 MiB mean
+ * nothing if the real p50 is 40 KiB.
+ *
+ * Bounded by construction: a fixed-size ring, not a growing array.
+ */
+const BODY_SIZE_RING = 512
+const bodySizes = new Float64Array(BODY_SIZE_RING)
+let bodySizeCount = 0
+let bodySizeIdx = 0
+
+/** Record one request body size (bytes). Cheap; safe to call per request. */
+export function recordBodySize(bytes: number): void {
+  if (!Number.isFinite(bytes) || bytes < 0) return
+  bodySizes[bodySizeIdx] = bytes
+  bodySizeIdx = (bodySizeIdx + 1) % BODY_SIZE_RING
+  if (bodySizeCount < BODY_SIZE_RING) bodySizeCount++
+}
+
+/** Percentile snapshot of observed body sizes, or undefined if none seen. */
+export function bodySizeStats():
+  | { count: number; p50: number; p95: number; p99: number; max: number }
+  | undefined {
+  if (bodySizeCount === 0) return undefined
+  const s = Array.from(bodySizes.slice(0, bodySizeCount)).sort((a, b) => a - b)
+  const at = (q: number) => s[Math.min(s.length - 1, Math.floor(s.length * q))]!
+  return {
+    count: bodySizeCount,
+    p50: at(0.5),
+    p95: at(0.95),
+    p99: at(0.99),
+    max: s[s.length - 1]!,
+  }
+}
+
+/** Test-only: reset the ring so cases don't bleed into each other. */
+export function __resetBodySizeStats(): void {
+  bodySizeCount = 0
+  bodySizeIdx = 0
+}
+
+/** Format a byte count compactly (1.2M / 15.3K / 900B). */
+function formatBytes(n: number): string {
+  if (n >= 1_048_576) return `${(n / 1_048_576).toFixed(1)}M`
+  if (n >= 1024) return `${(n / 1024).toFixed(1)}K`
+  return `${n}B`
 }
 
 /**
@@ -51,6 +122,27 @@ function formatTokenInfo(
 }
 
 /**
+ * Will a per-request summary line actually reach a consumer?
+ *
+ * Two ways it will not:
+ *   - consola's level is below `info` (3), so the line is filtered out; or
+ *   - file-logging mode is active, whose reporter accepts only
+ *     fatal/error/warn and drops `info` entirely.
+ *
+ * Callers use this to skip work that exists ONLY to populate that line — most
+ * notably the BPE tokenization on the `/chat/completions` path, which is
+ * synchronous, scales with prompt size, and sits ahead of the upstream call.
+ *
+ * Deliberately conservative: when in doubt this returns true, so the failure
+ * mode is "did unnecessary work", never "silently dropped a field the operator
+ * was looking at".
+ */
+export function requestLogVisible(): boolean {
+  if (isFileLoggingEnabled()) return false
+  return consola.level >= 3
+}
+
+/**
  * Print a single summary line for a completed request.
  *
  * Examples:
@@ -80,16 +172,31 @@ export function logRequest(
     parts.push(tokenInfo)
   }
 
+  // Body size, when the caller recorded one.
+  if (info.bodyBytes !== undefined) {
+    parts.push(`body:${formatBytes(info.bodyBytes)}`)
+  }
+
   // Status
   if (info.status !== undefined) {
     parts.push(String(info.status))
   }
 
-  // Duration + streaming flag
-  const elapsed = Date.now() - startTime
-  const duration =
-    elapsed >= 1000 ? `${(elapsed / 1000).toFixed(1)}s` : `${elapsed}ms`
-  parts.push(info.streaming ? `${duration} stream` : duration)
+  // Duration + streaming flag.
+  //
+  // For a stream, `Date.now() - startTime` at this call site is
+  // time-to-RESPONSE-OBJECT (headers), not stream duration — the body is still
+  // being produced when this runs. Prefer an explicit `streamMs` supplied at
+  // stream END, and surface TTFB separately, because on a stream the elapsed
+  // total is dominated by model generation while TTFB is the part the proxy
+  // actually influences.
+  const elapsed = info.streamMs ?? Date.now() - startTime
+  const fmt = (ms: number) =>
+    ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`
+  if (info.ttfbMs !== undefined) {
+    parts.push(`ttfb:${fmt(info.ttfbMs)}`)
+  }
+  parts.push(info.streaming ? `${fmt(elapsed)} stream` : fmt(elapsed))
 
   const line = parts.join("  ")
 
