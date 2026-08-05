@@ -494,19 +494,28 @@ describe("index-store: meta keying + freshness verdict", () => {
 // ---------------------------------------------------------------------
 
 describe("index progress probe (shared init/search stall signal)", () => {
-  test("indexDirSignature + makeIndexProgressProbe: progress vs frozen vs null grace", async () => {
+  test("indexDirSignature + makeIndexProgressProbe: only an OBSERVED frozen signature is a stall", async () => {
     const store = await import("../../src/lib/colbert/index-store")
     const { makeIndexProgressProbe } = await import("../../src/lib/colbert/runner")
     const { PATHS } = await import("../../src/lib/paths")
 
-    // Unknown workspace → no project dir → null signature → one window of
-    // grace (true), then no-progress (false).
+    // No project dir yet → `not-created`, which is the ABSENCE of evidence.
+    // It must never be read as a stall, no matter how many times it repeats.
+    // The previous contract gave one window of grace and then killed the
+    // build; on Windows the path comparison could never match colgrep's
+    // extended-length `project_path`, so this branch fired on every tick and
+    // killed healthy, actively-writing builds — which were then classified
+    // `stuck` and refused forever at a cap of 2. That was the outage.
     const unknown = path.join(TEST_HOME, "probe-unknown")
     fsSync.mkdirSync(unknown, { recursive: true })
-    expect(store.indexDirSignature(unknown)).toBeNull()
+    // Either non-observed state is correct here and both must be fail-safe:
+    // `unknown` when the store dir itself is not readable yet, `not-created`
+    // once it is but this workspace has no project dir.
+    expect(store.indexDirSignature(unknown).kind).not.toBe("observed")
     const pUnknown = makeIndexProgressProbe(unknown)
-    expect(pUnknown()).toBe(true) // null grace #1
-    expect(pUnknown()).toBe(false) // null streak → stuck
+    for (let i = 0; i < 5; i++) {
+      expect(pUnknown()).toBe(true) // never a stall without evidence
+    }
 
     // A real colgrep-style project dir whose project.json points at `ws`.
     const ws = path.join(TEST_HOME, "probe-ws")
@@ -520,17 +529,41 @@ describe("index progress probe (shared init/search stall signal)", () => {
     fsSync.writeFileSync(path.join(projDir, "index", "a"), "x".repeat(10))
 
     const sig1 = store.indexDirSignature(ws)
-    expect(sig1).not.toBeNull()
+    expect(sig1.kind).toBe("observed")
 
     const probe = makeIndexProgressProbe(ws)
-    expect(probe()).toBe(true) // baseline
-    // No change since baseline → frozen → no progress.
+    expect(probe()).toBe(true) // first concrete observation starts the clock
+    // Observed, and unchanged since baseline → genuinely frozen.
     expect(probe()).toBe(false)
     // Grow the index dir → progressing again.
     fsSync.writeFileSync(path.join(projDir, "index", "b"), "y".repeat(100))
     expect(probe()).toBe(true)
     // Frozen again.
     expect(probe()).toBe(false)
+  })
+
+  test("indexDirSignature matches colgrep's Windows extended-length project_path", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const { PATHS } = await import("../../src/lib/paths")
+
+    // colgrep writes `project_path` in extended-length form on Windows — 50
+    // of 53 dirs on the machine where this was diagnosed. The old
+    // canonicalization normalized that to `//?/q:/...` and compared it
+    // against `q:/...`, so it NEVER matched and the probe was blind.
+    const ws = path.join(TEST_HOME, "probe-extended")
+    fsSync.mkdirSync(ws, { recursive: true })
+    const stored =
+      process.platform === "win32" ? `\\\\?\\${path.resolve(ws)}` : ws
+
+    const projDir = path.join(PATHS.COLBERT_INDICES_DIR, "probe-extended-proj")
+    fsSync.mkdirSync(path.join(projDir, "index"), { recursive: true })
+    fsSync.writeFileSync(
+      path.join(projDir, "project.json"),
+      JSON.stringify({ project_path: stored }),
+    )
+    fsSync.writeFileSync(path.join(projDir, "index", "a"), "x".repeat(10))
+
+    expect(store.indexDirSignature(ws).kind).toBe("observed")
   })
 })
 

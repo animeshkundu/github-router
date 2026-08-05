@@ -22,7 +22,13 @@
  *     so a clean ready index is treated as fresh.
  */
 
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs"
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import process from "node:process"
@@ -109,12 +115,13 @@ const BUILD_SPAWN_GRACE_MS = 30_000
  * route). A stable sha256-prefix of the canonical path is sufficient.
  */
 export function metaHashForWorkspace(workspace: string): string {
-  // Use a require-free hash. Canonicalize separators + lowercase on
-  // Windows so the same workspace maps to one key regardless of casing.
-  const canonical =
-    process.platform === "win32"
-      ? path.resolve(workspace).toLowerCase().replace(/\\/g, "/")
-      : path.resolve(workspace)
+  // ONE identity function for every surface (see `canonicalWorkspace`). This
+  // previously resolved+folded WITHOUT realpath, so a workspace reached
+  // through a symlink got a different sidecar key than the project-dir
+  // lookup derived — two meta files, one physical index, and one of them
+  // permanently reporting `absent`. That is the macOS `/var`→`/private/var`
+  // shape, and it hits every temp workspace there.
+  const canonical = canonicalWorkspace(workspace)
   // Cheap FNV-1a 32-bit → hex; collision risk negligible for the small
   // number of workspaces a single user touches, and the file content
   // also carries the full `workspace` path for disambiguation.
@@ -301,20 +308,117 @@ export async function completedIndexOnDisk(workspace: string): Promise<boolean> 
   return validateIndexIntegrity(path.join(projectDir, "index")).verdict !== "not-built"
 }
 
-function canonicalForCompare(p: string): string {
-  return process.platform === "win32"
-    ? path.resolve(p).toLowerCase().replace(/\\/g, "/")
-    : path.resolve(p)
+/**
+ * Strip a Windows extended-length prefix.
+ *
+ * `\\?\Q:\dir` → `Q:\dir`, and `\\?\UNC\server\share` → `\\server\share`
+ * (naively slicing 4 there would yield the relative `UNC\server\share`).
+ * colgrep stores `project_path` in this form — 50 of 53 dirs on the machine
+ * where this was diagnosed — so every comparison against its `project.json`
+ * has to account for it.
+ */
+function stripExtendedPrefix(p: string): string {
+  if (p.startsWith("\\\\?\\UNC\\")) return `\\\\${p.slice(8)}`
+  if (p.startsWith("\\\\?\\")) return p.slice(4)
+  return p
 }
 
-/** Sync realpath-aware canonicalization (sibling of `realpathForCompare`,
- * for the on-a-timer inactivity probe which must be synchronous). */
-function canonicalRealpathSync(p: string): string {
+/**
+ * Is the volume holding `p` case-insensitive?
+ *
+ * Probed at runtime rather than inferred from `process.platform`, because
+ * the platform is wrong in both directions: APFS can be formatted
+ * case-SENSITIVE (folding there merges two genuinely distinct workspaces),
+ * and Linux routinely mounts case-INSENSITIVE volumes such as exfat/NTFS
+ * (not folding there splits one workspace into two identities).
+ *
+ * Cheap and memoized per filesystem root: stat the path back through a
+ * case-flipped spelling of its own basename. Falls back to the platform
+ * default only when the probe itself cannot run.
+ */
+const _caseInsensitiveByRoot = new Map<string, boolean>()
+
+function volumeIsCaseInsensitive(p: string): boolean {
+  const root = path.parse(path.resolve(p)).root || path.sep
+  const cached = _caseInsensitiveByRoot.get(root)
+  if (cached !== undefined) return cached
+
+  const platformDefault =
+    process.platform === "win32" || process.platform === "darwin"
+  let result = platformDefault
   try {
-    return canonicalForCompare(realpathSync(p))
+    // Walk up to the nearest existing ancestor so a not-yet-created
+    // workspace still probes its real volume.
+    let probe = path.resolve(p)
+    for (let i = 0; i < 64 && !existsSync(probe); i++) {
+      const parent = path.dirname(probe)
+      if (parent === probe) break
+      probe = parent
+    }
+    const base = path.basename(probe)
+    if (base && /[a-z]/i.test(base)) {
+      const flipped =
+        base === base.toLowerCase() ? base.toUpperCase() : base.toLowerCase()
+      const sibling = path.join(path.dirname(probe), flipped)
+      result = existsSync(sibling)
+    }
   } catch {
-    return canonicalForCompare(p)
+    // Keep the platform default.
   }
+  _caseInsensitiveByRoot.set(root, result)
+  return result
+}
+
+/** Test-only: clear the memoized per-volume case-sensitivity probe. */
+export function __resetCaseProbeForTests(): void {
+  _caseInsensitiveByRoot.clear()
+}
+
+/**
+ * THE canonical identity for a workspace. Every surface that answers "is this
+ * the same workspace?" — the meta sidecar key, the colgrep project-dir lookup,
+ * the watchdog signature, the init/search locks, and the argument handed to
+ * colgrep — must go through this and nothing else.
+ *
+ * They previously disagreed four different ways, and the disagreement is what
+ * made a healthy index invisible: colgrep writes `\\?\Q:\...`, the lookup
+ * normalized it to `//?/q:/...`, and nothing ever matched.
+ *
+ * Order matters: realpath FIRST (it resolves symlinks — the macOS
+ * `/var`→`/private/var` and `/tmp`→`/private/tmp` shapes — expands 8.3 short
+ * names, and returns the true on-disk casing), THEN strip any extended-length
+ * prefix from the *result*. `realpathSync.native` was measured to already
+ * return a clean `Q:\Software\github-router` for all input spellings, so the
+ * strip is belt-and-braces rather than load-bearing; it costs nothing and
+ * covers the fallback path where realpath could not run at all.
+ */
+export function canonicalWorkspace(p: string): string {
+  let out = stripExtendedPrefix(p)
+  try {
+    // `.native` (GetFinalPathNameByHandleW / realpath(3)) — NOT the JS
+    // variant, which leaves the `\\?\` prefix intact, does not expand 8.3
+    // names, and preserves caller casing instead of the on-disk truth.
+    out = stripExtendedPrefix(realpathSync.native(out))
+  } catch {
+    // Not on disk yet (a workspace about to be created). The stripped,
+    // resolved form is still a stable key.
+  }
+  out = path.resolve(out)
+  if (volumeIsCaseInsensitive(out)) out = out.toLowerCase()
+  // Separator-normalize so `Q:\x` and `Q:/x` are one key. Harmless on POSIX,
+  // where backslash is a legal filename character but `path.resolve` has
+  // already produced forward slashes.
+  return process.platform === "win32" ? out.replaceAll("\\", "/") : out
+}
+
+function canonicalForCompare(p: string): string {
+  return canonicalWorkspace(p)
+}
+
+/** Sync realpath-aware canonicalization. Retained as a named alias so call
+ * sites read intentionally; `canonicalWorkspace` already realpaths. */
+function canonicalRealpathSync(p: string): string {
+  return canonicalWorkspace(p)
 }
 
 /** Recursive (bytes, fileCount) of a directory; sync + best-effort. A
@@ -356,13 +460,29 @@ function dirSizeSync(dir: string): [number, number] {
  * "hung". Successive signatures drive the watchdog: change ⇒ re-arm, frozen
  * ⇒ kill. Sync because it's called from a `setTimeout` (not awaited).
  */
-export function indexDirSignature(workspace: string): string | null {
+/**
+ * Result of one progress probe.
+ *
+ * Three states, not `string | null`. Collapsing them was the fault boundary:
+ * `null` meant "no index yet" AND "could not match the dir" AND "readdir
+ * failed", and the watchdog read all of them as *no progress* — so a path
+ * mismatch (which was permanent on Windows) killed healthy, actively-writing
+ * builds and capped the workspace forever. UNKNOWN must never be evidence of
+ * a stall; only an OBSERVED signature that stops changing is.
+ */
+export type IndexProgress =
+  | { kind: "observed"; signature: string }
+  | { kind: "not-created" }
+  | { kind: "unknown" }
+
+export function indexDirSignature(workspace: string): IndexProgress {
   const indicesDir = PATHS.COLBERT_INDICES_DIR
   let names: Array<string>
   try {
     names = readdirSync(indicesDir)
   } catch {
-    return null
+    // The store itself is unreadable — we cannot tell, so say so.
+    return { kind: "unknown" }
   }
   const want = canonicalRealpathSync(workspace)
   for (const name of names) {
@@ -385,9 +505,12 @@ export function indexDirSignature(workspace: string): string | null {
     const projPath = proj.path ?? proj.project_path
     if (!projPath || canonicalRealpathSync(projPath) !== want) continue
     const [bytes, count] = dirSizeSync(dir)
-    return `${bytes}:${count}`
+    return { kind: "observed", signature: `${bytes}:${count}` }
   }
-  return null
+  // Scanned the store cleanly and this workspace has no project dir: colgrep
+  // has not created one yet. Distinct from `unknown` — a build that has not
+  // started writing is normal, and must not be mistaken for a hang.
+  return { kind: "not-created" }
 }
 
 /**
@@ -398,12 +521,10 @@ export function indexDirSignature(workspace: string): string | null {
  * when realpath fails (path doesn't exist yet).
  */
 async function realpathForCompare(p: string): Promise<string> {
-  try {
-    const real = await fs.realpath(p)
-    return canonicalForCompare(real)
-  } catch {
-    return canonicalForCompare(p)
-  }
+  // `canonicalWorkspace` is sync but cheap (one realpath + string work), and
+  // sharing ONE implementation is the whole point: the async and sync sides
+  // disagreeing is what made a healthy index invisible.
+  return canonicalWorkspace(p)
 }
 
 /**

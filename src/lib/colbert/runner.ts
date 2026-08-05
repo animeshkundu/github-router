@@ -112,19 +112,30 @@ function envIntMs(name: string, fallback: number): number {
  * search so neither colgrep child is killed mid-write (which orphans docs).
  */
 export function makeIndexProgressProbe(workspace: string): () => boolean {
-  let lastSig: string | null | undefined
-  let nullStreak = 0
+  let lastSig: string | undefined
   return () => {
-    const sig = indexDirSignature(workspace)
-    if (sig === null) {
-      nullStreak += 1
-      return nullStreak <= 1
-    }
-    nullStreak = 0
+    const p = indexDirSignature(workspace)
+    // FAIL-SAFE. Only a signature we actually OBSERVED, twice, unchanged, is
+    // evidence of a hang. `unknown` (store unreadable, probe errored) and
+    // `not-created` (colgrep has not written a dir yet) are the absence of
+    // evidence, and the absence of evidence must never kill a build.
+    //
+    // The previous version returned `string | null` and treated the second
+    // consecutive `null` as no-progress. On Windows the path comparison could
+    // never match colgrep's extended-length `project_path`, so the probe
+    // returned null on EVERY tick — the watchdog killed healthy,
+    // actively-writing builds, classified them `stuck`, and `stuck` is
+    // refused forever at a cap of 2. That is the whole outage, and it was
+    // reachable from any cause of null, not just the path bug.
+    //
+    // The absolute `INIT_TIMEOUT_MS` backstop (6h) remains the runaway guard,
+    // so a genuinely wedged build that never writes anything still dies.
+    if (p.kind !== "observed") return true
     const prev = lastSig
-    lastSig = sig
-    if (prev === undefined) return true // first measurement → baseline
-    return sig !== prev // progressing iff the signature changed
+    lastSig = p.signature
+    // First concrete observation starts the clock — nothing to compare yet.
+    if (prev === undefined) return true
+    return p.signature !== prev // progressing iff the signature changed
   }
 }
 
