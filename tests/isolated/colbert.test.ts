@@ -1456,3 +1456,111 @@ describe("colbertDegradedWarning (launch banner)", () => {
     )
   })
 })
+
+// ---------------------------------------------------------------------
+// Store sweep — reclaims disk WITHOUT destroying real index data
+// ---------------------------------------------------------------------
+//
+// These are the tests that make shipping deletion defensible. The scanner
+// that decides "unreachable" is the same one that was wrong in this
+// incident: under the old path comparison a perfectly healthy index looked
+// unreachable, and a sweep written against that scanner would have deleted
+// it. Every rule below therefore leans on evidence that does not depend on
+// our path matching at all.
+
+describe("sweepColbertStore (safe reclamation)", () => {
+  test("reaps only provably-empty orphans; never touches real data", async () => {
+    const { sweepColbertStore } = await import("../../src/lib/colbert/lifecycle")
+    const { PATHS } = await import("../../src/lib/paths")
+    const indices = PATHS.COLBERT_INDICES_DIR
+    await fs.mkdir(indices, { recursive: true })
+
+    const aged = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    const mk = async (
+      name: string,
+      opts: {
+        projectJson?: boolean
+        shards?: boolean
+        lock?: boolean
+        fresh?: boolean
+      },
+    ): Promise<string> => {
+      const d = path.join(indices, name)
+      await fs.mkdir(path.join(d, "index"), { recursive: true })
+      if (opts.projectJson) {
+        await fs.writeFile(path.join(d, "project.json"), JSON.stringify({ path: d }))
+      }
+      if (opts.shards) await fs.writeFile(path.join(d, "index", "0.codes.npy"), "x")
+      if (opts.lock) await fs.writeFile(path.join(d, ".lock"), "")
+      if (!opts.fresh) await fs.utimes(d, aged, aged)
+      return d
+    }
+
+    const orphan = await mk("sweep-orphan", {})
+    const withProject = await mk("sweep-real", { projectJson: true })
+    const withShards = await mk("sweep-shards", { shards: true })
+    const locked = await mk("sweep-locked", { lock: true })
+    const freshOrphan = await mk("sweep-fresh", { fresh: true })
+    const quarantine = await mk("sweep.corrupt-abc", {})
+
+    await sweepColbertStore()
+
+    // Reaped: nothing of value could have been in it.
+    expect(fsSync.existsSync(orphan)).toBe(false)
+    // Kept: each for a DIFFERENT reason, so a regression in any one rule shows.
+    expect(fsSync.existsSync(withProject)).toBe(true) // real index data
+    expect(fsSync.existsSync(withShards)).toBe(true) // work in progress
+    expect(fsSync.existsSync(locked)).toBe(true) // another process owns it
+    expect(fsSync.existsSync(freshOrphan)).toBe(true) // inside the grace window
+    expect(fsSync.existsSync(quarantine)).toBe(true) // corrupt-repair owns it
+  })
+
+  test("reaps metadata for deleted workspaces, keeps it for live ones", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const { sweepColbertStore } = await import("../../src/lib/colbert/lifecycle")
+
+    const live = path.join(TEST_HOME, "sweep-live-ws")
+    await fs.mkdir(live, { recursive: true })
+    const gone = path.join(TEST_HOME, "sweep-gone-ws")
+    await fs.mkdir(gone, { recursive: true })
+
+    const base = { model: "LateOn-Code-edge", modelRev: "rev", status: "ready" as const }
+    await store.writeColbertMeta({ workspace: live, ...base })
+    await store.writeColbertMeta({ workspace: gone, ...base })
+    // The workspace disappears; its sidecar is now pure bookkeeping garbage.
+    await fs.rm(gone, { recursive: true, force: true })
+    // Age both sidecars past the settle window. A freshly-written entry is
+    // deliberately never reaped: the reclassification pass rewrites
+    // building+dead-PID to `failed` so the runner can self-heal, and reaping
+    // that in the same sweep would erase the state before anything acts on it.
+    const { PATHS } = await import("../../src/lib/paths")
+    const { metaHashForWorkspace } = store
+    const agedAt = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    for (const w of [live, gone]) {
+      const f = path.join(PATHS.COLBERT_META_DIR, `${metaHashForWorkspace(w)}.json`)
+      await fs.utimes(f, agedAt, agedAt)
+    }
+
+    await sweepColbertStore()
+
+    expect(await store.readColbertMeta(live)).not.toBeNull()
+    expect(await store.readColbertMeta(gone)).toBeNull()
+  })
+
+  test("never reaps a building workspace's metadata", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const { sweepColbertStore } = await import("../../src/lib/colbert/lifecycle")
+
+    // A build in flight whose workspace is momentarily unreadable must not
+    // have its bookkeeping deleted out from under it.
+    const ws = path.join(TEST_HOME, "sweep-building-ws")
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "building",
+    })
+    await sweepColbertStore()
+    expect(await store.readColbertMeta(ws)).not.toBeNull()
+  })
+})
