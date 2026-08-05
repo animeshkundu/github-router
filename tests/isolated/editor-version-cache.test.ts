@@ -1,18 +1,70 @@
-import { expect, test } from "bun:test"
+import { expect, mock, test } from "bun:test"
 import fs from "node:fs"
-
-import {
-  editorVersionCachePath,
-  resolveEditorVersion,
-} from "~/lib/editor-version-cache"
+import fsp from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 
 /**
  * The editor-version cache exists so the VS Code / Copilot Chat impersonation
  * headers stay real WITHOUT paying a third-party network fetch on every
- * process spawn. These tests pin the two invariants that keep it honest.
+ * process spawn. These tests pin the invariants that keep it honest.
+ *
+ * HOME is redirected to a temp dir BEFORE importing the module under test.
+ * These tests write and delete the cache file at a path derived from
+ * `homedir()`, and without this they operated on the USER'S REAL
+ * `~/.local/share/github-router/last-editor-versions`. That is not
+ * hypothetical: a smoke test caught the fixture value "1.2.3" persisted in the
+ * live cache, which the proxy then sent upstream as `editor-version:
+ * vscode/1.2.3` for the full 12h TTL — corrupting the VS Code impersonation
+ * this cache exists to keep honest.
+ *
+ * `mock.module` is process-global and `mock.restore()` cannot undo it, so this
+ * file lives in tests/isolated/ to get its own process (same reasoning as
+ * tests/isolated/colbert.test.ts, which was moved here after the same class of
+ * accident clobbered the real colgrep binary).
  */
 
+const REAL_TMPDIR = os.tmpdir()
+const TEST_HOME = await fsp.mkdtemp(
+  path.join(REAL_TMPDIR, "gh-router-editor-version-test-"),
+)
+mock.module("node:os", () => ({
+  default: { homedir: () => TEST_HOME, tmpdir: () => REAL_TMPDIR },
+  homedir: () => TEST_HOME,
+  tmpdir: () => REAL_TMPDIR,
+}))
+
+const {
+  editorVersionCachePath,
+  resolveEditorVersion,
+  __allowEditorVersionWritesForTests,
+} = await import("~/lib/editor-version-cache")
+
+// Persistence is disabled under a test runner so a stubbed fetcher can never
+// write a fixture into the developer's real cache (the proxy would then send
+// it upstream as `editor-version` for the full TTL). This file is the one
+// place that opts back in: homedir() is redirected above, so every write below
+// lands in TEST_HOME.
+__allowEditorVersionWritesForTests(true)
+
+/**
+ * Refuse to touch anything outside the mocked home. If the `node:os` mock is
+ * ever not active, these tests must FAIL rather than quietly write to the real
+ * user state again.
+ */
+function assertSandboxed(): void {
+  const target = editorVersionCachePath()
+  const rel = path.relative(path.resolve(TEST_HOME), path.resolve(target))
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(
+      `refusing to touch ${target} — the node:os mock is not active, so this `
+        + `would operate on real user state (TEST_HOME=${TEST_HOME})`,
+    )
+  }
+}
+
 function clearCache(): void {
+  assertSandboxed()
   fs.rmSync(editorVersionCachePath(), { force: true })
 }
 

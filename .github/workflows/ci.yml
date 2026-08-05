@@ -10,7 +10,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        # macOS earns its slot on path semantics, not general coverage. The
+        # colbert workspace-identity logic must agree across three different
+        # filesystem behaviours — Windows extended-length `\\?\` paths,
+        # macOS's `/var`->`/private/var` and `/tmp`->`/private/tmp` symlinks,
+        # and Linux case-sensitivity. A semantic-search outage traced to
+        # exactly that mismatch was invisible to a two-OS matrix, so the
+        # identity tests need no colgrep artifacts and run everywhere.
         # Two bun lines, because a single pinned version cannot see the class
         # of bug that actually reaches users. `1.3.14` is current stable and is
         # the GATE. `canary` is the Rust rewrite (1.4.x) that users who ran
@@ -62,7 +69,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         # Every supported node line, because node — not our code — is what
         # changed underneath us: `--help` aborted on the Windows + node 24 lane
         # while the identical build passed on node 22, and that lane only

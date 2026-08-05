@@ -26,6 +26,8 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import process from "node:process"
 
+import consola from "consola"
+
 import { killManagedTree } from "../exec"
 import { PATHS } from "../paths"
 
@@ -220,5 +222,133 @@ export async function sweepStaleColbertMetaAtBoot(): Promise<void> {
     } catch {
       await fs.rm(tmp, { force: true }).catch(() => {})
     }
+  }
+  await sweepColbertStore()
+}
+
+/** An orphan stub younger than this may be a build that just started. */
+const ORPHAN_GRACE_MS = 60 * 60 * 1000
+
+/**
+ * Reclaim disk in the colgrep store, ordered so it cannot destroy good data.
+ *
+ * This runs AFTER the identity fix in this same release, which matters: the
+ * scanner that decides "unreachable" is the one that was wrong. Under the old
+ * comparison a perfectly healthy index looked unreachable, and a sweep written
+ * against that scanner would have deleted it. Everything below therefore
+ * leans on evidence that does not depend on our path matching at all.
+ *
+ * Three rules, in increasing order of caution:
+ *
+ *   1. ORPHAN STUB — no `project.json` AND an empty-or-absent `index/` AND
+ *      older than the grace window. All three required. A dir with a
+ *      `project.json` is real data and is never touched by this rule; a dir
+ *      with shards is never touched even without one. Deleted outright,
+ *      because there is provably nothing in it.
+ *
+ *   2. DEAD META — a sidecar whose `workspace` no longer exists on disk. Pure
+ *      bookkeeping, never index data. (48 such entries had accumulated on the
+ *      machine where this was diagnosed; nothing ever reaped them.)
+ *
+ *   3. QUARANTINE, NEVER DIRECT DELETE, for anything holding real bytes. A
+ *      dir with a `project.json` is left alone entirely, however unreachable
+ *      it looks. Reclaiming those would mean deleting real index data on our
+ *      own inference about what colgrep would use — and this incident is the
+ *      proof that such inference can be wrong. If it is ever added it must
+ *      rename first and delete only after a retention window, so the whole
+ *      period stays reversible.
+ *
+ * Skips any dir with a live lock owner or an in-flight init, and logs a
+ * one-line count so the accumulation is observable rather than silent.
+ */
+export async function sweepColbertStore(): Promise<void> {
+  const indicesDir = PATHS.COLBERT_INDICES_DIR
+  let names: Array<string>
+  try {
+    names = await fs.readdir(indicesDir)
+  } catch {
+    return
+  }
+
+  const now = Date.now()
+  let orphans = 0
+  let deadMeta = 0
+
+  for (const name of names) {
+    if (name === ".gh-router-meta") continue
+    // Quarantined husks are owned by the corrupt-repair path, which deletes
+    // them out of band. Never race it.
+    if (name.includes(".corrupt-")) continue
+    const dir = path.join(indicesDir, name)
+    try {
+      const st = await fs.stat(dir)
+      if (!st.isDirectory()) continue
+      // A live build claims its dir with a `.lock`; another proxy may own it.
+      if (await exists(path.join(dir, ".lock"))) continue
+      // Real index data — leave it. Reclaiming this needs quarantine-first
+      // semantics, not a boot-time `rm`.
+      if (await exists(path.join(dir, "project.json"))) continue
+      // Anything with shards is real work in progress, even mid-build.
+      let indexEntries: Array<string> = []
+      try {
+        indexEntries = await fs.readdir(path.join(dir, "index"))
+      } catch {
+        /* absent index/ is the orphan shape */
+      }
+      if (indexEntries.length > 0) continue
+      if (now - st.mtimeMs < ORPHAN_GRACE_MS) continue
+      await fs.rm(dir, { recursive: true, force: true })
+      orphans++
+    } catch {
+      // Vanished mid-sweep or unreadable — skip.
+    }
+  }
+
+  // Dead sidecars: the workspace they describe is gone.
+  try {
+    const metaDir = PATHS.COLBERT_META_DIR
+    for (const f of await fs.readdir(metaDir)) {
+      if (!f.endsWith(".json")) continue
+      const file = path.join(metaDir, f)
+      try {
+        const meta = JSON.parse(await fs.readFile(file, "utf8")) as {
+          workspace?: string
+          status?: string
+        }
+        const ws = meta.workspace
+        if (typeof ws !== "string" || ws.length === 0) continue
+        // Never reap a live build's bookkeeping.
+        if (meta.status === "building") continue
+        // Nor an entry this very sweep just reclassified. The reclassification
+        // pass above rewrites `building` + dead-PID to `failed` so the runner
+        // can self-heal; deleting it in the same pass would erase that state
+        // before anything could act on it. Only reap entries that have been
+        // settled for a while.
+        const stMeta = await fs.stat(file).catch(() => null)
+        if (stMeta && now - stMeta.mtimeMs < ORPHAN_GRACE_MS) continue
+        if (await exists(ws)) continue
+        await fs.rm(file, { force: true })
+        deadMeta++
+      } catch {
+        // Corrupt/unreadable — leave it; index-store re-derives on next access.
+      }
+    }
+  } catch {
+    // No meta dir yet.
+  }
+
+  if (orphans > 0 || deadMeta > 0) {
+    consola.debug(
+      `colbert: store sweep reclaimed ${orphans} orphan index dir(s), ${deadMeta} dead metadata entr(ies)`,
+    )
+  }
+}
+
+async function exists(p: string): Promise<boolean> {
+  try {
+    await fs.stat(p)
+    return true
+  } catch {
+    return false
   }
 }

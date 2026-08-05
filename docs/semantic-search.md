@@ -111,6 +111,59 @@ Applying it is best-effort — a failure means colgrep encodes at its default,
 which is greedy but not incorrect, so it never blocks a build. Override the
 share with `GH_ROUTER_COLBERT_PARALLEL` (a positive integer).
 
+**One workspace identity, on every OS.** Every surface that answers "is this
+the same workspace?" — the meta sidecar key, colgrep's project-dir lookup, the
+watchdog signature, the init/search locks, and the argument handed to colgrep —
+goes through `canonicalWorkspace()` and nothing else. They previously disagreed
+four different ways, and the disagreement is what made a healthy index
+invisible: colgrep stores `project_path` in Windows extended-length form
+(`\?\Q:\...`), the old comparison normalized that to `//?/q:/...`, and it never
+matched anything.
+
+The order is load-bearing: native realpath FIRST (it resolves symlinks — the
+macOS `/var`→`/private/var` and `/tmp`→`/private/tmp` shapes — expands 8.3 short
+names, and returns true on-disk casing), THEN strip any extended-length prefix
+from the result (`\?\UNC\server\share` → `\server\share`, not a relative
+path), then resolve, then case-fold **only when a runtime probe says the volume
+is case-insensitive**. The platform is the wrong signal in both directions:
+APFS can be formatted case-SENSITIVE (folding there merges two real workspaces)
+and Linux routinely mounts case-INSENSITIVE volumes such as exfat or NTFS (not
+folding there splits one). The probe runs once per filesystem root, memoized.
+
+The `--model` comparison stays EXACT string equality on purpose. colgrep hashes
+the raw `--model` argument into its project key, so a slash variant forks one
+workspace into two physical index dirs — verified: same workspace, two runs
+differing only in slash style, two dirs. Relaxing that compare would make the
+router adopt a different index than its own `init` writes to. Forks are
+prevented by canonicalizing the argument, not tolerated after the fact.
+
+**The progress probe is fail-safe.** `indexDirSignature` returns
+`observed(signature) | not-created | unknown`, and only an *observed* signature
+that stops changing counts as a stall. Absence of evidence is never evidence of
+a hang. It previously returned `string | null` and read the second consecutive
+null as no-progress; because the path comparison above could never match on
+Windows, the probe returned null on every tick, so the inactivity watchdog
+killed healthy actively-writing builds, classified them `stuck`, and `stuck` is
+refused forever at a cap of 2. The absolute `GH_ROUTER_COLBERT_INIT_TIMEOUT_MS`
+backstop remains the runaway guard.
+
+**Recovery for entries the bug already poisoned.** `ColbertMeta.watchdogEpoch`
+records which router-bug epoch an entry was reconciled against. A sidecar behind
+the current epoch has its watchdog-attributed streak (`stuck`/`crashed`, never
+`corrupt` or `launch`) cleared once, then is stamped forward on the next write
+so it cannot re-fire. Without this, users carrying a pre-fix `stuck` sidecar
+stay capped forever after upgrading, because the existing reset triggers on
+git/model/engine inputs and none of those change when the router is fixed.
+
+**Store sweep.** The boot sweep reclaims two kinds of garbage and nothing else:
+an orphan stub (no `project.json` AND an empty-or-absent `index/` AND older than
+an hour — all three required) and a metadata sidecar whose workspace no longer
+exists. A dir holding a `project.json` is real index data and is never deleted,
+however unreachable it looks; reclaiming those would mean acting on our own
+inference about which dir colgrep would choose, and this incident is the proof
+that such inference can be wrong. If it is ever added it must quarantine by
+rename first so the retention window stays reversible.
+
 **Failure-class-aware self-heal.** A failed build records a `failureClass`
 (`crashed` | `stuck` | `corrupt` | `error` | `launch`) and increments a `failedAttempts`
 counter (reset to 0 on success). On a later query the runner re-kicks a
@@ -121,7 +174,65 @@ instead of looping. The startup auto-kick (`provisionAndIndexColbert`) skips a
 workspace that is already capped or `stuck`; an under-cap `corrupt` workspace
 gets its bounded clean retry after restart, but a capped one stays
 operator-actionable so a restart loop cannot re-burn a known-bad build.
+
+**The cap resets when the inputs change.** `failedAttempts` is evidence about a
+SPECIFIC set of inputs, not a permanent verdict on the workspace. A counter
+that only ever counts up makes `failed` terminal for the life of the process —
+which is exactly what happened in practice: a workspace sat at
+`failedAttempts: 3` with a complete, healthy, queryable index on disk, and the
+router refused to look at it again. So each failure also stamps `failedAt`
+(the git HEAD, the working tree's dirty flag, the colgrep/ORT shas, and the
+model revision in effect at the time), and `handleFailure` clears the streak
+when any of those differ from the current state — a commit, a `checkout`, an
+edit to a dirty tree, a colgrep or ONNX-runtime upgrade, or a model re-pin.
+
+`failedAt` is deliberately separate from `lastIndexedHead`, which on the ready
+path means "what we successfully indexed" and feeds the git-freshness
+comparison; reusing it would entangle failure-reset with freshness. A legacy
+entry written before `failedAt` existed has no baseline and therefore does NOT
+reset — a missing baseline must not read as "everything changed".
+
+Recovery always goes through a REAL rebuild under the unchanged cap and the
+unchanged 5-min backoff, so completeness is established by colgrep exiting
+successfully, never inferred from what happens to be on disk. A genuinely
+broken workspace still caps out; it just re-earns the cap after each input
+change instead of being condemned forever by one bad commit. With this,
 `failed` is no longer a terminal dead-end within a session.
+
+**Failures are visible to the human, not just the model.** Two channels, added
+after a real outage went unnoticed for an unknown period — possibly weeks —
+because the only signals were an MCP `notice` string the model reads and a
+`consola.debug` that the file-log reporter drops:
+
+- The init failure is logged at `warn`, so it survives `FileLogReporter`'s
+  level filter and lands in `PATHS.ERROR_LOG_PATH`. Only the class, duration
+  and attempt count are recorded — never raw colgrep stderr, which can embed
+  source.
+- `colbertDegradedWarning()` writes one line to stderr at `claude` / `codex` /
+  `start` launch when the current workspace's index is in a terminal `failed`
+  state, naming the class. It is gated only on the
+  `GH_ROUTER_DISABLE_SEMANTIC_SEARCH` opt-out — deliberately NOT on
+  `colbertSearchEnabled()`, since missing artifacts or a failed smoke test are
+  themselves degraded states worth reporting. The log pointer tracks where the
+  detail actually went: `claude`/`codex` call `enableFileLogging()` so it names
+  `ERROR_LOG_PATH`, while `start` keeps consola's terminal reporter and the
+  banner says so instead of naming a file nothing wrote to.
+
+The capped MCP `notice` carries no env-var tuning advice: a spawned agent
+cannot set env vars on the running proxy. For the one class where that knob is
+the actual remedy (`stuck` — a very large repo tripping the stall watchdog),
+the banner carries the `GH_ROUTER_COLBERT_INIT_STALL_MS` /
+`GH_ROUTER_COLBERT_INIT_TIMEOUT_MS` hint, where an operator can act on it.
+
+**The reset does not bypass the backoff.** Clearing a stale streak is right;
+rebuilding without a throttle is not. On an actively-developed repo whose build
+genuinely fails, every commit (HEAD moves) and every clean/dirty toggle would
+otherwise buy an immediate full re-index at 25% of machine threads, forever. So
+the reset clears `failedAttempts` unconditionally but only kicks a rebuild once
+`FAILED_RETRY_BACKOFF_MS` has elapsed, reporting a pending rebuild otherwise.
+The git probe is also skipped entirely unless a git-derived baseline field
+could decide the outcome — `gitState` spawns up to three git subprocesses, and
+this path is awaited inline before the lexical fallback.
 
 ## Model guidance during the unavailable window
 

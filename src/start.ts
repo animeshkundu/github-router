@@ -8,7 +8,7 @@ import { generateEnvScript } from "./lib/shell"
 import { DEFAULT_CODEX_MODEL, DEFAULT_PORT } from "./lib/port"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
 import { browserToolsEnabled } from "./lib/mcp-capabilities"
-import { provisionAndIndexColbert } from "./lib/colbert"
+import { colbertDegradedWarning, provisionAndIndexColbert } from "./lib/colbert"
 import { startKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import {
@@ -85,6 +85,14 @@ export const start = defineCommand({
     // the launch cwd (if a git repo). ON by default; never blocks launch,
     // never throws. Opt out with GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1.
     void provisionAndIndexColbert()
+
+    // Surface a terminally-failed semantic index to the HUMAN (see the note
+    // in claude.ts). Fire-and-forget; lexical search still works.
+    void colbertDegradedWarning()
+      .then((warning) => {
+        if (warning) process.stderr.write(`${warning}\n`)
+      })
+      .catch(() => {})
 
     // Ready one tree-sitter worker in the background so the first code search
     // avoids WASM/grammar initialization. One worker keeps launch CPU bounded;

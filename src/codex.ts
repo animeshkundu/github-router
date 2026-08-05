@@ -20,7 +20,7 @@ import { runSelfUpdate } from "./lib/self-update"
 import { state } from "./lib/state"
 import { toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
-import { provisionAndIndexColbert } from "./lib/colbert"
+import { colbertDegradedWarning, provisionAndIndexColbert } from "./lib/colbert"
 import { startKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
@@ -75,6 +75,14 @@ export const codex = defineCommand({
     // Best-effort ColBERT semantic-search provision + background index of
     // the launch cwd. ON by default; never blocks launch, never throws.
     void provisionAndIndexColbert()
+
+    // Surface a terminally-failed semantic index to the HUMAN (see the note
+    // in claude.ts). Fire-and-forget; lexical search still works.
+    void colbertDegradedWarning(undefined, { logsToFile: true })
+      .then((warning) => {
+        if (warning) process.stderr.write(`${warning}\n`)
+      })
+      .catch(() => {})
 
     // Best-effort, bounded launch warm-up: ready one tree-sitter worker.
     // Opt out with GH_ROUTER_DISABLE_TS_POOL_WARMUP=1.

@@ -494,43 +494,111 @@ describe("index-store: meta keying + freshness verdict", () => {
 // ---------------------------------------------------------------------
 
 describe("index progress probe (shared init/search stall signal)", () => {
-  test("indexDirSignature + makeIndexProgressProbe: progress vs frozen vs null grace", async () => {
+  test("indexDirSignature + makeIndexProgressProbe: only an OBSERVED frozen signature is a stall", async () => {
     const store = await import("../../src/lib/colbert/index-store")
     const { makeIndexProgressProbe } = await import("../../src/lib/colbert/runner")
     const { PATHS } = await import("../../src/lib/paths")
 
-    // Unknown workspace → no project dir → null signature → one window of
-    // grace (true), then no-progress (false).
+    // No project dir yet → `not-created`, which is the ABSENCE of evidence.
+    // It must never be read as a stall, no matter how many times it repeats.
+    // The previous contract gave one window of grace and then killed the
+    // build; on Windows the path comparison could never match colgrep's
+    // extended-length `project_path`, so this branch fired on every tick and
+    // killed healthy, actively-writing builds — which were then classified
+    // `stuck` and refused forever at a cap of 2. That was the outage.
     const unknown = path.join(TEST_HOME, "probe-unknown")
     fsSync.mkdirSync(unknown, { recursive: true })
-    expect(store.indexDirSignature(unknown)).toBeNull()
+    // Either non-observed state is correct here and both must be fail-safe:
+    // `unknown` when the store dir itself is not readable yet, `not-created`
+    // once it is but this workspace has no project dir.
+    expect(store.indexDirSignature(unknown).kind).not.toBe("observed")
     const pUnknown = makeIndexProgressProbe(unknown)
-    expect(pUnknown()).toBe(true) // null grace #1
-    expect(pUnknown()).toBe(false) // null streak → stuck
+    for (let i = 0; i < 5; i++) {
+      expect(pUnknown()).toBe(true) // never a stall without evidence
+    }
 
     // A real colgrep-style project dir whose project.json points at `ws`.
     const ws = path.join(TEST_HOME, "probe-ws")
     fsSync.mkdirSync(ws, { recursive: true })
     const projDir = path.join(PATHS.COLBERT_INDICES_DIR, "probe-proj")
     fsSync.mkdirSync(path.join(projDir, "index"), { recursive: true })
+    const provMod = await import("../../src/lib/colbert/provision")
     fsSync.writeFileSync(
       path.join(projDir, "project.json"),
-      JSON.stringify({ path: ws }),
+      JSON.stringify({ path: ws, model: provMod.canonicalColbertModelDir() }),
     )
     fsSync.writeFileSync(path.join(projDir, "index", "a"), "x".repeat(10))
 
     const sig1 = store.indexDirSignature(ws)
-    expect(sig1).not.toBeNull()
+    expect(sig1.kind).toBe("observed")
 
     const probe = makeIndexProgressProbe(ws)
-    expect(probe()).toBe(true) // baseline
-    // No change since baseline → frozen → no progress.
+    expect(probe()).toBe(true) // first concrete observation starts the clock
+    // Observed, and unchanged since baseline → genuinely frozen.
     expect(probe()).toBe(false)
     // Grow the index dir → progressing again.
     fsSync.writeFileSync(path.join(projDir, "index", "b"), "y".repeat(100))
     expect(probe()).toBe(true)
     // Frozen again.
     expect(probe()).toBe(false)
+  })
+
+  test("indexDirSignature ignores a forked dir, agreeing with colbertProjectDir", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const { PATHS } = await import("../../src/lib/paths")
+
+    // A FORKED dir: same workspace, different `--model` spelling. colgrep
+    // keys those separately, so the router must never serve one — and
+    // `colbertProjectDir` already refuses it. The signature probe compared
+    // PATH only, so it happily sized the fork instead. Because a fork is
+    // frozen (nothing writes to it), the watchdog would then read "no
+    // growth" during a healthy build of the CANONICAL index and kill it —
+    // the exact failure the fail-safe probe exists to prevent, reachable
+    // through the one comparison that was not unified. Seen live: signature
+    // `observed` while `colbertProjectDir` returned null.
+    const ws = path.join(TEST_HOME, "probe-forked")
+    fsSync.mkdirSync(ws, { recursive: true })
+    const projDir = path.join(PATHS.COLBERT_INDICES_DIR, "probe-forked-proj")
+    fsSync.mkdirSync(path.join(projDir, "index"), { recursive: true })
+    fsSync.writeFileSync(
+      path.join(projDir, "project.json"),
+      JSON.stringify({ path: ws, model: "/some/other/model/spelling" }),
+    )
+    fsSync.writeFileSync(path.join(projDir, "index", "a"), "x".repeat(10))
+
+    expect(store.indexDirSignature(ws).kind).not.toBe("observed")
+    expect(await store.colbertProjectDir(ws)).toBeNull()
+  })
+
+  test("indexDirSignature matches colgrep's Windows extended-length project_path", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const { PATHS } = await import("../../src/lib/paths")
+
+    // colgrep writes `project_path` in extended-length form on Windows — 50
+    // of 53 dirs on the machine where this was diagnosed. The old
+    // canonicalization normalized that to `//?/q:/...` and compared it
+    // against `q:/...`, so it NEVER matched and the probe was blind.
+    const ws = path.join(TEST_HOME, "probe-extended")
+    fsSync.mkdirSync(ws, { recursive: true })
+    const stored =
+      process.platform === "win32" ? `\\\\?\\${path.resolve(ws)}` : ws
+
+    const projDir = path.join(PATHS.COLBERT_INDICES_DIR, "probe-extended-proj")
+    fsSync.mkdirSync(path.join(projDir, "index"), { recursive: true })
+    // Real colgrep dirs always carry `model` (52 of 53 on the machine where
+    // this was diagnosed; the one exception was a test fixture). Both lookups
+    // require it, so the fixture has to look like the real thing.
+    const prov = await import("../../src/lib/colbert/provision")
+    fsSync.writeFileSync(
+      path.join(projDir, "project.json"),
+      JSON.stringify({
+        project_path: stored,
+        model: prov.canonicalColbertModelDir(),
+      }),
+    )
+    fsSync.writeFileSync(path.join(projDir, "index", "a"), "x".repeat(10))
+
+    expect(store.indexDirSignature(ws).kind).toBe("observed")
   })
 })
 
@@ -685,7 +753,7 @@ describe("runSemanticSearch: no-fallback contract", () => {
     await store.writeColbertMeta({ ...base, failedAttempts: 2 })
     expect(await startupKickAllowed(ws)).toBe(false)
     const result = await (await import("../../src/lib/colbert/runner")).runSemanticSearch({ query: "auth", workspace: ws })
-    expect(result.notice).toMatch(/keeps failing.*corrupt/i)
+    expect(result.notice).toMatch(/unavailable.*corrupt/i)
     expect(result.notice).not.toMatch(/re-index was started/i)
   })
 
@@ -768,7 +836,11 @@ describe("runSemanticSearch: no-fallback contract", () => {
     const r = await runSemanticSearch({ query: "auth", workspace: ws })
     expect(r.status).toBe("failed")
     expect(r.isError).toBe(true)
-    expect(r.notice).toMatch(/keeps failing/i)
+    expect(r.notice).toMatch(/unavailable/i)
+    // The capped notice must NOT promise a retry, and must NOT hand the model
+    // env-var tuning advice it cannot act on.
+    expect(r.notice).not.toMatch(/started|shortly/i)
+    expect(r.notice).not.toMatch(/GH_ROUTER_/)
   })
 
   test("crashed (building + dead PID + no index) → persists failed+crashed, retry notice", async () => {
@@ -810,9 +882,198 @@ describe("runSemanticSearch: no-fallback contract", () => {
     const r = await runSemanticSearch({ query: "auth", workspace: ws })
     // crashed verdict reads the carried streak (2) + 1 = 3 → at the cap →
     // operator-actionable, NOT another retry (this is the storm guard).
-    expect(r.notice).toMatch(/keeps failing/i)
+    expect(r.notice).toMatch(/unavailable/i)
+    expect(r.notice).not.toMatch(/started|shortly/i)
     const meta = await store.readColbertMeta(ws)
     expect(meta?.failedAttempts).toBe(3)
+  })
+
+  // --- inputs-changed reset -------------------------------------------------
+  //
+  // `failedAttempts` is evidence about a SPECIFIC set of inputs, not a
+  // permanent verdict. Without a reset condition the cap is a terminal dead
+  // end: a workspace that failed 3 times stays unavailable for the life of
+  // the process even after the cause is gone. That is the bug these pin —
+  // observed live, with a complete healthy index on disk and the router
+  // refusing to look at it ever again.
+
+  /** A capped `failed` entry whose `failedAt` baseline the caller can vary. */
+  const cappedAt = async (
+    name: string,
+    failedAt: Record<string, unknown>,
+  ): Promise<string> => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const manifest = await import("../../src/lib/colbert/manifest")
+    store.__resetInitDebounceForTests()
+    const ws = path.join(TEST_HOME, name)
+    // A REAL git repo: the corpus-identity comparisons require a known head on
+    // BOTH sides, so a bare temp dir (no git => head undefined) could never
+    // exercise them. Real workspaces are repos.
+    await fs.mkdir(ws, { recursive: true })
+    const { execFileSync } = await import("node:child_process")
+    const git = (args: Array<string>) =>
+      execFileSync("git", args, { cwd: ws, stdio: "pipe" })
+    git(["init", "-q"])
+    git(["config", "user.email", "t@example.invalid"])
+    git(["config", "user.name", "t"])
+    await fs.writeFile(path.join(ws, "a.txt"), "a")
+    git(["add", "-A"])
+    git(["commit", "-qm", "a"])
+    await store.writeColbertMeta({
+      // Default the engine identity to the CURRENT values so a caller varying
+      // one axis (say HEAD) isn't also implicitly varying the shas.
+      binarySha: manifest.colgrepBinAsset()?.sha256,
+      ortSha: manifest.ortLibAsset()?.sha256,
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "failed",
+      failureClass: "error",
+      failedAttempts: 3,
+      failedAt: {
+        binarySha: manifest.colgrepBinAsset()?.sha256,
+        ortSha: manifest.ortLibAsset()?.sha256,
+        modelRev: manifest.MODEL_REVISION,
+        dirty: false,
+        ...failedAt,
+      },
+      // Well outside FAILED_RETRY_BACKOFF_MS, so the backoff never masks the
+      // behavior under test.
+      lastIndexedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    } as never)
+    return ws
+  }
+
+  test("capped failed + HEAD moved → streak cleared, rebuild kicked", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const ws = await cappedAt("ws-reset-head", { head: "old-head-sha" })
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+
+    // Still no results (nothing is served without a real rebuild), but the
+    // dead end is gone: the streak is cleared and a retry is promised.
+    expect(r.status).toBe("failed")
+    expect(r.notice).toMatch(/inputs changed|rebuild was started/i)
+    const meta = await store.readColbertMeta(ws)
+    expect(meta?.failedAttempts).toBe(0)
+  })
+
+  test("capped failed + working tree dirty-state changed → streak cleared", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    // HEAD is unchanged (undefined on both sides for a non-git temp dir); only
+    // the dirty flag differs. This is the common local recovery — fixing a
+    // malformed file WITHOUT committing — which a HEAD-only check would miss.
+    const ws = await cappedAt("ws-reset-dirty", { dirty: true })
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+
+    expect(r.notice).toMatch(/inputs changed|rebuild was started/i)
+    expect((await store.readColbertMeta(ws))?.failedAttempts).toBe(0)
+  })
+
+  test("capped failed + engine sha changed → streak cleared", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    // A colgrep / ONNX-runtime upgrade may fix the very bug that failed, so a
+    // streak earned by the old bits must not veto the new ones.
+    const ws = await cappedAt("ws-reset-sha", {
+      binarySha: "stale-binary-sha",
+      ortSha: "stale-ort-sha",
+    })
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+
+    expect(r.notice).toMatch(/inputs changed|rebuild was started/i)
+    expect((await store.readColbertMeta(ws))?.failedAttempts).toBe(0)
+  })
+
+  test("capped failed + IDENTICAL inputs → stays capped, no reset, no kick", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const manifest = await import("../../src/lib/colbert/manifest")
+    // Baseline that matches the current state exactly — nothing has changed,
+    // so the cap must still bind. This is the guard against turning the fix
+    // into a cap bypass / rebuild thrash.
+    const ws = await cappedAt("ws-reset-none", {
+      binarySha: manifest.colgrepBinAsset()?.sha256,
+      ortSha: manifest.ortLibAsset()?.sha256,
+      modelRev: manifest.MODEL_REVISION,
+    })
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+
+    expect(r.status).toBe("failed")
+    expect(r.notice).toMatch(/unavailable/i)
+    expect(r.notice).not.toMatch(/inputs changed|started|shortly/i)
+    expect((await store.readColbertMeta(ws))?.failedAttempts).toBe(3)
+  })
+
+  test("the reset fires ONCE, then the streak re-accumulates normally", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const ws = await cappedAt("ws-reset-once", { head: "old-head-sha" })
+    const { runSemanticSearch, __waitForAllInitsForTests } = await import(
+      "../../src/lib/colbert/runner"
+    )
+
+    // First query resets and kicks.
+    const first = await runSemanticSearch({ query: "auth", workspace: ws })
+    await __waitForAllInitsForTests()
+    expect(first.notice).toMatch(/inputs changed/i)
+
+    // The rebuild fails (no colgrep binary in this env) and must stamp a FRESH
+    // baseline. If any failure path forgot to, the next query would see a
+    // missing-or-stale baseline and reset again — an unbounded rebuild loop.
+    const after = await store.readColbertMeta(ws)
+    expect(after?.failedAt).toBeTruthy()
+
+    for (let i = 0; i < 3; i++) {
+      const again = await runSemanticSearch({ query: "auth", workspace: ws })
+      await __waitForAllInitsForTests()
+      expect(again.notice).not.toMatch(/inputs changed/i)
+    }
+  })
+
+  test("the reset still honors the backoff (no rebuild storm)", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const ws = await cappedAt("ws-reset-backoff", { head: "old-head-sha" })
+    // Move the failure to JUST NOW, inside FAILED_RETRY_BACKOFF_MS. Clearing
+    // a streak is right; rebuilding without a throttle is not — on an actively
+    // developed repo whose build genuinely fails, every commit and every
+    // clean/dirty toggle would otherwise buy an immediate full re-index.
+    const meta = await store.readColbertMeta(ws)
+    await store.writeColbertMeta({
+      ...meta!,
+      lastIndexedAt: new Date().toISOString(),
+    })
+
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+
+    // Streak cleared (the dead end is still gone) but NO rebuild promised.
+    expect(r.notice).toMatch(/pending/i)
+    expect(r.notice).not.toMatch(/was started/i)
+    expect((await store.readColbertMeta(ws))?.failedAttempts).toBe(0)
+  })
+
+  test("a legacy entry with no failedAt baseline does NOT reset", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    store.__resetInitDebounceForTests()
+    const ws = path.join(TEST_HOME, "ws-reset-legacy")
+    // Written before `failedAt` existed. A missing baseline means "unknown",
+    // which must not read as "everything changed" — that would reset every
+    // pre-upgrade entry on the first query after an upgrade.
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "failed",
+      failureClass: "error",
+      failedAttempts: 3,
+      lastIndexedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    })
+    const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
+    const r = await runSemanticSearch({ query: "auth", workspace: ws })
+
+    expect(r.notice).not.toMatch(/inputs changed/i)
+    expect((await store.readColbertMeta(ws))?.failedAttempts).toBe(3)
   })
 })
 
@@ -1159,3 +1420,386 @@ describe("provisioning self-repair (corrupt install, valid sidecar)", () => {
     ).toBe(false)
   })
 })
+
+// ---------------------------------------------------------------------
+// Operator visibility — the degraded-index launch banner
+// ---------------------------------------------------------------------
+//
+// The failure that motivated this was SILENCE: semantic search degraded to
+// lexical on a real repo for an unknown period and nobody noticed, because
+// the only signals were a `notice` string the model reads and a debug log
+// the file reporter drops. This banner is the one signal a human sees.
+
+describe("colbertDegradedWarning (launch banner)", () => {
+  test("warns for a terminally-failed index, silent otherwise", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const { colbertDegradedWarning } = await import("../../src/lib/colbert")
+
+    const base = {
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+    }
+
+    // No meta at all → nothing to report.
+    const wsNone = path.join(TEST_HOME, "warn-absent")
+    expect(await colbertDegradedWarning(wsNone)).toBeNull()
+
+    // A healthy index → silent. The banner must not cry wolf on every launch.
+    const wsReady = path.join(TEST_HOME, "warn-ready")
+    await store.writeColbertMeta({
+      workspace: wsReady,
+      ...base,
+      status: "ready",
+    })
+    expect(await colbertDegradedWarning(wsReady)).toBeNull()
+
+    // Failed → one actionable line naming the class and pointing at the log
+    // that (as of this change) actually contains the failure.
+    const wsFailed = path.join(TEST_HOME, "warn-failed")
+    await store.writeColbertMeta({
+      workspace: wsFailed,
+      ...base,
+      status: "failed",
+      failureClass: "error",
+    })
+    const warning = await colbertDegradedWarning(wsFailed)
+    expect(warning).toBeTruthy()
+    expect(warning).toMatch(/DEGRADED/)
+    expect(warning).toMatch(/error/)
+    // Says lexical still works, so the user knows the blast radius.
+    expect(warning).toMatch(/lexical/i)
+
+    // The log pointer must match where the detail actually went. `claude` and
+    // `codex` redirect warnings to ERROR_LOG_PATH via enableFileLogging();
+    // `start` does not, so pointing it at the file would send the operator to
+    // a stale or absent one.
+    const toFile = await colbertDegradedWarning(wsFailed, { logsToFile: true })
+    expect(toFile).toMatch(/error\.log/)
+    expect(warning).not.toMatch(/error\.log/)
+
+    // `stuck` is the one class with an actionable knob, so it keeps the
+    // tuning hint that was removed from the model-facing notice.
+    const wsStuck = path.join(TEST_HOME, "warn-stuck")
+    await store.writeColbertMeta({
+      workspace: wsStuck,
+      ...base,
+      status: "failed",
+      failureClass: "stuck",
+    })
+    expect(await colbertDegradedWarning(wsStuck)).toMatch(
+      /GH_ROUTER_COLBERT_INIT_STALL_MS/,
+    )
+  })
+})
+
+// ---------------------------------------------------------------------
+// Store sweep — reclaims disk WITHOUT destroying real index data
+// ---------------------------------------------------------------------
+//
+// These are the tests that make shipping deletion defensible. The scanner
+// that decides "unreachable" is the same one that was wrong in this
+// incident: under the old path comparison a perfectly healthy index looked
+// unreachable, and a sweep written against that scanner would have deleted
+// it. Every rule below therefore leans on evidence that does not depend on
+// our path matching at all.
+
+describe("sweepColbertStore (safe reclamation)", () => {
+  test("reaps only provably-empty orphans; never touches real data", async () => {
+    const { sweepColbertStore } = await import("../../src/lib/colbert/lifecycle")
+    const { PATHS } = await import("../../src/lib/paths")
+    const indices = PATHS.COLBERT_INDICES_DIR
+    await fs.mkdir(indices, { recursive: true })
+
+    const aged = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    const mk = async (
+      name: string,
+      opts: {
+        projectJson?: boolean
+        shards?: boolean
+        lock?: boolean
+        fresh?: boolean
+      },
+    ): Promise<string> => {
+      const d = path.join(indices, name)
+      await fs.mkdir(path.join(d, "index"), { recursive: true })
+      if (opts.projectJson) {
+        await fs.writeFile(path.join(d, "project.json"), JSON.stringify({ path: d }))
+      }
+      if (opts.shards) await fs.writeFile(path.join(d, "index", "0.codes.npy"), "x")
+      if (opts.lock) await fs.writeFile(path.join(d, ".lock"), "")
+      if (!opts.fresh) await fs.utimes(d, aged, aged)
+      return d
+    }
+
+    const orphan = await mk("sweep-orphan", {})
+    const withProject = await mk("sweep-real", { projectJson: true })
+    const withShards = await mk("sweep-shards", { shards: true })
+    const locked = await mk("sweep-locked", { lock: true })
+    const freshOrphan = await mk("sweep-fresh", { fresh: true })
+    const quarantine = await mk("sweep.corrupt-abc", {})
+
+    await sweepColbertStore()
+
+    // Reaped: nothing of value could have been in it.
+    expect(fsSync.existsSync(orphan)).toBe(false)
+    // Kept: each for a DIFFERENT reason, so a regression in any one rule shows.
+    expect(fsSync.existsSync(withProject)).toBe(true) // real index data
+    expect(fsSync.existsSync(withShards)).toBe(true) // work in progress
+    expect(fsSync.existsSync(locked)).toBe(true) // another process owns it
+    expect(fsSync.existsSync(freshOrphan)).toBe(true) // inside the grace window
+    expect(fsSync.existsSync(quarantine)).toBe(true) // corrupt-repair owns it
+  })
+
+  test("reaps metadata for deleted workspaces, keeps it for live ones", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const { sweepColbertStore } = await import("../../src/lib/colbert/lifecycle")
+
+    const live = path.join(TEST_HOME, "sweep-live-ws")
+    await fs.mkdir(live, { recursive: true })
+    const gone = path.join(TEST_HOME, "sweep-gone-ws")
+    await fs.mkdir(gone, { recursive: true })
+
+    const base = { model: "LateOn-Code-edge", modelRev: "rev", status: "ready" as const }
+    await store.writeColbertMeta({ workspace: live, ...base })
+    await store.writeColbertMeta({ workspace: gone, ...base })
+    // The workspace disappears; its sidecar is now pure bookkeeping garbage.
+    await fs.rm(gone, { recursive: true, force: true })
+    // Age both sidecars past the settle window. A freshly-written entry is
+    // deliberately never reaped: the reclassification pass rewrites
+    // building+dead-PID to `failed` so the runner can self-heal, and reaping
+    // that in the same sweep would erase the state before anything acts on it.
+    const { PATHS } = await import("../../src/lib/paths")
+    const { metaHashForWorkspace } = store
+    const agedAt = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    for (const w of [live, gone]) {
+      const f = path.join(PATHS.COLBERT_META_DIR, `${metaHashForWorkspace(w)}.json`)
+      await fs.utimes(f, agedAt, agedAt)
+    }
+
+    await sweepColbertStore()
+
+    expect(await store.readColbertMeta(live)).not.toBeNull()
+    expect(await store.readColbertMeta(gone)).toBeNull()
+  })
+
+  test("never reaps a building workspace's metadata", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const { sweepColbertStore } = await import("../../src/lib/colbert/lifecycle")
+
+    // A build in flight whose workspace is momentarily unreadable must not
+    // have its bookkeeping deleted out from under it.
+    const ws = path.join(TEST_HOME, "sweep-building-ws")
+    await store.writeColbertMeta({
+      workspace: ws,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "building",
+    })
+    await sweepColbertStore()
+    expect(await store.readColbertMeta(ws)).not.toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------
+// Workspace identity — one key per workspace, on every OS
+// ---------------------------------------------------------------------
+//
+// These need no colgrep artifacts, so they run on every CI OS rather than
+// being skipped like the E2E colbert tests. That is the point: the bug they
+// pin is a path-semantics bug, and path semantics differ per platform.
+
+describe("canonicalWorkspace (cross-platform identity)", () => {
+  test("every spelling of one workspace collapses to one key", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const ws = path.join(TEST_HOME, "identity-ws")
+    await fs.mkdir(ws, { recursive: true })
+
+    const spellings =
+      process.platform === "win32"
+        ? [
+            ws,
+            ws.replaceAll("\\", "/"),
+            ws + path.sep,
+            ws.toLowerCase(),
+            // colgrep's stored form: the Windows extended-length prefix.
+            "\\\\?\\" + path.resolve(ws),
+          ]
+        : [ws, `${ws}/`, path.join(ws, "."), path.join(ws, "sub", "..")]
+
+    const keys = new Set(spellings.map((s) => store.canonicalWorkspace(s)))
+    expect(keys.size).toBe(1)
+    // The sidecar key must agree — it previously used a DIFFERENT
+    // normalization, which is how one workspace got two meta files.
+    expect(new Set(spellings.map((s) => store.metaHashForWorkspace(s))).size).toBe(1)
+  })
+
+  test("a symlinked workspace has the same identity as its real path", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const real = path.join(TEST_HOME, "identity-real")
+    const link = path.join(TEST_HOME, "identity-link")
+    await fs.mkdir(real, { recursive: true })
+    try {
+      await fs.symlink(real, link, "junction")
+    } catch {
+      return // no symlink privilege (Windows without Developer Mode)
+    }
+
+    // This is the macOS shape: /var -> /private/var and /tmp -> /private/tmp
+    // mean EVERY temp workspace there is reached through a symlink. The meta
+    // key used to skip realpath while the project-dir lookup applied it, so
+    // one physical index got two identities and one of them always reported
+    // `absent`.
+    expect(store.canonicalWorkspace(link)).toBe(store.canonicalWorkspace(real))
+    expect(store.metaHashForWorkspace(link)).toBe(store.metaHashForWorkspace(real))
+  })
+
+  test("case sensitivity follows the volume, not the platform", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const dir = path.join(TEST_HOME, "IdentityCase")
+    await fs.mkdir(dir, { recursive: true })
+
+    // Ask the filesystem itself rather than assuming from process.platform:
+    // APFS can be formatted case-SENSITIVE and Linux routinely mounts
+    // case-INSENSITIVE volumes, so the platform is wrong in both directions.
+    const flipped = path.join(TEST_HOME, "identitycase")
+    const volumeFolds = fsSync.existsSync(flipped)
+
+    const same = store.canonicalWorkspace(dir) === store.canonicalWorkspace(flipped)
+    expect(same).toBe(volumeFolds)
+  })
+
+  test("identity survives the workspace being deleted", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const real = path.join(TEST_HOME, "vanish-real")
+    const link = path.join(TEST_HOME, "vanish-link")
+    await fs.mkdir(real, { recursive: true })
+    try {
+      await fs.symlink(real, link, "junction")
+    } catch {
+      return // no symlink privilege
+    }
+    const ws = path.join(link, "ws")
+    await fs.mkdir(ws, { recursive: true })
+
+    // Caught by macOS CI on its very first run. TEST_HOME lives under
+    // /var/folders -> /private/var/folders there, so EVERY temp workspace is
+    // reached through a symlink. While the workspace exists the key resolves
+    // through the link; a naive fallback keyed the deleted path off the
+    // UNRESOLVED spelling, so the identity SHIFTED the moment it vanished —
+    // the sidecar written while it was alive became unfindable, and the boot
+    // sweep could never reap it.
+    const alive = store.canonicalWorkspace(ws)
+    await fs.rm(path.join(real, "ws"), { recursive: true, force: true })
+    expect(store.canonicalWorkspace(ws)).toBe(alive)
+    expect(store.metaHashForWorkspace(ws)).toBe(store.metaHashForWorkspace(ws))
+  })
+
+  test("a not-yet-created workspace still gets a stable key", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    // realpath throws here; the fallback must still be deterministic, or a
+    // workspace would change identity the moment it is created.
+    const ghost = path.join(TEST_HOME, "identity-ghost")
+    expect(store.canonicalWorkspace(ghost)).toBe(store.canonicalWorkspace(ghost))
+    expect(store.metaHashForWorkspace(ghost)).toBe(store.metaHashForWorkspace(ghost))
+  })
+})
+
+// ---------------------------------------------------------------------
+// Watchdog epoch — recovery for entries the router's own bugs poisoned
+// ---------------------------------------------------------------------
+
+describe("watchdogEpoch recovery", () => {
+  test("a pre-fix failure marker stops short-circuiting the verdict", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const ws = path.join(TEST_HOME, "epoch-ws")
+    await fs.mkdir(ws, { recursive: true })
+
+    // Exactly the shapes the router's own bugs produced: `stuck` from the
+    // blind watchdog, `corrupt` from a null project-dir lookup. Written with
+    // NO epoch stamp, which is what every pre-upgrade sidecar looks like.
+    for (const cls of ["stuck", "corrupt", "crashed"] as const) {
+      const file = path.join(
+        await PATHS_COLBERT_META(),
+        `${store.metaHashForWorkspace(ws)}.json`,
+      )
+      await fs.mkdir(path.dirname(file), { recursive: true })
+      await fs.writeFile(
+        file,
+        JSON.stringify({
+          workspace: ws,
+          model: "LateOn-Code-edge",
+          modelRev: "rev",
+          status: "failed",
+          failureClass: cls,
+          failedAttempts: 3,
+        }),
+      )
+
+      const recovered = await store.readColbertMeta(ws)
+      // Clearing the streak alone is NOT enough: `freshnessVerdict` returns
+      // `failed` straight off `meta.status` before it looks at the disk, so a
+      // zeroed counter would leave the workspace just as dead. The status has
+      // to drop too, which makes the next verdict re-derive from the shards —
+      // a genuinely corrupt index is then re-detected and re-quarantined.
+      expect(recovered?.status).toBe("ready")
+      expect(recovered?.failedAttempts).toBe(0)
+      expect(recovered?.failureClass).toBeUndefined()
+    }
+  })
+
+  test("a genuine `launch` failure is NOT cleared, and the reset is one-shot", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const ws = path.join(TEST_HOME, "epoch-launch-ws")
+    await fs.mkdir(ws, { recursive: true })
+    const file = path.join(
+      await PATHS_COLBERT_META(),
+      `${store.metaHashForWorkspace(ws)}.json`,
+    )
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        workspace: ws,
+        model: "LateOn-Code-edge",
+        modelRev: "rev",
+        status: "failed",
+        failureClass: "launch", // a missing binary is about the environment
+        failedAttempts: 3,
+      }),
+    )
+    const kept = await store.readColbertMeta(ws)
+    expect(kept?.status).toBe("failed")
+    expect(kept?.failedAttempts).toBe(3)
+
+    // And the reset cannot loop: a write stamps the current epoch, so a
+    // recovered entry is not re-recovered on every subsequent read.
+    const ws2 = path.join(TEST_HOME, "epoch-once-ws")
+    await fs.mkdir(ws2, { recursive: true })
+    const f2 = path.join(
+      await PATHS_COLBERT_META(),
+      `${store.metaHashForWorkspace(ws2)}.json`,
+    )
+    await fs.writeFile(
+      f2,
+      JSON.stringify({
+        workspace: ws2,
+        model: "LateOn-Code-edge",
+        modelRev: "rev",
+        status: "failed",
+        failureClass: "stuck",
+        failedAttempts: 2,
+      }),
+    )
+    const first = await store.readColbertMeta(ws2)
+    expect(first?.status).toBe("ready")
+    await store.writeColbertMeta({ ...first!, status: "failed", failureClass: "stuck", failedAttempts: 2 })
+    const second = await store.readColbertMeta(ws2)
+    expect(second?.status).toBe("failed") // stamped → no second reset
+  })
+})
+
+async function PATHS_COLBERT_META(): Promise<string> {
+  // Resolved lazily so the node:os mock above is in effect.
+  const { PATHS } = await import("../../src/lib/paths")
+  return PATHS.COLBERT_META_DIR
+}
