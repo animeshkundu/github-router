@@ -1633,6 +1633,32 @@ describe("canonicalWorkspace (cross-platform identity)", () => {
     expect(same).toBe(volumeFolds)
   })
 
+  test("identity survives the workspace being deleted", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const real = path.join(TEST_HOME, "vanish-real")
+    const link = path.join(TEST_HOME, "vanish-link")
+    await fs.mkdir(real, { recursive: true })
+    try {
+      await fs.symlink(real, link, "junction")
+    } catch {
+      return // no symlink privilege
+    }
+    const ws = path.join(link, "ws")
+    await fs.mkdir(ws, { recursive: true })
+
+    // Caught by macOS CI on its very first run. TEST_HOME lives under
+    // /var/folders -> /private/var/folders there, so EVERY temp workspace is
+    // reached through a symlink. While the workspace exists the key resolves
+    // through the link; a naive fallback keyed the deleted path off the
+    // UNRESOLVED spelling, so the identity SHIFTED the moment it vanished —
+    // the sidecar written while it was alive became unfindable, and the boot
+    // sweep could never reap it.
+    const alive = store.canonicalWorkspace(ws)
+    await fs.rm(path.join(real, "ws"), { recursive: true, force: true })
+    expect(store.canonicalWorkspace(ws)).toBe(alive)
+    expect(store.metaHashForWorkspace(ws)).toBe(store.metaHashForWorkspace(ws))
+  })
+
   test("a not-yet-created workspace still gets a stable key", async () => {
     const store = await import("../../src/lib/colbert/index-store")
     // realpath throws here; the fallback must still be deterministic, or a

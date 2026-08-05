@@ -486,8 +486,18 @@ export function canonicalWorkspace(p: string): string {
     // names, and preserves caller casing instead of the on-disk truth.
     out = stripExtendedPrefix(realpathSync.native(out))
   } catch {
-    // Not on disk yet (a workspace about to be created). The stripped,
-    // resolved form is still a stable key.
+    // The leaf is not on disk (a workspace about to be created, deleted, or
+    // on an unmounted volume). Resolving the NEAREST EXISTING ANCESTOR and
+    // re-appending the remainder keeps the key STABLE across that boundary.
+    //
+    // Falling back to the raw path instead would make a workspace's identity
+    // change the moment it disappears: under a symlinked parent — which is
+    // every temp workspace on macOS, where `/var` → `/private/var` — the live
+    // key resolves through the link and the post-deletion key does not. The
+    // sidecar written while it existed then becomes unfindable, so the boot
+    // sweep cannot reap it and a re-created workspace starts from a different
+    // key than its own index. Caught by macOS CI on the first run.
+    out = resolveThroughExistingAncestor(out)
   }
   out = path.resolve(out)
   if (volumeIsCaseInsensitive(out)) out = out.toLowerCase()
@@ -495,6 +505,29 @@ export function canonicalWorkspace(p: string): string {
   // where backslash is a legal filename character but `path.resolve` has
   // already produced forward slashes.
   return process.platform === "win32" ? out.replaceAll("\\", "/") : out
+}
+
+/**
+ * Realpath as much of `p` as exists, then re-append the missing tail. Keeps a
+ * not-yet-created or just-deleted path on the same canonical root as its live
+ * self.
+ */
+function resolveThroughExistingAncestor(p: string): string {
+  const abs = path.resolve(p)
+  const tail: Array<string> = []
+  let cur = abs
+  for (let i = 0; i < 64; i++) {
+    try {
+      const real = stripExtendedPrefix(realpathSync.native(cur))
+      return tail.length > 0 ? path.join(real, ...tail.reverse()) : real
+    } catch {
+      const parent = path.dirname(cur)
+      if (parent === cur) break // hit the root without finding anything
+      tail.push(path.basename(cur))
+      cur = parent
+    }
+  }
+  return abs
 }
 
 function canonicalForCompare(p: string): string {
