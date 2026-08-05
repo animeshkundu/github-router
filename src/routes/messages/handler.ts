@@ -12,7 +12,7 @@ import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { EFFORT_ORDER, UNKNOWN_EFFORT_ANCHOR, bucketEffort, clampEffort } from "~/lib/reasoning-effort"
-import { logRequest, logRequestFields } from "~/lib/request-log"
+import { logRequest, logRequestFields, recordBodySize } from "~/lib/request-log"
 import { MAX_RESPONSE_BODY_BYTES, readResponseBodyCapped } from "~/lib/response-cap"
 import { sanitizeAnthropicBody } from "~/lib/sanitize-anthropic-body"
 import { state } from "~/lib/state"
@@ -250,6 +250,10 @@ export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
 
   const rawBody = await c.req.text()
+  // Feed the rolling body-size distribution. The prologue below (guards,
+  // parses, re-serialization) scales with this, so its p50/p95 is what decides
+  // whether optimizing the prologue is worth any risk at all.
+  recordBodySize(rawBody.length)
 
   const debugEnabled = consola.level >= 4
   if (debugEnabled) {

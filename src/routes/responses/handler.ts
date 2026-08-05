@@ -32,6 +32,15 @@ interface UpstreamSSEEvent {
 
 const ENCODER = new TextEncoder()
 
+/**
+ * Cap on CONSECUTIVE empty frames tolerated while discovering the first real
+ * SSE event. Reset by any meaningful frame, so a legitimately slow upstream
+ * that interleaves keepalives with progress is never cut off — only a source
+ * that emits nothing BUT empty frames trips it. Generous by design: this is a
+ * runaway backstop, not a policy knob.
+ */
+const MAX_CONSECUTIVE_EMPTY_DISCOVERY_FRAMES = 10_000
+
 function formatSSE(chunk: UpstreamSSEEvent): string {
   const parts: Array<string> = []
   if (chunk.event) parts.push(`event: ${chunk.event}`)
@@ -133,8 +142,20 @@ export async function handleResponses(c: Context) {
   ]()
 
   // Skip leading empty / [DONE] sentinels until we get a real event.
+  //
+  // Each read is already inactivity-bounded (`readIteratorWithTimeout` below),
+  // but the LOOP was not: a source emitting an endless run of immediately
+  // resolved empty frames never trips that per-read clock and spins here
+  // forever, starving the client while looking perfectly healthy.
+  //
+  // The bound is on CONSECUTIVE empty frames, and is reset by any meaningful
+  // frame — deliberately NOT an absolute time budget. Long-reasoning models
+  // legitimately emit keepalives for many minutes before the first real token,
+  // and a wall-clock cap here would truncate them, which is exactly what
+  // `UPSTREAM_FETCH_TIMEOUT_MS = 0` exists to prevent.
   let firstChunk: UpstreamSSEEvent | undefined
   let upstreamFinished = false
+  let consecutiveEmpty = 0
   while (true) {
     const r = await readIteratorWithTimeout(iterator, UPSTREAM_INACTIVITY_TIMEOUT_MS)
     if (r.done) {
@@ -143,12 +164,23 @@ export async function handleResponses(c: Context) {
     }
     // Defensive guard against an iterator that yields {done:false, value:undefined}
     // before we dereference r.value.data below.
-    if (r.value === undefined || r.value === null) continue
+    if (r.value === undefined || r.value === null) {
+      if (++consecutiveEmpty > MAX_CONSECUTIVE_EMPTY_DISCOVERY_FRAMES) break
+      continue
+    }
     if (r.value.data === "[DONE]") {
       upstreamFinished = true
       break
     }
-    if (!r.value.data) continue
+    if (!r.value.data) {
+      if (++consecutiveEmpty > MAX_CONSECUTIVE_EMPTY_DISCOVERY_FRAMES) break
+      continue
+    }
+    // A meaningful frame ends discovery outright, so there is no need to reset
+    // the counter here — the loop exits. (The "reset on progress" property this
+    // bound relies on is therefore structural: any non-empty frame leaves the
+    // loop, so a run of empties can only be counted within one uninterrupted
+    // stretch.)
     firstChunk = r.value
     break
   }

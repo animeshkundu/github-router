@@ -145,14 +145,71 @@ export function serializeAnthropicEvent(ev: AnthropicStreamEvent): string {
  * converts a mid-stream generator throw into a terminal `event: error` frame.
  * On consumer cancel it invokes `onCancel` (abort the upstream fetch) and
  * `return()`s the generator so its `finally` tears down the upstream reader.
+ *
+ * `inactivityTimeoutMs` bounds how long a single `events.next()` may stall.
+ * Without it a Copilot upstream that holds the socket open but stops emitting
+ * hangs the caller FOREVER: `UPSTREAM_FETCH_TIMEOUT_MS` defaults to 0 (see
+ * `~/lib/port`), so inactivity detection is the only stall defense, and every
+ * sibling streaming path already has it (`readIteratorWithTimeout`). The clock
+ * is per-read, NOT an absolute budget — a long-reasoning model legitimately
+ * streams for many minutes, and only a gap between events is a stall.
+ *
+ * Three properties this must preserve, each pinned by a test in
+ * `tests/anthropic-translate-inactivity.test.ts`:
+ *
+ *   - NO LEAK: on timeout we take the SAME teardown path as consumer cancel
+ *     (`onCancel` aborts the upstream fetch, `events.return()` drives the
+ *     generator's `finally`). Timing out without that leaves the fetch alive
+ *     for the life of the process.
+ *   - NO CRASH: the abandoned `events.next()` promise keeps running. If the
+ *     upstream later errors, that rejection has no handler and would kill the
+ *     process under Node's `--unhandled-rejections=throw`, so it is swallowed
+ *     explicitly. (Same reasoning as the noop `.catch` in `stream-relay.ts`.)
+ *   - NO TRUNCATION: a stream that keeps producing inside the deadline is
+ *     never cut short, however long it runs in total.
  */
 export function anthropicSseStreamFromEvents(
   events: AsyncGenerator<AnthropicStreamEvent>,
-  opts: { routePath: string; onCancel?: () => void },
+  opts: {
+    routePath: string
+    onCancel?: () => void
+    inactivityTimeoutMs?: number
+  },
 ): ReadableStream<Uint8Array> {
   const enc = new TextEncoder()
   let consumerCancelled = false
   let finished = false
+
+  /** Sentinel identity — never a legitimate iterator result. */
+  const STALLED = Symbol("stalled")
+
+  /**
+   * `events.next()` bounded by an inactivity deadline. Resolves to `STALLED`
+   * rather than throwing so the caller can distinguish a stall (terminate with
+   * a stall-specific message) from a genuine upstream error.
+   */
+  const nextWithTimeout = async (
+    timeoutMs: number,
+  ): Promise<IteratorResult<AnthropicStreamEvent> | typeof STALLED> => {
+    const pending = events.next()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        pending,
+        new Promise<typeof STALLED>((resolve) => {
+          timer = setTimeout(() => resolve(STALLED), timeoutMs)
+          // Never hold the event loop open on account of the deadline.
+          timer.unref?.()
+        }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+      // If the timeout won, `pending` is still in flight. A later rejection
+      // would be unhandled and terminate the process — attach a sink now.
+      // Harmless when `pending` already settled.
+      void pending.catch(() => undefined)
+    }
+  }
 
   const safeClose = (
     controller: ReadableStreamDefaultController<Uint8Array>,
@@ -173,7 +230,41 @@ export function anthropicSseStreamFromEvents(
 
       let res: IteratorResult<AnthropicStreamEvent>
       try {
-        res = await events.next()
+        const timeoutMs = opts.inactivityTimeoutMs
+        const settled =
+          timeoutMs !== undefined && timeoutMs > 0
+            ? await nextWithTimeout(timeoutMs)
+            : await events.next()
+
+        if (settled === STALLED) {
+          finished = true
+          if (consumerCancelled) {
+            safeClose(controller)
+            return
+          }
+          const message = `Upstream stalled: no stream activity for ${timeoutMs}ms`
+          consola.error(
+            `Anthropic-translate stream inactivity timeout at ${opts.routePath}: ${message}`,
+          )
+          // Same teardown as consumer cancel: abort the upstream fetch and
+          // drive the generator's finally. Skipping this leaks the fetch.
+          opts.onCancel?.()
+          void events.return?.(undefined as never)?.catch?.(() => undefined)
+          try {
+            controller.enqueue(
+              enc.encode(buildAnthropicErrorEvent("timeout_error", message)),
+            )
+          } catch (enqueueError) {
+            if (!isControllerClosedError(enqueueError)) {
+              consola.warn(
+                `Could not deliver error event to consumer at ${opts.routePath}: ${enqueueError instanceof Error ? enqueueError.message : String(enqueueError)}`,
+              )
+            }
+          }
+          safeClose(controller)
+          return
+        }
+        res = settled
       } catch (err) {
         finished = true
         if (consumerCancelled) {
@@ -225,7 +316,12 @@ export function anthropicSseStreamFromEvents(
       finished = true
       opts.onCancel?.()
       // Drive the generator's finally so it tears down the upstream reader.
-      void events.return?.(undefined as never)
+      // `.catch` is load-bearing: `onCancel` above aborts the upstream fetch,
+      // so the generator's pending read rejects and its `finally` can rethrow.
+      // An unhandled rejection here would kill the process under Node's
+      // `--unhandled-rejections=throw` — on the consumer-cancel path, which is
+      // the most common way a stream ends.
+      void events.return?.(undefined as never)?.catch?.(() => undefined)
     },
   })
 }

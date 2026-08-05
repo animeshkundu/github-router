@@ -498,20 +498,26 @@ describe("runBash (Windows cmd.exe)", () => {
     try {
       // `findstr "."` reads stdin; with stdin: 'ignore' it sees EOF
       // immediately and exits with code 1 (no match on empty input).
-      const start = Date.now()
       const result = await runBash('findstr "."', {
         cwd: dir,
         timeoutMs: 5_000,
         signal: new AbortController().signal,
         disableNetwork: false,
       })
-      const elapsed = Date.now() - start
-      // findstr exit 1 = no match (expected with empty stdin).
+      // findstr exit 1 = no match, which it can only report once stdin
+      // reached EOF — so this IS the proof that stdin was closed rather
+      // than left open. Had it hung waiting for input, the 5s `timeoutMs`
+      // above would have fired and surfaced a kill, not a clean exit 1.
+      //
+      // Deliberately NOT asserted on wall-clock. An `elapsed < 3000ms`
+      // check used to live here and was the one flake in this file: it
+      // measured 3373ms on a loaded windows-latest runner and failed the
+      // gate, because an absolute threshold cannot tell "hung on stdin"
+      // from "shared CI runner was busy". The exit code distinguishes
+      // them precisely and the timeout bounds the hang, so the timing
+      // assertion added no signal and cost a red gate.
       expect(result.exitCode).toBe(1)
       expect(result.stdout).toBe("")
-      // Must not hang waiting for input — should complete in well
-      // under 3 seconds.
-      expect(elapsed).toBeLessThan(3000)
     } finally {
       cleanup()
     }

@@ -217,4 +217,19 @@ export function enableFileLogging(): void {
   consola.setReporters([reporter])
   consola.options.stdout = nullStream as unknown as typeof process.stdout
   consola.options.stderr = nullStream as unknown as typeof process.stderr
+  fileLoggingActive = true
+}
+
+/**
+ * True once `enableFileLogging` has run. The file reporter accepts only
+ * fatal/error/warn (`ALLOWED_TYPES`), so an `info`-level line — which is what
+ * the per-request summary is — reaches no consumer at all in this mode.
+ *
+ * Exposed so callers can skip work whose ONLY purpose is to populate that
+ * line. See `requestLogVisible` in `~/lib/request-log`.
+ */
+let fileLoggingActive = false
+
+export function isFileLoggingEnabled(): boolean {
+  return fileLoggingActive
 }

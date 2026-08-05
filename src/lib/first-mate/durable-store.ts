@@ -76,8 +76,15 @@ export async function withFileLock<T>(
   for (;;) {
     try {
       const fh = await fs.open(lockPath, "wx")
-      await fh.writeFile(ownerToken)
-      await fh.close()
+      // Close in `finally`: if `writeFile` rejects (disk full, EIO, quota) the
+      // handle would otherwise leak. This runs inside the long-lived daemon's
+      // lock loop, so a repeating write failure would accumulate descriptors
+      // until the process hit EMFILE and stopped being able to open anything.
+      try {
+        await fh.writeFile(ownerToken)
+      } finally {
+        await fh.close().catch(() => {})
+      }
       break
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code

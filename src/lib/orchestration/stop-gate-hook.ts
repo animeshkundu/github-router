@@ -495,13 +495,22 @@ export async function decideStopHook(input: {
   }
   const timeoutMs = input.timeoutMs ?? 300_000
   let timer: ReturnType<typeof setTimeout> | undefined
-  const raced = await Promise.race<GateRunResult | null | "timeout">([
-    runGate(),
-    new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), timeoutMs)
-    }),
-  ])
-  if (timer) clearTimeout(timer)
+  let raced: GateRunResult | null | "timeout"
+  try {
+    raced = await Promise.race<GateRunResult | null | "timeout">([
+      runGate(),
+      new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), timeoutMs)
+        // Never keep this short-lived hook process alive on the timer alone.
+        timer.unref?.()
+      }),
+    ])
+  } finally {
+    // Clear in `finally`: a `runGate()` REJECTION previously skipped the
+    // clearTimeout below it, leaving a 5-minute timer pinning the hook process
+    // open long after it had nothing left to do.
+    if (timer) clearTimeout(timer)
+  }
   if (raced === "timeout") return { exitCode: 0 } // gate did not complete -> allow; never a claimed pass.
   if (raced === null) return { exitCode: 0 } // no gate resolvable now -> allow (fail open).
   if (raced.kind === "no-diff") return { exitCode: 0 } // no working-tree diff -> no checks to run.
