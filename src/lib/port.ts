@@ -1,5 +1,6 @@
 import consola from "consola"
 
+import { ONE_M_TOKENS } from "./one-m-context"
 import { state } from "./state"
 
 export const DEFAULT_PORT = 8787
@@ -77,8 +78,6 @@ export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
  * variant" — defaulting safe-side preserves the pre-change behavior).
  */
 const DEFAULT_OPUS_FAMILY = "5"
-
-const ONE_M_TOKENS = 1_000_000
 
 export function pickClaudeDefault(opusFamily: string = DEFAULT_OPUS_FAMILY): string {
   // Canonicalize the family to dotted form so both "4.8" and "4-8" work

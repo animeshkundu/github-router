@@ -1077,3 +1077,157 @@ describe("anthropic-translate file-tool steering", () => {
     }
   })
 })
+
+// Claude Code's effort picker puts its choice on the wire as
+// `output_config.effort`. `stripAnthropicOnlyFields` explicitly preserves that
+// field (`PROXY_OWNED_FIELDS`), but until the shim read it the value was simply
+// dropped, making the picker a no-op on every non-Claude model in three
+// distinct ways — each pinned below.
+describe("anthropic-translate output_config.effort (client-selected effort)", () => {
+  const ALL = ["low", "medium", "high", "xhigh", "max"]
+
+  test("wins over the absent-thinking default", () => {
+    const model = gptModel(ALL)
+    const { payload } = build(
+      { messages: [], output_config: { effort: "xhigh" } },
+      model,
+    )
+    expect(payload.reasoning?.effort).toBe("xhigh")
+  })
+
+  test("carries the max tier through", () => {
+    const model = gptModel(ALL)
+    const { payload } = build(
+      { messages: [], output_config: { effort: "max" } },
+      model,
+    )
+    expect(payload.reasoning?.effort).toBe("max")
+  })
+
+  test("wins over a conflicting thinking budget", () => {
+    // budget 5000 buckets to `medium`; the explicit selection must not lose to
+    // it, matching the passthrough path's documented precedence.
+    const model = gptModel(ALL)
+    const { payload } = build(
+      {
+        messages: [],
+        output_config: { effort: "xhigh" },
+        thinking: { type: "enabled", budget_tokens: 5000 },
+      },
+      model,
+    )
+    expect(payload.reasoning?.effort).toBe("xhigh")
+  })
+
+  test("survives thinking:{type:'adaptive'}, which previously dropped reasoning entirely", () => {
+    // The adaptive shape is neither `undefined` nor `enabled`, so both of the
+    // other branches decline it and no reasoning field was emitted at all.
+    const model = gptModel(ALL)
+    const { payload } = build(
+      {
+        messages: [],
+        output_config: { effort: "xhigh" },
+        thinking: { type: "adaptive" },
+      },
+      model,
+    )
+    expect(payload.reasoning?.effort).toBe("xhigh")
+  })
+
+  test("clamps to a model that does not advertise the selected tier", () => {
+    const model = gptModel(["low", "medium", "high"]) // gemini-like ceiling
+    for (const selected of ["xhigh", "max"]) {
+      const { payload } = build(
+        { messages: [], output_config: { effort: selected } },
+        model,
+      )
+      expect(payload.reasoning?.effort).toBe("high")
+    }
+  })
+
+  test("an unrecognized tier clamps DOWN to the highest supported, never up", () => {
+    const model = gptModel(["low", "medium", "high"])
+    const { payload } = build(
+      { messages: [], output_config: { effort: "ludicrous" } },
+      model,
+    )
+    expect(payload.reasoning?.effort).toBe("high")
+  })
+
+  test("a non-effort output_config leaves the default path untouched", () => {
+    const model = gptModel(ALL)
+    const { payload } = build(
+      { messages: [], output_config: { schema: { type: "object" } } },
+      model,
+    )
+    expect(payload.reasoning?.effort).toBe("high")
+  })
+
+  test("a model advertising no allowlist honors a recognized tier but drops an unrecognized one", () => {
+    // Nothing to clamp against. A known tier is well-formed so the client's
+    // explicit choice stands; an arbitrary string would become a synthesized
+    // `reasoning.effort` on a payload we build, which is the 400 that
+    // `defaultReasoningEffort` already refuses to risk for this model class.
+    expect(
+      build({ messages: [], output_config: { effort: "xhigh" } }, gptModel())
+        .payload.reasoning?.effort,
+    ).toBe("xhigh")
+    expect(
+      build({ messages: [], output_config: { effort: "ludicrous" } }, gptModel())
+        .payload.reasoning?.effort,
+    ).toBeUndefined()
+  })
+
+  test("a malformed effort falls through to the thinking/default path", () => {
+    const model = gptModel(ALL)
+    for (const bad of [42, null, "", { nested: true }]) {
+      const { payload } = build(
+        { messages: [], output_config: { effort: bad } },
+        model,
+      )
+      expect(payload.reasoning?.effort).toBe("high")
+    }
+  })
+})
+
+// The same tier-ladder invariants, exercised through the shim rather than the
+// passthrough clamp, since the two share EFFORT_ORDER.
+describe("anthropic-translate effort ladder ends (none / max)", () => {
+  test("`none` on a model that lacks it clamps to the LOWEST supported, not the highest", () => {
+    const model = gptModel(["low", "medium", "high"])
+    const { payload } = build(
+      { messages: [], output_config: { effort: "none" } },
+      model,
+    )
+    expect(payload.reasoning?.effort).toBe("low")
+  })
+
+  test("`none` passes through on a model that advertises it", () => {
+    const model = gptModel(["none", "low", "medium", "high", "xhigh"])
+    const { payload } = build(
+      { messages: [], output_config: { effort: "none" } },
+      model,
+    )
+    expect(payload.reasoning?.effort).toBe("none")
+  })
+
+  test("an unrecognized effort does NOT escalate to `max` on a max-capable model", () => {
+    const model = gptModel(["low", "medium", "high", "xhigh", "max"])
+    const { payload } = build(
+      { messages: [], output_config: { effort: "ludicrous" } },
+      model,
+    )
+    expect(payload.reasoning?.effort).toBe("xhigh")
+  })
+
+  test("a thinking budget never reaches `max`, however large", () => {
+    const model = gptModel(["low", "medium", "high", "xhigh", "max"])
+    for (const budget of [24000, 200000, 10_000_000]) {
+      const { payload } = build(
+        { messages: [], thinking: { type: "enabled", budget_tokens: budget } },
+        model,
+      )
+      expect(payload.reasoning?.effort).toBe("xhigh")
+    }
+  })
+})

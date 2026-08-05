@@ -11,7 +11,7 @@ import {
 import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
-import { EFFORT_ORDER, bucketEffort, clampEffort } from "~/lib/reasoning-effort"
+import { EFFORT_ORDER, UNKNOWN_EFFORT_ANCHOR, bucketEffort, clampEffort } from "~/lib/reasoning-effort"
 import { logRequest, logRequestFields } from "~/lib/request-log"
 import { MAX_RESPONSE_BODY_BYTES, readResponseBodyCapped } from "~/lib/response-cap"
 import { sanitizeAnthropicBody } from "~/lib/sanitize-anthropic-body"
@@ -753,11 +753,11 @@ export function clampOutputConfigEffortInPlace(
   if (supported.includes(current)) return false
   // Pass the current effort through `clampEffort` if it is a known
   // EFFORT_ORDER bucket; otherwise fall back to picking the nearest
-  // supported tier by treating unknown values as `xhigh` (so we always
+  // supported tier by treating unknown values as the TOP tier (so we always
   // clamp DOWN to the highest supported, never up).
   const bucketed = (EFFORT_ORDER as ReadonlyArray<string>).includes(current)
     ? (current as (typeof EFFORT_ORDER)[number])
-    : "xhigh"
+    : UNKNOWN_EFFORT_ANCHOR
   const clamped = clampEffort(bucketed, supported)
   if (clamped === current) return false
   oc.effort = clamped

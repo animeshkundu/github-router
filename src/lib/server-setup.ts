@@ -8,6 +8,7 @@ import { createBodyTooLargeError, limitRequestBody } from "srvx/body-limit"
 import { PATHS, ensurePaths } from "./paths"
 import { maybeSpawnDaemon, wireDaemonTeardown } from "./first-mate/scheduler/autospawn"
 import { agentToolsEnabled } from "./mcp-capabilities"
+import { withOneMSuffix } from "./one-m-context"
 import { generateRandomPort } from "./port"
 import { initProxyFromEnv } from "./proxy"
 import { state } from "./state"
@@ -642,9 +643,9 @@ export function parseSharedArgs(args: Record<string, unknown>): {
  *
  * Display labels only: the gateway-model cache schema Claude Code reads is
  * `{id, display_name?}` per model — there is NO per-model context-window
- * field, so context accounting for a selected row uses Claude Code's
- * default window (safe under-accounting: it compacts earlier than the real
- * 1M/400k window, never overflows). See `seedGatewayModelCache`.
+ * field. Context accounting is instead driven off the id itself, via the
+ * `[1m]` literal-bracket suffix `nativeSelectableModelsInCatalog` attaches to
+ * every row the catalog says serves >=1M. See `withOneMSuffix`.
  */
 const NATIVE_NON_CLAUDE_MODELS: ReadonlyArray<{
   id: string
@@ -665,6 +666,15 @@ const NATIVE_NON_CLAUDE_MODELS: ReadonlyArray<{
  * dropped — the caller then neither enables discovery nor writes a cache
  * for it, and lesser tiers see the unchanged picker. Pure (reads
  * `state.models`), so it is unit-testable without side effects.
+ *
+ * The projected id carries a `[1m]` suffix when the catalog advertises a
+ * >=1M window for it, because Claude Code budgets a gateway-discovered row
+ * at its 200K default otherwise — `gpt-5.6-sol` (1,050,000) would compact at
+ * roughly a fifth of its real window. `withOneMSuffix` is catalog-gated, so
+ * `gpt-5.3-codex` (400K) stays bare and keeps the conservative accounting;
+ * over-budgeting it would trade premature compaction for a hard overflow.
+ * The lookup below still keys off the BARE id — the decoration is applied
+ * only to the value handed to Claude Code.
  */
 export function nativeSelectableModelsInCatalog(): Array<{
   id: string
@@ -674,7 +684,7 @@ export function nativeSelectableModelsInCatalog(): Array<{
   if (!catalog || catalog.length === 0) return []
   const present = new Set(catalog.map((m) => m.id))
   return NATIVE_NON_CLAUDE_MODELS.filter((m) => present.has(m.id)).map((m) => ({
-    id: m.id,
+    id: withOneMSuffix(m.id),
     display_name: m.displayName,
   }))
 }

@@ -30,7 +30,13 @@ import {
 } from "~/services/copilot/responses-request"
 import type { Model } from "~/services/copilot/get-models"
 import { shimDefaultsToXhigh } from "~/lib/openai-frontier"
-import { bucketEffort, clampEffort } from "~/lib/reasoning-effort"
+import {
+  EFFORT_ORDER,
+  UNKNOWN_EFFORT_ANCHOR,
+  bucketEffort,
+  clampEffort,
+  type Effort,
+} from "~/lib/reasoning-effort"
 import { parseBoolEnv } from "~/lib/exec"
 
 type AnyRecord = Record<string, unknown>
@@ -422,6 +428,51 @@ function parseReasoningEffort(
 }
 
 /**
+ * Client-selected reasoning effort in Copilot shape (`output_config.effort`) —
+ * what Claude Code's effort picker puts on the wire.
+ *
+ * This is the highest-precedence signal, matching the rule the passthrough path
+ * already documents ("client-supplied `output_config.effort` always wins",
+ * `routes/messages/handler.ts`). Before it was read here the field survived
+ * every preprocessing step and was then simply dropped by the shim, which made
+ * the picker a no-op on non-Claude models in three distinct ways: alone it fell
+ * through to the `high` default, alongside a `thinking` budget it lost to the
+ * bucketed budget, and alongside `thinking:{type:"adaptive"}` it produced NO
+ * reasoning field at all (the adaptive shape is neither `undefined` nor
+ * `enabled`, so both of the other branches decline it).
+ *
+ * `clampOutputConfigEffortInPlace` has normally already clamped this against the
+ * model's allowlist upstream, but the clamp is repeated here so the shim is
+ * correct when called directly, and so an unrecognized level (a future Copilot
+ * tier) resolves the same way it does on the passthrough path: anchored at
+ * `UNKNOWN_EFFORT_ANCHOR` and clamped DOWN to the highest the model actually
+ * advertises, never up.
+ *
+ * When the model advertises NO allowlist there is nothing to validate against,
+ * so only a recognized tier is honored and anything else declines to the
+ * `thinking`/default chain. Passing an arbitrary string through would let a
+ * typo become a synthesized `reasoning.effort` on a payload we build, which is
+ * the 400 that `defaultReasoningEffort` already refuses to risk by returning
+ * undefined in exactly this case.
+ */
+function parseOutputConfigEffort(
+  body: AnyRecord,
+  model?: Model,
+): string | undefined {
+  const oc = body.output_config
+  if (!oc || typeof oc !== "object") return undefined
+  const effort = (oc as AnyRecord).effort
+  if (typeof effort !== "string" || effort === "") return undefined
+  const known = (EFFORT_ORDER as ReadonlyArray<string>).includes(effort)
+  const supported = model?.capabilities?.supports?.reasoning_effort
+  if (!(Array.isArray(supported) && supported.length > 0)) {
+    return known ? effort : undefined
+  }
+  if (supported.includes(effort)) return effort
+  return clampEffort(known ? (effort as Effort) : UNKNOWN_EFFORT_ANCHOR, supported)
+}
+
+/**
  * Parse an already-JSON-parsed Anthropic Messages body into the neutral shape.
  * `resolvedModel` is the catalog id the request will run on; `model` its
  * catalog entry (for the reasoning-effort allowlist).
@@ -460,9 +511,10 @@ export function parseAnthropicRequest(
     toolChoice: parseToolChoice(body.tool_choice),
     parallelToolCalls: parseDisableParallelToolUse(body.tool_choice),
     reasoningEffort:
-      body.thinking === undefined
+      parseOutputConfigEffort(body, model)
+      ?? (body.thinking === undefined
         ? defaultReasoningEffort(model)
-        : parseReasoningEffort(body.thinking, model),
+        : parseReasoningEffort(body.thinking, model)),
     maxOutputTokens: maxTokens,
     stopSequences: stopSequences && stopSequences.length > 0 ? stopSequences : undefined,
     stream: body.stream === true,

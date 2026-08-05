@@ -405,6 +405,82 @@ describe("clampOutputConfigEffortInPlace", () => {
     clampOutputConfigEffortInPlace(body, modelWithEfforts(["medium"]))
     expect(body.output_config).toEqual({ effort: "medium", schema: { type: "object" } })
   })
+
+  test("`none` on a model that lacks it clamps to the LOWEST supported, not the highest", () => {
+    // `none` is advertised by every gpt-5.x catalog entry but not by gemini.
+    // While it was absent from EFFORT_ORDER it counted as unrecognized, so a
+    // request for the minimum was anchored high and clamped to `high` — the
+    // maximum. Asking for less must never yield more.
+    const body: Record<string, unknown> = { output_config: { effort: "none" } }
+    const mutated = clampOutputConfigEffortInPlace(
+      body,
+      modelWithEfforts(["low", "medium", "high"]),
+    )
+    expect(mutated).toBe(true)
+    expect((body.output_config as { effort: string }).effort).toBe("low")
+  })
+
+  test("`none` passes through untouched on a model that advertises it", () => {
+    const body: Record<string, unknown> = { output_config: { effort: "none" } }
+    const mutated = clampOutputConfigEffortInPlace(
+      body,
+      modelWithEfforts(["none", "low", "medium", "high", "xhigh"]),
+    )
+    expect(mutated).toBe(false)
+    expect((body.output_config as { effort: string }).effort).toBe("none")
+  })
+
+  test("`max` passes through on a model advertising it, and clamps down on one that does not", () => {
+    const supported: Record<string, unknown> = { output_config: { effort: "max" } }
+    expect(
+      clampOutputConfigEffortInPlace(
+        supported,
+        modelWithEfforts(["high", "xhigh", "max"]),
+      ),
+    ).toBe(false)
+    expect((supported.output_config as { effort: string }).effort).toBe("max")
+
+    const unsupported: Record<string, unknown> = { output_config: { effort: "max" } }
+    clampOutputConfigEffortInPlace(unsupported, modelWithEfforts(["low", "medium", "high"]))
+    expect((unsupported.output_config as { effort: string }).effort).toBe("high")
+  })
+
+  test("an unrecognized effort does NOT escalate to `max` on a max-capable model", () => {
+    // The unknown-value anchor is deliberately not the top of the ladder: a
+    // guess must never resolve to the most expensive tier a model offers.
+    const body: Record<string, unknown> = { output_config: { effort: "ludicrous" } }
+    clampOutputConfigEffortInPlace(
+      body,
+      modelWithEfforts(["low", "medium", "high", "xhigh", "max"]),
+    )
+    expect((body.output_config as { effort: string }).effort).toBe("xhigh")
+
+    // The case above resolves on the anchor's own early-return, so it does not
+    // exercise the distance walk. claude-opus-4.6 and claude-sonnet-4.6 really
+    // do advertise `max` WITHOUT `xhigh`, which forces that walk and puts `max`
+    // exactly one tier away — the same distance as `high`. The documented
+    // tie-to-lower rule must keep it off the expensive tier.
+    const noXhigh: Record<string, unknown> = { output_config: { effort: "ludicrous" } }
+    clampOutputConfigEffortInPlace(
+      noXhigh,
+      modelWithEfforts(["low", "medium", "high", "max"]),
+    )
+    expect((noXhigh.output_config as { effort: string }).effort).toBe("high")
+
+    // A known tier the model lacks resolves the same way, for the same reason.
+    const knownTier: Record<string, unknown> = { output_config: { effort: "xhigh" } }
+    clampOutputConfigEffortInPlace(
+      knownTier,
+      modelWithEfforts(["low", "medium", "high", "max"]),
+    )
+    expect((knownTier.output_config as { effort: string }).effort).toBe("high")
+
+    // When `max` is genuinely the only tier on offer it IS selected — there is
+    // nothing lower to fall back to, so this is correct rather than escalation.
+    const onlyMax: Record<string, unknown> = { output_config: { effort: "ludicrous" } }
+    clampOutputConfigEffortInPlace(onlyMax, modelWithEfforts(["max"]))
+    expect((onlyMax.output_config as { effort: string }).effort).toBe("max")
+  })
 })
 
 // --- Phase B P0.2: strip Anthropic-only body fields Copilot 400s on ---

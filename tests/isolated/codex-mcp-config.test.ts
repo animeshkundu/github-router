@@ -17,6 +17,7 @@ import {
 } from "../../src/lib/codex-mcp-config"
 import { PEER_AGENT_MD_FILENAME } from "../../src/lib/paths"
 import { MCP_GROUPS } from "../../src/lib/peer-mcp-personas"
+import { state } from "../../src/lib/state"
 
 const NONCE = "0".repeat(64)
 const URL = "http://127.0.0.1:18787"
@@ -492,6 +493,88 @@ describe("buildPeerAgentDefinitions", () => {
       expect(def.description).toContain("Model is overridable at spawn")
     }
     expect(withoutModel.scout).toBeUndefined()
+  })
+
+  // Claude Code budgets a subagent's context off its frontmatter model id, and
+  // its 1M detector (`/\[1m\]/i`) has no vendor gate. Without the suffix an
+  // `implementer` on a 1,050,000-token model runs against a 200K budget.
+  test("native subagent models carry [1m] iff the catalog advertises >=1M", () => {
+    const saved = state.models
+    const savedOptOut = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+    delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+    const entry = (id: string, ctx: number) => ({
+      id,
+      name: id,
+      object: "model",
+      vendor: "openai",
+      version: "1",
+      preview: false,
+      model_picker_enabled: true,
+      capabilities: {
+        family: "gpt",
+        object: "model_capabilities",
+        tokenizer: "o200k_base",
+        type: "chat",
+        supports: { tool_calls: true },
+        limits: { max_context_window_tokens: ctx },
+      },
+      supported_endpoints: ["/responses"],
+    })
+    try {
+      state.models = {
+        object: "list",
+        data: [
+          entry("gpt-5.6-sol", 1_050_000),
+          entry("gemini-3.1-pro-preview", 1_000_000),
+          entry("gpt-5.6-terra", 1_050_000),
+          // scout's cheap-tier fallback: 400K, must stay bare.
+          entry("gpt-5.4-mini", 400_000),
+        ] as never,
+      }
+      const agents = buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: false,
+        groupKeys: { peers: "peers" },
+        nativeSubagentModel: "gpt-5.6-sol",
+        reviewerModel: "gemini-3.1-pro-preview",
+        brainstormModel: "gemini-3.1-pro-preview",
+        scoutModel: "gpt-5.4-mini",
+        scribeModel: "gpt-5.6-terra",
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+      })
+      expect(agents.implementer!.model).toBe("gpt-5.6-sol[1m]")
+      expect(agents.reviewer!.model).toBe("gemini-3.1-pro-preview[1m]")
+      expect(agents.brainstorm!.model).toBe("gemini-3.1-pro-preview[1m]")
+      expect(agents.scribe!.model).toBe("gpt-5.6-terra[1m]")
+      // Sub-1M: bare, so Claude Code keeps its conservative accounting rather
+      // than over-budgeting a 400K model into an overflow.
+      expect(agents.scout!.model).toBe("gpt-5.4-mini")
+
+      // The decoration is frontmatter-only. Descriptions are prose the lead
+      // reads, so they keep the bare id.
+      expect(agents.implementer!.description).toContain("gpt-5.6-sol")
+      expect(agents.implementer!.description).not.toContain("[1m]")
+      expect(agents.scribe!.description).not.toContain("[1m]")
+
+      // Opt-out suppresses every bracket.
+      process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1"
+      const optedOut = buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: false,
+        groupKeys: { peers: "peers" },
+        nativeSubagentModel: "gpt-5.6-sol",
+        scoutModel: "gpt-5.4-mini",
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+      })
+      expect(optedOut.implementer!.model).toBe("gpt-5.6-sol")
+      expect(optedOut.scout!.model).toBe("gpt-5.4-mini")
+    } finally {
+      state.models = saved
+      if (savedOptOut === undefined) delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+      else process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = savedOptOut
+    }
   })
 
   test("brainstorm's prompt carries the sounding-board contract (verdicts + feasibility screen)", () => {

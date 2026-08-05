@@ -21,7 +21,9 @@
  * Structured Outputs (`response_format` / `output_config.schema`) is NOT
  * emitted: neither Gemini model advertises `structured_outputs`, and the
  * neutral parse carries no structured-output info anyway (the handler strips
- * `output_config` before the shim is reached).
+ * every `output_config` member EXCEPT `effort` before the shim is reached, and
+ * `effort` is consumed by `parseAnthropicRequest` as the highest-precedence
+ * reasoning signal).
  */
 
 import type {

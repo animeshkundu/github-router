@@ -27,7 +27,7 @@ There are two independent gates, and both must be satisfied for a non-Claude
 model to run a Claude Code session end-to-end:
 
 1. **Selection gate (client side)** — Claude Code has to let the user *pick* a
-   non-Claude id. Phase 3 makes the four target models appear as first-class rows
+   non-Claude id. Phase 3 makes the five target models appear as first-class rows
    in Claude Code's `/model` picker by pre-seeding its gateway-model discovery
    cache (see [Phase 3](#phase-3-native-model-selection-gateway-cache-seed)).
    Any explicit selection (`github-router claude -m <id>`) also works without the
@@ -127,7 +127,8 @@ Anthropic → neutral correspondence (both paths):
 | `tools[] {name, input_schema}` | `tools[] {name, parameters}` |
 | `tool_choice {auto\|any\|tool\|none}` | `auto` / `required` / forced-function / `none`; a name-less forced `tool` becomes unset (default applies) rather than silently downgrading to `auto` |
 | `tool_choice.disable_parallel_tool_use: true` | `parallel_tool_calls: false` (only the disable — never sent as `true`) |
-| `thinking {enabled, budget_tokens}` | `reasoning.effort` (bucketed, then clamped to the model allowlist) |
+| `output_config.effort` | `reasoning.effort` (highest precedence, then clamped to the model allowlist) |
+| `thinking {enabled, budget_tokens}` | `reasoning.effort` (bucketed, then clamped to the model allowlist when no explicit `output_config.effort` is present) |
 | `max_tokens` | Responses `max_output_tokens` / chat `max_tokens` |
 | `stop_sequences` | `stop` (best-effort — honored on chat/gemini, accepted-but-ignored on Responses/gpt; see [Fields](#fields)) |
 
@@ -139,29 +140,37 @@ the call failed.
 
 ### Reasoning effort
 
-`thinking.budget_tokens` is bucketed by `bucketEffort` (`<2k→low`, `<8k→medium`,
-`<24k→high`, else `xhigh`; a missing/non-numeric budget defaults to `high`) and
-then `clampEffort`-ed to the model's `capabilities.supports.reasoning_effort`
-allowlist, ties resolving to the lower tier. The clamp is why a Gemini request
-asking for `xhigh` lands on `high` — Gemini's allowlist has no `xhigh`. `off` /
-absent drops the reasoning field entirely.
+The shim resolves reasoning effort in this order: explicit `output_config.effort`,
+then an enabled `thinking.budget_tokens`, then the default for an absent
+`thinking` field. This makes Claude Code's effort picker effective on the shim
+path: an explicit effort no longer falls through to the `high` default when sent
+alone, loses to a thinking budget when both are present, or disappears when sent
+alongside `thinking:{type:"adaptive"}`. The explicit value is clamped to the
+model's `capabilities.supports.reasoning_effort` allowlist when present.
 
-The shim maps a client's reasoning level to the identical provider level: an
-Anthropic `thinking` budget buckets to `low`/`medium`/`high`/`xhigh` and that
-value is what goes upstream, with no floor raising a level the client did not
-ask for. When the request carries no `thinking` block at all there is no client
-level to mirror, so the shim injects `high` for every translated model. Set
+Without an explicit effort, `thinking.budget_tokens` is bucketed by
+`bucketEffort` (`<2k→low`, `<8k→medium`, `<24k→high`, else `xhigh`; a
+missing/non-numeric budget defaults to `high`) and then `clampEffort`-ed to that
+allowlist, ties resolving to the lower tier. The clamp is why a Gemini request
+asking for `xhigh` lands on `high` — Gemini's allowlist has no `xhigh`.
+
+`EFFORT_ORDER` is `["none","low","medium","high","xhigh","max"]`. Both ends are
+reachable only by an explicit `output_config.effort`, never by bucketing: a
+budget is unbounded above, so inventing a `max` threshold would silently re-tier
+existing `xhigh` callers. Listing `none` is load-bearing rather than cosmetic —
+every gpt-5.x catalog entry advertises it, and while it was missing from the
+ladder a client asking for the MINIMUM on a model that lacks it (Gemini offers
+only low/medium/high) counted as unrecognized and clamped to `high`, the
+maximum. An effort that is genuinely unrecognized anchors at
+`UNKNOWN_EFFORT_ANCHOR` (`xhigh`, deliberately NOT the top of the ladder) and
+clamps down, so a guess never resolves to the most expensive tier a model offers.
+
+When the request carries no `thinking` block at all there is no client level to
+mirror, so the shim injects `high` for every translated model. Set
 `GH_ROUTER_FRONTIER_XHIGH_DEFAULT=1` to restore the previous behavior, where the
 OpenAI-frontier models (`gpt-5.6-sol`, `gpt-5.5`) defaulted to `xhigh` instead.
-Any explicit client `thinking` value still wins.
-
-Two limits worth stating plainly rather than calling this a pure identity map.
-The level is bucketed from a token budget (`<2k` low, `<8k` medium, `<24k` high,
-else xhigh), so it is lossy at the boundaries. And `clampEffort` still moves a
-level the target model does not advertise, which is why an `xhigh` request lands
-on `high` for gemini. A model that advertises no `reasoning_effort` allowlist
-gets no `reasoning` field at all, leaving the provider's own default rather than
-`high` — forcing an effort there could 400.
+A model that advertises no `reasoning_effort` allowlist gets no default reasoning
+field, leaving the provider's own default rather than risking a 400.
 
 ### Egress: Responses vs Chat
 
@@ -304,7 +313,7 @@ design already neutralizes the one batching case that does occur.
 **Blast radius** if the contract were violated: a dropped text suffix or a missing
 `thinking` signature on affected turns — a content-fidelity regression, not a
 crash or a lifecycle/leak bug (the stream still terminates cleanly). The empirical
-backstop is the Phase 5 live end-to-end suite that exercises the four target
+backstop is the Phase 5 live end-to-end suite that exercises the five target
 models against real Copilot, which is where a real-world ordering change would
 surface.
 
@@ -382,7 +391,7 @@ honestly rather than papered over:
 
 ## Phase 3: native model selection (gateway cache-seed)
 
-Phase 3 (`src/lib/server-setup.ts`) makes the four target models selectable in
+Phase 3 (`src/lib/server-setup.ts`) makes the five target models selectable in
 Claude Code's `/model` picker WITHOUT a network round-trip and without touching
 the Claude tier defaults.
 
@@ -408,7 +417,7 @@ rename, so a concurrent Claude Code read never sees torn JSON) and (2) enables
 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`. The enable is conditional and
 presence-guarded:
 
-- Only the subset of the four models actually present in the live Copilot catalog
+- Only the subset of the five models actually present in the live Copilot catalog
   is seeded (`nativeSelectableModelsInCatalog`) — license tiers differ, so a
   missing model is silently dropped and lesser tiers see the unchanged picker.
 - Discovery is turned on ONLY when the seed actually landed AND neither the parent
@@ -424,14 +433,18 @@ capability registry and would silently degrade advanced tool use. Phase 3 doesn'
 change that verdict: the network fetch is **permanently blocked** here (the proxy
 always sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and the fetch never reads
 the synthetic OAuth credential), so it can never overwrite the seed. The seed is
-authoritative for the session, and it contains ONLY these four non-Claude ids. The
+authoritative for the session, and it contains ONLY these five non-Claude ids. The
 capability-mapping hazard lived entirely on the fetch path, which stays closed.
 
 **Display labels only / context accounting.** The cache schema is `{id,
-display_name?}` per model — there is no per-model context-window field, so a
-selected row uses Claude Code's default context window. This is safe
-under-accounting: it compacts earlier than the real 1M/400k window, never
-overflows it.
+display_name?}` per model — there is no per-model context-window field, so the
+seed decorates `id` with `[1m]` when that exact catalog entry advertises at least
+1M context and `CLAUDE_CODE_DISABLE_1M_CONTEXT` is unset. Claude Code recognizes
+the literal suffix and accounts a decorated row at 1M; `display_name` remains
+bare. In the current target set this decorates `gpt-5.6-sol`, `gpt-5.5`,
+`gemini-3.5-flash`, and `gemini-3.1-pro-preview`, while 400k `gpt-5.3-codex`
+stays bare because the cache schema has no representation for 400k and
+over-budgeting would risk overflow.
 
 **Version-coupling caveat.** The cache path and schema are Claude Code internals,
 verified against build 2.1.201. This is graceful-degradation-coupled: if a future

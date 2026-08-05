@@ -34,7 +34,7 @@ const SEED_TARGET_IDS = [
   "gemini-3.1-pro-preview",
 ] as const
 
-function catalogModel(id: string) {
+function catalogModel(id: string, contextWindow?: number) {
   return {
     id,
     name: id,
@@ -49,13 +49,35 @@ function catalogModel(id: string) {
       tokenizer: "o200k_base",
       type: "chat",
       supports: { tool_calls: true },
+      ...(contextWindow === undefined
+        ? {}
+        : { limits: { max_context_window_tokens: contextWindow } }),
     },
     supported_endpoints: ["/responses"],
   }
 }
 
 function setCatalog(ids: ReadonlyArray<string>) {
-  state.models = { object: "list", data: ids.map(catalogModel) as never }
+  state.models = { object: "list", data: ids.map((id) => catalogModel(id)) as never }
+}
+
+/** Catalog whose entries advertise a real context window, so the `[1m]`
+ *  decoration in `nativeSelectableModelsInCatalog` has something to gate on. */
+function setCatalogWithWindows(entries: Record<string, number>) {
+  state.models = {
+    object: "list",
+    data: Object.entries(entries).map(([id, ctx]) => catalogModel(id, ctx)) as never,
+  }
+}
+
+/** The live windows as of the enterprise catalog: four of the five targets are
+ *  1M-class, `gpt-5.3-codex` is not. */
+const LIVE_WINDOWS: Record<string, number> = {
+  "gpt-5.6-sol": 1_050_000,
+  "gpt-5.5": 1_050_000,
+  "gpt-5.3-codex": 400_000,
+  "gemini-3.5-flash": 1_000_000,
+  "gemini-3.1-pro-preview": 1_000_000,
 }
 
 // getClaudeCodeEnvVars seeds PATHS.CLAUDE_CONFIG_DIR/cache when the catalog
@@ -77,6 +99,7 @@ function cleanRealCacheArtifact() {
 let savedModels: typeof state.models
 const TOUCHED_ENV = [
   "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+  "CLAUDE_CODE_DISABLE_1M_CONTEXT",
   "ANTHROPIC_DEFAULT_OPUS_MODEL",
   "ANTHROPIC_DEFAULT_SONNET_MODEL",
   "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -125,6 +148,80 @@ describe("nativeSelectableModelsInCatalog", () => {
     // The exact gemini slug is the preview id — never the bare one.
     expect(ids).toContain("gemini-3.1-pro-preview")
     expect(ids).not.toContain("gemini-3.1-pro")
+  })
+})
+
+// Claude Code budgets a gateway-discovered row off the id alone — the cache
+// schema has no context field — and its 1M detector (`/\[1m\]/i`) has no
+// vendor gate. Without the suffix a 1,050,000-token model is accounted at the
+// 200K default and auto-compacts at roughly a fifth of its real window.
+describe("nativeSelectableModelsInCatalog — [1m] context accounting", () => {
+  test("brackets only the ids whose catalog window is >=1M", () => {
+    setCatalogWithWindows(LIVE_WINDOWS)
+    expect(nativeSelectableModelsInCatalog().map((m) => m.id)).toEqual([
+      "gpt-5.6-sol[1m]",
+      "gpt-5.5[1m]",
+      // 400K — deliberately bare. Over-budgeting it would trade premature
+      // compaction for a hard overflow.
+      "gpt-5.3-codex",
+      "gemini-3.5-flash[1m]",
+      "gemini-3.1-pro-preview[1m]",
+    ])
+  })
+
+  test("leaves display_name undecorated", () => {
+    setCatalogWithWindows(LIVE_WINDOWS)
+    const got = nativeSelectableModelsInCatalog()
+    expect(got.map((m) => m.display_name)).toEqual([
+      "GPT-5.6 Sol",
+      "GPT-5.5",
+      "GPT-5.3 Codex",
+      "Gemini 3.5 Flash",
+      "Gemini 3.1 Pro (preview)",
+    ])
+  })
+
+  test("a catalog entry with no advertised window stays bare", () => {
+    // `setCatalog` builds entries without `capabilities.limits`.
+    setCatalog([...SEED_TARGET_IDS])
+    expect(nativeSelectableModelsInCatalog().map((m) => m.id)).toEqual([
+      ...SEED_TARGET_IDS,
+    ])
+  })
+
+  test("a window just under 1M stays bare (threshold is inclusive at 1M)", () => {
+    setCatalogWithWindows({ "gpt-5.5": 999_999, "gpt-5.6-sol": 1_000_000 })
+    expect(nativeSelectableModelsInCatalog().map((m) => m.id)).toEqual([
+      "gpt-5.6-sol[1m]",
+      "gpt-5.5",
+    ])
+  })
+
+  test("CLAUDE_CODE_DISABLE_1M_CONTEXT suppresses every bracket", () => {
+    setCatalogWithWindows(LIVE_WINDOWS)
+    process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1"
+    expect(nativeSelectableModelsInCatalog().map((m) => m.id)).toEqual([
+      ...SEED_TARGET_IDS,
+    ])
+  })
+
+  test("matches Claude Code's presence-based opt-out, where \"0\" also disables", () => {
+    // Claude Code's own gate is a raw truthiness read of the env var, so the
+    // string "0" disables 1M there. The decoration must agree with the
+    // accounting in every case, so it matches the quirk rather than parsing.
+    setCatalogWithWindows(LIVE_WINDOWS)
+    process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "0"
+    expect(nativeSelectableModelsInCatalog().map((m) => m.id)).toEqual([
+      ...SEED_TARGET_IDS,
+    ])
+  })
+
+  test("an empty opt-out value is falsy on both sides, so brackets stay on", () => {
+    setCatalogWithWindows(LIVE_WINDOWS)
+    process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = ""
+    expect(nativeSelectableModelsInCatalog().map((m) => m.id)).toContain(
+      "gpt-5.6-sol[1m]",
+    )
   })
 })
 
