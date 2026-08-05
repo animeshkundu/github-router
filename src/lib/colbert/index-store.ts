@@ -615,7 +615,7 @@ export function indexDirSignature(workspace: string): IndexProgress {
     // probe must agree.
     if (name.includes(".corrupt-")) continue
     const dir = path.join(indicesDir, name)
-    let proj: { path?: string; project_path?: string }
+    let proj: { path?: string; project_path?: string; model?: string }
     try {
       proj = JSON.parse(readFileSync(path.join(dir, "project.json"), "utf8"))
     } catch {
@@ -623,6 +623,17 @@ export function indexDirSignature(workspace: string): IndexProgress {
     }
     const projPath = proj.path ?? proj.project_path
     if (!projPath || canonicalRealpathSync(projPath) !== want) continue
+    // Same model check as `colbertProjectDir`. Without it the two lookups
+    // disagree on a FORKED dir — one written for this workspace under a
+    // different `--model` spelling, which colgrep keys separately. The probe
+    // would then size a directory the router will never serve, and a fork is
+    // frozen (nothing writes to it), so the watchdog would read "no growth"
+    // during a perfectly healthy build of the canonical index and kill it.
+    // That is the exact failure the fail-safe probe exists to prevent,
+    // reachable again through the one comparison that was not unified.
+    // Observed live: signature `observed` while `colbertProjectDir` returned
+    // null, because only the forked dir survived on disk.
+    if (proj.model !== canonicalColbertModelDir()) continue
     const [bytes, count] = dirSizeSync(dir)
     return { kind: "observed", signature: `${bytes}:${count}` }
   }

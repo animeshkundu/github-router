@@ -522,9 +522,10 @@ describe("index progress probe (shared init/search stall signal)", () => {
     fsSync.mkdirSync(ws, { recursive: true })
     const projDir = path.join(PATHS.COLBERT_INDICES_DIR, "probe-proj")
     fsSync.mkdirSync(path.join(projDir, "index"), { recursive: true })
+    const provMod = await import("../../src/lib/colbert/provision")
     fsSync.writeFileSync(
       path.join(projDir, "project.json"),
-      JSON.stringify({ path: ws }),
+      JSON.stringify({ path: ws, model: provMod.canonicalColbertModelDir() }),
     )
     fsSync.writeFileSync(path.join(projDir, "index", "a"), "x".repeat(10))
 
@@ -542,6 +543,33 @@ describe("index progress probe (shared init/search stall signal)", () => {
     expect(probe()).toBe(false)
   })
 
+  test("indexDirSignature ignores a forked dir, agreeing with colbertProjectDir", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const { PATHS } = await import("../../src/lib/paths")
+
+    // A FORKED dir: same workspace, different `--model` spelling. colgrep
+    // keys those separately, so the router must never serve one — and
+    // `colbertProjectDir` already refuses it. The signature probe compared
+    // PATH only, so it happily sized the fork instead. Because a fork is
+    // frozen (nothing writes to it), the watchdog would then read "no
+    // growth" during a healthy build of the CANONICAL index and kill it —
+    // the exact failure the fail-safe probe exists to prevent, reachable
+    // through the one comparison that was not unified. Seen live: signature
+    // `observed` while `colbertProjectDir` returned null.
+    const ws = path.join(TEST_HOME, "probe-forked")
+    fsSync.mkdirSync(ws, { recursive: true })
+    const projDir = path.join(PATHS.COLBERT_INDICES_DIR, "probe-forked-proj")
+    fsSync.mkdirSync(path.join(projDir, "index"), { recursive: true })
+    fsSync.writeFileSync(
+      path.join(projDir, "project.json"),
+      JSON.stringify({ path: ws, model: "/some/other/model/spelling" }),
+    )
+    fsSync.writeFileSync(path.join(projDir, "index", "a"), "x".repeat(10))
+
+    expect(store.indexDirSignature(ws).kind).not.toBe("observed")
+    expect(await store.colbertProjectDir(ws)).toBeNull()
+  })
+
   test("indexDirSignature matches colgrep's Windows extended-length project_path", async () => {
     const store = await import("../../src/lib/colbert/index-store")
     const { PATHS } = await import("../../src/lib/paths")
@@ -557,9 +585,16 @@ describe("index progress probe (shared init/search stall signal)", () => {
 
     const projDir = path.join(PATHS.COLBERT_INDICES_DIR, "probe-extended-proj")
     fsSync.mkdirSync(path.join(projDir, "index"), { recursive: true })
+    // Real colgrep dirs always carry `model` (52 of 53 on the machine where
+    // this was diagnosed; the one exception was a test fixture). Both lookups
+    // require it, so the fixture has to look like the real thing.
+    const prov = await import("../../src/lib/colbert/provision")
     fsSync.writeFileSync(
       path.join(projDir, "project.json"),
-      JSON.stringify({ project_path: stored }),
+      JSON.stringify({
+        project_path: stored,
+        model: prov.canonicalColbertModelDir(),
+      }),
     )
     fsSync.writeFileSync(path.join(projDir, "index", "a"), "x".repeat(10))
 
