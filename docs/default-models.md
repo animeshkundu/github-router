@@ -54,6 +54,10 @@ The proxy handles this with two cooperating pieces:
 
 2. **`resolveModel` Step 0 in `src/lib/utils.ts`** — Strips the bracket before any catalog lookup, delegates to the regular cascade, and re-checks the resolution. If it lands on a 1M backend (Opus 5 or 4.8 base slug, 4.7-1m-internal, 4.6-1m), perfect. If it lands on a non-1M variant (Pro tier for opus, or any `[1m]` on sonnet/haiku where Copilot has no 1M backend), it logs a `warn` and returns the 200K resolution so the request still succeeds. The bracket **never** reaches Copilot.
 
-Forcing 1M off entirely: `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` is Claude Code's HIPAA-compliance opt-out (cc-backup `context.ts:31`). When set, `has1mContext` always returns false regardless of the bracket; the local context window collapses back to 200K.
+The suffix detector itself is model-agnostic: `withOneMSuffix()` in
+`src/lib/one-m-context.ts` gives a concrete catalog id `[1m]` exactly when its
+own live catalog entry advertises at least 1M context. `nativeSelectableModelsInCatalog()` uses it for gateway-cache picker rows, and `buildPeerAgentDefinitions()` uses it only for native-subagent `model:` frontmatter. That keeps a 1M gpt/gemini picker row or subagent from being locally budgeted at 200K, while 400k gpt-5.3-codex and gpt-5.4-mini remain bare. The upstream-facing resolver and model resolvers keep bare ids: brackets are local accounting metadata, not Copilot model ids.
+
+Forcing 1M off entirely: `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` is Claude Code's HIPAA-compliance opt-out (cc-backup `context.ts:31`). The proxy matches Claude Code's raw truthiness gate, so any non-empty value, including `0`, prevents this decoration; the local context window collapses back to 200K.
 
 Round-trip coverage: `tests/lib-utils.test.ts` (`resolveModel [1m]` and `pickClaudeDefault` describe blocks) pins both detection signals across enterprise/non-enterprise/sonnet/haiku behavior, including the Opus-5-no-sibling and the version-anchored false-positive guards.

@@ -6,6 +6,7 @@ import consola from "consola"
 
 import { buildCodexProviderConfigFlags } from "./launch"
 import { buildWorkspaceHeaderHelperCommand } from "./mcp-workspace-header"
+import { withOneMSuffix } from "./one-m-context"
 import { PATHS, writeRuntimeFileSecure } from "./paths"
 import {
   buildAgentPrompt,
@@ -526,7 +527,14 @@ export function buildPeerAgentDefinitions(
   const brainstormModel = nonEmptyModel(opts.brainstormModel)
   const scoutModel = nonEmptyModel(opts.scoutModel)
   const scribeModel = nonEmptyModel(opts.scribeModel)
-  const modelField: { model?: string } = nativeModel ? { model: nativeModel } : {}
+  // `[1m]` decorates the FRONTMATTER value only, never the description text.
+  // Claude Code budgets a subagent's context off its model id, and its detector
+  // (`/\[1m\]/i`) has no vendor gate — so without the suffix an `implementer` on
+  // `gpt-5.6-sol` (1,050,000 tokens) runs against a 200K budget. Catalog-gated,
+  // so `scout` falling back to `gpt-5.4-mini` (400K) correctly stays bare.
+  // Descriptions keep the bare id because that string is prose the lead reads.
+  const modelField: { model?: string } =
+    nativeModel ? { model: withOneMSuffix(nativeModel) } : {}
   const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
   // Inline the `search` server for the read-only natives, same claude-code#30280
   // workaround the peers/workers subagents use: without it the allowlisted
@@ -555,7 +563,7 @@ export function buildPeerAgentDefinitions(
       + "Where the change warrants it, author tests that try to BREAK the implementation (edge cases, error paths, and the acceptance criteria as executable checks), run them, and report which pass and which fail; do NOT modify production code just to make tests pass. "
       + fileToolSteer("builds")
       + " Do the work yourself — do not spawn further subagents. Report severity-ranked findings with `file:line` citations, the evidence behind each, and end with a clear go/no-go.",
-    ...(reviewerModel ? { model: reviewerModel } : {}),
+    ...(reviewerModel ? { model: withOneMSuffix(reviewerModel) } : {}),
   }
   out.brainstorm = {
     description: brainstormModel
@@ -585,7 +593,7 @@ export function buildPeerAgentDefinitions(
       + readOnlyToolSteer()
       + " Do the work yourself — do not spawn further subagents.",
     tools: readOnlyToolAllowlist(searchKey),
-    ...(brainstormModel ? { model: brainstormModel } : {}),
+    ...(brainstormModel ? { model: withOneMSuffix(brainstormModel) } : {}),
     ...searchMcp,
   }
   if (scoutModel) {
@@ -597,7 +605,7 @@ export function buildPeerAgentDefinitions(
         + readOnlyToolSteer()
         + " Do the work yourself — do not spawn further subagents.",
       tools: readOnlyToolAllowlist(searchKey),
-      model: scoutModel,
+      model: withOneMSuffix(scoutModel),
       ...searchMcp,
     }
   }
@@ -611,7 +619,7 @@ export function buildPeerAgentDefinitions(
       + "Prefer updating an existing document over adding a new one, and delete what has become false rather than layering a correction on top of it. "
       + fileToolSteer("builds")
       + " Do the work yourself — do not spawn further subagents. Report which documents changed and any claim you could not verify.",
-    ...(scribeModel ? { model: scribeModel } : {}),
+    ...(scribeModel ? { model: withOneMSuffix(scribeModel) } : {}),
   }
   // Non-blocking workers surface: one `worker-<mode>` DISPATCHER subagent per
   // active worker tool. Each is pinned by a `tools:` allowlist to the workers
