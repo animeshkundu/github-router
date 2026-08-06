@@ -184,7 +184,7 @@ Each subcommand sets environment variables so the child process uses the proxy:
 
 2. Copilot Token:
    GitHub token → POST /copilot_internal/v2/token →
-   Gets short-lived Copilot token (auto-refreshed every ~25 minutes)
+   Gets short-lived Copilot token (auto-refreshed every ~25 minutes). `setupCopilotToken()` returns an idempotent disposer for its refresh interval and unrefs that interval, so it cannot keep a one-shot CLI process alive. `github-router models` disposes it explicitly; long-lived server paths retain it for request-time refreshes.
 
 3. API Requests:
    Copilot token used as Bearer token in Authorization header
@@ -230,6 +230,23 @@ The `/v1/messages` and `/v1/messages/count_tokens` handlers sanitize the request
 3. **Web search tool handling**: `web_search` tools are intercepted, search is performed via Copilot's Chat Threads API, results are injected into the system prompt, and the tool is stripped from the request.
 
 Fast path: sanitization is skipped when `"scope"` does not appear in the raw body string. Model resolution and sanitization share a single JSON parse/serialize pass.
+
+The messages handler records observed raw-body sizes in a bounded 512-request ring.
+`setupAndServe()` registers a once-only `process.on("exit")` report for `start`,
+`claude`, and `codex`, logging the observed count and p50/p95/p99/max body-size
+distribution when at least one request was seen. The telemetry makes the
+request-prologue decision in
+[`research/stage-c-perf-spikes.md`](research/stage-c-perf-spikes.md) measurable
+without retaining request bodies.
+
+It hooks `exit` only, and deliberately registers no SIGINT/SIGTERM handler: those
+signals already carry the keep-awake, ColBERT, worker-agent, browser-session and
+launcher teardowns, and a diagnostic does not get to compete for them. The
+consequence, measured on Windows: a process killed by another process
+(`child.kill()`, `taskkill`) terminates via `TerminateProcess` and dispatches no JS
+event, so no handler runs at all and the line is not printed. Ctrl-C in an
+interactive console and a normal exit both report. This is a measurement aid, not a
+durability guarantee; nothing that must survive a hard kill belongs on this hook.
 
 ## Error Format
 

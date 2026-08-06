@@ -11,6 +11,7 @@ import { agentToolsEnabled } from "./mcp-capabilities"
 import { withOneMSuffix } from "./one-m-context"
 import { generateRandomPort } from "./port"
 import { initProxyFromEnv } from "./proxy"
+import { installBodySizeStatsExitHook } from "./request-log"
 import { state } from "./state"
 import { setupCopilotToken, setupGitHubAgentToken, setupGitHubToken } from "./token"
 import { toolbeltEnabled } from "./toolbelt"
@@ -401,6 +402,11 @@ export async function setupAndServe(
     app.fetch as ServerHandler,
     options.silent,
   )
+
+  // Report the session's request-body distribution on the way out. Registered
+  // here (the one path `start`/`claude`/`codex` all take) rather than in a
+  // per-subcommand shutdown chain, since `start` has none.
+  installBodySizeStatsExitHook()
 
   let srvxServer: ReturnType<typeof serve> | undefined
 

@@ -246,12 +246,30 @@ export function anthropicSseStreamFromEvents(
   const teardownUpstream = (): void => {
     if (tornDown) return
     tornDown = true
-    opts.onCancel?.()
+    // Both halves run even if the first throws. `onCancel` is caller-supplied
+    // (it aborts an AbortController the shim owns); if it ever threw, marking
+    // teardown done and skipping `return()` would strand the generator with
+    // its reader held — the exact leak this function exists to close, arrived
+    // at from the other direction.
+    try {
+      opts.onCancel?.()
+    } catch (err) {
+      consola.warn(
+        `Anthropic-translate onCancel threw during teardown at ${opts.routePath}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
+    }
     // `.catch` is load-bearing: `onCancel` just aborted the upstream fetch, so
     // the generator's pending read rejects and its `finally` can rethrow. An
     // unhandled rejection would kill the process under Node's
     // `--unhandled-rejections=throw`.
-    void events.return?.(undefined as never)?.catch?.(() => undefined)
+    try {
+      void events.return?.(undefined as never)?.catch?.(() => undefined)
+    } catch {
+      // A generator whose `return` throws synchronously is already unusable;
+      // there is nothing further to release.
+    }
   }
 
   return new ReadableStream<Uint8Array>({

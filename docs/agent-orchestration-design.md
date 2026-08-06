@@ -174,6 +174,22 @@ unit-tested, demonstrated executing a real `WorkflowIR` end-to-end (kernel + run
 | `mcp__workers__decompose` | compose a verified IR (driver + cross-lab critic) | wired (worker-gated) |
 | `mcp__workers__run_workflow` | execute a verified IR through the frozen kernel | wired (worker-gated) |
 
+The underlying `runCommandCapture` capture is bounded to 16 MiB of stdout by
+default (`RunOpts.maxStdoutBytes` can lower or raise that per call) and reports
+`RunResult.truncated` when it reaches the cap. It keeps draining but deliberately
+does **not** kill the child, so the command reaches its real exit code: `liveExec`
+maps a null exit code to a failed sealed gate, and killing a successful command for
+printing too much would turn a capture limit into a false typecheck/test failure.
+Its streaming `TextDecoder` also preserves multi-byte characters split across stdout
+chunks. Callers that need complete output must inspect `truncated`; an exit code of
+zero does not mean the captured text is complete.
+
+stderr has its own 64 KiB ceiling and its own `RunResult.stderrTruncated` flag. The
+two are reported separately because they mean different things to a caller:
+truncated stdout loses data, truncated stderr loses a diagnostic. A failing
+compiler often puts the root error at the tail of a long stderr, so a caller that
+surfaces stderr to a human needs to know it is showing a prefix.
+
 Worker modes `worker_plan` + `worker_test` (Phase 0) are wired (the independent test author is the
 one floor-raise a single context can't do).
 

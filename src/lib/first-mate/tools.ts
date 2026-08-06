@@ -27,6 +27,7 @@ import {
   type ScaffoldTestContext,
 } from "~/lib/first-mate/scaffold-spec"
 import {
+  assertScaffoldRepoAllowed,
   createScaffoldBranch,
   createScaffoldPullRequest,
   deleteScaffoldBranch,
@@ -304,7 +305,7 @@ export function createFirstMateTools(
     ),
     tool(
       "scaffold_repo",
-      "Seeds first-mate and agentic-dev convention files into a GitHub repository by creating a scaffold branch, committing deterministic files, and opening a pull request; it does not write directly to the default branch. Inputs name the owner/name repo, optional base ref, handling mode, and optional detection overrides for stack, OS, package manager, commands, and UI evidence. Returns the pull request plus committed, preserved, and per-file report data, or a no-op note when nothing needs seeding. Use when preparing an owned repository for the first-mate cloud-agent workflow. It is not for arbitrary third-party repositories, normal feature work, or repeated runs unless the operator intentionally wants missing or enhanced convention files.",
+      "Seeds first-mate and agentic-dev convention files into a GitHub repository by creating a scaffold branch, committing deterministic files, and opening a pull request; it does not write directly to the default branch. Inputs name the owner/name repo, optional base ref, handling mode, and optional detection overrides for stack, OS, package manager, commands, and UI evidence. Returns the pull request plus committed, preserved, and per-file report data, or a no-op note when nothing needs seeding. Use when preparing an owned repository for the first-mate cloud-agent workflow. Repositories must be allowlisted by the operator via GH_ROUTER_FM_SCAFFOLD_REPOS (unset denies every repository), so a repo outside that list is refused rather than written to. It is not for arbitrary third-party repositories, normal feature work, or repeated runs unless the operator intentionally wants missing or enhanced convention files.",
       objectSchema({
         repo: stringProp("Repository as an owner/name string."),
         mode: enumProp(
@@ -317,6 +318,11 @@ export function createFirstMateTools(
       async (args, signal) => {
         const input = parseScaffoldRepoArgs(args)
         const repo = parseRepoSlug(input.repo)
+        // Enforced BEFORE any GitHub call: this tool creates branches, commits
+        // files, and opens PRs, and `parseRepoSlug` only checks the slug's
+        // shape. See `assertScaffoldRepoAllowed` for why the default is
+        // deny-all rather than allow-all.
+        assertScaffoldRepoAllowed(repo)
         const repository = input.base_ref === undefined
           ? await getRepositoryDetails(repo, signal)
           : { defaultBranch: normalizeBranchRef(input.base_ref) }

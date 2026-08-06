@@ -20,7 +20,19 @@ import { state } from "./state"
 const readGithubToken = () => fs.readFile(PATHS.GITHUB_TOKEN_PATH, "utf8")
 
 /**
- * Replace a credential file atomically: temp + rename.
+ * Backoff for a transient Windows rename failure. On Windows `fs.rename` over
+ * an existing destination transiently fails with EPERM / EBUSY / EACCES when
+ * anything else holds the target open for a moment (antivirus, the search
+ * indexer, a backup agent). Nothing is wrong and the handle closes microseconds
+ * later — but without a retry, a scan landing on the wrong millisecond throws
+ * out of a credential write and costs the user a re-auth. Same delays as
+ * `renameWithRetry` in `~/lib/claude-md-injection`, which documents the
+ * underlying behavior at length.
+ */
+const RENAME_RETRY_DELAYS_MS = [50, 200, 500] as const
+
+/**
+ * Replace a credential file atomically: temp + rename, with bounded retry.
  *
  * A plain `fs.writeFile` truncates the destination before it writes, so a
  * crash, a full disk, or a kill mid-write leaves a truncated token on disk and
@@ -47,7 +59,27 @@ async function writeTokenFileAtomic(
   const tmp = `${filePath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`
   try {
     await fs.writeFile(tmp, token, { mode: 0o600, flag: "wx" })
-    await fs.rename(tmp, filePath)
+
+    let lastErr: unknown
+    let renamed = false
+    for (let attempt = 0; attempt <= RENAME_RETRY_DELAYS_MS.length; attempt++) {
+      try {
+        await fs.rename(tmp, filePath)
+        renamed = true
+        break
+      } catch (err) {
+        lastErr = err
+        // Don't sleep after the final attempt.
+        if (attempt < RENAME_RETRY_DELAYS_MS.length) {
+          await new Promise<void>((resolve) =>
+            setTimeout(resolve, RENAME_RETRY_DELAYS_MS[attempt]),
+          )
+        }
+      }
+    }
+    // A persistent failure (permissions, full disk) still throws: the caller
+    // must not believe a credential was stored when it was not.
+    if (!renamed) throw lastErr
   } catch (err) {
     await fs.unlink(tmp).catch(() => {})
     throw err
@@ -73,10 +105,11 @@ export type StopCopilotTokenRefresh = () => void
  * Fetch the Copilot token and keep it fresh in the background.
  *
  * Returns a disposer that stops the refresh loop. **Long-lived callers**
- * (`start`/`claude`/`codex`) can ignore it — the interval is `unref()`d, so it
- * never holds the event loop open on its own. **One-shot CLI callers** (`models`,
- * `check-usage`) should still call it, so ownership of the timer is explicit
- * rather than implied by a runtime flag.
+ * (`start`/`claude`/`codex`, via `setupAndServe`) can ignore it — the interval
+ * is `unref()`d, so it never holds the event loop open on its own. The one-shot
+ * `models` command calls it, so ownership of the timer is explicit rather than
+ * implied by a runtime flag. (`check-usage` does not call this function at all;
+ * it only needs `setupGitHubToken`.)
  *
  * Both halves are load-bearing, for different failure modes. Without the
  * `unref()`, `github-router models` printed its full correct output and then

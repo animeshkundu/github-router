@@ -7,8 +7,12 @@
 // / heuristic layers (L7). Fast model is invoked only when the cascade
 // returns 0 candidates or N > 1 ambiguous candidates — the user
 // constraint "no false positives, no failure ballooning" is enforced
-// by the disambiguation tie-breakers (multi-candidate within 0.10 of
-// each other → escalate).
+// by the disambiguation tie-breakers: a layer only wins outright when
+// its top candidate beats the runner-up by >= 0.15 (see
+// `hasClearWinner`), otherwise the cascade keeps going and ultimately
+// escalates. The margin is deliberately WIDER than a hair's breadth —
+// it errs toward escalating, which costs a model call, rather than
+// toward guessing, which clicks the wrong element.
 //
 // Pure sync, no I/O, no imports from compressor.ts (would create a
 // cycle once compressor delegates to the cascade as its pre-LLM path).

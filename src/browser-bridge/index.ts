@@ -52,6 +52,7 @@ import { discoveryPath } from "../lib/browser-mcp/bridge-paths"
 // to the browser extension, with per-entry TTL timers so entries are
 // cleaned up even when the extension hangs (MV3 SW dormancy, tab crash).
 import { pendingAdd, pendingDropClient, pendingResolve } from "./pending"
+import { attachWsLifecycle } from "./ws-connection"
 
 // Early-boot trace: write a line to a debug log whenever the bridge
 // process starts. Native-messaging hosts run under the browser so we
@@ -256,31 +257,17 @@ httpServer.on("upgrade", (req, socket: Socket, head) => {
 // Pending requests are now managed by pending.ts (with per-entry TTL timers).
 
 function handleWsConnection(ws: WebSocket): void {
-  let alive = true
-  let misses = 0
-  const heartbeat = setInterval(() => {
-    if (!alive) {
-      misses++
-      if (misses >= HEARTBEAT_MISS_LIMIT) {
-        clearInterval(heartbeat)
-        try {
-          ws.terminate()
-        } catch {
-          // Closing a stale socket can throw; ignore.
-        }
-      }
-    }
-    alive = false
-    try {
-      ws.ping()
-    } catch {
-      // Ping on a half-closed socket — let onclose handle teardown.
-    }
-  }, HEARTBEAT_MS)
-  ws.on("pong", () => {
-    alive = true
-    misses = 0
+  // Heartbeat + teardown live in ws-connection.ts so they are unit-testable
+  // (index.ts is an entry point — importing it starts servers). Message
+  // dispatch stays here because it needs the bridge's request plumbing.
+  attachWsLifecycle(ws, {
+    heartbeatMs: HEARTBEAT_MS,
+    heartbeatMissLimit: HEARTBEAT_MISS_LIMIT,
+    // Drop any pending requests bound to this client so we don't leak memory
+    // if the dispatcher disconnects mid-flight.
+    onTeardown: (client) => pendingDropClient(client),
   })
+
   ws.on("message", (data) => {
     let msg: WsRequest
     try {
@@ -294,20 +281,22 @@ function handleWsConnection(ws: WebSocket): void {
       ws.send(JSON.stringify({ id: msg.id, ok: true, data: { pong: true } }))
       return
     }
-    if (typeof msg.id !== "string" || typeof msg.tool !== "string") return
+    // Narrow explicitly rather than relying on the `"type" in msg` check
+    // above: this is parsed from the wire, so the heartbeat arm being absent
+    // does NOT prove the tool-call arm is present — a peer can send
+    // `{"id":"x"}` and satisfy neither. Validating both fields here is what
+    // the guard below already intended; the cast makes the intent typecheck.
+    // (Surfaced the moment `src/browser-bridge/**` entered `tsc` — this
+    // directory had shipped untypechecked.)
+    const req = msg as Partial<BridgeRequest>
+    if (typeof req.id !== "string" || typeof req.tool !== "string") return
     pendingAdd(
-      msg.id,
+      req.id,
       ws,
       PENDING_TTL_MS,
       (resp) => ws.send(JSON.stringify(resp)),
     )
-    sendToBrowser(msg)
-  })
-  ws.on("close", () => {
-    clearInterval(heartbeat)
-    // Drop any pending requests bound to this client so we don't leak
-    // memory if the dispatcher disconnects mid-flight.
-    pendingDropClient(ws)
+    sendToBrowser(req as BridgeRequest)
   })
 }
 

@@ -140,6 +140,95 @@ test("teardown is idempotent across cancel after an error", async () => {
   expect(cancelCalls).toBe(1)
 })
 
+test("a throwing onCancel does not skip the generator teardown", async () => {
+  // Found by a cross-lab reviewer on the first version of this fix. The
+  // `tornDown` flag was set BEFORE `onCancel` ran, so an `onCancel` that threw
+  // marked teardown complete and skipped `events.return()` entirely — leaving
+  // the generator holding its reader. That is the same leak this function
+  // exists to close, reached from the other direction, and every later
+  // teardown attempt was then blocked by the flag.
+  let returnCalls = 0
+
+  const gen = (async function* (): AsyncGenerator<AnthropicStreamEvent> {
+    try {
+      yield makeMessageStart("msg_throwing_cancel", "gpt-5.5")
+      throw new Error("mid-stream failure")
+    } finally {
+      returnCalls += 1
+    }
+  })()
+
+  const stream = anthropicSseStreamFromEvents(gen, {
+    routePath: "/v1/messages",
+    onCancel: () => {
+      throw new Error("abort controller blew up")
+    },
+  })
+
+  // The stream must still terminate cleanly for the consumer.
+  const body = await drain(stream)
+  expect(body).toContain("event: error")
+
+  // The assertion that matters: the generator's finally still ran.
+  expect(returnCalls).toBe(1)
+})
+
+test("a stall whose abort rejects the parked read does not double-close", async () => {
+  // Raised as a Critical by a cross-lab reviewer: the claim was that the stall
+  // branch's `teardownUpstream()` aborts the fetch, the parked `events.next()`
+  // then rejects with AbortError, that rejection re-enters `pull`'s catch, and
+  // the catch enqueues + closes a SECOND time — a throw inside an async pull,
+  // i.e. an unhandled rejection that kills the proxy.
+  //
+  // It does not happen, for three independent reasons, and this test pins all
+  // three so a future refactor cannot quietly remove them:
+  //   1. the stall branch sets `finished = true` and RETURNS after closing, so
+  //      that invocation of `pull` never reaches the catch;
+  //   2. `nextWithTimeout` attaches a sink (`void pending.catch(...)`) to the
+  //      abandoned read in its `finally`, so the later AbortError is handled;
+  //   3. a subsequent `pull` (if the runtime made one) short-circuits on
+  //      `finished` and only calls the already-guarded `safeClose`.
+  //
+  // Modelled on the shim's real shape: a caller-owned AbortController whose
+  // abort REJECTS the pending upstream read.
+  const aborter = new AbortController()
+  let cancelCalls = 0
+
+  const gen = (async function* (): AsyncGenerator<AnthropicStreamEvent> {
+    yield makeMessageStart("msg_abort_reject", "gpt-5.5")
+    await new Promise<void>((_resolve, reject) => {
+      aborter.signal.addEventListener(
+        "abort",
+        () => {
+          const e = new Error("The operation was aborted.")
+          e.name = "AbortError"
+          reject(e)
+        },
+        { once: true },
+      )
+    })
+  })()
+
+  const stream = anthropicSseStreamFromEvents(gen, {
+    routePath: "/v1/messages",
+    inactivityTimeoutMs: 30,
+    onCancel: () => {
+      cancelCalls += 1
+      aborter.abort()
+    },
+  })
+
+  const body = await drain(stream)
+  // Let any late rejection surface before asserting.
+  await new Promise((r) => setTimeout(r, 50))
+
+  expect(body).toContain("Upstream stalled")
+  expect(cancelCalls).toBe(1)
+  // Exactly one terminal error frame — a double-close would have produced a
+  // second one or thrown.
+  expect(body.split("event: error").length - 1).toBe(1)
+})
+
 test("a stalled upstream still tears down exactly once", async () => {
   // Regression guard on the branch that was already correct, now that it
   // shares the closure with the two that were not.

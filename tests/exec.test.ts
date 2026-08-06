@@ -412,6 +412,24 @@ describe("runCommandCapture: stdout capture bounds", () => {
     const res = await runCommandCapture([node, "-e", 'process.stdout.write("ok")'])
     expect(res.stdout).toBe("ok")
     expect(res.truncated).toBe(false)
+    expect(res.stderrTruncated).toBe(false)
+    expect(res.code).toBe(0)
+  }, 15_000)
+
+  test("a truncated stderr says so, so a clipped diagnostic is not mistaken for the whole one", async () => {
+    // Raised by a cross-lab reviewer: stderr was capped at 64 KiB with NO
+    // signal at all. A failing compiler often puts the root error at the TAIL
+    // of a long stderr, so silently returning the first 64 KiB hands a caller
+    // a prefix that reads like the complete story. Truncation of a diagnostic
+    // is a different fact from truncation of data, hence a separate flag.
+    const script
+      = 'process.stderr.write("e".repeat(200000));process.exit(0)'
+    const res = await runCommandCapture([node, "-e", script])
+
+    expect(res.stderrTruncated).toBe(true)
+    expect(res.stderr.length).toBeLessThanOrEqual(64 * 1024)
+    // stdout is untouched, and the command still reports its real outcome.
+    expect(res.truncated).toBe(false)
     expect(res.code).toBe(0)
   }, 15_000)
 })
@@ -467,6 +485,28 @@ describe("spawnTaskkillBestEffort", () => {
     // Windows and is a no-op elsewhere.
     expect(() => spawnTaskkillBestEffort(999_999_999)).not.toThrow()
   })
+
+  test("a timed-out child is still reaped, so the caller never hangs", async () => {
+    // Found by a cross-lab reviewer. `runInternal` resolves ONLY from the
+    // child's `close` event, so if the kill never lands the promise stays
+    // pending for the life of the process — a worse failure than the crash
+    // this helper was written to prevent. The fix falls back to a
+    // single-process `process.kill` when taskkill itself cannot launch.
+    //
+    // This drives the real timeout path end to end: a child that would run far
+    // longer than the timeout must still settle, and settle as a timeout.
+    const node = resolveExecutable("node") ?? process.execPath
+    const started = Date.now()
+    const res = await runCommandCapture(
+      [node, "-e", "setTimeout(()=>{},60000)"],
+      { timeoutMs: 500 },
+    )
+
+    expect(res.timedOut).toBe(true)
+    // The discriminating part: it RESOLVED. A 60s child against a 0.5s
+    // timeout that resolves in a few seconds proves the kill landed.
+    expect(Date.now() - started).toBeLessThan(20_000)
+  }, 30_000)
 
   test("pins the System32 path rather than the hijackable bare name", async () => {
     // `CreateProcess`'s search order can include the cwd, so a bare

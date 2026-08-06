@@ -276,6 +276,16 @@ export interface RunResult {
    * still ran to completion — check this, never `code`, to detect truncation.
    */
   truncated: boolean
+  /**
+   * True when stderr exceeded its 64 KiB ceiling and was cut short.
+   *
+   * Reported separately from `truncated` because it means something different
+   * to a caller: stdout truncation loses DATA, stderr truncation loses a
+   * DIAGNOSTIC. A failing compiler often puts the root error at the tail of a
+   * long stderr, so a caller that surfaces stderr to a human needs to know it
+   * is looking at a prefix rather than the whole story.
+   */
+  stderrTruncated: boolean
 }
 
 function runInternal(
@@ -315,6 +325,7 @@ function runInternal(
     let stdoutBytes = 0
     let stderrBytes = 0
     let truncated = false
+    let stderrTruncated = false
     let timedOut = false
     let settled = false
     const maxStdoutBytes = opts.maxStdoutBytes ?? DEFAULT_CAPTURE_CAP
@@ -347,9 +358,17 @@ function runInternal(
       stdoutBytes += c.length
     })
     child.stderr?.on("data", (c: Buffer) => {
-      if (stderrBytes >= CAPTURE_STDERR_CAP) return
+      // Already full: this chunk is dropped entirely, which is truncation just
+      // as much as a partial slice is. Flagging only the slicing chunk missed
+      // the common case where the cap lands on a chunk boundary and every
+      // subsequent chunk returns here.
+      if (stderrBytes >= CAPTURE_STDERR_CAP) {
+        stderrTruncated = true
+        return
+      }
       const room = CAPTURE_STDERR_CAP - stderrBytes
       const slice = c.length > room ? c.subarray(0, room) : c
+      if (slice.length < c.length) stderrTruncated = true
       stderr += stderrDecoder.decode(slice, { stream: true })
       stderrBytes += slice.length
     })
@@ -369,8 +388,8 @@ function runInternal(
       // Un-truncated output has no such intent, so a trailing partial there IS
       // malformed input and should surface as U+FFFD rather than vanish.
       if (!truncated) stdout += stdoutDecoder.decode()
-      if (stderrBytes < CAPTURE_STDERR_CAP) stderr += stderrDecoder.decode()
-      resolve({ stdout, stderr, code, timedOut, truncated })
+      if (!stderrTruncated) stderr += stderrDecoder.decode()
+      resolve({ stdout, stderr, code, timedOut, truncated, stderrTruncated })
     }
 
     child.on("error", (err) => {
@@ -401,20 +420,47 @@ function runInternal(
  *      include the cwd, so `"taskkill"` may resolve to a planted binary;
  *      `taskkillExe()` pins `System32\taskkill.exe`.
  */
-export function spawnTaskkillBestEffort(pid: number): void {
+export function spawnTaskkillBestEffort(pid: number): boolean {
   try {
     const child = spawn(taskkillExe(), ["/T", "/F", "/PID", String(pid)], {
       stdio: "ignore",
       windowsHide: true,
     })
     // Load-bearing: see (1) above. Without this an async spawn failure is an
-    // uncaught exception, not a no-op.
+    // uncaught exception, not a no-op. It is NOT a silent swallow, either —
+    // the fallback below is what keeps a caller from hanging.
+    //
+    // (No logging here on purpose: this module has no logger import, and
+    // taking one would pull a dependency into the lowest-level exec helper
+    // that every other module builds on. The fallback is the observable
+    // behavior that matters.)
     child.on("error", () => {
-      // Best-effort by construction — taskkill missing/denied means we cannot
-      // reap this tree, which is exactly the case the caller already tolerates.
+      fallbackKill(pid)
     })
+    return true
   } catch {
-    // Synchronous spawn failure (bad argv shape) — same tolerance.
+    // Synchronous spawn failure (bad argv shape).
+    fallbackKill(pid)
+    return false
+  }
+}
+
+/**
+ * Last-resort single-process kill when `taskkill` itself cannot run.
+ *
+ * Not a tree kill — grandchildren survive — but it is the difference between
+ * "the timed-out child dies and its `close` event settles the caller" and "the
+ * caller waits forever". `runInternal` resolves ONLY from `close`, so a timeout
+ * whose kill never lands leaves that promise pending for the life of the
+ * process, which is a worse failure than the crash `spawnTaskkillBestEffort`
+ * was written to prevent. Best-effort by construction: ESRCH means the child
+ * was already gone, which is the success case.
+ */
+function fallbackKill(pid: number): void {
+  try {
+    process.kill(pid)
+  } catch {
+    // Already exited, or we lack permission — nothing further to try.
   }
 }
 
@@ -674,6 +720,9 @@ export function runManagedExeCapture(
         // name, which callers already branch on) so a caller holding either
         // shape reads the same fact.
         truncated: stdoutTruncated,
+        // This runner slices stderr to fit its own 64 KiB cap without tracking
+        // whether it did, so report the honest thing rather than guess.
+        stderrTruncated: stderrBytes >= STDERR_CAP,
         stalled,
       })
     }
