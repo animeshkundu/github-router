@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
 import os from "node:os"
 import path from "node:path"
@@ -334,27 +334,60 @@ describe("parseIntEnv", () => {
 const REPLACEMENT = "�"
 
 describe("runCommandCapture: stdout capture bounds", () => {
-  // A JS runtime that accepts `-e`. `process.execPath` under `bun test` is
-  // bun, and `bun -e` is NOT `node -e` (bun prints its usage banner), so a
-  // node-shaped script handed to bun exits non-zero and every assertion below
-  // becomes meaningless — which is exactly how the first version of these
-  // tests failed on all six CI jobs while passing here.
+  // These tests need a child that emits a controlled amount of stdout/stderr.
+  // They deliberately do NOT use a JS runtime with `-e`:
   //
-  // Resolve node when it is on PATH; otherwise fall back to bun AND switch to
-  // a script both runtimes execute identically. `runCommandCapture` routes
-  // through `buildExecInvocation`, so on Windows the argv is cmd.exe-quoted:
-  // every script must stay SINGLE-LINE.
-  const resolvedNode = resolveExecutable("node")
-  const node = resolvedNode ?? process.execPath
+  //   - `process.execPath` under `bun test` is bun, and `bun -e` is not
+  //     `node -e` (bun prints a usage banner and exits non-zero);
+  //   - `resolveExecutable("node")` is absent on the `ci` job, which never runs
+  //     `setup-node` (only `node-compat` does).
+  //
+  // The first version of these tests tripped on exactly that and failed all six
+  // CI jobs while passing locally. A capture test does not care WHAT produced
+  // the bytes, so the payload goes in a temp FILE and the child just cats it:
+  // `type` on Windows, `cat` elsewhere. Both are always present, neither needs
+  // a runtime, and the bytes are exact.
+  const isWin = process.platform === "win32"
+  let tmpDir = ""
 
-  /** Guard: the chosen runtime must actually run a `-e` script. */
-  test("the child runtime used by these tests works", async () => {
-    // Fails loudly rather than letting every test below silently assert
-    // against a non-running child.
-    const res = await runCommandCapture([node, "-e", 'process.stdout.write("probe")'])
-    expect(res.code).toBe(0)
-    expect(res.stdout).toBe("probe")
-  }, 15_000)
+  beforeAll(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "ghr-capture-"))
+  })
+  afterAll(async () => {
+    if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true })
+  })
+
+  /** Write `content` to a temp file and return argv that cats it to stdout. */
+  const catFile = async (name: string, content: string): Promise<Array<string>> => {
+    const file = path.join(tmpDir, name)
+    await fs.writeFile(file, content, "utf8")
+    return isWin ? ["cmd", "/d", "/s", "/c", "type", file] : ["cat", file]
+  }
+
+  /**
+   * Same, but the child writes to stderr.
+   *
+   * The redirect lives inside a SCRIPT FILE rather than in the argv.
+   * `buildExecInvocation` caret-escapes `>` and `&` on Windows — that is its
+   * entire purpose — so a `1>&2` passed as an argument reaches cmd.exe escaped
+   * and it answers "The filename, directory name, or volume label syntax is
+   * incorrect." A `.bat`/`.sh` keeps the redirect out of the command line.
+   */
+  const catFileToStderr = async (
+    name: string,
+    content: string,
+  ): Promise<Array<string>> => {
+    const file = path.join(tmpDir, name)
+    await fs.writeFile(file, content, "utf8")
+    if (isWin) {
+      const bat = path.join(tmpDir, `${name}.bat`)
+      await fs.writeFile(bat, `@echo off\r\ntype "${file}" 1>&2\r\n`, "utf8")
+      return [bat]
+    }
+    const sh = path.join(tmpDir, `${name}.sh`)
+    await fs.writeFile(sh, `#!/bin/sh\ncat "${file}" 1>&2\n`, { mode: 0o755 })
+    return ["sh", sh]
+  }
 
   test("multi-byte characters split across chunk boundaries are not corrupted", async () => {
     // The bug: `stdout += chunk.toString("utf8")` decoded EACH chunk
@@ -404,9 +437,8 @@ describe("runCommandCapture: stdout capture bounds", () => {
     // depend on where the runtime chunks — it asserts the round-trip, which
     // must hold regardless of how the output was split.
     const text = "héllo→wörld✓ ".repeat(20_000) // ~1.2 MB, many chunks
-    const script
-      = `process.stdout.write(${JSON.stringify("héllo→wörld✓ ")}.repeat(20000))`
-    const res = await runCommandCapture([node, "-e", script], {
+    const argv = await catFile("nonascii.txt", text)
+    const res = await runCommandCapture(argv, {
       maxStdoutBytes: 8 * 1024 * 1024,
     })
     expect(res.code).toBe(0)
@@ -420,10 +452,8 @@ describe("runCommandCapture: stdout capture bounds", () => {
     // `code ?? 1` onto a FAILED GATE, so tree-killing the child on overflow
     // would turn "this command printed a lot" into "typecheck failed".
     // Truncation is a capture-side limit, never a command outcome.
-    const script
-      = "let i=0;const t=setInterval(()=>{if(i++>=30){clearInterval(t);process.exit(0)}"
-        + 'else process.stdout.write("x".repeat(1000))},5)'
-    const res = await runCommandCapture([node, "-e", script], {
+    const argv = await catFile("big.txt", "x".repeat(30_000))
+    const res = await runCommandCapture(argv, {
       maxStdoutBytes: 4096,
     })
     expect(res.truncated).toBe(true)
@@ -439,8 +469,8 @@ describe("runCommandCapture: stdout capture bounds", () => {
     // partial code point back, and `finish` must NOT flush it on this path —
     // flushing would emit U+FFFD and turn a clean truncation into apparent
     // corruption. (Caught by this test against the first draft of the fix.)
-    const script = 'process.stdout.write("\\u2192".repeat(500));process.exit(0)'
-    const res = await runCommandCapture([node, "-e", script], {
+    const argv = await catFile("arrows.txt", "→".repeat(500))
+    const res = await runCommandCapture(argv, {
       maxStdoutBytes: 100, // 100 % 3 !== 0, so the cap splits a character
     })
     expect(res.truncated).toBe(true)
@@ -451,7 +481,7 @@ describe("runCommandCapture: stdout capture bounds", () => {
   }, 15_000)
 
   test("output under the cap is unchanged and not flagged truncated", async () => {
-    const res = await runCommandCapture([node, "-e", 'process.stdout.write("ok")'])
+    const res = await runCommandCapture(await catFile("ok.txt", "ok"))
     expect(res.stdout).toBe("ok")
     expect(res.truncated).toBe(false)
     expect(res.stderrTruncated).toBe(false)
@@ -464,9 +494,8 @@ describe("runCommandCapture: stdout capture bounds", () => {
     // of a long stderr, so silently returning the first 64 KiB hands a caller
     // a prefix that reads like the complete story. Truncation of a diagnostic
     // is a different fact from truncation of data, hence a separate flag.
-    const script
-      = 'process.stderr.write("e".repeat(200000));process.exit(0)'
-    const res = await runCommandCapture([node, "-e", script])
+    const argv = await catFileToStderr("bigerr.txt", "e".repeat(200_000))
+    const res = await runCommandCapture(argv)
 
     expect(res.stderrTruncated).toBe(true)
     expect(res.stderr.length).toBeLessThanOrEqual(64 * 1024)
@@ -537,12 +566,15 @@ describe("spawnTaskkillBestEffort", () => {
     //
     // This drives the real timeout path end to end: a child that would run far
     // longer than the timeout must still settle, and settle as a timeout.
-    const node = resolveExecutable("node") ?? process.execPath
+    // Uses a shell sleep rather than a JS runtime, for the same reason as the
+    // capture tests above: the `ci` job has no `node`, and `bun -e` is not
+    // `node -e`.
+    const longRunning
+      = process.platform === "win32"
+        ? ["ping", "-n", "60", "127.0.0.1"]
+        : ["sleep", "60"]
     const started = Date.now()
-    const res = await runCommandCapture(
-      [node, "-e", "setTimeout(()=>{},60000)"],
-      { timeoutMs: 500 },
-    )
+    const res = await runCommandCapture(longRunning, { timeoutMs: 500 })
 
     expect(res.timedOut).toBe(true)
     // The discriminating part: it RESOLVED. A 60s child against a 0.5s
