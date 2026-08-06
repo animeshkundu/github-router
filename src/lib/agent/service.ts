@@ -1724,10 +1724,19 @@ export async function fetchLiveText(
   const maxBytes = Math.min(1024 * 1024, Math.max(1024, opts.maxBytes ?? 64 * 1024))
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), Math.max(100, opts.timeoutMs ?? 10_000))
+  // Tracked out of the `try` so the `catch` can release it: a mid-read throw
+  // (abort, socket reset) otherwise returns with the body still LOCKED and
+  // undrained — a leaked upstream connection. The cap path below already
+  // cancels; only the throw path was missing it. Typed as the minimal
+  // structural shape rather than `ReadableStreamDefaultReader<Uint8Array>`,
+  // which Bun augments with `readMany` and so does not match `getReader()`'s
+  // inferred return here.
+  let openReader: { cancel: () => Promise<void> } | undefined
   try {
     const response = await fetch(url, { method: "GET", redirect: "follow", signal: controller.signal })
     const reader = response.body?.getReader()
     if (!reader) return { ok: response.ok, status: response.status, text: "", finalUrl: response.url }
+    openReader = reader
     const chunks: Uint8Array[] = []
     let size = 0
     while (size < maxBytes) {
@@ -1749,6 +1758,7 @@ export async function fetchLiveText(
       finalUrl: response.url,
     }
   } catch {
+    await openReader?.cancel().catch(() => undefined)
     return { ok: false, status: 0, text: "", finalUrl: url }
   } finally {
     clearTimeout(timeout)

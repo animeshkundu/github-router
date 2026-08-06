@@ -196,6 +196,11 @@ async function readCappedText(response: Response): Promise<string> {
     text += decoder.decode()
   } catch (err) {
     consola.debug("first-mate capi: capped read interrupted:", err)
+    // Load-bearing: a mid-read throw (socket reset, decode failure) otherwise
+    // returns with the body still LOCKED and undrained — a leaked upstream
+    // connection. The cap path above already cancels; only the throw path was
+    // missing it. Same reasoning as `~/lib/worker-agent/tools`' fetch_url loop.
+    await reader.cancel().catch(() => undefined)
   }
   return text.length > MAX_LOG_BYTES ? text.slice(0, MAX_LOG_BYTES) : text
 }

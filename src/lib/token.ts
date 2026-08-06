@@ -63,7 +63,29 @@ const readGithubAgentToken = () =>
 const writeGithubAgentToken = (token: string) =>
   writeTokenFileAtomic(PATHS.GITHUB_AGENT_TOKEN_PATH, token)
 
-export const setupCopilotToken = async () => {
+/**
+ * Stops the background Copilot-token refresh started by
+ * {@link setupCopilotToken}. Idempotent.
+ */
+export type StopCopilotTokenRefresh = () => void
+
+/**
+ * Fetch the Copilot token and keep it fresh in the background.
+ *
+ * Returns a disposer that stops the refresh loop. **Long-lived callers**
+ * (`start`/`claude`/`codex`) can ignore it — the interval is `unref()`d, so it
+ * never holds the event loop open on its own. **One-shot CLI callers** (`models`,
+ * `check-usage`) should still call it, so ownership of the timer is explicit
+ * rather than implied by a runtime flag.
+ *
+ * Both halves are load-bearing, for different failure modes. Without the
+ * `unref()`, `github-router models` printed its full correct output and then
+ * hung forever: its success path just returns (only the failure branches call
+ * `process.exit`), and the un-unref'd interval pinned the event loop. Without
+ * the disposer, that fix would depend on a property no caller can see, so the
+ * next one-shot command would inherit the same trap.
+ */
+export const setupCopilotToken = async (): Promise<StopCopilotTokenRefresh> => {
   const { token, refresh_in } = await getCopilotToken()
   state.copilotToken = token
 
@@ -74,9 +96,19 @@ export const setupCopilotToken = async () => {
   }
 
   const refreshInterval = Math.max((refresh_in - 60) * 1000, 1000)
-  setInterval(() => {
+  const handle = setInterval(() => {
     void refreshCopilotToken("interval")
   }, refreshInterval)
+  // A refresh timer is not a reason for the process to stay alive; it exists
+  // to serve work that is already keeping it alive.
+  handle.unref?.()
+
+  let stopped = false
+  return () => {
+    if (stopped) return
+    stopped = true
+    clearInterval(handle)
+  }
 }
 
 // Single-flight mutex around the refresh fetch. Concurrent triggers (interval

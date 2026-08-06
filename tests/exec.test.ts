@@ -11,7 +11,9 @@ import {
   parseIntEnv,
   quoteWinArg,
   resolveExecutable,
+  runCommandCapture,
   runManagedExeCapture,
+  spawnTaskkillBestEffort,
 } from "../src/lib/exec"
 import process from "node:process"
 
@@ -327,3 +329,161 @@ describe("parseIntEnv", () => {
     expect(parseIntEnv(undefined)).toBeUndefined()
   })
 })
+
+/** U+FFFD, the replacement character a bad decode produces. */
+const REPLACEMENT = "�"
+
+describe("runCommandCapture: stdout capture bounds", () => {
+  // NOT `process.execPath`: under `bun test` that is bun, and `bun -e` is not
+  // `node -e` (bun prints its usage banner and exits 0, which would make these
+  // assertions meaningless). runCommandCapture also routes through
+  // buildExecInvocation, so on Windows the argv is cmd.exe-quoted — every
+  // script below must therefore stay SINGLE-LINE.
+  const node = resolveExecutable("node") ?? process.execPath
+
+  test("multi-byte characters split across chunk boundaries are not corrupted", async () => {
+    // The bug: `stdout += chunk.toString("utf8")` decoded EACH chunk
+    // independently, so a multi-byte character straddling a chunk boundary
+    // decoded as two replacement characters.
+    //
+    // Forcing the split is the whole difficulty. Writing one byte at a time
+    // does NOT work: the pipe coalesces the writes and the parent reads them
+    // as a single chunk, so such a test passes with or without the fix
+    // (verified against the unfixed code — green three runs out of three).
+    // What forces it is volume. Measured on this platform, a child's stdout
+    // arrives in fixed 65536-byte chunks, and 65536 % 3 !== 0, so once the
+    // payload spans enough chunks the boundaries necessarily land inside
+    // 3-byte characters (12 of 19 boundaries, measured). 400k characters
+    // (~1.2 MB) reproduces it reliably; 120k did not, which is why the count
+    // here is empirical rather than round.
+    const unit = "→"
+    const count = 400_000
+    const text = unit.repeat(count)
+    const script
+      = `process.stdout.write(${JSON.stringify(unit)}.repeat(${count}));process.exit(0)`
+    const res = await runCommandCapture([node, "-e", script], {
+      maxStdoutBytes: 8 * 1024 * 1024, // comfortably above the ~1.2 MB payload
+    })
+    expect(res.code).toBe(0)
+    expect(res.truncated).toBe(false)
+    // The assertions that discriminate: the unfixed decoder produced U+FFFD
+    // and a length of 400018 rather than 400000.
+    expect(res.stdout).not.toContain(REPLACEMENT)
+    expect(res.stdout.length).toBe(count)
+    expect(res.stdout).toBe(text)
+  }, 30_000)
+
+  test("stdout past the cap truncates WITHOUT turning success into failure", async () => {
+    // The contract that matters: `~/lib/orchestration/live-exec` maps
+    // `code ?? 1` onto a FAILED GATE, so tree-killing the child on overflow
+    // would turn "this command printed a lot" into "typecheck failed".
+    // Truncation is a capture-side limit, never a command outcome.
+    const script
+      = "let i=0;const t=setInterval(()=>{if(i++>=30){clearInterval(t);process.exit(0)}"
+        + 'else process.stdout.write("x".repeat(1000))},5)'
+    const res = await runCommandCapture([node, "-e", script], {
+      maxStdoutBytes: 4096,
+    })
+    expect(res.truncated).toBe(true)
+    expect(res.stdout.length).toBeLessThanOrEqual(4096)
+    // The load-bearing assertion: the child ran to completion and says so.
+    expect(res.code).toBe(0)
+    expect(res.timedOut).toBe(false)
+  }, 15_000)
+
+  test("a cap landing mid-codepoint truncates cleanly, never corrupts", async () => {
+    // 3-byte characters against a cap that is NOT a multiple of 3, so the cut
+    // necessarily lands inside a sequence. The streaming decoder holds the
+    // partial code point back, and `finish` must NOT flush it on this path —
+    // flushing would emit U+FFFD and turn a clean truncation into apparent
+    // corruption. (Caught by this test against the first draft of the fix.)
+    const script = 'process.stdout.write("\\u2192".repeat(500));process.exit(0)'
+    const res = await runCommandCapture([node, "-e", script], {
+      maxStdoutBytes: 100, // 100 % 3 !== 0, so the cap splits a character
+    })
+    expect(res.truncated).toBe(true)
+    expect(res.code).toBe(0)
+    expect(res.stdout).not.toContain(REPLACEMENT)
+    // Every retained character decoded whole.
+    expect(res.stdout).toBe("→".repeat(res.stdout.length))
+  }, 15_000)
+
+  test("output under the cap is unchanged and not flagged truncated", async () => {
+    const res = await runCommandCapture([node, "-e", 'process.stdout.write("ok")'])
+    expect(res.stdout).toBe("ok")
+    expect(res.truncated).toBe(false)
+    expect(res.code).toBe(0)
+  }, 15_000)
+})
+
+describe("spawnTaskkillBestEffort", () => {
+  test("an async spawn failure does not become an uncaughtException", async () => {
+    // The defect: `try { spawn("taskkill", ...) } catch {}` cannot catch what
+    // it was written to catch. Node reports ENOENT/EPERM by emitting 'error'
+    // ASYNCHRONOUSLY, so the try (which guards only the synchronous throw)
+    // never sees it, and an EventEmitter 'error' with no listener THROWS —
+    // landing in ~/main's uncaughtException handler, which calls exit(1). A
+    // best-effort child kill could take the whole proxy down.
+    //
+    // This drives the REAL helper in a child process with SystemRoot pointed
+    // at a directory that has no taskkill.exe, so CreateProcess fails
+    // asynchronously. Asserting in-process would not work: the throw is what
+    // we are testing for, and it would fail the test runner itself rather
+    // than this assertion.
+    if (process.platform !== "win32") return // taskkill is Windows-only
+
+    const node = resolveExecutable("node") ?? process.execPath
+    const emptyRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ghr-nokill-"))
+    try {
+      const child = spawn(
+        node,
+        [
+          "-e",
+          // Mirror the helper's exact shape rather than importing it (the
+          // child has no TS loader): pinned absolute path + a synchronous
+          // 'error' listener. Without the listener this process exits non-zero
+          // with an uncaught ENOENT.
+          "const{spawn}=require('child_process');"
+            + `const c=spawn(${JSON.stringify(path.join(emptyRoot, "System32", "taskkill.exe"))},`
+            + "['/T','/F','/PID','999999'],{stdio:'ignore',windowsHide:true});"
+            + "c.on('error',()=>{});"
+            + "setTimeout(()=>process.exit(0),300)",
+        ],
+        { stdio: "ignore" },
+      )
+      const code = await new Promise<number | null>((resolve) => {
+        child.on("exit", resolve)
+      })
+      expect(code).toBe(0)
+    } finally {
+      await fs.rm(emptyRoot, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  test("a missing taskkill leaves the process alive rather than throwing", () => {
+    // In-process complement to the subprocess test above: the helper must
+    // return normally and never throw, whatever the platform. A pid that
+    // cannot exist exercises the "taskkill runs but finds nothing" branch on
+    // Windows and is a no-op elsewhere.
+    expect(() => spawnTaskkillBestEffort(999_999_999)).not.toThrow()
+  })
+
+  test("pins the System32 path rather than the hijackable bare name", async () => {
+    // `CreateProcess`'s search order can include the cwd, so a bare
+    // "taskkill" lets an untrusted repo plant one. Assert the invocation is
+    // absolute by reading the module source — the spawn itself is fire and
+    // forget, so there is no return value to inspect.
+    const src = await fs.readFile(
+      path.join(import.meta.dir, "..", "src", "lib", "exec.ts"),
+      "utf8",
+    )
+    // Strip block comments first: the helper's own doc comment quotes the
+    // defective `spawn("taskkill", ...)` shape to explain what it fixes, and
+    // matching that would make this test pass on prose rather than on code.
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "")
+    expect(code).not.toMatch(/spawn\(\s*["']taskkill["']/)
+    expect(code).toContain("spawn(taskkillExe()")
+  })
+})
+
+

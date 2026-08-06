@@ -79,6 +79,11 @@ export async function readResponseBodyCapped<T>(
     // Read error after cap cancel is expected; anything else is unusual.
     if (!capped) {
       consola.warn(`readResponseBodyCapped: read error at ${routePath}:`, err)
+      // Load-bearing: without this the body stays LOCKED and undrained on a
+      // mid-read throw — a leaked upstream connection. The cap path above
+      // already cancels (hence the `!capped` guard, which avoids a redundant
+      // second cancel); only the throw path was missing it.
+      await reader.cancel().catch(() => undefined)
     }
   }
 

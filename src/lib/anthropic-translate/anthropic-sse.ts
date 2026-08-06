@@ -221,6 +221,39 @@ export function anthropicSseStreamFromEvents(
     }
   }
 
+  /**
+   * Tear down the upstream, exactly once, on a PREMATURE end of stream.
+   *
+   * Called from the three places a stream can end early — the stall branch,
+   * the error branch, and consumer `cancel()` — because all three leave the
+   * upstream fetch running and the generator suspended. Both halves matter:
+   * `onCancel` aborts the fetch, and `return()` drives the generator's
+   * `finally`; `return()` alone cannot release a generator parked on a
+   * never-settling await, since it queues behind that await.
+   *
+   * Two things this is deliberately NOT:
+   *
+   *   - **Not a `finally` around `pull`.** `pull` re-enters per chunk, so a
+   *     `finally` there would fire on every successful chunk.
+   *   - **Not called on normal completion** (`res.done`). Aborting an
+   *     AbortController whose fetch has already completed DESTROYS the socket
+   *     instead of returning it to the keep-alive pool, so every successful
+   *     turn would pay a fresh TLS handshake. Premature-only is the whole
+   *     correctness condition, and `tornDown` only makes it idempotent — it
+   *     does not make an unconditional call safe.
+   */
+  let tornDown = false
+  const teardownUpstream = (): void => {
+    if (tornDown) return
+    tornDown = true
+    opts.onCancel?.()
+    // `.catch` is load-bearing: `onCancel` just aborted the upstream fetch, so
+    // the generator's pending read rejects and its `finally` can rethrow. An
+    // unhandled rejection would kill the process under Node's
+    // `--unhandled-rejections=throw`.
+    void events.return?.(undefined as never)?.catch?.(() => undefined)
+  }
+
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       if (consumerCancelled || finished) {
@@ -248,8 +281,7 @@ export function anthropicSseStreamFromEvents(
           )
           // Same teardown as consumer cancel: abort the upstream fetch and
           // drive the generator's finally. Skipping this leaks the fetch.
-          opts.onCancel?.()
-          void events.return?.(undefined as never)?.catch?.(() => undefined)
+          teardownUpstream()
           try {
             controller.enqueue(
               enc.encode(buildAnthropicErrorEvent("timeout_error", message)),
@@ -276,6 +308,12 @@ export function anthropicSseStreamFromEvents(
         consola.error(
           `Anthropic-translate stream interrupted at ${opts.routePath}: ${name}: ${JSON.stringify(message)}`,
         )
+        // Same teardown as the stall branch above. This branch used to do
+        // NEITHER half, so a translation/serialization throw — anything other
+        // than the upstream socket already being dead — left the Copilot fetch
+        // running. `UPSTREAM_FETCH_TIMEOUT_MS` defaults to 0 (disabled by
+        // design), so nothing else would ever have reclaimed it.
+        teardownUpstream()
         try {
           controller.enqueue(enc.encode(buildAnthropicErrorEvent(name, message)))
         } catch (enqueueError) {
@@ -314,14 +352,11 @@ export function anthropicSseStreamFromEvents(
     cancel() {
       consumerCancelled = true
       finished = true
-      opts.onCancel?.()
-      // Drive the generator's finally so it tears down the upstream reader.
-      // `.catch` is load-bearing: `onCancel` above aborts the upstream fetch,
-      // so the generator's pending read rejects and its `finally` can rethrow.
-      // An unhandled rejection here would kill the process under Node's
-      // `--unhandled-rejections=throw` — on the consumer-cancel path, which is
-      // the most common way a stream ends.
-      void events.return?.(undefined as never)?.catch?.(() => undefined)
+      // Consumer cancel is a premature end like the stall and error branches,
+      // so it takes the same teardown. Routing all three through one closure
+      // means a future branch cannot silently omit half of it — which is
+      // exactly how the error branch came to leak.
+      teardownUpstream()
     },
   })
 }
