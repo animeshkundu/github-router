@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 
-import consola from "consola"
+import { readFileSync } from "node:fs"
 import path from "node:path"
 import process from "node:process"
 
@@ -95,37 +95,43 @@ describe("body-size distribution", () => {
     expect(line).toContain("max")
   })
 
-  test("logBodySizeStats actually LOGS, not just returns", () => {
-    // Asserting the return value (above) proves the CONTENT is right but not
-    // that anything is emitted — a fair objection from a cross-lab reviewer:
-    // if the `consola.info` call were deleted the return-value test would stay
-    // green while the operator saw nothing.
+  test("logBodySizeStats routes its line through consola", () => {
+    // A cross-lab critic fairly objected that asserting only the RETURN value
+    // proves the content is right but not that anything is emitted: delete the
+    // `consola.info` call and a return-only test stays green.
     //
-    // So capture too — but capture SAFELY. The original version of these tests
-    // swapped reporters and asserted on what arrived, which made them depend
-    // on whatever ran earlier in the same process (reporters are global, and
-    // `enableFileLogging` replaces them); that is what failed on all six CI
-    // jobs. Here the reporter is installed and restored around ONE call, and
-    // the assertion is only "our line reached a reporter" — not a count of
-    // everything captured, which is the part that was order-dependent.
-    recordBodySize(1024)
-
-    const seen: string[] = []
-    const saved = consola.options.reporters
-    consola.setReporters([
-      {
-        log(obj: { args?: unknown[] }) {
-          seen.push((obj.args ?? []).map((a) => String(a)).join(" "))
-        },
-      },
-    ])
-    try {
-      logBodySizeStats()
-    } finally {
-      consola.setReporters(saved)
-    }
-
-    expect(seen.some((l) => l.includes("request body sizes (n=1)"))).toBe(true)
+    // The obvious answer — swap in a reporter and assert what it captured — is
+    // the defect this file already failed CI for, TWICE. It cannot be made
+    // order-safe here: `enableFileLogging()` (called by the `claude`/`codex`
+    // paths, and reachable from other tests in the same process) sets
+    // `consola.options.stdout`/`stderr` to a null stream and installs a
+    // reporter whose ALLOWED_TYPES is fatal/error/warn only. An `info` line
+    // then reaches no consumer at all — by design, documented at
+    // `file-log-reporter.ts:223-230`. Any capture-based assertion is therefore
+    // a bet on what ran earlier in the process. Measured: green alone, red on
+    // 6/6 CI jobs.
+    //
+    // So assert the WIRING instead of the transport — statically, which no
+    // execution order can perturb. Combined with the return-value test above
+    // (content) and the subprocess test below (the hook fires), the three
+    // together cover what a capture test would have, without the coupling.
+    const src = readFileSync(
+      path.join(import.meta.dir, "..", "src", "lib", "request-log.ts"),
+      "utf8",
+    )
+    // Scope to the BODY of logBodySizeStats. `logRequest` further down also
+    // calls `consola.info(line)`, so a whole-file search matches even when
+    // this function's call is deleted — verified by deleting it and watching
+    // a file-wide version stay green.
+    const start = src.indexOf("export function logBodySizeStats")
+    expect(start).toBeGreaterThan(-1)
+    const body = src.slice(start, src.indexOf("\n}", start))
+    // A line whose FIRST non-space characters are the call, so a commented-out
+    // `// consola.info(line)` does not satisfy it.
+    const callsInfo = body
+      .split("\n")
+      .some((l) => /^\s*consola\.info\(line\)/.test(l))
+    expect(callsInfo).toBe(true)
   })
 
   test("the exit hook reports on a clean exit", async () => {
