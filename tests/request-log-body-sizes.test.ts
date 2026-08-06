@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 
+import consola from "consola"
 import path from "node:path"
 import process from "node:process"
 
@@ -92,6 +93,39 @@ describe("body-size distribution", () => {
     expect(line).toContain("request body sizes (n=2)")
     expect(line).toContain("p50")
     expect(line).toContain("max")
+  })
+
+  test("logBodySizeStats actually LOGS, not just returns", () => {
+    // Asserting the return value (above) proves the CONTENT is right but not
+    // that anything is emitted — a fair objection from a cross-lab reviewer:
+    // if the `consola.info` call were deleted the return-value test would stay
+    // green while the operator saw nothing.
+    //
+    // So capture too — but capture SAFELY. The original version of these tests
+    // swapped reporters and asserted on what arrived, which made them depend
+    // on whatever ran earlier in the same process (reporters are global, and
+    // `enableFileLogging` replaces them); that is what failed on all six CI
+    // jobs. Here the reporter is installed and restored around ONE call, and
+    // the assertion is only "our line reached a reporter" — not a count of
+    // everything captured, which is the part that was order-dependent.
+    recordBodySize(1024)
+
+    const seen: string[] = []
+    const saved = consola.options.reporters
+    consola.setReporters([
+      {
+        log(obj: { args?: unknown[] }) {
+          seen.push((obj.args ?? []).map((a) => String(a)).join(" "))
+        },
+      },
+    ])
+    try {
+      logBodySizeStats()
+    } finally {
+      consola.setReporters(saved)
+    }
+
+    expect(seen.some((l) => l.includes("request body sizes (n=1)"))).toBe(true)
   })
 
   test("the exit hook reports on a clean exit", async () => {
