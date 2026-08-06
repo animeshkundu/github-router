@@ -90,16 +90,22 @@ export function __resetBodySizeStats(): void {
  * an operator or contributor actually asks; anything noisier would be a reason
  * to switch it off.
  */
-export function logBodySizeStats(): void {
+export function logBodySizeStats(): string | undefined {
   const stats = bodySizeStats()
-  if (!stats) return
-  consola.info(
-    `request body sizes (n=${stats.count}): `
-    + `p50 ${formatBytes(stats.p50)}, `
-    + `p95 ${formatBytes(stats.p95)}, `
-    + `p99 ${formatBytes(stats.p99)}, `
-    + `max ${formatBytes(stats.max)}`,
-  )
+  if (!stats) return undefined
+  const line
+    = `request body sizes (n=${stats.count}): `
+      + `p50 ${formatBytes(stats.p50)}, `
+      + `p95 ${formatBytes(stats.p95)}, `
+      + `p99 ${formatBytes(stats.p99)}, `
+      + `max ${formatBytes(stats.max)}`
+  consola.info(line)
+  // Returned as well as logged so a caller (and a test) can assert the CONTENT
+  // without depending on ambient consola state. Reporters are process-global
+  // and other code paths replace them (`enableFileLogging`), so a test that
+  // captures consola output asserts on whatever ran before it — which is how
+  // this file's first version passed locally and failed in CI.
+  return line
 }
 
 /**

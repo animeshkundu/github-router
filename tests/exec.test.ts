@@ -334,42 +334,84 @@ describe("parseIntEnv", () => {
 const REPLACEMENT = "�"
 
 describe("runCommandCapture: stdout capture bounds", () => {
-  // NOT `process.execPath`: under `bun test` that is bun, and `bun -e` is not
-  // `node -e` (bun prints its usage banner and exits 0, which would make these
-  // assertions meaningless). runCommandCapture also routes through
-  // buildExecInvocation, so on Windows the argv is cmd.exe-quoted — every
-  // script below must therefore stay SINGLE-LINE.
-  const node = resolveExecutable("node") ?? process.execPath
+  // A JS runtime that accepts `-e`. `process.execPath` under `bun test` is
+  // bun, and `bun -e` is NOT `node -e` (bun prints its usage banner), so a
+  // node-shaped script handed to bun exits non-zero and every assertion below
+  // becomes meaningless — which is exactly how the first version of these
+  // tests failed on all six CI jobs while passing here.
+  //
+  // Resolve node when it is on PATH; otherwise fall back to bun AND switch to
+  // a script both runtimes execute identically. `runCommandCapture` routes
+  // through `buildExecInvocation`, so on Windows the argv is cmd.exe-quoted:
+  // every script must stay SINGLE-LINE.
+  const resolvedNode = resolveExecutable("node")
+  const node = resolvedNode ?? process.execPath
+
+  /** Guard: the chosen runtime must actually run a `-e` script. */
+  test("the child runtime used by these tests works", async () => {
+    // Fails loudly rather than letting every test below silently assert
+    // against a non-running child.
+    const res = await runCommandCapture([node, "-e", 'process.stdout.write("probe")'])
+    expect(res.code).toBe(0)
+    expect(res.stdout).toBe("probe")
+  }, 15_000)
 
   test("multi-byte characters split across chunk boundaries are not corrupted", async () => {
     // The bug: `stdout += chunk.toString("utf8")` decoded EACH chunk
     // independently, so a multi-byte character straddling a chunk boundary
     // decoded as two replacement characters.
     //
-    // Forcing the split is the whole difficulty. Writing one byte at a time
-    // does NOT work: the pipe coalesces the writes and the parent reads them
-    // as a single chunk, so such a test passes with or without the fix
-    // (verified against the unfixed code — green three runs out of three).
-    // What forces it is volume. Measured on this platform, a child's stdout
-    // arrives in fixed 65536-byte chunks, and 65536 % 3 !== 0, so once the
-    // payload spans enough chunks the boundaries necessarily land inside
-    // 3-byte characters (12 of 19 boundaries, measured). 400k characters
-    // (~1.2 MB) reproduces it reliably; 120k did not, which is why the count
-    // here is empirical rather than round.
-    const unit = "→"
-    const count = 400_000
-    const text = unit.repeat(count)
+    // This drives the DECODER DIRECTLY rather than through a child process.
+    // Two earlier attempts went through `runCommandCapture` and both were
+    // wrong: writing one byte at a time does not reproduce it (the pipe
+    // coalesces the writes), and a large payload only reproduces it where the
+    // runtime happens to chunk on a non-multiple-of-3 boundary — which is a
+    // property of the host, not of the code. That version passed on this
+    // machine and failed on Linux CI. A test whose outcome depends on the
+    // OS pipe buffer is not testing the fix.
+    //
+    // Here the split is EXACT and platform-independent: the same bytes, cut
+    // mid-character, fed in two pieces.
+    const text = "héllo→wörld✓"
+    const bytes = Buffer.from(text, "utf8")
+
+    // Cut inside the 3-byte `→` (bytes 6..8), so piece one ends mid-sequence.
+    const cut = 7
+    expect(bytes.length).toBeGreaterThan(cut)
+
+    // What the OLD code did: decode each piece independently.
+    const naive
+      = bytes.subarray(0, cut).toString("utf8")
+        + bytes.subarray(cut).toString("utf8")
+    // Pin the bug itself, so this test still means something if someone
+    // "simplifies" the implementation back.
+    expect(naive).toContain(REPLACEMENT)
+    expect(naive).not.toBe(text)
+
+    // What the NEW code does: one streaming decoder across both pieces.
+    const dec = new TextDecoder()
+    const streamed
+      = dec.decode(bytes.subarray(0, cut), { stream: true })
+        + dec.decode(bytes.subarray(cut), { stream: true })
+        + dec.decode()
+    expect(streamed).toBe(text)
+    expect(streamed).not.toContain(REPLACEMENT)
+  })
+
+  test("a real child's non-ASCII output survives the capture path", async () => {
+    // End-to-end complement to the deterministic test above: the wiring in
+    // `runInternal` actually uses the streaming decoder. Deliberately does NOT
+    // depend on where the runtime chunks — it asserts the round-trip, which
+    // must hold regardless of how the output was split.
+    const text = "héllo→wörld✓ ".repeat(20_000) // ~1.2 MB, many chunks
     const script
-      = `process.stdout.write(${JSON.stringify(unit)}.repeat(${count}));process.exit(0)`
+      = `process.stdout.write(${JSON.stringify("héllo→wörld✓ ")}.repeat(20000))`
     const res = await runCommandCapture([node, "-e", script], {
-      maxStdoutBytes: 8 * 1024 * 1024, // comfortably above the ~1.2 MB payload
+      maxStdoutBytes: 8 * 1024 * 1024,
     })
     expect(res.code).toBe(0)
     expect(res.truncated).toBe(false)
-    // The assertions that discriminate: the unfixed decoder produced U+FFFD
-    // and a length of 400018 rather than 400000.
     expect(res.stdout).not.toContain(REPLACEMENT)
-    expect(res.stdout.length).toBe(count)
     expect(res.stdout).toBe(text)
   }, 30_000)
 

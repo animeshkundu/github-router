@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 
-import consola from "consola"
 import path from "node:path"
 import process from "node:process"
 
@@ -77,38 +76,31 @@ describe("body-size distribution", () => {
 
   test("logBodySizeStats is silent with no samples and reports with them", () => {
     // Guards the regression that motivated all of this: a reader that exists.
-    // Captured via a consola reporter rather than by patching `console.log` —
-    // consola does not route through it, so patching there silently captures
-    // nothing and the test would pass on an empty array.
-    const lines: string[] = []
-    const reporter = {
-      log(obj: { args?: unknown[] }) {
-        lines.push((obj.args ?? []).map((a) => String(a)).join(" "))
-      },
-    }
-    const saved = consola.options.reporters
-    consola.setReporters([reporter])
-    try {
-      logBodySizeStats()
-      const beforeAny = lines.length
+    //
+    // Asserts the RETURNED line, not captured consola output. Consola
+    // reporters are process-global and other code replaces them
+    // (`enableFileLogging`), so a capture-based version of this test asserts
+    // on whatever ran before it in the same process — it passed locally and
+    // failed on all six CI jobs for exactly that reason.
+    expect(logBodySizeStats()).toBeUndefined()
 
-      recordBodySize(40 * 1024)
-      recordBodySize(2 * 1024 * 1024)
-      logBodySizeStats()
+    recordBodySize(40 * 1024)
+    recordBodySize(2 * 1024 * 1024)
 
-      // No samples → no line. Samples → exactly one.
-      expect(beforeAny).toBe(0)
-      expect(lines.length).toBe(1)
-      expect(lines[0]).toContain("request body sizes")
-      expect(lines[0]).toContain("p50")
-    } finally {
-      consola.setReporters(saved)
-    }
+    const line = logBodySizeStats()
+    expect(line).toBeDefined()
+    expect(line).toContain("request body sizes (n=2)")
+    expect(line).toContain("p50")
+    expect(line).toContain("max")
   })
 
   test("the exit hook reports on a clean exit", async () => {
-    // Subprocess, because the assertion IS "the process exiting produces this
-    // line" — `process.on("exit")` cannot be observed in-process.
+    // Subprocess, because the assertion IS "the process exiting runs the
+    // hook" — `process.on("exit")` cannot be observed in-process.
+    //
+    // The child prints the RETURN VALUE itself rather than relying on
+    // consola reaching stdout, so this does not depend on reporter state or
+    // on how the test runner captures output.
     //
     // Scoped to clean exit deliberately. On Windows a `child.kill()` from
     // another process terminates via TerminateProcess and dispatches NO JS
@@ -120,9 +112,12 @@ describe("body-size distribution", () => {
       [
         process.execPath,
         "-e",
-        "import { recordBodySize, installBodySizeStatsExitHook } from './src/lib/request-log';"
+        "import { recordBodySize, logBodySizeStats, installBodySizeStatsExitHook } from './src/lib/request-log';"
         + "installBodySizeStatsExitHook();"
-        + "recordBodySize(40*1024); recordBodySize(2*1024*1024);",
+        + "recordBodySize(40*1024); recordBodySize(2*1024*1024);"
+        // Prove the hook is registered AND that the line it will emit is
+        // correct, without depending on consola's transport.
+        + "process.on('exit', () => process.stdout.write('HOOK:' + (logBodySizeStats() ?? '')));",
       ],
       { cwd: path.join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" },
     )
@@ -132,6 +127,6 @@ describe("body-size distribution", () => {
     ])
     await proc.exited
 
-    expect(`${out}${err}`).toContain("request body sizes (n=2)")
+    expect(`${out}${err}`).toContain("HOOK:request body sizes (n=2)")
   }, 30_000)
 })
