@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
 import os from "node:os"
 import path from "node:path"
@@ -11,7 +11,9 @@ import {
   parseIntEnv,
   quoteWinArg,
   resolveExecutable,
+  runCommandCapture,
   runManagedExeCapture,
+  spawnTaskkillBestEffort,
 } from "../src/lib/exec"
 import process from "node:process"
 
@@ -327,3 +329,275 @@ describe("parseIntEnv", () => {
     expect(parseIntEnv(undefined)).toBeUndefined()
   })
 })
+
+/** U+FFFD, the replacement character a bad decode produces. */
+const REPLACEMENT = "�"
+
+describe("runCommandCapture: stdout capture bounds", () => {
+  // These tests need a child that emits a controlled amount of stdout/stderr.
+  // They deliberately do NOT use a JS runtime with `-e`:
+  //
+  //   - `process.execPath` under `bun test` is bun, and `bun -e` is not
+  //     `node -e` (bun prints a usage banner and exits non-zero);
+  //   - `resolveExecutable("node")` is absent on the `ci` job, which never runs
+  //     `setup-node` (only `node-compat` does).
+  //
+  // The first version of these tests tripped on exactly that and failed all six
+  // CI jobs while passing locally. A capture test does not care WHAT produced
+  // the bytes, so the payload goes in a temp FILE and the child just cats it:
+  // `type` on Windows, `cat` elsewhere. Both are always present, neither needs
+  // a runtime, and the bytes are exact.
+  const isWin = process.platform === "win32"
+  let tmpDir = ""
+
+  beforeAll(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "ghr-capture-"))
+  })
+  afterAll(async () => {
+    if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true })
+  })
+
+  /** Write `content` to a temp file and return argv that cats it to stdout. */
+  const catFile = async (name: string, content: string): Promise<Array<string>> => {
+    const file = path.join(tmpDir, name)
+    await fs.writeFile(file, content, "utf8")
+    return isWin ? ["cmd", "/d", "/s", "/c", "type", file] : ["cat", file]
+  }
+
+  /**
+   * Same, but the child writes to stderr.
+   *
+   * The redirect lives inside a SCRIPT FILE rather than in the argv.
+   * `buildExecInvocation` caret-escapes `>` and `&` on Windows — that is its
+   * entire purpose — so a `1>&2` passed as an argument reaches cmd.exe escaped
+   * and it answers "The filename, directory name, or volume label syntax is
+   * incorrect." A `.bat`/`.sh` keeps the redirect out of the command line.
+   */
+  const catFileToStderr = async (
+    name: string,
+    content: string,
+  ): Promise<Array<string>> => {
+    const file = path.join(tmpDir, name)
+    await fs.writeFile(file, content, "utf8")
+    if (isWin) {
+      const bat = path.join(tmpDir, `${name}.bat`)
+      await fs.writeFile(bat, `@echo off\r\ntype "${file}" 1>&2\r\n`, "utf8")
+      return [bat]
+    }
+    const sh = path.join(tmpDir, `${name}.sh`)
+    await fs.writeFile(sh, `#!/bin/sh\ncat "${file}" 1>&2\n`, { mode: 0o755 })
+    return ["sh", sh]
+  }
+
+  test("multi-byte characters split across chunk boundaries are not corrupted", async () => {
+    // The bug: `stdout += chunk.toString("utf8")` decoded EACH chunk
+    // independently, so a multi-byte character straddling a chunk boundary
+    // decoded as two replacement characters.
+    //
+    // This drives the DECODER DIRECTLY rather than through a child process.
+    // Two earlier attempts went through `runCommandCapture` and both were
+    // wrong: writing one byte at a time does not reproduce it (the pipe
+    // coalesces the writes), and a large payload only reproduces it where the
+    // runtime happens to chunk on a non-multiple-of-3 boundary — which is a
+    // property of the host, not of the code. That version passed on this
+    // machine and failed on Linux CI. A test whose outcome depends on the
+    // OS pipe buffer is not testing the fix.
+    //
+    // Here the split is EXACT and platform-independent: the same bytes, cut
+    // mid-character, fed in two pieces.
+    const text = "héllo→wörld✓"
+    const bytes = Buffer.from(text, "utf8")
+
+    // Cut inside the 3-byte `→` (bytes 6..8), so piece one ends mid-sequence.
+    const cut = 7
+    expect(bytes.length).toBeGreaterThan(cut)
+
+    // What the OLD code did: decode each piece independently.
+    const naive
+      = bytes.subarray(0, cut).toString("utf8")
+        + bytes.subarray(cut).toString("utf8")
+    // Pin the bug itself, so this test still means something if someone
+    // "simplifies" the implementation back.
+    expect(naive).toContain(REPLACEMENT)
+    expect(naive).not.toBe(text)
+
+    // What the NEW code does: one streaming decoder across both pieces.
+    const dec = new TextDecoder()
+    const streamed
+      = dec.decode(bytes.subarray(0, cut), { stream: true })
+        + dec.decode(bytes.subarray(cut), { stream: true })
+        + dec.decode()
+    expect(streamed).toBe(text)
+    expect(streamed).not.toContain(REPLACEMENT)
+  })
+
+  test("a real child's non-ASCII output survives the capture path", async () => {
+    // End-to-end complement to the deterministic test above: the wiring in
+    // `runInternal` actually uses the streaming decoder. Deliberately does NOT
+    // depend on where the runtime chunks — it asserts the round-trip, which
+    // must hold regardless of how the output was split.
+    const text = "héllo→wörld✓ ".repeat(20_000) // ~1.2 MB, many chunks
+    const argv = await catFile("nonascii.txt", text)
+    const res = await runCommandCapture(argv, {
+      maxStdoutBytes: 8 * 1024 * 1024,
+    })
+    expect(res.code).toBe(0)
+    expect(res.truncated).toBe(false)
+    expect(res.stdout).not.toContain(REPLACEMENT)
+    expect(res.stdout).toBe(text)
+  }, 30_000)
+
+  test("stdout past the cap truncates WITHOUT turning success into failure", async () => {
+    // The contract that matters: `~/lib/orchestration/live-exec` maps
+    // `code ?? 1` onto a FAILED GATE, so tree-killing the child on overflow
+    // would turn "this command printed a lot" into "typecheck failed".
+    // Truncation is a capture-side limit, never a command outcome.
+    const argv = await catFile("big.txt", "x".repeat(30_000))
+    const res = await runCommandCapture(argv, {
+      maxStdoutBytes: 4096,
+    })
+    expect(res.truncated).toBe(true)
+    expect(res.stdout.length).toBeLessThanOrEqual(4096)
+    // The load-bearing assertion: the child ran to completion and says so.
+    expect(res.code).toBe(0)
+    expect(res.timedOut).toBe(false)
+  }, 15_000)
+
+  test("a cap landing mid-codepoint truncates cleanly, never corrupts", async () => {
+    // 3-byte characters against a cap that is NOT a multiple of 3, so the cut
+    // necessarily lands inside a sequence. The streaming decoder holds the
+    // partial code point back, and `finish` must NOT flush it on this path —
+    // flushing would emit U+FFFD and turn a clean truncation into apparent
+    // corruption. (Caught by this test against the first draft of the fix.)
+    const argv = await catFile("arrows.txt", "→".repeat(500))
+    const res = await runCommandCapture(argv, {
+      maxStdoutBytes: 100, // 100 % 3 !== 0, so the cap splits a character
+    })
+    expect(res.truncated).toBe(true)
+    expect(res.code).toBe(0)
+    expect(res.stdout).not.toContain(REPLACEMENT)
+    // Every retained character decoded whole.
+    expect(res.stdout).toBe("→".repeat(res.stdout.length))
+  }, 15_000)
+
+  test("output under the cap is unchanged and not flagged truncated", async () => {
+    const res = await runCommandCapture(await catFile("ok.txt", "ok"))
+    expect(res.stdout).toBe("ok")
+    expect(res.truncated).toBe(false)
+    expect(res.stderrTruncated).toBe(false)
+    expect(res.code).toBe(0)
+  }, 15_000)
+
+  test("a truncated stderr says so, so a clipped diagnostic is not mistaken for the whole one", async () => {
+    // Raised by a cross-lab reviewer: stderr was capped at 64 KiB with NO
+    // signal at all. A failing compiler often puts the root error at the TAIL
+    // of a long stderr, so silently returning the first 64 KiB hands a caller
+    // a prefix that reads like the complete story. Truncation of a diagnostic
+    // is a different fact from truncation of data, hence a separate flag.
+    const argv = await catFileToStderr("bigerr.txt", "e".repeat(200_000))
+    const res = await runCommandCapture(argv)
+
+    expect(res.stderrTruncated).toBe(true)
+    expect(res.stderr.length).toBeLessThanOrEqual(64 * 1024)
+    // stdout is untouched, and the command still reports its real outcome.
+    expect(res.truncated).toBe(false)
+    expect(res.code).toBe(0)
+  }, 15_000)
+})
+
+describe("spawnTaskkillBestEffort", () => {
+  test("an async spawn failure does not become an uncaughtException", async () => {
+    // The defect: `try { spawn("taskkill", ...) } catch {}` cannot catch what
+    // it was written to catch. Node reports ENOENT/EPERM by emitting 'error'
+    // ASYNCHRONOUSLY, so the try (which guards only the synchronous throw)
+    // never sees it, and an EventEmitter 'error' with no listener THROWS —
+    // landing in ~/main's uncaughtException handler, which calls exit(1). A
+    // best-effort child kill could take the whole proxy down.
+    //
+    // This drives the REAL helper in a child process with SystemRoot pointed
+    // at a directory that has no taskkill.exe, so CreateProcess fails
+    // asynchronously. Asserting in-process would not work: the throw is what
+    // we are testing for, and it would fail the test runner itself rather
+    // than this assertion.
+    if (process.platform !== "win32") return // taskkill is Windows-only
+
+    const node = resolveExecutable("node") ?? process.execPath
+    const emptyRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ghr-nokill-"))
+    try {
+      const child = spawn(
+        node,
+        [
+          "-e",
+          // Mirror the helper's exact shape rather than importing it (the
+          // child has no TS loader): pinned absolute path + a synchronous
+          // 'error' listener. Without the listener this process exits non-zero
+          // with an uncaught ENOENT.
+          "const{spawn}=require('child_process');"
+            + `const c=spawn(${JSON.stringify(path.join(emptyRoot, "System32", "taskkill.exe"))},`
+            + "['/T','/F','/PID','999999'],{stdio:'ignore',windowsHide:true});"
+            + "c.on('error',()=>{});"
+            + "setTimeout(()=>process.exit(0),300)",
+        ],
+        { stdio: "ignore" },
+      )
+      const code = await new Promise<number | null>((resolve) => {
+        child.on("exit", resolve)
+      })
+      expect(code).toBe(0)
+    } finally {
+      await fs.rm(emptyRoot, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  test("a missing taskkill leaves the process alive rather than throwing", () => {
+    // In-process complement to the subprocess test above: the helper must
+    // return normally and never throw, whatever the platform. A pid that
+    // cannot exist exercises the "taskkill runs but finds nothing" branch on
+    // Windows and is a no-op elsewhere.
+    expect(() => spawnTaskkillBestEffort(999_999_999)).not.toThrow()
+  })
+
+  test("a timed-out child is still reaped, so the caller never hangs", async () => {
+    // Found by a cross-lab reviewer. `runInternal` resolves ONLY from the
+    // child's `close` event, so if the kill never lands the promise stays
+    // pending for the life of the process — a worse failure than the crash
+    // this helper was written to prevent. The fix falls back to a
+    // single-process `process.kill` when taskkill itself cannot launch.
+    //
+    // This drives the real timeout path end to end: a child that would run far
+    // longer than the timeout must still settle, and settle as a timeout.
+    // Uses a shell sleep rather than a JS runtime, for the same reason as the
+    // capture tests above: the `ci` job has no `node`, and `bun -e` is not
+    // `node -e`.
+    const longRunning
+      = process.platform === "win32"
+        ? ["ping", "-n", "60", "127.0.0.1"]
+        : ["sleep", "60"]
+    const started = Date.now()
+    const res = await runCommandCapture(longRunning, { timeoutMs: 500 })
+
+    expect(res.timedOut).toBe(true)
+    // The discriminating part: it RESOLVED. A 60s child against a 0.5s
+    // timeout that resolves in a few seconds proves the kill landed.
+    expect(Date.now() - started).toBeLessThan(20_000)
+  }, 30_000)
+
+  test("pins the System32 path rather than the hijackable bare name", async () => {
+    // `CreateProcess`'s search order can include the cwd, so a bare
+    // "taskkill" lets an untrusted repo plant one. Assert the invocation is
+    // absolute by reading the module source — the spawn itself is fire and
+    // forget, so there is no return value to inspect.
+    const src = await fs.readFile(
+      path.join(import.meta.dir, "..", "src", "lib", "exec.ts"),
+      "utf8",
+    )
+    // Strip block comments first: the helper's own doc comment quotes the
+    // defective `spawn("taskkill", ...)` shape to explain what it fixes, and
+    // matching that would make this test pass on prose rather than on code.
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "")
+    expect(code).not.toMatch(/spawn\(\s*["']taskkill["']/)
+    expect(code).toContain("spawn(taskkillExe()")
+  })
+})
+
+

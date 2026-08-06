@@ -4,6 +4,18 @@ The `--browse` flag adds a tool suite to the github-router `/mcp/browser` endpoi
 
 Quick links: the entry point for changes is [`src/lib/browser-mcp/`](../src/lib/browser-mcp/). The extension lives in [`src/browser-ext/`](../src/browser-ext/) and the native-messaging host lives in [`src/browser-bridge/`](../src/browser-bridge/).
 
+## Typecheck boundary
+
+`bun run typecheck` runs both the root `tsc` configuration and
+`tsc -p tsconfig.browser.json`. The second configuration covers
+`src/browser-bridge/**`, the Node native-messaging TypeScript bundled into
+`dist/browser-bridge/index.js`; it was previously excluded from the root check.
+
+`src/browser-ext/**` remains deliberately outside TypeScript checking. It is MV3
+extension JavaScript with `chrome.*` service-worker globals, and needs a third
+configuration plus `@types/chrome`. Adding that coverage is a known follow-up, not a
+claim that the bridge configuration checks the entire browser-control surface.
+
 ## High-level architecture
 
 ```

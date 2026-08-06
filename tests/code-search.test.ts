@@ -1385,6 +1385,22 @@ describe("multi-engine: scan (whole-workspace outline)", () => {
 describe("multi-engine: ast_pattern", () => {
   const sgAvailable = resolveAstGrep() !== null
 
+  // The `test.if(sgAvailable)` gates below are a convenience for contributors
+  // who do not have ast-grep installed — NOT a licence for CI to skip them.
+  // They used to do exactly that: CI installed neither the toolbelt nor
+  // ast-grep, so all six reported green while running nothing, and the whole
+  // `mode:"ast"` surface was unverified on every platform.
+  //
+  // `scripts/ensure-ast-grep.ts` now provisions it before the test step, and
+  // this assertion is what makes a regression LOUD: if provisioning ever
+  // breaks, this fails instead of the six tests quietly vanishing.
+  test.if(process.env.CI === "true")(
+    "ast-grep is available in CI, so the gated tests below actually run",
+    () => {
+      expect(sgAvailable).toBe(true)
+    },
+  )
+
   test.if(sgAvailable)(
     "ast_pattern matches a multi-line construct the default regex misses",
     async () => {

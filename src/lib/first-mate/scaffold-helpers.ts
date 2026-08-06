@@ -1,7 +1,8 @@
 import { ghRest } from "~/lib/agent/rest"
 import type { RepoRef } from "~/lib/agent/types"
 
-export type ScaffoldHelperErrorCode = "invalid-repo" | "invalid-ref" | "api-error"
+export type ScaffoldHelperErrorCode
+  = "invalid-repo" | "invalid-ref" | "api-error" | "repo-not-allowed"
 
 export class ScaffoldHelperError extends Error {
   readonly code: ScaffoldHelperErrorCode
@@ -59,6 +60,62 @@ export function parseRepoSlug(value: string): RepoRef {
     )
   }
   return { owner: parts[0].trim(), repo: parts[1].trim() }
+}
+
+/**
+ * Repositories `scaffold_repo` is permitted to write to.
+ *
+ * `parseRepoSlug` validates SHAPE only, so before this gate any `owner/name`
+ * the agent token could reach was writable. The tool's own description says it
+ * "is not for arbitrary third-party repositories" — that was prose in a model-
+ * facing string, not enforcement.
+ *
+ * Why it matters here specifically: `--browse` ingests arbitrary web content,
+ * and that content reaches a model whose tool surface (under `--agents`, with
+ * the second write-scoped token) includes creating branches, committing files,
+ * and opening PRs. A fetched page that talks a model into naming a different
+ * repo is the realistic version of that risk, and nothing downstream would
+ * have caught it: the branch+PR flow and the human merge gate bound the BLAST
+ * RADIUS of a write, but neither constrains WHICH repo it lands in.
+ *
+ * Configured with `GH_ROUTER_FM_SCAFFOLD_REPOS` as a comma-separated list of
+ * `owner/name` entries; `owner/*` allows a whole org. Matching is
+ * case-insensitive (GitHub logins are). Unset means DENY-ALL rather than
+ * allow-all: a default-open gate is not a gate, and the operator who wants
+ * scaffolding is the one who knows which repos they own. The error names the
+ * env var so the honest use case is one copy-paste away.
+ */
+export function assertScaffoldRepoAllowed(repo: RepoRef): void {
+  const raw = process.env.GH_ROUTER_FM_SCAFFOLD_REPOS ?? ""
+  const patterns = raw
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0)
+
+  const slug = `${repo.owner}/${repo.repo}`.toLowerCase()
+  const allowed = patterns.some(
+    (pattern) =>
+      pattern === slug || pattern === `${repo.owner.toLowerCase()}/*`,
+  )
+  if (allowed) return
+
+  throw new ScaffoldHelperError(
+    "repo-not-allowed",
+    `scaffold_repo refused ${slug}: it is not in the allowlist. This tool creates `
+    + `branches, commits files, and opens pull requests, so it is restricted to `
+    + `repositories the operator has named. Set GH_ROUTER_FM_SCAFFOLD_REPOS to a `
+    + `comma-separated list of owner/name entries (or owner/* for a whole org) to `
+    + `permit it.`
+      + (patterns.length === 0
+        ? " It is currently unset, so every repository is denied."
+        : ""),
+  )
+  // NOTE: the error deliberately does NOT list the configured entries. This
+  // message is a tool result that goes back to the model, and under `--browse`
+  // that model may be acting on untrusted web content. Echoing the allowlist
+  // would turn a denied call into an oracle for the operator's private
+  // repository names. The denied slug plus the env var is everything a
+  // legitimate operator needs; the current value is theirs to read.
 }
 
 export function normalizeBranchRef(value: string): string {

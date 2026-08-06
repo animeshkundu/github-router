@@ -47,13 +47,52 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/**
+ * Backoff for a transient Windows rename failure.
+ *
+ * On Windows `fs.rename` over an existing destination transiently fails with
+ * EPERM / EBUSY / EACCES when anything else holds the target open for even a
+ * moment — antivirus, the search indexer, a backup agent, an editor. Nothing is
+ * wrong; the handle closes microseconds later.
+ *
+ * This matters here more than most places: this function is the durable write
+ * for mission ledgers and decisions. Without a retry, a single AV scan landing
+ * on the wrong millisecond throws out of a state write, and the caller sees a
+ * mission-tracking failure it cannot act on. Observed in the test suite as an
+ * EPERM on `octo__alpha.json`.
+ *
+ * Same delays as `renameWithRetry` in `~/lib/claude-md-injection`, which
+ * documents the underlying Windows behavior at length.
+ */
+const RENAME_RETRY_DELAYS_MS = [50, 200, 500] as const
+
 export async function writeJsonSecure<T>(target: string, value: T): Promise<void> {
   await fs.mkdir(path.dirname(target), { recursive: true })
   const tmp = `${target}.tmp.${process.pid}.${randomBytes(4).toString("hex")}`
   try {
     await fs.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
     await fs.chmod(tmp, 0o600).catch(() => {})
-    await fs.rename(tmp, target)
+
+    let lastErr: unknown
+    let renamed = false
+    for (let attempt = 0; attempt <= RENAME_RETRY_DELAYS_MS.length; attempt++) {
+      try {
+        await fs.rename(tmp, target)
+        renamed = true
+        break
+      } catch (err) {
+        lastErr = err
+        // Don't sleep after the final attempt.
+        if (attempt < RENAME_RETRY_DELAYS_MS.length) {
+          await sleep(RENAME_RETRY_DELAYS_MS[attempt])
+        }
+      }
+    }
+    // Still rethrow after the retries: a persistent failure is a real problem
+    // (permissions, a full disk) and must not be swallowed into a silently
+    // lost state write.
+    if (!renamed) throw lastErr
+
     await fs.chmod(target, 0o600).catch(() => {})
   } catch (err) {
     await fs.unlink(tmp).catch(() => {})

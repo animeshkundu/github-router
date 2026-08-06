@@ -2,7 +2,7 @@ import { defineCommand } from "citty"
 import consola from "consola"
 
 import { ensurePaths } from "./lib/paths"
-import { setupCopilotToken, setupGitHubToken } from "./lib/token"
+import { setupCopilotToken, setupGitHubToken, type StopCopilotTokenRefresh } from "./lib/token"
 import { getModels, type Model } from "./services/copilot/get-models"
 
 export const models = defineCommand({
@@ -27,52 +27,60 @@ export const models = defineCommand({
   async run({ args }) {
     await ensurePaths()
     await setupGitHubToken()
+    // One-shot command: stop the background refresh loop before returning, so
+    // the timer is never what decides whether this process exits. (It is also
+    // `unref()`d, so this is belt-and-braces — but ownership stays explicit.)
+    let stopRefresh: StopCopilotTokenRefresh | undefined
     try {
-      await setupCopilotToken()
+      stopRefresh = await setupCopilotToken()
     } catch (err) {
       consola.error("Failed to obtain Copilot token:", err)
       process.exit(1)
     }
 
-    let catalog: Awaited<ReturnType<typeof getModels>>
     try {
-      catalog = await getModels()
-    } catch (err) {
-      consola.error("Failed to fetch Copilot model catalog:", err)
-      process.exit(1)
-    }
-
-    const all = catalog.data
-    const pattern = args.pattern?.toString().trim()
-    const filtered = pattern ? filterModels(all, pattern) : all
-
-    if (args.json) {
-      process.stdout.write(`${JSON.stringify(filtered, null, 2)}\n`)
-      return
-    }
-
-    if (filtered.length === 0) {
-      consola.warn(
-        `No models matched "${pattern}". ${all.length} models available — try a different substring or run without an argument to list everything.`,
-      )
-      process.exit(1)
-    }
-
-    const grouped = groupByVendor(filtered)
-    const lines: Array<string> = []
-    const header = pattern
-      ? `${filtered.length}/${all.length} models match "${pattern}"`
-      : `${all.length} models available`
-    lines.push(header)
-    lines.push("")
-    for (const [vendor, list] of grouped) {
-      lines.push(`▾ ${vendor} (${list.length})`)
-      for (const model of list) {
-        lines.push(...formatModel(model))
+      let catalog: Awaited<ReturnType<typeof getModels>>
+      try {
+        catalog = await getModels()
+      } catch (err) {
+        consola.error("Failed to fetch Copilot model catalog:", err)
+        process.exit(1)
       }
+
+      const all = catalog.data
+      const pattern = args.pattern?.toString().trim()
+      const filtered = pattern ? filterModels(all, pattern) : all
+
+      if (args.json) {
+        process.stdout.write(`${JSON.stringify(filtered, null, 2)}\n`)
+        return
+      }
+
+      if (filtered.length === 0) {
+        consola.warn(
+          `No models matched "${pattern}". ${all.length} models available — try a different substring or run without an argument to list everything.`,
+        )
+        process.exit(1)
+      }
+
+      const grouped = groupByVendor(filtered)
+      const lines: Array<string> = []
+      const header = pattern
+        ? `${filtered.length}/${all.length} models match "${pattern}"`
+        : `${all.length} models available`
+      lines.push(header)
       lines.push("")
+      for (const [vendor, list] of grouped) {
+        lines.push(`▾ ${vendor} (${list.length})`)
+        for (const model of list) {
+          lines.push(...formatModel(model))
+        }
+        lines.push("")
+      }
+      process.stdout.write(lines.join("\n"))
+    } finally {
+      stopRefresh?.()
     }
-    process.stdout.write(lines.join("\n"))
   },
 })
 

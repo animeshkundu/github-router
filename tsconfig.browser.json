@@ -1,0 +1,25 @@
+{
+  // Typecheck for `src/browser-bridge/**` — 397 LOC of real TypeScript that is
+  // bundled and shipped to `dist/browser-bridge/index.js`, and that the root
+  // tsconfig EXCLUDES. `bun run typecheck` was therefore green partly by
+  // exclusion, on code users actually run under `--browse`.
+  //
+  // It needs its own config rather than a root `include` because the bridge is
+  // a **Node** program (native-messaging over stdio, `ws`, `node:*`), while the
+  // root config targets the proxy's bundler-resolved ESM surface with
+  // `lib: ["ESNext"]` and no DOM/Node globals. That mismatch is the likely
+  // reason the directory was excluded in the first place; the fix is a second
+  // config, not loosening the first.
+  //
+  // `src/browser-ext/**` stays excluded: it is MV3 extension JavaScript
+  // (`chrome.*` globals, service-worker scope), which needs a third environment
+  // and `@types/chrome`. Left as a follow-up rather than pretended-at here.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["src/browser-bridge/**/*.ts"],
+  "exclude": []
+}

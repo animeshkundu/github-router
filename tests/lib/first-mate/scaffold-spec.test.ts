@@ -311,14 +311,22 @@ describe("COPILOT_SETUP_ALLOWED_KEYS", () => {
 describe("scaffold_repo no-op (all files already present)", () => {
   const originalFetch = globalThis.fetch
   const savedToken = state.githubAgentToken
+  const savedAllowlist = process.env.GH_ROUTER_FM_SCAFFOLD_REPOS
 
   afterEach(() => {
     globalThis.fetch = originalFetch
     state.githubAgentToken = savedToken
+    if (savedAllowlist === undefined) delete process.env.GH_ROUTER_FM_SCAFFOLD_REPOS
+    else process.env.GH_ROUTER_FM_SCAFFOLD_REPOS = savedAllowlist
   })
 
   it("commits nothing, opens NO pull request, and creates no branch", async () => {
     state.githubAgentToken = "agent-token"
+    // `scaffold_repo` writes to a real repo (branch + commit + PR), so it is
+    // gated on an operator allowlist that defaults to deny-all. This test is
+    // about the no-op path, not the gate, so opt the fixture repo in
+    // explicitly — which also documents the shape an operator uses.
+    process.env.GH_ROUTER_FM_SCAFFOLD_REPOS = "octo/repo"
 
     const jsonResponse = (body: unknown, status = 200): Response =>
       new Response(JSON.stringify(body), {
@@ -417,5 +425,73 @@ describe("planScaffoldFiles self-heals an inert copilot-setup-steps", () => {
     })
     expect(plan.filesToCommit).toHaveLength(0)
     expect(plan.reports.find((r) => r.path === COPILOT_SETUP_PATH)?.status).toBe("skipped")
+  })
+})
+
+describe("scaffold_repo repository allowlist (end to end)", () => {
+  // The unit-level rules live in tests/first-mate-scaffold-helpers.test.ts.
+  // What THIS pins is that the gate is actually wired into the tool, and that
+  // it fires BEFORE any GitHub call — a gate that runs after the branch is
+  // created has not prevented anything.
+  //
+  // Why the gate exists: `scaffold_repo` creates branches, commits files, and
+  // opens PRs, and its `repo` argument was a free-form owner/name string that
+  // only had to parse. "Not for arbitrary third-party repositories" lived in
+  // the tool's model-facing description — prose, not enforcement — while
+  // `--browse` feeds arbitrary web content to the model holding this tool.
+  const originalFetch = globalThis.fetch
+  const savedToken = state.githubAgentToken
+  const savedAllowlist = process.env.GH_ROUTER_FM_SCAFFOLD_REPOS
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+    state.githubAgentToken = savedToken
+    if (savedAllowlist === undefined) delete process.env.GH_ROUTER_FM_SCAFFOLD_REPOS
+    else process.env.GH_ROUTER_FM_SCAFFOLD_REPOS = savedAllowlist
+  })
+
+  const runScaffold = async (repo: string) => {
+    state.githubAgentToken = "agent-token"
+    let githubCalls = 0
+    globalThis.fetch = (() => {
+      githubCalls += 1
+      return Promise.resolve(new Response("{}", { status: 200 }))
+    }) as unknown as typeof fetch
+
+    const tool = createFirstMateTools().find((t) => t.toolNameHttp === "scaffold_repo")
+    if (tool === undefined) throw new Error("scaffold_repo tool not found")
+    const res = await tool.handler({ repo, mode: "add-missing-only" })
+    return { res, githubCalls }
+  }
+
+  it("refuses an un-allowlisted repo without touching GitHub", async () => {
+    process.env.GH_ROUTER_FM_SCAFFOLD_REPOS = "acme/widgets"
+    const { res, githubCalls } = await runScaffold("victim/repo")
+
+    expect(res.isError).toBe(true)
+    expect(firstText(res)).toContain("GH_ROUTER_FM_SCAFFOLD_REPOS")
+    // The assertion that makes this a GATE and not a late error: zero requests
+    // reached GitHub, so no branch, commit, or PR could have been created.
+    expect(githubCalls).toBe(0)
+  })
+
+  it("refuses everything when the allowlist is unset", async () => {
+    delete process.env.GH_ROUTER_FM_SCAFFOLD_REPOS
+    const { res, githubCalls } = await runScaffold("acme/widgets")
+
+    // Deny-by-default: an operator who never configures this is protected,
+    // rather than protected only if they opt in.
+    expect(res.isError).toBe(true)
+    expect(githubCalls).toBe(0)
+  })
+
+  it("lets an allowlisted repo through the gate", async () => {
+    process.env.GH_ROUTER_FM_SCAFFOLD_REPOS = "acme/widgets"
+    const { githubCalls } = await runScaffold("acme/widgets")
+
+    // The gate is not a blanket refusal — the permitted case proceeds far
+    // enough to talk to GitHub. (What happens after is the no-op / commit
+    // path covered above; the stub fetch makes it fail harmlessly.)
+    expect(githubCalls).toBeGreaterThan(0)
   })
 })

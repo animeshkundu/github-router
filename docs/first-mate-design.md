@@ -81,10 +81,18 @@ implementation to GitHub cloud agents through first-mate.
 
 ### Foundation scaffold
 
-`scaffold_repo` is the foundation-first step for owned repositories. It never
-pushes directly to the default branch: the tool reads the target repository,
-creates a `scaffold/agentic-dev-*` branch, commits the foundation there, and opens
-a PR. The generated content is repo-geared rather than generic: repository
+`scaffold_repo` is the foundation-first step for operator-allowlisted repositories.
+It is **deny-by-default**: `assertScaffoldRepoAllowed()` runs after parsing the
+`owner/name` input but before any GitHub call, and requires a case-insensitive match
+in `GH_ROUTER_FM_SCAFFOLD_REPOS`. Set that environment variable to a comma-separated
+list of exact `owner/name` entries, or `owner/*` to allow a whole organization;
+unset or an empty list refuses every repository. This is a write boundary, not a
+model instruction: the tool creates a branch, commits files, and opens a PR, while
+its repo input is free-form and `--browse` can feed untrusted web content to a model
+holding the tool. Once admitted, it never pushes directly to the default branch: the
+tool reads the target repository, creates a `scaffold/agentic-dev-*` branch, commits
+the foundation there, and opens a PR. The generated content is repo-geared rather
+than generic: repository
 description/README, default branch, manifests, package manager, package scripts,
 test framework, existing workflow hints, primary-OS signals, and UI-test
 dependencies are used to fill confident values. Ambiguous facts stay visible as

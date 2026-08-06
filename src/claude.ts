@@ -847,6 +847,20 @@ export const claude = defineCommand({
             )
           }
           assertShapingInstalled(true, shapingInstalled)
+
+          // Surface the scaffold allowlist AT STARTUP rather than only as a
+          // refusal deep inside a tool call. `scaffold_repo` creates branches,
+          // commits files and opens PRs, so it is deny-by-default — but a user
+          // upgrading into that gate would otherwise discover it as an opaque
+          // mid-mission failure naming an env var they have never seen. One
+          // line at launch turns a surprise into a setting.
+          if (!process.env.GH_ROUTER_FM_SCAFFOLD_REPOS?.trim()) {
+            consola.info(
+              "first-mate: scaffold_repo is disabled (it writes to real repositories). "
+              + "Set GH_ROUTER_FM_SCAFFOLD_REPOS to a comma-separated list of owner/name "
+              + "entries, or owner/* for a whole org, to enable it.",
+            )
+          }
         }
 
         // ai-or-die session binding. When launched inside an ai-or-die Terminal

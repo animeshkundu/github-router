@@ -234,7 +234,36 @@ export interface RunOpts {
   timeoutMs?: number
   /** Extra env to merge over the parent env for the child. */
   env?: NodeJS.ProcessEnv
+  /**
+   * Byte ceiling on captured stdout. Defaults to {@link DEFAULT_CAPTURE_CAP}.
+   *
+   * On overflow we STOP BUFFERING but deliberately do NOT kill the child, and
+   * the result is reported as a normal completion with `truncated: true`. That
+   * asymmetry against `runManagedExeCapture` (which tree-kills on overflow) is
+   * load-bearing: callers here read the exit CODE as a verdict —
+   * `~/lib/orchestration/live-exec` maps `code ?? 1` onto a FAILED GATE — so
+   * killing the child would turn "this command printed a lot" into "typecheck
+   * failed". Truncation is a capture-side limit, never a command outcome.
+   *
+   * The data handler keeps firing and discarding after the cap, so the pipe
+   * drains and the child never blocks writing into a full buffer.
+   */
+  maxStdoutBytes?: number
 }
+
+/**
+ * Default stdout capture ceiling.
+ *
+ * A `timeoutMs` is NOT a memory bound: `git diff HEAD` on a repo with a large
+ * generated file happily emits hundreds of MB inside a 5s window, and every
+ * byte was being concatenated onto one JS string. 16 MiB matches the worker
+ * layer's `GH_ROUTER_WORKER_MAX_TOOL_BYTES` so the two capture paths agree on
+ * what "too much output to be useful" means.
+ */
+export const DEFAULT_CAPTURE_CAP = 16 * 1024 * 1024
+
+/** Same ceiling shape for stderr, which only ever feeds diagnostics. */
+const CAPTURE_STDERR_CAP = 64 * 1024
 
 export interface RunResult {
   stdout: string
@@ -242,6 +271,21 @@ export interface RunResult {
   /** Exit code; `null` when killed by signal/timeout. */
   code: number | null
   timedOut: boolean
+  /**
+   * True when stdout exceeded the cap and was cut short. The command itself
+   * still ran to completion — check this, never `code`, to detect truncation.
+   */
+  truncated: boolean
+  /**
+   * True when stderr exceeded its 64 KiB ceiling and was cut short.
+   *
+   * Reported separately from `truncated` because it means something different
+   * to a caller: stdout truncation loses DATA, stderr truncation loses a
+   * DIAGNOSTIC. A failing compiler often puts the root error at the tail of a
+   * long stderr, so a caller that surfaces stderr to a human needs to know it
+   * is looking at a prefix rather than the whole story.
+   */
+  stderrTruncated: boolean
 }
 
 function runInternal(
@@ -269,10 +313,22 @@ function runInternal(
       return
     }
 
+    // Buffer BYTES and decode once at the end (or incrementally through a
+    // streaming decoder). The previous `stdout += chunk.toString("utf8")` per
+    // chunk corrupted any multi-byte character that straddled a chunk
+    // boundary — a 3-byte `→` split 1/2 decoded as two replacement chars, so
+    // captured diffs and command output silently mangled non-ASCII.
+    const stdoutDecoder = new TextDecoder()
+    const stderrDecoder = new TextDecoder()
     let stdout = ""
     let stderr = ""
+    let stdoutBytes = 0
+    let stderrBytes = 0
+    let truncated = false
+    let stderrTruncated = false
     let timedOut = false
     let settled = false
+    const maxStdoutBytes = opts.maxStdoutBytes ?? DEFAULT_CAPTURE_CAP
 
     const timer = opts.timeoutMs
       ? setTimeout(() => {
@@ -283,10 +339,38 @@ function runInternal(
     timer?.unref?.()
 
     child.stdout?.on("data", (c: Buffer) => {
-      stdout += c.toString("utf8")
+      // Past the cap: keep draining the pipe, stop growing the string. The
+      // child is intentionally left alive (see `maxStdoutBytes` docs).
+      if (truncated) return
+      const room = maxStdoutBytes - stdoutBytes
+      if (c.length > room) {
+        // Append only the slice that fits, then stop. `stream: true` lets the
+        // decoder hold a partial code point back rather than emit U+FFFD, so a
+        // cap landing mid-character truncates cleanly instead of corrupting.
+        if (room > 0) {
+          stdout += stdoutDecoder.decode(c.subarray(0, room), { stream: true })
+          stdoutBytes += room
+        }
+        truncated = true
+        return
+      }
+      stdout += stdoutDecoder.decode(c, { stream: true })
+      stdoutBytes += c.length
     })
     child.stderr?.on("data", (c: Buffer) => {
-      stderr += c.toString("utf8")
+      // Already full: this chunk is dropped entirely, which is truncation just
+      // as much as a partial slice is. Flagging only the slicing chunk missed
+      // the common case where the cap lands on a chunk boundary and every
+      // subsequent chunk returns here.
+      if (stderrBytes >= CAPTURE_STDERR_CAP) {
+        stderrTruncated = true
+        return
+      }
+      const room = CAPTURE_STDERR_CAP - stderrBytes
+      const slice = c.length > room ? c.subarray(0, room) : c
+      if (slice.length < c.length) stderrTruncated = true
+      stderr += stderrDecoder.decode(slice, { stream: true })
+      stderrBytes += slice.length
     })
     child.stdout?.on("error", () => {})
     child.stderr?.on("error", () => {})
@@ -295,7 +379,17 @@ function runInternal(
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
-      resolve({ stdout, stderr, code, timedOut })
+      // Flush the decoders' held-back bytes.
+      //
+      // NOT flushed on the truncated path: the cap deliberately cuts mid-byte-
+      // sequence, so the decoder is holding a partial code point we chose to
+      // drop. Flushing it would emit U+FFFD — turning a clean truncation into
+      // apparent corruption, which is the exact failure this fix removes.
+      // Un-truncated output has no such intent, so a trailing partial there IS
+      // malformed input and should surface as U+FFFD rather than vanish.
+      if (!truncated) stdout += stdoutDecoder.decode()
+      if (!stderrTruncated) stderr += stderrDecoder.decode()
+      resolve({ stdout, stderr, code, timedOut, truncated, stderrTruncated })
     }
 
     child.on("error", (err) => {
@@ -308,15 +402,74 @@ function runInternal(
   })
 }
 
+/**
+ * Spawn `taskkill` best-effort, without any chance of taking the proxy down.
+ *
+ * Two things a bare `try { spawn("taskkill", ...) } catch {}` gets wrong, both
+ * of which this helper is the single place that fixes:
+ *
+ *   1. **The catch cannot catch.** `spawn` reports ENOENT / EPERM / EACCES by
+ *      emitting `'error'` ASYNCHRONOUSLY, so the surrounding `try` (which only
+ *      guards the synchronous throw) never sees it. An EventEmitter `'error'`
+ *      with no listener THROWS — which lands in the `uncaughtException` handler
+ *      in `~/main` and calls `process.exit(1)`. A best-effort child kill on a
+ *      timeout path could therefore kill the whole proxy. The listener must be
+ *      attached synchronously at the spawn site, which is why this is a helper
+ *      and not a convention.
+ *   2. **The bare name is hijackable.** `CreateProcess`'s search order can
+ *      include the cwd, so `"taskkill"` may resolve to a planted binary;
+ *      `taskkillExe()` pins `System32\taskkill.exe`.
+ */
+export function spawnTaskkillBestEffort(pid: number): boolean {
+  try {
+    const child = spawn(taskkillExe(), ["/T", "/F", "/PID", String(pid)], {
+      stdio: "ignore",
+      windowsHide: true,
+    })
+    // Load-bearing: see (1) above. Without this an async spawn failure is an
+    // uncaught exception, not a no-op. It is NOT a silent swallow, either —
+    // the fallback below is what keeps a caller from hanging.
+    //
+    // (No logging here on purpose: this module has no logger import, and
+    // taking one would pull a dependency into the lowest-level exec helper
+    // that every other module builds on. The fallback is the observable
+    // behavior that matters.)
+    child.on("error", () => {
+      fallbackKill(pid)
+    })
+    return true
+  } catch {
+    // Synchronous spawn failure (bad argv shape).
+    fallbackKill(pid)
+    return false
+  }
+}
+
+/**
+ * Last-resort single-process kill when `taskkill` itself cannot run.
+ *
+ * Not a tree kill — grandchildren survive — but it is the difference between
+ * "the timed-out child dies and its `close` event settles the caller" and "the
+ * caller waits forever". `runInternal` resolves ONLY from `close`, so a timeout
+ * whose kill never lands leaves that promise pending for the life of the
+ * process, which is a worse failure than the crash `spawnTaskkillBestEffort`
+ * was written to prevent. Best-effort by construction: ESRCH means the child
+ * was already gone, which is the success case.
+ */
+function fallbackKill(pid: number): void {
+  try {
+    process.kill(pid)
+  } catch {
+    // Already exited, or we lack permission — nothing further to try.
+  }
+}
+
 /** Kill a process tree best-effort (taskkill /T on Windows). */
 function killTree(pid: number | undefined): void {
   if (!pid) return
   try {
     if (process.platform === "win32") {
-      spawn("taskkill", ["/T", "/F", "/PID", String(pid)], {
-        stdio: "ignore",
-        windowsHide: true,
-      })
+      spawnTaskkillBestEffort(pid)
     } else {
       process.kill(pid, "SIGTERM")
     }
@@ -562,6 +715,14 @@ export function runManagedExeCapture(
         code,
         timedOut,
         stdoutTruncated,
+        // `RunResult.truncated` is the shared, runner-agnostic signal. Kept in
+        // lockstep with `stdoutTruncated` (this runner's older, more specific
+        // name, which callers already branch on) so a caller holding either
+        // shape reads the same fact.
+        truncated: stdoutTruncated,
+        // This runner slices stderr to fit its own 64 KiB cap without tracking
+        // whether it did, so report the honest thing rather than guess.
+        stderrTruncated: stderrBytes >= STDERR_CAP,
         stalled,
       })
     }
@@ -599,10 +760,7 @@ export function killManagedTree(
   if (!pid) return
   try {
     if (isWin) {
-      spawn("taskkill", ["/T", "/F", "/PID", String(pid)], {
-        stdio: "ignore",
-        windowsHide: true,
-      })
+      spawnTaskkillBestEffort(pid)
     } else {
       // Negative pid → the process group (we spawned detached). No
       // positive-pid fallback (PID-reuse hazard — see doc comment).

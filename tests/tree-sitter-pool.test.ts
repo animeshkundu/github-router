@@ -141,6 +141,24 @@ async function runRanked(workspace: string): Promise<Awaited<ReturnType<typeof s
 // defaults: run them on real (non-CI) hosts where the pool works, skip them
 // under CI. The default in-process path is covered by the rest of the suite.
 // Force-disable (GH_ROUTER_DISABLE_TS_POOL=1) also skips them.
+//
+// DECISION (recorded so it is not re-litigated every audit). Two of this
+// repo's rules point opposite ways here: "CI must actually run the tests" and
+// "zero tolerance for flaky CI". The tie-break is that the thing being skipped
+// is DISABLED in CI TOO — `poolEnabled()` in `~/lib/tree-sitter-pool/pool`
+// returns false under CI for exactly the reason above. So these tests are not
+// hiding a failure in shipped CI behavior; forcing them on would enable a path
+// CI does not use, whose known failure mode is a nondeterministic grammar-init
+// race. Turning that on buys a green-looking checkbox and pays for it with
+// flake, which is the worse trade under this repo's rules.
+//
+// The honest cost, stated plainly: pool determinism, abort propagation,
+// worker-crash degradation, warm-up, and "never hangs" are **host-verified
+// only**. They run for every contributor on a real machine (where the pool IS
+// on by default) and never on a hosted runner. Anyone changing
+// `src/lib/tree-sitter-pool/` must run this file locally; a green CI does not
+// speak to it. Re-enabling in CI is gated on fixing the grammar-init race
+// under bun's worker_threads, not on resizing the pool.
 const isCiEnv = process.env.CI === "true" || process.env.CI === "1"
 const poolDescribe =
   isCiEnv || process.env.GH_ROUTER_DISABLE_TS_POOL === "1"

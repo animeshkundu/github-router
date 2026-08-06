@@ -46,7 +46,7 @@
  *     length normalization is meaningful here.
  */
 
-import { spawn, execFile, execFileSync, type ChildProcess } from "node:child_process"
+import { spawn, execFileSync, type ChildProcess } from "node:child_process"
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { performance } from "node:perf_hooks"
 import { createInterface } from "node:readline"
@@ -71,7 +71,7 @@ import {
   type PoolJob,
   type TreeSitterPool,
 } from "~/lib/tree-sitter-pool/pool"
-import { resolveExecutable, runManagedExeCapture } from "~/lib/exec"
+import { resolveExecutable, runManagedExeCapture, spawnTaskkillBestEffort } from "~/lib/exec"
 import { PATHS } from "~/lib/paths"
 import { isSensitivePath } from "~/lib/worker-agent/paths"
 
@@ -603,19 +603,15 @@ function killChild(child: ChildProcess): void {
   if (process.platform === "win32") {
     // /T = kill tree (including children of children)
     // /F = force; rg has no graceful-shutdown signal handler on Win.
-    // ASYNC (execFile, not spawnSync): killChild fires MID-STREAM on a
+    // ASYNC (spawn, not spawnSync): killChild fires MID-STREAM on a
     // cap/abort/timeout while the event loop must keep draining ripgrep's
     // output — a synchronous taskkill would block the loop and stall the
     // very read it is racing. (This is why it does NOT use the shutdown-
     // path killChildProcessTree, which is intentionally synchronous.)
-    try {
-      execFile("taskkill", ["/T", "/F", "/PID", String(child.pid)], () => {
-        // Errors are swallowed: the process may already have exited,
-        // and we don't have anywhere meaningful to surface this to.
-      })
-    } catch {
-      // Best effort.
-    }
+    // The shared helper pins System32\taskkill.exe (a bare name lets
+    // CreateProcess resolve a planted binary from the cwd) and attaches the
+    // 'error' listener a spawn needs to fail quietly instead of throwing.
+    spawnTaskkillBestEffort(child.pid)
     return
   }
 

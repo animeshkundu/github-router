@@ -78,6 +78,89 @@ export function __resetBodySizeStats(): void {
   bodySizeIdx = 0
 }
 
+/**
+ * Print the observed body-size distribution, if any requests were seen.
+ *
+ * Without this the ring was WRITE-ONLY: `bodySizeStats()` had no caller
+ * anywhere in `src/`, so the one number its own doc comment says the decision
+ * needs ("benchmarks at 4.5 MiB mean nothing if the real p50 is 40 KiB") was
+ * collected every request and readable by nobody.
+ *
+ * At `consola.info` because it is a once-per-session line answering a question
+ * an operator or contributor actually asks; anything noisier would be a reason
+ * to switch it off.
+ */
+export function logBodySizeStats(): string | undefined {
+  const stats = bodySizeStats()
+  if (!stats) return undefined
+  const line
+    = `request body sizes (n=${stats.count}): `
+      + `p50 ${formatBytes(stats.p50)}, `
+      + `p95 ${formatBytes(stats.p95)}, `
+      + `p99 ${formatBytes(stats.p99)}, `
+      + `max ${formatBytes(stats.max)}`
+  consola.info(line)
+  // Returned as well as logged so a caller (and a test) can assert the CONTENT
+  // without depending on ambient consola state. Reporters are process-global
+  // and other code paths replace them (`enableFileLogging`), so a test that
+  // captures consola output asserts on whatever ran before it — which is how
+  // this file's first version passed locally and failed in CI.
+  return line
+}
+
+/**
+ * Report the distribution once, on the way out.
+ *
+ * Self-registered rather than wired into each subcommand's shutdown chain
+ * because `start` has NO `launchChild`/`onShutdown` to hang it on (see the
+ * comment at its `startKeepAwake()` call), and a stat that only appeared under
+ * `claude` would answer the question for one of three entry points. Same
+ * pattern, and same reasoning, as `~/lib/keep-awake`'s own reaper.
+ *
+ * **Windows caveat, measured rather than assumed.** This reports on a clean
+ * exit and on a signal the runtime actually delivers to JS (Ctrl-C in an
+ * interactive console). It does NOT report when the process is killed by
+ * another process on Windows: `child.kill(...)` and `taskkill` terminate
+ * abruptly via `TerminateProcess`, dispatching no JS signal event, so NO
+ * handler runs — not this one, and not `process.on("exit")` either. Verified
+ * on a real win32 host: a child registering both handlers and killed by its
+ * parent produced no output and exited with a null code.
+ *
+ * That is acceptable for a diagnostic — it is a measurement aid, not a
+ * durability guarantee, and the interactive case it exists to serve (run a
+ * session, Ctrl-C, read the distribution) does work. It is NOT acceptable for
+ * anything durable: do not move credential, ledger, or cleanup work onto this
+ * hook. The existing teardown paths that must survive a hard kill are built
+ * differently on purpose (see `~/lib/keep-awake`, which relies on the OS
+ * releasing a thread-scoped assertion rather than on a handler running, and
+ * `~/lib/process-guard`, which uses a separate reaper process).
+ *
+ * Idempotent: `exit` can follow a signal handler, and both call this.
+ */
+let statsReported = false
+function reportOnce(): void {
+  if (statsReported) return
+  statsReported = true
+  logBodySizeStats()
+}
+
+let exitHooksInstalled = false
+export function installBodySizeStatsExitHook(): void {
+  if (exitHooksInstalled) return
+  exitHooksInstalled = true
+  // `exit` ONLY. Deliberately no SIGINT/SIGTERM handler: the obvious
+  // implementation (handle, report, `process.removeAllListeners(sig)`,
+  // re-raise) would tear down the keep-awake, ColBERT, worker-agent,
+  // browser-session and launcher handlers registered on those same signals —
+  // trading their cleanup for one line of telemetry. A diagnostic does not get
+  // to own the shutdown lifecycle.
+  //
+  // `exit` still fires after those handlers run their own graceful paths, so
+  // the interactive case this exists for (run a session, Ctrl-C, read the
+  // distribution) is covered without competing with anything.
+  process.once("exit", reportOnce)
+}
+
 /** Format a byte count compactly (1.2M / 15.3K / 900B). */
 function formatBytes(n: number): string {
   if (n >= 1_048_576) return `${(n / 1_048_576).toFixed(1)}M`
