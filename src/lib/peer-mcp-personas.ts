@@ -917,6 +917,48 @@ const WORKER_TIER_GUIDANCE =
   + "`gpt-5.6-terra` (moderate), `gemini-3.6-flash` (light/cheap) — all "
   + "1M context; pair with thinking:'high'."
 
+/**
+ * Read-only contract, appended to the `explore` / `review` / `plan` tool
+ * descriptions.
+ *
+ * Those three say "read-only" of their TOOLSET, which describes what the worker
+ * may do but not what the caller gets back. The consequence is the part a caller
+ * acts on: the returned text is the ONLY artifact. Nothing is written, nothing
+ * is staged, and the transcript is not persisted — so a caller that wanted a
+ * file changed has to route to `implement`, and a caller that wanted the
+ * findings kept has to keep them itself.
+ *
+ * This is not redundant with "read-only toolset": a model reading "it has
+ * read-only tools" can still reasonably expect the worker to leave something
+ * behind (a report file, a scratch note). Stating the output contract closes
+ * that gap in one clause.
+ */
+const WORKER_READ_ONLY_NOTE =
+  " Strictly read-only: it changes nothing on disk, and its returned text is "
+  + "the only artifact it produces — route to `implement` or `test` when a file "
+  + "actually needs to change."
+
+/**
+ * Oversized-result contract, appended to EVERY `worker_*` tool description.
+ *
+ * `relaySafeText` (`~/lib/worker-agent/relay-cap`) is the final transform at
+ * the MCP boundary for every worker mode: a result over the relay cap spills IN
+ * FULL to a file and returns a bounded head preview plus that path. The
+ * mechanism already worked; what was missing is that the model was never TOLD,
+ * so a truncated result arrived with a path the model had to infer was real and
+ * readable from the trailer alone.
+ *
+ * It earns its bytes under the "ruthlessly minimal tool surface" rule because
+ * it is directly actionable: on truncation the next call is a `read` of that
+ * path, not a re-run of the worker. That matters most on the read-only modes
+ * (`explore`/`review`/`plan`), where the transcript is never persisted and a
+ * long investigation summarized past the cap is otherwise unrecoverable.
+ */
+const WORKER_OVERSIZED_RESULT_NOTE =
+  " If the result is too large to relay it is truncated to a preview and the "
+  + "FULL text is written to a file, whose absolute path is in the returned "
+  + "text; read that file rather than re-running the worker."
+
 export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
   Object.freeze([
     {
@@ -1442,7 +1484,9 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         + "would otherwise consume the lead context window. Not for implementation, "
         + "test authoring, or verification of a concrete diff; use implement, test, "
         + "or review for those scopes. Brief the investigation goal and constraints, "
-        + "not step-by-step tool semantics.",
+        + "not step-by-step tool semantics."
+        + WORKER_READ_ONLY_NOTE
+        + WORKER_OVERSIZED_RESULT_NOTE,
       inputSchema: {
         type: "object",
         required: ["prompt"],
@@ -1523,7 +1567,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         + "diff via a saved patch file (a `--stat` summary + a bounded preview + "
         + "the patch path; a small diff is inlined in full) — it never edits your "
         + "working tree, and it HARD-ERRORS if the workspace is not a git "
-        + "repository. For in-place edits, use the native `implementer` subagent.",
+        + "repository. For in-place edits, use the native `implementer` subagent."
+        + WORKER_OVERSIZED_RESULT_NOTE,
       inputSchema: {
         type: "object",
         required: ["prompt"],
@@ -1611,7 +1656,9 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         + "read the code itself rather than trusting a pasted artifact. Not for "
         + "architecture critique, implementation, or test authoring; use codex_critic "
         + "or gemini_critic for design review, implement for edits, and test for "
-        + "independent test creation.",
+        + "independent test creation."
+        + WORKER_READ_ONLY_NOTE
+        + WORKER_OVERSIZED_RESULT_NOTE,
       inputSchema: {
         type: "object",
         required: ["prompt"],
@@ -1690,7 +1737,9 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         + "needs repo-grounded sequencing or acceptance criteria translated into "
         + "implementation steps. Not for editing files, running an implementation, "
         + "writing tests, or adversarial review; use implement, test, or review for "
-        + "those scopes.",
+        + "those scopes."
+        + WORKER_READ_ONLY_NOTE
+        + WORKER_OVERSIZED_RESULT_NOTE,
       inputSchema: {
         type: "object",
         required: ["prompt"],
@@ -1771,7 +1820,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         + "saved patch file (a `--stat` summary + a bounded preview + the patch path; "
         + "a small diff is inlined in full) — it never edits your working tree, and it "
         + "HARD-ERRORS if the workspace is not a git repository. For in-place test "
-        + "authoring, use the native `implementer` subagent.",
+        + "authoring, use the native `implementer` subagent."
+        + WORKER_OVERSIZED_RESULT_NOTE,
       inputSchema: {
         type: "object",
         required: ["prompt"],
@@ -2126,7 +2176,8 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         + "or precise element interactions; use the `browser` MCP tools for those. "
         + "Pass `sessionId` to continue a prior browse session, or omit it for a "
         + "fresh isolated session; multiple calls run as parallel sessions on the "
-        + "shared browser.",
+        + "shared browser."
+        + WORKER_OVERSIZED_RESULT_NOTE,
       inputSchema: {
         type: "object",
         required: ["task"],

@@ -709,3 +709,46 @@ describe("enumerateInjectedMcpToolNames (plan-mode allowedTools seed)", () => {
     expect(names).not.toContain("mcp__codex-cli__codex")
   })
 })
+
+describe("worker tool descriptions state their output contract", () => {
+  const workerTools = ["explore", "review", "plan", "implement", "test", "browse"] as const
+  /** The three modes whose toolset is read-only (no edit/write/bash). */
+  const readOnlyModes = ["explore", "review", "plan"] as const
+
+  const describeOf = (name: string): string => {
+    const tool = NON_PERSONA_MCP_TOOLS.find((t) => t.toolNameHttp === name)
+    if (!tool) throw new Error(`worker tool ${name} not found`)
+    return tool.description
+  }
+
+  test("every worker tool documents the oversized-result spill", () => {
+    // `relaySafeText` already spilled an over-cap result to a file and returned
+    // the path — but no description said so, so a model receiving a truncated
+    // preview had to infer from the trailer alone that the path was real and
+    // readable. On the read-only modes, whose transcript is never persisted,
+    // guessing wrong loses the whole investigation.
+    for (const name of workerTools) {
+      const d = describeOf(name)
+      expect(d).toContain("written to a file")
+      expect(d).toContain("path")
+    }
+  })
+
+  test("read-only workers say the returned text is their only artifact", () => {
+    // "read-only toolset" describes what the WORKER may do; it does not tell a
+    // caller what it GETS BACK. A model can read "it has read-only tools" and
+    // still reasonably expect a report file to be left behind. These three
+    // produce nothing but their return value.
+    for (const name of readOnlyModes) {
+      expect(describeOf(name)).toContain("Strictly read-only")
+    }
+  })
+
+  test("write-capable workers are NOT labelled read-only", () => {
+    // The discriminating half: a blanket append would satisfy the test above
+    // while telling the model that `implement` cannot change files.
+    for (const name of ["implement", "test", "browse"] as const) {
+      expect(describeOf(name)).not.toContain("Strictly read-only")
+    }
+  })
+})
