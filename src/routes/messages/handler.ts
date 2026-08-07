@@ -18,6 +18,7 @@ import { sanitizeAnthropicBody } from "~/lib/sanitize-anthropic-body"
 import { state } from "~/lib/state"
 import { relayAnthropicStream } from "~/lib/stream-relay"
 import {
+  formatThinkingRepairDecline,
   rememberThinkingHistoryRepair,
   repairKnownThinkingHistory,
   repairRejectedThinkingHistory,
@@ -475,10 +476,11 @@ export async function handleCompletion(c: Context) {
       // would misdiagnose the outage.
       if (!(error instanceof HTTPError)) throw error
       const errorBody = await error.response.clone().text().catch(() => "")
-      const thinkingRepair =
+      const outcome =
         attempt < MAX_THINKING_REPAIR_ATTEMPTS ?
           repairRejectedThinkingHistory(nativeBody, errorBody)
         : undefined
+      const thinkingRepair = outcome?.ok ? outcome.repair : undefined
       // Give up when nothing is repairable, or when upstream names a message
       // already repaired this request — that means no forward progress, and
       // retrying would spin until the attempt cap.
@@ -486,6 +488,20 @@ export async function handleCompletion(c: Context) {
         !thinkingRepair
         || repairedMessageIndices.has(thinkingRepair.messageIndex)
       ) {
+        // Say WHY. A silent decline here is what made a 44-rejection incident
+        // impossible to diagnose after the fact: the upstream 400 carries a
+        // unique request_id so it is logged every time, while the route-level
+        // error is a constant string that the log's dedup window collapses —
+        // leaving a log that reads as unexplained repeated failure.
+        if (outcome && !outcome.ok) {
+          consola.warn(
+            `Thinking-history repair declined: ${formatThinkingRepairDecline(outcome.decline)}`,
+          )
+        } else if (thinkingRepair) {
+          consola.warn(
+            `Thinking-history repair made no progress; upstream re-named message=${thinkingRepair.messageIndex} after it was already repaired`,
+          )
+        }
         logRequest(
           {
             method: "POST",

@@ -18,8 +18,68 @@ export interface ThinkingHistoryRepair {
   removedBlocks: number
 }
 
+/**
+ * Why a repair could not be built. Every non-repair exit maps to exactly one of
+ * these: a decline used to be a silent `undefined`, which is precisely why a
+ * production incident of 44 rejections could not be explained after the fact.
+ */
+export type ThinkingRepairDeclineReason =
+  | "error-not-recognized"
+  | "message-index-invalid"
+  | "body-not-json"
+  | "no-messages-array"
+  | "message-missing"
+  | "message-not-assistant"
+  | "content-not-array"
+  | "no-signed-blocks"
+  | "no-blocks-removed"
+
+/**
+ * Structural facts about the declined request. Deliberately carries no message,
+ * thinking, signature, or tool content — only shapes and counts, so it is safe
+ * to log verbatim.
+ */
+export interface ThinkingRepairDecline {
+  reason: ThinkingRepairDeclineReason
+  messageIndex?: number
+  messageCount?: number
+  roleAtIndex?: string
+  blocksAtIndex?: number
+  signedBlocksAtIndex?: number
+}
+
+export type ThinkingRepairOutcome =
+  | { ok: true; repair: ThinkingHistoryRepair }
+  | { ok: false; decline: ThinkingRepairDecline }
+
+function declined(
+  reason: ThinkingRepairDeclineReason,
+  detail: Omit<ThinkingRepairDecline, "reason"> = {},
+): ThinkingRepairOutcome {
+  return { ok: false, decline: { reason, ...detail } }
+}
+
+/** Render a decline as a single log-safe `key=value` line. */
+export function formatThinkingRepairDecline(
+  decline: ThinkingRepairDecline,
+): string {
+  return Object.entries(decline)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(" ")
+}
+
 function isRecord(value: unknown): value is AnyRecord {
   return typeof value === "object" && value !== null
+}
+
+/** Count signed blocks without hashing — used only to explain a decline. */
+function countSignedBlocks(content: Array<unknown>): number {
+  return content.filter(
+    (block) =>
+      isRecord(block)
+      && (block.type === "thinking" || block.type === "redacted_thinking"),
+  ).length
 }
 
 function signedBlockFingerprint(
@@ -47,15 +107,32 @@ function signedBlockFingerprint(
 function repairMessageAt(
   parsed: AnyRecord,
   messageIndex: number,
-): ThinkingHistoryRepair | undefined {
-  if (!Array.isArray(parsed.messages)) return undefined
+): ThinkingRepairOutcome {
+  if (!Array.isArray(parsed.messages)) {
+    return declined("no-messages-array", { messageIndex })
+  }
   const messages = [...parsed.messages]
+  const detail = { messageIndex, messageCount: messages.length }
   const message = messages[messageIndex]
-  if (!isRecord(message) || message.role !== "assistant") return undefined
-  if (!Array.isArray(message.content)) return undefined
+  if (!isRecord(message)) return declined("message-missing", detail)
+  if (message.role !== "assistant") {
+    return declined("message-not-assistant", {
+      ...detail,
+      roleAtIndex: typeof message.role === "string" ? message.role : "unknown",
+    })
+  }
+  if (!Array.isArray(message.content)) {
+    return declined("content-not-array", { ...detail, roleAtIndex: "assistant" })
+  }
+  const shape = {
+    ...detail,
+    roleAtIndex: "assistant",
+    blocksAtIndex: message.content.length,
+    signedBlocksAtIndex: countSignedBlocks(message.content),
+  }
 
   const fingerprint = signedBlockFingerprint(messageIndex, message.content)
-  if (!fingerprint) return undefined
+  if (!fingerprint) return declined("no-signed-blocks", shape)
 
   const repairedContent = message.content.filter(
     (block) =>
@@ -63,7 +140,7 @@ function repairMessageAt(
       || (block.type !== "thinking" && block.type !== "redacted_thinking"),
   )
   const removedBlocks = message.content.length - repairedContent.length
-  if (removedBlocks === 0) return undefined
+  if (removedBlocks === 0) return declined("no-blocks-removed", shape)
   // A turn that was ONLY thinking — the usual source is a turn interrupted
   // right after the thinking block — would be left with an empty `content`,
   // which Anthropic rejects, so stripping alone cannot recover it. Substitute a
@@ -77,10 +154,13 @@ function repairMessageAt(
   messages[messageIndex] = { ...message, content: repairedContent }
   parsed.messages = messages
   return {
-    body: JSON.stringify(parsed),
-    fingerprint,
-    messageIndex,
-    removedBlocks,
+    ok: true,
+    repair: {
+      body: JSON.stringify(parsed),
+      fingerprint,
+      messageIndex,
+      removedBlocks,
+    },
   }
 }
 
@@ -89,23 +169,28 @@ function repairMessageAt(
  * rejections. The upstream error is the oracle: valid omitted-display thinking
  * also has an empty `thinking` string, so request shape alone cannot identify a
  * corrupt signature safely.
+ *
+ * Returns a discriminated outcome so a caller can report WHY a repair was not
+ * applied; a silent decline is what made the original incident undiagnosable.
  */
 export function repairRejectedThinkingHistory(
   rawBody: string,
   upstreamErrorText: string,
-): ThinkingHistoryRepair | undefined {
+): ThinkingRepairOutcome {
   const match = THINKING_INTEGRITY_ERROR_RES
     .map((pattern) => pattern.exec(upstreamErrorText))
     .find((candidate): candidate is RegExpExecArray => candidate !== null)
-  if (!match) return undefined
+  if (!match) return declined("error-not-recognized")
   const messageIndex = Number(match[1])
-  if (!Number.isSafeInteger(messageIndex) || messageIndex < 0) return undefined
+  if (!Number.isSafeInteger(messageIndex) || messageIndex < 0) {
+    return declined("message-index-invalid", { messageIndex })
+  }
 
   let parsed: AnyRecord
   try {
     parsed = JSON.parse(rawBody) as AnyRecord
   } catch {
-    return undefined
+    return declined("body-not-json", { messageIndex })
   }
   return repairMessageAt(parsed, messageIndex)
 }
@@ -139,9 +224,12 @@ export function repairKnownThinkingHistory(
     const fingerprint = signedBlockFingerprint(index, message.content)
     if (!fingerprint || !rememberedRepairs.has(fingerprint)) continue
     const attempt = repairMessageAt(parsed, index)
-    if (!attempt) continue
-    totalRemovedBlocks += attempt.removedBlocks
-    repaired = { ...attempt, removedBlocks: totalRemovedBlocks }
+    // A remembered message that cannot be repaired is not an error here — the
+    // scan simply moves on. Declines matter only on the upstream-rejected path,
+    // where the caller needs to explain the failure.
+    if (!attempt.ok) continue
+    totalRemovedBlocks += attempt.repair.removedBlocks
+    repaired = { ...attempt.repair, removedBlocks: totalRemovedBlocks }
   }
   return repaired
 }
