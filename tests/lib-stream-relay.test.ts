@@ -44,6 +44,10 @@ async function collect(stream: ReadableStream<Uint8Array>): Promise<string> {
   return out
 }
 
+function capturedErrorLine(index = 0): string {
+  return (captured.error[index] ?? []).map(String).join(" ")
+}
+
 interface FakeChunkSpec {
   delayMs?: number
   bytes?: Uint8Array
@@ -104,9 +108,9 @@ describe("relayAnthropicStream — pre-byte error path", () => {
 
     expect(out).toContain("event: error")
     expect(out).toContain("terminated")
-    expect(out).toContain('"type":"api_error"')
+    expect(out).toContain('"type":"overloaded_error"')
     expect(captured.error.length).toBe(1)
-    expect(String(captured.error[0]?.[0] ?? "")).toContain("bytes=0")
+    expect(capturedErrorLine()).toContain("bytes=0")
   })
 
   test("upstream returns done immediately → emits empty stream cleanly (no error)", async () => {
@@ -121,23 +125,48 @@ describe("relayAnthropicStream — pre-byte error path", () => {
 
 describe("relayAnthropicStream — mid-stream error path", () => {
   test("upstream errors after several chunks → emits event:error and logs bytes-relayed", async () => {
+    const cause = Object.assign(new Error("socket reset"), {
+      code: "ECONNRESET",
+    })
     const upstream = makeUpstream([
       { bytes: ENCODER.encode("event: a\ndata: 1\n\n") },
-      { error: new TypeError("terminated") },
+      { error: new TypeError("fetch failed", { cause }) },
     ])
     const wrapped = relayAnthropicStream(upstream, { routePath: "/v1/messages" })
     const out = await collect(wrapped)
 
     expect(out).toContain("event: a")
     expect(out).toContain("event: error")
-    expect(out).toContain('"type":"api_error"')
-    expect(out).toContain("terminated")
+    expect(out).toContain('"type":"overloaded_error"')
+    expect(out).toContain("transient transport failure")
+    expect(out).toContain("ECONNRESET")
 
     expect(captured.error.length).toBe(1)
-    const log = String(captured.error[0]?.[0] ?? "")
+    const log = capturedErrorLine()
     expect(log).toContain("/v1/messages")
     expect(log).toContain("errType=TypeError")
+    expect(log).toContain("classification=transient")
+    expect(log).toContain('causeCode="ECONNRESET"')
     expect(log).toMatch(/bytes=\d+/)
+  })
+
+  test("deterministic mid-stream connectivity failures emit actionable api_error", async () => {
+    const cause = Object.assign(new Error("getaddrinfo ENOTFOUND"), {
+      code: "ENOTFOUND",
+    })
+    const upstream = makeUpstream([
+      { bytes: ENCODER.encode("event: a\ndata: 1\n\n") },
+      { error: new TypeError("fetch failed", { cause }) },
+    ])
+    const wrapped = relayAnthropicStream(upstream, { routePath: "/v1/messages" })
+    const out = await collect(wrapped)
+
+    expect(out).toContain('"type":"api_error"')
+    expect(out).toContain("connectivity or TLS configuration failure")
+    expect(out).toContain("ENOTFOUND")
+    const log = capturedErrorLine()
+    expect(log).toContain("classification=deterministic")
+    expect(log).toContain('causeCode="ENOTFOUND"')
   })
 })
 
@@ -158,7 +187,7 @@ describe("relayAnthropicStream — inactivity timeout", () => {
     expect(out).toContain("upstream_inactive")
     expect(out).toContain('"type":"timeout_error"')
     expect(captured.error.length).toBe(1)
-    const log = String(captured.error[0]?.[0] ?? "")
+    const log = capturedErrorLine()
     expect(log).toContain("errType=InactivityTimeout")
   })
 })
@@ -323,7 +352,7 @@ describe("relayAnthropicStream — upstream-reader release on pull-error", () =>
 })
 
 describe("buildAnthropicErrorEvent", () => {
-  test("emits well-formed Anthropic SSE event with api_error type", () => {
+  test("emits well-formed Anthropic SSE event with overloaded_error for transient transport failures", () => {
     const event = buildAnthropicErrorEvent("TypeError", "terminated")
     expect(event.startsWith("event: error\ndata: ")).toBe(true)
     expect(event.endsWith("\n\n")).toBe(true)
@@ -333,7 +362,7 @@ describe("buildAnthropicErrorEvent", () => {
       error: { type: string; message: string }
     }
     expect(parsed.type).toBe("error")
-    expect(parsed.error.type).toBe("api_error")
+    expect(parsed.error.type).toBe("overloaded_error")
     expect(parsed.error.message).toContain("terminated")
   })
 
@@ -364,7 +393,7 @@ describe("buildOpenAIErrorEvent", () => {
     const parsed = JSON.parse(firstData) as {
       error: { type: string; message: string }
     }
-    expect(parsed.error.type).toBe("api_error")
+    expect(parsed.error.type).toBe("overloaded_error")
     expect(parsed.error.message).toContain("terminated")
   })
 })
@@ -378,9 +407,10 @@ describe("logStreamError", () => {
     expect(result.errName).toBe("TypeError")
     expect(result.errMessage).toBe("fetch failed")
     expect(captured.error.length).toBe(1)
-    const log = String(captured.error[0]?.[0] ?? "")
+    const log = capturedErrorLine()
     expect(log).toContain("/v1/chat/completions")
     expect(log).toContain("errType=TypeError")
+    expect(log).toContain("classification=transient")
   })
 })
 
@@ -488,7 +518,7 @@ describe("relayAnthropicStream — consumer-cancel race (the live regression)", 
     expect(out).toContain("event: error")
     expect(out).toContain('"type":"api_error"')
     expect(captured.error.length).toBe(1)
-    const log = String(captured.error[0]?.[0] ?? "")
+    const log = capturedErrorLine()
     expect(log).toContain("Upstream stream interrupted")
   })
 })

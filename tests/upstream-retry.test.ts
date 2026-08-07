@@ -6,7 +6,11 @@
 
 import { test, expect, describe } from "bun:test"
 
-import { fetchWithTransientRetry } from "../src/lib/upstream-retry"
+import {
+  fetchWithTransientRetry,
+  TransportExhaustionError,
+  withTransientRetry,
+} from "../src/lib/upstream-retry"
 
 function resp(status: number, headers?: Record<string, string>): Response {
   return new Response(status === 204 ? null : `body-${status}`, { status, headers })
@@ -86,15 +90,167 @@ describe("fetchWithTransientRetry", () => {
     expect(calls).toBe(2)
   })
 
+  test("transient transport exhaustion throws bounded diagnostic metadata", async () => {
+    let calls = 0
+    const cause = Object.assign(new Error("socket reset"), {
+      code: "ECONNRESET",
+    })
+    let thrown: unknown
+    try {
+      await fetchWithTransientRetry(async () => {
+        calls++
+        throw new TypeError("fetch failed", { cause })
+      }, {
+        ...FAST,
+        attempts: 3,
+        label: "/v1/messages",
+      })
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(calls).toBe(3)
+    expect(thrown).toBeInstanceOf(TransportExhaustionError)
+    const transport = thrown as TransportExhaustionError
+    expect(transport.endpoint).toBe("/v1/messages")
+    expect(transport.label).toBe("/v1/messages")
+    expect(transport.attempts).toBe(3)
+    expect(transport.classification).toBe("transient")
+    expect(transport.lastError).toEqual({
+      name: "TypeError",
+      message: "fetch failed",
+      code: undefined,
+      causeCode: "ECONNRESET",
+    })
+    expect(transport.cause).toBeInstanceOf(TypeError)
+  })
+
+  test("deterministic connectivity errors are wrapped once without retry", async () => {
+    let calls = 0
+    let thrown: unknown
+    try {
+      await fetchWithTransientRetry(async () => {
+        calls++
+        throw new TypeError("fetch failed", {
+          cause: Object.assign(new Error("getaddrinfo ENOTFOUND api.invalid"), {
+            code: "ENOTFOUND",
+          }),
+        })
+      }, { ...FAST, attempts: 3, endpoint: "https://api.invalid" })
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(calls).toBe(1)
+    expect(thrown).toBeInstanceOf(TransportExhaustionError)
+    const transport = thrown as TransportExhaustionError
+    expect(transport.classification).toBe("deterministic")
+    expect(transport.attempts).toBe(1)
+    expect(transport.lastError.causeCode).toBe("ENOTFOUND")
+  })
+
+  test("connection refusal and TLS certificate failures are deterministic", async () => {
+    for (const code of ["ECONNREFUSED", "CERT_HAS_EXPIRED"]) {
+      let calls = 0
+      let thrown: unknown
+      try {
+        await fetchWithTransientRetry(async () => {
+          calls++
+          throw Object.assign(new Error(`connect failed: ${code}`), { code })
+        }, { ...FAST, attempts: 3 })
+      } catch (error) {
+        thrown = error
+      }
+
+      expect(calls).toBe(1)
+      expect(thrown).toBeInstanceOf(TransportExhaustionError)
+      expect((thrown as TransportExhaustionError).classification).toBe(
+        "deterministic",
+      )
+    }
+  })
+
+  test("EAI_AGAIN remains a retryable DNS lookup failure", async () => {
+    let calls = 0
+    const result = await fetchWithTransientRetry(async () => {
+      calls++
+      if (calls === 1) {
+        throw Object.assign(new Error("temporary DNS failure"), {
+          code: "EAI_AGAIN",
+        })
+      }
+      return resp(200)
+    }, { ...FAST, attempts: 2 })
+
+    expect(result.status).toBe(200)
+    expect(calls).toBe(2)
+  })
+
   test("rethrows a non-transient error without retry", async () => {
     let calls = 0
-    await expect(
-      fetchWithTransientRetry(async () => {
+    const applicationError = new Error("malformed body: invalid JSON")
+    let thrown: unknown
+    try {
+      await fetchWithTransientRetry(async () => {
         calls++
-        throw new Error("malformed body: invalid JSON")
-      }, { ...FAST, attempts: 3 }),
-    ).rejects.toThrow(/malformed/)
+        throw applicationError
+      }, { ...FAST, attempts: 3 })
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBe(applicationError)
+    expect(thrown).not.toBeInstanceOf(TransportExhaustionError)
     expect(calls).toBe(1)
+  })
+
+  test("withTransientRetry adds metadata only when thrown transport retries exhaust", async () => {
+    let calls = 0
+    let thrown: unknown
+    try {
+      await withTransientRetry(async () => {
+        calls++
+        throw Object.assign(new Error("write EPIPE"), { code: "EPIPE" })
+      }, { ...FAST, attempts: 2, label: "advisor" })
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(calls).toBe(2)
+    expect(thrown).toBeInstanceOf(TransportExhaustionError)
+    const transport = thrown as TransportExhaustionError
+    expect(transport.label).toBe("advisor")
+    expect(transport.attempts).toBe(2)
+    expect(transport.classification).toBe("transient")
+    expect(transport.lastError.code).toBe("EPIPE")
+  })
+
+  test("withTransientRetry preserves HTTP-style errors after status exhaustion", async () => {
+    const httpError = Object.assign(new Error("upstream HTTP 503"), {
+      response: resp(503),
+    })
+    let calls = 0
+    let thrown: unknown
+    try {
+      await withTransientRetry(async () => {
+        calls++
+        throw httpError
+      }, { ...FAST, attempts: 3 })
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(calls).toBe(3)
+    expect(thrown).toBe(httpError)
+    expect(thrown).not.toBeInstanceOf(TransportExhaustionError)
+  })
+
+  test("withTransientRetry preserves deterministic application errors", async () => {
+    const applicationError = new Error("schema validation failed")
+    await expect(
+      withTransientRetry(async () => {
+        throw applicationError
+      }, { ...FAST, attempts: 3 }),
+    ).rejects.toBe(applicationError)
   })
 
   test("a user cancel (aborted signal) fails fast — never retried", async () => {
@@ -108,6 +264,22 @@ describe("fetchWithTransientRetry", () => {
       }, { ...FAST, attempts: 3, signal: ac.signal }),
     ).rejects.toThrow()
     expect(calls).toBe(0) // aborted before the first attempt
+  })
+
+  test("a user cancel during fetch preserves the original abort error", async () => {
+    const ac = new AbortController()
+    const abortError = new DOMException("cancelled by caller", "AbortError")
+    let thrown: unknown
+    try {
+      await fetchWithTransientRetry(async () => {
+        ac.abort()
+        throw abortError
+      }, { ...FAST, attempts: 3, signal: ac.signal })
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBe(abortError)
+    expect(thrown).not.toBeInstanceOf(TransportExhaustionError)
   })
 
   test("a thrown abort while the caller signal is NOT aborted is treated as a retryable timeout", async () => {

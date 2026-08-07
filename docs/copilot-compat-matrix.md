@@ -45,7 +45,7 @@ Canonical Copilot tool-type allowlist (verbatim from a 400 in probe `tooltype_co
 | `name`, `description`, `input_schema` | ✅ 200 | anthropic-docs | `tool_baseline_custom` | Required baseline |
 | `eager_input_streaming` | ✅ 200 (proxy strips) | claude-emits | `eager_input_streaming_stripped` / `eager_input_streaming_with_type_custom_stripped` | Copilot 400s on raw field; proxy strips before forwarding (Phase 0 of long-horizon plan). Auto-emitted by Claude Code under `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1`. Strip disables only chunk-size optimization; correctness unaffected. |
 | `cache_control: {type, ttl?}` | ✅ 200 | claude-emits | (TODO) | Standard Anthropic cache-control; preserved |
-| `cache_control.scope` | ✅ 200 (proxy strips) | claude-emits | (TODO) | Copilot 400s on raw `.scope`; proxy strips via `sanitizeCacheControl`. Add probe. |
+| `cache_control.scope` | ✅ 200 (proxy strips) | claude-emits | `signed_thinking_cache_scope_stripped` | Copilot 400s on raw `.scope`. On a signed thinking/redacted-thinking block it rejects the whole `cache_control` object (`...thinking.cache_control: Extra inputs`), so the proxy removes that unsigned cache metadata while preserving thinking/signature/data exactly. The probe obtains a real signed thinking+tool response and verifies the replay remains valid. |
 
 ## Top-level body fields
 
@@ -56,6 +56,7 @@ Canonical Copilot tool-type allowlist (verbatim from a 400 in probe `tooltype_co
 | `system` (string or array) | ✅ 200 | anthropic-docs | (TODO) | Standard system prompt; both shapes accepted |
 | `thinking: {type:"enabled", budget_tokens}` | ✅ 200 (proxy translates on adaptive-thinking models) | claude-emits | (TODO) | Translated to `thinking:{type:"adaptive"}` + `output_config.effort` for adaptive-thinking models |
 | `thinking: {type:"adaptive"}` | ✅ 200 | claude-emits | (TODO) | Native Copilot shape |
+| Replayed signed thinking rejected as modified/invalid | ✅ one-shot request-time recovery after a known upstream integrity 400 | claude-emits | `thinking_history_invalid_signature_repaired` | The original request is always tried first because `thinking:""` is valid with omitted display. On `messages.N.content.M ... cannot be modified` or `Invalid signature in thinking block`, the proxy removes thinking/redacted-thinking blocks only from rejected assistant message N and retries once. It never edits transcripts; failed recovery returns the original 400. |
 | `metadata: {user_id}` | ✅ 200 (passthrough) | claude-emits | (TODO) | Copilot 200s and ignores; not stripped per "preserve unknown fields unless documented" |
 | `mcp_servers: []` (empty array) | ✅ 200 (proxy passthrough; Copilot may 400, but harmless) | exploratory | (TODO) | Edge case |
 | `context_management.edits[].type=compact_20260112` | ❌ 400 in stealth, ✅ 200 with leverage betas | anthropic-docs | `compact_20260112` | Requires `anthropic-beta: compact-2026-01-12` forwarded to upstream. Stealth-default `bun run start` strips the beta → Copilot's allowlist drops to `{clear_thinking_20251015, clear_tool_uses_20250919}` and the body field 400s. `github-router claude` (extended-betas) forwards the beta and gets 200 + `applied_edits:[]`. Probe asserts the stealth-mode 400; leverage-mode acceptance is implicit via the `compact-` beta-prefix row. Strip-rule follow-up tracked in a separate PR. |

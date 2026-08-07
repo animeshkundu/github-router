@@ -242,6 +242,74 @@ describe("sanitizeAnthropicBody", () => {
     expect(parsed.messages[4]!.content[0]).toEqual({ type: "text", text: "Done." })
   })
 
+  test("parallel advisor history becomes one assistant turn followed by all results", () => {
+    const body = JSON.stringify({
+      model: "claude-opus-4.7",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Consulting twice." },
+            {
+              type: "server_tool_use",
+              id: "srvtoolu_parallel_a",
+              name: "advisor",
+              input: {},
+            },
+            {
+              type: "server_tool_use",
+              id: "srvtoolu_parallel_b",
+              name: "advisor",
+              input: {},
+            },
+            {
+              type: "advisor_tool_result",
+              tool_use_id: "srvtoolu_parallel_a",
+              content: { type: "advisor_result", text: "advice a" },
+            },
+            {
+              type: "advisor_tool_result",
+              tool_use_id: "srvtoolu_parallel_b",
+              content: { type: "advisor_result", text: "advice b" },
+            },
+            { type: "text", text: "Continuing." },
+          ],
+        },
+      ],
+    })
+
+    const parsed = JSON.parse(sanitizeAnthropicBody(body)) as {
+      messages: Array<{ role: string; content: Array<Record<string, unknown>> }>
+    }
+    expect(parsed.messages.map((message) => message.role)).toEqual([
+      "assistant",
+      "user",
+      "assistant",
+    ])
+    expect(parsed.messages[0]!.content.map((block) => block.type)).toEqual([
+      "text",
+      "tool_use",
+      "tool_use",
+    ])
+    expect(parsed.messages[0]!.content
+      .filter((block) => block.type === "tool_use")
+      .map((block) => block.id)).toEqual([
+      "toolu_parallel_a",
+      "toolu_parallel_b",
+    ])
+    expect(parsed.messages[1]!.content.map((block) => block.tool_use_id)).toEqual([
+      "toolu_parallel_a",
+      "toolu_parallel_b",
+    ])
+    expect(parsed.messages[1]!.content.map((block) => block.content)).toEqual([
+      "advice a",
+      "advice b",
+    ])
+    expect(parsed.messages[2]!.content).toEqual([
+      { type: "text", text: "Continuing." },
+    ])
+  })
+
   test("idempotent on already-translated body (re-running on output produces same output)", () => {
     const original = JSON.stringify({
       model: "claude-opus-4.7",
@@ -260,7 +328,7 @@ describe("sanitizeAnthropicBody", () => {
     expect(twice).toBe(once)
   })
 
-  test("stray advisor_tool_result without preceding server_tool_use → dropped (avoid 400)", () => {
+  test("stray advisor_tool_result without preceding server_tool_use fails clearly", () => {
     const body = JSON.stringify({
       model: "claude-opus-4.7",
       messages: [
@@ -278,14 +346,196 @@ describe("sanitizeAnthropicBody", () => {
         },
       ],
     })
-    const out = sanitizeAnthropicBody(body)
-    const parsed = JSON.parse(out) as {
+    expect(() => sanitizeAnthropicBody(body)).toThrow(
+      "Invalid advisor history",
+    )
+  })
+
+  test("mixed client/advisor turn merges both results into one immediate user message without changing thinking", () => {
+    const thinking = {
+      type: "thinking",
+      thinking: "",
+      signature: "signed-opaque-value",
+    }
+    const body = JSON.stringify({
+      model: "claude-opus-5",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            thinking,
+            {
+              type: "tool_use",
+              id: "toolu_read_1",
+              name: "Read",
+              input: { file_path: "/tmp/x" },
+            },
+            {
+              type: "server_tool_use",
+              id: "srvtoolu_advisor_1",
+              name: "advisor",
+              input: {},
+            },
+            {
+              type: "advisor_tool_result",
+              tool_use_id: "srvtoolu_advisor_1",
+              content: { type: "advisor_result", text: "reviewed" },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_read_1",
+              content: "contents",
+            },
+            { type: "text", text: "continue" },
+          ],
+        },
+      ],
+    })
+
+    const parsed = JSON.parse(sanitizeAnthropicBody(body)) as {
       messages: Array<{ role: string; content: Array<Record<string, unknown>> }>
     }
-    // Single assistant turn with text/text — orphan dropped.
-    expect(parsed.messages.length).toBe(1)
-    expect(parsed.messages[0]!.content.length).toBe(2)
-    expect(parsed.messages[0]!.content.every((b) => b.type === "text")).toBe(true)
+    expect(parsed.messages.map((message) => message.role)).toEqual([
+      "assistant",
+      "user",
+    ])
+    expect(parsed.messages[0]!.content[0]).toEqual(thinking)
+    expect(parsed.messages[0]!.content.map((block) => block.type)).toEqual([
+      "thinking",
+      "tool_use",
+      "tool_use",
+    ])
+    expect(parsed.messages[1]!.content.map((block) => block.type)).toEqual([
+      "tool_result",
+      "tool_result",
+      "text",
+    ])
+    expect(parsed.messages[1]!.content.map((block) => block.tool_use_id)).toEqual([
+      "toolu_advisor_1",
+      "toolu_read_1",
+      undefined,
+    ])
+  })
+
+  test("mixed turn also normalizes when the advisor call precedes a client tool", () => {
+    const body = JSON.stringify({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "server_tool_use",
+              id: "srvtoolu_advisor_first",
+              name: "advisor",
+              input: {},
+            },
+            { type: "tool_use", id: "toolu_read_2", name: "Read", input: {} },
+            {
+              type: "advisor_tool_result",
+              tool_use_id: "srvtoolu_advisor_first",
+              content: { type: "advisor_result", text: "reviewed" },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_read_2",
+              content: "contents",
+            },
+          ],
+        },
+      ],
+    })
+
+    const parsed = JSON.parse(sanitizeAnthropicBody(body)) as {
+      messages: Array<{ role: string; content: Array<Record<string, unknown>> }>
+    }
+    expect(parsed.messages.map((message) => message.role)).toEqual([
+      "assistant",
+      "user",
+    ])
+    expect(parsed.messages[0]!.content.map((block) => block.type)).toEqual([
+      "tool_use",
+      "tool_use",
+    ])
+    expect(parsed.messages[1]!.content.map((block) => block.tool_use_id)).toEqual([
+      "toolu_advisor_first",
+      "toolu_read_2",
+    ])
+  })
+
+  test("mixed client/advisor turn rejects incomplete client results", () => {
+    const body = JSON.stringify({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "toolu_read_1", name: "Read", input: {} },
+            {
+              type: "server_tool_use",
+              id: "srvtoolu_advisor_1",
+              name: "advisor",
+              input: {},
+            },
+            {
+              type: "advisor_tool_result",
+              tool_use_id: "srvtoolu_advisor_1",
+              content: { type: "advisor_result", text: "reviewed" },
+            },
+          ],
+        },
+        { role: "user", content: [{ type: "text", text: "missing result" }] },
+      ],
+    })
+    expect(() => sanitizeAnthropicBody(body)).toThrow(
+      "Invalid advisor history",
+    )
+  })
+
+  test("mixed client/advisor turn rejects an impossible trailing continuation", () => {
+    const body = JSON.stringify({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "toolu_read_1", name: "Read", input: {} },
+            {
+              type: "server_tool_use",
+              id: "srvtoolu_advisor_1",
+              name: "advisor",
+              input: {},
+            },
+            {
+              type: "advisor_tool_result",
+              tool_use_id: "srvtoolu_advisor_1",
+              content: { type: "advisor_result", text: "reviewed" },
+            },
+            { type: "text", text: "continued before Read completed" },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_read_1",
+              content: "contents",
+            },
+          ],
+        },
+      ],
+    })
+    expect(() => sanitizeAnthropicBody(body)).toThrow(
+      "Invalid advisor history",
+    )
   })
 
   test("re-injecting tools[] preserves user-defined tools (additive)", () => {

@@ -122,7 +122,7 @@ See [`docs/publishing.md`](docs/publishing.md) for npm/Docker release flow, the 
    - Service: `src/services/copilot/create-*.ts` → handler → route
 
 2. **Passthrough with sanitization**: Forward to Copilot, stripping unsupported fields:
-   - `/v1/messages` (Anthropic) → strip `cache_control.scope`, filter beta headers → Copilot `/v1/messages?beta=true`
+   - `/v1/messages` (Anthropic) → strip `cache_control.scope` generally and the whole unsupported `cache_control` object from signed thinking blocks (signed fields remain exact), filter beta headers → Copilot `/v1/messages?beta=true`
    - `/v1/messages/count_tokens` → same sanitization → Copilot `/v1/messages/count_tokens?beta=true`
 
 ### Beta header filtering & stealth-vs-leverage
@@ -150,7 +150,7 @@ The script templates the flag as a **decimal `[uint32]` literal, NOT hex** — W
 
 ### Unsupported features (Copilot can't serve)
 
-Files API (`/v1/files/*`) → 404; ADVISOR (`advisor-tool-2026-03-01`) → Phase I server-side wiring (proxy injects `__anthropic_advisor`, dispatches to gpt-5.6-sol xhigh, streams `advisor_tool_result` back); `mcp_servers` non-empty → fail-fast 400; Bridge / CCR remote-session env stripped from spawned-child env. Full surface + opt-out paths in [`docs/unsupported-features.md`](docs/unsupported-features.md).
+Files API (`/v1/files/*`) → 404; ADVISOR (`advisor-tool-2026-03-01`) → Phase I server-side wiring (proxy injects `__anthropic_advisor`, dispatches to gpt-5.6-sol xhigh, streams `advisor_tool_result` back, and defers continuation when ordinary client tools coexist); exact signed-thinking replay-integrity 400s → one request-time repair of the rejected assistant turn without editing Claude Code transcripts; `mcp_servers` non-empty → fail-fast 400; Bridge / CCR remote-session env stripped from spawned-child env. Full surface + opt-out paths in [`docs/unsupported-features.md`](docs/unsupported-features.md).
 
 ### `apiKeyHelper` and external credential scripts
 

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import fs from "node:fs"
 import { Writable } from "node:stream"
 
@@ -8,11 +9,14 @@ import { PATHS } from "~/lib/paths"
 
 const MAX_LOG_BYTES = 1024 * 1024 // 1 MB
 const DEDUP_MAX = 1000
+const DEDUP_WINDOW_MS = 5 * 60 * 1000
 const ARG_MAX_LEN = 2048
-const DEDUP_KEY_MAX_LEN = 200
+const ERROR_CAUSE_MAX_DEPTH = 4
+const ERROR_FIELD_MAX_LEN = 512
 
 const CREDENTIAL_RE =
   /\b(eyJ[A-Za-z0-9_-]{20,}(?:\.[A-Za-z0-9_-]+){0,2}|gh[opsu]_[A-Za-z0-9_]{20,}|Bearer\s+\S{20,})\b/g
+const ERROR_BODY_RE = /\b(request\s+body|body)\s*[:=]\s*.*$/i
 
 const ALLOWED_TYPES = new Set(["fatal", "error", "warn"])
 
@@ -20,37 +24,135 @@ function sanitize(line: string): string {
   return line.replace(CREDENTIAL_RE, "[REDACTED]")
 }
 
-function serializeArg(arg: unknown): string {
-  if (typeof arg === "string") return arg
-  if (arg instanceof Error) {
-    const parts = [arg.message]
-    if (arg.stack) parts.push(arg.stack)
-    return parts.join("\n")
+function errorProperty(error: unknown, key: string): string | undefined {
+  if (
+    (typeof error !== "object" && typeof error !== "function")
+    || error === null
+  ) {
+    return undefined
   }
-  return String(arg)
+  try {
+    const value = (error as Record<string, unknown>)[key]
+    return typeof value === "string" ? value : undefined
+  } catch {
+    return undefined
+  }
 }
 
-function formatLogLine(logObj: LogObject): string {
+function errorCause(error: unknown): unknown {
+  if (
+    (typeof error !== "object" && typeof error !== "function")
+    || error === null
+  ) {
+    return undefined
+  }
+  try {
+    return (error as { cause?: unknown }).cause
+  } catch {
+    return undefined
+  }
+}
+
+function safeString(value: unknown): string {
+  try {
+    return String(value)
+  } catch {
+    return "[unserializable]"
+  }
+}
+
+function boundErrorField(value: string): string {
+  return value.length > ERROR_FIELD_MAX_LEN
+    ? `${value.slice(0, ERROR_FIELD_MAX_LEN)}…`
+    : value
+}
+
+function sanitizeErrorMessage(value: string): string {
+  return sanitize(value).replace(ERROR_BODY_RE, "$1=[REDACTED]")
+}
+
+function serializeError(error: Error): string {
+  const chain: string[] = []
+  const seen = new Set<unknown>()
+  let current: unknown = error
+
+  for (
+    let depth = 0;
+    current !== undefined && depth <= ERROR_CAUSE_MAX_DEPTH;
+    depth++
+  ) {
+    if (
+      (typeof current === "object" || typeof current === "function")
+      && current !== null
+    ) {
+      if (seen.has(current)) {
+        chain.push("[circular cause]")
+        break
+      }
+      seen.add(current)
+    }
+
+    const name = boundErrorField(errorProperty(current, "name") ?? "Error")
+    const message = boundErrorField(
+      sanitizeErrorMessage(
+        errorProperty(current, "message")
+          ?? (typeof current === "string" ? current : safeString(current)),
+      ),
+    )
+    const rawCode = errorProperty(current, "code")
+    const code = rawCode ? boundErrorField(rawCode) : undefined
+    chain.push(`${name}: ${message}${code ? ` code=${code}` : ""}`)
+
+    const cause = errorCause(current)
+    if (cause === undefined) break
+    if (depth === ERROR_CAUSE_MAX_DEPTH) {
+      chain.push("[cause chain truncated]")
+      break
+    }
+    current = cause
+  }
+
+  return chain.join(" <- cause: ")
+}
+
+function serializeArg(arg: unknown): string {
+  if (typeof arg === "string") return arg
+  if (arg instanceof Error) return serializeError(arg)
+  return safeString(arg)
+}
+
+function serializeArgs(logObj: LogObject): string[] {
+  return logObj.args.map((arg) => {
+    const serialized = sanitize(serializeArg(arg))
+    return serialized.length > ARG_MAX_LEN
+      ? `${serialized.slice(0, ARG_MAX_LEN)}…`
+      : serialized
+  })
+}
+
+function formatLogLine(logObj: LogObject, suppressed = 0): string {
   const ts = logObj.date.toISOString()
   const level = (logObj.type ?? "error").toUpperCase()
-  const message = logObj.args
-    .map((a) => {
-      const s = serializeArg(a)
-      return s.length > ARG_MAX_LEN ? s.slice(0, ARG_MAX_LEN) + "…" : s
-    })
+  const message = serializeArgs(logObj)
     .join(" ")
     .replace(/\r\n|\r|\n/g, "\\n")
+  const recurrence = suppressed > 0
+    ? ` [${suppressed} identical occurrences suppressed]`
+    : ""
 
-  return sanitize(`${ts} [${level}] ${message}\n`)
+  return `${ts} [${level}] ${message}${recurrence}\n`
 }
 
 function makeDedupeKey(logObj: LogObject): string {
-  const firstArg =
-    logObj.args.length > 0 ? serializeArg(logObj.args[0]) : ""
-  const key = `${logObj.type}:${firstArg}`
-  return key.length > DEDUP_KEY_MAX_LEN
-    ? key.slice(0, DEDUP_KEY_MAX_LEN)
-    : key
+  const hash = createHash("sha256")
+  hash.update(logObj.type)
+  for (const arg of serializeArgs(logObj)) {
+    hash.update("\0")
+    hash.update(String(arg.length))
+    hash.update(":")
+    hash.update(arg)
+  }
+  return hash.digest("base64url")
 }
 
 /**
@@ -77,7 +179,10 @@ function rotateAtStartup(filePath: string): void {
 
 export class FileLogReporter implements ConsolaReporter {
   private readonly filePath: string
-  private readonly seen = new Set<string>()
+  private readonly seen = new Map<
+    string,
+    { lastWrittenAt: number; suppressed: number }
+  >()
   // Approximate bytes written since the last rotation check. We use a
   // conservative trigger threshold (half the max) so a burst of large
   // lines between checks never grows the file by more than ~2x the cap.
@@ -164,12 +269,26 @@ export class FileLogReporter implements ConsolaReporter {
     if (!ALLOWED_TYPES.has(logObj.type)) return
 
     const key = makeDedupeKey(logObj)
-    if (this.seen.has(key)) return
+    const timestamp = logObj.date.getTime()
+    const previous = this.seen.get(key)
+    let suppressed = 0
 
-    if (this.seen.size >= DEDUP_MAX) this.seen.clear()
-    this.seen.add(key)
+    if (previous) {
+      if (timestamp - previous.lastWrittenAt < DEDUP_WINDOW_MS) {
+        previous.suppressed++
+        return
+      }
+      suppressed = previous.suppressed
+      previous.lastWrittenAt = timestamp
+      previous.suppressed = 0
+    } else {
+      if (this.seen.size >= DEDUP_MAX) this.seen.clear()
+      this.seen.set(key, { lastWrittenAt: timestamp, suppressed: 0 })
+    }
 
-    const line = formatLogLine(logObj)
+    // One hot identical condition can write at most once per five-minute
+    // window (roughly 12 lines/hour), while the suffix preserves its frequency.
+    const line = formatLogLine(logObj, suppressed)
 
     // Periodic rotation check: after every ROTATE_CHECK_BYTES written since
     // the last check, enforce the MAX_LOG_BYTES ceiling from inside the hot

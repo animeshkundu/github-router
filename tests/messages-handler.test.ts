@@ -1,6 +1,7 @@
 import { describe, test, expect, mock, afterEach, beforeEach } from "bun:test"
 
 import { state } from "../src/lib/state"
+import { __resetThinkingHistoryRepairsForTests } from "../src/lib/thinking-history-repair"
 import { bucketEffort, clampEffort, clampOutputConfigEffortInPlace } from "../src/routes/messages/handler"
 import { server } from "../src/server"
 
@@ -53,7 +54,39 @@ function emptyMessageResponse() {
   )
 }
 
+/**
+ * Install a fetch mock typed as `globalThis.fetch`, so a test can override it
+ * without a type suppression. `handler` receives the 1-based call index and the
+ * serialized request body; the returned record exposes what was sent upstream.
+ */
+function installFetchMock(
+  handler: (call: number, body: string) => Response,
+): { calls: number; bodies: Array<string> } {
+  const record: { calls: number; bodies: Array<string> } = {
+    calls: 0,
+    bodies: [],
+  }
+  globalThis.fetch = Object.assign(
+    mock(
+      (
+        _input: Parameters<typeof fetch>[0],
+        init?: Parameters<typeof fetch>[1],
+      ): Promise<Response> => {
+        record.calls++
+        const body = typeof init?.body === "string" ? init.body : ""
+        record.bodies.push(body)
+        return Promise.resolve(handler(record.calls, body))
+      },
+    ),
+    // Bun's `typeof fetch` carries `preconnect`; supplying a no-op keeps the
+    // assignment type-safe instead of suppressing the mismatch.
+    { preconnect: () => {} },
+  )
+  return record
+}
+
 beforeEach(() => {
+  __resetThinkingHistoryRepairsForTests()
   savedModels = state.models
   state.copilotToken = "test-token"
   state.vsCodeVersion = "1.0.0"
@@ -61,6 +94,280 @@ beforeEach(() => {
   state.manualApprove = false
   state.rateLimitSeconds = undefined
   state.rateLimitWait = false
+})
+
+describe("signed thinking-history recovery", () => {
+  const upstreamIntegrityError = {
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      message:
+        "messages.1.content.0: `thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified. These blocks must remain as they were in the original response.",
+    },
+  }
+
+  function requestBody(): string {
+    return JSON.stringify({
+      model: "claude-opus-4.7",
+      max_tokens: 100,
+      thinking: { type: "adaptive" },
+      messages: [
+        { role: "user", content: "start" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "", signature: "opaque-signature" },
+            { type: "text", text: "using a tool" },
+            { type: "tool_use", id: "toolu_1", name: "Read", input: {} },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_1", content: "done" },
+          ],
+        },
+      ],
+    })
+  }
+
+  function integrityErrorAt(messageIndex: number) {
+    return {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: `messages.${messageIndex}.content.0: \`thinking\` or \`redacted_thinking\` blocks in the latest assistant message cannot be modified. These blocks must remain as they were in the original response.`,
+      },
+    }
+  }
+
+  // Two corrupt assistant turns. Upstream reports them one at a time, so this
+  // only succeeds if the handler keeps repairing until the history converges.
+  function twoCorruptTurnsBody(): string {
+    const corruptTurn = (signature: string) => ({
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "", signature },
+        { type: "text", text: "answer" },
+      ],
+    })
+    return JSON.stringify({
+      model: "claude-opus-4.7",
+      max_tokens: 100,
+      thinking: { type: "adaptive" },
+      messages: [
+        { role: "user", content: "first" },
+        corruptTurn("opaque-signature-a"),
+        { role: "user", content: "second" },
+        corruptTurn("opaque-signature-b"),
+        { role: "user", content: "third" },
+      ],
+    })
+  }
+
+  beforeEach(() => {
+    state.models = {
+      object: "list",
+      data: [makeModel({ id: "claude-opus-4.7" })],
+    }
+  })
+
+  test("retries once with only the rejected assistant thinking blocks removed", async () => {
+    const bodies: Array<string> = []
+    let calls = 0
+    const fetchMock = mock((_url: string, init?: { body?: string }) => {
+      calls++
+      bodies.push(init?.body ?? "")
+      if (calls === 1) {
+        return Response.json(upstreamIntegrityError, { status: 400 })
+      }
+      return emptyMessageResponse()
+    })
+    // @ts-expect-error - override fetch for this test
+    globalThis.fetch = fetchMock
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: requestBody(),
+    })
+    expect(response.status).toBe(200)
+    expect(calls).toBe(2)
+
+    const original = JSON.parse(bodies[0]!) as {
+      messages: Array<{ content: Array<Record<string, unknown>> }>
+    }
+    const repaired = JSON.parse(bodies[1]!) as typeof original
+    expect(original.messages[1]!.content.map((block) => block.type)).toEqual([
+      "thinking",
+      "text",
+      "tool_use",
+    ])
+    expect(repaired.messages[1]!.content.map((block) => block.type)).toEqual([
+      "text",
+      "tool_use",
+    ])
+    expect(repaired.messages[2]).toEqual(original.messages[2])
+  })
+
+  test("unrelated 400 is forwarded without a semantic retry", async () => {
+    let calls = 0
+    const body = {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "messages.2: missing tool_result",
+      },
+    }
+    const fetchMock = mock(() => {
+      calls++
+      return Response.json(body, { status: 400 })
+    })
+    // @ts-expect-error - override fetch for this test
+    globalThis.fetch = fetchMock
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: requestBody(),
+    })
+    expect(response.status).toBe(400)
+    expect(calls).toBe(1)
+    await expect(response.json()).resolves.toEqual(body)
+  })
+
+  test("converges across several corrupt assistant turns", async () => {
+    // Copilot names only the FIRST offending message per rejection, so a
+    // history with two corrupt turns needs one round trip per turn. A
+    // single-shot repair would surface the first rejection forever.
+    const upstream = installFetchMock((call) => {
+      if (call === 1) return Response.json(integrityErrorAt(1), { status: 400 })
+      if (call === 2) return Response.json(integrityErrorAt(3), { status: 400 })
+      return emptyMessageResponse()
+    })
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: twoCorruptTurnsBody(),
+    })
+    expect(response.status).toBe(200)
+    expect(upstream.calls).toBe(3)
+
+    const final = JSON.parse(upstream.bodies[2]!) as {
+      messages: Array<{ content: Array<Record<string, unknown>> }>
+    }
+    expect(final.messages[1]!.content.map((b) => b.type)).toEqual(["text"])
+    expect(final.messages[3]!.content.map((b) => b.type)).toEqual(["text"])
+  })
+
+  test("stops instead of spinning when upstream re-names a repaired turn", async () => {
+    const upstream = installFetchMock(() =>
+      Response.json(integrityErrorAt(1), { status: 400 }),
+    )
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: twoCorruptTurnsBody(),
+    })
+    expect(response.status).toBe(400)
+    // One repair attempt, then the same index recurs: no forward progress, so
+    // it must give up rather than burn the whole attempt budget.
+    expect(upstream.calls).toBe(2)
+  })
+
+  test("repairs a streaming request after an integrity rejection", async () => {
+    // Claude Code streams by default. A 400 arrives before any body streams, so
+    // it must reach the same repair path — this is otherwise uncovered.
+    const upstream = installFetchMock((call) => {
+      if (call === 1) {
+        return Response.json(upstreamIntegrityError, { status: 400 })
+      }
+      return new Response(
+        `event: message_start\ndata: {"type":"message_start","message":{"id":"msg_x","type":"message","role":"assistant","model":"claude-opus-4.7","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1}}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      )
+    })
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...(JSON.parse(requestBody()) as Record<string, unknown>),
+        stream: true,
+      }),
+    })
+    expect(response.status).toBe(200)
+    expect(upstream.calls).toBe(2)
+    expect(await response.text()).toContain("message_stop")
+  })
+
+  test("preemptive repair reapplies every remembered turn in one request", async () => {
+    // Learn both corrupt turns across a converging request...
+    const learn = installFetchMock((call) => {
+      if (call === 1) return Response.json(integrityErrorAt(1), { status: 400 })
+      if (call === 2) return Response.json(integrityErrorAt(3), { status: 400 })
+      return emptyMessageResponse()
+    })
+    await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: twoCorruptTurnsBody(),
+    })
+    expect(learn.calls).toBe(3)
+
+    // ...then the identical history must be repaired up-front, with no 400.
+    const replay = installFetchMock(() => emptyMessageResponse())
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: twoCorruptTurnsBody(),
+    })
+    expect(response.status).toBe(200)
+    expect(replay.calls).toBe(1)
+    const sent = JSON.parse(replay.bodies[0]!) as {
+      messages: Array<{ content: Array<Record<string, unknown>> }>
+    }
+    expect(sent.messages[1]!.content.map((b) => b.type)).toEqual(["text"])
+    expect(sent.messages[3]!.content.map((b) => b.type)).toEqual(["text"])
+  })
+
+  test("failed repair surfaces the most recent rejection, not the first", async () => {
+    const upstream = installFetchMock((call) => {
+      if (call === 1) {
+        return Response.json(upstreamIntegrityError, { status: 400 })
+      }
+      return Response.json(
+        {
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message: "repair-specific failure",
+          },
+        },
+        { status: 400 },
+      )
+    })
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: requestBody(),
+    })
+    expect(response.status).toBe(400)
+    expect(upstream.calls).toBe(2)
+    // The integrity rejection was already repaired; reporting it again would
+    // misdiagnose what actually blocked the retry.
+    await expect(response.json()).resolves.toEqual({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "repair-specific failure",
+      },
+    })
+  })
 })
 
 afterEach(() => {
@@ -892,6 +1199,46 @@ describe("Anthropic-only body field stripping (Phase B P0.2)", () => {
     expect(forwarded.system?.[0].cache_control?.type).toBe("ephemeral")
   })
 
+  test("strips unsupported cache_control.scope from signed thinking without changing signed fields", async () => {
+    const captured: { body?: string } = {}
+    setupModelAndFetch(captured)
+    const thinkingBlock = {
+      type: "thinking",
+      thinking: "",
+      signature: "opaque",
+      cache_control: { type: "ephemeral", scope: "global" },
+    }
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        messages: [
+          { role: "user", content: "start" },
+          {
+            role: "assistant",
+            content: [
+              thinkingBlock,
+              { type: "text", text: "done" },
+            ],
+          },
+          { role: "user", content: "continue" },
+        ],
+      }),
+    })
+    expect(response.status).toBe(200)
+    const forwarded = JSON.parse(captured.body ?? "{}") as {
+      messages: Array<{ content: Array<Record<string, unknown>> }>
+    }
+    expect(forwarded.messages[1]!.content[0]).toEqual({
+      type: "thinking",
+      thinking: "",
+      signature: "opaque",
+    })
+  })
+
   test("fast-path skip: body without budget/output_config/betas avoids re-serialize", async () => {
     // The fast path is the `rawBody.includes('"budget"')` etc. check. If
     // none of those substrings appear, sanitization runs but doesn't
@@ -912,5 +1259,55 @@ describe("Anthropic-only body field stripping (Phase B P0.2)", () => {
     })
     expect(response.status).toBe(200)
     expect(captured.body).toBe(inputBody)
+  })
+
+  test("count_tokens strips cache_control from signed thinking in lock-step", async () => {
+    state.models = {
+      object: "list",
+      data: [makeModel({ id: "claude-opus-4.7" })],
+    }
+    let capturedBody = ""
+    const fetchMock = mock((url: string, init?: { body?: string }) => {
+      if (!url.includes("/v1/messages/count_tokens")) {
+        throw new Error(`Unexpected URL ${url}`)
+      }
+      capturedBody = init?.body ?? ""
+      return Response.json({ input_tokens: 42 })
+    })
+    // @ts-expect-error - override fetch for this test
+    globalThis.fetch = fetchMock
+
+    const response = await server.request("/v1/messages/count_tokens", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        messages: [
+          { role: "user", content: "start" },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "thinking",
+                thinking: "",
+                signature: "opaque",
+                cache_control: { type: "ephemeral", scope: "global" },
+              },
+              { type: "text", text: "done" },
+            ],
+          },
+          { role: "user", content: "continue" },
+        ],
+      }),
+    })
+    expect(response.status).toBe(200)
+    const forwarded = JSON.parse(capturedBody) as {
+      messages: Array<{ content: Array<Record<string, unknown>> }>
+    }
+    expect(forwarded.messages[1]!.content[0]).toEqual({
+      type: "thinking",
+      thinking: "",
+      signature: "opaque",
+    })
   })
 })

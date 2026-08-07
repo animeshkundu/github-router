@@ -59,6 +59,12 @@ const baseModels: ModelsResponse = {
 
 const originalFetch = globalThis.fetch
 let savedDisableSemantic: string | undefined
+const artifactEnvKeys = [
+  "AIORDIE_BASE_URL",
+  "AIORDIE_TOKEN",
+  "AIORDIE_SESSION_ID",
+] as const
+let savedArtifactEnv: Record<(typeof artifactEnvKeys)[number], string | undefined>
 
 beforeEach(() => {
   __resetInFlightForTests()
@@ -70,6 +76,12 @@ beforeEach(() => {
   // that has run it). Mirrors the GH_ROUTER_DISABLE_WORKER_TOOLS pin.
   savedDisableSemantic = process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH
   process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH = "1"
+  savedArtifactEnv = {
+    AIORDIE_BASE_URL: process.env.AIORDIE_BASE_URL,
+    AIORDIE_TOKEN: process.env.AIORDIE_TOKEN,
+    AIORDIE_SESSION_ID: process.env.AIORDIE_SESSION_ID,
+  }
+  for (const key of artifactEnvKeys) delete process.env[key]
   state.peerMcpNonce = NONCE
   state.serveMode = false
   state.copilotToken = "test-copilot-token"
@@ -88,6 +100,11 @@ afterEach(() => {
     delete process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH
   } else {
     process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH = savedDisableSemantic
+  }
+  for (const key of artifactEnvKeys) {
+    const value = savedArtifactEnv[key]
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
   }
   globalThis.fetch = originalFetch
 })
