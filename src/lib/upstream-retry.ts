@@ -306,6 +306,17 @@ export function classifyTransportError(
   if (
     codes.some((value) => DETERMINISTIC_CODES.has(value))
     || DETERMINISTIC_TLS_MESSAGES.some((phrase) => messages.includes(phrase))
+    // Catch-all for every OTHER OpenSSL failure. Safe here, and only here,
+    // because the one retryable alert already returned above — so this keeps
+    // fail-fast for the long tail (`tlsv13 alert certificate required`,
+    // `sslv3 alert bad certificate`, `tlsv1 alert internal error`, …) without
+    // re-swallowing alert 20.
+    //
+    // Without it those errors fall through to the generic transient branch via
+    // the outer `TypeError: fetch failed`, turning a permanent configuration
+    // failure into three attempts. Narrowing the deterministic list alone was
+    // not sufficient; the residue has to land somewhere deliberate.
+    || messages.includes("ssl routines")
     // A refused connection or a DNS miss is a configuration signal, so it
     // fails fast rather than being hammered. Kept deliberately, not inherited:
     // transient DNS is already covered by EAI_AGAIN, and a genuinely

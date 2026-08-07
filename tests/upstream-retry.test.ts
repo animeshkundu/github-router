@@ -426,3 +426,38 @@ describe("classifyTransportError — TLS and session faults", () => {
     }
   })
 })
+
+/**
+ * The long tail of OpenSSL failures. Narrowing the deterministic list to an
+ * explicit set was not enough on its own: anything unlisted fell through to the
+ * generic transient branch via the outer `TypeError: fetch failed`, silently
+ * converting permanent configuration failures into three attempts. These pin
+ * the catch-all that keeps the residue deterministic.
+ */
+describe("classifyTransportError — unlisted OpenSSL failures stay deterministic", () => {
+  function fetchFailed(causeMessage: string): TypeError {
+    return new TypeError("fetch failed", { cause: new Error(causeMessage) })
+  }
+
+  test.each([
+    "error:0A000418:SSL routines:ssl3_read_bytes:tlsv13 alert certificate required",
+    "error:0A000412:SSL routines:ssl3_read_bytes:sslv3 alert bad certificate",
+    "error:0A000450:SSL routines:ssl3_read_bytes:tlsv1 alert internal error",
+    "error:0A00042E:SSL routines:ssl3_read_bytes:tlsv1 alert protocol version",
+    "error:0A000102:SSL routines:ssl_choose_client_version:unsupported protocol",
+  ])("stays deterministic: %s", (message) => {
+    expect(classifyTransportError(fetchFailed(message)).classification).toBe(
+      "deterministic",
+    )
+  })
+
+  // The exception that the catch-all must not reclaim, in both OpenSSL wordings.
+  test.each([
+    "error:0A0003FC:SSL routines:ssl3_read_bytes:ssl/tls alert bad record mac:SSL alert number 20",
+    "error:0A000119:SSL routines:ssl3_get_record:decryption failed or bad record mac",
+  ])("alert 20 still outranks the catch-all: %s", (message) => {
+    expect(classifyTransportError(fetchFailed(message)).classification).toBe(
+      "transient",
+    )
+  })
+})

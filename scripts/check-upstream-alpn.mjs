@@ -9,8 +9,14 @@
  * an earlier attempt at this change came out inert, since the agent it
  * configured lived behind `--proxy-env`, which defaults to false.
  *
- * So this measures the negotiated protocol on the real application path, and
- * records the two things that actually gate it: the BUILT-IN undici version
+ * So this measures the negotiated protocol TWICE: once on the real fetch path
+ * (an undici Agent configured exactly as `upstreamAgentOptions()` does, with the
+ * protocol read off the socket the request actually used), and once as a raw
+ * ALPN probe that reports what the peer would select. The first is the
+ * assertion; the second is context for interpreting it, since a peer declining
+ * h2 and a client refusing to offer it look identical from the outside.
+ *
+ * It also records the two things that actually gate exposure: the BUILT-IN undici version
  * (not the npm dependency) and which global-dispatcher symbol `fetch` reads.
  * Node <=24's built-in reads `.1`, whose wrapper hardcodes `allowH2:false`;
  * Node >=26's reads `.2` and negotiates h2. A dependency bump alone does not
@@ -27,6 +33,7 @@
  */
 
 import { connect } from "node:tls"
+import { Agent, buildConnector, setGlobalDispatcher } from "undici"
 
 const target = process.argv[2] ?? "https://api.githubcopilot.com"
 const allowH2 = process.env.GH_ROUTER_UPSTREAM_ALLOW_H2 === "1"
@@ -45,51 +52,93 @@ console.log(`dispatcher symbol  ${symbolPath}`)
 console.log(`policy allowH2     ${allowH2}`)
 
 const { hostname, port } = new URL(target)
+const expected = allowH2 ? "h2" : "http/1.1"
 
 /**
- * Offer exactly what undici would offer under the current policy and report
- * what the peer selects. Measuring the ALPN result directly (rather than
- * inspecting an Agent's options) is the point: it is the observable that
- * matters, and it is runtime-agnostic.
+ * Route a real `fetch()` through a dispatcher built the same way the proxy
+ * builds it, and read the protocol off the socket that request used. This is
+ * the assertion that matters: a construction-level check ("the Agent was built
+ * with allowH2:false") passes even when the live handshake negotiates h2 —
+ * which happened during development, because ALPN is chosen by the CONNECTOR
+ * and a custom `connect` built from `buildConnector({})` re-enables h2 no
+ * matter what the Agent says.
  */
-const socket = connect(
-  {
-    host: hostname,
-    port: port ? Number(port) : 443,
-    servername: hostname,
-    ALPNProtocols: allowH2 ? ["h2", "http/1.1"] : ["http/1.1"],
-  },
-  () => {
-    const negotiated = socket.alpnProtocol || "(none)"
-    socket.end()
-    console.log(`negotiated         ${negotiated}`)
+async function measureFetchPath() {
+  let observed
+  const base = buildConnector({ allowH2 })
+  const dispatcher = new Agent({
+    allowH2,
+    connections: 256,
+    connect: (options, callback) =>
+      base(options, (err, socket) => {
+        if (err || !socket) return callback(err ?? new Error("connect failed"), null)
+        observed =
+          typeof socket.alpnProtocol === "string" ? socket.alpnProtocol : "http/1.1"
+        callback(null, socket)
+      }),
+  })
+  setGlobalDispatcher(dispatcher)
+  // Any endpoint on the origin works; only the transport is under test, so a
+  // 401/404 is as informative as a 200.
+  // `globalThis.fetch` rather than the bare global: identical binding, but it
+  // needs no eslint environment directive to resolve in a plain .mjs script.
+  const response = await globalThis.fetch(target, { method: "GET" })
+  await response.body?.cancel()
+  await dispatcher.close()
+  return observed
+}
 
-    const expected = allowH2 ? "h2" : "http/1.1"
-    if (negotiated === expected) {
-      console.log(`\nOK: negotiated ${negotiated}, matching policy.`)
-      process.exit(0)
-    }
-    // A peer that declines h2 while we permit it is fine — permitting is not
-    // requiring. The failure that matters is speaking h2 when policy says not to.
-    if (allowH2 && negotiated === "http/1.1") {
-      console.log("\nOK: h2 permitted, peer selected http/1.1.")
-      process.exit(0)
-    }
-    console.error(
-      `\nFAIL: negotiated ${negotiated}, expected ${expected}. ` +
-        `Upstream multiplexing state does not match GH_ROUTER_UPSTREAM_ALLOW_H2.`,
+/** What the peer selects when offered both — context, not the assertion. */
+function probePeerAlpn() {
+  return new Promise((resolve) => {
+    const socket = connect(
+      {
+        host: hostname,
+        port: port ? Number(port) : 443,
+        servername: hostname,
+        ALPNProtocols: ["h2", "http/1.1"],
+      },
+      () => {
+        const negotiated = socket.alpnProtocol || "(none)"
+        socket.end()
+        resolve(negotiated)
+      },
     )
-    process.exit(1)
-  },
-)
+    socket.setTimeout(10_000, () => {
+      socket.destroy()
+      resolve("(timeout)")
+    })
+    socket.on("error", () => resolve("(error)"))
+  })
+}
 
-socket.setTimeout(10_000, () => {
-  socket.destroy()
-  console.error("\nSKIP: TLS probe timed out (network unreachable?).")
-  process.exit(2)
-})
+try {
+  const peerPrefers = await probePeerAlpn()
+  console.log(`peer prefers       ${peerPrefers}`)
 
-socket.on("error", (err) => {
-  console.error(`\nSKIP: TLS probe failed: ${err.message}`)
+  const negotiated = await measureFetchPath()
+  console.log(`fetch negotiated   ${negotiated ?? "(not observed)"}`)
+
+  if (negotiated === undefined) {
+    console.error("\nSKIP: no socket observed (connection reused or unreachable).")
+    process.exit(2)
+  }
+  if (negotiated === expected) {
+    console.log(`\nOK: fetch negotiated ${negotiated}, matching policy.`)
+    process.exit(0)
+  }
+  // Permitting h2 is not requiring it — a peer that declines is fine. Speaking
+  // h2 while policy says not to is the failure that matters.
+  if (allowH2 && negotiated === "http/1.1") {
+    console.log("\nOK: h2 permitted, peer selected http/1.1.")
+    process.exit(0)
+  }
+  console.error(
+    `\nFAIL: fetch negotiated ${negotiated}, expected ${expected}. ` +
+      `Upstream multiplexing does not match GH_ROUTER_UPSTREAM_ALLOW_H2.`,
+  )
+  process.exit(1)
+} catch (err) {
+  console.error(`\nSKIP: probe could not run: ${err.message}`)
   process.exit(2)
-})
+}

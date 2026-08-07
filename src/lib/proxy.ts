@@ -139,7 +139,15 @@ export function initProxyFromEnv(): void {
   if (typeof Bun !== "undefined") return
 
   try {
-    const direct = new Agent(upstreamAgentOptions())
+    const options = upstreamAgentOptions()
+    // Same instrumented connector as `initUpstreamTransport`, so enabling
+    // --proxy-env does not silently blind the transport diagnostics for
+    // bypassed origins (which is most of them — this dispatcher only routes
+    // through a proxy when `getProxyForUrl` returns one).
+    const direct = new Agent({
+      ...options,
+      connect: instrumentedConnector(options.allowH2),
+    })
     const proxies = new Map<string, ProxyAgent>()
 
     // We only need a minimal dispatcher that implements `dispatch` at runtime.
@@ -167,6 +175,13 @@ export function initProxyFromEnv(): void {
           }
           let agent = proxies.get(proxyUrl)
           if (!agent) {
+            // NOTE: no instrumented connector here, deliberately. A
+            // ProxyAgent's `connect` governs the socket to the PROXY and its
+            // CONNECT tunnel, not the upstream TLS session we want to observe,
+            // so wrapping it would record the wrong socket while adding risk to
+            // tunnel setup. Transport diagnostics are therefore unavailable for
+            // origins that actually route through an HTTP proxy; `allowH2` is
+            // still applied, since that is a plain Agent option.
             agent = new ProxyAgent({
               uri: proxyUrl,
               ...upstreamAgentOptions(),

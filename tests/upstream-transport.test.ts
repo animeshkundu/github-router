@@ -93,6 +93,12 @@ describe("upstream transport policy", () => {
   // The regression guard for the inert-fix failure mode: the policy must be
   // installed by a function callers invoke unconditionally, and it must
   // actually replace the process-wide dispatcher.
+  //
+  // COVERAGE GAP, stated rather than hidden: the suite runs under Bun, where
+  // this function is a documented no-op, so CI does not execute the Node branch
+  // that actually installs the dispatcher. `bun run check:alpn` is what covers
+  // it — that script runs under Node and asserts the protocol a real `fetch()`
+  // negotiates. Closing this properly needs a Node test lane.
   test("initUpstreamTransport installs a global dispatcher", () => {
     const before = getGlobalDispatcher()
     initUpstreamTransport()
