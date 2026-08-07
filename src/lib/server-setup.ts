@@ -10,7 +10,7 @@ import { maybeSpawnDaemon, wireDaemonTeardown } from "./first-mate/scheduler/aut
 import { agentToolsEnabled } from "./mcp-capabilities"
 import { withOneMSuffix } from "./one-m-context"
 import { generateRandomPort } from "./port"
-import { initProxyFromEnv } from "./proxy"
+import { initProxyFromEnv, initUpstreamTransport } from "./proxy"
 import { installBodySizeStatsExitHook } from "./request-log"
 import { state } from "./state"
 import { setupCopilotToken, setupGitHubAgentToken, setupGitHubToken } from "./token"
@@ -308,6 +308,12 @@ export function buildServeOptions(
 export async function setupAndServe(
   options: ServerSetupOptions,
 ): Promise<{ server: ReturnType<typeof serve>; serverUrl: string }> {
+  // Unconditional: pins the upstream transport policy (HTTP/1.1 by default)
+  // for every `fetch()` in the process. Must run BEFORE initProxyFromEnv so
+  // the proxy-routing dispatcher, when enabled, replaces it rather than the
+  // other way round.
+  initUpstreamTransport()
+
   if (options.proxyEnv) {
     initProxyFromEnv()
   }

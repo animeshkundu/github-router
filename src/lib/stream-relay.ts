@@ -322,7 +322,13 @@ function classifyStreamError(details: TransportErrorDetails): string {
   ) {
     return "timeout_error"
   }
-  if (details.classification === "transient") return "overloaded_error"
+  // A mid-stream transport failure is reported as `api_error`, NOT
+  // `overloaded_error`. Same reasoning as `forwardError` in `~/lib/error`: the
+  // retry budget is already spent, and `overloaded_error` is the type Claude
+  // Code retries hardest against, so labelling a dead transport as overload
+  // multiplies a large-body request instead of surfacing the failure. Mid
+  // stream it is worse than pre-first-byte — bytes already reached the
+  // consumer, so a client retry duplicates work it cannot deduplicate.
   return "api_error"
 }
 

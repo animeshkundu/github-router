@@ -7,6 +7,7 @@
 import { test, expect, describe } from "bun:test"
 
 import {
+  classifyTransportError,
   fetchWithTransientRetry,
   TransportExhaustionError,
   withTransientRetry,
@@ -304,5 +305,124 @@ describe("fetchWithTransientRetry", () => {
     }, { ...FAST, attempts: 1 })
     expect(r.status).toBe(502)
     expect(calls).toBe(1)
+  })
+})
+
+/**
+ * Classification is a total order: buckets are checked narrowest-first and the
+ * first match wins. These build the VERBATIM nested error shapes Node produces
+ * — an outer `TypeError: fetch failed` wrapping an OpenSSL/undici cause — because
+ * the bug this replaces only reproduced through the nested `cause` chain.
+ */
+describe("classifyTransportError — TLS and session faults", () => {
+  /** The shape undici/Node actually throws: generic outer, specific cause. */
+  function fetchFailed(causeMessage: string, causeCode?: string): TypeError {
+    const cause = Object.assign(new Error(causeMessage), causeCode ? { code: causeCode } : {})
+    return new TypeError("fetch failed", { cause })
+  }
+
+  // The regression this fixes. `bad_record_mac` is an integrity fault a fresh
+  // connection routinely clears, but every OpenSSL error message contains the
+  // substring "SSL routines", so a blanket match on it classified the alert as
+  // deterministic and failed the request after ONE attempt.
+  test("TLS alert 20 (received) is transient, not deterministic", () => {
+    const details = classifyTransportError(
+      fetchFailed(
+        "80DEFEF401000000:error:0A0003FC:SSL routines:ssl3_read_bytes:ssl/tls alert bad record mac:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:918:SSL alert number 20",
+        "ERR_SSL_SSL/TLS_ALERT_BAD_RECORD_MAC",
+      ),
+    )
+    expect(details.classification).toBe("transient")
+  })
+
+  // OpenSSL's local-detection wording (reason 281) for the same class of fault.
+  test("TLS alert 20 (locally detected) is transient", () => {
+    const details = classifyTransportError(
+      fetchFailed(
+        "error:0A000119:SSL routines:ssl3_get_record:decryption failed or bad record mac",
+      ),
+    )
+    expect(details.classification).toBe("transient")
+  })
+
+  // Promoting these was considered and rejected: they are genuine
+  // configuration/protocol faults, and retrying them buys 3x latency.
+  test.each([
+    ["wrong version number", "error:0A00010B:SSL routines:ssl3_get_record:wrong version number"],
+    ["handshake failure", "error:0A000410:SSL routines:ssl3_read_bytes:sslv3 alert handshake failure"],
+    ["certificate verify failed", "error:0A000086:SSL routines:tls_post_process_server_certificate:certificate verify failed"],
+  ])("deterministic TLS fault stays deterministic: %s", (_label, message) => {
+    expect(classifyTransportError(fetchFailed(message)).classification).toBe(
+      "deterministic",
+    )
+  })
+
+  // Previously in NEITHER code set, so it escaped as "non_transport" and was
+  // rethrown raw — an unclassified error leaking out of a classifier.
+  test("UND_ERR_CLOSED is transient", () => {
+    const err = Object.assign(new Error("The client is closed"), {
+      code: "UND_ERR_CLOSED",
+    })
+    expect(classifyTransportError(err).classification).toBe("transient")
+  })
+
+  // These reached "transient" only incidentally, via the outer "fetch failed"
+  // text. Named explicitly so a wording change upstream cannot reclassify them.
+  test.each(["ERR_HTTP2_INVALID_SESSION", "ERR_HTTP2_GOAWAY_SESSION"])(
+    "%s is transient by code, not by incidental message match",
+    (code) => {
+      const cause = Object.assign(new Error("The session has been destroyed"), {
+        code,
+      })
+      // Outer message deliberately does NOT contain "fetch failed".
+      const err = new TypeError("upstream dispatch failed", { cause })
+      expect(classifyTransportError(err).classification).toBe("transient")
+    },
+  )
+
+  test("a caller cancel outranks every other bucket", () => {
+    const details = classifyTransportError(
+      fetchFailed("ssl3_read_bytes:ssl/tls alert bad record mac"),
+      { callerCancelled: true },
+    )
+    expect(details.classification).toBe("cancelled")
+  })
+
+  // The invariant that makes the order safe to reason about: no error may
+  // satisfy two buckets. If a phrase is ever added to both lists, the bucket
+  // order silently decides — this test makes that a failure instead.
+  test("no error matches two buckets — transient and deterministic stay disjoint", () => {
+    const transientPhrases = ["bad record mac"]
+    const deterministicPhrases = [
+      "self signed certificate",
+      "certificate has expired",
+      "unable to verify the first certificate",
+      "unable to get local issuer certificate",
+      "hostname/ip does not match certificate",
+      "certificate verify failed",
+      "unknown ca",
+      "wrong version number",
+      "unsupported protocol",
+      "no protocols available",
+      "alert handshake failure",
+      "alert protocol version",
+      "alert insufficient security",
+      "tls handshake",
+    ]
+    for (const t of transientPhrases) {
+      for (const d of deterministicPhrases) {
+        expect(t.includes(d)).toBe(false)
+        expect(d.includes(t)).toBe(false)
+      }
+    }
+    // And each phrase resolves to the bucket it is declared for.
+    for (const t of transientPhrases) {
+      expect(classifyTransportError(fetchFailed(t)).classification).toBe("transient")
+    }
+    for (const d of deterministicPhrases) {
+      expect(classifyTransportError(fetchFailed(d)).classification).toBe(
+        "deterministic",
+      )
+    }
   })
 })

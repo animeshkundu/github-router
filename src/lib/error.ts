@@ -26,15 +26,28 @@ export async function forwardError(c: Context, error: unknown) {
     )
     const diagnostic = formatTransportDiagnostic(error)
     if (error.classification === "transient") {
+      // 502 / api_error, NOT 503 / overloaded_error.
+      //
+      // We already exhausted our own retries against a transport that failed,
+      // so "I am busy, retry later" is both inaccurate and expensive:
+      // `overloaded_error` is the type Claude Code retries hardest against,
+      // and each client retry costs another full round of upstream attempts.
+      // On a session near the 1M-token context limit that re-uploads a
+      // multi-megabyte body every time, which is what turned a fast failure
+      // into multi-minute stalls when this mapping shipped.
+      //
+      // Trade-off, deliberate: the client now surfaces the error instead of
+      // papering over a genuinely recoverable blip. That is the behaviour
+      // operators had before the mapping was introduced.
       return c.json(
         {
           type: "error",
           error: {
-            type: "overloaded_error",
-            message: `Upstream transport was interrupted at ${target} after ${error.attempts} attempts; retry later. ${diagnostic}`,
+            type: "api_error",
+            message: `Upstream transport was interrupted at ${target} after ${error.attempts} attempts. ${diagnostic}`,
           },
         },
-        503,
+        502,
       )
     }
     return c.json(

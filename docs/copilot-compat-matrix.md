@@ -250,3 +250,28 @@ Two failure modes — both need attention:
 - **Was accepted, now rejects**: a `✅ 200` row's probe fails (returns 4xx). Means Copilot has dropped or version-bumped support. Action: investigate; add strip / migrate / fail-fast as appropriate.
 
 CI mode: a weekly GitHub Actions workflow (TODO) runs `bun run probe:copilot --strict` against an up-to-date proxy + live Copilot, opening an issue on any deviation.
+
+## Transport (ALPN)
+
+Not a request-shape row, but the same discipline applies: an upstream behaviour we
+depend on, asserted by an executable check rather than assumed.
+
+| Observable | Expectation | Verified by |
+| --- | --- | --- |
+| `api.githubcopilot.com` ALPN when the client offers `["h2","http/1.1"]` | ✅ selects `h2` | `bun run check:alpn` with `GH_ROUTER_UPSTREAM_ALLOW_H2=1` |
+| `api.githubcopilot.com` ALPN when the client offers `["http/1.1"]` only | ✅ selects `http/1.1` | `bun run check:alpn` (default) |
+
+Both measured 2026-08-07 on Node v26.7.0 (built-in undici 8.9.0, OpenSSL 3.5.7).
+
+The check asserts the **negotiated** protocol, not the options an `Agent` was
+constructed with. That distinction is load-bearing: while adding transport
+diagnostics, supplying a custom `connect` connector silently defeated
+`allowH2:false` on the Agent — ALPN is chosen by the connector
+(`undici/lib/core/connect.js`), not the Agent — and every construction-level
+assertion still passed while the live handshake negotiated `h2`.
+
+Exposure is Node-version-gated: Node ≤24's built-in fetch reads
+`Symbol.for("undici.globalDispatcher.1")`, whose wrapper hardcodes
+`allowH2:false`; Node ≥26 reads `.2`. So a **runtime** bump can change this where
+a dependency bump cannot — which is why the check records
+`process.versions.undici` (the built-in, not the npm dependency).
