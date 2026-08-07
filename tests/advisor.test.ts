@@ -586,6 +586,192 @@ describe("ADVISOR streaming integration (Phase I)", () => {
 
   })
 
+  test("parallel advisor calls emit and replay one matching result per tool_use", async () => {
+    let messagesCalls = 0
+    let advisorCalls = 0
+    let continuationRequestBody: string | undefined
+    const fetchMock = mock(async (
+      input: Parameters<typeof fetch>[0],
+      init?: Parameters<typeof fetch>[1],
+    ): Promise<Response> => {
+      const url = String(input)
+      if (url.includes("/responses")) {
+        const call = ++advisorCalls
+        return new Response(
+          JSON.stringify({
+            id: `advisor_resp_${call}`,
+            status: "completed",
+            output: [
+              {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: `Advice ${call}` }],
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+      if (url.includes("/v1/messages")) {
+        messagesCalls++
+        if (messagesCalls === 1) {
+          return new Response(
+            buildSseStream([
+              {
+                event: "message_start",
+                data: { type: "message_start", message: { id: "m-parallel" } },
+              },
+              {
+                event: "content_block_start",
+                data: {
+                  type: "content_block_start",
+                  index: 0,
+                  content_block: {
+                    type: "tool_use",
+                    id: "toolu_advisor_a",
+                    name: ADVISOR_INTERNAL_TOOL_NAME,
+                    input: {},
+                  },
+                },
+              },
+              {
+                event: "content_block_stop",
+                data: { type: "content_block_stop", index: 0 },
+              },
+              {
+                event: "content_block_start",
+                data: {
+                  type: "content_block_start",
+                  index: 1,
+                  content_block: {
+                    type: "tool_use",
+                    id: "toolu_advisor_b",
+                    name: ADVISOR_INTERNAL_TOOL_NAME,
+                    input: {},
+                  },
+                },
+              },
+              {
+                event: "content_block_stop",
+                data: { type: "content_block_stop", index: 1 },
+              },
+              {
+                event: "message_delta",
+                data: {
+                  type: "message_delta",
+                  delta: { stop_reason: "tool_use", stop_sequence: null },
+                  usage: { output_tokens: 4 },
+                },
+              },
+              { event: "message_stop", data: { type: "message_stop" } },
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          )
+        }
+        continuationRequestBody =
+          typeof init?.body === "string" ? init.body : ""
+        return new Response(
+          buildSseStream([
+            {
+              event: "message_start",
+              data: { type: "message_start", message: { id: "m-final" } },
+            },
+            {
+              event: "content_block_start",
+              data: {
+                type: "content_block_start",
+                index: 0,
+                content_block: { type: "text", text: "" },
+              },
+            },
+            {
+              event: "content_block_delta",
+              data: {
+                type: "content_block_delta",
+                index: 0,
+                delta: { type: "text_delta", text: "Done." },
+              },
+            },
+            {
+              event: "content_block_stop",
+              data: { type: "content_block_stop", index: 0 },
+            },
+            { event: "message_stop", data: { type: "message_stop" } },
+          ]),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        )
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    })
+    // Bun's `typeof fetch` carries `preconnect`; supplying a no-op keeps the
+    // assignment type-safe instead of suppressing the mismatch.
+    globalThis.fetch = Object.assign(fetchMock, { preconnect: () => {} })
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        "anthropic-beta": "advisor-tool-2026-03-01",
+      },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      }),
+    })
+    const text = await streamToString(response.body!)
+    expect(response.status).toBe(200)
+    expect(messagesCalls).toBe(2)
+    expect(advisorCalls).toBe(2)
+
+    const serverUseIds = [...text.matchAll(
+      /"type":"server_tool_use","id":"([^"]+)"/g,
+    )].map((match) => match[1]!)
+    const advisorResultIds = [...text.matchAll(
+      /"type":"advisor_tool_result","tool_use_id":"([^"]+)"/g,
+    )].map((match) => match[1]!)
+    expect(serverUseIds).toEqual([
+      "srvtoolu_advisor_a",
+      "srvtoolu_advisor_b",
+    ])
+    expect(advisorResultIds).toEqual(serverUseIds)
+
+    expect(continuationRequestBody).toBeDefined()
+    const continuation = JSON.parse(continuationRequestBody!) as {
+      messages: Array<{ role: string; content: Array<Record<string, unknown>> }>
+    }
+    const assistantIndex = continuation.messages.findIndex(
+      (message) =>
+        message.role === "assistant"
+        && message.content.some(
+          (block) =>
+            block.type === "tool_use"
+            && block.name === ADVISOR_INTERNAL_TOOL_NAME,
+        ),
+    )
+    expect(assistantIndex).toBeGreaterThanOrEqual(0)
+    const assistant = continuation.messages[assistantIndex]!
+    const resultTurn = continuation.messages[assistantIndex + 1]!
+    expect(resultTurn.role).toBe("user")
+    const upstreamUseIds = assistant.content
+      .filter((block) => block.type === "tool_use")
+      .map((block) => block.id as string)
+      .sort()
+    const upstreamResultIds = resultTurn.content
+      .filter((block) => block.type === "tool_result")
+      .map((block) => block.tool_use_id as string)
+      .sort()
+    expect(upstreamUseIds).toEqual([
+      "toolu_advisor_a",
+      "toolu_advisor_b",
+    ])
+    expect(upstreamResultIds).toEqual(upstreamUseIds)
+    expect(resultTurn.content).toHaveLength(upstreamUseIds.length)
+    expect(continuationRequestBody!).not.toContain("srvtoolu_")
+  })
+
   test("mixed client/advisor turn emits advisor result and waits for client results", async () => {
     let messagesCalls = 0
     let advisorCalls = 0

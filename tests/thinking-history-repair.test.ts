@@ -92,7 +92,7 @@ describe("thinking history repair", () => {
     ).toBeUndefined()
   })
 
-  test("does not produce an empty assistant message", () => {
+  test("recovers a thinking-only assistant turn without emptying it", () => {
     const body = JSON.stringify({
       messages: [
         { role: "user", content: "start" },
@@ -104,12 +104,20 @@ describe("thinking history repair", () => {
         },
       ],
     })
-    expect(
-      repairRejectedThinkingHistory(
-        body,
-        integrityError.replace("messages.1.content.88", "messages.1.content.0"),
-      ),
-    ).toBeUndefined()
+    const repair = repairRejectedThinkingHistory(
+      body,
+      integrityError.replace("messages.1.content.88", "messages.1.content.0"),
+    )
+    // Stripping alone would leave `content: []`, which Anthropic rejects — so
+    // the turn is kept alive with a neutral placeholder instead of being
+    // abandoned as unrepairable (which bricked the session on every retry).
+    expect(repair).toBeDefined()
+    const repaired = JSON.parse(repair!.body) as {
+      messages: Array<{ role: string; content: Array<Record<string, string>> }>
+    }
+    expect(repaired.messages[1]!.content).toEqual([
+      { type: "text", text: "[prior reasoning omitted]" },
+    ])
   })
 
   test("a successful repair fingerprint reapplies without retaining source content", () => {
@@ -122,5 +130,71 @@ describe("thinking history repair", () => {
     const known = repairKnownThinkingHistory(brokenBody())
     expect(known?.body).toBe(first!.body)
     expect(known?.fingerprint).toBe(first!.fingerprint)
+  })
+
+  // The repair rewrites request history, so its blast radius is a safety
+  // property: it must never reach instruction-bearing surfaces (system prompt,
+  // tool definitions, or user turns — which is where Claude Code's
+  // permission-mode reminders live). Only signed blocks in ONE assistant turn
+  // may change.
+  test("never alters system, tools, or any non-assistant turn", () => {
+    const request = {
+      model: "claude-opus-4.7",
+      system: [{ type: "text", text: "Plan mode is active. Do not edit files." }],
+      tools: [{ name: "Edit", input_schema: { type: "object" } }],
+      metadata: { user_id: "u1" },
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "<system-reminder>Plan mode is active.</system-reminder>" },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "", signature: "opaque" },
+            { type: "text", text: "understood" },
+          ],
+        },
+        {
+          role: "user",
+          content: [{ type: "text", text: "<system-reminder>Still plan mode.</system-reminder>" }],
+        },
+      ],
+    }
+    const original = JSON.parse(JSON.stringify(request)) as typeof request
+    const repair = repairRejectedThinkingHistory(
+      JSON.stringify(request),
+      integrityError.replace("messages.1.content.88", "messages.1.content.0"),
+    )
+    expect(repair).toBeDefined()
+    const out = JSON.parse(repair!.body) as typeof request
+
+    expect(out.system).toEqual(original.system)
+    expect(out.tools).toEqual(original.tools)
+    expect(out.metadata).toEqual(original.metadata)
+    expect(out.messages[0]).toEqual(original.messages[0])
+    expect(out.messages[2]).toEqual(original.messages[2])
+    // Only the signed block in the named assistant turn is gone.
+    expect(out.messages[1]!.content).toEqual([{ type: "text", text: "understood" }])
+  })
+
+  test("refuses to touch a turn upstream names that is not an assistant turn", () => {
+    const request = {
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "thinking", thinking: "", signature: "opaque" }],
+        },
+      ],
+    }
+    // Even if upstream named index 0, a non-assistant role is out of scope.
+    expect(
+      repairRejectedThinkingHistory(
+        JSON.stringify(request),
+        integrityError.replace("messages.1.content.88", "messages.0.content.0"),
+      ),
+    ).toBeUndefined()
   })
 })

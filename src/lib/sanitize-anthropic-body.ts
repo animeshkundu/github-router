@@ -90,16 +90,11 @@ function bodyMightNeedSanitize(rawBody: string): boolean {
 
 /**
  * Translate one client-visible assistant turn into the internal messages
- * Copilot originally saw. Advisor-only continuations split at each advisor
- * pair. When a client tool and advisor coexist in the same upstream turn, the
- * advisor result and the client's following tool results are merged into the
- * one immediate user message required by Anthropic.
- *
- * Input shape (Claude Code stores everything in one assistant turn):
- *   [text*, server_tool_use{advisor}, advisor_tool_result, text*, ...]
- *
- * Output: array of {role, content[]} message objects, alternating
- * assistant→user→assistant for each advisor pair encountered.
+ * Copilot originally saw. Parallel advisor calls are replayed as one assistant
+ * turn followed by one user turn containing every matching result. Sequential
+ * advisor groups remain separate assistant/user pairs. When a client tool and
+ * advisor coexist, the advisor results and the client's following tool results
+ * are merged into the one immediate user message required by Anthropic.
  */
 function splitAssistantTurnAtAdvisorPairs(
   originalMessage: AnyRecord,
@@ -131,71 +126,96 @@ function splitAssistantTurnAtAdvisorPairs(
   while (i < originalContent.length) {
     const block = originalContent[i]
     const b = (typeof block === "object" && block !== null) ? (block as AnyRecord) : null
+    const isAdvisorUse =
+      b?.type === "server_tool_use"
+      && b.name === ADVISOR_INTERNAL_TOOL_NAME.replace(/^__anthropic_/, "")
 
-    if (
-      b
-      && b.type === "server_tool_use"
-      && b.name === ADVISOR_INTERNAL_TOOL_NAME.replace(/^__anthropic_/, "") // "advisor"
-    ) {
-      const stuId = typeof b.id === "string" ? b.id : ""
-      const copilotId = toCopilotToolUseId(stuId)
-      if (!copilotId) {
-        invalidAdvisorHistory("advisor server_tool_use id is not round-trippable")
+    if (isAdvisorUse) {
+      const uses: Array<{ serverId: string; copilotId: string }> = []
+      const results = new Map<string, string>()
+      let readingResults = false
+
+      while (i < originalContent.length) {
+        const candidate = originalContent[i]
+        const record =
+          typeof candidate === "object" && candidate !== null
+            ? (candidate as AnyRecord)
+            : null
+        const candidateIsAdvisorUse =
+          record?.type === "server_tool_use"
+          && record.name === ADVISOR_INTERNAL_TOOL_NAME.replace(/^__anthropic_/, "")
+
+        if (candidateIsAdvisorUse) {
+          if (readingResults) {
+            if (results.size === uses.length) break
+            invalidAdvisorHistory("advisor blocks overlap or are ambiguously nested")
+          }
+          const serverId = typeof record.id === "string" ? record.id : ""
+          const copilotId = toCopilotToolUseId(serverId)
+          if (!copilotId) {
+            invalidAdvisorHistory("advisor server_tool_use id is not round-trippable")
+          }
+          if (uses.some((use) => use.serverId === serverId)) {
+            invalidAdvisorHistory("duplicate advisor server_tool_use id")
+          }
+          uses.push({ serverId, copilotId })
+          currentAssistantContent.push({
+            type: "tool_use",
+            id: copilotId,
+            name: ADVISOR_INTERNAL_TOOL_NAME,
+            input: {},
+          })
+          i++
+          continue
+        }
+
+        if (record?.type === "advisor_tool_result") {
+          readingResults = true
+          const serverId =
+            typeof record.tool_use_id === "string" ? record.tool_use_id : ""
+          if (!uses.some((use) => use.serverId === serverId)) {
+            invalidAdvisorHistory("advisor_tool_result has no matching advisor server_tool_use")
+          }
+          if (results.has(serverId)) {
+            invalidAdvisorHistory("duplicate advisor_tool_result")
+          }
+          const resultContent = record.content
+          let resultText: string | undefined
+          if (typeof resultContent === "string") {
+            resultText = resultContent
+          } else if (typeof resultContent === "object" && resultContent !== null) {
+            const text = (resultContent as AnyRecord).text
+            if (typeof text === "string") resultText = text
+          }
+          if (resultText === undefined) {
+            invalidAdvisorHistory("advisor_tool_result has no replayable text")
+          }
+          results.set(serverId, resultText)
+          i++
+          continue
+        }
+
+        if (readingResults) {
+          if (results.size !== uses.length) {
+            invalidAdvisorHistory(
+              "advisor server_tool_use has no matching advisor_tool_result in the same assistant turn",
+            )
+          }
+          break
+        }
+
+        // Client tools and other assistant blocks emitted between parallel
+        // advisor calls and their result phase belong to this assistant turn.
+        currentAssistantContent.push(candidate)
+        i++
       }
 
-      const resultIndex = originalContent.findIndex((candidate, index) => {
-        if (index <= i || typeof candidate !== "object" || candidate === null) {
-          return false
-        }
-        const record = candidate as AnyRecord
-        return (
-          record.type === "advisor_tool_result"
-          && record.tool_use_id === stuId
-        )
-      })
-      if (resultIndex < 0) {
+      if (results.size !== uses.length) {
         invalidAdvisorHistory(
           "advisor server_tool_use has no matching advisor_tool_result in the same assistant turn",
         )
       }
-      const next = originalContent[resultIndex] as AnyRecord
 
-      let resultText: string | undefined
-      const resultContent = next.content
-      if (typeof resultContent === "string") {
-        resultText = resultContent
-      } else if (typeof resultContent === "object" && resultContent !== null) {
-        const text = (resultContent as AnyRecord).text
-        if (typeof text === "string") resultText = text
-      }
-      if (resultText === undefined) {
-        invalidAdvisorHistory("advisor_tool_result has no replayable text")
-      }
-
-      currentAssistantContent.push({
-        type: "tool_use",
-        id: copilotId,
-        name: ADVISOR_INTERNAL_TOOL_NAME,
-        input: {},
-      })
-      // buildAdvisorStream emits the server result after draining the current
-      // upstream turn, so client tools generated after the advisor call appear
-      // between server_tool_use and advisor_tool_result. They still belong to
-      // the same internal assistant message and must remain there on replay.
-      for (let between = i + 1; between < resultIndex; between++) {
-        const candidate = originalContent[between]
-        if (
-          typeof candidate === "object"
-          && candidate !== null
-          && (
-            (candidate as AnyRecord).type === "server_tool_use"
-            || (candidate as AnyRecord).type === "advisor_tool_result"
-          )
-        ) {
-          invalidAdvisorHistory("advisor blocks overlap or are ambiguously nested")
-        }
-        currentAssistantContent.push(candidate)
-      }
       const ordinaryToolIds = currentAssistantContent
         .filter(
           (entry): entry is AnyRecord =>
@@ -211,13 +231,11 @@ function splitAssistantTurnAtAdvisorPairs(
 
       pushAssistant()
       translated = true
-      i = resultIndex + 1
-
-      const advisorResult = {
+      const advisorResults = uses.map((use) => ({
         type: "tool_result",
-        tool_use_id: copilotId,
-        content: resultText,
-      }
+        tool_use_id: use.copilotId,
+        content: results.get(use.serverId)!,
+      }))
 
       if (ordinaryToolIds.length > 0) {
         if (i < originalContent.length) {
@@ -268,7 +286,7 @@ function splitAssistantTurnAtAdvisorPairs(
         }
         messages.push({
           ...following,
-          content: [advisorResult, ...followingContent],
+          content: [...advisorResults, ...followingContent],
         })
         return {
           messages,
@@ -277,28 +295,24 @@ function splitAssistantTurnAtAdvisorPairs(
         }
       }
 
-      messages.push({ role: "user", content: [advisorResult] })
+      messages.push({ role: "user", content: advisorResults })
       currentAssistantContent = []
       continue
     }
 
-    if (b && b.type === "advisor_tool_result") {
+    if (b?.type === "advisor_tool_result") {
       invalidAdvisorHistory(
         "advisor_tool_result has no immediately preceding advisor server_tool_use",
       )
     }
 
-    // Pass-through any other block.
     currentAssistantContent.push(block)
-    i += 1
+    i++
   }
 
-  // Flush any trailing assistant content as a final message.
   if (currentAssistantContent.length > 0) {
     messages.push({ role: "assistant", content: currentAssistantContent })
   }
-  // If we never split (no advisor blocks), return the original as one
-  // message so the caller can detect "no change" and short-circuit.
   if (!translated) {
     return {
       messages: [originalMessage],

@@ -9,6 +9,7 @@ import { PATHS } from "~/lib/paths"
 
 const MAX_LOG_BYTES = 1024 * 1024 // 1 MB
 const DEDUP_MAX = 1000
+const DEDUP_WINDOW_MS = 5 * 60 * 1000
 const ARG_MAX_LEN = 2048
 const ERROR_CAUSE_MAX_DEPTH = 4
 const ERROR_FIELD_MAX_LEN = 512
@@ -129,14 +130,17 @@ function serializeArgs(logObj: LogObject): string[] {
   })
 }
 
-function formatLogLine(logObj: LogObject): string {
+function formatLogLine(logObj: LogObject, suppressed = 0): string {
   const ts = logObj.date.toISOString()
   const level = (logObj.type ?? "error").toUpperCase()
   const message = serializeArgs(logObj)
     .join(" ")
     .replace(/\r\n|\r|\n/g, "\\n")
+  const recurrence = suppressed > 0
+    ? ` [${suppressed} identical occurrences suppressed]`
+    : ""
 
-  return `${ts} [${level}] ${message}\n`
+  return `${ts} [${level}] ${message}${recurrence}\n`
 }
 
 function makeDedupeKey(logObj: LogObject): string {
@@ -175,7 +179,10 @@ function rotateAtStartup(filePath: string): void {
 
 export class FileLogReporter implements ConsolaReporter {
   private readonly filePath: string
-  private readonly seen = new Set<string>()
+  private readonly seen = new Map<
+    string,
+    { lastWrittenAt: number; suppressed: number }
+  >()
   // Approximate bytes written since the last rotation check. We use a
   // conservative trigger threshold (half the max) so a burst of large
   // lines between checks never grows the file by more than ~2x the cap.
@@ -262,12 +269,26 @@ export class FileLogReporter implements ConsolaReporter {
     if (!ALLOWED_TYPES.has(logObj.type)) return
 
     const key = makeDedupeKey(logObj)
-    if (this.seen.has(key)) return
+    const timestamp = logObj.date.getTime()
+    const previous = this.seen.get(key)
+    let suppressed = 0
 
-    if (this.seen.size >= DEDUP_MAX) this.seen.clear()
-    this.seen.add(key)
+    if (previous) {
+      if (timestamp - previous.lastWrittenAt < DEDUP_WINDOW_MS) {
+        previous.suppressed++
+        return
+      }
+      suppressed = previous.suppressed
+      previous.lastWrittenAt = timestamp
+      previous.suppressed = 0
+    } else {
+      if (this.seen.size >= DEDUP_MAX) this.seen.clear()
+      this.seen.set(key, { lastWrittenAt: timestamp, suppressed: 0 })
+    }
 
-    const line = formatLogLine(logObj)
+    // One hot identical condition can write at most once per five-minute
+    // window (roughly 12 lines/hour), while the suffix preserves its frequency.
+    const line = formatLogLine(logObj, suppressed)
 
     // Periodic rotation check: after every ROTATE_CHECK_BYTES written since
     // the last check, enforce the MAX_LOG_BYTES ceiling from inside the hot

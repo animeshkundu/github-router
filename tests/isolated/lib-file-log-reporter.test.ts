@@ -33,17 +33,25 @@ const dummyCtx = { options: {} as ConsolaOptions }
 let logFile: string
 let testIndex = 0
 
-function makeLogObj(
+function makeLogObjAt(
+  date: Date,
   type: string,
   ...args: unknown[]
 ): LogObject {
   return {
-    date: new Date("2026-03-04T00:00:00.000Z"),
+    date,
     args,
     type,
     level: type === "error" || type === "fatal" ? 0 : type === "warn" ? 1 : 3,
     tag: "",
   } as LogObject
+}
+
+function makeLogObj(
+  type: string,
+  ...args: unknown[]
+): LogObject {
+  return makeLogObjAt(new Date("2026-03-04T00:00:00.000Z"), type, ...args)
 }
 
 beforeEach(async () => {
@@ -127,6 +135,37 @@ describe("FileLogReporter", () => {
 
     const lines = readLog().trim().split("\n")
     expect(lines.length).toBe(1)
+  })
+
+  test("recurring messages resurface with the suppressed count", () => {
+    const reporter = newReporter(logFile)
+    const start = Date.parse("2026-03-04T00:00:00.000Z")
+    reporter.log(makeLogObjAt(new Date(start), "warn", "recurring warning"), dummyCtx)
+    reporter.log(makeLogObjAt(new Date(start + 60_000), "warn", "recurring warning"), dummyCtx)
+    reporter.log(makeLogObjAt(new Date(start + 299_999), "warn", "recurring warning"), dummyCtx)
+    reporter.log(makeLogObjAt(new Date(start + 300_001), "warn", "recurring warning"), dummyCtx)
+
+    const lines = readLog().trim().split("\n")
+    expect(lines).toHaveLength(2)
+    expect(lines[1]).toContain("[2 identical occurrences suppressed]")
+  })
+
+  test("an identical-message flood stays bounded by the dedupe window", () => {
+    const reporter = newReporter(logFile)
+    const start = Date.parse("2026-03-04T00:00:00.000Z")
+
+    for (let i = 0; i < 1_000; i++) {
+      reporter.log(
+        makeLogObjAt(new Date(start + i * 1000), "error", "hot loop"),
+        dummyCtx,
+      )
+    }
+
+    const lines = readLog().trim().split("\n")
+    expect(lines).toHaveLength(4)
+    expect(lines[1]).toContain("[299 identical occurrences suppressed]")
+    expect(lines[2]).toContain("[299 identical occurrences suppressed]")
+    expect(lines[3]).toContain("[299 identical occurrences suppressed]")
   })
 
   test("different messages are each written", () => {

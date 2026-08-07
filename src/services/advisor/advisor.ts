@@ -763,17 +763,17 @@ export function buildAdvisorStream(opts: {
       }
 
       // Process one Copilot streaming response. Returns the assistant
-      // turn's blocks + the advisor tool_use info if one was called.
+      // turn's blocks + every advisor tool_use called in that turn.
       // Forwards events to the client as it goes.
       async function processOneTurn(
         response: Response,
       ): Promise<{
         capturedBlocks: Array<CapturedBlock>
-        advisorToolUse: ToolUseTracker | null
+        advisorToolUses: Array<ToolUseTracker>
         clientToolUseCount: number
       }> {
         const capturedBlocks: Array<CapturedBlock> = []
-        let advisorToolUse: ToolUseTracker | null = null
+        const advisorToolUses: Array<ToolUseTracker> = []
         let clientToolUseCount = 0
         // Track which upstream block index corresponds to which entry
         // in capturedBlocks (so deltas know which to update).
@@ -787,7 +787,7 @@ export function buildAdvisorStream(opts: {
           } catch {
             // Non-JSON data — forward as-is (defensive).
             const ok = safeEnqueue(ENCODER.encode(`event: ${ev.event}\ndata: ${ev.data}\n\n`))
-            if (!ok) return { capturedBlocks, advisorToolUse, clientToolUseCount }
+            if (!ok) return { capturedBlocks, advisorToolUses, clientToolUseCount }
             continue
           }
 
@@ -795,7 +795,7 @@ export function buildAdvisorStream(opts: {
             case "message_start": {
               if (!messageStartForwarded) {
                 if (!safeEnqueueEvent(ev.event, payload)) {
-                  return { capturedBlocks, advisorToolUse, clientToolUseCount }
+                  return { capturedBlocks, advisorToolUses, clientToolUseCount }
                 }
                 messageStartForwarded = true
               }
@@ -822,12 +822,13 @@ export function buildAdvisorStream(opts: {
                     typeof block.id === "string"
                       ? block.id
                       : `toolu_advisor_${myIndex}`
-                  advisorToolUse = {
+                  const advisorToolUse = {
                     index: myIndex,
                     id,
                     clientId: toClientServerToolUseId(id, myIndex),
                     inputJson: "",
                   }
+                  advisorToolUses.push(advisorToolUse)
                   const translated = {
                     ...payload,
                     index: myIndex,
@@ -839,7 +840,7 @@ export function buildAdvisorStream(opts: {
                     },
                   }
                   if (!safeEnqueueEvent(ev.event, translated)) {
-                    return { capturedBlocks, advisorToolUse, clientToolUseCount }
+                    return { capturedBlocks, advisorToolUses, clientToolUseCount }
                   }
                   // Track for later — the Copilot-replay continuation
                   // turn needs to round-trip with the INTERNAL name +
@@ -866,7 +867,7 @@ export function buildAdvisorStream(opts: {
                   // Forward as-is, with re-indexed.
                   const reindexed = { ...payload, index: myIndex }
                   if (!safeEnqueueEvent(ev.event, reindexed)) {
-                    return { capturedBlocks, advisorToolUse, clientToolUseCount }
+                    return { capturedBlocks, advisorToolUses, clientToolUseCount }
                   }
                   // Store the raw content_block verbatim — preserves
                   // every field upstream sent (including ones the proxy
@@ -901,7 +902,7 @@ export function buildAdvisorStream(opts: {
                     : upstreamIndex,
                 }
                 if (!safeEnqueueEvent(ev.event, reindexed)) {
-                  return { capturedBlocks, advisorToolUse, clientToolUseCount }
+                  return { capturedBlocks, advisorToolUses, clientToolUseCount }
                 }
                 // Accumulate every delta type into the right field on
                 // captured.block. The block is mutated in place; on
@@ -956,7 +957,7 @@ export function buildAdvisorStream(opts: {
                 }
               } else {
                 if (!safeEnqueueEvent(ev.event, payload)) {
-                  return { capturedBlocks, advisorToolUse, clientToolUseCount }
+                  return { capturedBlocks, advisorToolUses, clientToolUseCount }
                 }
               }
               continue
@@ -972,7 +973,7 @@ export function buildAdvisorStream(opts: {
                   : (upstreamIndex ?? 0),
               }
               if (!safeEnqueueEvent(ev.event, reindexed)) {
-                return { capturedBlocks, advisorToolUse, clientToolUseCount }
+                return { capturedBlocks, advisorToolUses, clientToolUseCount }
               }
 
               // Finalize block state for replay:
@@ -1014,18 +1015,18 @@ export function buildAdvisorStream(opts: {
             }
 
             case "message_stop": {
-              return { capturedBlocks, advisorToolUse, clientToolUseCount }
+              return { capturedBlocks, advisorToolUses, clientToolUseCount }
             }
 
             default: {
               // Unknown event — forward as-is.
               if (!safeEnqueueEvent(ev.event, payload)) {
-                return { capturedBlocks, advisorToolUse, clientToolUseCount }
+                return { capturedBlocks, advisorToolUses, clientToolUseCount }
               }
             }
           }
         }
-        return { capturedBlocks, advisorToolUse, clientToolUseCount }
+        return { capturedBlocks, advisorToolUses, clientToolUseCount }
       }
 
       try {
@@ -1041,11 +1042,11 @@ export function buildAdvisorStream(opts: {
 
           const {
             capturedBlocks,
-            advisorToolUse,
+            advisorToolUses,
             clientToolUseCount,
           } = await processOneTurn(response)
 
-          if (!advisorToolUse) {
+          if (advisorToolUses.length === 0) {
             emitTerminal()
             return
           }
@@ -1091,51 +1092,61 @@ export function buildAdvisorStream(opts: {
           }
           conversation.push(assistantTurn)
 
-          let advisorText: string
-          try {
-            advisorText = await runAdvisor(
-              conversation,
-              advisorModel,
-              advisorEffort,
-              aborter.signal,
-            )
-          } catch (err) {
-            // If the failure was the consumer-cancel abort, bail
-            // silently — there's nothing left to deliver. Otherwise
-            // synthesize an inline notice so the model can degrade
-            // gracefully (same path as before).
-            if (aborter.signal.aborted) return
-            const msg = err instanceof Error ? err.message : String(err)
-            consola.warn(`Advisor model call failed: ${msg}`)
-            advisorText =
-              `[Advisor unavailable: ${msg}. Continuing without external review — `
-              + `proceed with caution and consider self-checking against your `
-              + `primary-source evidence.]`
-          }
+          const advisorConversation = conversation
+          const advisorTexts = await Promise.all(
+            advisorToolUses.map(async () => {
+              try {
+                return await runAdvisor(
+                  advisorConversation,
+                  advisorModel,
+                  advisorEffort,
+                  aborter.signal,
+                )
+              } catch (err) {
+                // If the failure was the consumer-cancel abort, let the
+                // shared abort check below end the stream silently.
+                if (aborter.signal.aborted) throw err
+                const msg = err instanceof Error ? err.message : String(err)
+                consola.warn(`Advisor model call failed: ${msg}`)
+                return (
+                  `[Advisor unavailable: ${msg}. Continuing without external review — `
+                  + `proceed with caution and consider self-checking against your `
+                  + `primary-source evidence.]`
+                )
+              }
+            }),
+          ).catch((err) => {
+            if (aborter.signal.aborted) return null
+            throw err
+          })
+          if (!advisorTexts) return
 
-          // Synthesize advisor_tool_result block to client.
-          // tool_use_id MUST be the client-facing srvtoolu_* id so it
-          // pairs with the server_tool_use block emitted earlier; the
-          // internal toolu_* id is only used in the Copilot-replay
-          // path below.
+          // Synthesize one advisor_tool_result block per invocation.
+          // Each tool_use_id is the client-facing srvtoolu_* id paired
+          // with the server_tool_use emitted earlier; internal toolu_*
+          // ids are only used in the Copilot-replay path below.
           if (aborter.signal.aborted) return
           if (conversation === null) return
-          const resultIndex = nextSyntheticIndex++
-          const startOk = safeEnqueueEvent("content_block_start", {
-            type: "content_block_start",
-            index: resultIndex,
-            content_block: {
-              type: "advisor_tool_result",
-              tool_use_id: advisorToolUse.clientId,
-              content: { type: "advisor_result", text: advisorText },
-            },
-          })
-          if (!startOk) return
-          const stopOk = safeEnqueueEvent("content_block_stop", {
-            type: "content_block_stop",
-            index: resultIndex,
-          })
-          if (!stopOk) return
+          for (let index = 0; index < advisorToolUses.length; index++) {
+            const advisorToolUse = advisorToolUses[index]!
+            const advisorText = advisorTexts[index]!
+            const resultIndex = nextSyntheticIndex++
+            const startOk = safeEnqueueEvent("content_block_start", {
+              type: "content_block_start",
+              index: resultIndex,
+              content_block: {
+                type: "advisor_tool_result",
+                tool_use_id: advisorToolUse.clientId,
+                content: { type: "advisor_result", text: advisorText },
+              },
+            })
+            if (!startOk) return
+            const stopOk = safeEnqueueEvent("content_block_stop", {
+              type: "content_block_stop",
+              index: resultIndex,
+            })
+            if (!stopOk) return
+          }
 
           // Anthropic permits one assistant turn to contain both client tools
           // and a server tool. The client must execute every client tool before
@@ -1149,18 +1160,16 @@ export function buildAdvisorStream(opts: {
             return
           }
 
-          // Append the tool_result to conversation as a USER turn for
-          // the next Copilot call. NOTE we use the standard tool_result
-          // shape (Copilot doesn't know advisor_tool_result).
+          // Append every tool_result to conversation in one USER turn
+          // for the next Copilot call. Copilot doesn't know the
+          // advisor_tool_result shape, so use standard tool_result blocks.
           conversation.push({
             role: "user",
-            content: [
-              {
-                type: "tool_result",
-                tool_use_id: advisorToolUse.id,
-                content: advisorText,
-              },
-            ],
+            content: advisorToolUses.map((advisorToolUse, index) => ({
+              type: "tool_result",
+              tool_use_id: advisorToolUse.id,
+              content: advisorTexts[index]!,
+            })),
           })
 
           // Make the next Copilot call to continue the model's response

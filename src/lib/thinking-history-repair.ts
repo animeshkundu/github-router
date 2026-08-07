@@ -7,6 +7,7 @@ const THINKING_INTEGRITY_ERROR_RES = [
   /messages\.(\d+)\.content\.\d+:\s*Invalid `signature` in `thinking` block/,
 ] as const
 const MAX_REMEMBERED_REPAIRS = 1000
+const OMITTED_THINKING_PLACEHOLDER = "[prior reasoning omitted]"
 const repairSalt = randomBytes(32)
 const rememberedRepairs = new Set<string>()
 
@@ -62,7 +63,16 @@ function repairMessageAt(
       || (block.type !== "thinking" && block.type !== "redacted_thinking"),
   )
   const removedBlocks = message.content.length - repairedContent.length
-  if (removedBlocks === 0 || repairedContent.length === 0) return undefined
+  if (removedBlocks === 0) return undefined
+  // A turn that was ONLY thinking — the usual source is a turn interrupted
+  // right after the thinking block — would be left with an empty `content`,
+  // which Anthropic rejects, so stripping alone cannot recover it. Substitute a
+  // neutral text block rather than deleting the message: keeping the turn in
+  // place preserves user/assistant alternation and any tool_use/tool_result
+  // pairing that spans it, both of which dropping the message would break.
+  if (repairedContent.length === 0) {
+    repairedContent.push({ type: "text", text: OMITTED_THINKING_PLACEHOLDER })
+  }
 
   messages[messageIndex] = { ...message, content: repairedContent }
   parsed.messages = messages
@@ -116,14 +126,24 @@ export function repairKnownThinkingHistory(
     return undefined
   }
   if (!Array.isArray(parsed.messages)) return undefined
+  // Repair every remembered message, newest first. A match that turns out to be
+  // unrepairable must not abort the scan: returning there would silently
+  // suppress the repairs still pending on older messages. `repairMessageAt`
+  // mutates `parsed`, so each pass builds on the last and the final result
+  // carries the fully repaired body.
+  let repaired: ThinkingHistoryRepair | undefined
+  let totalRemovedBlocks = 0
   for (let index = parsed.messages.length - 1; index >= 0; index--) {
     const message = parsed.messages[index]
     if (!isRecord(message) || !Array.isArray(message.content)) continue
     const fingerprint = signedBlockFingerprint(index, message.content)
     if (!fingerprint || !rememberedRepairs.has(fingerprint)) continue
-    return repairMessageAt(parsed, index)
+    const attempt = repairMessageAt(parsed, index)
+    if (!attempt) continue
+    totalRemovedBlocks += attempt.removedBlocks
+    repaired = { ...attempt, removedBlocks: totalRemovedBlocks }
   }
-  return undefined
+  return repaired
 }
 
 export function rememberThinkingHistoryRepair(fingerprint: string): void {

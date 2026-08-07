@@ -21,6 +21,7 @@ import {
   rememberThinkingHistoryRepair,
   repairKnownThinkingHistory,
   repairRejectedThinkingHistory,
+  type ThinkingHistoryRepair,
 } from "~/lib/thinking-history-repair"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import {
@@ -34,6 +35,11 @@ import type { Model } from "~/services/copilot/get-models"
 import { searchWeb } from "~/services/copilot/web-search"
 
 type AnyRecord = Record<string, unknown>
+
+// Upper bound on repair-and-retry round trips for signed-thinking rejections.
+// Each attempt clears at most one assistant turn, so this caps how many
+// corrupt turns one request can converge past before we surface the rejection.
+const MAX_THINKING_REPAIR_ATTEMPTS = 5
 
 const isWebSearchTool = (tool: AnyRecord): boolean =>
   !!tool
@@ -439,60 +445,47 @@ export async function handleCompletion(c: Context) {
     )
   }
 
-  let response: Response
-  try {
-    // retryTransient: true — pre-first-byte retry on a 429/5xx/network blip.
-    // The response body is not consumed until the streaming/non-streaming
-    // branch below, so re-issuing here cannot duplicate streamed output.
-    response = await createMessages(
-      nativeBody,
-      requestHeaders,
-      advisorAborter?.signal,
-      true,
-    )
-  } catch (error) {
-    if (error instanceof HTTPError) {
-      const errorBody = await error.response.clone().text().catch(() => "")
-      const thinkingRepair = repairRejectedThinkingHistory(
+  // Repair-and-retry loop. Copilot names only the FIRST offending message per
+  // rejection, so a history with several corrupt assistant turns needs one
+  // round trip per turn to converge — a single retry would surface the first
+  // rejection forever and never memoize, bricking the session permanently.
+  let response: Response | undefined
+  let acceptedRepair: ThinkingHistoryRepair | undefined
+  const repairedMessageIndices = new Set<number>()
+  for (let attempt = 0; response === undefined; attempt++) {
+    try {
+      // retryTransient: true — pre-first-byte retry on a 429/5xx/network blip.
+      // The response body is not consumed until the streaming/non-streaming
+      // branch below, so re-issuing here cannot duplicate streamed output.
+      response = await createMessages(
         nativeBody,
-        errorBody,
+        requestHeaders,
+        advisorAborter?.signal,
+        true,
       )
-      if (thinkingRepair) {
+      if (acceptedRepair) {
+        rememberThinkingHistoryRepair(acceptedRepair.fingerprint)
         consola.warn(
-          `Copilot rejected signed thinking history; retrying once without rejected historical blocks: message=${thinkingRepair.messageIndex} removed_blocks=${thinkingRepair.removedBlocks}`,
+          `Thinking-history repair succeeded: message=${acceptedRepair.messageIndex} removed_blocks=${acceptedRepair.removedBlocks} attempts=${attempt}`,
         )
-        try {
-          response = await createMessages(
-            thinkingRepair.body,
-            requestHeaders,
-            advisorAborter?.signal,
-            true,
-          )
-          rememberThinkingHistoryRepair(thinkingRepair.fingerprint)
-          nativeBody = thinkingRepair.body
-          consola.warn(
-            `Thinking-history repair succeeded: message=${thinkingRepair.messageIndex} removed_blocks=${thinkingRepair.removedBlocks}`,
-          )
-        } catch (repairError) {
-          consola.error(
-            "Thinking-history repair failed; returning the original upstream rejection:",
-            repairError,
-          )
-          logRequest(
-            {
-              method: "POST",
-              path: c.req.path,
-              model: originalModel,
-              resolvedModel,
-              status: error.response.status,
-              errorBody,
-            },
-            selectedModel,
-            startTime,
-          )
-          throw error
-        }
-      } else {
+      }
+    } catch (error) {
+      // A non-HTTP failure (transport exhaustion, abort) is not a thinking
+      // rejection. Surface it as itself — reporting it as the earlier 400
+      // would misdiagnose the outage.
+      if (!(error instanceof HTTPError)) throw error
+      const errorBody = await error.response.clone().text().catch(() => "")
+      const thinkingRepair =
+        attempt < MAX_THINKING_REPAIR_ATTEMPTS ?
+          repairRejectedThinkingHistory(nativeBody, errorBody)
+        : undefined
+      // Give up when nothing is repairable, or when upstream names a message
+      // already repaired this request — that means no forward progress, and
+      // retrying would spin until the attempt cap.
+      if (
+        !thinkingRepair
+        || repairedMessageIndices.has(thinkingRepair.messageIndex)
+      ) {
         logRequest(
           {
             method: "POST",
@@ -505,10 +498,20 @@ export async function handleCompletion(c: Context) {
           selectedModel,
           startTime,
         )
+        // The CURRENT rejection, not the first one: it names the message that
+        // actually blocked the request after earlier repairs were accepted.
         throw error
       }
-    } else {
-      throw error
+      // Copilot validates messages in order, so a rejection naming a later
+      // message proves the previous repair cleared. Memoize it now so partial
+      // progress survives even if a subsequent attempt fails outright.
+      if (acceptedRepair) rememberThinkingHistoryRepair(acceptedRepair.fingerprint)
+      consola.warn(
+        `Copilot rejected signed thinking history; retrying without rejected historical blocks: message=${thinkingRepair.messageIndex} removed_blocks=${thinkingRepair.removedBlocks} attempt=${attempt + 1}`,
+      )
+      nativeBody = thinkingRepair.body
+      acceptedRepair = thinkingRepair
+      repairedMessageIndices.add(thinkingRepair.messageIndex)
     }
   }
 

@@ -242,6 +242,74 @@ describe("sanitizeAnthropicBody", () => {
     expect(parsed.messages[4]!.content[0]).toEqual({ type: "text", text: "Done." })
   })
 
+  test("parallel advisor history becomes one assistant turn followed by all results", () => {
+    const body = JSON.stringify({
+      model: "claude-opus-4.7",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Consulting twice." },
+            {
+              type: "server_tool_use",
+              id: "srvtoolu_parallel_a",
+              name: "advisor",
+              input: {},
+            },
+            {
+              type: "server_tool_use",
+              id: "srvtoolu_parallel_b",
+              name: "advisor",
+              input: {},
+            },
+            {
+              type: "advisor_tool_result",
+              tool_use_id: "srvtoolu_parallel_a",
+              content: { type: "advisor_result", text: "advice a" },
+            },
+            {
+              type: "advisor_tool_result",
+              tool_use_id: "srvtoolu_parallel_b",
+              content: { type: "advisor_result", text: "advice b" },
+            },
+            { type: "text", text: "Continuing." },
+          ],
+        },
+      ],
+    })
+
+    const parsed = JSON.parse(sanitizeAnthropicBody(body)) as {
+      messages: Array<{ role: string; content: Array<Record<string, unknown>> }>
+    }
+    expect(parsed.messages.map((message) => message.role)).toEqual([
+      "assistant",
+      "user",
+      "assistant",
+    ])
+    expect(parsed.messages[0]!.content.map((block) => block.type)).toEqual([
+      "text",
+      "tool_use",
+      "tool_use",
+    ])
+    expect(parsed.messages[0]!.content
+      .filter((block) => block.type === "tool_use")
+      .map((block) => block.id)).toEqual([
+      "toolu_parallel_a",
+      "toolu_parallel_b",
+    ])
+    expect(parsed.messages[1]!.content.map((block) => block.tool_use_id)).toEqual([
+      "toolu_parallel_a",
+      "toolu_parallel_b",
+    ])
+    expect(parsed.messages[1]!.content.map((block) => block.content)).toEqual([
+      "advice a",
+      "advice b",
+    ])
+    expect(parsed.messages[2]!.content).toEqual([
+      { type: "text", text: "Continuing." },
+    ])
+  })
+
   test("idempotent on already-translated body (re-running on output produces same output)", () => {
     const original = JSON.stringify({
       model: "claude-opus-4.7",
