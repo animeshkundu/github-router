@@ -1142,6 +1142,124 @@ describe("ADVISOR streaming integration (Phase I)", () => {
     expect(advisorResponsesCallCount).toBe(1)
     expect(messagesFetchCount).toBe(3)
   })
+
+  test("signed-thinking rejection on the continuation is repaired, not surfaced as 'advisor loop failed'", async () => {
+    // Regression: the first call in routes/messages/handler.ts is wrapped in the
+    // signed-thinking repair loop, but this continuation was not — so a rejected
+    // history here died as an advisor stream error with no recovery, while the
+    // main path would have recovered from the identical rejection.
+    const integrity = JSON.stringify({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message:
+          "messages.1.content.0: `thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified. These blocks must remain as they were in the original response.",
+      },
+    })
+    let messagesFetchCount = 0
+    const continuationBodies: Array<string> = []
+    const fetchMock = mock(async (
+      input: Parameters<typeof fetch>[0],
+      init?: Parameters<typeof fetch>[1],
+    ): Promise<Response> => {
+      const url = String(input)
+      if (url.includes("/responses")) {
+        return new Response(
+          JSON.stringify({
+            id: "advisor_resp",
+            object: "response",
+            status: "completed",
+            output: [
+              {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Advisor says: proceed." }],
+              },
+            ],
+            usage: { input_tokens: 10, output_tokens: 5 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+      if (url.includes("/v1/messages")) {
+        messagesFetchCount++
+        if (messagesFetchCount === 1) {
+          return new Response(
+            buildSseStream([
+              { event: "message_start", data: { type: "message_start", message: { id: "m1" } } },
+              { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_advisor_1", name: ADVISOR_INTERNAL_TOOL_NAME, input: {} } } },
+              { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+              { event: "message_stop", data: { type: "message_stop" } },
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          )
+        }
+        continuationBodies.push(typeof init?.body === "string" ? init.body : "")
+        // Continuation attempt 1 → upstream rejects the replayed thinking block.
+        if (messagesFetchCount === 2) {
+          return new Response(integrity, {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          })
+        }
+        // Continuation attempt 2, after the repair stripped the block.
+        return new Response(
+          buildSseStream([
+            { event: "message_start", data: { type: "message_start", message: { id: "m2" } } },
+            { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } },
+            { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Recovered after repair." } } },
+            { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+            { event: "message_stop", data: { type: "message_stop" } },
+          ]),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        )
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    })
+    globalThis.fetch = Object.assign(fetchMock, { preconnect: () => {} })
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        "anthropic-beta": "advisor-tool-2026-03-01",
+      },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        stream: true,
+        messages: [
+          { role: "user", content: "hi" },
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "", signature: "opaque-sig" },
+              { type: "text", text: "prior turn" },
+            ],
+          },
+          { role: "user", content: "continue" },
+        ],
+      }),
+    })
+    expect(response.status).toBe(200)
+    const text = await streamToString(response.body!)
+
+    // The rejection must not reach the client as a failed advisor loop.
+    expect(text).not.toContain("advisor loop failed")
+    expect(text).not.toContain('"type":"error"')
+    expect(text).toContain("Recovered after repair.")
+    expect((text.match(/^event: message_stop$/gm) ?? []).length).toBe(1)
+    // Main call + rejected continuation + repaired continuation.
+    expect(messagesFetchCount).toBe(3)
+    // The retried continuation must have dropped the rejected thinking block.
+    const retried = JSON.parse(continuationBodies[1]!) as {
+      messages: Array<{ role: string; content: Array<{ type: string }> }>
+    }
+    expect(
+      retried.messages[1]!.content.some((block) => block.type === "thinking"),
+    ).toBe(false)
+  })
 })
 
 describe("toClientServerToolUseId charset hardening (round-5 codex critic)", () => {

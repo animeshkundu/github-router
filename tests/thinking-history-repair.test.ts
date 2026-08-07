@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test"
 
 import {
   __resetThinkingHistoryRepairsForTests,
+  formatThinkingRepairDecline,
   rememberThinkingHistoryRepair,
   repairKnownThinkingHistory,
   repairRejectedThinkingHistory,
@@ -40,13 +41,32 @@ beforeEach(() => {
 })
 
 describe("thinking history repair", () => {
-  test("repairs only the assistant message named by the exact upstream error", () => {
-    const repair = repairRejectedThinkingHistory(brokenBody(), integrityError)
-    expect(repair).toBeDefined()
-    expect(repair!.messageIndex).toBe(1)
-    expect(repair!.removedBlocks).toBe(2)
+  /** Unwrap a successful outcome, failing loudly with the reason if it declined. */
+  function repairOf(
+    outcome: ReturnType<typeof repairRejectedThinkingHistory>,
+  ) {
+    if (!outcome.ok) {
+      throw new Error(`expected a repair, declined: ${outcome.decline.reason}`)
+    }
+    return outcome.repair
+  }
 
-    const parsed = JSON.parse(repair!.body) as {
+  /** Assert a decline and return its structured detail. */
+  function declineOf(
+    outcome: ReturnType<typeof repairRejectedThinkingHistory>,
+  ) {
+    if (outcome.ok) throw new Error("expected a decline, got a repair")
+    return outcome.decline
+  }
+
+  test("repairs only the assistant message named by the exact upstream error", () => {
+    const repair = repairOf(
+      repairRejectedThinkingHistory(brokenBody(), integrityError),
+    )
+    expect(repair.messageIndex).toBe(1)
+    expect(repair.removedBlocks).toBe(2)
+
+    const parsed = JSON.parse(repair.body) as {
       thinking: unknown
       messages: Array<{ content: Array<Record<string, unknown>> }>
     }
@@ -62,34 +82,44 @@ describe("thinking history repair", () => {
 
   test("unrelated 400 never triggers a repair", () => {
     expect(
-      repairRejectedThinkingHistory(
-        brokenBody(),
-        "messages.1: tool_use ids were found without tool_result blocks",
-      ),
-    ).toBeUndefined()
+      declineOf(
+        repairRejectedThinkingHistory(
+          brokenBody(),
+          "messages.1: tool_use ids were found without tool_result blocks",
+        ),
+      ).reason,
+    ).toBe("error-not-recognized")
   })
 
   test("invalid thinking signature rejection uses the same bounded repair", () => {
-    const repair = repairRejectedThinkingHistory(
-      brokenBody(),
-      "messages.1.content.0: Invalid `signature` in `thinking` block",
+    const repair = repairOf(
+      repairRejectedThinkingHistory(
+        brokenBody(),
+        "messages.1.content.0: Invalid `signature` in `thinking` block",
+      ),
     )
-    expect(repair?.removedBlocks).toBe(2)
+    expect(repair.removedBlocks).toBe(2)
   })
 
-  test("malformed and out-of-range paths fail closed", () => {
+  test("malformed and out-of-range paths fail closed, and say which", () => {
+    // Out of range: the index parses but names no message.
     expect(
-      repairRejectedThinkingHistory(
-        brokenBody(),
-        "messages.99.content.1: `thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified.",
+      declineOf(
+        repairRejectedThinkingHistory(
+          brokenBody(),
+          "messages.99.content.1: `thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified.",
+        ),
       ),
-    ).toBeUndefined()
+    ).toMatchObject({ reason: "message-missing", messageIndex: 99 })
+    // Unparseable index: the error shape is not recognised at all.
     expect(
-      repairRejectedThinkingHistory(
-        brokenBody(),
-        "messages.nope.content.1: `thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified.",
-      ),
-    ).toBeUndefined()
+      declineOf(
+        repairRejectedThinkingHistory(
+          brokenBody(),
+          "messages.nope.content.1: `thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified.",
+        ),
+      ).reason,
+    ).toBe("error-not-recognized")
   })
 
   test("recovers a thinking-only assistant turn without emptying it", () => {
@@ -104,15 +134,16 @@ describe("thinking history repair", () => {
         },
       ],
     })
-    const repair = repairRejectedThinkingHistory(
-      body,
-      integrityError.replace("messages.1.content.88", "messages.1.content.0"),
+    const repair = repairOf(
+      repairRejectedThinkingHistory(
+        body,
+        integrityError.replace("messages.1.content.88", "messages.1.content.0"),
+      ),
     )
     // Stripping alone would leave `content: []`, which Anthropic rejects — so
     // the turn is kept alive with a neutral placeholder instead of being
     // abandoned as unrepairable (which bricked the session on every retry).
-    expect(repair).toBeDefined()
-    const repaired = JSON.parse(repair!.body) as {
+    const repaired = JSON.parse(repair.body) as {
       messages: Array<{ role: string; content: Array<Record<string, string>> }>
     }
     expect(repaired.messages[1]!.content).toEqual([
@@ -121,15 +152,16 @@ describe("thinking history repair", () => {
   })
 
   test("a successful repair fingerprint reapplies without retaining source content", () => {
-    const first = repairRejectedThinkingHistory(brokenBody(), integrityError)
-    expect(first).toBeDefined()
-    expect(first!.fingerprint).toMatch(/^[a-f0-9]{64}$/)
-    expect(first!.fingerprint).not.toContain("opaque")
+    const first = repairOf(
+      repairRejectedThinkingHistory(brokenBody(), integrityError),
+    )
+    expect(first.fingerprint).toMatch(/^[a-f0-9]{64}$/)
+    expect(first.fingerprint).not.toContain("opaque")
 
-    rememberThinkingHistoryRepair(first!.fingerprint)
+    rememberThinkingHistoryRepair(first.fingerprint)
     const known = repairKnownThinkingHistory(brokenBody())
-    expect(known?.body).toBe(first!.body)
-    expect(known?.fingerprint).toBe(first!.fingerprint)
+    expect(known?.body).toBe(first.body)
+    expect(known?.fingerprint).toBe(first.fingerprint)
   })
 
   // The repair rewrites request history, so its blast radius is a safety
@@ -164,12 +196,13 @@ describe("thinking history repair", () => {
       ],
     }
     const original = JSON.parse(JSON.stringify(request)) as typeof request
-    const repair = repairRejectedThinkingHistory(
-      JSON.stringify(request),
-      integrityError.replace("messages.1.content.88", "messages.1.content.0"),
+    const repair = repairOf(
+      repairRejectedThinkingHistory(
+        JSON.stringify(request),
+        integrityError.replace("messages.1.content.88", "messages.1.content.0"),
+      ),
     )
-    expect(repair).toBeDefined()
-    const out = JSON.parse(repair!.body) as typeof request
+    const out = JSON.parse(repair.body) as typeof request
 
     expect(out.system).toEqual(original.system)
     expect(out.tools).toEqual(original.tools)
@@ -189,12 +222,74 @@ describe("thinking history repair", () => {
         },
       ],
     }
-    // Even if upstream named index 0, a non-assistant role is out of scope.
+    // Even if upstream named index 0, a non-assistant role is out of scope —
+    // and the decline says so rather than failing silently.
     expect(
+      declineOf(
+        repairRejectedThinkingHistory(
+          JSON.stringify(request),
+          integrityError.replace("messages.1.content.88", "messages.0.content.0"),
+        ),
+      ),
+    ).toMatchObject({ reason: "message-not-assistant", roleAtIndex: "user" })
+  })
+
+  // Every non-repair exit must name itself. A silent decline is what made a
+  // 44-rejection production incident impossible to explain after the fact.
+  test("each decline path reports a distinct, structured reason", () => {
+    const named = (index: number) =>
+      integrityError.replace("messages.1.content.88", `messages.${index}.content.0`)
+    const bodyOf = (messages: unknown) => JSON.stringify({ messages })
+
+    expect(
+      declineOf(repairRejectedThinkingHistory("{not json", named(0))).reason,
+    ).toBe("body-not-json")
+
+    expect(
+      declineOf(repairRejectedThinkingHistory("{}", named(0))).reason,
+    ).toBe("no-messages-array")
+
+    expect(
+      declineOf(
+        repairRejectedThinkingHistory(
+          bodyOf([{ role: "assistant", content: "plain string" }]),
+          named(0),
+        ),
+      ),
+    ).toMatchObject({ reason: "content-not-array" })
+
+    // An assistant turn upstream blames, but with nothing signed left to strip.
+    expect(
+      declineOf(
+        repairRejectedThinkingHistory(
+          bodyOf([{ role: "assistant", content: [{ type: "text", text: "hi" }] }]),
+          named(0),
+        ),
+      ),
+    ).toMatchObject({
+      reason: "no-signed-blocks",
+      blocksAtIndex: 1,
+      signedBlocksAtIndex: 0,
+    })
+  })
+
+  test("decline detail is log-safe: shapes and counts, never content", () => {
+    const decline = declineOf(
       repairRejectedThinkingHistory(
-        JSON.stringify(request),
+        JSON.stringify({
+          messages: [
+            {
+              role: "assistant",
+              content: [{ type: "text", text: "SECRET-CONTENT-MARKER" }],
+            },
+          ],
+        }),
         integrityError.replace("messages.1.content.88", "messages.0.content.0"),
       ),
-    ).toBeUndefined()
+    )
+    const rendered = formatThinkingRepairDecline(decline)
+    expect(rendered).not.toContain("SECRET-CONTENT-MARKER")
+    expect(rendered).toContain("reason=no-signed-blocks")
+    expect(rendered).toContain("blocksAtIndex=1")
   })
 })

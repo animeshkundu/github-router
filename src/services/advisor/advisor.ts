@@ -43,8 +43,15 @@
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
+import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
 import { isControllerClosedError } from "~/lib/stream-relay"
+import {
+  formatThinkingRepairDecline,
+  rememberThinkingHistoryRepair,
+  repairKnownThinkingHistory,
+  repairRejectedThinkingHistory,
+} from "~/lib/thinking-history-repair"
 import { getTokenizerFromModel, loadEncoder } from "~/lib/tokenizer"
 import { resolveModel } from "~/lib/utils"
 import { withTransientRetry } from "~/lib/upstream-retry"
@@ -1187,12 +1194,52 @@ export function buildAdvisorStream(opts: {
           // streams it, so re-issuing here cannot duplicate already-streamed
           // output. Matches the first-call retry in routes/messages/handler.ts so
           // the advisor turn no longer dies to a lone "fetch failed".
-          response = await createMessages(
-            continuationBody,
-            opts.requestHeaders,
-            aborter.signal,
-            true,
-          )
+          //
+          // The first call in routes/messages/handler.ts is also wrapped in the
+          // signed-thinking repair; this continuation was not, so a rejected
+          // history here died as an advisor stream error with no recovery. One
+          // repair attempt is enough: unlike the first call, a continuation
+          // replays a history the first call already got past, so converging
+          // across several corrupt turns is not a case that arises here.
+          let continuationSend = continuationBody
+          const knownRepair = repairKnownThinkingHistory(continuationSend)
+          if (knownRepair) continuationSend = knownRepair.body
+          try {
+            response = await createMessages(
+              continuationSend,
+              opts.requestHeaders,
+              aborter.signal,
+              true,
+            )
+          } catch (continuationError) {
+            if (!(continuationError instanceof HTTPError)) throw continuationError
+            const errorBody = await continuationError.response
+              .clone()
+              .text()
+              .catch(() => "")
+            const outcome = repairRejectedThinkingHistory(
+              continuationSend,
+              errorBody,
+            )
+            if (!outcome.ok) {
+              consola.warn(
+                `Advisor continuation thinking-history repair declined: ${formatThinkingRepairDecline(outcome.decline)}`,
+              )
+              throw continuationError
+            }
+            consola.warn(
+              `Advisor continuation: retrying without rejected thinking blocks: message=${outcome.repair.messageIndex} removed_blocks=${outcome.repair.removedBlocks}`,
+            )
+            response = await createMessages(
+              outcome.repair.body,
+              opts.requestHeaders,
+              aborter.signal,
+              true,
+            )
+            // Memoize only after upstream accepted it, so the main path can
+            // pre-emptively apply the same repair without paying another 400.
+            rememberThinkingHistoryRepair(outcome.repair.fingerprint)
+          }
         }
 
         // Loop exhausted. Synthesize final message_stop + an error text
