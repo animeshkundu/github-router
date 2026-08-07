@@ -679,8 +679,27 @@ test("buildPartial is O(n): 10k deltas finish in linear time (codex MEDIUM 6 reg
   // Warm-up pass to amortize JIT compilation and isolate per-delta cost.
   await timedRun(500)
 
-  const small = await timedRun(5000)
-  const large = await timedRun(10000)
+  // Best-of-3 per size. A shared CI runner only ever ADDS time (preemption, a
+  // noisy neighbour, GC), so the minimum of several samples is much closer to
+  // the true cost than any single one. This is noise reduction before a single
+  // assertion, not a retry-until-green loop: the assertion still runs once and
+  // a real quadratic regression fails every sample.
+  // Without it this test failed CI at ratio 3.03 against a 3.0 bound — a 1%
+  // miss on a threshold sitting midway between linear (~2x) and quadratic (~4x).
+  const bestOf3 = async (deltas: number) => {
+    const runs = [
+      await timedRun(deltas),
+      await timedRun(deltas),
+      await timedRun(deltas),
+    ]
+    return {
+      ms: Math.min(...runs.map((r) => r.ms)),
+      finalLen: runs[0]!.finalLen,
+    }
+  }
+
+  const small = await bestOf3(5000)
+  const large = await bestOf3(10000)
 
   // Correctness: every delta's content made it into the final text.
   expect(small.finalLen).toBe(5000 * 5)
@@ -690,11 +709,9 @@ test("buildPartial is O(n): 10k deltas finish in linear time (codex MEDIUM 6 reg
   // would be several seconds on the same hardware.
   expect(large.ms).toBeLessThan(2000)
 
-  // Scaling ratio — linear is ~2×; quadratic is ~4×. The 3.0 threshold
-  // absorbs CI jitter while still catching a true quadratic blowup.
-  // Floor `small.ms` at 1ms to avoid divide-by-near-zero on very fast
-  // hardware where 5k deltas finish in <1ms (the absolute large-N bound
-  // is doing the real work in that case).
+  // Scaling ratio — linear is ~2×; quadratic is ~4×. Floor `small.ms` at 1ms to
+  // avoid divide-by-near-zero on very fast hardware where 5k deltas finish in
+  // <1ms (the absolute large-N bound is doing the real work in that case).
   const denom = Math.max(small.ms, 1)
   const ratio = large.ms / denom
   expect(ratio).toBeLessThan(3.0)
