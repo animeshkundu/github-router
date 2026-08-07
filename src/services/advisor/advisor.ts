@@ -577,11 +577,16 @@ interface ToolUseTracker {
  */
 export function toClientServerToolUseId(
   id: string,
-  fallbackIndex: number,
+  _fallbackIndex: number,
 ): string {
-  const suffix = id.startsWith("toolu_") ? id.slice("toolu_".length) : id
-  if (/^[a-zA-Z0-9_]+$/.test(suffix)) return `srvtoolu_${suffix}`
-  return `srvtoolu_advisor_${fallbackIndex}`
+  if (!id.startsWith("toolu_")) {
+    throw new Error("advisor tool_use id is not round-trippable")
+  }
+  const suffix = id.slice("toolu_".length)
+  if (!/^[a-zA-Z0-9_]+$/.test(suffix)) {
+    throw new Error("advisor tool_use id is not round-trippable")
+  }
+  return `srvtoolu_${suffix}`
 }
 
 /**
@@ -618,9 +623,6 @@ interface CapturedBlock {
    *  to {} if no input_json_delta arrived — codex round-7: don't bake
    *  "advisor takes no input" as a load-bearing invariant). */
   advisorReplay?: { id: string }
-  /** Set during content_block_stop if this block should be dropped
-   *  from the replay (e.g., empty text block). */
-  dropFromReplay?: boolean
 }
 
 /**
@@ -677,6 +679,11 @@ export function buildAdvisorStream(opts: {
       let messageStartForwarded = false
       let nextSyntheticIndex = 0
       let turnsRun: number
+      let pendingMessageDelta: {
+        stopReason: unknown
+        stopSequence: unknown
+        usage: Record<string, number>
+      } | null = null
 
       const safeEnqueue = (bytes: Uint8Array): boolean => {
         try {
@@ -701,6 +708,60 @@ export function buildAdvisorStream(opts: {
       const safeEnqueueEvent = (type: string, data: AnyRecord): boolean =>
         safeEnqueue(ENCODER.encode(sseEvent(type, data)))
 
+      const captureMessageDelta = (payload: AnyRecord): void => {
+        const delta =
+          payload.delta && typeof payload.delta === "object"
+            ? (payload.delta as AnyRecord)
+            : {}
+        const usage =
+          payload.usage && typeof payload.usage === "object"
+            ? (payload.usage as AnyRecord)
+            : {}
+        if (!pendingMessageDelta) {
+          pendingMessageDelta = {
+            stopReason: delta.stop_reason ?? null,
+            stopSequence: delta.stop_sequence ?? null,
+            usage: {},
+          }
+        } else {
+          if (delta.stop_reason !== undefined) {
+            pendingMessageDelta.stopReason = delta.stop_reason
+          }
+          if (delta.stop_sequence !== undefined) {
+            pendingMessageDelta.stopSequence = delta.stop_sequence
+          }
+        }
+        for (const [key, value] of Object.entries(usage)) {
+          if (typeof value === "number" && Number.isFinite(value)) {
+            pendingMessageDelta.usage[key] =
+              (pendingMessageDelta.usage[key] ?? 0) + value
+          }
+        }
+      }
+
+      const emitTerminal = (forcedStopReason?: string): boolean => {
+        if (pendingMessageDelta || forcedStopReason) {
+          const terminal = pendingMessageDelta ?? {
+            stopReason: null,
+            stopSequence: null,
+            usage: {},
+          }
+          if (
+            !safeEnqueueEvent("message_delta", {
+              type: "message_delta",
+              delta: {
+                stop_reason: forcedStopReason ?? terminal.stopReason,
+                stop_sequence: terminal.stopSequence,
+              },
+              usage: terminal.usage,
+            })
+          ) {
+            return false
+          }
+        }
+        return safeEnqueueEvent("message_stop", { type: "message_stop" })
+      }
+
       // Process one Copilot streaming response. Returns the assistant
       // turn's blocks + the advisor tool_use info if one was called.
       // Forwards events to the client as it goes.
@@ -709,9 +770,11 @@ export function buildAdvisorStream(opts: {
       ): Promise<{
         capturedBlocks: Array<CapturedBlock>
         advisorToolUse: ToolUseTracker | null
+        clientToolUseCount: number
       }> {
         const capturedBlocks: Array<CapturedBlock> = []
         let advisorToolUse: ToolUseTracker | null = null
+        let clientToolUseCount = 0
         // Track which upstream block index corresponds to which entry
         // in capturedBlocks (so deltas know which to update).
         const indexToBlock = new Map<number, CapturedBlock>()
@@ -724,14 +787,16 @@ export function buildAdvisorStream(opts: {
           } catch {
             // Non-JSON data — forward as-is (defensive).
             const ok = safeEnqueue(ENCODER.encode(`event: ${ev.event}\ndata: ${ev.data}\n\n`))
-            if (!ok) return { capturedBlocks, advisorToolUse }
+            if (!ok) return { capturedBlocks, advisorToolUse, clientToolUseCount }
             continue
           }
 
           switch (ev.event) {
             case "message_start": {
               if (!messageStartForwarded) {
-                if (!safeEnqueueEvent(ev.event, payload)) return { capturedBlocks, advisorToolUse }
+                if (!safeEnqueueEvent(ev.event, payload)) {
+                  return { capturedBlocks, advisorToolUse, clientToolUseCount }
+                }
                 messageStartForwarded = true
               }
               // Suppress duplicate message_start on continuation turns —
@@ -773,7 +838,9 @@ export function buildAdvisorStream(opts: {
                       input: {},
                     },
                   }
-                  if (!safeEnqueueEvent(ev.event, translated)) return { capturedBlocks, advisorToolUse }
+                  if (!safeEnqueueEvent(ev.event, translated)) {
+                    return { capturedBlocks, advisorToolUse, clientToolUseCount }
+                  }
                   // Track for later — the Copilot-replay continuation
                   // turn needs to round-trip with the INTERNAL name +
                   // ORIGINAL toolu_* id (Copilot doesn't know
@@ -795,9 +862,12 @@ export function buildAdvisorStream(opts: {
                   capturedBlocks.push(captured)
                   indexToBlock.set(upstreamIndex, captured)
                 } else {
+                  if (block.type === "tool_use") clientToolUseCount++
                   // Forward as-is, with re-indexed.
                   const reindexed = { ...payload, index: myIndex }
-                  if (!safeEnqueueEvent(ev.event, reindexed)) return { capturedBlocks, advisorToolUse }
+                  if (!safeEnqueueEvent(ev.event, reindexed)) {
+                    return { capturedBlocks, advisorToolUse, clientToolUseCount }
+                  }
                   // Store the raw content_block verbatim — preserves
                   // every field upstream sent (including ones the proxy
                   // doesn't know about: thinking, signature, image src,
@@ -830,7 +900,9 @@ export function buildAdvisorStream(opts: {
                       : upstreamIndex
                     : upstreamIndex,
                 }
-                if (!safeEnqueueEvent(ev.event, reindexed)) return { capturedBlocks, advisorToolUse }
+                if (!safeEnqueueEvent(ev.event, reindexed)) {
+                  return { capturedBlocks, advisorToolUse, clientToolUseCount }
+                }
                 // Accumulate every delta type into the right field on
                 // captured.block. The block is mutated in place; on
                 // replay it's emitted verbatim, so every field upstream
@@ -883,7 +955,9 @@ export function buildAdvisorStream(opts: {
                   // start-state to fall back to.
                 }
               } else {
-                if (!safeEnqueueEvent(ev.event, payload)) return { capturedBlocks, advisorToolUse }
+                if (!safeEnqueueEvent(ev.event, payload)) {
+                  return { capturedBlocks, advisorToolUse, clientToolUseCount }
+                }
               }
               continue
             }
@@ -897,7 +971,9 @@ export function buildAdvisorStream(opts: {
                   ? nextSyntheticIndex - capturedBlocks.length + capturedBlocks.indexOf(captured)
                   : (upstreamIndex ?? 0),
               }
-              if (!safeEnqueueEvent(ev.event, reindexed)) return { capturedBlocks, advisorToolUse }
+              if (!safeEnqueueEvent(ev.event, reindexed)) {
+                return { capturedBlocks, advisorToolUse, clientToolUseCount }
+              }
 
               // Finalize block state for replay:
               if (captured) {
@@ -925,45 +1001,31 @@ export function buildAdvisorStream(opts: {
                     captured.block.input = {}
                   }
                 }
-                // (b) Drop empty text blocks from replay — empty
-                //     {type:"text", text:""} is at best meaningless and
-                //     at worst spec-invalid (codex round-7).
-                if (
-                  captured.block.type === "text"
-                  && (typeof captured.block.text !== "string"
-                    || (captured.block.text as string).length === 0)
-                ) {
-                  captured.dropFromReplay = true
-                }
               }
               continue
             }
 
             case "message_delta": {
-              // Forward as-is (usage updates etc.)
-              if (!safeEnqueueEvent(ev.event, payload)) return { capturedBlocks, advisorToolUse }
+              // One client-visible response may span several internal Copilot
+              // turns. Keep intermediate stop reasons private and emit one
+              // terminal delta with accumulated usage when the loop finishes.
+              captureMessageDelta(payload)
               continue
             }
 
             case "message_stop": {
-              // CRITICAL: do NOT forward yet if advisor was called —
-              // we need to run advisor + continue the loop. message_stop
-              // ends the entire outgoing assistant turn. Only emit it
-              // when the advisor loop is fully done.
-              if (advisorToolUse) {
-                return { capturedBlocks, advisorToolUse }
-              }
-              if (!safeEnqueueEvent(ev.event, payload)) return { capturedBlocks, advisorToolUse }
-              return { capturedBlocks, advisorToolUse }
+              return { capturedBlocks, advisorToolUse, clientToolUseCount }
             }
 
             default: {
               // Unknown event — forward as-is.
-              if (!safeEnqueueEvent(ev.event, payload)) return { capturedBlocks, advisorToolUse }
+              if (!safeEnqueueEvent(ev.event, payload)) {
+                return { capturedBlocks, advisorToolUse, clientToolUseCount }
+              }
             }
           }
         }
-        return { capturedBlocks, advisorToolUse }
+        return { capturedBlocks, advisorToolUse, clientToolUseCount }
       }
 
       try {
@@ -977,11 +1039,14 @@ export function buildAdvisorStream(opts: {
           if (aborter.signal.aborted) return
           if (conversation === null) return
 
-          const { capturedBlocks, advisorToolUse } = await processOneTurn(response)
+          const {
+            capturedBlocks,
+            advisorToolUse,
+            clientToolUseCount,
+          } = await processOneTurn(response)
 
           if (!advisorToolUse) {
-            // No advisor call this turn — message_stop was already
-            // forwarded. We're done.
+            emitTerminal()
             return
           }
 
@@ -1004,7 +1069,6 @@ export function buildAdvisorStream(opts: {
           const assistantTurn = {
             role: "assistant",
             content: capturedBlocks
-              .filter((c) => !c.dropFromReplay)
               .map((c) => {
                 if (c.advisorReplay) {
                   // Use the parsed input if any input_json_delta
@@ -1073,6 +1137,18 @@ export function buildAdvisorStream(opts: {
           })
           if (!stopOk) return
 
+          // Anthropic permits one assistant turn to contain both client tools
+          // and a server tool. The client must execute every client tool before
+          // the next model continuation. Continuing here with only the advisor
+          // result would orphan those tool_use ids and Copilot rejects the
+          // request. End the synthetic response and let Claude Code return all
+          // client results; sanitizeAnthropicBody merges those results with the
+          // advisor result on the next request.
+          if (clientToolUseCount > 0) {
+            emitTerminal("tool_use")
+            return
+          }
+
           // Append the tool_result to conversation as a USER turn for
           // the next Copilot call. NOTE we use the standard tool_result
           // shape (Copilot doesn't know advisor_tool_result).
@@ -1131,7 +1207,7 @@ export function buildAdvisorStream(opts: {
           type: "content_block_stop",
           index: finalIndex,
         })
-        safeEnqueueEvent("message_stop", { type: "message_stop" })
+        emitTerminal("end_turn")
       } catch (err) {
         // Suppress advisor-stream error path on consumer cancel —
         // emitting `event: error` would log a misleading "advisor loop

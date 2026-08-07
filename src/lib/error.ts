@@ -3,6 +3,11 @@ import type { ContentfulStatusCode } from "hono/utils/http-status"
 
 import consola from "consola"
 
+import {
+  sanitizeTransportText,
+  TransportExhaustionError,
+} from "~/lib/upstream-retry"
+
 export class HTTPError extends Error {
   response: Response
 
@@ -14,6 +19,35 @@ export class HTTPError extends Error {
 
 export async function forwardError(c: Context, error: unknown) {
   consola.error(`Error occurred at ${c.req.path}:`, error)
+
+  if (error instanceof TransportExhaustionError) {
+    const target = sanitizeTransportText(
+      error.endpoint ?? error.label ?? c.req.path,
+    )
+    const diagnostic = formatTransportDiagnostic(error)
+    if (error.classification === "transient") {
+      return c.json(
+        {
+          type: "error",
+          error: {
+            type: "overloaded_error",
+            message: `Upstream transport was interrupted at ${target} after ${error.attempts} attempts; retry later. ${diagnostic}`,
+          },
+        },
+        503,
+      )
+    }
+    return c.json(
+      {
+        type: "error",
+        error: {
+          type: "api_error",
+          message: `Could not connect to upstream at ${target}. Check DNS, proxy, firewall, and TLS configuration. ${diagnostic}`,
+        },
+      },
+      502,
+    )
+  }
 
   if (error instanceof HTTPError) {
     const errorText = await error.response.text().catch(() => "")
@@ -89,6 +123,12 @@ export async function forwardError(c: Context, error: unknown) {
     },
     500,
   )
+}
+
+function formatTransportDiagnostic(error: TransportExhaustionError): string {
+  const code = error.lastError.causeCode ?? error.lastError.code
+  const codeText = code ? ` (${sanitizeTransportText(code)})` : ""
+  return `${sanitizeTransportText(error.lastError.name)}: ${sanitizeTransportText(error.lastError.message)}${codeText}`
 }
 
 // Extracts error message from { message } or { error: { message } } payloads.

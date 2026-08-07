@@ -17,6 +17,11 @@ import { MAX_RESPONSE_BODY_BYTES, readResponseBodyCapped } from "~/lib/response-
 import { sanitizeAnthropicBody } from "~/lib/sanitize-anthropic-body"
 import { state } from "~/lib/state"
 import { relayAnthropicStream } from "~/lib/stream-relay"
+import {
+  rememberThinkingHistoryRepair,
+  repairKnownThinkingHistory,
+  repairRejectedThinkingHistory,
+} from "~/lib/thinking-history-repair"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import {
   ADVISOR_INTERNAL_TOOL_NAME,
@@ -421,33 +426,90 @@ export async function handleCompletion(c: Context) {
   // NOTE: do NOT use c.req.raw.signal here — Bun aborts it after request-
   // body consumption (see CLAUDE.md "Bun request-signal quirk").
   const advisorAborter = advisorEnabled ? new AbortController() : undefined
+  const requestHeaders = {
+    ...selectedModel?.requestHeaders,
+    ...effectiveBetas,
+  }
+  let nativeBody = resolvedBody
+  const knownThinkingRepair = repairKnownThinkingHistory(nativeBody)
+  if (knownThinkingRepair) {
+    nativeBody = knownThinkingRepair.body
+    consola.warn(
+      `Reapplying proven thinking-history repair: message=${knownThinkingRepair.messageIndex} removed_blocks=${knownThinkingRepair.removedBlocks}`,
+    )
+  }
 
   let response: Response
   try {
     // retryTransient: true — pre-first-byte retry on a 429/5xx/network blip.
     // The response body is not consumed until the streaming/non-streaming
     // branch below, so re-issuing here cannot duplicate streamed output.
-    response = await createMessages(resolvedBody, {
-      ...selectedModel?.requestHeaders,
-      ...effectiveBetas,
-    }, advisorAborter?.signal, true)
+    response = await createMessages(
+      nativeBody,
+      requestHeaders,
+      advisorAborter?.signal,
+      true,
+    )
   } catch (error) {
     if (error instanceof HTTPError) {
       const errorBody = await error.response.clone().text().catch(() => "")
-      logRequest(
-        {
-          method: "POST",
-          path: c.req.path,
-          model: originalModel,
-          resolvedModel,
-          status: error.response.status,
-          errorBody,
-        },
-        selectedModel,
-        startTime,
+      const thinkingRepair = repairRejectedThinkingHistory(
+        nativeBody,
+        errorBody,
       )
+      if (thinkingRepair) {
+        consola.warn(
+          `Copilot rejected signed thinking history; retrying once without rejected historical blocks: message=${thinkingRepair.messageIndex} removed_blocks=${thinkingRepair.removedBlocks}`,
+        )
+        try {
+          response = await createMessages(
+            thinkingRepair.body,
+            requestHeaders,
+            advisorAborter?.signal,
+            true,
+          )
+          rememberThinkingHistoryRepair(thinkingRepair.fingerprint)
+          nativeBody = thinkingRepair.body
+          consola.warn(
+            `Thinking-history repair succeeded: message=${thinkingRepair.messageIndex} removed_blocks=${thinkingRepair.removedBlocks}`,
+          )
+        } catch (repairError) {
+          consola.error(
+            "Thinking-history repair failed; returning the original upstream rejection:",
+            repairError,
+          )
+          logRequest(
+            {
+              method: "POST",
+              path: c.req.path,
+              model: originalModel,
+              resolvedModel,
+              status: error.response.status,
+              errorBody,
+            },
+            selectedModel,
+            startTime,
+          )
+          throw error
+        }
+      } else {
+        logRequest(
+          {
+            method: "POST",
+            path: c.req.path,
+            model: originalModel,
+            resolvedModel,
+            status: error.response.status,
+            errorBody,
+          },
+          selectedModel,
+          startTime,
+        )
+        throw error
+      }
+    } else {
+      throw error
     }
-    throw error
   }
 
   const contentType = response.headers.get("content-type") ?? ""
@@ -521,7 +583,7 @@ export async function handleCompletion(c: Context) {
       // these to extend the conversation across advisor turns.
       let parsedBase: AnyRecord = {}
       try {
-        parsedBase = JSON.parse(resolvedBody) as AnyRecord
+        parsedBase = JSON.parse(nativeBody) as AnyRecord
       } catch {
         // Should not happen since resolveModelInBody just re-serialized
         // it. Fallback: pass empty conversation; translate-loop will
@@ -535,10 +597,7 @@ export async function handleCompletion(c: Context) {
           firstResponse: response,
           initialConversation,
           baseBody: parsedBase,
-          requestHeaders: {
-            ...selectedModel?.requestHeaders,
-            ...effectiveBetas,
-          },
+          requestHeaders,
           externalAborter: advisorAborter,
         }),
         {
@@ -663,8 +722,18 @@ function resolveModelInBody(rawBody: string): {
     modified = true
   }
 
-  // Strip cache_control.scope — fast path skips when "scope" absent
-  const needsSanitize = rawBody.includes('"scope"')
+  // Copilot rejects cache_control.scope generally and rejects the entire
+  // cache_control object on signed thinking history. Keep the common fast path
+  // while detecting the signed-block special case.
+  const needsSanitize =
+    rawBody.includes('"scope"')
+    || (
+      rawBody.includes('"cache_control"')
+      && (
+        rawBody.includes('"thinking"')
+        || rawBody.includes('"redacted_thinking"')
+      )
+    )
   if (needsSanitize && sanitizeCacheControl(parsed)) {
     modified = true
   }
@@ -808,7 +877,9 @@ function translateThinking(body: AnyRecord, model?: Model): boolean {
 }
 
 /**
- * Strip the `scope` field from all `cache_control` objects in the body.
+ * Strip the `scope` field from ordinary `cache_control` objects. Copilot
+ * rejects the entire cache_control object on signed thinking blocks, so remove
+ * that unsigned transport metadata without touching thinking/signature/data.
  * Claude CLI 2.1.88+ sends {"type":"ephemeral","scope":"global"} which
  * Copilot rejects. Mutates the parsed object in place.
  *
@@ -819,6 +890,14 @@ function sanitizeCacheControl(body: AnyRecord): boolean {
   let stripped = false
   function stripScope(block: AnyRecord): void {
     const cc = block.cache_control as AnyRecord | undefined
+    if (
+      cc
+      && (block.type === "thinking" || block.type === "redacted_thinking")
+    ) {
+      delete block.cache_control
+      stripped = true
+      return
+    }
     if (cc?.scope !== undefined) {
       delete cc.scope
       if (Object.keys(cc).length === 0) {

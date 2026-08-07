@@ -1,6 +1,11 @@
 import consola from "consola"
 
 import { UPSTREAM_INACTIVITY_TIMEOUT_MS } from "~/lib/port"
+import {
+  classifyTransportError,
+  sanitizeTransportText,
+  type TransportErrorDetails,
+} from "~/lib/upstream-retry"
 
 const ENCODER = new TextEncoder()
 
@@ -153,12 +158,12 @@ export function relayAnthropicStream(
           safeClose(controller)
           return
         }
-        const errName = error instanceof Error ? error.name : "Error"
-        const errMessage = error instanceof Error ? error.message : String(error)
-        consola.error(
-          `Upstream stream interrupted at ${opts.routePath}: bytes=${bytesRelayed} errType=${errName} message=${JSON.stringify(errMessage)}`,
+        const { errName, errMessage, transport } = logStreamError(
+          opts.routePath,
+          error,
+          bytesRelayed,
         )
-        const event = buildAnthropicErrorEvent(errName, errMessage)
+        const event = buildAnthropicErrorEvent(errName, errMessage, transport)
         try {
           controller.enqueue(ENCODER.encode(event))
         } catch (enqueueError) {
@@ -263,12 +268,15 @@ export async function readIteratorWithTimeout<T>(
 export function buildAnthropicErrorEvent(
   errName: string,
   errMessage: string,
+  transportDetails?: TransportErrorDetails,
 ): string {
+  const details =
+    transportDetails ?? classifyNamedStreamError(errName, errMessage)
   const payload = {
     type: "error",
     error: {
-      type: classifyStreamError(errName),
-      message: `Upstream stream interrupted: ${errName}: ${errMessage}`,
+      type: classifyStreamError(details),
+      message: formatStreamErrorMessage(details),
     },
   }
   return `event: error\ndata: ${JSON.stringify(payload)}\n\n`
@@ -282,34 +290,79 @@ export function buildOpenAIErrorEvent(
   errName: string,
   errMessage: string,
 ): string {
+  const details = classifyNamedStreamError(errName, errMessage)
   const payload = {
     error: {
-      type: classifyStreamError(errName),
-      message: `Upstream stream interrupted: ${errName}: ${errMessage}`,
+      type: classifyStreamError(details),
+      message: formatStreamErrorMessage(details),
     },
   }
   return `data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`
 }
 
-function classifyStreamError(errName: string): string {
+function classifyNamedStreamError(
+  errName: string,
+  errMessage: string,
+): TransportErrorDetails {
+  const error = Object.assign(new Error(errMessage), { name: errName })
+  return classifyTransportError(error)
+}
+
+function classifyStreamError(details: TransportErrorDetails): string {
   // Use only documented Anthropic error types
   // (https://platform.claude.com/docs/en/api/errors). `timeout_error` is
   // the documented type for client-side / inactivity aborts; it survives
   // the SDK's discriminated-union parsing without falling into a default
   // branch that some consumers don't handle.
-  if (errName === "AbortError") return "timeout_error"
-  if (errName === "InactivityTimeout") return "timeout_error"
+  if (
+    details.name === "AbortError"
+    || details.name === "InactivityTimeout"
+    || details.name === "TimeoutError"
+    || details.name === "timeout_error"
+  ) {
+    return "timeout_error"
+  }
+  if (details.classification === "transient") return "overloaded_error"
   return "api_error"
+}
+
+function formatStreamErrorMessage(details: TransportErrorDetails): string {
+  const code = details.causeCode ?? details.code
+  const suffix = code ? ` (${sanitizeTransportText(code)})` : ""
+  const diagnostic =
+    `${sanitizeTransportText(details.name)}: ${sanitizeTransportText(details.message)}${suffix}`
+  if (details.classification === "transient") {
+    return `Upstream stream interrupted by a transient transport failure; retry the request. ${diagnostic}`
+  }
+  if (details.classification === "deterministic") {
+    return `Upstream stream interrupted by a connectivity or TLS configuration failure. ${diagnostic}`
+  }
+  return `Upstream stream interrupted: ${diagnostic}`
 }
 
 export function logStreamError(
   routePath: string,
   error: unknown,
-): { errName: string; errMessage: string } {
-  const errName = error instanceof Error ? error.name : "Error"
-  const errMessage = error instanceof Error ? error.message : String(error)
+  bytesRelayed?: number,
+): {
+  errName: string
+  errMessage: string
+  transport: TransportErrorDetails
+} {
+  const transport = classifyTransportError(error)
+  const errName = transport.name
+  const errMessage = transport.message
+  const byteField =
+    bytesRelayed === undefined ? "" : ` bytes=${Math.max(0, bytesRelayed)}`
+  const codeField = transport.code
+    ? ` code=${JSON.stringify(transport.code)}`
+    : ""
+  const causeCodeField = transport.causeCode
+    ? ` causeCode=${JSON.stringify(transport.causeCode)}`
+    : ""
   consola.error(
-    `Upstream stream interrupted at ${routePath}: errType=${errName} message=${JSON.stringify(errMessage)}`,
+    "Upstream stream interrupted",
+    `routePath=${JSON.stringify(routePath)}${byteField} classification=${transport.classification} errType=${errName}${codeField}${causeCodeField} message=${JSON.stringify(errMessage)}`,
   )
-  return { errName, errMessage }
+  return { errName, errMessage, transport }
 }

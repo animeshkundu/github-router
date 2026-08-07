@@ -445,16 +445,9 @@ describe("ADVISOR streaming integration (Phase I)", () => {
               { event: "content_block_start", data: { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } } },
               { event: "content_block_delta", data: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "Let me consult." } } },
               { event: "content_block_stop", data: { type: "content_block_stop", index: 1 } },
-              // Non-advisor tool_use with non-empty input streamed via
-              // input_json_delta — must be parsed into an OBJECT (not
-              // string) on Copilot replay (gemini round-6 fix).
-              { event: "content_block_start", data: { type: "content_block_start", index: 2, content_block: { type: "tool_use", id: "toolu_read_1", name: "Read", input: {} } } },
-              { event: "content_block_delta", data: { type: "content_block_delta", index: 2, delta: { type: "input_json_delta", partial_json: "{\"file_p" } } },
-              { event: "content_block_delta", data: { type: "content_block_delta", index: 2, delta: { type: "input_json_delta", partial_json: "ath\":\"/tmp/x" } } },
-              { event: "content_block_delta", data: { type: "content_block_delta", index: 2, delta: { type: "input_json_delta", partial_json: ".txt\"}" } } },
-              { event: "content_block_stop", data: { type: "content_block_stop", index: 2 } },
               { event: "content_block_start", data: { type: "content_block_start", index: 3, content_block: { type: "tool_use", id: "toolu_advisor_1", name: ADVISOR_INTERNAL_TOOL_NAME, input: {} } } },
               { event: "content_block_stop", data: { type: "content_block_stop", index: 3 } },
+              { event: "message_delta", data: { type: "message_delta", delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: 10 } } },
               { event: "message_stop", data: { type: "message_stop" } },
             ]),
             { status: 200, headers: { "content-type": "text/event-stream" } },
@@ -468,6 +461,7 @@ describe("ADVISOR streaming integration (Phase I)", () => {
             { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } },
             { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Based on advisor: proceeding." } } },
             { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+            { event: "message_delta", data: { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 5 } } },
             { event: "message_stop", data: { type: "message_stop" } },
           ]),
           { status: 200, headers: { "content-type": "text/event-stream" } },
@@ -516,6 +510,9 @@ describe("ADVISOR streaming integration (Phase I)", () => {
     //    inside the data payload).
     const messageStopEventCount = (text.match(/^event: message_stop$/gm) ?? []).length
     expect(messageStopEventCount).toBe(1)
+    expect((text.match(/^event: message_delta$/gm) ?? [])).toHaveLength(1)
+    expect(text).toContain('"stop_reason":"end_turn"')
+    expect(text).toContain('"output_tokens":15')
 
     // Verify the advisor model was called once via /responses with xhigh
     expect(advisorResponsesCallCount).toBe(1)
@@ -587,16 +584,228 @@ describe("ADVISOR streaming integration (Phase I)", () => {
     // Anthropic spec (cryptographic verification).
     expect(thinkingBlock!.signature).toBe("abcdef0123456789")
 
-    // Non-advisor `tool_use` block must have its `input` field as a
-    // PARSED OBJECT (not the raw `partial_json` string accumulator).
-    // gemini round-6 finding.
-    const readToolUseBlock = assistantMsg!.content.find(
-      (b) => b.type === "tool_use" && b.name === "Read",
-    )
-    expect(readToolUseBlock).toBeDefined()
-    expect(typeof readToolUseBlock!.input).toBe("object")
-    expect(readToolUseBlock!.input).toEqual({ file_path: "/tmp/x.txt" })
-    expect(readToolUseBlock!.id).toBe("toolu_read_1")
+  })
+
+  test("mixed client/advisor turn emits advisor result and waits for client results", async () => {
+    let messagesCalls = 0
+    let advisorCalls = 0
+    const fetchMock = mock((url: string) => {
+      if (url.includes("/responses")) {
+        advisorCalls++
+        return new Response(
+          JSON.stringify({
+            id: "advisor_resp",
+            status: "completed",
+            output: [
+              {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Advisor says proceed." }],
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+      if (url.includes("/v1/messages")) {
+        messagesCalls++
+        if (messagesCalls > 1) {
+          throw new Error("continuation must wait for the client tool result")
+        }
+        return new Response(
+          buildSseStream([
+            {
+              event: "message_start",
+              data: { type: "message_start", message: { id: "m-mixed" } },
+            },
+            {
+              event: "content_block_start",
+              data: {
+                type: "content_block_start",
+                index: 0,
+                content_block: { type: "thinking", thinking: "" },
+              },
+            },
+            {
+              event: "content_block_delta",
+              data: {
+                type: "content_block_delta",
+                index: 0,
+                delta: { type: "signature_delta", signature: "signed" },
+              },
+            },
+            {
+              event: "content_block_stop",
+              data: { type: "content_block_stop", index: 0 },
+            },
+            {
+              event: "content_block_start",
+              data: {
+                type: "content_block_start",
+                index: 1,
+                content_block: {
+                  type: "tool_use",
+                  id: "toolu_advisor_1",
+                  name: ADVISOR_INTERNAL_TOOL_NAME,
+                  input: {},
+                },
+              },
+            },
+            {
+              event: "content_block_stop",
+              data: { type: "content_block_stop", index: 1 },
+            },
+            {
+              event: "content_block_start",
+              data: {
+                type: "content_block_start",
+                index: 2,
+                content_block: {
+                  type: "tool_use",
+                  id: "toolu_read_1",
+                  name: "Read",
+                  input: {},
+                },
+              },
+            },
+            {
+              event: "content_block_delta",
+              data: {
+                type: "content_block_delta",
+                index: 2,
+                delta: {
+                  type: "input_json_delta",
+                  partial_json: "{\"file_path\":\"/tmp/x\"}",
+                },
+              },
+            },
+            {
+              event: "content_block_stop",
+              data: { type: "content_block_stop", index: 2 },
+            },
+            {
+              event: "message_delta",
+              data: {
+                type: "message_delta",
+                delta: { stop_reason: "tool_use", stop_sequence: null },
+                usage: { output_tokens: 10 },
+              },
+            },
+            { event: "message_stop", data: { type: "message_stop" } },
+          ]),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        )
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    })
+    // @ts-expect-error - override
+    globalThis.fetch = fetchMock
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        "anthropic-beta": "advisor-tool-2026-03-01",
+      },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      }),
+    })
+    const text = await streamToString(response.body!)
+    expect(response.status).toBe(200)
+    expect(messagesCalls).toBe(1)
+    expect(advisorCalls).toBe(1)
+    expect(text).toContain('"server_tool_use"')
+    expect(text).toContain('"advisor_tool_result"')
+    expect(text).toContain('"stop_reason":"tool_use"')
+    expect((text.match(/^event: message_stop$/gm) ?? [])).toHaveLength(1)
+  })
+
+  test("advisor loop exhaustion still emits one terminal message_delta", async () => {
+    let messagesCalls = 0
+    const fetchMock = mock((url: string) => {
+      if (url.includes("/responses")) {
+        return new Response(
+          JSON.stringify({
+            status: "completed",
+            output: [
+              {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "reviewed" }],
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+      if (url.includes("/v1/messages")) {
+        const call = ++messagesCalls
+        return new Response(
+          buildSseStream([
+            {
+              event: "message_start",
+              data: { type: "message_start", message: { id: `m-${call}` } },
+            },
+            {
+              event: "content_block_start",
+              data: {
+                type: "content_block_start",
+                index: 0,
+                content_block: {
+                  type: "tool_use",
+                  id: `toolu_advisor_${call}`,
+                  name: ADVISOR_INTERNAL_TOOL_NAME,
+                  input: {},
+                },
+              },
+            },
+            {
+              event: "content_block_stop",
+              data: { type: "content_block_stop", index: 0 },
+            },
+            {
+              event: "message_delta",
+              data: {
+                type: "message_delta",
+                delta: { stop_reason: "tool_use", stop_sequence: null },
+                usage: { output_tokens: 1 },
+              },
+            },
+            { event: "message_stop", data: { type: "message_stop" } },
+          ]),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        )
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    })
+    // @ts-expect-error - override
+    globalThis.fetch = fetchMock
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        "anthropic-beta": "advisor-tool-2026-03-01",
+      },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      }),
+    })
+    const text = await streamToString(response.body!)
+    expect(text).toContain("Advisor loop exceeded")
+    expect((text.match(/^event: message_delta$/gm) ?? [])).toHaveLength(1)
+    expect(text).toContain('"stop_reason":"end_turn"')
+    expect(text).toContain('"output_tokens":16')
+    expect((text.match(/^event: message_stop$/gm) ?? [])).toHaveLength(1)
   })
 
   test("CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 disables advisor — request flows as normal passthrough", async () => {
@@ -762,40 +971,34 @@ describe("toClientServerToolUseId charset hardening (round-5 codex critic)", () 
     )
   })
 
-  test("non-toolu_ prefix with valid charset → srvtoolu_ + raw suffix", () => {
-    // e.g., a future provider's id that doesn't start with toolu_ but
-    // is otherwise spec-compliant; pass through with srvtoolu_ prefix.
-    expect(toClientServerToolUseId("call_oai_xyz", 9)).toBe(
-      "srvtoolu_call_oai_xyz",
+  test("non-toolu_ prefix is rejected because it cannot round-trip", () => {
+    expect(() => toClientServerToolUseId("call_oai_xyz", 9)).toThrow(
+      "not round-trippable",
     )
   })
 
-  test("malformed id with hyphens → synthesized fallback (defensive)", () => {
-    // Hyphens are NOT in the spec charset [a-zA-Z0-9_]. Without the
-    // fallback, srvtoolu_abc-123 would be a malformed block and 400.
-    expect(toClientServerToolUseId("toolu_abc-123", 7)).toBe(
-      "srvtoolu_advisor_7",
+  test("malformed id with hyphens is rejected", () => {
+    expect(() => toClientServerToolUseId("toolu_abc-123", 7)).toThrow(
+      "not round-trippable",
     )
   })
 
-  test("non-ascii id → synthesized fallback", () => {
-    expect(toClientServerToolUseId("toolu_abcé", 11)).toBe(
-      "srvtoolu_advisor_11",
+  test("non-ascii id is rejected", () => {
+    expect(() => toClientServerToolUseId("toolu_abcé", 11)).toThrow(
+      "not round-trippable",
     )
   })
 
-  test("empty suffix after toolu_ stripping → fallback (regex requires at least one char)", () => {
-    expect(toClientServerToolUseId("toolu_", 13)).toBe("srvtoolu_advisor_13")
+  test("empty suffix after toolu_ stripping is rejected", () => {
+    expect(() => toClientServerToolUseId("toolu_", 13)).toThrow(
+      "not round-trippable",
+    )
   })
 
-  test("output always matches Anthropic spec /^srvtoolu_[a-zA-Z0-9_]+$/", () => {
+  test("accepted output always matches Anthropic spec /^srvtoolu_[a-zA-Z0-9_]+$/", () => {
     const inputs = [
       "toolu_normal_id_42",
-      "toolu_with-hyphen",
-      "call_oai_chunk",
-      "toolu_",
-      "weird id with spaces",
-      "",
+      "toolu_ABC_123",
     ]
     for (let i = 0; i < inputs.length; i++) {
       const out = toClientServerToolUseId(inputs[i]!, i)
@@ -1042,4 +1245,3 @@ describe("renderConversationAsText (Phase L truncation)", () => {
     expect(out).toContain("only the tail of the latest")
   })
 })
-

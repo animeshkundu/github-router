@@ -117,6 +117,10 @@ declare -a PROBE_REGISTRY=(
   # ===== Streaming =====
   "stream_with_tools|claude-emits|Streaming response with tools (no FGTS) returns 200 with valid SSE event sequence"
 
+  # ===== Signed thinking history integrity =====
+  "signed_thinking_cache_scope_stripped|claude-emits|Real signed thinking+tool replay with cache_control.scope added to the thinking block returns 200 after the proxy strips only unsupported cache metadata"
+  "thinking_history_invalid_signature_repaired|claude-emits|A persisted assistant turn rejected for an invalid thinking signature is repaired request-time and returns 200 without editing the transcript"
+
   # ===== Default tier models (emitted by every claude session) =====
   # claude-sonnet-5 is the ANTHROPIC_SMALL_FAST_MODEL default (and the
   # ANTHROPIC_DEFAULT_SONNET_MODEL + ANTHROPIC_DEFAULT_HAIKU_MODEL /model
@@ -1205,6 +1209,83 @@ probe_shim_parallel_tool_emit_gpt55() {
   assert_status 200 \
     && assert_anthropic_message \
     && assert_tool_use_count_at_least 1
+}
+
+probe_signed_thinking_cache_scope_stripped() {
+  local prompt first_body tool_id continuation
+  prompt="Carefully derive the 20th Fibonacci number, verify it independently, then call record_result with the integer result. You must use the tool."
+  do_request POST /v1/messages "{
+    \"model\":\"claude-opus-5\",
+    \"max_tokens\":4096,
+    \"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},
+    \"output_config\":{\"effort\":\"xhigh\"},
+    \"messages\":[{\"role\":\"user\",\"content\":$(jq -Rn --arg value "$prompt" '$value')}],
+    \"tools\":[{\"name\":\"record_result\",\"description\":\"Record the verified integer result\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}}]
+  }"
+  assert_status 200 || return 1
+  if ! jq -e '.content | any(.type=="thinking") and any(.type=="tool_use")' "$LAST_BODY_FILE" >/dev/null; then
+    echo "  ${C_RED}FAIL${C_RESET} setup response did not contain thinking + tool_use"
+    return 1
+  fi
+
+  first_body="$(mktemp -t probe-thinking.XXXXXX)"
+  cp "$LAST_BODY_FILE" "$first_body"
+  tool_id="$(jq -r '.content[] | select(.type=="tool_use") | .id' "$first_body" | head -1)"
+  continuation="$(
+    jq -c --arg prompt "$prompt" --arg tool_id "$tool_id" '{
+      model:"claude-opus-5",
+      max_tokens:512,
+      thinking:{type:"adaptive",display:"summarized"},
+      output_config:{effort:"xhigh"},
+      messages:[
+        {role:"user",content:$prompt},
+        {role:"assistant",content:(.content | map(
+          if .type=="thinking"
+          then . + {cache_control:{type:"ephemeral",scope:"global"}}
+          else .
+          end
+        ))},
+        {role:"user",content:[
+          {type:"tool_result",tool_use_id:$tool_id,content:"recorded"}
+        ]}
+      ],
+      tools:[{
+        name:"record_result",
+        description:"Record the verified integer result",
+        input_schema:{
+          type:"object",
+          properties:{value:{type:"integer"}},
+          required:["value"]
+        }
+      }]
+    }' "$first_body"
+  )"
+  rm -f "$first_body"
+
+  do_request POST /v1/messages "$continuation"
+  assert_status 200 && assert_anthropic_message
+}
+
+probe_thinking_history_invalid_signature_repaired() {
+  do_request POST /v1/messages '{
+    "model":"claude-opus-5",
+    "max_tokens":128,
+    "thinking":{"type":"adaptive"},
+    "messages":[
+      {"role":"user","content":"Reply with one word after reading the tool result."},
+      {"role":"assistant","content":[
+        {"type":"thinking","thinking":"","signature":"probe-invalid-signature"},
+        {"type":"tool_use","id":"toolu_probe_repair_1","name":"lookup","input":{}}
+      ]},
+      {"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"toolu_probe_repair_1","content":"ok"}
+      ]}
+    ],
+    "tools":[
+      {"name":"lookup","description":"Return ok","input_schema":{"type":"object","properties":{},"required":[]}}
+    ]
+  }'
+  assert_status 200 && assert_anthropic_message
 }
 
 # ===========================================================================

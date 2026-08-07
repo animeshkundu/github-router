@@ -5,9 +5,10 @@ import path from "node:path"
 
 import type { ConsolaOptions, LogObject } from "consola"
 
-// Use env var for temp dir to avoid os.tmpdir() which may be broken by
-// other test files' mock.module("node:os") bleeding through.
-const tmpBase = process.env.TEMP || process.env.TMPDIR || "/tmp"
+// Keep test artifacts inside the worktree; node:os may be mocked by another
+// isolated test file, and Windows cannot remove an open reporter descriptor.
+const tmpBase = path.join(process.cwd(), ".test-artifacts")
+await fsp.mkdir(tmpBase, { recursive: true })
 const tempDir = await fsp.mkdtemp(
   path.join(tmpBase, "github-router-filelog-"),
 )
@@ -67,6 +68,7 @@ function readLog(): string {
 describe("FileLogReporter", () => {
   afterAll(async () => {
     await fsp.rm(tempDir, { recursive: true, force: true })
+    await fsp.rmdir(tmpBase).catch(() => {})
   })
 
   test("error messages are written to the log file", () => {
@@ -139,6 +141,18 @@ describe("FileLogReporter", () => {
     expect(content).toContain("error-b")
   })
 
+  test("dedupe includes every sanitized serialized argument", () => {
+    const reporter = newReporter(logFile)
+    reporter.log(makeLogObj("error", "request failed", "endpoint-a"), dummyCtx)
+    reporter.log(makeLogObj("error", "request failed", "endpoint-b"), dummyCtx)
+    reporter.log(makeLogObj("error", "request failed", "endpoint-a"), dummyCtx)
+
+    const content = readLog()
+    expect(content.trim().split("\n")).toHaveLength(2)
+    expect(content).toContain("endpoint-a")
+    expect(content).toContain("endpoint-b")
+  })
+
   test("Error objects are serialized safely", () => {
     const reporter = newReporter(logFile)
     const err = new Error("boom")
@@ -147,6 +161,31 @@ describe("FileLogReporter", () => {
     const content = readLog()
     expect(content).toContain("boom")
     expect(content).not.toContain("[object Error]")
+  })
+
+  test("Error causes include bounded name/message/code with credential redaction", () => {
+    const reporter = newReporter(logFile)
+    const credential = `Bearer ${"x".repeat(24)}`
+    const requestBody = "private-request-body"
+    const socketError = Object.assign(
+      new Error(
+        `socket reset with ${credential} request body: ${requestBody}`,
+      ),
+      { code: "ECONNRESET", requestBody },
+    )
+    const wrappedCause = new Error("connection closed", { cause: socketError })
+    const err = new TypeError("fetch failed", { cause: wrappedCause })
+    reporter.log(makeLogObj("error", "upstream:", err), dummyCtx)
+
+    const content = readLog()
+    expect(content.trim().split("\n")).toHaveLength(1)
+    expect(content).toContain("TypeError: fetch failed")
+    expect(content).toContain("Error: connection closed")
+    expect(content).toContain("Error: socket reset")
+    expect(content).toContain("code=ECONNRESET")
+    expect(content).toContain("[REDACTED]")
+    expect(content).not.toContain(credential)
+    expect(content).not.toContain(requestBody)
   })
 
   test("credential patterns are redacted", () => {

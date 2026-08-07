@@ -2,6 +2,7 @@ import { test, expect } from "bun:test"
 import { Hono } from "hono"
 
 import { HTTPError, forwardError } from "../src/lib/error"
+import { TransportExhaustionError } from "../src/lib/upstream-retry"
 
 test("forwardError uses top-level message from HTTPError JSON payload", async () => {
   const app = new Hono()
@@ -70,6 +71,68 @@ test("forwardError returns 500 for non-HTTP errors", async () => {
     type: "error",
     error: { type: "api_error", message: "boom" },
   })
+})
+
+test("forwardError maps exhausted transient transport errors to overloaded 503", async () => {
+  const cause = Object.assign(new Error("socket reset"), {
+    code: "ECONNRESET",
+  })
+  const transportError = new TransportExhaustionError(
+    {
+      endpoint: "/v1/messages",
+      label: "/v1/messages",
+      attempts: 3,
+      classification: "transient",
+      lastError: {
+        name: "TypeError",
+        message: `fetch failed Bearer ${"x".repeat(24)} request body: {"prompt":"secret-body"}`,
+        causeCode: "ECONNRESET",
+      },
+    },
+    new TypeError("fetch failed", { cause }),
+  )
+  const app = new Hono()
+  app.get("/", (c) => forwardError(c, transportError))
+
+  const response = await app.request("/")
+  expect(response.status).toBe(503)
+  const json = (await response.json()) as {
+    error: { type: string; message: string }
+  }
+  expect(json.error.type).toBe("overloaded_error")
+  expect(json.error.message).toContain("/v1/messages")
+  expect(json.error.message).toContain("3 attempts")
+  expect(json.error.message).toContain("ECONNRESET")
+  expect(json.error.message).toContain("[REDACTED]")
+  expect(json.error.message).not.toContain("Bearer x")
+  expect(json.error.message).not.toContain("secret-body")
+})
+
+test("forwardError maps deterministic connectivity failures to actionable 502", async () => {
+  const transportError = new TransportExhaustionError(
+    {
+      endpoint: "https://api.invalid",
+      attempts: 1,
+      classification: "deterministic",
+      lastError: {
+        name: "TypeError",
+        message: "fetch failed",
+        causeCode: "ENOTFOUND",
+      },
+    },
+    Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }),
+  )
+  const app = new Hono()
+  app.get("/", (c) => forwardError(c, transportError))
+
+  const response = await app.request("/")
+  expect(response.status).toBe(502)
+  const json = (await response.json()) as {
+    error: { type: string; message: string }
+  }
+  expect(json.error.type).toBe("api_error")
+  expect(json.error.message).toContain("Check DNS, proxy, firewall, and TLS")
+  expect(json.error.message).toContain("ENOTFOUND")
 })
 
 test("forwardError passes through Anthropic-format error from upstream", async () => {

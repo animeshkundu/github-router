@@ -39,9 +39,256 @@ export interface TransientRetryOpts {
   signal?: AbortSignal
   /** Short label for debug logging (e.g. "codex_critic", "advisor"). */
   label?: string
+  /** Upstream endpoint when it differs from the human-readable label. */
+  endpoint?: string
 }
 
 const DEFAULT_RETRY_STATUSES: ReadonlyArray<number> = [429, 500, 502, 503, 504]
+const TRANSPORT_MESSAGE_MAX = 512
+const TRANSIENT_CODES = new Set([
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EPIPE",
+  "EAI_AGAIN",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+])
+const DETERMINISTIC_CODES = new Set([
+  "ENOTFOUND",
+  "ECONNREFUSED",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "ERR_TLS_CERT_SIGNATURE_ALGORITHM_UNSUPPORTED",
+  "ERR_SSL_WRONG_VERSION_NUMBER",
+])
+const CREDENTIAL_RE =
+  /\b(eyJ[A-Za-z0-9_-]{20,}(?:\.[A-Za-z0-9_-]+){0,2}|gh[opsu]_[A-Za-z0-9_]{20,}|Bearer\s+\S{20,})\b/gi
+const SECRET_ASSIGNMENT_RE =
+  /\b(authorization|api[_-]?key|access[_-]?token|token|password)\s*[:=]\s*([^\s,;]+)/gi
+const REQUEST_BODY_RE =
+  /\b(request\s+body|body)\s*[:=]\s*.*$/gi
+
+export type TransportErrorClassification =
+  | "transient"
+  | "deterministic"
+  | "non_transport"
+  | "cancelled"
+
+export interface TransportErrorDetails {
+  classification: TransportErrorClassification
+  name: string
+  message: string
+  code?: string
+  causeCode?: string
+}
+
+export interface TransportExhaustionMetadata {
+  endpoint?: string
+  label?: string
+  attempts: number
+  classification: "transient" | "deterministic"
+  lastError: Omit<TransportErrorDetails, "classification">
+}
+
+export class TransportExhaustionError extends Error {
+  readonly endpoint?: string
+  readonly label?: string
+  readonly attempts: number
+  readonly classification: "transient" | "deterministic"
+  readonly lastError: Omit<TransportErrorDetails, "classification">
+
+  constructor(metadata: TransportExhaustionMetadata, cause: unknown) {
+    const target = metadata.endpoint ?? metadata.label ?? "upstream"
+    const lastError = {
+      name: sanitizeTransportText(metadata.lastError.name),
+      message: sanitizeTransportText(metadata.lastError.message),
+      code: metadata.lastError.code
+        ? sanitizeTransportText(metadata.lastError.code)
+        : undefined,
+      causeCode: metadata.lastError.causeCode
+        ? sanitizeTransportText(metadata.lastError.causeCode)
+        : undefined,
+    }
+    const code = lastError.causeCode ?? lastError.code
+    const suffix = code ? ` (${code})` : ""
+    super(
+      `Upstream transport ${metadata.classification === "transient" ? "failed" : "is unreachable"} at ${sanitizeTransportText(target)} after ${metadata.attempts} attempt${metadata.attempts === 1 ? "" : "s"}: ${lastError.name}: ${lastError.message}${suffix}`,
+      { cause },
+    )
+    this.name = "TransportExhaustionError"
+    this.endpoint = metadata.endpoint
+      ? sanitizeTransportText(metadata.endpoint)
+      : undefined
+    this.label = metadata.label ? sanitizeTransportText(metadata.label) : undefined
+    this.attempts = metadata.attempts
+    this.classification = metadata.classification
+    this.lastError = lastError
+  }
+}
+
+function readStringProperty(value: unknown, key: string): string | undefined {
+  if (
+    (typeof value !== "object" && typeof value !== "function")
+    || value === null
+  ) {
+    return undefined
+  }
+  try {
+    const property = (value as Record<string, unknown>)[key]
+    return typeof property === "string" ? property : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function readCause(value: unknown): unknown {
+  if (
+    (typeof value !== "object" && typeof value !== "function")
+    || value === null
+  ) {
+    return undefined
+  }
+  try {
+    return (value as { cause?: unknown }).cause
+  } catch {
+    return undefined
+  }
+}
+
+function safeString(value: unknown): string {
+  try {
+    return String(value)
+  } catch {
+    return "[unserializable error]"
+  }
+}
+
+export function sanitizeTransportText(value: string): string {
+  const sanitized = value
+    .replace(/\r\n|\r|\n/g, " ")
+    .replace(CREDENTIAL_RE, "[REDACTED]")
+    .replace(SECRET_ASSIGNMENT_RE, "$1=[REDACTED]")
+    .replace(REQUEST_BODY_RE, "$1=[REDACTED]")
+  return sanitized.length > TRANSPORT_MESSAGE_MAX
+    ? `${sanitized.slice(0, TRANSPORT_MESSAGE_MAX)}…`
+    : sanitized
+}
+
+/**
+ * Classify errors thrown before the first response byte. Deterministic
+ * connectivity/configuration signals win over generic runtime wording such as
+ * TypeError("fetch failed"), because the nested cause is more specific.
+ */
+export function classifyTransportError(
+  error: unknown,
+  opts: { callerCancelled?: boolean } = {},
+): TransportErrorDetails {
+  const name = readStringProperty(error, "name") ?? "Error"
+  const rawMessage =
+    readStringProperty(error, "message")
+    ?? (typeof error === "string" ? error : safeString(error))
+  const message = sanitizeTransportText(rawMessage)
+  const code = readStringProperty(error, "code")
+
+  const causes: unknown[] = []
+  const seen = new Set<unknown>()
+  let current = readCause(error)
+  for (let depth = 0; current !== undefined && depth < 4; depth++) {
+    if (
+      (typeof current === "object" || typeof current === "function")
+      && current !== null
+    ) {
+      if (seen.has(current)) break
+      seen.add(current)
+    }
+    causes.push(current)
+    current = readCause(current)
+  }
+  const causeCode = causes
+    .map((cause) => readStringProperty(cause, "code"))
+    .find((value): value is string => value !== undefined)
+  const codes = [code, ...causes.map((cause) => readStringProperty(cause, "code"))]
+    .filter((value): value is string => value !== undefined)
+    .map((value) => value.toUpperCase())
+  const messages = [
+    rawMessage,
+    ...causes.map((cause) => readStringProperty(cause, "message") ?? ""),
+  ]
+    .join(" ")
+    .toLowerCase()
+
+  if (opts.callerCancelled) {
+    return { classification: "cancelled", name, message, code, causeCode }
+  }
+  if (
+    codes.some((value) => DETERMINISTIC_CODES.has(value))
+    || messages.includes("self signed certificate")
+    || messages.includes("certificate has expired")
+    || messages.includes("unable to verify the first certificate")
+    || messages.includes("unable to get local issuer certificate")
+    || messages.includes("hostname/ip does not match certificate")
+    || messages.includes("tls handshake")
+    || messages.includes("ssl routines")
+    || messages.includes("econnrefused")
+    || messages.includes("enotfound")
+  ) {
+    return { classification: "deterministic", name, message, code, causeCode }
+  }
+  if (
+    name === "AbortError"
+    || name === "TimeoutError"
+    || name === "InactivityTimeout"
+    || codes.some((value) => TRANSIENT_CODES.has(value))
+    || messages.includes("terminated")
+    || messages.includes("fetch failed")
+    || messages.includes("network error")
+    || messages.includes("socket hang up")
+    || messages.includes("socket closed")
+    || messages.includes("econnreset")
+    || messages.includes("etimedout")
+    || messages.includes("epipe")
+    || messages.includes("eai_again")
+  ) {
+    return { classification: "transient", name, message, code, causeCode }
+  }
+  return { classification: "non_transport", name, message, code, causeCode }
+}
+
+function transportExhaustion(
+  error: unknown,
+  attempts: number,
+  opts: TransientRetryOpts,
+  details: TransportErrorDetails,
+): TransportExhaustionError {
+  if (
+    details.classification !== "transient"
+    && details.classification !== "deterministic"
+  ) {
+    throw new TypeError("transportExhaustion requires a transport error")
+  }
+  return new TransportExhaustionError(
+    {
+      endpoint: opts.endpoint ?? opts.label,
+      label: opts.label,
+      attempts,
+      classification: details.classification,
+      lastError: {
+        name: details.name,
+        message: details.message,
+        code: details.code,
+        causeCode: details.causeCode,
+      },
+    },
+    error,
+  )
+}
 
 function parseRetryAfter(headerValue: string | null): number | undefined {
   if (!headerValue) return undefined
@@ -50,39 +297,6 @@ function parseRetryAfter(headerValue: string | null): number | undefined {
   const dateMs = Date.parse(headerValue)
   if (Number.isFinite(dateMs)) return Math.max(0, dateMs - Date.now())
   return undefined
-}
-
-/**
- * A thrown fetch error that is worth retrying — network resets, broken
- * pipes, DNS hiccups, and timeout aborts. NOTE: the caller must already
- * have ruled out a user cancel (caller signal aborted) before calling
- * this, since a timeout abort and a user-cancel abort look identical.
- */
-function isTransientNetworkError(err: unknown): boolean {
-  const e = err as
-    | { name?: string; message?: string; code?: string; cause?: { code?: string } }
-    | undefined
-  if (!e) return false
-  if (e.name === "AbortError" || e.name === "TimeoutError") return true
-  const msg = (e.message ?? "").toLowerCase()
-  if (
-    msg.includes("terminated") ||
-    msg.includes("fetch failed") ||
-    msg.includes("network") ||
-    msg.includes("socket") ||
-    msg.includes("econnreset") ||
-    msg.includes("etimedout") ||
-    msg.includes("econnrefused") ||
-    msg.includes("epipe") ||
-    msg.includes("enotfound")
-  ) {
-    return true
-  }
-  const code = e.code ?? e.cause?.code
-  return (
-    code !== undefined &&
-    ["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "EPIPE", "ENOTFOUND"].includes(code)
-  )
 }
 
 /** Sleep that resolves early (does not reject) when `signal` aborts — the
@@ -146,17 +360,24 @@ export async function fetchWithTransientRetry(
     // transient network/timeout class.
     if (caught !== undefined) {
       if (signal?.aborted) throw caught
-      if (!isTransientNetworkError(caught)) throw caught
+      const details = classifyTransportError(caught)
+      if (details.classification === "deterministic") {
+        throw transportExhaustion(caught, attempt, opts, details)
+      }
+      if (details.classification !== "transient") throw caught
     }
 
     // Out of attempts → return the last error response (or rethrow).
     if (attempt >= attempts) {
       if (res) return res
-      throw caught
+      const details = classifyTransportError(caught)
+      throw transportExhaustion(caught, attempt, opts, details)
     }
 
     // Free the connection before retrying a retryable-status response.
-    const retryAfterMs = res ? parseRetryAfter(res.headers.get("retry-after")) : undefined
+    const retryAfterMs = res
+      ? parseRetryAfter(res.headers.get("retry-after"))
+      : undefined
     if (res?.body) {
       try {
         await res.body.cancel()
@@ -230,10 +451,18 @@ export async function withTransientRetry<T>(
     } catch (err) {
       if (signal?.aborted) throw err
       const status = errorStatus(err)
-      const retryable =
-        (status !== undefined && retryStatuses.includes(status)) ||
-        isTransientNetworkError(err)
-      if (!retryable || attempt >= attempts) throw err
+      const details = classifyTransportError(err)
+      if (status !== undefined) {
+        if (!retryStatuses.includes(status) || attempt >= attempts) throw err
+      } else {
+        if (details.classification === "deterministic") {
+          throw transportExhaustion(err, attempt, opts, details)
+        }
+        if (details.classification !== "transient") throw err
+        if (attempt >= attempts) {
+          throw transportExhaustion(err, attempt, opts, details)
+        }
+      }
 
       const retryAfterMs = parseRetryAfter(
         (err as { response?: { headers?: { get?: (k: string) => string | null } } })
