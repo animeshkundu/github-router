@@ -5,7 +5,10 @@ import path from "node:path"
 
 import { advance, type ControllerDeps } from "~/lib/first-mate/controller"
 import type { Mission } from "~/lib/first-mate/registry"
-import { AnswerInbox } from "~/lib/first-mate/scheduler/answer-inbox"
+import {
+  __resetHeldClaimsForTests,
+  AnswerInbox,
+} from "~/lib/first-mate/scheduler/answer-inbox"
 
 let dir: string
 beforeEach(async () => {
@@ -64,13 +67,15 @@ describe("AnswerInbox", () => {
   })
 
   test("crash after drain-before-ack: the next drain replays the claim (no loss)", async () => {
-    // A fresh instance simulates a new process after a crash (in-flight
-    // tracking is per-instance, so the prior claim looks like an orphan).
     const crashed = new AnswerInbox({ dir })
     await crashed.enqueue({ humanDecisions: [{ requestId: "h1", choice: "merge" }] })
     const drained = await crashed.drain()
     expect(drained.humanDecisions).toEqual([{ requestId: "h1", choice: "merge" }])
-    // Process dies WITHOUT acking (no drained.ack()). New process:
+    // Process dies WITHOUT acking (no drained.ack()). A crash also loses the
+    // process-wide held-claim set that stops a LIVE peer from re-claiming, so
+    // clearing it here is what makes this a faithful new-process simulation
+    // rather than a same-process peer drain.
+    __resetHeldClaimsForTests()
     const recovered = new AnswerInbox({ dir })
     const replay = await recovered.drain()
     expect(replay.humanDecisions).toEqual([{ requestId: "h1", choice: "merge" }])
@@ -112,6 +117,29 @@ describe("AnswerInbox", () => {
     expect(surfaced).toEqual([{ requestId: "orphan-1", choice: "merge" }]) // once, not twice
     await Promise.all([da.ack(), db.ack()])
     // Nothing left behind.
+    expect((await fs.readdir(dir)).filter((n) => n.includes(".draining."))).toEqual([])
+  })
+
+  test("a peer drainer never re-claims a live drainer's claim (deterministic)", async () => {
+    // The concurrent variant above races two drains and only catches this when
+    // the interleaving happens to line up — which is why CI saw it intermittently
+    // and 20 local runs did not. This pins the same invariant with no timing:
+    // A claims the orphan and has NOT acked, so its claim file is still on disk.
+    // Because the claim keeps the `.draining.` prefix (deliberate, so a crash
+    // leaves it discoverable), B's scan matched it and surfaced the SAME human
+    // decision a second time — a double-apply of durable human-decision state.
+    await fs.writeFile(
+      path.join(dir, "answers.jsonl.draining.9999.dead"),
+      `${JSON.stringify({ t: "h", requestId: "orphan-1", choice: "merge" })}\n`,
+    )
+    const a = new AnswerInbox({ dir })
+    const da = await a.drain()
+    expect(da.humanDecisions).toEqual([{ requestId: "orphan-1", choice: "merge" }])
+    // A is still holding the claim (no ack yet). A peer must see nothing.
+    const b = new AnswerInbox({ dir })
+    const db = await b.drain()
+    expect(db.humanDecisions).toEqual([])
+    await da.ack()
     expect((await fs.readdir(dir)).filter((n) => n.includes(".draining."))).toEqual([])
   })
 

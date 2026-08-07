@@ -65,6 +65,54 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 const WIN_RENAME_TRANSIENT = new Set(["EPERM", "EACCES", "EBUSY"])
 
 /**
+ * Owner pid embedded in a `.draining.<pid>.<rand>` or `.claim.<pid>.<rand>`
+ * segment. A file can carry both (a claimed orphan keeps the drain segment), so
+ * the LAST match is the current owner.
+ */
+const OWNER_SEGMENT_RE = /\.(?:draining|claim)\.(\d+)\./g
+
+/**
+ * Claims held by a live drainer in THIS process, across instances. Per-instance
+ * `inflight` cannot see a peer instance's claim, and both share our pid, so pid
+ * liveness cannot separate them either. A claim abandoned on a read error is
+ * never added here, which is what keeps it replayable (R3 #4).
+ */
+const heldClaims = new Set<string>()
+
+/**
+ * Drop the process-wide held-claim set. A real crash loses this in-memory state
+ * along with the process, so a test simulating a crash inside one process must
+ * clear it too — otherwise the claim stays "held" by a drainer that no longer
+ * exists and the crash-replay path cannot be exercised.
+ */
+export function __resetHeldClaimsForTests(): void {
+  heldClaims.clear()
+}
+
+function ownerPidOf(name: string): number | undefined {
+  let pid: number | undefined
+  for (const match of name.matchAll(OWNER_SEGMENT_RE)) pid = Number(match[1])
+  return pid !== undefined && Number.isInteger(pid) && pid > 0 ? pid : undefined
+}
+
+/**
+ * `process.kill(pid, 0)` probes existence without signalling; `EPERM` means the
+ * process exists but is owned by another user (still alive). Mirrors the copies
+ * in `lib/paths.ts`, `lib/colbert/lifecycle.ts`, and `lib/worker-agent/
+ * lifecycle.ts` — kept local so first-mate takes no dependency on those modules.
+ */
+function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EPERM") return true
+    return false
+  }
+}
+
+/**
  * Atomically claim `from` by renaming it to the process-unique `to`.
  * Returns `true` if THIS caller won the claim, `false` if a peer already took it
  * (source gone). Retries transient Windows sharing violations so two concurrent
@@ -186,6 +234,25 @@ export class AnswerInbox {
       if (!name.startsWith(`${base}.draining.`)) continue
       const orphan = path.join(dir, name)
       if (this.inflight.has(orphan)) continue
+      // A `.draining.`/`.claim.` file is work in progress, not an orphan, while
+      // a live drainer holds it. `inflight` only knows about THIS instance, so
+      // without a wider check a peer drainer sees another's claim — which keeps
+      // the `.draining.` prefix by design so a crash leaves it discoverable —
+      // and claims it again, surfacing the same human decision twice.
+      // Verified: a second drain before the first acked re-surfaced it.
+      //
+      // Two separate cases, and conflating them breaks R3 #4:
+      //  - another instance in THIS process holds it → `heldClaims`. A claim
+      //    ABANDONED here (transient read error) is deliberately absent from
+      //    that set, so it stays replayable.
+      //  - another PROCESS holds it → pid liveness. If a crashed owner's pid was
+      //    recycled its file is deferred, not lost: the next run with that pid
+      //    dead replays it, and deferring a decision beats applying it twice.
+      if (heldClaims.has(orphan)) continue
+      const owner = ownerPidOf(name)
+      if (owner !== undefined && owner !== process.pid && isPidAlive(owner)) {
+        continue
+      }
       // R3 #3: CLAIM the orphan ATOMICALLY before reading. The old code read the
       // orphan in place, so two concurrent drainers (separate processes → separate
       // process-local `inflight` sets) both read and applied the SAME orphan →
@@ -223,11 +290,15 @@ export class AnswerInbox {
         }
       }
     }
-    for (const p of claimed) this.inflight.add(p)
+    for (const p of claimed) {
+      this.inflight.add(p)
+      heldClaims.add(p)
+    }
     const ack = async (): Promise<void> => {
       for (const p of claimed) {
         await fs.unlink(p).catch(() => {})
         this.inflight.delete(p)
+        heldClaims.delete(p)
       }
     }
     return { ...out, ack }
