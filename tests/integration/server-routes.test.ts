@@ -644,7 +644,10 @@ test("messages stream pre-byte upstream error emits event:error on a 200 stream"
   // otherwise pull is never invoked and we'd assert on an empty body.
   const body = await response.text()
   expect(body).toContain("event: error")
-  expect(body).toContain('"type":"overloaded_error"')
+  // Transport failures are api_error, never overloaded_error — see
+  // `classifyStreamError` in `~/lib/stream-relay`: overloaded_error is the type
+  // Claude Code retries hardest against, and a dead transport is not an overload.
+  expect(body).toContain('"type":"api_error"')
   expect(body).toContain("terminated")
 })
 
@@ -698,7 +701,10 @@ test("messages stream mid-stream upstream error appends event:error to wire byte
   expect(body).toContain("event: message_start")
   expect(body).toContain("event: content_block_delta")
   expect(body).toContain("event: error")
-  expect(body).toContain('"type":"overloaded_error"')
+  // Transport failures are api_error, never overloaded_error — see
+  // `classifyStreamError` in `~/lib/stream-relay`: overloaded_error is the type
+  // Claude Code retries hardest against, and a dead transport is not an overload.
+  expect(body).toContain('"type":"api_error"')
   expect(body).toContain("terminated")
 })
 

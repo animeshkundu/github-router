@@ -71,3 +71,43 @@ Set before launching `claude`:
   went quiet to think). **Do NOT lower below 5 min** without re-reading the 134-163k
   mid-stream abort history above — reasoning models go quiet for minutes between
   token bursts, and a tighter timeout reaps live requests as if they were stalled.
+
+  **HTTP/2 interaction (read before touching this value).** The 5-minute default is
+  reasoned entirely in HTTP/1.1 terms: it deliberately lets the upstream sever an
+  idle connection first, because under HTTP/1.1 that costs the one request on that
+  socket. Under HTTP/2 the same event costs the whole session — every concurrent
+  request shares it — so the blast radius this timeout was designed around does not
+  hold. That is why `GH_ROUTER_UPSTREAM_ALLOW_H2` exists and defaults to off.
+
+- `GH_ROUTER_UPSTREAM_ALLOW_H2` — set to `1` to permit HTTP/2 upstream. Default off.
+
+  undici enables h2 for itself (`lib/core/connect.js`); the project never chose it.
+  With h2 off, a connection-fatal fault costs one request instead of every in-flight
+  one. Verify what a host actually negotiates with `bun run check:alpn`.
+
+  **This is a mitigation of a correlated factor, not a fix for a known cause.** The
+  observed fault is a TLS `bad_record_mac` alert (OpenSSL alert 20, received — the
+  peer could not authenticate a record we sent) whose origin is still unexplained.
+  h2 is the variable separating the failing configuration from the clean ones, but
+  correlation is all there is; a service-side TLS terminator defect and a
+  client-side native TLS fault both remain live candidates, and transport-agnostic
+  causes are NOT excluded (h2 differs in write sizes, buffer ownership, connection
+  lifetime, and bytes-per-connection, so such a defect could still surface only
+  under h2). Flip this to `1` to run the comparison honestly rather than assuming.
+
+  **Exposure is Node-version-gated.** Node ≤24's built-in fetch reads
+  `Symbol.for("undici.globalDispatcher.1")`, whose wrapper hardcodes
+  `allowH2:false`, so h2 is unreachable there regardless of this setting. Node ≥26
+  reads `.2` and negotiates h2. A dependency bump does not change this; a runtime
+  bump does. Bun sends no ALPN extension at all.
+
+  **Rates matter when comparing arms.** At an observed ~4 faults per 11 hours, a
+  clean hour has a ~70% chance of being luck. Distinguishing arms at 5% needs on
+  the order of 12 equivalent hours each, measured in requests and upload bytes
+  rather than wall time.
+
+- `GH_ROUTER_UPSTREAM_MAX_CONNECTIONS` — per-origin connection cap. Default `256`.
+  Without h2 multiplexing each concurrent request needs its own socket, so this
+  bounds a parallel-agent burst. Generous on purpose: streaming responses hold a
+  connection for the whole completion, so a tight cap head-of-line blocks real
+  traffic — a worse failure than the one it guards against.

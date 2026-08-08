@@ -108,7 +108,7 @@ describe("relayAnthropicStream — pre-byte error path", () => {
 
     expect(out).toContain("event: error")
     expect(out).toContain("terminated")
-    expect(out).toContain('"type":"overloaded_error"')
+    expect(out).toContain('"type":"api_error"')
     expect(captured.error.length).toBe(1)
     expect(capturedErrorLine()).toContain("bytes=0")
   })
@@ -137,7 +137,7 @@ describe("relayAnthropicStream — mid-stream error path", () => {
 
     expect(out).toContain("event: a")
     expect(out).toContain("event: error")
-    expect(out).toContain('"type":"overloaded_error"')
+    expect(out).toContain('"type":"api_error"')
     expect(out).toContain("transient transport failure")
     expect(out).toContain("ECONNRESET")
 
@@ -352,7 +352,11 @@ describe("relayAnthropicStream — upstream-reader release on pull-error", () =>
 })
 
 describe("buildAnthropicErrorEvent", () => {
-  test("emits well-formed Anthropic SSE event with overloaded_error for transient transport failures", () => {
+  // Mid-stream a transport failure is api_error, never overloaded_error. Bytes
+  // have already reached the consumer, so telling the client "retry later"
+  // invites a duplicate it cannot deduplicate — and `overloaded_error` is the
+  // type Claude Code retries hardest against.
+  test("emits well-formed Anthropic SSE event with api_error for transient transport failures", () => {
     const event = buildAnthropicErrorEvent("TypeError", "terminated")
     expect(event.startsWith("event: error\ndata: ")).toBe(true)
     expect(event.endsWith("\n\n")).toBe(true)
@@ -362,7 +366,8 @@ describe("buildAnthropicErrorEvent", () => {
       error: { type: string; message: string }
     }
     expect(parsed.type).toBe("error")
-    expect(parsed.error.type).toBe("overloaded_error")
+    expect(parsed.error.type).toBe("api_error")
+    expect(parsed.error.type).not.toBe("overloaded_error")
     expect(parsed.error.message).toContain("terminated")
   })
 
@@ -393,7 +398,7 @@ describe("buildOpenAIErrorEvent", () => {
     const parsed = JSON.parse(firstData) as {
       error: { type: string; message: string }
     }
-    expect(parsed.error.type).toBe("overloaded_error")
+    expect(parsed.error.type).toBe("api_error")
     expect(parsed.error.message).toContain("terminated")
   })
 })

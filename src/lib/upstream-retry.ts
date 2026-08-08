@@ -53,7 +53,67 @@ const TRANSIENT_CODES = new Set([
   "UND_ERR_CONNECT_TIMEOUT",
   "UND_ERR_HEADERS_TIMEOUT",
   "UND_ERR_SOCKET",
+  // A dispatch that raced a pool teardown. Previously in NEITHER set, so it
+  // fell through to "non_transport" and was rethrown raw at the retry loop —
+  // an unclassified error escaping a classifier is a gap, not a policy.
+  "UND_ERR_CLOSED",
+  // HTTP/2 session death. These reached "transient" only incidentally, via the
+  // outer TypeError("fetch failed") message match, which means a future change
+  // to that string would silently reclassify them. Name them.
+  "ERR_HTTP2_INVALID_SESSION",
+  "ERR_HTTP2_GOAWAY_SESSION",
+  "ERR_HTTP2_STREAM_CANCEL",
 ])
+
+/**
+ * TLS faults that are genuinely permanent: a protocol/version/cipher mismatch,
+ * or a certificate this client cannot validate. Retrying any of these buys
+ * three times the latency before the identical failure.
+ *
+ * Deliberately NOT the blanket `"ssl routines"` match this replaces. Every
+ * OpenSSL error carries that string, so the catch-all also swallowed alert 20
+ * (`bad record mac`) — an integrity fault a fresh connection routinely clears.
+ * See TRANSIENT_TLS_MESSAGES.
+ *
+ * Each entry must stay disjoint from TRANSIENT_TLS_MESSAGES. The bucket order
+ * in `classifyTransportError` checks the narrower transient alert first, so an
+ * overlap would resolve as transient; `tests/upstream-retry.test.ts` pins that
+ * no error matches two buckets.
+ */
+const DETERMINISTIC_TLS_MESSAGES = [
+  "self signed certificate",
+  "certificate has expired",
+  "unable to verify the first certificate",
+  "unable to get local issuer certificate",
+  "hostname/ip does not match certificate",
+  "certificate verify failed",
+  "unknown ca",
+  "wrong version number",
+  "unsupported protocol",
+  "no protocols available",
+  "alert handshake failure",
+  "alert protocol version",
+  "alert insufficient security",
+  "tls handshake",
+]
+
+/**
+ * TLS alert 20 (`bad_record_mac`) ONLY — a record failed AEAD authentication
+ * somewhere on the path. The connection is unusable, but the next one is
+ * typically fine, which is exactly what a bounded retry is for.
+ *
+ * This also matches OpenSSL's local-detection wording ("decryption failed or
+ * bad record mac", reason 281) as well as the received-alert wording ("ssl/tls
+ * alert bad record mac", reason 1020). Both are integrity faults and both
+ * warrant the same one-bounded-replay policy.
+ *
+ * An earlier revision promoted four alert phrases; three were wrong and stay
+ * deterministic on purpose. Alert 10 (`unexpected message`) is protocol state,
+ * alert 21 (`decryption failed`) is legacy-server incompatibility, and alert 22
+ * (`record overflow`) is a malformed or desynchronised stream. Promoting those
+ * converts fail-fast configuration errors into 3x latency.
+ */
+const TRANSIENT_TLS_MESSAGES = ["bad record mac"]
 const DETERMINISTIC_CODES = new Set([
   "ENOTFOUND",
   "ECONNREFUSED",
@@ -185,6 +245,15 @@ export function sanitizeTransportText(value: string): string {
  * Classify errors thrown before the first response byte. Deterministic
  * connectivity/configuration signals win over generic runtime wording such as
  * TypeError("fetch failed"), because the nested cause is more specific.
+ *
+ * Buckets are evaluated in a stated total order, narrowest first, and the first
+ * match wins — so no error can land in two of them:
+ *
+ *   1. caller cancel
+ *   2. TLS alert 20 (`bad record mac`) — integrity, retryable
+ *   3. deterministic cert/config codes and messages, plus refused/DNS-miss
+ *   4. transient codes (incl. HTTP/2 session death) and generic transport text
+ *   5. everything else — `non_transport`, rethrown raw
  */
 export function classifyTransportError(
   error: unknown,
@@ -227,15 +296,32 @@ export function classifyTransportError(
   if (opts.callerCancelled) {
     return { classification: "cancelled", name, message, code, causeCode }
   }
+  // Narrowest match first: TLS alert 20 is an integrity fault, not a
+  // configuration fault, and it must not be swallowed by the broader cert /
+  // protocol patterns below (which is exactly what the old blanket
+  // `"ssl routines"` match did — it failed the alert after ONE attempt).
+  if (TRANSIENT_TLS_MESSAGES.some((phrase) => messages.includes(phrase))) {
+    return { classification: "transient", name, message, code, causeCode }
+  }
   if (
     codes.some((value) => DETERMINISTIC_CODES.has(value))
-    || messages.includes("self signed certificate")
-    || messages.includes("certificate has expired")
-    || messages.includes("unable to verify the first certificate")
-    || messages.includes("unable to get local issuer certificate")
-    || messages.includes("hostname/ip does not match certificate")
-    || messages.includes("tls handshake")
+    || DETERMINISTIC_TLS_MESSAGES.some((phrase) => messages.includes(phrase))
+    // Catch-all for every OTHER OpenSSL failure. Safe here, and only here,
+    // because the one retryable alert already returned above — so this keeps
+    // fail-fast for the long tail (`tlsv13 alert certificate required`,
+    // `sslv3 alert bad certificate`, `tlsv1 alert internal error`, …) without
+    // re-swallowing alert 20.
+    //
+    // Without it those errors fall through to the generic transient branch via
+    // the outer `TypeError: fetch failed`, turning a permanent configuration
+    // failure into three attempts. Narrowing the deterministic list alone was
+    // not sufficient; the residue has to land somewhere deliberate.
     || messages.includes("ssl routines")
+    // A refused connection or a DNS miss is a configuration signal, so it
+    // fails fast rather than being hammered. Kept deliberately, not inherited:
+    // transient DNS is already covered by EAI_AGAIN, and a genuinely
+    // restarting upstream surfaces as ECONNRESET or a 5xx, both of which do
+    // retry.
     || messages.includes("econnrefused")
     || messages.includes("enotfound")
   ) {

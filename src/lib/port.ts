@@ -216,6 +216,48 @@ export const UPSTREAM_INACTIVITY_TIMEOUT_MS = envInt(
   300_000,
 )
 
+// Whether upstream requests may negotiate HTTP/2.
+//
+// Default OFF. undici enables h2 by default (`lib/core/connect.js`), which the
+// project never chose — it arrived as a library default. Under h2 all
+// concurrency shares ONE session, so a single connection-fatal fault takes out
+// every in-flight request at once; under HTTP/1.1 it costs the one request that
+// was on that socket, which is the blast radius the inactivity timeout above
+// was designed around.
+//
+// This is a MITIGATION of a correlated factor, not a fix for a known cause. The
+// observed fault is a TLS `bad_record_mac` alert whose origin is still
+// unexplained; h2 is the variable that separates the failing configuration from
+// the two clean ones (Bun, which negotiates no ALPN at all, and Node <=24,
+// whose bundled undici forces HTTP/1.1). Set to `1` to restore multiplexing —
+// that is also how to run the A/B honestly rather than assuming the default.
+//
+// NOTE: exposure is only reachable on Node >=26. Node 24's built-in fetch reads
+// `Symbol.for("undici.globalDispatcher.1")`, whose wrapper hardcodes
+// `allowH2:false`; Node 26's reads `.2` and negotiates h2.
+// NOTE: these are functions, not module-level consts like the timeouts above,
+// because they are read once per agent construction (startup, plus once per
+// distinct proxy URL) rather than per request. Resolving them at call time
+// keeps the flag honest regardless of module load order, and makes the policy
+// directly testable without cache-busting imports.
+export function upstreamAllowH2(): boolean {
+  return process.env.GH_ROUTER_UPSTREAM_ALLOW_H2 === "1"
+}
+
+export function upstreamMaxConnections(): number {
+  return envInt("GH_ROUTER_UPSTREAM_MAX_CONNECTIONS", 256)
+}
+
+// Per-origin connection cap for upstream requests. undici defaults to
+// unlimited; without h2 multiplexing each concurrent request needs its own
+// socket, so an explicit ceiling keeps a burst of parallel agents from trading
+// one failure mode for ephemeral-port exhaustion or an upstream per-IP limit.
+//
+// Generous on purpose: streaming responses hold a connection for the whole
+// completion (minutes on a reasoning model), so a tight cap would head-of-line
+// block real traffic — a worse failure than the one being fixed.
+
+
 // TODO: extend timeout coverage to non-streaming paths (web-search MCP in
 // src/services/copilot/web-search.ts, embeddings, models) when those
 // endpoints become hot or start hanging in practice.

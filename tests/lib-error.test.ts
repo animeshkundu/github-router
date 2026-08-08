@@ -73,7 +73,12 @@ test("forwardError returns 500 for non-HTTP errors", async () => {
   })
 })
 
-test("forwardError maps exhausted transient transport errors to overloaded 503", async () => {
+// A transport exhaustion must NOT be reported as an overload. `overloaded_error`
+// is the type Claude Code retries hardest against, and by the time this error
+// exists the proxy has already spent its own retry budget on a transport that
+// failed — so labelling it an overload multiplies a (potentially multi-megabyte)
+// request instead of surfacing the failure.
+test("forwardError maps exhausted transient transport errors to api_error 502, never overloaded_error", async () => {
   const cause = Object.assign(new Error("socket reset"), {
     code: "ECONNRESET",
   })
@@ -95,11 +100,13 @@ test("forwardError maps exhausted transient transport errors to overloaded 503",
   app.get("/", (c) => forwardError(c, transportError))
 
   const response = await app.request("/")
-  expect(response.status).toBe(503)
+  expect(response.status).toBe(502)
   const json = (await response.json()) as {
     error: { type: string; message: string }
   }
-  expect(json.error.type).toBe("overloaded_error")
+  expect(json.error.type).toBe("api_error")
+  expect(json.error.type).not.toBe("overloaded_error")
+  // The diagnostic is what made this failure explicable at all; keep it.
   expect(json.error.message).toContain("/v1/messages")
   expect(json.error.message).toContain("3 attempts")
   expect(json.error.message).toContain("ECONNRESET")
