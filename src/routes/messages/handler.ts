@@ -17,6 +17,7 @@ import { MAX_RESPONSE_BODY_BYTES, readResponseBodyCapped } from "~/lib/response-
 import { sanitizeAnthropicBody } from "~/lib/sanitize-anthropic-body"
 import { state } from "~/lib/state"
 import { relayAnthropicStream } from "~/lib/stream-relay"
+import { guardAnthropicBody } from "~/lib/tool-loop-guard"
 import {
   formatThinkingRepairDecline,
   rememberThinkingHistoryRepair,
@@ -313,6 +314,29 @@ export async function handleCompletion(c: Context) {
   // Scoped narrowly to advisor pairs to avoid the ID round-trip trap
   // (see src/lib/sanitize-anthropic-body.ts header comment).
   finalBody = sanitizeAnthropicBody(finalBody)
+
+  // Runaway-tool-loop guard. Placed before the Claude-passthrough vs
+  // translation-shim fork so one site covers all three branches. Detection is
+  // read-only; `guardAnthropicBody` re-serializes only when it injects a nudge.
+  const loopGuard = guardAnthropicBody(finalBody)
+  if (loopGuard.action === "abort") {
+    return c.json(
+      {
+        type: "error",
+        error: { type: "invalid_request_error", message: loopGuard.message },
+      },
+      400,
+      // The proxy cannot kill a client's agent loop; it can only refuse. A 400
+      // is already terminal in the Anthropic SDK's retry policy, but that
+      // policy checks `x-should-retry` BEFORE any status test, so sending it
+      // explicitly keeps this working even if the retryable-status list
+      // changes. Without a terminal refusal we would trade a tool loop for a
+      // retry loop.
+      { "x-should-retry": "false" },
+    )
+  }
+  if (loopGuard.body !== undefined) finalBody = loopGuard.body
+
   if (advisorEnabled) {
     // Inject __anthropic_advisor tool definition (with cc-backup's
     // ADVISOR_TOOL_INSTRUCTIONS as description) so the model knows
