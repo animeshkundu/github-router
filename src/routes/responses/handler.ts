@@ -14,6 +14,7 @@ import { UPSTREAM_INACTIVITY_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
 import { buildOpenAIErrorEvent, isControllerClosedError, logStreamError, readIteratorWithTimeout } from "~/lib/stream-relay"
 import { tryRefreshAndRetry } from "~/lib/token"
+import { guardResponsesPayload } from "~/lib/tool-loop-guard"
 import { fetchWithTransientRetry } from "~/lib/upstream-retry"
 import { resolveModel } from "~/lib/utils"
 import {
@@ -63,6 +64,21 @@ export async function handleResponses(c: Context) {
     consola.debug(
       "Responses request payload:",
       JSON.stringify(payload).slice(-400),
+    )
+  }
+
+  // Runaway-tool-loop guard. OpenAI-format error envelope, not the Anthropic
+  // one — a client on this endpoint parses the OpenAI shape. `/responses/compact`
+  // is deliberately NOT guarded: it compacts history rather than advancing the
+  // agent loop, so blocking it would break the client's own way out of a
+  // runaway history.
+  const loopGuard = guardResponsesPayload(payload)
+  if (loopGuard.action === "abort") {
+    return c.json(
+      { error: { type: "invalid_request_error", message: loopGuard.message } },
+      400,
+      // Explicitly terminal, so the refusal cannot become a retry loop.
+      { "x-should-retry": "false" },
     )
   }
 

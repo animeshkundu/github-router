@@ -11,6 +11,7 @@ import { UPSTREAM_INACTIVITY_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
 import { buildOpenAIErrorEvent, isControllerClosedError, logStreamError, readIteratorWithTimeout } from "~/lib/stream-relay"
 import { getTokenCount } from "~/lib/tokenizer"
+import { guardChatPayload } from "~/lib/tool-loop-guard"
 import { isNullish, resolveModel } from "~/lib/utils"
 import {
   createChatCompletions,
@@ -51,6 +52,18 @@ export async function handleCompletion(c: Context) {
   }
 
   if (state.manualApprove) await awaitApproval()
+
+  // Runaway-tool-loop guard. OpenAI-format error envelope, not the Anthropic
+  // one — a client on this endpoint parses the OpenAI shape.
+  const loopGuard = guardChatPayload(payload)
+  if (loopGuard.action === "abort") {
+    return c.json(
+      { error: { type: "invalid_request_error", message: loopGuard.message } },
+      400,
+      // Explicitly terminal, so the refusal cannot become a retry loop.
+      { "x-should-retry": "false" },
+    )
+  }
 
   await injectWebSearchIfNeeded(payload)
 

@@ -3,8 +3,8 @@ import { createHash, randomBytes } from "node:crypto"
 type AnyRecord = Record<string, unknown>
 
 const THINKING_INTEGRITY_ERROR_RES = [
-  /messages\.(\d+)\.content\.\d+:\s*`thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified/,
-  /messages\.(\d+)\.content\.\d+:\s*Invalid `signature` in `thinking` block/,
+  /messages\.(\d+)\.content\.(\d+):\s*`thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified/,
+  /messages\.(\d+)\.content\.(\d+):\s*Invalid `signature` in `thinking` block/,
 ] as const
 const MAX_REMEMBERED_REPAIRS = 1000
 const OMITTED_THINKING_PLACEHOLDER = "[prior reasoning omitted]"
@@ -33,6 +33,7 @@ export type ThinkingRepairDeclineReason =
   | "content-not-array"
   | "no-signed-blocks"
   | "no-blocks-removed"
+  | "ambiguous-index"
 
 /**
  * Structural facts about the declined request. Deliberately carries no message,
@@ -46,6 +47,17 @@ export interface ThinkingRepairDecline {
   roleAtIndex?: string
   blocksAtIndex?: number
   signedBlocksAtIndex?: number
+  /**
+   * Elements upstream would not count as conversation turns (any role that is
+   * neither `user` nor `assistant`). Non-zero means this proxy's array and
+   * upstream's are not indexed alike — the fact that made the original
+   * `roleAtIndex=system` declines unexplainable from the log alone.
+   */
+  hoistedCount?: number
+  /** Roles in order, e.g. `user,system,assistant`. Roles only, so log-safe. */
+  roleSequence?: string
+  /** Array index the hoist-adjusted fallback tried, when it ran. */
+  mappedIndex?: number
 }
 
 export type ThinkingRepairOutcome =
@@ -104,7 +116,7 @@ function signedBlockFingerprint(
   return signedBlocks > 0 ? hash.digest("hex") : undefined
 }
 
-function repairMessageAt(
+function repairAtArrayIndex(
   parsed: AnyRecord,
   messageIndex: number,
 ): ThinkingRepairOutcome {
@@ -164,6 +176,152 @@ function repairMessageAt(
   }
 }
 
+/** Roles in order, for a decline log. Roles only, so it carries no content. */
+function roleSequenceOf(messages: Array<unknown>): string {
+  return messages
+    .map((message) =>
+      isRecord(message) && typeof message.role === "string"
+        ? message.role
+        : "unknown",
+    )
+    .join(",")
+}
+
+/** Elements upstream would not count as a conversation turn. */
+function isHoistedElement(message: unknown): boolean {
+  if (!isRecord(message)) return false
+  return message.role !== "user" && message.role !== "assistant"
+}
+
+/**
+ * Translate an upstream-reported message index into an index in THIS array,
+ * skipping elements upstream would not have counted.
+ *
+ * Anthropic's Messages schema has no in-array `system` role, yet clients do
+ * send one, and upstream evidently accepts it and drops it before validating —
+ * which shifts every index after it. Returns undefined when nothing is hoisted
+ * (the mapping would be the identity) or when the target does not exist.
+ */
+function hoistAdjustedIndex(
+  messages: Array<unknown>,
+  reportedIndex: number,
+): number | undefined {
+  let retained = 0
+  for (let index = 0; index < messages.length; index++) {
+    if (isHoistedElement(messages[index])) continue
+    if (retained === reportedIndex) {
+      return index === reportedIndex ? undefined : index
+    }
+    retained++
+  }
+  return undefined
+}
+
+/** True when `content[contentIndex]` is a signed thinking block. */
+function hasSignedBlockAt(content: unknown, contentIndex: number): boolean {
+  if (!Array.isArray(content)) return false
+  const block = content[contentIndex]
+  if (!isRecord(block)) return false
+  return block.type === "thinking" || block.type === "redacted_thinking"
+}
+
+/**
+ * Resolve the message upstream named, then repair it.
+ *
+ * DIRECT INDEX FIRST, hoist-adjusted index only as a fallback. The ordering is
+ * the whole safety argument: every request that repairs correctly today takes
+ * the direct path untouched, and the adjusted path runs only where the code
+ * would otherwise have declined outright. Mapping first would REGRESS a working
+ * case — with `[user, system, assistant]` and upstream naming `messages.2`, the
+ * direct lookup repairs the assistant turn correctly while a retained-role
+ * mapping yields only `[user, assistant]` and runs off the end.
+ *
+ * The fallback is self-validating rather than trusted: it is accepted only if
+ * the block upstream actually named is a signed thinking block at the adjusted
+ * position. If the index shift has some other cause, that check fails and the
+ * original decline stands, so a wrong hypothesis fails closed instead of
+ * stripping blocks from an innocent turn.
+ */
+/** True when `index` names an assistant carrying the block upstream reported. */
+function namesReportedBlock(
+  messages: Array<unknown>,
+  index: number,
+  contentIndex: number,
+): boolean {
+  const message = messages[index]
+  if (!isRecord(message) || message.role !== "assistant") return false
+  return hasSignedBlockAt(message.content, contentIndex)
+}
+
+/**
+ * Resolve the message upstream named, then repair it.
+ *
+ * When nothing is hoisted, this array and upstream's are indexed alike, so the
+ * reported index is used directly — the identity case, and the overwhelming
+ * majority of traffic, whose behaviour is unchanged.
+ *
+ * When something IS hoisted, the two arrays provably disagree and the reported
+ * index alone cannot say which turn was meant. Both the raw index and the
+ * hoist-adjusted one can land on a signed assistant, and picking the raw one
+ * blind would strip a healthy turn while leaving the corrupt one in place. So
+ * the block index upstream reported is used as the tiebreak: whichever
+ * candidate actually carries a signed block THERE is the one repaired. If both
+ * do, the request is genuinely ambiguous and we decline — the client sees the
+ * same 400 it would have seen anyway, with no innocent turn rewritten.
+ */
+function repairMessageAt(
+  parsed: AnyRecord,
+  messageIndex: number,
+  contentIndex?: number,
+): ThinkingRepairOutcome {
+  if (!Array.isArray(parsed.messages)) {
+    return repairAtArrayIndex(parsed, messageIndex)
+  }
+  const messages = parsed.messages
+  const hoistedCount = messages.filter((m) => isHoistedElement(m)).length
+  const mapped =
+    hoistedCount === 0 ? undefined : hoistAdjustedIndex(messages, messageIndex)
+
+  const annotate = (
+    outcome: ThinkingRepairOutcome,
+    extra: { mappedIndex?: number } = {},
+  ): ThinkingRepairOutcome =>
+    outcome.ok
+      ? outcome
+      : declined(outcome.decline.reason, {
+        ...outcome.decline,
+        hoistedCount,
+        roleSequence: roleSequenceOf(messages),
+        ...extra,
+      })
+
+  if (hoistedCount === 0 || contentIndex === undefined || mapped === undefined) {
+    return annotate(repairAtArrayIndex(parsed, messageIndex))
+  }
+
+  const directNames = namesReportedBlock(messages, messageIndex, contentIndex)
+  const mappedNames = namesReportedBlock(messages, mapped, contentIndex)
+
+  if (directNames && mappedNames) {
+    return declined("ambiguous-index", {
+      messageIndex,
+      messageCount: messages.length,
+      hoistedCount,
+      roleSequence: roleSequenceOf(messages),
+      mappedIndex: mapped,
+    })
+  }
+  if (mappedNames) return annotate(repairAtArrayIndex(parsed, mapped), {
+    mappedIndex: mapped,
+  })
+  // Either the direct index is the right one, or neither candidate carries the
+  // reported block and there is nothing to disambiguate with — in both cases
+  // fall back to the pre-existing direct behaviour.
+  return annotate(repairAtArrayIndex(parsed, messageIndex), {
+    mappedIndex: mapped,
+  })
+}
+
 /**
  * Build a one-shot repair only for Copilot's known signed-thinking integrity
  * rejections. The upstream error is the oracle: valid omitted-display thinking
@@ -185,6 +343,11 @@ export function repairRejectedThinkingHistory(
   if (!Number.isSafeInteger(messageIndex) || messageIndex < 0) {
     return declined("message-index-invalid", { messageIndex })
   }
+  const parsedContentIndex = Number(match[2])
+  const contentIndex =
+    Number.isSafeInteger(parsedContentIndex) && parsedContentIndex >= 0
+      ? parsedContentIndex
+      : undefined
 
   let parsed: AnyRecord
   try {
@@ -192,7 +355,7 @@ export function repairRejectedThinkingHistory(
   } catch {
     return declined("body-not-json", { messageIndex })
   }
-  return repairMessageAt(parsed, messageIndex)
+  return repairMessageAt(parsed, messageIndex, contentIndex)
 }
 
 /**
@@ -223,7 +386,10 @@ export function repairKnownThinkingHistory(
     if (!isRecord(message) || !Array.isArray(message.content)) continue
     const fingerprint = signedBlockFingerprint(index, message.content)
     if (!fingerprint || !rememberedRepairs.has(fingerprint)) continue
-    const attempt = repairMessageAt(parsed, index)
+    // `index` came from this scan, so it is already an index into THIS array —
+    // the upstream hoist adjustment must not run here or it would remap a
+    // position that is by construction already correct.
+    const attempt = repairAtArrayIndex(parsed, index)
     // A remembered message that cannot be repaired is not an error here — the
     // scan simply moves on. Declines matter only on the upstream-rejected path,
     // where the caller needs to explain the failure.

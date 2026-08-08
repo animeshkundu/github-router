@@ -293,3 +293,137 @@ describe("thinking history repair", () => {
     expect(rendered).toContain("blocksAtIndex=1")
   })
 })
+
+/**
+ * Clients do send `{role:"system"}` INSIDE `messages[]`, which the Anthropic
+ * Messages schema does not define. Upstream evidently accepts it and drops it
+ * before validating, so its `messages.N` stops agreeing with ours and the
+ * repair lands on the system element and declines — observed in production as
+ * `reason=message-not-assistant roleAtIndex=system`, which silently disabled
+ * the whole recovery path.
+ */
+describe("thinking history repair with an in-array system message", () => {
+  const signedBlocks = [
+    { type: "thinking", thinking: "", signature: "opaque-signature" },
+    { type: "text", text: "carrying on" },
+  ]
+
+  /** `[user, system, assistant]` — upstream retains only index 0 and 2. */
+  function hoistedBody(): string {
+    return JSON.stringify({
+      model: "claude-opus-5",
+      messages: [
+        { role: "user", content: "start" },
+        { role: "system", content: "injected by the client" },
+        { role: "assistant", content: signedBlocks },
+      ],
+    })
+  }
+
+  function errorAt(messageIndex: number, contentIndex: number): string {
+    return integrityError.replace(
+      "messages.1.content.88",
+      `messages.${messageIndex}.content.${contentIndex}`,
+    )
+  }
+
+  test("direct index still wins when upstream reports the raw wire index", () => {
+    // The regression this ordering exists to prevent: mapping FIRST would
+    // filter to [user, assistant], find retained index 2 out of range, and
+    // decline on a request that repairs correctly today.
+    const outcome = repairRejectedThinkingHistory(hoistedBody(), errorAt(2, 0))
+    if (!outcome.ok) {
+      throw new Error(`expected a repair, declined: ${outcome.decline.reason}`)
+    }
+    expect(outcome.repair.messageIndex).toBe(2)
+    expect(outcome.repair.removedBlocks).toBe(1)
+    const parsed = JSON.parse(outcome.repair.body) as {
+      messages: Array<{ role: string; content: Array<{ type: string }> }>
+    }
+    // The system element is left exactly where it was.
+    expect(parsed.messages[1]?.role).toBe("system")
+    expect(parsed.messages[2]?.content.map((b) => b.type)).toEqual(["text"])
+  })
+
+  test("falls back to the hoist-adjusted index when the direct one is the system element", () => {
+    // Upstream counts [user, assistant] and names messages.1; ours is at 2.
+    const outcome = repairRejectedThinkingHistory(hoistedBody(), errorAt(1, 0))
+    if (!outcome.ok) {
+      throw new Error(`expected a repair, declined: ${outcome.decline.reason}`)
+    }
+    expect(outcome.repair.messageIndex).toBe(2)
+    expect(outcome.repair.removedBlocks).toBe(1)
+  })
+
+  test("fails closed when the named block is not a signed block", () => {
+    // Same shape, but upstream names a content index that is NOT thinking. If
+    // the index shift has some other cause, the fallback must not strip blocks
+    // from an innocent turn.
+    const outcome = repairRejectedThinkingHistory(hoistedBody(), errorAt(1, 1))
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.decline.reason).toBe("message-not-assistant")
+    expect(outcome.decline.roleAtIndex).toBe("system")
+  })
+
+  test("a decline explains the misalignment without leaking content", () => {
+    const outcome = repairRejectedThinkingHistory(hoistedBody(), errorAt(1, 1))
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    const rendered = formatThinkingRepairDecline(outcome.decline)
+    expect(rendered).toContain("hoistedCount=1")
+    expect(rendered).toContain("roleSequence=user,system,assistant")
+    expect(rendered).not.toContain("injected by the client")
+    expect(rendered).not.toContain("opaque-signature")
+  })
+
+  test("no hoisted elements means the mapping never runs", () => {
+    // Identity case: behaviour must be bit-for-bit what it was before.
+    const outcome = repairRejectedThinkingHistory(
+      JSON.stringify({
+        messages: [
+          { role: "user", content: "start" },
+          { role: "user", content: "still the user" },
+        ],
+      }),
+      errorAt(1, 0),
+    )
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.decline.reason).toBe("message-not-assistant")
+    expect(outcome.decline.hoistedCount).toBe(0)
+    expect(outcome.decline.mappedIndex).toBeUndefined()
+  })
+
+  test("declines instead of stripping the wrong turn when both indices are valid", () => {
+    // Two hoisted elements, and BOTH the raw index and the hoist-adjusted one
+    // land on an assistant carrying a signed block at the reported position.
+    // Taking the raw index blind would rewrite assistant A while the corrupt
+    // turn is actually assistant B. Declining costs nothing — the client gets
+    // the same 400 it would have got — and rewrites no innocent history.
+    const body = JSON.stringify({
+      messages: [
+        { role: "system", content: "injected" },
+        { role: "assistant", content: signedBlocks },
+        { role: "system", content: "injected again" },
+        { role: "assistant", content: signedBlocks },
+      ],
+    })
+    const outcome = repairRejectedThinkingHistory(body, errorAt(1, 0))
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.decline.reason).toBe("ambiguous-index")
+    expect(outcome.decline.messageIndex).toBe(1)
+    expect(outcome.decline.mappedIndex).toBe(3)
+    expect(outcome.decline.hoistedCount).toBe(2)
+  })
+
+  test("the adjusted index is reported in the decline detail", () => {
+    // `mappedIndex` is advertised on the decline interface, so it has to be
+    // populated where the mapping actually ran.
+    const outcome = repairRejectedThinkingHistory(hoistedBody(), errorAt(1, 1))
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.decline.mappedIndex).toBe(2)
+  })
+})
