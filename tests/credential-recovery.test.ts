@@ -19,6 +19,7 @@ import {
   ensureFreshCopilotToken,
   refreshCopilotToken,
   setupCopilotToken,
+  setupGitHubToken,
   tryRefreshAndRetry,
 } from "../src/lib/token"
 import { credentialFingerprint } from "../src/services/github/get-copilot-token"
@@ -730,6 +731,61 @@ describe("a credential rejected at startup", () => {
     expect(
       transientLines.filter((l) => l.includes("github-router auth")),
     ).toHaveLength(0)
+    expect(state.authRequiredCredentialFingerprint).toBeUndefined()
+  })
+})
+
+/**
+ * The path a revoked STORED credential actually takes at launch.
+ *
+ * `setupGitHubToken` calls `logUser()` -> `getGitHubUser()` before
+ * `setupCopilotToken` ever runs, so a revoked file credential aborts there. A
+ * live smoke test caught this: the launch died on a raw HTTP 401 stack trace
+ * and never named the remedy, which is precisely how a revocation gets
+ * misread as "I restarted and it still doesn't work".
+ */
+describe("a revoked credential stored on disk, at launch", () => {
+  function capture(): { lines: string[]; restore: () => void } {
+    const lines: string[] = []
+    const previous = consola.options.reporters
+    consola.setReporters([
+      { log: (o) => lines.push(o.args.map((a) => String(a)).join(" ")) },
+    ])
+    return { lines, restore: () => consola.setReporters([...previous]) }
+  }
+
+  test("names the remedy instead of dying on a bare 401", async () => {
+    globalThis.fetch = (async () =>
+      jsonResponse(
+        { message: "Bad credentials" },
+        { status: 401 },
+      )) as unknown as typeof fetch
+
+    const c = capture()
+    try {
+      await expect(setupGitHubToken()).rejects.toThrow()
+    } finally {
+      c.restore()
+    }
+
+    const advice = c.lines.filter((l) => l.includes("github-router auth"))
+    expect(advice).toHaveLength(1)
+    expect(advice[0]).toContain(credentialFingerprint(startingCredential))
+
+    // Folded in rather than split out, since alone it passes against unfixed
+    // code: a 403 is GitHub's rate-limit answer, and accusing the credential
+    // there would send someone to fix something that is not broken.
+    state.authRequiredCredentialFingerprint = undefined
+    globalThis.fetch = (async () =>
+      new Response("rate limited", { status: 403 })) as unknown as typeof fetch
+
+    const c2 = capture()
+    try {
+      await expect(setupGitHubToken()).rejects.toThrow()
+    } finally {
+      c2.restore()
+    }
+    expect(c2.lines.filter((l) => l.includes("github-router auth"))).toHaveLength(0)
     expect(state.authRequiredCredentialFingerprint).toBeUndefined()
   })
 })

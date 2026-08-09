@@ -673,7 +673,27 @@ export async function setupGitHubToken(
       if (state.showToken) {
         consola.info("GitHub token:", githubToken)
       }
-      await logUser()
+      // A 401 HERE is the single most common way a revoked credential is
+      // discovered: the user's session died, they restarted, and this is the
+      // first call that touches GitHub. It runs BEFORE `setupCopilotToken`, so
+      // without this the launch aborted on a raw HTTP 401 stack trace and the
+      // remedy was never named — which is exactly how a revocation gets
+      // misdiagnosed as "restarting didn't help".
+      //
+      // Only a 401 accuses the credential. A 403 (rate limit), a 5xx, or a
+      // network fault must not send someone to re-authenticate a credential
+      // that is fine.
+      try {
+        await logUser()
+      } catch (error) {
+        if (error instanceof HTTPError && error.response.status === 401) {
+          noteAuthActionRequired(
+            "credential_rejected",
+            credentialFingerprint(githubToken),
+          )
+        }
+        throw error
+      }
 
       return
     }
