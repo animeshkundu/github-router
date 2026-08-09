@@ -40,6 +40,29 @@ export interface State {
   copilotTokenGeneration: number
 
   /**
+   * Fingerprint of the credential that upstream last told us is unusable —
+   * either revoked (`credential_rejected`) or entitled-out
+   * (`entitlement_lapsed`). Unset means "no known auth problem".
+   *
+   * This exists because both of those outcomes were previously PRODUCED and
+   * never CONSUMED: a terminal failure that no human can distinguish from a
+   * transient one is, operationally, not reported at all. The proxy also
+   * remaps upstream 401 to 503 (`src/lib/error.ts`) to protect the client's
+   * synthetic credential, so "overloaded" is all the client ever sees — which
+   * makes this the only honest signal that a person needs to act.
+   *
+   * It holds the FINGERPRINT rather than a boolean so the warning can be
+   * latched per credential: repeated rejections of the same dead credential say
+   * nothing new every 5 minutes, but a rejection of a DIFFERENT credential is
+   * new information and must be said again.
+   *
+   * Deliberately not keyed to `copilotTokenGeneration`: that counter bumps on
+   * every successful exchange including byte-identical tokens, so it would
+   * re-arm the warning on unrelated successes.
+   */
+  authRequiredCredentialFingerprint?: string
+
+  /**
    * Wall-clock ms after which `copilotToken` should be refreshed — already
    * skew-adjusted, so the per-request check is a plain `Date.now() >=` compare.
    *

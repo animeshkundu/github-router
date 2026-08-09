@@ -70,6 +70,44 @@ The GitHub credential (`~/.local/share/github-router/github_token`) is exchanged
 **Diagnosability.** A failed exchange records its HTTP status, a redacted body snippet, and a SHA-256 credential fingerprint (8 hex chars — never the credential). The fingerprint is what distinguishes "the process is holding a stale credential" from "the credential on disk is itself dead", which is the first question during an incident and was previously unanswerable. Failures are classified narrowly: only a `401`, or a `403` naming an entitlement problem (`access_revoked` / `subscription_ended` / `no_copilot_access`), counts as a rejected credential. **A bare 403 is transient**, because GitHub uses 403 for primary and secondary rate limits — treating those as terminal would tell a user with a perfectly valid credential to re-authenticate.
 
 
+**Saying so, once, to a human.** `credential_rejected` and `entitlement_lapsed` used to be *produced* by the exchange and *consumed* nowhere, which meant a terminal failure was operationally indistinguishable from a transient one. Three signals now close that gap:
+
+- `noteAuthActionRequired` (`src/lib/token.ts`) logs one actionable line at `error` level — deliberately not `info`, which `file-log-reporter`'s `ALLOWED_TYPES` drops before it ever reaches the file an operator reads. The remedy **branches on `githubTokenSource`**: an `--github-token` / `GH_TOKEN` operator is told to replace the supplied value, because re-authenticating would write a file that process never reads. A lapsed entitlement is told that re-authenticating will *not* help.
+- The line is **latched on the credential fingerprint**, held in `state.authRequiredCredentialFingerprint`. The refresh loop retries for the life of the process, so repeating identical advice every few minutes buries it; a rejection of a *different* credential is new information and re-arms. The latch is deliberately not keyed to `copilotTokenGeneration`, which bumps on every success including byte-identical tokens and would re-arm on unrelated successes. `commitCopilotToken` clears it on **any** success, not only a differing fingerprint — otherwise a credential rejected by a transient fault and then accepted again would report `auth_required` forever.
+- `GET /version` exposes a bare `auth_required` boolean. It is the machine-readable half: the no-401 invariant above means clients only ever see 503 `overloaded_error`, so nothing else can distinguish "dead credential, act now" from "upstream busy, retry". The fingerprint and `githubTokenSource` stay **out** of that response — the route sits behind an unrestricted `cors()`, and the source-dependent remedy belongs in the log.
+
+**Attributing a shared log.** Several proxies routinely run at once (a long-lived `start`, plus one per `claude` session) and all append to the same `error.log`. Every persisted line now carries `pid=<n> port=<n|pending> v<version>` (`src/lib/log-identity.ts`). This is not cosmetic: an investigation was spent attributing a three-week-old proxy's 401 storm to the current session. Two details are load-bearing — the port reads `pending` until `srvxServer.ready()` because `setupAndServe` retries several random ports and a confidently wrong port is worse than none, and the identity is added in `formatLogLine` only, never in `makeDedupeKey`, which hashes the serialized args; a per-line-varying dedupe key would silently disable recurrence suppression. Lines with **no** identity prefix are from a process running a pre-upgrade build, which is itself the tell.
+
+## Which GitHub app each Copilot client authenticates as
+
+Read out of the bundles shipped on a Windows box running VS Code **1.130.0** and Copilot Chat **0.45.1**. This corrects a persistent assumption that the proxy shares one token pool with every shipped Copilot client — it does not.
+
+| Client | Client id | Type | Token | Flow |
+|---|---|---|---|---|
+| VS Code (built-in `github-authentication`) | `01ab8ac9400c4e429b23` | classic OAuth App, secret shipped in the bundle | `gho_` | PKCE via `vscode.dev/redirect` → localhost loopback → device code (opt-in) |
+| Copilot CLI (`@github/copilot`) | `Ov23ctDVkRmgkPke0Mmm` | — | — | device code |
+| github-router | `Iv1.b507a08c87ecfe98` | GitHub App, `read:user` | `ghu_` | device code |
+
+**Copilot Chat owns no identity at all.** It calls `vscode.authentication.getSession('github', scopes)` and delegates entirely; `login/device/code`, `login/oauth/access_token`, and every client id are absent from its bundle. Its silent scope cascade is `["read:user","user:email","repo","workflow"]` → `["user:email"]` → `["read:user"]`, and interactive creation asks only for `["user:email"]`. VS Code stores one session per scope set in the OS keychain and reuses them rather than re-minting.
+
+So each of the three sits in a *different* `(user, application, scope)` pool. `Iv1.b507a08c87ecfe98` is the community Copilot app (copilot.vim, JetBrains, third-party proxies) — that is the pool this proxy shares.
+
+The exchange itself, verbatim from Copilot Chat 0.45.1:
+
+```js
+async fetchCopilotTokenFromGitHubToken(n){ let r={ callSite:"copilot-token-github",
+  headers:{ Authorization:`token ${n}`, "X-GitHub-Api-Version":"2025-04-01" },
+  retryFallbacks:!0, expectJSON:!0 }, … }
+```
+
+with `_mixinHeaders` layering on `Copilot-Integration-Id: vscode-chat`, `Editor-Version`, `Editor-Plugin-Version`, `Editor-Device-Id`, `VScode-SessionId`, `VScode-MachineId`. The raw token goes **only** to `api.github.com`; `*.githubcopilot.com` always receives the exchanged `tid=…` token. github-router matches all of this — the `Authorization: token …` form, the exchange shape, the editor masquerade headers, and consuming `endpoints.api`.
+
+**On the ten-token rule.** GitHub documents a limit of ten tokens per (user, application, scope), revoking the oldest beyond it, plus ten creations per hour ([token expiration and revocation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/token-expiration-and-revocation)). That documentation sits under an OAuth-apps heading and is **not** explicitly extended to GitHub App `ghu_` tokens. Eviction is the best-supported explanation for the observed revocations; it is not a documented certainty, and nothing here should be written as though it were.
+
+**If adopting VS Code's client id is ever considered**, `scripts/probe-device-flow.ts` is the gate, and it must be run before any constant changes. It proves device flow is enabled on the candidate app and that `/copilot_internal/v2/token` accepts the resulting token — that endpoint is demonstrably picky about the minting app, and the GitHub CLI's OAuth token gets a `403` from it. The probe's third check is the one that matters most: a classic OAuth App device flow against an app the user has **already authorized** returns a token carrying the *existing* grant's scopes, not the narrowly requested ones. If a user's VS Code grant includes `repo`/`workflow`, the credential stored at `PATHS.GITHUB_TOKEN_PATH` silently becomes write-capable — a file this codebase reasons about as read-only and also forwards to Copilot's `/mcp` web-search endpoint. That is a blast-radius change and a decision for a human. Sharing VS Code's app also means one GitHub authorization entry covers both, so revoking VS Code's access kills the proxy and vice versa.
+
+**Deferred, deliberately: `X-GitHub-Api-Version`.** The proxy sends a single `API_VERSION = "2026-01-09"` (`src/lib/api-config.ts`) everywhere, where Copilot Chat 0.45.1 sends three distinct values — `2025-04-01` on the token exchange and `/copilot_internal/user`, `2025-10-01` from `_mixinHeaders`, `2025-05-01` on CAPI chat completions. Note also `src/lib/agent/capi.ts` holds a private duplicate of the constant that does not import from `api-config.ts`, so any split must cover it too. This was **not** changed, for a reason worth recording: the proxy already spoofs a *newer* editor than the one those values were read from (`last-editor-versions` tracks the latest release, 1.131.0 / 0.48.1, while the installed extension is 0.45.1). Pinning an older extension's API versions underneath a newer claimed editor version would be internally inconsistent — arguably a worse signal than the current uniform value. Resolve it by reading the API versions from the extension build actually being claimed, not from whichever happens to be installed.
+
 ## Trade-offs
 
 - **Stale snapshot for MIRRORED entries**: if the user updates `~/.claude/settings.json` (or any other MIRRORED file: `.claude.json`, `history.jsonl`, `teams/`, `session-env/`, `agents/`, `plugins/`, etc.) via plain `claude` while a github-router session is running, the proxy session won't pick up the change until next restart. Mtime-based re-sync at startup handles between-session updates.

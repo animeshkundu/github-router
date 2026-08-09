@@ -10,12 +10,16 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
+import consola from "consola"
+
 import { PATHS } from "../src/lib/paths"
 import { state } from "../src/lib/state"
 import {
   __resetRefreshCooldownsForTests,
   ensureFreshCopilotToken,
   refreshCopilotToken,
+  setupCopilotToken,
+  setupGitHubToken,
   tryRefreshAndRetry,
 } from "../src/lib/token"
 import { credentialFingerprint } from "../src/services/github/get-copilot-token"
@@ -88,6 +92,9 @@ beforeEach(async () => {
   state.githubTokenSource = "file"
   state.copilotToken = "copilot-v1"
   state.copilotTokenRefreshAt = undefined
+  // The latch is process-global state, so a leak here would make one test's
+  // warning suppress the next test's.
+  state.authRequiredCredentialFingerprint = undefined
   // The cooldowns are module state that outlives a test, so one test's
   // refresh would otherwise suppress the next test's.
   __resetRefreshCooldownsForTests()
@@ -102,6 +109,12 @@ afterEach(async () => {
   state.githubToken = originalGithubToken
   state.githubTokenSource = originalSource
   state.copilotTokenRefreshAt = originalRefreshAt
+  state.authRequiredCredentialFingerprint = undefined
+  // Also reset on the way OUT, not just on the way in. The cooldowns are
+  // module-level and outlive this file, and these tests deliberately end on a
+  // failed refresh — which arms `lastRefreshFailure` and would make the NEXT
+  // test file's first reactive refresh cool down and report "skipped".
+  __resetRefreshCooldownsForTests()
   if (tempDir) await fs.rm(tempDir, { recursive: true, force: true })
 })
 
@@ -501,5 +514,278 @@ describe("tryRefreshAndRetry: the generation counter", () => {
 
     expect(res.status).toBe(201)
     expect(fetchMock).toHaveBeenCalledTimes(0)
+  })
+})
+
+/**
+ * The other half of the 2026-08-08 outage: the credential was revoked, and
+ * nothing said so.
+ *
+ * `credential_rejected` was PRODUCED by the exchange and CONSUMED nowhere, and
+ * upstream 401s are remapped to 503 `overloaded_error` to protect the client's
+ * synthetic credential — so a dead credential was indistinguishable from a busy
+ * upstream, from either side. The server-side line is the only honest signal,
+ * which makes "is it emitted, once, with the right remedy" a correctness
+ * property rather than a cosmetic one.
+ */
+describe("a rejected credential tells a human what to do", () => {
+  /** Captured consola output for the duration of one test. */
+  function captureConsola(): { lines: string[]; restore: () => void } {
+    const lines: string[] = []
+    // Reporters are process-global and other modules replace them wholesale,
+    // so snapshot and restore rather than appending and hoping.
+    const previous = consola.options.reporters
+    consola.setReporters([
+      {
+        log: (logObj) => {
+          lines.push(logObj.args.map((a) => String(a)).join(" "))
+        },
+      },
+    ])
+    return {
+      lines,
+      restore: () => {
+        consola.setReporters([...previous])
+      },
+    }
+  }
+
+  const rejected = () =>
+    jsonResponse({ message: "Bad credentials" }, { status: 401 })
+
+  test("says it once per credential, not once per refresh tick", async () => {
+    // The refresh loop retries for as long as the process lives. Advice
+    // repeated every few minutes is advice nobody reads.
+    globalThis.fetch = (async () => rejected()) as unknown as typeof fetch
+    const captured = captureConsola()
+    try {
+      expect(await refreshCopilotToken("interval")).toBe("credential_rejected")
+      expect(await refreshCopilotToken("interval")).toBe("credential_rejected")
+      expect(await refreshCopilotToken("interval")).toBe("credential_rejected")
+    } finally {
+      captured.restore()
+    }
+
+    const advice = captured.lines.filter((l) => l.includes("github-router auth"))
+    expect(advice).toHaveLength(1)
+    expect(advice[0]).toContain(credentialFingerprint(startingCredential))
+    // The remap is why this line has to exist at all; saying so in the line
+    // stops the next reader concluding the proxy is merely overloaded.
+    expect(advice[0]).toContain("503")
+  })
+
+  test("re-arms once a different credential is installed and also dies", async () => {
+    // A latch that never resets would silently swallow the SECOND outage.
+    const second = `disk-token-${crypto.randomUUID()}`
+    let phase: "reject-first" | "accept-second" | "reject-second" =
+      "reject-first"
+    globalThis.fetch = (async () =>
+      phase === "accept-second"
+        ? exchangeOk("copilot-v2")
+        : rejected()) as unknown as typeof fetch
+
+    const captured = captureConsola()
+    try {
+      expect(await refreshCopilotToken("interval")).toBe("credential_rejected")
+
+      // A human runs `github-router auth`; the proxy adopts it from disk.
+      phase = "accept-second"
+      await fs.writeFile(tokenPath, second)
+      __resetRefreshCooldownsForTests()
+      expect(await refreshCopilotToken("interval")).toBe("refreshed")
+      expect(state.githubToken).toBe(second)
+      // A success is proof the credential works, so the latch must be gone.
+      expect(state.authRequiredCredentialFingerprint).toBeUndefined()
+
+      phase = "reject-second"
+      __resetRefreshCooldownsForTests()
+      expect(await refreshCopilotToken("interval")).toBe("credential_rejected")
+    } finally {
+      captured.restore()
+    }
+
+    const advice = captured.lines.filter((l) => l.includes("github-router auth"))
+    expect(advice).toHaveLength(2)
+    expect(advice[0]).toContain(credentialFingerprint(startingCredential))
+    expect(advice[1]).toContain(credentialFingerprint(second))
+  })
+
+  test("tells an --github-token operator to replace the value, not to re-auth", async () => {
+    // `readGithubTokenIfUsable` never reads disk for an explicit credential,
+    // so "run github-router auth" would be instructions that cannot work.
+    state.githubTokenSource = "explicit"
+    globalThis.fetch = (async () => rejected()) as unknown as typeof fetch
+
+    const captured = captureConsola()
+    try {
+      expect(await refreshCopilotToken("interval")).toBe("credential_rejected")
+    } finally {
+      captured.restore()
+    }
+
+    const rejection = captured.lines.filter((l) => l.includes("REJECTED"))
+    expect(rejection).toHaveLength(1)
+    expect(rejection[0]).toContain("GH_TOKEN")
+    expect(rejection[0]).not.toContain('"github-router auth" to')
+  })
+
+  test("a lapsed entitlement is not told to re-authenticate", async () => {
+    // The credential is fine; the seat is not. Sending this person around the
+    // login loop is the one remedy guaranteed not to help.
+    globalThis.fetch = (async () =>
+      jsonResponse(
+        { notification_id: "subscription_ended" },
+        { status: 403 },
+      )) as unknown as typeof fetch
+
+    const captured = captureConsola()
+    try {
+      expect(await refreshCopilotToken("interval")).toBe("entitlement_lapsed")
+    } finally {
+      captured.restore()
+    }
+
+    // Match the remedy sentence, not the word "entitlement": the raw failure
+    // line quotes the upstream `entitlement_lapsed` kind and would match too.
+    const lapsed = captured.lines.filter((l) =>
+      l.includes("Copilot entitlement lapsed"),
+    )
+    expect(lapsed).toHaveLength(1)
+    expect(lapsed[0]).toContain("will NOT help")
+    expect(state.authRequiredCredentialFingerprint).toBe(
+      credentialFingerprint(startingCredential),
+    )
+  })
+
+  test("a bare 403 is transient and must not accuse the credential", async () => {
+    // GitHub answers 403 for rate limits. Telling a rate-limited user their
+    // credential is revoked is a worse failure than the one being fixed.
+    globalThis.fetch = (async () =>
+      new Response("rate limited", { status: 403 })) as unknown as typeof fetch
+
+    const captured = captureConsola()
+    try {
+      expect(await refreshCopilotToken("interval")).toBe("transient_failure")
+    } finally {
+      captured.restore()
+    }
+
+    expect(captured.lines.filter((l) => l.includes("REJECTED"))).toHaveLength(0)
+    expect(state.authRequiredCredentialFingerprint).toBeUndefined()
+  })
+})
+
+/**
+ * The startup exchange is a SEPARATE code path from the refresh loop, and it is
+ * the one a revoked credential is most likely to be discovered on: a user whose
+ * session died restarts, and restarting runs exactly this. Before this was
+ * wired it aborted launch with a bare "HTTP 401", never naming the one action
+ * that fixes it — which is precisely how the original incident got diagnosed as
+ * "restart didn't help" instead of "the credential is revoked".
+ */
+describe("a credential rejected at startup", () => {
+  test("still names the remedy before it aborts the launch", async () => {
+    globalThis.fetch = (async () =>
+      jsonResponse(
+        { message: "Bad credentials" },
+        { status: 401 },
+      )) as unknown as typeof fetch
+
+    const lines: string[] = []
+    const previous = consola.options.reporters
+    consola.setReporters([
+      { log: (o) => lines.push(o.args.map((a) => String(a)).join(" ")) },
+    ])
+    try {
+      // The launch must still fail — a credential that cannot be exchanged is
+      // not something to start up around.
+      await expect(setupCopilotToken()).rejects.toThrow()
+    } finally {
+      consola.setReporters([...previous])
+    }
+
+    const advice = lines.filter((l) => l.includes("github-router auth"))
+    expect(advice).toHaveLength(1)
+    expect(advice[0]).toContain(credentialFingerprint(startingCredential))
+
+    // Second phase, folded in rather than split out: on its own this assertion
+    // passes against unfixed code (which emits no advice at all, ever), so as a
+    // standalone test it would be decoration. It is also the assertion that
+    // matters most — a 500 at launch is upstream having a bad minute, and
+    // sending that user to re-authenticate points them at something that is not
+    // broken.
+    state.authRequiredCredentialFingerprint = undefined
+    globalThis.fetch = (async () =>
+      new Response("upstream boom", { status: 500 })) as unknown as typeof fetch
+
+    const transientLines: string[] = []
+    consola.setReporters([
+      { log: (o) => transientLines.push(o.args.map((a) => String(a)).join(" ")) },
+    ])
+    try {
+      await expect(setupCopilotToken()).rejects.toThrow()
+    } finally {
+      consola.setReporters([...previous])
+    }
+
+    expect(
+      transientLines.filter((l) => l.includes("github-router auth")),
+    ).toHaveLength(0)
+    expect(state.authRequiredCredentialFingerprint).toBeUndefined()
+  })
+})
+
+/**
+ * The path a revoked STORED credential actually takes at launch.
+ *
+ * `setupGitHubToken` calls `logUser()` -> `getGitHubUser()` before
+ * `setupCopilotToken` ever runs, so a revoked file credential aborts there. A
+ * live smoke test caught this: the launch died on a raw HTTP 401 stack trace
+ * and never named the remedy, which is precisely how a revocation gets
+ * misread as "I restarted and it still doesn't work".
+ */
+describe("a revoked credential stored on disk, at launch", () => {
+  function capture(): { lines: string[]; restore: () => void } {
+    const lines: string[] = []
+    const previous = consola.options.reporters
+    consola.setReporters([
+      { log: (o) => lines.push(o.args.map((a) => String(a)).join(" ")) },
+    ])
+    return { lines, restore: () => consola.setReporters([...previous]) }
+  }
+
+  test("names the remedy instead of dying on a bare 401", async () => {
+    globalThis.fetch = (async () =>
+      jsonResponse(
+        { message: "Bad credentials" },
+        { status: 401 },
+      )) as unknown as typeof fetch
+
+    const c = capture()
+    try {
+      await expect(setupGitHubToken()).rejects.toThrow()
+    } finally {
+      c.restore()
+    }
+
+    const advice = c.lines.filter((l) => l.includes("github-router auth"))
+    expect(advice).toHaveLength(1)
+    expect(advice[0]).toContain(credentialFingerprint(startingCredential))
+
+    // Folded in rather than split out, since alone it passes against unfixed
+    // code: a 403 is GitHub's rate-limit answer, and accusing the credential
+    // there would send someone to fix something that is not broken.
+    state.authRequiredCredentialFingerprint = undefined
+    globalThis.fetch = (async () =>
+      new Response("rate limited", { status: 403 })) as unknown as typeof fetch
+
+    const c2 = capture()
+    try {
+      await expect(setupGitHubToken()).rejects.toThrow()
+    } finally {
+      c2.restore()
+    }
+    expect(c2.lines.filter((l) => l.includes("github-router auth"))).toHaveLength(0)
+    expect(state.authRequiredCredentialFingerprint).toBeUndefined()
   })
 })

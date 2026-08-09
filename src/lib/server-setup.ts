@@ -8,6 +8,7 @@ import { createBodyTooLargeError, limitRequestBody } from "srvx/body-limit"
 import { PATHS, ensurePaths } from "./paths"
 import { maybeSpawnDaemon, wireDaemonTeardown } from "./first-mate/scheduler/autospawn"
 import { agentToolsEnabled } from "./mcp-capabilities"
+import { logIdentity, setLogListenPort } from "./log-identity"
 import { withOneMSuffix } from "./one-m-context"
 import { generateRandomPort } from "./port"
 import { initProxyFromEnv, initUpstreamTransport } from "./proxy"
@@ -459,6 +460,19 @@ export async function setupAndServe(
     throw new Error("Server started but URL is not available")
   }
   const serverUrl = url.replace(/\/$/, "")
+
+  // Publish the bound port for log identity, now that it is real. Doing this
+  // any earlier would be a guess: the no-explicit-port branch above retries
+  // several random ports, and a confidently wrong port in a log line is worse
+  // than the honest `pending`.
+  {
+    const boundPort = Number.parseInt(new URL(url).port, 10)
+    setLogListenPort(Number.isNaN(boundPort) ? undefined : boundPort)
+  }
+
+  // One line, at the one moment every identity field is finally known, so a
+  // human reading a terminal can match it to the shared error.log.
+  consola.info(`Proxy ready: ${logIdentity()}`)
 
   // Opt-in (GH_ROUTER_FM_DAEMON=1; default OFF) auto-spawn of the first-mate
   // scheduler daemon as a SEPARATE process. The [fm-heartbeat] cron is the
