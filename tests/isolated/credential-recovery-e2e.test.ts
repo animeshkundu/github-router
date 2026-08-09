@@ -20,6 +20,12 @@
  * Runs in-process against a scratch HOME rather than spawning the CLI:
  * spawning would drag in self-update, colbert provisioning and toolbelt
  * materialization, none of which bear on the credential lifecycle.
+ *
+ * Lives under `tests/isolated/` because it sets `GITHUB_API_URL`, which
+ * `~/lib/api-config` reads ONCE into a module-level constant at load time.
+ * In a shared process that makes the value order-dependent — whichever test
+ * file loads the module first wins — so this file gets its own process, which
+ * is exactly what that lane exists for.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
@@ -110,14 +116,14 @@ describe("credential recovery, end to end", () => {
     // Point the module at the fake GitHub and at a scratch credential path,
     // isolating the test from the developer's real credential.
     process.env.GITHUB_API_URL = `http://127.0.0.1:${ghPort}`
-    const { state } = await import("../src/lib/state")
-    const { PATHS } = await import("../src/lib/paths")
+    const { state } = await import("../../src/lib/state")
+    const { PATHS } = await import("../../src/lib/paths")
     Object.defineProperty(PATHS, "GITHUB_TOKEN_PATH", {
       configurable: true,
       value: tokenPath,
     })
     const { setupCopilotToken, refreshCopilotToken } = await import(
-      "../src/lib/token"
+      "../../src/lib/token"
     )
 
     state.githubToken = CRED_V1
