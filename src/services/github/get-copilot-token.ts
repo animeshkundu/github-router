@@ -188,7 +188,7 @@ export const getCopilotToken = async (credentialOverride?: string) => {
     // unconsumed, and since the only consumer downstream is a `.message` log,
     // that stream — and its socket — would stay pinned open. The body we need
     // is captured into `detail` here, so nothing downstream has to re-read it.
-    let body = ""
+    let body: string
     try {
       body = await response.text()
     } catch {
