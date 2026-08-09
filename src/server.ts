@@ -13,6 +13,8 @@ import { searchRoutes } from "./routes/search/route"
 import { tokenRoute } from "./routes/token/route"
 import { usageRoute } from "./routes/usage/route"
 import { assertMcpToolSurfaceConsistent } from "./lib/peer-mcp-personas"
+import { state } from "./lib/state"
+import { getPackageVersion } from "./lib/version"
 
 // Fail-fast invariant (runs once at module load for every proxy-serving
 // command): MCP tool names must be unique within each group AND across the
@@ -29,11 +31,28 @@ server.get("/", (c) => c.text("Server running"))
 // Build identity. Operators can `curl http://localhost:<port>/version` to
 // confirm which build is serving requests — useful when upgrading via
 // `npx github-router@latest` and verifying the new code actually loaded.
+//
+// `auth_required` is the machine-readable half of the operator warning in
+// `noteAuthActionRequired`: upstream 401s are remapped to 503 `overloaded_error`
+// to protect the client's synthetic credential, so a caller cannot otherwise
+// tell "the credential is dead, a human must re-auth" from "upstream is busy,
+// retrying will work". Set for a revoked credential AND for a lapsed
+// entitlement — both mean a person has to do something.
+//
+// Deliberately a bare boolean. This route sits behind an unrestricted
+// `cors()`, so any web page can read it; the credential FINGERPRINT and
+// `githubTokenSource` stay out of the response, and the remedy (which differs
+// by source) is stated in the log instead.
+//
+// Version comes from `getPackageVersion()` rather than the static import:
+// release.yml builds BEFORE the version bump, so a build-time inline would
+// always report the pre-bump value (see CLAUDE.md).
 server.get("/version", (c) =>
   c.json({
     name: packageJson.name,
-    version: packageJson.version,
+    version: getPackageVersion(),
     gitSha: process.env.GITHUB_SHA ?? "unknown",
+    auth_required: state.authRequiredCredentialFingerprint !== undefined,
   }),
 )
 

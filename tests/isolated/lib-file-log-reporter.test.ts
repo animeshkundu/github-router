@@ -16,6 +16,10 @@ const tempDir = await fsp.mkdtemp(
 // Import the reporter class directly — avoids consola module identity issues
 // that arise from mock.module in the isolated test environment.
 const { FileLogReporter } = await import("../../src/lib/file-log-reporter")
+const { logIdentity, setLogListenPort } = await import(
+  "../../src/lib/log-identity"
+)
+const { getPackageVersion } = await import("../../src/lib/version")
 
 // The reporter now holds a persistent append fd for the file's lifetime, so
 // every test's reporter MUST be closed before afterAll's recursive rm —
@@ -351,5 +355,65 @@ describe("FileLogReporter", () => {
 
     const sizeAfter = fs.statSync(logFile).size
     expect(sizeAfter).toBeLessThan(1024 * 1024)
+  })
+
+  /**
+   * Several proxies routinely run at once on one machine — a long-lived `start`
+   * plus one per `claude` session — and every one of them appends to the SAME
+   * error log. Without a process identity on the line, a stale proxy's 401 storm
+   * reads as the current session's failure, which is exactly the misattribution
+   * that cost a full investigation before this existed.
+   */
+  describe("process identity on persisted lines", () => {
+    afterEach(() => {
+      setLogListenPort(undefined)
+    })
+
+    test("a line names the process, port and build that wrote it — without defeating dedup", () => {
+      setLogListenPort(51609)
+      const reporter = newReporter(logFile)
+      reporter.log(makeLogObj("error", "attributable failure"), dummyCtx)
+
+      const content = readLog()
+      expect(content).toContain(`pid=${process.pid}`)
+      expect(content).toContain("port=51609")
+      expect(content).toContain(`v${getPackageVersion()}`)
+      // The existing shape must survive: a leading-timestamp sort and an
+      // `[ERROR]` grep are how this file is actually read.
+      expect(content).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
+      expect(content).toContain("[ERROR]")
+
+      // Folded in deliberately rather than split into its own test: alone this
+      // assertion passes against unfixed code, and it is the one way this change
+      // could plausibly break something. `makeDedupeKey` hashes the serialized
+      // ARGS, not the formatted line, so a per-line-varying identity must not
+      // reach it — if it did, recurrence suppression would silently stop working
+      // and every repeated error would flood the file again.
+      reporter.log(makeLogObj("error", "attributable failure"), dummyCtx)
+      const occurrences = readLog()
+        .split("\n")
+        .filter((l) => l.includes("attributable failure"))
+      expect(occurrences).toHaveLength(1)
+    })
+
+    test("before a listener binds, the port is reported as pending rather than guessed", () => {
+      // `setupAndServe` retries several random ports before one binds, so any
+      // value published earlier can be wrong — and a confidently wrong port is
+      // worse than an honest absence.
+      const reporter = newReporter(logFile)
+      reporter.log(makeLogObj("error", "logged before listen"), dummyCtx)
+
+      const content = readLog()
+      expect(content).toContain("port=pending")
+      expect(content).not.toMatch(/port=\d/)
+    })
+
+    test("the identity never contains the credential-shaped strings the sanitizer redacts", () => {
+      setLogListenPort(8787)
+      expect(logIdentity()).not.toMatch(/gh[opsu]_/)
+      expect(logIdentity()).toBe(
+        `pid=${process.pid} port=8787 v${getPackageVersion()}`,
+      )
+    })
   })
 })

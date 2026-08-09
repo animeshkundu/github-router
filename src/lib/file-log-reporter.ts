@@ -5,6 +5,7 @@ import { Writable } from "node:stream"
 import consola from "consola"
 import type { ConsolaOptions, ConsolaReporter, LogObject } from "consola"
 
+import { logIdentity } from "~/lib/log-identity"
 import { PATHS } from "~/lib/paths"
 
 const MAX_LOG_BYTES = 1024 * 1024 // 1 MB
@@ -130,6 +131,19 @@ function serializeArgs(logObj: LogObject): string[] {
   })
 }
 
+/**
+ * `<ts> [<LEVEL>] [<identity>] <message>`.
+ *
+ * The identity field is what makes a shared log file attributable: several
+ * proxies append here at once, so without it a stale process's failures read as
+ * the current session's. It is placed after the level so a leading-timestamp
+ * sort and a `[ERROR]` grep both keep working.
+ *
+ * Note for anyone touching this: `makeDedupeKey` below hashes `logObj.type` and
+ * `serializeArgs`, NOT this string. That is load-bearing — an identity that
+ * varies per line would defeat recurrence suppression entirely if it were part
+ * of the key.
+ */
 function formatLogLine(logObj: LogObject, suppressed = 0): string {
   const ts = logObj.date.toISOString()
   const level = (logObj.type ?? "error").toUpperCase()
@@ -140,7 +154,7 @@ function formatLogLine(logObj: LogObject, suppressed = 0): string {
     ? ` [${suppressed} identical occurrences suppressed]`
     : ""
 
-  return `${ts} [${level}] ${message}${recurrence}\n`
+  return `${ts} [${level}] [${logIdentity()}] ${message}${recurrence}\n`
 }
 
 function makeDedupeKey(logObj: LogObject): string {

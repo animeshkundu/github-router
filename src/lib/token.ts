@@ -195,6 +195,18 @@ const MIN_REFRESH_LEAD_MS = 30_000
 function commitCopilotToken(token: string, refreshIn: unknown): void {
   state.copilotToken = token
   state.copilotTokenGeneration += 1
+  // A successful exchange is proof the credential of record works, so any
+  // outstanding "a human must act" latch is stale — clear it here, the single
+  // choke point every success passes through (`setupCopilotToken` and
+  // `refreshCopilotToken` both land here, after
+  // `exchangeWithFreshestCredential` has already published the credential that
+  // worked).
+  //
+  // Cleared on ANY success, not only when the fingerprint differs. If a
+  // credential is rejected by a transient upstream fault and then the SAME
+  // credential succeeds, a differs-only rule would leave the proxy reporting
+  // `auth_required` forever on a perfectly good credential.
+  state.authRequiredCredentialFingerprint = undefined
   // Derived from the DURATION, never the absolute `expires_at`: a clock
   // running ahead of GitHub's would make an absolute deadline look
   // already-past on a brand-new token and drive a refresh storm.
@@ -203,6 +215,59 @@ function commitCopilotToken(token: string, refreshIn: unknown): void {
     MIN_REFRESH_LEAD_MS,
   )
   state.copilotTokenRefreshAt = Date.now() + lead
+}
+
+/**
+ * Say, once, that a human has to do something — and say the right thing.
+ *
+ * Latched on the credential fingerprint: the refresh loop retries every few
+ * minutes for as long as the process lives, and repeating identical advice on
+ * every tick buries it. A rejection of a DIFFERENT credential is new
+ * information, so the latch re-arms by fingerprint rather than being one-shot.
+ *
+ * The remedy branches on where the credential came from, because
+ * "run `github-router auth`" is FALSE advice for an operator-supplied
+ * `--github-token` / `GH_TOKEN`: `readGithubTokenIfUsable` never reads disk on
+ * that path, so re-authenticating would write a file the process will not look
+ * at, and the operator would be left with working instructions that do nothing.
+ *
+ * Emitted at `error` deliberately: `file-log-reporter`'s `ALLOWED_TYPES` keeps
+ * only fatal/error/warn, so an `info` line would never reach the log file that
+ * an operator actually reads.
+ */
+function noteAuthActionRequired(
+  kind: "credential_rejected" | "entitlement_lapsed",
+  credential: string,
+): void {
+  if (state.authRequiredCredentialFingerprint === credential) return
+  state.authRequiredCredentialFingerprint = credential
+
+  if (kind === "entitlement_lapsed") {
+    consola.error(
+      `Copilot entitlement lapsed for credential ${credential}: the credential `
+        + `itself is still valid, so re-authenticating will NOT help. Check the `
+        + `Copilot subscription or seat assignment for this account.`,
+    )
+    return
+  }
+
+  if (state.githubTokenSource === "explicit") {
+    consola.error(
+      `GitHub credential ${credential} was REJECTED by GitHub (revoked, not `
+        + `expired). It was supplied via --github-token / GH_TOKEN, so `
+        + `"github-router auth" will not help — replace the supplied value.`,
+    )
+    return
+  }
+
+  consola.error(
+    `GitHub credential ${credential} was REJECTED by GitHub (revoked, not `
+      + `expired). No refresh can recover this. Run "github-router auth" to `
+      + `re-authenticate; every proxy running on this machine picks the new `
+      + `credential up automatically, so nothing needs restarting. Note that `
+      + `clients see 503 "overloaded" for this, not 401 — that remap is `
+      + `deliberate, which is why this log line is the real signal.`,
+  )
 }
 
 /**
@@ -230,7 +295,26 @@ function commitCopilotToken(token: string, refreshIn: unknown): void {
  * separate retry timer can.
  */
 export const setupCopilotToken = async (): Promise<StopCopilotTokenRefresh> => {
-  const { token, refresh_in } = await getCopilotToken()
+  // The startup exchange is the MOST likely place a revoked credential is
+  // discovered — a user whose session died typically restarts, which is exactly
+  // this path. It does not go through `refreshCopilotToken`, so without this it
+  // would throw a bare "HTTP 401" and abort launch having never named the one
+  // thing that fixes it. Classify and advise, then re-throw unchanged: a
+  // credential that cannot be exchanged still has to stop the launch.
+  let exchanged
+  try {
+    exchanged = await getCopilotToken()
+  } catch (error) {
+    if (error instanceof CopilotTokenExchangeError) {
+      if (error.kind === "credential_rejected") {
+        noteAuthActionRequired("credential_rejected", error.credential)
+      } else if (error.kind === "entitlement_lapsed") {
+        noteAuthActionRequired("entitlement_lapsed", error.credential)
+      }
+    }
+    throw error
+  }
+  const { token, refresh_in } = exchanged
   commitCopilotToken(token, refresh_in)
 
   consola.debug(
@@ -471,8 +555,14 @@ export async function refreshCopilotToken(
           error instanceof Error ? error.message : error,
         )
         if (error instanceof CopilotTokenExchangeError) {
-          if (error.kind === "credential_rejected") return "credential_rejected"
-          if (error.kind === "entitlement_lapsed") return "entitlement_lapsed"
+          if (error.kind === "credential_rejected") {
+            noteAuthActionRequired("credential_rejected", error.credential)
+            return "credential_rejected"
+          }
+          if (error.kind === "entitlement_lapsed") {
+            noteAuthActionRequired("entitlement_lapsed", error.credential)
+            return "entitlement_lapsed"
+          }
         }
         return "transient_failure"
       }
