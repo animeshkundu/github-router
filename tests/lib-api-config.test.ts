@@ -10,6 +10,7 @@ import {
 
 const baseState: State = {
   accountType: "individual",
+  copilotTokenGeneration: 0,
   manualApprove: false,
   rateLimitWait: false,
   showToken: false,

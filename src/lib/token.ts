@@ -3,7 +3,11 @@ import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 
 import { PATHS } from "~/lib/paths"
-import { getCopilotToken } from "~/services/github/get-copilot-token"
+import {
+  CopilotTokenExchangeError,
+  credentialFingerprint,
+  getCopilotToken,
+} from "~/services/github/get-copilot-token"
 import { getDeviceCode } from "~/services/github/get-device-code"
 import { getGitHubUser } from "~/services/github/get-user"
 import { pollAccessToken } from "~/services/github/poll-access-token"
@@ -18,6 +22,47 @@ import { HTTPError } from "./error"
 import { state } from "./state"
 
 const readGithubToken = () => fs.readFile(PATHS.GITHUB_TOKEN_PATH, "utf8")
+
+/**
+ * Transient filesystem errors from a read that raced the temp+rename write.
+ *
+ * On Windows a read landing in that window fails with one of these even
+ * though a perfectly good file exists microseconds later. Treating one as
+ * fatal at startup would cost a launch for no reason.
+ */
+const TRANSIENT_READ_CODES = new Set(["EPERM", "EBUSY", "EACCES", "ENOENT"])
+
+function isTransientReadError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code
+  return typeof code === "string" && TRANSIENT_READ_CODES.has(code)
+}
+
+/**
+ * Read the credential file, retrying briefly through a racing rename.
+ *
+ * Same delays and the same reasoning as {@link RENAME_RETRY_DELAYS_MS} on the
+ * write side: the contending handle closes almost immediately, so a short
+ * bounded retry converts a spurious launch failure into a non-event. A
+ * persistent failure still propagates — the caller must not believe a
+ * credential was read when it was not.
+ */
+async function readGithubTokenWithRetry(): Promise<string> {
+  let lastErr: unknown
+  for (let attempt = 0; attempt <= RENAME_RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      return await readGithubToken()
+    } catch (err) {
+      lastErr = err
+      if (!isTransientReadError(err)) throw err
+      if (attempt < RENAME_RETRY_DELAYS_MS.length) {
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, RENAME_RETRY_DELAYS_MS[attempt]),
+        )
+      }
+    }
+  }
+  throw lastErr
+}
 
 /**
  * Backoff for a transient Windows rename failure. On Windows `fs.rename` over
@@ -102,10 +147,69 @@ const writeGithubAgentToken = (token: string) =>
 export type StopCopilotTokenRefresh = () => void
 
 /**
+ * Safety margin subtracted from the derived refresh deadline, so a request
+ * arriving just before expiry refreshes rather than racing it.
+ */
+const REFRESH_SKEW_MS = 120_000
+
+/**
+ * Bounds on a `refresh_in` we are willing to turn into a timer delay. An
+ * absurd or missing upstream value must not produce a zero-length timer (a
+ * hot loop hammering GitHub) or an effectively infinite one (a token that is
+ * never refreshed). 60s floor, 6h ceiling, 1500s default — the value GitHub
+ * actually returns today.
+ */
+const MIN_REFRESH_IN_S = 60
+const MAX_REFRESH_IN_S = 6 * 60 * 60
+const DEFAULT_REFRESH_IN_S = 1500
+
+/** Backoff schedule after a failed refresh, then hold at the last value. */
+const REFRESH_BACKOFF_MS = [5_000, 15_000, 60_000, 300_000] as const
+
+function clampRefreshIn(refreshIn: unknown): number {
+  if (typeof refreshIn !== "number" || !Number.isFinite(refreshIn)) {
+    return DEFAULT_REFRESH_IN_S
+  }
+  return Math.min(Math.max(refreshIn, MIN_REFRESH_IN_S), MAX_REFRESH_IN_S)
+}
+
+/**
+ * Adopt an exchange result into `state`.
+ *
+ * The generation bump is what lets an in-flight request know a newer token
+ * exists (see `State.copilotTokenGeneration`), so it happens on EVERY success
+ * — including one that returns a byte-identical token, which upstream
+ * demonstrably does.
+ */
+/**
+ * Floor on how far ahead the derived refresh deadline may be placed.
+ *
+ * The deadline is `now + refresh_in - skew`, and the skew (120s) is larger
+ * than the `refresh_in` floor (60s) — so a short upstream `refresh_in` would
+ * put the deadline in the PAST, the scheduler would floor its delay to 1s,
+ * and the proxy would hammer the token endpoint at 1 Hz forever. The deadline
+ * must always be in the future, whatever upstream says.
+ */
+const MIN_REFRESH_LEAD_MS = 30_000
+
+function commitCopilotToken(token: string, refreshIn: unknown): void {
+  state.copilotToken = token
+  state.copilotTokenGeneration += 1
+  // Derived from the DURATION, never the absolute `expires_at`: a clock
+  // running ahead of GitHub's would make an absolute deadline look
+  // already-past on a brand-new token and drive a refresh storm.
+  const lead = Math.max(
+    clampRefreshIn(refreshIn) * 1000 - REFRESH_SKEW_MS,
+    MIN_REFRESH_LEAD_MS,
+  )
+  state.copilotTokenRefreshAt = Date.now() + lead
+}
+
+/**
  * Fetch the Copilot token and keep it fresh in the background.
  *
  * Returns a disposer that stops the refresh loop. **Long-lived callers**
- * (`start`/`claude`/`codex`, via `setupAndServe`) can ignore it — the interval
+ * (`start`/`claude`/`codex`, via `setupAndServe`) can ignore it — the timer
  * is `unref()`d, so it never holds the event loop open on its own. The one-shot
  * `models` command calls it, so ownership of the timer is explicit rather than
  * implied by a runtime flag. (`check-usage` does not call this function at all;
@@ -114,40 +218,86 @@ export type StopCopilotTokenRefresh = () => void
  * Both halves are load-bearing, for different failure modes. Without the
  * `unref()`, `github-router models` printed its full correct output and then
  * hung forever: its success path just returns (only the failure branches call
- * `process.exit`), and the un-unref'd interval pinned the event loop. Without
+ * `process.exit`), and the un-unref'd timer pinned the event loop. Without
  * the disposer, that fix would depend on a property no caller can see, so the
  * next one-shot command would inherit the same trap.
+ *
+ * The schedule is a SELF-RE-ARMING `setTimeout`, not a fixed `setInterval`.
+ * Three reasons: the delay tracks each response's own `refresh_in` instead of
+ * the one captured at startup; a failure can back off (5s → 15s → 60s → 300s)
+ * instead of waiting a full period during which the token is already dead;
+ * and one timer cannot disagree with itself the way a period timer plus a
+ * separate retry timer can.
  */
 export const setupCopilotToken = async (): Promise<StopCopilotTokenRefresh> => {
   const { token, refresh_in } = await getCopilotToken()
-  state.copilotToken = token
+  commitCopilotToken(token, refresh_in)
 
-  // Display the Copilot token to the screen
-  consola.debug("GitHub Copilot Token fetched successfully!")
+  consola.debug(
+    `GitHub Copilot Token fetched successfully! (credential ${credentialFingerprint(state.githubToken)})`,
+  )
   if (state.showToken) {
     consola.info("Copilot token:", token)
   }
 
-  const refreshInterval = Math.max((refresh_in - 60) * 1000, 1000)
-  const handle = setInterval(() => {
-    void refreshCopilotToken("interval")
-  }, refreshInterval)
-  // A refresh timer is not a reason for the process to stay alive; it exists
-  // to serve work that is already keeping it alive.
-  handle.unref?.()
+  let handle: ReturnType<typeof setTimeout> | undefined
+  let disposed = false
+  let failures = 0
 
-  let stopped = false
-  return () => {
-    if (stopped) return
-    stopped = true
-    clearInterval(handle)
+  const arm = (delayMs: number) => {
+    // Checked here rather than only at the call sites because every caller
+    // reaches this after an `await`, and disposal can land in that window.
+    if (disposed) return
+    handle = setTimeout(() => {
+      void tick()
+    }, delayMs)
+    // A refresh timer is not a reason for the process to stay alive; it exists
+    // to serve work that is already keeping it alive.
+    handle.unref?.()
   }
+
+  const tick = async () => {
+    const outcome = await refreshCopilotToken("interval")
+    // The disposer may have run while the exchange was in flight. Re-arming
+    // now would resurrect the loop after it was explicitly stopped — the
+    // classic leaked-timer-after-dispose bug.
+    if (disposed) return
+    if (outcome === "refreshed") {
+      failures = 0
+      arm(nextDelayFromState())
+      return
+    }
+    // Any non-success (including a skipped no-op) backs off rather than
+    // spinning: the token is dead or dying and hammering will not help.
+    const delay =
+      REFRESH_BACKOFF_MS[Math.min(failures, REFRESH_BACKOFF_MS.length - 1)]
+    failures += 1
+    arm(delay)
+  }
+
+  arm(nextDelayFromState())
+
+  return () => {
+    if (disposed) return
+    disposed = true
+    if (handle) clearTimeout(handle)
+  }
+}
+
+/**
+ * Delay until the next scheduled refresh, from the deadline already stored on
+ * `state`. Floored at 1s so a pathological deadline can never busy-loop.
+ */
+function nextDelayFromState(): number {
+  const deadline = state.copilotTokenRefreshAt
+  if (deadline === undefined) return DEFAULT_REFRESH_IN_S * 1000
+  return Math.max(deadline - Date.now(), 1000)
 }
 
 // Single-flight mutex around the refresh fetch. Concurrent triggers (interval
 // + a 401-retry path) share one in-flight refresh promise so we never
 // overlap network calls or race writes to state.copilotToken.
-let inflightRefresh: Promise<void> | undefined
+let inflightRefresh: Promise<RefreshOutcome> | undefined
 // Cooldowns are keyed off the OUTCOME of the last refresh, not the attempt:
 //   - lastRefreshSuccess: throttles 401-retries when the token is fresh
 //     (don't pointlessly re-fetch a token we just got).
@@ -160,60 +310,225 @@ let lastRefreshFailure = 0
 const REFRESH_SUCCESS_COOLDOWN_MS = 30_000
 const REFRESH_FAILURE_COOLDOWN_MS = 5_000
 
+/**
+ * Clear the refresh cooldowns. TEST-ONLY.
+ *
+ * The cooldowns are module state that outlives any one test, so without a
+ * reset a test's refresh silently suppresses the next test's. The alternative
+ * — stubbing `Date.now` far into the future — leaks into every other test
+ * sharing the process (it broke the cooldown assertions in `token.test.ts`),
+ * so an explicit reset is both narrower and honest about what it touches.
+ */
+export function __resetRefreshCooldownsForTests(): void {
+  lastRefreshSuccess = 0
+  lastRefreshFailure = 0
+}
+
+/**
+ * What a refresh attempt did. Used for LOGGING and classification only —
+ * never to decide whether a request should retry. That decision belongs to
+ * the generation counter (see {@link tryRefreshAndRetry}), because a "skipped"
+ * outcome for one request can coincide with another request having just
+ * installed a perfectly good token.
+ */
+export type RefreshOutcome =
+  | "refreshed"
+  | "skipped"
+  | "credential_rejected"
+  | "entitlement_lapsed"
+  | "transient_failure"
+
+/**
+ * Read the credential from disk, returning it only if it is usable.
+ *
+ * Every failure mode here resolves to `undefined` (meaning "keep using what
+ * is in memory") rather than throwing or returning a partial value. The file
+ * is replaced by temp+rename (`writeTokenFileAtomic`), and on Windows a read
+ * racing that rename fails with EPERM/EBUSY/EACCES/ENOENT. None of those mean
+ * the in-memory credential went bad, so none of them may clear it — and a
+ * filesystem error must never escape into the refresh loop and kill the timer.
+ */
+async function readGithubTokenIfUsable(): Promise<string | undefined> {
+  if (state.githubTokenSource === "explicit") return undefined
+  try {
+    const raw = await readGithubToken()
+    const trimmed = raw.trim()
+    // A zero-length read is what a torn/partial write looks like. Adopting it
+    // would replace a working credential with nothing.
+    return trimmed.length > 0 ? trimmed : undefined
+  } catch (err) {
+    consola.debug("Could not re-read GitHub credential from disk:", err)
+    return undefined
+  }
+}
+
+/**
+ * Perform one exchange, preferring a newer credential from disk if there is one.
+ *
+ * The disk token is a CANDIDATE: it is passed to the exchange directly and
+ * published to `state.githubToken` only after that exchange succeeds. It is
+ * never installed globally on spec — `state` is shared by every concurrent
+ * request, so an unvalidated credential visible there would be sent by
+ * unrelated in-flight requests and 401 them while a working credential was
+ * still in hand.
+ */
+async function exchangeWithFreshestCredential(): Promise<{
+  token: string
+  refresh_in: number
+}> {
+  const onDisk = await readGithubTokenIfUsable()
+  const inMemory = state.githubToken
+
+  if (onDisk && onDisk !== inMemory) {
+    consola.info(
+      `GitHub credential on disk differs from the one in memory `
+        + `(${credentialFingerprint(inMemory)} → ${credentialFingerprint(onDisk)}); trying it.`,
+    )
+    // Try the candidate WITHOUT publishing it. On success it becomes the
+    // credential of record; on failure nothing was ever exposed to roll back.
+    const result = await getCopilotToken(onDisk)
+    state.githubToken = onDisk
+    state.githubTokenSource = "file"
+    return result
+  }
+
+  return getCopilotToken()
+}
+
 export async function refreshCopilotToken(
-  reason: "interval" | "401-retry",
-): Promise<void> {
+  reason: "interval" | "401-retry" | "expiry",
+): Promise<RefreshOutcome> {
+  // Single-flight: this check and the assignment below MUST NOT be separated
+  // by an await. Anything awaited in between yields the event loop, letting a
+  // second caller pass this guard before the first has published its promise
+  // — which would launch overlapping exchanges against GitHub, exactly the
+  // storm the mutex exists to prevent. The cooldown check needs to read the
+  // credential from disk, so it lives INSIDE the body below rather than here.
   if (inflightRefresh) return inflightRefresh
-  // Refresh-storm protection: if a recent refresh already completed,
-  // decline new 401-retry attempts. Interval refreshes always proceed
-  // (they're spaced by `refresh_in - 60s` which is well outside the
-  // window). 401-retry attempts respect both cooldowns:
-  //   - skip if a refresh succeeded within the last 30s (token is fresh)
-  //   - skip if a refresh failed within the last 5s (back off briefly)
-  if (reason === "401-retry") {
-    const now = Date.now()
-    if (now - lastRefreshSuccess < REFRESH_SUCCESS_COOLDOWN_MS) {
-      consola.debug(
-        `refreshCopilotToken(${reason}) skipped: prior success within ${REFRESH_SUCCESS_COOLDOWN_MS}ms`,
-      )
-      return
-    }
-    if (now - lastRefreshFailure < REFRESH_FAILURE_COOLDOWN_MS) {
-      consola.debug(
-        `refreshCopilotToken(${reason}) skipped: prior failure within ${REFRESH_FAILURE_COOLDOWN_MS}ms`,
-      )
-      return
+
+  const run = async (): Promise<RefreshOutcome> => {
+    // The `finally` that clears `inflightRefresh` must cover EVERY exit from
+    // this body, including the early cooldown returns below. If a `return`
+    // escaped it, the stale promise would stay published and every later
+    // refresh would short-circuit to it forever — a permanently wedged
+    // refresh loop, which is worse than the bug being fixed.
+    try {
+      // Refresh-storm protection: if a recent refresh already completed,
+      // decline new reactive attempts. Interval refreshes always proceed
+      // (they're spaced by the derived deadline, well outside the window).
+      // Reactive attempts respect both cooldowns:
+      //   - skip if a refresh succeeded within the last 30s (token is fresh)
+      //   - skip if a refresh failed within the last 5s (back off briefly)
+      //
+      // A cooldown skip is NOT the same as "your request should give up": the
+      // caller re-checks the generation counter and will still retry if some
+      // other caller refreshed. See `tryRefreshAndRetry`.
+      if (reason === "401-retry" || reason === "expiry") {
+        const now = Date.now()
+        // A credential newer than the one we last tried is new information,
+        // not a repeat attempt, so it bypasses both cooldowns. Without this,
+        // the window right after `github-router auth` — exactly the recovery
+        // path — would be swallowed by the 30s success cooldown.
+        const onDisk = await readGithubTokenIfUsable()
+        const hasNewerCredential = Boolean(
+          onDisk && onDisk !== state.githubToken,
+        )
+
+        if (!hasNewerCredential) {
+          if (now - lastRefreshSuccess < REFRESH_SUCCESS_COOLDOWN_MS) {
+            consola.debug(
+              `refreshCopilotToken(${reason}) skipped: prior success within ${REFRESH_SUCCESS_COOLDOWN_MS}ms`,
+            )
+            return "skipped"
+          }
+          if (now - lastRefreshFailure < REFRESH_FAILURE_COOLDOWN_MS) {
+            consola.debug(
+              `refreshCopilotToken(${reason}) skipped: prior failure within ${REFRESH_FAILURE_COOLDOWN_MS}ms`,
+            )
+            return "skipped"
+          }
+        }
+      }
+
+      consola.debug(`Refreshing Copilot token (reason=${reason})`)
+      try {
+        const { token, refresh_in } = await exchangeWithFreshestCredential()
+        commitCopilotToken(token, refresh_in)
+        lastRefreshSuccess = Date.now()
+        consola.debug(
+          `Copilot token refreshed (credential ${credentialFingerprint(state.githubToken)}, generation ${state.copilotTokenGeneration})`,
+        )
+        if (state.showToken) {
+          consola.info("Refreshed Copilot token:", token)
+        }
+        return "refreshed"
+      } catch (error) {
+        lastRefreshFailure = Date.now()
+        // Log the STATUS and body, not just the message. Their absence is why
+        // the 2026-08-08 incident could not be attributed after the fact.
+        consola.error(
+          `Failed to refresh Copilot token (reason=${reason}):`,
+          error instanceof Error ? error.message : error,
+        )
+        if (error instanceof CopilotTokenExchangeError) {
+          if (error.kind === "credential_rejected") return "credential_rejected"
+          if (error.kind === "entitlement_lapsed") return "entitlement_lapsed"
+        }
+        return "transient_failure"
+      }
+    } finally {
+      // Only release the lock if it is still OURS. An unconditional clear
+      // would let a finished attempt release a lock a newer attempt holds,
+      // re-opening the overlapping-exchange window this mutex exists to
+      // close. Identity-checking makes that safe no matter how the code
+      // around it is later rearranged. `attempt` is assigned before any
+      // await inside `run()` can settle, so it is always bound here.
+      if (inflightRefresh === attempt) inflightRefresh = undefined
     }
   }
 
-  inflightRefresh = (async () => {
-    consola.debug(`Refreshing Copilot token (reason=${reason})`)
-    try {
-      const { token } = await getCopilotToken()
-      state.copilotToken = token
-      lastRefreshSuccess = Date.now()
-      consola.debug("Copilot token refreshed")
-      if (state.showToken) {
-        consola.info("Refreshed Copilot token:", token)
-      }
-    } catch (error) {
-      lastRefreshFailure = Date.now()
-      consola.error(
-        `Failed to refresh Copilot token (reason=${reason}):`,
-        error,
-      )
-    } finally {
-      inflightRefresh = undefined
-    }
-  })()
-  return inflightRefresh
+  const attempt = run()
+  inflightRefresh = attempt
+  return attempt
+}
+
+/**
+ * Refresh the Copilot token if its derived deadline has passed.
+ *
+ * Called on EVERY request. The common path is one `Date.now()` and one
+ * integer compare — no I/O — against an upstream call that costs hundreds of
+ * milliseconds, so the overhead is not measurable. Sampling (every Nth
+ * request) was considered and rejected: a session that idles and then resumes
+ * may issue only a handful of requests, so a sampled guard would fail to fire
+ * in precisely the scenario it exists for. Actual refreshes do not get more
+ * frequent, because `refreshCopilotToken` is single-flighted and the deadline
+ * moves forward on success.
+ */
+export async function ensureFreshCopilotToken(): Promise<void> {
+  const deadline = state.copilotTokenRefreshAt
+  if (deadline === undefined || Date.now() < deadline) return
+  await refreshCopilotToken("expiry")
 }
 
 /**
  * Try `request()`. If it returns a 401, refresh the Copilot token (subject
  * to the single-flight + refresh-storm-protection of `refreshCopilotToken`)
- * and retry once. After one retry, propagate whatever the second attempt
- * returned — the caller's existing 401-handling path is preserved.
+ * and retry once — but ONLY if the token actually moved on.
+ *
+ * The retry criterion is the generation counter, not the refresh's verdict
+ * and not a token-string comparison. Both alternatives are wrong:
+ *
+ *   - By verdict: requests A and B both hold token T0 and both 401. A
+ *     refreshes to T1. B's refresh call lands inside the 30s success cooldown
+ *     and reports "skipped", so a verdict-based rule would give up and fail B
+ *     with a 503 — even though T1 is sitting in state and would have worked.
+ *   - By string: upstream demonstrably returns a byte-identical token from
+ *     two consecutive successful exchanges, so an unchanged string does not
+ *     mean an unchanged credential state.
+ *
+ * Comparing generations answers the question the request actually has: is
+ * what is in state now different from what I already tried? When it is not,
+ * we skip a re-send that is guaranteed to 401 again.
  *
  * The `request` callback is responsible for capturing `state.copilotToken`
  * locally before any await; this helper does NOT re-build the request
@@ -223,6 +538,9 @@ export async function tryRefreshAndRetry(
   request: () => Promise<Response>,
   routePath: string,
 ): Promise<Response> {
+  await ensureFreshCopilotToken()
+
+  const generationBefore = state.copilotTokenGeneration
   const first = await request()
   if (first.status !== 401) return first
 
@@ -230,7 +548,18 @@ export async function tryRefreshAndRetry(
     `${routePath}: upstream returned 401, attempting one token refresh + retry`,
   )
   await refreshCopilotToken("401-retry")
-  // Re-invoke the request with the (possibly) new token in state.
+
+  if (state.copilotTokenGeneration === generationBefore) {
+    // Nothing new to try. Re-sending the same credential would buy a second
+    // guaranteed 401 — which is what every request during the 2026-08-08
+    // outage paid, for an hour.
+    consola.debug(
+      `${routePath}: no newer Copilot token available (generation ${generationBefore}); not retrying`,
+    )
+    return first
+  }
+
+  // Re-invoke the request with the new token in state.
   return request()
 }
 
@@ -242,10 +571,15 @@ export async function setupGitHubToken(
   options?: SetupGitHubTokenOptions,
 ): Promise<void> {
   try {
-    const githubToken = await readGithubToken()
+    // Retrying: a startup read can race an `auth` rewrite in another
+    // terminal, and on Windows that surfaces as a transient EPERM/EBUSY/
+    // ENOENT. Failing launch over a window that closes in milliseconds
+    // would be a self-inflicted outage.
+    const githubToken = await readGithubTokenWithRetry()
 
     if (githubToken && !options?.force) {
       state.githubToken = githubToken
+      state.githubTokenSource = "file"
       if (state.showToken) {
         consola.info("GitHub token:", githubToken)
       }
@@ -254,7 +588,11 @@ export async function setupGitHubToken(
       return
     }
 
-    consola.info("Not logged in, getting new access token")
+    consola.info(
+      options?.force
+        ? "Re-authenticating, getting new access token"
+        : "Not logged in, getting new access token",
+    )
     const response = await getDeviceCode()
     consola.debug("Device code response:", response)
 
@@ -265,6 +603,7 @@ export async function setupGitHubToken(
     const token = await pollAccessToken(response)
     await writeGithubToken(token)
     state.githubToken = token
+    state.githubTokenSource = "file"
 
     if (state.showToken) {
       consola.info("GitHub token:", token)

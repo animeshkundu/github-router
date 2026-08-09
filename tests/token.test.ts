@@ -75,6 +75,25 @@ async function tempFiles(): Promise<Array<string>> {
   return (await fs.readdir(tempDir)).filter((name) => name.endsWith(".tmp"))
 }
 
+/**
+ * Poll until `predicate` holds, or throw. Used where a refresh now performs
+ * an async step (the disk re-read) before the upstream call, so "has the
+ * fetch been issued yet" is no longer answerable synchronously. Bounded so a
+ * genuine regression fails fast instead of hanging the suite.
+ */
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 2000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() > deadline) {
+      throw new Error("waitFor: condition not met before timeout")
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
 beforeEach(async () => {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "github-router-token-"))
   tokenPath = path.join(tempDir, "github_token")
@@ -123,6 +142,12 @@ describe("Copilot token refresh", () => {
       refreshCopilotToken("interval"),
     )
 
+    // A refresh now re-reads the credential from disk before exchanging, so
+    // the upstream call lands a tick later rather than synchronously. Wait
+    // for it to be issued; the invariant under test is that TWENTY concurrent
+    // triggers produce exactly ONE upstream call, not when it happens.
+    await waitFor(() => releases.length > 0)
+
     expect(fetchMock).toHaveBeenCalledTimes(1)
     for (const release of releases) release()
     await Promise.all(refreshes)
@@ -134,6 +159,13 @@ describe("Copilot token refresh", () => {
   test("applies outcome-specific 401 cooldowns while interval refreshes proceed", async () => {
     let now = 1_000_000
     Date.now = () => now
+    // Keep disk and memory in agreement. A credential on disk that the
+    // process has not tried is deliberately treated as new information and
+    // BYPASSES both cooldowns (that is the post-`auth` recovery path), which
+    // would defeat the cooldown behaviour under test here.
+    await fs.writeFile(tokenPath, "cooldown-test-token")
+    state.githubToken = "cooldown-test-token"
+    state.githubTokenSource = "file"
     let fetchCount = 0
     const fetchMock = mock(async () => {
       fetchCount++

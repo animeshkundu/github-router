@@ -78,4 +78,45 @@ describe("setupCopilotToken: refresh-timer lifecycle", () => {
     // Shape check only — the behavioral proof is the two subprocess tests
     // above. Calling the real thing here would hit the network.
   })
+
+  test("disposing DURING an in-flight exchange does not resurrect the timer", async () => {
+    // The self-re-arming `setTimeout` introduced a race the old fixed
+    // `setInterval` could not have: the disposer clears the pending timer,
+    // but an exchange already in flight resolves afterwards and its
+    // completion handler schedules a new one. Clearing is not enough; the
+    // handler has to re-check disposal after every await.
+    //
+    // Detected by counting upstream exchanges after disposal, NOT by process
+    // exit: the re-armed timer is `unref()`d, so a leaked one would not hold
+    // the loop open — it would just keep hitting GitHub forever.
+    const raceProbe = path.join(
+      import.meta.dir,
+      "fixtures",
+      "token-dispose-race-probe.ts",
+    )
+    const res = await new Promise<{
+      outcome: "exited" | "timeout"
+      code: number | null
+      out: string
+    }>((resolve) => {
+      const child = spawn(process.execPath, [raceProbe], {
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+      let out = ""
+      child.stdout.on("data", (d: Buffer) => (out += d.toString("utf8")))
+      child.stderr.on("data", (d: Buffer) => (out += d.toString("utf8")))
+      const timer = setTimeout(() => {
+        child.kill()
+        resolve({ outcome: "timeout", code: null, out })
+      }, 30_000)
+      child.on("exit", (code) => {
+        clearTimeout(timer)
+        resolve({ outcome: "exited", code, out })
+      })
+    })
+
+    expect(res.out).toContain("ok:no-resurrect")
+    expect(res.out).not.toContain("FAIL:timer-resurrected")
+    expect(res.outcome).toBe("exited")
+  }, 60_000)
 })

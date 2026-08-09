@@ -7,6 +7,51 @@ export interface State {
   copilotToken?: string
 
   /**
+   * Where `githubToken` came from, which decides whether the proxy may
+   * re-read it from disk.
+   *
+   * `"file"` — read from `PATHS.GITHUB_TOKEN_PATH`. A re-read is allowed, so
+   * an out-of-band `github-router auth` heals a running proxy without a
+   * restart.
+   *
+   * `"explicit"` — supplied by the operator via `--github-token` / `GH_TOKEN`.
+   * The file is NEVER read on this path: silently replacing a
+   * caller-supplied credential with whatever happens to be on disk would
+   * override an explicit instruction. It also means "run `github-router
+   * auth`" is false advice for this source — the remediation is to replace
+   * the supplied value.
+   */
+  githubTokenSource?: "file" | "explicit"
+
+  /**
+   * Monotonic counter bumped on every SUCCESSFUL Copilot token exchange.
+   *
+   * This is the retry criterion for `tryRefreshAndRetry`, and it is
+   * deliberately not "did the token string change": two consecutive
+   * successful exchanges were observed returning an identical token, so a
+   * string comparison would silently suppress legitimate retries. Nor is it
+   * the refresh's own verdict — with requests A and B both holding a stale
+   * token, A can refresh while B's later 401 is cooled down to a no-op, and
+   * a verdict of "nothing happened" would fail B even though a good token is
+   * already in `copilotToken`. Comparing generations answers the question
+   * each request actually has: "is what is in state now different from what
+   * I already tried?"
+   */
+  copilotTokenGeneration: number
+
+  /**
+   * Wall-clock ms after which `copilotToken` should be refreshed — already
+   * skew-adjusted, so the per-request check is a plain `Date.now() >=` compare.
+   *
+   * Derived from the exchange's `refresh_in` (a DURATION) and never from its
+   * absolute `expires_at`. A local clock running ahead of GitHub's would make
+   * an absolute timestamp look already-past on a brand-new token and drive a
+   * refresh storm; a duration is immune, because it is anchored to the same
+   * clock that later reads it.
+   */
+  copilotTokenRefreshAt?: number
+
+  /**
    * Second, WRITE-capable GitHub token for the first-mate
    * agent-orchestration surface (`--agents`). Minted by a separate
    * device-flow login against the GitHub CLI's OAuth client
@@ -118,6 +163,7 @@ export interface State {
 
 export const state: State = {
   accountType: "enterprise",
+  copilotTokenGeneration: 0,
   manualApprove: false,
   rateLimitWait: false,
   showToken: false,
