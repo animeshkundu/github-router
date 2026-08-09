@@ -26,6 +26,8 @@ const originalTokenPathDescriptor = Object.getOwnPropertyDescriptor(
 )
 const originalCopilotToken = state.copilotToken
 const originalGithubToken = state.githubToken
+const originalRefreshAt = state.copilotTokenRefreshAt
+const originalTokenSource = state.githubTokenSource
 
 let tempDir = ""
 let tokenPath = ""
@@ -116,6 +118,12 @@ afterEach(async () => {
   }
   state.copilotToken = originalCopilotToken
   state.githubToken = originalGithubToken
+  // Restore the refresh deadline too. A refresh performed here under a fake
+  // clock leaves it far in the past, and since `tryRefreshAndRetry` now
+  // checks it on every call, a stale value makes UNRELATED later test files
+  // perform a real refresh and consume one of their mocked fetches.
+  state.copilotTokenRefreshAt = originalRefreshAt
+  state.githubTokenSource = originalTokenSource
   if (tempDir) await fs.rm(tempDir, { recursive: true, force: true })
 })
 
