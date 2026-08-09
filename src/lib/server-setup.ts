@@ -383,6 +383,10 @@ export async function setupAndServe(
 
   if (options.githubToken) {
     state.githubToken = options.githubToken
+    // Marks this credential as operator-supplied, which makes it exempt from
+    // the disk re-read in `token.ts`: an explicit `--github-token`/`GH_TOKEN`
+    // must never be silently replaced by whatever happens to be on disk.
+    state.githubTokenSource = "explicit"
     consola.info("Using provided GitHub token")
   } else {
     await setupGitHubToken()

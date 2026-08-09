@@ -136,6 +136,20 @@ test("compact fetch retries on 401 and still passes a fresh AbortSignal", async 
         // Second call: return OK.
         return Promise.resolve(new Response(JSON.stringify(copilotResponse)))
       }
+      // The 401 path re-exchanges the GitHub credential for a Copilot token.
+      // That exchange must SUCCEED for the retry to happen at all: the retry
+      // fires only when the token generation actually advances, so that a
+      // failed refresh does not buy a second guaranteed 401. Serving a valid
+      // token here is what makes this a retry test rather than a
+      // refresh-failure test.
+      if (typeof url === "string" && url.includes("/copilot_internal/v2/token")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ token: "refreshed-token", refresh_in: 1500, expires_at: 0 }),
+            { headers: { "content-type": "application/json" } },
+          ),
+        )
+      }
       throw new Error(`Unexpected URL: ${url}`)
     },
   )
