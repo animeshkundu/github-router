@@ -52,7 +52,7 @@ export interface CapabilityEntry {
  * Ceiling on `DISPLAY_ONLY` + `UNUSED` entries. Currently 8; it was 11 before
  * the vision fields were wired into the outbound preflight.
  */
-export const UNCLASSIFIED_CEILING = 8
+export const UNCLASSIFIED_CEILING = 9
 
 /** Keyed by the dotted path under `capabilities`. */
 export const CAPABILITY_REGISTER: Readonly<Record<string, CapabilityEntry>> = {
@@ -67,7 +67,7 @@ export const CAPABILITY_REGISTER: Readonly<Record<string, CapabilityEntry>> = {
   },
   "supports.vision": {
     classification: "ENFORCED",
-    note: "Outbound preflight rejects images locally for a model that does not advertise it.",
+    note: "Outbound planner drops every image for a model that does not advertise it, replacing each with a note and suppressing the vision header.",
   },
   "supports.adaptive_thinking": {
     classification: "CONSUMED",
@@ -120,15 +120,22 @@ export const CAPABILITY_REGISTER: Readonly<Record<string, CapabilityEntry>> = {
     note: "We never vary the output ceiling by streaming mode, so the tighter non-streaming value has no consumer.",
   },
   "limits.vision.max_prompt_images": {
-    classification: "ENFORCED",
-    note: "Outbound preflight rejects an over-count request locally, naming the model and both numbers.",
+    classification: "DISPLAY_ONLY",
+    note:
+      "Measured against the live API on 2026-08-10 across all 23 vision models and found "
+      + "unreliable: accurate for gemini (10, enforced), but gpt-5.6-sol advertises 1 and upstream "
+      + "serves 50, gpt-5.5 advertises 1 and accepted 120, claude-opus-5 advertises 1 and accepted "
+      + "200. The real ceiling is not even uniform within a family. Enforcing it locally rejected "
+      + "at 2 what upstream serves at 50, fatally — the count covered replayed history, so the "
+      + "caller could not act on the error. Copilot owns this ceiling and names the real number "
+      + "when it refuses; the transports learn it from that rejection. Printed for the operator only.",
   },
   "limits.vision.max_prompt_image_size": {
     classification: "ENFORCED",
-    note: "Outbound preflight rejects on DECODED byte size, and peer attachments are size-checked before encoding.",
+    note: "Outbound planner drops an image on DECODED byte size, replacing it with a note; peer attachments are size-checked before encoding.",
   },
   "limits.vision.supported_media_types": {
     classification: "ENFORCED",
-    note: "Outbound preflight rejects a media type the model does not list, and names the accepted set.",
+    note: "Outbound planner drops a media type the model does not list, and the note names the accepted set.",
   },
 }

@@ -23,8 +23,9 @@ review lane reports `vision: true`, and yet:
 - worker tool results dropped every non-text part;
 - the worker's `read` returned a PNG as U+FFFD mojibake;
 - the peer critics had no way to accept an image at all;
-- and the whole `limits.vision` sub-object was unenforced, so an over-limit
-  request surfaced as an opaque upstream 400.
+- and `limits.vision.max_prompt_images` was enforced locally, even though it
+  understated the upstream ceiling for most models and could fatally reject
+  replayed history.
 
 ## What it costs to get this wrong
 
@@ -92,29 +93,58 @@ and any adapter that forgets one fails silently.
 | Situation | Behaviour |
 |---|---|
 | Model absent from the catalog | **Allow.** No basis to judge; upstream stays authoritative. Mirrors `modelSupportsEndpoint`. |
-| Model present, `supports.vision` not true | **Reject**, naming the model. |
-| Vision supported, limits absent | **Conservative floor** (1 image, 3 MiB), and the message says the limit was assumed. |
-| Count over `max_prompt_images` | Reject, naming the model and both numbers. |
-| Decoded size over `max_prompt_image_size` | Reject. Decoded, not base64 length. |
-| `media_type` absent | Reject. It used to be *defaulted*, silently asserting a type the model may not accept. |
-| Declared type disagrees with the bytes | Reject, naming both. |
-| Type not in `supported_media_types` | Reject, listing what the model does accept. |
+| Model present, `supports.vision` not true | Replace every image in place with a short text note and suppress `copilot-vision-request`. |
+| Vision supported, limits absent | Apply the 3 MiB per-image size floor. There is no image-count floor. |
+| Count over a learned upstream ceiling | Prune to the ceiling, keeping the most recent images and replacing the rest in place with notes. |
+| Decoded size over `max_prompt_image_size` | Replace that image in place with a note. Decoded, not base64 length. |
+| `media_type` absent | Replace that image in place with a note. It is never defaulted. |
+| Declared type disagrees with the bytes | Replace that image in place with a note naming both. |
+| Type not in `supported_media_types` | Replace that image in place with a note listing what the model accepts. |
 
-Deliberately **not** fail-open. "We don't know the limit" is not "there is no
-limit", and treating it as the latter reproduces the exact opaque-400 the
-preflight exists to remove.
+The preflight never rejects a whole request. A fatal check against replayed
+history would be fatal on every retry, because the caller cannot edit that
+history. It is still deliberately not fail-open at the image level: bytes the
+proxy knows are malformed are not sent. Every dropped image is replaced in
+place with a stable text note, and each drop emits a warn-level log naming the
+model and reason. Notes carry no ordinal or running total, so replaying the
+transcript does not invalidate the prompt-cache prefix.
 
-### Per-model ceilings (live catalog)
+Image cardinality belongs to upstream. There is no local count rejection from
+`max_prompt_images`. When upstream rejects for too many images, the proxy reads
+the ceiling from its message, retains the most recent images up to that ceiling,
+and retries once. An unparseable or second rejection is forwarded unchanged. The
+learned ceiling is retained by model id only for the current process, so later
+requests prune proactively without hardcoding or persisting a catalog value.
 
-| Model | Images | Notes |
-|---|---|---|
-| `gemini-3.1-pro-preview`, `gemini-3.6-flash` | **10** | The screenshot lane. |
-| `claude-sonnet-5` | 5 | |
-| `gpt-5.6-sol`, `gpt-5.3-codex`, `gpt-5.5`, `claude-opus-5` | 1 | |
+### Measured image ceilings (live API, 2026-08-10)
 
-All cap at 3 MiB per image. Practical consequence: multi-screenshot review
-effectively requires a gemini-backed lane, which is why `reviewer` and
-`gemini_reviewer` are the right agents to hand a set of screenshots.
+| Model group | Catalog says | Upstream reality |
+|---|---:|---|
+| `claude-opus-4.6` / `4.7` / `4.8` / `5` | 1 | >= 32; `claude-opus-5` accepted **200**, no ceiling found |
+| `claude-sonnet-4.6` / `5`, `claude-haiku-4.5` | 5 | >= 32 |
+| `gpt-5.6-sol` | 1 | **50**, enforced exactly |
+| `gpt-5.5` | 1 | accepted **120**, no ceiling found |
+| `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.6-luna` / `terra`, `gpt-5-mini` | 1 | >= 32, not escalated further |
+| `gpt-4.1`, `gpt-4.1-2025-04-14`, `gpt-4o-2024-05-13` | 1 | >= 32 |
+| `gemini-3.1-pro-preview`, `gemini-3.5-flash`, `gemini-3.6-flash` | 10 | 10, enforced exactly |
+| `grok-4.5` | 1 | Count untested: rejects a 1x1 PNG as too small (minimum-dimension rule) |
+| `gpt-4o` | 1 | Count untested: rejects PNG with "image media type not supported" |
+
+The real ceiling is **not uniform even within a family**: `gpt-5.6-sol` stops at
+50 while `gpt-5.5` accepted 120. An earlier revision of this table generalised
+"gpt-5.x = 50 exactly" from the one model that had been escalated past 32, which
+was wrong. That is the sharpest argument against replacing the catalog's number
+with a hardcoded one of our own: there is no single number to hardcode.
+
+These measurements covered all 23 vision-capable models on one machine and one
+Copilot Enterprise account. They are evidence, not configuration: the design
+does not depend on the values holding because it learns a ceiling from upstream
+rather than hardcoding one. Upstream also enforces rules the proxy does not
+model, including minimum pixel dimensions and per-model media-type support.
+The per-image 3 MiB size check remains. Practical consequence: do not choose a
+lane from the catalog's image-count field; the first over-ceiling request for a
+model pays one upstream round trip, and later requests for that model prune
+proactively.
 
 ## Peer-critic attachments (`imagePaths`)
 

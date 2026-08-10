@@ -1315,16 +1315,20 @@ describe("/mcp tools/call routing", () => {
     const PNG_B64 =
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 
-    test("the schema advertises it, with the per-model ceiling stated up front", async () => {
+    test("the schema advertises it, with the per-call budget stated up front", async () => {
       const { json } = await rpc({ jsonrpc: "2.0", id: 900, method: "tools/list", params: {} })
       const tools = (json as { result?: { tools?: Array<Record<string, unknown>> } }).result?.tools ?? []
       const critic = tools.find((t) => t.name === "codex_critic")
       const props = (critic?.inputSchema as { properties?: Record<string, { description?: string }> })
         ?.properties
       expect(props?.imagePaths).toBeDefined()
-      // The ceiling has to be known BEFORE the call, so it lives in the
-      // description rather than in a response field.
-      expect(props?.imagePaths?.description).toMatch(/10 images/)
+      // The budget has to be known BEFORE the call, so it lives in the
+      // description rather than in a response field. It states the proxy's own
+      // per-call cap, NOT a per-model image ceiling: that number is upstream's,
+      // and the catalog field that used to be quoted here said 1 for models
+      // upstream serves at 50.
+      expect(props?.imagePaths?.description).toMatch(/up to 10 per call/)
+      expect(props?.imagePaths?.description).not.toMatch(/accept 1\b/)
     })
 
     test("a non-image file is refused without any upstream call", async () => {

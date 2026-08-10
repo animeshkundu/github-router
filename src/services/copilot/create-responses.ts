@@ -3,7 +3,16 @@ import { events } from "fetch-event-stream"
 
 import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
-import { assertOutboundImagesOk, imagesInResponsesPayload } from "~/lib/vision-preflight"
+import {
+  imagesInResponsesPayload,
+  learnedImageCeiling,
+  logImagePlan,
+  parseUpstreamImageCeiling,
+  peekErrorBody,
+  planOutboundImages,
+  pruneImagesFromResponsesInput,
+  rememberImageCeiling,
+} from "~/lib/vision-preflight"
 import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { MAX_RESPONSE_BODY_BYTES, readResponseBodyCapped } from "~/lib/response-cap"
 import { state } from "~/lib/state"
@@ -28,13 +37,45 @@ export const createResponses = async (
 ) => {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
-  const enableVision = detectVision(payload.input)
-  // See the twin call in `create-chat-completions.ts`: validation happens once,
-  // here, on the assembled payload, rather than in each adapter that can add an
-  // image. Throws a 400 before any upstream call.
-  if (enableVision) {
-    assertOutboundImagesOk(payload.model, imagesInResponsesPayload(payload.input))
+  const carriesImages = detectVision(payload.input)
+  let enableVision = carriesImages
+
+  /**
+   * Apply a cardinality budget plus the per-image checks, rewriting `payload`
+   * in place of the caller's object. Returns whether anything changed.
+   *
+   * `enableVision` is recomputed here: if nothing survives, sending
+   * `copilot-vision-request: true` would trade one 400 for another.
+   */
+  const applyImagePlan = (maxImages: number | undefined): boolean => {
+    try {
+      const plan = planOutboundImages(
+        payload.model,
+        imagesInResponsesPayload(payload.input),
+        maxImages === undefined ? undefined : { maxImages },
+      )
+      if (plan.dropped === 0) return false
+      logImagePlan(payload.model, plan)
+      payload = {
+        ...payload,
+        input: pruneImagesFromResponsesInput(
+          payload.input,
+          plan.verdicts,
+        ) as ResponsesPayload["input"],
+      }
+      enableVision = plan.kept > 0
+      return true
+    } catch (error) {
+      // A latent pruner bug must not turn a forwardable upstream error into a
+      // proxy crash — not failing on images is the whole point of this path.
+      consola.warn(`Image pruning skipped for ${payload.model}: ${String(error)}`)
+      return false
+    }
   }
+
+  // Prune proactively when an earlier request already learned this model's real
+  // ceiling from upstream. Saves the round trip; costs one walk.
+  if (carriesImages) applyImagePlan(learnedImageCeiling(payload.model))
 
   const isAgentCall = detectAgentCall(payload.input)
 
@@ -61,13 +102,30 @@ export const createResponses = async (
   }
   const withRefresh = (): Promise<Response> =>
     tryRefreshAndRetry(doFetch, "/responses")
-  const response =
+  const send = (): Promise<Response> =>
     retryTransient ?
-      await fetchWithTransientRetry(withRefresh, {
+      fetchWithTransientRetry(withRefresh, {
         signal: callerSignal,
         label: "/responses",
       })
-    : await withRefresh()
+    : withRefresh()
+
+  let response = await send()
+
+  // Copilot owns the image ceiling — the catalog's `max_prompt_images` was
+  // measured wrong for 20 of 23 models — and its rejection names the real
+  // number. Prune to it and retry ONCE. A second rejection is forwarded, and an
+  // unparseable one is forwarded untouched, so this can never loop.
+  if (!response.ok && carriesImages) {
+    const ceiling = parseUpstreamImageCeiling(await peekErrorBody(response))
+    if (ceiling !== undefined) {
+      rememberImageCeiling(payload.model, ceiling)
+      if (applyImagePlan(ceiling)) {
+        void response.body?.cancel()
+        response = await send()
+      }
+    }
+  }
 
   if (!response.ok) {
     // Read the body BEFORE throwing so the actual upstream error is

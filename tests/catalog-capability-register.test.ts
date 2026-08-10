@@ -24,7 +24,7 @@ import {
 } from "~/lib/catalog-capability-register"
 import { state } from "~/lib/state"
 import type { Model, ModelsResponse } from "~/services/copilot/get-models"
-import { checkOutboundImages } from "~/lib/vision-preflight"
+import { planOutboundImages } from "~/lib/vision-preflight"
 
 const repoRoot = path.resolve(import.meta.dirname, "..")
 const getModelsSrc = readFileSync(
@@ -287,37 +287,37 @@ describe("DISPLAY_ONLY is checked, not asserted", () => {
 describe("ENFORCED is proven by mutation, not by reference", () => {
   test("supports.vision — flipping it changes the verdict", () => {
     withModel(visionModel())
-    expect(checkOutboundImages("fixture", [png]).ok).toBe(true)
+    expect(planOutboundImages("fixture", [png]).dropped).toBe(0)
 
     withModel(visionModel({ supports: { vision: false } }))
-    expect(checkOutboundImages("fixture", [png]).ok).toBe(false)
+    expect(planOutboundImages("fixture", [png]).dropped).toBe(1)
   })
 
-  test("limits.vision.max_prompt_images — raising it admits a second image", () => {
+  test("limits.vision.max_prompt_image_size — lowering it drops the same image", () => {
     withModel(visionModel())
-    expect(checkOutboundImages("fixture", [png, png]).ok).toBe(false)
-
-    withModel(visionModel({ vision: { max_prompt_images: 5 } }))
-    expect(checkOutboundImages("fixture", [png, png]).ok).toBe(true)
-  })
-
-  test("limits.vision.max_prompt_image_size — lowering it rejects the same image", () => {
-    withModel(visionModel())
-    expect(checkOutboundImages("fixture", [png]).ok).toBe(true)
+    expect(planOutboundImages("fixture", [png]).dropped).toBe(0)
 
     withModel(visionModel({ vision: { max_prompt_image_size: 8 } }))
-    expect(checkOutboundImages("fixture", [png]).ok).toBe(false)
+    expect(planOutboundImages("fixture", [png]).dropped).toBe(1)
   })
 
-  test("limits.vision.supported_media_types — removing the type rejects it", () => {
+  test("limits.vision.supported_media_types — removing the type drops it", () => {
     withModel(visionModel())
-    expect(checkOutboundImages("fixture", [png]).ok).toBe(true)
+    expect(planOutboundImages("fixture", [png]).dropped).toBe(0)
 
     withModel(visionModel({ vision: { supported_media_types: ["image/webp"] } }))
-    const verdict = checkOutboundImages("fixture", [png])
-    expect(verdict.ok).toBe(false)
-    if (verdict.ok) throw new Error("unreachable")
-    expect(verdict.message).toContain("image/webp")
+    const plan = planOutboundImages("fixture", [png])
+    expect(plan.dropped).toBe(1)
+    expect(plan.verdicts[0]?.note).toContain("image/webp")
+  })
+
+  test("limits.vision.max_prompt_images is NOT enforced, and must not become so by accident", () => {
+    // Measured 2026-08-10: the field is accurate for gemini and wrong by 32x to
+    // 128x everywhere else, so it is DISPLAY_ONLY. Enforcing it locally is what
+    // killed sessions at 2 images on a model upstream serves at 50. If someone
+    // reintroduces a local count gate, this fails.
+    withModel(visionModel({ vision: { max_prompt_images: 1 } }))
+    expect(planOutboundImages("fixture", [png, png, png]).dropped).toBe(0)
   })
 
   test("the remaining ENFORCED fields are covered by their own suites", () => {

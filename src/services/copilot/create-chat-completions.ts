@@ -3,7 +3,16 @@ import { events } from "fetch-event-stream"
 
 import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
-import { assertOutboundImagesOk, imagesInChatPayload } from "~/lib/vision-preflight"
+import {
+  imagesInChatPayload,
+  learnedImageCeiling,
+  logImagePlan,
+  parseUpstreamImageCeiling,
+  peekErrorBody,
+  planOutboundImages,
+  pruneImagesFromChatMessages,
+  rememberImageCeiling,
+} from "~/lib/vision-preflight"
 import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { MAX_RESPONSE_BODY_BYTES, readResponseBodyCapped } from "~/lib/response-cap"
 import { state } from "~/lib/state"
@@ -26,19 +35,52 @@ export const createChatCompletions = async (
 ) => {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
-  const enableVision = payload.messages.some(
+  const carriesImages = payload.messages.some(
     (x) =>
       typeof x.content !== "string"
       && x.content?.some((x) => x.type === "image_url"),
   )
-  // Single outbound chokepoint for image validation: this runs on the fully
-  // assembled payload, so every path that can introduce an image (top-level
-  // block, nested tool_result, the shim's synthetic follow-up user message,
-  // replayed history, peer attachments) is covered without each of them
-  // re-deriving the rules. Throws a 400 before any upstream call.
-  if (enableVision) {
-    assertOutboundImagesOk(payload.model, imagesInChatPayload(payload.messages))
+  let enableVision = carriesImages
+
+  /**
+   * Apply a cardinality budget plus the per-image checks on the fully assembled
+   * payload — the single outbound chokepoint, so every path that can introduce
+   * an image (top-level block, nested tool_result, the shim's synthetic
+   * follow-up user message, replayed history, peer attachments) is covered
+   * without each of them re-deriving the rules.
+   *
+   * `enableVision` is recomputed: if nothing survives, sending
+   * `copilot-vision-request: true` would trade one 400 for another.
+   */
+  const applyImagePlan = (maxImages: number | undefined): boolean => {
+    try {
+      const plan = planOutboundImages(
+        payload.model,
+        imagesInChatPayload(payload.messages),
+        maxImages === undefined ? undefined : { maxImages },
+      )
+      if (plan.dropped === 0) return false
+      logImagePlan(payload.model, plan)
+      payload = {
+        ...payload,
+        messages: pruneImagesFromChatMessages(
+          payload.messages,
+          plan.verdicts,
+        ) as ChatCompletionsPayload["messages"],
+      }
+      enableVision = plan.kept > 0
+      return true
+    } catch (error) {
+      // A latent pruner bug must not turn a forwardable upstream error into a
+      // proxy crash — not failing on images is the whole point of this path.
+      consola.warn(`Image pruning skipped for ${payload.model}: ${String(error)}`)
+      return false
+    }
   }
+
+  // Prune proactively when an earlier request already learned this model's real
+  // ceiling from upstream. Saves the round trip; costs one walk.
+  if (carriesImages) applyImagePlan(learnedImageCeiling(payload.model))
 
   // Agent/user check for X-Initiator header
   // Determine if any message is from an agent ("assistant" or "tool")
@@ -70,13 +112,30 @@ export const createChatCompletions = async (
   }
   const withRefresh = (): Promise<Response> =>
     tryRefreshAndRetry(doFetch, "/chat/completions")
-  const response =
+  const send = (): Promise<Response> =>
     retryTransient ?
-      await fetchWithTransientRetry(withRefresh, {
+      fetchWithTransientRetry(withRefresh, {
         signal: callerSignal,
         label: "/chat/completions",
       })
-    : await withRefresh()
+    : withRefresh()
+
+  let response = await send()
+
+  // Copilot owns the image ceiling — the catalog's `max_prompt_images` was
+  // measured wrong for 20 of 23 models — and its rejection names the real
+  // number. Prune to it and retry ONCE. A second rejection is forwarded, and an
+  // unparseable one is forwarded untouched, so this can never loop.
+  if (!response.ok && carriesImages) {
+    const ceiling = parseUpstreamImageCeiling(await peekErrorBody(response))
+    if (ceiling !== undefined) {
+      rememberImageCeiling(payload.model, ceiling)
+      if (applyImagePlan(ceiling)) {
+        void response.body?.cancel()
+        response = await send()
+      }
+    }
+  }
 
   if (!response.ok) {
     let errorBody: string
