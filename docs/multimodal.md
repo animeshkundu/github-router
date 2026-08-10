@@ -120,13 +120,21 @@ requests prune proactively without hardcoding or persisting a catalog value.
 
 | Model group | Catalog says | Upstream reality |
 |---|---:|---|
-| `claude-opus-4.6` / `4.7` / `4.8` / `5` | 1 | >= 32; `claude-opus-5` verified at 128 |
+| `claude-opus-4.6` / `4.7` / `4.8` / `5` | 1 | >= 32; `claude-opus-5` accepted **200**, no ceiling found |
 | `claude-sonnet-4.6` / `5`, `claude-haiku-4.5` | 5 | >= 32 |
-| `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna` / `sol` / `terra`, `gpt-5-mini` | 1 | 50 exactly |
+| `gpt-5.6-sol` | 1 | **50**, enforced exactly |
+| `gpt-5.5` | 1 | accepted **120**, no ceiling found |
+| `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.6-luna` / `terra`, `gpt-5-mini` | 1 | >= 32, not escalated further |
 | `gpt-4.1`, `gpt-4.1-2025-04-14`, `gpt-4o-2024-05-13` | 1 | >= 32 |
 | `gemini-3.1-pro-preview`, `gemini-3.5-flash`, `gemini-3.6-flash` | 10 | 10, enforced exactly |
 | `grok-4.5` | 1 | Count untested: rejects a 1x1 PNG as too small (minimum-dimension rule) |
 | `gpt-4o` | 1 | Count untested: rejects PNG with "image media type not supported" |
+
+The real ceiling is **not uniform even within a family**: `gpt-5.6-sol` stops at
+50 while `gpt-5.5` accepted 120. An earlier revision of this table generalised
+"gpt-5.x = 50 exactly" from the one model that had been escalated past 32, which
+was wrong. That is the sharpest argument against replacing the catalog's number
+with a hardcoded one of our own: there is no single number to hardcode.
 
 These measurements covered all 23 vision-capable models on one machine and one
 Copilot Enterprise account. They are evidence, not configuration: the design

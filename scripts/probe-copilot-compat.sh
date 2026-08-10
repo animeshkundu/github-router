@@ -203,7 +203,7 @@ declare -a PROBE_REGISTRY=(
   "passthrough_image_claude|exploratory|base64 RGB PNG image block on /v1/messages → claude-opus-5 NATIVE passthrough (no copilot-vision-request header): 200 + well-formed Anthropic message"
   "shim_image_tool_result_gpt55|exploratory|image inside a tool_result on /v1/messages → gpt-5.5 /responses shim: 200 (the shape a subagent reading a screenshot actually produces)"
   "shim_image_tool_result_gemini35flash|exploratory|image inside a tool_result on /v1/messages → gemini-3.5-flash /chat shim: 200 (same shape, chat egress)"
-  "vision_multi_image_gpt|exploratory|2 images to a max_prompt_images:1 gpt model → 200; the catalog field understates the real ceiling (gpt-5.x serves 50) and must not gate locally"
+  "vision_multi_image_gpt|exploratory|2 images to a max_prompt_images:1 gpt model → 200; the catalog field understates the real ceiling (gpt-5.5 accepted 120) and must not gate locally"
   "vision_ceiling_recovery_gemini|exploratory|12 images to gemini (real upstream ceiling 10) → 200; the proxy prunes to the number upstream names and retries once"
   "shim_advisor_degrade_gpt55|exploratory|advisor beta header + advisor tool on /v1/messages → gpt-5.5 /responses shim: 200 graceful degrade (advisor tool stripped, no 400)"
   "shim_advisor_degrade_gemini35flash|exploratory|advisor beta header + advisor tool on /v1/messages → gemini-3.5-flash /chat shim: 200 graceful degrade (advisor tool stripped, no 400)"
@@ -1120,10 +1120,12 @@ probe_shim_image_tool_result_gemini35flash() {
 probe_vision_multi_image_gpt() {
   # The regression this replaces: the proxy used to reject this LOCALLY at 2
   # images because gpt-5.5 publishes max_prompt_images: 1. Measured 2026-08-10,
-  # upstream serves gpt-5.x at 50, so the local gate was rejecting requests
-  # Copilot would have answered — and doing it fatally, because the count
-  # covered replayed history the caller could not edit. A 400 here means a local
-  # count gate came back.
+  # gpt-5.5 itself accepted 120 in one request, so the local gate was rejecting
+  # requests Copilot would have answered — and doing it fatally, because the
+  # count covered replayed history the caller could not edit. (The real ceiling
+  # is per-model and not uniform within a family: gpt-5.6-sol stops at 50 while
+  # gpt-5.5 took 120, which is why nothing here hardcodes a number.) A 400 here
+  # means a local count gate came back.
   do_request POST /v1/messages '{
     "model": "gpt-5.5",
     "max_tokens": 128,
@@ -1150,7 +1152,11 @@ probe_vision_ceiling_recovery_gemini() {
     \"max_tokens\": 128,
     \"messages\": [{\"role\":\"user\",\"content\":[${images},{\"type\":\"text\",\"text\":\"How many images?\"}]}]
   }"
-  assert_status 200
+  # This asserts the user-visible OUTCOME only: without the recovery this is a
+  # 400, so a well-formed 200 means the request was rescued. It cannot see the
+  # mechanism (one rejection, prune to 10, one retry, ceiling then learned) —
+  # that is pinned by tests/vision-preflight.test.ts.
+  assert_status 200     && assert_anthropic_message
 }
 
 probe_shim_advisor_degrade_gpt55() {

@@ -62,7 +62,8 @@ export const MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024
  * each up to 3 MiB, each inflating by a third on base64 — and hold them all in
  * memory at once. These are MEMORY and context budgets, not a per-model image
  * ceiling: that number is upstream's, it was measured far higher than the
- * catalog claims (gpt-5.x at 50, claude-opus-5 at 128), and a peer call wanting
+ * catalog claims (gpt-5.6-sol at 50, gpt-5.5 at 120+, claude-opus-5 at 200+),
+ * and a peer call wanting
  * more than 10 screenshots at once has a scoping problem rather than a limits
  * problem. See `~/lib/vision-preflight` for who owns cardinality.
  */

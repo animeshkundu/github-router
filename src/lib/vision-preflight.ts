@@ -8,12 +8,15 @@
  * on 2026-08-10 across all 23 vision-capable models:
  *
  *   - gemini-3.x        catalog 10 → upstream enforces exactly 10
- *   - gpt-5.x           catalog  1 → upstream enforces 50
- *   - claude-opus-*     catalog  1 → accepted 128, no ceiling found
+ *   - gpt-5.6-sol       catalog  1 → upstream enforces 50
+ *   - gpt-5.5           catalog  1 → accepted 120, no ceiling found
+ *   - claude-opus-5     catalog  1 → accepted 200, no ceiling found
  *   - claude-sonnet/haiku catalog 5 → accepted 32+
  *
- * So the field is accurate for one family and understates the truth by 32x to
- * 128x everywhere else. A local cardinality reject built on it rejected at 2
+ * So the field is accurate for one family and understates the truth by 50x to
+ * 200x everywhere else. Note the real ceiling is not even uniform WITHIN a
+ * family: gpt-5.6-sol stops at 50 while gpt-5.5 took 120, which is the sharpest
+ * argument against substituting one hardcoded number for another. A local cardinality reject built on it rejected at 2
  * what upstream serves at 50, and — because the count was taken over the whole
  * assembled payload including replayed history — the caller could not act on
  * the error, so every retry reproduced it and the session was finished.

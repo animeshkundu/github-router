@@ -123,11 +123,12 @@ export const CAPABILITY_REGISTER: Readonly<Record<string, CapabilityEntry>> = {
     classification: "DISPLAY_ONLY",
     note:
       "Measured against the live API on 2026-08-10 across all 23 vision models and found "
-      + "unreliable: accurate for gemini (10, enforced), but gpt-5.x advertises 1 and upstream "
-      + "serves 50, claude-opus-5 advertises 1 and served 128. Enforcing it locally rejected at 2 "
-      + "what upstream serves at 50, fatally — the count covered replayed history, so the caller "
-      + "could not act on the error. Copilot owns this ceiling and names the real number when it "
-      + "refuses; the transports learn it from that rejection. Printed for the operator only.",
+      + "unreliable: accurate for gemini (10, enforced), but gpt-5.6-sol advertises 1 and upstream "
+      + "serves 50, gpt-5.5 advertises 1 and accepted 120, claude-opus-5 advertises 1 and accepted "
+      + "200. The real ceiling is not even uniform within a family. Enforcing it locally rejected "
+      + "at 2 what upstream serves at 50, fatally — the count covered replayed history, so the "
+      + "caller could not act on the error. Copilot owns this ceiling and names the real number "
+      + "when it refuses; the transports learn it from that rejection. Printed for the operator only.",
   },
   "limits.vision.max_prompt_image_size": {
     classification: "ENFORCED",
