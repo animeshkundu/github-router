@@ -675,7 +675,7 @@ async function timedRun(deltaCount: number): Promise<{
   return { ms, finalLen: text.length }
 }
 
-test("buildPartial is O(n): 10k deltas finish in linear time (codex MEDIUM 6 regression guard)", async () => {
+test("buildPartial is O(n): 20k deltas finish in linear time (codex MEDIUM 6 regression guard)", async () => {
   // Warm-up pass to amortize JIT compilation and isolate per-delta cost.
   await timedRun(500)
 
@@ -684,8 +684,6 @@ test("buildPartial is O(n): 10k deltas finish in linear time (codex MEDIUM 6 reg
   // the true cost than any single one. This is noise reduction before a single
   // assertion, not a retry-until-green loop: the assertion still runs once and
   // a real quadratic regression fails every sample.
-  // Without it this test failed CI at ratio 3.03 against a 3.0 bound — a 1%
-  // miss on a threshold sitting midway between linear (~2x) and quadratic (~4x).
   const bestOf3 = async (deltas: number) => {
     const runs = [
       await timedRun(deltas),
@@ -698,23 +696,27 @@ test("buildPartial is O(n): 10k deltas finish in linear time (codex MEDIUM 6 reg
     }
   }
 
-  const small = await bestOf3(5000)
-  const large = await bestOf3(10000)
+  const large = await bestOf3(20000)
 
   // Correctness: every delta's content made it into the final text.
-  expect(small.finalLen).toBe(5000 * 5)
-  expect(large.finalLen).toBe(10000 * 5)
+  expect(large.finalLen).toBe(20000 * 5)
 
-  // Absolute bound — generous, but a regression to O(n²) on 10k deltas
-  // would be several seconds on the same hardware.
-  expect(large.ms).toBeLessThan(2000)
-
-  // Scaling ratio — linear is ~2×; quadratic is ~4×. Floor `small.ms` at 1ms to
-  // avoid divide-by-near-zero on very fast hardware where 5k deltas finish in
-  // <1ms (the absolute large-N bound is doing the real work in that case).
-  const denom = Math.max(small.ms, 1)
-  const ratio = large.ms / denom
-  expect(ratio).toBeLessThan(3.0)
+  // ONE absolute bound, and deliberately no scaling ratio.
+  //
+  // The ratio form was flaky twice — it failed CI at 3.03, and again at 3.0106
+  // after best-of-3 was added to fix it, both against a 3.0 bound. Widening the
+  // span does not rescue it either. Measured over five 2k-vs-20k runs on idle
+  // hardware, the ratio for this SAME linear implementation ranged from 9.2 to
+  // 25.8: a 2k run takes only ~6ms, far too small to be a stable denominator,
+  // while the 20k run swings with GC. Its noise floor exceeds its signal, so
+  // every available threshold is either flaky or too loose to mean anything.
+  //
+  // The absolute bound has the headroom the ratio never did. Linear is
+  // ~110-160ms here, and the O(n²) buildPartial this guards took "several
+  // seconds" at 10k, so roughly four times that at 20k. 4000ms sits ~25x above
+  // linear and ~10x below a regression, which survives a slow or loaded runner
+  // and still fails decisively on the actual bug.
+  expect(large.ms).toBeLessThan(4000)
 })
 
 test("buildPartial: 1000 deltas finish well under 100ms (team-lead acceptance bar)", async () => {
