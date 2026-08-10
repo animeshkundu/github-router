@@ -203,7 +203,8 @@ declare -a PROBE_REGISTRY=(
   "passthrough_image_claude|exploratory|base64 RGB PNG image block on /v1/messages → claude-opus-5 NATIVE passthrough (no copilot-vision-request header): 200 + well-formed Anthropic message"
   "shim_image_tool_result_gpt55|exploratory|image inside a tool_result on /v1/messages → gpt-5.5 /responses shim: 200 (the shape a subagent reading a screenshot actually produces)"
   "shim_image_tool_result_gemini35flash|exploratory|image inside a tool_result on /v1/messages → gemini-3.5-flash /chat shim: 200 (same shape, chat egress)"
-  "vision_over_limit_local_reject|exploratory|2 images to a max_prompt_images:1 model → LOCAL 400 naming the model and both counts, not an opaque upstream error"
+  "vision_multi_image_gpt|exploratory|2 images to a max_prompt_images:1 gpt model → 200; the catalog field understates the real ceiling (gpt-5.x serves 50) and must not gate locally"
+  "vision_ceiling_recovery_gemini|exploratory|12 images to gemini (real upstream ceiling 10) → 200; the proxy prunes to the number upstream names and retries once"
   "shim_advisor_degrade_gpt55|exploratory|advisor beta header + advisor tool on /v1/messages → gpt-5.5 /responses shim: 200 graceful degrade (advisor tool stripped, no 400)"
   "shim_advisor_degrade_gemini35flash|exploratory|advisor beta header + advisor tool on /v1/messages → gemini-3.5-flash /chat shim: 200 graceful degrade (advisor tool stripped, no 400)"
   "shim_count_tokens_gpt53codex|exploratory|/v1/messages/count_tokens with gpt-5.3-codex model id: 200 + input_tokens count"
@@ -1116,11 +1117,13 @@ probe_shim_image_tool_result_gemini35flash() {
   assert_status 200     && assert_anthropic_message
 }
 
-probe_vision_over_limit_local_reject() {
-  # The whole point of the outbound preflight: an over-count request must fail
-  # LOCALLY with an actionable message, not as an opaque upstream error. gpt-5.5
-  # publishes max_prompt_images: 1, so two images must be refused before any
-  # upstream call is made.
+probe_vision_multi_image_gpt() {
+  # The regression this replaces: the proxy used to reject this LOCALLY at 2
+  # images because gpt-5.5 publishes max_prompt_images: 1. Measured 2026-08-10,
+  # upstream serves gpt-5.x at 50, so the local gate was rejecting requests
+  # Copilot would have answered — and doing it fatally, because the count
+  # covered replayed history the caller could not edit. A 400 here means a local
+  # count gate came back.
   do_request POST /v1/messages '{
     "model": "gpt-5.5",
     "max_tokens": 128,
@@ -1130,7 +1133,24 @@ probe_vision_over_limit_local_reject() {
       {"type":"text","text":"Compare these."}
     ]}]
   }'
-  assert_status 400     && assert_body_contains "at most 1 image"
+  assert_status 200
+}
+
+probe_vision_ceiling_recovery_gemini() {
+  # gemini is the one family whose catalog value is real: upstream enforces 10
+  # exactly and says so ("maximum allowed for model ... is 10, got 12"). This
+  # asserts the recovery end to end — the proxy reads that number, prunes to it,
+  # retries once, and the caller sees a normal 200 instead of a dead session.
+  local img='{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}}'
+  local images="$img"
+  local i
+  for i in $(seq 2 12); do images="${images},${img}"; done
+  do_request POST /v1/messages "{
+    \"model\": \"gemini-3.1-pro-preview\",
+    \"max_tokens\": 128,
+    \"messages\": [{\"role\":\"user\",\"content\":[${images},{\"type\":\"text\",\"text\":\"How many images?\"}]}]
+  }"
+  assert_status 200
 }
 
 probe_shim_advisor_degrade_gpt55() {

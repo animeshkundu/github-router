@@ -324,10 +324,9 @@ function toolEntries(scope: McpScope): Array<ToolEntry> {
                   "Optional paths to image files (screenshots, diagrams, charts) INSIDE the workspace "
                   + "for the persona to LOOK AT. The proxy reads and encodes them, so no "
                   + "image data passes through your context. Content is identified by "
-                  + "bytes, not extension; jpeg/png/webp/gif/heic/heif, 3 MiB each. Note "
-                  + "paths are confined to the proxy's working directory. Note "
-                  + "the per-model ceiling: the gemini-backed personas accept 10 images, "
-                  + "the gpt- and opus-backed ones accept 1.",
+                  + "bytes, not extension; jpeg/png/webp/gif/heic/heif, 3 MiB each and "
+                  + "12 MiB in total, up to 10 per call. Note "
+                  + "paths are confined to the proxy's working directory.",
               },
               effort: {
                 type: "string",

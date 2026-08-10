@@ -138,13 +138,16 @@ describe("loadPeerImages", () => {
 })
 
 describe("attachment caps and base64 tolerance (review regressions)", () => {
-  test("the path count is capped at the most permissive model ceiling", async () => {
+  test("the path count is capped as a per-call memory budget", async () => {
+    // Not a per-model image ceiling: that number is upstream's, and it was
+    // measured far above the catalog's claim. This cap exists so a single call
+    // cannot hold hundreds of 3 MiB files in memory at once.
     const file = path.join(dir, "a.png")
     writeFileSync(file, PNG_BYTES)
     const res = await loadPeerImages(Array.from({ length: 11 }, () => file), dir)
     expect(res.ok).toBe(false)
     if (res.ok) throw new Error("unreachable")
-    expect(res.error).toMatch(/exceeds the 10-image ceiling/)
+    expect(res.error).toMatch(/exceeds the 10-image per-call budget/)
   })
 
   test("the aggregate byte total is capped, not just each file", async () => {

@@ -8,6 +8,17 @@ import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
 import { tryRefreshAndRetry } from "~/lib/token"
 import { fetchWithTransientRetry } from "~/lib/upstream-retry"
+import {
+  hasLearnedImageCeilings,
+  imagesInAnthropicMessages,
+  learnedImageCeiling,
+  logImagePlan,
+  parseUpstreamImageCeiling,
+  peekErrorBody,
+  planOutboundImages,
+  pruneImagesFromAnthropicMessages,
+  rememberImageCeiling,
+} from "~/lib/vision-preflight"
 
 /**
  * Build headers that match what VS Code Copilot Chat sends to the Copilot API.
@@ -50,6 +61,81 @@ function buildHeaders(
 }
 
 /**
+ * Prune the images in a parsed Anthropic request body down to `ceiling` and
+ * re-serialize. Returns `undefined` when nothing needed dropping.
+ *
+ * Never throws. A latent traversal bug in the pruner must not convert an error
+ * we could have forwarded into a proxy crash — the entire point of this change
+ * is that an image problem stops being fatal.
+ *
+ * This is the one place the proxy re-serializes a `/v1/messages` body it would
+ * otherwise forward byte-for-byte, so it inherits the usual JSON round-trip
+ * caveat for integers beyond 2^53. It runs only when a ceiling is in hand:
+ * either one upstream just stated, or one learned earlier in this process.
+ */
+function applyCeiling(
+  parsed: { model?: unknown; messages?: unknown },
+  ceiling: number,
+): string | undefined {
+  const model = typeof parsed.model === "string" ? parsed.model : ""
+  try {
+    const plan = planOutboundImages(model, imagesInAnthropicMessages(parsed.messages), {
+      maxImages: ceiling,
+    })
+    if (plan.dropped === 0) return undefined
+    logImagePlan(model, plan)
+    return JSON.stringify({
+      ...parsed,
+      messages: pruneImagesFromAnthropicMessages(parsed.messages, plan.verdicts),
+    })
+  } catch (error) {
+    consola.warn(`Image pruning skipped for ${model || "unknown model"}: ${String(error)}`)
+    return undefined
+  }
+}
+
+function parseBody(body: string): { model?: unknown; messages?: unknown } | undefined {
+  try {
+    return JSON.parse(body) as { model?: unknown; messages?: unknown }
+  } catch {
+    return undefined
+  }
+}
+
+/** Prune to a ceiling this process already learned for the body's own model. */
+function pruneToLearnedCeiling(body: string): string | undefined {
+  const parsed = parseBody(body)
+  if (!parsed) return undefined
+  const model = typeof parsed.model === "string" ? parsed.model : ""
+  if (model.length === 0) return undefined
+  const ceiling = learnedImageCeiling(model)
+  return ceiling === undefined ? undefined : applyCeiling(parsed, ceiling)
+}
+
+/** Prune to a ceiling upstream just stated, and remember it for next time. */
+function pruneToStatedCeiling(body: string, ceiling: number): string | undefined {
+  const parsed = parseBody(body)
+  if (!parsed) return undefined
+  const model = typeof parsed.model === "string" ? parsed.model : ""
+  // Attribute from the PARSED model on both the read and the write side. A
+  // regex over the raw body would match the first `"model":"..."` anywhere in
+  // it, which in a replayed transcript is easily a quoted snippet or a tool
+  // schema rather than the request's own field.
+  if (model.length > 0) rememberImageCeiling(model, ceiling)
+  return applyCeiling(parsed, ceiling)
+}
+
+/**
+ * Cheap pre-parse gate for the proactive path only. Whitespace-tolerant: a
+ * client that pretty-prints its JSON still matches. Deliberately NOT used to
+ * gate the recovery path — gating recovery on a string probe means a probe miss
+ * silently restores the fatal 400 this whole mechanism removes.
+ */
+function mayCarryImages(body: string): boolean {
+  return /"type"\s*:\s*"image"/.test(body)
+}
+
+/**
  * Forward an Anthropic Messages API request to Copilot's native /v1/messages endpoint.
  * Returns the raw Response so callers can handle streaming vs non-streaming.
  *
@@ -79,6 +165,13 @@ export async function createMessages(
   const url = `${copilotBaseUrl(state)}/v1/messages?beta=true`
   consola.debug(`Forwarding to ${url}`)
 
+  // Prune proactively only once upstream has already told us this model's real
+  // ceiling. Until then there is nothing to prune to, and parsing every body on
+  // the hot path to discover that would cost more than the round trip it saves.
+  if (hasLearnedImageCeilings() && mayCarryImages(body)) {
+    body = pruneToLearnedCeiling(body) ?? body
+  }
+
   // Re-build headers per attempt so a 401-retry picks up the refreshed token.
   const doFetch = (): Promise<Response> => {
     const headers = buildHeaders(extraHeaders)
@@ -94,13 +187,32 @@ export async function createMessages(
   }
   const withRefresh = (): Promise<Response> =>
     tryRefreshAndRetry(doFetch, "/v1/messages")
-  const response =
+  const send = (): Promise<Response> =>
     retryTransient ?
-      await fetchWithTransientRetry(withRefresh, {
+      fetchWithTransientRetry(withRefresh, {
         signal: callerSignal,
         label: "/v1/messages",
       })
-    : await withRefresh()
+    : withRefresh()
+
+  let response = await send()
+
+  // Copilot owns the image ceiling and names the real number when it refuses.
+  // Prune to it and retry ONCE; a second rejection or an unparseable one is
+  // forwarded untouched, so this can never loop. Deliberately NOT gated on a
+  // "does this body carry images" probe: `parseUpstreamImageCeiling` is already
+  // image-specific, and a probe miss would silently restore the fatal 400.
+  if (!response.ok) {
+    const ceiling = parseUpstreamImageCeiling(await peekErrorBody(response))
+    if (ceiling !== undefined) {
+      const pruned = pruneToStatedCeiling(body, ceiling)
+      if (pruned !== undefined) {
+        void response.body?.cancel()
+        body = pruned
+        response = await send()
+      }
+    }
+  }
 
   if (!response.ok) {
     let errorBody: string
