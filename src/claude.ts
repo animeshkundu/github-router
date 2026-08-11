@@ -1163,6 +1163,7 @@ export const claude = defineCommand({
           browseAvailable: browserToolsEnabled(),
           fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
+          ...nativeAvailability,
           groupKeys,
         })
         // Ordering invariant: this MUST run AFTER ensureClaudeConfigMirror()

@@ -743,9 +743,27 @@ export function buildPeerAwarenessSummary(opts: {
   browseAvailable: boolean
   fleetAvailable?: boolean
   agentToolsAvailable?: boolean
+  /** Which conditionally-emitted natives this launch wrote. `undefined` means
+   *  available, matching `buildPeerAwarenessSnippet`. Load-bearing here for the
+   *  same reason it is there and in the operating-defaults directive: `scout`
+   *  and the three `generic*` catch-alls are DROPPED rather than downgraded
+   *  when their chain misses, so naming one unconditionally in the
+   *  always-in-context surface points the lead at an agent absent from the Task
+   *  `subagent_type` enum. This surface previously took no availability at all
+   *  while its own doc comment claimed it was gated identically to the full
+   *  snippet. */
+  scoutAvailable?: boolean
+  genericAvailable?: boolean
+  genericFastAvailable?: boolean
+  genericCheapAvailable?: boolean
   groupKeys?: Partial<Record<McpGroup, string>>
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
+  const summaryCatchAlls = [
+    opts.genericAvailable === false ? undefined : "`generic`",
+    opts.genericFastAvailable === false ? undefined : "`generic-fast`",
+    opts.genericCheapAvailable === false ? undefined : "`generic-cheap`",
+  ].filter((n): n is string => n != null)
   const lines: Array<string> = [
     "## Injected capabilities (summary)",
     "",
@@ -757,7 +775,7 @@ export function buildPeerAwarenessSummary(opts: {
     // tiebreak because that is the one pair observed to route wrong: a live
     // session picked `codex_reviewer` for an assess-this-code task, which is
     // exactly the case `reviewer` exists for.
-    `Native subagents (Task), each in its own context: \`implementer\` (you know what to build), \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take), \`scout\` (find or understand something in the repo, cheap), \`scribe\` (docs and ADRs that trail the code). They read the repo and can run things; the peer critics below cannot, so reach for \`reviewer\` when an assessment needs execution or repo context and for a critic when you already hold the artifact.`,
+    `Native subagents (Task), each in its own context: \`implementer\` (you know what to build), \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).${summaryCatchAlls.length > 0 ? ` Catch-alls on non-lead models for work no specialist fits, cheapest last: ${summaryCatchAlls.join(", ")}.` : ""} They read the repo and can run things; the peer critics below cannot, so reach for \`reviewer\` when an assessment needs execution or repo context and for a critic when you already hold the artifact.`,
     `A layer of MCP tools, background workers, and skills is injected into this session. Cross-lab peer critics under \`mcp__${key("peers")}__*\` (plus the \`peer-review-coordinator\` subagent) review plans and diffs adversarially, and Claude Code's built-in \`advisor\` catches approach drift. \`mcp__${key("search")}__code\` is meaning-first code search and \`mcp__${key("search")}__web\` returns citable web sources.`,
   ]
   if (opts.workerToolsAvailable) {

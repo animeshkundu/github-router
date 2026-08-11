@@ -381,11 +381,67 @@ describe("buildPeerAwarenessSnippet", () => {
       standInAvailable: true,
       browseAvailable: false,
     })
-    for (const n of ["implementer", "reviewer", "brainstorm", "scout", "scribe"]) {
+    for (const n of [
+      "implementer",
+      "reviewer",
+      "brainstorm",
+      "scout",
+      "scribe",
+      "generic",
+      "generic-fast",
+      "generic-cheap",
+    ]) {
       expect(summary).toContain(`\`${n}\``)
     }
     expect(summary).toContain("can run things")
     expect(summary).toContain("already hold the artifact")
+  })
+
+  // Found by a live smoke test, not by the suite. This surface's doc comment
+  // claimed it was "gated identically to the full snippet so it never names a
+  // surface the live tools/list dropped", but it took NO availability booleans
+  // at all: `scout` was named unconditionally despite being dropped when no
+  // cheap-tier model resolves, and the three `generic*` catch-alls were missing
+  // entirely. That matters more here than anywhere else, because this is the
+  // always-in-context block where the routing decision is actually made — the
+  // CLAUDE.md snippet and the operating-defaults directive are both consulted,
+  // this one is resident.
+  //
+  // The positive assertions above pass whether or not the gating exists, so
+  // only building with the flags false proves the omission actually happens.
+  test("the summary omits natives this launch dropped", () => {
+    const none = buildPeerAwarenessSummary({
+      workerToolsAvailable: true,
+      standInAvailable: true,
+      browseAvailable: false,
+      scoutAvailable: false,
+      genericAvailable: false,
+      genericFastAvailable: false,
+      genericCheapAvailable: false,
+    })
+    expect(none).not.toContain("`scout`")
+    expect(none).not.toContain("`generic`")
+    expect(none).not.toContain("`generic-fast`")
+    expect(none).not.toContain("`generic-cheap`")
+    // The unconditional natives survive: they inherit the lead's model rather
+    // than being dropped, so they are always in the Task enum.
+    for (const n of ["implementer", "reviewer", "brainstorm", "scribe"]) {
+      expect(none).toContain(`\`${n}\``)
+    }
+    // The tiebreak sentence must survive the omission, not be swallowed by it.
+    expect(none).toContain("already hold the artifact")
+
+    // Each drops INDEPENDENTLY — losing one must not take the others out.
+    const onlyCheap = buildPeerAwarenessSummary({
+      workerToolsAvailable: true,
+      standInAvailable: true,
+      browseAvailable: false,
+      genericAvailable: false,
+      genericFastAvailable: false,
+    })
+    expect(onlyCheap).toContain("`generic-cheap`")
+    expect(onlyCheap).not.toContain("`generic-fast`")
+    expect(onlyCheap).toContain("`scout`")
   })
 
   test("mentions Claude Code's advisor built-in tool", () => {
@@ -499,6 +555,37 @@ describe("buildPeerAwarenessSnippet", () => {
     // advertise an agent that is not in the Task enum.
     expect(buildPeerAwarenessSnippet({ ...MINIMAL, scoutAvailable: true })).toContain("`scout`")
     expect(buildPeerAwarenessSnippet({ ...MINIMAL, scoutAvailable: false })).not.toContain("`scout`")
+    // The three `generic*` catch-alls follow the same rule, and each drops
+    // INDEPENDENTLY. The default fixtures leave these flags unset (= available),
+    // so without an explicitly-false build nothing exercises the omission at
+    // all: a mutation that hard-wired one of them ON left the whole suite green.
+    for (const [flag, name] of [
+      ["genericAvailable", "`generic`"],
+      ["genericFastAvailable", "`generic-fast`"],
+      ["genericCheapAvailable", "`generic-cheap`"],
+    ] as const) {
+      expect(buildPeerAwarenessSnippet({ ...MINIMAL, [flag]: true })).toContain(name)
+      const dropped = buildPeerAwarenessSnippet({ ...MINIMAL, [flag]: false })
+      expect(dropped).not.toContain(name)
+      // Dropping one must not drop its siblings.
+      for (const [otherFlag, otherName] of [
+        ["genericAvailable", "`generic`"],
+        ["genericFastAvailable", "`generic-fast`"],
+        ["genericCheapAvailable", "`generic-cheap`"],
+      ] as const) {
+        if (otherFlag !== flag) expect(dropped).toContain(otherName)
+      }
+    }
+    // All three gone: the clause itself disappears rather than leaving a
+    // dangling "cheapest last:" with nothing after it.
+    const noCatchAlls = buildPeerAwarenessSnippet({
+      ...MINIMAL,
+      genericAvailable: false,
+      genericFastAvailable: false,
+      genericCheapAvailable: false,
+    })
+    expect(noCatchAlls).not.toContain("Catch-alls")
+    expect(noCatchAlls).not.toContain("cheapest last")
   })
 
   test("gates browser lead and compound surfaces independently", () => {
