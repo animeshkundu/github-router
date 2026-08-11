@@ -436,7 +436,7 @@ describe("buildPeerAgentDefinitions", () => {
     expect(Object.keys(agents).some((k) => k.startsWith("worker-"))).toBe(false)
   })
 
-  test("native subagents are always injected (except scout); models set per agent", () => {
+  test("native subagents are always injected (except the four droppable); models set per agent", () => {
     const withNative = buildPeerAgentDefinitions({
       codexCli: false,
       geminiAvailable: false,
@@ -446,6 +446,9 @@ describe("buildPeerAgentDefinitions", () => {
       brainstormModel: "gemini-3.1-pro-preview",
       scoutModel: "gemini-3.6-flash",
       scribeModel: "gpt-5.6-terra",
+      genericModel: "gpt-5.6-terra",
+      genericFastModel: "gemini-3.6-flash",
+      genericCheapModel: "gpt-5.6-luna",
       nonce: NONCE,
       codexHome: "/tmp/codex",
     })
@@ -457,6 +460,11 @@ describe("buildPeerAgentDefinitions", () => {
       brainstorm: { description: "Divergent-options", model: "gemini-3.1-pro-preview", readOnly: true },
       scout: { description: "Read-only exploration", model: "gemini-3.6-flash", readOnly: true },
       scribe: { description: "Documentation subagent", model: "gpt-5.6-terra", readOnly: false },
+      // The catch-alls carry the full toolset, which is what distinguishes them
+      // from `scout`: a read-only catch-all could not finish the work it takes.
+      "generic": { description: "Catch-all subagent", model: "gpt-5.6-terra", readOnly: false },
+      "generic-fast": { description: "Catch-all subagent", model: "gemini-3.6-flash", readOnly: false },
+      "generic-cheap": { description: "Catch-all subagent", model: "gpt-5.6-luna", readOnly: false },
     }
     for (const [name, want] of Object.entries(expected)) {
       const def = withNative[name]!
@@ -475,10 +483,20 @@ describe("buildPeerAgentDefinitions", () => {
       }
     }
 
+    // Each catch-all names the model it actually resolved to, so the lead can
+    // tell them apart. `generic-fast` must NOT claim speed: that is an
+    // unmeasured inference about the flash tier, and it is not a property its
+    // `gemini-3.5-flash` fallback would share either.
+    expect(withNative.generic!.description).toContain("gpt-5.6-terra")
+    expect(withNative["generic-fast"]!.description).toContain("gemini-3.6-flash")
+    expect(withNative["generic-cheap"]!.description).toContain("gpt-5.6-luna")
+    expect(withNative["generic-fast"]!.description).not.toContain("fast")
+
     // No model in the catalog → the natives are STILL injected (no gating) but
-    // omit the `model` frontmatter so they inherit the lead's model. `scout` is
-    // the deliberate exception: it is dropped entirely rather than silently
-    // answering cheap-tier questions on the lead's expensive model.
+    // omit the `model` frontmatter so they inherit the lead's model. `scout`
+    // and the three catch-alls are the deliberate exceptions: they are dropped
+    // entirely rather than silently running cheap-tier work on the lead's
+    // expensive model, which is the whole reason they exist.
     const withoutModel = buildPeerAgentDefinitions({
       codexCli: false,
       geminiAvailable: false,
@@ -492,7 +510,23 @@ describe("buildPeerAgentDefinitions", () => {
       expect("model" in def).toBe(false)
       expect(def.description).toContain("Model is overridable at spawn")
     }
-    expect(withoutModel.scout).toBeUndefined()
+    for (const name of ["scout", "generic", "generic-fast", "generic-cheap"]) {
+      expect(withoutModel[name]).toBeUndefined()
+    }
+
+    // Each catch-all is dropped INDEPENDENTLY — one model missing must not take
+    // the other two with it.
+    const onlyCheap = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: false,
+      groupKeys: { peers: "peers" },
+      genericCheapModel: "gpt-5.6-luna",
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    expect(onlyCheap["generic-cheap"]).toBeDefined()
+    expect(onlyCheap.generic).toBeUndefined()
+    expect(onlyCheap["generic-fast"]).toBeUndefined()
   })
 
   // Claude Code budgets a subagent's context off its frontmatter model id, and
@@ -527,6 +561,9 @@ describe("buildPeerAgentDefinitions", () => {
           entry("gpt-5.6-sol", 1_050_000),
           entry("gemini-3.1-pro-preview", 1_000_000),
           entry("gpt-5.6-terra", 1_050_000),
+          entry("gemini-3.6-flash", 1_000_000),
+          entry("gemini-3.5-flash", 1_000_000),
+          entry("gpt-5.6-luna", 1_050_000),
           // scout's cheap-tier fallback: 400K, must stay bare.
           entry("gpt-5.4-mini", 400_000),
         ] as never,
@@ -540,6 +577,9 @@ describe("buildPeerAgentDefinitions", () => {
         brainstormModel: "gemini-3.1-pro-preview",
         scoutModel: "gpt-5.4-mini",
         scribeModel: "gpt-5.6-terra",
+        genericModel: "gpt-5.6-terra",
+        genericFastModel: "gemini-3.6-flash",
+        genericCheapModel: "gpt-5.6-luna",
         nonce: NONCE,
         codexHome: "/tmp/codex",
       })
@@ -550,6 +590,26 @@ describe("buildPeerAgentDefinitions", () => {
       // Sub-1M: bare, so Claude Code keeps its conservative accounting rather
       // than over-budgeting a 400K model into an overflow.
       expect(agents.scout!.model).toBe("gpt-5.4-mini")
+
+      // The catch-alls promise a 1M window in their descriptions, so EVERY
+      // member of their chains must carry the bracket — the primaries here, and
+      // the fallbacks below. A sub-1M id slipped into one of those chains would
+      // silently ship bare and be budgeted at 200K, so this is the assertion
+      // that catches it. `minContextTokens` in the resolvers is the other half.
+      expect(agents.generic!.model).toBe("gpt-5.6-terra[1m]")
+      expect(agents["generic-fast"]!.model).toBe("gemini-3.6-flash[1m]")
+      expect(agents["generic-cheap"]!.model).toBe("gpt-5.6-luna[1m]")
+      const onFallbacks = buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: false,
+        groupKeys: { peers: "peers" },
+        genericModel: "gemini-3.1-pro-preview",
+        genericFastModel: "gemini-3.5-flash",
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+      })
+      expect(onFallbacks.generic!.model).toBe("gemini-3.1-pro-preview[1m]")
+      expect(onFallbacks["generic-fast"]!.model).toBe("gemini-3.5-flash[1m]")
 
       // The decoration is frontmatter-only. Descriptions are prose the lead
       // reads, so they keep the bare id.
@@ -1280,6 +1340,12 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
         scoutModel: "gemini-3.6-flash",
+        // The catch-alls must land in the "no `tools:`" branch below: they carry
+        // the full toolset by design, which is exactly what separates them from
+        // `scout`. A read-only catch-all could not finish the work it is given.
+        genericModel: "gpt-5.6-terra",
+        genericFastModel: "gemini-3.6-flash",
+        genericCheapModel: "gpt-5.6-luna",
         runtimeDir,
         codexHome,
         agentsDir,

@@ -601,6 +601,13 @@ export function buildPeerAwarenessSnippet(opts: {
    *  model, so naming it unconditionally here would advertise an agent that is
    *  not in the Task enum. */
   scoutAvailable?: boolean
+  /** Whether each `generic*` catch-all resolved a model and was therefore
+   *  emitted. Like `scout` and unlike the other natives they are dropped rather
+   *  than downgraded to the lead's model, so naming one unconditionally would
+   *  advertise an agent absent from the Task enum. */
+  genericAvailable?: boolean
+  genericFastAvailable?: boolean
+  genericCheapAvailable?: boolean
   /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
    *  collision). Missing key → use the preferred bare key. Keeps the
    *  `mcp__<server>__<tool>` paths in this snippet pointing at OUR servers. */
@@ -647,8 +654,17 @@ export function buildPeerAwarenessSnippet(opts: {
       `\`worker-*\` are background Agent subagents (subagent_type) that run the matching worker in its own context and deliver the result as a completion notification, so a long run never blocks the turn: \`worker-explore\` (read-only research), \`worker-review\` (reads the code to verify a change or claim), \`worker-plan\` (ordered implementation plan), \`worker-implement\` (edit/write/bash; ALWAYS runs in an isolated git worktree and returns the diff via a saved patch file; for in-place edits use the \`implementer\` subagent), \`worker-test\` (independent test author; also always worktree-isolated). The raw \`mcp__${workersKey}__*\` tools they call are guarded (a direct main-thread call is redirected to the matching agent); Workers themselves have \`code_search\`.`,
     )
   }
+  const catchAllNames = [
+    opts.genericAvailable === false ? undefined : "`generic`",
+    opts.genericFastAvailable === false ? undefined : "`generic-fast`",
+    opts.genericCheapAvailable === false ? undefined : "`generic-cheap`",
+  ].filter((n): n is string => n != null)
+  const catchAllClause =
+    catchAllNames.length > 0
+      ? ` Catch-alls on non-lead models, for work no specialist fits, cheapest last: ${catchAllNames.join(", ")}.`
+      : ""
   para2Parts.push(
-    `Native subagents (Task), each in its own context so heavy work never fills yours: \`implementer\` (you know what to build), \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).`,
+    `Native subagents (Task), each in its own context so heavy work never fills yours: \`implementer\` (you know what to build), \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).${catchAllClause}`,
   )
   if (opts.workerToolsAvailable) {
     para2Parts.push(

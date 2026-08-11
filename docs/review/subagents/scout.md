@@ -7,14 +7,14 @@
 | Field | Value |
 |---|---|
 | Subagent name | `scout` |
-| Subagent's OWN model | `gemini-3.6-flash` preferred, then `gpt-5.4-mini`, only when a catalog entry advertises `tool_calls` |
-| Gate | Conditionally emitted. It is omitted entirely when neither cheap-tier model resolves, rather than inheriting the lead's model. |
+| Subagent's OWN model | `gemini-3.6-flash` preferred, then `gpt-5.6-luna`, then `gpt-5.4-mini`, only when a catalog entry advertises `tool_calls` |
+| Gate | Conditionally emitted. It is omitted entirely when no cheap-tier model resolves, rather than inheriting the lead's model. |
 | Registered via | `buildPeerAgentDefinitions` in `src/lib/codex-mcp-config.ts` |
 | Description source | Inline native-agent definition in `buildPeerAgentDefinitions` |
 | System prompt | Inline native-agent definition in `buildPeerAgentDefinitions` |
 | Tools | Read-only allowlist: Read, Grep, Glob, Bash, WebFetch, WebSearch, and the resolved `search` MCP server |
 
-It is one of five native agents: `implementer`, `reviewer`, `brainstorm`, `scout`, and `scribe`. Its cheap-tier-only model policy is deliberate: silently inheriting an expensive lead model would defeat the purpose of a low-cost lookup agent.
+It is one of eight native agents: `implementer`, `reviewer`, `brainstorm`, `scout`, `scribe`, `generic`, `generic-fast`, and `generic-cheap`. Its cheap-tier-only model policy is deliberate: silently inheriting an expensive lead model would defeat the purpose of a low-cost lookup agent. Luna fills the former direct drop from 1M Flash to 400K Mini; it preserves the `[1m]` accounting bracket before Mini remains as the widest-availability last resort.
 
 ## 2. Description (verbatim)
 
@@ -39,6 +39,6 @@ The prompt directs a broad-then-narrow repository investigation. It requires con
 
 ## 6. Findings + verdict
 
-- **No material routing defect found.** The conditional roster behavior is intentional and unique to `scout`: it is dropped rather than downgraded when its cheap-tier chain is unavailable.
+- **No material routing defect found.** The conditional roster behavior is intentional: `scout`, like the three `generic*` catch-alls, is dropped rather than downgraded when its qualifying chain is unavailable.
 
 **Verdict: Y.** The description gives a clear, cost-aware trigger for evidence-backed repository exploration.

@@ -124,19 +124,66 @@ const STYLE_DIRECTIVE =
  *
  * Self-referentially compliant with the style directive: no em dashes, no
  * Claude / Anthropic attribution.
+ *
+ * Availability-aware: four of the natives (`scout` and the three `generic*`
+ * catch-alls) are DROPPED rather than downgraded when no model in their chain
+ * resolves, so naming them unconditionally here would tell the lead to delegate
+ * to an agent that has no `.md` file and is absent from the Task
+ * `subagent_type` enum. Build the directive with
+ * `buildOperatingDefaultsDirective` and the same availability booleans used for
+ * the `.md` generation and the awareness snippet; the exported const below is
+ * the all-available form, kept for callers and tests that do not model a thin
+ * catalog.
  */
-export const OPERATING_DEFAULTS_DIRECTIVE =
-  "## Operating defaults (apply when the user has not specified otherwise; the "
-  + "user's explicit direction and the domain's own standards always override)\n\n"
-  + "Orchestrate. Delegate research, implementation, review, and large reads to the "
-  + "right subagent, worker, or model. Reach for `implementer` when you know what to "
-  + "build, `reviewer` when something exists and you want it assessed (including "
-  + "reproducing and root-causing a failure), `brainstorm` when you do not yet know "
-  + "which approach to take, `scout` to find or understand something in the repo, and "
-  + "`scribe` for docs and ADRs that trail the code; worker-* agents for background "
-  + "non-blocking runs; Task subagents for parallel work; peer critics for review. "
-  + "That keeps your own "
-  + "context free to reason and collaborate with the user. Prefer parallel "
+
+/** Which of the conditionally-emitted natives this launch actually wrote.
+ *  `undefined` means available, matching `buildPeerAwarenessSnippet`'s
+ *  `scoutAvailable` convention, so an existing caller that passes nothing keeps
+ *  the previous full-roster text. */
+export interface NativeAgentAvailability {
+  scoutAvailable?: boolean
+  genericAvailable?: boolean
+  genericFastAvailable?: boolean
+  genericCheapAvailable?: boolean
+}
+
+/** Oxford-comma join: "a", "a and b", "a, b, and c". */
+function joinClauses(parts: ReadonlyArray<string>): string {
+  if (parts.length <= 1) return parts[0] ?? ""
+  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`
+  return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`
+}
+
+/** The "Reach for X when Y" list, omitting any agent this launch did not emit. */
+function buildNativeReachClauses(opts: NativeAgentAvailability): string {
+  const clauses: Array<string> = [
+    "`implementer` when you know what to build",
+    "`reviewer` when something exists and you want it assessed (including "
+      + "reproducing and root-causing a failure)",
+    "`brainstorm` when you do not yet know which approach to take",
+  ]
+  if (opts.scoutAvailable !== false) {
+    clauses.push("`scout` to find or understand something in the repo")
+  }
+  clauses.push("`scribe` for docs and ADRs that trail the code")
+  const catchAlls = [
+    opts.genericAvailable === false ? undefined : "`generic`",
+    opts.genericFastAvailable === false ? undefined : "`generic-fast`",
+    opts.genericCheapAvailable === false ? undefined : "`generic-cheap`",
+  ].filter((c): c is string => c != null)
+  if (catchAlls.length > 0) {
+    clauses.push(
+      `${joinClauses(catchAlls)} for work no specialist fits, picking the tier `
+        + "that matches the work's weight",
+    )
+  }
+  return joinClauses(clauses)
+}
+
+/** Everything after the orchestration paragraph's agent list. Unchanged by
+ *  availability, so it lives here once rather than in both branches. */
+const OPERATING_DEFAULTS_TAIL =
+  "context free to reason and collaborate with the user. Prefer parallel "
   + "delegation for independent work. Delegation pays when the work is WIDE "
   + "(many files or sources to sweep) or SLOW, and you need only the "
   + "conclusion: the main thread is where you think with and respond to the "
@@ -187,6 +234,36 @@ export const OPERATING_DEFAULTS_DIRECTIVE =
   + "codebase itself: a lint error, a failing test, or a flaky test is worth fixing "
   + "the moment you see it, whoever introduced it. Fold it into your current work "
   + "rather than letting it derail the task the user actually asked for."
+
+/**
+ * Build the operating-defaults directive for one launch, naming only the
+ * natives that launch actually emitted.
+ *
+ * Callers must pass the SAME availability booleans they used for the `.md`
+ * generation and `buildPeerAwarenessSnippet`, so the three surfaces cannot
+ * disagree about which agents exist.
+ */
+export function buildOperatingDefaultsDirective(
+  opts: NativeAgentAvailability = {},
+): string {
+  return (
+    "## Operating defaults (apply when the user has not specified otherwise; the "
+    + "user's explicit direction and the domain's own standards always override)\n\n"
+    + "Orchestrate. Delegate research, implementation, review, and large reads to the "
+    + "right subagent, worker, or model. Reach for "
+    + buildNativeReachClauses(opts)
+    + "; worker-* agents for background "
+    + "non-blocking runs; Task subagents for parallel work; peer critics for review. "
+    + "That keeps your own "
+    + OPERATING_DEFAULTS_TAIL
+  )
+}
+
+/** The all-available form of the directive. Prefer
+ *  `buildOperatingDefaultsDirective` on any path that knows which natives
+ *  resolved; this const is the default for callers and tests that do not model
+ *  a thin catalog. */
+export const OPERATING_DEFAULTS_DIRECTIVE = buildOperatingDefaultsDirective()
 
 /**
  * Condensed digest of OPERATING_DEFAULTS_DIRECTIVE for the spawned session's

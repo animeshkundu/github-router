@@ -24,6 +24,7 @@ const {
   prependStyleDirectiveToMirroredClaudeMd,
   OPERATING_DEFAULTS_DIRECTIVE,
   OPERATING_DEFAULTS_DIGEST,
+  buildOperatingDefaultsDirective,
   findMarkerBlocks,
   __testExports,
 } = await import("../../src/lib/claude-md-injection")
@@ -828,7 +829,16 @@ test("digest and directive complement rather than duplicate each other", () => {
   expect(digest).toContain("Verify, do not assert")
 
   // The roster is lookup material: named in CLAUDE.md, not paid for per turn.
-  for (const agent of ["implementer", "reviewer", "brainstorm", "scout", "scribe"]) {
+  for (const agent of [
+    "implementer",
+    "reviewer",
+    "brainstorm",
+    "scout",
+    "scribe",
+    "generic",
+    "generic-fast",
+    "generic-cheap",
+  ]) {
     expect(directive).toContain(agent)
     expect(digest).not.toContain(agent)
   }
@@ -858,4 +868,54 @@ test("digest and directive complement rather than duplicate each other", () => {
 
   // The digest must say where the rest lives, or the split silently drops it.
   expect(digest).toContain("CLAUDE.md")
+})
+
+// Peer-finding-1 regression pin (codex_critic + gemini_critic, independently).
+//
+// Four natives are DROPPED rather than downgraded when no model in their chain
+// resolves: `scout` and the three `generic*` catch-alls. The directive used to
+// be a static const that named `scout` unconditionally, so on a thin catalog
+// the lead read an instruction to delegate to an agent with no `.md` file and
+// no entry in the Task `subagent_type` enum. The call then fails, wasting a
+// turn and inviting a retry loop.
+//
+// Without this test the defect is silently reintroducible: the all-available
+// const above still contains every name, so the roster assertion passes either
+// way. Only building with a false flag proves the omission actually happens.
+test("the operating-defaults directive omits natives this launch dropped", () => {
+  const all = buildOperatingDefaultsDirective()
+  for (const agent of ["scout", "generic", "generic-fast", "generic-cheap"]) {
+    expect(all).toContain(agent)
+  }
+  // The zero-arg form is the all-available one, so it must equal the const the
+  // rest of the suite asserts against.
+  expect(all).toBe(OPERATING_DEFAULTS_DIRECTIVE)
+
+  const none = buildOperatingDefaultsDirective({
+    scoutAvailable: false,
+    genericAvailable: false,
+    genericFastAvailable: false,
+    genericCheapAvailable: false,
+  })
+  expect(none).not.toContain("scout")
+  expect(none).not.toContain("generic")
+  // The unconditional natives survive: they inherit the lead's model rather
+  // than being dropped, so they are always in the enum.
+  for (const agent of ["implementer", "reviewer", "brainstorm", "scribe"]) {
+    expect(none).toContain(agent)
+  }
+  // And the rest of the directive is untouched by availability.
+  expect(none).toContain("Adversarial review")
+  expect(none).toContain("Engineering excellence")
+
+  // Each catch-all drops INDEPENDENTLY — losing one must not silently take the
+  // other two out of the prompt.
+  const onlyCheap = buildOperatingDefaultsDirective({
+    genericAvailable: false,
+    genericFastAvailable: false,
+  })
+  expect(onlyCheap).toContain("`generic-cheap`")
+  expect(onlyCheap).not.toContain("`generic-fast`")
+  expect(onlyCheap).not.toContain("`generic`,")
+  expect(onlyCheap).toContain("scout")
 })
