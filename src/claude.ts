@@ -70,7 +70,7 @@ import { tmpdir } from "node:os"
 import { randomBytes } from "node:crypto"
 import { buildPeerAwarenessSnippet, buildPeerAwarenessSummary, type McpGroup } from "./lib/peer-mcp-personas"
 import { injectAttributionSuppressionIntoSettingsFile } from "./lib/attribution-settings"
-import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, OPERATING_DEFAULTS_DIGEST, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
+import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, buildOperatingDefaultsDirective, type NativeAgentAvailability, OPERATING_DEFAULTS_DIGEST, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { colbertDegradedWarning, provisionAndIndexColbert } from "./lib/colbert"
@@ -94,6 +94,9 @@ import {
   reviewerModel,
   scoutModel,
   scribeModel,
+  genericModel,
+  genericFastModel,
+  genericCheapModel,
   standInToolEnabled,
   workerToolsEnabled,
 } from "./lib/mcp-capabilities"
@@ -576,6 +579,18 @@ export const claude = defineCommand({
     // off (then only the operating-defaults directive is injected).
     let peerAwarenessSnippet: string | undefined
     let peerAwarenessSummary: string | undefined
+    // Resolved ONCE per launch and reused by the `.md` generation, the
+    // awareness snippet, and the operating-defaults directive, so the three
+    // surfaces cannot disagree about which conditionally-emitted natives exist.
+    // Four of them are dropped rather than downgraded when their chain misses,
+    // and a prompt naming a dropped agent sends the lead at something absent
+    // from the Task `subagent_type` enum.
+    const nativeAvailability: NativeAgentAvailability = {
+      scoutAvailable: scoutModel() != null,
+      genericAvailable: genericModel() != null,
+      genericFastAvailable: genericFastModel() != null,
+      genericCheapAvailable: genericCheapModel() != null,
+    }
     const codexMcpEnabled = (args as Record<string, unknown>)["codex-mcp"] !== false
     if (codexMcpEnabled) {
       try {
@@ -621,6 +636,9 @@ export const claude = defineCommand({
           brainstormModel: brainstormModel(),
           scoutModel: scoutModel(),
           scribeModel: scribeModel(),
+          genericModel: genericModel(),
+          genericFastModel: genericFastModel(),
+          genericCheapModel: genericCheapModel(),
         })
         state.peerMcpNonce = runtime.nonce
         // Reach-back channel for the advisory-review hooks (hook V2): the
@@ -1132,7 +1150,7 @@ export const claude = defineCommand({
           powerBrowseAvailable: state.powerBrowseEnabled,
           fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
-          scoutAvailable: scoutModel() != null,
+          ...nativeAvailability,
           groupKeys,
         })
         // Capture the peer-awareness snippet; the always-on operating-defaults
@@ -1145,6 +1163,7 @@ export const claude = defineCommand({
           browseAvailable: browserToolsEnabled(),
           fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
+          ...nativeAvailability,
           groupKeys,
         })
         // Ordering invariant: this MUST run AFTER ensureClaudeConfigMirror()
@@ -1215,7 +1234,9 @@ export const claude = defineCommand({
         : OPERATING_DEFAULTS_DIGEST,
     )
     try {
-      await prependOperatingDefaultsToMirroredClaudeMd()
+      await prependOperatingDefaultsToMirroredClaudeMd(
+        buildOperatingDefaultsDirective(nativeAvailability),
+      )
     } catch (err) {
       consola.warn(
         `Operating-defaults CLAUDE.md prepend failed: ${

@@ -20,6 +20,7 @@ import {
   colbertSearchEnabled,
 } from "./colbert"
 import { OPENAI_FRONTIER_MODELS } from "./openai-frontier"
+import { ONE_M_TOKENS } from "./one-m-context"
 import { state, type State } from "./state"
 import {
   BROWSE_DEFAULT_MODEL,
@@ -66,17 +67,27 @@ export { OPENAI_FRONTIER_MODELS } from "./openai-frontier"
 /**
  * First id in `chain` that is present in the live catalog. With
  * `requireToolCalls`, skips an entry whose catalog record does not advertise
- * `tool_calls` (strict `!== true`, so absent metadata fails closed). Returns
- * undefined when the catalog is unavailable or nothing in the chain matches, so
- * every caller degrades gracefully rather than throwing on a thin catalog.
+ * `tool_calls` (strict `!== true`, so absent metadata fails closed). With
+ * `minContextTokens`, skips an entry whose advertised context window is below
+ * that floor (absent metadata likewise fails closed). Returns undefined when
+ * the catalog is unavailable or nothing in the chain matches, so every caller
+ * degrades gracefully rather than throwing on a thin catalog.
  *
  * Extracted from `resolveOpenAiFrontier` so the per-agent resolvers below share
  * one walk instead of hand-copying it. Ids are matched EXACTLY against
  * `catalog.id` — no slug translation, matching the pre-existing behavior.
+ *
+ * `minContextTokens` is OPT-IN because the two constraints are genuinely
+ * per-agent: the `generic*` chains promise 1M end to end, while `scoutModel`
+ * deliberately keeps a 400K last resort for its wider availability. Enforcing
+ * the floor here rather than by comment is what stops a chain silently
+ * degrading when an id's advertised window shrinks upstream — `withOneMSuffix`
+ * would then just omit the `[1m]` bracket, and the agent would be budgeted at
+ * Claude Code's 200K default with no signal that anything changed.
  */
 function firstPresentInCatalog(
   chain: ReadonlyArray<string>,
-  opts?: { requireToolCalls?: boolean },
+  opts?: { requireToolCalls?: boolean, minContextTokens?: number },
 ): string | undefined {
   const models = state.models?.data
   if (!models) return undefined
@@ -84,6 +95,13 @@ function firstPresentInCatalog(
     const found = models.find((m) => m.id === id)
     if (!found) continue
     if (opts?.requireToolCalls && found.capabilities?.supports?.tool_calls !== true) {
+      continue
+    }
+    if (
+      opts?.minContextTokens != null
+      && (found.capabilities?.limits?.max_context_window_tokens ?? 0)
+        < opts.minContextTokens
+    ) {
       continue
     }
     return id
@@ -195,11 +213,82 @@ export function scribeModel(): string | undefined {
  * caller drop the agent instead, so the lead falls back to the CLI's `Explore`
  * (same behavior as before `scout` existed) rather than to an expensive
  * impostor wearing the cheap agent's name.
+ *
+ * `gpt-5.6-luna` sits between the two originals because the old chain fell
+ * straight from a 1M model to 400K `gpt-5.4-mini`, which loses the `[1m]`
+ * bracket and drops Claude Code's accounting to its 200K default. Luna is
+ * cheaper than mini, keeps 1M, and is cross-vendor from the primary, so it
+ * covers a Gemini-side outage that a same-vendor entry would not.
+ *
+ * Deliberately NO `minContextTokens` floor, unlike the `generic*` resolvers:
+ * `gpt-5.4-mini` is retained as the last resort precisely BECAUSE it is the
+ * widest-availability id here (its `restricted_to` includes `individual_trial`
+ * and `edu`, which neither flash nor luna does). On a thin non-enterprise
+ * catalog a 400K scout beats no scout.
  */
 export function scoutModel(): string | undefined {
   return firstPresentInCatalog(
-    [EXPLORE_DEFAULT_MODEL, WORKER_DEFAULT_MODEL],
+    [EXPLORE_DEFAULT_MODEL, "gpt-5.6-luna", WORKER_DEFAULT_MODEL],
     { requireToolCalls: true },
+  )
+}
+
+/*
+ * The three `generic*` catch-alls.
+ *
+ * Every other native is a specialist (implement / review / ideate / find /
+ * document), so anything that fits none of them runs on the lead's own model.
+ * These give the lead three non-lead delegation targets at three cost points,
+ * and — like `scout` and for the same reason — each is DROPPED rather than
+ * downgraded when its chain misses: an agent whose whole value is costing less
+ * than the lead defeats itself by silently inheriting Opus.
+ *
+ * All three carry `minContextTokens: ONE_M_TOKENS`. Their descriptions promise
+ * a 1M window, so the floor is what keeps that promise true against an upstream
+ * catalog change rather than merely asserted in a comment.
+ */
+
+/** Model for `generic` — the mid-tier catch-all. Absent → the agent is dropped.
+ *
+ *  `gpt-5.6-sol` is deliberately NOT in this chain: the OpenAI frontier coder is
+ *  already `implementer`'s job, and a catch-all that quietly costs frontier
+ *  rates is the opposite of what this agent is for. Both entries are 1M+ and
+ *  mid-to-high capability, which is the most the description may claim. */
+export function genericModel(): string | undefined {
+  return firstPresentInCatalog(
+    ["gpt-5.6-terra", REVIEW_DEFAULT_MODEL],
+    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
+  )
+}
+
+/** Model for `generic-fast` — the Gemini flash tier. Absent → dropped.
+ *
+ *  Both entries are the same vendor, context, price point and `minimal..high`
+ *  effort ladder, so the agent's identity survives the fallback intact. That is
+ *  why the fallback is `gemini-3.5-flash` and not `gpt-5.6-luna`, which would
+ *  otherwise be the natural cross-vendor choice: luna is `genericCheapModel`'s
+ *  only entry, and using it in both places would collapse two roster entries
+ *  onto one model in the degraded case. */
+export function genericFastModel(): string | undefined {
+  return firstPresentInCatalog(
+    [EXPLORE_DEFAULT_MODEL, "gemini-3.5-flash"],
+    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
+  )
+}
+
+/** Model for `generic-cheap` — the cheapest catch-all. Absent → dropped.
+ *
+ *  Single-entry by design (see `genericFastModel` for why luna is not shared).
+ *  `gpt-5.6-luna` is the cheapest id in the catalog and undercuts even the 400K
+ *  `gpt-5.4-mini`, while carrying 1.05M context and the full `none..max` effort
+ *  ladder — so unlike the flash tier it propagates a CLI effort pick above
+ *  `high` rather than clamping it. No `-mini`/`-lite`/`-haiku` model in the
+ *  catalog serves 1M, which is why the cheap catch-all is a `gpt-5.6-*` slug
+ *  rather than a mini one. */
+export function genericCheapModel(): string | undefined {
+  return firstPresentInCatalog(
+    ["gpt-5.6-luna"],
+    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
   )
 }
 

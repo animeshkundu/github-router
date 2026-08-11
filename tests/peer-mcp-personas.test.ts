@@ -328,36 +328,41 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(snippet).toContain("## Peer review and advisor")
   })
 
-  test("snippet stays under ~350 tokens (~2100 bytes) in the minimal case", () => {
+  test("snippet stays under ~370 tokens (~2230 bytes) in the minimal case", () => {
     // Re-derived per peer-review I5 after the descriptive-only rewrite, then
     // bumped when the always-on orchestration tools (verify_workflow /
     // attest_step) were added to the minimal snippet, and again (2000 -> 2100)
     // when the always-on native subagents got their one-line inventory. The
     // roster later grew from three to five (implementer/reviewer/brainstorm/
     // scout/scribe) and the inventory sentence was TIGHTENED to absorb it, so
-    // this cap did not move. The cap is the smallest envelope the actual
-    // implementation fits inside, not a target driving copy growth. If a future
-    // tightening shaves bytes, lower this cap too.
+    // this cap did not move. It moves now (2100 -> 2230, measured 2215) for the
+    // three `generic*` catch-alls: they are a new capability class rather than
+    // another specialist, so the lead cannot infer them from the existing
+    // clause, and the sentence they add was already cut to the names plus the
+    // cheapest-last ordering. Each agent's own description carries its model and
+    // its trade-offs, so nothing further belongs in the always-in-context copy.
+    // The cap is the smallest envelope the actual implementation fits inside,
+    // not a target driving copy growth. If a future tightening shaves bytes,
+    // lower this cap too.
     const minimal = buildPeerAwarenessSnippet(MINIMAL)
-    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(2100)
+    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(2230)
   })
 
-  test("snippet stays under ~900 tokens (~5400 bytes) in the maximal case", () => {
+  test("snippet stays under ~930 tokens (~5580 bytes) in the maximal case", () => {
     // Maximal = EVERY gate on (gemini_reviewer, the `review`/`plan`/`test`
     // workers, the decompose/run_workflow orchestration pipeline, the three
     // floor-raising skills, browse + power). The cap tracks the smallest envelope
     // the implementation fits inside: it was bumped from 4600 when the
     // orchestration pipeline + skills + browser-power tools were added, again
-    // (4900 -> 5300) for the always-on native-subagent inventory, and again
-    // (5300 -> 5400) when that roster went from three agents to five. Measured
-    // 5370 at the time of writing. Two of the five are wholly new capabilities
-    // (divergent options, cheap read-only lookups), each earning one clause; the
-    // inventory sentence was also rewritten to state only WHEN to reach for each
-    // agent, dropping the model-fallback mechanics the lead does not need in
-    // order to choose. Each entry is a distinct capability getting one clause,
-    // not bloat. If a future tightening shaves bytes, lower it again.
+    // (4900 -> 5300) for the always-on native-subagent inventory, again
+    // (5300 -> 5400) when that roster went from three agents to five, again
+    // (5400 -> 5520) for the three `generic*` catch-alls, and now
+    // (5520 -> 5580, measured 5556) for `worker-browse`, which was emitted as a
+    // subagent whenever browse was on but named in neither prose surface. Only
+    // the maximal cap moves: the clause is browse-gated, so the minimal snippet
+    // is unchanged. If a future tightening shaves bytes, lower it again.
     const full = buildPeerAwarenessSnippet(MAXIMAL)
-    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(5400)
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(5580)
   })
 
   test("the system-prompt summary names every native and carries the reviewer-vs-critic tiebreak", () => {
@@ -377,11 +382,67 @@ describe("buildPeerAwarenessSnippet", () => {
       standInAvailable: true,
       browseAvailable: false,
     })
-    for (const n of ["implementer", "reviewer", "brainstorm", "scout", "scribe"]) {
+    for (const n of [
+      "implementer",
+      "reviewer",
+      "brainstorm",
+      "scout",
+      "scribe",
+      "generic",
+      "generic-fast",
+      "generic-cheap",
+    ]) {
       expect(summary).toContain(`\`${n}\``)
     }
     expect(summary).toContain("can run things")
     expect(summary).toContain("already hold the artifact")
+  })
+
+  // Found by a live smoke test, not by the suite. This surface's doc comment
+  // claimed it was "gated identically to the full snippet so it never names a
+  // surface the live tools/list dropped", but it took NO availability booleans
+  // at all: `scout` was named unconditionally despite being dropped when no
+  // cheap-tier model resolves, and the three `generic*` catch-alls were missing
+  // entirely. That matters more here than anywhere else, because this is the
+  // always-in-context block where the routing decision is actually made — the
+  // CLAUDE.md snippet and the operating-defaults directive are both consulted,
+  // this one is resident.
+  //
+  // The positive assertions above pass whether or not the gating exists, so
+  // only building with the flags false proves the omission actually happens.
+  test("the summary omits natives this launch dropped", () => {
+    const none = buildPeerAwarenessSummary({
+      workerToolsAvailable: true,
+      standInAvailable: true,
+      browseAvailable: false,
+      scoutAvailable: false,
+      genericAvailable: false,
+      genericFastAvailable: false,
+      genericCheapAvailable: false,
+    })
+    expect(none).not.toContain("`scout`")
+    expect(none).not.toContain("`generic`")
+    expect(none).not.toContain("`generic-fast`")
+    expect(none).not.toContain("`generic-cheap`")
+    // The unconditional natives survive: they inherit the lead's model rather
+    // than being dropped, so they are always in the Task enum.
+    for (const n of ["implementer", "reviewer", "brainstorm", "scribe"]) {
+      expect(none).toContain(`\`${n}\``)
+    }
+    // The tiebreak sentence must survive the omission, not be swallowed by it.
+    expect(none).toContain("already hold the artifact")
+
+    // Each drops INDEPENDENTLY — losing one must not take the others out.
+    const onlyCheap = buildPeerAwarenessSummary({
+      workerToolsAvailable: true,
+      standInAvailable: true,
+      browseAvailable: false,
+      genericAvailable: false,
+      genericFastAvailable: false,
+    })
+    expect(onlyCheap).toContain("`generic-cheap`")
+    expect(onlyCheap).not.toContain("`generic-fast`")
+    expect(onlyCheap).toContain("`scout`")
   })
 
   test("mentions Claude Code's advisor built-in tool", () => {
@@ -495,6 +556,80 @@ describe("buildPeerAwarenessSnippet", () => {
     // advertise an agent that is not in the Task enum.
     expect(buildPeerAwarenessSnippet({ ...MINIMAL, scoutAvailable: true })).toContain("`scout`")
     expect(buildPeerAwarenessSnippet({ ...MINIMAL, scoutAvailable: false })).not.toContain("`scout`")
+    // The three `generic*` catch-alls follow the same rule, and each drops
+    // INDEPENDENTLY. The default fixtures leave these flags unset (= available),
+    // so without an explicitly-false build nothing exercises the omission at
+    // all: a mutation that hard-wired one of them ON left the whole suite green.
+    for (const [flag, name] of [
+      ["genericAvailable", "`generic`"],
+      ["genericFastAvailable", "`generic-fast`"],
+      ["genericCheapAvailable", "`generic-cheap`"],
+    ] as const) {
+      expect(buildPeerAwarenessSnippet({ ...MINIMAL, [flag]: true })).toContain(name)
+      const dropped = buildPeerAwarenessSnippet({ ...MINIMAL, [flag]: false })
+      expect(dropped).not.toContain(name)
+      // Dropping one must not drop its siblings.
+      for (const [otherFlag, otherName] of [
+        ["genericAvailable", "`generic`"],
+        ["genericFastAvailable", "`generic-fast`"],
+        ["genericCheapAvailable", "`generic-cheap`"],
+      ] as const) {
+        if (otherFlag !== flag) expect(dropped).toContain(otherName)
+      }
+    }
+    // All three gone: the clause itself disappears rather than leaving a
+    // dangling "cheapest last:" with nothing after it.
+    const noCatchAlls = buildPeerAwarenessSnippet({
+      ...MINIMAL,
+      genericAvailable: false,
+      genericFastAvailable: false,
+      genericCheapAvailable: false,
+    })
+    expect(noCatchAlls).not.toContain("Catch-alls")
+    expect(noCatchAlls).not.toContain("cheapest last")
+  })
+
+  // `worker-browse` is emitted as a subagent whenever browse is on
+  // (`activeDispatchModes` returns six modes then), but BOTH prose surfaces
+  // hardcoded a five-item worker list that omitted it and were gated only on
+  // `workerToolsAvailable`. So an agent that was in the Task subagent_type enum
+  // was named nowhere the lead reads. Lower severity than the inverse defect
+  // (prose naming an agent that is NOT in the enum hard-fails on call), but the
+  // same roster-vs-prose disagreement this file exists to prevent.
+  test("names worker-browse in both surfaces iff browse is available", () => {
+    const base = {
+      codexCli: false,
+      geminiAvailable: true,
+      workerToolsAvailable: true,
+      standInAvailable: true,
+      compoundBrowseAvailable: false,
+    }
+    const on = buildPeerAwarenessSnippet({ ...base, browseAvailable: true })
+    const off = buildPeerAwarenessSnippet({ ...base, browseAvailable: false })
+    expect(on).toContain("`worker-browse`")
+    expect(off).not.toContain("worker-browse")
+    // The other five are unconditional on the worker gate, not the browse gate.
+    for (const w of ["worker-explore", "worker-review", "worker-plan", "worker-implement", "worker-test"]) {
+      expect(on).toContain(`\`${w}\``)
+      expect(off).toContain(`\`${w}\``)
+    }
+
+    const sumOn = buildPeerAwarenessSummary({
+      workerToolsAvailable: true, standInAvailable: true, browseAvailable: true,
+    })
+    const sumOff = buildPeerAwarenessSummary({
+      workerToolsAvailable: true, standInAvailable: true, browseAvailable: false,
+    })
+    expect(sumOn).toContain("implement, test, browse)")
+    expect(sumOff).toContain("implement, test)")
+    expect(sumOff).not.toContain(", browse)")
+
+    // Workers off entirely: neither surface names any dispatcher, browse or not.
+    const noWorkers = buildPeerAwarenessSnippet({
+      ...base, workerToolsAvailable: false, browseAvailable: true,
+    })
+    expect(noWorkers).not.toContain("worker-browse")
+    expect(noWorkers).not.toContain("worker-explore")
   })
 
   test("gates browser lead and compound surfaces independently", () => {

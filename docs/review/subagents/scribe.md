@@ -14,7 +14,7 @@
 | System prompt | Inline native-agent definition in `buildPeerAgentDefinitions` |
 | Tools | No `tools:` declaration, so it inherits the parent's full toolset |
 
-It is one of five native agents: `implementer`, `reviewer`, `brainstorm`, `scout`, and `scribe`.
+It is one of eight native agents: `implementer`, `reviewer`, `brainstorm`, `scout`, `scribe`, `generic`, `generic-fast`, and `generic-cheap`.
 
 ## 2. Description (verbatim)
 

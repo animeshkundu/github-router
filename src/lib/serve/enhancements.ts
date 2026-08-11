@@ -13,7 +13,8 @@ import {
 import {
   appendPeerAwarenessToMirroredClaudeMd,
   appendToolbeltAwarenessToMirroredClaudeMd,
-  OPERATING_DEFAULTS_DIRECTIVE,
+  buildOperatingDefaultsDirective,
+  type NativeAgentAvailability,
   prependOperatingDefaultsToMirroredClaudeMd,
   prependStyleDirectiveToMirroredClaudeMd,
 } from "../claude-md-injection"
@@ -36,6 +37,9 @@ import {
   reviewerModel,
   scoutModel,
   scribeModel,
+  genericModel,
+  genericFastModel,
+  genericCheapModel,
   standInToolEnabled,
   workerToolsEnabled,
 } from "../mcp-capabilities"
@@ -113,6 +117,15 @@ export async function provisionServeEnhancements(
 
     const gem = geminiAvailable()
     const { keys: groupKeys } = await resolveGroupKeysFromMirror(enabledGroups)
+    // Resolved once and reused by the `.md` generation, the awareness snippet,
+    // and the operating-defaults directive, so the three surfaces cannot
+    // disagree about which conditionally-emitted natives exist.
+    const nativeAvailability: NativeAgentAvailability = {
+      scoutAvailable: scoutModel() != null,
+      genericAvailable: genericModel() != null,
+      genericFastAvailable: genericFastModel() != null,
+      genericCheapAvailable: genericCheapModel() != null,
+    }
 
     const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
       codexCli: opts.codexCli === true,
@@ -125,6 +138,9 @@ export async function provisionServeEnhancements(
       brainstormModel: brainstormModel(),
       scoutModel: scoutModel(),
       scribeModel: scribeModel(),
+      genericModel: genericModel(),
+      genericFastModel: genericFastModel(),
+      genericCheapModel: genericCheapModel(),
       // Serve-only: register Claude Code's built-in Explore/Plan/general-purpose
       // subagents (the Agent SDK doesn't) so the model's habitual Agent() calls
       // resolve. Never passed by `github-router claude` (would shadow the CLI's
@@ -151,7 +167,7 @@ export async function provisionServeEnhancements(
       compoundBrowseAvailable: browseAllowed && browserCompoundToolsEnabled(),
       powerBrowseAvailable: browseAllowed && state.powerBrowseEnabled,
       agentToolsAvailable: firstMateAllowed,
-      scoutAvailable: scoutModel() != null,
+      ...nativeAvailability,
       groupKeys,
     })
 
@@ -161,7 +177,9 @@ export async function provisionServeEnhancements(
     await prependStyleDirectiveToMirroredClaudeMd().catch((err) =>
       consola.warn(`Style-directive CLAUDE.md prepend failed: ${String(err)}`),
     )
-    await prependOperatingDefaultsToMirroredClaudeMd(OPERATING_DEFAULTS_DIRECTIVE).catch((err) =>
+    await prependOperatingDefaultsToMirroredClaudeMd(
+      buildOperatingDefaultsDirective(nativeAvailability),
+    ).catch((err) =>
       consola.warn(`Operating-defaults CLAUDE.md prepend failed: ${String(err)}`),
     )
     if (toolbeltEnabled()) {

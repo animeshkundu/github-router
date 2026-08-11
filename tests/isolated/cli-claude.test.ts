@@ -194,8 +194,12 @@ mock.module("~/lib/mcp-capabilities", () => ({
   brainstormModel: mock(() => undefined),
   scribeModel: mock(() => undefined),
   // `scout` is emitted only when a cheap-tier model resolves; undefined here
-  // keeps the default agent set deterministic, matching the other gates.
+  // keeps the default agent set deterministic, matching the other gates. The
+  // three `generic*` catch-alls follow the same drop-not-downgrade rule.
   scoutModel: mock(() => undefined),
+  genericModel: mock(() => undefined),
+  genericFastModel: mock(() => undefined),
+  genericCheapModel: mock(() => undefined),
   // stand-in.ts (pulled in transitively via handler.ts) imports this;
   // stub it so the module mock doesn't break that import.
   resolveOpenAiFrontier: mock(() => "gpt-5.6-sol"),
@@ -221,6 +225,13 @@ mock.module("~/lib/claude-md-injection", () => ({
   // a recognizable marker keeps the value assertion meaningful.
   OPERATING_DEFAULTS_DIGEST: "## Operating defaults (test digest; see CLAUDE.md)",
   OPERATING_DEFAULTS_DIRECTIVE: "## Operating defaults (test full directive)",
+  // claude.ts builds the directive per-launch so it never names a native that
+  // this launch dropped. The stub echoes the availability it was handed, which
+  // keeps the prepend assertion meaningful without duplicating the real copy.
+  buildOperatingDefaultsDirective: mock(
+    (opts: Record<string, unknown> = {}) =>
+      `## Operating defaults (test full directive; availability=${JSON.stringify(opts)})`,
+  ),
   appendToolbeltAwarenessToMirroredClaudeMd:
     appendToolbeltAwarenessToMirroredClaudeMdMock,
   prependArtifactPanelDirectiveToMirroredClaudeMd:

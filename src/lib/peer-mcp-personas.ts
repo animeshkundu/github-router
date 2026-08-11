@@ -601,6 +601,13 @@ export function buildPeerAwarenessSnippet(opts: {
    *  model, so naming it unconditionally here would advertise an agent that is
    *  not in the Task enum. */
   scoutAvailable?: boolean
+  /** Whether each `generic*` catch-all resolved a model and was therefore
+   *  emitted. Like `scout` and unlike the other natives they are dropped rather
+   *  than downgraded to the lead's model, so naming one unconditionally would
+   *  advertise an agent absent from the Task enum. */
+  genericAvailable?: boolean
+  genericFastAvailable?: boolean
+  genericCheapAvailable?: boolean
   /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
    *  collision). Missing key → use the preferred bare key. Keeps the
    *  `mcp__<server>__<tool>` paths in this snippet pointing at OUR servers. */
@@ -644,11 +651,20 @@ export function buildPeerAwarenessSnippet(opts: {
   ]
   if (opts.workerToolsAvailable) {
     para2Parts.push(
-      `\`worker-*\` are background Agent subagents (subagent_type) that run the matching worker in its own context and deliver the result as a completion notification, so a long run never blocks the turn: \`worker-explore\` (read-only research), \`worker-review\` (reads the code to verify a change or claim), \`worker-plan\` (ordered implementation plan), \`worker-implement\` (edit/write/bash; ALWAYS runs in an isolated git worktree and returns the diff via a saved patch file; for in-place edits use the \`implementer\` subagent), \`worker-test\` (independent test author; also always worktree-isolated). The raw \`mcp__${workersKey}__*\` tools they call are guarded (a direct main-thread call is redirected to the matching agent); Workers themselves have \`code_search\`.`,
+      `\`worker-*\` are background Agent subagents (subagent_type) that run the matching worker in its own context and deliver the result as a completion notification, so a long run never blocks the turn: \`worker-explore\` (read-only research), \`worker-review\` (reads the code to verify a change or claim), \`worker-plan\` (ordered implementation plan), \`worker-implement\` (edit/write/bash; ALWAYS runs in an isolated git worktree and returns the diff via a saved patch file; for in-place edits use the \`implementer\` subagent), \`worker-test\` (independent test author; also always worktree-isolated)${opts.browseAvailable ? ", `worker-browse` (autonomous browser agent driving a real browser)" : ""}. The raw \`mcp__${workersKey}__*\` tools they call are guarded (a direct main-thread call is redirected to the matching agent); Workers themselves have \`code_search\`.`,
     )
   }
+  const catchAllNames = [
+    opts.genericAvailable === false ? undefined : "`generic`",
+    opts.genericFastAvailable === false ? undefined : "`generic-fast`",
+    opts.genericCheapAvailable === false ? undefined : "`generic-cheap`",
+  ].filter((n): n is string => n != null)
+  const catchAllClause =
+    catchAllNames.length > 0
+      ? ` Catch-alls on non-lead models, for work no specialist fits, cheapest last: ${catchAllNames.join(", ")}.`
+      : ""
   para2Parts.push(
-    `Native subagents (Task), each in its own context so heavy work never fills yours: \`implementer\` (you know what to build), \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).`,
+    `Native subagents (Task), each in its own context so heavy work never fills yours: \`implementer\` (you know what to build), \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).${catchAllClause}`,
   )
   if (opts.workerToolsAvailable) {
     para2Parts.push(
@@ -727,9 +743,27 @@ export function buildPeerAwarenessSummary(opts: {
   browseAvailable: boolean
   fleetAvailable?: boolean
   agentToolsAvailable?: boolean
+  /** Which conditionally-emitted natives this launch wrote. `undefined` means
+   *  available, matching `buildPeerAwarenessSnippet`. Load-bearing here for the
+   *  same reason it is there and in the operating-defaults directive: `scout`
+   *  and the three `generic*` catch-alls are DROPPED rather than downgraded
+   *  when their chain misses, so naming one unconditionally in the
+   *  always-in-context surface points the lead at an agent absent from the Task
+   *  `subagent_type` enum. This surface previously took no availability at all
+   *  while its own doc comment claimed it was gated identically to the full
+   *  snippet. */
+  scoutAvailable?: boolean
+  genericAvailable?: boolean
+  genericFastAvailable?: boolean
+  genericCheapAvailable?: boolean
   groupKeys?: Partial<Record<McpGroup, string>>
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
+  const summaryCatchAlls = [
+    opts.genericAvailable === false ? undefined : "`generic`",
+    opts.genericFastAvailable === false ? undefined : "`generic-fast`",
+    opts.genericCheapAvailable === false ? undefined : "`generic-cheap`",
+  ].filter((n): n is string => n != null)
   const lines: Array<string> = [
     "## Injected capabilities (summary)",
     "",
@@ -741,11 +775,11 @@ export function buildPeerAwarenessSummary(opts: {
     // tiebreak because that is the one pair observed to route wrong: a live
     // session picked `codex_reviewer` for an assess-this-code task, which is
     // exactly the case `reviewer` exists for.
-    `Native subagents (Task), each in its own context: \`implementer\` (you know what to build), \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take), \`scout\` (find or understand something in the repo, cheap), \`scribe\` (docs and ADRs that trail the code). They read the repo and can run things; the peer critics below cannot, so reach for \`reviewer\` when an assessment needs execution or repo context and for a critic when you already hold the artifact.`,
+    `Native subagents (Task), each in its own context: \`implementer\` (you know what to build), \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).${summaryCatchAlls.length > 0 ? ` Catch-alls on non-lead models for work no specialist fits, cheapest last: ${summaryCatchAlls.join(", ")}.` : ""} They read the repo and can run things; the peer critics below cannot, so reach for \`reviewer\` when an assessment needs execution or repo context and for a critic when you already hold the artifact.`,
     `A layer of MCP tools, background workers, and skills is injected into this session. Cross-lab peer critics under \`mcp__${key("peers")}__*\` (plus the \`peer-review-coordinator\` subagent) review plans and diffs adversarially, and Claude Code's built-in \`advisor\` catches approach drift. \`mcp__${key("search")}__code\` is meaning-first code search and \`mcp__${key("search")}__web\` returns citable web sources.`,
   ]
   if (opts.workerToolsAvailable) {
-    lines.push(`Background \`worker-*\` agents (explore, review, plan, implement, test) run delegated work in their own context without blocking your turn, and \`mcp__${key("orchestrate")}__*\` composes, verifies, and runs floor-raising workflows.`)
+    lines.push(`Background \`worker-*\` agents (explore, review, plan, implement, test${opts.browseAvailable ? ", browse" : ""}) run delegated work in their own context without blocking your turn, and \`mcp__${key("orchestrate")}__*\` composes, verifies, and runs floor-raising workflows.`)
   }
   if (opts.standInAvailable) {
     lines.push(`\`mcp__${key("decide")}__stand_in\` returns a three-lab consensus for a decision when the user is unavailable.`)
