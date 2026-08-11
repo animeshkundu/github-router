@@ -627,7 +627,7 @@ export function buildPeerAgentDefinitions(
   }
   out.scribe = {
     description: scribeModel
-      ? `Documentation subagent running ${scribeModel}. Use proactively for prose that trails the code: docs, ADRs, CLAUDE.md sections, changelog entries, and README updates that have gone stale. Keeps low-glamour upkeep off the lead's context. Model is overridable at spawn.`
+      ? `Documentation subagent running ${scribeModel} (the mid tier: documentation is verifiable prose, not frontier reasoning). Use proactively for prose that trails the code: docs, ADRs, CLAUDE.md sections, changelog entries, and README updates that have gone stale. Keeps low-glamour upkeep off the lead's context. Model is overridable at spawn.`
       : `Documentation subagent (runs on the lead's model in its own context). Use proactively for prose that trails the code: docs, ADRs, CLAUDE.md sections, changelog entries, and README updates that have gone stale. Model is overridable at spawn.`,
     prompt:
       "You are a documentation subagent. Write and maintain the prose that trails the code: docs, ADRs, CLAUDE.md sections, changelog entries, README rows. "
@@ -662,14 +662,14 @@ export function buildPeerAgentDefinitions(
   }
   if (genericFastModel) {
     out["generic-fast"] = {
-      description: `Catch-all subagent running ${genericFastModel} (1M context, Gemini flash tier — low cost, reasoning effort tops out at high). Use for well-specified work that does not need a frontier model's reasoning. Runs in its own context on a non-lead model. Model is overridable at spawn.`,
+      description: `Catch-all subagent running ${genericFastModel} (1M context, Gemini flash tier — low cost, reasoning effort tops out at high). Use for well-specified work that does not need a frontier model's reasoning. Full toolset, so it can finish the work rather than only research it. Runs in its own context on a non-lead model. Model is overridable at spawn.`,
       prompt: genericPromptFor("light, well-specified work"),
       model: withOneMSuffix(genericFastModel),
     }
   }
   if (genericCheapModel) {
     out["generic-cheap"] = {
-      description: `Catch-all subagent running ${genericCheapModel} (1M context, the lowest-cost model in the catalog, and unlike the flash tier it carries the full reasoning-effort ladder so an effort selection above high still applies). Use for high-volume or long-running work where cost dominates. Runs in its own context on a non-lead model. Model is overridable at spawn.`,
+      description: `Catch-all subagent running ${genericCheapModel} (1M context, the lowest-cost model in the catalog, and unlike the flash tier it carries the full reasoning-effort ladder so an effort selection above high still applies). Use for high-volume or long-running work where cost dominates. Full toolset, so it can finish the work rather than only research it. Runs in its own context on a non-lead model. Model is overridable at spawn.`,
       prompt: genericPromptFor("cost-sensitive work"),
       model: withOneMSuffix(genericCheapModel),
     }

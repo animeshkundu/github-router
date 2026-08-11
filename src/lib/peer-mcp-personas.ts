@@ -651,7 +651,7 @@ export function buildPeerAwarenessSnippet(opts: {
   ]
   if (opts.workerToolsAvailable) {
     para2Parts.push(
-      `\`worker-*\` are background Agent subagents (subagent_type) that run the matching worker in its own context and deliver the result as a completion notification, so a long run never blocks the turn: \`worker-explore\` (read-only research), \`worker-review\` (reads the code to verify a change or claim), \`worker-plan\` (ordered implementation plan), \`worker-implement\` (edit/write/bash; ALWAYS runs in an isolated git worktree and returns the diff via a saved patch file; for in-place edits use the \`implementer\` subagent), \`worker-test\` (independent test author; also always worktree-isolated). The raw \`mcp__${workersKey}__*\` tools they call are guarded (a direct main-thread call is redirected to the matching agent); Workers themselves have \`code_search\`.`,
+      `\`worker-*\` are background Agent subagents (subagent_type) that run the matching worker in its own context and deliver the result as a completion notification, so a long run never blocks the turn: \`worker-explore\` (read-only research), \`worker-review\` (reads the code to verify a change or claim), \`worker-plan\` (ordered implementation plan), \`worker-implement\` (edit/write/bash; ALWAYS runs in an isolated git worktree and returns the diff via a saved patch file; for in-place edits use the \`implementer\` subagent), \`worker-test\` (independent test author; also always worktree-isolated)${opts.browseAvailable ? ", `worker-browse` (autonomous browser agent driving a real browser)" : ""}. The raw \`mcp__${workersKey}__*\` tools they call are guarded (a direct main-thread call is redirected to the matching agent); Workers themselves have \`code_search\`.`,
     )
   }
   const catchAllNames = [
@@ -779,7 +779,7 @@ export function buildPeerAwarenessSummary(opts: {
     `A layer of MCP tools, background workers, and skills is injected into this session. Cross-lab peer critics under \`mcp__${key("peers")}__*\` (plus the \`peer-review-coordinator\` subagent) review plans and diffs adversarially, and Claude Code's built-in \`advisor\` catches approach drift. \`mcp__${key("search")}__code\` is meaning-first code search and \`mcp__${key("search")}__web\` returns citable web sources.`,
   ]
   if (opts.workerToolsAvailable) {
-    lines.push(`Background \`worker-*\` agents (explore, review, plan, implement, test) run delegated work in their own context without blocking your turn, and \`mcp__${key("orchestrate")}__*\` composes, verifies, and runs floor-raising workflows.`)
+    lines.push(`Background \`worker-*\` agents (explore, review, plan, implement, test${opts.browseAvailable ? ", browse" : ""}) run delegated work in their own context without blocking your turn, and \`mcp__${key("orchestrate")}__*\` composes, verifies, and runs floor-raising workflows.`)
   }
   if (opts.standInAvailable) {
     lines.push(`\`mcp__${key("decide")}__stand_in\` returns a three-lab consensus for a decision when the user is unavailable.`)

@@ -529,7 +529,61 @@ describe("buildPeerAgentDefinitions", () => {
     expect(onlyCheap["generic-fast"]).toBeUndefined()
   })
 
-  // Claude Code budgets a subagent's context off its frontmatter model id, and
+  // Description-quality invariant across the whole native roster. Each of these
+  // is what the lead actually reads in the Task `subagent_type` enum when it
+  // decides where to route, so a description missing one of them costs a
+  // routing decision, silently. Audited by hand once; pinned here so it stays
+  // true as agents are added.
+  test("every native description names its model, its trigger, and stays bare of [1m]", () => {
+    const models: Record<string, string> = {
+      implementer: "gpt-5.6-sol",
+      reviewer: "gemini-3.1-pro-preview",
+      brainstorm: "gemini-3.1-pro-preview",
+      scout: "gemini-3.6-flash",
+      scribe: "gpt-5.6-terra",
+      "generic": "gpt-5.6-terra",
+      "generic-fast": "gemini-3.6-flash",
+      "generic-cheap": "gpt-5.6-luna",
+    }
+    const agents = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: false,
+      groupKeys: { peers: "peers" },
+      nativeSubagentModel: models.implementer,
+      reviewerModel: models.reviewer,
+      brainstormModel: models.brainstorm,
+      scoutModel: models.scout,
+      scribeModel: models.scribe,
+      genericModel: models.generic,
+      genericFastModel: models["generic-fast"],
+      genericCheapModel: models["generic-cheap"],
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    for (const [name, model] of Object.entries(models)) {
+      const d = agents[name]!.description
+      // Names the model it actually resolved to, so the lead can tell the
+      // agents apart and knows what it is paying for.
+      expect(d).toContain(model)
+      // A capability hint after the model id, not a bare slug: every other
+      // agent explains WHY that model, so `scribe` should not be the exception.
+      expect(d).toMatch(new RegExp(`${model.replace(/[.\\]/g, "\\$&")}\\s*[(,]`))
+      // States when to reach for it.
+      expect(d).toMatch(/\bUse\b/)
+      // The override contract.
+      expect(d).toContain("Model is overridable at spawn")
+      // `[1m]` decorates the FRONTMATTER value only. The description is prose
+      // the lead reads, and the bracket is a Claude-Code-local accounting
+      // token that would read as part of the model name.
+      expect(d).not.toContain("[1m]")
+    }
+    // The three catch-alls must say they carry the full toolset: that is the
+    // one property distinguishing them from `scout`, which is also cheap and
+    // also non-lead but cannot finish the work it is handed.
+    for (const n of ["generic", "generic-fast", "generic-cheap"]) {
+      expect(agents[n]!.description).toMatch(/full toolset|read-and-edit/i)
+    }
+  })
   // its 1M detector (`/\[1m\]/i`) has no vendor gate. Without the suffix an
   // `implementer` on a 1,050,000-token model runs against a 200K budget.
   test("native subagent models carry [1m] iff the catalog advertises >=1M", () => {

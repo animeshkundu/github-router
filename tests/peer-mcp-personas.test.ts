@@ -348,20 +348,21 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(2230)
   })
 
-  test("snippet stays under ~920 tokens (~5520 bytes) in the maximal case", () => {
+  test("snippet stays under ~930 tokens (~5580 bytes) in the maximal case", () => {
     // Maximal = EVERY gate on (gemini_reviewer, the `review`/`plan`/`test`
     // workers, the decompose/run_workflow orchestration pipeline, the three
     // floor-raising skills, browse + power). The cap tracks the smallest envelope
     // the implementation fits inside: it was bumped from 4600 when the
     // orchestration pipeline + skills + browser-power tools were added, again
     // (4900 -> 5300) for the always-on native-subagent inventory, again
-    // (5300 -> 5400) when that roster went from three agents to five, and now
-    // (5400 -> 5520, measured 5489) for the three `generic*` catch-alls. Same
-    // justification as the minimal cap: a new capability class, already
-    // compressed to names plus ordering. If a future tightening shaves bytes,
-    // lower it again.
+    // (5300 -> 5400) when that roster went from three agents to five, again
+    // (5400 -> 5520) for the three `generic*` catch-alls, and now
+    // (5520 -> 5580, measured 5556) for `worker-browse`, which was emitted as a
+    // subagent whenever browse was on but named in neither prose surface. Only
+    // the maximal cap moves: the clause is browse-gated, so the minimal snippet
+    // is unchanged. If a future tightening shaves bytes, lower it again.
     const full = buildPeerAwarenessSnippet(MAXIMAL)
-    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(5520)
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(5580)
   })
 
   test("the system-prompt summary names every native and carries the reviewer-vs-critic tiebreak", () => {
@@ -586,6 +587,49 @@ describe("buildPeerAwarenessSnippet", () => {
     })
     expect(noCatchAlls).not.toContain("Catch-alls")
     expect(noCatchAlls).not.toContain("cheapest last")
+  })
+
+  // `worker-browse` is emitted as a subagent whenever browse is on
+  // (`activeDispatchModes` returns six modes then), but BOTH prose surfaces
+  // hardcoded a five-item worker list that omitted it and were gated only on
+  // `workerToolsAvailable`. So an agent that was in the Task subagent_type enum
+  // was named nowhere the lead reads. Lower severity than the inverse defect
+  // (prose naming an agent that is NOT in the enum hard-fails on call), but the
+  // same roster-vs-prose disagreement this file exists to prevent.
+  test("names worker-browse in both surfaces iff browse is available", () => {
+    const base = {
+      codexCli: false,
+      geminiAvailable: true,
+      workerToolsAvailable: true,
+      standInAvailable: true,
+      compoundBrowseAvailable: false,
+    }
+    const on = buildPeerAwarenessSnippet({ ...base, browseAvailable: true })
+    const off = buildPeerAwarenessSnippet({ ...base, browseAvailable: false })
+    expect(on).toContain("`worker-browse`")
+    expect(off).not.toContain("worker-browse")
+    // The other five are unconditional on the worker gate, not the browse gate.
+    for (const w of ["worker-explore", "worker-review", "worker-plan", "worker-implement", "worker-test"]) {
+      expect(on).toContain(`\`${w}\``)
+      expect(off).toContain(`\`${w}\``)
+    }
+
+    const sumOn = buildPeerAwarenessSummary({
+      workerToolsAvailable: true, standInAvailable: true, browseAvailable: true,
+    })
+    const sumOff = buildPeerAwarenessSummary({
+      workerToolsAvailable: true, standInAvailable: true, browseAvailable: false,
+    })
+    expect(sumOn).toContain("implement, test, browse)")
+    expect(sumOff).toContain("implement, test)")
+    expect(sumOff).not.toContain(", browse)")
+
+    // Workers off entirely: neither surface names any dispatcher, browse or not.
+    const noWorkers = buildPeerAwarenessSnippet({
+      ...base, workerToolsAvailable: false, browseAvailable: true,
+    })
+    expect(noWorkers).not.toContain("worker-browse")
+    expect(noWorkers).not.toContain("worker-explore")
   })
 
   test("gates browser lead and compound surfaces independently", () => {
