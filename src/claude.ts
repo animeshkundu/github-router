@@ -94,7 +94,7 @@ import {
   reviewerModel,
   scoutModel,
   scribeModel,
-  genericModel,
+  implementerFastModel,
   genericFastModel,
   genericCheapModel,
   standInToolEnabled,
@@ -587,7 +587,7 @@ export const claude = defineCommand({
     // from the Task `subagent_type` enum.
     const nativeAvailability: NativeAgentAvailability = {
       scoutAvailable: scoutModel() != null,
-      genericAvailable: genericModel() != null,
+      implementerFastAvailable: implementerFastModel() != null,
       genericFastAvailable: genericFastModel() != null,
       genericCheapAvailable: genericCheapModel() != null,
     }
@@ -636,7 +636,7 @@ export const claude = defineCommand({
           brainstormModel: brainstormModel(),
           scoutModel: scoutModel(),
           scribeModel: scribeModel(),
-          genericModel: genericModel(),
+          implementerFastModel: implementerFastModel(),
           genericFastModel: genericFastModel(),
           genericCheapModel: genericCheapModel(),
         })

@@ -52,9 +52,9 @@ Description source unless noted: `src/lib/peer-mcp-personas.ts`.
 | explore | 1194 | gemini-3.6-flash high | worker |
 | implement | 1276 | gpt-5.6-sol xhigh | worker |
 | review | 1367 | gemini-3.1-pro-preview | worker |
-| plan | 1451 | claude-opus-5 xhigh | worker |
+| plan | 1451 | claude-opus-5 high | worker |
 | test | 1529 | gpt-5.6-sol xhigh | worker |
-| browse | 1905 | gpt-5.4-mini | browse_agent |
+| browse | 1905 | gpt-5.6-luna high | browse_agent |
 
 ### orchestrate — `NON_PERSONA_MCP_TOOLS`  ·  verify/attest always-on; decompose/run gated `worker`
 | Tool | Line |

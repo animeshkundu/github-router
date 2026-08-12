@@ -131,10 +131,15 @@ beforeEach(() => {
         tool_calls: true,
         reasoning_effort: ["minimal", "low", "medium", "high"],
       }),
-      // worker-availability gate sentinel + browse default
+      // worker-availability gate sentinel
       fakeModel("gpt-5.4-mini", {
         tool_calls: true,
         reasoning_effort: ["minimal", "low", "medium", "high"],
+      }),
+      // browse default, deliberately decoupled from the gate sentinel
+      fakeModel("gpt-5.6-luna", {
+        tool_calls: true,
+        reasoning_effort: ["none", "low", "medium", "high", "xhigh", "max"],
       }),
       // implement default (routes to /responses via the stream-fn split)
       fakeModel("gpt-5.6-sol", {

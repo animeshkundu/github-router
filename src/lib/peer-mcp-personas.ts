@@ -601,11 +601,11 @@ export function buildPeerAwarenessSnippet(opts: {
    *  model, so naming it unconditionally here would advertise an agent that is
    *  not in the Task enum. */
   scoutAvailable?: boolean
-  /** Whether each `generic*` catch-all resolved a model and was therefore
-   *  emitted. Like `scout` and unlike the other natives they are dropped rather
-   *  than downgraded to the lead's model, so naming one unconditionally would
-   *  advertise an agent absent from the Task enum. */
-  genericAvailable?: boolean
+  /** Whether `implementer-fast` resolved a model and was therefore emitted.
+   *  Like `scout`, it is dropped rather than downgraded to the lead's model. */
+  implementerFastAvailable?: boolean
+  /** Whether each `generic-*` catch-all resolved a model and was therefore
+   *  emitted. Like `scout`, they are dropped rather than downgraded. */
   genericFastAvailable?: boolean
   genericCheapAvailable?: boolean
   /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
@@ -655,7 +655,6 @@ export function buildPeerAwarenessSnippet(opts: {
     )
   }
   const catchAllNames = [
-    opts.genericAvailable === false ? undefined : "`generic`",
     opts.genericFastAvailable === false ? undefined : "`generic-fast`",
     opts.genericCheapAvailable === false ? undefined : "`generic-cheap`",
   ].filter((n): n is string => n != null)
@@ -664,7 +663,7 @@ export function buildPeerAwarenessSnippet(opts: {
       ? ` Catch-alls on non-lead models, for work no specialist fits, cheapest last: ${catchAllNames.join(", ")}.`
       : ""
   para2Parts.push(
-    `Native subagents (Task), each in its own context so heavy work never fills yours: \`implementer\` (you know what to build), \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).${catchAllClause}`,
+    `Native subagents (Task), each in its own context so heavy work never fills yours: \`implementer\` (coding changes needing judgment or with ambiguous scope)${opts.implementerFastAvailable === false ? "" : ", `implementer-fast` (well-specified, mechanical coding changes)"}, \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).${catchAllClause}`,
   )
   if (opts.workerToolsAvailable) {
     para2Parts.push(
@@ -746,21 +745,20 @@ export function buildPeerAwarenessSummary(opts: {
   /** Which conditionally-emitted natives this launch wrote. `undefined` means
    *  available, matching `buildPeerAwarenessSnippet`. Load-bearing here for the
    *  same reason it is there and in the operating-defaults directive: `scout`
-   *  and the three `generic*` catch-alls are DROPPED rather than downgraded
-   *  when their chain misses, so naming one unconditionally in the
-   *  always-in-context surface points the lead at an agent absent from the Task
-   *  `subagent_type` enum. This surface previously took no availability at all
-   *  while its own doc comment claimed it was gated identically to the full
+   *  `implementer-fast` and the two `generic-*` catch-alls are DROPPED rather
+   *  than downgraded when their chain misses, so naming one unconditionally in
+   *  the always-in-context surface points the lead at an agent absent from the
+   *  Task `subagent_type` enum. This surface previously took no availability at
+   *  all while its own doc comment claimed it was gated identically to the full
    *  snippet. */
   scoutAvailable?: boolean
-  genericAvailable?: boolean
+  implementerFastAvailable?: boolean
   genericFastAvailable?: boolean
   genericCheapAvailable?: boolean
   groupKeys?: Partial<Record<McpGroup, string>>
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
   const summaryCatchAlls = [
-    opts.genericAvailable === false ? undefined : "`generic`",
     opts.genericFastAvailable === false ? undefined : "`generic-fast`",
     opts.genericCheapAvailable === false ? undefined : "`generic-cheap`",
   ].filter((n): n is string => n != null)
@@ -775,7 +773,7 @@ export function buildPeerAwarenessSummary(opts: {
     // tiebreak because that is the one pair observed to route wrong: a live
     // session picked `codex_reviewer` for an assess-this-code task, which is
     // exactly the case `reviewer` exists for.
-    `Native subagents (Task), each in its own context: \`implementer\` (you know what to build), \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).${summaryCatchAlls.length > 0 ? ` Catch-alls on non-lead models for work no specialist fits, cheapest last: ${summaryCatchAlls.join(", ")}.` : ""} They read the repo and can run things; the peer critics below cannot, so reach for \`reviewer\` when an assessment needs execution or repo context and for a critic when you already hold the artifact.`,
+    `Native subagents (Task), each in its own context: \`implementer\` (coding changes needing judgment or with ambiguous scope)${opts.implementerFastAvailable === false ? "" : ", `implementer-fast` (well-specified, mechanical coding changes)"}, \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).${summaryCatchAlls.length > 0 ? ` Catch-alls on non-lead models for work no specialist fits, cheapest last: ${summaryCatchAlls.join(", ")}.` : ""} They read the repo and can run things; the peer critics below cannot, so reach for \`reviewer\` when an assessment needs execution or repo context and for a critic when you already hold the artifact.`,
     `A layer of MCP tools, background workers, and skills is injected into this session. Cross-lab peer critics under \`mcp__${key("peers")}__*\` (plus the \`peer-review-coordinator\` subagent) review plans and diffs adversarially, and Claude Code's built-in \`advisor\` catches approach drift. \`mcp__${key("search")}__code\` is meaning-first code search and \`mcp__${key("search")}__web\` returns citable web sources.`,
   ]
   if (opts.workerToolsAvailable) {
@@ -850,11 +848,10 @@ export interface NonPersonaMcpTool {
    * `tools/list` and `tools/call` when the runtime gate is off.
    *
    * - `"worker"` (explore / review / implement) requires Copilot's
-   *   `gpt-5.4-mini` (the worker default) to be in the live catalog
+   *   `gpt-5.4-mini` worker gate sentinel to be in the live catalog
    *   with `tool_calls` support AND `GH_ROUTER_DISABLE_WORKER_TOOLS=1` to
-   *   be unset (see `workerToolsEnabled()`). implement's `gpt-5.6-sol` default
-   *   is not gated here — if absent, implement calls return a helpful
-   *   resolve error.
+   *   be unset (see `workerToolsEnabled()`). Per-mode defaults are not gated
+   *   here — if one is absent, that mode returns a helpful resolve error.
    * - `"stand_in"` requires all three of `gpt-5.6-sol`, `claude-opus-4-7`,
    *   and a `gemini-3.X.*pro` model to be in the live catalog (see
    *   `standInToolEnabled()` in `routes/mcp/handler.ts`).
@@ -875,7 +872,7 @@ export interface NonPersonaMcpTool {
    *   only the 6 lead-model tools; power mode adds the raw primitives.
    * - `"browse_agent"` (the `browse` worker tool) requires
    *   `browseAgentEnabled()` — `browserToolsEnabled()` AND the browse
-   *   default model (`gpt-5.4-mini`) reachable in the live catalog (see
+   *   default model (`gpt-5.6-luna`) reachable in the live catalog (see
    *   `browseAgentEnabled()` in `lib/mcp-capabilities.ts`). NOTE: this
    *   capability deliberately does NOT start with the literal `"browser"`
    *   so `isBrowserCapability()` in handler.ts treats it as a normal
@@ -1378,8 +1375,9 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     // backed by the Pi agent loop (`src/lib/worker-agent/engine.ts`) and routed
     // through per-mode defaults: explore -> `gemini-3.6-flash` (high), review ->
     // `gemini-3.1-pro-preview` (xhigh clamped to high by the default model), plan
-    // -> `claude-opus-5` (xhigh), and implement/test -> `gpt-5.6-sol` (xhigh). An
-    // explicit `model` arg wins.
+    // -> `claude-opus-5` (high), and implement/test -> `gpt-5.6-sol` (high). The
+    // defaults favour time-to-outcome; an explicit `model` or `thinking` arg wins,
+    // as does a `worker_defaults` session override.
     //
     // GATING (`capability: "worker"`): the MCP handler drops these entries from
     // `tools/list` and `tools/call` when `workerToolsEnabled()` is false. The gate
@@ -2177,7 +2175,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     },
     // browse — a Pi-driven autonomous browser agent (mode: "browse" of the
     // SAME `runWorkerAgent` engine as explore/review/implement), routed
-    // through Copilot's `gpt-5.4-mini` by default. It drives a real
+    // through Copilot's `gpt-5.6-luna` by default. It drives a real
     // Chrome/Edge tab via the browser-MCP bridge to accomplish `task` and
     // returns the result — runs in its OWN context so the lead's window
     // isn't burned by raw DOM / page snapshots.
@@ -2185,7 +2183,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     // GATING (`capability: "browse_agent"`): the MCP handler drops this
     // entry from `tools/list` AND `tools/call` when `browseAgentEnabled()`
     // is false — i.e. when `--browse` is off / no supported browser is on
-    // disk, OR the `gpt-5.4-mini` default isn't reachable in the live
+    // disk, OR the `gpt-5.6-luna` default isn't reachable in the live
     // catalog. Same defense-in-depth (list-time filter + call-time -32601)
     // as the other capability tags.
     //
@@ -2201,7 +2199,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       capability: "browse_agent",
       description:
         "Runs as the background `worker-browse` agent. Dispatch via the Agent tool (subagent_type: worker-browse) so the turn is never blocked; the result arrives as a completion notification. "
-        + "A Pi-driven autonomous browser worker (default model `gpt-5.4-mini`) "
+        + "A Pi-driven autonomous browser worker (default model `gpt-5.6-luna`) "
         + "drives a real browser to accomplish `task`, keeps raw DOM and page "
         + "snapshots inside its own context, and returns a single text result. "
         + "Use for delegated multi-step web tasks such as comparing prices, logging "

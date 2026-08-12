@@ -291,6 +291,71 @@ export async function handleCompletion(c: Context) {
     })
   }
 
+  // The delegation eval measures the lead's choice, not the delegated work.
+  // Keep subagent requests valid but token-free; unset in every normal launch.
+  if (
+    process.env.GH_ROUTER_DELEGATION_EVAL === "1"
+    && c.req.header("x-claude-code-agent-id")
+  ) {
+    let request: AnyRecord = {}
+    try {
+      request = JSON.parse(rawBody) as AnyRecord
+    } catch {
+      // The normal request path below owns malformed-body errors. Eval traffic
+      // comes from Claude Code and is valid JSON, so defaults are sufficient.
+    }
+    const model = typeof request.model === "string" ? request.model : "delegation-eval"
+    if (request.stream === true) {
+      const events: Array<[string, AnyRecord]> = [
+        [
+          "message_start",
+          {
+            type: "message_start",
+            message: {
+              id: "msg_delegation_eval",
+              type: "message",
+              role: "assistant",
+              model,
+              content: [],
+              stop_reason: null,
+              stop_sequence: null,
+              usage: { input_tokens: 0, output_tokens: 0 },
+            },
+          },
+        ],
+        [
+          "message_delta",
+          {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn", stop_sequence: null },
+            usage: { output_tokens: 0 },
+          },
+        ],
+        ["message_stop", { type: "message_stop" }],
+      ]
+      const body = events
+        .map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+        .join("")
+      return new Response(body, {
+        headers: {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        },
+      })
+    }
+    return c.json({
+      id: "msg_delegation_eval",
+      type: "message",
+      role: "assistant",
+      model,
+      content: [],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    })
+  }
+
   if (state.manualApprove) {
     await awaitApproval()
   }

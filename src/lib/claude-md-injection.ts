@@ -125,8 +125,8 @@ const STYLE_DIRECTIVE =
  * Self-referentially compliant with the style directive: no em dashes, no
  * Claude / Anthropic attribution.
  *
- * Availability-aware: four of the natives (`scout` and the three `generic*`
- * catch-alls) are DROPPED rather than downgraded when no model in their chain
+ * Availability-aware: four of the natives (`scout`, `implementer-fast`, and
+ * the two `generic-*` catch-alls) are DROPPED rather than downgraded when no model in their chain
  * resolves, so naming them unconditionally here would tell the lead to delegate
  * to an agent that has no `.md` file and is absent from the Task
  * `subagent_type` enum. Build the directive with
@@ -142,7 +142,7 @@ const STYLE_DIRECTIVE =
  *  the previous full-roster text. */
 export interface NativeAgentAvailability {
   scoutAvailable?: boolean
-  genericAvailable?: boolean
+  implementerFastAvailable?: boolean
   genericFastAvailable?: boolean
   genericCheapAvailable?: boolean
 }
@@ -157,17 +157,21 @@ function joinClauses(parts: ReadonlyArray<string>): string {
 /** The "Reach for X when Y" list, omitting any agent this launch did not emit. */
 function buildNativeReachClauses(opts: NativeAgentAvailability): string {
   const clauses: Array<string> = [
-    "`implementer` when you know what to build",
+    "`implementer` for coding changes that need judgment or have ambiguous scope",
+  ]
+  if (opts.implementerFastAvailable !== false) {
+    clauses.push("`implementer-fast` for well-specified, mechanical coding changes")
+  }
+  clauses.push(
     "`reviewer` when something exists and you want it assessed (including "
       + "reproducing and root-causing a failure)",
     "`brainstorm` when you do not yet know which approach to take",
-  ]
+  )
   if (opts.scoutAvailable !== false) {
     clauses.push("`scout` to find or understand something in the repo")
   }
   clauses.push("`scribe` for docs and ADRs that trail the code")
   const catchAlls = [
-    opts.genericAvailable === false ? undefined : "`generic`",
     opts.genericFastAvailable === false ? undefined : "`generic-fast`",
     opts.genericCheapAvailable === false ? undefined : "`generic-cheap`",
   ].filter((c): c is string => c != null)
@@ -183,8 +187,9 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
 /** Everything after the orchestration paragraph's agent list. Unchanged by
  *  availability, so it lives here once rather than in both branches. */
 const OPERATING_DEFAULTS_TAIL =
-  "context free to reason and collaborate with the user. Prefer parallel "
-  + "delegation for independent work. Delegation pays when the work is WIDE "
+  "context free to reason and collaborate with the user. Launch independent "
+  + "agents concurrently in a single message rather than serially. Delegation "
+  + "pays when the work is WIDE "
   + "(many files or sources to sweep) or SLOW, and you need only the "
   + "conclusion: the main thread is where you think with and respond to the "
   + "user, and its context window is a finite shared resource. It does NOT pay "

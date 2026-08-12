@@ -335,17 +335,15 @@ describe("buildPeerAwarenessSnippet", () => {
     // when the always-on native subagents got their one-line inventory. The
     // roster later grew from three to five (implementer/reviewer/brainstorm/
     // scout/scribe) and the inventory sentence was TIGHTENED to absorb it, so
-    // this cap did not move. It moves now (2100 -> 2230, measured 2215) for the
-    // three `generic*` catch-alls: they are a new capability class rather than
-    // another specialist, so the lead cannot infer them from the existing
-    // clause, and the sentence they add was already cut to the names plus the
-    // cheapest-last ordering. Each agent's own description carries its model and
-    // its trade-offs, so nothing further belongs in the always-in-context copy.
-    // The cap is the smallest envelope the actual implementation fits inside,
-    // not a target driving copy growth. If a future tightening shaves bytes,
-    // lower this cap too.
+    // this cap did not move. It moved from 2100 -> 2230 for the original three
+    // catch-alls, then to 2320 when `generic` became the longer specialist name
+    // `implementer-fast` and gained its mechanical-vs-judgment role clause.
+    // Each agent's own description carries its model and trade-offs, so nothing
+    // further belongs in the always-in-context copy. The cap is the smallest
+    // envelope the actual implementation fits inside, not a target driving copy
+    // growth. If a future tightening shaves bytes, lower this cap too.
     const minimal = buildPeerAwarenessSnippet(MINIMAL)
-    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(2230)
+    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(2320)
   })
 
   test("snippet stays under ~930 tokens (~5580 bytes) in the maximal case", () => {
@@ -358,11 +356,11 @@ describe("buildPeerAwarenessSnippet", () => {
     // (5300 -> 5400) when that roster went from three agents to five, again
     // (5400 -> 5520) for the three `generic*` catch-alls, and now
     // (5520 -> 5580, measured 5556) for `worker-browse`, which was emitted as a
-    // subagent whenever browse was on but named in neither prose surface. Only
-    // the maximal cap moves: the clause is browse-gated, so the minimal snippet
-    // is unchanged. If a future tightening shaves bytes, lower it again.
+    // subagent whenever browse was on but named in neither prose surface, then to
+    // 5660 for the `implementer-fast` name and specialist role clause. If a
+    // future tightening shaves bytes, lower it again.
     const full = buildPeerAwarenessSnippet(MAXIMAL)
-    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(5580)
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(5660)
   })
 
   test("the system-prompt summary names every native and carries the reviewer-vs-critic tiebreak", () => {
@@ -388,7 +386,7 @@ describe("buildPeerAwarenessSnippet", () => {
       "brainstorm",
       "scout",
       "scribe",
-      "generic",
+      "implementer-fast",
       "generic-fast",
       "generic-cheap",
     ]) {
@@ -416,12 +414,12 @@ describe("buildPeerAwarenessSnippet", () => {
       standInAvailable: true,
       browseAvailable: false,
       scoutAvailable: false,
-      genericAvailable: false,
+      implementerFastAvailable: false,
       genericFastAvailable: false,
       genericCheapAvailable: false,
     })
     expect(none).not.toContain("`scout`")
-    expect(none).not.toContain("`generic`")
+    expect(none).not.toContain("`implementer-fast`")
     expect(none).not.toContain("`generic-fast`")
     expect(none).not.toContain("`generic-cheap`")
     // The unconditional natives survive: they inherit the lead's model rather
@@ -437,7 +435,7 @@ describe("buildPeerAwarenessSnippet", () => {
       workerToolsAvailable: true,
       standInAvailable: true,
       browseAvailable: false,
-      genericAvailable: false,
+      implementerFastAvailable: false,
       genericFastAvailable: false,
     })
     expect(onlyCheap).toContain("`generic-cheap`")
@@ -561,7 +559,7 @@ describe("buildPeerAwarenessSnippet", () => {
     // so without an explicitly-false build nothing exercises the omission at
     // all: a mutation that hard-wired one of them ON left the whole suite green.
     for (const [flag, name] of [
-      ["genericAvailable", "`generic`"],
+      ["implementerFastAvailable", "`implementer-fast`"],
       ["genericFastAvailable", "`generic-fast`"],
       ["genericCheapAvailable", "`generic-cheap`"],
     ] as const) {
@@ -570,7 +568,7 @@ describe("buildPeerAwarenessSnippet", () => {
       expect(dropped).not.toContain(name)
       // Dropping one must not drop its siblings.
       for (const [otherFlag, otherName] of [
-        ["genericAvailable", "`generic`"],
+        ["implementerFastAvailable", "`implementer-fast`"],
         ["genericFastAvailable", "`generic-fast`"],
         ["genericCheapAvailable", "`generic-cheap`"],
       ] as const) {
@@ -581,7 +579,7 @@ describe("buildPeerAwarenessSnippet", () => {
     // dangling "cheapest last:" with nothing after it.
     const noCatchAlls = buildPeerAwarenessSnippet({
       ...MINIMAL,
-      genericAvailable: false,
+      implementerFastAvailable: false,
       genericFastAvailable: false,
       genericCheapAvailable: false,
     })

@@ -14,7 +14,7 @@
 | System prompt | Shared `genericPromptFor` inline helper in `buildPeerAgentDefinitions` |
 | Tools | No `tools:` declaration, so it inherits the parent's full toolset, including Agent. |
 
-It is one of eight native agents: `implementer`, `reviewer`, `brainstorm`, `scout`, `scribe`, `generic`, `generic-fast`, and `generic-cheap`. The resolver is `genericFastModel()` in `src/lib/mcp-capabilities.ts`; it passes both `requireToolCalls: true` and `minContextTokens: ONE_M_TOKENS` to the shared catalog walk. The 1M floor keeps the context promise honest if a catalog entry's advertised window changes.
+It is one of eight native agents: `implementer`, `implementer-fast`, `reviewer`, `brainstorm`, `scout`, `scribe`, `generic-fast`, and `generic-cheap`. The resolver is `genericFastModel()` in `src/lib/mcp-capabilities.ts`; it passes both `requireToolCalls: true` and `minContextTokens: ONE_M_TOKENS` to the shared catalog walk. The 1M floor keeps the context promise honest if a catalog entry's advertised window changes.
 
 ## 2. Description (verbatim)
 

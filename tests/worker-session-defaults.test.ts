@@ -78,7 +78,14 @@ describe("worker session defaults", () => {
     expect(ordinary.model).toBe("same-lab-override")
     expect(ordinary.thinking).toBe("low")
     expect(workflow.model).toBe("gpt-5.6-sol")
-    expect(workflow.thinking).toBe("xhigh")
+    expect(workflow.thinking).toBe("high")
+  })
+
+  test("time-to-outcome modes default to high while review retains its clamped xhigh request", () => {
+    for (const mode of ["plan", "implement", "test"] as const) {
+      expect(resolveModeDefaults(mode).thinking).toBe("high")
+    }
+    expect(resolveModeDefaults("review").thinking).toBe("xhigh")
   })
 
   test("reset restores built-ins and never mutates the gate sentinel", () => {

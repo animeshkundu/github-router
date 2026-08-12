@@ -197,7 +197,7 @@ mock.module("~/lib/mcp-capabilities", () => ({
   // keeps the default agent set deterministic, matching the other gates. The
   // three `generic*` catch-alls follow the same drop-not-downgrade rule.
   scoutModel: mock(() => undefined),
-  genericModel: mock(() => undefined),
+  implementerFastModel: mock(() => undefined),
   genericFastModel: mock(() => undefined),
   genericCheapModel: mock(() => undefined),
   // stand-in.ts (pulled in transitively via handler.ts) imports this;

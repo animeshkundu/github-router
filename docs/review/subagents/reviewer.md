@@ -14,7 +14,7 @@
 | System prompt | Inline native-agent definition in `buildPeerAgentDefinitions` |
 | Tools | No `tools:` declaration, so it inherits the parent's full toolset |
 
-It is one of eight native agents: `implementer`, `reviewer`, `brainstorm`, `scout`, `scribe`, `generic`, `generic-fast`, and `generic-cheap`. Its scope replaces the former split between `qa-engineer` and `debugger`: assessment includes the investigation needed to establish what is wrong.
+It is one of eight native agents: `implementer`, `implementer-fast`, `reviewer`, `brainstorm`, `scout`, `scribe`, `generic-fast`, and `generic-cheap`. Its scope replaces the former split between `qa-engineer` and `debugger`: assessment includes the investigation needed to establish what is wrong.
 
 ## 2. Description (verbatim)
 

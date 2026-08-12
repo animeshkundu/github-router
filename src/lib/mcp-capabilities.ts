@@ -214,22 +214,20 @@ export function scribeModel(): string | undefined {
  * (same behavior as before `scout` existed) rather than to an expensive
  * impostor wearing the cheap agent's name.
  *
- * `gpt-5.6-luna` sits between the two originals because the old chain fell
- * straight from a 1M model to 400K `gpt-5.4-mini`, which loses the `[1m]`
- * bracket and drops Claude Code's accounting to its 200K default. Luna is
- * cheaper than mini, keeps 1M, and is cross-vendor from the primary, so it
- * covers a Gemini-side outage that a same-vendor entry would not.
+ * `gpt-5.6-luna` leads because it is the cheapest 1M-context model in the
+ * catalog; the Gemini explore default remains the cross-vendor fallback with a
+ * strong agentic tool-calling record in this repo. Both entries must continue
+ * advertising at least 1M context so Claude Code's `[1m]` accounting remains
+ * honest if an upstream catalog entry shrinks.
  *
- * Deliberately NO `minContextTokens` floor, unlike the `generic*` resolvers:
- * `gpt-5.4-mini` is retained as the last resort precisely BECAUSE it is the
- * widest-availability id here (its `restricted_to` includes `individual_trial`
- * and `edu`, which neither flash nor luna does). On a thin non-enterprise
- * catalog a 400K scout beats no scout.
+ * There is deliberately no 400K last resort. On a catalog carrying neither
+ * luna nor the explore default, `scout` is dropped rather than inheriting the
+ * lead or presenting a narrower-context agent under this role.
  */
 export function scoutModel(): string | undefined {
   return firstPresentInCatalog(
-    [EXPLORE_DEFAULT_MODEL, "gpt-5.6-luna", WORKER_DEFAULT_MODEL],
-    { requireToolCalls: true },
+    ["gpt-5.6-luna", EXPLORE_DEFAULT_MODEL],
+    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
   )
 }
 
@@ -248,13 +246,14 @@ export function scoutModel(): string | undefined {
  * catalog change rather than merely asserted in a comment.
  */
 
-/** Model for `generic` — the mid-tier catch-all. Absent → the agent is dropped.
+/** Model for `implementer-fast` — the cheaper implementation tier. Absent →
+ *  the agent is dropped.
  *
- *  `gpt-5.6-sol` is deliberately NOT in this chain: the OpenAI frontier coder is
- *  already `implementer`'s job, and a catch-all that quietly costs frontier
- *  rates is the opposite of what this agent is for. Both entries are 1M+ and
- *  mid-to-high capability, which is the most the description may claim. */
-export function genericModel(): string | undefined {
+ *  `gpt-5.6-sol` is deliberately NOT in this chain: changes needing frontier
+ *  judgment already belong to `implementer`, while this agent handles
+ *  well-specified, mechanical changes at a lower tier. Both entries are 1M+;
+ *  their different speed and effort properties stay out of shared claims. */
+export function implementerFastModel(): string | undefined {
   return firstPresentInCatalog(
     ["gpt-5.6-terra", REVIEW_DEFAULT_MODEL],
     { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
@@ -297,14 +296,14 @@ export function genericCheapModel(): string | undefined {
  *
  * Returns true iff BOTH:
  *   1. Copilot's live catalog (`state.models?.data`) contains the
- *      worker default model (`gpt-5.4-mini`, used by explore)
+ *      worker gate sentinel (`gpt-5.4-mini`)
  *      AND that entry advertises `capabilities.supports.tool_calls ===
  *      true`. The worker loop is function-calling; a model that can't
  *      emit tool_calls is unusable, so dormant-register (omit from
- *      `tools/list`) keeps the surface honest. (The implement default
- *      `gpt-5.6-sol` is NOT gated here — if it's absent, implement calls
- *      surface a clean resolve error rather than disabling all worker
- *      tools, since explore/review still work.)
+ *      `tools/list`) keeps the surface honest. The per-mode defaults are
+ *      NOT gated here — if one is absent, that mode surfaces a clean resolve
+ *      error rather than disabling all worker tools, since other modes can
+ *      still work.
  *   2. The operator hasn't set `GH_ROUTER_DISABLE_WORKER_TOOLS=1`
  *      (opt-out — workers ship enabled by default per plan).
  *
@@ -447,10 +446,10 @@ export function artifactToolsEnabled(): boolean {
  *      browser is on disk. The browse agent drives the SAME Chrome/Edge
  *      bridge as the raw `browser_*` tools, so it can't be useful without
  *      that surface enabled.
- *   2. The browse default model (`BROWSE_DEFAULT_MODEL`, `gpt-5.4-mini`)
+ *   2. The browse default model (`BROWSE_DEFAULT_MODEL`, `gpt-5.6-luna`)
  *      is in Copilot's live catalog AND `pickEndpoint()` resolves a
  *      reachable endpoint for it. Unlike `workerToolsEnabled()` (which
- *      checks `tool_calls` on the gemini default), the browse default is
+ *      checks `tool_calls` on the shared gate sentinel), the browse default is
  *      a `/responses`-only gpt-5.x model — `pickEndpoint` is the right
  *      reachability probe (it returns undefined only when the model
  *      serves neither chat nor responses).

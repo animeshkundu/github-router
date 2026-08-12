@@ -7,7 +7,7 @@
 | Field | Value |
 |---|---|
 | Subagent name | `worker-plan` (`worker-dispatch.ts:58-60`) |
-| Subagent's OWN model | inherited (Claude); the WORKER runs `PLAN_DEFAULT_MODEL` = `claude-opus-5` (exact catalog id) at xhigh — "planning is the highest-leverage step, so it gets the strongest model" (repo CLAUDE.md) |
+| Subagent's OWN model | inherited (Claude); the WORKER runs `PLAN_DEFAULT_MODEL` = `claude-opus-5` (exact catalog id) at high by default; callers can restore a higher tier per call or via `worker_defaults` |
 | Gate | `workerToolsAvailable` (`codex-mcp-config.ts:326-335`) |
 | Description | `dispatcherDescription("plan")` (`worker-dispatch.ts:211-212` + suffix) |
 | System prompt | `dispatcherPrompt("plan", workersKey)` |

@@ -37,7 +37,7 @@ import {
   reviewerModel,
   scoutModel,
   scribeModel,
-  genericModel,
+  implementerFastModel,
   genericFastModel,
   genericCheapModel,
   standInToolEnabled,
@@ -122,7 +122,7 @@ export async function provisionServeEnhancements(
     // disagree about which conditionally-emitted natives exist.
     const nativeAvailability: NativeAgentAvailability = {
       scoutAvailable: scoutModel() != null,
-      genericAvailable: genericModel() != null,
+      implementerFastAvailable: implementerFastModel() != null,
       genericFastAvailable: genericFastModel() != null,
       genericCheapAvailable: genericCheapModel() != null,
     }
@@ -138,7 +138,7 @@ export async function provisionServeEnhancements(
       brainstormModel: brainstormModel(),
       scoutModel: scoutModel(),
       scribeModel: scribeModel(),
-      genericModel: genericModel(),
+      implementerFastModel: implementerFastModel(),
       genericFastModel: genericFastModel(),
       genericCheapModel: genericCheapModel(),
       // Serve-only: register Claude Code's built-in Explore/Plan/general-purpose
