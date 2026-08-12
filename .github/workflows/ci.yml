@@ -23,34 +23,38 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        # macOS earns its slot on path semantics, not general coverage. The
-        # colbert workspace-identity logic must agree across three different
-        # filesystem behaviours — Windows extended-length `\\?\` paths,
-        # macOS's `/var`->`/private/var` and `/tmp`->`/private/tmp` symlinks,
-        # and Linux case-sensitivity. A semantic-search outage traced to
-        # exactly that mismatch was invisible to a two-OS matrix, so the
-        # identity tests need no colgrep artifacts and run everywhere.
-        # Two bun lines, because a single pinned version cannot see the class
-        # of bug that actually reaches users. `1.3.14` is current stable and is
-        # the GATE. `canary` is the Rust rewrite (1.4.x) that users who ran
-        # `bun upgrade --canary` are already on — CI pinning only stable meant
-        # CI was validating a runtime nobody was running.
+        # macOS earns its slot on PATH SEMANTICS, not general breadth. The
+        # colbert workspace-identity logic must agree across three filesystem
+        # behaviours — Windows extended-length `\\?\` paths, macOS's
+        # `/var`->`/private/var` and `/tmp`->`/private/tmp` symlinks, and Linux
+        # case-sensitivity. A semantic-search outage was traced to exactly that
+        # mismatch and was invisible to a two-OS matrix. Those identity tests
+        # live in the unit suite, which is why macOS is here and not in
+        # `node-compat`.
         #
-        # It surfaced immediately: a streaming test passed on canary/Windows
-        # and failed on 1.3.14/ubuntu, because when bun's socket reaper fires
-        # is a platform- and version-specific internal detail.
-        bun-version: ["1.3.14", "canary"]
+        # Single bun line as of 2026-08-12: the supported runtime is 1.4, which
+        # ships as `canary` (no 1.4.x is on npm yet, so `"1.4"` would not
+        # resolve). Recorded rather than deleted: `1.3.14` was the stable GATE
+        # and is still what `npm i -g bun` serves, so CI now validates a
+        # PRE-RELEASE channel only and a bug reproducing solely on current
+        # stable will not be caught here. A streaming test once passed on
+        # canary/Windows and failed on 1.3.14/ubuntu, because when bun's socket
+        # reaper fires is a platform- and version-specific internal.
+        bun-version: ["canary"]
     runs-on: ${{ matrix.os }}
     # A hung job would otherwise sit on a runner for GitHub's 360-minute
     # default. The full suite is minutes, not hours, so this is a runaway
     # backstop set far above any legitimate run — it turns an infinite hang
     # into a visible failure without ever truncating real work.
     timeout-minutes: 45
-    # Canary is pre-release and moves under us. It must give signal without
-    # taking merges hostage to upstream churn we do not control — a red tick
-    # for someone else's unreleased bug would erode the zero-red-CI rule that
-    # makes a red tick mean something. Stable stays blocking on both OSes.
-    continue-on-error: ${{ matrix.bun-version == 'canary' }}
+    # `canary` was allowed to fail while `1.3.14` carried the blocking gate:
+    # a red tick for someone else's unreleased bug would erode the zero-red-CI
+    # rule that makes a red tick mean something. That trade only works while a
+    # stable lane is also running. With the matrix narrowed to the 1.4 line,
+    # canary IS the supported runtime, so it must block — leaving the old
+    # conditional in place would have made every unit-suite job advisory and
+    # turned CI permanently green regardless of failures.
+    continue-on-error: false
     steps:
       - uses: actions/checkout@v7
 
@@ -61,21 +65,24 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # Lint/typecheck/license are runtime-independent, so run them once
-      # (ubuntu + stable) rather than four times.
+      # Lint/typecheck/license are runtime-independent, so run them once rather
+      # than on every matrix cell. Pinned to ubuntu ONLY: the old condition also
+      # required bun '1.3.14', which the 2026-08-12 narrowing removed from the
+      # matrix. Left as-is it would have silently stopped running lint,
+      # typecheck, and the license guard ANYWHERE in CI.
       - name: Lint
-        if: matrix.os == 'ubuntu-latest' && matrix.bun-version == '1.3.14'
+        if: matrix.os == 'ubuntu-latest'
         run: bun run lint:all
 
       - name: Type check
-        if: matrix.os == 'ubuntu-latest' && matrix.bun-version == '1.3.14'
+        if: matrix.os == 'ubuntu-latest'
         run: bun run typecheck
 
       - name: Build
         run: bun run build
 
       - name: License guard (no AGPL/CloudCLI in tarball)
-        if: matrix.os == 'ubuntu-latest' && matrix.bun-version == '1.3.14'
+        if: matrix.os == 'ubuntu-latest'
         run: node scripts/check-pack-no-agpl.mjs
 
       - name: Ensure ast-grep (mode:"ast" tests skip silently without it)
@@ -89,19 +96,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        # Every supported node line, because node — not our code — is what
-        # changed underneath us: `--help` aborted on the Windows + node 24 lane
-        # while the identical build passed on node 22, and that lane only
-        # existed because this matrix was widened. 22 is the older LTS most
-        # users are on, 24 is what release.yml builds and publishes with, and
-        # 26 is current — shipping without it means the next teardown change
-        # lands on users first.
+        os: [ubuntu-latest, windows-latest]
+        # The supported node lines: 24 is what release.yml builds and publishes
+        # with, 26 is current. Node — not our code — is what changes underneath
+        # us: `--help` once aborted on the Windows + node 24 lane while the
+        # identical build passed on node 22, and that lane only existed because
+        # this matrix was widened.
+        #
+        # 22 was dropped on 2026-08-12 with the rest of the narrowing. Recorded
+        # rather than deleted: it was the older LTS most users were on, so a
+        # regression that only reproduces there now reaches users first.
         #
         # These lanes run the E2E surface (CLI usage paths, the mock-API smoke,
         # the serve WS relay). The UNIT suite cannot join them: it is written
         # against `bun:test`, which does not run under node at all.
-        node-version: ["22", "24", "26"]
+        node-version: ["24", "26"]
     runs-on: ${{ matrix.os }}
     # Runaway backstop; see the note on the `ci` job. The mock-API smoke here
     # already hard-fails at 30s, so this only catches a wedge outside it.
@@ -111,7 +120,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3.14"
+          bun-version: "canary"
 
       - uses: actions/setup-node@v7
         with:
