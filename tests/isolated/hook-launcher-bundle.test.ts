@@ -166,9 +166,16 @@ describe("hook launcher bundle: self-containment", () => {
     for (const m of bundleText.matchAll(/\b__?require\s*\(\s*"([^"]+)"\s*\)/g)) {
       if (m[1]) targets.add(m[1])
     }
-    // `isBuiltin` rather than a `node:` prefix test: rolldown emits some of
-    // these un-prefixed (`buffer`, `process`), which are builtins all the same.
-    const nonBuiltin = [...targets].filter((t) => !isBuiltin(t))
+    // A `node:` prefix is trusted outright rather than run past `isBuiltin`.
+    // `isBuiltin` answers for the runtime executing THIS TEST, not the one
+    // executing the hooks: bun 1.3.14 returns false for `node:sqlite` (which
+    // the bundle does pull in) while Node and newer bun return true, so using
+    // it as the sole oracle failed CI on the pinned bun while passing on
+    // canary. The prefix is unambiguous everywhere; `isBuiltin` is kept only
+    // for the legacy UNPREFIXED names rolldown emits (`buffer`, `process`).
+    const nonBuiltin = [...targets].filter(
+      (t) => !t.startsWith("node:") && !isBuiltin(t),
+    )
     expect(nonBuiltin).toEqual([])
   })
 
