@@ -58,6 +58,8 @@ export interface TaskCall {
 export interface ParsedTranscript {
   taskCalls: Array<TaskCall>
   startedAgentIds: Array<string>
+  /** Largest tool_use batch in any top-level assistant message, across all tools. */
+  maxToolBatch: number
 }
 
 export interface RunResult extends ParsedTranscript {
@@ -101,6 +103,8 @@ export interface ScoreSummary {
   routingConditionalOnDelegation: Record<ArmName, Rate>
   restraint: Record<ArmName, Rate>
   parallelFanout: Record<ArmName, Rate>
+  parallelFanoutInconclusive: Record<ArmName, number>
+  parallelFanoutErrored: Record<ArmName, number>
   complexImplementationDelegation: Record<ArmName, Rate>
   pairedTransitions: {
     noDelegationToDelegation: number
@@ -276,7 +280,12 @@ function stripAnsi(text: string): string {
 
 function parseStreamObject(
   value: unknown,
-  state: { taskCalls: Array<TaskCall>; startedAgentIds: Set<string>; assistantMessage: number },
+  state: {
+    taskCalls: Array<TaskCall>
+    startedAgentIds: Set<string>
+    assistantMessage: number
+    maxToolBatch: number
+  },
 ): void {
   if (!value || typeof value !== "object" || Array.isArray(value)) return
   const obj = value as Record<string, unknown>
@@ -289,9 +298,11 @@ function parseStreamObject(
       const content = (message as Record<string, unknown>).content
       if (Array.isArray(content)) {
         let batchPosition = 0
+        let toolBatch = 0
         for (const block of content) {
           if (!block || typeof block !== "object" || Array.isArray(block)) continue
           const record = block as Record<string, unknown>
+          if (record.type === "tool_use") toolBatch += 1
           if (record.type !== "tool_use" || (record.name !== "Task" && record.name !== "Agent")) continue
           const input = record.input
           if (!input || typeof input !== "object" || Array.isArray(input)) continue
@@ -306,6 +317,7 @@ function parseStreamObject(
             toolUseId: typeof record.id === "string" ? record.id : undefined,
           })
         }
+        state.maxToolBatch = Math.max(state.maxToolBatch, toolBatch)
       }
     }
   }
@@ -316,6 +328,7 @@ export function parseTranscript(text: string): ParsedTranscript {
     taskCalls: [] as Array<TaskCall>,
     startedAgentIds: new Set<string>(),
     assistantMessage: 0,
+    maxToolBatch: 0,
   }
   for (const rawLine of text.split(/\r?\n/)) {
     const line = stripAnsi(rawLine).trim()
@@ -328,7 +341,11 @@ export function parseTranscript(text: string): ParsedTranscript {
       // stdout also contains non-JSON launch/log lines; only JSONL events count.
     }
   }
-  return { taskCalls: state.taskCalls, startedAgentIds: [...state.startedAgentIds] }
+  return {
+    taskCalls: state.taskCalls,
+    startedAgentIds: [...state.startedAgentIds],
+    maxToolBatch: state.maxToolBatch,
+  }
 }
 
 export function wilson95(successes: number, denominator: number): Rate {
@@ -354,12 +371,34 @@ function routingPass(result: RunResult): boolean {
     && result.taskCalls.every((call) => result.acceptableAgents.includes(call.subagentType))
 }
 
-function fanoutPass(result: RunResult): boolean {
-  if (!result.expectedParallelCalls || result.taskCalls.length === 0) return false
-  const firstMessage = result.taskCalls[0].assistantMessage
-  const firstBatch = result.taskCalls.filter((call) => call.assistantMessage === firstMessage)
-  return firstBatch.length >= result.expectedParallelCalls
-    && firstBatch.every((call) => result.acceptableAgents.includes(call.subagentType))
+type FanoutScore = "pass" | "fail" | "inconclusive" | "errored"
+
+function fanoutScore(result: RunResult): FanoutScore {
+  // A run that timed out or died proves nothing about batching OR about the
+  // model's choice, so it is excluded separately from the batching limitation.
+  // `killedAfterTask` is the harness's OWN intentional kill on the first Task
+  // event, so its non-zero exit is expected and is not an error.
+  if (result.timedOut || (result.exitCode !== 0 && !result.killedAfterTask)) {
+    return "errored"
+  }
+  // Only a run that actually emitted a 2+ tool batch somewhere can distinguish
+  // "the model chose to serialize" from "this execution mode cannot batch".
+  if (result.maxToolBatch >= 2) {
+    if (!result.expectedParallelCalls || result.taskCalls.length === 0) return "fail"
+    const firstMessage = result.taskCalls[0].assistantMessage
+    const firstBatch = result.taskCalls.filter((call) => call.assistantMessage === firstMessage)
+    return firstBatch.length >= result.expectedParallelCalls
+      && firstBatch.every((call) => result.acceptableAgents.includes(call.subagentType))
+      ? "pass"
+      : "fail"
+  }
+  // Exactly one tool call per assistant message throughout: the documented
+  // headless-mode limitation, which no prompt can overcome. Not a model verdict.
+  if (result.maxToolBatch === 1) return "inconclusive"
+  // Zero tool calls on a clean run. The lead answered directly instead of
+  // fanning out. That is a genuine fan-out FAILURE, not a mode limitation, and
+  // must stay in the denominator or the rate silently inflates.
+  return "fail"
 }
 
 export function scoreResults(results: ReadonlyArray<RunResult>): ScoreSummary {
@@ -402,7 +441,20 @@ export function scoreResults(results: ReadonlyArray<RunResult>): ScoreSummary {
       (r) => r.stratum !== "negative-control" && delegated(r),
     ),
     restraint: rateByArm((r) => !delegated(r), (r) => r.stratum === "negative-control"),
-    parallelFanout: rateByArm(fanoutPass, (r) => r.stratum === "parallel-fanout"),
+    parallelFanout: rateByArm(
+      (r) => fanoutScore(r) === "pass",
+      (r) => r.stratum === "parallel-fanout"
+        && fanoutScore(r) !== "inconclusive"
+        && fanoutScore(r) !== "errored",
+    ),
+    parallelFanoutInconclusive: Object.fromEntries((['A', 'B'] as const).map((arm) => [
+      arm,
+      armResults(arm).filter((r) => r.stratum === "parallel-fanout" && fanoutScore(r) === "inconclusive").length,
+    ])) as Record<ArmName, number>,
+    parallelFanoutErrored: Object.fromEntries((['A', 'B'] as const).map((arm) => [
+      arm,
+      armResults(arm).filter((r) => r.stratum === "parallel-fanout" && fanoutScore(r) === "errored").length,
+    ])) as Record<ArmName, number>,
     complexImplementationDelegation: rateByArm(
       (r) => r.taskCalls.some((call) => call.subagentType === "implementer"),
       (r) => r.stratum === "complex-implementation",
@@ -503,6 +555,7 @@ async function runOne(
     taskCalls: [] as Array<TaskCall>,
     startedAgentIds: new Set<string>(),
     assistantMessage: 0,
+    maxToolBatch: 0,
   }
   let firstTaskMs: number | undefined
   let killedAfterTask = false
@@ -553,6 +606,7 @@ async function runOne(
     requestedButNeverStarted: taskCalls.length > 0 && startedAgentIds.length === 0,
     taskCalls,
     startedAgentIds,
+    maxToolBatch: liveState.maxToolBatch,
     stdoutTail: stdout.slice(-2_000),
     stderrTail: stderr.slice(-2_000),
     model: MODEL,
@@ -578,9 +632,25 @@ function formatRate(rate: Rate): string {
 }
 
 function printSummary(summary: ScoreSummary): void {
-  for (const [name, rates] of Object.entries(summary).filter(([name]) => name !== "pairedTransitions")) {
+  for (const [name, rates] of Object.entries(summary).filter(
+    ([name]) => name !== "pairedTransitions"
+      && name !== "parallelFanoutInconclusive"
+      && name !== "parallelFanoutErrored",
+  )) {
     const typed = rates as Record<ArmName, Rate>
     console.log(`${name}: A ${formatRate(typed.A)}; B ${formatRate(typed.B)}`)
+  }
+  const inconclusive = summary.parallelFanoutInconclusive
+  if (inconclusive.A > 0 || inconclusive.B > 0) {
+    console.log(
+      `parallelFanout: excluded A ${inconclusive.A}; B ${inconclusive.B} inconclusive run(s) because every assistant message carried at most one tool call, so this execution mode could not demonstrate batching at all.`,
+    )
+  }
+  const errored = summary.parallelFanoutErrored
+  if (errored.A > 0 || errored.B > 0) {
+    console.log(
+      `parallelFanout: excluded A ${errored.A}; B ${errored.B} errored run(s) (timeout or non-zero exit), which measure neither the model's choice nor the mode's capability.`,
+    )
   }
   console.log(`pairedTransitions: ${JSON.stringify(summary.pairedTransitions)}`)
 }
@@ -592,6 +662,7 @@ function syntheticResult(
   taskCalls: Array<TaskCall>,
   acceptableAgents: ReadonlyArray<string>,
   expectedParallelCalls?: number,
+  maxToolBatch = taskCalls.length,
 ): RunResult {
   return {
     promptId,
@@ -601,6 +672,7 @@ function syntheticResult(
     acceptableAgents,
     expectedParallelCalls,
     startedAgentIds: taskCalls.length > 0 ? ["agent-synthetic"] : [],
+    maxToolBatch,
     startedAt: "2026-08-11T00:00:00.000Z",
     endedAt: "2026-08-11T00:00:01.000Z",
     elapsedMs: 1_000,
@@ -627,6 +699,9 @@ function selfTest(): void {
   if (parsed.taskCalls.some((call) => call.assistantMessage !== 1)) {
     throw new Error("parallel calls were not grouped in one assistant message")
   }
+  if (parsed.maxToolBatch !== 3) {
+    throw new Error(`expected maxToolBatch 3, got ${parsed.maxToolBatch}`)
+  }
   if (parsed.startedAgentIds.join(",") !== "agent-scout,agent-reviewer") {
     throw new Error(`unexpected started-agent cross-check: ${parsed.startedAgentIds.join(",")}`)
   }
@@ -636,18 +711,58 @@ function selfTest(): void {
     syntheticResult("positive", "specialist", "B", [calls[0]], ["scout"]),
     syntheticResult("negative", "negative-control", "A", [], []),
     syntheticResult("negative", "negative-control", "B", [], []),
-    syntheticResult("fanout", "parallel-fanout", "A", [calls[0]], ["scout", "reviewer", "brainstorm"], 3),
-    syntheticResult("fanout", "parallel-fanout", "B", calls, ["scout", "reviewer", "brainstorm"], 3),
+    syntheticResult("fanout", "parallel-fanout", "A", [calls[0]], ["scout", "reviewer", "brainstorm"], 3, 1),
+    syntheticResult("fanout", "parallel-fanout", "B", calls, ["scout", "reviewer", "brainstorm"], 3, 3),
+    // Zero tool calls on a CLEAN run: the lead answered directly instead of
+    // fanning out. That is a real failure and must stay in the denominator,
+    // otherwise excluding it silently inflates the rate.
+    syntheticResult("fanout-zero", "parallel-fanout", "A", [], ["scout", "reviewer", "brainstorm"], 3, 0),
+    // A timed-out run measures neither the model's choice nor the mode's
+    // capability, so it is excluded in its own bucket rather than as a failure.
+    {
+      ...syntheticResult("fanout-timeout", "parallel-fanout", "A", [], ["scout", "reviewer", "brainstorm"], 3, 0),
+      timedOut: true,
+    },
   ]
   const score = scoreResults(results)
   if (score.spontaneousDelegation.B.successes !== 1 || score.restraint.B.successes !== 1) {
     throw new Error(`unexpected score: ${JSON.stringify(score)}`)
   }
-  if (score.parallelFanout.A.successes !== 0 || score.parallelFanout.B.successes !== 1) {
+  if (score.parallelFanout.A.denominator !== 1 || score.parallelFanout.A.successes !== 0) {
+    throw new Error(`zero-tool run must count as a fan-out failure: ${JSON.stringify(score.parallelFanout.A)}`)
+  }
+  if (score.parallelFanout.B.denominator !== 1 || score.parallelFanout.B.successes !== 1) {
     throw new Error(`unexpected fanout score: ${JSON.stringify(score.parallelFanout)}`)
   }
+  if (score.parallelFanoutInconclusive.A !== 1 || score.parallelFanoutInconclusive.B !== 0) {
+    throw new Error(`unexpected fanout exclusions: ${JSON.stringify(score.parallelFanoutInconclusive)}`)
+  }
+  if (score.parallelFanoutErrored.A !== 1 || score.parallelFanoutErrored.B !== 0) {
+    throw new Error(`errored runs must be excluded separately: ${JSON.stringify(score.parallelFanoutErrored)}`)
+  }
+  // maxToolBatch must count EVERY tool, not only Task/Agent. A run that batches
+  // three ordinary tools proves the MODE can batch, which is exactly what
+  // separates "the model chose to serialize" from "this mode cannot batch".
+  // Without this the diagnostic could regress to Task-only and still pass.
+  const ordinaryBatch = JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [
+        { type: "tool_use", id: "t1", name: "Read", input: {} },
+        { type: "tool_use", id: "t2", name: "Read", input: {} },
+        { type: "tool_use", id: "t3", name: "Grep", input: {} },
+      ],
+    },
+  })
+  const ordinaryParsed = parseTranscript(ordinaryBatch)
+  if (ordinaryParsed.maxToolBatch !== 3) {
+    throw new Error(`maxToolBatch must count non-Task tools, got ${ordinaryParsed.maxToolBatch}`)
+  }
+  if (ordinaryParsed.taskCalls.length !== 0) {
+    throw new Error("ordinary tools must not register as Task calls")
+  }
   if (!score.spontaneousDelegation.B.wilson95) throw new Error("Wilson interval missing")
-  console.log("delegation eval self-test passed: JSONL parser, ordering, start cross-check, fanout scoring, and Wilson intervals")
+  console.log("delegation eval self-test passed: JSONL parser, ordering, start cross-check, three-valued fanout scoring, and Wilson intervals")
 }
 
 async function main(): Promise<void> {

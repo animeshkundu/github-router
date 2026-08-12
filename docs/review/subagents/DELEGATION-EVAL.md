@@ -45,7 +45,7 @@ Prompts do not name agents. Each positive instance declares an **acceptable set*
 
 ## Signal and cost bound
 
-Claude Code runs with `--print --output-format stream-json`. The parser records every top-level `Task` or `Agent` tool-use block, its `subagent_type`, global order, assistant-message number, and position within that message. Child-agent events are excluded via `parent_tool_use_id`. For parallel fan-out, calls count as concurrent only when issued in the same top-level assistant message.
+Claude Code runs with `--print --output-format stream-json`. The parser records every top-level `Task` or `Agent` tool-use block, its `subagent_type`, global order, assistant-message number, and position within that message, plus the largest tool-use batch in any assistant message across all tools. Child-agent events are excluded via `parent_tool_use_id`. For parallel fan-out, calls count as concurrent only when issued in the same top-level assistant message.
 
 `GH_ROUTER_DELEGATION_EVAL=1` makes the proxy return a minimal valid Anthropic response to requests carrying `x-claude-code-agent-id`. The lead can choose a subagent, but the subagent does no model work. Independently, the harness terminates the CLI immediately on the first top-level Task-bearing event.
 
@@ -83,7 +83,16 @@ The evaluation reports these separately. There is no combined delegation score.
 
 ## Parallel fan-out endpoint
 
-Parallel fan-out is a first-class additional endpoint, not folded into spontaneous delegation. A run passes when the first Task-bearing assistant message contains at least the instance's preregistered number of Task/Agent calls and every call is in the acceptable set. Later serial calls cannot rescue a failed first batch. Report per arm with a Wilson 95% confidence interval.
+Parallel fan-out is a first-class additional endpoint, not folded into spontaneous delegation. A measurable run passes when the first Task-bearing assistant message contains at least the instance's preregistered number of Task/Agent calls and every call is in the acceptable set. Later serial calls cannot rescue a failed first batch. Report per arm with a Wilson 95% confidence interval.
+
+Fan-out scoring is four-valued, and the three non-`pass` outcomes are deliberately not interchangeable:
+
+- `maxToolBatch >= 2` — the mode demonstrably batches, so the run is scored `pass`/`fail` on whether the first Task-bearing message carried the expected concurrent calls.
+- `maxToolBatch === 1` — **inconclusive**, excluded from the denominator. One tool use per message cannot distinguish a lead that chose to serialize from an execution mode that structurally cannot batch.
+- `maxToolBatch === 0` on a clean run — a genuine **failure** that stays in the denominator. The lead answered directly instead of fanning out, which is a real result and says nothing about the mode's batching limit. Folding this into `inconclusive` would silently inflate the rate by removing true failures.
+- Timed out or non-zero exit (excluding the harness's own `killedAfterTask`) — **errored**, excluded in its own bucket. A crashed run measures neither the model's choice nor the mode's capability.
+
+The summary must report the inconclusive and errored counts separately, each with its own reason. An undisclosed exclusion reads as "measured and passed" when it was never measured.
 
 ## Primary bar
 
@@ -122,3 +131,9 @@ A rate without its numerator, denominator, and Wilson interval is incomplete.
 ## Known limits
 
 The task distribution is synthetic and first-turn. Real sessions contain accumulated context, corrections, and prior tool use. Part 1 is a bundled treatment: rename, role framing, trigger idiom, and reciprocal `implementer` boundary. This A/B estimates the package rather than isolating a single wording change. The cost short-circuit measures delegation choice and request start, not the delegated agent's output quality. Finally, the eval's product goal is faster time to a correct outcome; delegation rates are policy diagnostics, not ends in themselves.
+
+### Measured headless fan-out limitation
+
+Live verification across multiple runs found that `claude --print --output-format stream-json` emits exactly one `tool_use` block in every assistant message, including ordinary `Read`, `Grep`, and `Glob` calls. No observed headless assistant message contained two or more tool uses. Interactive Claude Code does batch multiple calls per message through the same proxy.
+
+Consequently, the `parallel-fanout` stratum is currently **unmeasurable under `--print`**: its former requirement for multiple `Task`/`Agent` calls in the first message could only produce a structural false negative. The harness retains the preregistered stratum and prompts, records the all-tool `maxToolBatch` diagnostic, and marks runs whose maximum is exactly one as inconclusive rather than failures. Runs with zero tool calls remain failures, and crashed runs are excluded separately, so neither is laundered into the inconclusive bucket. Measuring actual parallel fan-out requires a harness that drives interactive Claude Code rather than headless print mode.
