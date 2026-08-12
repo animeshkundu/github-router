@@ -30,6 +30,8 @@
  *          "no clamp notice in output".
  */
 
+import consola from "consola"
+
 import { state } from "~/lib/state"
 
 import type { ThinkingLevel, WorkerThinkingLevel } from "./types"
@@ -190,11 +192,66 @@ const CATALOG_PRICE_SCALE = 1_000_000_000
 const TOKENS_PER_MILLION = 1_000_000
 
 /**
- * Looks up a model's live batch prices and converts them to the repository's
- * per-1M-token relative units. Missing or malformed prices stay absent so
- * callers never mistake a guess or zero for a catalog fact.
+ * Last-resort per-1M-token prices, recorded from the live catalog on
+ * 2026-08-12. The LIVE catalog always wins; this only fills in when
+ * `state.models` is unpopulated, which in practice means the startup catalog
+ * fetch failed. Without it the injected roster degrades to bare names and the
+ * model loses the cost signal entirely for that session.
+ *
+ * A hardcoded copy of a value that HAS a live source is a second source of
+ * truth, and this one has already been observed to drift: two figures written
+ * from memory into a commit message (`gpt-5.3-codex` 400/1600, `gpt-5.5`
+ * 500/2000) were both wrong against the live catalog (175/1400 and 500/3000).
+ * That is exactly the silent-misroute failure this table risks, so
+ * `warnOnTokenPriceDrift()` compares it against the live catalog once at
+ * startup and logs any disagreement rather than letting a stale number sit
+ * here indefinitely.
+ *
+ * This is NOT the same trade as `INDICATIVE_TOKENS_PER_SECOND`: throughput
+ * cannot be derived from the catalog at all, so hardcoding is the only option
+ * there. Price can, so hardcoding is strictly a degraded fallback.
  */
-export function catalogTokenPrices(modelId: string): CatalogTokenPrices | undefined {
+export const FALLBACK_TOKEN_PRICES: Readonly<Record<string, CatalogTokenPrices>> =
+  Object.freeze({
+    "gpt-5.6-luna": { in: 20, out: 120 },
+    "gpt-5.6-terra": { in: 200, out: 1200 },
+    "gpt-5.4-mini": { in: 75, out: 450 },
+    "claude-sonnet-5": { in: 200, out: 1000 },
+    "gpt-5.3-codex": { in: 175, out: 1400 },
+    "claude-haiku-4.5": { in: 100, out: 500 },
+    "claude-opus-5": { in: 500, out: 2500 },
+    "gpt-5.6-sol": { in: 500, out: 3000 },
+    "grok-4.5": { in: 200, out: 600 },
+    "gpt-5.5": { in: 500, out: 3000 },
+    "gemini-3.6-flash": { in: 150, out: 750 },
+    "gemini-3.5-flash": { in: 150, out: 900 },
+    "gemini-3.1-pro-preview": { in: 200, out: 1200 },
+  })
+
+/**
+ * Compare every `FALLBACK_TOKEN_PRICES` entry against the live catalog and warn
+ * on disagreement. Call once after the catalog is populated. Makes fallback
+ * staleness VISIBLE instead of silent: a stale entry only ever surfaces on the
+ * degraded path, where nobody is looking, so without this it could be wrong for
+ * months. Warn-only by design — a price mismatch must never block a launch.
+ */
+export function warnOnTokenPriceDrift(): void {
+  for (const [id, hardcoded] of Object.entries(FALLBACK_TOKEN_PRICES)) {
+    const live = livePricesFor(id)
+    if (!live) continue
+    if (live.in !== hardcoded.in || live.out !== hardcoded.out) {
+      consola.warn(
+        `[model-resolve] FALLBACK_TOKEN_PRICES is stale for ${id}: hardcoded `
+        + `${hardcoded.in}/${hardcoded.out}, live catalog ${live.in}/${live.out}. `
+        + `Update the table in src/lib/worker-agent/model-resolve.ts.`,
+      )
+    }
+  }
+}
+
+/** Live-catalog price lookup with no fallback. Split out so the drift check can
+ *  compare against the catalog without the fallback masking a disagreement. */
+function livePricesFor(modelId: string): CatalogTokenPrices | undefined {
   const prices = state.models?.data.find((model) => model.id === modelId)?.billing?.token_prices
   if (
     !prices
@@ -218,6 +275,16 @@ export function catalogTokenPrices(modelId: string): CatalogTokenPrices | undefi
     in: toPerMillion(prices.input_price),
     out: toPerMillion(prices.output_price),
   }
+}
+
+/**
+ * A model's per-1M-token prices: live catalog first, then the dated fallback
+ * table. Still returns undefined for a model in neither, so a caller never
+ * mistakes a guess for a fact — the fallback covers models we have actually
+ * recorded, not every id.
+ */
+export function catalogTokenPrices(modelId: string): CatalogTokenPrices | undefined {
+  return livePricesFor(modelId) ?? FALLBACK_TOKEN_PRICES[modelId]
 }
 
 /**

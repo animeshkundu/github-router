@@ -973,3 +973,57 @@ describe("worker tool descriptions state their output contract", () => {
     }
   })
 })
+
+// Every cost/speed annotation is independently omitted when the live catalog
+// has no price for that model or the speed table has no entry. So a launch
+// whose catalog fetch failed, or has not landed yet at injection time, renders
+// bare names — and an unconditional preamble would then promise "cost per 1M
+// tokens, tok/s" and deliver none. A header describing a format the body does
+// not use is worse than no header: it tells the model to look for data that is
+// not there. Pin BOTH directions, since a fix to either alone re-opens the lie.
+test("the cost/speed preamble appears only when figures actually rendered", () => {
+  const nativeAgentModels = {
+    implementer: "gpt-5.6-sol",
+    "implementer-fast": "gpt-5.6-terra",
+    reviewer: "gemini-3.1-pro-preview",
+    brainstorm: "gemini-3.1-pro-preview",
+    scout: "gpt-5.6-luna",
+    scribe: "gpt-5.6-terra",
+    "general-purpose-fast": "gpt-5.6-luna",
+  } as const
+  const opts = {
+    workerToolsAvailable: true,
+    standInAvailable: true,
+    browseAvailable: false,
+    nativeAgentModels,
+  }
+
+  setCatalog([pricedModel("gpt-5.6-sol", 500, 3000)])
+  const annotated = buildPeerAwarenessSummary(opts)
+  expect(annotated).toContain("Cost is per 1M tokens in/out, tok/s approximate")
+  expect(annotated).toMatch(/`implementer` \d+\/\d+ ~\d+t\/s/)
+
+  // No catalog AND ids absent from FALLBACK_TOKEN_PRICES: nothing can be
+  // priced, so no annotation can render. Unknown ids are required here —
+  // an empty catalog alone is no longer enough, because the fallback table
+  // answers for every model the roster actually routes to. That is the
+  // fallback working, and it makes this the genuinely unpriceable case.
+  setCatalog([])
+  const bare = buildPeerAwarenessSummary({
+    ...opts,
+    nativeAgentModels: {
+      implementer: "unpriceable-model-a",
+      "implementer-fast": "unpriceable-model-b",
+      reviewer: "unpriceable-model-c",
+      brainstorm: "unpriceable-model-c",
+      scout: "unpriceable-model-d",
+      scribe: "unpriceable-model-b",
+      "general-purpose-fast": "unpriceable-model-d",
+    },
+  })
+  expect(bare).not.toContain("Cost is per 1M tokens")
+  expect(bare).not.toMatch(/`implementer` \d/)
+  // The roster itself must still be present; only the promise goes away.
+  expect(bare).toContain("`implementer`")
+  expect(bare).toContain("`general-purpose-fast`")
+})

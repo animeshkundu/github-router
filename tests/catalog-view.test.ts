@@ -3,8 +3,10 @@ import { test, expect, afterEach } from "bun:test"
 import {
   buildCatalogView,
   catalogTokenPrices,
+  FALLBACK_TOKEN_PRICES,
   INDICATIVE_TOKENS_PER_SECOND,
   indicativeTokensPerSecond,
+  warnOnTokenPriceDrift,
   WORKER_THINKING_LEVELS,
 } from "~/lib/worker-agent/model-resolve"
 import {
@@ -18,6 +20,8 @@ import {
 } from "~/lib/worker-agent/engine"
 import { SCOUT_MODEL_CHAIN } from "~/lib/mcp-capabilities"
 import { OPENAI_FRONTIER_MODELS } from "~/lib/openai-frontier"
+import consola from "consola"
+
 import { state } from "~/lib/state"
 
 // The catalog view exists to close a DISCOVERABILITY gap: models ship in the
@@ -321,4 +325,81 @@ test("omits optional fields rather than emitting nulls", () => {
 test("survives an absent catalog", () => {
   state.models = undefined
   expect(buildCatalogView()).toEqual([])
+})
+
+// The fallback exists so a launch whose catalog fetch FAILED still gives the
+// model cost signal instead of bare names. Live catalog must always win, and an
+// id in neither source must stay undefined rather than being guessed.
+test("falls back to recorded prices only when the live catalog cannot answer", () => {
+  setCatalog([])
+  expect(catalogTokenPrices("gpt-5.6-luna")).toEqual(
+    FALLBACK_TOKEN_PRICES["gpt-5.6-luna"],
+  )
+  // Not in the catalog AND not in the fallback table: still undefined. The
+  // fallback covers models actually recorded, never every id.
+  expect(catalogTokenPrices("no-such-model")).toBeUndefined()
+
+  // Live wins over the hardcoded copy, so a price change ships immediately
+  // rather than waiting for someone to edit the table.
+  setCatalog([
+    model({
+      id: "gpt-5.6-luna",
+      billing: {
+        token_prices: {
+          batch_size: 1_000_000,
+          input_price: 999_000_000_000,
+          output_price: 120_000_000_000,
+        },
+      },
+    }),
+  ])
+  expect(catalogTokenPrices("gpt-5.6-luna")).toEqual({ in: 999, out: 120 })
+})
+
+// A stale fallback is only ever READ on the degraded path, where nobody is
+// looking, so without a startup check it could be wrong for months. Warn-only:
+// a price mismatch must never block a launch.
+test("drift check warns when a recorded price disagrees with the live catalog", () => {
+  const warnings: Array<string> = []
+  const realWarn = consola.warn
+  // `LogFn` carries a `.raw` member the stub does not need, so the double cast
+  // is narrowing an over-specified type rather than escaping type safety.
+  consola.warn = ((msg: string) => {
+    warnings.push(String(msg))
+  }) as unknown as typeof consola.warn
+  try {
+    setCatalog([
+      model({
+        id: "gpt-5.6-luna",
+        billing: {
+          token_prices: {
+            batch_size: 1_000_000,
+            input_price: 999_000_000_000,
+            output_price: 120_000_000_000,
+          },
+        },
+      }),
+    ])
+    warnOnTokenPriceDrift()
+    expect(warnings.some((w) => w.includes("gpt-5.6-luna") && w.includes("999"))).toBe(true)
+
+    // Agreement must be silent, or the warning becomes noise nobody reads.
+    warnings.length = 0
+    setCatalog([
+      model({
+        id: "gpt-5.6-luna",
+        billing: {
+          token_prices: {
+            batch_size: 1_000_000,
+            input_price: 20_000_000_000,
+            output_price: 120_000_000_000,
+          },
+        },
+      }),
+    ])
+    warnOnTokenPriceDrift()
+    expect(warnings).toEqual([])
+  } finally {
+    consola.warn = realWarn
+  }
 })

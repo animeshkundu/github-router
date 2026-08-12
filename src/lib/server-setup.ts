@@ -17,6 +17,7 @@ import { setupCopilotToken, setupGitHubAgentToken, setupGitHubToken } from "./to
 import { toolbeltEnabled } from "./toolbelt"
 import { toolbeltPathOverride } from "./toolbelt/path-inject"
 import { cacheModels, cacheCopilotVersion, cacheVSCodeVersion } from "./utils"
+import { warnOnTokenPriceDrift } from "./worker-agent/model-resolve"
 import { resolveMcpToolTimeoutMs } from "./worker-agent/budget"
 import { server as app } from "../server"
 
@@ -403,6 +404,12 @@ export async function setupAndServe(
 
   await setupCopilotToken()
   await cacheModels()
+
+  // The catalog is now populated, so this is the one moment the hardcoded
+  // fallback price table can be checked against live truth. Warn-only: a stale
+  // price must never block a launch, but it must not sit undetected either,
+  // since the fallback is only READ on the degraded path where nobody looks.
+  warnOnTokenPriceDrift()
 
   consola.debug(
     `Available models: \n${state.models?.data.map((model) => `- ${model.id}`).join("\n")}`,

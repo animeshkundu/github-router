@@ -783,6 +783,18 @@ export function buildPeerAwarenessSummary(opts: {
     renderNative("scribe"),
     opts.generalPurposeFastAvailable === false ? undefined : renderNative("general-purpose-fast"),
   ].filter((n): n is string => n != null)
+  // The cost/speed preamble must only appear when at least one name actually
+  // carries figures. Every annotation is independently omitted when the live
+  // catalog has no price for that model or the speed table has no entry, so a
+  // launch whose catalog fetch failed or has not landed yet renders bare names
+  // — and an unconditional preamble would then promise "cost per 1M tokens,
+  // tok/s" and deliver none. A header describing a format the body does not
+  // use is worse than no header: it tells the model to look for data that is
+  // not there.
+  const summaryNativesAnnotated = summaryNativeNames.some((n) => /\d/.test(n))
+  const summaryNativeLead = summaryNativesAnnotated
+    ? "Native subagents (Task), own context. Cost is per 1M tokens in/out, tok/s approximate:"
+    : "Native subagents (Task), each in its own context:"
   const lines: Array<string> = [
     "## Injected capabilities (summary)",
     "",
@@ -803,7 +815,7 @@ export function buildPeerAwarenessSummary(opts: {
     // closing pointer to CLAUDE.md for the roster. What cannot be recovered from
     // a per-agent description is the CROSS-CUTTING fact, so that is what stays:
     // the roster exists, and natives can execute where the critics cannot.
-    `Native subagents (Task), own context. Cost is per 1M tokens in/out, tok/s approximate: ${summaryNativeNames.join(", ")}. Each agent's own description states when it applies. They read the repo and can run things; the peer critics below cannot, so reach for \`reviewer\` when an assessment needs execution or repo context and for a critic when you already hold the artifact.`,
+    `${summaryNativeLead} ${summaryNativeNames.join(", ")}. Each agent's own description states when it applies. They read the repo and can run things; the peer critics below cannot, so reach for \`reviewer\` when an assessment needs execution or repo context and for a critic when you already hold the artifact.`,
     `A layer of MCP tools, background workers, and skills is injected into this session. Cross-lab peer critics under \`mcp__${key("peers")}__*\` (plus the \`peer-review-coordinator\` subagent) review plans and diffs adversarially, and Claude Code's built-in \`advisor\` catches approach drift. \`mcp__${key("search")}__code\` is meaning-first code search and \`mcp__${key("search")}__web\` returns citable web sources.`,
   ]
   if (opts.workerToolsAvailable) {
