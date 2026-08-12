@@ -61,6 +61,30 @@ export const PATHS = {
     return path.join(appDir(), "worker-diffs")
   },
   /**
+   * Stable home for the relocated hook launcher (`hooks-<sha256>.mjs`).
+   *
+   * Claude Code hook commands are persisted into a settings.json that outlives
+   * the process that wrote them. Under `bunx` the package tree lives in
+   * `$TMPDIR`, which macOS reaps — so a command pointing there dies on its
+   * first bare import and every hook in the session fails. This directory is
+   * under APP_DIR precisely because APP_DIR is neither a cache nor a temp dir
+   * and is therefore never reaped. Entries are content-addressed and immutable,
+   * so two proxies on different versions coexist and neither can delete a
+   * launcher the other is still using.
+   */
+  get HOOK_LAUNCHER_DIR() {
+    return path.join(appDir(), "hooks")
+  },
+  /**
+   * Durable copy of the tree-sitter WASM runtime and the grammar subset used
+   * by code search. The package tree can live under a reaped bunx temp dir;
+   * APP_DIR is stable across launches, so structural ranking and outlines do
+   * not silently disappear after the original install files are removed.
+   */
+  get TREE_SITTER_ASSETS_DIR() {
+    return path.join(appDir(), "tree-sitter")
+  },
+  /**
    * Isolated CODEX_HOME for the spawned Codex CLI. Masks any cached
    * ChatGPT subscription login (openai/codex#2733 — cached login can
    * override OPENAI_API_KEY) so the proxy's dummy key is authoritative.

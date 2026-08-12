@@ -16,6 +16,10 @@ import {
   writePeerMcpRuntimeFiles,
 } from "./lib/codex-mcp-config"
 import { enableFileLogging } from "./lib/file-log-reporter"
+import {
+  hookLauncherDegradedWarning,
+  resolveSelfInvocation,
+} from "./lib/hook-launcher/self-invocation"
 import { getCodexVersion, launchChild } from "./lib/launch"
 import { injectAllowRules, planModeAllowRules } from "./lib/mcp-permissions-settings"
 import { listModelsForEndpoint } from "./lib/model-validation"
@@ -592,6 +596,16 @@ export const claude = defineCommand({
       genericCheapAvailable: genericCheapModel() != null,
     }
     const codexMcpEnabled = (args as Record<string, unknown>)["codex-mcp"] !== false
+    // Resolve before any settings/runtime file can persist a self-command. The
+    // launcher publication must finish before those writes, never race them.
+    const selfInvocation = await resolveSelfInvocation()
+    // Surface a fallback to the HUMAN. `enableFileLogging()` has already run by
+    // here, so a consola.warn would land in the error log where nobody looks —
+    // same reasoning (and same shape) as the colbert degraded warning above.
+    {
+      const warning = hookLauncherDegradedWarning(selfInvocation)
+      if (warning) process.stderr.write(`${warning}\n`)
+    }
     if (codexMcpEnabled) {
       try {
         const requestedCli =
@@ -627,6 +641,7 @@ export const claude = defineCommand({
 
         const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
           codexCli: backend === "cli",
+          selfInvocation,
           geminiAvailable: geminiModelsAvailable,
           groupKeys,
           workerToolsAvailable: workerToolsEnabled(),
@@ -670,6 +685,7 @@ export const claude = defineCommand({
         // silent precedence).
         const injected = await injectPeerMcpIntoMirror(serverUrl, {
           codexCli: backend === "cli",
+          selfInvocation,
           geminiAvailable: geminiModelsAvailable,
           groupKeys,
           nonce: runtime.nonce,
@@ -741,7 +757,7 @@ export const claude = defineCommand({
           }
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
-            const cmd = buildPromptSubmitHookCommand(process.execPath, process.argv[1])
+            const cmd = buildPromptSubmitHookCommand(selfInvocation)
             // Raise the host hook timeout to 45s (default 30s): the V2 path may
             // make one gpt-5.6-sol scope call + a parallel code search. The hook's
             // own enrichment is bounded well under this (≈22s) and fails open,
@@ -823,8 +839,7 @@ export const claude = defineCommand({
               const workersKey = workersKeyOf(groupKeys)
               const modes = activeDispatchModes({ browse: browseAgentEnabled() })
               const cmd = buildWorkerGuardHookCommand(
-                process.execPath,
-                process.argv[1],
+                selfInvocation,
                 workersKey,
                 modes,
               )
@@ -850,7 +865,7 @@ export const claude = defineCommand({
           let shapingInstalled = false
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
-            const guardCmd = buildFirstMateGuardHookCommand(process.execPath, process.argv[1])
+            const guardCmd = buildFirstMateGuardHookCommand(selfInvocation)
             await injectStopHookIntoSettingsFile(
               settingsPath,
               guardCmd,
@@ -900,7 +915,7 @@ export const claude = defineCommand({
         if (aiordieSidecar.length > 0 && !aiordieSidecar.includes('"')) {
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
-            const command = buildSessionBindHookCommand(process.execPath, process.argv[1], aiordieSidecar)
+            const command = buildSessionBindHookCommand(selfInvocation, aiordieSidecar)
             await injectStopHookIntoSettingsFile(settingsPath, command, "SessionStart")
             await injectStopHookIntoSettingsFile(settingsPath, command, "SessionEnd")
           } catch (err) {
@@ -929,7 +944,7 @@ export const claude = defineCommand({
           try {
             await writeArtifactCredsToMirror(shouldUseInsecureTls(process.env.AIORDIE_BASE_URL ?? ""))
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
-            const cmd = buildArtifactOpenHookCommand(process.execPath, process.argv[1])
+            const cmd = buildArtifactOpenHookCommand(selfInvocation)
             await injectStopHookIntoSettingsFile(settingsPath, cmd, "PostToolUse", undefined, "ExitPlanMode")
           } catch (err) {
             consola.warn(`Could not register the artifact auto-open hook: ${String(err)}`)
@@ -943,7 +958,7 @@ export const claude = defineCommand({
         if (hookMcpRuntimeFromEnv(envVars) && planReviewEnabled()) {
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
-            const command = buildPlanReviewHookCommand(process.execPath, process.argv[1])
+            const command = buildPlanReviewHookCommand(selfInvocation)
             await injectStopHookIntoSettingsFile(settingsPath, command, "PostToolUse", undefined, "ExitPlanMode")
           } catch (err) {
             consola.warn(`Could not register the advisory plan-review hook: ${String(err)}`)
@@ -1022,7 +1037,7 @@ export const claude = defineCommand({
           const armed = descriptor
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
-            const command = buildStopHookCommand(process.execPath, process.argv[1])
+            const command = buildStopHookCommand(selfInvocation)
             // Arm the matching runtime resolver (env reaches the child via envVars).
             if (armed.kind === "sealed") envVars.GH_ROUTER_STOP_GATE_ID = armed.gateId
             else if (armed.kind === "parsed") envVars.GH_ROUTER_STOP_GATE_PARSED = "1"

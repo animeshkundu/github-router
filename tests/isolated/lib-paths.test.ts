@@ -1641,6 +1641,7 @@ test("ensureClaudeConfigMirror + injectPeerMcpIntoMirror: gate fields survive th
   // Production order: mirror first, then peer-MCP injection.
   await ensureClaudeConfigMirror()
   const result = await injectPeerMcpIntoMirror("http://127.0.0.1:18787", {
+    selfInvocation: { execPath: "/usr/bin/node", scriptPath: "/app/dist/main.js" },
     codexCli: false,
     geminiAvailable: true,
     groupKeys: { peers: "peers", search: "search" },

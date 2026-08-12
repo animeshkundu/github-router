@@ -21,6 +21,7 @@ import { state } from "../../src/lib/state"
 
 const NONCE = "0".repeat(64)
 const URL = "http://127.0.0.1:18787"
+const SELF_INVOCATION = { execPath: "/usr/bin/node", scriptPath: "/app/dist/main.js" }
 
 // Use a fixed `/tmp` prefix instead of `os.tmpdir()`. This file and
 // `tests/isolated/lib-paths.test.ts` (which mocks `node:os` to stub
@@ -836,6 +837,7 @@ describe("writePeerMcpRuntimeFiles", () => {
   test("writes mcp-config + agents tempfiles with mode 0o600 and PID+random-suffix names + .md subagent files", async () => {
     await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
       const runtime = await writePeerMcpRuntimeFiles(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: true,
         groupKeys: { peers: "peers", search: "search" },
@@ -897,7 +899,11 @@ describe("writePeerMcpRuntimeFiles", () => {
       const cfg = JSON.parse(
         await fs.readFile(runtime.mcpConfigPath, "utf8"),
       ) as {
-        mcpServers: Record<string, { url: string; headers: { Authorization: string } }>
+        mcpServers: Record<string, {
+          url: string
+          headers: { Authorization: string }
+          headersHelper: string
+        }>
       }
       // One scoped entry per group we passed in groupKeys.
       expect(Object.keys(cfg.mcpServers).sort()).toEqual(["peers", "search"])
@@ -905,6 +911,9 @@ describe("writePeerMcpRuntimeFiles", () => {
       expect(cfg.mcpServers["search"]!.url).toBe(`${URL}/mcp/search`)
       expect(cfg.mcpServers["peers"]!.headers.Authorization).toBe(
         `Bearer ${runtime.nonce}`,
+      )
+      expect(cfg.mcpServers["peers"]!.headersHelper).toBe(
+        '"/usr/bin/node" "/app/dist/main.js" internal-workspace-header',
       )
 
       // Cleanup unlinks both JSON tempfiles AND all .md files
@@ -922,6 +931,7 @@ describe("writePeerMcpRuntimeFiles", () => {
       // Base run WITHOUT builtinSubagents — the peer/coordinator/native-subagent
       // set (its size grows as master adds native subagents, so compute it).
       const base = await writePeerMcpRuntimeFiles(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: true,
         groupKeys: { peers: "peers", search: "search" },
@@ -933,6 +943,7 @@ describe("writePeerMcpRuntimeFiles", () => {
       await base.cleanup()
 
       const runtime = await writePeerMcpRuntimeFiles(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: true,
         groupKeys: { peers: "peers", search: "search" },
@@ -962,6 +973,7 @@ describe("writePeerMcpRuntimeFiles", () => {
   test("two consecutive invocations produce distinct nonces", async () => {
     await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
       const a = await writePeerMcpRuntimeFiles(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: false,
         groupKeys: { peers: "peers" },
@@ -973,6 +985,7 @@ describe("writePeerMcpRuntimeFiles", () => {
       // but kept to exercise the cleanup path.
       await a.cleanup()
       const b = await writePeerMcpRuntimeFiles(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: false,
         groupKeys: { peers: "peers" },
@@ -988,6 +1001,7 @@ describe("writePeerMcpRuntimeFiles", () => {
   test("re-runs in the same PID produce DIFFERENT files (random-suffix collision avoidance)", async () => {
     await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
       const a = await writePeerMcpRuntimeFiles(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: false,
         groupKeys: { peers: "peers" },
@@ -998,6 +1012,7 @@ describe("writePeerMcpRuntimeFiles", () => {
       // Don't cleanup. Second call must NOT collide with first call's
       // files — random-suffix guarantees uniqueness within a process.
       const b = await writePeerMcpRuntimeFiles(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: false,
         groupKeys: { peers: "peers" },
@@ -1154,6 +1169,7 @@ describe("writePeerMcpRuntimeFiles", () => {
   test("personas list reflects mode (codexCli adds implementer)", async () => {
     await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
       const httpMode = await writePeerMcpRuntimeFiles(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
@@ -1162,6 +1178,7 @@ describe("writePeerMcpRuntimeFiles", () => {
         agentsDir,
       })
       const cliMode = await writePeerMcpRuntimeFiles(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: true,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
@@ -1262,6 +1279,7 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
   test("every emitted agent file passes cc-backup's required-field validation", async () => {
     await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
       const runtime = await writePeerMcpRuntimeFiles(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
@@ -1303,6 +1321,7 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
     // the user can't predict from the file. Lock them in step.
     await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
       const runtime = await writePeerMcpRuntimeFiles(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
@@ -1339,6 +1358,7 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
     // (or vice versa).
     await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
       const runtime = await writePeerMcpRuntimeFiles(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
@@ -1390,6 +1410,7 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
     const READ_ONLY_NATIVES = ["scout", "brainstorm"]
     await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
       const runtime = await writePeerMcpRuntimeFiles(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: true,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
@@ -1438,6 +1459,7 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
   test("worker-* dispatcher .md emits a `tools:` array (server wildcard) that passes the cc-backup schema", async () => {
     await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
       const runtime = await writePeerMcpRuntimeFiles(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: false,
         groupKeys: { peers: "peers", workers: "workers" },
@@ -1473,6 +1495,7 @@ describe("subagent .md frontmatter — cc-backup schema parity (Phase C P0.3)", 
     // description will trip the check.
     await withTempRuntimeDir(async (runtimeDir, codexHome, agentsDir) => {
       const runtime = await writePeerMcpRuntimeFiles(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
@@ -1513,6 +1536,7 @@ describe("injectPeerMcpIntoMirror", () => {
   test("creates .claude.json with one entry per group when the file does not yet exist", async () => {
     await withMirrorDir(async (dir) => {
       const result = await injectPeerMcpIntoMirror(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: true,
         groupKeys: { peers: "peers", search: "search" },
@@ -1563,6 +1587,7 @@ describe("injectPeerMcpIntoMirror", () => {
       })
 
       const result = await injectPeerMcpIntoMirror(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
@@ -1597,6 +1622,7 @@ describe("injectPeerMcpIntoMirror", () => {
   test("codexCli=true also injects the codex-cli stdio entry", async () => {
     await withMirrorDir(async (dir) => {
       const result = await injectPeerMcpIntoMirror(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: true,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
@@ -1643,6 +1669,7 @@ describe("injectPeerMcpIntoMirror", () => {
       const beforeBody = await fs.readFile(target, "utf8")
 
       const result = await injectPeerMcpIntoMirror(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
@@ -1673,6 +1700,7 @@ describe("injectPeerMcpIntoMirror", () => {
       const beforeBody = await fs.readFile(target, "utf8")
 
       const result = await injectPeerMcpIntoMirror(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: true,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
@@ -1695,6 +1723,7 @@ describe("injectPeerMcpIntoMirror", () => {
       await fs.writeFile(target, "{ not valid json", { mode: 0o600 })
 
       const result = await injectPeerMcpIntoMirror(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
@@ -1727,6 +1756,7 @@ describe("injectPeerMcpIntoMirror", () => {
     // reused without re-resolving.)
     await withMirrorDir(async (dir) => {
       const first = await injectPeerMcpIntoMirror(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
@@ -1737,6 +1767,7 @@ describe("injectPeerMcpIntoMirror", () => {
       expect(first.ok).toBe(true)
 
       const second = await injectPeerMcpIntoMirror(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
@@ -1757,6 +1788,7 @@ describe("injectPeerMcpIntoMirror", () => {
       await fs.writeFile(target, JSON.stringify(seed), { mode: 0o600 })
 
       const result = await injectPeerMcpIntoMirror(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },
@@ -1783,6 +1815,7 @@ describe("injectPeerMcpIntoMirror", () => {
     const dir = path.join(parent, "nonexistent-subdir")
     try {
       const result = await injectPeerMcpIntoMirror(URL, {
+        selfInvocation: SELF_INVOCATION,
         codexCli: false,
         geminiAvailable: true,
         groupKeys: { peers: "peers" },

@@ -73,5 +73,60 @@ export default defineConfig([
       NODE_ENV: "production",
     },
   },
+  {
+    // Hook launcher build: separate entry. Claude Code hook commands are
+    // PERSISTED into a settings.json that outlives the process that wrote
+    // them, and under `bunx` the package tree lives in $TMPDIR, which macOS
+    // reaps (files deleted, directory skeleton kept) — so `node <tmp>/dist/
+    // main.js` died on its first bare import and every hook in a long-running
+    // session failed. This bundle inlines EVERY dependency so it can be copied
+    // to a stable path outside the package tree and run with no node_modules
+    // lookup at all. `src/lib/hook-launcher/provision.ts` publishes it.
+    //
+    // Two options here are load-bearing, not stylistic:
+    //   - `noExternal` returns true for EVERY id — a single unresolved bare
+    //     import reintroduces the exact bug this entry exists to fix. It is a
+    //     predicate rather than `true` because the option is typed as a
+    //     pattern (or a matcher fn), and a bare `true` is passed to picomatch
+    //     as a pattern and throws.
+    //   - `codeSplitting: false` — the subcommands are lazy `import()` thunks,
+    //     and with splitting on, rolldown emits sibling chunks that the
+    //     relocated single file could not find. Off, they are inlined while
+    //     STILL being evaluated lazily on first call.
+    // Both are asserted by tests/hook-launcher-bundle.test.ts, which checks
+    // SELF-CONTAINMENT (no non-`node:` import, no sibling-chunk reference)
+    // rather than a file count: rolldown also emits a small orphan chunk of
+    // tree-shaken-empty module shells that nothing imports, and asserting
+    // "exactly one file" would fail on that harmless artifact.
+    entry: ["src/hooks.ts"],
+
+    format: ["esm"],
+    target: "es2022",
+    platform: "node",
+    // .mjs, deliberately, though the reason is narrower than it looks. Node
+    // has shipped ESM syntax detection ON BY DEFAULT since 22.7, so on a
+    // current runtime this bundle runs fine even named `.js` from a directory
+    // with no governing package.json (verified on Node 24.19). Below that —
+    // Node 20, or 22.0-22.6 — the same file is read as CommonJS and dies on
+    // "Cannot use import statement outside a module", and this package
+    // declares no `engines` floor. `.mjs` is unambiguous on every version, so
+    // it costs nothing and removes a runtime-version dependency from the one
+    // file every hook in every session executes. The other entries set
+    // `fixedExtension: false` to keep `.js`; this one wants the rename.
+    fixedExtension: true,
+
+    sourcemap: false,
+    clean: false,
+    removeNodeProtocol: false,
+
+    env: {
+      NODE_ENV: "production",
+    },
+
+    noExternal: () => true,
+    outputOptions: {
+      codeSplitting: false,
+    },
+  },
 ])
 

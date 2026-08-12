@@ -219,19 +219,21 @@ describe("parseWorkerToolCall", () => {
 
 describe("buildWorkerGuardHookCommand", () => {
   test("bakes key + modes; distinct key ⇒ distinct command (dedup-safe)", () => {
-    const a = buildWorkerGuardHookCommand("/usr/bin/node", "/app/main.js", "workers", CORE)
-    const b = buildWorkerGuardHookCommand("/usr/bin/node", "/app/main.js", "gh-router-workers", CORE)
-    expect(a).toContain("internal-worker-guard")
-    expect(a).toContain("--workers-key")
-    expect(a).toContain("workers")
-    expect(a).toContain("--modes")
-    expect(a).toContain("explore,implement,review,plan,test")
-    expect(a).not.toBe(b)
-    expect(b).toContain("gh-router-workers")
+    const invocation = { execPath: "/usr/bin/node", scriptPath: "/app/main.js" }
+    const a = buildWorkerGuardHookCommand(invocation, "workers", CORE)
+    const b = buildWorkerGuardHookCommand(invocation, "gh-router-workers", CORE)
+    expect(a).toBe(
+      '"/usr/bin/node" "/app/main.js" internal-worker-guard --workers-key "workers" --modes "explore,implement,review,plan,test"',
+    )
+    expect(b).toBe(
+      '"/usr/bin/node" "/app/main.js" internal-worker-guard --workers-key "gh-router-workers" --modes "explore,implement,review,plan,test"',
+    )
   })
   test("omits the scriptPath arg when it equals execPath (bundled single-file)", () => {
-    const cmd = buildWorkerGuardHookCommand("/app/gh", "/app/gh", "workers", CORE)
-    expect(cmd.startsWith(`"/app/gh" internal-worker-guard`)).toBe(true)
+    const cmd = buildWorkerGuardHookCommand({ execPath: "/app/gh", scriptPath: "/app/gh" }, "workers", CORE)
+    expect(cmd).toBe(
+      '"/app/gh" internal-worker-guard --workers-key "workers" --modes "explore,implement,review,plan,test"',
+    )
   })
 })
 
