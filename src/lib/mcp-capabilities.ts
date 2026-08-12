@@ -77,13 +77,12 @@ export { OPENAI_FRONTIER_MODELS } from "./openai-frontier"
  * one walk instead of hand-copying it. Ids are matched EXACTLY against
  * `catalog.id` — no slug translation, matching the pre-existing behavior.
  *
- * `minContextTokens` is OPT-IN because the two constraints are genuinely
- * per-agent: the `generic*` chains promise 1M end to end, while `scoutModel`
- * deliberately keeps a 400K last resort for its wider availability. Enforcing
- * the floor here rather than by comment is what stops a chain silently
- * degrading when an id's advertised window shrinks upstream — `withOneMSuffix`
- * would then just omit the `[1m]` bracket, and the agent would be budgeted at
- * Claude Code's 200K default with no signal that anything changed.
+ * `minContextTokens` is OPT-IN because the constraint is genuinely per-agent:
+ * the conditional cheaper-tier agents promise 1M end to end. Enforcing the
+ * floor here rather than by comment is what stops a chain silently degrading
+ * when an id's advertised window shrinks upstream — `withOneMSuffix` would then
+ * just omit the `[1m]` bracket, and the agent would be budgeted at Claude Code's
+ * 200K default with no signal that anything changed.
  */
 function firstPresentInCatalog(
   chain: ReadonlyArray<string>,
@@ -232,17 +231,16 @@ export function scoutModel(): string | undefined {
 }
 
 /*
- * The three `generic*` catch-alls.
+ * The cheaper non-lead agents.
  *
- * Every other native is a specialist (implement / review / ideate / find /
- * document), so anything that fits none of them runs on the lead's own model.
- * These give the lead three non-lead delegation targets at three cost points,
- * and — like `scout` and for the same reason — each is DROPPED rather than
- * downgraded when its chain misses: an agent whose whole value is costing less
- * than the lead defeats itself by silently inheriting Opus.
+ * `implementer-fast` is the mechanical implementation specialist, while
+ * `general-purpose-fast` handles work no specialist fits. Like `scout` and for
+ * the same reason, both are DROPPED rather than downgraded when their chain
+ * misses: an agent whose whole value is costing less than the lead defeats
+ * itself by silently inheriting Opus.
  *
- * All three carry `minContextTokens: ONE_M_TOKENS`. Their descriptions promise
- * a 1M window, so the floor is what keeps that promise true against an upstream
+ * Both carry `minContextTokens: ONE_M_TOKENS`. Their descriptions promise a 1M
+ * window, so the floor is what keeps that promise true against an upstream
  * catalog change rather than merely asserted in a comment.
  */
 
@@ -260,31 +258,15 @@ export function implementerFastModel(): string | undefined {
   )
 }
 
-/** Model for `generic-fast` — the Gemini flash tier. Absent → dropped.
+/** Model for `general-purpose-fast` — the fast, cheapest catch-all. Absent →
+ *  dropped.
  *
- *  Both entries are the same vendor, context, price point and `minimal..high`
- *  effort ladder, so the agent's identity survives the fallback intact. That is
- *  why the fallback is `gemini-3.5-flash` and not `gpt-5.6-luna`, which would
- *  otherwise be the natural cross-vendor choice: luna is `genericCheapModel`'s
- *  only entry, and using it in both places would collapse two roster entries
- *  onto one model in the degraded case. */
-export function genericFastModel(): string | undefined {
-  return firstPresentInCatalog(
-    [EXPLORE_DEFAULT_MODEL, "gemini-3.5-flash"],
-    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
-  )
-}
-
-/** Model for `generic-cheap` — the cheapest catch-all. Absent → dropped.
- *
- *  Single-entry by design (see `genericFastModel` for why luna is not shared).
- *  `gpt-5.6-luna` is the cheapest id in the catalog and undercuts even the 400K
- *  `gpt-5.4-mini`, while carrying 1.05M context and the full `none..max` effort
- *  ladder — so unlike the flash tier it propagates a CLI effort pick above
- *  `high` rather than clamping it. No `-mini`/`-lite`/`-haiku` model in the
- *  catalog serves 1M, which is why the cheap catch-all is a `gpt-5.6-*` slug
- *  rather than a mini one. */
-export function genericCheapModel(): string | undefined {
+ *  Single-entry by design. `gpt-5.6-luna` is the cheapest model in the live
+ *  catalog and measured fastest among the catch-all candidates, while carrying
+ *  1.05M context and the full `none..max` effort ladder. No
+ *  `-mini`/`-lite`/`-haiku` model in the catalog serves 1M, which is why this
+ *  catch-all uses a `gpt-5.6-*` slug rather than a mini one. */
+export function generalPurposeFastModel(): string | undefined {
   return firstPresentInCatalog(
     ["gpt-5.6-luna"],
     { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },

@@ -180,7 +180,87 @@ export function resolveModelAndThinking(opts: ResolveOpts): ResolveResult {
   return mkOk(clamp as ThinkingLevel)
 }
 
-/** One catalog row as surfaced to the model. Derived only — no editorial prose. */
+/** Per-1M-token relative units derived from the live Copilot catalog. */
+export interface CatalogTokenPrices {
+  in: number
+  out: number
+}
+
+const CATALOG_PRICE_SCALE = 1_000_000_000
+const TOKENS_PER_MILLION = 1_000_000
+
+/**
+ * Looks up a model's live batch prices and converts them to the repository's
+ * per-1M-token relative units. Missing or malformed prices stay absent so
+ * callers never mistake a guess or zero for a catalog fact.
+ */
+export function catalogTokenPrices(modelId: string): CatalogTokenPrices | undefined {
+  const prices = state.models?.data.find((model) => model.id === modelId)?.billing?.token_prices
+  if (
+    !prices
+    || typeof prices.batch_size !== "number"
+    || !Number.isSafeInteger(prices.batch_size)
+    || prices.batch_size <= 0
+    || typeof prices.input_price !== "number"
+    || !Number.isFinite(prices.input_price)
+    || prices.input_price < 0
+    || typeof prices.output_price !== "number"
+    || !Number.isFinite(prices.output_price)
+    || prices.output_price < 0
+  ) {
+    return undefined
+  }
+
+  const toPerMillion = (price: number): number =>
+    price / CATALOG_PRICE_SCALE * TOKENS_PER_MILLION / prices.batch_size!
+
+  return {
+    in: toPerMillion(prices.input_price),
+    out: toPerMillion(prices.output_price),
+  }
+}
+
+/**
+ * Approximate output tokens/sec, median of n=3 per model, measured 2026-08-12
+ * through this proxy. Reproduce with `bun scripts/bench-model-speed.ts` — the
+ * harness is committed precisely so these numbers can be re-derived and
+ * challenged instead of being trusted. Rounded coarsely on purpose: run-to-run
+ * variance is large (`gpt-5.6-sol` measured 22 in an early n=1 pass and 74 at
+ * n=3), so any digit beyond the leading one or two would be false precision.
+ *
+ * Wall clock includes time-to-first-token, which is why an early n=1 pass put
+ * `gemini-3.1-pro-preview` at 9: that response emitted only 66 tokens, so TTFT
+ * dominated. Reasoning tokens are timed but may not appear in `output_tokens`,
+ * so heavy-reasoning models are penalised here.
+ *
+ * This is a deliberately hardcoded, coarse speed hint, indicative and never a
+ * per-call benchmark: a recoverable speed retry is safer than a quality score
+ * that silently misroutes.
+ *
+ * NOT the whole picture for agent work. The benchmark also measures p50 latency
+ * to a trivial tool call, which is the workload an agent model actually spends
+ * its turns on, and the ordering differs from raw generation: `gpt-5.6-sol`
+ * generates at 75 but takes ~4.3s to reach a tool call, while `gpt-5.6-luna`
+ * takes ~0.9s. That figure is deliberately NOT surfaced to the model, because a
+ * second speed axis invites optimising a routing choice that policy already
+ * settles (see the decorrelation note below).
+ */
+export const INDICATIVE_TOKENS_PER_SECOND: Readonly<Record<string, number>> = Object.freeze({
+  "gpt-5.6-luna": 120,
+  "gpt-5.6-terra": 100,
+  "claude-opus-5": 80,
+  "gpt-5.6-sol": 75,
+  "gemini-3.6-flash": 45,
+  "gemini-3.5-flash": 40,
+  "gemini-3.1-pro-preview": 25,
+})
+
+/** Returns the approximate, indicative output speed when it was measured. */
+export function indicativeTokensPerSecond(modelId: string): number | undefined {
+  return INDICATIVE_TOKENS_PER_SECOND[modelId]
+}
+
+/** One catalog row as surfaced to the model. */
 export interface CatalogRow {
   id: string
   vendor: string
@@ -190,8 +270,12 @@ export interface CatalogRow {
   maxOut?: number
   /** Reasoning efforts this worker layer can actually request. */
   efforts: Array<string>
-  /** Vendor-authored cost tier, omitted when absent. */
-  cost?: string
+  /** Live input price in per-1M-token relative units, omitted when malformed. */
+  in?: number
+  /** Live output price in per-1M-token relative units, omitted when malformed. */
+  out?: number
+  /** Approximate, indicative output tokens/sec when this model was measured. */
+  tps?: number
 }
 
 /** Worker-usable models need a big enough window to be worth delegating to. */
@@ -201,12 +285,14 @@ const CATALOG_MIN_CONTEXT = 200_000
  * Derived view of the live catalog: every model a worker could actually be
  * pointed at, with the metadata needed to choose between them.
  *
- * DERIVED ONLY, and that is the whole design. A one-liner like "strong
+ * Derived facts only, with one explicitly-labelled exception:
+ * `INDICATIVE_TOKENS_PER_SECOND` is a dated, coarse measurement whose speed
+ * signal is recoverable by retrying a slow selection. A one-liner like "strong
  * reasoning, weak long-context recall" cannot be computed from catalog
  * metadata — it is editorial, it goes stale silently as vendors ship, and the
  * asymmetry is brutal: a MISSING characterization costs one suboptimal pick
  * the model recovers from, while a WRONG one misroutes invisibly at the call
- * site. So this ships facts and lets the caller judge.
+ * site. So this ships facts, the recoverable speed hint, and no quality score.
  *
  * It exists because the hardcoded chains cannot discover anything. Models are
  * live in the catalog that appear nowhere in `src/` — nobody evaluated them
@@ -234,15 +320,16 @@ export function buildCatalogView(): Array<CatalogRow> {
       (WORKER_THINKING_LEVELS as ReadonlyArray<string>).includes(effort),
     )
     if (efforts.length === 0) continue
+    const prices = catalogTokenPrices(model.id)
+    const tps = indicativeTokensPerSecond(model.id)
     rows.push({
       id: model.id,
       vendor: model.vendor,
       ctx,
       ...(limits?.max_output_tokens ? { maxOut: limits.max_output_tokens } : {}),
       efforts,
-      ...(model.model_picker_price_category
-        ? { cost: model.model_picker_price_category }
-        : {}),
+      ...(prices ?? {}),
+      ...(tps === undefined ? {} : { tps }),
     })
   }
   return rows.sort((a, b) => a.id.localeCompare(b.id))

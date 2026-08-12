@@ -12,11 +12,11 @@
 
 ## Availability-aware native roster
 
-Four native agents are conditional: `scout`, `implementer-fast`, `generic-fast`, and `generic-cheap`. They are dropped rather than inheriting the lead model when their qualifying catalog chain does not resolve. The builder accepts corresponding booleans through `NativeAgentAvailability` and names only the agents actually emitted.
+Three native agents are conditional: `scout`, `implementer-fast`, and `general-purpose-fast`. They are dropped rather than inheriting the lead model when their qualifying catalog chain does not resolve. The builder accepts corresponding booleans through `NativeAgentAvailability` and names only the agents actually emitted.
 
 This preserves a routing invariant: the directive must not suggest a Task `subagent_type` that has no emitted `.md` definition. The same availability object is also passed to `buildPeerAwarenessSnippet`, keeping the operating directive, awareness inventory, and generated native roster aligned.
 
-The unconditional specialist list remains `implementer`, `reviewer`, `brainstorm`, and `scribe`. When present, `implementer-fast` sits beside `implementer` for well-specified mechanical changes; `generic-fast` and `generic-cheap` remain grouped as catch-alls for work no specialist fits.
+The unconditional specialist list remains `implementer`, `reviewer`, `brainstorm`, and `scribe`. When present, `implementer-fast` sits beside `implementer` for well-specified mechanical changes; `general-purpose-fast` is the singular catch-all for work no specialist fits.
 
 ## Current directive shape
 
@@ -28,7 +28,7 @@ The remaining fixed content states the review boundary, the quality bar, and eng
 
 - **Prompting, not enforcement.** The directive is an overridable operating default. It does not itself create a native agent, force delegation, or validate a model's decision.
 - **Availability is enforced by construction.** Each conditional agent is omitted when its resolver returns no qualifying model; the builder then removes it from the full directive rather than advertising an unavailable route.
-- **Tool availability differs by agent.** `scout` and `brainstorm` have a read-only `tools:` allowlist. The three catch-alls omit `tools:` and therefore inherit the parent's full toolset. Their prompts ask them not to spawn further subagents, but that request is not a tool-level restriction.
+- **Tool availability differs by agent.** `scout` and `brainstorm` have a read-only `tools:` allowlist. `implementer-fast` and `general-purpose-fast` omit `tools:` and therefore inherit the parent's full toolset. Their prompts ask them not to spawn further subagents, but that request is not a tool-level restriction.
 - **Reasoning effort is not per-agent.** A native's frontmatter selects its resolved model; effort follows the normal Claude Code picker and translation path. Capability limits remain model-specific, including Gemini Flash clamping above-`high` selections and Luna allowing its fuller advertised ladder.
 
 ## Findings + verdict

@@ -128,10 +128,9 @@ interface BuildOpts {
   /** Model for `implementer-fast` (the cheaper implementation tier). Absent →
    *  the agent is OMITTED rather than inheriting the lead's model. */
   implementerFastModel?: string
-  /** Model for `generic-fast` (the Gemini flash catch-all). Absent → OMITTED. */
-  genericFastModel?: string
-  /** Model for `generic-cheap` (the cheapest catch-all). Absent → OMITTED. */
-  genericCheapModel?: string
+  /** Model for `general-purpose-fast` (the fast, cheapest catch-all). Absent →
+   *  OMITTED. */
+  generalPurposeFastModel?: string
 }
 
 export interface HttpMcpEntry {
@@ -375,8 +374,8 @@ export const BUILTIN_SUBAGENT_DEFINITIONS: PeerAgentDefinitions = {
  *
  * This is a NAME REGISTRY for the sweep allowlist in `paths.ts` and its drift
  * test, NOT a list of agents that are guaranteed to exist in a given launch.
- * `scout`, `implementer-fast`, and the two `generic-*` catch-alls are conditionally emitted (see
- * `buildPeerAgentDefinitions`) yet are listed here on purpose: the sweep must
+ * `scout`, `implementer-fast`, and `general-purpose-fast` are conditionally
+ * emitted (see `buildPeerAgentDefinitions`) yet are listed here on purpose: the sweep must
  * recognize their filenames so a file written by a launch that DID resolve a
  * model gets reaped by a later launch that did not. Do not iterate this
  * expecting a definition back from `buildPeerAgentDefinitions` for every entry;
@@ -394,8 +393,7 @@ export const ALL_NATIVE_AGENT_NAMES = [
   "scout",
   "scribe",
   "implementer-fast",
-  "generic-fast",
-  "generic-cheap",
+  "general-purpose-fast",
 ] as const
 
 /** Empty-string-safe read of an optional model id. */
@@ -525,14 +523,14 @@ export function buildPeerAgentDefinitions(
   // frontmatter is OMITTED and it inherits the lead's model, so a thin catalog
   // degrades the model, never the roster.
   //
-  // `scout`, `implementer-fast`, and the two `generic-*` catch-alls are the
-  // exceptions. Their entire reason to exist is being cheaper than the lead's
-  // model, so silently inheriting Opus would burn exactly the cost they were
-  // added to avoid — their resolvers return undefined when nothing in their
-  // chain resolves and the agent is then omitted outright.
+  // `scout`, `implementer-fast`, and `general-purpose-fast` are the exceptions.
+  // Their entire reason to exist is being cheaper than the lead's model, so
+  // silently inheriting Opus would burn exactly the cost they were added to
+  // avoid — their resolvers return undefined when nothing in their chain
+  // resolves and the agent is then omitted outright.
   //
-  // `implementer`, `implementer-fast`, `reviewer`, `scribe`, and the two
-  // `generic-*` catch-alls inherit the full toolset (no `tools:`). `scout` and
+  // `implementer`, `implementer-fast`, `reviewer`, `scribe`, and
+  // `general-purpose-fast` inherit the full toolset (no `tools:`). `scout` and
   // `brainstorm` carry the read-only allowlist.
   const nativeModel = nonEmptyModel(opts.nativeSubagentModel)
   const reviewerModel = nonEmptyModel(opts.reviewerModel)
@@ -540,8 +538,7 @@ export function buildPeerAgentDefinitions(
   const scoutModel = nonEmptyModel(opts.scoutModel)
   const scribeModel = nonEmptyModel(opts.scribeModel)
   const implementerFastModel = nonEmptyModel(opts.implementerFastModel)
-  const genericFastModel = nonEmptyModel(opts.genericFastModel)
-  const genericCheapModel = nonEmptyModel(opts.genericCheapModel)
+  const generalPurposeFastModel = nonEmptyModel(opts.generalPurposeFastModel)
   // `[1m]` decorates the FRONTMATTER value only, never the description text.
   // Claude Code budgets a subagent's context off its model id, and its detector
   // (`/\[1m\]/i`) has no vendor gate — so without the suffix an `implementer` on
@@ -636,17 +633,16 @@ export function buildPeerAgentDefinitions(
       + " Do the work yourself — do not spawn further subagents. Report which documents changed and any claim you could not verify.",
     ...(scribeModel ? { model: withOneMSuffix(scribeModel) } : {}),
   }
-  // `implementer-fast` is the cheaper implementation specialist; `generic-fast`
-  // and `generic-cheap` remain catch-alls for work no specialist fits.
+  // `implementer-fast` is the cheaper implementation specialist;
+  // `general-purpose-fast` is the catch-all for work no specialist fits.
   //
   // Description discipline: a description may claim only what is true of EVERY
   // member of that agent's chain, because the fallback is invisible to whoever
   // reads the prose. `implementer-fast` therefore branches its model-specific
   // framing: terra may carry the speed/cost claim, while the gemini-pro fallback
   // is described neutrally and may not claim terra's `max` effort tier.
-  // `generic-fast` may not claim measured speed, which is why it is described by
-  // its tier rather than by a latency it has never been benchmarked for.
-  // `generic-cheap` is single-entry, so it may state luna's properties exactly.
+  // `general-purpose-fast` is single-entry, so it may state luna's measured and
+  // catalog properties exactly.
   const genericPromptFor = (role: string): string =>
     `You are a general-purpose subagent handling ${role} the lead has delegated to keep its own context free. `
     + "Work out what the task actually requires, then do it end to end. Verify against the real repository and the real runtime rather than assuming — read the code, run the command, check the exit code. "
@@ -662,18 +658,11 @@ export function buildPeerAgentDefinitions(
       model: withOneMSuffix(implementerFastModel),
     }
   }
-  if (genericFastModel) {
-    out["generic-fast"] = {
-      description: `Catch-all subagent running ${genericFastModel} (1M context, Gemini flash tier — low cost, reasoning effort tops out at high). Use for well-specified work that does not need a frontier model's reasoning. Full toolset, so it can finish the work rather than only research it. Runs in its own context on a non-lead model. Model is overridable at spawn.`,
-      prompt: genericPromptFor("light, well-specified work"),
-      model: withOneMSuffix(genericFastModel),
-    }
-  }
-  if (genericCheapModel) {
-    out["generic-cheap"] = {
-      description: `Catch-all subagent running ${genericCheapModel} (1M context, the lowest-cost model in the catalog, and unlike the flash tier it carries the full reasoning-effort ladder so an effort selection above high still applies). Use for high-volume or long-running work where cost dominates. Full toolset, so it can finish the work rather than only research it. Runs in its own context on a non-lead model. Model is overridable at spawn.`,
-      prompt: genericPromptFor("cost-sensitive work"),
-      model: withOneMSuffix(genericCheapModel),
+  if (generalPurposeFastModel) {
+    out["general-purpose-fast"] = {
+      description: `Catch-all subagent running ${generalPurposeFastModel} (1.05M context, the lowest-cost model in the catalog and the fastest measured catch-all candidate, with the full reasoning-effort ladder). Use proactively for work no specialist fits when a fast, economical non-lead model can finish it. Full toolset, so it can complete the work rather than only research it. Runs in its own context. Model is overridable at spawn.`,
+      prompt: genericPromptFor("work no specialist fits"),
+      model: withOneMSuffix(generalPurposeFastModel),
     }
   }
   // Non-blocking workers surface: one `worker-<mode>` DISPATCHER subagent per
@@ -749,10 +738,8 @@ interface WriteOpts {
   scribeModel?: string
   /** Model for `implementer-fast`. Absent → the agent is omitted entirely. */
   implementerFastModel?: string
-  /** Model for `generic-fast`. Absent → the agent is omitted entirely. */
-  genericFastModel?: string
-  /** Model for `generic-cheap`. Absent → the agent is omitted entirely. */
-  genericCheapModel?: string
+  /** Model for `general-purpose-fast`. Absent → the agent is omitted entirely. */
+  generalPurposeFastModel?: string
   /** Extra subagent definitions to register alongside the peer/worker agents
    *  (written as `.md` files so they appear in the Task `subagent_type` enum).
    *  Used by `serve` to inject Claude Code's built-in subagents (Explore/Plan/
@@ -1272,8 +1259,7 @@ export async function writePeerMcpRuntimeFiles(
     scoutModel: opts.scoutModel,
     scribeModel: opts.scribeModel,
     implementerFastModel: opts.implementerFastModel,
-    genericFastModel: opts.genericFastModel,
-    genericCheapModel: opts.genericCheapModel,
+    generalPurposeFastModel: opts.generalPurposeFastModel,
     nonce,
     codexHome,
     serverUrl,

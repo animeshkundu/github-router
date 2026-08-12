@@ -14,7 +14,7 @@
 | System prompt | Inline native-agent definition in `buildPeerAgentDefinitions` |
 | Tools | No `tools:` declaration, so it inherits the parent's full toolset |
 
-It is one of eight native agents: `implementer`, `implementer-fast`, `reviewer`, `brainstorm`, `scout`, `scribe`, `generic-fast`, and `generic-cheap`. Unlike peer critics, it does the work in its own agent loop rather than relaying a request through an MCP persona.
+It is one of seven native agents: `implementer`, `implementer-fast`, `reviewer`, `brainstorm`, `scout`, `scribe`, and `general-purpose-fast`. Unlike peer critics, it does the work in its own agent loop rather than relaying a request through an MCP persona.
 
 ## 2. Description (verbatim)
 

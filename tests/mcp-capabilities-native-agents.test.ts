@@ -1,5 +1,5 @@
-// Unit tests for the conditional implementer-fast / generic-* resolvers and
-// the 1M context floor they rely on.
+// Unit tests for the conditional cheaper-tier native resolvers and the 1M
+// context floor they rely on.
 //
 // Two properties are load-bearing and neither was previously covered:
 //
@@ -19,8 +19,7 @@
 import { afterEach, expect, test } from "bun:test"
 
 import {
-  genericCheapModel,
-  genericFastModel,
+  generalPurposeFastModel,
   implementerFastModel,
   scoutModel,
 } from "~/lib/mcp-capabilities"
@@ -85,37 +84,17 @@ test("implementerFastModel does NOT fall through to the OpenAI frontier", () => 
   expect(implementerFastModel()).toBeUndefined()
 })
 
-test("genericFastModel prefers gemini-3.6-flash, falls back to gemini-3.5-flash", () => {
-  setCatalog(
-    entry("gemini-3.6-flash", { ctx: ONE_M }),
-    entry("gemini-3.5-flash", { ctx: ONE_M }),
-  )
-  expect(genericFastModel()).toBe("gemini-3.6-flash")
-
-  setCatalog(entry("gemini-3.5-flash", { ctx: ONE_M }))
-  expect(genericFastModel()).toBe("gemini-3.5-flash")
-})
-
-// The fallback stays inside the Gemini flash family rather than taking luna,
-// which would otherwise be the natural cross-vendor choice: luna is
-// genericCheapModel's ONLY entry, so sharing it would collapse two roster
-// entries onto one model in the degraded case.
-test("genericFastModel does not borrow generic-cheap's model", () => {
+test("generalPurposeFastModel is single-entry: gpt-5.6-luna or nothing", () => {
   setCatalog(entry("gpt-5.6-luna", { ctx: 1_050_000 }))
-  expect(genericFastModel()).toBeUndefined()
-  expect(genericCheapModel()).toBe("gpt-5.6-luna")
-})
-
-test("genericCheapModel is single-entry: gpt-5.6-luna or nothing", () => {
-  setCatalog(entry("gpt-5.6-luna", { ctx: 1_050_000 }))
-  expect(genericCheapModel()).toBe("gpt-5.6-luna")
+  expect(generalPurposeFastModel()).toBe("gpt-5.6-luna")
 
   setCatalog(
     entry("gpt-5.6-terra", { ctx: 1_050_000 }),
     entry("gemini-3.6-flash", { ctx: ONE_M }),
+    entry("gemini-3.5-flash", { ctx: ONE_M }),
     entry("gpt-5.4-mini", { ctx: 400_000 }),
   )
-  expect(genericCheapModel()).toBeUndefined()
+  expect(generalPurposeFastModel()).toBeUndefined()
 })
 
 // The drop-not-downgrade rule. A thin catalog must not silently promote these
@@ -123,13 +102,11 @@ test("genericCheapModel is single-entry: gpt-5.6-luna or nothing", () => {
 test("every conditional resolver returns undefined on an empty or absent catalog", () => {
   setCatalog()
   expect(implementerFastModel()).toBeUndefined()
-  expect(genericFastModel()).toBeUndefined()
-  expect(genericCheapModel()).toBeUndefined()
+  expect(generalPurposeFastModel()).toBeUndefined()
 
   state.models = undefined
   expect(implementerFastModel()).toBeUndefined()
-  expect(genericFastModel()).toBeUndefined()
-  expect(genericCheapModel()).toBeUndefined()
+  expect(generalPurposeFastModel()).toBeUndefined()
 })
 
 test("a chain entry without tool_calls is skipped, and absent metadata fails closed", () => {
@@ -156,7 +133,7 @@ test("a chain entry without tool_calls is skipped, and absent metadata fails clo
       },
     ] as never,
   }
-  expect(genericCheapModel()).toBeUndefined()
+  expect(generalPurposeFastModel()).toBeUndefined()
 })
 
 // The mutation this floor exists to catch: an id stays in the catalog with
@@ -170,19 +147,13 @@ test("minContextTokens skips a chain entry whose window has dropped below 1M", (
   )
   expect(implementerFastModel()).toBe("gemini-3.1-pro-preview")
 
-  setCatalog(
-    entry("gemini-3.6-flash", { ctx: 128_000 }),
-    entry("gemini-3.5-flash", { ctx: 200_000 }),
-  )
-  expect(genericFastModel()).toBeUndefined()
-
   setCatalog(entry("gpt-5.6-luna", { ctx: 400_000 }))
-  expect(genericCheapModel()).toBeUndefined()
+  expect(generalPurposeFastModel()).toBeUndefined()
 })
 
 test("absent context metadata fails closed under the 1M floor", () => {
   setCatalog(entry("gpt-5.6-luna"))
-  expect(genericCheapModel()).toBeUndefined()
+  expect(generalPurposeFastModel()).toBeUndefined()
 })
 
 // Scout now keeps a 1M context contract across both entries. The accepted

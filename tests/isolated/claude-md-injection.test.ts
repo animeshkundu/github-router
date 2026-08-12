@@ -839,8 +839,7 @@ test("digest and directive complement rather than duplicate each other", () => {
     "scout",
     "scribe",
     "implementer-fast",
-    "generic-fast",
-    "generic-cheap",
+    "general-purpose-fast",
   ]) {
     expect(directive).toContain(agent)
     expect(digest).not.toContain(agent)
@@ -875,9 +874,9 @@ test("digest and directive complement rather than duplicate each other", () => {
 
 // Peer-finding-1 regression pin (codex_critic + gemini_critic, independently).
 //
-// Four natives are DROPPED rather than downgraded when no model in their chain
-// resolves: `scout`, `implementer-fast`, and the two `generic-*` catch-alls. The directive used to
-// be a static const that named `scout` unconditionally, so on a thin catalog
+// Three natives are DROPPED rather than downgraded when no model in their chain
+// resolves: `scout`, `implementer-fast`, and `general-purpose-fast`. The directive
+// used to be a static const that named `scout` unconditionally, so on a thin catalog
 // the lead read an instruction to delegate to an agent with no `.md` file and
 // no entry in the Task `subagent_type` enum. The call then fails, wasting a
 // turn and inviting a retry loop.
@@ -887,7 +886,7 @@ test("digest and directive complement rather than duplicate each other", () => {
 // way. Only building with a false flag proves the omission actually happens.
 test("the operating-defaults directive omits natives this launch dropped", () => {
   const all = buildOperatingDefaultsDirective()
-  for (const agent of ["scout", "implementer-fast", "generic-fast", "generic-cheap"]) {
+  for (const agent of ["scout", "implementer-fast", "general-purpose-fast"]) {
     expect(all).toContain(agent)
   }
   // The zero-arg form is the all-available one, so it must equal the const the
@@ -897,13 +896,11 @@ test("the operating-defaults directive omits natives this launch dropped", () =>
   const none = buildOperatingDefaultsDirective({
     scoutAvailable: false,
     implementerFastAvailable: false,
-    genericFastAvailable: false,
-    genericCheapAvailable: false,
+    generalPurposeFastAvailable: false,
   })
   expect(none).not.toContain("scout")
   expect(none).not.toContain("implementer-fast")
-  expect(none).not.toContain("generic-fast")
-  expect(none).not.toContain("generic-cheap")
+  expect(none).not.toContain("general-purpose-fast")
   // The unconditional natives survive: they inherit the lead's model rather
   // than being dropped, so they are always in the enum.
   for (const agent of ["implementer", "reviewer", "brainstorm", "scribe"]) {
@@ -915,12 +912,10 @@ test("the operating-defaults directive omits natives this launch dropped", () =>
 
   // Each conditional native drops INDEPENDENTLY — losing one must not silently
   // take the others out of the prompt.
-  const onlyCheap = buildOperatingDefaultsDirective({
+  const onlyCatchAll = buildOperatingDefaultsDirective({
     implementerFastAvailable: false,
-    genericFastAvailable: false,
   })
-  expect(onlyCheap).toContain("`generic-cheap`")
-  expect(onlyCheap).not.toContain("`generic-fast`")
-  expect(onlyCheap).not.toContain("`implementer-fast`")
-  expect(onlyCheap).toContain("scout")
+  expect(onlyCatchAll).toContain("`general-purpose-fast`")
+  expect(onlyCatchAll).not.toContain("`implementer-fast`")
+  expect(onlyCatchAll).toContain("scout")
 })

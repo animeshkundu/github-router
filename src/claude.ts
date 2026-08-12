@@ -68,7 +68,12 @@ import { parseBoolEnv } from "./lib/exec"
 import nodePath from "node:path"
 import { tmpdir } from "node:os"
 import { randomBytes } from "node:crypto"
-import { buildPeerAwarenessSnippet, buildPeerAwarenessSummary, type McpGroup } from "./lib/peer-mcp-personas"
+import {
+  buildPeerAwarenessSnippet,
+  buildPeerAwarenessSummary,
+  type McpGroup,
+  type NativeAgentName,
+} from "./lib/peer-mcp-personas"
 import { injectAttributionSuppressionIntoSettingsFile } from "./lib/attribution-settings"
 import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, buildOperatingDefaultsDirective, type NativeAgentAvailability, OPERATING_DEFAULTS_DIGEST, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
@@ -95,8 +100,7 @@ import {
   scoutModel,
   scribeModel,
   implementerFastModel,
-  genericFastModel,
-  genericCheapModel,
+  generalPurposeFastModel,
   standInToolEnabled,
   workerToolsEnabled,
 } from "./lib/mcp-capabilities"
@@ -582,14 +586,22 @@ export const claude = defineCommand({
     // Resolved ONCE per launch and reused by the `.md` generation, the
     // awareness snippet, and the operating-defaults directive, so the three
     // surfaces cannot disagree about which conditionally-emitted natives exist.
-    // Four of them are dropped rather than downgraded when their chain misses,
+    // Three of them are dropped rather than downgraded when their chain misses,
     // and a prompt naming a dropped agent sends the lead at something absent
     // from the Task `subagent_type` enum.
+    const nativeAgentModels: Partial<Record<NativeAgentName, string | undefined>> = {
+      implementer: nativeSubagentModel(),
+      "implementer-fast": implementerFastModel(),
+      reviewer: reviewerModel(),
+      brainstorm: brainstormModel(),
+      scout: scoutModel(),
+      scribe: scribeModel(),
+      "general-purpose-fast": generalPurposeFastModel(),
+    }
     const nativeAvailability: NativeAgentAvailability = {
-      scoutAvailable: scoutModel() != null,
-      implementerFastAvailable: implementerFastModel() != null,
-      genericFastAvailable: genericFastModel() != null,
-      genericCheapAvailable: genericCheapModel() != null,
+      scoutAvailable: nativeAgentModels.scout != null,
+      implementerFastAvailable: nativeAgentModels["implementer-fast"] != null,
+      generalPurposeFastAvailable: nativeAgentModels["general-purpose-fast"] != null,
     }
     const codexMcpEnabled = (args as Record<string, unknown>)["codex-mcp"] !== false
     if (codexMcpEnabled) {
@@ -631,14 +643,13 @@ export const claude = defineCommand({
           groupKeys,
           workerToolsAvailable: workerToolsEnabled(),
           browseAvailable: browseAgentEnabled(),
-          nativeSubagentModel: nativeSubagentModel(),
-          reviewerModel: reviewerModel(),
-          brainstormModel: brainstormModel(),
-          scoutModel: scoutModel(),
-          scribeModel: scribeModel(),
-          implementerFastModel: implementerFastModel(),
-          genericFastModel: genericFastModel(),
-          genericCheapModel: genericCheapModel(),
+          nativeSubagentModel: nativeAgentModels.implementer,
+          reviewerModel: nativeAgentModels.reviewer,
+          brainstormModel: nativeAgentModels.brainstorm,
+          scoutModel: nativeAgentModels.scout,
+          scribeModel: nativeAgentModels.scribe,
+          implementerFastModel: nativeAgentModels["implementer-fast"],
+          generalPurposeFastModel: nativeAgentModels["general-purpose-fast"],
         })
         state.peerMcpNonce = runtime.nonce
         // Reach-back channel for the advisory-review hooks (hook V2): the
@@ -1164,6 +1175,7 @@ export const claude = defineCommand({
           fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
           ...nativeAvailability,
+          nativeAgentModels,
           groupKeys,
         })
         // Ordering invariant: this MUST run AFTER ensureClaudeConfigMirror()

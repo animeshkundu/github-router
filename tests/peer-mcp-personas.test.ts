@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 
 import {
   buildAgentPrompt,
@@ -10,6 +10,31 @@ import {
   PERSONAS_WRITE,
   personasFor,
 } from "../src/lib/peer-mcp-personas"
+import { state } from "../src/lib/state"
+
+const realModels = state.models
+
+afterEach(() => {
+  state.models = realModels
+})
+
+function setCatalog(data: Array<unknown>): void {
+  state.models = { data, object: "list" } as unknown as typeof state.models
+}
+
+function pricedModel(id: string, input: number = 20, output: number = 120): Record<string, unknown> {
+  return {
+    id,
+    capabilities: { supports: { tool_calls: true } },
+    billing: {
+      token_prices: {
+        batch_size: 1_000_000,
+        input_price: input * 1_000_000_000,
+        output_price: output * 1_000_000_000,
+      },
+    },
+  }
+}
 
 describe("worker tool descriptions point at the worker-* dispatcher", () => {
   test("each raw workers-group tool description leads with its worker-<mode> agent + Agent-tool dispatch", () => {
@@ -337,13 +362,15 @@ describe("buildPeerAwarenessSnippet", () => {
     // scout/scribe) and the inventory sentence was TIGHTENED to absorb it, so
     // this cap did not move. It moved from 2100 -> 2230 for the original three
     // catch-alls, then to 2320 when `generic` became the longer specialist name
-    // `implementer-fast` and gained its mechanical-vs-judgment role clause.
+    // `implementer-fast` and gained its mechanical-vs-judgment role clause. It
+    // tightened to 2300 when the two overlapping generic catch-alls became the
+    // singular `general-purpose-fast` (measured 2293 bytes).
     // Each agent's own description carries its model and trade-offs, so nothing
     // further belongs in the always-in-context copy. The cap is the smallest
     // envelope the actual implementation fits inside, not a target driving copy
     // growth. If a future tightening shaves bytes, lower this cap too.
     const minimal = buildPeerAwarenessSnippet(MINIMAL)
-    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(2320)
+    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(2300)
   })
 
   test("snippet stays under ~930 tokens (~5580 bytes) in the maximal case", () => {
@@ -354,13 +381,14 @@ describe("buildPeerAwarenessSnippet", () => {
     // orchestration pipeline + skills + browser-power tools were added, again
     // (4900 -> 5300) for the always-on native-subagent inventory, again
     // (5300 -> 5400) when that roster went from three agents to five, again
-    // (5400 -> 5520) for the three `generic*` catch-alls, and now
+    // (5400 -> 5520) for the former generic catch-alls, then
     // (5520 -> 5580, measured 5556) for `worker-browse`, which was emitted as a
     // subagent whenever browse was on but named in neither prose surface, then to
-    // 5660 for the `implementer-fast` name and specialist role clause. If a
-    // future tightening shaves bytes, lower it again.
+    // 5660 for the `implementer-fast` name and specialist role clause. The
+    // singular `general-purpose-fast` roster now measures 5634 bytes, so the cap
+    // tightens to 5640. If a future tightening shaves bytes, lower it again.
     const full = buildPeerAwarenessSnippet(MAXIMAL)
-    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(5660)
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(5640)
   })
 
   test("the system-prompt summary names every native and carries the reviewer-vs-critic tiebreak", () => {
@@ -375,10 +403,25 @@ describe("buildPeerAwarenessSnippet", () => {
     // that job. The differentiator is that natives can execute and read the
     // repo while the critics are stateless, so that has to be stated where the
     // routing decision is actually made, not only in CLAUDE.md.
+    setCatalog([
+      pricedModel("gpt-5.6-sol", 500, 3000),
+      pricedModel("gpt-5.6-terra", 200, 1200),
+      pricedModel("gemini-3.1-pro-preview", 200, 1200),
+      pricedModel("gpt-5.6-luna", 20, 120),
+    ])
     const summary = buildPeerAwarenessSummary({
       workerToolsAvailable: true,
       standInAvailable: true,
       browseAvailable: false,
+      nativeAgentModels: {
+        implementer: "gpt-5.6-sol",
+        "implementer-fast": "gpt-5.6-terra",
+        reviewer: "gemini-3.1-pro-preview",
+        brainstorm: "gemini-3.1-pro-preview",
+        scout: "gpt-5.6-luna",
+        scribe: "gpt-5.6-terra",
+        "general-purpose-fast": "gpt-5.6-luna",
+      },
     })
     for (const n of [
       "implementer",
@@ -387,27 +430,83 @@ describe("buildPeerAwarenessSnippet", () => {
       "scout",
       "scribe",
       "implementer-fast",
-      "generic-fast",
-      "generic-cheap",
+      "general-purpose-fast",
     ]) {
       expect(summary).toContain(`\`${n}\``)
     }
     expect(summary).toContain("can run things")
     expect(summary).toContain("already hold the artifact")
+    expect(summary).toContain("Cost is per 1M tokens in/out, tok/s approximate")
+    expect(summary).toContain("`implementer` 500/3000 ~75t/s")
+    expect(summary).toContain("`implementer-fast` 200/1200 ~100t/s")
+    expect(summary).toContain("`reviewer` 200/1200 ~25t/s")
+    expect(summary).toContain("`brainstorm` 200/1200 ~25t/s")
+    expect(summary).toContain("`scout` 20/120 ~120t/s")
+    expect(summary).toContain("`scribe` 200/1200 ~100t/s")
+    expect(summary).toContain("`general-purpose-fast` 20/120 ~120t/s")
+
+    // This block is injected into the system prompt and paid on EVERY turn.
+    // Keep it as a compact roster and cross-cutting tiebreak, not a third copy
+    // of each agent's routing description. Measured at 1493 bytes with the
+    // cost/speed annotations; the small envelope catches real growth.
+    expect(Buffer.byteLength(summary, "utf8")).toBeLessThan(1500)
+    for (const removedRoleProse of [
+      "coding changes needing judgment",
+      "docs and ADRs that trail the code",
+      "you do not yet know which approach",
+      "work no specialist fits",
+    ]) {
+      expect(summary).not.toContain(removedRoleProse)
+    }
+    // The summary stays intentionally incomplete: expanded models, gating, and
+    // routing guidance remain in CLAUDE.md rather than returning here.
+    expect(summary).toContain("full per-tool inventory")
+    expect(summary).toContain("CLAUDE.md project instructions")
   })
 
   // Found by a live smoke test, not by the suite. This surface's doc comment
   // claimed it was "gated identically to the full snippet so it never names a
   // surface the live tools/list dropped", but it took NO availability booleans
   // at all: `scout` was named unconditionally despite being dropped when no
-  // cheap-tier model resolves, and the three `generic*` catch-alls were missing
-  // entirely. That matters more here than anywhere else, because this is the
+  // cheap-tier model resolves, and the cheaper-tier conditional agents were
+  // missing entirely. That matters more here than anywhere else, because this is the
   // always-in-context block where the routing decision is actually made — the
   // CLAUDE.md snippet and the operating-defaults directive are both consulted,
   // this one is resident.
   //
   // The positive assertions above pass whether or not the gating exists, so
   // only building with the flags false proves the omission actually happens.
+  test("the summary omits price or speed annotations with either missing figure", () => {
+    setCatalog([
+      pricedModel("gpt-5.6-sol"),
+      {
+        id: "unmeasured",
+        billing: {
+          token_prices: {
+            batch_size: 1_000_000,
+            input_price: 20_000_000_000,
+            output_price: 120_000_000_000,
+          },
+        },
+      },
+    ])
+    const summary = buildPeerAwarenessSummary({
+      workerToolsAvailable: true,
+      standInAvailable: true,
+      browseAvailable: false,
+      nativeAgentModels: {
+        implementer: "gpt-5.6-sol",
+        reviewer: "unmeasured",
+        brainstorm: "missing-price",
+      },
+    })
+    expect(summary).toContain("`implementer` 20/120 ~75t/s")
+    expect(summary).toContain("`reviewer`")
+    expect(summary).not.toContain("`reviewer` 20/120")
+    expect(summary).toContain("`brainstorm`")
+    expect(summary).not.toContain("`brainstorm` 0/")
+  })
+
   test("the summary omits natives this launch dropped", () => {
     const none = buildPeerAwarenessSummary({
       workerToolsAvailable: true,
@@ -415,13 +514,11 @@ describe("buildPeerAwarenessSnippet", () => {
       browseAvailable: false,
       scoutAvailable: false,
       implementerFastAvailable: false,
-      genericFastAvailable: false,
-      genericCheapAvailable: false,
+      generalPurposeFastAvailable: false,
     })
     expect(none).not.toContain("`scout`")
     expect(none).not.toContain("`implementer-fast`")
-    expect(none).not.toContain("`generic-fast`")
-    expect(none).not.toContain("`generic-cheap`")
+    expect(none).not.toContain("`general-purpose-fast`")
     // The unconditional natives survive: they inherit the lead's model rather
     // than being dropped, so they are always in the Task enum.
     for (const n of ["implementer", "reviewer", "brainstorm", "scribe"]) {
@@ -431,16 +528,15 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(none).toContain("already hold the artifact")
 
     // Each drops INDEPENDENTLY — losing one must not take the others out.
-    const onlyCheap = buildPeerAwarenessSummary({
+    const onlyCatchAll = buildPeerAwarenessSummary({
       workerToolsAvailable: true,
       standInAvailable: true,
       browseAvailable: false,
       implementerFastAvailable: false,
-      genericFastAvailable: false,
     })
-    expect(onlyCheap).toContain("`generic-cheap`")
-    expect(onlyCheap).not.toContain("`generic-fast`")
-    expect(onlyCheap).toContain("`scout`")
+    expect(onlyCatchAll).toContain("`general-purpose-fast`")
+    expect(onlyCatchAll).not.toContain("`implementer-fast`")
+    expect(onlyCatchAll).toContain("`scout`")
   })
 
   test("mentions Claude Code's advisor built-in tool", () => {
@@ -554,37 +650,29 @@ describe("buildPeerAwarenessSnippet", () => {
     // advertise an agent that is not in the Task enum.
     expect(buildPeerAwarenessSnippet({ ...MINIMAL, scoutAvailable: true })).toContain("`scout`")
     expect(buildPeerAwarenessSnippet({ ...MINIMAL, scoutAvailable: false })).not.toContain("`scout`")
-    // The three `generic*` catch-alls follow the same rule, and each drops
+    // The two cheaper-tier full-toolset agents follow the same rule and drop
     // INDEPENDENTLY. The default fixtures leave these flags unset (= available),
-    // so without an explicitly-false build nothing exercises the omission at
-    // all: a mutation that hard-wired one of them ON left the whole suite green.
+    // so without an explicitly-false build nothing exercises the omission.
     for (const [flag, name] of [
       ["implementerFastAvailable", "`implementer-fast`"],
-      ["genericFastAvailable", "`generic-fast`"],
-      ["genericCheapAvailable", "`generic-cheap`"],
+      ["generalPurposeFastAvailable", "`general-purpose-fast`"],
     ] as const) {
       expect(buildPeerAwarenessSnippet({ ...MINIMAL, [flag]: true })).toContain(name)
       const dropped = buildPeerAwarenessSnippet({ ...MINIMAL, [flag]: false })
       expect(dropped).not.toContain(name)
-      // Dropping one must not drop its siblings.
-      for (const [otherFlag, otherName] of [
-        ["implementerFastAvailable", "`implementer-fast`"],
-        ["genericFastAvailable", "`generic-fast`"],
-        ["genericCheapAvailable", "`generic-cheap`"],
-      ] as const) {
-        if (otherFlag !== flag) expect(dropped).toContain(otherName)
-      }
+      const [otherFlag, otherName] = flag === "implementerFastAvailable"
+        ? ["generalPurposeFastAvailable", "`general-purpose-fast`"] as const
+        : ["implementerFastAvailable", "`implementer-fast`"] as const
+      expect(dropped).toContain(otherName)
+      expect(buildPeerAwarenessSnippet({ ...MINIMAL, [otherFlag]: true })).toContain(otherName)
     }
-    // All three gone: the clause itself disappears rather than leaving a
-    // dangling "cheapest last:" with nothing after it.
-    const noCatchAlls = buildPeerAwarenessSnippet({
+    // The catch-all gone: its singular clause disappears cleanly.
+    const noCatchAll = buildPeerAwarenessSnippet({
       ...MINIMAL,
-      implementerFastAvailable: false,
-      genericFastAvailable: false,
-      genericCheapAvailable: false,
+      generalPurposeFastAvailable: false,
     })
-    expect(noCatchAlls).not.toContain("Catch-alls")
-    expect(noCatchAlls).not.toContain("cheapest last")
+    expect(noCatchAll).not.toContain("Catch-all on")
+    expect(noCatchAll).not.toContain("general-purpose-fast")
   })
 
   // `worker-browse` is emitted as a subagent whenever browse is on

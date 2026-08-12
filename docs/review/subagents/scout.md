@@ -14,7 +14,7 @@
 | System prompt | Inline native-agent definition in `buildPeerAgentDefinitions` |
 | Tools | Read-only allowlist: Read, Grep, Glob, Bash, WebFetch, WebSearch, and the resolved `search` MCP server |
 
-It is one of eight native agents: `implementer`, `implementer-fast`, `reviewer`, `brainstorm`, `scout`, `scribe`, `generic-fast`, and `generic-cheap`. Its cheap-tier-only model policy is deliberate: silently inheriting an expensive lead model would defeat the purpose of a low-cost lookup agent. The resolver prefers Luna, falls back to Gemini Flash, and enforces a 1M context floor across both. If neither qualifies, the agent is dropped; there is no 400K Mini last resort.
+It is one of seven native agents: `implementer`, `implementer-fast`, `reviewer`, `brainstorm`, `scout`, `scribe`, and `general-purpose-fast`. Its cheap-tier-only model policy is deliberate: silently inheriting an expensive lead model would defeat the purpose of a low-cost lookup agent. The resolver prefers Luna, falls back to Gemini Flash, and enforces a 1M context floor across both. If neither qualifies, the agent is dropped; there is no 400K Mini last resort.
 
 ## 2. Description (verbatim)
 
@@ -39,6 +39,6 @@ The prompt directs a broad-then-narrow repository investigation. It requires con
 
 ## 6. Findings + verdict
 
-- **No material routing defect found.** The conditional roster behavior is intentional: `scout`, like `implementer-fast` and the two `generic-*` catch-alls, is dropped rather than downgraded when its qualifying chain is unavailable.
+- **No material routing defect found.** The conditional roster behavior is intentional: `scout`, like `implementer-fast` and `general-purpose-fast`, is dropped rather than downgraded when its qualifying chain is unavailable.
 
 **Verdict: Y.** The description gives a clear, cost-aware trigger for evidence-backed repository exploration.

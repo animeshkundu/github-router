@@ -14,7 +14,7 @@
 | System prompt | Inline native-agent definition in `buildPeerAgentDefinitions` |
 | Tools | Read-only allowlist: Read, Grep, Glob, Bash, WebFetch, WebSearch, and the resolved `search` MCP server |
 
-It is one of eight native agents: `implementer`, `implementer-fast`, `reviewer`, `brainstorm`, `scout`, `scribe`, `generic-fast`, and `generic-cheap`. Its `tools:` field is a positive allowlist, so it deliberately does not inherit write tools, Agent, worker tools, orchestrate tools, or future tools not listed there.
+It is one of seven native agents: `implementer`, `implementer-fast`, `reviewer`, `brainstorm`, `scout`, `scribe`, and `general-purpose-fast`. Its `tools:` field is a positive allowlist, so it deliberately does not inherit write tools, Agent, worker tools, orchestrate tools, or future tools not listed there.
 
 ## 2. Description (verbatim)
 

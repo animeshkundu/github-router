@@ -50,6 +50,8 @@ import {
 } from "~/lib/worker-agent"
 import {
   buildCatalogView,
+  catalogTokenPrices,
+  indicativeTokensPerSecond,
   resolveModelAndThinking,
 } from "~/lib/worker-agent/model-resolve"
 import {
@@ -604,10 +606,9 @@ export function buildPeerAwarenessSnippet(opts: {
   /** Whether `implementer-fast` resolved a model and was therefore emitted.
    *  Like `scout`, it is dropped rather than downgraded to the lead's model. */
   implementerFastAvailable?: boolean
-  /** Whether each `generic-*` catch-all resolved a model and was therefore
-   *  emitted. Like `scout`, they are dropped rather than downgraded. */
-  genericFastAvailable?: boolean
-  genericCheapAvailable?: boolean
+  /** Whether `general-purpose-fast` resolved a model and was therefore emitted.
+   *  Like `scout`, it is dropped rather than downgraded. */
+  generalPurposeFastAvailable?: boolean
   /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
    *  collision). Missing key → use the preferred bare key. Keeps the
    *  `mcp__<server>__<tool>` paths in this snippet pointing at OUR servers. */
@@ -654,14 +655,9 @@ export function buildPeerAwarenessSnippet(opts: {
       `\`worker-*\` are background Agent subagents (subagent_type) that run the matching worker in its own context and deliver the result as a completion notification, so a long run never blocks the turn: \`worker-explore\` (read-only research), \`worker-review\` (reads the code to verify a change or claim), \`worker-plan\` (ordered implementation plan), \`worker-implement\` (edit/write/bash; ALWAYS runs in an isolated git worktree and returns the diff via a saved patch file; for in-place edits use the \`implementer\` subagent), \`worker-test\` (independent test author; also always worktree-isolated)${opts.browseAvailable ? ", `worker-browse` (autonomous browser agent driving a real browser)" : ""}. The raw \`mcp__${workersKey}__*\` tools they call are guarded (a direct main-thread call is redirected to the matching agent); Workers themselves have \`code_search\`.`,
     )
   }
-  const catchAllNames = [
-    opts.genericFastAvailable === false ? undefined : "`generic-fast`",
-    opts.genericCheapAvailable === false ? undefined : "`generic-cheap`",
-  ].filter((n): n is string => n != null)
-  const catchAllClause =
-    catchAllNames.length > 0
-      ? ` Catch-alls on non-lead models, for work no specialist fits, cheapest last: ${catchAllNames.join(", ")}.`
-      : ""
+  const catchAllClause = opts.generalPurposeFastAvailable === false
+    ? ""
+    : " Catch-all on a fast, economical non-lead model for work no specialist fits: `general-purpose-fast`."
   para2Parts.push(
     `Native subagents (Task), each in its own context so heavy work never fills yours: \`implementer\` (coding changes needing judgment or with ambiguous scope)${opts.implementerFastAvailable === false ? "" : ", `implementer-fast` (well-specified, mechanical coding changes)"}, \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).${catchAllClause}`,
   )
@@ -727,6 +723,15 @@ export function buildPeerAwarenessSnippet(opts: {
   ].join("\n")
 }
 
+export type NativeAgentName =
+  | "implementer"
+  | "implementer-fast"
+  | "reviewer"
+  | "brainstorm"
+  | "scout"
+  | "scribe"
+  | "general-purpose-fast"
+
 /**
  * Compact, gated capability SUMMARY for the spawned session's system prompt
  * (`--append-system-prompt`). The FULL per-tool inventory lives once in the
@@ -744,28 +749,44 @@ export function buildPeerAwarenessSummary(opts: {
   agentToolsAvailable?: boolean
   /** Which conditionally-emitted natives this launch wrote. `undefined` means
    *  available, matching `buildPeerAwarenessSnippet`. Load-bearing here for the
-   *  same reason it is there and in the operating-defaults directive: `scout`
-   *  `implementer-fast` and the two `generic-*` catch-alls are DROPPED rather
-   *  than downgraded when their chain misses, so naming one unconditionally in
+   *  same reason it is there and in the operating-defaults directive: `scout`,
+   *  `implementer-fast`, and `general-purpose-fast` are DROPPED rather than
+   *  downgraded when their chain misses, so naming one unconditionally in
    *  the always-in-context surface points the lead at an agent absent from the
    *  Task `subagent_type` enum. This surface previously took no availability at
    *  all while its own doc comment claimed it was gated identically to the full
    *  snippet. */
   scoutAvailable?: boolean
   implementerFastAvailable?: boolean
-  genericFastAvailable?: boolean
-  genericCheapAvailable?: boolean
+  generalPurposeFastAvailable?: boolean
+  /** Resolved native agent model ids from the current launch. Values are only
+   *  used to derive live catalog prices and measured speed hints for this
+   *  decision surface. */
+  nativeAgentModels?: Partial<Record<NativeAgentName, string | undefined>>
   groupKeys?: Partial<Record<McpGroup, string>>
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
-  const summaryCatchAlls = [
-    opts.genericFastAvailable === false ? undefined : "`generic-fast`",
-    opts.genericCheapAvailable === false ? undefined : "`generic-cheap`",
+  const renderNative = (name: NativeAgentName): string => {
+    const modelId = opts.nativeAgentModels?.[name]
+    if (!modelId) return `\`${name}\``
+    const prices = catalogTokenPrices(modelId)
+    const tps = indicativeTokensPerSecond(modelId)
+    if (!prices || tps == null) return `\`${name}\``
+    return `\`${name}\` ${prices.in}/${prices.out} ~${tps}t/s`
+  }
+  const summaryNativeNames = [
+    renderNative("implementer"),
+    opts.implementerFastAvailable === false ? undefined : renderNative("implementer-fast"),
+    renderNative("reviewer"),
+    renderNative("brainstorm"),
+    opts.scoutAvailable === false ? undefined : renderNative("scout"),
+    renderNative("scribe"),
+    opts.generalPurposeFastAvailable === false ? undefined : renderNative("general-purpose-fast"),
   ].filter((n): n is string => n != null)
   const lines: Array<string> = [
     "## Injected capabilities (summary)",
     "",
-    // The native subagents come FIRST and are named here, not only in CLAUDE.md.
+    // The native subagents come FIRST and are NAMED here, not only in CLAUDE.md.
     // This block is the always-in-context surface; it previously named every
     // competing surface (peer critics, workers, stand_in) and none of the
     // natives, so the only agents the lead was reminded of every turn were the
@@ -773,7 +794,16 @@ export function buildPeerAwarenessSummary(opts: {
     // tiebreak because that is the one pair observed to route wrong: a live
     // session picked `codex_reviewer` for an assess-this-code task, which is
     // exactly the case `reviewer` exists for.
-    `Native subagents (Task), each in its own context: \`implementer\` (coding changes needing judgment or with ambiguous scope)${opts.implementerFastAvailable === false ? "" : ", `implementer-fast` (well-specified, mechanical coding changes)"}, \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).${summaryCatchAlls.length > 0 ? ` Catch-alls on non-lead models for work no specialist fits, cheapest last: ${summaryCatchAlls.join(", ")}.` : ""} They read the repo and can run things; the peer critics below cannot, so reach for \`reviewer\` when an assessment needs execution or repo context and for a critic when you already hold the artifact.`,
+    //
+    // NAMES ONLY, deliberately. The per-agent "when to use" clause lives in each
+    // agent's own `.md` description, which is what Claude Code's auto-delegation
+    // rubric actually reads at selection time, and is expanded again in the
+    // CLAUDE.md snippet. Repeating it here made it a THIRD copy on the surface
+    // that is paid every single turn, and it contradicted this block's own
+    // closing pointer to CLAUDE.md for the roster. What cannot be recovered from
+    // a per-agent description is the CROSS-CUTTING fact, so that is what stays:
+    // the roster exists, and natives can execute where the critics cannot.
+    `Native subagents (Task), own context. Cost is per 1M tokens in/out, tok/s approximate: ${summaryNativeNames.join(", ")}. Each agent's own description states when it applies. They read the repo and can run things; the peer critics below cannot, so reach for \`reviewer\` when an assessment needs execution or repo context and for a critic when you already hold the artifact.`,
     `A layer of MCP tools, background workers, and skills is injected into this session. Cross-lab peer critics under \`mcp__${key("peers")}__*\` (plus the \`peer-review-coordinator\` subagent) review plans and diffs adversarially, and Claude Code's built-in \`advisor\` catches approach drift. \`mcp__${key("search")}__code\` is meaning-first code search and \`mcp__${key("search")}__web\` returns citable web sources.`,
   ]
   if (opts.workerToolsAvailable) {

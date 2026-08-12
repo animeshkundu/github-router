@@ -125,9 +125,9 @@ const STYLE_DIRECTIVE =
  * Self-referentially compliant with the style directive: no em dashes, no
  * Claude / Anthropic attribution.
  *
- * Availability-aware: four of the natives (`scout`, `implementer-fast`, and
- * the two `generic-*` catch-alls) are DROPPED rather than downgraded when no model in their chain
- * resolves, so naming them unconditionally here would tell the lead to delegate
+ * Availability-aware: three of the natives (`scout`, `implementer-fast`, and
+ * `general-purpose-fast`) are DROPPED rather than downgraded when no model in
+ * their chain resolves, so naming them unconditionally here would tell the lead to delegate
  * to an agent that has no `.md` file and is absent from the Task
  * `subagent_type` enum. Build the directive with
  * `buildOperatingDefaultsDirective` and the same availability booleans used for
@@ -143,8 +143,7 @@ const STYLE_DIRECTIVE =
 export interface NativeAgentAvailability {
   scoutAvailable?: boolean
   implementerFastAvailable?: boolean
-  genericFastAvailable?: boolean
-  genericCheapAvailable?: boolean
+  generalPurposeFastAvailable?: boolean
 }
 
 /** Oxford-comma join: "a", "a and b", "a, b, and c". */
@@ -171,15 +170,8 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
     clauses.push("`scout` to find or understand something in the repo")
   }
   clauses.push("`scribe` for docs and ADRs that trail the code")
-  const catchAlls = [
-    opts.genericFastAvailable === false ? undefined : "`generic-fast`",
-    opts.genericCheapAvailable === false ? undefined : "`generic-cheap`",
-  ].filter((c): c is string => c != null)
-  if (catchAlls.length > 0) {
-    clauses.push(
-      `${joinClauses(catchAlls)} for work no specialist fits, picking the tier `
-        + "that matches the work's weight",
-    )
+  if (opts.generalPurposeFastAvailable !== false) {
+    clauses.push("`general-purpose-fast` for work no specialist fits")
   }
   return joinClauses(clauses)
 }
