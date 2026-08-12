@@ -22,6 +22,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 
 import { parseBoolEnv, runCommandCapture } from "./lib/exec"
+import { PACKAGE_ROOT_FLAG, explicitPackageRoot } from "./lib/package-root"
 import { liveExec } from "./lib/orchestration"
 import { readDiscoveredGate } from "./lib/orchestration/gate-discovery"
 import { checksForDescriptor, descriptorHash, parseGateDescriptor, type GateDescriptor } from "./lib/orchestration/harness-parse"
@@ -145,11 +146,12 @@ function spawnStopReview(ctx: StopReviewContext, extras: { prompt: string; trans
       }),
       { mode: 0o600 },
     )
-    // Invoke the same binary's `internal-stop-review` subcommand. Mirror
-    // buildStopHookCommand's resolution: pass the script path only when it
-    // differs from the node/bun executable (a packaged single-file build).
+    // Invoke the same binary's `internal-stop-review` subcommand. Preserve the
+    // package root when this hook itself runs from the relocated launcher.
     const scriptArgs = process.argv[1] && process.argv[1] !== process.execPath ? [process.argv[1]] : []
-    const child = spawn(process.execPath, [...scriptArgs, "internal-stop-review"], {
+    const root = explicitPackageRoot()
+    const packageRootArgs = root ? [PACKAGE_ROOT_FLAG, root] : []
+    const child = spawn(process.execPath, [...scriptArgs, ...packageRootArgs, "internal-stop-review"], {
       detached: true,
       windowsHide: true,
       stdio: "ignore",

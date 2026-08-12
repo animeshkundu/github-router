@@ -15,6 +15,7 @@
  * trivial prompt yields an empty injection.
  */
 
+import { buildSelfCommand, type SelfInvocation } from "../hook-launcher/self-invocation"
 import { isSubagentContext } from "./stop-gate-policy"
 
 /**
@@ -251,15 +252,7 @@ export async function decidePromptSubmitV2(input: {
   return decision
 }
 
-/**
- * Build the shell command Claude Code runs for the `UserPromptSubmit` hook —
- * the running github-router via its node/bun binary so it works regardless of
- * PATH. Mirrors `buildStopHookCommand`.
- */
-export function buildPromptSubmitHookCommand(execPath: string, scriptPath: string | undefined): string {
-  const q = (s: string): string => `"${s}"`
-  if (scriptPath && scriptPath !== execPath) {
-    return `${q(execPath)} ${q(scriptPath)} internal-prompt-submit`
-  }
-  return `${q(execPath)} internal-prompt-submit`
+/** Build the shell command Claude Code runs for the `UserPromptSubmit` hook. */
+export function buildPromptSubmitHookCommand(invocation: SelfInvocation): string {
+  return buildSelfCommand(invocation, "internal-prompt-submit")
 }

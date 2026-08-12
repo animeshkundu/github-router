@@ -14,14 +14,14 @@ describe("mcp workspace header helper", () => {
 
   test("command builder quotes exec and script paths", () => {
     expect(
-      buildWorkspaceHeaderHelperCommand("/usr/bin/node", "/app/dist/main.js"),
+      buildWorkspaceHeaderHelperCommand({ execPath: "/usr/bin/node", scriptPath: "/app/dist/main.js" }),
     ).toBe('"/usr/bin/node" "/app/dist/main.js" internal-workspace-header')
   })
 
   test("command builder collapses to exec-only for packaged builds", () => {
-    expect(buildWorkspaceHeaderHelperCommand("/opt/github-router", "/opt/github-router"))
+    expect(buildWorkspaceHeaderHelperCommand({ execPath: "/opt/github-router", scriptPath: "/opt/github-router" }))
       .toBe('"/opt/github-router" internal-workspace-header')
-    expect(buildWorkspaceHeaderHelperCommand("/opt/github-router", undefined))
+    expect(buildWorkspaceHeaderHelperCommand({ execPath: "/opt/github-router" }))
       .toBe('"/opt/github-router" internal-workspace-header')
   })
 

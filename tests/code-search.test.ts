@@ -117,8 +117,20 @@ describe("tokenize (FSE 2021 rule-based identifier splitter)", () => {
 describe("resolveRipgrep", () => {
   test("resolves to an extant rg binary", () => {
     const r = resolveRipgrep()
-    expect(["system", "bundled"]).toContain(r.source)
+    // Three tiers, in preference order: a system `rg` on PATH, the toolbelt's
+    // copy under APP_DIR, then the bundled @vscode/ripgrep binary. The
+    // toolbelt tier exists because the bundled one lives in the package tree,
+    // which under `bunx` sits in $TMPDIR and gets reaped — taking code_search
+    // down with it for anyone without a system rg.
+    expect(["system", "toolbelt", "bundled"]).toContain(r.source)
     expect(r.rgPath.length).toBeGreaterThan(0)
+    // Live up to the test's name. The `system` tier deliberately returns the
+    // bare command name rather than an absolute path (so Windows applies
+    // NoDefaultCurrentDirectoryInExePath and a planted ./rg.exe can't win), so
+    // there is nothing to stat there; the other two are real paths.
+    if (r.source !== "system") {
+      expect(existsSync(r.rgPath)).toBe(true)
+    }
   })
 
   test("bundled @vscode/ripgrep is reachable", () => {

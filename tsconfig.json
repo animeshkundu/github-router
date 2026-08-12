@@ -27,6 +27,7 @@
     }
   },
   "exclude": [
+    "dist/**",
     "src/browser-ext/**",
     "src/browser-bridge/**"
   ]

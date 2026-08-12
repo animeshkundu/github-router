@@ -84,19 +84,19 @@ describe("decidePromptSubmit", () => {
 
 describe("buildPromptSubmitHookCommand", () => {
   test("includes both execPath and scriptPath when they differ", () => {
-    expect(buildPromptSubmitHookCommand("/bin/bun", "/app/github-router.js")).toBe(
+    expect(buildPromptSubmitHookCommand({ execPath: "/bin/bun", scriptPath: "/app/github-router.js" })).toBe(
       '"/bin/bun" "/app/github-router.js" internal-prompt-submit',
     )
   })
 
   test("omits scriptPath when it is the same as execPath", () => {
-    expect(buildPromptSubmitHookCommand("/app/github-router", "/app/github-router")).toBe(
+    expect(buildPromptSubmitHookCommand({ execPath: "/app/github-router", scriptPath: "/app/github-router" })).toBe(
       '"/app/github-router" internal-prompt-submit',
     )
   })
 
   test("omits scriptPath when it is undefined", () => {
-    expect(buildPromptSubmitHookCommand("/app/github-router", undefined)).toBe(
+    expect(buildPromptSubmitHookCommand({ execPath: "/app/github-router" })).toBe(
       '"/app/github-router" internal-prompt-submit',
     )
   })

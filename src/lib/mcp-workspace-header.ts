@@ -1,3 +1,5 @@
+import { buildSelfCommand, type SelfInvocation } from "./hook-launcher/self-invocation"
+
 /** Header the per-session MCP headersHelper emits, carrying the calling Claude
  *  session's working directory. The /mcp handler uses it as the default
  *  `workspace` for repo-scoped tools so a machine-wide `serve` targets the
@@ -10,11 +12,7 @@ export function buildWorkspaceHeaderJson(cwd: string): string {
   return JSON.stringify({ [MCP_WORKSPACE_HEADER]: cwd })
 }
 
-/** Command string Claude runs as the headersHelper. Mirrors
- *  buildPromptSubmitHookCommand's quoting (src/lib/orchestration/prompt-submit-hook.ts). */
-export function buildWorkspaceHeaderHelperCommand(execPath: string, scriptPath: string | undefined): string {
-  const q = (s: string): string => `"${s}"`
-  return scriptPath && scriptPath !== execPath
-    ? `${q(execPath)} ${q(scriptPath)} internal-workspace-header`
-    : `${q(execPath)} internal-workspace-header`
+/** Command string Claude runs as the headersHelper. */
+export function buildWorkspaceHeaderHelperCommand(invocation: SelfInvocation): string {
+  return buildSelfCommand(invocation, "internal-workspace-header")
 }

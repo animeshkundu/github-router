@@ -4,6 +4,7 @@ import path from "node:path"
 
 import consola from "consola"
 
+import { type SelfInvocation } from "./hook-launcher/self-invocation"
 import { buildCodexProviderConfigFlags } from "./launch"
 import { buildWorkspaceHeaderHelperCommand } from "./mcp-workspace-header"
 import { withOneMSuffix } from "./one-m-context"
@@ -714,6 +715,8 @@ export interface PeerMcpRuntimeFiles {
 
 interface WriteOpts {
   codexCli: boolean
+  /** Stable invocation baked into persisted headersHelper commands. */
+  selfInvocation: SelfInvocation
   geminiAvailable: boolean
   /** Resolved config keys per enabled group (from `resolveGroupKeysFromMirror`).
    *  Threaded into both the --mcp-config payload and the persona .md routing
@@ -977,6 +980,8 @@ export type InjectPeerMcpResult =
 
 interface InjectOpts {
   codexCli: boolean
+  /** Stable invocation baked into persisted headersHelper commands. */
+  selfInvocation: SelfInvocation
   geminiAvailable: boolean
   /** Resolved config keys per enabled group (from `resolveGroupKeysFromMirror`).
    *  Collision-free by construction, so the merge below never overwrites a
@@ -1157,7 +1162,7 @@ export async function injectPeerMcpIntoMirror(
     groupKeys: opts.groupKeys,
     nonce: opts.nonce,
     codexHome: opts.codexHome ?? PATHS.CODEX_HOME,
-    workspaceHeaderCmd: buildWorkspaceHeaderHelperCommand(process.execPath, process.argv[1]),
+    workspaceHeaderCmd: buildWorkspaceHeaderHelperCommand(opts.selfInvocation),
   })
 
   // 4. Defensive: the resolved keys are collision-free by construction, so
@@ -1246,7 +1251,7 @@ export async function writePeerMcpRuntimeFiles(
     groupKeys: opts.groupKeys,
     nonce,
     codexHome,
-    workspaceHeaderCmd: buildWorkspaceHeaderHelperCommand(process.execPath, process.argv[1]),
+    workspaceHeaderCmd: buildWorkspaceHeaderHelperCommand(opts.selfInvocation),
   })
   const agents = buildPeerAgentDefinitions({
     codexCli: opts.codexCli,
@@ -1264,7 +1269,7 @@ export async function writePeerMcpRuntimeFiles(
     nonce,
     codexHome,
     serverUrl,
-    workspaceHeaderCmd: buildWorkspaceHeaderHelperCommand(process.execPath, process.argv[1]),
+    workspaceHeaderCmd: buildWorkspaceHeaderHelperCommand(opts.selfInvocation),
   })
 
   // If a prior same-PID file survived (boot sweep didn't run, or this

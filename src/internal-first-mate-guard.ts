@@ -14,6 +14,7 @@ import { defineCommand } from "citty"
 import { readFileSync } from "node:fs"
 
 import { operatorPreToolUse, type OperatorToolInput } from "./lib/first-mate/operator-shaping"
+import { buildSelfCommand, type SelfInvocation } from "./lib/hook-launcher/self-invocation"
 
 function readStdinSync(): string {
   try {
@@ -69,6 +70,6 @@ export const internalFirstMateGuard = defineCommand({
 export const FIRST_MATE_GUARD_MATCHER = "mcp__workers__.*|mcp__orchestrate__.*"
 
 /** Build the hook command string that runs this subcommand. */
-export function buildFirstMateGuardHookCommand(execPath: string, entry: string): string {
-  return `${JSON.stringify(execPath)} ${JSON.stringify(entry)} internal-first-mate-guard`
+export function buildFirstMateGuardHookCommand(invocation: SelfInvocation): string {
+  return buildSelfCommand(invocation, "internal-first-mate-guard")
 }

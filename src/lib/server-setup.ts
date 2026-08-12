@@ -16,6 +16,7 @@ import { state } from "./state"
 import { setupCopilotToken, setupGitHubAgentToken, setupGitHubToken } from "./token"
 import { toolbeltEnabled } from "./toolbelt"
 import { toolbeltPathOverride } from "./toolbelt/path-inject"
+import { provisionTreeSitterAssets } from "./tree-sitter-assets/provision"
 import { cacheModels, cacheCopilotVersion, cacheVSCodeVersion } from "./utils"
 import { warnOnTokenPriceDrift } from "./worker-agent/model-resolve"
 import { resolveMcpToolTimeoutMs } from "./worker-agent/budget"
@@ -461,6 +462,12 @@ export async function setupAndServe(
 
   // Wait for the server to be listening before reading the URL
   await srvxServer.ready()
+
+  // Best-effort and deliberately not startup-ordering-critical: both tree-sitter
+  // resolvers retain their package-tree fallbacks while the stable copies are
+  // published in the background.
+  void provisionTreeSitterAssets()
+
   const url = srvxServer.url
   if (!url) {
     throw new Error("Server started but URL is not available")

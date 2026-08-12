@@ -18,6 +18,7 @@ import {
   prependOperatingDefaultsToMirroredClaudeMd,
   prependStyleDirectiveToMirroredClaudeMd,
 } from "../claude-md-injection"
+import { type SelfInvocation } from "../hook-launcher/self-invocation"
 import { INJECTED_SKILLS, writeInjectedSkill } from "../injected-skills"
 import {
   configureServeDefaultPermissionMode,
@@ -69,6 +70,8 @@ export interface ServeEnhancementsHandle {
 }
 
 export interface ServeEnhancementOpts {
+  /** Stable invocation baked into every persisted hook/helper command. */
+  selfInvocation: SelfInvocation
   /** Route Codex personas through a local `codex mcp-server` (stdio) when the backend resolved to "cli". */
   codexCli?: boolean
   /** True when the control plane is reachable beyond loopback (a --tunnel or --public-url is active). Gates the highest-blast-radius capabilities OFF by default: the server-side browser MCP (a session-hijack / SSRF / cloud-metadata primitive when reachable remotely) and first-mate (mints a repo+workflow GitHub write token). */
@@ -103,7 +106,7 @@ const NOOP: ServeEnhancementsHandle = { cleanup: async () => {} }
  */
 export async function provisionServeEnhancements(
   serverUrl: string,
-  opts: ServeEnhancementOpts = {},
+  opts: ServeEnhancementOpts,
 ): Promise<ServeEnhancementsHandle> {
   try {
     const tunnelExposed = opts.tunnelExposed === true
@@ -131,6 +134,7 @@ export async function provisionServeEnhancements(
 
     const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
       codexCli: opts.codexCli === true,
+      selfInvocation: opts.selfInvocation,
       geminiAvailable: gem,
       groupKeys,
       workerToolsAvailable: workerToolsEnabled(),
@@ -154,6 +158,7 @@ export async function provisionServeEnhancements(
 
     const injected = await injectPeerMcpIntoMirror(serverUrl, {
       codexCli: opts.codexCli === true,
+      selfInvocation: opts.selfInvocation,
       geminiAvailable: gem,
       groupKeys,
       nonce: runtime.nonce,
@@ -256,7 +261,7 @@ export async function provisionServeEnhancements(
     )
 
     if (workerToolsEnabled()) {
-      const promptCmd = buildPromptSubmitHookCommand(process.execPath, process.argv[1])
+      const promptCmd = buildPromptSubmitHookCommand(opts.selfInvocation)
       await injectStopHookIntoSettingsFile(settingsPath, promptCmd, "UserPromptSubmit", 45).catch(
         (err) => consola.warn(`Could not register the UserPromptSubmit hook: ${String(err)}`),
       )
@@ -269,8 +274,7 @@ export async function provisionServeEnhancements(
         const workersKey = workersKeyOf(groupKeys)
         const modes = activeDispatchModes({ browse: browseAllowed && browseAgentEnabled() })
         const cmd = buildWorkerGuardHookCommand(
-          process.execPath,
-          process.argv[1],
+          opts.selfInvocation,
           workersKey,
           modes,
         )
@@ -287,7 +291,7 @@ export async function provisionServeEnhancements(
 
     if (planReviewEnabled()) {
       try {
-        const command = buildPlanReviewHookCommand(process.execPath, process.argv[1])
+        const command = buildPlanReviewHookCommand(opts.selfInvocation)
         // Advisory PostToolUse(ExitPlanMode) hook: non-blocking; findings surface on the next prompt.
         // Verified (scripts/verify-plan-mode-cloudcli.mjs): ExitPlanMode runs as a real tool under
         // CloudCLI's SDK path, and settingSources=['project','user','local'] loads this mirror

@@ -29,6 +29,13 @@ import { readFile } from "node:fs/promises"
 import consola from "consola"
 import { Language, Node, Parser, Tree } from "web-tree-sitter"
 
+import { PATHS } from "~/lib/paths"
+import {
+  TREE_SITTER_GRAMMAR_FILES,
+  TREE_SITTER_RUNTIME_FILE,
+} from "~/lib/tree-sitter-assets/files"
+import { stableTreeSitterAssetsComplete } from "~/lib/tree-sitter-assets/provision"
+
 // ============================================================
 // Constants
 // ============================================================
@@ -73,22 +80,11 @@ export const EXTENSION_TO_LANG: Readonly<Record<string, string>> = {
 }
 
 /**
- * Grammar key → wasm filename under `node_modules/tree-sitter-wasms/out/`.
- * Resolved at runtime from `node_modules`; the file paths are stable
- * because `tree-sitter-wasms` ships prebuilt binaries (no per-install
- * codegen).
+ * Grammar key → wasm filename. The stable APP_DIR copy is preferred; the
+ * original `node_modules/tree-sitter-wasms/out/` directory remains the
+ * first-run fallback while background provisioning completes.
  */
-export const GRAMMAR_FILES: Readonly<Record<string, string>> = {
-  typescript: "tree-sitter-typescript.wasm",
-  tsx: "tree-sitter-tsx.wasm",
-  javascript: "tree-sitter-javascript.wasm",
-  python: "tree-sitter-python.wasm",
-  go: "tree-sitter-go.wasm",
-  rust: "tree-sitter-rust.wasm",
-  java: "tree-sitter-java.wasm",
-  c: "tree-sitter-c.wasm",
-  cpp: "tree-sitter-cpp.wasm",
-}
+export const GRAMMAR_FILES = TREE_SITTER_GRAMMAR_FILES
 
 /**
  * Per-language definition-shape node types. When a matched identifier
@@ -237,17 +233,34 @@ export interface GrammarBundle {
 let _grammarBundle: GrammarBundle | undefined
 
 /**
- * Resolve the `tree-sitter-wasms/out/` directory at the package root.
- * `require.resolve` is used through a try/catch — the bundled-only
- * fallback runs in environments where node_modules has been pruned to
- * just runtime deps.
+ * Resolve the grammar directory. The stable APP_DIR copy wins only when the
+ * COMPLETE set is present; otherwise `require.resolve` supplies the
+ * package-tree fallback for first launch or a best-effort provisioning failure.
+ *
+ * All-or-nothing on purpose — see `stableTreeSitterAssetsComplete()`: mixing a
+ * stable runtime with package-tree grammars can pair mismatched ABI builds and
+ * silently disable structural ranking.
  */
 export function resolveGrammarRoot(): string | null {
+  if (stableTreeSitterAssetsComplete()) return PATHS.TREE_SITTER_ASSETS_DIR
   try {
     const pkgPath = require.resolve("tree-sitter-wasms/package.json")
     return path.join(path.dirname(pkgPath), "out")
   } catch {
     return null
+  }
+}
+
+/**
+ * web-tree-sitter normally resolves this sidecar relative to its JS module.
+ * Prefer the durable copy, but only under the same all-present gate the
+ * grammars use, so the runtime and the grammars always come from one install.
+ */
+function parserInitOptions(): Parameters<typeof Parser.init>[0] | undefined {
+  if (!stableTreeSitterAssetsComplete()) return undefined
+  return {
+    locateFile: () =>
+      path.join(PATHS.TREE_SITTER_ASSETS_DIR, TREE_SITTER_RUNTIME_FILE),
   }
 }
 
@@ -262,7 +275,7 @@ export function getGrammarBundle(): GrammarBundle {
   const ready = (async (): Promise<Map<string, Language>> => {
     const out = new Map<string, Language>()
     try {
-      await Parser.init()
+      await Parser.init(parserInitOptions())
     } catch (err) {
       consola.warn(
         `[code_search] tree-sitter Parser.init failed; structural ranking disabled: ${(err as Error).message}`,

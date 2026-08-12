@@ -14,6 +14,7 @@
  * map the result to an exit code) is the only part that needs a real process.
  */
 
+import { buildSelfCommand, type SelfInvocation } from "../hook-launcher/self-invocation"
 import { resolveSealedGate } from "./gate-registry"
 import { runGateChecks, type CheckSpec, type ExecFn } from "./gate-runner"
 import { evaluateStopGate, type StopGateResult } from "./stop-gate"
@@ -605,18 +606,9 @@ export function fileBlockBudget(stateDir: string): BlockBudget {
   }
 }
 
-/**
- * Build the shell command string Claude Code runs for the Stop hook. Invokes the
- * running github-router via its node/bun binary so it works regardless of PATH.
- * Pure (takes the binary + script paths) so the quoting is unit-testable; the
- * cross-platform firing is verified by the gated E2E.
- */
-export function buildStopHookCommand(execPath: string, scriptPath: string | undefined): string {
-  const q = (s: string): string => `"${s}"`
-  if (scriptPath && scriptPath !== execPath) {
-    return `${q(execPath)} ${q(scriptPath)} internal-stop-hook`
-  }
-  return `${q(execPath)} internal-stop-hook`
+/** Build the shell command Claude Code runs for the Stop hook. */
+export function buildStopHookCommand(invocation: SelfInvocation): string {
+  return buildSelfCommand(invocation, "internal-stop-hook")
 }
 
 /**
@@ -628,21 +620,16 @@ export function buildStopHookCommand(execPath: string, scriptPath: string | unde
  * paths) for unit-testable quoting; the live firing is verified end-to-end.
  */
 export function buildSessionBindHookCommand(
-  execPath: string,
-  scriptPath: string | undefined,
+  invocation: SelfInvocation,
   outPath: string,
 ): string {
-  const q = (s: string): string => `"${s}"`
-  const head = scriptPath && scriptPath !== execPath ? `${q(execPath)} ${q(scriptPath)}` : q(execPath)
-  return `${head} internal-session-bind --out ${q(outPath)}`
+  return buildSelfCommand(invocation, `internal-session-bind --out "${outPath}"`)
 }
 
 /** Command for the `internal-artifact-open` hook (no args — token comes from the
  *  mirror creds file, plan from the plans dir; nothing secret in argv). */
-export function buildArtifactOpenHookCommand(execPath: string, scriptPath: string | undefined): string {
-  const q = (s: string): string => `"${s}"`
-  const head = scriptPath && scriptPath !== execPath ? `${q(execPath)} ${q(scriptPath)}` : q(execPath)
-  return `${head} internal-artifact-open`
+export function buildArtifactOpenHookCommand(invocation: SelfInvocation): string {
+  return buildSelfCommand(invocation, "internal-artifact-open")
 }
 
 /**
