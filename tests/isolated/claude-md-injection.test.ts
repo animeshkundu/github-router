@@ -618,6 +618,27 @@ test("operating-defaults digest protects main-thread context for the user", () =
   )
 })
 
+// Both injection surfaces must carry the teammate-lifecycle rule, and they are
+// NOT interchangeable: the digest reaches the main agent via
+// --append-system-prompt, while CLAUDE.md is the only surface that reaches
+// Agent-tool subagents and teammates, which never see that flag. Dropping it
+// from either one silently loses the rule for that audience.
+//
+// The wording is pinned deliberately. An earlier draft said "once its work is
+// done", which reads as reap-on-first-report and would destroy the persistence
+// the feature exists for: a named teammate is kept alive precisely so it can
+// take follow-up rounds with its context intact. The rule is "done WITH IT",
+// not "its work is done".
+test("both injection surfaces carry the teammate-reaping rule, scoped to no-longer-needed", () => {
+  const directive = buildOperatingDefaultsDirective()
+  for (const surface of [OPERATING_DEFAULTS_DIGEST, directive]) {
+    expect(surface).toContain("once you are done with it")
+    expect(surface).toContain("nothing reaps it for you")
+    // Must not imply reaping the moment a teammate reports.
+    expect(surface).not.toContain("once its work is done")
+  }
+})
+
 test("peer-critic guidance carries a two-sided discriminator, not an exhortation to consult more", () => {
   // Same failure shape the delegation default had, and the same fix. Four of
   // four unprimed agents, asked afterwards, had never reached for a peer

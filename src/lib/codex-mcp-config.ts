@@ -286,7 +286,7 @@ function buildCoordinatorAgent(opts: {
     "- **Plan / design / architecture choice** → fan out to `codex-critic` (gpt-5.6-sol, strongest reasoning, cross-lab)"
       + (opts.geminiAvailable ? " AND `gemini-critic` (third-lab triangulation, strong on formal reasoning) in parallel" : "")
       + ". codex-reviewer is the wrong tool for plans (it's a code-specialist, not an architecture critic).",
-    "- **Concrete diff or single file** → fan out to `codex-reviewer` (gpt-5.3-codex, line-level code specialist, fastest at ~16s)"
+    "- **Concrete diff or single file** → fan out to `codex-reviewer` (gpt-5.3-codex, line-level code specialist)"
       + (opts.geminiAvailable ? " AND `gemini-reviewer` (gemini-3.1-pro, second-lab line-level review)" : "")
       + (opts.geminiAvailable ? " AND `gemini-critic` for cross-lab triangulation" : "")
       + ". For very small changes (<20 lines), one `codex-reviewer` call is enough.",
@@ -297,7 +297,7 @@ function buildCoordinatorAgent(opts: {
     "- **Tie-breaker after codex-critic has weighed in** → call `gemini-critic`"
       + (opts.geminiAvailable ? "" : " (NOT REGISTERED in this session)")
       + " or `opus-critic` with the artifact AND codex-critic's verdict for cross-check.",
-    "- **Fast sanity check** → `opus-critic` (~22s, same lab as lead but fresh context — catches confabulation and motivated reasoning).",
+    "- **Fast sanity check** → `opus-critic` (same lab as lead but fresh context — catches confabulation and motivated reasoning).",
     "",
     "## Decomposition for large artifacts",
     "",
@@ -542,8 +542,9 @@ export function buildPeerAgentDefinitions(
   // `[1m]` decorates the FRONTMATTER value only, never the description text.
   // Claude Code budgets a subagent's context off its model id, and its detector
   // (`/\[1m\]/i`) has no vendor gate — so without the suffix an `implementer` on
-  // `gpt-5.6-sol` (1,050,000 tokens) runs against a 200K budget. Catalog-gated,
-  // so `scout` falling back to `gpt-5.4-mini` (400K) correctly stays bare.
+  // `gpt-5.6-sol` (1,050,000 tokens) runs against a 200K budget. `scout` is now
+  // floor-gated to 1M across both of its entries, so every emitted scout id receives
+  // the suffix; a model below the floor causes the agent to be dropped instead.
   // Descriptions keep the bare id because that string is prose the lead reads.
   const modelField: { model?: string } =
     nativeModel ? { model: withOneMSuffix(nativeModel) } : {}

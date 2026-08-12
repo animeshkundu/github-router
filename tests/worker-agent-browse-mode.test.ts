@@ -4,8 +4,8 @@
  * Browse runs the SAME `runWorkerAgent` engine as explore/implement/review,
  * but with three browse-specific differences this file pins:
  *
- *   1. the default model is `BROWSE_DEFAULT_MODEL`, deliberately decoupled
- *      from the worker-gate `DEFAULT_MODEL` — and an explicit `model` arg
+ *   1. the default model is `BROWSE_DEFAULT_MODEL`; it also leads the
+ *      tier-adaptive worker gate/fallback chain, while an explicit `model` arg
  *      still wins;
  *   2. the toolset is the browser-control tools (`buildBrowseTools`), NOT
  *      the filesystem worker tools (`buildWorkerTools`);
@@ -32,7 +32,7 @@ import { state } from "~/lib/state"
 import { recordingFetch, sseFinalText, sseToolCall } from "./helpers/worker-sse"
 import {
   BROWSE_DEFAULT_MODEL,
-  DEFAULT_MODEL,
+  DEFAULT_MODEL_CHAIN,
   runWorkerAgent,
 } from "~/lib/worker-agent/engine"
 import {
@@ -121,9 +121,9 @@ beforeEach(() => {
         tool_calls: true,
         reasoning_effort: ["low", "medium", "high"],
       }),
-      // Gemini worker default — present so a wrong-default regression
-      // (browse falling back to DEFAULT_MODEL) is observable.
-      fakeModel(DEFAULT_MODEL, {
+      // Broad-tier fallback — present so a wrong-default regression
+      // (browse choosing the second gate-chain entry) is observable.
+      fakeModel(DEFAULT_MODEL_CHAIN[1]!, {
         tool_calls: true,
         reasoning_effort: ["low", "medium", "high"],
       }),
@@ -147,9 +147,9 @@ afterEach(() => {
 // ============================================================
 
 describe("BROWSE_DEFAULT_MODEL", () => {
-  test("pins the browse model independently from the worker gate sentinel", () => {
+  test("pins the browse model to the preferred worker gate-chain entry", () => {
     expect(BROWSE_DEFAULT_MODEL).toBe("gpt-5.6-luna")
-    expect(BROWSE_DEFAULT_MODEL).not.toBe(DEFAULT_MODEL)
+    expect(BROWSE_DEFAULT_MODEL).toBe(DEFAULT_MODEL_CHAIN[0])
   })
 })
 
@@ -192,10 +192,10 @@ describe("browse mode model selection", () => {
         prompt: "x",
         mode: "browse",
         workspace: dir,
-        model: DEFAULT_MODEL,
+        model: DEFAULT_MODEL_CHAIN[1]!,
       })
       expect(r.isError).toBeUndefined()
-      expect(bodies[0]!.model).toBe(DEFAULT_MODEL)
+      expect(bodies[0]!.model).toBe(DEFAULT_MODEL_CHAIN[1])
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

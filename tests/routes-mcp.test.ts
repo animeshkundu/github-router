@@ -2292,25 +2292,24 @@ function workerSseResponse(
 }
 
 describe("/mcp worker_* tools — registration + gating", () => {
-  test("tools/list includes worker_explore + worker_implement when gpt-5.4-mini is present with tool_calls", async () => {
-    state.models = {
-      object: "list",
-      data: [
-        ...baseModels.data.filter((m) => m.id !== "gpt-5.4-mini"),
-        fakeWorkerModel("gpt-5.4-mini"),
-      ],
-    }
-    const { status, json } = await rpc({
-      jsonrpc: "2.0",
-      id: 700,
-      method: "tools/list",
+  for (const gateModel of ["gpt-5.4-mini", "gpt-5.6-luna"]) {
+    test(`tools/list includes worker tools on a ${gateModel}-only gate catalog`, async () => {
+      state.models = {
+        object: "list",
+        data: [fakeWorkerModel(gateModel)],
+      }
+      const { status, json } = await rpc({
+        jsonrpc: "2.0",
+        id: 700,
+        method: "tools/list",
+      })
+      expect(status).toBe(200)
+      const result = json.result as { tools: Array<{ name: string }> }
+      const names = result.tools.map((t) => t.name)
+      expect(names).toContain("explore")
+      expect(names).toContain("implement")
     })
-    expect(status).toBe(200)
-    const result = json.result as { tools: Array<{ name: string }> }
-    const names = result.tools.map((t) => t.name)
-    expect(names).toContain("explore")
-    expect(names).toContain("implement")
-  })
+  }
 
   test("tools/list omits both worker tools when GH_ROUTER_DISABLE_WORKER_TOOLS=1 (even if model is present)", async () => {
     const prev = process.env.GH_ROUTER_DISABLE_WORKER_TOOLS
@@ -2339,10 +2338,10 @@ describe("/mcp worker_* tools — registration + gating", () => {
     }
   })
 
-  test("tools/list omits both worker tools when gpt-5.4-mini is absent from catalog", async () => {
+  test("tools/list omits both worker tools when the entire gate chain is absent", async () => {
     state.models = {
       object: "list",
-      data: baseModels.data.filter((m) => m.id !== "gpt-5.4-mini"),
+      data: baseModels.data,
     }
     const { json } = await rpc({
       jsonrpc: "2.0",
@@ -2356,11 +2355,11 @@ describe("/mcp worker_* tools — registration + gating", () => {
     expect(names).not.toContain("implement")
   })
 
-  test("tools/list omits both when gpt-5.4-mini is present WITHOUT tool_calls support", async () => {
+  test("tools/list omits both when every gate model lacks tool_calls", async () => {
     state.models = {
       object: "list",
       data: [
-        ...baseModels.data.filter((m) => m.id !== "gpt-5.4-mini"),
+        fakeWorkerModel("gpt-5.6-luna", { tool_calls: false }),
         fakeWorkerModel("gpt-5.4-mini", { tool_calls: false }),
       ],
     }
@@ -2377,7 +2376,7 @@ describe("/mcp worker_* tools — registration + gating", () => {
   })
 
   test("defense-in-depth: tools/call for worker_explore returns method-not-found when gate fails (even if client bypasses tools/list)", async () => {
-    // No gpt-5.4-mini in catalog → gate fails. A naive client could
+    // No gate-chain model in catalog → gate fails. A naive client could
     // skip tools/list and hard-code the name; the call-time gate must
     // reject identically to an unknown tool (-32601), keeping the gated
     // surface functionally invisible.
@@ -2406,14 +2405,14 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
               "gpt-5.5",
               "gpt-5.6-sol",
               "gemini-3.1-pro-preview",
-              "gemini-3.6-flash",
+              "gpt-5.6-luna",
             ].includes(m.id),
         ),
-        // explore default (Gemini worker via /chat/completions)
-        fakeWorkerModel("gemini-3.6-flash", {
-          reasoning_effort: ["minimal", "low", "medium", "high"],
+        // explore + browse default and preferred worker gate/fallback model
+        fakeWorkerModel("gpt-5.6-luna", {
+          reasoning_effort: ["none", "low", "medium", "high", "xhigh", "max"],
         }),
-        // worker gate sentinel + browse default
+        // broad-tier worker gate/fallback model
         fakeWorkerModel("gpt-5.4-mini", {
           reasoning_effort: ["minimal", "low", "medium", "high"],
         }),
@@ -2504,7 +2503,15 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
     }
     expect(result.isError).toBeFalsy()
     expect(result.content[0].text).toContain("implement-worktree-result")
-  })
+    // Explicit budget, NOT a flake workaround. This test creates a REAL git
+    // worktree of the github-router repo (process.cwd()), which is genuinely
+    // I/O-bound: measured 3.9s/3.9s/4.2s in isolation on Windows, stable
+    // across runs, so there is no leak or race — the default 5s budget was
+    // simply mis-sized for the work. Under lane-1 parallel load it tipped
+    // over and timed out. 30s leaves real headroom while still bounding a
+    // genuine hang. If this ever needs raising again, profile first: a
+    // GROWING time means a leak, and that would be a bug, not a budget.
+  }, 30_000)
 
   test("worker_explore accepts an explicit absolute workspace override", async () => {
     // The model can override the default (process.cwd()) when the parent

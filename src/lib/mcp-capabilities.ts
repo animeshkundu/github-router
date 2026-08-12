@@ -24,8 +24,7 @@ import { ONE_M_TOKENS } from "./one-m-context"
 import { state, type State } from "./state"
 import {
   BROWSE_DEFAULT_MODEL,
-  DEFAULT_MODEL as WORKER_DEFAULT_MODEL,
-  EXPLORE_DEFAULT_MODEL,
+  DEFAULT_MODEL_CHAIN as WORKER_DEFAULT_MODEL_CHAIN,
   REVIEW_DEFAULT_MODEL,
 } from "./worker-agent"
 import { pickEndpoint } from "../services/copilot/endpoint"
@@ -173,8 +172,8 @@ export function reviewerModel(): string | undefined {
  * while this module's top level runs — a `const CHAIN = [REVIEW_DEFAULT_MODEL]`
  * throws `Cannot access ... before initialization` at load. Referencing them
  * lazily inside a function body defers the read until after both modules have
- * initialized, which is why the pre-existing `WORKER_DEFAULT_MODEL` usage below
- * has always been function-local too.
+ * initialized, which is why reads of the worker fallback chain below stay
+ * function-local too.
  */
 
 /** Model for `brainstorm`. Absent → inherits the lead's model.
@@ -214,18 +213,25 @@ export function scribeModel(): string | undefined {
  * impostor wearing the cheap agent's name.
  *
  * `gpt-5.6-luna` leads because it is the cheapest 1M-context model in the
- * catalog; the Gemini explore default remains the cross-vendor fallback with a
- * strong agentic tool-calling record in this repo. Both entries must continue
- * advertising at least 1M context so Claude Code's `[1m]` accounting remains
- * honest if an upstream catalog entry shrinks.
+ * catalog; `gemini-3.6-flash` remains the cross-vendor fallback so an OpenAI-side
+ * outage does not remove the scout. Both entries must continue advertising at
+ * least 1M context so Claude Code's `[1m]` accounting remains honest if an
+ * upstream catalog entry shrinks.
  *
- * There is deliberately no 400K last resort. On a catalog carrying neither
- * luna nor the explore default, `scout` is dropped rather than inheriting the
- * lead or presenting a narrower-context agent under this role.
+ * This chain deliberately uses literal ids rather than `EXPLORE_DEFAULT_MODEL`:
+ * the explore worker default and scout's cross-vendor fallback are independent
+ * policies, so retuning one must not silently collapse the other. There is no
+ * 400K last resort. On a catalog carrying neither chain member, `scout` is
+ * dropped rather than inheriting the lead or presenting a narrower-context agent.
  */
+export const SCOUT_MODEL_CHAIN = Object.freeze([
+  "gpt-5.6-luna",
+  "gemini-3.6-flash",
+] as const)
+
 export function scoutModel(): string | undefined {
   return firstPresentInCatalog(
-    ["gpt-5.6-luna", EXPLORE_DEFAULT_MODEL],
+    SCOUT_MODEL_CHAIN,
     { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
   )
 }
@@ -277,15 +283,14 @@ export function generalPurposeFastModel(): string | undefined {
  * Gate for the worker tools (`explore`, `review`, `implement`).
  *
  * Returns true iff BOTH:
- *   1. Copilot's live catalog (`state.models?.data`) contains the
- *      worker gate sentinel (`gpt-5.4-mini`)
- *      AND that entry advertises `capabilities.supports.tool_calls ===
- *      true`. The worker loop is function-calling; a model that can't
- *      emit tool_calls is unusable, so dormant-register (omit from
- *      `tools/list`) keeps the surface honest. The per-mode defaults are
- *      NOT gated here — if one is absent, that mode surfaces a clean resolve
- *      error rather than disabling all worker tools, since other modes can
- *      still work.
+ *   1. Copilot's live catalog (`state.models?.data`) contains any model in the
+ *      ordered worker gate chain (`gpt-5.6-luna` → `gpt-5.4-mini`) and that
+ *      entry advertises `capabilities.supports.tool_calls === true`. Luna leads
+ *      on qualifying tiers; mini preserves the worker surface on individual
+ *      trial and education catalogs. The catalog is the entitlement signal.
+ *      The worker loop is function-calling, so a model without tool calls is
+ *      unusable. Per-mode defaults are NOT gated here — an absent mode default
+ *      surfaces a clean resolve error rather than disabling all worker tools.
  *   2. The operator hasn't set `GH_ROUTER_DISABLE_WORKER_TOOLS=1`
  *      (opt-out — workers ship enabled by default per plan).
  *
@@ -294,17 +299,15 @@ export function generalPurposeFastModel(): string | undefined {
  * validation in the engine, which surfaces a clean `isError`
  * envelope with the catalog's eligible model ids on mismatch.
  *
- * `WORKER_DEFAULT_MODEL` is imported (aliased from `DEFAULT_MODEL`)
- * from `src/lib/worker-agent` so the engine owns the single source
- * of truth.
+ * `WORKER_DEFAULT_MODEL_CHAIN` is imported from `src/lib/worker-agent` so the
+ * engine owns the single source of truth for both gating and fallback order.
  */
 export function workerToolsEnabled(): boolean {
   if (process.env.GH_ROUTER_DISABLE_WORKER_TOOLS === "1") return false
-  const models = state.models?.data
-  if (!models) return false
-  const found = models.find((m) => m.id === WORKER_DEFAULT_MODEL)
-  if (!found) return false
-  return found.capabilities?.supports?.tool_calls === true
+  return firstPresentInCatalog(
+    WORKER_DEFAULT_MODEL_CHAIN,
+    { requireToolCalls: true },
+  ) != null
 }
 
 /**

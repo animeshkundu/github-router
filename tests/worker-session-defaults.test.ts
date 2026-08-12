@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test"
 
 import {
-  DEFAULT_MODEL,
+  DEFAULT_MODEL_CHAIN,
+  EXPLORE_DEFAULT_MODEL,
+  resolveDefaultModel,
   resolveModeDefaults,
   resolveWorkerRunOpts,
 } from "../src/lib/worker-agent/engine"
@@ -88,12 +90,45 @@ describe("worker session defaults", () => {
     expect(resolveModeDefaults("review").thinking).toBe("xhigh")
   })
 
-  test("reset restores built-ins and never mutates the gate sentinel", () => {
+  test("reset restores built-ins and never mutates the gate chain", () => {
     const builtIn = resolveModeDefaults("explore")
     setWorkerSessionDefault("explore", { model: "override" })
     resetWorkerSessionDefault("explore")
     expect(resolveModeDefaults("explore")).toEqual(builtIn)
-    expect(DEFAULT_MODEL).toBe("gpt-5.4-mini")
+    expect(DEFAULT_MODEL_CHAIN).toEqual(["gpt-5.6-luna", "gpt-5.4-mini"])
+    expect(EXPLORE_DEFAULT_MODEL).toBe("gpt-5.6-luna")
+  })
+
+  test("gate and unmatched fallback accept Luna-only and mini-only catalogs", () => {
+    const original = state.models
+    try {
+      for (const id of DEFAULT_MODEL_CHAIN) {
+        state.models = {
+          object: "list",
+          data: [model(id, ["low", "high"])] as NonNullable<typeof state.models>["data"],
+        }
+        expect(workerToolsEnabled()).toBe(true)
+        expect(resolveDefaultModel()).toBe(id)
+      }
+    } finally {
+      state.models = original
+    }
+  })
+
+  test("unmatched fallback prefers Luna when both chain entries are available", () => {
+    const original = state.models
+    state.models = {
+      object: "list",
+      data: [
+        model("gpt-5.4-mini", ["low", "high"]),
+        model("gpt-5.6-luna", ["low", "high"]),
+      ] as NonNullable<typeof state.models>["data"],
+    }
+    try {
+      expect(resolveDefaultModel()).toBe("gpt-5.6-luna")
+    } finally {
+      state.models = original
+    }
   })
 
   test("tool validates models, stores requested unclamped thinking, and reports sources", async () => {
@@ -101,14 +136,14 @@ describe("worker session defaults", () => {
     state.models = {
       object: "list",
       data: [
-        model(DEFAULT_MODEL, ["low", "high"]),
+        model(DEFAULT_MODEL_CHAIN[0]!, ["low", "high"]),
         model("valid", ["low"]),
       ] as NonNullable<typeof state.models>["data"],
     }
     try {
       const rejected = await tool.handler({ mode: "review", model: "missing" })
       expect(rejected.isError).toBe(true)
-      expect(rejected.content[0]?.text).toContain("Available models with tool_calls: gpt-5.4-mini, valid")
+      expect(rejected.content[0]?.text).toContain("Available models with tool_calls: gpt-5.6-luna, valid")
 
       const invalidClearAll = await tool.handler({ clearAll: true, clear: false })
       expect(invalidClearAll.isError).toBe(true)
@@ -140,7 +175,7 @@ test("catalog rides along on inspect, not on mutation", async () => {
   state.models = {
     object: "list",
     data: [
-      model(DEFAULT_MODEL, ["low", "high"]),
+      model(DEFAULT_MODEL_CHAIN[0]!, ["low", "high"]),
       model("valid", ["low"]),
     ] as NonNullable<typeof state.models>["data"],
   }

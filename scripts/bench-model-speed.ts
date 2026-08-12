@@ -30,14 +30,25 @@
 const BASE_URL = process.env.GH_ROUTER_BENCH_BASE_URL ?? "http://127.0.0.1:8787"
 const REPS = Number(process.env.GH_ROUTER_BENCH_REPS ?? "3")
 
+// Every model any agent, worker, critic, or fallback chain can route to. This
+// list must stay a SUPERSET of `INDICATIVE_TOKENS_PER_SECOND` in
+// `src/lib/worker-agent/model-resolve.ts`: a figure in that table which this
+// harness cannot re-derive is an unreproducible claim, which is the exact
+// failure this script exists to prevent.
 const DEFAULT_MODELS = [
   "gpt-5.6-luna",
-  "gemini-3.6-flash",
-  "gemini-3.5-flash",
   "gpt-5.6-terra",
   "gpt-5.6-sol",
+  "gpt-5.5",
+  "gpt-5.3-codex",
+  "gpt-5.4-mini",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash",
   "gemini-3.1-pro-preview",
   "claude-opus-5",
+  "claude-sonnet-5",
+  "claude-haiku-4.5",
+  "grok-4.5",
 ]
 
 /** Long enough that time-to-first-token does not dominate the rate. */

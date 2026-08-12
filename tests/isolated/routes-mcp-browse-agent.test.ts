@@ -29,7 +29,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 // the index is — so these are the genuine constants the gate keys on).
 import {
   BROWSE_DEFAULT_MODEL,
-  DEFAULT_MODEL,
+  DEFAULT_MODEL_CHAIN,
 } from "../../src/lib/worker-agent/engine"
 import { state } from "../../src/lib/state"
 import type { ModelsResponse } from "../../src/services/copilot/get-models"
@@ -60,7 +60,7 @@ let runWorkerAgentReturn: { text: string; isError?: boolean } = {
 // imports). Provide the two constants mcp-capabilities reads so the gate
 // keeps working with the mock in place.
 mock.module("~/lib/worker-agent", () => ({
-  DEFAULT_MODEL,
+  DEFAULT_MODEL_CHAIN,
   BROWSE_DEFAULT_MODEL,
   runWorkerAgent: async (opts: BrowseCall) => {
     runWorkerAgentCalls.push(opts)

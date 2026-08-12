@@ -389,7 +389,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.3-codex",
     endpoint: "/v1/responses",
     description:
-      "Line-level code reviewer backed by gpt-5.3-codex (OpenAI, ≈272K-token input window), a code-specialist reviewer that is fastest around high effort (~16s at high effort). It reviews concrete diffs, files, or function bodies and returns findings with severity, file:line locations, issue impact, and a minimal suggested fix. Use when the artifact is actual code and the goal is bug, edge-case, security, concurrency, resource, or idiom review. Not for architecture or tradeoff review, use codex_critic or gemini_critic; pass the diff or file content verbatim.",
+      "Line-level code reviewer backed by gpt-5.3-codex (OpenAI, ≈272K-token input window), a code specialist for line-level review. It reviews concrete diffs, files, or function bodies and returns findings with severity, file:line locations, issue impact, and a minimal suggested fix. Use when the artifact is actual code and the goal is bug, edge-case, security, concurrency, resource, or idiom review. Not for architecture or tradeoff review, use codex_critic or gemini_critic; pass the diff or file content verbatim.",
     baseInstructions: REVIEWER_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -878,7 +878,7 @@ export interface NonPersonaMcpTool {
    * `tools/list` and `tools/call` when the runtime gate is off.
    *
    * - `"worker"` (explore / review / implement) requires Copilot's
-   *   `gpt-5.4-mini` worker gate sentinel to be in the live catalog
+   *   a usable model from the Luna → mini worker gate chain in the live catalog
    *   with `tool_calls` support AND `GH_ROUTER_DISABLE_WORKER_TOOLS=1` to
    *   be unset (see `workerToolsEnabled()`). Per-mode defaults are not gated
    *   here — if one is absent, that mode returns a helpful resolve error.
@@ -969,13 +969,15 @@ function formatWebSearchResult(results: {
  * Model-override tier ladder surfaced on the read-heavy workers
  * (explore / implement / review). The caller picks a model by task weight;
  * all three tiers are 1M-context, and `high` is the recommended reasoning
- * depth for the ladder (flash tops out at high; sol/terra go higher if the
- * caller wants). Appended to those tools' `model` param description so the
- * lead has actionable override guidance instead of a bare free string.
+ * depth for the ladder (sol/terra go higher if the caller wants). Appended to
+ * those tools' `model` param description so the lead has actionable override
+ * guidance instead of a bare free string. Luna owns the light tier because it
+ * is both cheaper and faster than the prior Gemini Flash entry; no quality
+ * ranking is implied.
  */
 const WORKER_TIER_GUIDANCE =
   " Override by task weight: `gpt-5.6-sol` (heavy/deep), "
-  + "`gpt-5.6-terra` (moderate), `gemini-3.6-flash` (light/cheap) — all "
+  + "`gpt-5.6-terra` (moderate), `gpt-5.6-luna` (light/cheap) — all "
   + "1M context; pair with thinking:'high'."
 
 /**
@@ -1403,7 +1405,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     },
     // explore / implement / review / plan / test are autonomous worker tools
     // backed by the Pi agent loop (`src/lib/worker-agent/engine.ts`) and routed
-    // through per-mode defaults: explore -> `gemini-3.6-flash` (high), review ->
+    // through per-mode defaults: explore -> `gpt-5.6-luna` (high), review ->
     // `gemini-3.1-pro-preview` (xhigh clamped to high by the default model), plan
     // -> `claude-opus-5` (high), and implement/test -> `gpt-5.6-sol` (high). The
     // defaults favour time-to-outcome; an explicit `model` or `thinking` arg wins,
@@ -1411,12 +1413,13 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     //
     // GATING (`capability: "worker"`): the MCP handler drops these entries from
     // `tools/list` and `tools/call` when `workerToolsEnabled()` is false. The gate
-    // fires when (a) the worker sentinel (`gpt-5.4-mini`) is missing from the live
-    // Copilot catalog or lacks `tool_calls`, OR (b) the operator opted out via
+    // fires when (a) neither member of the ordered worker gate chain
+    // (`gpt-5.6-luna` -> `gpt-5.4-mini`) is present with `tool_calls` in the live
+    // Copilot catalog, OR (b) the operator opted out via
     // `GH_ROUTER_DISABLE_WORKER_TOOLS=1`. Defense-in-depth: the gate is checked at
     // BOTH list-time and call-time so a client that hard-codes the tool name can't
     // bypass the list-side filter. If a per-mode default such as `gpt-5.6-sol` or
-    // `gemini-3.6-flash` is absent, that mode returns a helpful resolve error.
+    // `gpt-5.6-luna` is absent, that mode returns a helpful resolve error.
     //
     // SCHEMA SHAPE: `prompt` is required; `model` / `thinking` are optional
     // fine-tunes the worker engine validates against the live catalog (unknown
@@ -1537,7 +1540,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       description:
         "Runs as the background `worker-explore` agent. Dispatch via the Agent tool (subagent_type: worker-explore) so the turn is never blocked; the result arrives as a completion notification. "
         + "Read-only investigation by an autonomous worker (Pi runtime; "
-        + "default model `gemini-3.6-flash` at high reasoning, override via "
+        + "default model `gpt-5.6-luna` at high reasoning, override via "
         + "the `model` arg with any Copilot-catalog model that advertises "
         + "`tool_calls`). It has read, glob, grep, semantic-first code search, "
         + "web search, fetch_url, advisor, update_plan, and read-only toolbelt "
@@ -1565,7 +1568,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "gemini-3.6-flash). Must advertise tool_calls "
+              + "gpt-5.6-luna). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
               + "the eligible catalog models on mismatch."
               + WORKER_TIER_GUIDANCE,
@@ -1618,7 +1621,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       description:
         "Runs as the background `worker-implement` agent. Dispatch via the Agent tool (subagent_type: worker-implement) so the turn is never blocked; the result arrives as a completion notification. "
         + "Delegates a scoped coding task to an autonomous worker (Pi runtime; "
-        + "default model `gpt-5.6-sol` at xhigh reasoning, override via `model` "
+        + "default model `gpt-5.6-sol` at high reasoning, override via `model` "
         + "with any Copilot-catalog model that advertises `tool_calls`). It has "
         + "the explore read-only tools plus edit, write, bash, and codex_review, "
         + "and it returns its final text with any changed files or worktree diff. "
@@ -1791,7 +1794,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       description:
         "Runs as the background `worker-plan` agent. Dispatch via the Agent tool (subagent_type: worker-plan) so the turn is never blocked; the result arrives as a completion notification. "
         + "Read-only implementation planning by an autonomous worker (Pi runtime; "
-        + "default model `claude-opus-5` at xhigh reasoning, override via "
+        + "default model `claude-opus-5` at high reasoning, override via "
         + "`model` with any Copilot-catalog model that advertises `tool_calls`). "
         + "It has the same read-only toolset as explore and returns a concrete, "
         + "ordered implementation plan covering files, approach, risks, and how "
@@ -1870,7 +1873,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       description:
         "Runs as the background `worker-test` agent. Dispatch via the Agent tool (subagent_type: worker-test) so the turn is never blocked; the result arrives as a completion notification. "
         + "Independent adversarial test authoring by an autonomous worker (Pi "
-        + "runtime; default model `gpt-5.6-sol` at xhigh reasoning, override via "
+        + "runtime; default model `gpt-5.6-sol` at high reasoning, override via "
         + "`model` with any Copilot-catalog model that advertises `tool_calls`). "
         + "It has the same read/write toolset as implement and writes tests that "
         + "try to break the implementation through edge cases, error paths, and "

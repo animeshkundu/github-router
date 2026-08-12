@@ -126,20 +126,15 @@ beforeEach(() => {
         tool_calls: true,
         reasoning_effort: ["low", "medium", "high"],
       }),
-      // explore default (gemini via /chat/completions translation shim)
-      fakeModel("gemini-3.6-flash", {
-        tool_calls: true,
-        reasoning_effort: ["minimal", "low", "medium", "high"],
-      }),
-      // worker-availability gate sentinel
-      fakeModel("gpt-5.4-mini", {
-        tool_calls: true,
-        reasoning_effort: ["minimal", "low", "medium", "high"],
-      }),
-      // browse default, deliberately decoupled from the gate sentinel
+      // worker explore + browse default and preferred gate/fallback model
       fakeModel("gpt-5.6-luna", {
         tool_calls: true,
         reasoning_effort: ["none", "low", "medium", "high", "xhigh", "max"],
+      }),
+      // broad-tier worker gate/fallback model
+      fakeModel("gpt-5.4-mini", {
+        tool_calls: true,
+        reasoning_effort: ["minimal", "low", "medium", "high"],
       }),
       // implement default (routes to /responses via the stream-fn split)
       fakeModel("gpt-5.6-sol", {
@@ -418,7 +413,7 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
     }
   })
 
-  test("explore mode sends gemini-3.6-flash upstream by default", async () => {
+  test("explore mode sends gpt-5.6-luna upstream by default", async () => {
     let capturedModel: string | undefined
     globalThis.fetch = mock((_input: unknown, init?: { body?: unknown }) => {
       try {
@@ -431,7 +426,7 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
     )
     try {
       await runWorkerAgent({ prompt: "summarize", mode: "explore", workspace: dir })
-      expect(capturedModel).toBe("gemini-3.6-flash")
+      expect(capturedModel).toBe("gpt-5.6-luna")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

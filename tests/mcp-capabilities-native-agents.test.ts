@@ -21,6 +21,7 @@ import { afterEach, expect, test } from "bun:test"
 import {
   generalPurposeFastModel,
   implementerFastModel,
+  SCOUT_MODEL_CHAIN,
   scoutModel,
 } from "~/lib/mcp-capabilities"
 import { state } from "~/lib/state"
@@ -156,9 +157,16 @@ test("absent context metadata fails closed under the 1M floor", () => {
   expect(generalPurposeFastModel()).toBeUndefined()
 })
 
-// Scout now keeps a 1M context contract across both entries. The accepted
-// consequence is that a catalog carrying neither luna nor the Gemini explore
-// default gets no scout rather than a 400K last resort.
+// Scout keeps a distinct cross-vendor 1M fallback. Pin the chain shape itself:
+// referencing EXPLORE_DEFAULT_MODEL here previously let an explore retune collapse
+// both entries to Luna without a type error or failed behavior test.
+test("scout chain has two distinct literal entries", () => {
+  expect(SCOUT_MODEL_CHAIN).toEqual(["gpt-5.6-luna", "gemini-3.6-flash"])
+  expect(new Set(SCOUT_MODEL_CHAIN).size).toBe(2)
+})
+
+// The accepted consequence is that a catalog carrying neither Luna nor the
+// 1M Gemini fallback gets no scout rather than a 400K last resort.
 test("scoutModel walks luna -> flash, enforces 1M, and otherwise drops", () => {
   setCatalog(
     entry("gemini-3.6-flash", { ctx: ONE_M }),
@@ -166,6 +174,8 @@ test("scoutModel walks luna -> flash, enforces 1M, and otherwise drops", () => {
   )
   expect(scoutModel()).toBe("gpt-5.6-luna")
 
+  // Exactly 1M must remain eligible. If this floor comparison ever becomes
+  // exclusive, scout silently loses its cross-vendor fallback.
   setCatalog(entry("gemini-3.6-flash", { ctx: ONE_M }))
   expect(scoutModel()).toBe("gemini-3.6-flash")
 

@@ -13,7 +13,7 @@ import { beforeEach, describe, expect, mock, test } from "bun:test"
 
 import {
   BROWSE_DEFAULT_MODEL,
-  DEFAULT_MODEL,
+  DEFAULT_MODEL_CHAIN,
 } from "../../src/lib/worker-agent/engine"
 
 interface Captured {
@@ -25,7 +25,7 @@ const calls: Array<Captured> = []
 let ret: { text: string; isError?: boolean } = { text: "worker-done" }
 
 mock.module("~/lib/worker-agent", () => ({
-  DEFAULT_MODEL,
+  DEFAULT_MODEL_CHAIN,
   BROWSE_DEFAULT_MODEL,
   runWorkerAgent: async (opts: Captured) => {
     calls.push(opts)

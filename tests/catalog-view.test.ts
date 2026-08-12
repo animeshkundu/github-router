@@ -7,6 +7,17 @@ import {
   indicativeTokensPerSecond,
   WORKER_THINKING_LEVELS,
 } from "~/lib/worker-agent/model-resolve"
+import {
+  BROWSE_DEFAULT_MODEL,
+  DEFAULT_MODEL_CHAIN,
+  EXPLORE_DEFAULT_MODEL,
+  IMPLEMENT_DEFAULT_MODEL,
+  PLAN_DEFAULT_MODEL,
+  REVIEW_DEFAULT_MODEL,
+  TEST_DEFAULT_MODEL,
+} from "~/lib/worker-agent/engine"
+import { SCOUT_MODEL_CHAIN } from "~/lib/mcp-capabilities"
+import { OPENAI_FRONTIER_MODELS } from "~/lib/openai-frontier"
 import { state } from "~/lib/state"
 
 // The catalog view exists to close a DISCOVERABILITY gap: models ship in the
@@ -251,18 +262,32 @@ test("includes approximate tps only for models in the measured table", () => {
 // model a native agent or worker mode can resolve to must carry a figure. A
 // missing entry silently drops the speed signal at exactly the call site that
 // motivated measuring it.
+// A speed figure is only useful where a routing decision happens, so every
+// model any agent, worker, or fallback chain can resolve to must carry one.
+//
+// DERIVED, not hand-listed. The previous version of this test was a literal
+// array, which silently omitted `gpt-5.5` — a real native-agent fallback with
+// no tps entry — while claiming to cover "every model". A hand-maintained list
+// asserting completeness is the failure it is supposed to catch, so the chains
+// that can actually be routed to are imported and unioned here. Adding a model
+// to any imported chain now fails this test until it is measured.
 test("covers every model the native agents and worker modes route to", () => {
-  for (const id of [
-    "gpt-5.6-sol",
+  const routed = new Set<string>([
+    ...OPENAI_FRONTIER_MODELS,
+    ...SCOUT_MODEL_CHAIN,
+    ...DEFAULT_MODEL_CHAIN,
+    // Per-mode worker defaults and per-agent chain heads that are not members
+    // of an exported chain constant.
+    EXPLORE_DEFAULT_MODEL,
+    REVIEW_DEFAULT_MODEL,
+    IMPLEMENT_DEFAULT_MODEL,
+    TEST_DEFAULT_MODEL,
+    BROWSE_DEFAULT_MODEL,
+    PLAN_DEFAULT_MODEL,
     "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gemini-3.1-pro-preview",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
-    "claude-opus-5",
-  ]) {
-    expect(indicativeTokensPerSecond(id)).toBeGreaterThan(0)
-  }
+  ])
+  const missing = [...routed].filter((id) => indicativeTokensPerSecond(id) === undefined)
+  expect(missing).toEqual([])
 })
 
 // The roster decision that deleted `generic-fast` rests on luna being faster
@@ -271,10 +296,17 @@ test("covers every model the native agents and worker modes route to", () => {
 // the digits: the numbers are coarse and expected to be re-measured, but an
 // edit that inverts this relation invalidates a shipped roster decision and
 // must fail loudly rather than silently.
-test("preserves the measured ordering the roster decision depends on", () => {
+test("preserves the measured ordering the roster and explore decisions depend on", () => {
   const luna = indicativeTokensPerSecond("gpt-5.6-luna")!
   expect(luna).toBeGreaterThan(indicativeTokensPerSecond("gemini-3.6-flash")!)
   expect(luna).toBeGreaterThan(indicativeTokensPerSecond("gemini-3.5-flash")!)
+})
+
+test("includes every newly measured speed gap", () => {
+  expect(indicativeTokensPerSecond("gpt-5.4-mini")).toBe(100)
+  expect(indicativeTokensPerSecond("claude-sonnet-5")).toBe(100)
+  expect(indicativeTokensPerSecond("claude-haiku-4.5")).toBe(85)
+  expect(indicativeTokensPerSecond("grok-4.5")).toBe(70)
 })
 
 test("omits optional fields rather than emitting nulls", () => {
