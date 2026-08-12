@@ -168,10 +168,10 @@ describe("runPlanReview", () => {
 
 describe("plan review hook registration command", () => {
   test("buildPlanReviewHookCommand mirrors the internal hook command quoting", () => {
-    expect(buildPlanReviewHookCommand("/usr/bin/node", "/app/main.js")).toBe(
+    expect(buildPlanReviewHookCommand({ execPath: "/usr/bin/node", scriptPath: "/app/main.js" })).toBe(
       '"/usr/bin/node" "/app/main.js" internal-plan-review',
     )
-    expect(buildPlanReviewHookCommand("/app/ghr", undefined)).toBe('"/app/ghr" internal-plan-review')
+    expect(buildPlanReviewHookCommand({ execPath: "/app/ghr" })).toBe('"/app/ghr" internal-plan-review')
   })
 
   test("PLAN_REVIEW_MIN_CHARS is high enough to skip one-line trivial plans", () => {

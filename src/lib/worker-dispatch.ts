@@ -32,6 +32,8 @@
  * guard here is the inverse (allow-only-dispatcher rather than skip-any-sub).
  */
 
+import { buildSelfCommand, type SelfInvocation } from "./hook-launcher/self-invocation"
+
 /** The five always-available worker modes (gated by `workerToolsEnabled()`). */
 export const CORE_WORKER_MODES = [
   "explore",
@@ -283,17 +285,13 @@ export function dispatcherTools(_mode: WorkerDispatchMode, workersKey: string): 
  * DISTINCT command — no stale-matcher entry can survive from a prior launch.
  */
 export function buildWorkerGuardHookCommand(
-  execPath: string,
-  scriptPath: string | undefined,
+  invocation: SelfInvocation,
   workersKey: string,
   modes: ReadonlyArray<WorkerDispatchMode>,
 ): string {
   const q = (s: string): string => `"${s}"`
   const args = `internal-worker-guard --workers-key ${q(workersKey)} --modes ${q(modes.join(","))}`
-  if (scriptPath && scriptPath !== execPath) {
-    return `${q(execPath)} ${q(scriptPath)} ${args}`
-  }
-  return `${q(execPath)} ${args}`
+  return buildSelfCommand(invocation, args)
 }
 
 /** Parse a `--modes` CSV back into validated modes (drops unknown tokens). */

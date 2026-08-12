@@ -1,6 +1,6 @@
 {
   "name": "@animeshkundu/github-router",
-  "version": "0.3.276",
+  "version": "0.3.277",
   "license": "MIT",
   "description": "A reverse proxy that exposes GitHub Copilot as OpenAI and Anthropic compatible API endpoints.",
   "keywords": [
@@ -31,7 +31,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsdown && bun scripts/copy-browser-ext.ts",
+    "build": "tsdown && bun scripts/copy-browser-ext.ts && bun scripts/stamp-hooks-digest.ts",
     "dev": "bun run --watch ./src/main.ts",
     "discover:fields": "bash scripts/discover-new-fields.sh",
     "knip": "knip-bun",

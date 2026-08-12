@@ -471,12 +471,22 @@ describe("decideStopHook (subcommand decision)", () => {
 
 describe("buildStopHookCommand", () => {
   test("uses binary + script when both present and distinct", () => {
-    expect(buildStopHookCommand("/usr/bin/node", "/app/main.js")).toBe('"/usr/bin/node" "/app/main.js" internal-stop-hook')
+    expect(buildStopHookCommand({ execPath: "/usr/bin/node", scriptPath: "/app/main.js" })).toBe('"/usr/bin/node" "/app/main.js" internal-stop-hook')
   })
 
   test("uses just the binary when the script is absent or equals it", () => {
-    expect(buildStopHookCommand("/app/ghr", undefined)).toBe('"/app/ghr" internal-stop-hook')
-    expect(buildStopHookCommand("/app/ghr", "/app/ghr")).toBe('"/app/ghr" internal-stop-hook')
+    expect(buildStopHookCommand({ execPath: "/app/ghr" })).toBe('"/app/ghr" internal-stop-hook')
+    expect(buildStopHookCommand({ execPath: "/app/ghr", scriptPath: "/app/ghr" })).toBe('"/app/ghr" internal-stop-hook')
+  })
+
+  test("bakes package root before the subcommand", () => {
+    expect(buildStopHookCommand({
+      execPath: "/usr/bin/node",
+      scriptPath: "/stable/hooks-abc.mjs",
+      packageRoot: "/tmp/pkg root",
+    })).toBe(
+      '"/usr/bin/node" "/stable/hooks-abc.mjs" --package-root "/tmp/pkg root" internal-stop-hook',
+    )
   })
 })
 

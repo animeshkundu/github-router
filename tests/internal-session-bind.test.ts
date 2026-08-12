@@ -69,19 +69,21 @@ describe("decodeSessionBind", () => {
 
 describe("buildSessionBindHookCommand", () => {
   test("bakes the --out path (quoted) and the subcommand into the command", () => {
-    const cmd = buildSessionBindHookCommand("/usr/bin/node", "/app/dist/main.js", "/data/binds/s1.json")
+    const cmd = buildSessionBindHookCommand({ execPath: "/usr/bin/node", scriptPath: "/app/dist/main.js" }, "/data/binds/s1.json")
     expect(cmd).toBe('"/usr/bin/node" "/app/dist/main.js" internal-session-bind --out "/data/binds/s1.json"')
   })
 
   test("collapses to a single token when script === exec (packaged build)", () => {
-    const cmd = buildSessionBindHookCommand("/opt/gr", "/opt/gr", "C:\\data\\s.json")
+    const cmd = buildSessionBindHookCommand({ execPath: "/opt/gr", scriptPath: "/opt/gr" }, "C:\\data\\s.json")
     expect(cmd).toBe('"/opt/gr" internal-session-bind --out "C:\\data\\s.json"')
   })
 
   test("double-quotes a Windows path with spaces (backslashes stay literal for cmd/pwsh)", () => {
     const cmd = buildSessionBindHookCommand(
-      "C:\\Program Files\\nodejs\\node.exe",
-      "C:\\Users\\Some User\\app\\dist\\main.js",
+      {
+        execPath: "C:\\Program Files\\nodejs\\node.exe",
+        scriptPath: "C:\\Users\\Some User\\app\\dist\\main.js",
+      },
       "C:\\Users\\Some User\\.ai-or-die\\claude-bindings\\tab-1.json",
     )
     expect(cmd).toBe(

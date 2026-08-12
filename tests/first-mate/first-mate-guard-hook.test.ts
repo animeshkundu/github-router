@@ -21,7 +21,8 @@ afterEach(async () => {
 describe("operator PreToolUse hook wiring", () => {
   test("injects a PreToolUse hook scoped only to worker/orchestrate MCP tools", async () => {
     const settingsPath = path.join(dir, "settings.json")
-    const command = buildFirstMateGuardHookCommand("/usr/bin/bun", "/app/main.ts")
+    const command = buildFirstMateGuardHookCommand({ execPath: "/usr/bin/bun", scriptPath: "/app/main.ts" })
+    expect(command).toBe('"/usr/bin/bun" "/app/main.ts" internal-first-mate-guard')
     const merged = await injectStopHookIntoSettingsFile(
       settingsPath,
       command,

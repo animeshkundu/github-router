@@ -10,6 +10,10 @@ import { provisionAndIndexColbert } from "./lib/colbert"
 import { resolveCodexCliBackend } from "./lib/codex-mcp-config"
 import { killChildProcessTree } from "./lib/exec"
 import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
+import {
+  hookLauncherDegradedWarning,
+  resolveSelfInvocation,
+} from "./lib/hook-launcher/self-invocation"
 import { getCodexVersion } from "./lib/launch"
 import { browserToolsEnabled } from "./lib/mcp-capabilities"
 import { SEAMLESS_BUILTIN_TOOLS } from "./lib/mcp-permissions-settings"
@@ -335,8 +339,15 @@ export const serve = defineCommand({
     // 2b. wire the github-router enhancement layer (MCP servers + peer/worker
     //     subagents + gh-* skills) into the mirror so CloudCLI-spawned Claude
     //     sessions get the same tools `github-router claude` provides. Must run
-    //     after the mirror exists and before CloudCLI spawns claude.
+    //     after the mirror exists and before CloudCLI spawns claude. Resolve the
+    //     self-invocation first so no persisted command races launcher publication.
+    const selfInvocation = await resolveSelfInvocation()
+    {
+      const warning = hookLauncherDegradedWarning(selfInvocation)
+      if (warning) process.stderr.write(`${warning}\n`)
+    }
     const enhancements = await provisionServeEnhancements(serverUrl, {
+      selfInvocation,
       codexCli: backend === "cli",
       tunnelExposed,
       browseOverTunnel: args["browse-over-tunnel"] === true,

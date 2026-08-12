@@ -18,6 +18,8 @@ import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { promises as fs } from "node:fs"
 import path from "node:path"
 
+import { PACKAGE_ROOT_FLAG, explicitPackageRoot } from "./lib/package-root"
+
 import { hookMcpRuntimeFromEnv } from "./lib/orchestration/hook-mcp-client"
 import {
   decidePlanReviewHook,
@@ -61,7 +63,9 @@ function spawnDetachedPlanReview(ctx: PlanReviewSpawnContext): void {
     payloadPath = path.join(dir, `plan-review-${process.pid}-${randomBytes(4).toString("hex")}.json`)
     writeFileSync(payloadPath, JSON.stringify(ctx), { mode: 0o600 })
     const scriptArgs = process.argv[1] && process.argv[1] !== process.execPath ? [process.argv[1]] : []
-    const child = spawn(process.execPath, [...scriptArgs, "internal-plan-review"], {
+    const root = explicitPackageRoot()
+    const packageRootArgs = root ? [PACKAGE_ROOT_FLAG, root] : []
+    const child = spawn(process.execPath, [...scriptArgs, ...packageRootArgs, "internal-plan-review"], {
       detached: true,
       windowsHide: true,
       stdio: "ignore",

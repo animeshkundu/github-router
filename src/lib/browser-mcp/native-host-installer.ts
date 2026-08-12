@@ -35,6 +35,7 @@ import path from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
 
+import { explicitPackageRoot } from "~/lib/package-root"
 import { PATHS } from "~/lib/paths"
 
 import type { SupportedBrowser } from "./browser-detect"
@@ -126,14 +127,19 @@ function findPackageRoot(startDir: string, maxHops = 10): string | undefined {
 }
 
 /**
- * Resolve the github-router package root. Uses two sources in order:
- *   1. process.argv[1] — the entrypoint script, walks up from there.
- *   2. import.meta.url of THIS module, walks up from there.
- *   3. process.cwd() as last resort.
+ * Resolve the github-router package root. Uses sources in order:
+ *   1. The explicit root baked into the relocated hook launcher's argv. From
+ *      `<APP_DIR>/hooks/`, neither entrypoint walk can find the package and cwd
+ *      is the user's workspace, so this source must win when present.
+ *   2. process.argv[1] — the entrypoint script, walks up from there.
+ *   3. import.meta.url of THIS module, walks up from there.
+ *   4. process.cwd() as last resort.
  *
- * Robust across bun (src/main.ts) and node (dist/main.js) launch paths.
+ * Robust across relocated hooks, bun (src/main.ts), and node (dist/main.js).
  */
 function packageRoot(): string {
+  const explicit = explicitPackageRoot()
+  if (explicit) return explicit
   // Defensive guards: some test suites mock `process.argv` to
   // undefined or to an empty array. Treat any non-string entry as
   // "absent" rather than crashing the import.

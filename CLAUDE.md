@@ -141,6 +141,15 @@ Three startup behaviors share one Windows-safe exec helper (`src/lib/exec.ts`): 
 - **Proxy self-update** (`src/lib/self-update.ts`): default-ON, throttled (`last-self-update-check`). Probes npm for the **unscoped `github-router`** (the scoped `@animeshkundu/github-router` is GitHub-Packages-only); on a newer version spawns a **detached, post-exit updater** (waits for this PID to exit, then `npm install -g github-router@latest`) — the proxy is a running process, so in-place install would hit Windows file locks (EPERM/EBUSY) and can corrupt the install. Applies on next launch; no re-exec. Disable with `--no-self-update` or `GH_ROUTER_NO_SELF_UPDATE=1`. Wired into `start`/`claude`/`codex` after `setupAndServe`.
 - **LLM toolbelt** (`src/lib/toolbelt/`): curated CLI tools (`rg`, `fd`, `jq`, `sd`, `ast-grep`/`sg`, `yq`, `scc`, `difft`/difftastic, `gron`) materialized into `~/.local/share/github-router/bin/` and prepended to the spawned agent's PATH so the model calls them as native. **Gap-fill**: only tools NOT already on the user's PATH are exposed (never shadows a pinned `jq`/Go-vs-Python `yq`). `rg` is materialized from the existing `@vscode/ripgrep` binary (no second download); the rest lazy-download from version-pinned GitHub releases with **hardcoded-in-source SHA256** verified before extraction (`src/lib/toolbelt/manifest.ts`; regenerate via `scripts/gen-toolbelt-manifest.ts`, which takes an optional `--only <csv>` filter to re-pin a subset). `tokei` is NOT bundled (its GitHub releases ship 0 prebuilt binaries since 2024; `scc` is the bundlable code-stats substitute) but stays in the worker `toolbelt` allowlist opportunistically — it runs if the user has it system-installed. Extraction is dependency-free (`extract.ts`) and **regular-files-only** (rejects symlink/hardlink/device archive entries). Materialization runs in the background (never blocks launch); the awareness one-liner is injected into the mirrored CLAUDE.md so the agent knows which tools are on PATH. Anti-shadow: the launcher resolves `claude`/`codex` to an absolute path so the toolbelt PATH can't shadow the CLI itself. Opt out with `GH_ROUTER_DISABLE_TOOLBELT=1`; skip individual tools with `GH_ROUTER_TOOLBELT_SKIP=jq,yq`. The toolbelt PATH also reaches the worker-agent bash env (casing-safe, no global `process.env` mutation), and all worker modes additionally get a `toolbelt` tool (itself read-only) that runs these CLIs with `shell:false` (see "worker tools" below).
 
+### Durable hook launcher and code-search assets
+
+`github-router claude` persists hook commands in the mirrored `settings.json`; a `bunx` entrypoint can instead live under the OS temp root, where cleanup or an in-place `bunx pkg@latest` re-extraction can leave a live session pointing at missing or changing code. `src/hooks.ts` is therefore a separate self-contained build of all nine `internal-*` hook subcommands (`noExternal`, `codeSplitting: false`), published by `src/lib/hook-launcher/` under `~/.local/share/github-router/hooks/hooks-<sha256>.mjs`. The `.mjs` extension removes a runtime-version dependency rather than fixing a live break: Node has detected ESM syntax by default since 22.7, so a relocated `.js` runs correctly on a current runtime even with no `package.json` above it, but on Node 20 (this package declares no `engines` floor) it is read as CommonJS and fails to start.
+
+`resolveSelfInvocation()` is awaited before **any** settings or runtime file persists a self-command. Do not make it fire-and-forget: doing so can store its temporary publication path and leave the session broken even if provisioning later succeeds. The bundle's build-generated `hooks.sha256` must match the bytes before publication. Both a missing/unreadable sidecar and a mismatch are a refusal to publish, because content-addressing a torn in-place extraction would preserve corruption. Published names are immutable digest names, not version names: never garbage-collect them, since concurrent proxies can otherwise delete a launcher that a live session still uses. Same-directory temp-file-plus-rename publishing prevents a partial file being named by a hook.
+
+Every persisted self-command is composed through `buildSelfCommand`. Its relocated form carries `--package-root <root>` as a literal argument, never an environment variable: child environments are filtered, whereas argv survives. The relocated bundle cannot walk to the package root; without the explicit value, browser native-host lookup falls back to the user's workspace and runtime version lookup cannot find the package manifest. Keep `getPackageVersion()` as a runtime read, not a bundled value, because the release build precedes its version bump. Provisioning failure falls back to the original entrypoint and warns only when it is under a volatile temp root.
+
+The same package-tree loss affects code search. `src/lib/code-search.ts` prefers system `rg`, then the durable toolbelt copy, before the package dependency; `src/lib/tree-sitter-assets/` copies the web-tree-sitter runtime and the nine grammar WASMs into APP_DIR. Those copies are best-effort first-run fallbacks, but prevent code search from becoming a hard ripgrep failure or a silent loss of structural ranking and outlines after a reaped package tree.
 
 ### Windows keep-awake (default-on, best-effort)
 
@@ -252,10 +261,13 @@ Upstream Anthropic-format errors from Copilot are forwarded as-is.
 ### Key directories
 
 ```
-src/routes/<name>/     # route.ts (Hono router) + handler.ts (business logic)
-src/services/copilot/  # API clients for Copilot endpoints
-src/services/github/   # GitHub OAuth + token management
-src/lib/               # Shared utilities (state, config, rate-limit, etc.)
+src/routes/<name>/          # route.ts (Hono router) + handler.ts (business logic)
+src/services/copilot/       # API clients for Copilot endpoints
+src/services/github/        # GitHub OAuth + token management
+src/lib/                    # Shared utilities (state, config, rate-limit, etc.)
+src/lib/hook-launcher/      # Durable, content-addressed Claude Code hook launcher
+src/lib/tree-sitter-assets/ # Durable tree-sitter runtime and grammar provisioning
+src/hooks.ts                # Self-contained dispatcher for persisted internal hook commands
 ```
 
 ### Model → endpoint mapping

@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs"
 import nodePath from "node:path"
 
 import { parseBoolEnv } from "~/lib/exec"
+import { buildSelfCommand, type SelfInvocation } from "~/lib/hook-launcher/self-invocation"
 
 import { callMcpTool, type HookMcpRuntime, type McpToolResult } from "./hook-mcp-client"
 import {
@@ -206,10 +207,6 @@ export async function runPlanReview(input: {
 }
 
 /** Build the command registered for PostToolUse(ExitPlanMode). */
-export function buildPlanReviewHookCommand(execPath: string, scriptPath: string | undefined): string {
-  const q = (s: string): string => `"${s}"`
-  if (scriptPath && scriptPath !== execPath) {
-    return `${q(execPath)} ${q(scriptPath)} internal-plan-review`
-  }
-  return `${q(execPath)} internal-plan-review`
+export function buildPlanReviewHookCommand(invocation: SelfInvocation): string {
+  return buildSelfCommand(invocation, "internal-plan-review")
 }

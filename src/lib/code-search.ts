@@ -377,22 +377,30 @@ interface RawHit {
 
 interface RipgrepResolution {
   rgPath: string
-  source: "system" | "bundled"
+  source: "system" | "toolbelt" | "bundled"
 }
 
 let _rgResolution: RipgrepResolution | undefined
 
+/** @internal — reset memoized resolution between test cases. */
+export function __resetRipgrepResolverForTest(): void {
+  _rgResolution = undefined
+}
+
 /**
- * Tri-tier resolution. Memoized. Mirrors cc-backup
+ * Four-tier resolution. Memoized. Mirrors cc-backup
  * `src/utils/ripgrep.ts:31-65`.
  *
  *   1. System rg on PATH — use the literal command name `"rg"` (NOT
  *      the absolute path). This leverages NoDefaultCurrentDirectory-
  *      InExePath on Windows, preventing PATH-hijacking via a
  *      malicious ./rg.exe in the proxy's cwd.
- *   2. Bundled via `@vscode/ripgrep` — falls back to the per-platform
+ *   2. Router-owned toolbelt copy under APP_DIR. Its absolute path is
+ *      safe because it cannot resolve to a planted binary in the cwd,
+ *      and it survives a temp-hosted bunx package tree being reaped.
+ *   3. Bundled via `@vscode/ripgrep` — falls back to the per-platform
  *      binary that `optionalDependencies` installed.
- *   3. Throw — surfaced to the caller as an MCP isError response.
+ *   4. Throw — surfaced to the caller as an MCP isError response.
  */
 export function resolveRipgrep(): RipgrepResolution {
   if (_rgResolution) return _rgResolution
@@ -402,6 +410,18 @@ export function resolveRipgrep(): RipgrepResolution {
   // the OS apply NoDefaultCurrentDirectoryInExePath on Windows.
   if (hasSystemRipgrep()) {
     _rgResolution = { rgPath: "rg", source: "system" }
+    return _rgResolution
+  }
+
+  // The toolbelt copy is router-owned, so using its absolute path cannot
+  // resolve a planted ./rg.exe from the workspace. Unlike the package tree,
+  // APP_DIR is not subject to OS temp cleanup.
+  const toolbeltPath = path.join(
+    PATHS.TOOLBELT_BIN_DIR,
+    process.platform === "win32" ? "rg.exe" : "rg",
+  )
+  if (existsSync(toolbeltPath)) {
+    _rgResolution = { rgPath: toolbeltPath, source: "toolbelt" }
     return _rgResolution
   }
 
