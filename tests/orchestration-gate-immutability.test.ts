@@ -61,6 +61,40 @@ describe("detectGateWeakening", () => {
     const d = diff("diff --git a/src/company.ts b/src/company.ts", "+++ b/src/company.ts", "+export const ok = true")
     expect(detectGateWeakening(d).weakened).toBe(false)
   })
+
+  test("fixture strings containing weakening syntax are not executable weakening", () => {
+    const d = diff(
+      "diff --git a/tests/gate.test.ts b/tests/gate.test.ts",
+      "+++ b/tests/gate.test.ts",
+      "+await fs.writeFile(file, \"test.skip('must run', () => {})\\n\")",
+      "+const mixed = \"+  const y = z as any\\n\"",
+    )
+    expect(detectGateWeakening(d).weakened).toBe(false)
+  })
+
+  test("real weakening remains detected beside fixture strings", () => {
+    const d = diff(
+      "diff --git a/src/x.ts b/src/x.ts",
+      "+++ b/src/x.ts",
+      "+const fixture = \"test.skip('quoted', () => {})\"",
+      "+test.skip('real', () => {})",
+      "+const value = source as any",
+    )
+    expect(patterns(d)).toEqual(expect.arrayContaining(["skipped-test", "any-cast"]))
+  })
+
+  test("comment directives remain detected, but mentions inside strings do not", () => {
+    const d = diff(
+      "diff --git a/src/x.ts b/src/x.ts",
+      "+++ b/src/x.ts",
+      "+const fixture = \"// @ts-ignore and eslint-disable\"",
+      "+// @ts-ignore",
+      "+/* eslint-disable no-explicit-any */",
+    )
+    const found = patterns(d)
+    expect(found.filter((p) => p === "ts-suppression")).toHaveLength(1)
+    expect(found.filter((p) => p === "eslint-disable")).toHaveLength(1)
+  })
 })
 
 describe("detectGateWeakening — per-language scoping", () => {

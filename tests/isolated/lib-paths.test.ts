@@ -311,7 +311,13 @@ test("sweepStalePeerAgentMdFiles reaps a dead-PID .md for EVERY native subagent 
   // matching, so the files survive every future launch and register as ghost
   // subagents with a stale prompt and a stale model. The allowlist is a
   // permanent superset: names are added, never removed.
-  const RETIRED_NATIVE_NAMES = ["debugger", "qa-engineer"]
+  const RETIRED_NATIVE_NAMES = [
+    "debugger",
+    "qa-engineer",
+    "generic",
+    "generic-fast",
+    "generic-cheap",
+  ]
   const agentsDir = path.join(PATHS.CLAUDE_CONFIG_DIR, "agents")
   await fs.mkdir(agentsDir, { recursive: true })
   const deadPid = 2_147_483_641

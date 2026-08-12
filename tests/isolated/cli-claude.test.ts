@@ -194,12 +194,12 @@ mock.module("~/lib/mcp-capabilities", () => ({
   brainstormModel: mock(() => undefined),
   scribeModel: mock(() => undefined),
   // `scout` is emitted only when a cheap-tier model resolves; undefined here
-  // keeps the default agent set deterministic, matching the other gates. The
-  // three `generic*` catch-alls follow the same drop-not-downgrade rule.
-  scoutModel: mock(() => undefined),
-  genericModel: mock(() => undefined),
-  genericFastModel: mock(() => undefined),
-  genericCheapModel: mock(() => undefined),
+  // keeps the default agent set deterministic, matching the other gates.
+  // `implementer-fast` and `general-purpose-fast` follow the same
+  // drop-not-downgrade rule.
+  scoutModel: mock(() => "gpt-5.6-luna"),
+  implementerFastModel: mock(() => "gpt-5.6-terra"),
+  generalPurposeFastModel: mock(() => "gpt-5.6-luna"),
   // stand-in.ts (pulled in transitively via handler.ts) imports this;
   // stub it so the module mock doesn't break that import.
   resolveOpenAiFrontier: mock(() => "gpt-5.6-sol"),

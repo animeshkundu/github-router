@@ -24,8 +24,7 @@ import { ONE_M_TOKENS } from "./one-m-context"
 import { state, type State } from "./state"
 import {
   BROWSE_DEFAULT_MODEL,
-  DEFAULT_MODEL as WORKER_DEFAULT_MODEL,
-  EXPLORE_DEFAULT_MODEL,
+  DEFAULT_MODEL_CHAIN as WORKER_DEFAULT_MODEL_CHAIN,
   REVIEW_DEFAULT_MODEL,
 } from "./worker-agent"
 import { pickEndpoint } from "../services/copilot/endpoint"
@@ -77,13 +76,12 @@ export { OPENAI_FRONTIER_MODELS } from "./openai-frontier"
  * one walk instead of hand-copying it. Ids are matched EXACTLY against
  * `catalog.id` — no slug translation, matching the pre-existing behavior.
  *
- * `minContextTokens` is OPT-IN because the two constraints are genuinely
- * per-agent: the `generic*` chains promise 1M end to end, while `scoutModel`
- * deliberately keeps a 400K last resort for its wider availability. Enforcing
- * the floor here rather than by comment is what stops a chain silently
- * degrading when an id's advertised window shrinks upstream — `withOneMSuffix`
- * would then just omit the `[1m]` bracket, and the agent would be budgeted at
- * Claude Code's 200K default with no signal that anything changed.
+ * `minContextTokens` is OPT-IN because the constraint is genuinely per-agent:
+ * the conditional cheaper-tier agents promise 1M end to end. Enforcing the
+ * floor here rather than by comment is what stops a chain silently degrading
+ * when an id's advertised window shrinks upstream — `withOneMSuffix` would then
+ * just omit the `[1m]` bracket, and the agent would be budgeted at Claude Code's
+ * 200K default with no signal that anything changed.
  */
 function firstPresentInCatalog(
   chain: ReadonlyArray<string>,
@@ -174,8 +172,8 @@ export function reviewerModel(): string | undefined {
  * while this module's top level runs — a `const CHAIN = [REVIEW_DEFAULT_MODEL]`
  * throws `Cannot access ... before initialization` at load. Referencing them
  * lazily inside a function body defers the read until after both modules have
- * initialized, which is why the pre-existing `WORKER_DEFAULT_MODEL` usage below
- * has always been function-local too.
+ * initialized, which is why reads of the worker fallback chain below stay
+ * function-local too.
  */
 
 /** Model for `brainstorm`. Absent → inherits the lead's model.
@@ -214,78 +212,67 @@ export function scribeModel(): string | undefined {
  * (same behavior as before `scout` existed) rather than to an expensive
  * impostor wearing the cheap agent's name.
  *
- * `gpt-5.6-luna` sits between the two originals because the old chain fell
- * straight from a 1M model to 400K `gpt-5.4-mini`, which loses the `[1m]`
- * bracket and drops Claude Code's accounting to its 200K default. Luna is
- * cheaper than mini, keeps 1M, and is cross-vendor from the primary, so it
- * covers a Gemini-side outage that a same-vendor entry would not.
+ * `gpt-5.6-luna` leads because it is the cheapest 1M-context model in the
+ * catalog; `gemini-3.6-flash` remains the cross-vendor fallback so an OpenAI-side
+ * outage does not remove the scout. Both entries must continue advertising at
+ * least 1M context so Claude Code's `[1m]` accounting remains honest if an
+ * upstream catalog entry shrinks.
  *
- * Deliberately NO `minContextTokens` floor, unlike the `generic*` resolvers:
- * `gpt-5.4-mini` is retained as the last resort precisely BECAUSE it is the
- * widest-availability id here (its `restricted_to` includes `individual_trial`
- * and `edu`, which neither flash nor luna does). On a thin non-enterprise
- * catalog a 400K scout beats no scout.
+ * This chain deliberately uses literal ids rather than `EXPLORE_DEFAULT_MODEL`:
+ * the explore worker default and scout's cross-vendor fallback are independent
+ * policies, so retuning one must not silently collapse the other. There is no
+ * 400K last resort. On a catalog carrying neither chain member, `scout` is
+ * dropped rather than inheriting the lead or presenting a narrower-context agent.
  */
+export const SCOUT_MODEL_CHAIN = Object.freeze([
+  "gpt-5.6-luna",
+  "gemini-3.6-flash",
+] as const)
+
 export function scoutModel(): string | undefined {
   return firstPresentInCatalog(
-    [EXPLORE_DEFAULT_MODEL, "gpt-5.6-luna", WORKER_DEFAULT_MODEL],
-    { requireToolCalls: true },
+    SCOUT_MODEL_CHAIN,
+    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
   )
 }
 
 /*
- * The three `generic*` catch-alls.
+ * The cheaper non-lead agents.
  *
- * Every other native is a specialist (implement / review / ideate / find /
- * document), so anything that fits none of them runs on the lead's own model.
- * These give the lead three non-lead delegation targets at three cost points,
- * and — like `scout` and for the same reason — each is DROPPED rather than
- * downgraded when its chain misses: an agent whose whole value is costing less
- * than the lead defeats itself by silently inheriting Opus.
+ * `implementer-fast` is the mechanical implementation specialist, while
+ * `general-purpose-fast` handles work no specialist fits. Like `scout` and for
+ * the same reason, both are DROPPED rather than downgraded when their chain
+ * misses: an agent whose whole value is costing less than the lead defeats
+ * itself by silently inheriting Opus.
  *
- * All three carry `minContextTokens: ONE_M_TOKENS`. Their descriptions promise
- * a 1M window, so the floor is what keeps that promise true against an upstream
+ * Both carry `minContextTokens: ONE_M_TOKENS`. Their descriptions promise a 1M
+ * window, so the floor is what keeps that promise true against an upstream
  * catalog change rather than merely asserted in a comment.
  */
 
-/** Model for `generic` — the mid-tier catch-all. Absent → the agent is dropped.
+/** Model for `implementer-fast` — the cheaper implementation tier. Absent →
+ *  the agent is dropped.
  *
- *  `gpt-5.6-sol` is deliberately NOT in this chain: the OpenAI frontier coder is
- *  already `implementer`'s job, and a catch-all that quietly costs frontier
- *  rates is the opposite of what this agent is for. Both entries are 1M+ and
- *  mid-to-high capability, which is the most the description may claim. */
-export function genericModel(): string | undefined {
+ *  `gpt-5.6-sol` is deliberately NOT in this chain: changes needing frontier
+ *  judgment already belong to `implementer`, while this agent handles
+ *  well-specified, mechanical changes at a lower tier. Both entries are 1M+;
+ *  their different speed and effort properties stay out of shared claims. */
+export function implementerFastModel(): string | undefined {
   return firstPresentInCatalog(
     ["gpt-5.6-terra", REVIEW_DEFAULT_MODEL],
     { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
   )
 }
 
-/** Model for `generic-fast` — the Gemini flash tier. Absent → dropped.
+/** Model for `general-purpose-fast` — the fast, cheapest catch-all. Absent →
+ *  dropped.
  *
- *  Both entries are the same vendor, context, price point and `minimal..high`
- *  effort ladder, so the agent's identity survives the fallback intact. That is
- *  why the fallback is `gemini-3.5-flash` and not `gpt-5.6-luna`, which would
- *  otherwise be the natural cross-vendor choice: luna is `genericCheapModel`'s
- *  only entry, and using it in both places would collapse two roster entries
- *  onto one model in the degraded case. */
-export function genericFastModel(): string | undefined {
-  return firstPresentInCatalog(
-    [EXPLORE_DEFAULT_MODEL, "gemini-3.5-flash"],
-    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
-  )
-}
-
-/** Model for `generic-cheap` — the cheapest catch-all. Absent → dropped.
- *
- *  Single-entry by design (see `genericFastModel` for why luna is not shared).
- *  `gpt-5.6-luna` is the cheapest id in the catalog and undercuts even the 400K
- *  `gpt-5.4-mini`, while carrying 1.05M context and the full `none..max` effort
- *  ladder — so unlike the flash tier it propagates a CLI effort pick above
- *  `high` rather than clamping it. No `-mini`/`-lite`/`-haiku` model in the
- *  catalog serves 1M, which is why the cheap catch-all is a `gpt-5.6-*` slug
- *  rather than a mini one. */
-export function genericCheapModel(): string | undefined {
+ *  Single-entry by design. `gpt-5.6-luna` is the cheapest model in the live
+ *  catalog and measured fastest among the catch-all candidates, while carrying
+ *  1.05M context and the full `none..max` effort ladder. No
+ *  `-mini`/`-lite`/`-haiku` model in the catalog serves 1M, which is why this
+ *  catch-all uses a `gpt-5.6-*` slug rather than a mini one. */
+export function generalPurposeFastModel(): string | undefined {
   return firstPresentInCatalog(
     ["gpt-5.6-luna"],
     { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
@@ -296,15 +283,14 @@ export function genericCheapModel(): string | undefined {
  * Gate for the worker tools (`explore`, `review`, `implement`).
  *
  * Returns true iff BOTH:
- *   1. Copilot's live catalog (`state.models?.data`) contains the
- *      worker default model (`gpt-5.4-mini`, used by explore)
- *      AND that entry advertises `capabilities.supports.tool_calls ===
- *      true`. The worker loop is function-calling; a model that can't
- *      emit tool_calls is unusable, so dormant-register (omit from
- *      `tools/list`) keeps the surface honest. (The implement default
- *      `gpt-5.6-sol` is NOT gated here — if it's absent, implement calls
- *      surface a clean resolve error rather than disabling all worker
- *      tools, since explore/review still work.)
+ *   1. Copilot's live catalog (`state.models?.data`) contains any model in the
+ *      ordered worker gate chain (`gpt-5.6-luna` → `gpt-5.4-mini`) and that
+ *      entry advertises `capabilities.supports.tool_calls === true`. Luna leads
+ *      on qualifying tiers; mini preserves the worker surface on individual
+ *      trial and education catalogs. The catalog is the entitlement signal.
+ *      The worker loop is function-calling, so a model without tool calls is
+ *      unusable. Per-mode defaults are NOT gated here — an absent mode default
+ *      surfaces a clean resolve error rather than disabling all worker tools.
  *   2. The operator hasn't set `GH_ROUTER_DISABLE_WORKER_TOOLS=1`
  *      (opt-out — workers ship enabled by default per plan).
  *
@@ -313,17 +299,15 @@ export function genericCheapModel(): string | undefined {
  * validation in the engine, which surfaces a clean `isError`
  * envelope with the catalog's eligible model ids on mismatch.
  *
- * `WORKER_DEFAULT_MODEL` is imported (aliased from `DEFAULT_MODEL`)
- * from `src/lib/worker-agent` so the engine owns the single source
- * of truth.
+ * `WORKER_DEFAULT_MODEL_CHAIN` is imported from `src/lib/worker-agent` so the
+ * engine owns the single source of truth for both gating and fallback order.
  */
 export function workerToolsEnabled(): boolean {
   if (process.env.GH_ROUTER_DISABLE_WORKER_TOOLS === "1") return false
-  const models = state.models?.data
-  if (!models) return false
-  const found = models.find((m) => m.id === WORKER_DEFAULT_MODEL)
-  if (!found) return false
-  return found.capabilities?.supports?.tool_calls === true
+  return firstPresentInCatalog(
+    WORKER_DEFAULT_MODEL_CHAIN,
+    { requireToolCalls: true },
+  ) != null
 }
 
 /**
@@ -447,10 +431,10 @@ export function artifactToolsEnabled(): boolean {
  *      browser is on disk. The browse agent drives the SAME Chrome/Edge
  *      bridge as the raw `browser_*` tools, so it can't be useful without
  *      that surface enabled.
- *   2. The browse default model (`BROWSE_DEFAULT_MODEL`, `gpt-5.4-mini`)
+ *   2. The browse default model (`BROWSE_DEFAULT_MODEL`, `gpt-5.6-luna`)
  *      is in Copilot's live catalog AND `pickEndpoint()` resolves a
  *      reachable endpoint for it. Unlike `workerToolsEnabled()` (which
- *      checks `tool_calls` on the gemini default), the browse default is
+ *      checks `tool_calls` on the shared gate sentinel), the browse default is
  *      a `/responses`-only gpt-5.x model — `pickEndpoint` is the right
  *      reachability probe (it returns undefined only when the model
  *      serves neither chat nor responses).

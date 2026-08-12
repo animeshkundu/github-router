@@ -11,6 +11,7 @@ import { promises as fs } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
+import { captureStopGateDiff } from "../src/internal-stop-hook"
 import { type ExecFn } from "../src/lib/orchestration/gate-runner"
 import {
   type BlockBudget,
@@ -26,7 +27,6 @@ import {
   stopGateDisabled,
   stopGateEnabled,
   stopGateId,
-  stopGatePlanMode,
   stripPlanMemoryDiffHunks,
 } from "../src/lib/orchestration/stop-gate-hook"
 import { fileBaselineStore, type BaselineStore } from "../src/lib/orchestration/stop-gate-policy"
@@ -102,6 +102,65 @@ function decisionInput(overrides: Partial<StopHookInput> = {}): StopHookInput {
 
 const allPass: ExecFn = async () => ({ exitCode: 0 })
 const allFail: ExecFn = async () => ({ exitCode: 1 })
+
+async function git(cwd: string, args: string[]): Promise<void> {
+  const result = await Bun.$`git -C ${cwd} ${args}`.quiet().nothrow()
+  if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr.toString()}`)
+}
+
+describe("captureStopGateDiff", () => {
+  test("empty tracked tree is empty, but an untracked file is a real change", async () => {
+    const dir = await fs.mkdtemp(path.join(tmpdir(), "ghr-stop-diff-"))
+    try {
+      await git(dir, ["init"])
+      await git(dir, ["config", "user.email", "stop-gate@example.invalid"])
+      await git(dir, ["config", "user.name", "Stop Gate Test"])
+      await fs.writeFile(path.join(dir, "tracked.txt"), "base\n")
+      await git(dir, ["add", "tracked.txt"])
+      await git(dir, ["commit", "-m", "base"])
+
+      expect(await captureStopGateDiff(dir)).toBe("")
+      await fs.writeFile(path.join(dir, "new-file.ts"), "export const added = true\n")
+      const untrackedDiff = await captureStopGateDiff(dir)
+      expect(untrackedDiff).toContain("new-file.ts")
+      expect(untrackedDiff).toContain("+export const added = true")
+
+      const exec = mock(async () => ({ exitCode: 0 }))
+      const decision = await decideStopHook(decisionInput({
+        stdin: JSON.stringify({ cwd: dir, session_id: "untracked" }),
+        exec,
+        captureDiff: captureStopGateDiff,
+      }))
+      expect(decision.exitCode).toBe(0)
+      expect(exec.mock.calls.length).toBe(1)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("gate-weakening in an untracked file still blocks", async () => {
+    const dir = await fs.mkdtemp(path.join(tmpdir(), "ghr-stop-untracked-weak-"))
+    try {
+      await git(dir, ["init"])
+      await git(dir, ["config", "user.email", "stop-gate@example.invalid"])
+      await git(dir, ["config", "user.name", "Stop Gate Test"])
+      await fs.writeFile(path.join(dir, "tracked.txt"), "base\n")
+      await git(dir, ["add", "tracked.txt"])
+      await git(dir, ["commit", "-m", "base"])
+      await fs.writeFile(path.join(dir, "new.test.ts"), "test.skip('must run', () => {})\n")
+
+      const decision = await decideStopHook(decisionInput({
+        stdin: JSON.stringify({ cwd: dir, session_id: "untracked-weak" }),
+        exec: allPass,
+        captureDiff: captureStopGateDiff,
+      }))
+      expect(decision.exitCode).toBe(2)
+      expect(decision.stderr).toContain("gate-weakening")
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+})
 
 describe("runStopGateForLaunch", () => {
   test("a clean pass with no gate-weakening does not block", async () => {
@@ -616,14 +675,7 @@ describe("decideStopHook — dynamic resolveChecks (parser/discovered path)", ()
   })
 })
 
-describe("stop-gate plan-mode scoping (Part 1)", () => {
-  test("stopGatePlanMode reads GH_ROUTER_STOP_GATE_PLAN_MODE (default off)", () => {
-    expect(stopGatePlanMode({})).toBe(false)
-    expect(stopGatePlanMode({ GH_ROUTER_STOP_GATE_PLAN_MODE: "0" })).toBe(false)
-    expect(stopGatePlanMode({ GH_ROUTER_STOP_GATE_PLAN_MODE: "1" })).toBe(true)
-    expect(stopGatePlanMode({ GH_ROUTER_STOP_GATE_PLAN_MODE: "true" })).toBe(true)
-  })
-
+describe("stop-gate plan-mode payload scoping", () => {
   test("stripPlanMemoryDiffHunks drops plans/ + memory/ file sections, keeps src/", () => {
     const diff = [
       "diff --git a/plans/todo.md b/plans/todo.md",
@@ -648,46 +700,33 @@ describe("stop-gate plan-mode scoping (Part 1)", () => {
     expect(out).not.toContain("plans/todo.md")
     expect(out).not.toContain("memory/notes.md")
     expect(out).not.toContain("it.skip")
-    // A path whose filename merely contains "plans" is NOT stripped.
     const keep = "diff --git a/docs/plans.md b/docs/plans.md\n+  it.only('x', () => {})"
     expect(stripPlanMemoryDiffHunks(keep)).toBe(keep)
   })
 
   const weakPlanDiff = "diff --git a/plans/p.md b/plans/p.md\n--- a/plans/p.md\n+++ b/plans/p.md\n@@ -0,0 +1 @@\n+  it.skip('later', () => {})\n"
 
-  test("weakening confined to plans/ blocks WITHOUT plan mode but is EXCUSED with it", async () => {
-    const off = await decideStopHook(decisionInput({ exec: allPass, captureDiff: async () => weakPlanDiff }))
-    expect(off.exitCode).toBe(2)
-    expect(off.stderr).toContain("gate-weakening")
-
-    const onEnv = await decideStopHook(decisionInput({ exec: allPass, captureDiff: async () => weakPlanDiff, planMode: true }))
-    expect(onEnv.exitCode).toBe(0)
-
-    // Forward-compat: a truthy `plan_mode` payload field activates it too.
-    const onPayload = await decideStopHook(decisionInput({
+  test("payload plan mode scopes only the weakening scan and still runs the full gate", async () => {
+    const exec = mock(async () => ({ exitCode: 1 }))
+    const d = await decideStopHook(decisionInput({
       stdin: JSON.stringify({ cwd: "/w", session_id: "s1", plan_mode: true }),
-      exec: allPass,
+      exec,
       captureDiff: async () => weakPlanDiff,
     }))
-    expect(onPayload.exitCode).toBe(0)
-  })
-
-  test("plan mode still catches src/ weakening in a MIXED diff", async () => {
-    const mixed = weakPlanDiff + "diff --git a/src/x.ts b/src/x.ts\n+++ b/src/x.ts\n@@ -0,0 +1 @@\n+  const y = z as any\n"
-    const d = await decideStopHook(decisionInput({ exec: allPass, captureDiff: async () => mixed, planMode: true }))
-    expect(d.exitCode).toBe(2)
-    expect(d.stderr).toContain("gate-weakening")
-  })
-
-  test("plan mode does NOT early-exit: the executable gate still runs (red gate blocks)", async () => {
-    // Diff only touches plans/ (no weakening survives the scan) but the gate is
-    // RED — plan mode must not skip the executable checks.
-    const d = await decideStopHook(decisionInput({
-      exec: allFail,
-      captureDiff: async () => "diff --git a/plans/p.md b/plans/p.md\n+  just a note\n",
-      planMode: true,
-    }))
+    expect(exec.mock.calls.length).toBe(1)
     expect(d.exitCode).toBe(2)
     expect(d.stderr).toContain("regressed gates: typecheck")
+    expect(d.stderr).not.toContain("gate-weakening in the diff:")
+  })
+
+  test("payload plan mode still catches weakening outside plans/ and memory/", async () => {
+    const mixed = weakPlanDiff + "diff --git a/src/x.ts b/src/x.ts\n+++ b/src/x.ts\n@@ -0,0 +1 @@\n+  const y = z as any\n"
+    const d = await decideStopHook(decisionInput({
+      stdin: JSON.stringify({ cwd: "/w", session_id: "s1", plan_mode: true }),
+      exec: allPass,
+      captureDiff: async () => mixed,
+    }))
+    expect(d.exitCode).toBe(2)
+    expect(d.stderr).toContain("gate-weakening")
   })
 })

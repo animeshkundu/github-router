@@ -30,6 +30,8 @@
  *          "no clamp notice in output".
  */
 
+import consola from "consola"
+
 import { state } from "~/lib/state"
 
 import type { ThinkingLevel, WorkerThinkingLevel } from "./types"
@@ -180,7 +182,158 @@ export function resolveModelAndThinking(opts: ResolveOpts): ResolveResult {
   return mkOk(clamp as ThinkingLevel)
 }
 
-/** One catalog row as surfaced to the model. Derived only — no editorial prose. */
+/** Per-1M-token relative units derived from the live Copilot catalog. */
+export interface CatalogTokenPrices {
+  in: number
+  out: number
+}
+
+const CATALOG_PRICE_SCALE = 1_000_000_000
+const TOKENS_PER_MILLION = 1_000_000
+
+/**
+ * Last-resort per-1M-token prices, recorded from the live catalog on
+ * 2026-08-12. The LIVE catalog always wins; this only fills in when
+ * `state.models` is unpopulated, which in practice means the startup catalog
+ * fetch failed. Without it the injected roster degrades to bare names and the
+ * model loses the cost signal entirely for that session.
+ *
+ * A hardcoded copy of a value that HAS a live source is a second source of
+ * truth, and this one has already been observed to drift: two figures written
+ * from memory into a commit message (`gpt-5.3-codex` 400/1600, `gpt-5.5`
+ * 500/2000) were both wrong against the live catalog (175/1400 and 500/3000).
+ * That is exactly the silent-misroute failure this table risks, so
+ * `warnOnTokenPriceDrift()` compares it against the live catalog once at
+ * startup and logs any disagreement rather than letting a stale number sit
+ * here indefinitely.
+ *
+ * This is NOT the same trade as `INDICATIVE_TOKENS_PER_SECOND`: throughput
+ * cannot be derived from the catalog at all, so hardcoding is the only option
+ * there. Price can, so hardcoding is strictly a degraded fallback.
+ */
+export const FALLBACK_TOKEN_PRICES: Readonly<Record<string, CatalogTokenPrices>> =
+  Object.freeze({
+    "gpt-5.6-luna": { in: 20, out: 120 },
+    "gpt-5.6-terra": { in: 200, out: 1200 },
+    "gpt-5.4-mini": { in: 75, out: 450 },
+    "claude-sonnet-5": { in: 200, out: 1000 },
+    "gpt-5.3-codex": { in: 175, out: 1400 },
+    "claude-haiku-4.5": { in: 100, out: 500 },
+    "claude-opus-5": { in: 500, out: 2500 },
+    "gpt-5.6-sol": { in: 500, out: 3000 },
+    "grok-4.5": { in: 200, out: 600 },
+    "gpt-5.5": { in: 500, out: 3000 },
+    "gemini-3.6-flash": { in: 150, out: 750 },
+    "gemini-3.5-flash": { in: 150, out: 900 },
+    "gemini-3.1-pro-preview": { in: 200, out: 1200 },
+  })
+
+/**
+ * Compare every `FALLBACK_TOKEN_PRICES` entry against the live catalog and warn
+ * on disagreement. Call once after the catalog is populated. Makes fallback
+ * staleness VISIBLE instead of silent: a stale entry only ever surfaces on the
+ * degraded path, where nobody is looking, so without this it could be wrong for
+ * months. Warn-only by design — a price mismatch must never block a launch.
+ */
+export function warnOnTokenPriceDrift(): void {
+  for (const [id, hardcoded] of Object.entries(FALLBACK_TOKEN_PRICES)) {
+    const live = livePricesFor(id)
+    if (!live) continue
+    if (live.in !== hardcoded.in || live.out !== hardcoded.out) {
+      consola.warn(
+        `[model-resolve] FALLBACK_TOKEN_PRICES is stale for ${id}: hardcoded `
+        + `${hardcoded.in}/${hardcoded.out}, live catalog ${live.in}/${live.out}. `
+        + `Update the table in src/lib/worker-agent/model-resolve.ts.`,
+      )
+    }
+  }
+}
+
+/** Live-catalog price lookup with no fallback. Split out so the drift check can
+ *  compare against the catalog without the fallback masking a disagreement. */
+function livePricesFor(modelId: string): CatalogTokenPrices | undefined {
+  const prices = state.models?.data.find((model) => model.id === modelId)?.billing?.token_prices
+  if (
+    !prices
+    || typeof prices.batch_size !== "number"
+    || !Number.isSafeInteger(prices.batch_size)
+    || prices.batch_size <= 0
+    || typeof prices.input_price !== "number"
+    || !Number.isFinite(prices.input_price)
+    || prices.input_price < 0
+    || typeof prices.output_price !== "number"
+    || !Number.isFinite(prices.output_price)
+    || prices.output_price < 0
+  ) {
+    return undefined
+  }
+
+  const toPerMillion = (price: number): number =>
+    price / CATALOG_PRICE_SCALE * TOKENS_PER_MILLION / prices.batch_size!
+
+  return {
+    in: toPerMillion(prices.input_price),
+    out: toPerMillion(prices.output_price),
+  }
+}
+
+/**
+ * A model's per-1M-token prices: live catalog first, then the dated fallback
+ * table. Still returns undefined for a model in neither, so a caller never
+ * mistakes a guess for a fact — the fallback covers models we have actually
+ * recorded, not every id.
+ */
+export function catalogTokenPrices(modelId: string): CatalogTokenPrices | undefined {
+  return livePricesFor(modelId) ?? FALLBACK_TOKEN_PRICES[modelId]
+}
+
+/**
+ * Approximate output tokens/sec, median of n=3 per model, measured 2026-08-12
+ * through this proxy. Reproduce with `bun scripts/bench-model-speed.ts` — the
+ * harness is committed precisely so these numbers can be re-derived and
+ * challenged instead of being trusted. Rounded coarsely on purpose: run-to-run
+ * variance is large (`gpt-5.6-sol` measured 22 in an early n=1 pass and 74 at
+ * n=3), so any digit beyond the leading one or two would be false precision.
+ *
+ * Wall clock includes time-to-first-token, which is why an early n=1 pass put
+ * `gemini-3.1-pro-preview` at 9: that response emitted only 66 tokens, so TTFT
+ * dominated. Reasoning tokens are timed but may not appear in `output_tokens`,
+ * so heavy-reasoning models are penalised here.
+ *
+ * This is a deliberately hardcoded, coarse speed hint, indicative and never a
+ * per-call benchmark: a recoverable speed retry is safer than a quality score
+ * that silently misroutes.
+ *
+ * NOT the whole picture for agent work. The benchmark also measures p50 latency
+ * to a trivial tool call, which is the workload an agent model actually spends
+ * its turns on, and the ordering differs from raw generation: `gpt-5.6-sol`
+ * generates at 75 but takes ~4.3s to reach a tool call, while `gpt-5.6-luna`
+ * takes ~0.9s. That figure is deliberately NOT surfaced to the model, because a
+ * second speed axis invites optimising a routing choice that policy already
+ * settles (see the decorrelation note below).
+ */
+export const INDICATIVE_TOKENS_PER_SECOND: Readonly<Record<string, number>> = Object.freeze({
+  "gpt-5.6-luna": 120,
+  "gpt-5.6-terra": 100,
+  "gpt-5.4-mini": 100,
+  "claude-sonnet-5": 100,
+  "gpt-5.3-codex": 85,
+  "claude-haiku-4.5": 85,
+  "claude-opus-5": 80,
+  "gpt-5.6-sol": 75,
+  "grok-4.5": 70,
+  "gpt-5.5": 65,
+  "gemini-3.6-flash": 45,
+  "gemini-3.5-flash": 40,
+  "gemini-3.1-pro-preview": 25,
+})
+
+/** Returns the approximate, indicative output speed when it was measured. */
+export function indicativeTokensPerSecond(modelId: string): number | undefined {
+  return INDICATIVE_TOKENS_PER_SECOND[modelId]
+}
+
+/** One catalog row as surfaced to the model. */
 export interface CatalogRow {
   id: string
   vendor: string
@@ -190,8 +343,12 @@ export interface CatalogRow {
   maxOut?: number
   /** Reasoning efforts this worker layer can actually request. */
   efforts: Array<string>
-  /** Vendor-authored cost tier, omitted when absent. */
-  cost?: string
+  /** Live input price in per-1M-token relative units, omitted when malformed. */
+  in?: number
+  /** Live output price in per-1M-token relative units, omitted when malformed. */
+  out?: number
+  /** Approximate, indicative output tokens/sec when this model was measured. */
+  tps?: number
 }
 
 /** Worker-usable models need a big enough window to be worth delegating to. */
@@ -201,12 +358,14 @@ const CATALOG_MIN_CONTEXT = 200_000
  * Derived view of the live catalog: every model a worker could actually be
  * pointed at, with the metadata needed to choose between them.
  *
- * DERIVED ONLY, and that is the whole design. A one-liner like "strong
+ * Derived facts only, with one explicitly-labelled exception:
+ * `INDICATIVE_TOKENS_PER_SECOND` is a dated, coarse measurement whose speed
+ * signal is recoverable by retrying a slow selection. A one-liner like "strong
  * reasoning, weak long-context recall" cannot be computed from catalog
  * metadata — it is editorial, it goes stale silently as vendors ship, and the
  * asymmetry is brutal: a MISSING characterization costs one suboptimal pick
  * the model recovers from, while a WRONG one misroutes invisibly at the call
- * site. So this ships facts and lets the caller judge.
+ * site. So this ships facts, the recoverable speed hint, and no quality score.
  *
  * It exists because the hardcoded chains cannot discover anything. Models are
  * live in the catalog that appear nowhere in `src/` — nobody evaluated them
@@ -234,15 +393,16 @@ export function buildCatalogView(): Array<CatalogRow> {
       (WORKER_THINKING_LEVELS as ReadonlyArray<string>).includes(effort),
     )
     if (efforts.length === 0) continue
+    const prices = catalogTokenPrices(model.id)
+    const tps = indicativeTokensPerSecond(model.id)
     rows.push({
       id: model.id,
       vendor: model.vendor,
       ctx,
       ...(limits?.max_output_tokens ? { maxOut: limits.max_output_tokens } : {}),
       efforts,
-      ...(model.model_picker_price_category
-        ? { cost: model.model_picker_price_category }
-        : {}),
+      ...(prices ?? {}),
+      ...(tps === undefined ? {} : { tps }),
     })
   }
   return rows.sort((a, b) => a.id.localeCompare(b.id))

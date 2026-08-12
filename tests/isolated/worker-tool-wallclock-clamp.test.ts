@@ -17,7 +17,7 @@ import { beforeEach, describe, expect, mock, test } from "bun:test"
 // stubbed index re-exports the genuine values anything reading them expects.
 import {
   BROWSE_DEFAULT_MODEL,
-  DEFAULT_MODEL,
+  DEFAULT_MODEL_CHAIN,
 } from "../../src/lib/worker-agent/engine"
 import {
   MCP_TIMEOUT_HEADROOM_MS,
@@ -39,7 +39,7 @@ let runWorkerAgentReturn: { text: string; isError?: boolean } = {
 // imports). The clamp math lives in `worker-agent/budget` (a distinct module
 // path, NOT mocked), so the real ceiling is exercised end-to-end.
 mock.module("~/lib/worker-agent", () => ({
-  DEFAULT_MODEL,
+  DEFAULT_MODEL_CHAIN,
   BROWSE_DEFAULT_MODEL,
   runWorkerAgent: async (opts: Captured) => {
     runWorkerAgentCalls.push(opts)

@@ -132,19 +132,6 @@ export function stopGateId(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
- * PLAN-MODE env fallback. When the session is in plan mode, plan/memory scratch
- * edits should not trip the gate-WEAKENING scan (a plan/memory markdown file may
- * legitimately quote `it.skip` / `as any` while describing work). The launcher
- * sets `GH_ROUTER_STOP_GATE_PLAN_MODE` for a plan-mode session; the payload may
- * ALSO carry a forward-compat `plan_mode` field (see `decideStopHook`). Either
- * signal being present activates the scoping — the executable gate STILL runs
- * and non-plan hunks are STILL scanned.
- */
-export function stopGatePlanMode(env: NodeJS.ProcessEnv = process.env): boolean {
-  return parseBoolEnv(env.GH_ROUTER_STOP_GATE_PLAN_MODE) === true
-}
-
-/**
  * Is a unified-diff file path confined to a `plans/` or `memory/` directory?
  * Windows-safe (normalizes `\` → `/`). Matches only when a DIRECTORY segment of
  * the path is exactly `plans` or `memory`, so `plans/x.md`, `memory/y.md`, and
@@ -332,15 +319,6 @@ export async function decideStopHook(input: {
   ) => Promise<{ checks: CheckSpec[]; workdir: string; descriptorKey: string; baselineKey?: string } | null>
   /** Max blocks per prompt before the gate always allows (default 2). */
   maxBlocks?: number
-  /**
-   * PLAN-MODE scoping (env-fallback signal). When true — OR when the stdin
-   * payload carries a truthy `plan_mode` field — diff hunks confined to
-   * `plans/` or `memory/` are EXCLUDED from the gate-weakening scan. The
-   * executable gate still runs and non-plan (`src/…`) hunks are still scanned;
-   * this only narrows the weakening heuristic so plan/memory scratch docs don't
-   * trip it. The live wrapper passes `stopGatePlanMode()`.
-   */
-  planMode?: boolean
   /** Absolute wall-clock cap on the diff+gate evaluation; on timeout the hook
    *  FAILS OPEN (exit 0) and never claims the gate passed. Default 300s. */
   timeoutMs?: number
@@ -445,15 +423,11 @@ export async function decideStopHook(input: {
   // the LAUNCHER captured BEFORE the agent mutated the tree — so an
   // agent-introduced failure is a regression, not silently adopted as baseline.
   let dynamicBaselineKey: string | undefined
-  // PLAN-MODE: active via the env-fallback input OR a forward-compat truthy
-  // `plan_mode` payload field. When active, the gate-weakening scan runs over a
-  // diff with plans/ + memory/ file sections stripped; the FULL diff is still
-  // returned for the advisory review, and the executable gate (which ignores the
-  // diff) is unaffected. A truly empty full diff short-circuits before checks,
-  // which subsumes plan-only turns with no code changes; the env remains an
-  // explicit override for non-empty plan/memory scratch diffs.
-  const planMode = input.planMode === true || payload.plan_mode === true
-  const scanDiff = (diff: string): string => (planMode ? stripPlanMemoryDiffHunks(diff) : diff)
+  // Forward-compatible payload signal. Current Claude Code does not emit
+  // `plan_mode`, but preserving this path keeps the prior diff-scoping behavior
+  // if it does. The dead env fallback is deliberately gone.
+  const scanDiff = (diff: string): string =>
+    payload.plan_mode === true ? stripPlanMemoryDiffHunks(diff) : diff
   type GateRunResult =
     | { kind: "evaluated"; failedChecks: string[]; weakeningPatterns: string[]; diff: string }
     | { kind: "no-diff"; diff: string }

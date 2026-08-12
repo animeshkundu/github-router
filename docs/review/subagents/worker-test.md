@@ -7,7 +7,7 @@
 | Field | Value |
 |---|---|
 | Subagent name | `worker-test` (`worker-dispatch.ts:58-60`) |
-| Subagent's OWN model | inherited (Claude); the WORKER runs `IMPLEMENT_DEFAULT_MODEL` = `gpt-5.6-sol` at xhigh (test shares the implement default — repo CLAUDE.md) |
+| Subagent's OWN model | inherited (Claude); the WORKER runs `IMPLEMENT_DEFAULT_MODEL` = `gpt-5.6-sol` at high (test shares the implement default — repo CLAUDE.md) |
 | Gate | `workerToolsAvailable` (`codex-mcp-config.ts:326-335`) |
 | Description | `dispatcherDescription("test")` (`worker-dispatch.ts:213-214` + suffix) |
 | System prompt | `dispatcherPrompt("test", workersKey)` |

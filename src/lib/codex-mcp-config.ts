@@ -126,14 +126,12 @@ interface BuildOpts {
   scoutModel?: string
   /** Model for `scribe`. Absent → the agent inherits the lead's model. */
   scribeModel?: string
-  /** Model for `generic` (the mid-tier catch-all). Absent → the agent is
-   *  OMITTED rather than inheriting the lead's model, on `scout`'s reasoning:
-   *  costing less than the lead is the whole point. */
-  genericModel?: string
-  /** Model for `generic-fast` (the Gemini flash catch-all). Absent → OMITTED. */
-  genericFastModel?: string
-  /** Model for `generic-cheap` (the cheapest catch-all). Absent → OMITTED. */
-  genericCheapModel?: string
+  /** Model for `implementer-fast` (the cheaper implementation tier). Absent →
+   *  the agent is OMITTED rather than inheriting the lead's model. */
+  implementerFastModel?: string
+  /** Model for `general-purpose-fast` (the fast, cheapest catch-all). Absent →
+   *  OMITTED. */
+  generalPurposeFastModel?: string
 }
 
 export interface HttpMcpEntry {
@@ -289,7 +287,7 @@ function buildCoordinatorAgent(opts: {
     "- **Plan / design / architecture choice** → fan out to `codex-critic` (gpt-5.6-sol, strongest reasoning, cross-lab)"
       + (opts.geminiAvailable ? " AND `gemini-critic` (third-lab triangulation, strong on formal reasoning) in parallel" : "")
       + ". codex-reviewer is the wrong tool for plans (it's a code-specialist, not an architecture critic).",
-    "- **Concrete diff or single file** → fan out to `codex-reviewer` (gpt-5.3-codex, line-level code specialist, fastest at ~16s)"
+    "- **Concrete diff or single file** → fan out to `codex-reviewer` (gpt-5.3-codex, line-level code specialist)"
       + (opts.geminiAvailable ? " AND `gemini-reviewer` (gemini-3.1-pro, second-lab line-level review)" : "")
       + (opts.geminiAvailable ? " AND `gemini-critic` for cross-lab triangulation" : "")
       + ". For very small changes (<20 lines), one `codex-reviewer` call is enough.",
@@ -300,7 +298,7 @@ function buildCoordinatorAgent(opts: {
     "- **Tie-breaker after codex-critic has weighed in** → call `gemini-critic`"
       + (opts.geminiAvailable ? "" : " (NOT REGISTERED in this session)")
       + " or `opus-critic` with the artifact AND codex-critic's verdict for cross-check.",
-    "- **Fast sanity check** → `opus-critic` (~22s, same lab as lead but fresh context — catches confabulation and motivated reasoning).",
+    "- **Fast sanity check** → `opus-critic` (same lab as lead but fresh context — catches confabulation and motivated reasoning).",
     "",
     "## Decomposition for large artifacts",
     "",
@@ -377,8 +375,8 @@ export const BUILTIN_SUBAGENT_DEFINITIONS: PeerAgentDefinitions = {
  *
  * This is a NAME REGISTRY for the sweep allowlist in `paths.ts` and its drift
  * test, NOT a list of agents that are guaranteed to exist in a given launch.
- * `scout` and the three `generic*` catch-alls are conditionally emitted (see
- * `buildPeerAgentDefinitions`) yet are listed here on purpose: the sweep must
+ * `scout`, `implementer-fast`, and `general-purpose-fast` are conditionally
+ * emitted (see `buildPeerAgentDefinitions`) yet are listed here on purpose: the sweep must
  * recognize their filenames so a file written by a launch that DID resolve a
  * model gets reaped by a later launch that did not. Do not iterate this
  * expecting a definition back from `buildPeerAgentDefinitions` for every entry;
@@ -395,9 +393,8 @@ export const ALL_NATIVE_AGENT_NAMES = [
   "brainstorm",
   "scout",
   "scribe",
-  "generic",
-  "generic-fast",
-  "generic-cheap",
+  "implementer-fast",
+  "general-purpose-fast",
 ] as const
 
 /** Empty-string-safe read of an optional model id. */
@@ -527,28 +524,28 @@ export function buildPeerAgentDefinitions(
   // frontmatter is OMITTED and it inherits the lead's model, so a thin catalog
   // degrades the model, never the roster.
   //
-  // `scout` and the three `generic*` catch-alls are the exceptions. Their entire
-  // reason to exist is being cheaper than the lead's model, so silently
-  // inheriting Opus would burn exactly the cost they were added to avoid — their
-  // resolvers return undefined when nothing in their chain resolves and the
-  // agent is then omitted outright.
+  // `scout`, `implementer-fast`, and `general-purpose-fast` are the exceptions.
+  // Their entire reason to exist is being cheaper than the lead's model, so
+  // silently inheriting Opus would burn exactly the cost they were added to
+  // avoid — their resolvers return undefined when nothing in their chain
+  // resolves and the agent is then omitted outright.
   //
-  // `implementer`, `reviewer`, `scribe` and the `generic*` trio inherit the full
-  // toolset (no `tools:`). `scout` and `brainstorm` carry the read-only
-  // allowlist.
+  // `implementer`, `implementer-fast`, `reviewer`, `scribe`, and
+  // `general-purpose-fast` inherit the full toolset (no `tools:`). `scout` and
+  // `brainstorm` carry the read-only allowlist.
   const nativeModel = nonEmptyModel(opts.nativeSubagentModel)
   const reviewerModel = nonEmptyModel(opts.reviewerModel)
   const brainstormModel = nonEmptyModel(opts.brainstormModel)
   const scoutModel = nonEmptyModel(opts.scoutModel)
   const scribeModel = nonEmptyModel(opts.scribeModel)
-  const genericModel = nonEmptyModel(opts.genericModel)
-  const genericFastModel = nonEmptyModel(opts.genericFastModel)
-  const genericCheapModel = nonEmptyModel(opts.genericCheapModel)
+  const implementerFastModel = nonEmptyModel(opts.implementerFastModel)
+  const generalPurposeFastModel = nonEmptyModel(opts.generalPurposeFastModel)
   // `[1m]` decorates the FRONTMATTER value only, never the description text.
   // Claude Code budgets a subagent's context off its model id, and its detector
   // (`/\[1m\]/i`) has no vendor gate — so without the suffix an `implementer` on
-  // `gpt-5.6-sol` (1,050,000 tokens) runs against a 200K budget. Catalog-gated,
-  // so `scout` falling back to `gpt-5.4-mini` (400K) correctly stays bare.
+  // `gpt-5.6-sol` (1,050,000 tokens) runs against a 200K budget. `scout` is now
+  // floor-gated to 1M across both of its entries, so every emitted scout id receives
+  // the suffix; a model below the floor causes the agent to be dropped instead.
   // Descriptions keep the bare id because that string is prose the lead reads.
   const modelField: { model?: string } =
     nativeModel ? { model: withOneMSuffix(nativeModel) } : {}
@@ -562,8 +559,8 @@ export function buildPeerAgentDefinitions(
       : {}
   out.implementer = {
     description: nativeModel
-      ? `Bounded implementation subagent running ${nativeModel} (strong non-Claude coder, maximum reasoning). Use proactively for well-scoped coding tasks — edits, small features, fixes — to keep the lead's context focused; runs in its own context. Model is overridable at spawn.`
-      : `Bounded implementation subagent (native tools, runs on the lead's model in its own context). Use proactively for well-scoped coding tasks — edits, small features, fixes — to keep the lead's context focused. Model is overridable at spawn.`,
+      ? `Bounded implementation subagent running ${nativeModel} (strong non-Claude coder, maximum reasoning). Use proactively for coding changes that need judgment or have ambiguous scope — edits, features, fixes — to keep the lead's context focused; use implementer-fast instead for well-specified, mechanical changes. Runs in its own context. Model is overridable at spawn.`
+      : `Bounded implementation subagent (native tools, runs on the lead's model in its own context). Use proactively for coding changes that need judgment or have ambiguous scope — edits, features, fixes — to keep the lead's context focused; use implementer-fast instead for well-specified, mechanical changes. Model is overridable at spawn.`,
     prompt:
       "You are a bounded implementation subagent for well-scoped coding tasks. Implement the requested change surgically, matching the surrounding code style and minimizing unrelated churn. "
       + fileToolSteer("builds")
@@ -638,41 +635,36 @@ export function buildPeerAgentDefinitions(
       + " Do the work yourself — do not spawn further subagents. Report which documents changed and any claim you could not verify.",
     ...(scribeModel ? { model: withOneMSuffix(scribeModel) } : {}),
   }
-  // The three `generic*` catch-alls. Every other native is a specialist, so work
-  // that fits none of them otherwise runs on the lead's own model; these give it
-  // three non-lead targets at three cost points and let it pick.
+  // `implementer-fast` is the cheaper implementation specialist;
+  // `general-purpose-fast` is the catch-all for work no specialist fits.
   //
   // Description discipline: a description may claim only what is true of EVERY
   // member of that agent's chain, because the fallback is invisible to whoever
-  // reads the prose. `generic` may not mention a `max` effort tier (terra has
-  // one, gemini-pro does not); `generic-fast` may not claim measured speed,
-  // which is why it is described by its tier rather than by a latency it has
-  // never been benchmarked for. `generic-cheap` is single-entry, so it may state
-  // luna's properties exactly.
+  // reads the prose. `implementer-fast` therefore branches its model-specific
+  // framing: terra may carry the speed/cost claim, while the gemini-pro fallback
+  // is described neutrally and may not claim terra's `max` effort tier.
+  // `general-purpose-fast` is single-entry, so it may state luna's measured and
+  // catalog properties exactly.
   const genericPromptFor = (role: string): string =>
     `You are a general-purpose subagent handling ${role} the lead has delegated to keep its own context free. `
     + "Work out what the task actually requires, then do it end to end. Verify against the real repository and the real runtime rather than assuming — read the code, run the command, check the exit code. "
     + fileToolSteer("builds")
     + " Do the work yourself — do not spawn further subagents. Report what you did, what you verified, and anything you could not settle."
-  if (genericModel) {
-    out.generic = {
-      description: `Catch-all subagent running ${genericModel} (1M context, broad general capability). Use for work that no specialist native fits and that you would otherwise do inline: multi-step tasks, mixed read-and-edit work, one-off investigations that end in a change. Runs in its own context on a non-lead model. Model is overridable at spawn.`,
-      prompt: genericPromptFor("general work"),
-      model: withOneMSuffix(genericModel),
+  if (implementerFastModel) {
+    const tierDescription = implementerFastModel === "gpt-5.6-terra"
+      ? "the cheaper, faster implementation tier"
+      : "a non-lead implementation model"
+    out["implementer-fast"] = {
+      description: `Implementation subagent running ${implementerFastModel} (1M context, ${tierDescription}). Use proactively for well-specified, mechanical coding changes; use implementer instead when the change needs judgment or its scope is ambiguous. Full toolset, so it can implement and verify the change end to end in its own context. Model is overridable at spawn.`,
+      prompt: genericPromptFor("a well-specified, mechanical coding change"),
+      model: withOneMSuffix(implementerFastModel),
     }
   }
-  if (genericFastModel) {
-    out["generic-fast"] = {
-      description: `Catch-all subagent running ${genericFastModel} (1M context, Gemini flash tier — low cost, reasoning effort tops out at high). Use for well-specified work that does not need a frontier model's reasoning. Full toolset, so it can finish the work rather than only research it. Runs in its own context on a non-lead model. Model is overridable at spawn.`,
-      prompt: genericPromptFor("light, well-specified work"),
-      model: withOneMSuffix(genericFastModel),
-    }
-  }
-  if (genericCheapModel) {
-    out["generic-cheap"] = {
-      description: `Catch-all subagent running ${genericCheapModel} (1M context, the lowest-cost model in the catalog, and unlike the flash tier it carries the full reasoning-effort ladder so an effort selection above high still applies). Use for high-volume or long-running work where cost dominates. Full toolset, so it can finish the work rather than only research it. Runs in its own context on a non-lead model. Model is overridable at spawn.`,
-      prompt: genericPromptFor("cost-sensitive work"),
-      model: withOneMSuffix(genericCheapModel),
+  if (generalPurposeFastModel) {
+    out["general-purpose-fast"] = {
+      description: `Catch-all subagent running ${generalPurposeFastModel} (1.05M context, the lowest-cost model in the catalog and the fastest measured catch-all candidate, with the full reasoning-effort ladder). Use proactively for work no specialist fits when a fast, economical non-lead model can finish it. Full toolset, so it can complete the work rather than only research it. Runs in its own context. Model is overridable at spawn.`,
+      prompt: genericPromptFor("work no specialist fits"),
+      model: withOneMSuffix(generalPurposeFastModel),
     }
   }
   // Non-blocking workers surface: one `worker-<mode>` DISPATCHER subagent per
@@ -748,12 +740,10 @@ interface WriteOpts {
   scoutModel?: string
   /** Model for `scribe`. Absent → inherits the lead's model. */
   scribeModel?: string
-  /** Model for `generic`. Absent → the agent is omitted entirely. */
-  genericModel?: string
-  /** Model for `generic-fast`. Absent → the agent is omitted entirely. */
-  genericFastModel?: string
-  /** Model for `generic-cheap`. Absent → the agent is omitted entirely. */
-  genericCheapModel?: string
+  /** Model for `implementer-fast`. Absent → the agent is omitted entirely. */
+  implementerFastModel?: string
+  /** Model for `general-purpose-fast`. Absent → the agent is omitted entirely. */
+  generalPurposeFastModel?: string
   /** Extra subagent definitions to register alongside the peer/worker agents
    *  (written as `.md` files so they appear in the Task `subagent_type` enum).
    *  Used by `serve` to inject Claude Code's built-in subagents (Explore/Plan/
@@ -1274,9 +1264,8 @@ export async function writePeerMcpRuntimeFiles(
     brainstormModel: opts.brainstormModel,
     scoutModel: opts.scoutModel,
     scribeModel: opts.scribeModel,
-    genericModel: opts.genericModel,
-    genericFastModel: opts.genericFastModel,
-    genericCheapModel: opts.genericCheapModel,
+    implementerFastModel: opts.implementerFastModel,
+    generalPurposeFastModel: opts.generalPurposeFastModel,
     nonce,
     codexHome,
     serverUrl,

@@ -125,9 +125,9 @@ const STYLE_DIRECTIVE =
  * Self-referentially compliant with the style directive: no em dashes, no
  * Claude / Anthropic attribution.
  *
- * Availability-aware: four of the natives (`scout` and the three `generic*`
- * catch-alls) are DROPPED rather than downgraded when no model in their chain
- * resolves, so naming them unconditionally here would tell the lead to delegate
+ * Availability-aware: three of the natives (`scout`, `implementer-fast`, and
+ * `general-purpose-fast`) are DROPPED rather than downgraded when no model in
+ * their chain resolves, so naming them unconditionally here would tell the lead to delegate
  * to an agent that has no `.md` file and is absent from the Task
  * `subagent_type` enum. Build the directive with
  * `buildOperatingDefaultsDirective` and the same availability booleans used for
@@ -142,9 +142,8 @@ const STYLE_DIRECTIVE =
  *  the previous full-roster text. */
 export interface NativeAgentAvailability {
   scoutAvailable?: boolean
-  genericAvailable?: boolean
-  genericFastAvailable?: boolean
-  genericCheapAvailable?: boolean
+  implementerFastAvailable?: boolean
+  generalPurposeFastAvailable?: boolean
 }
 
 /** Oxford-comma join: "a", "a and b", "a, b, and c". */
@@ -157,25 +156,22 @@ function joinClauses(parts: ReadonlyArray<string>): string {
 /** The "Reach for X when Y" list, omitting any agent this launch did not emit. */
 function buildNativeReachClauses(opts: NativeAgentAvailability): string {
   const clauses: Array<string> = [
-    "`implementer` when you know what to build",
+    "`implementer` for coding changes that need judgment or have ambiguous scope",
+  ]
+  if (opts.implementerFastAvailable !== false) {
+    clauses.push("`implementer-fast` for well-specified, mechanical coding changes")
+  }
+  clauses.push(
     "`reviewer` when something exists and you want it assessed (including "
       + "reproducing and root-causing a failure)",
     "`brainstorm` when you do not yet know which approach to take",
-  ]
+  )
   if (opts.scoutAvailable !== false) {
     clauses.push("`scout` to find or understand something in the repo")
   }
   clauses.push("`scribe` for docs and ADRs that trail the code")
-  const catchAlls = [
-    opts.genericAvailable === false ? undefined : "`generic`",
-    opts.genericFastAvailable === false ? undefined : "`generic-fast`",
-    opts.genericCheapAvailable === false ? undefined : "`generic-cheap`",
-  ].filter((c): c is string => c != null)
-  if (catchAlls.length > 0) {
-    clauses.push(
-      `${joinClauses(catchAlls)} for work no specialist fits, picking the tier `
-        + "that matches the work's weight",
-    )
+  if (opts.generalPurposeFastAvailable !== false) {
+    clauses.push("`general-purpose-fast` for work no specialist fits")
   }
   return joinClauses(clauses)
 }
@@ -183,8 +179,9 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
 /** Everything after the orchestration paragraph's agent list. Unchanged by
  *  availability, so it lives here once rather than in both branches. */
 const OPERATING_DEFAULTS_TAIL =
-  "context free to reason and collaborate with the user. Prefer parallel "
-  + "delegation for independent work. Delegation pays when the work is WIDE "
+  "context free to reason and collaborate with the user. Launch independent "
+  + "agents concurrently in a single message rather than serially. Delegation "
+  + "pays when the work is WIDE "
   + "(many files or sources to sweep) or SLOW, and you need only the "
   + "conclusion: the main thread is where you think with and respond to the "
   + "user, and its context window is a finite shared resource. It does NOT pay "
@@ -192,7 +189,9 @@ const OPERATING_DEFAULTS_TAIL =
   + "whole value is file:line fidelity loses exactly that through a "
   + "summarization layer, and a sub-question you could answer in one command is "
   + "cheaper done directly than paying a subagent's startup. Do trivial, "
-  + "surgical, and last-mile work yourself.\n\n"
+  + "surgical, and last-mile work yourself. A named teammate persists after it "
+  + "reports so you can send it follow-ups, and nothing reaps it for you: its idle "
+  + "notice means available, not finished. Stop it once you are done with it.\n\n"
   + "Adversarial review. The peer critics (`codex_critic` and `codex_reviewer`, "
   + "`gemini_critic` and `gemini_reviewer`, `opus_critic`, and the "
   + "`peer-review-coordinator` that fans out to several of them) are "
@@ -288,7 +287,9 @@ export const OPERATING_DEFAULTS_DIGEST =
   + "interacting with the user; prefer parallel delegation for independent work. Do NOT delegate "
   + "merely because a sub-question is separable: a narrow, deep question whose value is file:line "
   + "fidelity loses exactly that through a summarization layer, and one answerable in a single "
-  + "command is cheaper done directly. Do trivial, surgical, and last-mile work yourself.\n\n"
+  + "command is cheaper done directly. Do trivial, surgical, and last-mile work yourself. "
+  + "Stop a named teammate once you are done with it: it persists for follow-ups, its idle "
+  + "notice means available rather than finished, and nothing reaps it for you.\n\n"
   + "Verify, do not assert. Run the code, read the file, check the exit code. A claim in prose is "
   + "worth nothing against state you did not check, and a check that cannot fail proves nothing. "
   + "Reproduce a bug end to end, the way a real user hits it, before fixing it. Fix a lint error, "

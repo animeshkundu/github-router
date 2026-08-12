@@ -60,69 +60,29 @@ Checked-in root `CLAUDE.md` and the awareness snippet both identify opus_critic 
 ### 3a. Description quality
 
 - **Routing signal**: strong. "same lab as the lead, limited blind-spot diversity vs cross-lab critics" plus "Catches confabulation" gives a genuine when-to-use (same-lab confabulation catch) and an honest when-NOT (reach for cross-lab critics for genuine diversity). Differentiates cleanly from `codex_critic` ("different lab", "strongest reasoning") and `gemini_critic` ("third-lab triangulation"). This is the best-differentiated of the three critic descriptions on the diversity axis.
-- **Accuracy vs implementation**: model version "4.6" is CORRECT (matches `claude-opus-4-6` / the `OPUS_1M_RE` 4.6-anchored resolver). The ≈936K figure matches the 1M variant's documented `max_prompt_tokens` (`handler.ts:250-251`). BUT "Pinned one minor behind the default Opus" is WRONG: the default is `claude-opus-4-8` (root `CLAUDE.md:119`), opus_critic is 4.6 — that is **two** minor versions behind (4.8 → 4.7 → 4.6), not one. The design doc says the same thing more precisely: "pinned one minor behind the spawned-Claude-Code default" was written when the default was 4.7; it has drifted since the default moved to 4.8.
+- **Accuracy vs implementation**: the preferred model is `claude-opus-5`, which is natively 1M and needs no `-1m` sibling. The older `claude-opus-4.6-1m` and `claude-opus-4-6` entries are fallbacks only, matching the dynamic resolution chain.
 - **Schema minimality**: clean. `prompt` (required), `context` (optional, actionable — extends the brief), `effort` (model-tunable, gated to real tiers). No echoed-input or diagnostic-only fields. Compliant with the ruthlessly-minimal principle.
 
 ### 3b. System-prompt coverage
 
 - **Named**: yes, in `criticList` (`personas.ts:585`), by design — it is one of the always-on critics the snippet contract pins (regression-pinned: `tests/peer-mcp-personas.test.ts:321` asserts the snippet contains `opus_critic`).
-- **Accurate & non-redundant**: the snippet correctly defers routing to the description ("Each tool's description explains its scope"), so it is non-redundant. But the parenthetical model tag `(Opus 5)` CONTRADICTS the tool description's `Opus 4.6` — the two surfaces disagree on the model version (see Finding 1).
-- **Framing-constraint compliance**: compliant. The critic list is a pure capability inventory (tool name + model tag), no imperatives, no hedges, no anchors. The version tag is a factual label, not a steer — the defect is that the fact is wrong, not that it violates framing.
+- **Accurate & non-redundant**: the snippet correctly defers routing to the description ("Each tool's description explains its scope") and labels the preferred Opus 5 model accurately.
+- **Framing-constraint compliance**: compliant. The critic list is a pure capability inventory (tool name + model tag), with no imperatives, hedges, or anchors.
 
 ### 3c. CLAUDE.md coverage
 
-- **Accurate / non-drifted**: the mirrored peer-awareness block inherits the same `(Opus 5)` error from 2b — so it is drifted from the code's ground-truth model (`claude-opus-4-6`).
-- **Injected block vs checked-in root CLAUDE.md**: the root CLAUDE.md peer-review sentence matches the injected snippet string (both say 4.7), so they agree with each other but both disagree with `claude-md-injection` is not the source — `personas.ts:585` is. Notably the root CLAUDE.md is self-contradictory: line 9 says opus_critic's pinned model is `claude-opus-4.6-1m` while the peer-review sentence says "(Opus 5)". Fixing `personas.ts:585` resolves the injected surface; the root-CLAUDE.md peer-review sentence needs the same 4.6 correction.
+- **Accurate / non-drifted**: the mirrored peer-awareness block inherits the preferred-model `(Opus 5)` label from 2b, matching the current resolution chain.
+- **Injected block vs checked-in root CLAUDE.md**: both identify the preferred model as Opus 5 and retain the older 4.6 variants only as fallback behavior.
 
 ### 3d. Cross-surface consistency
 
-The model version is inconsistent across surfaces. Ground truth (`personas.ts:401` model `claude-opus-4-6`; `handler.ts:261-265` 4.6-anchored resolver; test pin `tests/peer-mcp-personas.test.ts:63` `expect(model).toBe("claude-opus-4-6")`; root `CLAUDE.md:9` "opus_critic's pinned model = claude-opus-4.6-1m") is unambiguously **4.6**.
-
-| Surface | Says | Correct? |
-|---|---|---|
-| Tool `description` (`personas.ts:404`) | Opus 4.6 | ✅ |
-| Awareness snippet / mirrored CLAUDE.md (`personas.ts:585`) | Opus 5 | ❌ |
-| Subagent prompt `OPUS_CRITIC_BASE` (`personas.ts:322,324`) | Claude Opus 5 | ❌ |
-| Window-guard hint (`handler.ts:575`) | Opus 5 1M ≈ 936K | ❌ |
-| Design doc Phase B (`docs/peer-mcp-design.md:205`) | Opus 5 | ❌ |
-| Design doc window-guard example (`docs/peer-mcp-design.md:203`) | opus_critic Opus 5-1M ≈936K | ❌ |
-| Design doc latency/model table (`docs/peer-mcp-design.md:175,177`) | claude-opus-4.6 | ✅ |
-
-The description (the surface Opus 4.8 is told to trust for routing) is correct; four other surfaces including the subagent's OWN system prompt tell it it is 4.7.
+The surfaces agree that `claude-opus-5` is the preferred, natively 1M backing model. The `claude-opus-4.6-1m` and `claude-opus-4-6` entries are fallback behavior, not a competing current identity.
 
 ## 4. Findings
 
-### [Important] — Model-version mismatch: five surfaces say "4.7", ground truth is 4.6
-
-- `src/lib/peer-mcp-personas.ts:585` — snippet pushes ``"`opus_critic` (Opus 5)"``; model is `claude-opus-4-6` (`personas.ts:401`).
-- `src/lib/peer-mcp-personas.ts:322` and `:324` — `OPUS_CRITIC_BASE` tells the subagent it is "running on Claude Opus 5". This is the subagent's own identity statement, so the peer critic asserts a false version about itself in its reply framing.
-- `src/routes/mcp/handler.ts:575` — window-guard hint routes overflow to "`opus_critic` (Opus 5 1M ≈ 936K tokens)".
-- `docs/peer-mcp-design.md:203,205` — Phase B writeup and the window-guard example both say 4.7.
-
-Why it matters: the description (`personas.ts:404`) correctly says 4.6, so the model-facing surface is self-contradictory — the tool card says 4.6, the system prompt and the subagent's self-identity say 4.7. This is a factual-accuracy defect, not a misroute (the tool still dispatches to `claude-opus-4-6` regardless of the label; `personas.ts:401` + `handler.ts:262-265` are the load-bearing path, and the version string is cosmetic to routing). It does not silently misroute a call, which is why it is Important, not Critical. But a same-lab critic that misstates its own model undercuts the one thing this tool exists to convey honestly (its limited blind-spot diversity is a function of WHICH model it is), and the repo already contradicts itself between root `CLAUDE.md:9` (4.6) and the peer-review sentence (4.7).
-
-Fix: replace "Opus 5" → "Opus 4.6" at `personas.ts:585`, `personas.ts:322`, `personas.ts:324`, `handler.ts:575`, and `docs/peer-mcp-design.md:203,205`, and the peer-review sentence in root `CLAUDE.md`. Root cause is almost certainly a default-bump: these strings were written when the spawned-Claude default was 4.7 and opus_critic was "one minor behind"; the default moved to 4.8 and opus_critic stayed on 4.6, but the "4.7" labels were not swept.
-
-### [Important] — "Pinned one minor behind the default Opus" is now two minors behind
-
-- `src/lib/peer-mcp-personas.ts:404` (description) — "Pinned one minor behind the default Opus so the panel spans more of the version curve."
-- The main default and opus_critic preferred model are both Opus 5; the 4.6 variants remain fallback-only.
-
-Why it matters: same root cause as Finding 1 (default drift from 4.7 to 4.8). The claim reads as a precise design rationale, so a stale "one minor" is a concrete wrong fact in the routing-authoritative surface. Fix: change to "Pinned two minors behind the default Opus" (or drop the count: "Pinned behind the default Opus so the panel spans more of the version curve"). The design doc `docs/peer-mcp-design.md:177` already hedges this correctly ("pinned one minor behind the spawned-Claude-Code default" is itself now stale there too and should read "two").
-
-### [Suggestion] — `OPUS_CRITIC_BASE` names `gemini-critic` unconditionally, but that persona is catalog-gated
-
-- `src/lib/peer-mcp-personas.ts:324` — "Your blind-spot diversification is LIMITED compared to codex-critic (gpt-5.6-sol) and gemini-critic (gemini-3.1-pro)".
-- `gemini-critic` is dropped from the live surface when the gemini-3.x-pro family is absent from the catalog (`personasFor`/`activePersonas` gate on `requiresGeminiCatalog`, `personas.ts:660` / `handler.ts:278-279`).
-
-Why it's only a Suggestion: this is a subagent-internal system prompt, not the model-facing tool card, and the reference is illustrative ("compared to X and Y") rather than a routing instruction — naming a possibly-absent sibling as a diversity contrast does not break anything. The snippet surface already correctly gates the gemini mention (`personas.ts:580`). No change required unless tightening for lesser-tier accuracy; if changed, phrase as "the cross-lab critics" rather than naming gemini specifically.
-
-### [Suggestion] — Description omits the effort default / cap, unlike the codex siblings' implicit signal
-
-- `src/lib/peer-mcp-personas.ts:404` — the description does not state defaultEffort `high` or that xhigh is unavailable.
-
-Why it's only a Suggestion: the schema `enum` already advertises `low|medium|high` (no xhigh), so a caller cannot request an invalid tier — the constraint is enforced structurally, and echoing it in prose would be redundant per the minimality principle. The codex critics also omit it. No change; noted for completeness so a future editor does not "fix" it by adding redundant effort prose.
+- **[Resolved]** The previous Opus 4.6/4.7 drift is obsolete: the live persona now prefers `claude-opus-5`, which has a native 1M context window without a `-1m` sibling.
+- **[Suggestion]** `OPUS_CRITIC_BASE` names `gemini-critic` unconditionally, but that persona is catalog-gated. The reference is illustrative rather than a routing instruction, so no change is required; if tightening lesser-tier accuracy, phrase it as "the cross-lab critics" rather than naming Gemini specifically.
 
 ## 5. Verdict
 
-**N** — the injected surface is minimal, well-routed, and honestly conveys the same-lab diversity limitation, but it is factually inconsistent on the model version: the description correctly says Opus 4.6 while the awareness snippet, the mirrored CLAUDE.md, the subagent's own system prompt, the window-guard hint, and the design doc all say 4.7, and the description's "one minor behind" is now two. Single most important fix: sweep "Opus 5" → "Opus 4.6" (and "one minor" → "two minors") across `personas.ts:322,324,585`, `handler.ts:575`, `docs/peer-mcp-design.md:203,205`, and root `CLAUDE.md`, so every surface agrees with the `claude-opus-4-6` the tool actually dispatches to.
+**Y (correct, minimal, consistent, well-routed).** The injected surface accurately identifies Opus 5 as the preferred same-lab critic and clearly records the limited blind-spot diversity relative to cross-lab critics. Older Opus 4.6 variants remain documented solely as fallback behavior.

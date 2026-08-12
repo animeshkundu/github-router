@@ -33,7 +33,13 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3.14"
+          # Matches the CI gate: the supported runtime is bun 1.4, which ships
+          # as `canary` until a 1.4.x lands on npm. Building the published
+          # artifact on a runtime CI does not exercise is how a release-only
+          # bug reaches users, so these two must not drift apart. The artifact
+          # itself is `#!/usr/bin/env node` and runs under node 24 below, so
+          # bun is the BUILD toolchain here, not the shipped runtime.
+          bun-version: "canary"
 
       - uses: actions/setup-node@v7
         with:

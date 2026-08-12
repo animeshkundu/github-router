@@ -32,7 +32,6 @@ import {
   fileBlockBudget,
   launchBaselineKey,
   stopGateId,
-  stopGatePlanMode,
   stopReviewEnabled,
   type StopReviewContext,
 } from "./lib/orchestration/stop-gate-hook"
@@ -66,16 +65,52 @@ function readStdin(): string {
  *  (e.g. a lockfile) can never OOM or stall the hook. */
 const MAX_DIFF_BYTES = 2 * 1024 * 1024
 
-/** Capture the working-tree diff WITHOUT mutating the user's index (no
- *  `git add -N`): `git diff HEAD` covers modified tracked files, which is where
- *  gate-weakening edits live. A git failure rejects, so the decision layer can run
- *  checks with an empty weakening scan instead of treating an unknown diff as a
- *  genuine no-diff turn. Capped. */
-async function captureDiff(cwd: string): Promise<string> {
-  const r = await runCommandCapture(["git", "diff", "HEAD"], { cwd, timeoutMs: 5_000 })
-  if (r.code !== 0) throw new Error(`git diff failed with exit ${r.code}`)
-  const out = r.stdout
-  return out.length > MAX_DIFF_BYTES ? out.slice(0, MAX_DIFF_BYTES) : out
+/** Build a tiny synthetic diff for untracked paths so the weakening scan sees
+ *  their contents too. No index mutation (`git add -N`) is needed. */
+async function captureUntrackedDiff(cwd: string, paths: string[]): Promise<string> {
+  const chunks: string[] = []
+  let bytes = 0
+  for (const untrackedPath of paths) {
+    const result = await runCommandCapture(
+      ["git", "diff", "--no-index", "--", "/dev/null", untrackedPath],
+      { cwd, timeoutMs: 5_000, maxStdoutBytes: MAX_DIFF_BYTES },
+    )
+    // `git diff --no-index` returns 1 when differences exist; anything else is an
+    // actual failure. A truncated untracked diff is unknown, never "no diff".
+    if (result.code !== 1 || result.truncated) throw new Error(`git diff for untracked file failed with exit ${result.code}`)
+    bytes += Buffer.byteLength(result.stdout, "utf8")
+    if (bytes > MAX_DIFF_BYTES) throw new Error("git working-tree capture exceeded its size limit")
+    chunks.push(result.stdout)
+  }
+  return chunks.join("")
+}
+
+/** Capture every working-tree change WITHOUT mutating the user's index (no
+ *  `git add -N`). `git diff HEAD` covers staged + unstaged tracked changes;
+ *  `git ls-files --others` catches untracked files and each is diffed against an
+ *  empty file so gate-weakening in new tests is visible. Git failures/truncation
+ *  reject, so the decision layer runs the full checks instead of mistaking an
+ *  unknown tree for a no-diff turn. */
+export async function captureStopGateDiff(cwd: string): Promise<string> {
+  const [diffResult, untrackedResult] = await Promise.all([
+    runCommandCapture(["git", "diff", "HEAD"], { cwd, timeoutMs: 5_000, maxStdoutBytes: MAX_DIFF_BYTES }),
+    runCommandCapture(["git", "ls-files", "--others", "--exclude-standard", "-z"], {
+      cwd,
+      timeoutMs: 5_000,
+      maxStdoutBytes: MAX_DIFF_BYTES,
+    }),
+  ])
+  if (diffResult.code !== 0) throw new Error(`git diff failed with exit ${diffResult.code}`)
+  if (untrackedResult.code !== 0) throw new Error(`git ls-files failed with exit ${untrackedResult.code}`)
+  if (diffResult.truncated || untrackedResult.truncated) throw new Error("git working-tree capture exceeded its size limit")
+
+  const untrackedPaths = untrackedResult.stdout.split("\0").filter(Boolean)
+  if (untrackedPaths.length === 0) return diffResult.stdout
+  const untrackedDiff = await captureUntrackedDiff(cwd, untrackedPaths)
+  if (Buffer.byteLength(diffResult.stdout, "utf8") + Buffer.byteLength(untrackedDiff, "utf8") > MAX_DIFF_BYTES) {
+    throw new Error("git working-tree capture exceeded its size limit")
+  }
+  return diffResult.stdout + untrackedDiff
 }
 
 /** Flush a message to stderr before exiting (process.exit can drop an unflushed
@@ -246,7 +281,7 @@ export const internalStopHook = defineCommand({
         stdin,
         gateId: stopGateId(),
         exec: liveExec,
-        captureDiff,
+        captureDiff: captureStopGateDiff,
         fallbackCwd: process.cwd(),
         budget: fileBlockBudget(path.join(tmpdir(), "gh-router-stopgate")),
         baseline: fileBaselineStore(path.join(tmpdir(), "gh-router-stopgate-baseline")),
@@ -255,7 +290,6 @@ export const internalStopHook = defineCommand({
         // parseIntEnv already rejects non-positive / non-integer / truncating
         // values, so undefined here means "use the built-in default".
         timeoutMs: timeoutEnv,
-        planMode: stopGatePlanMode(),
         reviewDebounce: reviewEnabled ? fileReviewDebounce(stopReviewStateDir()) : undefined,
         spawnReview: reviewEnabled
           ? (ctx) => spawnStopReview(ctx, { prompt: userPrompt, transcriptPath })

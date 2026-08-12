@@ -2,14 +2,14 @@
 
 ## Goal
 
-Expose three peer models - `gpt-5.6-sol` (codex_critic), `gpt-5.3-codex` (codex_reviewer), `gemini-3.1-pro-preview` (gemini_critic) - as cross-lab adversarial reviewers inside Claude Code, used per their strengths to improve quality and reduce blindspots/hallucinations. Capability injection must be auto-injected on `github-router claude` startup with no per-session user action. Reasoning effort must be configurable via the MCP tool args, defaulting to `high` (with `xhigh` available for explicit deep dives).
+Expose five peer-model review tools - `gpt-5.6-sol` (codex_critic), `gpt-5.3-codex` (codex_reviewer), `gemini-3.1-pro-preview` (gemini_critic and gemini_reviewer), and `claude-opus-5` (opus_critic) - inside Claude Code, used per their strengths to improve quality and reduce blind spots. Capability injection must be auto-injected on `github-router claude` startup with no per-session user action. Reasoning effort is configurable via the MCP tool args within each persona's allowed tiers.
 
 ### Five-Server Split
 
 As of the latest architectural change, the original single `gh-router-peers` MCP server was split into **five intent-named MCP servers** to prevent monolithic server congestion and enforce isolation. Each is a distinct `mcpServers` entry pointing at a path-scoped `/mcp/<group>` endpoint (instead of the single `/mcp` union path, which is kept as a fallback for BYO clients).
 
 The five scoped servers and their public MCP surfaces are:
-- `peers`   → `/mcp/peers` (the critics: `codex_critic`, `codex_reviewer`, `gemini_critic`, `opus_critic` + `codex_implementer` in `--codex-cli` mode)
+- `peers`   → `/mcp/peers` (the critics: `codex_critic`, `codex_reviewer`, `gemini_critic`, `gemini_reviewer`, `opus_critic` + `codex_implementer` in `--codex-cli` mode)
 - `search`  → `/mcp/search` (`code` [was `code_search`], `web` [was `web_search`])
 - `workers` → `/mcp/workers` (`explore` [was `worker_explore`], `implement` [was `worker_implement`])
 - `browser` → `/mcp/browser` (the browser tools with the `browser_` prefix dropped: `navigate`, `open_tab`, `read_page`, `act`, …; loaded only under `--browse`)
@@ -28,6 +28,7 @@ The proxy at `src/routes/mcp/` exposes five scoped MCP servers on loopback ports
 - `mcp__peers__codex_critic` (gpt-5.6-sol) - adversarial design review
 - `mcp__peers__codex_reviewer` (gpt-5.3-codex) - line-level code review
 - `mcp__peers__gemini_critic` (gemini-3.1-pro-preview) - long-context cross-lab triangulation
+- `mcp__peers__gemini_reviewer` (gemini-3.1-pro-preview) - second-lab line-level code review
 
 Auto-injection: `github-router claude` registers these servers by **merging them into the per-launch mirrored `<CLAUDE_CONFIG_DIR>/.claude.json`'s `mcpServers` map** (`injectPeerMcpIntoMirror` in `src/lib/codex-mcp-config.ts`). This is the load-bearing fix for subagent MCP visibility - subagents (Agent-tool, forks, agent-teams subprocesses) discover MCP servers from `CLAUDE_CONFIG_DIR/.claude.json` user-scope, NOT from a parent-process-only CLI flag, so the mirror approach makes the peer tools visible to every spawned tier. The merge is non-destructive (the user's pre-existing user-scope MCPs are preserved). On collision, we dynamically resolve the server keys using a fallback name (`gh-router-<group>`) as described above; subagents inherit the fallback keys identically. Subagent persona prompts are written to `<CLAUDE_CONFIG_DIR>/agents/peer-<pid>-<rand>-<name>.md` and pass an `--agents`-style discovery path; the frontmatter has **no `tools:` field** so the subagent inherits the parent's full toolset (built-ins + every MCP visible to the parent, incl. our injected tools). Per-launch mirror dir (`<pid>-<rand>` under `~/.local/share/github-router/claude-config/`) means two concurrent launches never race on the `.claude.json` write or share an MCP nonce; orphan dirs from SIGKILL'd proxies are reclaimed by a boot-time PID-alive sweep. Project-scope MCPs (`<workspace>/.mcp.json`) are untouched - the spawned `claude` inherits the parent's cwd via `launchChild`'s no-`cwd:` spawn, so Claude Code reads them directly from the workspace; the proxy never mirrors or sanitizes project-scope. Auth: per-launch random 32-byte nonce as Bearer token + Host header check (loopback only); the proxy validates against the launch nonce regardless of which channel - mirror or `--mcp-config` fallback - the request came through.
 
@@ -152,7 +153,7 @@ The full multi-stage adversarial review process - including the 4-perspective te
 This section documents what is actually shipped in the proxy today - the runtime
 behavior `github-router claude` exposes - as distinct from the phased plan above.
 
-The `claude` subcommand auto-injects three peer-model review tools as Claude Code subagents (`codex-critic` gpt-5.6-sol; `codex-reviewer` gpt-5.3-codex; `gemini-critic` gemini-3.1-pro-preview) plus a `peer-review-coordinator` meta-subagent that fans out to them in parallel.
+The `claude` subcommand auto-injects five peer-model review tools as Claude Code subagents (`codex-critic` gpt-5.6-sol; `codex-reviewer` gpt-5.3-codex; `gemini-critic` gemini-3.1-pro-preview; `gemini-reviewer` gemini-3.1-pro-preview; `opus-critic` claude-opus-5) plus a `peer-review-coordinator` meta-subagent that fans out to them in parallel.
 
 **Auto-invocation triggers** (Phase 2A): each persona's MCP-tool description includes prescriptive **CALL BEFORE / CALL AFTER** wording so Opus naturally delegates at the right checkpoints (before `ExitPlanMode` for non-trivial plans, after commits touching concurrency/security/streaming, before `TeamCreate` for non-trivial team tasks). The `peer-review-coordinator` subagent's description uses the documented Claude Code "use proactively" idiom - Opus delegates to it without an explicit user request at the matching checkpoints. Empirical reliability is ~60% per claude-code-guide (the plan calls for an acceptance test ≥7/10; if <7/10 we flip an opt-in `PreToolUse(ExitPlanMode)` hook to default-on, env-disable-able via `GH_ROUTER_AUTO_PEER_REVIEW=0`).
 
@@ -172,6 +173,8 @@ The `claude` subcommand auto-injects three peer-model review tools as Claude Cod
 | codex_critic | gpt-5.6-sol | /v1/responses | high | gpt-5.5 probe (historical): 23.8s |
 | codex_critic | gpt-5.6-sol | /v1/responses | medium | gpt-5.5 probe (historical): 26.3s |
 | codex_reviewer | gpt-5.3-codex | /v1/responses | high | 16.0s |
+| gemini_critic | gemini-3.1-pro-preview | /v1/chat/completions | high (default) | no empirical latency measurement yet |
+| gemini_reviewer | gemini-3.1-pro-preview | /v1/chat/completions | high (default) | no empirical latency measurement yet |
 | opus_critic | claude-opus-5 (else claude-opus-4.6-1m → claude-opus-4-6) | /v1/messages | high (default; xhigh available on Opus 5) | 30-90s on real reviews - fits inside SSE-streamed `/mcp/peers` |
 
 **opus_critic model selection**: `activePersonas()` (`src/routes/mcp/handler.ts`) resolves opus_critic's model at call time. It prefers `claude-opus-5`, whose single base slug is natively 1M, when the live catalog carries it. On lesser tiers it falls back to the older 1M-context Opus 4.6 variant (`claude-opus-4.6-1m`, ≈936K-token prompt window), then to the 200K `claude-opus-4-6`. Opus 5 and codex_critic (gpt-5.6-sol, ~1M) are the two big-window peers that can take a large artifact whole. opus_critic exposes `low|medium|high|xhigh`; its `defaultEffort` remains `"high"` to preserve the prior latency profile, while callers can opt into Opus 5's `xhigh` tier.
@@ -186,8 +189,9 @@ The `claude` subcommand auto-injects three peer-model review tools as Claude Cod
 | codex_reviewer | ✅ | ✅ | ✅ | ✅ (SSE-streamed) | xhigh |
 | opus_critic | ✅ | ✅ | ✅ | ✅ (SSE-streamed) | xhigh |
 | gemini_critic | ✅ | ✅ | ✅ | ❌ rejected `-32602 RPC_INVALID_PARAMS` | high |
+| gemini_reviewer | ✅ | ✅ | ✅ | ❌ rejected `-32602 RPC_INVALID_PARAMS` | high |
 
-`xhigh` is allowed on the three long-running personas because SSE-streamed `/mcp/peers` keeps the wall time off the MCP per-tool-call clock. `gemini_critic` is the exception: Copilot's gemini route returned 400 (`reasoning_effort "xhigh" is not supported by model gemini-3.1-pro-preview; supported values: [low medium high]`), so the gate rejects xhigh upstream of any Copilot call. The empirical 400 is captured in the proxy log for posterity.
+`xhigh` is allowed on the three long-running personas because SSE-streamed `/mcp/peers` keeps the wall time off the MCP per-tool-call clock. The Gemini personas (`gemini_critic` and `gemini_reviewer`) are the exception: Copilot's gemini route returned 400 (`reasoning_effort "xhigh" is not supported by model gemini-3.1-pro-preview; supported values: [low medium high]`), so the gate rejects xhigh upstream of any Copilot call. The empirical 400 is captured in the proxy log for posterity.
 
 **Pre-flight `predictedTooLong` cap** (Phase A2; defense-in-depth on top of the effort gate). Even `high` on the codex personas can bust the ceiling once the brief grows past ~8 KB (the 23.8s baseline scales roughly linearly with input). The cap rejects with `isError: true` (NOT an RPC error - the request is syntactically valid; the prediction is operational) and an actionable message telling the caller to drop to `medium` or split the brief into 2-4 parallel sub-calls per the decomposition guidance:
 
@@ -197,6 +201,7 @@ The `claude` subcommand auto-injects three peer-model review tools as Claude Cod
 | codex_reviewer | high | 12 KB → toolError (faster sibling, more headroom) |
 | opus_critic | medium | 6 KB → toolError (conservative - opus thinking grows with input) |
 | gemini_critic | (any) | (no cap - long-context strong, no empirical data yet to anchor) |
+| gemini_reviewer | (any) | (no cap - long-context strong, no empirical data yet to anchor) |
 
 **The cap fires BEFORE the AbortController + `inFlightToolsCall` increment**, so a rejected pre-flight is free of concurrency-slot cost and free of upstream call cost (no Copilot fetch issued). Don't reorder this - moving the cap after the increment leaks concurrency slots on every rejected pre-flight. Thresholds are constants in `src/routes/mcp/handler.ts` - easy to update as more empirical data arrives via the probe suite.
 
@@ -352,7 +357,7 @@ what it read.
 
 If a proposed field fails all three tests, **cut it**. The model's context is finite and precious; echoing the model's own inputs back, exposing internal diagnostics for human eyeballs, and surfacing failures the model has no lever to fix all cost tokens for negative value. Negative value because every additional token in the tool response (i) reduces the budget left for the model's actual reasoning, and (ii) introduces noise the model has to filter through before reaching the actionable bits.
 
-This rule applies to **all** MCP tools registered under `NON_PERSONA_MCP_TOOLS` (`code`, `web`, anything added later) and to the peer-critic persona tools (`codex_critic`, `codex_reviewer`, `opus_critic`, `gemini_critic`).
+This rule applies to **all** MCP tools registered under `NON_PERSONA_MCP_TOOLS` (`code`, `web`, anything added later) and to the peer-critic persona tools (`codex_critic`, `codex_reviewer`, `gemini_critic`, `gemini_reviewer`, `opus_critic`).
 
 ### Worked example: `code`
 
@@ -379,36 +384,43 @@ The internal `CodeSearchResponse` type in `src/lib/code-search.ts` is rich on pu
 
 For each proposed input or output field, answer in one sentence: **"What would the model do with this?"** If the answer is "nothing" or "look at it for context but not act on it," cut it. Default to absent - adding back later is cheap; pulling out a field clients have already learned to expect is breaking.
 
-## Worker tools (`explore`, `implement`)
+## Worker tools (`explore`, `review`, `plan`, `implement`, `test`, `browse`)
 
-Three non-persona MCP tools - `mcp__workers__explore`, `mcp__workers__review`, and `mcp__workers__implement` - delegate scoped work to an **autonomous worker subagent** backed by the **Pi agent runtime** (vendored at `src/vendor/pi/`). **Per-mode model defaults** (caller `model` arg always wins): read-only `explore` → `gemini-3.6-flash` at `high`; read-only `review` → `gemini-3.1-pro-preview` at `xhigh` (clamped to `high`); read-only `plan` → `claude-opus-5` at `xhigh`; read+write `implement`/`test` → `gpt-5.6-sol` at `xhigh` (coding wants max reasoning). The worker plans its own tool calls, decides when it's done, and returns a single text answer (plus a unified diff when `worktree: true`). Implementation: `src/lib/worker-agent/engine.ts` (`runWorkerAgent`, which holds the `DEFAULT_MODEL`/`IMPLEMENT_DEFAULT_MODEL`/`BROWSE_DEFAULT_MODEL` constants) and `src/lib/worker-agent/tools.ts` (the worker-side `AgentTool` definitions).
+The six mode tools `mcp__workers__explore`, `mcp__workers__review`, `mcp__workers__plan`, `mcp__workers__implement`, `mcp__workers__test`, and `mcp__workers__browse` delegate scoped work to an **autonomous worker subagent** backed by the **Pi agent runtime** (vendored at `src/vendor/pi/`); the seventh tool, `mcp__workers__worker_defaults`, inspects or changes their in-memory defaults. **Per-mode built-in defaults:** read-only `explore` → `gpt-5.6-luna` at `high`; read-only `review` → `gemini-3.1-pro-preview` at `xhigh` (clamped to `high` at call time because Gemini does not advertise xhigh); read-only `plan` → `claude-opus-5` at `high`; read+write `implement`/`test` → `gpt-5.6-sol` at `high`; browser-control `browse` → `gpt-5.6-luna` at `high`. Luna's full effort ladder makes explore's `high` a real choice rather than a clamp. The `high` plan/implement/test defaults favour time-to-outcome; a caller can restore a higher tier because thinking resolution is **per-call `thinking` > `worker_defaults` session override > built-in**. The worker plans its own tool calls, decides when it's done, and returns a single text answer (plus a unified diff for an implementation/test run that changed files). Implementation: `src/lib/worker-agent/engine.ts` (`runWorkerAgent`, which holds the `DEFAULT_MODEL_CHAIN`/`IMPLEMENT_DEFAULT_MODEL`/`BROWSE_DEFAULT_MODEL` constants) and `src/lib/worker-agent/tools.ts` (the worker-side `AgentTool` definitions).
 
 These tools are exposed under the `workers` MCP server at `/mcp/workers` (or the `/mcp` union path).
 
 ### Tool surface
 
-| Tool | Mode | Tools the worker can call | Worktree opt-in | Description |
-| --- | --- | --- | --- | --- |
-| `explore` | read-only | `read`, `glob`, `grep`, `code_search`, `web_search`, `fetch_url`, `toolbelt`, `advisor`, `update_plan` (9) | n/a | Read-only investigation - the worker plans its own searches/reads and returns a single text answer. |
-| `review` | read-only | same 9 read-only tools as `explore` | n/a | Same surface as `explore` with a reviewer ROLE frame (verify correctness, report findings with severity + `file:line`). |
-| `implement` | read+write | explore tools + `edit`, `write`, `bash`, `codex_review` (13) | `worktree` (retained, IGNORED — always `true`) | Scoped coding task; ALWAYS runs in a fresh git worktree and returns the diff via a saved `.patch` file (`--stat` + preview + path; small diffs inline). HARD ERROR if not a git repo. For in-place edits use the `implementer` subagent. |
+| Tool | Mode | Built-in model / thinking | Tools the worker can call | Worktree behavior | Description |
+| --- | --- | --- | --- | --- | --- |
+| `explore` | read-only | `gpt-5.6-luna` / `high` | `read`, `glob`, `grep`, `code_search`, `web_search`, `fetch_url`, `toolbelt`, `advisor`, `update_plan` (9) | n/a | Read-only investigation - the worker plans its own searches/reads and returns a single text answer. |
+| `review` | read-only | `gemini-3.1-pro-preview` / `xhigh` (clamps to `high`) | same 9 read-only tools as `explore` | n/a | Same surface as `explore` with a reviewer ROLE frame (verify correctness, report findings with severity + `file:line`). |
+| `plan` | read-only | `claude-opus-5` / `high` | same 9 read-only tools as `explore` | n/a | Read-only implementation planning with a planner ROLE frame; returns an ordered plan without editing files. |
+| `implement` | read+write | `gpt-5.6-sol` / `high` | explore tools + `edit`, `write`, `bash`, `codex_review` (13) | `worktree` (retained, IGNORED — always `true`) | Scoped coding task; ALWAYS runs in a fresh git worktree and returns the diff via a saved `.patch` file (`--stat` + preview + path; small diffs inline). HARD ERROR if not a git repo. For in-place edits use the `implementer` subagent. |
+| `test` | read+write | `gpt-5.6-sol` / `high` | same 13 tools as `implement` | `worktree` (retained, IGNORED — always `true`) | Independent adversarial test authoring in a fresh worktree; may change tests but not production code to make them pass. |
+| `browse` | browser-control | `gpt-5.6-luna` / `high` | browser tools + terminal `submit_answer` / `report_insufficient` | n/a | Drives a real browser in a sandbox and returns the requested result or a specific blocker/insufficiency report. |
 
 Workers stay strictly TERMINAL (no recursive sub-worker spawning is allowed). Implement mode is no longer forced agent-wide sequential; pure read/search batches (incl. `toolbelt`, which runs read-only CLIs with `shell:false` and carries no `executionMode`) run in parallel, while `edit`, `write`, `bash`, `codex_review`, and `update_plan` execute sequentially via per-tool `executionMode`.
 
 Context management derives compaction, per-result capping, and the request-boundary overflow estimate from one per-run `ContextBudget`. A missing or invalid catalog context window uses a conservative 128k fallback so compaction and result capping never silently disengage. Because that fallback is only a guess, exceeding its request limit emits a diagnostic and proceeds; upstream remains authoritative. A known catalog window retains the hard local abort with an actionable message.
 
-The `model` arg is a free-string Copilot catalog model id, not an enum; any selected model must advertise `tool_calls`. Defaults are per-mode: explore `gemini-3.6-flash` at `high`, review `gemini-3.1-pro-preview` at `xhigh` clamped to `high`, plan `claude-opus-5` at `xhigh`, and implement/test `gpt-5.6-sol` at `xhigh`. The `worker_defaults` tool can set process-global, in-memory model/thinking overrides independently for all six modes; precedence is **per-call > session override > built-in**. Workflow producer runs opt out of session overrides because verified cross-lab isolation must not be defeatable by mutable process-global settings. Gate discovery is advisory rather than a producer/checker and intentionally honors the explore session override. For `explore`, `implement`, and `review`, the recommended 1M override ladder is `gpt-5.6-sol` for heavy/deep work, `gpt-5.6-terra` for moderate work, and `gemini-3.6-flash` for light/cheap work, paired with `thinking: "high"`. `thinking` accepts `off|minimal|low|medium|high|xhigh` and is silently clamped to the resolved model's allowlist.
+The `model` arg is a free-string Copilot catalog model id, not an enum; any selected model must advertise `tool_calls`. Defaults are per-mode: explore `gpt-5.6-luna` at `high`; review `gemini-3.1-pro-preview` at `xhigh`, which clamps to `high` at call time because Gemini does not advertise xhigh; plan `claude-opus-5` at `high`; implement/test `gpt-5.6-sol` at `high`; and browse `gpt-5.6-luna` at `high`. The general worker gate and unmatched-mode fallback use the ordered `DEFAULT_MODEL_CHAIN` (`gpt-5.6-luna` → `gpt-5.4-mini`): Luna wins where the live catalog grants access, while mini keeps individual-trial and education catalogs working. `browseAgentEnabled()` still separately gates the browse tool on Luna's catalog presence and a reachable endpoint; the engine validates every selected model at call time. The `worker_defaults` tool can set process-global, in-memory model/thinking overrides independently for all six modes; thinking precedence is **per-call `thinking` > session override > built-in**. The `high` plan/implement/test built-ins favour time-to-outcome, while either override layer can restore a higher tier. Workflow producer runs opt out of session overrides because verified cross-lab isolation must not be defeatable by mutable process-global settings. Gate discovery is advisory rather than a producer/checker and intentionally honors the explore session override. For `explore`, `implement`, and `review`, the recommended 1M override ladder is `gpt-5.6-sol` for heavy/deep work, `gpt-5.6-terra` for moderate work, and `gpt-5.6-luna` for light/cheap work, paired with `thinking: "high"`. `thinking` accepts `off|minimal|low|medium|high|xhigh` and is silently clamped to the resolved model's allowlist.
 
-Both also accept an optional `workspace` (absolute path) - the working directory the worker operates in. **Default is the proxy's launch cwd** (the directory `github-router start` / `github-router claude` was invoked from); the model can override when the parent agent has multiple workspaces open and needs the worker pointed at a specific one. The override is absolute-only - relative paths are rejected at the MCP boundary with an actionable error so a typo doesn't silently resolve against `process.cwd()` and land somewhere surprising. For `implement` with `worktree: true`, the workspace must be inside a git repository (the engine's existing `createWorktree` hard-errors otherwise). Threat model matches code search: the proxy already runs as the user; no allowlist (the same operator could `Read` / `Bash` the same paths through Claude Code directly). See `runWorkerToolCall` in `src/lib/peer-mcp-personas.ts` for the validation.
+A zero-argument `worker_defaults` inspection additionally returns `catalog`: worker-usable models (tool calls, a requestable effort, and >=200k context) as `{id, vendor, ctx, maxOut?, efforts, in?, out?, tps?}` from `buildCatalogView()`. `in` and `out` are the live catalog's batch-sized `billing.token_prices`, normalized to per-1M-token relative units and omitted when absent or malformed. `tps` is an approximate, indicative output-tokens/sec hint present only for a small dated measurement table; it is not a per-call benchmark. The view does not expose quality, intelligence, or benchmark scores: those editorial characterizations decay silently and can misroute a caller. The one speed exception is labelled and recoverable because a caller can retry a slow selection. The catalog rides only on inspection, not mutations, so its bytes are paid only by the caller that requests discovery.
 
-### Dual gate (catalog + opt-out)
+All six mode tools also accept an optional `workspace` (absolute path) - the working directory the worker operates in. **Default is the proxy's launch cwd** (the directory `github-router start` / `github-router claude` was invoked from); the model can override when the parent agent has multiple workspaces open and needs the worker pointed at a specific one. The override is absolute-only - relative paths are rejected at the MCP boundary with an actionable error so a typo doesn't silently resolve against `process.cwd()` and land somewhere surprising. For `implement`/`test`, the workspace must be inside a git repository (the engine's `createWorktree` hard-errors otherwise). Threat model matches code search: the proxy already runs as the user; no allowlist (the same operator could `Read` / `Bash` the same paths through Claude Code directly). See `runWorkerToolCall` in `src/lib/peer-mcp-personas.ts` for the validation.
 
-`workerToolsEnabled()` in `src/routes/mcp/handler.ts` drops all three worker tools from `tools/list` AND `tools/call` when EITHER:
+### Catalog and opt-out gates
+
+`workerToolsEnabled()` drops the five filesystem/repository worker modes (`explore`, `review`, `plan`, `implement`, `test`) plus `worker_defaults` from `tools/list` AND `tools/call` when EITHER:
 
 1. The operator set `GH_ROUTER_DISABLE_WORKER_TOOLS=1`, OR
-2. `gpt-5.4-mini` (the worker gate sentinel and unmatched-mode fallback, not the explore default) is missing from the live Copilot catalog, or present but lacks `tool_calls` support.
+2. no member of `DEFAULT_MODEL_CHAIN` (`gpt-5.6-luna` → `gpt-5.4-mini`) is present in the live Copilot catalog with `tool_calls` support.
 
-This is defense-in-depth - a client that hard-codes the tool name still fails at call-time rather than seeing a useless dormant registration. The gate model lives at `src/lib/worker-agent/engine.ts:DEFAULT_MODEL` and is re-imported by the handler (`import { DEFAULT_MODEL as WORKER_DEFAULT_MODEL } from "~/lib/worker-agent"`) so there is no parallel constant to drift. Implement/test's `gpt-5.6-sol` default is deliberately NOT a gate input: if it is absent the worker surface stays live and `implement`/`test` error helpfully at call time (only the OpenAI-backed implement/test default path breaks, not explore/review).
+The chain is deliberately tier-adaptive. Luna is the cheaper, faster, larger-context preferred entry, but it is not offered on `individual_trial` or `edu`; mini remains available there. The live catalog is the entitlement signal. `billing.restricted_to` states what a model permits, not which tier the user has, so the resolver does not infer user entitlement from it. The browse worker has an additional, independent `browseAgentEnabled()` gate: the browser surface must be enabled and supported on disk, and `gpt-5.6-luna` must be present in the live catalog with a reachable chat or Responses endpoint. The browser's inner compound-tool **compressor is a different component**: its `COMPRESSOR_FALLBACK_CHAIN` still starts with `gpt-5.4-mini`; this change does not retune that resolver.
+
+These checks are defense-in-depth - a client that hard-codes a tool name still fails at call-time rather than seeing a useless dormant registration. The general gate/fallback chain lives at `src/lib/worker-agent/engine.ts:DEFAULT_MODEL_CHAIN` and is re-imported by `mcp-capabilities.ts`, so there is no parallel constant to drift. Per-mode defaults are deliberately NOT general gate inputs: if `explore`'s Luna or `implement`/`test`'s `gpt-5.6-sol` is absent, that mode errors helpfully at call time without disabling the rest of the worker surface. Browse remains independently gated on Luna because it cannot fall back to mini.
 
 ### Non-blocking dispatch (`worker-*` subagents + PreToolUse guard)
 
@@ -423,7 +435,7 @@ Claude's own tools and every other MCP group are untouched; only the raw workers
 
 ### Budget caps (turns / wallclock / tool-bytes - NOT tokens or cost)
 
-Every worker run gets a `Budget` (`src/lib/worker-agent/budget.ts`) wired through Pi's `beforeToolCall` (cap check, blocks the call with a clear reason) and `prepareNextTurn` (turn counter) hooks. Three caps, all env-overridable:
+Every worker run gets a `Budget` (`src/lib/worker-agent/budget.ts`) wired through Pi's `beforeToolCall` (cap check, blocks the call with a clear reason) and `prepareNextTurn` (turn counter) hooks. The table below records the worker limits and related request bounds; all are env-overridable:
 
 | Cap | Default | Env override | Where it fires |
 | --- | --- | --- | --- |
@@ -431,6 +443,9 @@ Every worker run gets a `Budget` (`src/lib/worker-agent/budget.ts`) wired throug
 | Model call | 15 minutes | `GH_ROUTER_WORKER_MODEL_CALL_TIMEOUT_MS` | Whole `streamFunction` invocation: fetch plus SSE consumption; exactly one retry only when no model output was emitted |
 | Max wall-clock | 6 hours (per-call `maxWallClockMs` override, clamped to `workerWallClockCeilingMs()` = the injected MCP tool-call timeout − 15 min headroom) | `GH_ROUTER_WORKER_MAX_WALLCLOCK_MS` | `beforeToolCall` + a `setTimeout(agent.abort)` belt-and-suspenders that tears down mid-bash |
 | Max cumulative tool-output bytes | 16 MiB | `GH_ROUTER_WORKER_MAX_TOOL_BYTES` | `afterToolCall` records, `beforeToolCall` blocks |
+| Max tool calls | 250 | `GH_ROUTER_WORKER_MAX_TOOL_CALLS` | `beforeToolCall` blocks after the run reaches the cap |
+| Max consecutive identical tool calls | 3 | `GH_ROUTER_WORKER_MAX_REPEATED_CALLS` | Blocks the repeated call without halting the run |
+| Clean empty-output nudges | 3 | `GH_ROUTER_WORKER_MAX_NUDGES` | Adds a follow-up user turn in the same run only after a clean stop with no usable text/tool call; `0` disables |
 | Advisor transcript chars | 720 000 | `GH_ROUTER_WORKER_ADVISOR_MAX_CHARS` | `advisor` tool truncation (matches `ADVISOR_MAX_CONVERSATION_CHARS` in `src/services/advisor/advisor.ts`) |
 
 **No token/cost accounting.** Counting tokens would require duplicating Anthropic/Copilot's tokenizer choices per model; the caps above are model-agnostic proxies that hit the same SRE concern (runaway loops, runaway resource use) without that complexity.
@@ -449,7 +464,7 @@ All three are 10 MiB, matching `MAX_STDOUT_BYTES` in `src/lib/code-search.ts:106
 
 ### MCP in-flight cap participation
 
-The worker's `advisor` and `codex_review` tools (which dispatch to the advisor responses endpoint / peer-model personas from inside the worker's Pi loop) acquire the **same** `MAX_INFLIGHT_TOOLS_CALL = 32` slot as MCP-boundary persona calls. (`peer_review` shares the same mechanism but is not wired into the worker surface.) Implementation: `src/lib/mcp-inflight.ts` exports `acquireInFlightSlot()`; both `src/routes/mcp/handler.ts` (for `tools/call` dispatch) and `src/lib/worker-agent/tools.ts` (for nested advisor/codex_review) acquire from it. Without this shared counter, a single worker could fan out unboundedly to peers and starve the operator's own MCP traffic; with it, nested calls return a clean `Peer MCP queue full` tool error and the worker model can back off.
+The worker's `advisor` and `codex_review` tools (which dispatch to the advisor responses endpoint / peer-model personas from inside the worker's Pi loop) acquire the **same** `MAX_INFLIGHT_TOOLS_CALL` slot as MCP-boundary persona calls (default 128, overridable with `GH_ROUTER_MAX_INFLIGHT_TOOLS_CALL`). (`peer_review` shares the same mechanism but is not wired into the worker surface.) Implementation: `src/lib/mcp-inflight.ts` exports `acquireInFlightSlot()`; both `src/routes/mcp/handler.ts` (for `tools/call` dispatch) and `src/lib/worker-agent/tools.ts` (for nested advisor/codex_review) acquire from it. Without this shared counter, a single worker could fan out unboundedly to peers and starve the operator's own MCP traffic; with it, nested calls return a clean `Peer MCP queue full` tool error and the worker model can back off.
 
 ### Bash hardening
 
@@ -477,7 +492,7 @@ The Pi agent runtime (`@earendil-works/pi-agent-core` + a minimal `pi-ai` slice)
 
 Two probes assert that Copilot accepts the exact body shapes the worker-agent stream-fn emits:
 
-- `worker_gemini_tools_reasoning` — `gemini-3.5-flash` on `/v1/chat/completions` with a `tools[]` array + `reasoning_effort:"high"` (a valid worker tool+reasoning shape; explore now defaults to `gemini-3.6-flash`). The dual gate's catalog arm only checks "model present + `tool_calls` advertised"; it does NOT exercise the request shape. If Copilot tightens the `gemini-3.5-flash` validator, the gate would leave the tools advertised but every explore/review call would 400 — this probe surfaces that regression upstream.
+- `worker_gemini_tools_reasoning` — `gemini-3.5-flash` on `/v1/chat/completions` with a `tools[]` array + `reasoning_effort:"high"` (a valid explicit-override and review-fallback tool+reasoning shape; explore now defaults to `gpt-5.6-luna`). The gate's catalog arm only checks "chain member present + `tool_calls` advertised"; it does NOT exercise every selectable request shape. If Copilot tightens the Gemini validator, explicit Gemini worker calls would 400 — this probe surfaces that regression upstream.
 - `worker_gpt5_responses_tools_reasoning` — `gpt-5.5` on `/v1/responses` with function-shaped `tools[]` (flat `{type:"function",name,description,parameters}`) + `reasoning:{effort:"xhigh"}` (the retained-fallback `/responses` contract — `gpt-5.5` is the fallback for the codex CLI and the native implementer subagent; the primary `implement`/`test` worker default `gpt-5.6-sol` is probed by `worker_gpt56sol_responses_tools_reasoning`). `gpt-5.5` is NOT a dual-gate input, so a body-shape regression here breaks the OpenAI fallback path while explore/review keep working — only this probe catches it.
 
 Probe ids in `scripts/probe-copilot-compat.sh`; matrix rows in `docs/copilot-compat-matrix.md` (see also [`docs/pi-vendor-sync.md`](pi-vendor-sync.md)).

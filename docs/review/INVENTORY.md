@@ -7,7 +7,7 @@ The per-surface reviews:
 - MCP tools: [`mcp/README.md`](./mcp/README.md) + [`mcp/FINDINGS.md`](./mcp/FINDINGS.md) (71 tools, 9 groups)
 - Hooks: [`hooks/README.md`](./hooks/README.md) (7 lifecycle hooks)
 - Skills: [`skills/README.md`](./skills/README.md) (7 injected skills)
-- Subagents: [`subagents/README.md`](./subagents/README.md) (peer critics, coordinator, eight native agents, worker dispatchers)
+- Subagents: [`subagents/README.md`](./subagents/README.md) (peer critics, coordinator, seven native agents, worker dispatchers)
 - Injected prompt blocks: [`injected-prompt/README.md`](./injected-prompt/README.md) (operating-defaults, style, peer-awareness, toolbelt, artifact directive)
 - Env and settings: [`env-and-settings/README.md`](./env-and-settings/README.md) (feature gates, model defaults, MCP timeouts, gateway seed, config mirror)
 
@@ -65,16 +65,15 @@ Description-line (routing) review in [`skills/README.md`](./skills/README.md).
 |---|---|---|---|---|
 | codex-critic / codex-reviewer | inherited (Claude) | relay to gpt-5.6-sol / gpt-5.3-codex via MCP | always | [subagents/](./subagents/) |
 | gemini-critic / gemini-reviewer | inherited | relay to gemini-3.1-pro via MCP | `requiresGeminiCatalog` | [subagents/](./subagents/) |
-| opus-critic | inherited | relay to claude-opus-4-6 via MCP | always | [opus-critic](./subagents/opus-critic.md) |
+| opus-critic | inherited | relay to claude-opus-5 via MCP (Opus 4.6 variants fallback) | always | [opus-critic](./subagents/opus-critic.md) |
 | codex-implementer | inherited | relay to gpt-5.3-codex writer (stdio) | `--codex-cli` | [codex-implementer](./subagents/codex-implementer.md) |
 | implementer (native) | gpt-5.6-sol → gpt-5.5, else lead | implementation, full toolset | always emitted; frontier model only when it has `tool_calls` | [implementer](./subagents/implementer.md) |
 | reviewer (native) | gemini-3.1-pro-preview → frontier, else lead | artifact assessment, full toolset; cross-lab from implementer by design | always emitted; preferred model only when it has `tool_calls` | [reviewer](./subagents/reviewer.md) |
 | brainstorm (native) | gemini-3.1-pro-preview → frontier, else lead | read-only divergent options | always emitted; preferred model only when it has `tool_calls` | [brainstorm](./subagents/brainstorm.md) |
-| scout (native) | gemini-3.6-flash → gpt-5.6-luna → gpt-5.4-mini | read-only low-cost repository exploration | omitted unless cheap-tier model has `tool_calls` | [scout](./subagents/scout.md) |
+| scout (native) | gpt-5.6-luna → gemini-3.6-flash | read-only low-cost repository exploration | omitted unless a chain model has `tool_calls` and 1M context | [scout](./subagents/scout.md) |
 | scribe (native) | gpt-5.6-terra → frontier, else lead | repository-grounded documentation, full toolset | always emitted; preferred model only when it has `tool_calls` | [scribe](./subagents/scribe.md) |
-| generic (native) | gpt-5.6-terra → gemini-3.1-pro-preview | mid-tier full-toolset catch-all | omitted unless a chain model has `tool_calls` and 1M context | [generic](./subagents/generic.md) |
-| generic-fast (native) | gemini-3.6-flash → gemini-3.5-flash | Gemini Flash full-toolset catch-all | omitted unless a chain model has `tool_calls` and 1M context | [generic-fast](./subagents/generic-fast.md) |
-| generic-cheap (native) | gpt-5.6-luna only | lowest-cost full-toolset catch-all | omitted unless Luna has `tool_calls` and 1M context | [generic-cheap](./subagents/generic-cheap.md) |
+| implementer-fast (native) | gpt-5.6-terra → gemini-3.1-pro-preview | well-specified mechanical implementation, full toolset | omitted unless a chain model has `tool_calls` and 1M context | [implementer-fast](./subagents/implementer-fast.md) |
+| general-purpose-fast (native) | gpt-5.6-luna only | fastest measured, lowest-cost full-toolset catch-all | omitted unless Luna has `tool_calls` and 1M context | [general-purpose-fast](./subagents/general-purpose-fast.md) |
 | peer-review-coordinator | inherited | fans out to critics, aggregates | always | [peer-review-coordinator](./subagents/peer-review-coordinator.md) |
 | worker-explore/implement/review/plan/test/browse | inherited (dispatchers) | background non-blocking dispatch to the matching worker | worker / browse gate | [subagents/](./subagents/) |
 
@@ -120,8 +119,8 @@ What each launch flag / condition turns ON, so a reader can see exactly what a g
 
 | Condition | Turns ON |
 |---|---|
-| **default** (`github-router claude`) | peers critics (codex_critic, codex_reviewer, opus_critic; gemini pair if catalog), `search` (web, code), `orchestrate` verify+attest, five non-blocking `worker-*` dispatchers when the worker gate passes, native `implementer` / `reviewer` / `brainstorm` / `scribe` (always emitted, inheriting the lead when their preferred model chain misses), `scout` when its cheap-tier chain resolves, and `generic` / `generic-fast` / `generic-cheap` when their respective qualifying 1M chains resolve, `peer-review-coordinator`, hooks #1/#2/#6/#7, skills gh-research/gh-orchestrate/gh-floor-keeper/gh-worker, all 5 prompt/CLAUDE.md text blocks (toolbelt/style/artifact conditional), all env/settings above |
-| **worker-gate present** (`gpt-5.4-mini` w/ tool_calls in catalog) | workers group (explore/implement/review/plan/test), orchestrate decompose+run, prompt-submit steer #1, worker guard #2, worker skills, worker-* dispatchers. If ABSENT: the entire worker surface + the four worker-gated skills + hook #1 drop |
+| **default** (`github-router claude`) | peers critics (codex_critic, codex_reviewer, opus_critic; gemini pair if catalog), `search` (web, code), `orchestrate` verify+attest, five non-blocking `worker-*` dispatchers when the worker gate passes, native `implementer` / `reviewer` / `brainstorm` / `scribe` (always emitted, inheriting the lead when their preferred model chain misses), plus `scout`, `implementer-fast`, and `general-purpose-fast` when their respective qualifying 1M chains resolve, `peer-review-coordinator`, hooks #1/#2/#6/#7, skills gh-research/gh-orchestrate/gh-floor-keeper/gh-worker, all 5 prompt/CLAUDE.md text blocks (toolbelt/style/artifact conditional), all env/settings above |
+| **worker-gate present** (a `DEFAULT_MODEL_CHAIN` member, `gpt-5.6-luna` → `gpt-5.4-mini`, with `tool_calls` in the catalog) | workers group (explore/implement/review/plan/test), orchestrate decompose+run, prompt-submit steer #1, worker guard #2, worker skills, worker-* dispatchers. If ABSENT: the entire worker surface + the four worker-gated skills + hook #1 drop |
 | **gemini catalog** (`gemini-3.x-pro`) | gemini_critic, gemini_reviewer tools + subagents |
 | **stand_in catalog** (all 3 consensus models) | decide group (`stand_in`) |
 | **compressor available** (`gpt-5.4-mini` / sonnet-4.6 / haiku-4.5 w/ tool_calls) | browser `observe`/`extract` + `act` INTENT mode (under `--browse`) |
@@ -150,14 +149,14 @@ These share one root class: a text surface (awareness snippet, root CLAUDE.md, o
 
 ### Important — the plan-review lifecycle gap (hooks + subagents)
 
-- **Stop-on-plan over-fire + unwired plan peer-review** — spans hooks and subagents. Two halves of the same gap:
-  - The `Stop` gate (#6) runs typecheck/test/lint on EVERY stop with no empty-diff short-circuit, so a plan-only, Q&A, or read-only turn pays the full suite cost. The design doc's V2 spec opens with "No diff → nothing"; the branch was never implemented, and the plan-mode carve-out (`GH_ROUTER_STOP_GATE_PLAN_MODE`) is dead code (nothing in `src/` sets it). Detail: [hooks README §synthesis 1 + cross-hook findings](./hooks/README.md).
-  - NO cross-lab review fires before a plan finalizes (`ExitPlanMode`), the cheapest leverage point. The team's own comment (`codex-mcp-config.ts:193-194`) scoped a default-on `PreToolUse(ExitPlanMode)` peer-review hook as the fallback if coordinator proactive-delegation falls under 7/10; it was never wired. The `peer-review-coordinator` description promises "use proactively before non-trivial plans" that the harness delivers at ~60% soft-steer, and "after non-trivial commits" has no hook anchor at all. Detail: [subagents S2](./subagents/README.md), [hooks README](./hooks/README.md).
+- **Stop-on-plan over-fire resolved; plan peer-review remains unwired** — spans hooks and subagents. Two halves of the same lifecycle:
+  - **Resolved:** the `Stop` gate (#6) now short-circuits before typecheck/test/lint when the working tree has no tracked or untracked diff, so plan-only, Q&A, and read-only turns do not pay the suite cost. Untracked files correctly count as a diff and still enter the gate. Detail: [hooks README §synthesis 1 + cross-hook findings](./hooks/README.md).
+  - **Open:** NO cross-lab review fires before a plan finalizes (`ExitPlanMode`), the cheapest leverage point. The team's own comment (`codex-mcp-config.ts:193-194`) scoped a default-on `PreToolUse(ExitPlanMode)` peer-review hook as the fallback if coordinator proactive-delegation falls under 7/10; it was never wired. The `peer-review-coordinator` description promises "use proactively before non-trivial plans" that the harness delivers at ~60% soft-steer, and "after non-trivial commits" has no hook anchor at all. Detail: [subagents S2](./subagents/README.md), [hooks README](./hooks/README.md).
 - **Operator guard (#3) likely blocks the `worker-*` path it recommends** — a #2/#3 hook interaction. In `--agents` mode #3 denies any `mcp__workers__*` by prefix without checking the caller, so it also denies the dispatcher subagent that #2 exists to allow, breaking the delegation the operator banner recommends. Fix: #3 must allow the dispatcher `agent_type`. Detail: [hooks cross-hook findings](./hooks/README.md).
 
 ### Important — over-firing tips / steers (the right amount)
 
-- **The prompt-submit static search tip fires on every trivial prompt** — primarily hooks, but it shapes every model turn. The V2 model-call enrichment is correctly non-trivial-gated, but the static `PROMPT_SEARCH_TIP` fires on `git commit -m fix`, "yes", "thanks". A one-line bounded classifier would suppress it on conversational turns. Detail: [hooks synthesis 2](./hooks/README.md).
+- **Resolved: prompt-submit tips are substantive-prompt-only** — primarily hooks, but they shape model turns. `isNonTrivialPrompt` now returns early for trivial commands and conversational acknowledgements such as `git commit -m fix`, "yes", and "thanks", so neither the static `PROMPT_SEARCH_TIP` nor V2 model-call enrichment fires on those turns. Substantive prompts still receive the search tip. Detail: [hooks synthesis 2](./hooks/README.md).
 - **[Suggestion] Named-persona calibration bars in OPERATING_DEFAULTS** — injected-prompt. Grouped here because it is the same over-injection class (spending the highest-salience surface for no floor gain), but it is Suggestion-level per its own doc, not Important. The "aim high" principle appends celebrity calibration (Jobs/Ive, Gates, Bezos); each principle is already stated functionally, so the high-variance name vector can be dropped with no loss. Detail: [injected-prompt Finding 1](./injected-prompt/README.md).
 
 ### Important — description / doc drift (the model's mental model is wrong)

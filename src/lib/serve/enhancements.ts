@@ -38,9 +38,8 @@ import {
   reviewerModel,
   scoutModel,
   scribeModel,
-  genericModel,
-  genericFastModel,
-  genericCheapModel,
+  implementerFastModel,
+  generalPurposeFastModel,
   standInToolEnabled,
   workerToolsEnabled,
 } from "../mcp-capabilities"
@@ -48,7 +47,11 @@ import { buildPlanReviewHookCommand, planReviewEnabled } from "../orchestration/
 import { buildPromptSubmitHookCommand } from "../orchestration/prompt-submit-hook"
 import { injectStopHookIntoSettingsFile } from "../orchestration/stop-gate-hook"
 import { PATHS } from "../paths"
-import { buildPeerAwarenessSnippet, enumerateInjectedMcpToolNames, type McpGroup } from "../peer-mcp-personas"
+import {
+  buildPeerAwarenessSnippet,
+  enumerateInjectedMcpToolNames,
+  type McpGroup,
+} from "../peer-mcp-personas"
 import { state } from "../state"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "../toolbelt"
 import {
@@ -125,9 +128,8 @@ export async function provisionServeEnhancements(
     // disagree about which conditionally-emitted natives exist.
     const nativeAvailability: NativeAgentAvailability = {
       scoutAvailable: scoutModel() != null,
-      genericAvailable: genericModel() != null,
-      genericFastAvailable: genericFastModel() != null,
-      genericCheapAvailable: genericCheapModel() != null,
+      implementerFastAvailable: implementerFastModel() != null,
+      generalPurposeFastAvailable: generalPurposeFastModel() != null,
     }
 
     const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
@@ -142,9 +144,8 @@ export async function provisionServeEnhancements(
       brainstormModel: brainstormModel(),
       scoutModel: scoutModel(),
       scribeModel: scribeModel(),
-      genericModel: genericModel(),
-      genericFastModel: genericFastModel(),
-      genericCheapModel: genericCheapModel(),
+      implementerFastModel: implementerFastModel(),
+      generalPurposeFastModel: generalPurposeFastModel(),
       // Serve-only: register Claude Code's built-in Explore/Plan/general-purpose
       // subagents (the Agent SDK doesn't) so the model's habitual Agent() calls
       // resolve. Never passed by `github-router claude` (would shadow the CLI's
@@ -175,7 +176,6 @@ export async function provisionServeEnhancements(
       ...nativeAvailability,
       groupKeys,
     })
-
     await appendPeerAwarenessToMirroredClaudeMd(peerSnippet).catch((err) =>
       consola.warn(`Peer-awareness CLAUDE.md append failed: ${String(err)}`),
     )

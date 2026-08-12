@@ -50,6 +50,8 @@ import {
 } from "~/lib/worker-agent"
 import {
   buildCatalogView,
+  catalogTokenPrices,
+  indicativeTokensPerSecond,
   resolveModelAndThinking,
 } from "~/lib/worker-agent/model-resolve"
 import {
@@ -387,7 +389,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
     model: "gpt-5.3-codex",
     endpoint: "/v1/responses",
     description:
-      "Line-level code reviewer backed by gpt-5.3-codex (OpenAI, ≈272K-token input window), a code-specialist reviewer that is fastest around high effort (~16s at high effort). It reviews concrete diffs, files, or function bodies and returns findings with severity, file:line locations, issue impact, and a minimal suggested fix. Use when the artifact is actual code and the goal is bug, edge-case, security, concurrency, resource, or idiom review. Not for architecture or tradeoff review, use codex_critic or gemini_critic; pass the diff or file content verbatim.",
+      "Line-level code reviewer backed by gpt-5.3-codex (OpenAI, ≈272K-token input window), a code specialist for line-level review. It reviews concrete diffs, files, or function bodies and returns findings with severity, file:line locations, issue impact, and a minimal suggested fix. Use when the artifact is actual code and the goal is bug, edge-case, security, concurrency, resource, or idiom review. Not for architecture or tradeoff review, use codex_critic or gemini_critic; pass the diff or file content verbatim.",
     baseInstructions: REVIEWER_BASE,
     agentPrompt: "",
     writeCapable: false,
@@ -601,13 +603,12 @@ export function buildPeerAwarenessSnippet(opts: {
    *  model, so naming it unconditionally here would advertise an agent that is
    *  not in the Task enum. */
   scoutAvailable?: boolean
-  /** Whether each `generic*` catch-all resolved a model and was therefore
-   *  emitted. Like `scout` and unlike the other natives they are dropped rather
-   *  than downgraded to the lead's model, so naming one unconditionally would
-   *  advertise an agent absent from the Task enum. */
-  genericAvailable?: boolean
-  genericFastAvailable?: boolean
-  genericCheapAvailable?: boolean
+  /** Whether `implementer-fast` resolved a model and was therefore emitted.
+   *  Like `scout`, it is dropped rather than downgraded to the lead's model. */
+  implementerFastAvailable?: boolean
+  /** Whether `general-purpose-fast` resolved a model and was therefore emitted.
+   *  Like `scout`, it is dropped rather than downgraded. */
+  generalPurposeFastAvailable?: boolean
   /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
    *  collision). Missing key → use the preferred bare key. Keeps the
    *  `mcp__<server>__<tool>` paths in this snippet pointing at OUR servers. */
@@ -654,17 +655,11 @@ export function buildPeerAwarenessSnippet(opts: {
       `\`worker-*\` are background Agent subagents (subagent_type) that run the matching worker in its own context and deliver the result as a completion notification, so a long run never blocks the turn: \`worker-explore\` (read-only research), \`worker-review\` (reads the code to verify a change or claim), \`worker-plan\` (ordered implementation plan), \`worker-implement\` (edit/write/bash; ALWAYS runs in an isolated git worktree and returns the diff via a saved patch file; for in-place edits use the \`implementer\` subagent), \`worker-test\` (independent test author; also always worktree-isolated)${opts.browseAvailable ? ", `worker-browse` (autonomous browser agent driving a real browser)" : ""}. The raw \`mcp__${workersKey}__*\` tools they call are guarded (a direct main-thread call is redirected to the matching agent); Workers themselves have \`code_search\`.`,
     )
   }
-  const catchAllNames = [
-    opts.genericAvailable === false ? undefined : "`generic`",
-    opts.genericFastAvailable === false ? undefined : "`generic-fast`",
-    opts.genericCheapAvailable === false ? undefined : "`generic-cheap`",
-  ].filter((n): n is string => n != null)
-  const catchAllClause =
-    catchAllNames.length > 0
-      ? ` Catch-alls on non-lead models, for work no specialist fits, cheapest last: ${catchAllNames.join(", ")}.`
-      : ""
+  const catchAllClause = opts.generalPurposeFastAvailable === false
+    ? ""
+    : " Catch-all on a fast, economical non-lead model for work no specialist fits: `general-purpose-fast`."
   para2Parts.push(
-    `Native subagents (Task), each in its own context so heavy work never fills yours: \`implementer\` (you know what to build), \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).${catchAllClause}`,
+    `Native subagents (Task), each in its own context so heavy work never fills yours: \`implementer\` (coding changes needing judgment or with ambiguous scope)${opts.implementerFastAvailable === false ? "" : ", `implementer-fast` (well-specified, mechanical coding changes)"}, \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).${catchAllClause}`,
   )
   if (opts.workerToolsAvailable) {
     para2Parts.push(
@@ -728,6 +723,15 @@ export function buildPeerAwarenessSnippet(opts: {
   ].join("\n")
 }
 
+export type NativeAgentName =
+  | "implementer"
+  | "implementer-fast"
+  | "reviewer"
+  | "brainstorm"
+  | "scout"
+  | "scribe"
+  | "general-purpose-fast"
+
 /**
  * Compact, gated capability SUMMARY for the spawned session's system prompt
  * (`--append-system-prompt`). The FULL per-tool inventory lives once in the
@@ -745,29 +749,56 @@ export function buildPeerAwarenessSummary(opts: {
   agentToolsAvailable?: boolean
   /** Which conditionally-emitted natives this launch wrote. `undefined` means
    *  available, matching `buildPeerAwarenessSnippet`. Load-bearing here for the
-   *  same reason it is there and in the operating-defaults directive: `scout`
-   *  and the three `generic*` catch-alls are DROPPED rather than downgraded
-   *  when their chain misses, so naming one unconditionally in the
-   *  always-in-context surface points the lead at an agent absent from the Task
-   *  `subagent_type` enum. This surface previously took no availability at all
-   *  while its own doc comment claimed it was gated identically to the full
+   *  same reason it is there and in the operating-defaults directive: `scout`,
+   *  `implementer-fast`, and `general-purpose-fast` are DROPPED rather than
+   *  downgraded when their chain misses, so naming one unconditionally in
+   *  the always-in-context surface points the lead at an agent absent from the
+   *  Task `subagent_type` enum. This surface previously took no availability at
+   *  all while its own doc comment claimed it was gated identically to the full
    *  snippet. */
   scoutAvailable?: boolean
-  genericAvailable?: boolean
-  genericFastAvailable?: boolean
-  genericCheapAvailable?: boolean
+  implementerFastAvailable?: boolean
+  generalPurposeFastAvailable?: boolean
+  /** Resolved native agent model ids from the current launch. Values are only
+   *  used to derive live catalog prices and measured speed hints for this
+   *  decision surface. */
+  nativeAgentModels?: Partial<Record<NativeAgentName, string | undefined>>
   groupKeys?: Partial<Record<McpGroup, string>>
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
-  const summaryCatchAlls = [
-    opts.genericAvailable === false ? undefined : "`generic`",
-    opts.genericFastAvailable === false ? undefined : "`generic-fast`",
-    opts.genericCheapAvailable === false ? undefined : "`generic-cheap`",
+  const renderNative = (name: NativeAgentName): string => {
+    const modelId = opts.nativeAgentModels?.[name]
+    if (!modelId) return `\`${name}\``
+    const prices = catalogTokenPrices(modelId)
+    const tps = indicativeTokensPerSecond(modelId)
+    if (!prices || tps == null) return `\`${name}\``
+    return `\`${name}\` ${prices.in}/${prices.out} ~${tps}t/s`
+  }
+  const summaryNativeNames = [
+    renderNative("implementer"),
+    opts.implementerFastAvailable === false ? undefined : renderNative("implementer-fast"),
+    renderNative("reviewer"),
+    renderNative("brainstorm"),
+    opts.scoutAvailable === false ? undefined : renderNative("scout"),
+    renderNative("scribe"),
+    opts.generalPurposeFastAvailable === false ? undefined : renderNative("general-purpose-fast"),
   ].filter((n): n is string => n != null)
+  // The cost/speed preamble must only appear when at least one name actually
+  // carries figures. Every annotation is independently omitted when the live
+  // catalog has no price for that model or the speed table has no entry, so a
+  // launch whose catalog fetch failed or has not landed yet renders bare names
+  // — and an unconditional preamble would then promise "cost per 1M tokens,
+  // tok/s" and deliver none. A header describing a format the body does not
+  // use is worse than no header: it tells the model to look for data that is
+  // not there.
+  const summaryNativesAnnotated = summaryNativeNames.some((n) => /\d/.test(n))
+  const summaryNativeLead = summaryNativesAnnotated
+    ? "Native subagents (Task), own context. Cost is per 1M tokens in/out, tok/s approximate:"
+    : "Native subagents (Task), each in its own context:"
   const lines: Array<string> = [
     "## Injected capabilities (summary)",
     "",
-    // The native subagents come FIRST and are named here, not only in CLAUDE.md.
+    // The native subagents come FIRST and are NAMED here, not only in CLAUDE.md.
     // This block is the always-in-context surface; it previously named every
     // competing surface (peer critics, workers, stand_in) and none of the
     // natives, so the only agents the lead was reminded of every turn were the
@@ -775,7 +806,16 @@ export function buildPeerAwarenessSummary(opts: {
     // tiebreak because that is the one pair observed to route wrong: a live
     // session picked `codex_reviewer` for an assess-this-code task, which is
     // exactly the case `reviewer` exists for.
-    `Native subagents (Task), each in its own context: \`implementer\` (you know what to build), \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).${summaryCatchAlls.length > 0 ? ` Catch-alls on non-lead models for work no specialist fits, cheapest last: ${summaryCatchAlls.join(", ")}.` : ""} They read the repo and can run things; the peer critics below cannot, so reach for \`reviewer\` when an assessment needs execution or repo context and for a critic when you already hold the artifact.`,
+    //
+    // NAMES ONLY, deliberately. The per-agent "when to use" clause lives in each
+    // agent's own `.md` description, which is what Claude Code's auto-delegation
+    // rubric actually reads at selection time, and is expanded again in the
+    // CLAUDE.md snippet. Repeating it here made it a THIRD copy on the surface
+    // that is paid every single turn, and it contradicted this block's own
+    // closing pointer to CLAUDE.md for the roster. What cannot be recovered from
+    // a per-agent description is the CROSS-CUTTING fact, so that is what stays:
+    // the roster exists, and natives can execute where the critics cannot.
+    `${summaryNativeLead} ${summaryNativeNames.join(", ")}. Each agent's own description states when it applies. They read the repo and can run things; the peer critics below cannot, so reach for \`reviewer\` when an assessment needs execution or repo context and for a critic when you already hold the artifact.`,
     `A layer of MCP tools, background workers, and skills is injected into this session. Cross-lab peer critics under \`mcp__${key("peers")}__*\` (plus the \`peer-review-coordinator\` subagent) review plans and diffs adversarially, and Claude Code's built-in \`advisor\` catches approach drift. \`mcp__${key("search")}__code\` is meaning-first code search and \`mcp__${key("search")}__web\` returns citable web sources.`,
   ]
   if (opts.workerToolsAvailable) {
@@ -850,11 +890,10 @@ export interface NonPersonaMcpTool {
    * `tools/list` and `tools/call` when the runtime gate is off.
    *
    * - `"worker"` (explore / review / implement) requires Copilot's
-   *   `gpt-5.4-mini` (the worker default) to be in the live catalog
+   *   a usable model from the Luna → mini worker gate chain in the live catalog
    *   with `tool_calls` support AND `GH_ROUTER_DISABLE_WORKER_TOOLS=1` to
-   *   be unset (see `workerToolsEnabled()`). implement's `gpt-5.6-sol` default
-   *   is not gated here — if absent, implement calls return a helpful
-   *   resolve error.
+   *   be unset (see `workerToolsEnabled()`). Per-mode defaults are not gated
+   *   here — if one is absent, that mode returns a helpful resolve error.
    * - `"stand_in"` requires all three of `gpt-5.6-sol`, `claude-opus-4-7`,
    *   and a `gemini-3.X.*pro` model to be in the live catalog (see
    *   `standInToolEnabled()` in `routes/mcp/handler.ts`).
@@ -875,7 +914,7 @@ export interface NonPersonaMcpTool {
    *   only the 6 lead-model tools; power mode adds the raw primitives.
    * - `"browse_agent"` (the `browse` worker tool) requires
    *   `browseAgentEnabled()` — `browserToolsEnabled()` AND the browse
-   *   default model (`gpt-5.4-mini`) reachable in the live catalog (see
+   *   default model (`gpt-5.6-luna`) reachable in the live catalog (see
    *   `browseAgentEnabled()` in `lib/mcp-capabilities.ts`). NOTE: this
    *   capability deliberately does NOT start with the literal `"browser"`
    *   so `isBrowserCapability()` in handler.ts treats it as a normal
@@ -942,13 +981,15 @@ function formatWebSearchResult(results: {
  * Model-override tier ladder surfaced on the read-heavy workers
  * (explore / implement / review). The caller picks a model by task weight;
  * all three tiers are 1M-context, and `high` is the recommended reasoning
- * depth for the ladder (flash tops out at high; sol/terra go higher if the
- * caller wants). Appended to those tools' `model` param description so the
- * lead has actionable override guidance instead of a bare free string.
+ * depth for the ladder (sol/terra go higher if the caller wants). Appended to
+ * those tools' `model` param description so the lead has actionable override
+ * guidance instead of a bare free string. Luna owns the light tier because it
+ * is both cheaper and faster than the prior Gemini Flash entry; no quality
+ * ranking is implied.
  */
 const WORKER_TIER_GUIDANCE =
   " Override by task weight: `gpt-5.6-sol` (heavy/deep), "
-  + "`gpt-5.6-terra` (moderate), `gemini-3.6-flash` (light/cheap) — all "
+  + "`gpt-5.6-terra` (moderate), `gpt-5.6-luna` (light/cheap) — all "
   + "1M context; pair with thinking:'high'."
 
 /**
@@ -1376,19 +1417,21 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     },
     // explore / implement / review / plan / test are autonomous worker tools
     // backed by the Pi agent loop (`src/lib/worker-agent/engine.ts`) and routed
-    // through per-mode defaults: explore -> `gemini-3.6-flash` (high), review ->
+    // through per-mode defaults: explore -> `gpt-5.6-luna` (high), review ->
     // `gemini-3.1-pro-preview` (xhigh clamped to high by the default model), plan
-    // -> `claude-opus-5` (xhigh), and implement/test -> `gpt-5.6-sol` (xhigh). An
-    // explicit `model` arg wins.
+    // -> `claude-opus-5` (high), and implement/test -> `gpt-5.6-sol` (high). The
+    // defaults favour time-to-outcome; an explicit `model` or `thinking` arg wins,
+    // as does a `worker_defaults` session override.
     //
     // GATING (`capability: "worker"`): the MCP handler drops these entries from
     // `tools/list` and `tools/call` when `workerToolsEnabled()` is false. The gate
-    // fires when (a) the worker sentinel (`gpt-5.4-mini`) is missing from the live
-    // Copilot catalog or lacks `tool_calls`, OR (b) the operator opted out via
+    // fires when (a) neither member of the ordered worker gate chain
+    // (`gpt-5.6-luna` -> `gpt-5.4-mini`) is present with `tool_calls` in the live
+    // Copilot catalog, OR (b) the operator opted out via
     // `GH_ROUTER_DISABLE_WORKER_TOOLS=1`. Defense-in-depth: the gate is checked at
     // BOTH list-time and call-time so a client that hard-codes the tool name can't
     // bypass the list-side filter. If a per-mode default such as `gpt-5.6-sol` or
-    // `gemini-3.6-flash` is absent, that mode returns a helpful resolve error.
+    // `gpt-5.6-luna` is absent, that mode returns a helpful resolve error.
     //
     // SCHEMA SHAPE: `prompt` is required; `model` / `thinking` are optional
     // fine-tunes the worker engine validates against the live catalog (unknown
@@ -1509,7 +1552,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       description:
         "Runs as the background `worker-explore` agent. Dispatch via the Agent tool (subagent_type: worker-explore) so the turn is never blocked; the result arrives as a completion notification. "
         + "Read-only investigation by an autonomous worker (Pi runtime; "
-        + "default model `gemini-3.6-flash` at high reasoning, override via "
+        + "default model `gpt-5.6-luna` at high reasoning, override via "
         + "the `model` arg with any Copilot-catalog model that advertises "
         + "`tool_calls`). It has read, glob, grep, semantic-first code search, "
         + "web search, fetch_url, advisor, update_plan, and read-only toolbelt "
@@ -1537,7 +1580,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             type: "string",
             description:
               "Optional Copilot catalog model id (defaults to "
-              + "gemini-3.6-flash). Must advertise tool_calls "
+              + "gpt-5.6-luna). Must advertise tool_calls "
               + "support; the engine emits an isError envelope listing "
               + "the eligible catalog models on mismatch."
               + WORKER_TIER_GUIDANCE,
@@ -1590,7 +1633,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       description:
         "Runs as the background `worker-implement` agent. Dispatch via the Agent tool (subagent_type: worker-implement) so the turn is never blocked; the result arrives as a completion notification. "
         + "Delegates a scoped coding task to an autonomous worker (Pi runtime; "
-        + "default model `gpt-5.6-sol` at xhigh reasoning, override via `model` "
+        + "default model `gpt-5.6-sol` at high reasoning, override via `model` "
         + "with any Copilot-catalog model that advertises `tool_calls`). It has "
         + "the explore read-only tools plus edit, write, bash, and codex_review, "
         + "and it returns its final text with any changed files or worktree diff. "
@@ -1763,7 +1806,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       description:
         "Runs as the background `worker-plan` agent. Dispatch via the Agent tool (subagent_type: worker-plan) so the turn is never blocked; the result arrives as a completion notification. "
         + "Read-only implementation planning by an autonomous worker (Pi runtime; "
-        + "default model `claude-opus-5` at xhigh reasoning, override via "
+        + "default model `claude-opus-5` at high reasoning, override via "
         + "`model` with any Copilot-catalog model that advertises `tool_calls`). "
         + "It has the same read-only toolset as explore and returns a concrete, "
         + "ordered implementation plan covering files, approach, risks, and how "
@@ -1842,7 +1885,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       description:
         "Runs as the background `worker-test` agent. Dispatch via the Agent tool (subagent_type: worker-test) so the turn is never blocked; the result arrives as a completion notification. "
         + "Independent adversarial test authoring by an autonomous worker (Pi "
-        + "runtime; default model `gpt-5.6-sol` at xhigh reasoning, override via "
+        + "runtime; default model `gpt-5.6-sol` at high reasoning, override via "
         + "`model` with any Copilot-catalog model that advertises `tool_calls`). "
         + "It has the same read/write toolset as implement and writes tests that "
         + "try to break the implementation through edge cases, error paths, and "
@@ -2177,7 +2220,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     },
     // browse — a Pi-driven autonomous browser agent (mode: "browse" of the
     // SAME `runWorkerAgent` engine as explore/review/implement), routed
-    // through Copilot's `gpt-5.4-mini` by default. It drives a real
+    // through Copilot's `gpt-5.6-luna` by default. It drives a real
     // Chrome/Edge tab via the browser-MCP bridge to accomplish `task` and
     // returns the result — runs in its OWN context so the lead's window
     // isn't burned by raw DOM / page snapshots.
@@ -2185,7 +2228,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     // GATING (`capability: "browse_agent"`): the MCP handler drops this
     // entry from `tools/list` AND `tools/call` when `browseAgentEnabled()`
     // is false — i.e. when `--browse` is off / no supported browser is on
-    // disk, OR the `gpt-5.4-mini` default isn't reachable in the live
+    // disk, OR the `gpt-5.6-luna` default isn't reachable in the live
     // catalog. Same defense-in-depth (list-time filter + call-time -32601)
     // as the other capability tags.
     //
@@ -2201,7 +2244,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       capability: "browse_agent",
       description:
         "Runs as the background `worker-browse` agent. Dispatch via the Agent tool (subagent_type: worker-browse) so the turn is never blocked; the result arrives as a completion notification. "
-        + "A Pi-driven autonomous browser worker (default model `gpt-5.4-mini`) "
+        + "A Pi-driven autonomous browser worker (default model `gpt-5.6-luna`) "
         + "drives a real browser to accomplish `task`, keeps raw DOM and page "
         + "snapshots inside its own context, and returns a single text result. "
         + "Use for delegated multi-step web tasks such as comparing prices, logging "

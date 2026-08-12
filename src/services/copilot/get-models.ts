@@ -89,11 +89,11 @@ export interface Model {
     multiplier: number
     restricted_to?: string[]
     /**
-     * Per-token prices, scaled by 1e9. Present on the live catalog even
-     * where `is_premium` / `multiplier` are absent (usage-based-billing
-     * accounts populate this instead), which is why both shapes are
-     * modelled: reading only the premium pair silently yields nothing
-     * on those accounts.
+     * Prices for `batch_size` tokens, scaled by 1e9. Present on the live
+     * catalog even where `is_premium` / `multiplier` are absent
+     * (usage-based-billing accounts populate this instead), which is why both
+     * shapes are modelled: reading only the premium pair silently yields
+     * nothing on those accounts.
      */
     token_prices?: {
       input_price?: number

@@ -12,8 +12,9 @@
 
 export {
   BROWSE_DEFAULT_MODEL,
-  DEFAULT_MODEL,
+  DEFAULT_MODEL_CHAIN,
   EXPLORE_DEFAULT_MODEL,
+  resolveDefaultModel,
   resolveModeDefaults,
   REVIEW_DEFAULT_MODEL,
   runWorkerAgent,

@@ -4,8 +4,8 @@
  * Browse runs the SAME `runWorkerAgent` engine as explore/implement/review,
  * but with three browse-specific differences this file pins:
  *
- *   1. the default model is `BROWSE_DEFAULT_MODEL` (the Gate-B browse model),
- *      NOT the gemini worker `DEFAULT_MODEL` — and an explicit `model` arg
+ *   1. the default model is `BROWSE_DEFAULT_MODEL`; it also leads the
+ *      tier-adaptive worker gate/fallback chain, while an explicit `model` arg
  *      still wins;
  *   2. the toolset is the browser-control tools (`buildBrowseTools`), NOT
  *      the filesystem worker tools (`buildWorkerTools`);
@@ -32,7 +32,7 @@ import { state } from "~/lib/state"
 import { recordingFetch, sseFinalText, sseToolCall } from "./helpers/worker-sse"
 import {
   BROWSE_DEFAULT_MODEL,
-  DEFAULT_MODEL,
+  DEFAULT_MODEL_CHAIN,
   runWorkerAgent,
 } from "~/lib/worker-agent/engine"
 import {
@@ -89,8 +89,8 @@ function fakeModel(
     // Drive BOTH fixtures through `/chat/completions` so the chat-shaped SSE
     // below works. The engine's model SELECTION (what this file tests) is
     // orthogonal to the stream-fn's chat-vs-responses endpoint routing —
-    // gpt-5.4-mini is `/responses`-only in production, but the routing is
-    // covered by the stream-fn tests, not here.
+    // Production routing comes from each model's live catalog endpoints, but
+    // that split is covered by the stream-fn tests rather than this selection test.
     supported_endpoints: ["/v1/chat/completions"],
   }
 }
@@ -121,9 +121,9 @@ beforeEach(() => {
         tool_calls: true,
         reasoning_effort: ["low", "medium", "high"],
       }),
-      // Gemini worker default — present so a wrong-default regression
-      // (browse falling back to DEFAULT_MODEL) is observable.
-      fakeModel(DEFAULT_MODEL, {
+      // Broad-tier fallback — present so a wrong-default regression
+      // (browse choosing the second gate-chain entry) is observable.
+      fakeModel(DEFAULT_MODEL_CHAIN[1]!, {
         tool_calls: true,
         reasoning_effort: ["low", "medium", "high"],
       }),
@@ -147,8 +147,9 @@ afterEach(() => {
 // ============================================================
 
 describe("BROWSE_DEFAULT_MODEL", () => {
-  test("pins the Gate-B browse model", () => {
-    expect(BROWSE_DEFAULT_MODEL).toBe("gpt-5.4-mini")
+  test("pins the browse model to the preferred worker gate-chain entry", () => {
+    expect(BROWSE_DEFAULT_MODEL).toBe("gpt-5.6-luna")
+    expect(BROWSE_DEFAULT_MODEL).toBe(DEFAULT_MODEL_CHAIN[0])
   })
 })
 
@@ -191,10 +192,10 @@ describe("browse mode model selection", () => {
         prompt: "x",
         mode: "browse",
         workspace: dir,
-        model: DEFAULT_MODEL,
+        model: DEFAULT_MODEL_CHAIN[1]!,
       })
       expect(r.isError).toBeUndefined()
-      expect(bodies[0]!.model).toBe(DEFAULT_MODEL)
+      expect(bodies[0]!.model).toBe(DEFAULT_MODEL_CHAIN[1])
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

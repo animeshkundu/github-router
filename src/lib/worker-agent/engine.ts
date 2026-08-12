@@ -89,6 +89,8 @@ import {
   getInstanceUuid,
   registerExitHandlers,
 } from "./lifecycle"
+import { state } from "~/lib/state"
+
 import { resolveModelAndThinking } from "./model-resolve"
 import { getWorkerSessionDefault } from "./session-defaults"
 import type { WorkerMode } from "./session-defaults"
@@ -125,33 +127,42 @@ import { type WorktreeHandle, createWorktree } from "./worktree"
 const WORKTREE_REGISTRY = new WorktreeRegistry()
 registerExitHandlers(WORKTREE_REGISTRY)
 
-/** Worker-availability GATE sentinel + final fallback. `gpt-5.4-mini` — cheap,
- *  broadly-available, tool-call-capable, 400k-context, with tight
- *  function-calling-loop discipline (earlier gemini-flash cheap defaults
- *  early-stopped with empty turns on the function-calling loop; gpt-5.4-mini
- *  does not). Exported and aliased as `WORKER_DEFAULT_MODEL`:
- *  `workerToolsEnabled()` gates the ENTIRE worker surface on this id being
- *  present with `tool_calls`. It is no longer `explore`'s default (see
- *  `EXPLORE_DEFAULT_MODEL`) — it stays the gate sentinel because it's the
- *  cheapest broadly-present tool-caller, and the fallback for any unmatched
- *  mode. */
-export const DEFAULT_MODEL = "gpt-5.4-mini"
+/** Worker-availability gate + unmatched-mode fallback chain. Luna leads where
+ *  the live catalog grants access: it is cheaper, faster, and has a larger context
+ *  window than mini. Mini remains the broad-tier fallback because individual-trial
+ *  and education catalogs may omit Luna. The catalog itself is the entitlement
+ *  signal; `billing.restricted_to` describes model policy, not the user's tier.
+ *
+ *  `workerToolsEnabled()` admits the worker surface when either entry is present
+ *  with `tool_calls`. `resolveDefaultModel()` picks the first usable live entry for
+ *  an unmatched worker mode. Per-mode defaults remain independent of the gate. */
+export const DEFAULT_MODEL_CHAIN = Object.freeze([
+  "gpt-5.6-luna",
+  "gpt-5.4-mini",
+] as const)
 const DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 
-/** Default model for the READ-ONLY `explore` mode. `gemini-3.6-flash` at `high`
- *  (via `EXPLORE_DEFAULT_THINKING`; flash advertises no xhigh) — a fast, cheap,
- *  1M-context tool-caller for read-only repo research. Routes over
- *  `/chat/completions` via the translation shim (the same proven path the
- *  `review` worker uses for gemini). Like `implement`'s gpt-5.6-sol this is NOT a
- *  `workerToolsEnabled` gate input — if absent (e.g. a non-enterprise tier)
- *  `explore` errors helpfully at call time rather than vanishing the whole worker
- *  surface. The caller (the main model) overrides BOTH the model and the reasoning
- *  per call via the `model` / `thinking` args — see the tier ladder (gpt-5.6-sol
- *  heavy / gpt-5.6-terra moderate / gemini-3.6-flash light) in the MCP tool desc. */
-export const EXPLORE_DEFAULT_MODEL = "gemini-3.6-flash"
-/** Default thinking for `explore`. `high` (flash has no xhigh); explicit rather
- *  than inherited from `DEFAULT_THINKING` so the explore effort can't drift if the
- *  shared fallback changes. */
+export function resolveDefaultModel(): string {
+  const models = state.models?.data ?? []
+  return DEFAULT_MODEL_CHAIN.find((id) =>
+    models.some((model) =>
+      model.id === id && model.capabilities?.supports?.tool_calls === true,
+    ),
+  ) ?? DEFAULT_MODEL_CHAIN[0]
+}
+
+/** Default model for the READ-ONLY `explore` mode. `gpt-5.6-luna` at `high`
+ *  (via `EXPLORE_DEFAULT_THINKING`) is the measured strict improvement over the
+ *  former Gemini Flash default: lower token cost, faster generation and tool-call
+ *  latency, a larger context window, and the full reasoning-effort ladder. `high`
+ *  is therefore a real selected tier rather than a clamp. Like `implement`'s
+ *  gpt-5.6-sol this per-mode default is NOT a `workerToolsEnabled` gate input — if
+ *  absent on a thin catalog, `explore` errors helpfully at call time rather than
+ *  vanishing the whole worker surface. The caller can override model and thinking
+ *  per call via the `model` / `thinking` args. */
+export const EXPLORE_DEFAULT_MODEL = "gpt-5.6-luna"
+/** Default thinking for `explore`. Explicit rather than inherited from
+ *  `DEFAULT_THINKING` so the explore effort cannot drift with the fallback. */
 export const EXPLORE_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 
 /** Default model + thinking for the READ-ONLY `review` mode.
@@ -170,46 +181,49 @@ export const REVIEW_DEFAULT_MODEL = "gemini-3.1-pro-preview"
 const REVIEW_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 
 /** Default model + thinking for the READ+WRITE `implement` mode. `gpt-5.6-sol`
- *  at `xhigh` — the strongest reasoning tier in the catalog, 1M+ context,
- *  routed through `/responses` by the stream-fn endpoint split. Coding edits
- *  benefit from maximum reasoning; the higher per-call cost is justified for
- *  autonomous implementation. An explicit `opts.model` still wins. */
+ *  at `high` — a time-to-outcome default for the 1M+ context model, routed
+ *  through `/responses` by the stream-fn endpoint split. Any caller can restore
+ *  a higher tier per call via `thinking` or per session via `worker_defaults`;
+ *  precedence is per-call > session > built-in. */
 export const IMPLEMENT_DEFAULT_MODEL = "gpt-5.6-sol"
-const IMPLEMENT_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
+const IMPLEMENT_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 
-/** `test` starts with the same built-in pair as `implement`, but remains an
- * independent mode so either can be overridden without affecting the other. */
+/** `test` starts with the same time-to-outcome built-in pair as `implement`, but
+ * remains independent so either mode can restore a higher tier per call via
+ * `thinking` or per session via `worker_defaults`. Resolution precedence is
+ * per-call > session > built-in. */
 export const TEST_DEFAULT_MODEL = "gpt-5.6-sol"
-const TEST_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
+const TEST_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 
-/** Default model for `browse` mode. `gpt-5.4-mini` — the Gate-B-winning
- *  browse model (small + fast enough to drive a tab at human pace, with
- *  enough tool-calling discipline to terminate). This is DISTINCT from the
- *  gemini worker `DEFAULT_MODEL`: browse is a different workload (drive a
- *  page, not read a repo) and was tuned separately. May be retuned after
- *  the flash-vs-mini eval settles. Routed through `/responses` by the
- *  stream-fn's endpoint split (it's a gpt-5.x model). Caller can override
+/** Default model for `browse` mode. `gpt-5.6-luna` has the same measured image
+ *  ceiling as `gpt-5.4-mini`, so screenshot-heavy sessions retain their input
+ *  capacity, and endpoint routing is derived from the live catalog. Luna's full
+ *  reasoning-effort ladder preserves the independent `high` browse default.
+ *  This is deliberately a per-mode default even though it also leads
+ *  `DEFAULT_MODEL_CHAIN`; the general worker gate remains tier-adaptive while
+ *  browse still applies its independent reachability gate. Caller can override
  *  per call via the `model` arg.
  *
  *  Exported so the MCP browse handler reads the same constant — drift
  *  between the two would ship a tool whose docs disagree with its runtime
  *  default. */
-export const BROWSE_DEFAULT_MODEL = "gpt-5.4-mini"
+export const BROWSE_DEFAULT_MODEL = "gpt-5.6-luna"
 /** Default thinking for `browse`. Higher than the page-driving workload
  *  strictly needs, but the termination discipline benefits from it. */
 const BROWSE_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 
-/** Default model + thinking for the read-only `plan` mode. `claude-opus-4.8`
- *  at `xhigh` — planning is the highest-leverage read-only step (the plan
- *  shapes everything downstream), so it gets the strongest reasoning model
- *  rather than the lightweight `gemini-3.6-flash` explore default. Uses the DOTTED
- *  Copilot catalog id (the worker resolver exact-matches `catalog.id`, it does
- *  NOT translate the Anthropic dashed slug; `claude-opus-5` is a single-segment
- *  slug so dotted == dashed). Falls back to a helpful unknown-model error at call
- *  time if opus-5 isn't in the catalog (e.g. a non-enterprise tier), exactly like
- *  `implement`'s `gpt-5.6-sol`. Caller's `model` arg still wins. */
+/** Default model + thinking for the read-only `plan` mode. `claude-opus-5`
+ *  at `high` favours time-to-outcome while retaining the strongest planning
+ *  model rather than the lightweight `gpt-5.6-luna` explore default. Any
+ *  caller can restore a higher tier per call via `thinking` or per session via
+ *  `worker_defaults`; precedence is per-call > session > built-in. Uses the
+ *  DOTTED Copilot catalog id (the worker resolver exact-matches `catalog.id`, it
+ *  does NOT translate the Anthropic dashed slug; `claude-opus-5` is a
+ *  single-segment slug so dotted == dashed). Falls back to a helpful unknown-model
+ *  error at call time if opus-5 isn't in the catalog (e.g. a non-enterprise tier),
+ *  exactly like `implement`'s `gpt-5.6-sol`. */
 export const PLAN_DEFAULT_MODEL = "claude-opus-5"
-const PLAN_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
+const PLAN_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 
 export interface EffectiveModeDefaults {
   model: string
@@ -230,13 +244,13 @@ const BUILT_IN_MODE_DEFAULTS: Readonly<Record<WorkerMode, {
   browse: { model: BROWSE_DEFAULT_MODEL, thinking: BROWSE_DEFAULT_THINKING },
 })
 
-/** Resolve the effective mode ladder without changing the gate sentinel. */
+/** Resolve the effective mode ladder without changing the worker gate. */
 export function resolveModeDefaults(
   mode: WorkerMode,
   ignoreSessionDefaults = false,
 ): EffectiveModeDefaults {
   const builtIn = BUILT_IN_MODE_DEFAULTS[mode] ?? {
-    model: DEFAULT_MODEL,
+    model: resolveDefaultModel(),
     thinking: DEFAULT_THINKING,
   }
   const override = ignoreSessionDefaults ? {} : getWorkerSessionDefault(mode)

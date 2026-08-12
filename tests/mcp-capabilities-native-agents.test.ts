@@ -1,5 +1,5 @@
-// Unit tests for the three `generic*` catch-all resolvers and the 1M context
-// floor they rely on.
+// Unit tests for the conditional cheaper-tier native resolvers and the 1M
+// context floor they rely on.
 //
 // Two properties are load-bearing and neither was previously covered:
 //
@@ -13,16 +13,15 @@
 //      Code's 200K default with no signal. The floor is what keeps the promise
 //      true against an upstream catalog change rather than merely asserted.
 //
-// `scoutModel` is covered here too because it shares the chain walk but
-// deliberately does NOT take the floor: its `gpt-5.4-mini` last resort is 400K
-// and is retained precisely for its wider availability.
+// `scoutModel` is covered here too because its luna -> Gemini chain carries the
+// same 1M floor and drop-not-downgrade contract.
 
 import { afterEach, expect, test } from "bun:test"
 
 import {
-  genericCheapModel,
-  genericFastModel,
-  genericModel,
+  generalPurposeFastModel,
+  implementerFastModel,
+  SCOUT_MODEL_CHAIN,
   scoutModel,
 } from "~/lib/mcp-capabilities"
 import { state } from "~/lib/state"
@@ -64,73 +63,51 @@ afterEach(() => {
   state.models = savedModels
 })
 
-test("genericModel prefers gpt-5.6-terra, falls back to gemini-3.1-pro-preview", () => {
+test("implementerFastModel prefers gpt-5.6-terra, falls back to gemini-3.1-pro-preview", () => {
   setCatalog(
     entry("gpt-5.6-terra", { ctx: 1_050_000 }),
     entry("gemini-3.1-pro-preview", { ctx: ONE_M }),
   )
-  expect(genericModel()).toBe("gpt-5.6-terra")
+  expect(implementerFastModel()).toBe("gpt-5.6-terra")
 
   setCatalog(entry("gemini-3.1-pro-preview", { ctx: ONE_M }))
-  expect(genericModel()).toBe("gemini-3.1-pro-preview")
+  expect(implementerFastModel()).toBe("gemini-3.1-pro-preview")
 })
 
 // gpt-5.6-sol is deliberately absent from this chain: the OpenAI frontier coder
 // is already `implementer`'s job, and a catch-all that quietly bills at frontier
 // rates is the opposite of what the agent is for.
-test("genericModel does NOT fall through to the OpenAI frontier", () => {
+test("implementerFastModel does NOT fall through to the OpenAI frontier", () => {
   setCatalog(
     entry("gpt-5.6-sol", { ctx: 1_050_000 }),
     entry("gpt-5.5", { ctx: 1_050_000 }),
   )
-  expect(genericModel()).toBeUndefined()
+  expect(implementerFastModel()).toBeUndefined()
 })
 
-test("genericFastModel prefers gemini-3.6-flash, falls back to gemini-3.5-flash", () => {
-  setCatalog(
-    entry("gemini-3.6-flash", { ctx: ONE_M }),
-    entry("gemini-3.5-flash", { ctx: ONE_M }),
-  )
-  expect(genericFastModel()).toBe("gemini-3.6-flash")
-
-  setCatalog(entry("gemini-3.5-flash", { ctx: ONE_M }))
-  expect(genericFastModel()).toBe("gemini-3.5-flash")
-})
-
-// The fallback stays inside the Gemini flash family rather than taking luna,
-// which would otherwise be the natural cross-vendor choice: luna is
-// genericCheapModel's ONLY entry, so sharing it would collapse two roster
-// entries onto one model in the degraded case.
-test("genericFastModel does not borrow generic-cheap's model", () => {
+test("generalPurposeFastModel is single-entry: gpt-5.6-luna or nothing", () => {
   setCatalog(entry("gpt-5.6-luna", { ctx: 1_050_000 }))
-  expect(genericFastModel()).toBeUndefined()
-  expect(genericCheapModel()).toBe("gpt-5.6-luna")
-})
-
-test("genericCheapModel is single-entry: gpt-5.6-luna or nothing", () => {
-  setCatalog(entry("gpt-5.6-luna", { ctx: 1_050_000 }))
-  expect(genericCheapModel()).toBe("gpt-5.6-luna")
+  expect(generalPurposeFastModel()).toBe("gpt-5.6-luna")
 
   setCatalog(
     entry("gpt-5.6-terra", { ctx: 1_050_000 }),
     entry("gemini-3.6-flash", { ctx: ONE_M }),
+    entry("gemini-3.5-flash", { ctx: ONE_M }),
     entry("gpt-5.4-mini", { ctx: 400_000 }),
   )
-  expect(genericCheapModel()).toBeUndefined()
+  expect(generalPurposeFastModel()).toBeUndefined()
 })
 
 // The drop-not-downgrade rule. A thin catalog must not silently promote these
 // agents onto the lead's model.
-test("every generic resolver returns undefined on an empty or absent catalog", () => {
+test("every conditional resolver returns undefined on an empty or absent catalog", () => {
   setCatalog()
-  expect(genericModel()).toBeUndefined()
-  expect(genericFastModel()).toBeUndefined()
-  expect(genericCheapModel()).toBeUndefined()
+  expect(implementerFastModel()).toBeUndefined()
+  expect(generalPurposeFastModel()).toBeUndefined()
 
   state.models = undefined
-  expect(genericModel()).toBeUndefined()
-  expect(genericFastModel()).toBeUndefined()
-  expect(genericCheapModel()).toBeUndefined()
+  expect(implementerFastModel()).toBeUndefined()
+  expect(generalPurposeFastModel()).toBeUndefined()
 })
 
 test("a chain entry without tool_calls is skipped, and absent metadata fails closed", () => {
@@ -138,7 +115,7 @@ test("a chain entry without tool_calls is skipped, and absent metadata fails clo
     entry("gpt-5.6-terra", { ctx: 1_050_000, toolCalls: false }),
     entry("gemini-3.1-pro-preview", { ctx: ONE_M }),
   )
-  expect(genericModel()).toBe("gemini-3.1-pro-preview")
+  expect(implementerFastModel()).toBe("gemini-3.1-pro-preview")
 
   // No `supports` metadata at all -> not selected.
   state.models = {
@@ -157,7 +134,7 @@ test("a chain entry without tool_calls is skipped, and absent metadata fails clo
       },
     ] as never,
   }
-  expect(genericCheapModel()).toBeUndefined()
+  expect(generalPurposeFastModel()).toBeUndefined()
 })
 
 // The mutation this floor exists to catch: an id stays in the catalog with
@@ -169,41 +146,43 @@ test("minContextTokens skips a chain entry whose window has dropped below 1M", (
     entry("gpt-5.6-terra", { ctx: 400_000 }),
     entry("gemini-3.1-pro-preview", { ctx: ONE_M }),
   )
-  expect(genericModel()).toBe("gemini-3.1-pro-preview")
-
-  setCatalog(
-    entry("gemini-3.6-flash", { ctx: 128_000 }),
-    entry("gemini-3.5-flash", { ctx: 200_000 }),
-  )
-  expect(genericFastModel()).toBeUndefined()
+  expect(implementerFastModel()).toBe("gemini-3.1-pro-preview")
 
   setCatalog(entry("gpt-5.6-luna", { ctx: 400_000 }))
-  expect(genericCheapModel()).toBeUndefined()
+  expect(generalPurposeFastModel()).toBeUndefined()
 })
 
 test("absent context metadata fails closed under the 1M floor", () => {
   setCatalog(entry("gpt-5.6-luna"))
-  expect(genericCheapModel()).toBeUndefined()
+  expect(generalPurposeFastModel()).toBeUndefined()
 })
 
-// scout shares the walk but NOT the floor: `gpt-5.4-mini` is 400K and is
-// retained as the last resort because its `restricted_to` is the widest of the
-// three (it includes individual_trial and edu). On a thin non-enterprise
-// catalog a 400K scout beats no scout.
-test("scoutModel walks flash -> luna -> mini and keeps its sub-1M last resort", () => {
+// Scout keeps a distinct cross-vendor 1M fallback. Pin the chain shape itself:
+// referencing EXPLORE_DEFAULT_MODEL here previously let an explore retune collapse
+// both entries to Luna without a type error or failed behavior test.
+test("scout chain has two distinct literal entries", () => {
+  expect(SCOUT_MODEL_CHAIN).toEqual(["gpt-5.6-luna", "gemini-3.6-flash"])
+  expect(new Set(SCOUT_MODEL_CHAIN).size).toBe(2)
+})
+
+// The accepted consequence is that a catalog carrying neither Luna nor the
+// 1M Gemini fallback gets no scout rather than a 400K last resort.
+test("scoutModel walks luna -> flash, enforces 1M, and otherwise drops", () => {
   setCatalog(
     entry("gemini-3.6-flash", { ctx: ONE_M }),
     entry("gpt-5.6-luna", { ctx: 1_050_000 }),
-    entry("gpt-5.4-mini", { ctx: 400_000 }),
-  )
-  expect(scoutModel()).toBe("gemini-3.6-flash")
-
-  setCatalog(
-    entry("gpt-5.6-luna", { ctx: 1_050_000 }),
-    entry("gpt-5.4-mini", { ctx: 400_000 }),
   )
   expect(scoutModel()).toBe("gpt-5.6-luna")
 
-  setCatalog(entry("gpt-5.4-mini", { ctx: 400_000 }))
-  expect(scoutModel()).toBe("gpt-5.4-mini")
+  // Exactly 1M must remain eligible. If this floor comparison ever becomes
+  // exclusive, scout silently loses its cross-vendor fallback.
+  setCatalog(entry("gemini-3.6-flash", { ctx: ONE_M }))
+  expect(scoutModel()).toBe("gemini-3.6-flash")
+
+  setCatalog(
+    entry("gpt-5.6-luna", { ctx: 400_000 }),
+    entry("gemini-3.6-flash", { ctx: 200_000 }),
+    entry("gpt-5.4-mini", { ctx: 400_000 }),
+  )
+  expect(scoutModel()).toBeUndefined()
 })
