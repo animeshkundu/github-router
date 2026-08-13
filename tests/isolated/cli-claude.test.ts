@@ -93,6 +93,13 @@ let pickClaudeDefaultImpl: (family?: string) => string = (family) =>
   `claude-opus-${family ?? "5"}`
 let pickClaudeDefaultCalls: Array<string | undefined> = []
 
+// Stands in for `withOneMSuffixForLead`, which the real `resolveLeadSlugArg`
+// applies to the `-m fast` and full-slug branches. Identity by default (a bare
+// catalog advertises no 1M window), rebound by the tests that assert the
+// bracket reaches ANTHROPIC_MODEL. Kept as a seam rather than inlined so the
+// mock cannot quietly disagree with the source about WHICH branches decorate.
+let leadOneMDecorateImpl: (slug: string) => string = (slug) => slug
+
 mock.module("~/lib/port", () => ({
   // Anthropic-published dashed slug (per plan §14) — Claude Code's `/model`
   // UI registry expects this, and the proxy's resolver preserves the
@@ -140,13 +147,13 @@ mock.module("~/lib/port", () => ({
       pickClaudeDefaultCalls.push(undefined)
       return pickClaudeDefaultImpl(undefined)
     }
-    if (arg.toLowerCase() === "fast") return "claude-sonnet-5"
+    if (arg.toLowerCase() === "fast") return leadOneMDecorateImpl("claude-sonnet-5")
     const shorthand = arg.match(/^(\d+\.\d+)$/)?.[1]
     if (shorthand) {
       pickClaudeDefaultCalls.push(shorthand)
       return pickClaudeDefaultImpl(shorthand)
     }
-    return arg
+    return leadOneMDecorateImpl(arg)
   },
 }))
 
@@ -467,6 +474,7 @@ beforeEach(() => {
   // assertions see a clean slate.
   pickClaudeDefaultImpl = (family) => `claude-opus-${family ?? "5"}`
   pickClaudeDefaultCalls = []
+  leadOneMDecorateImpl = (slug) => slug
 })
 
 describe("claude command", () => {
@@ -549,6 +557,39 @@ describe("claude command", () => {
     )
     const [, , options] = spawnMock.mock.calls[0]
     expect(options.env.ANTHROPIC_MODEL).toBe("claude-sonnet-5")
+  })
+
+  test("`-m fast` carries the [1m] bracket all the way into ANTHROPIC_MODEL", async () => {
+    // The end-to-end shape of the gap a live session surfaced: the catalog
+    // advertises a 1M window for sonnet-5, but ANTHROPIC_MODEL arrived bare, so
+    // Claude Code budgeted the session at its 200K default. Asserting on the
+    // spawned child's env rather than only on the resolver is the point — the
+    // resolver was one of three places the bracket had to survive.
+    leadOneMDecorateImpl = (slug) =>
+      slug === "claude-sonnet-5" ? "claude-sonnet-5[1m]" : slug
+    const run = getRunFn()
+
+    await run({ args: { model: "fast" } })
+
+    expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:12345",
+      "claude-sonnet-5[1m]",
+    )
+    const [, , options] = spawnMock.mock.calls[0]
+    expect(options.env.ANTHROPIC_MODEL).toBe("claude-sonnet-5[1m]")
+  })
+
+  test("an explicitly pinned full slug carries [1m] too", async () => {
+    // `-m fast` and `-m claude-sonnet-5` must produce identical sessions, and
+    // the context budget is part of that identity.
+    leadOneMDecorateImpl = (slug) =>
+      slug === "claude-sonnet-5" ? "claude-sonnet-5[1m]" : slug
+    const run = getRunFn()
+
+    await run({ args: { model: "claude-sonnet-5" } })
+
+    const [, , options] = spawnMock.mock.calls[0]
+    expect(options.env.ANTHROPIC_MODEL).toBe("claude-sonnet-5[1m]")
   })
 
   test("a whitespace-only -m behaves like an absent one, fallback walk included", async () => {

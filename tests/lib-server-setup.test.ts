@@ -660,27 +660,37 @@ describe("withBodyLimit", () => {
 
 // Budget mode: `-m fast` and the Haiku small/fast tier.
 describe("budget-mode lead and small/fast tier", () => {
-  function withCatalog<T>(ids: Array<string>, fn: () => T): T {
+  // Entries are either a bare id (no advertised window — the shape most of
+  // these tests want, since they are about tier selection rather than context
+  // accounting) or an `[id, maxContextWindowTokens]` pair for the tests that
+  // are specifically about the `[1m]` decoration.
+  type CatalogEntry = string | readonly [string, number]
+
+  function withCatalog<T>(ids: Array<CatalogEntry>, fn: () => T): T {
     const saved = state.models
     state.models = {
       object: "list",
-      data: ids.map((id) => ({
-        id,
-        name: id,
-        object: "model",
-        preview: false,
-        vendor: "anthropic",
-        version: "1",
-        model_picker_enabled: true,
-        capabilities: {
-          family: id,
-          limits: {},
+      data: ids.map((entry) => {
+        const [id, ctx] = typeof entry === "string" ? [entry, undefined] : entry
+        return {
+          id,
+          name: id,
           object: "model",
-          supports: {},
-          tokenizer: "o200k_base",
-          type: "chat",
-        },
-      })) as unknown as NonNullable<typeof state.models>["data"],
+          preview: false,
+          vendor: "anthropic",
+          version: "1",
+          model_picker_enabled: true,
+          capabilities: {
+            family: id,
+            limits:
+              ctx === undefined ? {} : { max_context_window_tokens: ctx },
+            object: "model",
+            supports: {},
+            tokenizer: "o200k_base",
+            type: "chat",
+          },
+        }
+      }) as unknown as NonNullable<typeof state.models>["data"],
     }
     try {
       return fn()
@@ -711,20 +721,142 @@ describe("budget-mode lead and small/fast tier", () => {
     }
   }
 
+  // The live Copilot catalog as measured on 2026-08-13: every current Claude
+  // model advertises a 1M window except Haiku 4.5, which really is 200K. These
+  // tests use it rather than a bare-id fixture because a fixture with no
+  // advertised window cannot tell a correct "left bare" from the bug — it makes
+  // every model look 200K, which is exactly why the gap below went unnoticed.
+  const LIVE_SHAPED_CATALOG = [
+    ["claude-opus-5", 1_000_000],
+    ["claude-sonnet-5", 1_000_000],
+    ["claude-sonnet-4.6", 1_000_000],
+    ["claude-haiku-4.5", 200_000],
+  ] as const
+
+  function withoutOneMOptOut(fn: () => void): void {
+    const prior = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+    delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+    try {
+      fn()
+    } finally {
+      if (prior === undefined) delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+      else process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = prior
+    }
+  }
+
   test("`-m fast` resolves to the budget lead", () => {
-    expect(resolveLeadSlugArg("fast")).toBe(BUDGET_LEAD_MODEL)
-    expect(resolveLeadSlugArg("FAST")).toBe(BUDGET_LEAD_MODEL)
+    withCatalog([], () => {
+      expect(resolveLeadSlugArg("fast")).toBe(BUDGET_LEAD_MODEL)
+      expect(resolveLeadSlugArg("FAST")).toBe(BUDGET_LEAD_MODEL)
+    })
+  })
+
+  test("`-m fast` carries [1m] when the catalog says sonnet-5 serves 1M", () => {
+    // The gap this pins: sonnet-5 ships the same shape opus-5 does — a single
+    // slug advertising 1M, no `-1m` sibling — but the decoration used to be
+    // opus-only, so a budget lead was budgeted locally at 200K and auto-compacted
+    // at roughly a fifth of the window Copilot was willing to serve.
+    withoutOneMOptOut(() => {
+      withCatalog([...LIVE_SHAPED_CATALOG], () => {
+        expect(resolveLeadSlugArg("fast")).toBe("claude-sonnet-5[1m]")
+      })
+    })
   })
 
   test("`-m fast` and the explicit sonnet slug agree, so both give the same session", () => {
-    expect(isBudgetClaudeLead(resolveLeadSlugArg("fast"))).toBe(true)
-    expect(isBudgetClaudeLead("claude-sonnet-5")).toBe(true)
+    withoutOneMOptOut(() => {
+      withCatalog([...LIVE_SHAPED_CATALOG], () => {
+        // Identical STRING, not merely identical budget classification: the
+        // context budget is part of what "the same session" means, so a
+        // decoration applied to one branch and not the other would reintroduce
+        // the divergence the `-m fast` alias exists to avoid.
+        expect(resolveLeadSlugArg("fast")).toBe(
+          resolveLeadSlugArg("claude-sonnet-5"),
+        )
+        expect(isBudgetClaudeLead(resolveLeadSlugArg("fast"))).toBe(true)
+        expect(isBudgetClaudeLead("claude-sonnet-5")).toBe(true)
+        // The bracket must not confuse the budget-lead predicate.
+        expect(isBudgetClaudeLead("claude-sonnet-5[1m]")).toBe(true)
+      })
+    })
   })
 
-  test("a full slug still passes through unchanged", () => {
-    expect(resolveLeadSlugArg("claude-opus-5")).toBe("claude-opus-5")
-    expect(isBudgetClaudeLead("claude-opus-5")).toBe(false)
-    expect(isBudgetClaudeLead("claude-opus-5[1m]")).toBe(false)
+  test("a full slug passes through, decorated only when the catalog backs it", () => {
+    withoutOneMOptOut(() => {
+      withCatalog([...LIVE_SHAPED_CATALOG], () => {
+        expect(resolveLeadSlugArg("claude-opus-5")).toBe("claude-opus-5[1m]")
+        // Haiku 4.5 genuinely is 200K, so it stays bare — the rule is the
+        // catalog's advertised window, not a hardcoded family list.
+        expect(resolveLeadSlugArg("claude-haiku-4-5")).toBe("claude-haiku-4-5")
+        expect(isBudgetClaudeLead("claude-opus-5")).toBe(false)
+        expect(isBudgetClaudeLead("claude-opus-5[1m]")).toBe(false)
+      })
+    })
+  })
+
+  test("a dashed Anthropic slug is decorated even though the catalog id is dotted", () => {
+    // An exact-id match would answer "no 1M" here purely because it never found
+    // `claude-sonnet-4-6` in a catalog that carries `claude-sonnet-4.6`. That
+    // silent under-accounting is why the lead decorator resolves first.
+    withoutOneMOptOut(() => {
+      withCatalog([...LIVE_SHAPED_CATALOG], () => {
+        expect(resolveLeadSlugArg("claude-sonnet-4-6")).toBe(
+          "claude-sonnet-4-6[1m]",
+        )
+      })
+    })
+  })
+
+  test("a hand-pinned [1m] slug is not double-decorated", () => {
+    withoutOneMOptOut(() => {
+      withCatalog([...LIVE_SHAPED_CATALOG], () => {
+        expect(resolveLeadSlugArg("claude-sonnet-5[1m]")).toBe(
+          "claude-sonnet-5[1m]",
+        )
+        expect(resolveLeadSlugArg("claude-opus-5[1m]")).toBe("claude-opus-5[1m]")
+      })
+    })
+  })
+
+  test("a 200K sonnet catalog leaves the budget lead bare", () => {
+    // Cap-awareness in the direction that matters: on a tier where sonnet-5 is
+    // not 1M, claiming it would make Claude Code over-account and compact late.
+    withoutOneMOptOut(() => {
+      withCatalog([["claude-sonnet-5", 200_000]], () => {
+        expect(resolveLeadSlugArg("fast")).toBe("claude-sonnet-5")
+        expect(resolveLeadSlugArg("claude-sonnet-5")).toBe("claude-sonnet-5")
+      })
+    })
+  })
+
+  test("an unpopulated catalog leaves every branch bare", () => {
+    withoutOneMOptOut(() => {
+      const saved = state.models
+      state.models = undefined
+      try {
+        expect(resolveLeadSlugArg("fast")).toBe("claude-sonnet-5")
+        expect(resolveLeadSlugArg("claude-opus-5")).toBe("claude-opus-5")
+      } finally {
+        state.models = saved
+      }
+    })
+  })
+
+  test("CLAUDE_CODE_DISABLE_1M_CONTEXT suppresses the decoration on every branch", () => {
+    const prior = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+    process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1"
+    try {
+      withCatalog([...LIVE_SHAPED_CATALOG], () => {
+        expect(resolveLeadSlugArg("fast")).toBe("claude-sonnet-5")
+        expect(resolveLeadSlugArg("claude-opus-5")).toBe("claude-opus-5")
+        expect(resolveLeadSlugArg("claude-sonnet-4-6")).toBe(
+          "claude-sonnet-4-6",
+        )
+      })
+    } finally {
+      if (prior === undefined) delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+      else process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = prior
+    }
   })
 
   test("a budget lead drops the small/fast tier and the Haiku row to Haiku", () => {

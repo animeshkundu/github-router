@@ -181,13 +181,17 @@ export function resolveModel(modelId: string): string {
   //
   // Strip for the catalog lookup and delegate. If the stripped
   // resolution lands on a `-1m` variant (enterprise opus path via
-  // family preference), perfect — the upstream call routes to the 1M
-  // backend and Claude Code's local accounting was right. Otherwise
-  // (non-enterprise for opus, or any [1m] on sonnet/haiku where
-  // Copilot has no -1m backend), warn and return the 200K resolution
-  // so the request still succeeds — at the cost of Claude Code
-  // over-accounting context against the proxy (it will compact early
-  // because it thinks the window is 1M).
+  // family preference) or on a base slug that natively advertises a
+  // >=1M window (how opus-4.8, opus-5 and sonnet-5 all ship), perfect —
+  // the upstream call routes to the 1M backend and Claude Code's local
+  // accounting was right. Otherwise — a non-enterprise tier carrying
+  // only the 200K opus variant, or a genuinely 200K model such as
+  // claude-haiku-4.5 — warn and return the 200K resolution so the
+  // request still succeeds, at the cost of Claude Code over-accounting
+  // context against the proxy (it will compact early because it thinks
+  // the window is 1M). The decorators upstream of this are all
+  // catalog-gated, so reaching that branch means the catalog changed
+  // under a running process or the slug was pinned by hand.
   //
   // Bounded recursion: the stripped form no longer matches the regex,
   // so the inner resolveModel call cannot re-enter this branch.

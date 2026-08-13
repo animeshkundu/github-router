@@ -1,6 +1,6 @@
 import consola from "consola"
 
-import { ONE_M_TOKENS } from "./one-m-context"
+import { ONE_M_TOKENS, withOneMSuffixForLead } from "./one-m-context"
 import { state } from "./state"
 import { isClaudeModel } from "./anthropic-translate/classifier"
 import { resolveModel } from "./utils"
@@ -68,11 +68,22 @@ export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
  * This helper detects the catalog state at launch and only opts in
  * when the backend can actually serve 1M.
  *
- * Sonnet/Haiku families are intentionally NOT given `[1m]` defaults
- * because Copilot has no 1M backend for them (and Anthropic-side
- * `modelSupports1M` doesn't list haiku at all). See
- * `src/lib/server-setup.ts:getClaudeCodeEnvVars` for the
- * `ANTHROPIC_DEFAULT_{SONNET,HAIKU,OPUS}_MODEL` tier defaults.
+ * This helper answers the question only for the OPUS families, because a
+ * family is what it is asked about (`-m 4.7` names no slug). Every other lead
+ * slug — `-m fast`, a full slug a power user pins, the implicit budget lead —
+ * goes through `withOneMSuffixForLead` (`./one-m-context`) instead, which
+ * resolves the slug first and then reads the resolved entry's advertised
+ * window. The two agree wherever both can be asked: a family that resolves to a
+ * 1M backend is 1M by either route.
+ *
+ * A previous revision of this comment claimed Sonnet and Haiku were left bare
+ * because "Copilot has no 1M backend for them". That was true when it was
+ * written and is now false for Sonnet: the live catalog advertises
+ * `max_context_window_tokens: 1_000_000` on both `claude-sonnet-5` and
+ * `claude-sonnet-4.6` (Haiku 4.5 really is 200K, and is left bare by the same
+ * catalog check rather than by a hardcoded family rule). Nothing here is
+ * family-gated any more — the catalog decides per model, so the next family
+ * that ships 1M is picked up without an edit.
  *
  * Must be called AFTER `cacheModels()` has populated `state.models`.
  * Returns the bare slug if the catalog isn't populated (resolveModel
@@ -105,11 +116,23 @@ export const BUDGET_SMALL_FAST_CATALOG_ID = "claude-haiku-4.5"
  *   - a full slug → unchanged, including Copilot slugs a power user pins
  *   - absent      → the ordinary default
  *
+ * Every branch is `[1m]`-decorated against the live catalog, by
+ * `pickClaudeDefault` on the two Opus-family branches and by
+ * `withOneMSuffixForLead` on the other two. Pinning a MODEL is not a request to
+ * give up four fifths of its context window, which is what leaving the other
+ * two bare amounted to: `claude-sonnet-5` advertises a 1M window, so `-m fast`
+ * and `-m claude-sonnet-5` were both budgeted locally at Claude Code's 200K
+ * default and auto-compacted at roughly a fifth of the real window. The
+ * decoration is catalog-gated per model, so a genuinely 200K model
+ * (`claude-haiku-4.5`) still comes back bare.
+ *
  * `fast` resolves to an ordinary slug rather than setting a mode flag, because
  * budget mode is keyed off the RESOLVED lead everywhere it matters (the advisor
  * escalation, the delegation prose, the small/fast tier). `-m fast` and
  * `-m claude-sonnet-5` must therefore produce identical sessions, which a flag
- * only one of the two set would break.
+ * only one of the two set would break. The shared decoration is part of that
+ * identity: decorating one branch and not the other would reintroduce the
+ * divergence through the context budget instead of through a flag.
  *
  * Callers must keep treating any explicit `-m` as explicit: the
  * `DEFAULT_CLAUDE_MODEL_FALLBACKS` walk applies to the implicit-default path
@@ -121,10 +144,12 @@ export function resolveLeadSlugArg(modelArg: string | undefined): string {
   // returned verbatim as a model id.
   const arg = modelArg?.trim()
   if (!arg) return pickClaudeDefault()
-  if (arg.toLowerCase() === "fast") return BUDGET_LEAD_MODEL
+  if (arg.toLowerCase() === "fast") {
+    return withOneMSuffixForLead(BUDGET_LEAD_MODEL)
+  }
   const opusFamilyShorthand = arg.match(/^(\d+\.\d+)$/)?.[1]
   if (opusFamilyShorthand) return pickClaudeDefault(opusFamilyShorthand)
-  return arg
+  return withOneMSuffixForLead(arg)
 }
 
 /**
