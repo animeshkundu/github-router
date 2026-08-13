@@ -95,7 +95,21 @@ export function withOneMSuffix(id: string): string {
  * so the two paths cannot disagree about a family both can be asked about.
  *
  * Idempotent: a slug that already carries the bracket is returned unchanged, so
- * a user who pins `-m claude-opus-5[1m]` by hand does not get `[1m][1m]`.
+ * a user who pins `-m claude-opus-5[1m]` by hand does not get `[1m][1m]`. That
+ * early return deliberately does NOT re-validate the pin against the catalog.
+ * `-m claude-haiku-4-5[1m]` therefore survives even though Haiku 4.5 is a 200K
+ * model — the same as before this function existed, and `resolveModel` already
+ * warns loudly about exactly that case. Stripping a bracket the user typed
+ * would be the surprising behaviour, and it would be the only place in the
+ * launcher that overrides an explicit `-m`.
+ *
+ * A repeat can still arrive from the CLIENT side rather than from here: the
+ * `/model` picker rows are seeded already decorated, and Claude Code's alias
+ * path appends its own bracket (`getDefaultSonnetModel() + '[1m]'`), so
+ * selecting `sonnet[1m]` puts `claude-sonnet-5[1m][1m]` on the wire. That
+ * resolves to the same bare id — `resolveModel`'s strip recurses — and Claude
+ * Code's own detector is unanchored, so local accounting is right too. Pinned
+ * by a regression test in `tests/lib-utils.test.ts`.
  *
  * Degrades the same safe direction as everything else here. An unpopulated
  * catalog makes `resolveModel` a pass-through and `catalogAdvertises1M` false,

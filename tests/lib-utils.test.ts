@@ -469,6 +469,35 @@ describe("resolveModel", () => {
     // resolve in a finite number of recursions.
     expect(() => resolveModel("claude-opus-4-7[1m][1m]")).not.toThrow()
   })
+
+  test("a doubly-bracketed slug resolves to the same bare id as a singly-bracketed one", () => {
+    // Not pathological any more — REACHABLE. The proxy now seeds the /model
+    // picker tier rows already decorated (ANTHROPIC_DEFAULT_SONNET_MODEL =
+    // "claude-sonnet-5[1m]"), and Claude Code's alias path appends its own
+    // bracket on top: `case 'sonnet': return getDefaultSonnetModel() +
+    // (has1mTag ? '[1m]' : '')`. So selecting `sonnet[1m]` puts
+    // "claude-sonnet-5[1m][1m]" on the wire. Both sides handle it — the
+    // recursion above strips every repeat before the upstream call, and Claude
+    // Code's own detector is an UNANCHORED /\[1m\]/i so local accounting still
+    // reads 1M — but "handles it" is a property worth pinning rather than
+    // rediscovering, since the seed change is what made the input reachable.
+    const models = [
+      { id: "claude-sonnet-5", ctx: 1_000_000 },
+      { id: "claude-opus-5", ctx: 1_000_000 },
+    ]
+    state.models = {
+      object: "list",
+      data: models.map(({ id, ctx }) => ({
+        id,
+        capabilities: { limits: { max_context_window_tokens: ctx } },
+      })) as never,
+    }
+    for (const { id } of models) {
+      expect(resolveModel(`${id}[1m][1m]`)).toBe(id)
+      expect(resolveModel(`${id}[1m][1m]`)).toBe(resolveModel(`${id}[1m]`))
+      expect(resolveModel(`${id}[1m][1m]`)).not.toContain("[1m]")
+    }
+  })
 })
 
 // --- resolveModel: consola breadcrumb assertions for Step 5 dated-slug retry ---

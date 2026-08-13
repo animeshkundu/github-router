@@ -29,13 +29,18 @@ Fallback chains only fire on the implicit-default path — explicit `-m`/`--mode
 
 ## `/model` tier-default knobs
 
-`getClaudeCodeEnvVars` seeds three additional presence-guarded defaults so the `/model` picker's Sonnet, Haiku, and Opus rows show ids the proxy knows how to route (cc-backup `src/utils/model/modelOptions.ts:78,109,167` reads these as the 3P-user picker customization knobs):
+`getClaudeCodeEnvVars` seeds three additional presence-guarded defaults so the `/model` picker's Sonnet, Haiku, and Opus rows show ids the proxy knows how to route (cc-backup `src/utils/model/modelOptions.ts:78,109,167` reads these as the 3P-user picker customization knobs), each paired with a `*_MODEL_NAME` label seed:
 
-| Env var | Default | Why bare slug (no `[1m]`) |
+| Env var | Default | Notes |
 |---|---|---|
-| `ANTHROPIC_DEFAULT_SONNET_MODEL` | `claude-sonnet-5` | Seeded to Sonnet 5 (newer + cheaper than `claude-sonnet-4-6`: 200/1000 vs 300/1500 multipliers, broadly available pro..enterprise). Bare slug: the `[1m]` decoration lives only on the active default (`ANTHROPIC_MODEL` via `pickClaudeDefault`), never on picker tier rows. |
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `claude-sonnet-5` (Opus lead) / `claude-haiku-4-5` (budget lead) | On an Opus lead, seeded to Sonnet 5 (not a Haiku slug) to match the `ANTHROPIC_SMALL_FAST_MODEL` default — the cheap-tier pick lands on Sonnet 5, which is newer and cheaper than `claude-haiku-4-5`. Bare slug: the `[1m]` decoration lives only on the active default (`ANTHROPIC_MODEL` via `pickClaudeDefault`), never on picker tier rows. |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `claude-opus-5` | The active default's `[1m]` decoration lives on `ANTHROPIC_MODEL` (see "1M context opt-in" below) and is cap-aware; the picker row stays bare because picker-tier seeds never carry the local `[1m]` decoration. |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | `claude-sonnet-5`, `[1m]`-decorated when the catalog backs it | Sonnet 5 is newer + cheaper than `claude-sonnet-4-6` (200/1000 vs 300/1500 multipliers, broadly available pro..enterprise). |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `claude-sonnet-5` (Opus lead) / `claude-haiku-4-5` (budget lead) | On an Opus lead, seeded to Sonnet 5 (not a Haiku slug) to match the `ANTHROPIC_SMALL_FAST_MODEL` default — the cheap-tier pick lands on Sonnet 5, which is newer and cheaper than `claude-haiku-4-5`. On a budget lead this row holds a genuinely 200K model, so it stays bare. |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `claude-opus-5`, `[1m]`-decorated when the catalog backs it | |
+| `ANTHROPIC_DEFAULT_{SONNET,HAIKU,OPUS}_MODEL_NAME` | the BARE slug of the row above | The picker label. Seeded only when we also seeded the row's model, so a user who pins their own tier model is never handed our label for it; a user-set label still wins when we did seed the model. |
+
+**Why the rows carry `[1m]` (they used to be pinned bare).** Selecting a tier row makes its env value the ACTIVE model id — cc-backup `model.ts:456-465` returns `getDefaultSonnetModel()` verbatim — so a bare row reproduces the same 200K under-accounting the active default already guards against, one interaction later. The earlier objection was that seeding a bracketed slug "would bypass cap-awareness"; the rows now go through `withOneMSuffixForLead`, the same catalog-gated detector the lead slug uses, which is exactly the cap-awareness that was missing. Verified rather than assumed in Claude Code's own source: `has1mContext()` is applied DIRECTLY to the env value to produce the row's "(1M context)" description (`modelOptions.ts:76-121`), and nothing validates or rejects the bracket — `parseUserSpecifiedModel` deliberately round-trips it.
+
+The label is seeded with the BARE slug because Claude Code falls back to the raw env value for a custom row's label (`label: process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME ?? customSonnetModel`), so an undecorated row would otherwise render literally as `claude-sonnet-5[1m]`. Seeding the name keeps the picker reading exactly as it does today while the value carries the bracket, and Claude Code appends its own "(1M context)" to the description.
 
 Presence-based guards mean each of these is preserved when set in the parent shell — symmetric with the `ANTHROPIC_SMALL_FAST_MODEL` and `CLAUDE_CODE_*` opt-out surfaces.
 

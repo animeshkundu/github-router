@@ -8,7 +8,7 @@ import { createBodyTooLargeError, limitRequestBody } from "srvx/body-limit"
 import { PATHS, ensurePaths } from "./paths"
 import { maybeSpawnDaemon, wireDaemonTeardown } from "./first-mate/scheduler/autospawn"
 import { agentToolsEnabled } from "./mcp-capabilities"
-import { withOneMSuffix } from "./one-m-context"
+import { withOneMSuffix, withOneMSuffixForLead } from "./one-m-context"
 import {
   BUDGET_SMALL_FAST_CATALOG_ID,
   BUDGET_SMALL_FAST_SLUG,
@@ -974,33 +974,68 @@ export function getClaudeCodeEnvVars(
   // to what Copilot has). Setting them seeds the three tier rows with
   // ids the proxy's resolveModel knows how to route.
   //
-  // Why NO [1m] suffix on the Sonnet/Haiku tier rows: the picker-row tier
-  // defaults are always the bare slug — the [1m] decoration for the
-  // *active* default lives on ANTHROPIC_MODEL itself (see pickClaudeDefault
-  // in src/lib/port.ts) and is cap-aware against the live catalog via the
-  // dual-signal detector (sibling-slug regex OR base-slug
-  // max_context_window_tokens). Seeding a bracketed slug here would bypass
-  // that cap-awareness and risk a request Copilot 400s (unrecognized
-  // bracket) or local over-accounting of context. On an OPUS lead both the
-  // Sonnet and Haiku tier rows are seeded to claude-sonnet-5 (the Haiku row is
-  // NOT a haiku slug) to match the ANTHROPIC_SMALL_FAST_MODEL default above —
-  // the Sonnet/cheap-tier picks land on Sonnet 5, which is newer and cheaper
-  // than the prior Sonnet-4.6 / Haiku-4.5 defaults. On a BUDGET lead the Haiku
-  // row follows `smallFastModel` down to Haiku, for the reason given there: the
-  // cheap-tier pick must not disagree with the tier background ops actually use.
+  // On an OPUS lead both the Sonnet and Haiku tier rows are seeded to
+  // claude-sonnet-5 (the Haiku row is NOT a haiku slug) to match the
+  // ANTHROPIC_SMALL_FAST_MODEL default above — the Sonnet/cheap-tier picks land
+  // on Sonnet 5, which is newer and cheaper than the prior Sonnet-4.6 /
+  // Haiku-4.5 defaults. On a BUDGET lead the Haiku row follows `smallFastModel`
+  // down to Haiku, for the reason given there: the cheap-tier pick must not
+  // disagree with the tier background ops actually use.
+  // Why these DO carry [1m] now, when they used to be pinned bare: selecting a
+  // tier row makes its env value the ACTIVE model id, so a bare row is the same
+  // 200K under-accounting the active default already guards against, just one
+  // interaction later. Verified in Claude Code's own source rather than assumed
+  // (src/utils/model/modelOptions.ts:76-121, 165-178, and model.ts:456-465):
+  // the row's `value` is the tier alias, `getDefaultSonnetModel()` returns this
+  // env value verbatim as the resolved model, and `has1mContext()` is applied
+  // DIRECTLY to the env value to decide the row's "(1M context)" description.
+  // Nothing validates or rejects the bracket; `parseUserSpecifiedModel`
+  // deliberately round-trips it.
   //
-  // Presence-based guard symmetric with the SMALL_FAST_MODEL guard
-  // above — preserves any value (including 0/false/off/unrecognized)
-  // the user has explicitly set.
-  if (process.env.ANTHROPIC_DEFAULT_SONNET_MODEL === undefined) {
-    vars.ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-5"
+  // The decoration is `withOneMSuffixForLead`, the same cap-aware detector the
+  // lead slug uses, so a row is decorated only when the live catalog backs it —
+  // the Haiku row lands on `claude-haiku-4-5`, which really is a 200K model, and
+  // stays bare. That is what the earlier "seeding a bracketed slug here would
+  // bypass cap-awareness" concern was really about; the detector closes it.
+  //
+  // The paired `*_MODEL_NAME` seeds keep the picker readable. Claude Code falls
+  // back to the RAW env value for a custom row's label, so a decorated row
+  // would otherwise render literally as "claude-sonnet-5[1m]". Seeding the NAME
+  // with the BARE slug keeps the label byte-identical to what it shows today
+  // while the value carries the bracket, and Claude Code appends its own
+  // "(1M context)" to the description from `has1mContext`, so the extra window
+  // is surfaced by the client rather than spelled into our label.
+  //
+  // Presence-based guards symmetric with the SMALL_FAST_MODEL guard above —
+  // preserve any value (including 0/false/off/unrecognized) the user has set.
+  // The NAME is seeded only when we also seeded the MODEL: a user who pins
+  // their own tier model must not be handed OUR label for it, which would put a
+  // flatly wrong model name in the picker. A user-set NAME still wins over ours
+  // in the case where we did seed the model.
+  const seedTierRow = (
+    modelKey: string,
+    nameKey: string,
+    bareSlug: string,
+  ): void => {
+    if (process.env[modelKey] !== undefined) return
+    vars[modelKey] = withOneMSuffixForLead(bareSlug)
+    if (process.env[nameKey] === undefined) vars[nameKey] = bareSlug
   }
-  if (process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL === undefined) {
-    vars.ANTHROPIC_DEFAULT_HAIKU_MODEL = smallFastModel
-  }
-  if (process.env.ANTHROPIC_DEFAULT_OPUS_MODEL === undefined) {
-    vars.ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-5"
-  }
+  seedTierRow(
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+    "claude-sonnet-5",
+  )
+  seedTierRow(
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+    smallFastModel,
+  )
+  seedTierRow(
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+    "claude-opus-5",
+  )
 
   // Plan-mode (v2) Phase-2 "Plan" agent parallelism. Claude Code's
   // getPlanModeV2AgentCount() (verified verbatim in the claude v2.1.158
