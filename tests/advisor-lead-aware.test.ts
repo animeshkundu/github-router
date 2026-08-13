@@ -298,19 +298,30 @@ describe("resolveAdvisorEffort — clamping against the ADVISOR's ladder", () =>
 // Regressions from cross-lab review of this change. Each of these was a real
 // defect found by a reviewer, not a hypothetical.
 describe("review regressions", () => {
-  test("a namespaced operator pin reaches the /responses transport", () => {
-    // codex_reviewer found this; an independent reviewer then found my FIRST
-    // fix did not actually close it, and that the test I wrote asserted only
-    // passthrough — so the exact failure its own comment described still passed.
-    // This asserts the transport itself.
-    //
-    // `openai/gpt-5.6-sol` is in no catalog and fails the start-anchored name
-    // regex, so before the bare-id fallback it was posted to /v1/messages and
-    // 400'd.
+  test("a namespaced operator pin is normalized to the catalog id AND routed to /responses", () => {
+    // Found by SMOKE TEST, after two unit-test-only fixes had already "passed".
+    // Choosing the transport correctly was not sufficient: `openai/gpt-5.6-sol`
+    // still went upstream verbatim and Copilot answered 400 model_not_supported,
+    // so the advisor degraded to its "[Advisor unavailable: ...]" fallback while
+    // every assertion here stayed green. Assert BOTH halves.
     process.env.GH_ROUTER_ADVISOR_MODEL = "openai/gpt-5.6-sol"
     const choice = resolveAdvisorModel("claude-sonnet-5")
-    expect(choice).toEqual({ model: "openai/gpt-5.6-sol", escalated: false })
+    expect(choice).toEqual({ model: ADVISOR_DEFAULT_MODEL, escalated: false })
     expect(advisorUsesResponses(choice.model)).toBe(true)
+  })
+
+  test("pin normalization only fires when the bare id is really in the catalog", () => {
+    // An unknown pin passes through untouched — the catalog may not be loaded,
+    // and inventing an id is worse than letting upstream reject it.
+    process.env.GH_ROUTER_ADVISOR_MODEL = "somevendor/not-a-real-model"
+    expect(resolveAdvisorModel("claude-sonnet-5").model).toBe(
+      "somevendor/not-a-real-model",
+    )
+    // An exact catalog hit is never mangled, even if it contained a slash.
+    process.env.GH_ROUTER_ADVISOR_MODEL = ADVISOR_ESCALATION_MODEL
+    expect(resolveAdvisorModel("claude-sonnet-5").model).toBe(
+      ADVISOR_ESCALATION_MODEL,
+    )
   })
 
   test("transport selection across id shapes", () => {

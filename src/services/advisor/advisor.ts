@@ -243,11 +243,36 @@ export interface AdvisorModelChoice {
  * frontier walk could yield `gpt-5.5` on a catalog missing `gpt-5.6-sol` —
  * a silent change to the one path that is required not to move.
  */
+/**
+ * Map an operator pin onto the id the catalog actually carries.
+ *
+ * `GH_ROUTER_ADVISOR_MODEL` is free-form, and the natural thing to write is a
+ * vendor-namespaced id like `openai/gpt-5.6-sol`. Copilot's catalog carries the
+ * bare `gpt-5.6-sol`, so forwarding the namespaced form verbatim gets a 400
+ * `model_not_supported` and the advisor silently degrades to its
+ * "[Advisor unavailable: ...]" fallback — measured, not theorised: choosing the
+ * transport correctly was NOT sufficient, because the id itself was still
+ * wrong on the wire.
+ *
+ * An exact catalog hit wins first, so a real id containing a slash could never
+ * be mangled. Only when the pin is absent from the catalog do we try its last
+ * path segment, and only when THAT is present do we rewrite. A pin that matches
+ * nothing is passed through untouched: the catalog may simply not be loaded
+ * yet, and inventing an id would be worse than letting upstream reject it.
+ */
+function normalizeAdvisorPin(pinned: string): string {
+  const models = state.models?.data
+  if (!models) return pinned
+  if (models.some((m) => m.id === pinned)) return pinned
+  const bare = pinned.slice(pinned.lastIndexOf("/") + 1)
+  return bare !== pinned && models.some((m) => m.id === bare) ? bare : pinned
+}
+
 export function resolveAdvisorModel(
   leadModel: string | undefined,
 ): AdvisorModelChoice {
   const pinned = process.env.GH_ROUTER_ADVISOR_MODEL?.trim()
-  if (pinned) return { model: pinned, escalated: false }
+  if (pinned) return { model: normalizeAdvisorPin(pinned), escalated: false }
   if (leadModel && shouldEscalateAdvisor(leadModel)) {
     return { model: ADVISOR_ESCALATION_MODEL, escalated: true }
   }
