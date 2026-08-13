@@ -93,6 +93,13 @@ let pickClaudeDefaultImpl: (family?: string) => string = (family) =>
   `claude-opus-${family ?? "5"}`
 let pickClaudeDefaultCalls: Array<string | undefined> = []
 
+// Stands in for `withOneMSuffixForLead`, which the real `resolveLeadSlugArg`
+// applies to the `-m fast` and full-slug branches. Identity by default (a bare
+// catalog advertises no 1M window), rebound by the tests that assert the
+// bracket reaches ANTHROPIC_MODEL. Kept as a seam rather than inlined so the
+// mock cannot quietly disagree with the source about WHICH branches decorate.
+let leadOneMDecorateImpl: (slug: string) => string = (slug) => slug
+
 mock.module("~/lib/port", () => ({
   // Anthropic-published dashed slug (per plan §14) — Claude Code's `/model`
   // UI registry expects this, and the proxy's resolver preserves the
@@ -119,6 +126,35 @@ mock.module("~/lib/port", () => ({
   // not found in module`. Values are the real defaults (per src/lib/port.ts).
   UPSTREAM_FETCH_TIMEOUT_MS: 0,
   UPSTREAM_INACTIVITY_TIMEOUT_MS: 300_000,
+  // Budget-mode surface. `claude.ts` and `server-setup.ts` both import these
+  // statically, so the mock has to carry them for the same reason as the
+  // timeouts above — a partial module mock fails at import time, not at the
+  // call site, so an omission here takes down the whole file.
+  //
+  // These are real reimplementations rather than stubs: the tests below assert
+  // on which lead `-m` resolves to, and a stub that always returned false would
+  // make the budget-mode assertions vacuously pass.
+  BUDGET_LEAD_MODEL: "claude-sonnet-5",
+  BUDGET_SMALL_FAST_SLUG: "claude-haiku-4-5",
+  BUDGET_SMALL_FAST_CATALOG_ID: "claude-haiku-4.5",
+  isBudgetClaudeLead: (slug?: string) =>
+    slug != null && /claude|anthropic/i.test(slug) && !/opus/i.test(slug),
+  resolveLeadSlugArg: (modelArg?: string) => {
+    // Mirrors the real helper including its trim, so the CLI-level assertions
+    // above exercise the same normalization the source does.
+    const arg = modelArg?.trim()
+    if (!arg) {
+      pickClaudeDefaultCalls.push(undefined)
+      return pickClaudeDefaultImpl(undefined)
+    }
+    if (arg.toLowerCase() === "fast") return leadOneMDecorateImpl("claude-sonnet-5")
+    const shorthand = arg.match(/^(\d+\.\d+)$/)?.[1]
+    if (shorthand) {
+      pickClaudeDefaultCalls.push(shorthand)
+      return pickClaudeDefaultImpl(shorthand)
+    }
+    return leadOneMDecorateImpl(arg)
+  },
 }))
 
 mock.module("consola", () => ({
@@ -438,6 +474,7 @@ beforeEach(() => {
   // assertions see a clean slate.
   pickClaudeDefaultImpl = (family) => `claude-opus-${family ?? "5"}`
   pickClaudeDefaultCalls = []
+  leadOneMDecorateImpl = (slug) => slug
 })
 
 describe("claude command", () => {
@@ -507,6 +544,83 @@ describe("claude command", () => {
     )
     const [, , options] = spawnMock.mock.calls[0]
     expect(options.env.ANTHROPIC_MODEL).toBe("claude-sonnet-4-20250514")
+  })
+
+  test("`-m fast` selects the budget lead end to end", async () => {
+    const run = getRunFn()
+
+    await run({ args: { model: "fast" } })
+
+    expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:12345",
+      "claude-sonnet-5",
+    )
+    const [, , options] = spawnMock.mock.calls[0]
+    expect(options.env.ANTHROPIC_MODEL).toBe("claude-sonnet-5")
+  })
+
+  test("`-m fast` carries the [1m] bracket all the way into ANTHROPIC_MODEL", async () => {
+    // The end-to-end shape of the gap a live session surfaced: the catalog
+    // advertises a 1M window for sonnet-5, but ANTHROPIC_MODEL arrived bare, so
+    // Claude Code budgeted the session at its 200K default. Asserting on the
+    // spawned child's env rather than only on the resolver is the point — the
+    // resolver was one of three places the bracket had to survive.
+    leadOneMDecorateImpl = (slug) =>
+      slug === "claude-sonnet-5" ? "claude-sonnet-5[1m]" : slug
+    const run = getRunFn()
+
+    await run({ args: { model: "fast" } })
+
+    expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:12345",
+      "claude-sonnet-5[1m]",
+    )
+    const [, , options] = spawnMock.mock.calls[0]
+    expect(options.env.ANTHROPIC_MODEL).toBe("claude-sonnet-5[1m]")
+  })
+
+  test("an explicitly pinned full slug carries [1m] too", async () => {
+    // `-m fast` and `-m claude-sonnet-5` must produce identical sessions, and
+    // the context budget is part of that identity.
+    leadOneMDecorateImpl = (slug) =>
+      slug === "claude-sonnet-5" ? "claude-sonnet-5[1m]" : slug
+    const run = getRunFn()
+
+    await run({ args: { model: "claude-sonnet-5" } })
+
+    const [, , options] = spawnMock.mock.calls[0]
+    expect(options.env.ANTHROPIC_MODEL).toBe("claude-sonnet-5[1m]")
+  })
+
+  test("a whitespace-only -m behaves like an absent one, fallback walk included", async () => {
+    // An independent reviewer caught that `resolveLeadSlugArg` trims and
+    // returns the default for `-m "   "`, while `usingDefault` was computed
+    // from the UNTRIMMED argument — so the run picked the default model but
+    // suppressed the fallback walk that exists to rescue it when the catalog
+    // lacks that family.
+    //
+    // This has to be a DISCRIMINATING test, and a first version of it was not:
+    // asserting that the picker was consulted passes either way, because the
+    // helper consults it regardless of `usingDefault`. So stage a catalog where
+    // the default is ABSENT and only a fallback is present. With the bug,
+    // `usingDefault` is false, the walk is skipped, and the run ships the
+    // absent `claude-opus-5`. With the fix, the walk runs and lands on the
+    // fallback.
+    state.models = {
+      data: [
+        { id: "claude-opus-4.8" },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+      object: "list",
+    }
+    try {
+      const run = getRunFn()
+      await run({ args: { model: "   " } })
+      const [, , options] = spawnMock.mock.calls[0]
+      expect(options.env.ANTHROPIC_MODEL).toBe("claude-opus-4-8")
+      expect(options.env.ANTHROPIC_MODEL).not.toBe("claude-opus-5")
+    } finally {
+      state.models = undefined
+    }
   })
 
   test("default works on enterprise (cap-aware default adds [1m] suffix so Claude Code accounts for 1M context locally)", async () => {

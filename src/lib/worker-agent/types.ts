@@ -56,7 +56,7 @@ export interface WorkerAgentOpts {
    *    drives a real Chrome/Edge tab via the browser-MCP bridge. Does NOT
    *    touch the filesystem; `workspace` is irrelevant (defaulted to cwd by
    *    the engine purely so canonicalization stays happy) and `worktree` is
-   *    ignored (worktrees stay implement/test-only).
+   *    ignored (worktrees are for `implement`/`test`/`review` only).
    */
   mode: "explore" | "review" | "plan" | "implement" | "test" | "browse"
   /**
@@ -84,10 +84,12 @@ export interface WorkerAgentOpts {
    */
   ignoreSessionDefaults?: boolean
   /**
-   * Implement-only. When `true`, run the worker inside a fresh git
-   * worktree and return the diff alongside the final text. When
-   * `false`/omitted, edit the workspace in place. Ignored for `browse`
-   * (which never provisions a worktree).
+   * `implement`/`test`/`review` only. When `true`, run the worker inside a
+   * fresh git worktree and return the diff alongside the final text. When
+   * `false`/omitted, work in the workspace in place. The MCP boundary forces
+   * `true` for `implement`/`test` and passes the caller's choice through for
+   * `review`. Ignored for `explore`/`plan`/`browse` (which never provision a
+   * worktree).
    */
   worktree?: boolean
   /**

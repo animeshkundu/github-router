@@ -18,7 +18,11 @@ import { getCodexVersion } from "./lib/launch"
 import { browserToolsEnabled } from "./lib/mcp-capabilities"
 import { SEAMLESS_BUILTIN_TOOLS } from "./lib/mcp-permissions-settings"
 import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror } from "./lib/paths"
-import { DEFAULT_CLAUDE_MODEL_FALLBACKS, pickClaudeDefault } from "./lib/port"
+import {
+  DEFAULT_CLAUDE_MODEL_FALLBACKS,
+  pickClaudeDefault,
+  resolveLeadSlugArg,
+} from "./lib/port"
 import {
   getClaudeCodeEnvVars,
   parseSharedArgs,
@@ -289,20 +293,27 @@ export const serve = defineCommand({
       )
     }
 
-    const opusFamilyShorthand = (args.model as string | undefined)?.match(/^(\d+\.\d+)$/)?.[1]
-    let chosenSlug = opusFamilyShorthand
-      ? pickClaudeDefault(opusFamilyShorthand)
-      : ((args.model as string | undefined) ?? pickClaudeDefault())
-    if (!args.model && state.models) {
+    // Same lead-slug resolution the `claude` subcommand uses, via the shared
+    // helper rather than a second copy of the branching. The copy that used to
+    // live here had drifted twice: it never learned the `-m fast` alias, and
+    // its fallback walk assigned the bare constant, silently dropping the
+    // `[1m]` accounting on a family that is 1M-capable. Re-deriving the
+    // fallback through `pickClaudeDefault` is what `src/claude.ts` already
+    // does, for that exact reason.
+    let chosenSlug = resolveLeadSlugArg(args.model as string | undefined)
+    if (!(args.model as string | undefined)?.trim() && state.models) {
       const inCache = (slug: string): boolean =>
         state.models?.data.some((m) => m.id === resolveModel(slug)) ?? false
       if (!inCache(chosenSlug)) {
         for (const fb of DEFAULT_CLAUDE_MODEL_FALLBACKS) {
           if (inCache(fb)) {
-            consola.info(
-              `Default model "${chosenSlug}" not in your Copilot model list; falling back to "${fb}".`,
+            const fallbackSlug = pickClaudeDefault(
+              fb.replace(/^claude-opus-/, ""),
             )
-            chosenSlug = fb
+            consola.info(
+              `Default model "${chosenSlug}" not in your Copilot model list; falling back to "${fallbackSlug}".`,
+            )
+            chosenSlug = fallbackSlug
             break
           }
         }

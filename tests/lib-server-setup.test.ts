@@ -3,6 +3,13 @@ import type { ServerHandler } from "srvx"
 
 import { PATHS } from "../src/lib/paths"
 import {
+  BUDGET_LEAD_MODEL,
+  BUDGET_SMALL_FAST_SLUG,
+  isBudgetClaudeLead,
+  resolveLeadSlugArg,
+} from "../src/lib/port"
+import { state } from "../src/lib/state"
+import {
   MAX_REQUEST_BODY_BYTES,
   buildServeOptions,
   parseSharedArgs,
@@ -265,20 +272,29 @@ describe("getClaudeCodeEnvVars", () => {
     }
   })
 
-  test("defaults ANTHROPIC_DEFAULT_SONNET_MODEL to claude-sonnet-5 (NO [1m] — tier rows stay bare)", () => {
+  test("defaults ANTHROPIC_DEFAULT_SONNET_MODEL to claude-sonnet-5, with a bare paired label", () => {
     // Sonnet 5 is the newer, cheaper cheap-tier pick (200/1000 vs 4.6's
-    // 300/1500) and is broadly available (pro..enterprise). The tier-row
-    // seed stays a BARE slug — the [1m] decoration is reserved for the
-    // active default via the cap-aware pickClaudeDefault, not the picker rows.
+    // 300/1500) and is broadly available (pro..enterprise). With no catalog
+    // loaded there is no 1M signal, so the row is bare — cap-awareness, not a
+    // family rule. The paired _NAME seed keeps the picker label readable once
+    // the catalog DOES make the row bracketed (see the next test).
     const prior = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+    const priorName = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME
     delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+    delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME
+    const savedModels = state.models
+    state.models = undefined
     try {
       const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
       expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("claude-sonnet-5")
-      expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL).not.toContain("[1m]")
+      expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME).toBe("claude-sonnet-5")
     } finally {
+      state.models = savedModels
       if (prior === undefined) delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
       else process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = prior
+      if (priorName === undefined)
+        delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME
+      else process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = priorName
     }
   })
 
@@ -294,21 +310,27 @@ describe("getClaudeCodeEnvVars", () => {
     }
   })
 
-  test("defaults ANTHROPIC_DEFAULT_HAIKU_MODEL to claude-sonnet-5 (cheap-tier pick lands on Sonnet 5, matching SMALL_FAST_MODEL; NO [1m] — tier rows are always bare, [1m] lives on the active default)", () => {
+  test("defaults ANTHROPIC_DEFAULT_HAIKU_MODEL to claude-sonnet-5 (cheap-tier pick lands on Sonnet 5, matching SMALL_FAST_MODEL)", () => {
     // The Haiku picker tier row is seeded to claude-sonnet-5 (not a haiku
     // slug) so the cheap-tier pick lands on Sonnet 5 — newer and cheaper
-    // than the prior claude-haiku-4-5 default. Bare slug: the [1m]
-    // decoration lives only on the active default (ANTHROPIC_MODEL via
-    // pickClaudeDefault), never on picker tier rows.
+    // than the prior claude-haiku-4-5 default.
     const prior = process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
+    const priorName = process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME
     delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
+    delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME
+    const savedModels = state.models
+    state.models = undefined
     try {
       const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
       expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("claude-sonnet-5")
-      expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).not.toContain("[1m]")
+      expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME).toBe("claude-sonnet-5")
     } finally {
+      state.models = savedModels
       if (prior === undefined) delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
       else process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = prior
+      if (priorName === undefined)
+        delete process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME
+      else process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME = priorName
     }
   })
 
@@ -324,23 +346,24 @@ describe("getClaudeCodeEnvVars", () => {
     }
   })
 
-  test("defaults ANTHROPIC_DEFAULT_OPUS_MODEL to bare claude-opus-5 (NO [1m] — the active default's [1m] decoration lives on ANTHROPIC_MODEL via pickClaudeDefault, which is cap-aware)", () => {
-    // The picker-row tier default is the bare slug; the *active* default
-    // (ANTHROPIC_MODEL) is cap-aware (pickClaudeDefault adds [1m] only
-    // when the catalog actually signals 1M capability — either via a
-    // sibling -1m slug or via base-slug max_context_window_tokens).
-    // Keeping the picker row bare lets the user manually flip to 1M via
-    // /model selection (Claude Code's picker shows "opus[1m]" as a
-    // separate entry — see cc-backup aliases.ts MODEL_ALIASES).
+  test("defaults ANTHROPIC_DEFAULT_OPUS_MODEL to claude-opus-5, bare when the catalog shows no 1M signal", () => {
     const prior = process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
+    const priorName = process.env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME
     delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
+    delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME
+    const savedModels = state.models
+    state.models = undefined
     try {
       const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
       expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-5")
-      expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).not.toContain("[1m]")
+      expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME).toBe("claude-opus-5")
     } finally {
+      state.models = savedModels
       if (prior === undefined) delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
       else process.env.ANTHROPIC_DEFAULT_OPUS_MODEL = prior
+      if (priorName === undefined)
+        delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME
+      else process.env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME = priorName
     }
   })
 
@@ -648,5 +671,352 @@ describe("withBodyLimit", () => {
       throw new Error("kaboom")
     }) as ServerHandler
     expect(withBodyLimit(boom)(post({}))).rejects.toThrow("kaboom")
+  })
+})
+
+// Budget mode: `-m fast` and the Haiku small/fast tier.
+describe("budget-mode lead and small/fast tier", () => {
+  // Entries are either a bare id (no advertised window — the shape most of
+  // these tests want, since they are about tier selection rather than context
+  // accounting) or an `[id, maxContextWindowTokens]` pair for the tests that
+  // are specifically about the `[1m]` decoration.
+  type CatalogEntry = string | readonly [string, number]
+
+  function withCatalog<T>(ids: Array<CatalogEntry>, fn: () => T): T {
+    const saved = state.models
+    state.models = {
+      object: "list",
+      data: ids.map((entry) => {
+        const [id, ctx] = typeof entry === "string" ? [entry, undefined] : entry
+        return {
+          id,
+          name: id,
+          object: "model",
+          preview: false,
+          vendor: "anthropic",
+          version: "1",
+          model_picker_enabled: true,
+          capabilities: {
+            family: id,
+            limits:
+              ctx === undefined ? {} : { max_context_window_tokens: ctx },
+            object: "model",
+            supports: {},
+            tokenizer: "o200k_base",
+            type: "chat",
+          },
+        }
+      }) as unknown as NonNullable<typeof state.models>["data"],
+    }
+    try {
+      return fn()
+    } finally {
+      state.models = saved
+    }
+  }
+
+  // Every tier key this block asserts on must be cleared, not just the ones it
+  // expects to change: these tests run inside a proxy-launched session that
+  // already exports the tier defaults, and the presence guard would otherwise
+  // skip the assignment and make the assertion depend on the ambient shell.
+  function withoutUserOverrides(fn: () => void): void {
+    const keys = [
+      "ANTHROPIC_SMALL_FAST_MODEL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+    ] as const
+    const prior = keys.map((k) => [k, process.env[k]] as const)
+    for (const k of keys) delete process.env[k]
+    try {
+      fn()
+    } finally {
+      for (const [k, v] of prior) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  }
+
+  // The live Copilot catalog as measured on 2026-08-13: every current Claude
+  // model advertises a 1M window except Haiku 4.5, which really is 200K. These
+  // tests use it rather than a bare-id fixture because a fixture with no
+  // advertised window cannot tell a correct "left bare" from the bug — it makes
+  // every model look 200K, which is exactly why the gap below went unnoticed.
+  const LIVE_SHAPED_CATALOG = [
+    ["claude-opus-5", 1_000_000],
+    ["claude-sonnet-5", 1_000_000],
+    ["claude-sonnet-4.6", 1_000_000],
+    ["claude-haiku-4.5", 200_000],
+  ] as const
+
+  function withoutOneMOptOut(fn: () => void): void {
+    const prior = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+    delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+    try {
+      fn()
+    } finally {
+      if (prior === undefined) delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+      else process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = prior
+    }
+  }
+
+  test("`-m fast` resolves to the budget lead", () => {
+    withCatalog([], () => {
+      expect(resolveLeadSlugArg("fast")).toBe(BUDGET_LEAD_MODEL)
+      expect(resolveLeadSlugArg("FAST")).toBe(BUDGET_LEAD_MODEL)
+    })
+  })
+
+  test("`-m fast` carries [1m] when the catalog says sonnet-5 serves 1M", () => {
+    // The gap this pins: sonnet-5 ships the same shape opus-5 does — a single
+    // slug advertising 1M, no `-1m` sibling — but the decoration used to be
+    // opus-only, so a budget lead was budgeted locally at 200K and auto-compacted
+    // at roughly a fifth of the window Copilot was willing to serve.
+    withoutOneMOptOut(() => {
+      withCatalog([...LIVE_SHAPED_CATALOG], () => {
+        expect(resolveLeadSlugArg("fast")).toBe("claude-sonnet-5[1m]")
+      })
+    })
+  })
+
+  test("`-m fast` and the explicit sonnet slug agree, so both give the same session", () => {
+    withoutOneMOptOut(() => {
+      withCatalog([...LIVE_SHAPED_CATALOG], () => {
+        // Identical STRING, not merely identical budget classification: the
+        // context budget is part of what "the same session" means, so a
+        // decoration applied to one branch and not the other would reintroduce
+        // the divergence the `-m fast` alias exists to avoid.
+        expect(resolveLeadSlugArg("fast")).toBe(
+          resolveLeadSlugArg("claude-sonnet-5"),
+        )
+        expect(isBudgetClaudeLead(resolveLeadSlugArg("fast"))).toBe(true)
+        expect(isBudgetClaudeLead("claude-sonnet-5")).toBe(true)
+        // The bracket must not confuse the budget-lead predicate.
+        expect(isBudgetClaudeLead("claude-sonnet-5[1m]")).toBe(true)
+      })
+    })
+  })
+
+  test("a full slug passes through, decorated only when the catalog backs it", () => {
+    withoutOneMOptOut(() => {
+      withCatalog([...LIVE_SHAPED_CATALOG], () => {
+        expect(resolveLeadSlugArg("claude-opus-5")).toBe("claude-opus-5[1m]")
+        // Haiku 4.5 genuinely is 200K, so it stays bare — the rule is the
+        // catalog's advertised window, not a hardcoded family list.
+        expect(resolveLeadSlugArg("claude-haiku-4-5")).toBe("claude-haiku-4-5")
+        expect(isBudgetClaudeLead("claude-opus-5")).toBe(false)
+        expect(isBudgetClaudeLead("claude-opus-5[1m]")).toBe(false)
+      })
+    })
+  })
+
+  test("a dashed Anthropic slug is decorated even though the catalog id is dotted", () => {
+    // An exact-id match would answer "no 1M" here purely because it never found
+    // `claude-sonnet-4-6` in a catalog that carries `claude-sonnet-4.6`. That
+    // silent under-accounting is why the lead decorator resolves first.
+    withoutOneMOptOut(() => {
+      withCatalog([...LIVE_SHAPED_CATALOG], () => {
+        expect(resolveLeadSlugArg("claude-sonnet-4-6")).toBe(
+          "claude-sonnet-4-6[1m]",
+        )
+      })
+    })
+  })
+
+  test("a hand-pinned [1m] slug is not double-decorated", () => {
+    withoutOneMOptOut(() => {
+      withCatalog([...LIVE_SHAPED_CATALOG], () => {
+        expect(resolveLeadSlugArg("claude-sonnet-5[1m]")).toBe(
+          "claude-sonnet-5[1m]",
+        )
+        expect(resolveLeadSlugArg("claude-opus-5[1m]")).toBe("claude-opus-5[1m]")
+      })
+    })
+  })
+
+  test("a 200K sonnet catalog leaves the budget lead bare", () => {
+    // Cap-awareness in the direction that matters: on a tier where sonnet-5 is
+    // not 1M, claiming it would make Claude Code over-account and compact late.
+    withoutOneMOptOut(() => {
+      withCatalog([["claude-sonnet-5", 200_000]], () => {
+        expect(resolveLeadSlugArg("fast")).toBe("claude-sonnet-5")
+        expect(resolveLeadSlugArg("claude-sonnet-5")).toBe("claude-sonnet-5")
+      })
+    })
+  })
+
+  test("an unpopulated catalog leaves every branch bare", () => {
+    withoutOneMOptOut(() => {
+      const saved = state.models
+      state.models = undefined
+      try {
+        expect(resolveLeadSlugArg("fast")).toBe("claude-sonnet-5")
+        expect(resolveLeadSlugArg("claude-opus-5")).toBe("claude-opus-5")
+      } finally {
+        state.models = saved
+      }
+    })
+  })
+
+  test("tier rows carry [1m] when the catalog backs it, and the paired label stays bare", () => {
+    // Selecting a tier row makes its env value the ACTIVE model id (Claude Code
+    // `model.ts:456-465` returns `getDefaultSonnetModel()` verbatim), so a bare
+    // row is the same 200K under-accounting the active default guards against,
+    // one interaction later. The label is seeded bare because Claude Code falls
+    // back to the RAW env value for a custom row's label
+    // (`modelOptions.ts:76-90`), so an undecorated label keeps the picker
+    // reading exactly as it does today while the value carries the bracket.
+    withoutOneMOptOut(() => {
+      withCatalog([...LIVE_SHAPED_CATALOG], () => {
+        withoutUserOverrides(() => {
+          const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+          expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe(
+            "claude-sonnet-5[1m]",
+          )
+          expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME).toBe(
+            "claude-sonnet-5",
+          )
+          expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-5[1m]")
+          expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME).toBe("claude-opus-5")
+        })
+      })
+    })
+  })
+
+  test("the Haiku row stays bare on a budget lead, because Haiku 4.5 really is 200K", () => {
+    // The decoration is cap-aware per model, not per family: the same call that
+    // brackets the Sonnet row leaves this one alone. Asserting it on the budget
+    // lead is the discriminating case, since that is when the row actually
+    // holds a Haiku slug rather than following Sonnet.
+    withoutOneMOptOut(() => {
+      withCatalog([...LIVE_SHAPED_CATALOG], () => {
+        withoutUserOverrides(() => {
+          const vars = getClaudeCodeEnvVars(
+            "http://127.0.0.1:8787",
+            "claude-sonnet-5",
+          )
+          expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe(
+            BUDGET_SMALL_FAST_SLUG,
+          )
+          expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).not.toContain("[1m]")
+        })
+      })
+    })
+  })
+
+  test("a user-set tier model suppresses our label too, and a user-set label wins over ours", () => {
+    // The NAME rides on the MODEL guard rather than its own. Seeding it
+    // independently would print "claude-sonnet-5" as the label for a user's
+    // pinned gemini model — a flatly wrong model name in the picker. When we DO
+    // seed the model, a user-set label still wins.
+    const priorModel = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+    const priorName = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME
+    try {
+      withoutOneMOptOut(() => {
+        withCatalog([...LIVE_SHAPED_CATALOG], () => {
+          process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = "gemini-3.1-pro-preview"
+          delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME
+          let vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+          expect(vars).not.toHaveProperty("ANTHROPIC_DEFAULT_SONNET_MODEL")
+          expect(vars).not.toHaveProperty("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME")
+
+          delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+          process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = "My Sonnet"
+          vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+          expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe(
+            "claude-sonnet-5[1m]",
+          )
+          expect(vars).not.toHaveProperty("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME")
+        })
+      })
+    } finally {
+      if (priorModel === undefined)
+        delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+      else process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = priorModel
+      if (priorName === undefined)
+        delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME
+      else process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = priorName
+    }
+  })
+
+  test("CLAUDE_CODE_DISABLE_1M_CONTEXT suppresses the decoration on every branch", () => {
+    const prior = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+    process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1"
+    try {
+      withCatalog([...LIVE_SHAPED_CATALOG], () => {
+        expect(resolveLeadSlugArg("fast")).toBe("claude-sonnet-5")
+        expect(resolveLeadSlugArg("claude-opus-5")).toBe("claude-opus-5")
+        expect(resolveLeadSlugArg("claude-sonnet-4-6")).toBe(
+          "claude-sonnet-4-6",
+        )
+      })
+    } finally {
+      if (prior === undefined) delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+      else process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = prior
+    }
+  })
+
+  test("a budget lead drops the small/fast tier and the Haiku row to Haiku", () => {
+    withCatalog(["claude-sonnet-5", "claude-haiku-4.5"], () => {
+      withoutUserOverrides(() => {
+        const vars = getClaudeCodeEnvVars(
+          "http://127.0.0.1:8787",
+          "claude-sonnet-5",
+        )
+        // The Anthropic DASHED slug, not Copilot's dotted catalog id: Claude
+        // Code's /model registry is keyed on Anthropic slugs.
+        expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBe(BUDGET_SMALL_FAST_SLUG)
+        expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe(BUDGET_SMALL_FAST_SLUG)
+        // The Sonnet tier row is untouched: it is not the cheap tier.
+        expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("claude-sonnet-5")
+      })
+    })
+  })
+
+  test("an opus lead keeps today's Sonnet small/fast tier", () => {
+    withCatalog(["claude-opus-5", "claude-haiku-4.5"], () => {
+      withoutUserOverrides(() => {
+        const vars = getClaudeCodeEnvVars(
+          "http://127.0.0.1:8787",
+          "claude-opus-5",
+        )
+        expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBe("claude-sonnet-5")
+        expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("claude-sonnet-5")
+      })
+    })
+  })
+
+  test("a catalog without Haiku falls back to Sonnet rather than naming an absent model", () => {
+    withCatalog(["claude-sonnet-5"], () => {
+      withoutUserOverrides(() => {
+        const vars = getClaudeCodeEnvVars(
+          "http://127.0.0.1:8787",
+          "claude-sonnet-5",
+        )
+        expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBe("claude-sonnet-5")
+        expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("claude-sonnet-5")
+      })
+    })
+  })
+
+  test("a user-set small/fast model survives budget mode", () => {
+    withCatalog(["claude-sonnet-5", "claude-haiku-4.5"], () => {
+      const prior = process.env.ANTHROPIC_SMALL_FAST_MODEL
+      process.env.ANTHROPIC_SMALL_FAST_MODEL = "gemini-3.6-flash"
+      try {
+        const vars = getClaudeCodeEnvVars(
+          "http://127.0.0.1:8787",
+          "claude-sonnet-5",
+        )
+        expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBeUndefined()
+      } finally {
+        if (prior === undefined) delete process.env.ANTHROPIC_SMALL_FAST_MODEL
+        else process.env.ANTHROPIC_SMALL_FAST_MODEL = prior
+      }
+    })
   })
 })

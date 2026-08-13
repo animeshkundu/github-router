@@ -50,9 +50,15 @@ export interface CapabilityEntry {
 
 /**
  * Ceiling on `DISPLAY_ONLY` + `UNUSED` entries. Currently 8; it was 11 before
- * the vision fields were wired into the outbound preflight.
+ * the vision fields were wired into the outbound preflight, and 9 before the
+ * advisor's Anthropic branch became reachable and started sizing its output cap
+ * from `limits.max_non_streaming_output_tokens`.
+ *
+ * The number only ever ratchets DOWN. Wiring a field up without lowering this
+ * would leave room for the next unwired field to appear for free, which is the
+ * drift the register exists to catch.
  */
-export const UNCLASSIFIED_CEILING = 9
+export const UNCLASSIFIED_CEILING = 8
 
 /** Keyed by the dotted path under `capabilities`. */
 export const CAPABILITY_REGISTER: Readonly<Record<string, CapabilityEntry>> = {
@@ -116,8 +122,14 @@ export const CAPABILITY_REGISTER: Readonly<Record<string, CapabilityEntry>> = {
     note: "Embeddings batch size; the embeddings route does not enforce it.",
   },
   "limits.max_non_streaming_output_tokens": {
-    classification: "DISPLAY_ONLY",
-    note: "We never vary the output ceiling by streaming mode, so the tighter non-streaming value has no consumer.",
+    classification: "CONSUMED",
+    note:
+      "The advisor's Anthropic branch sizes its `max_tokens` from this field: that call sets "
+      + "`stream: false`, so the non-streaming ceiling is the contract-correct one (16000 vs 64000 on "
+      + "claude-opus-5). Copilot does NOT enforce it — probe `advisor_claude_streaming_cap_accepted` "
+      + "measured a 200 at the streaming ceiling on a non-streaming request — so this is staying "
+      + "inside the advertised limit by choice, which is also what keeps the branch working if "
+      + "Copilot ever starts enforcing what it advertises.",
   },
   "limits.vision.max_prompt_images": {
     classification: "DISPLAY_ONLY",

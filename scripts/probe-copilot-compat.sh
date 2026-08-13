@@ -129,6 +129,17 @@ declare -a PROBE_REGISTRY=(
   # other background ops on every session, so it must resolve+200 end-to-end.
   "smallfast_sonnet_baseline|claude-emits|claude-sonnet-5 (ANTHROPIC_SMALL_FAST_MODEL / DEFAULT_SONNET / DEFAULT_HAIKU default) resolves and returns 200 from /v1/messages"
 
+  # ===== Advisor escalation to Opus (budget-lead path) =====
+  # On a lighter Claude lead the advisor escalates to claude-opus-5 and dispatches
+  # on /v1/messages instead of /responses (runAdvisor in src/services/advisor/advisor.ts).
+  # That branch was unreachable while the advisor was always gpt-5.6-sol, so the
+  # exact body it now emits — non-streaming + thinking:{type:"adaptive"} +
+  # output_config.effort + the model's max_non_streaming_output_tokens — has no
+  # prior production evidence behind it. These two probes are that evidence.
+  "advisor_claude_adaptive_thinking|claude-emits|claude-opus-5 on /v1/messages accepts the escalated advisor body (stream:false + thinking:{type:'adaptive'} + output_config.effort) and returns 200"
+  "advisor_claude_nonstreaming_cap|claude-emits|claude-opus-5 on /v1/messages accepts max_tokens at the advertised max_non_streaming_output_tokens (16000) when stream:false"
+  "advisor_claude_streaming_cap_accepted|exploratory|claude-opus-5 on /v1/messages ACCEPTS max_tokens at the streaming ceiling (64000) even when stream:false — max_non_streaming_output_tokens is advertised but not enforced; the advisor stays inside it by choice, not necessity"
+
   # ===== Peer-MCP personas (Phase B6 of cap-codex-effort-add-opus-critic) =====
   # Two probe shapes:
   #   - opus_critic_low / opus_critic_medium are END-TO-END LIVE PROBES against the
@@ -674,6 +685,70 @@ probe_smallfast_sonnet_baseline() {
   do_request POST /v1/messages '{
     "model": "claude-sonnet-5",
     "max_tokens": 16,
+    "messages": [{"role": "user", "content": "Reply with the single word: ok"}]
+  }'
+  assert_status 200
+}
+
+# ===========================================================================
+# Advisor escalation probes (budget-lead path)
+# ===========================================================================
+
+# End-to-end live probes for the body `runAdvisor` emits on its Anthropic
+# branch. Referenced from the code comment in src/services/advisor/advisor.ts so
+# a contributor following the breadcrumb lands on the empirical evidence.
+#
+# Why these exist: the /v1/messages advisor branch was dead code for as long as
+# ADVISOR_DEFAULT_MODEL was gpt-5.6-sol (which always matches the /responses
+# regex). A budget lead makes it live, so every field in that body is newly
+# exercised against Copilot and none of it had prior production evidence.
+
+probe_advisor_claude_adaptive_thinking() {
+  # The escalated advisor body: non-streaming, with the adaptive-thinking shape
+  # translateThinking produces for any model advertising adaptive_thinking.
+  # If Copilot ever rejects this combination the advisor silently loses its
+  # reasoning effort on exactly the path the escalation exists to serve.
+  do_request POST /v1/messages '{
+    "model": "claude-opus-5",
+    "max_tokens": 1024,
+    "stream": false,
+    "system": "You are an expert advisor.",
+    "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
+    "thinking": {"type": "adaptive"},
+    "output_config": {"effort": "high"}
+  }'
+  assert_status 200
+}
+
+probe_advisor_claude_nonstreaming_cap() {
+  # claude-opus-5 advertises max_output_tokens 64000 but
+  # max_non_streaming_output_tokens 16000. The advisor sets stream:false, so it
+  # sizes max_tokens from the NON-streaming limit. Asserts that limit is really
+  # accepted.
+  do_request POST /v1/messages '{
+    "model": "claude-opus-5",
+    "max_tokens": 16000,
+    "stream": false,
+    "messages": [{"role": "user", "content": "Reply with the single word: ok"}]
+  }'
+  assert_status 200
+}
+
+probe_advisor_claude_streaming_cap_accepted() {
+  # MEASURED, not assumed: Copilot does NOT enforce
+  # max_non_streaming_output_tokens. It returns 200 for max_tokens at the
+  # streaming ceiling (64000) even with stream:false.
+  #
+  # The advisor still sizes its cap from the non-streaming limit. That is a
+  # deliberate choice to stay inside the advertised contract rather than to rely
+  # on upstream leniency, NOT a workaround for a rejection — an earlier version
+  # of this probe asserted a 400 here and was wrong. If this row ever flips to
+  # 400, Copilot started enforcing the advertised limit and the advisor's
+  # conservative sizing is what will have kept it working.
+  do_request POST /v1/messages '{
+    "model": "claude-opus-5",
+    "max_tokens": 64000,
+    "stream": false,
     "messages": [{"role": "user", "content": "Reply with the single word: ok"}]
   }'
   assert_status 200

@@ -1,4 +1,5 @@
 import { state } from "./state"
+import { resolveModel } from "./utils"
 
 /**
  * Context-window threshold at which Claude Code's `[1m]` accounting unlock is
@@ -69,4 +70,54 @@ function oneMContextDisabled(): boolean {
 export function withOneMSuffix(id: string): string {
   if (oneMContextDisabled()) return id
   return catalogAdvertises1M(id) ? `${id}[1m]` : id
+}
+
+/**
+ * Decorate a slug the USER named — a `-m` argument or a launcher default — with
+ * `[1m]` iff the model it actually RESOLVES to serves >=1M context.
+ *
+ * The difference from `withOneMSuffix` is the resolution step, and it exists
+ * because the two functions are handed different kinds of string. Every
+ * `withOneMSuffix` caller already holds a concrete catalog id from a catalog
+ * walk, so an exact-id match is both sufficient and the safer rule: inferring a
+ * match there could attach `[1m]` to a sibling that does not serve 1M. A lead
+ * slug is the opposite case — it is whatever the user typed, or an
+ * Anthropic-published dashed slug like `claude-opus-4-8` that the catalog
+ * carries in dotted form. Exact-id matching answers "no 1M" for those purely
+ * because it never found the entry, which is the silent under-accounting this
+ * function exists to stop.
+ *
+ * Resolving first also picks up the `-1m` SIBLING shape for free:
+ * `resolveModel`'s opus family preference maps `claude-opus-4-7` onto
+ * `claude-opus-4.7-1m-internal` when that is what the tier carries, and the
+ * sibling's own advertised window then answers the question. That is the same
+ * dual-signal conclusion `pickClaudeDefault` reaches for the family shorthand,
+ * so the two paths cannot disagree about a family both can be asked about.
+ *
+ * Idempotent: a slug that already carries the bracket is returned unchanged, so
+ * a user who pins `-m claude-opus-5[1m]` by hand does not get `[1m][1m]`. That
+ * early return deliberately does NOT re-validate the pin against the catalog.
+ * `-m claude-haiku-4-5[1m]` therefore survives even though Haiku 4.5 is a 200K
+ * model — the same as before this function existed, and `resolveModel` already
+ * warns loudly about exactly that case. Stripping a bracket the user typed
+ * would be the surprising behaviour, and it would be the only place in the
+ * launcher that overrides an explicit `-m`.
+ *
+ * A repeat can still arrive from the CLIENT side rather than from here: the
+ * `/model` picker rows are seeded already decorated, and Claude Code's alias
+ * path appends its own bracket (`getDefaultSonnetModel() + '[1m]'`), so
+ * selecting `sonnet[1m]` puts `claude-sonnet-5[1m][1m]` on the wire. That
+ * resolves to the same bare id — `resolveModel`'s strip recurses — and Claude
+ * Code's own detector is unanchored, so local accounting is right too. Pinned
+ * by a regression test in `tests/lib-utils.test.ts`.
+ *
+ * Degrades the same safe direction as everything else here. An unpopulated
+ * catalog makes `resolveModel` a pass-through and `catalogAdvertises1M` false,
+ * so the slug stays bare and Claude Code accounts at its conservative 200K
+ * default — under-accounting, never overflow.
+ */
+export function withOneMSuffixForLead(slug: string): string {
+  if (oneMContextDisabled()) return slug
+  if (/\[1m\]$/i.test(slug)) return slug
+  return catalogAdvertises1M(resolveModel(slug)) ? `${slug}[1m]` : slug
 }

@@ -144,6 +144,16 @@ export interface NativeAgentAvailability {
   scoutAvailable?: boolean
   implementerFastAvailable?: boolean
   generalPurposeFastAvailable?: boolean
+  /** True when this launch's LEAD is a lighter Claude tier (sonnet, haiku)
+   *  rather than an Opus. Reorders the delegation clauses so the cheap tiers
+   *  lead; see `buildNativeReachClauses`. Absent/false keeps the Opus-lead
+   *  ordering, so existing callers are unaffected.
+   *
+   *  Unlike the advisor's lead-awareness, this is resolved ONCE per launch and
+   *  baked into the mirrored CLAUDE.md, so it cannot follow a mid-session
+   *  `/model` switch. Acceptable for prose that biases a choice; it would not
+   *  be for anything that routes a request. */
+  budgetLead?: boolean
 }
 
 /** Oxford-comma join: "a", "a and b", "a, b, and c". */
@@ -153,13 +163,34 @@ function joinClauses(parts: ReadonlyArray<string>): string {
   return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`
 }
 
-/** The "Reach for X when Y" list, omitting any agent this launch did not emit. */
+/** The "Reach for X when Y" list, omitting any agent this launch did not emit.
+ *
+ *  On a budget lead the coding clauses swap order so the cheap tier leads and
+ *  the frontier tier is named as the complexity escalation. Choosing a lighter
+ *  lead is a decision to spend less while holding quality, and a roster that
+ *  names the expensive `implementer` first works against exactly that. This is
+ *  ORDERING AND WORDING ONLY: no agent's model changes, and `implementer` stays
+ *  named so work beyond the fast tier still has somewhere to go. */
 function buildNativeReachClauses(opts: NativeAgentAvailability): string {
-  const clauses: Array<string> = [
-    "`implementer` for coding changes that need judgment or have ambiguous scope",
-  ]
-  if (opts.implementerFastAvailable !== false) {
-    clauses.push("`implementer-fast` for well-specified, mechanical coding changes")
+  const clauses: Array<string> = []
+  const implementerFast = opts.implementerFastAvailable !== false
+  // The swap requires `implementer-fast` to actually exist this launch — on a
+  // catalog where it was dropped, naming it first would point the lead at an
+  // agent absent from the Task `subagent_type` enum.
+  if (opts.budgetLead === true && implementerFast) {
+    clauses.push(
+      "`implementer-fast` first for coding changes, since it is the cheaper and "
+        + "faster tier and this session is running a lighter lead",
+      "`implementer` when the change needs judgment, its scope is ambiguous, or "
+        + "its complexity is beyond what the fast tier can carry",
+    )
+  } else {
+    clauses.push(
+      "`implementer` for coding changes that need judgment or have ambiguous scope",
+    )
+    if (implementerFast) {
+      clauses.push("`implementer-fast` for well-specified, mechanical coding changes")
+    }
   }
   clauses.push(
     "`reviewer` when something exists and you want it assessed (including "
@@ -171,7 +202,12 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
   }
   clauses.push("`scribe` for docs and ADRs that trail the code")
   if (opts.generalPurposeFastAvailable !== false) {
-    clauses.push("`general-purpose-fast` for work no specialist fits")
+    clauses.push(
+      opts.budgetLead === true
+        ? "`general-purpose-fast` for work no specialist fits, in preference to "
+          + "carrying it inline yourself"
+        : "`general-purpose-fast` for work no specialist fits",
+    )
   }
   return joinClauses(clauses)
 }

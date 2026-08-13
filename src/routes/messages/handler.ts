@@ -31,6 +31,8 @@ import {
   buildAdvisorStream,
   injectAdvisorTool,
   isAdvisorRequested,
+  resolveAdvisorEffort,
+  resolveAdvisorModel,
 } from "~/services/advisor/advisor"
 import { createMessages } from "~/services/copilot/create-messages"
 import type { Model } from "~/services/copilot/get-models"
@@ -700,12 +702,27 @@ export async function handleCompletion(c: Context) {
       const initialConversation = Array.isArray(parsedBase.messages)
         ? (parsedBase.messages as Array<AnyRecord>)
         : []
+      // Resolve the advisor per REQUEST, not per launch: both the lead model and
+      // the effort level change mid-session via the CLI pickers, so a value
+      // pinned at spawn would go stale on the first `/model` switch.
+      //
+      // Two different bodies feed this on purpose. The lead identity comes from
+      // `originalModel` — the pre-resolution, user-facing slug that still
+      // carries `[1m]` and the dashed-vs-dotted form. The effort comes from
+      // `rawBody`, NOT `nativeBody`/`parsedBase`, because those have already
+      // been through `translateThinking`, which clamps to the LEAD model's
+      // allowlist; reading them would hand the advisor what the lead could do
+      // instead of what the user picked.
+      const advisorChoice = resolveAdvisorModel(originalModel)
       return new Response(
         buildAdvisorStream({
           firstResponse: response,
           initialConversation,
           baseBody: parsedBase,
           requestHeaders,
+          advisorModel: advisorChoice.model,
+          advisorEscalated: advisorChoice.escalated,
+          advisorEffort: resolveAdvisorEffort(rawBody, advisorChoice.model),
           externalAborter: advisorAborter,
         }),
         {

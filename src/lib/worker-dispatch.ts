@@ -212,7 +212,7 @@ export function dispatcherDescription(mode: WorkerDispatchMode): string {
     implement:
       "Non-blocking `implement` worker: dispatches an autonomous coding worker (read/write/bash) that ALWAYS runs in an isolated git worktree and returns the diff (for in-place edits use the `implementer` subagent), in the background, and delivers its result as a completion notification.",
     review:
-      "Non-blocking `review` worker: the backgrounded counterpart of the `reviewer` subagent, running a cross-lab model. In a git workspace it takes an isolated worktree and can therefore VERIFY rather than only read: reproduce a failure, run the build or suite to check a claim, and author a throwaway probe test. Outside git it degrades to read-only rather than failing. Returns severity-ranked findings with file:line and a go/no-go, as a completion notification. Use `explore` instead when you just need to find or understand something.",
+      "Non-blocking `review` worker: the backgrounded counterpart of the `reviewer` subagent, running a cross-lab model. It has explore's read-and-search tools plus `bash`, so it can VERIFY rather than only read: reproduce a failure, or run the build or suite to check a claim. By default it works directly in the workspace, where it gets no edit/write tools but `bash` still runs real commands, so a build or test it invokes can touch the tree. Pass `worktree: true` to run it isolated in a replayed git worktree instead, which also lets it author a throwaway probe test. Returns severity-ranked findings with file:line and a go/no-go, as a completion notification. Use `explore` instead when you just need to find or understand something.",
     plan:
       "Non-blocking `plan` worker: dispatches a read-only planner that returns an ordered implementation plan, in the background, and delivers it as a completion notification.",
     test:
@@ -234,7 +234,9 @@ export function dispatcherPrompt(mode: WorkerDispatchMode, workersKey: string): 
   const briefDescription = mode === "browse" ? "the lead's browse task, copied verbatim" : "the lead's worker brief, copied verbatim"
   const modeSpecificPassThrough = mode === "browse"
     ? "\n  - `sessionId` (optional): pass through if the lead specified one"
-    : ""
+    : mode === "review"
+      ? "\n  - `worktree` (optional): pass `true` only if the lead asked for an isolated review"
+      : ""
   return [
     `# Subagent: ${dispatcherAgentName(mode)}`,
     "",
@@ -245,7 +247,11 @@ export function dispatcherPrompt(mode: WorkerDispatchMode, workersKey: string): 
     "",
     `Call the \`${tool}\` tool EXACTLY ONCE, passing through the fields from the lead's brief:`,
     `  - \`${briefField}\`: ${briefDescription}`,
-    "  - `workspace` (optional): absolute path, if the lead specified one",
+    "  - `workspace`: ALWAYS pass this. Use the absolute path of the directory the",
+    "    lead named, or, when the lead named none, your own current working",
+    "    directory. The proxy runs as a separate long-lived process and cannot see",
+    "    where you are, so if you omit this it falls back to the session's directory,",
+    "    which may be a different checkout than the files the lead is asking about.",
     "  - `model` / `thinking` (optional): only if the lead specified them",
     "  - `maxWallClockMs` (optional): per-call wall-clock budget in ms, if the lead specified one"
       + modeSpecificPassThrough,
