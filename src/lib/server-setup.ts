@@ -9,7 +9,12 @@ import { PATHS, ensurePaths } from "./paths"
 import { maybeSpawnDaemon, wireDaemonTeardown } from "./first-mate/scheduler/autospawn"
 import { agentToolsEnabled } from "./mcp-capabilities"
 import { withOneMSuffix } from "./one-m-context"
-import { generateRandomPort } from "./port"
+import {
+  BUDGET_SMALL_FAST_CATALOG_ID,
+  BUDGET_SMALL_FAST_SLUG,
+  generateRandomPort,
+  isBudgetClaudeLead,
+} from "./port"
 import { initProxyFromEnv, initUpstreamTransport } from "./proxy"
 import { installBodySizeStatsExitHook } from "./request-log"
 import { state } from "./state"
@@ -927,23 +932,39 @@ export function getClaudeCodeEnvVars(
   // claude-sonnet-5. Anthropic-published dashed slug that is also the
   // Copilot catalog id verbatim (no dotted variant), so resolveModel
   // resolves it via an exact catalog match at request time.
-  // We deliberately pass Sonnet rather than Haiku here: on the canonical
-  // Copilot-Enterprise deployment the quality lift on background ops
+  // We deliberately pass Sonnet rather than Haiku on an OPUS lead: on the
+  // canonical Copilot-Enterprise deployment the quality lift on background ops
   // (compaction summaries, session titles) is worth more than Haiku's
   // marginal latency/cost edge, and Copilot bills per-request by
   // multiplier rather than per-token. Sonnet 5 is both the newest Sonnet
   // and cheaper than Sonnet 4.6 per the live catalog (input/output
   // multipliers 200/1000 vs 300/1500), so it strictly dominates the
-  // prior default for this tier. The /model picker's Haiku tier row
-  // (ANTHROPIC_DEFAULT_HAIKU_MODEL below) is likewise seeded to
-  // claude-sonnet-5 so the cheap-tier pick also lands on Sonnet 5.
+  // prior default for this tier.
+  //
+  // On a BUDGET lead that reasoning inverts. Sonnet is then the lead itself, so
+  // seeding the small/fast tier to Sonnet means background ops cost the same as
+  // real work — there is no cheap tier left. Haiku restores the gap. Both this
+  // and the Haiku picker row below move together: leaving the row on Sonnet
+  // while background ops ran on Haiku would make the cheap-tier pick disagree
+  // with the tier actually in use.
+  //
+  // The presence probe tests Copilot's DOTTED catalog id while the env var gets
+  // the Anthropic DASHED slug — see BUDGET_SMALL_FAST_* for why the two forms
+  // are not interchangeable here. Absent from the catalog, we fall back to
+  // today's Sonnet rather than naming a model the account cannot reach.
   // Presence-based guard preserves any user-set value, including the
   // dated slug variant or a different family (gemini, gpt) for users
   // who have custom Copilot mappings — symmetric with the
   // ANTHROPIC_SMALL_FAST_MODEL pass-through documented in launch.ts's
   // STRIPPED_PARENT_ENV_KEYS comment.
+  const smallFastModel =
+    isBudgetClaudeLead(model)
+    && (state.models?.data?.some((m) => m.id === BUDGET_SMALL_FAST_CATALOG_ID)
+      ?? false)
+      ? BUDGET_SMALL_FAST_SLUG
+      : "claude-sonnet-5"
   if (process.env.ANTHROPIC_SMALL_FAST_MODEL === undefined) {
-    vars.ANTHROPIC_SMALL_FAST_MODEL = "claude-sonnet-5"
+    vars.ANTHROPIC_SMALL_FAST_MODEL = smallFastModel
   }
 
   // Tier-default knobs read by Claude Code's /model picker (cc-backup
@@ -960,11 +981,13 @@ export function getClaudeCodeEnvVars(
   // dual-signal detector (sibling-slug regex OR base-slug
   // max_context_window_tokens). Seeding a bracketed slug here would bypass
   // that cap-awareness and risk a request Copilot 400s (unrecognized
-  // bracket) or local over-accounting of context. Note both the Sonnet and
-  // Haiku tier rows are seeded to claude-sonnet-5 (the Haiku row is NOT a
-  // haiku slug) to match the ANTHROPIC_SMALL_FAST_MODEL default above — the
-  // Sonnet/cheap-tier picks land on Sonnet 5, which is newer and cheaper than
-  // the prior Sonnet-4.6 / Haiku-4.5 defaults.
+  // bracket) or local over-accounting of context. On an OPUS lead both the
+  // Sonnet and Haiku tier rows are seeded to claude-sonnet-5 (the Haiku row is
+  // NOT a haiku slug) to match the ANTHROPIC_SMALL_FAST_MODEL default above —
+  // the Sonnet/cheap-tier picks land on Sonnet 5, which is newer and cheaper
+  // than the prior Sonnet-4.6 / Haiku-4.5 defaults. On a BUDGET lead the Haiku
+  // row follows `smallFastModel` down to Haiku, for the reason given there: the
+  // cheap-tier pick must not disagree with the tier background ops actually use.
   //
   // Presence-based guard symmetric with the SMALL_FAST_MODEL guard
   // above — preserves any value (including 0/false/off/unrecognized)
@@ -973,7 +996,7 @@ export function getClaudeCodeEnvVars(
     vars.ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-5"
   }
   if (process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL === undefined) {
-    vars.ANTHROPIC_DEFAULT_HAIKU_MODEL = "claude-sonnet-5"
+    vars.ANTHROPIC_DEFAULT_HAIKU_MODEL = smallFastModel
   }
   if (process.env.ANTHROPIC_DEFAULT_OPUS_MODEL === undefined) {
     vars.ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-5"

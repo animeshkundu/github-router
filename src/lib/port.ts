@@ -2,6 +2,8 @@ import consola from "consola"
 
 import { ONE_M_TOKENS } from "./one-m-context"
 import { state } from "./state"
+import { isClaudeModel } from "./anthropic-translate/classifier"
+import { resolveModel } from "./utils"
 
 export const DEFAULT_PORT = 8787
 
@@ -78,6 +80,83 @@ export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
  * variant" — defaulting safe-side preserves the pre-change behavior).
  */
 const DEFAULT_OPUS_FAMILY = "5"
+
+/** The lead `-m fast` selects. Anthropic-published dashed slug that is also the
+ *  Copilot catalog id verbatim, so `resolveModel` matches it exactly. */
+export const BUDGET_LEAD_MODEL = "claude-sonnet-5"
+
+/** Small/fast tier for a budget lead, in the two forms this codebase needs.
+ *
+ *  `SLUG` is the Anthropic-published DASHED form and is what goes into
+ *  `ANTHROPIC_SMALL_FAST_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL`: Claude Code's
+ *  `/model` registry is keyed on Anthropic slugs, and seeding Copilot's dotted
+ *  id there reproduces the documented `claude-opus-5` failure where the picker
+ *  silently falls back to an older model. `CATALOG_ID` is Copilot's DOTTED id
+ *  and is what the presence probe must test, because that is the id the catalog
+ *  actually carries. `resolveModel` bridges the two at request time. */
+export const BUDGET_SMALL_FAST_SLUG = "claude-haiku-4-5"
+export const BUDGET_SMALL_FAST_CATALOG_ID = "claude-haiku-4.5"
+
+/**
+ * Resolve the `-m` argument to the lead slug to launch with.
+ *
+ *   - `fast`      → `BUDGET_LEAD_MODEL` (budget mode)
+ *   - `N.M`       → the best variant of that Opus family, via `pickClaudeDefault`
+ *   - a full slug → unchanged, including Copilot slugs a power user pins
+ *   - absent      → the ordinary default
+ *
+ * `fast` resolves to an ordinary slug rather than setting a mode flag, because
+ * budget mode is keyed off the RESOLVED lead everywhere it matters (the advisor
+ * escalation, the delegation prose, the small/fast tier). `-m fast` and
+ * `-m claude-sonnet-5` must therefore produce identical sessions, which a flag
+ * only one of the two set would break.
+ *
+ * Callers must keep treating any explicit `-m` as explicit: the
+ * `DEFAULT_CLAUDE_MODEL_FALLBACKS` walk applies to the implicit-default path
+ * only, so it cannot override a requested family (or `fast`) with an older Opus.
+ */
+export function resolveLeadSlugArg(modelArg: string | undefined): string {
+  // Normalize before every test: `-m ""` and `-m " fast "` are things a shell
+  // and a wrapper script both produce, and an untrimmed empty string would be
+  // returned verbatim as a model id.
+  const arg = modelArg?.trim()
+  if (!arg) return pickClaudeDefault()
+  if (arg.toLowerCase() === "fast") return BUDGET_LEAD_MODEL
+  const opusFamilyShorthand = arg.match(/^(\d+\.\d+)$/)?.[1]
+  if (opusFamilyShorthand) return pickClaudeDefault(opusFamilyShorthand)
+  return arg
+}
+
+/**
+ * True when `slug` names a Claude model that is NOT an Opus tier — the
+ * "budget lead" condition.
+ *
+ * Selecting sonnet or haiku as the lead is a decision to spend less while
+ * holding quality as far as possible, and three surfaces key off it: the
+ * advisor escalates to the Anthropic frontier (`resolveAdvisorModel`), the
+ * injected delegation prose puts the cheap agent tiers first
+ * (`buildNativeReachClauses`), and the small/fast tier drops to Haiku
+ * (`getClaudeCodeEnvVars`). One definition here so those three cannot disagree
+ * about what counts as a budget lead.
+ *
+ * Resolves before the family test so the Anthropic dashed form, Copilot's
+ * dotted form, and `pickClaudeDefault`'s literal `[1m]` suffix all classify
+ * alike. A non-Claude lead is not a budget lead: the concept is about picking a
+ * lighter tier WITHIN the Claude family, and the gpt/gemini shim models have
+ * their own cost profile that this switch says nothing about.
+ *
+ * CONTRACT: `slug` is an already-resolved LEAD SLUG, never a raw `-m` argument.
+ * `"fast"` and the `N.M` shorthand are not Claude slugs and would classify
+ * false here; run them through `resolveLeadSlugArg` first, which is what every
+ * caller does. Resolving internally instead would drag `pickClaudeDefault`'s
+ * catalog dependency into a pure predicate and make the same input answer
+ * differently before and after the catalog loads.
+ */
+export function isBudgetClaudeLead(slug: string | undefined): boolean {
+  if (!slug) return false
+  if (!isClaudeModel(slug)) return false
+  return !/opus/i.test(resolveModel(slug))
+}
 
 export function pickClaudeDefault(opusFamily: string = DEFAULT_OPUS_FAMILY): string {
   // Canonicalize the family to dotted form so both "4.8" and "4-8" work

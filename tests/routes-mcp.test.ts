@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { tmpdir } from "node:os"
@@ -210,6 +210,21 @@ describe("/mcp session workspace header", () => {
     const relative: Record<string, unknown> = {}
     applySessionWorkspace(relative, "relative/path")
     expect(relative.workspace).toBeUndefined()
+  })
+
+  test("applySessionWorkspace reports which source the workspace came from", () => {
+    // The merge into `args` makes a header-derived workspace look identical to
+    // one the caller chose, and those warrant different treatment: a caller
+    // knows where it is, a per-connection header only knows where the SESSION
+    // is. The return value is how that distinction survives.
+    expect(applySessionWorkspace({ workspace: "/explicit" }, process.cwd())).toBe(
+      "argument",
+    )
+    expect(applySessionWorkspace({ prompt: "x" }, process.cwd())).toBe("session")
+    expect(applySessionWorkspace({ workspace: "" }, process.cwd())).toBe("session")
+    expect(applySessionWorkspace({ prompt: "x" }, undefined)).toBe("absent")
+    // A relative header is not usable, so it is not a source.
+    expect(applySessionWorkspace({ prompt: "x" }, "relative/path")).toBe("absent")
   })
 
   test("persona calls do not receive a workspace from the session header", async () => {
@@ -1367,6 +1382,45 @@ describe("/mcp tools/call routing", () => {
       }
     })
 
+    test("the confinement root is the CALLING session's directory, not the proxy's cwd", async () => {
+      // The proxy is long-lived and started from wherever the operator was; a
+      // caller running in a git worktree keeps its screenshots there. Rooting
+      // the check at our own cwd rejected every one of them, which reads to
+      // the caller as "the image is broken" rather than "you are somewhere I
+      // did not look". The same path is accepted once the connection says
+      // where the session actually is.
+      const elsewhere = realpathSync.native(
+        mkdtempSync(path.join(os.tmpdir(), "gh-router-session-ws-")),
+      )
+      const file = path.join(elsewhere, "shot.png")
+      writeFileSync(file, Buffer.from(PNG_B64, "base64"))
+      try {
+        const withoutHeader = await rpc({
+          jsonrpc: "2.0",
+          id: 905,
+          method: "tools/call",
+          params: { name: "codex_critic", arguments: { prompt: "look", imagePaths: [file] } },
+        })
+        expect(
+          (withoutHeader.json as { error?: { message?: string } }).error?.message,
+        ).toMatch(/imagePaths\[0\]/)
+
+        mockResponsesUpstream("saw the image")
+        const withHeader = await rpc(
+          {
+            jsonrpc: "2.0",
+            id: 906,
+            method: "tools/call",
+            params: { name: "codex_critic", arguments: { prompt: "look", imagePaths: [file] } },
+          },
+          { workspace: elsewhere },
+        )
+        expect((withHeader.json as { error?: unknown }).error).toBeUndefined()
+      } finally {
+        rmSync(elsewhere, { recursive: true, force: true })
+      }
+    })
+
     test("a non-array argument is rejected at the boundary", async () => {
       const { json } = await rpc({
         jsonrpc: "2.0",
@@ -2440,7 +2494,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
       method: "tools/call",
       params: {
         name: "explore",
-        arguments: { prompt: "what does foo do?" },
+        arguments: { prompt: "what does foo do?", workspace: process.cwd() },
       },
     })
     expect(status).toBe(200)
@@ -2462,6 +2516,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
         name: "implement",
         arguments: {
           prompt: "add a comment to README",
+          workspace: process.cwd(),
           // Pin a chat-endpoint model so the chat-SSE mock applies — this
           // test covers the in-place implement path, not the implement
           // default (gpt-5.6-sol, which routes to /responses).
@@ -2491,6 +2546,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
         arguments: {
           prompt: "fix the typo",
           worktree: true,
+          workspace: process.cwd(),
           // Chat-endpoint pin (see above) — gpt-5.6-sol default routes to
           // /responses, which the chat-SSE mock doesn't serve.
           model: "gemini-3.1-pro-preview",
@@ -2562,7 +2618,11 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
       content: Array<{ text: string }>
     }
     expect(result.isError).toBeFalsy()
-    expect(result.content[0].text).toBe("explore-with-header-workspace")
+    // The header supplied the workspace, so the result carries the
+    // provenance note naming the tree the worker actually ran in.
+    expect(result.content[0].text).toContain("explore-with-header-workspace")
+    expect(result.content[0].text).toContain(`[workspace: ${process.cwd()}`)
+    expect(result.content[0].text).toContain("from your session's working directory")
     expect(captured).toBeDefined()
   })
 
@@ -2675,7 +2735,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
         method: "tools/call",
         params: {
           name: "explore",
-          arguments: { prompt: "anything" },
+          arguments: { prompt: "anything", workspace: process.cwd() },
         },
       })
       const result = json.result as {
@@ -2701,7 +2761,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
       method: "tools/call",
       params: {
         name: "explore",
-        arguments: { prompt: "anything", model: "nonexistent" },
+        arguments: { prompt: "anything", model: "nonexistent", workspace: process.cwd() },
       },
     })
     const result = json.result as {
@@ -2726,7 +2786,12 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
       method: "tools/call",
       params: {
         name: "explore",
-        arguments: { prompt: "hi", thinking: "xhigh", model: "gemini-3.1-pro-preview" },
+        arguments: {
+          prompt: "hi",
+          thinking: "xhigh",
+          model: "gemini-3.1-pro-preview",
+          workspace: process.cwd(),
+        },
       },
     })
     const result = json.result as {
@@ -2749,22 +2814,23 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
     )
   })
 
-  test("worker_implement worktree:true in a non-git cwd returns isError (hard fail, no silent fallback)", async () => {
-    // Move cwd into a fresh non-git temp dir. The engine's Step-4
+  test("worker_implement worktree:true in a non-git workspace returns isError (hard fail, no silent fallback)", async () => {
+    // Point the worker at a fresh non-git temp dir. The engine's Step-4
     // worktree provisioning calls `git rev-parse` and throws on
     // non-zero exit; runWorkerAgent surfaces the throw as the isError
-    // envelope. No fetch mock — failure is pre-fetch.
-    const originalCwd = process.cwd()
+    // envelope. No fetch mock — failure is pre-fetch. The workspace is
+    // passed explicitly rather than by chdir'ing the test process: the
+    // worker no longer reads `process.cwd()`, and mutating a process-global
+    // from one test is a race against every other test in the lane.
     const dir = mkdtempSync(join(tmpdir(), "gh-router-worker-noregister-"))
     try {
-      process.chdir(dir)
       const { json } = await rpc({
         jsonrpc: "2.0",
         id: 716,
         method: "tools/call",
         params: {
           name: "implement",
-          arguments: { prompt: "make a change", worktree: true },
+          arguments: { prompt: "make a change", worktree: true, workspace: dir },
         },
       })
       const result = json.result as {
@@ -2776,7 +2842,6 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
         /not a (git )?repository|git unavailable/i,
       )
     } finally {
-      process.chdir(originalCwd)
       try {
         rmSync(dir, { recursive: true, force: true })
       } catch {

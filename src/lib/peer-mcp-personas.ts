@@ -950,7 +950,29 @@ export interface NonPersonaMcpTool {
   handler: (
     args: Record<string, unknown>,
     signal?: AbortSignal,
+    ctx?: McpToolCallContext,
   ) => Promise<McpToolResult>
+}
+
+/**
+ * Where a tool call's `workspace` came from, decided at the MCP boundary by
+ * `applySessionWorkspace` and threaded to the handler so it survives the merge
+ * into `args`.
+ *
+ *   - `argument` — the caller named a directory. Authoritative: it is the only
+ *     source that reflects where the CALLING AGENT actually is.
+ *   - `session`  — the per-connection `X-GH-Workspace` header. A default, not a
+ *     choice: the header is computed once per MCP connection by a helper Claude
+ *     Code runs, so it tracks the session, not the individual sub-agent, and it
+ *     goes stale the moment anything moves into a git worktree.
+ *   - `absent`   — neither. Nothing on the wire says where to run.
+ */
+export type WorkspaceSource = "argument" | "session" | "absent"
+
+/** Per-call context the MCP boundary threads into a tool handler alongside the
+ *  raw arguments. Optional so the many handlers that ignore it stay two-arg. */
+export interface McpToolCallContext {
+  workspaceSource: WorkspaceSource
 }
 
 const WEB_SEARCH_DESCRIPTION =
@@ -1596,12 +1618,15 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           workspace: {
             type: "string",
             description:
-              "Optional absolute path to the workspace the worker "
-              + "operates in. Defaults to the proxy's launch cwd. "
-              + "Use this when the parent agent has multiple "
-              + "workspaces open and the worker must operate in a "
-              + "specific one. Must be absolute (relative paths "
-              + "rejected).",
+              "Absolute path of the directory the worker operates in. "
+              + "Pass YOUR OWN current working directory unless you were "
+              + "told to target a different one — the proxy is a separate, "
+              + "long-lived process and cannot see where you are, so it "
+              + "falls back to your session's directory, which is not "
+              + "necessarily yours (a sub-agent or a git worktree moves you "
+              + "without moving the session). Omitting it when the "
+              + "connection supplies nothing is an error rather than a "
+              + "guess. Must be absolute (relative paths rejected).",
           },
           maxWallClockMs: {
             type: "integer",
@@ -1619,11 +1644,12 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       async handler(
         args: Record<string, unknown>,
         signal?: AbortSignal,
+        ctx?: McpToolCallContext,
       ): Promise<{
         content: Array<{ type: "text"; text: string }>
         isError?: boolean
       }> {
-        return runWorkerToolCall({ mode: "explore", args, signal })
+        return runWorkerToolCall({ mode: "explore", args, signal, ctx })
       },
     },
     {
@@ -1686,13 +1712,16 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           workspace: {
             type: "string",
             description:
-              "Optional absolute path to the workspace the worker "
-              + "operates in. Defaults to the proxy's launch cwd. "
-              + "Use this when the parent agent has multiple "
-              + "workspaces open and the worker must operate in a "
-              + "specific one. Must be absolute (relative paths "
-              + "rejected). Must be inside a git repo (implement always "
-              + "runs in a worktree).",
+              "Absolute path of the directory the worker operates in. "
+              + "Pass YOUR OWN current working directory unless you were "
+              + "told to target a different one — the proxy is a separate, "
+              + "long-lived process and cannot see where you are, so it "
+              + "falls back to your session's directory, which is not "
+              + "necessarily yours (a sub-agent or a git worktree moves you "
+              + "without moving the session). Omitting it when the "
+              + "connection supplies nothing is an error rather than a "
+              + "guess. Must be absolute (relative paths rejected). Must be "
+              + "inside a git repo (implement always runs in a worktree).",
           },
           maxWallClockMs: {
             type: "integer",
@@ -1710,11 +1739,12 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       async handler(
         args: Record<string, unknown>,
         signal?: AbortSignal,
+        ctx?: McpToolCallContext,
       ): Promise<{
         content: Array<{ type: "text"; text: string }>
         isError?: boolean
       }> {
-        return runWorkerToolCall({ mode: "implement", args, signal })
+        return runWorkerToolCall({ mode: "implement", args, signal, ctx })
       },
     },
     {
@@ -1723,18 +1753,21 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       capability: "worker",
       description:
         "Runs as the background `worker-review` agent. Dispatch via the Agent tool (subagent_type: worker-review) so the turn is never blocked; the result arrives as a completion notification. "
-        + "Read-only code review by an autonomous worker (Pi runtime; default "
+        + "Code review by an autonomous worker (Pi runtime; default "
         + "model `gemini-3.1-pro-preview`, default thinking xhigh clamped to high "
         + "for that model, override via `model` with any Copilot-catalog model "
-        + "that advertises `tool_calls`). It has the same read-only toolset as "
-        + "explore and verifies claims against surrounding repository context before "
-        + "returning severity-ranked findings with `file:line` citations. Use for "
+        + "that advertises `tool_calls`). It has explore's read-and-search tools "
+        + "PLUS `bash`, so it verifies claims by running them — reproducing a "
+        + "failure or running the build or suite — rather than only reading, and "
+        + "returns severity-ranked findings with `file:line` citations. It gets no "
+        + "edit/write tools unless you pass `worktree: true`, but `bash` runs real "
+        + "commands in the workspace, so a build or test it invokes can touch the "
+        + "tree. Use for "
         + "reviewing a change, diff, or correctness claim when the reviewer should "
         + "read the code itself rather than trusting a pasted artifact. Not for "
         + "architecture critique, implementation, or test authoring; use codex_critic "
         + "or gemini_critic for design review, implement for edits, and test for "
         + "independent test creation."
-        + WORKER_READ_ONLY_NOTE
         + WORKER_OVERSIZED_RESULT_NOTE,
       inputSchema: {
         type: "object",
@@ -1766,15 +1799,32 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               + "for the default review model). Silently clamped to the model's "
               + "allowed range; \"off\" drops the parameter entirely.",
           },
+          worktree: {
+            type: "boolean",
+            description:
+              "Optional. When true, the review runs in an isolated git "
+              + "worktree replaying the workspace's working tree (dirty "
+              + "tracked changes and untracked-not-ignored files), which "
+              + "additionally grants `edit`/`write` so the reviewer can "
+              + "author a throwaway probe test to prove a claim. Default "
+              + "false: the reviewer reads and runs commands in the "
+              + "workspace itself. Prefer the default when verifying needs "
+              + "the build to work — a fresh worktree does not carry "
+              + "IGNORED files, so installed dependencies are absent. "
+              + "Requires a git repository.",
+          },
           workspace: {
             type: "string",
             description:
-              "Optional absolute path to the workspace the worker "
-              + "operates in. Defaults to the proxy's launch cwd. "
-              + "Use this when the parent agent has multiple "
-              + "workspaces open and the worker must operate in a "
-              + "specific one. Must be absolute (relative paths "
-              + "rejected).",
+              "Absolute path of the directory the worker operates in. "
+              + "Pass YOUR OWN current working directory unless you were "
+              + "told to target a different one — the proxy is a separate, "
+              + "long-lived process and cannot see where you are, so it "
+              + "falls back to your session's directory, which is not "
+              + "necessarily yours (a sub-agent or a git worktree moves you "
+              + "without moving the session). Omitting it when the "
+              + "connection supplies nothing is an error rather than a "
+              + "guess. Must be absolute (relative paths rejected).",
           },
           maxWallClockMs: {
             type: "integer",
@@ -1792,11 +1842,12 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       async handler(
         args: Record<string, unknown>,
         signal?: AbortSignal,
+        ctx?: McpToolCallContext,
       ): Promise<{
         content: Array<{ type: "text"; text: string }>
         isError?: boolean
       }> {
-        return runWorkerToolCall({ mode: "review", args, signal })
+        return runWorkerToolCall({ mode: "review", args, signal, ctx })
       },
     },
     {
@@ -1848,12 +1899,15 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           workspace: {
             type: "string",
             description:
-              "Optional absolute path to the workspace the worker "
-              + "operates in. Defaults to the proxy's launch cwd. "
-              + "Use this when the parent agent has multiple "
-              + "workspaces open and the worker must operate in a "
-              + "specific one. Must be absolute (relative paths "
-              + "rejected).",
+              "Absolute path of the directory the worker operates in. "
+              + "Pass YOUR OWN current working directory unless you were "
+              + "told to target a different one — the proxy is a separate, "
+              + "long-lived process and cannot see where you are, so it "
+              + "falls back to your session's directory, which is not "
+              + "necessarily yours (a sub-agent or a git worktree moves you "
+              + "without moving the session). Omitting it when the "
+              + "connection supplies nothing is an error rather than a "
+              + "guess. Must be absolute (relative paths rejected).",
           },
           maxWallClockMs: {
             type: "integer",
@@ -1871,11 +1925,12 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       async handler(
         args: Record<string, unknown>,
         signal?: AbortSignal,
+        ctx?: McpToolCallContext,
       ): Promise<{
         content: Array<{ type: "text"; text: string }>
         isError?: boolean
       }> {
-        return runWorkerToolCall({ mode: "plan", args, signal })
+        return runWorkerToolCall({ mode: "plan", args, signal, ctx })
       },
     },
     {
@@ -1939,13 +1994,16 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           workspace: {
             type: "string",
             description:
-              "Optional absolute path to the workspace the worker "
-              + "operates in. Defaults to the proxy's launch cwd. "
-              + "Use this when the parent agent has multiple "
-              + "workspaces open and the worker must operate in a "
-              + "specific one. Must be absolute (relative paths "
-              + "rejected). Must be inside a git repo (test always "
-              + "runs in a worktree).",
+              "Absolute path of the directory the worker operates in. "
+              + "Pass YOUR OWN current working directory unless you were "
+              + "told to target a different one — the proxy is a separate, "
+              + "long-lived process and cannot see where you are, so it "
+              + "falls back to your session's directory, which is not "
+              + "necessarily yours (a sub-agent or a git worktree moves you "
+              + "without moving the session). Omitting it when the "
+              + "connection supplies nothing is an error rather than a "
+              + "guess. Must be absolute (relative paths rejected). Must be "
+              + "inside a git repo (test always runs in a worktree).",
           },
           maxWallClockMs: {
             type: "integer",
@@ -1963,11 +2021,12 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       async handler(
         args: Record<string, unknown>,
         signal?: AbortSignal,
+        ctx?: McpToolCallContext,
       ): Promise<{
         content: Array<{ type: "text"; text: string }>
         isError?: boolean
       }> {
-        return runWorkerToolCall({ mode: "test", args, signal })
+        return runWorkerToolCall({ mode: "test", args, signal, ctx })
       },
     },
     {
@@ -2463,10 +2522,12 @@ export function assertMcpToolSurfaceConsistent(): void {
 /**
  * Shared closure body for the two worker MCP tools. Validates the
  * minimal arg shape (prompt required + optional knobs typed), then
- * forwards to `runWorkerAgent`. Outside serve mode, `workspace` defaults
- * to the proxy's launch cwd; serve mode requires an explicit/header-derived
- * workspace. Callers can override via the optional `workspace` arg
- * (absolute paths only — enforced here). The engine performs every
+ * forwards to `runWorkerAgent`. `workspace` comes from the caller's
+ * argument or, failing that, the per-connection session header the
+ * boundary folds in; with neither, the call is REFUSED rather than
+ * defaulted to the proxy's launch cwd (see the resolution block below
+ * for why that default was a bug, and `GH_ROUTER_ALLOW_PROXY_CWD_WORKSPACE`
+ * for the raw-client escape hatch). The engine performs every
  * deeper validation (model existence, thinking clamp, worktree
  * provisioning, semaphore acquisition, workspace realpath +
  * accessibility) and never throws — its `{text, isError?}` envelope
@@ -2482,11 +2543,12 @@ async function runWorkerToolCall(call: {
   mode: "explore" | "review" | "plan" | "implement" | "test"
   args: Record<string, unknown>
   signal?: AbortSignal
+  ctx?: McpToolCallContext
 }): Promise<{
   content: Array<{ type: "text"; text: string }>
   isError?: boolean
 }> {
-  const { mode, args, signal } = call
+  const { mode, args, signal, ctx } = call
   const prompt = typeof args.prompt === "string" ? args.prompt : ""
   if (!prompt) {
     return {
@@ -2538,11 +2600,12 @@ async function runWorkerToolCall(call: {
   // mandatory, not caller-tunable (a flag that had to survive a free-text
   // Agent-tool round-trip silently dropped in prod, editing the real repo).
   // A caller passing `worktree: false` is overridden with a note; for in-place
-  // edits the native `implementer` subagent is the right tool. We still reject
+  // edits the native `implementer` subagent is the right tool. `review` is the
+  // exception and takes the caller's answer (see below). We still reject
   // a non-boolean so a schema-ignoring client gets a clean error.
   let worktree: boolean | undefined
   let worktreeNote = ""
-  if (mode === "implement" || mode === "test") {
+  if (mode === "implement" || mode === "test" || mode === "review") {
     if (args.worktree !== undefined && typeof args.worktree !== "boolean") {
       return {
         content: [
@@ -2551,19 +2614,56 @@ async function runWorkerToolCall(call: {
         isError: true,
       }
     }
-    worktree = true
-    if (args.worktree === false) {
-      worktreeNote =
-        `[note: worker_${mode} always runs in an isolated git worktree; the requested `
-        + "worktree:false was overridden. For in-place edits, use the `implementer` subagent.]\n\n"
+    if (mode === "review") {
+      // `review` is the one mode where isolation is the CALLER's call. The
+      // engine and `buildWorkerTools` have always supported an isolated
+      // review — it is what unlocks `edit`/`write` so the reviewer can author
+      // the probe test it needs to prove a claim — but nothing ever set the
+      // flag, so that path was unreachable and the surface advertised a
+      // capability it could not deliver. It stays opt-in rather than forced
+      // because a fresh worktree gets tracked + untracked-not-ignored files
+      // only: IGNORED build inputs (`node_modules`, `target/`, `.venv`) are
+      // not replayed, so an isolated reviewer often cannot run the very build
+      // or suite that makes a review a verification. Forcing isolation would
+      // trade one false promise for another.
+      worktree = args.worktree === true ? true : undefined
+    } else {
+      worktree = true
+      if (args.worktree === false) {
+        worktreeNote =
+          `[note: worker_${mode} always runs in an isolated git worktree; the requested `
+          + "worktree:false was overridden. For in-place edits, use the `implementer` subagent.]\n\n"
+      }
     }
   }
 
-  // Optional workspace override. Outside serve mode, default is the proxy's
-  // launch cwd; in serve mode this proxy is machine-wide, so the workspace
-  // must come from the per-session header (injected by handler.ts as
-  // args.workspace) or from an explicit tool argument. Absolute-only at the
-  // boundary so a relative path doesn't silently resolve against process.cwd().
+  // Workspace resolution. A worker runs an autonomous agent — reading,
+  // and for the write-capable modes editing and executing — inside whatever
+  // directory we pick here, so picking it by guess is the whole bug class this
+  // resolution exists to close.
+  //
+  // The proxy is long-lived and started ONCE, from wherever the operator
+  // happened to be. The agent calling this tool is not: a Claude Code session
+  // can move into a git worktree, and a sub-agent can be launched pinned to one.
+  // `process.cwd()` is therefore unrelated to the caller's location, and
+  // defaulting to it silently ran workers against a tree that did not contain
+  // the files they were asked to work on — reading pre-change content, or
+  // finding nothing at all. So we FAIL CLOSED: when neither the caller nor the
+  // connection said where to run, we refuse and say so, instead of guessing.
+  //
+  // Precedence, and why:
+  //   1. an explicit `workspace` argument — the only source that reflects where
+  //      the CALLING AGENT actually is, because only it knows;
+  //   2. the per-connection `X-GH-Workspace` header (already folded into
+  //      `args.workspace` at the boundary) — a session-level default that
+  //      cannot distinguish one sub-agent from another;
+  //   3. nothing → error, unless the operator opts back into the old
+  //      launch-cwd behaviour for a raw MCP client that sends neither. That
+  //      opt-out is non-serve ONLY — see the `state.serveMode` branch below.
+  //
+  // Absolute-only so a relative path can't quietly resolve against our cwd.
+  const allowProxyCwd = process.env.GH_ROUTER_ALLOW_PROXY_CWD_WORKSPACE === "1"
+  const callerGaveWorkspace = args.workspace !== undefined
   let workspace: string
   if (args.workspace !== undefined) {
     if (typeof args.workspace !== "string" || args.workspace.length === 0) {
@@ -2584,6 +2684,13 @@ async function runWorkerToolCall(call: {
     }
     workspace = args.workspace
   } else if (state.serveMode) {
+    // Deliberately OUTRANKS `allowProxyCwd`, and must stay that way. A serve is
+    // one machine-wide daemon fronting many projects at once, so its launch cwd
+    // belongs to no client in particular — falling back to it would not restore
+    // a useful default, it would run a worker against an unrelated repository,
+    // which is a worse version of the bug this resolution exists to close. The
+    // escape hatch therefore does not apply here, and the message does not
+    // offer it; the only correct answer in serve mode is an explicit path.
     return {
       content: [
         {
@@ -2593,9 +2700,49 @@ async function runWorkerToolCall(call: {
       ],
       isError: true,
     }
-  } else {
+  } else if (allowProxyCwd) {
     workspace = process.cwd()
+  } else {
+    return {
+      content: [
+        {
+          type: "text",
+          text:
+            `worker_${mode}: a workspace is required. Nothing in this call said which `
+            + "directory to run in, and the proxy's own launch directory is not a safe "
+            + "guess — it is where the proxy was started, which may be a different "
+            + "checkout or git worktree than the one you are working in. Re-issue this "
+            + "call with `workspace` set to the absolute path of your current working "
+            + "directory. (Operators running a raw MCP client that cannot send one can "
+            + "restore the old launch-cwd default with "
+            + "GH_ROUTER_ALLOW_PROXY_CWD_WORKSPACE=1.)",
+        },
+      ],
+      isError: true,
+    }
   }
+
+  // Say which tree we ran in whenever the CALLER did not choose it. A worker
+  // that read the wrong directory otherwise reports a confident, wrong answer
+  // with nothing in the result to reveal why, which is exactly how this failed
+  // silently before. When the caller passed `workspace` itself the note is
+  // noise — it already knows — so it is omitted there.
+  //
+  // `ctx` is absent for a direct handler call that never crossed the MCP
+  // boundary (tests, future in-process callers). Fall back to the one thing
+  // still visible here — whether the arguments carried a workspace at all —
+  // rather than to a constant, so an explicit path is never mislabelled as
+  // our launch directory.
+  const effectiveSource: WorkspaceSource =
+    ctx?.workspaceSource ?? (callerGaveWorkspace ? "argument" : "absent")
+  const workspaceNote =
+    effectiveSource === "argument"
+      ? ""
+      : `[workspace: ${workspace} (${
+          effectiveSource === "session"
+            ? "from your session's working directory; pass `workspace` explicitly if you are running somewhere else, such as a git worktree"
+            : "the proxy's launch directory"
+        })]\n\n`
 
   // Optional per-call wall-clock override (ms). Validate as a positive
   // integer, then CLAMP to `workerWallClockCeilingMs()` (the injected MCP
@@ -2645,9 +2792,10 @@ async function runWorkerToolCall(call: {
     signal,
   })
   // Notes are prefixes that MUST survive — reserve their bytes so the FINAL
-  // composed string (`clampNote + worktreeNote + body`) honors the relay cap,
-  // and truncate only the worker body (the last transform before returning).
-  const notePrefix = `${clampNote}${worktreeNote}`
+  // composed string (`workspaceNote + clampNote + worktreeNote + body`) honors
+  // the relay cap, and truncate only the worker body (the last transform
+  // before returning).
+  const notePrefix = `${workspaceNote}${clampNote}${worktreeNote}`
   const body = await relaySafeText(result.text, Buffer.byteLength(notePrefix, "utf8"))
   return {
     content: [{ type: "text", text: `${notePrefix}${body}` }],

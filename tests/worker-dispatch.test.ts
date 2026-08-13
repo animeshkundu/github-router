@@ -268,11 +268,28 @@ describe("dispatcher bodies", () => {
     expect(p).toContain("EXACTLY ONCE")
     expect(p).toContain("VERBATIM")
     expect(p).toMatch(/do NOT spawn/i)
-    // Worktree is no longer a relayed flag — implement/test ALWAYS run in a
+    // Worktree is not a relayed flag for implement/test — they ALWAYS run in a
     // worktree (enforced at the MCP boundary), so the dispatcher prompt must
-    // NOT mention it (nothing for the dispatcher to pass through).
+    // NOT mention it (nothing for the dispatcher to pass through). `review` is
+    // the exception: its isolation IS the caller's choice, so the dispatcher
+    // has to know it can relay one.
     expect(p).not.toContain("worktree")
     expect(dispatcherPrompt("explore", KEY)).not.toContain("worktree")
+    expect(dispatcherPrompt("review", KEY)).toContain("`worktree` (optional)")
+  })
+
+  test("every dispatcher is told to always pass its own workspace", () => {
+    // The dispatcher is the ONLY caller the PreToolUse guard admits, and it is
+    // the only party that knows where it is: the proxy is a separate
+    // long-lived process, and the per-connection workspace header tracks the
+    // session rather than the individual sub-agent. If the dispatcher stays
+    // silent, a worker can run against a checkout that never held the files
+    // the lead asked about.
+    for (const mode of ALL_WORKER_DISPATCH_MODES) {
+      const p = dispatcherPrompt(mode, KEY)
+      expect(p).toContain("`workspace`: ALWAYS pass this")
+      expect(p).toContain("your own current working")
+    }
   })
   test("prompt names the correct required brief field for each worker tool", () => {
     const browse = dispatcherPrompt("browse", KEY)

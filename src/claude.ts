@@ -88,7 +88,9 @@ import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
 import {
   DEFAULT_CLAUDE_MODEL_FALLBACKS,
+  isBudgetClaudeLead,
   pickClaudeDefault,
+  resolveLeadSlugArg,
 } from "./lib/port"
 import {
   agentToolsEnabled,
@@ -427,11 +429,20 @@ export const claude = defineCommand({
     // continue to pass through unchanged. `usingDefault` stays false
     // for shorthand so the DEFAULT_CLAUDE_MODEL_FALLBACKS walk doesn't
     // override an explicit family request with the next-older Opus.
-    const usingDefault = !args.model
-    const opusFamilyShorthand = args.model?.match(/^(\d+\.\d+)$/)?.[1]
-    const requestedSlug = opusFamilyShorthand
-      ? pickClaudeDefault(opusFamilyShorthand)
-      : (args.model ?? pickClaudeDefault())
+    //
+    // `-m fast` is the named alias for budget mode: sonnet-5 leads and does the
+    // legwork while the advisor escalates to Opus for direction. It resolves to
+    // an ordinary slug rather than setting a separate flag, because budget mode
+    // is keyed off the RESOLVED lead everywhere it matters — so `-m fast` and
+    // `-m claude-sonnet-5` must produce identical sessions, and a mode flag that
+    // only one of the two set would break that.
+    // Trimmed, and it must stay in lockstep with `resolveLeadSlugArg`'s own
+    // trim: that helper treats `-m "   "` as absent and returns the default, so
+    // computing `usingDefault` from the untrimmed argument would pick the
+    // default model while suppressing the fallback walk that exists to rescue
+    // it when the catalog lacks that family.
+    const usingDefault = !args.model?.trim()
+    const requestedSlug = resolveLeadSlugArg(args.model)
     let chosenSlug = requestedSlug
     let resolvedSlug = resolveModel(chosenSlug)
 
@@ -606,6 +617,10 @@ export const claude = defineCommand({
       scoutAvailable: nativeAgentModels.scout != null,
       implementerFastAvailable: nativeAgentModels["implementer-fast"] != null,
       generalPurposeFastAvailable: nativeAgentModels["general-purpose-fast"] != null,
+      // Read from the FINAL `chosenSlug`, after the fallback walk above may have
+      // reassigned it, so the prose describes the lead this session actually
+      // got rather than the one it asked for.
+      budgetLead: isBudgetClaudeLead(chosenSlug),
     }
     const codexMcpEnabled = (args as Record<string, unknown>)["codex-mcp"] !== false
     // Resolve before any settings/runtime file can persist a self-command. The

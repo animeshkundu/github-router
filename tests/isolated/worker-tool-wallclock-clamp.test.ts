@@ -66,6 +66,11 @@ function handlerFor(mode: string): ToolHandler {
   return tool.handler as ToolHandler
 }
 
+/** The boundary refuses to guess a workspace, so every call supplies one.
+ *  Passing it explicitly also suppresses the provenance note, keeping these
+ *  assertions about the clamp text alone. */
+const WS = process.cwd()
+
 beforeEach(() => {
   runWorkerAgentCalls.length = 0
   runWorkerAgentReturn = { text: "worker-done" }
@@ -74,7 +79,7 @@ beforeEach(() => {
 describe("runWorkerToolCall maxWallClockMs clamp", () => {
   test("an override above the ceiling is clamped down and reported in the text", async () => {
     const huge = resolveMcpToolTimeoutMs() * 10
-    const res = await handlerFor("explore")({ prompt: "hi", maxWallClockMs: huge })
+    const res = await handlerFor("explore")({ prompt: "hi", maxWallClockMs: huge, workspace: WS })
     expect(runWorkerAgentCalls).toHaveLength(1)
     // Threaded value is the ceiling, NOT the caller's oversized request.
     expect(runWorkerAgentCalls[0]!.maxWallClockMs).toBe(workerWallClockCeilingMs())
@@ -86,14 +91,14 @@ describe("runWorkerToolCall maxWallClockMs clamp", () => {
 
   test("an override at/below the ceiling is threaded through unchanged (no note)", async () => {
     const ms = 60_000
-    const res = await handlerFor("implement")({ prompt: "hi", maxWallClockMs: ms })
+    const res = await handlerFor("implement")({ prompt: "hi", maxWallClockMs: ms, workspace: WS })
     expect(runWorkerAgentCalls[0]!.maxWallClockMs).toBe(ms)
     expect(res.content[0]!.text).not.toContain("clamped")
     expect(res.content[0]!.text).toBe("worker-done")
   })
 
   test("omitting maxWallClockMs threads undefined (engine applies the default)", async () => {
-    await handlerFor("explore")({ prompt: "hi" })
+    await handlerFor("explore")({ prompt: "hi", workspace: WS })
     expect(runWorkerAgentCalls[0]!.maxWallClockMs).toBeUndefined()
   })
 
@@ -104,6 +109,7 @@ describe("runWorkerToolCall maxWallClockMs clamp", () => {
       const res = await handlerFor("test")({
         prompt: "hi",
         maxWallClockMs: bad as number,
+        workspace: WS,
       })
       expect(res.isError).toBe(true)
       expect(res.content[0]!.text).toContain("maxWallClockMs")
@@ -113,7 +119,7 @@ describe("runWorkerToolCall maxWallClockMs clamp", () => {
 
   test("the reported ceiling equals MCP tool-call timeout minus the teardown headroom", async () => {
     const huge = resolveMcpToolTimeoutMs() * 10
-    const res = await handlerFor("explore")({ prompt: "hi", maxWallClockMs: huge })
+    const res = await handlerFor("explore")({ prompt: "hi", maxWallClockMs: huge, workspace: WS })
     const ceiling = resolveMcpToolTimeoutMs() - MCP_TIMEOUT_HEADROOM_MS
     expect(res.content[0]!.text).toContain(String(ceiling))
   })

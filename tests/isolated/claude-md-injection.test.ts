@@ -940,3 +940,40 @@ test("the operating-defaults directive omits natives this launch dropped", () =>
   expect(onlyCatchAll).not.toContain("`implementer-fast`")
   expect(onlyCatchAll).toContain("scout")
 })
+
+// Budget-mode delegation ordering. On a lighter lead the cheap tier must lead
+// and the frontier tier must be named as the complexity escalation — choosing a
+// budget lead and then being told to reach for the expensive implementer first
+// works against the reason the lead was chosen.
+test("budgetLead reorders the coding clauses without dropping either agent", () => {
+  const opusLead = buildOperatingDefaultsDirective()
+  const budgetLead = buildOperatingDefaultsDirective({ budgetLead: true })
+
+  // Both agents stay named on both paths: this is ordering, not availability.
+  for (const directive of [opusLead, budgetLead]) {
+    expect(directive).toContain("`implementer`")
+    expect(directive).toContain("`implementer-fast`")
+  }
+
+  // The orderings are actually opposite.
+  expect(opusLead.indexOf("`implementer`")).toBeLessThan(
+    opusLead.indexOf("`implementer-fast`"),
+  )
+  expect(budgetLead.indexOf("`implementer-fast`")).toBeLessThan(
+    budgetLead.indexOf("`implementer`"),
+  )
+  expect(budgetLead).toContain("beyond what the fast tier can carry")
+})
+
+// The swap must never name an agent this launch did not emit. With
+// implementer-fast dropped, the budget path has to fall back to the ordinary
+// ordering rather than leading with a subagent_type that does not exist.
+test("budgetLead does not name implementer-fast when it was dropped", () => {
+  const dropped = buildOperatingDefaultsDirective({
+    budgetLead: true,
+    implementerFastAvailable: false,
+  })
+  expect(dropped).not.toContain("`implementer-fast`")
+  expect(dropped).toContain("`implementer`")
+  expect(dropped).not.toContain("beyond what the fast tier can carry")
+})

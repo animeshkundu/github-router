@@ -29,10 +29,15 @@
  *       re-call Copilot for the next turn — stream onto the SAME
  *       SSE connection (no new message_start; the original one is
  *       still open). Loop up to ADVISOR_MAX_TURNS times.
- * 4. Cross-lab default: route the advisor call to a different model
- *    family than the main loop (gpt-5.6-sol by default) so the user gets
- *    a true "second set of eyes" instead of Opus reviewing Opus
- *    (gemini-critic finding).
+ * 4. Lead-aware model choice: route the advisor call to a different model
+ *    family than the main loop (gpt-5.6-sol) so the user gets a true "second
+ *    set of eyes" instead of Opus reviewing Opus (gemini-critic finding). When
+ *    the LEAD is a lighter Claude tier the choice inverts and the advisor
+ *    escalates to `ADVISOR_ESCALATION_MODEL` instead — see that constant for
+ *    why trading the cross-lab property is the right call on that path.
+ * 5. Effort follows the Claude Code effort picker (`resolveAdvisorEffort`)
+ *    rather than a hardcoded constant, floored so a low picker cannot render
+ *    the consultation useless.
  *
  * The translate-loop is bounded to a single user request — no
  * persistent state across requests is needed (unlike Phase G's
@@ -44,6 +49,13 @@ import consola from "consola"
 import { events } from "fetch-event-stream"
 
 import { HTTPError } from "~/lib/error"
+import { isBudgetClaudeLead } from "~/lib/port"
+import {
+  EFFORT_ORDER,
+  bucketEffort,
+  clampEffort,
+  type Effort,
+} from "~/lib/reasoning-effort"
 import { state } from "~/lib/state"
 import { isControllerClosedError } from "~/lib/stream-relay"
 import {
@@ -91,7 +103,229 @@ export const ADVISOR_MAX_TURNS = 16
 export const ADVISOR_DEFAULT_MODEL = "gpt-5.6-sol"
 export const ADVISOR_DEFAULT_EFFORT = "xhigh"
 
-type Effort = "low" | "medium" | "high" | "xhigh"
+/** The Anthropic frontier model the advisor escalates to when the LEAD is a
+ *  lighter Claude tier (sonnet, haiku).
+ *
+ *  Selecting a lighter lead is a decision to work on a budget while holding
+ *  quality: the lead does the legwork and escalates for direction. Without this,
+ *  a budget lead has no transcript-aware path to the strongest Anthropic
+ *  reasoner at all — `opus_critic` is stateless and sees one artifact, and the
+ *  `plan` worker is read-only and never sees the transcript.
+ *
+ *  This deliberately trades the advisor's cross-lab property on that path. The
+ *  advisor is not this repo's review instrument: it catches drift and momentum
+ *  and inherits the lead's framing by design, while the fresh-context critics
+ *  (`codex_critic`, `gemini_critic`, `codex_reviewer`, `gemini_reviewer`) are
+ *  the decorrelation instrument and are untouched. `GH_ROUTER_ADVISOR_MODEL`
+ *  keeps a cross-lab advisor one env var away for anyone who wants it back. */
+export const ADVISOR_ESCALATION_MODEL = "claude-opus-5"
+
+/** Floor for the advisor's reasoning effort.
+ *
+ *  The advisor follows the Claude Code effort picker (see `resolveAdvisorEffort`)
+ *  so dialing the picker down makes it cheaper, but it does NOT follow it all the
+ *  way to the bottom of `EFFORT_ORDER`. The advisor fires a handful of times per
+ *  session (`ADVISOR_MAX_TURNS`, typically 1-3), so it is not the budget line —
+ *  the lead's own turns are — while an advisor reasoning at `none`/`low` cannot
+ *  do the job the consultation exists for. The picker therefore governs the
+ *  `high..max` range. */
+const ADVISOR_MIN_EFFORT: Effort = "high"
+
+/** Output cap for the Anthropic-branch advisor call when the catalog carries no
+ *  limits for the resolved model. The value the branch used unconditionally
+ *  before it became reachable, kept so a catalog-less path is no worse off. */
+const ADVISOR_FALLBACK_MAX_OUTPUT_TOKENS = 4096
+
+/** Catalog spellings that mean the Responses API. Copilot is inconsistent about
+ *  the `/v1` prefix, so both are matched — mirroring `CHAT_ENDPOINTS` /
+ *  `RESPONSES_ENDPOINTS` in `src/services/copilot/endpoint.ts`. */
+const ADVISOR_RESPONSES_ENDPOINTS: ReadonlySet<string> = new Set([
+  "/responses",
+  "/v1/responses",
+])
+
+/**
+ * Which transport the advisor dispatches on: `/responses` (with
+ * `reasoning.effort`) or `/v1/messages`.
+ *
+ * Catalog-first, name-regex second, and BOTH tests run against the bare id as
+ * well as the given one. `pickEndpoint` is deliberately not reused: it answers
+ * "chat or responses" for the two tool-calling clients and would send
+ * `claude-opus-5` — which advertises `/v1/messages` AND `/chat/completions` — to
+ * chat. The advisor's question is narrower: does this model serve `/responses`?
+ *
+ * The bare-id fallback is what makes `GH_ROUTER_ADVISOR_MODEL` safe. That pin is
+ * accepted verbatim, so an operator can write a vendor-namespaced value like
+ * `openai/gpt-5.6-sol`. Such an id is in no catalog and fails the start-anchored
+ * name regex, so a catalog-only fix still posted it to `/v1/messages` and 400'd
+ * — exported and directly tested for that exact input, because an earlier
+ * version of this function claimed to handle it and did not.
+ */
+export function advisorUsesResponses(resolvedAdvisorModel: string): boolean {
+  // `openai/gpt-5.6-sol` -> `gpt-5.6-sol`. Only the last segment can be a real
+  // catalog id; anything before it is a vendor namespace the catalog never uses.
+  const bare = resolvedAdvisorModel.slice(
+    resolvedAdvisorModel.lastIndexOf("/") + 1,
+  )
+  const entry = state.models?.data?.find(
+    (m) => m.id === resolvedAdvisorModel || m.id === bare,
+  )
+  const endpoints = entry?.supported_endpoints
+  if (endpoints && endpoints.length > 0) {
+    return endpoints.some((e) => ADVISOR_RESPONSES_ENDPOINTS.has(e))
+  }
+  return /^(gpt-|o\d|.*codex)/i.test(bare)
+}
+
+/** True when the model advertises a usable reasoning-effort ladder. */
+function advertisedEffortLadder(
+  resolvedAdvisorModel: string,
+): Array<string> | undefined {
+  const supported = state.models?.data?.find(
+    (m) => m.id === resolvedAdvisorModel,
+  )?.capabilities?.supports?.reasoning_effort
+  return Array.isArray(supported) && supported.length > 0 ? supported : undefined
+}
+
+/** True when the advisor should escalate to `ADVISOR_ESCALATION_MODEL` for this
+ *  lead: a Claude lead that is NOT already an Opus tier, on a catalog that
+ *  actually carries the escalation model.
+ *
+ *  The catalog probe mirrors `standInToolEnabled`'s: never name a model the
+ *  account cannot reach. A non-Claude lead never gets here in practice (the
+ *  advisor tool is stripped for those before the request reaches this module),
+ *  but the check is explicit rather than assumed.
+ *
+ *  The probe compares the BARE constant rather than `resolveModel`-ing it first,
+ *  which is deliberate and not an oversight: `claude-opus-5` is a single-segment
+ *  slug whose dashed and dotted spellings are identical, so resolution is a
+ *  no-op, and `resolveModel` WARNS on an id it cannot find — routing this probe
+ *  through it would emit that warning on every advisor request for anyone whose
+ *  catalog lacks opus-5, which is exactly the tier this returns false for.
+ *  `standInToolEnabled` compares the same id the same way. */
+function shouldEscalateAdvisor(leadModel: string): boolean {
+  // `isBudgetClaudeLead` resolves the slug first, so the Anthropic dashed form,
+  // Copilot's dotted form, and `pickClaudeDefault`'s `[1m]` suffix all classify
+  // alike. Shared with the delegation prose and the small/fast tier so the three
+  // budget-mode surfaces cannot disagree about what a budget lead is.
+  if (!isBudgetClaudeLead(leadModel)) return false
+  return state.models?.data?.some((m) => m.id === ADVISOR_ESCALATION_MODEL) ?? false
+}
+
+export interface AdvisorModelChoice {
+  model: string
+  /** True ONLY for the automatic lead-based escalation.
+   *
+   *  An operator pin via `GH_ROUTER_ADVISOR_MODEL` is not an escalation even
+   *  when it names `ADVISOR_ESCALATION_MODEL` itself. `runAdvisor` keys the
+   *  "your caller is running a lighter model" clause on this flag rather than on
+   *  the resolved model id, so pinning opus on an opus lead cannot inject a
+   *  sentence that is false. */
+  escalated: boolean
+}
+
+/**
+ * Pick the advisor model for one request from the LEAD model that request is
+ * running on.
+ *
+ * Resolved per request rather than at launch because the lead changes
+ * mid-session via the `/model` picker; launch-time env plumbing would pin the
+ * advisor to whatever was selected at spawn.
+ *
+ * Precedence:
+ *   1. `GH_ROUTER_ADVISOR_MODEL` (trimmed) — the operator pin, checked first so
+ *      it works on every lead.
+ *   2. A lighter Claude lead with the escalation model in the catalog.
+ *   3. `ADVISOR_DEFAULT_MODEL`.
+ *
+ * Step 3 returns the LITERAL constant rather than walking the OpenAI frontier
+ * chain. An Opus lead must resolve to exactly what it resolves to today, and a
+ * frontier walk could yield `gpt-5.5` on a catalog missing `gpt-5.6-sol` —
+ * a silent change to the one path that is required not to move.
+ */
+export function resolveAdvisorModel(
+  leadModel: string | undefined,
+): AdvisorModelChoice {
+  const pinned = process.env.GH_ROUTER_ADVISOR_MODEL?.trim()
+  if (pinned) return { model: pinned, escalated: false }
+  if (leadModel && shouldEscalateAdvisor(leadModel)) {
+    return { model: ADVISOR_ESCALATION_MODEL, escalated: true }
+  }
+  return { model: ADVISOR_DEFAULT_MODEL, escalated: false }
+}
+
+/**
+ * Resolve the advisor's reasoning effort from the ORIGINAL request body, so the
+ * advisor thinks at the level selected in the Claude Code effort picker instead
+ * of a hardcoded constant.
+ *
+ * The source is the RAW pre-`resolveModelInBody` body, deliberately. By the time
+ * the handler holds a parsed body, `translateThinking` has already bucketed
+ * `thinking.budget_tokens` into `output_config.effort` AND clamped it to the
+ * LEAD model's allowlist — so that value encodes "what the lead could do", not
+ * "what the user picked". Re-clamping it against the advisor cannot recover the
+ * difference: a `max` pick on a lead whose ceiling is `high` would reach an
+ * xhigh-capable advisor as `high`.
+ *
+ * Precedence mirrors the repo-wide rule that an explicit client effort wins:
+ *   1. `output_config.effort`
+ *   2. `bucketEffort(thinking.budget_tokens)`
+ *   3. `ADVISOR_DEFAULT_EFFORT` — a request expressing no preference behaves
+ *      exactly as it did before the picker was honored at all.
+ *
+ * Then floor, THEN clamp. The order is load-bearing: a model whose ceiling sits
+ * below `ADVISOR_MIN_EFFORT` must still receive a value it accepts, so the clamp
+ * is allowed to pull back under the floor. Flipping the two would forward an
+ * effort upstream rejects.
+ */
+export function resolveAdvisorEffort(
+  rawRequestBody: string | undefined,
+  advisorModel: string,
+): string {
+  let requested: Effort = ADVISOR_DEFAULT_EFFORT
+  if (rawRequestBody) {
+    try {
+      const body = JSON.parse(rawRequestBody) as AnyRecord
+      const oc = body.output_config
+      const explicit =
+        oc && typeof oc === "object" ? (oc as AnyRecord).effort : undefined
+      const thinking = body.thinking
+      if (
+        typeof explicit === "string"
+        && (EFFORT_ORDER as ReadonlyArray<string>).includes(explicit)
+      ) {
+        requested = explicit as Effort
+      } else if (
+        thinking
+        && typeof thinking === "object"
+        && (thinking as AnyRecord).type === "enabled"
+      ) {
+        // An explicit-but-unrecognized effort lands here too, and bucketing a
+        // real budget beats anchoring on a value we could not parse. With no
+        // thinking block either, the default below is already the repo's
+        // UNKNOWN_EFFORT_ANCHOR, so the two conventions agree.
+        requested = bucketEffort((thinking as AnyRecord).budget_tokens)
+      }
+    } catch {
+      // Unparseable body: keep the default. `isAdvisorRequested` already parsed
+      // this body to get here, so this is belt-and-braces rather than a path we
+      // expect to take.
+    }
+  }
+
+  const floored =
+    EFFORT_ORDER.indexOf(requested) < EFFORT_ORDER.indexOf(ADVISOR_MIN_EFFORT)
+      ? ADVISOR_MIN_EFFORT
+      : requested
+
+  const supported = state.models?.data?.find(
+    (m) => m.id === resolveModel(advisorModel),
+  )?.capabilities?.supports?.reasoning_effort
+  // Absent OR empty allowlist means "accepts anything" — the same reading
+  // `clampOutputConfigEffortInPlace` takes. Only a non-empty list clamps.
+  if (!Array.isArray(supported) || supported.length === 0) return floored
+  return clampEffort(floored, supported)
+}
 
 /** ADVISOR_TOOL_INSTRUCTIONS verbatim from cc-backup
  *  src/utils/advisor.ts — describes when the model should invoke
@@ -251,8 +485,12 @@ export const ADVISOR_FALLBACK_MAX_TOKENS = 240_000
  *  our o200k count and Copilot's full-payload count. The transcript token
  *  budget is `max_prompt_tokens - reserve`. Generous on purpose: a 400
  *  `model_max_prompt_tokens_exceeded` degrades to a silent advisor
- *  fallback, and the marginal window we give up is irrelevant next to
- *  gpt-5.6-sol's ~1M. */
+ *  fallback, and the window given up is marginal against either advisor
+ *  model's real prompt window (`claude-opus-5` 936k, `gpt-5.6-sol` ~1M off
+ *  the live catalog). Sized as a fraction of the smaller of the two, not as
+ *  "irrelevant next to ~1M" — that framing assumed the advisor was always
+ *  the cheap side of the pair, which stopped being true once a budget lead
+ *  escalates to Opus. */
 const ADVISOR_PROMPT_TOKEN_RESERVE = 8_000
 
 /**
@@ -416,8 +654,9 @@ function truncateTailToUnits(
 async function runAdvisor(
   conversation: Array<AnyRecord>,
   advisorModel: string,
-  advisorEffort: Effort,
+  advisorEffort: string,
   signal?: AbortSignal,
+  advisorEscalated = false,
 ): Promise<string> {
   if (signal?.aborted) {
     throw new Error("advisor call aborted before dispatch")
@@ -431,16 +670,29 @@ async function runAdvisor(
     + "is on the right track, say so explicitly. If they're stuck or off-track, "
     + "name the specific assumption or step to revisit. Aim for 2-5 paragraphs "
     + "of substantive guidance."
+    // Only on the AUTOMATIC escalation, never on an operator pin that happens to
+    // name the same model — see `AdvisorModelChoice.escalated`. The requesting
+    // agent really is a lighter tier here, so it needs a decision rather than a
+    // survey of options it is less equipped to choose between.
+    + (advisorEscalated
+      ? " The requesting agent is running a lighter, faster model than you. "
+        + "Give a directive recommendation and commit to the decision rather "
+        + "than laying out options for it to weigh."
+      : "")
 
   const resolvedAdvisorModel = resolveModel(advisorModel)
 
   // Budget the rendered transcript against the advisor model's REAL
-  // prompt-token window using its exact o200k tokenizer (every advisor-
-  // eligible Copilot model declares o200k_base), not a chars/token
-  // approximation. Front-truncation in renderConversationAsText then
-  // drops oldest turns until the EXACT token count fits. If the tokenizer
-  // can't be loaded, degrade to the char-length budget rather than fail
-  // the whole advisor turn.
+  // prompt-token window using its exact tokenizer, not a chars/token
+  // approximation. Both advisor-eligible families declare o200k_base
+  // (`gpt-5.6-sol` and `claude-opus-5` were each read off the live catalog when
+  // the Anthropic escalation was added), so `getTokenizerFromModel` agrees with
+  // the default — but the value is read per model rather than assumed, because
+  // counting a transcript with the wrong tokenizer under-counts silently and
+  // surfaces as an upstream 400 only on long sessions.
+  // Front-truncation in renderConversationAsText then drops oldest turns until
+  // the EXACT token count fits. If the tokenizer can't be loaded, degrade to the
+  // char-length budget rather than fail the whole advisor turn.
   let measure: (s: string) => number
   let maxUnits: number
   try {
@@ -472,7 +724,7 @@ async function runAdvisor(
   // "codex" or starts with "o", use /responses. Otherwise /v1/messages.
   // (Could be tightened with a state.models lookup, but the fast-path
   // text match is correct for every model in Copilot's catalog today.)
-  const useResponses = /^(gpt-|o\d|.*codex)/i.test(resolvedAdvisorModel)
+  const useResponses = advisorUsesResponses(resolvedAdvisorModel)
 
   if (useResponses) {
     const payload: ResponsesPayload = {
@@ -522,15 +774,54 @@ async function runAdvisor(
     return text
   }
 
-  // claude-* fallback: /v1/messages with the conversation as a single
-  // user message. Effort doesn't apply (Anthropic uses thinking mode
-  // separately).
+  // claude-* branch: /v1/messages with the conversation as a single user
+  // message.
+  //
+  // This branch used to be unreachable — `ADVISOR_DEFAULT_MODEL` always matched
+  // the /responses regex above — which is why it dropped the effort on the floor
+  // and carried a comment saying effort did not apply. `ADVISOR_ESCALATION_MODEL`
+  // makes it live, so both the effort and the output cap have to be real here or
+  // the escalation advises with thinking disabled.
+  const advisorEntry = state.models?.data?.find(
+    (m) => m.id === resolvedAdvisorModel,
+  )
+  const limits = advisorEntry?.capabilities?.limits
+  // `stream: false` below, so size from the NON-streaming limit (16000 on
+  // claude-opus-5, against a 64000 streaming ceiling). Copilot does NOT actually
+  // enforce this — probe `advisor_claude_streaming_cap_accepted` measured a 200
+  // at 64000 with stream:false — so this is staying inside the advertised
+  // contract by choice rather than working around a rejection. 16000 is ample
+  // for the 2-5 paragraphs the system prompt asks for, and it keeps working if
+  // Copilot ever starts enforcing what it advertises. The old 4096 remains the
+  // floor for a catalog-less path.
+  const maxTokens =
+    limits?.max_non_streaming_output_tokens
+    ?? limits?.max_output_tokens
+    ?? ADVISOR_FALLBACK_MAX_OUTPUT_TOKENS
   const advisorBody = JSON.stringify({
     model: resolvedAdvisorModel,
-    max_tokens: 4096,
+    max_tokens: maxTokens,
     system: advisorSystem,
     messages: [{ role: "user", content: conversationText }],
     stream: false,
+    // Effort reaches an Anthropic model the same way `translateThinking` sends
+    // it for any adaptive-thinking model. Two conditions, not one: the model
+    // must advertise `adaptive_thinking` (a Claude entry without it would 400 on
+    // this shape) AND advertise a non-empty effort ladder. Without the second,
+    // `resolveAdvisorEffort` returns its floored value unclamped — correct as a
+    // resolver, since an absent ladder means "accepts anything" everywhere else
+    // in this repo — but sending an unvalidated effort here costs a whole
+    // transcript upload to learn it was wrong. `thinking` alone still ships, so
+    // the advisor reasons; only the unverifiable knob is dropped. Probe:
+    // `advisor_claude_adaptive_thinking` in scripts/probe-copilot-compat.sh.
+    ...(advisorEntry?.capabilities?.supports?.adaptive_thinking
+      ? {
+          thinking: { type: "adaptive" },
+          ...(advertisedEffortLadder(resolvedAdvisorModel)
+            ? { output_config: { effort: advisorEffort } }
+            : {}),
+        }
+      : {}),
   })
   const response = await withTransientRetry(
     () => createMessages(advisorBody, {}, signal),
@@ -663,11 +954,15 @@ export function buildAdvisorStream(opts: {
   baseBody: AnyRecord
   requestHeaders: Record<string, string>
   advisorModel?: string
-  advisorEffort?: Effort
+  advisorEffort?: string
+  /** From `resolveAdvisorModel(...).escalated`. Drives only the system-prompt
+   *  clause in `runAdvisor`; never the model or transport choice. */
+  advisorEscalated?: boolean
   externalAborter?: AbortController
 }): ReadableStream<Uint8Array> {
   const advisorModel = opts.advisorModel ?? ADVISOR_DEFAULT_MODEL
   const advisorEffort = opts.advisorEffort ?? ADVISOR_DEFAULT_EFFORT
+  const advisorEscalated = opts.advisorEscalated ?? false
 
   // Use the caller-supplied AbortController when provided, otherwise
   // create a local one. When the handler creates a shared controller
@@ -1108,6 +1403,7 @@ export function buildAdvisorStream(opts: {
                   advisorModel,
                   advisorEffort,
                   aborter.signal,
+                  advisorEscalated,
                 )
               } catch (err) {
                 // If the failure was the consumer-cancel abort, let the

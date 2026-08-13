@@ -1260,6 +1260,168 @@ describe("ADVISOR streaming integration (Phase I)", () => {
       retried.messages[1]!.content.some((block) => block.type === "thinking"),
     ).toBe(false)
   })
+
+  test("a budget lead routes the advisor to Opus on /v1/messages, carrying effort and a real output cap", async () => {
+    // Before the Anthropic escalation existed, ADVISOR_DEFAULT_MODEL always
+    // matched the /responses regex, so the /v1/messages advisor branch was
+    // unreachable — it dropped the effort on the floor and capped output at
+    // 4096. This test is what stops that branch silently regressing to those
+    // values now that a budget lead makes it live.
+    state.models = {
+      object: "list",
+      data: [
+        {
+          id: "claude-sonnet-5",
+          name: "claude-sonnet-5",
+          object: "model",
+          preview: false,
+          vendor: "anthropic",
+          version: "1",
+          model_picker_enabled: true,
+          capabilities: {
+            family: "claude-sonnet-5",
+            limits: { max_output_tokens: 8192 },
+            object: "model",
+            supports: { reasoning_effort: ["low", "medium", "high"] },
+            tokenizer: "o200k_base",
+            type: "chat",
+          },
+        },
+        {
+          id: "claude-opus-5",
+          name: "claude-opus-5",
+          object: "model",
+          preview: false,
+          vendor: "anthropic",
+          version: "1",
+          model_picker_enabled: true,
+          capabilities: {
+            family: "claude-opus-5",
+            limits: {
+              max_prompt_tokens: 936_000,
+              max_output_tokens: 64_000,
+              max_non_streaming_output_tokens: 16_000,
+            },
+            object: "model",
+            supports: {
+              adaptive_thinking: true,
+              reasoning_effort: ["low", "medium", "high", "xhigh", "max"],
+            },
+            tokenizer: "o200k_base",
+            type: "chat",
+          },
+        },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+    }
+
+    let advisorBody: string | undefined
+    let advisorHitResponses = false
+    let turn = 0
+    // Typed to the real fetch signature so no ts-suppression is needed: the
+    // surrounding tests predate that rule and cast, but a new one should not.
+    const fetchMock = mock(
+      async (
+        input: string | URL | Request,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const url = String(input)
+        const rawInit = typeof init?.body === "string" ? init.body : "{}"
+        if (url.includes("/responses")) {
+          advisorHitResponses = true
+          throw new Error("advisor must not take the /responses branch here")
+        }
+        const parsed = JSON.parse(rawInit) as {
+          model?: string
+          stream?: boolean
+        }
+        // The advisor's own call is the non-streaming one addressed to Opus;
+        // the lead's turns are streaming and addressed to Sonnet.
+        if (parsed.model === "claude-opus-5" && parsed.stream === false) {
+          advisorBody = rawInit
+          return new Response(
+            JSON.stringify({
+              id: "adv",
+              type: "message",
+              role: "assistant",
+              content: [{ type: "text", text: "advice" }],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          )
+        }
+        turn++
+        if (turn === 1) {
+          return new Response(
+            buildSseStream([
+              { event: "message_start", data: { type: "message_start", message: { id: "m1" } } },
+              { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_1", name: ADVISOR_INTERNAL_TOOL_NAME, input: {} } } },
+              { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{}" } } },
+              { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+              { event: "message_delta", data: { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 4 } } },
+              { event: "message_stop", data: { type: "message_stop" } },
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          )
+        }
+        return new Response(
+          buildSseStream([
+            { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } },
+            { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "done" } } },
+            { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+            { event: "message_delta", data: { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 4 } } },
+            { event: "message_stop", data: { type: "message_stop" } },
+          ]),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        )
+      },
+    )
+    // Bun's `typeof fetch` carries a `preconnect` member, so a bare mock is not
+    // assignable. Borrowing the real one keeps this a plain typed assignment
+    // rather than a suppression.
+    globalThis.fetch = Object.assign(fetchMock, {
+      preconnect: originalFetch.preconnect,
+    })
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        "anthropic-beta": "advisor-tool-2026-03-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-5",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+        output_config: { effort: "max" },
+      }),
+    })
+    expect(response.status).toBe(200)
+    await streamToString(response.body!)
+
+    expect(advisorHitResponses).toBe(false)
+    expect(advisorBody).toBeDefined()
+    const advisor = JSON.parse(advisorBody!) as {
+      model: string
+      max_tokens: number
+      thinking?: { type?: string }
+      output_config?: { effort?: string }
+      system: string
+    }
+    expect(advisor.model).toBe("claude-opus-5")
+    // The NON-streaming cap (16000), not `max_output_tokens` (64000). Copilot
+    // accepts either — probe `advisor_claude_streaming_cap_accepted` measured
+    // that — so this pins a deliberate choice to stay inside the advertised
+    // contract, not a workaround for a rejection.
+    expect(advisor.max_tokens).toBe(16_000)
+    expect(advisor.thinking?.type).toBe("adaptive")
+    // `max` survives: it is read from the RAW request body, so the lead's
+    // narrower ["low","medium","high"] ladder never clamps it, and opus-5's own
+    // ladder does advertise `max`.
+    expect(advisor.output_config?.effort).toBe("max")
+    // The escalation clause fires only on the automatic escalation.
+    expect(advisor.system).toContain("lighter, faster model")
+  })
 })
 
 describe("toClientServerToolUseId charset hardening (round-5 codex critic)", () => {

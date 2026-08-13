@@ -3,6 +3,13 @@ import type { ServerHandler } from "srvx"
 
 import { PATHS } from "../src/lib/paths"
 import {
+  BUDGET_LEAD_MODEL,
+  BUDGET_SMALL_FAST_SLUG,
+  isBudgetClaudeLead,
+  resolveLeadSlugArg,
+} from "../src/lib/port"
+import { state } from "../src/lib/state"
+import {
   MAX_REQUEST_BODY_BYTES,
   buildServeOptions,
   parseSharedArgs,
@@ -648,5 +655,135 @@ describe("withBodyLimit", () => {
       throw new Error("kaboom")
     }) as ServerHandler
     expect(withBodyLimit(boom)(post({}))).rejects.toThrow("kaboom")
+  })
+})
+
+// Budget mode: `-m fast` and the Haiku small/fast tier.
+describe("budget-mode lead and small/fast tier", () => {
+  function withCatalog<T>(ids: Array<string>, fn: () => T): T {
+    const saved = state.models
+    state.models = {
+      object: "list",
+      data: ids.map((id) => ({
+        id,
+        name: id,
+        object: "model",
+        preview: false,
+        vendor: "anthropic",
+        version: "1",
+        model_picker_enabled: true,
+        capabilities: {
+          family: id,
+          limits: {},
+          object: "model",
+          supports: {},
+          tokenizer: "o200k_base",
+          type: "chat",
+        },
+      })) as unknown as NonNullable<typeof state.models>["data"],
+    }
+    try {
+      return fn()
+    } finally {
+      state.models = saved
+    }
+  }
+
+  // Every tier key this block asserts on must be cleared, not just the ones it
+  // expects to change: these tests run inside a proxy-launched session that
+  // already exports the tier defaults, and the presence guard would otherwise
+  // skip the assignment and make the assertion depend on the ambient shell.
+  function withoutUserOverrides(fn: () => void): void {
+    const keys = [
+      "ANTHROPIC_SMALL_FAST_MODEL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    ] as const
+    const prior = keys.map((k) => [k, process.env[k]] as const)
+    for (const k of keys) delete process.env[k]
+    try {
+      fn()
+    } finally {
+      for (const [k, v] of prior) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  }
+
+  test("`-m fast` resolves to the budget lead", () => {
+    expect(resolveLeadSlugArg("fast")).toBe(BUDGET_LEAD_MODEL)
+    expect(resolveLeadSlugArg("FAST")).toBe(BUDGET_LEAD_MODEL)
+  })
+
+  test("`-m fast` and the explicit sonnet slug agree, so both give the same session", () => {
+    expect(isBudgetClaudeLead(resolveLeadSlugArg("fast"))).toBe(true)
+    expect(isBudgetClaudeLead("claude-sonnet-5")).toBe(true)
+  })
+
+  test("a full slug still passes through unchanged", () => {
+    expect(resolveLeadSlugArg("claude-opus-5")).toBe("claude-opus-5")
+    expect(isBudgetClaudeLead("claude-opus-5")).toBe(false)
+    expect(isBudgetClaudeLead("claude-opus-5[1m]")).toBe(false)
+  })
+
+  test("a budget lead drops the small/fast tier and the Haiku row to Haiku", () => {
+    withCatalog(["claude-sonnet-5", "claude-haiku-4.5"], () => {
+      withoutUserOverrides(() => {
+        const vars = getClaudeCodeEnvVars(
+          "http://127.0.0.1:8787",
+          "claude-sonnet-5",
+        )
+        // The Anthropic DASHED slug, not Copilot's dotted catalog id: Claude
+        // Code's /model registry is keyed on Anthropic slugs.
+        expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBe(BUDGET_SMALL_FAST_SLUG)
+        expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe(BUDGET_SMALL_FAST_SLUG)
+        // The Sonnet tier row is untouched: it is not the cheap tier.
+        expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("claude-sonnet-5")
+      })
+    })
+  })
+
+  test("an opus lead keeps today's Sonnet small/fast tier", () => {
+    withCatalog(["claude-opus-5", "claude-haiku-4.5"], () => {
+      withoutUserOverrides(() => {
+        const vars = getClaudeCodeEnvVars(
+          "http://127.0.0.1:8787",
+          "claude-opus-5",
+        )
+        expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBe("claude-sonnet-5")
+        expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("claude-sonnet-5")
+      })
+    })
+  })
+
+  test("a catalog without Haiku falls back to Sonnet rather than naming an absent model", () => {
+    withCatalog(["claude-sonnet-5"], () => {
+      withoutUserOverrides(() => {
+        const vars = getClaudeCodeEnvVars(
+          "http://127.0.0.1:8787",
+          "claude-sonnet-5",
+        )
+        expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBe("claude-sonnet-5")
+        expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("claude-sonnet-5")
+      })
+    })
+  })
+
+  test("a user-set small/fast model survives budget mode", () => {
+    withCatalog(["claude-sonnet-5", "claude-haiku-4.5"], () => {
+      const prior = process.env.ANTHROPIC_SMALL_FAST_MODEL
+      process.env.ANTHROPIC_SMALL_FAST_MODEL = "gemini-3.6-flash"
+      try {
+        const vars = getClaudeCodeEnvVars(
+          "http://127.0.0.1:8787",
+          "claude-sonnet-5",
+        )
+        expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBeUndefined()
+      } finally {
+        if (prior === undefined) delete process.env.ANTHROPIC_SMALL_FAST_MODEL
+        else process.env.ANTHROPIC_SMALL_FAST_MODEL = prior
+      }
+    })
   })
 })

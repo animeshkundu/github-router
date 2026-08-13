@@ -21,6 +21,7 @@ import {
   isMcpGroup,
   type McpGroup,
   type McpScope,
+  type WorkspaceSource,
 } from "~/lib/peer-mcp-personas"
 import {
   createChatCompletions,
@@ -952,20 +953,37 @@ function toolAcceptsWorkspace(tool: NonPersonaMcpTool): boolean {
     || tool.toolNameHttp === "run_workflow"
 }
 
+/**
+ * Fold the per-session `X-GH-Workspace` header into `args.workspace` when the
+ * caller left it empty, and REPORT which of the two the tool ended up with.
+ *
+ * The return value is the load-bearing part. This function mutates `args`, so
+ * once it has run a header-derived workspace is byte-indistinguishable from one
+ * the caller chose — and those two cases warrant very different treatment. A
+ * caller that named a directory has told us where it is; a header is a
+ * connection-level default that may be stale (it is computed by a helper Claude
+ * Code runs, and the calling agent may since have moved into a git worktree).
+ * `runWorkerToolCall` uses the distinction to decide what to tell the caller
+ * about the tree it actually ran in, so the provenance must survive the merge.
+ */
 export function applySessionWorkspace(
   args: Record<string, unknown>,
   sessionWorkspace: string | undefined,
   tool?: NonPersonaMcpTool,
-): void {
+): WorkspaceSource {
+  const callerSupplied =
+    args.workspace !== undefined && args.workspace !== ""
+  if (callerSupplied) return "argument"
   if (
     (!tool || toolAcceptsWorkspace(tool))
     && typeof sessionWorkspace === "string"
     && sessionWorkspace.length > 0
     && path.isAbsolute(sessionWorkspace)
-    && (args.workspace === undefined || args.workspace === "")
   ) {
     args.workspace = sessionWorkspace
+    return "session"
   }
+  return "absent"
 }
 
 async function handleToolsCall(
@@ -1166,7 +1184,23 @@ async function handleToolsCall(
           "tools/call: arguments.imagePaths must be an array of strings",
         )
       }
-      const loaded = await loadPeerImages(args.imagePaths as Array<string>, process.cwd())
+      // Confine to the CALLING SESSION's directory when the connection told us
+      // one, not to the proxy's launch cwd. The proxy is long-lived and started
+      // from wherever the operator happened to be; a caller running in a git
+      // worktree keeps its screenshots there, and rooting the check at our cwd
+      // rejected every one of them. Falling back to `process.cwd()` keeps raw
+      // MCP clients (no header) working exactly as before. This widens what a
+      // header-bearing caller can attach, which is consistent with the threat
+      // model the workspace tools already document: the proxy runs as the user
+      // and the same agent holds Read over these paths anyway, so the bound is
+      // an integration guardrail, not a security boundary.
+      const imageRoot =
+        typeof sessionWorkspace === "string"
+        && sessionWorkspace.length > 0
+        && path.isAbsolute(sessionWorkspace)
+          ? sessionWorkspace
+          : process.cwd()
+      const loaded = await loadPeerImages(args.imagePaths as Array<string>, imageRoot)
       if (!loaded.ok) {
         return rpcError(body.id, RPC_INVALID_PARAMS, `tools/call: ${loaded.error}`)
       }
@@ -1290,7 +1324,9 @@ async function handleToolsCall(
   const telemetryName = persona ? persona.agentName : nonPersonaTool!.toolNameHttp
   const telemetryModel = persona ? persona.model : "(non-persona)"
   try {
-    if (nonPersonaTool) applySessionWorkspace(args, sessionWorkspace, nonPersonaTool)
+    const workspaceSource = nonPersonaTool
+      ? applySessionWorkspace(args, sessionWorkspace, nonPersonaTool)
+      : "absent"
 
     const result = persona
       ? await callPersona(
@@ -1301,7 +1337,7 @@ async function handleToolsCall(
           aborter?.signal,
           personaImages,
         )
-      : await nonPersonaTool!.handler(args, aborter?.signal)
+      : await nonPersonaTool!.handler(args, aborter?.signal, { workspaceSource })
     logTelemetry({
       name: telemetryName,
       model: telemetryModel,

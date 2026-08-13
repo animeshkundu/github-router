@@ -933,8 +933,10 @@ describe("enumerateInjectedMcpToolNames (plan-mode allowedTools seed)", () => {
 
 describe("worker tool descriptions state their output contract", () => {
   const workerTools = ["explore", "review", "plan", "implement", "test", "browse"] as const
-  /** The three modes whose toolset is read-only (no edit/write/bash). */
-  const readOnlyModes = ["explore", "review", "plan"] as const
+  /** The modes whose toolset is genuinely read-only (no edit/write/bash).
+   *  `review` is NOT one of them: `buildWorkerTools` gives it `bash`
+   *  unconditionally, so "changes nothing on disk" was never true of it. */
+  const readOnlyModes = ["explore", "plan"] as const
 
   const describeOf = (name: string): string => {
     const tool = NON_PERSONA_MCP_TOOLS.find((t) => t.toolNameHttp === name)
@@ -967,8 +969,10 @@ describe("worker tool descriptions state their output contract", () => {
 
   test("write-capable workers are NOT labelled read-only", () => {
     // The discriminating half: a blanket append would satisfy the test above
-    // while telling the model that `implement` cannot change files.
-    for (const name of ["implement", "test", "browse"] as const) {
+    // while telling the model that `implement` cannot change files. `review`
+    // belongs here too — it holds `bash`, which is a write primitive whatever
+    // the edit/write tools do, so labelling it read-only was a false promise.
+    for (const name of ["implement", "test", "browse", "review"] as const) {
       expect(describeOf(name)).not.toContain("Strictly read-only")
     }
   })
