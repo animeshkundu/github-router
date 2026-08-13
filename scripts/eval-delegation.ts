@@ -30,6 +30,7 @@ const RUN_TIMEOUT_MS = positiveInt(process.env.GH_ROUTER_DELEGATION_EVAL_TIMEOUT
 const SEED = process.env.GH_ROUTER_DELEGATION_EVAL_SEED ?? new Date().toISOString().slice(0, 10)
 
 export type ArmName = "A" | "B"
+type AnyRecord = Record<string, unknown>
 export type Stratum =
   | "cheap-implementation"
   | "complex-implementation"
@@ -106,6 +107,11 @@ export interface ScoreSummary {
   parallelFanoutInconclusive: Record<ArmName, number>
   parallelFanoutErrored: Record<ArmName, number>
   complexImplementationDelegation: Record<ArmName, Rate>
+  /** Runs excluded from the NON-fan-out endpoints above because the CLI
+   *  invocation itself failed or timed out (see `erroredRun`). Reported so a
+   *  systematic invocation failure is visible as an exclusion count rather than
+   *  silently folded into "no delegation" / "restrained". */
+  nonFanoutErrored: Record<ArmName, number>
   pairedTransitions: {
     noDelegationToDelegation: number
     delegationToNoDelegation: number
@@ -236,13 +242,105 @@ function parseCommand(value: string | undefined, fallback: Array<string>): Array
   return parsed as Array<string>
 }
 
+/**
+ * Env keys that must be scrubbed from the harness's OWN process env before it
+ * spawns a test CLI, not merely left unset in `arm.env`. Both are injected as
+ * real process-env vars into a `github-router claude` child
+ * (`getClaudeCodeEnvVars` in `src/lib/server-setup.ts`, presence-guarded, not
+ * `--print`-aware) and/or a user's real `~/.claude/settings.json` `env` block,
+ * which the mirror faithfully copies forward. So a harness invoked from
+ * *inside* an active `github-router claude` session — exactly how this file
+ * is normally run — inherits them ambiently through `...process.env` in
+ * `armEnv` below, contaminating every arm regardless of `arm.env`.
+ *
+ * Measured directly against the installed CLI (2.1.229): with EITHER var
+ * present, `claude --print --output-format stream-json` collapses the
+ * session's own tool list from the full native+MCP set down to exactly
+ * `["Task","SendMessage","TaskStop","Workflow"]` — no Read, Write, Edit,
+ * Bash, Grep, or Glob, and no MCP tools. That is not "avoids delegating"; it
+ * is "cannot do anything BUT attempt to delegate", and since a fire-and-forget
+ * `Task`/`Agent` dispatch under `--print` never resolves synchronously within
+ * the same turn sequence, the observed behavior is a doomed retry loop across
+ * `general-purpose-fast` → `scout` → `scout` (empty prompt) → `worker`, ending
+ * in a stalling non-answer ("I've launched an agent... I'll report back once
+ * it finishes") rather than a real result. Every prior invocation of this
+ * harness from inside a live proxy session measured exactly that failure
+ * mode, not genuine delegation behavior — this is what fixes it.
+ *
+ * This mirrors an already-shipped precedent: `docs/serve-control-plane.md`
+ * documents stripping `CLAUDE_CODE_COORDINATOR_MODE` from the serve mirror for
+ * the identical reason, and its own verification script "scrubs an ambient
+ * `CLAUDE_CODE_COORDINATOR_MODE` from its probe env so it tests the mirror,
+ * not the runner's shell" — the same scrub, applied here to the eval runner's
+ * own shell instead of a mirror file.
+ */
+const AMBIENT_ENV_KEYS_TO_SCRUB = [
+  "CLAUDE_CODE_COORDINATOR_MODE",
+  "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+] as const
+
 function armEnv(baseUrl: string, configDir: string | undefined): Record<string, string> {
   const env: Record<string, string> = {
     ANTHROPIC_BASE_URL: baseUrl,
     ANTHROPIC_AUTH_TOKEN: "delegation-eval",
   }
+  // Empty string, not omission: `{...process.env, ...arm.env}` at the spawn
+  // site only overrides a key that IS present in this object. Omitting the
+  // key here would let an ambient non-empty value from `process.env` survive
+  // into the child untouched.
+  for (const key of AMBIENT_ENV_KEYS_TO_SCRUB) env[key] = ""
   if (configDir) env.CLAUDE_CONFIG_DIR = path.resolve(configDir)
   return env
+}
+
+/**
+ * Scrubbing the spawned process env (`armEnv` above) is not sufficient on its
+ * own. Measured directly: with an UNPATCHED `settings.json` still carrying
+ * `"env":{"CLAUDE_CODE_COORDINATOR_MODE":"1", ...}` at the target
+ * `CLAUDE_CONFIG_DIR`, an explicit `CLAUDE_CODE_COORDINATOR_MODE=""` in the
+ * spawned process's own env did NOT restore the tool list — the settings.json
+ * `env` block value took effect regardless. Both vectors carry the ambient
+ * ONE-launch-back `github-router claude` session's ORIGINAL ENV, since that
+ * process's real `~/.claude/settings.json` env block is what got mirrored
+ * into the `CLAUDE_CONFIG_DIR` this harness is invoked from. So when neither
+ * arm sets its own explicit `CLAUDE_CONFIG_DIR`, this makes a throwaway copy
+ * of the ambient one with the two culprit keys deleted from its
+ * `settings.json` `env` block, and returns its path.
+ *
+ * Returns `undefined` (no scrub, no copy) when there is no ambient
+ * `CLAUDE_CONFIG_DIR` to begin with — a bare environment has no settings.json
+ * vector to worry about, and the process-env scrub in `armEnv` already covers
+ * whatever is left.
+ */
+function scrubbedAmbientConfigDir(): string | undefined {
+  const ambient = process.env.CLAUDE_CONFIG_DIR
+  if (!ambient) return undefined
+  const settingsPath = path.join(ambient, "settings.json")
+  let settings: AnyRecord
+  try {
+    settings = JSON.parse(readFileSync(settingsPath, "utf8")) as AnyRecord
+  } catch {
+    // No settings.json, or unreadable/malformed: nothing to scrub, and the
+    // process-env scrub in `armEnv` is the whole defense in that case.
+    return undefined
+  }
+  const env = settings.env
+  if (
+    !env
+    || typeof env !== "object"
+    || !AMBIENT_ENV_KEYS_TO_SCRUB.some((key) => (env as AnyRecord)[key] !== undefined)
+  ) {
+    return undefined // nothing to scrub; don't pay for a copy that changes nothing
+  }
+  const dest = mkdtempSync(path.join(tmpdir(), "delegation-eval-config-"))
+  cpSync(ambient, dest, { recursive: true })
+  const scrubbedEnv = { ...(env as AnyRecord) }
+  for (const key of AMBIENT_ENV_KEYS_TO_SCRUB) delete scrubbedEnv[key]
+  writeFileSync(
+    path.join(dest, "settings.json"),
+    JSON.stringify({ ...settings, env: scrubbedEnv }),
+  )
+  return dest
 }
 
 function hashSeed(seed: string): number {
@@ -371,16 +469,31 @@ function routingPass(result: RunResult): boolean {
     && result.taskCalls.every((call) => result.acceptableAgents.includes(call.subagentType))
 }
 
+/**
+ * A run that timed out or died proves nothing about the model's choice — it
+ * measures the harness or the CLI invocation, not delegation. `killedAfterTask`
+ * is the harness's OWN intentional kill on the first Task event, so its
+ * non-zero exit is expected and is not an error.
+ *
+ * This must gate every endpoint, not only fan-out. A run whose CLI invocation
+ * fails before the model ever sees the prompt produces zero Task calls for a
+ * reason that has nothing to do with delegation — and `spontaneousDelegation`
+ * and `restraint` both key off `taskCalls.length === 0`. Without this filter a
+ * systematic invocation failure (wrong flag, bad auth, crashed proxy) silently
+ * reads as "the model chose not to delegate" and, on the negative-control
+ * stratum, as a perfect restraint score — a fabricated result dressed up as a
+ * measurement. This was caught live: every run in an eval invocation failed
+ * identically on an unrecognized CLI flag, and the unfiltered scoring reported
+ * 0% delegation / 100% restraint across the board before this fix.
+ */
+function erroredRun(result: RunResult): boolean {
+  return result.timedOut || (result.exitCode !== 0 && !result.killedAfterTask)
+}
+
 type FanoutScore = "pass" | "fail" | "inconclusive" | "errored"
 
 function fanoutScore(result: RunResult): FanoutScore {
-  // A run that timed out or died proves nothing about batching OR about the
-  // model's choice, so it is excluded separately from the batching limitation.
-  // `killedAfterTask` is the harness's OWN intentional kill on the first Task
-  // event, so its non-zero exit is expected and is not an error.
-  if (result.timedOut || (result.exitCode !== 0 && !result.killedAfterTask)) {
-    return "errored"
-  }
+  if (erroredRun(result)) return "errored"
   // Only a run that actually emitted a 2+ tool batch somewhere can distinguish
   // "the model chose to serialize" from "this execution mode cannot batch".
   if (result.maxToolBatch >= 2) {
@@ -409,8 +522,15 @@ export function scoreResults(results: ReadonlyArray<RunResult>): ScoreSummary {
       return [arm, wilson95(denominator.filter(predicate).length, denominator.length)]
     })) as Record<ArmName, Rate>
 
+  // Every non-fan-out eligibility predicate below is ANDed with `!erroredRun`.
+  // A crashed or timed-out CLI invocation produces zero Task calls for a reason
+  // that says nothing about delegation, and must never be scored as "chose not
+  // to delegate" or "restrained" — see `erroredRun`'s doc comment for the live
+  // incident this guards against.
   const spontaneousEligible = (result: RunResult) =>
-    result.stratum !== "negative-control" && result.stratum !== "parallel-fanout"
+    result.stratum !== "negative-control"
+    && result.stratum !== "parallel-fanout"
+    && !erroredRun(result)
   const delegated = (result: RunResult) => result.taskCalls.length > 0
   const paired = new Map<string, Partial<Record<ArmName, RunResult>>>()
   for (const result of results) {
@@ -425,7 +545,12 @@ export function scoreResults(results: ReadonlyArray<RunResult>): ScoreSummary {
     neitherDelegated: 0,
   }
   for (const pair of paired.values()) {
-    if (!pair.A || !pair.B || !spontaneousEligible(pair.A)) continue
+    if (!pair.A || !pair.B) continue
+    if (pair.A.stratum === "negative-control" || pair.A.stratum === "parallel-fanout") continue
+    // Skip the pair (not just one side) when either arm errored: a transition
+    // needs both sides to be a real measurement, or "delegation dropped" could
+    // just mean "arm B's CLI invocation crashed this time".
+    if (erroredRun(pair.A) || erroredRun(pair.B)) continue
     const a = delegated(pair.A)
     const b = delegated(pair.B)
     if (!a && b) transitions.noDelegationToDelegation += 1
@@ -438,9 +563,12 @@ export function scoreResults(results: ReadonlyArray<RunResult>): ScoreSummary {
     spontaneousDelegation: rateByArm(delegated, spontaneousEligible),
     routingConditionalOnDelegation: rateByArm(
       routingPass,
-      (r) => r.stratum !== "negative-control" && delegated(r),
+      (r) => r.stratum !== "negative-control" && !erroredRun(r) && delegated(r),
     ),
-    restraint: rateByArm((r) => !delegated(r), (r) => r.stratum === "negative-control"),
+    restraint: rateByArm(
+      (r) => !delegated(r),
+      (r) => r.stratum === "negative-control" && !erroredRun(r),
+    ),
     parallelFanout: rateByArm(
       (r) => fanoutScore(r) === "pass",
       (r) => r.stratum === "parallel-fanout"
@@ -457,8 +585,12 @@ export function scoreResults(results: ReadonlyArray<RunResult>): ScoreSummary {
     ])) as Record<ArmName, number>,
     complexImplementationDelegation: rateByArm(
       (r) => r.taskCalls.some((call) => call.subagentType === "implementer"),
-      (r) => r.stratum === "complex-implementation",
+      (r) => r.stratum === "complex-implementation" && !erroredRun(r),
     ),
+    nonFanoutErrored: Object.fromEntries((["A", "B"] as const).map((arm) => [
+      arm,
+      armResults(arm).filter((r) => r.stratum !== "parallel-fanout" && erroredRun(r)).length,
+    ])) as Record<ArmName, number>,
     pairedTransitions: transitions,
   }
 }
@@ -525,15 +657,34 @@ async function runOne(
   cliVersion: string,
 ): Promise<RunResult> {
   resetFixture(fixture)
+  // `arm.command` invokes the CLI directly against an already-running proxy
+  // (see DELEGATION-EVAL.md) — the DEFAULT is the raw `claude` binary, not
+  // `github-router claude`. `--no-auto-update`/`--no-self-update` are
+  // `github-router claude`'s OWN flags; the real Claude Code CLI does not
+  // recognize them and exits 1 with "unknown option" before the prompt is ever
+  // sent. That crash previously went undetected because the pre-fix scoring
+  // counted a crashed run's zero Task calls as "chose not to delegate" — see
+  // `erroredRun`. `GH_ROUTER_NO_SELF_UPDATE=1` below is the correct guard for
+  // an arm that DOES point at `github-router claude` (a CLI flag would be
+  // wrong there too, since that subcommand's own flag is `--no-self-update`,
+  // not a proxy env var override of the SAME name coincidentally reused here);
+  // it is a silently-ignored no-op env var against the raw `claude` binary.
   const args = [
     ...arm.command,
-    "--no-auto-update",
-    "--no-self-update",
     "--model",
     MODEL,
     "--print",
     "--output-format",
     "stream-json",
+    // The installed CLI (verified against 2.1.229) hard-rejects
+    // `--print --output-format=stream-json` without `--verbose`: "Error: When
+    // using --print, --output-format=stream-json requires --verbose". A second
+    // real invocation failure this harness shipped with, caught the same way as
+    // the flags fix above — every run crashed identically in ~3s and the
+    // pre-fix scoring silently read that as "chose not to delegate" /
+    // "restrained". `--verbose` only affects what the CLI prints in stream-json
+    // mode, not the model's behavior, so it does not change what is measured.
+    "--verbose",
     "--permission-mode",
     "dontAsk",
     "--no-session-persistence",
@@ -635,10 +786,17 @@ function printSummary(summary: ScoreSummary): void {
   for (const [name, rates] of Object.entries(summary).filter(
     ([name]) => name !== "pairedTransitions"
       && name !== "parallelFanoutInconclusive"
-      && name !== "parallelFanoutErrored",
+      && name !== "parallelFanoutErrored"
+      && name !== "nonFanoutErrored",
   )) {
     const typed = rates as Record<ArmName, Rate>
     console.log(`${name}: A ${formatRate(typed.A)}; B ${formatRate(typed.B)}`)
+  }
+  const nonFanoutErrored = summary.nonFanoutErrored
+  if (nonFanoutErrored.A > 0 || nonFanoutErrored.B > 0) {
+    console.log(
+      `spontaneousDelegation/restraint/complexImplementationDelegation: excluded A ${nonFanoutErrored.A}; B ${nonFanoutErrored.B} errored run(s) (timeout or non-zero exit before the CLI produced any signal), which measure neither the model's choice nor its restraint.`,
+    )
   }
   const inconclusive = summary.parallelFanoutInconclusive
   if (inconclusive.A > 0 || inconclusive.B > 0) {
@@ -723,10 +881,37 @@ function selfTest(): void {
       ...syntheticResult("fanout-timeout", "parallel-fanout", "A", [], ["scout", "reviewer", "brainstorm"], 3, 0),
       timedOut: true,
     },
+    // A crashed CLI invocation on a NON-fan-out stratum (no paired "B" run, so
+    // it cannot register a paired transition either). Its zero Task calls must
+    // be excluded from spontaneousDelegation's denominator rather than counted
+    // as "chose not to delegate" — the live incident this guards against.
+    {
+      ...syntheticResult("crashed-specialist", "specialist", "A", [], ["scout"]),
+      exitCode: 1,
+    },
+    // Same failure mode on the negative-control stratum: a crash must not be
+    // counted as "restrained" — it never got the chance to act at all.
+    {
+      ...syntheticResult("crashed-negative", "negative-control", "A", [], []),
+      exitCode: 1,
+    },
   ]
   const score = scoreResults(results)
   if (score.spontaneousDelegation.B.successes !== 1 || score.restraint.B.successes !== 1) {
     throw new Error(`unexpected score: ${JSON.stringify(score)}`)
+  }
+  if (score.spontaneousDelegation.A.denominator !== 1) {
+    throw new Error(
+      `a crashed run must not enter the spontaneousDelegation denominator: ${JSON.stringify(score.spontaneousDelegation.A)}`,
+    )
+  }
+  if (score.restraint.A.denominator !== 1) {
+    throw new Error(
+      `a crashed run must not enter the restraint denominator: ${JSON.stringify(score.restraint.A)}`,
+    )
+  }
+  if (score.nonFanoutErrored.A !== 2 || score.nonFanoutErrored.B !== 0) {
+    throw new Error(`non-fan-out errored exclusions must be counted: ${JSON.stringify(score.nonFanoutErrored)}`)
   }
   if (score.parallelFanout.A.denominator !== 1 || score.parallelFanout.A.successes !== 0) {
     throw new Error(`zero-tool run must count as a fan-out failure: ${JSON.stringify(score.parallelFanout.A)}`)
@@ -775,13 +960,25 @@ async function main(): Promise<void> {
     return
   }
 
+  // Computed ONCE and shared: both arms defaulting to no explicit
+  // GH_ROUTER_DELEGATION_ARM_{A,B}_CONFIG_DIR (the common case) should reuse
+  // the SAME scrubbed copy rather than paying for — and diverging between —
+  // two independent copies of an identical fix.
+  const sharedScrubbedConfigDir = scrubbedAmbientConfigDir()
+  if (sharedScrubbedConfigDir) {
+    console.log(
+      `delegation eval: ambient CLAUDE_CONFIG_DIR carried a coordinator/agent-teams env var that collapses --print sessions to a 4-tool set; using a scrubbed copy at ${sharedScrubbedConfigDir} for any arm without its own explicit CONFIG_DIR.`,
+    )
+  }
+  const resolvedConfigDir = (explicit: string | undefined) => explicit ?? sharedScrubbedConfigDir
+
   const armA: ArmConfig = {
     name: "A",
     command: parseCommand(process.env.GH_ROUTER_DELEGATION_ARM_A_COMMAND, ["claude"]),
     revision: process.env.GH_ROUTER_DELEGATION_ARM_A_REVISION ?? "baseline-config",
     env: armEnv(
       process.env.GH_ROUTER_DELEGATION_ARM_A_BASE_URL ?? BASE_URL,
-      process.env.GH_ROUTER_DELEGATION_ARM_A_CONFIG_DIR,
+      resolvedConfigDir(process.env.GH_ROUTER_DELEGATION_ARM_A_CONFIG_DIR),
     ),
   }
   const armB: ArmConfig = {
@@ -790,7 +987,7 @@ async function main(): Promise<void> {
     revision: process.env.GH_ROUTER_DELEGATION_ARM_B_REVISION ?? currentRevision(),
     env: armEnv(
       process.env.GH_ROUTER_DELEGATION_ARM_B_BASE_URL ?? BASE_URL,
-      process.env.GH_ROUTER_DELEGATION_ARM_B_CONFIG_DIR,
+      resolvedConfigDir(process.env.GH_ROUTER_DELEGATION_ARM_B_CONFIG_DIR),
     ),
   }
   const cliVersion = commandOutput(["claude", "--version"])
@@ -810,6 +1007,7 @@ async function main(): Promise<void> {
     }
   } finally {
     rmSync(path.dirname(fixture), { recursive: true, force: true })
+    if (sharedScrubbedConfigDir) rmSync(sharedScrubbedConfigDir, { recursive: true, force: true })
   }
 
   const summary = scoreResults(results)
