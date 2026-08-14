@@ -167,15 +167,25 @@ function joinClauses(parts: ReadonlyArray<string>): string {
 
 /** The "Reach for X when Y" list, omitting any agent this launch did not emit.
  *
- *  On a budget lead the coding clauses swap order so the cheap tier leads and
- *  the frontier tier is named as the complexity escalation. Choosing a lighter
- *  lead is a decision to spend less while holding quality, and a roster that
- *  names the expensive `implementer` first works against exactly that. This is
- *  ORDERING AND WORDING ONLY: no agent's model changes, and `implementer` stays
- *  named so work beyond the fast tier still has somewhere to go. */
+ *  On a budget lead the coding AND review clauses swap order so the cheap tier
+ *  leads and the frontier tier is named as the complexity escalation. Choosing a
+ *  lighter lead is a decision to spend less while holding quality, and a roster
+ *  that names the expensive `implementer` / `reviewer` first works against
+ *  exactly that. This is ORDERING AND WORDING ONLY: no agent's model changes,
+ *  and both frontier tiers stay named so work beyond the fast tier still has
+ *  somewhere to go.
+ *
+ *  Review gets the same treatment as implementation because the cost gap is the
+ *  same shape: `reviewer` runs the pro tier (200/1200 per 1M) against
+ *  `reviewer-fast`'s flash tier (75/375), and measured 2026-08-13 the flash
+ *  model was also the FASTER of the two on every axis (tool-call p50 ~1.2s vs
+ *  ~2.8s, TTFT ~1.9s vs ~3.7s, decode ~326 vs ~165 tok/s). So on a budget lead
+ *  there is no quality-for-cost trade being hidden by leading with the cheap
+ *  tier; reserve `reviewer` for the higher-stakes assessment it is there for. */
 function buildNativeReachClauses(opts: NativeAgentAvailability): string {
   const clauses: Array<string> = []
   const implementerFast = opts.implementerFastAvailable !== false
+  const reviewerFast = opts.reviewerFastAvailable !== false
   // The swap requires `implementer-fast` to actually exist this launch — on a
   // catalog where it was dropped, naming it first would point the lead at an
   // agent absent from the Task `subagent_type` enum.
@@ -194,12 +204,22 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
       clauses.push("`implementer-fast` for well-specified, mechanical coding changes")
     }
   }
-  clauses.push(
-    "`reviewer` when something exists and you want it assessed (including "
-      + "reproducing and root-causing a failure)",
-  )
-  if (opts.reviewerFastAvailable !== false) {
-    clauses.push("`reviewer-fast` for lower-stakes assessments")
+  // Same swap, same precondition, for the review pair.
+  if (opts.budgetLead === true && reviewerFast) {
+    clauses.push(
+      "`reviewer-fast` first when something exists and you want it assessed, "
+        + "since it is the cheaper and faster review tier",
+      "`reviewer` when the assessment is higher-stakes or needs deeper "
+        + "reproduction and root-causing than the fast tier can carry",
+    )
+  } else {
+    clauses.push(
+      "`reviewer` when something exists and you want it assessed (including "
+        + "reproducing and root-causing a failure)",
+    )
+    if (reviewerFast) {
+      clauses.push("`reviewer-fast` for lower-stakes assessments")
+    }
   }
   clauses.push(
     "`brainstorm` when you do not yet know which approach to take",

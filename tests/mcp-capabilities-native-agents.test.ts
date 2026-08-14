@@ -156,7 +156,7 @@ test("generalPurposeFastModel is single-entry: gpt-5.6-luna or nothing", () => {
 
   setCatalog(
     entry("gpt-5.6-terra", { ctx: 1_050_000 }),
-    entry("gemini-3.6-flash", { ctx: ONE_M }),
+    entry("gemini-3.7-flash", { ctx: ONE_M }),
     entry("gemini-3.5-flash", { ctx: ONE_M }),
     entry("gpt-5.4-mini", { ctx: 400_000 }),
   )
@@ -228,7 +228,7 @@ test("absent context metadata fails closed under the 1M floor", () => {
 // referencing EXPLORE_DEFAULT_MODEL here previously let an explore retune collapse
 // both entries to Luna without a type error or failed behavior test.
 test("scout chain has two distinct literal entries", () => {
-  expect(SCOUT_MODEL_CHAIN).toEqual(["gpt-5.6-luna", "gemini-3.6-flash"])
+  expect(SCOUT_MODEL_CHAIN).toEqual(["gpt-5.6-luna", "gemini-3.7-flash"])
   expect(new Set(SCOUT_MODEL_CHAIN).size).toBe(2)
 })
 
@@ -236,19 +236,19 @@ test("scout chain has two distinct literal entries", () => {
 // 1M Gemini fallback gets no scout rather than a 400K last resort.
 test("scoutModel walks luna -> flash, enforces 1M, and otherwise drops", () => {
   setCatalog(
-    entry("gemini-3.6-flash", { ctx: ONE_M }),
+    entry("gemini-3.7-flash", { ctx: ONE_M }),
     entry("gpt-5.6-luna", { ctx: 1_050_000 }),
   )
   expect(scoutModel()).toBe("gpt-5.6-luna")
 
   // Exactly 1M must remain eligible. If this floor comparison ever becomes
   // exclusive, scout silently loses its cross-vendor fallback.
-  setCatalog(entry("gemini-3.6-flash", { ctx: ONE_M }))
-  expect(scoutModel()).toBe("gemini-3.6-flash")
+  setCatalog(entry("gemini-3.7-flash", { ctx: ONE_M }))
+  expect(scoutModel()).toBe("gemini-3.7-flash")
 
   setCatalog(
     entry("gpt-5.6-luna", { ctx: 400_000 }),
-    entry("gemini-3.6-flash", { ctx: 200_000 }),
+    entry("gemini-3.7-flash", { ctx: 200_000 }),
     entry("gpt-5.4-mini", { ctx: 400_000 }),
   )
   expect(scoutModel()).toBeUndefined()

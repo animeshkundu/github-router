@@ -66,6 +66,7 @@ const DEFAULT_MODELS = [
   "gpt-5.5",
   "gpt-5.3-codex",
   "gpt-5.4-mini",
+  "gemini-3.7-flash",
   "gemini-3.6-flash",
   "gemini-3.5-flash",
   "gemini-3.1-pro-preview",
@@ -203,7 +204,17 @@ async function onceStreaming(model: string, mode: "generate" | "tool"): Promise<
     }
   }
   const ms = performance.now() - started
-  if (finalOutputTokens === undefined || deltas.length === 0) return undefined
+  if (finalOutputTokens === undefined) return undefined
+  if (deltas.length === 0) {
+    // No text/thinking content streamed — the norm for a pure tool-call
+    // response (its arguments stream as input_json_delta, which isn't
+    // tracked in `deltas`). Still a valid sample for `ms`/`toolCalled`; there
+    // is just no TTFT/decode-rate to report. Returning undefined here was a
+    // real bug: it silently discarded every tool-call-workload sample in
+    // streaming mode, so "tool p50 ms" reported "n/a" across the board
+    // instead of measuring anything.
+    return { ms, outputTokens: finalOutputTokens, toolCalled }
+  }
 
   const ttftMs = deltas[0].t - started
   let decodeTokPerSec: number | undefined

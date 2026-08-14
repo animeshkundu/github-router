@@ -28,12 +28,12 @@ The peer-critic descriptions are the SAME strings used as the corresponding `mcp
 | `implementer` (native) | gpt-5.6-sol → gpt-5.5, else lead | edits files itself (full toolset) | always emitted; preferred model needs `tool_calls` | [implementer.md](implementer.md) | Y |
 | `reviewer` (native) | gemini-3.1-pro-preview → frontier, else lead | assesses artifacts and isolates failures (full toolset) | always emitted; preferred model needs `tool_calls` | [reviewer.md](reviewer.md) | Y |
 | `brainstorm` (native) | gemini-3.1-pro-preview → frontier, else lead | read-only divergent options | always emitted; preferred model needs `tool_calls` | [brainstorm.md](brainstorm.md) | Y |
-| `scout` (native) | gpt-5.6-luna → gemini-3.6-flash | read-only low-cost repository exploration | qualifying 1M `tool_calls` model required; otherwise omitted | [scout.md](scout.md) | Y |
+| `scout` (native) | gpt-5.6-luna → gemini-3.7-flash | read-only low-cost repository exploration | qualifying 1M `tool_calls` model required; otherwise omitted | [scout.md](scout.md) | Y |
 | `scribe` (native) | gpt-5.6-terra → frontier, else lead | repository-grounded documentation maintenance (full toolset) | always emitted; preferred model needs `tool_calls` | [scribe.md](scribe.md) | Y |
 | `implementer-fast` (native) | gpt-5.6-terra → gemini-3.1-pro-preview | well-specified mechanical implementation (full toolset) | qualifying 1M `tool_calls` model required; otherwise omitted | [implementer-fast.md](implementer-fast.md) | Y |
 | `general-purpose-fast` (native) | gpt-5.6-luna only | fastest measured, lowest-cost full-toolset catch-all | qualifying 1M `tool_calls` model required; otherwise omitted | [general-purpose-fast.md](general-purpose-fast.md) | Y |
 | `peer-review-coordinator` | inherited | fans out to critics, aggregates | always | [peer-review-coordinator.md](peer-review-coordinator.md) | N (F1 unbacked trigger) |
-| `worker-explore` | inherited (worker: gemini-3.6-flash high) | bg dispatch read-only research | `workerToolsAvailable` | [worker-explore.md](worker-explore.md) | Y |
+| `worker-explore` | inherited (worker: gpt-5.6-luna high) | bg dispatch read-only research | `workerToolsAvailable` | [worker-explore.md](worker-explore.md) | Y |
 | `worker-implement` | inherited (worker: gpt-5.6-sol) | bg dispatch read/write coding | `workerToolsAvailable` | [worker-implement.md](worker-implement.md) | Y |
 | `worker-review` | inherited (worker: gemini-3.1-pro) | bg dispatch self-navigating review | `workerToolsAvailable` | [worker-review.md](worker-review.md) | Y |
 | `worker-plan` | inherited (worker: claude-opus-5) | bg dispatch ordered plan | `workerToolsAvailable` | [worker-plan.md](worker-plan.md) | Y (minor gap) |

@@ -269,10 +269,16 @@ export function scribeModel(): string | undefined {
  * impostor wearing the cheap agent's name.
  *
  * `gpt-5.6-luna` leads because it is the cheapest 1M-context model in the
- * catalog; `gemini-3.6-flash` remains the cross-vendor fallback so an OpenAI-side
+ * catalog; `gemini-3.7-flash` remains the cross-vendor fallback so an OpenAI-side
  * outage does not remove the scout. Both entries must continue advertising at
  * least 1M context so Claude Code's `[1m]` accounting remains honest if an
  * upstream catalog entry shrinks.
+ *
+ * The fallback moved off `gemini-3.6-flash` on 2026-08-13: `gemini-3.7-flash`
+ * is strictly better on every axis this chain cares about — half the price
+ * (75/375 vs 150/750 per 1M), materially faster (measured tool-call p50 ~1.2s
+ * against 3.6's ~2.6s), same 1M window, same vendor, so the cross-vendor
+ * property the fallback exists for is preserved.
  *
  * This chain deliberately uses literal ids rather than `EXPLORE_DEFAULT_MODEL`:
  * the explore worker default and scout's cross-vendor fallback are independent
@@ -282,7 +288,7 @@ export function scribeModel(): string | undefined {
  */
 export const SCOUT_MODEL_CHAIN = Object.freeze([
   "gpt-5.6-luna",
-  "gemini-3.6-flash",
+  "gemini-3.7-flash",
 ] as const)
 
 export function scoutModel(): string | undefined {

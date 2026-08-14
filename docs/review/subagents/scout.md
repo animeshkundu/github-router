@@ -7,7 +7,7 @@
 | Field | Value |
 |---|---|
 | Subagent name | `scout` |
-| Subagent's OWN model | `gpt-5.6-luna` preferred, then `gemini-3.6-flash`, only when a catalog entry advertises `tool_calls` and at least 1M context |
+| Subagent's OWN model | `gpt-5.6-luna` preferred, then `gemini-3.7-flash`, only when a catalog entry advertises `tool_calls` and at least 1M context |
 | Gate | Conditionally emitted. It is omitted entirely when no cheap-tier model resolves, rather than inheriting the lead's model. |
 | Registered via | `buildPeerAgentDefinitions` in `src/lib/codex-mcp-config.ts` |
 | Description source | Inline native-agent definition in `buildPeerAgentDefinitions` |

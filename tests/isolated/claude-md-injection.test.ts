@@ -994,3 +994,37 @@ test("budgetLead does not name implementer-fast when it was dropped", () => {
   expect(dropped).toContain("`implementer`")
   expect(dropped).not.toContain("beyond what the fast tier can carry")
 })
+
+// The REVIEW pair gets the same budget-lead treatment as the coding pair. The
+// cost gap is the same shape (pro tier 200/1200 vs flash 75/375 per 1M), and
+// measured 2026-08-13 the flash model was also the faster of the two, so
+// leading with the cheap reviewer on a budget lead hides no quality trade.
+test("budgetLead reorders the review clauses without dropping either agent", () => {
+  const opusLead = buildOperatingDefaultsDirective()
+  const budgetLead = buildOperatingDefaultsDirective({ budgetLead: true })
+
+  for (const directive of [opusLead, budgetLead]) {
+    expect(directive).toContain("`reviewer`")
+    expect(directive).toContain("`reviewer-fast`")
+  }
+
+  expect(opusLead.indexOf("`reviewer`")).toBeLessThan(
+    opusLead.indexOf("`reviewer-fast`"),
+  )
+  expect(budgetLead.indexOf("`reviewer-fast`")).toBeLessThan(
+    budgetLead.indexOf("`reviewer`"),
+  )
+  expect(budgetLead).toContain("cheaper and faster review tier")
+})
+
+// Same precondition as the coding swap: never lead with an agent that was
+// dropped this launch.
+test("budgetLead does not name reviewer-fast when it was dropped", () => {
+  const dropped = buildOperatingDefaultsDirective({
+    budgetLead: true,
+    reviewerFastAvailable: false,
+  })
+  expect(dropped).not.toContain("`reviewer-fast`")
+  expect(dropped).toContain("`reviewer`")
+  expect(dropped).not.toContain("cheaper and faster review tier")
+})
